@@ -2,10 +2,10 @@
 //!
 //! MCTS should never mutate the caller's primary `HexoState`. A
 //! `SearchPosition` wraps a cloned state for one rollout and delegates every
-//! mutation back to `hexo_engine::apply_placement`, keeping the engine as the
+//! mutation back to `game_engine::apply_placement`, keeping the engine as the
 //! single source of truth for legality, phase changes, windows, and wins.
 
-use hexo_engine::{apply_placement, ApplyResult, HexCoord, HexoState, MoveError, Placement};
+use game_engine::{apply_placement, ApplyResult, HexCoord, HexoState, MoveError, Placement};
 
 /// Mutable state used inside search simulations.
 #[derive(Clone, Debug)]

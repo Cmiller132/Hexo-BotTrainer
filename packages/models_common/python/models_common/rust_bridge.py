@@ -9,10 +9,10 @@ def import_rust_module() -> Any | None:
     """Return the optional PyO3 extension module when it is installed."""
 
     try:
-        import models_common_rust  # type: ignore[import-not-found]
+        from models_common import _rust  # type: ignore[attr-defined]
     except ImportError:
         return None
-    return models_common_rust
+    return _rust
 
 
 def rust_available() -> bool:

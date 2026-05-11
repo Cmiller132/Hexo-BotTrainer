@@ -3,9 +3,9 @@ requires = ["hatchling>=1.24"]
 build-backend = "hatchling.build"
 
 [project]
-name = "hexo-rl"
+name = "game-runner"
 version = "0.1.0"
-description = "Python runner skeleton for the Hexo reinforcement learning prototype."
+description = "Python runner for Hexo RL experiments."
 requires-python = ">=3.11"
 dependencies = [
   "models-common==0.1.0",
@@ -20,10 +20,10 @@ dependencies = [
 ]
 
 [project.scripts]
-hexo-rl = "hexo_rl.cli:main"
+hexo-rl = "game_runner.cli:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/hexo_rl"]
+packages = ["python/game_runner"]
 
 [tool.pyright]
 pythonVersion = "3.11"

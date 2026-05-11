@@ -1,4 +1,4 @@
-# Finalized Project Overview: Hexo RL Prototype
+﻿# Finalized Project Overview: Hexo RL Prototype
 
 This project is a **single-machine reinforcement learning prototype** for Hexo. The design uses a **Rust engine** for fast rule/state logic, a separate Rust/Python `models_common` layer for MCTS, encoding, replay, and model-facing utilities, and a **Python skeleton** for training, checkpointing, and experiment control.
 
@@ -53,62 +53,36 @@ Keep it small, correct, and expandable.
 
 ```text
 hexo-rl/
-├── rust/
-│   ├── Cargo.toml                # workspace
-│   └── crates/
-│       ├── hexo_engine/          # authoritative game rules/state
-│       └── hexo_models_common/   # MCTS, encoding, replay, PyO3 bridge
-│
-├── python/
-│   ├── pyproject.toml
-│   └── src/
-│       └── hexo_rl/
-│           ├── __init__.py
-│           ├── cli.py
-│           ├── config.py
-│           ├── train.py           # PyTorch training loop
-│           ├── selfplay.py        # calls Rust self-play
-│           ├── replay.py          # runner replay-cycle maintenance
-│           └── metrics.py         # logging and stats
-│
-├── models_common/
-│   ├── pyproject.toml
-│   └── src/
-│       └── models_common/
-│           ├── model_api.py       # model plugin protocol
-│           ├── inference.py       # batched GPU inference utilities
-│           ├── replay.py          # replay buffer utilities
-│           └── rust_bridge.py     # optional models_common_rust loader
-│
-├── models/
-│   └── hexo_resnet/
-│       ├── pyproject.toml
-│       └── src/
-│           └── hexo_resnet/
-│               ├── __init__.py
-│               ├── model.py       # ResNet policy/value network
-│               ├── plugin.py      # model plugin entry point
-│               ├── losses.py
-│               └── augment.py
-│
-├── configs/
-│   ├── dev.yaml
-│   └── main.yaml
-│
-├── data/
-│   ├── selfplay/
-│   ├── replay/
-│   └── checkpoints/
-│
-└── tests/
-    ├── rust/
-    └── python/
+Cargo.toml
+packages/
+  game_engine/
+    Cargo.toml
+    src/
+      lib.rs
+      game/
+
+  models_common/
+    Cargo.toml
+    pyproject.toml
+    src/                  # Rust MCTS, encoding, replay, PyO3
+    python/models_common/ # Python model API, replay, inference helpers
+
+  game_runner/
+    pyproject.toml
+    python/game_runner/   # CLI, config, training loop
+
+  hexo_resnet/
+    pyproject.toml
+    python/hexo_resnet/   # ResNet model plugin
+
+configs/
+data/
+tests/
 ```
 
-The implemented layout now keeps `hexo_engine` and `hexo_models_common` as separate Rust crates. The engine owns authoritative rules and state transitions; models-common owns search, encoding, replay samples, self-play helpers, and the Python bridge.
+The implemented layout keeps `game_engine` and `models_common` as separate Rust crates. The engine owns authoritative rules and state transitions; models-common owns search, encoding, replay samples, self-play helpers, and the Python bridge.
 
 ---
-
 # 3. Rust Engine Overview
 
 The Rust engine crate is responsible for:
@@ -121,7 +95,7 @@ win detection
 threat detection
 ```
 
-The Rust models-common crate owns autoregressive MCTS, search-owned cloned positions, training sample generation, state encoding, self-play helpers, and Python bindings. The engine should stay deterministic, heavily tested, and independent from model code.
+The Rust `models_common` crate owns autoregressive MCTS, search-owned cloned positions, training sample generation, state encoding, self-play helpers, and Python bindings. The engine should stay deterministic, heavily tested, and independent from model code.
 
 ---
 
@@ -600,7 +574,7 @@ crop size: 31x31 for dev
 crop size: 37x37 for main
 ```
 
-Center the crop around the board’s occupied bounding region or recent move. For the first version, use a simple deterministic crop centered on the occupied bounding box.
+Center the crop around the boardâ€™s occupied bounding region or recent move. For the first version, use a simple deterministic crop centered on the occupied bounding box.
 
 Recommended input planes:
 
@@ -750,7 +724,7 @@ saving checkpoints
 logging metrics
 ```
 
-The Python runner should be thin. `hexo_engine` should own game rules, while `models_common` should own model-facing MCTS, encoding, replay, and inference utilities.
+The Python runner should be thin. `game_engine` should own game rules, while `models_common` should own model-facing MCTS, encoding, replay, and inference utilities.
 
 ---
 
@@ -759,7 +733,7 @@ The Python runner should be thin. `hexo_engine` should own game rules, while `mo
 Use a stable model plugin interface:
 
 ```python
-# models_common/src/models_common/model_api.py
+# packages/models_common/python/models_common/model_api.py
 
 from typing import Protocol, Mapping, Any
 import torch
@@ -810,7 +784,7 @@ The Rust models-common bridge only sees policy/value outputs. It does not know w
 The inference module batches Rust evaluation requests and runs them on the GPU.
 
 ```python
-# models_common/src/models_common/inference.py
+# packages/models_common/python/models_common/inference.py
 
 class InferenceServer:
     def __init__(self, model, plugin, device, batch_size: int):
@@ -878,7 +852,7 @@ No gating. No tournament. The latest model is always used for the next self-play
 # 20. Main Training Driver
 
 ```python
-# python/src/hexo_rl/cli.py
+# packages/game_runner/python/game_runner/cli.py
 
 def loop(config_path: str):
     config = load_config(config_path)
@@ -894,15 +868,15 @@ Training loop:
 
 ```text
 latest checkpoint
-    ↓
+    â†“
 self-play
-    ↓
+    â†“
 replay update
-    ↓
+    â†“
 train
-    ↓
+    â†“
 new latest checkpoint
-    ↓
+    â†“
 repeat
 ```
 
@@ -1070,26 +1044,27 @@ For the earliest version, you can leave out PyO3 until the Rust engine and MCTS 
 From the project root:
 
 ```bash
-mkdir -p python/src/hexo_rl
-mkdir -p models_common/src/models_common
-touch python/src/hexo_rl/__init__.py
-touch python/src/hexo_rl/cli.py
-touch python/src/hexo_rl/config.py
-touch python/src/hexo_rl/train.py
-touch python/src/hexo_rl/selfplay.py
-touch python/src/hexo_rl/replay.py
-touch python/src/hexo_rl/metrics.py
-touch models_common/src/models_common/model_api.py
-touch models_common/src/models_common/inference.py
-touch models_common/src/models_common/replay.py
-touch models_common/src/models_common/rust_bridge.py
+mkdir -p packages/game_runner/python/game_runner
+mkdir -p packages/models_common/python/models_common
+mkdir -p packages/hexo_resnet/python/hexo_resnet
+touch packages/game_runner/python/game_runner/__init__.py
+touch packages/game_runner/python/game_runner/cli.py
+touch packages/game_runner/python/game_runner/config.py
+touch packages/game_runner/python/game_runner/train.py
+touch packages/game_runner/python/game_runner/selfplay.py
+touch packages/game_runner/python/game_runner/replay.py
+touch packages/game_runner/python/game_runner/metrics.py
+touch packages/models_common/python/models_common/model_api.py
+touch packages/models_common/python/models_common/inference.py
+touch packages/models_common/python/models_common/replay.py
+touch packages/models_common/python/models_common/rust_bridge.py
 ```
 
 Suggested Python dependencies:
 
 ```toml
 [project]
-name = "hexo-rl"
+name = "game-runner"
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
@@ -1110,14 +1085,13 @@ dependencies = [
 Once `pybridge.rs` exists:
 
 ```bash
-cd models_common
-maturin develop --manifest-path ../rust/crates/hexo_models_common/Cargo.toml --features python
+maturin develop --manifest-path packages/models_common/Cargo.toml --features python
 ```
 
 Then test:
 
 ```bash
-python -c "import hexo_rl; print('ok')"
+python -c "import game_runner, models_common; print('ok')"
 ```
 
 ---
@@ -1125,7 +1099,7 @@ python -c "import hexo_rl; print('ok')"
 ## 23.4 Run Rust tests
 
 ```bash
-cd rust
+cd .
 cargo test
 ```
 
@@ -1327,15 +1301,15 @@ The core loop:
 
 ```text
 latest checkpoint
-    ↓
+    â†“
 Rust self-play using autoregressive MCTS
-    ↓
+    â†“
 placement-level replay samples
-    ↓
+    â†“
 Python training
-    ↓
+    â†“
 updated checkpoint
-    ↓
+    â†“
 repeat
 ```
 

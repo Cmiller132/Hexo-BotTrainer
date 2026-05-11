@@ -9,7 +9,7 @@
 //! is connected.
 
 use crate::encode::EncodedState;
-use hexo_engine::{HexCoord, HexoState};
+use game_engine::{HexCoord, HexoState};
 
 /// Raw neural-network-style output for one encoded state.
 #[derive(Clone, Debug)]

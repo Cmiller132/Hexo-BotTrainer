@@ -14,7 +14,7 @@ use crate::encode::{encode_state, legal_placements_in_crop};
 use crate::mcts::evaluator::{Evaluation, StateEvaluator};
 use crate::mcts::tree::{Edge, Node, NodeId, SearchTree};
 use crate::position::SearchPosition;
-use hexo_engine::{GameOutcome, HexCoord, HexoState, MoveError, Player};
+use game_engine::{GameOutcome, HexCoord, HexoState, MoveError, Player};
 
 /// Tunable search parameters for one root search.
 #[derive(Clone, Copy, Debug)]

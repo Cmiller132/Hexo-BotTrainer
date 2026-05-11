@@ -6,7 +6,7 @@
 
 use crate::mcts::{run_mcts, MctsConfig, SearchError, StateEvaluator};
 use crate::sample::ReplaySample;
-use hexo_engine::{apply_placement, GameOutcome, HexoState, MoveError, Placement, Player};
+use game_engine::{apply_placement, GameOutcome, HexoState, MoveError, Placement, Player};
 
 /// Game-level self-play limits.
 #[derive(Clone, Debug)]

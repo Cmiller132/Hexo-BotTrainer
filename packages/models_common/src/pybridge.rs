@@ -134,8 +134,8 @@ pub fn register_pybridge(module: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }
 
-/// Python extension module entry point.
+/// Private Python extension module entry point.
 #[pymodule]
-pub fn models_common_rust(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
+pub fn _rust(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     register_pybridge(module)
 }

@@ -3,21 +3,23 @@ requires = ["hatchling>=1.24"]
 build-backend = "hatchling.build"
 
 [project]
-name = "hexo-resnet"
+name = "models-common"
 version = "0.1.0"
-description = "Small PyTorch ResNet model plugin for Hexo RL."
+description = "Shared model, inference, replay, and Rust bridge utilities for Hexo models."
 requires-python = ">=3.11"
 dependencies = [
+  "numpy>=1.26",
   "torch>=2.2",
-  "models-common==0.1.0",
+  "zstandard>=0.22",
 ]
 
-[project.entry-points."hexo_rl.models"]
-hexo_resnet = "hexo_resnet:get_plugin"
-
 [tool.hatch.build.targets.wheel]
-packages = ["src/hexo_resnet"]
+packages = ["python/models_common"]
 
 [tool.pyright]
 pythonVersion = "3.11"
 typeCheckingMode = "basic"
+
+[tool.maturin]
+python-source = "python"
+module-name = "models_common._rust"

@@ -4,7 +4,7 @@
 //! crop is serialized as flat planes (`plane, row, col`) so it can cross the
 //! Rust/Python boundary as plain JSON/msgpack-friendly data.
 
-use hexo_engine::{legal_placements, HexCoord, HexoState, Player, Stone, TurnPhase};
+use game_engine::{legal_placements, HexCoord, HexoState, Player, Stone, TurnPhase};
 use serde::{Deserialize, Serialize};
 
 /// Default crop size used by development configs.

@@ -46,12 +46,12 @@ class RustSelfplayBridge:
         if summary is not None:
             return {
                 "status": "ok",
-                "engine": "models_common_rust",
+                "engine": "models_common._rust",
                 **summary,
             }
         return {
             "status": "unavailable",
-            "reason": "models_common_rust bindings are not installed yet",
+            "reason": "models_common._rust bindings are not installed yet",
         }
 
     def random_game(self) -> dict[str, Any]:
@@ -68,7 +68,7 @@ class RustSelfplayBridge:
         if summary is not None:
             return {
                 "status": "completed",
-                "engine": "models_common_rust",
+                "engine": "models_common._rust",
                 **summary,
             }
         return {

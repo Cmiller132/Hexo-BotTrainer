@@ -1,10 +1,10 @@
 [package]
-name = "hexo_engine"
+name = "game_engine"
 version.workspace = true
 edition.workspace = true
 
 [lib]
-name = "hexo_engine"
+name = "game_engine"
 path = "src/lib.rs"
 
 [dependencies]

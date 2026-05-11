@@ -1,6 +1,6 @@
 //! Shared model/search utilities for Hexo models.
 //!
-//! This crate depends on `hexo_engine` for authoritative rules and state
+//! This crate depends on `game_engine` for authoritative rules and state
 //! transitions. It owns neural-network encoding, MCTS, replay samples,
 //! self-play orchestration, and optional Python bindings.
 

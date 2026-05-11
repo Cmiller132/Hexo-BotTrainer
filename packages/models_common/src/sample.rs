@@ -5,7 +5,7 @@
 //! space: a single crop cell.
 
 use crate::encode::{encode_state, legal_placements_in_crop, EncodedState, DEFAULT_CROP_SIZE};
-use hexo_engine::{HexCoord, HexoState, Player, TurnPhase};
+use game_engine::{HexCoord, HexoState, Player, TurnPhase};
 use serde::{Deserialize, Serialize};
 
 /// Rules schema version written into replay data.
