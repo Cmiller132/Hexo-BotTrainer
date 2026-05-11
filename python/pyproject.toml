@@ -1,0 +1,29 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "hexo-rl"
+version = "0.1.0"
+description = "Python runner skeleton for the Hexo reinforcement learning prototype."
+requires-python = ">=3.11"
+dependencies = [
+  "numpy>=1.26",
+  "pydantic>=2.7",
+  "pyyaml>=6.0",
+  "rich>=13.7",
+  "torch>=2.2",
+  "tqdm>=4.66",
+  "maturin>=1.5",
+  "zstandard>=0.22",
+]
+
+[project.scripts]
+hexo-rl = "hexo_rl.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/hexo_rl"]
+
+[tool.pyright]
+pythonVersion = "3.11"
+typeCheckingMode = "basic"

@@ -1,0 +1,23 @@
+//! Hexo rule engine.
+//!
+//! This module keeps all game-specific logic together: axial coordinates,
+//! sparse board storage, turn phases, legality checks, win detection, and
+//! threat helpers. Search and training code should call this module instead of
+//! duplicating game rules.
+
+pub mod board;
+pub mod coord;
+pub mod rules;
+pub mod state;
+pub mod threats;
+pub mod win;
+
+pub use board::{Board, MoveError, Stone};
+pub use coord::{hex_distance, HexCoord, AXES};
+pub use rules::{is_legal_placement, legal_placements};
+pub use state::{
+    apply_placement, ApplyResult, GameOutcome, HexoState, MoveRecord, Placement, PlacementRecord,
+    Player, TurnPhase,
+};
+pub use threats::{find_threats, Threat};
+pub use win::is_winning_placement;
