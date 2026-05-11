@@ -6,6 +6,7 @@
 
 use super::coord::HexCoord;
 use super::state::Player;
+use super::windows::{WindowStore, WindowUpdate};
 use ahash::AHashMap;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -16,10 +17,12 @@ pub type Stone = Player;
 /// Sparse representation of all placed stones.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Board {
-    /// Coordinate -> owner lookup for legality and line scans.
+    /// Coordinate -> owner lookup for legality and window updates.
     stones: AHashMap<HexCoord, Stone>,
     /// Placement coordinates in insertion order.
     occupied: Vec<HexCoord>,
+    /// Incrementally maintained six-cell window state.
+    windows: WindowStore,
 }
 
 /// Errors produced when a placement violates the rules.
@@ -58,13 +61,18 @@ impl Board {
     /// Callers should validate game legality before calling this method. This
     /// method only protects the board invariant that a cell cannot be occupied
     /// twice.
-    pub fn place(&mut self, coord: HexCoord, stone: Stone) -> Result<(), MoveError> {
+    pub fn place(&mut self, coord: HexCoord, stone: Stone) -> Result<WindowUpdate, MoveError> {
         if !self.is_empty(coord) {
             return Err(MoveError::Occupied(coord));
         }
         self.stones.insert(coord, stone);
         self.occupied.push(coord);
-        Ok(())
+        Ok(self.windows.update_for_placement(coord, stone))
+    }
+
+    /// Incremental active/threat/win window state.
+    pub fn windows(&self) -> &WindowStore {
+        &self.windows
     }
 
     /// All occupied coordinates in placement order.

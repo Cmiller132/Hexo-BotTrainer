@@ -12,7 +12,7 @@
 use super::board::{Board, MoveError};
 use super::coord::HexCoord;
 use super::rules::is_legal_placement;
-use super::win::is_winning_placement;
+use super::windows::WindowUpdate;
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -117,7 +117,7 @@ pub struct HexoState {
 }
 
 /// Summary returned after applying one placement.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ApplyResult {
     /// Coordinate that was placed.
     pub placed: HexCoord,
@@ -129,6 +129,8 @@ pub struct ApplyResult {
     pub phase_after: TurnPhase,
     /// Terminal outcome if this placement won immediately.
     pub outcome: Option<GameOutcome>,
+    /// Window ids changed by this placement plus any threat/win ids.
+    pub window_update: WindowUpdate,
 }
 
 impl Default for HexoState {
@@ -244,13 +246,14 @@ pub fn apply_placement(
 
     let player = state.current_player;
     let phase_before = state.phase;
-    state.board.place(placement.coord, player)?;
+    let window_update = state.board.place(placement.coord, player)?;
     state.placements_made += 1;
     state.push_history(player, placement.coord, phase_before);
 
-    // Hexo wins immediately after any single placement, including the first
-    // stone of a normal two-stone turn.
-    if is_winning_placement(&state.board, placement.coord, player) {
+    // The board updates all affected six-cell windows during placement, so win
+    // detection is now an O(18) incremental check rather than a separate line
+    // scan through the board.
+    if window_update.has_win() {
         let outcome = GameOutcome {
             winner: player,
             placements: state.placements_made,
@@ -263,6 +266,7 @@ pub fn apply_placement(
             phase_before,
             phase_after: state.phase,
             outcome: Some(outcome),
+            window_update,
         });
     }
 
@@ -305,5 +309,6 @@ pub fn apply_placement(
         phase_before,
         phase_after: state.phase,
         outcome: None,
+        window_update,
     })
 }

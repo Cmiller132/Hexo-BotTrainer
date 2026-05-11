@@ -83,7 +83,7 @@ pub const NEIGHBORS: [HexCoord; 6] = [
     HexCoord { q: 0, r: 1 },
 ];
 
-/// The three unique straight-line axes used by win and threat detection.
+/// The three unique straight-line axes on the hex grid.
 ///
 /// The opposite directions are obtained by negating these vectors.
 pub const AXES: [HexCoord; 3] = [
