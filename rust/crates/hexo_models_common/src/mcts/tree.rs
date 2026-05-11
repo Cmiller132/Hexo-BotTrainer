@@ -3,7 +3,7 @@
 //! Nodes are stored in a `Vec` and referenced by integer ids. Each edge is one
 //! single placement action, matching Hexo's autoregressive turn model.
 
-use crate::game::{HexCoord, Player, TurnPhase};
+use hexo_engine::{HexCoord, Player, TurnPhase};
 
 /// Index into `SearchTree.nodes`.
 pub type NodeId = usize;

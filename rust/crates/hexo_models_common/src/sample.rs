@@ -4,8 +4,8 @@
 //! two-stone turn. That keeps the policy target aligned with the MCTS action
 //! space: a single crop cell.
 
-use crate::encode::{encode_state, EncodedState, DEFAULT_CROP_SIZE};
-use crate::game::{legal_placements, HexCoord, HexoState, Player, TurnPhase};
+use crate::encode::{encode_state, legal_placements_in_crop, EncodedState, DEFAULT_CROP_SIZE};
+use hexo_engine::{HexCoord, HexoState, Player, TurnPhase};
 use serde::{Deserialize, Serialize};
 
 /// Rules schema version written into replay data.
@@ -64,17 +64,23 @@ impl ReplaySample {
         root_value: f32,
         crop_size: usize,
     ) -> Self {
+        let encoded = encode_state(state, crop_size);
         let mut legal_actions = Vec::new();
-        legal_placements(state, &mut legal_actions);
+        legal_placements_in_crop(state, &encoded, &mut legal_actions);
+        let cropped_visit_policy: Vec<_> = visit_policy
+            .iter()
+            .copied()
+            .filter(|(coord, _)| encoded.index_of_coord(*coord).is_some())
+            .collect();
 
         Self {
             game: "hexo".to_owned(),
             rules_version: RULES_VERSION,
-            state: encode_state(state, crop_size),
+            state: encoded,
             current_player: state.current_player(),
             phase: TurnPhaseLabel::from(state.phase()),
             legal_actions,
-            policy_target: normalize_visit_policy(visit_policy),
+            policy_target: normalize_visit_policy(&cropped_visit_policy),
             value_target: 0.0,
             root_value,
             placements_made: state.placements_made(),

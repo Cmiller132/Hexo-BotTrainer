@@ -4,7 +4,7 @@
 //! crop is serialized as flat planes (`plane, row, col`) so it can cross the
 //! Rust/Python boundary as plain JSON/msgpack-friendly data.
 
-use crate::game::{legal_placements, HexCoord, HexoState, Player, Stone, TurnPhase};
+use hexo_engine::{legal_placements, HexCoord, HexoState, Player, Stone, TurnPhase};
 use serde::{Deserialize, Serialize};
 
 /// Default crop size used by development configs.
@@ -137,6 +137,16 @@ pub fn encode_state(state: &HexoState, crop_size: usize) -> EncodedState {
     encode_turn_memory(state, &mut encoded);
 
     encoded
+}
+
+/// Fill `out` with legal placements that are representable in `encoded`.
+pub fn legal_placements_in_crop(
+    state: &HexoState,
+    encoded: &EncodedState,
+    out: &mut Vec<HexCoord>,
+) {
+    legal_placements(state, out);
+    out.retain(|coord| encoded.index_of_coord(*coord).is_some());
 }
 
 /// Mark stones as current-player or opponent stones.

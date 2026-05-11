@@ -7,8 +7,10 @@ import json
 from pathlib import Path
 from typing import Any
 
+from models_common.replay import inspect_replay
+
 from .config import load_config
-from .replay import inspect_replay, update_replay_from_cycle
+from .replay import update_replay_from_cycle
 from .selfplay import RustSelfplayBridge, run_selfplay_cycle
 from .train import train_one_cycle
 
@@ -104,4 +106,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

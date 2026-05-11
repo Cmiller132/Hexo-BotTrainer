@@ -9,7 +9,7 @@
 //! is connected.
 
 use crate::encode::EncodedState;
-use crate::game::{HexCoord, HexoState};
+use hexo_engine::{HexCoord, HexoState};
 
 /// Raw neural-network-style output for one encoded state.
 #[derive(Clone, Debug)]
@@ -100,9 +100,9 @@ impl Evaluator for UniformEvaluator {
 
 /// Convert model logits into a softmax over legal coordinates.
 ///
-/// Legal moves outside the current crop receive logit 0.0 for now. The encoder
-/// crop is expected to be large enough in normal configs; this fallback keeps
-/// the prototype robust while that assumption is being refined.
+/// MCTS passes legal actions that are already filtered to the encoded crop.
+/// Missing logits still fall back to 0.0 so malformed early evaluators degrade
+/// to a uniform-ish prior instead of panicking.
 fn legal_policy_from_logits(
     encoded: &EncodedState,
     legal_actions: &[HexCoord],

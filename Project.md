@@ -1,6 +1,6 @@
 # Finalized Project Overview: Hexo RL Prototype
 
-This project is a **single-machine reinforcement learning prototype** for Hexo. The design uses a **Rust engine** for fast game logic, MCTS, and self-play, with a **Python skeleton** for model inference, training, checkpointing, and experiment control.
+This project is a **single-machine reinforcement learning prototype** for Hexo. The design uses a **Rust engine** for fast rule/state logic, a separate Rust/Python `models_common` layer for MCTS, encoding, replay, and model-facing utilities, and a **Python skeleton** for training, checkpointing, and experiment control.
 
 The key rule assumption is that Hexo is played on an unlimited hex grid, Player 0 opens at `(0, 0)`, later turns place two stones of the same player, each stone must be empty and within 8 hex steps of existing stones, and a player wins immediately by making six connected stones in a straight line. Threats are six-cell windows with at least four own stones and zero opponent stones. 
 
@@ -39,7 +39,7 @@ The project should **not** initially include:
 model gating
 distributed actors
 multi-GPU support
-multi-crate Rust workspace
+large multi-game framework
 dense pair-action policy heads
 large model zoo
 fully asynchronous training and self-play
@@ -54,28 +54,10 @@ Keep it small, correct, and expandable.
 ```text
 hexo-rl/
 ├── rust/
-│   ├── Cargo.toml
-│   └── src/
-│       ├── lib.rs
-│       ├── game/
-│       │   ├── mod.rs
-│       │   ├── coord.rs          # axial hex coordinates
-│       │   ├── board.rs          # sparse board storage
-│       │   ├── state.rs          # HexoState, TurnPhase, Player
-│       │   ├── rules.rs          # legal move generation
-│       │   ├── win.rs            # six-in-line win detection
-│       │   └── threats.rs        # optional threat-window helpers
-│       │
-│       ├── mcts/
-│       │   ├── mod.rs
-│       │   ├── search.rs         # PUCT search
-│       │   ├── tree.rs           # nodes and edges
-│       │   └── evaluator.rs      # evaluator trait
-│       │
-│       ├── encode.rs             # state -> neural network input
-│       ├── selfplay.rs           # self-play workers
-│       ├── sample.rs             # replay sample format
-│       └── pybridge.rs           # PyO3 Python bindings
+│   ├── Cargo.toml                # workspace
+│   └── crates/
+│       ├── hexo_engine/          # authoritative game rules/state
+│       └── hexo_models_common/   # MCTS, encoding, replay, PyO3 bridge
 │
 ├── python/
 │   ├── pyproject.toml
@@ -84,12 +66,19 @@ hexo-rl/
 │           ├── __init__.py
 │           ├── cli.py
 │           ├── config.py
-│           ├── model_api.py       # model plugin protocol
-│           ├── inference.py       # batched GPU inference
 │           ├── train.py           # PyTorch training loop
 │           ├── selfplay.py        # calls Rust self-play
-│           ├── replay.py          # replay buffer utilities
+│           ├── replay.py          # runner replay-cycle maintenance
 │           └── metrics.py         # logging and stats
+│
+├── models_common/
+│   ├── pyproject.toml
+│   └── src/
+│       └── models_common/
+│           ├── model_api.py       # model plugin protocol
+│           ├── inference.py       # batched GPU inference utilities
+│           ├── replay.py          # replay buffer utilities
+│           └── rust_bridge.py     # optional models_common_rust loader
 │
 ├── models/
 │   └── hexo_resnet/
@@ -116,27 +105,23 @@ hexo-rl/
     └── python/
 ```
 
-This layout keeps the Rust prototype in **one crate**. Internal modules are enough for now. The project can later be split into separate crates after the engine, MCTS, and training loop are stable.
+The implemented layout now keeps `hexo_engine` and `hexo_models_common` as separate Rust crates. The engine owns authoritative rules and state transitions; models-common owns search, encoding, replay samples, self-play helpers, and the Python bridge.
 
 ---
 
 # 3. Rust Engine Overview
 
-The Rust side is responsible for:
+The Rust engine crate is responsible for:
 
 ```text
 game state
 legal move generation
+incremental window tracking
 win detection
 threat detection
-autoregressive MCTS
-self-play
-training sample generation
-state encoding
-Python bindings
 ```
 
-The Rust engine should be deterministic, heavily tested, and fast enough to run many self-play games in parallel.
+The Rust models-common crate owns autoregressive MCTS, search-owned cloned positions, training sample generation, state encoding, self-play helpers, and Python bindings. The engine should stay deterministic, heavily tested, and independent from model code.
 
 ---
 
@@ -765,7 +750,7 @@ saving checkpoints
 logging metrics
 ```
 
-The Python side should be thin. The Rust side should own the game and MCTS.
+The Python runner should be thin. `hexo_engine` should own game rules, while `models_common` should own model-facing MCTS, encoding, replay, and inference utilities.
 
 ---
 
@@ -774,7 +759,7 @@ The Python side should be thin. The Rust side should own the game and MCTS.
 Use a stable model plugin interface:
 
 ```python
-# python/src/hexo_rl/model_api.py
+# models_common/src/models_common/model_api.py
 
 from typing import Protocol, Mapping, Any
 import torch
@@ -816,7 +801,7 @@ class ModelPlugin(Protocol):
         ...
 ```
 
-The Rust engine only sees policy/value outputs. It does not know which model package produced them.
+The Rust models-common bridge only sees policy/value outputs. It does not know which model package produced them.
 
 ---
 
@@ -825,7 +810,7 @@ The Rust engine only sees policy/value outputs. It does not know which model pac
 The inference module batches Rust evaluation requests and runs them on the GPU.
 
 ```python
-# python/src/hexo_rl/inference.py
+# models_common/src/models_common/inference.py
 
 class InferenceServer:
     def __init__(self, model, plugin, device, batch_size: int):
@@ -1086,15 +1071,18 @@ From the project root:
 
 ```bash
 mkdir -p python/src/hexo_rl
+mkdir -p models_common/src/models_common
 touch python/src/hexo_rl/__init__.py
 touch python/src/hexo_rl/cli.py
 touch python/src/hexo_rl/config.py
-touch python/src/hexo_rl/model_api.py
-touch python/src/hexo_rl/inference.py
 touch python/src/hexo_rl/train.py
 touch python/src/hexo_rl/selfplay.py
 touch python/src/hexo_rl/replay.py
 touch python/src/hexo_rl/metrics.py
+touch models_common/src/models_common/model_api.py
+touch models_common/src/models_common/inference.py
+touch models_common/src/models_common/replay.py
+touch models_common/src/models_common/rust_bridge.py
 ```
 
 Suggested Python dependencies:
@@ -1122,8 +1110,8 @@ dependencies = [
 Once `pybridge.rs` exists:
 
 ```bash
-cd python
-maturin develop --manifest-path ../rust/Cargo.toml
+cd models_common
+maturin develop --manifest-path ../rust/crates/hexo_models_common/Cargo.toml --features python
 ```
 
 Then test:

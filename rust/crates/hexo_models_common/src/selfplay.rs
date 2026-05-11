@@ -4,9 +4,9 @@
 //! generic over `StateEvaluator`, so it can run with `UniformEvaluator` now and
 //! a Python-backed neural evaluator later.
 
-use crate::game::{apply_placement, GameOutcome, HexoState, Placement, Player};
 use crate::mcts::{run_mcts, MctsConfig, SearchError, StateEvaluator};
 use crate::sample::ReplaySample;
+use hexo_engine::{apply_placement, GameOutcome, HexoState, MoveError, Placement, Player};
 
 /// Game-level self-play limits.
 #[derive(Clone, Debug)]
@@ -43,7 +43,7 @@ pub enum SelfplayError {
     /// Search failed, usually because no legal action existed.
     Search(SearchError),
     /// MCTS selected an action rejected by the game rules.
-    IllegalMove(crate::game::MoveError),
+    IllegalMove(MoveError),
 }
 
 impl From<SearchError> for SelfplayError {
@@ -52,8 +52,8 @@ impl From<SearchError> for SelfplayError {
     }
 }
 
-impl From<crate::game::MoveError> for SelfplayError {
-    fn from(value: crate::game::MoveError) -> Self {
+impl From<MoveError> for SelfplayError {
+    fn from(value: MoveError) -> Self {
         Self::IllegalMove(value)
     }
 }
@@ -80,7 +80,7 @@ where
             &state,
             &search.visit_policy,
             search.root_value,
-            game_config.crop_size,
+            mcts_config.crop_size,
         ));
 
         // Apply only the selected single-stone action. The state machine handles

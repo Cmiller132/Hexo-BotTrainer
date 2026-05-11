@@ -4,18 +4,21 @@
 //! A hash map gives O(1)-ish lookup by coordinate, while `occupied` preserves a
 //! compact list for frontier generation, encoding, and board summaries.
 
-use super::coord::HexCoord;
+use super::coord::{coords_within_radius, HexCoord};
 use super::state::Player;
 use super::windows::{WindowStore, WindowUpdate};
-use ahash::AHashMap;
-use serde::{Deserialize, Serialize};
+use ahash::{AHashMap, AHashSet};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
+
+/// Maximum distance from any existing stone for non-opening placements.
+pub const LEGAL_FRONTIER_RADIUS: i16 = 8;
 
 /// In the game engine, a stone is just the owning player.
 pub type Stone = Player;
 
 /// Sparse representation of all placed stones.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default)]
 pub struct Board {
     /// Coordinate -> owner lookup for legality and window updates.
     stones: AHashMap<HexCoord, Stone>,
@@ -23,6 +26,14 @@ pub struct Board {
     occupied: Vec<HexCoord>,
     /// Incrementally maintained six-cell window state.
     windows: WindowStore,
+    /// Incrementally maintained legal non-opening placements.
+    frontier: AHashSet<HexCoord>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+struct BoardStone {
+    coord: HexCoord,
+    stone: Stone,
 }
 
 /// Errors produced when a placement violates the rules.
@@ -67,12 +78,23 @@ impl Board {
         }
         self.stones.insert(coord, stone);
         self.occupied.push(coord);
+        self.update_frontier_for_placement(coord);
         Ok(self.windows.update_for_placement(coord, stone))
     }
 
     /// Incremental active/threat/win window state.
     pub fn windows(&self) -> &WindowStore {
         &self.windows
+    }
+
+    /// True when `coord` is a legal non-opening frontier cell.
+    pub fn is_frontier_cell(&self, coord: HexCoord) -> bool {
+        self.frontier.contains(&coord)
+    }
+
+    /// Iterate legal non-opening frontier cells.
+    pub fn frontier_cells(&self) -> impl Iterator<Item = HexCoord> + '_ {
+        self.frontier.iter().copied()
     }
 
     /// All occupied coordinates in placement order.
@@ -112,5 +134,49 @@ impl Board {
             HexCoord { q: min_q, r: min_r },
             HexCoord { q: max_q, r: max_r },
         ))
+    }
+
+    fn update_frontier_for_placement(&mut self, coord: HexCoord) {
+        self.frontier.remove(&coord);
+        for candidate in coords_within_radius(coord, LEGAL_FRONTIER_RADIUS) {
+            if self.is_empty(candidate) {
+                self.frontier.insert(candidate);
+            }
+        }
+    }
+}
+
+impl Serialize for Board {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let placements: Vec<BoardStone> = self
+            .occupied
+            .iter()
+            .filter_map(|coord| {
+                self.get(*coord).map(|stone| BoardStone {
+                    coord: *coord,
+                    stone,
+                })
+            })
+            .collect();
+        placements.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Board {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let placements = Vec::<BoardStone>::deserialize(deserializer)?;
+        let mut board = Self::new();
+        for placement in placements {
+            board
+                .place(placement.coord, placement.stone)
+                .map_err(serde::de::Error::custom)?;
+        }
+        Ok(board)
     }
 }

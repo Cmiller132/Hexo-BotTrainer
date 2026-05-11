@@ -136,6 +136,6 @@ pub fn register_pybridge(module: &Bound<'_, PyModule>) -> PyResult<()> {
 
 /// Python extension module entry point.
 #[pymodule]
-pub fn hexo_rl_rust(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
+pub fn models_common_rust(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     register_pybridge(module)
 }

@@ -10,7 +10,7 @@ use super::board::Board;
 use super::coord::HexCoord;
 use super::state::Player;
 use ahash::{AHashMap, AHashSet};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Number of cells in a win/threat window.
 pub const WINDOW_LEN: i16 = 6;
@@ -31,6 +31,15 @@ pub enum Axis {
 impl Axis {
     /// All unique axes. Opposite directions are represented by different starts.
     pub const ALL: [Self; 3] = [Self::Q, Self::R, Self::QR];
+
+    /// Stable order for sorting/debug output.
+    pub const fn index(self) -> u8 {
+        match self {
+            Self::Q => 0,
+            Self::R => 1,
+            Self::QR => 2,
+        }
+    }
 
     /// Direction vector for walking this axis.
     pub const fn vector(self) -> HexCoord {
@@ -202,7 +211,7 @@ impl WindowUpdate {
 }
 
 /// Maintained index of all non-empty windows.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
 pub struct WindowStore {
     entries: Vec<WindowEntry>,
     by_key: AHashMap<WindowKey, WindowId>,
@@ -225,6 +234,16 @@ impl WindowStore {
     /// Create an empty window store.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Rebuild a store from canonical entries, reconstructing all indexes.
+    pub fn from_entries(entries: Vec<WindowEntry>) -> Self {
+        let mut store = Self {
+            entries,
+            ..Self::default()
+        };
+        store.rebuild_indices();
+        store
     }
 
     /// Number of known non-empty/touched windows.
@@ -323,6 +342,21 @@ impl WindowStore {
         id
     }
 
+    /// Recompute all derived indexes from `entries`.
+    pub fn rebuild_indices(&mut self) {
+        self.by_key.clear();
+        for player in [Player::Player0, Player::Player1] {
+            self.active_by_player[player.index()].clear();
+            self.threat_by_player[player.index()].clear();
+        }
+
+        for index in 0..self.entries.len() {
+            let id = WindowId(index as u32);
+            self.by_key.insert(self.entries[index].key, id);
+            self.add_indices(id);
+        }
+    }
+
     fn remove_indices(&mut self, id: WindowId) {
         if self.entry(id).is_none() {
             return;
@@ -348,6 +382,25 @@ impl WindowStore {
     }
 }
 
+impl Serialize for WindowStore {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.entries.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for WindowStore {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let entries = Vec::<WindowEntry>::deserialize(deserializer)?;
+        Ok(Self::from_entries(entries))
+    }
+}
+
 /// Serializable/debug-friendly view of an active threat window.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Threat {
@@ -369,7 +422,7 @@ pub struct Threat {
 
 /// Return current threats for `player` from the board's maintained index.
 pub fn find_threats(board: &Board, player: Player) -> Vec<Threat> {
-    board
+    let mut threats: Vec<_> = board
         .windows()
         .threat_windows(player)
         .filter_map(|id| {
@@ -384,5 +437,14 @@ pub fn find_threats(board: &Board, player: Player) -> Vec<Threat> {
                 own_count: entry.count(player),
             })
         })
-        .collect()
+        .collect();
+    threats.sort_by_key(|threat| {
+        (
+            threat.key.axis.index(),
+            threat.key.start.q,
+            threat.key.start.r,
+            threat.id.0,
+        )
+    });
+    threats
 }

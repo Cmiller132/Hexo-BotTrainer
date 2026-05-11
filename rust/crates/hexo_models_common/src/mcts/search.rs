@@ -10,13 +10,11 @@ use std::fmt;
 
 use rand::Rng;
 
-use crate::encode::encode_state;
-use crate::game::{
-    apply_placement, legal_placements, GameOutcome, HexCoord, HexoState, MoveError, Placement,
-    Player,
-};
+use crate::encode::{encode_state, legal_placements_in_crop};
 use crate::mcts::evaluator::{Evaluation, StateEvaluator};
 use crate::mcts::tree::{Edge, Node, NodeId, SearchTree};
+use crate::position::SearchPosition;
+use hexo_engine::{GameOutcome, HexCoord, HexoState, MoveError, Player};
 
 /// Tunable search parameters for one root search.
 #[derive(Clone, Copy, Debug)]
@@ -138,31 +136,32 @@ fn run_simulation<E>(
 where
     E: StateEvaluator,
 {
-    let mut state = root_state.clone();
+    let mut position = SearchPosition::from_root(root_state);
     let mut node_id = 0;
     let mut path: Vec<(NodeId, usize)> = Vec::new();
 
     let (leaf_player, leaf_value) = loop {
         // Terminal leaves get exact values instead of evaluator estimates.
-        if let Some(outcome) = state.terminal() {
-            let player = state.current_player();
+        if let Some(outcome) = position.state().terminal() {
+            let player = position.state().current_player();
             break (player, terminal_value_for_player(&outcome, player));
         }
 
         if !tree.nodes[node_id].expanded {
-            let evaluation = expand_node(tree, node_id, &state, evaluator, config.crop_size)?;
-            break (state.current_player(), evaluation.value);
+            let evaluation =
+                expand_node(tree, node_id, position.state(), evaluator, config.crop_size)?;
+            break (position.state().current_player(), evaluation.value);
         }
 
         if tree.nodes[node_id].edges.is_empty() {
-            break (state.current_player(), 0.0);
+            break (position.state().current_player(), 0.0);
         }
 
         // Selection: choose one edge with PUCT and apply its placement to the
         // local state clone.
         let edge_index = select_child(tree, node_id, config.c_puct);
         let action = tree.nodes[node_id].edges[edge_index].action;
-        apply_placement(&mut state, Placement { coord: action })?;
+        position.place_coord(action)?;
         path.push((node_id, edge_index));
 
         // If the child already exists, keep descending. Otherwise create it and
@@ -172,21 +171,25 @@ where
             continue;
         }
 
-        let child = Node::new(state_hash(&state), state.current_player(), state.phase());
+        let child = Node::new(
+            state_hash(position.state()),
+            position.state().current_player(),
+            position.state().phase(),
+        );
         let child_id = tree.add_node(child);
         tree.nodes[node_id].edges[edge_index].child = Some(child_id);
         node_id = child_id;
 
-        if let Some(outcome) = state.terminal() {
+        if let Some(outcome) = position.state().terminal() {
             tree.nodes[node_id].expanded = true;
             break (
-                state.current_player(),
-                terminal_value_for_player(&outcome, state.current_player()),
+                position.state().current_player(),
+                terminal_value_for_player(&outcome, position.state().current_player()),
             );
         }
 
-        let evaluation = expand_node(tree, node_id, &state, evaluator, config.crop_size)?;
-        break (state.current_player(), evaluation.value);
+        let evaluation = expand_node(tree, node_id, position.state(), evaluator, config.crop_size)?;
+        break (position.state().current_player(), evaluation.value);
     };
 
     backup(tree, node_id, &path, leaf_player, leaf_value);
@@ -213,8 +216,9 @@ where
         });
     }
 
+    let encoded = encode_state(state, crop_size);
     let mut legal = Vec::new();
-    legal_placements(state, &mut legal);
+    legal_placements_in_crop(state, &encoded, &mut legal);
 
     if legal.is_empty() {
         tree.nodes[node_id].expanded = true;
@@ -228,9 +232,8 @@ where
     legal.sort_by(|a, b| compare_coord(*a, *b));
     legal.dedup();
 
-    // Encoding is only needed at expansion time. The evaluator maps the crop
-    // output back onto the legal coordinate list.
-    let encoded = encode_state(state, crop_size);
+    // Encoding is only needed at expansion time. Legal actions are filtered to
+    // the same crop so search, policy priors, and replay targets agree.
     let evaluation = evaluator.evaluate_state(state, &encoded, &legal);
 
     let mut edges = Vec::with_capacity(legal.len());

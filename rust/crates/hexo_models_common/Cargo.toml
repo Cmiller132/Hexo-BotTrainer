@@ -1,0 +1,21 @@
+[package]
+name = "hexo_models_common"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "hexo_models_common"
+path = "src/lib.rs"
+crate-type = ["rlib", "cdylib"]
+
+[features]
+default = []
+python = ["dep:pyo3"]
+
+[dependencies]
+hexo_engine.workspace = true
+pyo3 = { workspace = true, optional = true }
+rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+zstd.workspace = true

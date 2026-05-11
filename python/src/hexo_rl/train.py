@@ -7,11 +7,11 @@ from pathlib import Path
 from typing import Any
 
 import torch
+from models_common.model_api import ModelPlugin, load_model_plugin
+from models_common.replay import ReplayBuffer
 
 from .config import HexoConfig, resolve_path
 from .metrics import MetricLogger
-from .model_api import ModelPlugin, load_model_plugin
-from .replay import ReplayBuffer
 
 
 @dataclass(frozen=True)
@@ -136,4 +136,3 @@ def train_one_cycle(config: HexoConfig) -> TrainingResult:
         metrics=logger.averages(),
         status="completed",
     )
-

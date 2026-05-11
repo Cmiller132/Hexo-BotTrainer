@@ -1,15 +1,15 @@
 //! Legal placement generation and validation.
 //!
-//! The prototype uses a simple radius frontier: after the opening move, every
-//! new stone must be empty and within eight hex steps of an existing stone.
+//! The board maintains a radius-8 frontier incrementally. After the opening
+//! move, legal placement generation is a query over that frontier rather than a
+//! full-board rescan.
 
-use super::board::MoveError;
-use super::coord::{coords_within_radius, hex_distance, HexCoord};
+use super::board::{MoveError, LEGAL_FRONTIER_RADIUS};
+use super::coord::HexCoord;
 use super::state::{HexoState, TurnPhase};
-use ahash::AHashSet;
 
 /// Maximum distance from any existing stone for non-opening placements.
-pub const FRONTIER_RADIUS: i16 = 8;
+pub const FRONTIER_RADIUS: i16 = LEGAL_FRONTIER_RADIUS;
 
 /// Fill `out` with all legal single-stone placements for the current state.
 ///
@@ -31,17 +31,7 @@ pub fn legal_placements(state: &HexoState, out: &mut Vec<HexCoord>) {
             }
         }
         TurnPhase::FirstStone | TurnPhase::SecondStone { .. } => {
-            let mut seen = AHashSet::new();
-            for occupied in state.board().occupied_cells() {
-                // Prototype implementation: rescan radius-8 neighborhoods and
-                // deduplicate. This is simple and correct; an incremental
-                // frontier can replace it later if profiling says it matters.
-                for candidate in coords_within_radius(*occupied, FRONTIER_RADIUS) {
-                    if state.board().is_empty(candidate) && seen.insert(candidate) {
-                        out.push(candidate);
-                    }
-                }
-            }
+            out.extend(state.board().frontier_cells());
             out.sort_by_key(|coord| (coord.q, coord.r));
         }
     }
@@ -77,12 +67,7 @@ fn legal_non_opening_placement(state: &HexoState, coord: HexCoord) -> Result<(),
         return Err(MoveError::Occupied(coord));
     }
 
-    if state
-        .board()
-        .occupied_cells()
-        .iter()
-        .any(|occupied| hex_distance(*occupied, coord) <= FRONTIER_RADIUS)
-    {
+    if state.board().is_frontier_cell(coord) {
         Ok(())
     } else {
         Err(MoveError::IllegalPlacement(coord))

@@ -104,7 +104,7 @@ pub struct HexoState {
     placements_made: u32,
     /// Set once a player has six in a line.
     terminal: Option<GameOutcome>,
-    /// Last completed turn, useful for debugging and optional features.
+    /// Most recent logical turn progress.
     last_turn: Option<MoveRecord>,
     /// Full single-placement history for encoding recent stones.
     placement_history: Vec<PlacementRecord>,
@@ -191,7 +191,7 @@ impl HexoState {
         self.terminal.is_some()
     }
 
-    /// Last completed logical turn.
+    /// Most recent logical turn progress.
     pub fn last_turn(&self) -> Option<&MoveRecord> {
         self.last_turn.as_ref()
     }
@@ -214,6 +214,14 @@ impl HexoState {
             phase,
             placement_index: self.placements_made,
         });
+    }
+
+    fn record_turn_progress(&mut self, player: Player, coord: HexCoord, phase: TurnPhase) {
+        let placements = match phase {
+            TurnPhase::Opening | TurnPhase::FirstStone => vec![coord],
+            TurnPhase::SecondStone { first } => vec![first, coord],
+        };
+        self.last_turn = Some(MoveRecord { player, placements });
     }
 
     /// Recompute the current state hash from scratch.
@@ -249,6 +257,7 @@ pub fn apply_placement(
     let window_update = state.board.place(placement.coord, player)?;
     state.placements_made += 1;
     state.push_history(player, placement.coord, phase_before);
+    state.record_turn_progress(player, placement.coord, phase_before);
 
     // The board updates all affected six-cell windows during placement, so win
     // detection is now an O(18) incremental check rather than a separate line
@@ -274,29 +283,17 @@ pub fn apply_placement(
         TurnPhase::Opening => {
             // Opening is a special one-stone turn by Player 0. After it,
             // Player 1 starts the first normal two-stone turn.
-            state.last_turn = Some(MoveRecord {
-                player,
-                placements: vec![placement.coord],
-            });
             state.current_player = Player::Player1;
             state.phase = TurnPhase::FirstStone;
         }
         TurnPhase::FirstStone => {
             // The same player remains to place the second stone.
-            state.last_turn = Some(MoveRecord {
-                player,
-                placements: vec![placement.coord],
-            });
             state.phase = TurnPhase::SecondStone {
                 first: placement.coord,
             };
         }
-        TurnPhase::SecondStone { first } => {
+        TurnPhase::SecondStone { .. } => {
             // A normal two-stone turn is complete, so control passes.
-            state.last_turn = Some(MoveRecord {
-                player,
-                placements: vec![first, placement.coord],
-            });
             state.current_player = player.other();
             state.phase = TurnPhase::FirstStone;
         }
