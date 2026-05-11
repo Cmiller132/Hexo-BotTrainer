@@ -4,12 +4,9 @@
 //! move, legal placement generation is a query over that frontier rather than a
 //! full-board rescan.
 
-use super::board::{MoveError, LEGAL_FRONTIER_RADIUS};
+use super::board::MoveError;
 use super::coord::HexCoord;
 use super::state::{HexoState, TurnPhase};
-
-/// Maximum distance from any existing stone for non-opening placements.
-pub const FRONTIER_RADIUS: i16 = LEGAL_FRONTIER_RADIUS;
 
 /// Fill `out` with all legal single-stone placements for the current state.
 ///

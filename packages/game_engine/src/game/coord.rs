@@ -73,25 +73,6 @@ impl Neg for HexCoord {
     }
 }
 
-/// Six adjacent directions around a hex.
-pub const NEIGHBORS: [HexCoord; 6] = [
-    HexCoord { q: 1, r: 0 },
-    HexCoord { q: 1, r: -1 },
-    HexCoord { q: 0, r: -1 },
-    HexCoord { q: -1, r: 0 },
-    HexCoord { q: -1, r: 1 },
-    HexCoord { q: 0, r: 1 },
-];
-
-/// The three unique straight-line axes on the hex grid.
-///
-/// The opposite directions are obtained by negating these vectors.
-pub const AXES: [HexCoord; 3] = [
-    HexCoord { q: 1, r: 0 },
-    HexCoord { q: 0, r: 1 },
-    HexCoord { q: 1, r: -1 },
-];
-
 /// Hex-grid distance between two axial coordinates.
 pub fn hex_distance(a: HexCoord, b: HexCoord) -> i16 {
     let dq = a.q - b.q;

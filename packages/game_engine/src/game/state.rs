@@ -13,7 +13,8 @@ use super::board::{Board, MoveError};
 use super::coord::HexCoord;
 use super::rules::is_legal_placement;
 use super::windows::WindowUpdate;
-use serde::{de, Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 /// Player identifier and stone owner.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -90,7 +91,7 @@ pub struct MoveRecord {
 }
 
 /// Complete Hexo game state.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug)]
 pub struct HexoState {
     /// Sparse unlimited board.
     board: Board,
@@ -106,11 +107,6 @@ pub struct HexoState {
     last_turn: Option<MoveRecord>,
     /// Full single-placement history for encoding recent stones.
     placement_history: Vec<PlacementRecord>,
-    /// Deterministic Zobrist-style hash of the public state used by MCTS nodes.
-    ///
-    /// The board is unbounded, so keys are generated on demand from fixed
-    /// splitmix64 seeds instead of being stored in a finite table.
-    zobrist_hash: u64,
 }
 
 /// Summary returned after applying one placement.
@@ -130,85 +126,46 @@ pub struct ApplyResult {
     pub window_update: WindowUpdate,
 }
 
-const ZOBRIST_SEED: u64 = 0x9e37_79b9_7f4a_7c15;
-const ZOBRIST_TAG_STONE: u64 = 0x4845_584f_5354_4f4e;
-const ZOBRIST_TAG_CURRENT_PLAYER: u64 = 0x4845_584f_4355_5252;
-const ZOBRIST_TAG_PHASE: u64 = 0x4845_584f_5048_4153;
-const ZOBRIST_TAG_TERMINAL: u64 = 0x4845_584f_5445_524d;
-const ZOBRIST_TAG_PLACEMENT_COUNT: u64 = 0x4845_584f_434f_554e;
-const ZOBRIST_TAG_HISTORY: u64 = 0x4845_584f_4849_5354;
+const HEXO_STATE_SNAPSHOT_VERSION: u32 = 1;
 
-fn splitmix64(mut value: u64) -> u64 {
-    value = value.wrapping_add(0x9e37_79b9_7f4a_7c15);
-    let mut mixed = value;
-    mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    mixed ^ (mixed >> 31)
+/// Serializable startup/resume snapshot.
+///
+/// This is intentionally much smaller than `HexoState`: it records only the
+/// move coordinates needed to rebuild authoritative state through
+/// `apply_placement`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StateSnapshot {
+    rules_version: u32,
+    placements: Vec<HexCoord>,
 }
 
-fn zobrist_key(tag: u64, a: u64, b: u64, c: u64) -> u64 {
-    let mut value = ZOBRIST_SEED ^ tag;
-    value = splitmix64(value ^ a);
-    value = splitmix64(value ^ b.rotate_left(21));
-    splitmix64(value ^ c.rotate_left(42))
-}
+impl StateSnapshot {
+    /// Create a snapshot from a sequence of single-stone placements.
+    pub fn new(placements: Vec<HexCoord>) -> Self {
+        Self {
+            rules_version: HEXO_STATE_SNAPSHOT_VERSION,
+            placements,
+        }
+    }
 
-fn player_component(player: Player) -> u64 {
-    player.index() as u64
-}
+    /// Rules version expected by this engine.
+    pub fn rules_version(&self) -> u32 {
+        self.rules_version
+    }
 
-fn coord_component(coord: HexCoord) -> u64 {
-    ((coord.q as u16 as u64) << 16) | coord.r as u16 as u64
-}
-
-fn phase_component(phase: TurnPhase) -> u64 {
-    match phase {
-        TurnPhase::Opening => 0,
-        TurnPhase::FirstStone => 1,
-        TurnPhase::SecondStone { first } => 2 ^ coord_component(first).rotate_left(17),
+    /// Single-stone placements to replay from the initial state.
+    pub fn placements(&self) -> &[HexCoord] {
+        &self.placements
     }
 }
 
-fn zobrist_stone_key(player: Player, coord: HexCoord) -> u64 {
-    zobrist_key(
-        ZOBRIST_TAG_STONE,
-        player_component(player),
-        coord_component(coord),
-        0,
-    )
-}
-
-fn zobrist_current_player_key(player: Player) -> u64 {
-    zobrist_key(ZOBRIST_TAG_CURRENT_PLAYER, player_component(player), 0, 0)
-}
-
-fn zobrist_phase_key(phase: TurnPhase) -> u64 {
-    zobrist_key(ZOBRIST_TAG_PHASE, phase_component(phase), 0, 0)
-}
-
-fn zobrist_terminal_key(terminal: Option<GameOutcome>) -> u64 {
-    match terminal {
-        Some(outcome) => zobrist_key(
-            ZOBRIST_TAG_TERMINAL,
-            player_component(outcome.winner),
-            outcome.placements as u64,
-            0,
-        ),
-        None => 0,
-    }
-}
-
-fn zobrist_placement_count_key(placements_made: u32) -> u64 {
-    zobrist_key(ZOBRIST_TAG_PLACEMENT_COUNT, placements_made as u64, 0, 0)
-}
-
-fn zobrist_history_key(record: PlacementRecord) -> u64 {
-    zobrist_key(
-        ZOBRIST_TAG_HISTORY,
-        record.placement_index as u64,
-        player_component(record.player) ^ coord_component(record.coord).rotate_left(7),
-        phase_component(record.phase),
-    )
+/// Errors produced while constructing state from a startup/resume snapshot.
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub enum StateLoadError {
+    #[error("unsupported snapshot rules version {found}; expected {expected}")]
+    UnsupportedSnapshotVersion { found: u32, expected: u32 },
+    #[error("snapshot placement {index} is illegal: {source}")]
+    IllegalPlacement { index: usize, source: MoveError },
 }
 
 impl Default for HexoState {
@@ -220,7 +177,7 @@ impl Default for HexoState {
 impl HexoState {
     /// Create the initial empty game state.
     pub fn new() -> Self {
-        let mut state = Self {
+        Self {
             board: Board::new(),
             current_player: Player::Player0,
             phase: TurnPhase::Opening,
@@ -228,10 +185,7 @@ impl HexoState {
             terminal: None,
             last_turn: None,
             placement_history: Vec::new(),
-            zobrist_hash: 0,
-        };
-        state.reset_zobrist_hash();
-        state
+        }
     }
 
     /// Read-only access to board occupancy.
@@ -259,11 +213,6 @@ impl HexoState {
         self.terminal
     }
 
-    /// Alias for `terminal`, used by self-play code.
-    pub fn outcome(&self) -> Option<GameOutcome> {
-        self.terminal
-    }
-
     /// True once no more moves should be generated.
     pub fn is_terminal(&self) -> bool {
         self.terminal.is_some()
@@ -279,9 +228,14 @@ impl HexoState {
         &self.placement_history
     }
 
-    /// State hash used to label MCTS nodes.
-    pub fn zobrist_hash(&self) -> u64 {
-        self.zobrist_hash
+    /// Export a compact snapshot that can be passed to `load_state`.
+    pub fn snapshot(&self) -> StateSnapshot {
+        StateSnapshot::new(
+            self.placement_history
+                .iter()
+                .map(|record| record.coord)
+                .collect(),
+        )
     }
 
     /// Append a single-stone history entry after placement succeeds.
@@ -301,152 +255,25 @@ impl HexoState {
         };
         self.last_turn = Some(MoveRecord { player, placements });
     }
-
-    fn zobrist_metadata_hash(&self) -> u64 {
-        zobrist_current_player_key(self.current_player)
-            ^ zobrist_phase_key(self.phase)
-            ^ zobrist_terminal_key(self.terminal)
-            ^ zobrist_placement_count_key(self.placements_made)
-    }
-
-    /// Recompute the current state hash from scratch.
-    fn recompute_zobrist_hash(&self) -> u64 {
-        let mut hash = self.zobrist_metadata_hash();
-        for coord in self.board.occupied_cells() {
-            if let Some(stone) = self.board.get(*coord) {
-                hash ^= zobrist_stone_key(stone, *coord);
-            }
-        }
-        for record in &self.placement_history {
-            hash ^= zobrist_history_key(*record);
-        }
-        hash
-    }
-
-    fn reset_zobrist_hash(&mut self) {
-        self.zobrist_hash = self.recompute_zobrist_hash();
-    }
-
-    fn debug_assert_zobrist_consistent(&self) {
-        debug_assert_eq!(self.zobrist_hash, self.recompute_zobrist_hash());
-    }
 }
 
-#[derive(Deserialize)]
-struct RawHexoState {
-    board: Board,
-    current_player: Player,
-    phase: TurnPhase,
-    placements_made: u32,
-    terminal: Option<GameOutcome>,
-    last_turn: Option<MoveRecord>,
-    placement_history: Vec<PlacementRecord>,
-    #[serde(default, rename = "zobrist_hash")]
-    _zobrist_hash: Option<u64>,
-}
-
-impl<'de> Deserialize<'de> for HexoState {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let raw = RawHexoState::deserialize(deserializer)?;
-        deserialize_validated_state(raw).map_err(de::Error::custom)
+/// Build authoritative state by replaying a validated startup/resume snapshot.
+pub fn load_state(snapshot: &StateSnapshot) -> Result<HexoState, StateLoadError> {
+    if snapshot.rules_version != HEXO_STATE_SNAPSHOT_VERSION {
+        return Err(StateLoadError::UnsupportedSnapshotVersion {
+            found: snapshot.rules_version,
+            expected: HEXO_STATE_SNAPSHOT_VERSION,
+        });
     }
-}
 
-fn deserialize_validated_state(raw: RawHexoState) -> Result<HexoState, String> {
-    let rebuilt = replay_history(&raw.placement_history)?;
-    validate_deserialized_state(&raw, &rebuilt)?;
-    Ok(rebuilt)
-}
-
-fn replay_history(history: &[PlacementRecord]) -> Result<HexoState, String> {
     let mut state = HexoState::new();
 
-    for (index, record) in history.iter().copied().enumerate() {
-        let expected_player = state.current_player;
-        let expected_phase = state.phase;
-        let expected_placement_index = state.placements_made + 1;
-
-        if record.player != expected_player {
-            return Err(format!(
-                "placement history record {index} has player {:?}, expected {:?}",
-                record.player, expected_player
-            ));
-        }
-        if record.phase != expected_phase {
-            return Err(format!(
-                "placement history record {index} has phase {:?}, expected {:?}",
-                record.phase, expected_phase
-            ));
-        }
-        if record.placement_index != expected_placement_index {
-            return Err(format!(
-                "placement history record {index} has placement_index {}, expected {}",
-                record.placement_index, expected_placement_index
-            ));
-        }
-
-        apply_placement(
-            &mut state,
-            Placement {
-                coord: record.coord,
-            },
-        )
-        .map_err(|error| format!("placement history record {index} is illegal: {error}"))?;
+    for (index, coord) in snapshot.placements.iter().copied().enumerate() {
+        apply_placement(&mut state, Placement { coord })
+            .map_err(|source| StateLoadError::IllegalPlacement { index, source })?;
     }
 
     Ok(state)
-}
-
-fn validate_deserialized_state(raw: &RawHexoState, rebuilt: &HexoState) -> Result<(), String> {
-    if !boards_match(&raw.board, &rebuilt.board) {
-        return Err("serialized board does not match placement history replay".to_owned());
-    }
-    if raw.current_player != rebuilt.current_player {
-        return Err(format!(
-            "serialized current_player {:?} does not match replayed {:?}",
-            raw.current_player, rebuilt.current_player
-        ));
-    }
-    if raw.phase != rebuilt.phase {
-        return Err(format!(
-            "serialized phase {:?} does not match replayed {:?}",
-            raw.phase, rebuilt.phase
-        ));
-    }
-    if raw.placements_made != rebuilt.placements_made {
-        return Err(format!(
-            "serialized placements_made {} does not match replayed {}",
-            raw.placements_made, rebuilt.placements_made
-        ));
-    }
-    if raw.terminal != rebuilt.terminal {
-        return Err(format!(
-            "serialized terminal {:?} does not match replayed {:?}",
-            raw.terminal, rebuilt.terminal
-        ));
-    }
-    if raw.last_turn != rebuilt.last_turn {
-        return Err(format!(
-            "serialized last_turn {:?} does not match replayed {:?}",
-            raw.last_turn, rebuilt.last_turn
-        ));
-    }
-    if raw.placement_history != rebuilt.placement_history {
-        return Err("serialized placement_history does not match replayed history".to_owned());
-    }
-
-    Ok(())
-}
-
-fn boards_match(left: &Board, right: &Board) -> bool {
-    left.occupied_cells() == right.occupied_cells()
-        && left
-            .occupied_cells()
-            .iter()
-            .all(|coord| left.get(*coord) == right.get(*coord))
 }
 
 /// Apply one single-stone placement and advance the phase machine.
@@ -465,17 +292,9 @@ pub fn apply_placement(
 
     let player = state.current_player;
     let phase_before = state.phase;
-    let old_metadata_hash = state.zobrist_metadata_hash();
     let window_update = state.board.place(placement.coord, player)?;
-    state.zobrist_hash ^= old_metadata_hash;
-    state.zobrist_hash ^= zobrist_stone_key(player, placement.coord);
     state.placements_made += 1;
     state.push_history(player, placement.coord, phase_before);
-    let history_record = *state
-        .placement_history
-        .last()
-        .expect("history is pushed immediately before hashing");
-    state.zobrist_hash ^= zobrist_history_key(history_record);
     state.record_turn_progress(player, placement.coord, phase_before);
 
     // The board updates all affected six-cell windows during placement, so win
@@ -487,8 +306,6 @@ pub fn apply_placement(
             placements: state.placements_made,
         };
         state.terminal = Some(outcome);
-        state.zobrist_hash ^= state.zobrist_metadata_hash();
-        state.debug_assert_zobrist_consistent();
         return Ok(ApplyResult {
             placed: placement.coord,
             player,
@@ -519,8 +336,6 @@ pub fn apply_placement(
         }
     }
 
-    state.zobrist_hash ^= state.zobrist_metadata_hash();
-    state.debug_assert_zobrist_consistent();
     Ok(ApplyResult {
         placed: placement.coord,
         player,
@@ -567,36 +382,50 @@ mod tests {
     }
 
     #[test]
-    fn deserialization_replays_history_and_recomputes_zobrist_hash() {
+    fn snapshot_uses_canonical_shape() {
         let state = sample_state();
-        let mut value = serde_json::to_value(&state).unwrap();
-        value["zobrist_hash"] = json!(0);
+        let snapshot = state.snapshot();
+        let value = serde_json::to_value(&snapshot).unwrap();
 
-        let decoded: HexoState = serde_json::from_value(value).unwrap();
+        assert_eq!(value["rules_version"], json!(HEXO_STATE_SNAPSHOT_VERSION));
+        assert_eq!(value["placements"].as_array().unwrap().len(), 5);
+        assert!(value.get("board").is_none());
+    }
+
+    #[test]
+    fn load_state_replays_snapshot() {
+        let state = sample_state();
+        let snapshot = state.snapshot();
+
+        let decoded = load_state(&snapshot).unwrap();
 
         assert_same_public_state(&decoded, &state);
-        assert_eq!(decoded.zobrist_hash(), state.zobrist_hash());
     }
 
     #[test]
-    fn deserialization_rejects_placement_count_that_disagrees_with_replay() {
+    fn load_state_rejects_unsupported_snapshot_version() {
         let state = sample_state();
-        let mut value = serde_json::to_value(&state).unwrap();
-        value["placements_made"] = json!(99);
+        let mut snapshot = state.snapshot();
+        snapshot.rules_version = HEXO_STATE_SNAPSHOT_VERSION + 1;
 
-        let error = serde_json::from_value::<HexoState>(value).unwrap_err();
-
-        assert!(error.to_string().contains("placements_made"));
+        assert!(matches!(
+            load_state(&snapshot),
+            Err(StateLoadError::UnsupportedSnapshotVersion { .. })
+        ));
     }
 
     #[test]
-    fn deserialization_rejects_history_that_does_not_match_phase_machine() {
+    fn load_state_rejects_illegal_snapshot_placement() {
         let state = sample_state();
-        let mut value = serde_json::to_value(&state).unwrap();
-        value["placement_history"][0]["phase"] = json!("FirstStone");
+        let mut snapshot = state.snapshot();
+        snapshot.placements[1] = snapshot.placements[0];
 
-        let error = serde_json::from_value::<HexoState>(value).unwrap_err();
-
-        assert!(error.to_string().contains("phase"));
+        assert!(matches!(
+            load_state(&snapshot),
+            Err(StateLoadError::IllegalPlacement {
+                index: 1,
+                source: MoveError::Occupied(coord),
+            }) if coord == HexCoord::ZERO
+        ));
     }
 }

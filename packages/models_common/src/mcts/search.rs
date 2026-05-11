@@ -64,7 +64,9 @@ impl fmt::Display for SearchError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             SearchError::NoLegalActions => write!(f, "MCTS root has no legal actions"),
-            SearchError::IllegalMove(error) => write!(f, "MCTS selected an illegal move: {error:?}"),
+            SearchError::IllegalMove(error) => {
+                write!(f, "MCTS selected an illegal move: {error:?}")
+            }
         }
     }
 }
@@ -89,11 +91,7 @@ where
     // The root represents the exact state passed by the caller. It is expanded
     // once before simulations so root edges exist for policy extraction even if
     // visit count is tiny.
-    let root = Node::new(
-        state_hash(root_state),
-        root_state.current_player(),
-        root_state.phase(),
-    );
+    let root = Node::new(root_state.current_player(), root_state.phase());
     let mut tree = SearchTree::with_root(root);
 
     expand_node(&mut tree, 0, root_state, evaluator, config.crop_size)?;
@@ -171,11 +169,7 @@ where
             continue;
         }
 
-        let child = Node::new(
-            state_hash(position.state()),
-            position.state().current_player(),
-            position.state().phase(),
-        );
+        let child = Node::new(position.state().current_player(), position.state().phase());
         let child_id = tree.add_node(child);
         tree.nodes[node_id].edges[edge_index].child = Some(child_id);
         node_id = child_id;
@@ -228,9 +222,6 @@ where
             value: 0.0,
         });
     }
-
-    legal.sort_by(|a, b| compare_coord(*a, *b));
-    legal.dedup();
 
     // Encoding is only needed at expansion time. Legal actions are filtered to
     // the same crop so search, policy priors, and replay targets agree.
@@ -391,11 +382,6 @@ fn select_root_action(root: &Node, temperature: f32) -> Option<HexCoord> {
     }
 
     root.edges.last().map(|edge| edge.action)
-}
-
-/// Current state hash accessor.
-fn state_hash(state: &HexoState) -> u64 {
-    state.zobrist_hash()
 }
 
 /// Deterministic coordinate ordering for stable policies and tie-breaks.

@@ -72,7 +72,11 @@ impl Board {
     /// Callers should validate game legality before calling this method. This
     /// method only protects the board invariant that a cell cannot be occupied
     /// twice.
-    pub fn place(&mut self, coord: HexCoord, stone: Stone) -> Result<WindowUpdate, MoveError> {
+    pub(crate) fn place(
+        &mut self,
+        coord: HexCoord,
+        stone: Stone,
+    ) -> Result<WindowUpdate, MoveError> {
         if !self.is_empty(coord) {
             return Err(MoveError::Occupied(coord));
         }
@@ -82,7 +86,7 @@ impl Board {
         Ok(self.windows.update_for_placement(coord, stone))
     }
 
-    /// Incremental active/threat/win window state.
+    /// Incremental threat/win window state.
     pub fn windows(&self) -> &WindowStore {
         &self.windows
     }
@@ -105,11 +109,6 @@ impl Board {
     /// Number of stones currently on the board.
     pub fn len(&self) -> usize {
         self.occupied.len()
-    }
-
-    /// True when the board contains no stones.
-    pub fn is_empty_board(&self) -> bool {
-        self.occupied.is_empty()
     }
 
     /// Axis-aligned axial bounds around occupied cells.

@@ -236,26 +236,12 @@ fn encode_turn_memory(state: &HexoState, encoded: &mut EncodedState) {
 
 /// Choose a deterministic crop center from occupied-cell bounds.
 fn crop_center(state: &HexoState) -> HexCoord {
-    let occupied = state.board().occupied_cells();
-    if occupied.is_empty() {
-        return HexCoord { q: 0, r: 0 };
-    }
-
-    let mut min_q = occupied[0].q;
-    let mut max_q = occupied[0].q;
-    let mut min_r = occupied[0].r;
-    let mut max_r = occupied[0].r;
-
-    for &coord in occupied.iter().skip(1) {
-        min_q = min_q.min(coord.q);
-        max_q = max_q.max(coord.q);
-        min_r = min_r.min(coord.r);
-        max_r = max_r.max(coord.r);
-    }
-
-    HexCoord {
-        q: min_q + (max_q - min_q) / 2,
-        r: min_r + (max_r - min_r) / 2,
+    match state.board().bounds() {
+        Some((min, max)) => HexCoord {
+            q: min.q + (max.q - min.q) / 2,
+            r: min.r + (max.r - min.r) / 2,
+        },
+        None => HexCoord::ZERO,
     }
 }
 

@@ -48,8 +48,6 @@ impl Edge {
 /// One MCTS node representing a complete Hexo state.
 #[derive(Clone, Debug)]
 pub struct Node {
-    /// Hash of the represented state, useful for debugging/transpositions later.
-    pub state_hash: u64,
     /// Player to act at this state.
     pub player_to_act: Player,
     /// Turn phase at this state.
@@ -66,9 +64,8 @@ pub struct Node {
 
 impl Node {
     /// Create an unexpanded search node.
-    pub fn new(state_hash: u64, player_to_act: Player, phase: TurnPhase) -> Self {
+    pub fn new(player_to_act: Player, phase: TurnPhase) -> Self {
         Self {
-            state_hash,
             player_to_act,
             phase,
             visits: 0,
