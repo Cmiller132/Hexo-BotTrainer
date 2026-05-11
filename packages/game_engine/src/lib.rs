@@ -10,5 +10,5 @@ pub use game::{
     apply_placement, find_threats, hex_distance, is_legal_placement, legal_placements, ApplyResult,
     Axis, Board, GameOutcome, HexCoord, HexoState, MoveError, MoveRecord, Placement,
     PlacementRecord, Player, Stone, Threat, TurnPhase, WindowEntry, WindowId, WindowKey,
-    WindowStore, WindowUpdate, AXES, LEGAL_FRONTIER_RADIUS, WINDOW_LEN,
+    WindowStore, WindowStoreError, WindowUpdate, AXES, LEGAL_FRONTIER_RADIUS, WINDOW_LEN,
 };

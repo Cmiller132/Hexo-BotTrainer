@@ -11,6 +11,7 @@ use super::coord::HexCoord;
 use super::state::Player;
 use ahash::{AHashMap, AHashSet};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use thiserror::Error;
 
 /// Number of cells in a win/threat window.
 pub const WINDOW_LEN: i16 = 6;
@@ -91,14 +92,14 @@ impl WindowId {
 /// A window stores only two six-bit masks. Coordinates are derived from
 /// `WindowKey` when needed, which avoids duplicating six coordinates across many
 /// overlapping windows.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub struct WindowEntry {
     /// Canonical start and axis.
-    pub key: WindowKey,
+    key: WindowKey,
     /// Bits occupied by Player 0.
-    pub p0_mask: u8,
+    p0_mask: u8,
     /// Bits occupied by Player 1.
-    pub p1_mask: u8,
+    p1_mask: u8,
 }
 
 impl WindowEntry {
@@ -109,6 +110,39 @@ impl WindowEntry {
             p0_mask: 0,
             p1_mask: 0,
         }
+    }
+
+    fn from_masks(key: WindowKey, p0_mask: u8, p1_mask: u8) -> Result<Self, &'static str> {
+        if p0_mask & !WINDOW_MASK != 0 {
+            return Err("player 0 window mask contains bits outside the six-cell window");
+        }
+        if p1_mask & !WINDOW_MASK != 0 {
+            return Err("player 1 window mask contains bits outside the six-cell window");
+        }
+        if p0_mask & p1_mask != 0 {
+            return Err("window masks overlap between players");
+        }
+
+        Ok(Self {
+            key,
+            p0_mask,
+            p1_mask,
+        })
+    }
+
+    /// Canonical start and axis.
+    pub fn key(self) -> WindowKey {
+        self.key
+    }
+
+    /// Raw six-bit mask for Player 0.
+    pub fn p0_mask(self) -> u8 {
+        self.p0_mask
+    }
+
+    /// Raw six-bit mask for Player 1.
+    pub fn p1_mask(self) -> u8 {
+        self.p1_mask
     }
 
     /// Mask for one player's stones.
@@ -187,6 +221,23 @@ impl WindowEntry {
     }
 }
 
+impl<'de> Deserialize<'de> for WindowEntry {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct RawWindowEntry {
+            key: WindowKey,
+            p0_mask: u8,
+            p1_mask: u8,
+        }
+
+        let raw = RawWindowEntry::deserialize(deserializer)?;
+        Self::from_masks(raw.key, raw.p0_mask, raw.p1_mask).map_err(serde::de::Error::custom)
+    }
+}
+
 /// Incremental result produced by one placement's window updates.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct WindowUpdate {
@@ -219,6 +270,13 @@ pub struct WindowStore {
     threat_by_player: [AHashSet<WindowId>; 2],
 }
 
+/// Errors produced when rebuilding a window store from serialized entries.
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub enum WindowStoreError {
+    #[error("duplicate window key {0:?}")]
+    DuplicateKey(WindowKey),
+}
+
 impl Default for WindowStore {
     fn default() -> Self {
         Self {
@@ -237,13 +295,13 @@ impl WindowStore {
     }
 
     /// Rebuild a store from canonical entries, reconstructing all indexes.
-    pub fn from_entries(entries: Vec<WindowEntry>) -> Self {
+    pub fn from_entries(entries: Vec<WindowEntry>) -> Result<Self, WindowStoreError> {
         let mut store = Self {
             entries,
             ..Self::default()
         };
-        store.rebuild_indices();
-        store
+        store.rebuild_indices()?;
+        Ok(store)
     }
 
     /// Number of known non-empty/touched windows.
@@ -342,8 +400,7 @@ impl WindowStore {
         id
     }
 
-    /// Recompute all derived indexes from `entries`.
-    pub fn rebuild_indices(&mut self) {
+    fn rebuild_indices(&mut self) -> Result<(), WindowStoreError> {
         self.by_key.clear();
         for player in [Player::Player0, Player::Player1] {
             self.active_by_player[player.index()].clear();
@@ -352,9 +409,14 @@ impl WindowStore {
 
         for index in 0..self.entries.len() {
             let id = WindowId(index as u32);
-            self.by_key.insert(self.entries[index].key, id);
+            let key = self.entries[index].key();
+            if self.by_key.insert(key, id).is_some() {
+                return Err(WindowStoreError::DuplicateKey(key));
+            }
             self.add_indices(id);
         }
+
+        Ok(())
     }
 
     fn remove_indices(&mut self, id: WindowId) {
@@ -397,7 +459,7 @@ impl<'de> Deserialize<'de> for WindowStore {
         D: Deserializer<'de>,
     {
         let entries = Vec::<WindowEntry>::deserialize(deserializer)?;
-        Ok(Self::from_entries(entries))
+        Self::from_entries(entries).map_err(serde::de::Error::custom)
     }
 }
 
@@ -430,8 +492,8 @@ pub fn find_threats(board: &Board, player: Player) -> Vec<Threat> {
             Some(Threat {
                 player,
                 id,
-                key: entry.key,
-                cells: entry.key.cells(),
+                key: entry.key(),
+                cells: entry.key().cells(),
                 stone_mask: entry.mask(player),
                 empty_mask: entry.empty_mask(),
                 own_count: entry.count(player),
@@ -447,4 +509,52 @@ pub fn find_threats(board: &Board, player: Player) -> Vec<Threat> {
         )
     });
     threats
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn window_entry_deserialization_rejects_overlapping_masks() {
+        let value = json!({
+            "key": {
+                "start": { "q": 0, "r": 0 },
+                "axis": "Q"
+            },
+            "p0_mask": 1,
+            "p1_mask": 1
+        });
+
+        assert!(serde_json::from_value::<WindowEntry>(value).is_err());
+    }
+
+    #[test]
+    fn window_entry_deserialization_rejects_bits_outside_window() {
+        let value = json!({
+            "key": {
+                "start": { "q": 0, "r": 0 },
+                "axis": "Q"
+            },
+            "p0_mask": 0b0100_0000,
+            "p1_mask": 0
+        });
+
+        assert!(serde_json::from_value::<WindowEntry>(value).is_err());
+    }
+
+    #[test]
+    fn window_store_rejects_duplicate_keys() {
+        let key = WindowKey {
+            start: HexCoord::ZERO,
+            axis: Axis::Q,
+        };
+        let entries = vec![WindowEntry::new(key), WindowEntry::new(key)];
+
+        assert!(matches!(
+            WindowStore::from_entries(entries),
+            Err(WindowStoreError::DuplicateKey(duplicate)) if duplicate == key
+        ));
+    }
 }

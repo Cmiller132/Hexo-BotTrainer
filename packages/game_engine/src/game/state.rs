@@ -13,9 +13,7 @@ use super::board::{Board, MoveError};
 use super::coord::HexCoord;
 use super::rules::is_legal_placement;
 use super::windows::WindowUpdate;
-use serde::{Deserialize, Serialize};
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
+use serde::{de, Deserialize, Deserializer, Serialize};
 
 /// Player identifier and stone owner.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -92,7 +90,7 @@ pub struct MoveRecord {
 }
 
 /// Complete Hexo game state.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct HexoState {
     /// Sparse unlimited board.
     board: Board,
@@ -108,11 +106,10 @@ pub struct HexoState {
     last_turn: Option<MoveRecord>,
     /// Full single-placement history for encoding recent stones.
     placement_history: Vec<PlacementRecord>,
-    /// Deterministic hash of the public state used by MCTS nodes.
+    /// Deterministic Zobrist-style hash of the public state used by MCTS nodes.
     ///
-    /// This is named zobrist for the intended role, but currently uses a simple
-    /// deterministic hash over state fields. A true incremental Zobrist table
-    /// can replace `refresh_hash` later without changing callers.
+    /// The board is unbounded, so keys are generated on demand from fixed
+    /// splitmix64 seeds instead of being stored in a finite table.
     zobrist_hash: u64,
 }
 
@@ -131,6 +128,87 @@ pub struct ApplyResult {
     pub outcome: Option<GameOutcome>,
     /// Window ids changed by this placement plus any threat/win ids.
     pub window_update: WindowUpdate,
+}
+
+const ZOBRIST_SEED: u64 = 0x9e37_79b9_7f4a_7c15;
+const ZOBRIST_TAG_STONE: u64 = 0x4845_584f_5354_4f4e;
+const ZOBRIST_TAG_CURRENT_PLAYER: u64 = 0x4845_584f_4355_5252;
+const ZOBRIST_TAG_PHASE: u64 = 0x4845_584f_5048_4153;
+const ZOBRIST_TAG_TERMINAL: u64 = 0x4845_584f_5445_524d;
+const ZOBRIST_TAG_PLACEMENT_COUNT: u64 = 0x4845_584f_434f_554e;
+const ZOBRIST_TAG_HISTORY: u64 = 0x4845_584f_4849_5354;
+
+fn splitmix64(mut value: u64) -> u64 {
+    value = value.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    let mut mixed = value;
+    mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    mixed ^ (mixed >> 31)
+}
+
+fn zobrist_key(tag: u64, a: u64, b: u64, c: u64) -> u64 {
+    let mut value = ZOBRIST_SEED ^ tag;
+    value = splitmix64(value ^ a);
+    value = splitmix64(value ^ b.rotate_left(21));
+    splitmix64(value ^ c.rotate_left(42))
+}
+
+fn player_component(player: Player) -> u64 {
+    player.index() as u64
+}
+
+fn coord_component(coord: HexCoord) -> u64 {
+    ((coord.q as u16 as u64) << 16) | coord.r as u16 as u64
+}
+
+fn phase_component(phase: TurnPhase) -> u64 {
+    match phase {
+        TurnPhase::Opening => 0,
+        TurnPhase::FirstStone => 1,
+        TurnPhase::SecondStone { first } => 2 ^ coord_component(first).rotate_left(17),
+    }
+}
+
+fn zobrist_stone_key(player: Player, coord: HexCoord) -> u64 {
+    zobrist_key(
+        ZOBRIST_TAG_STONE,
+        player_component(player),
+        coord_component(coord),
+        0,
+    )
+}
+
+fn zobrist_current_player_key(player: Player) -> u64 {
+    zobrist_key(ZOBRIST_TAG_CURRENT_PLAYER, player_component(player), 0, 0)
+}
+
+fn zobrist_phase_key(phase: TurnPhase) -> u64 {
+    zobrist_key(ZOBRIST_TAG_PHASE, phase_component(phase), 0, 0)
+}
+
+fn zobrist_terminal_key(terminal: Option<GameOutcome>) -> u64 {
+    match terminal {
+        Some(outcome) => zobrist_key(
+            ZOBRIST_TAG_TERMINAL,
+            player_component(outcome.winner),
+            outcome.placements as u64,
+            0,
+        ),
+        None => 0,
+    }
+}
+
+fn zobrist_placement_count_key(placements_made: u32) -> u64 {
+    zobrist_key(ZOBRIST_TAG_PLACEMENT_COUNT, placements_made as u64, 0, 0)
+}
+
+fn zobrist_history_key(record: PlacementRecord) -> u64 {
+    zobrist_key(
+        ZOBRIST_TAG_HISTORY,
+        record.placement_index as u64,
+        player_component(record.player) ^ coord_component(record.coord).rotate_left(7),
+        phase_component(record.phase),
+    )
 }
 
 impl Default for HexoState {
@@ -152,7 +230,7 @@ impl HexoState {
             placement_history: Vec::new(),
             zobrist_hash: 0,
         };
-        state.refresh_hash();
+        state.reset_zobrist_hash();
         state
     }
 
@@ -224,18 +302,151 @@ impl HexoState {
         self.last_turn = Some(MoveRecord { player, placements });
     }
 
-    /// Recompute the current state hash from scratch.
-    fn refresh_hash(&mut self) {
-        let mut hasher = DefaultHasher::new();
-        self.current_player.hash(&mut hasher);
-        self.phase.hash(&mut hasher);
-        self.placements_made.hash(&mut hasher);
-        for coord in self.board.occupied_cells() {
-            coord.hash(&mut hasher);
-            self.board.get(*coord).hash(&mut hasher);
-        }
-        self.zobrist_hash = hasher.finish();
+    fn zobrist_metadata_hash(&self) -> u64 {
+        zobrist_current_player_key(self.current_player)
+            ^ zobrist_phase_key(self.phase)
+            ^ zobrist_terminal_key(self.terminal)
+            ^ zobrist_placement_count_key(self.placements_made)
     }
+
+    /// Recompute the current state hash from scratch.
+    fn recompute_zobrist_hash(&self) -> u64 {
+        let mut hash = self.zobrist_metadata_hash();
+        for coord in self.board.occupied_cells() {
+            if let Some(stone) = self.board.get(*coord) {
+                hash ^= zobrist_stone_key(stone, *coord);
+            }
+        }
+        for record in &self.placement_history {
+            hash ^= zobrist_history_key(*record);
+        }
+        hash
+    }
+
+    fn reset_zobrist_hash(&mut self) {
+        self.zobrist_hash = self.recompute_zobrist_hash();
+    }
+
+    fn debug_assert_zobrist_consistent(&self) {
+        debug_assert_eq!(self.zobrist_hash, self.recompute_zobrist_hash());
+    }
+}
+
+#[derive(Deserialize)]
+struct RawHexoState {
+    board: Board,
+    current_player: Player,
+    phase: TurnPhase,
+    placements_made: u32,
+    terminal: Option<GameOutcome>,
+    last_turn: Option<MoveRecord>,
+    placement_history: Vec<PlacementRecord>,
+    #[serde(default, rename = "zobrist_hash")]
+    _zobrist_hash: Option<u64>,
+}
+
+impl<'de> Deserialize<'de> for HexoState {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = RawHexoState::deserialize(deserializer)?;
+        deserialize_validated_state(raw).map_err(de::Error::custom)
+    }
+}
+
+fn deserialize_validated_state(raw: RawHexoState) -> Result<HexoState, String> {
+    let rebuilt = replay_history(&raw.placement_history)?;
+    validate_deserialized_state(&raw, &rebuilt)?;
+    Ok(rebuilt)
+}
+
+fn replay_history(history: &[PlacementRecord]) -> Result<HexoState, String> {
+    let mut state = HexoState::new();
+
+    for (index, record) in history.iter().copied().enumerate() {
+        let expected_player = state.current_player;
+        let expected_phase = state.phase;
+        let expected_placement_index = state.placements_made + 1;
+
+        if record.player != expected_player {
+            return Err(format!(
+                "placement history record {index} has player {:?}, expected {:?}",
+                record.player, expected_player
+            ));
+        }
+        if record.phase != expected_phase {
+            return Err(format!(
+                "placement history record {index} has phase {:?}, expected {:?}",
+                record.phase, expected_phase
+            ));
+        }
+        if record.placement_index != expected_placement_index {
+            return Err(format!(
+                "placement history record {index} has placement_index {}, expected {}",
+                record.placement_index, expected_placement_index
+            ));
+        }
+
+        apply_placement(
+            &mut state,
+            Placement {
+                coord: record.coord,
+            },
+        )
+        .map_err(|error| format!("placement history record {index} is illegal: {error}"))?;
+    }
+
+    Ok(state)
+}
+
+fn validate_deserialized_state(raw: &RawHexoState, rebuilt: &HexoState) -> Result<(), String> {
+    if !boards_match(&raw.board, &rebuilt.board) {
+        return Err("serialized board does not match placement history replay".to_owned());
+    }
+    if raw.current_player != rebuilt.current_player {
+        return Err(format!(
+            "serialized current_player {:?} does not match replayed {:?}",
+            raw.current_player, rebuilt.current_player
+        ));
+    }
+    if raw.phase != rebuilt.phase {
+        return Err(format!(
+            "serialized phase {:?} does not match replayed {:?}",
+            raw.phase, rebuilt.phase
+        ));
+    }
+    if raw.placements_made != rebuilt.placements_made {
+        return Err(format!(
+            "serialized placements_made {} does not match replayed {}",
+            raw.placements_made, rebuilt.placements_made
+        ));
+    }
+    if raw.terminal != rebuilt.terminal {
+        return Err(format!(
+            "serialized terminal {:?} does not match replayed {:?}",
+            raw.terminal, rebuilt.terminal
+        ));
+    }
+    if raw.last_turn != rebuilt.last_turn {
+        return Err(format!(
+            "serialized last_turn {:?} does not match replayed {:?}",
+            raw.last_turn, rebuilt.last_turn
+        ));
+    }
+    if raw.placement_history != rebuilt.placement_history {
+        return Err("serialized placement_history does not match replayed history".to_owned());
+    }
+
+    Ok(())
+}
+
+fn boards_match(left: &Board, right: &Board) -> bool {
+    left.occupied_cells() == right.occupied_cells()
+        && left
+            .occupied_cells()
+            .iter()
+            .all(|coord| left.get(*coord) == right.get(*coord))
 }
 
 /// Apply one single-stone placement and advance the phase machine.
@@ -254,9 +465,17 @@ pub fn apply_placement(
 
     let player = state.current_player;
     let phase_before = state.phase;
+    let old_metadata_hash = state.zobrist_metadata_hash();
     let window_update = state.board.place(placement.coord, player)?;
+    state.zobrist_hash ^= old_metadata_hash;
+    state.zobrist_hash ^= zobrist_stone_key(player, placement.coord);
     state.placements_made += 1;
     state.push_history(player, placement.coord, phase_before);
+    let history_record = *state
+        .placement_history
+        .last()
+        .expect("history is pushed immediately before hashing");
+    state.zobrist_hash ^= zobrist_history_key(history_record);
     state.record_turn_progress(player, placement.coord, phase_before);
 
     // The board updates all affected six-cell windows during placement, so win
@@ -268,7 +487,8 @@ pub fn apply_placement(
             placements: state.placements_made,
         };
         state.terminal = Some(outcome);
-        state.refresh_hash();
+        state.zobrist_hash ^= state.zobrist_metadata_hash();
+        state.debug_assert_zobrist_consistent();
         return Ok(ApplyResult {
             placed: placement.coord,
             player,
@@ -299,7 +519,8 @@ pub fn apply_placement(
         }
     }
 
-    state.refresh_hash();
+    state.zobrist_hash ^= state.zobrist_metadata_hash();
+    state.debug_assert_zobrist_consistent();
     Ok(ApplyResult {
         placed: placement.coord,
         player,
@@ -308,4 +529,74 @@ pub fn apply_placement(
         outcome: None,
         window_update,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn sample_state() -> HexoState {
+        let mut state = HexoState::new();
+        for coord in [
+            HexCoord::ZERO,
+            HexCoord::new(1, 0),
+            HexCoord::new(2, 0),
+            HexCoord::new(0, 1),
+            HexCoord::new(0, 2),
+        ] {
+            apply_placement(&mut state, Placement { coord }).unwrap();
+        }
+        state
+    }
+
+    fn assert_same_public_state(left: &HexoState, right: &HexoState) {
+        assert_eq!(left.current_player(), right.current_player());
+        assert_eq!(left.phase(), right.phase());
+        assert_eq!(left.placements_made(), right.placements_made());
+        assert_eq!(left.terminal(), right.terminal());
+        assert_eq!(left.last_turn(), right.last_turn());
+        assert_eq!(left.placement_history(), right.placement_history());
+        assert_eq!(
+            left.board().occupied_cells(),
+            right.board().occupied_cells()
+        );
+        for coord in left.board().occupied_cells() {
+            assert_eq!(left.board().get(*coord), right.board().get(*coord));
+        }
+    }
+
+    #[test]
+    fn deserialization_replays_history_and_recomputes_zobrist_hash() {
+        let state = sample_state();
+        let mut value = serde_json::to_value(&state).unwrap();
+        value["zobrist_hash"] = json!(0);
+
+        let decoded: HexoState = serde_json::from_value(value).unwrap();
+
+        assert_same_public_state(&decoded, &state);
+        assert_eq!(decoded.zobrist_hash(), state.zobrist_hash());
+    }
+
+    #[test]
+    fn deserialization_rejects_placement_count_that_disagrees_with_replay() {
+        let state = sample_state();
+        let mut value = serde_json::to_value(&state).unwrap();
+        value["placements_made"] = json!(99);
+
+        let error = serde_json::from_value::<HexoState>(value).unwrap_err();
+
+        assert!(error.to_string().contains("placements_made"));
+    }
+
+    #[test]
+    fn deserialization_rejects_history_that_does_not_match_phase_machine() {
+        let state = sample_state();
+        let mut value = serde_json::to_value(&state).unwrap();
+        value["placement_history"][0]["phase"] = json!("FirstStone");
+
+        let error = serde_json::from_value::<HexoState>(value).unwrap_err();
+
+        assert!(error.to_string().contains("phase"));
+    }
 }
