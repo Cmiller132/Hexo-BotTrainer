@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "hexo-runner"
+version = "0.1.0"
+description = "Placeholder Python runner package for the Hexo RL redesign."
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+hexo-rl = "hexo_runner.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["python/hexo_runner"]
+
+[tool.pyright]
+pythonVersion = "3.11"
+typeCheckingMode = "basic"

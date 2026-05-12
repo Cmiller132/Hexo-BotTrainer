@@ -1,0 +1,21 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "hexo-utils"
+version = "0.1.0"
+description = "Shared encoding, MCTS, and replay utilities for Hexo RL."
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.hatch.build.targets.wheel]
+packages = ["python/hexo_utils"]
+
+[tool.pyright]
+pythonVersion = "3.11"
+typeCheckingMode = "basic"
+
+[tool.maturin]
+python-source = "python"
+module-name = "hexo_utils._rust"

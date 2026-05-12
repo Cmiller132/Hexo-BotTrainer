@@ -1,7 +1,7 @@
 [workspace]
 members = [
-    "packages/game_engine",
-    "packages/models_common",
+    "packages/hexo_engine",
+    "packages/hexo_utils",
 ]
 resolver = "2"
 
@@ -11,7 +11,7 @@ edition = "2021"
 
 [workspace.dependencies]
 ahash = { version = "0.8", features = ["serde"] }
-game_engine = { path = "packages/game_engine" }
+hexo_engine = { path = "packages/hexo_engine" }
 pyo3 = { version = "0.21", features = ["extension-module"] }
 rand = "0.8"
 rayon = "1.10"
