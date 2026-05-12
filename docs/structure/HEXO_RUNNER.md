@@ -39,21 +39,22 @@ runner applies accepted actions through the engine
 ```text
 packages/hexo_runner/
   pyproject.toml
-  python/hexo_runner/
-    __init__.py
-    config.py
-    player.py
-    session.py
-    loop.py
-    budgets.py
-    events.py
-    replay.py
-    results.py
-    modes/
-      match.py
-      selfplay.py
-      evaluation.py
-      batch.py
+  python/
+    hexo_runner/
+      __init__.py
+      config.py
+      player.py
+      session.py
+      loop.py
+      budgets.py
+      events.py
+      replay.py
+      results.py
+      modes/
+        match.py
+        selfplay.py
+        evaluation.py
+        batch.py
 ```
 
 ## Player Contract

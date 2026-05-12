@@ -38,29 +38,36 @@ terminal state, or runner lifecycle.
 ```text
 packages/hexo_model_resnet/
   pyproject.toml
-  python/hexo_model_resnet/
-    __init__.py
-    architecture.py
-    config.py
-    input.py
-    inference.py
-    player.py
-    training.py
-    losses.py
-    augment.py
-    diagnostics.py
-    checkpoints.py
+  Cargo.toml                 # optional, only if this model has Rust code
+  python/
+    hexo_model_resnet/
+      __init__.py
+      architecture.py
+      config.py
+      input.py
+      inference.py
+      player.py
+      training.py
+      losses.py
+      augment.py
+      diagnostics.py
+      checkpoints.py
+  rust/
+    src/
+      lib.rs
 
 packages/hexo_model_*/
   pyproject.toml
-  python/hexo_model_*/
-
-crates/hexgame_model_*/       # optional per model family
+  Cargo.toml                 # optional, only if this model has Rust code
+  python/
+    hexo_model_*/
+  rust/
+    src/
 ```
 
-Most model packages are Python packages. A model-owned Rust crate is reserved
-for representation-coupled search, high-volume preprocessing, or data
-structures that need Rust performance.
+Most model packages are Python-first. When a model owns Rust code for
+representation-coupled search, high-volume preprocessing, or data structures,
+that Rust code lives inside the same `packages/hexo_model_*` directory.
 
 ## Interfaces
 
@@ -80,8 +87,8 @@ To runner:
 
 To utilities:
 
-- shared encoders, MCTS, replay helpers, batching, resource profiles, and
-  telemetry when they match the model's assumptions.
+- shared encoders, MCTS, and replay helpers when they match the model's
+  assumptions.
 
 ## Model Player Flow
 

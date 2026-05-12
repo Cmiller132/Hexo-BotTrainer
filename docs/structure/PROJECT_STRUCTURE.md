@@ -46,28 +46,40 @@ should not hard-code model architectures.
 packages/
   hexo_engine/
     pyproject.toml
-    python/hexo_engine/
+    Cargo.toml
+    python/
+      hexo_engine/
+    rust/
+      src/
 
   hexo_utils/
     pyproject.toml
-    python/hexo_utils/
+    Cargo.toml                 # when shared Rust helpers are needed
+    python/
+      hexo_utils/
+    rust/
+      src/
 
   hexo_runner/
     pyproject.toml
-    python/hexo_runner/
+    python/
+      hexo_runner/
 
   hexo_model_resnet/
     pyproject.toml
-    python/hexo_model_resnet/
+    Cargo.toml                 # optional, only if this model has Rust code
+    python/
+      hexo_model_resnet/
+    rust/
+      src/
 
   hexo_model_*/
     pyproject.toml
-    python/hexo_model_*/
-
-crates/
-  hexgame_engine/
-  hexgame_utils/
-  hexgame_model_*/          # optional per model family
+    Cargo.toml                 # optional, only if this model has Rust code
+    python/
+      hexo_model_*/
+    rust/
+      src/
 
 docs/
   structure/
@@ -80,18 +92,20 @@ tests/
   integration/
 ```
 
-## Rust Layout
+## Package Layout Rule
 
-The Rust crates mirror the same authority boundaries:
+Python and Rust code live together inside the package that owns the behavior.
+There is no separate top-level `crates/` source tree. A repository-level Cargo
+workspace may list package-local manifests, but Rust source stays under the
+owning package.
 
-- `hexgame-engine`: rules, state, legal actions, terminal detection, tactics,
-  identity, and replayable state.
-- `hexgame-utils`: shared encoder/search/replay/runtime helpers that depend on
-  the engine but do not own rules.
-- `hexgame-model-*`: optional model-specific Rust code for representation,
-  search, or high-volume data paths.
+For example, `packages/hexo_engine` owns both:
 
-Python packages expose and compose these Rust crates through narrow APIs.
+- the host-facing Python API under `python/hexo_engine`;
+- the Rust authority implementation under `rust/src`.
+
+The same rule applies to utilities and model packages when they need Rust code.
+If a package is Python-only, it simply omits `Cargo.toml` and `rust/`.
 
 ## Runtime Flow
 

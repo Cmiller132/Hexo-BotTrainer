@@ -35,28 +35,30 @@ Every other package consumes engine facts instead of duplicating game logic.
 ```text
 packages/hexo_engine/
   pyproject.toml
-  python/hexo_engine/
-    __init__.py
-    api.py
-    types.py
-    errors.py
-
-crates/hexgame_engine/
   Cargo.toml
-  src/
-    lib.rs
-    board.rs
-    coord.rs
-    rules.rs
-    state.rs
-    tactics.rs
-    identity.rs
-    snapshot.rs
-    error.rs
+  python/
+    hexo_engine/
+      __init__.py
+      api.py
+      types.py
+      errors.py
+  rust/
+    src/
+      lib.rs
+      board.rs
+      coord.rs
+      rules.rs
+      state.rs
+      tactics.rs
+      identity.rs
+      snapshot.rs
+      error.rs
 ```
 
-The Python package is a thin host-facing wrapper around the Rust authority
-crate. It should not contain a parallel Python rules implementation.
+`packages/hexo_engine` is the single ownership boundary for engine code. The
+Python package is the host-facing API; the Rust code is the rules authority and
+performance core. The Python side should not contain a parallel rules
+implementation.
 
 ## Core API
 
