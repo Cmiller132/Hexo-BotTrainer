@@ -1,8 +1,10 @@
 //! Shared model/search utilities for Hexo models.
 //!
 //! This crate depends on `game_engine` for authoritative rules and state
-//! transitions. It owns neural-network encoding, MCTS, replay samples,
-//! self-play orchestration, and optional Python bindings.
+//! transitions. During the runner redesign it keeps the stable pieces:
+//! neural-network encoding, MCTS, and a minimal optional Python extension.
+//! Replay and self-play modules are placeholders for the next explicit
+//! contract.
 
 pub mod encode;
 pub mod mcts;
@@ -21,7 +23,5 @@ pub use mcts::{
     SearchResult, StateEvaluator, UniformEvaluator,
 };
 pub use position::SearchPosition;
-pub use sample::{normalize_visit_policy, ReplaySample, TurnPhaseLabel, RULES_VERSION};
-pub use selfplay::{
-    attach_final_values, play_selfplay_game, SelfplayConfig, SelfplayError, SelfplayGame,
-};
+pub use sample::{ReplayBatchDraft, REPLAY_SCHEMA_DRAFT};
+pub use selfplay::{SelfplayCycleDraft, SelfplayPlan};

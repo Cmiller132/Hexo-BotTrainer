@@ -5,13 +5,9 @@ build-backend = "hatchling.build"
 [project]
 name = "models-common"
 version = "0.1.0"
-description = "Shared model, inference, replay, and Rust bridge utilities for Hexo models."
+description = "Placeholder Python package for the Rust models_common crate."
 requires-python = ">=3.11"
-dependencies = [
-  "numpy>=1.26",
-  "torch>=2.2",
-  "zstandard>=0.22",
-]
+dependencies = []
 
 [tool.hatch.build.targets.wheel]
 packages = ["python/models_common"]

@@ -5,19 +5,9 @@ build-backend = "hatchling.build"
 [project]
 name = "game-runner"
 version = "0.1.0"
-description = "Python runner for Hexo RL experiments."
+description = "Placeholder Python runner package for the Hexo RL redesign."
 requires-python = ">=3.11"
-dependencies = [
-  "models-common==0.1.0",
-  "numpy>=1.26",
-  "pydantic>=2.7",
-  "pyyaml>=6.0",
-  "rich>=13.7",
-  "torch>=2.2",
-  "tqdm>=4.66",
-  "maturin>=1.5",
-  "zstandard>=0.22",
-]
+dependencies = []
 
 [project.scripts]
 hexo-rl = "game_runner.cli:main"
