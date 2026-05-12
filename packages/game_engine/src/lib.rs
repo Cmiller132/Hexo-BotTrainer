@@ -7,8 +7,9 @@
 pub mod game;
 
 pub use game::{
-    apply_placement, find_threats, hex_distance, is_legal_placement, legal_placements, load_state,
-    ApplyResult, Axis, Board, GameOutcome, HexCoord, HexoState, MoveError, MoveRecord, Placement,
-    PlacementRecord, Player, StateLoadError, StateSnapshot, Stone, Threat, TurnPhase, WindowEntry,
-    WindowId, WindowKey, WindowStore, WindowUpdate, LEGAL_FRONTIER_RADIUS, WINDOW_LEN,
+    apply_placement, find_all_threats, find_threats, hex_distance, is_legal_placement,
+    legal_placements, load_state, ApplyResult, Axis, Board, GameOutcome, HexCoord, HexoState,
+    MoveError, MoveRecord, Placement, PlacementRecord, Player, StateLoadError, StateSnapshot,
+    Stone, Threat, TurnPhase, WindowEntry, WindowKey, WindowStore, WindowUpdate,
+    LEGAL_FRONTIER_RADIUS, WINDOW_LEN,
 };

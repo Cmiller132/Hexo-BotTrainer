@@ -122,7 +122,7 @@ pub struct ApplyResult {
     pub phase_after: TurnPhase,
     /// Terminal outcome if this placement won immediately.
     pub outcome: Option<GameOutcome>,
-    /// Window ids changed by this placement plus any threat/win ids.
+    /// Windows changed by this placement plus any threat/win windows.
     pub window_update: WindowUpdate,
 }
 

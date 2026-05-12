@@ -1,14 +1,13 @@
 //! Incremental six-cell window tracking.
 //!
-//! Every possible win or threat lives inside a length-6 straight window. A new
-//! placement only affects the 18 windows that contain that coordinate:
-//! `3 axes * 6 offsets`. This module stores those windows once and maintains
-//! a lightweight threat index so callers do not need to rescan the whole board.
+//! A placement touches exactly 18 length-6 windows: 3 axes times 6 possible
+//! offsets inside the window. The store keeps those windows incrementally so
+//! wins and threats can be read from compact six-bit masks.
 
 use super::board::Board;
-use super::coord::HexCoord;
+use super::coord::{hex_distance, HexCoord};
 use super::state::Player;
-use ahash::{AHashMap, AHashSet};
+use ahash::AHashMap;
 use serde::{Deserialize, Serialize};
 
 /// Number of cells in a win/threat window.
@@ -73,60 +72,59 @@ impl WindowKey {
         }
         cells
     }
-}
 
-/// Stable id into `WindowStore.entries`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct WindowId(pub u32);
+    /// True when `coord` is one of this window's six cells.
+    pub fn contains(self, coord: HexCoord) -> bool {
+        self.cells().contains(&coord)
+    }
 
-impl WindowId {
-    fn index(self) -> usize {
-        self.0 as usize
+    /// True when two windows share at least one cell.
+    pub fn intersects(self, other: Self) -> bool {
+        self.cells().iter().any(|cell| other.contains(*cell))
+    }
+
+    /// True when the windows do not overlap but have adjacent cells.
+    pub fn touches(self, other: Self) -> bool {
+        if self.intersects(other) {
+            return false;
+        }
+
+        let left_cells = self.cells();
+        let right_cells = other.cells();
+        left_cells.iter().any(|left| {
+            right_cells
+                .iter()
+                .any(|right| hex_distance(*left, *right) == 1)
+        })
+    }
+
+    /// True when two windows either overlap or have adjacent cells.
+    pub fn intersects_or_touches(self, other: Self) -> bool {
+        self.intersects(other) || self.touches(other)
     }
 }
 
-/// Compact state for one length-6 window.
-///
-/// A window stores only two six-bit masks. Coordinates are derived from
-/// `WindowKey` when needed, which avoids duplicating six coordinates across many
-/// overlapping windows.
+/// Read view of one length-6 window.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WindowEntry {
-    /// Canonical start and axis.
     key: WindowKey,
-    /// Bits occupied by Player 0.
-    p0_mask: u8,
-    /// Bits occupied by Player 1.
-    p1_mask: u8,
+    masks: [u8; 2],
 }
 
 impl WindowEntry {
-    fn new(key: WindowKey) -> Self {
-        Self {
-            key,
-            p0_mask: 0,
-            p1_mask: 0,
-        }
-    }
-
     /// Canonical start and axis.
     pub fn key(self) -> WindowKey {
         self.key
     }
 
-    /// Mask for one player's stones.
-    pub fn mask(self, player: Player) -> u8 {
-        match player {
-            Player::Player0 => self.p0_mask,
-            Player::Player1 => self.p1_mask,
-        }
+    /// All six coordinates in this window.
+    pub fn cells(self) -> [HexCoord; WINDOW_LEN as usize] {
+        self.key.cells()
     }
 
-    fn mask_mut(&mut self, player: Player) -> &mut u8 {
-        match player {
-            Player::Player0 => &mut self.p0_mask,
-            Player::Player1 => &mut self.p1_mask,
-        }
+    /// Mask for one player's stones.
+    pub fn mask(self, player: Player) -> u8 {
+        self.masks[player.index()]
     }
 
     /// Number of stones the player has in this window.
@@ -136,7 +134,7 @@ impl WindowEntry {
 
     /// All occupied cells, regardless of owner.
     pub fn occupied_mask(self) -> u8 {
-        self.p0_mask | self.p1_mask
+        self.masks[Player::Player0.index()] | self.masks[Player::Player1.index()]
     }
 
     /// Empty positions inside the six-cell window.
@@ -144,31 +142,91 @@ impl WindowEntry {
         !self.occupied_mask() & WINDOW_MASK
     }
 
+    /// Coordinates occupied by `player` inside this window.
+    pub fn stone_cells(self, player: Player) -> Vec<HexCoord> {
+        self.cells_for_mask(self.mask(player))
+    }
+
+    /// Empty coordinates inside this window.
+    pub fn empty_cells(self) -> Vec<HexCoord> {
+        self.cells_for_mask(self.empty_mask())
+    }
+
+    /// All occupied coordinates with their owning players.
+    pub fn occupied_cells(self) -> Vec<(HexCoord, Player)> {
+        let mut cells = Vec::with_capacity(self.occupied_mask().count_ones() as usize);
+        for player in [Player::Player0, Player::Player1] {
+            cells.extend(
+                self.stone_cells(player)
+                    .into_iter()
+                    .map(|coord| (coord, player)),
+            );
+        }
+        cells
+    }
+
     /// Player who owns this active window, if it is active.
-    ///
-    /// Active means at least one stone from exactly one player and zero stones
-    /// from the other player.
     pub fn active_player(self) -> Option<Player> {
-        match (self.p0_mask != 0, self.p1_mask != 0) {
+        match (
+            self.masks[Player::Player0.index()] != 0,
+            self.masks[Player::Player1.index()] != 0,
+        ) {
             (true, false) => Some(Player::Player0),
             (false, true) => Some(Player::Player1),
             _ => None,
         }
     }
 
-    /// True when this is an active window for `player`.
-    pub fn is_active_for(self, player: Player) -> bool {
-        self.active_player() == Some(player)
+    /// True when the window contains stones from exactly one player.
+    pub fn is_active(self) -> bool {
+        self.active_player().is_some()
+    }
+
+    /// Player who owns this threat, if the window is currently a threat.
+    pub fn threat_player(self) -> Option<Player> {
+        let player = self.active_player()?;
+        (self.count(player) >= 4).then_some(player)
+    }
+
+    /// True when this window has at least four stones from one player and none
+    /// from the other.
+    pub fn is_threat(self) -> bool {
+        self.threat_player().is_some()
     }
 
     /// True when this active window has at least four stones for `player`.
     pub fn is_threat_for(self, player: Player) -> bool {
-        self.is_active_for(player) && self.count(player) >= 4
+        self.threat_player() == Some(player)
     }
 
     /// True when this active window is completely filled by `player`.
     pub fn is_win_for(self, player: Player) -> bool {
-        self.is_active_for(player) && self.count(player) == WINDOW_LEN as u8
+        self.active_player() == Some(player) && self.count(player) == WINDOW_LEN as u8
+    }
+
+    /// True when this window shares at least one cell with `other`.
+    pub fn intersects(self, other: Self) -> bool {
+        self.key.intersects(other.key)
+    }
+
+    /// True when this window does not overlap `other` but has adjacent cells.
+    pub fn touches(self, other: Self) -> bool {
+        self.key.touches(other.key)
+    }
+
+    /// True when this window either overlaps `other` or has adjacent cells.
+    pub fn intersects_or_touches(self, other: Self) -> bool {
+        self.key.intersects_or_touches(other.key)
+    }
+
+    fn cells_for_mask(self, mask: u8) -> Vec<HexCoord> {
+        let mut cells = Vec::with_capacity(mask.count_ones() as usize);
+        for index in 0..WINDOW_LEN as u8 {
+            if mask & (1u8 << index) != 0 {
+                cells.push(self.key.coord_at(index));
+            }
+        }
+        cells
     }
 }
 
@@ -176,11 +234,11 @@ impl WindowEntry {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct WindowUpdate {
     /// All windows touched by the placement.
-    pub changed: Vec<WindowId>,
+    pub changed: Vec<WindowKey>,
     /// Changed windows that are now threats for the placed player.
-    pub threats: Vec<WindowId>,
+    pub threats: Vec<WindowKey>,
     /// Changed windows that are now wins for the placed player.
-    pub winning_windows: Vec<WindowId>,
+    pub winning_windows: Vec<WindowKey>,
 }
 
 impl WindowUpdate {
@@ -195,22 +253,10 @@ impl WindowUpdate {
     }
 }
 
-/// Maintained index of all non-empty windows.
-#[derive(Clone, Debug)]
+/// Maintained index of all touched windows.
+#[derive(Clone, Debug, Default)]
 pub struct WindowStore {
-    entries: Vec<WindowEntry>,
-    by_key: AHashMap<WindowKey, WindowId>,
-    threat_by_player: [AHashSet<WindowId>; 2],
-}
-
-impl Default for WindowStore {
-    fn default() -> Self {
-        Self {
-            entries: Vec::new(),
-            by_key: AHashMap::new(),
-            threat_by_player: [AHashSet::new(), AHashSet::new()],
-        }
-    }
+    masks_by_key: AHashMap<WindowKey, [u8; 2]>,
 }
 
 impl WindowStore {
@@ -219,43 +265,42 @@ impl WindowStore {
         Self::default()
     }
 
-    /// Number of known non-empty/touched windows.
+    /// Number of known/touched windows.
     pub fn len(&self) -> usize {
-        self.entries.len()
+        self.masks_by_key.len()
     }
 
     /// True when no windows have been touched yet.
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-
-    /// Fetch a window entry by id.
-    pub fn entry(&self, id: WindowId) -> Option<&WindowEntry> {
-        self.entries.get(id.index())
-    }
-
-    /// Find the id for a canonical window key, if that window has been touched.
-    pub fn id_for_key(&self, key: WindowKey) -> Option<WindowId> {
-        self.by_key.get(&key).copied()
+        self.masks_by_key.is_empty()
     }
 
     /// Fetch a window entry by canonical key.
-    pub fn entry_by_key(&self, key: WindowKey) -> Option<(WindowId, &WindowEntry)> {
-        let id = self.id_for_key(key)?;
-        self.entry(id).map(|entry| (id, entry))
+    pub fn entry(&self, key: WindowKey) -> Option<WindowEntry> {
+        self.masks_by_key
+            .get(&key)
+            .copied()
+            .map(|masks| WindowEntry { key, masks })
     }
 
     /// Iterate all known windows.
-    pub fn entries(&self) -> impl Iterator<Item = (WindowId, &WindowEntry)> {
-        self.entries
-            .iter()
-            .enumerate()
-            .map(|(index, entry)| (WindowId(index as u32), entry))
+    pub fn entries(&self) -> impl Iterator<Item = WindowEntry> + '_ {
+        self.masks_by_key.iter().map(|(key, masks)| WindowEntry {
+            key: *key,
+            masks: *masks,
+        })
     }
 
-    /// Threat windows for one player.
-    fn threat_windows(&self, player: Player) -> impl Iterator<Item = WindowId> + '_ {
-        self.threat_by_player[player.index()].iter().copied()
+    /// Current threat windows for one player.
+    pub fn threat_entries(&self, player: Player) -> impl Iterator<Item = WindowEntry> + '_ {
+        self.entries()
+            .filter(move |entry| (*entry).is_threat_for(player))
+    }
+
+    /// Current threat windows for both players.
+    pub fn threats(&self) -> impl Iterator<Item = (Player, WindowEntry)> + '_ {
+        self.entries()
+            .filter_map(|entry| entry.threat_player().map(|player| (player, entry)))
     }
 
     /// Update the 18 windows affected by one newly placed stone.
@@ -264,63 +309,30 @@ impl WindowStore {
 
         for axis in Axis::ALL {
             for offset in 0..WINDOW_LEN as u8 {
-                let start = coord - axis.vector().scale(offset as i16);
-                let key = WindowKey { start, axis };
-                let id = self.get_or_create(key);
+                let (key, bit) = window_containing(coord, axis, offset);
+                let masks = self.masks_by_key.entry(key).or_insert([0; 2]);
+                debug_assert_eq!((masks[0] | masks[1]) & bit, 0);
+                masks[player.index()] |= bit;
 
-                self.remove_indices(id);
+                let entry = WindowEntry { key, masks: *masks };
+                update.changed.push(key);
 
-                let bit = 1u8 << offset;
-                let entry = &mut self.entries[id.index()];
-                *entry.mask_mut(player) |= bit;
-
-                self.add_indices(id);
-
-                update.changed.push(id);
-                if self.entries[id.index()].is_threat_for(player) {
-                    update.threats.push(id);
+                if entry.is_threat_for(player) {
+                    update.threats.push(key);
                 }
-                if self.entries[id.index()].is_win_for(player) {
-                    update.winning_windows.push(id);
+                if entry.is_win_for(player) {
+                    update.winning_windows.push(key);
                 }
             }
         }
 
         update
     }
+}
 
-    fn get_or_create(&mut self, key: WindowKey) -> WindowId {
-        if let Some(id) = self.by_key.get(&key).copied() {
-            return id;
-        }
-
-        let id = WindowId(self.entries.len() as u32);
-        self.entries.push(WindowEntry::new(key));
-        self.by_key.insert(key, id);
-        id
-    }
-
-    fn remove_indices(&mut self, id: WindowId) {
-        if self.entry(id).is_none() {
-            return;
-        }
-
-        for player in [Player::Player0, Player::Player1] {
-            self.threat_by_player[player.index()].remove(&id);
-        }
-    }
-
-    fn add_indices(&mut self, id: WindowId) {
-        let Some(entry) = self.entry(id).copied() else {
-            return;
-        };
-
-        if let Some(player) = entry.active_player() {
-            if entry.is_threat_for(player) {
-                self.threat_by_player[player.index()].insert(id);
-            }
-        }
-    }
+fn window_containing(coord: HexCoord, axis: Axis, offset: u8) -> (WindowKey, u8) {
+    let start = coord - axis.vector().scale(offset as i16);
+    (WindowKey { start, axis }, 1u8 << offset)
 }
 
 /// Serializable/debug-friendly view of an active threat window.
@@ -328,45 +340,209 @@ impl WindowStore {
 pub struct Threat {
     /// Player who owns the stones in this window.
     pub player: Player,
-    /// Id of the stored window.
-    pub id: WindowId,
     /// Canonical start/axis of the window.
     pub key: WindowKey,
     /// The six coordinates that make up the window.
     pub cells: [HexCoord; WINDOW_LEN as usize],
     /// Player stone positions as a six-bit mask.
     pub stone_mask: u8,
+    /// Player stone coordinates inside the window.
+    pub stone_cells: Vec<HexCoord>,
     /// Empty positions as a six-bit mask.
     pub empty_mask: u8,
+    /// Empty coordinates inside the window.
+    pub empty_cells: Vec<HexCoord>,
     /// Number of `player` stones in the window. Always at least four.
     pub own_count: u8,
 }
 
-/// Return current threats for `player` from the board's maintained index.
+/// Return current threats for `player` from the board's maintained windows.
 pub fn find_threats(board: &Board, player: Player) -> Vec<Threat> {
     let mut threats: Vec<_> = board
         .windows()
-        .threat_windows(player)
-        .filter_map(|id| {
-            let entry = board.windows().entry(id).copied()?;
-            Some(Threat {
-                player,
-                id,
-                key: entry.key(),
-                cells: entry.key().cells(),
-                stone_mask: entry.mask(player),
-                empty_mask: entry.empty_mask(),
-                own_count: entry.count(player),
-            })
+        .threat_entries(player)
+        .map(|entry| Threat {
+            player,
+            key: entry.key(),
+            cells: entry.cells(),
+            stone_mask: entry.mask(player),
+            stone_cells: entry.stone_cells(player),
+            empty_mask: entry.empty_mask(),
+            empty_cells: entry.empty_cells(),
+            own_count: entry.count(player),
         })
         .collect();
+    sort_threats(&mut threats);
+    threats
+}
+
+/// Return current threats for both players from the board's maintained windows.
+pub fn find_all_threats(board: &Board) -> Vec<Threat> {
+    let mut threats: Vec<_> = board
+        .windows()
+        .threats()
+        .map(|(player, entry)| Threat {
+            player,
+            key: entry.key(),
+            cells: entry.cells(),
+            stone_mask: entry.mask(player),
+            stone_cells: entry.stone_cells(player),
+            empty_mask: entry.empty_mask(),
+            empty_cells: entry.empty_cells(),
+            own_count: entry.count(player),
+        })
+        .collect();
+    sort_threats(&mut threats);
+    threats
+}
+
+fn sort_threats(threats: &mut [Threat]) {
     threats.sort_by_key(|threat| {
         (
+            threat.player.index(),
             threat.key.axis.index(),
             threat.key.start.q,
             threat.key.start.r,
-            threat.id.0,
         )
     });
-    threats
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn place_q_line(store: &mut WindowStore, player: Player, start: i16, end: i16) {
+        for q in start..=end {
+            store.update_for_placement(HexCoord::new(q, 0), player);
+        }
+    }
+
+    #[test]
+    fn placement_updates_only_containing_windows() {
+        let mut store = WindowStore::new();
+
+        let update = store.update_for_placement(HexCoord::ZERO, Player::Player0);
+
+        assert_eq!(update.changed.len(), 18);
+        assert_eq!(store.len(), 18);
+        assert!(
+            store
+                .entry(WindowKey {
+                    start: HexCoord::ZERO,
+                    axis: Axis::Q,
+                })
+                .unwrap()
+                .mask(Player::Player0)
+                & 1
+                != 0
+        );
+    }
+
+    #[test]
+    fn threat_entries_scan_live_windows() {
+        let mut store = WindowStore::new();
+        place_q_line(&mut store, Player::Player0, 0, 3);
+
+        let threats: Vec<_> = store.threat_entries(Player::Player0).collect();
+
+        assert!(!threats.is_empty());
+        assert!(threats
+            .iter()
+            .all(|entry| (*entry).is_threat_for(Player::Player0)));
+        assert_eq!(store.threat_entries(Player::Player1).count(), 0);
+    }
+
+    #[test]
+    fn blocked_windows_are_not_threats() {
+        let mut store = WindowStore::new();
+        place_q_line(&mut store, Player::Player0, 0, 3);
+
+        let key = WindowKey {
+            start: HexCoord::new(-1, 0),
+            axis: Axis::Q,
+        };
+        assert!(store.entry(key).unwrap().is_threat_for(Player::Player0));
+
+        store.update_for_placement(HexCoord::new(4, 0), Player::Player1);
+
+        assert!(!store.entry(key).unwrap().is_threat_for(Player::Player0));
+        assert!(!store
+            .threat_entries(Player::Player0)
+            .any(|entry| entry.key() == key));
+    }
+
+    #[test]
+    fn window_entries_expose_active_state_counts_and_cells() {
+        let mut store = WindowStore::new();
+        place_q_line(&mut store, Player::Player0, 0, 3);
+
+        let entry = store
+            .entry(WindowKey {
+                start: HexCoord::new(-1, 0),
+                axis: Axis::Q,
+            })
+            .unwrap();
+
+        assert!(entry.is_active());
+        assert_eq!(entry.active_player(), Some(Player::Player0));
+        assert!(entry.is_threat());
+        assert_eq!(entry.threat_player(), Some(Player::Player0));
+        assert_eq!(entry.count(Player::Player0), 4);
+        assert_eq!(
+            entry.stone_cells(Player::Player0),
+            vec![
+                HexCoord::new(0, 0),
+                HexCoord::new(1, 0),
+                HexCoord::new(2, 0),
+                HexCoord::new(3, 0),
+            ]
+        );
+        assert_eq!(
+            entry.empty_cells(),
+            vec![HexCoord::new(-1, 0), HexCoord::new(4, 0)]
+        );
+    }
+
+    #[test]
+    fn windows_can_report_overlap_and_touching() {
+        let window = WindowKey {
+            start: HexCoord::ZERO,
+            axis: Axis::Q,
+        };
+        let overlapping = WindowKey {
+            start: HexCoord::new(3, 0),
+            axis: Axis::Q,
+        };
+        let touching = WindowKey {
+            start: HexCoord::new(6, 0),
+            axis: Axis::Q,
+        };
+        let separate = WindowKey {
+            start: HexCoord::new(8, 8),
+            axis: Axis::Q,
+        };
+
+        assert!(window.intersects(overlapping));
+        assert!(!window.touches(overlapping));
+        assert!(!window.intersects(touching));
+        assert!(window.touches(touching));
+        assert!(window.intersects_or_touches(touching));
+        assert!(!window.intersects_or_touches(separate));
+    }
+
+    #[test]
+    fn store_can_iterate_threats_for_both_players() {
+        let mut store = WindowStore::new();
+        place_q_line(&mut store, Player::Player0, 0, 3);
+        place_q_line(&mut store, Player::Player1, 20, 23);
+
+        let threats: Vec<_> = store.threats().collect();
+
+        assert!(threats
+            .iter()
+            .any(|(player, entry)| *player == Player::Player0 && (*entry).is_threat()));
+        assert!(threats
+            .iter()
+            .any(|(player, entry)| *player == Player::Player1 && (*entry).is_threat()));
+    }
 }
