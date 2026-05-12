@@ -1,8 +1,8 @@
 """Session setup contracts.
 
-The runner session binds players, seeds, scenarios, budgets, and run metadata
-before any game loop starts. Engine state creation and player initialization
-hang off this boundary.
+The runner session binds players, seeds, scenarios, and run metadata before any
+game loop starts. Engine state creation and player initialization hang off this
+boundary.
 """
 
 from __future__ import annotations
@@ -18,7 +18,6 @@ class SessionSpec:
     players: Sequence[object]
     seed: int | None = None
     scenario: object | None = None
-    budget: object | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
 

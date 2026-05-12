@@ -26,7 +26,7 @@ Every other package consumes engine facts instead of duplicating game logic.
 - Neural network architecture.
 - Tensor, graph, or token construction.
 - Training targets, losses, optimizers, or checkpoints.
-- Runner lifecycle, budgets, timeouts, or player orchestration.
+- Runner lifecycle, player orchestration, or run results.
 - Model-specific search policy.
 - Dashboards, experiment management, or storage backends.
 

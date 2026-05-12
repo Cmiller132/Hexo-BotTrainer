@@ -115,7 +115,7 @@ runner asks a player for an action
 player may use model and utility code internally
 runner submits action to engine
 engine validates and applies the action
-runner records events, replay, timings, and diagnostics
+runner records events, replay, and diagnostics
 model packages turn records into training examples
 ```
 
@@ -125,7 +125,7 @@ Replay and training data are layered by ownership:
 
 - engine history: accepted actions, state snapshots, terminal result,
   rules/version metadata;
-- runner metadata: players, seeds, budgets, timings, execution outcome;
+- runner metadata: players, seeds, and execution outcome;
 - model diagnostics: policy, value, search, or architecture-specific metadata;
 - model training records: model-specific examples, masks, targets, and weights.
 

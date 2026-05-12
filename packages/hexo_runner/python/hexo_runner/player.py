@@ -28,7 +28,6 @@ class DecisionRequest:
     current_player: object
     state: object
     legal_actions: Sequence[object]
-    budget: object | None = None
     tactics: object | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
@@ -38,7 +37,6 @@ class DecisionResult:
     """Participant response consumed by the runner."""
 
     action: object | None
-    elapsed_ms: float | None = None
     diagnostics: Mapping[str, Any] = field(default_factory=dict)
     refusal: str | None = None
 

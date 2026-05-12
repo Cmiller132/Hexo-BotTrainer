@@ -17,7 +17,6 @@ class GameStatus(StrEnum):
     COMPLETED = "completed"
     FORFEITED = "forfeited"
     ABORTED = "aborted"
-    TIMED_OUT = "timed_out"
 
 
 @dataclass(frozen=True, slots=True)

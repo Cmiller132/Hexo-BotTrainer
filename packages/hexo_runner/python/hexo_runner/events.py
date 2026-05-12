@@ -1,7 +1,7 @@
 """Runner event shapes.
 
 Events are emitted around player initialization, decision requests, accepted
-engine transitions, timeouts, forfeits, and final summaries. They carry runner
+engine transitions, player errors, and final summaries. They carry runner
 metadata and opaque player/model diagnostics without interpreting them.
 """
 

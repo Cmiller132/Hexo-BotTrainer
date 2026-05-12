@@ -9,8 +9,8 @@ through the engine, and records what happened.
 Its central abstraction is:
 
 ```text
-participant receives decision request + budget
-participant returns action | refusal | error | timeout
+participant receives decision request
+participant returns action | refusal | error
 runner applies accepted actions through the engine
 ```
 
@@ -19,8 +19,6 @@ runner applies accepted actions through the engine
 - Session setup from players, seeds, scenarios, and run options.
 - The game loop.
 - Player lifecycle.
-- Per-decision and per-game budgets.
-- Timeout, cancellation, abort, and forfeit policy.
 - Replay and event emission.
 - Result summaries.
 - Self-play, evaluation, direct match, smoke test, and batch run modes.
@@ -46,7 +44,6 @@ packages/hexo_runner/
       player.py
       session.py
       loop.py
-      budgets.py
       events.py
       replay.py
       results.py
@@ -80,13 +77,11 @@ A request contains:
 - engine snapshot or state reference,
 - legal actions,
 - optional tactical summary,
-- budget information,
 - seed and provenance metadata.
 
 A response contains:
 
 - chosen action, or a controlled failure,
-- elapsed decision time,
 - optional opaque diagnostics.
 
 Diagnostics are transported by the runner but owned by the player/model that
@@ -101,7 +96,7 @@ create or load engine state
 while not terminal:
     ask engine for current context
     ask active player for a decision
-    handle timeout/error policy if needed
+    handle player refusal or error if needed
     submit action to engine
     emit events and replay records
 close players
