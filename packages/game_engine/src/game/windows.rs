@@ -9,9 +9,13 @@ use super::coord::{hex_distance, HexCoord};
 use super::state::Player;
 use ahash::AHashMap;
 use serde::{Deserialize, Serialize};
+use std::{fmt, ops::Deref};
 
 /// Number of cells in a win/threat window.
 pub const WINDOW_LEN: i16 = 6;
+
+/// Number of six-cell windows affected by one placement.
+pub const WINDOWS_PER_PLACEMENT: usize = 3 * WINDOW_LEN as usize;
 
 const WINDOW_MASK: u8 = 0b0011_1111;
 
@@ -230,15 +234,97 @@ impl WindowEntry {
     }
 }
 
+const EMPTY_WINDOW_KEY: WindowKey = WindowKey {
+    start: HexCoord::ZERO,
+    axis: Axis::Q,
+};
+
+/// Fixed-capacity list of window keys affected by one placement.
+///
+/// A placement can affect at most 18 windows, so this keeps `WindowUpdate`
+/// stack-backed while still exposing slice-like read access.
+#[derive(Clone, Eq)]
+pub struct WindowKeyList {
+    keys: [WindowKey; WINDOWS_PER_PLACEMENT],
+    len: u8,
+}
+
+impl WindowKeyList {
+    /// Create an empty list.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Number of stored keys.
+    pub fn len(&self) -> usize {
+        self.len as usize
+    }
+
+    /// True when no keys are stored.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Stored keys as a slice.
+    pub fn as_slice(&self) -> &[WindowKey] {
+        &self.keys[..self.len()]
+    }
+
+    fn push(&mut self, key: WindowKey) {
+        assert!(
+            self.len() < WINDOWS_PER_PLACEMENT,
+            "window key list capacity exceeded"
+        );
+        let index = self.len();
+        self.keys[index] = key;
+        self.len += 1;
+    }
+}
+
+impl Default for WindowKeyList {
+    fn default() -> Self {
+        Self {
+            keys: [EMPTY_WINDOW_KEY; WINDOWS_PER_PLACEMENT],
+            len: 0,
+        }
+    }
+}
+
+impl fmt::Debug for WindowKeyList {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list().entries(self.as_slice()).finish()
+    }
+}
+
+impl PartialEq for WindowKeyList {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
+impl AsRef<[WindowKey]> for WindowKeyList {
+    fn as_ref(&self) -> &[WindowKey] {
+        self.as_slice()
+    }
+}
+
+impl Deref for WindowKeyList {
+    type Target = [WindowKey];
+
+    fn deref(&self) -> &Self::Target {
+        self.as_slice()
+    }
+}
+
 /// Incremental result produced by one placement's window updates.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct WindowUpdate {
     /// All windows touched by the placement.
-    pub changed: Vec<WindowKey>,
+    pub changed: WindowKeyList,
     /// Changed windows that are now threats for the placed player.
-    pub threats: Vec<WindowKey>,
+    pub threats: WindowKeyList,
     /// Changed windows that are now wins for the placed player.
-    pub winning_windows: Vec<WindowKey>,
+    pub winning_windows: WindowKeyList,
 }
 
 impl WindowUpdate {
@@ -304,7 +390,7 @@ impl WindowStore {
     }
 
     /// Update the 18 windows affected by one newly placed stone.
-    pub fn update_for_placement(&mut self, coord: HexCoord, player: Player) -> WindowUpdate {
+    pub(crate) fn update_for_placement(&mut self, coord: HexCoord, player: Player) -> WindowUpdate {
         let mut update = WindowUpdate::default();
 
         for axis in Axis::ALL {
@@ -410,11 +496,39 @@ fn sort_threats(threats: &mut [Threat]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::state::{apply_placement, HexoState, Placement};
+
+    fn place_axis_line(
+        store: &mut WindowStore,
+        player: Player,
+        start: HexCoord,
+        axis: Axis,
+        count: i16,
+    ) {
+        for index in 0..count {
+            store.update_for_placement(start + axis.vector().scale(index), player);
+        }
+    }
 
     fn place_q_line(store: &mut WindowStore, player: Player, start: i16, end: i16) {
         for q in start..=end {
             store.update_for_placement(HexCoord::new(q, 0), player);
         }
+    }
+
+    fn line_coord(axis: Axis, index: i16) -> HexCoord {
+        HexCoord::ZERO + axis.vector().scale(index)
+    }
+
+    fn side_vector(axis: Axis) -> HexCoord {
+        match axis {
+            Axis::Q | Axis::QR => Axis::R.vector(),
+            Axis::R => Axis::Q.vector(),
+        }
+    }
+
+    fn side_coord(axis: Axis, row: i16, index: i16) -> HexCoord {
+        side_vector(axis).scale(row) + axis.vector().scale(index)
     }
 
     #[test]
@@ -423,8 +537,8 @@ mod tests {
 
         let update = store.update_for_placement(HexCoord::ZERO, Player::Player0);
 
-        assert_eq!(update.changed.len(), 18);
-        assert_eq!(store.len(), 18);
+        assert_eq!(update.changed.len(), WINDOWS_PER_PLACEMENT);
+        assert_eq!(store.len(), WINDOWS_PER_PLACEMENT);
         assert!(
             store
                 .entry(WindowKey {
@@ -450,6 +564,98 @@ mod tests {
             .iter()
             .all(|entry| (*entry).is_threat_for(Player::Player0)));
         assert_eq!(store.threat_entries(Player::Player1).count(), 0);
+    }
+
+    #[test]
+    fn threats_are_detected_on_all_axes() {
+        for axis in Axis::ALL {
+            let mut store = WindowStore::new();
+            place_axis_line(&mut store, Player::Player0, HexCoord::ZERO, axis, 4);
+
+            let entry = store
+                .entry(WindowKey {
+                    start: HexCoord::ZERO,
+                    axis,
+                })
+                .unwrap();
+
+            assert!(entry.is_threat_for(Player::Player0), "axis {:?}", axis);
+            assert_eq!(
+                entry.stone_cells(Player::Player0),
+                (0..4)
+                    .map(|index| line_coord(axis, index))
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn apply_placement_wins_on_all_axes() {
+        for axis in Axis::ALL {
+            let mut state = HexoState::new();
+            let opponent = [
+                side_coord(axis, 1, 0),
+                side_coord(axis, 1, 2),
+                side_coord(axis, 1, 4),
+                side_coord(axis, 2, 0),
+                side_coord(axis, 2, 2),
+                side_coord(axis, 2, 4),
+            ];
+
+            apply_placement(
+                &mut state,
+                Placement {
+                    coord: line_coord(axis, 0),
+                },
+            )
+            .unwrap();
+            apply_placement(&mut state, Placement { coord: opponent[0] }).unwrap();
+            apply_placement(&mut state, Placement { coord: opponent[1] }).unwrap();
+            apply_placement(
+                &mut state,
+                Placement {
+                    coord: line_coord(axis, 1),
+                },
+            )
+            .unwrap();
+            apply_placement(
+                &mut state,
+                Placement {
+                    coord: line_coord(axis, 2),
+                },
+            )
+            .unwrap();
+            apply_placement(&mut state, Placement { coord: opponent[2] }).unwrap();
+            apply_placement(&mut state, Placement { coord: opponent[3] }).unwrap();
+            apply_placement(
+                &mut state,
+                Placement {
+                    coord: line_coord(axis, 3),
+                },
+            )
+            .unwrap();
+            apply_placement(
+                &mut state,
+                Placement {
+                    coord: line_coord(axis, 4),
+                },
+            )
+            .unwrap();
+            apply_placement(&mut state, Placement { coord: opponent[4] }).unwrap();
+            apply_placement(&mut state, Placement { coord: opponent[5] }).unwrap();
+
+            let result = apply_placement(
+                &mut state,
+                Placement {
+                    coord: line_coord(axis, 5),
+                },
+            )
+            .unwrap();
+
+            assert!(result.window_update.has_win(), "axis {:?}", axis);
+            assert_eq!(result.outcome.unwrap().winner, Player::Player0);
+            assert!(state.is_terminal(), "axis {:?}", axis);
+        }
     }
 
     #[test]

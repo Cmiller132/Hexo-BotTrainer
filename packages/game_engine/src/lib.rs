@@ -10,6 +10,6 @@ pub use game::{
     apply_placement, find_all_threats, find_threats, hex_distance, is_legal_placement,
     legal_placements, load_state, ApplyResult, Axis, Board, GameOutcome, HexCoord, HexoState,
     MoveError, MoveRecord, Placement, PlacementRecord, Player, StateLoadError, StateSnapshot,
-    Stone, Threat, TurnPhase, WindowEntry, WindowKey, WindowStore, WindowUpdate,
-    LEGAL_FRONTIER_RADIUS, WINDOW_LEN,
+    Stone, Threat, TurnPhase, WindowEntry, WindowKey, WindowKeyList, WindowStore, WindowUpdate,
+    LEGAL_FRONTIER_RADIUS, WINDOWS_PER_PLACEMENT, WINDOW_LEN,
 };

@@ -19,6 +19,6 @@ pub use state::{
     PlacementRecord, Player, StateLoadError, StateSnapshot, TurnPhase,
 };
 pub use windows::{
-    find_all_threats, find_threats, Axis, Threat, WindowEntry, WindowKey, WindowStore,
-    WindowUpdate, WINDOW_LEN,
+    find_all_threats, find_threats, Axis, Threat, WindowEntry, WindowKey, WindowKeyList,
+    WindowStore, WindowUpdate, WINDOWS_PER_PLACEMENT, WINDOW_LEN,
 };
