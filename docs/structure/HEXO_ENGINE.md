@@ -1,0 +1,112 @@
+# HEXO_ENGINE
+
+## Purpose
+
+`hexo-engine` is the rules and state authority for Hexo. It defines the
+canonical game state, legal transitions, terminal detection, replayable history,
+and rules-derived tactical facts.
+
+Every other package consumes engine facts instead of duplicating game logic.
+
+## Owns
+
+- Canonical game state.
+- Player to act and turn phase.
+- Legal action generation.
+- Move validation and state transitions.
+- Terminal detection and winner.
+- Move history and replayable snapshots.
+- Rules-derived tactical facts, such as threats or immediate wins.
+- Stable state/action identity for caches, replay checks, search tables, and
+  diagnostics.
+- Clear errors for illegal, stale, malformed, or incompatible inputs.
+
+## Does Not Own
+
+- Neural network architecture.
+- Tensor, graph, or token construction.
+- Training targets, losses, optimizers, or checkpoints.
+- Runner lifecycle, budgets, timeouts, or player orchestration.
+- Model-specific search policy.
+- Dashboards, experiment management, or storage backends.
+
+## Package Layout
+
+```text
+packages/hexo_engine/
+  pyproject.toml
+  python/hexo_engine/
+    __init__.py
+    api.py
+    types.py
+    errors.py
+
+crates/hexgame_engine/
+  Cargo.toml
+  src/
+    lib.rs
+    board.rs
+    coord.rs
+    rules.rs
+    state.rs
+    tactics.rs
+    identity.rs
+    snapshot.rs
+    error.rs
+```
+
+The Python package is a thin host-facing wrapper around the Rust authority
+crate. It should not contain a parallel Python rules implementation.
+
+## Core API
+
+```text
+new_game() -> state
+load_snapshot(snapshot) -> state
+snapshot(state) -> snapshot
+current_player(state) -> player
+turn_phase(state) -> phase
+legal_actions(state) -> list[action]
+validate_action(state, action) -> ok | legality_error
+apply_action(state, action) -> transition_result | legality_error
+terminal(state) -> terminal_result | none
+tactics(state) -> tactical_summary
+state_id(state) -> stable identity
+action_id(action) -> stable identity
+```
+
+## Interfaces
+
+To the runner:
+
+- initial or scenario state,
+- active player,
+- legal action context,
+- action validation and application,
+- transition result,
+- terminal result,
+- replayable history and state snapshots.
+
+To models:
+
+- canonical state context,
+- legal actions and action identities,
+- optional tactical summaries,
+- terminal result and replay history for target construction.
+
+To utilities:
+
+- state and legal action APIs for search, encoding, replay validation, and
+  test harnesses.
+
+## Tests
+
+Engine tests should focus on rule correctness and determinism:
+
+- legality and illegal move errors,
+- turn phase transitions,
+- terminal detection,
+- snapshot round trips,
+- replay from action history,
+- state/action identity stability,
+- tactical payload consistency with legal actions.
