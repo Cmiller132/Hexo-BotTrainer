@@ -115,7 +115,7 @@ runner asks a player for an action
 player may use model and utility code internally
 runner submits action to engine
 engine validates and applies the action
-runner records events, replay, and diagnostics
+runner emits events and writes durable game records
 model packages turn records into training examples
 ```
 
@@ -126,7 +126,9 @@ Replay and training data are layered by ownership:
 - engine history: accepted actions, state snapshots, terminal result,
   rules/version metadata;
 - runner metadata: players, seeds, and execution outcome;
-- model diagnostics: policy, value, search, or architecture-specific metadata;
+- common policy records: logits over the legal actions supplied by the engine;
+- model extensions: model-owned payloads for anything beyond the common policy
+  record;
 - model training records: model-specific examples, masks, targets, and weights.
 
 This allows multiple model families to train from the same games without

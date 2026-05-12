@@ -1,8 +1,9 @@
-"""Session setup contracts.
+"""Session setup contracts for one engine-backed game.
 
-The runner session binds players, seeds, scenarios, and run metadata before any
-game loop starts. Engine state creation and player initialization hang off this
-boundary.
+`match.py` creates a session, then hands the initialized context to the shared
+loop. Session setup owns engine state creation, player initialization, seed and
+scenario metadata, and any future resource handles needed by parallel batch
+runs.
 """
 
 from __future__ import annotations
@@ -18,6 +19,8 @@ class SessionSpec:
     players: Sequence[object]
     seed: int | None = None
     scenario: object | None = None
+    mode: str = "match"
+    is_evaluation: bool = False
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
@@ -27,11 +30,17 @@ class SessionContext:
 
     session_id: str
     seed: int | None
+    mode: str = "match"
+    is_evaluation: bool = False
     engine_metadata: Mapping[str, Any] = field(default_factory=dict)
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
 def create_session_context(spec: SessionSpec) -> SessionContext:
-    """Create the context object passed to players before the loop starts."""
+    """Create engine state and the context passed to players before the loop.
+
+    The implementation should avoid process-global mutable state so many
+    sessions can be created safely by batch workers.
+    """
 
     raise NotImplementedError("Session creation will be wired to engine setup.")

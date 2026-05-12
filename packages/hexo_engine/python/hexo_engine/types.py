@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any, Mapping
+from typing import Any, Mapping, TypeAlias
 
 
 StateId = str
@@ -20,15 +20,15 @@ TacticalSummary = Mapping[str, Any]
 class Player(StrEnum):
     """Canonical player labels exposed to Python callers."""
 
-    ONE = "one"
-    TWO = "two"
+    PLAYER_0 = "player0"
+    PLAYER_1 = "player1"
 
 
-class TurnPhase(StrEnum):
-    """High-level turn phase reported by the engine."""
+class TurnPlacement(StrEnum):
+    """Placement slot inside the current logical turn."""
 
-    PLACE = "place"
-    TERMINAL = "terminal"
+    PLACEMENT_0 = "placement_0"
+    PLACEMENT_1 = "placement_1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,12 +38,28 @@ class AxialCoord:
     q: int
     r: int
 
-
 @dataclass(frozen=True, slots=True)
-class Action:
-    """A player action submitted to the Rust engine for validation."""
+class PlacementAction:
+    """One single-placement action submitted to the Rust engine."""
 
     coord: AxialCoord
+
+
+@dataclass(frozen=True, slots=True)
+class PairAction:
+    """Unordered two-placement convenience action.
+
+    The input tuple names the two requested cells; it does not imply
+    application order. The engine boundary should resolve the pair into single
+    placements deterministically for the current state and record the resolved
+    order. If the first resolved placement wins the game, the second placement
+    is discarded and must not be applied.
+    """
+
+    placements: tuple[AxialCoord, AxialCoord]
+
+
+Action: TypeAlias = PlacementAction | PairAction
 
 
 @dataclass(frozen=True, slots=True)

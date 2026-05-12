@@ -1,14 +1,14 @@
 """Direct match runner mode.
 
-Match mode runs one game or a small explicit series between configured players.
-It uses the same player contract and engine transition path as every other
-mode.
+Match mode starts a single match and returns the result.
+This is the public entry point for running one game. It should build a session,
+call the shared loop, and return a compact `GameResult`.
 """
 
 from __future__ import annotations
 
 
 def run_match(config: object) -> object:
-    """Run a direct match once session, loop, and engine wiring exist."""
+    """Run one game through session setup and the shared loop."""
 
     raise NotImplementedError("match mode will be built on the shared runner loop.")

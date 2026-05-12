@@ -1,8 +1,8 @@
-"""Placeholder package for the future Hexo Python runner.
+"""Python runner package for headless Hexo execution.
 
-The Python layer has intentionally been stripped back to design notes. The
-working game rules, MCTS, encoding, replay sample construction, and PyO3 bridge
-live in Rust.
+The runner owns sessions, player lifecycle, single-game loops, run modes, and
+record/result emission. It applies actions through `hexo_engine` and treats
+model/search internals as player-owned details.
 """
 
 __version__ = "0.1.0"

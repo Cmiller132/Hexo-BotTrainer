@@ -71,12 +71,17 @@ Otherwise it belongs in the engine, runner, or a model package.
 
 ## Core Areas
 
-`encoding`: shared board/crop/mask encoders for model families that agree on a
-common representation.
+`encoding`: optional shared board/crop/mask helpers. Crops may be square,
+circular, multi-window, or bypassed entirely by model packages that consume the
+whole board or a custom representation. Masks translate engine legal actions
+into model-facing shapes; threat masks may only strip engine legal actions
+using engine tactical facts.
 
 `search`: reusable MCTS machinery and supporting search statistics.
 
-`replay`: schemas, record helpers, sampling mechanics, and validation tools.
+`replay`: schemas, compact canonical records, common policy logits over legal
+actions, model-owned extension attachment, sampling mechanics, and validation
+tools.
 
 ## Contract Flow
 

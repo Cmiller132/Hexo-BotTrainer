@@ -1,8 +1,9 @@
-"""Core runner loop boundary.
+"""Core runner loop boundary for one game.
 
-The loop asks the engine for context, asks the active player for a decision,
-submits the chosen action back to the engine, records events, and stops on a
-terminal result or runner policy failure.
+`match.py` is the public entry point for a single game. It creates a session
+and calls this loop. The loop asks the engine for context, asks the active
+player for a decision, submits the chosen action back to the engine, emits
+events/records, and stops on terminal state or runner policy failure.
 """
 
 from __future__ import annotations

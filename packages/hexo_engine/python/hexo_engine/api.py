@@ -21,7 +21,7 @@ from .types import (
     TacticalSummary,
     TerminalResult,
     TransitionResult,
-    TurnPhase,
+    TurnPlacement,
 )
 
 
@@ -62,10 +62,10 @@ def current_player(state: EngineStateRef) -> Player:
     _not_bound("current_player")
 
 
-def turn_phase(state: EngineStateRef) -> TurnPhase:
-    """Return the current turn phase, as reported by the engine."""
+def turn_placement(state: EngineStateRef) -> TurnPlacement:
+    """Return the current placement slot, as reported by the engine."""
 
-    _not_bound("turn_phase")
+    _not_bound("turn_placement")
 
 
 def legal_actions(state: EngineStateRef) -> list[Action]:

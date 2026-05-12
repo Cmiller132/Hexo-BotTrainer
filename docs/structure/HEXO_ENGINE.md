@@ -11,7 +11,7 @@ Every other package consumes engine facts instead of duplicating game logic.
 ## Owns
 
 - Canonical game state.
-- Player to act and turn phase.
+- Player0/Player1 to act and current turn placement slot.
 - Legal action generation.
 - Move validation and state transitions.
 - Terminal detection and winner.
@@ -66,8 +66,8 @@ implementation.
 new_game() -> state
 load_snapshot(snapshot) -> state
 snapshot(state) -> snapshot
-current_player(state) -> player
-turn_phase(state) -> phase
+current_player(state) -> Player0 | Player1
+turn_placement(state) -> PLACEMENT_0 | PLACEMENT_1
 legal_actions(state) -> list[action]
 validate_action(state, action) -> ok | legality_error
 apply_action(state, action) -> transition_result | legality_error
@@ -89,6 +89,11 @@ To the runner:
 - terminal result,
 - replayable history and state snapshots.
 
+The primary action is a single placement. A pair action may exist as a
+host-facing convenience for normal two-placement turns, but the engine boundary
+resolves it into deterministic single placements, records the resolved order,
+and discards the second placement if the first placement wins.
+
 To models:
 
 - canonical state context,
@@ -106,7 +111,7 @@ To utilities:
 Engine tests should focus on rule correctness and determinism:
 
 - legality and illegal move errors,
-- turn phase transitions,
+- turn placement transitions,
 - terminal detection,
 - snapshot round trips,
 - replay from action history,

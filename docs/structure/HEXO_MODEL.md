@@ -21,6 +21,7 @@ terminal state, or runner lifecycle.
 - Losses, augmentation, and batching rules.
 - Checkpoint semantics.
 - Model-specific diagnostics.
+- Model-specific replay extensions beyond the shared policy-logit record.
 - Optional model-specific search when needed.
 
 ## Does Not Own
@@ -103,6 +104,10 @@ return action + diagnostics
 The runner sees only the action and diagnostics. Tensor layouts, logits,
 candidate ranking, and search internals stay inside the model package.
 
+For self-play, model packages expose an `InferenceAdapter` that returns common
+policy logits over the engine-provided legal actions plus any model-owned
+extension records the model wants to persist.
+
 ## Training Data
 
 Model packages decide how runner records become model-specific examples:
@@ -110,6 +115,7 @@ Model packages decide how runner records become model-specific examples:
 - filter replay records,
 - rebuild or load model inputs,
 - construct policy and value targets,
+- parse model-owned replay extensions when needed,
 - apply masks and sample weights,
 - collate batches,
 - compute losses,

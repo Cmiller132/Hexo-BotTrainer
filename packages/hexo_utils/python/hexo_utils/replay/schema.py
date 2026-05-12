@@ -1,8 +1,8 @@
 """Replay schema versioning helpers.
 
-Replay records combine engine history, runner metadata, and optional
-model-owned diagnostics. This module holds shared schema identifiers without
-owning storage policy or model-specific training targets.
+Replay records combine engine history, runner metadata, common policy logits,
+and optional model-owned extensions. This module holds shared schema
+identifiers without owning storage policy or model-specific training targets.
 """
 
 from __future__ import annotations

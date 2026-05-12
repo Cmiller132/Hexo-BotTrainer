@@ -1,7 +1,8 @@
 """Runner result summaries.
 
 Results describe the outcome of games and batches from the runner point of
-view: participants, status, timing, terminal state, and replay references.
+view: participants, status, terminal state, record references, and optional
+post-game analysis summaries. Detailed move history belongs in game records.
 """
 
 from __future__ import annotations
@@ -27,6 +28,8 @@ class GameResult:
     status: GameStatus
     terminal: object | None = None
     winner: object | None = None
+    record_ref: object | None = None
+    analysis: Mapping[str, Any] = field(default_factory=dict)
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
 

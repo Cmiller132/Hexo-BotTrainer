@@ -18,7 +18,7 @@ from .api import (
     state_id,
     tactics,
     terminal,
-    turn_phase,
+    turn_placement,
     validate_action,
 )
 from .errors import (
@@ -33,12 +33,14 @@ from .types import (
     ActionId,
     AxialCoord,
     EngineSnapshot,
+    PairAction,
+    PlacementAction,
     Player,
     StateId,
     TacticalSummary,
     TerminalResult,
     TransitionResult,
-    TurnPhase,
+    TurnPlacement,
 )
 
 __version__ = "0.1.0"
@@ -53,13 +55,15 @@ __all__ = [
     "HexoEngineError",
     "IllegalActionError",
     "IncompatibleSnapshotError",
+    "PairAction",
+    "PlacementAction",
     "Player",
     "SnapshotError",
     "StateId",
     "TacticalSummary",
     "TerminalResult",
     "TransitionResult",
-    "TurnPhase",
+    "TurnPlacement",
     "action_id",
     "apply_action",
     "current_player",
@@ -71,6 +75,6 @@ __all__ = [
     "state_id",
     "tactics",
     "terminal",
-    "turn_phase",
+    "turn_placement",
     "validate_action",
 ]

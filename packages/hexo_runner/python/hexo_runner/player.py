@@ -28,6 +28,7 @@ class DecisionRequest:
     current_player: object
     state: object
     legal_actions: Sequence[object]
+    is_evaluation: bool = False
     tactics: object | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
