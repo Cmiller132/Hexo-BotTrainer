@@ -15,10 +15,11 @@ The default sequence is:
 8. finalize pending samples;
 9. refresh sample index;
 10. build sample window;
-11. train configured steps;
-12. save checkpoint;
-13. optionally update self-play checkpoint pointer;
-14. write diagnostics.
+11. select sample symmetries;
+12. train configured steps;
+13. save checkpoint;
+14. optionally update self-play checkpoint pointer;
+15. write diagnostics.
 
 The model owns tensors, targets, losses, optimizer details, and model artifact
 contents. Utilities own reusable sample mechanics. Runner owns game execution.
@@ -45,6 +46,7 @@ from .stages import (
     prepare_sample_store,
     refresh_sample_index,
     save_checkpoint,
+    select_sample_symmetries,
     train_steps,
     update_selfplay_checkpoint_pointer,
     write_diagnostics,
@@ -61,6 +63,7 @@ CANONICAL_STAGE_ORDER: tuple[tuple[str, StageFunction], ...] = (
     ("finalize_pending_samples", finalize_pending_samples),
     ("refresh_sample_index", refresh_sample_index),
     ("build_sample_window", build_sample_window),
+    ("select_sample_symmetries", select_sample_symmetries),
     ("train_steps", train_steps),
     ("save_checkpoint", save_checkpoint),
     ("update_selfplay_checkpoint_pointer", update_selfplay_checkpoint_pointer),

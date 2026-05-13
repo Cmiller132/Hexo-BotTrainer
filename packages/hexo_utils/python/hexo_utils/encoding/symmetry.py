@@ -1,14 +1,14 @@
 """Shared D6 symmetry contracts for hex-board training data.
 
-The shared layer owns how a symmetry is identified and sampled. Engine/model
-code owns how concrete coordinates, action ids, tensors, and custom targets are
+The shared layer owns how a symmetry is identified and transported.
+`hexo_train` owns when a training sample receives a symmetry. Engine/model code
+owns how concrete coordinates, action ids, tensors, and custom targets are
 transformed under that symmetry.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from hashlib import blake2b
 from typing import Protocol, Sequence
 
 
@@ -34,22 +34,6 @@ class ActionSymmetryMapper(Protocol):
 
     def transform_action_id(self, action_id: str, symmetry: D6Symmetry) -> str:
         """Return the action id after applying `symmetry`."""
-
-
-def choose_d6_symmetry(
-    *,
-    seed: int,
-    epoch: int,
-    sample_index: int,
-    game_id: str,
-    turn_index: int,
-) -> D6Symmetry:
-    """Choose a deterministic pseudo-random D6 symmetry for one sample."""
-
-    material = f"{seed}:{epoch}:{sample_index}:{game_id}:{turn_index}".encode("utf-8")
-    digest = blake2b(material, digest_size=8).digest()
-    value = int.from_bytes(digest, byteorder="little", signed=False)
-    return D6Symmetry(value % D6_SIZE)
 
 
 def transform_action_ids(

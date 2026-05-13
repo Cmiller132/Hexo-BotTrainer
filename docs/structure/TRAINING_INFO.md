@@ -19,8 +19,10 @@ training. They exist for analysis, debugging, audit, and recordkeeping.
 - `hexo_runner`: runs games and writes detached game records.
 - `hexo_model_*`: decides what a trainable sample means and writes samples
   during self-play.
+- `hexo_train`: orchestrates training stages and selects deterministic D6
+  symmetries for sampled positions.
 - `hexo_utils.samples`: provides shared sample schemas, chunk writing, indexing,
-  shuffling, sampling, D6 symmetry selection, and default policy/value helpers.
+  shuffling, sampling, and default policy/value helpers.
 - `hexo_engine`: owns legal moves, transitions, terminal state, and snapshots.
 
 ## Self-Play Sample Generation
@@ -32,7 +34,8 @@ For each model decision:
 3. Inference/search produces legal-action policy data and a selected action.
 4. The model sample writer stores a pending sample.
 5. Runner applies the action through the engine.
-6. When the game ends, the model finalizes pending samples with value targets.
+6. After self-play returns, `hexo_train` calls the model finalizer to attach
+   value targets.
 7. Finalized samples are appended to the model's sample buffer.
 
 The normal training path should not scan finished runner game records to invent
@@ -64,7 +67,7 @@ objects. A first buffer should support:
 - flush chunk files,
 - keep a compact index,
 - sample or iterate shuffled batches,
-- choose deterministic D6 symmetry per sample,
+- accept deterministic D6 symmetry selections from `hexo_train`,
 - decode compact storage into training tensors.
 
 On a 32 GB machine, keep samples compact in storage and use CPU workers to

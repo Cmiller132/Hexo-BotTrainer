@@ -11,10 +11,11 @@ dependencies = [
   "torch>=2.2",
   "hexo-engine==0.1.0",
   "hexo-runner==0.1.0",
+  "hexo-train==0.1.0",
   "hexo-utils==0.1.0",
 ]
 
-[project.entry-points."hexo_utils.models"]
+[project.entry-points."hexo_train.models"]
 hexo_model_resnet = "hexo_model_resnet:get_plugin"
 
 [tool.hatch.build.targets.wheel]

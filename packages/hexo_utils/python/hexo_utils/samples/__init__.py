@@ -14,15 +14,22 @@ from .index import SampleIndex, refresh_sample_index
 from .sampling import SampleBatch, SampleRequest, sample_training_samples
 from .schema import SAMPLE_SCHEMA_VERSION, SampleSchema
 from .store import SampleStore, open_sample_store
-from .targets import LegalPolicyValueTarget, build_legal_policy_value_target
+from .targets import (
+    LegalPolicyTargetHelper,
+    LegalPolicyValueTarget,
+    ScalarValueTargetHelper,
+    build_legal_policy_value_target,
+)
 from .window import SampleWindow, build_sample_window
 from .writer import SampleWriteResult, append_samples
 
 __all__ = [
     "LegalPolicyValueTarget",
+    "LegalPolicyTargetHelper",
     "ModelSamplePayload",
     "PolicyOutputRecord",
     "SAMPLE_SCHEMA_VERSION",
+    "ScalarValueTargetHelper",
     "SampleBatch",
     "SampleIndex",
     "SampleRequest",

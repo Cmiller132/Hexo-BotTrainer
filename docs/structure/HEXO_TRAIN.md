@@ -18,6 +18,7 @@ diagnostics.
 - Model plugin discovery and loading.
 - Shared/default training component construction.
 - Stage orchestration.
+- Training-time D6 symmetry selection.
 - Run output directories.
 - Checkpoint layout.
 - Diagnostics and run manifests.
@@ -50,6 +51,7 @@ packages/hexo_train/
       components.py
       defaults.py
       diagnostics.py
+      symmetry.py
       py.typed
       cli/
         __init__.py
@@ -60,6 +62,7 @@ packages/hexo_train/
         checkpoint.py
         samples.py
         selfplay.py
+        symmetry.py
         training.py
 ```
 
@@ -90,7 +93,7 @@ Training config should describe:
 - run identity and output directory,
 - model plugin name or module,
 - shared game/sample settings,
-- model-specific config,
+- model-owned settings under `model.config`,
 - optional stage subset to run in the canonical order.
 
 The config loader normalizes YAML/TOML into one shared `TrainingConfig` shape.
@@ -124,8 +127,9 @@ Shared components are model-neutral:
 - sample source description,
 - engine/game spec,
 - checkpoint store;
-- default scalar value target helper;
-- default legal-action policy target helper.
+- default scalar value target helper from `hexo_utils.samples`;
+- default legal-action policy target helper from `hexo_utils.samples`;
+- default D6 symmetry selector.
 
 Model components are plugin-owned:
 
@@ -147,11 +151,12 @@ to replace.
 
 ```text
 defaults = build shared defaults
-overrides = model_plugin.training_component_overrides(defaults, config, shared)
+model = model_plugin.build_model(game_spec, model.config)
+overrides = model_plugin.training_component_overrides(defaults, model.config, shared, model)
 components = defaults with overrides applied
 ```
 
-Example default:
+Example reusable default wired through `hexo-train` from `hexo-utils`:
 
 ```text
 ScalarValueTargetHelper:
@@ -163,7 +168,8 @@ ScalarValueTargetHelper:
 A normal policy/value model can use that default directly. A model with richer
 value targets, such as value distributions or multiple outcome heads, replaces
 only the value target helper. The same pattern applies to legal policy targets,
-sample decoding, trainers, optimizers, checkpoint writers, and stage handlers.
+sample decoding, trainers, optimizers, checkpoint writers, D6 selection, and
+stage handlers.
 
 ## Pipeline Flow
 
@@ -178,6 +184,7 @@ optionally generate self-play samples
 finalize pending samples
 refresh sample index
 build sample window
+select sample symmetries
 train configured steps
 save checkpoint
 optionally update self-play checkpoint pointer
@@ -197,6 +204,7 @@ self-play creates model-owned trainable samples
 hexo_utils.samples stores and serves sample chunks
 hexo_train orchestrates training stages
 model plugin decodes samples into tensors
+model plugin applies selected D6 symmetries to tensors/targets
 model plugin computes losses and updates weights
 hexo_train writes run outputs and diagnostics
 ```
@@ -223,6 +231,8 @@ Concrete model packages should not be hard-coded into `hexo-train`.
 - Keep game execution in `hexo-runner`.
 - Keep rule authority in `hexo-engine`.
 - Keep tensor layouts, targets, losses, and checkpoint meaning in model
+  packages.
+- Keep D6 selection timing in `hexo-train`; keep D6 application in model
   packages.
 - Prefer explicit plugin hooks over model-specific conditionals in the training
   package.

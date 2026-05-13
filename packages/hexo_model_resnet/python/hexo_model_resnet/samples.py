@@ -10,11 +10,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
+from .config import ResNetSampleSettings
+
 
 @dataclass(slots=True)
 class ResNetSampleFinalizer:
     """Placeholder for finalizing pending ResNet samples after games end."""
 
+    config: ResNetSampleSettings = field(default_factory=ResNetSampleSettings)
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def finalize(self, *, ctx: Any, components: Any) -> Mapping[str, Any]:

@@ -12,48 +12,11 @@ from pathlib import Path
 from typing import Any, Mapping
 import json
 
+from hexo_utils.samples import LegalPolicyTargetHelper, ScalarValueTargetHelper
+
 from .components import DefaultTrainingComponents, SharedComponents
 from .context import RunContext
-
-
-@dataclass(frozen=True, slots=True)
-class ScalarValueTargetHelper:
-    """Default scalar value target for simple win/loss/draw models."""
-
-    win_value: float = 1.0
-    loss_value: float = -1.0
-    draw_value: float = 0.0
-
-    def from_terminal_result(
-        self,
-        *,
-        winner: Any | None,
-        perspective: Any,
-        is_draw: bool = False,
-    ) -> float:
-        """Return the value target from the sample player's perspective."""
-
-        if is_draw or winner is None:
-            return self.draw_value
-        if winner == perspective:
-            return self.win_value
-        return self.loss_value
-
-
-@dataclass(frozen=True, slots=True)
-class LegalPolicyTargetHelper:
-    """Default target helper for weights over engine-provided legal actions."""
-
-    def normalize(self, weights: Mapping[Any, float]) -> Mapping[Any, float]:
-        """Normalize action weights into a probability distribution."""
-
-        total = sum(max(0.0, float(weight)) for weight in weights.values())
-        if total <= 0.0:
-            return {action: 0.0 for action in weights}
-        return {
-            action: max(0.0, float(weight)) / total
-            for action, weight in weights.items()
-        }
+from .symmetry import D6SymmetrySelector
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +43,7 @@ def build_shared_components(ctx: RunContext) -> SharedComponents:
     defaults = DefaultTrainingComponents(
         scalar_value_target=ScalarValueTargetHelper(),
         legal_policy_target=LegalPolicyTargetHelper(),
+        symmetry_selector=D6SymmetrySelector(),
         checkpoint_store=checkpoint_store,
         diagnostics=ctx.diagnostics,
     )

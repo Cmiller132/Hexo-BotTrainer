@@ -15,17 +15,17 @@ from typing import Any, Mapping, Sequence
 class PolicyOutputRecord:
     """Common policy output over the legal actions offered by the engine.
 
-    `legal_action_ids` defines the order of `logits`. Model packages can turn
-    that compact vector into their own target tensors. More complex policy
-    heads, pair policies, search traces, or architecture-specific data should
-    be stored as model payload records instead of being modeled here. Large
-    arrays may be represented by references rather than kept resident in RAM.
+    The parent `TrainingSampleRecord.legal_action_ids` defines the order of
+    `logits`. Model packages can turn that compact vector into their own target
+    tensors. More complex policy heads, pair policies, search traces, or
+    architecture-specific data should be stored as model payload records
+    instead of being modeled here. Large arrays may be represented by
+    references rather than kept resident in RAM.
     """
 
     game_id: str
     turn_index: int
     model_id: str
-    legal_action_ids: tuple[str, ...]
     selected_action_id: str | None = None
     logits: object | None = None
     logits_ref: object | None = None
@@ -62,8 +62,8 @@ class TrainingSampleRecord:
 
     game_id: str
     turn_index: int
-    source_record_ref: object
     legal_action_ids: tuple[str, ...]
+    source_record_ref: object | None = None
     policy: PolicyOutputRecord | None = None
     model_payloads: Sequence[ModelSamplePayload] = field(default_factory=tuple)
     metadata: Mapping[str, Any] = field(default_factory=dict)

@@ -21,6 +21,46 @@ from .records import TrainingSampleRecord
 
 
 @dataclass(frozen=True, slots=True)
+class ScalarValueTargetHelper:
+    """Reusable scalar value target for simple win/loss/draw models."""
+
+    win_value: float = 1.0
+    loss_value: float = -1.0
+    draw_value: float = 0.0
+
+    def from_terminal_result(
+        self,
+        *,
+        winner: Any | None,
+        perspective: Any,
+        is_draw: bool = False,
+    ) -> float:
+        """Return the value target from the sample player's perspective."""
+
+        if is_draw or winner is None:
+            return self.draw_value
+        if winner == perspective:
+            return self.win_value
+        return self.loss_value
+
+
+@dataclass(frozen=True, slots=True)
+class LegalPolicyTargetHelper:
+    """Reusable helper for weights over engine-provided legal actions."""
+
+    def normalize(self, weights: Mapping[Any, float]) -> Mapping[Any, float]:
+        """Normalize action weights into a probability distribution."""
+
+        total = sum(max(0.0, float(weight)) for weight in weights.values())
+        if total <= 0.0:
+            return {action: 0.0 for action in weights}
+        return {
+            action: max(0.0, float(weight)) / total
+            for action, weight in weights.items()
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class LegalPolicyValueTarget:
     """Default target for models trained on legal-action policy logits/value."""
 

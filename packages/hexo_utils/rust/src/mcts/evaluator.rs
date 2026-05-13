@@ -1,7 +1,7 @@
 //! Evaluator abstraction used by MCTS.
 //!
-//! Rust search only needs two model outputs:
-//! - policy logits over crop cells
+//! Rust search only needs two evaluator outputs:
+//! - priors over legal actions, or logits that an adapter can map to them
 //! - scalar value from the current player's perspective
 //!
 //! The trait boundary keeps PyTorch/model details out of the game and search
@@ -11,7 +11,7 @@
 use crate::encoder::EncodedState;
 use hexo_engine::{HexCoord, HexoState};
 
-/// Raw neural-network-style output for one encoded state.
+    /// Raw neural-network-style output for one optional shared encoded state.
 #[derive(Clone, Debug)]
 pub struct NetworkOutput {
     /// Flat policy logits, indexed the same way as `EncodedState`.

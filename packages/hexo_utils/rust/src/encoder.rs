@@ -1,8 +1,10 @@
-//! Convert game states into neural-network input tensors.
+//! Optional shared default encoder for crop-based model inputs.
 //!
 //! The encoder creates a fixed square crop around the occupied board area. The
 //! crop is serialized as flat planes (`plane, row, col`) so it can cross the
-//! Rust/Python boundary as plain JSON/msgpack-friendly data.
+//! Rust/Python boundary as plain JSON/msgpack-friendly data. Model packages may
+//! use this default when its plane semantics match their architecture, or ignore
+//! it and own a model-specific encoder.
 
 use hexo_engine::{legal_placements, HexCoord, HexoState, Player, Stone, TurnPhase};
 use serde::{Deserialize, Serialize};

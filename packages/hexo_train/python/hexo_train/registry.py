@@ -30,6 +30,7 @@ class ModelPlugin(Protocol):
         defaults: DefaultTrainingComponents,
         config: Any,
         shared: SharedComponents,
+        model: Any,
     ) -> ComponentOverrides | None:
         """Return only the default components this model wants to replace."""
 
@@ -59,7 +60,7 @@ def _load_from_entry_point(entry_point_name: str) -> ModelPlugin:
     for group in _entry_point_groups():
         for entry_point in entry_points(group=group):
             if entry_point.name == entry_point_name:
-                return entry_point.load()()
+                return _coerce_loaded_plugin(entry_point.load())
     raise LookupError(f"No Hexo model entry point named {entry_point_name!r}.")
 
 
@@ -67,8 +68,7 @@ def _load_by_name(model_name: str) -> ModelPlugin:
     for group in _entry_point_groups():
         for entry_point in entry_points(group=group):
             if entry_point.name == model_name:
-                loaded = entry_point.load()
-                return loaded() if callable(loaded) else loaded
+                return _coerce_loaded_plugin(entry_point.load())
 
     # Development fallback: `hexo_model_resnet` can be used before packaging.
     return _load_from_module(model_name)
@@ -77,5 +77,8 @@ def _load_by_name(model_name: str) -> ModelPlugin:
 def _entry_point_groups() -> tuple[str, ...]:
     return (
         "hexo_train.models",
-        "hexo_utils.models",
     )
+
+
+def _coerce_loaded_plugin(loaded: Any) -> ModelPlugin:
+    return loaded() if callable(loaded) else loaded

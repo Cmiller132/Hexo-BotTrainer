@@ -41,7 +41,8 @@ In practice:
   runs, load model plugins, and write run outputs.
 - `hexo-model-*` packages consume engine, utility, and runner player contracts
   so model-backed players report the same identity and decision shapes as every
-  other participant.
+  other participant. They also consume the small `hexo-train` plugin contract
+  when they expose training components.
 
 The runner should discover or receive model-backed players through adapters and
 plugins. It should not import or hard-code concrete model architectures.
@@ -149,6 +150,7 @@ packages/
         components.py
         defaults.py
         diagnostics.py
+        symmetry.py
         py.typed
         cli/
           __init__.py
@@ -159,6 +161,7 @@ packages/
           checkpoint.py
           samples.py
           selfplay.py
+          symmetry.py
           training.py
 
   hexo_model_resnet/
@@ -195,11 +198,18 @@ packages/
 
 docs/
   structure/
+    HEXO_ENGINE.md
+    HEXO_MODEL.md
+    HEXO_RUNNER.md
     HEXO_TRAIN.md
+    HEXO_UTILS.md
+    PROJECT_STRUCTURE.md
+    Review Notes.md
     TRAINING_INFO.md
 
 tests/
-  engine/
+  test_training_pipeline_simplification.py
+  engine/                     # target grouping as coverage expands
   utils/
   runner/
   models/
@@ -250,8 +260,8 @@ Record and sample data are layered by ownership:
 - training samples: model-owned samples written during self-play, with
   legal-action ordering, policy/search outputs, value targets once finalized,
   and optional references back to detached game records;
-- sampled symmetries: deterministic D6 transforms chosen per training sample
-  and applied by model-owned mappers;
+- sampled symmetries: deterministic D6 transforms chosen by `hexo_train` per
+  training sample and applied by model-owned mappers;
 - model extensions: model-owned payloads for anything beyond the common sample
   helpers;
 - model training examples: model-specific tensors, masks, targets, and weights.

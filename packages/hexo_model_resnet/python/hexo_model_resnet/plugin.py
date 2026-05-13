@@ -6,9 +6,10 @@ from typing import Any, Mapping
 
 import torch
 
-from .augment import augment_batch
-from .losses import hexo_loss
+from hexo_train.components import ComponentOverrides
+
 from .architecture import HexoNet
+from .config import parse_resnet_config
 from .decode import ResNetSampleDecoder
 from .samples import ResNetSampleFinalizer
 from .trainer import ResNetTrainer
@@ -21,63 +22,45 @@ class HexoResNetPlugin:
         self,
         *,
         defaults: Any,
-        config: Any,
+        config: Mapping[str, Any],
         shared: Any,
-    ) -> Mapping[str, Any]:
+        model: torch.nn.Module | None,
+    ) -> ComponentOverrides:
         """Describe which shared training defaults ResNet accepts or replaces.
 
         Pseudocode shape:
 
-        - use the default scalar value helper for win/loss/draw targets;
-        - use the default legal-action policy helper while policy targets are
-          a distribution over engine-provided legal moves;
         - replace sample decoding with ResNet crop/input decoding;
         - replace training with the ResNet optimizer/loss loop.
+        - rely on `hexo_train` to keep shared defaults when not overridden.
         """
 
-        return {
-            "scalar_value_target": defaults.scalar_value_target,
-            "legal_policy_target": defaults.legal_policy_target,
-            "sample_decoder": ResNetSampleDecoder(config=getattr(config, "model_specific", {})),
-            "sample_finalizer": ResNetSampleFinalizer(),
-            "trainer": ResNetTrainer(config=getattr(config, "model_specific", {})),
-            "extra": {
+        _ = (defaults, shared)
+        resnet_config = parse_resnet_config(config)
+        return ComponentOverrides(
+            sample_decoder=ResNetSampleDecoder(config=resnet_config.samples),
+            sample_finalizer=ResNetSampleFinalizer(config=resnet_config.samples),
+            trainer=ResNetTrainer(model=model, config=resnet_config.training),
+            extra={
                 "sample_decoder": "ResNet crop/input decoder placeholder.",
                 "sample_finalizer": "ResNet value finalizer placeholder.",
                 "trainer": "ResNet training loop placeholder.",
             },
-        }
+        )
 
     def build_model(
         self,
         game_spec: Mapping[str, Any],
         config: Mapping[str, Any],
     ) -> torch.nn.Module:
+        _ = game_spec
+        resnet_config = parse_resnet_config(config)
+        architecture = resnet_config.architecture
         return HexoNet(
-            in_channels=int(config.get("input_channels", 12)),
-            channels=int(config.get("channels", 64)),
-            blocks=int(config.get("residual_blocks", 6)),
+            in_channels=architecture.input_channels,
+            channels=architecture.channels,
+            blocks=architecture.residual_blocks,
         )
-
-    def forward_inference(
-        self,
-        model: torch.nn.Module,
-        batch: Mapping[str, torch.Tensor],
-    ) -> Mapping[str, torch.Tensor]:
-        return model(batch["state_tensor"], batch.get("legal_mask"))
-
-    def loss(
-        self,
-        outputs: Mapping[str, torch.Tensor],
-        batch: Mapping[str, torch.Tensor],
-    ) -> torch.Tensor:
-        return hexo_loss(outputs, batch)
-
-    def augment_batch(
-        self,
-        batch: Mapping[str, torch.Tensor],
-    ) -> Mapping[str, torch.Tensor]:
-        return augment_batch(batch)
 
 
 plugin = HexoResNetPlugin()

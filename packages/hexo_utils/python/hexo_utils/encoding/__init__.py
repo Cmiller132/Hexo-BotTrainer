@@ -28,7 +28,6 @@ from .symmetry import (
     IDENTITY_D6,
     ActionSymmetryMapper,
     D6Symmetry,
-    choose_d6_symmetry,
     transform_action_ids,
 )
 
@@ -47,7 +46,6 @@ __all__ = [
     "build_crop_windows",
     "build_legal_mask",
     "build_threat_legal_mask",
-    "choose_d6_symmetry",
     "encode_crop",
     "encode_crops",
     "filter_threat_legal_actions",

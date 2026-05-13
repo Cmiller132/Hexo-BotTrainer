@@ -30,8 +30,6 @@ def train_steps(
             ctx=ctx,
             components=components,
         )
-    if trainer is not None and hasattr(trainer, "train"):
-        return trainer.train(ctx=ctx, components=components)
 
     return {
         "status": "skipped",

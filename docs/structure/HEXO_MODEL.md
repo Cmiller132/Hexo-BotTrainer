@@ -113,10 +113,11 @@ candidate ranking, and search internals stay inside the model package.
 Model-backed players should conform to the runner contract directly rather than
 requiring runner-specific special cases.
 
-For self-play, model packages expose an `InferenceAdapter` and training sample
-writer. The adapter can return policy/search outputs over engine-provided legal
-actions; the model writer stores the trainable data it needs while the game is
-running, then finalizes value/result targets when the game ends.
+For self-play, model packages expose runner-compatible players plus any
+model-owned inference adapters and sample writers needed by those players. The
+runner only sees the player contract. The model writer stores the trainable
+data it needs while the game is running, then `hexo_train` calls model-owned
+finalization after self-play returns.
 
 ## Training Data
 
@@ -129,8 +130,9 @@ training samples:
 - construct or transform model-specific targets when it does not,
 - attach model-owned sample payloads when needed,
 - finalize value targets after the terminal result is known,
-- apply the sampled D6 symmetry consistently to inputs, legal masks, policy
-  targets, and any model-owned extensions,
+- receive the sampled D6 symmetry selected by `hexo_train` and apply it
+  consistently to inputs, legal masks, policy targets, and any model-owned
+  extensions,
 - apply masks and sample weights,
 - collate batches,
 - compute losses,
@@ -149,15 +151,16 @@ self-play. A first version should store:
 
 - identity: sample id, model id, checkpoint id, game id, turn index, player;
 - state input: encoded board planes or a reference to an encoded input chunk;
-- legal policy space: legal action ids in logit order and the selected action;
+- legal policy space: one legal action id list in logit order and the selected
+  action;
 - policy target: model/search logits or visit-derived policy over those legal
   actions;
 - value target: finalized result from the sample player's perspective once the
   game ends;
 - masks: legal mask, optional threat-filtered legal mask, and any crop/action
   mapping needed by the model;
-- symmetry: the D6 symmetry chosen at sample read time or stored if the sample
-  was pre-augmented;
+- symmetry: the D6 symmetry chosen by `hexo_train` for the training window, or
+  stored if the sample was pre-augmented;
 - weights: sample weight and optional per-head weights;
 - provenance: RNG seed, self-play mode metadata, and optional detached runner
   record reference for debugging.
@@ -180,3 +183,8 @@ defaults when they match and overrides the model-owned pieces:
 For ResNet, `samples.py` owns pending-sample finalization, `decode.py` owns
 sample-to-tensor conversion, `trainer.py` owns train steps and metrics, and
 `checkpoints.py` owns model checkpoint contents.
+
+`plugin.py` should stay a composition root: build the model, parse
+`model.config`, and return model-owned components. It should not duplicate
+loss, augmentation, inference, or trainer behavior already owned by other
+model modules.

@@ -26,7 +26,6 @@ class SearchRequest:
 
     state: object
     legal_actions: Sequence[object]
-    budget: object | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
 

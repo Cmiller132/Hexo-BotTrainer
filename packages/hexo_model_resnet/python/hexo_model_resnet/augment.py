@@ -31,8 +31,9 @@ def augment_batch(
     """Apply the sampled symmetry to state, legal mask, and policy target.
 
     This remains a square-crop approximation until the encoder exposes exact
-    axial D6 transforms. The important contract is that randomness lives in the
-    sampler; the model receives and applies the chosen symmetry consistently.
+    axial D6 transforms. The important contract is that selection lives in
+    `hexo_train`; the model receives and applies the chosen symmetry
+    consistently.
     """
 
     transform = symmetry.index % 8

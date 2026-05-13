@@ -28,6 +28,7 @@ class DefaultTrainingComponents:
 
     scalar_value_target: Any | None = None
     legal_policy_target: Any | None = None
+    symmetry_selector: Any | None = None
     checkpoint_store: Any | None = None
     diagnostics: Any | None = None
 
@@ -40,6 +41,7 @@ class SharedComponents:
     sample_store: Any | None = None
     sample_index: Any | None = None
     sample_window: Any | None = None
+    sample_symmetries: Any | None = None
     checkpoint_state: Any | None = None
     selfplay_result: Any | None = None
     game_spec: Mapping[str, Any] = field(default_factory=dict)
@@ -53,6 +55,7 @@ class ComponentOverrides:
     legal_policy_target: Any | None = None
     sample_decoder: Any | None = None
     sample_finalizer: Any | None = None
+    symmetry_selector: Any | None = None
     trainer: Any | None = None
     optimizer: Any | None = None
     checkpoint_loader: Any | None = None
@@ -71,6 +74,7 @@ class ModelComponents:
     trainer: Any | None = None
     decoder: Any | None = None
     sample_finalizer: Any | None = None
+    symmetry_selector: Any | None = None
     checkpoint_loader: Any | None = None
     checkpoint_saver: Any | None = None
     scalar_value_target: Any | None = None
@@ -98,17 +102,18 @@ def build_model_components(
     defaults = shared.defaults
     overrides = ComponentOverrides()
 
-    if hasattr(plugin, "training_component_overrides"):
-        raw_overrides = plugin.training_component_overrides(
-            defaults=defaults,
-            config=ctx.config,
-            shared=shared,
-        )
-        overrides = _coerce_overrides(raw_overrides)
-
     model = None
     if hasattr(plugin, "build_model"):
         model = plugin.build_model(shared.game_spec, ctx.config.model.config)
+
+    if hasattr(plugin, "training_component_overrides"):
+        raw_overrides = plugin.training_component_overrides(
+            defaults=defaults,
+            config=ctx.config.model.config,
+            shared=shared,
+            model=model,
+        )
+        overrides = _coerce_overrides(raw_overrides)
 
     return ModelComponents(
         plugin=plugin,
@@ -117,6 +122,8 @@ def build_model_components(
         trainer=overrides.trainer,
         decoder=overrides.sample_decoder,
         sample_finalizer=overrides.sample_finalizer,
+        symmetry_selector=overrides.symmetry_selector
+        or defaults.symmetry_selector,
         checkpoint_loader=overrides.checkpoint_loader,
         checkpoint_saver=overrides.checkpoint_saver,
         scalar_value_target=overrides.scalar_value_target

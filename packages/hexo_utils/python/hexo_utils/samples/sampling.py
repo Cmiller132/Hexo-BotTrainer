@@ -1,17 +1,14 @@
 """Training sample buffer and sampling boundary.
 
 Model packages write trainable samples during self-play. Shared sampling
-utilities should select those samples, preserve schema metadata, and choose
-deterministic D6 symmetries without constructing model tensors.
+utilities should select those samples and preserve schema metadata without
+constructing model tensors or choosing training-time augmentation policy.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Mapping, NoReturn, Sequence
-
-from hexo_utils.encoding import D6Symmetry
-
 
 @dataclass(frozen=True, slots=True)
 class SampleRequest:
@@ -28,7 +25,6 @@ class SampleBatch:
     """A sampled set of training samples plus provenance metadata."""
 
     records: Sequence[object]
-    symmetries: Sequence[D6Symmetry] = field(default_factory=tuple)
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
@@ -43,10 +39,10 @@ def sample_training_samples(source: object, request: SampleRequest) -> SampleBat
 
     1. read model-written sample chunks by schema version;
     2. select samples deterministically from `seed` and filters;
-    3. choose one deterministic D6 symmetry per sampled decision;
-    4. keep legal-action ordering and action ids intact;
-    5. include only requested model payload namespaces when asked;
-    6. return samples and symmetries for model packages to parse into batches.
+    3. keep legal-action ordering and action ids intact;
+    4. include only requested model payload namespaces when asked;
+    5. return samples for `hexo_train` to attach training-time selections such
+       as D6 symmetries before model decoding.
     """
 
     _not_implemented("sample_training_samples")

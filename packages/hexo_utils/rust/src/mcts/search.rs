@@ -2,7 +2,8 @@
 //!
 //! Each edge is a single stone placement. A two-stone Hexo turn is therefore
 //! searched as `FirstStone -> SecondStone -> opponent FirstStone`, which avoids
-//! pair-action explosion and matches the training target shape.
+//! pair-action explosion while leaving training target interpretation to model
+//! packages.
 
 use std::cmp::Ordering;
 use std::error::Error;
@@ -45,7 +46,7 @@ impl Default for MctsConfig {
 pub struct SearchResult {
     /// Action chosen for actual play.
     pub selected_action: HexCoord,
-    /// Visit counts for each root action; this becomes the policy target.
+    /// Visit counts for each root action; model packages may record this.
     pub visit_policy: Vec<(HexCoord, u32)>,
     /// Root mean value from the root current-player perspective.
     pub root_value: f32,
@@ -224,7 +225,7 @@ where
     }
 
     // Encoding is only needed at expansion time. Legal actions are filtered to
-    // the same crop so search, policy priors, and sample targets agree.
+    // the same crop so search priors can be mapped back to engine actions.
     let evaluation = evaluator.evaluate_state(state, &encoded, &legal);
 
     let mut edges = Vec::with_capacity(legal.len());

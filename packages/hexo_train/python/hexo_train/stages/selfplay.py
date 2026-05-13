@@ -28,8 +28,11 @@ def maybe_generate_selfplay(
     else:
         request = {
             "config": dict(selfplay_config),
-            "sample_store": components.shared.sample_store,
-            "note": "Runner self-play wiring is not implemented yet.",
+            "note": (
+                "Runner self-play wiring is not implemented yet. "
+                "Model plugins should bind sample stores into model-owned "
+                "players or writers before calling the runner."
+            ),
         }
 
     result = {

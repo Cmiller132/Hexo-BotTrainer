@@ -53,6 +53,7 @@ packages/hexo_runner/
         record.py
         results.py
       modes/
+        __init__.py
         match.py
         selfplay.py
         evaluation.py
@@ -134,8 +135,8 @@ model's self-play sample writer, not into the runner game record.
   configs and aggregates results.
 - `evaluation`: builds fixed opponent comparisons on top of batch, marks
   sessions as evaluation runs, and owns score/analysis summaries.
-- `selfplay`: creates model-backed players through an `InferenceAdapter`, calls
-  batch, writes detached core game records, and lets the model package write
-  trainable samples into its own sample buffer while the games run.
+- `selfplay`: receives model-backed `RunnerPlayer`s from the caller, calls
+  batch, writes detached core game records, and lets those model-owned players
+  maintain their own training-sample writers while games run.
 
 All modes share the same player contract and engine application path.

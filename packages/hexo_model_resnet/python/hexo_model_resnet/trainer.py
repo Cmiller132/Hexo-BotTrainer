@@ -2,20 +2,23 @@
 
 `hexo_train` decides when training runs and how many steps are requested. This
 module owns ResNet-specific decoding, forward passes, loss computation,
-optimizer steps, and metrics for each step.
+optimizer steps, D6 application through the decoder, and metrics for each step.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Mapping
+from typing import Any
+
+from .config import ResNetTrainingSettings
 
 
 @dataclass(slots=True)
 class ResNetTrainer:
     """Placeholder ResNet train-step implementation."""
 
-    config: Mapping[str, Any] = field(default_factory=dict)
+    model: Any | None = None
+    config: ResNetTrainingSettings = field(default_factory=ResNetTrainingSettings)
 
     def train_steps(
         self,
@@ -33,4 +36,5 @@ class ResNetTrainer:
             "steps": steps,
             "reason": "ResNet trainer is not implemented yet.",
             "run": ctx.config.run.name,
+            "has_model": self.model is not None,
         }

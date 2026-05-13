@@ -11,9 +11,12 @@ from .config import TrainingConfig, load_training_config
 from .context import RunContext
 from .pipeline import TrainingPipeline
 from .registry import load_model_plugin
+from .symmetry import D6SymmetrySelector, SampleSymmetrySelection
 
 __all__ = [
+    "D6SymmetrySelector",
     "RunContext",
+    "SampleSymmetrySelection",
     "TrainingConfig",
     "TrainingPipeline",
     "load_model_plugin",

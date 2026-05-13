@@ -89,8 +89,10 @@ Otherwise it belongs in the engine, runner, or a model package.
 circular, multi-window, or bypassed entirely by model packages that consume the
 whole board or a custom representation. Masks translate engine legal actions
 into model-facing shapes; threat masks may only strip engine legal actions
-using engine tactical facts. Symmetry helpers define and sample D6 transforms,
-but model packages decide how those transforms apply to their tensors.
+using engine tactical facts. Symmetry helpers define D6 transport types and
+action-id transform protocols; `hexo_train` decides when training samples
+receive D6 selections, and model packages decide how those transforms apply to
+their tensors.
 
 `search`: reusable MCTS machinery and supporting search statistics. In Rust,
 `mcts.rs` is the public search module, `mcts/search.rs` owns the rollout/search
@@ -103,7 +105,7 @@ caller's root state.
 `samples`: training sample schemas, append/write buffer helpers, sample buffer
 storage and indexing, sampling windows, common policy logits over legal actions
 when the model opts into that default shape, default legal-action policy/value
-target helpers, deterministic D6 symmetry plumbing, and validation tools.
+target helpers, and validation tools.
 
 The samples layer should not own the authoritative position trail. That belongs
 to `hexo_runner.records`. It exists so model packages can write trainable
@@ -112,10 +114,11 @@ shuffle and sample those buffers, and attach custom payloads without teaching
 shared utilities about model-specific heads or logic.
 
 The default target path is intentionally narrow: legal-action policy logits and
-an optional scalar value. The default builder preserves logit/action ordering
-and applies a sampled D6 symmetry to action ids through an engine/model-provided
-mapper. Pair policies, auxiliary heads, search traces, and architecture-specific
-labels remain model-owned extensions.
+an optional scalar value. The default builder reads one action order from
+`TrainingSampleRecord.legal_action_ids` and can apply a D6 symmetry supplied by
+`hexo_train` through an engine/model-provided mapper. Pair policies, auxiliary
+heads, search traces, and architecture-specific labels remain model-owned
+extensions.
 
 Shared sample helpers do not make datasets interchangeable. Models own the
 rules for writing their own self-play samples and interpreting their policy

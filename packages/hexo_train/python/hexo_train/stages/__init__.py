@@ -18,6 +18,7 @@ from .samples import (
     refresh_sample_index,
 )
 from .selfplay import maybe_generate_selfplay
+from .symmetry import select_sample_symmetries
 from .training import train_steps
 
 __all__ = [
@@ -28,6 +29,7 @@ __all__ = [
     "prepare_sample_store",
     "refresh_sample_index",
     "save_checkpoint",
+    "select_sample_symmetries",
     "train_steps",
     "update_selfplay_checkpoint_pointer",
     "write_diagnostics",

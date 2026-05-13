@@ -43,7 +43,6 @@ class TrainingConfig:
     stages: tuple[str, ...] = ("all",)
     run: RunConfig = field(default_factory=RunConfig)
     shared: ConfigMap = field(default_factory=dict)
-    model_specific: ConfigMap = field(default_factory=dict)
     raw: ConfigMap = field(default_factory=dict)
 
 
@@ -57,6 +56,12 @@ def load_training_config(config_path: str | Path) -> TrainingConfig:
 
 def normalize_training_config(raw: ConfigMap, *, base_dir: Path) -> TrainingConfig:
     """Convert an untyped config mapping into the training skeleton contract."""
+
+    if "model_specific" in raw:
+        raise ValueError(
+            "Training config field 'model_specific' was removed; "
+            "move model-owned settings under [model.config]."
+        )
 
     model_section = _require_mapping(raw, "model")
     model_name = str(model_section.get("name", "")).strip()
@@ -77,11 +82,15 @@ def normalize_training_config(raw: ConfigMap, *, base_dir: Path) -> TrainingConf
     if not output_dir.is_absolute():
         output_dir = base_dir / output_dir
 
+    model_config = model_section.get("config", {})
+    if not isinstance(model_config, Mapping):
+        raise ValueError("Training config field [model.config] must be a mapping.")
+
     model = ModelConfig(
         name=model_name,
         module=_optional_str(model_section.get("module")),
         entry_point=_optional_str(model_section.get("entry_point")),
-        config=dict(model_section.get("config", {})),
+        config=dict(model_config),
     )
     run = RunConfig(
         name=run_name,
@@ -94,7 +103,6 @@ def normalize_training_config(raw: ConfigMap, *, base_dir: Path) -> TrainingConf
         stages=stages,
         run=run,
         shared=dict(raw.get("shared", {})),
-        model_specific=dict(raw.get("model_specific", {})),
         raw=dict(raw),
     )
 
