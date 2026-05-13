@@ -1,4 +1,14 @@
-"""Diagnostics and run-output helpers for training orchestration."""
+"""Diagnostics and run-output helpers for training orchestration.
+
+Diagnostics are intentionally simple files in the run directory:
+
+- `events.jsonl` records an append-only stream of step lifecycle events.
+- `<step>.json` records a structured summary for each top-level step or epoch.
+- other pipeline files can write additional JSON payloads through `write_json`.
+
+The writer also converts dataclasses and paths into JSON-friendly shapes so
+callers can pass normal pipeline objects without manual serialization code.
+"""
 
 from __future__ import annotations
 
@@ -11,7 +21,7 @@ import time
 
 @dataclass(slots=True)
 class StageDiagnostic:
-    """Small serializable record for one pipeline stage."""
+    """Small serializable record for one pipeline step or epoch."""
 
     stage: str
     status: str
@@ -20,13 +30,17 @@ class StageDiagnostic:
 
 
 class DiagnosticsWriter:
-    """Writes stage and run diagnostics to the run output directory."""
+    """Writes step and run diagnostics to the run output directory."""
 
     def __init__(self, diagnostics_dir: Path) -> None:
+        """Create a writer rooted at one run's diagnostics directory."""
+
         self.diagnostics_dir = diagnostics_dir
         self.diagnostics_dir.mkdir(parents=True, exist_ok=True)
 
     def start_stage(self, stage: str) -> float:
+        """Record that a step started and return a timer token."""
+
         self.write_event("stage_started", {"stage": stage})
         return time.perf_counter()
 
@@ -38,6 +52,8 @@ class DiagnosticsWriter:
         status: str,
         metadata: Mapping[str, Any] | None = None,
     ) -> StageDiagnostic:
+        """Record that a step finished and write its JSON summary."""
+
         diagnostic = StageDiagnostic(
             stage=stage,
             status=status,
@@ -49,12 +65,16 @@ class DiagnosticsWriter:
         return diagnostic
 
     def write_event(self, name: str, payload: Any) -> None:
+        """Append one JSON-lines event to the run event stream."""
+
         event_path = self.diagnostics_dir / "events.jsonl"
         with event_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps({"event": name, "payload": _jsonable(payload)}))
             handle.write("\n")
 
     def write_json(self, name: str, payload: Any) -> Path:
+        """Write one pretty JSON payload under the diagnostics directory."""
+
         path = self.diagnostics_dir / name
         path.write_text(
             json.dumps(_jsonable(payload), indent=2, default=str),
@@ -64,6 +84,8 @@ class DiagnosticsWriter:
 
 
 def _jsonable(value: Any) -> Any:
+    """Convert common pipeline objects into JSON-compatible values."""
+
     if hasattr(value, "__dataclass_fields__"):
         return {
             field_name: _jsonable(getattr(value, field_name))

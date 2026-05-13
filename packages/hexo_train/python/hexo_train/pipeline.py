@@ -1,28 +1,22 @@
-"""Canonical training pipeline orchestration.
+"""Top-level self-play training pipeline.
 
-`hexo_train` owns the order of a training run. Model packages can override the
-behavior inside a stage, but they should not have to recreate the lifecycle.
+This file is intentionally the "map" of a training run. It does not know how
+to decode model tensors, run a loss, generate a legal action, or serialize a
+real checkpoint. It coordinates the packages that do own those details.
 
-The default sequence is:
+`hexo_train` currently owns one supported training path:
 
-1. load and validate config;
-2. create run context;
-3. load model training plugin;
-4. build default and model-specific components;
-5. load or initialize checkpoint;
-6. prepare sample store;
-7. optionally generate self-play samples;
-8. finalize pending samples;
-9. refresh sample index;
-10. build sample window;
-11. select sample symmetries;
-12. train configured steps;
-13. save checkpoint;
-14. optionally update self-play checkpoint pointer;
-15. write diagnostics.
+1. initialize run artifacts and shared stores;
+2. load or initialize a checkpoint;
+3. run self-play training epochs;
+4. publish the final checkpoint for future self-play;
+5. write diagnostics.
 
-The model owns tensors, targets, losses, optimizer details, and model artifact
-contents. Utilities own reusable sample mechanics. Runner owns game execution.
+Each top-level step is wrapped by `_run_step()` so failures and successful
+results are recorded consistently in the diagnostics directory.
+
+Model packages own tensors, losses, optimizer details, sample decoding, and
+checkpoint contents. The runner owns game execution once self-play is wired.
 """
 
 from __future__ import annotations
@@ -30,52 +24,40 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from .components import (
-    TrainingComponents,
-    build_model_components,
+from .artifacts import (
+    publish_selfplay_checkpoint_pointer,
+    write_final_diagnostics,
+    write_run_manifest,
 )
+from .checkpoints import load_or_initialize_checkpoint, save_final_checkpoint
+from .components import TrainingComponents, build_model_components
 from .config import load_training_config
 from .context import RunContext
 from .defaults import build_shared_components
+from .epoch import run_epochs
+from .epoch.samples import prepare_sample_store
 from .registry import load_model_plugin
-from .stages import (
-    build_sample_window,
-    finalize_pending_samples,
-    load_or_initialize_checkpoint,
-    maybe_generate_selfplay,
-    prepare_sample_store,
-    refresh_sample_index,
-    save_checkpoint,
-    select_sample_symmetries,
-    train_steps,
-    update_selfplay_checkpoint_pointer,
-    write_diagnostics,
-)
 
 
-StageFunction = Callable[[RunContext, TrainingComponents], Any]
-
-
-CANONICAL_STAGE_ORDER: tuple[tuple[str, StageFunction], ...] = (
-    ("load_or_initialize_checkpoint", load_or_initialize_checkpoint),
-    ("prepare_sample_store", prepare_sample_store),
-    ("maybe_generate_selfplay", maybe_generate_selfplay),
-    ("finalize_pending_samples", finalize_pending_samples),
-    ("refresh_sample_index", refresh_sample_index),
-    ("build_sample_window", build_sample_window),
-    ("select_sample_symmetries", select_sample_symmetries),
-    ("train_steps", train_steps),
-    ("save_checkpoint", save_checkpoint),
-    ("update_selfplay_checkpoint_pointer", update_selfplay_checkpoint_pointer),
-    ("write_diagnostics", write_diagnostics),
-)
+PipelineStep = Callable[[RunContext, TrainingComponents], Any]
 
 
 class TrainingPipeline:
-    """Shared orchestrator for model training runs."""
+    """Public orchestrator for one config-driven self-play training run."""
 
     def run(self, config_path: str | Path) -> RunContext:
-        """Run the canonical training lifecycle from a YAML/TOML config path."""
+        """Run training and return the mutable run context.
+
+        Step by step:
+
+        1. Normalize the user config into typed config sections.
+        2. Create run directories and the diagnostics writer.
+        3. Load the model plugin and let it build model-owned components.
+        4. Execute the fixed self-play lifecycle.
+
+        The returned `RunContext` is useful for tests and callers that want to
+        inspect artifact paths, top-level outputs, or per-epoch results.
+        """
 
         config = load_training_config(config_path)
         ctx = RunContext.from_config(config)
@@ -84,96 +66,106 @@ class TrainingPipeline:
         model = build_model_components(plugin=plugin, ctx=ctx, shared=shared)
         components = TrainingComponents(shared=shared, model=model)
 
-        ctx.diagnostics.write_json("config.normalized.json", config)
-        for stage_name, default_stage in self._selected_stages(ctx):
-            self._run_stage(stage_name, default_stage, ctx, components)
+        self._run_step("initialize_run", self._initialize_run, ctx, components)
+        self._run_step(
+            "load_checkpoint",
+            load_or_initialize_checkpoint,
+            ctx,
+            components,
+        )
+        self._run_step("run_epochs", run_epochs, ctx, components)
+        self._run_step("publish_final_model", self._publish_final_model, ctx, components)
+        self._run_step("write_diagnostics", write_final_diagnostics, ctx, components)
         return ctx
 
-    def _selected_stages(
+    def _initialize_run(
         self,
         ctx: RunContext,
-    ) -> tuple[tuple[str, StageFunction], ...]:
-        """Return configured stages in canonical order.
+        components: TrainingComponents,
+    ) -> Mapping[str, Any]:
+        """Write initial run files and open the sample store.
 
-        Config may select a subset by name, but it does not define ordering.
-        This prevents training lifecycle policy from drifting into experiment
-        configs.
+        This is the only setup step that touches run metadata. It writes the
+        normalized config and manifest before epochs start, then opens the
+        shared sample store so self-play/finalization can append model-owned
+        records through the same handle.
         """
 
-        requested = set(ctx.config.stages)
-        if not requested or requested == {"all"}:
-            return CANONICAL_STAGE_ORDER
-        known = {name for name, _ in CANONICAL_STAGE_ORDER}
-        unknown = requested - known
-        if unknown:
-            raise ValueError(f"Unknown training stages: {sorted(unknown)}")
-        return tuple(
-            (name, stage)
-            for name, stage in CANONICAL_STAGE_ORDER
-            if name in requested
+        normalized_config = ctx.diagnostics.write_json(
+            "config.normalized.json",
+            ctx.config,
         )
+        manifest = write_run_manifest(ctx)
+        sample_store = prepare_sample_store(ctx, components)
+        return {
+            "config": str(normalized_config),
+            "manifest": str(manifest),
+            "sample_store": sample_store,
+        }
 
-    def _run_stage(
+    def _publish_final_model(
         self,
-        stage_name: str,
-        default_stage: StageFunction,
+        ctx: RunContext,
+        components: TrainingComponents,
+    ) -> Mapping[str, Any]:
+        """Save the final model checkpoint and publish the optional pointer.
+
+        Epoch checkpoints feed the next epoch during this process. The final
+        checkpoint is the stable output of the whole run, and the pointer is
+        the small handoff file future self-play workers can read.
+        """
+
+        checkpoint = save_final_checkpoint(ctx, components)
+        ctx.remember("final_checkpoint", checkpoint)
+        pointer = publish_selfplay_checkpoint_pointer(ctx, components)
+        return {"checkpoint": checkpoint, "pointer": pointer}
+
+    def _run_step(
+        self,
+        step_name: str,
+        step: PipelineStep,
         ctx: RunContext,
         components: TrainingComponents,
     ) -> Any:
-        """Run one stage with diagnostics and optional model override."""
+        """Run one top-level step with consistent diagnostics.
+
+        The helper records a start event, delegates to the supplied step, stores
+        the result on `ctx.outputs`, and writes a JSON summary. If a step raises,
+        the failure is recorded before the exception is re-raised.
+        """
 
         diagnostics = ctx.diagnostics
-        started_at = diagnostics.start_stage(stage_name)
+        started_at = diagnostics.start_stage(step_name)
         try:
-            result = self._dispatch_stage(
-                stage_name,
-                default_stage,
-                ctx,
-                components,
-            )
+            result = step(ctx, components)
         except Exception as exc:
             diagnostics.finish_stage(
-                stage=stage_name,
+                stage=step_name,
                 started_at=started_at,
                 status="failed",
                 metadata={"error": repr(exc)},
             )
             raise
 
-        ctx.remember(stage_name, result)
+        ctx.remember(step_name, result)
         diagnostics.finish_stage(
-            stage=stage_name,
+            stage=step_name,
             started_at=started_at,
             status=self._status_for(result),
             metadata={"result": self._result_metadata(result)},
         )
         return result
 
-    def _dispatch_stage(
-        self,
-        stage_name: str,
-        default_stage: StageFunction,
-        ctx: RunContext,
-        components: TrainingComponents,
-    ) -> Any:
-        """Call a model override when present, otherwise the shared default."""
-
-        handler = components.model.stage_handlers.get(stage_name)
-        if handler is not None:
-            return handler(ctx, components)
-
-        plugin = components.model.plugin
-        if hasattr(plugin, stage_name):
-            return getattr(plugin, stage_name)(ctx, components)
-
-        return default_stage(ctx, components)
-
     def _status_for(self, result: Any) -> str:
+        """Translate a step result payload into a diagnostic status."""
+
         if isinstance(result, Mapping) and result.get("status") == "skipped":
             return "skipped"
         return "completed"
 
     def _result_metadata(self, result: Any) -> Mapping[str, Any]:
+        """Convert common result objects into compact diagnostic metadata."""
+
         if result is None:
             return {}
         if isinstance(result, Mapping):

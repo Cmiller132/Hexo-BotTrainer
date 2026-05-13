@@ -1,30 +1,34 @@
 """Training component contracts.
 
-The training pipeline has three layers:
+The self-play training pipeline has three layers:
 
-1. `RunContext` owns run identity, directories, diagnostics, and stage outputs.
+1. `RunContext` owns run identity, directories, diagnostics, and epoch outputs.
 2. `SharedComponents` are reusable defaults created by `hexo_train`.
 3. `ModelComponents` are supplied or overridden by the selected model plugin.
 
-Stages receive `RunContext` plus `TrainingComponents`. This keeps the stage
-sequence centralized while still letting models own tensors, losses, decoders,
-and checkpoint contents.
+Epoch helpers receive `RunContext` plus `TrainingComponents`. This keeps the
+loop sequence centralized while still letting models own tensors, losses,
+decoders, and checkpoint contents.
+
+Read this file as the dependency container for a run. It defines what shared
+orchestration code can rely on and what model plugins may replace.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Mapping
+from typing import Any, Mapping
 
 from .context import RunContext
 
 
-StageHandler = Callable[[RunContext, "TrainingComponents"], Any]
-
-
 @dataclass(slots=True)
 class DefaultTrainingComponents:
-    """Shared defaults a model may accept or override."""
+    """Shared defaults a model may accept or override.
+
+    Defaults are deliberately boring and model-neutral: target helpers,
+    checkpoint path helpers, diagnostics, and deterministic symmetry selection.
+    """
 
     scalar_value_target: Any | None = None
     legal_policy_target: Any | None = None
@@ -35,7 +39,12 @@ class DefaultTrainingComponents:
 
 @dataclass(slots=True)
 class SharedComponents:
-    """Model-neutral handles built by `hexo_train`."""
+    """Model-neutral handles built by `hexo_train`.
+
+    The pipeline mutates these fields as the run advances. For example, sample
+    selection writes `sample_window`, symmetry selection writes
+    `sample_symmetries`, and checkpoint saves update `checkpoint_state`.
+    """
 
     defaults: DefaultTrainingComponents
     sample_store: Any | None = None
@@ -49,7 +58,11 @@ class SharedComponents:
 
 @dataclass(slots=True)
 class ComponentOverrides:
-    """Optional replacements returned by a model training plugin."""
+    """Optional replacements returned by a model training plugin.
+
+    The plugin returns only the pieces it owns or wants to replace. Missing
+    fields fall back to shared defaults where a default exists.
+    """
 
     scalar_value_target: Any | None = None
     legal_policy_target: Any | None = None
@@ -60,13 +73,17 @@ class ComponentOverrides:
     optimizer: Any | None = None
     checkpoint_loader: Any | None = None
     checkpoint_saver: Any | None = None
-    stage_handlers: Mapping[str, StageHandler] = field(default_factory=dict)
     extra: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
 class ModelComponents:
-    """Model-owned training pieces used by generic stages."""
+    """Model-owned training pieces used by the epoch loop.
+
+    These fields are the resolved plugin contract after defaults and overrides
+    are merged. Epoch helpers should call these components instead of importing
+    concrete model packages.
+    """
 
     plugin: Any
     model: Any | None = None
@@ -79,7 +96,6 @@ class ModelComponents:
     checkpoint_saver: Any | None = None
     scalar_value_target: Any | None = None
     legal_policy_target: Any | None = None
-    stage_handlers: Mapping[str, StageHandler] = field(default_factory=dict)
     extra: Mapping[str, Any] = field(default_factory=dict)
 
 
@@ -97,7 +113,15 @@ def build_model_components(
     ctx: RunContext,
     shared: SharedComponents,
 ) -> ModelComponents:
-    """Build model components by merging shared defaults with plugin overrides."""
+    """Build model components by merging shared defaults with plugin overrides.
+
+    Step by step:
+
+    1. Ask the plugin to build the model object, if it has a builder.
+    2. Pass the built model plus shared defaults back to the plugin.
+    3. Coerce the plugin response into `ComponentOverrides`.
+    4. Return a single `ModelComponents` object for the epoch loop to use.
+    """
 
     defaults = shared.defaults
     overrides = ComponentOverrides()
@@ -130,12 +154,13 @@ def build_model_components(
         or defaults.scalar_value_target,
         legal_policy_target=overrides.legal_policy_target
         or defaults.legal_policy_target,
-        stage_handlers=overrides.stage_handlers,
         extra=overrides.extra,
     )
 
 
 def _coerce_overrides(raw: Any) -> ComponentOverrides:
+    """Accept the supported plugin override shapes and reject ambiguous ones."""
+
     if raw is None:
         return ComponentOverrides()
     if isinstance(raw, ComponentOverrides):

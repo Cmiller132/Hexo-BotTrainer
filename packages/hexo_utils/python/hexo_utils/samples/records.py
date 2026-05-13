@@ -1,14 +1,35 @@
-"""Training sample record shapes.
+"""Training sample schema and record shapes.
 
 Models write these records during self-play. Core game records remain in
 `hexo_runner.records` for detached analysis and audit; samples may keep optional
 references back to those records, but they are already training-facing data.
+
+The record layer is intentionally data-only. It defines the shared schema
+version and the neutral row shapes that model packages may use or extend, while
+buffer storage and sampling mechanics live in `buffer.py`.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
+
+
+SAMPLE_SCHEMA_VERSION = 1
+
+
+@dataclass(frozen=True, slots=True)
+class SampleSchema:
+    """Version metadata attached to sample files and batches.
+
+    `extensions` lets model packages declare their own payload namespaces
+    without making the shared utils package understand those payload schemas.
+    """
+
+    name: str = "hexo.samples"
+    version: int = SAMPLE_SCHEMA_VERSION
+    engine_version: str | None = None
+    extensions: Mapping[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)

@@ -94,14 +94,9 @@ packages/
           mcts.py
         samples/
           __init__.py
-          index.py
-          schema.py
+          buffer.py
           records.py
-          sampling.py
-          store.py
           targets.py
-          window.py
-          writer.py
     rust/
       src/
         lib.rs
@@ -143,22 +138,23 @@ packages/
     python/
       hexo_train/
         __init__.py
+        artifacts.py
+        checkpoints.py
+        components.py
         config.py
         context.py
-        pipeline.py
-        registry.py
-        components.py
         defaults.py
         diagnostics.py
+        pipeline.py
+        registry.py
         symmetry.py
         py.typed
         cli/
           __init__.py
           train_model.py
-        stages/
+        epoch/
           __init__.py
-          artifacts.py
-          checkpoint.py
+          loop.py
           samples.py
           selfplay.py
           symmetry.py
@@ -269,6 +265,11 @@ Record and sample data are layered by ownership:
 Core game records are detached neutral facts for analysis, audit, and
 recordkeeping. Training samples are model-owned: by default, a model writes and
 trains only on its own self-play samples, targets, masks, and weights.
+
+Within `hexo_utils.samples`, the mechanical sample buffer files are deliberately
+consolidated into `buffer.py` until real chunk IO, durable indexes, and sampling
+logic become substantial enough to split. Record/schema definitions remain in
+`records.py`, and common target construction remains in `targets.py`.
 
 ## Design Rules
 

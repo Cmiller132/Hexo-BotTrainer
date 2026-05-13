@@ -1,8 +1,15 @@
 """Dynamic model plugin loading.
 
 Model packages provide the model-specific pieces: architecture construction,
-sample decoding, losses, checkpoint interpretation, and optional stage hooks.
+sample decoding, losses, checkpoint interpretation, and epoch-time behavior.
 `hexo_train` only finds the plugin and calls agreed-upon lifecycle methods.
+
+Plugin lookup supports three development/deployment modes:
+
+1. explicit Python module path from config;
+2. explicit entry point name from config;
+3. model name lookup through the `hexo_train.models` entry point group, with a
+   module-name fallback for editable local development.
 """
 
 from __future__ import annotations
@@ -17,7 +24,11 @@ from .components import ComponentOverrides, DefaultTrainingComponents, SharedCom
 
 @runtime_checkable
 class ModelPlugin(Protocol):
-    """Minimum plugin shape expected by the training orchestrator."""
+    """Minimum plugin shape expected by the training orchestrator.
+
+    Plugins can expose more optional hooks, such as self-play generation or
+    checkpoint IO, but the pipeline can always start from this small contract.
+    """
 
     name: str
 
@@ -46,6 +57,8 @@ def load_model_plugin(config: ModelConfig) -> ModelPlugin:
 
 
 def _load_from_module(module_name: str) -> ModelPlugin:
+    """Import a development module and read its plugin object."""
+
     module = import_module(module_name)
     if hasattr(module, "get_plugin"):
         return module.get_plugin()
@@ -57,6 +70,8 @@ def _load_from_module(module_name: str) -> ModelPlugin:
 
 
 def _load_from_entry_point(entry_point_name: str) -> ModelPlugin:
+    """Load a plugin from the supported Python entry point groups."""
+
     for group in _entry_point_groups():
         for entry_point in entry_points(group=group):
             if entry_point.name == entry_point_name:
@@ -65,6 +80,8 @@ def _load_from_entry_point(entry_point_name: str) -> ModelPlugin:
 
 
 def _load_by_name(model_name: str) -> ModelPlugin:
+    """Resolve a model name through installed entry points or module fallback."""
+
     for group in _entry_point_groups():
         for entry_point in entry_points(group=group):
             if entry_point.name == model_name:
@@ -75,10 +92,14 @@ def _load_by_name(model_name: str) -> ModelPlugin:
 
 
 def _entry_point_groups() -> tuple[str, ...]:
+    """Return the entry point groups that may provide Hexo training models."""
+
     return (
         "hexo_train.models",
     )
 
 
 def _coerce_loaded_plugin(loaded: Any) -> ModelPlugin:
+    """Accept either a plugin instance or a callable that returns one."""
+
     return loaded() if callable(loaded) else loaded

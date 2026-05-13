@@ -2,14 +2,21 @@
 
 ## Purpose
 
-`hexo-train` is the shared training orchestration package. It owns the
-config-driven lifecycle for training runs: loading config, loading a model
-plugin, building shared components, running configured stages, and writing run
-outputs.
+`hexo-train` is the shared self-play training orchestration package. It owns
+the fixed training lifecycle: loading config, loading a model plugin, building
+shared components, running self-play epochs, publishing checkpoints, and writing
+run outputs.
 
-It is intentionally separate from `hexo-utils`. Utilities provide reusable
-mechanisms; training decides lifecycle, ordering, outputs, checkpoints, and
-diagnostics.
+One epoch means:
+
+```text
+self-play generation
+finalize samples
+select training samples
+select sample symmetries
+train configured passes
+save epoch checkpoint
+```
 
 ## Owns
 
@@ -17,10 +24,10 @@ diagnostics.
 - YAML/TOML training config loading.
 - Model plugin discovery and loading.
 - Shared/default training component construction.
-- Stage orchestration.
+- Self-play epoch orchestration.
 - Training-time D6 symmetry selection.
 - Run output directories.
-- Checkpoint layout.
+- Checkpoint layout and checkpoint pointer publishing.
 - Diagnostics and run manifests.
 - Coordination between shared sample buffers and model-owned training code.
 
@@ -44,22 +51,23 @@ packages/hexo_train/
   python/
     hexo_train/
       __init__.py
+      artifacts.py
+      checkpoints.py
+      components.py
       config.py
       context.py
-      pipeline.py
-      registry.py
-      components.py
       defaults.py
       diagnostics.py
+      pipeline.py
+      registry.py
       symmetry.py
       py.typed
       cli/
         __init__.py
         train_model.py
-      stages/
+      epoch/
         __init__.py
-        artifacts.py
-        checkpoint.py
+        loop.py
         samples.py
         selfplay.py
         symmetry.py
@@ -75,7 +83,7 @@ hexo-train-model path/to/train.toml
 hexo-train-model path/to/train.yaml
 ```
 
-`train_model.py` should stay thin:
+`train_model.py` stays thin:
 
 ```text
 parse config path
@@ -88,17 +96,19 @@ run lifecycle.
 
 ## Config
 
-Training config should describe:
+Training config describes:
 
-- run identity and output directory,
-- model plugin name or module,
-- shared game/sample settings,
-- model-owned settings under `model.config`,
-- optional stage subset to run in the canonical order.
+- run identity and output directory;
+- model plugin name, module, entry point, and model-owned settings under
+  `model.config`;
+- `loop.epochs`;
+- `selfplay.games_per_epoch`;
+- `samples.train_sample_count`;
+- `train.passes_per_epoch`;
+- checkpoint resume/save settings.
 
-The config loader normalizes YAML/TOML into one shared `TrainingConfig` shape.
-It should validate required fields early so failures happen before long-running
-jobs start.
+The config loader rejects generic `stages`. Self-play epoch training is the
+only implemented path initially.
 
 ## Plugin Loading
 
@@ -110,8 +120,10 @@ The plugin boundary should allow:
 ```text
 build model
 build model-specific training components
-run model-owned stages
+generate self-play requests or games
+finalize model-owned samples
 decode model-owned samples
+train over selected samples for configured passes
 write model-owned checkpoints or metadata
 ```
 
@@ -121,11 +133,11 @@ write model-owned checkpoints or metadata
 
 Shared components are model-neutral:
 
-- output directory,
-- checkpoint directory,
-- diagnostics writer,
-- sample source description,
-- engine/game spec,
+- output directory;
+- checkpoint directory;
+- diagnostics writer;
+- sample source description;
+- engine/game spec;
 - checkpoint store;
 - default scalar value target helper from `hexo_utils.samples`;
 - default legal-action policy target helper from `hexo_utils.samples`;
@@ -133,43 +145,16 @@ Shared components are model-neutral:
 
 Model components are plugin-owned:
 
-- model instance,
-- trainer,
-- optimizer,
-- sample decoder,
-- loss behavior,
+- model instance;
+- trainer;
+- optimizer;
+- sample decoder;
+- sample finalizer;
+- checkpoint loader/saver;
 - extra model-specific handles.
 
 The pipeline builds shared components first, then gives those to the model
 plugin so the model can construct whatever it needs.
-
-## Defaults And Overrides
-
-The key abstraction is a model training plugin. The shared package builds a
-default component set, then the model plugin returns only the pieces it wants
-to replace.
-
-```text
-defaults = build shared defaults
-model = model_plugin.build_model(game_spec, model.config)
-overrides = model_plugin.training_component_overrides(defaults, model.config, shared, model)
-components = defaults with overrides applied
-```
-
-Example reusable default wired through `hexo-train` from `hexo-utils`:
-
-```text
-ScalarValueTargetHelper:
-    winner == sample perspective -> +1.0
-    winner != sample perspective -> -1.0
-    draw or no result           ->  0.0
-```
-
-A normal policy/value model can use that default directly. A model with richer
-value targets, such as value distributions or multiple outcome heads, replaces
-only the value target helper. The same pattern applies to legal policy targets,
-sample decoding, trainers, optimizers, checkpoint writers, D6 selection, and
-stage handlers.
 
 ## Pipeline Flow
 
@@ -178,22 +163,22 @@ load and validate config
 create run context
 load model training plugin
 build default and model-specific components
+initialize run artifacts and sample store
 load or initialize checkpoint
-prepare sample store
-optionally generate self-play samples
-finalize pending samples
-refresh sample index
-build sample window
-select sample symmetries
-train configured steps
-save checkpoint
+for each epoch:
+    generate self-play
+    finalize samples
+    refresh sample index and select train_sample_count samples
+    select deterministic D6 symmetries for the window
+    train passes_per_epoch over the selected samples
+    save epoch checkpoint
+save final checkpoint
 optionally update self-play checkpoint pointer
 write diagnostics
 ```
 
-`hexo-train` owns this order. Config may select a subset for development or
-debugging, but it should not define a different order. Each stage calls shared
-default logic unless the model plugin provides a specific override.
+The checkpoint saved at the end of an epoch is the model state used for the next
+epoch's self-play.
 
 ## Training Data Boundary
 
@@ -202,7 +187,7 @@ The normal training path is:
 ```text
 self-play creates model-owned trainable samples
 hexo_utils.samples stores and serves sample chunks
-hexo_train orchestrates training stages
+hexo_train orchestrates self-play epochs
 model plugin decodes samples into tensors
 model plugin applies selected D6 symmetries to tensors/targets
 model plugin computes losses and updates weights
@@ -217,9 +202,9 @@ targets.
 
 `hexo-train` may depend on:
 
-- `hexo-engine` for game/spec contracts,
-- `hexo-utils` for sample buffers and shared mechanisms,
-- `hexo-runner` for self-play orchestration contracts,
+- `hexo-engine` for game/spec contracts;
+- `hexo-utils` for sample buffers and shared mechanisms;
+- `hexo-runner` for self-play orchestration contracts;
 - `hexo-model-*` only through dynamic plugin loading.
 
 Concrete model packages should not be hard-coded into `hexo-train`.

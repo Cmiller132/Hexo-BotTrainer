@@ -176,12 +176,12 @@ defaults when they match and overrides the model-owned pieces:
 
 - sample finalization;
 - sample decoding;
-- trainer or train-step behavior;
+- trainer or train-pass behavior;
 - checkpoint contents;
-- optional stage handlers.
 
 For ResNet, `samples.py` owns pending-sample finalization, `decode.py` owns
-sample-to-tensor conversion, `trainer.py` owns train steps and metrics, and
+sample-to-tensor conversion, `trainer.py` owns epoch training passes and
+metrics, and
 `checkpoints.py` owns model checkpoint contents.
 
 `plugin.py` should stay a composition root: build the model, parse

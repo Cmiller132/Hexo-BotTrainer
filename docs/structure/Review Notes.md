@@ -10,15 +10,15 @@ Review Notes.md (line 1) is 700+ lines of mostly empty per-file checklist. That 
 
 
 
-Training Stage Modules
+Training Epoch Modules
 
-hexo_train has a good central pipeline in pipeline.py (line 59), but the stage implementations are split across many small files, several of which are thin placeholders. The stage package may be worth consolidating into fewer lifecycle modules, for example checkpoint.py, samples.py, and execution.py, or temporarily folding no-op stages into the pipeline until they grow real behavior.
+hexo_train now has a self-play epoch package instead of the old selectable stages package. Continue watching whether epoch/samples.py should remain one file or split only after real chunk IO makes that worthwhile.
 
 
 
 Sample Buffer Scaffolding
 
-hexo_utils.samples is split into store, index, window, writer, sampling, schema, records, and targets. Some files are only placeholder dataclasses, like store.py (line 1), index.py (line 1), and window.py (line 1). I’d investigate combining the mechanical buffer pieces into one buffer.py or storage.py until real chunk/index logic requires separation.
+hexo_utils.samples now keeps the mechanical sample buffer pieces together in `buffer.py`, keeps schema/record shapes in `records.py`, and keeps reusable target construction in `targets.py`. Revisit splitting `buffer.py` only when real chunk IO, durable indexes, or sampler logic become large enough to justify separate files.
 
 
 

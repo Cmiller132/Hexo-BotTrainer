@@ -50,6 +50,37 @@ class TrainingPipelineSimplificationTests(unittest.TestCase):
                 base_dir=ROOT,
             )
 
+    def test_generic_stages_config_is_rejected(self) -> None:
+        from hexo_train.config import normalize_training_config
+
+        with self.assertRaisesRegex(ValueError, "stages"):
+            normalize_training_config(
+                {
+                    "model": {"name": "hexo_model_resnet"},
+                    "stages": ["train_steps"],
+                },
+                base_dir=ROOT,
+            )
+
+    def test_selfplay_loop_config_is_normalized(self) -> None:
+        from hexo_train.config import normalize_training_config
+
+        config = normalize_training_config(
+            {
+                "model": {"name": "hexo_model_resnet"},
+                "loop": {"epochs": 10},
+                "selfplay": {"games_per_epoch": 25},
+                "samples": {"train_sample_count": 5000},
+                "train": {"passes_per_epoch": 3},
+            },
+            base_dir=ROOT,
+        )
+
+        self.assertEqual(config.loop.epochs, 10)
+        self.assertEqual(config.selfplay.games_per_epoch, 25)
+        self.assertEqual(config.samples.train_sample_count, 5000)
+        self.assertEqual(config.train.passes_per_epoch, 3)
+
     def test_plugin_entrypoint_group_is_hexo_train_models(self) -> None:
         from hexo_train.config import ModelConfig
         from hexo_train.registry import load_model_plugin
@@ -114,6 +145,127 @@ class TrainingPipelineSimplificationTests(unittest.TestCase):
         self.assertEqual(components.model, "built-model")
         self.assertEqual(components.extra["model_seen"], "built-model")
 
+    def test_pipeline_runs_selfplay_epochs_in_order(self) -> None:
+        from hexo_train.components import ComponentOverrides
+        from hexo_train.pipeline import TrainingPipeline
+        from hexo_utils.samples import build_sample_window as real_build_window
+
+        events: list[object] = []
+        case = self
+
+        class FakeFinalizer:
+            def finalize(self, *, ctx: object, components: object, epoch: int) -> dict[str, object]:
+                case.assertIsNotNone(components.shared.selfplay_result)
+                events.append(("finalize", epoch))
+                return {"epoch": epoch}
+
+        class FakeSymmetrySelector:
+            def select_for_window(self, sample_window: object, *, seed: int | None, epoch: int) -> object:
+                case.assertIsNotNone(sample_window)
+                events.append(("symmetry", epoch))
+                return types.SimpleNamespace(
+                    symmetries=tuple(range(epoch)),
+                    seed=int(seed or 0),
+                    epoch=epoch,
+                    metadata={},
+                )
+
+        class FakeTrainer:
+            def train_passes(
+                self,
+                *,
+                passes: int,
+                sample_window: object,
+                sample_symmetries: object,
+                ctx: object,
+                components: object,
+                epoch: int,
+            ) -> dict[str, object]:
+                case.assertIsNotNone(sample_window)
+                case.assertIsNotNone(sample_symmetries)
+                events.append(("train", epoch, passes, sample_window.window_size))
+                return {"epoch": epoch, "passes": passes}
+
+        class FakeSaver:
+            def save(self, *, name: str, ctx: object, components: object) -> Path:
+                events.append(("checkpoint", name))
+                return ctx.checkpoint_dir / f"{name}.ckpt"
+
+        class FakePlugin:
+            name = "fake_model"
+
+            def build_model(self, game_spec: object, config: object) -> str:
+                return "fake-model"
+
+            def training_component_overrides(self, **kwargs: object) -> ComponentOverrides:
+                return ComponentOverrides(
+                    sample_finalizer=FakeFinalizer(),
+                    symmetry_selector=FakeSymmetrySelector(),
+                    trainer=FakeTrainer(),
+                    checkpoint_saver=FakeSaver(),
+                )
+
+            def generate_selfplay(
+                self,
+                *,
+                ctx: object,
+                components: object,
+                epoch: int,
+                games_per_epoch: int,
+            ) -> dict[str, object]:
+                events.append(("selfplay", epoch, games_per_epoch))
+                return {"epoch": epoch, "games": games_per_epoch}
+
+        module = types.SimpleNamespace(get_plugin=lambda: FakePlugin())
+
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "train.toml"
+            output_dir = Path(directory).as_posix()
+            config_path.write_text(
+                "\n".join(
+                    [
+                        "[model]",
+                        'name = "fake_model"',
+                        'module = "fake_training_plugin"',
+                        "[run]",
+                        f'output_dir = "{output_dir}"',
+                        "seed = 7",
+                        "[loop]",
+                        "epochs = 10",
+                        "[selfplay]",
+                        "games_per_epoch = 4",
+                        "[samples]",
+                        "train_sample_count = 123",
+                        "[train]",
+                        "passes_per_epoch = 2",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            def tracked_build_window(*args: object, **kwargs: object) -> object:
+                events.append(("samples", kwargs.get("window_size")))
+                return real_build_window(*args, **kwargs)
+
+            with patch.dict(sys.modules, {"fake_training_plugin": module}):
+                with patch("hexo_utils.samples.build_sample_window", tracked_build_window):
+                    ctx = TrainingPipeline().run(config_path)
+
+        self.assertEqual(len(ctx.epoch_outputs), 10)
+        self.assertEqual(ctx.epoch_outputs[-1].epoch, 10)
+        self.assertEqual(
+            events[:6],
+            [
+                ("selfplay", 1, 4),
+                ("finalize", 1),
+                ("samples", 123),
+                ("symmetry", 1),
+                ("train", 1, 2, 123),
+                ("checkpoint", "epoch_000001"),
+            ],
+        )
+        self.assertIn(("checkpoint", "latest"), events)
+
     def test_d6_selection_is_deterministic_in_hexo_train(self) -> None:
         from hexo_train.symmetry import D6SymmetrySelector
 
@@ -122,6 +274,21 @@ class TrainingPipelineSimplificationTests(unittest.TestCase):
         second = selector.choose(seed=7, epoch=2, sample_index=11, game_id="g", turn_index=3)
 
         self.assertEqual(first, second)
+
+    def test_d6_selection_records_epoch(self) -> None:
+        from hexo_train.symmetry import D6SymmetrySelector
+
+        selector = D6SymmetrySelector()
+        sample_window = types.SimpleNamespace(
+            window_size=2,
+            index=types.SimpleNamespace(sample_count=2),
+        )
+
+        first = selector.select_for_window(sample_window, seed=7, epoch=1)
+        second = selector.select_for_window(sample_window, seed=7, epoch=2)
+
+        self.assertEqual(first.epoch, 1)
+        self.assertEqual(second.epoch, 2)
 
     def test_policy_record_uses_parent_sample_action_order(self) -> None:
         from hexo_utils.samples import (
@@ -168,6 +335,8 @@ class TrainingPipelineSimplificationTests(unittest.TestCase):
             model=None,
         )
         self.assertIsInstance(overrides, ComponentOverrides)
+        self.assertTrue(hasattr(overrides.trainer, "train_passes"))
+        self.assertFalse(hasattr(overrides.trainer, "train_steps"))
 
 
 if __name__ == "__main__":

@@ -46,14 +46,9 @@ packages/hexo_utils/
         mcts.py
       samples/
         __init__.py
-        index.py
-        schema.py
+        buffer.py
         records.py
-        sampling.py
-        store.py
         targets.py
-        window.py
-        writer.py
   rust/
     src/
       lib.rs
@@ -102,10 +97,17 @@ and `mcts/tree.rs` owns the in-memory node/edge tree used by a single MCTS run.
 MCTS can simulate through engine-authoritative transitions without mutating the
 caller's root state.
 
-`samples`: training sample schemas, append/write buffer helpers, sample buffer
-storage and indexing, sampling windows, common policy logits over legal actions
-when the model opts into that default shape, default legal-action policy/value
-target helpers, and validation tools.
+`samples`: training sample schemas and record shapes, consolidated sample
+buffer mechanics in `buffer.py`, common policy logits over legal actions when
+the model opts into that default shape, default legal-action policy/value target
+helpers, and validation tools.
+
+The Python samples package stays intentionally compact:
+
+- `buffer.py`: sample store handles, append results, index refresh, training
+  windows, and future deterministic sample requests;
+- `records.py`: schema version metadata and neutral training sample records;
+- `targets.py`: reusable legal-action policy/value target builders.
 
 The samples layer should not own the authoritative position trail. That belongs
 to `hexo_runner.records`. It exists so model packages can write trainable

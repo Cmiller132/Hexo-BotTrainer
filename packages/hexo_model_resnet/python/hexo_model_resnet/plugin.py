@@ -1,4 +1,12 @@
-"""Model plugin entry point."""
+"""Model plugin entry point.
+
+This file is the composition root for the ResNet model package. `hexo_train`
+loads this plugin dynamically, then asks it to build the model and return the
+model-owned training components that replace or extend shared defaults.
+
+Keep detailed architecture, decoding, loss, augmentation, and training logic in
+their own modules. The plugin should mostly wire those pieces together.
+"""
 
 from __future__ import annotations
 
@@ -16,6 +24,8 @@ from .trainer import ResNetTrainer
 
 
 class HexoResNetPlugin:
+    """Training plugin consumed by `hexo_train`."""
+
     name = "hexo_model_resnet"
 
     def training_component_overrides(
@@ -28,11 +38,12 @@ class HexoResNetPlugin:
     ) -> ComponentOverrides:
         """Describe which shared training defaults ResNet accepts or replaces.
 
-        Pseudocode shape:
+        Step by step:
 
-        - replace sample decoding with ResNet crop/input decoding;
-        - replace training with the ResNet optimizer/loss loop.
-        - rely on `hexo_train` to keep shared defaults when not overridden.
+        1. Parse only the ResNet-owned portion of config.
+        2. Build ResNet-specific sample decoding/finalization/training helpers.
+        3. Return only those replacements; `hexo_train` keeps shared defaults
+           for everything else.
         """
 
         _ = (defaults, shared)
@@ -53,6 +64,8 @@ class HexoResNetPlugin:
         game_spec: Mapping[str, Any],
         config: Mapping[str, Any],
     ) -> torch.nn.Module:
+        """Build the ResNet model from model-owned architecture settings."""
+
         _ = game_spec
         resnet_config = parse_resnet_config(config)
         architecture = resnet_config.architecture
@@ -67,4 +80,6 @@ plugin = HexoResNetPlugin()
 
 
 def get_plugin() -> HexoResNetPlugin:
+    """Return the singleton plugin used by entry point and module loading."""
+
     return plugin

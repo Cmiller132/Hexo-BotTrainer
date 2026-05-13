@@ -19,13 +19,17 @@ training. They exist for analysis, debugging, audit, and recordkeeping.
 - `hexo_runner`: runs games and writes detached game records.
 - `hexo_model_*`: decides what a trainable sample means and writes samples
   during self-play.
-- `hexo_train`: orchestrates training stages and selects deterministic D6
+- `hexo_train`: orchestrates self-play epochs and selects deterministic D6
   symmetries for sampled positions.
 - `hexo_utils.samples`: provides shared sample schemas, chunk writing, indexing,
   shuffling, sampling, and default policy/value helpers.
 - `hexo_engine`: owns legal moves, transitions, terminal state, and snapshots.
 
 ## Self-Play Sample Generation
+
+Self-play is part of every training epoch. An epoch generates fresh games,
+finalizes any result-dependent samples, selects `samples.train_sample_count`
+samples, then trains over those samples for `train.passes_per_epoch` passes.
 
 For each model decision:
 
