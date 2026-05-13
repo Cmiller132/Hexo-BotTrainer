@@ -2,11 +2,12 @@
 
 ## Goal
 
-Hexo-RL is organized around four clear project families:
+Hexo-RL is organized around five clear project families:
 
 - `hexo-engine`: canonical game rules and state authority.
 - `hexo-runner`: game execution and orchestration.
 - `hexo-utils`: reusable mechanisms shared across packages.
+- `hexo-train`: config-driven training orchestration.
 - `hexo-model-*`: model families and learned decision systems.
 
 Each package family owns one kind of responsibility. The layout should make it
@@ -25,6 +26,9 @@ hexo-engine
 
 hexo-runner
   <- hexo-model-*        # only for runner player contracts
+
+hexo-train
+  <- hexo-model-*        # loaded dynamically as training plugins
 ```
 
 In practice:
@@ -33,6 +37,8 @@ In practice:
 - `hexo-utils` may depend on engine contracts for reusable mechanisms.
 - `hexo-runner` consumes engine and utility contracts, hosts players, and
   applies their actions through the engine.
+- `hexo-train` consumes engine, runner, and utility contracts to build training
+  runs, load model plugins, and write run outputs.
 - `hexo-model-*` packages consume engine, utility, and runner player contracts
   so model-backed players report the same identity and decision shapes as every
   other participant.
@@ -87,10 +93,14 @@ packages/
           mcts.py
         samples/
           __init__.py
+          index.py
           schema.py
           records.py
           sampling.py
+          store.py
           targets.py
+          window.py
+          writer.py
     rust/
       src/
         lib.rs
@@ -127,6 +137,30 @@ packages/
           evaluation.py
           selfplay.py
 
+  hexo_train/
+    pyproject.toml
+    python/
+      hexo_train/
+        __init__.py
+        config.py
+        context.py
+        pipeline.py
+        registry.py
+        components.py
+        defaults.py
+        diagnostics.py
+        py.typed
+        cli/
+          __init__.py
+          train_model.py
+        stages/
+          __init__.py
+          artifacts.py
+          checkpoint.py
+          samples.py
+          selfplay.py
+          training.py
+
   hexo_model_resnet/
     pyproject.toml
     python/
@@ -136,6 +170,7 @@ packages/
         augment.py
         checkpoints.py
         config.py
+        decode.py
         diagnostics.py
         inference.py
         input.py
@@ -143,6 +178,8 @@ packages/
         player.py
         plugin.py
         py.typed
+        samples.py
+        trainer.py
         training.py
     Cargo.toml                 # optional, only if this model has Rust code
     rust/                      # optional, only if this model has Rust code
@@ -158,6 +195,7 @@ packages/
 
 docs/
   structure/
+    HEXO_TRAIN.md
     TRAINING_INFO.md
 
 tests/

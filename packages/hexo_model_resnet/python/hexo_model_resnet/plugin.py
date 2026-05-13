@@ -9,10 +9,44 @@ import torch
 from .augment import augment_batch
 from .losses import hexo_loss
 from .architecture import HexoNet
+from .decode import ResNetSampleDecoder
+from .samples import ResNetSampleFinalizer
+from .trainer import ResNetTrainer
 
 
 class HexoResNetPlugin:
     name = "hexo_model_resnet"
+
+    def training_component_overrides(
+        self,
+        *,
+        defaults: Any,
+        config: Any,
+        shared: Any,
+    ) -> Mapping[str, Any]:
+        """Describe which shared training defaults ResNet accepts or replaces.
+
+        Pseudocode shape:
+
+        - use the default scalar value helper for win/loss/draw targets;
+        - use the default legal-action policy helper while policy targets are
+          a distribution over engine-provided legal moves;
+        - replace sample decoding with ResNet crop/input decoding;
+        - replace training with the ResNet optimizer/loss loop.
+        """
+
+        return {
+            "scalar_value_target": defaults.scalar_value_target,
+            "legal_policy_target": defaults.legal_policy_target,
+            "sample_decoder": ResNetSampleDecoder(config=getattr(config, "model_specific", {})),
+            "sample_finalizer": ResNetSampleFinalizer(),
+            "trainer": ResNetTrainer(config=getattr(config, "model_specific", {})),
+            "extra": {
+                "sample_decoder": "ResNet crop/input decoder placeholder.",
+                "sample_finalizer": "ResNet value finalizer placeholder.",
+                "trainer": "ResNet training loop placeholder.",
+            },
+        }
 
     def build_model(
         self,

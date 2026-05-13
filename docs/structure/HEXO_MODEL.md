@@ -45,6 +45,7 @@ packages/hexo_model_resnet/
       __init__.py
       architecture.py
       config.py
+      decode.py
       input.py
       inference.py
       player.py
@@ -54,6 +55,8 @@ packages/hexo_model_resnet/
       diagnostics.py
       checkpoints.py
       plugin.py
+      samples.py
+      trainer.py
       py.typed
   Cargo.toml                 # optional, only if this model has Rust code
   rust/                      # optional, only if this model has Rust code
@@ -162,3 +165,18 @@ self-play. A first version should store:
 The shared samples package may provide the legal-action policy/value container,
 buffer writing, indexing, and sampling mechanics. ResNet owns the exact tensor
 layout, crop behavior, auxiliary fields, and loss interpretation.
+
+## Model Training Plugin
+
+Each model package exposes a training plugin. The plugin accepts shared
+defaults when they match and overrides the model-owned pieces:
+
+- sample finalization;
+- sample decoding;
+- trainer or train-step behavior;
+- checkpoint contents;
+- optional stage handlers.
+
+For ResNet, `samples.py` owns pending-sample finalization, `decode.py` owns
+sample-to-tensor conversion, `trainer.py` owns train steps and metrics, and
+`checkpoints.py` owns model checkpoint contents.
