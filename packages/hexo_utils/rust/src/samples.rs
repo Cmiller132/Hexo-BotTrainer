@@ -1,31 +1,31 @@
-//! Replay boundary sketch.
+//! Samples boundary sketch.
 //!
-//! The old `ReplaySample` type mixed three decisions in one place:
+//! Older sample sketches mixed three decisions in one place:
 //! encoding shape, MCTS visit targets, and the training-file schema. That made
-//! it too easy for the Python runner redesign to inherit a replay format before
+//! it too easy for the Python runner redesign to inherit a sample format before
 //! the contract was actually settled.
 //!
 //! Keep this module as a small marker for now. The next implementation should
-//! define replay as an explicit versioned contract between Rust self-play and
+//! define samples as an explicit versioned contract between self-play and
 //! whichever trainer consumes it.
 
 /// Current placeholder schema version.
-pub const REPLAY_SCHEMA_DRAFT: u32 = 0;
+pub const SAMPLE_SCHEMA_DRAFT: u32 = 0;
 
-/// Minimal manifest-like replay batch description.
+/// Minimal manifest-like sample batch description.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ReplayBatchDraft {
+pub struct SampleBatchDraft {
     /// Schema draft used by this placeholder.
     pub schema: u32,
     /// Number of samples the eventual writer claims to contain.
     pub samples: usize,
 }
 
-impl ReplayBatchDraft {
+impl SampleBatchDraft {
     /// Create an empty draft batch.
     pub fn empty() -> Self {
         Self {
-            schema: REPLAY_SCHEMA_DRAFT,
+            schema: SAMPLE_SCHEMA_DRAFT,
             samples: 0,
         }
     }

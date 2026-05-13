@@ -19,7 +19,7 @@ from .session import SessionContext
 class LoopOptions:
     """Runner loop options that are independent of model internals."""
 
-    emit_replay: bool = True
+    emit_records: bool = True
     stop_on_player_error: bool = True
     metadata: Mapping[str, Any] = field(default_factory=dict)
 

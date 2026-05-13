@@ -2,12 +2,12 @@
 //!
 //! This crate depends on `hexo_engine` for authoritative rules and state
 //! transitions. It keeps the shared pieces: neural-network encoding, MCTS, and
-//! replay contract helpers.
+//! sample contract helpers.
 
 pub mod encoder;
 pub mod mcts;
 pub mod position;
-pub mod replay;
+pub mod samples;
 
 #[cfg(feature = "python")]
 pub mod pybridge;
@@ -20,4 +20,4 @@ pub use mcts::{
     SearchResult, StateEvaluator, UniformEvaluator,
 };
 pub use position::SearchPosition;
-pub use replay::{ReplayBatchDraft, REPLAY_SCHEMA_DRAFT};
+pub use samples::{SampleBatchDraft, SAMPLE_SCHEMA_DRAFT};

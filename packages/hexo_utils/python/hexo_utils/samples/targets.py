@@ -1,4 +1,4 @@
-"""Default replay target builders for common policy/value models.
+"""Default sample target builders for common policy/value models.
 
 This module handles only the shared case: a policy logit for each legal action
 plus an optional scalar value. Model-specific heads, pair targets, search
@@ -17,7 +17,7 @@ from hexo_utils.encoding.symmetry import (
     transform_action_ids,
 )
 
-from .records import ReplayDecisionRecord
+from .records import TrainingSampleRecord
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,12 +34,12 @@ class LegalPolicyValueTarget:
 
 
 def build_legal_policy_value_target(
-    record: ReplayDecisionRecord,
+    record: TrainingSampleRecord,
     *,
     symmetry: D6Symmetry = IDENTITY_D6,
     action_mapper: ActionSymmetryMapper | None = None,
 ) -> LegalPolicyValueTarget:
-    """Build the shared policy/value target for one replay decision.
+    """Build the shared policy/value target for one training sample.
 
     The policy vector stays paired with legal-action order. Under symmetry, the
     action ids are transformed but their associated logits remain in the same
@@ -48,7 +48,7 @@ def build_legal_policy_value_target(
     """
 
     if record.policy is None:
-        raise ValueError("ReplayDecisionRecord has no common policy record")
+        raise ValueError("TrainingSampleRecord has no common policy record")
 
     if symmetry != IDENTITY_D6 and action_mapper is None:
         raise ValueError("non-identity symmetry requires an action_mapper")

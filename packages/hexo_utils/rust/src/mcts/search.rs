@@ -224,7 +224,7 @@ where
     }
 
     // Encoding is only needed at expansion time. Legal actions are filtered to
-    // the same crop so search, policy priors, and replay targets agree.
+    // the same crop so search, policy priors, and sample targets agree.
     let evaluation = evaluator.evaluate_state(state, &encoded, &legal);
 
     let mut edges = Vec::with_capacity(legal.len());

@@ -12,7 +12,7 @@ policy layer, or a catch-all package.
 
 - Shared encoding helpers when they are not model-specific.
 - Shared MCTS search machinery.
-- Training replay serialization helpers.
+- Training sample buffer and serialization helpers.
 - Schema and version helpers.
 
 ## Does Not Own
@@ -34,6 +34,8 @@ packages/hexo_utils/
   python/
     hexo_utils/
       __init__.py
+      py.typed
+      rust_bridge.py
       encoding/
         __init__.py
         crop.py
@@ -42,7 +44,7 @@ packages/hexo_utils/
       search/
         __init__.py
         mcts.py
-      replay/
+      samples/
         __init__.py
         schema.py
         records.py
@@ -53,7 +55,13 @@ packages/hexo_utils/
       lib.rs
       encoder.rs
       mcts.rs
-      replay.rs
+      position.rs
+      pybridge.rs
+      samples.rs
+      mcts/
+        evaluator.rs
+        search.rs
+        tree.rs
 ```
 
 Any Rust utility code lives inside `packages/hexo_utils` with the Python
@@ -80,24 +88,34 @@ into model-facing shapes; threat masks may only strip engine legal actions
 using engine tactical facts. Symmetry helpers define and sample D6 transforms,
 but model packages decide how those transforms apply to their tensors.
 
-`search`: reusable MCTS machinery and supporting search statistics.
+`search`: reusable MCTS machinery and supporting search statistics. In Rust,
+`mcts.rs` is the public search module, `mcts/search.rs` owns the rollout/search
+algorithm, `mcts/evaluator.rs` owns evaluator-facing policy/value contracts,
+and `mcts/tree.rs` owns the in-memory node/edge tree used by a single MCTS run.
+`position.rs` wraps a cloned `hexo_engine::HexoState` for search rollouts so
+MCTS can simulate through engine-authoritative transitions without mutating the
+caller's root state.
 
-`replay`: training-oriented schemas, common policy logits over legal actions,
-references to core runner records, model-owned extension attachment, sampling
-mechanics, default legal-action policy/value target builders, and validation
-tools.
+`samples`: training sample schemas, append/write buffer helpers, sample buffer
+storage and indexing, sampling windows, common policy logits over legal actions
+when the model opts into that default shape, default legal-action policy/value
+target helpers, deterministic D6 symmetry plumbing, and validation tools.
 
-The replay layer should not own the authoritative position trail. That belongs
-to `hexo_runner.records`. Replay exists so training pipelines can consistently
-sample from core records while allowing model packages to attach custom
-extensions without teaching shared utilities about model-specific heads or
-logic.
+The samples layer should not own the authoritative position trail. That belongs
+to `hexo_runner.records`. It exists so model packages can write trainable
+samples during self-play, finalize result-dependent targets when a game ends,
+shuffle and sample those buffers, and attach custom payloads without teaching
+shared utilities about model-specific heads or logic.
 
 The default target path is intentionally narrow: legal-action policy logits and
 an optional scalar value. The default builder preserves logit/action ordering
 and applies a sampled D6 symmetry to action ids through an engine/model-provided
 mapper. Pair policies, auxiliary heads, search traces, and architecture-specific
 labels remain model-owned extensions.
+
+Shared sample helpers do not make datasets interchangeable. Models own the
+rules for writing their own self-play samples and interpreting their policy
+outputs.
 
 ## Contract Flow
 

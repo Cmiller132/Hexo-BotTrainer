@@ -1,8 +1,8 @@
 """Training pipeline boundary for the ResNet model family.
 
-Training code owns how replay becomes ResNet examples, policy/value targets,
+Training code owns how ResNet samples become examples, policy/value targets,
 loss inputs, optimizer steps, checkpoint writes, and model-specific metrics.
-Shared replay helpers may sample records, but target semantics live here.
+Shared sample helpers may select records, but target semantics live here.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ class TrainingRun:
     """Inputs for one ResNet training run."""
 
     model: object
-    replay_source: object
+    sample_source: object
     config: object
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
@@ -35,6 +35,6 @@ def _not_implemented(operation: str) -> NoReturn:
 
 
 def train(run: TrainingRun) -> TrainingResult:
-    """Train a ResNet model from replay records."""
+    """Train a ResNet model from model-owned sample records."""
 
     _not_implemented("train")

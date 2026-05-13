@@ -1,7 +1,7 @@
 //! Hexo rule engine.
 //!
 //! This crate owns the authoritative game state and state transitions. Model,
-//! search, and replay code live outside this crate so the rules layer stays
+//! search, and sample code live outside this crate so the rules layer stays
 //! small, deterministic, and easy to audit. The package-local Python bridge is
 //! intentionally thin and forwards to this rules authority.
 

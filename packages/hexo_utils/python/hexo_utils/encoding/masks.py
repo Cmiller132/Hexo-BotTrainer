@@ -34,7 +34,7 @@ def build_legal_mask(legal_actions: Sequence[object], *, shape: tuple[int, ...])
 
 
 def mask_from_action_ids(action_ids: Sequence[str], *, shape: tuple[int, ...]) -> ActionMask:
-    """Build a mask when replay or search already carries action identities."""
+    """Build a mask when samples or search already carry action identities."""
 
     _not_implemented("mask_from_action_ids")
 

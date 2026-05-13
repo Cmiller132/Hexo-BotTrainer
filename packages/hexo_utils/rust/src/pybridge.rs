@@ -1,6 +1,6 @@
 //! Minimal PyO3 bridge while the Python layer is redesigned.
 //!
-//! Keep the extension importable, but do not expose self-play, replay writing,
+//! Keep the extension importable, but do not expose self-play, sample writing,
 //! or evaluator callbacks yet. Those contracts should be rebuilt deliberately
 //! after the new Python top layer is specified.
 
@@ -12,7 +12,7 @@ pub fn capabilities(py: Python<'_>) -> PyResult<PyObject> {
     let dict = pyo3::types::PyDict::new_bound(py);
     dict.set_item("status", "placeholder")?;
     dict.set_item("selfplay", false)?;
-    dict.set_item("replay", false)?;
+    dict.set_item("samples", false)?;
     dict.set_item("message", "hexo_utils PyO3 bridge is awaiting redesign")?;
     Ok(dict.into_py(py))
 }

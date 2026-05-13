@@ -2,8 +2,8 @@
 
 The runner records the authoritative position trail and game metadata while a
 game runs. It does not record model tensors, policy semantics, or training
-targets. Training-oriented replay records can later reference these core game
-records and attach model-specific data.
+targets. Model-owned training samples may keep references to these core records
+for debugging, but they are written separately during self-play.
 """
 
 from __future__ import annotations

@@ -42,6 +42,7 @@ packages/hexo_engine/
       api.py
       types.py
       errors.py
+      py.typed
   rust/
     src/
       lib.rs

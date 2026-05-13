@@ -1,8 +1,8 @@
-"""Training replay record shapes.
+"""Training sample record shapes.
 
-Core game records are written by `hexo_runner.records`. This module describes
-training-oriented replay layers that can reference those core records, attach a
-common policy output over legal actions, and carry model-owned extensions.
+Models write these records during self-play. Core game records remain in
+`hexo_runner.records` for detached analysis and audit; samples may keep optional
+references back to those records, but they are already training-facing data.
 """
 
 from __future__ import annotations
@@ -12,13 +12,13 @@ from typing import Any, Mapping, Sequence
 
 
 @dataclass(frozen=True, slots=True)
-class PolicyLogitRecord:
+class PolicyOutputRecord:
     """Common policy output over the legal actions offered by the engine.
 
     `legal_action_ids` defines the order of `logits`. Model packages can turn
     that compact vector into their own target tensors. More complex policy
     heads, pair policies, search traces, or architecture-specific data should
-    be stored as model extension records instead of being modeled here. Large
+    be stored as model payload records instead of being modeled here. Large
     arrays may be represented by references rather than kept resident in RAM.
     """
 
@@ -34,10 +34,10 @@ class PolicyLogitRecord:
 
 
 @dataclass(frozen=True, slots=True)
-class ModelExtensionRecord:
-    """Opaque model-owned extension attached to a replay decision.
+class ModelSamplePayload:
+    """Opaque model-owned payload attached to a training sample.
 
-    The shared replay layer only knows the extension namespace and version.
+    The shared samples layer only knows the payload namespace and version.
     The model package owns the payload schema and parsing code. Large extension
     payloads may be stored out-of-line behind `payload_ref`.
     """
@@ -52,18 +52,18 @@ class ModelExtensionRecord:
 
 
 @dataclass(frozen=True, slots=True)
-class ReplayDecisionRecord:
-    """Training-facing replay record for one recorded decision.
+class TrainingSampleRecord:
+    """Training-facing record for one sampled position/decision.
 
-    `source_record_ref` points at the runner's durable core position record.
-    This keeps the replay layer extensible for model training without making
-    utils responsible for owning the authoritative game record.
+    `source_record_ref` may point at the runner's detached core position record
+    for debugging or audit. Training should not depend on scanning runner
+    records; models write the sample contents they need during self-play.
     """
 
     game_id: str
     turn_index: int
     source_record_ref: object
     legal_action_ids: tuple[str, ...]
-    policy: PolicyLogitRecord | None = None
-    model_extensions: Sequence[ModelExtensionRecord] = field(default_factory=tuple)
+    policy: PolicyOutputRecord | None = None
+    model_payloads: Sequence[ModelSamplePayload] = field(default_factory=tuple)
     metadata: Mapping[str, Any] = field(default_factory=dict)

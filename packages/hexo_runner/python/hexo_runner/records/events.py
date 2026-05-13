@@ -3,7 +3,7 @@
 Events are emitted around player initialization, decision requests, accepted
 engine transitions, player errors, and final summaries. They are useful for
 logging, live observers, and feeding record writers, but they are not the
-durable replay schema by themselves.
+durable game record schema by themselves.
 """
 
 from __future__ import annotations

@@ -69,7 +69,7 @@ pub struct GameOutcome {
     pub placements: u32,
 }
 
-/// Flat history record for encoders and replay samples.
+/// Flat history record for encoders and training samples.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlacementRecord {
     /// Player who placed the stone.

@@ -41,10 +41,12 @@ packages/hexo_runner/
   python/
     hexo_runner/
       __init__.py
+      cli.py
       config.py
       player.py
       session.py
       loop.py
+      py.typed
       records/
         __init__.py
         events.py
@@ -105,7 +107,7 @@ while not terminal:
     ask active player for a decision
     handle player refusal or error if needed
     submit action to engine
-    emit events and replay records
+    emit events and core game records
 close players
 emit final summary
 ```
@@ -119,9 +121,10 @@ emit final summary
 - `results`: compact return summaries for match, batch, evaluation, and
   self-play calls.
 
-Records can be analyzed after a game to produce derived summaries, but the
-original game record should remain append-only and replayable. Model-specific
-training payloads belong in replay extensions, not in the core game record.
+Records are detached from training. They can be analyzed after a game to
+produce derived summaries, but the original game record should remain
+append-only and replayable. Model-specific training payloads are written by the
+model's self-play sample writer, not into the runner game record.
 
 ## Run Modes
 
@@ -132,6 +135,7 @@ training payloads belong in replay extensions, not in the core game record.
 - `evaluation`: builds fixed opponent comparisons on top of batch, marks
   sessions as evaluation runs, and owns score/analysis summaries.
 - `selfplay`: creates model-backed players through an `InferenceAdapter`, calls
-  batch, and writes records for training to consume.
+  batch, writes detached core game records, and lets the model package write
+  trainable samples into its own sample buffer while the games run.
 
 All modes share the same player contract and engine application path.

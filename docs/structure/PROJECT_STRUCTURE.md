@@ -40,38 +40,112 @@ In practice:
 The runner should discover or receive model-backed players through adapters and
 plugins. It should not import or hard-code concrete model architectures.
 
-## Desired Package Layout
+## Current And Target Package Layout
 
 ```text
+Cargo.toml                    # workspace listing package-local Rust manifests
+
 packages/
   hexo_engine/
     pyproject.toml
     Cargo.toml
     python/
       hexo_engine/
+        __init__.py
+        api.py
+        types.py
+        errors.py
+        py.typed
     rust/
       src/
+        lib.rs
+        board.rs
+        coord.rs
+        rules.rs
+        state.rs
+        tactics.rs
+        identity.rs
+        snapshot.rs
+        error.rs
         pybridge.rs
 
   hexo_utils/
     pyproject.toml
-    Cargo.toml                 # when shared Rust helpers are needed
+    Cargo.toml
     python/
       hexo_utils/
+        __init__.py
+        py.typed
+        rust_bridge.py
+        encoding/
+          __init__.py
+          crop.py
+          masks.py
+          symmetry.py
+        search/
+          __init__.py
+          mcts.py
+        samples/
+          __init__.py
+          schema.py
+          records.py
+          sampling.py
+          targets.py
     rust/
       src/
+        lib.rs
+        encoder.rs
+        mcts.rs
+        position.rs
+        pybridge.rs
+        samples.rs
+        mcts/
+          evaluator.rs
+          search.rs
+          tree.rs
 
   hexo_runner/
     pyproject.toml
     python/
       hexo_runner/
+        __init__.py
+        cli.py
+        config.py
+        player.py
+        session.py
+        loop.py
+        py.typed
+        records/
+          __init__.py
+          events.py
+          record.py
+          results.py
+        modes/
+          __init__.py
+          match.py
+          batch.py
+          evaluation.py
+          selfplay.py
 
   hexo_model_resnet/
     pyproject.toml
-    Cargo.toml                 # optional, only if this model has Rust code
     python/
       hexo_model_resnet/
-    rust/
+        __init__.py
+        architecture.py
+        augment.py
+        checkpoints.py
+        config.py
+        diagnostics.py
+        inference.py
+        input.py
+        losses.py
+        player.py
+        plugin.py
+        py.typed
+        training.py
+    Cargo.toml                 # optional, only if this model has Rust code
+    rust/                      # optional, only if this model has Rust code
       src/
 
   hexo_model_*/
@@ -84,6 +158,7 @@ packages/
 
 docs/
   structure/
+    TRAINING_INFO.md
 
 tests/
   engine/
@@ -92,6 +167,10 @@ tests/
   models/
   integration/
 ```
+
+This layout reflects both the current project tree and the near-term target.
+Optional model-local Rust directories are part of the final package rule, but
+`hexo_model_resnet` is currently Python-only.
 
 ## Package Layout Rule
 
@@ -121,25 +200,27 @@ player may use model and utility code internally
 runner submits action to engine
 engine validates and applies the action
 runner emits events and writes durable game records
-model packages turn records into training examples
+model packages write trainable samples during self-play
 ```
 
-## Record And Replay Layers
+## Record And Sample Layers
 
-Record and replay data are layered by ownership:
+Record and sample data are layered by ownership:
 
 - core game records: position trail, accepted actions, state snapshots,
   players, seeds, terminal result, and run outcome;
-- training replay records: references to core game records plus legal-action
-  ordering and common policy logits;
+- training samples: model-owned samples written during self-play, with
+  legal-action ordering, policy/search outputs, value targets once finalized,
+  and optional references back to detached game records;
 - sampled symmetries: deterministic D6 transforms chosen per training sample
   and applied by model-owned mappers;
-- model extensions: model-owned payloads for anything beyond the common replay
-  record;
+- model extensions: model-owned payloads for anything beyond the common sample
+  helpers;
 - model training examples: model-specific tensors, masks, targets, and weights.
 
-This allows multiple model families to train from the same games without
-forcing them to share target semantics.
+Core game records are detached neutral facts for analysis, audit, and
+recordkeeping. Training samples are model-owned: by default, a model writes and
+trains only on its own self-play samples, targets, masks, and weights.
 
 ## Design Rules
 
