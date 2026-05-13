@@ -1,36 +1,14 @@
-"""Shared replay record shapes.
+"""Training replay record shapes.
 
-The engine contributes accepted actions and snapshots. The runner contributes
-players, seeds, and run outcome. Models may attach opaque extension records
-that remain owned by the producing model package.
+Core game records are written by `hexo_runner.records`. This module describes
+training-oriented replay layers that can reference those core records, attach a
+common policy output over legal actions, and carry model-owned extensions.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
-
-
-@dataclass(frozen=True, slots=True)
-class EngineReplayRecord:
-    """Rules-authoritative transition data for one accepted action."""
-
-    game_id: str
-    turn_index: int
-    before_snapshot: object
-    action: object
-    after_snapshot: object
-    terminal: object | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class RunnerReplayRecord:
-    """Execution metadata recorded around an engine transition."""
-
-    game_id: str
-    turn_index: int
-    player_id: str
-    metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,9 +53,17 @@ class ModelExtensionRecord:
 
 @dataclass(frozen=True, slots=True)
 class ReplayDecisionRecord:
-    """Joined decision record used by samplers and training readers."""
+    """Training-facing replay record for one recorded decision.
 
-    engine: EngineReplayRecord
-    runner: RunnerReplayRecord
+    `source_record_ref` points at the runner's durable core position record.
+    This keeps the replay layer extensible for model training without making
+    utils responsible for owning the authoritative game record.
+    """
+
+    game_id: str
+    turn_index: int
+    source_record_ref: object
+    legal_action_ids: tuple[str, ...]
     policy: PolicyLogitRecord | None = None
     model_extensions: Sequence[ModelExtensionRecord] = field(default_factory=tuple)
+    metadata: Mapping[str, Any] = field(default_factory=dict)

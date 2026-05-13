@@ -17,9 +17,10 @@ runner applies accepted actions through the engine
 ## Owns
 
 - Session setup from players, seeds, scenarios, and run options.
+- Engine state handle ownership for one game session.
 - The game loop.
 - Player lifecycle.
-- Replay and event emission.
+- Core game recording and event emission.
 - Result summaries.
 - Self-play, evaluation, direct match, smoke test, and batch run modes.
 
@@ -61,6 +62,7 @@ packages/hexo_runner/
 All participants implement the same contract:
 
 ```text
+identity -> player identity
 initialize(session_context)
 decide(decision_request) -> decision_result
 observe_transition(transition_event)
@@ -68,7 +70,8 @@ close(final_summary)
 ```
 
 A player may be model-backed, scripted, human-controlled, remote, search-based,
-or random. The runner only depends on the contract.
+or random. The runner only depends on the contract, and every player self
+reports the same `identity` field.
 
 ## Decision Request
 
@@ -96,6 +99,7 @@ produced them.
 create session
 initialize players
 create or load engine state
+store EngineStateRef on SessionContext
 while not terminal:
     ask engine for current context
     ask active player for a decision
@@ -109,12 +113,15 @@ emit final summary
 ## Records And Results
 
 - `events`: live, ephemeral notifications for logging and observers.
-- `record`: durable game records written as the game runs.
+- `record`: durable core game records written as the game runs. These contain
+  position history, accepted actions, players, seeds, terminal state, and run
+  metadata.
 - `results`: compact return summaries for match, batch, evaluation, and
   self-play calls.
 
 Records can be analyzed after a game to produce derived summaries, but the
-original game record should remain append-only and replayable.
+original game record should remain append-only and replayable. Model-specific
+training payloads belong in replay extensions, not in the core game record.
 
 ## Run Modes
 

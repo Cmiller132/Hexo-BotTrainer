@@ -83,6 +83,7 @@ From engine:
 To runner:
 
 - a player adapter,
+- a self-reported `identity` field matching the runner contract,
 - a decision response with selected action,
 - optional opaque diagnostics.
 
@@ -103,6 +104,8 @@ return action + diagnostics
 
 The runner sees only the action and diagnostics. Tensor layouts, logits,
 candidate ranking, and search internals stay inside the model package.
+Model-backed players should conform to the runner contract directly rather than
+requiring runner-specific special cases.
 
 For self-play, model packages expose an `InferenceAdapter` that returns common
 policy logits over the engine-provided legal actions plus any model-owned
@@ -114,8 +117,11 @@ Model packages decide how runner records become model-specific examples:
 
 - filter replay records,
 - rebuild or load model inputs,
-- construct policy and value targets,
+- use the default legal-action policy/value target when it fits,
+- construct or transform model-specific targets when it does not,
 - parse model-owned replay extensions when needed,
+- apply the sampled D6 symmetry consistently to inputs, legal masks, policy
+  targets, and any model-owned extensions,
 - apply masks and sample weights,
 - collate batches,
 - compute losses,

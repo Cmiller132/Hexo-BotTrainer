@@ -9,7 +9,10 @@ events/records, and stops on terminal state or runner policy failure.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping
+
+from .records import EventSink, GameResult, RecordSink
+from .session import SessionContext
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,11 +27,18 @@ class LoopOptions:
 class GameLoop:
     """Coordinator for one engine-backed game."""
 
-    def __init__(self, players: Sequence[object], options: LoopOptions | None = None) -> None:
-        self.players = tuple(players)
+    def __init__(
+        self,
+        options: LoopOptions | None = None,
+        *,
+        event_sink: EventSink | None = None,
+        record_sink: RecordSink | None = None,
+    ) -> None:
         self.options = options or LoopOptions()
+        self.event_sink = event_sink
+        self.record_sink = record_sink
 
-    def run(self, session_context: object) -> object:
-        """Run a game using engine state and runner player contracts."""
+    def run(self, session_context: SessionContext) -> GameResult:
+        """Run a game using `session_context.engine_state` and runner players."""
 
         raise NotImplementedError("GameLoop.run will be wired to the engine API.")

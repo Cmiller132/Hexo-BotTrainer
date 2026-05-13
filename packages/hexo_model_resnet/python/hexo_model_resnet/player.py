@@ -10,12 +10,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import NoReturn
 
+from hexo_runner.player import PlayerIdentity
+
 
 @dataclass(slots=True)
 class ResNetPlayer:
     """Model-backed participant for `hexo_runner`."""
 
-    player_id: str
+    identity: PlayerIdentity
     inference: object
     search: object | None = None
 

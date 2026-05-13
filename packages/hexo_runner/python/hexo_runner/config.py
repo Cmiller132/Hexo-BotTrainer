@@ -3,8 +3,8 @@
 The redesign should make config ownership explicit:
 
 1. Experiment config: cycle counts, paths, checkpoint policy, logging.
-2. Game config: Rust-owned game limits and encoding options.
-3. Search config: Rust-owned MCTS/search options.
+2. Game config: engine-owned rules, scenario, and seed options.
+3. Search config: model/search-owned MCTS options.
 4. Model config: Python-owned model package, device, precision, batching.
 5. Training config: Python-owned optimizer and replay consumption options.
 

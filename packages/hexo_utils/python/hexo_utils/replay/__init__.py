@@ -1,22 +1,21 @@
 """Shared replay helpers.
 
-Replay utilities describe portable records and sampling contracts. Engine
-truth, runner execution metadata, common policy logits, and model extensions
-remain separate layers.
+Replay utilities describe training-facing records and sampling contracts. Core
+game records stay in `hexo_runner.records`; replay records attach policy data
+and model-owned extensions for training.
 """
 
 from .records import (
-    EngineReplayRecord,
     ModelExtensionRecord,
     PolicyLogitRecord,
     ReplayDecisionRecord,
-    RunnerReplayRecord,
 )
 from .sampling import ReplayBatch, ReplaySampleRequest, sample_replay_records
 from .schema import REPLAY_SCHEMA_VERSION, ReplaySchema
+from .targets import LegalPolicyValueTarget, build_legal_policy_value_target
 
 __all__ = [
-    "EngineReplayRecord",
+    "LegalPolicyValueTarget",
     "ModelExtensionRecord",
     "PolicyLogitRecord",
     "REPLAY_SCHEMA_VERSION",
@@ -24,6 +23,6 @@ __all__ = [
     "ReplayDecisionRecord",
     "ReplaySampleRequest",
     "ReplaySchema",
-    "RunnerReplayRecord",
+    "build_legal_policy_value_target",
     "sample_replay_records",
 ]

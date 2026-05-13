@@ -15,30 +15,30 @@ mixing training assumptions into the game engine.
 
 ## Dependency Direction
 
-The intended dependency direction is:
+The intended package dependencies are:
 
 ```text
 hexo-engine
-   ^
-   |
-hexo-utils
-   ^
-   |
-hexo-model-*
-   ^
-   |
+  <- hexo-utils
+  <- hexo-runner
+  <- hexo-model-*
+
 hexo-runner
+  <- hexo-model-*        # only for runner player contracts
 ```
 
 In practice:
 
 - `hexo-engine` stands alone and owns game truth.
 - `hexo-utils` may depend on engine contracts for reusable mechanisms.
-- `hexo-model-*` packages consume engine and utility contracts.
-- `hexo-runner` hosts players and applies their actions through the engine.
+- `hexo-runner` consumes engine and utility contracts, hosts players, and
+  applies their actions through the engine.
+- `hexo-model-*` packages consume engine, utility, and runner player contracts
+  so model-backed players report the same identity and decision shapes as every
+  other participant.
 
-The runner should discover or receive model-backed players through adapters. It
-should not hard-code model architectures.
+The runner should discover or receive model-backed players through adapters and
+plugins. It should not import or hard-code concrete model architectures.
 
 ## Desired Package Layout
 
@@ -51,6 +51,7 @@ packages/
       hexo_engine/
     rust/
       src/
+        pybridge.rs
 
   hexo_utils/
     pyproject.toml
@@ -99,6 +100,10 @@ There is no separate top-level `crates/` source tree. A repository-level Cargo
 workspace may list package-local manifests, but Rust source stays under the
 owning package.
 
+Packages that expose Rust to Python use PyO3 through maturin. This keeps the
+Python wheel and Rust extension in one package while preserving a narrow,
+typed bridge surface.
+
 For example, `packages/hexo_engine` owns both:
 
 - the host-facing Python API under `python/hexo_engine`;
@@ -119,17 +124,19 @@ runner emits events and writes durable game records
 model packages turn records into training examples
 ```
 
-## Replay Layers
+## Record And Replay Layers
 
-Replay and training data are layered by ownership:
+Record and replay data are layered by ownership:
 
-- engine history: accepted actions, state snapshots, terminal result,
-  rules/version metadata;
-- runner metadata: players, seeds, and execution outcome;
-- common policy records: logits over the legal actions supplied by the engine;
-- model extensions: model-owned payloads for anything beyond the common policy
+- core game records: position trail, accepted actions, state snapshots,
+  players, seeds, terminal result, and run outcome;
+- training replay records: references to core game records plus legal-action
+  ordering and common policy logits;
+- sampled symmetries: deterministic D6 transforms chosen per training sample
+  and applied by model-owned mappers;
+- model extensions: model-owned payloads for anything beyond the common replay
   record;
-- model training records: model-specific examples, masks, targets, and weights.
+- model training examples: model-specific tensors, masks, targets, and weights.
 
 This allows multiple model families to train from the same games without
 forcing them to share target semantics.

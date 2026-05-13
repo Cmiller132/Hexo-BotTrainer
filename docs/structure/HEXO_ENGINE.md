@@ -53,12 +53,18 @@ packages/hexo_engine/
       identity.rs
       snapshot.rs
       error.rs
+      pybridge.rs
 ```
 
 `packages/hexo_engine` is the single ownership boundary for engine code. The
 Python package is the host-facing API; the Rust code is the rules authority and
 performance core. The Python side should not contain a parallel rules
 implementation.
+
+The clean bridge choice is PyO3 built with maturin. The Python package exposes
+friendly typed functions while `hexo_engine._rust` owns the narrow compiled
+boundary into Rust. The bridge should pass opaque state handles and simple
+transport types, not reimplement rules in Python.
 
 ## Core API
 

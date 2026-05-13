@@ -12,7 +12,7 @@ policy layer, or a catch-all package.
 
 - Shared encoding helpers when they are not model-specific.
 - Shared MCTS search machinery.
-- Replay serialization helpers.
+- Training replay serialization helpers.
 - Schema and version helpers.
 
 ## Does Not Own
@@ -21,7 +21,7 @@ policy layer, or a catch-all package.
 - Terminal state authority.
 - Model architecture.
 - Model-specific target meaning.
-- Runner lifecycle.
+- Core game recording or runner lifecycle.
 - Policy decisions.
 - Reward interpretation.
 
@@ -38,6 +38,7 @@ packages/hexo_utils/
         __init__.py
         crop.py
         masks.py
+        symmetry.py
       search/
         __init__.py
         mcts.py
@@ -46,6 +47,7 @@ packages/hexo_utils/
         schema.py
         records.py
         sampling.py
+        targets.py
   rust/
     src/
       lib.rs
@@ -75,13 +77,27 @@ Otherwise it belongs in the engine, runner, or a model package.
 circular, multi-window, or bypassed entirely by model packages that consume the
 whole board or a custom representation. Masks translate engine legal actions
 into model-facing shapes; threat masks may only strip engine legal actions
-using engine tactical facts.
+using engine tactical facts. Symmetry helpers define and sample D6 transforms,
+but model packages decide how those transforms apply to their tensors.
 
 `search`: reusable MCTS machinery and supporting search statistics.
 
-`replay`: schemas, compact canonical records, common policy logits over legal
-actions, model-owned extension attachment, sampling mechanics, and validation
+`replay`: training-oriented schemas, common policy logits over legal actions,
+references to core runner records, model-owned extension attachment, sampling
+mechanics, default legal-action policy/value target builders, and validation
 tools.
+
+The replay layer should not own the authoritative position trail. That belongs
+to `hexo_runner.records`. Replay exists so training pipelines can consistently
+sample from core records while allowing model packages to attach custom
+extensions without teaching shared utilities about model-specific heads or
+logic.
+
+The default target path is intentionally narrow: legal-action policy logits and
+an optional scalar value. The default builder preserves logit/action ordering
+and applies a sampled D6 symmetry to action ids through an engine/model-provided
+mapper. Pair policies, auxiliary heads, search traces, and architecture-specific
+labels remain model-owned extensions.
 
 ## Contract Flow
 

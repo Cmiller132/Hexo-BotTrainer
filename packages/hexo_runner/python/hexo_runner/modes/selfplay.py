@@ -1,8 +1,9 @@
 """Self-play runner mode.
 
-Self-play generates games from model-backed players and writes durable game
-records for training. It should not build model tensors itself; model packages
-read records and decide how to encode them for their own training loops.
+Self-play generates games from model-backed players, writes durable core game
+records, and creates training replay references. It should not build model
+tensors itself; model packages read records and decide how to encode them for
+their own training loops.
 """
 
 from __future__ import annotations
@@ -42,9 +43,10 @@ def run_selfplay_cycle(config: object) -> object:
     2. Ask the model package to create an `InferenceAdapter`.
     3. Wrap the adapter in runner players.
     4. Build match configs and call batch mode.
-    5. Write game records with engine history, runner metadata, common policy
-       logits, and model-owned extension records.
-    6. Return a manifest or record reference for the training package to read.
+    5. Write core game records with position history and runner metadata.
+    6. Write training replay records with common policy logits and optional
+       model-owned extensions that reference the core records.
+    7. Return a manifest or record reference for the training package to read.
     """
 
     raise NotImplementedError("self-play will be built on batch mode and records.")

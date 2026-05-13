@@ -1,9 +1,9 @@
-"""Durable runner game record boundary.
+"""Durable core game record boundary.
 
-The runner records what happened while a game runs. It does not reinterpret
-game legality, model tensors, or policy semantics; it joins engine transition
-records, runner metadata, common policy outputs, and opaque model extension
-records into a durable game record.
+The runner records the authoritative position trail and game metadata while a
+game runs. It does not record model tensors, policy semantics, or training
+targets. Training-oriented replay records can later reference these core game
+records and attach model-specific data.
 """
 
 from __future__ import annotations
@@ -11,35 +11,40 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Protocol, Sequence
 
+from ..player import PlayerIdentity
+
 
 @dataclass(frozen=True, slots=True)
-class GameRecordEntry:
-    """Durable record for one accepted decision/transition."""
+class PositionRecord:
+    """Core record for one accepted engine transition."""
 
     game_id: str
     turn_index: int
     player_id: str
-    engine_record: object
-    policy_record: object | None = None
-    model_extension_records: Sequence[object] = field(default_factory=tuple)
+    before_snapshot: object
+    action: object
+    after_snapshot: object
+    terminal: object | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
 class GameRecord:
-    """Complete durable record for one game."""
+    """Complete core record for one game."""
 
     game_id: str
-    entries: Sequence[GameRecordEntry]
+    players: Sequence[PlayerIdentity]
+    entries: Sequence[PositionRecord]
+    seed: int | None = None
     terminal: object | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
 class RecordSink(Protocol):
-    """Destination for game record entries."""
+    """Destination for core game record entries."""
 
-    def write_entry(self, entry: GameRecordEntry) -> None:
-        """Persist or forward one record entry as the game runs."""
+    def write_entry(self, entry: PositionRecord) -> None:
+        """Persist or forward one core position record as the game runs."""
 
     def close_game(self, game_id: str, terminal: object | None = None) -> object:
         """Finalize a game record and return a storage reference or manifest."""
