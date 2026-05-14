@@ -1,36 +1,44 @@
 # Hexo RL Prototype
 
-Single-machine reinforcement learning prototype for Hexo. The repo is organized
-by package: `game_engine` owns rules and state transitions, `models_common`
-owns model-facing MCTS/encoding/replay/inference helpers, `game_runner` owns
-config and training orchestration, and `hexo_resnet` is the first model plugin.
+Single-machine reinforcement-learning prototype for Hexo.
+
+The current design documentation is intentionally consolidated:
+
+- [Project Structure](docs/structure/PROJECT_STRUCTURE.md)
+- [hexo-engine](docs/structure/HEXO_ENGINE.md)
+- [hexo-runner](docs/structure/HEXO_RUNNER.md)
+- [hexo-utils](docs/structure/HEXO_UTILS.md)
+- [hexo-train](docs/structure/HEXO_TRAIN.md)
+- [hexo-model-*](docs/structure/HEXO_MODEL.md)
+
+The code is still in a prototype/design stage, so several package APIs are
+scaffolding. The docs above are the source of truth for package ownership and
+the intended layout.
+
+## Packages
+
+- `hexo_engine`: canonical rules, state transitions, terminal detection, and
+  replayable state history.
+- `hexo_runner`: headless game execution, player lifecycle, and detached game
+  records.
+- `hexo_utils`: reusable encoding, search, symmetry, and sample-buffer
+  mechanics.
+- `hexo_train`: self-play epoch orchestration, config loading, checkpoints, and
+  run artifacts.
+- `hexo_model_resnet`: first model package and training plugin scaffold.
 
 ## Setup
 
-```bash
+```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-python -m pip install -e .\packages\models_common
-python -m pip install -e .\packages\game_runner
-python -m pip install -e .\packages\hexo_resnet
+python -m pip install -e .\packages\hexo_engine
+python -m pip install -e .\packages\hexo_utils
+python -m pip install -e .\packages\hexo_runner
+python -m pip install -e .\packages\hexo_train
+python -m pip install -e .\packages\hexo_model_resnet
 ```
 
-The root Cargo workspace has two crates: `game_engine` for rules/state and
-`models_common` for search, encoding, replay, self-play helpers, and the
-private PyO3 module `models_common._rust`. Build the optional bridge once Rust
-tooling is installed:
-
-```bash
-maturin develop --manifest-path .\packages\models_common\Cargo.toml --features python
-```
-
-## Commands
-
-```bash
-hexo-rl test-engine
-hexo-rl random-game
-hexo-rl selfplay configs/dev.yaml
-hexo-rl train configs/dev.yaml
-hexo-rl loop configs/dev.yaml --cycles 1
-hexo-rl inspect-replay data/selfplay/cycle_000001
-```
+Rust-backed packages keep their Rust code inside the owning package directory.
+Build a package bridge with maturin when that package's Python bindings are
+needed.

@@ -67,6 +67,40 @@ Any Rust utility code lives inside `packages/hexo_utils` with the Python
 utility package. Utility Rust may depend on engine contracts, but it must not
 duplicate engine rules.
 
+Current status: this package intentionally mixes real Rust prototypes with
+Python contract scaffolding. The Python modules define typed surfaces and
+exports; several operations still raise `NotImplementedError` until the Rust
+bridge and storage paths are wired.
+
+## File Responsibilities
+
+| File | Role |
+| --- | --- |
+| `pyproject.toml` | Python/Rust package metadata and maturin bridge settings. |
+| `Cargo.toml` | Rust crate metadata for utility code. |
+| `python/hexo_utils/__init__.py` | Package status/version marker for the Python utility surface. |
+| `python/hexo_utils/rust_bridge.py` | Placeholder loader boundary for the compiled `_rust` extension. |
+| `python/hexo_utils/py.typed` | Marker that the package ships type information. |
+| `encoding/__init__.py` | Public exports for crop, mask, and symmetry helpers. |
+| `encoding/crop.py` | Python crop-request/window contract; implementation is placeholder-backed. |
+| `encoding/masks.py` | Python action-mask contract and simple id-mask helpers. |
+| `encoding/symmetry.py` | Shared D6 symmetry labels and action-transform protocol. |
+| `search/__init__.py` | Public exports for Python search contracts. |
+| `search/mcts.py` | Python MCTS request/result contracts; search execution is placeholder-backed. |
+| `samples/__init__.py` | Public sample-buffer, record, and target helper exports. |
+| `samples/buffer.py` | Sample store, append result, index, window, request, and batch scaffolding. |
+| `samples/records.py` | Shared sample schema metadata and neutral training record shapes. |
+| `samples/targets.py` | Common legal-action policy/value target helpers. |
+| `rust/src/lib.rs` | Rust crate root and public utility exports. |
+| `rust/src/encoder.rs` | Fixed square crop encoder with current 12-plane layout. |
+| `rust/src/mcts.rs` | Public Rust MCTS module declaration. |
+| `rust/src/position.rs` | Search position wrapper around cloned engine state. |
+| `rust/src/pybridge.rs` | Minimal importable PyO3 bridge scaffold. |
+| `rust/src/samples.rs` | Draft Rust sample manifest marker. |
+| `rust/src/mcts/evaluator.rs` | Evaluator-facing policy/value contracts for search. |
+| `rust/src/mcts/search.rs` | Autoregressive single-stone PUCT search prototype. |
+| `rust/src/mcts/tree.rs` | In-memory search tree structures. |
+
 ## Utility Rule
 
 A helper belongs in `hexo-utils` when:
@@ -90,8 +124,9 @@ receive D6 selections, and model packages decide how those transforms apply to
 their tensors.
 
 `search`: reusable MCTS machinery and supporting search statistics. In Rust,
-`mcts.rs` is the public search module, `mcts/search.rs` owns the rollout/search
-algorithm, `mcts/evaluator.rs` owns evaluator-facing policy/value contracts,
+`mcts.rs` is the public search module, `mcts/search.rs` owns the autoregressive
+single-stone PUCT search prototype, `mcts/evaluator.rs` owns evaluator-facing
+policy/value contracts that adapt encoded crop logits to legal-action priors,
 and `mcts/tree.rs` owns the in-memory node/edge tree used by a single MCTS run.
 `position.rs` wraps a cloned `hexo_engine::HexoState` for search rollouts so
 MCTS can simulate through engine-authoritative transitions without mutating the
@@ -114,6 +149,15 @@ to `hexo_runner.records`. It exists so model packages can write trainable
 samples during self-play, finalize result-dependent targets when a game ends,
 shuffle and sample those buffers, and attach custom payloads without teaching
 shared utilities about model-specific heads or logic.
+
+A first real sample buffer should support:
+
+- appending finalized samples;
+- flushing compact chunk files;
+- refreshing a compact index;
+- selecting deterministic training windows;
+- carrying symmetry selections from `hexo_train`;
+- leaving tensor decoding to the model package.
 
 The default target path is intentionally narrow: legal-action policy logits and
 an optional scalar value. The default builder reads one action order from

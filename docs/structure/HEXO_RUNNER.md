@@ -22,7 +22,7 @@ runner applies accepted actions through the engine
 - Player lifecycle.
 - Core game recording and event emission.
 - Result summaries.
-- Self-play, evaluation, direct match, smoke test, and batch run modes.
+- Self-play, evaluation, direct match, and batch run modes.
 
 ## Does Not Own
 
@@ -59,6 +59,35 @@ packages/hexo_runner/
         evaluation.py
         batch.py
 ```
+
+## Current Status
+
+This document describes the intended final runner boundary. The current Python
+package is a non-operational skeleton: the CLI prints a redesign message, the
+session and loop objects define their contracts, and the mode modules raise
+`NotImplementedError` until engine wiring exists.
+
+## File Responsibilities
+
+| File | Role |
+| --- | --- |
+| `pyproject.toml` | Python package metadata and `hexo-rl` console entry point. |
+| `python/hexo_runner/__init__.py` | Package description and version export. |
+| `python/hexo_runner/cli.py` | Placeholder CLI entry point for the runner package. |
+| `python/hexo_runner/config.py` | Placeholder runner config dataclass for future session/run options. |
+| `python/hexo_runner/player.py` | Shared player identity, decision request/result, and runner-player protocol. |
+| `python/hexo_runner/session.py` | Session context and future session creation boundary. |
+| `python/hexo_runner/loop.py` | Future single-game loop object and loop result shape. |
+| `python/hexo_runner/py.typed` | Marker that the package ships type information. |
+| `records/__init__.py` | Public exports for runner record/result types. |
+| `records/events.py` | Live transition/record event shapes. |
+| `records/record.py` | Durable detached game-record dataclasses. |
+| `records/results.py` | Compact match, batch, evaluation, and self-play result dataclasses. |
+| `modes/__init__.py` | Public exports for available runner modes. |
+| `modes/match.py` | Future one-game mode built on the shared loop. |
+| `modes/batch.py` | Future many-game mode built from match jobs. |
+| `modes/evaluation.py` | Future fixed-opponent evaluation mode. |
+| `modes/selfplay.py` | Future self-play execution mode using model-owned players and sample writers. |
 
 ## Player Contract
 

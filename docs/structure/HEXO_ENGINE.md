@@ -67,14 +67,56 @@ friendly typed functions while `hexo_engine._rust` owns the narrow compiled
 boundary into Rust. The bridge should pass opaque state handles and simple
 transport types, not reimplement rules in Python.
 
+Current status: the Rust engine skeleton contains real rule/state modules, but
+the Python API and PyO3 bridge are still scaffolding. The Python functions
+define the intended host-facing surface and currently raise engine-unavailable
+errors until the bridge is wired.
+
+## File Responsibilities
+
+| File | Role |
+| --- | --- |
+| `pyproject.toml` | Python package metadata and maturin bridge settings. |
+| `Cargo.toml` | Rust crate metadata for the engine package. |
+| `python/hexo_engine/__init__.py` | Public Python export surface for engine API, errors, and transport types. |
+| `python/hexo_engine/api.py` | Intended Python API for state creation, legal actions, transitions, snapshots, tactics, and identities. |
+| `python/hexo_engine/types.py` | Python dataclasses and aliases for engine-facing transport values. |
+| `python/hexo_engine/errors.py` | Python exception types for unavailable engine, illegal actions, and snapshot errors. |
+| `python/hexo_engine/py.typed` | Marker that the package ships type information. |
+| `rust/src/lib.rs` | Rust crate root and public export surface. |
+| `rust/src/board.rs` | Sparse unlimited-board storage and board-level helpers. |
+| `rust/src/coord.rs` | Axial coordinate math and distance helpers. |
+| `rust/src/rules.rs` | Rule constants and legality helpers. |
+| `rust/src/state.rs` | Canonical game state, turn phase, transitions, terminal checks, and tests. |
+| `rust/src/tactics.rs` | Threat-window and tactical-summary logic. |
+| `rust/src/identity.rs` | Placeholder home for stable state/action identity helpers. |
+| `rust/src/snapshot.rs` | Replayable snapshot DTOs and metadata. |
+| `rust/src/error.rs` | Rust engine error types. |
+| `rust/src/pybridge.rs` | Minimal PyO3 module scaffold for the compiled Python bridge. |
+
+## Game Rules
+
+Hexo is played on an unlimited hex grid. Player 0 opens at `(0, 0)`.
+After the opening, players place two stones per turn, one placement at a time.
+Each stone must be empty and within 8 hex steps of at least one existing stone.
+
+A player wins immediately by making six connected stones in a straight line
+along any of the three hex axes. There is no normal draw rule in the current
+design.
+
+A threat is a six-cell window containing at least four stones for one player
+and no opponent stones. Because normal turns place two stones, many open
+four-in-a-row and five-in-a-row threats can be decisive if they cannot be
+blocked with the opponent's two placements.
+
 ## Core API
 
 ```text
-new_game() -> state
+new_game(seed?, scenario?) -> state
 load_snapshot(snapshot) -> state
 snapshot(state) -> snapshot
 current_player(state) -> Player0 | Player1
-turn_placement(state) -> PLACEMENT_0 | PLACEMENT_1
+turn_phase(state) -> Opening | FirstStone | SecondStone
 legal_actions(state) -> list[action]
 validate_action(state, action) -> ok | legality_error
 apply_action(state, action) -> transition_result | legality_error
@@ -83,6 +125,11 @@ tactics(state) -> tactical_summary
 state_id(state) -> stable identity
 action_id(action) -> stable identity
 ```
+
+The Rust skeleton names phases `Opening`, `FirstStone`, and `SecondStone`.
+The Python skeleton still exposes `turn_placement()` for the normal placement
+slot; the final bridge should make the opening phase explicit rather than
+pretending every turn has only placement 0 or placement 1.
 
 ## Interfaces
 

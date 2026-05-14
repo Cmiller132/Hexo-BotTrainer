@@ -189,19 +189,25 @@ packages/
     Cargo.toml                 # optional, only if this model has Rust code
     python/
       hexo_model_*/
-    rust/
+    rust/                      # optional, only if this model has Rust code
       src/
 
 docs/
   structure/
-    HEXO_ENGINE.md
-    HEXO_MODEL.md
-    HEXO_RUNNER.md
-    HEXO_TRAIN.md
-    HEXO_UTILS.md
     PROJECT_STRUCTURE.md
-    Review Notes.md
-    TRAINING_INFO.md
+    HEXO_ENGINE.md
+    HEXO_RUNNER.md
+    HEXO_UTILS.md
+    HEXO_TRAIN.md
+    HEXO_MODEL.md
+
+data/
+  checkpoints/
+    .gitkeep                   # runtime checkpoint output location
+  replay/
+    .gitkeep                   # detached runner replay output location
+  selfplay/
+    .gitkeep                   # self-play output location
 
 tests/
   test_training_pipeline_simplification.py
@@ -215,6 +221,21 @@ tests/
 This layout reflects both the current project tree and the near-term target.
 Optional model-local Rust directories are part of the final package rule, but
 `hexo_model_resnet` is currently Python-only.
+
+## Documentation Set
+
+The structure docs are deliberately small and package-oriented:
+
+- `PROJECT_STRUCTURE.md`: repository layout, package ownership, and dependency
+  direction.
+- `HEXO_ENGINE.md`: rule/state authority.
+- `HEXO_RUNNER.md`: game execution and records.
+- `HEXO_UTILS.md`: reusable mechanisms.
+- `HEXO_TRAIN.md`: self-play epoch training orchestration.
+- `HEXO_MODEL.md`: model package responsibilities.
+
+Avoid adding separate design-note files for training, review notes, or package
+plans. Fold durable information into the package doc that owns it.
 
 ## Package Layout Rule
 

@@ -74,6 +74,32 @@ packages/hexo_train/
         training.py
 ```
 
+## File Responsibilities
+
+| File | Role |
+| --- | --- |
+| `pyproject.toml` | Python package metadata and `hexo-train-model` console entry point. |
+| `python/hexo_train/__init__.py` | Public exports for config, context, pipeline, plugin loading, and symmetry selection. |
+| `artifacts.py` | Run artifact helpers: checkpoint store, manifests, final diagnostics, and checkpoint pointers. |
+| `checkpoints.py` | Checkpoint load/save orchestration and placeholder checkpoint fallback. |
+| `components.py` | Shared/model component dataclasses and plugin override assembly. |
+| `config.py` | TOML/YAML config loading, validation, and normalized config dataclasses. |
+| `context.py` | Run directory layout, diagnostics object, raw sections, and recorded step outputs. |
+| `defaults.py` | Shared default component construction. |
+| `diagnostics.py` | Stage timing/status records and diagnostics file writing. |
+| `pipeline.py` | Top-level run lifecycle from config load through final artifacts. |
+| `registry.py` | Model plugin discovery by entry point or explicit module. |
+| `symmetry.py` | Reusable deterministic D6 selector used by training epochs. |
+| `py.typed` | Marker that the package ships type information. |
+| `cli/__init__.py` | CLI package marker. |
+| `cli/train_model.py` | Thin training CLI wrapper around `TrainingPipeline`. |
+| `epoch/__init__.py` | Epoch package marker. |
+| `epoch/loop.py` | `run_epochs()` and `run_epoch()` orchestration. |
+| `epoch/selfplay.py` | Self-play request/generation step for one epoch. |
+| `epoch/samples.py` | Sample store preparation, finalization, index refresh, and training window selection. |
+| `epoch/symmetry.py` | Per-epoch application of the reusable D6 selector. |
+| `epoch/training.py` | Delegation to `trainer.train_passes(...)` for selected samples and symmetries. |
+
 ## CLI
 
 The public entry point is:
@@ -101,10 +127,15 @@ Training config describes:
 - run identity and output directory;
 - model plugin name, module, entry point, and model-owned settings under
   `model.config`;
+- `run.seed`;
 - `loop.epochs`;
 - `selfplay.games_per_epoch`;
+- `selfplay.update_checkpoint_pointer`;
+- `selfplay.checkpoint_pointer`;
 - `samples.train_sample_count`;
+- sample store settings currently read from `samples.path` and `samples.mode`;
 - `train.passes_per_epoch`;
+- optional shared settings under `shared`;
 - checkpoint resume/save settings.
 
 The config loader rejects generic `stages`. Self-play epoch training is the
@@ -122,26 +153,41 @@ build model
 build model-specific training components
 generate self-play requests or games
 finalize model-owned samples
-decode model-owned samples
 train over selected samples for configured passes
 write model-owned checkpoints or metadata
 ```
 
-`hexo-train` calls these hooks but does not interpret model tensors or targets.
+`hexo-train` calls direct orchestration hooks such as self-play, finalization,
+training, and checkpoint IO. It may store model-owned helpers such as a sample
+decoder on the model components, but the current pipeline does not call the
+decoder directly; the trainer owns how selected samples become tensors.
 
 ## Components
 
-Shared components are model-neutral:
+Run context is model-neutral and owns:
 
 - output directory;
 - checkpoint directory;
 - diagnostics writer;
-- sample source description;
-- engine/game spec;
-- checkpoint store;
+- sample directory;
+- raw config sections;
+- step and epoch outputs.
+
+Default training components are model-neutral helpers:
+
 - default scalar value target helper from `hexo_utils.samples`;
 - default legal-action policy target helper from `hexo_utils.samples`;
 - default D6 symmetry selector.
+
+Shared components are mutable run handles used by the epoch loop:
+
+- sample source description;
+- engine/game spec;
+- default helpers;
+- sample store, index, and selected window;
+- sample symmetries;
+- checkpoint state;
+- self-play result.
 
 Model components are plugin-owned:
 
@@ -182,7 +228,16 @@ epoch's self-play.
 
 ## Training Data Boundary
 
-The normal training path is:
+Training follows a simple self-play loop:
+
+```text
+self-play writes trainable samples
+sample buffer stores and shuffles samples
+training reads from the sample buffer
+new checkpoints feed future self-play
+```
+
+The normal package boundary is:
 
 ```text
 self-play creates model-owned trainable samples
@@ -197,6 +252,20 @@ hexo_train writes run outputs and diagnostics
 Runner game records remain detached from training. They are useful for
 analysis, audit, and debugging, but they are not the normal source of training
 targets.
+
+For each model decision during self-play:
+
+1. Runner asks the model-backed player for an action.
+2. The model encodes the position.
+3. Inference or search produces legal-action policy data and a selected action.
+4. The model sample writer stores a pending sample.
+5. Runner applies the action through the engine.
+6. After self-play returns, `hexo_train` calls the model finalizer.
+7. Finalized samples are appended to the model's sample buffer.
+
+One epoch generates fresh games, finalizes result-dependent samples, selects
+`samples.train_sample_count` samples, then trains over those samples for
+`train.passes_per_epoch` passes.
 
 ## Dependency Direction
 

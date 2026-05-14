@@ -76,6 +76,28 @@ Most model packages are Python-first. When a model owns Rust code for
 representation-coupled search, high-volume preprocessing, or data structures,
 that Rust code lives inside the same `packages/hexo_model_*` directory.
 
+## File Responsibilities
+
+| File | Role |
+| --- | --- |
+| `pyproject.toml` | Python package metadata and `hexo_train.models` plugin entry point. |
+| `python/hexo_model_resnet/__init__.py` | Public plugin exports: `HexoResNetPlugin`, `get_plugin`, and `plugin`. |
+| `architecture.py` | ResNet architecture configuration and model-construction placeholder. |
+| `config.py` | Model-owned config dataclasses and `model.config` parsing. |
+| `decode.py` | Sample-to-tensor decoder boundary for selected training samples. |
+| `input.py` | ResNet input representation boundary for engine state and legal actions. |
+| `inference.py` | ResNet inference request/result and evaluator placeholder. |
+| `player.py` | Runner-compatible model-player adapter scaffold. |
+| `training.py` | High-level training configuration placeholder. |
+| `losses.py` | Policy/value loss result shapes and placeholder loss computation. |
+| `augment.py` | Training-time symmetry augmentation boundary. |
+| `diagnostics.py` | Model-owned metric and diagnostic record shapes. |
+| `checkpoints.py` | Model checkpoint reference and IO placeholder helpers. |
+| `plugin.py` | Composition root that builds the model and returns training component overrides. |
+| `samples.py` | ResNet sample finalization placeholder for pending self-play samples. |
+| `trainer.py` | `train_passes(...)` implementation boundary for epoch training. |
+| `py.typed` | Marker that the package ships type information. |
+
 ## Interfaces
 
 From engine:
@@ -168,6 +190,24 @@ self-play. A first version should store:
 The shared samples package may provide the legal-action policy/value container,
 buffer writing, indexing, and sampling mechanics. ResNet owns the exact tensor
 layout, crop behavior, auxiliary fields, and loss interpretation.
+
+Keep initial storage compact:
+
+```text
+binary/int planes: uint8[12, crop_size, crop_size]   # default crop_size = 15
+scalar globals: float32[3]
+legal mask: uint8/bool[crop_size, crop_size]
+threat mask: optional uint8/bool[crop_size, crop_size]
+policy target: dense or sparse policy over legal actions
+value target: float32, finalized after game end
+metadata: compact ids for game, turn, player, model/checkpoint, seed
+```
+
+Decode to model tensors at training time, not during sample writing.
+
+Current augmentation status: `augment.py` carries the intended boundary, but
+the skeleton uses a square-crop approximation for D6-style transforms until
+exact axial tensor, mask, and action-id transforms are implemented.
 
 ## Model Training Plugin
 
