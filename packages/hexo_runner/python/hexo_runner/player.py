@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Protocol
 
-from hexo_engine import Action, EngineStateRef
+from hexo_engine import Action, HexoState
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,7 +25,7 @@ class PlayerIdentity:
 class DecisionResult:
     """Participant response consumed by the runner.
 
-    Players receive only a cloned `EngineStateRef` in `decide`, query whatever
+    Players receive only a cloned `HexoState` in `decide`, query whatever
     they need from `hexo_engine`, and return one action plus optional
     diagnostics. There is no refusal/forfeit path; errors abort the game.
     """
@@ -52,6 +52,7 @@ class TransitionEvent:
     turn_index: int
     action: object
     transition: object
+    state: HexoState
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,7 +72,7 @@ class RunnerPlayer(Protocol):
     def initialize(self, session_context: object) -> None:
         """Prepare the player for a session."""
 
-    def decide(self, state: EngineStateRef) -> DecisionResult:
+    def decide(self, state: HexoState) -> DecisionResult:
         """Choose an action from a cloned, player-owned engine state."""
 
     def observe_transition(self, transition: TransitionEvent) -> None:

@@ -101,7 +101,7 @@ class RunnerMatchModeTests(unittest.TestCase):
             self.assertIn("decision_diagnostics", entry.metadata)
 
     def test_player_receives_only_cloneable_engine_state(self) -> None:
-        from hexo_engine import EngineStateRef, game_state, legal_actions, snapshot, tactics
+        from hexo_engine import HexoState, PythonHexoState, legal_actions, to_python_state
         from hexo_runner.modes.match import run_match
         from hexo_runner.session import GameSpec
 
@@ -112,15 +112,17 @@ class RunnerMatchModeTests(unittest.TestCase):
         run_match(GameSpec(game_id="view-contract"), (p0, p1), sink)
 
         state = p0.states[0]
-        self.assertIsInstance(state, EngineStateRef)
-        self.assertEqual(len(snapshot(state).payload["placements"]), 1)
+        self.assertIsInstance(state, HexoState)
+        python_state = to_python_state(state)
+        self.assertIsInstance(python_state, PythonHexoState)
+        self.assertEqual(python_state.placements_made, 1)
         self.assertEqual(len(sink.entries), 1)
         self.assertEqual(sink.entries[0].action.coord.q, 0)
         self.assertEqual(sink.entries[0].action.coord.r, 0)
-        self.assertIn("board", game_state(state))
-        self.assertIn("window_store", tactics(state))
-        self.assertIn("entries", tactics(state)["window_store"])
+        self.assertGreater(python_state.board.windows.len, 0)
         self.assertGreater(len(legal_actions(state)), 1)
+        self.assertTrue(p0.observed)
+        self.assertIsInstance(p0.observed[0].state, HexoState)
 
     def test_decision_result_requires_an_action(self) -> None:
         from hexo_runner.player import DecisionResult
@@ -146,14 +148,54 @@ class RunnerMatchModeTests(unittest.TestCase):
         self.assertIn("not legal", result.metadata["error"])
 
     def test_engine_rejects_pair_actions_atomically(self) -> None:
-        from hexo_engine import AxialCoord, IllegalActionError, PairAction, apply_action, new_game, snapshot
+        from hexo_engine import AxialCoord, IllegalActionError, PairAction, apply_action, new_game, to_python_state
 
         state = new_game()
 
         with self.assertRaises(IllegalActionError):
             apply_action(state, PairAction((AxialCoord(0, 0), AxialCoord(0, 0))))
 
-        self.assertEqual(snapshot(state).payload["placements"], [])
+        self.assertEqual(to_python_state(state).placements_made, 0)
+
+    def test_to_python_state_mirrors_engine_state(self) -> None:
+        from dataclasses import FrozenInstanceError
+
+        from hexo_engine import AxialCoord, HexoState, PlacementAction, Player, PythonHexoState, TurnPhase
+        from hexo_engine import apply_action, legal_actions, new_game, to_python_state
+
+        state = new_game()
+        initial = to_python_state(state)
+
+        self.assertIsInstance(state, HexoState)
+        self.assertIsInstance(initial, PythonHexoState)
+        self.assertEqual(initial.phase, TurnPhase.OPENING)
+        self.assertEqual(initial.placements_made, 0)
+        self.assertEqual(initial.board.legal, (AxialCoord(0, 0),))
+        self.assertTrue(initial.board.windows.is_empty)
+
+        apply_action(state, PlacementAction(AxialCoord(0, 0)))
+        opened = to_python_state(state)
+        self.assertEqual(opened.phase, TurnPhase.FIRST_STONE)
+        self.assertEqual(opened.current_player, Player.PLAYER_1)
+        self.assertEqual(opened.board.occupied, (AxialCoord(0, 0),))
+        self.assertGreater(opened.board.windows.len, 0)
+        self.assertEqual(opened.board.windows.entries, tuple(sorted(opened.board.windows.entries, key=lambda entry: (entry.key.axis, entry.key.start.q, entry.key.start.r))))
+
+        action = legal_actions(state)[0]
+        apply_action(state, action)
+        second = to_python_state(state)
+        self.assertEqual(second.phase, TurnPhase.SECOND_STONE)
+        self.assertEqual(second.first_stone, action.coord)
+        self.assertEqual(second.placement_history[-1].phase, TurnPhase.FIRST_STONE)
+
+        with self.assertRaises(FrozenInstanceError):
+            second.placements_made = 99
+
+    def test_removed_engine_apis_are_not_exported(self) -> None:
+        import hexo_engine
+
+        for name in ("EngineStateRef", "EngineSnapshot", "snapshot", "load_snapshot", "game_state", "tactics"):
+            self.assertFalse(hasattr(hexo_engine, name), name)
 
     def test_frontend_controller_uses_generic_runner(self) -> None:
         from hexo_frontend.web import ManualMatchController
@@ -182,6 +224,9 @@ class RunnerMatchModeTests(unittest.TestCase):
 
         self.assertNotIn("create_match", web_source)
         self.assertNotIn("/api/undo", app_source)
+        self.assertNotIn("game_state", web_source)
+        self.assertNotIn("tactics(", web_source)
+        self.assertNotIn("snapshot", web_source)
 
 
 if __name__ == "__main__":

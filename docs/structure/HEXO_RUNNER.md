@@ -109,7 +109,7 @@ reports the same `identity` field.
 ## Player Decision State
 
 The active player receives exactly one game payload: a cloned mutable
-`EngineStateRef`. It is not the primary state held by the runner.
+`HexoState`. It is not the primary state held by the runner.
 
 Players query the clone through public `hexo_engine` APIs:
 
@@ -117,8 +117,7 @@ Players query the clone through public `hexo_engine` APIs:
 current_player(state)
 turn_placement(state)
 legal_actions(state)
-game_state(state)
-tactics(state)
+to_python_state(state)
 terminal(state)
 apply_action(state, action)  # search/simulation only
 ```
@@ -132,17 +131,16 @@ legal actions into the player contract. A response contains:
 Diagnostics are transported by the runner but owned by the player/model that
 produced them.
 
-Snapshots remain an engine API, but the current runner record does not store
-before/after snapshots. The transition object still carries engine transition
-data for player observers such as the manual frontend adapter.
+The transition object carries a cloned post-action `HexoState` for observers
+such as the manual frontend adapter.
 
 ## Runtime Flow
 
 ```text
 create session
 initialize players
-create or load engine state
-store EngineStateRef on SessionContext
+create engine state
+store HexoState on SessionContext
 while not terminal:
     ask engine for current context
     clone primary engine state

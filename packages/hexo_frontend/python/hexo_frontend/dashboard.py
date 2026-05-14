@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from hexo_engine import AxialCoord, Player, PythonHexoState, PythonPlacementRecord, PythonWindowEntry, TurnPhase
 
 
 WIN_LENGTH = 6
@@ -10,49 +10,40 @@ AXIS_VECTORS = {"Q": (1, 0), "R": (0, 1), "QR": (1, -1)}
 WINDOW_MASK = (1 << WIN_LENGTH) - 1
 
 
-def dashboard_state(raw: dict[str, object]) -> dict[str, object]:
-    """Translate raw match/engine data into the browser dashboard shape."""
+def dashboard_state(state: PythonHexoState) -> dict[str, object]:
+    """Translate a Python HexoState mirror into the browser dashboard shape."""
 
-    engine_state = _mapping(raw.get("engine_state"))
-    raw_tactics = _mapping(raw.get("tactics"))
-    legal = list(raw.get("legal_actions") or [])
-    placements = [_placement(record) for record in engine_state.get("placement_history", [])]
-    terminal = _mapping(raw.get("terminal")) if raw.get("terminal") else None
-    tactics = _dashboard_tactics(raw_tactics, engine_state, legal)
+    legal = [_coord_payload(coord) for coord in state.board.legal]
+    legal_coords = {_coord_key(coord) for coord in legal}
+    stone_owner = {_coord_key(_coord_payload(coord)): _player(player) for coord, player in state.board.stones}
+    placements = [_placement(record) for record in state.placement_history]
+    tactics = _dashboard_tactics(state.board.windows.entries, stone_owner, legal_coords)
 
     return {
-        "current_player": _player(engine_state.get("current_player")),
-        "phase": _phase(engine_state.get("phase")),
-        "first_stone": _first_stone(engine_state.get("phase")),
-        "winner": _player(terminal.get("winner")) if terminal else None,
-        "terminal_reason": terminal.get("reason") if terminal else None,
+        "current_player": _player(state.current_player),
+        "phase": _phase(state.phase),
+        "first_stone": _coord_payload(state.first_stone) if state.first_stone else None,
+        "winner": _player(state.terminal.winner) if state.terminal else None,
+        "terminal_reason": "six_in_line" if state.terminal else None,
         "placements": placements,
         "legal": legal,
         "legal_count": len(legal),
         "tactics": tactics,
-        "snapshot": raw.get("snapshot"),
     }
 
 
 def _dashboard_tactics(
-    raw_tactics: dict[str, Any],
-    engine_state: dict[str, Any],
-    legal: list[object],
+    entries: tuple[PythonWindowEntry, ...],
+    stone_owner: dict[tuple[int, int], str | None],
+    legal: set[tuple[int, int]],
 ) -> dict[str, object]:
-    legal_coords = {_coord_key(_coord(coord)) for coord in legal}
-    stone_owner = {
-        _coord_key(_coord(stone.get("coord"))): _player(stone.get("stone"))
-        for stone in _mapping(engine_state.get("board")).get("stones", [])
-    }
-    entries = _mapping(raw_tactics.get("window_store")).get("entries", [])
-    windows = [_window(entry, stone_owner, legal_coords) for entry in entries]
+    windows = [_window(entry, stone_owner, legal) for entry in entries]
     threats = [window for window in windows if window["is_threat"]]
     winning_windows = [window for window in windows if window["is_win"]]
-    immediate_wins = _move_facts(windows, legal_coords, want_win=True)
-    must_blocks = _must_blocks(windows, legal_coords)
+    immediate_wins = _move_facts(windows, legal, want_win=True)
+    must_blocks = _must_blocks(windows, legal)
 
     return {
-        "raw": raw_tactics,
         "windows": windows,
         "window_count": len(windows),
         "threats": threats,
@@ -71,14 +62,15 @@ def _dashboard_tactics(
     }
 
 
-def _window(entry: object, stone_owner: dict[tuple[int, int], str | None], legal: set[tuple[int, int]]) -> dict[str, object]:
-    data = _mapping(entry)
-    key = _mapping(data.get("key"))
-    start = _coord(key.get("start"))
-    axis = str(key.get("axis"))
-    masks = list(data.get("masks") or [0, 0])
-    p0_mask = int(masks[0] if len(masks) > 0 else 0)
-    p1_mask = int(masks[1] if len(masks) > 1 else 0)
+def _window(
+    entry: PythonWindowEntry,
+    stone_owner: dict[tuple[int, int], str | None],
+    legal: set[tuple[int, int]],
+) -> dict[str, object]:
+    start = _coord_payload(entry.key.start)
+    axis = entry.key.axis
+    p0_mask = int(entry.masks[0])
+    p1_mask = int(entry.masks[1])
     p0_count = p0_mask.bit_count()
     p1_count = p1_mask.bit_count()
     active_player = _active_player(p0_count, p1_count)
@@ -165,25 +157,27 @@ def _must_blocks(windows: list[dict[str, object]], legal: set[tuple[int, int]]) 
     ]
 
 
-def _placement(raw: object) -> dict[str, object]:
-    record = _mapping(raw)
-    coord = _coord(record.get("coord"))
+def _placement(record: PythonPlacementRecord) -> dict[str, object]:
+    coord = _coord_payload(record.coord)
     return {
         "q": coord["q"],
         "r": coord["r"],
-        "player": _player(record.get("player")),
-        "phase": _phase(record.get("phase")),
-        "index": int(record.get("placement_index") or 0),
+        "player": _player(record.player),
+        "phase": _phase(record.phase),
+        "index": record.placement_index,
     }
 
 
-def _mapping(value: object) -> dict[str, Any]:
-    return value if isinstance(value, dict) else {}
-
-
 def _coord(value: object) -> dict[str, int]:
-    data = _mapping(value)
-    return {"q": int(data.get("q", 0)), "r": int(data.get("r", 0))}
+    if isinstance(value, dict):
+        return {"q": int(value.get("q", 0)), "r": int(value.get("r", 0))}
+    if isinstance(value, AxialCoord):
+        return _coord_payload(value)
+    return {"q": 0, "r": 0}
+
+
+def _coord_payload(coord: AxialCoord) -> dict[str, int]:
+    return {"q": coord.q, "r": coord.r}
 
 
 def _coord_key(coord: dict[str, int]) -> tuple[int, int]:
@@ -203,21 +197,19 @@ def _window_id(start: dict[str, int], axis: str) -> str:
 
 
 def _player(value: object) -> str | None:
-    return {"Player0": "player0", "Player1": "player1", "player0": "player0", "player1": "player1"}.get(str(value))
+    if value == Player.PLAYER_0 or str(value) in {"player0", "Player0"}:
+        return "player0"
+    if value == Player.PLAYER_1 or str(value) in {"player1", "Player1"}:
+        return "player1"
+    return None
 
 
 def _phase(value: object) -> str:
-    if value == "Opening":
+    if value == TurnPhase.OPENING or str(value) == "Opening":
         return "opening"
-    if value == "FirstStone":
-        return "first_stone"
-    return "second_stone" if isinstance(value, dict) and "SecondStone" in value else "first_stone"
-
-
-def _first_stone(value: object) -> dict[str, int] | None:
-    if isinstance(value, dict) and "SecondStone" in value:
-        return _coord(_mapping(value["SecondStone"]).get("first"))
-    return None
+    if value == TurnPhase.SECOND_STONE or str(value) == "SecondStone":
+        return "second_stone"
+    return "first_stone"
 
 
 def _active_player(p0_count: int, p1_count: int) -> str | None:

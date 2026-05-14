@@ -18,7 +18,7 @@ def run_match_loop(
 
     The runner owns exactly one authoritative state: `primary_state` below.
     Players never receive that object. On every decision, the runner gives the
-    active player only a cloned `EngineStateRef`. The returned action is then
+    active player only a cloned `HexoState`. The returned action is then
     applied back to the primary state.
     """
 
@@ -29,7 +29,7 @@ def run_match_loop(
     # engine state. The context is shared with players for setup/provenance, but
     # per-turn decisions receive only a cloned engine state.
     context = create_session_context(spec, players)
-    primary_state = context.state_ref
+    primary_state = context.state
     turn_index = 0
     result = GameResult(game_id=spec.game_id, status=GameStatus.ABORTED)
 
@@ -78,6 +78,7 @@ def run_match_loop(
                 turn_index=turn_index,
                 action=decision.action,
                 transition=transition,
+                state=engine.clone_state(primary_state),
             )
             for player in players:
                 player.observe_transition(transition_event)

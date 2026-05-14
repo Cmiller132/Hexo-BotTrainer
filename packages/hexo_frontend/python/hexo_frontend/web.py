@@ -37,9 +37,9 @@ class ManualMatchController:
         self._thread: Thread | None = None
         self._game_number = 0
         self._cancelled = False
-        self._state_ref: engine.EngineStateRef | None = None
+        self._state: engine.HexoState | None = None
+        self._python_state: engine.PythonHexoState | None = None
         self._pending_action: engine.Action | None = None
-        self._raw_state: dict[str, object] | None = None
         self._version = 0
         self._entries: list[PositionRecord] = []
         self._result: GameResult | None = None
@@ -52,9 +52,9 @@ class ManualMatchController:
             self._game_number += 1
             game_id = f"manual-{self._game_number}"
             self._cancelled = False
-            self._state_ref = None
+            self._state = None
+            self._python_state = None
             self._pending_action = None
-            self._raw_state = None
             self._version = 0
             self._entries = []
             self._result = None
@@ -64,21 +64,21 @@ class ManualMatchController:
             self._thread = Thread(target=self._run_match, args=(spec, players), daemon=True)
             self._thread.start()
             self._wait_for_state_locked()
-            return dashboard_state(self._require_raw_state_locked())
+            return dashboard_state(self._require_state_locked())
 
     def state(self) -> dict[str, object]:
         with self._condition:
             self._wait_for_state_locked()
-            return dashboard_state(self._require_raw_state_locked())
+            return dashboard_state(self._require_state_locked())
 
     def submit_move(self, q: int, r: int) -> dict[str, object]:
         with self._condition:
             self._wait_for_state_locked()
-            state_ref = self._state_ref
-            if state_ref is None or self._result is not None:
+            state = self._state
+            if state is None or self._result is not None:
                 raise ValueError("No move is currently pending.")
             action = engine.PlacementAction(engine.AxialCoord(q=q, r=r))
-            if action not in engine.legal_actions(state_ref):
+            if action not in engine.legal_actions(state):
                 raise ValueError(f"{q},{r} is not legal.")
 
             start_version = self._version
@@ -88,7 +88,7 @@ class ManualMatchController:
                 self._condition.wait(timeout=0.25)
             if self._error is not None:
                 raise RuntimeError(str(self._error)) from self._error
-            return dashboard_state(self._require_raw_state_locked())
+            return dashboard_state(self._require_state_locked())
 
     def close(self) -> None:
         thread = self._thread
@@ -102,12 +102,12 @@ class ManualMatchController:
             raise RuntimeError("Timed out waiting for the current match to stop.")
         self._thread = None
 
-    def decide(self, player_index: int, state_ref: engine.EngineStateRef) -> DecisionResult:
+    def decide(self, player_index: int, state: engine.HexoState) -> DecisionResult:
         with self._condition:
             if self._cancelled:
                 raise RuntimeError("manual match reset")
-            self._state_ref = state_ref
-            self._raw_state = _raw_from_state_ref(state_ref)
+            self._state = state
+            self._python_state = engine.to_python_state(state)
             self._version += 1
             self._condition.notify_all()
 
@@ -126,7 +126,8 @@ class ManualMatchController:
 
     def observe_transition(self, transition: TransitionEvent) -> None:
         with self._condition:
-            self._raw_state = _raw_from_snapshot(transition.transition.snapshot)
+            self._state = transition.state
+            self._python_state = engine.to_python_state(transition.state)
             self._version += 1
             self._condition.notify_all()
 
@@ -149,7 +150,7 @@ class ManualMatchController:
 
     def _wait_for_state_locked(self, timeout: float = 5.0) -> None:
         deadline = monotonic() + timeout
-        while self._raw_state is None and self._error is None:
+        while self._python_state is None and self._error is None:
             remaining = deadline - monotonic()
             if remaining <= 0:
                 raise RuntimeError("Timed out waiting for match state.")
@@ -157,10 +158,10 @@ class ManualMatchController:
         if self._error is not None:
             raise RuntimeError(str(self._error)) from self._error
 
-    def _require_raw_state_locked(self) -> dict[str, object]:
-        if self._raw_state is None:
+    def _require_state_locked(self) -> engine.PythonHexoState:
+        if self._python_state is None:
             raise RuntimeError("Match state is unavailable.")
-        return self._raw_state
+        return self._python_state
 
 
 class _ManualPlayer:
@@ -172,8 +173,8 @@ class _ManualPlayer:
     def initialize(self, session_context: SessionContext) -> None:
         return
 
-    def decide(self, state_ref: engine.EngineStateRef) -> DecisionResult:
-        return self._controller.decide(self._player_index, state_ref)
+    def decide(self, state: engine.HexoState) -> DecisionResult:
+        return self._controller.decide(self._player_index, state)
 
     def observe_transition(self, transition: TransitionEvent) -> None:
         self._controller.observe_transition(transition)
@@ -253,61 +254,6 @@ def make_handler(controller: ManualMatchController) -> type[HexoPlayHandler]:
 
     BoundHexoPlayHandler.controller = controller
     return BoundHexoPlayHandler
-
-
-def _raw_from_state_ref(state_ref: engine.EngineStateRef) -> dict[str, object]:
-    legal = tuple(engine.legal_actions(state_ref))
-    return {
-        "engine_state": engine.game_state(state_ref),
-        "legal_actions": [_action_payload(action) for action in legal],
-        "legal_count": len(legal),
-        "terminal": _terminal_payload(engine.terminal(state_ref)),
-        "tactics": engine.tactics(state_ref),
-        "snapshot": _snapshot_payload(engine.snapshot(state_ref)),
-    }
-
-
-def _raw_from_snapshot(snapshot: engine.EngineSnapshot) -> dict[str, object]:
-    state_ref = engine.load_snapshot(snapshot)
-    legal = tuple(engine.legal_actions(state_ref))
-    return {
-        "engine_state": engine.game_state(state_ref),
-        "legal_actions": [_action_payload(action) for action in legal],
-        "legal_count": len(legal),
-        "terminal": _terminal_payload(engine.terminal(state_ref)),
-        "tactics": engine.tactics(state_ref),
-        "snapshot": _snapshot_payload(snapshot),
-    }
-
-
-def _action_payload(action: object) -> dict[str, int]:
-    if isinstance(action, engine.PlacementAction):
-        return {"q": action.coord.q, "r": action.coord.r}
-    raise ValueError(f"Unsupported action type: {type(action).__name__}")
-
-
-def _snapshot_payload(snapshot: engine.EngineSnapshot) -> dict[str, object]:
-    return {"version": snapshot.version, "placements": snapshot.payload.get("placements", [])}
-
-
-def _terminal_payload(outcome: object) -> dict[str, object] | None:
-    if outcome is None:
-        return None
-    winner = getattr(outcome, "winner", None)
-    return {
-        "winner": _raw_player(winner),
-        "reason": getattr(outcome, "reason", None),
-        "metadata": dict(getattr(outcome, "metadata", {}) or {}),
-    }
-
-
-def _raw_player(player: object) -> str | None:
-    value = getattr(player, "value", player)
-    if value == "player0":
-        return "Player0"
-    if value == "player1":
-        return "Player1"
-    return None
 
 
 def run(host: str = "127.0.0.1", port: int = 8765) -> None:

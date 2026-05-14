@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
-from hexo_engine import EngineStateRef, engine_metadata, new_game
+from hexo_engine import HexoState, engine_metadata, new_game
 
 from .player import RunnerPlayer
 
@@ -40,7 +40,7 @@ SessionSpec = GameSpec
 class SessionContext:
     """Initialized context consumed by the game loop and players.
 
-    `state_ref` is the primary authoritative engine state. The loop keeps it and
+    `state` is the primary authoritative engine state. The loop keeps it and
     applies real moves to it. Per-decision players receive cloned state refs,
     not this primary handle.
     """
@@ -48,7 +48,7 @@ class SessionContext:
     session_id: str
     game_id: str
     seed: int | None
-    state_ref: EngineStateRef
+    state: HexoState
     players: Sequence[RunnerPlayer]
     mode: str = "match"
     is_evaluation: bool = False
@@ -65,12 +65,12 @@ def create_session_context(spec: GameSpec, players: Sequence[RunnerPlayer]) -> S
     """
 
     # Public engine API call that creates the authoritative game state.
-    state_ref = new_game(seed=spec.seed, scenario=spec.scenario)
+    state = new_game(seed=spec.seed, scenario=spec.scenario)
     return SessionContext(
         session_id=spec.game_id,
         game_id=spec.game_id,
         seed=spec.seed,
-        state_ref=state_ref,
+        state=state,
         players=tuple(players),
         mode=spec.mode,
         is_evaluation=spec.is_evaluation,

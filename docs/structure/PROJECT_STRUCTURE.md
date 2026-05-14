@@ -292,7 +292,7 @@ model packages write trainable samples during self-play
 
 Record and sample data are layered by ownership:
 
-- core game records: position trail, accepted actions, state snapshots,
+- core game records: accepted actions, players, terminal summaries,
   players, seeds, terminal result, and run outcome;
 - training samples: model-owned samples written during self-play, with
   legal-action ordering, policy/search outputs, value targets once finalized,

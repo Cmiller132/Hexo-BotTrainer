@@ -13,8 +13,8 @@ exist, but those packages must not import frontend modules.
 - Browser UI.
 - Static assets.
 - Local HTTP servers for development tools.
-- UI-specific adapters that parse raw engine/runner transport data into
-  browser-facing dashboard state.
+- UI-specific adapters that convert `PythonHexoState` into browser-facing
+  dashboard state.
 - Tactics overlay presentation, filtering, labels, summaries, and derived facts
   such as immediate wins or must-block placements.
 
@@ -47,10 +47,11 @@ packages/hexo_frontend/
 
 The package currently serves a simple manual-play Hexo board. The server creates
 an interactive match through `hexo_runner.modes.match`, so the frontend does not
-own game state or placement legality. The runner returns raw engine state,
-legal actions, raw tactics/window-store data, terminal status, and snapshots.
+own game state or placement legality. The runner passes cloned `HexoState`
+objects, and the frontend calls `hexo_engine.to_python_state()` when it needs a
+read-only state mirror for rendering.
 
-`dashboard.py` is the frontend adapter that turns those raw structures into the
+`dashboard.py` is the frontend adapter that turns `PythonHexoState` into the
 JSON shape the browser needs. The Python server owns HTTP routing, API/static
 asset serving, and frontend-only adaptation; board rendering, tactics overlays,
 and inspector interaction live in package static assets.

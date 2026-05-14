@@ -3,8 +3,8 @@
 ## Purpose
 
 `hexo-engine` is the rules and state authority for Hexo. It defines the
-canonical game state, legal transitions, terminal detection, replayable history,
-and the raw tactical data maintained by the rules engine.
+canonical game state, legal transitions, terminal detection, move history, and
+the tactical window data maintained by the rules engine.
 
 Every other package consumes engine facts instead of duplicating game logic.
 
@@ -15,11 +15,10 @@ Every other package consumes engine facts instead of duplicating game logic.
 - Legal action generation.
 - Move validation and state transitions.
 - Terminal detection and winner.
-- Move history and replayable snapshots.
-- Raw board state and raw tactics/window-store data in the same shape the engine
-  stores internally.
-- Stable state/action identity for caches, replay checks, search tables, and
-  diagnostics.
+- Move history.
+- A native `HexoState` handle as the only public Python state object.
+- `to_python_state()` conversion for slow inspection, frontend, and debugging.
+- Stable action identity for diagnostics.
 - Clear errors for illegal, stale, malformed, or incompatible inputs.
 
 ## Does Not Own
@@ -75,11 +74,11 @@ the PyO3 bridge is still scaffolding. The Python functions define the intended
 host-facing surface and temporarily provide a small fallback implementation so
 callers can use the engine boundary until the Rust API is bound.
 
-The bridge should expose literal engine data structures as simple transport
-values. For example, `game_state()` returns board/history/phase information and
-`tactics()` returns the raw window store plus the last window update. Dashboard
-packages may derive display-oriented facts from that data, but the engine API
-should not reshape raw engine state into UI summaries.
+The bridge should expose the native engine state as an opaque `HexoState`.
+Slow clients can call `to_python_state()` to get a read-only Python mirror of
+Rust `HexoState`, including `Board.windows`. Dashboard packages may derive
+display-oriented facts from that mirror, but the engine API should not reshape
+state into UI summaries.
 
 ## File Responsibilities
 
@@ -88,9 +87,9 @@ should not reshape raw engine state into UI summaries.
 | `pyproject.toml` | Python package metadata and maturin bridge settings. |
 | `Cargo.toml` | Rust crate metadata for the engine package. |
 | `python/hexo_engine/__init__.py` | Public Python export surface for engine API, errors, and transport types. |
-| `python/hexo_engine/api.py` | Python API for state creation, legal actions, transitions, snapshots, tactics, and identities. |
-| `python/hexo_engine/types.py` | Python dataclasses and aliases for engine-facing transport values. |
-| `python/hexo_engine/errors.py` | Python exception types for unavailable engine, illegal actions, and snapshot errors. |
+| `python/hexo_engine/api.py` | Python API for state creation, legal actions, transitions, Python-state conversion, and action identity. |
+| `python/hexo_engine/types.py` | Python dataclasses and aliases for engine-facing actions, results, and read-only state mirrors. |
+| `python/hexo_engine/errors.py` | Python exception types for unavailable engine and illegal actions. |
 | `python/hexo_engine/py.typed` | Marker that the package ships type information. |
 | `rust/src/lib.rs` | Rust crate root and public export surface. |
 | `rust/src/board.rs` | Sparse unlimited-board storage and board-level helpers. |
@@ -122,24 +121,18 @@ blocked with the opponent's two placements.
 
 ```text
 new_game(seed?, scenario?) -> state
-load_snapshot(snapshot) -> state
-snapshot(state) -> snapshot
 current_player(state) -> Player0 | Player1
-turn_phase(state) -> Opening | FirstStone | SecondStone
+turn_placement(state) -> Placement0 | Placement1
 legal_actions(state) -> list[action]
 validate_action(state, action) -> ok | legality_error
 apply_action(state, action) -> transition_result | legality_error
 terminal(state) -> terminal_result | none
-game_state(state) -> raw state
-tactics(state) -> raw window store and update data
-state_id(state) -> stable identity
+to_python_state(state) -> PythonHexoState
 action_id(action) -> stable identity
 ```
 
-The Rust skeleton names phases `Opening`, `FirstStone`, and `SecondStone`.
-The Python skeleton still exposes `turn_placement()` for the normal placement
-slot; the final bridge should make the opening phase explicit rather than
-pretending every turn has only placement 0 or placement 1.
+`to_python_state()` exposes the Rust-like phase names `Opening`, `FirstStone`,
+and `SecondStone` on the read-only Python mirror.
 
 ## Interfaces
 
@@ -151,8 +144,7 @@ To the runner:
 - action validation and application,
 - transition result,
 - terminal result,
-- replayable history and state snapshots,
-- raw game state and raw tactical/window-store data for clients that need it.
+- Python state mirror for clients that need slow inspection/export.
 
 The primary action is a single placement. A pair action may exist as a
 host-facing convenience for normal two-placement turns, but the engine boundary
@@ -163,13 +155,12 @@ To models:
 
 - canonical state context,
 - legal actions and action identities,
-- optional raw tactical/window-store data,
-- terminal result and replay history for target construction.
+- optional Python state mirror,
+- terminal result and history for target construction.
 
 To utilities:
 
-- state and legal action APIs for search, encoding, replay validation, and
-  test harnesses.
+- state and legal action APIs for search, encoding, and test harnesses.
 
 ## Tests
 
@@ -178,7 +169,6 @@ Engine tests should focus on rule correctness and determinism:
 - legality and illegal move errors,
 - turn placement transitions,
 - terminal detection,
-- snapshot round trips,
 - replay from action history,
-- state/action identity stability,
-- raw tactical payload consistency with engine window state.
+- action identity stability,
+- Python state mirror consistency with engine window state.
