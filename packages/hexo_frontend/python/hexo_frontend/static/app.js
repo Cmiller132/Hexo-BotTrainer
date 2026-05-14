@@ -12,7 +12,6 @@ const svg = document.getElementById("boardSvg");
 const tip = document.getElementById("tip");
 
 document.getElementById("newBtn").addEventListener("click", () => post("/api/new", {}));
-document.getElementById("undoBtn").addEventListener("click", () => post("/api/undo", {}));
 document.getElementById("fitBtn").addEventListener("click", render);
 document.getElementById("tacticsBtn").addEventListener("click", () => {
   tacticsOn = !tacticsOn;

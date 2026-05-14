@@ -16,7 +16,12 @@ from ..player import PlayerIdentity
 
 @dataclass(frozen=True, slots=True)
 class PositionRecord:
-    """Core record for one accepted engine transition."""
+    """Core record for one accepted engine transition.
+
+    Metadata should include `before_state_id`, `after_state_id`, `action_id`,
+    `decision_diagnostics`, and `transition_metadata` when produced by the
+    generic runner loop.
+    """
 
     game_id: str
     turn_index: int

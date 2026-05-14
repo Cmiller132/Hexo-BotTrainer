@@ -148,20 +148,14 @@ def legal_actions(state: EngineStateRef) -> list[Action]:
 def validate_action(state: EngineStateRef, action: Action) -> None:
     """Ask Rust to validate an action, raising on illegal input."""
 
-    engine_state = _state(state)
-    for coord in _action_coords(action):
-        if coord not in set(_legal_coords(engine_state)):
-            from .errors import IllegalActionError
-
-            raise IllegalActionError(f"{coord.q},{coord.r} is not legal.")
+    _validated_action_coords(_state(state), action)
 
 
 def apply_action(state: EngineStateRef, action: Action) -> TransitionResult:
     """Apply an accepted action through the Rust engine."""
 
     engine_state = _state(state)
-    for coord in _action_coords(action):
-        validate_action(state, PlacementAction(AxialCoord(coord.q, coord.r)))
+    for coord in _validated_action_coords(engine_state, action):
         _apply_placement(engine_state, coord)
         if engine_state.outcome is not None:
             break
@@ -252,6 +246,22 @@ def _action_coords(action: Action) -> list[_Coord]:
     from .errors import IllegalActionError
 
     raise IllegalActionError(f"Unsupported action type: {type(action).__name__}")
+
+
+def _validated_action_coords(state: _EngineState, action: Action) -> list[_Coord]:
+    coords = _action_coords(action)
+    trial = _state(load_snapshot(snapshot(EngineStateRef(state))))
+    accepted: list[_Coord] = []
+    for coord in coords:
+        if coord not in set(_legal_coords(trial)):
+            from .errors import IllegalActionError
+
+            raise IllegalActionError(f"{coord.q},{coord.r} is not legal.")
+        _apply_placement(trial, coord)
+        accepted.append(coord)
+        if trial.outcome is not None:
+            break
+    return accepted
 
 
 def _legal_coords(state: _EngineState) -> list[_Coord]:

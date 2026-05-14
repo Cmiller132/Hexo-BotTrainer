@@ -16,7 +16,6 @@ class GameStatus(StrEnum):
     """Runner-level game completion status."""
 
     COMPLETED = "completed"
-    FORFEITED = "forfeited"
     ABORTED = "aborted"
 
 

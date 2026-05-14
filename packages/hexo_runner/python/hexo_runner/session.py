@@ -11,16 +11,21 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
-from hexo_engine import EngineStateRef
+from hexo_engine import EngineStateRef, engine_metadata, new_game
 
 from .player import RunnerPlayer
 
 
 @dataclass(frozen=True, slots=True)
-class SessionSpec:
-    """Inputs needed to create one runner session."""
+class GameSpec:
+    """Inputs needed to create one engine-backed game.
 
-    players: Sequence[RunnerPlayer]
+    `run_match` receives this from the caller. The runner passes `seed` and
+    `scenario` through to `hexo_engine.new_game`; it does not interpret game
+    rules or scenario contents itself.
+    """
+
+    game_id: str
     seed: int | None = None
     scenario: object | None = None
     mode: str = "match"
@@ -28,14 +33,22 @@ class SessionSpec:
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
+SessionSpec = GameSpec
+
+
 @dataclass(frozen=True, slots=True)
 class SessionContext:
-    """Initialized context consumed by the game loop and players."""
+    """Initialized context consumed by the game loop and players.
+
+    `state_ref` is the primary authoritative engine state. The loop keeps it and
+    applies real moves to it. Per-decision players receive cloned state refs via
+    `EngineDecisionView`, not this primary handle.
+    """
 
     session_id: str
     game_id: str
     seed: int | None
-    engine_state: EngineStateRef
+    state_ref: EngineStateRef
     players: Sequence[RunnerPlayer]
     mode: str = "match"
     is_evaluation: bool = False
@@ -43,13 +56,24 @@ class SessionContext:
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
-def create_session_context(spec: SessionSpec) -> SessionContext:
+def create_session_context(spec: GameSpec, players: Sequence[RunnerPlayer]) -> SessionContext:
     """Create engine state and the context passed to players before the loop.
 
-    The implementation should avoid process-global mutable state so many
-    sessions can be created safely by batch workers. It should create or load
-    the `EngineStateRef`, ask each player to initialize against the resulting
-    context, and return the initialized players with the state handle.
+    This is the boundary where the runner asks the engine for the primary game
+    state. Everything in `SessionContext` is setup/provenance data used by the
+    loop and by `RunnerPlayer.initialize`.
     """
 
-    raise NotImplementedError("Session creation will be wired to engine setup.")
+    # Public engine API call that creates the authoritative game state.
+    state_ref = new_game(seed=spec.seed, scenario=spec.scenario)
+    return SessionContext(
+        session_id=spec.game_id,
+        game_id=spec.game_id,
+        seed=spec.seed,
+        state_ref=state_ref,
+        players=tuple(players),
+        mode=spec.mode,
+        is_evaluation=spec.is_evaluation,
+        engine_metadata=engine_metadata(),
+        metadata=spec.metadata,
+    )
