@@ -1,8 +1,8 @@
 """Python package boundary for the Rust Hexo engine.
 
-The engine owns canonical rules, legal transitions, snapshots, tactics, and
-stable state/action identity. Python callers should come through this package
-instead of duplicating game logic.
+The engine owns canonical rules, legal transitions, snapshots, raw tactics data,
+and stable state/action identity. Python callers should come through this
+package instead of duplicating game logic.
 """
 
 from .api import (
@@ -11,6 +11,7 @@ from .api import (
     apply_action,
     current_player,
     engine_metadata,
+    game_state,
     legal_actions,
     load_snapshot,
     new_game,
@@ -68,6 +69,7 @@ __all__ = [
     "apply_action",
     "current_player",
     "engine_metadata",
+    "game_state",
     "legal_actions",
     "load_snapshot",
     "new_game",

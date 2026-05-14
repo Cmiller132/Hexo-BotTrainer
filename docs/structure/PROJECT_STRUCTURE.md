@@ -2,13 +2,14 @@
 
 ## Goal
 
-Hexo-RL is organized around five clear project families:
+Hexo-RL is organized around six clear project families:
 
 - `hexo-engine`: canonical game rules and state authority.
 - `hexo-runner`: game execution and orchestration.
 - `hexo-utils`: reusable mechanisms shared across packages.
 - `hexo-train`: config-driven training orchestration.
 - `hexo-model-*`: model families and learned decision systems.
+- `hexo-frontend`: browser-facing local tools and dashboards.
 
 Each package family owns one kind of responsibility. The layout should make it
 easy to add new models, runners, and tooling without moving rule authority or
@@ -29,6 +30,9 @@ hexo-runner
 
 hexo-train
   <- hexo-model-*        # loaded dynamically as training plugins
+
+hexo-frontend
+  <- hexo-runner         # UI clients call runner-facing APIs, never the reverse
 ```
 
 In practice:
@@ -43,6 +47,8 @@ In practice:
   so model-backed players report the same identity and decision shapes as every
   other participant. They also consume the small `hexo-train` plugin contract
   when they expose training components.
+- `hexo-frontend` owns browser UI, static assets, and lightweight local web
+  servers. It may depend on runner APIs, but runner packages must not import it.
 
 The runner should discover or receive model-backed players through adapters and
 plugins. It should not import or hard-code concrete model architectures.
@@ -132,6 +138,19 @@ packages/
           batch.py
           evaluation.py
           selfplay.py
+
+  hexo_frontend/
+    pyproject.toml
+    python/
+      hexo_frontend/
+        __init__.py
+        dashboard.py
+        static/
+          app.js
+          index.html
+          styles.css
+        web.py
+        py.typed
 
   hexo_train/
     pyproject.toml
@@ -233,6 +252,7 @@ The structure docs are deliberately small and package-oriented:
 - `HEXO_UTILS.md`: reusable mechanisms.
 - `HEXO_TRAIN.md`: self-play epoch training orchestration.
 - `HEXO_MODEL.md`: model package responsibilities.
+- `HEXO_FRONTEND.md`: browser-facing local tools and dashboards.
 
 Avoid adding separate design-note files for training, review notes, or package
 plans. Fold durable information into the package doc that owns it.

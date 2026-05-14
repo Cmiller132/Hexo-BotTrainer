@@ -26,6 +26,7 @@ the intended layout.
 - `hexo_train`: self-play epoch orchestration, config loading, checkpoints, and
   run artifacts.
 - `hexo_model_resnet`: first model package and training plugin scaffold.
+- `hexo_frontend`: local browser tools and dashboards.
 
 ## Setup
 
@@ -37,6 +38,7 @@ python -m pip install -e .\packages\hexo_utils
 python -m pip install -e .\packages\hexo_runner
 python -m pip install -e .\packages\hexo_train
 python -m pip install -e .\packages\hexo_model_resnet
+python -m pip install -e .\packages\hexo_frontend
 ```
 
 Rust-backed packages keep their Rust code inside the owning package directory.

@@ -5,7 +5,6 @@
 //! wins and threats can be read from compact six-bit masks.
 
 use super::coord::{hex_distance, HexCoord};
-use super::board::Board;
 use super::state::Player;
 use ahash::AHashMap;
 use serde::{Deserialize, Serialize};
@@ -419,78 +418,6 @@ impl WindowStore {
 fn window_containing(coord: HexCoord, axis: Axis, offset: u8) -> (WindowKey, u8) {
     let start = coord - axis.vector().scale(offset as i16);
     (WindowKey { start, axis }, 1u8 << offset)
-}
-
-/// Serializable/debug-friendly view of an active threat window.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Threat {
-    /// Player who owns the stones in this window.
-    pub player: Player,
-    /// Canonical start/axis of the window.
-    pub key: WindowKey,
-    /// The six coordinates that make up the window.
-    pub cells: [HexCoord; WINDOW_LEN as usize],
-    /// Player stone positions as a six-bit mask.
-    pub stone_mask: u8,
-    /// Player stone coordinates inside the window.
-    pub stone_cells: Vec<HexCoord>,
-    /// Empty positions as a six-bit mask.
-    pub empty_mask: u8,
-    /// Empty coordinates inside the window.
-    pub empty_cells: Vec<HexCoord>,
-    /// Number of `player` stones in the window. Always at least four.
-    pub own_count: u8,
-}
-
-/// Return current threats for `player` from the board's maintained windows.
-pub fn find_threats(board: &Board, player: Player) -> Vec<Threat> {
-    let mut threats: Vec<_> = board
-        .windows()
-        .threat_entries(player)
-        .map(|entry| Threat {
-            player,
-            key: entry.key(),
-            cells: entry.cells(),
-            stone_mask: entry.mask(player),
-            stone_cells: entry.stone_cells(player),
-            empty_mask: entry.empty_mask(),
-            empty_cells: entry.empty_cells(),
-            own_count: entry.count(player),
-        })
-        .collect();
-    sort_threats(&mut threats);
-    threats
-}
-
-/// Return current threats for both players from the board's maintained windows.
-pub fn find_all_threats(board: &Board) -> Vec<Threat> {
-    let mut threats: Vec<_> = board
-        .windows()
-        .threats()
-        .map(|(player, entry)| Threat {
-            player,
-            key: entry.key(),
-            cells: entry.cells(),
-            stone_mask: entry.mask(player),
-            stone_cells: entry.stone_cells(player),
-            empty_mask: entry.empty_mask(),
-            empty_cells: entry.empty_cells(),
-            own_count: entry.count(player),
-        })
-        .collect();
-    sort_threats(&mut threats);
-    threats
-}
-
-fn sort_threats(threats: &mut [Threat]) {
-    threats.sort_by_key(|threat| {
-        (
-            threat.player.index(),
-            threat.key.axis.index(),
-            threat.key.start.q,
-            threat.key.start.r,
-        )
-    });
 }
 
 #[cfg(test)]

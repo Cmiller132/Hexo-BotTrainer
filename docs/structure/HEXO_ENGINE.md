@@ -4,7 +4,7 @@
 
 `hexo-engine` is the rules and state authority for Hexo. It defines the
 canonical game state, legal transitions, terminal detection, replayable history,
-and rules-derived tactical facts.
+and the raw tactical data maintained by the rules engine.
 
 Every other package consumes engine facts instead of duplicating game logic.
 
@@ -16,7 +16,8 @@ Every other package consumes engine facts instead of duplicating game logic.
 - Move validation and state transitions.
 - Terminal detection and winner.
 - Move history and replayable snapshots.
-- Rules-derived tactical facts, such as threats or immediate wins.
+- Raw board state and raw tactics/window-store data in the same shape the engine
+  stores internally.
 - Stable state/action identity for caches, replay checks, search tables, and
   diagnostics.
 - Clear errors for illegal, stale, malformed, or incompatible inputs.
@@ -29,6 +30,8 @@ Every other package consumes engine facts instead of duplicating game logic.
 - Runner lifecycle, player orchestration, or run results.
 - Model-specific search policy.
 - Dashboards, experiment management, or storage backends.
+- UI/dashboard tactical interpretation, sorting, filtering, labels, summaries,
+  or derived helper facts such as immediate wins and must-block moves.
 
 ## Package Layout
 
@@ -68,9 +71,15 @@ boundary into Rust. The bridge should pass opaque state handles and simple
 transport types, not reimplement rules in Python.
 
 Current status: the Rust engine skeleton contains real rule/state modules, but
-the Python API and PyO3 bridge are still scaffolding. The Python functions
-define the intended host-facing surface and currently raise engine-unavailable
-errors until the bridge is wired.
+the PyO3 bridge is still scaffolding. The Python functions define the intended
+host-facing surface and temporarily provide a small fallback implementation so
+callers can use the engine boundary until the Rust API is bound.
+
+The bridge should expose literal engine data structures as simple transport
+values. For example, `game_state()` returns board/history/phase information and
+`tactics()` returns the raw window store plus the last window update. Dashboard
+packages may derive display-oriented facts from that data, but the engine API
+should not reshape raw engine state into UI summaries.
 
 ## File Responsibilities
 
@@ -79,7 +88,7 @@ errors until the bridge is wired.
 | `pyproject.toml` | Python package metadata and maturin bridge settings. |
 | `Cargo.toml` | Rust crate metadata for the engine package. |
 | `python/hexo_engine/__init__.py` | Public Python export surface for engine API, errors, and transport types. |
-| `python/hexo_engine/api.py` | Intended Python API for state creation, legal actions, transitions, snapshots, tactics, and identities. |
+| `python/hexo_engine/api.py` | Python API for state creation, legal actions, transitions, snapshots, tactics, and identities. |
 | `python/hexo_engine/types.py` | Python dataclasses and aliases for engine-facing transport values. |
 | `python/hexo_engine/errors.py` | Python exception types for unavailable engine, illegal actions, and snapshot errors. |
 | `python/hexo_engine/py.typed` | Marker that the package ships type information. |
@@ -88,7 +97,7 @@ errors until the bridge is wired.
 | `rust/src/coord.rs` | Axial coordinate math and distance helpers. |
 | `rust/src/rules.rs` | Rule constants and legality helpers. |
 | `rust/src/state.rs` | Canonical game state, turn phase, transitions, terminal checks, and tests. |
-| `rust/src/tactics.rs` | Threat-window and tactical-summary logic. |
+| `rust/src/tactics.rs` | Incremental raw six-cell window tracking and window update data. |
 | `rust/src/identity.rs` | Placeholder home for stable state/action identity helpers. |
 | `rust/src/snapshot.rs` | Replayable snapshot DTOs and metadata. |
 | `rust/src/error.rs` | Rust engine error types. |
@@ -121,7 +130,8 @@ legal_actions(state) -> list[action]
 validate_action(state, action) -> ok | legality_error
 apply_action(state, action) -> transition_result | legality_error
 terminal(state) -> terminal_result | none
-tactics(state) -> tactical_summary
+game_state(state) -> raw state
+tactics(state) -> raw window store and update data
 state_id(state) -> stable identity
 action_id(action) -> stable identity
 ```
@@ -141,7 +151,8 @@ To the runner:
 - action validation and application,
 - transition result,
 - terminal result,
-- replayable history and state snapshots.
+- replayable history and state snapshots,
+- raw game state and raw tactical/window-store data for clients that need it.
 
 The primary action is a single placement. A pair action may exist as a
 host-facing convenience for normal two-placement turns, but the engine boundary
@@ -152,7 +163,7 @@ To models:
 
 - canonical state context,
 - legal actions and action identities,
-- optional tactical summaries,
+- optional raw tactical/window-store data,
 - terminal result and replay history for target construction.
 
 To utilities:
@@ -170,4 +181,4 @@ Engine tests should focus on rule correctness and determinism:
 - snapshot round trips,
 - replay from action history,
 - state/action identity stability,
-- tactical payload consistency with legal actions.
+- raw tactical payload consistency with engine window state.

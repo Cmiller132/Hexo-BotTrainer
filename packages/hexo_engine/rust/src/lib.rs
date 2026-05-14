@@ -27,6 +27,6 @@ pub use state::{
     PlacementRecord, Player, TurnPhase,
 };
 pub use tactics::{
-    find_all_threats, find_threats, Axis, Threat, WindowEntry, WindowKey, WindowKeyList,
-    WindowStore, WindowUpdate, WINDOWS_PER_PLACEMENT, WINDOW_LEN,
+    Axis, WindowEntry, WindowKey, WindowKeyList, WindowStore, WindowUpdate,
+    WINDOWS_PER_PLACEMENT, WINDOW_LEN,
 };

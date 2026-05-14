@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hexo Match</title>
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+<header>
+  <h1>Hexo Match</h1>
+  <div class="status"><span class="dot"></span><span id="statusText">Ready</span></div>
+</header>
+<main>
+  <div class="board-area" id="boardArea">
+    <svg id="boardSvg"></svg>
+    <div class="tip" id="tip"></div>
+  </div>
+  <aside class="sidebar">
+    <div class="info">
+      <div class="info-row"><span class="label">Player</span><span class="value" id="playerVal"></span></div>
+      <div class="info-row"><span class="label">Phase</span><span class="value" id="phaseVal"></span></div>
+      <div class="info-row"><span class="label">Stones</span><span class="value" id="stonesVal"></span></div>
+      <div class="info-row"><span class="label">Legal Cells</span><span class="value" id="legalVal"></span></div>
+    </div>
+    <div class="toolbar">
+      <button id="newBtn">New</button>
+      <button id="undoBtn">Undo</button>
+      <button id="fitBtn">Fit</button>
+      <button id="tacticsBtn">Tactics</button>
+    </div>
+    <div class="tactics-side">
+      <div class="overlay-controls">
+        <div class="seg" id="modeSeg">
+          <button data-mode="forcing">Forcing</button>
+          <button data-mode="threats">Threats</button>
+          <button data-mode="windows">Active</button>
+          <button data-mode="all">All</button>
+        </div>
+        <div class="seg" id="playerSeg">
+          <button data-player="both">Both</button>
+          <button data-player="player0">P0</button>
+          <button data-player="player1">P1</button>
+        </div>
+        <div class="seg" id="axisSeg">
+          <button data-axis="all">Axis</button>
+          <button data-axis="Q">Q</button>
+          <button data-axis="R">R</button>
+          <button data-axis="QR">QR</button>
+        </div>
+        <button id="inspectBtn">Inspect</button>
+      </div>
+      <div class="tactics-panel" id="tacticsPanel"></div>
+    </div>
+    <div class="moves-wrap"><div class="moves" id="moves"></div></div>
+    <div class="legend">
+      <span><span class="ldot" style="background:var(--p0)"></span>P0</span>
+      <span><span class="ldot" style="background:var(--p1)"></span>P1</span>
+      <span><span class="ldot" style="background:#111722;border:1px solid var(--border)"></span>Legal</span>
+      <span class="tactic-legend"><span class="ldot" style="background:var(--green)"></span>Win</span>
+      <span class="tactic-legend"><span class="ldot" style="background:var(--red)"></span>Block</span>
+    </div>
+  </aside>
+</main>
+<script src="/static/app.js"></script>
+</body>
+</html>

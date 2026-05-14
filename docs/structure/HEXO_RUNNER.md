@@ -27,6 +27,7 @@ runner applies accepted actions through the engine
 ## Does Not Own
 
 - Game legality or terminal detection.
+- Dashboard-specific game-state shaping or tactical interpretation.
 - Model architecture or tensors.
 - Search internals.
 - Training targets or losses.
@@ -62,10 +63,14 @@ packages/hexo_runner/
 
 ## Current Status
 
-This document describes the intended final runner boundary. The current Python
-package is a non-operational skeleton: the CLI prints a redesign message, the
-session and loop objects define their contracts, and the mode modules raise
-`NotImplementedError` until engine wiring exists.
+This document describes the intended final runner boundary. Most of the Python
+package is still a redesign skeleton: the CLI prints a redesign message, and
+the session and loop objects define their contracts. Match mode now includes a
+small interactive facade backed by the engine API so local tools can play
+through the runner boundary while the full shared loop is still being wired.
+Its view returns raw engine state, raw engine tactics/window data, legal
+actions, terminal status, and a replay snapshot; browser-specific parsing lives
+in `hexo_frontend`.
 
 ## File Responsibilities
 
@@ -84,7 +89,7 @@ session and loop objects define their contracts, and the mode modules raise
 | `records/record.py` | Durable detached game-record dataclasses. |
 | `records/results.py` | Compact match, batch, evaluation, and self-play result dataclasses. |
 | `modes/__init__.py` | Public exports for available runner modes. |
-| `modes/match.py` | Future one-game mode built on the shared loop. |
+| `modes/match.py` | One-game match mode, currently exposing an interactive engine-backed match facade and passing raw engine data through while the full shared loop is unfinished. |
 | `modes/batch.py` | Future many-game mode built from match jobs. |
 | `modes/evaluation.py` | Future fixed-opponent evaluation mode. |
 | `modes/selfplay.py` | Future self-play execution mode using model-owned players and sample writers. |
@@ -114,7 +119,7 @@ A request contains:
 - engine snapshot or state reference,
 - legal actions,
 - evaluation flag,
-- optional tactical summary,
+- optional raw tactical/window-store data,
 - seed and provenance metadata.
 
 A response contains:
