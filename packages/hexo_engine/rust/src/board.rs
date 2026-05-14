@@ -2,7 +2,7 @@
 //!
 //! Hexo has no fixed board bounds, so the board stores only occupied cells.
 //! A hash map gives O(1)-ish lookup by coordinate, while `occupied` preserves a
-//! compact list for frontier generation, encoding, and board summaries.
+//! compact list for legal-cell generation, encoding, and board summaries.
 
 use super::coord::{coords_within_radius, HexCoord};
 use super::error::MoveError;
@@ -12,7 +12,7 @@ use ahash::{AHashMap, AHashSet};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Maximum distance from any existing stone for non-opening placements.
-pub const LEGAL_FRONTIER_RADIUS: i16 = 8;
+pub const LEGAL_RADIUS: i16 = 8;
 
 /// In the game engine, a stone is just the owning player.
 pub type Stone = Player;
@@ -27,7 +27,7 @@ pub struct Board {
     /// Incrementally maintained six-cell window state.
     windows: WindowStore,
     /// Incrementally maintained legal non-opening placements.
-    frontier: AHashSet<HexCoord>,
+    legal: AHashSet<HexCoord>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -67,7 +67,7 @@ impl Board {
         }
         self.stones.insert(coord, stone);
         self.occupied.push(coord);
-        self.update_frontier_for_placement(coord);
+        self.update_legal_for_placement(coord);
         Ok(self.windows.update_for_placement(coord, stone))
     }
 
@@ -76,14 +76,14 @@ impl Board {
         &self.windows
     }
 
-    /// True when `coord` is a legal non-opening frontier cell.
-    pub fn is_frontier_cell(&self, coord: HexCoord) -> bool {
-        self.frontier.contains(&coord)
+    /// True when `coord` is a legal non-opening cell.
+    pub fn is_legal_cell(&self, coord: HexCoord) -> bool {
+        self.legal.contains(&coord)
     }
 
-    /// Iterate legal non-opening frontier cells.
-    pub fn frontier_cells(&self) -> impl Iterator<Item = HexCoord> + '_ {
-        self.frontier.iter().copied()
+    /// Iterate legal non-opening cells.
+    pub fn legal_cells(&self) -> impl Iterator<Item = HexCoord> + '_ {
+        self.legal.iter().copied()
     }
 
     /// All occupied coordinates in placement order.
@@ -120,11 +120,11 @@ impl Board {
         ))
     }
 
-    fn update_frontier_for_placement(&mut self, coord: HexCoord) {
-        self.frontier.remove(&coord);
-        for candidate in coords_within_radius(coord, LEGAL_FRONTIER_RADIUS) {
+    fn update_legal_for_placement(&mut self, coord: HexCoord) {
+        self.legal.remove(&coord);
+        for candidate in coords_within_radius(coord, LEGAL_RADIUS) {
             if self.is_empty(candidate) {
-                self.frontier.insert(candidate);
+                self.legal.insert(candidate);
             }
         }
     }

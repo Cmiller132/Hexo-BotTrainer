@@ -17,7 +17,7 @@ pub mod tactics;
 #[cfg(feature = "python")]
 pub mod pybridge;
 
-pub use board::{Board, Stone, LEGAL_FRONTIER_RADIUS};
+pub use board::{Board, Stone, LEGAL_RADIUS};
 pub use coord::{hex_distance, HexCoord};
 pub use error::{MoveError, StateLoadError};
 pub use rules::{is_legal_placement, legal_placements};

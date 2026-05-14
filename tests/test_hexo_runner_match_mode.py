@@ -35,19 +35,19 @@ class ScriptedPlayer:
         self.initialized = False
         self.closed = False
         self.observed: list[object] = []
-        self.requests: list[object] = []
+        self.states: list[object] = []
 
     def initialize(self, session_context: object) -> None:
         self.initialized = True
 
-    def decide(self, request: object) -> object:
-        from hexo_engine import AxialCoord, PlacementAction, apply_action
+    def decide(self, state: object) -> object:
+        from hexo_engine import AxialCoord, PlacementAction, apply_action, legal_actions
         from hexo_runner.player import DecisionResult
 
-        self.requests.append(request)
-        legal_actions = list(getattr(request, "legal_actions"))
-        if self.mutate_clone and legal_actions:
-            apply_action(getattr(request, "state").state_ref, legal_actions[0])
+        self.states.append(state)
+        actions = list(legal_actions(state))
+        if self.mutate_clone and actions:
+            apply_action(state, actions[0])
         if not self.moves:
             raise RuntimeError("script exhausted")
         q, r = self.moves.pop(0)
@@ -64,11 +64,11 @@ class IllegalPlayer(ScriptedPlayer):
     def __init__(self, player_id: str) -> None:
         super().__init__(player_id, [])
 
-    def decide(self, request: object) -> object:
+    def decide(self, state: object) -> object:
         from hexo_engine import AxialCoord, PlacementAction
         from hexo_runner.player import DecisionResult
 
-        self.requests.append(request)
+        self.states.append(state)
         return DecisionResult(action=PlacementAction(AxialCoord(99, 99)))
 
 
@@ -95,21 +95,14 @@ class RunnerMatchModeTests(unittest.TestCase):
         self.assertEqual(len(p0.observed), 12)
         self.assertEqual(len(p1.observed), 12)
 
-        for index, entry in enumerate(sink.entries):
-            before = entry.before_snapshot.payload["placements"]
-            after = entry.after_snapshot.payload["placements"]
-            self.assertEqual(len(before), index)
-            self.assertEqual(len(after), index + 1)
-            self.assertIn("before_state_id", entry.metadata)
-            self.assertIn("after_state_id", entry.metadata)
+        for entry in sink.entries:
+            self.assertIsNotNone(entry.action)
             self.assertIn("action_id", entry.metadata)
             self.assertIn("decision_diagnostics", entry.metadata)
-            self.assertIn("transition_metadata", entry.metadata)
 
-    def test_decision_request_exposes_typed_cloneable_engine_view(self) -> None:
-        from hexo_engine import legal_actions, snapshot
+    def test_player_receives_only_cloneable_engine_state(self) -> None:
+        from hexo_engine import EngineStateRef, game_state, legal_actions, snapshot, tactics
         from hexo_runner.modes.match import run_match
-        from hexo_runner.player import EngineDecisionView
         from hexo_runner.session import GameSpec
 
         p0 = ScriptedPlayer("p0", [(0, 0)], mutate_clone=True)
@@ -118,17 +111,16 @@ class RunnerMatchModeTests(unittest.TestCase):
 
         run_match(GameSpec(game_id="view-contract"), (p0, p1), sink)
 
-        request = p0.requests[0]
-        self.assertIsInstance(request.state, EngineDecisionView)
-        self.assertEqual(request.seed, None)
-        self.assertEqual(request.state.snapshot.payload["placements"], [])
-        self.assertEqual(len(snapshot(request.state.state_ref).payload["placements"]), 1)
-        self.assertEqual(len(sink.entries[0].before_snapshot.payload["placements"]), 0)
-        self.assertEqual(len(sink.entries[0].after_snapshot.payload["placements"]), 1)
-        self.assertIn("board", request.state.game_state)
-        self.assertIn("window_store", request.state.tactics)
-        self.assertIn("entries", request.state.tactics["window_store"])
-        self.assertGreater(len(legal_actions(request.state.state_ref)), 1)
+        state = p0.states[0]
+        self.assertIsInstance(state, EngineStateRef)
+        self.assertEqual(len(snapshot(state).payload["placements"]), 1)
+        self.assertEqual(len(sink.entries), 1)
+        self.assertEqual(sink.entries[0].action.coord.q, 0)
+        self.assertEqual(sink.entries[0].action.coord.r, 0)
+        self.assertIn("board", game_state(state))
+        self.assertIn("window_store", tactics(state))
+        self.assertIn("entries", tactics(state)["window_store"])
+        self.assertGreater(len(legal_actions(state)), 1)
 
     def test_decision_result_requires_an_action(self) -> None:
         from hexo_runner.player import DecisionResult

@@ -9,7 +9,7 @@ through the engine, and records what happened.
 Its central abstraction is:
 
 ```text
-participant receives decision request
+participant receives cloned engine state
 participant returns action | error
 runner applies accepted actions through the engine
 ```
@@ -20,7 +20,7 @@ runner applies accepted actions through the engine
 - Engine state handle ownership for one game session.
 - The game loop.
 - Player lifecycle.
-- Core game recording and event emission.
+- Core game recording.
 - Result summaries.
 - Self-play, evaluation, direct match, and batch run modes.
 
@@ -50,7 +50,6 @@ packages/hexo_runner/
       py.typed
       records/
         __init__.py
-        events.py
         record.py
         results.py
       modes/
@@ -66,7 +65,7 @@ packages/hexo_runner/
 This document describes the runner boundary. The CLI and non-match modes are
 still redesign scaffolds, but match mode now runs a generic player-versus-player
 game through the shared loop. The runner owns the primary engine state, builds a
-typed decision view for the active player, applies accepted actions through the
+cloned engine state for the active player, applies accepted actions through the
 public engine API, writes core transition records, and returns a compact
 `GameResult`.
 
@@ -78,12 +77,11 @@ public engine API, writes core transition records, and returns a compact
 | `python/hexo_runner/__init__.py` | Package description and version export. |
 | `python/hexo_runner/cli.py` | Placeholder CLI entry point for the runner package. |
 | `python/hexo_runner/config.py` | Placeholder runner config dataclass for future session/run options. |
-| `python/hexo_runner/player.py` | Shared player identity, decision request/result, and runner-player protocol. |
+| `python/hexo_runner/player.py` | Shared player identity, decision result, and runner-player protocol. |
 | `python/hexo_runner/session.py` | Game spec, session context, and engine-backed session creation. |
 | `python/hexo_runner/loop.py` | Generic single-game player/engine loop. |
 | `python/hexo_runner/py.typed` | Marker that the package ships type information. |
 | `records/__init__.py` | Public exports for runner record/result types. |
-| `records/events.py` | Live transition/record event shapes. |
 | `records/record.py` | Durable detached game-record dataclasses. |
 | `records/results.py` | Compact match, batch, evaluation, and self-play result dataclasses. |
 | `modes/__init__.py` | Public exports for available runner modes. |
@@ -99,7 +97,7 @@ All participants implement the same contract:
 ```text
 identity -> player identity
 initialize(session_context)
-decide(decision_request) -> decision_result
+decide(cloned_engine_state) -> decision_result
 observe_transition(transition_event)
 close(final_summary)
 ```
@@ -108,19 +106,25 @@ A player may be model-backed, scripted, human-controlled, remote, search-based,
 or random. The runner only depends on the contract, and every player self
 reports the same `identity` field.
 
-## Decision Request
+## Player Decision State
 
-A request contains:
+The active player receives exactly one game payload: a cloned mutable
+`EngineStateRef`. It is not the primary state held by the runner.
 
-- game id and turn index,
-- current player,
-- typed engine decision view,
-- legal actions,
-- evaluation flag,
-- optional raw tactical/window-store data,
-- seed and provenance metadata.
+Players query the clone through public `hexo_engine` APIs:
 
-A response contains:
+```text
+current_player(state)
+turn_placement(state)
+legal_actions(state)
+game_state(state)
+tactics(state)
+terminal(state)
+apply_action(state, action)  # search/simulation only
+```
+
+The runner does not push snapshots, raw game state, tactics, terminal data, or
+legal actions into the player contract. A response contains:
 
 - chosen action,
 - optional opaque diagnostics.
@@ -128,11 +132,9 @@ A response contains:
 Diagnostics are transported by the runner but owned by the player/model that
 produced them.
 
-The decision view contains a replay snapshot, stable state id, raw game state,
-raw tactical/window-store data, legal actions, terminal status, and a cloned
-`EngineStateRef`. The clone is built from `snapshot(primary)` followed by
-`load_snapshot(snapshot)`, so players can mutate it for search without touching
-the primary game state held by the runner.
+Snapshots remain an engine API, but the current runner record does not store
+before/after snapshots. The transition object still carries engine transition
+data for player observers such as the manual frontend adapter.
 
 ## Runtime Flow
 
@@ -143,20 +145,19 @@ create or load engine state
 store EngineStateRef on SessionContext
 while not terminal:
     ask engine for current context
-    ask active player for a decision
+    clone primary engine state
+    ask active player for a decision from the clone
     handle player error if needed
     submit action to engine
-    emit events and core game records
+    write a core action record
 close players
-emit final summary
+return final summary
 ```
 
 ## Records And Results
 
-- `events`: live, ephemeral notifications for logging and observers.
 - `record`: durable core game records written as the game runs. These contain
-  position history, accepted actions, players, seeds, terminal state, and run
-  metadata.
+  accepted actions, players, terminal state, and run metadata.
 - `results`: compact return summaries for match, batch, evaluation, and
   self-play calls.
 

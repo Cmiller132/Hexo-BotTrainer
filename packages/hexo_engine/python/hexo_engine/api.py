@@ -8,6 +8,7 @@ against the intended engine contract instead of duplicating rules in UI code.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from copy import deepcopy
 from dataclasses import dataclass
 from hashlib import sha1
 from typing import Any
@@ -60,7 +61,7 @@ class _PlacementRecord:
 class _EngineState:
     def __init__(self) -> None:
         self.stones: dict[_Coord, Player] = {}
-        self.frontier: set[_Coord] = set()
+        self.legal: set[_Coord] = set()
         self.history: list[_PlacementRecord] = []
         self.current_player = Player.PLAYER_0
         self.turn_slot = TurnPlacement.PLACEMENT_0
@@ -83,6 +84,22 @@ def new_game(*, seed: int | None = None, scenario: object | None = None) -> Engi
     """Create a new engine-owned game state."""
 
     return EngineStateRef(_EngineState())
+
+
+def clone_state(state: EngineStateRef) -> EngineStateRef:
+    """Return an independent mutable copy of an engine state."""
+
+    source = _state(state)
+    clone = _EngineState()
+    clone.stones = dict(source.stones)
+    clone.legal = set(source.legal)
+    clone.history = list(source.history)
+    clone.current_player = source.current_player
+    clone.turn_slot = source.turn_slot
+    clone.first_stone = source.first_stone
+    clone.outcome = deepcopy(source.outcome)
+    clone.last_window_update = deepcopy(source.last_window_update)
+    return EngineStateRef(clone)
 
 
 def load_snapshot(snapshot: EngineSnapshot) -> EngineStateRef:
@@ -197,7 +214,7 @@ def game_state(state: EngineStateRef) -> dict[str, object]:
                 for record in engine_state.history
             ],
             "occupied": [_coord_payload(record.coord) for record in engine_state.history],
-            "frontier": [_coord_payload(coord) for coord in sorted(engine_state.frontier)],
+            "legal": [_coord_payload(coord) for coord in sorted(engine_state.legal)],
         },
     }
 
@@ -269,7 +286,7 @@ def _legal_coords(state: _EngineState) -> list[_Coord]:
         return []
     if not state.history:
         return [_Coord(0, 0)] if _Coord(0, 0) not in state.stones else []
-    return sorted(state.frontier)
+    return sorted(state.legal)
 
 
 def _apply_placement(state: _EngineState, coord: _Coord) -> None:
@@ -284,7 +301,7 @@ def _apply_placement(state: _EngineState, coord: _Coord) -> None:
             index=len(state.history) + 1,
         )
     )
-    _update_frontier(state, coord)
+    _update_legal(state, coord)
     state.last_window_update = _raw_window_update(state, coord, player)
 
     if _has_six_in_line(state, coord, player):
@@ -308,11 +325,11 @@ def _apply_placement(state: _EngineState, coord: _Coord) -> None:
         state.first_stone = None
 
 
-def _update_frontier(state: _EngineState, coord: _Coord) -> None:
-    state.frontier.discard(coord)
+def _update_legal(state: _EngineState, coord: _Coord) -> None:
+    state.legal.discard(coord)
     for candidate in _coords_within_radius(coord, FRONTIER_RADIUS):
         if candidate not in state.stones:
-            state.frontier.add(candidate)
+            state.legal.add(candidate)
 
 
 def _coords_within_radius(center: _Coord, radius: int) -> list[_Coord]:

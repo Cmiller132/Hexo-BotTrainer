@@ -1,9 +1,7 @@
 """Durable core game record boundary.
 
-The runner records the authoritative position trail and game metadata while a
-game runs. It does not record model tensors, policy semantics, or training
-targets. Model-owned training samples may keep references to these core records
-for debugging, but they are written separately during self-play.
+The runner records accepted actions and game metadata while a game runs. It
+does not record model tensors, policy semantics, or training targets.
 """
 
 from __future__ import annotations
@@ -18,17 +16,15 @@ from ..player import PlayerIdentity
 class PositionRecord:
     """Core record for one accepted engine transition.
 
-    Metadata should include `before_state_id`, `after_state_id`, `action_id`,
-    `decision_diagnostics`, and `transition_metadata` when produced by the
-    generic runner loop.
+    The runner keeps this intentionally small while the core loop settles: one
+    accepted action, who chose it, terminal state if the action ended the game,
+    and optional player diagnostics.
     """
 
     game_id: str
     turn_index: int
     player_id: str
-    before_snapshot: object
     action: object
-    after_snapshot: object
     terminal: object | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
 

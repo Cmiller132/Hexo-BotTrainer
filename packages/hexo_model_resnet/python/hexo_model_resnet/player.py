@@ -1,8 +1,8 @@
 """Runner player adapter for the ResNet model family.
 
-This adapter will receive runner decision requests, build ResNet inputs from
-engine state, run inference and optional search, then return one legal action to
-the runner.
+This adapter will receive a cloned runner engine state, build ResNet inputs
+from public `hexo_engine` queries, run inference and optional search, then
+return one legal action to the runner.
 """
 
 from __future__ import annotations
@@ -24,8 +24,8 @@ class ResNetPlayer:
     def initialize(self, session_context: object) -> None:
         """Prepare model resources for a runner session."""
 
-    def decide(self, request: object) -> object:
-        """Choose a legal action from a runner decision request."""
+    def decide(self, state: object) -> object:
+        """Choose a legal action from a cloned engine state."""
 
         _not_implemented("ResNetPlayer.decide")
 

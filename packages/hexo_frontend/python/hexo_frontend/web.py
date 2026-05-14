@@ -14,7 +14,7 @@ from urllib.parse import unquote, urlparse
 
 import hexo_engine as engine
 from hexo_runner.modes.match import run_match
-from hexo_runner.player import DecisionRequest, DecisionResult, FinalSummary, PlayerIdentity, TransitionEvent
+from hexo_runner.player import DecisionResult, FinalSummary, PlayerIdentity, TransitionEvent
 from hexo_runner.records import GameResult, PositionRecord
 from hexo_runner.session import GameSpec, SessionContext
 
@@ -37,7 +37,7 @@ class ManualMatchController:
         self._thread: Thread | None = None
         self._game_number = 0
         self._cancelled = False
-        self._request: DecisionRequest | None = None
+        self._state_ref: engine.EngineStateRef | None = None
         self._pending_action: engine.Action | None = None
         self._raw_state: dict[str, object] | None = None
         self._version = 0
@@ -52,7 +52,7 @@ class ManualMatchController:
             self._game_number += 1
             game_id = f"manual-{self._game_number}"
             self._cancelled = False
-            self._request = None
+            self._state_ref = None
             self._pending_action = None
             self._raw_state = None
             self._version = 0
@@ -74,11 +74,11 @@ class ManualMatchController:
     def submit_move(self, q: int, r: int) -> dict[str, object]:
         with self._condition:
             self._wait_for_state_locked()
-            request = self._request
-            if request is None or self._result is not None:
+            state_ref = self._state_ref
+            if state_ref is None or self._result is not None:
                 raise ValueError("No move is currently pending.")
             action = engine.PlacementAction(engine.AxialCoord(q=q, r=r))
-            if action not in request.legal_actions:
+            if action not in engine.legal_actions(state_ref):
                 raise ValueError(f"{q},{r} is not legal.")
 
             start_version = self._version
@@ -102,12 +102,12 @@ class ManualMatchController:
             raise RuntimeError("Timed out waiting for the current match to stop.")
         self._thread = None
 
-    def decide(self, player_index: int, request: DecisionRequest) -> DecisionResult:
+    def decide(self, player_index: int, state_ref: engine.EngineStateRef) -> DecisionResult:
         with self._condition:
             if self._cancelled:
                 raise RuntimeError("manual match reset")
-            self._request = request
-            self._raw_state = _raw_from_view(request.state)
+            self._state_ref = state_ref
+            self._raw_state = _raw_from_state_ref(state_ref)
             self._version += 1
             self._condition.notify_all()
 
@@ -123,7 +123,10 @@ class ManualMatchController:
     def write_entry(self, entry: PositionRecord) -> None:
         with self._condition:
             self._entries.append(entry)
-            self._raw_state = _raw_from_snapshot(entry.after_snapshot)
+
+    def observe_transition(self, transition: TransitionEvent) -> None:
+        with self._condition:
+            self._raw_state = _raw_from_snapshot(transition.transition.snapshot)
             self._version += 1
             self._condition.notify_all()
 
@@ -169,11 +172,11 @@ class _ManualPlayer:
     def initialize(self, session_context: SessionContext) -> None:
         return
 
-    def decide(self, request: DecisionRequest) -> DecisionResult:
-        return self._controller.decide(self._player_index, request)
+    def decide(self, state_ref: engine.EngineStateRef) -> DecisionResult:
+        return self._controller.decide(self._player_index, state_ref)
 
     def observe_transition(self, transition: TransitionEvent) -> None:
-        return
+        self._controller.observe_transition(transition)
 
     def close(self, final_summary: FinalSummary) -> None:
         return
@@ -252,14 +255,15 @@ def make_handler(controller: ManualMatchController) -> type[HexoPlayHandler]:
     return BoundHexoPlayHandler
 
 
-def _raw_from_view(view: Any) -> dict[str, object]:
+def _raw_from_state_ref(state_ref: engine.EngineStateRef) -> dict[str, object]:
+    legal = tuple(engine.legal_actions(state_ref))
     return {
-        "engine_state": view.game_state,
-        "legal_actions": [_action_payload(action) for action in view.legal_actions],
-        "legal_count": len(view.legal_actions),
-        "terminal": _terminal_payload(view.terminal),
-        "tactics": view.tactics,
-        "snapshot": _snapshot_payload(view.snapshot),
+        "engine_state": engine.game_state(state_ref),
+        "legal_actions": [_action_payload(action) for action in legal],
+        "legal_count": len(legal),
+        "terminal": _terminal_payload(engine.terminal(state_ref)),
+        "tactics": engine.tactics(state_ref),
+        "snapshot": _snapshot_payload(engine.snapshot(state_ref)),
     }
 
 

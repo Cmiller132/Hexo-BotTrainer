@@ -1,7 +1,7 @@
 //! Legal placement generation and validation.
 //!
-//! The board maintains a radius-8 frontier incrementally. After the opening
-//! move, legal placement generation is a query over that frontier rather than a
+//! The board maintains radius-8 legal cells incrementally. After the opening
+//! move, legal placement generation is a query over those cells rather than a
 //! full-board rescan.
 
 use super::coord::HexCoord;
@@ -12,8 +12,8 @@ use super::state::{HexoState, TurnPhase};
 ///
 /// This respects the autoregressive phase model:
 /// - opening: only `(0, 0)`
-/// - first stone: any empty frontier cell
-/// - second stone: any empty frontier cell other than the first stone
+/// - first stone: any legal empty cell
+/// - second stone: any legal empty cell other than the first stone
 pub fn legal_placements(state: &HexoState, out: &mut Vec<HexCoord>) {
     out.clear();
 
@@ -28,7 +28,7 @@ pub fn legal_placements(state: &HexoState, out: &mut Vec<HexCoord>) {
             }
         }
         TurnPhase::FirstStone | TurnPhase::SecondStone { .. } => {
-            out.extend(state.board().frontier_cells());
+            out.extend(state.board().legal_cells());
             out.sort_by_key(|coord| (coord.q, coord.r));
         }
     }
@@ -64,7 +64,7 @@ fn legal_non_opening_placement(state: &HexoState, coord: HexCoord) -> Result<(),
         return Err(MoveError::Occupied(coord));
     }
 
-    if state.board().is_frontier_cell(coord) {
+    if state.board().is_legal_cell(coord) {
         Ok(())
     } else {
         Err(MoveError::IllegalPlacement(coord))

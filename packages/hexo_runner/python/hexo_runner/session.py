@@ -41,8 +41,8 @@ class SessionContext:
     """Initialized context consumed by the game loop and players.
 
     `state_ref` is the primary authoritative engine state. The loop keeps it and
-    applies real moves to it. Per-decision players receive cloned state refs via
-    `EngineDecisionView`, not this primary handle.
+    applies real moves to it. Per-decision players receive cloned state refs,
+    not this primary handle.
     """
 
     session_id: str
