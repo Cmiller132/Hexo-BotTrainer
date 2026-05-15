@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any
 
 from .errors import EngineUnavailableError
@@ -16,7 +17,6 @@ from .types import (
     Action,
     ActionId,
     AxialCoord,
-    PairAction,
     Player,
     PlacementAction,
     PythonBoard,
@@ -30,7 +30,6 @@ from .types import (
     TerminalResult,
     TransitionResult,
     TurnPhase,
-    TurnPlacement,
 )
 
 
@@ -38,6 +37,11 @@ LEGAL_RADIUS = 8
 WIN_LENGTH = 6
 DIRECTIONS = ((1, 0), (0, 1), (1, -1))
 AXES = (("Q", (1, 0)), ("R", (0, 1)), ("QR", (1, -1)))
+
+
+class _TurnPlacement(Enum):
+    PLACEMENT_0 = "placement_0"
+    PLACEMENT_1 = "placement_1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,7 +61,7 @@ class _Coord:
 class _PlacementRecord:
     player: Player
     coord: _Coord
-    phase: TurnPlacement
+    phase: _TurnPlacement
     index: int
 
 
@@ -67,7 +71,7 @@ class _EngineState:
         self.legal: set[_Coord] = set()
         self.history: list[_PlacementRecord] = []
         self.current_player = Player.PLAYER_0
-        self.turn_slot = TurnPlacement.PLACEMENT_0
+        self.turn_slot = _TurnPlacement.PLACEMENT_0
         self.first_stone: _Coord | None = None
         self.outcome: TerminalResult | None = None
 
@@ -96,22 +100,10 @@ def current_player(state: HexoState) -> Player:
     return _state(state).current_player
 
 
-def turn_placement(state: HexoState) -> TurnPlacement:
-    """Return the current placement slot, as reported by the engine."""
-
-    return _state(state).turn_slot
-
-
 def legal_actions(state: HexoState) -> list[Action]:
     """Return legal actions from the Rust rules authority."""
 
     return [PlacementAction(AxialCoord(coord.q, coord.r)) for coord in _legal_coords(_state(state))]
-
-
-def validate_action(state: HexoState, action: Action) -> None:
-    """Ask Rust to validate an action, raising on illegal input."""
-
-    _validated_action_coords(_state(state), action)
 
 
 def apply_action(state: HexoState, action: Action) -> TransitionResult:
@@ -127,7 +119,6 @@ def apply_action(state: HexoState, action: Action) -> TransitionResult:
         next_player=None if engine_state.outcome else engine_state.current_player,
         terminal=engine_state.outcome is not None,
         metadata={
-            "turn_placement": engine_state.turn_slot.value,
             "placements_made": len(engine_state.history),
         },
     )
@@ -200,7 +191,7 @@ def _axial(coord: _Coord) -> AxialCoord:
 def _turn_phase(state: _EngineState) -> TurnPhase:
     if not state.history:
         return TurnPhase.OPENING
-    if state.turn_slot == TurnPlacement.PLACEMENT_0:
+    if state.turn_slot == _TurnPlacement.PLACEMENT_0:
         return TurnPhase.FIRST_STONE
     return TurnPhase.SECOND_STONE
 
@@ -208,7 +199,7 @@ def _turn_phase(state: _EngineState) -> TurnPhase:
 def _placement_phase(record: _PlacementRecord, index: int) -> TurnPhase:
     if index == 0:
         return TurnPhase.OPENING
-    if record.phase == TurnPlacement.PLACEMENT_0:
+    if record.phase == _TurnPlacement.PLACEMENT_0:
         return TurnPhase.FIRST_STONE
     return TurnPhase.SECOND_STONE
 
@@ -228,7 +219,7 @@ def _python_last_turn(state: _EngineState) -> PythonMoveRecord | None:
     record = state.history[-1]
     if len(state.history) == 1:
         return PythonMoveRecord(player=record.player, placements=(_axial(record.coord),))
-    if record.phase == TurnPlacement.PLACEMENT_1 and len(state.history) >= 2:
+    if record.phase == _TurnPlacement.PLACEMENT_1 and len(state.history) >= 2:
         previous = state.history[-2]
         return PythonMoveRecord(
             player=record.player,
@@ -274,8 +265,6 @@ def _python_window_entries(state: _EngineState) -> tuple[PythonWindowEntry, ...]
 def _action_coords(action: Action) -> list[_Coord]:
     if isinstance(action, PlacementAction):
         return [_Coord(action.coord.q, action.coord.r)]
-    if isinstance(action, PairAction):
-        return [_Coord(coord.q, coord.r) for coord in action.placements]
     from .errors import IllegalActionError
 
     raise IllegalActionError(f"Unsupported action type: {type(action).__name__}")
@@ -329,14 +318,14 @@ def _apply_placement(state: _EngineState, coord: _Coord) -> None:
 
     if len(state.history) == 1:
         state.current_player = Player.PLAYER_1
-        state.turn_slot = TurnPlacement.PLACEMENT_0
+        state.turn_slot = _TurnPlacement.PLACEMENT_0
         state.first_stone = None
-    elif phase == TurnPlacement.PLACEMENT_0:
-        state.turn_slot = TurnPlacement.PLACEMENT_1
+    elif phase == _TurnPlacement.PLACEMENT_0:
+        state.turn_slot = _TurnPlacement.PLACEMENT_1
         state.first_stone = coord
     else:
         state.current_player = Player.PLAYER_0 if player == Player.PLAYER_1 else Player.PLAYER_1
-        state.turn_slot = TurnPlacement.PLACEMENT_0
+        state.turn_slot = _TurnPlacement.PLACEMENT_0
         state.first_stone = None
 
 

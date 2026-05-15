@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping
 
 
 class GameStatus(StrEnum):
@@ -29,12 +29,4 @@ class GameResult:
     winner: object | None = None
     record_ref: object | None = None
     analysis: Mapping[str, Any] = field(default_factory=dict)
-    metadata: Mapping[str, Any] = field(default_factory=dict)
-
-
-@dataclass(frozen=True, slots=True)
-class BatchResult:
-    """Aggregate summary for many games."""
-
-    games: Sequence[GameResult]
     metadata: Mapping[str, Any] = field(default_factory=dict)

@@ -68,7 +68,6 @@ name = "hexo_engine"
 version = "0.1.0"
 dependencies = [
  "ahash",
- "pyo3",
  "serde",
  "serde_json",
  "thiserror",

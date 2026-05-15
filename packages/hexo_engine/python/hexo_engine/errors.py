@@ -1,9 +1,4 @@
-"""Python-facing engine error types.
-
-The Rust engine owns the authoritative error details for illegal moves,
-snapshot loading, and incompatible state data. These Python exceptions are the
-host-side boundary that API wrappers should raise after translating Rust errors.
-"""
+"""Python-facing engine error types."""
 
 from __future__ import annotations
 
@@ -18,11 +13,3 @@ class EngineUnavailableError(HexoEngineError):
 
 class IllegalActionError(HexoEngineError):
     """Raised when an action is rejected by the Rust rules authority."""
-
-
-class SnapshotError(HexoEngineError):
-    """Raised when a snapshot cannot be serialized or loaded."""
-
-
-class IncompatibleSnapshotError(SnapshotError):
-    """Raised when snapshot data was produced by an incompatible engine version."""

@@ -19,7 +19,7 @@ Every other package consumes engine facts instead of duplicating game logic.
 - A native `HexoState` handle as the only public Python state object.
 - `to_python_state()` conversion for slow inspection, frontend, and debugging.
 - Stable action identity for diagnostics.
-- Clear errors for illegal, stale, malformed, or incompatible inputs.
+- Clear errors for illegal inputs.
 
 ## Does Not Own
 
@@ -53,26 +53,20 @@ packages/hexo_engine/
       rules.rs
       state.rs
       tactics.rs
-      identity.rs
       snapshot.rs
       error.rs
-      pybridge.rs
 ```
 
 `packages/hexo_engine` is the single ownership boundary for engine code. The
 Python package is the host-facing API; the Rust code is the rules authority and
-performance core. The Python side should not contain a parallel rules
-implementation.
-
-The clean bridge choice is PyO3 built with maturin. The Python package exposes
-friendly typed functions while `hexo_engine._rust` owns the narrow compiled
-boundary into Rust. The bridge should pass opaque state handles and simple
-transport types, not reimplement rules in Python.
+performance core. The Python side should remain a temporary fallback and API
+shim until the Rust-backed `HexoState` bridge is wired.
 
 Current status: the Rust engine skeleton contains real rule/state modules, but
-the PyO3 bridge is still scaffolding. The Python functions define the intended
-host-facing surface and temporarily provide a small fallback implementation so
-callers can use the engine boundary until the Rust API is bound.
+the compiled Python bridge is not currently present. The Python functions define
+the intended host-facing surface and temporarily provide a small fallback
+implementation so callers can use the engine boundary until the Rust API is
+bound.
 
 The bridge should expose the native engine state as an opaque `HexoState`.
 Slow clients can call `to_python_state()` to get a read-only Python mirror of
@@ -84,7 +78,7 @@ state into UI summaries.
 
 | File | Role |
 | --- | --- |
-| `pyproject.toml` | Python package metadata and maturin bridge settings. |
+| `pyproject.toml` | Python package metadata for the host-facing package. |
 | `Cargo.toml` | Rust crate metadata for the engine package. |
 | `python/hexo_engine/__init__.py` | Public Python export surface for engine API, errors, and transport types. |
 | `python/hexo_engine/api.py` | Python API for state creation, legal actions, transitions, Python-state conversion, and action identity. |
@@ -97,10 +91,8 @@ state into UI summaries.
 | `rust/src/rules.rs` | Rule constants and legality helpers. |
 | `rust/src/state.rs` | Canonical game state, turn phase, transitions, terminal checks, and tests. |
 | `rust/src/tactics.rs` | Incremental raw six-cell window tracking and window update data. |
-| `rust/src/identity.rs` | Placeholder home for stable state/action identity helpers. |
 | `rust/src/snapshot.rs` | Replayable snapshot DTOs and metadata. |
 | `rust/src/error.rs` | Rust engine error types. |
-| `rust/src/pybridge.rs` | Minimal PyO3 module scaffold for the compiled Python bridge. |
 
 ## Game Rules
 
@@ -122,9 +114,7 @@ blocked with the opponent's two placements.
 ```text
 new_game(seed?, scenario?) -> state
 current_player(state) -> Player0 | Player1
-turn_placement(state) -> Placement0 | Placement1
 legal_actions(state) -> list[action]
-validate_action(state, action) -> ok | legality_error
 apply_action(state, action) -> transition_result | legality_error
 terminal(state) -> terminal_result | none
 to_python_state(state) -> PythonHexoState
@@ -146,10 +136,9 @@ To the runner:
 - terminal result,
 - Python state mirror for clients that need slow inspection/export.
 
-The primary action is a single placement. A pair action may exist as a
-host-facing convenience for normal two-placement turns, but the engine boundary
-resolves it into deterministic single placements, records the resolved order,
-and discards the second placement if the first placement wins.
+The primary action is a single placement. Normal two-placement turns are
+represented autoregressively by sending one placement at a time through
+`apply_action`.
 
 To models:
 

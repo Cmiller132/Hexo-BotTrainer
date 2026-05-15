@@ -2,20 +2,15 @@
 //!
 //! This crate owns the authoritative game state and state transitions. Model,
 //! search, and sample code live outside this crate so the rules layer stays
-//! small, deterministic, and easy to audit. The package-local Python bridge is
-//! intentionally thin and forwards to this rules authority.
+//! small, deterministic, and easy to audit.
 
 pub mod board;
 pub mod coord;
 pub mod error;
-pub mod identity;
 pub mod rules;
 pub mod snapshot;
 pub mod state;
 pub mod tactics;
-
-#[cfg(feature = "python")]
-pub mod pybridge;
 
 pub use board::{Board, Stone, LEGAL_RADIUS};
 pub use coord::{hex_distance, HexCoord};

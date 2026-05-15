@@ -147,13 +147,13 @@ class RunnerMatchModeTests(unittest.TestCase):
         self.assertEqual(result.metadata["reason"], "runner_error")
         self.assertIn("not legal", result.metadata["error"])
 
-    def test_engine_rejects_pair_actions_atomically(self) -> None:
-        from hexo_engine import AxialCoord, IllegalActionError, PairAction, apply_action, new_game, to_python_state
+    def test_engine_rejects_unsupported_actions_without_corrupting_state(self) -> None:
+        from hexo_engine import IllegalActionError, apply_action, new_game, to_python_state
 
         state = new_game()
 
         with self.assertRaises(IllegalActionError):
-            apply_action(state, PairAction((AxialCoord(0, 0), AxialCoord(0, 0))))
+            apply_action(state, object())
 
         self.assertEqual(to_python_state(state).placements_made, 0)
 
@@ -194,7 +194,20 @@ class RunnerMatchModeTests(unittest.TestCase):
     def test_removed_engine_apis_are_not_exported(self) -> None:
         import hexo_engine
 
-        for name in ("EngineStateRef", "EngineSnapshot", "snapshot", "load_snapshot", "game_state", "tactics"):
+        for name in (
+            "EngineStateRef",
+            "EngineSnapshot",
+            "IncompatibleSnapshotError",
+            "PairAction",
+            "SnapshotError",
+            "TurnPlacement",
+            "game_state",
+            "load_snapshot",
+            "snapshot",
+            "tactics",
+            "turn_placement",
+            "validate_action",
+        ):
             self.assertFalse(hasattr(hexo_engine, name), name)
 
     def test_frontend_controller_uses_generic_runner(self) -> None:

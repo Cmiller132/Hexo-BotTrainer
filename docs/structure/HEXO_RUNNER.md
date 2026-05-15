@@ -55,7 +55,6 @@ packages/hexo_runner/
       modes/
         __init__.py
         match.py
-        selfplay.py
         evaluation.py
         batch.py
 ```
@@ -83,12 +82,11 @@ public engine API, writes core transition records, and returns a compact
 | `python/hexo_runner/py.typed` | Marker that the package ships type information. |
 | `records/__init__.py` | Public exports for runner record/result types. |
 | `records/record.py` | Durable detached game-record dataclasses. |
-| `records/results.py` | Compact match, batch, evaluation, and self-play result dataclasses. |
+| `records/results.py` | Compact single-game result dataclasses. |
 | `modes/__init__.py` | Public exports for available runner modes. |
 | `modes/match.py` | One-game match mode built on the generic player/engine loop. |
 | `modes/batch.py` | Future many-game mode built from match jobs. |
 | `modes/evaluation.py` | Future fixed-opponent evaluation mode. |
-| `modes/selfplay.py` | Future self-play execution mode using model-owned players and sample writers. |
 
 ## Player Contract
 
@@ -115,7 +113,6 @@ Players query the clone through public `hexo_engine` APIs:
 
 ```text
 current_player(state)
-turn_placement(state)
 legal_actions(state)
 to_python_state(state)
 terminal(state)

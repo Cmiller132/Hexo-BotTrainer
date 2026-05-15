@@ -77,10 +77,8 @@ packages/
         rules.rs
         state.rs
         tactics.rs
-        identity.rs
         snapshot.rs
         error.rs
-        pybridge.rs
 
   hexo_utils/
     pyproject.toml
@@ -129,7 +127,6 @@ packages/
         py.typed
         records/
           __init__.py
-          events.py
           record.py
           results.py
         modes/
@@ -137,7 +134,6 @@ packages/
           match.py
           batch.py
           evaluation.py
-          selfplay.py
 
   hexo_frontend/
     pyproject.toml

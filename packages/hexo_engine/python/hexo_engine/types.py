@@ -22,13 +22,6 @@ class Player(StrEnum):
     PLAYER_1 = "player1"
 
 
-class TurnPlacement(StrEnum):
-    """Placement slot inside the current logical turn."""
-
-    PLACEMENT_0 = "placement_0"
-    PLACEMENT_1 = "placement_1"
-
-
 class TurnPhase(StrEnum):
     """Rust-like phase of the autoregressive Hexo turn."""
 
@@ -52,21 +45,7 @@ class PlacementAction:
     coord: AxialCoord
 
 
-@dataclass(frozen=True, slots=True)
-class PairAction:
-    """Unordered two-placement convenience action.
-
-    The input tuple names the two requested cells; it does not imply
-    application order. The engine boundary should resolve the pair into single
-    placements deterministically for the current state and record the resolved
-    order. If the first resolved placement wins the game, the second placement
-    is discarded and must not be applied.
-    """
-
-    placements: tuple[AxialCoord, AxialCoord]
-
-
-Action: TypeAlias = PlacementAction | PairAction
+Action: TypeAlias = PlacementAction
 
 
 @dataclass(frozen=True, slots=True)
