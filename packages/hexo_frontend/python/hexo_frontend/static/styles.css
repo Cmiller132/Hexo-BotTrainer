@@ -404,6 +404,54 @@ button:disabled {
   margin-bottom: 12px;
 }
 
+.tactics-tabs {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.tactics-tabs button,
+.wide-action {
+  min-height: 30px;
+}
+
+.overview-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.mini-metric {
+  min-width: 0;
+  padding: 7px 6px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: rgba(8, 15, 23, 0.78);
+  color: var(--muted);
+  text-align: center;
+}
+
+.mini-metric strong {
+  display: block;
+  color: var(--p0);
+  font-size: 16px;
+  line-height: 1.05;
+}
+
+.mini-metric.p1 strong {
+  color: #ff8a86;
+}
+
+.mini-metric span {
+  display: block;
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .metric-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -418,6 +466,15 @@ button:disabled {
   display: grid;
   gap: 6px;
   margin-top: 8px;
+}
+
+.empty-panel,
+.selected-window-card {
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: rgba(8, 15, 23, 0.82);
+  padding: 9px;
+  margin-bottom: 10px;
 }
 
 .fact {
@@ -446,6 +503,168 @@ button:disabled {
   color: var(--muted);
   margin-top: 3px;
   line-height: 1.35;
+}
+
+.window-groups {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.window-group {
+  display: grid;
+  gap: 6px;
+}
+
+.window-group-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+
+.window-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 6px;
+}
+
+.window-card {
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+  padding: 7px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: rgba(8, 15, 23, 0.82);
+  cursor: pointer;
+}
+
+.window-card:hover,
+.window-card.selected {
+  border-color: var(--accent);
+  background: rgba(39, 215, 230, 0.08);
+}
+
+.window-card-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 6px;
+  align-items: center;
+  color: var(--text);
+  font-weight: 750;
+  min-width: 0;
+}
+
+.window-card-head span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.window-glyph {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 4px;
+}
+
+.window-glyph.large {
+  margin: 9px 0 7px;
+  gap: 6px;
+}
+
+.window-slot {
+  min-width: 0;
+  aspect-ratio: 1;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: rgba(7, 13, 19, 0.86);
+  color: rgba(255, 255, 255, 0.88);
+  display: grid;
+  place-items: center;
+  font-size: 10px;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.window-slot.p0 {
+  border-color: rgba(79, 147, 255, 0.74);
+  background: rgba(79, 147, 255, 0.38);
+}
+
+.window-slot.p1 {
+  border-color: rgba(255, 86, 80, 0.74);
+  background: rgba(255, 86, 80, 0.36);
+}
+
+.window-slot.empty {
+  border-style: dashed;
+}
+
+.window-slot.playable {
+  border-color: var(--yellow);
+  box-shadow: inset 0 0 0 1px rgba(245, 197, 66, 0.45);
+}
+
+.window-tags {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.tag {
+  padding: 1px 5px;
+  border: 1px solid rgba(143, 155, 170, 0.24);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.tag.win,
+.tag.blockable {
+  border-color: rgba(71, 200, 117, 0.45);
+  color: var(--green);
+}
+
+.tag.threat {
+  border-color: rgba(245, 197, 66, 0.45);
+  color: var(--yellow);
+}
+
+.tag.active {
+  border-color: rgba(39, 215, 230, 0.42);
+  color: var(--accent);
+}
+
+.tag.blocked {
+  opacity: 0.72;
+}
+
+.window-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.raw-details {
+  margin-top: 8px;
+}
+
+.raw-details summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 1.2px;
 }
 
 .pill {

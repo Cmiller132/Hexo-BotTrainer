@@ -8,6 +8,7 @@ let tacticsOn = false;
 let selectedWindowId = null;
 let selectedCellKey = null;
 let tacticFilters = { mode: "windows", player: "both", axis: "all", inspect: false };
+let tacticsView = "overview";
 let pendingRequest = false;
 let requestSeq = 0;
 let replayIndex = null;
@@ -33,6 +34,7 @@ document.getElementById("zoomInBtn").addEventListener("click", () => zoomBoardAt
 document.getElementById("zoomOutBtn").addEventListener("click", () => zoomBoardAtCenter(1.22));
 document.getElementById("tacticsBtn").addEventListener("click", () => {
   tacticsOn = !tacticsOn;
+  if (tacticsOn) tacticsView = "overview";
   if (!tacticsOn) clearTacticSelection();
   render();
 });
@@ -48,6 +50,7 @@ document.querySelectorAll("#axisSeg button").forEach(button => {
 document.getElementById("inspectBtn").addEventListener("click", () => {
   tacticFilters.inspect = !tacticFilters.inspect;
   if (!tacticFilters.inspect) clearTacticSelection();
+  if (tacticFilters.inspect) tacticsView = "cell";
   render();
 });
 document.getElementById("replayStartBtn").addEventListener("click", () => setReplayIndex(0));
@@ -279,6 +282,7 @@ function handleBoardClick(event) {
   if (tacticsOn && tacticFilters.inspect) {
     selectedCellKey = `${el.dataset.q},${el.dataset.r}`;
     selectedWindowId = null;
+    tacticsView = "cell";
     render();
   } else if (el.classList.contains("legal")) {
     post("/api/move", { q: Number(el.dataset.q), r: Number(el.dataset.r) });
@@ -525,11 +529,19 @@ function renderTacticsPanel(tacticMaps) {
   const selectedCell = tacticsOn && isLiveView() && selectedCellKey ? cellDebug(selectedCellKey) : null;
   panel.classList.toggle("has-selection", Boolean(selectedWindow || selectedCell));
 
-  let body = `<div class="fact-sub">Overlay off</div>`;
+  let body = `<div class="fact-sub">Turn on tactics to inspect windows, threats, and blocks.</div>`;
+  let tabs = "";
   if (tacticsOn && !isLiveView()) {
     body = `<div class="fact-sub">Replay view</div>`;
   } else if (tacticsOn) {
-    body = selectedWindow ? renderWindowInspector(selectedWindow) : selectedCell ? renderCellInspector(selectedCell) : renderTacticsOverview(tacticMaps);
+    tabs = renderTacticsTabs();
+    if (tacticsView === "cell") {
+      body = selectedCell ? renderCellInspector(selectedCell) : renderCellEmptyState();
+    } else if (tacticsView === "windows") {
+      body = renderWindowsExplorer(tacticMaps, selectedWindow);
+    } else {
+      body = renderTacticsOverview(tacticMaps);
+    }
   }
 
   panel.innerHTML = `
@@ -542,6 +554,7 @@ function renderTacticsPanel(tacticMaps) {
       </div>
     </div>
     <div class="tactics-body">
+      ${tabs}
       <div class="metric-grid stats-grid">
         ${metric("P0 Max", tacticMaps.maxHeat.player0)}
         ${metric("P1 Max", tacticMaps.maxHeat.player1)}
@@ -554,9 +567,28 @@ function renderTacticsPanel(tacticMaps) {
   bindTacticsPanel();
 }
 
+function renderTacticsTabs() {
+  const tabs = [
+    ["overview", "Overview"],
+    ["cell", "Cell"],
+    ["windows", "Windows"],
+  ];
+  return `<div class="tactics-tabs">${tabs.map(([mode, label]) => `
+    <button data-tactics-view="${mode}" class="${tacticsView === mode ? "active" : ""}">${label}</button>
+  `).join("")}</div>`;
+}
+
 function renderTacticsOverview(tacticMaps) {
   const tactics = state.tactics || {};
   return `
+    <div class="overview-grid">
+      ${windowCountMetric("P0 Windows", tacticMaps.windows.filter(w => (w.active_player || w.player) === "player0").length, "p0")}
+      ${windowCountMetric("P1 Windows", tacticMaps.windows.filter(w => (w.active_player || w.player) === "player1").length, "p1")}
+      ${windowCountMetric("Q Axis", tacticMaps.windows.filter(w => w.axis === "Q").length)}
+      ${windowCountMetric("R Axis", tacticMaps.windows.filter(w => w.axis === "R").length)}
+      ${windowCountMetric("QR Axis", tacticMaps.windows.filter(w => w.axis === "QR").length)}
+      ${windowCountMetric("Active", tacticMaps.windows.filter(w => w.is_active).length)}
+    </div>
     <div class="tactics-section">
       <div class="tactics-title">Forcing</div>
       <div class="metric-grid">
@@ -566,7 +598,19 @@ function renderTacticsOverview(tacticMaps) {
     </div>
     ${renderFactSection("Immediate Wins", tactics.immediate_wins || [], "win")}
     ${renderFactSection("Must Blocks", tactics.must_blocks || [], "block")}
-    ${renderWindowList(tacticMaps.windows.slice(0, 40), "Visible Windows")}
+    <div class="tactics-section">
+      <div class="tactics-title">Browse</div>
+      <button class="wide-action" data-tactics-view="windows">Open Window Explorer</button>
+    </div>
+  `;
+}
+
+function renderCellEmptyState() {
+  return `
+    <div class="empty-panel">
+      <div class="fact-main">No cell selected</div>
+      <div class="fact-sub">Turn on Inspect, then click a board cell to see containing windows and playable tactical facts.</div>
+    </div>
   `;
 }
 
@@ -579,7 +623,7 @@ function renderCellInspector(info) {
     </div>
     ${renderFactSection("Wins From This Cell", info.wins, "win")}
     ${renderFactSection("Blocks From This Cell", info.blocks, "block")}
-    ${renderWindowList(info.windows.slice(0, 30), "Containing Windows")}
+    ${renderWindowGroups(info.windows, "Containing Windows")}
   `;
 }
 
@@ -587,10 +631,14 @@ function renderWindowInspector(w) {
   const relatedWins = factsForWindow((state.tactics || {}).immediate_wins || [], w.id);
   const relatedBlocks = factsForWindow((state.tactics || {}).must_blocks || [], w.id);
   return `
-    <div class="tactics-section">
+    <div class="selected-window-card">
       <div class="fact-main">
         <span>${playerPill(w.player || w.active_player)} ${escapeText(w.id)}</span>
         <span>${w.own_count || 0}/6</span>
+      </div>
+      <div class="window-glyph large">${(w.cells || []).map(c => renderWindowSlot(c, w)).join("")}</div>
+      <div class="window-tags">
+        ${renderWindowTags(w)}
       </div>
       <div class="fact-sub">${escapeText(w.axis)} axis - ${escapeText(w.severity)} - ${w.is_blocked ? "blocked" : w.blockable_now ? "blockable now" : "not blockable now"}</div>
     </div>
@@ -618,10 +666,10 @@ function renderWindowInspector(w) {
     </div>
     ${renderFactSection("Related Wins", relatedWins, "win")}
     ${renderFactSection("Related Blocks", relatedBlocks, "block")}
-    <div class="tactics-section">
-      <div class="tactics-title">Raw Window</div>
+    <details class="raw-details">
+      <summary>Raw Window</summary>
       <div class="detail">${escapeText(JSON.stringify(w, null, 2))}</div>
-    </div>
+    </details>
   `;
 }
 
@@ -644,37 +692,120 @@ function renderFactSection(title, facts, kind) {
   `;
 }
 
-function renderWindowList(windows, title = "Visible Windows") {
+function renderWindowsExplorer(tacticMaps, selectedWindow) {
+  return `
+    ${selectedWindow ? renderWindowInspector(selectedWindow) : ""}
+    ${renderWindowGroups(tacticMaps.windows, "Window Explorer")}
+  `;
+}
+
+function renderWindowGroups(windows, title = "Windows") {
+  const sorted = [...windows].sort(windowPrioritySort);
+  const groups = groupedWindows(sorted);
   return `
     <div class="tactics-section">
       <div class="tactics-title">${title}</div>
-      <div class="fact-list">
-        ${windows.length ? windows.map(renderWindowRow).join("") : `<div class="fact-sub">No matching windows</div>`}
-      </div>
+      ${groups.length ? `<div class="window-groups">${groups.map(renderWindowGroup).join("")}</div>` : `<div class="fact-sub">No matching windows</div>`}
     </div>
   `;
 }
 
-function renderWindowRow(w) {
+function renderWindowGroup(group) {
+  return `
+    <div class="window-group">
+      <div class="window-group-head">
+        <span>${playerPill(group.player)} <strong>${escapeText(group.axis)}</strong></span>
+        <span>${group.windows.length} windows</span>
+      </div>
+      <div class="window-card-grid">${group.windows.map(renderWindowCard).join("")}</div>
+    </div>
+  `;
+}
+
+function renderWindowCard(w) {
   const selected = selectedWindowId === w.id ? "selected" : "";
-  return `<div class="fact ${selected}" data-window-id="${escapeAttr(w.id)}">
-    <div class="fact-main"><span>${playerPill(w.player || w.active_player)} ${escapeText(w.id)}</span><span>${w.own_count || 0}/6</span></div>
-    <div class="fact-sub">${escapeText(w.severity)} - empty ${coordList(w.empty_cells)} - playable ${coordList(w.blockable_cells)}</div>
+  const emptyCount = (w.empty_cells || []).length;
+  const playableCount = (w.blockable_cells || []).length;
+  return `<div class="window-card ${selected}" data-window-id="${escapeAttr(w.id)}">
+    <div class="window-card-head">
+      <span>${playerPill(w.player || w.active_player)} ${escapeText(w.id)}</span>
+      <strong>${w.own_count || 0}/6</strong>
+    </div>
+    <div class="window-glyph">${(w.cells || []).map(c => renderWindowSlot(c, w)).join("")}</div>
+    <div class="window-tags">${renderWindowTags(w)}</div>
+    <div class="window-meta"><span>${emptyCount} empty</span><span>${playableCount} playable</span></div>
   </div>`;
 }
 
+function renderWindowSlot(cell, w) {
+  const ownerClass = cell.owner === "player1" ? "p1" : cell.owner === "player0" ? "p0" : "empty";
+  const playable = (w.blockable_cells || []).some(c => c.q === cell.q && c.r === cell.r);
+  return `<span class="window-slot ${ownerClass} ${playable ? "playable" : ""}" title="(${cell.q}, ${cell.r})" data-cell-key="${cell.q},${cell.r}">
+    ${cell.owner ? playerShort(cell.owner).slice(1) : ""}
+  </span>`;
+}
+
+function renderWindowTags(w) {
+  return [
+    w.is_win ? "win" : "",
+    w.is_threat ? "threat" : "",
+    w.is_active ? "active" : "",
+    w.blockable_now ? "blockable" : "",
+    w.is_blocked ? "blocked" : "",
+  ].filter(Boolean).map(tag => `<span class="tag ${tag}">${tag}</span>`).join("") || `<span class="tag quiet">${escapeText(w.severity || "window")}</span>`;
+}
+
+function groupedWindows(windows) {
+  const map = new Map();
+  for (const w of windows) {
+    const player = w.active_player || w.player || w.threat_player || "blocked";
+    const axis = w.axis || "Axis";
+    const key = `${player}:${axis}`;
+    if (!map.has(key)) map.set(key, { player, axis, windows: [] });
+    map.get(key).windows.push(w);
+  }
+  return [...map.values()].sort((a, b) => playerShort(a.player).localeCompare(playerShort(b.player)) || String(a.axis).localeCompare(String(b.axis)));
+}
+
+function windowPrioritySort(a, b) {
+  return windowScore(b) - windowScore(a) || String(a.id).localeCompare(String(b.id));
+}
+
+function windowScore(w) {
+  return (w.is_win ? 1000 : 0)
+    + (w.is_threat ? 500 : 0)
+    + (w.blockable_now ? 160 : 0)
+    + (w.is_active ? 80 : 0)
+    + Number(w.own_count || 0) * 20
+    - (w.is_blocked ? 50 : 0);
+}
+
+function windowCountMetric(label, value, cls = "") {
+  return `<div class="mini-metric ${cls}"><strong>${escapeText(value)}</strong><span>${label}</span></div>`;
+}
+
 function bindTacticsPanel() {
+  document.querySelectorAll("[data-tactics-view]").forEach(el => {
+    el.addEventListener("click", event => {
+      event.stopPropagation();
+      tacticsView = el.dataset.tacticsView;
+      render();
+    });
+  });
   document.querySelectorAll("[data-window-id]").forEach(el => {
     el.addEventListener("click", () => {
       selectedWindowId = el.dataset.windowId;
       selectedCellKey = null;
+      tacticsView = "windows";
       render();
     });
   });
   document.querySelectorAll("[data-cell-key]").forEach(el => {
-    el.addEventListener("click", () => {
+    el.addEventListener("click", event => {
+      event.stopPropagation();
       selectedCellKey = el.dataset.cellKey;
       selectedWindowId = null;
+      tacticsView = "cell";
       render();
     });
   });
