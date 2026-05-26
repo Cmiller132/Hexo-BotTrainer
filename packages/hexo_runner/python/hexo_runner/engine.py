@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import asdict, is_dataclass
-from typing import Any, Mapping
+from typing import Any
 
 import hexo_engine as engine
 
@@ -50,19 +51,31 @@ class HexoEngineAdapter:
     def terminal_payload(self, terminal: object | None) -> Mapping[str, Any] | None:
         if terminal is None:
             return None
+        if isinstance(terminal, engine.TerminalResult):
+            return {
+                "winner": str(terminal.winner) if terminal.winner is not None else None,
+                "reason": terminal.reason,
+                "metadata": _jsonable(terminal.metadata),
+            }
         return _jsonable(terminal)
 
     def transition_payload(self, transition: object) -> Mapping[str, Any]:
+        if isinstance(transition, engine.TransitionResult):
+            return {
+                "next_player": str(transition.next_player) if transition.next_player is not None else None,
+                "terminal": transition.terminal,
+                "metadata": _jsonable(transition.metadata),
+            }
         return _jsonable(transition)
 
 
 def _jsonable(value: object) -> Any:
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
     if is_dataclass(value):
         return _jsonable(asdict(value))
     if isinstance(value, Mapping):
         return {str(key): _jsonable(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [_jsonable(item) for item in value]
-    if isinstance(value, (str, int, float, bool)) or value is None:
-        return value
     return str(value)

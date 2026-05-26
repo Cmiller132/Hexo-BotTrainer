@@ -114,7 +114,7 @@ def _run_worker_task(task: _WorkerTask) -> _WorkerResult:
         player.setup_worker(worker_context)
 
     path = Path(task.output_dir) / f"{task.batch_id}-worker-{task.worker_id}.jsonl"
-    sink = JsonlRecordSink(path)
+    sink = JsonlRecordSink(path, flush_on_write=False)
     results: list[GameResult] = []
     try:
         for game in task.games:
@@ -130,6 +130,7 @@ def _run_worker_task(task: _WorkerTask) -> _WorkerResult:
                 )
             )
     finally:
+        sink.close()
         for player in players:
             try:
                 player.close()

@@ -65,7 +65,7 @@ def legal_actions(state: HexoState) -> LegalActions:
 def legal_action_ids(state: HexoState) -> tuple[LegalActionId, ...]:
     """Return compact deterministic legal action IDs."""
 
-    return tuple(int(action_id) for action_id in _bridge().legal_action_ids(state))
+    return _bridge().legal_action_ids(state)
 
 
 def legal_action_count(state: HexoState) -> int:

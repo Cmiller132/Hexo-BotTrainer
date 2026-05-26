@@ -2,11 +2,11 @@
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::{PyDict, PyList, PyTuple};
 
 use crate::{
-    apply_placement, Axis, GameOutcome, HexCoord, HexoState as RustHexoState, MoveError,
-    PackedCoord, Placement, Player, TurnPhase,
+    apply_placement, Axis, GameOutcome, HexCoord, HexoState as RustHexoState, MoveError, Placement,
+    Player, TurnPhase,
 };
 
 /// Python-owned opaque handle to a Rust Hexo state.
@@ -49,10 +49,10 @@ pub fn current_player(state: PyRef<'_, PyHexoState>) -> &'static str {
 }
 
 #[pyfunction]
-pub fn legal_action_ids(state: PyRef<'_, PyHexoState>) -> Vec<PackedCoord> {
+pub fn legal_action_ids(py: Python<'_>, state: PyRef<'_, PyHexoState>) -> PyResult<Py<PyAny>> {
     let mut actions = Vec::with_capacity(state.state.legal_move_count());
     state.state.write_legal_action_ids(&mut actions);
-    actions
+    Ok(PyTuple::new(py, actions)?.into_any().unbind())
 }
 
 #[pyfunction]
@@ -81,10 +81,6 @@ pub fn apply_action(
     .map_err(move_error)?;
 
     let dict = PyDict::new(py);
-    dict.set_item("placed", coord_obj(py, result.placed)?)?;
-    dict.set_item("player", player_label(result.player))?;
-    dict.set_item("phase_before", phase_label(result.phase_before))?;
-    dict.set_item("phase_after", phase_label(result.phase_after))?;
     dict.set_item("terminal", result.outcome.is_some())?;
     dict.set_item(
         "next_player",
@@ -93,7 +89,6 @@ pub fn apply_action(
             .is_none()
             .then(|| player_label(state.state.current_player())),
     )?;
-    dict.set_item("outcome", outcome_obj(py, result.outcome)?)?;
 
     let metadata = PyDict::new(py);
     metadata.set_item("placements_made", state.state.placements_made())?;

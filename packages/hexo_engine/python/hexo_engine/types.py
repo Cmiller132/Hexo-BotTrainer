@@ -59,7 +59,7 @@ class LegalActions(Sequence[PlacementAction]):
     __slots__ = ("_ids", "_id_set")
 
     def __init__(self, action_ids: Sequence[int]) -> None:
-        self._ids = tuple(int(action_id) for action_id in action_ids)
+        self._ids = tuple(action_ids)
         self._id_set = frozenset(self._ids)
 
     @property

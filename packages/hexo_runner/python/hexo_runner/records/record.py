@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field, is_dataclass
 from enum import Enum
+from io import TextIOWrapper
 from pathlib import Path
-from typing import Any, Mapping, Protocol, Sequence
+from typing import Any, Protocol
 
 GAME_RECORD_SCHEMA_VERSION = 1
 
@@ -100,7 +102,20 @@ class GameRecordV1:
         )
 
     def to_dict(self) -> Mapping[str, Any]:
-        return _jsonable(self)
+        return {
+            "schema_version": self.schema_version,
+            "game_id": self.game_id,
+            "seed": self.seed,
+            "scenario": _jsonable(self.scenario),
+            "engine": _jsonable(self.engine),
+            "players": [_player_to_dict(player) for player in self.players],
+            "actions": [_action_to_dict(action) for action in self.actions],
+            "status": self.status,
+            "terminal": _jsonable(self.terminal),
+            "abort": _abort_to_dict(self.abort),
+            "timing": {"duration_ms": self.timing.duration_ms},
+            "metadata": _jsonable(self.metadata),
+        }
 
 
 class RecordSink(Protocol):
@@ -124,17 +139,46 @@ class MemoryRecordSink:
 class JsonlRecordSink:
     """Append one JSON game record per line."""
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(self, path: str | Path, *, flush_on_write: bool = True) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.flush_on_write = flush_on_write
+        self._handle: TextIOWrapper | None = None
 
     def write_game(self, record: GameRecordV1) -> object:
-        with self.path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record.to_dict(), separators=(",", ":")) + "\n")
+        handle = self._open()
+        handle.write(json.dumps(record.to_dict(), separators=(",", ":")) + "\n")
+        if self.flush_on_write:
+            handle.flush()
         return {"path": str(self.path), "game_id": record.game_id, "status": record.status}
+
+    def close(self) -> None:
+        if self._handle is None:
+            return
+        self._handle.close()
+        self._handle = None
+
+    def __enter__(self) -> JsonlRecordSink:
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.close()
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
+
+    def _open(self) -> TextIOWrapper:
+        if self._handle is None or self._handle.closed:
+            self._handle = self.path.open("a", encoding="utf-8")
+        return self._handle
 
 
 def _jsonable(value: object) -> Any:
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
     if is_dataclass(value):
         return _jsonable(asdict(value))
     if isinstance(value, Enum):
@@ -143,6 +187,36 @@ def _jsonable(value: object) -> Any:
         return {str(key): _jsonable(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [_jsonable(item) for item in value]
-    if isinstance(value, (str, int, float, bool)) or value is None:
-        return value
     return str(value)
+
+
+def _player_to_dict(player: PlayerRecord) -> dict[str, Any]:
+    return {
+        "player_id": player.player_id,
+        "role": player.role,
+        "label": player.label,
+        "metadata": _jsonable(player.metadata),
+    }
+
+
+def _action_to_dict(action: ActionRecordV1) -> dict[str, Any]:
+    return {
+        "index": action.index,
+        "player_id": action.player_id,
+        "player_role": action.player_role,
+        "action_id": action.action_id,
+        "action": _jsonable(action.action),
+        "decision_ms": action.decision_ms,
+        "diagnostics": _jsonable(action.diagnostics),
+        "transition": _jsonable(action.transition),
+    }
+
+
+def _abort_to_dict(abort: AbortRecord | None) -> dict[str, str] | None:
+    if abort is None:
+        return None
+    return {
+        "stage": abort.stage,
+        "exception_type": abort.exception_type,
+        "message": abort.message,
+    }
