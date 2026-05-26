@@ -18,6 +18,18 @@ let boardView = null;
 let boardViewDirty = false;
 let boardDrag = null;
 let suppressBoardClick = false;
+let adapters = null;
+let adapterLoadError = null;
+let polling = false;
+let pollTimer = null;
+let pollAbort = null;
+let lastStatusError = "";
+let matchConfig = {
+  mode: "manual",
+  human_player: "player0",
+  seed: null,
+  bot: { id: "sealbot", variant: "current", time_limit: 0.05 },
+};
 
 const svg = document.getElementById("boardSvg");
 const boardArea = document.getElementById("boardArea");
@@ -27,11 +39,37 @@ const cellHud = document.getElementById("cellHud");
 document.getElementById("newBtn").addEventListener("click", () => {
   clearBoardView();
   resetReplay();
-  post("/api/new", {});
+  post("/api/new", buildNewMatchPayload(), { resetReplay: true, clearBoard: true });
 });
 document.getElementById("fitBtn").addEventListener("click", fitBoard);
 document.getElementById("zoomInBtn").addEventListener("click", () => zoomBoardAtCenter(0.82));
 document.getElementById("zoomOutBtn").addEventListener("click", () => zoomBoardAtCenter(1.22));
+document.querySelectorAll("#matchModeSeg button").forEach(button => {
+  button.addEventListener("click", () => {
+    matchConfig.mode = button.dataset.mode;
+    lastStatusError = "";
+    render();
+  });
+});
+document.querySelectorAll("#humanSideSeg button").forEach(button => {
+  button.addEventListener("click", () => {
+    matchConfig.human_player = button.dataset.side;
+    render();
+  });
+});
+document.getElementById("botVariantSelect").addEventListener("change", event => {
+  matchConfig.bot.variant = event.target.value || "current";
+  render();
+});
+document.getElementById("timeLimitInput").addEventListener("change", event => {
+  const value = Number(event.target.value);
+  matchConfig.bot.time_limit = Number.isFinite(value) && value > 0 ? value : 0.05;
+  event.target.value = String(matchConfig.bot.time_limit);
+});
+document.getElementById("seedInput").addEventListener("change", event => {
+  const value = event.target.value.trim();
+  matchConfig.seed = value === "" ? null : Number(value);
+});
 document.getElementById("tacticsBtn").addEventListener("click", () => {
   tacticsOn = !tacticsOn;
   if (tacticsOn) tacticsView = "overview";
@@ -64,15 +102,38 @@ boardArea.addEventListener("click", handleBoardClick);
 bindBoardViewEvents();
 
 async function loadState() {
-  const res = await fetch("/api/state");
-  state = await res.json();
-  clearBoardView();
-  resetReplay();
+  try {
+    const res = await fetch("/api/state");
+    const data = await safeJson(res);
+    if (res.ok) {
+      applyState(data, { resetReplay: true, clearBoard: true });
+    } else {
+      lastStatusError = (data && data.error) || "State unavailable";
+      render();
+    }
+  } finally {
+    schedulePoll(250);
+  }
+}
+
+async function loadAdapters() {
+  try {
+    const res = await fetch("/api/adapters");
+    const data = await safeJson(res);
+    if (!res.ok) throw new Error((data && data.error) || "Adapter API unavailable");
+    adapters = data || {};
+    adapterLoadError = null;
+    syncDefaultVariant();
+  } catch (error) {
+    adapters = null;
+    adapterLoadError = error && error.message ? error.message : "Adapter API unavailable";
+  }
   render();
 }
 
-async function post(url, payload) {
+async function post(url, payload, options = {}) {
   if (pendingRequest) return;
+  abortPoll();
   const seq = ++requestSeq;
   setPending(true);
   try {
@@ -81,21 +142,30 @@ async function post(url, payload) {
       headers: {"Content-Type": "application/json"},
       body: JSON.stringify(payload)
     });
-    const data = await res.json();
+    const data = await safeJson(res);
     if (seq !== requestSeq) return;
     if (!res.ok) {
-      state = data.state;
-      document.getElementById("statusText").textContent = data.error || "Illegal move";
+      lastStatusError = (data && data.error) || "Request failed";
+      if (data && data.state) applyState(data.state, { preserveReplay: true });
+      else render();
     } else {
-      state = data;
-      resetReplay();
+      lastStatusError = "";
+      applyState(data, {
+        resetReplay: Boolean(options.resetReplay),
+        clearBoard: Boolean(options.clearBoard),
+        preserveReplay: !options.resetReplay,
+      });
     }
   } catch (error) {
-    if (seq === requestSeq) document.getElementById("statusText").textContent = "Request failed";
+    if (seq === requestSeq) {
+      lastStatusError = "Request failed";
+      render();
+    }
   } finally {
     if (seq === requestSeq) {
       setPending(false);
       render();
+      schedulePoll(250);
     }
   }
 }
@@ -104,17 +174,104 @@ function setPending(value) {
   pendingRequest = value;
   if (value) stopReplay();
   document.body.classList.toggle("pending", value);
-  document.querySelectorAll("button").forEach(button => { button.disabled = value; });
+}
+
+async function safeJson(res) {
+  try {
+    return await res.json();
+  } catch (_) {
+    return null;
+  }
+}
+
+function applyState(next, options = {}) {
+  if (!next || typeof next !== "object") return;
+  if (!isNewerOrSameState(next)) return;
+  const wasLive = !state || isLiveView();
+  const currentVersion = Number(state && state.version);
+  const nextVersion = Number(next && next.version);
+  if (Number.isFinite(currentVersion) && Number.isFinite(nextVersion) && nextVersion > currentVersion && !next.error) {
+    lastStatusError = "";
+  }
+  state = next;
+  if (options.clearBoard) clearBoardView();
+  if (options.resetReplay) {
+    resetReplay();
+  } else if (wasLive && !options.preserveReplay) {
+    replayIndex = null;
+  } else if (replayIndex !== null) {
+    replayIndex = Math.min(replayIndex, totalPlacements());
+    if (replayIndex === totalPlacements() && wasLive) replayIndex = null;
+  }
+  render();
+}
+
+function isNewerOrSameState(next) {
+  const currentVersion = Number(state && state.version);
+  const nextVersion = Number(next && next.version);
+  if (!Number.isFinite(currentVersion) || !Number.isFinite(nextVersion)) return true;
+  return nextVersion >= currentVersion;
+}
+
+function schedulePoll(delay = 0) {
+  window.clearTimeout(pollTimer);
+  pollTimer = window.setTimeout(pollState, delay);
+}
+
+function abortPoll() {
+  if (pollAbort) {
+    pollAbort.abort();
+    pollAbort = null;
+  }
+  polling = false;
+}
+
+async function pollState() {
+  if (polling || pendingRequest) {
+    schedulePoll(600);
+    return;
+  }
+  polling = true;
+  const controller = new AbortController();
+  pollAbort = controller;
+  try {
+    const params = new URLSearchParams();
+    const version = stateVersion();
+    if (version !== null) {
+      params.set("since", String(version));
+      params.set("timeout_ms", "15000");
+    }
+    const res = await fetch(`/api/state${params.toString() ? "?" + params.toString() : ""}`, { signal: controller.signal });
+    const data = await safeJson(res);
+    if (res.ok && data) {
+      if (lastStatusError === "Live update paused") lastStatusError = "";
+      applyState(data, { preserveReplay: true });
+    }
+  } catch (error) {
+    if (!controller.signal.aborted) {
+      lastStatusError = "Live update paused";
+      render();
+    }
+  } finally {
+    if (pollAbort === controller) pollAbort = null;
+    polling = false;
+    schedulePoll(document.hidden ? 2500 : 300);
+  }
 }
 
 function render() {
-  if (!state) return;
+  if (!state) {
+    renderMatchControls();
+    return;
+  }
   renderControls();
   const board = buildBoardModel();
   renderBoard(board);
   renderStatus();
   renderMoves();
   renderTacticsPanel(board.tacticMaps);
+  renderBotPanel();
+  renderTurnOverlay();
   renderReplay();
 }
 
@@ -122,14 +279,153 @@ function renderControls() {
   document.body.classList.toggle("tactics-on", tacticsOn);
   document.body.classList.toggle("pending", pendingRequest);
   document.body.classList.toggle("replay-mode", !isLiveView());
+  document.body.classList.toggle("bot-thinking", isBotThinking());
+  document.body.classList.toggle("state-error", turnStatus() === "error" || Boolean(state.error || lastStatusError));
+  renderMatchControls();
   document.getElementById("tacticsBtn").classList.toggle("active", tacticsOn);
   document.querySelectorAll("#modeSeg button").forEach(button => button.classList.toggle("active", button.dataset.mode === tacticFilters.mode));
   document.querySelectorAll("#playerSeg button").forEach(button => button.classList.toggle("active", button.dataset.player === tacticFilters.player));
   document.querySelectorAll("#axisSeg button").forEach(button => button.classList.toggle("active", button.dataset.axis === tacticFilters.axis));
   document.getElementById("inspectBtn").classList.toggle("active", tacticFilters.inspect);
-  document.querySelectorAll("button").forEach(button => { button.disabled = pendingRequest; });
-  document.querySelectorAll(".replay-buttons button").forEach(button => { button.disabled = pendingRequest || totalPlacements() === 0; });
-  document.getElementById("replaySlider").disabled = pendingRequest || totalPlacements() === 0;
+  document.getElementById("fitBtn").disabled = false;
+  document.getElementById("tacticsBtn").disabled = false;
+  document.querySelectorAll(".overlay-controls button").forEach(button => { button.disabled = pendingRequest; });
+  document.querySelectorAll(".replay-buttons button").forEach(button => { button.disabled = totalPlacements() === 0; });
+  document.getElementById("replaySlider").disabled = totalPlacements() === 0;
+}
+
+function renderMatchControls() {
+  const sealbotReady = hasAvailableSealBotVariant();
+  const variants = sealbotVariants();
+  const mode = matchConfig.mode || "manual";
+  const selectedVariant = matchConfig.bot.variant || sealbotDefaultVariant() || "current";
+  document.querySelectorAll("#matchModeSeg button").forEach(button => {
+    button.classList.toggle("active", button.dataset.mode === mode);
+    button.disabled = pendingRequest || (button.dataset.mode === "sealbot" && !sealbotReady);
+  });
+  document.querySelectorAll("#humanSideSeg button").forEach(button => {
+    button.classList.toggle("active", button.dataset.side === matchConfig.human_player);
+    button.disabled = pendingRequest || mode !== "sealbot";
+  });
+
+  const select = document.getElementById("botVariantSelect");
+  const options = variants.length ? variants : [
+    { id: "current", label: "current", available: false, error: adapterLoadError || "SealBot unavailable" },
+    { id: "best", label: "best", available: false, error: adapterLoadError || "SealBot unavailable" },
+  ];
+  const optionsKey = JSON.stringify(options.map(variant => [variant.id, variant.label, variant.available]));
+  if (select.dataset.optionsKey !== optionsKey) {
+    select.innerHTML = options.map(variant => {
+      const label = `${variant.label || variant.id}${variant.available ? "" : " unavailable"}`;
+      return `<option value="${escapeAttr(variant.id)}" ${variant.available ? "" : "disabled"}>${escapeText(label)}</option>`;
+    }).join("");
+    select.dataset.optionsKey = optionsKey;
+  }
+  if (options.some(variant => variant.id === selectedVariant && variant.available !== false)) {
+    select.value = selectedVariant;
+  } else {
+    const first = options.find(variant => variant.available !== false);
+    if (first) {
+      matchConfig.bot.variant = first.id;
+      select.value = first.id;
+    }
+  }
+  select.disabled = pendingRequest || mode !== "sealbot" || !sealbotReady;
+
+  const timeLimit = document.getElementById("timeLimitInput");
+  if (document.activeElement !== timeLimit) timeLimit.value = String(matchConfig.bot.time_limit || 0.05);
+  timeLimit.disabled = pendingRequest || mode !== "sealbot";
+  const seedInput = document.getElementById("seedInput");
+  seedInput.disabled = pendingRequest;
+  const newBtn = document.getElementById("newBtn");
+  newBtn.textContent = state && totalPlacements() ? "Rematch" : "New Match";
+  newBtn.disabled = pendingRequest || (mode === "sealbot" && !sealbotReady);
+  renderAdapterStatus();
+}
+
+function renderAdapterStatus() {
+  const el = document.getElementById("adapterStatus");
+  const sealbot = sealbotAdapter();
+  if (!el) return;
+  if (adapterLoadError) {
+    el.className = "adapter-status error";
+    el.textContent = adapterLoadError;
+    return;
+  }
+  if (!sealbot) {
+    el.className = "adapter-status muted";
+    el.textContent = "Manual play available. SealBot API not detected.";
+    return;
+  }
+  if (!sealbot.configured && !hasAvailableSealBotVariant()) {
+    el.className = "adapter-status error";
+    el.textContent = sealbot.error || "SealBot path is not configured.";
+    return;
+  }
+  const available = sealbotVariants().filter(variant => variant.available !== false);
+  if (!available.length) {
+    const firstError = (sealbotVariants().find(variant => variant.error) || {}).error;
+    el.className = "adapter-status error";
+    el.textContent = firstError || sealbot.error || "No SealBot variants are available.";
+    return;
+  }
+  el.className = "adapter-status ok";
+  el.textContent = `SealBot ready: ${available.map(variant => variant.label || variant.id).join(", ")}`;
+}
+
+function buildNewMatchPayload() {
+  const seedText = document.getElementById("seedInput").value.trim();
+  const seedValue = seedText === "" ? null : Number(seedText);
+  const timeValue = Number(document.getElementById("timeLimitInput").value);
+  matchConfig.seed = Number.isFinite(seedValue) ? seedValue : null;
+  matchConfig.bot.time_limit = Number.isFinite(timeValue) && timeValue > 0 ? timeValue : 0.05;
+  const payload = {
+    mode: matchConfig.mode,
+    human_player: matchConfig.human_player,
+    seed: matchConfig.seed,
+  };
+  if (matchConfig.mode === "sealbot") {
+    payload.bot = {
+      id: "sealbot",
+      variant: matchConfig.bot.variant || sealbotDefaultVariant() || "current",
+      time_limit: matchConfig.bot.time_limit,
+    };
+  }
+  return payload;
+}
+
+function sealbotAdapter() {
+  if (!adapters) return null;
+  return adapters.sealbot || adapters.SealBot || null;
+}
+
+function sealbotVariants() {
+  const sealbot = sealbotAdapter();
+  const raw = sealbot && Array.isArray(sealbot.variants) ? sealbot.variants : [];
+  return raw.map(variant => ({
+    id: String(variant.id || variant.name || variant.label || ""),
+    label: String(variant.label || variant.id || variant.name || "SealBot"),
+    available: variant.available !== false,
+    error: variant.error || "",
+  })).filter(variant => variant.id);
+}
+
+function hasAvailableSealBotVariant() {
+  return sealbotVariants().some(variant => variant.available !== false);
+}
+
+function sealbotDefaultVariant() {
+  const sealbot = sealbotAdapter();
+  return (sealbot && (sealbot.default_variant || sealbot.defaultVariant)) || (sealbotVariants()[0] && sealbotVariants()[0].id) || "current";
+}
+
+function syncDefaultVariant() {
+  const current = matchConfig.bot.variant;
+  const variants = sealbotVariants();
+  if (variants.some(variant => variant.id === current && variant.available !== false)) return;
+  const preferred = variants.find(variant => variant.id === sealbotDefaultVariant() && variant.available !== false)
+    || variants.find(variant => variant.available !== false);
+  if (preferred) matchConfig.bot.variant = preferred.id;
 }
 
 function buildBoardModel() {
@@ -285,6 +581,12 @@ function handleBoardClick(event) {
     tacticsView = "cell";
     render();
   } else if (el.classList.contains("legal")) {
+    if (!canSubmitMove()) {
+      lastStatusError = isBotThinking() ? "SealBot is thinking" : "Move submission is locked";
+      renderStatus();
+      renderTurnOverlay();
+      return;
+    }
     post("/api/move", { q: Number(el.dataset.q), r: Number(el.dataset.r) });
   }
 }
@@ -435,15 +737,27 @@ function clamp(value, min, max) {
 function renderStatus() {
   const total = totalPlacements();
   const viewed = viewedPlacementCount();
+  const turn = turnStatus();
+  const actor = state.winner ? playerLabel(state.winner) + " wins" : playerLabel(state.current_player);
+  document.getElementById("matchVal").textContent = matchLabel();
   document.getElementById("playerVal").textContent = state.winner ? playerLabel(state.winner) + " wins" : playerLabel(state.current_player);
   document.getElementById("phaseVal").textContent = state.winner ? "Complete" : phaseLabel(state.phase);
   document.getElementById("stonesVal").textContent = total;
-  document.getElementById("legalVal").textContent = state.legal_count;
+  document.getElementById("legalVal").textContent = state.legal_count ?? (state.legal || []).length;
+  document.getElementById("gameVal").textContent = `${state.game_id || "game"} v${state.version ?? "-"}`;
   document.getElementById("viewVal").textContent = isLiveView() ? "Live" : `${viewed} / ${total}`;
-  if (!isLiveView()) {
+  if (lastStatusError) {
+    document.getElementById("statusText").textContent = lastStatusError;
+  } else if (!isLiveView()) {
     document.getElementById("statusText").textContent = `Reviewing move ${viewed} / ${total}`;
+  } else if (turn === "bot_thinking") {
+    document.getElementById("statusText").textContent = `${playerLabel(state.thinking_player || state.current_player)} thinking`;
+  } else if (turn === "starting") {
+    document.getElementById("statusText").textContent = "Starting match";
+  } else if (turn === "error" || state.error) {
+    document.getElementById("statusText").textContent = state.error || "Match error";
   } else {
-    document.getElementById("statusText").textContent = state.winner ? `${playerLabel(state.winner)} wins by six in line` : `${playerLabel(state.current_player)} to place`;
+    document.getElementById("statusText").textContent = state.winner ? `${actor} by six in line` : `${actor} to place`;
   }
 }
 
@@ -567,6 +881,78 @@ function renderTacticsPanel(tacticMaps) {
   bindTacticsPanel();
 }
 
+function renderBotPanel() {
+  const card = document.getElementById("sealbotCard");
+  const panel = document.getElementById("botPanel");
+  const show = matchConfig.mode === "sealbot" || isSealBotMatch() || Boolean(state.last_bot_decision) || Boolean(state.adapter_errors);
+  card.hidden = !show;
+  if (!show) {
+    panel.innerHTML = "";
+    return;
+  }
+
+  const decision = normalizeBotDecision(state.last_bot_decision);
+  const errors = adapterErrors();
+  const thinking = isBotThinking();
+  const configuredOnly = matchConfig.mode === "sealbot" && !isSealBotMatch();
+  const statusLabel = configuredOnly ? "Ready for next match" : turnStatusLabel();
+  const rows = [
+    botMetric("Status", thinking ? "Thinking" : statusLabel),
+    botMetric("Variant", activeBotVariantLabel()),
+    botMetric("Last Move", decision.moveLabel || "-"),
+    botMetric("Duration", decision.durationLabel || "-"),
+  ];
+  if (decision.depth !== null) rows.push(botMetric("Depth", decision.depth));
+  if (decision.nodes !== null) rows.push(botMetric("Nodes", decision.nodes));
+  if (decision.score !== null) rows.push(botMetric("Score", decision.score));
+
+  panel.innerHTML = `
+    <div class="bot-status-line ${thinking ? "thinking" : ""}">
+      <span class="bot-status-dot"></span>
+      <span>${escapeText(thinking ? `${playerLabel(state.thinking_player || botPlayer())} is searching` : statusLabel)}</span>
+    </div>
+    <div class="bot-metrics">${rows.join("")}</div>
+    ${errors.length ? `<div class="adapter-error-list">${errors.map(error => `<div>${escapeText(error)}</div>`).join("")}</div>` : ""}
+    ${decision.raw ? `<details class="raw-details"><summary>Raw Diagnostics</summary><div class="detail">${escapeText(JSON.stringify(decision.raw, null, 2))}</div></details>` : ""}
+  `;
+}
+
+function renderTurnOverlay() {
+  const overlay = document.getElementById("turnOverlay");
+  const title = document.getElementById("turnOverlayTitle");
+  const sub = document.getElementById("turnOverlaySub");
+  const show = isLiveView() && (isBotThinking() || turnStatus() === "starting");
+  overlay.hidden = !show;
+  if (!show) return;
+  title.textContent = isBotThinking() ? "SealBot thinking" : "Starting match";
+  sub.textContent = isBotThinking()
+    ? `${playerLabel(state.thinking_player || botPlayer())} is choosing the next placement`
+    : "Preparing players";
+}
+
+function botMetric(label, value) {
+  return `<div class="bot-metric"><span>${escapeText(label)}</span><strong>${escapeText(value)}</strong></div>`;
+}
+
+function normalizeBotDecision(decision) {
+  if (!decision || typeof decision !== "object") {
+    return { raw: null, moveLabel: "", durationLabel: "", depth: null, nodes: null, score: null };
+  }
+  const diagnostics = decision.diagnostics && typeof decision.diagnostics === "object" ? decision.diagnostics : {};
+  const move = decision.move || decision.action || decision.placement || decision;
+  const q = firstFinite(move.q, decision.q);
+  const r = firstFinite(move.r, decision.r);
+  const duration = firstFinite(decision.duration_ms, decision.elapsed_ms, diagnostics.duration_ms, diagnostics.elapsed_ms);
+  return {
+    raw: decision,
+    moveLabel: Number.isFinite(q) && Number.isFinite(r) ? `(${q}, ${r})` : "",
+    durationLabel: Number.isFinite(duration) ? `${duration.toFixed(duration >= 10 ? 0 : 1)} ms` : "",
+    depth: firstPresent(decision.depth, decision.last_depth, diagnostics.depth, diagnostics.last_depth),
+    nodes: firstPresent(decision.nodes, decision._nodes, diagnostics.nodes, diagnostics._nodes),
+    score: firstPresent(decision.score, decision.last_score, diagnostics.score, diagnostics.last_score),
+  };
+}
+
 function renderTacticsTabs() {
   const tabs = [
     ["overview", "Overview"],
@@ -619,7 +1005,7 @@ function renderCellInspector(info) {
     <div class="tactics-section">
       <div class="fact-main"><span><span class="pill threat">cell</span> (${info.q}, ${info.r})</span><span>${info.legal ? "legal" : info.owner ? playerShort(info.owner) : "empty"}</span></div>
       <div class="fact-sub">${info.owner ? `Stone ${info.index} by ${playerShort(info.owner)}` : info.legal ? "Legal move" : "Not currently playable"}</div>
-      ${info.legal ? `<button id="playSelectedBtn" data-q="${info.q}" data-r="${info.r}">Play selected</button>` : ""}
+      ${info.legal ? `<button id="playSelectedBtn" data-q="${info.q}" data-r="${info.r}" ${canSubmitMove() ? "" : "disabled"}>Play selected</button>` : ""}
     </div>
     ${renderFactSection("Wins From This Cell", info.wins, "win")}
     ${renderFactSection("Blocks From This Cell", info.blocks, "block")}
@@ -741,7 +1127,7 @@ function renderWindowSlot(cell, w) {
   const ownerClass = cell.owner === "player1" ? "p1" : cell.owner === "player0" ? "p0" : "empty";
   const playable = (w.blockable_cells || []).some(c => c.q === cell.q && c.r === cell.r);
   return `<span class="window-slot ${ownerClass} ${playable ? "playable" : ""}" title="(${cell.q}, ${cell.r})" data-cell-key="${cell.q},${cell.r}">
-    ${cell.owner ? playerShort(cell.owner).slice(1) : ""}
+    ${cell.owner ? playerSlotLabel(cell.owner) : ""}
   </span>`;
 }
 
@@ -810,7 +1196,10 @@ function bindTacticsPanel() {
     });
   });
   const play = document.getElementById("playSelectedBtn");
-  if (play) play.addEventListener("click", () => post("/api/move", { q: Number(play.dataset.q), r: Number(play.dataset.r) }));
+  if (play) play.addEventListener("click", () => {
+    if (!canSubmitMove()) return;
+    post("/api/move", { q: Number(play.dataset.q), r: Number(play.dataset.r) });
+  });
 }
 
 function buildTacticMaps() {
@@ -946,14 +1335,124 @@ function idList(ids) {
   return (ids || []).map(escapeText).join(" ");
 }
 
+function matchLabel() {
+  if (isSealBotMatch()) return activeBotVariantLabel();
+  return "Manual";
+}
+
+function isSealBotMatch() {
+  return Boolean(state && state.mode === "sealbot");
+}
+
+function canSubmitMove() {
+  if (!state || pendingRequest || !isLiveView() || state.winner || turnStatus() === "terminal") return false;
+  if (isSealBotMatch()) return state.can_submit === true || turnStatus() === "human_turn";
+  return true;
+}
+
+function turnStatus() {
+  if (!state) return "starting";
+  if (state.error) return "error";
+  if (state.winner || state.turn_status === "terminal") return "terminal";
+  return state.turn_status || (isSealBotMatch() ? "human_turn" : "manual_turn");
+}
+
+function turnStatusLabel() {
+  const turn = turnStatus();
+  if (turn === "bot_thinking") return "Bot thinking";
+  if (turn === "human_turn") return "Your turn";
+  if (turn === "manual_turn") return "Manual turn";
+  if (turn === "terminal") return "Complete";
+  if (turn === "error") return "Error";
+  if (turn === "starting") return "Starting";
+  return turn.replace(/_/g, " ");
+}
+
+function isBotThinking() {
+  return turnStatus() === "bot_thinking";
+}
+
+function botPlayer() {
+  if (!isSealBotMatch()) return null;
+  if (state && state.players) {
+    const bot = state.players.find(player => player.kind === "bot" || player.adapter_id === "sealbot" || player.label === "SealBot");
+    if (bot) return bot.role || bot.player || bot.id;
+  }
+  return (state && state.human_player === "player1") || matchConfig.human_player === "player1" ? "player0" : "player1";
+}
+
+function playerMeta(player) {
+  return state && Array.isArray(state.players)
+    ? state.players.find(item => item.role === player || item.player === player || item.id === player)
+    : null;
+}
+
 function playerLabel(player) {
+  if (!player) return "--";
+  if (isSealBotMatch() && player) {
+    const human = (state && state.human_player) || matchConfig.human_player;
+    if (player === human) return "You";
+    if (player === botPlayer()) return "SealBot";
+  }
+  const meta = playerMeta(player);
+  if (meta && meta.label) return meta.label;
   return player === "player0" ? "Player 0" : "Player 1";
 }
 
 function playerShort(player) {
+  if (isSealBotMatch() && player) {
+    const human = (state && state.human_player) || matchConfig.human_player;
+    if (player === human) return "You";
+    if (player === botPlayer()) return "Bot";
+  }
   if (player === "player0") return "P0";
   if (player === "player1") return "P1";
   return "--";
+}
+
+function playerSlotLabel(player) {
+  const short = playerShort(player);
+  if (short === "P0") return "0";
+  if (short === "P1") return "1";
+  if (short === "You") return "Y";
+  if (short === "Bot") return "B";
+  return short.slice(0, 1);
+}
+
+function activeBotVariantLabel() {
+  const configured = state && state.match && state.match.bot && (state.match.bot.variant || state.match.bot.label);
+  const variant = configured || matchConfig.bot.variant || sealbotDefaultVariant();
+  const known = sealbotVariants().find(item => item.id === variant);
+  return (known && known.label) || variant || "current";
+}
+
+function adapterErrors() {
+  const values = [];
+  if (adapterLoadError) values.push(adapterLoadError);
+  if (state && state.error) values.push(state.error);
+  const raw = state && state.adapter_errors;
+  if (Array.isArray(raw)) values.push(...raw.map(String));
+  else if (raw && typeof raw === "object") {
+    for (const [key, value] of Object.entries(raw)) values.push(`${key}: ${value}`);
+  } else if (raw) values.push(String(raw));
+  const selected = sealbotVariants().find(variant => variant.id === matchConfig.bot.variant);
+  if (selected && selected.available === false && selected.error) values.push(selected.error);
+  return [...new Set(values.filter(Boolean))];
+}
+
+function firstPresent(...values) {
+  for (const value of values) {
+    if (value !== undefined && value !== null && value !== "") return value;
+  }
+  return null;
+}
+
+function firstFinite(...values) {
+  for (const value of values) {
+    const number = Number(value);
+    if (Number.isFinite(number)) return number;
+  }
+  return NaN;
 }
 
 function playerColor(player) {
@@ -987,6 +1486,11 @@ function visiblePlacements() {
 
 function totalPlacements() {
   return state ? (state.placements || []).length : 0;
+}
+
+function stateVersion() {
+  const version = Number(state && state.version);
+  return Number.isFinite(version) ? version : null;
 }
 
 function viewedPlacementCount() {
@@ -1114,4 +1618,9 @@ function escapeAttr(text) {
   return escapeText(text);
 }
 
-loadState();
+async function init() {
+  await Promise.allSettled([loadAdapters(), loadState()]);
+  render();
+}
+
+init();

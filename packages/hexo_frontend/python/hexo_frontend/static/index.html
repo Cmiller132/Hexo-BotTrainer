@@ -16,6 +16,15 @@
     <section class="board-panel" aria-label="Game board">
       <div class="board-area" id="boardArea">
         <svg id="boardSvg"></svg>
+        <div class="turn-overlay" id="turnOverlay" hidden>
+          <div class="turn-overlay-card">
+            <div class="thinking-mark" aria-hidden="true"></div>
+            <div>
+              <div class="turn-overlay-title" id="turnOverlayTitle">SealBot thinking</div>
+              <div class="turn-overlay-sub" id="turnOverlaySub">Waiting for the next move</div>
+            </div>
+          </div>
+        </div>
         <div class="board-view-controls" aria-label="Board view controls">
           <button id="zoomInBtn" type="button" aria-label="Zoom in">+</button>
           <button id="zoomOutBtn" type="button" aria-label="Zoom out">-</button>
@@ -36,13 +45,53 @@
     </section>
 
     <aside class="side-stack" aria-label="Match controls">
+      <section class="panel-card match-card">
+        <div class="section-title">Match Setup</div>
+        <div class="match-form">
+          <div class="field-block">
+            <label>Opponent</label>
+            <div class="seg" id="matchModeSeg">
+              <button type="button" data-mode="manual">Manual</button>
+              <button type="button" data-mode="sealbot">SealBot</button>
+            </div>
+          </div>
+          <div class="match-grid">
+            <div class="field-block">
+              <label>Your Side</label>
+              <div class="seg" id="humanSideSeg">
+                <button type="button" data-side="player0">P0</button>
+                <button type="button" data-side="player1">P1</button>
+              </div>
+            </div>
+            <div class="field-block">
+              <label for="botVariantSelect">Bot Variant</label>
+              <select id="botVariantSelect"></select>
+            </div>
+          </div>
+          <div class="match-grid">
+            <div class="field-block">
+              <label for="timeLimitInput">Time Limit</label>
+              <input id="timeLimitInput" type="number" min="0.01" max="30" step="0.01" value="0.05">
+            </div>
+            <div class="field-block">
+              <label for="seedInput">Seed</label>
+              <input id="seedInput" type="number" step="1" placeholder="Auto">
+            </div>
+          </div>
+          <div class="adapter-status" id="adapterStatus">Checking SealBot adapters</div>
+          <button id="newBtn" class="primary-action" type="button">New Match</button>
+        </div>
+      </section>
+
       <section class="panel-card">
         <div class="section-title">State Summary</div>
         <div class="info">
+          <div class="info-row"><span class="label">Match</span><span class="value" id="matchVal"></span></div>
           <div class="info-row"><span class="label">Player</span><span class="value" id="playerVal"></span></div>
           <div class="info-row"><span class="label">Phase</span><span class="value" id="phaseVal"></span></div>
           <div class="info-row"><span class="label">Stones</span><span class="value" id="stonesVal"></span></div>
           <div class="info-row"><span class="label">Legal Cells</span><span class="value" id="legalVal"></span></div>
+          <div class="info-row"><span class="label">Game</span><span class="value" id="gameVal"></span></div>
           <div class="info-row"><span class="label">View</span><span class="value" id="viewVal"></span></div>
         </div>
       </section>
@@ -50,10 +99,14 @@
       <section class="panel-card">
         <div class="section-title">Controls</div>
         <div class="toolbar">
-          <button id="newBtn">New</button>
-          <button id="fitBtn">Fit</button>
-          <button id="tacticsBtn">Tactics</button>
+          <button id="fitBtn" type="button">Fit</button>
+          <button id="tacticsBtn" type="button">Tactics</button>
         </div>
+      </section>
+
+      <section class="panel-card sealbot-card" id="sealbotCard" hidden>
+        <div class="section-title">SealBot Insight</div>
+        <div class="bot-panel" id="botPanel"></div>
       </section>
 
       <section class="panel-card tactics-card">
