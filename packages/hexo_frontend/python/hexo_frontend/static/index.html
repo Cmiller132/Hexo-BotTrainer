@@ -20,7 +20,7 @@
           <div class="turn-overlay-card">
             <div class="thinking-mark" aria-hidden="true"></div>
             <div>
-              <div class="turn-overlay-title" id="turnOverlayTitle">SealBot thinking</div>
+              <div class="turn-overlay-title" id="turnOverlayTitle">Bot thinking</div>
               <div class="turn-overlay-sub" id="turnOverlaySub">Waiting for the next move</div>
             </div>
           </div>
@@ -48,25 +48,23 @@
       <section class="panel-card match-card">
         <div class="section-title">Match Setup</div>
         <div class="match-form">
-          <div class="field-block">
-            <label>Opponent</label>
-            <div class="seg" id="matchModeSeg">
-              <button type="button" data-mode="manual">Manual</button>
-              <button type="button" data-mode="sealbot">SealBot</button>
-            </div>
-          </div>
-          <div class="match-grid">
-            <div class="field-block">
-              <label>Your Side</label>
-              <div class="seg" id="humanSideSeg">
-                <button type="button" data-side="player0">P0</button>
-                <button type="button" data-side="player1">P1</button>
-              </div>
-            </div>
-            <div class="field-block">
-              <label for="botVariantSelect">Bot Variant</label>
-              <select id="botVariantSelect"></select>
-            </div>
+          <div class="setup-grid">
+            <label class="select-field">
+              <span>Player 1 / P0</span>
+              <select id="player0Kind" data-player-select="player0">
+                <option value="manual">Manual</option>
+                <option value="sealbot-current">SealBot current</option>
+                <option value="sealbot-best">SealBot best</option>
+              </select>
+            </label>
+            <label class="select-field">
+              <span>Player 2 / P1</span>
+              <select id="player1Kind" data-player-select="player1">
+                <option value="manual">Manual</option>
+                <option value="sealbot-current" selected>SealBot current</option>
+                <option value="sealbot-best">SealBot best</option>
+              </select>
+            </label>
           </div>
           <div class="match-grid">
             <div class="field-block">
@@ -79,13 +77,25 @@
             </div>
           </div>
           <div class="adapter-status" id="adapterStatus">Checking SealBot adapters</div>
-          <button id="newBtn" class="primary-action" type="button">New Match</button>
+          <div class="toolbar setup-toolbar">
+            <button id="newBtn" class="primary-action" type="button">Rematch</button>
+          </div>
         </div>
       </section>
 
       <section class="panel-card">
         <div class="section-title">State Summary</div>
+        <div class="turn-banner" id="turnBanner">
+          <span class="turn-dot" id="turnDot"></span>
+          <div>
+            <strong id="turnTitle">Loading</strong>
+            <span id="turnSub">Waiting for state</span>
+          </div>
+        </div>
         <div class="info">
+          <div class="info-row turn-row"><span class="label">To Play</span><span class="value" id="turnVal"></span></div>
+          <div class="info-row"><span class="label">Placement</span><span class="value" id="turnPlacementVal"></span></div>
+          <div class="info-row"><span class="label">Last Move</span><span class="value" id="lastMoveVal"></span></div>
           <div class="info-row"><span class="label">Match</span><span class="value" id="matchVal"></span></div>
           <div class="info-row"><span class="label">Player</span><span class="value" id="playerVal"></span></div>
           <div class="info-row"><span class="label">Phase</span><span class="value" id="phaseVal"></span></div>

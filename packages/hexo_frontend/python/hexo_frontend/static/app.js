@@ -25,10 +25,15 @@ let pollTimer = null;
 let pollAbort = null;
 let lastStatusError = "";
 let matchConfig = {
-  mode: "manual",
-  human_player: "player0",
+  players: { player0: "manual", player1: "sealbot-current" },
   seed: null,
-  bot: { id: "sealbot", variant: "current", time_limit: 0.05 },
+  time_limit: 0.05,
+};
+
+const PLAYER_KIND_LABELS = {
+  manual: "Manual",
+  "sealbot-current": "SealBot current",
+  "sealbot-best": "SealBot best",
 };
 
 const svg = document.getElementById("boardSvg");
@@ -44,27 +49,17 @@ document.getElementById("newBtn").addEventListener("click", () => {
 document.getElementById("fitBtn").addEventListener("click", fitBoard);
 document.getElementById("zoomInBtn").addEventListener("click", () => zoomBoardAtCenter(0.82));
 document.getElementById("zoomOutBtn").addEventListener("click", () => zoomBoardAtCenter(1.22));
-document.querySelectorAll("#matchModeSeg button").forEach(button => {
-  button.addEventListener("click", () => {
-    matchConfig.mode = button.dataset.mode;
+document.querySelectorAll("[data-player-select]").forEach(select => {
+  select.addEventListener("change", event => {
+    matchConfig.players[event.target.dataset.playerSelect] = event.target.value || "manual";
     lastStatusError = "";
     render();
   });
 });
-document.querySelectorAll("#humanSideSeg button").forEach(button => {
-  button.addEventListener("click", () => {
-    matchConfig.human_player = button.dataset.side;
-    render();
-  });
-});
-document.getElementById("botVariantSelect").addEventListener("change", event => {
-  matchConfig.bot.variant = event.target.value || "current";
-  render();
-});
 document.getElementById("timeLimitInput").addEventListener("change", event => {
   const value = Number(event.target.value);
-  matchConfig.bot.time_limit = Number.isFinite(value) && value > 0 ? value : 0.05;
-  event.target.value = String(matchConfig.bot.time_limit);
+  matchConfig.time_limit = Number.isFinite(value) && value > 0 ? value : 0.05;
+  event.target.value = String(matchConfig.time_limit);
 });
 document.getElementById("seedInput").addEventListener("change", event => {
   const value = event.target.value.trim();
@@ -186,7 +181,7 @@ async function safeJson(res) {
 
 function applyState(next, options = {}) {
   if (!next || typeof next !== "object") return;
-  if (!isNewerOrSameState(next)) return;
+  if (isSameGame(next) && !isNewerOrSameState(next)) return;
   const wasLive = !state || isLiveView();
   const currentVersion = Number(state && state.version);
   const nextVersion = Number(next && next.version);
@@ -204,6 +199,12 @@ function applyState(next, options = {}) {
     if (replayIndex === totalPlacements() && wasLive) replayIndex = null;
   }
   render();
+}
+
+function isSameGame(next) {
+  if (!state || !next) return true;
+  if (!state.game_id || !next.game_id) return true;
+  return state.game_id === next.game_id;
 }
 
 function isNewerOrSameState(next) {
@@ -295,51 +296,23 @@ function renderControls() {
 }
 
 function renderMatchControls() {
-  const sealbotReady = hasAvailableSealBotVariant();
-  const variants = sealbotVariants();
-  const mode = matchConfig.mode || "manual";
-  const selectedVariant = matchConfig.bot.variant || sealbotDefaultVariant() || "current";
-  document.querySelectorAll("#matchModeSeg button").forEach(button => {
-    button.classList.toggle("active", button.dataset.mode === mode);
-    button.disabled = pendingRequest || (button.dataset.mode === "sealbot" && !sealbotReady);
-  });
-  document.querySelectorAll("#humanSideSeg button").forEach(button => {
-    button.classList.toggle("active", button.dataset.side === matchConfig.human_player);
-    button.disabled = pendingRequest || mode !== "sealbot";
-  });
-
-  const select = document.getElementById("botVariantSelect");
-  const options = variants.length ? variants : [
-    { id: "current", label: "current", available: false, error: adapterLoadError || "SealBot unavailable" },
-    { id: "best", label: "best", available: false, error: adapterLoadError || "SealBot unavailable" },
-  ];
-  const optionsKey = JSON.stringify(options.map(variant => [variant.id, variant.label, variant.available]));
-  if (select.dataset.optionsKey !== optionsKey) {
-    select.innerHTML = options.map(variant => {
-      const label = `${variant.label || variant.id}${variant.available ? "" : " unavailable"}`;
-      return `<option value="${escapeAttr(variant.id)}" ${variant.available ? "" : "disabled"}>${escapeText(label)}</option>`;
-    }).join("");
-    select.dataset.optionsKey = optionsKey;
-  }
-  if (options.some(variant => variant.id === selectedVariant && variant.available !== false)) {
-    select.value = selectedVariant;
-  } else {
-    const first = options.find(variant => variant.available !== false);
-    if (first) {
-      matchConfig.bot.variant = first.id;
-      select.value = first.id;
+  document.querySelectorAll("[data-player-select]").forEach(select => {
+    const role = select.dataset.playerSelect;
+    const selected = matchConfig.players[role] || select.value || "manual";
+    if (select.value !== selected) select.value = selected;
+    select.disabled = pendingRequest;
+    for (const option of select.options) {
+      option.disabled = pendingRequest || !playerKindAvailable(option.value);
     }
-  }
-  select.disabled = pendingRequest || mode !== "sealbot" || !sealbotReady;
-
+  });
   const timeLimit = document.getElementById("timeLimitInput");
-  if (document.activeElement !== timeLimit) timeLimit.value = String(matchConfig.bot.time_limit || 0.05);
-  timeLimit.disabled = pendingRequest || mode !== "sealbot";
+  if (document.activeElement !== timeLimit) timeLimit.value = String(matchConfig.time_limit || 0.05);
+  timeLimit.disabled = pendingRequest || !setupHasSealBot();
   const seedInput = document.getElementById("seedInput");
   seedInput.disabled = pendingRequest;
   const newBtn = document.getElementById("newBtn");
   newBtn.textContent = state && totalPlacements() ? "Rematch" : "New Match";
-  newBtn.disabled = pendingRequest || (mode === "sealbot" && !sealbotReady);
+  newBtn.disabled = pendingRequest || !selectedSetupAvailable();
   renderAdapterStatus();
 }
 
@@ -378,20 +351,30 @@ function buildNewMatchPayload() {
   const seedValue = seedText === "" ? null : Number(seedText);
   const timeValue = Number(document.getElementById("timeLimitInput").value);
   matchConfig.seed = Number.isFinite(seedValue) ? seedValue : null;
-  matchConfig.bot.time_limit = Number.isFinite(timeValue) && timeValue > 0 ? timeValue : 0.05;
-  const payload = {
-    mode: matchConfig.mode,
-    human_player: matchConfig.human_player,
+  matchConfig.time_limit = Number.isFinite(timeValue) && timeValue > 0 ? timeValue : 0.05;
+  matchConfig.players = {
+    player0: document.getElementById("player0Kind")?.value || "manual",
+    player1: document.getElementById("player1Kind")?.value || "sealbot-current",
+  };
+  return {
+    players: { ...matchConfig.players },
+    time_limit: matchConfig.time_limit,
     seed: matchConfig.seed,
   };
-  if (matchConfig.mode === "sealbot") {
-    payload.bot = {
-      id: "sealbot",
-      variant: matchConfig.bot.variant || sealbotDefaultVariant() || "current",
-      time_limit: matchConfig.bot.time_limit,
-    };
-  }
-  return payload;
+}
+
+function setupHasSealBot() {
+  return Object.values(matchConfig.players || {}).some(kind => String(kind).startsWith("sealbot-"));
+}
+
+function selectedSetupAvailable() {
+  return Object.values(matchConfig.players || {}).every(playerKindAvailable);
+}
+
+function playerKindAvailable(kind) {
+  if (!String(kind).startsWith("sealbot-")) return true;
+  const variant = String(kind).replace("sealbot-", "");
+  return sealbotVariants().some(item => item.id === variant && item.available !== false);
 }
 
 function sealbotAdapter() {
@@ -420,12 +403,15 @@ function sealbotDefaultVariant() {
 }
 
 function syncDefaultVariant() {
-  const current = matchConfig.bot.variant;
   const variants = sealbotVariants();
-  if (variants.some(variant => variant.id === current && variant.available !== false)) return;
   const preferred = variants.find(variant => variant.id === sealbotDefaultVariant() && variant.available !== false)
     || variants.find(variant => variant.available !== false);
-  if (preferred) matchConfig.bot.variant = preferred.id;
+  if (!preferred) return;
+  for (const [role, kind] of Object.entries(matchConfig.players)) {
+    if (String(kind).startsWith("sealbot-") && !playerKindAvailable(kind)) {
+      matchConfig.players[role] = `sealbot-${preferred.id}`;
+    }
+  }
 }
 
 function buildBoardModel() {
@@ -496,8 +482,16 @@ function renderBoard(board) {
     const roles = board.tacticMaps.cellRoles.get(h.key) || new Set();
     const tacticClasses = drawTactics ? Array.from(roles).map(role => role + "-cell").join(" ") : "";
     const selectedClass = selectedCellKey === h.key ? "selected-cell" : "";
-    const cls = (h.legal && !isStone ? "cell legal" : "cell") + " " + tacticClasses + " " + selectedClass;
+    const recentRank = recentPlacementRank(h.placement);
+    const recentClass = recentRank === 1 ? "last" : recentRank === 2 ? "previous" : "";
+    const cls = (h.legal && !isStone ? "cell legal" : "cell")
+      + " " + tacticClasses
+      + " " + selectedClass
+      + (recentRank ? ` recent-stone recent-${recentRank}` : "");
     html += `<path class="${cls}" d="${path(h.x, h.y, HEX - 1)}" fill="${fill}" stroke="${stroke}" stroke-width="1" opacity="${opacity}" data-q="${h.q}" data-r="${h.r}"></path>`;
+    if (isStone && recentRank) {
+      html += `<path class="last-move-outline ${recentClass}" d="${path(h.x, h.y, HEX - 0.5)}"></path>`;
+    }
     if (drawTactics && !isStone) html += renderHeatOverlay(h, board.tacticMaps);
     if (drawTactics && !isStone) html += renderThreatOverlay(h, board.tacticMaps);
     if (drawTactics) html += renderCellBadge(h, roles);
@@ -737,28 +731,59 @@ function clamp(value, min, max) {
 function renderStatus() {
   const total = totalPlacements();
   const viewed = viewedPlacementCount();
-  const turn = turnStatus();
-  const actor = state.winner ? playerLabel(state.winner) + " wins" : playerLabel(state.current_player);
+  const live = isLiveView();
+  const active = state.winner ? null : state.current_player;
+  const last = lastVisiblePlacement();
+  document.body.classList.toggle("player0-turn", active === "player0");
+  document.body.classList.toggle("player1-turn", active === "player1");
+
   document.getElementById("matchVal").textContent = matchLabel();
   document.getElementById("playerVal").textContent = state.winner ? playerLabel(state.winner) + " wins" : playerLabel(state.current_player);
   document.getElementById("phaseVal").textContent = state.winner ? "Complete" : phaseLabel(state.phase);
   document.getElementById("stonesVal").textContent = total;
   document.getElementById("legalVal").textContent = state.legal_count ?? (state.legal || []).length;
   document.getElementById("gameVal").textContent = `${state.game_id || "game"} v${state.version ?? "-"}`;
-  document.getElementById("viewVal").textContent = isLiveView() ? "Live" : `${viewed} / ${total}`;
+  document.getElementById("viewVal").textContent = live ? "Live" : `${viewed} / ${total}`;
+  setText("turnVal", active ? `${playerShort(active)} - ${playerKindLabel(active)}` : "Complete");
+  setText("turnPlacementVal", state.winner ? "Complete" : placementStepLabel());
+  setText("lastMoveVal", last ? `#${last.index} ${playerShort(last.player)} (${last.q}, ${last.r})` : "None");
+  renderTurnBanner(active);
+
   if (lastStatusError) {
     document.getElementById("statusText").textContent = lastStatusError;
-  } else if (!isLiveView()) {
+  } else if (!live) {
     document.getElementById("statusText").textContent = `Reviewing move ${viewed} / ${total}`;
-  } else if (turn === "bot_thinking") {
-    document.getElementById("statusText").textContent = `${playerLabel(state.thinking_player || state.current_player)} thinking`;
-  } else if (turn === "starting") {
+  } else if (state.winner) {
+    document.getElementById("statusText").textContent = `${playerLabel(state.winner)} wins by six in line`;
+  } else if (turnStatus() === "bot_thinking") {
+    document.getElementById("statusText").textContent = `${playerShort(active)} ${playerKindLabel(active)} thinking`;
+  } else if (turnStatus() === "starting") {
     document.getElementById("statusText").textContent = "Starting match";
-  } else if (turn === "error" || state.error) {
+  } else if (turnStatus() === "error" || state.error) {
     document.getElementById("statusText").textContent = state.error || "Match error";
   } else {
-    document.getElementById("statusText").textContent = state.winner ? `${actor} by six in line` : `${actor} to place`;
+    document.getElementById("statusText").textContent =
+      `${playerShort(active)} ${playerKindLabel(active)} to place - ${placementStepLabel()}`;
   }
+}
+
+function renderTurnBanner(active) {
+  const banner = document.getElementById("turnBanner");
+  const title = document.getElementById("turnTitle");
+  const sub = document.getElementById("turnSub");
+  if (!banner || !title || !sub) return;
+
+  banner.classList.toggle("p0", active === "player0");
+  banner.classList.toggle("p1", active === "player1");
+
+  if (state.winner) {
+    title.textContent = `${playerLabel(state.winner)} wins`;
+    sub.textContent = "Game complete";
+    return;
+  }
+
+  title.textContent = `${playerShort(active)} to play`;
+  sub.textContent = `${playerKindLabel(active)} - ${placementStepLabel()}`;
 }
 
 function renderMoves() {
@@ -884,7 +909,7 @@ function renderTacticsPanel(tacticMaps) {
 function renderBotPanel() {
   const card = document.getElementById("sealbotCard");
   const panel = document.getElementById("botPanel");
-  const show = matchConfig.mode === "sealbot" || isSealBotMatch() || Boolean(state.last_bot_decision) || Boolean(state.adapter_errors);
+  const show = setupHasSealBot() || isSealBotMatch() || Boolean(state.last_bot_decision) || Boolean(state.adapter_errors);
   card.hidden = !show;
   if (!show) {
     panel.innerHTML = "";
@@ -894,7 +919,7 @@ function renderBotPanel() {
   const decision = normalizeBotDecision(state.last_bot_decision);
   const errors = adapterErrors();
   const thinking = isBotThinking();
-  const configuredOnly = matchConfig.mode === "sealbot" && !isSealBotMatch();
+  const configuredOnly = setupHasSealBot() && !isSealBotMatch();
   const statusLabel = configuredOnly ? "Ready for next match" : turnStatusLabel();
   const rows = [
     botMetric("Status", thinking ? "Thinking" : statusLabel),
@@ -924,9 +949,9 @@ function renderTurnOverlay() {
   const show = isLiveView() && (isBotThinking() || turnStatus() === "starting");
   overlay.hidden = !show;
   if (!show) return;
-  title.textContent = isBotThinking() ? "SealBot thinking" : "Starting match";
+  title.textContent = isBotThinking() ? `${playerShort(state.thinking_player || botPlayer())} thinking` : "Starting match";
   sub.textContent = isBotThinking()
-    ? `${playerLabel(state.thinking_player || botPlayer())} is choosing the next placement`
+    ? `${playerKindLabel(state.thinking_player || botPlayer())} is choosing the next placement`
     : "Preparing players";
 }
 
@@ -1336,18 +1361,17 @@ function idList(ids) {
 }
 
 function matchLabel() {
-  if (isSealBotMatch()) return activeBotVariantLabel();
-  return "Manual";
+  return `P0 ${playerKindLabel("player0")} - P1 ${playerKindLabel("player1")}`;
 }
 
 function isSealBotMatch() {
-  return Boolean(state && state.mode === "sealbot");
+  return Boolean(state && (state.mode === "sealbot" || ["player0", "player1"].some(player => playerKind(player).startsWith("sealbot-"))));
 }
 
 function canSubmitMove() {
   if (!state || pendingRequest || !isLiveView() || state.winner || turnStatus() === "terminal") return false;
-  if (isSealBotMatch()) return state.can_submit === true || turnStatus() === "human_turn";
-  return true;
+  if (typeof state.can_submit === "boolean") return state.can_submit;
+  return playerKind(state.current_player) === "manual";
 }
 
 function turnStatus() {
@@ -1360,7 +1384,7 @@ function turnStatus() {
 function turnStatusLabel() {
   const turn = turnStatus();
   if (turn === "bot_thinking") return "Bot thinking";
-  if (turn === "human_turn") return "Your turn";
+  if (turn === "human_turn") return "Manual turn";
   if (turn === "manual_turn") return "Manual turn";
   if (turn === "terminal") return "Complete";
   if (turn === "error") return "Error";
@@ -1373,38 +1397,49 @@ function isBotThinking() {
 }
 
 function botPlayer() {
-  if (!isSealBotMatch()) return null;
-  if (state && state.players) {
-    const bot = state.players.find(player => player.kind === "bot" || player.adapter_id === "sealbot" || player.label === "SealBot");
-    if (bot) return bot.role || bot.player || bot.id;
-  }
-  return (state && state.human_player === "player1") || matchConfig.human_player === "player1" ? "player0" : "player1";
+  if (state && state.thinking_player) return state.thinking_player;
+  return ["player0", "player1"].find(player => playerKind(player).startsWith("sealbot-")) || null;
 }
 
 function playerMeta(player) {
-  return state && Array.isArray(state.players)
-    ? state.players.find(item => item.role === player || item.player === player || item.id === player)
-    : null;
+  if (!state || !state.players) return null;
+  if (Array.isArray(state.players)) {
+    return state.players.find(item => item.role === player || item.player === player || item.id === player) || null;
+  }
+  const item = state.players[player];
+  if (typeof item === "string") return { role: player, kind: item, label: PLAYER_KIND_LABELS[item] || item };
+  if (item && typeof item === "object") return item;
+  return null;
+}
+
+function playerKind(player) {
+  const meta = playerMeta(player);
+  if (meta) {
+    if (typeof meta.kind === "string") return normalizePlayerKind(meta.kind, meta.variant);
+    if (typeof meta.variant === "string") return `sealbot-${meta.variant}`;
+  }
+  const selectId = player === "player0" ? "player0Kind" : "player1Kind";
+  return document.getElementById(selectId)?.value || "manual";
+}
+
+function normalizePlayerKind(kind, variant = "") {
+  if (kind === "human") return "manual";
+  if (kind === "bot" || kind === "sealbot") return `sealbot-${variant || "current"}`;
+  return kind || "manual";
+}
+
+function playerKindLabel(player) {
+  const kind = playerKind(player);
+  return PLAYER_KIND_LABELS[kind] || kind;
 }
 
 function playerLabel(player) {
   if (!player) return "--";
-  if (isSealBotMatch() && player) {
-    const human = (state && state.human_player) || matchConfig.human_player;
-    if (player === human) return "You";
-    if (player === botPlayer()) return "SealBot";
-  }
-  const meta = playerMeta(player);
-  if (meta && meta.label) return meta.label;
-  return player === "player0" ? "Player 0" : "Player 1";
+  const slot = player === "player0" ? "P0" : player === "player1" ? "P1" : player;
+  return `${slot} ${playerKindLabel(player)}`;
 }
 
 function playerShort(player) {
-  if (isSealBotMatch() && player) {
-    const human = (state && state.human_player) || matchConfig.human_player;
-    if (player === human) return "You";
-    if (player === botPlayer()) return "Bot";
-  }
   if (player === "player0") return "P0";
   if (player === "player1") return "P1";
   return "--";
@@ -1414,14 +1449,13 @@ function playerSlotLabel(player) {
   const short = playerShort(player);
   if (short === "P0") return "0";
   if (short === "P1") return "1";
-  if (short === "You") return "Y";
-  if (short === "Bot") return "B";
   return short.slice(0, 1);
 }
 
 function activeBotVariantLabel() {
-  const configured = state && state.match && state.match.bot && (state.match.bot.variant || state.match.bot.label);
-  const variant = configured || matchConfig.bot.variant || sealbotDefaultVariant();
+  const bot = botPlayer();
+  const kind = bot ? playerKind(bot) : "sealbot-current";
+  const variant = kind.startsWith("sealbot-") ? kind.replace("sealbot-", "") : sealbotDefaultVariant();
   const known = sealbotVariants().find(item => item.id === variant);
   return (known && known.label) || variant || "current";
 }
@@ -1435,8 +1469,11 @@ function adapterErrors() {
   else if (raw && typeof raw === "object") {
     for (const [key, value] of Object.entries(raw)) values.push(`${key}: ${value}`);
   } else if (raw) values.push(String(raw));
-  const selected = sealbotVariants().find(variant => variant.id === matchConfig.bot.variant);
-  if (selected && selected.available === false && selected.error) values.push(selected.error);
+  for (const kind of Object.values(matchConfig.players || {})) {
+    if (!String(kind).startsWith("sealbot-")) continue;
+    const selected = sealbotVariants().find(variant => variant.id === String(kind).replace("sealbot-", ""));
+    if (selected && selected.available === false && selected.error) values.push(selected.error);
+  }
   return [...new Set(values.filter(Boolean))];
 }
 
@@ -1482,6 +1519,22 @@ function path(cx, cy, size) {
 
 function visiblePlacements() {
   return (state.placements || []).slice(0, viewedPlacementCount());
+}
+
+function lastVisiblePlacement(offset = 0) {
+  const placements = visiblePlacements();
+  return placements[placements.length - 1 - offset] || null;
+}
+
+function recentPlacementRank(placement) {
+  if (!placement) return 0;
+  if (samePlacement(placement, lastVisiblePlacement(0))) return 1;
+  if (samePlacement(placement, lastVisiblePlacement(1))) return 2;
+  return 0;
+}
+
+function samePlacement(a, b) {
+  return Boolean(a && b && a.index === b.index);
 }
 
 function totalPlacements() {
@@ -1616,6 +1669,16 @@ function escapeText(text) {
 
 function escapeAttr(text) {
   return escapeText(text);
+}
+
+function placementStepLabel() {
+  if (!state || state.phase === "opening") return "Opening";
+  return state.phase === "second_stone" ? "Placement 2 of 2" : "Placement 1 of 2";
+}
+
+function setText(id, value) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = value;
 }
 
 async function init() {

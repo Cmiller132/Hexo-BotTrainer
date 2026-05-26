@@ -117,6 +117,23 @@ class FrontendSealBotControllerTests(unittest.TestCase):
         finally:
             controller.close()
 
+    def test_slot_payload_player0_manual_player1_sealbot(self) -> None:
+        from hexo_frontend.web import ManualMatchController
+
+        controller = ManualMatchController(bot_factory=lambda variant, limit: AutoLegalBot())
+        try:
+            state = controller.reset(_slot_config("manual", "sealbot-current"))
+            self.assertEqual(state["players"]["player0"]["kind"], "manual")
+            self.assertEqual(state["players"]["player1"]["kind"], "sealbot-current")
+            self.assertEqual(state["turn_status"], "human_turn")
+
+            state = controller.submit_move(0, 0)
+            state = _wait_for_state(controller, state, lambda item: item["turn_status"] == "human_turn")
+            self.assertEqual(state["current_player"], "player0")
+            self.assertEqual(len(state["placements"]), 3)
+        finally:
+            controller.close()
+
     def test_human_player1_starts_after_bot_opening(self) -> None:
         from hexo_frontend.web import ManualMatchController
 
@@ -124,6 +141,20 @@ class FrontendSealBotControllerTests(unittest.TestCase):
         try:
             state = controller.reset(_sealbot_config("player1"))
             state = _wait_for_state(controller, state, lambda item: item["turn_status"] == "human_turn")
+            self.assertEqual(state["current_player"], "player1")
+            self.assertEqual(len(state["placements"]), 1)
+        finally:
+            controller.close()
+
+    def test_slot_payload_player0_sealbot_player1_manual_starts_after_opening(self) -> None:
+        from hexo_frontend.web import ManualMatchController
+
+        controller = ManualMatchController(bot_factory=lambda variant, limit: AutoLegalBot())
+        try:
+            state = controller.reset(_slot_config("sealbot-current", "manual"))
+            state = _wait_for_state(controller, state, lambda item: item["turn_status"] == "human_turn")
+            self.assertEqual(state["players"]["player0"]["kind"], "sealbot-current")
+            self.assertEqual(state["players"]["player1"]["kind"], "manual")
             self.assertEqual(state["current_player"], "player1")
             self.assertEqual(len(state["placements"]), 1)
         finally:
@@ -249,6 +280,10 @@ def _sealbot_config(human_player: str) -> dict[str, object]:
         "human_player": human_player,
         "bot": {"id": "sealbot", "variant": "current", "time_limit": 0.01},
     }
+
+
+def _slot_config(player0: str, player1: str) -> dict[str, object]:
+    return {"players": {"player0": player0, "player1": player1}, "time_limit": 0.01}
 
 
 def _wait_for_state(controller: object, state: dict[str, object], predicate: object) -> dict[str, object]:

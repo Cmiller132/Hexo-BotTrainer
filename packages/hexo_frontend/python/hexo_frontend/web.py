@@ -37,6 +37,9 @@ STATIC_TYPES = {
     "js": "text/javascript; charset=utf-8",
 }
 BotFactory = Callable[[str, float], object]
+PLAYER_ROLES = ("player0", "player1")
+MANUAL_KIND = "manual"
+SEALBOT_PREFIX = "sealbot-"
 
 
 class MoveConflict(ValueError):
@@ -60,8 +63,7 @@ class ManualMatchController:
         self._result: GameResult | None = None
         self._error: BaseException | None = None
         self._mode = "manual"
-        self._human_player = "player0"
-        self._bot_variant = "current"
+        self._player_setup: dict[str, str] = {"player0": MANUAL_KIND, "player1": MANUAL_KIND}
         self._bot_time_limit = DEFAULT_SEALBOT_TIME_LIMIT
         self._seed: int | None = None
         self._thinking_player: str | None = None
@@ -75,8 +77,7 @@ class ManualMatchController:
         with self._condition:
             self._game_number += 1
             self._mode = match["mode"]
-            self._human_player = match["human_player"]
-            self._bot_variant = match["variant"]
+            self._player_setup = dict(match["players"])
             self._bot_time_limit = match["time_limit"]
             self._seed = match["seed"]
             game_id = f"{self._mode}-{self._game_number}"
@@ -224,47 +225,69 @@ class ManualMatchController:
             self._condition.notify_all()
 
     def _players_for_match(self) -> tuple[object, object]:
-        if self._mode == "manual":
-            return (_ManualPlayer(self, 0, label="Player 0"), _ManualPlayer(self, 1, label="Player 1"))
+        return (
+            self._make_player(0, self._player_setup["player0"]),
+            self._make_player(1, self._player_setup["player1"]),
+        )
 
-        human_index = 0 if self._human_player == "player0" else 1
-        bot_index = 1 - human_index
+    def _make_player(self, player_index: int, kind: str) -> object:
+        role = _player_role(player_index)
+        if kind == MANUAL_KIND:
+            return _ManualPlayer(self, player_index, label=f"{_player_label(role)} Manual")
+
+        variant = _sealbot_variant(kind)
         if self._bot_factory is not None:
-            bot = self._bot_factory(self._bot_variant, self._bot_time_limit)
+            bot = self._bot_factory(variant, self._bot_time_limit)
         else:
             bot = SealBotPlayer(
                 SealBotConfig(
                     path=self._sealbot_path,
-                    variant=self._bot_variant,
+                    variant=variant,
                     time_limit=self._bot_time_limit,
                 )
             )
-        players: list[object] = [None, None]
-        players[human_index] = _ManualPlayer(self, human_index, label="You")
-        players[bot_index] = _ObservedBotPlayer(self, bot_index, bot)
-        return (players[0], players[1])
+        return _ObservedBotPlayer(self, player_index, bot)
 
     def _parse_match_config(self, config: dict[str, Any]) -> dict[str, Any]:
-        mode = str(config.get("mode") or "manual")
-        if mode not in {"manual", "sealbot"}:
-            raise ValueError(f"Unknown match mode: {mode}")
-        human_player = str(config.get("human_player") or "player0")
-        if human_player not in {"player0", "player1"}:
-            raise ValueError("human_player must be player0 or player1.")
         bot = config.get("bot") if isinstance(config.get("bot"), dict) else {}
-        variant = str(bot.get("variant") or self._bot_variant or "current")
-        if variant not in {"current", "best"}:
-            raise ValueError("SealBot variant must be current or best.")
         time_limit = float(bot.get("time_limit") or self._bot_time_limit or DEFAULT_SEALBOT_TIME_LIMIT)
+        if "time_limit" in config and config["time_limit"] not in {"", None}:
+            time_limit = float(config["time_limit"])
         if time_limit <= 0:
             raise ValueError("SealBot time_limit must be positive.")
         seed = config.get("seed")
+        players = self._normalize_player_setup(config)
+        mode = "sealbot" if any(_is_sealbot_kind(kind) for kind in players.values()) else "manual"
         return {
             "mode": mode,
-            "human_player": human_player,
-            "variant": variant,
+            "players": players,
             "time_limit": time_limit,
             "seed": None if seed in {"", None} else int(seed),
+        }
+
+    def _normalize_player_setup(self, config: dict[str, Any]) -> dict[str, str]:
+        raw_players = config.get("players")
+        if isinstance(raw_players, dict):
+            return {
+                "player0": _normalize_player_kind(raw_players.get("player0", MANUAL_KIND)),
+                "player1": _normalize_player_kind(raw_players.get("player1", MANUAL_KIND)),
+            }
+
+        mode = str(config.get("mode") or "manual")
+        if mode not in {"manual", "sealbot"}:
+            raise ValueError(f"Unknown match mode: {mode}")
+        if mode == "manual":
+            return {"player0": MANUAL_KIND, "player1": MANUAL_KIND}
+
+        human_player = str(config.get("human_player") or "player0")
+        if human_player not in PLAYER_ROLES:
+            raise ValueError("human_player must be player0 or player1.")
+        bot = config.get("bot") if isinstance(config.get("bot"), dict) else {}
+        variant = str(bot.get("variant") or "current")
+        bot_kind = _normalize_player_kind({"kind": "sealbot", "variant": variant})
+        return {
+            "player0": MANUAL_KIND if human_player == "player0" else bot_kind,
+            "player1": MANUAL_KIND if human_player == "player1" else bot_kind,
         }
 
     def _wait_for_state_locked(self, timeout: float = 5.0) -> None:
@@ -285,36 +308,25 @@ class ManualMatchController:
                 "game_id": f"{self._mode}-{self._game_number}",
                 "mode": self._mode,
                 "players": self._players_payload_locked(),
-                "human_player": self._human_player,
                 "turn_status": self._turn_status_locked(payload),
                 "can_submit": self._can_submit_locked(),
                 "thinking_player": self._thinking_player,
                 "last_bot_decision": self._last_bot_decision,
                 "error": self._error_message_locked(),
                 "match": {
-                    "bot": {
-                        "id": "sealbot",
-                        "variant": self._bot_variant,
-                        "time_limit": self._bot_time_limit,
-                    }
-                    if self._mode == "sealbot"
-                    else None,
+                    "players": dict(self._player_setup),
+                    "time_limit": self._bot_time_limit,
                     "seed": self._seed,
                 },
             }
         )
         return payload
 
-    def _players_payload_locked(self) -> list[dict[str, object]]:
-        if self._mode == "sealbot":
-            return [
-                _player_payload(0, "human" if self._human_player == "player0" else "bot", self._bot_variant),
-                _player_payload(1, "human" if self._human_player == "player1" else "bot", self._bot_variant),
-            ]
-        return [
-            {"role": "player0", "kind": "human", "label": "Player 0"},
-            {"role": "player1", "kind": "human", "label": "Player 1"},
-        ]
+    def _players_payload_locked(self) -> dict[str, dict[str, object]]:
+        return {
+            role: _player_payload(index, self._player_setup[role])
+            for index, role in enumerate(PLAYER_ROLES)
+        }
 
     def _turn_status_locked(self, payload: dict[str, object]) -> str:
         if self._error is not None or (self._result is not None and self._result.abort is not None):
@@ -323,9 +335,8 @@ class ManualMatchController:
             return "terminal"
         if self._thinking_player is not None:
             return "bot_thinking"
-        if self._mode == "sealbot":
-            return "human_turn" if payload.get("current_player") == self._human_player else "bot_thinking"
-        return "manual_turn"
+        current = str(payload.get("current_player") or "")
+        return "bot_thinking" if _is_sealbot_kind(self._player_setup.get(current, MANUAL_KIND)) else "human_turn"
 
     def _can_submit_locked(self) -> bool:
         if self._state is None or self._result is not None or self._pending_action is not None:
@@ -334,7 +345,8 @@ class ManualMatchController:
             return False
         if self._python_state is not None and self._python_state.terminal is not None:
             return False
-        if self._mode == "sealbot" and str(engine.current_player(self._state)) != self._human_player:
+        current = str(engine.current_player(self._state))
+        if _is_sealbot_kind(self._player_setup.get(current, MANUAL_KIND)):
             return False
         return True
 
@@ -419,11 +431,52 @@ def _player_role(player_index: int) -> str:
     return "player0" if player_index == 0 else "player1"
 
 
-def _player_payload(player_index: int, kind: str, variant: str) -> dict[str, object]:
+def _player_label(role: str) -> str:
+    return "P0" if role == "player0" else "P1"
+
+
+def _is_sealbot_kind(kind: str) -> bool:
+    return kind.startswith(SEALBOT_PREFIX)
+
+
+def _sealbot_variant(kind: str) -> str:
+    if not _is_sealbot_kind(kind):
+        raise ValueError(f"Player kind is not SealBot: {kind}")
+    return kind.removeprefix(SEALBOT_PREFIX)
+
+
+def _normalize_player_kind(value: object) -> str:
+    if isinstance(value, dict):
+        kind = str(value.get("kind") or value.get("adapter") or value.get("id") or MANUAL_KIND)
+        variant = str(value.get("variant") or "current")
+        if kind in {"manual", "human"}:
+            return MANUAL_KIND
+        if kind in {"bot", "sealbot"}:
+            return _normalize_player_kind(f"sealbot-{variant}")
+        return _normalize_player_kind(kind)
+
+    kind = str(value or MANUAL_KIND).strip().lower()
+    if kind in {"manual", "human"}:
+        return MANUAL_KIND
+    if kind in {"bot", "sealbot"}:
+        return "sealbot-current"
+    if kind in {"sealbot-current", "sealbot-best"}:
+        return kind
+    raise ValueError(f"Unknown player kind: {kind}")
+
+
+def _player_payload(player_index: int, kind: str) -> dict[str, object]:
     role = _player_role(player_index)
-    if kind == "human":
-        return {"role": role, "kind": "human", "label": "You"}
-    return {"role": role, "kind": "bot", "label": f"SealBot {variant}", "adapter_id": "sealbot", "variant": variant}
+    if kind == MANUAL_KIND:
+        return {"role": role, "kind": kind, "label": "Manual"}
+    variant = _sealbot_variant(kind)
+    return {
+        "role": role,
+        "kind": kind,
+        "label": f"SealBot {variant}",
+        "adapter_id": "sealbot",
+        "variant": variant,
+    }
 
 
 class HexoPlayHandler(BaseHTTPRequestHandler):

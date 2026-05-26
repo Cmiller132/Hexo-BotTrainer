@@ -274,6 +274,32 @@ main {
   padding: 10px 12px 12px;
 }
 
+.setup-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  padding: 9px 12px 0;
+}
+
+.select-field {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.select-field select {
+  width: 100%;
+  min-height: 30px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: rgba(7, 13, 19, 0.86);
+  color: var(--text);
+  padding: 0 8px;
+  font: inherit;
+}
+
 .match-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
@@ -392,6 +418,57 @@ select:disabled {
   padding: 9px 12px 11px;
 }
 
+.turn-banner {
+  margin: 9px 12px 0;
+  padding: 9px 10px;
+  display: grid;
+  grid-template-columns: 12px 1fr;
+  align-items: center;
+  gap: 9px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: rgba(7, 13, 19, 0.68);
+}
+
+.turn-banner strong {
+  display: block;
+  color: var(--text);
+  font-size: 14px;
+}
+
+.turn-banner span {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.turn-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.turn-banner.p0 {
+  border-color: rgba(79, 147, 255, 0.72);
+  background: rgba(79, 147, 255, 0.08);
+}
+
+.turn-banner.p0 .turn-dot {
+  background: var(--p0);
+  box-shadow: 0 0 12px rgba(79, 147, 255, 0.58);
+}
+
+.turn-banner.p1 {
+  border-color: rgba(255, 86, 80, 0.72);
+  background: rgba(255, 86, 80, 0.08);
+}
+
+.turn-banner.p1 .turn-dot {
+  background: var(--p1);
+  box-shadow: 0 0 12px rgba(255, 86, 80, 0.58);
+}
+
 .info-row {
   display: grid;
   gap: 4px;
@@ -405,6 +482,10 @@ select:disabled {
 
 .info-row:last-child {
   grid-column: auto;
+}
+
+.turn-row {
+  border-color: rgba(39, 215, 230, 0.42);
 }
 
 .label {
@@ -425,6 +506,10 @@ select:disabled {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
   padding: 8px 12px 9px;
+}
+
+.setup-toolbar {
+  grid-template-columns: 1fr;
 }
 
 button {
@@ -1166,6 +1251,21 @@ body.bot-thinking .legal {
   stroke-width: 3;
 }
 
+.last-move-outline {
+  pointer-events: none;
+  fill: none;
+  stroke: #ffffff;
+  stroke-width: 3;
+  opacity: 0.98;
+  filter: drop-shadow(0 0 6px rgba(255, 255, 255, 0.52));
+}
+
+.last-move-outline.previous {
+  stroke-width: 2;
+  stroke-dasharray: 4 4;
+  opacity: 0.68;
+}
+
 .heat-cell {
   pointer-events: none;
   stroke: none;
@@ -1295,6 +1395,10 @@ body:not(.tactics-on) .tactic-legend {
   }
 
   .match-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .setup-grid {
     grid-template-columns: 1fr;
   }
 
