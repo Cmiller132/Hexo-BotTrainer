@@ -8,13 +8,13 @@ use pyo3::prelude::*;
 
 /// Return a tiny capabilities object for smoke tests and packaging checks.
 #[pyfunction]
-pub fn capabilities(py: Python<'_>) -> PyResult<PyObject> {
-    let dict = pyo3::types::PyDict::new_bound(py);
+pub fn capabilities(py: Python<'_>) -> PyResult<Py<PyAny>> {
+    let dict = pyo3::types::PyDict::new(py);
     dict.set_item("status", "placeholder")?;
     dict.set_item("selfplay", false)?;
     dict.set_item("samples", false)?;
     dict.set_item("message", "hexo_utils PyO3 bridge is awaiting redesign")?;
-    Ok(dict.into_py(py))
+    Ok(dict.into_any().unbind())
 }
 
 /// Register Python-visible functions on a module.

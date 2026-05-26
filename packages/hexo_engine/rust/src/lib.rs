@@ -12,6 +12,9 @@ pub mod snapshot;
 pub mod state;
 pub mod tactics;
 
+#[cfg(feature = "python")]
+pub mod pybridge;
+
 pub use board::{Board, Stone, LEGAL_RADIUS};
 pub use coord::{hex_distance, HexCoord};
 pub use error::{MoveError, StateLoadError};

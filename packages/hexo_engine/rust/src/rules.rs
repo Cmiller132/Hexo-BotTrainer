@@ -23,7 +23,7 @@ pub fn legal_placements(state: &HexoState, out: &mut Vec<HexCoord>) {
 
     match state.phase() {
         TurnPhase::Opening => {
-            if state.board().is_empty(HexCoord::ZERO) {
+            if state.board().is_cell_empty(HexCoord::ZERO) {
                 out.push(HexCoord::ZERO);
             }
         }
@@ -42,7 +42,7 @@ pub fn is_legal_placement(state: &HexoState, coord: HexCoord) -> Result<(), Move
 
     match state.phase() {
         TurnPhase::Opening => {
-            if coord == HexCoord::ZERO && state.board().is_empty(coord) {
+            if coord == HexCoord::ZERO && state.board().is_cell_empty(coord) {
                 Ok(())
             } else {
                 Err(MoveError::IllegalOpening)
@@ -60,7 +60,7 @@ pub fn is_legal_placement(state: &HexoState, coord: HexCoord) -> Result<(), Move
 
 /// Shared validation for all non-opening placements.
 fn legal_non_opening_placement(state: &HexoState, coord: HexCoord) -> Result<(), MoveError> {
-    if !state.board().is_empty(coord) {
+    if !state.board().is_cell_empty(coord) {
         return Err(MoveError::Occupied(coord));
     }
 

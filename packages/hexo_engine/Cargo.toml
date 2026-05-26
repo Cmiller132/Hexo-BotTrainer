@@ -6,10 +6,15 @@ edition.workspace = true
 [lib]
 name = "hexo_engine"
 path = "rust/src/lib.rs"
-crate-type = ["rlib"]
+crate-type = ["rlib", "cdylib"]
+
+[features]
+default = []
+python = ["dep:pyo3"]
 
 [dependencies]
 ahash.workspace = true
+pyo3 = { workspace = true, optional = true }
 serde.workspace = true
 thiserror.workspace = true
 

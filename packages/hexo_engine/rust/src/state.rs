@@ -60,7 +60,7 @@ pub struct Placement {
     pub coord: HexCoord,
 }
 
-/// Terminal result. Hexo has no normal draw in this prototype.
+/// Terminal result. Hexo has no normal draw under the current rules.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GameOutcome {
     /// Winning player.

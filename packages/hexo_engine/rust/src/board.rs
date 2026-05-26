@@ -42,8 +42,13 @@ impl Board {
         Self::default()
     }
 
+    /// True when the board has no stones.
+    pub fn is_empty(&self) -> bool {
+        self.occupied.is_empty()
+    }
+
     /// True when no stone occupies `coord`.
-    pub fn is_empty(&self, coord: HexCoord) -> bool {
+    pub fn is_cell_empty(&self, coord: HexCoord) -> bool {
         !self.stones.contains_key(&coord)
     }
 
@@ -62,7 +67,7 @@ impl Board {
         coord: HexCoord,
         stone: Stone,
     ) -> Result<WindowUpdate, MoveError> {
-        if !self.is_empty(coord) {
+        if !self.is_cell_empty(coord) {
             return Err(MoveError::Occupied(coord));
         }
         self.stones.insert(coord, stone);
@@ -123,7 +128,7 @@ impl Board {
     fn update_legal_for_placement(&mut self, coord: HexCoord) {
         self.legal.remove(&coord);
         for candidate in coords_within_radius(coord, LEGAL_RADIUS) {
-            if self.is_empty(candidate) {
+            if self.is_cell_empty(candidate) {
                 self.legal.insert(candidate);
             }
         }

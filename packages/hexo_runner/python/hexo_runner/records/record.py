@@ -8,8 +8,6 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Mapping, Protocol, Sequence
 
-from ..player import PlayerIdentity
-
 GAME_RECORD_SCHEMA_VERSION = 1
 
 
@@ -105,33 +103,6 @@ class GameRecordV1:
         return _jsonable(self)
 
 
-@dataclass(frozen=True, slots=True)
-class PositionRecord:
-    """Compatibility view for older manual sinks.
-
-    New durable records should use `GameRecordV1`.
-    """
-
-    game_id: str
-    turn_index: int
-    player_id: str
-    action: object
-    terminal: object | None = None
-    metadata: Mapping[str, Any] = field(default_factory=dict)
-
-
-@dataclass(frozen=True, slots=True)
-class GameRecord:
-    """Compatibility alias shape for complete game records."""
-
-    game_id: str
-    players: Sequence[PlayerIdentity]
-    entries: Sequence[PositionRecord]
-    seed: int | None = None
-    terminal: object | None = None
-    metadata: Mapping[str, Any] = field(default_factory=dict)
-
-
 class RecordSink(Protocol):
     """Destination for compact game records."""
 
@@ -161,13 +132,6 @@ class JsonlRecordSink:
         with self.path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record.to_dict(), separators=(",", ":")) + "\n")
         return {"path": str(self.path), "game_id": record.game_id, "status": record.status}
-
-
-class RecordAnalyzer(Protocol):
-    """Post-game analyzer for durable records."""
-
-    def analyze(self, record: GameRecord) -> Mapping[str, Any]:
-        """Return derived statistics without mutating the source record."""
 
 
 def _jsonable(value: object) -> Any:

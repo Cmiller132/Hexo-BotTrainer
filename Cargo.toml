@@ -12,7 +12,7 @@ edition = "2021"
 [workspace.dependencies]
 ahash = { version = "0.8", features = ["serde"] }
 hexo_engine = { path = "packages/hexo_engine" }
-pyo3 = { version = "0.21", features = ["extension-module"] }
+pyo3 = { version = "0.28", features = ["extension-module"] }
 rand = "0.8"
 rayon = "1.10"
 serde = { version = "1", features = ["derive"] }

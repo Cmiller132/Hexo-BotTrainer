@@ -1,6 +1,6 @@
 [build-system]
-requires = ["setuptools>=68"]
-build-backend = "setuptools.build_meta"
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
 
 [project]
 name = "hexo-engine"
@@ -13,5 +13,7 @@ dependencies = []
 pythonVersion = "3.11"
 typeCheckingMode = "basic"
 
-[tool.setuptools.packages.find]
-where = ["python"]
+[tool.maturin]
+python-source = "python"
+module-name = "hexo_engine._rust"
+features = ["python"]

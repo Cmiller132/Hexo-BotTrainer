@@ -180,7 +180,7 @@ class RunnerRewriteTests(unittest.TestCase):
         record = sink.records[0]
         self.assertEqual(record.schema_version, 1)
         self.assertEqual(record.status, "completed")
-        self.assertEqual(record.engine["backend"], "python-fallback")
+        self.assertEqual(record.engine["backend"], "rust-pyo3")
         self.assertEqual(len(record.actions), 12)
         self.assertIsNone(record.abort)
 
@@ -216,7 +216,7 @@ class RunnerRewriteTests(unittest.TestCase):
 
         self.assertEqual(result.status, GameStatus.ABORTED)
         self.assertEqual(result.abort.stage, "engine.apply_action")
-        self.assertIn("not legal", result.abort.message)
+        self.assertIn("opening placement", result.abort.message)
         record = sink.records[0]
         self.assertEqual(record.status, "aborted")
         self.assertEqual(record.actions, ())
