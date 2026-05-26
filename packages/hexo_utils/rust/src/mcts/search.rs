@@ -101,10 +101,11 @@ where
         return Err(SearchError::NoLegalActions);
     }
 
-    // Each simulation starts from a fresh clone of the root state and walks the
-    // tree by applying actions to that clone.
+    // One search-owned state clone is reused for all simulations. Each rollout
+    // applies actions while descending, then rewinds engine deltas back to root.
+    let mut position = SearchPosition::from_root(root_state);
     for _ in 0..config.visits.max(1) {
-        run_simulation(root_state, &mut tree, evaluator, config)?;
+        run_simulation(&mut position, &mut tree, evaluator, config)?;
     }
 
     let root = &tree.nodes[0];
@@ -127,7 +128,7 @@ where
 
 /// Execute one selection/expansion/evaluation/backup simulation.
 fn run_simulation<E>(
-    root_state: &HexoState,
+    position: &mut SearchPosition,
     tree: &mut SearchTree,
     evaluator: &mut E,
     config: &MctsConfig,
@@ -135,7 +136,20 @@ fn run_simulation<E>(
 where
     E: StateEvaluator,
 {
-    let mut position = SearchPosition::from_root(root_state);
+    let result = run_simulation_inner(position, tree, evaluator, config);
+    position.rewind();
+    result
+}
+
+fn run_simulation_inner<E>(
+    position: &mut SearchPosition,
+    tree: &mut SearchTree,
+    evaluator: &mut E,
+    config: &MctsConfig,
+) -> Result<(), SearchError>
+where
+    E: StateEvaluator,
+{
     let mut node_id = 0;
     let mut path: Vec<(NodeId, usize)> = Vec::new();
 
@@ -388,4 +402,123 @@ fn select_root_action(root: &Node, temperature: f32) -> Option<HexCoord> {
 /// Deterministic coordinate ordering for stable policies and tie-breaks.
 fn compare_coord(a: HexCoord, b: HexCoord) -> Ordering {
     a.q.cmp(&b.q).then_with(|| a.r.cmp(&b.r))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mcts::evaluator::UniformEvaluator;
+    use hexo_engine::{apply_placement, Axis, PackedCoord, Placement, TurnPhase};
+
+    fn root_after_opening() -> HexoState {
+        let mut state = HexoState::new();
+        apply_placement(
+            &mut state,
+            Placement {
+                coord: HexCoord::ZERO,
+            },
+        )
+        .unwrap();
+        state
+    }
+
+    fn state_signature(
+        state: &HexoState,
+    ) -> (
+        Player,
+        TurnPhase,
+        u32,
+        Option<GameOutcome>,
+        Vec<HexCoord>,
+        Vec<PackedCoord>,
+        Vec<(Axis, i16, i16, u8, u8)>,
+    ) {
+        let mut legal_ids = Vec::new();
+        state.write_legal_action_ids(&mut legal_ids);
+        let mut windows: Vec<_> = state
+            .board()
+            .windows()
+            .entries()
+            .map(|entry| {
+                let key = entry.key();
+                (
+                    key.axis,
+                    key.start.q,
+                    key.start.r,
+                    entry.mask(Player::Player0),
+                    entry.mask(Player::Player1),
+                )
+            })
+            .collect();
+        windows.sort_by_key(|(axis, q, r, _, _)| (axis.index(), *q, *r));
+        (
+            state.current_player(),
+            state.phase(),
+            state.placements_made(),
+            state.terminal(),
+            state.board().occupied_cells().to_vec(),
+            legal_ids,
+            windows,
+        )
+    }
+
+    fn legal_coords(state: &HexoState) -> Vec<HexCoord> {
+        let mut legal = Vec::new();
+        state.write_legal_moves(&mut legal);
+        legal
+    }
+
+    #[test]
+    fn mcts_does_not_mutate_root_state() {
+        let root = root_after_opening();
+        let before = state_signature(&root);
+        let mut evaluator = UniformEvaluator;
+        let config = MctsConfig {
+            visits: 16,
+            ..MctsConfig::default()
+        };
+
+        let _ = run_mcts(&root, &mut evaluator, &config).unwrap();
+
+        assert_eq!(state_signature(&root), before);
+    }
+
+    #[test]
+    fn mcts_result_uses_legal_root_actions() {
+        let root = root_after_opening();
+        let legal = legal_coords(&root);
+        let mut evaluator = UniformEvaluator;
+        let config = MctsConfig {
+            visits: 16,
+            ..MctsConfig::default()
+        };
+
+        let result = run_mcts(&root, &mut evaluator, &config).unwrap();
+
+        assert!(legal.contains(&result.selected_action));
+        assert!(!result.visit_policy.is_empty());
+        assert!(result
+            .visit_policy
+            .iter()
+            .all(|(action, _visits)| legal.contains(action)));
+    }
+
+    #[test]
+    fn mcts_repeated_searches_are_deterministic_with_uniform_evaluator() {
+        let root = root_after_opening();
+        let config = MctsConfig {
+            visits: 24,
+            temperature: 0.0,
+            ..MctsConfig::default()
+        };
+        let mut left_evaluator = UniformEvaluator;
+        let mut right_evaluator = UniformEvaluator;
+
+        let left = run_mcts(&root, &mut left_evaluator, &config).unwrap();
+        let right = run_mcts(&root, &mut right_evaluator, &config).unwrap();
+
+        assert_eq!(left.selected_action, right.selected_action);
+        assert_eq!(left.visit_policy, right.visit_policy);
+        assert_eq!(left.root_value, right.root_value);
+    }
 }

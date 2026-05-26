@@ -13,7 +13,7 @@ from enum import StrEnum
 from typing import Any, Mapping, TypeAlias
 
 
-ActionId = str
+ActionId = int
 LegalActionId = int
 _COORD_OFFSET = 1 << 15
 _COORD_MIN = -(1 << 15)
@@ -97,6 +97,13 @@ def pack_coord_id(coord: AxialCoord) -> LegalActionId:
     q = _checked_coord_component(coord.q)
     r = _checked_coord_component(coord.r)
     return ((q + _COORD_OFFSET) << 16) | (r + _COORD_OFFSET)
+
+
+def format_coord_id(action_id: ActionId) -> str:
+    """Format a packed action ID for display only."""
+
+    coord = unpack_coord_id(action_id)
+    return f"{coord.q},{coord.r}"
 
 
 def unpack_coord_id(action_id: LegalActionId) -> AxialCoord:

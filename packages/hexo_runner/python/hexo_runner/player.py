@@ -83,7 +83,7 @@ class TransitionEvent:
     action_index: int
     player_id: str
     player_role: str
-    action_id: str
+    action_id: int
     action: Action
     transition: object
     terminal: object | None

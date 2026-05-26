@@ -6,9 +6,9 @@
 
 use super::coord::HexCoord;
 use super::error::MoveError;
-use super::legal::LegalMoveStore;
+use super::legal::{LegalMoveDelta, LegalMoveStore};
 use super::state::Player;
-use super::tactics::{WindowStore, WindowUpdate};
+use super::tactics::{WindowStore, WindowStoreDelta, WindowUpdate};
 use ahash::AHashMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -26,6 +26,16 @@ pub struct Board {
     windows: WindowStore,
     /// Incrementally maintained legal non-opening placements.
     legal: LegalMoveStore,
+}
+
+/// Board-level changes made by one placement.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BoardDelta {
+    coord: HexCoord,
+    previous_stone: Option<Stone>,
+    previous_occupied_len: usize,
+    legal: LegalMoveDelta,
+    windows: WindowStoreDelta,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -65,13 +75,45 @@ impl Board {
         coord: HexCoord,
         stone: Stone,
     ) -> Result<WindowUpdate, MoveError> {
+        let (update, _) = self.place_with_delta(coord, stone)?;
+        Ok(update)
+    }
+
+    /// Place one stone and return the delta needed to undo the board mutation.
+    pub(crate) fn place_with_delta(
+        &mut self,
+        coord: HexCoord,
+        stone: Stone,
+    ) -> Result<(WindowUpdate, BoardDelta), MoveError> {
         if !self.is_cell_empty(coord) {
             return Err(MoveError::Occupied(coord));
         }
-        self.stones.insert(coord, stone);
+        let previous_stone = self.stones.insert(coord, stone);
+        let previous_occupied_len = self.occupied.len();
         self.occupied.push(coord);
-        self.update_legal_for_placement(coord);
-        Ok(self.windows.update_for_placement(coord, stone))
+        let legal = self.update_legal_for_placement_with_delta(coord);
+        let (window_update, windows) = self.windows.update_for_placement_with_delta(coord, stone);
+        Ok((
+            window_update,
+            BoardDelta {
+                coord,
+                previous_stone,
+                previous_occupied_len,
+                legal,
+                windows,
+            },
+        ))
+    }
+
+    pub(crate) fn undo_place(&mut self, delta: BoardDelta) {
+        self.occupied.truncate(delta.previous_occupied_len);
+        if let Some(stone) = delta.previous_stone {
+            self.stones.insert(delta.coord, stone);
+        } else {
+            self.stones.remove(&delta.coord);
+        }
+        self.legal.restore_delta(delta.legal);
+        self.windows.restore_delta(delta.windows);
     }
 
     /// Incremental threat/win window state.
@@ -118,10 +160,15 @@ impl Board {
         ))
     }
 
-    fn update_legal_for_placement(&mut self, coord: HexCoord) {
+    fn update_legal_for_placement_with_delta(&mut self, coord: HexCoord) -> LegalMoveDelta {
         let stones = &self.stones;
         self.legal
-            .update_for_placement(coord, |candidate| !stones.contains_key(&candidate));
+            .update_for_placement_with_delta(coord, |candidate| !stones.contains_key(&candidate))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn debug_stones(&self) -> &AHashMap<HexCoord, Stone> {
+        &self.stones
     }
 }
 

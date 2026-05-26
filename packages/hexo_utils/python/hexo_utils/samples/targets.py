@@ -64,10 +64,10 @@ class LegalPolicyTargetHelper:
 class LegalPolicyValueTarget:
     """Default target for models trained on legal-action policy logits/value."""
 
-    legal_action_ids: tuple[str, ...]
+    legal_action_ids: tuple[int, ...]
     policy_logits: object | None = None
     policy_logits_ref: object | None = None
-    selected_action_id: str | None = None
+    selected_action_id: int | None = None
     value: float | None = None
     symmetry: D6Symmetry = IDENTITY_D6
     metadata: Mapping[str, Any] = field(default_factory=dict)
@@ -114,7 +114,7 @@ def build_legal_policy_value_target(
     )
 
 
-def _validate_logits_shape(action_ids: Sequence[str], logits: object | None) -> None:
+def _validate_logits_shape(action_ids: Sequence[int], logits: object | None) -> None:
     """Catch obvious mismatches without requiring a tensor dependency."""
 
     if logits is None or not hasattr(logits, "__len__"):

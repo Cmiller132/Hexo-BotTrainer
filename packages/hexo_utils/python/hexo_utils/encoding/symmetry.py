@@ -32,15 +32,15 @@ IDENTITY_D6 = D6Symmetry(0)
 class ActionSymmetryMapper(Protocol):
     """Model or engine adapter that transforms stable action ids."""
 
-    def transform_action_id(self, action_id: str, symmetry: D6Symmetry) -> str:
+    def transform_action_id(self, action_id: int, symmetry: D6Symmetry) -> int:
         """Return the action id after applying `symmetry`."""
 
 
 def transform_action_ids(
-    action_ids: Sequence[str],
+    action_ids: Sequence[int],
     symmetry: D6Symmetry,
     mapper: ActionSymmetryMapper,
-) -> tuple[str, ...]:
+) -> tuple[int, ...]:
     """Transform stable action ids while preserving their policy-logit order."""
 
     return tuple(mapper.transform_action_id(action_id, symmetry) for action_id in action_ids)

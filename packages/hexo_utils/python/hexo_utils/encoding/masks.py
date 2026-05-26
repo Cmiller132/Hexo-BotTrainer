@@ -19,7 +19,7 @@ class ActionMask:
     """Model-facing legal-action mask plus the action ids it represents."""
 
     mask: object
-    action_ids: tuple[str, ...]
+    action_ids: tuple[int, ...]
     legal_actions: tuple[object, ...] = ()
 
 
@@ -33,7 +33,7 @@ def build_legal_mask(legal_actions: Sequence[object], *, shape: tuple[int, ...])
     _not_implemented("build_legal_mask")
 
 
-def mask_from_action_ids(action_ids: Sequence[str], *, shape: tuple[int, ...]) -> ActionMask:
+def mask_from_action_ids(action_ids: Sequence[int], *, shape: tuple[int, ...]) -> ActionMask:
     """Build a mask when samples or search already carry action identities."""
 
     _not_implemented("mask_from_action_ids")

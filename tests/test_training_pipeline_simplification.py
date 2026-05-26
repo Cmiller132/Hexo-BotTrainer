@@ -302,18 +302,18 @@ class TrainingPipelineSimplificationTests(unittest.TestCase):
             turn_index=4,
             model_id="m",
             logits=(0.25, 0.75),
-            selected_action_id="b",
+            selected_action_id=2,
         )
         sample = TrainingSampleRecord(
             game_id="g",
             turn_index=4,
-            legal_action_ids=("a", "b"),
+            legal_action_ids=(1, 2),
             policy=policy,
         )
 
         target = build_legal_policy_value_target(sample)
 
-        self.assertEqual(target.legal_action_ids, ("a", "b"))
+        self.assertEqual(target.legal_action_ids, (1, 2))
         self.assertFalse(hasattr(policy, "legal_action_ids"))
 
     def test_resnet_plugin_is_composition_only(self) -> None:

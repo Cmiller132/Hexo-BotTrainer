@@ -47,7 +47,7 @@ class PolicyOutputRecord:
     game_id: str
     turn_index: int
     model_id: str
-    selected_action_id: str | None = None
+    selected_action_id: int | None = None
     logits: object | None = None
     logits_ref: object | None = None
     value: float | None = None
@@ -83,7 +83,7 @@ class TrainingSampleRecord:
 
     game_id: str
     turn_index: int
-    legal_action_ids: tuple[str, ...]
+    legal_action_ids: tuple[int, ...]
     source_record_ref: object | None = None
     policy: PolicyOutputRecord | None = None
     model_payloads: Sequence[ModelSamplePayload] = field(default_factory=tuple)

@@ -23,7 +23,12 @@ class GameSpec:
     scenario: object | None = None
     mode: str = "match"
     is_evaluation: bool = False
+    max_actions: int = 1024
     metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.max_actions <= 0:
+            raise ValueError("GameSpec.max_actions must be positive.")
 
 
 SessionSpec = GameSpec

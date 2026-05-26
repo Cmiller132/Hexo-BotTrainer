@@ -270,6 +270,54 @@ class RunnerRewriteTests(unittest.TestCase):
         self.assertEqual(result.abort.message, "boom")
         self.assertEqual(records[0].abort.stage, "player.decide:p0")
 
+    def test_max_actions_aborts_before_requesting_next_decision(self) -> None:
+        from hexo_runner.modes.match import run_match
+        from hexo_runner.records import GameStatus
+        from hexo_runner.session import GameSpec
+
+        with tempfile.TemporaryDirectory() as tmp:
+            result = run_match(
+                GameSpec(game_id="max-actions", max_actions=1),
+                (ScriptedPlayer("p0", ((0, 0),)), ScriptedPlayer("p1", ((0, 1),))),
+                tmp,
+            )
+            records = records_from_result(result)
+
+        self.assertEqual(result.status, GameStatus.ABORTED)
+        self.assertEqual(result.turns, 1)
+        self.assertEqual(result.abort.stage, "runner.max_actions")
+        self.assertEqual(result.abort.exception_type, "MaxActionsExceeded")
+        self.assertIn("max-actions", result.abort.message)
+        self.assertIn("max_actions=1", result.abort.message)
+        record = records[0]
+        self.assertEqual(record.status, "aborted")
+        self.assertEqual(len(record.action_ids), 1)
+        self.assertEqual(record.abort.stage, "runner.max_actions")
+
+    def test_terminal_move_exactly_at_max_actions_completes(self) -> None:
+        from hexo_runner.modes.match import run_match
+        from hexo_runner.records import GameStatus
+        from hexo_runner.session import GameSpec
+
+        with tempfile.TemporaryDirectory() as tmp:
+            result = run_match(
+                GameSpec(game_id="max-terminal", max_actions=12),
+                (ScriptedPlayer("p0", WINNING_P0), ScriptedPlayer("p1", FILLER_P1)),
+                tmp,
+            )
+            records = records_from_result(result)
+
+        self.assertEqual(result.status, GameStatus.COMPLETED)
+        self.assertEqual(result.turns, 12)
+        self.assertEqual(records[0].status, "completed")
+        self.assertIsNone(records[0].abort)
+
+    def test_game_spec_rejects_non_positive_max_actions(self) -> None:
+        from hexo_runner.session import GameSpec
+
+        with self.assertRaisesRegex(ValueError, "max_actions"):
+            GameSpec(game_id="bad", max_actions=0)
+
     def test_observers_receive_independent_cloned_states(self) -> None:
         from hexo_runner.modes.match import run_match
         from hexo_runner.session import GameSpec

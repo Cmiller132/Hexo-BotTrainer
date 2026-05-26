@@ -84,6 +84,17 @@ def run_match_loop(
         )
 
         while adapter.terminal(primary_state) is None:
+            if record_writer.action_count >= spec.max_actions:
+                raise RunnerAbort(
+                    AbortRecord(
+                        stage="runner.max_actions",
+                        exception_type="MaxActionsExceeded",
+                        message=(
+                            f"Game {spec.game_id!r} reached max_actions="
+                            f"{spec.max_actions} before terminal state."
+                        ),
+                    )
+                )
             current = _run_stage("engine.current_player", lambda: adapter.current_player(primary_state))
             player_index = adapter.player_index(current)
             active_player = players[player_index]

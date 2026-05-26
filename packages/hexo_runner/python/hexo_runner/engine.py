@@ -40,13 +40,8 @@ class HexoEngineAdapter:
     def terminal(self, state: engine.HexoState) -> engine.TerminalResult | None:
         return engine.terminal(state)
 
-    def action_id(self, action: engine.Action) -> str:
+    def action_id(self, action: engine.Action) -> int:
         return engine.action_id(action)
-
-    def action_payload(self, action: object) -> Mapping[str, Any]:
-        if isinstance(action, engine.PlacementAction):
-            return {"type": "placement", "q": action.coord.q, "r": action.coord.r}
-        return {"type": type(action).__name__, "repr": repr(action)}
 
     def terminal_payload(self, terminal: object | None) -> Mapping[str, Any] | None:
         if terminal is None:
@@ -58,15 +53,6 @@ class HexoEngineAdapter:
                 "metadata": _jsonable(terminal.metadata),
             }
         return _jsonable(terminal)
-
-    def transition_payload(self, transition: object) -> Mapping[str, Any]:
-        if isinstance(transition, engine.TransitionResult):
-            return {
-                "next_player": str(transition.next_player) if transition.next_player is not None else None,
-                "terminal": transition.terminal,
-                "metadata": _jsonable(transition.metadata),
-            }
-        return _jsonable(transition)
 
 
 def _jsonable(value: object) -> Any:

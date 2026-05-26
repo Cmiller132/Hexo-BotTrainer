@@ -42,6 +42,14 @@ pub struct LegalMoveStore {
     version: u64,
 }
 
+/// Incremental legal-move changes made by one placement.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LegalMoveDelta {
+    inserted: Vec<PackedCoord>,
+    removed: Vec<PackedCoord>,
+    previous_version: u64,
+}
+
 impl LegalMoveStore {
     /// Create an empty legal move store.
     pub fn new() -> Self {
@@ -98,17 +106,42 @@ impl LegalMoveStore {
         coord: HexCoord,
         mut is_cell_empty: impl FnMut(HexCoord) -> bool,
     ) {
-        let mut changed = self.remove(coord);
+        let _ = self.update_for_placement_with_delta(coord, &mut is_cell_empty);
+    }
+
+    /// Update legal moves after a stone is placed and return an undo delta.
+    pub(crate) fn update_for_placement_with_delta(
+        &mut self,
+        coord: HexCoord,
+        mut is_cell_empty: impl FnMut(HexCoord) -> bool,
+    ) -> LegalMoveDelta {
+        let mut delta = LegalMoveDelta {
+            previous_version: self.version,
+            ..LegalMoveDelta::default()
+        };
+        let mut changed = self.remove_recorded(coord, &mut delta.removed);
 
         for candidate in coords_within_radius(coord, LEGAL_RADIUS) {
             if is_cell_empty(candidate) {
-                changed |= self.insert(candidate);
+                changed |= self.insert_recorded(candidate, &mut delta.inserted);
             }
         }
 
         if changed {
             self.version = self.version.wrapping_add(1);
         }
+
+        delta
+    }
+
+    pub(crate) fn restore_delta(&mut self, delta: LegalMoveDelta) {
+        for action_id in delta.inserted {
+            self.remove(unpack_coord(action_id));
+        }
+        for action_id in delta.removed {
+            self.insert(unpack_coord(action_id));
+        }
+        self.version = delta.previous_version;
     }
 
     fn insert(&mut self, coord: HexCoord) -> bool {
@@ -124,6 +157,16 @@ impl LegalMoveStore {
         true
     }
 
+    fn insert_recorded(&mut self, coord: HexCoord, inserted: &mut Vec<PackedCoord>) -> bool {
+        let action_id = pack_coord(coord);
+        if self.insert(coord) {
+            inserted.push(action_id);
+            true
+        } else {
+            false
+        }
+    }
+
     fn remove(&mut self, coord: HexCoord) -> bool {
         let action_id = pack_coord(coord);
         if !self.membership.remove(&action_id) {
@@ -133,6 +176,16 @@ impl LegalMoveStore {
             self.ordered.remove(index);
         }
         true
+    }
+
+    fn remove_recorded(&mut self, coord: HexCoord, removed: &mut Vec<PackedCoord>) -> bool {
+        let action_id = pack_coord(coord);
+        if self.remove(coord) {
+            removed.push(action_id);
+            true
+        } else {
+            false
+        }
     }
 }
 

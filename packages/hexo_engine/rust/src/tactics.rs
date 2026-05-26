@@ -344,6 +344,12 @@ pub struct WindowStore {
     masks_by_key: AHashMap<WindowKey, [u8; 2]>,
 }
 
+/// Incremental window-mask changes made by one placement.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WindowStoreDelta {
+    previous_masks: Vec<(WindowKey, Option<[u8; 2]>)>,
+}
+
 impl WindowStore {
     /// Create an empty window store.
     pub fn new() -> Self {
@@ -389,12 +395,27 @@ impl WindowStore {
     }
 
     /// Update the 18 windows affected by one newly placed stone.
+    #[cfg(test)]
     pub(crate) fn update_for_placement(&mut self, coord: HexCoord, player: Player) -> WindowUpdate {
+        let (update, _) = self.update_for_placement_with_delta(coord, player);
+        update
+    }
+
+    /// Update affected windows and return the masks needed for undo.
+    pub(crate) fn update_for_placement_with_delta(
+        &mut self,
+        coord: HexCoord,
+        player: Player,
+    ) -> (WindowUpdate, WindowStoreDelta) {
         let mut update = WindowUpdate::default();
+        let mut delta = WindowStoreDelta::default();
 
         for axis in Axis::ALL {
             for offset in 0..WINDOW_LEN as u8 {
                 let (key, bit) = window_containing(coord, axis, offset);
+                delta
+                    .previous_masks
+                    .push((key, self.masks_by_key.get(&key).copied()));
                 let masks = self.masks_by_key.entry(key).or_insert([0; 2]);
                 debug_assert_eq!((masks[0] | masks[1]) & bit, 0);
                 masks[player.index()] |= bit;
@@ -411,7 +432,17 @@ impl WindowStore {
             }
         }
 
-        update
+        (update, delta)
+    }
+
+    pub(crate) fn restore_delta(&mut self, delta: WindowStoreDelta) {
+        for (key, previous) in delta.previous_masks.into_iter().rev() {
+            if let Some(masks) = previous {
+                self.masks_by_key.insert(key, masks);
+            } else {
+                self.masks_by_key.remove(&key);
+            }
+        }
     }
 }
 

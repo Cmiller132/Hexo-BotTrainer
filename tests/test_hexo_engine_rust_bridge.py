@@ -35,12 +35,17 @@ class RustEngineBridgeTests(unittest.TestCase):
         import random
 
         import hexo_engine as engine
+        from hexo_engine.types import pack_coord_id
 
         state = engine.new_game()
         legal = engine.legal_actions(state)
 
         self.assertEqual(engine.legal_action_count(state), 1)
         self.assertEqual(legal.action_ids, engine.legal_action_ids(state))
+        self.assertEqual(
+            engine.action_id(engine.PlacementAction(engine.AxialCoord(0, 0))),
+            pack_coord_id(engine.AxialCoord(0, 0)),
+        )
         self.assertEqual(random.choice(legal), engine.PlacementAction(engine.AxialCoord(0, 0)))
         self.assertTrue(engine.is_legal_action(state, engine.PlacementAction(engine.AxialCoord(0, 0))))
 

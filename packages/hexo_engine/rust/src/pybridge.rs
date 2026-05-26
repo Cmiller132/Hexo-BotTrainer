@@ -5,8 +5,8 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
 
 use crate::{
-    apply_placement, Axis, GameOutcome, HexCoord, HexoState as RustHexoState, MoveError, Placement,
-    Player, TurnPhase,
+    apply_placement, pack_coord, Axis, GameOutcome, HexCoord, HexoState as RustHexoState,
+    MoveError, Placement, Player, TurnPhase,
 };
 
 /// Python-owned opaque handle to a Rust Hexo state.
@@ -119,8 +119,8 @@ pub fn to_python_state(py: Python<'_>, state: PyRef<'_, PyHexoState>) -> PyResul
 }
 
 #[pyfunction]
-pub fn action_id(q: i16, r: i16) -> String {
-    format!("{q},{r}")
+pub fn action_id(q: i16, r: i16) -> u32 {
+    pack_coord(HexCoord { q, r })
 }
 
 #[pyfunction]

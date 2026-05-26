@@ -17,7 +17,7 @@ class ResNetInput:
 
     state_tensor: object
     legal_mask: object
-    action_ids: tuple[str, ...]
+    action_ids: tuple[int, ...]
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
