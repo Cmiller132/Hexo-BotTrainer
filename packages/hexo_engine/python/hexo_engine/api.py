@@ -9,6 +9,8 @@ from .types import (
     Action,
     ActionId,
     AxialCoord,
+    LegalActionId,
+    LegalActions,
     Player,
     PlacementAction,
     PythonBoard,
@@ -54,13 +56,29 @@ def current_player(state: HexoState) -> Player:
     return Player(_bridge().current_player(state))
 
 
-def legal_actions(state: HexoState) -> list[Action]:
-    """Return sorted legal single-placement actions."""
+def legal_actions(state: HexoState) -> LegalActions:
+    """Return deterministic legal single-placement actions."""
 
-    return [
-        PlacementAction(AxialCoord(q=int(q), r=int(r)))
-        for q, r in _bridge().legal_actions(state)
-    ]
+    return LegalActions(_bridge().legal_action_ids(state))
+
+
+def legal_action_ids(state: HexoState) -> tuple[LegalActionId, ...]:
+    """Return compact deterministic legal action IDs."""
+
+    return tuple(int(action_id) for action_id in _bridge().legal_action_ids(state))
+
+
+def legal_action_count(state: HexoState) -> int:
+    """Return the number of legal single-placement actions."""
+
+    return int(_bridge().legal_action_count(state))
+
+
+def is_legal_action(state: HexoState, action: Action) -> bool:
+    """Return whether an action is legal in the current state."""
+
+    coord = _placement_coord(action)
+    return bool(_bridge().is_legal_action(state, coord.q, coord.r))
 
 
 def apply_action(state: HexoState, action: Action) -> TransitionResult:

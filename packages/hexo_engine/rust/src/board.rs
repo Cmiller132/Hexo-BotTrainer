@@ -4,15 +4,13 @@
 //! A hash map gives O(1)-ish lookup by coordinate, while `occupied` preserves a
 //! compact list for legal-cell generation, encoding, and board summaries.
 
-use super::coord::{coords_within_radius, HexCoord};
+use super::coord::HexCoord;
 use super::error::MoveError;
+use super::legal::LegalMoveStore;
 use super::state::Player;
 use super::tactics::{WindowStore, WindowUpdate};
-use ahash::{AHashMap, AHashSet};
+use ahash::AHashMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-/// Maximum distance from any existing stone for non-opening placements.
-pub const LEGAL_RADIUS: i16 = 8;
 
 /// In the game engine, a stone is just the owning player.
 pub type Stone = Player;
@@ -27,7 +25,7 @@ pub struct Board {
     /// Incrementally maintained six-cell window state.
     windows: WindowStore,
     /// Incrementally maintained legal non-opening placements.
-    legal: AHashSet<HexCoord>,
+    legal: LegalMoveStore,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -81,14 +79,9 @@ impl Board {
         &self.windows
     }
 
-    /// True when `coord` is a legal non-opening cell.
-    pub fn is_legal_cell(&self, coord: HexCoord) -> bool {
-        self.legal.contains(&coord)
-    }
-
-    /// Iterate legal non-opening cells.
-    pub fn legal_cells(&self) -> impl Iterator<Item = HexCoord> + '_ {
-        self.legal.iter().copied()
+    /// Incremental legal non-opening move store.
+    pub fn legal_moves(&self) -> &LegalMoveStore {
+        &self.legal
     }
 
     /// All occupied coordinates in placement order.
@@ -126,12 +119,9 @@ impl Board {
     }
 
     fn update_legal_for_placement(&mut self, coord: HexCoord) {
-        self.legal.remove(&coord);
-        for candidate in coords_within_radius(coord, LEGAL_RADIUS) {
-            if self.is_cell_empty(candidate) {
-                self.legal.insert(candidate);
-            }
-        }
+        let stones = &self.stones;
+        self.legal
+            .update_for_placement(coord, |candidate| !stones.contains_key(&candidate));
     }
 }
 

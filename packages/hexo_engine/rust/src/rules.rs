@@ -1,38 +1,11 @@
-//! Legal placement generation and validation.
+//! Legal placement validation.
 //!
-//! The board maintains radius-8 legal cells incrementally. After the opening
-//! move, legal placement generation is a query over those cells rather than a
-//! full-board rescan.
+//! The board owns incremental legal move storage. This module only validates a
+//! submitted coordinate against the current phase and that store.
 
 use super::coord::HexCoord;
 use super::error::MoveError;
 use super::state::{HexoState, TurnPhase};
-
-/// Fill `out` with all legal single-stone placements for the current state.
-///
-/// This respects the autoregressive phase model:
-/// - opening: only `(0, 0)`
-/// - first stone: any legal empty cell
-/// - second stone: any legal empty cell other than the first stone
-pub fn legal_placements(state: &HexoState, out: &mut Vec<HexCoord>) {
-    out.clear();
-
-    if state.terminal().is_some() {
-        return;
-    }
-
-    match state.phase() {
-        TurnPhase::Opening => {
-            if state.board().is_cell_empty(HexCoord::ZERO) {
-                out.push(HexCoord::ZERO);
-            }
-        }
-        TurnPhase::FirstStone | TurnPhase::SecondStone { .. } => {
-            out.extend(state.board().legal_cells());
-            out.sort_by_key(|coord| (coord.q, coord.r));
-        }
-    }
-}
 
 /// Validate one coordinate against the current state and phase.
 pub fn is_legal_placement(state: &HexoState, coord: HexCoord) -> Result<(), MoveError> {
@@ -64,7 +37,7 @@ fn legal_non_opening_placement(state: &HexoState, coord: HexCoord) -> Result<(),
         return Err(MoveError::Occupied(coord));
     }
 
-    if state.board().is_legal_cell(coord) {
+    if state.board().legal_moves().contains(coord) {
         Ok(())
     } else {
         Err(MoveError::IllegalPlacement(coord))

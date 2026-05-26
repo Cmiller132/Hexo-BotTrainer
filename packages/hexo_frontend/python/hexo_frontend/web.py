@@ -78,7 +78,7 @@ class ManualMatchController:
             if state is None or self._result is not None:
                 raise ValueError("No move is currently pending.")
             action = engine.PlacementAction(engine.AxialCoord(q=q, r=r))
-            if action not in engine.legal_actions(state):
+            if not engine.is_legal_action(state, action):
                 raise ValueError(f"{q},{r} is not legal.")
 
             start_version = self._version

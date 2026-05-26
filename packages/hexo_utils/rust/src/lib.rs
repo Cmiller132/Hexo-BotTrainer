@@ -13,7 +13,7 @@ pub mod samples;
 pub mod pybridge;
 
 pub use encoder::{
-    encode_state, legal_placements_in_crop, planes, EncodedState, DEFAULT_CROP_SIZE, PLANE_COUNT,
+    encode_state, legal_moves_in_crop, planes, EncodedState, DEFAULT_CROP_SIZE, PLANE_COUNT,
 };
 pub use mcts::{
     run_mcts, Evaluation, Evaluator, MctsConfig, NetworkOutput, PolicyPrior, SearchError,

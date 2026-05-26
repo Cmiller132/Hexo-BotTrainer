@@ -31,6 +31,19 @@ class RustEngineBridgeTests(unittest.TestCase):
 
         self.assertEqual(coords, sorted(coords))
 
+    def test_legal_actions_use_compact_id_view(self) -> None:
+        import random
+
+        import hexo_engine as engine
+
+        state = engine.new_game()
+        legal = engine.legal_actions(state)
+
+        self.assertEqual(engine.legal_action_count(state), 1)
+        self.assertEqual(legal.action_ids, engine.legal_action_ids(state))
+        self.assertEqual(random.choice(legal), engine.PlacementAction(engine.AxialCoord(0, 0)))
+        self.assertTrue(engine.is_legal_action(state, engine.PlacementAction(engine.AxialCoord(0, 0))))
+
     def test_clone_mutation_does_not_affect_original(self) -> None:
         import hexo_engine as engine
 

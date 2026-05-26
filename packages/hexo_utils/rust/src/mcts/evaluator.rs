@@ -11,7 +11,7 @@
 use crate::encoder::EncodedState;
 use hexo_engine::{HexCoord, HexoState};
 
-    /// Raw neural-network-style output for one optional shared encoded state.
+/// Raw neural-network-style output for one optional shared encoded state.
 #[derive(Clone, Debug)]
 pub struct NetworkOutput {
     /// Flat policy logits, indexed the same way as `EncodedState`.

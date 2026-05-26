@@ -11,7 +11,7 @@ use std::fmt;
 
 use rand::Rng;
 
-use crate::encoder::{encode_state, legal_placements_in_crop};
+use crate::encoder::{encode_state, legal_moves_in_crop};
 use crate::mcts::evaluator::{Evaluation, StateEvaluator};
 use crate::mcts::tree::{Edge, Node, NodeId, SearchTree};
 use crate::position::SearchPosition;
@@ -213,7 +213,7 @@ where
 
     let encoded = encode_state(state, crop_size);
     let mut legal = Vec::new();
-    legal_placements_in_crop(state, &encoded, &mut legal);
+    legal_moves_in_crop(state, &encoded, &mut legal);
 
     if legal.is_empty() {
         tree.nodes[node_id].expanded = true;

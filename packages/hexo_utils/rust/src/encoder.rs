@@ -6,7 +6,7 @@
 //! use this default when its plane semantics match their architecture, or ignore
 //! it and own a model-specific encoder.
 
-use hexo_engine::{legal_placements, HexCoord, HexoState, Player, Stone, TurnPhase};
+use hexo_engine::{HexCoord, HexoState, Player, Stone, TurnPhase};
 use serde::{Deserialize, Serialize};
 
 /// Default crop size used by development configs.
@@ -20,8 +20,8 @@ pub mod planes {
     pub const CURRENT_PLAYER_STONES: usize = 0;
     /// Stones owned by the opponent.
     pub const OPPONENT_STONES: usize = 1;
-    /// Legal single-stone placements inside the crop.
-    pub const LEGAL_CELLS: usize = 2;
+    /// Legal single-stone moves inside the crop.
+    pub const LEGAL_MOVES: usize = 2;
     /// First stone of the current two-stone turn, if in `SecondStone` phase.
     pub const FIRST_STONE_THIS_TURN: usize = 3;
     /// Most recent stone by current player.
@@ -134,7 +134,7 @@ pub fn encode_state(state: &HexoState, crop_size: usize) -> EncodedState {
     }
 
     encode_stones(state, &mut encoded);
-    encode_legal_cells(state, &mut encoded);
+    encode_legal_moves(state, &mut encoded);
     encode_phase(state, &mut encoded);
     encode_turn_memory(state, &mut encoded);
 
@@ -142,12 +142,8 @@ pub fn encode_state(state: &HexoState, crop_size: usize) -> EncodedState {
 }
 
 /// Fill `out` with legal placements that are representable in `encoded`.
-pub fn legal_placements_in_crop(
-    state: &HexoState,
-    encoded: &EncodedState,
-    out: &mut Vec<HexCoord>,
-) {
-    legal_placements(state, out);
+pub fn legal_moves_in_crop(state: &HexoState, encoded: &EncodedState, out: &mut Vec<HexCoord>) {
+    state.write_legal_moves(out);
     out.retain(|coord| encoded.index_of_coord(*coord).is_some());
 }
 
@@ -171,14 +167,14 @@ fn encode_stones(state: &HexoState, encoded: &mut EncodedState) {
     }
 }
 
-/// Mark legal placements that fall inside the crop.
-fn encode_legal_cells(state: &HexoState, encoded: &mut EncodedState) {
+/// Mark legal moves that fall inside the crop.
+fn encode_legal_moves(state: &HexoState, encoded: &mut EncodedState) {
     let mut legal = Vec::new();
-    legal_placements(state, &mut legal);
+    state.write_legal_moves(&mut legal);
 
     for coord in legal {
         if let Some(index) = encoded.index_of_coord(coord) {
-            encoded.set(planes::LEGAL_CELLS, index, 1.0);
+            encoded.set(planes::LEGAL_MOVES, index, 1.0);
         }
     }
 }

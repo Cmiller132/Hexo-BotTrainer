@@ -12,6 +12,7 @@
 use super::board::Board;
 use super::coord::HexCoord;
 use super::error::{MoveError, StateLoadError};
+use super::legal::{pack_coord, PackedCoord};
 use super::rules::is_legal_placement;
 use super::snapshot::{StateSnapshot, HEXO_STATE_SNAPSHOT_VERSION};
 use super::tactics::WindowUpdate;
@@ -185,6 +186,58 @@ impl HexoState {
     /// Complete single-placement history.
     pub fn placement_history(&self) -> &[PlacementRecord] {
         &self.placement_history
+    }
+
+    /// Number of legal single-stone moves in the current state.
+    pub fn legal_move_count(&self) -> usize {
+        if self.terminal.is_some() {
+            return 0;
+        }
+
+        match self.phase {
+            TurnPhase::Opening => usize::from(self.board.is_cell_empty(HexCoord::ZERO)),
+            TurnPhase::FirstStone | TurnPhase::SecondStone { .. } => self.board.legal_moves().len(),
+        }
+    }
+
+    /// Fill `out` with deterministic legal single-stone move coordinates.
+    pub fn write_legal_moves(&self, out: &mut Vec<HexCoord>) {
+        out.clear();
+
+        if self.terminal.is_some() {
+            return;
+        }
+
+        match self.phase {
+            TurnPhase::Opening => {
+                if self.board.is_cell_empty(HexCoord::ZERO) {
+                    out.push(HexCoord::ZERO);
+                }
+            }
+            TurnPhase::FirstStone | TurnPhase::SecondStone { .. } => {
+                self.board.legal_moves().write_coords(out);
+            }
+        }
+    }
+
+    /// Fill `out` with deterministic compact legal action IDs.
+    pub fn write_legal_action_ids(&self, out: &mut Vec<PackedCoord>) {
+        out.clear();
+
+        if self.terminal.is_some() {
+            return;
+        }
+
+        match self.phase {
+            TurnPhase::Opening => {
+                if self.board.is_cell_empty(HexCoord::ZERO) {
+                    out.push(pack_coord(HexCoord::ZERO));
+                }
+            }
+            TurnPhase::FirstStone | TurnPhase::SecondStone { .. } => {
+                self.board.legal_moves().write_action_ids(out);
+            }
+        }
     }
 
     /// Export a compact snapshot that can be passed to `load_state`.

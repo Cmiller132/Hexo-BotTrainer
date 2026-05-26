@@ -5,8 +5,8 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
 use crate::{
-    apply_placement, legal_placements, Axis, GameOutcome, HexCoord, HexoState as RustHexoState,
-    MoveError, Placement, Player, TurnPhase,
+    apply_placement, Axis, GameOutcome, HexCoord, HexoState as RustHexoState, MoveError,
+    PackedCoord, Placement, Player, TurnPhase,
 };
 
 /// Python-owned opaque handle to a Rust Hexo state.
@@ -49,11 +49,20 @@ pub fn current_player(state: PyRef<'_, PyHexoState>) -> &'static str {
 }
 
 #[pyfunction]
-pub fn legal_actions(state: PyRef<'_, PyHexoState>) -> Vec<(i16, i16)> {
-    let mut actions = Vec::new();
-    legal_placements(&state.state, &mut actions);
-    actions.sort_by_key(|coord| (coord.q, coord.r));
-    actions.into_iter().map(|coord| (coord.q, coord.r)).collect()
+pub fn legal_action_ids(state: PyRef<'_, PyHexoState>) -> Vec<PackedCoord> {
+    let mut actions = Vec::with_capacity(state.state.legal_move_count());
+    state.state.write_legal_action_ids(&mut actions);
+    actions
+}
+
+#[pyfunction]
+pub fn legal_action_count(state: PyRef<'_, PyHexoState>) -> usize {
+    state.state.legal_move_count()
+}
+
+#[pyfunction]
+pub fn is_legal_action(state: PyRef<'_, PyHexoState>, q: i16, r: i16) -> bool {
+    crate::is_legal_placement(&state.state, HexCoord { q, r }).is_ok()
 }
 
 #[pyfunction]
@@ -63,8 +72,13 @@ pub fn apply_action(
     q: i16,
     r: i16,
 ) -> PyResult<Py<PyAny>> {
-    let result = apply_placement(&mut state.state, Placement { coord: HexCoord { q, r } })
-        .map_err(move_error)?;
+    let result = apply_placement(
+        &mut state.state,
+        Placement {
+            coord: HexCoord { q, r },
+        },
+    )
+    .map_err(move_error)?;
 
     let dict = PyDict::new(py);
     dict.set_item("placed", coord_obj(py, result.placed)?)?;
@@ -101,7 +115,10 @@ pub fn to_python_state(py: Python<'_>, state: PyRef<'_, PyHexoState>) -> PyResul
     dict.set_item("placements_made", state.state.placements_made())?;
     dict.set_item("terminal", outcome_obj(py, state.state.terminal())?)?;
     dict.set_item("last_turn", last_turn_obj(py, &state.state)?)?;
-    dict.set_item("placement_history", placement_history_obj(py, &state.state)?)?;
+    dict.set_item(
+        "placement_history",
+        placement_history_obj(py, &state.state)?,
+    )?;
     dict.set_item("first_stone", first_stone_obj(py, state.state.phase())?)?;
     Ok(dict.into_any().unbind())
 }
@@ -116,7 +133,10 @@ pub fn engine_metadata(py: Python<'_>) -> PyResult<Py<PyAny>> {
     let dict = PyDict::new(py);
     dict.set_item("engine_api", true)?;
     dict.set_item("backend", "rust-pyo3")?;
-    dict.set_item("rules_version", RustHexoState::new().snapshot().rules_version())?;
+    dict.set_item(
+        "rules_version",
+        RustHexoState::new().snapshot().rules_version(),
+    )?;
     Ok(dict.into_any().unbind())
 }
 
@@ -126,7 +146,9 @@ pub fn _rust(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(new_game, module)?)?;
     module.add_function(wrap_pyfunction!(clone_state, module)?)?;
     module.add_function(wrap_pyfunction!(current_player, module)?)?;
-    module.add_function(wrap_pyfunction!(legal_actions, module)?)?;
+    module.add_function(wrap_pyfunction!(legal_action_ids, module)?)?;
+    module.add_function(wrap_pyfunction!(legal_action_count, module)?)?;
+    module.add_function(wrap_pyfunction!(is_legal_action, module)?)?;
     module.add_function(wrap_pyfunction!(apply_action, module)?)?;
     module.add_function(wrap_pyfunction!(terminal, module)?)?;
     module.add_function(wrap_pyfunction!(to_python_state, module)?)?;
@@ -206,8 +228,7 @@ fn board_obj(py: Python<'_>, state: &RustHexoState) -> PyResult<Py<PyAny>> {
 
     let legal = PyList::empty(py);
     let mut legal_coords = Vec::new();
-    legal_placements(state, &mut legal_coords);
-    legal_coords.sort_by_key(|coord| (coord.q, coord.r));
+    state.write_legal_moves(&mut legal_coords);
     for coord in legal_coords {
         legal.append(coord_obj(py, coord)?)?;
     }
@@ -232,10 +253,7 @@ fn window_entries_obj(py: Python<'_>, state: &RustHexoState) -> PyResult<Py<PyAn
         item.set_item("axis", axis_label(key.axis))?;
         item.set_item(
             "masks",
-            (
-                entry.mask(Player::Player0),
-                entry.mask(Player::Player1),
-            ),
+            (entry.mask(Player::Player0), entry.mask(Player::Player1)),
         )?;
         list.append(item)?;
     }
