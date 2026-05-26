@@ -7,5 +7,8 @@ pub use evaluator::{
     Evaluation, Evaluator, NetworkOutput, PolicyPrior, StateEvaluator, UniformEvaluator,
 };
 pub use search::{run_mcts, MctsConfig, SearchError, SearchResult};
-pub use slot::{GameSlot, GameSlotArena, GameSlotId, GameSlotStatus};
+pub use slot::{
+    GameSlot, GameSlotArena, GameSlotArenaMemoryUsage, GameSlotId, GameSlotMemoryUsage,
+    GameSlotStatus,
+};
 pub use tree::{Edge, Node, NodeId, SearchTree};

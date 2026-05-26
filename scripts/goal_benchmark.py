@@ -18,6 +18,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 for PACKAGE_PATH in (
     ROOT / "packages" / "hexo_engine" / "python",
+    ROOT / "packages" / "hexo_utils" / "python",
     ROOT / "packages" / "hexo_runner" / "python",
 ):
     if str(PACKAGE_PATH) not in sys.path:

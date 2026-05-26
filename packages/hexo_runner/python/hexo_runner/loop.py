@@ -54,6 +54,8 @@ def run_match_loop(
 
     if len(players) != 2:
         raise ValueError("run_match_loop requires exactly two players.")
+    if spec.scenario is not None:
+        raise ValueError("GameSpec.scenario is not supported by durable .hxr records; use scenario=None.")
 
     adapter = engine_adapter or HexoEngineAdapter()
     timer = Timer.start()
@@ -73,12 +75,12 @@ def run_match_loop(
 
         primary_state = _run_stage(
             "engine.new_game",
-            lambda: adapter.new_game(seed=spec.seed, scenario=spec.scenario),
+            lambda: adapter.new_game(seed=spec.seed),
         )
         _start_players(spec, players, adapter, engine_metadata)
         record_writer = _run_stage(
             "record_file.begin_game",
-            lambda: record_file.begin_game(spec.game_id, seed=spec.seed, scenario=spec.scenario),
+            lambda: record_file.begin_game(spec.game_id, seed=spec.seed),
         )
 
         while adapter.terminal(primary_state) is None:
@@ -96,12 +98,12 @@ def run_match_loop(
                 "engine.apply_action",
                 lambda: adapter.apply_action(primary_state, decision.action),
             )
-            terminal = _run_stage("engine.terminal", lambda: adapter.terminal(primary_state))
-            terminal_payload = adapter.terminal_payload(terminal)
             _run_stage(
                 "record_writer.record_action",
                 lambda action=decision.action: record_writer.record_action(action),
             )
+            terminal = _run_stage("engine.terminal", lambda: adapter.terminal(primary_state))
+            terminal_payload = adapter.terminal_payload(terminal)
 
             for observer in players:
                 event = TransitionEvent(
@@ -134,7 +136,7 @@ def run_match_loop(
     record_ref = None
     try:
         if record_writer is None:
-            record_writer = record_file.begin_game(spec.game_id, seed=spec.seed, scenario=spec.scenario)
+            record_writer = record_file.begin_game(spec.game_id, seed=spec.seed)
         if status == GameStatus.COMPLETED:
             record_ref = record_writer.finish_completed(
                 _terminal_winner(terminal_payload),

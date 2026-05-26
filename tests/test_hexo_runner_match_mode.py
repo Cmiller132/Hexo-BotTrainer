@@ -197,6 +197,26 @@ class RunnerRewriteTests(unittest.TestCase):
         self.assertEqual(terminal(replay).winner, Player.PLAYER_0)
         self.assertEqual(record.replay().winner, Player.PLAYER_0)
 
+    def test_recorded_scenarios_are_rejected(self) -> None:
+        from hexo_runner.modes.match import run_match
+        from hexo_runner.session import GameSpec
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(ValueError, "scenario"):
+                run_match(
+                    GameSpec(game_id="scenario", scenario={"opening": "custom"}),
+                    (ScriptedPlayer("p0", WINNING_P0), ScriptedPlayer("p1", FILLER_P1)),
+                    tmp,
+                )
+
+    def test_record_file_rejects_non_none_scenario(self) -> None:
+        from hexo_runner.records import HexoRecordFile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with HexoRecordFile.create(Path(tmp) / "scenario.hxr", {"rules_version": 1, "backend": "test"}, ()) as file:
+                with self.assertRaisesRegex(ValueError, "scenarios"):
+                    file.begin_game("scenario", scenario={"opening": "custom"})
+
     def test_player_can_mutate_decision_clone_without_corrupting_primary_state(self) -> None:
         from hexo_runner.modes.match import run_match
         from hexo_engine.types import unpack_coord_id

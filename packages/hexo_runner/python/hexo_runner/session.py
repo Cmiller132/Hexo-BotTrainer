@@ -13,8 +13,9 @@ from .player import GameContext, PlayerFactory
 class GameSpec:
     """Inputs needed to create one engine-backed game.
 
-    The runner passes `seed` and `scenario` through to `hexo_engine.new_game`;
-    it does not interpret game rules or scenario contents itself.
+    The runner passes `seed` through to `hexo_engine.new_game`. Durable runner
+    records do not persist scenarios yet, so recorded runs require
+    `scenario=None`.
     """
 
     game_id: str

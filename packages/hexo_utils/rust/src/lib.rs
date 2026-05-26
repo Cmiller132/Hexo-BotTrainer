@@ -7,6 +7,7 @@
 pub mod encoder;
 pub mod mcts;
 pub mod position;
+pub mod records;
 pub mod samples;
 
 #[cfg(feature = "python")]
@@ -20,4 +21,9 @@ pub use mcts::{
     SearchResult, StateEvaluator, UniformEvaluator,
 };
 pub use position::SearchPosition;
+pub use records::{
+    AbortRecord, HexoRecord, HexoRecordEngineMetadata, HexoRecordFile, HexoRecordFileMode,
+    HexoRecordGameWriter, HexoRecordPlayer, HexoRecordRef, HexoRecordStatus,
+    RecordError as HexoRecordError, HEXO_RECORD_MAGIC, HEXO_RECORD_SCHEMA_VERSION,
+};
 pub use samples::{SampleBatchDraft, SAMPLE_SCHEMA_DRAFT};

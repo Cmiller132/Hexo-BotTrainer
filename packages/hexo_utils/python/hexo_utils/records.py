@@ -1,10 +1,9 @@
-"""Rust-backed Hexo runner record contracts."""
+"""Python exposure for the Rust-backed `.hxr` record codec."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
-from hexo_utils.records import (
+from ._rust import (
+    AbortRecord,
     HEXO_RECORD_MAGIC,
     HEXO_RECORD_SCHEMA_VERSION,
     HexoRecord,
@@ -12,16 +11,6 @@ from hexo_utils.records import (
     HexoRecordGameWriter,
     HexoRecordPlayer,
 )
-
-
-@dataclass(frozen=True, slots=True)
-class AbortRecord:
-    """Abort information for runner control-plane summaries."""
-
-    stage: str
-    exception_type: str
-    message: str
-
 
 __all__ = [
     "AbortRecord",
