@@ -1,8 +1,8 @@
-"""Runner player contract.
+"""Runner player contracts.
 
-Participants can be model-backed, scripted, human-controlled, remote, random,
-or search-based. The runner sees only this contract and submits accepted actions
-to the engine.
+Players are opaque synchronous adapters. The runner owns game execution and
+authoritative state; players receive cloned mutable engine states and return
+actions for the runner to submit to the engine.
 """
 
 from __future__ import annotations
@@ -19,15 +19,46 @@ class PlayerIdentity:
 
     player_id: str
     label: str | None = None
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class WorkerContext:
+    """Long-lived worker setup context.
+
+    This intentionally contains no game state.
+    """
+
+    worker_id: int
+    engine_metadata: Mapping[str, Any] = field(default_factory=dict)
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class GameContext:
+    """Per-game player context.
+
+    This intentionally contains no authoritative state handle.
+    """
+
+    game_id: str
+    seed: int | None
+    player_index: int
+    player_role: str
+    opponent: PlayerIdentity
+    mode: str = "match"
+    is_evaluation: bool = False
+    engine_metadata: Mapping[str, Any] = field(default_factory=dict)
+    metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
 class DecisionResult:
     """Participant response consumed by the runner.
 
-    Players receive only a cloned `HexoState` in `decide`, query whatever
-    they need from `hexo_engine`, and return one action plus optional
-    diagnostics. There is no refusal/forfeit path; errors abort the game.
+    Players receive only a cloned `HexoState` in `decide`, query whatever they
+    need from `hexo_engine`, and return one action plus optional diagnostics.
+    There is no refusal/forfeit path; errors abort the game.
     """
 
     # The action the runner will submit to `hexo_engine.apply_action`.
@@ -49,9 +80,13 @@ class TransitionEvent:
     """
 
     game_id: str
-    turn_index: int
-    action: object
+    action_index: int
+    player_id: str
+    player_role: str
+    action_id: str
+    action: Action
     transition: object
+    terminal: object | None
     state: HexoState
 
 
@@ -69,8 +104,11 @@ class RunnerPlayer(Protocol):
 
     identity: PlayerIdentity
 
-    def initialize(self, session_context: object) -> None:
-        """Prepare the player for a session."""
+    def setup_worker(self, context: WorkerContext) -> None:
+        """Prepare long-lived resources once per worker."""
+
+    def start_game(self, context: GameContext) -> None:
+        """Reset per-game mutable state before the first decision."""
 
     def decide(self, state: HexoState) -> DecisionResult:
         """Choose an action from a cloned, player-owned engine state."""
@@ -78,5 +116,15 @@ class RunnerPlayer(Protocol):
     def observe_transition(self, transition: TransitionEvent) -> None:
         """Observe an accepted engine transition."""
 
-    def close(self, final_summary: FinalSummary) -> None:
-        """Release player resources after a game or series."""
+    def finish_game(self, final_summary: FinalSummary) -> None:
+        """Observe the final result and clear per-game state."""
+
+    def close(self) -> None:
+        """Release long-lived resources when the worker is done."""
+
+
+class PlayerFactory(Protocol):
+    """Pickleable factory used by batch workers to build reusable players."""
+
+    def create_player(self) -> RunnerPlayer:
+        """Create one long-lived runner player inside a worker process."""

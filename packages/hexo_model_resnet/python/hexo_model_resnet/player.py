@@ -21,8 +21,11 @@ class ResNetPlayer:
     inference: object
     search: object | None = None
 
-    def initialize(self, session_context: object) -> None:
-        """Prepare model resources for a runner session."""
+    def setup_worker(self, context: object) -> None:
+        """Prepare long-lived model resources for a runner worker."""
+
+    def start_game(self, context: object) -> None:
+        """Reset per-game model/search state."""
 
     def decide(self, state: object) -> object:
         """Choose a legal action from a cloned engine state."""
@@ -32,8 +35,11 @@ class ResNetPlayer:
     def observe_transition(self, transition: object) -> None:
         """Observe accepted engine transitions for diagnostics or stateful search."""
 
-    def close(self, final_summary: object) -> None:
-        """Release any model or search resources."""
+    def finish_game(self, final_summary: object) -> None:
+        """Observe the final runner result for this game."""
+
+    def close(self) -> None:
+        """Release any long-lived model or search resources."""
 
 
 def _not_implemented(operation: str) -> NoReturn:

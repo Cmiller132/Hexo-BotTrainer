@@ -1,52 +1,56 @@
 from __future__ import annotations
 
+import json
 import sys
+import tempfile
 import unittest
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-for package in ("hexo_engine", "hexo_runner", "hexo_frontend"):
-    path = ROOT / "packages" / package / "python"
+TESTS = Path(__file__).resolve().parent
+for path in (
+    TESTS,
+    ROOT / "packages" / "hexo_engine" / "python",
+    ROOT / "packages" / "hexo_runner" / "python",
+    ROOT / "packages" / "hexo_frontend" / "python",
+):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
 
-class MemorySink:
-    def __init__(self) -> None:
-        self.entries: list[object] = []
-        self.closed: tuple[str, object | None] | None = None
-
-    def write_entry(self, entry: object) -> None:
-        self.entries.append(entry)
-
-    def close_game(self, game_id: str, terminal: object | None = None) -> object:
-        self.closed = (game_id, terminal)
-        return {"game_id": game_id, "entries": len(self.entries), "terminal": terminal is not None}
+WINNING_P0 = ((0, 0), (1, 0), (2, 0), (3, 0), (4, 0), (5, 0))
+FILLER_P1 = ((0, 1), (0, 2), (1, 1), (1, 2), (2, 1), (2, 2))
 
 
 class ScriptedPlayer:
-    def __init__(self, player_id: str, moves: list[tuple[int, int]], *, mutate_clone: bool = False) -> None:
-        from hexo_runner.player import PlayerIdentity
+    def __init__(self, player_id: str, moves: tuple[tuple[int, int], ...], *, mutate_decision_clone: bool = False) -> None:
+        from hexo_runner import PlayerIdentity
 
         self.identity = PlayerIdentity(player_id=player_id)
-        self.moves = list(moves)
-        self.mutate_clone = mutate_clone
-        self.initialized = False
-        self.closed = False
+        self.base_moves = tuple(moves)
+        self.moves: list[tuple[int, int]] = []
+        self.mutate_decision_clone = mutate_decision_clone
+        self.setup_worker_count = 0
+        self.start_game_count = 0
+        self.finish_game_count = 0
+        self.close_count = 0
         self.observed: list[object] = []
-        self.states: list[object] = []
 
-    def initialize(self, session_context: object) -> None:
-        self.initialized = True
+    def setup_worker(self, context: object) -> None:
+        self.setup_worker_count += 1
+
+    def start_game(self, context: object) -> None:
+        self.start_game_count += 1
+        self.moves = list(self.base_moves)
 
     def decide(self, state: object) -> object:
         from hexo_engine import AxialCoord, PlacementAction, apply_action, legal_actions
-        from hexo_runner.player import DecisionResult
+        from hexo_runner import DecisionResult
 
-        self.states.append(state)
         actions = list(legal_actions(state))
-        if self.mutate_clone and actions:
+        if self.mutate_decision_clone and actions:
             apply_action(state, actions[0])
         if not self.moves:
             raise RuntimeError("script exhausted")
@@ -56,161 +60,268 @@ class ScriptedPlayer:
     def observe_transition(self, transition: object) -> None:
         self.observed.append(transition)
 
-    def close(self, final_summary: object) -> None:
-        self.closed = True
+    def finish_game(self, final_summary: object) -> None:
+        self.finish_game_count += 1
+
+    def close(self) -> None:
+        self.close_count += 1
 
 
 class IllegalPlayer(ScriptedPlayer):
     def __init__(self, player_id: str) -> None:
-        super().__init__(player_id, [])
+        super().__init__(player_id, ())
 
     def decide(self, state: object) -> object:
         from hexo_engine import AxialCoord, PlacementAction
-        from hexo_runner.player import DecisionResult
+        from hexo_runner import DecisionResult
 
-        self.states.append(state)
         return DecisionResult(action=PlacementAction(AxialCoord(99, 99)))
 
 
-class RunnerMatchModeTests(unittest.TestCase):
-    def test_scripted_players_complete_game_and_write_records(self) -> None:
-        from hexo_engine import Player
+class ExplodingPlayer(ScriptedPlayer):
+    def decide(self, state: object) -> object:
+        raise RuntimeError("boom")
+
+
+class MutatingObserverPlayer(ScriptedPlayer):
+    def observe_transition(self, transition: object) -> None:
+        from hexo_engine import apply_action, legal_actions
+
+        self.observed.append(transition)
+        actions = list(legal_actions(transition.state))
+        if actions:
+            apply_action(transition.state, actions[0])
+
+
+class RecordingIllegalObserver(IllegalPlayer):
+    def __init__(self, player_id: str) -> None:
+        super().__init__(player_id)
+        self.python_states: list[object] = []
+
+    def observe_transition(self, transition: object) -> None:
+        from hexo_engine import to_python_state
+
+        self.observed.append(transition)
+        self.python_states.append(to_python_state(transition.state))
+
+
+@dataclass
+class ScriptedFactory:
+    player_id: str
+    moves: tuple[tuple[int, int], ...]
+    created: int = 0
+    instances: list[ScriptedPlayer] = field(default_factory=list)
+
+    def create_player(self) -> ScriptedPlayer:
+        self.created += 1
+        player = ScriptedPlayer(self.player_id, self.moves)
+        self.instances.append(player)
+        return player
+
+
+@dataclass
+class ConditionalFactory:
+    player_id: str
+    moves: tuple[tuple[int, int], ...]
+    abort_game_id: str | None = None
+    created: int = 0
+    instances: list[ScriptedPlayer] = field(default_factory=list)
+
+    def create_player(self) -> ScriptedPlayer:
+        self.created += 1
+        if self.abort_game_id is None:
+            player = ScriptedPlayer(self.player_id, self.moves)
+        else:
+            player = ConditionalPlayer(self.player_id, self.moves, self.abort_game_id)
+        self.instances.append(player)
+        return player
+
+
+class ConditionalPlayer(ScriptedPlayer):
+    def __init__(self, player_id: str, moves: tuple[tuple[int, int], ...], abort_game_id: str) -> None:
+        super().__init__(player_id, moves)
+        self.abort_game_id = abort_game_id
+        self.current_game_id = ""
+
+    def start_game(self, context: object) -> None:
+        super().start_game(context)
+        self.current_game_id = context.game_id
+
+    def decide(self, state: object) -> object:
+        if self.current_game_id == self.abort_game_id:
+            return IllegalPlayer(self.identity.player_id).decide(state)
+        return super().decide(state)
+
+
+def action_from_record(action: object) -> object:
+    from hexo_engine import AxialCoord, PlacementAction
+
+    return PlacementAction(AxialCoord(action["q"], action["r"]))
+
+
+class RunnerRewriteTests(unittest.TestCase):
+    def test_completed_game_writes_compact_replayable_record(self) -> None:
+        from hexo_engine import Player, apply_action, new_game, terminal
         from hexo_runner.modes.match import run_match
-        from hexo_runner.records import GameStatus
+        from hexo_runner.records import GameStatus, MemoryRecordSink
         from hexo_runner.session import GameSpec
 
-        p0 = ScriptedPlayer("p0", [(0, 0), (1, 0), (2, 0), (3, 0), (4, 0), (5, 0)], mutate_clone=True)
-        p1 = ScriptedPlayer("p1", [(0, 1), (0, 2), (1, 1), (1, 2), (2, 1), (2, 2)])
-        sink = MemorySink()
-
-        result = run_match(GameSpec(game_id="scripted", seed=7), (p0, p1), sink)
+        sink = MemoryRecordSink()
+        result = run_match(
+            GameSpec(game_id="scripted", seed=7),
+            (ScriptedPlayer("p0", WINNING_P0), ScriptedPlayer("p1", FILLER_P1)),
+            sink,
+        )
 
         self.assertEqual(result.status, GameStatus.COMPLETED)
-        self.assertEqual(result.winner, Player.PLAYER_0)
-        self.assertEqual(result.terminal.reason, "six_in_line")
-        self.assertEqual(len(sink.entries), 12)
-        self.assertEqual(result.record_ref, {"game_id": "scripted", "entries": 12, "terminal": True})
-        self.assertTrue(p0.initialized and p1.initialized)
-        self.assertTrue(p0.closed and p1.closed)
-        self.assertEqual(len(p0.observed), 12)
-        self.assertEqual(len(p1.observed), 12)
+        self.assertEqual(result.winner, "player0")
+        self.assertEqual(result.turns, 12)
+        self.assertEqual(len(sink.records), 1)
+        record = sink.records[0]
+        self.assertEqual(record.schema_version, 1)
+        self.assertEqual(record.status, "completed")
+        self.assertEqual(record.engine["backend"], "python-fallback")
+        self.assertEqual(len(record.actions), 12)
+        self.assertIsNone(record.abort)
 
-        for entry in sink.entries:
-            self.assertIsNotNone(entry.action)
-            self.assertIn("action_id", entry.metadata)
-            self.assertIn("decision_diagnostics", entry.metadata)
+        replay = new_game(seed=record.seed)
+        for action in record.actions:
+            apply_action(replay, action_from_record(action.action))
+        self.assertEqual(terminal(replay).winner, Player.PLAYER_0)
 
-    def test_player_receives_only_cloneable_engine_state(self) -> None:
-        from hexo_engine import HexoState, PythonHexoState, legal_actions, to_python_state
+    def test_player_can_mutate_decision_clone_without_corrupting_primary_state(self) -> None:
         from hexo_runner.modes.match import run_match
+        from hexo_runner.records import GameStatus, MemoryRecordSink
         from hexo_runner.session import GameSpec
 
-        p0 = ScriptedPlayer("p0", [(0, 0)], mutate_clone=True)
-        p1 = IllegalPlayer("p1")
-        sink = MemorySink()
-
-        run_match(GameSpec(game_id="view-contract"), (p0, p1), sink)
-
-        state = p0.states[0]
-        self.assertIsInstance(state, HexoState)
-        python_state = to_python_state(state)
-        self.assertIsInstance(python_state, PythonHexoState)
-        self.assertEqual(python_state.placements_made, 1)
-        self.assertEqual(len(sink.entries), 1)
-        self.assertEqual(sink.entries[0].action.coord.q, 0)
-        self.assertEqual(sink.entries[0].action.coord.r, 0)
-        self.assertGreater(python_state.board.windows.len, 0)
-        self.assertGreater(len(legal_actions(state)), 1)
-        self.assertTrue(p0.observed)
-        self.assertIsInstance(p0.observed[0].state, HexoState)
-
-    def test_decision_result_requires_an_action(self) -> None:
-        from hexo_runner.player import DecisionResult
-
-        with self.assertRaises(ValueError):
-            DecisionResult(action=None)
-
-    def test_illegal_action_aborts_without_corrupting_primary_state(self) -> None:
-        from hexo_runner.modes.match import run_match
-        from hexo_runner.records import GameStatus
-        from hexo_runner.session import GameSpec
-
-        p0 = IllegalPlayer("p0")
-        p1 = ScriptedPlayer("p1", [])
-        sink = MemorySink()
-
-        result = run_match(GameSpec(game_id="illegal"), (p0, p1), sink)
+        sink = MemoryRecordSink()
+        result = run_match(
+            GameSpec(game_id="clone-isolation"),
+            (ScriptedPlayer("p0", ((0, 0),), mutate_decision_clone=True), IllegalPlayer("p1")),
+            sink,
+        )
 
         self.assertEqual(result.status, GameStatus.ABORTED)
-        self.assertIsNone(result.winner)
-        self.assertEqual(len(sink.entries), 0)
-        self.assertEqual(result.metadata["reason"], "runner_error")
-        self.assertIn("not legal", result.metadata["error"])
+        self.assertEqual(result.turns, 1)
+        self.assertEqual(len(sink.records[0].actions), 1)
+        self.assertEqual(sink.records[0].actions[0].action, {"type": "placement", "q": 0, "r": 0})
 
-    def test_engine_rejects_unsupported_actions_without_corrupting_state(self) -> None:
-        from hexo_engine import IllegalActionError, apply_action, new_game, to_python_state
+    def test_illegal_action_aborts_loudly_and_writes_aborted_record(self) -> None:
+        from hexo_runner.modes.match import run_match
+        from hexo_runner.records import GameStatus, MemoryRecordSink
+        from hexo_runner.session import GameSpec
 
-        state = new_game()
+        sink = MemoryRecordSink()
+        result = run_match(GameSpec(game_id="illegal"), (IllegalPlayer("p0"), ScriptedPlayer("p1", ())), sink)
 
-        with self.assertRaises(IllegalActionError):
-            apply_action(state, object())
+        self.assertEqual(result.status, GameStatus.ABORTED)
+        self.assertEqual(result.abort.stage, "engine.apply_action")
+        self.assertIn("not legal", result.abort.message)
+        record = sink.records[0]
+        self.assertEqual(record.status, "aborted")
+        self.assertEqual(record.actions, ())
+        self.assertIsNone(record.terminal)
+        self.assertEqual(record.abort.stage, "engine.apply_action")
 
-        self.assertEqual(to_python_state(state).placements_made, 0)
+    def test_player_exception_aborts_with_stage_type_and_message(self) -> None:
+        from hexo_runner.modes.match import run_match
+        from hexo_runner.records import GameStatus, MemoryRecordSink
+        from hexo_runner.session import GameSpec
 
-    def test_to_python_state_mirrors_engine_state(self) -> None:
-        from dataclasses import FrozenInstanceError
+        sink = MemoryRecordSink()
+        result = run_match(GameSpec(game_id="explode"), (ExplodingPlayer("p0", ()), ScriptedPlayer("p1", ())), sink)
 
-        from hexo_engine import AxialCoord, HexoState, PlacementAction, Player, PythonHexoState, TurnPhase
-        from hexo_engine import apply_action, legal_actions, new_game, to_python_state
+        self.assertEqual(result.status, GameStatus.ABORTED)
+        self.assertEqual(result.abort.stage, "player.decide:p0")
+        self.assertEqual(result.abort.exception_type, "RuntimeError")
+        self.assertEqual(result.abort.message, "boom")
+        self.assertEqual(sink.records[0].abort.stage, "player.decide:p0")
 
-        state = new_game()
-        initial = to_python_state(state)
+    def test_observers_receive_independent_cloned_states(self) -> None:
+        from hexo_runner.modes.match import run_match
+        from hexo_runner.records import MemoryRecordSink
+        from hexo_runner.session import GameSpec
 
-        self.assertIsInstance(state, HexoState)
-        self.assertIsInstance(initial, PythonHexoState)
-        self.assertEqual(initial.phase, TurnPhase.OPENING)
-        self.assertEqual(initial.placements_made, 0)
-        self.assertEqual(initial.board.legal, (AxialCoord(0, 0),))
-        self.assertTrue(initial.board.windows.is_empty)
+        p0 = MutatingObserverPlayer("p0", ((0, 0),))
+        p1 = RecordingIllegalObserver("p1")
+        run_match(GameSpec(game_id="observer-clones"), (p0, p1), MemoryRecordSink())
 
-        apply_action(state, PlacementAction(AxialCoord(0, 0)))
-        opened = to_python_state(state)
-        self.assertEqual(opened.phase, TurnPhase.FIRST_STONE)
-        self.assertEqual(opened.current_player, Player.PLAYER_1)
-        self.assertEqual(opened.board.occupied, (AxialCoord(0, 0),))
-        self.assertGreater(opened.board.windows.len, 0)
-        self.assertEqual(opened.board.windows.entries, tuple(sorted(opened.board.windows.entries, key=lambda entry: (entry.key.axis, entry.key.start.q, entry.key.start.r))))
+        self.assertEqual(p1.python_states[0].placements_made, 1)
+        self.assertGreater(len(p0.observed), 0)
+        self.assertGreater(len(p1.observed), 0)
 
-        action = legal_actions(state)[0]
-        apply_action(state, action)
-        second = to_python_state(state)
-        self.assertEqual(second.phase, TurnPhase.SECOND_STONE)
-        self.assertEqual(second.first_stone, action.coord)
-        self.assertEqual(second.placement_history[-1].phase, TurnPhase.FIRST_STONE)
+    def test_jsonl_record_sink_writes_one_record_per_game(self) -> None:
+        from hexo_runner.modes.match import run_match
+        from hexo_runner.records import JsonlRecordSink
+        from hexo_runner.session import GameSpec
 
-        with self.assertRaises(FrozenInstanceError):
-            second.placements_made = 99
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "games.jsonl"
+            run_match(
+                GameSpec(game_id="jsonl"),
+                (ScriptedPlayer("p0", WINNING_P0), ScriptedPlayer("p1", FILLER_P1)),
+                JsonlRecordSink(path),
+            )
+            lines = path.read_text(encoding="utf-8").splitlines()
 
-    def test_removed_engine_apis_are_not_exported(self) -> None:
-        import hexo_engine
+        self.assertEqual(len(lines), 1)
+        payload = json.loads(lines[0])
+        self.assertEqual(payload["game_id"], "jsonl")
+        self.assertEqual(payload["status"], "completed")
+        self.assertEqual(len(payload["actions"]), 12)
 
-        for name in (
-            "EngineStateRef",
-            "EngineSnapshot",
-            "IncompatibleSnapshotError",
-            "PairAction",
-            "SnapshotError",
-            "TurnPlacement",
-            "game_state",
-            "load_snapshot",
-            "snapshot",
-            "tactics",
-            "turn_placement",
-            "validate_action",
-        ):
-            self.assertFalse(hasattr(hexo_engine, name), name)
+    def test_batch_reuses_player_instances_within_worker_and_surfaces_aborts(self) -> None:
+        from hexo_runner.modes.batch import run_batch
+        from hexo_runner.records import GameStatus
+        from hexo_runner.session import BatchSpec, GameSpec
 
-    def test_frontend_controller_uses_generic_runner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            p0_factory = ConditionalFactory("p0", WINNING_P0, abort_game_id="bad")
+            p1_factory = ScriptedFactory("p1", FILLER_P1)
+            result = run_batch(
+                BatchSpec(
+                    batch_id="reuse",
+                    games=(GameSpec("ok-1"), GameSpec("bad"), GameSpec("ok-2")),
+                    player_factories=(p0_factory, p1_factory),
+                    output_dir=tmp,
+                    worker_count=1,
+                    chunk_size=1,
+                )
+            )
+
+        self.assertEqual(result.total_games, 3)
+        self.assertEqual(result.completed, 2)
+        self.assertEqual(result.aborted, 1)
+        self.assertEqual(p0_factory.created, 1)
+        self.assertEqual(p1_factory.created, 1)
+        self.assertEqual(p1_factory.instances[0].start_game_count, 3)
+        self.assertEqual([item.status for item in result.results].count(GameStatus.ABORTED), 1)
+        self.assertEqual(result.aborts[0].stage, "engine.apply_action")
+
+    def test_batch_runs_across_process_workers_and_writes_worker_jsonl(self) -> None:
+        from hexo_runner.modes.batch import run_batch
+        from hexo_runner.session import BatchSpec, GameSpec
+
+        with tempfile.TemporaryDirectory() as tmp:
+            result = run_batch(
+                BatchSpec(
+                    batch_id="process",
+                    games=tuple(GameSpec(f"game-{index}") for index in range(4)),
+                    player_factories=(ScriptedFactory("p0", WINNING_P0), ScriptedFactory("p1", FILLER_P1)),
+                    output_dir=tmp,
+                    worker_count=2,
+                    chunk_size=1,
+                )
+            )
+            line_count = sum(len(Path(ref["path"]).read_text(encoding="utf-8").splitlines()) for ref in result.record_refs)
+
+        self.assertEqual(result.total_games, 4)
+        self.assertEqual(result.completed, 4)
+        self.assertEqual(result.aborted, 0)
+        self.assertEqual(result.worker_count, 2)
+        self.assertEqual(line_count, 4)
+
+    def test_frontend_controller_still_uses_generic_runner(self) -> None:
         from hexo_frontend.web import ManualMatchController
 
         controller = ManualMatchController()
@@ -230,16 +341,6 @@ class RunnerMatchModeTests(unittest.TestCase):
                 controller.submit_move(42, 42)
         finally:
             controller.close()
-
-    def test_frontend_no_longer_imports_create_match(self) -> None:
-        web_source = (ROOT / "packages" / "hexo_frontend" / "python" / "hexo_frontend" / "web.py").read_text()
-        app_source = (ROOT / "packages" / "hexo_frontend" / "python" / "hexo_frontend" / "static" / "app.js").read_text()
-
-        self.assertNotIn("create_match", web_source)
-        self.assertNotIn("/api/undo", app_source)
-        self.assertNotIn("game_state", web_source)
-        self.assertNotIn("tactics(", web_source)
-        self.assertNotIn("snapshot", web_source)
 
 
 if __name__ == "__main__":

@@ -14,9 +14,9 @@ from urllib.parse import unquote, urlparse
 
 import hexo_engine as engine
 from hexo_runner.modes.match import run_match
-from hexo_runner.player import DecisionResult, FinalSummary, PlayerIdentity, TransitionEvent
-from hexo_runner.records import GameResult, PositionRecord
-from hexo_runner.session import GameSpec, SessionContext
+from hexo_runner.player import DecisionResult, FinalSummary, PlayerIdentity, TransitionEvent, WorkerContext, GameContext
+from hexo_runner.records import GameRecordV1, GameResult
+from hexo_runner.session import GameSpec
 
 from .dashboard import dashboard_state
 
@@ -41,7 +41,7 @@ class ManualMatchController:
         self._python_state: engine.PythonHexoState | None = None
         self._pending_action: engine.Action | None = None
         self._version = 0
-        self._entries: list[PositionRecord] = []
+        self._records: list[GameRecordV1] = []
         self._result: GameResult | None = None
         self._error: BaseException | None = None
         self.reset()
@@ -56,7 +56,7 @@ class ManualMatchController:
             self._python_state = None
             self._pending_action = None
             self._version = 0
-            self._entries = []
+            self._records = []
             self._result = None
             self._error = None
             players = (_ManualPlayer(self, 0), _ManualPlayer(self, 1))
@@ -120,9 +120,11 @@ class ManualMatchController:
             self._pending_action = None
             return DecisionResult(action=action, diagnostics={"manual_player": player_index})
 
-    def write_entry(self, entry: PositionRecord) -> None:
+    def write_game(self, record: GameRecordV1) -> object:
         with self._condition:
-            self._entries.append(entry)
+            self._records.append(record)
+            self._condition.notify_all()
+            return {"game_id": record.game_id, "actions": len(record.actions), "status": record.status}
 
     def observe_transition(self, transition: TransitionEvent) -> None:
         with self._condition:
@@ -130,11 +132,6 @@ class ManualMatchController:
             self._python_state = engine.to_python_state(transition.state)
             self._version += 1
             self._condition.notify_all()
-
-    def close_game(self, game_id: str, terminal: object | None = None) -> object:
-        with self._condition:
-            self._condition.notify_all()
-            return {"game_id": game_id, "entries": len(self._entries), "terminal": terminal is not None}
 
     def _run_match(self, spec: GameSpec, players: tuple["_ManualPlayer", "_ManualPlayer"]) -> None:
         try:
@@ -170,7 +167,10 @@ class _ManualPlayer:
         self._player_index = player_index
         self.identity = PlayerIdentity(player_id=f"manual-player-{player_index}", label=f"Player {player_index}")
 
-    def initialize(self, session_context: SessionContext) -> None:
+    def setup_worker(self, context: WorkerContext) -> None:
+        return
+
+    def start_game(self, context: GameContext) -> None:
         return
 
     def decide(self, state: engine.HexoState) -> DecisionResult:
@@ -179,7 +179,10 @@ class _ManualPlayer:
     def observe_transition(self, transition: TransitionEvent) -> None:
         self._controller.observe_transition(transition)
 
-    def close(self, final_summary: FinalSummary) -> None:
+    def finish_game(self, final_summary: FinalSummary) -> None:
+        return
+
+    def close(self) -> None:
         return
 
 
