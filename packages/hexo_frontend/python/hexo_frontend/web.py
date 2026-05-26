@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import tempfile
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
@@ -15,7 +16,7 @@ from urllib.parse import unquote, urlparse
 import hexo_engine as engine
 from hexo_runner.modes.match import run_match
 from hexo_runner.player import DecisionResult, FinalSummary, PlayerIdentity, TransitionEvent, WorkerContext, GameContext
-from hexo_runner.records import GameRecordV1, GameResult
+from hexo_runner.records import GameResult
 from hexo_runner.session import GameSpec
 
 from .dashboard import dashboard_state
@@ -41,7 +42,6 @@ class ManualMatchController:
         self._python_state: engine.PythonHexoState | None = None
         self._pending_action: engine.Action | None = None
         self._version = 0
-        self._records: list[GameRecordV1] = []
         self._result: GameResult | None = None
         self._error: BaseException | None = None
         self.reset()
@@ -56,7 +56,6 @@ class ManualMatchController:
             self._python_state = None
             self._pending_action = None
             self._version = 0
-            self._records = []
             self._result = None
             self._error = None
             players = (_ManualPlayer(self, 0), _ManualPlayer(self, 1))
@@ -120,12 +119,6 @@ class ManualMatchController:
             self._pending_action = None
             return DecisionResult(action=action, diagnostics={"manual_player": player_index})
 
-    def write_game(self, record: GameRecordV1) -> object:
-        with self._condition:
-            self._records.append(record)
-            self._condition.notify_all()
-            return {"game_id": record.game_id, "actions": len(record.actions), "status": record.status}
-
     def observe_transition(self, transition: TransitionEvent) -> None:
         with self._condition:
             self._state = transition.state
@@ -135,7 +128,8 @@ class ManualMatchController:
 
     def _run_match(self, spec: GameSpec, players: tuple["_ManualPlayer", "_ManualPlayer"]) -> None:
         try:
-            result = run_match(spec, players, self)
+            with tempfile.TemporaryDirectory(prefix="hexo_manual_records_") as tmp:
+                result = run_match(spec, players, tmp)
         except BaseException as exc:
             with self._condition:
                 self._error = exc

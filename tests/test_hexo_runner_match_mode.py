@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import sys
 import tempfile
 import unittest
@@ -153,122 +152,137 @@ class ConditionalPlayer(ScriptedPlayer):
         return super().decide(state)
 
 
-def action_from_record(action: object) -> object:
-    from hexo_engine import AxialCoord, PlacementAction
+def action_from_record(action_id: int) -> object:
+    from hexo_engine import PlacementAction
+    from hexo_engine.types import unpack_coord_id
 
-    return PlacementAction(AxialCoord(action["q"], action["r"]))
+    return PlacementAction(unpack_coord_id(action_id))
+
+
+def records_from_result(result: object) -> tuple[object, ...]:
+    from hexo_runner.records import HexoRecordFile
+
+    with HexoRecordFile.open(result.record_ref["path"]) as record_file:
+        return record_file.iter_records()
 
 
 class RunnerRewriteTests(unittest.TestCase):
     def test_completed_game_writes_compact_replayable_record(self) -> None:
         from hexo_engine import Player, apply_action, new_game, terminal
         from hexo_runner.modes.match import run_match
-        from hexo_runner.records import GameStatus, MemoryRecordSink
+        from hexo_runner.records import GameStatus, HEXO_RECORD_SCHEMA_VERSION
         from hexo_runner.session import GameSpec
 
-        sink = MemoryRecordSink()
-        result = run_match(
-            GameSpec(game_id="scripted", seed=7),
-            (ScriptedPlayer("p0", WINNING_P0), ScriptedPlayer("p1", FILLER_P1)),
-            sink,
-        )
+        with tempfile.TemporaryDirectory() as tmp:
+            result = run_match(
+                GameSpec(game_id="scripted", seed=7),
+                (ScriptedPlayer("p0", WINNING_P0), ScriptedPlayer("p1", FILLER_P1)),
+                tmp,
+            )
+            records = records_from_result(result)
 
         self.assertEqual(result.status, GameStatus.COMPLETED)
         self.assertEqual(result.winner, "player0")
         self.assertEqual(result.turns, 12)
-        self.assertEqual(len(sink.records), 1)
-        record = sink.records[0]
-        self.assertEqual(record.schema_version, 1)
+        self.assertEqual(HEXO_RECORD_SCHEMA_VERSION, 1)
+        self.assertEqual(len(records), 1)
+        record = records[0]
         self.assertEqual(record.status, "completed")
-        self.assertEqual(record.engine["backend"], "rust-pyo3")
-        self.assertEqual(len(record.actions), 12)
+        self.assertEqual(len(record.action_ids), 12)
         self.assertIsNone(record.abort)
 
         replay = new_game(seed=record.seed)
-        for action in record.actions:
-            apply_action(replay, action_from_record(action.action))
+        for action_id in record.action_ids:
+            apply_action(replay, action_from_record(action_id))
         self.assertEqual(terminal(replay).winner, Player.PLAYER_0)
+        self.assertEqual(record.replay().winner, Player.PLAYER_0)
 
     def test_player_can_mutate_decision_clone_without_corrupting_primary_state(self) -> None:
         from hexo_runner.modes.match import run_match
-        from hexo_runner.records import GameStatus, MemoryRecordSink
+        from hexo_engine.types import unpack_coord_id
+        from hexo_runner.records import GameStatus
         from hexo_runner.session import GameSpec
 
-        sink = MemoryRecordSink()
-        result = run_match(
-            GameSpec(game_id="clone-isolation"),
-            (ScriptedPlayer("p0", ((0, 0),), mutate_decision_clone=True), IllegalPlayer("p1")),
-            sink,
-        )
+        with tempfile.TemporaryDirectory() as tmp:
+            result = run_match(
+                GameSpec(game_id="clone-isolation"),
+                (ScriptedPlayer("p0", ((0, 0),), mutate_decision_clone=True), IllegalPlayer("p1")),
+                tmp,
+            )
+            records = records_from_result(result)
 
         self.assertEqual(result.status, GameStatus.ABORTED)
         self.assertEqual(result.turns, 1)
-        self.assertEqual(len(sink.records[0].actions), 1)
-        self.assertEqual(sink.records[0].actions[0].action, {"type": "placement", "q": 0, "r": 0})
+        self.assertEqual(len(records[0].action_ids), 1)
+        coord = unpack_coord_id(records[0].action_ids[0])
+        self.assertEqual((coord.q, coord.r), (0, 0))
 
     def test_illegal_action_aborts_loudly_and_writes_aborted_record(self) -> None:
         from hexo_runner.modes.match import run_match
-        from hexo_runner.records import GameStatus, MemoryRecordSink
+        from hexo_runner.records import GameStatus
         from hexo_runner.session import GameSpec
 
-        sink = MemoryRecordSink()
-        result = run_match(GameSpec(game_id="illegal"), (IllegalPlayer("p0"), ScriptedPlayer("p1", ())), sink)
+        with tempfile.TemporaryDirectory() as tmp:
+            result = run_match(GameSpec(game_id="illegal"), (IllegalPlayer("p0"), ScriptedPlayer("p1", ())), tmp)
+            records = records_from_result(result)
 
         self.assertEqual(result.status, GameStatus.ABORTED)
         self.assertEqual(result.abort.stage, "engine.apply_action")
         self.assertIn("opening placement", result.abort.message)
-        record = sink.records[0]
+        record = records[0]
         self.assertEqual(record.status, "aborted")
-        self.assertEqual(record.actions, ())
-        self.assertIsNone(record.terminal)
+        self.assertEqual(record.action_ids, ())
+        self.assertIsNone(record.winner)
         self.assertEqual(record.abort.stage, "engine.apply_action")
 
     def test_player_exception_aborts_with_stage_type_and_message(self) -> None:
         from hexo_runner.modes.match import run_match
-        from hexo_runner.records import GameStatus, MemoryRecordSink
+        from hexo_runner.records import GameStatus
         from hexo_runner.session import GameSpec
 
-        sink = MemoryRecordSink()
-        result = run_match(GameSpec(game_id="explode"), (ExplodingPlayer("p0", ()), ScriptedPlayer("p1", ())), sink)
+        with tempfile.TemporaryDirectory() as tmp:
+            result = run_match(GameSpec(game_id="explode"), (ExplodingPlayer("p0", ()), ScriptedPlayer("p1", ())), tmp)
+            records = records_from_result(result)
 
         self.assertEqual(result.status, GameStatus.ABORTED)
         self.assertEqual(result.abort.stage, "player.decide:p0")
         self.assertEqual(result.abort.exception_type, "RuntimeError")
         self.assertEqual(result.abort.message, "boom")
-        self.assertEqual(sink.records[0].abort.stage, "player.decide:p0")
+        self.assertEqual(records[0].abort.stage, "player.decide:p0")
 
     def test_observers_receive_independent_cloned_states(self) -> None:
         from hexo_runner.modes.match import run_match
-        from hexo_runner.records import MemoryRecordSink
         from hexo_runner.session import GameSpec
 
         p0 = MutatingObserverPlayer("p0", ((0, 0),))
         p1 = RecordingIllegalObserver("p1")
-        run_match(GameSpec(game_id="observer-clones"), (p0, p1), MemoryRecordSink())
+        with tempfile.TemporaryDirectory() as tmp:
+            run_match(GameSpec(game_id="observer-clones"), (p0, p1), tmp)
 
         self.assertEqual(p1.python_states[0].placements_made, 1)
         self.assertGreater(len(p0.observed), 0)
         self.assertGreater(len(p1.observed), 0)
 
-    def test_jsonl_record_sink_writes_one_record_per_game(self) -> None:
+    def test_hexo_record_file_writes_one_record_per_game(self) -> None:
         from hexo_runner.modes.match import run_match
-        from hexo_runner.records import JsonlRecordSink
+        from hexo_runner.records import HexoRecordFile
         from hexo_runner.session import GameSpec
 
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "games.jsonl"
-            run_match(
-                GameSpec(game_id="jsonl"),
+            result = run_match(
+                GameSpec(game_id="hxr"),
                 (ScriptedPlayer("p0", WINNING_P0), ScriptedPlayer("p1", FILLER_P1)),
-                JsonlRecordSink(path),
+                tmp,
             )
-            lines = path.read_text(encoding="utf-8").splitlines()
+            path = Path(result.record_ref["path"])
+            with HexoRecordFile.open(path) as record_file:
+                records = record_file.iter_records()
 
-        self.assertEqual(len(lines), 1)
-        payload = json.loads(lines[0])
-        self.assertEqual(payload["game_id"], "jsonl")
-        self.assertEqual(payload["status"], "completed")
-        self.assertEqual(len(payload["actions"]), 12)
+            self.assertEqual(path.suffix, ".hxr")
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0].game_id, "hxr")
+            self.assertEqual(records[0].status, "completed")
+            self.assertEqual(len(records[0].action_ids), 12)
 
     def test_batch_reuses_player_instances_within_worker_and_surfaces_aborts(self) -> None:
         from hexo_runner.modes.batch import run_batch
@@ -298,8 +312,9 @@ class RunnerRewriteTests(unittest.TestCase):
         self.assertEqual([item.status for item in result.results].count(GameStatus.ABORTED), 1)
         self.assertEqual(result.aborts[0].stage, "engine.apply_action")
 
-    def test_batch_runs_across_process_workers_and_writes_worker_jsonl(self) -> None:
+    def test_batch_runs_across_process_workers_and_writes_worker_hxr(self) -> None:
         from hexo_runner.modes.batch import run_batch
+        from hexo_runner.records import HexoRecordFile
         from hexo_runner.session import BatchSpec, GameSpec
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -313,13 +328,16 @@ class RunnerRewriteTests(unittest.TestCase):
                     chunk_size=1,
                 )
             )
-            line_count = sum(len(Path(ref["path"]).read_text(encoding="utf-8").splitlines()) for ref in result.record_refs)
+            record_count = 0
+            for ref in result.record_refs:
+                with HexoRecordFile.open(ref["path"]) as record_file:
+                    record_count += len(record_file.iter_records())
 
         self.assertEqual(result.total_games, 4)
         self.assertEqual(result.completed, 4)
         self.assertEqual(result.aborted, 0)
         self.assertEqual(result.worker_count, 2)
-        self.assertEqual(line_count, 4)
+        self.assertEqual(record_count, 4)
 
     def test_frontend_controller_still_uses_generic_runner(self) -> None:
         from hexo_frontend.web import ManualMatchController

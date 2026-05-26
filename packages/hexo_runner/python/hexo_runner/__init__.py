@@ -17,7 +17,7 @@ from .player import (
     TransitionEvent,
     WorkerContext,
 )
-from .records import BatchResult, GameRecordV1, GameResult, GameStatus, JsonlRecordSink, MemoryRecordSink
+from .records import BatchResult, GameResult, GameStatus, HexoRecord, HexoRecordFile
 from .session import BatchSpec, GameSpec
 
 __all__ = [
@@ -26,12 +26,11 @@ __all__ = [
     "DecisionResult",
     "FinalSummary",
     "GameContext",
-    "GameRecordV1",
     "GameResult",
     "GameSpec",
     "GameStatus",
-    "JsonlRecordSink",
-    "MemoryRecordSink",
+    "HexoRecord",
+    "HexoRecordFile",
     "PlayerFactory",
     "PlayerIdentity",
     "RunnerPlayer",

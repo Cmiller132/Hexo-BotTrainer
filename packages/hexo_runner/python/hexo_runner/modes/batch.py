@@ -9,7 +9,7 @@ from typing import Sequence
 from ..engine import HexoEngineAdapter
 from ..loop import run_match_loop
 from ..player import PlayerFactory, RunnerPlayer, WorkerContext
-from ..records import AbortRecord, BatchResult, GameResult, GameStatus, JsonlRecordSink
+from ..records import BatchResult, GameResult, GameStatus, HexoRecordFile
 from ..session import BatchSpec, GameSpec
 from ..timing import Timer
 
@@ -113,8 +113,8 @@ def _run_worker_task(task: _WorkerTask) -> _WorkerResult:
     for player in players:
         player.setup_worker(worker_context)
 
-    path = Path(task.output_dir) / f"{task.batch_id}-worker-{task.worker_id}.jsonl"
-    sink = JsonlRecordSink(path, flush_on_write=False)
+    path = Path(task.output_dir) / f"{task.batch_id}-worker-{task.worker_id}.hxr"
+    record_file = HexoRecordFile.create(path, adapter.metadata(), players)
     results: list[GameResult] = []
     try:
         for game in task.games:
@@ -122,7 +122,7 @@ def _run_worker_task(task: _WorkerTask) -> _WorkerResult:
                 run_match_loop(
                     game,
                     players,  # type: ignore[arg-type]
-                    sink,
+                    record_file,
                     engine_adapter=adapter,
                     worker_context=worker_context,
                     setup_players=False,
@@ -130,7 +130,7 @@ def _run_worker_task(task: _WorkerTask) -> _WorkerResult:
                 )
             )
     finally:
-        sink.close()
+        record_file.close()
         for player in players:
             try:
                 player.close()

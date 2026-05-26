@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import math
 import multiprocessing as mp
 import os
@@ -27,17 +26,14 @@ for PACKAGE_PATH in (
 from hexo_engine import (  # noqa: E402
     AxialCoord,
     PlacementAction,
-    apply_action,
     legal_action_count,
     legal_action_ids,
-    new_game,
-    terminal,
 )
 from hexo_engine.types import pack_coord_id, unpack_coord_id  # noqa: E402
 from hexo_runner import DecisionResult, PlayerIdentity, WorkerContext  # noqa: E402
 from hexo_runner.engine import HexoEngineAdapter  # noqa: E402
 from hexo_runner.loop import run_match_loop  # noqa: E402
-from hexo_runner.records import GameStatus, JsonlRecordSink  # noqa: E402
+from hexo_runner.records import GameStatus, HexoRecordFile  # noqa: E402
 from hexo_runner.session import GameSpec  # noqa: E402
 
 
@@ -150,12 +146,12 @@ def _run(args: argparse.Namespace, game_counts: tuple[int, ...], output_dir: Pat
     worker_results = _collect_worker_results(result_queue, len(processes))
     failed_processes = [process for process in processes if process.exitcode != 0]
     if failed_processes:
-        print(json.dumps({"status": "failed", "failed_workers": [p.name for p in failed_processes], "results": worker_results}, indent=2))
+        _print_json({"status": "failed", "failed_workers": [p.name for p in failed_processes], "results": worker_results})
         return 1
 
     errors = [result for result in worker_results if "error" in result]
     if errors:
-        print(json.dumps({"status": "failed", "errors": errors}, indent=2))
+        _print_json({"status": "failed", "errors": errors})
         return 1
 
     record_paths = [Path(path) for result in worker_results for path in result["record_paths"]]
@@ -191,7 +187,7 @@ def _run(args: argparse.Namespace, game_counts: tuple[int, ...], output_dir: Pat
         "output_dir": str(output_dir),
         "worker_results": worker_results,
     }
-    print(json.dumps(summary, indent=2, sort_keys=True))
+    _print_json(summary)
     return 0 if passed else 1
 
 
@@ -216,8 +212,16 @@ def _run_worker(task: WorkerTask, barrier: Any) -> dict[str, Any]:
         player.setup_worker(worker_context)
 
     output_dir = Path(task.output_dir)
-    warmup_sink = JsonlRecordSink(output_dir / f"{task.batch_id}-warmup-worker-{task.worker_id}.jsonl", flush_on_write=False)
-    measured_sink = JsonlRecordSink(output_dir / f"{task.batch_id}-worker-{task.worker_id}.jsonl", flush_on_write=False)
+    warmup_records = HexoRecordFile.create(
+        output_dir / f"{task.batch_id}-warmup-worker-{task.worker_id}.hxr",
+        engine_metadata,
+        players,
+    )
+    measured_records = HexoRecordFile.create(
+        output_dir / f"{task.batch_id}-worker-{task.worker_id}.hxr",
+        engine_metadata,
+        players,
+    )
     measured_results = []
     observations = 0
     try:
@@ -225,13 +229,13 @@ def _run_worker(task: WorkerTask, barrier: Any) -> dict[str, Any]:
             run_match_loop(
                 GameSpec(game_id=f"warmup-{task.worker_id}-{game_index}", seed=game_index),
                 players,
-                warmup_sink,
+                warmup_records,
                 engine_adapter=adapter,
                 worker_context=worker_context,
                 setup_players=False,
                 close_players=False,
             )
-        warmup_sink.close()
+        warmup_records.close()
         barrier.wait(timeout=task.barrier_timeout_s)
 
         measured_start_ns = time.perf_counter_ns()
@@ -240,7 +244,7 @@ def _run_worker(task: WorkerTask, barrier: Any) -> dict[str, Any]:
                 run_match_loop(
                     GameSpec(game_id=f"measured-{task.worker_id}-{game_index}", seed=game_index),
                     players,
-                    measured_sink,
+                    measured_records,
                     engine_adapter=adapter,
                     worker_context=worker_context,
                     setup_players=False,
@@ -250,8 +254,8 @@ def _run_worker(task: WorkerTask, barrier: Any) -> dict[str, Any]:
         measured_end_ns = time.perf_counter_ns()
         observations = sum(player.observations for player in players)
     finally:
-        measured_sink.close()
-        warmup_sink.close()
+        measured_records.close()
+        warmup_records.close()
         for player in players:
             player.close()
 
@@ -267,28 +271,21 @@ def _run_worker(task: WorkerTask, barrier: Any) -> dict[str, Any]:
         "measured_end_ns": measured_end_ns,
         "rss_bytes": _rss_bytes(),
         "observations": observations,
-        "record_paths": [str(warmup_sink.path), str(measured_sink.path)],
+        "record_paths": [str(warmup_records.path), str(measured_records.path)],
     }
 
 
 def _replay_records(record_paths: list[Path]) -> int:
     replayed = 0
     for path in record_paths:
-        with path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                payload = json.loads(line)
-                state = new_game(seed=payload["seed"], scenario=payload["scenario"])
-                for action in payload["actions"]:
-                    body = action["action"]
-                    if body["type"] != "placement":
-                        raise AssertionError(f"unsupported action record in {path}: {body!r}")
-                    apply_action(state, PlacementAction(AxialCoord(body["q"], body["r"])))
-                replay_terminal = terminal(state)
-                if payload["status"] == "completed":
+        with HexoRecordFile.open(path) as record_file:
+            for record in record_file.iter_records():
+                replay_terminal = record.replay()
+                if record.status == "completed":
                     if replay_terminal is None:
-                        raise AssertionError(f"completed record did not replay to terminal: {payload['game_id']}")
-                    if str(replay_terminal.winner) != payload["terminal"]["winner"]:
-                        raise AssertionError(f"winner mismatch while replaying {payload['game_id']}")
+                        raise AssertionError(f"completed record did not replay to terminal: {record.game_id}")
+                    if str(replay_terminal.winner) != record.winner:
+                        raise AssertionError(f"winner mismatch while replaying {record.game_id}")
                 replayed += 1
     return replayed
 
@@ -361,6 +358,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--barrier-timeout-s", type=float, default=300.0)
     parser.add_argument("--output-dir", type=str)
     return parser.parse_args()
+
+
+def _print_json(payload: object) -> None:
+    import json
+
+    print(json.dumps(payload, indent=2, sort_keys=True))
 
 
 if __name__ == "__main__":

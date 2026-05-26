@@ -15,12 +15,9 @@ from .player import (
 )
 from .records import (
     AbortRecord,
-    ActionRecordV1,
-    GameRecordV1,
     GameResult,
     GameStatus,
-    PlayerRecord,
-    RecordSink,
+    HexoRecordFile,
 )
 from .session import GameSpec
 from .timing import Timer
@@ -40,7 +37,7 @@ class RunnerAbort(Exception):
 def run_match_loop(
     spec: GameSpec,
     players: tuple[RunnerPlayer, RunnerPlayer],
-    sink: RecordSink,
+    record_file: HexoRecordFile,
     *,
     engine_adapter: HexoEngineAdapter | None = None,
     worker_context: WorkerContext | None = None,
@@ -62,11 +59,11 @@ def run_match_loop(
     timer = Timer.start()
     engine_metadata = adapter.metadata()
     worker = worker_context or WorkerContext(worker_id=0, engine_metadata=engine_metadata)
-    actions: list[ActionRecordV1] = []
     terminal_payload = None
     abort: AbortRecord | None = None
     status = GameStatus.ABORTED
     primary_state = None
+    record_writer = None
     result = GameResult(game_id=spec.game_id, status=GameStatus.ABORTED)
 
     try:
@@ -79,6 +76,10 @@ def run_match_loop(
             lambda: adapter.new_game(seed=spec.seed, scenario=spec.scenario),
         )
         _start_players(spec, players, adapter, engine_metadata)
+        record_writer = _run_stage(
+            "record_file.begin_game",
+            lambda: record_file.begin_game(spec.game_id, seed=spec.seed, scenario=spec.scenario),
+        )
 
         while adapter.terminal(primary_state) is None:
             current = _run_stage("engine.current_player", lambda: adapter.current_player(primary_state))
@@ -86,12 +87,10 @@ def run_match_loop(
             active_player = players[player_index]
             role = adapter.player_role(current)
             cloned_state = _run_stage("engine.clone_state:decide", lambda: adapter.clone_state(primary_state))
-            decision_timer = Timer.start()
             decision = _run_stage(
                 f"player.decide:{active_player.identity.player_id}",
                 lambda: active_player.decide(cloned_state),
             )
-            decision_ms = decision_timer.elapsed_ms()
             action_id = _run_stage("engine.action_id", lambda: adapter.action_id(decision.action))
             transition = _run_stage(
                 "engine.apply_action",
@@ -99,24 +98,15 @@ def run_match_loop(
             )
             terminal = _run_stage("engine.terminal", lambda: adapter.terminal(primary_state))
             terminal_payload = adapter.terminal_payload(terminal)
-
-            actions.append(
-                ActionRecordV1(
-                    index=len(actions),
-                    player_id=active_player.identity.player_id,
-                    player_role=role,
-                    action_id=action_id,
-                    action=adapter.action_payload(decision.action),
-                    decision_ms=decision_ms,
-                    diagnostics=dict(decision.diagnostics),
-                    transition=adapter.transition_payload(transition),
-                )
+            _run_stage(
+                "record_writer.record_action",
+                lambda action=decision.action: record_writer.record_action(action),
             )
 
             for observer in players:
                 event = TransitionEvent(
                     game_id=spec.game_id,
-                    action_index=len(actions) - 1,
+                    action_index=record_writer.action_count - 1,
                     player_id=active_player.identity.player_id,
                     player_role=role,
                     action_id=action_id,
@@ -141,27 +131,28 @@ def run_match_loop(
         )
 
     duration_ms = timer.elapsed_ms()
-    record = GameRecordV1.create(
-        game_id=spec.game_id,
-        seed=spec.seed,
-        scenario=spec.scenario,
-        engine=engine_metadata,
-        players=_player_records(players, adapter),
-        actions=actions,
-        status=str(status),
-        terminal=terminal_payload if status == GameStatus.COMPLETED else None,
-        abort=abort,
-        duration_ms=duration_ms,
-        metadata=spec.metadata,
-    )
-
     record_ref = None
     try:
-        record_ref = sink.write_game(record)
+        if record_writer is None:
+            record_writer = record_file.begin_game(spec.game_id, seed=spec.seed, scenario=spec.scenario)
+        if status == GameStatus.COMPLETED:
+            record_ref = record_writer.finish_completed(
+                _terminal_winner(terminal_payload),
+                _terminal_placements(terminal_payload),
+            )
+        else:
+            record_ref = record_writer.finish_aborted(
+                abort
+                or AbortRecord(
+                    stage="runner",
+                    exception_type="RuntimeError",
+                    message="game aborted before structured abort was set",
+                )
+            )
     except Exception as exc:
         status = GameStatus.ABORTED
         abort = AbortRecord(
-            stage="record_sink.write_game",
+            stage="record_file.finish_game",
             exception_type=type(exc).__name__,
             message=str(exc),
         )
@@ -173,7 +164,7 @@ def run_match_loop(
         terminal=terminal_payload if status == GameStatus.COMPLETED else None,
         winner=_terminal_winner(terminal_payload) if status == GameStatus.COMPLETED else None,
         record_ref=record_ref,
-        turns=len(actions),
+        turns=record_writer.action_count if record_writer is not None else 0,
         duration_ms=duration_ms,
         abort=abort,
         metadata={"engine": engine_metadata},
@@ -229,23 +220,16 @@ def _start_players(
         _run_stage(f"player.start_game:{player.identity.player_id}", lambda p=player, ctx=context: p.start_game(ctx))
 
 
-def _player_records(
-    players: Sequence[RunnerPlayer],
-    adapter: HexoEngineAdapter,
-) -> tuple[PlayerRecord, PlayerRecord]:
-    roles = ("player0", "player1")
-    return tuple(
-        PlayerRecord(
-            player_id=player.identity.player_id,
-            role=roles[index],
-            label=player.identity.label,
-            metadata=player.identity.metadata,
-        )
-        for index, player in enumerate(players)
-    )  # type: ignore[return-value]
-
-
 def _terminal_winner(terminal_payload: object | None) -> object | None:
     if not isinstance(terminal_payload, dict):
         return None
     return terminal_payload.get("winner")
+
+
+def _terminal_placements(terminal_payload: object | None) -> int:
+    if not isinstance(terminal_payload, dict):
+        return 0
+    metadata = terminal_payload.get("metadata")
+    if not isinstance(metadata, dict):
+        return 0
+    return int(metadata.get("placements", 0))
