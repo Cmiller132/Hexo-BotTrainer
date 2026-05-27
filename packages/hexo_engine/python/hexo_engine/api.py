@@ -179,6 +179,40 @@ def _terminal(payload: Mapping[str, Any] | None) -> TerminalResult | None:
     )
 
 
+def model1_batch_inputs(states: object) -> Mapping[str, Any]:
+    """Return dense-cnn Model 1 inference inputs for a batch of Rust states."""
+
+    payload = _bridge().model1_batch_inputs(tuple(states))
+    if not isinstance(payload, Mapping):
+        raise TypeError("model1_batch_inputs bridge returned a non-mapping payload")
+    return payload
+
+
+def model1_batched_mcts(
+    states: object,
+    *,
+    visits: int,
+    c_puct: float,
+    temperature: float,
+    seed: int,
+    evaluator: object,
+    virtual_batch_size: int | None = None,
+) -> tuple[Mapping[str, Any], ...]:
+    """Run dense-cnn batched MCTS in Rust using a Python Torch evaluator."""
+
+    return tuple(
+        _bridge().model1_batched_mcts(
+            tuple(states),
+            int(visits),
+            float(c_puct),
+            float(temperature),
+            int(seed),
+            evaluator,
+            virtual_batch_size,
+        )
+    )
+
+
 def _window_entry(payload: Mapping[str, Any]) -> PythonWindowEntry:
     return PythonWindowEntry(
         key=PythonWindowKey(

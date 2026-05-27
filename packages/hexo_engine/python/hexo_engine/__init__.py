@@ -17,6 +17,8 @@ from .api import (
     legal_action_ids,
     legal_actions,
     new_game,
+    model1_batch_inputs,
+    model1_batched_mcts,
     terminal,
     to_python_state,
 )
@@ -80,6 +82,8 @@ __all__ = [
     "legal_action_count",
     "legal_action_ids",
     "legal_actions",
+    "model1_batch_inputs",
+    "model1_batched_mcts",
     "new_game",
     "terminal",
     "to_python_state",

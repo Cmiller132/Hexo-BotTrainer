@@ -8,9 +8,10 @@ real checkpoint. It coordinates the packages that do own those details.
 
 1. initialize run artifacts and shared stores;
 2. load or initialize a checkpoint;
-3. run self-play training epochs;
-4. publish the final checkpoint for future self-play;
-5. write diagnostics.
+3. calibrate model-owned performance settings when available;
+4. run self-play training epochs;
+5. publish the final checkpoint for future self-play;
+6. write diagnostics.
 
 Each top-level step is wrapped by `_run_step()` so failures and successful
 results are recorded consistently in the diagnostics directory.
@@ -73,6 +74,7 @@ class TrainingPipeline:
             ctx,
             components,
         )
+        self._run_step("calibrate_performance", self._calibrate_performance, ctx, components)
         self._run_step("run_epochs", run_epochs, ctx, components)
         self._run_step("publish_final_model", self._publish_final_model, ctx, components)
         self._run_step("write_diagnostics", write_final_diagnostics, ctx, components)
@@ -119,6 +121,21 @@ class TrainingPipeline:
         ctx.remember("final_checkpoint", checkpoint)
         pointer = publish_selfplay_checkpoint_pointer(ctx, components)
         return {"checkpoint": checkpoint, "pointer": pointer}
+
+    def _calibrate_performance(
+        self,
+        ctx: RunContext,
+        components: TrainingComponents,
+    ) -> Mapping[str, Any]:
+        """Run optional model-owned performance calibration before epochs."""
+
+        plugin = components.model.plugin
+        if hasattr(plugin, "calibrate_performance"):
+            return plugin.calibrate_performance(ctx=ctx, components=components)
+        return {
+            "status": "skipped",
+            "reason": "model plugin has no calibrate_performance hook",
+        }
 
     def _run_step(
         self,

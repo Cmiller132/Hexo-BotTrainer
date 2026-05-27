@@ -79,6 +79,10 @@ def select_training_samples(
     3. Store both handles on `components.shared` for symmetry and training.
     """
 
+    trainer = components.model.trainer
+    if trainer is not None and hasattr(trainer, "select_training_samples"):
+        return trainer.select_training_samples(ctx=ctx, components=components, epoch=epoch)
+
     from hexo_utils.samples import build_sample_window, refresh_sample_index
 
     sample_index = refresh_sample_index(components.shared.sample_store)

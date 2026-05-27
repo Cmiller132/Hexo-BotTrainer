@@ -106,5 +106,20 @@ def _save_checkpoint(
         )
 
     result = {"checkpoint_path": str(path), "name": name, **metadata}
+    if metadata.get("kind") == "epoch":
+        pointer = _publish_epoch_checkpoint_pointer(ctx, result)
+        if pointer is not None:
+            result["pointer"] = pointer
     components.shared.checkpoint_state = result
     return result
+
+
+def _publish_epoch_checkpoint_pointer(ctx: RunContext, checkpoint_result: dict[str, Any]) -> dict[str, Any] | None:
+    if not ctx.config.selfplay.update_checkpoint_pointer:
+        return None
+    pointer_path = ctx.config.selfplay.checkpoint_pointer
+    if pointer_path is None:
+        pointer_path = ctx.output_dir / "selfplay_checkpoint.txt"
+    pointer_path.parent.mkdir(parents=True, exist_ok=True)
+    pointer_path.write_text(str(checkpoint_result.get("checkpoint_path") or ""), encoding="utf-8")
+    return {"status": "updated", "pointer_path": str(pointer_path)}

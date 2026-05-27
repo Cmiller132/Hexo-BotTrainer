@@ -106,8 +106,8 @@ class CheckpointConfig:
     `save_name` names the final checkpoint after all epochs complete.
     """
 
-    resume_from: str | None = None
-    initialize_from: str | None = None
+    resume_from: Path | None = None
+    initialize_from: Path | None = None
     save_name: str = "latest"
 
 
@@ -167,6 +167,7 @@ def normalize_training_config(raw: ConfigMap, *, base_dir: Path) -> TrainingConf
     output_dir = Path(run_section.get("output_dir", Path("runs") / run_name))
     if not output_dir.is_absolute():
         output_dir = base_dir / output_dir
+    output_dir = output_dir.resolve()
 
     model_config = model_section.get("config", {})
     if not isinstance(model_config, Mapping):
@@ -217,8 +218,8 @@ def normalize_training_config(raw: ConfigMap, *, base_dir: Path) -> TrainingConf
     )
     checkpoint_section = _optional_mapping(raw, "checkpoint")
     checkpoint = CheckpointConfig(
-        resume_from=_optional_str(checkpoint_section.get("resume_from")),
-        initialize_from=_optional_str(checkpoint_section.get("initialize_from")),
+        resume_from=_optional_path(checkpoint_section.get("resume_from"), base_dir=base_dir),
+        initialize_from=_optional_path(checkpoint_section.get("initialize_from"), base_dir=base_dir),
         save_name=str(checkpoint_section.get("save_name", "latest")),
     )
 
@@ -331,4 +332,4 @@ def _optional_path(value: object, *, base_dir: Path) -> Path | None:
     path = Path(text)
     if not path.is_absolute():
         path = base_dir / path
-    return path
+    return path.resolve()

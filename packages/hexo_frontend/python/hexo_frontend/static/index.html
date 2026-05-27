@@ -9,9 +9,13 @@
 <body>
 <header>
   <h1>Hexo Match</h1>
+  <nav class="app-nav" aria-label="Dashboard screens">
+    <button type="button" data-screen="match">Match</button>
+    <button type="button" data-screen="history">Game History</button>
+  </nav>
   <div class="status"><span class="dot"></span><span id="statusText">Ready</span></div>
 </header>
-<main>
+<main id="matchScreen" class="app-screen match-screen">
   <section class="top-grid">
     <section class="board-panel" aria-label="Game board">
       <div class="board-area" id="boardArea">
@@ -147,6 +151,19 @@
         <div class="section-title">Tactical Stats</div>
         <div class="tactics-panel" id="tacticsPanel"></div>
       </section>
+
+      <section class="panel-card training-card">
+        <div class="section-title">Training Runs</div>
+        <div class="training-panel">
+          <select id="trainingRunSelect" aria-label="Training run"></select>
+          <div class="toolbar training-toolbar">
+            <button id="trainingRefreshBtn" type="button">Refresh</button>
+            <button type="button" data-screen="history">Open History</button>
+          </div>
+          <div id="trainingSummary" class="training-summary"></div>
+          <div id="trainingArtifacts" class="training-artifacts"></div>
+        </div>
+      </section>
     </aside>
   </section>
 
@@ -174,6 +191,57 @@
           <div class="slider-ticks"><span>0</span><span id="replayMidTick">0</span><span id="replayMaxTick">0</span></div>
         </div>
       </div>
+    </div>
+  </section>
+</main>
+<main id="historyScreen" class="app-screen history-screen" hidden>
+  <section class="history-page">
+    <div class="history-page-head">
+      <div>
+        <div class="section-title page-title">Game History</div>
+        <div class="page-subtitle">Training and evaluation games with epoch context, outcomes, player setup, and diagnostics.</div>
+      </div>
+      <div class="history-page-actions">
+        <select id="historyRunSelect" aria-label="Training run for game history"></select>
+        <button id="historyRefreshBtn" type="button">Refresh</button>
+      </div>
+    </div>
+
+    <div id="historyOverview" class="history-overview"></div>
+
+    <div class="history-filters" aria-label="Game history filters">
+      <input id="historySearchInput" type="search" placeholder="Filter by game, path, player, epoch, source">
+      <select id="historySourceSelect" aria-label="History source">
+        <option value="all">All sources</option>
+        <option value="evaluation">Evaluation</option>
+        <option value="selfplay">Selfplay</option>
+        <option value="history">History</option>
+      </select>
+      <select id="historyWinnerSelect" aria-label="Winner">
+        <option value="all">All winners</option>
+        <option value="player0">Winner P0</option>
+        <option value="player1">Winner P1</option>
+        <option value="none">No winner</option>
+      </select>
+    </div>
+
+    <div class="history-layout">
+      <section class="history-table-panel" aria-label="Game history list">
+        <div class="history-table-head">
+          <span>Game</span>
+          <span>Epoch</span>
+          <span>Winner</span>
+          <span>Length</span>
+          <span>Players</span>
+          <span>Diagnostics</span>
+        </div>
+        <div id="gameHistoryList" class="game-history-list"></div>
+      </section>
+
+      <aside class="history-detail-panel" aria-label="Selected game details">
+        <div class="section-title">Selected Game</div>
+        <div id="gameHistoryDetail" class="game-history-detail"></div>
+      </aside>
     </div>
   </section>
 </main>

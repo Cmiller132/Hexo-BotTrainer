@@ -266,6 +266,97 @@ class TrainingPipelineSimplificationTests(unittest.TestCase):
         )
         self.assertIn(("checkpoint", "latest"), events)
 
+    def test_pipeline_resume_continues_after_loaded_checkpoint_epoch(self) -> None:
+        from hexo_train.components import ComponentOverrides
+        from hexo_train.pipeline import TrainingPipeline
+
+        events: list[object] = []
+
+        class FakeLoader:
+            def load(self, checkpoint_ref: object, *, ctx: object, components: object) -> dict[str, object]:
+                events.append(("load", Path(checkpoint_ref).name))
+                return {"status": "loaded", "checkpoint_ref": str(checkpoint_ref), "epoch": 2}
+
+        class FakeFinalizer:
+            def finalize(self, *, ctx: object, components: object, epoch: int) -> dict[str, object]:
+                events.append(("finalize", epoch))
+                return {"epoch": epoch}
+
+        class FakeTrainer:
+            def train_passes(self, **kwargs: object) -> dict[str, object]:
+                epoch = int(kwargs["epoch"])
+                events.append(("train", epoch))
+                return {"epoch": epoch}
+
+        class FakeSaver:
+            def save(self, *, name: str, ctx: object, components: object) -> Path:
+                events.append(("checkpoint", name))
+                path = ctx.checkpoint_dir / f"{name}.ckpt"
+                path.write_text(name, encoding="utf-8")
+                return path
+
+        class FakePlugin:
+            name = "fake_model"
+
+            def build_model(self, game_spec: object, config: object) -> str:
+                return "fake-model"
+
+            def training_component_overrides(self, **kwargs: object) -> ComponentOverrides:
+                return ComponentOverrides(
+                    sample_finalizer=FakeFinalizer(),
+                    trainer=FakeTrainer(),
+                    checkpoint_loader=FakeLoader(),
+                    checkpoint_saver=FakeSaver(),
+                )
+
+            def generate_selfplay(
+                self,
+                *,
+                ctx: object,
+                components: object,
+                epoch: int,
+                games_per_epoch: int,
+            ) -> dict[str, object]:
+                events.append(("selfplay", epoch))
+                return {"epoch": epoch, "games": games_per_epoch}
+
+        module = types.SimpleNamespace(get_plugin=lambda: FakePlugin())
+
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "train.toml"
+            output_dir = Path(directory) / "run"
+            resume_path = Path(directory) / "resume.ckpt"
+            resume_path.write_text("checkpoint", encoding="utf-8")
+            config_path.write_text(
+                "\n".join(
+                    [
+                        "[model]",
+                        'name = "fake_model"',
+                        'module = "fake_resume_plugin"',
+                        "[run]",
+                        f'output_dir = "{output_dir.as_posix()}"',
+                        "[loop]",
+                        "epochs = 4",
+                        "[selfplay]",
+                        "games_per_epoch = 1",
+                        "[samples]",
+                        "train_sample_count = 1",
+                        "[checkpoint]",
+                        f'resume_from = "{resume_path.as_posix()}"',
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.dict(sys.modules, {"fake_resume_plugin": module}):
+                ctx = TrainingPipeline().run(config_path)
+
+        self.assertEqual([output.epoch for output in ctx.epoch_outputs], [3, 4])
+        self.assertIn(("selfplay", 3), events)
+        self.assertIn(("checkpoint", "epoch_000003"), events)
+        self.assertNotIn(("selfplay", 1), events)
+        self.assertNotIn(("checkpoint", "epoch_000001"), events)
+
     def test_d6_selection_is_deterministic_in_hexo_train(self) -> None:
         from hexo_train.symmetry import D6SymmetrySelector
 

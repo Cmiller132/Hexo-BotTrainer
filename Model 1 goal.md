@@ -1,10 +1,10 @@
 The goal is to create a simple self play model and create a good process for training epochs and debugging / working on the model.
 
 Model Specs:
-33x33 centroid 
-(B, 13, 33, 33)
-33x33 crop over the infinite axial hex grid
-BOARD_AREA = 1089
+41x41 centroid 
+(B, 13, 41, 41)
+41x41 crop over the infinite axial hex grid
+BOARD_AREA = 1681
 0   own stones
 1   opponent stones
 2   empty mask
@@ -19,11 +19,11 @@ BOARD_AREA = 1089
 11  normalized distance from crop center
 12  opponent's most recent completed turn
 
-input:      (B, 13, 33, 33)
+input:      (B, 13, 41, 41)
 conv_in:    HexConv2d(13 -> C, kernel=3, padding=1)
 activation: ReLU
 blocks:     N x GatedResBlock(C)
-output:     (B, C, 33, 33)
+output:     (B, C, 41, 41)
 
 HexConv2d is a normal 3x3 convolution with two invalid square-grid corners masked out:
 
@@ -58,16 +58,16 @@ opp_policy
 policy
 
 Purpose: current-player move prior over dense crop cells
-Input:   (B, C, 33, 33)
-Path:    Conv2d(C -> 2, 1x1) -> ReLU -> flatten -> Linear(2*1089 -> 1089)
-Output:  (B, 1089) raw logits
+Input:   (B, C, 41, 41)
+Path:    Conv2d(C -> 2, 1x1) -> ReLU -> flatten -> Linear(2*1681 -> 1681)
+Output:  (B, 1681) raw logits
 Loss:    soft cross-entropy against MCTS visit distribution
 Target:  dense policy vector over crop-local cells
 value
 
 Purpose: game outcome/value from current player's perspective
-Input:   (B, C, 33, 33)
-Path:    Conv2d(C -> 1, 1x1) -> ReLU -> flatten -> Linear(1089 -> 64) -> ReLU -> Linear(64 -> 65)
+Input:   (B, C, 41, 41)
+Path:    Conv2d(C -> 1, 1x1) -> ReLU -> flatten -> Linear(1681 -> 64) -> ReLU -> Linear(64 -> 65)
 Output:  (B, 65) raw logits
 Decode:  softmax over 65 bins with bin centers linearly spaced in [-1, 1]
 Loss:    KataGo-style soft binned cross-entropy
@@ -82,7 +82,7 @@ Loss:    same binned value loss as value
 opp_policy
 
 Purpose: opponent-response policy auxiliary target
-Shape:   (B, 1089)
+Shape:   (B, 1681)
 Path:    same structure as policy head
 Loss:    soft cross-entropy, weighted by opp_policy_weight
 
@@ -121,9 +121,12 @@ Goal #2
 
 Make it fast. Now that we have a working model, optimize training, inference, and memory usage. Some tips would be batch MCTS leaves for inference, use amp, etc. Also have training batch size be optimized. It should be possible to have a calibration step where the model automatically picks the best settings for MCTS batching, Inference, Training batch size, etc. This is critical and this step will take a long time. Make sure the model is able to hit at least 128 pos/s in self play. Keep iterating and benchmarking until the model is optimized fully and able to run at peak performance on this machine. It should also automatically tune the settings for different sized models, we want to automate performance tweaking to get the best option. Also make sure training is quick. Prefer to offload memory pressure to the cpu as my 7950x has 16 cores. Multithread where possible even if difficult. Make sure GPU and CPU usage is maxed out and time is not being wasted.
 
+It needs to get 128 pos/s with 128 MCTS sims
 Goal #3
 Make it easy to debug. Expand the frontend dashboard and logging to keep game history records, keep policy targets and any other useful debug info. Make it easy to access and stored in a natural easy to work with way.
 
+Goal #3a
+Regularly check in on the dashboard and make it work on mobile, desktop, lan etc. Also add features regularly and make it easier to browse. also regularly test it and use it to verify info. Use the dashboard yourself so that you know that it is usable. 
 
 Goal #4
 Make it good. Tune and train the model for many epochs(20-30) until it can hold its own against sealbot 50ms. It needs to be able to reliably beat sealbot. You can check for progress by looking at game length in the evaluation. If the model is improving it will increase survival time but if it stays stuck at 20-30 moves it does not have a strong strategy at all.
@@ -132,3 +135,6 @@ Intervene and make sure the games look coherent and not random. If after epoch 6
 
 Goal #5
 Take your model that beats sealbot and do any finishing touches, clean up all unused code and experiments you did. make the codebase clean and cohesive. Do not leave legacy support or complicated wrappers. Rewrite messy code. Make the codebase clean, maintainable and designed around a single clear production path to train and test models.
+
+Goal #6
+Take the model that beats sealbot and keep iterating. Make it slightly larger, improve weak areas. document it in the dashboard. Keep working at it until the model is as good as possible. We need at least 72 hours of training.

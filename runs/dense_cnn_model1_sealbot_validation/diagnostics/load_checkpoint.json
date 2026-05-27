@@ -1,0 +1,11 @@
+{
+  "stage": "load_checkpoint",
+  "status": "completed",
+  "elapsed_seconds": 8.09994526207447e-06,
+  "metadata": {
+    "result": {
+      "status": "initialized",
+      "checkpoint_ref": null
+    }
+  }
+}

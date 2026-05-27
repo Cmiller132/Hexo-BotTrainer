@@ -1,0 +1,10 @@
+{
+  "status": "completed",
+  "epoch": 1,
+  "games": 2,
+  "completed": 2,
+  "wins": 0,
+  "losses": 2,
+  "mean_turns": 20.0,
+  "output_dir": "E:\\Hexo-BotTrainer\\runs\\dense_cnn_dashboard_view\\evaluation\\epoch_000001"
+}

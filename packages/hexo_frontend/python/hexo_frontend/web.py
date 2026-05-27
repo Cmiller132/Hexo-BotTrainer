@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import tempfile
 from collections.abc import Callable
 from http import HTTPStatus
@@ -24,8 +25,9 @@ from hexo_runner.adapters.sealbot import (
 )
 from hexo_runner.modes.match import run_match
 from hexo_runner.player import DecisionResult, FinalSummary, PlayerIdentity, TransitionEvent, WorkerContext, GameContext
-from hexo_runner.records import GameResult
+from hexo_runner.records import GameResult, HexoRecordFile
 from hexo_runner.session import GameSpec
+from hexo_engine.types import unpack_coord_id
 
 from .dashboard import dashboard_state
 
@@ -36,6 +38,13 @@ STATIC_TYPES = {
     "html": "text/html; charset=utf-8",
     "js": "text/javascript; charset=utf-8",
 }
+ARTIFACT_TYPES = {
+    ".json": "application/json; charset=utf-8",
+    ".jsonl": "application/x-ndjson; charset=utf-8",
+    ".png": "image/png",
+    ".hxr": "application/octet-stream",
+}
+ARTIFACT_SUFFIXES = frozenset(ARTIFACT_TYPES)
 BotFactory = Callable[[str, float], object]
 PLAYER_ROLES = ("player0", "player1")
 MANUAL_KIND = "manual"
@@ -494,6 +503,26 @@ class HexoPlayHandler(BaseHTTPRequestHandler):
                 self._send_json(self.controller.state(since=since, timeout_ms=timeout_ms))
             elif path == "/api/adapters":
                 self._send_json(self.controller.adapters())
+            elif path == "/api/training/runs":
+                self._send_json(_training_runs())
+            elif path == "/api/training/run":
+                query = parse_qs(parsed.query)
+                self._send_json(_training_run(str(query.get("name", [""])[0])))
+            elif path == "/api/training/file":
+                query = parse_qs(parsed.query)
+                self._send_training_file(
+                    str(query.get("run", [""])[0]),
+                    str(query.get("path", [""])[0]),
+                )
+            elif path == "/api/training/history":
+                query = parse_qs(parsed.query)
+                self._send_json(
+                    _training_history(
+                        str(query.get("run", [""])[0]),
+                        str(query.get("path", [""])[0]),
+                        _query_int(query.get("record", [None])[0]) or 0,
+                    )
+                )
             elif path == "/" or path == "/index.html":
                 self._send_static("index.html")
             elif path.startswith("/static/"):
@@ -562,11 +591,386 @@ class HexoPlayHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(encoded)
 
+    def _send_training_file(self, run_name: str, artifact_path: str) -> None:
+        path = _resolve_run_path(run_name, artifact_path)
+        if path is None or not path.is_file():
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
+        encoded = path.read_bytes()
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", ARTIFACT_TYPES.get(path.suffix.lower(), "application/octet-stream"))
+        self.send_header("Content-Length", str(len(encoded)))
+        self.end_headers()
+        self.wfile.write(encoded)
+
 
 def _query_int(value: str | None) -> int | None:
     if value in {"", None}:
         return None
     return int(value)
+
+
+def _training_roots() -> tuple[Path, ...]:
+    cwd = Path.cwd()
+    candidates = (cwd / "runs", cwd / "configs" / "runs")
+    roots: list[Path] = []
+    seen: set[str] = set()
+    for root in candidates:
+        resolved = str(root.resolve())
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        roots.append(root)
+    return tuple(roots)
+
+
+def _training_runs() -> dict[str, object]:
+    runs_by_name: dict[str, dict[str, object]] = {}
+    for root in _training_roots():
+        if not root.exists():
+            continue
+        for path in sorted(root.iterdir(), key=lambda item: item.stat().st_mtime if item.exists() else 0, reverse=True):
+            if not path.is_dir():
+                continue
+            diagnostics = path / "diagnostics"
+            selfplay = path / "selfplay"
+            if not diagnostics.exists() and not selfplay.exists():
+                continue
+            current = {
+                "name": path.name,
+                "path": str(path),
+                "diagnostics": str(diagnostics),
+                "selfplay": str(selfplay),
+                "modified": path.stat().st_mtime,
+            }
+            existing = runs_by_name.get(path.name)
+            if existing is None or float(current["modified"]) > float(existing["modified"]):
+                runs_by_name[path.name] = current
+    runs = sorted(runs_by_name.values(), key=lambda item: float(item["modified"]), reverse=True)
+    return {"roots": [str(root) for root in _training_roots()], "runs": runs}
+
+
+def _training_run(name: str) -> dict[str, object]:
+    run_dir = _resolve_run_dir(name)
+    if run_dir is None:
+        raise ValueError("Unknown training run")
+    artifacts = []
+    diagnostics_by_epoch = _diagnostics_by_epoch(run_dir)
+    histories_by_path = _training_histories(run_dir, diagnostics_by_epoch)
+    for path in sorted(run_dir.rglob("*"), key=lambda item: item.stat().st_mtime if item.exists() else 0, reverse=True):
+        if not path.is_file():
+            continue
+        if path.suffix.lower() not in ARTIFACT_SUFFIXES:
+            continue
+        rel = path.relative_to(run_dir).as_posix()
+        history_count = len(histories_by_path.get(rel, ()))
+        artifact: dict[str, object] = {
+            "path": rel,
+            "name": path.name,
+            "bytes": path.stat().st_size,
+            "modified": path.stat().st_mtime,
+            "kind": path.suffix.lower().lstrip(".") or "file",
+            "loadable_history": history_count > 0,
+            "history_count": history_count,
+        }
+        if path.suffix.lower() == ".json":
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                artifact["summary"] = _artifact_summary(payload)
+            except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+                artifact["summary"] = None
+        artifacts.append(artifact)
+    histories = [
+        item
+        for path_histories in histories_by_path.values()
+        for item in path_histories
+    ]
+    histories.sort(
+        key=lambda item: (
+            int(item.get("epoch") or 0),
+            str(item.get("source") or ""),
+            str(item.get("game_id") or ""),
+            int(item.get("record_index") or 0),
+        ),
+        reverse=True,
+    )
+    return {
+        "name": run_dir.name,
+        "path": str(run_dir),
+        "artifacts": artifacts,
+        "histories": histories,
+        "diagnostics_by_epoch": diagnostics_by_epoch,
+    }
+
+
+def _training_history(run_name: str, artifact_path: str, record_index: int = 0) -> dict[str, object]:
+    path = _resolve_run_path(run_name, artifact_path)
+    if path is None or not path.is_file() or path.suffix.lower() != ".hxr":
+        raise ValueError("Unknown game history artifact")
+    if path.stat().st_size <= 0:
+        raise ValueError("Game history artifact is empty")
+
+    with HexoRecordFile.open(path) as record_file:
+        players = [_record_player_payload(player) for player in record_file.players]
+        records = list(record_file.iter_records())
+
+    if not records:
+        raise ValueError("Game history artifact contains no games")
+    if record_index < 0 or record_index >= len(records):
+        raise ValueError(f"Game history record index out of range: {record_index}")
+
+    record = records[record_index]
+    state = engine.new_game(seed=record.seed)
+    applied_actions: list[int] = []
+    for action_id in record.action_ids:
+        action_id = int(action_id)
+        engine.apply_action(state, engine.PlacementAction(unpack_coord_id(action_id)))
+        applied_actions.append(action_id)
+
+    payload = dashboard_state(engine.to_python_state(state))
+    payload.update(
+        {
+            "version": int(path.stat().st_mtime_ns % 9_000_000_000_000_000),
+            "game_id": f"{run_name}:{record.game_id}",
+            "mode": "history",
+            "players": _players_by_role(players),
+            "turn_status": "history",
+            "can_submit": False,
+            "thinking_player": None,
+            "last_bot_decision": None,
+            "error": None,
+            "match": {
+                "players": {item["role"]: item["kind"] for item in players},
+                "time_limit": None,
+                "seed": record.seed,
+            },
+            "history": {
+                "run": run_name,
+                "path": artifact_path,
+                "record_index": record_index,
+                "record_count": len(records),
+                "status": record.status,
+                "winner": record.winner,
+                "placements": record.placements,
+                "action_ids": applied_actions,
+                "abort": _abort_payload(record.abort),
+            },
+            "record_games": [
+                {
+                    "index": index,
+                    "game_id": item.game_id,
+                    "status": item.status,
+                    "actions": len(item.action_ids),
+                    "winner": item.winner,
+                }
+                for index, item in enumerate(records)
+            ],
+        }
+    )
+    return payload
+
+
+def _record_player_payload(player: object) -> dict[str, object]:
+    role = str(getattr(player, "role", ""))
+    label = getattr(player, "label", None)
+    player_id = str(getattr(player, "player_id", role or "player"))
+    kind = "manual"
+    lowered = player_id.lower()
+    if "sealbot" in lowered:
+        kind = "sealbot-best" if "best" in lowered else "sealbot-current"
+    elif "dense" in lowered:
+        kind = "dense-cnn"
+    return {
+        "role": role,
+        "kind": kind,
+        "label": str(label or player_id),
+        "player_id": player_id,
+    }
+
+
+def _training_histories(
+    run_dir: Path,
+    diagnostics_by_epoch: dict[str, object],
+) -> dict[str, list[dict[str, object]]]:
+    histories: dict[str, list[dict[str, object]]] = {}
+    for path in sorted(run_dir.rglob("*.hxr")):
+        if not path.is_file() or path.stat().st_size <= 0:
+            continue
+        rel = path.relative_to(run_dir).as_posix()
+        try:
+            with HexoRecordFile.open(path) as record_file:
+                players = [_record_player_payload(player) for player in record_file.players]
+                records = list(record_file.iter_records())
+        except Exception:
+            continue
+        epoch = _epoch_from_artifact_path(rel)
+        source = _history_source(rel)
+        diagnostics = diagnostics_by_epoch.get(str(epoch), {}) if epoch is not None else {}
+        entries: list[dict[str, object]] = []
+        for index, record in enumerate(records):
+            length = int(record.placements or len(record.action_ids))
+            entries.append(
+                {
+                    "path": rel,
+                    "record_index": index,
+                    "game_id": record.game_id,
+                    "status": record.status,
+                    "winner": record.winner,
+                    "winner_label": _winner_label(record.winner),
+                    "length": length,
+                    "actions": len(record.action_ids),
+                    "epoch": epoch,
+                    "source": source,
+                    "seed": record.seed,
+                    "players": _players_by_role(players),
+                    "diagnostics": diagnostics,
+                    "modified": path.stat().st_mtime,
+                    "bytes": path.stat().st_size,
+                    "abort": _abort_payload(record.abort),
+                }
+            )
+        if entries:
+            histories[rel] = entries
+    return histories
+
+
+def _diagnostics_by_epoch(run_dir: Path) -> dict[str, object]:
+    by_epoch: dict[str, dict[str, object]] = {}
+    diagnostics_dir = run_dir / "diagnostics"
+    if not diagnostics_dir.exists():
+        return by_epoch
+    for path in sorted(diagnostics_dir.glob("*.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        epoch = _epoch_from_artifact_path(path.name)
+        if epoch is None and isinstance(payload, dict) and payload.get("epoch") is not None:
+            try:
+                epoch = int(payload["epoch"])
+            except (TypeError, ValueError):
+                epoch = None
+        if epoch is None:
+            continue
+        key = str(epoch)
+        by_epoch.setdefault(key, {})
+        label = _diagnostic_label(path.name)
+        summary = _artifact_summary(payload)
+        if summary:
+            by_epoch[key][label] = {
+                "path": f"diagnostics/{path.name}",
+                "summary": summary,
+            }
+    return by_epoch
+
+
+def _diagnostic_label(name: str) -> str:
+    lowered = name.lower()
+    if "evaluation" in lowered:
+        return "evaluation"
+    if "selfplay" in lowered:
+        return "selfplay"
+    if lowered.startswith("epoch_"):
+        return "epoch"
+    return Path(name).stem
+
+
+def _history_source(path: str) -> str:
+    parts = Path(path).parts
+    if parts:
+        return str(parts[0])
+    return "history"
+
+
+def _epoch_from_artifact_path(path: str) -> int | None:
+    match = re.search(r"epoch[_-](\d+)", path)
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def _winner_label(winner: object | None) -> str:
+    if winner == "player0":
+        return "P0"
+    if winner == "player1":
+        return "P1"
+    return "None"
+
+
+def _players_by_role(players: list[dict[str, object]]) -> dict[str, dict[str, object]]:
+    by_role = {
+        str(player.get("role")): player
+        for player in players
+        if player.get("role") in PLAYER_ROLES
+    }
+    for role in PLAYER_ROLES:
+        by_role.setdefault(role, {"role": role, "kind": "unknown", "label": role, "player_id": role})
+    return by_role
+
+
+def _abort_payload(abort: object | None) -> object | None:
+    if abort is None:
+        return None
+    return {
+        "stage": getattr(abort, "stage", None),
+        "exception_type": getattr(abort, "exception_type", None),
+        "message": getattr(abort, "message", None),
+    }
+
+
+def _artifact_summary(payload: object) -> object:
+    if not isinstance(payload, dict):
+        return None
+    keys = (
+        "status",
+        "epoch",
+        "positions_per_second",
+        "samples_added",
+        "samples_per_second",
+        "measured_selfplay_positions_per_second",
+        "selected_inference_batch_size",
+        "selected_selfplay_batch_size",
+        "selected_mcts_virtual_batch_size",
+        "selected_mcts_visits",
+        "searched_positions",
+        "mcts_simulations",
+        "mcts_sims_per_searched_position",
+        "meets_target",
+        "games",
+        "completed",
+        "wins",
+        "losses",
+        "mean_turns",
+        "winner",
+        "length",
+    )
+    return {key: payload[key] for key in keys if key in payload}
+
+
+def _resolve_run_dir(name: str) -> Path | None:
+    if not name or "/" in name or "\\" in name or name.startswith("."):
+        return None
+    matches: list[Path] = []
+    for root in _training_roots():
+        resolved_root = root.resolve()
+        path = (resolved_root / name).resolve()
+        if resolved_root != path and resolved_root not in path.parents:
+            continue
+        if path.is_dir():
+            matches.append(path)
+    if not matches:
+        return None
+    return max(matches, key=lambda item: item.stat().st_mtime)
+
+
+def _resolve_run_path(run_name: str, artifact_path: str) -> Path | None:
+    run_dir = _resolve_run_dir(run_name)
+    if run_dir is None or not artifact_path or artifact_path.startswith(("/", "\\")):
+        return None
+    path = (run_dir / artifact_path).resolve()
+    if run_dir.resolve() != path and run_dir.resolve() not in path.parents:
+        return None
+    return path
 
 
 def make_handler(controller: ManualMatchController) -> type[HexoPlayHandler]:

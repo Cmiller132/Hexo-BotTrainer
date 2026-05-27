@@ -2,6 +2,7 @@ const HEX = 19;
 const SQRT3 = Math.sqrt(3);
 const FIT_MOVE_COUNT = 8;
 const FIT_LEGAL_RADIUS = 5;
+const HISTORY_ALL_RUNS = "__all__";
 
 let state = null;
 let tacticsOn = false;
@@ -20,6 +21,16 @@ let boardDrag = null;
 let suppressBoardClick = false;
 let adapters = null;
 let adapterLoadError = null;
+let trainingRuns = [];
+let trainingRun = null;
+let trainingRunDetails = {};
+let trainingLoadError = "";
+let activeScreen = screenFromHash();
+let historyFilters = { query: "", source: "all", winner: "all" };
+let historySelectedRun = HISTORY_ALL_RUNS;
+let historyDetailsLoading = false;
+let selectedHistoryKey = "";
+let historyView = false;
 let polling = false;
 let pollTimer = null;
 let pollAbort = null;
@@ -34,18 +45,68 @@ const PLAYER_KIND_LABELS = {
   manual: "Manual",
   "sealbot-current": "SealBot current",
   "sealbot-best": "SealBot best",
+  "dense-cnn": "Dense CNN",
+  unknown: "Unknown",
 };
 
 const svg = document.getElementById("boardSvg");
 const boardArea = document.getElementById("boardArea");
 const tip = document.getElementById("tip");
 const cellHud = document.getElementById("cellHud");
+const matchScreen = document.getElementById("matchScreen");
+const historyScreen = document.getElementById("historyScreen");
+const trainingRunSelect = document.getElementById("trainingRunSelect");
+const trainingSummary = document.getElementById("trainingSummary");
+const trainingArtifacts = document.getElementById("trainingArtifacts");
+const historyRunSelect = document.getElementById("historyRunSelect");
+const historyRefreshBtn = document.getElementById("historyRefreshBtn");
+const historyOverview = document.getElementById("historyOverview");
+const historySearchInput = document.getElementById("historySearchInput");
+const historySourceSelect = document.getElementById("historySourceSelect");
+const historyWinnerSelect = document.getElementById("historyWinnerSelect");
+const gameHistoryList = document.getElementById("gameHistoryList");
+const gameHistoryDetail = document.getElementById("gameHistoryDetail");
 
 document.getElementById("newBtn").addEventListener("click", () => {
+  historyView = false;
   clearBoardView();
   resetReplay();
   post("/api/new", buildNewMatchPayload(), { resetReplay: true, clearBoard: true });
 });
+document.getElementById("trainingRefreshBtn").addEventListener("click", loadTrainingRuns);
+if (historyRefreshBtn) historyRefreshBtn.addEventListener("click", loadTrainingRuns);
+trainingRunSelect.addEventListener("change", () => loadTrainingRun(trainingRunSelect.value));
+if (historyRunSelect) historyRunSelect.addEventListener("change", async () => {
+  historySelectedRun = historyRunSelect.value || HISTORY_ALL_RUNS;
+  await ensureHistorySelectionLoaded();
+  renderGameHistoryPage();
+});
+document.querySelectorAll("[data-screen]").forEach(button => {
+  button.addEventListener("click", () => {
+    navigateScreen(button.dataset.screen || "match");
+  });
+});
+trainingArtifacts.addEventListener("click", event => {
+  const button = event.target.closest("[data-history-path]");
+  if (!button) return;
+  event.preventDefault();
+  loadTrainingHistory(trainingRun && trainingRun.name, button.dataset.historyPath, Number(button.dataset.recordIndex || 0));
+});
+if (gameHistoryList) gameHistoryList.addEventListener("click", handleGameHistoryClick);
+if (gameHistoryDetail) gameHistoryDetail.addEventListener("click", handleGameHistoryClick);
+if (historySearchInput) historySearchInput.addEventListener("input", event => {
+  historyFilters.query = event.target.value || "";
+  renderGameHistoryPage();
+});
+if (historySourceSelect) historySourceSelect.addEventListener("change", event => {
+  historyFilters.source = event.target.value || "all";
+  renderGameHistoryPage();
+});
+if (historyWinnerSelect) historyWinnerSelect.addEventListener("change", event => {
+  historyFilters.winner = event.target.value || "all";
+  renderGameHistoryPage();
+});
+window.addEventListener("hashchange", () => setScreen(screenFromHash(), { preserveHash: true }));
 document.getElementById("fitBtn").addEventListener("click", fitBoard);
 document.getElementById("zoomInBtn").addEventListener("click", () => zoomBoardAtCenter(0.82));
 document.getElementById("zoomOutBtn").addEventListener("click", () => zoomBoardAtCenter(1.22));
@@ -97,6 +158,7 @@ boardArea.addEventListener("click", handleBoardClick);
 bindBoardViewEvents();
 
 async function loadState() {
+  historyView = false;
   try {
     const res = await fetch("/api/state");
     const data = await safeJson(res);
@@ -124,6 +186,108 @@ async function loadAdapters() {
     adapterLoadError = error && error.message ? error.message : "Adapter API unavailable";
   }
   render();
+}
+
+async function loadTrainingRuns() {
+  const preferred = (trainingRun && trainingRun.name) || trainingRunSelect.value || (historyRunSelect && historyRunSelect.value) || "";
+  try {
+    const res = await fetch("/api/training/runs");
+    const data = await safeJson(res);
+    if (!res.ok) throw new Error((data && data.error) || "Training runs unavailable");
+    trainingRuns = (data && data.runs) || [];
+    trainingLoadError = "";
+    const selected = trainingRuns.some(run => run.name === preferred) ? preferred : ((trainingRuns[0] && trainingRuns[0].name) || "");
+    if (!trainingRuns.some(run => run.name === historySelectedRun)) historySelectedRun = HISTORY_ALL_RUNS;
+    syncTrainingRunSelect(selected);
+    syncHistoryRunSelect(historySelectedRun);
+    if (trainingRuns.length) {
+      await loadTrainingRun(selected, { preserveHistorySelection: true });
+      await ensureHistorySelectionLoaded();
+    }
+    else {
+      trainingRun = null;
+      renderTraining();
+    }
+  } catch (error) {
+    trainingLoadError = error && error.message ? error.message : "Training runs unavailable";
+    trainingRuns = [];
+    trainingRun = null;
+    renderTraining();
+  }
+}
+
+async function fetchTrainingRunDetail(name) {
+  const res = await fetch(`/api/training/run?name=${encodeURIComponent(name)}`);
+  const data = await safeJson(res);
+  if (!res.ok) throw new Error((data && data.error) || "Training run unavailable");
+  trainingRunDetails[name] = data;
+  return data;
+}
+
+async function loadTrainingRun(name, options = {}) {
+  if (!name) {
+    trainingRun = null;
+    syncTrainingRunSelect("");
+    renderTraining();
+    return;
+  }
+  try {
+    trainingRun = await fetchTrainingRunDetail(name);
+    trainingLoadError = "";
+    syncTrainingRunSelect(trainingRun.name || name);
+    if (!options.preserveHistorySelection && historySelectedRun !== HISTORY_ALL_RUNS) {
+      historySelectedRun = trainingRun.name || name;
+      syncHistoryRunSelect(historySelectedRun);
+    }
+  } catch (error) {
+    trainingRun = null;
+    trainingLoadError = error && error.message ? error.message : "Training run unavailable";
+  }
+  renderTraining();
+}
+
+async function ensureHistorySelectionLoaded() {
+  if (!trainingRuns.length) return;
+  const names = historySelectedRun === HISTORY_ALL_RUNS
+    ? trainingRuns.map(run => run.name)
+    : [historySelectedRun];
+  const missing = names.filter(name => name && !trainingRunDetails[name]);
+  if (!missing.length) return;
+  historyDetailsLoading = true;
+  renderGameHistoryPage();
+  try {
+    await Promise.all(missing.map(name => fetchTrainingRunDetail(name)));
+    trainingLoadError = "";
+  } catch (error) {
+    trainingLoadError = error && error.message ? error.message : "Training run unavailable";
+  } finally {
+    historyDetailsLoading = false;
+    renderGameHistoryPage();
+  }
+}
+
+async function loadTrainingHistory(runName, artifactPath, recordIndex = 0) {
+  if (!runName || !artifactPath) return;
+  abortPoll();
+  stopReplay();
+  setPending(true);
+  try {
+    const params = new URLSearchParams({ run: runName, path: artifactPath, record: String(recordIndex || 0) });
+    const res = await fetch(`/api/training/history?${params.toString()}`);
+    const data = await safeJson(res);
+    if (!res.ok) throw new Error((data && data.error) || "Game history unavailable");
+    historyView = true;
+    selectedHistoryKey = historyItemKey({ run: runName, path: artifactPath, record_index: recordIndex || 0 });
+    lastStatusError = `Loaded ${artifactPath}`;
+    applyState(data, { resetReplay: true, clearBoard: true });
+    navigateScreen("match");
+  } catch (error) {
+    lastStatusError = error && error.message ? error.message : "Game history unavailable";
+    render();
+  } finally {
+    setPending(false);
+    renderTraining();
+  }
 }
 
 async function post(url, payload, options = {}) {
@@ -179,6 +343,55 @@ async function safeJson(res) {
   }
 }
 
+function screenFromHash() {
+  return String(window.location.hash || "").replace(/^#\/?/, "") === "history" ? "history" : "match";
+}
+
+function navigateScreen(screen) {
+  setScreen(screen);
+  const hash = activeScreen === "history" ? "#history" : "#match";
+  if (window.location.hash !== hash) window.location.hash = hash;
+}
+
+function setScreen(screen, options = {}) {
+  activeScreen = screen === "history" ? "history" : "match";
+  if (matchScreen) matchScreen.hidden = activeScreen !== "match";
+  if (historyScreen) historyScreen.hidden = activeScreen !== "history";
+  document.querySelectorAll("[data-screen]").forEach(button => {
+    button.classList.toggle("active", button.dataset.screen === activeScreen);
+  });
+  document.body.classList.toggle("history-screen-active", activeScreen === "history");
+  if (!options.preserveHash) {
+    const hash = activeScreen === "history" ? "#history" : "#match";
+    if (window.location.hash && window.location.hash !== hash) window.history.replaceState(null, "", hash);
+  }
+  renderGameHistoryPage();
+}
+
+function syncTrainingRunSelect(selected = "") {
+  const options = trainingRuns.length
+    ? trainingRuns.map(run => `<option value="${escapeAttr(run.name)}">${escapeText(run.name)}</option>`).join("")
+    : `<option value="">No runs</option>`;
+  if (!trainingRunSelect) return;
+  trainingRunSelect.innerHTML = options;
+  trainingRunSelect.value = selected;
+}
+
+function syncHistoryRunSelect(selected = historySelectedRun) {
+  if (!historyRunSelect) return;
+  const runOptions = trainingRuns
+    .map(run => `<option value="${escapeAttr(run.name)}">${escapeText(run.name)}</option>`)
+    .join("");
+  historyRunSelect.innerHTML = trainingRuns.length
+    ? `<option value="${HISTORY_ALL_RUNS}">All runs</option>${runOptions}`
+    : `<option value="">No runs</option>`;
+  const value = selected === HISTORY_ALL_RUNS || trainingRuns.some(run => run.name === selected)
+    ? selected
+    : HISTORY_ALL_RUNS;
+  historySelectedRun = value || HISTORY_ALL_RUNS;
+  historyRunSelect.value = historySelectedRun;
+}
+
 function applyState(next, options = {}) {
   if (!next || typeof next !== "object") return;
   if (isSameGame(next) && !isNewerOrSameState(next)) return;
@@ -215,6 +428,7 @@ function isNewerOrSameState(next) {
 }
 
 function schedulePoll(delay = 0) {
+  if (historyView) return;
   window.clearTimeout(pollTimer);
   pollTimer = window.setTimeout(pollState, delay);
 }
@@ -228,6 +442,7 @@ function abortPoll() {
 }
 
 async function pollState() {
+  if (historyView) return;
   if (polling || pendingRequest) {
     schedulePoll(600);
     return;
@@ -755,6 +970,10 @@ function renderStatus() {
     document.getElementById("statusText").textContent = `Reviewing move ${viewed} / ${total}`;
   } else if (state.winner) {
     document.getElementById("statusText").textContent = `${playerLabel(state.winner)} wins by six in line`;
+  } else if (state.mode === "history") {
+    const history = state.history || {};
+    const status = history.status ? ` (${history.status})` : "";
+    document.getElementById("statusText").textContent = `Viewing ${state.game_id || "game history"}${status}`;
   } else if (turnStatus() === "bot_thinking") {
     document.getElementById("statusText").textContent = `${playerShort(active)} ${playerKindLabel(active)} thinking`;
   } else if (turnStatus() === "starting") {
@@ -1681,8 +1900,366 @@ function setText(id, value) {
   if (el) el.textContent = value;
 }
 
+function renderTraining() {
+  if (!trainingSummary || !trainingArtifacts) return;
+  if (trainingLoadError) {
+    trainingSummary.textContent = trainingLoadError;
+    trainingArtifacts.innerHTML = "";
+    renderGameHistoryPage();
+    return;
+  }
+  if (!trainingRun) {
+    trainingSummary.textContent = "No training run selected";
+    trainingArtifacts.innerHTML = "";
+    renderGameHistoryPage();
+    return;
+  }
+  const artifacts = trainingRun.artifacts || [];
+  const histories = trainingRun.histories || [];
+  const latest = artifacts.find(item => item.name.includes("performance_calibration")) ||
+    artifacts.find(item => item.name.startsWith("epoch_"));
+  const epochs = historyEpochs(histories);
+  const p0Wins = histories.filter(item => item.winner === "player0").length;
+  const p1Wins = histories.filter(item => item.winner === "player1").length;
+  trainingSummary.innerHTML = latest && latest.summary
+    ? Object.entries(latest.summary).map(([key, value]) => summaryMetric(key, value)).join("")
+    : [
+      summaryMetric("Games", histories.length),
+      summaryMetric("Epochs", epochs.length ? `${epochs[0]}-${epochs[epochs.length - 1]}` : "--"),
+      summaryMetric("P0 / P1", `${p0Wins} / ${p1Wins}`),
+      summaryMetric("Artifacts", artifacts.length),
+    ].join("");
+  const shown = artifacts.slice(0, 50);
+  trainingArtifacts.innerHTML = shown.map(item => trainingArtifactRow(trainingRun.name, item)).join("");
+  renderGameHistoryPage();
+}
+
+function trainingArtifactRow(runName, item) {
+  const href = `/api/training/file?run=${encodeURIComponent(runName)}&path=${encodeURIComponent(item.path)}`;
+  const summary = item.summary
+    ? Object.entries(item.summary).map(([key, value]) => `${key}: ${value}`).join(" | ")
+    : `${item.kind} | ${formatBytes(item.bytes)}`;
+  const preview = item.kind === "png" ? `<img src="${href}" alt="">` : "";
+  const loadButton = item.loadable_history
+    ? `<button class="artifact-load-btn" type="button" data-history-path="${escapeAttr(item.path)}" data-record-index="0">Load game</button>`
+    : "";
+  return `<div class="artifact-row">
+    <a class="artifact-link" href="${href}" target="_blank" rel="noreferrer">
+      ${preview}
+      <span>${escapeText(item.name)}</span>
+      <small>${escapeText(summary)}</small>
+    </a>
+    ${loadButton}
+  </div>`;
+}
+
+function renderGameHistoryPage() {
+  if (!historyOverview || !gameHistoryList || !gameHistoryDetail) return;
+  syncHistoryRunSelect(historySelectedRun);
+  if (trainingLoadError) {
+    historyOverview.innerHTML = "";
+    gameHistoryList.innerHTML = `<div class="empty-list">${escapeText(trainingLoadError)}</div>`;
+    gameHistoryDetail.innerHTML = `<div class="empty-list">No game selected</div>`;
+    return;
+  }
+  const runs = historyRunsForPage();
+  const histories = historyItemsForPage(runs);
+  if (!runs.length) {
+    historyOverview.innerHTML = "";
+    gameHistoryList.innerHTML = `<div class="empty-list">${historyDetailsLoading ? "Loading game histories" : "No training run selected"}</div>`;
+    gameHistoryDetail.innerHTML = `<div class="empty-list">No game selected</div>`;
+    return;
+  }
+
+  const filtered = filteredHistoryItems(histories);
+  const selected = selectedHistoryItem(histories, filtered);
+  historyOverview.innerHTML = renderHistoryOverview(histories, filtered);
+  gameHistoryList.innerHTML = filtered.length
+    ? filtered.map(item => gameHistoryListRow(item.run, item)).join("")
+    : `<div class="empty-list">No games match the current filters</div>`;
+  gameHistoryDetail.innerHTML = selected
+    ? gameHistoryDetailHtml(selected.run, selected)
+    : `<div class="empty-list">No game selected</div>`;
+}
+
+function summaryMetric(key, value) {
+  return `<div><span>${escapeText(key)}</span><strong>${escapeText(value)}</strong></div>`;
+}
+
+function historyRunsForPage() {
+  if (historySelectedRun === HISTORY_ALL_RUNS) {
+    return trainingRuns
+      .map(run => trainingRunDetails[run.name])
+      .filter(Boolean);
+  }
+  const selected = trainingRunDetails[historySelectedRun] ||
+    (trainingRun && trainingRun.name === historySelectedRun ? trainingRun : null);
+  return selected ? [selected] : [];
+}
+
+function historyItemsForPage(runs) {
+  return runs.flatMap(run => (run.histories || []).map(item => ({ ...item, run: run.name })));
+}
+
+function handleGameHistoryClick(event) {
+  const loadButton = event.target.closest("[data-history-load]");
+  if (loadButton) {
+    event.preventDefault();
+    const runName = loadButton.dataset.historyRun || (trainingRun && trainingRun.name);
+    selectedHistoryKey = historyItemKey({
+      run: runName,
+      path: loadButton.dataset.historyPath,
+      record_index: Number(loadButton.dataset.recordIndex || 0),
+    });
+    renderGameHistoryPage();
+    loadTrainingHistory(runName, loadButton.dataset.historyPath, Number(loadButton.dataset.recordIndex || 0));
+    return;
+  }
+  const row = event.target.closest("[data-history-key]");
+  if (!row) return;
+  event.preventDefault();
+  selectedHistoryKey = row.dataset.historyKey || "";
+  renderGameHistoryPage();
+}
+
+function filteredHistoryItems(histories) {
+  const query = historyFilters.query.trim().toLowerCase();
+  return histories.filter(item => {
+    if (historyFilters.source !== "all" && String(item.source || "history") !== historyFilters.source) return false;
+    if (historyFilters.winner === "none" && item.winner) return false;
+    if (historyFilters.winner !== "all" && historyFilters.winner !== "none" && item.winner !== historyFilters.winner) return false;
+    if (!query) return true;
+    const haystack = [
+      item.game_id,
+      item.run,
+      item.path,
+      item.status,
+      item.source,
+      item.epoch,
+      item.seed,
+      item.winner_label,
+      item.length,
+      historyPlayerLabel(item.players && item.players.player0),
+      historyPlayerLabel(item.players && item.players.player1),
+      historyDiagnosticsText(item.diagnostics),
+    ].filter(value => value !== undefined && value !== null).join(" ").toLowerCase();
+    return haystack.includes(query);
+  });
+}
+
+function selectedHistoryItem(histories, filtered) {
+  const candidates = filtered.length ? filtered : histories;
+  let selected = candidates.find(item => historyItemKey(item) === selectedHistoryKey) || null;
+  if (!selected && candidates.length) {
+    selected = candidates[0];
+    selectedHistoryKey = historyItemKey(selected);
+  }
+  if (!selected) selectedHistoryKey = "";
+  return selected;
+}
+
+function historyItemKey(item) {
+  return `${item && item.run ? item.run : ""}::${item && item.path ? item.path : ""}::${Number(item && item.record_index || 0)}`;
+}
+
+function historyEpochs(histories) {
+  return [...new Set((histories || [])
+    .map(item => Number(item.epoch))
+    .filter(epoch => Number.isFinite(epoch)))].sort((a, b) => a - b);
+}
+
+function renderHistoryOverview(histories, filtered) {
+  const epochs = historyEpochs(histories);
+  const runCount = new Set(histories.map(item => item.run).filter(Boolean)).size;
+  const lengths = histories.map(item => Number(item.length || item.actions || 0)).filter(value => Number.isFinite(value) && value > 0);
+  const avgLength = lengths.length ? (lengths.reduce((sum, value) => sum + value, 0) / lengths.length).toFixed(1) : "--";
+  const p0Wins = histories.filter(item => item.winner === "player0").length;
+  const p1Wins = histories.filter(item => item.winner === "player1").length;
+  const completed = histories.filter(item => item.status === "completed").length;
+  const evalSummary = latestDiagnosticSummary(histories, "evaluation");
+  const selfplaySummary = latestDiagnosticSummary(histories, "selfplay");
+  const cards = [
+    ["Runs", runCount || "--", historySelectedRun === HISTORY_ALL_RUNS ? "All loaded runs" : "Selected run"],
+    ["Games", `${filtered.length} / ${histories.length}`, "Filtered / total"],
+    ["Epochs", epochs.length ? `${epochs[0]}-${epochs[epochs.length - 1]}` : "--", `${epochs.length} observed`],
+    ["Winners", `P0 ${p0Wins} | P1 ${p1Wins}`, `${completed} completed`],
+    ["Avg Length", avgLength, "Moves per game"],
+  ];
+  if (evalSummary) cards.push(["Evaluation", historyDiagnosticsText({ evaluation: { summary: evalSummary } }), "Latest diagnostics"]);
+  if (selfplaySummary) cards.push(["Selfplay", historyDiagnosticsText({ selfplay: { summary: selfplaySummary } }), "Latest diagnostics"]);
+  return cards.map(([label, value, sub]) => `
+    <div class="history-metric-card">
+      <span>${escapeText(label)}</span>
+      <strong>${escapeText(value)}</strong>
+      <small>${escapeText(sub)}</small>
+    </div>
+  `).join("");
+}
+
+function latestDiagnosticSummary(histories, label) {
+  for (const item of histories || []) {
+    const diagnostic = item.diagnostics && item.diagnostics[label];
+    if (diagnostic && diagnostic.summary) return diagnostic.summary;
+  }
+  return null;
+}
+
+function gameHistoryListRow(runName, item) {
+  const winner = item.winner_label || winnerLabel(item.winner);
+  const status = item.status || "unknown";
+  const epoch = item.epoch ? `Epoch ${item.epoch}` : "No epoch";
+  const source = item.source || "history";
+  const p0 = historyPlayerLabel(item.players && item.players.player0);
+  const p1 = historyPlayerLabel(item.players && item.players.player1);
+  const diagnostics = historyDiagnosticsText(item.diagnostics);
+  const key = historyItemKey(item);
+  const selected = key === selectedHistoryKey;
+  return `<div class="game-history-row ${selected ? "selected" : ""}" data-history-key="${escapeAttr(key)}">
+    <button class="game-history-select" type="button" data-history-key="${escapeAttr(key)}">
+      <span class="history-game-title">${escapeText(item.game_id || item.path)}</span>
+      <span class="history-game-meta">${escapeText(runName || "run")} | ${escapeText(item.path || "")}</span>
+    </button>
+    <div><strong>${escapeText(epoch)}</strong><span>${escapeText(source)} | ${escapeText(status)}</span></div>
+    <div><span class="winner-pill ${winnerClass(item.winner)}">${escapeText(winner)}</span></div>
+    <div><strong>${escapeText(item.length || item.actions || 0)}</strong><span>moves</span></div>
+    <div><strong>P0 ${escapeText(p0)}</strong><span>P1 ${escapeText(p1)}</span></div>
+    <div><strong>${escapeText(diagnostics)}</strong><span>${escapeText(formatHistoryDate(item.modified))}</span></div>
+  </div>`;
+}
+
+function gameHistoryDetailHtml(runName, item) {
+  const winner = item.winner_label || winnerLabel(item.winner);
+  const diagnostics = item.diagnostics || {};
+  const p0 = item.players && item.players.player0;
+  const p1 = item.players && item.players.player1;
+  return `<div class="history-detail-body">
+    <div class="history-detail-hero">
+      <div>
+        <span>Winner</span>
+        <strong class="${winnerClass(item.winner)}">${escapeText(winner)}</strong>
+      </div>
+      <div>
+        <span>Length</span>
+        <strong>${escapeText(item.length || item.actions || 0)}</strong>
+      </div>
+      <div>
+        <span>Epoch</span>
+        <strong>${escapeText(item.epoch || "--")}</strong>
+      </div>
+      <div>
+        <span>Source</span>
+        <strong>${escapeText(item.source || "history")}</strong>
+      </div>
+    </div>
+    <div class="detail-stack">
+      ${detailRow("Run", runName || "Unknown")}
+      ${detailRow("Game", item.game_id || "Unknown")}
+      ${detailRow("Status", item.status || "unknown")}
+      ${detailRow("Seed", item.seed === null || item.seed === undefined ? "--" : item.seed)}
+      ${detailRow("Record", Number(item.record_index || 0))}
+      ${detailRow("Path", item.path || "")}
+      ${detailRow("Modified", formatHistoryDate(item.modified))}
+    </div>
+    <div class="history-detail-section">
+      <div class="detail-section-title">Players</div>
+      <div class="player-detail-grid">
+        ${playerDetail("P0", p0)}
+        ${playerDetail("P1", p1)}
+      </div>
+    </div>
+    <div class="history-detail-section">
+      <div class="detail-section-title">Diagnostics</div>
+      ${diagnosticDetailsHtml(diagnostics)}
+    </div>
+    ${item.abort ? `<div class="history-detail-section"><div class="detail-section-title">Abort</div><div class="detail-note">${escapeText(item.abort)}</div></div>` : ""}
+    <button class="primary-action history-replay-btn" type="button" data-history-load data-history-run="${escapeAttr(runName || "")}" data-history-path="${escapeAttr(item.path)}" data-record-index="${escapeAttr(item.record_index || 0)}">Load Replay</button>
+  </div>`;
+}
+
+function detailRow(label, value) {
+  return `<div class="detail-row"><span>${escapeText(label)}</span><strong>${escapeText(value)}</strong></div>`;
+}
+
+function playerDetail(slot, player) {
+  const label = historyPlayerLabel(player);
+  const kind = player && (player.kind || player.variant || player.id || "");
+  return `<div class="player-detail">
+    <span>${escapeText(slot)}</span>
+    <strong>${escapeText(label)}</strong>
+    <small>${escapeText(kind || "unknown")}</small>
+  </div>`;
+}
+
+function diagnosticDetailsHtml(diagnostics) {
+  if (!diagnostics || typeof diagnostics !== "object" || !Object.keys(diagnostics).length) {
+    return `<div class="detail-note">No diagnostics attached to this game.</div>`;
+  }
+  return Object.entries(diagnostics).map(([label, diagnostic]) => {
+    const summary = diagnostic && diagnostic.summary ? diagnostic.summary : {};
+    const entries = Object.entries(summary);
+    return `<div class="diagnostic-block">
+      <div class="diagnostic-title">${escapeText(label)}</div>
+      <div class="diagnostic-grid">
+        ${entries.length ? entries.map(([key, value]) => `<div><span>${escapeText(key)}</span><strong>${escapeText(value)}</strong></div>`).join("") : `<div><span>Artifact</span><strong>${escapeText(diagnostic && diagnostic.name || "attached")}</strong></div>`}
+      </div>
+    </div>`;
+  }).join("");
+}
+
+function historyPlayerLabel(player) {
+  if (!player) return "Unknown";
+  return player.label || PLAYER_KIND_LABELS[player.kind] || player.kind || "Unknown";
+}
+
+function winnerLabel(winner) {
+  if (winner === "player0") return "P0";
+  if (winner === "player1") return "P1";
+  return "None";
+}
+
+function historyDiagnosticsText(diagnostics) {
+  if (!diagnostics || typeof diagnostics !== "object") return "None";
+  const evalSummary = diagnostics.evaluation && diagnostics.evaluation.summary;
+  if (evalSummary) {
+    const parts = [];
+    if (evalSummary.games !== undefined) parts.push(`${evalSummary.games}g`);
+    if (evalSummary.wins !== undefined || evalSummary.losses !== undefined) parts.push(`${evalSummary.wins || 0}-${evalSummary.losses || 0}`);
+    if (evalSummary.mean_turns !== undefined) parts.push(`${Number(evalSummary.mean_turns).toFixed(1)}t`);
+    return parts.length ? parts.join(" ") : "Eval";
+  }
+  const selfplaySummary = diagnostics.selfplay && diagnostics.selfplay.summary;
+  if (selfplaySummary) {
+    if (selfplaySummary.samples_added !== undefined) return `${selfplaySummary.samples_added} samples`;
+    if (selfplaySummary.searched_positions !== undefined) return `${selfplaySummary.searched_positions} pos`;
+    return "Selfplay";
+  }
+  return Object.keys(diagnostics).length ? Object.keys(diagnostics).join(", ") : "None";
+}
+
+function winnerClass(winner) {
+  if (winner === "player0") return "p0";
+  if (winner === "player1") return "p1";
+  return "none";
+}
+
+function formatHistoryDate(value) {
+  if (!value) return "--";
+  const raw = Number(value);
+  const date = Number.isFinite(raw) ? new Date(raw < 1000000000000 ? raw * 1000 : raw) : new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return date.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+function formatBytes(value) {
+  const bytes = Number(value) || 0;
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 async function init() {
-  await Promise.allSettled([loadAdapters(), loadState()]);
+  setScreen(activeScreen, { preserveHash: true });
+  await Promise.allSettled([loadAdapters(), loadState(), loadTrainingRuns()]);
   render();
 }
 

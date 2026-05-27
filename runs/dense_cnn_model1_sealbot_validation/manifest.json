@@ -1,0 +1,120 @@
+{
+  "run": {
+    "name": "dense_cnn_model1",
+    "output_dir": "E:\\Hexo-BotTrainer\\runs\\dense_cnn_model1_sealbot_validation",
+    "seed": 1
+  },
+  "model": {
+    "name": "dense_cnn",
+    "module": "hexo_models.dense_cnn.plugin",
+    "entry_point": null,
+    "config": {
+      "device": "cuda",
+      "architecture": {
+        "input_channels": 13,
+        "channels": 96,
+        "residual_blocks": 6,
+        "crop_size": 33,
+        "dropout": 0.0,
+        "lookahead_horizons": [
+          1,
+          4,
+          8
+        ]
+      },
+      "training": {
+        "batch_size": 128,
+        "learning_rate": 0.001,
+        "weight_decay": 0.0001,
+        "policy_weight": 1.0,
+        "value_weight": 1.0,
+        "opp_policy_weight": 0.25,
+        "lookahead_weight": 0.25,
+        "amp": true,
+        "max_grad_norm": 1.0
+      },
+      "samples": {
+        "capacity": 200000,
+        "train_sample_count": 4096,
+        "recency_halflife": 50000.0,
+        "compression_level": 6
+      },
+      "selfplay": {
+        "samples_per_epoch": 4096,
+        "search_visits": 128,
+        "active_games": 2048,
+        "max_actions": 512,
+        "temperature": 1.0,
+        "worker_count": 1
+      },
+      "evaluation": {
+        "games_per_epoch": 64,
+        "sealbot_variant": "best",
+        "sealbot_time_limit": 0.05,
+        "max_actions": 512,
+        "require_sealbot": true
+      },
+      "performance": {
+        "calibrate": true,
+        "target_selfplay_positions_per_second": 128.0,
+        "inference_batch_candidates": [
+          128,
+          256,
+          512,
+          1024,
+          2048
+        ],
+        "selfplay_batch_candidates": [
+          512,
+          1024,
+          2048
+        ],
+        "training_batch_candidates": [
+          64,
+          128,
+          192,
+          256,
+          384,
+          512
+        ],
+        "mcts_visit_candidates": [
+          128
+        ],
+        "mcts_virtual_batch_candidates": [
+          4,
+          8,
+          16,
+          32
+        ],
+        "selfplay_probe_positions": 4096,
+        "probe_batches": 1
+      },
+      "debug": {
+        "write_game_history": true,
+        "write_policy_targets": true,
+        "write_sample_previews": true,
+        "preview_games": 4
+      }
+    }
+  },
+  "loop": {
+    "epochs": 1
+  },
+  "selfplay": {
+    "games_per_epoch": 4096,
+    "update_checkpoint_pointer": false,
+    "checkpoint_pointer": "E:\\Hexo-BotTrainer\\data\\checkpoints\\dense_cnn_model1_latest.txt"
+  },
+  "samples": {
+    "train_sample_count": 4096
+  },
+  "train": {
+    "passes_per_epoch": 1
+  },
+  "checkpoint": {
+    "resume_from": null,
+    "initialize_from": null,
+    "save_name": "latest"
+  },
+  "output_dir": "E:\\Hexo-BotTrainer\\runs\\dense_cnn_model1_sealbot_validation"
+}

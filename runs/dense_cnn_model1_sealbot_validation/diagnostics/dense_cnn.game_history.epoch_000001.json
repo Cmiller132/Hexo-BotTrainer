@@ -1,0 +1,1090 @@
+{
+  "epoch": 1,
+  "record_path": "E:\\Hexo-BotTrainer\\runs\\dense_cnn_model1_sealbot_validation\\selfplay\\epoch_000001.hxr",
+  "games": [
+    {
+      "game_id": "epoch-000001-selfplay-001146",
+      "winner": "player1",
+      "truncated": false,
+      "actions": [
+        2147516416,
+        2147188741,
+        2147385340,
+        2147319818,
+        2147385335,
+        2147385339,
+        2147385338,
+        2147385348,
+        2147385349,
+        2147385341,
+        2147385337,
+        2147385352,
+        2147385343,
+        2147385344,
+        2147385342
+      ],
+      "samples": 2
+    },
+    {
+      "game_id": "epoch-000001-selfplay-001863",
+      "winner": "player1",
+      "truncated": false,
+      "actions": [
+        2147516416,
+        2147254270,
+        2147254265,
+        2147188739,
+        2147123206,
+        2147123191,
+        2147057663,
+        2147057651,
+        2146992128,
+        2146992122,
+        2146992116,
+        2146992117,
+        2146992118,
+        2146992125,
+        2146992126,
+        2146992129,
+        2146992127,
+        2146992124,
+        2146992123,
+        2146992130,
+        2146992120,
+        2146992121
+      ],
+      "samples": 2
+    },
+    {
+      "game_id": "epoch-000001-selfplay-001118",
+      "winner": "player0",
+      "truncated": false,
+      "actions": [
+        2147516416,
+        2147385348,
+        2147450890,
+        2147516411,
+        2147516410,
+        2147516417,
+        2147516415,
+        2147516422,
+        2147516420,
+        2147516419,
+        2147516409,
+        2147516421,
+        2147516423,
+        2147516404,
+        2147450895,
+        2147516413,
+        2147516424,
+        2147516412,
+        2147516426,
+        2147516414,
+        2147516408,
+        2147516428,
+        2147516418,
+        2147516425
+      ],
+      "samples": 2
+    },
+    {
+      "game_id": "epoch-000001-selfplay-000451",
+      "winner": "player0",
+      "truncated": false,
+      "actions": [
+        2147516416,
+        2147254269,
+        2147450888,
+        2147516408,
+        2147581940,
+        2147581953,
+        2147581952,
+        2147581954,
+        2147581956,
+        2147581947,
+        2147581949,
+        2147581950,
+        2147581961,
+        2147647474,
+        2147647481,
+        2147647486,
+        2147647489,
+        2147647491,
+        2147647493,
+        2147647484,
+        2147647485,
+        2147647483,
+        2147647495,
+        2147647487,
+        2147647488
+      ],
+      "samples": 2
+    }
+  ],
+  "preview_artifacts": [
+    {
+      "status": "rendered",
+      "game_id": "epoch-000001-selfplay-001146",
+      "action_count": 15,
+      "rendered_actions": 15,
+      "omitted_actions": 0,
+      "crop_size": 33,
+      "center": {
+        "q": -2,
+        "r": 0
+      },
+      "renderer": "pillow",
+      "files": [
+        {
+          "path": "E:\\Hexo-BotTrainer\\runs\\dense_cnn_model1_sealbot_validation\\diagnostics\\dense_cnn_previews\\epoch_000001\\epoch-000001-selfplay-001146.01.png",
+          "filename": "epoch-000001-selfplay-001146.01.png",
+          "action_start": 0,
+          "action_end": 15,
+          "action_count": 15,
+          "bytes": 3016,
+          "renderer": "pillow"
+        }
+      ],
+      "actions": [
+        {
+          "index": 0,
+          "action_id": 2147516416,
+          "q": 0,
+          "r": 0,
+          "row": 16,
+          "col": 18,
+          "player": "player0",
+          "in_crop": true
+        },
+        {
+          "index": 1,
+          "action_id": 2147188741,
+          "q": -5,
+          "r": 5,
+          "row": 21,
+          "col": 13,
+          "player": "player1",
+          "in_crop": true
+        },
+        {
+          "index": 2,
+          "action_id": 2147385340,
+          "q": -2,
+          "r": -4,
+          "row": 12,
+          "col": 16,
+          "player": "player0",
+          "in_crop": true
+        },
+        {
+          "index": 3,
+          "action_id": 2147319818,
+          "q": -3,
+          "r": 10,
+          "row": 26,
+          "col": 15,
+          "player": "player1",
+          "in_crop": true
+        },
+        {
+          "index": 4,
+          "action_id": 2147385335,
+          "q": -2,
+          "r": -9,
+          "row": 7,
+          "col": 16,
+          "player": "player0",
+          "in_crop": true
+        },
+        {
+          "index": 5,
+          "action_id": 2147385339,
+          "q": -2,
+          "r": -5,
+          "row": 11,
+          "col": 16,
+          "player": "player1",
+          "in_crop": true
+        },
+        {
+          "index": 6,
+          "action_id": 2147385338,
+          "q": -2,
+          "r": -6,
+          "row": 10,
+          "col": 16,
+          "player": "player0",
+          "in_crop": true
+        },
+        {
+          "index": 7,
+          "action_id": 2147385348,
+          "q": -2,
+          "r": 4,
+          "row": 20,
+          "col": 16,
+          "player": "player1",
+          "in_crop": true
+        },
+        {
+          "index": 8,
+          "action_id": 2147385349,
+          "q": -2,
+          "r": 5,
+          "row": 21,
+          "col": 16,
+          "player": "player0",
+          "in_crop": true
+        },
+        {
+          "index": 9,
+          "action_id": 2147385341,
+          "q": -2,
+          "r": -3,
+          "row": 13,
+          "col": 16,
+          "player": "player1",
+          "in_crop": true
+        },
+        {
+          "index": 10,
+          "action_id": 2147385337,
+          "q": -2,
+          "r": -7,
+          "row": 9,
+          "col": 16,
+          "player": "player0",
+          "in_crop": true
+        },
+        {
+          "index": 11,
+          "action_id": 2147385352,
+          "q": -2,
+          "r": 8,
+          "row": 24,
+          "col": 16,
+          "player": "player1",
+          "in_crop": true
+        },
+        {
+          "index": 12,
+          "action_id": 2147385343,
+          "q": -2,
+          "r": -1,
+          "row": 15,
+          "col": 16,
+          "player": "player0",
+          "in_crop": true
+        },
+        {
+          "index": 13,
+          "action_id": 2147385344,
+          "q": -2,
+          "r": 0,
+          "row": 16,
+          "col": 16,
+          "player": "player1",
+          "in_crop": true
+        },
+        {
+          "index": 14,
+          "action_id": 2147385342,
+          "q": -2,
+          "r": -2,
+          "row": 14,
+          "col": 16,
+          "player": "player0",
+          "in_crop": true
+        }
+      ]
+    },
+    {
+      "status": "rendered",
+      "game_id": "epoch-000001-selfplay-001863",
+      "action_count": 22,
+      "rendered_actions": 22,
+      "omitted_actions": 0,
+      "crop_size": 33,
+      "center": {
+        "q": -7,
+        "r": -4
+      },
+      "renderer": "pillow",
+      "files": [
+        {
+          "path": "E:\\Hexo-BotTrainer\\runs\\dense_cnn_model1_sealbot_validation\\diagnostics\\dense_cnn_previews\\epoch_000001\\epoch-000001-selfplay-001863.01.png",
+          "filename": "epoch-000001-selfplay-001863.01.png",
+          "action_start": 0,
+          "action_end": 22,
+          "action_count": 22,
+          "bytes": 3039,
+          "renderer": "pillow"
+        }
+      ],
+      "actions": [
+        {
+          "index": 0,
+          "action_id": 2147516416,
+          "q": 0,
+          "r": 0,
+          "row": 20,
+          "col": 23,
+          "player": "player0",
+          "in_crop": true
+        },
+        {
+          "index": 1,
+          "action_id": 2147254270,
+          "q": -4,
+          "r": -2,
+          "row": 18,
+          "col": 19,
+          "player": "player1",
+          "in_crop": true
+        },
+        {
+          "index": 2,
+          "action_id": 2147254265,
+          "q": -4,
+          "r": -7,
+          "row": 13,
+          "col": 19,
+          "player": "player0",
+          "in_crop": true
+        },
+        {
+          "index": 3,
+          "action_id": 2147188739,
+          "q": -5,
+          "r": 3,
+          "row": 23,
+          "col": 18,
+          "player": "player1",
+          "in_crop": true
+        },
+        {
+          "index": 4,
+          "action_id": 2147123206,
+          "q": -6,
+          "r": 6,
+          "row": 26,
+          "col": 17,
+          "player": "player0",
+          "in_crop": true
+        },
+        {
+          "index": 5,
+          "action_id": 2147123191,
+          "q": -6,
+          "r": -9,
+          "row": 11,
+          "col": 17,
+          "player": "player1",
+          "in_crop": true
+        },
+        {
+          "index": 6,
+          "action_id": 2147057663,
+          "q": -7,
+          "r": -1,
+          "row": 19,
+          "col": 16,
+          "player": "player0",
+          "in_crop": true
+        },
+        {
+          "index": 7,
+          "action_id": 2147057651,
+          "q": -7,
+          "r": -13,
+          "row": 7,
+          "col": 16,
+          "player": "player1",
+          "in_crop": true
+        },
+        {
+          "index": 8,
+          "action_id": 2146992128,
+          "q": -8,
+          "r": 0,
+          "row": 20,
+          "col": 15,
+          "player": "player0",
+          "in_crop": true
+        },
+        {
+          "index": 9,
+          "action_id": 2146992122,
+          "q": -8,
+          "r": -6,
+          "row": 14,
+          "col": 15,
+          "player": "player1",
+          "in_crop": true
+        },
+        {
+          "index": 10,
+          "action_id": 2146992116,
+          "q": -8,
+          "r": -12,
+          "row": 8,
+          "col": 15,
+          "player": "player0",
+          "in_crop": true
+        },
+        {
+          "index": 11,
+          "action_id": 2146992117,
+          "q": -8,
+          "r": -11,
+          "row": 9,
+          "col": 15,
+          "player": "player1",
+          "in_crop": true
+        },
+        {
+          "index": 12,
+          "action_id": 2146992118,
+          "q": -8,
+          "r": -10,
+          "row": 10,
+          "col": 15,
+          "player": "player0",
+          "in_crop": true
+        },
+        {
+          "index": 13,
+          "action_id": 2146992125,
+          "q": -8,
+          "r": -3,
+          "row": 17,
+          "col": 15,
+          "player": "player1",
+          "in_crop": true
+        },
+        {
+          "index": 14,
+          "action_id": 2146992126,
+          "q": -8,
+          "r": -2,
+          "row": 18,
+          "col": 15,
+          "player": "player0",
+          "in_crop": true
+        },
+        {
+          "index": 15,
+          "action_id": 2146992129,
+          "q": -8,
+          "r": 1,
+          "row": 21,
+          "col": 15,
+          "player": "player1",
+          "in_crop": true
+        },
+        {
+          "index": 16,
+          "action_id": 2146992127,
+          "q": -8,
+          "r": -1,
+          "row": 19,
+          "col": 15,
+          "player": "player0",
+          "in_crop": true
+        },
+        {
+          "index": 17,
+          "action_id": 2146992124,
+          "q": -8,
+          "r": -4,
+          "row": 16,
+          "col": 15,
+          "player": "player1",
+          "in_crop": true
+        },
+        {
+          "index": 18,
+          "action_id": 2146992123,
+          "q": -8,
+          "r": -5,
+          "row": 15,
+          "col": 15,
+          "player": "player0",
+          "in_crop": true
+        },
+        {
+          "index": 19,
+          "action_id": 2146992130,
+          "q": -8,
+          "r": 2,
+          "row": 22,
+          "col": 15,
+          "player": "player1",
+          "in_crop": true
+        },
+        {
+          "index": 20,
+          "action_id": 2146992120,
+          "q": -8,
+          "r": -8,
+          "row": 12,
+          "col": 15,
+          "player": "player0",
+          "in_crop": true
+        },
+        {
+          "index": 21,
+          "action_id": 2146992121,
+          "q": -8,
+          "r": -7,
+          "row": 13,
+          "col": 15,
+          "player": "player1",
+          "in_crop": true
+        }
+      ]
+    },
+    {
+      "status": "rendered",
+      "game_id": "epoch-000001-selfplay-001118",
+      "action_count": 24,
+      "rendered_actions": 24,
+      "omitted_actions": 0,
+      "crop_size": 33,
+      "center": {
+        "q": 0,
+        "r": 2
+      },
+      "renderer": "pillow",
+      "files": [
+        {
+          "path": "E:\\Hexo-BotTrainer\\runs\\dense_cnn_model1_sealbot_validation\\diagnostics\\dense_cnn_previews\\epoch_000001\\epoch-000001-selfplay-001118.01.png",
+          "filename": "epoch-000001-selfplay-001118.01.png",
+          "action_start": 0,
+          "action_end": 24,
+          "action_count": 24,
+          "bytes": 3049,
+          "renderer": "pillow"
+        }
+      ],
+      "actions": [
+        {
+          "index": 0,
+          "action_id": 2147516416,
+          "q": 0,
+          "r": 0,
+          "row": 14,
+          "col": 16,
+          "player": "player0",
+          "in_crop": true
+        },
+        {
+          "index": 1,
+          "action_id": 2147385348,
+          "q": -2,
+          "r": 4,
+          "row": 18,
+          "col": 14,
+          "player": "player1",
+          "in_crop": true
+        },
+        {
+          "index": 2,
+          "action_id": 2147450890,
+          "q": -1,
+          "r": 10,
+          "row": 24,
+          "col": 15,
+          "player": "player0",
+          "in_crop": true
+        },
+        {
+          "index": 3,
+          "action_id": 2147516411,
+          "q": 0,
+          "r": -5,
+          "row": 9,
+          "col": 16,
+          "player": "player1",
+          "in_crop": true
+        },
+        {
+          "index": 4,
+          "action_id": 2147516410,
+          "q": 0,
+          "r": -6,
+          "row": 8,
+          "col": 16,
+          "player": "player0",
+          "in_crop": true
+        },
+        {
+          "index": 5,
+          "action_id": 2147516417,
+          "q": 0,
+          "r": 1,
+          "row": 15,
+          "col": 16,
+          "player": "player1",
+          "in_crop": true
+        },
+        {
+          "index": 6,
+          "action_id": 2147516415,
+          "q": 0,
+          "r": -1,
+          "row": 13,
+          "col": 16,
+          "player": "player0",
+          "in_crop": true
+        },
+        {
+          "index": 7,
+          "action_id": 2147516422,
+          "q": 0,
+          "r": 6,
+          "row": 20,
+          "col": 16,
+          "player": "player1",
+          "in_crop": true
+        },
+        {
+          "index": 8,
+          "action_id": 2147516420,
+          "q": 0,
+          "r": 4,
+          "row": 18,
+          "col": 16,
+          "player": "player0",
+          "in_crop": true
+        },
+        {
+          "index": 9,
+          "action_id": 2147516419,
+          "q": 0,
+          "r": 3,
+          "row": 17,
+          "col": 16,
+          "player": "player1",
+          "in_crop": true
+        },
+        {
+          "index": 10,
+          "action_id": 2147516409,
+          "q": 0,
+          "r": -7,
+          "row": 7,
+          "col": 16,
+          "player": "player0",
+          "in_crop": true
+        },
+        {
+          "index": 11,
+          "action_id": 2147516421,
+          "q": 0,
+          "r": 5,
+          "row": 19,
+          "col": 16,
+          "player": "player1",
+          "in_crop": true
+        },
+        {
+          "index": 12,
+          "action_id": 2147516423,
+          "q": 0,
+          "r": 7,
+          "row": 21,
+          "col": 16,
+          "player": "player0",
+          "in_crop": true
+        },
+        {
+          "index": 13,
+          "action_id": 2147516404,
+          "q": 0,
+          "r": -12,
+          "row": 2,
+          "col": 16,
+          "player": "player1",
+          "in_crop": true
+        },
+        {
+          "index": 14,
+          "action_id": 2147450895,
+          "q": -1,
+          "r": 15,
+          "row": 29,
+          "col": 15,
+          "player": "player0",
+          "in_crop": true
+        },
+        {
+          "index": 15,
+          "action_id": 2147516413,
+          "q": 0,
+          "r": -3,
+          "row": 11,
+          "col": 16,
+          "player": "player1",
+          "in_crop": true
+        },
+        {
+          "index": 16,
+          "action_id": 2147516424,
+          "q": 0,
+          "r": 8,
+          "row": 22,
+          "col": 16,
+          "player": "player0",
+          "in_crop": true
+        },
+        {
+          "index": 17,
+          "action_id": 2147516412,
+          "q": 0,
+          "r": -4,
+          "row": 10,
+          "col": 16,
+          "player": "player1",
+          "in_crop": true
+        },
+        {
+          "index": 18,
+          "action_id": 2147516426,
+          "q": 0,
+          "r": 10,
+          "row": 24,
+          "col": 16,
+          "player": "player0",
+          "in_crop": true
+        },
+        {
+          "index": 19,
+          "action_id": 2147516414,
+          "q": 0,
+          "r": -2,
+          "row": 12,
+          "col": 16,
+          "player": "player1",
+          "in_crop": true
+        },
+        {
+          "index": 20,
+          "action_id": 2147516408,
+          "q": 0,
+          "r": -8,
+          "row": 6,
+          "col": 16,
+          "player": "player0",
+          "in_crop": true
+        },
+        {
+          "index": 21,
+          "action_id": 2147516428,
+          "q": 0,
+          "r": 12,
+          "row": 26,
+          "col": 16,
+          "player": "player1",
+          "in_crop": true
+        },
+        {
+          "index": 22,
+          "action_id": 2147516418,
+          "q": 0,
+          "r": 2,
+          "row": 16,
+          "col": 16,
+          "player": "player0",
+          "in_crop": true
+        },
+        {
+          "index": 23,
+          "action_id": 2147516425,
+          "q": 0,
+          "r": 9,
+          "row": 23,
+          "col": 16,
+          "player": "player1",
+          "in_crop": true
+        }
+      ]
+    },
+    {
+      "status": "rendered",
+      "game_id": "epoch-000001-selfplay-000451",
+      "action_count": 25,
+      "rendered_actions": 25,
+      "omitted_actions": 0,
+      "crop_size": 33,
+      "center": {
+        "q": 1,
+        "r": -1
+      },
+      "renderer": "pillow",
+      "files": [
+        {
+          "path": "E:\\Hexo-BotTrainer\\runs\\dense_cnn_model1_sealbot_validation\\diagnostics\\dense_cnn_previews\\epoch_000001\\epoch-000001-selfplay-000451.01.png",
+          "filename": "epoch-000001-selfplay-000451.01.png",
+          "action_start": 0,
+          "action_end": 25,
+          "action_count": 25,
+          "bytes": 3018,
+          "renderer": "pillow"
+        }
+      ],
+      "actions": [
+        {
+          "index": 0,
+          "action_id": 2147516416,
+          "q": 0,
+          "r": 0,
+          "row": 17,
+          "col": 15,
+          "player": "player0",
+          "in_crop": true
+        },
+        {
+          "index": 1,
+          "action_id": 2147254269,
+          "q": -4,
+          "r": -3,
+          "row": 14,
+          "col": 11,
+          "player": "player1",
+          "in_crop": true
+        },
+        {
+          "index": 2,
+          "action_id": 2147450888,
+          "q": -1,
+          "r": 8,
+          "row": 25,
+          "col": 14,
+          "player": "player0",
+          "in_crop": true
+        },
+        {
+          "index": 3,
+          "action_id": 2147516408,
+          "q": 0,
+          "r": -8,
+          "row": 9,
+          "col": 15,
+          "player": "player1",
+          "in_crop": true
+        },
+        {
+          "index": 4,
+          "action_id": 2147581940,
+          "q": 1,
+          "r": -12,
+          "row": 5,
+          "col": 16,
+          "player": "player0",
+          "in_crop": true
+        },
+        {
+          "index": 5,
+          "action_id": 2147581953,
+          "q": 1,
+          "r": 1,
+          "row": 18,
+          "col": 16,
+          "player": "player1",
+          "in_crop": true
+        },
+        {
+          "index": 6,
+          "action_id": 2147581952,
+          "q": 1,
+          "r": 0,
+          "row": 17,
+          "col": 16,
+          "player": "player0",
+          "in_crop": true
+        },
+        {
+          "index": 7,
+          "action_id": 2147581954,
+          "q": 1,
+          "r": 2,
+          "row": 19,
+          "col": 16,
+          "player": "player1",
+          "in_crop": true
+        },
+        {
+          "index": 8,
+          "action_id": 2147581956,
+          "q": 1,
+          "r": 4,
+          "row": 21,
+          "col": 16,
+          "player": "player0",
+          "in_crop": true
+        },
+        {
+          "index": 9,
+          "action_id": 2147581947,
+          "q": 1,
+          "r": -5,
+          "row": 12,
+          "col": 16,
+          "player": "player1",
+          "in_crop": true
+        },
+        {
+          "index": 10,
+          "action_id": 2147581949,
+          "q": 1,
+          "r": -3,
+          "row": 14,
+          "col": 16,
+          "player": "player0",
+          "in_crop": true
+        },
+        {
+          "index": 11,
+          "action_id": 2147581950,
+          "q": 1,
+          "r": -2,
+          "row": 15,
+          "col": 16,
+          "player": "player1",
+          "in_crop": true
+        },
+        {
+          "index": 12,
+          "action_id": 2147581961,
+          "q": 1,
+          "r": 9,
+          "row": 26,
+          "col": 16,
+          "player": "player0",
+          "in_crop": true
+        },
+        {
+          "index": 13,
+          "action_id": 2147647474,
+          "q": 2,
+          "r": -14,
+          "row": 3,
+          "col": 17,
+          "player": "player1",
+          "in_crop": true
+        },
+        {
+          "index": 14,
+          "action_id": 2147647481,
+          "q": 2,
+          "r": -7,
+          "row": 10,
+          "col": 17,
+          "player": "player0",
+          "in_crop": true
+        },
+        {
+          "index": 15,
+          "action_id": 2147647486,
+          "q": 2,
+          "r": -2,
+          "row": 15,
+          "col": 17,
+          "player": "player1",
+          "in_crop": true
+        },
+        {
+          "index": 16,
+          "action_id": 2147647489,
+          "q": 2,
+          "r": 1,
+          "row": 18,
+          "col": 17,
+          "player": "player0",
+          "in_crop": true
+        },
+        {
+          "index": 17,
+          "action_id": 2147647491,
+          "q": 2,
+          "r": 3,
+          "row": 20,
+          "col": 17,
+          "player": "player1",
+          "in_crop": true
+        },
+        {
+          "index": 18,
+          "action_id": 2147647493,
+          "q": 2,
+          "r": 5,
+          "row": 22,
+          "col": 17,
+          "player": "player0",
+          "in_crop": true
+        },
+        {
+          "index": 19,
+          "action_id": 2147647484,
+          "q": 2,
+          "r": -4,
+          "row": 13,
+          "col": 17,
+          "player": "player1",
+          "in_crop": true
+        },
+        {
+          "index": 20,
+          "action_id": 2147647485,
+          "q": 2,
+          "r": -3,
+          "row": 14,
+          "col": 17,
+          "player": "player0",
+          "in_crop": true
+        },
+        {
+          "index": 21,
+          "action_id": 2147647483,
+          "q": 2,
+          "r": -5,
+          "row": 12,
+          "col": 17,
+          "player": "player1",
+          "in_crop": true
+        },
+        {
+          "index": 22,
+          "action_id": 2147647495,
+          "q": 2,
+          "r": 7,
+          "row": 24,
+          "col": 17,
+          "player": "player0",
+          "in_crop": true
+        },
+        {
+          "index": 23,
+          "action_id": 2147647487,
+          "q": 2,
+          "r": -1,
+          "row": 16,
+          "col": 17,
+          "player": "player1",
+          "in_crop": true
+        },
+        {
+          "index": 24,
+          "action_id": 2147647488,
+          "q": 2,
+          "r": 0,
+          "row": 17,
+          "col": 17,
+          "player": "player0",
+          "in_crop": true
+        }
+      ]
+    }
+  ]
+}

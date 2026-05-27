@@ -12,7 +12,8 @@ The fixed epoch order is:
 3. select the sample window for training;
 4. select deterministic D6 symmetries for that window;
 5. train the model for the configured number of passes;
-6. save an epoch checkpoint for the next epoch.
+6. save an epoch checkpoint for the next epoch;
+7. run model-owned epoch evaluation when the plugin provides it.
 """
 
 from __future__ import annotations
@@ -44,6 +45,7 @@ class EpochResult:
     symmetries: Mapping[str, Any]
     training: Mapping[str, Any]
     checkpoint: Mapping[str, Any]
+    evaluation: Mapping[str, Any]
 
 
 def run_epochs(
@@ -56,8 +58,9 @@ def run_epochs(
     and diagnostics use `epoch_000001`, `epoch_000002`, and so on.
     """
 
+    start_epoch = _start_epoch(components)
     results: list[EpochResult] = []
-    for epoch in range(1, ctx.config.loop.epochs + 1):
+    for epoch in range(start_epoch, ctx.config.loop.epochs + 1):
         # Treat the whole epoch as one diagnostic unit while `EpochResult`
         # preserves the finer-grained outcomes inside it.
         started_at = ctx.diagnostics.start_stage(f"epoch_{epoch:06d}")
@@ -81,7 +84,12 @@ def run_epochs(
             metadata={"result": result},
         )
 
-    return {"epochs": len(results), "results": tuple(results)}
+    return {
+        "epochs": len(results),
+        "start_epoch": start_epoch,
+        "target_epoch": ctx.config.loop.epochs,
+        "results": tuple(results),
+    }
 
 
 def run_epoch(
@@ -102,6 +110,7 @@ def run_epoch(
     symmetry_result = select_epoch_symmetries(ctx, components, epoch=epoch)
     training_result = train_passes(ctx, components, epoch=epoch)
     checkpoint_result = save_epoch_checkpoint(ctx, components, epoch=epoch)
+    evaluation_result = evaluate_epoch(ctx, components, epoch=epoch)
 
     return EpochResult(
         epoch=epoch,
@@ -113,4 +122,34 @@ def run_epoch(
         symmetries=symmetry_result,
         training=training_result,
         checkpoint=checkpoint_result,
+        evaluation=evaluation_result,
     )
+
+
+def evaluate_epoch(
+    ctx: RunContext,
+    components: TrainingComponents,
+    *,
+    epoch: int,
+) -> dict[str, Any]:
+    """Run optional model-owned evaluation after the epoch checkpoint exists."""
+
+    plugin = components.model.plugin
+    if hasattr(plugin, "evaluate_epoch"):
+        return plugin.evaluate_epoch(ctx=ctx, components=components, epoch=epoch)
+    return {
+        "status": "skipped",
+        "epoch": epoch,
+        "reason": "model plugin has no evaluate_epoch hook",
+    }
+
+
+def _start_epoch(components: TrainingComponents) -> int:
+    state = components.shared.checkpoint_state
+    if not isinstance(state, Mapping) or state.get("status") != "loaded":
+        return 1
+    try:
+        loaded_epoch = int(state.get("epoch") or 0)
+    except (TypeError, ValueError):
+        return 1
+    return max(1, loaded_epoch + 1)

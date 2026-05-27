@@ -1,0 +1,15 @@
+{
+  "stage": "initialize_run",
+  "status": "completed",
+  "elapsed_seconds": 0.000981199904344976,
+  "metadata": {
+    "result": {
+      "config": "E:\\Hexo-BotTrainer\\runs\\dense_cnn_model1_sealbot_validation\\diagnostics\\config.normalized.json",
+      "manifest": "E:\\Hexo-BotTrainer\\runs\\dense_cnn_model1_sealbot_validation\\manifest.json",
+      "sample_store": {
+        "path": "E:\\Hexo-BotTrainer\\runs\\dense_cnn_model1_sealbot_validation\\samples",
+        "mode": "append"
+      }
+    }
+  }
+}

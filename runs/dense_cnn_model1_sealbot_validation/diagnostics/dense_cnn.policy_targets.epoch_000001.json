@@ -1,0 +1,972 @@
+{
+  "epoch": 1,
+  "sample_count": 4096,
+  "d6": {
+    "mode": "random_per_training_expansion",
+    "preview_count": 8
+  },
+  "preview": [
+    {
+      "sample_index": 0,
+      "pass_index": 0,
+      "game_id": "epoch-000001-selfplay-000686",
+      "turn_index": 0,
+      "current_player": "player0",
+      "phase": "Opening",
+      "value": -1.0,
+      "lookahead": {
+        "1": -1.0,
+        "4": -1.0,
+        "8": -1.0
+      },
+      "symmetry": 8,
+      "nonzero_policy_cells": [
+        544
+      ],
+      "nonzero_opp_policy_cells": [
+        281,
+        282,
+        283,
+        285,
+        286,
+        287,
+        312,
+        313,
+        314,
+        315,
+        316,
+        317,
+        319,
+        344,
+        345,
+        347
+      ],
+      "policy": [
+        {
+          "action_id": 2147516416,
+          "weight": 1.0
+        }
+      ],
+      "opp_policy": [
+        {
+          "action_id": 2146992128,
+          "weight": 0.0
+        },
+        {
+          "action_id": 2146992129,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2146992130,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2146992131,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2146992132,
+          "weight": 0.0
+        },
+        {
+          "action_id": 2146992133,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2146992134,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2146992135,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2146992136,
+          "weight": 0.0
+        },
+        {
+          "action_id": 2147057663,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2147057664,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2147057665,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2147057666,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2147057667,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2147057668,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2147057669,
+          "weight": 0.0
+        }
+      ],
+      "metadata": {
+        "configured_search_visits": 128,
+        "epoch": 1,
+        "mcts_sims_exact": true,
+        "opp_policy_source": "future_opponent_mcts",
+        "sample_source": "mcts",
+        "search_visits": 128
+      }
+    },
+    {
+      "sample_index": 1,
+      "pass_index": 0,
+      "game_id": "epoch-000001-selfplay-000513",
+      "turn_index": 0,
+      "current_player": "player0",
+      "phase": "Opening",
+      "value": 1.0,
+      "lookahead": {
+        "1": 1.0,
+        "4": 1.0,
+        "8": 1.0
+      },
+      "symmetry": 7,
+      "nonzero_policy_cells": [
+        544
+      ],
+      "nonzero_opp_policy_cells": [
+        283,
+        286,
+        288,
+        312,
+        314,
+        315,
+        316,
+        318,
+        319,
+        321,
+        344,
+        345,
+        346,
+        347,
+        348,
+        349
+      ],
+      "policy": [
+        {
+          "action_id": 2147516416,
+          "weight": 1.0
+        }
+      ],
+      "opp_policy": [
+        {
+          "action_id": 2146992128,
+          "weight": 0.0
+        },
+        {
+          "action_id": 2146992129,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2146992130,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2146992131,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2146992132,
+          "weight": 0.0
+        },
+        {
+          "action_id": 2146992133,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2146992134,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2146992135,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2146992136,
+          "weight": 0.0
+        },
+        {
+          "action_id": 2147057663,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2147057664,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2147057665,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2147057666,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2147057667,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2147057668,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2147057669,
+          "weight": 0.0
+        }
+      ],
+      "metadata": {
+        "configured_search_visits": 128,
+        "epoch": 1,
+        "mcts_sims_exact": true,
+        "opp_policy_source": "future_opponent_mcts",
+        "sample_source": "mcts",
+        "search_visits": 128
+      }
+    },
+    {
+      "sample_index": 2,
+      "pass_index": 0,
+      "game_id": "epoch-000001-selfplay-001617",
+      "turn_index": 0,
+      "current_player": "player0",
+      "phase": "Opening",
+      "value": -1.0,
+      "lookahead": {
+        "1": -1.0,
+        "4": -1.0,
+        "8": -1.0
+      },
+      "symmetry": 9,
+      "nonzero_policy_cells": [
+        544
+      ],
+      "nonzero_opp_policy_cells": [
+        280,
+        281,
+        282,
+        283,
+        286,
+        287,
+        314,
+        315,
+        316,
+        317,
+        319,
+        320,
+        321,
+        344,
+        345,
+        348
+      ],
+      "policy": [
+        {
+          "action_id": 2147516416,
+          "weight": 1.0
+        }
+      ],
+      "opp_policy": [
+        {
+          "action_id": 2146992128,
+          "weight": 0.0
+        },
+        {
+          "action_id": 2146992129,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2146992130,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2146992131,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2146992132,
+          "weight": 0.0
+        },
+        {
+          "action_id": 2146992133,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2146992134,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2146992135,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2146992136,
+          "weight": 0.0
+        },
+        {
+          "action_id": 2147057663,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2147057664,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2147057665,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2147057666,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2147057667,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2147057668,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2147057669,
+          "weight": 0.0
+        }
+      ],
+      "metadata": {
+        "configured_search_visits": 128,
+        "epoch": 1,
+        "mcts_sims_exact": true,
+        "opp_policy_source": "future_opponent_mcts",
+        "sample_source": "mcts",
+        "search_visits": 128
+      }
+    },
+    {
+      "sample_index": 3,
+      "pass_index": 0,
+      "game_id": "epoch-000001-selfplay-000701",
+      "turn_index": 1,
+      "current_player": "player1",
+      "phase": "FirstStone",
+      "value": 0.0,
+      "lookahead": {
+        "1": 0.003084520809352398,
+        "4": 0.003084520809352398,
+        "8": 0.003084520809352398
+      },
+      "symmetry": 10,
+      "nonzero_policy_cells": [
+        280,
+        281,
+        282,
+        284,
+        285,
+        286,
+        288,
+        312,
+        315,
+        317,
+        319,
+        321,
+        345,
+        349,
+        351,
+        353
+      ],
+      "nonzero_opp_policy_cells": [
+        280,
+        281,
+        282,
+        283,
+        284,
+        285,
+        286,
+        287,
+        288,
+        312,
+        313,
+        314,
+        315,
+        316,
+        317,
+        318
+      ],
+      "policy": [
+        {
+          "action_id": 2146992128,
+          "weight": 0.0
+        },
+        {
+          "action_id": 2146992129,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2146992130,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2146992131,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2146992132,
+          "weight": 0.0
+        },
+        {
+          "action_id": 2146992133,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2146992134,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2146992135,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2146992136,
+          "weight": 0.0
+        },
+        {
+          "action_id": 2147057663,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2147057664,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2147057665,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2147057666,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2147057667,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2147057668,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2147057669,
+          "weight": 0.0
+        }
+      ],
+      "opp_policy": [],
+      "metadata": {
+        "configured_search_visits": 128,
+        "epoch": 1,
+        "mcts_sims_exact": true,
+        "opp_policy_source": "uniform_legal_fallback",
+        "sample_source": "mcts",
+        "search_visits": 128,
+        "truncated": true,
+        "value_target_reason": "max_actions_draw"
+      }
+    },
+    {
+      "sample_index": 4,
+      "pass_index": 0,
+      "game_id": "epoch-000001-selfplay-001226",
+      "turn_index": 1,
+      "current_player": "player1",
+      "phase": "FirstStone",
+      "value": 1.0,
+      "lookahead": {
+        "1": 1.0,
+        "4": 1.0,
+        "8": 1.0
+      },
+      "symmetry": 0,
+      "nonzero_policy_cells": [
+        280,
+        282,
+        283,
+        284,
+        286,
+        287,
+        288,
+        312,
+        314,
+        316,
+        318,
+        321,
+        344,
+        345,
+        347,
+        349
+      ],
+      "nonzero_opp_policy_cells": [
+        280,
+        281,
+        282,
+        283,
+        284,
+        285,
+        286,
+        287,
+        288,
+        312,
+        313,
+        314,
+        315,
+        316,
+        317,
+        318
+      ],
+      "policy": [
+        {
+          "action_id": 2146992128,
+          "weight": 0.0
+        },
+        {
+          "action_id": 2146992129,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2146992130,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2146992131,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2146992132,
+          "weight": 0.0
+        },
+        {
+          "action_id": 2146992133,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2146992134,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2146992135,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2146992136,
+          "weight": 0.0
+        },
+        {
+          "action_id": 2147057663,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2147057664,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2147057665,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2147057666,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2147057667,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2147057668,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2147057669,
+          "weight": 0.0
+        }
+      ],
+      "opp_policy": [],
+      "metadata": {
+        "configured_search_visits": 128,
+        "epoch": 1,
+        "mcts_sims_exact": true,
+        "opp_policy_source": "uniform_legal_fallback",
+        "sample_source": "mcts",
+        "search_visits": 128
+      }
+    },
+    {
+      "sample_index": 5,
+      "pass_index": 0,
+      "game_id": "epoch-000001-selfplay-001774",
+      "turn_index": 0,
+      "current_player": "player0",
+      "phase": "Opening",
+      "value": 0.0,
+      "lookahead": {
+        "1": -0.003084520809352398,
+        "4": -0.003084520809352398,
+        "8": -0.003084520809352398
+      },
+      "symmetry": 9,
+      "nonzero_policy_cells": [
+        544
+      ],
+      "nonzero_opp_policy_cells": [
+        280,
+        281,
+        282,
+        283,
+        286,
+        287,
+        314,
+        315,
+        316,
+        317,
+        319,
+        320,
+        321,
+        344,
+        345,
+        348
+      ],
+      "policy": [
+        {
+          "action_id": 2147516416,
+          "weight": 1.0
+        }
+      ],
+      "opp_policy": [
+        {
+          "action_id": 2146992128,
+          "weight": 0.0
+        },
+        {
+          "action_id": 2146992129,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2146992130,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2146992131,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2146992132,
+          "weight": 0.0
+        },
+        {
+          "action_id": 2146992133,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2146992134,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2146992135,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2146992136,
+          "weight": 0.0
+        },
+        {
+          "action_id": 2147057663,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2147057664,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2147057665,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2147057666,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2147057667,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2147057668,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2147057669,
+          "weight": 0.0
+        }
+      ],
+      "metadata": {
+        "configured_search_visits": 128,
+        "epoch": 1,
+        "mcts_sims_exact": true,
+        "opp_policy_source": "future_opponent_mcts",
+        "sample_source": "mcts",
+        "search_visits": 128,
+        "truncated": true,
+        "value_target_reason": "max_actions_draw"
+      }
+    },
+    {
+      "sample_index": 6,
+      "pass_index": 0,
+      "game_id": "epoch-000001-selfplay-002002",
+      "turn_index": 1,
+      "current_player": "player1",
+      "phase": "FirstStone",
+      "value": -1.0,
+      "lookahead": {
+        "1": -1.0,
+        "4": -1.0,
+        "8": -1.0
+      },
+      "symmetry": 5,
+      "nonzero_policy_cells": [
+        280,
+        281,
+        284,
+        285,
+        286,
+        287,
+        312,
+        314,
+        316,
+        317,
+        319,
+        320,
+        321,
+        344,
+        349,
+        351
+      ],
+      "nonzero_opp_policy_cells": [
+        280,
+        281,
+        282,
+        283,
+        284,
+        285,
+        286,
+        287,
+        288,
+        312,
+        313,
+        314,
+        315,
+        316,
+        317,
+        318
+      ],
+      "policy": [
+        {
+          "action_id": 2146992128,
+          "weight": 0.0
+        },
+        {
+          "action_id": 2146992129,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2146992130,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2146992131,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2146992132,
+          "weight": 0.0
+        },
+        {
+          "action_id": 2146992133,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2146992134,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2146992135,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2146992136,
+          "weight": 0.0
+        },
+        {
+          "action_id": 2147057663,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2147057664,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2147057665,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2147057666,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2147057667,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2147057668,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2147057669,
+          "weight": 0.0
+        }
+      ],
+      "opp_policy": [],
+      "metadata": {
+        "configured_search_visits": 128,
+        "epoch": 1,
+        "mcts_sims_exact": true,
+        "opp_policy_source": "uniform_legal_fallback",
+        "sample_source": "mcts",
+        "search_visits": 128
+      }
+    },
+    {
+      "sample_index": 7,
+      "pass_index": 0,
+      "game_id": "epoch-000001-selfplay-001752",
+      "turn_index": 0,
+      "current_player": "player0",
+      "phase": "Opening",
+      "value": 1.0,
+      "lookahead": {
+        "1": 1.0,
+        "4": 1.0,
+        "8": 1.0
+      },
+      "symmetry": 2,
+      "nonzero_policy_cells": [
+        544
+      ],
+      "nonzero_opp_policy_cells": [
+        281,
+        282,
+        283,
+        285,
+        286,
+        287,
+        314,
+        316,
+        317,
+        318,
+        319,
+        320,
+        321,
+        345,
+        346,
+        348
+      ],
+      "policy": [
+        {
+          "action_id": 2147516416,
+          "weight": 1.0
+        }
+      ],
+      "opp_policy": [
+        {
+          "action_id": 2146992128,
+          "weight": 0.0
+        },
+        {
+          "action_id": 2146992129,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2146992130,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2146992131,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2146992132,
+          "weight": 0.0
+        },
+        {
+          "action_id": 2146992133,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2146992134,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2146992135,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2146992136,
+          "weight": 0.0
+        },
+        {
+          "action_id": 2147057663,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2147057664,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2147057665,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2147057666,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2147057667,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2147057668,
+          "weight": 0.0078125
+        },
+        {
+          "action_id": 2147057669,
+          "weight": 0.0
+        }
+      ],
+      "metadata": {
+        "configured_search_visits": 128,
+        "epoch": 1,
+        "mcts_sims_exact": true,
+        "opp_policy_source": "future_opponent_mcts",
+        "sample_source": "mcts",
+        "search_visits": 128
+      }
+    }
+  ]
+}
