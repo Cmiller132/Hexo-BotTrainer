@@ -13,7 +13,7 @@ use hexo_engine::{
 };
 
 use crate::mcts_eval::RustEvaluation;
-use crate::state::move_error;
+use crate::engine_state::move_error;
 
 #[derive(Clone, Debug)]
 pub(crate) struct RustEdge {
@@ -394,6 +394,21 @@ mod tests {
             select_root_action(&left.nodes[0], 0.0, 123),
             select_root_action(&right.nodes[0], 0.0, 123)
         );
+    }
+
+    #[test]
+    fn mcts_returns_visit_policy_over_candidate_ids() {
+        let root = RustHexoState::new();
+        let search = run_uniform_search(&root, 4);
+        let policy = search.nodes[0]
+            .edges
+            .iter()
+            .map(|edge| (edge.action_id, edge.visits))
+            .collect::<Vec<_>>();
+
+        assert!(!policy.is_empty());
+        assert_eq!(policy.iter().map(|(_, visits)| *visits).sum::<u32>(), 4);
+        assert_eq!(policy[0].0, pack_coord(HexCoord::ZERO));
     }
 
     #[test]

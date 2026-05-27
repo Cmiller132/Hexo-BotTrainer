@@ -59,6 +59,10 @@ class HexformerARPlugin:
                 "train_sample_count": parsed.samples.train_sample_count,
                 "selfplay_samples_per_epoch": parsed.selfplay.samples_per_epoch,
                 "evaluation_games_per_epoch": parsed.evaluation.games_per_epoch,
+                "candidate_max": parsed.candidates.max_candidates,
+                "token_dim": parsed.architecture.token_dim,
+                "gps_layers": parsed.architecture.gps_layers,
+                "max_rel_edges": parsed.architecture.max_rel_edges,
             },
         )
 

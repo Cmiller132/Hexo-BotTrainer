@@ -1,360 +1,1206 @@
-# Verified Review Fix Plan
+# Revised plan: Hexformer receives cloned engine states, not move-history rows
 
-This file contains implementation-ready requirements for review items 2 through 6.
-Item 1, the record/sample architecture question, is intentionally not specified
-here because it needs a separate design decision about replay records versus
-training samples.
-
-Recommended implementation order:
-
-1. Standardize action IDs.
-2. Add the max-action guard.
-3. Add invariant validation tests.
-4. Thin `HexoEngineAdapter`.
-5. Keep search mutation model-owned.
-
-## 2. Add A Max-Action Guard
-
-### Problem
-
-`hexo_runner.loop.run_match_loop` currently runs until
-`HexoEngineAdapter.terminal(primary_state)` returns a terminal result. The
-current rules are no-draw, but the board is unbounded and legal play can keep
-expanding. A rule bug, model loop, adapter bug, or intentionally evasive player
-could keep one worker occupied for an unbounded number of placements.
-
-### Requirements
-
-- Add `max_actions: int = 1024` to `hexo_runner.session.GameSpec`.
-- The value must be positive. Reject `max_actions <= 0` before a game starts.
-- The runner must abort a game before requesting another decision once the
-  number of accepted actions has reached `max_actions`.
-- A game that becomes terminal exactly on the `max_actions`th accepted action
-  must be recorded as completed, not aborted.
-- The abort must be structured and durable in the `.hxr` record:
-  - `stage`: `runner.max_actions`
-  - `exception_type`: `MaxActionsExceeded`
-  - `message`: include the game id and configured limit.
-- The aborted `.hxr` record must keep all accepted action IDs before the abort.
-- The guard must apply equally through `run_match`, `run_batch`, and direct
-  `run_match_loop` calls because they all share the same loop.
-
-### Implementation Notes
-
-- File: `packages/hexo_runner/python/hexo_runner/session.py`
-  - Add the field to `GameSpec`.
-  - Implement validation in `__post_init__`. Because the dataclass is frozen,
-    validation should only inspect values.
-- File: `packages/hexo_runner/python/hexo_runner/loop.py`
-  - Check the action count at the top of the loop, after `record_writer` is
-    available and before cloning the state for `decide`.
-  - Raise `RunnerAbort(AbortRecord(...))` so normal abort finalization writes
-    the record.
-  - Use `record_writer.action_count` as the authoritative accepted-action count.
-- Do not add a separate timeout-based guard in this pass. Timeouts are a
-  different policy problem and should be handled at player/adapter boundaries.
-
-### Validation
-
-- Add a runner test with scripted legal players and `GameSpec(max_actions=1)`.
-  The game should record one accepted action, then abort before the next
-  decision.
-- Add a test where the winning move is exactly at `max_actions`; it should
-  complete.
-- Add a test that `GameSpec(max_actions=0)` raises `ValueError`.
-- Verify the `.hxr` aborted record contains accepted actions plus abort metadata.
-- Run:
-  - `python -m unittest tests.test_hexo_runner_match_mode`
-  - `python -m pytest`
-
-## 3. Thin `HexoEngineAdapter`
-
-### Problem
-
-`HexoEngineAdapter` is useful as a runner boundary, but it currently contains
-unused payload conversion helpers and still exposes string action IDs through
-`action_id`. The runner should keep the adapter as a centralized engine facade
-while avoiding Python-side game semantics that Rust already owns.
-
-### Requirements
-
-- Keep `HexoEngineAdapter` as the runner's engine boundary.
-- Remove unused methods:
-  - `action_payload`
-  - `transition_payload`
-- Keep pass-through methods that centralize direct engine calls:
-  - `metadata`
-  - `new_game`
-  - `clone_state`
-  - `current_player`
-  - `apply_action`
-  - `terminal`
-  - `terminal_payload`
-- Keep `player_index` and `player_role` unless a cleaner local helper is added
-  in the runner loop. Do not scatter that mapping throughout the codebase.
-- After item 5 lands, `HexoEngineAdapter.action_id` must return packed `int`
-  action IDs, not `"q,r"` strings.
-- Remove dead imports made unnecessary by deleting payload helpers.
-
-### Implementation Notes
-
-- File: `packages/hexo_runner/python/hexo_runner/engine.py`
-  - Delete unused methods and rerun `rg "action_payload|transition_payload"`.
-  - Keep `_jsonable` if still used by `metadata` or `terminal_payload`.
-- File: `packages/hexo_runner/python/hexo_runner/loop.py`
-  - No behavior change should be required other than the action ID type update
-    from item 5.
-- This cleanup should be done after action ID standardization if both are in the
-  same implementation pass, so type signatures are updated once.
-
-### Validation
-
-- `rg "action_payload|transition_payload" packages tests scripts` returns no
-  usages.
-- Existing runner tests still pass.
-- Run:
-  - `python -m unittest tests.test_hexo_runner_match_mode`
-  - `python -m pytest`
-
-## 4. Keep Search Mutation Model-Owned
-
-### Problem
-
-Model MCTS needs efficient search-local mutation without adding model-specific
-or search-specific behavior to `hexo_engine`.
-
-`HexoState` clone cost includes:
-
-- `Board.stones`
-- `Board.occupied`
-- `Board.windows`
-- `Board.legal`
-- `placement_history`
-- `last_turn`
-- phase, player, placement count, terminal state
-
-### Requirements
-
-- `hexo_engine` remains the generic rules source and exposes only the private
-  state clone capsule for model-owned Rust extensions.
-- Model packages own their MCTS trees, evaluator caches, and search scratch
-  state.
-- Search may clone the root into a local scratch state during traversal, but no
-  live Python engine state may be mutated by a model.
-- If a future model needs undo deltas, implement them in model-owned Rust
-  wrappers or utilities after an explicit design pass. Do not add them to core
-  engine state in this cleanup.
-
-### Implementation Notes
-
-- Keep engine changes limited to generic bridge behavior.
-- Dense-cnn and hexformer-ar should share the direct-state handoff shape:
-  Python passes `HexoState`, model Rust clones it through the capsule, and only
-  the selected move is applied to the live game by self-play.
-
-### Validation
-
-- Add MCTS tests:
-  - running MCTS does not mutate the root state;
-  - search result matches legal root actions;
-  - repeated searches from the same root remain deterministic with a fixed
-    evaluator/config if deterministic before this change.
-- Run:
-  - `cargo fmt`
-  - `cargo test --workspace`
-
-## 5. Standardize Packed Action IDs
-
-### Problem
-
-Python currently has two action identity systems:
-
-- `ActionId = str`
-- `LegalActionId = int`
-
-The Rust engine already uses compact packed `u32` IDs for legal actions and
-`.hxr` records. The Python bridge returns packed integer legal IDs, but
-`hexo_engine.action_id()` returns strings like `"q,r"`. Runner events and
-training sample contracts still reference string action IDs. This is a real
-schema inconsistency.
-
-### Requirements
-
-- Use packed integer action IDs everywhere an action identity is passed between
-  engine, runner, records, samples, policy targets, model inputs, and adapters.
-- Change Python type aliases:
-  - `ActionId = int`
-  - `LegalActionId = int`
-- Change Rust PyO3 `action_id(q, r)` to return `u32` from `pack_coord`.
-- Change `hexo_engine.api.action_id()` to return an integer.
-- Change `hexo_runner.player.TransitionEvent.action_id` to `int`.
-- Change `HexoEngineAdapter.action_id()` to return `int`.
-- Change sample/training/model contracts that currently use string action IDs:
-  - `hexo_utils.samples.records.PolicyOutputRecord.selected_action_id`
-  - `hexo_utils.samples.records.TrainingSampleRecord.legal_action_ids`
-  - `hexo_utils.samples.targets.LegalPolicyValueTarget`
-  - `hexo_utils.encoding.symmetry.ActionSymmetryMapper`
-  - model-owned input contracts that carry legal action IDs
-- Keep string formatting only as display/logging helpers, never as identity.
-- Do not add backwards-compatible string aliases. This should be a hard cleanup.
-
-### Implementation Notes
-
-- File: `packages/hexo_engine/rust/src/pybridge.rs`
-  - Import/use `pack_coord`.
-  - Return `u32` from `action_id`.
-- File: `packages/hexo_engine/python/hexo_engine/types.py`
-  - Change aliases and any type annotations.
-  - Keep `pack_coord_id` and `unpack_coord_id`.
-  - Consider adding `format_coord_id(action_id: int) -> str` only for display.
-- File: `packages/hexo_runner/python/hexo_runner/player.py`
-  - Update `TransitionEvent.action_id`.
-- File: `packages/hexo_runner/python/hexo_runner/engine.py`
-  - Update return annotation.
-- Files under `packages/hexo_utils/python/hexo_utils/samples` and
-  `packages/hexo_utils/python/hexo_utils/encoding`
-  - Update type annotations and tests from string IDs to ints.
-- Model-owned input files
-  - Update action ID type annotations to ints.
-- Tests that currently create sample records with IDs like `"a"` and `"b"`
-  should use packed ints. If the test does not care about real coordinates,
-  use small integer constants and name them clearly.
-
-### Validation
-
-- `rg "ActionId = str|tuple\\[str, \\.\\.\\.\\]|selected_action_id: str|action_id: str" packages tests`
-  should show no identity-bearing action ID annotations. Review any remaining
-  string hits manually to confirm they are display text only.
-- Add/adjust Python bridge tests:
-  - `engine.action_id(PlacementAction(AxialCoord(0, 0)))` equals
-    `pack_coord_id(AxialCoord(0, 0))`.
-  - `legal_action_ids(state)` and `LegalActions.action_ids` remain packed ints.
-- Add/adjust runner tests:
-  - `TransitionEvent.action_id` is an `int`.
-  - `.hxr` action IDs match event action IDs.
-- Run:
-  - `cargo test -p hexo_engine --features python`
-  - `python -m unittest tests.test_hexo_engine_rust_bridge`
-  - `python -m unittest tests.test_hexo_runner_match_mode`
-  - `python -m pytest`
-
-## 6. Add Engine Invariant Validation Tests
-
-### Problem
-
-The engine now uses incremental caches for legal moves and six-cell windows.
-That is much faster than scanning from scratch, but correctness depends on
-those caches staying synchronized with authoritative stones and history.
-Current tests cover important examples, but they do not stress random legal
-games or validate every cache invariant after every move.
-
-### Requirements
-
-- Add deterministic property-style Rust tests that replay random legal games.
-- Tests must validate after every accepted placement:
-  - `Board.stones` and `Board.occupied` agree.
-  - Every occupied coordinate is not legal.
-  - Every legal coordinate is empty.
-  - Every stored `WindowStore` mask matches a slow scan over board stones.
-  - Every accepted placement's `WindowUpdate.changed.len()` equals
-    `WINDOWS_PER_PLACEMENT`.
-  - `StateSnapshot -> load_state` produces the same public state.
-  - Terminal snapshots reject any additional post-win placement.
-- Tests must be reproducible with fixed seeds.
-- These tests should live in Rust where private cache fields can be inspected
-  under `#[cfg(test)]`.
-
-### Implementation Notes
-
-- Likely files:
-  - `packages/hexo_engine/rust/src/board.rs`
-  - `packages/hexo_engine/rust/src/tactics.rs`
-  - `packages/hexo_engine/rust/src/state.rs`
-- Add test-only helper methods or helper modules instead of making internal
-  fields public in production APIs.
-- Slow window validation algorithm:
-  - For each `WindowEntry` in `state.board().windows().entries()`, iterate the
-    six cells from `entry.cells()`.
-  - For each player, build an expected mask by checking `Board::get(coord)`.
-  - Assert expected masks equal `entry.mask(player)`.
-- Legal validation algorithm:
-  - Build a set of occupied coords from `occupied_cells()`.
-  - Assert every occupied coord has `Board::get(coord).is_some()`.
-  - Assert every `Board::get(coord)` entry appears in occupied cells.
-  - Assert no legal action decodes to an occupied coord.
-  - Optionally recompute legal candidates around occupied coords using
-    `coords_within_radius` and compare against `LegalMoveStore`.
-- Random game generation:
-  - Use a fixed seed and a small number of games, for example 32 games.
-  - Cap each game at a reasonable action count, for example 256 actions, to
-    avoid very long random tests.
-  - Pick from engine-provided legal action IDs only.
-  - Stop when terminal.
-- Terminal snapshot rejection:
-  - Once a game is terminal, append any coordinate to the snapshot placements.
-  - `load_state` should reject it with `StateLoadError::IllegalPlacement`
-    containing `MoveError::TerminalState`.
-
-### Validation
-
-- New invariant tests pass repeatedly without flakes.
-- Existing example tests still pass.
-- Run:
-  - `cargo fmt`
-  - `cargo test -p hexo_engine`
-  - `cargo test --workspace`
-
-
-
-7.
-Updated [Review.md](E:/Hexo-BotTrainer/Review.md) with implementation-ready plans for items 2 through 6 only, including requirements, implementation notes, and validation commands.
-
-For item 1, I would use a two-layer episode design:
-
-**Replay core**
-Keep `.hxr` as the runner-defined authoritative replay file. It should stay compact and durable: game id, seed, players, accepted packed action IDs, status, winner/placements, abort metadata. This is the audit log and replay source.
-
-**Training samples**
-Add a separate append-only sample file keyed back to `.hxr`, probably one per worker next to the replay file. Each sample row should have a runner-defined core:
+I agree with your correction. For this codebase, the cleanest model boundary is:
 
 ```text
-record_path
-game_id
-action_index
-player_role
-current_player
+Python engine HexoState
+â†’ engine.clone_state(...)
+â†’ model-specific Rust clones/owns the Rust state
+â†’ Hexformer builds sparse payloads directly from that state
+â†’ Python/PyTorch runs the network
+```
+
+The model should **not** use packed move history as its main live inference or self-play interface. Packed history can remain useful for record files, debugging, reproducibility, and compatibility tests, but the production model path should operate on **cloned engine state snapshots**.
+
+This also fits the current repository. `hexo_engine.api` already exposes `clone_state(state)` as a public Python function, returning an independent mutable Rust state clone.  The PyO3 bridge also exposes `clone_state` directly and implements it as `state.state.clone()`.  The Hexformer self-play code already stores `engine.clone_state(state)` in each pending decision before applying the selected action, so the pipeline is already conceptually moving in this direction.
+
+---
+
+# 1. Core ownership rule
+
+## 1.1 Keep `hexo_engine` authoritative and small
+
+`hexo_engine` still owns:
+
+```text
+rules
+legality
+state transitions
+terminal detection
+turn phase
+legal action IDs
+board windows
+placement history
+clone_state
+apply_action
+to_python_state
+```
+
+Do **not** move Hexformer-specific logic into `hexo_engine`.
+
+Hexformer-specific logic belongs in:
+
+```text
+packages/hexo_models/hexformer_ar/
+```
+
+The repository already establishes this package boundary. The README says `hexo_engine` owns canonical rules and state transitions, while `hexo_models` owns standalone production model families.  The engine Rust crate also explicitly says model, search, and sample code live outside the rules crate so the rules layer stays small, deterministic, and auditable.
+
+## 1.2 Updated state-source rule
+
+Replace this current Hexformer Rust capability:
+
+```text
+state_source = "packed_history_rows"
+```
+
+with:
+
+```text
+state_source = "engine_state_clone"
+```
+
+The current Hexformer Rust capability still reports `state_source = "packed_history_rows"`, so that should be updated once the clone-state path lands.
+
+---
+
+# 2. Why cloned engine state is better than history rows
+
+The history-row path reconstructs state by replaying all placements. Current Hexformer Python converts a state into a tuple of packed coordinate IDs using `history_row_from_state()`.  The current Hexformer Rust `state_from_history_row()` then starts from `HexoState::new()` and reapplies every placement.
+
+That works, but it has drawbacks:
+
+```text
+It repeats work already done by the engine.
+It risks mismatch if runtime state gains fields not recoverable from history.
+It makes every model call depend on serialization/replay.
+It is less direct for MCTS, where leaf states already exist as Rust states.
+It obscures the actual contract: the model wants a state snapshot, not a log.
+```
+
+A cloned engine state is better because:
+
+```text
+It preserves the exact board, legal store, window store, phase, terminal state, and caches.
+It avoids replaying history just to recover a state already available.
+It gives model-specific Rust direct read access to the same state structure used by rules/search.
+It matches self-play, which already snapshots pending states by cloning.
+It simplifies live inference and MCTS evaluator design.
+```
+
+---
+
+# 3. Revised data path
+
+## 3.1 Direct inference path
+
+Old live path:
+
+```text
+HexoState
+â†’ to_python_state(...)
+â†’ placement_history
+â†’ packed history row
+â†’ Rust reconstructs HexoState by replay
+â†’ sparse payload
+â†’ model
+```
+
+New live path:
+
+```text
+HexoState
+â†’ engine.clone_state(...)
+â†’ _rust.hexformer_ar.sparse_input_payload_from_state(...)
+â†’ model-specific Rust clones/owns RustHexoState
+â†’ sparse payload
+â†’ SparseDecisionInput
+â†’ PyTorch HexformerAR
+```
+
+## 3.2 Self-play path
+
+Old self-play sample finalization:
+
+```text
+PendingDecision.state clone
+â†’ build_selfplay_sample_payloads(...)
+â†’ history_row_from_state(...)
+â†’ Rust replay history
+â†’ sparse payload
+```
+
+New self-play sample finalization:
+
+```text
+PendingDecision.state clone
+â†’ build_selfplay_sample_payloads_from_states(...)
+â†’ Rust receives cloned state handles
+â†’ Rust clones/owns RustHexoState through engine state API
+â†’ sparse payload
+```
+
+The pending self-play state should remain exactly as it is now: `PendingDecision(state=engine.clone_state(state), ...)`.  The change is that `_finalize_pending()` should stop converting those states into history rows before handing them to Rust.
+
+## 3.3 MCTS path
+
+Old MCTS evaluator path:
+
+```text
+Rust MCTS leaf state
+â†’ convert leaf state to placement history row
+â†’ Python evaluator rebuilds sparse input from history row
+â†’ model eval
+```
+
+New MCTS evaluator path:
+
+```text
+Rust MCTS leaf state
+â†’ build sparse payload directly in hexformer_ar Rust
+â†’ Python evaluator receives sparse payloads
+â†’ SparseDecisionInput.from_payload(...)
+â†’ model eval
+```
+
+This is important. Inside model-specific Rust MCTS, leaf states are already `RustHexoState` values. There is no need to serialize them into histories and replay them again.
+
+---
+
+# 4. New model-state bridge design
+
+## 4.1 Use the existing engine state API capsule
+
+`hexo_engine` already exposes a C-style state API capsule with:
+
+```text
+clone_state
+free_state
+version
+```
+
+The capsule struct and version are defined in the Rust bridge.  The Python-visible `state_api_capsule()` function returns the capsule.  The capsule clone function allocates a cloned `RustHexoState`, and the free function releases it.
+
+Hexformer should use this existing capsule. Do not add a new engine API unless absolutely necessary.
+
+## 4.2 Add model-side Rust wrapper
+
+Add:
+
+```text
+packages/hexo_models/hexformer_ar/rust/src/engine_state.rs
+```
+
+Responsibilities:
+
+```text
+load hexo_engine._rust.state_api_capsule()
+validate API version
+clone Python HexoState into owned RustHexoState
+free temporary capsule-owned pointer
+return model-owned RustHexoState
+```
+
+Suggested Rust shape:
+
+```rust
+pub(crate) struct EngineStateApi {
+    version: u32,
+    clone_state: unsafe extern "C" fn(*mut c_void, *mut *mut c_void) -> i32,
+    free_state: unsafe extern "C" fn(*mut c_void),
+}
+
+pub(crate) fn clone_py_engine_state(
+    py: Python<'_>,
+    state_obj: &Bound<'_, PyAny>,
+) -> PyResult<RustHexoState> {
+    let api = load_state_api(py)?;
+    let mut raw: *mut c_void = std::ptr::null_mut();
+
+    let code = unsafe {
+        (api.clone_state)(state_obj.as_ptr().cast::<c_void>(), &mut raw)
+    };
+
+    if code != 0 || raw.is_null() {
+        return Err(PyValueError::new_err(format!(
+            "failed to clone HexoState through state API: code={code}"
+        )));
+    }
+
+    let cloned_ref: &RustHexoState = unsafe { &*(raw.cast::<RustHexoState>()) };
+    let owned = cloned_ref.clone();
+
+    unsafe {
+        (api.free_state)(raw);
+    }
+
+    Ok(owned)
+}
+```
+
+The wrapper must not store borrowed engine pointers beyond the call. It should return a model-owned `RustHexoState`.
+
+## 4.3 Safety rules
+
+Strict rules:
+
+```text
+Never mutate caller-owned Python HexoState.
+Always clone at the boundary.
+Never store raw capsule pointers after the function returns.
+Always free capsule-owned cloned pointers.
+Always validate state API version.
+Fail fast on capsule version mismatch.
+```
+
+Recommended metadata:
+
+```text
+state_source = "engine_state_clone"
+state_api_version = 2
+```
+
+The current engine bridge reports `STATE_API_VERSION = 2`, so Hexformer should require version 2 for this plan.
+
+---
+
+# 5. Revised Rust module layout
+
+Update `hexformer_ar/rust/src/lib.rs` from:
+
+```rust
+mod constants;
+mod state;
+mod mcts_eval;
+mod mcts_tree;
+mod mcts;
+mod sample_gen;
+```
+
+to:
+
+```rust
+mod constants;
+mod engine_state;
+mod mcts_eval;
+mod mcts_tree;
+mod mcts;
+mod sample_gen;
+```
+
+Optional compatibility module:
+
+```rust
+mod history_state_compat;
+```
+
+Only keep the history-row path under a compatibility module if tests or old sample records still need it.
+
+The current `lib.rs` is already the correct PyO3 export map and should stay that way. It currently registers capabilities, MCTS functions, and sample generation.
+
+---
+
+# 6. Revised Rust public functions
+
+## 6.1 Replace history-row payload APIs
+
+Current Rust API:
+
+```rust
+sparse_input_payload(history_row, architecture, candidates, ...)
+sparse_input_payloads(history_rows, architecture, candidates)
+selfplay_sample_payloads(game_id, history_rows, ...)
+```
+
+New Rust API:
+
+```rust
+sparse_input_payload_from_state(state, architecture, candidates, ...)
+sparse_input_payloads_from_states(states, architecture, candidates)
+selfplay_sample_payloads_from_states(game_id, states, ...)
+```
+
+Python-visible signatures:
+
+```python
+_rust.hexformer_ar.sparse_input_payload_from_state(
+    state,
+    architecture,
+    candidates,
+    policy,
+    opp_policy,
+    value,
+    distance,
+    lookahead,
+    metadata,
+)
+```
+
+```python
+_rust.hexformer_ar.sparse_input_payloads_from_states(
+    states,
+    architecture,
+    candidates,
+)
+```
+
+```python
+_rust.hexformer_ar.selfplay_sample_payloads_from_states(
+    game_id,
+    states,
+    players,
+    turn_indices,
+    visit_policies,
+    root_values,
+    search_visits,
+    selected_action_ids,
+    winner,
+    architecture,
+    candidates,
+)
+```
+
+## 6.2 Internal implementation
+
+The internal pipeline stays the same after state acquisition.
+
+```rust
+let state = clone_py_engine_state(py, state_obj)?;
+let payload = build_sparse_payload(&state, &arch, &candidate_cfg, &targets);
+```
+
+The existing `build_sparse_payload()` function should remain the core assembly function. It already does the correct pipeline: legal actions, tactical scan, candidate frontier, anchor selection, candidate/stone/window features, local windows, relation edges, global features, and targets.
+
+---
+
+# 7. Revised Python input API
+
+## 7.1 Update `input.py`
+
+Current `build_sparse_input()` does:
+
+```python
+payload = _hexformer_ar_rust().sparse_input_payload(
+    history_row_from_state(state),
+    ...
+)
+```
+
+That should become:
+
+```python
+state_clone = engine.clone_state(state)
+payload = _hexformer_ar_rust().sparse_input_payload_from_state(
+    state_clone,
+    _config_mapping(arch),
+    _config_mapping(candidate_cfg),
+    _policy_items(policy),
+    _policy_items(opp_policy),
+    None if value is None else float(value),
+    None if distance is None else float(distance),
+    _lookahead_items(lookahead),
+    dict(metadata or {}),
+)
+```
+
+Keep the public Python function name:
+
+```python
+build_sparse_input(state, ...)
+```
+
+This preserves call sites while changing the internal state source.
+
+## 7.2 Update batch input builder
+
+Replace:
+
+```python
+build_sparse_inputs_from_history_rows(...)
+```
+
+with:
+
+```python
+build_sparse_inputs_from_states(states, ...)
+```
+
+Implementation:
+
+```python
+def build_sparse_inputs_from_states(
+    states: Sequence[object],
+    *,
+    architecture: HexformerArchitectureConfig | None = None,
+    candidates: HexformerCandidateConfig | None = None,
+) -> tuple[SparseDecisionInput, ...]:
+    arch = architecture or HexformerArchitectureConfig()
+    candidate_cfg = candidates or HexformerCandidateConfig(max_candidates=arch.max_candidates)
+    clones = tuple(engine.clone_state(state) for state in states)
+    payloads = _hexformer_ar_rust().sparse_input_payloads_from_states(
+        clones,
+        _config_mapping(arch),
+        _config_mapping(candidate_cfg),
+    )
+    return tuple(_sparse_input_from_payload(payload) for payload in payloads)
+```
+
+## 7.3 Deprecate history helpers
+
+Deprecate, but do not immediately delete:
+
+```python
+history_row_from_state
+build_sparse_inputs_from_history_rows
+```
+
+Use warnings:
+
+```python
+DeprecationWarning:
+"history-row Hexformer input is compatibility-only; use cloned engine states."
+```
+
+This makes migration safer.
+
+---
+
+# 8. Revised inference API
+
+## 8.1 Direct inference
+
+Current `HexformerInference.infer_states()` calls `build_sparse_input(state, ...)`.  Once `build_sparse_input()` is changed internally, this API remains valid.
+
+No external change needed:
+
+```python
+inference.infer_state(state)
+inference.infer_states(states)
+```
+
+But internally it now uses cloned engine state, not history rows.
+
+## 8.2 MCTS evaluator callback
+
+Current evaluator callback expects:
+
+```text
+payload["history_rows"]
+```
+
+and rebuilds sparse inputs from history rows.
+
+Replace with:
+
+```text
+payload["sparse_payloads"]
+```
+
+New implementation:
+
+```python
+@torch.no_grad()
+def evaluate_mcts_payload(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+    if "sparse_payloads" in payload:
+        sparse = tuple(
+            sparse_input_from_payload(item)
+            for item in payload["sparse_payloads"]
+        )
+    else:
+        # temporary compatibility only
+        sparse = build_sparse_inputs_from_states(
+            payload["states"],
+            architecture=self.config.architecture,
+            candidates=self.config.candidates,
+        )
+
+    results = self.infer_sparse(sparse)
+
+    values = torch.tensor([r.value for r in results], dtype=torch.float32).contiguous()
+    candidate_rows = tuple(tuple(r.legal_action_ids) for r in results)
+    priors = torch.tensor(
+        [
+            float(r.legal_priors.get(action_id, 0.0))
+            for r in results
+            for action_id in r.legal_action_ids
+        ],
+        dtype=torch.float32,
+    ).contiguous()
+
+    return {
+        "values_bytes": values.numpy().tobytes(),
+        "candidate_action_ids": candidate_rows,
+        "priors_bytes": priors.numpy().tobytes(),
+    }
+```
+
+The important design change is that Rust MCTS should send already-built sparse payloads, not histories.
+
+---
+
+# 9. Revised MCTS design
+
+## 9.1 Python `mcts.py`
+
+The current Python `run_batched_mcts()` already passes `tuple(root_states)` into `_rust.hexformer_ar.hexformer_ar_batched_mcts(...)`. It also passes architecture and candidate config mappings.
+
+Keep that Python shape.
+
+The Rust MCTS signature should be updated to match it.
+
+## 9.2 Rust `mcts.rs`
+
+Current Rust `hexformer_ar_batched_mcts()` still names its first argument `history_rows` and reconstructs roots with `states_from_history_rows(...)`.
+
+Replace that with:
+
+```rust
+#[pyfunction(signature = (
+    root_states,
+    visits,
+    c_puct,
+    temperature,
+    seed,
+    evaluator,
+    architecture,
+    candidates,
+    virtual_batch_size=None
+))]
+pub fn hexformer_ar_batched_mcts(
+    py: Python<'_>,
+    root_states: &Bound<'_, PyAny>,
+    visits: u32,
+    c_puct: f32,
+    temperature: f32,
+    seed: u64,
+    evaluator: &Bound<'_, PyAny>,
+    architecture: &Bound<'_, PyAny>,
+    candidates: &Bound<'_, PyAny>,
+    virtual_batch_size: Option<u32>,
+) -> PyResult<Py<PyAny>> {
+    let roots = clone_engine_states(py, root_states)?;
+    ...
+}
+```
+
+## 9.3 Rust MCTS leaf evaluation
+
+Current `mcts_eval.rs` serializes leaf states into `history_rows` and `legal_action_ids` before calling Python.
+
+Replace with:
+
+```rust
+fn evaluate_states(
+    py: Python<'_>,
+    evaluator: &Bound<'_, PyAny>,
+    states: &[RustHexoState],
+    architecture: &ArchitectureConfig,
+    candidates: &CandidateConfig,
+) -> PyResult<Vec<RustEvaluation>> {
+    let sparse_payloads = PyList::empty(py);
+
+    for state in states {
+        let targets = SparseTargets::default();
+        let sparse = build_sparse_payload(state, architecture, candidates, &targets);
+        sparse_payloads.append(sparse_payload_to_py(py, &sparse, empty_metadata)?)?;
+    }
+
+    let payload = PyDict::new(py);
+    payload.set_item("sparse_payloads", sparse_payloads)?;
+    payload.set_item("state_source", "engine_state_clone")?;
+
+    let output = evaluator.call1((payload,))?;
+    parse_evaluation_output(&output, states)
+}
+```
+
+This means:
+
+```text
+Rust MCTS owns Rust states.
+Rust sample_gen builds sparse payloads from Rust states.
+Python/PyTorch only evaluates sparse tensors.
+No history replay inside MCTS evaluation.
+```
+
+## 9.4 Cache keys
+
+Current `mcts_eval.rs` uses placement-history packed coordinates as cache keys.
+
+This can remain for now as an internal cache key:
+
+```text
+state_cache_key = placement_history coordinates
+```
+
+This is not the model input path; it is only a stable hash-like identifier for memoization. Later, replace it with a native state hash if `hexo_engine` exposes one.
+
+---
+
+# 10. Revised sample finalization
+
+## 10.1 Keep `PendingDecision.state`
+
+Self-play already does the right thing:
+
+```python
+PendingDecision(
+    state=engine.clone_state(state),
+    player=...,
+    turn_index=...,
+    search=...
+)
+```
+
+Keep it.
+
+## 10.2 Change `_finalize_pending()`
+
+Current `_finalize_pending()` calls `build_selfplay_sample_payloads(states=...)`, but that function currently converts those states into rows internally.
+
+Keep the Python call shape:
+
+```python
+build_selfplay_sample_payloads(states=tuple(decision.state for decision in pending), ...)
+```
+
+Change only the implementation inside `input.py`:
+
+```python
+return tuple(
+    _hexformer_ar_rust().selfplay_sample_payloads_from_states(
+        game_id,
+        tuple(engine.clone_state(state) for state in states),
+        ...
+    )
+)
+```
+
+Do not convert to `history_row_from_state()`.
+
+---
+
+# 11. Revised sparse payload contract
+
+The `SparseDecisionInput` dataclass remains correct.
+
+Keep:
+
+```text
+candidate_action_ids
+candidate_features
+candidate_coords
+candidate_mask
+stone_features
+stone_coords
+stone_mask
+window_features
+window_coords
+window_mask
+local_input
+local_inputs
+local_window_coords
+local_window_mask
+rel_edge_index
+rel_edge_features
+rel_edge_mask
+global_features
+policy_target
+opp_policy_target
+wdl_target
+distance_target
+threat_target
+relevance_target
+lookahead_targets
+metadata
+```
+
+The current dataclass already includes these fields.  The current collator already pads sparse candidates, stones, windows, local windows, relative edges, global features, and targets.
+
+Add metadata fields:
+
+```text
+state_source = "engine_state_clone"
+state_api_version = 2
+placements_made
 phase
-selected_action_id
-legal_action_ids
-terminal_value_after_game
+current_player
+legal_action_count
+candidate_count
 ```
 
-Then allow player-defined payloads as namespaced extensions:
+---
+
+# 12. Revised candidate and tactical generation
+
+No conceptual change here.
+
+Candidate frontier remains model-specific Rust.
+
+Current `sample_gen.rs` already owns:
 
 ```text
-namespace = "hexo.mcts.policy"
-schema_version = 1
-payload = {
-  visit_policy: [(action_id, visits), ...],
-  root_value: float,
-  temperature: float,
-  search_visits: int,
-  model_id: str,
-  search_config_id: str
-}
+tactical windows
+candidate frontiers
+local crops
+relation edges
+target tensors
 ```
 
-For CNN/network players, the extension could be:
+and explicitly says it does not rely on engine-side model accelerators.
+
+Keep:
+
+```rust
+build_tactical_summary(&state, &legal_action_ids)
+build_candidate_frontier(&state, &legal_action_ids, &tactical, &candidate_cfg)
+build_local_windows(...)
+build_rel_edges(...)
+build_global_features(...)
+```
+
+The only change is that `state` now comes from a cloned engine state instead of replayed history.
+
+---
+
+# 13. Revised public API map
+
+## 13.1 Python public functions
+
+Keep stable:
+
+```python
+build_sparse_input(state, ...)
+build_selfplay_sample_payloads(states=..., ...)
+HexformerInference.infer_state(state)
+HexformerInference.infer_states(states)
+run_mcts(root_state, ...)
+run_batched_mcts(root_states, ...)
+```
+
+Change internals only.
+
+## 13.2 Rust PyO3 functions
+
+Add:
+
+```rust
+sparse_input_payload_from_state
+sparse_input_payloads_from_states
+selfplay_sample_payloads_from_states
+hexformer_ar_mcts
+hexformer_ar_batched_mcts
+```
+
+`hexformer_ar_mcts` should accept a root state object, not a history row.
+
+## 13.3 Compatibility functions
+
+Keep temporarily:
+
+```rust
+sparse_input_payload_from_history_row
+sparse_input_payloads_from_history_rows
+```
+
+Mark as compatibility-only.
+
+Remove once:
 
 ```text
-namespace = "hexo.model.policy"
-schema_version = 1
-payload = {
-  model_id: str,
-  value: float,
-  logits_ref: ...,
-  input_config_id: str
-}
+tests updated
+self-play updated
+inference updated
+MCTS updated
+sample finalization updated
 ```
 
-I would not store arbitrary `DecisionResult.diagnostics` directly. Keep diagnostics for UI/debugging, and add a separate `training_payloads` or `sample_payloads` field/protocol with versioned, validated schemas. That gives you durable replay plus extensible training data without turning `.hxr` into a large, schema-loose catchall.
+---
+
+# 14. File-by-file implementation instructions
+
+## 14.1 `hexformer_ar/rust/src/lib.rs`
+
+Update capabilities:
+
+```rust
+dict.set_item("state_source", "engine_state_clone")?;
+dict.set_item("engine_state_clone", true)?;
+dict.set_item("history_row_compat", true)?; // temporary
+```
+
+Keep:
+
+```rust
+mcts::register_pybridge(module)?;
+sample_gen::register_pybridge(module)?;
+```
+
+Current registration pattern is already correct.
+
+## 14.2 `hexformer_ar/rust/src/engine_state.rs`
+
+New file.
+
+Implement:
+
+```rust
+load_state_api(py) -> PyResult<EngineStateApi>
+clone_py_engine_state(py, state_obj) -> PyResult<RustHexoState>
+clone_py_engine_states(py, states_obj) -> PyResult<Vec<RustHexoState>>
+```
+
+Use existing `hexo_engine._rust.state_api_capsule()`.
+
+## 14.3 `hexformer_ar/rust/src/sample_gen.rs`
+
+Change entry functions from history rows to states.
+
+Before:
+
+```rust
+let state = state_from_history_row(history_row)?;
+```
+
+After:
+
+```rust
+let state = clone_py_engine_state(py, state_obj)?;
+```
+
+Before:
+
+```rust
+let states = states_from_history_rows(history_rows)?;
+```
+
+After:
+
+```rust
+let states = clone_py_engine_states(py, states_obj)?;
+```
+
+Keep `build_sparse_payload(&state, ...)` unchanged except for metadata additions.
+
+## 14.4 `hexformer_ar/python/hexo_models/hexformer_ar/input.py`
+
+Remove production use of:
+
+```python
+history_row_from_state(state)
+```
+
+Change `build_sparse_input()` and batch builders to pass cloned engine states to Rust.
+
+Current `build_sparse_input()` already hides the Rust call behind a Python function, so call sites do not need to change.
+
+## 14.5 `hexformer_ar/python/hexo_models/hexformer_ar/inference.py`
+
+Change `evaluate_mcts_payload()` so it consumes:
+
+```text
+sparse_payloads
+```
+
+instead of:
+
+```text
+history_rows
+```
+
+The rest of inference can stay the same: `infer_sparse()` collates, runs the model, softmaxes policy logits, maps priors back to candidate IDs, and returns values.
+
+## 14.6 `hexformer_ar/rust/src/mcts.rs`
+
+Change root input from `history_rows` to `root_states`.
+
+Python already calls Rust MCTS with `tuple(root_states)`, architecture config, and candidate config.  Align Rust with that Python boundary.
+
+## 14.7 `hexformer_ar/rust/src/mcts_eval.rs`
+
+Replace history-row evaluator payload with sparse payload evaluator payload.
+
+Before:
+
+```rust
+payload.set_item("history_rows", history_rows)?;
+payload.set_item("legal_action_ids", legal_rows)?;
+```
+
+After:
+
+```rust
+payload.set_item("sparse_payloads", sparse_payloads)?;
+payload.set_item("state_source", "engine_state_clone")?;
+```
+
+Keep `parse_evaluation_output()` mostly as-is because Python still returns candidate action rows, priors, and values.
+
+## 14.8 `hexformer_ar/rust/src/mcts_tree.rs`
+
+No required structural rewrite.
+
+The tree already owns `RustHexoState` values and applies placements internally.
+
+Later optimization:
+
+```text
+replace repeated root_state.clone() in select_pending_leaf with scratch state + apply_with_delta/undo
+```
+
+Do this only after clone-state ingestion is working.
+
+---
+
+# 15. Updated tests
+
+## 15.1 New Rust tests
+
+Add to model-specific Rust tests:
+
+```text
+clone_py_engine_state_rejects_non_state
+clone_py_engine_state_preserves_phase
+clone_py_engine_state_preserves_legal_count
+sparse_payload_from_state_matches_history_compat_payload
+sparse_payloads_from_states_batch_order_is_stable
+selfplay_sample_payloads_from_states_preserve_turn_indices
+mcts_accepts_root_state_objects
+mcts_does_not_mutate_root_state
+mcts_eval_sends_sparse_payloads_not_history_rows
+```
+
+## 15.2 Python tests
+
+Add under:
+
+```text
+tests/models/hexformer_ar/
+```
+
+Required tests:
+
+```python
+def test_build_sparse_input_uses_clone_state_not_history_rows(): ...
+def test_build_sparse_inputs_from_states_batch(): ...
+def test_evaluate_mcts_payload_accepts_sparse_payloads(): ...
+def test_run_mcts_accepts_engine_state_object(): ...
+def test_selfplay_finalizer_passes_cloned_states(): ...
+```
+
+## 15.3 Compatibility tests
+
+While both paths exist:
+
+```text
+history_row payload and cloned-state payload should match for simple positions
+history_row path emits DeprecationWarning
+```
+
+Once the clone path is stable, remove history-row compatibility tests.
+
+---
+
+# 16. Updated acceptance criteria
+
+The refactor is accepted when:
+
+```text
+build_sparse_input(state) no longer calls history_row_from_state in production
+selfplay sample finalization no longer converts states to history rows
+Rust MCTS root input is Python HexoState objects
+Rust MCTS evaluator sends sparse_payloads to Python
+Hexformer capabilities report state_source = engine_state_clone
+dense_cnn remains unchanged
+hexo_engine has no major new model-specific APIs
+```
+
+Functional acceptance:
+
+```text
+Hexformer direct inference works from engine.new_game()
+Hexformer direct inference works after several applied actions
+Hexformer self-play completes at least one game
+Hexformer samples round-trip through replay buffer
+Hexformer MCTS returns legal action IDs
+Root state is unchanged after run_mcts()
+Sparse payloads from clone-state and history-compat match on simple fixtures
+```
+
+Performance acceptance:
+
+```text
+Clone-state sparse payload generation is no slower than history replay for midgame states.
+MCTS no longer spends avoidable time rebuilding states from history for every evaluator call.
+Candidate counts and policy rows match previous behaviour.
+```
+
+---
+
+# 17. Updated implementation sequence
+
+## Phase 1 â€” Add model-side state clone wrapper
+
+Files:
+
+```text
+hexformer_ar/rust/src/engine_state.rs
+hexformer_ar/rust/src/lib.rs
+```
+
+Tasks:
+
+```text
+Load hexo_engine state API capsule.
+Validate version.
+Clone Python HexoState into RustHexoState.
+Free capsule pointer safely.
+Expose capability state_source = engine_state_clone.
+```
+
+Exit criteria:
+
+```text
+Rust test can clone engine.new_game() state.
+Rust test can clone a non-opening state.
+No root state mutation.
+```
+
+## Phase 2 â€” Change sparse input generation
+
+Files:
+
+```text
+hexformer_ar/rust/src/sample_gen.rs
+hexformer_ar/python/hexo_models/hexformer_ar/input.py
+```
+
+Tasks:
+
+```text
+Add sparse_input_payload_from_state.
+Add sparse_input_payloads_from_states.
+Update build_sparse_input.
+Update build_sparse_inputs_from_states.
+Deprecate history-row helpers.
+```
+
+Exit criteria:
+
+```text
+build_sparse_input(state) works without history replay.
+SparseDecisionInput shapes unchanged.
+Payload metadata says engine_state_clone.
+```
+
+## Phase 3 â€” Change self-play finalization
+
+Files:
+
+```text
+hexformer_ar/python/hexo_models/hexformer_ar/selfplay.py
+hexformer_ar/python/hexo_models/hexformer_ar/input.py
+hexformer_ar/rust/src/sample_gen.rs
+```
+
+Tasks:
+
+```text
+Keep PendingDecision.state = engine.clone_state(state).
+Update build_selfplay_sample_payloads to call Rust from cloned states.
+Remove history row conversion from finalizer path.
+```
+
+Exit criteria:
+
+```text
+self-play produces HexformerSample objects.
+Training records still append to sample store.
+Stored payload schema unchanged except metadata.
+```
+
+## Phase 4 â€” Change MCTS evaluator path
+
+Files:
+
+```text
+hexformer_ar/rust/src/mcts.rs
+hexformer_ar/rust/src/mcts_eval.rs
+hexformer_ar/python/hexo_models/hexformer_ar/inference.py
+hexformer_ar/python/hexo_models/hexformer_ar/mcts.py
+```
+
+Tasks:
+
+```text
+Make Rust MCTS accept root state objects.
+Clone root states via engine_state.rs.
+Build sparse payloads from Rust leaf states.
+Send sparse_payloads to Python evaluator.
+Parse values/candidate IDs/priors as before.
+```
+
+Exit criteria:
+
+```text
+run_mcts(state, inference, ...) works.
+run_batched_mcts((state1, state2), ...) works.
+Evaluator no longer receives history_rows in production.
+```
+
+## Phase 5 â€” Cleanup
+
+Tasks:
+
+```text
+Mark history-row functions compatibility-only.
+Update docs.
+Update diagnostics.
+Remove stale capability state_source = packed_history_rows.
+Add tests.
+```
+
+Exit criteria:
+
+```text
+No production Hexformer code path depends on move-history replay.
+No major hexo_engine changes.
+dense_cnn still passes existing tests.
+```
+
+---
+
+# 18. Final revised spec
+
+Use this as the updated implementation contract:
+
+```text
+HexformerAR state interface:
+  Input object:
+    cloned Python HexoState
+
+  Python entry:
+    build_sparse_input(state, ...)
+    run_mcts(state, ...)
+    build_selfplay_sample_payloads(states=...)
+
+  Rust state acquisition:
+    hexformer_ar/rust/src/engine_state.rs
+    clone via hexo_engine._rust.state_api_capsule()
+
+  Rust sparse generation:
+    build_sparse_payload(&RustHexoState, ...)
+
+  Rust MCTS:
+    root states cloned from Python HexoState objects
+    leaf states remain native RustHexoState values
+    evaluator receives sparse_payloads, not history_rows
+
+  Durable records:
+    .hxr / replay may still store action history for audit and reproduction
+
+  Production rule:
+    no live model inference, sample finalization, or MCTS evaluation may rebuild state by replaying move history
+```
+
+This keeps `hexo_engine` clean, uses its existing clone-state API, and makes Hexformerâ€™s model-specific Rust code operate on actual engine state snapshots instead of serialized history rows.

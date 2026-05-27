@@ -2,8 +2,8 @@
 //!
 //! This module owns the model-specific sample facts used by self-play and
 //! inference: tactical windows, candidate frontiers, local crops, relation
-//! edges, and target tensors. It consumes cloned engine states from `state.rs`
-//! and does not rely on engine-side model accelerators.
+//! edges, and target tensors. Production APIs clone live engine states through
+//! the engine state capsule.
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -17,9 +17,10 @@ use hexo_engine::{
     PackedCoord, Player, TurnPhase,
 };
 
-use crate::state::{state_from_py_state, states_from_py_states};
-
 use crate::constants::*;
+use crate::engine_state::{clone_py_engine_state, clone_py_engine_states, STATE_API_VERSION};
+
+const ENGINE_STATE_SOURCE: &str = "engine_state_clone";
 
 #[derive(Clone, Debug)]
 pub(crate) struct ArchitectureConfig {
@@ -87,6 +88,9 @@ pub(crate) struct CandidateConfig {
     frontier_radius: i16,
     include_all_legal_below: usize,
     require_tactical_candidates: bool,
+    force_include_tactical: bool,
+    overflow_policy: String,
+    candidate_diagnostics: bool,
 }
 
 impl Default for CandidateConfig {
@@ -98,6 +102,9 @@ impl Default for CandidateConfig {
             frontier_radius: DEFAULT_FRONTIER_RADIUS,
             include_all_legal_below: DEFAULT_INCLUDE_ALL_LEGAL_BELOW,
             require_tactical_candidates: DEFAULT_REQUIRE_TACTICAL_CANDIDATES,
+            force_include_tactical: true,
+            overflow_policy: "fail_fast".to_string(),
+            candidate_diagnostics: true,
         }
     }
 }
@@ -119,6 +126,17 @@ impl CandidateConfig {
                 raw,
                 "require_tactical_candidates",
                 default.require_tactical_candidates,
+            )?,
+            force_include_tactical: get_bool(
+                raw,
+                "force_include_tactical",
+                default.force_include_tactical,
+            )?,
+            overflow_policy: get_string(raw, "overflow_policy", default.overflow_policy)?,
+            candidate_diagnostics: get_bool(
+                raw,
+                "candidate_diagnostics",
+                default.candidate_diagnostics,
             )?,
         })
     }
@@ -145,18 +163,49 @@ struct Candidate {
 struct CandidateMetadata {
     legal_count: usize,
     candidate_count: usize,
+    generated_candidate_count: usize,
+    dropped_candidate_count: usize,
     truncated: bool,
+    candidate_overflow: bool,
+    forced_candidate_count: usize,
+    forced_missing_count: usize,
+    forced_candidate_recall: f32,
+    max_candidates: usize,
     immediate_win_count: usize,
+    immediate_win_included_count: usize,
+    immediate_win_missing_count: usize,
+    immediate_win_recall: f32,
+    immediate_win_missing_action_ids: Vec<PackedCoord>,
     must_block_count: usize,
+    must_block_included_count: usize,
+    must_block_missing_count: usize,
+    must_block_recall: f32,
+    must_block_missing_action_ids: Vec<PackedCoord>,
+    tactical_action_count: usize,
+    tactical_included_count: usize,
+    tactical_missing_count: usize,
+    tactical_recall: f32,
+    tactical_missing_action_ids: Vec<PackedCoord>,
     tactical_radius: i16,
     frontier_radius: i16,
     require_tactical_candidates: bool,
+    force_include_tactical: bool,
+    overflow_policy: String,
+    candidate_diagnostics: bool,
 }
 
 #[derive(Clone, Debug)]
 struct CandidateSet {
     candidates: Vec<Candidate>,
     metadata: CandidateMetadata,
+}
+
+#[derive(Clone, Debug)]
+struct CandidateRecall {
+    required_count: usize,
+    included_count: usize,
+    missing_action_ids: Vec<PackedCoord>,
+    recall: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -234,12 +283,16 @@ pub(crate) struct SparsePayload {
     relevance_target: TensorF32,
     lookahead_targets: Vec<(i32, TensorF32)>,
     anchor: HexCoord,
+    placements_made: usize,
+    phase: &'static str,
+    current_player: &'static str,
+    legal_action_count: usize,
     candidate_metadata: CandidateMetadata,
     tactical_metadata: TacticalMetadata,
 }
 
 #[pyfunction]
-pub fn sparse_input_payload(
+pub fn sparse_input_payload_from_state(
     py: Python<'_>,
     state: &Bound<'_, PyAny>,
     architecture: &Bound<'_, PyAny>,
@@ -260,14 +313,19 @@ pub fn sparse_input_payload(
         distance,
         lookahead: parse_lookahead_items(lookahead)?,
     };
-    let state = state_from_py_state(py, state)?;
+    let state = clone_py_engine_state(py, state)?;
     let payload = build_sparse_payload(&state, &arch, &candidate_cfg, &targets);
-    let payload_obj = sparse_payload_to_py(py, &payload, metadata)?;
-    Ok(payload_obj)
+    let metadata = metadata_with_state_source(
+        py,
+        metadata,
+        ENGINE_STATE_SOURCE,
+        Some(STATE_API_VERSION),
+    )?;
+    sparse_payload_to_py(py, &payload, metadata.as_any())
 }
 
 #[pyfunction]
-pub fn sparse_input_payloads(
+pub fn sparse_input_payloads_from_states(
     py: Python<'_>,
     states: &Bound<'_, PyAny>,
     architecture: &Bound<'_, PyAny>,
@@ -275,12 +333,12 @@ pub fn sparse_input_payloads(
 ) -> PyResult<Py<PyAny>> {
     let arch = ArchitectureConfig::from_py(architecture)?;
     let candidate_cfg = CandidateConfig::from_py(candidates)?;
-    let states = states_from_py_states(py, states)?;
+    let states = clone_py_engine_states(py, states)?;
     sparse_payloads_to_py(py, &states, &arch, &candidate_cfg)
 }
 
 #[pyfunction]
-pub fn selfplay_sample_payloads(
+pub fn selfplay_sample_payloads_from_states(
     py: Python<'_>,
     game_id: String,
     states: &Bound<'_, PyAny>,
@@ -296,7 +354,37 @@ pub fn selfplay_sample_payloads(
 ) -> PyResult<Py<PyAny>> {
     let arch = ArchitectureConfig::from_py(architecture)?;
     let candidate_cfg = CandidateConfig::from_py(candidates)?;
-    let states = states_from_py_states(py, states)?;
+    let states = clone_py_engine_states(py, states)?;
+    selfplay_sample_payloads_for_states(
+        py,
+        game_id,
+        states,
+        players,
+        turn_indices,
+        visit_policies,
+        root_values,
+        search_visits,
+        selected_action_ids,
+        winner,
+        &arch,
+        &candidate_cfg,
+    )
+}
+
+fn selfplay_sample_payloads_for_states(
+    py: Python<'_>,
+    game_id: String,
+    states: Vec<RustHexoState>,
+    players: &Bound<'_, PyAny>,
+    turn_indices: &Bound<'_, PyAny>,
+    visit_policies: &Bound<'_, PyAny>,
+    root_values: &Bound<'_, PyAny>,
+    search_visits: &Bound<'_, PyAny>,
+    selected_action_ids: &Bound<'_, PyAny>,
+    winner: Option<String>,
+    arch: &ArchitectureConfig,
+    candidate_cfg: &CandidateConfig,
+) -> PyResult<Py<PyAny>> {
     let players = parse_string_sequence(players)?;
     let turn_indices = parse_i64_sequence(turn_indices)?;
     let policies = parse_policy_rows(visit_policies)?;
@@ -361,8 +449,10 @@ pub fn selfplay_sample_payloads(
         base_metadata.set_item("search_visits", search_visits[index])?;
         base_metadata.set_item("selected_action_id", selected_action_ids[index])?;
         base_metadata.set_item("model_family", "hexformer_ar")?;
+        base_metadata.set_item("state_source", ENGINE_STATE_SOURCE)?;
+        base_metadata.set_item("state_api_version", STATE_API_VERSION)?;
 
-        let sparse = build_sparse_payload(&states[index], &arch, &candidate_cfg, &targets);
+        let sparse = build_sparse_payload(&states[index], arch, candidate_cfg, &targets);
         let input_payload = sparse_payload_to_py(py, &sparse, base_metadata.as_any())?;
         let input_bound = input_payload.bind(py);
         let metadata = input_bound.get_item("metadata")?;
@@ -377,9 +467,9 @@ pub fn selfplay_sample_payloads(
 }
 
 pub fn register_pybridge(module: &Bound<'_, PyModule>) -> PyResult<()> {
-    module.add_function(wrap_pyfunction!(sparse_input_payload, module)?)?;
-    module.add_function(wrap_pyfunction!(sparse_input_payloads, module)?)?;
-    module.add_function(wrap_pyfunction!(selfplay_sample_payloads, module)?)?;
+    module.add_function(wrap_pyfunction!(sparse_input_payload_from_state, module)?)?;
+    module.add_function(wrap_pyfunction!(sparse_input_payloads_from_states, module)?)?;
+    module.add_function(wrap_pyfunction!(selfplay_sample_payloads_from_states, module)?)?;
     Ok(())
 }
 
@@ -674,6 +764,10 @@ pub(crate) fn build_sparse_payload(
             .filter_map(|(horizon, value)| wdl_target(Some(*value)).map(|target| (*horizon, target)))
             .collect(),
         anchor,
+        placements_made: state.placements_made(),
+        phase: phase_label(state.phase()),
+        current_player: player_label(state.current_player()),
+        legal_action_count: legal_action_ids.len(),
         candidate_metadata: candidate_set.metadata,
         tactical_metadata: tactical.metadata,
     }
@@ -839,17 +933,10 @@ fn build_candidate_frontier(
             add_candidate(&mut by_id, &legal_set, *action_id, TAG_FRONTIER, 10.0);
         }
     }
-    if cfg.require_tactical_candidates
-        && (!tactical.immediate_win_action_ids.is_empty() || !tactical.must_block_action_ids.is_empty())
-    {
-        for action_id in tactical
-            .immediate_win_action_ids
-            .iter()
-            .chain(tactical.must_block_action_ids.iter())
-        {
-            if !by_id.contains_key(action_id) {
-                add_candidate(&mut by_id, &legal_set, *action_id, TAG_TACTICAL, 95.0);
-            }
+    let forced_ids = forced_candidate_ids(&legal_set, tactical, cfg.force_include_tactical);
+    for action_id in &forced_ids {
+        if !by_id.contains_key(action_id) {
+            add_candidate(&mut by_id, &legal_set, *action_id, TAG_TACTICAL, 95.0);
         }
     }
     if by_id.is_empty() {
@@ -860,12 +947,30 @@ fn build_candidate_frontier(
     let mut ordered = by_id.into_values().collect::<Vec<_>>();
     ordered.sort_by(compare_candidate);
     let truncated = ordered.len() > cfg.max_candidates;
-    let mut limited = ordered
-        .iter()
-        .copied()
-        .take(cfg.max_candidates)
-        .collect::<Vec<_>>();
-    if limited.is_empty() && !legal_action_ids.is_empty() {
+    let forced_set = forced_ids.iter().copied().collect::<HashSet<_>>();
+    let mut limited = if truncated {
+        let mut selected = ordered
+            .iter()
+            .copied()
+            .filter(|candidate| forced_set.contains(&candidate.action_id))
+            .take(cfg.max_candidates)
+            .collect::<Vec<_>>();
+        if selected.len() < cfg.max_candidates {
+            let remaining = cfg.max_candidates - selected.len();
+            selected.extend(
+                ordered
+                    .iter()
+                    .copied()
+                    .filter(|candidate| !forced_set.contains(&candidate.action_id))
+                    .take(remaining),
+            );
+        }
+        selected.sort_by(compare_candidate);
+        selected
+    } else {
+        ordered.clone()
+    };
+    if limited.is_empty() && !legal_action_ids.is_empty() && cfg.max_candidates > 0 {
         let action_id = legal_action_ids[0];
         limited.push(Candidate {
             action_id,
@@ -874,18 +979,122 @@ fn build_candidate_frontier(
             priority: 0.0,
         });
     }
+    let selected_ids = limited
+        .iter()
+        .map(|candidate| candidate.action_id)
+        .collect::<HashSet<_>>();
+    let immediate_recall = candidate_recall(&tactical.immediate_win_action_ids, &selected_ids);
+    let must_block_recall = candidate_recall(&tactical.must_block_action_ids, &selected_ids);
+    let tactical_recall = candidate_recall(&tactical.tactical_action_ids, &selected_ids);
+    let forced_recall = candidate_recall(&forced_ids, &selected_ids);
+    let candidate_overflow =
+        forced_ids.len() > cfg.max_candidates || !forced_recall.missing_action_ids.is_empty();
     CandidateSet {
         metadata: CandidateMetadata {
             legal_count: legal_action_ids.len(),
             candidate_count: limited.len(),
+            generated_candidate_count: ordered.len(),
+            dropped_candidate_count: ordered.len().saturating_sub(limited.len()),
             truncated,
-            immediate_win_count: tactical.immediate_win_action_ids.len(),
-            must_block_count: tactical.must_block_action_ids.len(),
+            candidate_overflow,
+            forced_candidate_count: forced_ids.len(),
+            forced_missing_count: forced_recall.missing_action_ids.len(),
+            forced_candidate_recall: forced_recall.recall,
+            max_candidates: cfg.max_candidates,
+            immediate_win_count: immediate_recall.required_count,
+            immediate_win_included_count: immediate_recall.included_count,
+            immediate_win_missing_count: immediate_recall.missing_action_ids.len(),
+            immediate_win_recall: immediate_recall.recall,
+            immediate_win_missing_action_ids: immediate_recall.missing_action_ids,
+            must_block_count: must_block_recall.required_count,
+            must_block_included_count: must_block_recall.included_count,
+            must_block_missing_count: must_block_recall.missing_action_ids.len(),
+            must_block_recall: must_block_recall.recall,
+            must_block_missing_action_ids: must_block_recall.missing_action_ids,
+            tactical_action_count: tactical_recall.required_count,
+            tactical_included_count: tactical_recall.included_count,
+            tactical_missing_count: tactical_recall.missing_action_ids.len(),
+            tactical_recall: tactical_recall.recall,
+            tactical_missing_action_ids: tactical_recall.missing_action_ids,
             tactical_radius: cfg.tactical_radius,
             frontier_radius: cfg.frontier_radius,
             require_tactical_candidates: cfg.require_tactical_candidates,
+            force_include_tactical: cfg.force_include_tactical,
+            overflow_policy: cfg.overflow_policy.clone(),
+            candidate_diagnostics: cfg.candidate_diagnostics,
         },
         candidates: limited,
+    }
+}
+
+fn forced_candidate_ids(
+    legal_set: &HashSet<PackedCoord>,
+    tactical: &TacticalSummary,
+    force_include_tactical: bool,
+) -> Vec<PackedCoord> {
+    let mut seen = HashSet::<PackedCoord>::new();
+    let mut forced = Vec::new();
+    push_forced_ids(
+        &mut forced,
+        &mut seen,
+        legal_set,
+        &tactical.immediate_win_action_ids,
+    );
+    push_forced_ids(
+        &mut forced,
+        &mut seen,
+        legal_set,
+        &tactical.must_block_action_ids,
+    );
+    if force_include_tactical {
+        push_forced_ids(
+            &mut forced,
+            &mut seen,
+            legal_set,
+            &tactical.tactical_action_ids,
+        );
+    }
+    forced.sort_unstable();
+    forced
+}
+
+fn push_forced_ids(
+    out: &mut Vec<PackedCoord>,
+    seen: &mut HashSet<PackedCoord>,
+    legal_set: &HashSet<PackedCoord>,
+    action_ids: &[PackedCoord],
+) {
+    for action_id in action_ids {
+        if legal_set.contains(action_id) && seen.insert(*action_id) {
+            out.push(*action_id);
+        }
+    }
+}
+
+fn candidate_recall(
+    required_action_ids: &[PackedCoord],
+    selected_ids: &HashSet<PackedCoord>,
+) -> CandidateRecall {
+    let mut required = required_action_ids.to_vec();
+    required.sort_unstable();
+    required.dedup();
+
+    let missing_action_ids = required
+        .iter()
+        .copied()
+        .filter(|action_id| !selected_ids.contains(action_id))
+        .collect::<Vec<_>>();
+    let included_count = required.len().saturating_sub(missing_action_ids.len());
+    let recall = if required.is_empty() {
+        1.0
+    } else {
+        included_count as f32 / required.len() as f32
+    };
+    CandidateRecall {
+        required_count: required.len(),
+        included_count,
+        missing_action_ids,
+        recall,
     }
 }
 
@@ -1322,6 +1531,21 @@ fn sorted_stones(state: &RustHexoState) -> Vec<(HexCoord, Player)> {
         .collect()
 }
 
+fn phase_label(phase: TurnPhase) -> &'static str {
+    match phase {
+        TurnPhase::Opening => "Opening",
+        TurnPhase::FirstStone => "FirstStone",
+        TurnPhase::SecondStone { .. } => "SecondStone",
+    }
+}
+
+fn player_label(player: Player) -> &'static str {
+    match player {
+        Player::Player0 => "player0",
+        Player::Player1 => "player1",
+    }
+}
+
 pub(crate) fn sparse_payloads_to_py(
     py: Python<'_>,
     states: &[RustHexoState],
@@ -1329,13 +1553,20 @@ pub(crate) fn sparse_payloads_to_py(
     candidate_cfg: &CandidateConfig,
 ) -> PyResult<Py<PyAny>> {
     let results = PyList::empty(py);
-    let empty = PyDict::new(py);
     let targets = SparseTargets::default();
     for state in states {
+        let metadata = base_engine_metadata(py)?;
         let payload = build_sparse_payload(state, architecture, candidate_cfg, &targets);
-        results.append(sparse_payload_to_py(py, &payload, empty.as_any())?)?;
+        results.append(sparse_payload_to_py(py, &payload, metadata.as_any())?)?;
     }
     Ok(results.into_any().unbind())
+}
+
+fn base_engine_metadata(py: Python<'_>) -> PyResult<Bound<'_, PyDict>> {
+    let metadata = PyDict::new(py);
+    metadata.set_item("state_source", ENGINE_STATE_SOURCE)?;
+    metadata.set_item("state_api_version", STATE_API_VERSION)?;
+    Ok(metadata)
 }
 
 pub(crate) fn sparse_payload_to_py(
@@ -1450,21 +1681,114 @@ fn metadata_to_py<'py>(
 ) -> PyResult<Bound<'py, PyDict>> {
     let metadata = copy_py_mapping(py, base_metadata)?;
     metadata.set_item("anchor", (payload.anchor.q, payload.anchor.r))?;
+    metadata.set_item("placements_made", payload.placements_made)?;
+    metadata.set_item("phase", payload.phase)?;
+    metadata.set_item("current_player", payload.current_player)?;
+    metadata.set_item("legal_action_count", payload.legal_action_count)?;
+    metadata.set_item("candidate_count", payload.candidate_metadata.candidate_count)?;
     let candidate = PyDict::new(py);
     candidate.set_item("legal_count", payload.candidate_metadata.legal_count)?;
     candidate.set_item("candidate_count", payload.candidate_metadata.candidate_count)?;
+    candidate.set_item(
+        "generated_candidate_count",
+        payload.candidate_metadata.generated_candidate_count,
+    )?;
+    candidate.set_item(
+        "dropped_candidate_count",
+        payload.candidate_metadata.dropped_candidate_count,
+    )?;
     candidate.set_item("truncated", payload.candidate_metadata.truncated)?;
+    candidate.set_item(
+        "candidate_overflow",
+        payload.candidate_metadata.candidate_overflow,
+    )?;
+    candidate.set_item(
+        "forced_candidate_count",
+        payload.candidate_metadata.forced_candidate_count,
+    )?;
+    candidate.set_item(
+        "forced_missing_count",
+        payload.candidate_metadata.forced_missing_count,
+    )?;
+    candidate.set_item(
+        "forced_candidate_recall",
+        payload.candidate_metadata.forced_candidate_recall,
+    )?;
+    candidate.set_item("max_candidates", payload.candidate_metadata.max_candidates)?;
     candidate.set_item(
         "immediate_win_count",
         payload.candidate_metadata.immediate_win_count,
     )?;
+    candidate.set_item(
+        "immediate_win_included_count",
+        payload.candidate_metadata.immediate_win_included_count,
+    )?;
+    candidate.set_item(
+        "immediate_win_missing_count",
+        payload.candidate_metadata.immediate_win_missing_count,
+    )?;
+    candidate.set_item(
+        "immediate_win_recall",
+        payload.candidate_metadata.immediate_win_recall,
+    )?;
     candidate.set_item("must_block_count", payload.candidate_metadata.must_block_count)?;
+    candidate.set_item(
+        "must_block_included_count",
+        payload.candidate_metadata.must_block_included_count,
+    )?;
+    candidate.set_item(
+        "must_block_missing_count",
+        payload.candidate_metadata.must_block_missing_count,
+    )?;
+    candidate.set_item(
+        "must_block_recall",
+        payload.candidate_metadata.must_block_recall,
+    )?;
+    candidate.set_item(
+        "tactical_action_count",
+        payload.candidate_metadata.tactical_action_count,
+    )?;
+    candidate.set_item(
+        "tactical_included_count",
+        payload.candidate_metadata.tactical_included_count,
+    )?;
+    candidate.set_item(
+        "tactical_missing_count",
+        payload.candidate_metadata.tactical_missing_count,
+    )?;
+    candidate.set_item("tactical_recall", payload.candidate_metadata.tactical_recall)?;
     candidate.set_item("tactical_radius", payload.candidate_metadata.tactical_radius)?;
     candidate.set_item("frontier_radius", payload.candidate_metadata.frontier_radius)?;
     candidate.set_item(
         "require_tactical_candidates",
         payload.candidate_metadata.require_tactical_candidates,
     )?;
+    candidate.set_item(
+        "force_include_tactical",
+        payload.candidate_metadata.force_include_tactical,
+    )?;
+    candidate.set_item(
+        "overflow_policy",
+        payload.candidate_metadata.overflow_policy.clone(),
+    )?;
+    candidate.set_item(
+        "candidate_diagnostics",
+        payload.candidate_metadata.candidate_diagnostics,
+    )?;
+    if payload.candidate_metadata.candidate_diagnostics {
+        candidate.set_item(
+            "immediate_win_missing_action_ids",
+            payload.candidate_metadata.immediate_win_missing_action_ids.clone(),
+        )?;
+        candidate.set_item(
+            "must_block_missing_action_ids",
+            payload.candidate_metadata.must_block_missing_action_ids.clone(),
+        )?;
+        candidate.set_item(
+            "tactical_missing_action_ids",
+            payload.candidate_metadata.tactical_missing_action_ids.clone(),
+        )?;
+    }
     metadata.set_item("candidate", candidate)?;
 
     let tactical = PyDict::new(py);
@@ -1479,6 +1803,20 @@ fn metadata_to_py<'py>(
     )?;
     tactical.set_item("must_block_count", payload.tactical_metadata.must_block_count)?;
     metadata.set_item("tactical", tactical)?;
+    Ok(metadata)
+}
+
+fn metadata_with_state_source<'py>(
+    py: Python<'py>,
+    base_metadata: &Bound<'py, PyAny>,
+    state_source: &str,
+    state_api_version: Option<u32>,
+) -> PyResult<Bound<'py, PyDict>> {
+    let metadata = copy_py_mapping(py, base_metadata)?;
+    metadata.set_item("state_source", state_source)?;
+    if let Some(version) = state_api_version {
+        metadata.set_item("state_api_version", version)?;
+    }
     Ok(metadata)
 }
 
@@ -1614,6 +1952,13 @@ fn get_bool(raw: &Bound<'_, PyAny>, key: &str, default: bool) -> PyResult<bool> 
     }
 }
 
+fn get_string(raw: &Bound<'_, PyAny>, key: &str, default: String) -> PyResult<String> {
+    match py_get(raw, key) {
+        Some(value) if !value.is_none() => value.extract::<String>(),
+        _ => Ok(default),
+    }
+}
+
 fn get_i32_vec(raw: &Bound<'_, PyAny>, key: &str, default: Vec<i32>) -> PyResult<Vec<i32>> {
     let Some(value) = py_get(raw, key) else {
         return Ok(default);
@@ -1719,21 +2064,166 @@ mod tests {
     use super::*;
     use hexo_engine::{apply_placement, Placement};
 
-    fn sample_state() -> RustHexoState {
+    fn apply_sequence(coords: &[HexCoord]) -> RustHexoState {
         let mut state = RustHexoState::new();
-        for coord in [
-            HexCoord::ZERO,
-            HexCoord::new(1, 0),
-            HexCoord::new(2, 0),
-            HexCoord::new(0, 1),
-        ] {
-            apply_placement(&mut state, Placement { coord }).unwrap();
+        for coord in coords {
+            apply_placement(&mut state, Placement { coord: *coord }).unwrap();
         }
         state
     }
 
+    fn sample_state() -> RustHexoState {
+        apply_sequence(&[
+            HexCoord::ZERO,
+            HexCoord::new(1, 0),
+            HexCoord::new(2, 0),
+            HexCoord::new(0, 1),
+        ])
+    }
+
+    fn five_in_row_current_player() -> RustHexoState {
+        apply_sequence(&[
+            HexCoord::ZERO,
+            HexCoord::new(0, 1),
+            HexCoord::new(0, 2),
+            HexCoord::new(1, 0),
+            HexCoord::new(2, 0),
+            HexCoord::new(1, 1),
+            HexCoord::new(1, 2),
+            HexCoord::new(3, 0),
+            HexCoord::new(4, 0),
+            HexCoord::new(2, 1),
+            HexCoord::new(2, 2),
+        ])
+    }
+
+    fn five_in_row_opponent_to_move() -> RustHexoState {
+        apply_sequence(&[
+            HexCoord::ZERO,
+            HexCoord::new(0, 1),
+            HexCoord::new(0, 2),
+            HexCoord::new(1, 0),
+            HexCoord::new(2, 0),
+            HexCoord::new(1, 1),
+            HexCoord::new(1, 2),
+            HexCoord::new(3, 0),
+            HexCoord::new(4, 0),
+        ])
+    }
+
+    fn legal_ids(state: &RustHexoState) -> Vec<PackedCoord> {
+        let mut legal = Vec::new();
+        state.write_legal_action_ids(&mut legal);
+        legal
+    }
+
     #[test]
-    fn sparse_payload_has_existing_trainer_shapes() {
+    fn build_tactical_summary_detects_immediate_win() {
+        let state = five_in_row_current_player();
+        let tactical = build_tactical_summary(&state, &legal_ids(&state));
+
+        assert!(!tactical.immediate_win_action_ids.is_empty());
+        assert_eq!(tactical.must_block_action_ids.len(), 0);
+        assert_eq!(
+            tactical.metadata.immediate_win_count,
+            tactical.immediate_win_action_ids.len()
+        );
+    }
+
+    #[test]
+    fn build_tactical_summary_detects_must_block() {
+        let state = five_in_row_opponent_to_move();
+        let tactical = build_tactical_summary(&state, &legal_ids(&state));
+
+        assert!(!tactical.must_block_action_ids.is_empty());
+        assert_eq!(tactical.immediate_win_action_ids.len(), 0);
+        assert_eq!(
+            tactical.metadata.must_block_count,
+            tactical.must_block_action_ids.len()
+        );
+    }
+
+    #[test]
+    fn candidate_frontier_keeps_immediate_win_when_truncated() {
+        let state = five_in_row_current_player();
+        let legal = legal_ids(&state);
+        let tactical = build_tactical_summary(&state, &legal);
+        let cfg = CandidateConfig {
+            max_candidates: tactical.immediate_win_action_ids.len().max(1),
+            include_all_legal_below: usize::MAX,
+            ..CandidateConfig::default()
+        };
+
+        let frontier = build_candidate_frontier(&state, &legal, &tactical, &cfg);
+        let selected = frontier
+            .candidates
+            .iter()
+            .map(|candidate| candidate.action_id)
+            .collect::<HashSet<_>>();
+
+        assert!(frontier.metadata.truncated);
+        assert!(tactical
+            .immediate_win_action_ids
+            .iter()
+            .all(|action_id| selected.contains(action_id)));
+        assert_eq!(frontier.metadata.immediate_win_missing_count, 0);
+    }
+
+    #[test]
+    fn candidate_frontier_keeps_must_block_when_truncated() {
+        let state = five_in_row_opponent_to_move();
+        let legal = legal_ids(&state);
+        let tactical = build_tactical_summary(&state, &legal);
+        let cfg = CandidateConfig {
+            max_candidates: tactical.must_block_action_ids.len().max(1),
+            include_all_legal_below: usize::MAX,
+            ..CandidateConfig::default()
+        };
+
+        let frontier = build_candidate_frontier(&state, &legal, &tactical, &cfg);
+        let selected = frontier
+            .candidates
+            .iter()
+            .map(|candidate| candidate.action_id)
+            .collect::<HashSet<_>>();
+
+        assert!(frontier.metadata.truncated);
+        assert!(tactical
+            .must_block_action_ids
+            .iter()
+            .all(|action_id| selected.contains(action_id)));
+        assert_eq!(frontier.metadata.must_block_missing_count, 0);
+    }
+
+    #[test]
+    fn candidate_frontier_is_deterministic() {
+        let state = sample_state();
+        let legal = legal_ids(&state);
+        let tactical = build_tactical_summary(&state, &legal);
+        let cfg = CandidateConfig {
+            max_candidates: 8,
+            ..CandidateConfig::default()
+        };
+
+        let left = build_candidate_frontier(&state, &legal, &tactical, &cfg);
+        let right = build_candidate_frontier(&state, &legal, &tactical, &cfg);
+
+        assert_eq!(
+            left.candidates
+                .iter()
+                .map(|candidate| candidate.action_id)
+                .collect::<Vec<_>>(),
+            right
+                .candidates
+                .iter()
+                .map(|candidate| candidate.action_id)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(left.metadata.candidate_count, right.metadata.candidate_count);
+    }
+
+    #[test]
+    fn sparse_payload_shapes_match_config() {
         let state = sample_state();
         let arch = ArchitectureConfig {
             local_crop_size: 9,
@@ -1772,4 +2262,32 @@ mod tests {
         assert_eq!(payload.wdl_target.unwrap().data, vec![0.0, 0.0, 1.0]);
     }
 
+    #[test]
+    fn rel_edges_do_not_reference_out_of_range_tokens() {
+        let state = sample_state();
+        let arch = ArchitectureConfig {
+            local_crop_size: 9,
+            max_candidates: 16,
+            max_stones: 8,
+            max_windows: 32,
+            max_rel_edges: 128,
+            ..ArchitectureConfig::default()
+        };
+        let cfg = CandidateConfig {
+            max_candidates: 16,
+            ..CandidateConfig::default()
+        };
+
+        let payload = build_sparse_payload(&state, &arch, &cfg, &SparseTargets::default());
+        let token_count = 1
+            + payload.local_inputs.shape[0]
+            + payload.candidate_action_ids.len()
+            + payload.stone_features.shape[0]
+            + payload.window_features.shape[0];
+
+        for pair in payload.rel_edge_index.data.chunks_exact(2) {
+            assert!((pair[0] as usize) < token_count);
+            assert!((pair[1] as usize) < token_count);
+        }
+    }
 }

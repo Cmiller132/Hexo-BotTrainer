@@ -9,15 +9,15 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
 use std::collections::HashMap;
 
+use crate::engine_state::clone_py_engine_states;
 use crate::mcts_eval::evaluate_states_cached;
 use crate::mcts_tree::{select_root_action, terminal_value, RustLeaf, RustSearch};
 use crate::sample_gen::{ArchitectureConfig, CandidateConfig};
-use crate::state::states_from_py_states;
 
-#[pyfunction(signature = (state, visits, c_puct, temperature, seed, evaluator, architecture, candidates))]
+#[pyfunction(signature = (root_state, visits, c_puct, temperature, seed, evaluator, architecture, candidates))]
 pub fn hexformer_ar_mcts(
     py: Python<'_>,
-    state: &Bound<'_, PyAny>,
+    root_state: &Bound<'_, PyAny>,
     visits: u32,
     c_puct: f32,
     temperature: f32,
@@ -26,10 +26,10 @@ pub fn hexformer_ar_mcts(
     architecture: &Bound<'_, PyAny>,
     candidates: &Bound<'_, PyAny>,
 ) -> PyResult<Py<PyAny>> {
-    let states = PyTuple::new(py, [state])?;
+    let root_states = PyTuple::new(py, [root_state])?;
     let results = hexformer_ar_batched_mcts(
         py,
-        states.as_any(),
+        root_states.as_any(),
         visits,
         c_puct,
         temperature,
@@ -43,10 +43,10 @@ pub fn hexformer_ar_mcts(
     Ok(results.get_item(0)?.unbind())
 }
 
-#[pyfunction(signature = (states, visits, c_puct, temperature, seed, evaluator, architecture, candidates, virtual_batch_size=None))]
+#[pyfunction(signature = (root_states, visits, c_puct, temperature, seed, evaluator, architecture, candidates, virtual_batch_size=None))]
 pub fn hexformer_ar_batched_mcts(
     py: Python<'_>,
-    states: &Bound<'_, PyAny>,
+    root_states: &Bound<'_, PyAny>,
     visits: u32,
     c_puct: f32,
     temperature: f32,
@@ -56,7 +56,7 @@ pub fn hexformer_ar_batched_mcts(
     candidates: &Bound<'_, PyAny>,
     virtual_batch_size: Option<u32>,
 ) -> PyResult<Py<PyAny>> {
-    let roots = states_from_py_states(py, states)?;
+    let roots = clone_py_engine_states(py, root_states)?;
     if roots.is_empty() {
         return Ok(PyTuple::empty(py).into_any().unbind());
     }
@@ -189,6 +189,11 @@ pub fn hexformer_ar_batched_mcts(
         result.set_item("visit_policy", policy)?;
         result.set_item("root_value", root.value())?;
         result.set_item("visits", policy_total)?;
+        result.set_item("root_candidate_count", root.edges.len())?;
+        result.set_item(
+            "root_prior_mass",
+            root.edges.iter().map(|edge| edge.prior).sum::<f32>(),
+        )?;
         results.append(result)?;
     }
 

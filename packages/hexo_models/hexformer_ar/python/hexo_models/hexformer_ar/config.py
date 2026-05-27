@@ -39,6 +39,9 @@ class HexformerCandidateConfig:
     frontier_radius: int = 8
     include_all_legal_below: int = 768
     require_tactical_candidates: bool = True
+    force_include_tactical: bool = True
+    overflow_policy: str = "fail_fast"
+    candidate_diagnostics: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,6 +120,9 @@ class HexformerDebugConfig:
     write_sparse_batch_previews: bool = True
     write_candidate_diagnostics: bool = True
     write_tactical_diagnostics: bool = True
+    write_frontier_overflow: bool = True
+    write_mcts_candidate_rows: bool = True
+    write_sparse_payload_schema: bool = True
     preview_samples: int = 8
 
 
@@ -179,6 +185,9 @@ def parse_hexformer_config(raw: Mapping[str, Any] | None) -> HexformerConfig:
             frontier_radius=int(candidates.get("frontier_radius", 8)),
             include_all_legal_below=int(candidates.get("include_all_legal_below", 768)),
             require_tactical_candidates=bool(candidates.get("require_tactical_candidates", True)),
+            force_include_tactical=bool(candidates.get("force_include_tactical", True)),
+            overflow_policy=str(candidates.get("overflow_policy", "fail_fast")),
+            candidate_diagnostics=bool(candidates.get("candidate_diagnostics", True)),
         ),
         training=HexformerTrainingConfig(
             batch_size=int(training.get("batch_size", 64)),
@@ -249,6 +258,9 @@ def parse_hexformer_config(raw: Mapping[str, Any] | None) -> HexformerConfig:
             write_sparse_batch_previews=bool(debug.get("write_sparse_batch_previews", True)),
             write_candidate_diagnostics=bool(debug.get("write_candidate_diagnostics", True)),
             write_tactical_diagnostics=bool(debug.get("write_tactical_diagnostics", True)),
+            write_frontier_overflow=bool(debug.get("write_frontier_overflow", True)),
+            write_mcts_candidate_rows=bool(debug.get("write_mcts_candidate_rows", True)),
+            write_sparse_payload_schema=bool(debug.get("write_sparse_payload_schema", True)),
             preview_samples=int(debug.get("preview_samples", 8)),
         ),
         device=str(config.get("device", "cuda")),

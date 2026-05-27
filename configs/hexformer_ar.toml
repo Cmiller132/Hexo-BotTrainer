@@ -34,6 +34,9 @@ recent_radius = 3
 frontier_radius = 8
 include_all_legal_below = 768
 require_tactical_candidates = true
+force_include_tactical = true
+overflow_policy = "fail_fast"
+candidate_diagnostics = true
 
 [model.config.training]
 batch_size = 64
@@ -97,6 +100,9 @@ enabled_stages = ["win_in_1", "block_in_1", "double_threat"]
 write_sparse_batch_previews = true
 write_candidate_diagnostics = true
 write_tactical_diagnostics = true
+write_frontier_overflow = true
+write_mcts_candidate_rows = true
+write_sparse_payload_schema = true
 preview_samples = 8
 
 [run]

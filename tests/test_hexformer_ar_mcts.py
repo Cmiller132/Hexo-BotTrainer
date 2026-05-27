@@ -72,7 +72,7 @@ def test_hexformer_ar_mcts_delegates_to_rust(monkeypatch: pytest.MonkeyPatch) ->
     class FakeHexformerRust:
         def hexformer_ar_batched_mcts(
             self,
-            states: object,
+            root_states: object,
             visits: int,
             c_puct: float,
             temperature: float,
@@ -82,7 +82,7 @@ def test_hexformer_ar_mcts_delegates_to_rust(monkeypatch: pytest.MonkeyPatch) ->
             candidates: object,
             virtual_batch_size: int,
         ) -> tuple[dict[str, object], ...]:
-            assert states == (root_state,)
+            assert root_states == (root_state,)
             assert visits == 7
             assert c_puct == 2.0
             assert temperature == 0.25
@@ -90,7 +90,7 @@ def test_hexformer_ar_mcts_delegates_to_rust(monkeypatch: pytest.MonkeyPatch) ->
             assert architecture == {"config": "arch"}
             assert candidates == {"config": "candidates"}
             assert virtual_batch_size == 3
-            evaluator({"sparse_inputs": ("payload",)})
+            evaluator({"sparse_payloads": ("payload",)})
             return (
                 {
                     "action_id": action_id,
@@ -114,7 +114,7 @@ def test_hexformer_ar_mcts_delegates_to_rust(monkeypatch: pytest.MonkeyPatch) ->
         virtual_batch_size=3,
     )
 
-    assert calls == [{"sparse_inputs": ("payload",)}]
+    assert calls == [{"sparse_payloads": ("payload",)}]
     assert result[0].action_id == action_id
     assert result[0].visit_policy == {action_id: 1.0}
     assert result[0].root_value == 0.5
@@ -149,6 +149,7 @@ def _load_inference(monkeypatch: pytest.MonkeyPatch, action_id: int) -> types.Mo
     input_mod.build_sparse_input = lambda _state, **_kwargs: pytest.fail("evaluate_mcts_payload rebuilt Python states")
     input_mod.sparse_input_from_payload = lambda payload: payload
     input_mod.collate_sparse_inputs = lambda _samples: {}
+    input_mod.validate_candidate_frontier = lambda *_args, **_kwargs: None
 
     losses = types.ModuleType("hexo_models.hexformer_ar.losses")
     losses.wdl_value_from_logits = lambda logits: logits
@@ -193,7 +194,7 @@ def test_hexformer_ar_mcts_payload_callback_returns_candidate_priors(monkeypatch
 
     payload = inference_module.HexformerInference.evaluate_mcts_payload(
         inference,
-        {"sparse_inputs": (SimpleNamespace(candidate_action_ids=(action_id,)),)},
+        {"sparse_payloads": (SimpleNamespace(candidate_action_ids=(action_id,)),)},
     )
 
     assert payload["candidate_action_ids"] == ((action_id,),)

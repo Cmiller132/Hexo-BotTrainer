@@ -26,6 +26,9 @@ def test_build_sparse_input_consumes_rust_payload(monkeypatch: pytest.MonkeyPatc
     fake = _FakeRust(_payload(arch, candidate_ids=(7, 8)))
     monkeypatch.setattr(input_module, "_MODELS_RUST", SimpleNamespace(hexformer_ar=fake))
     monkeypatch.setattr(input_module, "_RUST_IMPORT_ERROR", None)
+    fake_engine = ModuleType("hexo_engine")
+    fake_engine.clone_state = lambda state: SimpleNamespace(cloned_from=state)
+    monkeypatch.setitem(sys.modules, "hexo_engine", fake_engine)
     state = object()
 
     sparse = input_module.build_sparse_input(
@@ -39,7 +42,7 @@ def test_build_sparse_input_consumes_rust_payload(monkeypatch: pytest.MonkeyPatc
 
     assert sparse.candidate_action_ids == (7, 8)
     assert sparse.policy_target is not None
-    assert fake.calls[0]["state"] is state
+    assert fake.calls[0]["state"].cloned_from is state
     assert fake.calls[0]["policy"] == ((7, 3.0),)
     assert fake.calls[0]["metadata"] == {"source": "unit"}
 
@@ -107,7 +110,7 @@ class _FakeRust:
         self.payload = payload
         self.calls: list[dict[str, object]] = []
 
-    def sparse_input_payload(
+    def sparse_input_payload_from_state(
         self,
         state: object,
         architecture: dict[str, object],

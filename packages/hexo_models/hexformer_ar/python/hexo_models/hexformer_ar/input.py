@@ -62,8 +62,8 @@ def build_sparse_input(
 ) -> SparseDecisionInput:
     arch = architecture or HexformerArchitectureConfig()
     candidate_cfg = candidates or HexformerCandidateConfig(max_candidates=arch.max_candidates)
-    payload = _hexformer_ar_rust().sparse_input_payload(
-        state,
+    payload = _hexformer_ar_rust().sparse_input_payload_from_state(
+        _clone_engine_state(state),
         _config_mapping(arch),
         _config_mapping(candidate_cfg),
         _policy_items(policy),
@@ -73,7 +73,9 @@ def build_sparse_input(
         _lookahead_items(lookahead),
         dict(metadata or {}),
     )
-    return _sparse_input_from_payload(payload)
+    sparse = _sparse_input_from_payload(payload)
+    validate_candidate_frontier(sparse, candidate_cfg)
+    return sparse
 
 
 def build_sparse_inputs(
@@ -82,16 +84,19 @@ def build_sparse_inputs(
     architecture: HexformerArchitectureConfig | None = None,
     candidates: HexformerCandidateConfig | None = None,
 ) -> tuple[SparseDecisionInput, ...]:
-    """Build sparse inputs from live engine states through Rust."""
+    """Build sparse inputs through Rust from cloned engine states."""
 
     arch = architecture or HexformerArchitectureConfig()
     candidate_cfg = candidates or HexformerCandidateConfig(max_candidates=arch.max_candidates)
-    payloads = _hexformer_ar_rust().sparse_input_payloads(
-        tuple(states),
+    payloads = _hexformer_ar_rust().sparse_input_payloads_from_states(
+        _clone_engine_states(states),
         _config_mapping(arch),
         _config_mapping(candidate_cfg),
     )
-    return tuple(_sparse_input_from_payload(payload) for payload in payloads)
+    sparse = tuple(_sparse_input_from_payload(payload) for payload in payloads)
+    for item in sparse:
+        validate_candidate_frontier(item, candidate_cfg)
+    return sparse
 
 
 def sparse_input_from_payload(payload: Mapping[str, Any]) -> SparseDecisionInput:
@@ -116,10 +121,10 @@ def build_selfplay_sample_payloads(
 ) -> tuple[Mapping[str, Any], ...]:
     """Finalize self-play sparse sample payloads through Rust."""
 
-    return tuple(
-        _hexformer_ar_rust().selfplay_sample_payloads(
+    rows = tuple(
+        _hexformer_ar_rust().selfplay_sample_payloads_from_states(
             game_id,
-            tuple(states),
+            _clone_engine_states(states),
             tuple(str(player) for player in players),
             tuple(int(turn_index) for turn_index in turn_indices),
             tuple(_policy_items(policy) for policy in visit_policies),
@@ -131,6 +136,19 @@ def build_selfplay_sample_payloads(
             _config_mapping(candidates),
         )
     )
+    for row in rows:
+        _validate_candidate_metadata(dict(row.get("metadata", {})), candidates)
+    return rows
+
+
+def _clone_engine_state(state: object) -> object:
+    import hexo_engine as engine
+
+    return engine.clone_state(state)
+
+
+def _clone_engine_states(states: Sequence[object]) -> tuple[object, ...]:
+    return tuple(_clone_engine_state(state) for state in states)
 
 
 def _sparse_input_from_payload(payload: Mapping[str, Any]) -> SparseDecisionInput:
@@ -164,6 +182,32 @@ def _sparse_input_from_payload(payload: Mapping[str, Any]) -> SparseDecisionInpu
             for key, value in dict(payload.get("lookahead_targets", {})).items()
         },
         metadata=dict(payload.get("metadata", {})),
+    )
+
+
+def validate_candidate_frontier(
+    sparse: SparseDecisionInput,
+    candidates: HexformerCandidateConfig,
+) -> None:
+    """Apply model-configured frontier overflow policy to a sparse payload."""
+
+    _validate_candidate_metadata(sparse.metadata, candidates)
+
+
+def _validate_candidate_metadata(
+    metadata: Mapping[str, Any],
+    candidates: HexformerCandidateConfig,
+) -> None:
+    candidate = dict(metadata.get("candidate", {}))
+    if not bool(candidate.get("candidate_overflow", False)):
+        return
+    if str(candidates.overflow_policy) != "fail_fast":
+        return
+    raise RuntimeError(
+        "hexformer candidate frontier overflow: "
+        f"forced_candidate_count={int(candidate.get('forced_candidate_count', 0))}, "
+        f"max_candidates={int(candidate.get('max_candidates', candidates.max_candidates))}, "
+        f"forced_missing_count={int(candidate.get('forced_missing_count', 0))}"
     )
 
 

@@ -5,7 +5,7 @@
 //! and sample generation can evolve independently.
 
 mod constants;
-mod state;
+mod engine_state;
 mod mcts_eval;
 mod mcts_tree;
 mod mcts;
@@ -19,13 +19,19 @@ pub fn capabilities(py: Python<'_>) -> PyResult<Py<PyAny>> {
     let dict = PyDict::new(py);
     dict.set_item("status", "ready")?;
     dict.set_item("model_family", "hexformer_ar")?;
-    dict.set_item("state_source", "direct_engine_state")?;
+    dict.set_item("state_source", "engine_state_clone")?;
+    dict.set_item("engine_state_clone", true)?;
+    dict.set_item("state_api_version", engine_state::STATE_API_VERSION)?;
     dict.set_item("coordinate_encoding", "u32_i16_pair")?;
+    dict.set_item(
+        "coordinate_range_note",
+        "The game model uses sparse infinite-board logic within the current engine coordinate range. The current ActionId transport is u32_i16_pair and is bounded to i16 coordinate components.",
+    )?;
     dict.set_item("hexformer_ar_mcts", true)?;
     dict.set_item("hexformer_ar_batched_mcts", true)?;
-    dict.set_item("sparse_input_payload", true)?;
-    dict.set_item("sparse_input_payloads", true)?;
-    dict.set_item("selfplay_sample_payloads", true)?;
+    dict.set_item("sparse_input_payload_from_state", true)?;
+    dict.set_item("sparse_input_payloads_from_states", true)?;
+    dict.set_item("selfplay_sample_payloads_from_states", true)?;
     Ok(dict.into_any().unbind())
 }
 

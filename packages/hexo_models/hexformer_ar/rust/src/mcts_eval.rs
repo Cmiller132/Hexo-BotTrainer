@@ -29,9 +29,10 @@ fn evaluate_states(
 ) -> PyResult<Vec<RustEvaluation>> {
     let payload = PyDict::new(py);
     payload.set_item(
-        "sparse_inputs",
+        "sparse_payloads",
         sparse_payloads_to_py(py, states, architecture, candidates)?,
     )?;
+    payload.set_item("state_source", "engine_state_clone")?;
 
     let output = evaluator.call1((payload,))?;
     parse_evaluation_output(&output, states)
@@ -114,27 +115,31 @@ fn parse_evaluation_output(
 
     let mut evaluations = Vec::with_capacity(states.len());
     for (index, state) in states.iter().enumerate() {
-        let mut legal = Vec::new();
-        state.write_legal_action_ids(&mut legal);
-        let legal_set: HashSet<_> = legal.into_iter().collect();
-        let mut seen = HashSet::new();
-        let mut priors = Vec::new();
-        for (action_id, prior) in candidate_rows[index]
-            .iter()
-            .copied()
-            .zip(prior_rows[index].iter().copied())
-        {
-            if !legal_set.contains(&action_id) || !seen.insert(action_id) {
-                continue;
-            }
-            priors.push((action_id, clean_prior(prior)));
-        }
         evaluations.push(RustEvaluation {
             value: values[index].clamp(-1.0, 1.0),
-            priors,
+            priors: legal_prior_row(state, &candidate_rows[index], &prior_rows[index]),
         });
     }
     Ok(evaluations)
+}
+
+fn legal_prior_row(
+    state: &RustHexoState,
+    candidate_row: &[PackedCoord],
+    prior_row: &[f32],
+) -> Vec<(PackedCoord, f32)> {
+    let mut legal = Vec::new();
+    state.write_legal_action_ids(&mut legal);
+    let legal_set: HashSet<_> = legal.into_iter().collect();
+    let mut seen = HashSet::new();
+    let mut priors = Vec::new();
+    for (action_id, prior) in candidate_row.iter().copied().zip(prior_row.iter().copied()) {
+        if !legal_set.contains(&action_id) || !seen.insert(action_id) {
+            continue;
+        }
+        priors.push((action_id, clean_prior(prior)));
+    }
+    priors
 }
 
 fn read_values(output: &Bound<'_, PyAny>, expected: usize) -> PyResult<Vec<f32>> {
@@ -247,5 +252,35 @@ fn clean_prior(prior: f32) -> f32 {
         prior.max(0.0)
     } else {
         0.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hexo_engine::{apply_placement, pack_coord, HexCoord, Placement};
+
+    #[test]
+    fn mcts_ignores_illegal_evaluator_priors() {
+        let mut state = RustHexoState::new();
+        apply_placement(
+            &mut state,
+            Placement {
+                coord: HexCoord::ZERO,
+            },
+        )
+        .unwrap();
+        let mut legal = Vec::new();
+        state.write_legal_action_ids(&mut legal);
+        let legal_action = legal[0];
+        let illegal_action = pack_coord(HexCoord::ZERO);
+
+        let priors = legal_prior_row(
+            &state,
+            &[illegal_action, legal_action, legal_action],
+            &[0.9, f32::NAN, 0.8],
+        );
+
+        assert_eq!(priors, vec![(legal_action, 0.0)]);
     }
 }

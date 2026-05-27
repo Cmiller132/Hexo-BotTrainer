@@ -45,6 +45,10 @@ Rust-backed packages keep their Rust code inside the owning package directory.
 Build a package bridge with maturin when that package's Python bindings are
 needed.
 
+The game model uses sparse infinite-board logic within the current engine
+coordinate range. The current ActionId transport is `u32_i16_pair` and is
+bounded to i16 coordinate components.
+
 ## Dense CNN Model 1
 
 The production Model 1 implementation lives under

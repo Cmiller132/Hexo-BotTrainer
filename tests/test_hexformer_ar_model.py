@@ -147,30 +147,6 @@ def test_hexformer_collation_rebases_relation_edges_after_local_padding() -> Non
     assert torch.equal(batch["rel_edge_index"][1, 2], torch.tensor([8, 3]))
 
 
-def test_hexformer_candidate_frontier_keeps_forced_moves() -> None:
-    from hexo_models.hexformer_ar.candidates import TAG_IMMEDIATE_WIN, TAG_MUST_BLOCK, build_candidate_frontier
-    from hexo_models.hexformer_ar.config import HexformerCandidateConfig
-    from hexo_models.hexformer_ar.coordinates import Axial, pack_action_id
-
-    win_id = pack_action_id(Axial(1, 0))
-    block_id = pack_action_id(Axial(0, 1))
-    state = SimpleNamespace(
-        placement_history=(),
-        board=SimpleNamespace(occupied=(Axial(0, 0),)),
-    )
-    result = build_candidate_frontier(
-        state,
-        (win_id, block_id, pack_action_id(Axial(2, 0))),
-        immediate_win_action_ids=(win_id,),
-        must_block_action_ids=(block_id,),
-        config=HexformerCandidateConfig(max_candidates=2, require_tactical_candidates=True),
-    )
-
-    tags = {candidate.action_id: candidate.tags for candidate in result.candidates}
-    assert tags[win_id] & TAG_IMMEDIATE_WIN
-    assert tags[block_id] & TAG_MUST_BLOCK
-
-
 def test_hexformer_curriculum_records_are_sparse_training_samples() -> None:
     from hexo_models.hexformer_ar.config import HexformerCurriculumConfig
     from hexo_models.hexformer_ar.curriculum import generate_tactical_pretraining_records
