@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
 from random import Random
 from time import perf_counter
 from typing import Any
@@ -14,7 +13,7 @@ from hexo_runner.records import AbortRecord, HexoRecordFile, HexoRecordPlayer
 from .debug_artifacts import render_preview_game_actions
 from .inference import DenseCNNInference
 from .mcts import SearchResult, run_batched_mcts
-from .samples import Model1SampleData, sample_from_state
+from .samples import Model1SampleData, finalize_game_samples, sample_from_history
 
 
 def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_epoch: int) -> dict[str, Any]:
@@ -102,9 +101,8 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
                     searched_positions += 1
                     mcts_simulations += int(search.visits)
                     state = game["state"]
-                    current = _player_label(engine.current_player(state))
-                    sample = sample_from_state(
-                        state,
+                    sample = sample_from_history(
+                        tuple(game["actions"]),
                         game_id=game["game_id"],
                         turn_index=len(game["actions"]),
                         policy=search.visit_policy,
@@ -112,12 +110,12 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
                         metadata={
                             "epoch": epoch,
                             "search_visits": search.visits,
-                                "configured_search_visits": configured_visits,
-                                "mcts_sims_exact": True,
+                            "configured_search_visits": configured_visits,
+                            "mcts_sims_exact": True,
                             "sample_source": "mcts",
                         },
                     )
-                    game["pending"].append((current, sample, search.root_value))
+                    game["pending"].append((sample.current_player, sample, search.root_value))
                     action = engine.PlacementAction(unpack_coord_id(search.action_id))
                     engine.apply_action(state, action)
                     game["actions"].append(search.action_id)
@@ -159,15 +157,12 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
                     writer.finish_completed(winner, len(game["actions"]))
                     completed_games += 1
 
-                finalized = _finalize_game_samples(game["pending"], winner, config.architecture.lookahead_horizons)
-                if truncated:
-                    finalized = [
-                        replace(
-                            sample,
-                            metadata={**dict(sample.metadata), "truncated": True, "value_target_reason": "max_actions_draw"},
-                        )
-                        for sample in finalized
-                    ]
+                finalized = _finalize_game_samples(
+                    game["pending"],
+                    winner,
+                    config.architecture.lookahead_horizons,
+                    truncated=truncated,
+                )
                 buffer.extend(finalized)
                 samples_added += len(finalized)
                 if len(debug_games) < config.debug.preview_games:
@@ -252,36 +247,10 @@ def _finalize_game_samples(
     pending: list[tuple[str, Model1SampleData, float]],
     winner: str | None,
     horizons: tuple[int, ...],
+    *,
+    truncated: bool = False,
 ) -> list[Model1SampleData]:
-    finalized: list[Model1SampleData] = []
-    for index, (player, sample, root_value) in enumerate(pending):
-        value = 0.0 if winner is None else (1.0 if winner == player else -1.0)
-        opp_policy = ()
-        for future_player, future_sample, _future_value in pending[index + 1 :]:
-            if future_player != player:
-                opp_policy = future_sample.policy
-                break
-        lookahead = []
-        for horizon in horizons:
-            future_index = min(len(pending) - 1, index + int(horizon))
-            future_player, _future_sample, future_root = pending[future_index]
-            lookahead_value = future_root if future_player == player else -future_root
-            if future_index == len(pending) - 1 and winner is not None:
-                lookahead_value = value
-            lookahead.append((int(horizon), float(lookahead_value)))
-        finalized.append(
-            replace(
-                sample,
-                value=value,
-                opp_policy=opp_policy,
-                lookahead=tuple(lookahead),
-                metadata={
-                    **dict(sample.metadata),
-                    "opp_policy_source": "future_opponent_mcts" if opp_policy else "uniform_legal_fallback",
-                },
-            )
-        )
-    return finalized
+    return finalize_game_samples(pending, winner, horizons, truncated=truncated)
 
 
 def _player_label(value: object) -> str:

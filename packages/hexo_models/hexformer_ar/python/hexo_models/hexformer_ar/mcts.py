@@ -1,42 +1,22 @@
-"""Python PUCT search over Hexformer candidate priors."""
+"""Required Rust MCTS boundary for Hexformer candidate priors."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from math import sqrt
-from random import Random
-from typing import Mapping
+from dataclasses import dataclass
+from typing import Any, Mapping, Sequence
 
 import hexo_engine as engine
-from hexo_engine.types import unpack_coord_id
+from hexo_engine.types import pack_coord_id
 
 from .inference import HexformerInference
 
-
-@dataclass(slots=True)
-class Edge:
-    action_id: int
-    prior: float
-    visits: int = 0
-    value_sum: float = 0.0
-    child: "Node | None" = None
-
-    @property
-    def value(self) -> float:
-        return 0.0 if self.visits == 0 else self.value_sum / self.visits
-
-
-@dataclass(slots=True)
-class Node:
-    player: str
-    value: float
-    edges: list[Edge] = field(default_factory=list)
-    visits: int = 0
-    value_sum: float = 0.0
-
-    @property
-    def mean_value(self) -> float:
-        return self.value if self.visits == 0 else self.value_sum / self.visits
+try:
+    from hexo_models import _rust
+except ImportError as exc:  # pragma: no cover - source checkout before Rust is built.
+    _rust = None
+    _IMPORT_ERROR: BaseException | None = exc
+else:
+    _IMPORT_ERROR = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,103 +36,82 @@ def run_mcts(
     temperature: float = 1.0,
     seed: int | None = None,
 ) -> SearchResult:
-    root = _expand(root_state, inference)
-    if not root.edges:
-        raise RuntimeError("Hexformer MCTS root has no legal candidate actions")
-    for _ in range(max(1, int(visits))):
-        state = engine.clone_state(root_state)
-        node = root
-        path: list[tuple[Node, Edge]] = []
-        while node.edges:
-            edge = _select_edge(node, c_puct)
-            engine.apply_action(state, engine.PlacementAction(unpack_coord_id(edge.action_id)))
-            path.append((node, edge))
-            if edge.child is None:
-                terminal = engine.terminal(state)
-                if terminal is None:
-                    edge.child = _expand(state, inference)
-                    leaf_player = edge.child.player
-                    leaf_value = edge.child.value
-                else:
-                    leaf_player = _player_label(engine.current_player(state))
-                    leaf_value = _terminal_value(terminal, leaf_player)
-                _backup(path, leaf_player, leaf_value)
-                break
-            node = edge.child
-        else:
-            _backup(path, node.player, node.mean_value)
-    total = sum(edge.visits for edge in root.edges)
-    policy = {
-        edge.action_id: (edge.visits / total if total > 0 else edge.prior)
-        for edge in root.edges
-    }
+    return run_batched_mcts(
+        (root_state,),
+        inference,
+        visits=visits,
+        c_puct=c_puct,
+        temperature=temperature,
+        seed=seed,
+    )[0]
+
+
+def run_batched_mcts(
+    root_states: Sequence[object],
+    inference: HexformerInference,
+    *,
+    visits: int,
+    c_puct: float = 1.5,
+    temperature: float = 1.0,
+    seed: int | None = None,
+    virtual_batch_size: int | None = None,
+) -> list[SearchResult]:
+    """Run Rust-owned PUCT searches with batched Hexformer leaf evaluation."""
+
+    if not root_states:
+        return []
+    resolved_virtual_batch_size = (
+        max(1, int(virtual_batch_size))
+        if virtual_batch_size is not None
+        else max(1, int(visits))
+    )
+    try:
+        payloads = _hexformer_ar_module().hexformer_ar_batched_mcts(
+            history_rows_from_states(root_states),
+            max(1, int(visits)),
+            float(c_puct),
+            float(temperature),
+            0 if seed is None else int(seed),
+            inference.evaluate_mcts_payload,
+            resolved_virtual_batch_size,
+        )
+    except ValueError as exc:
+        if "Hexformer MCTS root has no legal candidate actions" in str(exc):
+            raise RuntimeError("Hexformer MCTS root has no legal candidate actions") from exc
+        raise
+
+    return [_search_result_from_payload(payload) for payload in payloads]
+
+
+def history_rows_from_states(states: Sequence[object]) -> tuple[tuple[int, ...], ...]:
+    """Return packed placement-history rows for Rust MCTS reconstruction."""
+
+    rows: list[tuple[int, ...]] = []
+    for state in states:
+        python_state = engine.to_python_state(state)
+        rows.append(
+            tuple(
+                int(pack_coord_id(record.coord))
+                for record in python_state.placement_history
+            )
+        )
+    return tuple(rows)
+
+
+def _search_result_from_payload(payload: Mapping[str, Any]) -> SearchResult:
     return SearchResult(
-        action_id=_select_root_action(root, temperature=temperature, seed=seed),
-        visit_policy=policy,
-        root_value=root.mean_value,
-        visits=total,
+        action_id=int(payload["action_id"]),
+        visit_policy={
+            int(action_id): float(weight)
+            for action_id, weight in payload["visit_policy"]
+        },
+        root_value=float(payload["root_value"]),
+        visits=int(payload["visits"]),
     )
 
 
-def _expand(state: object, inference: HexformerInference) -> Node:
-    result = inference.infer_state(state)
-    node = Node(player=_player_label(engine.current_player(state)), value=result.value)
-    node.edges = [Edge(action_id=action_id, prior=max(0.0, float(prior))) for action_id, prior in result.legal_priors.items()]
-    _normalize_edges(node.edges)
-    return node
-
-
-def _select_edge(node: Node, c_puct: float) -> Edge:
-    total = max(1, node.visits)
-
-    def score(edge: Edge) -> tuple[float, int]:
-        q = edge.value
-        u = float(c_puct) * edge.prior * sqrt(total) / (1 + edge.visits)
-        return (q + u, -edge.action_id)
-
-    return max(node.edges, key=score)
-
-
-def _backup(path: list[tuple[Node, Edge]], leaf_player: str, leaf_value: float) -> None:
-    for node, edge in reversed(path):
-        value = leaf_value if node.player == leaf_player else -leaf_value
-        node.visits += 1
-        node.value_sum += value
-        edge.visits += 1
-        edge.value_sum += value
-
-
-def _select_root_action(node: Node, *, temperature: float, seed: int | None) -> int:
-    if temperature <= 1.0e-6:
-        return max(node.edges, key=lambda edge: (edge.visits, -edge.action_id)).action_id
-    rng = Random(seed)
-    weights = [max(1, edge.visits) ** (1.0 / max(1.0e-3, temperature)) for edge in node.edges]
-    total = sum(weights)
-    threshold = rng.random() * total
-    for edge, weight in zip(node.edges, weights):
-        threshold -= weight
-        if threshold <= 0:
-            return edge.action_id
-    return node.edges[-1].action_id
-
-
-def _normalize_edges(edges: list[Edge]) -> None:
-    total = sum(max(0.0, edge.prior) for edge in edges)
-    if total <= 0.0 and edges:
-        prior = 1.0 / len(edges)
-        for edge in edges:
-            edge.prior = prior
-        return
-    for edge in edges:
-        edge.prior = max(0.0, edge.prior) / total
-
-
-def _terminal_value(terminal: object, player: str) -> float:
-    winner = getattr(terminal, "winner", None)
-    if winner is None:
-        return 0.0
-    return 1.0 if _player_label(winner) == player else -1.0
-
-
-def _player_label(value: object) -> str:
-    return str(getattr(value, "value", value))
+def _hexformer_ar_module() -> Any:
+    module = getattr(_rust, "hexformer_ar", None) if _rust is not None else None
+    if module is None:
+        raise RuntimeError(f"hexformer_ar Rust MCTS accelerator is unavailable: {_IMPORT_ERROR}")
+    return module

@@ -9,10 +9,9 @@ import torch
 
 from . import rust_bridge
 from .constants import BOARD_SIZE
-from .d6 import Axial, D6Symmetry, unpack_coord_pair
-from .input import build_input_planes
+from .d6 import unpack_coord_pair
 from .losses import decode_binned_value
-from .samples import CompressedSample, Model1SampleData, expand_sample, sample_from_state, stack_expanded
+from .samples import CompressedSample, Model1SampleData, expand_sample, stack_expanded
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,12 +52,10 @@ class DenseCNNInference:
     def infer_states(self, states: Sequence[object]) -> list[InferenceResult]:
         if not states:
             return []
-        if rust_bridge.is_available():
-            return self._infer_states_fast(states)
-        return self._infer_states_python(states)
+        return self._infer_states_rust(states)
 
     @torch.no_grad()
-    def _infer_states_fast(self, states: Sequence[object]) -> list[InferenceResult]:
+    def _infer_states_rust(self, states: Sequence[object]) -> list[InferenceResult]:
         payload = rust_bridge.model1_batch_inputs(states)
         shape = tuple(int(item) for item in payload["shape"])
         inputs = torch.frombuffer(payload["inputs"], dtype=torch.float32).reshape(shape)
@@ -80,34 +77,6 @@ class DenseCNNInference:
                     legal_action_ids=legal_action_ids,
                     legal_priors=_legal_priors_from_flats(policy_logits, legal_action_ids, legal_flat_indices),
                     diagnostics={"device": str(self.device), "amp": self.amp, "batched": len(states) > 1, "encoder": "rust"},
-                )
-            )
-        return results
-
-    @torch.no_grad()
-    def _infer_states_python(self, states: Sequence[object]) -> list[InferenceResult]:
-        samples = tuple(
-            sample_from_state(state, game_id=f"inference-{index}", turn_index=0)
-            for index, state in enumerate(states)
-        )
-        inputs = torch.stack([_input_from_sample(sample) for sample in samples], dim=0)
-        outputs = self._forward_inputs_device(inputs)
-        policy_batch = outputs["policy"]
-        value_batch = outputs["value"]
-        results: list[InferenceResult] = []
-        values = decode_binned_value(value_batch)
-        for index, sample in enumerate(samples):
-            policy_logits = policy_batch[index]
-            value_logits = value_batch[index]
-            legal_action_ids = sample.legal_action_ids
-            results.append(
-                InferenceResult(
-                    policy_logits=policy_logits.cpu() if self.return_logits else torch.empty(0),
-                    value_logits=value_logits.cpu() if self.return_logits else torch.empty(0),
-                    value=float(values[index].item()),
-                    legal_action_ids=legal_action_ids,
-                    legal_priors=_legal_priors(policy_logits, legal_action_ids, sample.center),
-                    diagnostics={"device": str(self.device), "amp": self.amp, "batched": len(states) > 1, "encoder": "python"},
                 )
             )
         return results
@@ -297,20 +266,3 @@ def _legal_priors_from_flats(
         int(action_id): float(prob)
         for action_id, prob in zip(legal_action_ids, probs)
     }
-
-
-def _input_from_sample(sample: Model1SampleData) -> torch.Tensor:
-    center = Axial(*sample.center)
-    return build_input_planes(
-        current_player=sample.current_player,
-        phase=sample.phase,
-        center=center,
-        stones=sample.stones,
-        legal_action_ids=sample.legal_action_ids,
-        placement_history=sample.placement_history,
-        first_stone=sample.first_stone,
-        own_hot=sample.own_hot,
-        opponent_hot=sample.opponent_hot,
-        opponent_last_turn=sample.opponent_last_turn,
-        symmetry=D6Symmetry(0),
-    )

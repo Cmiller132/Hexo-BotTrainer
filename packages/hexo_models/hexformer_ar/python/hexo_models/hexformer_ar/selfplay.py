@@ -13,10 +13,10 @@ from hexo_engine.types import unpack_coord_id
 from hexo_runner.records import AbortRecord, HexoRecordFile, HexoRecordPlayer
 from hexo_utils.samples import append_samples
 
-from .input import build_sparse_input
+from .input import build_selfplay_sample_payloads
 from .inference import HexformerInference
 from .mcts import SearchResult, run_mcts
-from .samples import SAMPLE_NAMESPACE, sample_from_sparse_input, training_record_from_sample
+from .samples import SAMPLE_NAMESPACE, HexformerSample, training_record_from_sample
 
 
 @dataclass(frozen=True, slots=True)
@@ -219,52 +219,28 @@ def _seed_curriculum_before_selfplay(*, ctx: Any, components: Any, epoch: int, t
 
 
 def _finalize_pending(game_id: str, pending: list[PendingDecision], winner: str | None, config: Any) -> list[Any]:
-    finalized = []
-    for index, decision in enumerate(pending):
-        value = 0.0 if winner is None else (1.0 if winner == decision.player else -1.0)
-        opp_policy = ()
-        for future in pending[index + 1 :]:
-            if future.player != decision.player:
-                opp_policy = future.search.visit_policy
-                break
-        lookahead = {
-            horizon: _lookahead_value(index, pending, horizon, winner, decision.player)
-            for horizon in config.architecture.lookahead_horizons
-        }
-        sparse = build_sparse_input(
-            decision.state,
-            architecture=config.architecture,
-            candidates=config.candidates,
-            policy=decision.search.visit_policy,
-            opp_policy=opp_policy,
-            value=value,
-            distance=_distance_target(index, pending, winner),
-            lookahead=lookahead,
-            metadata={
-                "game_id": game_id,
-                "turn_index": decision.turn_index,
-                "root_value": decision.search.root_value,
-                "search_visits": decision.search.visits,
-                "selected_action_id": decision.search.action_id,
-                "model_family": "hexformer_ar",
-            },
+    rows = build_selfplay_sample_payloads(
+        game_id=game_id,
+        states=tuple(decision.state for decision in pending),
+        players=tuple(decision.player for decision in pending),
+        turn_indices=tuple(decision.turn_index for decision in pending),
+        visit_policies=tuple(decision.search.visit_policy for decision in pending),
+        root_values=tuple(decision.search.root_value for decision in pending),
+        search_visits=tuple(decision.search.visits for decision in pending),
+        selected_action_ids=tuple(decision.search.action_id for decision in pending),
+        winner=winner,
+        architecture=config.architecture,
+        candidates=config.candidates,
+    )
+    return [
+        HexformerSample(
+            game_id=str(row["game_id"]),
+            turn_index=int(row["turn_index"]),
+            input_payload=dict(row["input_payload"]),
+            metadata=dict(row.get("metadata", {})),
         )
-        finalized.append(sample_from_sparse_input(sparse, game_id=game_id, turn_index=decision.turn_index))
-    return finalized
-
-
-def _lookahead_value(index: int, pending: list[PendingDecision], horizon: int, winner: str | None, player: str) -> float:
-    target = min(len(pending) - 1, index + int(horizon))
-    if target <= index or winner is None:
-        return 0.0
-    return 1.0 if winner == player else -1.0
-
-
-def _distance_target(index: int, pending: list[PendingDecision], winner: str | None) -> float:
-    if winner is None:
-        return 0.0
-    remaining = max(0, len(pending) - index)
-    return min(1.0, remaining / 128.0)
+        for row in rows
+    ]
 
 
 def _visits_for_position(config: Any, rng: Random) -> int:

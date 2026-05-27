@@ -11,9 +11,9 @@ import zlib
 
 import torch
 
-from .d6 import Axial, D6_SIZE, D6Symmetry, inverse_index, pack_coord_id, transform_coord, unpack_coord_id
+from . import rust_bridge
+from .d6 import Axial, D6_SIZE, D6Symmetry, inverse_index, pack_coord_id, transform_coord
 from .constants import BOARD_SIZE
-from .geometry import coord_to_flat, crop_center
 from .input import build_input_planes, dense_policy_target, legal_mask_flat
 
 D6_TRANSFORMS = tuple(D6Symmetry(index) for index in range(D6_SIZE))
@@ -310,62 +310,70 @@ def sample_from_state(
     lookahead: Mapping[int, float] | Sequence[tuple[int, float]] = (),
     metadata: Mapping[str, Any] | None = None,
 ) -> Model1SampleData:
-    """Create a compact sample from a `hexo_engine` state before a decision."""
+    """Create a compact sample from a `hexo_engine` state before a decision.
 
-    import hexo_engine as engine
+    Live-state facts are built by the dense-cnn Rust accelerator after
+    reconstructing the core state from the packed action history.
+    """
 
-    python_state = engine.to_python_state(state)
-    current_player = _player_label(python_state.current_player)
-    opponent = "player1" if current_player == "player0" else "player0"
-    stones = tuple(
-        (int(coord.q), int(coord.r), _player_label(player))
-        for coord, player in python_state.board.stones
-    )
-    center = crop_center((Axial(q, r) for q, r, _player in stones))
-    first_stone = (
-        (python_state.first_stone.q, python_state.first_stone.r)
-        if python_state.first_stone is not None
-        else None
-    )
-    history = tuple(
-        (
-            int(record.coord.q),
-            int(record.coord.r),
-            _player_label(record.player),
-            _phase_label(record.phase),
-            int(record.placement_index),
-            int(record.first_stone.q) if record.first_stone is not None else None,
-            int(record.first_stone.r) if record.first_stone is not None else None,
-        )
-        for record in python_state.placement_history
-    )
-    own_hot, opponent_hot = _hot_cells(python_state, current_player)
-    last_opponent_turn = _last_completed_turn(history, opponent)
-    legal_action_ids = tuple(
-        int(action_id)
-        for action_id in engine.legal_action_ids(state)
-        if coord_to_flat(unpack_coord_id(int(action_id)), center=center) is not None
-    )
-
-    return Model1SampleData(
+    return sample_from_history(
+        rust_bridge.history_rows_from_states((state,))[0],
         game_id=game_id,
-        turn_index=int(turn_index),
-        current_player=current_player,
-        phase=_phase_label(python_state.phase),
-        center=(center.q, center.r),
-        stones=stones,
-        legal_action_ids=legal_action_ids,
-        placement_history=history,
-        first_stone=first_stone,
-        own_hot=own_hot,
-        opponent_hot=opponent_hot,
-        opponent_last_turn=last_opponent_turn,
-        policy=_weights_to_pairs(policy),
-        opp_policy=_weights_to_pairs(opp_policy),
-        value=float(value),
-        lookahead=tuple((int(k), float(v)) for k, v in (lookahead.items() if isinstance(lookahead, Mapping) else lookahead)),
-        metadata=dict(metadata or {}),
+        turn_index=turn_index,
+        policy=policy,
+        value=value,
+        opp_policy=opp_policy,
+        lookahead=lookahead,
+        metadata=metadata,
     )
+
+
+def sample_from_history(
+    history_row: Sequence[int],
+    *,
+    game_id: str,
+    turn_index: int,
+    policy: Mapping[int, float] | Sequence[tuple[int, float]] = (),
+    value: float = 0.0,
+    opp_policy: Mapping[int, float] | Sequence[tuple[int, float]] = (),
+    lookahead: Mapping[int, float] | Sequence[tuple[int, float]] = (),
+    metadata: Mapping[str, Any] | None = None,
+) -> Model1SampleData:
+    """Create a compact sample from packed action history using Rust."""
+
+    payload = rust_bridge._dense_cnn_module().model1_sample_from_history(
+        tuple(int(action_id) for action_id in history_row),
+        str(game_id),
+        int(turn_index),
+        policy,
+        float(value),
+        opp_policy,
+        lookahead,
+        dict(metadata or {}),
+    )
+    return _sample_data_from_json(payload)
+
+
+def finalize_game_samples(
+    pending: Sequence[tuple[str, Model1SampleData | Mapping[str, Any], float]],
+    winner: str | None,
+    horizons: Sequence[int],
+    *,
+    truncated: bool = False,
+) -> list[Model1SampleData]:
+    """Finalize self-play samples through Rust-owned outcome logic."""
+
+    rust_pending = tuple(
+        (str(player), _sample_payload(sample), float(root_value))
+        for player, sample, root_value in pending
+    )
+    payloads = rust_bridge._dense_cnn_module().model1_finalize_game_samples(
+        rust_pending,
+        winner,
+        tuple(int(horizon) for horizon in horizons),
+        bool(truncated),
+    )
+    return [_sample_data_from_json(payload) for payload in payloads]
 
 
 def expand_sample(
@@ -461,53 +469,12 @@ def _sample_data_from_json(data: Mapping[str, Any]) -> Model1SampleData:
     )
 
 
-def _hot_cells(python_state: object, current_player: str) -> tuple[tuple[tuple[int, int], ...], tuple[tuple[int, int], ...]]:
-    own: set[tuple[int, int]] = set()
-    opponent: set[tuple[int, int]] = set()
-    occupied = {(coord.q, coord.r) for coord in python_state.board.occupied}
-    for entry in python_state.board.windows.entries:
-        masks = tuple(int(mask) for mask in entry.masks)
-        p0_count = masks[0].bit_count()
-        p1_count = masks[1].bit_count()
-        if p0_count and p1_count:
-            continue
-        if p0_count < 4 and p1_count < 4:
-            continue
-        player = "player0" if p0_count >= 4 else "player1"
-        target = own if player == current_player else opponent
-        key = getattr(entry, "key", entry)
-        for coord in _window_cells(key.start, key.axis):
-            if coord not in occupied:
-                target.add(coord)
-    return tuple(sorted(own)), tuple(sorted(opponent))
-
-
-def _window_cells(start: object, axis: str) -> tuple[tuple[int, int], ...]:
-    vector = {
-        "Q": (1, 0),
-        "R": (0, 1),
-        "QR": (1, -1),
-    }[str(axis)]
-    return tuple((int(start.q) + vector[0] * index, int(start.r) + vector[1] * index) for index in range(6))
-
-
-def _last_completed_turn(
-    history: Sequence[tuple[int, int, str, str, int, int | None, int | None]],
-    player: str,
-) -> tuple[tuple[int, int], ...]:
-    for q, r, record_player, phase, _index, first_q, first_r in reversed(tuple(history)):
-        if record_player != player:
-            continue
-        if phase == "SecondStone" and first_q is not None and first_r is not None:
-            return ((int(first_q), int(first_r)), (int(q), int(r)))
-        if phase == "Opening":
-            return ((int(q), int(r)),)
-    return ()
-
-
-def _weights_to_pairs(weights: Mapping[int, float] | Sequence[tuple[int, float]]) -> tuple[tuple[int, float], ...]:
-    items = weights.items() if isinstance(weights, Mapping) else weights
-    return tuple((int(action_id), float(weight)) for action_id, weight in items)
+def _sample_payload(sample: Model1SampleData | Mapping[str, Any]) -> Mapping[str, Any]:
+    if isinstance(sample, Model1SampleData):
+        return asdict(sample)
+    if isinstance(sample, Mapping):
+        return dict(sample)
+    raise TypeError(f"expected Model1SampleData or mapping, got {type(sample).__name__}")
 
 
 def _raw_policy_to_action_pairs(value: object) -> tuple[tuple[int, float], ...]:
@@ -524,14 +491,6 @@ def _raw_policy_to_action_pairs(value: object) -> tuple[tuple[int, float], ...]:
             action_id = pack_coord_id(Axial(int(coord[0]), int(coord[1])))
         pairs.append((action_id, float(weight)))
     return tuple(pairs)
-
-
-def _player_label(value: object) -> str:
-    return str(getattr(value, "value", value))
-
-
-def _phase_label(value: object) -> str:
-    return str(getattr(value, "value", value))
 
 
 def _optional_int(value: object) -> int | None:

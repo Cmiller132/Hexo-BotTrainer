@@ -658,40 +658,100 @@ def test_dense_cnn_rust_mcts_uses_model_local_accelerator() -> None:
     assert sum(float(weight) for _action_id, weight in first["visit_policy"]) == pytest.approx(1.0)
 
 
-def test_dense_cnn_batched_mcts_falls_back_when_rust_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
-    engine = importlib.import_module("hexo_engine")
+def test_dense_cnn_batched_mcts_requires_rust_and_does_not_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
     mcts_module = importlib.import_module("hexo_models.dense_cnn.mcts")
     rust_bridge = importlib.import_module("hexo_models.dense_cnn.rust_bridge")
 
-    monkeypatch.setattr(rust_bridge, "is_available", lambda: False)
+    def unavailable(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("dense_cnn Rust accelerator is unavailable")
+
+    monkeypatch.setattr(rust_bridge, "model1_batched_mcts", unavailable)
 
     class FakeInference:
-        def infer_states(self, states: Sequence[object]) -> list[Any]:
-            return [
-                type(
-                    "Eval",
-                    (),
-                    {
-                        "value": 0.0,
-                        "legal_priors": {int(engine.legal_action_ids(state)[0]): 1.0},
-                    },
-                )()
-                for state in states
-            ]
+        evaluate_model1_payload = object()
 
-    state = engine.new_game()
-    result = mcts_module.run_batched_mcts(
-        [state],
-        FakeInference(),
-        visits=1,
+        def infer_states(self, _states: Sequence[object]) -> list[Any]:
+            raise AssertionError("dense CNN MCTS must not fall back to Python inference")
+
+    with pytest.raises(RuntimeError, match="Rust accelerator is unavailable"):
+        mcts_module.run_batched_mcts(
+            [object()],
+            FakeInference(),
+            visits=1,
+            temperature=0.0,
+            seed=7,
+            virtual_batch_size=1,
+        )
+
+
+def test_dense_cnn_mcts_python_boundary_delegates_to_rust(monkeypatch: pytest.MonkeyPatch) -> None:
+    mcts_module = importlib.import_module("hexo_models.dense_cnn.mcts")
+    rust_bridge = importlib.import_module("hexo_models.dense_cnn.rust_bridge")
+    calls: list[Mapping[str, Any]] = []
+
+    class FakeInference:
+        evaluate_model1_payload = object()
+
+    def fake_model1_batched_mcts(
+        states: Sequence[object],
+        *,
+        visits: int,
+        c_puct: float,
+        temperature: float,
+        seed: int,
+        evaluator: object,
+        virtual_batch_size: int | None,
+    ) -> tuple[Mapping[str, Any], ...]:
+        calls.append(
+            {
+                "states": states,
+                "visits": visits,
+                "c_puct": c_puct,
+                "temperature": temperature,
+                "seed": seed,
+                "evaluator": evaluator,
+                "virtual_batch_size": virtual_batch_size,
+            }
+        )
+        return (
+            {
+                "action_id": 17,
+                "visit_policy": ((17, 0.75), (23, 0.25)),
+                "root_value": -0.125,
+                "visits": visits,
+            },
+        )
+
+    monkeypatch.setattr(rust_bridge, "model1_batched_mcts", fake_model1_batched_mcts)
+
+    state = object()
+    inference = FakeInference()
+    result = mcts_module.run_mcts(
+        state,
+        inference,
+        visits=3,
+        c_puct=2.0,
         temperature=0.0,
-        seed=7,
-        virtual_batch_size=1,
+        seed=None,
     )
 
-    assert len(result) == 1
-    assert result[0].visits == 1
-    assert result[0].visit_policy
+    assert result == mcts_module.SearchResult(
+        action_id=17,
+        visit_policy={17: 0.75, 23: 0.25},
+        root_value=-0.125,
+        visits=3,
+    )
+    assert calls == [
+        {
+            "states": [state],
+            "visits": 3,
+            "c_puct": 2.0,
+            "temperature": 0.0,
+            "seed": 0,
+            "evaluator": inference.evaluate_model1_payload,
+            "virtual_batch_size": 3,
+        }
+    ]
 
 
 def test_batch_inference_fast_path_runs_compact_samples_in_one_forward_pass() -> None:

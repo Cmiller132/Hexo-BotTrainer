@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
 import torch
 
 from .config import HexformerConfig
-from .input import SparseDecisionInput, build_sparse_input, collate_sparse_inputs
+from .input import (
+    SparseDecisionInput,
+    build_sparse_input,
+    build_sparse_inputs_from_history_rows,
+    collate_sparse_inputs,
+)
 from .losses import wdl_value_from_logits
 
 
@@ -87,3 +92,35 @@ class HexformerInference:
                 )
             )
         return tuple(results)
+
+    @torch.no_grad()
+    def evaluate_mcts_payload(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        """Torch callback used by the Rust Hexformer AR MCTS bridge."""
+
+        sparse = build_sparse_inputs_from_history_rows(
+            payload["history_rows"],
+            architecture=self.config.architecture,
+            candidates=self.config.candidates,
+        )
+        results = self.infer_sparse(sparse)
+        values = torch.tensor(
+            [result.value for result in results],
+            dtype=torch.float32,
+        ).contiguous()
+        candidate_rows = tuple(
+            tuple(int(action_id) for action_id in result.legal_action_ids)
+            for result in results
+        )
+        priors = torch.tensor(
+            [
+                float(result.legal_priors.get(int(action_id), 0.0))
+                for result in results
+                for action_id in result.legal_action_ids
+            ],
+            dtype=torch.float32,
+        ).contiguous()
+        return {
+            "values_bytes": values.numpy().tobytes(),
+            "candidate_action_ids": candidate_rows,
+            "priors_bytes": priors.numpy().tobytes(),
+        }
