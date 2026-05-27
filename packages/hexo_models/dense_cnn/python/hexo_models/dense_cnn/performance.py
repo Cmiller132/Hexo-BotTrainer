@@ -111,29 +111,6 @@ def calibrate_dense_cnn(
     return result
 
 
-def calibrate_performance(
-    *,
-    model: torch.nn.Module,
-    config: Model1Config,
-    optimizer: torch.optim.Optimizer | None = None,
-    inference_batch_candidates: Sequence[int] | None = None,
-    training_batch_candidates: Sequence[int] | None = None,
-    selfplay_batch_candidates: Sequence[int] | None = None,
-    mcts_virtual_batch_candidates: Sequence[int] | None = None,
-) -> dict[str, Any]:
-    """Public calibration wrapper used by tests and external tooling."""
-
-    return calibrate_dense_cnn(
-        model=model,
-        config=config,
-        optimizer=optimizer,
-        inference_batch_candidates=inference_batch_candidates,
-        training_batch_candidates=training_batch_candidates,
-        selfplay_batch_candidates=selfplay_batch_candidates,
-        mcts_virtual_batch_candidates=mcts_virtual_batch_candidates,
-    )
-
-
 def build_benchmark_report(
     *,
     config: Model1Config,
@@ -150,12 +127,6 @@ def build_benchmark_report(
         "training_samples_per_second": float(measurements.get("training_samples_per_second", 0.0)),
         "meets_target": selfplay >= target,
     }
-
-
-benchmark_report = build_benchmark_report
-report_performance_benchmark = build_benchmark_report
-calibrate_model1_performance = calibrate_performance
-calibrate_dense_cnn_performance = calibrate_performance
 
 
 def _benchmark_inference(

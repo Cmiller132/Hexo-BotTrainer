@@ -32,6 +32,13 @@ class HexformerTrainer:
     buffer: HexformerReplayBuffer
     optimizer: torch.optim.Optimizer
     curriculum_seeded_epochs: set[int] = field(default_factory=set)
+    device: torch.device = field(init=False)
+    scaler: torch.amp.GradScaler = field(init=False)
+    training_batch_size: int = field(init=False)
+    search_visits: int = field(init=False)
+    optimizer_step: int = field(init=False)
+    base_lrs: list[float] = field(init=False)
+    ema_state: dict[str, torch.Tensor] = field(init=False)
 
     def __post_init__(self) -> None:
         requested = torch.device(self.config.device)

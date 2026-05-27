@@ -2,8 +2,8 @@
 //!
 //! This module owns the model-specific sample facts used by self-play and
 //! inference: tactical windows, candidate frontiers, local crops, relation
-//! edges, and target tensors. It reconstructs core states from packed histories
-//! through `state.rs` and does not rely on engine-side model accelerators.
+//! edges, and target tensors. It consumes cloned engine states from `state.rs`
+//! and does not rely on engine-side model accelerators.
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -17,12 +17,12 @@ use hexo_engine::{
     PackedCoord, Player, TurnPhase,
 };
 
-use crate::state::{state_from_history_row, states_from_history_rows};
+use crate::state::{state_from_py_state, states_from_py_states};
 
 use crate::constants::*;
 
 #[derive(Clone, Debug)]
-struct ArchitectureConfig {
+pub(crate) struct ArchitectureConfig {
     candidate_feature_dim: usize,
     stone_feature_dim: usize,
     window_feature_dim: usize,
@@ -59,7 +59,7 @@ impl Default for ArchitectureConfig {
 }
 
 impl ArchitectureConfig {
-    fn from_py(raw: &Bound<'_, PyAny>) -> PyResult<Self> {
+    pub(crate) fn from_py(raw: &Bound<'_, PyAny>) -> PyResult<Self> {
         let default = Self::default();
         Ok(Self {
             candidate_feature_dim: get_usize(raw, "candidate_feature_dim", default.candidate_feature_dim)?,
@@ -80,7 +80,7 @@ impl ArchitectureConfig {
 }
 
 #[derive(Clone, Debug)]
-struct CandidateConfig {
+pub(crate) struct CandidateConfig {
     max_candidates: usize,
     tactical_radius: i16,
     recent_radius: i16,
@@ -103,7 +103,7 @@ impl Default for CandidateConfig {
 }
 
 impl CandidateConfig {
-    fn from_py(raw: &Bound<'_, PyAny>) -> PyResult<Self> {
+    pub(crate) fn from_py(raw: &Bound<'_, PyAny>) -> PyResult<Self> {
         let default = Self::default();
         Ok(Self {
             max_candidates: get_usize(raw, "max_candidates", default.max_candidates)?,
@@ -125,7 +125,7 @@ impl CandidateConfig {
 }
 
 #[derive(Clone, Debug, Default)]
-struct SparseTargets {
+pub(crate) struct SparseTargets {
     policy: Vec<(PackedCoord, f32)>,
     opp_policy: Vec<(PackedCoord, f32)>,
     value: Option<f32>,
@@ -207,7 +207,7 @@ struct TensorI64 {
 }
 
 #[derive(Clone, Debug)]
-struct SparsePayload {
+pub(crate) struct SparsePayload {
     candidate_action_ids: Vec<PackedCoord>,
     candidate_features: TensorF32,
     candidate_coords: TensorF32,
@@ -241,7 +241,7 @@ struct SparsePayload {
 #[pyfunction]
 pub fn sparse_input_payload(
     py: Python<'_>,
-    history_row: &Bound<'_, PyAny>,
+    state: &Bound<'_, PyAny>,
     architecture: &Bound<'_, PyAny>,
     candidates: &Bound<'_, PyAny>,
     policy: &Bound<'_, PyAny>,
@@ -260,7 +260,7 @@ pub fn sparse_input_payload(
         distance,
         lookahead: parse_lookahead_items(lookahead)?,
     };
-    let state = state_from_history_row(history_row)?;
+    let state = state_from_py_state(py, state)?;
     let payload = build_sparse_payload(&state, &arch, &candidate_cfg, &targets);
     let payload_obj = sparse_payload_to_py(py, &payload, metadata)?;
     Ok(payload_obj)
@@ -269,28 +269,21 @@ pub fn sparse_input_payload(
 #[pyfunction]
 pub fn sparse_input_payloads(
     py: Python<'_>,
-    history_rows: &Bound<'_, PyAny>,
+    states: &Bound<'_, PyAny>,
     architecture: &Bound<'_, PyAny>,
     candidates: &Bound<'_, PyAny>,
 ) -> PyResult<Py<PyAny>> {
     let arch = ArchitectureConfig::from_py(architecture)?;
     let candidate_cfg = CandidateConfig::from_py(candidates)?;
-    let states = states_from_history_rows(history_rows)?;
-    let results = PyList::empty(py);
-    let empty = PyDict::new(py);
-    let targets = SparseTargets::default();
-    for state in &states {
-        let payload = build_sparse_payload(state, &arch, &candidate_cfg, &targets);
-        results.append(sparse_payload_to_py(py, &payload, empty.as_any())?)?;
-    }
-    Ok(results.into_any().unbind())
+    let states = states_from_py_states(py, states)?;
+    sparse_payloads_to_py(py, &states, &arch, &candidate_cfg)
 }
 
 #[pyfunction]
 pub fn selfplay_sample_payloads(
     py: Python<'_>,
     game_id: String,
-    history_rows: &Bound<'_, PyAny>,
+    states: &Bound<'_, PyAny>,
     players: &Bound<'_, PyAny>,
     turn_indices: &Bound<'_, PyAny>,
     visit_policies: &Bound<'_, PyAny>,
@@ -303,7 +296,7 @@ pub fn selfplay_sample_payloads(
 ) -> PyResult<Py<PyAny>> {
     let arch = ArchitectureConfig::from_py(architecture)?;
     let candidate_cfg = CandidateConfig::from_py(candidates)?;
-    let states = states_from_history_rows(history_rows)?;
+    let states = states_from_py_states(py, states)?;
     let players = parse_string_sequence(players)?;
     let turn_indices = parse_i64_sequence(turn_indices)?;
     let policies = parse_policy_rows(visit_policies)?;
@@ -390,7 +383,7 @@ pub fn register_pybridge(module: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }
 
-fn build_sparse_payload(
+pub(crate) fn build_sparse_payload(
     state: &RustHexoState,
     architecture: &ArchitectureConfig,
     candidate_cfg: &CandidateConfig,
@@ -1329,7 +1322,23 @@ fn sorted_stones(state: &RustHexoState) -> Vec<(HexCoord, Player)> {
         .collect()
 }
 
-fn sparse_payload_to_py(
+pub(crate) fn sparse_payloads_to_py(
+    py: Python<'_>,
+    states: &[RustHexoState],
+    architecture: &ArchitectureConfig,
+    candidate_cfg: &CandidateConfig,
+) -> PyResult<Py<PyAny>> {
+    let results = PyList::empty(py);
+    let empty = PyDict::new(py);
+    let targets = SparseTargets::default();
+    for state in states {
+        let payload = build_sparse_payload(state, architecture, candidate_cfg, &targets);
+        results.append(sparse_payload_to_py(py, &payload, empty.as_any())?)?;
+    }
+    Ok(results.into_any().unbind())
+}
+
+pub(crate) fn sparse_payload_to_py(
     py: Python<'_>,
     payload: &SparsePayload,
     base_metadata: &Bound<'_, PyAny>,
@@ -1551,7 +1560,7 @@ fn parse_packed_coord_sequence(raw: &Bound<'_, PyAny>) -> PyResult<Vec<PackedCoo
 fn validate_len(name: &str, actual: usize, expected: usize) -> PyResult<()> {
     if actual != expected {
         return Err(PyValueError::new_err(format!(
-            "{name} length {actual} does not match history_rows length {expected}"
+            "{name} length {actual} does not match state batch length {expected}"
         )));
     }
     Ok(())
@@ -1763,28 +1772,4 @@ mod tests {
         assert_eq!(payload.wdl_target.unwrap().data, vec![0.0, 0.0, 1.0]);
     }
 
-    #[test]
-    fn packed_history_reconstruction_matches_engine_state() {
-        let state = sample_state();
-        let history = state
-            .placement_history()
-            .iter()
-            .map(|record| pack_coord(record.coord))
-            .collect::<Vec<_>>();
-        let mut decoded = RustHexoState::new();
-        for action_id in history {
-            apply_placement(
-                &mut decoded,
-                Placement {
-                    coord: unpack_coord(action_id),
-                },
-            )
-            .unwrap();
-        }
-
-        assert_eq!(decoded.current_player(), state.current_player());
-        assert_eq!(decoded.phase(), state.phase());
-        assert_eq!(decoded.placements_made(), state.placements_made());
-        assert_eq!(decoded.board().occupied_cells(), state.board().occupied_cells());
-    }
 }

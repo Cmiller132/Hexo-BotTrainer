@@ -1,14 +1,19 @@
 //! Python/PyTorch evaluator adapter for dense CNN MCTS.
 //!
-//! The Rust search owns tree state, but PyTorch still evaluates leaf tensors.
-//! This module builds the byte-oriented evaluator payload and normalizes the
-//! returned values/priors into Rust structs used by the search tree.
+//! MCTS owns the tree and game-state mutations, while PyTorch remains the neural
+//! evaluator. This file is the boundary between those worlds: it encodes engine
+//! states into the dense-cnn tensor payload, calls the Python evaluator once per
+//! batch, and caches exact model evaluations by the history-sensitive state
+//! identity derived in `hexo_utils`.
 
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyTuple};
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 
-use hexo_engine::{pack_coord, HexoState as RustHexoState, PackedCoord};
+use hexo_engine::{HexoState as RustHexoState, PackedCoord};
+use hexo_utils::{hash_state, StateHash};
 
 use crate::constants::*;
 use crate::encoding::encode_model1_state;
@@ -17,6 +22,16 @@ use crate::encoding::encode_model1_state;
 pub(crate) struct RustEvaluation {
     pub(crate) value: f32,
     pub(crate) priors: Vec<(PackedCoord, f32)>,
+}
+
+pub(crate) type SharedEvaluationCache = Rc<RefCell<HashMap<StateHash, RustEvaluation>>>;
+
+pub(crate) fn new_shared_evaluation_cache() -> SharedEvaluationCache {
+    Rc::new(RefCell::new(HashMap::new()))
+}
+
+pub(crate) fn state_hash(state: &RustHexoState) -> StateHash {
+    hash_state(state)
 }
 
 fn evaluate_model1_states(
@@ -102,38 +117,45 @@ pub(crate) fn evaluate_model1_states_cached(
     py: Python<'_>,
     evaluator: &Bound<'_, PyAny>,
     states: &[RustHexoState],
-    cache: &mut HashMap<Vec<PackedCoord>, RustEvaluation>,
+    cache: &SharedEvaluationCache,
 ) -> PyResult<Vec<RustEvaluation>> {
     let mut result_slots: Vec<Option<RustEvaluation>> = vec![None; states.len()];
     let mut unique_states: Vec<RustHexoState> = Vec::new();
-    let mut unique_keys: Vec<Vec<PackedCoord>> = Vec::new();
-    let mut unique_index_by_key: HashMap<Vec<PackedCoord>, usize> = HashMap::new();
+    let mut unique_keys: Vec<StateHash> = Vec::new();
+    let mut unique_index_by_key: HashMap<StateHash, usize> = HashMap::new();
 
-    for (index, state) in states.iter().enumerate() {
-        let key = model1_state_cache_key(state);
-        if let Some(cached) = cache.get(&key) {
-            result_slots[index] = Some(cached.clone());
-            continue;
+    {
+        let cached = cache.borrow();
+        for (index, state) in states.iter().enumerate() {
+            let key = state_hash(state);
+            if let Some(cached_eval) = cached.get(&key) {
+                result_slots[index] = Some(cached_eval.clone());
+                continue;
+            }
+            if unique_index_by_key.contains_key(&key) {
+                continue;
+            }
+            unique_index_by_key.insert(key, unique_states.len());
+            unique_keys.push(key);
+            unique_states.push(state.clone());
         }
-        if unique_index_by_key.contains_key(&key) {
-            continue;
-        }
-        unique_index_by_key.insert(key.clone(), unique_states.len());
-        unique_keys.push(key);
-        unique_states.push(state.clone());
     }
 
     if !unique_states.is_empty() {
         let unique_evals = evaluate_model1_states(py, evaluator, &unique_states)?;
-        for (key, evaluation) in unique_keys.into_iter().zip(unique_evals.into_iter()) {
-            cache.insert(key.clone(), evaluation.clone());
+        {
+            let mut cached = cache.borrow_mut();
+            for (key, evaluation) in unique_keys.into_iter().zip(unique_evals.into_iter()) {
+                cached.insert(key, evaluation);
+            }
         }
+        let cached = cache.borrow();
         for (index, state) in states.iter().enumerate() {
             if result_slots[index].is_some() {
                 continue;
             }
-            let key = model1_state_cache_key(state);
-            if let Some(evaluation) = cache.get(&key) {
+            let key = state_hash(state);
+            if let Some(evaluation) = cached.get(&key) {
                 result_slots[index] = Some(evaluation.clone());
             }
         }
@@ -143,14 +165,6 @@ pub(crate) fn evaluate_model1_states_cached(
         .into_iter()
         .map(|item| item.expect("every model1 evaluation slot must be populated"))
         .collect())
-}
-
-fn model1_state_cache_key(state: &RustHexoState) -> Vec<PackedCoord> {
-    state
-        .placement_history()
-        .iter()
-        .map(|record| pack_coord(record.coord))
-        .collect()
 }
 
 fn read_f32(bytes: &[u8], index: usize) -> Option<f32> {

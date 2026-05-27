@@ -28,17 +28,13 @@ def _install_package_shell(monkeypatch: pytest.MonkeyPatch, *, rust: object = MI
     hexformer_pkg.__path__ = []
     inference = types.ModuleType("hexo_models.hexformer_ar.inference")
     inference.HexformerInference = type("HexformerInference", (), {})
-
-    engine = types.ModuleType("hexo_engine")
-    engine.to_python_state = lambda state: state
-    engine_types = types.ModuleType("hexo_engine.types")
-    engine_types.pack_coord_id = _pack_coord_id
+    input_mod = types.ModuleType("hexo_models.hexformer_ar.input")
+    input_mod._config_mapping = lambda config: {"config": config}
 
     monkeypatch.setitem(sys.modules, "hexo_models", hexo_models)
     monkeypatch.setitem(sys.modules, "hexo_models.hexformer_ar", hexformer_pkg)
     monkeypatch.setitem(sys.modules, "hexo_models.hexformer_ar.inference", inference)
-    monkeypatch.setitem(sys.modules, "hexo_engine", engine)
-    monkeypatch.setitem(sys.modules, "hexo_engine.types", engine_types)
+    monkeypatch.setitem(sys.modules, "hexo_models.hexformer_ar.input", input_mod)
 
 
 def _load_mcts(monkeypatch: pytest.MonkeyPatch, *, rust: object = MISSING) -> types.ModuleType:
@@ -52,8 +48,7 @@ def _load_mcts(monkeypatch: pytest.MonkeyPatch, *, rust: object = MISSING) -> ty
 
 
 def _state(*coords: tuple[int, int]) -> SimpleNamespace:
-    records = tuple(SimpleNamespace(coord=SimpleNamespace(q=q, r=r)) for q, r in coords)
-    return SimpleNamespace(placement_history=records)
+    return SimpleNamespace(coords=coords)
 
 
 def test_hexformer_ar_mcts_requires_rust(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -68,6 +63,8 @@ def test_hexformer_ar_mcts_delegates_to_rust(monkeypatch: pytest.MonkeyPatch) ->
     calls: list[object] = []
 
     class FakeInference:
+        config = SimpleNamespace(architecture="arch", candidates="candidates")
+
         def evaluate_mcts_payload(self, payload: object) -> dict[str, object]:
             calls.append(payload)
             return {}
@@ -75,21 +72,25 @@ def test_hexformer_ar_mcts_delegates_to_rust(monkeypatch: pytest.MonkeyPatch) ->
     class FakeHexformerRust:
         def hexformer_ar_batched_mcts(
             self,
-            history_rows: object,
+            states: object,
             visits: int,
             c_puct: float,
             temperature: float,
             seed: int,
             evaluator: object,
+            architecture: object,
+            candidates: object,
             virtual_batch_size: int,
         ) -> tuple[dict[str, object], ...]:
-            assert history_rows == ((),)
+            assert states == (root_state,)
             assert visits == 7
             assert c_puct == 2.0
             assert temperature == 0.25
             assert seed == 11
+            assert architecture == {"config": "arch"}
+            assert candidates == {"config": "candidates"}
             assert virtual_batch_size == 3
-            evaluator({"history_rows": history_rows})
+            evaluator({"sparse_inputs": ("payload",)})
             return (
                 {
                     "action_id": action_id,
@@ -101,9 +102,10 @@ def test_hexformer_ar_mcts_delegates_to_rust(monkeypatch: pytest.MonkeyPatch) ->
 
     rust = SimpleNamespace(hexformer_ar=FakeHexformerRust())
     mcts = _load_mcts(monkeypatch, rust=rust)
+    root_state = _state()
 
     result = mcts.run_batched_mcts(
-        (_state(),),
+        (root_state,),
         FakeInference(),
         visits=7,
         c_puct=2.0,
@@ -112,7 +114,7 @@ def test_hexformer_ar_mcts_delegates_to_rust(monkeypatch: pytest.MonkeyPatch) ->
         virtual_batch_size=3,
     )
 
-    assert calls == [{"history_rows": ((),)}]
+    assert calls == [{"sparse_inputs": ("payload",)}]
     assert result[0].action_id == action_id
     assert result[0].visit_policy == {action_id: 1.0}
     assert result[0].root_value == 0.5
@@ -128,7 +130,11 @@ def test_hexformer_ar_mcts_root_candidate_error_is_runtime_error(monkeypatch: py
     mcts = _load_mcts(monkeypatch, rust=rust)
 
     with pytest.raises(RuntimeError, match="Hexformer MCTS root has no legal candidate actions"):
-        mcts.run_mcts(_state(), SimpleNamespace(evaluate_mcts_payload=lambda _payload: {}), visits=1)
+        inference = SimpleNamespace(
+            config=SimpleNamespace(architecture=object(), candidates=object()),
+            evaluate_mcts_payload=lambda _payload: {},
+        )
+        mcts.run_mcts(_state(), inference, visits=1)
 
 
 def _load_inference(monkeypatch: pytest.MonkeyPatch, action_id: int) -> types.ModuleType:
@@ -141,10 +147,7 @@ def _load_inference(monkeypatch: pytest.MonkeyPatch, action_id: int) -> types.Mo
     input_mod = types.ModuleType("hexo_models.hexformer_ar.input")
     input_mod.SparseDecisionInput = type("SparseDecisionInput", (), {})
     input_mod.build_sparse_input = lambda _state, **_kwargs: pytest.fail("evaluate_mcts_payload rebuilt Python states")
-    input_mod.build_sparse_inputs_from_history_rows = lambda history_rows, **_kwargs: tuple(
-        SimpleNamespace(candidate_action_ids=(int(row[0]),))
-        for row in history_rows
-    )
+    input_mod.sparse_input_from_payload = lambda payload: payload
     input_mod.collate_sparse_inputs = lambda _samples: {}
 
     losses = types.ModuleType("hexo_models.hexformer_ar.losses")
@@ -190,7 +193,7 @@ def test_hexformer_ar_mcts_payload_callback_returns_candidate_priors(monkeypatch
 
     payload = inference_module.HexformerInference.evaluate_mcts_payload(
         inference,
-        {"history_rows": ((action_id,),)},
+        {"sparse_inputs": (SimpleNamespace(candidate_action_ids=(action_id,)),)},
     )
 
     assert payload["candidate_action_ids"] == ((action_id,),)

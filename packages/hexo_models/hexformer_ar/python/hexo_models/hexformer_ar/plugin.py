@@ -11,11 +11,9 @@ from hexo_train.components import ComponentOverrides
 from .architecture import HexformerAR
 from .checkpoints import HexformerCheckpointLoader, HexformerCheckpointSaver
 from .config import parse_hexformer_config
-from .evaluation import evaluate_epoch
 from .performance import calibrate_hexformer
 from .samples import HexformerReplayBuffer
 from .samples_finalizer import HexformerSampleFinalizer
-from .selfplay import generate_selfplay_epoch
 from .trainer import HexformerTrainer
 
 
@@ -65,9 +63,13 @@ class HexformerARPlugin:
         )
 
     def generate_selfplay(self, *, ctx: Any, components: Any, epoch: int, games_per_epoch: int) -> dict[str, Any]:
+        from .selfplay import generate_selfplay_epoch
+
         return generate_selfplay_epoch(ctx=ctx, components=components, epoch=epoch, games_per_epoch=games_per_epoch)
 
     def evaluate_epoch(self, *, ctx: Any, components: Any, epoch: int) -> dict[str, Any]:
+        from .evaluation import evaluate_epoch
+
         return evaluate_epoch(ctx=ctx, components=components, epoch=epoch)
 
     def calibrate_performance(self, *, ctx: Any, components: Any) -> dict[str, Any]:

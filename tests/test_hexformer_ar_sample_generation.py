@@ -26,10 +26,10 @@ def test_build_sparse_input_consumes_rust_payload(monkeypatch: pytest.MonkeyPatc
     fake = _FakeRust(_payload(arch, candidate_ids=(7, 8)))
     monkeypatch.setattr(input_module, "_MODELS_RUST", SimpleNamespace(hexformer_ar=fake))
     monkeypatch.setattr(input_module, "_RUST_IMPORT_ERROR", None)
-    monkeypatch.setattr(input_module, "history_row_from_state", lambda _state: (123, 456))
+    state = object()
 
     sparse = input_module.build_sparse_input(
-        object(),
+        state,
         architecture=arch,
         candidates=candidate_cfg,
         policy={7: 3.0},
@@ -39,7 +39,7 @@ def test_build_sparse_input_consumes_rust_payload(monkeypatch: pytest.MonkeyPatc
 
     assert sparse.candidate_action_ids == (7, 8)
     assert sparse.policy_target is not None
-    assert fake.calls[0]["history_row"] == (123, 456)
+    assert fake.calls[0]["state"] is state
     assert fake.calls[0]["policy"] == ((7, 3.0),)
     assert fake.calls[0]["metadata"] == {"source": "unit"}
 
@@ -109,7 +109,7 @@ class _FakeRust:
 
     def sparse_input_payload(
         self,
-        history_row: tuple[int, ...],
+        state: object,
         architecture: dict[str, object],
         candidates: dict[str, object],
         policy: tuple[tuple[int, float], ...],
@@ -121,7 +121,7 @@ class _FakeRust:
     ) -> dict[str, object]:
         self.calls.append(
             {
-                "history_row": history_row,
+                "state": state,
                 "architecture": architecture,
                 "candidates": candidates,
                 "policy": policy,

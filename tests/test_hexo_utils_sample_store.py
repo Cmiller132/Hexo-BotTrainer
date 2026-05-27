@@ -4,6 +4,7 @@ import json
 import sys
 import zlib
 from pathlib import Path
+import importlib.util
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -95,6 +96,13 @@ def test_sample_store_writes_manifest_index_window_and_reads_records(tmp_path: P
     assert batch.metadata["returned_count"] == 1
     [record] = batch.records
     assert record == dense_record
+
+
+def test_removed_hexo_utils_legacy_modules_are_not_importable() -> None:
+    assert importlib.util.find_spec("hexo_utils.search") is None
+    assert importlib.util.find_spec("hexo_utils.rust_bridge") is None
+    assert importlib.util.find_spec("hexo_utils.encoding.crop") is None
+    assert importlib.util.find_spec("hexo_utils.encoding.masks") is None
 
 
 def test_empty_sample_window_keeps_requested_size_for_pipeline_compatibility(tmp_path: Path) -> None:

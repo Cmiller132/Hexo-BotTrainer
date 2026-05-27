@@ -13,6 +13,14 @@ for package in ("hexo_engine",):
 
 
 class RustEngineBridgeTests(unittest.TestCase):
+    def setUp(self) -> None:
+        import hexo_engine as engine
+
+        try:
+            engine.engine_metadata()
+        except engine.EngineUnavailableError as exc:
+            self.skipTest(f"hexo_engine Rust bridge is unavailable: {exc}")
+
     def test_bridge_metadata_reports_rust_backend(self) -> None:
         import hexo_engine as engine
 
@@ -20,6 +28,7 @@ class RustEngineBridgeTests(unittest.TestCase):
 
         self.assertEqual(metadata["backend"], "rust-pyo3")
         self.assertEqual(metadata["rules_version"], 1)
+        self.assertEqual(metadata["state_api_version"], 2)
         self.assertFalse(hasattr(engine, "model1_batch_inputs"))
         self.assertFalse(hasattr(engine, "model1_batched_mcts"))
 
@@ -60,6 +69,23 @@ class RustEngineBridgeTests(unittest.TestCase):
 
         self.assertEqual(engine.to_python_state(state).placements_made, 0)
         self.assertEqual(engine.to_python_state(clone).placements_made, 1)
+
+    def test_state_api_capsule_is_private_and_read_only(self) -> None:
+        import hexo_engine as engine
+        import hexo_engine._rust as rust
+
+        state = engine.new_game()
+        for q, r in [(0, 0), (1, 0), (0, 1)]:
+            engine.apply_action(state, engine.PlacementAction(engine.AxialCoord(q, r)))
+        before = engine.to_python_state(state)
+
+        capsule = rust.state_api_capsule()
+
+        self.assertIsNotNone(capsule)
+        self.assertFalse(hasattr(rust, "state_api"))
+        self.assertFalse(hasattr(rust, "state_hash"))
+        self.assertFalse(hasattr(rust, "_clone_state_wire_for_testing"))
+        self.assertEqual(engine.to_python_state(state), before)
 
     def test_illegal_action_does_not_mutate_state(self) -> None:
         import hexo_engine as engine

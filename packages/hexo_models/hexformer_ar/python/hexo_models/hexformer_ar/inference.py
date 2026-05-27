@@ -11,8 +11,8 @@ from .config import HexformerConfig
 from .input import (
     SparseDecisionInput,
     build_sparse_input,
-    build_sparse_inputs_from_history_rows,
     collate_sparse_inputs,
+    sparse_input_from_payload,
 )
 from .losses import wdl_value_from_logits
 
@@ -97,10 +97,9 @@ class HexformerInference:
     def evaluate_mcts_payload(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         """Torch callback used by the Rust Hexformer AR MCTS bridge."""
 
-        sparse = build_sparse_inputs_from_history_rows(
-            payload["history_rows"],
-            architecture=self.config.architecture,
-            candidates=self.config.candidates,
+        sparse = tuple(
+            sparse_input_from_payload(item)
+            for item in payload["sparse_inputs"]
         )
         results = self.infer_sparse(sparse)
         values = torch.tensor(

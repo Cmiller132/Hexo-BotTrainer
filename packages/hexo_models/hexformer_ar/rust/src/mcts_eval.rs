@@ -1,15 +1,18 @@
 //! Python/PyTorch evaluator adapter for Hexformer MCTS.
 //!
-//! The search tree asks for batches of leaf states; this module serializes their
-//! packed histories/legal actions, calls the Python inference callback, and
+//! The search tree asks for batches of leaf states; this module builds
+//! Hexformer sparse payloads in Rust, calls the Python inference callback, and
 //! validates candidate priors before they enter the tree.
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict, PyList, PyTuple};
+use pyo3::types::{PyBytes, PyDict};
 use std::collections::{HashMap, HashSet};
 
-use hexo_engine::{pack_coord, HexoState as RustHexoState, PackedCoord};
+use hexo_engine::{HexoState as RustHexoState, PackedCoord};
+use hexo_utils::{hash_state, StateHash};
+
+use crate::sample_gen::{sparse_payloads_to_py, ArchitectureConfig, CandidateConfig};
 
 #[derive(Clone, Debug)]
 pub(crate) struct RustEvaluation {
@@ -21,24 +24,14 @@ fn evaluate_states(
     py: Python<'_>,
     evaluator: &Bound<'_, PyAny>,
     states: &[RustHexoState],
+    architecture: &ArchitectureConfig,
+    candidates: &CandidateConfig,
 ) -> PyResult<Vec<RustEvaluation>> {
-    let history_rows = PyList::empty(py);
-    let legal_rows = PyList::empty(py);
-    for state in states {
-        let history: Vec<PackedCoord> = state
-            .placement_history()
-            .iter()
-            .map(|record| pack_coord(record.coord))
-            .collect();
-        let mut legal = Vec::new();
-        state.write_legal_action_ids(&mut legal);
-        history_rows.append(PyTuple::new(py, history)?)?;
-        legal_rows.append(PyTuple::new(py, legal)?)?;
-    }
-
     let payload = PyDict::new(py);
-    payload.set_item("history_rows", history_rows)?;
-    payload.set_item("legal_action_ids", legal_rows)?;
+    payload.set_item(
+        "sparse_inputs",
+        sparse_payloads_to_py(py, states, architecture, candidates)?,
+    )?;
 
     let output = evaluator.call1((payload,))?;
     parse_evaluation_output(&output, states)
@@ -48,15 +41,17 @@ pub(crate) fn evaluate_states_cached(
     py: Python<'_>,
     evaluator: &Bound<'_, PyAny>,
     states: &[RustHexoState],
-    cache: &mut HashMap<Vec<PackedCoord>, RustEvaluation>,
+    architecture: &ArchitectureConfig,
+    candidates: &CandidateConfig,
+    cache: &mut HashMap<StateHash, RustEvaluation>,
 ) -> PyResult<Vec<RustEvaluation>> {
     let mut result_slots: Vec<Option<RustEvaluation>> = vec![None; states.len()];
     let mut unique_states: Vec<RustHexoState> = Vec::new();
-    let mut unique_keys: Vec<Vec<PackedCoord>> = Vec::new();
-    let mut unique_index_by_key: HashMap<Vec<PackedCoord>, usize> = HashMap::new();
+    let mut unique_keys: Vec<StateHash> = Vec::new();
+    let mut unique_index_by_key: HashMap<StateHash, usize> = HashMap::new();
 
     for (index, state) in states.iter().enumerate() {
-        let key = state_cache_key(state);
+        let key = hash_state(state);
         if let Some(cached) = cache.get(&key) {
             result_slots[index] = Some(cached.clone());
             continue;
@@ -70,7 +65,7 @@ pub(crate) fn evaluate_states_cached(
     }
 
     if !unique_states.is_empty() {
-        let unique_evals = evaluate_states(py, evaluator, &unique_states)?;
+        let unique_evals = evaluate_states(py, evaluator, &unique_states, architecture, candidates)?;
         for (key, evaluation) in unique_keys.into_iter().zip(unique_evals.into_iter()) {
             cache.insert(key, evaluation);
         }
@@ -80,7 +75,7 @@ pub(crate) fn evaluate_states_cached(
         if result_slots[index].is_some() {
             continue;
         }
-        let key = state_cache_key(state);
+        let key = hash_state(state);
         if let Some(evaluation) = cache.get(&key) {
             result_slots[index] = Some(evaluation.clone());
         }
@@ -245,14 +240,6 @@ fn read_packed_coord(bytes: &[u8], index: usize) -> Option<PackedCoord> {
     let start = index.checked_mul(4)?;
     let chunk = bytes.get(start..start + 4)?;
     Some(u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-}
-
-fn state_cache_key(state: &RustHexoState) -> Vec<PackedCoord> {
-    state
-        .placement_history()
-        .iter()
-        .map(|record| pack_coord(record.coord))
-        .collect()
 }
 
 fn clean_prior(prior: f32) -> f32 {

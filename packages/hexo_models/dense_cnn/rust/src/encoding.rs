@@ -13,7 +13,7 @@ use hexo_engine::{
 };
 
 use crate::constants::*;
-use crate::state::states_from_history_rows;
+use crate::state::states_from_py_states;
 
 pub(crate) struct Model1EncodedState {
     pub(crate) planes: Vec<f32>,
@@ -22,9 +22,9 @@ pub(crate) struct Model1EncodedState {
     pub(crate) center: HexCoord,
 }
 
-#[pyfunction]
-pub fn model1_batch_inputs(py: Python<'_>, history_rows: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-    let states = states_from_history_rows(history_rows)?;
+#[pyfunction(signature = (states))]
+pub fn model1_batch_inputs(py: Python<'_>, states: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    let states = states_from_py_states(py, states)?;
     let mut planes: Vec<f32> = Vec::new();
     let legal_action_rows = PyList::empty(py);
     let legal_flat_rows = PyList::empty(py);

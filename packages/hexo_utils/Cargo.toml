@@ -15,5 +15,3 @@ python = ["dep:pyo3"]
 [dependencies]
 hexo_engine.workspace = true
 pyo3 = { workspace = true, optional = true }
-rand.workspace = true
-serde.workspace = true

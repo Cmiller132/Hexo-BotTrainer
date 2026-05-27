@@ -5,10 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
-import hexo_engine as engine
-from hexo_engine.types import pack_coord_id
-
 from .inference import HexformerInference
+from .input import _config_mapping
 
 try:
     from hexo_models import _rust
@@ -67,12 +65,14 @@ def run_batched_mcts(
     )
     try:
         payloads = _hexformer_ar_module().hexformer_ar_batched_mcts(
-            history_rows_from_states(root_states),
+            tuple(root_states),
             max(1, int(visits)),
             float(c_puct),
             float(temperature),
             0 if seed is None else int(seed),
             inference.evaluate_mcts_payload,
+            _config_mapping(inference.config.architecture),
+            _config_mapping(inference.config.candidates),
             resolved_virtual_batch_size,
         )
     except ValueError as exc:
@@ -81,21 +81,6 @@ def run_batched_mcts(
         raise
 
     return [_search_result_from_payload(payload) for payload in payloads]
-
-
-def history_rows_from_states(states: Sequence[object]) -> tuple[tuple[int, ...], ...]:
-    """Return packed placement-history rows for Rust MCTS reconstruction."""
-
-    rows: list[tuple[int, ...]] = []
-    for state in states:
-        python_state = engine.to_python_state(state)
-        rows.append(
-            tuple(
-                int(pack_coord_id(record.coord))
-                for record in python_state.placement_history
-            )
-        )
-    return tuple(rows)
 
 
 def _search_result_from_payload(payload: Mapping[str, Any]) -> SearchResult:

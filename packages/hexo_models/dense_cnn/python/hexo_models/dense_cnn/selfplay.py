@@ -13,7 +13,7 @@ from hexo_runner.records import AbortRecord, HexoRecordFile, HexoRecordPlayer
 from .debug_artifacts import render_preview_game_actions
 from .inference import DenseCNNInference
 from .mcts import SearchResult, run_batched_mcts
-from .samples import Model1SampleData, finalize_game_samples, sample_from_history
+from .samples import Model1SampleData, finalize_game_samples, sample_from_state
 
 
 def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_epoch: int) -> dict[str, Any]:
@@ -101,8 +101,8 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
                     searched_positions += 1
                     mcts_simulations += int(search.visits)
                     state = game["state"]
-                    sample = sample_from_history(
-                        tuple(game["actions"]),
+                    sample = sample_from_state(
+                        state,
                         game_id=game["game_id"],
                         turn_index=len(game["actions"]),
                         policy=search.visit_policy,

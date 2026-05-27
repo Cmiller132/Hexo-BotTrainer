@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 import sys
 from pathlib import Path
 from typing import Any
@@ -13,14 +14,16 @@ for package in ("hexo_models", "hexo_engine"):
         sys.path.insert(0, str(path))
 
 
-def test_sample_from_history_delegates_live_facts_to_rust(monkeypatch: Any) -> None:
+def test_sample_from_state_delegates_live_facts_to_rust_without_python_mirror(monkeypatch: Any) -> None:
+    engine = importlib.import_module("hexo_engine")
     samples = importlib.import_module("hexo_models.dense_cnn.samples")
     calls: dict[str, Any] = {}
+    state = object()
 
     class FakeDenseCnnRust:
-        def model1_sample_from_history(
+        def model1_sample_from_state(
             self,
-            history_row: tuple[int, ...],
+            live_state: object,
             game_id: str,
             turn_index: int,
             policy: dict[int, float],
@@ -31,7 +34,7 @@ def test_sample_from_history_delegates_live_facts_to_rust(monkeypatch: Any) -> N
         ) -> dict[str, Any]:
             calls.update(
                 {
-                    "history_row": history_row,
+                    "state": live_state,
                     "game_id": game_id,
                     "turn_index": turn_index,
                     "policy": policy,
@@ -46,7 +49,7 @@ def test_sample_from_history_delegates_live_facts_to_rust(monkeypatch: Any) -> N
                 "phase": "Opening",
                 "center": (0, 0),
                 "stones": (),
-                "legal_action_ids": history_row,
+                "legal_action_ids": (10, 20),
                 "placement_history": (),
                 "first_stone": None,
                 "own_hot": (),
@@ -60,9 +63,14 @@ def test_sample_from_history_delegates_live_facts_to_rust(monkeypatch: Any) -> N
             }
 
     monkeypatch.setattr(samples.rust_bridge, "_dense_cnn_module", lambda: FakeDenseCnnRust())
+    monkeypatch.setattr(
+        engine,
+        "to_python_state",
+        lambda _state: (_ for _ in ()).throw(AssertionError("dense-cnn must pass live states directly")),
+    )
 
-    sample = samples.sample_from_history(
-        [10, 20],
+    sample = samples.sample_from_state(
+        state,
         game_id="game",
         turn_index=3,
         policy={99: 1.0},
@@ -70,11 +78,105 @@ def test_sample_from_history_delegates_live_facts_to_rust(monkeypatch: Any) -> N
         metadata={"sample_source": "mcts"},
     )
 
-    assert calls["history_row"] == (10, 20)
+    assert calls["state"] is state
     assert calls["game_id"] == "game"
     assert calls["turn_index"] == 3
     assert sample.policy == ((99, 1.0),)
     assert sample.metadata["sample_source"] == "mcts"
+
+
+def test_rust_bridge_forwards_live_states_without_history_conversion(monkeypatch: Any) -> None:
+    engine = importlib.import_module("hexo_engine")
+    rust_bridge = importlib.import_module("hexo_models.dense_cnn.rust_bridge")
+    state_a = object()
+    state_b = object()
+    evaluator = object()
+    calls: dict[str, Any] = {}
+
+    class FakeDenseCnnRust:
+        def model1_batch_inputs(self, states: tuple[object, ...]) -> dict[str, Any]:
+            calls["batch_states"] = states
+            return {"ok": True}
+
+        def model1_batched_mcts(
+            self,
+            states: tuple[object, ...],
+            visits: int,
+            c_puct: float,
+            temperature: float,
+            seed: int,
+            callback: object,
+            virtual_batch_size: int | None,
+        ) -> tuple[dict[str, Any], ...]:
+            calls["mcts"] = {
+                "states": states,
+                "visits": visits,
+                "c_puct": c_puct,
+                "temperature": temperature,
+                "seed": seed,
+                "callback": callback,
+                "virtual_batch_size": virtual_batch_size,
+            }
+            return ({"action_id": 7, "visit_policy": ((7, 1.0),), "root_value": 0.0, "visits": visits},)
+
+    monkeypatch.setattr(rust_bridge, "_dense_cnn_module", lambda: FakeDenseCnnRust())
+    monkeypatch.setattr(
+        engine,
+        "to_python_state",
+        lambda _state: (_ for _ in ()).throw(AssertionError("dense-cnn must not mirror states through Python")),
+    )
+
+    assert rust_bridge.model1_batch_inputs([state_a, state_b]) == {"ok": True}
+    payloads = rust_bridge.model1_batched_mcts(
+        [state_a],
+        visits=5,
+        c_puct=2.0,
+        temperature=0.25,
+        seed=13,
+        evaluator=evaluator,
+        virtual_batch_size=3,
+    )
+
+    assert calls["batch_states"] == (state_a, state_b)
+    assert calls["mcts"] == {
+        "states": (state_a,),
+        "visits": 5,
+        "c_puct": 2.0,
+        "temperature": 0.25,
+        "seed": 13,
+        "callback": evaluator,
+        "virtual_batch_size": 3,
+    }
+    assert payloads[0]["action_id"] == 7
+
+
+def test_dense_cnn_python_boundary_has_no_history_api() -> None:
+    rust_bridge = importlib.import_module("hexo_models.dense_cnn.rust_bridge")
+    samples = importlib.import_module("hexo_models.dense_cnn.samples")
+    mcts = importlib.import_module("hexo_models.dense_cnn.mcts")
+    inference = importlib.import_module("hexo_models.dense_cnn.inference")
+    selfplay_source = (
+        ROOT
+        / "packages"
+        / "hexo_models"
+        / "dense_cnn"
+        / "python"
+        / "hexo_models"
+        / "dense_cnn"
+        / "selfplay.py"
+    ).read_text()
+
+    assert not hasattr(rust_bridge, "history_rows_from_states")
+    assert not hasattr(samples, "sample_from_history")
+    source = "\n".join(
+        inspect.getsource(module)
+        for module in (rust_bridge, samples, mcts, inference)
+    )
+    source = f"{source}\n{selfplay_source}"
+    assert "to_python_state" not in source
+    assert "model1_sample_from_history" not in source
+    assert "history_rows_from_states" not in source
+    assert "sample_from_history" not in source
 
 
 def test_finalize_game_samples_delegates_outcomes_to_rust(monkeypatch: Any) -> None:
@@ -116,7 +218,7 @@ def test_finalize_game_samples_delegates_outcomes_to_rust(monkeypatch: Any) -> N
                     "lookahead": ((1, 1.0),),
                     "metadata": {
                         **dict(payload["metadata"]),
-                        "opp_policy_source": "uniform_legal_fallback",
+                        "opp_policy_source": "none",
                         "truncated": True,
                     },
                 }

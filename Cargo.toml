@@ -13,6 +13,7 @@ edition = "2021"
 [workspace.dependencies]
 ahash = { version = "0.8", features = ["serde"] }
 hexo_engine = { path = "packages/hexo_engine" }
+hexo_utils = { path = "packages/hexo_utils" }
 pyo3 = { version = "0.28", features = ["extension-module"] }
 rand = "0.8"
 rayon = "1.10"

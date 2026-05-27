@@ -1,7 +1,7 @@
 //! Hexformer AR Rust accelerator package.
 //!
 //! `lib.rs` stays as the PyO3 export map. Implementation details are split by
-//! responsibility so MCTS, evaluator parsing, tree mechanics, state rebuilds,
+//! responsibility so MCTS, evaluator parsing, tree mechanics, state intake,
 //! and sample generation can evolve independently.
 
 mod constants;
@@ -19,7 +19,7 @@ pub fn capabilities(py: Python<'_>) -> PyResult<Py<PyAny>> {
     let dict = PyDict::new(py);
     dict.set_item("status", "ready")?;
     dict.set_item("model_family", "hexformer_ar")?;
-    dict.set_item("state_source", "packed_history_rows")?;
+    dict.set_item("state_source", "direct_engine_state")?;
     dict.set_item("coordinate_encoding", "u32_i16_pair")?;
     dict.set_item("hexformer_ar_mcts", true)?;
     dict.set_item("hexformer_ar_batched_mcts", true)?;

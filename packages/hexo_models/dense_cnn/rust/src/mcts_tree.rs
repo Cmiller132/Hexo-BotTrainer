@@ -1,18 +1,23 @@
 //! Dense CNN PUCT tree mechanics.
 //!
-//! This file is deliberately free of PyO3 entry points. It owns selection,
-//! virtual visits, backup, prior normalization, and deterministic root action
-//! selection for Model1's dense-board policy.
+//! The tree mirrors the usual KataGo-style ownership pattern at a smaller
+//! scale: a search owns one root state, an arena of nodes, an exact hash table
+//! for already-expanded states, root visit accounting, and a shared evaluator
+//! cache handle. Nodes intentionally store only statistics and outgoing edges;
+//! traversal recreates leaf states from a root clone plus selected actions so
+//! the implementation stays memory-light and easy to inspect.
 
 use pyo3::prelude::*;
 use std::cmp::Ordering;
+use std::collections::HashMap;
 
 use hexo_engine::{
     apply_placement, unpack_coord, GameOutcome, HexCoord, HexoState as RustHexoState,
     PackedCoord, Placement, Player,
 };
+use hexo_utils::StateHash;
 
-use crate::mcts_eval::RustEvaluation;
+use crate::mcts_eval::{state_hash, RustEvaluation, SharedEvaluationCache};
 use crate::state::move_error;
 
 #[derive(Clone, Debug)]
@@ -38,6 +43,7 @@ impl RustEdge {
 
 #[derive(Clone, Debug)]
 pub(crate) struct RustNode {
+    pub(crate) state_hash: StateHash,
     pub(crate) player: Player,
     pub(crate) eval_value: f32,
     pub(crate) visits: u32,
@@ -58,12 +64,18 @@ impl RustNode {
 #[derive(Clone, Debug)]
 pub(crate) struct RustSearch {
     pub(crate) root_state: RustHexoState,
+    pub(crate) root_hash: StateHash,
     pub(crate) nodes: Vec<RustNode>,
+    pub(crate) node_table: HashMap<StateHash, usize>,
+    pub(crate) target_visits: u32,
+    pub(crate) completed_visits: u32,
+    pub(crate) evaluator_cache: SharedEvaluationCache,
 }
 
 pub(crate) struct RustSelectedLeaf {
     pub(crate) path: Vec<(usize, usize)>,
     pub(crate) state: RustHexoState,
+    pub(crate) state_hash: StateHash,
     pub(crate) parent_node: usize,
     pub(crate) edge_index: usize,
     pub(crate) terminal: Option<GameOutcome>,
@@ -76,13 +88,28 @@ pub(crate) struct RustLeaf {
     pub(crate) edge_index: usize,
     pub(crate) path: Vec<(usize, usize)>,
     pub(crate) state: RustHexoState,
+    pub(crate) state_hash: StateHash,
 }
 
 impl RustSearch {
-    pub(crate) fn new(root_state: &RustHexoState, evaluation: &RustEvaluation) -> Self {
+    pub(crate) fn new(
+        root_state: RustHexoState,
+        evaluation: &RustEvaluation,
+        target_visits: u32,
+        evaluator_cache: SharedEvaluationCache,
+    ) -> Self {
+        let root_hash = state_hash(&root_state);
+        let root_node = node_from_evaluation(root_hash, &root_state, evaluation);
+        let mut node_table = HashMap::new();
+        node_table.insert(root_hash, 0);
         Self {
-            root_state: root_state.clone(),
-            nodes: vec![node_from_evaluation(root_state, evaluation)],
+            root_state,
+            root_hash,
+            nodes: vec![root_node],
+            node_table,
+            target_visits,
+            completed_visits: 0,
+            evaluator_cache,
         }
     }
 
@@ -90,18 +117,41 @@ impl RustSearch {
         self.nodes[0].edges.is_empty()
     }
 
-    pub(crate) fn add_node_from_eval(&mut self, state: &RustHexoState, evaluation: &RustEvaluation) -> usize {
+    pub(crate) fn needs_visits(&self) -> bool {
+        self.completed_visits < self.target_visits && !self.root_edges_empty()
+    }
+
+    pub(crate) fn remaining_visits(&self) -> u32 {
+        self.target_visits.saturating_sub(self.completed_visits)
+    }
+
+    pub(crate) fn root(&self) -> &RustNode {
+        debug_assert_eq!(self.nodes[0].state_hash, self.root_hash);
+        &self.nodes[0]
+    }
+
+    pub(crate) fn add_node_from_eval(
+        &mut self,
+        state: &RustHexoState,
+        hash: StateHash,
+        evaluation: &RustEvaluation,
+    ) -> usize {
+        if let Some(existing) = self.node_table.get(&hash).copied() {
+            return existing;
+        }
         let id = self.nodes.len();
-        self.nodes.push(node_from_evaluation(state, evaluation));
+        self.nodes.push(node_from_evaluation(hash, state, evaluation));
+        self.node_table.insert(hash, id);
         id
     }
 
-    pub(crate) fn select_pending_leaf(&self, c_puct: f32) -> PyResult<Option<RustSelectedLeaf>> {
+    pub(crate) fn select_pending_leaf(&mut self, c_puct: f32) -> PyResult<Option<RustSelectedLeaf>> {
         let mut state = self.root_state.clone();
         let mut node_id = 0usize;
         let mut path = Vec::new();
         let mut last_parent = None;
         let mut last_edge = None;
+        let mut current_hash = self.root_hash;
 
         loop {
             let node = &self.nodes[node_id];
@@ -113,6 +163,7 @@ impl RustSearch {
                 return Ok(Some(RustSelectedLeaf {
                     path,
                     state,
+                    state_hash: current_hash,
                     parent_node,
                     edge_index,
                     terminal: None,
@@ -123,13 +174,15 @@ impl RustSearch {
             let Some(edge_index) = self.select_edge(node_id, c_puct) else {
                 return Ok(None);
             };
-            let edge = &node.edges[edge_index];
+            let edge = &self.nodes[node_id].edges[edge_index];
             if edge.pending > 0 && edge.child.is_none() {
                 return Ok(None);
             }
+
             let action = edge.action;
             let child = edge.child;
             apply_placement(&mut state, Placement { coord: action }).map_err(move_error)?;
+            current_hash = state_hash(&state);
             path.push((node_id, edge_index));
             last_parent = Some(node_id);
             last_edge = Some(edge_index);
@@ -139,9 +192,23 @@ impl RustSearch {
                 continue;
             }
 
+            if let Some(child_id) = self.node_table.get(&current_hash).copied() {
+                self.nodes[node_id].edges[edge_index].child = Some(child_id);
+                return Ok(Some(RustSelectedLeaf {
+                    path,
+                    state,
+                    state_hash: current_hash,
+                    parent_node: node_id,
+                    edge_index,
+                    terminal: None,
+                    existing_node: Some(child_id),
+                }));
+            }
+
             return Ok(Some(RustSelectedLeaf {
                 path,
                 state: state.clone(),
+                state_hash: current_hash,
                 parent_node: node_id,
                 edge_index,
                 terminal: state.terminal(),
@@ -160,7 +227,10 @@ impl RustSearch {
             }
             let score = edge.value() + edge.prior * exploration_scale / (1.0 + edge.visits as f32);
             let candidate = (index, score, edge.visits, edge.action_id);
-            let replace = best.is_none_or(|current| compare_edge_score(candidate, current) == Ordering::Greater);
+            let replace = match best {
+                Some(current) => compare_edge_score(candidate, current) == Ordering::Greater,
+                None => true,
+            };
             if replace {
                 best = Some(candidate);
             }
@@ -169,6 +239,7 @@ impl RustSearch {
     }
 
     pub(crate) fn apply_virtual_visit(&mut self, path: &[(usize, usize)]) {
+        self.completed_visits = self.completed_visits.saturating_add(1);
         for &(node_id, edge_index) in path {
             self.nodes[node_id].visits += 1;
             self.nodes[node_id].edges[edge_index].visits += 1;
@@ -197,7 +268,11 @@ impl RustSearch {
     }
 }
 
-fn node_from_evaluation(state: &RustHexoState, evaluation: &RustEvaluation) -> RustNode {
+fn node_from_evaluation(
+    state_hash: StateHash,
+    state: &RustHexoState,
+    evaluation: &RustEvaluation,
+) -> RustNode {
     let mut edges: Vec<_> = evaluation
         .priors
         .iter()
@@ -213,6 +288,7 @@ fn node_from_evaluation(state: &RustHexoState, evaluation: &RustEvaluation) -> R
         .collect();
     normalize_rust_priors(&mut edges);
     RustNode {
+        state_hash,
         player: state.current_player(),
         eval_value: evaluation.value.clamp(-1.0, 1.0),
         visits: 0,

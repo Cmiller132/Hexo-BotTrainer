@@ -1,39 +1,89 @@
-//! Shared Hexformer state reconstruction from packed histories.
+//! Hexformer state intake from live engine objects.
 //!
-//! Both MCTS and sparse sample generation operate from the same minimal input:
-//! a row of u32 packed coordinates. Keeping this here prevents either path from
-//! depending on model-specific helpers in `hexo_engine`'s Python bridge.
+//! Hexformer follows the same production path as dense-cnn: Python passes live
+//! `hexo_engine.HexoState` objects, the generic engine capsule clones each
+//! state, and model-owned Rust performs all search/sample work from that clone.
+//! No packed-history transport is part of the public or private model API.
 
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
+use std::ffi::c_void;
+use std::ptr;
 
-use hexo_engine::{
-    apply_placement, unpack_coord, HexoState as RustHexoState, MoveError, PackedCoord,
-    Placement,
-};
+use hexo_engine::{HexoState as RustHexoState, MoveError};
 
-pub(crate) fn states_from_history_rows(history_rows: &Bound<'_, PyAny>) -> PyResult<Vec<RustHexoState>> {
-    let mut states = Vec::new();
-    for row in history_rows.try_iter()? {
-        let row = row?;
-        states.push(state_from_history_row(&row)?);
-    }
-    Ok(states)
+const STATE_API_CAPSULE_NAME: &str = "hexo_engine._rust.state_api";
+const STATE_API_VERSION: u32 = 2;
+
+#[repr(C)]
+struct HexoStateApi {
+    version: u32,
+    clone_state: unsafe extern "C" fn(*mut c_void, *mut *mut c_void) -> i32,
+    free_state: unsafe extern "C" fn(*mut c_void),
 }
 
-pub(crate) fn state_from_history_row(row: &Bound<'_, PyAny>) -> PyResult<RustHexoState> {
-    let mut state = RustHexoState::new();
-    for item in row.try_iter()? {
-        let action_id = item?.extract::<PackedCoord>()?;
-        apply_placement(
-            &mut state,
-            Placement {
-                coord: unpack_coord(action_id),
-            },
-        )
-        .map_err(move_error)?;
+pub(crate) fn states_from_py_states(
+    py: Python<'_>,
+    states: &Bound<'_, PyAny>,
+) -> PyResult<Vec<RustHexoState>> {
+    let api = engine_state_api(py)?;
+    let mut roots = Vec::new();
+    for item in states.try_iter()? {
+        let item = item?;
+        roots.push(state_from_py_state_with_api(api, &item)?);
     }
-    Ok(state)
+    Ok(roots)
+}
+
+pub(crate) fn state_from_py_state(
+    py: Python<'_>,
+    state: &Bound<'_, PyAny>,
+) -> PyResult<RustHexoState> {
+    state_from_py_state_with_api(engine_state_api(py)?, state)
+}
+
+fn engine_state_api(py: Python<'_>) -> PyResult<&'static HexoStateApi> {
+    let module = py.import("hexo_engine._rust")?;
+    let capsule = module.call_method0("state_api_capsule")?;
+    let name = pyo3::ffi::c_str!("hexo_engine._rust.state_api");
+    debug_assert_eq!(name.to_string_lossy(), STATE_API_CAPSULE_NAME);
+    let pointer = unsafe { pyo3::ffi::PyCapsule_GetPointer(capsule.as_ptr(), name.as_ptr()) };
+    if pointer.is_null() {
+        return Err(PyErr::fetch(py));
+    }
+    let api = unsafe { &*(pointer as *const HexoStateApi) };
+    if api.version != STATE_API_VERSION {
+        return Err(PyRuntimeError::new_err(format!(
+            "unsupported hexo_engine state API version {}; expected {}",
+            api.version, STATE_API_VERSION
+        )));
+    }
+    Ok(api)
+}
+
+fn state_from_py_state_with_api(
+    api: &HexoStateApi,
+    state: &Bound<'_, PyAny>,
+) -> PyResult<RustHexoState> {
+    let mut handle: *mut c_void = ptr::null_mut();
+    let code = unsafe {
+        (api.clone_state)(state.as_ptr() as *mut c_void, &mut handle as *mut *mut c_void)
+    };
+    if code != 0 {
+        return Err(PyValueError::new_err(format!(
+            "hexo_engine could not clone state through capsule; code={code}"
+        )));
+    }
+    if handle.is_null() {
+        return Err(PyRuntimeError::new_err(
+            "hexo_engine returned an empty state handle",
+        ));
+    }
+    let cloned = unsafe { (&*handle.cast::<RustHexoState>()).clone() };
+    unsafe {
+        (api.free_state)(handle);
+    }
+    Ok(cloned)
 }
 
 pub(crate) fn move_error(error: MoveError) -> PyErr {

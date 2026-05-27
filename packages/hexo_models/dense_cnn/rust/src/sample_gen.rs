@@ -1,8 +1,8 @@
 //! Dense CNN compact sample generation and finalization.
 //!
 //! Self-play records compact facts rather than dense tensors. This module owns
-//! those facts for live positions and game outcomes, reconstructing states from
-//! packed history rows so the engine bridge stays generic.
+//! those facts for live positions and game outcomes, cloning live engine states
+//! through the generic engine state capsule before reading model-specific facts.
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -12,10 +12,12 @@ use hexo_engine::{
     pack_coord, Axis, HexCoord, HexoState as RustHexoState, PackedCoord, Player, TurnPhase,
 };
 
-#[pyfunction]
-pub fn model1_sample_from_history(
+#[pyfunction(
+    signature = (state, game_id, turn_index, policy, value, opp_policy, lookahead, metadata)
+)]
+pub fn model1_sample_from_state(
     py: Python<'_>,
-    history_row: &Bound<'_, PyAny>,
+    state: &Bound<'_, PyAny>,
     game_id: String,
     turn_index: u32,
     policy: &Bound<'_, PyAny>,
@@ -24,7 +26,7 @@ pub fn model1_sample_from_history(
     lookahead: &Bound<'_, PyAny>,
     metadata: &Bound<'_, PyAny>,
 ) -> PyResult<Py<PyAny>> {
-    let state = crate::state::state_from_history_row(history_row)?;
+    let state = crate::state::state_from_py_state(py, state)?;
     let center = crate::encoding::model1_crop_center(&state);
 
     let dict = PyDict::new(py);
@@ -94,7 +96,7 @@ pub fn model1_finalize_game_samples(
         metadata.set_item(
             "opp_policy_source",
             if opp_policy.is_empty() {
-                "uniform_legal_fallback"
+                "none"
             } else {
                 "future_opponent_mcts"
             },
@@ -111,7 +113,7 @@ pub fn model1_finalize_game_samples(
 }
 
 pub fn register_pybridge(module: &Bound<'_, PyModule>) -> PyResult<()> {
-    module.add_function(wrap_pyfunction!(model1_sample_from_history, module)?)?;
+    module.add_function(wrap_pyfunction!(model1_sample_from_state, module)?)?;
     module.add_function(wrap_pyfunction!(model1_finalize_game_samples, module)?)?;
     Ok(())
 }

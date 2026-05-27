@@ -312,12 +312,12 @@ def sample_from_state(
 ) -> Model1SampleData:
     """Create a compact sample from a `hexo_engine` state before a decision.
 
-    Live-state facts are built by the dense-cnn Rust accelerator after
-    reconstructing the core state from the packed action history.
+    Live-state facts are built by the dense-cnn Rust accelerator from a cloned
+    authoritative engine state.
     """
 
-    return sample_from_history(
-        rust_bridge.history_rows_from_states((state,))[0],
+    payload = rust_bridge.model1_sample_from_state(
+        state,
         game_id=game_id,
         turn_index=turn_index,
         policy=policy,
@@ -325,31 +325,6 @@ def sample_from_state(
         opp_policy=opp_policy,
         lookahead=lookahead,
         metadata=metadata,
-    )
-
-
-def sample_from_history(
-    history_row: Sequence[int],
-    *,
-    game_id: str,
-    turn_index: int,
-    policy: Mapping[int, float] | Sequence[tuple[int, float]] = (),
-    value: float = 0.0,
-    opp_policy: Mapping[int, float] | Sequence[tuple[int, float]] = (),
-    lookahead: Mapping[int, float] | Sequence[tuple[int, float]] = (),
-    metadata: Mapping[str, Any] | None = None,
-) -> Model1SampleData:
-    """Create a compact sample from packed action history using Rust."""
-
-    payload = rust_bridge._dense_cnn_module().model1_sample_from_history(
-        tuple(int(action_id) for action_id in history_row),
-        str(game_id),
-        int(turn_index),
-        policy,
-        float(value),
-        opp_policy,
-        lookahead,
-        dict(metadata or {}),
     )
     return _sample_data_from_json(payload)
 
@@ -367,11 +342,11 @@ def finalize_game_samples(
         (str(player), _sample_payload(sample), float(root_value))
         for player, sample, root_value in pending
     )
-    payloads = rust_bridge._dense_cnn_module().model1_finalize_game_samples(
+    payloads = rust_bridge.model1_finalize_game_samples(
         rust_pending,
-        winner,
-        tuple(int(horizon) for horizon in horizons),
-        bool(truncated),
+        winner=winner,
+        horizons=horizons,
+        truncated=truncated,
     )
     return [_sample_data_from_json(payload) for payload in payloads]
 
@@ -403,13 +378,11 @@ def expand_sample(
             data.policy,
             center=center,
             symmetry=symmetry,
-            fallback_legal_action_ids=data.legal_action_ids,
         ),
         "opp_policy": dense_policy_target(
             data.opp_policy,
             center=center,
             symmetry=symmetry,
-            fallback_legal_action_ids=data.legal_action_ids,
         ),
         "legal_mask": legal_mask_flat(data.legal_action_ids, center=center, symmetry=symmetry),
         "value": torch.tensor(float(data.value), dtype=torch.float32),

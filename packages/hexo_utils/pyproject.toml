@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name = "hexo-utils"
 version = "0.1.0"
-description = "Shared encoding, MCTS, and replay utilities for Hexo RL."
+description = "Shared replay, sample-store, symmetry, and state utilities for Hexo RL."
 requires-python = ">=3.11"
 dependencies = [
   "hexo-engine==0.1.0",

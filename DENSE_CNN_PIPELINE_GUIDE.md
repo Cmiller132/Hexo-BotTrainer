@@ -16,10 +16,9 @@ model-owned implementations.
 | `configs/` | Training configs. `configs/dense_cnn_model1.toml` is the main dense CNN config. |
 | `packages/hexo_engine/` | Canonical Hexo rules, state transitions, legal moves, terminal detection, and Python bindings over Rust. |
 | `packages/hexo_runner/` | Generic headless game runner. It owns game loops, player contracts, match/batch modes, SealBot adapter, and `.hxr` replay writing. |
-| `packages/hexo_utils/` | Shared utilities: records, sample-store mechanics, generic search scaffolding, encoding helpers, and reusable Rust MCTS infrastructure. |
+| `packages/hexo_utils/` | Shared utilities: records, sample-store mechanics, symmetry contracts, and state hashing. |
 | `packages/hexo_train/` | Config-driven training orchestration. It loads model plugins and owns the fixed training lifecycle. |
 | `packages/hexo_models/` | Production model families. `dense_cnn` and `hexformer_ar` live side by side here. This package also builds `hexo_models._rust`. |
-| `packages/hexo_model_resnet/` | Older first-model package/scaffold. Dense CNN is now the production Model 1 path. |
 | `packages/hexo_frontend/` | Local browser/dashboard tooling over engine/runner artifacts. |
 | `data/` | Shared durable pointers and sample/replay/checkpoint placeholders. |
 | `runs/` | Run outputs: checkpoints, diagnostics, self-play records, evaluation records, dashboard artifacts. |
@@ -88,8 +87,8 @@ interpret.
 
 - Generic sample store and sample windows.
 - Reusable records.
-- Generic Rust MCTS/search scaffolding.
-- Generic encoding utilities.
+- D6 symmetry contracts.
+- Shared state hashing helpers.
 
 Dense CNN uses some shared utilities, but its production self-play and training
 samples are mostly model-owned.
@@ -416,8 +415,7 @@ Plane list:
 | 12 | `OPPONENT_LAST_TURN` | Coordinates from opponent's last logical turn. |
 
 The Rust encoder is used for fast batched inference and MCTS. The Python
-encoder is used when expanding compact training samples and as a fallback for
-non-MCTS inference.
+encoder is used only when expanding compact training samples for collation.
 
 ## 11. Inference
 
@@ -442,33 +440,14 @@ It owns:
 
 ```text
 DenseCNNInference.infer_states(states)
-  -> if Rust accelerator available:
-       _infer_states_fast(states)
-     else:
-       _infer_states_python(states)
-```
-
-Fast path:
-
-```text
-rust_bridge.model1_batch_inputs(states)
-  -> history_rows_from_states(states)
-  -> hexo_models._rust.dense_cnn.model1_batch_inputs(history_rows)
-  -> Rust reconstructs states from histories
+  -> rust_bridge.model1_batch_inputs(states)
+  -> hexo_models._rust.dense_cnn.model1_batch_inputs(states)
+  -> Rust clones live engine states through the engine capsule
   -> Rust encodes planes, legal action IDs, legal flat indices
   -> Python creates torch tensor from bytes
   -> model forward
   -> decode value
   -> softmax policy logits only over legal flat indices
-```
-
-Python fallback:
-
-```text
-sample_from_state(state)
-  -> sample_from_history(...)
-  -> expand_sample(...)
-  -> model forward
 ```
 
 ### MCTS Callback Inference
@@ -527,7 +506,7 @@ run_batched_mcts(root_states, inference, visits, c_puct=1.5, temperature=1.0, se
 
 `run_batched_mcts` sends this into Rust:
 
-- Root states, converted to packed action histories.
+- Live root `hexo_engine.HexoState` objects.
 - Target visit count.
 - PUCT exploration constant.
 - Root temperature.
@@ -548,28 +527,14 @@ SearchResult(
 
 ## 13. How Dense CNN MCTS Works
 
-The actual dense CNN search implementation lives in
-`packages/hexo_models/dense_cnn/rust/src/lib.rs`.
+The actual dense CNN search implementation lives under
+`packages/hexo_models/dense_cnn/rust/src/`.
 
-### Step 1: Reconstruct Root States
+### Step 1: Clone Root States
 
-Python does not pass Rust-owned `HexoState` objects directly to
-`hexo_models._rust.dense_cnn`. It passes packed action-history rows.
-
-```text
-history row: (action_id_0, action_id_1, ...)
-```
-
-Rust reconstructs the root by replaying actions through the canonical engine:
-
-```text
-state_from_history_row
-  -> RustHexoState::new()
-  -> apply_placement for each packed action ID
-```
-
-That means search, inference encoding, and sample generation all rebuild state
-from the same replayable source of truth.
+Python passes live engine state objects to `hexo_models._rust.dense_cnn`.
+Rust clones each root through the generic `hexo_engine._rust.state_api_capsule`
+and then mutates only search-local copies.
 
 ### Step 2: Evaluate Roots
 
@@ -658,8 +623,9 @@ There are three leaf cases:
 3. New non-terminal leaf: batch it for neural evaluation, create a child node,
    attach it to the parent edge, then back up the child value.
 
-Leaf evaluation is cached by action-history key. If two searches ask for the
-same position, Rust reuses the evaluation.
+Leaf evaluation is cached by a model-visible state hash derived from the cloned
+engine state. Placement order is part of the identity because dense CNN recency
+planes make board-equivalent histories distinct.
 
 ### Step 6: Backup Values
 
@@ -697,19 +663,9 @@ Action selection:
 Self-play uses the configured temperature, currently `1.0`.
 Evaluation through `DenseCNNPlayer` uses `temperature = 0.0`.
 
-## 14. Generic MCTS vs Dense CNN MCTS
+## 14. Dense CNN MCTS
 
-There is reusable MCTS code under:
-
-- `packages/hexo_utils/rust/src/mcts/`
-- `packages/hexo_utils/python/hexo_utils/search/mcts.py`
-
-That shared Rust MCTS is a clean generic PUCT implementation around
-`hexo_engine`, `SearchTree`, and evaluator traits. It is useful design
-infrastructure, and it has its own tests.
-
-Dense CNN's production path does not call the generic Python
-`MCTSSearcher`. It calls the model-local Rust accelerator:
+Dense CNN's production path calls the model-local Rust accelerator:
 
 ```text
 hexo_models.dense_cnn.mcts
@@ -792,23 +748,23 @@ Important files:
 - `packages/hexo_models/dense_cnn/python/hexo_models/dense_cnn/samples.py`
 - `packages/hexo_models/dense_cnn/rust/src/sample_generation.rs`
 
-Samples are created from action history, not from ad hoc Python state scraping.
+Samples are created from the live engine state before the selected action is
+applied. Python does not scrape generic state or rebuild history rows.
 
 When MCTS returns a searched decision, self-play does:
 
 ```text
-sample_from_history(
-    tuple(game["actions"]),
+sample_from_state(
+    state,
     game_id=...,
-    turn_index=len(game["actions"]),
+    turn_index=...,
     policy=search.visit_policy,
     value=search.root_value,
     metadata={...}
 )
 ```
 
-That action history is the state before applying the selected action. Rust
-reconstructs the state and emits compact model facts:
+That state is cloned through the engine capsule. Rust emits compact model facts:
 
 - `game_id`
 - `turn_index`
@@ -860,11 +816,11 @@ opponent. If no future opponent MCTS policy exists, the field remains empty and
 metadata records:
 
 ```text
-opp_policy_source = "uniform_legal_fallback"
+opp_policy_source = "none"
 ```
 
-During training expansion, an empty policy target falls back to uniform over
-legal actions.
+During training expansion, an empty auxiliary policy remains an empty target,
+so it contributes no auxiliary policy loss instead of fabricating a policy.
 
 Third, it sets lookahead values for configured horizons, for example
 `1`, `4`, and `8`. A lookahead target uses a future root value adjusted into
@@ -1016,7 +972,7 @@ Then it:
 | --- | --- | --- |
 | `policy` | MCTS visit distribution over dense crop cells | `1.0` |
 | `value` | 65-bin soft target from final scalar value | `1.0` |
-| `opp_policy` | Future opponent MCTS policy or legal fallback | `0.25` |
+| `opp_policy` | Future opponent MCTS policy when available | `0.25` |
 | `lookahead_*` | 65-bin future-value targets | `0.25` |
 
 Values are represented with 65 bins over `[-1, 1]`. `decode_binned_value`
@@ -1277,14 +1233,13 @@ CLI
            -> DenseCNNInference
            -> dense_cnn.selfplay active game loop
               -> run_batched_mcts
-                 -> rust_bridge.history_rows_from_states
                  -> hexo_models._rust.dense_cnn.model1_batched_mcts
-                    -> reconstruct Rust states from histories
+                    -> clone live engine states through the capsule
                     -> encode_model1_state
                     -> Python evaluator callback
                     -> PUCT search with virtual batches
                     -> visit policy + selected action
-              -> sample_from_history
+              -> sample_from_state
               -> engine.apply_action
               -> write .hxr record
               -> finalize_game_samples
@@ -1358,10 +1313,12 @@ No. One edge is one placement. A two-stone turn is represented by two edges.
 No. It flips value only when the player-to-act perspective changes. This is
 essential because the same player acts in both `FirstStone` and `SecondStone`.
 
-### Why pass action histories into Rust instead of live state objects?
+### Why pass live state objects into Rust?
 
-Action histories are replayable, compact, and model-neutral. Rust can rebuild
-authoritative states through the same engine rules used everywhere else.
+The production path is direct state handoff. Python passes live
+`hexo_engine.HexoState` objects, model-owned Rust clones them through the
+generic engine capsule, and search/sample generation mutate only those local
+copies. This keeps the engine generic while avoiding history replay.
 
 ### Where are dense CNN samples stored?
 
@@ -1381,15 +1338,15 @@ back to uniform legal policy.
 It is an auxiliary value target at future sample offsets such as 1, 4, and 8.
 The future value is converted into the current sample player's perspective.
 
-### Why are there Rust encoders and Python encoders?
+### Why is MCTS/sample generation Rust-only?
 
-Rust encoding feeds high-throughput batched inference and MCTS. Python encoding
-feeds sample expansion during training and acts as a parity target. Tests check
-that they match exactly.
+The production search and self-play sample path is model-owned Rust. Python
+keeps PyTorch execution, training orchestration, checkpointing, and tensor
+collation, but it no longer contains alternate MCTS or history-rebuild sample
+generation logic.
 
 ### Why does calibration require exact visits?
 
 The baseline goal is fixed-strength search: exactly 128 MCTS simulations per
 searched position. Calibration can tune batching, but it must not make the run
 look faster by reducing search work.
-

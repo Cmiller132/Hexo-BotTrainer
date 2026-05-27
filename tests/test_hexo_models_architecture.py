@@ -19,15 +19,6 @@ def _torch() -> Any:
     return pytest.importorskip("torch")
 
 
-def _optional_submodule(name: str) -> Any | None:
-    try:
-        return importlib.import_module(name)
-    except ModuleNotFoundError as exc:
-        if exc.name == name:
-            return None
-        raise
-
-
 def _api() -> SimpleNamespace:
     try:
         package = importlib.import_module("hexo_models.dense_cnn")
@@ -36,63 +27,35 @@ def _api() -> SimpleNamespace:
             pytest.xfail("hexo_models.dense_cnn package is expected to land with the Model 1 implementation")
         raise
 
-    architecture = _optional_submodule("hexo_models.dense_cnn.architecture")
-    losses = _optional_submodule("hexo_models.dense_cnn.losses")
-    modules = (package, architecture, losses)
-
     return SimpleNamespace(
-        HexoModel=_public_attr(modules, "HexoModel", "Model1Network", "HexoNet"),
-        HexoModelConfig=_optional_public_attr(modules, "HexoModelConfig", "ModelConfig"),
-        HexConv2d=_public_attr(modules, "HexConv2d"),
-        GatedResBlock=_public_attr(modules, "GatedResBlock"),
-        decode_value=_public_attr(modules, "decode_value", "decode_binned_value"),
-        binned_soft_cross_entropy=_public_attr(
-            modules,
-            "binned_soft_cross_entropy",
-            "binned_value_loss",
-            "value_binned_cross_entropy",
-        ),
+        Model1Network=package.Model1Network,
+        Model1Config=package.Model1Config,
+        HexConv2d=package.HexConv2d,
+        GatedResBlock=package.GatedResBlock,
+        decode_binned_value=package.decode_binned_value,
+        binned_value_loss=package.binned_value_loss,
     )
-
-
-def _public_attr(modules: tuple[Any | None, ...], *names: str) -> Any:
-    value = _optional_public_attr(modules, *names)
-    if value is not None:
-        return value
-    checked = ", ".join(module.__name__ for module in modules if module is not None)
-    raise AssertionError(f"hexo_models.dense_cnn public API must expose one of {names!r}; checked {checked}")
-
-
-def _optional_public_attr(modules: tuple[Any | None, ...], *names: str) -> Any | None:
-    for module in modules:
-        if module is None:
-            continue
-        for name in names:
-            if hasattr(module, name):
-                return getattr(module, name)
-    return None
 
 
 def _make_model(api: SimpleNamespace, **overrides: Any) -> Any:
     attempts: list[Callable[[], Any]] = []
 
-    if api.HexoModelConfig is not None:
-        try:
-            config = api.HexoModelConfig(**overrides)
-        except TypeError:
-            config = None
-        if config is not None:
-            attempts.extend(
-                [
-                    lambda: api.HexoModel(config),
-                    lambda: api.HexoModel(config=config),
-                ]
-            )
+    try:
+        config = api.Model1Config(**overrides)
+    except TypeError:
+        config = None
+    if config is not None:
+        attempts.extend(
+            [
+                lambda: api.Model1Network(config),
+                lambda: api.Model1Network(config=config),
+            ]
+        )
 
     attempts.extend(
         [
-            lambda: api.HexoModel(**overrides),
-            lambda: api.HexoModel(),
+            lambda: api.Model1Network(**overrides),
+            lambda: api.Model1Network(),
         ]
     )
 
@@ -103,7 +66,7 @@ def _make_model(api: SimpleNamespace, **overrides: Any) -> Any:
         except TypeError as exc:
             errors.append(str(exc))
 
-    raise AssertionError(f"Could not construct HexoModel with overrides {overrides!r}: {errors}")
+    raise AssertionError(f"Could not construct Model1Network with overrides {overrides!r}: {errors}")
 
 
 def _conv_weight(module: Any) -> Any:
@@ -150,7 +113,7 @@ def test_default_model_architecture_uses_goal_1_shapes_and_depth() -> None:
     model.eval()
 
     hex_convs = [module for module in model.modules() if isinstance(module, api.HexConv2d)]
-    assert hex_convs, "HexoModel must start with and use HexConv2d layers"
+    assert hex_convs, "Model1Network must start with and use HexConv2d layers"
     first_weight = _conv_weight(hex_convs[0])
     assert tuple(first_weight.shape[:2]) == (96, 13)
 
@@ -239,7 +202,7 @@ def test_forward_returns_policy_value_lookahead_and_opponent_policy_logits() -> 
     assert outputs["opp_policy"].shape == (3, 41 * 41)
 
 
-def test_decode_value_uses_65_softmax_bins_from_minus_one_to_one() -> None:
+def test_decode_binned_value_uses_65_softmax_bins_from_minus_one_to_one() -> None:
     torch = _torch()
     api = _api()
     logits = torch.stack(
@@ -249,7 +212,7 @@ def test_decode_value_uses_65_softmax_bins_from_minus_one_to_one() -> None:
         ]
     )
 
-    decoded = api.decode_value(logits)
+    decoded = api.decode_binned_value(logits)
 
     bins = torch.linspace(-1.0, 1.0, 65, dtype=logits.dtype, device=logits.device)
     expected = (torch.softmax(logits, dim=-1) * bins).sum(dim=-1)
@@ -257,7 +220,7 @@ def test_decode_value_uses_65_softmax_bins_from_minus_one_to_one() -> None:
     assert torch.allclose(decoded, expected, atol=1.0e-6)
 
 
-def test_binned_soft_cross_entropy_interpolates_scalar_targets_between_bins() -> None:
+def test_binned_value_loss_interpolates_scalar_targets_between_bins() -> None:
     torch = _torch()
     api = _api()
     logits = torch.stack(
@@ -269,7 +232,7 @@ def test_binned_soft_cross_entropy_interpolates_scalar_targets_between_bins() ->
     )
     targets = torch.tensor([-1.0, 0.2, 1.0])
 
-    loss = api.binned_soft_cross_entropy(logits, targets)
+    loss = api.binned_value_loss(logits, targets)
 
     target_distribution = _manual_binned_targets(targets, torch=torch)
     expected = -(target_distribution * torch.log_softmax(logits, dim=-1)).sum(dim=-1).mean()

@@ -8,8 +8,7 @@ Plugin lookup supports three development/deployment modes:
 
 1. explicit Python module path from config;
 2. explicit entry point name from config;
-3. model name lookup through the `hexo_train.models` entry point group, with a
-   module-name fallback for editable local development.
+3. model name lookup through the `hexo_train.models` entry point group.
 """
 
 from __future__ import annotations
@@ -80,15 +79,14 @@ def _load_from_entry_point(entry_point_name: str) -> ModelPlugin:
 
 
 def _load_by_name(model_name: str) -> ModelPlugin:
-    """Resolve a model name through installed entry points or module fallback."""
+    """Resolve a model name through installed entry points."""
 
     for group in _entry_point_groups():
         for entry_point in entry_points(group=group):
             if entry_point.name == model_name:
                 return _coerce_loaded_plugin(entry_point.load())
 
-    # Development fallback: `hexo_model_resnet` can be used before packaging.
-    return _load_from_module(model_name)
+    raise LookupError(f"No Hexo model entry point named {model_name!r}.")
 
 
 def _entry_point_groups() -> tuple[str, ...]:

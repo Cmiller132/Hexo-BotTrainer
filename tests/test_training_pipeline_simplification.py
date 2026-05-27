@@ -12,7 +12,6 @@ ROOT = Path(__file__).resolve().parents[1]
 for package in (
     "hexo_train",
     "hexo_utils",
-    "hexo_model_resnet",
     "hexo_engine",
     "hexo_runner",
 ):
@@ -28,7 +27,7 @@ class TrainingPipelineSimplificationTests(unittest.TestCase):
         config = normalize_training_config(
             {
                 "model": {
-                    "name": "hexo_model_resnet",
+                    "name": "fake_model",
                     "config": {"channels": 32},
                 },
             },
@@ -44,7 +43,7 @@ class TrainingPipelineSimplificationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "model_specific"):
             normalize_training_config(
                 {
-                    "model": {"name": "hexo_model_resnet"},
+                    "model": {"name": "fake_model"},
                     "model_specific": {"channels": 32},
                 },
                 base_dir=ROOT,
@@ -56,7 +55,7 @@ class TrainingPipelineSimplificationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "stages"):
             normalize_training_config(
                 {
-                    "model": {"name": "hexo_model_resnet"},
+                    "model": {"name": "fake_model"},
                     "stages": ["train_steps"],
                 },
                 base_dir=ROOT,
@@ -67,7 +66,7 @@ class TrainingPipelineSimplificationTests(unittest.TestCase):
 
         config = normalize_training_config(
             {
-                "model": {"name": "hexo_model_resnet"},
+                "model": {"name": "fake_model"},
                 "loop": {"epochs": 10},
                 "selfplay": {"games_per_epoch": 25},
                 "samples": {"train_sample_count": 5000},
@@ -104,6 +103,17 @@ class TrainingPipelineSimplificationTests(unittest.TestCase):
 
         self.assertIs(loaded, plugin)
         self.assertEqual(seen_groups, ["hexo_train.models"])
+
+    def test_model_name_without_entry_point_does_not_import_module_fallback(self) -> None:
+        from hexo_train.config import ModelConfig
+        from hexo_train.registry import load_model_plugin
+
+        module = types.SimpleNamespace(get_plugin=lambda: object())
+
+        with patch.dict(sys.modules, {"fake_model": module}):
+            with patch("hexo_train.registry.entry_points", lambda *, group: []):
+                with self.assertRaisesRegex(LookupError, "fake_model"):
+                    load_model_plugin(ModelConfig(name="fake_model"))
 
     def test_model_is_built_before_component_overrides(self) -> None:
         from hexo_train.components import ComponentOverrides, build_model_components
@@ -406,29 +416,6 @@ class TrainingPipelineSimplificationTests(unittest.TestCase):
 
         self.assertEqual(target.legal_action_ids, (1, 2))
         self.assertFalse(hasattr(policy, "legal_action_ids"))
-
-    def test_resnet_plugin_is_composition_only(self) -> None:
-        try:
-            from hexo_model_resnet.plugin import get_plugin
-            from hexo_train.components import ComponentOverrides
-        except ImportError as exc:
-            self.skipTest(f"ResNet plugin dependencies unavailable: {exc}")
-
-        plugin = get_plugin()
-
-        self.assertFalse(hasattr(plugin, "forward_inference"))
-        self.assertFalse(hasattr(plugin, "loss"))
-        self.assertFalse(hasattr(plugin, "augment_batch"))
-        overrides = plugin.training_component_overrides(
-            defaults=types.SimpleNamespace(),
-            config={},
-            shared=types.SimpleNamespace(),
-            model=None,
-        )
-        self.assertIsInstance(overrides, ComponentOverrides)
-        self.assertTrue(hasattr(overrides.trainer, "train_passes"))
-        self.assertFalse(hasattr(overrides.trainer, "train_steps"))
-
 
 if __name__ == "__main__":
     unittest.main()

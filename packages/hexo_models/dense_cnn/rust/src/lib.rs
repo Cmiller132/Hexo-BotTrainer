@@ -1,7 +1,7 @@
 //! Dense CNN Rust accelerator package.
 //!
 //! `lib.rs` intentionally only wires together Python exports. The model logic is
-//! split by responsibility: state reconstruction, tensor encoding, neural
+//! split by responsibility: direct engine-state intake, tensor encoding, neural
 //! evaluation payloads, MCTS, and compact sample generation.
 
 mod constants;
@@ -20,11 +20,11 @@ pub fn capabilities(py: Python<'_>) -> PyResult<Py<PyAny>> {
     let dict = PyDict::new(py);
     dict.set_item("status", "ready")?;
     dict.set_item("model_family", "dense_cnn")?;
-    dict.set_item("state_source", "packed_history_rows")?;
+    dict.set_item("state_source", "direct_engine_state")?;
     dict.set_item("coordinate_encoding", "u32_i16_pair")?;
     dict.set_item("model1_batch_inputs", true)?;
     dict.set_item("model1_batched_mcts", true)?;
-    dict.set_item("model1_sample_from_history", true)?;
+    dict.set_item("model1_sample_from_state", true)?;
     dict.set_item("model1_finalize_game_samples", true)?;
     Ok(dict.into_any().unbind())
 }

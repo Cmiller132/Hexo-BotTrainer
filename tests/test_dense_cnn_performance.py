@@ -33,6 +33,24 @@ def _dense_cnn() -> Any:
     return importlib.import_module("hexo_models.dense_cnn")
 
 
+def _engine_with_rust() -> Any:
+    engine = importlib.import_module("hexo_engine")
+    try:
+        engine.engine_metadata()
+    except engine.EngineUnavailableError as exc:
+        pytest.skip(f"hexo_engine Rust bridge is unavailable: {exc}")
+    return engine
+
+
+def _skip_without_direct_state_rust(rust_bridge: Any) -> None:
+    try:
+        capabilities = rust_bridge.capabilities()
+    except RuntimeError as exc:
+        pytest.skip(f"dense_cnn Rust accelerator is not available: {exc}")
+    if capabilities.get("state_source") != "direct_engine_state":
+        pytest.skip("dense_cnn direct-state Rust accelerator is not available in this checkout")
+
+
 def _public_attr(module: Any, *names: str) -> Any:
     for name in names:
         if hasattr(module, name):
@@ -273,17 +291,12 @@ def _field(value: Any, *names: str) -> Any:
 
 
 def test_calibration_api_selects_batches_and_reports_measured_throughput() -> None:
+    _engine_with_rust()
     dense_cnn = _dense_cnn()
-    calibrate_performance = _public_attr(
-        dense_cnn,
-        "calibrate_performance",
-        "calibrate_model1_performance",
-        "calibrate_dense_cnn_performance",
-        "calibrate_dense_cnn",
-    )
+    calibrate_dense_cnn = _public_attr(dense_cnn, "calibrate_dense_cnn")
 
     result = _call_calibration_api(
-        calibrate_performance,
+        calibrate_dense_cnn,
         model=_small_model(),
         config=_small_config(),
     )
@@ -296,6 +309,8 @@ def test_calibration_api_selects_batches_and_reports_measured_throughput() -> No
 
 
 def test_training_pipeline_writes_calibration_json_artifact_when_enabled(tmp_path: Path) -> None:
+    _engine_with_rust()
+    pytest.importorskip("hexo_utils._rust")
     from hexo_train.pipeline import TrainingPipeline
 
     ctx = TrainingPipeline().run(_write_pipeline_config(tmp_path))
@@ -324,59 +339,18 @@ def test_training_pipeline_writes_calibration_json_artifact_when_enabled(tmp_pat
     )
 
 
-def test_benchmark_report_targets_128_pps_and_does_not_fabricate_success(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_build_benchmark_report_targets_128_pps_and_does_not_fabricate_success() -> None:
     dense_cnn = _dense_cnn()
-    build_benchmark_report = getattr(dense_cnn, "build_benchmark_report", None)
-    if build_benchmark_report is None:
-        build_benchmark_report = getattr(dense_cnn, "benchmark_report", None)
-    if build_benchmark_report is None:
-        build_benchmark_report = getattr(dense_cnn, "report_performance_benchmark", None)
+    build_benchmark_report = _public_attr(dense_cnn, "build_benchmark_report")
 
-    if build_benchmark_report is not None:
-        report = build_benchmark_report(
-            config=_small_config(),
-            measurements={
-                "selfplay_positions_per_second": 127.0,
-                "inference_positions_per_second": 1_000_000.0,
-                "training_samples_per_second": 1_000_000.0,
-            },
-        )
-    else:
-        calibrate_performance = _public_attr(
-            dense_cnn,
-            "calibrate_performance",
-            "calibrate_model1_performance",
-            "calibrate_dense_cnn_performance",
-            "calibrate_dense_cnn",
-        )
-        performance_module = importlib.import_module("hexo_models.dense_cnn.performance")
-        monkeypatch.setattr(
-            performance_module,
-            "_benchmark_inference",
-            lambda **_kwargs: [
-                {
-                    "status": "completed",
-                    "batch_size": 2,
-                    "positions_per_second": 127.0,
-                }
-            ],
-        )
-        monkeypatch.setattr(
-            performance_module,
-            "_benchmark_training",
-            lambda **_kwargs: [
-                {
-                    "status": "completed",
-                    "batch_size": 2,
-                    "positions_per_second": 1_000_000.0,
-                }
-            ],
-        )
-        report = _call_calibration_api(
-            calibrate_performance,
-            model=_small_model(),
-            config=_small_config(),
-        )
+    report = build_benchmark_report(
+        config=_small_config(),
+        measurements={
+            "selfplay_positions_per_second": 127.0,
+            "inference_positions_per_second": 1_000_000.0,
+            "training_samples_per_second": 1_000_000.0,
+        },
+    )
 
     assert isinstance(report, Mapping)
     assert report["target_selfplay_positions_per_second"] == pytest.approx(128.0)
@@ -392,13 +366,7 @@ def test_benchmark_report_targets_128_pps_and_does_not_fabricate_success(monkeyp
 def test_calibration_success_requires_exact_configured_mcts_visits(monkeypatch: pytest.MonkeyPatch) -> None:
     dense_cnn = _dense_cnn()
     performance_module = importlib.import_module("hexo_models.dense_cnn.performance")
-    calibrate_performance = _public_attr(
-        dense_cnn,
-        "calibrate_performance",
-        "calibrate_model1_performance",
-        "calibrate_dense_cnn_performance",
-        "calibrate_dense_cnn",
-    )
+    calibrate_dense_cnn = _public_attr(dense_cnn, "calibrate_dense_cnn")
     config = dense_cnn.parse_model1_config(
         {
             "device": "cpu",
@@ -472,7 +440,7 @@ def test_calibration_success_requires_exact_configured_mcts_visits(monkeypatch: 
         ],
     )
 
-    report = calibrate_performance(model=_small_model(), config=config)
+    report = calibrate_dense_cnn(model=_small_model(), config=config)
 
     assert report["target_mcts_simulations_per_position"] == 128
     assert report["measured_selfplay_positions_per_second"] == pytest.approx(10_000.0)
@@ -484,7 +452,7 @@ def test_selfplay_benchmark_counts_every_root_as_its_own_128_sim_search(monkeypa
     dense_cnn = _dense_cnn()
     performance_module = importlib.import_module("hexo_models.dense_cnn.performance")
     mcts_module = importlib.import_module("hexo_models.dense_cnn.mcts")
-    engine = importlib.import_module("hexo_engine")
+    engine = _engine_with_rust()
 
     calls: list[int] = []
 
@@ -523,7 +491,7 @@ def test_selfplay_benchmark_counts_every_root_as_its_own_128_sim_search(monkeypa
 def test_selfplay_benchmark_reports_actual_searches_when_batch_overshoots_probe(monkeypatch: pytest.MonkeyPatch) -> None:
     performance_module = importlib.import_module("hexo_models.dense_cnn.performance")
     mcts_module = importlib.import_module("hexo_models.dense_cnn.mcts")
-    engine = importlib.import_module("hexo_engine")
+    engine = _engine_with_rust()
 
     calls: list[int] = []
 
@@ -566,8 +534,7 @@ def test_dense_cnn_rust_batch_input_encoder_matches_python_sample_encoder() -> N
     rust_bridge = importlib.import_module("hexo_models.dense_cnn.rust_bridge")
     samples_module = importlib.import_module("hexo_models.dense_cnn.samples")
     dense_cnn = _dense_cnn()
-    if not rust_bridge.is_available():
-        pytest.skip("dense_cnn Rust accelerator is not available")
+    _skip_without_direct_state_rust(rust_bridge)
 
     state = engine.new_game()
     states = []
@@ -604,22 +571,24 @@ def test_dense_cnn_rust_batch_input_encoder_matches_python_sample_encoder() -> N
 
 def test_dense_cnn_rust_capabilities_smoke() -> None:
     rust_bridge = importlib.import_module("hexo_models.dense_cnn.rust_bridge")
-    if not rust_bridge.is_available():
-        pytest.skip("dense_cnn Rust accelerator is not available")
+    _skip_without_direct_state_rust(rust_bridge)
 
     rust_module = importlib.import_module("hexo_models._rust.dense_cnn")
     capabilities = rust_module.capabilities()
 
     assert capabilities["model_family"] == "dense_cnn"
+    assert capabilities["state_source"] == "direct_engine_state"
     assert capabilities["model1_batch_inputs"] is True
+    assert capabilities["model1_batched_mcts"] is True
+    assert capabilities["model1_sample_from_state"] is True
+    assert "model1_sample_from_history" not in capabilities
     assert capabilities["coordinate_encoding"] == "u32_i16_pair"
 
 
 def test_dense_cnn_rust_mcts_uses_model_local_accelerator() -> None:
     engine = importlib.import_module("hexo_engine")
     rust_bridge = importlib.import_module("hexo_models.dense_cnn.rust_bridge")
-    if not rust_bridge.is_available():
-        pytest.skip("dense_cnn Rust accelerator is not available")
+    _skip_without_direct_state_rust(rust_bridge)
 
     state = engine.new_game()
     expected_action = engine.action_id(engine.PlacementAction(engine.AxialCoord(0, 0)))
@@ -658,6 +627,42 @@ def test_dense_cnn_rust_mcts_uses_model_local_accelerator() -> None:
     assert sum(float(weight) for _action_id, weight in first["visit_policy"]) == pytest.approx(1.0)
 
 
+def test_dense_cnn_rust_mcts_deduplicates_duplicate_roots_without_mutating_live_state() -> None:
+    engine = importlib.import_module("hexo_engine")
+    rust_bridge = importlib.import_module("hexo_models.dense_cnn.rust_bridge")
+    _skip_without_direct_state_rust(rust_bridge)
+
+    state = engine.new_game()
+    before = engine.to_python_state(state)
+    evaluated_rows: list[int] = []
+
+    def evaluator(payload: Mapping[str, Any]) -> Mapping[str, bytes]:
+        rows = int(payload["shape"][0])
+        offsets = tuple(int(item) for item in payload["legal_row_offsets"])
+        priors = max(0, offsets[-1])
+        evaluated_rows.append(rows)
+        return {
+            "values_bytes": struct.pack(f"{rows}f", *([0.0] * rows)),
+            "priors_bytes": struct.pack(f"{priors}f", *([1.0] * priors)),
+        }
+
+    results = rust_bridge.model1_batched_mcts(
+        [state, state],
+        visits=1,
+        c_puct=1.5,
+        temperature=0.0,
+        seed=5,
+        evaluator=evaluator,
+        virtual_batch_size=1,
+    )
+
+    assert len(results) == 2
+    assert [int(result["visits"]) for result in results] == [1, 1]
+    assert evaluated_rows and all(rows == 1 for rows in evaluated_rows)
+    assert sum(evaluated_rows) < 4, "duplicate roots should share exact StateHash evaluator cache"
+    assert engine.to_python_state(state) == before
+
+
 def test_dense_cnn_batched_mcts_requires_rust_and_does_not_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
     mcts_module = importlib.import_module("hexo_models.dense_cnn.mcts")
     rust_bridge = importlib.import_module("hexo_models.dense_cnn.rust_bridge")
@@ -685,6 +690,7 @@ def test_dense_cnn_batched_mcts_requires_rust_and_does_not_fallback(monkeypatch:
 
 
 def test_dense_cnn_mcts_python_boundary_delegates_to_rust(monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = importlib.import_module("hexo_engine")
     mcts_module = importlib.import_module("hexo_models.dense_cnn.mcts")
     rust_bridge = importlib.import_module("hexo_models.dense_cnn.rust_bridge")
     calls: list[Mapping[str, Any]] = []
@@ -723,6 +729,11 @@ def test_dense_cnn_mcts_python_boundary_delegates_to_rust(monkeypatch: pytest.Mo
         )
 
     monkeypatch.setattr(rust_bridge, "model1_batched_mcts", fake_model1_batched_mcts)
+    monkeypatch.setattr(
+        engine,
+        "to_python_state",
+        lambda _state: (_ for _ in ()).throw(AssertionError("dense-cnn MCTS must pass live states directly")),
+    )
 
     state = object()
     inference = FakeInference()

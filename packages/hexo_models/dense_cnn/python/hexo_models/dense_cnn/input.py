@@ -116,7 +116,6 @@ def dense_policy_target(
     *,
     center: Axial,
     symmetry: D6Symmetry | int = 0,
-    fallback_legal_action_ids: Sequence[int] = (),
 ) -> torch.Tensor:
     target = torch.zeros((BOARD_AREA,), dtype=torch.float32)
     items = weights.items() if isinstance(weights, Mapping) else tuple(weights)
@@ -129,17 +128,6 @@ def dense_policy_target(
         )
         if flat is not None:
             target[flat] += max(0.0, float(weight))
-
-    if float(target.sum()) <= 0.0 and fallback_legal_action_ids:
-        legal_weight = 1.0 / len(fallback_legal_action_ids)
-        for action_id in fallback_legal_action_ids:
-            flat = (
-                _flat_for_action_id(action_id, center=center)
-                if identity
-                else coord_to_flat(unpack_coord_id(transform_action_id(int(action_id), symmetry, center=center)), center=center)
-            )
-            if flat is not None:
-                target[flat] += legal_weight
 
     total = target.sum().clamp_min(1.0e-8)
     return target / total

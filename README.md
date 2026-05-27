@@ -21,13 +21,11 @@ the intended layout.
   replayable state history.
 - `hexo_runner`: headless game execution, player lifecycle, and detached game
   records.
-- `hexo_utils`: reusable encoding, search, symmetry, and sample-buffer
-  mechanics.
+- `hexo_utils`: reusable replay records, symmetry, and sample-buffer mechanics.
 - `hexo_train`: self-play epoch orchestration, config loading, checkpoints, and
   run artifacts.
 - `hexo_models`: standalone production model families. Model 1 lives in the
   compartmentalized `hexo_models.dense_cnn` package.
-- `hexo_model_resnet`: first model package and training plugin scaffold.
 - `hexo_frontend`: local browser tools and dashboards.
 
 ## Setup
@@ -40,7 +38,6 @@ python -m pip install -e .\packages\hexo_utils
 python -m pip install -e .\packages\hexo_runner
 python -m pip install -e .\packages\hexo_train
 python -m pip install -e .\packages\hexo_models
-python -m pip install -e .\packages\hexo_model_resnet
 python -m pip install -e .\packages\hexo_frontend
 ```
 

@@ -64,7 +64,7 @@ def test_hexformer_sample_store_round_trip(tmp_path: Path) -> None:
     compressed = compressed_sample_from_training_record(loaded)
     tensors = collate_compressed_samples((compressed,), architecture=arch)
 
-    assert loaded.legal_action_ids == sample.input_payload["candidate_action_ids"]
+    assert loaded.legal_action_ids == tuple(sample.input_payload["candidate_action_ids"])
     assert tensors["candidate_features"].shape == (1, 2, arch.candidate_feature_dim)
     assert tensors["policy_target"].shape == (1, 2)
     assert int(tensors["candidate_mask"].sum().item()) == 2

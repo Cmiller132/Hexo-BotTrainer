@@ -32,7 +32,13 @@ def _dense_cnn() -> Any:
 
 
 def _dense_cnn_plugin() -> Any:
+    pytest.importorskip("hexo_utils._rust")
     return importlib.import_module("hexo_models.dense_cnn.plugin").get_plugin()
+
+
+def _dense_cnn_selfplay_module() -> Any:
+    pytest.importorskip("hexo_utils._rust")
+    return importlib.import_module("hexo_models.dense_cnn.selfplay")
 
 
 def _small_model_config(overrides: Mapping[str, Any] | None = None) -> dict[str, Any]:
@@ -334,6 +340,7 @@ def test_training_overrides_wire_dense_cnn_pipeline_components(tmp_path: Path) -
 
 
 def test_dense_cnn_player_constructs_with_slots(tmp_path: Path) -> None:
+    pytest.importorskip("hexo_utils._rust")
     player_module = importlib.import_module("hexo_models.dense_cnn.player")
     ctx, components = _build_dense_components(tmp_path)
     _ = ctx
@@ -433,6 +440,7 @@ def test_final_checkpoint_preserves_latest_epoch_for_future_resume(tmp_path: Pat
 
 
 def test_training_pipeline_run_records_dense_cnn_epoch_diagnostics(tmp_path: Path) -> None:
+    pytest.importorskip("hexo_utils._rust")
     dense_cnn = _dense_cnn()
     assert dense_cnn.parse_model1_config({}).samples.train_sample_count == 4096
 
@@ -485,7 +493,7 @@ def test_training_pipeline_run_records_dense_cnn_epoch_diagnostics(tmp_path: Pat
 
 def test_finalize_samples_does_not_fake_missing_opponent_policy_with_current_policy() -> None:
     samples_module = importlib.import_module("hexo_models.dense_cnn.samples")
-    selfplay_module = importlib.import_module("hexo_models.dense_cnn.selfplay")
+    selfplay_module = _dense_cnn_selfplay_module()
     first = samples_module.Model1SampleData(
         game_id="g",
         turn_index=0,
@@ -514,9 +522,9 @@ def test_finalize_samples_does_not_fake_missing_opponent_policy_with_current_pol
     )
 
     assert finalized[0].opp_policy == ()
-    assert finalized[0].metadata["opp_policy_source"] == "uniform_legal_fallback"
+    assert finalized[0].metadata["opp_policy_source"] == "none"
     assert finalized[1].opp_policy == ()
-    assert finalized[1].metadata["opp_policy_source"] == "uniform_legal_fallback"
+    assert finalized[1].metadata["opp_policy_source"] == "none"
 
 
 def test_selfplay_records_only_sample_budget_with_mcts_and_rolls_out_tail(
@@ -524,8 +532,9 @@ def test_selfplay_records_only_sample_budget_with_mcts_and_rolls_out_tail(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     dense_cnn = _dense_cnn()
-    selfplay_module = importlib.import_module("hexo_models.dense_cnn.selfplay")
+    selfplay_module = _dense_cnn_selfplay_module()
     mcts_module = importlib.import_module("hexo_models.dense_cnn.mcts")
+    samples_module = importlib.import_module("hexo_models.dense_cnn.samples")
     engine = importlib.import_module("hexo_engine")
 
     ctx, components = _build_dense_components(
@@ -549,6 +558,7 @@ def test_selfplay_records_only_sample_budget_with_mcts_and_rolls_out_tail(
     )
     mcts_batch_sizes: list[int] = []
     rollout_batch_sizes: list[int] = []
+    sampled_turns: list[tuple[str, int, int]] = []
 
     def fake_run_batched_mcts(root_states: Sequence[object], inference: object, **kwargs: object) -> list[Any]:
         _ = inference
@@ -567,8 +577,35 @@ def test_selfplay_records_only_sample_budget_with_mcts_and_rolls_out_tail(
         rollout_batch_sizes.append(len(playable))
         return [int(engine.legal_action_ids(game["state"])[0]) for game in playable]
 
+    def fake_sample_from_state(
+        state: object,
+        *,
+        game_id: str,
+        turn_index: int,
+        policy: Mapping[int, float],
+        value: float,
+        metadata: Mapping[str, Any],
+    ) -> Any:
+        legal_ids = tuple(int(item) for item in engine.legal_action_ids(state))
+        action_id = next(iter(policy))
+        assert int(action_id) in legal_ids, "sample must be captured before the selected action mutates the state"
+        sampled_turns.append((game_id, turn_index, len(legal_ids)))
+        return samples_module.Model1SampleData(
+            game_id=game_id,
+            turn_index=turn_index,
+            current_player="player0",
+            phase="Opening",
+            center=(0, 0),
+            stones=(),
+            legal_action_ids=legal_ids,
+            policy=tuple((int(key), float(weight)) for key, weight in policy.items()),
+            value=float(value),
+            metadata=dict(metadata),
+        )
+
     monkeypatch.setattr(selfplay_module, "run_batched_mcts", fake_run_batched_mcts)
     monkeypatch.setattr(selfplay_module, "_policy_rollout_actions", fake_rollout)
+    monkeypatch.setattr(selfplay_module, "sample_from_state", fake_sample_from_state)
 
     result = selfplay_module.generate_selfplay_epoch(
         ctx=ctx,
@@ -581,6 +618,7 @@ def test_selfplay_records_only_sample_budget_with_mcts_and_rolls_out_tail(
     assert result["searched_positions"] == 2
     assert result["mcts_simulations"] == 2
     assert mcts_batch_sizes == [2]
+    assert len(sampled_turns) == 2
     assert rollout_batch_sizes, "non-sample tail moves should use policy rollout instead of MCTS"
 
 
@@ -588,7 +626,7 @@ def test_selfplay_rejects_under_counted_mcts_results(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    selfplay_module = importlib.import_module("hexo_models.dense_cnn.selfplay")
+    selfplay_module = _dense_cnn_selfplay_module()
     mcts_module = importlib.import_module("hexo_models.dense_cnn.mcts")
     engine = importlib.import_module("hexo_engine")
     ctx, components = _build_dense_components(

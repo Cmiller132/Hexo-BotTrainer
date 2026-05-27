@@ -63,7 +63,7 @@ def build_sparse_input(
     arch = architecture or HexformerArchitectureConfig()
     candidate_cfg = candidates or HexformerCandidateConfig(max_candidates=arch.max_candidates)
     payload = _hexformer_ar_rust().sparse_input_payload(
-        history_row_from_state(state),
+        state,
         _config_mapping(arch),
         _config_mapping(candidate_cfg),
         _policy_items(policy),
@@ -76,33 +76,28 @@ def build_sparse_input(
     return _sparse_input_from_payload(payload)
 
 
-def build_sparse_inputs_from_history_rows(
-    history_rows: Sequence[Sequence[int]],
+def build_sparse_inputs(
+    states: Sequence[object],
     *,
     architecture: HexformerArchitectureConfig | None = None,
     candidates: HexformerCandidateConfig | None = None,
 ) -> tuple[SparseDecisionInput, ...]:
-    """Build sparse inputs directly from packed Rust history rows."""
+    """Build sparse inputs from live engine states through Rust."""
 
     arch = architecture or HexformerArchitectureConfig()
     candidate_cfg = candidates or HexformerCandidateConfig(max_candidates=arch.max_candidates)
-    rows = tuple(tuple(int(action_id) for action_id in row) for row in history_rows)
     payloads = _hexformer_ar_rust().sparse_input_payloads(
-        rows,
+        tuple(states),
         _config_mapping(arch),
         _config_mapping(candidate_cfg),
     )
     return tuple(_sparse_input_from_payload(payload) for payload in payloads)
 
 
-def history_row_from_state(state: object) -> tuple[int, ...]:
-    """Return packed placement history for Rust-side state reconstruction."""
+def sparse_input_from_payload(payload: Mapping[str, Any]) -> SparseDecisionInput:
+    """Convert a Rust-built sparse payload into tensor-backed Python input."""
 
-    import hexo_engine as engine
-    from hexo_engine.types import pack_coord_id
-
-    python_state = engine.to_python_state(state)
-    return tuple(int(pack_coord_id(record.coord)) for record in python_state.placement_history)
+    return _sparse_input_from_payload(payload)
 
 
 def build_selfplay_sample_payloads(
@@ -121,11 +116,10 @@ def build_selfplay_sample_payloads(
 ) -> tuple[Mapping[str, Any], ...]:
     """Finalize self-play sparse sample payloads through Rust."""
 
-    rows = tuple(history_row_from_state(state) for state in states)
     return tuple(
         _hexformer_ar_rust().selfplay_sample_payloads(
             game_id,
-            rows,
+            tuple(states),
             tuple(str(player) for player in players),
             tuple(int(turn_index) for turn_index in turn_indices),
             tuple(_policy_items(policy) for policy in visit_policies),

@@ -11,7 +11,7 @@ Recommended implementation order:
 2. Add the max-action guard.
 3. Add invariant validation tests.
 4. Thin `HexoEngineAdapter`.
-5. Add apply/undo deltas for MCTS search.
+5. Keep search mutation model-owned.
 
 ## 2. Add A Max-Action Guard
 
@@ -116,14 +116,12 @@ while avoiding Python-side game semantics that Rust already owns.
   - `python -m unittest tests.test_hexo_runner_match_mode`
   - `python -m pytest`
 
-## 4. Add Apply/Undo Deltas For MCTS
+## 4. Keep Search Mutation Model-Owned
 
 ### Problem
 
-MCTS currently clones the full `HexoState` at the start of every simulation:
-`SearchPosition::from_root(root_state)` clones `HexoState`, and
-`run_simulation` calls it for every visit. That is simple and correct, but it
-becomes expensive as visits, active games, and resident search trees grow.
+Model MCTS needs efficient search-local mutation without adding model-specific
+or search-specific behavior to `hexo_engine`.
 
 `HexoState` clone cost includes:
 
@@ -137,71 +135,25 @@ becomes expensive as visits, active games, and resident search trees grow.
 
 ### Requirements
 
-- Add an undo-capable apply path in Rust without changing the existing public
-  behavior of `apply_placement`.
-- Introduce an explicit `ApplyDelta` that stores enough information to restore
-  the exact pre-move state.
-- Introduce a board-level delta that stores all board cache changes needed for
-  undo.
-- `HexoState::apply_with_delta` must:
-  - validate the placement using the same rule path as `apply_placement`;
-  - apply the move through the authoritative engine logic;
-  - return both the current `ApplyResult` and an `ApplyDelta`.
-- `HexoState::undo(delta)` must restore:
-  - board stone map;
-  - occupied list;
-  - legal move store membership/order/version;
-  - window masks for all changed windows;
-  - current player;
-  - turn phase;
-  - placement count;
-  - terminal outcome;
-  - last turn;
-  - placement history length/content.
-- Keep the existing free function:
-  - `apply_placement(state, placement) -> Result<ApplyResult, MoveError>`
-  - It can internally call the new method and discard the delta.
-- Update MCTS search to avoid cloning the root state for every simulation.
-  `SearchPosition` should walk one mutable state down the tree and undo back up
-  after the simulation.
-- Do not add inference batching, evaluator queues, or new search algorithms in
-  this pass.
+- `hexo_engine` remains the generic rules source and exposes only the private
+  state clone capsule for model-owned Rust extensions.
+- Model packages own their MCTS trees, evaluator caches, and search scratch
+  state.
+- Search may clone the root into a local scratch state during traversal, but no
+  live Python engine state may be mutated by a model.
+- If a future model needs undo deltas, implement them in model-owned Rust
+  wrappers or utilities after an explicit design pass. Do not add them to core
+  engine state in this cleanup.
 
 ### Implementation Notes
 
-- Likely files:
-  - `packages/hexo_engine/rust/src/state.rs`
-  - `packages/hexo_engine/rust/src/board.rs`
-  - `packages/hexo_engine/rust/src/legal.rs`
-  - `packages/hexo_engine/rust/src/tactics.rs`
-  - `packages/hexo_utils/rust/src/position.rs`
-  - `packages/hexo_utils/rust/src/mcts/search.rs`
-- `BoardDelta` should avoid full map clones. It should capture only:
-  - placed coordinate and previous stone state;
-  - previous occupied length;
-  - legal store insertions/removals/version before mutation;
-  - previous masks for touched window keys.
-- `WindowStore` needs helper methods to apply a placement while returning prior
-  masks and to restore those masks.
-- `LegalMoveStore` needs an undo-friendly update path or a delta that records
-  inserted/removed packed IDs and previous version.
-- `SearchPosition` can maintain a `Vec<ApplyDelta>` for the current path.
-  During one simulation, push deltas as actions are applied, then pop and undo
-  before returning.
-- Be careful with terminal moves. Undo must restore the non-terminal pre-move
-  state exactly.
+- Keep engine changes limited to generic bridge behavior.
+- Dense-cnn and hexformer-ar should share the direct-state handoff shape:
+  Python passes `HexoState`, model Rust clones it through the capsule, and only
+  the selected move is applied to the live game by self-play.
 
 ### Validation
 
-- Add Rust engine tests:
-  - applying then undoing one opening placement restores a fresh state;
-  - applying then undoing a first-stone placement restores phase/player/legal
-    moves;
-  - applying then undoing a second-stone placement restores turn ownership and
-    `last_turn`;
-  - applying then undoing a winning placement restores terminal to `None`;
-  - repeated apply/undo over random legal games returns to a byte-for-byte
-    equivalent public state at every step.
 - Add MCTS tests:
   - running MCTS does not mutate the root state;
   - search result matches legal root actions;
@@ -209,8 +161,6 @@ becomes expensive as visits, active games, and resident search trees grow.
     evaluator/config if deterministic before this change.
 - Run:
   - `cargo fmt`
-  - `cargo test -p hexo_engine`
-  - `cargo test -p hexo_utils`
   - `cargo test --workspace`
 
 ## 5. Standardize Packed Action IDs
@@ -244,8 +194,7 @@ schema inconsistency.
   - `hexo_utils.samples.records.TrainingSampleRecord.legal_action_ids`
   - `hexo_utils.samples.targets.LegalPolicyValueTarget`
   - `hexo_utils.encoding.symmetry.ActionSymmetryMapper`
-  - `hexo_utils.encoding.masks`
-  - `hexo_model_resnet.input.ResNetInput.action_ids`
+  - model-owned input contracts that carry legal action IDs
 - Keep string formatting only as display/logging helpers, never as identity.
 - Do not add backwards-compatible string aliases. This should be a hard cleanup.
 
@@ -265,7 +214,7 @@ schema inconsistency.
 - Files under `packages/hexo_utils/python/hexo_utils/samples` and
   `packages/hexo_utils/python/hexo_utils/encoding`
   - Update type annotations and tests from string IDs to ints.
-- Files under `packages/hexo_model_resnet/python`
+- Model-owned input files
   - Update action ID type annotations to ints.
 - Tests that currently create sample records with IDs like `"a"` and `"b"`
   should use packed ints. If the test does not care about real coordinates,

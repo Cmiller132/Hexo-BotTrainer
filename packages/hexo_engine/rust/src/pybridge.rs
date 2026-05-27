@@ -3,10 +3,31 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
+use std::ffi::c_void;
 
 use crate::{
     apply_placement, pack_coord, Axis, GameOutcome, HexCoord, HexoState as RustHexoState,
     MoveError, Placement, Player, TurnPhase,
+};
+
+const STATE_API_CAPSULE_NAME: &str = "hexo_engine._rust.state_api";
+const STATE_API_VERSION: u32 = 2;
+const STATE_API_OK: i32 = 0;
+const STATE_API_NULL_ARGUMENT: i32 = -1;
+const STATE_API_TYPE_ERROR: i32 = -2;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct HexoStateApi {
+    version: u32,
+    clone_state: unsafe extern "C" fn(*mut c_void, *mut *mut c_void) -> i32,
+    free_state: unsafe extern "C" fn(*mut c_void),
+}
+
+static STATE_API: HexoStateApi = HexoStateApi {
+    version: STATE_API_VERSION,
+    clone_state: clone_state_for_capsule,
+    free_state: free_state_for_capsule,
 };
 
 /// Python-owned opaque handle to a Rust Hexo state.
@@ -132,7 +153,20 @@ pub fn engine_metadata(py: Python<'_>) -> PyResult<Py<PyAny>> {
         "rules_version",
         RustHexoState::new().snapshot().rules_version(),
     )?;
+    dict.set_item("state_api_version", STATE_API_VERSION)?;
     Ok(dict.into_any().unbind())
+}
+
+#[pyfunction]
+pub fn state_api_capsule(py: Python<'_>) -> PyResult<Py<PyAny>> {
+    let name = pyo3::ffi::c_str!("hexo_engine._rust.state_api");
+    debug_assert_eq!(name.to_string_lossy(), STATE_API_CAPSULE_NAME);
+    let pointer = (&STATE_API as *const HexoStateApi).cast::<c_void>() as *mut c_void;
+    let capsule = unsafe { pyo3::ffi::PyCapsule_New(pointer, name.as_ptr(), None) };
+    if capsule.is_null() {
+        return Err(PyErr::fetch(py));
+    }
+    Ok(unsafe { Py::<PyAny>::from_owned_ptr(py, capsule) })
 }
 
 #[pymodule]
@@ -149,11 +183,42 @@ pub fn _rust(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(to_python_state, module)?)?;
     module.add_function(wrap_pyfunction!(action_id, module)?)?;
     module.add_function(wrap_pyfunction!(engine_metadata, module)?)?;
+    module.add_function(wrap_pyfunction!(state_api_capsule, module)?)?;
     Ok(())
 }
 
 fn move_error(error: MoveError) -> PyErr {
     PyValueError::new_err(error.to_string())
+}
+
+unsafe extern "C" fn clone_state_for_capsule(
+    object: *mut c_void,
+    out: *mut *mut c_void,
+) -> i32 {
+    if object.is_null() || out.is_null() {
+        return STATE_API_NULL_ARGUMENT;
+    }
+    Python::with_gil(|py| {
+        let any =
+            unsafe { Bound::<PyAny>::from_borrowed_ptr(py, object as *mut pyo3::ffi::PyObject) };
+        let Ok(state) = any.extract::<PyRef<'_, PyHexoState>>() else {
+            return STATE_API_TYPE_ERROR;
+        };
+        let cloned = Box::new(state.state.clone());
+        unsafe {
+            *out = Box::into_raw(cloned).cast::<c_void>();
+        }
+        STATE_API_OK
+    })
+}
+
+unsafe extern "C" fn free_state_for_capsule(state: *mut c_void) {
+    if state.is_null() {
+        return;
+    }
+    unsafe {
+        let _ = Box::from_raw(state.cast::<RustHexoState>());
+    }
 }
 
 fn player_label(player: Player) -> &'static str {

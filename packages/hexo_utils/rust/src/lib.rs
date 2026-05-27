@@ -1,29 +1,18 @@
-//! Shared model/search utilities for Hexo models.
+//! Shared record, sample-store, and state utility code for Hexo.
 //!
-//! This crate depends on `hexo_engine` for authoritative rules and state
-//! transitions. It keeps the shared pieces: neural-network encoding, MCTS, and
-//! sample contract helpers.
+//! Model-owned Rust crates own search, encoding, and sample generation. This
+//! crate keeps only stable utilities that are intentionally shared across
+//! training, runner, and model packages.
 
-pub mod encoder;
-pub mod mcts;
-pub mod position;
 pub mod records;
-pub mod samples;
+pub mod state_hash;
 
 #[cfg(feature = "python")]
 pub mod pybridge;
 
-pub use encoder::{
-    encode_state, legal_moves_in_crop, planes, EncodedState, DEFAULT_CROP_SIZE, PLANE_COUNT,
-};
-pub use mcts::{
-    run_mcts, Evaluation, Evaluator, MctsConfig, NetworkOutput, PolicyPrior, SearchError,
-    SearchResult, StateEvaluator, UniformEvaluator,
-};
-pub use position::SearchPosition;
 pub use records::{
     AbortRecord, HexoRecord, HexoRecordEngineMetadata, HexoRecordFile, HexoRecordFileMode,
     HexoRecordGameWriter, HexoRecordPlayer, HexoRecordRef, HexoRecordStatus,
     RecordError as HexoRecordError, HEXO_RECORD_MAGIC, HEXO_RECORD_SCHEMA_VERSION,
 };
-pub use samples::{SampleBatchDraft, SAMPLE_SCHEMA_DRAFT};
+pub use state_hash::{hash_state, StateHash};

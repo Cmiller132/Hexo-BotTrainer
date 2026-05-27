@@ -9,49 +9,54 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
 use std::collections::HashMap;
 
-use hexo_engine::PackedCoord;
-
-use crate::mcts_eval::{evaluate_states_cached, RustEvaluation};
+use crate::mcts_eval::evaluate_states_cached;
 use crate::mcts_tree::{select_root_action, terminal_value, RustLeaf, RustSearch};
-use crate::state::states_from_history_rows;
+use crate::sample_gen::{ArchitectureConfig, CandidateConfig};
+use crate::state::states_from_py_states;
 
-#[pyfunction(signature = (history_row, visits, c_puct, temperature, seed, evaluator))]
+#[pyfunction(signature = (state, visits, c_puct, temperature, seed, evaluator, architecture, candidates))]
 pub fn hexformer_ar_mcts(
     py: Python<'_>,
-    history_row: &Bound<'_, PyAny>,
+    state: &Bound<'_, PyAny>,
     visits: u32,
     c_puct: f32,
     temperature: f32,
     seed: u64,
     evaluator: &Bound<'_, PyAny>,
+    architecture: &Bound<'_, PyAny>,
+    candidates: &Bound<'_, PyAny>,
 ) -> PyResult<Py<PyAny>> {
-    let rows = PyTuple::new(py, [history_row])?;
+    let states = PyTuple::new(py, [state])?;
     let results = hexformer_ar_batched_mcts(
         py,
-        rows.as_any(),
+        states.as_any(),
         visits,
         c_puct,
         temperature,
         seed,
         evaluator,
+        architecture,
+        candidates,
         Some(visits.max(1)),
     )?;
     let results = results.bind(py);
     Ok(results.get_item(0)?.unbind())
 }
 
-#[pyfunction(signature = (history_rows, visits, c_puct, temperature, seed, evaluator, virtual_batch_size=None))]
+#[pyfunction(signature = (states, visits, c_puct, temperature, seed, evaluator, architecture, candidates, virtual_batch_size=None))]
 pub fn hexformer_ar_batched_mcts(
     py: Python<'_>,
-    history_rows: &Bound<'_, PyAny>,
+    states: &Bound<'_, PyAny>,
     visits: u32,
     c_puct: f32,
     temperature: f32,
     seed: u64,
     evaluator: &Bound<'_, PyAny>,
+    architecture: &Bound<'_, PyAny>,
+    candidates: &Bound<'_, PyAny>,
     virtual_batch_size: Option<u32>,
 ) -> PyResult<Py<PyAny>> {
-    let roots = states_from_history_rows(history_rows)?;
+    let roots = states_from_py_states(py, states)?;
     if roots.is_empty() {
         return Ok(PyTuple::empty(py).into_any().unbind());
     }
@@ -64,8 +69,17 @@ pub fn hexformer_ar_batched_mcts(
         ));
     }
 
-    let mut evaluation_cache: HashMap<Vec<PackedCoord>, RustEvaluation> = HashMap::new();
-    let root_evals = evaluate_states_cached(py, evaluator, &roots, &mut evaluation_cache)?;
+    let arch = ArchitectureConfig::from_py(architecture)?;
+    let candidate_cfg = CandidateConfig::from_py(candidates)?;
+    let mut evaluation_cache = HashMap::new();
+    let root_evals = evaluate_states_cached(
+        py,
+        evaluator,
+        &roots,
+        &arch,
+        &candidate_cfg,
+        &mut evaluation_cache,
+    )?;
     let mut searches: Vec<RustSearch> = roots
         .iter()
         .zip(root_evals.iter())
@@ -132,8 +146,14 @@ pub fn hexformer_ar_batched_mcts(
 
         if !leaves.is_empty() {
             let leaf_states: Vec<_> = leaves.iter().map(|leaf| leaf.state.clone()).collect();
-            let evaluations =
-                evaluate_states_cached(py, evaluator, &leaf_states, &mut evaluation_cache)?;
+            let evaluations = evaluate_states_cached(
+                py,
+                evaluator,
+                &leaf_states,
+                &arch,
+                &candidate_cfg,
+                &mut evaluation_cache,
+            )?;
             for (leaf, evaluation) in leaves.into_iter().zip(evaluations.iter()) {
                 let search = &mut searches[leaf.root_index];
                 let child_id = search.add_node_from_eval(&leaf.state, evaluation);
