@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import inspect
 import json
+import struct
 import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -558,12 +559,15 @@ def test_selfplay_benchmark_reports_actual_searches_when_batch_overshoots_probe(
     assert result["all_searches_exact"] is True
 
 
-def test_rust_model1_batch_input_encoder_matches_python_sample_encoder() -> None:
+def test_dense_cnn_rust_batch_input_encoder_matches_python_sample_encoder() -> None:
     torch = _torch()
     engine = importlib.import_module("hexo_engine")
     engine_types = importlib.import_module("hexo_engine.types")
+    rust_bridge = importlib.import_module("hexo_models.dense_cnn.rust_bridge")
     samples_module = importlib.import_module("hexo_models.dense_cnn.samples")
     dense_cnn = _dense_cnn()
+    if not rust_bridge.is_available():
+        pytest.skip("dense_cnn Rust accelerator is not available")
 
     state = engine.new_game()
     states = []
@@ -580,7 +584,7 @@ def test_rust_model1_batch_input_encoder_matches_python_sample_encoder() -> None
             engine.PlacementAction(engine_types.unpack_coord_id(action_id)),
         )
 
-    payload = engine.model1_batch_inputs(states)
+    payload = rust_bridge.model1_batch_inputs(states)
     shape = tuple(int(item) for item in payload["shape"])
     rust_inputs = torch.frombuffer(bytearray(payload["inputs"]), dtype=torch.float32).reshape(shape)
 
@@ -596,6 +600,98 @@ def test_rust_model1_batch_input_encoder_matches_python_sample_encoder() -> None
         assert tuple(int(item) for item in payload["centers"][index]) == sample.center
         assert tuple(int(item) for item in payload["legal_action_ids"][index]) == sample.legal_action_ids
         torch.testing.assert_close(rust_inputs[index], expected, rtol=0.0, atol=0.0)
+
+
+def test_dense_cnn_rust_capabilities_smoke() -> None:
+    rust_bridge = importlib.import_module("hexo_models.dense_cnn.rust_bridge")
+    if not rust_bridge.is_available():
+        pytest.skip("dense_cnn Rust accelerator is not available")
+
+    rust_module = importlib.import_module("hexo_models._rust.dense_cnn")
+    capabilities = rust_module.capabilities()
+
+    assert capabilities["model_family"] == "dense_cnn"
+    assert capabilities["model1_batch_inputs"] is True
+    assert capabilities["coordinate_encoding"] == "u32_i16_pair"
+
+
+def test_dense_cnn_rust_mcts_uses_model_local_accelerator() -> None:
+    engine = importlib.import_module("hexo_engine")
+    rust_bridge = importlib.import_module("hexo_models.dense_cnn.rust_bridge")
+    if not rust_bridge.is_available():
+        pytest.skip("dense_cnn Rust accelerator is not available")
+
+    state = engine.new_game()
+    expected_action = engine.action_id(engine.PlacementAction(engine.AxialCoord(0, 0)))
+
+    def evaluator(payload: Mapping[str, Any]) -> Mapping[str, bytes]:
+        rows = int(payload["shape"][0])
+        offsets = tuple(int(item) for item in payload["legal_row_offsets"])
+        priors = max(0, offsets[-1])
+        return {
+            "values_bytes": struct.pack(f"{rows}f", *([0.0] * rows)),
+            "priors_bytes": struct.pack(f"{priors}f", *([1.0] * priors)),
+        }
+
+    first = rust_bridge.model1_batched_mcts(
+        [state],
+        visits=3,
+        c_puct=1.5,
+        temperature=0.0,
+        seed=42,
+        evaluator=evaluator,
+        virtual_batch_size=2,
+    )[0]
+    second = rust_bridge.model1_batched_mcts(
+        [state],
+        visits=3,
+        c_puct=1.5,
+        temperature=0.0,
+        seed=42,
+        evaluator=evaluator,
+        virtual_batch_size=2,
+    )[0]
+
+    assert int(first["action_id"]) == expected_action
+    assert int(first["action_id"]) == int(second["action_id"])
+    assert int(first["visits"]) == 3
+    assert sum(float(weight) for _action_id, weight in first["visit_policy"]) == pytest.approx(1.0)
+
+
+def test_dense_cnn_batched_mcts_falls_back_when_rust_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = importlib.import_module("hexo_engine")
+    mcts_module = importlib.import_module("hexo_models.dense_cnn.mcts")
+    rust_bridge = importlib.import_module("hexo_models.dense_cnn.rust_bridge")
+
+    monkeypatch.setattr(rust_bridge, "is_available", lambda: False)
+
+    class FakeInference:
+        def infer_states(self, states: Sequence[object]) -> list[Any]:
+            return [
+                type(
+                    "Eval",
+                    (),
+                    {
+                        "value": 0.0,
+                        "legal_priors": {int(engine.legal_action_ids(state)[0]): 1.0},
+                    },
+                )()
+                for state in states
+            ]
+
+    state = engine.new_game()
+    result = mcts_module.run_batched_mcts(
+        [state],
+        FakeInference(),
+        visits=1,
+        temperature=0.0,
+        seed=7,
+        virtual_batch_size=1,
+    )
+
+    assert len(result) == 1
+    assert result[0].visits == 1
+    assert result[0].visit_policy
 
 
 def test_batch_inference_fast_path_runs_compact_samples_in_one_forward_pass() -> None:

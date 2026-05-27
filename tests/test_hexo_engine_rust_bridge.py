@@ -20,6 +20,8 @@ class RustEngineBridgeTests(unittest.TestCase):
 
         self.assertEqual(metadata["backend"], "rust-pyo3")
         self.assertEqual(metadata["rules_version"], 1)
+        self.assertFalse(hasattr(engine, "model1_batch_inputs"))
+        self.assertFalse(hasattr(engine, "model1_batched_mcts"))
 
     def test_legal_actions_are_sorted(self) -> None:
         import hexo_engine as engine

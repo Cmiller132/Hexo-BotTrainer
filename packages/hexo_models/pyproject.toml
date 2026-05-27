@@ -1,6 +1,6 @@
 [build-system]
-requires = ["hatchling>=1.24"]
-build-backend = "hatchling.build"
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
 
 [project]
 name = "hexo-models"
@@ -16,10 +16,26 @@ dependencies = [
 
 [project.entry-points."hexo_train.models"]
 dense_cnn = "hexo_models.dense_cnn.plugin:get_plugin"
-
-[tool.hatch.build.targets.wheel]
-packages = ["python/hexo_models"]
+hexformer_ar = "hexo_models.hexformer_ar.plugin:get_plugin"
 
 [tool.pyright]
 pythonVersion = "3.11"
 typeCheckingMode = "basic"
+extraPaths = [
+  "python",
+  "dense_cnn/python",
+  "hexformer_ar/python",
+]
+
+[tool.maturin]
+python-source = "python"
+module-name = "hexo_models._rust"
+features = ["python"]
+include = [
+  { path = "dense_cnn/python/hexo_models/dense_cnn/**/*", format = "wheel" },
+  { path = "hexformer_ar/python/hexo_models/hexformer_ar/**/*", format = "wheel" },
+  { path = "dense_cnn/python/hexo_models/dense_cnn/**/*", format = "sdist" },
+  { path = "hexformer_ar/python/hexo_models/hexformer_ar/**/*", format = "sdist" },
+  { path = "dense_cnn/rust/**/*", format = "sdist" },
+  { path = "hexformer_ar/rust/**/*", format = "sdist" },
+]

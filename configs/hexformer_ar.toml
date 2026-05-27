@@ -1,0 +1,123 @@
+[model]
+name = "hexformer_ar"
+module = "hexo_models.hexformer_ar.plugin"
+
+[model.config]
+device = "cuda"
+
+[model.config.architecture]
+local_channels = 96
+local_blocks = 4
+token_dim = 256
+gps_layers = 6
+attention_heads = 8
+dropout = 0.05
+candidate_feature_dim = 24
+stone_feature_dim = 18
+window_feature_dim = 24
+global_feature_dim = 16
+local_input_channels = 13
+local_crop_size = 41
+max_local_windows = 3
+max_candidates = 768
+max_stones = 512
+max_windows = 768
+max_rel_edges = 4096
+rel_edge_feature_dim = 12
+lookahead_horizons = [1, 2, 4, 8]
+threat_classes = 6
+
+[model.config.candidates]
+max_candidates = 768
+tactical_radius = 2
+recent_radius = 3
+frontier_radius = 8
+include_all_legal_below = 768
+require_tactical_candidates = true
+
+[model.config.training]
+batch_size = 64
+learning_rate = 0.0003
+weight_decay = 0.0001
+policy_weight = 1.0
+wdl_weight = 1.0
+distance_weight = 0.25
+opponent_policy_weight = 0.15
+lookahead_weight = 0.25
+threat_weight = 0.5
+relevance_weight = 0.25
+symmetry_weight = 0.05
+amp = true
+max_grad_norm = 1.0
+warmup_steps = 2000
+cosine_decay_steps = 200000
+min_learning_rate = 0.00003
+ema_decay = 0.999
+
+[model.config.samples]
+train_sample_count = 4096
+chunk_size = 4096
+recency_halflife = 100000.0
+compression = "zlib"
+schema_version = 1
+hard_sample_fraction = 0.25
+recent_sample_fraction = 0.50
+
+[model.config.selfplay]
+samples_per_epoch = 4096
+games_per_epoch = 4096
+search_visits = 128
+max_actions = 1024
+c_puct = 1.5
+temperature = 1.0
+playout_cap_randomization = true
+low_visit_probability = 0.25
+low_visit_count = 32
+
+[model.config.evaluation]
+games_per_epoch = 64
+sealbot_variant = "best"
+sealbot_time_limit = 0.05
+max_actions = 1024
+require_sealbot = false
+
+[model.config.performance]
+calibrate = true
+inference_batch_candidates = [16, 32, 64, 128]
+training_batch_candidates = [16, 32, 64]
+probe_batches = 1
+
+[model.config.curriculum]
+synthetic_samples = 1024
+max_span = 8
+seed_offset = 910337
+enabled_stages = ["win_in_1", "block_in_1", "double_threat"]
+
+[model.config.debug]
+write_sparse_batch_previews = true
+write_candidate_diagnostics = true
+write_tactical_diagnostics = true
+preview_samples = 8
+
+[run]
+name = "hexformer_ar"
+output_dir = "../runs/hexformer_ar"
+seed = 1
+
+[loop]
+epochs = 30
+
+[selfplay]
+games_per_epoch = 4096
+update_checkpoint_pointer = true
+checkpoint_pointer = "../data/checkpoints/hexformer_ar_latest.txt"
+
+[samples]
+train_sample_count = 4096
+
+[train]
+passes_per_epoch = 1
+
+[checkpoint]
+resume_from = "../data/checkpoints/hexformer_ar_latest.txt"
+save_name = "latest"

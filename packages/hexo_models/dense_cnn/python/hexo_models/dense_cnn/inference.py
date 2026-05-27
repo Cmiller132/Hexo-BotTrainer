@@ -5,9 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
-import hexo_engine as engine
 import torch
 
+from . import rust_bridge
 from .constants import BOARD_SIZE
 from .d6 import Axial, D6Symmetry, unpack_coord_pair
 from .input import build_input_planes
@@ -53,13 +53,13 @@ class DenseCNNInference:
     def infer_states(self, states: Sequence[object]) -> list[InferenceResult]:
         if not states:
             return []
-        if hasattr(engine, "model1_batch_inputs"):
+        if rust_bridge.is_available():
             return self._infer_states_fast(states)
         return self._infer_states_python(states)
 
     @torch.no_grad()
     def _infer_states_fast(self, states: Sequence[object]) -> list[InferenceResult]:
-        payload = engine.model1_batch_inputs(states)
+        payload = rust_bridge.model1_batch_inputs(states)
         shape = tuple(int(item) for item in payload["shape"])
         inputs = torch.frombuffer(payload["inputs"], dtype=torch.float32).reshape(shape)
         outputs = self._forward_inputs_device(inputs)

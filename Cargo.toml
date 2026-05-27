@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "packages/hexo_engine",
+    "packages/hexo_models",
     "packages/hexo_utils",
 ]
 resolver = "2"

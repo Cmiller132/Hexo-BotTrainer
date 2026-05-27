@@ -10,6 +10,7 @@ from typing import Mapping, Sequence
 import hexo_engine as engine
 from hexo_engine.types import unpack_coord_id
 
+from . import rust_bridge
 from .inference import DenseCNNInference
 
 
@@ -117,19 +118,25 @@ def run_batched_mcts(
 
     if not root_states:
         return []
-    if hasattr(engine, "model1_batched_mcts"):
-        resolved_virtual_batch_size = virtual_batch_size
-        if resolved_virtual_batch_size is None:
+    if rust_bridge.is_available():
+        if virtual_batch_size is None:
             resolved_virtual_batch_size = max(1, min(max(1, int(visits)), 8192 // max(1, len(root_states))))
-        payloads = engine.model1_batched_mcts(
-            root_states,
-            visits=max(1, int(visits)),
-            c_puct=float(c_puct),
-            temperature=float(temperature),
-            seed=0 if seed is None else int(seed),
-            evaluator=inference.evaluate_model1_payload,
-            virtual_batch_size=resolved_virtual_batch_size,
-        )
+        else:
+            resolved_virtual_batch_size = max(1, int(virtual_batch_size))
+        try:
+            payloads = rust_bridge.model1_batched_mcts(
+                root_states,
+                visits=max(1, int(visits)),
+                c_puct=float(c_puct),
+                temperature=float(temperature),
+                seed=0 if seed is None else int(seed),
+                evaluator=inference.evaluate_model1_payload,
+                virtual_batch_size=resolved_virtual_batch_size,
+            )
+        except ValueError as exc:
+            if "MCTS root has no legal actions" in str(exc):
+                raise RuntimeError("MCTS root has no legal actions") from exc
+            raise
         return [
             SearchResult(
                 action_id=int(payload["action_id"]),

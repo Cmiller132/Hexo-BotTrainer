@@ -63,6 +63,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "hexo_models"
+version = "0.1.0"
+dependencies = [
+ "hexo_engine",
+ "pyo3",
+]
+
+[[package]]
 name = "hexo_utils"
 version = "0.1.0"
 dependencies = [
