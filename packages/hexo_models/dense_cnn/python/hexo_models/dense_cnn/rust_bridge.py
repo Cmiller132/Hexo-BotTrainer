@@ -25,53 +25,6 @@ def model1_batch_inputs(states: Sequence[object]) -> Mapping[str, Any]:
     return _dense_cnn_module().model1_batch_inputs(tuple(states))
 
 
-def model1_batched_mcts(
-    states: Sequence[object],
-    *,
-    visits: int,
-    c_puct: float,
-    temperature: float,
-    seed: int,
-    evaluator: object,
-    virtual_batch_size: int | None = None,
-    progressive_widening_initial_actions: int | None = None,
-    progressive_widening_child_initial_actions: int | None = None,
-    progressive_widening_candidate_actions: int | None = None,
-    progressive_widening_growth_interval: float | None = None,
-    progressive_widening_growth_base: float | None = None,
-    evaluation_cache: object | None = None,
-    active_root_limit: int | None = None,
-) -> tuple[Mapping[str, Any], ...]:
-    """Run dense-cnn Rust MCTS from live engine states."""
-
-    return tuple(
-        _dense_cnn_module().model1_batched_mcts(
-            tuple(states),
-            int(visits),
-            float(c_puct),
-            float(temperature),
-            int(seed),
-            evaluator,
-            None if virtual_batch_size is None else max(1, int(virtual_batch_size)),
-            None if progressive_widening_initial_actions is None else max(1, int(progressive_widening_initial_actions)),
-            None if progressive_widening_child_initial_actions is None else max(1, int(progressive_widening_child_initial_actions)),
-            None if progressive_widening_growth_interval is None else max(1.0, float(progressive_widening_growth_interval)),
-            None if progressive_widening_growth_base is None else max(1.000001, float(progressive_widening_growth_base)),
-            None if progressive_widening_candidate_actions is None else max(1, int(progressive_widening_candidate_actions)),
-            evaluation_cache,
-            None if active_root_limit is None else max(1, int(active_root_limit)),
-        )
-    )
-
-
-def model1_new_mcts_evaluation_cache(*, max_states: int | None = None) -> object:
-    """Create a native scoped MCTS evaluation cache for one model-weight snapshot."""
-
-    return _dense_cnn_module().Model1MctsEvaluationCache(
-        None if max_states is None else max(1, int(max_states))
-    )
-
-
 def model1_new_mcts_session(*, max_states: int | None = None) -> object:
     """Create a native MCTS session that reuses selected subtrees across moves."""
 
@@ -97,6 +50,11 @@ def model1_mcts_session_search(
     progressive_widening_growth_interval: float | None = None,
     progressive_widening_growth_base: float | None = None,
     active_root_limit: int | None = None,
+    root_dirichlet_alpha: float | None = None,
+    root_dirichlet_noise_fraction: float | None = None,
+    hidden_prior_mass: float | None = None,
+    fpu_reduction: float | None = None,
+    virtual_loss: float | None = None,
 ) -> tuple[Mapping[str, Any], ...]:
     """Search through a native MCTS session, preserving chosen subtrees."""
 
@@ -116,6 +74,11 @@ def model1_mcts_session_search(
             None if progressive_widening_growth_base is None else max(1.000001, float(progressive_widening_growth_base)),
             None if progressive_widening_candidate_actions is None else max(1, int(progressive_widening_candidate_actions)),
             None if active_root_limit is None else max(1, int(active_root_limit)),
+            None if root_dirichlet_alpha is None else float(root_dirichlet_alpha),
+            None if root_dirichlet_noise_fraction is None else float(root_dirichlet_noise_fraction),
+            None if hidden_prior_mass is None else float(hidden_prior_mass),
+            None if fpu_reduction is None else float(fpu_reduction),
+            None if virtual_loss is None else float(virtual_loss),
         )
     )
 

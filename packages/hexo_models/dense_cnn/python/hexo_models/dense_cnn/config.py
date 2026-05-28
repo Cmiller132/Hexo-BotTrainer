@@ -51,7 +51,13 @@ class Model1SelfPlayConfig:
     progressive_widening_candidate_actions: int = 128
     progressive_widening_growth_interval: float = 256.0
     progressive_widening_growth_base: float = 1.3
-    mcts_evaluation_cache_max_states: int = 1_048_576
+    root_dirichlet_noise_enabled: bool = True
+    root_dirichlet_noise_fraction: float = 0.25
+    root_dirichlet_alpha: float = 0.03
+    hidden_prior_mass: float = 0.05
+    fpu_reduction: float = 0.20
+    virtual_loss: float = 1.0
+    mcts_session_cache_max_states: int = 1_048_576
     mcts_active_root_limit: int = 1024
     max_actions: int = 1024
     temperature: float = 1.0
@@ -162,9 +168,24 @@ def parse_model1_config(raw: Mapping[str, Any] | None) -> Model1Config:
                 1.000001,
                 float(selfplay.get("progressive_widening_growth_base", 1.3)),
             ),
-            mcts_evaluation_cache_max_states=max(
+            root_dirichlet_noise_enabled=bool(selfplay.get("root_dirichlet_noise_enabled", True)),
+            root_dirichlet_noise_fraction=max(
+                0.0,
+                min(1.0, float(selfplay.get("root_dirichlet_noise_fraction", 0.25))),
+            ),
+            root_dirichlet_alpha=max(
+                0.0,
+                float(selfplay.get("root_dirichlet_alpha", 0.03)),
+            ),
+            hidden_prior_mass=max(
+                0.0,
+                min(0.95, float(selfplay.get("hidden_prior_mass", 0.05))),
+            ),
+            fpu_reduction=max(0.0, float(selfplay.get("fpu_reduction", 0.20))),
+            virtual_loss=max(0.0, float(selfplay.get("virtual_loss", 1.0))),
+            mcts_session_cache_max_states=max(
                 1,
-                int(selfplay.get("mcts_evaluation_cache_max_states", 1_048_576)),
+                int(selfplay.get("mcts_session_cache_max_states", 1_048_576)),
             ),
             mcts_active_root_limit=max(1, int(selfplay.get("mcts_active_root_limit", 1024))),
             max_actions=int(selfplay.get("max_actions", 1024)),

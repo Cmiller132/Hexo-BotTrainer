@@ -110,6 +110,12 @@ def calibrate_dense_cnn(
         "mcts_progressive_widening_candidate_actions": config.selfplay.progressive_widening_candidate_actions,
         "mcts_progressive_widening_growth_interval": config.selfplay.progressive_widening_growth_interval,
         "mcts_progressive_widening_growth_base": config.selfplay.progressive_widening_growth_base,
+        "mcts_root_dirichlet_noise_enabled": config.selfplay.root_dirichlet_noise_enabled,
+        "mcts_root_dirichlet_alpha": config.selfplay.root_dirichlet_alpha,
+        "mcts_root_dirichlet_noise_fraction": config.selfplay.root_dirichlet_noise_fraction,
+        "mcts_hidden_prior_mass": config.selfplay.hidden_prior_mass,
+        "mcts_fpu_reduction": config.selfplay.fpu_reduction,
+        "mcts_virtual_loss": config.selfplay.virtual_loss,
         "mcts_active_root_limit": config.selfplay.mcts_active_root_limit,
         "selected_training_batch_size": int(selected_training.get("batch_size", config.training.batch_size)),
         "selected_mcts_visits": int(selected_selfplay.get("visits", config.selfplay.search_visits)),
@@ -243,11 +249,7 @@ def _benchmark_selfplay(
     visits: int,
     probe_positions: int,
 ) -> list[dict[str, Any]]:
-    import hexo_engine as engine
-    from hexo_engine.types import unpack_coord_id
-
     from .inference import DenseCNNInference
-    from .mcts import new_mcts_session, run_batched_mcts
 
     results: list[dict[str, Any]] = []
     inference = DenseCNNInference(
@@ -284,7 +286,7 @@ def _benchmark_selfplay_setting(
     import hexo_engine as engine
     from hexo_engine.types import unpack_coord_id
 
-    from .mcts import new_mcts_session, run_batched_mcts
+    from .mcts import new_mcts_session
 
     resolved_visits = max(1, int(visits))
     target_positions = max(1, int(probe_positions))
@@ -302,7 +304,7 @@ def _benchmark_selfplay_setting(
     completed_games = 0
     exact_visit_results = 0
     mcts_diagnostic_batches: list[Mapping[str, Any]] = []
-    mcts_session = new_mcts_session(max_states=config.selfplay.mcts_evaluation_cache_max_states)
+    mcts_session = new_mcts_session(max_states=config.selfplay.mcts_session_cache_max_states)
     started = perf_counter()
     while positions < target_positions:
         playable = [
@@ -312,6 +314,8 @@ def _benchmark_selfplay_setting(
             and positions < target_positions
         ]
         if not playable:
+            for game in games:
+                mcts_session.discard(int(game["search_key"]))
             completed_games += len(games)
             games = [
                 {
@@ -322,38 +326,34 @@ def _benchmark_selfplay_setting(
                 for index in range(active_limit)
             ]
             continue
-        if hasattr(inference, "evaluate_model1_payload"):
-            searches = mcts_session.run(
-                [int(game["search_key"]) for game in playable],
-                [game["state"] for game in playable],
-                inference,
-                visits=resolved_visits,
-                temperature=config.selfplay.temperature,
-                seed=17_000 + resolved_visits + positions,
-                virtual_batch_size=virtual_batch_size,
-                progressive_widening_initial_actions=config.selfplay.progressive_widening_initial_actions,
-                progressive_widening_child_initial_actions=config.selfplay.progressive_widening_child_initial_actions,
-                progressive_widening_candidate_actions=config.selfplay.progressive_widening_candidate_actions,
-                progressive_widening_growth_interval=config.selfplay.progressive_widening_growth_interval,
-                progressive_widening_growth_base=config.selfplay.progressive_widening_growth_base,
-                active_root_limit=config.selfplay.mcts_active_root_limit,
-            )
-        else:
-            searches = run_batched_mcts(
-                [game["state"] for game in playable],
-                inference,
-                visits=resolved_visits,
-                temperature=config.selfplay.temperature,
-                seed=17_000 + resolved_visits + positions,
-                virtual_batch_size=virtual_batch_size,
-                progressive_widening_initial_actions=config.selfplay.progressive_widening_initial_actions,
-                progressive_widening_child_initial_actions=config.selfplay.progressive_widening_child_initial_actions,
-                progressive_widening_candidate_actions=config.selfplay.progressive_widening_candidate_actions,
-                progressive_widening_growth_interval=config.selfplay.progressive_widening_growth_interval,
-                progressive_widening_growth_base=config.selfplay.progressive_widening_growth_base,
-                evaluation_cache=None,
-                active_root_limit=config.selfplay.mcts_active_root_limit,
-            )
+        searches = mcts_session.run(
+            [int(game["search_key"]) for game in playable],
+            [game["state"] for game in playable],
+            inference,
+            visits=resolved_visits,
+            temperature=config.selfplay.temperature,
+            seed=17_000 + resolved_visits + positions,
+            virtual_batch_size=virtual_batch_size,
+            progressive_widening_initial_actions=config.selfplay.progressive_widening_initial_actions,
+            progressive_widening_child_initial_actions=config.selfplay.progressive_widening_child_initial_actions,
+            progressive_widening_candidate_actions=config.selfplay.progressive_widening_candidate_actions,
+            progressive_widening_growth_interval=config.selfplay.progressive_widening_growth_interval,
+            progressive_widening_growth_base=config.selfplay.progressive_widening_growth_base,
+            root_dirichlet_alpha=(
+                config.selfplay.root_dirichlet_alpha
+                if config.selfplay.root_dirichlet_noise_enabled
+                else None
+            ),
+            root_dirichlet_noise_fraction=(
+                config.selfplay.root_dirichlet_noise_fraction
+                if config.selfplay.root_dirichlet_noise_enabled
+                else None
+            ),
+            hidden_prior_mass=config.selfplay.hidden_prior_mass,
+            fpu_reduction=config.selfplay.fpu_reduction,
+            virtual_loss=config.selfplay.virtual_loss,
+            active_root_limit=config.selfplay.mcts_active_root_limit,
+        )
         if searches:
             _extend_mcts_diagnostic_batches(mcts_diagnostic_batches, searches)
         for game, search in zip(playable, searches):
@@ -377,7 +377,13 @@ def _benchmark_selfplay_setting(
         "mcts_progressive_widening_candidate_actions": config.selfplay.progressive_widening_candidate_actions,
         "mcts_progressive_widening_growth_interval": config.selfplay.progressive_widening_growth_interval,
         "mcts_progressive_widening_growth_base": config.selfplay.progressive_widening_growth_base,
-        "mcts_evaluation_cache_max_states": config.selfplay.mcts_evaluation_cache_max_states,
+        "mcts_root_dirichlet_noise_enabled": config.selfplay.root_dirichlet_noise_enabled,
+        "mcts_root_dirichlet_alpha": config.selfplay.root_dirichlet_alpha,
+        "mcts_root_dirichlet_noise_fraction": config.selfplay.root_dirichlet_noise_fraction,
+        "mcts_hidden_prior_mass": config.selfplay.hidden_prior_mass,
+        "mcts_fpu_reduction": config.selfplay.fpu_reduction,
+        "mcts_virtual_loss": config.selfplay.virtual_loss,
+        "mcts_session_cache_max_states": config.selfplay.mcts_session_cache_max_states,
         "mcts_active_root_limit": config.selfplay.mcts_active_root_limit,
         "mcts_diagnostics": _summarize_mcts_diagnostic_batches(mcts_diagnostic_batches),
         "positions": int(positions),

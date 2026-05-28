@@ -47,7 +47,9 @@ class DenseCNNPlayer:
             progressive_widening_candidate_actions=self.trainer.config.selfplay.progressive_widening_candidate_actions,
             progressive_widening_growth_interval=self.trainer.config.selfplay.progressive_widening_growth_interval,
             progressive_widening_growth_base=self.trainer.config.selfplay.progressive_widening_growth_base,
-            evaluation_cache=None,
+            hidden_prior_mass=self.trainer.config.selfplay.hidden_prior_mass,
+            fpu_reduction=self.trainer.config.selfplay.fpu_reduction,
+            virtual_loss=self.trainer.config.selfplay.virtual_loss,
         )
         action = engine.PlacementAction(unpack_coord_id(search.action_id))
         return DecisionResult(

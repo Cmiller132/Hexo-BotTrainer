@@ -23,14 +23,13 @@ pub fn capabilities(py: Python<'_>) -> PyResult<Py<PyAny>> {
     dict.set_item("state_source", "direct_engine_state")?;
     dict.set_item("coordinate_encoding", "u32_i16_pair")?;
     dict.set_item("model1_batch_inputs", true)?;
-    dict.set_item("model1_batched_mcts", true)?;
     dict.set_item("model1_mcts_progressive_widening", true)?;
     dict.set_item(
         "model1_mcts_progressive_widening_reference",
         "Chaslot_2008_progressive_unpruning",
     )?;
-    dict.set_item("model1_mcts_evaluation_cache", true)?;
     dict.set_item("model1_mcts_tree_reuse_session", true)?;
+    dict.set_item("model1_mcts_session_search", true)?;
     dict.set_item(
         "model1_mcts_tree_reuse_reference",
         "KataGo_Search_makeMove_promote_child",
@@ -40,6 +39,11 @@ pub fn capabilities(py: Python<'_>) -> PyResult<Py<PyAny>> {
         "model1_mcts_lazy_staged_edges_reference",
         "KataGo_SearchNode_children0_1_2",
     )?;
+    dict.set_item("model1_mcts_root_dirichlet_noise", true)?;
+    dict.set_item("model1_mcts_hidden_prior_mass", true)?;
+    dict.set_item("model1_mcts_tactical_candidate_protection", true)?;
+    dict.set_item("model1_mcts_first_play_urgency", true)?;
+    dict.set_item("model1_mcts_virtual_loss", true)?;
     dict.set_item("model1_sample_from_state", true)?;
     dict.set_item("model1_finalize_game_samples", true)?;
     Ok(dict.into_any().unbind())

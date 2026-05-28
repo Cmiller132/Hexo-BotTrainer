@@ -57,6 +57,12 @@ class DenseCNNTrainer:
         self.mcts_progressive_widening_candidate_actions = config.selfplay.progressive_widening_candidate_actions
         self.mcts_progressive_widening_growth_interval = config.selfplay.progressive_widening_growth_interval
         self.mcts_progressive_widening_growth_base = config.selfplay.progressive_widening_growth_base
+        self.mcts_root_dirichlet_noise_enabled = config.selfplay.root_dirichlet_noise_enabled
+        self.mcts_root_dirichlet_noise_fraction = config.selfplay.root_dirichlet_noise_fraction
+        self.mcts_root_dirichlet_alpha = config.selfplay.root_dirichlet_alpha
+        self.mcts_hidden_prior_mass = config.selfplay.hidden_prior_mass
+        self.mcts_fpu_reduction = config.selfplay.fpu_reduction
+        self.mcts_virtual_loss = config.selfplay.virtual_loss
         self.mcts_active_root_limit = config.selfplay.mcts_active_root_limit
         self.training_batch_size = config.training.batch_size
         self.search_visits = config.selfplay.search_visits

@@ -15,12 +15,6 @@ DEFAULT_ACTIVE_ROOT_LIMIT = 1024
 DEFAULT_EVAL_CHUNK_STATES = 1024
 
 
-def new_mcts_evaluation_cache(*, max_states: int = 1_048_576) -> object:
-    """Create a native cache scoped to a single model-weight snapshot."""
-
-    return rust_bridge.model1_new_mcts_evaluation_cache(max_states=max_states)
-
-
 def new_mcts_session(*, max_states: int = 1_048_576) -> "BatchedMctsSession":
     """Create a native search session that keeps selected subtrees per game."""
 
@@ -58,6 +52,11 @@ class BatchedMctsSession:
         progressive_widening_candidate_actions: int | None = 128,
         progressive_widening_growth_interval: float | None = 256.0,
         progressive_widening_growth_base: float | None = 1.3,
+        root_dirichlet_alpha: float | None = None,
+        root_dirichlet_noise_fraction: float | None = None,
+        hidden_prior_mass: float | None = 0.05,
+        fpu_reduction: float | None = 0.20,
+        virtual_loss: float | None = 1.0,
         active_root_limit: int | None = None,
     ) -> list["SearchResult"]:
         if not root_states:
@@ -84,6 +83,11 @@ class BatchedMctsSession:
                         progressive_widening_candidate_actions=progressive_widening_candidate_actions,
                         progressive_widening_growth_interval=progressive_widening_growth_interval,
                         progressive_widening_growth_base=progressive_widening_growth_base,
+                        root_dirichlet_alpha=root_dirichlet_alpha,
+                        root_dirichlet_noise_fraction=root_dirichlet_noise_fraction,
+                        hidden_prior_mass=hidden_prior_mass,
+                        fpu_reduction=fpu_reduction,
+                        virtual_loss=virtual_loss,
                         active_root_limit=root_limit,
                     )
                 )
@@ -107,6 +111,11 @@ class BatchedMctsSession:
             progressive_widening_candidate_actions=progressive_widening_candidate_actions,
             progressive_widening_growth_interval=progressive_widening_growth_interval,
             progressive_widening_growth_base=progressive_widening_growth_base,
+            root_dirichlet_alpha=root_dirichlet_alpha,
+            root_dirichlet_noise_fraction=root_dirichlet_noise_fraction,
+            hidden_prior_mass=hidden_prior_mass,
+            fpu_reduction=fpu_reduction,
+            virtual_loss=virtual_loss,
             active_root_limit=root_limit,
         )
         return [_result_from_payload(payload) for payload in payloads]
@@ -161,7 +170,11 @@ def run_mcts(
     progressive_widening_candidate_actions: int | None = 128,
     progressive_widening_growth_interval: float | None = 256.0,
     progressive_widening_growth_base: float | None = 1.3,
-    evaluation_cache: object | None = None,
+    root_dirichlet_alpha: float | None = None,
+    root_dirichlet_noise_fraction: float | None = None,
+    hidden_prior_mass: float | None = 0.05,
+    fpu_reduction: float | None = 0.20,
+    virtual_loss: float | None = 1.0,
     active_root_limit: int | None = None,
 ) -> SearchResult:
     """Run a single-root dense CNN MCTS search in Rust."""
@@ -178,7 +191,11 @@ def run_mcts(
         progressive_widening_candidate_actions=progressive_widening_candidate_actions,
         progressive_widening_growth_interval=progressive_widening_growth_interval,
         progressive_widening_growth_base=progressive_widening_growth_base,
-        evaluation_cache=evaluation_cache,
+        root_dirichlet_alpha=root_dirichlet_alpha,
+        root_dirichlet_noise_fraction=root_dirichlet_noise_fraction,
+        hidden_prior_mass=hidden_prior_mass,
+        fpu_reduction=fpu_reduction,
+        virtual_loss=virtual_loss,
         active_root_limit=active_root_limit,
     )[0]
 
@@ -197,21 +214,27 @@ def run_batched_mcts(
     progressive_widening_candidate_actions: int | None = 128,
     progressive_widening_growth_interval: float | None = 256.0,
     progressive_widening_growth_base: float | None = 1.3,
-    evaluation_cache: object | None = None,
+    root_dirichlet_alpha: float | None = None,
+    root_dirichlet_noise_fraction: float | None = None,
+    hidden_prior_mass: float | None = 0.05,
+    fpu_reduction: float | None = 0.20,
+    virtual_loss: float | None = 1.0,
     active_root_limit: int | None = None,
 ) -> list[SearchResult]:
-    """Run dense CNN root searches through the required Rust accelerator."""
+    """Run dense CNN root searches through the native session path."""
 
     if not root_states:
         return []
     target_visits = max(1, int(visits))
     root_limit = max(1, int(active_root_limit or DEFAULT_ACTIVE_ROOT_LIMIT))
+    session = new_mcts_session()
     if len(root_states) > root_limit:
         results: list[SearchResult] = []
         for start in range(0, len(root_states), root_limit):
             chunk = root_states[start : start + root_limit]
             results.extend(
-                run_batched_mcts(
+                session.run(
+                    range(start, start + len(chunk)),
                     chunk,
                     inference,
                     visits=target_visits,
@@ -224,32 +247,36 @@ def run_batched_mcts(
                     progressive_widening_candidate_actions=progressive_widening_candidate_actions,
                     progressive_widening_growth_interval=progressive_widening_growth_interval,
                     progressive_widening_growth_base=progressive_widening_growth_base,
-                    evaluation_cache=evaluation_cache,
+                    root_dirichlet_alpha=root_dirichlet_alpha,
+                    root_dirichlet_noise_fraction=root_dirichlet_noise_fraction,
+                    hidden_prior_mass=hidden_prior_mass,
+                    fpu_reduction=fpu_reduction,
+                    virtual_loss=virtual_loss,
                     active_root_limit=root_limit,
                 )
             )
         return results
-    payloads = rust_bridge.model1_batched_mcts(
+    return session.run(
+        range(len(root_states)),
         root_states,
+        inference,
         visits=target_visits,
         c_puct=float(c_puct),
         temperature=float(temperature),
         seed=0 if seed is None else int(seed),
-        evaluator=inference.evaluate_model1_payload,
-        virtual_batch_size=_resolve_virtual_batch_size(
-            root_count=len(root_states),
-            visits=target_visits,
-            virtual_batch_size=virtual_batch_size,
-        ),
+        virtual_batch_size=virtual_batch_size,
         progressive_widening_initial_actions=progressive_widening_initial_actions,
         progressive_widening_child_initial_actions=progressive_widening_child_initial_actions,
         progressive_widening_candidate_actions=progressive_widening_candidate_actions,
         progressive_widening_growth_interval=progressive_widening_growth_interval,
         progressive_widening_growth_base=progressive_widening_growth_base,
-        evaluation_cache=evaluation_cache,
+        root_dirichlet_alpha=root_dirichlet_alpha,
+        root_dirichlet_noise_fraction=root_dirichlet_noise_fraction,
+        hidden_prior_mass=hidden_prior_mass,
+        fpu_reduction=fpu_reduction,
+        virtual_loss=virtual_loss,
         active_root_limit=root_limit,
     )
-    return [_result_from_payload(payload) for payload in payloads]
 
 
 def _resolve_virtual_batch_size(
@@ -266,12 +293,15 @@ def _resolve_virtual_batch_size(
 
 
 def _result_from_payload(payload: Mapping[str, Any]) -> SearchResult:
+    diagnostics = dict(payload.get("diagnostics", {}))
+    if "action_selection" in payload:
+        diagnostics["action_selection"] = str(payload["action_selection"])
     return SearchResult(
         action_id=int(payload["action_id"]),
         visit_policy=_visit_policy_from_payload(payload),
         root_value=float(payload["root_value"]),
         visits=int(payload["visits"]),
-        diagnostics=dict(payload.get("diagnostics", {})),
+        diagnostics=diagnostics,
     )
 
 

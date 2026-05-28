@@ -97,7 +97,9 @@ pub(crate) fn encode_model1_state_half_for_mcts(state: &RustHexoState) -> Model1
     let mut legal_coords = Vec::with_capacity(state.legal_move_count());
     state.write_legal_moves(&mut legal_coords);
     let all_legal_action_count = legal_coords.len();
+    let mut legal_action_ids = Vec::with_capacity(legal_coords.len());
     for coord in legal_coords {
+        legal_action_ids.push(pack_coord(coord));
         if let Some(flat) = model1_flat_index(coord, center) {
             set_half_plane(&mut half_planes, MODEL1_PLANE_LEGAL, flat, half_one());
         }
@@ -140,7 +142,7 @@ pub(crate) fn encode_model1_state_half_for_mcts(state: &RustHexoState) -> Model1
         planes: Vec::new(),
         half_planes,
         all_legal_action_count,
-        legal_action_ids: Vec::new(),
+        legal_action_ids,
         legal_flat_indices: Vec::new(),
         center,
     }

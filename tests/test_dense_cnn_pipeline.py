@@ -322,7 +322,13 @@ def test_dense_cnn_model1_config_writes_to_repo_level_run_and_checkpoint_paths()
     assert parsed.selfplay.progressive_widening_candidate_actions == 128
     assert parsed.selfplay.progressive_widening_growth_interval == pytest.approx(256.0)
     assert parsed.selfplay.progressive_widening_growth_base == pytest.approx(1.3)
-    assert parsed.selfplay.mcts_evaluation_cache_max_states == 1_048_576
+    assert parsed.selfplay.root_dirichlet_noise_enabled is True
+    assert parsed.selfplay.root_dirichlet_noise_fraction == pytest.approx(0.25)
+    assert parsed.selfplay.root_dirichlet_alpha == pytest.approx(0.03)
+    assert parsed.selfplay.hidden_prior_mass == pytest.approx(0.05)
+    assert parsed.selfplay.fpu_reduction == pytest.approx(0.20)
+    assert parsed.selfplay.virtual_loss == pytest.approx(1.0)
+    assert parsed.selfplay.mcts_session_cache_max_states == 1_048_576
     assert parsed.selfplay.mcts_active_root_limit == 1024
     assert parsed.samples.train_sample_count == 4096
     assert parsed.samples.capacity >= 200_000
@@ -742,18 +748,28 @@ def test_selfplay_keeps_mcts_samples_deeper_than_opening_before_rollout(
     rollout_batch_sizes: list[int] = []
     sampled_turns: list[tuple[str, int, int]] = []
 
-    def fake_run_batched_mcts(root_states: Sequence[object], inference: object, **kwargs: object) -> list[Any]:
-        _ = inference
-        mcts_batch_sizes.append(len(root_states))
-        return [
-            mcts_module.SearchResult(
-                action_id=int(engine.legal_action_ids(state)[0]),
-                visit_policy={int(engine.legal_action_ids(state)[0]): 1.0},
-                root_value=0.0,
-                visits=int(kwargs["visits"]),
-            )
-            for state in root_states
-        ]
+    class FakeMctsSession:
+        def discard(self, _game_key: int) -> None:
+            return
+
+        def run(
+            self,
+            _game_keys: Sequence[int],
+            root_states: Sequence[object],
+            inference: object,
+            **kwargs: object,
+        ) -> list[Any]:
+            _ = inference
+            mcts_batch_sizes.append(len(root_states))
+            return [
+                mcts_module.SearchResult(
+                    action_id=int(engine.legal_action_ids(state)[0]),
+                    visit_policy={int(engine.legal_action_ids(state)[0]): 1.0},
+                    root_value=0.0,
+                    visits=int(kwargs["visits"]),
+                )
+                for state in root_states
+            ]
 
     def fake_rollout(playable: list[dict[str, Any]], **_kwargs: object) -> list[int]:
         rollout_batch_sizes.append(len(playable))
@@ -785,7 +801,7 @@ def test_selfplay_keeps_mcts_samples_deeper_than_opening_before_rollout(
             metadata=dict(metadata),
         )
 
-    monkeypatch.setattr(selfplay_module, "run_batched_mcts", fake_run_batched_mcts)
+    monkeypatch.setattr(selfplay_module, "new_mcts_session", lambda **_kwargs: FakeMctsSession())
     monkeypatch.setattr(selfplay_module, "_policy_rollout_actions", fake_rollout)
     monkeypatch.setattr(selfplay_module, "sample_from_state", fake_sample_from_state)
 
@@ -829,19 +845,29 @@ def test_selfplay_rejects_under_counted_mcts_results(
         ),
     )
 
-    def fake_run_batched_mcts(root_states: Sequence[object], inference: object, **_kwargs: object) -> list[Any]:
-        _ = inference
-        return [
-            mcts_module.SearchResult(
-                action_id=int(engine.legal_action_ids(state)[0]),
-                visit_policy={int(engine.legal_action_ids(state)[0]): 1.0},
-                root_value=0.0,
-                visits=7,
-            )
-            for state in root_states
-        ]
+    class FakeMctsSession:
+        def discard(self, _game_key: int) -> None:
+            return
 
-    monkeypatch.setattr(selfplay_module, "run_batched_mcts", fake_run_batched_mcts)
+        def run(
+            self,
+            _game_keys: Sequence[int],
+            root_states: Sequence[object],
+            inference: object,
+            **_kwargs: object,
+        ) -> list[Any]:
+            _ = inference
+            return [
+                mcts_module.SearchResult(
+                    action_id=int(engine.legal_action_ids(state)[0]),
+                    visit_policy={int(engine.legal_action_ids(state)[0]): 1.0},
+                    root_value=0.0,
+                    visits=7,
+                )
+                for state in root_states
+            ]
+
+    monkeypatch.setattr(selfplay_module, "new_mcts_session", lambda **_kwargs: FakeMctsSession())
 
     with pytest.raises(RuntimeError, match="expected exactly 8"):
         selfplay_module.generate_selfplay_epoch(

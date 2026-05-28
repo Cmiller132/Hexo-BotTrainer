@@ -17,112 +17,18 @@ use hexo_engine::PackedCoord;
 use super::constants::{MODEL1_ACTIVE_ROOT_LIMIT, MODEL1_EVAL_CACHE_MAX_STATES};
 use super::mcts_eval::{
     evaluate_model1_state_refs_cached, evaluate_model1_states_cached, new_shared_evaluation_cache,
-    new_shared_evaluation_stats, state_hash, EvaluationStats, Model1MctsEvaluationCache,
-    RustEvaluationRequest, SharedEvaluationCache, SharedEvaluationStats,
+    new_shared_evaluation_stats, state_hash, EvaluationStats, RustEvaluationRequest,
+    SharedEvaluationCache, SharedEvaluationStats,
 };
 use super::mcts_tree::{
-    select_root_action, terminal_value, ProgressiveWideningConfig, RustLeaf, RustSearch,
-    RustSearchDiagnostics,
+    terminal_value, ProgressiveWideningConfig, RootDirichletNoise, RustEdge, RustLeaf, RustNode,
+    RustSearch, RustSearchDiagnostics,
 };
 use super::state::states_from_py_states;
 
 struct RootSelectionWork {
     leaves: Vec<RustLeaf>,
     made_progress: bool,
-}
-
-#[pyfunction(signature = (states, visits, c_puct, temperature, seed, evaluator, virtual_batch_size=None, progressive_widening_initial_actions=None, progressive_widening_child_initial_actions=None, progressive_widening_growth_interval=None, progressive_widening_growth_base=None, progressive_widening_candidate_actions=None, evaluation_cache=None, active_root_limit=None))]
-pub fn model1_batched_mcts(
-    py: Python<'_>,
-    states: &Bound<'_, PyAny>,
-    visits: u32,
-    c_puct: f32,
-    temperature: f32,
-    seed: u64,
-    evaluator: &Bound<'_, PyAny>,
-    virtual_batch_size: Option<u32>,
-    progressive_widening_initial_actions: Option<u32>,
-    progressive_widening_child_initial_actions: Option<u32>,
-    progressive_widening_growth_interval: Option<f32>,
-    progressive_widening_growth_base: Option<f32>,
-    progressive_widening_candidate_actions: Option<u32>,
-    evaluation_cache: Option<PyRef<'_, Model1MctsEvaluationCache>>,
-    active_root_limit: Option<usize>,
-) -> PyResult<Py<PyAny>> {
-    let roots = states_from_py_states(py, states)?;
-    if roots.is_empty() {
-        return Ok(PyTuple::empty(py).into_any().unbind());
-    }
-    let root_limit = active_root_limit.unwrap_or(MODEL1_ACTIVE_ROOT_LIMIT).max(1);
-    if roots.len() > root_limit {
-        return Err(PyValueError::new_err(format!(
-            "dense_cnn MCTS received {} active roots, above strict limit {}",
-            roots.len(),
-            root_limit
-        )));
-    }
-
-    let target_visits = visits.max(1);
-    let leaf_batch_per_root = virtual_batch_size.unwrap_or(target_visits).max(1);
-    let widening = progressive_widening_initial_actions
-        .filter(|count| *count > 0)
-        .and_then(|count| {
-            ProgressiveWideningConfig::new(
-                count as usize,
-                progressive_widening_child_initial_actions.unwrap_or(count) as usize,
-                progressive_widening_growth_interval.unwrap_or(256.0),
-                progressive_widening_growth_base.unwrap_or(1.3),
-            )
-        });
-    let (evaluation_cache, cache_max_states) = if let Some(cache) = evaluation_cache.as_ref() {
-        (cache.shared_cache(), cache.max_state_count())
-    } else {
-        (new_shared_evaluation_cache(), MODEL1_EVAL_CACHE_MAX_STATES)
-    };
-    let evaluation_stats = new_shared_evaluation_stats();
-    let prior_candidate_limit =
-        progressive_widening_candidate_actions.map(|count| count.max(1) as usize);
-    let root_evals = evaluate_model1_states_cached(
-        py,
-        evaluator,
-        &roots,
-        &evaluation_cache,
-        Some(&evaluation_stats),
-        prior_candidate_limit,
-        cache_max_states,
-    )?;
-    let mut searches: Vec<RustSearch> = roots
-        .into_iter()
-        .zip(root_evals.iter())
-        .map(|(state, eval)| RustSearch::new(state, eval, target_visits, widening))
-        .collect();
-
-    if searches.iter().any(RustSearch::root_edges_empty) {
-        return Err(PyValueError::new_err("MCTS root has no legal actions"));
-    }
-
-    run_searches_to_targets(
-        py,
-        evaluator,
-        &mut searches,
-        c_puct,
-        leaf_batch_per_root,
-        &evaluation_cache,
-        &evaluation_stats,
-        prior_candidate_limit,
-        cache_max_states,
-    )?;
-    let cache_len = evaluation_cache.borrow().len();
-    let evaluation_stats = evaluation_stats.borrow().clone();
-    let batch_diagnostics = build_batch_diagnostics(
-        py,
-        &searches,
-        &evaluation_stats,
-        target_visits,
-        leaf_batch_per_root,
-        cache_len,
-    )?;
-    build_search_result_payloads(py, &searches, &batch_diagnostics, temperature, seed, None)
 }
 
 #[pyclass(unsendable)]
@@ -157,7 +63,7 @@ impl Model1MctsSession {
         self.searches.len()
     }
 
-    #[pyo3(signature = (game_keys, states, visits, c_puct, temperature, seed, evaluator, virtual_batch_size=None, progressive_widening_initial_actions=None, progressive_widening_child_initial_actions=None, progressive_widening_growth_interval=None, progressive_widening_growth_base=None, progressive_widening_candidate_actions=None, active_root_limit=None))]
+    #[pyo3(signature = (game_keys, states, visits, c_puct, temperature, seed, evaluator, virtual_batch_size=None, progressive_widening_initial_actions=None, progressive_widening_child_initial_actions=None, progressive_widening_growth_interval=None, progressive_widening_growth_base=None, progressive_widening_candidate_actions=None, active_root_limit=None, root_dirichlet_alpha=None, root_dirichlet_noise_fraction=None, hidden_prior_mass=None, fpu_reduction=None, virtual_loss=None))]
     fn search(
         &mut self,
         py: Python<'_>,
@@ -175,7 +81,13 @@ impl Model1MctsSession {
         progressive_widening_growth_base: Option<f32>,
         progressive_widening_candidate_actions: Option<u32>,
         active_root_limit: Option<usize>,
+        root_dirichlet_alpha: Option<f32>,
+        root_dirichlet_noise_fraction: Option<f32>,
+        hidden_prior_mass: Option<f32>,
+        fpu_reduction: Option<f32>,
+        virtual_loss: Option<f32>,
     ) -> PyResult<Py<PyAny>> {
+        validate_search_inputs(c_puct, temperature)?;
         let roots = states_from_py_states(py, states)?;
         if roots.is_empty() {
             return Ok(PyTuple::empty(py).into_any().unbind());
@@ -211,6 +123,9 @@ impl Model1MctsSession {
         let prior_candidate_limit =
             progressive_widening_candidate_actions.map(|count| count.max(1) as usize);
         let evaluation_stats = new_shared_evaluation_stats();
+        let hidden_prior_mass = sanitize_fraction(hidden_prior_mass.unwrap_or(0.05), 0.95);
+        let fpu_reduction = sanitize_nonnegative(fpu_reduction.unwrap_or(0.20));
+        let virtual_loss = sanitize_nonnegative(virtual_loss.unwrap_or(1.0));
 
         let mut searches: Vec<Option<RustSearch>> = Vec::with_capacity(roots.len());
         let mut missing_indices = Vec::new();
@@ -220,6 +135,11 @@ impl Model1MctsSession {
             if let Some(mut search) = self.searches.remove(game_key) {
                 if search.root_hash == root_hash {
                     search.set_additional_visits(target_visits);
+                    if let Some(noise) =
+                        root_noise(root_dirichlet_alpha, root_dirichlet_noise_fraction, seed, index)
+                    {
+                        search.apply_root_dirichlet_noise(noise);
+                    }
                     searches.push(Some(search));
                     continue;
                 }
@@ -244,7 +164,20 @@ impl Model1MctsSession {
                 .zip(missing_roots.into_iter())
                 .zip(root_evals.iter())
             {
-                searches[index] = Some(RustSearch::new(root, evaluation, target_visits, widening));
+                searches[index] = Some(RustSearch::new(
+                    root,
+                    evaluation,
+                    target_visits,
+                    widening,
+                    hidden_prior_mass,
+                    fpu_reduction,
+                    root_noise(
+                        root_dirichlet_alpha,
+                        root_dirichlet_noise_fraction,
+                        seed,
+                        index,
+                    ),
+                ));
             }
         }
 
@@ -270,6 +203,7 @@ impl Model1MctsSession {
             &evaluation_stats,
             prior_candidate_limit,
             self.cache_max_states,
+            virtual_loss,
         )?;
         let cache_len = self.evaluation_cache.borrow().len();
         let evaluation_stats = evaluation_stats.borrow().clone();
@@ -285,7 +219,12 @@ impl Model1MctsSession {
             .iter()
             .enumerate()
             .map(|(index, search)| {
-                select_root_action(search.root(), temperature, seed.wrapping_add(index as u64))
+                select_search_action(
+                    search,
+                    baselines.get(index),
+                    temperature,
+                    seed.wrapping_add(index as u64),
+                )
             })
             .collect();
         let results = build_search_result_payloads(
@@ -323,6 +262,7 @@ fn run_searches_to_targets(
     evaluation_stats: &SharedEvaluationStats,
     prior_candidate_limit: Option<usize>,
     cache_max_states: usize,
+    virtual_loss: f32,
 ) -> PyResult<()> {
     // Each outer pass gathers several pending leaves per root, evaluates the
     // unique uncached states as one Python/Torch batch, and then backs values
@@ -348,16 +288,26 @@ fn run_searches_to_targets(
                     let Some(selected) = selected else {
                         break;
                     };
-                    search.apply_virtual_visit(&selected.path);
+                    search.apply_virtual_visit(&selected.path, virtual_loss);
                     made_progress = true;
 
                     if let Some(outcome) = selected.terminal {
                         let leaf_player = selected.state.current_player();
                         let leaf_value = terminal_value(outcome, leaf_player);
-                        search.backup_virtual(&selected.path, leaf_player, leaf_value);
+                        search.backup_virtual(
+                            &selected.path,
+                            leaf_player,
+                            leaf_value,
+                            virtual_loss,
+                        );
                     } else if let Some(node_id) = selected.existing_node {
                         let node = &search.nodes[node_id];
-                        search.backup_virtual(&selected.path, node.player, node.value());
+                        search.backup_virtual(
+                            &selected.path,
+                            node.player,
+                            node.value(),
+                            virtual_loss,
+                        );
                     } else {
                         search.mark_pending(selected.parent_node, selected.edge_index, 1);
                         leaves.push(RustLeaf {
@@ -408,7 +358,7 @@ fn run_searches_to_targets(
                 search.mark_pending(leaf.parent_node, leaf.edge_index, -1);
                 let child_player = search.nodes[child_id].player;
                 let child_value = search.nodes[child_id].value();
-                search.backup_virtual(&leaf.path, child_player, child_value);
+                search.backup_virtual(&leaf.path, child_player, child_value, virtual_loss);
             }
         }
 
@@ -432,36 +382,22 @@ fn build_search_result_payloads(
         let result = PyDict::new(py);
         let root = search.root();
         let baseline = baselines.and_then(|items| items.get(index));
-        let policy_total: u32 = root
-            .edges
-            .iter()
-            .map(|edge| {
-                let before = baseline
-                    .and_then(|visits| visits.get(&edge.action_id).copied())
-                    .unwrap_or(0);
-                edge.visits.saturating_sub(before)
-            })
-            .sum();
-        let mut policy_action_ids = Vec::with_capacity(root.edges.len());
-        let mut policy_weights = Vec::with_capacity(root.edges.len());
-        for edge in &root.edges {
-            let before = baseline
-                .and_then(|visits| visits.get(&edge.action_id).copied())
-                .unwrap_or(0);
-            let visits = edge.visits.saturating_sub(before);
-            if baseline.is_some() && visits == 0 {
-                continue;
-            }
-            let weight = if policy_total > 0 {
-                visits as f32 / policy_total as f32
-            } else {
-                edge.prior
-            };
-            policy_action_ids.push(edge.action_id);
-            policy_weights.push(weight);
-        }
-        let selected = select_root_action(root, temperature, seed.wrapping_add(index as u64));
+        let (policy_action_ids, policy_weights, policy_total) = visit_policy(root, baseline);
+        let selected = select_action_from_policy(
+            &policy_action_ids,
+            &policy_weights,
+            temperature,
+            seed.wrapping_add(index as u64),
+        );
         result.set_item("action_id", selected.unwrap_or(0))?;
+        result.set_item(
+            "action_selection",
+            if baseline.is_some() {
+                "delta_visit_policy"
+            } else {
+                "cumulative_visit_policy"
+            },
+        )?;
         let action_byte_len = policy_action_ids.len() * std::mem::size_of::<u32>();
         let weight_byte_len = policy_weights.len() * std::mem::size_of::<f32>();
         let action_bytes = unsafe {
@@ -478,16 +414,150 @@ fn build_search_result_payloads(
         result.set_item("visit_policy_count", policy_action_ids.len())?;
         result.set_item("root_value", root.value())?;
         result.set_item("visits", policy_total)?;
-        if index == 0 {
-            result.set_item(
-                "diagnostics",
-                build_result_diagnostics(py, &search.diagnostics(), batch_diagnostics)?,
-            )?;
-        }
+        result.set_item(
+            "diagnostics",
+            build_result_diagnostics(py, &search.diagnostics(), batch_diagnostics)?,
+        )?;
         results.append(result)?;
     }
 
     Ok(results.into_any().unbind())
+}
+
+fn validate_search_inputs(c_puct: f32, temperature: f32) -> PyResult<()> {
+    if !c_puct.is_finite() || c_puct <= 0.0 {
+        return Err(PyValueError::new_err("c_puct must be finite and > 0"));
+    }
+    if !temperature.is_finite() || temperature < 0.0 {
+        return Err(PyValueError::new_err("temperature must be finite and >= 0"));
+    }
+    Ok(())
+}
+
+fn sanitize_fraction(value: f32, max_value: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(0.0, max_value)
+    } else {
+        0.0
+    }
+}
+
+fn sanitize_nonnegative(value: f32) -> f32 {
+    if value.is_finite() {
+        value.max(0.0)
+    } else {
+        0.0
+    }
+}
+
+fn root_noise(
+    alpha: Option<f32>,
+    fraction: Option<f32>,
+    seed: u64,
+    index: usize,
+) -> Option<RootDirichletNoise> {
+    let alpha = alpha.unwrap_or(0.0);
+    let fraction = fraction.unwrap_or(0.0);
+    if !alpha.is_finite() || !fraction.is_finite() || alpha <= 0.0 || fraction <= 0.0 {
+        return None;
+    }
+    Some(RootDirichletNoise {
+        alpha,
+        fraction: fraction.clamp(0.0, 1.0),
+        seed: seed.wrapping_add((index as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)),
+    })
+}
+
+fn select_search_action(
+    search: &RustSearch,
+    baseline: Option<&HashMap<PackedCoord, u32>>,
+    temperature: f32,
+    seed: u64,
+) -> Option<PackedCoord> {
+    let (action_ids, weights, _total) = visit_policy(search.root(), baseline);
+    select_action_from_policy(&action_ids, &weights, temperature, seed)
+}
+
+fn visit_policy(
+    root: &RustNode,
+    baseline: Option<&HashMap<PackedCoord, u32>>,
+) -> (Vec<PackedCoord>, Vec<f32>, u32) {
+    let policy_total: u32 = root
+        .edges
+        .iter()
+        .map(|edge| edge_delta_visits(edge, baseline))
+        .sum();
+    let mut policy_action_ids = Vec::with_capacity(root.edges.len());
+    let mut policy_weights = Vec::with_capacity(root.edges.len());
+    for edge in &root.edges {
+        let visits = edge_delta_visits(edge, baseline);
+        if baseline.is_some() && visits == 0 {
+            continue;
+        }
+        let weight = if policy_total > 0 {
+            visits as f32 / policy_total as f32
+        } else {
+            edge.prior
+        };
+        policy_action_ids.push(edge.action_id);
+        policy_weights.push(weight);
+    }
+    (policy_action_ids, policy_weights, policy_total)
+}
+
+fn edge_delta_visits(edge: &RustEdge, baseline: Option<&HashMap<PackedCoord, u32>>) -> u32 {
+    let before = baseline
+        .and_then(|visits| visits.get(&edge.action_id).copied())
+        .unwrap_or(0);
+    edge.visits.saturating_sub(before)
+}
+
+fn select_action_from_policy(
+    action_ids: &[PackedCoord],
+    weights: &[f32],
+    temperature: f32,
+    seed: u64,
+) -> Option<PackedCoord> {
+    if action_ids.is_empty() || weights.is_empty() {
+        return None;
+    }
+    if temperature <= 1.0e-6 {
+        return action_ids
+            .iter()
+            .copied()
+            .zip(weights.iter().copied())
+            .max_by(|left, right| {
+                left.1
+                    .partial_cmp(&right.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| right.0.cmp(&left.0))
+            })
+            .map(|(action_id, _)| action_id);
+    }
+    let inv_temperature = 1.0 / temperature.max(1.0e-3);
+    let mut total = 0.0f64;
+    let mut adjusted = Vec::with_capacity(weights.len());
+    for weight in weights {
+        let value = weight.max(1.0e-12).powf(inv_temperature) as f64;
+        total += value;
+        adjusted.push(value);
+    }
+    let mut threshold = random_unit(seed) * total;
+    for (action_id, weight) in action_ids.iter().copied().zip(adjusted) {
+        threshold -= weight;
+        if threshold <= 0.0 {
+            return Some(action_id);
+        }
+    }
+    action_ids.last().copied()
+}
+
+fn random_unit(seed: u64) -> f64 {
+    let mut value = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    value = (value ^ (value >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    value ^= value >> 31;
+    ((value >> 11) as f64) * (1.0 / ((1u64 << 53) as f64))
 }
 
 fn build_result_diagnostics<'py>(
@@ -603,8 +673,6 @@ fn build_batch_diagnostics<'py>(
 }
 
 pub fn register_pybridge(module: &Bound<'_, PyModule>) -> PyResult<()> {
-    module.add_class::<Model1MctsEvaluationCache>()?;
     module.add_class::<Model1MctsSession>()?;
-    module.add_function(wrap_pyfunction!(model1_batched_mcts, module)?)?;
     Ok(())
 }

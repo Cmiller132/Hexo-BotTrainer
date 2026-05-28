@@ -93,13 +93,10 @@ def test_rust_bridge_forwards_live_states_without_history_conversion(monkeypatch
     evaluator = object()
     calls: dict[str, Any] = {}
 
-    class FakeDenseCnnRust:
-        def model1_batch_inputs(self, states: tuple[object, ...]) -> dict[str, Any]:
-            calls["batch_states"] = states
-            return {"ok": True}
-
-        def model1_batched_mcts(
+    class FakeSession:
+        def search(
             self,
+            game_keys: tuple[int, ...],
             states: tuple[object, ...],
             visits: int,
             c_puct: float,
@@ -112,10 +109,16 @@ def test_rust_bridge_forwards_live_states_without_history_conversion(monkeypatch
             progressive_widening_growth_interval: float | None,
             progressive_widening_growth_base: float | None,
             progressive_widening_candidate_actions: int | None,
-            evaluation_cache: object | None,
             active_root_limit: int | None,
+            root_dirichlet_alpha: float | None,
+            root_dirichlet_noise_fraction: float | None,
+            hidden_prior_mass: float | None,
+            fpu_reduction: float | None,
+            virtual_loss: float | None,
         ) -> tuple[dict[str, Any], ...]:
             calls["mcts"] = {
+                "session": self,
+                "game_keys": game_keys,
                 "states": states,
                 "visits": visits,
                 "c_puct": c_puct,
@@ -128,10 +131,25 @@ def test_rust_bridge_forwards_live_states_without_history_conversion(monkeypatch
                 "progressive_widening_candidate_actions": progressive_widening_candidate_actions,
                 "progressive_widening_growth_interval": progressive_widening_growth_interval,
                 "progressive_widening_growth_base": progressive_widening_growth_base,
-                "evaluation_cache": evaluation_cache,
                 "active_root_limit": active_root_limit,
+                "root_dirichlet_alpha": root_dirichlet_alpha,
+                "root_dirichlet_noise_fraction": root_dirichlet_noise_fraction,
+                "hidden_prior_mass": hidden_prior_mass,
+                "fpu_reduction": fpu_reduction,
+                "virtual_loss": virtual_loss,
             }
             return ({"action_id": 7, "visit_policy": ((7, 1.0),), "root_value": 0.0, "visits": visits},)
+
+    class FakeDenseCnnRust:
+        def model1_batch_inputs(self, states: tuple[object, ...]) -> dict[str, Any]:
+            calls["batch_states"] = states
+            return {"ok": True}
+
+        def Model1MctsSession(self, max_states: int | None) -> object:
+            calls["session_max_states"] = max_states
+            session = FakeSession()
+            calls["session"] = session
+            return session
 
     monkeypatch.setattr(rust_bridge, "_dense_cnn_module", lambda: FakeDenseCnnRust())
     monkeypatch.setattr(
@@ -141,7 +159,10 @@ def test_rust_bridge_forwards_live_states_without_history_conversion(monkeypatch
     )
 
     assert rust_bridge.model1_batch_inputs([state_a, state_b]) == {"ok": True}
-    payloads = rust_bridge.model1_batched_mcts(
+    session = rust_bridge.model1_new_mcts_session(max_states=99)
+    payloads = rust_bridge.model1_mcts_session_search(
+        session,
+        [123],
         [state_a],
         visits=5,
         c_puct=2.0,
@@ -152,7 +173,10 @@ def test_rust_bridge_forwards_live_states_without_history_conversion(monkeypatch
     )
 
     assert calls["batch_states"] == (state_a, state_b)
+    assert calls["session_max_states"] == 99
     assert calls["mcts"] == {
+        "session": session,
+        "game_keys": (123,),
         "states": (state_a,),
         "visits": 5,
         "c_puct": 2.0,
@@ -165,8 +189,12 @@ def test_rust_bridge_forwards_live_states_without_history_conversion(monkeypatch
         "progressive_widening_candidate_actions": None,
         "progressive_widening_growth_interval": None,
         "progressive_widening_growth_base": None,
-        "evaluation_cache": None,
         "active_root_limit": None,
+        "root_dirichlet_alpha": None,
+        "root_dirichlet_noise_fraction": None,
+        "hidden_prior_mass": None,
+        "fpu_reduction": None,
+        "virtual_loss": None,
     }
     assert payloads[0]["action_id"] == 7
 

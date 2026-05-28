@@ -107,46 +107,6 @@ impl RustEvaluationCache {
 pub(crate) type SharedEvaluationCache = Rc<RefCell<RustEvaluationCache>>;
 pub(crate) type SharedEvaluationStats = Rc<RefCell<EvaluationStats>>;
 
-#[pyclass(unsendable)]
-pub(crate) struct Model1MctsEvaluationCache {
-    cache: SharedEvaluationCache,
-    max_states: usize,
-}
-
-#[pymethods]
-impl Model1MctsEvaluationCache {
-    #[new]
-    #[pyo3(signature = (max_states=None))]
-    fn new(max_states: Option<usize>) -> Self {
-        Self {
-            cache: new_shared_evaluation_cache(),
-            max_states: max_states.unwrap_or(MODEL1_EVAL_CACHE_MAX_STATES).max(1),
-        }
-    }
-
-    fn clear(&self) {
-        self.cache.borrow_mut().clear();
-    }
-
-    fn len(&self) -> usize {
-        self.cache.borrow().len()
-    }
-
-    fn max_states(&self) -> usize {
-        self.max_states
-    }
-}
-
-impl Model1MctsEvaluationCache {
-    pub(crate) fn shared_cache(&self) -> SharedEvaluationCache {
-        self.cache.clone()
-    }
-
-    pub(crate) fn max_state_count(&self) -> usize {
-        self.max_states
-    }
-}
-
 pub(crate) fn new_shared_evaluation_cache() -> SharedEvaluationCache {
     Rc::new(RefCell::new(RustEvaluationCache::default()))
 }
@@ -334,10 +294,14 @@ fn evaluate_model1_states_chunk(
                     let Some(coord) = model1_coord_from_flat(flat as usize, row.center) else {
                         continue;
                     };
+                    let action_id = pack_coord(coord);
+                    if !row.legal_action_ids.contains(&action_id) {
+                        continue;
+                    }
                     let prior = read_f32(prior_bytes, selected_index)
                         .unwrap_or(0.0)
                         .max(0.0);
-                    row_priors.push((pack_coord(coord), prior));
+                    row_priors.push((action_id, prior));
                 }
                 finalize_model_priors(
                     &mut row_priors,
@@ -600,7 +564,18 @@ fn finalize_model_priors(
         .map(|count| count.max(1).min(legal_action_count))
         .unwrap_or(legal_action_count);
     if already_ranked {
-        priors.truncate(limit);
+        let mut filtered = Vec::with_capacity(priors.len().min(limit));
+        let mut seen = HashSet::with_capacity(priors.len().min(limit));
+        for (action_id, prior) in priors.drain(..) {
+            if !seen.insert(action_id) {
+                continue;
+            }
+            filtered.push((action_id, prior));
+            if filtered.len() == limit {
+                break;
+            }
+        }
+        *priors = filtered;
         renormalize_priors(priors);
         return;
     }

@@ -685,7 +685,7 @@ Dense CNN's production path calls the model-local Rust accelerator:
 ```text
 hexo_models.dense_cnn.mcts
   -> hexo_models.dense_cnn.rust_bridge
-  -> hexo_models._rust.dense_cnn.model1_batched_mcts
+  -> hexo_models._rust.dense_cnn.Model1MctsSession.search
 ```
 
 The reason is practical: dense CNN needs model-specific 13-plane/41x41
@@ -1248,7 +1248,7 @@ CLI
            -> DenseCNNInference
            -> dense_cnn.selfplay active game loop
               -> run_batched_mcts
-                 -> hexo_models._rust.dense_cnn.model1_batched_mcts
+                 -> hexo_models._rust.dense_cnn.Model1MctsSession.search
                     -> clone live engine states through the capsule
                     -> encode_model1_state
                     -> Python evaluator callback

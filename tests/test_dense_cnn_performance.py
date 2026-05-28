@@ -66,6 +66,36 @@ def _skip_without_direct_state_rust(rust_bridge: Any) -> None:
         pytest.skip("dense_cnn direct-state Rust accelerator is not available in this checkout")
 
 
+def _run_raw_session_mcts(
+    rust_bridge: Any,
+    states: Sequence[object],
+    *,
+    evaluator: object,
+    session: object | None = None,
+    game_keys: Sequence[int] | None = None,
+    visits: int = 1,
+    c_puct: float = 1.5,
+    temperature: float = 0.0,
+    seed: int = 0,
+    virtual_batch_size: int | None = 1,
+    **kwargs: object,
+) -> tuple[Mapping[str, Any], ...]:
+    native_session = session or rust_bridge.model1_new_mcts_session(max_states=100)
+    keys = tuple(range(len(states))) if game_keys is None else tuple(int(key) for key in game_keys)
+    return rust_bridge.model1_mcts_session_search(
+        native_session,
+        keys,
+        tuple(states),
+        visits=int(visits),
+        c_puct=float(c_puct),
+        temperature=float(temperature),
+        seed=int(seed),
+        evaluator=evaluator,
+        virtual_batch_size=virtual_batch_size,
+        **kwargs,
+    )
+
+
 def _public_attr(module: Any, *names: str) -> Any:
     for name in names:
         if hasattr(module, name):
@@ -477,21 +507,28 @@ def test_selfplay_benchmark_counts_every_root_as_its_own_128_sim_search(monkeypa
 
     calls: list[int] = []
 
-    def fake_run_batched_mcts(root_states: Sequence[object], inference: object, **kwargs: object) -> list[Any]:
-        _ = inference
-        visits = int(kwargs["visits"])
-        calls.append(len(root_states))
-        return [
-            mcts_module.SearchResult(
-                action_id=int(engine.legal_action_ids(state)[0]),
-                visit_policy={int(engine.legal_action_ids(state)[0]): 1.0},
-                root_value=0.0,
-                visits=visits,
-            )
-            for state in root_states
-        ]
+    class FakeMctsSession:
+        def run(
+            self,
+            _game_keys: Sequence[int],
+            root_states: Sequence[object],
+            inference: object,
+            **kwargs: object,
+        ) -> list[Any]:
+            _ = inference
+            visits = int(kwargs["visits"])
+            calls.append(len(root_states))
+            return [
+                mcts_module.SearchResult(
+                    action_id=int(engine.legal_action_ids(state)[0]),
+                    visit_policy={int(engine.legal_action_ids(state)[0]): 1.0},
+                    root_value=0.0,
+                    visits=visits,
+                )
+                for state in root_states
+            ]
 
-    monkeypatch.setattr(mcts_module, "run_batched_mcts", fake_run_batched_mcts)
+    monkeypatch.setattr(mcts_module, "new_mcts_session", lambda **_kwargs: FakeMctsSession())
 
     result = performance_module._benchmark_selfplay_setting(
         inference=object(),
@@ -516,21 +553,28 @@ def test_selfplay_benchmark_reports_actual_searches_when_batch_overshoots_probe(
 
     calls: list[int] = []
 
-    def fake_run_batched_mcts(root_states: Sequence[object], inference: object, **kwargs: object) -> list[Any]:
-        _ = inference
-        visits = int(kwargs["visits"])
-        calls.append(len(root_states))
-        return [
-            mcts_module.SearchResult(
-                action_id=int(engine.legal_action_ids(state)[0]),
-                visit_policy={int(engine.legal_action_ids(state)[0]): 1.0},
-                root_value=0.0,
-                visits=visits,
-            )
-            for state in root_states
-        ]
+    class FakeMctsSession:
+        def run(
+            self,
+            _game_keys: Sequence[int],
+            root_states: Sequence[object],
+            inference: object,
+            **kwargs: object,
+        ) -> list[Any]:
+            _ = inference
+            visits = int(kwargs["visits"])
+            calls.append(len(root_states))
+            return [
+                mcts_module.SearchResult(
+                    action_id=int(engine.legal_action_ids(state)[0]),
+                    visit_policy={int(engine.legal_action_ids(state)[0]): 1.0},
+                    root_value=0.0,
+                    visits=visits,
+                )
+                for state in root_states
+            ]
 
-    monkeypatch.setattr(mcts_module, "run_batched_mcts", fake_run_batched_mcts)
+    monkeypatch.setattr(mcts_module, "new_mcts_session", lambda **_kwargs: FakeMctsSession())
 
     result = performance_module._benchmark_selfplay_setting(
         inference=object(),
@@ -600,14 +644,18 @@ def test_dense_cnn_rust_capabilities_smoke() -> None:
     assert capabilities["model_family"] == "dense_cnn"
     assert capabilities["state_source"] == "direct_engine_state"
     assert capabilities["model1_batch_inputs"] is True
-    assert capabilities["model1_batched_mcts"] is True
     assert capabilities["model1_mcts_progressive_widening"] is True
     assert capabilities["model1_mcts_progressive_widening_reference"] == "Chaslot_2008_progressive_unpruning"
-    assert capabilities["model1_mcts_evaluation_cache"] is True
     assert capabilities["model1_mcts_tree_reuse_session"] is True
+    assert capabilities["model1_mcts_session_search"] is True
     assert capabilities["model1_mcts_tree_reuse_reference"] == "KataGo_Search_makeMove_promote_child"
     assert capabilities["model1_mcts_lazy_staged_edges"] is True
     assert capabilities["model1_mcts_lazy_staged_edges_reference"] == "KataGo_SearchNode_children0_1_2"
+    assert capabilities["model1_mcts_root_dirichlet_noise"] is True
+    assert capabilities["model1_mcts_hidden_prior_mass"] is True
+    assert capabilities["model1_mcts_tactical_candidate_protection"] is True
+    assert capabilities["model1_mcts_first_play_urgency"] is True
+    assert capabilities["model1_mcts_virtual_loss"] is True
     assert capabilities["model1_sample_from_state"] is True
     assert "model1_sample_from_history" not in capabilities
     assert capabilities["coordinate_encoding"] == "u32_i16_pair"
@@ -630,7 +678,8 @@ def test_dense_cnn_rust_mcts_uses_model_local_accelerator() -> None:
             "priors_bytes": struct.pack(f"{priors}f", *([1.0] * priors)),
         }
 
-    first = rust_bridge.model1_batched_mcts(
+    first = _run_raw_session_mcts(
+        rust_bridge,
         [state],
         visits=3,
         c_puct=1.5,
@@ -639,7 +688,8 @@ def test_dense_cnn_rust_mcts_uses_model_local_accelerator() -> None:
         evaluator=evaluator,
         virtual_batch_size=2,
     )[0]
-    second = rust_bridge.model1_batched_mcts(
+    second = _run_raw_session_mcts(
+        rust_bridge,
         [state],
         visits=3,
         c_puct=1.5,
@@ -680,7 +730,8 @@ def test_dense_cnn_rust_mcts_initial_progressive_widening_uses_top_128_priors() 
             "selected_row_offsets": (0, 128),
         }
 
-    result = rust_bridge.model1_batched_mcts(
+    result = _run_raw_session_mcts(
+        rust_bridge,
         [state],
         visits=1,
         c_puct=1.5,
@@ -740,7 +791,8 @@ def test_dense_cnn_rust_mcts_keeps_authoritative_legal_actions_outside_dense_cro
             "selected_row_offsets": tuple(0 for _ in range(rows + 1)),
         }
 
-    result = rust_bridge.model1_batched_mcts(
+    result = _run_raw_session_mcts(
+        rust_bridge,
         [state],
         visits=1,
         c_puct=1.5,
@@ -803,7 +855,8 @@ def test_dense_cnn_rust_mcts_keeps_out_of_crop_legal_actions_hidden_when_topk_is
             "selected_row_offsets": (0, 4),
         }
 
-    result = rust_bridge.model1_batched_mcts(
+    result = _run_raw_session_mcts(
+        rust_bridge,
         [state],
         visits=1,
         c_puct=1.5,
@@ -826,13 +879,13 @@ def test_dense_cnn_rust_mcts_keeps_out_of_crop_legal_actions_hidden_when_topk_is
     assert hidden > len(in_crop_legal) - active
 
 
-def test_dense_cnn_rust_mcts_evaluation_cache_keys_candidate_limit() -> None:
+def test_dense_cnn_rust_mcts_session_cache_keys_candidate_limit() -> None:
     engine = importlib.import_module("hexo_engine")
     rust_bridge = importlib.import_module("hexo_models.dense_cnn.rust_bridge")
     _skip_without_direct_state_rust(rust_bridge)
 
     state = engine.new_game()
-    cache = rust_bridge.model1_new_mcts_evaluation_cache(max_states=100)
+    session = rust_bridge.model1_new_mcts_session(max_states=100)
     calls: list[int] = []
 
     def evaluator(payload: Mapping[str, Any]) -> Mapping[str, object]:
@@ -846,8 +899,11 @@ def test_dense_cnn_rust_mcts_evaluation_cache_keys_candidate_limit() -> None:
         }
 
     for candidate_limit in (1, 1, 3, 3):
-        rust_bridge.model1_batched_mcts(
+        _run_raw_session_mcts(
+            rust_bridge,
             [state],
+            session=session,
+            game_keys=[0],
             visits=1,
             c_puct=1.5,
             temperature=0.0,
@@ -859,7 +915,6 @@ def test_dense_cnn_rust_mcts_evaluation_cache_keys_candidate_limit() -> None:
             progressive_widening_candidate_actions=candidate_limit,
             progressive_widening_growth_interval=40.0,
             progressive_widening_growth_base=1.3,
-            evaluation_cache=cache,
         )
 
     assert calls[:2] == [1, 1]
@@ -943,7 +998,8 @@ def test_dense_cnn_rust_mcts_rejects_short_compact_evaluator_payloads() -> None:
         }
 
     with pytest.raises(ValueError, match="values_bytes"):
-        rust_bridge.model1_batched_mcts(
+        _run_raw_session_mcts(
+            rust_bridge,
             [engine.new_game()],
             visits=1,
             c_puct=1.5,
@@ -974,7 +1030,8 @@ def test_dense_cnn_rust_mcts_deduplicates_duplicate_roots_without_mutating_live_
             "priors_bytes": struct.pack(f"{priors}f", *([1.0] * priors)),
         }
 
-    results = rust_bridge.model1_batched_mcts(
+    results = _run_raw_session_mcts(
+        rust_bridge,
         [state, state],
         visits=1,
         c_puct=1.5,
@@ -1000,7 +1057,8 @@ def test_dense_cnn_rust_mcts_rejects_batches_above_strict_active_root_limit() ->
         raise AssertionError("active-root guard should run before evaluation")
 
     with pytest.raises(ValueError, match="above strict limit"):
-        rust_bridge.model1_batched_mcts(
+        _run_raw_session_mcts(
+            rust_bridge,
             [engine.new_game(), engine.new_game(), engine.new_game()],
             visits=1,
             c_puct=1.5,
@@ -1019,7 +1077,7 @@ def test_dense_cnn_batched_mcts_requires_rust_and_does_not_fallback(monkeypatch:
     def unavailable(*_args: object, **_kwargs: object) -> object:
         raise RuntimeError("dense_cnn Rust accelerator is unavailable")
 
-    monkeypatch.setattr(rust_bridge, "model1_batched_mcts", unavailable)
+    monkeypatch.setattr(rust_bridge, "model1_new_mcts_session", unavailable)
 
     class FakeInference:
         evaluate_model1_payload = object()
@@ -1047,7 +1105,11 @@ def test_dense_cnn_mcts_python_boundary_delegates_to_rust(monkeypatch: pytest.Mo
     class FakeInference:
         evaluate_model1_payload = object()
 
-    def fake_model1_batched_mcts(
+    native_session = object()
+
+    def fake_model1_mcts_session_search(
+        session: object,
+        game_keys: Sequence[int],
         states: Sequence[object],
         *,
         visits: int,
@@ -1061,11 +1123,17 @@ def test_dense_cnn_mcts_python_boundary_delegates_to_rust(monkeypatch: pytest.Mo
         progressive_widening_candidate_actions: int | None,
         progressive_widening_growth_interval: float | None,
         progressive_widening_growth_base: float | None,
-        evaluation_cache: object | None,
         active_root_limit: int | None,
+        root_dirichlet_alpha: float | None,
+        root_dirichlet_noise_fraction: float | None,
+        hidden_prior_mass: float | None,
+        fpu_reduction: float | None,
+        virtual_loss: float | None,
     ) -> tuple[Mapping[str, Any], ...]:
         calls.append(
             {
+                "session": session,
+                "game_keys": tuple(game_keys),
                 "states": states,
                 "visits": visits,
                 "c_puct": c_puct,
@@ -1078,8 +1146,12 @@ def test_dense_cnn_mcts_python_boundary_delegates_to_rust(monkeypatch: pytest.Mo
                 "progressive_widening_candidate_actions": progressive_widening_candidate_actions,
                 "progressive_widening_growth_interval": progressive_widening_growth_interval,
                 "progressive_widening_growth_base": progressive_widening_growth_base,
-                "evaluation_cache": evaluation_cache,
                 "active_root_limit": active_root_limit,
+                "root_dirichlet_alpha": root_dirichlet_alpha,
+                "root_dirichlet_noise_fraction": root_dirichlet_noise_fraction,
+                "hidden_prior_mass": hidden_prior_mass,
+                "fpu_reduction": fpu_reduction,
+                "virtual_loss": virtual_loss,
             }
         )
         return (
@@ -1091,7 +1163,8 @@ def test_dense_cnn_mcts_python_boundary_delegates_to_rust(monkeypatch: pytest.Mo
             },
         )
 
-    monkeypatch.setattr(rust_bridge, "model1_batched_mcts", fake_model1_batched_mcts)
+    monkeypatch.setattr(rust_bridge, "model1_new_mcts_session", lambda **_kwargs: native_session)
+    monkeypatch.setattr(rust_bridge, "model1_mcts_session_search", fake_model1_mcts_session_search)
     monkeypatch.setattr(
         engine,
         "to_python_state",
@@ -1117,6 +1190,8 @@ def test_dense_cnn_mcts_python_boundary_delegates_to_rust(monkeypatch: pytest.Mo
     )
     assert calls == [
         {
+            "session": native_session,
+            "game_keys": (0,),
             "states": [state],
             "visits": 3,
             "c_puct": 2.0,
@@ -1129,8 +1204,12 @@ def test_dense_cnn_mcts_python_boundary_delegates_to_rust(monkeypatch: pytest.Mo
             "progressive_widening_candidate_actions": 128,
             "progressive_widening_growth_interval": 256.0,
             "progressive_widening_growth_base": 1.3,
-            "evaluation_cache": None,
             "active_root_limit": 1024,
+            "root_dirichlet_alpha": None,
+            "root_dirichlet_noise_fraction": None,
+            "hidden_prior_mass": 0.05,
+            "fpu_reduction": 0.20,
+            "virtual_loss": 1.0,
         }
     ]
 
@@ -1164,7 +1243,12 @@ def test_dense_cnn_mcts_chunks_active_roots_before_rust_boundary(monkeypatch: py
     class FakeInference:
         evaluate_model1_payload = object()
 
-    def fake_model1_batched_mcts(states: Sequence[object], **kwargs: object) -> tuple[Mapping[str, Any], ...]:
+    def fake_model1_mcts_session_search(
+        _session: object,
+        _game_keys: Sequence[int],
+        states: Sequence[object],
+        **kwargs: object,
+    ) -> tuple[Mapping[str, Any], ...]:
         calls.append((len(states), int(kwargs["seed"])))
         visits = int(kwargs["visits"])
         return tuple(
@@ -1177,7 +1261,8 @@ def test_dense_cnn_mcts_chunks_active_roots_before_rust_boundary(monkeypatch: py
             for index, _state in enumerate(states)
         )
 
-    monkeypatch.setattr(rust_bridge, "model1_batched_mcts", fake_model1_batched_mcts)
+    monkeypatch.setattr(rust_bridge, "model1_new_mcts_session", lambda **_kwargs: object())
+    monkeypatch.setattr(rust_bridge, "model1_mcts_session_search", fake_model1_mcts_session_search)
 
     results = mcts_module.run_batched_mcts(
         [object() for _ in range(5)],
@@ -1200,7 +1285,12 @@ def test_dense_cnn_mcts_defaults_to_production_active_root_limit(monkeypatch: py
     class FakeInference:
         evaluate_model1_payload = object()
 
-    def fake_model1_batched_mcts(states: Sequence[object], **kwargs: object) -> tuple[Mapping[str, Any], ...]:
+    def fake_model1_mcts_session_search(
+        _session: object,
+        _game_keys: Sequence[int],
+        states: Sequence[object],
+        **kwargs: object,
+    ) -> tuple[Mapping[str, Any], ...]:
         calls.append((len(states), kwargs.get("active_root_limit")))
         visits = int(kwargs["visits"])
         return tuple(
@@ -1213,7 +1303,8 @@ def test_dense_cnn_mcts_defaults_to_production_active_root_limit(monkeypatch: py
             for _state in states
         )
 
-    monkeypatch.setattr(rust_bridge, "model1_batched_mcts", fake_model1_batched_mcts)
+    monkeypatch.setattr(rust_bridge, "model1_new_mcts_session", lambda **_kwargs: object())
+    monkeypatch.setattr(rust_bridge, "model1_mcts_session_search", fake_model1_mcts_session_search)
 
     results = mcts_module.run_batched_mcts(
         [object() for _ in range(1025)],

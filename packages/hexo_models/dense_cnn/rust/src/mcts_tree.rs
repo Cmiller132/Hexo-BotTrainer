@@ -11,8 +11,8 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
 use hexo_engine::{
-    apply_placement, unpack_coord, GameOutcome, HexCoord, HexoState as RustHexoState, PackedCoord,
-    Placement, Player,
+    apply_placement, pack_coord, unpack_coord, GameOutcome, HexCoord,
+    HexoState as RustHexoState, PackedCoord, Placement, Player,
 };
 use hexo_utils::StateHash;
 
@@ -78,6 +78,13 @@ impl ProgressiveWideningConfig {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RootDirichletNoise {
+    pub(crate) alpha: f32,
+    pub(crate) fraction: f32,
+    pub(crate) seed: u64,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct RustEdge {
     pub(crate) action_id: PackedCoord,
@@ -95,6 +102,14 @@ impl RustEdge {
             0.0
         } else {
             self.value_sum / self.visits as f32
+        }
+    }
+
+    fn value_or_fpu(&self, parent_value: f32, fpu_reduction: f32) -> f32 {
+        if self.visits == 0 {
+            parent_value - fpu_reduction
+        } else {
+            self.value()
         }
     }
 }
@@ -125,6 +140,7 @@ pub(crate) struct RustNode {
     pub(crate) player: Player,
     pub(crate) eval_value: f32,
     pub(crate) total_legal_actions: usize,
+    pub(crate) hidden_prior_per_action: f32,
     pub(crate) visits: u32,
     pub(crate) value_sum: f32,
     pub(crate) edges: Vec<RustEdge>,
@@ -170,6 +186,8 @@ pub(crate) struct RustSearch {
     pub(crate) target_visits: u32,
     pub(crate) completed_visits: u32,
     widening: Option<ProgressiveWideningConfig>,
+    hidden_prior_mass: f32,
+    fpu_reduction: f32,
     active_edge_count: usize,
     hidden_prior_count: usize,
     max_active_edges_per_node: usize,
@@ -202,9 +220,18 @@ impl RustSearch {
         evaluation: &RustEvaluation,
         target_visits: u32,
         widening: Option<ProgressiveWideningConfig>,
+        hidden_prior_mass: f32,
+        fpu_reduction: f32,
+        root_noise: Option<RootDirichletNoise>,
     ) -> Self {
         let root_hash = state_hash(&root_state);
-        let root_node = node_from_evaluation(root_hash, &root_state, evaluation, widening, true);
+        let root_node = node_from_evaluation(
+            root_hash,
+            &root_state,
+            evaluation,
+            hidden_prior_mass,
+            root_noise,
+        );
         let root_hidden = root_node.hidden_action_count();
         let mut node_table = HashMap::new();
         node_table.insert(root_hash, 0);
@@ -216,12 +243,49 @@ impl RustSearch {
             target_visits,
             completed_visits: 0,
             widening,
+            hidden_prior_mass,
+            fpu_reduction,
             active_edge_count: 0,
             hidden_prior_count: root_hidden,
             max_active_edges_per_node: 0,
             max_hidden_priors_per_node: root_hidden,
             widened_edges_total: 0,
         }
+    }
+
+    pub(crate) fn apply_root_dirichlet_noise(&mut self, noise: RootDirichletNoise) {
+        let root = &mut self.nodes[0];
+        let count = root.edges.len() + root.unexpanded_priors.len();
+        if count == 0 || noise.alpha <= 0.0 || noise.fraction <= 0.0 {
+            return;
+        }
+        let samples = dirichlet_samples(count, noise);
+        let visible_total: f32 = root
+            .edges
+            .iter()
+            .map(|edge| edge.prior.max(0.0))
+            .chain(
+                root.unexpanded_priors
+                    .iter()
+                    .map(|candidate| candidate.prior.max(0.0)),
+            )
+            .filter(|prior| prior.is_finite())
+            .sum();
+        let fraction = noise.fraction.clamp(0.0, 1.0);
+        let mut sample_index = 0usize;
+        for edge in &mut root.edges {
+            edge.prior =
+                (1.0 - fraction) * edge.prior + fraction * samples[sample_index] * visible_total;
+            sample_index += 1;
+        }
+        for candidate in &mut root.unexpanded_priors {
+            candidate.prior =
+                (1.0 - fraction) * candidate.prior
+                    + fraction * samples[sample_index] * visible_total;
+            sample_index += 1;
+        }
+        root.unexpanded_priors.sort_by(compare_prior_candidate);
+        root.unexpanded_priors.reverse();
     }
 
     pub(crate) fn root_edges_empty(&self) -> bool {
@@ -263,7 +327,7 @@ impl RustSearch {
             return existing;
         }
         let id = self.nodes.len();
-        let node = node_from_evaluation(hash, state, evaluation, self.widening, false);
+        let node = node_from_evaluation(hash, state, evaluation, self.hidden_prior_mass, None);
         let hidden = node.hidden_action_count();
         self.hidden_prior_count += hidden;
         self.max_hidden_priors_per_node = self.max_hidden_priors_per_node.max(hidden);
@@ -380,12 +444,14 @@ impl RustSearch {
     ) -> Option<usize> {
         let node = &self.nodes[node_id];
         let exploration_scale = c_puct * (node.visits.max(1) as f32).sqrt();
+        let parent_value = node.value();
         let mut best: Option<(usize, f32, u32, PackedCoord)> = None;
         for (index, edge) in node.edges.iter().enumerate() {
             if edge.pending > 0 && edge.child.is_none() {
                 continue;
             }
-            let score = edge.value() + edge.prior * exploration_scale / (1.0 + edge.visits as f32);
+            let score = edge.value_or_fpu(parent_value, self.fpu_reduction)
+                + edge.prior * exploration_scale / (1.0 + edge.visits as f32);
             let candidate = (index, score, edge.visits, edge.action_id);
             let replace = match best {
                 Some(current) => compare_edge_score(candidate, current) == Ordering::Greater,
@@ -417,9 +483,11 @@ impl RustSearch {
                     self.record_materialized_edge(node_id);
                     return Some(edge_index);
                 }
-            } else if let Some(action_id) = next_lazy_legal_action_id(state, &self.nodes[node_id]) {
-                let fallback_prior = fallback_prior(&self.nodes[node_id]);
-                let score = fallback_prior * exploration_scale;
+            } else if let Some(action_id) =
+                next_lazy_legal_action_id(state, &self.nodes[node_id])
+            {
+                let hidden_prior = hidden_action_prior(&self.nodes[node_id]);
+                let score = hidden_prior * exploration_scale;
                 let candidate_key = (usize::MAX, score, 0, action_id);
                 let replace = match best {
                     Some(current) => {
@@ -432,7 +500,7 @@ impl RustSearch {
                     self.nodes[node_id].edges.push(
                         RustPriorCandidate {
                             action_id,
-                            prior: fallback_prior,
+                            prior: hidden_prior,
                         }
                         .into_edge(),
                     );
@@ -445,11 +513,13 @@ impl RustSearch {
         best.map(|item| item.0)
     }
 
-    pub(crate) fn apply_virtual_visit(&mut self, path: &[(usize, usize)]) {
+    pub(crate) fn apply_virtual_visit(&mut self, path: &[(usize, usize)], virtual_loss: f32) {
         self.completed_visits = self.completed_visits.saturating_add(1);
         for &(node_id, edge_index) in path {
             self.nodes[node_id].visits += 1;
+            self.nodes[node_id].value_sum -= virtual_loss;
             self.nodes[node_id].edges[edge_index].visits += 1;
+            self.nodes[node_id].edges[edge_index].value_sum -= virtual_loss;
         }
     }
 
@@ -458,6 +528,7 @@ impl RustSearch {
         path: &[(usize, usize)],
         leaf_player: Player,
         leaf_value: f32,
+        virtual_loss: f32,
     ) {
         for &(node_id, edge_index) in path {
             let value = if self.nodes[node_id].player == leaf_player {
@@ -465,8 +536,8 @@ impl RustSearch {
             } else {
                 -leaf_value
             };
-            self.nodes[node_id].value_sum += value;
-            self.nodes[node_id].edges[edge_index].value_sum += value;
+            self.nodes[node_id].value_sum += value + virtual_loss;
+            self.nodes[node_id].edges[edge_index].value_sum += value + virtual_loss;
         }
     }
 
@@ -627,8 +698,8 @@ fn node_from_evaluation(
     state_hash: StateHash,
     state: &RustHexoState,
     evaluation: &RustEvaluation,
-    widening: Option<ProgressiveWideningConfig>,
-    is_root: bool,
+    hidden_prior_mass: f32,
+    root_noise: Option<RootDirichletNoise>,
 ) -> RustNode {
     let mut candidates: Vec<_> = evaluation
         .priors
@@ -638,21 +709,37 @@ fn node_from_evaluation(
             prior: sanitize_prior(*prior),
         })
         .collect();
+    force_tactical_candidates(state, &mut candidates);
     candidates.sort_by(compare_prior_candidate);
     let mut seen_actions = HashSet::new();
     candidates.retain(|candidate| seen_actions.insert(candidate.action_id));
+    renormalize_candidate_priors(&mut candidates);
+    if let Some(noise) = root_noise {
+        apply_dirichlet_noise(&mut candidates, noise);
+    }
+    candidates.sort_by(compare_prior_candidate);
     candidates.reverse();
-    let total_legal_actions = if is_root {
-        evaluation.legal_action_count.max(candidates.len())
+    let total_legal_actions = evaluation.legal_action_count.max(candidates.len());
+    let hidden_count = total_legal_actions.saturating_sub(candidates.len());
+    let visible_mass = if hidden_count > 0 {
+        (1.0 - hidden_prior_mass.clamp(0.0, 0.95)).max(0.0)
     } else {
-        candidates.len()
+        1.0
     };
-    let _ = (widening, is_root);
+    for candidate in &mut candidates {
+        candidate.prior *= visible_mass;
+    }
+    let hidden_prior_per_action = if hidden_count > 0 {
+        hidden_prior_mass.clamp(0.0, 0.95) / hidden_count as f32
+    } else {
+        0.0
+    };
     RustNode {
         state_hash,
         player: state.current_player(),
         eval_value: evaluation.value.clamp(-1.0, 1.0),
         total_legal_actions,
+        hidden_prior_per_action,
         visits: 0,
         value_sum: 0.0,
         edges: Vec::new(),
@@ -660,7 +747,10 @@ fn node_from_evaluation(
     }
 }
 
-fn fallback_prior(node: &RustNode) -> f32 {
+fn hidden_action_prior(node: &RustNode) -> f32 {
+    if node.hidden_prior_per_action.is_finite() && node.hidden_prior_per_action > 0.0 {
+        return node.hidden_prior_per_action;
+    }
     let edge_min = node
         .edges
         .iter()
@@ -680,6 +770,173 @@ fn fallback_prior(node: &RustNode) -> f32 {
         1.0 / node.total_legal_actions as f32
     } else {
         0.0
+    }
+}
+
+fn force_tactical_candidates(state: &RustHexoState, candidates: &mut Vec<RustPriorCandidate>) {
+    let mut legal_ids = Vec::with_capacity(state.legal_move_count());
+    state.write_legal_action_ids(&mut legal_ids);
+    if legal_ids.is_empty() {
+        return;
+    }
+    let legal: HashSet<PackedCoord> = legal_ids.iter().copied().collect();
+    let current_player = state.current_player();
+    for action_id in immediate_winning_actions(state, current_player, &legal) {
+        upsert_tactical_prior(candidates, action_id, 2.0);
+    }
+    for action_id in opponent_block_actions(state, current_player, &legal) {
+        upsert_tactical_prior(candidates, action_id, 1.5);
+    }
+}
+
+fn immediate_winning_actions(
+    state: &RustHexoState,
+    player: Player,
+    legal: &HashSet<PackedCoord>,
+) -> Vec<PackedCoord> {
+    let mut wins = HashSet::new();
+    let opponent = player.other();
+    for entry in state.board().windows().entries() {
+        if entry.count(player) != 5 || entry.count(opponent) != 0 {
+            continue;
+        }
+        for coord in entry.empty_cells() {
+            let action_id = pack_coord(coord);
+            if legal.contains(&action_id) {
+                wins.insert(action_id);
+            }
+        }
+    }
+    let mut wins: Vec<_> = wins.into_iter().collect();
+    wins.sort_unstable();
+    wins
+}
+
+fn opponent_block_actions(
+    state: &RustHexoState,
+    current_player: Player,
+    legal: &HashSet<PackedCoord>,
+) -> Vec<PackedCoord> {
+    let opponent = current_player.other();
+    let mut blocks = HashSet::new();
+    for entry in state.board().windows().entries() {
+        if entry.count(opponent) != 5 || entry.count(current_player) != 0 {
+            continue;
+        }
+        for coord in entry.empty_cells() {
+            let action_id = pack_coord(coord);
+            if legal.contains(&action_id) {
+                blocks.insert(action_id);
+            }
+        }
+    }
+    let mut blocks: Vec<_> = blocks.into_iter().collect();
+    blocks.sort_unstable();
+    blocks
+}
+
+fn upsert_tactical_prior(
+    candidates: &mut Vec<RustPriorCandidate>,
+    action_id: PackedCoord,
+    tactical_prior: f32,
+) {
+    if let Some(candidate) = candidates
+        .iter_mut()
+        .find(|candidate| candidate.action_id == action_id)
+    {
+        candidate.prior = candidate.prior.max(tactical_prior);
+        return;
+    }
+    candidates.push(RustPriorCandidate {
+        action_id,
+        prior: tactical_prior,
+    });
+}
+
+fn apply_dirichlet_noise(candidates: &mut [RustPriorCandidate], noise: RootDirichletNoise) {
+    if candidates.is_empty() || noise.alpha <= 0.0 || noise.fraction <= 0.0 {
+        return;
+    }
+    let fraction = noise.fraction.clamp(0.0, 1.0);
+    if fraction <= 0.0 {
+        return;
+    }
+    let samples = dirichlet_samples(candidates.len(), noise);
+    for (candidate, sampled) in candidates.iter_mut().zip(samples) {
+        candidate.prior = (1.0 - fraction) * candidate.prior + fraction * sampled;
+    }
+}
+
+fn dirichlet_samples(count: usize, noise: RootDirichletNoise) -> Vec<f32> {
+    if count == 0 {
+        return Vec::new();
+    }
+    let mut sampler = DirichletSampler::new(noise.seed);
+    let mut samples = Vec::with_capacity(count);
+    let mut total = 0.0f64;
+    for _ in 0..count {
+        let value = sampler.gamma(noise.alpha.max(1.0e-4) as f64);
+        samples.push(value);
+        total += value;
+    }
+    if total <= 0.0 || !total.is_finite() {
+        return vec![1.0 / count as f32; count];
+    }
+    samples.into_iter().map(|sample| (sample / total) as f32).collect()
+}
+
+struct DirichletSampler {
+    state: u64,
+}
+
+impl DirichletSampler {
+    fn new(seed: u64) -> Self {
+        Self {
+            state: seed ^ 0xD1B5_4A32_D192_ED03,
+        }
+    }
+
+    fn uniform_open(&mut self) -> f64 {
+        let value = random_unit(self.next_u64()).clamp(f64::MIN_POSITIVE, 1.0 - f64::EPSILON);
+        value
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        self.state = self
+            .state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        self.state
+    }
+
+    fn normal(&mut self) -> f64 {
+        let u1 = self.uniform_open();
+        let u2 = self.uniform_open();
+        (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()
+    }
+
+    fn gamma(&mut self, alpha: f64) -> f64 {
+        if alpha < 1.0 {
+            let boosted = self.gamma(alpha + 1.0);
+            return boosted * self.uniform_open().powf(1.0 / alpha);
+        }
+        let d = alpha - 1.0 / 3.0;
+        let c = (1.0 / (9.0 * d)).sqrt();
+        loop {
+            let x = self.normal();
+            let v = 1.0 + c * x;
+            if v <= 0.0 {
+                continue;
+            }
+            let v3 = v * v * v;
+            let u = self.uniform_open();
+            if u < 1.0 - 0.0331 * x.powi(4) {
+                return d * v3;
+            }
+            if u.ln() < 0.5 * x * x + d * (1.0 - v3 + v3.ln()) {
+                return d * v3;
+            }
+        }
     }
 }
 
@@ -714,6 +971,28 @@ fn sanitize_prior(prior: f32) -> f32 {
     }
 }
 
+fn renormalize_candidate_priors(candidates: &mut [RustPriorCandidate]) {
+    let total: f32 = candidates
+        .iter()
+        .map(|candidate| candidate.prior.max(0.0))
+        .filter(|prior| prior.is_finite())
+        .sum();
+    if total <= 0.0 {
+        let uniform = if candidates.is_empty() {
+            0.0
+        } else {
+            1.0 / candidates.len() as f32
+        };
+        for candidate in candidates {
+            candidate.prior = uniform;
+        }
+        return;
+    }
+    for candidate in candidates {
+        candidate.prior = candidate.prior.max(0.0) / total;
+    }
+}
+
 fn compare_edge_score(
     left: (usize, f32, u32, PackedCoord),
     right: (usize, f32, u32, PackedCoord),
@@ -731,39 +1010,6 @@ pub(crate) fn terminal_value(outcome: GameOutcome, player: Player) -> f32 {
     } else {
         -1.0
     }
-}
-
-pub(crate) fn select_root_action(
-    node: &RustNode,
-    temperature: f32,
-    seed: u64,
-) -> Option<PackedCoord> {
-    if node.edges.is_empty() {
-        return None;
-    }
-    if temperature <= 1.0e-6 {
-        return node
-            .edges
-            .iter()
-            .max_by_key(|edge| (edge.visits, std::cmp::Reverse(edge.action_id)))
-            .map(|edge| edge.action_id);
-    }
-    let inv_temperature = 1.0 / temperature.max(1.0e-3);
-    let mut total = 0.0f64;
-    let mut weights = Vec::with_capacity(node.edges.len());
-    for edge in &node.edges {
-        let weight = (edge.visits.max(1) as f32).powf(inv_temperature) as f64;
-        total += weight;
-        weights.push(weight);
-    }
-    let mut threshold = random_unit(seed) * total;
-    for (edge, weight) in node.edges.iter().zip(weights) {
-        threshold -= weight;
-        if threshold <= 0.0 {
-            return Some(edge.action_id);
-        }
-    }
-    node.edges.last().map(|edge| edge.action_id)
 }
 
 fn random_unit(seed: u64) -> f64 {
@@ -803,7 +1049,8 @@ mod tests {
     fn progressive_widening_starts_with_top_initial_priors() {
         let config = ProgressiveWideningConfig::new(128, 32, 40.0, 1.3);
         let state = RustHexoState::new();
-        let node = node_from_evaluation(0, &state, &evaluation_with_priors(200), config, true);
+        let node = node_from_evaluation(0, &state, &evaluation_with_priors(200), 0.05, None);
+        let edge_limit = config.unwrap().edge_limit(0, node.total_legal_actions, true);
 
         assert_eq!(node.edges.len(), 0);
         assert_eq!(node.unexpanded_priors.len(), 200);
@@ -811,13 +1058,13 @@ mod tests {
             .unexpanded_priors
             .iter()
             .rev()
-            .take(128)
+            .take(edge_limit)
             .any(|prior| prior.action_id == pack_coord(HexCoord { q: 199, r: 0 })));
         assert!(!node
             .unexpanded_priors
             .iter()
             .rev()
-            .take(128)
+            .take(edge_limit)
             .any(|prior| prior.action_id == pack_coord(HexCoord { q: 0, r: 0 })));
     }
 
@@ -825,7 +1072,8 @@ mod tests {
     fn progressive_widening_materializes_edges_lazily_as_visits_grow() {
         let config = ProgressiveWideningConfig::new(128, 32, 40.0, 1.3);
         let state = RustHexoState::new();
-        let mut search = RustSearch::new(state, &evaluation_with_priors(300), 128, config);
+        let mut search =
+            RustSearch::new(state, &evaluation_with_priors(300), 128, config, 0.05, 0.20, None);
 
         let root_state = search.root_state.clone();
         assert_eq!(search.eligible_unmaterialized_count(0, &root_state), 128);
@@ -854,7 +1102,15 @@ mod tests {
     fn progressive_widening_uses_smaller_child_frontier() {
         let config = ProgressiveWideningConfig::new(128, 32, 40.0, 1.3);
         let state = RustHexoState::new();
-        let mut search = RustSearch::new(state.clone(), &evaluation_with_priors(200), 128, config);
+        let mut search = RustSearch::new(
+            state.clone(),
+            &evaluation_with_priors(200),
+            128,
+            config,
+            0.05,
+            0.20,
+            None,
+        );
 
         let child_id = search.add_node_from_eval(&state, 1, &evaluation_with_priors(200));
         let root_state = search.root_state.clone();

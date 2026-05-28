@@ -20,9 +20,14 @@ The advertised Rust capability payload includes:
 
 ```text
 model1_mcts_progressive_widening = true
-model1_mcts_evaluation_cache = true
 model1_mcts_tree_reuse_session = true
+model1_mcts_session_search = true
 model1_mcts_lazy_staged_edges = true
+model1_mcts_root_dirichlet_noise = true
+model1_mcts_hidden_prior_mass = true
+model1_mcts_tactical_candidate_protection = true
+model1_mcts_first_play_urgency = true
+model1_mcts_virtual_loss = true
 ```
 
 The dense-cnn MCTS path is intentionally model-owned. Python passes live engine
@@ -34,7 +39,7 @@ compact search result payload.
 
 At a high level, a search does this:
 
-1. Python calls `model1_batched_mcts(...)` or a `Model1MctsSession.search(...)`
+1. Python creates a `Model1MctsSession` and calls `Model1MctsSession.search(...)`
    through `dense_cnn.rust_bridge`.
 2. Rust clones each live `hexo_engine.HexoState` into a model-owned
    `RustHexoState`.
@@ -50,7 +55,7 @@ At a high level, a search does this:
    - compact visit-policy weight bytes
    - `root_value`
    - exact new visit count
-   - diagnostics for the first root
+   - diagnostics for each root
 
 The important ownership rule is that the live Python game is not mutated by
 MCTS. Search mutates cloned states and tree-local state only.
@@ -141,14 +146,13 @@ This makes the neural prior more influential. That is the point, but it also
 means bad priors can hide tactical moves longer unless candidate generation or
 widening parameters are generous enough.
 
-### Current Caveat
+### Current Legal-Space Behavior
 
-Root nodes currently track `evaluation.legal_action_count`, but non-root nodes
-currently set `total_legal_actions = candidates.len()`. In practice, that means
-lazy expansion beyond returned candidates is available at the root, but deeper
-nodes are candidate-pruned unless the evaluator returned the move. That should be
-an explicit design choice. If the intent is full-width eventual expansion at all
-depths, non-root nodes should also keep the full legal action count.
+Root and non-root nodes both preserve the evaluator's full legal action count.
+The ranked model candidates form the staged frontier, while remaining legal moves
+stay hidden and can be materialized lazily as widening allows. Tactical wins and
+blocks are force-included before candidate normalization so obvious one-ply moves
+are not dependent on the model top-k list.
 
 ## Evaluator Cache
 
@@ -188,13 +192,8 @@ RustEvaluationCache
   candidate_limit: Option<usize>
 ```
 
-The public Python-visible cache object is:
-
-```text
-Model1MctsEvaluationCache
-```
-
-The search session also owns a cache internally.
+The cache is owned by the native `Model1MctsSession`. There is no separate public
+Python-visible cache object.
 
 The cached key is `hexo_utils::hash_state(state)`. That hash is intended to be
 history-sensitive, not just board-equivalent. This matters because dense-cnn
@@ -641,4 +640,3 @@ reviewing the current implementation:
 4. Dense-cnn still has some Python wrapper/alternate-route code around session
    MCTS. If the goal is one production path, those wrapper checks should be
    trimmed.
-

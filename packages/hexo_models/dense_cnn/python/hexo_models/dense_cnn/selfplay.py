@@ -12,12 +12,9 @@ from hexo_runner.records import AbortRecord, HexoRecordFile, HexoRecordPlayer
 
 from .debug_artifacts import render_preview_game_actions
 from .inference import DenseCNNInference
-from .mcts import BatchedMctsSession, SearchResult, new_mcts_session, run_batched_mcts
+from .mcts import BatchedMctsSession, SearchResult, new_mcts_session
 from .performance import _extend_mcts_diagnostic_batches, _summarize_mcts_diagnostic_batches
 from .samples import CompressedSample, Model1SampleData, finalize_game_samples, sample_from_state
-
-_ORIGINAL_RUN_BATCHED_MCTS = run_batched_mcts
-
 
 def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_epoch: int) -> dict[str, Any]:
     trainer = components.model.trainer
@@ -98,7 +95,29 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
             config.selfplay.progressive_widening_growth_base,
         )
     )
-    mcts_session = new_mcts_session(max_states=config.selfplay.mcts_evaluation_cache_max_states)
+    root_noise_enabled = bool(
+        getattr(
+            trainer,
+            "mcts_root_dirichlet_noise_enabled",
+            config.selfplay.root_dirichlet_noise_enabled,
+        )
+    )
+    root_dirichlet_alpha = float(
+        getattr(trainer, "mcts_root_dirichlet_alpha", config.selfplay.root_dirichlet_alpha)
+    )
+    root_dirichlet_noise_fraction = float(
+        getattr(
+            trainer,
+            "mcts_root_dirichlet_noise_fraction",
+            config.selfplay.root_dirichlet_noise_fraction,
+        )
+    )
+    hidden_prior_mass = float(
+        getattr(trainer, "mcts_hidden_prior_mass", config.selfplay.hidden_prior_mass)
+    )
+    fpu_reduction = float(getattr(trainer, "mcts_fpu_reduction", config.selfplay.fpu_reduction))
+    virtual_loss = float(getattr(trainer, "mcts_virtual_loss", config.selfplay.virtual_loss))
+    mcts_session = new_mcts_session(max_states=config.selfplay.mcts_session_cache_max_states)
     active_root_limit = max(
         1,
         int(getattr(trainer, "mcts_active_root_limit", config.selfplay.mcts_active_root_limit)),
@@ -151,8 +170,14 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
                         progressive_widening_candidate_actions=progressive_widening_candidate_actions,
                         progressive_widening_growth_interval=progressive_widening_growth_interval,
                         progressive_widening_growth_base=progressive_widening_growth_base,
-                        evaluation_cache=None,
                         mcts_session=mcts_session,
+                        root_dirichlet_alpha=root_dirichlet_alpha if root_noise_enabled else None,
+                        root_dirichlet_noise_fraction=(
+                            root_dirichlet_noise_fraction if root_noise_enabled else None
+                        ),
+                        hidden_prior_mass=hidden_prior_mass,
+                        fpu_reduction=fpu_reduction,
+                        virtual_loss=virtual_loss,
                         active_root_limit=active_root_limit,
                     )
                     if searches:
@@ -309,7 +334,15 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
             "mcts_progressive_widening_candidate_actions": progressive_widening_candidate_actions,
             "mcts_progressive_widening_growth_interval": progressive_widening_growth_interval,
             "mcts_progressive_widening_growth_base": progressive_widening_growth_base,
-            "mcts_evaluation_cache_max_states": config.selfplay.mcts_evaluation_cache_max_states,
+            "mcts_root_dirichlet_noise_enabled": root_noise_enabled,
+            "mcts_root_dirichlet_alpha": root_dirichlet_alpha if root_noise_enabled else None,
+            "mcts_root_dirichlet_noise_fraction": (
+                root_dirichlet_noise_fraction if root_noise_enabled else None
+            ),
+            "mcts_hidden_prior_mass": hidden_prior_mass,
+            "mcts_fpu_reduction": fpu_reduction,
+            "mcts_virtual_loss": virtual_loss,
+            "mcts_session_cache_max_states": config.selfplay.mcts_session_cache_max_states,
             "mcts_active_root_limit": active_root_limit,
             "mcts_diagnostics": mcts_diagnostics,
         },
@@ -368,31 +401,18 @@ def _search_playable_games(
     progressive_widening_candidate_actions: int | None = None,
     progressive_widening_growth_interval: float | None = None,
     progressive_widening_growth_base: float | None = None,
-    evaluation_cache: object | None = None,
     mcts_session: BatchedMctsSession | None = None,
+    root_dirichlet_alpha: float | None = None,
+    root_dirichlet_noise_fraction: float | None = None,
+    hidden_prior_mass: float | None = None,
+    fpu_reduction: float | None = None,
+    virtual_loss: float | None = None,
     active_root_limit: int | None = None,
 ) -> list[SearchResult]:
-    if (
-        mcts_session is not None
-        and run_batched_mcts is _ORIGINAL_RUN_BATCHED_MCTS
-        and hasattr(inference, "evaluate_model1_payload")
-    ):
-        return mcts_session.run(
-            [int(game["search_key"]) for game in playable],
-            [game["state"] for game in playable],
-            inference,
-            visits=visits,
-            temperature=temperature,
-            seed=seed,
-            virtual_batch_size=virtual_batch_size,
-            progressive_widening_initial_actions=progressive_widening_initial_actions,
-            progressive_widening_child_initial_actions=progressive_widening_child_initial_actions,
-            progressive_widening_candidate_actions=progressive_widening_candidate_actions,
-            progressive_widening_growth_interval=progressive_widening_growth_interval,
-            progressive_widening_growth_base=progressive_widening_growth_base,
-            active_root_limit=active_root_limit,
-        )
-    return run_batched_mcts(
+    if mcts_session is None:
+        raise RuntimeError("dense_cnn self-play requires a native MCTS session")
+    return mcts_session.run(
+        [int(game["search_key"]) for game in playable],
         [game["state"] for game in playable],
         inference,
         visits=visits,
@@ -404,7 +424,11 @@ def _search_playable_games(
         progressive_widening_candidate_actions=progressive_widening_candidate_actions,
         progressive_widening_growth_interval=progressive_widening_growth_interval,
         progressive_widening_growth_base=progressive_widening_growth_base,
-        evaluation_cache=evaluation_cache,
+        root_dirichlet_alpha=root_dirichlet_alpha,
+        root_dirichlet_noise_fraction=root_dirichlet_noise_fraction,
+        hidden_prior_mass=hidden_prior_mass,
+        fpu_reduction=fpu_reduction,
+        virtual_loss=virtual_loss,
         active_root_limit=active_root_limit,
     )
 
