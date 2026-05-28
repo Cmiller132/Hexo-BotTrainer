@@ -20,8 +20,8 @@ from .config import Model1Config
 from .constants import BOARD_SIZE, INPUT_CHANNELS
 from .losses import model1_loss
 
-CALIBRATION_CACHE_VERSION = 5
-MCTS_BACKEND_SIGNATURE = "dense_cnn_katago_tree_reuse_staged_edges_bounded_cache_v1"
+CALIBRATION_CACHE_VERSION = 6
+MCTS_BACKEND_SIGNATURE = "dense_cnn_katago_tree_reuse_in_crop_staged_edges_v2"
 MCTS_EVAL_CHUNK_STATES = 1024
 
 

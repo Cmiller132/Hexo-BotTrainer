@@ -159,7 +159,6 @@ def _small_config() -> Any:
                 "max_grad_norm": 1.0,
             },
             "selfplay": {
-                "samples_per_epoch": 2,
                 "search_visits": 1,
                 "max_actions": 2,
             },
@@ -284,7 +283,6 @@ def _write_pipeline_config(tmp_path: Path) -> Path:
                 "compression_level = 1",
                 "",
                 "[model.config.selfplay]",
-                "samples_per_epoch = 1",
                 "search_visits = 1",
                 "max_actions = 2",
                 "temperature = 1.0",
@@ -834,7 +832,7 @@ def test_dense_cnn_rust_mcts_rejects_empty_candidate_limited_prior_rows() -> Non
         )
 
 
-def test_dense_cnn_rust_mcts_keeps_out_of_crop_legal_actions_hidden_when_topk_is_full() -> None:
+def test_dense_cnn_rust_mcts_excludes_out_of_crop_legal_actions_from_hidden_priors() -> None:
     engine = importlib.import_module("hexo_engine")
     engine_types = importlib.import_module("hexo_engine.types")
     rust_bridge = importlib.import_module("hexo_models.dense_cnn.rust_bridge")
@@ -895,8 +893,8 @@ def test_dense_cnn_rust_mcts_keeps_out_of_crop_legal_actions_hidden_when_topk_is
     active = int(root_diagnostics["root_active_edges"])
     hidden = int(root_diagnostics["root_hidden_priors"])
     assert active == 1
-    assert hidden == len(all_legal) - active
-    assert hidden > len(in_crop_legal) - active
+    assert hidden == len(in_crop_legal) - active
+    assert hidden < len(all_legal) - active
 
 
 def test_dense_cnn_rust_mcts_session_cache_keys_candidate_limit() -> None:

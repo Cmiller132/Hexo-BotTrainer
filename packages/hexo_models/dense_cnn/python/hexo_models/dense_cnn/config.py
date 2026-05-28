@@ -53,10 +53,8 @@ class Model1SampleConfig:
 
 @dataclass(frozen=True, slots=True)
 class Model1SelfPlayConfig:
-    samples_per_epoch: int = 4096
     search_visits: int = 128
-    active_games: int = 2048
-    min_mcts_samples_per_game: int = 32
+    active_games: int = 1024
     progressive_widening_initial_actions: int = 8
     progressive_widening_child_initial_actions: int = 4
     progressive_widening_candidate_actions: int = 128
@@ -88,7 +86,7 @@ class Model1PerformanceConfig:
     calibrate: bool = True
     target_selfplay_positions_per_second: float = 128.0
     inference_batch_candidates: tuple[int, ...] = (128, 256, 512, 1024)
-    selfplay_batch_candidates: tuple[int, ...] = (2048,)
+    selfplay_batch_candidates: tuple[int, ...] = (1024,)
     training_batch_candidates: tuple[int, ...] = (64, 128, 192, 256)
     mcts_virtual_batch_candidates: tuple[int, ...] = (4,)
     selfplay_probe_positions: int = 8192
@@ -159,10 +157,8 @@ def parse_model1_config(raw: Mapping[str, Any] | None) -> Model1Config:
         config,
         "selfplay",
         {
-            "samples_per_epoch",
             "search_visits",
             "active_games",
-            "min_mcts_samples_per_game",
             "progressive_widening_initial_actions",
             "progressive_widening_child_initial_actions",
             "progressive_widening_candidate_actions",
@@ -200,6 +196,41 @@ def parse_model1_config(raw: Mapping[str, Any] | None) -> Model1Config:
         },
     )
 
+    selfplay_config = Model1SelfPlayConfig(
+        search_visits=_positive_int(selfplay, "search_visits", 128),
+        active_games=_positive_int(selfplay, "active_games", 1024),
+        progressive_widening_initial_actions=_positive_int(selfplay, "progressive_widening_initial_actions", 8),
+        progressive_widening_child_initial_actions=_positive_int(selfplay, "progressive_widening_child_initial_actions", 4),
+        progressive_widening_candidate_actions=_positive_int(selfplay, "progressive_widening_candidate_actions", 128),
+        progressive_widening_growth_interval=_positive_float(selfplay, "progressive_widening_growth_interval", 256.0),
+        progressive_widening_growth_base=_greater_than_float(selfplay, "progressive_widening_growth_base", 1.3, minimum=1.0),
+        root_dirichlet_noise_enabled=_bool(selfplay, "root_dirichlet_noise_enabled", True),
+        root_dirichlet_noise_fraction=_bounded_float(selfplay, "root_dirichlet_noise_fraction", 0.25, minimum=0.0, maximum=1.0),
+        root_dirichlet_alpha=_positive_float(selfplay, "root_dirichlet_alpha", 0.03),
+        hidden_prior_mass=_bounded_float(selfplay, "hidden_prior_mass", 0.05, minimum=0.0, maximum=0.95),
+        fpu_reduction=_nonnegative_float(selfplay, "fpu_reduction", 0.20),
+        virtual_loss=_nonnegative_float(selfplay, "virtual_loss", 1.0),
+        mcts_session_cache_max_states=_positive_int(selfplay, "mcts_session_cache_max_states", 1_048_576),
+        mcts_active_root_limit=_positive_int(selfplay, "mcts_active_root_limit", 1024),
+        max_actions=_positive_int(selfplay, "max_actions", 1024),
+        temperature=_nonnegative_float(selfplay, "temperature", 1.0),
+    )
+    if selfplay_config.active_games > selfplay_config.mcts_active_root_limit:
+        raise ValueError("active_games must be <= mcts_active_root_limit")
+
+    performance_config = Model1PerformanceConfig(
+        calibrate=_bool(performance, "calibrate", True),
+        target_selfplay_positions_per_second=_positive_float(performance, "target_selfplay_positions_per_second", 128.0),
+        inference_batch_candidates=_positive_int_tuple(performance, "inference_batch_candidates", (128, 256, 512, 1024), non_empty=True),
+        selfplay_batch_candidates=_positive_int_tuple(performance, "selfplay_batch_candidates", (1024,), non_empty=True),
+        training_batch_candidates=_positive_int_tuple(performance, "training_batch_candidates", (64, 128, 192, 256), non_empty=True),
+        mcts_virtual_batch_candidates=_positive_int_tuple(performance, "mcts_virtual_batch_candidates", (4,), non_empty=True),
+        selfplay_probe_positions=_positive_int(performance, "selfplay_probe_positions", 8192),
+        probe_batches=_positive_int(performance, "probe_batches", 1),
+    )
+    if max(performance_config.selfplay_batch_candidates) > selfplay_config.mcts_active_root_limit:
+        raise ValueError("selfplay_batch_candidates must be <= mcts_active_root_limit")
+
     return Model1Config(
         architecture=Model1ArchitectureConfig(
             input_channels=_positive_int(arch, "input_channels", INPUT_CHANNELS),
@@ -225,27 +256,7 @@ def parse_model1_config(raw: Mapping[str, Any] | None) -> Model1Config:
             recency_halflife=_positive_float(samples, "recency_halflife", 50_000.0),
             compression_level=_int_range(samples, "compression_level", 6, minimum=0, maximum=9),
         ),
-        selfplay=Model1SelfPlayConfig(
-            samples_per_epoch=_positive_int(selfplay, "samples_per_epoch", 4096),
-            search_visits=_positive_int(selfplay, "search_visits", 128),
-            active_games=_positive_int(selfplay, "active_games", 2048),
-            min_mcts_samples_per_game=_positive_int(selfplay, "min_mcts_samples_per_game", 32),
-            progressive_widening_initial_actions=_positive_int(selfplay, "progressive_widening_initial_actions", 8),
-            progressive_widening_child_initial_actions=_positive_int(selfplay, "progressive_widening_child_initial_actions", 4),
-            progressive_widening_candidate_actions=_positive_int(selfplay, "progressive_widening_candidate_actions", 128),
-            progressive_widening_growth_interval=_positive_float(selfplay, "progressive_widening_growth_interval", 256.0),
-            progressive_widening_growth_base=_greater_than_float(selfplay, "progressive_widening_growth_base", 1.3, minimum=1.0),
-            root_dirichlet_noise_enabled=_bool(selfplay, "root_dirichlet_noise_enabled", True),
-            root_dirichlet_noise_fraction=_bounded_float(selfplay, "root_dirichlet_noise_fraction", 0.25, minimum=0.0, maximum=1.0),
-            root_dirichlet_alpha=_positive_float(selfplay, "root_dirichlet_alpha", 0.03),
-            hidden_prior_mass=_bounded_float(selfplay, "hidden_prior_mass", 0.05, minimum=0.0, maximum=0.95),
-            fpu_reduction=_nonnegative_float(selfplay, "fpu_reduction", 0.20),
-            virtual_loss=_nonnegative_float(selfplay, "virtual_loss", 1.0),
-            mcts_session_cache_max_states=_positive_int(selfplay, "mcts_session_cache_max_states", 1_048_576),
-            mcts_active_root_limit=_positive_int(selfplay, "mcts_active_root_limit", 1024),
-            max_actions=_positive_int(selfplay, "max_actions", 1024),
-            temperature=_nonnegative_float(selfplay, "temperature", 1.0),
-        ),
+        selfplay=selfplay_config,
         evaluation=Model1EvalConfig(
             games_per_epoch=_nonnegative_int(evaluation, "games_per_epoch", 64),
             sealbot_variant=str(evaluation.get("sealbot_variant", "best")),
@@ -253,16 +264,7 @@ def parse_model1_config(raw: Mapping[str, Any] | None) -> Model1Config:
             max_actions=_positive_int(evaluation, "max_actions", 1024),
             require_sealbot=_bool(evaluation, "require_sealbot", False),
         ),
-        performance=Model1PerformanceConfig(
-            calibrate=_bool(performance, "calibrate", True),
-            target_selfplay_positions_per_second=_positive_float(performance, "target_selfplay_positions_per_second", 128.0),
-            inference_batch_candidates=_positive_int_tuple(performance, "inference_batch_candidates", (128, 256, 512, 1024), non_empty=True),
-            selfplay_batch_candidates=_positive_int_tuple(performance, "selfplay_batch_candidates", (2048,), non_empty=True),
-            training_batch_candidates=_positive_int_tuple(performance, "training_batch_candidates", (64, 128, 192, 256), non_empty=True),
-            mcts_virtual_batch_candidates=_positive_int_tuple(performance, "mcts_virtual_batch_candidates", (4,), non_empty=True),
-            selfplay_probe_positions=_positive_int(performance, "selfplay_probe_positions", 8192),
-            probe_batches=_positive_int(performance, "probe_batches", 1),
-        ),
+        performance=performance_config,
         device=str(config.get("device", "cuda")),
         checkpoint_path=_optional_path(config.get("checkpoint_path")),
     )

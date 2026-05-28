@@ -10,7 +10,8 @@
 //! This module does not call Python and does not encode tensors. It consumes
 //! validated `RustEvaluation` values from `mcts_eval`, turns visible priors into
 //! staged edges, assigns hidden prior mass to legal actions that were not
-//! returned by the model, and performs PUCT selection/backups.
+//! returned by the model within the dense crop, and performs PUCT
+//! selection/backups.
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -23,6 +24,7 @@ use hexo_engine::{
 };
 use hexo_utils::StateHash;
 
+use super::encoding::{model1_crop_center, model1_flat_index};
 use super::mcts_eval::{state_hash, RustEvaluation};
 use super::state::move_error;
 
@@ -607,7 +609,7 @@ impl RustSearch {
         if !node.unexpanded_priors.is_empty() || node.edges.len() < node.total_legal_actions {
             return;
         }
-        let refreshed = state.legal_move_count().max(node.total_legal_actions);
+        let refreshed = in_crop_legal_action_count(state).max(node.total_legal_actions);
         if refreshed <= node.total_legal_actions {
             return;
         }
@@ -746,9 +748,11 @@ fn node_from_evaluation(
     hidden_prior_mass: f32,
     root_noise: Option<RootDirichletNoise>,
 ) -> PyResult<RustNode> {
-    // Model priors are only the visible frontier. Legal moves not present in the
-    // returned priors are represented as hidden actions with shared prior mass,
-    // so search can still discover them through progressive widening.
+    // Model priors are only the visible in-crop frontier. In-crop legal moves
+    // not present in the returned priors are represented as hidden actions with
+    // shared prior mass, so search can still discover them through progressive
+    // widening. Out-of-crop legal moves are ignored because the policy head
+    // cannot represent them.
     let mut candidates: Vec<_> = evaluation
         .priors
         .iter()
@@ -810,7 +814,15 @@ fn force_tactical_candidates(state: &RustHexoState, candidates: &mut Vec<RustPri
     if legal_ids.is_empty() {
         return;
     }
-    let legal: HashSet<PackedCoord> = legal_ids.iter().copied().collect();
+    let center = model1_crop_center(state);
+    let legal: HashSet<PackedCoord> = legal_ids
+        .iter()
+        .copied()
+        .filter(|action_id| model1_flat_index(unpack_coord(*action_id), center).is_some())
+        .collect();
+    if legal.is_empty() {
+        return;
+    }
     let current_player = state.current_player();
     for action_id in immediate_winning_actions(state, current_player, &legal) {
         upsert_tactical_prior(candidates, action_id, 2.0);
@@ -977,13 +989,25 @@ fn next_lazy_legal_action_id(state: &RustHexoState, node: &RustNode) -> Option<P
     }
     let mut legal_action_ids = Vec::with_capacity(node.total_legal_actions);
     state.write_legal_action_ids(&mut legal_action_ids);
+    let center = model1_crop_center(state);
     legal_action_ids.into_iter().find(|action_id| {
-        !node.edges.iter().any(|edge| edge.action_id == *action_id)
+        model1_flat_index(unpack_coord(*action_id), center).is_some()
+            && !node.edges.iter().any(|edge| edge.action_id == *action_id)
             && !node
                 .unexpanded_priors
                 .iter()
                 .any(|candidate| candidate.action_id == *action_id)
     })
+}
+
+fn in_crop_legal_action_count(state: &RustHexoState) -> usize {
+    let center = model1_crop_center(state);
+    let mut legal_action_ids = Vec::with_capacity(state.legal_move_count());
+    state.write_legal_action_ids(&mut legal_action_ids);
+    legal_action_ids
+        .into_iter()
+        .filter(|action_id| model1_flat_index(unpack_coord(*action_id), center).is_some())
+        .count()
 }
 
 fn compare_prior_candidate(left: &RustPriorCandidate, right: &RustPriorCandidate) -> Ordering {

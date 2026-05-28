@@ -6,10 +6,8 @@ VENV="${VENV:-/root/.venvs/hexo-bottrainer-wsl}"
 RUN_ROOT="${RUN_ROOT:-$ROOT/runs/dense_cnn_model1_wsl_smoke}"
 CHECKPOINT="${CHECKPOINT:-$ROOT/runs/dense_cnn_model1/checkpoints/epoch_000006.pt}"
 
-SELFPLAY_SAMPLES="${SELFPLAY_SAMPLES:-65536}"
-ACTIVE_GAMES="${ACTIVE_GAMES:-2048}"
-MIN_MCTS_SAMPLES_PER_GAME="${MIN_MCTS_SAMPLES_PER_GAME:-32}"
-GAMES_PER_EPOCH="${GAMES_PER_EPOCH:-4096}"
+ACTIVE_GAMES="${ACTIVE_GAMES:-1024}"
+GAMES_PER_EPOCH="${GAMES_PER_EPOCH:-256}"
 EVAL_GAMES="${EVAL_GAMES:-0}"
 MONITOR_INTERVAL_SECONDS="${MONITOR_INTERVAL_SECONDS:-6}"
 
@@ -92,10 +90,8 @@ recency_halflife = 50000.0
 compression_level = 6
 
 [model.config.selfplay]
-samples_per_epoch = $SELFPLAY_SAMPLES
 search_visits = 128
 active_games = $ACTIVE_GAMES
-min_mcts_samples_per_game = $MIN_MCTS_SAMPLES_PER_GAME
 progressive_widening_initial_actions = 8
 progressive_widening_child_initial_actions = 4
 progressive_widening_candidate_actions = 128
@@ -117,7 +113,7 @@ require_sealbot = false
 calibrate = true
 target_selfplay_positions_per_second = 128.0
 inference_batch_candidates = [128, 256, 512, 1024]
-selfplay_batch_candidates = [2048]
+selfplay_batch_candidates = [1024]
 training_batch_candidates = [64, 128, 192, 256]
 mcts_virtual_batch_candidates = [4]
 selfplay_probe_positions = 8192

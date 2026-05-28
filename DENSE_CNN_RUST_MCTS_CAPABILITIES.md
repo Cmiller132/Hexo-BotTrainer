@@ -443,8 +443,8 @@ These fields tell you how much of the tree is active versus still staged.
 ### What It Is
 
 Top-k legal prior payloads are a reduced evaluator contract between Rust MCTS and
-Python/PyTorch. Instead of asking Python to return priors for every legal move,
-Rust can ask for only the top `k` legal priors per state.
+Python/PyTorch. Instead of asking Python to return priors for every legal
+in-crop move, Rust can ask for only the top `k` legal priors per state.
 
 The `k` value comes from:
 
@@ -456,12 +456,12 @@ progressive_widening_candidate_actions
 
 For MCTS with progressive widening, Rust usually does not need a full legal
 policy vector. It only needs enough high-prior candidates to seed the staged
-frontier. Returning priors for every legal move can be expensive because it
+frontier. Returning priors for every in-crop legal move can be expensive because it
 requires:
 
-- listing all legal flat indices;
-- softmaxing over every legal action;
-- transferring all legal priors back to Rust;
+- listing all in-crop legal flat indices;
+- softmaxing over every in-crop legal action;
+- transferring all in-crop legal priors back to Rust;
 - storing a large prior list per expanded node.
 
 The top-k payload reduces Python/Rust transfer size and keeps node prior storage
@@ -522,8 +522,8 @@ legal_flat_indices_bytes
 legal_row_offsets
 ```
 
-Python returns priors for all legal moves. This mode is wider and more complete,
-but heavier.
+Python returns priors for all legal moves represented by the current dense crop.
+This mode is wider and more complete, but heavier.
 
 ### How It Changes Model Behavior
 
@@ -531,11 +531,11 @@ Top-k legal priors make the search more explicitly candidate-based. MCTS begins
 from the highest-scoring legal actions under the dense-cnn policy head. This can
 greatly reduce work when the legal set is large.
 
-The behavior change is that very low-ranked legal moves may not appear in the
-neural candidate list at all. At the root, the lazy fallback path can eventually
-materialize legal moves outside the returned top-k list. At non-root nodes, the
-current `total_legal_actions = candidates.len()` behavior means the returned
-top-k list is effectively the complete child set unless that is changed.
+The behavior change is that very low-ranked in-crop legal moves may not appear
+in the neural candidate list at all. The lazy fallback path can eventually
+materialize in-crop legal moves outside the returned top-k list. Out-of-crop
+engine-legal moves are ignored because the dense policy head cannot represent
+or train targets for them.
 
 ## Rayon Parallel Root Leaf Selection
 

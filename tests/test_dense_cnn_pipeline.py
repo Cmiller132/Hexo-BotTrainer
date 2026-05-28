@@ -61,7 +61,6 @@ def _small_model_config(overrides: Mapping[str, Any] | None = None) -> dict[str,
             "compression_level": 1,
         },
         "selfplay": {
-            "samples_per_epoch": 2,
             "search_visits": 1,
             "max_actions": 4,
         },
@@ -164,7 +163,6 @@ def _write_pipeline_config(tmp_path: Path) -> Path:
                 "compression_level = 1",
                 "",
                 "[model.config.selfplay]",
-                "samples_per_epoch = 2",
                 "search_visits = 1",
                 "max_actions = 4",
                 "temperature = 1.0",
@@ -300,9 +298,9 @@ def test_dense_cnn_model1_config_writes_to_repo_level_run_and_checkpoint_paths()
     assert config.run.output_dir == ROOT / "runs" / "dense_cnn_model1"
     assert config.selfplay.checkpoint_pointer == ROOT / "data" / "checkpoints" / "dense_cnn_model1_latest.txt"
     assert config.checkpoint.resume_from == ROOT / "data" / "checkpoints" / "dense_cnn_model1_latest.txt"
+    assert config.selfplay.games_per_epoch == 256
     assert parsed.selfplay.search_visits == 128
-    assert parsed.selfplay.samples_per_epoch == 65536
-    assert parsed.selfplay.min_mcts_samples_per_game == 32
+    assert parsed.selfplay.active_games == 1024
     assert parsed.selfplay.progressive_widening_initial_actions == 8
     assert parsed.selfplay.progressive_widening_child_initial_actions == 4
     assert parsed.selfplay.progressive_widening_candidate_actions == 128
@@ -316,6 +314,7 @@ def test_dense_cnn_model1_config_writes_to_repo_level_run_and_checkpoint_paths()
     assert parsed.selfplay.virtual_loss == pytest.approx(1.0)
     assert parsed.selfplay.mcts_session_cache_max_states == 1_048_576
     assert parsed.selfplay.mcts_active_root_limit == 1024
+    assert parsed.selfplay.active_games <= parsed.selfplay.mcts_active_root_limit
     assert parsed.samples.train_sample_count == 4096
     assert parsed.samples.capacity >= 200_000
     assert parsed.evaluation.games_per_epoch == 64
@@ -325,7 +324,8 @@ def test_dense_cnn_model1_config_writes_to_repo_level_run_and_checkpoint_paths()
     assert parsed.performance.target_selfplay_positions_per_second == pytest.approx(128.0)
     assert parsed.performance.selfplay_probe_positions >= max(parsed.performance.selfplay_batch_candidates)
     assert parsed.performance.inference_batch_candidates[-1] <= 1024
-    assert parsed.performance.selfplay_batch_candidates == (2048,)
+    assert parsed.performance.selfplay_batch_candidates == (1024,)
+    assert max(parsed.performance.selfplay_batch_candidates) <= parsed.selfplay.mcts_active_root_limit
     assert parsed.performance.mcts_virtual_batch_candidates == (4,)
     assert max(parsed.performance.training_batch_candidates) <= 256
 
@@ -335,8 +335,21 @@ def test_dense_cnn_model_config_rejects_legacy_or_clamped_values() -> None:
 
     with pytest.raises(ValueError, match="worker_count"):
         dense_cnn.parse_model1_config({"selfplay": {"worker_count": 1}})
+    with pytest.raises(ValueError, match="samples_per_epoch"):
+        dense_cnn.parse_model1_config({"selfplay": {"samples_per_epoch": 1}})
+    with pytest.raises(ValueError, match="min_mcts_samples_per_game"):
+        dense_cnn.parse_model1_config({"selfplay": {"min_mcts_samples_per_game": 1}})
     with pytest.raises(ValueError, match="hidden_prior_mass"):
         dense_cnn.parse_model1_config({"selfplay": {"hidden_prior_mass": 1.5}})
+    with pytest.raises(ValueError, match="active_games"):
+        dense_cnn.parse_model1_config({"selfplay": {"active_games": 2, "mcts_active_root_limit": 1}})
+    with pytest.raises(ValueError, match="selfplay_batch_candidates"):
+        dense_cnn.parse_model1_config(
+            {
+                "selfplay": {"active_games": 1, "mcts_active_root_limit": 1},
+                "performance": {"selfplay_batch_candidates": [2]},
+            }
+        )
     with pytest.raises(ValueError, match="capacity"):
         dense_cnn.parse_model1_config({"samples": {"capacity": 1024}})
 
@@ -702,7 +715,7 @@ def test_finalize_samples_omits_lookahead_without_future_mcts_root() -> None:
     assert finalized[0].metadata["lookahead_target_semantics"] == "mcts_prefix_future_root_only_v2"
 
 
-def test_selfplay_keeps_mcts_samples_deeper_than_opening_before_rollout(
+def test_selfplay_searches_every_playable_move_until_games_finish(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -717,17 +730,14 @@ def test_selfplay_keeps_mcts_samples_deeper_than_opening_before_rollout(
         _small_model_config(
             {
                 "selfplay": {
-                    "samples_per_epoch": 2,
                     "search_visits": 1,
                     "active_games": 4,
-                    "min_mcts_samples_per_game": 2,
                     "max_actions": 3,
                 },
             }
         ),
     )
     mcts_batch_sizes: list[int] = []
-    rollout_batch_sizes: list[int] = []
     sampled_turns: list[tuple[str, int, int]] = []
 
     class FakeMctsSession:
@@ -752,10 +762,6 @@ def test_selfplay_keeps_mcts_samples_deeper_than_opening_before_rollout(
                 )
                 for state in root_states
             ]
-
-    def fake_rollout(playable: list[dict[str, Any]], **_kwargs: object) -> list[int]:
-        rollout_batch_sizes.append(len(playable))
-        return [int(engine.legal_action_ids(game["state"])[0]) for game in playable]
 
     def fake_sample_from_state(
         state: object,
@@ -784,7 +790,6 @@ def test_selfplay_keeps_mcts_samples_deeper_than_opening_before_rollout(
         )
 
     monkeypatch.setattr(selfplay_module, "new_mcts_session", lambda **_kwargs: FakeMctsSession())
-    monkeypatch.setattr(selfplay_module, "_policy_rollout_actions", fake_rollout)
     monkeypatch.setattr(selfplay_module, "sample_from_state", fake_sample_from_state)
 
     result = selfplay_module.generate_selfplay_epoch(
@@ -794,16 +799,22 @@ def test_selfplay_keeps_mcts_samples_deeper_than_opening_before_rollout(
         games_per_epoch=4,
     )
 
-    assert result["samples_added"] == 2
-    assert result["searched_positions"] == 2
-    assert result["mcts_simulations"] == 2
+    assert result["selfplay_mode"] == "game_driven_all_mcts"
+    assert result["requested_games"] == 4
+    assert result["games_started"] == 4
+    assert result["games_finished"] == 4
+    assert result["completed_games"] == 0
+    assert result["no_policy_rollout_tails"] is True
+    assert result["samples_added"] == 12
+    assert result["searched_positions"] == 12
+    assert result["mcts_simulations"] == 12
     assert result["mcts_search_elapsed_seconds"] >= 0.0
     assert result["positions_per_second"] == result["end_to_end_positions_per_second"]
     assert result["end_to_end_positions_per_second"] <= result["search_positions_per_second"]
-    assert mcts_batch_sizes == [1, 1]
-    assert len(sampled_turns) == 2
-    assert [turn for _game_id, turn, _legal_count in sampled_turns] == [0, 1]
-    assert rollout_batch_sizes, "non-sample tail moves should use policy rollout instead of MCTS"
+    assert mcts_batch_sizes == [4, 4, 4]
+    assert len(sampled_turns) == 12
+    assert [turn for _game_id, turn, _legal_count in sampled_turns] == [0] * 4 + [1] * 4 + [2] * 4
+    assert not hasattr(selfplay_module, "_policy_rollout_actions")
 
 
 def test_selfplay_rejects_under_counted_mcts_results(
@@ -818,7 +829,6 @@ def test_selfplay_rejects_under_counted_mcts_results(
         _small_model_config(
             {
                 "selfplay": {
-                    "samples_per_epoch": 1,
                     "search_visits": 8,
                     "active_games": 1,
                     "max_actions": 2,

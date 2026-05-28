@@ -35,8 +35,8 @@ use super::encoding::{
 pub(crate) struct RustEvaluation {
     /// Scalar value from the perspective of the evaluated state's current player.
     pub(crate) value: f32,
-    /// Total legal moves in the authoritative engine state, including moves
-    /// outside the dense crop or outside a candidate-limited result.
+    /// Total legal moves represented by the dense crop. Out-of-crop engine
+    /// legal moves are intentionally ignored by dense-cnn MCTS.
     pub(crate) legal_action_count: usize,
     /// Ranked visible priors. Hidden legal actions are represented later by
     /// `mcts_tree` using `legal_action_count`.

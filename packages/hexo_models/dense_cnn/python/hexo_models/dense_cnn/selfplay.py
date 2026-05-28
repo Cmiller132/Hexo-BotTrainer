@@ -6,14 +6,12 @@ pre-decision samples from the same live states, applies selected actions through
 the generic engine, writes `.hxr` records, and finalizes targets once each game
 has an outcome.
 
-The loop searches with MCTS only until the epoch sample budget is covered. Any
-remaining active games are rolled out by direct model policy so already-collected
-pending MCTS samples can receive final values and lookahead targets.
+The loop is game-driven: every active nonterminal game decision is searched with
+MCTS until the game reaches a terminal outcome or `max_actions`.
 """
 
 from __future__ import annotations
 
-from random import Random
 from time import perf_counter
 from typing import Any, Mapping
 
@@ -45,10 +43,9 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
         return_logits=False,
         max_batch_size=getattr(trainer, "inference_batch_size", 1024),
     )
-    target_samples = int(config.selfplay.samples_per_epoch)
-    max_games = max(int(games_per_epoch or 0), 1)
-    if target_samples > 0:
-        max_games = max(max_games, target_samples)
+    requested_games = int(games_per_epoch or 0)
+    if requested_games < 0:
+        raise ValueError("games_per_epoch must be >= 0")
 
     record_dir = ctx.output_dir / "selfplay"
     record_dir.mkdir(parents=True, exist_ok=True)
@@ -56,6 +53,7 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
     samples_added = 0
     searched_positions = 0
     mcts_simulations = 0
+    games_started = 0
     completed_games = 0
     truncated_games = 0
     mcts_search_elapsed = 0.0
@@ -69,17 +67,6 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
     configured_active_limit = int(getattr(trainer, "selfplay_batch_size", config.selfplay.active_games))
     if configured_active_limit <= 0:
         raise ValueError("selfplay active game count must be > 0")
-    min_mcts_samples_per_game = int(config.selfplay.min_mcts_samples_per_game)
-    if min_mcts_samples_per_game <= 0:
-        raise ValueError("min_mcts_samples_per_game must be > 0")
-    if target_samples > 0:
-        sample_depth_active_limit = max(
-            1,
-            (target_samples + min_mcts_samples_per_game - 1) // min_mcts_samples_per_game,
-        )
-        active_limit = min(configured_active_limit, sample_depth_active_limit)
-    else:
-        active_limit = configured_active_limit
     virtual_batch_size = getattr(trainer, "mcts_virtual_batch_size", None)
     progressive_widening_initial_actions = int(
         getattr(
@@ -142,18 +129,14 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
     active_root_limit = int(getattr(trainer, "mcts_active_root_limit", config.selfplay.mcts_active_root_limit))
     if active_root_limit <= 0:
         raise ValueError("mcts_active_root_limit must be > 0")
+    if configured_active_limit > active_root_limit:
+        raise ValueError("selfplay active game count must be <= mcts_active_root_limit")
+    active_limit = configured_active_limit
     next_game_index = 0
     active: list[dict[str, Any]] = []
     with HexoRecordFile.create(record_path, engine.engine_metadata(), players) as record_file:
-        while (samples_added < target_samples or active) and (next_game_index < max_games or active):
-            # Start only as many fresh games as can still contribute to the
-            # remaining sample budget. Finished and active games are kept until
-            # pending MCTS samples receive game-end targets.
-            while (
-                len(active) < active_limit
-                and next_game_index < max_games
-                and len(active) < max(0, target_samples - samples_added - sum(len(game["pending"]) for game in active))
-            ):
+        while next_game_index < requested_games or active:
+            while len(active) < active_limit and next_game_index < requested_games:
                 game_id = f"epoch-{epoch:06d}-selfplay-{next_game_index:06d}"
                 seed = (ctx.config.run.seed or 0) + epoch * 1_000_000 + next_game_index
                 active.append(
@@ -167,6 +150,7 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
                     }
                 )
                 next_game_index += 1
+                games_started += 1
 
             playable = [
                 game
@@ -175,43 +159,40 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
                 and len(game["actions"]) < config.selfplay.max_actions
             ]
             if playable:
-                pending_count = sum(len(item["pending"]) for item in active)
-                remaining_samples = max(0, target_samples - samples_added - pending_count)
-                search_games = playable[:remaining_samples]
-                rollout_games = playable[remaining_samples:]
-                if search_games:
-                    # Search live roots through the persistent native session.
-                    # The session keys are per-game and let Rust promote the
-                    # selected child subtree after each turn.
-                    search_started = perf_counter()
-                    searches = _search_playable_games(
-                        search_games,
-                        inference=inference,
-                        visits=getattr(trainer, "search_visits", config.selfplay.search_visits),
-                        temperature=config.selfplay.temperature,
-                        seed=(ctx.config.run.seed or 0) + epoch,
-                        virtual_batch_size=virtual_batch_size,
-                        progressive_widening_initial_actions=progressive_widening_initial_actions,
-                        progressive_widening_child_initial_actions=progressive_widening_child_initial_actions,
-                        progressive_widening_candidate_actions=progressive_widening_candidate_actions,
-                        progressive_widening_growth_interval=progressive_widening_growth_interval,
-                        progressive_widening_growth_base=progressive_widening_growth_base,
-                        mcts_session=mcts_session,
-                        root_dirichlet_alpha=root_dirichlet_alpha if root_noise_enabled else None,
-                        root_dirichlet_noise_fraction=(
-                            root_dirichlet_noise_fraction if root_noise_enabled else None
-                        ),
-                        hidden_prior_mass=hidden_prior_mass,
-                        fpu_reduction=fpu_reduction,
-                        virtual_loss=virtual_loss,
-                        active_root_limit=active_root_limit,
+                # Search live roots through the persistent native session. The
+                # session keys are per-game and let Rust promote the selected
+                # child subtree after each turn.
+                search_started = perf_counter()
+                searches = _search_playable_games(
+                    playable,
+                    inference=inference,
+                    visits=getattr(trainer, "search_visits", config.selfplay.search_visits),
+                    temperature=config.selfplay.temperature,
+                    seed=(ctx.config.run.seed or 0) + epoch,
+                    virtual_batch_size=virtual_batch_size,
+                    progressive_widening_initial_actions=progressive_widening_initial_actions,
+                    progressive_widening_child_initial_actions=progressive_widening_child_initial_actions,
+                    progressive_widening_candidate_actions=progressive_widening_candidate_actions,
+                    progressive_widening_growth_interval=progressive_widening_growth_interval,
+                    progressive_widening_growth_base=progressive_widening_growth_base,
+                    mcts_session=mcts_session,
+                    root_dirichlet_alpha=root_dirichlet_alpha if root_noise_enabled else None,
+                    root_dirichlet_noise_fraction=(
+                        root_dirichlet_noise_fraction if root_noise_enabled else None
+                    ),
+                    hidden_prior_mass=hidden_prior_mass,
+                    fpu_reduction=fpu_reduction,
+                    virtual_loss=virtual_loss,
+                    active_root_limit=active_root_limit,
+                )
+                if len(searches) != len(playable):
+                    raise RuntimeError(
+                        f"dense_cnn MCTS returned {len(searches)} results for {len(playable)} playable games"
                     )
-                    if searches:
-                        _extend_mcts_diagnostic_batches(mcts_diagnostic_batches, searches)
-                    mcts_search_elapsed += perf_counter() - search_started
-                else:
-                    searches = []
-                for game, search in zip(search_games, searches):
+                if searches:
+                    _extend_mcts_diagnostic_batches(mcts_diagnostic_batches, searches)
+                mcts_search_elapsed += perf_counter() - search_started
+                for game, search in zip(playable, searches):
                     configured_visits = int(getattr(trainer, "search_visits", config.selfplay.search_visits))
                     if int(search.visits) != configured_visits:
                         raise RuntimeError(
@@ -245,21 +226,6 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
                     action = engine.PlacementAction(unpack_coord_id(search.action_id))
                     engine.apply_action(state, action)
                     game["actions"].append(search.action_id)
-                if rollout_games:
-                    # Once the epoch has enough pending MCTS samples, unfinished
-                    # games are completed with direct policy inference. This
-                    # avoids creating extra samples while still producing final
-                    # outcomes for samples already collected.
-                    rollout_actions = _policy_rollout_actions(
-                        rollout_games,
-                        inference=inference,
-                        temperature=config.selfplay.temperature,
-                        seed=(ctx.config.run.seed or 0) + epoch + searched_positions,
-                    )
-                    for game, action_id in zip(rollout_games, rollout_actions):
-                        action = engine.PlacementAction(unpack_coord_id(action_id))
-                        engine.apply_action(game["state"], action)
-                        game["actions"].append(action_id)
 
             finished = [
                 game
@@ -308,6 +274,12 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
         {
             "epoch": epoch,
             "record_path": str(record_path),
+            "selfplay_mode": "game_driven_all_mcts",
+            "requested_games": requested_games,
+            "games_started": games_started,
+            "games_finished": completed_games + truncated_games,
+            "completed_games": completed_games,
+            "truncated_games": truncated_games,
             "samples_added": samples_added,
             "searched_positions": searched_positions,
             "mcts_simulations": mcts_simulations,
@@ -318,10 +290,9 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
             "mcts_sims_per_searched_position": (
                 mcts_simulations / searched_positions if searched_positions else 0.0
             ),
-            "completion_rollout": "mcts_until_sample_budget_then_model_policy_rollout",
+            "no_policy_rollout_tails": True,
             "configured_active_games": configured_active_limit,
             "active_games": active_limit,
-            "min_mcts_samples_per_game": min_mcts_samples_per_game,
             "mcts_virtual_batch_size": virtual_batch_size,
             "mcts_tree_reuse_session": True,
             "mcts_progressive_widening_initial_actions": progressive_widening_initial_actions,
@@ -345,6 +316,11 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
     return {
         "status": "completed",
         "epoch": epoch,
+        "selfplay_mode": "game_driven_all_mcts",
+        "requested_games": requested_games,
+        "games_started": games_started,
+        "games_finished": completed_games + truncated_games,
+        "completed_games": completed_games,
         "games": completed_games,
         "truncated_games": truncated_games,
         "samples_added": samples_added,
@@ -359,10 +335,9 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
         "search_positions_per_second": search_positions_per_second,
         "end_to_end_positions_per_second": end_to_end_positions_per_second,
         "samples_per_second": samples_added / max(elapsed, 1.0e-9),
-        "completion_rollout": "mcts_until_sample_budget_then_model_policy_rollout",
+        "no_policy_rollout_tails": True,
         "configured_active_games": configured_active_limit,
         "active_games": active_limit,
-        "min_mcts_samples_per_game": min_mcts_samples_per_game,
         "mcts_tree_reuse_session": True,
         "mcts_diagnostics": mcts_diagnostics,
     }
@@ -427,49 +402,3 @@ def _search_playable_games(
         virtual_loss=virtual_loss,
         active_root_limit=active_root_limit,
     )
-
-
-def _sample_policy_action(policy: Any, *, temperature: float, seed: int) -> int:
-    """Sample an action from a legal-prior mapping for non-MCTS rollouts."""
-
-    if temperature < 0.0:
-        raise ValueError("temperature must be >= 0")
-    items = [(int(action_id), float(weight)) for action_id, weight in policy.items()]
-    if not items:
-        raise RuntimeError("cannot sample from an empty visit policy")
-    for action_id, weight in items:
-        if not weight >= 0.0 or not weight < float("inf"):
-            raise RuntimeError(f"policy rollout weight for action {action_id} must be finite and >= 0")
-    if temperature <= 1.0e-6:
-        return max(items, key=lambda item: (item[1], -item[0]))[0]
-    inv_temperature = 1.0 / temperature
-    weights = [weight ** inv_temperature for _action, weight in items]
-    total = sum(weights)
-    if total <= 0.0:
-        raise RuntimeError("policy rollout weights must have positive total mass")
-    threshold = Random(seed).random() * total
-    for (action_id, _weight), weight in zip(items, weights):
-        threshold -= weight
-        if threshold <= 0:
-            return action_id
-    return items[-1][0]
-
-
-def _policy_rollout_actions(
-    playable: list[dict[str, Any]],
-    *,
-    inference: DenseCNNInference,
-    temperature: float,
-    seed: int,
-) -> list[int]:
-    """Evaluate rollout states directly and sample one policy action per game."""
-
-    evaluations = inference.infer_states([game["state"] for game in playable])
-    return [
-        _sample_policy_action(
-            evaluation.legal_priors,
-            temperature=temperature,
-            seed=seed + index * 1_000_003,
-        )
-        for index, evaluation in enumerate(evaluations)
-    ]

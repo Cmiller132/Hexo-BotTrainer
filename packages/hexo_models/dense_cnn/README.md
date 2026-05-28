@@ -110,7 +110,8 @@ are live engine states, not serialized state mirrors.
 2. Create a native `BatchedMctsSession`.
 3. Start up to the configured number of active games with `engine.new_game`.
 4. Choose playable games that have not ended and are below `max_actions`.
-5. Search only enough positions to satisfy the sample budget.
+5. Search every nonterminal active game position with MCTS until terminal or
+   `max_actions`.
 6. Send each searched live state to `BatchedMctsSession.run`.
 7. Use the returned visit policy and root value to create a pre-decision sample
    through `samples.sample_from_state`.
@@ -120,14 +121,11 @@ are live engine states, not serialized state mirrors.
 9. Compress each pending sample and store it with the player label and root
    value until the game finishes.
 10. Apply the selected action to the live engine state.
-11. If the sample budget is met while active games remain unfinished, roll out
-    the rest using direct dense-cnn policy inference instead of MCTS, so every
-    pending MCTS sample can still receive a final outcome.
-12. At game end, write an `.hxr` record and call `finalize_game_samples`.
-13. `finalize_game_samples` calls Rust to set final value targets, opponent
+11. At game end, write an `.hxr` record and call `finalize_game_samples`.
+12. `finalize_game_samples` calls Rust to set final value targets, opponent
     policy targets, lookahead targets, and schema metadata.
-14. Add finalized compressed samples to `SampleBuffer`.
-15. Discard the game key from the native MCTS session so stale subtrees are not
+13. Add finalized compressed samples to `SampleBuffer`.
+14. Discard the game key from the native MCTS session so stale subtrees are not
     reused for a finished game.
 
 The self-play loop keeps the strict boundary rule: invalid native settings,
@@ -138,7 +136,7 @@ instead of being repaired locally.
 
 `inference.py` is used in two ways:
 
-- Direct state inference for player policy rollouts and evaluation.
+- Direct state inference for players and evaluation.
 - Native MCTS callback evaluation through `evaluate_model1_payload`.
 
 Direct state inference calls `rust_bridge.model1_batch_inputs`, which delegates
@@ -294,13 +292,18 @@ come from `hexo_engine`.
 The tree uses:
 
 - PUCT edge scoring with first-play urgency.
-- Progressive widening for large legal action sets.
-- Hidden prior mass for legal actions not yet materialized as edges.
+- Progressive widening for large in-crop legal action sets.
+- Hidden prior mass for in-crop legal actions not yet materialized as edges.
 - Tactical candidate protection for immediate wins and opponent blocks.
 - Root Dirichlet noise for self-play exploration.
 - Virtual visits so batched leaf selection does not select the same unevaluated
   edge repeatedly.
 - Root promotion so the selected child subtree becomes the next turn's root.
+
+Dense-cnn MCTS intentionally ignores out-of-crop engine-legal moves. The model
+cannot produce policy targets for those actions, so search, hidden prior mass,
+and tactical protection operate only over legal moves represented by the current
+41x41 crop.
 
 ### Sample Generation
 

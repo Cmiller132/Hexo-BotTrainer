@@ -85,7 +85,8 @@ class DenseCNNPlugin:
                 "model_family": "dense_cnn",
                 "sample_capacity": parsed.samples.capacity,
                 "train_sample_count": parsed.samples.train_sample_count,
-                "selfplay_samples_per_epoch": parsed.selfplay.samples_per_epoch,
+                "selfplay_mode": "game_driven_all_mcts",
+                "selfplay_active_games": parsed.selfplay.active_games,
                 "evaluation_games_per_epoch": parsed.evaluation.games_per_epoch,
             },
         )

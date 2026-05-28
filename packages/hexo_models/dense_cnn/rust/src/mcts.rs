@@ -623,8 +623,8 @@ fn select_action_from_policy(
     seed: u64,
 ) -> PyResult<Option<PackedCoord>> {
     // Temperature zero is deterministic argmax. Positive temperature samples
-    // from visit weights raised by 1 / temperature, matching the Python rollout
-    // helper used after the sample budget is filled.
+    // from visit weights raised by 1 / temperature, matching self-play action
+    // selection from the MCTS visit policy.
     if action_ids.is_empty() || weights.is_empty() {
         return Ok(None);
     }

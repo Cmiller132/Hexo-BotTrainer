@@ -30,10 +30,8 @@ recency_halflife = 50000.0
 compression_level = 6
 
 [model.config.selfplay]
-samples_per_epoch = 65536
 search_visits = 128
-active_games = 2048
-min_mcts_samples_per_game = 32
+active_games = 1024
 progressive_widening_initial_actions = 8
 progressive_widening_child_initial_actions = 4
 progressive_widening_candidate_actions = 128
@@ -61,7 +59,7 @@ require_sealbot = true
 calibrate = true
 target_selfplay_positions_per_second = 128.0
 inference_batch_candidates = [128, 256, 512, 1024]
-selfplay_batch_candidates = [2048]
+selfplay_batch_candidates = [1024]
 training_batch_candidates = [64, 128, 192, 256]
 mcts_virtual_batch_candidates = [4]
 selfplay_probe_positions = 8192
@@ -76,7 +74,7 @@ seed = 1
 epochs = 30
 
 [selfplay]
-games_per_epoch = 4096
+games_per_epoch = 256
 update_checkpoint_pointer = true
 checkpoint_pointer = "../data/checkpoints/dense_cnn_model1_latest.txt"
 

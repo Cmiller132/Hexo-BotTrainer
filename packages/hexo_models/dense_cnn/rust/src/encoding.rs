@@ -23,9 +23,8 @@ pub(crate) struct Model1EncodedState {
     // Exactly one of `planes` or `half_planes` is populated for a given call.
     pub(crate) planes: Vec<f32>,
     pub(crate) half_planes: Vec<u16>,
-    // `all_legal_action_count` can exceed the number of in-crop priors when a
-    // legal action is outside the fixed 41x41 crop. MCTS uses this to allocate
-    // hidden prior mass to legal-but-not-yet-materialized actions.
+    // MCTS can only act on policy cells represented by the fixed 41x41 crop, so
+    // this count intentionally excludes out-of-crop legal engine moves.
     pub(crate) all_legal_action_count: usize,
     pub(crate) legal_action_ids: Vec<PackedCoord>,
     pub(crate) legal_flat_indices: Vec<i64>,
@@ -109,11 +108,12 @@ pub(crate) fn encode_model1_state_half_for_mcts(state: &RustHexoState) -> Model1
 
     let mut legal_coords = Vec::with_capacity(state.legal_move_count());
     state.write_legal_moves(&mut legal_coords);
-    let all_legal_action_count = legal_coords.len();
+    let mut all_legal_action_count = 0usize;
     let mut legal_action_ids = Vec::with_capacity(legal_coords.len());
     for coord in legal_coords {
-        legal_action_ids.push(pack_coord(coord));
         if let Some(flat) = model1_flat_index(coord, center) {
+            all_legal_action_count += 1;
+            legal_action_ids.push(pack_coord(coord));
             set_half_plane(&mut half_planes, MODEL1_PLANE_LEGAL, flat, half_one());
         }
     }
@@ -190,7 +190,7 @@ fn encode_model1_state_inner(
 
     let mut legal_coords = Vec::with_capacity(state.legal_move_count());
     state.write_legal_moves(&mut legal_coords);
-    let all_legal_action_count = legal_coords.len();
+    let mut all_legal_action_count = 0usize;
     let mut legal_action_ids = if include_crop_legal_lists {
         Vec::with_capacity(legal_coords.len())
     } else {
@@ -204,6 +204,7 @@ fn encode_model1_state_inner(
     for coord in legal_coords {
         let action_id = pack_coord(coord);
         if let Some(flat) = model1_flat_index(coord, center) {
+            all_legal_action_count += 1;
             set_plane(&mut planes, MODEL1_PLANE_LEGAL, flat, 1.0);
             if include_crop_legal_lists {
                 legal_action_ids.push(action_id);
