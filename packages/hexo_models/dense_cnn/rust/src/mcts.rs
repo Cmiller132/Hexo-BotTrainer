@@ -17,18 +17,17 @@ use pyo3::types::{PyBytes, PyDict, PyList, PyTuple};
 use rayon::prelude::*;
 use std::collections::HashMap;
 
-use hexo_engine::{unpack_coord, HexoState as RustHexoState, PackedCoord};
+use hexo_engine::PackedCoord;
 
 use super::constants::{MODEL1_ACTIVE_ROOT_LIMIT, MODEL1_EVAL_CACHE_MAX_STATES};
-use super::encoding::{model1_crop_center, model1_flat_index};
 use super::mcts_eval::{
     evaluate_model1_state_refs_cached, evaluate_model1_states_cached, new_shared_evaluation_cache,
     new_shared_evaluation_stats, state_hash, EvaluationStats, RustEvaluationRequest,
     SharedEvaluationCache, SharedEvaluationStats,
 };
 use super::mcts_tree::{
-    terminal_value, ProgressiveWideningConfig, RootDirichletNoise, RustEdge, RustLeaf, RustNode,
-    RustSearch, RustSearchDiagnostics,
+    terminal_value, RootDirichletNoise, RustEdge, RustLeaf, RustNode, RustSearch,
+    RustSearchDiagnostics,
 };
 use super::state::states_from_py_states;
 
@@ -79,7 +78,7 @@ impl Model1MctsSession {
         self.searches.len()
     }
 
-    #[pyo3(signature = (game_keys, states, visits, c_puct, temperature, seed, evaluator, virtual_batch_size=None, progressive_widening_initial_actions=None, progressive_widening_child_initial_actions=None, progressive_widening_growth_interval=None, progressive_widening_growth_base=None, progressive_widening_candidate_actions=None, active_root_limit=None, root_dirichlet_alpha=None, root_dirichlet_noise_fraction=None, hidden_prior_mass=None, fpu_reduction=None, virtual_loss=None))]
+    #[pyo3(signature = (game_keys, states, visits, c_puct, temperature, seed, evaluator, virtual_batch_size=None, active_root_limit=None, root_dirichlet_total_alpha=None, root_dirichlet_noise_fraction=None, root_policy_temperature=None, fpu_reduction=None, virtual_loss=None))]
     fn search(
         &mut self,
         py: Python<'_>,
@@ -91,15 +90,10 @@ impl Model1MctsSession {
         seed: u64,
         evaluator: &Bound<'_, PyAny>,
         virtual_batch_size: Option<u32>,
-        progressive_widening_initial_actions: Option<u32>,
-        progressive_widening_child_initial_actions: Option<u32>,
-        progressive_widening_growth_interval: Option<f32>,
-        progressive_widening_growth_base: Option<f32>,
-        progressive_widening_candidate_actions: Option<u32>,
         active_root_limit: Option<usize>,
-        root_dirichlet_alpha: Option<f32>,
+        root_dirichlet_total_alpha: Option<f32>,
         root_dirichlet_noise_fraction: Option<f32>,
-        hidden_prior_mass: Option<f32>,
+        root_policy_temperature: Option<f32>,
         fpu_reduction: Option<f32>,
         virtual_loss: Option<f32>,
     ) -> PyResult<Py<PyAny>> {
@@ -134,39 +128,13 @@ impl Model1MctsSession {
             "virtual_batch_size",
             virtual_batch_size.unwrap_or(target_visits),
         )?;
-        let widening = match progressive_widening_initial_actions {
-            Some(count) => Some(ProgressiveWideningConfig::new(
-                validate_positive_u32("progressive_widening_initial_actions", count)? as usize,
-                validate_positive_u32(
-                    "progressive_widening_child_initial_actions",
-                    progressive_widening_child_initial_actions.unwrap_or(count),
-                )? as usize,
-                validate_positive_f32(
-                    "progressive_widening_growth_interval",
-                    progressive_widening_growth_interval.unwrap_or(256.0),
-                )?,
-                validate_greater_than_f32(
-                    "progressive_widening_growth_base",
-                    progressive_widening_growth_base.unwrap_or(1.3),
-                    1.0,
-                )?,
-            )?),
-            None => None,
-        };
-        let prior_candidate_limit = match progressive_widening_candidate_actions {
-            Some(count) => Some(validate_positive_u32("progressive_widening_candidate_actions", count)? as usize),
-            None => None,
-        };
         let evaluation_stats = new_shared_evaluation_stats();
-        let hidden_prior_mass = validate_bounded_f32(
-            "hidden_prior_mass",
-            hidden_prior_mass.unwrap_or(0.05),
-            0.0,
-            0.95,
-        )?;
+        let root_policy_temperature =
+            validate_positive_f32("root_policy_temperature", root_policy_temperature.unwrap_or(1.0))?;
         let fpu_reduction = validate_nonnegative_f32("fpu_reduction", fpu_reduction.unwrap_or(0.20))?;
         let virtual_loss = validate_nonnegative_f32("virtual_loss", virtual_loss.unwrap_or(1.0))?;
-        let root_noise_config = root_noise_config(root_dirichlet_alpha, root_dirichlet_noise_fraction)?;
+        let root_noise_config =
+            root_noise_config(root_dirichlet_total_alpha, root_dirichlet_noise_fraction)?;
 
         let mut searches: Vec<Option<RustSearch>> = Vec::with_capacity(roots.len());
         let mut missing_indices = Vec::new();
@@ -199,7 +167,6 @@ impl Model1MctsSession {
                 &missing_roots,
                 &self.evaluation_cache,
                 Some(&evaluation_stats),
-                prior_candidate_limit,
                 self.cache_max_states,
             )?;
             for ((index, root), evaluation) in missing_indices
@@ -211,9 +178,8 @@ impl Model1MctsSession {
                     root,
                     evaluation,
                     target_visits,
-                    widening,
-                    hidden_prior_mass,
                     fpu_reduction,
+                    root_policy_temperature,
                     root_noise(root_noise_config, seed, index),
                 )?);
             }
@@ -242,7 +208,6 @@ impl Model1MctsSession {
             leaf_batch_per_root,
             &self.evaluation_cache,
             &evaluation_stats,
-            prior_candidate_limit,
             self.cache_max_states,
             virtual_loss,
         )?;
@@ -303,7 +268,6 @@ fn run_searches_to_targets(
     leaf_batch_per_root: u32,
     evaluation_cache: &SharedEvaluationCache,
     evaluation_stats: &SharedEvaluationStats,
-    prior_candidate_limit: Option<usize>,
     cache_max_states: usize,
     virtual_loss: f32,
 ) -> PyResult<()> {
@@ -391,7 +355,6 @@ fn run_searches_to_targets(
                 &leaf_requests,
                 evaluation_cache,
                 Some(evaluation_stats),
-                prior_candidate_limit,
                 cache_max_states,
             )?;
             for (leaf, evaluation) in leaves.into_iter().zip(evaluations.iter()) {
@@ -428,8 +391,7 @@ fn build_search_result_payloads(
         let root = search.root();
         let baseline = baselines.and_then(|items| items.get(index));
         let (policy_action_ids, policy_weights, policy_total) = visit_policy(root, baseline);
-        let (root_prior_action_ids, root_prior_weights) =
-            root_prior_policy(root, &search.root_state);
+        let (root_prior_action_ids, root_prior_weights) = root_prior_policy(root);
         let selected = select_action_from_policy(
             &policy_action_ids,
             &policy_weights,
@@ -494,11 +456,11 @@ fn build_search_result_payloads(
     Ok(results.into_any().unbind())
 }
 
-fn root_prior_policy(root: &RustNode, state: &RustHexoState) -> (Vec<PackedCoord>, Vec<f32>) {
-    let mut priors: HashMap<PackedCoord, f32> = HashMap::with_capacity(
-        root.total_legal_actions
-            .max(root.edges.len() + root.unexpanded_priors.len()),
-    );
+fn root_prior_policy(root: &RustNode) -> (Vec<PackedCoord>, Vec<f32>) {
+    // Every in-crop legal move is staged as either a materialized edge or an
+    // unexpanded prior, so the root prior is exactly their union normalized.
+    let mut priors: HashMap<PackedCoord, f32> =
+        HashMap::with_capacity(root.edges.len() + root.unexpanded_priors.len());
     for edge in &root.edges {
         if edge.prior.is_finite() && edge.prior > 0.0 {
             priors.insert(edge.action_id, edge.prior);
@@ -507,19 +469,6 @@ fn root_prior_policy(root: &RustNode, state: &RustHexoState) -> (Vec<PackedCoord
     for candidate in &root.unexpanded_priors {
         if candidate.prior.is_finite() && candidate.prior > 0.0 {
             priors.insert(candidate.action_id, candidate.prior);
-        }
-    }
-    if root.hidden_prior_per_action.is_finite() && root.hidden_prior_per_action > 0.0 {
-        let center = model1_crop_center(state);
-        let mut legal_action_ids = Vec::with_capacity(root.total_legal_actions);
-        state.write_legal_action_ids(&mut legal_action_ids);
-        for action_id in legal_action_ids {
-            if priors.contains_key(&action_id) {
-                continue;
-            }
-            if model1_flat_index(unpack_coord(action_id), center).is_some() {
-                priors.insert(action_id, root.hidden_prior_per_action);
-            }
         }
     }
     let mut pairs: Vec<(PackedCoord, f32)> = priors.into_iter().collect();
@@ -572,13 +521,6 @@ fn validate_positive_f32(name: &str, value: f32) -> PyResult<f32> {
     Ok(value)
 }
 
-fn validate_greater_than_f32(name: &str, value: f32, minimum: f32) -> PyResult<f32> {
-    if !value.is_finite() || value <= minimum {
-        return Err(PyValueError::new_err(format!("{name} must be finite and > {minimum}")));
-    }
-    Ok(value)
-}
-
 fn validate_nonnegative_f32(name: &str, value: f32) -> PyResult<f32> {
     if !value.is_finite() || value < 0.0 {
         return Err(PyValueError::new_err(format!("{name} must be finite and >= 0")));
@@ -597,31 +539,30 @@ fn validate_bounded_f32(name: &str, value: f32, minimum: f32, maximum: f32) -> P
 
 #[derive(Clone, Copy)]
 struct RootNoiseConfig {
-    alpha: f32,
+    total_alpha: f32,
     fraction: f32,
 }
 
 fn root_noise_config(
-    alpha: Option<f32>,
+    total_alpha: Option<f32>,
     fraction: Option<f32>,
 ) -> PyResult<Option<RootNoiseConfig>> {
-    match (alpha, fraction) {
+    match (total_alpha, fraction) {
         (None, None) => Ok(None),
-        (Some(alpha), Some(fraction)) => {
-            let alpha = validate_positive_f32("root_dirichlet_alpha", alpha)?;
-            let fraction = validate_bounded_f32(
-                "root_dirichlet_noise_fraction",
-                fraction,
-                0.0,
-                1.0,
-            )?;
+        (Some(total_alpha), Some(fraction)) => {
+            let total_alpha = validate_positive_f32("root_dirichlet_total_alpha", total_alpha)?;
+            let fraction =
+                validate_bounded_f32("root_dirichlet_noise_fraction", fraction, 0.0, 1.0)?;
             if fraction == 0.0 {
                 return Ok(None);
             }
-            Ok(Some(RootNoiseConfig { alpha, fraction }))
+            Ok(Some(RootNoiseConfig {
+                total_alpha,
+                fraction,
+            }))
         }
         _ => Err(PyValueError::new_err(
-            "root_dirichlet_alpha and root_dirichlet_noise_fraction must be provided together",
+            "root_dirichlet_total_alpha and root_dirichlet_noise_fraction must be provided together",
         )),
     }
 }
@@ -633,7 +574,7 @@ fn root_noise(
 ) -> Option<RootDirichletNoise> {
     let config = config?;
     Some(RootDirichletNoise {
-        alpha: config.alpha,
+        total_alpha: config.total_alpha,
         fraction: config.fraction,
         seed: seed.wrapping_add((index as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)),
     })
@@ -767,18 +708,8 @@ fn build_result_diagnostics<'py>(
     let root = PyDict::new(py);
     root.set_item("node_count", search.node_count)?;
     root.set_item("active_edge_count", search.active_edge_count)?;
-    root.set_item("hidden_prior_count", search.hidden_prior_count)?;
     root.set_item("root_active_edges", search.root_active_edges)?;
-    root.set_item("root_hidden_priors", search.root_hidden_priors)?;
-    root.set_item(
-        "max_active_edges_per_node",
-        search.max_active_edges_per_node,
-    )?;
-    root.set_item(
-        "max_hidden_priors_per_node",
-        search.max_hidden_priors_per_node,
-    )?;
-    root.set_item("widened_edges_total", search.widened_edges_total)?;
+    root.set_item("max_active_edges_per_node", search.max_active_edges_per_node)?;
     diagnostics.set_item("root", root)?;
     diagnostics.set_item("batch", batch)?;
     Ok(diagnostics)
@@ -796,25 +727,17 @@ fn build_batch_diagnostics<'py>(
     let mut completed_visits = 0u64;
     let mut max_nodes_per_root = 0usize;
     let mut max_active_edges_per_root = 0usize;
-    let mut max_hidden_priors_per_root = 0usize;
     for search in searches {
         let stats = search.diagnostics();
         aggregate.node_count += stats.node_count;
         aggregate.active_edge_count += stats.active_edge_count;
-        aggregate.hidden_prior_count += stats.hidden_prior_count;
         aggregate.root_active_edges += stats.root_active_edges;
-        aggregate.root_hidden_priors += stats.root_hidden_priors;
         aggregate.max_active_edges_per_node = aggregate
             .max_active_edges_per_node
             .max(stats.max_active_edges_per_node);
-        aggregate.max_hidden_priors_per_node = aggregate
-            .max_hidden_priors_per_node
-            .max(stats.max_hidden_priors_per_node);
-        aggregate.widened_edges_total += stats.widened_edges_total;
         completed_visits += search.completed_visits as u64;
         max_nodes_per_root = max_nodes_per_root.max(stats.node_count);
         max_active_edges_per_root = max_active_edges_per_root.max(stats.active_edge_count);
-        max_hidden_priors_per_root = max_hidden_priors_per_root.max(stats.hidden_prior_count);
     }
 
     let tree = PyDict::new(py);
@@ -824,21 +747,10 @@ fn build_batch_diagnostics<'py>(
     tree.set_item("completed_visits", completed_visits)?;
     tree.set_item("node_count", aggregate.node_count)?;
     tree.set_item("active_edge_count", aggregate.active_edge_count)?;
-    tree.set_item("hidden_prior_count", aggregate.hidden_prior_count)?;
     tree.set_item("root_active_edges", aggregate.root_active_edges)?;
-    tree.set_item("root_hidden_priors", aggregate.root_hidden_priors)?;
     tree.set_item("max_nodes_per_root", max_nodes_per_root)?;
     tree.set_item("max_active_edges_per_root", max_active_edges_per_root)?;
-    tree.set_item("max_hidden_priors_per_root", max_hidden_priors_per_root)?;
-    tree.set_item(
-        "max_active_edges_per_node",
-        aggregate.max_active_edges_per_node,
-    )?;
-    tree.set_item(
-        "max_hidden_priors_per_node",
-        aggregate.max_hidden_priors_per_node,
-    )?;
-    tree.set_item("widened_edges_total", aggregate.widened_edges_total)?;
+    tree.set_item("max_active_edges_per_node", aggregate.max_active_edges_per_node)?;
 
     let eval = PyDict::new(py);
     eval.set_item("requested_states", evaluation.requested_states)?;

@@ -31,4 +31,3 @@ pub(crate) const MODEL1_PLANE_OWN_HOT: usize = 10;
 pub(crate) const MODEL1_PLANE_CENTER_DISTANCE: usize = 11;
 pub(crate) const MODEL1_PLANE_OPPONENT_LAST_TURN: usize = 12;
 pub(crate) static MODEL1_BASE_PLANES: OnceLock<Vec<f32>> = OnceLock::new();
-pub(crate) static MODEL1_BASE_HALF_PLANES: OnceLock<Vec<u16>> = OnceLock::new();
