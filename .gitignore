@@ -6,6 +6,23 @@ __pycache__/
 .ruff_cache/
 .venv/
 *.egg-info/
+
+# Local runtime artifacts.
+runs/
+*.log
+*.out
+*.err
+*.tmp
+*.bak
+
+# Model/data outputs.
+*.pt
+*.pth
+*.onnx
+*.hxr
+*.incomplete
+*.watchdog_stopped
+
 data/selfplay/*
 data/replay/*
 data/checkpoints/*
