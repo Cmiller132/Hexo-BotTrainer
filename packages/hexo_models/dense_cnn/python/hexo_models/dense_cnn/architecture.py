@@ -7,7 +7,7 @@ search:
 - `policy`: logits over the 41x41 dense crop.
 - `value`: a 65-bin scalar value distribution in `[-1, 1]`.
 - `opp_policy`: an auxiliary policy target from the next opponent MCTS policy.
-- `lookahead_<horizon>`: optional value heads for future root-value targets.
+- `stvalue_<horizon>`: optional short-term value heads for EMA future-root targets.
 
 The model uses `HexConv2d`, a normal 3x3 convolution whose two square-grid
 corners are masked away so each kernel footprint matches axial hex adjacency.
@@ -159,14 +159,14 @@ class Model1Network(nn.Module):
         channels: int = DEFAULT_CHANNELS,
         blocks: int = DEFAULT_BLOCKS,
         dropout: float = 0.0,
-        lookahead_horizons: tuple[int, ...] = (),
+        short_term_value_horizons: tuple[int, ...] = (),
     ) -> None:
         super().__init__()
         self.in_channels = int(in_channels)
         self.channels = int(channels)
         self.blocks_count = int(blocks)
         self.board_size = BOARD_SIZE
-        self.lookahead_horizons = tuple(int(item) for item in lookahead_horizons)
+        self.short_term_value_horizons = tuple(int(item) for item in short_term_value_horizons)
 
         self.conv_in = HexConv2d(self.in_channels, self.channels, kernel_size=3, padding=1)
         self.activation = nn.ReLU(inplace=True)
@@ -176,8 +176,8 @@ class Model1Network(nn.Module):
         self.policy_head = PolicyHead(self.channels)
         self.value_head = ValueBinnedHead(self.channels)
         self.opp_policy_head = PolicyHead(self.channels)
-        self.lookahead_heads = nn.ModuleDict(
-            {str(horizon): ValueBinnedHead(self.channels) for horizon in self.lookahead_horizons}
+        self.short_term_value_heads = nn.ModuleDict(
+            {str(horizon): ValueBinnedHead(self.channels) for horizon in self.short_term_value_horizons}
         )
 
     def trunk(self, x: torch.Tensor) -> torch.Tensor:
@@ -191,8 +191,8 @@ class Model1Network(nn.Module):
             "value": self.value_head(features),
             "opp_policy": self.opp_policy_head(features),
         }
-        for horizon, head in self.lookahead_heads.items():
-            outputs[f"lookahead_{horizon}"] = head(features)
+        for horizon, head in self.short_term_value_heads.items():
+            outputs[f"stvalue_{horizon}"] = head(features)
         return outputs
 
     def forward_policy_value(self, x: torch.Tensor) -> dict[str, torch.Tensor]:

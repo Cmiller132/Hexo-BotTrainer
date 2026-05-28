@@ -14,8 +14,8 @@ from .config import Model1Config
 from .losses import model1_loss
 from .replay import (
     INPUT_KEY,
-    LOOKAHEAD_KEY,
-    LOOKAHEAD_MASK_KEY,
+    SHORT_TERM_VALUE_KEY,
+    SHORT_TERM_VALUE_MASK_KEY,
     OPP_POLICY_KEY,
     POLICY_KEY,
     VALUE_KEY,
@@ -55,23 +55,12 @@ class DenseCNNTrainer:
         else:
             self.model.to(self.device)
         self.scaler = torch.amp.GradScaler("cuda", enabled=config.training.amp and self.device.type == "cuda")
+        # Calibration tunes only these four batch sizes; every other search and
+        # training setting is read directly from `config`.
         self.inference_batch_size = 1
         self.selfplay_batch_size = config.selfplay.active_games
         self.mcts_virtual_batch_size: int | None = None
-        self.mcts_progressive_widening_initial_actions = config.selfplay.progressive_widening_initial_actions
-        self.mcts_progressive_widening_child_initial_actions = config.selfplay.progressive_widening_child_initial_actions
-        self.mcts_progressive_widening_candidate_actions = config.selfplay.progressive_widening_candidate_actions
-        self.mcts_progressive_widening_growth_interval = config.selfplay.progressive_widening_growth_interval
-        self.mcts_progressive_widening_growth_base = config.selfplay.progressive_widening_growth_base
-        self.mcts_root_dirichlet_noise_enabled = config.selfplay.root_dirichlet_noise_enabled
-        self.mcts_root_dirichlet_noise_fraction = config.selfplay.root_dirichlet_noise_fraction
-        self.mcts_root_dirichlet_alpha = config.selfplay.root_dirichlet_alpha
-        self.mcts_hidden_prior_mass = config.selfplay.hidden_prior_mass
-        self.mcts_fpu_reduction = config.selfplay.fpu_reduction
-        self.mcts_virtual_loss = config.selfplay.virtual_loss
-        self.mcts_active_root_limit = config.selfplay.mcts_active_root_limit
         self.training_batch_size = config.training.batch_size
-        self.search_visits = config.selfplay.search_visits
 
     @property
     def sample_count(self) -> int:
@@ -240,7 +229,7 @@ class DenseCNNTrainer:
                 offset = 0
                 while offset < rows and trained_rows < target_rows:
                     take = min(batch_size, rows - offset, target_rows - trained_rows)
-                    batch = _batch_from_npz(data, offset, offset + take, self.config.architecture.lookahead_horizons)
+                    batch = _batch_from_npz(data, offset, offset + take, self.config.architecture.short_term_value_horizons)
                     offset += take
                     trained_rows += take
                     loss_value = self._optimizer_step(batch)
@@ -296,7 +285,7 @@ class DenseCNNTrainer:
                 policy_weight=self.config.training.policy_weight,
                 value_weight=self.config.training.value_weight,
                 opp_policy_weight=self.config.training.opp_policy_weight,
-                lookahead_weight=self.config.training.lookahead_weight,
+                short_term_value_weight=self.config.training.short_term_value_weight,
             )
         self.scaler.scale(loss).backward()
         if self.config.training.max_grad_norm > 0:
@@ -327,7 +316,7 @@ class DenseCNNTrainer:
                 offset = 0
                 while offset < rows and rows_seen < max_rows:
                     take = min(batch_size, rows - offset, max_rows - rows_seen)
-                    batch = _batch_from_npz(data, offset, offset + take, self.config.architecture.lookahead_horizons)
+                    batch = _batch_from_npz(data, offset, offset + take, self.config.architecture.short_term_value_horizons)
                     offset += take
                     rows_seen += take
                     inputs = batch.pop("input")
@@ -344,7 +333,7 @@ class DenseCNNTrainer:
                             policy_weight=self.config.training.policy_weight,
                             value_weight=self.config.training.value_weight,
                             opp_policy_weight=self.config.training.opp_policy_weight,
-                            lookahead_weight=self.config.training.lookahead_weight,
+                            short_term_value_weight=self.config.training.short_term_value_weight,
                         )
                     total_loss += float(loss.detach().cpu().item())
                     steps += 1
@@ -432,15 +421,15 @@ def _batch_from_npz(data: Any, start: int, stop: int, horizons: tuple[int, ...])
         "opp_policy": opp_policy,
         "value": torch.from_numpy(data[VALUE_KEY][start:stop].astype(np.float32, copy=False)),
     }
-    lookahead = data[LOOKAHEAD_KEY][start:stop].astype(np.float32, copy=False)
-    masks = data[LOOKAHEAD_MASK_KEY][start:stop].astype(np.float32, copy=False)
+    short_term_value = data[SHORT_TERM_VALUE_KEY][start:stop].astype(np.float32, copy=False)
+    masks = data[SHORT_TERM_VALUE_MASK_KEY][start:stop].astype(np.float32, copy=False)
     for index, horizon in enumerate(horizons):
-        if index >= lookahead.shape[1]:
-            batch[f"lookahead_{int(horizon)}"] = torch.zeros((stop - start,), dtype=torch.float32)
-            batch[f"lookahead_{int(horizon)}_mask"] = torch.zeros((stop - start,), dtype=torch.float32)
+        if index >= short_term_value.shape[1]:
+            batch[f"stvalue_{int(horizon)}"] = torch.zeros((stop - start,), dtype=torch.float32)
+            batch[f"stvalue_{int(horizon)}_mask"] = torch.zeros((stop - start,), dtype=torch.float32)
         else:
-            batch[f"lookahead_{int(horizon)}"] = torch.from_numpy(lookahead[:, index])
-            batch[f"lookahead_{int(horizon)}_mask"] = torch.from_numpy(masks[:, index])
+            batch[f"stvalue_{int(horizon)}"] = torch.from_numpy(short_term_value[:, index])
+            batch[f"stvalue_{int(horizon)}_mask"] = torch.from_numpy(masks[:, index])
     return batch
 
 

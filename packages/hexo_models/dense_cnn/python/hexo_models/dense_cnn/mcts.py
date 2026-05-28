@@ -59,24 +59,19 @@ class BatchedMctsSession:
         temperature: float = 1.0,
         seed: int | None = None,
         virtual_batch_size: int | None = None,
-        progressive_widening_initial_actions: int | None = 8,
-        progressive_widening_child_initial_actions: int | None = 4,
-        progressive_widening_candidate_actions: int | None = 128,
-        progressive_widening_growth_interval: float | None = 256.0,
-        progressive_widening_growth_base: float | None = 1.3,
-        root_dirichlet_alpha: float | None = None,
-        root_dirichlet_noise_fraction: float | None = None,
-        hidden_prior_mass: float | None = 0.05,
-        fpu_reduction: float | None = 0.20,
-        virtual_loss: float | None = 1.0,
         active_root_limit: int | None = None,
+        root_dirichlet_total_alpha: float | None = None,
+        root_dirichlet_noise_fraction: float | None = None,
+        root_policy_temperature: float | None = None,
+        fpu_reduction: float | None = None,
+        virtual_loss: float | None = None,
     ) -> list["SearchResult"]:
         """Search live root states through the native dense-cnn MCTS session.
 
         The Python side supplies the `DenseCNNInference` callback. Every other
-        search detail, including cloning engine states, validating numeric
-        search settings, batching leaves, parsing evaluator bytes, and selecting
-        the returned action, belongs to Rust.
+        search detail, including cloning engine states, batching leaves over all
+        legal moves, parsing evaluator bytes, and selecting the returned action,
+        belongs to Rust.
         """
 
         if not root_states:
@@ -91,17 +86,12 @@ class BatchedMctsSession:
             seed=0 if seed is None else int(seed),
             evaluator=inference.evaluate_model1_payload,
             virtual_batch_size=virtual_batch_size,
-            progressive_widening_initial_actions=progressive_widening_initial_actions,
-            progressive_widening_child_initial_actions=progressive_widening_child_initial_actions,
-            progressive_widening_candidate_actions=progressive_widening_candidate_actions,
-            progressive_widening_growth_interval=progressive_widening_growth_interval,
-            progressive_widening_growth_base=progressive_widening_growth_base,
-            root_dirichlet_alpha=root_dirichlet_alpha,
+            active_root_limit=active_root_limit,
+            root_dirichlet_total_alpha=root_dirichlet_total_alpha,
             root_dirichlet_noise_fraction=root_dirichlet_noise_fraction,
-            hidden_prior_mass=hidden_prior_mass,
+            root_policy_temperature=root_policy_temperature,
             fpu_reduction=fpu_reduction,
             virtual_loss=virtual_loss,
-            active_root_limit=active_root_limit,
         )
         return [_result_from_payload(payload) for payload in payloads]
 

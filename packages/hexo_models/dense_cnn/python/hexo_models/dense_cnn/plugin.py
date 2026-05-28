@@ -40,7 +40,7 @@ class DenseCNNPlugin:
             channels=arch.channels,
             blocks=arch.residual_blocks,
             dropout=arch.dropout,
-            lookahead_horizons=arch.lookahead_horizons,
+            short_term_value_horizons=arch.short_term_value_horizons,
         )
 
     def training_component_overrides(

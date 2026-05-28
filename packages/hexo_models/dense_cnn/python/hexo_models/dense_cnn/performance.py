@@ -119,15 +119,10 @@ def calibrate_dense_cnn(
         "selected_inference_batch_size": int(selected_inference_benchmark.get("batch_size", 1)),
         "selected_selfplay_batch_size": int(selected_selfplay.get("selfplay_batch_size", config.selfplay.active_games)),
         "selected_mcts_virtual_batch_size": int(selected_selfplay.get("mcts_virtual_batch_size", 0)),
-        "mcts_progressive_widening_initial_actions": config.selfplay.progressive_widening_initial_actions,
-        "mcts_progressive_widening_child_initial_actions": config.selfplay.progressive_widening_child_initial_actions,
-        "mcts_progressive_widening_candidate_actions": config.selfplay.progressive_widening_candidate_actions,
-        "mcts_progressive_widening_growth_interval": config.selfplay.progressive_widening_growth_interval,
-        "mcts_progressive_widening_growth_base": config.selfplay.progressive_widening_growth_base,
         "mcts_root_dirichlet_noise_enabled": config.selfplay.root_dirichlet_noise_enabled,
-        "mcts_root_dirichlet_alpha": config.selfplay.root_dirichlet_alpha,
+        "mcts_root_dirichlet_total_alpha": config.selfplay.root_dirichlet_total_alpha,
         "mcts_root_dirichlet_noise_fraction": config.selfplay.root_dirichlet_noise_fraction,
-        "mcts_hidden_prior_mass": config.selfplay.hidden_prior_mass,
+        "mcts_root_policy_temperature": config.selfplay.root_policy_temperature,
         "mcts_fpu_reduction": config.selfplay.fpu_reduction,
         "mcts_virtual_loss": config.selfplay.virtual_loss,
         "mcts_active_root_limit": config.selfplay.mcts_active_root_limit,
@@ -353,16 +348,13 @@ def _benchmark_selfplay_setting(
             [game["state"] for game in playable],
             inference,
             visits=resolved_visits,
+            c_puct=config.selfplay.c_puct,
             temperature=config.selfplay.temperature,
             seed=17_000 + resolved_visits + positions,
             virtual_batch_size=virtual_batch_size,
-            progressive_widening_initial_actions=config.selfplay.progressive_widening_initial_actions,
-            progressive_widening_child_initial_actions=config.selfplay.progressive_widening_child_initial_actions,
-            progressive_widening_candidate_actions=config.selfplay.progressive_widening_candidate_actions,
-            progressive_widening_growth_interval=config.selfplay.progressive_widening_growth_interval,
-            progressive_widening_growth_base=config.selfplay.progressive_widening_growth_base,
-            root_dirichlet_alpha=(
-                config.selfplay.root_dirichlet_alpha
+            active_root_limit=config.selfplay.mcts_active_root_limit,
+            root_dirichlet_total_alpha=(
+                config.selfplay.root_dirichlet_total_alpha
                 if config.selfplay.root_dirichlet_noise_enabled
                 else None
             ),
@@ -371,10 +363,9 @@ def _benchmark_selfplay_setting(
                 if config.selfplay.root_dirichlet_noise_enabled
                 else None
             ),
-            hidden_prior_mass=config.selfplay.hidden_prior_mass,
+            root_policy_temperature=config.selfplay.root_policy_temperature,
             fpu_reduction=config.selfplay.fpu_reduction,
             virtual_loss=config.selfplay.virtual_loss,
-            active_root_limit=config.selfplay.mcts_active_root_limit,
         )
         if searches:
             _extend_mcts_diagnostic_batches(mcts_diagnostic_batches, searches)
@@ -394,15 +385,10 @@ def _benchmark_selfplay_setting(
         "batch_size": active_limit,
         "mcts_virtual_batch_size": virtual_batch_size,
         "mcts_tree_reuse_session": True,
-        "mcts_progressive_widening_initial_actions": config.selfplay.progressive_widening_initial_actions,
-        "mcts_progressive_widening_child_initial_actions": config.selfplay.progressive_widening_child_initial_actions,
-        "mcts_progressive_widening_candidate_actions": config.selfplay.progressive_widening_candidate_actions,
-        "mcts_progressive_widening_growth_interval": config.selfplay.progressive_widening_growth_interval,
-        "mcts_progressive_widening_growth_base": config.selfplay.progressive_widening_growth_base,
         "mcts_root_dirichlet_noise_enabled": config.selfplay.root_dirichlet_noise_enabled,
-        "mcts_root_dirichlet_alpha": config.selfplay.root_dirichlet_alpha,
+        "mcts_root_dirichlet_total_alpha": config.selfplay.root_dirichlet_total_alpha,
         "mcts_root_dirichlet_noise_fraction": config.selfplay.root_dirichlet_noise_fraction,
-        "mcts_hidden_prior_mass": config.selfplay.hidden_prior_mass,
+        "mcts_root_policy_temperature": config.selfplay.root_policy_temperature,
         "mcts_fpu_reduction": config.selfplay.fpu_reduction,
         "mcts_virtual_loss": config.selfplay.virtual_loss,
         "mcts_session_cache_max_states": config.selfplay.mcts_session_cache_max_states,

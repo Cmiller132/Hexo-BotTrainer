@@ -26,8 +26,8 @@ OPP_POLICY_KEY = "oppPolicyTargetsNCHW"
 ROOT_POLICY_KEY = "rootPolicyNCHW"
 LEGAL_MASK_KEY = "legalMaskNCHW"
 VALUE_KEY = "valueTargetsN"
-LOOKAHEAD_KEY = "lookaheadTargetsNC"
-LOOKAHEAD_MASK_KEY = "lookaheadMasksNC"
+SHORT_TERM_VALUE_KEY = "shortTermValueTargetsNC"
+SHORT_TERM_VALUE_MASK_KEY = "shortTermValueMasksNC"
 METADATA_KEY = "metadataInputNC"
 NPZ_KEYS = (
     INPUT_KEY,
@@ -36,8 +36,8 @@ NPZ_KEYS = (
     ROOT_POLICY_KEY,
     LEGAL_MASK_KEY,
     VALUE_KEY,
-    LOOKAHEAD_KEY,
-    LOOKAHEAD_MASK_KEY,
+    SHORT_TERM_VALUE_KEY,
+    SHORT_TERM_VALUE_MASK_KEY,
     METADATA_KEY,
 )
 
@@ -153,8 +153,15 @@ def materialize_policy_surprise_rows(
     samples: Sequence[Model1SampleData],
     *,
     seed: int,
+    uniform_fraction: float = 0.5,
+    max_weight: float = 8.0,
 ) -> tuple[list[Model1SampleData], dict[str, float]]:
-    """Return samples repeated by KataGo policy-surprise frequency weights."""
+    """Return samples repeated by KataGo policy-surprise frequency weights.
+
+    Each sample's frequency weight mixes a uniform floor with a term proportional
+    to its policy surprise `KL(target || prior)`, so surprising positions are seen
+    more often. Weights sum to the game length before the `max_weight` clamp.
+    """
 
     if not samples:
         return [], {
@@ -167,7 +174,11 @@ def materialize_policy_surprise_rows(
     surprise_total = sum(surprises)
     if surprise_total > 0.0:
         n = float(len(samples))
-        weights = [0.5 + 0.5 * n * surprise / surprise_total for surprise in surprises]
+        kl_fraction = 1.0 - uniform_fraction
+        weights = [
+            min(max_weight, uniform_fraction + kl_fraction * n * surprise / surprise_total)
+            for surprise in surprises
+        ]
     else:
         weights = [1.0 for _sample in samples]
 
@@ -206,13 +217,13 @@ def write_selfplay_npz(
     raw_rows: int,
     epoch: int,
     game_id: str,
-    lookahead_horizons: Sequence[int],
+    short_term_value_horizons: Sequence[int],
 ) -> DenseSelfplayWriteResult:
     """Write one self-play game shard as dense training rows."""
 
     path.parent.mkdir(parents=True, exist_ok=True)
     sidecar_path = sidecar_for_npz(path)
-    arrays = _samples_to_arrays(samples, lookahead_horizons=lookahead_horizons)
+    arrays = _samples_to_arrays(samples, short_term_value_horizons=short_term_value_horizons)
     np.savez_compressed(path, **arrays)
     policy_surprises = [float(sample.policy_surprise) for sample in samples]
     frequency_weights = [float(sample.frequency_weight) for sample in samples]
@@ -541,14 +552,14 @@ def compute_katago_window_rows(
 def _samples_to_arrays(
     samples: Sequence[Model1SampleData],
     *,
-    lookahead_horizons: Sequence[int],
+    short_term_value_horizons: Sequence[int],
 ) -> dict[str, np.ndarray]:
     expanded = []
-    horizons = tuple(int(horizon) for horizon in lookahead_horizons)
+    horizons = tuple(int(horizon) for horizon in short_term_value_horizons)
     for sample in samples:
         row = expand_sample(sample)
         for horizon in horizons:
-            key = f"lookahead_{horizon}"
+            key = f"stvalue_{horizon}"
             mask_key = f"{key}_mask"
             if key in row:
                 row[mask_key] = torch.tensor(1.0, dtype=torch.float32)
@@ -564,16 +575,16 @@ def _samples_to_arrays(
             ROOT_POLICY_KEY: np.zeros((0, 1, BOARD_SIZE, BOARD_SIZE), dtype=np.float32),
             LEGAL_MASK_KEY: np.zeros((0, 1, BOARD_SIZE, BOARD_SIZE), dtype=np.bool_),
             VALUE_KEY: np.zeros((0,), dtype=np.float32),
-            LOOKAHEAD_KEY: np.zeros((0, len(horizons)), dtype=np.float32),
-            LOOKAHEAD_MASK_KEY: np.zeros((0, len(horizons)), dtype=np.float32),
+            SHORT_TERM_VALUE_KEY: np.zeros((0, len(horizons)), dtype=np.float32),
+            SHORT_TERM_VALUE_MASK_KEY: np.zeros((0, len(horizons)), dtype=np.float32),
             METADATA_KEY: np.zeros((0, 4), dtype=np.float32),
         }
     batch = stack_expanded(expanded)
-    lookahead_targets = []
-    lookahead_masks = []
+    short_term_value_targets = []
+    short_term_value_masks = []
     for horizon in horizons:
-        lookahead_targets.append(batch[f"lookahead_{horizon}"].reshape(-1, 1))
-        lookahead_masks.append(batch[f"lookahead_{horizon}_mask"].reshape(-1, 1))
+        short_term_value_targets.append(batch[f"stvalue_{horizon}"].reshape(-1, 1))
+        short_term_value_masks.append(batch[f"stvalue_{horizon}_mask"].reshape(-1, 1))
     metadata = np.asarray(
         [
             [
@@ -593,14 +604,14 @@ def _samples_to_arrays(
         ROOT_POLICY_KEY: _flat_to_nchw(batch["root_policy"]),
         LEGAL_MASK_KEY: _flat_to_nchw(batch["legal_mask"].to(dtype=torch.float32)).astype(np.bool_),
         VALUE_KEY: batch["value"].cpu().numpy().astype(np.float32, copy=False),
-        LOOKAHEAD_KEY: (
-            torch.cat(lookahead_targets, dim=1).cpu().numpy().astype(np.float32, copy=False)
-            if lookahead_targets
+        SHORT_TERM_VALUE_KEY: (
+            torch.cat(short_term_value_targets, dim=1).cpu().numpy().astype(np.float32, copy=False)
+            if short_term_value_targets
             else np.zeros((len(samples), 0), dtype=np.float32)
         ),
-        LOOKAHEAD_MASK_KEY: (
-            torch.cat(lookahead_masks, dim=1).cpu().numpy().astype(np.float32, copy=False)
-            if lookahead_masks
+        SHORT_TERM_VALUE_MASK_KEY: (
+            torch.cat(short_term_value_masks, dim=1).cpu().numpy().astype(np.float32, copy=False)
+            if short_term_value_masks
             else np.zeros((len(samples), 0), dtype=np.float32)
         ),
         METADATA_KEY: metadata,

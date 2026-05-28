@@ -118,7 +118,7 @@ def model1_loss(
     policy_weight: float = 1.0,
     value_weight: float = 1.0,
     opp_policy_weight: float = 0.25,
-    lookahead_weight: float = 0.25,
+    short_term_value_weight: float = 0.25,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """Compute the weighted loss surface expected by `DenseCNNTrainer`."""
 
@@ -132,9 +132,9 @@ def model1_loss(
         total = total + opp_policy_weight * components["opp_policy"]
 
     for key, output in outputs.items():
-        if key.startswith("lookahead_") and key in batch:
+        if key.startswith("stvalue_") and key in batch:
             components[key] = binned_value_loss(output, batch[key], mask=batch.get(f"{key}_mask"))
-            total = total + lookahead_weight * components[key]
+            total = total + short_term_value_weight * components[key]
 
     components["total"] = total
     return total, components

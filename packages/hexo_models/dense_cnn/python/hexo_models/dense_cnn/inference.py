@@ -21,7 +21,7 @@ import torch
 
 from . import rust_bridge
 from .architecture import Model1Network, optimized_model1_for_inference
-from .constants import BOARD_SIZE, INPUT_CHANNELS, PLANE_LEGAL
+from .constants import BOARD_SIZE, INPUT_CHANNELS
 from .losses import decode_binned_value
 
 
@@ -176,103 +176,60 @@ class DenseCNNInference:
     def evaluate_model1_payload(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         """Torch callback used by the Rust batched MCTS bridge.
 
-        Rust owns search and sends a strict byte payload. Python owns only the
-        neural network pass and legal-prior extraction. Returned bytes are parsed
-        by `rust/src/mcts_eval.rs`, so the order and lengths here are part of the
-        native evaluator ABI.
+        Rust owns search and sends a strict byte payload: the f32 input planes
+        plus the per-row legal crop flats Rust derived from the engine. Python
+        runs the network and returns row-major `values_bytes` and softmax
+        `priors_bytes` over each row's legal flats. The order and lengths here are
+        part of the native evaluator ABI parsed by `rust/src/mcts_eval.rs`.
         """
 
         shape = _payload_shape(payload)
-        input_dtype_name = str(payload.get("input_dtype", "float32"))
-        if input_dtype_name == "float32":
-            input_dtype = torch.float32
-            item_bytes = 4
-        elif input_dtype_name == "float16":
-            input_dtype = torch.float16
-            item_bytes = 2
-        else:
-            raise ValueError(f"unsupported dense_cnn MCTS input_dtype {input_dtype_name!r}")
-        _require_byte_length("inputs", payload["inputs"], _shape_product(shape), item_bytes)
-        inputs = torch.frombuffer(payload["inputs"], dtype=input_dtype).reshape(shape)
-        if inputs.dtype != torch.float32 and (self.device.type != "cuda" or not self.amp):
-            inputs = inputs.float()
+        _require_byte_length("inputs", payload["inputs"], _shape_product(shape), 4)
+        inputs = torch.frombuffer(payload["inputs"], dtype=torch.float32).reshape(shape)
         max_batch = self.max_batch_size
         if inputs.shape[0] > max_batch:
             # MCTS can ask for a large leaf batch. Chunking happens here because
-            # only the Python inference wrapper knows the safe Torch batch size
-            # for the active model/device.
-            output_chunks = []
-            for start in range(0, inputs.shape[0], max_batch):
-                output_chunks.append({
-                    key: value.cpu()
-                    for key, value in self._forward_inputs_device(inputs[start : start + max_batch]).items()
-                })
+            # only the Python inference wrapper knows the safe Torch batch size.
+            output_chunks = [
+                {key: value.cpu() for key, value in self._forward_inputs_device(inputs[start : start + max_batch]).items()}
+                for start in range(0, inputs.shape[0], max_batch)
+            ]
             policy_batch = torch.cat([chunk["policy"] for chunk in output_chunks], dim=0)
             value_batch = torch.cat([chunk["value"] for chunk in output_chunks], dim=0)
-            mask_inputs = inputs
         else:
-            device_inputs = _to_inference_device(inputs, self.device)
-            outputs = self._forward_device_inputs(device_inputs)
+            outputs = self._forward_inputs_device(_to_inference_device(inputs, self.device))
             policy_batch = outputs["policy"]
             value_batch = outputs["value"]
-            mask_inputs = device_inputs
         values_tensor = decode_binned_value(value_batch).cpu().contiguous()
-        selected_flats: torch.Tensor | None = None
-        selected_offsets: Sequence[int] | None = None
-        if payload.get("legal_mask_from_inputs"):
-            # Candidate-limited mode sends the legal plane inside the input
-            # tensor. Python chooses the top-k legal crop cells and returns both
-            # priors and selected flat indices so Rust can prove they are legal.
-            max_candidates = _positive_payload_int(payload, "max_prior_candidates")
-            priors_tensor, selected_flats, selected_offsets = _topk_legal_priors_from_input_mask(
-                policy_batch=policy_batch,
-                inputs=mask_inputs,
-                max_candidates=max_candidates,
-            )
+
+        offsets = _legal_row_offsets(payload["legal_row_offsets"], rows=shape[0])
+        selected_count = offsets[-1]
+        _require_byte_length("legal_flat_indices_bytes", payload["legal_flat_indices_bytes"], selected_count, 8)
+        if selected_count == 0:
+            priors_tensor = torch.empty(0, dtype=torch.float32)
         else:
-            # Full-prior mode is used when Rust has already sent the exact legal
-            # crop flats. Priors are softmax-normalized per row over that list.
-            if "legal_flat_indices_bytes" not in payload or "legal_row_offsets" not in payload:
-                raise ValueError(
-                    "dense_cnn MCTS evaluator payload requires legal_flat_indices_bytes and legal_row_offsets"
-                )
-            offsets = _legal_row_offsets(payload["legal_row_offsets"], rows=shape[0])
-            selected_count = offsets[-1]
-            _require_byte_length("legal_flat_indices_bytes", payload["legal_flat_indices_bytes"], selected_count, 8)
-            if selected_count == 0:
-                priors_tensor = torch.empty(0, dtype=torch.float32)
-            else:
-                flat_index_buffer = torch.frombuffer(payload["legal_flat_indices_bytes"], dtype=torch.int64)
-                counts = torch.as_tensor(
-                    [offsets[index + 1] - offsets[index] for index in range(len(offsets) - 1)],
-                    dtype=torch.long,
-                )
-                row_ids = torch.repeat_interleave(torch.arange(len(counts), dtype=torch.long), counts)
-                flat_indices = flat_index_buffer.to(policy_batch.device, non_blocking=True)
-                row_ids_device = row_ids.to(policy_batch.device, non_blocking=True)
-                selected = policy_batch[row_ids_device, flat_indices]
-                max_per_row = torch.full(
-                    (len(counts),),
-                    float("-inf"),
-                    dtype=selected.dtype,
-                    device=selected.device,
-                )
-                max_per_row.scatter_reduce_(0, row_ids_device, selected, reduce="amax", include_self=True)
-                exp = torch.exp(selected - max_per_row[row_ids_device])
-                sum_per_row = torch.zeros((len(counts),), dtype=selected.dtype, device=selected.device)
-                sum_per_row.scatter_add_(0, row_ids_device, exp)
-                positive_rows = counts.to(sum_per_row.device) > 0
-                if bool((sum_per_row[positive_rows] <= 0).any().item()):
-                    raise ValueError("dense_cnn MCTS evaluator payload has a legal row with zero prior mass")
-                priors_tensor = (exp / sum_per_row[row_ids_device]).cpu().contiguous()
-        result: dict[str, Any] = {
+            counts = torch.as_tensor(
+                [offsets[index + 1] - offsets[index] for index in range(len(offsets) - 1)],
+                dtype=torch.long,
+            )
+            row_ids = torch.repeat_interleave(torch.arange(len(counts), dtype=torch.long), counts)
+            flat_indices = torch.frombuffer(payload["legal_flat_indices_bytes"], dtype=torch.int64).to(
+                policy_batch.device, non_blocking=True
+            )
+            row_ids_device = row_ids.to(policy_batch.device, non_blocking=True)
+            selected = policy_batch[row_ids_device, flat_indices]
+            max_per_row = torch.full((len(counts),), float("-inf"), dtype=selected.dtype, device=selected.device)
+            max_per_row.scatter_reduce_(0, row_ids_device, selected, reduce="amax", include_self=True)
+            exp = torch.exp(selected - max_per_row[row_ids_device])
+            sum_per_row = torch.zeros((len(counts),), dtype=selected.dtype, device=selected.device)
+            sum_per_row.scatter_add_(0, row_ids_device, exp)
+            if bool((sum_per_row[counts.to(sum_per_row.device) > 0] <= 0).any().item()):
+                raise ValueError("dense_cnn MCTS evaluator payload has a legal row with zero prior mass")
+            priors_tensor = (exp / sum_per_row[row_ids_device]).cpu().contiguous()
+        return {
             "values_bytes": values_tensor.numpy().tobytes(),
             "priors_bytes": priors_tensor.numpy().tobytes(),
         }
-        if payload.get("legal_mask_from_inputs") and selected_flats is not None and selected_offsets is not None:
-            result["selected_flat_indices_bytes"] = selected_flats.contiguous().numpy().tobytes()
-            result["selected_row_offsets"] = tuple(int(item) for item in selected_offsets)
-        return result
 
 
 def _legal_priors_from_flats(
@@ -330,15 +287,6 @@ def _require_byte_length(name: str, value: object, expected_items: int, bytes_pe
         raise ValueError(f"{name} has {actual} bytes, expected {expected}")
 
 
-def _positive_payload_int(payload: Mapping[str, Any], key: str) -> int:
-    if key not in payload:
-        raise ValueError(f"dense_cnn MCTS evaluator payload missing {key}")
-    value = int(payload[key])
-    if value <= 0:
-        raise ValueError(f"{key} must be > 0")
-    return value
-
-
 def _legal_row_offsets(value: object, *, rows: int) -> tuple[int, ...]:
     offsets = tuple(int(item) for item in value)  # type: ignore[arg-type]
     if len(offsets) != rows + 1:
@@ -351,63 +299,3 @@ def _legal_row_offsets(value: object, *, rows: int) -> tuple[int, ...]:
     return offsets
 
 
-def _topk_legal_priors_from_input_mask(
-    *,
-    policy_batch: torch.Tensor,
-    inputs: torch.Tensor,
-    max_candidates: int,
-) -> tuple[torch.Tensor, torch.Tensor, list[int]]:
-    """Return top-k legal priors and flat crop indices for candidate-limited MCTS."""
-
-    row_count = int(policy_batch.shape[0])
-    if row_count <= 0:
-        return torch.empty(0, dtype=torch.float32), torch.empty(0, dtype=torch.int64), [0]
-    policy_width = int(policy_batch.shape[1])
-    if max_candidates <= 0:
-        raise ValueError("max_prior_candidates must be > 0")
-    if max_candidates > policy_width:
-        raise ValueError(
-            f"max_prior_candidates {max_candidates} exceeds dense_cnn policy width {policy_width}"
-        )
-
-    legal_mask = inputs[:, PLANE_LEGAL].reshape(row_count, -1).to(
-        device=policy_batch.device,
-        dtype=torch.bool,
-        non_blocking=True,
-    )
-    if not bool(legal_mask.any().item()):
-        return torch.empty(0, dtype=torch.float32), torch.empty(0, dtype=torch.int64), [0 for _ in range(row_count + 1)]
-
-    # `topk` runs over masked logits. Invalid cells become `-inf`, then the
-    # finite mask controls both softmax normalization and selected-row offsets.
-    k = int(max_candidates)
-    masked_logits = policy_batch.masked_fill(~legal_mask, float("-inf"))
-    values, selected_flats = torch.topk(masked_logits, k=k, dim=1, largest=True, sorted=True)
-    valid = torch.isfinite(values)
-    masked_values = values.masked_fill(~valid, float("-inf"))
-    prob_matrix = torch.softmax(masked_values, dim=1).masked_fill(~valid, 0.0).float().cpu()
-    flat_matrix = selected_flats.cpu()
-    valid_cpu = valid.cpu()
-    if bool(valid_cpu.all().item()):
-        selected_offsets = list(range(0, (row_count + 1) * k, k))
-        return (
-            prob_matrix.reshape(-1).contiguous(),
-            flat_matrix.reshape(-1).to(dtype=torch.int64).contiguous(),
-            selected_offsets,
-        )
-
-    priors: list[torch.Tensor] = []
-    flats: list[torch.Tensor] = []
-    selected_offsets = [0]
-    for row_index in range(row_count):
-        row_valid = valid_cpu[row_index]
-        keep = int(row_valid.sum().item())
-        if keep == 0:
-            selected_offsets.append(selected_offsets[-1])
-            continue
-        priors.append(prob_matrix[row_index, row_valid])
-        flats.append(flat_matrix[row_index, row_valid].to(dtype=torch.int64))
-        selected_offsets.append(selected_offsets[-1] + keep)
-    if priors:
-        return torch.cat(priors).contiguous(), torch.cat(flats).contiguous(), selected_offsets
-    return torch.empty(0, dtype=torch.float32), torch.empty(0, dtype=torch.int64), selected_offsets

@@ -54,22 +54,19 @@ class DenseCNNPlayer:
     def decide(self, state: object) -> DecisionResult:
         """Search the current live runner state and return one placement action."""
 
+        selfplay = self.trainer.config.selfplay
         search = self.mcts_session.run(
             [0],
             [state],
             self.inference,
-            visits=self.trainer.config.selfplay.search_visits,
+            visits=selfplay.search_visits,
+            c_puct=selfplay.c_puct,
             temperature=0.0,
-            virtual_batch_size=getattr(self.trainer, "mcts_virtual_batch_size", None),
-            progressive_widening_initial_actions=self.trainer.config.selfplay.progressive_widening_initial_actions,
-            progressive_widening_child_initial_actions=self.trainer.config.selfplay.progressive_widening_child_initial_actions,
-            progressive_widening_candidate_actions=self.trainer.config.selfplay.progressive_widening_candidate_actions,
-            progressive_widening_growth_interval=self.trainer.config.selfplay.progressive_widening_growth_interval,
-            progressive_widening_growth_base=self.trainer.config.selfplay.progressive_widening_growth_base,
-            hidden_prior_mass=self.trainer.config.selfplay.hidden_prior_mass,
-            fpu_reduction=self.trainer.config.selfplay.fpu_reduction,
-            virtual_loss=self.trainer.config.selfplay.virtual_loss,
-            active_root_limit=self.trainer.config.selfplay.mcts_active_root_limit,
+            virtual_batch_size=self.trainer.mcts_virtual_batch_size,
+            active_root_limit=selfplay.mcts_active_root_limit,
+            root_policy_temperature=selfplay.root_policy_temperature,
+            fpu_reduction=selfplay.fpu_reduction,
+            virtual_loss=selfplay.virtual_loss,
         )[0]
         action = engine.PlacementAction(unpack_coord_id(search.action_id))
         return DecisionResult(

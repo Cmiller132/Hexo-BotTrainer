@@ -1,22 +1,19 @@
-"""Strict configuration objects for dense CNN Model 1.
+"""Configuration objects for dense CNN Model 1.
 
-`parse_model1_config` is the TOML boundary for this model. It accepts only the
-current production sections and keys, converts scalars into typed dataclasses,
-and raises `ValueError` for unknown, non-finite, out-of-range, or incompatible
-values.
+`parse_model1_config` is the TOML boundary for this model. It rejects unknown
+keys per section so a typo in a hand-authored config fails fast instead of being
+silently ignored, then builds immutable dataclasses with light type coercion.
 
-The small validation helpers in this file are intentionally centralized here:
-configuration is a real external boundary, and raising clear config errors here
-prevents invalid settings from reaching the trainer, Rust MCTS session, or
-PyTorch optimizer with less useful failures.
+It deliberately does not re-validate every scalar's sign and range: the config
+is authored by hand alongside the code, and the trainer, Rust session, and
+optimizer raise clear errors for genuinely invalid values.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-import math
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from .constants import DEFAULT_BLOCKS, DEFAULT_CHANNELS, INPUT_CHANNELS
 
@@ -27,7 +24,7 @@ class Model1ArchitectureConfig:
     channels: int = DEFAULT_CHANNELS
     residual_blocks: int = DEFAULT_BLOCKS
     dropout: float = 0.0
-    lookahead_horizons: tuple[int, ...] = ()
+    short_term_value_horizons: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,7 +35,7 @@ class Model1TrainingConfig:
     policy_weight: float = 1.0
     value_weight: float = 1.0
     opp_policy_weight: float = 0.25
-    lookahead_weight: float = 0.25
+    short_term_value_weight: float = 0.25
     amp: bool = True
     max_grad_norm: float = 1.0
     train_samples_per_epoch: int = 100_000
@@ -50,7 +47,6 @@ class Model1TrainingConfig:
 
 @dataclass(frozen=True, slots=True)
 class Model1SampleConfig:
-    compression_level: int = 6
     shuffle_min_rows: int = 100_000
     shuffle_keep_target_rows: int = 600_000
     shuffle_taper_window_exponent: float = 0.65
@@ -59,21 +55,19 @@ class Model1SampleConfig:
     approx_rows_per_out_file: int = 70_000
     shuffle_worker_group_size: int = 80_000
     validation_fraction: float = 0.0
+    policy_surprise_uniform_fraction: float = 0.5
+    policy_surprise_max_weight: float = 8.0
 
 
 @dataclass(frozen=True, slots=True)
 class Model1SelfPlayConfig:
     search_visits: int = 128
     active_games: int = 1024
-    progressive_widening_initial_actions: int = 8
-    progressive_widening_child_initial_actions: int = 4
-    progressive_widening_candidate_actions: int = 128
-    progressive_widening_growth_interval: float = 256.0
-    progressive_widening_growth_base: float = 1.3
+    c_puct: float = 1.5
     root_dirichlet_noise_enabled: bool = True
     root_dirichlet_noise_fraction: float = 0.25
-    root_dirichlet_alpha: float = 0.03
-    hidden_prior_mass: float = 0.05
+    root_dirichlet_total_alpha: float = 10.83
+    root_policy_temperature: float = 1.1
     fpu_reduction: float = 0.20
     virtual_loss: float = 1.0
     mcts_session_cache_max_states: int = 1_048_576
@@ -116,337 +110,112 @@ class Model1Config:
 
 
 def parse_model1_config(raw: Mapping[str, Any] | None) -> Model1Config:
-    """Parse the dense_cnn model section into immutable config dataclasses.
-
-    This function is intentionally explicit rather than reflection-driven. Each
-    allowed key is listed at the parse site, which makes deleted production
-    options fail as unknown keys instead of lingering as decorative config.
-    """
+    """Parse the dense_cnn model section into immutable config dataclasses."""
 
     config = dict(raw or {})
     _reject_unknown(
         config,
         "model config",
-        {
-            "architecture",
-            "training",
-            "samples",
-            "selfplay",
-            "evaluation",
-            "performance",
-            "device",
-            "checkpoint_path",
-        },
+        {"architecture", "training", "samples", "selfplay", "evaluation", "performance", "device", "checkpoint_path"},
     )
-    arch = _section(
-        config,
-        "architecture",
-        {"input_channels", "channels", "residual_blocks", "dropout", "lookahead_horizons"},
-    )
-    training = _section(
-        config,
-        "training",
-        {
-            "batch_size",
-            "learning_rate",
-            "weight_decay",
-            "policy_weight",
-            "value_weight",
-            "opp_policy_weight",
-            "lookahead_weight",
-            "amp",
-            "max_grad_norm",
-            "train_samples_per_epoch",
-            "max_train_bucket_per_new_data",
-            "max_train_bucket_size",
-            "no_repeat_files",
-            "max_validation_samples",
-        },
-    )
-    samples = _section(
-        config,
-        "samples",
-        {
-            "compression_level",
-            "shuffle_min_rows",
-            "shuffle_keep_target_rows",
-            "shuffle_taper_window_exponent",
-            "shuffle_expand_window_per_row",
-            "shuffle_taper_window_scale",
-            "approx_rows_per_out_file",
-            "shuffle_worker_group_size",
-            "validation_fraction",
-        },
-    )
-    selfplay = _section(
-        config,
-        "selfplay",
-        {
-            "search_visits",
-            "active_games",
-            "progressive_widening_initial_actions",
-            "progressive_widening_child_initial_actions",
-            "progressive_widening_candidate_actions",
-            "progressive_widening_growth_interval",
-            "progressive_widening_growth_base",
-            "root_dirichlet_noise_enabled",
-            "root_dirichlet_noise_fraction",
-            "root_dirichlet_alpha",
-            "hidden_prior_mass",
-            "fpu_reduction",
-            "virtual_loss",
-            "mcts_session_cache_max_states",
-            "mcts_active_root_limit",
-            "max_actions",
-            "temperature",
-        },
-    )
-    evaluation = _section(
-        config,
-        "evaluation",
-        {"games_per_epoch", "sealbot_variant", "sealbot_time_limit", "max_actions", "require_sealbot"},
-    )
-    performance = _section(
-        config,
-        "performance",
-        {
-            "calibrate",
-            "target_selfplay_positions_per_second",
-            "inference_batch_candidates",
-            "selfplay_batch_candidates",
-            "training_batch_candidates",
-            "mcts_virtual_batch_candidates",
-            "selfplay_probe_positions",
-            "probe_batches",
-        },
-    )
+    arch = _section(config, "architecture", Model1ArchitectureConfig)
+    training = _section(config, "training", Model1TrainingConfig)
+    samples = _section(config, "samples", Model1SampleConfig)
+    selfplay = _section(config, "selfplay", Model1SelfPlayConfig)
+    evaluation = _section(config, "evaluation", Model1EvalConfig)
+    performance = _section(config, "performance", Model1PerformanceConfig)
 
-    selfplay_config = Model1SelfPlayConfig(
-        search_visits=_positive_int(selfplay, "search_visits", 128),
-        active_games=_positive_int(selfplay, "active_games", 1024),
-        progressive_widening_initial_actions=_positive_int(selfplay, "progressive_widening_initial_actions", 8),
-        progressive_widening_child_initial_actions=_positive_int(selfplay, "progressive_widening_child_initial_actions", 4),
-        progressive_widening_candidate_actions=_positive_int(selfplay, "progressive_widening_candidate_actions", 128),
-        progressive_widening_growth_interval=_positive_float(selfplay, "progressive_widening_growth_interval", 256.0),
-        progressive_widening_growth_base=_greater_than_float(selfplay, "progressive_widening_growth_base", 1.3, minimum=1.0),
-        root_dirichlet_noise_enabled=_bool(selfplay, "root_dirichlet_noise_enabled", True),
-        root_dirichlet_noise_fraction=_bounded_float(selfplay, "root_dirichlet_noise_fraction", 0.25, minimum=0.0, maximum=1.0),
-        root_dirichlet_alpha=_positive_float(selfplay, "root_dirichlet_alpha", 0.03),
-        hidden_prior_mass=_bounded_float(selfplay, "hidden_prior_mass", 0.05, minimum=0.0, maximum=0.95),
-        fpu_reduction=_nonnegative_float(selfplay, "fpu_reduction", 0.20),
-        virtual_loss=_nonnegative_float(selfplay, "virtual_loss", 1.0),
-        mcts_session_cache_max_states=_positive_int(selfplay, "mcts_session_cache_max_states", 1_048_576),
-        mcts_active_root_limit=_positive_int(selfplay, "mcts_active_root_limit", 1024),
-        max_actions=_positive_int(selfplay, "max_actions", 1024),
-        temperature=_nonnegative_float(selfplay, "temperature", 1.0),
-    )
-    if selfplay_config.active_games > selfplay_config.mcts_active_root_limit:
-        raise ValueError("active_games must be <= mcts_active_root_limit")
-
-    performance_config = Model1PerformanceConfig(
-        calibrate=_bool(performance, "calibrate", True),
-        target_selfplay_positions_per_second=_positive_float(performance, "target_selfplay_positions_per_second", 128.0),
-        inference_batch_candidates=_positive_int_tuple(performance, "inference_batch_candidates", (128, 256, 512, 1024), non_empty=True),
-        selfplay_batch_candidates=_positive_int_tuple(performance, "selfplay_batch_candidates", (1024,), non_empty=True),
-        training_batch_candidates=_positive_int_tuple(performance, "training_batch_candidates", (64, 128, 192, 256), non_empty=True),
-        mcts_virtual_batch_candidates=_positive_int_tuple(performance, "mcts_virtual_batch_candidates", (4,), non_empty=True),
-        selfplay_probe_positions=_positive_int(performance, "selfplay_probe_positions", 8192),
-        probe_batches=_positive_int(performance, "probe_batches", 1),
-    )
-    if max(performance_config.selfplay_batch_candidates) > selfplay_config.mcts_active_root_limit:
-        raise ValueError("selfplay_batch_candidates must be <= mcts_active_root_limit")
-
-    training_config = Model1TrainingConfig(
-        batch_size=_positive_int(training, "batch_size", 128),
-        learning_rate=_positive_float(training, "learning_rate", 1.0e-3),
-        weight_decay=_nonnegative_float(training, "weight_decay", 1.0e-4),
-        policy_weight=_nonnegative_float(training, "policy_weight", 1.0),
-        value_weight=_nonnegative_float(training, "value_weight", 1.0),
-        opp_policy_weight=_nonnegative_float(training, "opp_policy_weight", 0.25),
-        lookahead_weight=_nonnegative_float(training, "lookahead_weight", 0.25),
-        amp=_bool(training, "amp", True),
-        max_grad_norm=_nonnegative_float(training, "max_grad_norm", 1.0),
-        train_samples_per_epoch=_positive_int(training, "train_samples_per_epoch", 100_000),
-        max_train_bucket_per_new_data=_positive_float(training, "max_train_bucket_per_new_data", 8.0),
-        max_train_bucket_size=_positive_float(training, "max_train_bucket_size", 500_000.0),
-        no_repeat_files=_bool(training, "no_repeat_files", True),
-        max_validation_samples=_positive_int(training, "max_validation_samples", 100_000),
-    )
-
+    checkpoint_path = config.get("checkpoint_path")
     return Model1Config(
         architecture=Model1ArchitectureConfig(
-            input_channels=_positive_int(arch, "input_channels", INPUT_CHANNELS),
-            channels=_positive_int(arch, "channels", DEFAULT_CHANNELS),
-            residual_blocks=_positive_int(arch, "residual_blocks", DEFAULT_BLOCKS),
-            dropout=_bounded_float(arch, "dropout", 0.0, minimum=0.0, maximum=1.0, include_maximum=False),
-            lookahead_horizons=_positive_int_tuple(arch, "lookahead_horizons", ()),
+            input_channels=int(arch.get("input_channels", INPUT_CHANNELS)),
+            channels=int(arch.get("channels", DEFAULT_CHANNELS)),
+            residual_blocks=int(arch.get("residual_blocks", DEFAULT_BLOCKS)),
+            dropout=float(arch.get("dropout", 0.0)),
+            short_term_value_horizons=_int_tuple(arch.get("short_term_value_horizons", ())),
         ),
-        training=training_config,
+        training=Model1TrainingConfig(
+            batch_size=int(training.get("batch_size", 128)),
+            learning_rate=float(training.get("learning_rate", 1.0e-3)),
+            weight_decay=float(training.get("weight_decay", 1.0e-4)),
+            policy_weight=float(training.get("policy_weight", 1.0)),
+            value_weight=float(training.get("value_weight", 1.0)),
+            opp_policy_weight=float(training.get("opp_policy_weight", 0.25)),
+            short_term_value_weight=float(training.get("short_term_value_weight", 0.25)),
+            amp=bool(training.get("amp", True)),
+            max_grad_norm=float(training.get("max_grad_norm", 1.0)),
+            train_samples_per_epoch=int(training.get("train_samples_per_epoch", 100_000)),
+            max_train_bucket_per_new_data=float(training.get("max_train_bucket_per_new_data", 8.0)),
+            max_train_bucket_size=float(training.get("max_train_bucket_size", 500_000.0)),
+            no_repeat_files=bool(training.get("no_repeat_files", True)),
+            max_validation_samples=int(training.get("max_validation_samples", 100_000)),
+        ),
         samples=Model1SampleConfig(
-            compression_level=_int_range(samples, "compression_level", 6, minimum=0, maximum=9),
-            shuffle_min_rows=_positive_int(samples, "shuffle_min_rows", 100_000),
-            shuffle_keep_target_rows=_positive_int(samples, "shuffle_keep_target_rows", 600_000),
-            shuffle_taper_window_exponent=_positive_float(samples, "shuffle_taper_window_exponent", 0.65),
-            shuffle_expand_window_per_row=_nonnegative_float(samples, "shuffle_expand_window_per_row", 0.4),
-            shuffle_taper_window_scale=_positive_float(samples, "shuffle_taper_window_scale", 50_000.0),
-            approx_rows_per_out_file=_positive_int(samples, "approx_rows_per_out_file", 70_000),
-            shuffle_worker_group_size=_positive_int(samples, "shuffle_worker_group_size", 80_000),
-            validation_fraction=_bounded_float(samples, "validation_fraction", 0.0, minimum=0.0, maximum=1.0, include_maximum=False),
+            shuffle_min_rows=int(samples.get("shuffle_min_rows", 100_000)),
+            shuffle_keep_target_rows=int(samples.get("shuffle_keep_target_rows", 600_000)),
+            shuffle_taper_window_exponent=float(samples.get("shuffle_taper_window_exponent", 0.65)),
+            shuffle_expand_window_per_row=float(samples.get("shuffle_expand_window_per_row", 0.4)),
+            shuffle_taper_window_scale=float(samples.get("shuffle_taper_window_scale", 50_000.0)),
+            approx_rows_per_out_file=int(samples.get("approx_rows_per_out_file", 70_000)),
+            shuffle_worker_group_size=int(samples.get("shuffle_worker_group_size", 80_000)),
+            validation_fraction=float(samples.get("validation_fraction", 0.0)),
+            policy_surprise_uniform_fraction=float(samples.get("policy_surprise_uniform_fraction", 0.5)),
+            policy_surprise_max_weight=float(samples.get("policy_surprise_max_weight", 8.0)),
         ),
-        selfplay=selfplay_config,
+        selfplay=Model1SelfPlayConfig(
+            search_visits=int(selfplay.get("search_visits", 128)),
+            active_games=int(selfplay.get("active_games", 1024)),
+            c_puct=float(selfplay.get("c_puct", 1.5)),
+            root_dirichlet_noise_enabled=bool(selfplay.get("root_dirichlet_noise_enabled", True)),
+            root_dirichlet_noise_fraction=float(selfplay.get("root_dirichlet_noise_fraction", 0.25)),
+            root_dirichlet_total_alpha=float(selfplay.get("root_dirichlet_total_alpha", 10.83)),
+            root_policy_temperature=float(selfplay.get("root_policy_temperature", 1.1)),
+            fpu_reduction=float(selfplay.get("fpu_reduction", 0.20)),
+            virtual_loss=float(selfplay.get("virtual_loss", 1.0)),
+            mcts_session_cache_max_states=int(selfplay.get("mcts_session_cache_max_states", 1_048_576)),
+            mcts_active_root_limit=int(selfplay.get("mcts_active_root_limit", 1024)),
+            max_actions=int(selfplay.get("max_actions", 1024)),
+            temperature=float(selfplay.get("temperature", 1.0)),
+        ),
         evaluation=Model1EvalConfig(
-            games_per_epoch=_nonnegative_int(evaluation, "games_per_epoch", 64),
+            games_per_epoch=int(evaluation.get("games_per_epoch", 64)),
             sealbot_variant=str(evaluation.get("sealbot_variant", "best")),
-            sealbot_time_limit=_positive_float(evaluation, "sealbot_time_limit", 0.05),
-            max_actions=_positive_int(evaluation, "max_actions", 1024),
-            require_sealbot=_bool(evaluation, "require_sealbot", False),
+            sealbot_time_limit=float(evaluation.get("sealbot_time_limit", 0.05)),
+            max_actions=int(evaluation.get("max_actions", 1024)),
+            require_sealbot=bool(evaluation.get("require_sealbot", False)),
         ),
-        performance=performance_config,
+        performance=Model1PerformanceConfig(
+            calibrate=bool(performance.get("calibrate", True)),
+            target_selfplay_positions_per_second=float(performance.get("target_selfplay_positions_per_second", 128.0)),
+            inference_batch_candidates=_int_tuple(performance.get("inference_batch_candidates", (128, 256, 512, 1024))),
+            selfplay_batch_candidates=_int_tuple(performance.get("selfplay_batch_candidates", (1024,))),
+            training_batch_candidates=_int_tuple(performance.get("training_batch_candidates", (64, 128, 192, 256))),
+            mcts_virtual_batch_candidates=_int_tuple(performance.get("mcts_virtual_batch_candidates", (4,))),
+            selfplay_probe_positions=int(performance.get("selfplay_probe_positions", 8192)),
+            probe_batches=int(performance.get("probe_batches", 1)),
+        ),
         device=str(config.get("device", "cuda")),
-        checkpoint_path=_optional_path(config.get("checkpoint_path")),
+        checkpoint_path=Path(str(checkpoint_path)) if checkpoint_path else None,
     )
 
 
-def _section(raw: Mapping[str, Any], name: str, allowed: set[str]) -> Mapping[str, Any]:
-    """Return a typed config subsection after rejecting unsupported keys."""
+def _section(raw: Mapping[str, Any], name: str, dataclass_type: type) -> Mapping[str, Any]:
+    """Return a config subsection, rejecting keys the dataclass does not define."""
 
     value = raw.get(name, {})
     if not isinstance(value, Mapping):
         raise ValueError(f"model config section {name!r} must be a mapping")
-    _reject_unknown(value, f"model config section {name!r}", allowed)
+    _reject_unknown(value, f"model config section {name!r}", set(dataclass_type.__dataclass_fields__))
     return value
 
 
-def _optional_path(value: object) -> Path | None:
-    if value is None or value == "":
-        return None
-    return Path(str(value))
-
-
 def _reject_unknown(raw: Mapping[str, Any], label: str, allowed: set[str]) -> None:
-    """Fail fast when config still contains removed or misspelled options."""
-
     unknown = sorted(str(key) for key in raw if str(key) not in allowed)
     if unknown:
         raise ValueError(f"{label} contains unsupported key(s): {', '.join(unknown)}")
 
 
-def _bool(raw: Mapping[str, Any], key: str, default: bool) -> bool:
-    value = raw.get(key, default)
-    if not isinstance(value, bool):
-        raise ValueError(f"{key} must be a boolean")
-    return value
-
-
-def _int_value(raw: Mapping[str, Any], key: str, default: int) -> int:
-    value = raw.get(key, default)
-    if isinstance(value, bool):
-        raise ValueError(f"{key} must be an integer")
-    try:
-        resolved = int(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"{key} must be an integer") from exc
-    if resolved != value and not isinstance(value, str):
-        raise ValueError(f"{key} must be an integer")
-    return resolved
-
-
-def _nonnegative_int(raw: Mapping[str, Any], key: str, default: int) -> int:
-    value = _int_value(raw, key, default)
-    if value < 0:
-        raise ValueError(f"{key} must be >= 0")
-    return value
-
-
-def _positive_int(raw: Mapping[str, Any], key: str, default: int) -> int:
-    value = _int_value(raw, key, default)
-    if value <= 0:
-        raise ValueError(f"{key} must be > 0")
-    return value
-
-
-def _int_range(raw: Mapping[str, Any], key: str, default: int, *, minimum: int, maximum: int) -> int:
-    value = _int_value(raw, key, default)
-    if value < minimum or value > maximum:
-        raise ValueError(f"{key} must be in [{minimum}, {maximum}]")
-    return value
-
-
-def _float_value(raw: Mapping[str, Any], key: str, default: float) -> float:
-    value = raw.get(key, default)
-    if isinstance(value, bool):
-        raise ValueError(f"{key} must be a finite number")
-    try:
-        resolved = float(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"{key} must be a finite number") from exc
-    if not math.isfinite(resolved):
-        raise ValueError(f"{key} must be finite")
-    return resolved
-
-
-def _positive_float(raw: Mapping[str, Any], key: str, default: float) -> float:
-    value = _float_value(raw, key, default)
-    if value <= 0.0:
-        raise ValueError(f"{key} must be > 0")
-    return value
-
-
-def _greater_than_float(raw: Mapping[str, Any], key: str, default: float, *, minimum: float) -> float:
-    value = _float_value(raw, key, default)
-    if value <= minimum:
-        raise ValueError(f"{key} must be > {minimum}")
-    return value
-
-
-def _nonnegative_float(raw: Mapping[str, Any], key: str, default: float) -> float:
-    value = _float_value(raw, key, default)
-    if value < 0.0:
-        raise ValueError(f"{key} must be >= 0")
-    return value
-
-
-def _bounded_float(
-    raw: Mapping[str, Any],
-    key: str,
-    default: float,
-    *,
-    minimum: float,
-    maximum: float,
-    include_maximum: bool = True,
-) -> float:
-    value = _float_value(raw, key, default)
-    above_minimum = value >= minimum
-    below_maximum = value <= maximum if include_maximum else value < maximum
-    if not above_minimum or not below_maximum:
-        right = "]" if include_maximum else ")"
-        raise ValueError(f"{key} must be in [{minimum}, {maximum}{right}")
-    return value
-
-
-def _positive_int_tuple(
-    raw: Mapping[str, Any],
-    key: str,
-    default: tuple[int, ...],
-    *,
-    non_empty: bool = False,
-) -> tuple[int, ...]:
-    value = raw.get(key, default)
-    if isinstance(value, (str, bytes, bytearray)) or not isinstance(value, tuple | list):
-        raise ValueError(f"{key} must be a sequence of positive integers")
-    result = tuple(_coerce_positive_int_item(key, item) for item in value)
-    if non_empty and not result:
-        raise ValueError(f"{key} must not be empty")
-    return result
-
-
-def _coerce_positive_int_item(key: str, value: object) -> int:
-    if isinstance(value, bool):
-        raise ValueError(f"{key} must contain only positive integers")
-    try:
-        resolved = int(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"{key} must contain only positive integers") from exc
-    if resolved <= 0:
-        raise ValueError(f"{key} must contain only positive integers")
-    return resolved
+def _int_tuple(value: Sequence[int] | Any) -> tuple[int, ...]:
+    if isinstance(value, (str, bytes, bytearray)) or not isinstance(value, (tuple, list)):
+        raise ValueError(f"expected a sequence of integers, got {value!r}")
+    return tuple(int(item) for item in value)
