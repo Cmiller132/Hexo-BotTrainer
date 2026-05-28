@@ -1,4 +1,13 @@
-"""Required Rust acceleration owned by the dense CNN model package."""
+"""Thin Python import/call boundary for dense CNN Rust acceleration.
+
+All production acceleration lives in `hexo_models._rust.dense_cnn`, registered
+from `rust/src`. This module keeps the import error message readable and gives
+Python code named functions for native calls.
+
+It intentionally does not duplicate Rust MCTS scalar validation. The native
+session is the actual search boundary; Python forwards values and lets PyO3/Rust
+raise clear errors for invalid native search configuration.
+"""
 
 from __future__ import annotations
 
@@ -28,9 +37,7 @@ def model1_batch_inputs(states: Sequence[object]) -> Mapping[str, Any]:
 def model1_new_mcts_session(*, max_states: int | None = None) -> object:
     """Create a native MCTS session that reuses selected subtrees across moves."""
 
-    return _dense_cnn_module().Model1MctsSession(
-        None if max_states is None else max(1, int(max_states))
-    )
+    return _dense_cnn_module().Model1MctsSession(max_states)
 
 
 def model1_mcts_session_search(
@@ -56,29 +63,34 @@ def model1_mcts_session_search(
     fpu_reduction: float | None = None,
     virtual_loss: float | None = None,
 ) -> tuple[Mapping[str, Any], ...]:
-    """Search through a native MCTS session, preserving chosen subtrees."""
+    """Search through a native MCTS session, preserving chosen subtrees.
+
+    Arguments are forwarded in the PyO3 signature order expected by
+    `rust/src/mcts.rs`. The session validates scalar settings and live-state
+    consistency after Python has performed only simple sequence conversion.
+    """
 
     return tuple(
         session.search(
             tuple(int(item) for item in game_keys),
             tuple(states),
-            int(visits),
-            float(c_puct),
-            float(temperature),
+            visits,
+            c_puct,
+            temperature,
             int(seed),
             evaluator,
-            None if virtual_batch_size is None else max(1, int(virtual_batch_size)),
-            None if progressive_widening_initial_actions is None else max(1, int(progressive_widening_initial_actions)),
-            None if progressive_widening_child_initial_actions is None else max(1, int(progressive_widening_child_initial_actions)),
-            None if progressive_widening_growth_interval is None else max(1.0, float(progressive_widening_growth_interval)),
-            None if progressive_widening_growth_base is None else max(1.000001, float(progressive_widening_growth_base)),
-            None if progressive_widening_candidate_actions is None else max(1, int(progressive_widening_candidate_actions)),
-            None if active_root_limit is None else max(1, int(active_root_limit)),
-            None if root_dirichlet_alpha is None else float(root_dirichlet_alpha),
-            None if root_dirichlet_noise_fraction is None else float(root_dirichlet_noise_fraction),
-            None if hidden_prior_mass is None else float(hidden_prior_mass),
-            None if fpu_reduction is None else float(fpu_reduction),
-            None if virtual_loss is None else float(virtual_loss),
+            virtual_batch_size,
+            progressive_widening_initial_actions,
+            progressive_widening_child_initial_actions,
+            progressive_widening_growth_interval,
+            progressive_widening_growth_base,
+            progressive_widening_candidate_actions,
+            active_root_limit,
+            root_dirichlet_alpha,
+            root_dirichlet_noise_fraction,
+            hidden_prior_mass,
+            fpu_reduction,
+            virtual_loss,
         )
     )
 
@@ -115,7 +127,11 @@ def model1_finalize_game_samples(
     horizons: Sequence[int],
     truncated: bool,
 ) -> tuple[Mapping[str, Any], ...]:
-    """Finalize compact game samples in Rust."""
+    """Finalize compact game samples in Rust.
+
+    `pending` is the per-game sequence produced by self-play: player label,
+    compact sample payload, and MCTS root value for each decision.
+    """
 
     return tuple(
         _dense_cnn_module().model1_finalize_game_samples(
@@ -128,6 +144,8 @@ def model1_finalize_game_samples(
 
 
 def _dense_cnn_module() -> Any:
+    """Return the loaded native dense_cnn module or raise a clear error."""
+
     module = getattr(_rust, "dense_cnn", None) if _rust is not None else None
     if module is None:
         raise RuntimeError(f"dense_cnn Rust accelerator is unavailable: {_IMPORT_ERROR}")

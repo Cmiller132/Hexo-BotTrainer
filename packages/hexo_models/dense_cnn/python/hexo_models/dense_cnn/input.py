@@ -1,9 +1,20 @@
-"""Model 1 input encoding from compact state facts."""
+"""Python expansion of compact samples into Model 1 tensors.
+
+Rust generates compact sample facts from live engine states; this module turns
+those facts into training tensors. It applies the requested D6 symmetry first,
+then projects stones, legal actions, recency, hot cells, and target policies
+into the same 41x41 crop contract used by native inference encoding.
+
+Facts that fall outside the current crop are skipped because the model cannot
+represent them in its fixed dense view. Invalid target weights still raise at
+this boundary instead of being silently repaired.
+"""
 
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
 from functools import lru_cache
+from math import isfinite
 
 import torch
 
@@ -43,12 +54,20 @@ def build_input_planes(
     opponent_last_turn: Sequence[tuple[int, int]] = (),
     symmetry: D6Symmetry | int = 0,
 ) -> torch.Tensor:
-    """Encode one compact sample into a dense model tensor."""
+    """Encode one compact sample into a dense model tensor.
+
+    This is the Python training equivalent of Rust `encode_model1_state_inner`.
+    It starts from compact sample facts, applies the requested D6 transform, and
+    writes each fact into the fixed plane index defined in `constants.py`.
+    """
 
     planes = torch.zeros((INPUT_CHANNELS, BOARD_SIZE, BOARD_SIZE), dtype=torch.float32)
     planes[PLANE_EMPTY].fill_(1.0)
     planes[PLANE_CENTER_DISTANCE].copy_(_distance_plane(BOARD_SIZE))
     identity = _is_identity_symmetry(symmetry)
+    # Stones are transformed once into a coordinate->owner map, then projected
+    # into the crop. Out-of-crop facts remain valid game facts but cannot be
+    # represented in this fixed dense input.
     transformed_stones = {
         ((int(q), int(r)) if identity else _coord_tuple(transform_coord((q, r), symmetry, center=center))): player
         for q, r, player in stones
@@ -70,8 +89,9 @@ def build_input_planes(
             if identity
             else coord_to_flat(unpack_coord_id(transform_action_id(action_id, symmetry, center=center)), center=center)
         )
-        if flat is not None:
-            legal_plane[flat] = 1.0
+        if flat is None:
+            continue
+        legal_plane[flat] = 1.0
 
     if phase == "SecondStone":
         planes[PLANE_SECOND_PLACEMENT].fill_(1.0)
@@ -86,15 +106,19 @@ def build_input_planes(
         planes[PLANE_PLAYER_COLOUR].fill_(1.0)
 
     latest_index = max((item[4] for item in placement_history), default=0)
+    # Recency planes store the strongest recency weight per cell. A cell can
+    # appear in history only once in legal play, but keeping max mirrors the Rust
+    # encoder and makes duplicate bad data fail later through target validation.
     for q, r, player, _phase, placement_index, _first_q, _first_r in reversed(tuple(placement_history)):
         coord = (int(q), int(r)) if identity else transform_coord((q, r), symmetry, center=center)
         row_col = coord_to_row_col(coord, center=center)
         if row_col is None:
             continue
         row, col = row_col
-        weight = 1.0 / (1.0 + max(0, latest_index - int(placement_index)))
+        weight = 1.0 / (1.0 + latest_index - int(placement_index))
         plane = PLANE_OWN_RECENCY if player == current_player else PLANE_OPPONENT_RECENCY
-        planes[plane, row, col] = max(float(planes[plane, row, col]), weight)
+        if weight > float(planes[plane, row, col]):
+            planes[plane, row, col] = weight
 
     for coord in own_hot:
         _set_coord(planes, PLANE_OWN_HOT, coord if identity else transform_coord(coord, symmetry, center=center), center)
@@ -116,20 +140,31 @@ def dense_policy_target(
     *,
     center: Axial,
     symmetry: D6Symmetry | int = 0,
+    allow_empty: bool = False,
 ) -> torch.Tensor:
+    """Project sparse action weights into a normalized dense crop target."""
+
     target = torch.zeros((BOARD_AREA,), dtype=torch.float32)
     items = weights.items() if isinstance(weights, Mapping) else tuple(weights)
     identity = _is_identity_symmetry(symmetry)
     for action_id, weight in items:
+        weight = float(weight)
+        if not isfinite(weight) or weight < 0.0:
+            raise ValueError(f"policy target weight for action {int(action_id)} must be finite and >= 0")
         flat = (
             _flat_for_action_id(action_id, center=center)
             if identity
             else coord_to_flat(unpack_coord_id(transform_action_id(int(action_id), symmetry, center=center)), center=center)
         )
-        if flat is not None:
-            target[flat] += max(0.0, float(weight))
+        if flat is None:
+            continue
+        target[flat] += weight
 
-    total = target.sum().clamp_min(1.0e-8)
+    total = target.sum()
+    if float(total.item()) <= 0.0:
+        if allow_empty:
+            return target
+        raise ValueError("policy target must contain positive probability mass")
     return target / total
 
 
@@ -139,6 +174,8 @@ def legal_mask_flat(
     center: Axial,
     symmetry: D6Symmetry | int = 0,
 ) -> torch.Tensor:
+    """Return a flat boolean mask for legal in-crop policy cells."""
+
     mask = torch.zeros((BOARD_AREA,), dtype=torch.bool)
     identity = _is_identity_symmetry(symmetry)
     for action_id in legal_action_ids:
@@ -147,8 +184,9 @@ def legal_mask_flat(
             if identity
             else coord_to_flat(unpack_coord_id(transform_action_id(action_id, symmetry, center=center)), center=center)
         )
-        if flat is not None:
-            mask[flat] = True
+        if flat is None:
+            continue
+        mask[flat] = True
     return mask
 
 

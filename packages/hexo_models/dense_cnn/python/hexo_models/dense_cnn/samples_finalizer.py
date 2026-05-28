@@ -1,4 +1,10 @@
-"""Sample finalization boundary for dense CNN self-play."""
+"""Generic training finalizer adapter for dense CNN samples.
+
+Dense CNN self-play finalizes samples immediately after each game because Rust
+needs the whole pending decision sequence to compute outcome, opponent-policy,
+and lookahead targets. The generic pipeline still expects a finalizer component,
+so this adapter reports current buffer state instead of doing extra mutation.
+"""
 
 from __future__ import annotations
 
@@ -27,4 +33,3 @@ class DenseCNNSampleFinalizer:
             "compressed_bytes": self.buffer.compressed_bytes,
             "note": "dense_cnn self-play finalizes samples immediately after each game",
         }
-

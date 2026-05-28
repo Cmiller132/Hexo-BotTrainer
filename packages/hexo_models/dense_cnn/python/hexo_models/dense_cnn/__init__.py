@@ -1,8 +1,14 @@
-"""Dense CNN Model 1 implementation.
+"""Dense CNN Model 1 public Python surface.
 
-This subpackage owns its architecture, sample encoding, losses, training
-helpers, and plugin wiring so future model families can live beside it without
-sharing implementation modules.
+This package is intentionally model-owned. Shared packages such as
+`hexo_engine`, `hexo_runner`, and `hexo_train` provide game truth, game-loop
+contracts, and orchestration, but they do not know how Model 1 tensors, losses,
+MCTS payloads, or replay samples are represented.
+
+Only stable user-facing building blocks are re-exported here. Lower-level
+production boundaries such as `mcts`, `rust_bridge`, `samples`, and
+`selfplay` stay in their modules so callers have to opt into those specific
+contracts.
 """
 
 from .architecture import (
@@ -27,7 +33,6 @@ from .performance import (
     build_benchmark_report,
     calibrate_dense_cnn,
 )
-from .samples import encode_compact_sample
 
 __all__ = [
     "BOARD_AREA",
@@ -48,7 +53,6 @@ __all__ = [
     "calibrate_dense_cnn",
     "decode_binned_value",
     "DenseCNNInference",
-    "encode_compact_sample",
     "inverse_index",
     "model1_loss",
     "parse_model1_config",

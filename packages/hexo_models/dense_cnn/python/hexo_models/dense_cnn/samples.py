@@ -1,4 +1,14 @@
-"""Compact compressed Model 1 samples and dense training expansion."""
+"""Compact Model 1 samples, replay buffer, and dense expansion.
+
+Self-play stores compact game facts rather than prebuilt tensors. Rust creates
+and finalizes those facts from live engine states; Python validates, compresses,
+stores, samples, decodes, applies D6 symmetry, and expands them into tensors for
+training.
+
+The checkpoint schema stores only compressed current-schema samples. Loading an
+older raw mapping format or an incompatible target schema raises immediately so
+training cannot continue from mixed target semantics.
+"""
 
 from __future__ import annotations
 
@@ -12,7 +22,7 @@ import zlib
 import torch
 
 from . import rust_bridge
-from .d6 import Axial, D6_SIZE, D6Symmetry, inverse_index, pack_coord_id, transform_coord
+from .d6 import Axial, D6_SIZE, D6Symmetry
 from .constants import BOARD_SIZE
 from .input import build_input_planes, dense_policy_target, legal_mask_flat
 
@@ -24,24 +34,24 @@ def _sample_buffer_load_stats(
     *,
     total: int = 0,
     loaded: int = 0,
-    filtered_schema: int = 0,
-    filtered_decode_errors: int = 0,
-    dropped_by_capacity: int = 0,
 ) -> dict[str, int]:
-    filtered = int(filtered_schema) + int(filtered_decode_errors) + int(dropped_by_capacity)
     return {
         "target_schema_version": int(CURRENT_TARGET_SCHEMA_VERSION),
         "total": int(total),
         "loaded": int(loaded),
-        "filtered": filtered,
-        "filtered_schema": int(filtered_schema),
-        "filtered_decode_errors": int(filtered_decode_errors),
-        "dropped_by_capacity": int(dropped_by_capacity),
     }
 
 
 @dataclass(frozen=True, slots=True)
 class Model1SampleData:
+    """Compact, schema-versioned facts needed to rebuild one training row.
+
+    The dataclass is intentionally free of tensors so samples can be compressed,
+    checkpointed, transformed with D6 symmetry, and expanded lazily at training
+    time. Rust emits the authoritative facts from live engine states; Python
+    owns compression and tensor expansion.
+    """
+
     game_id: str
     turn_index: int
     current_player: str
@@ -72,6 +82,8 @@ class CompressedSample:
 
     @classmethod
     def from_data(cls, data: Model1SampleData, *, compression_level: int = 6) -> "CompressedSample":
+        """Serialize a current-schema sample with deterministic JSON layout."""
+
         raw = json.dumps(asdict(data), separators=(",", ":"), sort_keys=True).encode("utf-8")
         return cls(
             payload=zlib.compress(raw, level=int(compression_level)),
@@ -83,6 +95,8 @@ class CompressedSample:
         return len(self.payload)
 
     def decode(self) -> Model1SampleData:
+        """Inflate and parse the compressed JSON payload into `Model1SampleData`."""
+
         raw = zlib.decompress(self.payload).decode("utf-8")
         data = json.loads(raw)
         return _sample_data_from_json(data)
@@ -90,7 +104,12 @@ class CompressedSample:
 
 @dataclass(slots=True)
 class SampleBuffer:
-    """Capacity-bounded in-RAM compressed replay buffer with recency sampling."""
+    """Capacity-bounded in-RAM compressed replay buffer with recency sampling.
+
+    The buffer stores compressed samples only. That keeps long self-play runs
+    memory-bounded and ensures checkpointed replay entries all pass through the
+    current `CompressedSample`/target-schema validation path.
+    """
 
     capacity: int = 200_000
     recency_halflife: float = 50_000.0
@@ -104,12 +123,12 @@ class SampleBuffer:
 
     def __post_init__(self) -> None:
         if self.capacity < 200_000:
-            self.capacity = 200_000
+            raise ValueError("SampleBuffer capacity must be >= 200000")
         if self.recency_decay is not None:
             decay = float(self.recency_decay)
             if not 0.0 < decay < 1.0:
                 raise ValueError("recency_decay must be in (0, 1)")
-            self.recency_halflife = max(1.0e-6, log(0.5) / log(decay))
+            self.recency_halflife = log(0.5) / log(decay)
         if self.recency_halflife <= 0:
             raise ValueError("recency_halflife must be positive")
 
@@ -141,14 +160,16 @@ class SampleBuffer:
     def load_stats(self) -> dict[str, int]:
         return self.last_load_stats
 
-    def add(self, sample: Model1SampleData | CompressedSample | Mapping[str, Any]) -> None:
+    def add(self, sample: Model1SampleData | CompressedSample) -> None:
         self.append(sample)
 
-    def append(self, sample: Model1SampleData | CompressedSample | Mapping[str, Any]) -> None:
-        if isinstance(sample, Mapping):
-            sample = raw_mapping_to_sample_data(sample)
-        elif isinstance(sample, Model1SampleData):
+    def append(self, sample: Model1SampleData | CompressedSample) -> None:
+        """Add one current-schema sample and evict oldest overflow entries."""
+
+        if isinstance(sample, Model1SampleData):
             sample = _with_current_target_schema(sample)
+        elif not isinstance(sample, CompressedSample):
+            raise TypeError(f"expected Model1SampleData or CompressedSample, got {type(sample).__name__}")
         compressed = (
             sample
             if isinstance(sample, CompressedSample)
@@ -165,6 +186,8 @@ class SampleBuffer:
             self.append(sample)
 
     def state_dict(self) -> dict[str, Any]:
+        """Return the checkpoint payload for compressed replay state."""
+
         return {
             "capacity": int(self.capacity),
             "recency_halflife": float(self.recency_halflife),
@@ -183,39 +206,44 @@ class SampleBuffer:
         }
 
     def load_state_dict(self, state: Mapping[str, Any]) -> dict[str, int]:
-        self.capacity = max(200_000, int(state.get("capacity", self.capacity)))
+        """Load a replay-buffer checkpoint after strict schema validation."""
+
+        capacity = int(state.get("capacity", self.capacity))
+        if capacity < 200_000:
+            raise ValueError("sample buffer checkpoint capacity must be >= 200000")
+        self.capacity = capacity
         self.recency_halflife = float(state.get("recency_halflife", self.recency_halflife))
         self.compression_level = int(state.get("compression_level", self.compression_level))
         self._total_appended = int(state.get("total_appended", 0))
         self._draw_count = int(state.get("draw_count", 0))
-        loaded_samples: list[CompressedSample] = []
-        filtered_schema = 0
-        filtered_decode_errors = 0
         raw_samples = tuple(state.get("samples") or ())
-        for item in raw_samples:
+        loaded_samples: list[CompressedSample] = []
+        for index, item in enumerate(raw_samples):
             try:
                 compressed = _compressed_sample_from_state_item(item)
                 data = compressed.decode()
             except (KeyError, TypeError, ValueError, zlib.error, json.JSONDecodeError, UnicodeDecodeError):
-                filtered_decode_errors += 1
-                continue
+                raise ValueError(f"sample buffer checkpoint sample {index} is not a valid compressed sample") from None
             if _metadata_target_schema_version(data.metadata) != CURRENT_TARGET_SCHEMA_VERSION:
-                filtered_schema += 1
-                continue
+                raise ValueError(
+                    f"sample buffer checkpoint sample {index} has incompatible target_schema_version"
+                )
             loaded_samples.append(compressed)
 
-        dropped_by_capacity = max(0, len(loaded_samples) - self.capacity)
-        self._samples = loaded_samples[-self.capacity :]
+        if len(loaded_samples) > self.capacity:
+            raise ValueError(
+                f"sample buffer checkpoint contains {len(loaded_samples)} samples, above capacity {self.capacity}"
+            )
+        self._samples = loaded_samples
         self._last_load_stats = _sample_buffer_load_stats(
             total=len(raw_samples),
             loaded=len(self._samples),
-            filtered_schema=filtered_schema,
-            filtered_decode_errors=filtered_decode_errors,
-            dropped_by_capacity=dropped_by_capacity,
         )
         return self.last_load_stats
 
     def sample(self, count: int, *, seed: int | None = None) -> tuple[CompressedSample, ...]:
+        """Draw a recency-weighted sample window without replacement."""
+
         if count <= 0 or not self._samples:
             return ()
         resolved_seed = self.seed if seed is None else seed
@@ -232,125 +260,6 @@ class SampleBuffer:
     def _recency_weight(self, index: int) -> float:
         age = len(self._samples) - 1 - index
         return exp(-log(2.0) * age / self.recency_halflife)
-
-
-def encode_compact_sample(sample: Mapping[str, Any] | Model1SampleData) -> CompressedSample:
-    """Compress sample metadata without materializing dense tensors."""
-
-    data = sample if isinstance(sample, Model1SampleData) else raw_mapping_to_sample_data(sample)
-    return CompressedSample.from_data(data)
-
-
-def decode_compact_sample(
-    sample: CompressedSample | Model1SampleData | Mapping[str, Any],
-    *,
-    transform: D6Symmetry | int | None = None,
-    symmetry: D6Symmetry | int | None = None,
-    d6: D6Symmetry | int | None = None,
-) -> dict[str, Any]:
-    """Expand one compact sample into dense training targets and metadata."""
-
-    selected = transform
-    if selected is None:
-        selected = symmetry
-    if selected is None:
-        selected = d6
-    if selected is None:
-        selected = 0
-
-    compact = sample
-    if isinstance(sample, Mapping):
-        compact = encode_compact_sample(sample)
-    expanded = expand_sample(compact, symmetry=selected)
-    data = compact.decode() if isinstance(compact, CompressedSample) else compact
-    lookahead = {
-        int(key.removeprefix("lookahead_")): value
-        for key, value in expanded.items()
-        if key.startswith("lookahead_")
-    }
-    return {
-        **expanded,
-        "policy_target": expanded["policy"],
-        "dense_policy": expanded["policy"],
-        "opp_policy_target": expanded["opp_policy"],
-        "dense_opp_policy": expanded["opp_policy"],
-        "value_target": expanded["value"],
-        "lookahead_targets": lookahead,
-        "lookahead": lookahead,
-        "sample_id": data.metadata.get("sample_id", data.game_id),
-        "metadata": dict(data.metadata),
-    }
-
-
-def d6_transforms() -> tuple[D6Symmetry, ...]:
-    return D6_TRANSFORMS
-
-
-def transform_axial(coord: tuple[int, int], transform: D6Symmetry | int) -> Axial:
-    return transform_coord(coord, transform)
-
-
-def inverse_d6(transform: D6Symmetry | int) -> D6Symmetry:
-    index = transform.index if isinstance(transform, D6Symmetry) else int(transform)
-    return D6Symmetry(inverse_index(index))
-
-
-def dense_index_for_coord(
-    coord: tuple[int, int],
-    *,
-    center: tuple[int, int] = (0, 0),
-    board_size: int = BOARD_SIZE,
-    size: int | None = None,
-    crop_center: tuple[int, int] | None = None,
-    crop_size: int | None = None,
-) -> int:
-    resolved_size = crop_size or size or board_size
-    resolved_center = crop_center or center
-    q, r = int(coord[0]), int(coord[1])
-    center_q, center_r = int(resolved_center[0]), int(resolved_center[1])
-    half = int(resolved_size) // 2
-    col = q - center_q + half
-    row = r - center_r + half
-    if not 0 <= row < resolved_size or not 0 <= col < resolved_size:
-        raise ValueError(f"coordinate {coord!r} outside {resolved_size} crop centered on {resolved_center!r}")
-    return row * resolved_size + col
-
-
-def raw_mapping_to_sample_data(sample: Mapping[str, Any]) -> Model1SampleData:
-    """Normalize test/debug raw sample maps into the production compact schema."""
-
-    sample_id = str(sample.get("sample_id", sample.get("game_id", "sample")))
-    sequence = int(sample.get("sequence", sample.get("turn_index", 0)))
-    center = tuple(int(item) for item in sample.get("center", (0, 0)))
-    policy = _raw_policy_to_action_pairs(sample.get("policy", ()))
-    opp_policy = _raw_policy_to_action_pairs(sample.get("opp_policy", ()))
-    legal_ids = tuple(dict(policy + opp_policy).keys())
-    return Model1SampleData(
-        game_id=sample_id,
-        turn_index=sequence,
-        current_player=str(sample.get("current_player", "player0")),
-        phase=str(sample.get("phase", "FirstStone")),
-        center=(center[0], center[1]),
-        stones=tuple((int(q), int(r), str(player)) for q, r, player in sample.get("stones", ())),
-        legal_action_ids=tuple(int(item) for item in sample.get("legal_action_ids", legal_ids)),
-        policy=policy,
-        opp_policy=opp_policy,
-        value=float(sample.get("value", 0.0)),
-        lookahead=tuple(
-            (int(horizon), float(value))
-            for horizon, value in (
-                sample.get("lookahead", {}).items()
-                if isinstance(sample.get("lookahead", {}), Mapping)
-                else sample.get("lookahead", ())
-            )
-        ),
-        metadata={
-            "target_schema_version": CURRENT_TARGET_SCHEMA_VERSION,
-            **dict(sample.get("metadata", {})),
-            "sample_id": sample_id,
-            "sequence": sequence,
-        },
-    )
 
 
 def sample_from_state(
@@ -388,13 +297,18 @@ def sample_from_state(
 
 
 def finalize_game_samples(
-    pending: Sequence[tuple[str, Model1SampleData | CompressedSample | Mapping[str, Any], float]],
+    pending: Sequence[tuple[str, Model1SampleData | CompressedSample, float]],
     winner: str | None,
     horizons: Sequence[int],
     *,
     truncated: bool = False,
 ) -> list[Model1SampleData]:
-    """Finalize self-play samples through Rust-owned outcome logic."""
+    """Finalize self-play samples through Rust-owned outcome logic.
+
+    `pending` contains samples collected before MCTS decisions. Rust receives
+    the whole game sequence so it can assign final values, future opponent
+    policy targets, and lookahead values consistently.
+    """
 
     rust_pending = tuple(
         (str(player), _sample_payload(sample), float(root_value))
@@ -441,6 +355,7 @@ def expand_sample(
             data.opp_policy,
             center=center,
             symmetry=symmetry,
+            allow_empty=True,
         ),
         "legal_mask": legal_mask_flat(data.legal_action_ids, center=center, symmetry=symmetry),
         "value": torch.tensor(float(data.value), dtype=torch.float32),
@@ -451,6 +366,8 @@ def expand_sample(
 
 
 def stack_expanded(samples: Sequence[Mapping[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
+    """Stack expanded rows by common tensor keys for model training/inference."""
+
     if not samples:
         raise ValueError("cannot stack an empty sample sequence")
     keys = set(samples[0])
@@ -465,15 +382,24 @@ def _weighted_without_replacement(
     weight_at: object,
     rng: Random,
 ) -> list[int]:
+    """Efraimidis-Spirakis weighted sampling without replacement."""
+
     keys: list[tuple[float, int]] = []
     for index in range(population_size):
-        weight = max(1.0e-12, float(weight_at(index)))
-        keys.append((-log(max(1.0e-12, rng.random())) / weight, index))
+        weight = float(weight_at(index))
+        if not weight > 0.0:
+            raise ValueError(f"sample weight at index {index} must be > 0")
+        draw = rng.random()
+        while draw <= 0.0:
+            draw = rng.random()
+        keys.append((-log(draw) / weight, index))
     keys.sort(key=lambda item: item[0])
     return [index for _key, index in keys[:count]]
 
 
 def _sample_data_from_json(data: Mapping[str, Any]) -> Model1SampleData:
+    """Parse Rust/Python JSON-compatible sample payloads into the dataclass."""
+
     return Model1SampleData(
         game_id=str(data["game_id"]),
         turn_index=int(data["turn_index"]),
@@ -526,41 +452,23 @@ def _compressed_sample_from_state_item(item: object) -> CompressedSample:
     if isinstance(item, CompressedSample):
         return item
     if isinstance(item, Mapping):
-        if "payload" in item:
-            return CompressedSample(
-                payload=bytes(item["payload"]),
-                uncompressed_bytes=int(item["uncompressed_bytes"]),
-                compression=str(item.get("compression", "zlib+json")),
-                compressed=bool(item.get("compressed", True)),
-            )
-        return CompressedSample.from_data(_sample_data_from_json(item))
+        if "payload" not in item:
+            raise ValueError("sample buffer checkpoints must store compressed sample payloads")
+        return CompressedSample(
+            payload=bytes(item["payload"]),
+            uncompressed_bytes=int(item["uncompressed_bytes"]),
+            compression=str(item.get("compression", "zlib+json")),
+            compressed=bool(item.get("compressed", True)),
+        )
     raise TypeError(f"expected compressed sample state mapping, got {type(item).__name__}")
 
 
-def _sample_payload(sample: Model1SampleData | CompressedSample | Mapping[str, Any]) -> Mapping[str, Any]:
+def _sample_payload(sample: Model1SampleData | CompressedSample) -> Mapping[str, Any]:
     if isinstance(sample, CompressedSample):
         return asdict(sample.decode())
     if isinstance(sample, Model1SampleData):
         return asdict(sample)
-    if isinstance(sample, Mapping):
-        return dict(sample)
-    raise TypeError(f"expected Model1SampleData or mapping, got {type(sample).__name__}")
-
-
-def _raw_policy_to_action_pairs(value: object) -> tuple[tuple[int, float], ...]:
-    if isinstance(value, Mapping):
-        items = value.items()
-    else:
-        items = value if value is not None else ()
-    pairs: list[tuple[int, float]] = []
-    for action_or_coord, weight in items:  # type: ignore[assignment]
-        if isinstance(action_or_coord, int):
-            action_id = int(action_or_coord)
-        else:
-            coord = tuple(action_or_coord)  # type: ignore[arg-type]
-            action_id = pack_coord_id(Axial(int(coord[0]), int(coord[1])))
-        pairs.append((action_id, float(weight)))
-    return tuple(pairs)
+    raise TypeError(f"expected Model1SampleData or CompressedSample, got {type(sample).__name__}")
 
 
 def _optional_int(value: object) -> int | None:

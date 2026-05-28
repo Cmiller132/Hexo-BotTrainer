@@ -1,8 +1,16 @@
 //! Dense CNN Rust accelerator package.
 //!
-//! `lib.rs` intentionally only wires together Python exports. The model logic is
-//! split by responsibility: direct engine-state intake, tensor encoding, neural
-//! evaluation payloads, MCTS, and compact sample generation.
+//! The Rust half of dense_cnn owns the model-specific native path:
+//!
+//! 1. Clone live `hexo_engine.HexoState` objects through `state`.
+//! 2. Encode those states into Model 1 tensors through `encoding`.
+//! 3. Run batched tree search through `mcts` and `mcts_tree`.
+//! 4. Call the Python/Torch evaluator through the strict byte contract in
+//!    `mcts_eval`.
+//! 5. Generate and finalize compact self-play samples through `sample_gen`.
+//!
+//! `lib.rs` only registers those pieces into the Python extension module and
+//! publishes capability metadata. It deliberately contains no model logic.
 
 mod constants;
 mod encoding;

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import inspect
+import struct
 import sys
 from pathlib import Path
 from typing import Any
@@ -138,7 +139,16 @@ def test_rust_bridge_forwards_live_states_without_history_conversion(monkeypatch
                 "fpu_reduction": fpu_reduction,
                 "virtual_loss": virtual_loss,
             }
-            return ({"action_id": 7, "visit_policy": ((7, 1.0),), "root_value": 0.0, "visits": visits},)
+            return (
+                {
+                    "action_id": 7,
+                    "visit_policy_action_ids_bytes": struct.pack("I", 7),
+                    "visit_policy_weights_bytes": struct.pack("f", 1.0),
+                    "visit_policy_count": 1,
+                    "root_value": 0.0,
+                    "visits": visits,
+                },
+            )
 
     class FakeDenseCnnRust:
         def model1_batch_inputs(self, states: tuple[object, ...]) -> dict[str, Any]:
@@ -217,6 +227,12 @@ def test_dense_cnn_python_boundary_has_no_history_api() -> None:
 
     assert not hasattr(rust_bridge, "history_rows_from_states")
     assert not hasattr(samples, "sample_from_history")
+    assert not hasattr(samples, "encode_compact_sample")
+    assert not hasattr(samples, "decode_compact_sample")
+    assert not hasattr(samples, "raw_mapping_to_sample_data")
+    assert not hasattr(samples, "dense_index_for_coord")
+    assert not hasattr(mcts, "run_mcts")
+    assert not hasattr(mcts, "run_batched_mcts")
     source = "\n".join(
         inspect.getsource(module)
         for module in (rust_bridge, samples, mcts, inference)

@@ -1,8 +1,14 @@
-"""Training plugin for the standalone dense CNN model family."""
+"""Training plugin for the standalone dense CNN model family.
+
+`hexo_train` discovers this plugin and calls it to build model-specific
+components. The plugin is the composition boundary: it wires config parsing,
+network construction, optimizer setup, replay buffer, checkpoint IO, self-play,
+training, performance calibration, sample-finalization reporting, and
+evaluation into the generic training pipeline.
+"""
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 from typing import Any, Mapping
 
 import torch
@@ -21,9 +27,13 @@ from .trainer import DenseCNNTrainer
 
 
 class DenseCNNPlugin:
+    """Model plugin object consumed by `hexo_train.registry`."""
+
     name = "hexo_models.dense_cnn"
 
     def build_model(self, game_spec: Mapping[str, Any], config: Mapping[str, Any]) -> torch.nn.Module:
+        """Build the PyTorch network from model-specific config."""
+
         _ = game_spec
         parsed = parse_model1_config(config)
         arch = parsed.architecture
@@ -43,6 +53,8 @@ class DenseCNNPlugin:
         shared: Any,
         model: torch.nn.Module | None,
     ) -> ComponentOverrides:
+        """Create dense_cnn-owned components for the generic training loop."""
+
         _ = (defaults, shared)
         if model is None:
             raise ValueError("DenseCNNPlugin requires build_model() to run first")
@@ -65,7 +77,6 @@ class DenseCNNPlugin:
         )
         return ComponentOverrides(
             sample_finalizer=DenseCNNSampleFinalizer(buffer),
-            symmetry_selector=DenseCNNRandomExpansionSymmetrySelector(),
             trainer=trainer,
             optimizer=optimizer,
             checkpoint_loader=DenseCNNCheckpointLoader(),
@@ -91,6 +102,8 @@ class DenseCNNPlugin:
         return evaluate_epoch(ctx=ctx, components=components, epoch=epoch)
 
     def calibrate_performance(self, *, ctx: Any, components: Any) -> dict[str, Any]:
+        """Run calibration and copy selected settings onto the trainer."""
+
         trainer = components.model.trainer
         result = calibrate_dense_cnn(
             model=components.model.model,
@@ -105,25 +118,6 @@ class DenseCNNPlugin:
             trainer.mcts_virtual_batch_size = selected_virtual if selected_virtual > 0 else None
             trainer.training_batch_size = int(result["selected_training_batch_size"])
         return result
-
-
-class DenseCNNRandomExpansionSymmetrySelector:
-    """Declare that dense_cnn chooses D6 randomly when compact samples expand."""
-
-    def select_for_window(self, sample_window: object, *, seed: int | None, epoch: int = 0) -> object:
-        count = int(getattr(sample_window, "window_size", 0) or 0)
-        return SimpleNamespace(
-            symmetries=(),
-            seed=int(seed or 0),
-            epoch=int(epoch),
-            metadata={
-                "sample_count": count,
-                "mode": "random_per_training_expansion",
-                "d6_group_size": 12,
-                "note": "dense_cnn trainer samples a fresh random D6 transform when each compact sample is expanded",
-            },
-        )
-
 
 plugin = DenseCNNPlugin()
 

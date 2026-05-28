@@ -1,12 +1,17 @@
-"""Optimizer-backed training for dense CNN samples."""
+"""Optimizer-backed training over compressed dense CNN samples.
+
+`DenseCNNTrainer` is called by the generic training loop. It samples compressed
+records from `SampleBuffer`, receives explicit D6 symmetries from the shared
+pipeline, expands each sample into Model 1 tensors, computes the weighted model
+loss, and performs optimizer steps with optional AMP and gradient clipping.
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from random import Random
 from time import perf_counter
 from types import SimpleNamespace
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping
 
 import torch
 
@@ -18,6 +23,8 @@ from .samples import CompressedSample, SampleBuffer, expand_sample, stack_expand
 
 @dataclass(slots=True)
 class DenseSampleWindow:
+    """Sample records plus metadata selected for one training epoch."""
+
     records: tuple[CompressedSample, ...]
     seed: int
     epoch: int
@@ -27,6 +34,8 @@ class DenseSampleWindow:
 
 
 class DenseCNNTrainer:
+    """Dense CNN model owner used by the generic training pipeline."""
+
     def __init__(
         self,
         *,
@@ -72,6 +81,8 @@ class DenseCNNTrainer:
         return self.buffer.sample_count
 
     def select_training_samples(self, *, ctx: Any, components: Any, epoch: int) -> dict[str, Any]:
+        """Select a recency-weighted replay window for the next train pass."""
+
         requested = ctx.config.samples.train_sample_count or self.config.samples.train_sample_count
         records = self.buffer.sample(requested, seed=(ctx.config.run.seed or 0) + epoch)
         window = DenseSampleWindow(
@@ -106,6 +117,12 @@ class DenseCNNTrainer:
         components: Any,
         epoch: int,
     ) -> Mapping[str, Any]:
+        """Run optimizer passes over the selected replay window.
+
+        Expansion happens inside the pass so each sample can be transformed by
+        the explicit D6 symmetry assigned by the generic training pipeline.
+        """
+
         _ = components
         if sample_window is None or not sample_window.records:
             return {
@@ -117,25 +134,30 @@ class DenseCNNTrainer:
             }
 
         self.model.train()
-        batch_size = max(1, int(self.training_batch_size))
-        symmetries = tuple(getattr(sample_symmetries, "symmetries", ()))
+        batch_size = int(self.training_batch_size)
+        if batch_size <= 0:
+            raise ValueError("dense_cnn training batch size must be > 0")
         total_loss = 0.0
         steps = 0
         started = perf_counter()
         records = tuple(sample_window.records)
-        policy_preview: list[dict[str, Any]] = []
+        symmetries = _resolve_window_symmetries(sample_symmetries, len(records))
 
-        rng = Random((int(ctx.config.run.seed or 0) + 1) * 1_000_003 + int(epoch))
-        for pass_index in range(max(1, int(passes))):
+        resolved_passes = int(passes)
+        if resolved_passes <= 0:
+            raise ValueError("dense_cnn training passes must be > 0")
+        for _pass_index in range(resolved_passes):
             for start in range(0, len(records), batch_size):
                 chunk = records[start : start + batch_size]
                 expanded = []
                 for offset, sample in enumerate(chunk):
                     absolute_index = start + offset
-                    _ = symmetries
-                    symmetry = D6Symmetry(rng.randrange(12))
                     data = sample.decode() if isinstance(sample, CompressedSample) else sample
-                    decoded = expand_sample(sample, symmetry=symmetry)
+                    symmetry = symmetries[absolute_index]
+                    decoded = expand_sample(data, symmetry=symmetry)
+                    # Lookahead heads are optional per sample. Missing horizons
+                    # are represented by zero targets plus zero masks so the
+                    # corresponding loss contributes exactly zero.
                     for horizon in self.config.architecture.lookahead_horizons:
                         key = f"lookahead_{int(horizon)}"
                         mask_key = f"{key}_mask"
@@ -144,27 +166,6 @@ class DenseCNNTrainer:
                         else:
                             decoded[key] = torch.tensor(0.0, dtype=torch.float32)
                             decoded[mask_key] = torch.tensor(0.0, dtype=torch.float32)
-                    if len(policy_preview) < 8:
-                        nonzero = torch.nonzero(decoded["policy"] > 0, as_tuple=False).flatten().tolist()
-                        opp_nonzero = torch.nonzero(decoded["opp_policy"] > 0, as_tuple=False).flatten().tolist()
-                        policy_preview.append(
-                            {
-                                "sample_index": absolute_index,
-                                "pass_index": pass_index,
-                                "game_id": data.game_id,
-                                "turn_index": data.turn_index,
-                                "current_player": data.current_player,
-                                "phase": data.phase,
-                                "value": float(data.value),
-                                "lookahead": {int(horizon): float(value) for horizon, value in data.lookahead},
-                                "symmetry": int(getattr(symmetry, "index", symmetry)),
-                                "nonzero_policy_cells": [int(item) for item in nonzero[:16]],
-                                "nonzero_opp_policy_cells": [int(item) for item in opp_nonzero[:16]],
-                                "policy": _policy_preview(data.policy),
-                                "opp_policy": _policy_preview(data.opp_policy),
-                                "metadata": dict(data.metadata),
-                            }
-                        )
                     expanded.append(decoded)
                 batch = stack_expanded(expanded)
                 inputs = batch.pop("input")
@@ -196,20 +197,8 @@ class DenseCNNTrainer:
                 steps += 1
 
         elapsed = perf_counter() - started
-        policy_target_path = None
-        if self.config.debug.write_policy_targets:
-            policy_target_path = ctx.diagnostics.write_json(
-                f"dense_cnn.policy_targets.epoch_{epoch:06d}.json",
-                {
-                    "epoch": epoch,
-                    "sample_count": len(records),
-                    "d6": {
-                        "mode": "random_per_training_expansion",
-                        "preview_count": len(policy_preview),
-                    },
-                    "preview": policy_preview,
-                },
-            )
+        if steps <= 0:
+            raise RuntimeError("dense_cnn training produced no optimizer steps")
         return {
             "status": "completed",
             "epoch": epoch,
@@ -217,15 +206,16 @@ class DenseCNNTrainer:
             "steps": steps,
             "samples": len(records),
             "batch_size": batch_size,
-            "loss": total_loss / max(1, steps),
-            "policy_target_path": str(policy_target_path) if policy_target_path is not None else None,
+            "loss": total_loss / steps,
             "elapsed_seconds": elapsed,
-            "samples_per_second": (len(records) * max(1, int(passes))) / max(elapsed, 1.0e-9),
+            "samples_per_second": (len(records) * resolved_passes) / max(elapsed, 1.0e-9),
         }
 
 
-def _policy_preview(policy: Sequence[tuple[int, float]], limit: int = 16) -> list[dict[str, float | int]]:
-    return [
-        {"action_id": int(action_id), "weight": float(weight)}
-        for action_id, weight in tuple(policy)[:limit]
-    ]
+def _resolve_window_symmetries(sample_symmetries: object, count: int) -> tuple[D6Symmetry, ...]:
+    raw = tuple(getattr(sample_symmetries, "symmetries", ()))
+    if len(raw) != count:
+        raise ValueError(
+            f"dense_cnn expected {count} D6 symmetries for the training window, got {len(raw)}"
+        )
+    return tuple(D6Symmetry(int(getattr(symmetry, "index", symmetry))) for symmetry in raw)

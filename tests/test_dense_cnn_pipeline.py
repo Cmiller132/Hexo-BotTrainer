@@ -64,18 +64,11 @@ def _small_model_config(overrides: Mapping[str, Any] | None = None) -> dict[str,
             "samples_per_epoch": 2,
             "search_visits": 1,
             "max_actions": 4,
-            "worker_count": 1,
         },
         "evaluation": {
             "games_per_epoch": 1,
             "sealbot_time_limit": 0.001,
             "max_actions": 4,
-        },
-        "debug": {
-            "write_game_history": True,
-            "write_policy_targets": True,
-            "write_sample_previews": False,
-            "preview_games": 1,
         },
     }
     if overrides:
@@ -175,7 +168,6 @@ def _write_pipeline_config(tmp_path: Path) -> Path:
                 "search_visits = 1",
                 "max_actions = 4",
                 "temperature = 1.0",
-                "worker_count = 1",
                 "",
                 "[model.config.evaluation]",
                 "games_per_epoch = 1",
@@ -192,12 +184,6 @@ def _write_pipeline_config(tmp_path: Path) -> Path:
                 "mcts_virtual_batch_candidates = [1, 2]",
                 "selfplay_probe_positions = 4",
                 "probe_batches = 1",
-                "",
-                "[model.config.debug]",
-                "write_game_history = true",
-                "write_policy_targets = true",
-                "write_sample_previews = false",
-                "preview_games = 1",
                 "",
                 "[run]",
                 f'output_dir = "{output_dir}"',
@@ -344,6 +330,17 @@ def test_dense_cnn_model1_config_writes_to_repo_level_run_and_checkpoint_paths()
     assert max(parsed.performance.training_batch_candidates) <= 256
 
 
+def test_dense_cnn_model_config_rejects_legacy_or_clamped_values() -> None:
+    dense_cnn = _dense_cnn()
+
+    with pytest.raises(ValueError, match="worker_count"):
+        dense_cnn.parse_model1_config({"selfplay": {"worker_count": 1}})
+    with pytest.raises(ValueError, match="hidden_prior_mass"):
+        dense_cnn.parse_model1_config({"selfplay": {"hidden_prior_mass": 1.5}})
+    with pytest.raises(ValueError, match="capacity"):
+        dense_cnn.parse_model1_config({"samples": {"capacity": 1024}})
+
+
 def test_training_overrides_wire_dense_cnn_pipeline_components(tmp_path: Path) -> None:
     from hexo_train.components import ComponentOverrides
 
@@ -414,19 +411,21 @@ def test_checkpoint_loader_resumes_model_and_sample_buffer_from_pointer(tmp_path
     torch = _torch()
     ctx, components = _build_dense_components(tmp_path / "source")
     trainer = components.model.trainer
+    samples_module = importlib.import_module("hexo_models.dense_cnn.samples")
     trainer.buffer.append(
-        {
-            "sample_id": "resume-sample",
-            "turn_index": 3,
-            "current_player": "player0",
-            "phase": "Opening",
-            "center": (0, 0),
-            "stones": (),
-            "policy": [((0, 0), 1.0)],
-            "opp_policy": [((0, 0), 1.0)],
-            "value": 0.5,
-            "metadata": {"target_schema_version": 2},
-        }
+        samples_module.Model1SampleData(
+            game_id="resume-sample",
+            turn_index=3,
+            current_player="player0",
+            phase="Opening",
+            center=(0, 0),
+            stones=(),
+            legal_action_ids=(samples_module.pack_coord_id(samples_module.Axial(0, 0)),),
+            policy=((samples_module.pack_coord_id(samples_module.Axial(0, 0)), 1.0),),
+            opp_policy=((samples_module.pack_coord_id(samples_module.Axial(0, 0)), 1.0),),
+            value=0.5,
+            metadata={"target_schema_version": 2},
+        )
     )
 
     with torch.no_grad():
@@ -503,19 +502,21 @@ def test_checkpoint_loader_skips_incompatible_model_but_recovers_sample_buffer(t
     torch = _torch()
     ctx, components = _build_dense_components(tmp_path / "source", _small_model_config({"architecture": {"channels": 4}}))
     trainer = components.model.trainer
+    samples_module = importlib.import_module("hexo_models.dense_cnn.samples")
     trainer.buffer.append(
-        {
-            "sample_id": "architecture-change-sample",
-            "turn_index": 1,
-            "current_player": "player0",
-            "phase": "Opening",
-            "center": (0, 0),
-            "stones": (),
-            "policy": [((0, 0), 1.0)],
-            "opp_policy": [((0, 0), 1.0)],
-            "value": -0.25,
-            "metadata": {"target_schema_version": 2},
-        }
+        samples_module.Model1SampleData(
+            game_id="architecture-change-sample",
+            turn_index=1,
+            current_player="player0",
+            phase="Opening",
+            center=(0, 0),
+            stones=(),
+            legal_action_ids=(samples_module.pack_coord_id(samples_module.Axial(0, 0)),),
+            policy=((samples_module.pack_coord_id(samples_module.Axial(0, 0)), 1.0),),
+            opp_policy=((samples_module.pack_coord_id(samples_module.Axial(0, 0)), 1.0),),
+            value=-0.25,
+            metadata={"target_schema_version": 2},
+        )
     )
     with torch.no_grad():
         next(components.model.model.parameters()).fill_(0.875)
@@ -577,7 +578,7 @@ def test_training_pipeline_run_records_dense_cnn_epoch_diagnostics(tmp_path: Pat
     epoch_result = epoch_diagnostic["metadata"]["result"]
 
     assert epoch_result["samples"]["selection"]["window_size"] == 2
-    assert epoch_result["symmetries"]["metadata"]["mode"] == "random_per_training_expansion"
+    assert epoch_result["symmetries"]["symmetry_count"] == 2
     for section in ("selfplay", "training", "checkpoint", "evaluation"):
         assert section in epoch_result
         _assert_real_diagnostic(epoch_result[section], section)
@@ -585,31 +586,18 @@ def test_training_pipeline_run_records_dense_cnn_epoch_diagnostics(tmp_path: Pat
     assert Path(epoch_result["checkpoint"]["pointer"]["pointer_path"]).exists()
 
     payloads = _diagnostic_payloads(ctx.diagnostics_dir)
-    policy_target_paths = _matching_path_values(
-        payloads,
-        key_tokens=("policy", "target"),
-        base_dir=ctx.output_dir,
-    )
-    game_history_paths = _matching_path_values(
-        payloads,
-        key_tokens=("game", "history"),
-        base_dir=ctx.output_dir,
-    )
-    if not game_history_paths:
-        game_history_paths = [
-            path
-            for path in _matching_path_values(
-                payloads,
-                key_tokens=("record",),
-                base_dir=ctx.output_dir,
-            )
-            if path.suffix == ".hxr"
-        ]
+    record_paths = [
+        path
+        for path in _matching_path_values(
+            payloads,
+            key_tokens=("record",),
+            base_dir=ctx.output_dir,
+        )
+        if path.suffix == ".hxr"
+    ]
 
-    assert policy_target_paths, "dense CNN diagnostics must include policy target artifact paths"
-    assert game_history_paths, "dense CNN diagnostics must include game history artifact paths"
-    assert all(path.exists() for path in policy_target_paths)
-    assert all(path.exists() for path in game_history_paths)
+    assert record_paths, "dense CNN diagnostics must include the HXR self-play record path"
+    assert all(path.exists() for path in record_paths)
 
 
 def test_finalize_samples_does_not_fake_missing_opponent_policy_with_current_policy() -> None:
@@ -734,12 +722,6 @@ def test_selfplay_keeps_mcts_samples_deeper_than_opening_before_rollout(
                     "active_games": 4,
                     "min_mcts_samples_per_game": 2,
                     "max_actions": 3,
-                },
-                "debug": {
-                    "write_game_history": False,
-                    "write_policy_targets": False,
-                    "write_sample_previews": False,
-                    "preview_games": 0,
                 },
             }
         ),

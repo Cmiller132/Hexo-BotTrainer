@@ -1,4 +1,10 @@
-"""Bounded PNG previews for dense CNN debug game histories."""
+"""Optional PNG previews for dense CNN inspection tooling.
+
+This renderer is not part of the production self-play or training path. It is
+kept as an explicit utility for bounded visual inspection of game histories,
+with small dependency fallbacks so diagnostics can still be rendered in minimal
+Python environments.
+"""
 
 from __future__ import annotations
 

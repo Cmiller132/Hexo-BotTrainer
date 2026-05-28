@@ -105,7 +105,6 @@ mcts_session_cache_max_states = 1048576
 mcts_active_root_limit = 1024
 max_actions = 1024
 temperature = 1.0
-worker_count = 1
 
 [model.config.evaluation]
 games_per_epoch = $EVAL_GAMES
@@ -120,16 +119,9 @@ target_selfplay_positions_per_second = 128.0
 inference_batch_candidates = [128, 256, 512, 1024]
 selfplay_batch_candidates = [2048]
 training_batch_candidates = [64, 128, 192, 256]
-mcts_visit_candidates = [128]
 mcts_virtual_batch_candidates = [4]
 selfplay_probe_positions = 8192
 probe_batches = 1
-
-[model.config.debug]
-write_game_history = true
-write_policy_targets = true
-write_sample_previews = true
-preview_games = 4
 
 [run]
 name = "dense_cnn_model1_wsl_smoke"
@@ -171,11 +163,9 @@ caps = dict(capabilities())
 
 assert torch.cuda.is_available(), "CUDA is not available to PyTorch inside WSL"
 assert BOARD_SIZE == 41 and INPUT_CHANNELS == 13
-assert cfg.architecture.crop_size == 41
 assert cfg.selfplay.max_actions == 1024
 assert cfg.evaluation.max_actions == 1024
 assert cfg.selfplay.search_visits == 128
-assert cfg.performance.mcts_visit_candidates == (128,)
 assert cfg.selfplay.progressive_widening_candidate_actions == 128
 assert caps["model1_mcts_progressive_widening"]
 assert caps["model1_mcts_lazy_staged_edges"]

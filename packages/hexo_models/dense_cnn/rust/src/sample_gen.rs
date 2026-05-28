@@ -3,6 +3,16 @@
 //! Self-play records compact facts rather than dense tensors. This module owns
 //! those facts for live positions and game outcomes, cloning live engine states
 //! through the generic engine state capsule before reading model-specific facts.
+//!
+//! The production sequence is:
+//!
+//! 1. Python captures a pre-decision live state and MCTS visit policy.
+//! 2. `model1_sample_from_state` clones the state and emits JSON-compatible
+//!    sample facts.
+//! 3. Python compresses the pending sample.
+//! 4. At game end, Python sends the pending sequence back here.
+//! 5. `model1_finalize_game_samples` writes final value, future opponent-policy,
+//!    lookahead, and target-schema metadata.
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -29,6 +39,8 @@ pub fn model1_sample_from_state(
     lookahead: &Bound<'_, PyAny>,
     metadata: &Bound<'_, PyAny>,
 ) -> PyResult<Py<PyAny>> {
+    // Clone the live Python state through the engine capsule before reading any
+    // facts. The returned dict is compact sample data, not a dense tensor.
     let state = super::state::state_from_py_state(py, state)?;
     let center = super::encoding::model1_crop_center(&state);
 
@@ -79,6 +91,8 @@ pub fn model1_finalize_game_samples(
     horizons: &Bound<'_, PyAny>,
     truncated: bool,
 ) -> PyResult<Py<PyAny>> {
+    // Finalization needs the whole decision sequence. Opponent-policy and
+    // lookahead targets are derived from future MCTS decisions in the same game.
     let decisions = pending_decisions(pending)?;
     let horizons = horizon_values(horizons)?;
     let output = PyList::empty(py);
@@ -98,6 +112,9 @@ pub fn model1_finalize_game_samples(
             .unwrap_or(&[]);
 
         let lookahead = finalized_lookahead(&decisions, index, &horizons);
+        // Copy the original sample fields into a fresh dict so finalized target
+        // fields replace pending values without mutating the original Python
+        // object that may still be held by caller-side diagnostics.
         let sample = sample_to_dict(py, decision.sample.bind(py))?;
         sample.set_item("value", value)?;
         sample.set_item("opp_policy", action_weight_pairs_obj(py, opp_policy)?)?;
@@ -133,9 +150,13 @@ pub fn register_pybridge(module: &Bound<'_, PyModule>) -> PyResult<()> {
 }
 
 struct PendingDecision {
+    /// Player label at the sampled decision.
     player: String,
+    /// Original pending sample object or mapping.
     sample: Py<PyAny>,
+    /// MCTS root value at the sampled decision, before final outcome is known.
     root_value: f32,
+    /// Search visit policy stored for future opponent-policy targets.
     policy: Vec<(PackedCoord, f32)>,
 }
 
@@ -163,6 +184,8 @@ fn finalized_lookahead(
     index: usize,
     horizons: &[usize],
 ) -> Vec<(i64, f32)> {
+    // Lookahead values are future root values from the current sample player's
+    // perspective. If the future decision belongs to the opponent, negate it.
     let mut lookahead = Vec::with_capacity(horizons.len());
     if decisions.is_empty() || index >= decisions.len() {
         return lookahead;
@@ -233,6 +256,9 @@ fn legal_action_ids_obj(
     state: &RustHexoState,
     center: HexCoord,
 ) -> PyResult<Py<PyAny>> {
+    // The training policy head can represent only in-crop legal actions. The
+    // engine still owns total legality; this compact sample stores the action ids
+    // needed to build dense targets for the fixed crop.
     let list = PyList::empty(py);
     let mut legal = Vec::with_capacity(state.legal_move_count());
     state.write_legal_moves(&mut legal);
@@ -353,6 +379,8 @@ fn sort_dedup_coords(coords: &mut Vec<HexCoord>) {
 }
 
 fn action_weight_pairs(weights: &Bound<'_, PyAny>) -> PyResult<Vec<(PackedCoord, f32)>> {
+    // Policies can arrive as mappings, iterable pairs, or the byte-backed
+    // `CompactVisitPolicy` returned by Rust MCTS.
     if weights.is_none() {
         return Ok(Vec::new());
     }
@@ -372,6 +400,7 @@ fn action_weight_pairs(weights: &Bound<'_, PyAny>) -> PyResult<Vec<(PackedCoord,
             item.get_item(1)?.extract::<f32>()?,
         ));
     }
+    validate_action_weight_pairs(&pairs)?;
     Ok(pairs)
 }
 
@@ -400,7 +429,21 @@ fn compact_action_weight_pairs(
     for index in 0..count {
         pairs.push((read_u32(action_bytes, index), read_f32(weight_bytes, index)));
     }
+    validate_action_weight_pairs(&pairs)?;
     Ok(Some(pairs))
+}
+
+fn validate_action_weight_pairs(pairs: &[(PackedCoord, f32)]) -> PyResult<()> {
+    // Do not normalize or clamp here. Search and training should see malformed
+    // policy targets as boundary errors, not repaired samples.
+    for (action_id, weight) in pairs {
+        if !weight.is_finite() || *weight < 0.0 {
+            return Err(PyValueError::new_err(format!(
+                "sample policy weight for action {action_id} must be finite and >= 0"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn read_u32(bytes: &[u8], index: usize) -> u32 {

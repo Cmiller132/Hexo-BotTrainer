@@ -1,4 +1,14 @@
-"""Checkpoint IO for the dense CNN model."""
+"""Checkpoint IO for dense CNN training state.
+
+The generic training pipeline owns when checkpoints are loaded and saved. This
+module owns what dense_cnn needs to persist inside those checkpoints: model
+weights, optimizer state, trainer counters/tuned settings, and the compressed
+`SampleBuffer`.
+
+Loading is strict about model-weight compatibility and replay-buffer schema.
+That keeps stale or partially migrated dense_cnn checkpoints from being treated
+as usable training state.
+"""
 
 from __future__ import annotations
 
@@ -9,7 +19,11 @@ import torch
 
 
 class DenseCNNCheckpointLoader:
+    """Load dense_cnn checkpoint payloads into generic pipeline components."""
+
     def load(self, checkpoint_ref: object | None, *, ctx: Any, components: Any) -> dict[str, Any]:
+        """Load model, optimizer, and replay buffer if the reference is usable."""
+
         if checkpoint_ref is None:
             return {"status": "initialized", "checkpoint_ref": None}
         path = _resolve_checkpoint_ref(Path(str(checkpoint_ref)))
@@ -46,7 +60,6 @@ class DenseCNNCheckpointLoader:
                 "sample_count": getattr(buffer, "sample_count", None),
                 "sample_buffer_load_stats": sample_buffer_load_stats,
                 "sample_buffer_loaded_count": _sample_buffer_loaded_count(sample_buffer_load_stats),
-                "sample_buffer_filtered_count": _sample_buffer_filtered_count(sample_buffer_load_stats),
             }
 
         components.model.model.load_state_dict(model_state)
@@ -61,12 +74,15 @@ class DenseCNNCheckpointLoader:
             "sample_count": getattr(buffer, "sample_count", None),
             "sample_buffer_load_stats": sample_buffer_load_stats,
             "sample_buffer_loaded_count": _sample_buffer_loaded_count(sample_buffer_load_stats),
-            "sample_buffer_filtered_count": _sample_buffer_filtered_count(sample_buffer_load_stats),
         }
 
 
 class DenseCNNCheckpointSaver:
+    """Save dense_cnn checkpoint payloads from generic pipeline components."""
+
     def save(self, *, name: str, ctx: Any, components: Any) -> Path:
+        """Persist model/optimizer/sample-buffer state for one checkpoint name."""
+
         path = ctx.checkpoint_dir / f"{name}.pt"
         trainer = getattr(components.model, "trainer", None)
         buffer = getattr(trainer, "buffer", None)
@@ -118,6 +134,8 @@ def _state_dict_incompatibilities(
     *,
     limit: int = 12,
 ) -> list[dict[str, object]]:
+    """Return a bounded list of tensor/key mismatches before loading weights."""
+
     if not isinstance(candidate, Mapping):
         return [{"key": "model_state", "expected": "mapping", "actual": type(candidate).__name__}]
 
@@ -156,10 +174,6 @@ def _sample_buffer_load_stats(load_result: object, buffer: object) -> dict[str, 
 
 def _sample_buffer_loaded_count(stats: Mapping[str, object] | None) -> int | None:
     return _optional_int(stats.get("loaded")) if stats is not None else None
-
-
-def _sample_buffer_filtered_count(stats: Mapping[str, object] | None) -> int | None:
-    return _optional_int(stats.get("filtered")) if stats is not None else None
 
 
 def _optional_int(value: object) -> int | None:

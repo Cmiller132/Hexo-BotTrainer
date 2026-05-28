@@ -1,10 +1,18 @@
 //! Python/PyTorch evaluator adapter for dense CNN MCTS.
 //!
 //! MCTS owns the tree and game-state mutations, while PyTorch remains the neural
-//! evaluator. This file is the boundary between those worlds: it encodes engine
-//! states into the dense-cnn tensor payload, calls the Python evaluator once per
-//! batch, and caches exact model evaluations by the history-sensitive state
-//! identity derived in `hexo_utils`.
+//! evaluator. This file is the boundary between those worlds:
+//!
+//! 1. Hash incoming engine states with `hexo_utils`.
+//! 2. Reuse cached evaluations and coalesce duplicate uncached states.
+//! 3. Encode unique states into strict tensor byte payloads.
+//! 4. Call `DenseCNNInference.evaluate_model1_payload`.
+//! 5. Parse exact value/prior byte buffers back into `RustEvaluation`.
+//! 6. Validate legality, finiteness, uniqueness, and prior mass before search
+//!    sees the result.
+//!
+//! No fallback evaluator format is accepted here. If Python returns malformed
+//! bytes, the PyO3 boundary raises `PyValueError`.
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -25,8 +33,13 @@ use super::encoding::{
 
 #[derive(Clone, Debug)]
 pub(crate) struct RustEvaluation {
+    /// Scalar value from the perspective of the evaluated state's current player.
     pub(crate) value: f32,
+    /// Total legal moves in the authoritative engine state, including moves
+    /// outside the dense crop or outside a candidate-limited result.
     pub(crate) legal_action_count: usize,
+    /// Ranked visible priors. Hidden legal actions are represented later by
+    /// `mcts_tree` using `legal_action_count`.
     pub(crate) priors: Vec<(PackedCoord, f32)>,
 }
 
@@ -91,7 +104,8 @@ impl RustEvaluationCache {
             self.entries.insert(key, evaluation);
             return;
         }
-        while self.entries.len() >= max_states.max(1) {
+        debug_assert!(max_states > 0);
+        while self.entries.len() >= max_states {
             let Some(evicted) = self.insertion_order.pop_front() else {
                 break;
             };
@@ -131,6 +145,9 @@ fn evaluate_model1_state_refs(
     stats: Option<&SharedEvaluationStats>,
     prior_candidate_limit: Option<usize>,
 ) -> PyResult<Vec<RustEvaluation>> {
+    // Keep Python callback batches bounded. The caller may request many leaf
+    // states at once, but Torch memory and callback latency are better behaved
+    // when large batches are chunked here.
     if states.len() > MODEL1_EVAL_CHUNK_STATES {
         let mut evaluations = Vec::with_capacity(states.len());
         for chunk in states.chunks(MODEL1_EVAL_CHUNK_STATES) {
@@ -154,6 +171,9 @@ fn evaluate_model1_states_chunk(
     stats: Option<&SharedEvaluationStats>,
     prior_candidate_limit: Option<usize>,
 ) -> PyResult<Vec<RustEvaluation>> {
+    // Candidate-limited mode reduces traffic by sending half-precision inputs
+    // and asking Python to choose top-k priors from the legal plane. Full-prior
+    // mode sends explicit legal flats and expects one prior per flat.
     let use_half_inputs = prior_candidate_limit.is_some();
     let use_legal_plane_mask = prior_candidate_limit.is_some();
     let encoding_started = Instant::now();
@@ -221,6 +241,8 @@ fn evaluate_model1_states_chunk(
         stats.encoding_seconds += encoding_started.elapsed().as_secs_f64();
     }
     let payload = PyDict::new(py);
+    // This dictionary is the native evaluator ABI consumed by
+    // `DenseCNNInference.evaluate_model1_payload`.
     payload.set_item("inputs", PyBytes::new(py, bytes))?;
     if use_half_inputs {
         payload.set_item("input_dtype", "float16")?;
@@ -235,7 +257,7 @@ fn evaluate_model1_states_chunk(
         ),
     )?;
     if let Some(limit) = prior_candidate_limit {
-        payload.set_item("max_prior_candidates", limit.max(1))?;
+        payload.set_item("max_prior_candidates", limit)?;
         payload.set_item("legal_mask_from_inputs", true)?;
     } else {
         payload.set_item("legal_flat_indices_bytes", PyBytes::new(py, flat_bytes))?;
@@ -247,181 +269,113 @@ fn evaluate_model1_states_chunk(
     if let Some(stats) = stats {
         stats.borrow_mut().evaluator_seconds += evaluator_started.elapsed().as_secs_f64();
     }
-    if let (Ok(values_obj), Ok(priors_obj)) = (
-        output.get_item("values_bytes"),
-        output.get_item("priors_bytes"),
-    ) {
-        let value_bytes = values_obj.downcast::<PyBytes>()?.as_bytes();
-        let prior_bytes = priors_obj.downcast::<PyBytes>()?.as_bytes();
-        require_exact_bytes("values_bytes", value_bytes.len(), encoded.len(), 4)?;
-        if let Some(stats) = stats {
-            let mut stats = stats.borrow_mut();
-            stats.value_bytes += value_bytes.len();
-            stats.prior_bytes += prior_bytes.len();
-        }
-        let mut evaluations = Vec::with_capacity(encoded.len());
-        if let (Ok(flats_obj), Ok(selected_offsets_obj)) = (
-            output.get_item("selected_flat_indices_bytes"),
-            output.get_item("selected_row_offsets"),
-        ) {
-            let flat_bytes = flats_obj.downcast::<PyBytes>()?.as_bytes();
-            let selected_offsets = selected_offsets_obj.extract::<Vec<usize>>()?;
-            validate_row_offsets("selected_row_offsets", &selected_offsets, encoded.len())?;
-            let selected_count = selected_offsets.last().copied().unwrap_or(0);
-            require_exact_bytes("priors_bytes", prior_bytes.len(), selected_count, 4)?;
-            require_exact_bytes(
-                "selected_flat_indices_bytes",
-                flat_bytes.len(),
-                selected_count,
-                8,
-            )?;
-            for (index, row) in encoded.iter().enumerate() {
-                let value = read_f32(value_bytes, index).unwrap_or(0.0).clamp(-1.0, 1.0);
-                let start = selected_offsets.get(index).copied().unwrap_or(0);
-                let end = selected_offsets
-                    .get(index + 1)
-                    .copied()
-                    .unwrap_or(start)
-                    .max(start);
-                let mut row_priors = Vec::with_capacity(end.saturating_sub(start));
-                for selected_index in start..end {
-                    let Some(flat) = read_i64(flat_bytes, selected_index) else {
-                        continue;
-                    };
-                    if flat < 0 {
-                        continue;
-                    }
-                    let Some(coord) = model1_coord_from_flat(flat as usize, row.center) else {
-                        continue;
-                    };
-                    let action_id = pack_coord(coord);
-                    if !row.legal_action_ids.contains(&action_id) {
-                        continue;
-                    }
-                    let prior = read_f32(prior_bytes, selected_index)
-                        .unwrap_or(0.0)
-                        .max(0.0);
-                    row_priors.push((action_id, prior));
-                }
-                finalize_model_priors(
-                    &mut row_priors,
-                    row.all_legal_action_count,
-                    prior_candidate_limit,
-                    true,
-                );
-                evaluations.push(RustEvaluation {
-                    value,
-                    legal_action_count: row.all_legal_action_count,
-                    priors: row_priors,
-                });
-            }
-        } else if let (Ok(ordinals_obj), Ok(selected_offsets_obj)) = (
-            output.get_item("selected_legal_ordinals_bytes"),
-            output.get_item("selected_row_offsets"),
-        ) {
-            let ordinal_bytes = ordinals_obj.downcast::<PyBytes>()?.as_bytes();
-            let selected_offsets = selected_offsets_obj.extract::<Vec<usize>>()?;
-            validate_row_offsets("selected_row_offsets", &selected_offsets, encoded.len())?;
-            let selected_count = selected_offsets.last().copied().unwrap_or(0);
-            require_exact_bytes("priors_bytes", prior_bytes.len(), selected_count, 4)?;
-            require_exact_bytes(
-                "selected_legal_ordinals_bytes",
-                ordinal_bytes.len(),
-                selected_count,
-                8,
-            )?;
-            for (index, row) in encoded.iter().enumerate() {
-                let value = read_f32(value_bytes, index).unwrap_or(0.0).clamp(-1.0, 1.0);
-                let start = selected_offsets.get(index).copied().unwrap_or(0);
-                let end = selected_offsets
-                    .get(index + 1)
-                    .copied()
-                    .unwrap_or(start)
-                    .max(start);
-                let mut row_priors = Vec::with_capacity(end.saturating_sub(start));
-                for selected_index in start..end {
-                    let Some(ordinal) = read_i64(ordinal_bytes, selected_index) else {
-                        continue;
-                    };
-                    if ordinal < 0 {
-                        continue;
-                    }
-                    let ordinal = ordinal as usize;
-                    let Some(action_id) = row.legal_action_ids.get(ordinal).copied() else {
-                        continue;
-                    };
-                    let prior = read_f32(prior_bytes, selected_index)
-                        .unwrap_or(0.0)
-                        .max(0.0);
-                    row_priors.push((action_id, prior));
-                }
-                finalize_model_priors(
-                    &mut row_priors,
-                    row.all_legal_action_count,
-                    prior_candidate_limit,
-                    true,
-                );
-                evaluations.push(RustEvaluation {
-                    value,
-                    legal_action_count: row.all_legal_action_count,
-                    priors: row_priors,
-                });
-            }
-        } else {
-            let mut prior_offset = 0usize;
-            let expected_prior_count: usize =
-                encoded.iter().map(|row| row.legal_action_ids.len()).sum();
-            require_exact_bytes("priors_bytes", prior_bytes.len(), expected_prior_count, 4)?;
-            for (index, row) in encoded.iter().enumerate() {
-                let value = read_f32(value_bytes, index).unwrap_or(0.0).clamp(-1.0, 1.0);
-                let mut row_priors = Vec::with_capacity(row.legal_action_ids.len());
-                for action_id in row.legal_action_ids.iter().copied() {
-                    let prior = read_f32(prior_bytes, prior_offset).unwrap_or(0.0).max(0.0);
-                    row_priors.push((action_id, prior));
-                    prior_offset += 1;
-                }
-                finalize_model_priors(
-                    &mut row_priors,
-                    row.all_legal_action_count,
-                    prior_candidate_limit,
-                    false,
-                );
-                evaluations.push(RustEvaluation {
-                    value,
-                    legal_action_count: row.all_legal_action_count,
-                    priors: row_priors,
-                });
-            }
-        }
-        return Ok(evaluations);
+    let values_obj = output.get_item("values_bytes").map_err(|_| {
+        PyValueError::new_err("dense_cnn evaluator output missing required values_bytes")
+    })?;
+    let priors_obj = output.get_item("priors_bytes").map_err(|_| {
+        PyValueError::new_err("dense_cnn evaluator output missing required priors_bytes")
+    })?;
+    let value_bytes = values_obj.downcast::<PyBytes>()?.as_bytes();
+    let prior_bytes = priors_obj.downcast::<PyBytes>()?.as_bytes();
+    require_exact_bytes("values_bytes", value_bytes.len(), encoded.len(), 4)?;
+    if let Some(stats) = stats {
+        let mut stats = stats.borrow_mut();
+        stats.value_bytes += value_bytes.len();
+        stats.prior_bytes += prior_bytes.len();
     }
-
-    let values = output.get_item("values")?;
-    let priors = output.get_item("priors")?;
     let mut evaluations = Vec::with_capacity(encoded.len());
-    for (index, row) in encoded.iter().enumerate() {
-        let value = values.get_item(index)?.extract::<f32>()?.clamp(-1.0, 1.0);
-        let prior_row = priors.get_item(index)?;
-        let mut row_priors = Vec::with_capacity(row.legal_action_ids.len());
-        for (action_id, prior_item) in row
-            .legal_action_ids
-            .iter()
-            .copied()
-            .zip(prior_row.try_iter()?)
-        {
-            row_priors.push((action_id, prior_item?.extract::<f32>()?.max(0.0)));
+    if prior_candidate_limit.is_some() {
+        // Python returns selected crop flats in candidate-limited mode. Convert
+        // each flat back to a packed action id, then prove it is legal in the
+        // encoded engine state before accepting the prior.
+        let flats_obj = output.get_item("selected_flat_indices_bytes").map_err(|_| {
+            PyValueError::new_err(
+                "candidate-limited dense_cnn evaluator output missing selected_flat_indices_bytes",
+            )
+        })?;
+        let selected_offsets_obj = output.get_item("selected_row_offsets").map_err(|_| {
+            PyValueError::new_err(
+                "candidate-limited dense_cnn evaluator output missing selected_row_offsets",
+            )
+        })?;
+        let flat_bytes = flats_obj.downcast::<PyBytes>()?.as_bytes();
+        let selected_offsets = selected_offsets_obj.extract::<Vec<usize>>()?;
+        validate_row_offsets("selected_row_offsets", &selected_offsets, encoded.len())?;
+        let selected_count = selected_offsets.last().copied().unwrap_or(0);
+        require_exact_bytes("priors_bytes", prior_bytes.len(), selected_count, 4)?;
+        require_exact_bytes(
+            "selected_flat_indices_bytes",
+            flat_bytes.len(),
+            selected_count,
+            8,
+        )?;
+        for (row_index, row) in encoded.iter().enumerate() {
+            let value = read_value(value_bytes, row_index)?;
+            let start = selected_offsets[row_index];
+            let end = selected_offsets[row_index + 1];
+            let mut row_priors = Vec::with_capacity(end - start);
+            for selected_index in start..end {
+                let flat = read_i64_required("selected_flat_indices_bytes", flat_bytes, selected_index)?;
+                if flat < 0 {
+                    return Err(PyValueError::new_err(format!(
+                        "selected_flat_indices_bytes row {row_index} entry {selected_index} is negative"
+                    )));
+                }
+                let Some(coord) = model1_coord_from_flat(flat as usize, row.center) else {
+                    return Err(PyValueError::new_err(format!(
+                        "selected_flat_indices_bytes row {row_index} entry {selected_index} is outside the dense crop"
+                    )));
+                };
+                let action_id = pack_coord(coord);
+                if !row.legal_action_ids.contains(&action_id) {
+                    return Err(PyValueError::new_err(format!(
+                        "selected_flat_indices_bytes row {row_index} entry {selected_index} maps to illegal action {action_id}"
+                    )));
+                }
+                let prior = read_prior(prior_bytes, selected_index, row_index)?;
+                row_priors.push((action_id, prior));
+            }
+            finalize_model_priors(
+                &mut row_priors,
+                row.all_legal_action_count,
+                prior_candidate_limit,
+                true,
+                row_index,
+            )?;
+            evaluations.push(RustEvaluation {
+                value,
+                legal_action_count: row.all_legal_action_count,
+                priors: row_priors,
+            });
         }
-        finalize_model_priors(
-            &mut row_priors,
-            row.all_legal_action_count,
-            prior_candidate_limit,
-            false,
-        );
-        evaluations.push(RustEvaluation {
-            value,
-            legal_action_count: row.all_legal_action_count,
-            priors: row_priors,
-        });
+    } else {
+        // Full-prior mode is positional: priors_bytes item N corresponds to the
+        // Nth legal action id written into the row-offset payload sent above.
+        let mut prior_offset = 0usize;
+        let expected_prior_count: usize =
+            encoded.iter().map(|row| row.legal_action_ids.len()).sum();
+        require_exact_bytes("priors_bytes", prior_bytes.len(), expected_prior_count, 4)?;
+        for (row_index, row) in encoded.iter().enumerate() {
+            let value = read_value(value_bytes, row_index)?;
+            let mut row_priors = Vec::with_capacity(row.legal_action_ids.len());
+            for action_id in row.legal_action_ids.iter().copied() {
+                let prior = read_prior(prior_bytes, prior_offset, row_index)?;
+                row_priors.push((action_id, prior));
+                prior_offset += 1;
+            }
+            finalize_model_priors(
+                &mut row_priors,
+                row.all_legal_action_count,
+                prior_candidate_limit,
+                false,
+                row_index,
+            )?;
+            evaluations.push(RustEvaluation {
+                value,
+                legal_action_count: row.all_legal_action_count,
+                priors: row_priors,
+            });
+        }
     }
     Ok(evaluations)
 }
@@ -462,6 +416,8 @@ pub(crate) fn evaluate_model1_state_refs_cached(
     prior_candidate_limit: Option<usize>,
     cache_max_states: usize,
 ) -> PyResult<Vec<RustEvaluation>> {
+    // Cache slots preserve caller order. `unique_states` contains only misses,
+    // and `slot_to_unique` maps duplicate misses back to their first occurrence.
     let mut result_slots: Vec<Option<RustEvaluation>> = vec![None; requests.len()];
     let mut unique_states: Vec<&RustHexoState> = Vec::new();
     let mut unique_keys: Vec<StateHash> = Vec::new();
@@ -555,40 +511,63 @@ fn finalize_model_priors(
     legal_action_count: usize,
     prior_candidate_limit: Option<usize>,
     already_ranked: bool,
-) {
+    row_index: usize,
+) -> PyResult<()> {
+    // This is the last validation step before priors become tree edges. The tree
+    // assumes every visible prior is finite, nonnegative, unique, legal, and has
+    // positive total mass for nonterminal rows.
     if legal_action_count == 0 {
-        priors.clear();
-        return;
-    }
-    let limit = prior_candidate_limit
-        .map(|count| count.max(1).min(legal_action_count))
-        .unwrap_or(legal_action_count);
-    if already_ranked {
-        let mut filtered = Vec::with_capacity(priors.len().min(limit));
-        let mut seen = HashSet::with_capacity(priors.len().min(limit));
-        for (action_id, prior) in priors.drain(..) {
-            if !seen.insert(action_id) {
-                continue;
-            }
-            filtered.push((action_id, prior));
-            if filtered.len() == limit {
-                break;
-            }
+        if priors.is_empty() {
+            return Ok(());
         }
-        *priors = filtered;
-        renormalize_priors(priors);
-        return;
+        return Err(PyValueError::new_err(format!(
+            "evaluator returned {} priors for terminal row {row_index}",
+            priors.len()
+        )));
     }
-    let mut filtered = Vec::with_capacity(priors.len().min(limit));
-    let mut seen = HashSet::with_capacity(priors.len().min(limit));
-    for (action_id, prior) in priors.drain(..) {
+    let limit = match prior_candidate_limit {
+        Some(0) => {
+            return Err(PyValueError::new_err(
+                "prior_candidate_limit must be > 0 when provided",
+            ));
+        }
+        Some(count) => count.min(legal_action_count),
+        None => legal_action_count,
+    };
+
+    if priors.is_empty() {
+        return Err(PyValueError::new_err(format!(
+            "evaluator returned no priors for non-terminal row {row_index}"
+        )));
+    }
+    if priors.len() > limit {
+        return Err(PyValueError::new_err(format!(
+            "evaluator returned {} priors for row {row_index}, above limit {limit}",
+            priors.len()
+        )));
+    }
+    let mut seen = HashSet::with_capacity(priors.len());
+    for (action_id, prior) in priors.iter().copied() {
         if !seen.insert(action_id) {
-            continue;
+            return Err(PyValueError::new_err(format!(
+                "evaluator returned duplicate action {action_id} in row {row_index}"
+            )));
         }
-        filtered.push((action_id, prior));
+        if !prior.is_finite() || prior < 0.0 {
+            return Err(PyValueError::new_err(format!(
+                "evaluator returned invalid prior {prior} for action {action_id} in row {row_index}"
+            )));
+        }
     }
+    let total: f32 = priors.iter().map(|(_, prior)| *prior).sum();
+    if !priors.is_empty() && total <= 0.0 {
+        return Err(PyValueError::new_err(format!(
+            "evaluator returned zero total prior mass for row {row_index}"
+        )));
+    }
+
     if !already_ranked {
-        filtered.sort_by(|left, right| {
+        priors.sort_by(|left, right| {
             right
                 .1
                 .partial_cmp(&left.1)
@@ -596,9 +575,7 @@ fn finalize_model_priors(
                 .then_with(|| left.0.cmp(&right.0))
         });
     }
-    filtered.truncate(limit);
-    *priors = filtered;
-    renormalize_priors(priors);
+    Ok(())
 }
 
 fn require_exact_bytes(
@@ -607,6 +584,8 @@ fn require_exact_bytes(
     expected_items: usize,
     bytes_per_item: usize,
 ) -> PyResult<()> {
+    // Byte-length checks keep payload corruption from turning into accidental
+    // reinterpretation of shorter or longer buffers.
     let Some(expected_bytes) = expected_items.checked_mul(bytes_per_item) else {
         return Err(PyValueError::new_err(format!(
             "{name} expected byte count overflow"
@@ -641,32 +620,38 @@ fn validate_row_offsets(name: &str, offsets: &[usize], rows: usize) -> PyResult<
     Ok(())
 }
 
-fn renormalize_priors(priors: &mut [(PackedCoord, f32)]) {
-    let total: f32 = priors
-        .iter()
-        .map(|(_, prior)| prior.max(0.0))
-        .filter(|prior| prior.is_finite())
-        .sum();
-    if total <= 0.0 {
-        let uniform = if priors.is_empty() {
-            0.0
-        } else {
-            1.0 / priors.len() as f32
-        };
-        for (_, prior) in priors {
-            *prior = uniform;
-        }
-        return;
-    }
-    for (_, prior) in priors {
-        *prior = prior.max(0.0) / total;
-    }
-}
-
 fn read_f32(bytes: &[u8], index: usize) -> Option<f32> {
     let start = index.checked_mul(4)?;
     let chunk = bytes.get(start..start + 4)?;
     Some(f32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+}
+
+fn read_value(bytes: &[u8], index: usize) -> PyResult<f32> {
+    let value = read_f32_required("values_bytes", bytes, index)?;
+    if !value.is_finite() || !(-1.0..=1.0).contains(&value) {
+        return Err(PyValueError::new_err(format!(
+            "values_bytes row {index} must be finite and in [-1, 1], got {value}"
+        )));
+    }
+    Ok(value)
+}
+
+fn read_prior(bytes: &[u8], index: usize, row_index: usize) -> PyResult<f32> {
+    let value = read_f32_required("priors_bytes", bytes, index)?;
+    if !value.is_finite() || value < 0.0 {
+        return Err(PyValueError::new_err(format!(
+            "priors_bytes row {row_index} entry {index} must be finite and >= 0, got {value}"
+        )));
+    }
+    Ok(value)
+}
+
+fn read_f32_required(name: &str, bytes: &[u8], index: usize) -> PyResult<f32> {
+    read_f32(bytes, index).ok_or_else(|| {
+        PyValueError::new_err(format!(
+            "{name} missing f32 at item index {index}"
+        ))
+    })
 }
 
 fn read_i64(bytes: &[u8], index: usize) -> Option<i64> {
@@ -675,4 +660,12 @@ fn read_i64(bytes: &[u8], index: usize) -> Option<i64> {
     Some(i64::from_ne_bytes([
         chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
     ]))
+}
+
+fn read_i64_required(name: &str, bytes: &[u8], index: usize) -> PyResult<i64> {
+    read_i64(bytes, index).ok_or_else(|| {
+        PyValueError::new_err(format!(
+            "{name} missing i64 at item index {index}"
+        ))
+    })
 }

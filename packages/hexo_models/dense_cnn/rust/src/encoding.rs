@@ -1,9 +1,13 @@
-//! Dense CNN Model1 input encoding.
+//! Dense CNN Model 1 input encoding.
 //!
-//! This file owns the 13-plane dense tensor contract consumed by the PyTorch
-//! network. MCTS and inference call this encoder, while sample generation uses
-//! a few coordinate helpers to keep compact sample facts aligned with training
-//! expansion.
+//! This file owns native encoding from authoritative `HexoState` to the 13-plane
+//! dense tensor consumed by PyTorch. The same state facts are expanded in Python
+//! from compact samples, so this file must stay aligned with `input.py`,
+//! `geometry.py`, and `constants.py`.
+//!
+//! Direct inference uses float32 tensors plus explicit legal rows. Candidate
+//! limited MCTS uses float16 tensors with the legal plane present so Python can
+//! choose top-k legal priors on-device and send only those candidates back.
 
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList, PyTuple};
@@ -16,8 +20,12 @@ use super::constants::*;
 use super::state::states_from_py_states;
 
 pub(crate) struct Model1EncodedState {
+    // Exactly one of `planes` or `half_planes` is populated for a given call.
     pub(crate) planes: Vec<f32>,
     pub(crate) half_planes: Vec<u16>,
+    // `all_legal_action_count` can exceed the number of in-crop priors when a
+    // legal action is outside the fixed 41x41 crop. MCTS uses this to allocate
+    // hidden prior mass to legal-but-not-yet-materialized actions.
     pub(crate) all_legal_action_count: usize,
     pub(crate) legal_action_ids: Vec<PackedCoord>,
     pub(crate) legal_flat_indices: Vec<i64>,
@@ -26,6 +34,8 @@ pub(crate) struct Model1EncodedState {
 
 #[pyfunction(signature = (states))]
 pub fn model1_batch_inputs(py: Python<'_>, states: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    // This Python-visible helper is used by `DenseCNNInference.infer_states`.
+    // It keeps state intake and crop projection in Rust even outside MCTS.
     let states = states_from_py_states(py, states)?;
     let mut planes: Vec<f32> = Vec::new();
     let legal_action_rows = PyList::empty(py);
@@ -76,6 +86,9 @@ pub(crate) fn encode_model1_state_for_mcts(
 }
 
 pub(crate) fn encode_model1_state_half_for_mcts(state: &RustHexoState) -> Model1EncodedState {
+    // Candidate-limited search sends half-precision inputs to reduce Python
+    // callback bandwidth. The legal plane is included so Python can top-k over
+    // legal crop cells without a separate legal-index byte payload.
     let center = model1_crop_center(state);
     let mut half_planes = model1_half_base_planes().to_vec();
 
@@ -152,6 +165,9 @@ fn encode_model1_state_inner(
     state: &RustHexoState,
     include_crop_legal_lists: bool,
 ) -> Model1EncodedState {
+    // Full-prior encoding can optionally return legal action ids and crop flats.
+    // MCTS asks for those rows when it wants Python to softmax exactly over every
+    // legal in-crop action.
     let center = model1_crop_center(state);
     let mut planes = model1_base_planes().to_vec();
 
@@ -406,6 +422,8 @@ fn fill_opponent_last_turn_half(
 }
 
 pub(crate) fn model1_crop_center(state: &RustHexoState) -> HexCoord {
+    // Python's compact-sample path uses the same rounded mean rule. Matching it
+    // matters because policy flats are crop-relative.
     let occupied = state.board().occupied_cells();
     if occupied.is_empty() {
         return HexCoord { q: 0, r: 0 };
@@ -419,6 +437,8 @@ pub(crate) fn model1_crop_center(state: &RustHexoState) -> HexCoord {
 }
 
 fn python_round(numerator: i32, denominator: i32) -> i32 {
+    // Python `round` uses ties-to-even for halves; reproduce it so Rust inference
+    // and Python sample expansion choose the same crop center.
     let quotient = numerator.div_euclid(denominator);
     let remainder = numerator.rem_euclid(denominator);
     let doubled = remainder * 2;
@@ -434,6 +454,8 @@ fn python_round(numerator: i32, denominator: i32) -> i32 {
 }
 
 pub(crate) fn model1_flat_index(coord: HexCoord, center: HexCoord) -> Option<usize> {
+    // Convert axial coordinates to row-major crop flats. Returning `None` is a
+    // representational limit of the crop, not an illegal game state.
     let half = (MODEL1_BOARD_SIZE / 2) as i32;
     let row = coord.r as i32 - center.r as i32 + half;
     let col = coord.q as i32 - center.q as i32 + half;

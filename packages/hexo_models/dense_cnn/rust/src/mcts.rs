@@ -1,10 +1,15 @@
 //! Dense CNN MCTS Python boundary.
 //!
-//! Python hands live engine states to this module. The dense-cnn state bridge is
+//! Python hands live engine states to this module. The dense_cnn state bridge is
 //! responsible for cloning those states into authoritative Rust `HexoState`
 //! values; from there the search never mutates the live Python game. Tree
 //! mechanics live in `mcts_tree`, and evaluator payload parsing lives in
 //! `mcts_eval`.
+//!
+//! `Model1MctsSession` is intentionally stateful. A caller provides a stable
+//! game key for each active game, and the session promotes the selected child
+//! subtree after every search. If the next call sends a root whose hash differs
+//! from the promoted tree, the old tree is discarded and a new one is evaluated.
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -27,13 +32,19 @@ use super::mcts_tree::{
 use super::state::states_from_py_states;
 
 struct RootSelectionWork {
+    // Leaves selected by one root during one virtual batch.
     leaves: Vec<RustLeaf>,
+    // False means the root could not select any new or existing visit. The outer
+    // loop uses this to stop if every root is blocked.
     made_progress: bool,
 }
 
 #[pyclass(unsendable)]
 pub(crate) struct Model1MctsSession {
+    // Keyed by Python self-play game ids. Each search stores one promoted root.
     searches: HashMap<u64, RustSearch>,
+    // Shared across active roots so transpositions and duplicate leaf requests
+    // evaluate once per exact state hash.
     evaluation_cache: SharedEvaluationCache,
     cache_max_states: usize,
 }
@@ -42,12 +53,16 @@ pub(crate) struct Model1MctsSession {
 impl Model1MctsSession {
     #[new]
     #[pyo3(signature = (max_states=None))]
-    fn new(max_states: Option<usize>) -> Self {
-        Self {
+    fn new(max_states: Option<usize>) -> PyResult<Self> {
+        let cache_max_states = validate_positive_usize(
+            "max_states",
+            max_states.unwrap_or(MODEL1_EVAL_CACHE_MAX_STATES),
+        )?;
+        Ok(Self {
             searches: HashMap::new(),
             evaluation_cache: new_shared_evaluation_cache(),
-            cache_max_states: max_states.unwrap_or(MODEL1_EVAL_CACHE_MAX_STATES).max(1),
-        }
+            cache_max_states,
+        })
     }
 
     fn clear(&mut self) {
@@ -87,7 +102,9 @@ impl Model1MctsSession {
         fpu_reduction: Option<f32>,
         virtual_loss: Option<f32>,
     ) -> PyResult<Py<PyAny>> {
-        validate_search_inputs(c_puct, temperature)?;
+        // Validate true native-search boundaries here. The Python wrapper is a
+        // transport layer and intentionally does not duplicate these checks.
+        validate_search_inputs(visits, c_puct, temperature)?;
         let roots = states_from_py_states(py, states)?;
         if roots.is_empty() {
             return Ok(PyTuple::empty(py).into_any().unbind());
@@ -99,7 +116,10 @@ impl Model1MctsSession {
                 roots.len()
             )));
         }
-        let root_limit = active_root_limit.unwrap_or(MODEL1_ACTIVE_ROOT_LIMIT).max(1);
+        let root_limit = validate_positive_usize(
+            "active_root_limit",
+            active_root_limit.unwrap_or(MODEL1_ACTIVE_ROOT_LIMIT),
+        )?;
         if roots.len() > root_limit {
             return Err(PyValueError::new_err(format!(
                 "dense_cnn MCTS session received {} active roots, above strict limit {}",
@@ -108,36 +128,57 @@ impl Model1MctsSession {
             )));
         }
 
-        let target_visits = visits.max(1);
-        let leaf_batch_per_root = virtual_batch_size.unwrap_or(target_visits).max(1);
-        let widening = progressive_widening_initial_actions
-            .filter(|count| *count > 0)
-            .and_then(|count| {
-                ProgressiveWideningConfig::new(
-                    count as usize,
-                    progressive_widening_child_initial_actions.unwrap_or(count) as usize,
+        let target_visits = visits;
+        let leaf_batch_per_root = validate_positive_u32(
+            "virtual_batch_size",
+            virtual_batch_size.unwrap_or(target_visits),
+        )?;
+        let widening = match progressive_widening_initial_actions {
+            Some(count) => Some(ProgressiveWideningConfig::new(
+                validate_positive_u32("progressive_widening_initial_actions", count)? as usize,
+                validate_positive_u32(
+                    "progressive_widening_child_initial_actions",
+                    progressive_widening_child_initial_actions.unwrap_or(count),
+                )? as usize,
+                validate_positive_f32(
+                    "progressive_widening_growth_interval",
                     progressive_widening_growth_interval.unwrap_or(256.0),
+                )?,
+                validate_greater_than_f32(
+                    "progressive_widening_growth_base",
                     progressive_widening_growth_base.unwrap_or(1.3),
-                )
-            });
-        let prior_candidate_limit =
-            progressive_widening_candidate_actions.map(|count| count.max(1) as usize);
+                    1.0,
+                )?,
+            )?),
+            None => None,
+        };
+        let prior_candidate_limit = match progressive_widening_candidate_actions {
+            Some(count) => Some(validate_positive_u32("progressive_widening_candidate_actions", count)? as usize),
+            None => None,
+        };
         let evaluation_stats = new_shared_evaluation_stats();
-        let hidden_prior_mass = sanitize_fraction(hidden_prior_mass.unwrap_or(0.05), 0.95);
-        let fpu_reduction = sanitize_nonnegative(fpu_reduction.unwrap_or(0.20));
-        let virtual_loss = sanitize_nonnegative(virtual_loss.unwrap_or(1.0));
+        let hidden_prior_mass = validate_bounded_f32(
+            "hidden_prior_mass",
+            hidden_prior_mass.unwrap_or(0.05),
+            0.0,
+            0.95,
+        )?;
+        let fpu_reduction = validate_nonnegative_f32("fpu_reduction", fpu_reduction.unwrap_or(0.20))?;
+        let virtual_loss = validate_nonnegative_f32("virtual_loss", virtual_loss.unwrap_or(1.0))?;
+        let root_noise_config = root_noise_config(root_dirichlet_alpha, root_dirichlet_noise_fraction)?;
 
         let mut searches: Vec<Option<RustSearch>> = Vec::with_capacity(roots.len());
         let mut missing_indices = Vec::new();
         let mut missing_roots = Vec::new();
         for (index, (game_key, root)) in game_keys.iter().zip(roots.iter()).enumerate() {
             let root_hash = state_hash(root);
+            // Reuse only when the promoted native root exactly matches the live
+            // engine state Python just handed us. This avoids stale-subtree
+            // reuse if an external caller advanced or reset the game.
             if let Some(mut search) = self.searches.remove(game_key) {
                 if search.root_hash == root_hash {
                     search.set_additional_visits(target_visits);
-                    if let Some(noise) =
-                        root_noise(root_dirichlet_alpha, root_dirichlet_noise_fraction, seed, index)
-                    {
+                    if let Some(noise) = root_noise(root_noise_config, seed, index) {
                         search.apply_root_dirichlet_noise(noise);
                     }
                     searches.push(Some(search));
@@ -150,6 +191,7 @@ impl Model1MctsSession {
         }
 
         if !missing_roots.is_empty() {
+            // Missing roots are evaluated as one batch before tree construction.
             let root_evals = evaluate_model1_states_cached(
                 py,
                 evaluator,
@@ -171,13 +213,8 @@ impl Model1MctsSession {
                     widening,
                     hidden_prior_mass,
                     fpu_reduction,
-                    root_noise(
-                        root_dirichlet_alpha,
-                        root_dirichlet_noise_fraction,
-                        seed,
-                        index,
-                    ),
-                ));
+                    root_noise(root_noise_config, seed, index),
+                )?);
             }
         }
 
@@ -193,6 +230,9 @@ impl Model1MctsSession {
             .iter()
             .map(|search| search.root_edge_visits().into_iter().collect())
             .collect();
+        // Baselines let the returned visit policy describe only the visits added
+        // by this call. That is what self-play wants for the current move target
+        // when a root already carried visits from previous turns.
         run_searches_to_targets(
             py,
             evaluator,
@@ -226,7 +266,7 @@ impl Model1MctsSession {
                     seed.wrapping_add(index as u64),
                 )
             })
-            .collect();
+            .collect::<PyResult<Vec<_>>>()?;
         let results = build_search_result_payloads(
             py,
             &searches,
@@ -242,6 +282,8 @@ impl Model1MctsSession {
             .zip(selected_actions.into_iter())
         {
             if let Some(action_id) = selected {
+                // Store the child subtree for the next call. Terminal or
+                // unexpanded children are intentionally not retained.
                 if search.advance_root(action_id)? {
                     self.searches.insert(game_key, search);
                 }
@@ -353,7 +395,7 @@ fn run_searches_to_targets(
             )?;
             for (leaf, evaluation) in leaves.into_iter().zip(evaluations.iter()) {
                 let search = &mut searches[leaf.root_index];
-                let child_id = search.add_node_from_eval(&leaf.state, leaf.state_hash, evaluation);
+                let child_id = search.add_node_from_eval(&leaf.state, leaf.state_hash, evaluation)?;
                 search.nodes[leaf.parent_node].edges[leaf.edge_index].child = Some(child_id);
                 search.mark_pending(leaf.parent_node, leaf.edge_index, -1);
                 let child_player = search.nodes[child_id].player;
@@ -377,6 +419,8 @@ fn build_search_result_payloads(
     seed: u64,
     baselines: Option<&[HashMap<PackedCoord, u32>]>,
 ) -> PyResult<Py<PyAny>> {
+    // The Python wrapper expects byte-backed policies. This avoids allocating a
+    // Python tuple for every legal move while still supporting lazy iteration.
     let results = PyList::empty(py);
     for (index, search) in searches.iter().enumerate() {
         let result = PyDict::new(py);
@@ -388,7 +432,7 @@ fn build_search_result_payloads(
             &policy_weights,
             temperature,
             seed.wrapping_add(index as u64),
-        );
+        )?;
         result.set_item("action_id", selected.unwrap_or(0))?;
         result.set_item(
             "action_selection",
@@ -424,7 +468,10 @@ fn build_search_result_payloads(
     Ok(results.into_any().unbind())
 }
 
-fn validate_search_inputs(c_puct: f32, temperature: f32) -> PyResult<()> {
+fn validate_search_inputs(visits: u32, c_puct: f32, temperature: f32) -> PyResult<()> {
+    if visits == 0 {
+        return Err(PyValueError::new_err("visits must be > 0"));
+    }
     if !c_puct.is_finite() || c_puct <= 0.0 {
         return Err(PyValueError::new_err("c_puct must be finite and > 0"));
     }
@@ -434,36 +481,90 @@ fn validate_search_inputs(c_puct: f32, temperature: f32) -> PyResult<()> {
     Ok(())
 }
 
-fn sanitize_fraction(value: f32, max_value: f32) -> f32 {
-    if value.is_finite() {
-        value.clamp(0.0, max_value)
-    } else {
-        0.0
+fn validate_positive_u32(name: &str, value: u32) -> PyResult<u32> {
+    if value == 0 {
+        return Err(PyValueError::new_err(format!("{name} must be > 0")));
     }
+    Ok(value)
 }
 
-fn sanitize_nonnegative(value: f32) -> f32 {
-    if value.is_finite() {
-        value.max(0.0)
-    } else {
-        0.0
+fn validate_positive_usize(name: &str, value: usize) -> PyResult<usize> {
+    if value == 0 {
+        return Err(PyValueError::new_err(format!("{name} must be > 0")));
+    }
+    Ok(value)
+}
+
+fn validate_positive_f32(name: &str, value: f32) -> PyResult<f32> {
+    if !value.is_finite() || value <= 0.0 {
+        return Err(PyValueError::new_err(format!("{name} must be finite and > 0")));
+    }
+    Ok(value)
+}
+
+fn validate_greater_than_f32(name: &str, value: f32, minimum: f32) -> PyResult<f32> {
+    if !value.is_finite() || value <= minimum {
+        return Err(PyValueError::new_err(format!("{name} must be finite and > {minimum}")));
+    }
+    Ok(value)
+}
+
+fn validate_nonnegative_f32(name: &str, value: f32) -> PyResult<f32> {
+    if !value.is_finite() || value < 0.0 {
+        return Err(PyValueError::new_err(format!("{name} must be finite and >= 0")));
+    }
+    Ok(value)
+}
+
+fn validate_bounded_f32(name: &str, value: f32, minimum: f32, maximum: f32) -> PyResult<f32> {
+    if !value.is_finite() || value < minimum || value > maximum {
+        return Err(PyValueError::new_err(format!(
+            "{name} must be finite and in [{minimum}, {maximum}]"
+        )));
+    }
+    Ok(value)
+}
+
+#[derive(Clone, Copy)]
+struct RootNoiseConfig {
+    alpha: f32,
+    fraction: f32,
+}
+
+fn root_noise_config(
+    alpha: Option<f32>,
+    fraction: Option<f32>,
+) -> PyResult<Option<RootNoiseConfig>> {
+    match (alpha, fraction) {
+        (None, None) => Ok(None),
+        (Some(alpha), Some(fraction)) => {
+            let alpha = validate_positive_f32("root_dirichlet_alpha", alpha)?;
+            let fraction = validate_bounded_f32(
+                "root_dirichlet_noise_fraction",
+                fraction,
+                0.0,
+                1.0,
+            )?;
+            if fraction == 0.0 {
+                return Ok(None);
+            }
+            Ok(Some(RootNoiseConfig { alpha, fraction }))
+        }
+        _ => Err(PyValueError::new_err(
+            "root_dirichlet_alpha and root_dirichlet_noise_fraction must be provided together",
+        )),
     }
 }
 
 fn root_noise(
-    alpha: Option<f32>,
-    fraction: Option<f32>,
+    config: Option<RootNoiseConfig>,
     seed: u64,
     index: usize,
 ) -> Option<RootDirichletNoise> {
-    let alpha = alpha.unwrap_or(0.0);
-    let fraction = fraction.unwrap_or(0.0);
-    if !alpha.is_finite() || !fraction.is_finite() || alpha <= 0.0 || fraction <= 0.0 {
-        return None;
-    }
+    let config = config?;
     Some(RootDirichletNoise {
-        alpha,
-        fraction: fraction.clamp(0.0, 1.0),
+        alpha: config.alpha,
+        fraction: config.fraction,
         seed: seed.wrapping_add((index as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)),
     })
 }
@@ -473,7 +574,7 @@ fn select_search_action(
     baseline: Option<&HashMap<PackedCoord, u32>>,
     temperature: f32,
     seed: u64,
-) -> Option<PackedCoord> {
+) -> PyResult<Option<PackedCoord>> {
     let (action_ids, weights, _total) = visit_policy(search.root(), baseline);
     select_action_from_policy(&action_ids, &weights, temperature, seed)
 }
@@ -482,6 +583,9 @@ fn visit_policy(
     root: &RustNode,
     baseline: Option<&HashMap<PackedCoord, u32>>,
 ) -> (Vec<PackedCoord>, Vec<f32>, u32) {
+    // With a baseline, policy weights are normalized over visits added during
+    // this search call. Without one, they are normalized over cumulative root
+    // visits and are mostly useful for diagnostics.
     let policy_total: u32 = root
         .edges
         .iter()
@@ -517,12 +621,31 @@ fn select_action_from_policy(
     weights: &[f32],
     temperature: f32,
     seed: u64,
-) -> Option<PackedCoord> {
+) -> PyResult<Option<PackedCoord>> {
+    // Temperature zero is deterministic argmax. Positive temperature samples
+    // from visit weights raised by 1 / temperature, matching the Python rollout
+    // helper used after the sample budget is filled.
     if action_ids.is_empty() || weights.is_empty() {
-        return None;
+        return Ok(None);
     }
-    if temperature <= 1.0e-6 {
-        return action_ids
+    if action_ids.len() != weights.len() {
+        return Err(PyValueError::new_err("visit policy action and weight lengths differ"));
+    }
+    let total_weight: f32 = weights.iter().copied().sum();
+    for weight in weights {
+        if !weight.is_finite() || *weight < 0.0 {
+            return Err(PyValueError::new_err(format!(
+                "visit policy weights must be finite and >= 0, got {weight}"
+            )));
+        }
+    }
+    if total_weight <= 0.0 {
+        return Err(PyValueError::new_err(
+            "visit policy must contain positive weight mass",
+        ));
+    }
+    if temperature == 0.0 {
+        return Ok(action_ids
             .iter()
             .copied()
             .zip(weights.iter().copied())
@@ -532,24 +655,29 @@ fn select_action_from_policy(
                     .unwrap_or(std::cmp::Ordering::Equal)
                     .then_with(|| right.0.cmp(&left.0))
             })
-            .map(|(action_id, _)| action_id);
+            .map(|(action_id, _)| action_id));
     }
-    let inv_temperature = 1.0 / temperature.max(1.0e-3);
+    let inv_temperature = 1.0 / temperature;
     let mut total = 0.0f64;
     let mut adjusted = Vec::with_capacity(weights.len());
     for weight in weights {
-        let value = weight.max(1.0e-12).powf(inv_temperature) as f64;
+        let value = weight.powf(inv_temperature) as f64;
         total += value;
         adjusted.push(value);
+    }
+    if total <= 0.0 || !total.is_finite() {
+        return Err(PyValueError::new_err(
+            "temperature-adjusted visit policy must contain positive finite mass",
+        ));
     }
     let mut threshold = random_unit(seed) * total;
     for (action_id, weight) in action_ids.iter().copied().zip(adjusted) {
         threshold -= weight;
         if threshold <= 0.0 {
-            return Some(action_id);
+            return Ok(Some(action_id));
         }
     }
-    action_ids.last().copied()
+    Ok(action_ids.last().copied())
 }
 
 fn random_unit(seed: u64) -> f64 {

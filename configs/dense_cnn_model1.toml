@@ -9,7 +9,6 @@ device = "cuda"
 input_channels = 13
 channels = 64
 residual_blocks = 4
-crop_size = 41
 dropout = 0.0
 lookahead_horizons = [1, 4, 8]
 
@@ -50,7 +49,6 @@ mcts_session_cache_max_states = 1048576
 mcts_active_root_limit = 1024
 max_actions = 1024
 temperature = 1.0
-worker_count = 1
 
 [model.config.evaluation]
 games_per_epoch = 64
@@ -65,16 +63,9 @@ target_selfplay_positions_per_second = 128.0
 inference_batch_candidates = [128, 256, 512, 1024]
 selfplay_batch_candidates = [2048]
 training_batch_candidates = [64, 128, 192, 256]
-mcts_visit_candidates = [128]
 mcts_virtual_batch_candidates = [4]
 selfplay_probe_positions = 8192
 probe_batches = 1
-
-[model.config.debug]
-write_game_history = true
-write_policy_targets = true
-write_sample_previews = true
-preview_games = 4
 
 [run]
 name = "dense_cnn_model1"

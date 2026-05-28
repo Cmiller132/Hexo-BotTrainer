@@ -1,4 +1,13 @@
-"""True axial-coordinate D6 transforms for Hexo samples."""
+"""True axial-coordinate D6 transforms for sample augmentation.
+
+Dense CNN training augments compact samples by transforming axial coordinates
+before projecting them into the crop. This module contains only coordinate and
+packed-action transforms; it does not know about tensors, model heads, or game
+rules.
+
+The training pipeline chooses the symmetry per sample. Dense CNN then applies
+that explicit symmetry during `samples.expand_sample`.
+"""
 
 from __future__ import annotations
 
@@ -12,12 +21,16 @@ _COORD_OFFSET = 1 << 15
 
 @dataclass(frozen=True, slots=True)
 class Axial:
+    """Axial hex coordinate `(q, r)` used by dense_cnn samples."""
+
     q: int
     r: int
 
 
 @dataclass(frozen=True, slots=True)
 class D6Symmetry:
+    """Index wrapper for one of the twelve axial D6 transforms."""
+
     index: int
 
     def __post_init__(self) -> None:
@@ -26,11 +39,15 @@ class D6Symmetry:
 
 
 def pack_coord_id(coord: Axial | tuple[int, int]) -> int:
+    """Pack an axial coordinate into the action id format used by samples."""
+
     q, r = _coord_pair(coord)
     return ((q + _COORD_OFFSET) << 16) | (r + _COORD_OFFSET)
 
 
 def unpack_coord_id(action_id: int) -> Axial:
+    """Unpack a dense_cnn sample action id into an `Axial` coordinate."""
+
     value = int(action_id)
     q = (value >> 16) - _COORD_OFFSET
     r = (value & 0xFFFF) - _COORD_OFFSET
@@ -43,6 +60,8 @@ def unpack_coord_pair(action_id: int) -> tuple[int, int]:
 
 
 def transform_action_id(action_id: int, symmetry: D6Symmetry | int, *, center: Axial | tuple[int, int] = (0, 0)) -> int:
+    """Apply one D6 symmetry to a packed action id around `center`."""
+
     return pack_coord_id(transform_coord(unpack_coord_id(action_id), symmetry, center=center))
 
 
@@ -52,6 +71,8 @@ def transform_action_ids(
     *,
     center: Axial | tuple[int, int] = (0, 0),
 ) -> tuple[int, ...]:
+    """Apply one D6 symmetry to many packed action ids."""
+
     return tuple(transform_action_id(action_id, symmetry, center=center) for action_id in action_ids)
 
 

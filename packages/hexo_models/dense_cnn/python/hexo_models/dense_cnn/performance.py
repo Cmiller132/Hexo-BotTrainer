@@ -1,4 +1,13 @@
-"""Automatic performance calibration for dense CNN training and inference."""
+"""Automatic dense CNN performance calibration.
+
+Calibration runs short, focused probes against the current model and device.
+The selected settings are written back onto `DenseCNNTrainer` so self-play and
+training use measured batch sizes rather than fixed guesses.
+
+This module measures production surfaces: PyTorch inference, optimizer steps,
+and the Rust MCTS session path. It reports failed probes instead of fabricating
+fallback throughput values.
+"""
 
 from __future__ import annotations
 
@@ -27,7 +36,12 @@ def calibrate_dense_cnn(
     selfplay_batch_candidates: Sequence[int] | None = None,
     mcts_virtual_batch_candidates: Sequence[int] | None = None,
 ) -> dict[str, Any]:
-    """Benchmark candidate batch settings and return measured recommendations."""
+    """Benchmark candidate batch settings and return measured recommendations.
+
+    The model and optimizer are restored after probes, so calibration can safely
+    run at the start of training without consuming the epoch's optimization
+    budget.
+    """
 
     perf = config.performance
     if not perf.calibrate:
@@ -168,7 +182,7 @@ def _benchmark_inference(
 ) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
     for batch_size in candidates:
-        batch = max(1, int(batch_size))
+        batch = int(batch_size)
         try:
             inputs = torch.randn(batch, INPUT_CHANNELS, BOARD_SIZE, BOARD_SIZE, device=device)
             if device.type == "cuda":
@@ -207,7 +221,7 @@ def _benchmark_training(
     was_training = model.training
     model.train()
     for batch_size in candidates:
-        batch = max(1, int(batch_size))
+        batch = int(batch_size)
         try:
             inputs = torch.randn(batch, INPUT_CHANNELS, BOARD_SIZE, BOARD_SIZE, device=device)
             if device.type == "cuda":
@@ -257,7 +271,7 @@ def _benchmark_selfplay(
         device=config.device,
         amp=config.training.amp,
         return_logits=False,
-            max_batch_size=max(1, min(1024, max(int(item) for item in config.performance.inference_batch_candidates))),
+        max_batch_size=min(1024, max(int(item) for item in config.performance.inference_batch_candidates)),
     )
     for selfplay_batch_size in batch_candidates:
         for virtual_batch_size in virtual_batch_candidates:
@@ -265,10 +279,10 @@ def _benchmark_selfplay(
                 _benchmark_selfplay_setting(
                     inference=inference,
                     config=config,
-                    selfplay_batch_size=max(1, int(selfplay_batch_size)),
-                    virtual_batch_size=max(1, int(virtual_batch_size)),
-                    visits=max(1, int(visits)),
-                    probe_positions=max(1, int(probe_positions)),
+                    selfplay_batch_size=int(selfplay_batch_size),
+                    virtual_batch_size=int(virtual_batch_size),
+                    visits=int(visits),
+                    probe_positions=int(probe_positions),
                 )
             )
     return results
@@ -283,14 +297,19 @@ def _benchmark_selfplay_setting(
     visits: int,
     probe_positions: int,
 ) -> dict[str, Any]:
+    """Probe one production self-play setting through the Rust MCTS session."""
+
     import hexo_engine as engine
     from hexo_engine.types import unpack_coord_id
 
     from .mcts import new_mcts_session
 
-    resolved_visits = max(1, int(visits))
-    target_positions = max(1, int(probe_positions))
-    active_limit = max(1, int(selfplay_batch_size))
+    resolved_visits = int(visits)
+    target_positions = int(probe_positions)
+    active_limit = int(selfplay_batch_size)
+    virtual_batch_size = int(virtual_batch_size)
+    if min(resolved_visits, target_positions, active_limit, virtual_batch_size) <= 0:
+        raise ValueError("self-play benchmark counts and batch sizes must be positive")
     games = [
         {
             "search_key": index,
@@ -307,6 +326,9 @@ def _benchmark_selfplay_setting(
     mcts_session = new_mcts_session(max_states=config.selfplay.mcts_session_cache_max_states)
     started = perf_counter()
     while positions < target_positions:
+        # This mirrors self-play's search/apply loop without sample creation or
+        # replay writing: live roots enter Rust MCTS, selected actions come back,
+        # and only `hexo_engine` mutates the authoritative states.
         playable = [
             game
             for game in games
@@ -489,7 +511,7 @@ def _float_nested(mapping: Mapping[str, Any], section: str, field: str) -> float
 def _best_batch(results: Sequence[dict[str, Any]]) -> dict[str, Any]:
     completed = [item for item in results if item.get("status") == "completed"]
     if not completed:
-        return {"batch_size": 1, "positions_per_second": 0.0}
+        raise RuntimeError("dense_cnn calibration did not produce any completed batch measurements")
     return max(completed, key=lambda item: float(item.get("positions_per_second", 0.0)))
 
 
@@ -501,7 +523,7 @@ def _select_selfplay_setting(
 ) -> dict[str, Any]:
     completed = [item for item in results if item.get("status") == "completed"]
     if not completed:
-        return {"visits": configured_visits, "positions_per_second": 0.0}
+        raise RuntimeError("dense_cnn calibration did not produce any completed self-play measurements")
     viable = [
         item
         for item in completed

@@ -1,4 +1,10 @@
-"""Runner player adapter for dense CNN inference and search."""
+"""`hexo_runner` player adapter for dense CNN inference and search.
+
+The runner speaks in generic player lifecycle methods and live engine states.
+This adapter creates a dense CNN inference wrapper, keeps one persistent native
+MCTS session for the game, searches the current live state in `decide`, and
+clears native state when games start or finish.
+"""
 
 from __future__ import annotations
 
@@ -10,17 +16,20 @@ from hexo_engine.types import unpack_coord_id
 from hexo_runner.player import DecisionResult, FinalSummary, GameContext, PlayerIdentity, TransitionEvent, WorkerContext
 
 from .inference import DenseCNNInference
-from .mcts import run_mcts
+from .mcts import BatchedMctsSession, new_mcts_session
 
 
 @dataclass(slots=True)
 class DenseCNNPlayer:
+    """Runner-compatible player backed by dense CNN MCTS."""
+
     identity_id: str
     model: Any
     trainer: Any
     record_samples: bool = False
     identity: PlayerIdentity = field(init=False)
     inference: DenseCNNInference = field(init=False)
+    mcts_session: BatchedMctsSession = field(init=False)
 
     def __post_init__(self) -> None:
         self.identity = PlayerIdentity(self.identity_id, label="Dense CNN")
@@ -29,19 +38,29 @@ class DenseCNNPlayer:
             device=self.trainer.device,
             amp=self.trainer.config.training.amp,
         )
+        self.mcts_session = new_mcts_session(
+            max_states=self.trainer.config.selfplay.mcts_session_cache_max_states
+        )
 
     def setup_worker(self, context: WorkerContext) -> None:
         _ = context
 
     def start_game(self, context: GameContext) -> None:
         _ = context
+        # Runner games are independent. Clearing prevents a previous game's
+        # subtree from surviving under the single player-side key used below.
+        self.mcts_session.clear()
 
     def decide(self, state: object) -> DecisionResult:
-        search = run_mcts(
-            state,
+        """Search the current live runner state and return one placement action."""
+
+        search = self.mcts_session.run(
+            [0],
+            [state],
             self.inference,
             visits=self.trainer.config.selfplay.search_visits,
             temperature=0.0,
+            virtual_batch_size=getattr(self.trainer, "mcts_virtual_batch_size", None),
             progressive_widening_initial_actions=self.trainer.config.selfplay.progressive_widening_initial_actions,
             progressive_widening_child_initial_actions=self.trainer.config.selfplay.progressive_widening_child_initial_actions,
             progressive_widening_candidate_actions=self.trainer.config.selfplay.progressive_widening_candidate_actions,
@@ -50,7 +69,8 @@ class DenseCNNPlayer:
             hidden_prior_mass=self.trainer.config.selfplay.hidden_prior_mass,
             fpu_reduction=self.trainer.config.selfplay.fpu_reduction,
             virtual_loss=self.trainer.config.selfplay.virtual_loss,
-        )
+            active_root_limit=self.trainer.config.selfplay.mcts_active_root_limit,
+        )[0]
         action = engine.PlacementAction(unpack_coord_id(search.action_id))
         return DecisionResult(
             action=action,

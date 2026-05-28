@@ -1,4 +1,15 @@
-"""Sequential self-play sample generation for the dense CNN model."""
+"""Sequential self-play sample generation for dense CNN Model 1.
+
+The production self-play loop works from live `hexo_engine.HexoState` objects.
+It batches active games through one persistent Rust MCTS session, records compact
+pre-decision samples from the same live states, applies selected actions through
+the generic engine, writes `.hxr` records, and finalizes targets once each game
+has an outcome.
+
+The loop searches with MCTS only until the epoch sample budget is covered. Any
+remaining active games are rolled out by direct model policy so already-collected
+pending MCTS samples can receive final values and lookahead targets.
+"""
 
 from __future__ import annotations
 
@@ -10,13 +21,20 @@ import hexo_engine as engine
 from hexo_engine.types import unpack_coord_id
 from hexo_runner.records import AbortRecord, HexoRecordFile, HexoRecordPlayer
 
-from .debug_artifacts import render_preview_game_actions
 from .inference import DenseCNNInference
 from .mcts import BatchedMctsSession, SearchResult, new_mcts_session
 from .performance import _extend_mcts_diagnostic_batches, _summarize_mcts_diagnostic_batches
 from .samples import CompressedSample, Model1SampleData, finalize_game_samples, sample_from_state
 
 def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_epoch: int) -> dict[str, Any]:
+    """Generate one epoch of dense_cnn self-play samples.
+
+    The function is called by `hexo_train`. It mutates only model-owned
+    components: the replay buffer and dense-cnn diagnostics. Game truth remains
+    in `hexo_engine`, and MCTS search state remains in the native dense-cnn
+    session.
+    """
+
     trainer = components.model.trainer
     config = trainer.config
     buffer = trainer.buffer
@@ -35,7 +53,6 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
     record_dir = ctx.output_dir / "selfplay"
     record_dir.mkdir(parents=True, exist_ok=True)
     record_path = record_dir / f"epoch_{epoch:06d}.hxr"
-    debug_games: list[dict[str, Any]] = []
     samples_added = 0
     searched_positions = 0
     mcts_simulations = 0
@@ -49,8 +66,12 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
         HexoRecordPlayer("dense-cnn-a", "player0", "Dense CNN A"),
         HexoRecordPlayer("dense-cnn-b", "player1", "Dense CNN B"),
     )
-    configured_active_limit = max(1, int(getattr(trainer, "selfplay_batch_size", config.selfplay.active_games)))
-    min_mcts_samples_per_game = max(1, int(config.selfplay.min_mcts_samples_per_game))
+    configured_active_limit = int(getattr(trainer, "selfplay_batch_size", config.selfplay.active_games))
+    if configured_active_limit <= 0:
+        raise ValueError("selfplay active game count must be > 0")
+    min_mcts_samples_per_game = int(config.selfplay.min_mcts_samples_per_game)
+    if min_mcts_samples_per_game <= 0:
+        raise ValueError("min_mcts_samples_per_game must be > 0")
     if target_samples > 0:
         sample_depth_active_limit = max(
             1,
@@ -118,14 +139,16 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
     fpu_reduction = float(getattr(trainer, "mcts_fpu_reduction", config.selfplay.fpu_reduction))
     virtual_loss = float(getattr(trainer, "mcts_virtual_loss", config.selfplay.virtual_loss))
     mcts_session = new_mcts_session(max_states=config.selfplay.mcts_session_cache_max_states)
-    active_root_limit = max(
-        1,
-        int(getattr(trainer, "mcts_active_root_limit", config.selfplay.mcts_active_root_limit)),
-    )
+    active_root_limit = int(getattr(trainer, "mcts_active_root_limit", config.selfplay.mcts_active_root_limit))
+    if active_root_limit <= 0:
+        raise ValueError("mcts_active_root_limit must be > 0")
     next_game_index = 0
     active: list[dict[str, Any]] = []
     with HexoRecordFile.create(record_path, engine.engine_metadata(), players) as record_file:
         while (samples_added < target_samples or active) and (next_game_index < max_games or active):
+            # Start only as many fresh games as can still contribute to the
+            # remaining sample budget. Finished and active games are kept until
+            # pending MCTS samples receive game-end targets.
             while (
                 len(active) < active_limit
                 and next_game_index < max_games
@@ -157,6 +180,9 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
                 search_games = playable[:remaining_samples]
                 rollout_games = playable[remaining_samples:]
                 if search_games:
+                    # Search live roots through the persistent native session.
+                    # The session keys are per-game and let Rust promote the
+                    # selected child subtree after each turn.
                     search_started = perf_counter()
                     searches = _search_playable_games(
                         search_games,
@@ -194,6 +220,9 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
                     searched_positions += 1
                     mcts_simulations += int(search.visits)
                     state = game["state"]
+                    # The sample is captured before applying the chosen action:
+                    # policy/value targets describe the decision position, while
+                    # final value/lookahead targets are filled once the game ends.
                     sample = sample_from_state(
                         state,
                         game_id=game["game_id"],
@@ -217,6 +246,10 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
                     engine.apply_action(state, action)
                     game["actions"].append(search.action_id)
                 if rollout_games:
+                    # Once the epoch has enough pending MCTS samples, unfinished
+                    # games are completed with direct policy inference. This
+                    # avoids creating extra samples while still producing final
+                    # outcomes for samples already collected.
                     rollout_actions = _policy_rollout_actions(
                         rollout_games,
                         inference=inference,
@@ -262,57 +295,19 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
                 )
                 buffer.extend(finalized)
                 samples_added += len(finalized)
-                if len(debug_games) < config.debug.preview_games:
-                    debug_games.append(
-                        {
-                            "game_id": game["game_id"],
-                            "winner": winner,
-                            "truncated": truncated,
-                            "actions": game["actions"],
-                            "samples": len(finalized),
-                        }
-                    )
                 active.remove(game)
+                # A finished game cannot legally reuse its old native root.
                 mcts_session.discard(int(game["search_key"]))
 
     elapsed = perf_counter() - started
     search_positions_per_second = searched_positions / max(mcts_search_elapsed, 1.0e-9)
     end_to_end_positions_per_second = searched_positions / max(elapsed, 1.0e-9)
     mcts_diagnostics = _summarize_mcts_diagnostic_batches(mcts_diagnostic_batches)
-    preview_artifacts: list[dict[str, Any]] = []
-    if config.debug.write_sample_previews and debug_games:
-        preview_dir = ctx.output_dir / "diagnostics" / "dense_cnn_previews" / f"epoch_{epoch:06d}"
-        for game in debug_games:
-            preview_artifacts.append(
-                render_preview_game_actions(
-                    game["actions"],
-                    preview_dir,
-                    game_id=game["game_id"],
-                    file_prefix=game["game_id"],
-                    max_actions=config.selfplay.max_actions,
-                    max_images=4,
-                    actions_per_image=64,
-                )
-            )
-    game_history_path = None
-    if config.debug.write_game_history:
-        game_history_path = ctx.diagnostics.write_json(
-            f"dense_cnn.game_history.epoch_{epoch:06d}.json",
-            {
-                "epoch": epoch,
-                "record_path": str(record_path),
-                "games": debug_games,
-                "preview_artifacts": preview_artifacts,
-            },
-        )
     debug_path = ctx.diagnostics.write_json(
         f"dense_cnn.selfplay.epoch_{epoch:06d}.json",
         {
             "epoch": epoch,
             "record_path": str(record_path),
-            "game_history_path": str(game_history_path) if game_history_path is not None else None,
-            "preview_games": debug_games,
-            "preview_artifacts": preview_artifacts,
             "samples_added": samples_added,
             "searched_positions": searched_positions,
             "mcts_simulations": mcts_simulations,
@@ -357,7 +352,6 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
         "mcts_simulations": mcts_simulations,
         "buffer_count": buffer.sample_count,
         "record_path": str(record_path),
-        "game_history_path": str(game_history_path) if game_history_path is not None else None,
         "debug_path": str(debug_path),
         "elapsed_seconds": elapsed,
         "mcts_search_elapsed_seconds": mcts_search_elapsed,
@@ -409,6 +403,8 @@ def _search_playable_games(
     virtual_loss: float | None = None,
     active_root_limit: int | None = None,
 ) -> list[SearchResult]:
+    """Search currently playable live states with the required native session."""
+
     if mcts_session is None:
         raise RuntimeError("dense_cnn self-play requires a native MCTS session")
     return mcts_session.run(
@@ -434,14 +430,23 @@ def _search_playable_games(
 
 
 def _sample_policy_action(policy: Any, *, temperature: float, seed: int) -> int:
-    items = [(int(action_id), max(0.0, float(weight))) for action_id, weight in policy.items()]
+    """Sample an action from a legal-prior mapping for non-MCTS rollouts."""
+
+    if temperature < 0.0:
+        raise ValueError("temperature must be >= 0")
+    items = [(int(action_id), float(weight)) for action_id, weight in policy.items()]
     if not items:
         raise RuntimeError("cannot sample from an empty visit policy")
+    for action_id, weight in items:
+        if not weight >= 0.0 or not weight < float("inf"):
+            raise RuntimeError(f"policy rollout weight for action {action_id} must be finite and >= 0")
     if temperature <= 1.0e-6:
         return max(items, key=lambda item: (item[1], -item[0]))[0]
-    inv_temperature = 1.0 / max(temperature, 1.0e-3)
-    weights = [(weight or 1.0e-12) ** inv_temperature for _action, weight in items]
+    inv_temperature = 1.0 / temperature
+    weights = [weight ** inv_temperature for _action, weight in items]
     total = sum(weights)
+    if total <= 0.0:
+        raise RuntimeError("policy rollout weights must have positive total mass")
     threshold = Random(seed).random() * total
     for (action_id, _weight), weight in zip(items, weights):
         threshold -= weight
@@ -457,6 +462,8 @@ def _policy_rollout_actions(
     temperature: float,
     seed: int,
 ) -> list[int]:
+    """Evaluate rollout states directly and sample one policy action per game."""
+
     evaluations = inference.infer_states([game["state"] for game in playable])
     return [
         _sample_policy_action(

@@ -1,7 +1,13 @@
-//! Dense CNN Model1 tensor dimensions and plane indices.
+//! Dense CNN Model 1 tensor dimensions and plane indices.
 //!
-//! These values define the Python-visible tensor contract for Model1. Keep them
-//! model-local: the engine only deals in board state and packed coordinates.
+//! These values define the Rust side of the tensor contract shared with
+//! `python/hexo_models/dense_cnn/constants.py`. Keep them model-local:
+//! `hexo_engine` only deals in board state, legal moves, history, and packed
+//! coordinates.
+//!
+//! Any plane-order change is a replay-schema and model-weights change because
+//! old samples and checkpoints would represent different facts at the same
+//! channel index.
 
 use std::sync::OnceLock;
 

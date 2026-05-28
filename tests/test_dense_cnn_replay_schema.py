@@ -61,7 +61,7 @@ def _buffer_state(*entries: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def test_sample_buffer_load_state_dict_keeps_current_schema_and_filters_legacy() -> None:
+def test_sample_buffer_load_state_dict_rejects_legacy_schema_samples() -> None:
     samples = _samples_module()
     current_entry = _compressed_state_entry(
         _sample("current", target_schema_version=samples.CURRENT_TARGET_SCHEMA_VERSION)
@@ -69,19 +69,13 @@ def test_sample_buffer_load_state_dict_keeps_current_schema_and_filters_legacy()
     legacy_entry = _compressed_state_entry(_sample("legacy", target_schema_version=1))
 
     buffer = samples.SampleBuffer(capacity=200_000, compression_level=1)
-    stats = buffer.load_state_dict(_buffer_state(legacy_entry, current_entry))
 
-    assert stats["target_schema_version"] == 2
-    assert stats["total"] == 2
-    assert stats["loaded"] == 1
-    assert stats["filtered"] == 1
-    assert stats["filtered_schema"] == 1
-    assert buffer.sample_count == 1
-    assert buffer.entries[0].payload == current_entry["payload"]
-    assert buffer.entries[0].decode().game_id == "current"
+    with pytest.raises(ValueError, match="target_schema_version"):
+        buffer.load_state_dict(_buffer_state(legacy_entry, current_entry))
+    assert buffer.sample_count == 0
 
 
-def test_checkpoint_loader_reports_replay_schema_filter_stats(tmp_path: Path) -> None:
+def test_checkpoint_loader_rejects_incompatible_replay_schema(tmp_path: Path) -> None:
     torch = pytest.importorskip("torch")
     samples = _samples_module()
     checkpoints = importlib.import_module("hexo_models.dense_cnn.checkpoints")
@@ -112,13 +106,6 @@ def test_checkpoint_loader_reports_replay_schema_filter_stats(tmp_path: Path) ->
         checkpoint_path,
     )
 
-    result = checkpoints.DenseCNNCheckpointLoader().load(checkpoint_path, ctx=None, components=components)
-
-    assert result["status"] == "loaded"
-    assert result["epoch"] == 12
-    assert result["sample_count"] == 1
-    assert result["sample_buffer_loaded_count"] == 1
-    assert result["sample_buffer_filtered_count"] == 1
-    assert result["sample_buffer_load_stats"]["loaded"] == 1
-    assert result["sample_buffer_load_stats"]["filtered_schema"] == 1
-    assert buffer.entries[0].decode().game_id == "current"
+    with pytest.raises(ValueError, match="target_schema_version"):
+        checkpoints.DenseCNNCheckpointLoader().load(checkpoint_path, ctx=None, components=components)
+    assert buffer.sample_count == 0
