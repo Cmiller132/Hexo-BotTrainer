@@ -11,8 +11,8 @@ from .config import Model1Config
 from .constants import BOARD_SIZE, INPUT_CHANNELS
 from .losses import model1_loss
 
-CALIBRATION_CACHE_VERSION = 4
-MCTS_BACKEND_SIGNATURE = "dense_cnn_katago_staged_edges_bounded_cache_active_roots_v1"
+CALIBRATION_CACHE_VERSION = 5
+MCTS_BACKEND_SIGNATURE = "dense_cnn_katago_tree_reuse_staged_edges_bounded_cache_v1"
 MCTS_EVAL_CHUNK_STATES = 1024
 
 
@@ -100,6 +100,7 @@ def calibrate_dense_cnn(
         "amp": bool(config.training.amp and device.type == "cuda"),
         "calibration_cache_version": CALIBRATION_CACHE_VERSION,
         "mcts_backend_signature": MCTS_BACKEND_SIGNATURE,
+        "mcts_tree_reuse_session": True,
         "mcts_eval_chunk_states": MCTS_EVAL_CHUNK_STATES,
         "selected_inference_batch_size": int(selected_inference_benchmark.get("batch_size", 1)),
         "selected_selfplay_batch_size": int(selected_selfplay.get("selfplay_batch_size", config.selfplay.active_games)),
@@ -246,7 +247,7 @@ def _benchmark_selfplay(
     from hexo_engine.types import unpack_coord_id
 
     from .inference import DenseCNNInference
-    from .mcts import new_mcts_evaluation_cache, run_batched_mcts
+    from .mcts import new_mcts_session, run_batched_mcts
 
     results: list[dict[str, Any]] = []
     inference = DenseCNNInference(
@@ -254,7 +255,7 @@ def _benchmark_selfplay(
         device=config.device,
         amp=config.training.amp,
         return_logits=False,
-        max_batch_size=max(1, min(1024, max(int(item) for item in config.performance.inference_batch_candidates))),
+            max_batch_size=max(1, min(1024, max(int(item) for item in config.performance.inference_batch_candidates))),
     )
     for selfplay_batch_size in batch_candidates:
         for virtual_batch_size in virtual_batch_candidates:
@@ -283,13 +284,14 @@ def _benchmark_selfplay_setting(
     import hexo_engine as engine
     from hexo_engine.types import unpack_coord_id
 
-    from .mcts import new_mcts_evaluation_cache, run_batched_mcts
+    from .mcts import new_mcts_session, run_batched_mcts
 
     resolved_visits = max(1, int(visits))
     target_positions = max(1, int(probe_positions))
     active_limit = max(1, int(selfplay_batch_size))
     games = [
         {
+            "search_key": index,
             "state": engine.new_game(seed=31_337 + index),
             "actions": [],
         }
@@ -300,9 +302,7 @@ def _benchmark_selfplay_setting(
     completed_games = 0
     exact_visit_results = 0
     mcts_diagnostic_batches: list[Mapping[str, Any]] = []
-    evaluation_cache = new_mcts_evaluation_cache(
-        max_states=config.selfplay.mcts_evaluation_cache_max_states
-    )
+    mcts_session = new_mcts_session(max_states=config.selfplay.mcts_evaluation_cache_max_states)
     started = perf_counter()
     while positions < target_positions:
         playable = [
@@ -315,27 +315,45 @@ def _benchmark_selfplay_setting(
             completed_games += len(games)
             games = [
                 {
+                    "search_key": completed_games + index,
                     "state": engine.new_game(seed=91_000 + completed_games + index),
                     "actions": [],
                 }
                 for index in range(active_limit)
             ]
             continue
-        searches = run_batched_mcts(
-            [game["state"] for game in playable],
-            inference,
-            visits=resolved_visits,
-            temperature=config.selfplay.temperature,
-            seed=17_000 + resolved_visits + positions,
-            virtual_batch_size=virtual_batch_size,
-            progressive_widening_initial_actions=config.selfplay.progressive_widening_initial_actions,
-            progressive_widening_child_initial_actions=config.selfplay.progressive_widening_child_initial_actions,
-            progressive_widening_candidate_actions=config.selfplay.progressive_widening_candidate_actions,
-            progressive_widening_growth_interval=config.selfplay.progressive_widening_growth_interval,
-            progressive_widening_growth_base=config.selfplay.progressive_widening_growth_base,
-            evaluation_cache=evaluation_cache,
-            active_root_limit=config.selfplay.mcts_active_root_limit,
-        )
+        if hasattr(inference, "evaluate_model1_payload"):
+            searches = mcts_session.run(
+                [int(game["search_key"]) for game in playable],
+                [game["state"] for game in playable],
+                inference,
+                visits=resolved_visits,
+                temperature=config.selfplay.temperature,
+                seed=17_000 + resolved_visits + positions,
+                virtual_batch_size=virtual_batch_size,
+                progressive_widening_initial_actions=config.selfplay.progressive_widening_initial_actions,
+                progressive_widening_child_initial_actions=config.selfplay.progressive_widening_child_initial_actions,
+                progressive_widening_candidate_actions=config.selfplay.progressive_widening_candidate_actions,
+                progressive_widening_growth_interval=config.selfplay.progressive_widening_growth_interval,
+                progressive_widening_growth_base=config.selfplay.progressive_widening_growth_base,
+                active_root_limit=config.selfplay.mcts_active_root_limit,
+            )
+        else:
+            searches = run_batched_mcts(
+                [game["state"] for game in playable],
+                inference,
+                visits=resolved_visits,
+                temperature=config.selfplay.temperature,
+                seed=17_000 + resolved_visits + positions,
+                virtual_batch_size=virtual_batch_size,
+                progressive_widening_initial_actions=config.selfplay.progressive_widening_initial_actions,
+                progressive_widening_child_initial_actions=config.selfplay.progressive_widening_child_initial_actions,
+                progressive_widening_candidate_actions=config.selfplay.progressive_widening_candidate_actions,
+                progressive_widening_growth_interval=config.selfplay.progressive_widening_growth_interval,
+                progressive_widening_growth_base=config.selfplay.progressive_widening_growth_base,
+                evaluation_cache=None,
+                active_root_limit=config.selfplay.mcts_active_root_limit,
+            )
         if searches:
             _extend_mcts_diagnostic_batches(mcts_diagnostic_batches, searches)
         for game, search in zip(playable, searches):
@@ -353,6 +371,7 @@ def _benchmark_selfplay_setting(
         "inference_batch_size": int(getattr(inference, "max_batch_size", active_limit)),
         "batch_size": active_limit,
         "mcts_virtual_batch_size": virtual_batch_size,
+        "mcts_tree_reuse_session": True,
         "mcts_progressive_widening_initial_actions": config.selfplay.progressive_widening_initial_actions,
         "mcts_progressive_widening_child_initial_actions": config.selfplay.progressive_widening_child_initial_actions,
         "mcts_progressive_widening_candidate_actions": config.selfplay.progressive_widening_candidate_actions,
@@ -408,6 +427,7 @@ def _summarize_mcts_diagnostic_batches(batches: Sequence[Mapping[str, Any]]) -> 
         "cache_insert_skipped",
     )
     eval_max_fields = ("max_chunk_states", "max_chunk_legal_actions", "cache_size", "cache_size_peak")
+    eval_float_sum_fields = ("encoding_seconds", "evaluator_seconds")
 
     for field in tree_sum_fields:
         summary[f"tree_{field}"] = sum(_int_nested(batch, "tree", field) for batch in batches)
@@ -417,6 +437,8 @@ def _summarize_mcts_diagnostic_batches(batches: Sequence[Mapping[str, Any]]) -> 
         summary[f"eval_{field}"] = sum(_int_nested(batch, "evaluation", field) for batch in batches)
     for field in eval_max_fields:
         summary[f"eval_{field}"] = max(_int_nested(batch, "evaluation", field) for batch in batches)
+    for field in eval_float_sum_fields:
+        summary[f"eval_{field}"] = sum(_float_nested(batch, "evaluation", field) for batch in batches)
     return summary
 
 
@@ -426,7 +448,9 @@ def _extend_mcts_diagnostic_batches(destination: list[Mapping[str, Any]], search
         diagnostics = getattr(search, "diagnostics", {})
         if not isinstance(diagnostics, Mapping):
             continue
-        batch_diagnostics = diagnostics.get("batch", {})
+        if "batch" not in diagnostics:
+            continue
+        batch_diagnostics = diagnostics["batch"]
         if not isinstance(batch_diagnostics, Mapping):
             continue
         marker = id(batch_diagnostics)
@@ -444,6 +468,16 @@ def _int_nested(mapping: Mapping[str, Any], section: str, field: str) -> int:
         return int(section_value.get(field, 0))
     except (TypeError, ValueError):
         return 0
+
+
+def _float_nested(mapping: Mapping[str, Any], section: str, field: str) -> float:
+    section_value = mapping.get(section, {})
+    if not isinstance(section_value, Mapping):
+        return 0.0
+    try:
+        return float(section_value.get(field, 0.0))
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _best_batch(results: Sequence[dict[str, Any]]) -> dict[str, Any]:

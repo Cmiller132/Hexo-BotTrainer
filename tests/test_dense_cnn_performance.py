@@ -33,6 +33,21 @@ def _dense_cnn() -> Any:
     return importlib.import_module("hexo_models.dense_cnn")
 
 
+def _payload_visit_policy(payload: Mapping[str, Any]) -> tuple[tuple[int, float], ...]:
+    if "visit_policy" in payload:
+        return tuple((int(action), float(weight)) for action, weight in payload["visit_policy"])
+    actions = payload["visit_policy_action_ids_bytes"]
+    weights = payload["visit_policy_weights_bytes"]
+    count = int(payload["visit_policy_count"])
+    return tuple(
+        (
+            int(struct.unpack_from("I", actions, index * 4)[0]),
+            float(struct.unpack_from("f", weights, index * 4)[0]),
+        )
+        for index in range(count)
+    )
+
+
 def _engine_with_rust() -> Any:
     engine = importlib.import_module("hexo_engine")
     try:
@@ -589,6 +604,8 @@ def test_dense_cnn_rust_capabilities_smoke() -> None:
     assert capabilities["model1_mcts_progressive_widening"] is True
     assert capabilities["model1_mcts_progressive_widening_reference"] == "Chaslot_2008_progressive_unpruning"
     assert capabilities["model1_mcts_evaluation_cache"] is True
+    assert capabilities["model1_mcts_tree_reuse_session"] is True
+    assert capabilities["model1_mcts_tree_reuse_reference"] == "KataGo_Search_makeMove_promote_child"
     assert capabilities["model1_mcts_lazy_staged_edges"] is True
     assert capabilities["model1_mcts_lazy_staged_edges_reference"] == "KataGo_SearchNode_children0_1_2"
     assert capabilities["model1_sample_from_state"] is True
@@ -635,7 +652,7 @@ def test_dense_cnn_rust_mcts_uses_model_local_accelerator() -> None:
     assert int(first["action_id"]) == expected_action
     assert int(first["action_id"]) == int(second["action_id"])
     assert int(first["visits"]) == 3
-    assert sum(float(weight) for _action_id, weight in first["visit_policy"]) == pytest.approx(1.0)
+    assert sum(weight for _action_id, weight in _payload_visit_policy(first)) == pytest.approx(1.0)
 
 
 def test_dense_cnn_rust_mcts_initial_progressive_widening_uses_top_128_priors() -> None:
@@ -645,19 +662,22 @@ def test_dense_cnn_rust_mcts_initial_progressive_widening_uses_top_128_priors() 
 
     state = engine.new_game()
     engine.apply_action(state, engine.PlacementAction(engine.AxialCoord(0, 0)))
-    legal_action_ids = tuple(rust_bridge.model1_batch_inputs([state])["legal_action_ids"][0])
+    batch_inputs = rust_bridge.model1_batch_inputs([state])
+    legal_action_ids = tuple(batch_inputs["legal_action_ids"][0])
+    legal_flat_indices = tuple(int(item) for item in batch_inputs["legal_flat_indices"][0])
     assert len(legal_action_ids) > 128
+    selected_flats = legal_flat_indices[-128:]
 
-    def evaluator(payload: Mapping[str, Any]) -> Mapping[str, bytes]:
+    def evaluator(payload: Mapping[str, Any]) -> Mapping[str, object]:
         rows = int(payload["shape"][0])
-        offsets = tuple(int(item) for item in payload["legal_row_offsets"])
-        prior_count = max(0, offsets[-1])
         return {
             "values_bytes": struct.pack(f"{rows}f", *([0.0] * rows)),
             "priors_bytes": struct.pack(
-                f"{prior_count}f",
-                *(float(index + 1) for index in range(prior_count)),
+                "128f",
+                *(float(index + 1) for index in range(128)),
             ),
+            "selected_flat_indices_bytes": struct.pack("128q", *selected_flats),
+            "selected_row_offsets": (0, 128),
         }
 
     result = rust_bridge.model1_batched_mcts(
@@ -670,18 +690,269 @@ def test_dense_cnn_rust_mcts_initial_progressive_widening_uses_top_128_priors() 
         virtual_batch_size=1,
         progressive_widening_initial_actions=128,
         progressive_widening_child_initial_actions=32,
-        progressive_widening_candidate_actions=192,
+        progressive_widening_candidate_actions=128,
         progressive_widening_growth_interval=40.0,
         progressive_widening_growth_base=1.3,
     )[0]
 
-    returned_action_ids = {int(action_id) for action_id, _weight in result["visit_policy"]}
+    returned_action_ids = {action_id for action_id, _weight in _payload_visit_policy(result)}
     assert returned_action_ids == {int(legal_action_ids[-1])}
     root_diagnostics = dict(result["diagnostics"]["root"])
     assert int(root_diagnostics["root_active_edges"]) == 1
     assert int(root_diagnostics["root_hidden_priors"]) == len(legal_action_ids) - 1
     assert int(result["visits"]) == 1
-    assert sum(float(weight) for _action_id, weight in result["visit_policy"]) == pytest.approx(1.0)
+    assert sum(weight for _action_id, weight in _payload_visit_policy(result)) == pytest.approx(1.0)
+
+
+def test_dense_cnn_rust_mcts_keeps_authoritative_legal_actions_outside_dense_crop() -> None:
+    engine = importlib.import_module("hexo_engine")
+    engine_types = importlib.import_module("hexo_engine.types")
+    rust_bridge = importlib.import_module("hexo_models.dense_cnn.rust_bridge")
+    _skip_without_direct_state_rust(rust_bridge)
+
+    state = engine.new_game()
+    for _ in range(5):
+        legal = tuple(int(item) for item in engine.legal_action_ids(state))
+        action_id = max(
+            legal,
+            key=lambda item: (
+                engine_types.unpack_coord_id(item).q,
+                -abs(engine_types.unpack_coord_id(item).r),
+            ),
+        )
+        engine.apply_action(
+            state,
+            engine.PlacementAction(engine_types.unpack_coord_id(action_id)),
+        )
+
+    payload = rust_bridge.model1_batch_inputs([state])
+    in_crop_legal = {int(item) for item in payload["legal_action_ids"][0]}
+    all_legal = {int(item) for item in engine.legal_action_ids(state)}
+    out_of_crop_legal = all_legal - in_crop_legal
+    assert out_of_crop_legal
+
+    def evaluator(payload: Mapping[str, Any]) -> Mapping[str, object]:
+        rows = int(payload["shape"][0])
+        return {
+            "values_bytes": struct.pack(f"{rows}f", *([0.0] * rows)),
+            "priors_bytes": b"",
+            "selected_flat_indices_bytes": b"",
+            "selected_row_offsets": tuple(0 for _ in range(rows + 1)),
+        }
+
+    result = rust_bridge.model1_batched_mcts(
+        [state],
+        visits=1,
+        c_puct=1.5,
+        temperature=0.0,
+        seed=17,
+        evaluator=evaluator,
+        virtual_batch_size=1,
+        progressive_widening_initial_actions=4,
+        progressive_widening_child_initial_actions=4,
+        progressive_widening_candidate_actions=4,
+        progressive_widening_growth_interval=40.0,
+        progressive_widening_growth_base=1.3,
+    )[0]
+
+    assert int(result["action_id"]) in out_of_crop_legal
+    root_diagnostics = dict(result["diagnostics"]["root"])
+    assert int(root_diagnostics["root_active_edges"]) == 1
+    assert int(root_diagnostics["root_hidden_priors"]) == len(all_legal) - 1
+    assert int(result["visits"]) == 1
+
+
+def test_dense_cnn_rust_mcts_keeps_out_of_crop_legal_actions_hidden_when_topk_is_full() -> None:
+    engine = importlib.import_module("hexo_engine")
+    engine_types = importlib.import_module("hexo_engine.types")
+    rust_bridge = importlib.import_module("hexo_models.dense_cnn.rust_bridge")
+    _skip_without_direct_state_rust(rust_bridge)
+
+    state = engine.new_game()
+    for _ in range(5):
+        legal = tuple(int(item) for item in engine.legal_action_ids(state))
+        action_id = max(
+            legal,
+            key=lambda item: (
+                engine_types.unpack_coord_id(item).q,
+                -abs(engine_types.unpack_coord_id(item).r),
+            ),
+        )
+        engine.apply_action(
+            state,
+            engine.PlacementAction(engine_types.unpack_coord_id(action_id)),
+        )
+
+    payload = rust_bridge.model1_batch_inputs([state])
+    in_crop_legal = {int(item) for item in payload["legal_action_ids"][0]}
+    legal_flat_indices = tuple(int(item) for item in payload["legal_flat_indices"][0])
+    all_legal = {int(item) for item in engine.legal_action_ids(state)}
+    assert all_legal - in_crop_legal
+    assert len(legal_flat_indices) >= 4
+
+    selected_flats = legal_flat_indices[:4]
+
+    def evaluator(payload: Mapping[str, Any]) -> Mapping[str, object]:
+        rows = int(payload["shape"][0])
+        assert int(payload["max_prior_candidates"]) == 4
+        assert bool(payload["legal_mask_from_inputs"]) is True
+        return {
+            "values_bytes": struct.pack(f"{rows}f", *([0.0] * rows)),
+            "priors_bytes": struct.pack("4f", 0.4, 0.3, 0.2, 0.1),
+            "selected_flat_indices_bytes": struct.pack("4q", *selected_flats),
+            "selected_row_offsets": (0, 4),
+        }
+
+    result = rust_bridge.model1_batched_mcts(
+        [state],
+        visits=1,
+        c_puct=1.5,
+        temperature=0.0,
+        seed=19,
+        evaluator=evaluator,
+        virtual_batch_size=1,
+        progressive_widening_initial_actions=4,
+        progressive_widening_child_initial_actions=4,
+        progressive_widening_candidate_actions=4,
+        progressive_widening_growth_interval=40.0,
+        progressive_widening_growth_base=1.3,
+    )[0]
+
+    root_diagnostics = dict(result["diagnostics"]["root"])
+    active = int(root_diagnostics["root_active_edges"])
+    hidden = int(root_diagnostics["root_hidden_priors"])
+    assert active == 1
+    assert hidden == len(all_legal) - active
+    assert hidden > len(in_crop_legal) - active
+
+
+def test_dense_cnn_rust_mcts_evaluation_cache_keys_candidate_limit() -> None:
+    engine = importlib.import_module("hexo_engine")
+    rust_bridge = importlib.import_module("hexo_models.dense_cnn.rust_bridge")
+    _skip_without_direct_state_rust(rust_bridge)
+
+    state = engine.new_game()
+    cache = rust_bridge.model1_new_mcts_evaluation_cache(max_states=100)
+    calls: list[int] = []
+
+    def evaluator(payload: Mapping[str, Any]) -> Mapping[str, object]:
+        rows = int(payload["shape"][0])
+        calls.append(int(payload["max_prior_candidates"]))
+        return {
+            "values_bytes": struct.pack(f"{rows}f", *([0.0] * rows)),
+            "priors_bytes": b"",
+            "selected_flat_indices_bytes": b"",
+            "selected_row_offsets": tuple(0 for _ in range(rows + 1)),
+        }
+
+    for candidate_limit in (1, 1, 3, 3):
+        rust_bridge.model1_batched_mcts(
+            [state],
+            visits=1,
+            c_puct=1.5,
+            temperature=0.0,
+            seed=23,
+            evaluator=evaluator,
+            virtual_batch_size=1,
+            progressive_widening_initial_actions=1,
+            progressive_widening_child_initial_actions=1,
+            progressive_widening_candidate_actions=candidate_limit,
+            progressive_widening_growth_interval=40.0,
+            progressive_widening_growth_base=1.3,
+            evaluation_cache=cache,
+        )
+
+    assert calls[:2] == [1, 1]
+    assert calls[2:4] == [3, 3]
+    assert calls[4:] == []
+
+
+def test_dense_cnn_mcts_session_reuses_tree_and_reports_exact_delta_visits() -> None:
+    engine = importlib.import_module("hexo_engine")
+    engine_types = importlib.import_module("hexo_engine.types")
+    mcts_module = importlib.import_module("hexo_models.dense_cnn.mcts")
+    rust_bridge = importlib.import_module("hexo_models.dense_cnn.rust_bridge")
+    _skip_without_direct_state_rust(rust_bridge)
+
+    class FakeInference:
+        def __init__(self) -> None:
+            self.rows: list[int] = []
+
+        def evaluate_model1_payload(self, payload: Mapping[str, Any]) -> Mapping[str, object]:
+            rows = int(payload["shape"][0])
+            self.rows.append(rows)
+            return {
+                "values_bytes": struct.pack(f"{rows}f", *([0.0] * rows)),
+                "priors_bytes": b"",
+                "selected_flat_indices_bytes": b"",
+                "selected_row_offsets": tuple(0 for _ in range(rows + 1)),
+            }
+
+    state = engine.new_game()
+    inference = FakeInference()
+    session = mcts_module.new_mcts_session(max_states=100)
+
+    first = session.run(
+        [7],
+        [state],
+        inference,
+        visits=4,
+        temperature=0.0,
+        seed=1,
+        virtual_batch_size=1,
+        progressive_widening_initial_actions=1,
+        progressive_widening_child_initial_actions=1,
+        progressive_widening_candidate_actions=1,
+    )[0]
+    engine.apply_action(
+        state,
+        engine.PlacementAction(engine_types.unpack_coord_id(first.action_id)),
+    )
+    second = session.run(
+        [7],
+        [state],
+        inference,
+        visits=4,
+        temperature=0.0,
+        seed=2,
+        virtual_batch_size=1,
+        progressive_widening_initial_actions=1,
+        progressive_widening_child_initial_actions=1,
+        progressive_widening_candidate_actions=1,
+    )[0]
+
+    assert first.visits == 4
+    assert second.visits == 4
+    assert len(session) == 1
+    assert sum(weight for _action_id, weight in first.visit_policy) == pytest.approx(1.0)
+    assert sum(weight for _action_id, weight in second.visit_policy) == pytest.approx(1.0)
+    assert int(second.diagnostics["batch"]["tree"]["completed_visits"]) > second.visits
+
+
+def test_dense_cnn_rust_mcts_rejects_short_compact_evaluator_payloads() -> None:
+    engine = importlib.import_module("hexo_engine")
+    rust_bridge = importlib.import_module("hexo_models.dense_cnn.rust_bridge")
+    _skip_without_direct_state_rust(rust_bridge)
+
+    def evaluator(_payload: Mapping[str, Any]) -> Mapping[str, object]:
+        return {
+            "values_bytes": b"",
+            "priors_bytes": b"",
+            "selected_flat_indices_bytes": b"",
+            "selected_row_offsets": (0,),
+        }
+
+    with pytest.raises(ValueError, match="values_bytes"):
+        rust_bridge.model1_batched_mcts(
+            [engine.new_game()],
+            visits=1,
+            c_puct=1.5,
+            temperature=0.0,
+            seed=29,
+            evaluator=evaluator,
+            virtual_batch_size=1,
+            progressive_widening_candidate_actions=4,
+        )
 
 
 def test_dense_cnn_rust_mcts_deduplicates_duplicate_roots_without_mutating_live_state() -> None:
@@ -718,6 +989,27 @@ def test_dense_cnn_rust_mcts_deduplicates_duplicate_roots_without_mutating_live_
     assert evaluated_rows and all(rows == 1 for rows in evaluated_rows)
     assert sum(evaluated_rows) < 4, "duplicate roots should share exact StateHash evaluator cache"
     assert engine.to_python_state(state) == before
+
+
+def test_dense_cnn_rust_mcts_rejects_batches_above_strict_active_root_limit() -> None:
+    engine = importlib.import_module("hexo_engine")
+    rust_bridge = importlib.import_module("hexo_models.dense_cnn.rust_bridge")
+    _skip_without_direct_state_rust(rust_bridge)
+
+    def evaluator(_payload: Mapping[str, Any]) -> Mapping[str, bytes]:
+        raise AssertionError("active-root guard should run before evaluation")
+
+    with pytest.raises(ValueError, match="above strict limit"):
+        rust_bridge.model1_batched_mcts(
+            [engine.new_game(), engine.new_game(), engine.new_game()],
+            visits=1,
+            c_puct=1.5,
+            temperature=0.0,
+            seed=3,
+            evaluator=evaluator,
+            virtual_batch_size=1,
+            active_root_limit=2,
+        )
 
 
 def test_dense_cnn_batched_mcts_requires_rust_and_does_not_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -770,6 +1062,7 @@ def test_dense_cnn_mcts_python_boundary_delegates_to_rust(monkeypatch: pytest.Mo
         progressive_widening_growth_interval: float | None,
         progressive_widening_growth_base: float | None,
         evaluation_cache: object | None,
+        active_root_limit: int | None,
     ) -> tuple[Mapping[str, Any], ...]:
         calls.append(
             {
@@ -786,6 +1079,7 @@ def test_dense_cnn_mcts_python_boundary_delegates_to_rust(monkeypatch: pytest.Mo
                 "progressive_widening_growth_interval": progressive_widening_growth_interval,
                 "progressive_widening_growth_base": progressive_widening_growth_base,
                 "evaluation_cache": evaluation_cache,
+                "active_root_limit": active_root_limit,
             }
         )
         return (
@@ -817,7 +1111,7 @@ def test_dense_cnn_mcts_python_boundary_delegates_to_rust(monkeypatch: pytest.Mo
 
     assert result == mcts_module.SearchResult(
         action_id=17,
-        visit_policy={17: 0.75, 23: 0.25},
+        visit_policy=((17, 0.75), (23, 0.25)),
         root_value=-0.125,
         visits=3,
     )
@@ -830,12 +1124,13 @@ def test_dense_cnn_mcts_python_boundary_delegates_to_rust(monkeypatch: pytest.Mo
             "seed": 0,
             "evaluator": inference.evaluate_model1_payload,
             "virtual_batch_size": 3,
-            "progressive_widening_initial_actions": 128,
-            "progressive_widening_child_initial_actions": 32,
-            "progressive_widening_candidate_actions": 192,
-            "progressive_widening_growth_interval": 40.0,
+            "progressive_widening_initial_actions": 8,
+            "progressive_widening_child_initial_actions": 4,
+            "progressive_widening_candidate_actions": 128,
+            "progressive_widening_growth_interval": 256.0,
             "progressive_widening_growth_base": 1.3,
             "evaluation_cache": None,
+            "active_root_limit": 1024,
         }
     ]
 
@@ -843,16 +1138,22 @@ def test_dense_cnn_mcts_python_boundary_delegates_to_rust(monkeypatch: pytest.Mo
 def test_dense_cnn_mcts_clamps_explicit_virtual_batch_to_safe_leaf_budget() -> None:
     mcts_module = importlib.import_module("hexo_models.dense_cnn.mcts")
 
+    assert mcts_module.DEFAULT_EVAL_CHUNK_STATES == 1024
     assert mcts_module._resolve_virtual_batch_size(
-        root_count=2048,
+        root_count=1024,
         visits=128,
-        virtual_batch_size=32,
-    ) == 4
+        virtual_batch_size=4,
+    ) == 1
     assert mcts_module._resolve_virtual_batch_size(
         root_count=512,
         visits=128,
         virtual_batch_size=32,
-    ) == 16
+    ) == 2
+    assert mcts_module._resolve_virtual_batch_size(
+        root_count=128,
+        visits=128,
+        virtual_batch_size=32,
+    ) == 8
 
 
 def test_dense_cnn_mcts_chunks_active_roots_before_rust_boundary(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -889,6 +1190,41 @@ def test_dense_cnn_mcts_chunks_active_roots_before_rust_boundary(monkeypatch: py
 
     assert [result.visits for result in results] == [7, 7, 7, 7, 7]
     assert calls == [(2, 11), (2, 13), (1, 15)]
+
+
+def test_dense_cnn_mcts_defaults_to_production_active_root_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    mcts_module = importlib.import_module("hexo_models.dense_cnn.mcts")
+    rust_bridge = importlib.import_module("hexo_models.dense_cnn.rust_bridge")
+    calls: list[tuple[int, int | None]] = []
+
+    class FakeInference:
+        evaluate_model1_payload = object()
+
+    def fake_model1_batched_mcts(states: Sequence[object], **kwargs: object) -> tuple[Mapping[str, Any], ...]:
+        calls.append((len(states), kwargs.get("active_root_limit")))
+        visits = int(kwargs["visits"])
+        return tuple(
+            {
+                "action_id": 1,
+                "visit_policy": ((1, 1.0),),
+                "root_value": 0.0,
+                "visits": visits,
+            }
+            for _state in states
+        )
+
+    monkeypatch.setattr(rust_bridge, "model1_batched_mcts", fake_model1_batched_mcts)
+
+    results = mcts_module.run_batched_mcts(
+        [object() for _ in range(1025)],
+        FakeInference(),
+        visits=1,
+        seed=31,
+        virtual_batch_size=1,
+    )
+
+    assert len(results) == 1025
+    assert calls == [(1024, 1024), (1, 1024)]
 
 
 def test_dense_cnn_payload_inference_respects_configured_max_batch_size() -> None:

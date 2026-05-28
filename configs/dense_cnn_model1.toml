@@ -7,8 +7,8 @@ device = "cuda"
 
 [model.config.architecture]
 input_channels = 13
-channels = 96
-residual_blocks = 6
+channels = 64
+residual_blocks = 4
 crop_size = 41
 dropout = 0.0
 lookahead_horizons = [1, 4, 8]
@@ -31,16 +31,17 @@ recency_halflife = 50000.0
 compression_level = 6
 
 [model.config.selfplay]
-samples_per_epoch = 4096
+samples_per_epoch = 65536
 search_visits = 128
 active_games = 2048
-progressive_widening_initial_actions = 128
-progressive_widening_child_initial_actions = 32
-progressive_widening_candidate_actions = 192
-progressive_widening_growth_interval = 40.0
+min_mcts_samples_per_game = 32
+progressive_widening_initial_actions = 8
+progressive_widening_child_initial_actions = 4
+progressive_widening_candidate_actions = 128
+progressive_widening_growth_interval = 256.0
 progressive_widening_growth_base = 1.3
-mcts_evaluation_cache_max_states = 131072
-mcts_active_root_limit = 512
+mcts_evaluation_cache_max_states = 1048576
+mcts_active_root_limit = 1024
 max_actions = 1024
 temperature = 1.0
 worker_count = 1
@@ -60,7 +61,7 @@ selfplay_batch_candidates = [2048]
 training_batch_candidates = [64, 128, 192, 256]
 mcts_visit_candidates = [128]
 mcts_virtual_batch_candidates = [4]
-selfplay_probe_positions = 4096
+selfplay_probe_positions = 8192
 probe_batches = 1
 
 [model.config.debug]

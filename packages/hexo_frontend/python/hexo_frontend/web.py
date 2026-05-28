@@ -564,7 +564,10 @@ class HexoPlayHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(encoded)))
         self.end_headers()
-        self.wfile.write(encoded)
+        try:
+            self.wfile.write(encoded)
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+            return
 
     def _error_payload(self, message: str) -> dict[str, object]:
         try:
@@ -587,9 +590,13 @@ class HexoPlayHandler(BaseHTTPRequestHandler):
         extension = name.rsplit(".", 1)[-1]
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", STATIC_TYPES.get(extension, "application/octet-stream"))
+        self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(encoded)))
         self.end_headers()
-        self.wfile.write(encoded)
+        try:
+            self.wfile.write(encoded)
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+            return
 
     def _send_training_file(self, run_name: str, artifact_path: str) -> None:
         path = _resolve_run_path(run_name, artifact_path)
@@ -601,7 +608,10 @@ class HexoPlayHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ARTIFACT_TYPES.get(path.suffix.lower(), "application/octet-stream"))
         self.send_header("Content-Length", str(len(encoded)))
         self.end_headers()
-        self.wfile.write(encoded)
+        try:
+            self.wfile.write(encoded)
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+            return
 
 
 def _query_int(value: str | None) -> int | None:
@@ -656,7 +666,10 @@ def _training_run(name: str) -> dict[str, object]:
         raise ValueError("Unknown training run")
     artifacts = []
     diagnostics_by_epoch = _diagnostics_by_epoch(run_dir)
-    histories_by_path = _training_histories(run_dir, diagnostics_by_epoch)
+    live_status = _training_live_status(run_dir)
+    histories_by_path = _training_histories(run_dir, diagnostics_by_epoch, live_status)
+    epoch_history = _epoch_history(run_dir)
+    evaluation_history = _evaluation_history(run_dir)
     for path in sorted(run_dir.rglob("*"), key=lambda item: item.stat().st_mtime if item.exists() else 0, reverse=True):
         if not path.is_file():
             continue
@@ -687,9 +700,9 @@ def _training_run(name: str) -> dict[str, object]:
     ]
     histories.sort(
         key=lambda item: (
+            float(item.get("modified") or 0.0),
             int(item.get("epoch") or 0),
-            str(item.get("source") or ""),
-            str(item.get("game_id") or ""),
+            str(item.get("path") or ""),
             int(item.get("record_index") or 0),
         ),
         reverse=True,
@@ -700,6 +713,10 @@ def _training_run(name: str) -> dict[str, object]:
         "artifacts": artifacts,
         "histories": histories,
         "diagnostics_by_epoch": diagnostics_by_epoch,
+        "epoch_history": epoch_history,
+        "evaluation_history": evaluation_history,
+        "learning_health": _learning_health(epoch_history, evaluation_history, live_status),
+        "status": _training_run_status(run_dir, histories, live_status),
     }
 
 
@@ -755,16 +772,6 @@ def _training_history(run_name: str, artifact_path: str, record_index: int = 0) 
                 "action_ids": applied_actions,
                 "abort": _abort_payload(record.abort),
             },
-            "record_games": [
-                {
-                    "index": index,
-                    "game_id": item.game_id,
-                    "status": item.status,
-                    "actions": len(item.action_ids),
-                    "winner": item.winner,
-                }
-                for index, item in enumerate(records)
-            ],
         }
     )
     return payload
@@ -791,6 +798,7 @@ def _record_player_payload(player: object) -> dict[str, object]:
 def _training_histories(
     run_dir: Path,
     diagnostics_by_epoch: dict[str, object],
+    live_status: dict[str, object] | None = None,
 ) -> dict[str, list[dict[str, object]]]:
     histories: dict[str, list[dict[str, object]]] = {}
     for path in sorted(run_dir.rglob("*.hxr")):
@@ -805,7 +813,18 @@ def _training_histories(
             continue
         epoch = _epoch_from_artifact_path(rel)
         source = _history_source(rel)
-        diagnostics = diagnostics_by_epoch.get(str(epoch), {}) if epoch is not None else {}
+        diagnostics = dict(diagnostics_by_epoch.get(str(epoch), {})) if epoch is not None else {}
+        if (
+            live_status
+            and source == "selfplay"
+            and epoch is not None
+            and int(live_status.get("current_epoch") or -1) == int(epoch)
+            and "selfplay" not in diagnostics
+        ):
+            diagnostics["live"] = {
+                "path": rel,
+                "summary": _live_history_diagnostic_summary(live_status),
+            }
         entries: list[dict[str, object]] = []
         for index, record in enumerate(records):
             length = int(record.placements or len(record.action_ids))
@@ -864,6 +883,313 @@ def _diagnostics_by_epoch(run_dir: Path) -> dict[str, object]:
     return by_epoch
 
 
+def _evaluation_history(run_dir: Path) -> list[dict[str, object]]:
+    diagnostics_dir = run_dir / "diagnostics"
+    if not diagnostics_dir.exists():
+        return []
+    rows: list[dict[str, object]] = []
+    for path in sorted(diagnostics_dir.glob("dense_cnn.evaluation.epoch_*.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        epoch = _epoch_from_artifact_path(path.name)
+        if epoch is None and payload.get("epoch") is not None:
+            try:
+                epoch = int(payload["epoch"])
+            except (TypeError, ValueError):
+                epoch = None
+        rows.append(
+            {
+                "epoch": epoch,
+                "status": payload.get("status"),
+                "games": payload.get("games"),
+                "completed": payload.get("completed"),
+                "wins": payload.get("wins"),
+                "losses": payload.get("losses"),
+                "mean_turns": payload.get("mean_turns"),
+                "path": f"diagnostics/{path.name}",
+                "modified": path.stat().st_mtime,
+            }
+        )
+    rows.sort(key=lambda item: int(item.get("epoch") or 0))
+    return rows
+
+
+def _epoch_history(run_dir: Path) -> list[dict[str, object]]:
+    rows: dict[int, dict[str, object]] = {}
+    diagnostics_dir = run_dir / "diagnostics"
+
+    if diagnostics_dir.exists():
+        for path in sorted(diagnostics_dir.glob("epoch_*.json")):
+            payload = _read_json_file(path)
+            if not isinstance(payload, dict):
+                continue
+            result = payload.get("metadata", {}).get("result") if isinstance(payload.get("metadata"), dict) else None
+            if not isinstance(result, dict):
+                continue
+            epoch = _coerce_epoch(result.get("epoch"), path.name)
+            if epoch is None:
+                continue
+            row = rows.setdefault(epoch, {"epoch": epoch})
+            row["status"] = payload.get("status")
+            row["elapsed_seconds"] = payload.get("elapsed_seconds")
+            _merge_epoch_result(row, result)
+
+        for path in sorted(diagnostics_dir.glob("dense_cnn.selfplay.epoch_*.json")):
+            payload = _read_json_file(path)
+            if not isinstance(payload, dict):
+                continue
+            epoch = _coerce_epoch(payload.get("epoch"), path.name)
+            if epoch is None:
+                continue
+            row = rows.setdefault(epoch, {"epoch": epoch})
+            row["selfplay"] = _selfplay_epoch_summary(payload)
+
+        for path in sorted(diagnostics_dir.glob("dense_cnn.evaluation.epoch_*.json")):
+            payload = _read_json_file(path)
+            if not isinstance(payload, dict):
+                continue
+            epoch = _coerce_epoch(payload.get("epoch"), path.name)
+            if epoch is None:
+                continue
+            row = rows.setdefault(epoch, {"epoch": epoch})
+            row["evaluation"] = _evaluation_epoch_summary(payload)
+
+        for path in sorted(diagnostics_dir.glob("dense_cnn.policy_targets.epoch_*.json")):
+            payload = _read_json_file(path)
+            if not isinstance(payload, dict):
+                continue
+            epoch = _coerce_epoch(payload.get("epoch"), path.name)
+            if epoch is None:
+                continue
+            preview = payload.get("preview") if isinstance(payload.get("preview"), list) else []
+            row = rows.setdefault(epoch, {"epoch": epoch})
+            row["d6"] = {
+                "mode": payload.get("d6", {}).get("mode") if isinstance(payload.get("d6"), dict) else None,
+                "preview_count": len(preview),
+                "preview_symmetries": [
+                    int(item.get("symmetry"))
+                    for item in preview
+                    if isinstance(item, dict) and item.get("symmetry") is not None
+                ],
+            }
+
+    checkpoints_dir = run_dir / "checkpoints"
+    if checkpoints_dir.exists():
+        for path in sorted(checkpoints_dir.glob("epoch_*.pt")):
+            epoch = _coerce_epoch(None, path.name)
+            if epoch is None:
+                continue
+            row = rows.setdefault(epoch, {"epoch": epoch})
+            row["checkpoint"] = {
+                "path": path.relative_to(run_dir).as_posix(),
+                "bytes": path.stat().st_size,
+                "modified": path.stat().st_mtime,
+            }
+
+    for row in rows.values():
+        if "status" not in row:
+            row["status"] = "partial"
+    return [rows[key] for key in sorted(rows)]
+
+
+def _learning_health(
+    epoch_history: list[dict[str, object]],
+    evaluation_history: list[dict[str, object]],
+    live_status: dict[str, object],
+) -> dict[str, object]:
+    completed = [row for row in epoch_history if row.get("status") == "completed"]
+    latest = completed[-1] if completed else (epoch_history[-1] if epoch_history else {})
+    latest_epoch = int(latest.get("epoch") or 0)
+    latest_training = latest.get("training") if isinstance(latest.get("training"), dict) else {}
+    first_training = completed[0].get("training") if completed and isinstance(completed[0].get("training"), dict) else {}
+    latest_loss = _optional_float(latest_training.get("loss"))
+    first_loss = _optional_float(first_training.get("loss"))
+
+    evals = [
+        item
+        for item in evaluation_history
+        if _optional_float(item.get("mean_turns")) is not None
+    ]
+    latest_eval = evals[-1] if evals else {}
+    first_eval = evals[0] if evals else {}
+    best_eval = max(evals, key=lambda item: (_optional_float(item.get("mean_turns")) or 0.0, int(item.get("wins") or 0)), default={})
+    latest_turns = _optional_float(latest_eval.get("mean_turns"))
+    first_turns = _optional_float(first_eval.get("mean_turns"))
+    best_turns = _optional_float(best_eval.get("mean_turns"))
+    latest_wins = int(latest_eval.get("wins") or 0) if latest_eval else 0
+    latest_games = int(latest_eval.get("games") or 0) if latest_eval else 0
+    latest_selfplay = latest.get("selfplay") if isinstance(latest.get("selfplay"), dict) else {}
+    latest_d6 = latest.get("d6") if isinstance(latest.get("d6"), dict) else {}
+
+    messages: list[str] = []
+    status = "collecting"
+    if latest_epoch > 0:
+        status = "ok"
+    if latest_loss is not None and first_loss is not None and latest_loss < first_loss:
+        messages.append(f"Training loss improved from {first_loss:.3f} to {latest_loss:.3f}.")
+    elif latest_loss is not None:
+        messages.append(f"Latest training loss is {latest_loss:.3f}.")
+
+    if latest_turns is None:
+        status = "collecting"
+        messages.append("No SealBot evaluation result yet for the completed epochs.")
+    else:
+        delta = latest_turns - (first_turns if first_turns is not None else latest_turns)
+        if latest_wins > 0:
+            status = "improving"
+            messages.append(f"Latest SealBot eval has {latest_wins}/{latest_games} wins.")
+        elif delta > 3.0:
+            status = "improving"
+            messages.append(f"SealBot survival improved by {delta:.1f} turns.")
+        elif len(evals) >= 2:
+            status = "watch"
+            messages.append(f"SealBot survival is flat at {latest_turns:.1f} turns.")
+        else:
+            messages.append(f"Initial SealBot survival is {latest_turns:.1f} turns.")
+        if latest_epoch >= 6 and latest_wins == 0 and (best_turns or 0.0) <= 30.0:
+            status = "intervene"
+            messages.append("Epoch 6+ is still under 30 turns with no wins; inspect games and training targets before continuing blindly.")
+        elif status == "watch":
+            messages.append("Keep training for now, but inspect previews if this remains flat near epoch 6.")
+
+    exact_128 = abs((_optional_float(latest_selfplay.get("mcts_sims_per_searched_position")) or 0.0) - 128.0) < 1.0e-6
+    speed = _optional_float(latest_selfplay.get("search_positions_per_second"))
+    if speed is not None and speed >= 128.0 and exact_128:
+        messages.append(f"Self-play speed is healthy at {speed:.0f} pos/s with exact 128 sims.")
+    elif speed is not None:
+        status = "watch" if status != "intervene" else status
+        messages.append(f"Self-play speed needs attention: {speed:.0f} pos/s, exact128={exact_128}.")
+
+    d6_mode = str(latest_d6.get("mode") or "")
+    d6_preview = latest_d6.get("preview_symmetries") if isinstance(latest_d6.get("preview_symmetries"), list) else []
+    if "random_per_training_expansion" in d6_mode or d6_preview:
+        messages.append("D6 training augmentation previews are present.")
+    elif latest_epoch > 0:
+        status = "watch" if status != "intervene" else status
+        messages.append("D6 augmentation preview is missing for the latest epoch.")
+
+    return {
+        "status": status,
+        "latest_epoch": latest_epoch or None,
+        "current_stage": live_status.get("stage"),
+        "latest_loss": latest_loss,
+        "loss_delta_from_first": (latest_loss - first_loss) if latest_loss is not None and first_loss is not None else None,
+        "latest_eval_mean_turns": latest_turns,
+        "best_eval_mean_turns": best_turns,
+        "eval_delta_from_first": (latest_turns - first_turns) if latest_turns is not None and first_turns is not None else None,
+        "latest_eval_wins": latest_wins,
+        "latest_eval_games": latest_games,
+        "latest_selfplay_pos_s": speed,
+        "latest_exact_128": exact_128,
+        "d6_preview_symmetries": d6_preview,
+        "messages": messages,
+    }
+
+
+def _merge_epoch_result(row: dict[str, object], result: dict[str, object]) -> None:
+    if isinstance(result.get("selfplay"), dict):
+        row["selfplay"] = _selfplay_epoch_summary(result["selfplay"])
+    if isinstance(result.get("training"), dict):
+        row["training"] = _training_epoch_summary(result["training"])
+    if isinstance(result.get("evaluation"), dict):
+        row["evaluation"] = _evaluation_epoch_summary(result["evaluation"])
+    if isinstance(result.get("checkpoint"), dict):
+        checkpoint = result["checkpoint"]
+        row["checkpoint"] = {
+            "path": _run_relative_or_value(checkpoint.get("checkpoint_path")),
+            "name": checkpoint.get("name"),
+        }
+    if isinstance(result.get("samples"), dict):
+        samples = result["samples"]
+        selection = samples.get("selection") if isinstance(samples.get("selection"), dict) else {}
+        finalize = samples.get("finalize") if isinstance(samples.get("finalize"), dict) else {}
+        row["samples"] = {
+            "buffer_count": selection.get("sample_count") or finalize.get("buffer_count"),
+            "window_size": selection.get("window_size"),
+            "compressed_bytes": finalize.get("compressed_bytes"),
+        }
+    if isinstance(result.get("symmetries"), dict):
+        metadata = result["symmetries"].get("metadata") if isinstance(result["symmetries"].get("metadata"), dict) else {}
+        row["d6"] = {
+            "mode": metadata.get("mode"),
+            "group_size": metadata.get("d6_group_size"),
+            "sample_count": metadata.get("sample_count"),
+        }
+
+
+def _selfplay_epoch_summary(payload: dict[str, object]) -> dict[str, object]:
+    return {
+        "status": payload.get("status"),
+        "games": payload.get("games"),
+        "truncated_games": payload.get("truncated_games"),
+        "samples_added": payload.get("samples_added"),
+        "searched_positions": payload.get("searched_positions"),
+        "mcts_simulations": payload.get("mcts_simulations"),
+        "search_positions_per_second": payload.get("search_positions_per_second"),
+        "mcts_sims_per_searched_position": payload.get("mcts_sims_per_searched_position"),
+        "elapsed_seconds": payload.get("elapsed_seconds"),
+    }
+
+
+def _training_epoch_summary(payload: dict[str, object]) -> dict[str, object]:
+    return {
+        "status": payload.get("status"),
+        "loss": payload.get("loss"),
+        "steps": payload.get("steps"),
+        "samples": payload.get("samples"),
+        "batch_size": payload.get("batch_size"),
+        "samples_per_second": payload.get("samples_per_second"),
+        "elapsed_seconds": payload.get("elapsed_seconds"),
+    }
+
+
+def _evaluation_epoch_summary(payload: dict[str, object]) -> dict[str, object]:
+    return {
+        "status": payload.get("status"),
+        "games": payload.get("games"),
+        "completed": payload.get("completed"),
+        "wins": payload.get("wins"),
+        "losses": payload.get("losses"),
+        "mean_turns": payload.get("mean_turns"),
+    }
+
+
+def _coerce_epoch(value: object, path: str) -> int | None:
+    try:
+        if value is not None:
+            return int(value)
+    except (TypeError, ValueError):
+        pass
+    return _epoch_from_artifact_path(path)
+
+
+def _optional_float(value: object) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number == number else None
+
+
+def _run_relative_or_value(value: object) -> object:
+    if value is None:
+        return None
+    try:
+        path = Path(str(value))
+        if path.parts:
+            parts = path.parts
+            if "runs" in parts:
+                index = parts.index("runs")
+                return Path(*parts[index + 2 :]).as_posix()
+    except Exception:
+        pass
+    return value
+
+
 def _diagnostic_label(name: str) -> str:
     lowered = name.lower()
     if "evaluation" in lowered:
@@ -916,6 +1242,184 @@ def _abort_payload(abort: object | None) -> object | None:
         "exception_type": getattr(abort, "exception_type", None),
         "message": getattr(abort, "message", None),
     }
+
+
+def _training_live_status(run_dir: Path) -> dict[str, object]:
+    diagnostics = run_dir / "diagnostics"
+    events = _stage_status_from_events(diagnostics / "events.jsonl")
+    watchdog = _read_last_jsonl(diagnostics / "resource_watchdog.jsonl")
+    calibration = _read_json_file(diagnostics / "dense_cnn.performance_calibration.json")
+    status: dict[str, object] = {
+        "stage": events.get("stage") or "unknown",
+        "stage_status": events.get("status") or "unknown",
+        "current_epoch": events.get("epoch"),
+        "last_event": events.get("last_event"),
+    }
+    if isinstance(watchdog, dict):
+        status["watchdog"] = _watchdog_summary(watchdog)
+    if isinstance(calibration, dict):
+        status["calibration"] = _calibration_summary(calibration)
+    return status
+
+
+def _training_run_status(run_dir: Path, histories: list[dict[str, object]], live_status: dict[str, object]) -> dict[str, object]:
+    lengths = [
+        int(item.get("length") or item.get("actions") or 0)
+        for item in histories
+        if int(item.get("length") or item.get("actions") or 0) > 0
+    ]
+    latest_history = max(
+        histories,
+        key=lambda item: float(item.get("modified") or 0.0),
+        default=None,
+    )
+    status = dict(live_status)
+    p0_wins = sum(1 for item in histories if item.get("winner") == "player0")
+    p1_wins = sum(1 for item in histories if item.get("winner") == "player1")
+    status["history"] = {
+        "games": len(histories),
+        "completed": sum(1 for item in histories if item.get("status") == "completed"),
+        "aborted": sum(1 for item in histories if item.get("status") != "completed"),
+        "p0_wins": p0_wins,
+        "p1_wins": p1_wins,
+        "min_length": min(lengths) if lengths else None,
+        "max_length": max(lengths) if lengths else None,
+        "avg_length": (sum(lengths) / len(lengths)) if lengths else None,
+        "latest_modified": latest_history.get("modified") if latest_history else None,
+        "latest_path": latest_history.get("path") if latest_history else None,
+    }
+    latest_selfplay = max(
+        (path for path in (run_dir / "selfplay").glob("*.hxr") if path.is_file()),
+        key=lambda item: item.stat().st_mtime,
+        default=None,
+    )
+    if latest_selfplay is not None:
+        status["latest_selfplay_record"] = {
+            "path": latest_selfplay.relative_to(run_dir).as_posix(),
+            "bytes": latest_selfplay.stat().st_size,
+            "modified": latest_selfplay.stat().st_mtime,
+        }
+    return status
+
+
+def _live_history_diagnostic_summary(live_status: dict[str, object]) -> dict[str, object]:
+    watchdog = live_status.get("watchdog") if isinstance(live_status.get("watchdog"), dict) else {}
+    calibration = live_status.get("calibration") if isinstance(live_status.get("calibration"), dict) else {}
+    summary: dict[str, object] = {
+        "stage": live_status.get("stage") or "unknown",
+        "epoch": live_status.get("current_epoch") or "--",
+    }
+    if watchdog:
+        summary["watchdog"] = watchdog.get("status") or "unknown"
+        summary["free_ram_gb"] = watchdog.get("free_ram_gb")
+        summary["gpu_free_gb"] = watchdog.get("gpu_free_gb")
+        summary["trainer_private_gb"] = watchdog.get("trainer_private_gb")
+    if calibration:
+        summary["selfplay_pos_s"] = calibration.get("selfplay_pos_s")
+        summary["exact_128"] = calibration.get("exact_128")
+    return summary
+
+
+def _stage_status_from_events(path: Path) -> dict[str, object]:
+    active_stage: str | None = None
+    active_epoch: int | None = None
+    last_event: dict[str, object] | None = None
+    for event in _iter_jsonl(path):
+        if not isinstance(event, dict):
+            continue
+        last_event = event
+        name = str(event.get("event") or "")
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        stage = str(payload.get("stage") or "")
+        if name == "stage_started" and stage:
+            active_stage = stage
+            active_epoch = _epoch_from_artifact_path(stage)
+        elif name == "stage_finished" and stage == active_stage:
+            active_stage = None
+            active_epoch = None
+    return {
+        "stage": active_stage or _event_stage(last_event),
+        "status": "running" if active_stage else _event_status(last_event),
+        "epoch": active_epoch,
+        "last_event": last_event,
+    }
+
+
+def _event_stage(event: dict[str, object] | None) -> str | None:
+    payload = event.get("payload") if isinstance(event, dict) and isinstance(event.get("payload"), dict) else {}
+    stage = payload.get("stage")
+    return str(stage) if stage is not None else None
+
+
+def _event_status(event: dict[str, object] | None) -> str | None:
+    payload = event.get("payload") if isinstance(event, dict) and isinstance(event.get("payload"), dict) else {}
+    status = payload.get("status")
+    return str(status) if status is not None else None
+
+
+def _watchdog_summary(payload: dict[str, object]) -> dict[str, object]:
+    memory = payload.get("memory") if isinstance(payload.get("memory"), dict) else {}
+    trainer = payload.get("trainer") if isinstance(payload.get("trainer"), dict) else {}
+    gpu = payload.get("gpu") if isinstance(payload.get("gpu"), dict) else {}
+    return {
+        "timestamp": payload.get("timestamp"),
+        "status": payload.get("status"),
+        "critical": payload.get("critical") or [],
+        "free_ram_gb": memory.get("free_ram_gb"),
+        "free_virtual_gb": memory.get("free_virtual_gb"),
+        "trainer_private_gb": trainer.get("private_gb"),
+        "trainer_working_set_gb": trainer.get("working_set_gb"),
+        "gpu_free_gb": gpu.get("free_gb"),
+        "gpu_used_gb": gpu.get("used_gb"),
+        "gpu_utilization_percent": gpu.get("utilization_percent"),
+    }
+
+
+def _calibration_summary(payload: dict[str, object]) -> dict[str, object]:
+    return {
+        "status": payload.get("status"),
+        "device": payload.get("device"),
+        "selfplay_pos_s": payload.get("measured_selfplay_positions_per_second"),
+        "target_pos_s": payload.get("target_selfplay_positions_per_second"),
+        "meets_target": payload.get("meets_target"),
+        "exact_128": (
+            payload.get("all_searches_exact") is True
+            and int(payload.get("selected_mcts_visits") or 0) == 128
+        ),
+        "selected_inference_batch_size": payload.get("selected_inference_batch_size"),
+        "selected_selfplay_batch_size": payload.get("selected_selfplay_batch_size"),
+        "selected_training_batch_size": payload.get("selected_training_batch_size"),
+        "selected_mcts_virtual_batch_size": payload.get("selected_mcts_virtual_batch_size"),
+    }
+
+
+def _iter_jsonl(path: Path) -> list[object]:
+    if not path.is_file():
+        return []
+    records: list[object] = []
+    try:
+        for line in path.read_text(encoding="utf-8-sig").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            records.append(json.loads(line))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return records
+    return records
+
+
+def _read_last_jsonl(path: Path) -> object | None:
+    records = _iter_jsonl(path)
+    return records[-1] if records else None
+
+
+def _read_json_file(path: Path) -> object | None:
+    if not path.is_file():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
 
 
 def _artifact_summary(payload: object) -> object:

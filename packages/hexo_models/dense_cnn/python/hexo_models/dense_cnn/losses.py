@@ -43,11 +43,27 @@ def soft_cross_entropy(logits: torch.Tensor, target: torch.Tensor) -> torch.Tens
     return -(target * F.log_softmax(logits, dim=-1)).sum(dim=-1).mean()
 
 
-def binned_value_loss(logits: torch.Tensor, target: torch.Tensor | float) -> torch.Tensor:
+def binned_value_loss(
+    logits: torch.Tensor,
+    target: torch.Tensor | float,
+    *,
+    mask: torch.Tensor | None = None,
+) -> torch.Tensor:
     target_tensor = torch.as_tensor(target, device=logits.device, dtype=logits.dtype)
     if target_tensor.shape != logits.shape:
         target_tensor = scalar_to_binned_target(target_tensor).to(device=logits.device, dtype=logits.dtype)
-    return soft_cross_entropy(logits, target_tensor)
+    target_tensor = target_tensor / target_tensor.sum(dim=-1, keepdim=True).clamp_min(1.0e-8)
+    per_item = -(target_tensor * F.log_softmax(logits, dim=-1)).sum(dim=-1)
+    if mask is None:
+        return per_item.mean()
+    mask_tensor = torch.as_tensor(mask, device=logits.device, dtype=logits.dtype)
+    while mask_tensor.ndim < per_item.ndim:
+        mask_tensor = mask_tensor.unsqueeze(-1)
+    mask_tensor = mask_tensor.expand_as(per_item)
+    denominator = mask_tensor.sum()
+    if float(denominator.detach().cpu().item()) <= 0.0:
+        return logits.sum() * 0.0
+    return (per_item * mask_tensor).sum() / denominator
 
 
 def model1_loss(
@@ -70,7 +86,7 @@ def model1_loss(
 
     for key, output in outputs.items():
         if key.startswith("lookahead_") and key in batch:
-            components[key] = binned_value_loss(output, batch[key])
+            components[key] = binned_value_loss(output, batch[key], mask=batch.get(f"{key}_mask"))
             total = total + lookahead_weight * components[key]
 
     components["total"] = total

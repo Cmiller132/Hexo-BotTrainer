@@ -113,6 +113,7 @@ def test_rust_bridge_forwards_live_states_without_history_conversion(monkeypatch
             progressive_widening_growth_base: float | None,
             progressive_widening_candidate_actions: int | None,
             evaluation_cache: object | None,
+            active_root_limit: int | None,
         ) -> tuple[dict[str, Any], ...]:
             calls["mcts"] = {
                 "states": states,
@@ -128,6 +129,7 @@ def test_rust_bridge_forwards_live_states_without_history_conversion(monkeypatch
                 "progressive_widening_growth_interval": progressive_widening_growth_interval,
                 "progressive_widening_growth_base": progressive_widening_growth_base,
                 "evaluation_cache": evaluation_cache,
+                "active_root_limit": active_root_limit,
             }
             return ({"action_id": 7, "visit_policy": ((7, 1.0),), "root_value": 0.0, "visits": visits},)
 
@@ -164,6 +166,7 @@ def test_rust_bridge_forwards_live_states_without_history_conversion(monkeypatch
         "progressive_widening_growth_interval": None,
         "progressive_widening_growth_base": None,
         "evaluation_cache": None,
+        "active_root_limit": None,
     }
     assert payloads[0]["action_id"] == 7
 

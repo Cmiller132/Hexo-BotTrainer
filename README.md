@@ -54,22 +54,25 @@ bounded to i16 coordinate components.
 The production Model 1 implementation lives under
 `hexo_models.dense_cnn`, separate from other model families. A baseline
 training config is available at `configs/dense_cnn_model1.toml` and follows
-the 4096 self-play sample / 4096 training sample epoch path with 200k compressed
-sample capacity and 64 SealBot-best 50 ms evaluation games per epoch.
+the 65,536 self-play sample / 4,096 training sample epoch path with 200k
+compressed sample capacity and 64 SealBot-best 50 ms evaluation games per
+epoch. Self-play keeps a 2,048-game production batch but targets at least 32
+MCTS-labeled positions per active game before rolling out the remaining game
+tail, so the training buffer is not dominated by opening positions.
 
 Dense CNN self-play uses the Rust Model 1 encoder and Rust batched MCTS bridge.
 Calibration keeps the search count fixed at exactly 128 MCTS simulations per
 searched position and tunes active self-play batch size plus virtual leaf batch
-size. The current baseline keeps the 96-channel, 6-block model and targets at
+size. The current baseline keeps the 64-channel, 4-block model and targets at
 least 128 searched positions per second with 128 simulations.
 
 The production config requires a SealBot checkout for epoch evaluation:
 
 ```powershell
-$env:SEALBOT_PATH = "C:\path\to\SealBot"
-python -m hexo_train.cli.train_model .\configs\dense_cnn_model1.toml
+.\scripts\start_model1_training.ps1 -SealBotPath "C:\path\to\SealBot"
 ```
 
 When `require_sealbot = true`, training fails fast if SealBot best 50 ms cannot
 be launched; this prevents a run from looking complete while Goal 4 evaluation
-was skipped.
+was skipped. The script also pins `PYTHONPATH` to the local worktree packages so
+long runs do not accidentally import an older installed `hexo_models` wheel.

@@ -146,9 +146,13 @@ Python helpers:
 The standard dense CNN command from the README is:
 
 ```powershell
-$env:SEALBOT_PATH = "C:\path\to\SealBot"
-python -m hexo_train.cli.train_model .\configs\dense_cnn_model1.toml
+.\scripts\start_model1_training.ps1 -SealBotPath "C:\path\to\SealBot"
 ```
+
+That launcher sets `SEALBOT_PATH`, starts the resource watchdog when needed,
+and pins `PYTHONPATH` to the repository package directories before launching
+`hexo_train.cli.train_model`. Use it instead of a bare `python -m ...` command
+on machines that may have older `hexo_models` wheels installed.
 
 The CLI is intentionally thin:
 
@@ -192,18 +196,20 @@ Key baseline settings:
 | Section | Setting | Meaning |
 | --- | --- | --- |
 | `model.config.architecture` | `input_channels = 13` | Number of input planes. |
-| `model.config.architecture` | `channels = 96` | Trunk width. |
-| `model.config.architecture` | `residual_blocks = 6` | Number of gated residual blocks. |
+| `model.config.architecture` | `channels = 64` | Trunk width. |
+| `model.config.architecture` | `residual_blocks = 4` | Number of gated residual blocks. |
 | `model.config.architecture` | `crop_size = 41` | Dense square crop side length. |
 | `model.config.architecture` | `lookahead_horizons = [1, 4, 8]` | Auxiliary future-value targets. |
-| `model.config.selfplay` | `samples_per_epoch = 4096` | Number of searched positions recorded per epoch. |
+| `model.config.selfplay` | `samples_per_epoch = 65536` | Number of searched positions recorded per epoch. |
 | `model.config.selfplay` | `search_visits = 128` | Exact MCTS simulations per searched position. |
 | `model.config.selfplay` | `active_games = 2048` | Target active self-play games in the dense loop. |
+| `model.config.selfplay` | `min_mcts_samples_per_game = 32` | Minimum searched-position budget per active game before policy rollout. |
 | `model.config.samples` | `capacity = 200000` | Replay buffer capacity floor. |
 | `model.config.samples` | `train_sample_count = 4096` | Samples drawn for each epoch's training window. |
 | `model.config.evaluation` | `games_per_epoch = 64` | SealBot evaluation games after each epoch. |
 | `model.config.evaluation` | `require_sealbot = true` | Fail fast if SealBot is unavailable. |
 | `model.config.performance` | `target_selfplay_positions_per_second = 128.0` | Calibration target. |
+| `model.config.performance` | `selfplay_probe_positions = 8192` | Self-play calibration probe size, large enough to move past duplicate openings. |
 | `loop` | `epochs = 30` | Total training epochs. |
 | `checkpoint` | `resume_from = "../data/checkpoints/dense_cnn_model1_latest.txt"` | Resume pointer. |
 
@@ -213,8 +219,12 @@ The top-level `[selfplay] games_per_epoch` and model-level
 - `games_per_epoch` bounds how many games the epoch may start.
 - `samples_per_epoch` is the number of searched positions to record as
   training samples.
-- Dense CNN searches only until the sample budget is covered, then may finish
-  active games with policy rollouts.
+- Dense CNN limits the effective active batch when needed so the sample budget
+  covers at least `min_mcts_samples_per_game` searched positions per active
+  game. With the production `65536 / 2048` settings, each initial active game
+  receives roughly 32 MCTS-labeled positions before active tails are finished
+  with policy rollouts. This keeps the replay buffer from being dominated by
+  opening-only samples.
 
 ## 6. Plugin Wiring
 
@@ -357,8 +367,8 @@ Default production config:
 
 ```text
 13 input planes
-96 trunk channels
-6 gated residual blocks
+64 trunk channels
+4 gated residual blocks
 41x41 crop
 65 value bins
 policy + value + opp_policy + lookahead heads
@@ -550,15 +560,18 @@ evaluate_model1_states_cached
 The root node is initialized with:
 
 - `player`: current player at that state.
-- `visits = 1`
-- `value_sum = root network value`
-- one edge per legal action.
+- `visits = 0`
+- `value_sum = 0`
+- compact hidden prior candidates from the neural policy.
+- a total legal-action count used to lazily recover crop-invisible legal moves.
 
-Each edge stores:
+Edges are materialized only when PUCT selects a hidden candidate. Each active
+edge stores:
 
 - `action_id`
 - unpacked `HexCoord`
-- normalized prior
+- normalized prior, or a small fallback prior for legal moves outside the dense
+  crop.
 - visit count
 - value sum
 - pending count
@@ -575,7 +588,9 @@ score = Q + prior * c_puct * sqrt(parent_visits) / (1 + edge_visits)
 where:
 
 - `Q = edge.value_sum / edge.visits`, or `0` when unvisited.
-- `prior` comes from the neural policy softmax over legal actions.
+- `prior` comes from the neural policy softmax over the retained legal
+  candidates. Crop-invisible legal moves stay reachable through lazy fallback
+  materialization instead of being stored as full edge objects up front.
 - `c_puct` defaults to `1.5`.
 
 Tie-breaking prefers:

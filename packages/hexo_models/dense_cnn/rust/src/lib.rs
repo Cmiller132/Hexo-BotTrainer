@@ -30,6 +30,11 @@ pub fn capabilities(py: Python<'_>) -> PyResult<Py<PyAny>> {
         "Chaslot_2008_progressive_unpruning",
     )?;
     dict.set_item("model1_mcts_evaluation_cache", true)?;
+    dict.set_item("model1_mcts_tree_reuse_session", true)?;
+    dict.set_item(
+        "model1_mcts_tree_reuse_reference",
+        "KataGo_Search_makeMove_promote_child",
+    )?;
     dict.set_item("model1_mcts_lazy_staged_edges", true)?;
     dict.set_item(
         "model1_mcts_lazy_staged_edges_reference",

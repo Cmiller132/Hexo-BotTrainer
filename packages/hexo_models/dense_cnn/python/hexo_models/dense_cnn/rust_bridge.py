@@ -40,6 +40,7 @@ def model1_batched_mcts(
     progressive_widening_growth_interval: float | None = None,
     progressive_widening_growth_base: float | None = None,
     evaluation_cache: object | None = None,
+    active_root_limit: int | None = None,
 ) -> tuple[Mapping[str, Any], ...]:
     """Run dense-cnn Rust MCTS from live engine states."""
 
@@ -58,6 +59,7 @@ def model1_batched_mcts(
             None if progressive_widening_growth_base is None else max(1.000001, float(progressive_widening_growth_base)),
             None if progressive_widening_candidate_actions is None else max(1, int(progressive_widening_candidate_actions)),
             evaluation_cache,
+            None if active_root_limit is None else max(1, int(active_root_limit)),
         )
     )
 
@@ -67,6 +69,54 @@ def model1_new_mcts_evaluation_cache(*, max_states: int | None = None) -> object
 
     return _dense_cnn_module().Model1MctsEvaluationCache(
         None if max_states is None else max(1, int(max_states))
+    )
+
+
+def model1_new_mcts_session(*, max_states: int | None = None) -> object:
+    """Create a native MCTS session that reuses selected subtrees across moves."""
+
+    return _dense_cnn_module().Model1MctsSession(
+        None if max_states is None else max(1, int(max_states))
+    )
+
+
+def model1_mcts_session_search(
+    session: object,
+    game_keys: Sequence[int],
+    states: Sequence[object],
+    *,
+    visits: int,
+    c_puct: float,
+    temperature: float,
+    seed: int,
+    evaluator: object,
+    virtual_batch_size: int | None = None,
+    progressive_widening_initial_actions: int | None = None,
+    progressive_widening_child_initial_actions: int | None = None,
+    progressive_widening_candidate_actions: int | None = None,
+    progressive_widening_growth_interval: float | None = None,
+    progressive_widening_growth_base: float | None = None,
+    active_root_limit: int | None = None,
+) -> tuple[Mapping[str, Any], ...]:
+    """Search through a native MCTS session, preserving chosen subtrees."""
+
+    return tuple(
+        session.search(
+            tuple(int(item) for item in game_keys),
+            tuple(states),
+            int(visits),
+            float(c_puct),
+            float(temperature),
+            int(seed),
+            evaluator,
+            None if virtual_batch_size is None else max(1, int(virtual_batch_size)),
+            None if progressive_widening_initial_actions is None else max(1, int(progressive_widening_initial_actions)),
+            None if progressive_widening_child_initial_actions is None else max(1, int(progressive_widening_child_initial_actions)),
+            None if progressive_widening_growth_interval is None else max(1.0, float(progressive_widening_growth_interval)),
+            None if progressive_widening_growth_base is None else max(1.000001, float(progressive_widening_growth_base)),
+            None if progressive_widening_candidate_actions is None else max(1, int(progressive_widening_candidate_actions)),
+            None if active_root_limit is None else max(1, int(active_root_limit)),
+        )
     )
 
 

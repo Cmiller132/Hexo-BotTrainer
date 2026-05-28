@@ -6,11 +6,14 @@
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::{PyBytes, PyDict, PyList};
 
 use hexo_engine::{
     pack_coord, Axis, HexCoord, HexoState as RustHexoState, PackedCoord, Player, TurnPhase,
 };
+
+const TARGET_SCHEMA_VERSION: i64 = 2;
+const LOOKAHEAD_TARGET_SEMANTICS: &str = "mcts_prefix_future_root_only_v2";
 
 #[pyfunction(
     signature = (state, game_id, turn_index, policy, value, opp_policy, lookahead, metadata)
@@ -94,7 +97,7 @@ pub fn model1_finalize_game_samples(
             .map(|future| future.policy.as_slice())
             .unwrap_or(&[]);
 
-        let lookahead = finalized_lookahead(&decisions, index, value, winner.is_some(), &horizons);
+        let lookahead = finalized_lookahead(&decisions, index, &horizons);
         let sample = sample_to_dict(py, decision.sample.bind(py))?;
         sample.set_item("value", value)?;
         sample.set_item("opp_policy", action_weight_pairs_obj(py, opp_policy)?)?;
@@ -114,6 +117,8 @@ pub fn model1_finalize_game_samples(
             metadata.set_item("truncated", true)?;
             metadata.set_item("value_target_reason", "max_actions_draw")?;
         }
+        metadata.set_item("target_schema_version", TARGET_SCHEMA_VERSION)?;
+        metadata.set_item("lookahead_target_semantics", LOOKAHEAD_TARGET_SEMANTICS)?;
         sample.set_item("metadata", metadata)?;
         output.append(sample)?;
     }
@@ -156,25 +161,25 @@ fn pending_decisions(pending: &Bound<'_, PyAny>) -> PyResult<Vec<PendingDecision
 fn finalized_lookahead(
     decisions: &[PendingDecision],
     index: usize,
-    value: f32,
-    has_winner: bool,
     horizons: &[usize],
 ) -> Vec<(i64, f32)> {
     let mut lookahead = Vec::with_capacity(horizons.len());
-    if decisions.is_empty() {
+    if decisions.is_empty() || index >= decisions.len() {
         return lookahead;
     }
     for &horizon in horizons {
-        let future_index = (index + horizon).min(decisions.len() - 1);
+        let Some(future_index) = index.checked_add(horizon) else {
+            continue;
+        };
+        if future_index >= decisions.len() {
+            continue;
+        }
         let future = &decisions[future_index];
-        let mut lookahead_value = if future.player == decisions[index].player {
+        let lookahead_value = if future.player == decisions[index].player {
             future.root_value
         } else {
             -future.root_value
         };
-        if future_index == decisions.len() - 1 && has_winner {
-            lookahead_value = value;
-        }
         lookahead.push((horizon as i64, lookahead_value));
     }
     lookahead
@@ -351,6 +356,9 @@ fn action_weight_pairs(weights: &Bound<'_, PyAny>) -> PyResult<Vec<(PackedCoord,
     if weights.is_none() {
         return Ok(Vec::new());
     }
+    if let Some(compact) = compact_action_weight_pairs(weights)? {
+        return Ok(compact);
+    }
     let iterable = if weights.hasattr("items")? {
         weights.call_method0("items")?
     } else {
@@ -365,6 +373,46 @@ fn action_weight_pairs(weights: &Bound<'_, PyAny>) -> PyResult<Vec<(PackedCoord,
         ));
     }
     Ok(pairs)
+}
+
+fn compact_action_weight_pairs(
+    weights: &Bound<'_, PyAny>,
+) -> PyResult<Option<Vec<(PackedCoord, f32)>>> {
+    if !weights.hasattr("action_ids_bytes")? || !weights.hasattr("weights_bytes")? {
+        return Ok(None);
+    }
+    let action_obj = weights.getattr("action_ids_bytes")?;
+    let weight_obj = weights.getattr("weights_bytes")?;
+    let action_bytes = action_obj.downcast::<PyBytes>()?.as_bytes();
+    let weight_bytes = weight_obj.downcast::<PyBytes>()?.as_bytes();
+    if action_bytes.len() % 4 != 0 || weight_bytes.len() % 4 != 0 {
+        return Err(PyValueError::new_err(
+            "compact visit policy byte lengths must be multiples of four",
+        ));
+    }
+    let count = action_bytes.len() / 4;
+    if weight_bytes.len() / 4 != count {
+        return Err(PyValueError::new_err(
+            "compact visit policy action and weight counts differ",
+        ));
+    }
+    let mut pairs = Vec::with_capacity(count);
+    for index in 0..count {
+        pairs.push((read_u32(action_bytes, index), read_f32(weight_bytes, index)));
+    }
+    Ok(Some(pairs))
+}
+
+fn read_u32(bytes: &[u8], index: usize) -> u32 {
+    let start = index * 4;
+    let chunk = &bytes[start..start + 4];
+    u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
+}
+
+fn read_f32(bytes: &[u8], index: usize) -> f32 {
+    let start = index * 4;
+    let chunk = &bytes[start..start + 4];
+    f32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
 }
 
 fn lookahead_pairs(lookahead: &Bound<'_, PyAny>) -> PyResult<Vec<(i64, f32)>> {

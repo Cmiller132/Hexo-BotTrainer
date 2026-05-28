@@ -8,7 +8,8 @@ from typing import Any, Mapping, Sequence
 import torch
 
 from . import rust_bridge
-from .constants import BOARD_SIZE, PLANE_LEGAL
+from .architecture import Model1Network, optimized_model1_for_inference
+from .constants import BOARD_SIZE, INPUT_CHANNELS, PLANE_LEGAL
 from .d6 import unpack_coord_pair
 from .losses import decode_binned_value
 from .samples import CompressedSample, Model1SampleData, expand_sample, stack_expanded
@@ -35,11 +36,16 @@ class DenseCNNInference:
         amp: bool = False,
         return_logits: bool = True,
         max_batch_size: int | None = None,
+        optimize_for_inference: bool = True,
     ) -> None:
-        self.model = model
         self.device = torch.device(device)
         if self.device.type == "cuda" and not torch.cuda.is_available():
             self.device = torch.device("cpu")
+        self.model = (
+            optimized_model1_for_inference(model)
+            if optimize_for_inference and self.device.type == "cuda" and _contains_model1_network(model)
+            else model
+        )
         self.amp = bool(amp and self.device.type == "cuda")
         self.return_logits = bool(return_logits)
         self.max_batch_size = max(1, int(max_batch_size or 1024))
@@ -51,6 +57,8 @@ class DenseCNNInference:
         else:
             self.model.to(self.device)
         self.model.eval()
+        if self.device.type == "cuda":
+            self._warm_up_cuda()
 
     @torch.no_grad()
     def infer_state(self, state: object) -> InferenceResult:
@@ -159,9 +167,13 @@ class DenseCNNInference:
             for key in chunks[0]
         }
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def _forward_inputs_device(self, inputs: torch.Tensor) -> dict[str, torch.Tensor]:
         inputs = _to_inference_device(inputs, self.device)
+        return self._forward_device_inputs(inputs)
+
+    @torch.inference_mode()
+    def _forward_device_inputs(self, inputs: torch.Tensor) -> dict[str, torch.Tensor]:
         with torch.autocast(device_type=self.device.type, enabled=self.amp):
             if hasattr(self.model, "forward_policy_value"):
                 output = self.model.forward_policy_value(inputs)
@@ -169,12 +181,30 @@ class DenseCNNInference:
                 output = self.model(inputs)
         return {key: value.detach().float() for key, value in output.items()}
 
-    @torch.no_grad()
+    @torch.inference_mode()
+    def _warm_up_cuda(self) -> None:
+        """Prime cuDNN algorithm selection and GPU clocks before timed search."""
+
+        warmup_batch = min(1024, self.max_batch_size)
+        dtype = torch.float16 if self.amp else torch.float32
+        inputs = torch.zeros(
+            (warmup_batch, INPUT_CHANNELS, BOARD_SIZE, BOARD_SIZE),
+            device=self.device,
+            dtype=dtype,
+        ).to(memory_format=torch.channels_last)
+        for _ in range(8):
+            self._forward_device_inputs(inputs)
+        torch.cuda.synchronize(self.device)
+
+    @torch.inference_mode()
     def evaluate_model1_payload(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         """Torch callback used by the Rust batched MCTS bridge."""
 
         shape = tuple(int(item) for item in payload["shape"])
-        inputs = torch.frombuffer(payload["inputs"], dtype=torch.float32).reshape(shape)
+        input_dtype = torch.float16 if payload.get("input_dtype") == "float16" else torch.float32
+        inputs = torch.frombuffer(payload["inputs"], dtype=input_dtype).reshape(shape)
+        if inputs.dtype != torch.float32 and (self.device.type != "cuda" or not self.amp):
+            inputs = inputs.float()
         max_batch = self.max_batch_size
         if inputs.shape[0] > max_batch:
             output_chunks = []
@@ -185,10 +215,13 @@ class DenseCNNInference:
                 })
             policy_batch = torch.cat([chunk["policy"] for chunk in output_chunks], dim=0)
             value_batch = torch.cat([chunk["value"] for chunk in output_chunks], dim=0)
+            mask_inputs = inputs
         else:
-            outputs = self._forward_inputs_device(inputs)
+            device_inputs = _to_inference_device(inputs, self.device)
+            outputs = self._forward_device_inputs(device_inputs)
             policy_batch = outputs["policy"]
             value_batch = outputs["value"]
+            mask_inputs = device_inputs
         values_tensor = decode_binned_value(value_batch).cpu().contiguous()
         priors: list[torch.Tensor] = []
         selected_ordinals: torch.Tensor | None = None
@@ -197,7 +230,7 @@ class DenseCNNInference:
         if payload.get("legal_mask_from_inputs") and int(payload.get("max_prior_candidates") or 0) > 0:
             priors_tensor, selected_flats, selected_offsets = _topk_legal_priors_from_input_mask(
                 policy_batch=policy_batch,
-                inputs=inputs,
+                inputs=mask_inputs,
                 max_candidates=int(payload["max_prior_candidates"]),
             )
         elif "legal_flat_indices_bytes" in payload:
@@ -312,9 +345,14 @@ def _legal_priors_from_flats(
 
 
 def _to_inference_device(inputs: torch.Tensor, device: torch.device) -> torch.Tensor:
+    non_blocking = bool(inputs.is_cuda or inputs.is_pinned())
     if device.type == "cuda" and inputs.ndim == 4:
-        return inputs.to(device, non_blocking=True, memory_format=torch.channels_last)
-    return inputs.to(device, non_blocking=True)
+        return inputs.to(device, non_blocking=non_blocking, memory_format=torch.channels_last)
+    return inputs.to(device, non_blocking=non_blocking)
+
+
+def _contains_model1_network(model: torch.nn.Module) -> bool:
+    return any(isinstance(module, Model1Network) for module in model.modules())
 
 
 def _topk_legal_priors(
@@ -359,6 +397,13 @@ def _topk_legal_priors(
     prob_matrix = torch.softmax(masked_values, dim=1).masked_fill(~valid, 0.0).float().cpu()
     ordinal_matrix = selected_ordinal_matrix.cpu()
     valid_cpu = valid.cpu()
+    if bool(valid_cpu.all().item()):
+        selected_offsets = list(range(0, (row_count + 1) * k, k))
+        return (
+            prob_matrix.reshape(-1).contiguous(),
+            ordinal_matrix.reshape(-1).to(dtype=torch.int64).contiguous(),
+            selected_offsets,
+        )
 
     priors: list[torch.Tensor] = []
     ordinals: list[torch.Tensor] = []
@@ -403,6 +448,13 @@ def _topk_legal_priors_from_input_mask(
     prob_matrix = torch.softmax(masked_values, dim=1).masked_fill(~valid, 0.0).float().cpu()
     flat_matrix = selected_flats.cpu()
     valid_cpu = valid.cpu()
+    if bool(valid_cpu.all().item()):
+        selected_offsets = list(range(0, (row_count + 1) * k, k))
+        return (
+            prob_matrix.reshape(-1).contiguous(),
+            flat_matrix.reshape(-1).to(dtype=torch.int64).contiguous(),
+            selected_offsets,
+        )
 
     priors: list[torch.Tensor] = []
     flats: list[torch.Tensor] = []

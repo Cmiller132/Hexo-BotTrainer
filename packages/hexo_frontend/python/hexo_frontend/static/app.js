@@ -4,6 +4,7 @@ const FIT_MOVE_COUNT = 8;
 const FIT_LEGAL_RADIUS = 5;
 const HISTORY_ALL_RUNS = "__all__";
 const HISTORY_PAGE_SIZE = 400;
+const HISTORY_REFRESH_INTERVAL_MS = 15000;
 
 let state = null;
 let tacticsOn = false;
@@ -28,9 +29,12 @@ let trainingRunDetails = {};
 let trainingLoadError = "";
 let activeScreen = screenFromHash();
 let historyFilters = { query: "", source: "all", winner: "all" };
-let historySelectedRun = HISTORY_ALL_RUNS;
+let historySort = "newest";
+let historySelectedRun = "";
+let historySelectionTouched = false;
 let historyVisibleLimit = HISTORY_PAGE_SIZE;
 let historyDetailsLoading = false;
+let historyRefreshInFlight = false;
 let selectedHistoryKey = "";
 let historyView = false;
 let polling = false;
@@ -66,8 +70,12 @@ const historyOverview = document.getElementById("historyOverview");
 const historySearchInput = document.getElementById("historySearchInput");
 const historySourceSelect = document.getElementById("historySourceSelect");
 const historyWinnerSelect = document.getElementById("historyWinnerSelect");
+const historySortSelect = document.getElementById("historySortSelect");
 const gameHistoryList = document.getElementById("gameHistoryList");
 const gameHistoryDetail = document.getElementById("gameHistoryDetail");
+const historyLearningHealth = document.getElementById("historyLearningHealth");
+const historyEvalTrend = document.getElementById("historyEvalTrend");
+const historyEpochProgress = document.getElementById("historyEpochProgress");
 
 document.getElementById("newBtn").addEventListener("click", () => {
   historyView = false;
@@ -80,6 +88,7 @@ if (historyRefreshBtn) historyRefreshBtn.addEventListener("click", loadTrainingR
 trainingRunSelect.addEventListener("change", () => loadTrainingRun(trainingRunSelect.value));
 if (historyRunSelect) historyRunSelect.addEventListener("change", async () => {
   historySelectedRun = historyRunSelect.value || HISTORY_ALL_RUNS;
+  historySelectionTouched = true;
   historyVisibleLimit = HISTORY_PAGE_SIZE;
   await ensureHistorySelectionLoaded();
   renderGameHistoryPage();
@@ -112,7 +121,13 @@ if (historyWinnerSelect) historyWinnerSelect.addEventListener("change", event =>
   historyVisibleLimit = HISTORY_PAGE_SIZE;
   renderGameHistoryPage();
 });
+if (historySortSelect) historySortSelect.addEventListener("change", event => {
+  historySort = event.target.value || "newest";
+  historyVisibleLimit = HISTORY_PAGE_SIZE;
+  renderGameHistoryPage();
+});
 window.addEventListener("hashchange", () => setScreen(screenFromHash(), { preserveHash: true }));
+window.setInterval(refreshHistoryIfVisible, HISTORY_REFRESH_INTERVAL_MS);
 document.getElementById("fitBtn").addEventListener("click", fitBoard);
 document.getElementById("zoomInBtn").addEventListener("click", () => zoomBoardAtCenter(0.82));
 document.getElementById("zoomOutBtn").addEventListener("click", () => zoomBoardAtCenter(1.22));
@@ -203,7 +218,10 @@ async function loadTrainingRuns() {
     trainingRuns = (data && data.runs) || [];
     trainingLoadError = "";
     const selected = trainingRuns.some(run => run.name === preferred) ? preferred : ((trainingRuns[0] && trainingRuns[0].name) || "");
-    if (!trainingRuns.some(run => run.name === historySelectedRun)) historySelectedRun = HISTORY_ALL_RUNS;
+    if (!historySelectionTouched && selected) historySelectedRun = selected;
+    if (historySelectedRun !== HISTORY_ALL_RUNS && !trainingRuns.some(run => run.name === historySelectedRun)) {
+      historySelectedRun = selected || HISTORY_ALL_RUNS;
+    }
     syncTrainingRunSelect(selected);
     syncHistoryRunSelect(historySelectedRun);
     if (trainingRuns.length) {
@@ -269,6 +287,16 @@ async function ensureHistorySelectionLoaded() {
   } finally {
     historyDetailsLoading = false;
     renderGameHistoryPage();
+  }
+}
+
+async function refreshHistoryIfVisible() {
+  if (activeScreen !== "history" || historyRefreshInFlight || pendingRequest) return;
+  historyRefreshInFlight = true;
+  try {
+    await loadTrainingRuns();
+  } finally {
+    historyRefreshInFlight = false;
   }
 }
 
@@ -1927,14 +1955,24 @@ function renderTraining() {
   const epochs = historyEpochs(histories);
   const p0Wins = histories.filter(item => item.winner === "player0").length;
   const p1Wins = histories.filter(item => item.winner === "player1").length;
-  trainingSummary.innerHTML = latest && latest.summary
-    ? Object.entries(latest.summary).map(([key, value]) => summaryMetric(key, value)).join("")
-    : [
-      summaryMetric("Games", histories.length),
-      summaryMetric("Epochs", epochs.length ? `${epochs[0]}-${epochs[epochs.length - 1]}` : "--"),
-      summaryMetric("P0 / P1", `${p0Wins} / ${p1Wins}`),
-      summaryMetric("Artifacts", artifacts.length),
-    ].join("");
+  const status = trainingRun.status || {};
+  const history = status.history || {};
+  const watchdog = status.watchdog || {};
+  const calibration = status.calibration || {};
+  const statusMetrics = [
+    summaryMetric("Stage", runStageLabel(status)),
+    summaryMetric("Games", firstPresent(history.games, histories.length)),
+    summaryMetric("Epochs", epochs.length ? `${epochs[0]}-${epochs[epochs.length - 1]}` : "--"),
+    summaryMetric("P0 / P1", `${firstPresent(history.p0_wins, p0Wins)} / ${firstPresent(history.p1_wins, p1Wins)}`),
+    summaryMetric("Avg Len", formatDecimal(firstPresent(history.avg_length, averageHistoryLength(histories)), 1)),
+    summaryMetric("Selfplay", formatRate(calibration.selfplay_pos_s, "pos/s")),
+    summaryMetric("RAM Free", formatGib(watchdog.free_ram_gb)),
+    summaryMetric("GPU Free", formatGib(watchdog.gpu_free_gb)),
+  ];
+  const fallbackMetrics = latest && latest.summary
+    ? Object.entries(latest.summary).slice(0, 4).map(([key, value]) => summaryMetric(key, value))
+    : [summaryMetric("Artifacts", artifacts.length)];
+  trainingSummary.innerHTML = [...statusMetrics, ...fallbackMetrics].join("");
   const shown = artifacts.slice(0, 50);
   trainingArtifacts.innerHTML = shown.map(item => trainingArtifactRow(trainingRun.name, item)).join("");
   renderGameHistoryPage();
@@ -1964,6 +2002,9 @@ function renderGameHistoryPage() {
   syncHistoryRunSelect(historySelectedRun);
   if (trainingLoadError) {
     historyOverview.innerHTML = "";
+    if (historyLearningHealth) historyLearningHealth.innerHTML = "";
+    if (historyEvalTrend) historyEvalTrend.innerHTML = "";
+    if (historyEpochProgress) historyEpochProgress.innerHTML = "";
     gameHistoryList.innerHTML = `<div class="empty-list">${escapeText(trainingLoadError)}</div>`;
     gameHistoryDetail.innerHTML = `<div class="empty-list">No game selected</div>`;
     return;
@@ -1972,15 +2013,21 @@ function renderGameHistoryPage() {
   const histories = historyItemsForPage(runs);
   if (!runs.length) {
     historyOverview.innerHTML = "";
+    if (historyLearningHealth) historyLearningHealth.innerHTML = "";
+    if (historyEvalTrend) historyEvalTrend.innerHTML = "";
+    if (historyEpochProgress) historyEpochProgress.innerHTML = "";
     gameHistoryList.innerHTML = `<div class="empty-list">${historyDetailsLoading ? "Loading game histories" : "No training run selected"}</div>`;
     gameHistoryDetail.innerHTML = `<div class="empty-list">No game selected</div>`;
     return;
   }
 
-  const filtered = filteredHistoryItems(histories);
+  const filtered = sortedHistoryItems(filteredHistoryItems(histories));
   const selected = selectedHistoryItem(histories, filtered);
   const visible = filtered.slice(0, historyVisibleLimit);
   historyOverview.innerHTML = renderHistoryOverview(histories, filtered);
+  if (historyLearningHealth) historyLearningHealth.innerHTML = renderLearningHealth(runs);
+  if (historyEvalTrend) historyEvalTrend.innerHTML = renderEvaluationTrend(runs);
+  if (historyEpochProgress) historyEpochProgress.innerHTML = renderEpochProgress(runs);
   gameHistoryList.innerHTML = filtered.length
     ? [
       ...visible.map(item => gameHistoryListRow(item.run, item)),
@@ -2066,6 +2113,40 @@ function filteredHistoryItems(histories) {
   });
 }
 
+function sortedHistoryItems(histories) {
+  const items = [...histories];
+  const newest = (a, b) => compareHistoryNewest(a, b);
+  if (historySort === "longest") {
+    return items.sort((a, b) => compareNumber(historyLength(b), historyLength(a)) || newest(a, b));
+  }
+  if (historySort === "shortest") {
+    return items.sort((a, b) => compareNumber(historyLength(a), historyLength(b)) || newest(a, b));
+  }
+  if (historySort === "oldest") {
+    return items.sort((a, b) => -newest(a, b));
+  }
+  if (historySort === "winner") {
+    return items.sort((a, b) => String(a.winner_label || winnerLabel(a.winner)).localeCompare(String(b.winner_label || winnerLabel(b.winner))) || newest(a, b));
+  }
+  return items.sort(newest);
+}
+
+function compareHistoryNewest(a, b) {
+  return compareNumber(Number(b.modified || 0), Number(a.modified || 0)) ||
+    compareNumber(Number(b.epoch || 0), Number(a.epoch || 0)) ||
+    compareNumber(Number(b.record_index || 0), Number(a.record_index || 0));
+}
+
+function compareNumber(a, b) {
+  const left = Number.isFinite(Number(a)) ? Number(a) : 0;
+  const right = Number.isFinite(Number(b)) ? Number(b) : 0;
+  return left === right ? 0 : left > right ? 1 : -1;
+}
+
+function historyLength(item) {
+  return Number(item && (item.length || item.actions || 0)) || 0;
+}
+
 function selectedHistoryItem(histories, filtered) {
   const candidates = filtered.length ? filtered : histories;
   let selected = candidates.find(item => historyItemKey(item) === selectedHistoryKey) || null;
@@ -2087,6 +2168,47 @@ function historyEpochs(histories) {
     .filter(epoch => Number.isFinite(epoch)))].sort((a, b) => a - b);
 }
 
+function latestRunStatusForHistoryPage() {
+  const runs = historyRunsForPage();
+  return runs
+    .map(run => run && run.status)
+    .filter(Boolean)
+    .sort((a, b) => Number(b.history && b.history.latest_modified || 0) - Number(a.history && a.history.latest_modified || 0))[0] || null;
+}
+
+function runStageLabel(status) {
+  if (!status || typeof status !== "object") return "--";
+  const stage = status.stage || "unknown";
+  const epoch = status.current_epoch ? ` e${status.current_epoch}` : "";
+  const state = status.stage_status && status.stage_status !== "unknown" ? ` ${status.stage_status}` : "";
+  return `${stage}${epoch}${state}`;
+}
+
+function averageHistoryLength(histories) {
+  const lengths = (histories || [])
+    .map(item => Number(item.length || item.actions || 0))
+    .filter(value => Number.isFinite(value) && value > 0);
+  return lengths.length ? lengths.reduce((sum, value) => sum + value, 0) / lengths.length : null;
+}
+
+function formatDecimal(value, digits = 1) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "--";
+  return number.toFixed(digits);
+}
+
+function formatRate(value, unit) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "--";
+  return `${number.toFixed(number >= 100 ? 0 : 1)} ${unit}`;
+}
+
+function formatGib(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "--";
+  return `${number.toFixed(1)} GB`;
+}
+
 function renderHistoryOverview(histories, filtered) {
   const epochs = historyEpochs(histories);
   const runCount = new Set(histories.map(item => item.run).filter(Boolean)).size;
@@ -2097,13 +2219,23 @@ function renderHistoryOverview(histories, filtered) {
   const completed = histories.filter(item => item.status === "completed").length;
   const evalSummary = latestDiagnosticSummary(histories, "evaluation");
   const selfplaySummary = latestDiagnosticSummary(histories, "selfplay");
+  const liveStatus = latestRunStatusForHistoryPage();
+  const liveWatchdog = liveStatus && liveStatus.watchdog ? liveStatus.watchdog : {};
+  const liveCalibration = liveStatus && liveStatus.calibration ? liveStatus.calibration : {};
   const cards = [
+    ["Stage", runStageLabel(liveStatus), "Live trainer"],
     ["Runs", runCount || "--", historySelectedRun === HISTORY_ALL_RUNS ? "All loaded runs" : "Selected run"],
     ["Games", `${filtered.length} / ${histories.length}`, "Filtered / total"],
     ["Epochs", epochs.length ? `${epochs[0]}-${epochs[epochs.length - 1]}` : "--", `${epochs.length} observed`],
     ["Winners", `P0 ${p0Wins} | P1 ${p1Wins}`, `${completed} completed`],
     ["Avg Length", avgLength, "Moves per game"],
   ];
+  if (liveCalibration && liveCalibration.selfplay_pos_s !== undefined) {
+    cards.push(["Speed", formatRate(liveCalibration.selfplay_pos_s, "pos/s"), liveCalibration.exact_128 ? "Exact 128 sims" : "Calibration"]);
+  }
+  if (liveWatchdog && (liveWatchdog.free_ram_gb !== undefined || liveWatchdog.gpu_free_gb !== undefined)) {
+    cards.push(["Resources", `${formatGib(liveWatchdog.free_ram_gb)} RAM | ${formatGib(liveWatchdog.gpu_free_gb)} GPU`, liveWatchdog.status || "watchdog"]);
+  }
   if (evalSummary) cards.push(["Evaluation", historyDiagnosticsText({ evaluation: { summary: evalSummary } }), "Latest diagnostics"]);
   if (selfplaySummary) cards.push(["Selfplay", historyDiagnosticsText({ selfplay: { summary: selfplaySummary } }), "Latest diagnostics"]);
   return cards.map(([label, value, sub]) => `
@@ -2113,6 +2245,169 @@ function renderHistoryOverview(histories, filtered) {
       <small>${escapeText(sub)}</small>
     </div>
   `).join("");
+}
+
+function renderLearningHealth(runs) {
+  const health = latestLearningHealth(runs);
+  if (!health) return "";
+  const messages = Array.isArray(health.messages) ? health.messages : [];
+  const status = health.status || "collecting";
+  const metrics = [
+    ["Latest", health.latest_epoch ? `Epoch ${health.latest_epoch}` : "--"],
+    ["Loss", health.latest_loss !== null && health.latest_loss !== undefined ? formatDecimal(health.latest_loss, 3) : "--"],
+    ["Eval", health.latest_eval_mean_turns !== null && health.latest_eval_mean_turns !== undefined ? `${formatDecimal(health.latest_eval_mean_turns, 1)} turns` : "--"],
+    ["Best", health.best_eval_mean_turns !== null && health.best_eval_mean_turns !== undefined ? `${formatDecimal(health.best_eval_mean_turns, 1)} turns` : "--"],
+    ["Speed", formatRate(health.latest_selfplay_pos_s, "pos/s")],
+    ["Exact", health.latest_exact_128 ? "128 sims" : "--"],
+  ];
+  return `<section class="learning-health-panel ${learningHealthClass(status)}" aria-label="Learning health">
+    <div class="learning-health-head">
+      <span>Learning Health</span>
+      <strong>${escapeText(learningHealthLabel(status))}</strong>
+    </div>
+    <div class="learning-health-metrics">
+      ${metrics.map(([label, value]) => `<div><span>${escapeText(label)}</span><strong>${escapeText(value)}</strong></div>`).join("")}
+    </div>
+    <div class="learning-health-messages">
+      ${messages.slice(0, 4).map(message => `<div>${escapeText(message)}</div>`).join("")}
+    </div>
+  </section>`;
+}
+
+function latestLearningHealth(runs) {
+  return runs
+    .map(run => run && run.learning_health)
+    .filter(Boolean)
+    .sort((a, b) => Number(b.latest_epoch || 0) - Number(a.latest_epoch || 0))[0] || null;
+}
+
+function learningHealthClass(status) {
+  if (status === "intervene") return "intervene";
+  if (status === "watch") return "watch";
+  if (status === "improving") return "improving";
+  return "ok";
+}
+
+function learningHealthLabel(status) {
+  if (status === "intervene") return "Intervene";
+  if (status === "watch") return "Watch";
+  if (status === "improving") return "Improving";
+  if (status === "collecting") return "Collecting";
+  return "OK";
+}
+
+function renderEvaluationTrend(runs) {
+  const rows = runs
+    .flatMap(run => (run.evaluation_history || []).map(item => ({ ...item, run: run.name })))
+    .filter(item => item.epoch !== undefined && item.epoch !== null)
+    .sort((a, b) => Number(a.epoch || 0) - Number(b.epoch || 0) || String(a.run || "").localeCompare(String(b.run || "")));
+  if (!rows.length) {
+    return `<div class="eval-trend-empty">No SealBot evaluation diagnostics yet.</div>`;
+  }
+  const latest = rows[rows.length - 1];
+  const best = rows.reduce((current, item) => {
+    const currentTurns = Number(current.mean_turns || 0);
+    const itemTurns = Number(item.mean_turns || 0);
+    if (itemTurns !== currentTurns) return itemTurns > currentTurns ? item : current;
+    return Number(item.wins || 0) > Number(current.wins || 0) ? item : current;
+  }, rows[0]);
+  return `<section class="eval-trend-panel" aria-label="SealBot evaluation trend">
+    <div class="eval-trend-head">
+      <div>
+        <span>SealBot Evaluation Trend</span>
+        <strong>${escapeText(evalTrendSummary(latest))}</strong>
+      </div>
+      <small>Best survival: ${escapeText(evalTrendSummary(best))}</small>
+    </div>
+    <div class="eval-trend-list">
+      ${rows.slice(-12).map(evalTrendRow).join("")}
+    </div>
+  </section>`;
+}
+
+function evalTrendRow(item) {
+  const games = Number(item.games || 0);
+  const wins = Number(item.wins || 0);
+  const losses = Number(item.losses || 0);
+  const meanTurns = formatDecimal(item.mean_turns, 1);
+  const winRate = games > 0 ? `${((wins / games) * 100).toFixed(0)}%` : "--";
+  const cls = wins > 0 ? "has-win" : "no-win";
+  return `<div class="eval-trend-row ${cls}">
+    <strong>Epoch ${escapeText(item.epoch)}</strong>
+    <span>${escapeText(`${wins}-${losses}`)}</span>
+    <span>${escapeText(meanTurns)} turns</span>
+    <span>${escapeText(winRate)} win</span>
+  </div>`;
+}
+
+function evalTrendSummary(item) {
+  if (!item) return "--";
+  return `E${item.epoch}: ${Number(item.wins || 0)}-${Number(item.losses || 0)}, ${formatDecimal(item.mean_turns, 1)} turns`;
+}
+
+function renderEpochProgress(runs) {
+  const rows = runs
+    .flatMap(run => (run.epoch_history || []).map(item => ({ ...item, run: run.name })))
+    .sort((a, b) => Number(a.epoch || 0) - Number(b.epoch || 0) || String(a.run || "").localeCompare(String(b.run || "")));
+  if (!rows.length) return "";
+  return `<section class="epoch-progress-panel" aria-label="Epoch progress">
+    <div class="epoch-progress-head">
+      <span>Epoch Progress</span>
+      <strong>${escapeText(epochProgressSummary(rows[rows.length - 1]))}</strong>
+    </div>
+    <div class="epoch-progress-table">
+      <div class="epoch-progress-row epoch-progress-header">
+        <span>Epoch</span>
+        <span>Selfplay</span>
+        <span>Train</span>
+        <span>Eval</span>
+        <span>D6</span>
+        <span>Checkpoint</span>
+      </div>
+      ${rows.slice(-10).map(epochProgressRow).join("")}
+    </div>
+  </section>`;
+}
+
+function epochProgressRow(item) {
+  const selfplay = item.selfplay || {};
+  const training = item.training || {};
+  const evaluation = item.evaluation || {};
+  const d6 = item.d6 || {};
+  const checkpoint = item.checkpoint || {};
+  const selfplayText = selfplay.samples_added !== undefined
+    ? `${selfplay.samples_added} samples | ${formatRate(selfplay.search_positions_per_second, "pos/s")}`
+    : "pending";
+  const trainText = training.loss !== undefined
+    ? `loss ${formatDecimal(training.loss, 3)} | ${formatRate(training.samples_per_second, "samples/s")}`
+    : "pending";
+  const evalText = evaluation.games !== undefined
+    ? `${Number(evaluation.wins || 0)}-${Number(evaluation.losses || 0)} | ${formatDecimal(evaluation.mean_turns, 1)} turns`
+    : "pending";
+  const d6Text = d6.preview_symmetries && d6.preview_symmetries.length
+    ? `${d6.preview_symmetries.slice(0, 6).join(",")}${d6.preview_symmetries.length > 6 ? "..." : ""}`
+    : (d6.mode ? "random" : "pending");
+  const checkpointText = checkpoint.path || checkpoint.name ? "saved" : "pending";
+  const status = item.status || "partial";
+  return `<div class="epoch-progress-row ${status === "completed" ? "completed" : "partial"}">
+    <strong>Epoch ${escapeText(item.epoch)}</strong>
+    <span>${escapeText(selfplayText)}</span>
+    <span>${escapeText(trainText)}</span>
+    <span>${escapeText(evalText)}</span>
+    <span>${escapeText(d6Text)}</span>
+    <span>${escapeText(checkpointText)}</span>
+  </div>`;
+}
+
+function epochProgressSummary(item) {
+  if (!item) return "--";
+  const training = item.training || {};
+  const evaluation = item.evaluation || {};
+  const parts = [`E${item.epoch}`];
+  if (training.loss !== undefined) parts.push(`loss ${formatDecimal(training.loss, 3)}`);
+  if (evaluation.games !== undefined) parts.push(`eval ${Number(evaluation.wins || 0)}-${Number(evaluation.losses || 0)}`);
+  if (item.status && item.status !== "completed") parts.push(item.status);
+  return parts.join(" | ");
 }
 
 function latestDiagnosticSummary(histories, label) {

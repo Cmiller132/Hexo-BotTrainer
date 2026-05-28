@@ -315,14 +315,15 @@ def test_dense_cnn_model1_config_writes_to_repo_level_run_and_checkpoint_paths()
     assert config.selfplay.checkpoint_pointer == ROOT / "data" / "checkpoints" / "dense_cnn_model1_latest.txt"
     assert config.checkpoint.resume_from == ROOT / "data" / "checkpoints" / "dense_cnn_model1_latest.txt"
     assert parsed.selfplay.search_visits == 128
-    assert parsed.selfplay.samples_per_epoch == 4096
-    assert parsed.selfplay.progressive_widening_initial_actions == 128
-    assert parsed.selfplay.progressive_widening_child_initial_actions == 32
-    assert parsed.selfplay.progressive_widening_candidate_actions == 192
-    assert parsed.selfplay.progressive_widening_growth_interval == pytest.approx(40.0)
+    assert parsed.selfplay.samples_per_epoch == 65536
+    assert parsed.selfplay.min_mcts_samples_per_game == 32
+    assert parsed.selfplay.progressive_widening_initial_actions == 8
+    assert parsed.selfplay.progressive_widening_child_initial_actions == 4
+    assert parsed.selfplay.progressive_widening_candidate_actions == 128
+    assert parsed.selfplay.progressive_widening_growth_interval == pytest.approx(256.0)
     assert parsed.selfplay.progressive_widening_growth_base == pytest.approx(1.3)
-    assert parsed.selfplay.mcts_evaluation_cache_max_states == 131_072
-    assert parsed.selfplay.mcts_active_root_limit == 512
+    assert parsed.selfplay.mcts_evaluation_cache_max_states == 1_048_576
+    assert parsed.selfplay.mcts_active_root_limit == 1024
     assert parsed.samples.train_sample_count == 4096
     assert parsed.samples.capacity >= 200_000
     assert parsed.evaluation.games_per_epoch == 64
@@ -418,6 +419,7 @@ def test_checkpoint_loader_resumes_model_and_sample_buffer_from_pointer(tmp_path
             "policy": [((0, 0), 1.0)],
             "opp_policy": [((0, 0), 1.0)],
             "value": 0.5,
+            "metadata": {"target_schema_version": 2},
         }
     )
 
@@ -448,6 +450,98 @@ def test_checkpoint_loader_resumes_model_and_sample_buffer_from_pointer(tmp_path
     assert restored_buffer.sample_count == 1
     assert restored_sample.game_id == "resume-sample"
     assert restored_sample.value == pytest.approx(0.5)
+
+
+def test_checkpoint_loader_initializes_when_pointer_target_is_missing(tmp_path: Path) -> None:
+    _, components = _build_dense_components(tmp_path)
+    pointer_path = tmp_path / "missing_latest.txt"
+    pointer_path.write_text("does-not-exist.pt", encoding="utf-8")
+
+    result = components.model.checkpoint_loader.load(
+        pointer_path,
+        ctx=None,
+        components=components,
+    )
+
+    assert result["status"] == "initialized"
+    assert result["reason"] == "checkpoint target is missing"
+    assert result["checkpoint_ref"].endswith("does-not-exist.pt")
+
+
+def test_checkpoint_loader_accepts_utf8_sig_pointer_files(tmp_path: Path) -> None:
+    torch = _torch()
+    ctx, components = _build_dense_components(tmp_path / "source")
+    with torch.no_grad():
+        saved_param = next(components.model.model.parameters())
+        saved_param.fill_(0.125)
+        expected_param = saved_param.detach().clone()
+
+    checkpoint_path = Path(components.model.checkpoint_saver.save(name="epoch_5", ctx=ctx, components=components))
+    pointer_path = ctx.checkpoint_dir / "dense_cnn_latest_bom.txt"
+    pointer_path.write_text(str(checkpoint_path), encoding="utf-8-sig")
+
+    fresh_ctx, fresh_components = _build_dense_components(tmp_path / "fresh")
+    result = fresh_components.model.checkpoint_loader.load(
+        pointer_path,
+        ctx=fresh_ctx,
+        components=fresh_components,
+    )
+
+    restored_param = next(fresh_components.model.model.parameters()).detach()
+    assert result["status"] == "loaded"
+    assert result["epoch"] == 5
+    assert torch.allclose(restored_param, expected_param)
+
+
+def test_checkpoint_loader_skips_incompatible_model_but_recovers_sample_buffer(tmp_path: Path) -> None:
+    torch = _torch()
+    ctx, components = _build_dense_components(tmp_path / "source", _small_model_config({"architecture": {"channels": 4}}))
+    trainer = components.model.trainer
+    trainer.buffer.append(
+        {
+            "sample_id": "architecture-change-sample",
+            "turn_index": 1,
+            "current_player": "player0",
+            "phase": "Opening",
+            "center": (0, 0),
+            "stones": (),
+            "policy": [((0, 0), 1.0)],
+            "opp_policy": [((0, 0), 1.0)],
+            "value": -0.25,
+            "metadata": {"target_schema_version": 2},
+        }
+    )
+    with torch.no_grad():
+        next(components.model.model.parameters()).fill_(0.875)
+    checkpoint_path = Path(components.model.checkpoint_saver.save(name="epoch_3", ctx=ctx, components=components))
+    pointer_path = ctx.checkpoint_dir / "dense_cnn_latest.txt"
+    pointer_path.write_text(checkpoint_path.name, encoding="utf-8")
+
+    fresh_ctx, fresh_components = _build_dense_components(
+        tmp_path / "fresh",
+        _small_model_config({"architecture": {"channels": 5}}),
+    )
+    fresh_param_before = next(fresh_components.model.model.parameters()).detach().clone()
+
+    result = fresh_components.model.checkpoint_loader.load(
+        pointer_path,
+        ctx=fresh_ctx,
+        components=fresh_components,
+    )
+
+    restored_buffer = fresh_components.model.trainer.buffer
+    restored_sample = restored_buffer.entries[0].decode()
+    fresh_param_after = next(fresh_components.model.model.parameters()).detach()
+
+    assert result["status"] == "initialized"
+    assert "incompatible" in result["reason"]
+    assert result["checkpoint_epoch"] == 3
+    assert result["sample_count"] == 1
+    assert result["incompatible_tensors"]
+    assert torch.allclose(fresh_param_after, fresh_param_before)
+    assert restored_buffer.sample_count == 1
+    assert restored_sample.game_id == "architecture-change-sample"
+    assert restored_sample.value == pytest.approx(-0.25)
 
 
 def test_final_checkpoint_preserves_latest_epoch_for_future_resume(tmp_path: Path) -> None:
@@ -548,7 +642,73 @@ def test_finalize_samples_does_not_fake_missing_opponent_policy_with_current_pol
     assert finalized[1].metadata["opp_policy_source"] == "none"
 
 
-def test_selfplay_records_only_sample_budget_with_mcts_and_rolls_out_tail(
+def test_finalize_samples_accepts_compressed_pending_samples() -> None:
+    samples_module = importlib.import_module("hexo_models.dense_cnn.samples")
+    selfplay_module = _dense_cnn_selfplay_module()
+    sample = samples_module.Model1SampleData(
+        game_id="compressed-pending",
+        turn_index=0,
+        current_player="player0",
+        phase="Opening",
+        center=(0, 0),
+        stones=(),
+        legal_action_ids=(1,),
+        policy=((1, 1.0),),
+    )
+    compressed = samples_module.CompressedSample.from_data(sample, compression_level=1)
+
+    finalized = selfplay_module._finalize_game_samples(
+        [("player0", compressed, 0.0)],
+        winner="player0",
+        horizons=(),
+    )
+
+    assert len(finalized) == 1
+    assert finalized[0].game_id == "compressed-pending"
+    assert finalized[0].value == pytest.approx(1.0)
+
+
+def test_finalize_samples_omits_lookahead_without_future_mcts_root() -> None:
+    samples_module = importlib.import_module("hexo_models.dense_cnn.samples")
+    selfplay_module = _dense_cnn_selfplay_module()
+    first = samples_module.Model1SampleData(
+        game_id="lookahead-prefix",
+        turn_index=0,
+        current_player="player0",
+        phase="Opening",
+        center=(0, 0),
+        stones=(),
+        legal_action_ids=(1,),
+        policy=((1, 1.0),),
+    )
+    second = samples_module.Model1SampleData(
+        game_id="lookahead-prefix",
+        turn_index=1,
+        current_player="player1",
+        phase="FirstStone",
+        center=(0, 0),
+        stones=(),
+        legal_action_ids=(2,),
+        policy=((2, 1.0),),
+    )
+
+    finalized = selfplay_module._finalize_game_samples(
+        [("player0", first, 0.10), ("player1", second, -0.25)],
+        winner="player0",
+        horizons=(1, 4, 8),
+    )
+
+    assert finalized[0].value == pytest.approx(1.0)
+    assert len(finalized[0].lookahead) == 1
+    assert finalized[0].lookahead[0][0] == 1
+    assert finalized[0].lookahead[0][1] == pytest.approx(0.25)
+    assert finalized[1].value == pytest.approx(-1.0)
+    assert finalized[1].lookahead == ()
+    assert finalized[0].metadata["target_schema_version"] == 2
+    assert finalized[0].metadata["lookahead_target_semantics"] == "mcts_prefix_future_root_only_v2"
+
+
+def test_selfplay_keeps_mcts_samples_deeper_than_opening_before_rollout(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -566,7 +726,8 @@ def test_selfplay_records_only_sample_budget_with_mcts_and_rolls_out_tail(
                     "samples_per_epoch": 2,
                     "search_visits": 1,
                     "active_games": 4,
-                    "max_actions": 2,
+                    "min_mcts_samples_per_game": 2,
+                    "max_actions": 3,
                 },
                 "debug": {
                     "write_game_history": False,
@@ -641,8 +802,9 @@ def test_selfplay_records_only_sample_budget_with_mcts_and_rolls_out_tail(
     assert result["mcts_search_elapsed_seconds"] >= 0.0
     assert result["positions_per_second"] == result["end_to_end_positions_per_second"]
     assert result["end_to_end_positions_per_second"] <= result["search_positions_per_second"]
-    assert mcts_batch_sizes == [2]
+    assert mcts_batch_sizes == [1, 1]
     assert len(sampled_turns) == 2
+    assert [turn for _game_id, turn, _legal_count in sampled_turns] == [0, 1]
     assert rollout_batch_sizes, "non-sample tail moves should use policy rollout instead of MCTS"
 
 

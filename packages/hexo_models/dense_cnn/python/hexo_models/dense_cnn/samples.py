@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from math import exp, log
 from random import Random
 from typing import Any, Mapping, Sequence
@@ -17,6 +17,27 @@ from .constants import BOARD_SIZE
 from .input import build_input_planes, dense_policy_target, legal_mask_flat
 
 D6_TRANSFORMS = tuple(D6Symmetry(index) for index in range(D6_SIZE))
+CURRENT_TARGET_SCHEMA_VERSION = 2
+
+
+def _sample_buffer_load_stats(
+    *,
+    total: int = 0,
+    loaded: int = 0,
+    filtered_schema: int = 0,
+    filtered_decode_errors: int = 0,
+    dropped_by_capacity: int = 0,
+) -> dict[str, int]:
+    filtered = int(filtered_schema) + int(filtered_decode_errors) + int(dropped_by_capacity)
+    return {
+        "target_schema_version": int(CURRENT_TARGET_SCHEMA_VERSION),
+        "total": int(total),
+        "loaded": int(loaded),
+        "filtered": filtered,
+        "filtered_schema": int(filtered_schema),
+        "filtered_decode_errors": int(filtered_decode_errors),
+        "dropped_by_capacity": int(dropped_by_capacity),
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,6 +100,7 @@ class SampleBuffer:
     _samples: list[CompressedSample] = field(default_factory=list)
     _total_appended: int = 0
     _draw_count: int = 0
+    _last_load_stats: dict[str, int] = field(default_factory=_sample_buffer_load_stats)
 
     def __post_init__(self) -> None:
         if self.capacity < 200_000:
@@ -111,12 +133,22 @@ class SampleBuffer:
     def compact_samples(self) -> tuple[CompressedSample, ...]:
         return tuple(self._samples)
 
+    @property
+    def last_load_stats(self) -> dict[str, int]:
+        return dict(self._last_load_stats)
+
+    @property
+    def load_stats(self) -> dict[str, int]:
+        return self.last_load_stats
+
     def add(self, sample: Model1SampleData | CompressedSample | Mapping[str, Any]) -> None:
         self.append(sample)
 
     def append(self, sample: Model1SampleData | CompressedSample | Mapping[str, Any]) -> None:
         if isinstance(sample, Mapping):
             sample = raw_mapping_to_sample_data(sample)
+        elif isinstance(sample, Model1SampleData):
+            sample = _with_current_target_schema(sample)
         compressed = (
             sample
             if isinstance(sample, CompressedSample)
@@ -150,21 +182,38 @@ class SampleBuffer:
             ],
         }
 
-    def load_state_dict(self, state: Mapping[str, Any]) -> None:
+    def load_state_dict(self, state: Mapping[str, Any]) -> dict[str, int]:
         self.capacity = max(200_000, int(state.get("capacity", self.capacity)))
         self.recency_halflife = float(state.get("recency_halflife", self.recency_halflife))
         self.compression_level = int(state.get("compression_level", self.compression_level))
         self._total_appended = int(state.get("total_appended", 0))
         self._draw_count = int(state.get("draw_count", 0))
-        self._samples = [
-            CompressedSample(
-                payload=bytes(item["payload"]),
-                uncompressed_bytes=int(item["uncompressed_bytes"]),
-                compression=str(item.get("compression", "zlib+json")),
-                compressed=bool(item.get("compressed", True)),
-            )
-            for item in state.get("samples", ())
-        ][-self.capacity :]
+        loaded_samples: list[CompressedSample] = []
+        filtered_schema = 0
+        filtered_decode_errors = 0
+        raw_samples = tuple(state.get("samples") or ())
+        for item in raw_samples:
+            try:
+                compressed = _compressed_sample_from_state_item(item)
+                data = compressed.decode()
+            except (KeyError, TypeError, ValueError, zlib.error, json.JSONDecodeError, UnicodeDecodeError):
+                filtered_decode_errors += 1
+                continue
+            if _metadata_target_schema_version(data.metadata) != CURRENT_TARGET_SCHEMA_VERSION:
+                filtered_schema += 1
+                continue
+            loaded_samples.append(compressed)
+
+        dropped_by_capacity = max(0, len(loaded_samples) - self.capacity)
+        self._samples = loaded_samples[-self.capacity :]
+        self._last_load_stats = _sample_buffer_load_stats(
+            total=len(raw_samples),
+            loaded=len(self._samples),
+            filtered_schema=filtered_schema,
+            filtered_decode_errors=filtered_decode_errors,
+            dropped_by_capacity=dropped_by_capacity,
+        )
+        return self.last_load_stats
 
     def sample(self, count: int, *, seed: int | None = None) -> tuple[CompressedSample, ...]:
         if count <= 0 or not self._samples:
@@ -295,7 +344,12 @@ def raw_mapping_to_sample_data(sample: Mapping[str, Any]) -> Model1SampleData:
                 else sample.get("lookahead", ())
             )
         ),
-        metadata={**dict(sample.get("metadata", {})), "sample_id": sample_id, "sequence": sequence},
+        metadata={
+            "target_schema_version": CURRENT_TARGET_SCHEMA_VERSION,
+            **dict(sample.get("metadata", {})),
+            "sample_id": sample_id,
+            "sequence": sequence,
+        },
     )
 
 
@@ -316,6 +370,10 @@ def sample_from_state(
     authoritative engine state.
     """
 
+    resolved_metadata = {
+        **dict(metadata or {}),
+        "target_schema_version": CURRENT_TARGET_SCHEMA_VERSION,
+    }
     payload = rust_bridge.model1_sample_from_state(
         state,
         game_id=game_id,
@@ -324,13 +382,13 @@ def sample_from_state(
         value=value,
         opp_policy=opp_policy,
         lookahead=lookahead,
-        metadata=metadata,
+        metadata=resolved_metadata,
     )
     return _sample_data_from_json(payload)
 
 
 def finalize_game_samples(
-    pending: Sequence[tuple[str, Model1SampleData | Mapping[str, Any], float]],
+    pending: Sequence[tuple[str, Model1SampleData | CompressedSample | Mapping[str, Any], float]],
     winner: str | None,
     horizons: Sequence[int],
     *,
@@ -442,7 +500,46 @@ def _sample_data_from_json(data: Mapping[str, Any]) -> Model1SampleData:
     )
 
 
-def _sample_payload(sample: Model1SampleData | Mapping[str, Any]) -> Mapping[str, Any]:
+def _with_current_target_schema(sample: Model1SampleData) -> Model1SampleData:
+    if _metadata_target_schema_version(sample.metadata) == CURRENT_TARGET_SCHEMA_VERSION:
+        return sample
+    return replace(
+        sample,
+        metadata={
+            **dict(sample.metadata),
+            "target_schema_version": CURRENT_TARGET_SCHEMA_VERSION,
+        },
+    )
+
+
+def _metadata_target_schema_version(metadata: Mapping[str, Any]) -> int | None:
+    value = metadata.get("target_schema_version")
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _compressed_sample_from_state_item(item: object) -> CompressedSample:
+    if isinstance(item, CompressedSample):
+        return item
+    if isinstance(item, Mapping):
+        if "payload" in item:
+            return CompressedSample(
+                payload=bytes(item["payload"]),
+                uncompressed_bytes=int(item["uncompressed_bytes"]),
+                compression=str(item.get("compression", "zlib+json")),
+                compressed=bool(item.get("compressed", True)),
+            )
+        return CompressedSample.from_data(_sample_data_from_json(item))
+    raise TypeError(f"expected compressed sample state mapping, got {type(item).__name__}")
+
+
+def _sample_payload(sample: Model1SampleData | CompressedSample | Mapping[str, Any]) -> Mapping[str, Any]:
+    if isinstance(sample, CompressedSample):
+        return asdict(sample.decode())
     if isinstance(sample, Model1SampleData):
         return asdict(sample)
     if isinstance(sample, Mapping):

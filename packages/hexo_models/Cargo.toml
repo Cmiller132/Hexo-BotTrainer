@@ -16,3 +16,4 @@ python = ["dep:pyo3"]
 hexo_engine.workspace = true
 hexo_utils.workspace = true
 pyo3 = { workspace = true, optional = true }
+rayon.workspace = true

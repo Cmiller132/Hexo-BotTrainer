@@ -130,6 +130,14 @@ class DenseCNNTrainer:
                     symmetry = D6Symmetry(rng.randrange(12))
                     data = sample.decode() if isinstance(sample, CompressedSample) else sample
                     decoded = expand_sample(sample, symmetry=symmetry)
+                    for horizon in self.config.architecture.lookahead_horizons:
+                        key = f"lookahead_{int(horizon)}"
+                        mask_key = f"{key}_mask"
+                        if key in decoded:
+                            decoded[mask_key] = torch.tensor(1.0, dtype=torch.float32)
+                        else:
+                            decoded[key] = torch.tensor(0.0, dtype=torch.float32)
+                            decoded[mask_key] = torch.tensor(0.0, dtype=torch.float32)
                     if len(policy_preview) < 8:
                         nonzero = torch.nonzero(decoded["policy"] > 0, as_tuple=False).flatten().tolist()
                         opp_nonzero = torch.nonzero(decoded["opp_policy"] > 0, as_tuple=False).flatten().tolist()

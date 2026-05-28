@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import copy
+
 import torch
 from torch import nn
 from torch.nn import functional as F
+from torch.nn.utils.fusion import fuse_conv_bn_eval
 
 from .constants import (
     BOARD_AREA,
@@ -27,17 +30,37 @@ class HexConv2d(nn.Conv2d):
         mask[:, :, 0, 0] = 0.0
         mask[:, :, 2, 2] = 0.0
         self.register_buffer("hex_mask", mask, persistent=False)
+        self._cached_inference_weight: torch.Tensor | None = None
+        self._cached_inference_weight_version: int | None = None
+        self._cached_inference_weight_device: torch.device | None = None
+        self._cached_inference_weight_dtype: torch.dtype | None = None
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         return F.conv2d(
             input,
-            self.weight * self.hex_mask,
+            self.masked_weight(),
             self.bias,
             self.stride,
             self.padding,
             self.dilation,
             self.groups,
         )
+
+    def masked_weight(self) -> torch.Tensor:
+        if self.training or torch.is_grad_enabled():
+            return self.weight * self.hex_mask
+        version = int(getattr(self.weight, "_version", 0))
+        if (
+            self._cached_inference_weight is None
+            or self._cached_inference_weight_version != version
+            or self._cached_inference_weight_device != self.weight.device
+            or self._cached_inference_weight_dtype != self.weight.dtype
+        ):
+            self._cached_inference_weight = (self.weight * self.hex_mask).detach()
+            self._cached_inference_weight_version = version
+            self._cached_inference_weight_device = self.weight.device
+            self._cached_inference_weight_dtype = self.weight.dtype
+        return self._cached_inference_weight
 
 
 class GatedResBlock(nn.Module):
@@ -161,3 +184,75 @@ class Model1Network(nn.Module):
                 "Model1Network input shape after batch must be "
                 f"({self.in_channels}, {BOARD_SIZE}, {BOARD_SIZE}), got {tuple(x.shape[1:])}"
             )
+
+
+def optimized_model1_for_inference(model: nn.Module) -> nn.Module:
+    """Return a cloned eval-only model with HexConv/BatchNorm overhead folded away."""
+
+    optimized = copy.deepcopy(model).to("cpu").eval()
+    for module in optimized.modules():
+        if isinstance(module, GatedResBlock):
+            _fuse_gated_res_block(module)
+    _replace_remaining_hex_convs(optimized)
+    optimized.eval()
+    return optimized
+
+
+def _fuse_gated_res_block(block: GatedResBlock) -> None:
+    main = block.main
+    gate = block.gate
+    if (
+        isinstance(main, nn.Sequential)
+        and len(main) >= 5
+        and isinstance(main[0], HexConv2d)
+        and isinstance(main[1], nn.BatchNorm2d)
+        and isinstance(main[3], HexConv2d)
+        and isinstance(main[4], nn.BatchNorm2d)
+    ):
+        main[0] = fuse_conv_bn_eval(_hex_conv_as_conv2d(main[0]).eval(), main[1].eval())
+        main[1] = nn.Identity()
+        main[3] = fuse_conv_bn_eval(_hex_conv_as_conv2d(main[3]).eval(), main[4].eval())
+        main[4] = nn.Identity()
+    if (
+        isinstance(gate, nn.Sequential)
+        and len(gate) >= 2
+        and isinstance(gate[0], HexConv2d)
+        and isinstance(gate[1], nn.BatchNorm2d)
+    ):
+        gate[0] = fuse_conv_bn_eval(_hex_conv_as_conv2d(gate[0]).eval(), gate[1].eval())
+        gate[1] = nn.Identity()
+
+
+def _replace_remaining_hex_convs(module: nn.Module) -> None:
+    for name, child in list(module.named_children()):
+        if isinstance(child, HexConv2d):
+            _set_child_module(module, name, _hex_conv_as_conv2d(child))
+        else:
+            _replace_remaining_hex_convs(child)
+
+
+def _set_child_module(parent: nn.Module, name: str, child: nn.Module) -> None:
+    if isinstance(parent, nn.Sequential):
+        parent[int(name)] = child
+    else:
+        setattr(parent, name, child)
+
+
+def _hex_conv_as_conv2d(conv: HexConv2d) -> nn.Conv2d:
+    converted = nn.Conv2d(
+        conv.in_channels,
+        conv.out_channels,
+        conv.kernel_size,
+        stride=conv.stride,
+        padding=conv.padding,
+        dilation=conv.dilation,
+        groups=conv.groups,
+        bias=conv.bias is not None,
+        padding_mode=conv.padding_mode,
+        device=conv.weight.device,
+        dtype=conv.weight.dtype,
+    )
+    converted.weight.data.copy_(conv.masked_weight().detach())
+    if conv.bias is not None:
+        converted.bias.data.copy_(conv.bias.detach())
+    return converted

@@ -164,6 +164,50 @@ def test_hex_conv2d_masks_invalid_square_grid_corners() -> None:
     assert y[0, 0, 1, 1].item() == pytest.approx(35.0)
 
 
+def test_hex_conv2d_caches_masked_weight_only_for_inference() -> None:
+    torch = _torch()
+    api = _api()
+    conv = api.HexConv2d(1, 1, kernel_size=3, padding=1, bias=False)
+    conv.eval()
+
+    with torch.no_grad():
+        _conv_weight(conv).fill_(1.0)
+        first = conv.masked_weight()
+        second = conv.masked_weight()
+        _conv_weight(conv)[0, 0, 1, 1] = 2.0
+        third = conv.masked_weight()
+
+    assert first.data_ptr() == second.data_ptr()
+    assert third.data_ptr() != second.data_ptr()
+    assert third[0, 0, 1, 1].item() == pytest.approx(2.0)
+
+    conv.train()
+    x = torch.ones((1, 1, 3, 3))
+    y = conv(x).sum()
+    y.backward()
+    grad = _conv_weight(conv).grad[0, 0]
+    assert grad[0, 0].item() == pytest.approx(0.0)
+    assert grad[2, 2].item() == pytest.approx(0.0)
+    assert grad[1, 1].item() != pytest.approx(0.0)
+
+
+def test_inference_optimizer_folds_hex_convs_without_changing_outputs() -> None:
+    torch = _torch()
+    api = _api()
+    architecture = importlib.import_module("hexo_models.dense_cnn.architecture")
+    model = api.Model1Network(channels=8, blocks=1, lookahead_horizons=(1,)).eval()
+    optimized = architecture.optimized_model1_for_inference(model).eval()
+    inputs = torch.randn(2, model.in_channels, model.board_size, model.board_size)
+
+    with torch.no_grad():
+        expected = model.forward_policy_value(inputs)
+        actual = optimized.forward_policy_value(inputs)
+
+    assert not any(isinstance(module, api.HexConv2d) for module in optimized.modules())
+    for key in expected:
+        torch.testing.assert_close(actual[key], expected[key], rtol=1.0e-5, atol=1.0e-6)
+
+
 def test_gated_res_block_preserves_shape_and_exposes_sigmoid_gate() -> None:
     torch = _torch()
     api = _api()
@@ -236,5 +280,27 @@ def test_binned_value_loss_interpolates_scalar_targets_between_bins() -> None:
 
     target_distribution = _manual_binned_targets(targets, torch=torch)
     expected = -(target_distribution * torch.log_softmax(logits, dim=-1)).sum(dim=-1).mean()
+    assert loss.shape == ()
+    assert torch.allclose(loss, expected, atol=1.0e-6)
+
+
+def test_binned_value_loss_respects_sample_mask() -> None:
+    torch = _torch()
+    api = _api()
+    logits = torch.stack(
+        [
+            torch.linspace(-1.0, 1.0, 65),
+            torch.linspace(1.0, -1.0, 65),
+            torch.sin(torch.linspace(0.0, 3.14, 65)),
+        ]
+    )
+    targets = torch.tensor([-1.0, 0.2, 1.0])
+    mask = torch.tensor([1.0, 0.0, 1.0])
+
+    loss = api.binned_value_loss(logits, targets, mask=mask)
+
+    target_distribution = _manual_binned_targets(targets, torch=torch)
+    per_item = -(target_distribution * torch.log_softmax(logits, dim=-1)).sum(dim=-1)
+    expected = (per_item * mask).sum() / mask.sum()
     assert loss.shape == ()
     assert torch.allclose(loss, expected, atol=1.0e-6)

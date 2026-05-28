@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Hexo Match</title>
-<link rel="stylesheet" href="/static/styles.css">
+<link rel="stylesheet" href="/static/styles.css?v=20260528-learning-health">
 </head>
 <body>
 <header>
@@ -208,6 +208,9 @@
     </div>
 
     <div id="historyOverview" class="history-overview"></div>
+    <div id="historyLearningHealth" class="history-learning-health"></div>
+    <div id="historyEvalTrend" class="history-eval-trend"></div>
+    <div id="historyEpochProgress" class="history-epoch-progress"></div>
 
     <div class="history-filters" aria-label="Game history filters">
       <input id="historySearchInput" type="search" placeholder="Filter by game, path, player, epoch, source">
@@ -222,6 +225,13 @@
         <option value="player0">Winner P0</option>
         <option value="player1">Winner P1</option>
         <option value="none">No winner</option>
+      </select>
+      <select id="historySortSelect" aria-label="Sort game history">
+        <option value="newest">Newest first</option>
+        <option value="longest">Longest games</option>
+        <option value="shortest">Shortest games</option>
+        <option value="oldest">Oldest first</option>
+        <option value="winner">Winner</option>
       </select>
     </div>
 
@@ -245,6 +255,6 @@
     </div>
   </section>
 </main>
-<script src="/static/app.js"></script>
+<script src="/static/app.js?v=20260528-learning-health"></script>
 </body>
 </html>

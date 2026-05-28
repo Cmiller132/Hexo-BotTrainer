@@ -12,9 +12,11 @@ from hexo_runner.records import AbortRecord, HexoRecordFile, HexoRecordPlayer
 
 from .debug_artifacts import render_preview_game_actions
 from .inference import DenseCNNInference
-from .mcts import SearchResult, new_mcts_evaluation_cache, run_batched_mcts
+from .mcts import BatchedMctsSession, SearchResult, new_mcts_session, run_batched_mcts
 from .performance import _extend_mcts_diagnostic_batches, _summarize_mcts_diagnostic_batches
-from .samples import Model1SampleData, finalize_game_samples, sample_from_state
+from .samples import CompressedSample, Model1SampleData, finalize_game_samples, sample_from_state
+
+_ORIGINAL_RUN_BATCHED_MCTS = run_batched_mcts
 
 
 def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_epoch: int) -> dict[str, Any]:
@@ -50,7 +52,16 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
         HexoRecordPlayer("dense-cnn-a", "player0", "Dense CNN A"),
         HexoRecordPlayer("dense-cnn-b", "player1", "Dense CNN B"),
     )
-    active_limit = max(1, int(getattr(trainer, "selfplay_batch_size", config.selfplay.active_games)))
+    configured_active_limit = max(1, int(getattr(trainer, "selfplay_batch_size", config.selfplay.active_games)))
+    min_mcts_samples_per_game = max(1, int(config.selfplay.min_mcts_samples_per_game))
+    if target_samples > 0:
+        sample_depth_active_limit = max(
+            1,
+            (target_samples + min_mcts_samples_per_game - 1) // min_mcts_samples_per_game,
+        )
+        active_limit = min(configured_active_limit, sample_depth_active_limit)
+    else:
+        active_limit = configured_active_limit
     virtual_batch_size = getattr(trainer, "mcts_virtual_batch_size", None)
     progressive_widening_initial_actions = int(
         getattr(
@@ -87,9 +98,7 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
             config.selfplay.progressive_widening_growth_base,
         )
     )
-    evaluation_cache = new_mcts_evaluation_cache(
-        max_states=config.selfplay.mcts_evaluation_cache_max_states
-    )
+    mcts_session = new_mcts_session(max_states=config.selfplay.mcts_evaluation_cache_max_states)
     active_root_limit = max(
         1,
         int(getattr(trainer, "mcts_active_root_limit", config.selfplay.mcts_active_root_limit)),
@@ -108,6 +117,7 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
                 active.append(
                     {
                         "game_id": game_id,
+                        "search_key": next_game_index,
                         "seed": seed,
                         "state": engine.new_game(seed=seed),
                         "pending": [],
@@ -141,7 +151,8 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
                         progressive_widening_candidate_actions=progressive_widening_candidate_actions,
                         progressive_widening_growth_interval=progressive_widening_growth_interval,
                         progressive_widening_growth_base=progressive_widening_growth_base,
-                        evaluation_cache=evaluation_cache,
+                        evaluation_cache=None,
+                        mcts_session=mcts_session,
                         active_root_limit=active_root_limit,
                     )
                     if searches:
@@ -172,7 +183,11 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
                             "sample_source": "mcts",
                         },
                     )
-                    game["pending"].append((sample.current_player, sample, search.root_value))
+                    compressed_sample = CompressedSample.from_data(
+                        sample,
+                        compression_level=config.samples.compression_level,
+                    )
+                    game["pending"].append((sample.current_player, compressed_sample, search.root_value))
                     action = engine.PlacementAction(unpack_coord_id(search.action_id))
                     engine.apply_action(state, action)
                     game["actions"].append(search.action_id)
@@ -233,6 +248,7 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
                         }
                     )
                 active.remove(game)
+                mcts_session.discard(int(game["search_key"]))
 
     elapsed = perf_counter() - started
     search_positions_per_second = searched_positions / max(mcts_search_elapsed, 1.0e-9)
@@ -282,9 +298,12 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
             "mcts_sims_per_searched_position": (
                 mcts_simulations / searched_positions if searched_positions else 0.0
             ),
-            "completion_rollout": "model_policy_after_sample_budget",
+            "completion_rollout": "mcts_until_sample_budget_then_model_policy_rollout",
+            "configured_active_games": configured_active_limit,
             "active_games": active_limit,
+            "min_mcts_samples_per_game": min_mcts_samples_per_game,
             "mcts_virtual_batch_size": virtual_batch_size,
+            "mcts_tree_reuse_session": True,
             "mcts_progressive_widening_initial_actions": progressive_widening_initial_actions,
             "mcts_progressive_widening_child_initial_actions": progressive_widening_child_initial_actions,
             "mcts_progressive_widening_candidate_actions": progressive_widening_candidate_actions,
@@ -313,13 +332,17 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
         "search_positions_per_second": search_positions_per_second,
         "end_to_end_positions_per_second": end_to_end_positions_per_second,
         "samples_per_second": samples_added / max(elapsed, 1.0e-9),
-        "completion_rollout": "model_policy_after_sample_budget",
+        "completion_rollout": "mcts_until_sample_budget_then_model_policy_rollout",
+        "configured_active_games": configured_active_limit,
+        "active_games": active_limit,
+        "min_mcts_samples_per_game": min_mcts_samples_per_game,
+        "mcts_tree_reuse_session": True,
         "mcts_diagnostics": mcts_diagnostics,
     }
 
 
 def _finalize_game_samples(
-    pending: list[tuple[str, Model1SampleData, float]],
+    pending: list[tuple[str, Model1SampleData | CompressedSample, float]],
     winner: str | None,
     horizons: tuple[int, ...],
     *,
@@ -346,8 +369,29 @@ def _search_playable_games(
     progressive_widening_growth_interval: float | None = None,
     progressive_widening_growth_base: float | None = None,
     evaluation_cache: object | None = None,
+    mcts_session: BatchedMctsSession | None = None,
     active_root_limit: int | None = None,
 ) -> list[SearchResult]:
+    if (
+        mcts_session is not None
+        and run_batched_mcts is _ORIGINAL_RUN_BATCHED_MCTS
+        and hasattr(inference, "evaluate_model1_payload")
+    ):
+        return mcts_session.run(
+            [int(game["search_key"]) for game in playable],
+            [game["state"] for game in playable],
+            inference,
+            visits=visits,
+            temperature=temperature,
+            seed=seed,
+            virtual_batch_size=virtual_batch_size,
+            progressive_widening_initial_actions=progressive_widening_initial_actions,
+            progressive_widening_child_initial_actions=progressive_widening_child_initial_actions,
+            progressive_widening_candidate_actions=progressive_widening_candidate_actions,
+            progressive_widening_growth_interval=progressive_widening_growth_interval,
+            progressive_widening_growth_base=progressive_widening_growth_base,
+            active_root_limit=active_root_limit,
+        )
     return run_batched_mcts(
         [game["state"] for game in playable],
         inference,

@@ -1672,7 +1672,7 @@ body:not(.tactics-on) .tactic-legend {
 .history-page {
   min-height: calc(100vh - 72px);
   display: grid;
-  grid-template-rows: auto auto auto minmax(0, 1fr);
+  grid-template-rows: auto auto auto auto auto auto minmax(0, 1fr);
   gap: 10px;
 }
 
@@ -1706,6 +1706,232 @@ body:not(.tactics-on) .tactic-legend {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 8px;
+}
+
+.history-learning-health,
+.history-eval-trend,
+.history-epoch-progress {
+  min-width: 0;
+}
+
+.learning-health-panel {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 170px minmax(260px, 0.75fr) minmax(0, 1fr);
+  gap: 10px;
+  align-items: stretch;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: rgba(7, 13, 19, 0.48);
+}
+
+.learning-health-panel.watch {
+  border-color: rgba(255, 206, 86, 0.36);
+}
+
+.learning-health-panel.intervene {
+  border-color: rgba(255, 92, 92, 0.48);
+}
+
+.learning-health-panel.improving {
+  border-color: rgba(54, 211, 153, 0.38);
+}
+
+.learning-health-head {
+  display: grid;
+  gap: 4px;
+  align-content: center;
+}
+
+.learning-health-head span,
+.learning-health-metrics span,
+.learning-health-messages {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.learning-health-head span {
+  font-weight: 900;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+
+.learning-health-head strong {
+  color: var(--text);
+  font-size: 18px;
+}
+
+.learning-health-metrics {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.learning-health-metrics div {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+  padding: 7px 8px;
+  border: 1px solid rgba(143, 155, 170, 0.20);
+  border-radius: 5px;
+  background: rgba(7, 13, 19, 0.54);
+}
+
+.learning-health-metrics strong,
+.learning-health-messages div {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.learning-health-metrics strong {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.learning-health-messages {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+  align-content: center;
+}
+
+.eval-trend-panel,
+.epoch-progress-panel {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(220px, 320px) minmax(0, 1fr);
+  gap: 10px;
+  align-items: stretch;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: rgba(7, 13, 19, 0.44);
+}
+
+.eval-trend-head,
+.epoch-progress-head {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+  align-content: center;
+}
+
+.eval-trend-head span,
+.eval-trend-head small,
+.eval-trend-row span,
+.eval-trend-empty,
+.epoch-progress-head span,
+.epoch-progress-row span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.eval-trend-head span,
+.epoch-progress-head span {
+  font-weight: 900;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+
+.eval-trend-head strong,
+.epoch-progress-head strong {
+  color: var(--text);
+  font-size: 15px;
+  line-height: 1.2;
+}
+
+.eval-trend-list {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(142px, 1fr));
+  gap: 7px;
+}
+
+.eval-trend-row {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+  padding: 7px 8px;
+  border: 1px solid rgba(143, 155, 170, 0.20);
+  border-radius: 5px;
+  background: rgba(7, 13, 19, 0.54);
+}
+
+.eval-trend-row.has-win {
+  border-color: rgba(54, 211, 153, 0.34);
+}
+
+.eval-trend-row strong,
+.eval-trend-row span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.eval-trend-row strong {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.epoch-progress-panel {
+  grid-template-columns: minmax(180px, 260px) minmax(0, 1fr);
+}
+
+.epoch-progress-table {
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.epoch-progress-row {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 72px minmax(150px, 1.2fr) minmax(120px, 1fr) minmax(110px, 0.9fr) minmax(88px, 0.7fr) 84px;
+  gap: 8px;
+  align-items: center;
+  padding: 7px 8px;
+  border: 1px solid rgba(143, 155, 170, 0.20);
+  border-radius: 5px;
+  background: rgba(7, 13, 19, 0.54);
+}
+
+.epoch-progress-row.partial {
+  border-color: rgba(39, 215, 230, 0.30);
+}
+
+.epoch-progress-row strong,
+.epoch-progress-row span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.epoch-progress-row strong {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.epoch-progress-header {
+  padding-top: 0;
+  padding-bottom: 0;
+  border: 0;
+  background: transparent;
+}
+
+.epoch-progress-header span {
+  font-weight: 900;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+
+.eval-trend-empty {
+  padding: 8px 2px;
 }
 
 .history-metric-card,
@@ -1757,7 +1983,7 @@ body:not(.tactics-on) .tactic-legend {
 
 .history-filters {
   display: grid;
-  grid-template-columns: minmax(260px, 1fr) 180px 180px;
+  grid-template-columns: minmax(260px, 1fr) 180px 180px 180px;
   gap: 8px;
 }
 
@@ -2019,7 +2245,10 @@ body:not(.tactics-on) .tactic-legend {
 
 @media (max-width: 1120px) {
   .history-page-head,
-  .history-layout {
+  .history-layout,
+  .learning-health-panel,
+  .eval-trend-panel,
+  .epoch-progress-panel {
     grid-template-columns: 1fr;
   }
 
@@ -2046,6 +2275,14 @@ body:not(.tactics-on) .tactic-legend {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .learning-health-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .epoch-progress-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .game-history-select {
     grid-column: 1 / -1;
   }
@@ -2063,7 +2300,8 @@ body:not(.tactics-on) .tactic-legend {
 @media (max-width: 520px) {
   .training-toolbar,
   .history-page-actions,
-  .game-history-row {
+  .game-history-row,
+  .learning-health-metrics {
     grid-template-columns: 1fr;
   }
 }
