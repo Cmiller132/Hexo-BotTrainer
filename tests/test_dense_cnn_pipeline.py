@@ -314,6 +314,9 @@ def test_dense_cnn_model1_config_writes_to_repo_level_run_and_checkpoint_paths()
     assert parsed.selfplay.root_dirichlet_noise_fraction == pytest.approx(0.25)
     assert parsed.selfplay.root_dirichlet_total_alpha == pytest.approx(10.83)
     assert parsed.selfplay.root_policy_temperature == pytest.approx(1.1)
+    assert parsed.selfplay.widening_policy_mass == pytest.approx(0.95)
+    assert parsed.selfplay.widening_max_children == 32
+    assert parsed.selfplay.widening_min_children == 2
     assert parsed.selfplay.fpu_reduction == pytest.approx(0.20)
     assert parsed.selfplay.virtual_loss == pytest.approx(1.0)
     assert parsed.selfplay.mcts_session_cache_max_states == 1_048_576

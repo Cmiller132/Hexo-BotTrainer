@@ -65,6 +65,9 @@ class BatchedMctsSession:
         root_policy_temperature: float | None = None,
         fpu_reduction: float | None = None,
         virtual_loss: float | None = None,
+        widening_policy_mass: float | None = None,
+        widening_max_children: int | None = None,
+        widening_min_children: int | None = None,
     ) -> list["SearchResult"]:
         """Search live root states through the native dense-cnn MCTS session.
 
@@ -92,6 +95,9 @@ class BatchedMctsSession:
             root_policy_temperature=root_policy_temperature,
             fpu_reduction=fpu_reduction,
             virtual_loss=virtual_loss,
+            widening_policy_mass=widening_policy_mass,
+            widening_max_children=widening_max_children,
+            widening_min_children=widening_min_children,
         )
         return [_result_from_payload(payload) for payload in payloads]
 

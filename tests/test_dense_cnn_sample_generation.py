@@ -112,6 +112,9 @@ def test_mcts_session_search_forwards_slim_signature(monkeypatch: Any) -> None:
             root_policy_temperature: float | None,
             fpu_reduction: float | None,
             virtual_loss: float | None,
+            widening_policy_mass: float | None,
+            widening_max_children: int | None,
+            widening_min_children: int | None,
         ) -> tuple[dict[str, Any], ...]:
             calls["args"] = {
                 "game_keys": game_keys,
@@ -128,6 +131,9 @@ def test_mcts_session_search_forwards_slim_signature(monkeypatch: Any) -> None:
                 "root_policy_temperature": root_policy_temperature,
                 "fpu_reduction": fpu_reduction,
                 "virtual_loss": virtual_loss,
+                "widening_policy_mass": widening_policy_mass,
+                "widening_max_children": widening_max_children,
+                "widening_min_children": widening_min_children,
             }
             return (
                 {
@@ -178,6 +184,9 @@ def test_mcts_session_search_forwards_slim_signature(monkeypatch: Any) -> None:
         "root_policy_temperature": 1.1,
         "fpu_reduction": None,
         "virtual_loss": None,
+        "widening_policy_mass": None,
+        "widening_max_children": None,
+        "widening_min_children": None,
     }
     assert payloads[0]["action_id"] == 7
 

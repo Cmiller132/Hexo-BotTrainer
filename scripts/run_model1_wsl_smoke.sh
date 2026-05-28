@@ -163,7 +163,7 @@ assert BOARD_SIZE == 41 and INPUT_CHANNELS == 13
 assert cfg.selfplay.max_actions == 1024
 assert cfg.evaluation.max_actions == 1024
 assert cfg.selfplay.search_visits == 128
-assert caps["model1_mcts_all_legal_candidates"]
+assert caps["model1_mcts_policy_nucleus_widening"]
 assert caps["model1_mcts_tree_reuse_session"]
 
 print(json.dumps({

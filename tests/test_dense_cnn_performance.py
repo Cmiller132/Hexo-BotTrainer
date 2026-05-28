@@ -626,7 +626,8 @@ def test_dense_cnn_rust_capabilities_smoke() -> None:
     assert capabilities["model_family"] == "dense_cnn"
     assert capabilities["state_source"] == "direct_engine_state"
     assert capabilities["model1_batch_inputs"] is True
-    assert capabilities["model1_mcts_all_legal_candidates"] is True
+    assert capabilities["model1_mcts_policy_nucleus_widening"] is True
+    assert "model1_mcts_all_legal_candidates" not in capabilities
     assert capabilities["model1_mcts_tree_reuse_session"] is True
     assert capabilities["model1_mcts_session_search"] is True
     assert capabilities["model1_mcts_tree_reuse_reference"] == "KataGo_Search_makeMove_promote_child"
@@ -859,6 +860,9 @@ def test_dense_cnn_mcts_python_boundary_delegates_to_rust(monkeypatch: pytest.Mo
         root_policy_temperature: float | None,
         fpu_reduction: float | None,
         virtual_loss: float | None,
+        widening_policy_mass: float | None,
+        widening_max_children: int | None,
+        widening_min_children: int | None,
     ) -> tuple[Mapping[str, Any], ...]:
         calls.append(
             {
@@ -877,6 +881,9 @@ def test_dense_cnn_mcts_python_boundary_delegates_to_rust(monkeypatch: pytest.Mo
                 "root_policy_temperature": root_policy_temperature,
                 "fpu_reduction": fpu_reduction,
                 "virtual_loss": virtual_loss,
+                "widening_policy_mass": widening_policy_mass,
+                "widening_max_children": widening_max_children,
+                "widening_min_children": widening_min_children,
             }
         )
         return (
@@ -941,6 +948,9 @@ def test_dense_cnn_mcts_python_boundary_delegates_to_rust(monkeypatch: pytest.Mo
             "root_policy_temperature": None,
             "fpu_reduction": None,
             "virtual_loss": None,
+            "widening_policy_mass": None,
+            "widening_max_children": None,
+            "widening_min_children": None,
         }
     ]
 

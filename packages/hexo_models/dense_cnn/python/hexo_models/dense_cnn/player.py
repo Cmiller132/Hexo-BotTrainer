@@ -67,6 +67,9 @@ class DenseCNNPlayer:
             root_policy_temperature=selfplay.root_policy_temperature,
             fpu_reduction=selfplay.fpu_reduction,
             virtual_loss=selfplay.virtual_loss,
+            widening_policy_mass=selfplay.widening_policy_mass,
+            widening_max_children=selfplay.widening_max_children,
+            widening_min_children=selfplay.widening_min_children,
         )[0]
         action = engine.PlacementAction(unpack_coord_id(search.action_id))
         return DecisionResult(

@@ -366,6 +366,9 @@ def _benchmark_selfplay_setting(
             root_policy_temperature=config.selfplay.root_policy_temperature,
             fpu_reduction=config.selfplay.fpu_reduction,
             virtual_loss=config.selfplay.virtual_loss,
+            widening_policy_mass=config.selfplay.widening_policy_mass,
+            widening_max_children=config.selfplay.widening_max_children,
+            widening_min_children=config.selfplay.widening_min_children,
         )
         if searches:
             _extend_mcts_diagnostic_batches(mcts_diagnostic_batches, searches)

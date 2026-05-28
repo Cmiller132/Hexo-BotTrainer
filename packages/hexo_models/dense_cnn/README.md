@@ -138,10 +138,19 @@ budget before optimizer work, and row-count regressions do not mint free budget.
 ## MCTS
 
 Dense-cnn MCTS uses only engine-legal moves represented by the current dense
-crop. The evaluator returns exactly one prior per in-crop legal move, so every
-legal candidate is staged at a node and an edge is materialized lazily when PUCT
-selects it. There is no progressive widening, no candidate cap, and no hidden
-prior mass; out-of-crop legal moves are simply not part of the policy contract.
+crop. The evaluator returns one prior per in-crop legal move; each is staged at a
+node and an edge is materialized lazily when PUCT selects it. Out-of-crop legal
+moves are simply not part of the policy contract.
+
+**Policy-nucleus widening** bounds branching for the large action space: each node
+may only ever materialize its top-prior moves whose cumulative prior reaches
+`widening_policy_mass` (top-p, default 0.95), clamped to
+`[widening_min_children, widening_max_children]` (default 2..32). The cap is
+computed once from the prior distribution at expansion time — no visit-based
+growth schedule. A confident (sharp) policy considers few moves; a flat
+early-training or Dirichlet-noised root considers more. This replaced the earlier
+"all legal candidates" behavior and the removed Chaslot-style progressive
+widening.
 
 At the root, the model prior is softened by `root_policy_temperature` and then
 mixed with Dirichlet noise whose total concentration `root_dirichlet_total_alpha`

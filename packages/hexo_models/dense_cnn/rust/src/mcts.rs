@@ -27,7 +27,7 @@ use super::mcts_eval::{
 };
 use super::mcts_tree::{
     terminal_value, RootDirichletNoise, RustEdge, RustLeaf, RustNode, RustSearch,
-    RustSearchDiagnostics,
+    RustSearchDiagnostics, Widening,
 };
 use super::state::states_from_py_states;
 
@@ -78,7 +78,7 @@ impl Model1MctsSession {
         self.searches.len()
     }
 
-    #[pyo3(signature = (game_keys, states, visits, c_puct, temperature, seed, evaluator, virtual_batch_size=None, active_root_limit=None, root_dirichlet_total_alpha=None, root_dirichlet_noise_fraction=None, root_policy_temperature=None, fpu_reduction=None, virtual_loss=None))]
+    #[pyo3(signature = (game_keys, states, visits, c_puct, temperature, seed, evaluator, virtual_batch_size=None, active_root_limit=None, root_dirichlet_total_alpha=None, root_dirichlet_noise_fraction=None, root_policy_temperature=None, fpu_reduction=None, virtual_loss=None, widening_policy_mass=None, widening_max_children=None, widening_min_children=None))]
     fn search(
         &mut self,
         py: Python<'_>,
@@ -96,6 +96,9 @@ impl Model1MctsSession {
         root_policy_temperature: Option<f32>,
         fpu_reduction: Option<f32>,
         virtual_loss: Option<f32>,
+        widening_policy_mass: Option<f32>,
+        widening_max_children: Option<u32>,
+        widening_min_children: Option<u32>,
     ) -> PyResult<Py<PyAny>> {
         // Validate true native-search boundaries here. The Python wrapper is a
         // transport layer and intentionally does not duplicate these checks.
@@ -135,6 +138,27 @@ impl Model1MctsSession {
         let virtual_loss = validate_nonnegative_f32("virtual_loss", virtual_loss.unwrap_or(1.0))?;
         let root_noise_config =
             root_noise_config(root_dirichlet_total_alpha, root_dirichlet_noise_fraction)?;
+
+        let widening_mass = widening_policy_mass.unwrap_or(0.95);
+        if !widening_mass.is_finite() || widening_mass <= 0.0 || widening_mass > 1.0 {
+            return Err(PyValueError::new_err("widening_policy_mass must be in (0, 1]"));
+        }
+        let widening = Widening {
+            mass: widening_mass,
+            min_children: validate_positive_u32(
+                "widening_min_children",
+                widening_min_children.unwrap_or(2),
+            )? as usize,
+            max_children: validate_positive_u32(
+                "widening_max_children",
+                widening_max_children.unwrap_or(32),
+            )? as usize,
+        };
+        if widening.min_children > widening.max_children {
+            return Err(PyValueError::new_err(
+                "widening_min_children must be <= widening_max_children",
+            ));
+        }
 
         let mut searches: Vec<Option<RustSearch>> = Vec::with_capacity(roots.len());
         let mut missing_indices = Vec::new();
@@ -181,6 +205,7 @@ impl Model1MctsSession {
                     fpu_reduction,
                     root_policy_temperature,
                     root_noise(root_noise_config, seed, index),
+                    widening,
                 )?);
             }
         }

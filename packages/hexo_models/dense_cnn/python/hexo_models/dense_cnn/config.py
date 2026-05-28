@@ -70,6 +70,9 @@ class Model1SelfPlayConfig:
     root_policy_temperature: float = 1.1
     fpu_reduction: float = 0.20
     virtual_loss: float = 1.0
+    widening_policy_mass: float = 0.95
+    widening_max_children: int = 32
+    widening_min_children: int = 2
     mcts_session_cache_max_states: int = 1_048_576
     mcts_active_root_limit: int = 1024
     max_actions: int = 1024
@@ -172,6 +175,9 @@ def parse_model1_config(raw: Mapping[str, Any] | None) -> Model1Config:
             root_policy_temperature=float(selfplay.get("root_policy_temperature", 1.1)),
             fpu_reduction=float(selfplay.get("fpu_reduction", 0.20)),
             virtual_loss=float(selfplay.get("virtual_loss", 1.0)),
+            widening_policy_mass=float(selfplay.get("widening_policy_mass", 0.95)),
+            widening_max_children=int(selfplay.get("widening_max_children", 32)),
+            widening_min_children=int(selfplay.get("widening_min_children", 2)),
             mcts_session_cache_max_states=int(selfplay.get("mcts_session_cache_max_states", 1_048_576)),
             mcts_active_root_limit=int(selfplay.get("mcts_active_root_limit", 1024)),
             max_actions=int(selfplay.get("max_actions", 1024)),

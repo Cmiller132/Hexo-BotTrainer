@@ -31,7 +31,11 @@ pub fn capabilities(py: Python<'_>) -> PyResult<Py<PyAny>> {
     dict.set_item("state_source", "direct_engine_state")?;
     dict.set_item("coordinate_encoding", "u32_i16_pair")?;
     dict.set_item("model1_batch_inputs", true)?;
-    dict.set_item("model1_mcts_all_legal_candidates", true)?;
+    dict.set_item("model1_mcts_policy_nucleus_widening", true)?;
+    dict.set_item(
+        "model1_mcts_policy_nucleus_widening_reference",
+        "nucleus_top_p_policy_pruning",
+    )?;
     dict.set_item("model1_mcts_tree_reuse_session", true)?;
     dict.set_item("model1_mcts_session_search", true)?;
     dict.set_item(

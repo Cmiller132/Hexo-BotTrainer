@@ -57,12 +57,15 @@ def model1_mcts_session_search(
     root_policy_temperature: float | None = None,
     fpu_reduction: float | None = None,
     virtual_loss: float | None = None,
+    widening_policy_mass: float | None = None,
+    widening_max_children: int | None = None,
+    widening_min_children: int | None = None,
 ) -> tuple[Mapping[str, Any], ...]:
     """Search through a native MCTS session, preserving chosen subtrees.
 
     Arguments are forwarded in the PyO3 signature order expected by
-    `rust/src/mcts.rs`. The session searches every legal move at each node; there
-    is no progressive widening or candidate cap.
+    `rust/src/mcts.rs`. Each node materializes at most a policy-nucleus subset of
+    its legal moves (top-p widening).
     """
 
     return tuple(
@@ -81,6 +84,9 @@ def model1_mcts_session_search(
             root_policy_temperature,
             fpu_reduction,
             virtual_loss,
+            widening_policy_mass,
+            widening_max_children,
+            widening_min_children,
         )
     )
 

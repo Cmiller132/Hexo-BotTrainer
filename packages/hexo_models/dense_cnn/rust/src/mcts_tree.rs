@@ -89,6 +89,14 @@ impl RustPriorCandidate {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Widening {
+    /// Cumulative policy mass (top-p / nucleus) a node's candidate set must cover.
+    pub(crate) mass: f32,
+    pub(crate) min_children: usize,
+    pub(crate) max_children: usize,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct RustNode {
     pub(crate) state_hash: StateHash,
@@ -100,6 +108,9 @@ pub(crate) struct RustNode {
     // KataGo-style staged children: keep legal policy candidates compact and
     // materialize an edge only when PUCT actually selects that move.
     pub(crate) unexpanded_priors: Vec<RustPriorCandidate>,
+    // Policy-nucleus widening cap: the most edges this node may ever materialize,
+    // computed once from the prior distribution at expansion time.
+    pub(crate) max_eligible_children: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -133,6 +144,7 @@ pub(crate) struct RustSearch {
     pub(crate) target_visits: u32,
     pub(crate) completed_visits: u32,
     fpu_reduction: f32,
+    widening: Widening,
     active_edge_count: usize,
     max_active_edges_per_node: usize,
 }
@@ -164,6 +176,7 @@ impl RustSearch {
         fpu_reduction: f32,
         root_policy_temperature: f32,
         root_noise: Option<RootDirichletNoise>,
+        widening: Widening,
     ) -> PyResult<Self> {
         // The root node starts with priors staged but no active edges. Edges are
         // materialized lazily by `select_or_materialize_edge` according to PUCT
@@ -175,6 +188,7 @@ impl RustSearch {
             evaluation,
             Some(root_policy_temperature),
             root_noise,
+            widening,
         )?;
         let mut node_table = HashMap::new();
         node_table.insert(root_hash, 0);
@@ -186,6 +200,7 @@ impl RustSearch {
             target_visits,
             completed_visits: 0,
             fpu_reduction,
+            widening,
             active_edge_count: 0,
             max_active_edges_per_node: 0,
         })
@@ -264,7 +279,7 @@ impl RustSearch {
             return Ok(existing);
         }
         let id = self.nodes.len();
-        let node = node_from_evaluation(hash, state, evaluation, None, None)?;
+        let node = node_from_evaluation(hash, state, evaluation, None, None, self.widening)?;
         self.nodes.push(node);
         self.node_table.insert(hash, id);
         Ok(id)
@@ -373,22 +388,29 @@ impl RustSearch {
             }
         }
 
-        if let Some(candidate) = self.nodes[node_id].unexpanded_priors.last() {
-            let score = candidate.prior * exploration_scale;
-            let candidate_key = (usize::MAX, score, 0, candidate.action_id);
-            let replace = match best {
-                Some(current) => compare_edge_score(candidate_key, current) == Ordering::Greater,
-                None => true,
-            };
-            if replace {
-                let candidate = self.nodes[node_id]
-                    .unexpanded_priors
-                    .pop()
-                    .expect("last prior candidate exists");
-                let edge_index = self.nodes[node_id].edges.len();
-                self.nodes[node_id].edges.push(candidate.into_edge());
-                self.record_materialized_edge(node_id);
-                return Some(edge_index);
+        // Policy-nucleus widening: only ever materialize up to `max_eligible_children`
+        // edges (the top-prior moves covering the configured policy mass). Once the
+        // cap is reached the candidate set is closed and PUCT chooses among edges.
+        let can_widen =
+            self.nodes[node_id].edges.len() < self.nodes[node_id].max_eligible_children;
+        if can_widen {
+            if let Some(candidate) = self.nodes[node_id].unexpanded_priors.last() {
+                let score = candidate.prior * exploration_scale;
+                let candidate_key = (usize::MAX, score, 0, candidate.action_id);
+                let replace = match best {
+                    Some(current) => compare_edge_score(candidate_key, current) == Ordering::Greater,
+                    None => true,
+                };
+                if replace {
+                    let candidate = self.nodes[node_id]
+                        .unexpanded_priors
+                        .pop()
+                        .expect("last prior candidate exists");
+                    let edge_index = self.nodes[node_id].edges.len();
+                    self.nodes[node_id].edges.push(candidate.into_edge());
+                    self.record_materialized_edge(node_id);
+                    return Some(edge_index);
+                }
             }
         }
 
@@ -554,6 +576,7 @@ fn node_from_evaluation(
     evaluation: &RustEvaluation,
     root_policy_temperature: Option<f32>,
     root_noise: Option<RootDirichletNoise>,
+    widening: Widening,
 ) -> PyResult<RustNode> {
     // The evaluator returns one prior per in-crop legal move, so every legal
     // candidate is staged here. Root-policy temperature softens the prior at the
@@ -578,6 +601,9 @@ fn node_from_evaluation(
     }
     candidates.sort_by(compare_prior_candidate);
     candidates.reverse();
+    // Compute the policy-nucleus cap from the final (normalized, possibly noised)
+    // prior distribution. Static for the node's lifetime — no visit-based growth.
+    let max_eligible_children = nucleus_count(&candidates, widening);
     Ok(RustNode {
         state_hash,
         player: state.current_player(),
@@ -586,7 +612,35 @@ fn node_from_evaluation(
         value_sum: 0.0,
         edges: Vec::new(),
         unexpanded_priors: candidates,
+        max_eligible_children,
     })
+}
+
+fn nucleus_count(candidates: &[RustPriorCandidate], widening: Widening) -> usize {
+    // Smallest set of top-prior candidates whose cumulative prior reaches
+    // `widening.mass`, clamped to [min_children, min(max_children, total)]. Priors
+    // are already normalized to sum 1.0, so the cumulative cutoff is well defined.
+    let total = candidates.len();
+    if total == 0 {
+        return 0;
+    }
+    let lo = widening.min_children.max(1).min(total);
+    let hi = widening.max_children.max(lo).min(total);
+    if lo >= hi {
+        return hi;
+    }
+    let mut priors: Vec<f32> = candidates.iter().map(|candidate| candidate.prior).collect();
+    priors.sort_by(|a, b| b.partial_cmp(a).unwrap_or(Ordering::Equal));
+    let mut cumulative = 0.0f32;
+    let mut count = 0usize;
+    for prior in priors {
+        cumulative += prior;
+        count += 1;
+        if cumulative >= widening.mass {
+            break;
+        }
+    }
+    count.clamp(lo, hi)
 }
 
 fn apply_root_policy_temperature(candidates: &mut [RustPriorCandidate], temperature: f32) {
@@ -759,6 +813,18 @@ mod tests {
 
     use super::*;
 
+    fn wide(mass: f32, min_children: usize, max_children: usize) -> Widening {
+        Widening {
+            mass,
+            min_children,
+            max_children,
+        }
+    }
+
+    fn wide_open() -> Widening {
+        wide(1.0, 1, usize::MAX)
+    }
+
     fn evaluation_with_priors(count: usize) -> RustEvaluation {
         let priors = (0..count)
             .map(|index| {
@@ -778,24 +844,76 @@ mod tests {
         }
     }
 
+    fn uniform_evaluation(count: usize) -> RustEvaluation {
+        let priors = (0..count)
+            .map(|index| (pack_coord(HexCoord { q: index as i16, r: 0 }), 1.0))
+            .collect();
+        RustEvaluation {
+            value: 0.0,
+            legal_action_count: count,
+            priors,
+        }
+    }
+
+    fn candidates(priors: &[f32]) -> Vec<RustPriorCandidate> {
+        priors
+            .iter()
+            .enumerate()
+            .map(|(index, &prior)| RustPriorCandidate {
+                action_id: pack_coord(HexCoord {
+                    q: index as i16,
+                    r: 0,
+                }),
+                prior,
+            })
+            .collect()
+    }
+
     #[test]
-    fn root_stages_every_legal_prior_without_a_cap() {
+    fn nucleus_count_picks_smallest_set_covering_mass() {
+        // Sharp policy: the top move already covers 0.9, the second reaches 0.95.
+        assert_eq!(nucleus_count(&candidates(&[0.9, 0.05, 0.03, 0.02]), wide(0.95, 1, 32)), 2);
+        // Flat policy: needs all four to reach 0.95.
+        assert_eq!(nucleus_count(&candidates(&[0.25, 0.25, 0.25, 0.25]), wide(0.95, 1, 32)), 4);
+    }
+
+    #[test]
+    fn nucleus_count_respects_min_and_max_clamps() {
+        // Very sharp: cutoff would be 1, but the floor lifts it to 2.
+        assert_eq!(nucleus_count(&candidates(&[0.99, 0.01]), wide(0.95, 2, 32)), 2);
+        // Flat over 16: cutoff would be ~16, but max_children caps it at 4.
+        let flat: Vec<f32> = (0..16).map(|_| 1.0 / 16.0).collect();
+        assert_eq!(nucleus_count(&candidates(&flat), wide(0.95, 2, 4)), 4);
+    }
+
+    #[test]
+    fn widening_caps_materialized_edges_under_many_visits() {
         let state = RustHexoState::new();
-        let node = node_from_evaluation(0, &state, &evaluation_with_priors(200), Some(1.0), None).unwrap();
-        assert_eq!(node.edges.len(), 0);
-        assert_eq!(node.unexpanded_priors.len(), 200);
-        // Highest prior is staged last so PUCT pops it first.
-        assert_eq!(
-            node.unexpanded_priors.last().unwrap().action_id,
-            pack_coord(HexCoord { q: 199, r: 0 })
-        );
+        let mut search =
+            RustSearch::new(state, &uniform_evaluation(16), 128, 0.20, 1.0, None, wide(0.95, 2, 4))
+                .unwrap();
+        assert_eq!(search.nodes[0].max_eligible_children, 4);
+        let mut materialized = 0;
+        for _ in 0..16 {
+            match search.select_or_materialize_edge(0, 1.5) {
+                Some(edge_index) => {
+                    search.nodes[0].edges[edge_index].pending = 1;
+                    materialized += 1;
+                }
+                None => break,
+            }
+        }
+        assert_eq!(materialized, 4);
+        assert_eq!(search.nodes[0].edges.len(), 4);
+        assert_eq!(search.nodes[0].unexpanded_priors.len(), 12);
     }
 
     #[test]
     fn edges_materialize_lazily_in_prior_order() {
         let state = RustHexoState::new();
         let mut search =
-            RustSearch::new(state, &evaluation_with_priors(8), 128, 0.20, 1.0, None).unwrap();
+            RustSearch::new(state, &evaluation_with_priors(8), 128, 0.20, 1.0, None, wide_open())
+                .unwrap();
         for _ in 0..8 {
             let edge_index = search.select_or_materialize_edge(0, 1.5).unwrap();
             search.nodes[0].edges[edge_index].pending = 1;
@@ -812,8 +930,12 @@ mod tests {
     #[test]
     fn root_policy_temperature_flattens_priors() {
         let state = RustHexoState::new();
-        let sharp = node_from_evaluation(0, &state, &evaluation_with_priors(4), Some(1.0), None).unwrap();
-        let flat = node_from_evaluation(0, &state, &evaluation_with_priors(4), Some(2.0), None).unwrap();
+        let sharp =
+            node_from_evaluation(0, &state, &evaluation_with_priors(4), Some(1.0), None, wide_open())
+                .unwrap();
+        let flat =
+            node_from_evaluation(0, &state, &evaluation_with_priors(4), Some(2.0), None, wide_open())
+                .unwrap();
         let sharp_top = sharp.unexpanded_priors.last().unwrap().prior;
         let flat_top = flat.unexpanded_priors.last().unwrap().prior;
         // Temperature > 1 reduces the gap between the top prior and uniform.
