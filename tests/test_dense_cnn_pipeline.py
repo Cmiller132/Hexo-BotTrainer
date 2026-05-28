@@ -60,7 +60,6 @@ def _small_model_config(overrides: Mapping[str, Any] | None = None) -> dict[str,
             "max_train_bucket_size": 16,
         },
         "samples": {
-            "compression_level": 1,
             "shuffle_min_rows": 1,
             "shuffle_keep_target_rows": 32,
             "approx_rows_per_out_file": 8,
@@ -167,7 +166,6 @@ def _write_pipeline_config(tmp_path: Path) -> Path:
                 "max_train_bucket_size = 16",
                 "",
                 "[model.config.samples]",
-                "compression_level = 1",
                 "shuffle_min_rows = 1",
                 "shuffle_keep_target_rows = 32",
                 "approx_rows_per_out_file = 8",
@@ -311,15 +309,11 @@ def test_dense_cnn_model1_config_writes_to_repo_level_run_and_checkpoint_paths()
     assert config.selfplay.games_per_epoch == 256
     assert parsed.selfplay.search_visits == 128
     assert parsed.selfplay.active_games == 1024
-    assert parsed.selfplay.progressive_widening_initial_actions == 8
-    assert parsed.selfplay.progressive_widening_child_initial_actions == 4
-    assert parsed.selfplay.progressive_widening_candidate_actions == 128
-    assert parsed.selfplay.progressive_widening_growth_interval == pytest.approx(256.0)
-    assert parsed.selfplay.progressive_widening_growth_base == pytest.approx(1.3)
+    assert parsed.selfplay.c_puct == pytest.approx(1.5)
     assert parsed.selfplay.root_dirichlet_noise_enabled is True
     assert parsed.selfplay.root_dirichlet_noise_fraction == pytest.approx(0.25)
-    assert parsed.selfplay.root_dirichlet_alpha == pytest.approx(0.03)
-    assert parsed.selfplay.hidden_prior_mass == pytest.approx(0.05)
+    assert parsed.selfplay.root_dirichlet_total_alpha == pytest.approx(10.83)
+    assert parsed.selfplay.root_policy_temperature == pytest.approx(1.1)
     assert parsed.selfplay.fpu_reduction == pytest.approx(0.20)
     assert parsed.selfplay.virtual_loss == pytest.approx(1.0)
     assert parsed.selfplay.mcts_session_cache_max_states == 1_048_576
@@ -359,16 +353,9 @@ def test_dense_cnn_model_config_rejects_legacy_or_clamped_values() -> None:
     with pytest.raises(ValueError, match="min_mcts_samples_per_game"):
         dense_cnn.parse_model1_config({"selfplay": {"min_mcts_samples_per_game": 1}})
     with pytest.raises(ValueError, match="hidden_prior_mass"):
-        dense_cnn.parse_model1_config({"selfplay": {"hidden_prior_mass": 1.5}})
-    with pytest.raises(ValueError, match="active_games"):
-        dense_cnn.parse_model1_config({"selfplay": {"active_games": 2, "mcts_active_root_limit": 1}})
-    with pytest.raises(ValueError, match="selfplay_batch_candidates"):
-        dense_cnn.parse_model1_config(
-            {
-                "selfplay": {"active_games": 1, "mcts_active_root_limit": 1},
-                "performance": {"selfplay_batch_candidates": [2]},
-            }
-        )
+        dense_cnn.parse_model1_config({"selfplay": {"hidden_prior_mass": 0.05}})
+    with pytest.raises(ValueError, match="progressive_widening_candidate_actions"):
+        dense_cnn.parse_model1_config({"selfplay": {"progressive_widening_candidate_actions": 128}})
     with pytest.raises(ValueError, match="capacity"):
         dense_cnn.parse_model1_config({"samples": {"capacity": 1024}})
     with pytest.raises(ValueError, match="train_sample_count"):
@@ -542,7 +529,7 @@ def test_dense_train_bucket_starts_zero_and_row_regression_does_not_grant_budget
         channels=arch.channels,
         blocks=arch.residual_blocks,
         dropout=arch.dropout,
-        lookahead_horizons=arch.lookahead_horizons,
+        short_term_value_horizons=arch.short_term_value_horizons,
     )
     trainer = trainer_module.DenseCNNTrainer(
         model=model,
@@ -682,37 +669,11 @@ def test_finalize_samples_does_not_fake_missing_opponent_policy_with_current_pol
     assert finalized[1].metadata["opp_policy_source"] == "none"
 
 
-def test_finalize_samples_accepts_compressed_pending_samples() -> None:
-    samples_module = importlib.import_module("hexo_models.dense_cnn.samples")
-    selfplay_module = _dense_cnn_selfplay_module()
-    sample = samples_module.Model1SampleData(
-        game_id="compressed-pending",
-        turn_index=0,
-        current_player="player0",
-        phase="Opening",
-        center=(0, 0),
-        stones=(),
-        legal_action_ids=(1,),
-        policy=((1, 1.0),),
-    )
-    compressed = samples_module.CompressedSample.from_data(sample, compression_level=1)
-
-    finalized = selfplay_module._finalize_game_samples(
-        [("player0", compressed, 0.0)],
-        winner="player0",
-        horizons=(),
-    )
-
-    assert len(finalized) == 1
-    assert finalized[0].game_id == "compressed-pending"
-    assert finalized[0].value == pytest.approx(1.0)
-
-
-def test_finalize_samples_omits_lookahead_without_future_mcts_root() -> None:
+def test_finalize_samples_omits_short_term_value_without_future_decisions() -> None:
     samples_module = importlib.import_module("hexo_models.dense_cnn.samples")
     selfplay_module = _dense_cnn_selfplay_module()
     first = samples_module.Model1SampleData(
-        game_id="lookahead-prefix",
+        game_id="stv-prefix",
         turn_index=0,
         current_player="player0",
         phase="Opening",
@@ -722,7 +683,7 @@ def test_finalize_samples_omits_lookahead_without_future_mcts_root() -> None:
         policy=((1, 1.0),),
     )
     second = samples_module.Model1SampleData(
-        game_id="lookahead-prefix",
+        game_id="stv-prefix",
         turn_index=1,
         current_player="player1",
         phase="FirstStone",
@@ -738,14 +699,14 @@ def test_finalize_samples_omits_lookahead_without_future_mcts_root() -> None:
         horizons=(1, 4, 8),
     )
 
+    # decision 0 has one future decision (player1, root -0.25) -> from player0's
+    # perspective +0.25; with a single future term the EMA equals it for every
+    # horizon. decision 1 has no future decision, so it carries no short-term value.
     assert finalized[0].value == pytest.approx(1.0)
-    assert len(finalized[0].lookahead) == 1
-    assert finalized[0].lookahead[0][0] == 1
-    assert finalized[0].lookahead[0][1] == pytest.approx(0.25)
+    assert finalized[0].short_term_value == ((1, pytest.approx(0.25)), (4, pytest.approx(0.25)), (8, pytest.approx(0.25)))
     assert finalized[1].value == pytest.approx(-1.0)
-    assert finalized[1].lookahead == ()
-    assert finalized[0].metadata["target_schema_version"] == 3
-    assert finalized[0].metadata["lookahead_target_semantics"] == "mcts_prefix_future_root_only_v2"
+    assert finalized[1].short_term_value == ()
+    assert finalized[0].metadata["target_schema_version"] == samples_module.CURRENT_TARGET_SCHEMA_VERSION
 
 
 def test_selfplay_searches_every_playable_move_until_games_finish(
@@ -843,22 +804,18 @@ def test_selfplay_searches_every_playable_move_until_games_finish(
         games_per_epoch=4,
     )
 
-    assert result["selfplay_mode"] == "game_driven_all_mcts"
     assert result["requested_games"] == 4
     assert result["games_started"] == 4
     assert result["games_finished"] == 4
     assert result["completed_games"] == 0
-    assert result["no_policy_rollout_tails"] is True
-    assert result["samples_added"] == 12
+    assert result["effective_samples"] == 12
     assert result["searched_positions"] == 12
     assert result["mcts_simulations"] == 12
     assert result["mcts_search_elapsed_seconds"] >= 0.0
-    assert result["positions_per_second"] == result["end_to_end_positions_per_second"]
-    assert result["end_to_end_positions_per_second"] <= result["search_positions_per_second"]
+    assert result["positions_per_second"] <= result["search_positions_per_second"]
     assert mcts_batch_sizes == [4, 4, 4]
     assert len(sampled_turns) == 12
     assert [turn for _game_id, turn, _legal_count in sampled_turns] == [0] * 4 + [1] * 4 + [2] * 4
-    assert not hasattr(selfplay_module, "_policy_rollout_actions")
 
 
 def test_selfplay_rejects_under_counted_mcts_results(

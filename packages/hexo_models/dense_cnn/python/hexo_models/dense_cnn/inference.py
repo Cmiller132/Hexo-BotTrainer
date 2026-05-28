@@ -202,6 +202,10 @@ class DenseCNNInference:
             value_batch = outputs["value"]
         values_tensor = decode_binned_value(value_batch).cpu().contiguous()
 
+        if "legal_flat_indices_bytes" not in payload or "legal_row_offsets" not in payload:
+            raise ValueError(
+                "dense_cnn MCTS evaluator payload requires legal_flat_indices_bytes and legal_row_offsets"
+            )
         offsets = _legal_row_offsets(payload["legal_row_offsets"], rows=shape[0])
         selected_count = offsets[-1]
         _require_byte_length("legal_flat_indices_bytes", payload["legal_flat_indices_bytes"], selected_count, 8)

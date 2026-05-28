@@ -195,7 +195,7 @@ def test_inference_optimizer_folds_hex_convs_without_changing_outputs() -> None:
     torch = _torch()
     api = _api()
     architecture = importlib.import_module("hexo_models.dense_cnn.architecture")
-    model = api.Model1Network(channels=8, blocks=1, lookahead_horizons=(1,)).eval()
+    model = api.Model1Network(channels=8, blocks=1, short_term_value_horizons=(1,)).eval()
     optimized = architecture.optimized_model1_for_inference(model).eval()
     inputs = torch.randn(2, model.in_channels, model.board_size, model.board_size)
 
@@ -230,10 +230,10 @@ def test_gated_res_block_preserves_shape_and_exposes_sigmoid_gate() -> None:
     assert torch.all(gate_values <= 1.0)
 
 
-def test_forward_returns_policy_value_lookahead_and_opponent_policy_logits() -> None:
+def test_forward_returns_policy_value_short_term_value_and_opponent_policy_logits() -> None:
     torch = _torch()
     api = _api()
-    model = _make_model(api, lookahead_horizons=(1, 4))
+    model = _make_model(api, short_term_value_horizons=(1, 4))
     model.eval()
 
     with torch.no_grad():
@@ -241,8 +241,8 @@ def test_forward_returns_policy_value_lookahead_and_opponent_policy_logits() -> 
 
     assert outputs["policy"].shape == (3, 41 * 41)
     assert outputs["value"].shape == (3, 65)
-    assert outputs["lookahead_1"].shape == (3, 65)
-    assert outputs["lookahead_4"].shape == (3, 65)
+    assert outputs["stvalue_1"].shape == (3, 65)
+    assert outputs["stvalue_4"].shape == (3, 65)
     assert outputs["opp_policy"].shape == (3, 41 * 41)
 
 

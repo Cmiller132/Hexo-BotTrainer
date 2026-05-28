@@ -93,7 +93,7 @@ def test_selfplay_npz_writer_uses_fixed_schema_and_sidecar(tmp_path: Path) -> No
         raw_rows=2,
         epoch=3,
         game_id="game",
-        lookahead_horizons=(1, 4),
+        short_term_value_horizons=(1, 4),
     )
 
     assert result.path.exists()
@@ -104,7 +104,7 @@ def test_selfplay_npz_writer_uses_fixed_schema_and_sidecar(tmp_path: Path) -> No
         assert data[replay.POLICY_KEY].shape[1:] == (1, 41, 41)
         assert data[replay.ROOT_POLICY_KEY].shape[1:] == (1, 41, 41)
         assert data[replay.LEGAL_MASK_KEY].dtype == np.bool_
-        assert data[replay.LOOKAHEAD_KEY].shape == (len(rows), 2)
+        assert data[replay.SHORT_TERM_VALUE_KEY].shape == (len(rows), 2)
         assert data[replay.METADATA_KEY].shape == (len(rows), 4)
     sidecar = json.loads(result.sidecar_path.read_text(encoding="utf-8"))
     assert sidecar["num_rows"] == len(rows)
@@ -125,7 +125,7 @@ def test_npz_row_count_reads_header_when_sidecar_is_missing(
         raw_rows=3,
         epoch=1,
         game_id="game",
-        lookahead_horizons=(),
+        short_term_value_horizons=(),
     ).path
     replay.sidecar_for_npz(path).unlink()
 
@@ -149,7 +149,7 @@ def test_katago_shuffle_builds_latest_batch_aligned_train_dir(tmp_path: Path) ->
         raw_rows=4,
         epoch=1,
         game_id="old",
-        lookahead_horizons=(),
+        short_term_value_horizons=(),
     ).path
     new_path = replay.write_selfplay_npz(
         selfplay_dir / "new.npz",
@@ -157,7 +157,7 @@ def test_katago_shuffle_builds_latest_batch_aligned_train_dir(tmp_path: Path) ->
         raw_rows=4,
         epoch=2,
         game_id="new",
-        lookahead_horizons=(),
+        short_term_value_horizons=(),
     ).path
     old_time = 100.0
     new_time = 200.0

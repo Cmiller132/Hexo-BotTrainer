@@ -69,7 +69,7 @@ input_channels = 13
 channels = 64
 residual_blocks = 4
 dropout = 0.0
-lookahead_horizons = [1, 4, 8]
+short_term_value_horizons = [1, 4, 8]
 
 [model.config.training]
 batch_size = 128
@@ -101,11 +101,6 @@ validation_fraction = 0.0
 [model.config.selfplay]
 search_visits = 128
 active_games = $ACTIVE_GAMES
-progressive_widening_initial_actions = 8
-progressive_widening_child_initial_actions = 4
-progressive_widening_candidate_actions = 128
-progressive_widening_growth_interval = 256.0
-progressive_widening_growth_base = 1.3
 mcts_session_cache_max_states = 1048576
 mcts_active_root_limit = 1024
 max_actions = 1024
@@ -168,9 +163,7 @@ assert BOARD_SIZE == 41 and INPUT_CHANNELS == 13
 assert cfg.selfplay.max_actions == 1024
 assert cfg.evaluation.max_actions == 1024
 assert cfg.selfplay.search_visits == 128
-assert cfg.selfplay.progressive_widening_candidate_actions == 128
-assert caps["model1_mcts_progressive_widening"]
-assert caps["model1_mcts_lazy_staged_edges"]
+assert caps["model1_mcts_all_legal_candidates"]
 assert caps["model1_mcts_tree_reuse_session"]
 
 print(json.dumps({
