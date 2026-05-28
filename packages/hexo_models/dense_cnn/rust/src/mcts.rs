@@ -17,9 +17,10 @@ use pyo3::types::{PyBytes, PyDict, PyList, PyTuple};
 use rayon::prelude::*;
 use std::collections::HashMap;
 
-use hexo_engine::PackedCoord;
+use hexo_engine::{unpack_coord, HexoState as RustHexoState, PackedCoord};
 
 use super::constants::{MODEL1_ACTIVE_ROOT_LIMIT, MODEL1_EVAL_CACHE_MAX_STATES};
+use super::encoding::{model1_crop_center, model1_flat_index};
 use super::mcts_eval::{
     evaluate_model1_state_refs_cached, evaluate_model1_states_cached, new_shared_evaluation_cache,
     new_shared_evaluation_stats, state_hash, EvaluationStats, RustEvaluationRequest,
@@ -427,6 +428,8 @@ fn build_search_result_payloads(
         let root = search.root();
         let baseline = baselines.and_then(|items| items.get(index));
         let (policy_action_ids, policy_weights, policy_total) = visit_policy(root, baseline);
+        let (root_prior_action_ids, root_prior_weights) =
+            root_prior_policy(root, &search.root_state);
         let selected = select_action_from_policy(
             &policy_action_ids,
             &policy_weights,
@@ -456,6 +459,29 @@ fn build_search_result_payloads(
         )?;
         result.set_item("visit_policy_weights_bytes", PyBytes::new(py, weight_bytes))?;
         result.set_item("visit_policy_count", policy_action_ids.len())?;
+        let prior_action_byte_len = root_prior_action_ids.len() * std::mem::size_of::<u32>();
+        let prior_weight_byte_len = root_prior_weights.len() * std::mem::size_of::<f32>();
+        let prior_action_bytes = unsafe {
+            std::slice::from_raw_parts(
+                root_prior_action_ids.as_ptr() as *const u8,
+                prior_action_byte_len,
+            )
+        };
+        let prior_weight_bytes = unsafe {
+            std::slice::from_raw_parts(
+                root_prior_weights.as_ptr() as *const u8,
+                prior_weight_byte_len,
+            )
+        };
+        result.set_item(
+            "root_prior_policy_action_ids_bytes",
+            PyBytes::new(py, prior_action_bytes),
+        )?;
+        result.set_item(
+            "root_prior_policy_weights_bytes",
+            PyBytes::new(py, prior_weight_bytes),
+        )?;
+        result.set_item("root_prior_policy_count", root_prior_action_ids.len())?;
         result.set_item("root_value", root.value())?;
         result.set_item("visits", policy_total)?;
         result.set_item(
@@ -466,6 +492,50 @@ fn build_search_result_payloads(
     }
 
     Ok(results.into_any().unbind())
+}
+
+fn root_prior_policy(root: &RustNode, state: &RustHexoState) -> (Vec<PackedCoord>, Vec<f32>) {
+    let mut priors: HashMap<PackedCoord, f32> = HashMap::with_capacity(
+        root.total_legal_actions
+            .max(root.edges.len() + root.unexpanded_priors.len()),
+    );
+    for edge in &root.edges {
+        if edge.prior.is_finite() && edge.prior > 0.0 {
+            priors.insert(edge.action_id, edge.prior);
+        }
+    }
+    for candidate in &root.unexpanded_priors {
+        if candidate.prior.is_finite() && candidate.prior > 0.0 {
+            priors.insert(candidate.action_id, candidate.prior);
+        }
+    }
+    if root.hidden_prior_per_action.is_finite() && root.hidden_prior_per_action > 0.0 {
+        let center = model1_crop_center(state);
+        let mut legal_action_ids = Vec::with_capacity(root.total_legal_actions);
+        state.write_legal_action_ids(&mut legal_action_ids);
+        for action_id in legal_action_ids {
+            if priors.contains_key(&action_id) {
+                continue;
+            }
+            if model1_flat_index(unpack_coord(action_id), center).is_some() {
+                priors.insert(action_id, root.hidden_prior_per_action);
+            }
+        }
+    }
+    let mut pairs: Vec<(PackedCoord, f32)> = priors.into_iter().collect();
+    pairs.sort_unstable_by_key(|(action_id, _prior)| *action_id);
+    let action_ids: Vec<PackedCoord> = pairs
+        .iter()
+        .map(|(action_id, _prior)| *action_id)
+        .collect();
+    let mut weights: Vec<f32> = pairs.into_iter().map(|(_action_id, prior)| prior).collect();
+    let total: f32 = weights.iter().copied().sum();
+    if total > 0.0 {
+        for weight in &mut weights {
+            *weight /= total;
+        }
+    }
+    (action_ids, weights)
 }
 
 fn validate_search_inputs(visits: u32, c_puct: f32, temperature: f32) -> PyResult<()> {

@@ -22,9 +22,7 @@ import torch
 from . import rust_bridge
 from .architecture import Model1Network, optimized_model1_for_inference
 from .constants import BOARD_SIZE, INPUT_CHANNELS, PLANE_LEGAL
-from .d6 import unpack_coord_pair
 from .losses import decode_binned_value
-from .samples import CompressedSample, Model1SampleData, expand_sample, stack_expanded
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,60 +119,6 @@ class DenseCNNInference:
                     legal_action_ids=legal_action_ids,
                     legal_priors=_legal_priors_from_flats(policy_logits, legal_action_ids, legal_flat_indices),
                     diagnostics={"device": str(self.device), "amp": self.amp, "batched": len(states) > 1, "encoder": "rust"},
-                )
-            )
-        return results
-
-    @torch.no_grad()
-    def infer_samples(
-        self,
-        samples: Sequence[CompressedSample | Model1SampleData],
-        *,
-        batch_size: int | None = None,
-    ) -> list[dict[str, torch.Tensor]]:
-        """Run batch inference over compact samples without changing them."""
-
-        if not samples:
-            return []
-        resolved_batch = len(samples) if batch_size is None else int(batch_size)
-        if resolved_batch <= 0:
-            raise ValueError("batch_size must be > 0")
-        outputs: list[dict[str, torch.Tensor]] = []
-        for start in range(0, len(samples), resolved_batch):
-            chunk = samples[start : start + resolved_batch]
-            batch = stack_expanded([expand_sample(sample) for sample in chunk])
-            model_outputs = self.infer_inputs(batch["input"])
-            for row in range(model_outputs["policy"].shape[0]):
-                outputs.append({key: value[row].cpu() for key, value in model_outputs.items()})
-        return outputs
-
-    @torch.no_grad()
-    def infer_batch(
-        self,
-        samples: Sequence[CompressedSample | Model1SampleData],
-    ) -> list[InferenceResult]:
-        """Return decoded inference results for a compact-sample batch."""
-
-        if not samples:
-            return []
-        expanded = [expand_sample(sample) for sample in samples]
-        batch = stack_expanded(expanded)
-        model_outputs = self.infer_inputs(batch["input"], batch_size=len(samples))
-        results: list[InferenceResult] = []
-        for index, sample in enumerate(samples):
-            data = sample.decode() if isinstance(sample, CompressedSample) else sample
-            policy_logits = model_outputs["policy"][index]
-            value_logits = model_outputs["value"][index]
-            value = float(decode_binned_value(value_logits.unsqueeze(0))[0].item())
-            priors = _legal_priors(policy_logits, data.legal_action_ids, data.center)
-            results.append(
-                InferenceResult(
-                    policy_logits=policy_logits,
-                    value_logits=value_logits,
-                    value=value,
-                    legal_action_ids=data.legal_action_ids,
-                    legal_priors=priors,
-                    diagnostics={"device": str(self.device), "amp": self.amp, "batched": True},
                 )
             )
         return results
@@ -329,32 +273,6 @@ class DenseCNNInference:
             result["selected_flat_indices_bytes"] = selected_flats.contiguous().numpy().tobytes()
             result["selected_row_offsets"] = tuple(int(item) for item in selected_offsets)
         return result
-
-
-def _legal_priors(
-    logits: torch.Tensor,
-    legal_action_ids: Sequence[int],
-    center: tuple[int, int],
-) -> dict[int, float]:
-    if not legal_action_ids:
-        return {}
-    flats: list[int] = []
-    valid_ids: list[int] = []
-    center_q, center_r = int(center[0]), int(center[1])
-    half = BOARD_SIZE // 2
-    for action_id in legal_action_ids:
-        q, r = unpack_coord_pair(action_id)
-        row = r - center_r + half
-        col = q - center_q + half
-        if not 0 <= row < BOARD_SIZE or not 0 <= col < BOARD_SIZE:
-            raise ValueError(f"legal action {int(action_id)} is outside the dense_cnn inference crop")
-        valid_ids.append(int(action_id))
-        flats.append(row * BOARD_SIZE + col)
-    if not flats:
-        raise ValueError("dense_cnn inference received legal actions but no in-crop policy indices")
-    index = torch.as_tensor(flats, dtype=torch.long, device=logits.device)
-    probs = torch.softmax(logits.index_select(0, index), dim=0).tolist()
-    return {action_id: float(prob) for action_id, prob in zip(valid_ids, probs)}
 
 
 def _legal_priors_from_flats(

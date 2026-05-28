@@ -22,20 +22,19 @@ from hexo_runner.records import AbortRecord, HexoRecordFile, HexoRecordPlayer
 from .inference import DenseCNNInference
 from .mcts import BatchedMctsSession, SearchResult, new_mcts_session
 from .performance import _extend_mcts_diagnostic_batches, _summarize_mcts_diagnostic_batches
+from .replay import materialize_policy_surprise_rows, write_selfplay_npz
 from .samples import CompressedSample, Model1SampleData, finalize_game_samples, sample_from_state
 
 def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_epoch: int) -> dict[str, Any]:
     """Generate one epoch of dense_cnn self-play samples.
 
-    The function is called by `hexo_train`. It mutates only model-owned
-    components: the replay buffer and dense-cnn diagnostics. Game truth remains
-    in `hexo_engine`, and MCTS search state remains in the native dense-cnn
-    session.
+    The function is called by `hexo_train`. It writes finalized dense training
+    rows as self-play NPZ shards. Game truth remains in `hexo_engine`, and MCTS
+    search state remains in the native dense-cnn session.
     """
 
     trainer = components.model.trainer
     config = trainer.config
-    buffer = trainer.buffer
     inference = DenseCNNInference(
         components.model.model,
         device=trainer.device,
@@ -51,6 +50,7 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
     record_dir.mkdir(parents=True, exist_ok=True)
     record_path = record_dir / f"epoch_{epoch:06d}.hxr"
     samples_added = 0
+    raw_samples_added = 0
     searched_positions = 0
     mcts_simulations = 0
     games_started = 0
@@ -58,6 +58,7 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
     truncated_games = 0
     mcts_search_elapsed = 0.0
     mcts_diagnostic_batches: list[Mapping[str, Any]] = []
+    npz_writes: list[Mapping[str, Any]] = []
     started = perf_counter()
 
     players = (
@@ -209,6 +210,7 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
                         game_id=game["game_id"],
                         turn_index=len(game["actions"]),
                         policy=search.visit_policy,
+                        root_prior_policy=search.root_prior_policy,
                         value=search.root_value,
                         metadata={
                             "epoch": epoch,
@@ -259,8 +261,32 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
                     config.architecture.lookahead_horizons,
                     truncated=truncated,
                 )
-                buffer.extend(finalized)
-                samples_added += len(finalized)
+                materialized, weight_stats = materialize_policy_surprise_rows(
+                    finalized,
+                    seed=(ctx.config.run.seed or 0) + epoch * 1_000_000_003 + int(game["search_key"]),
+                )
+                npz_path = record_dir / f"epoch_{epoch:06d}_game_{int(game['search_key']):06d}.npz"
+                write_result = write_selfplay_npz(
+                    npz_path,
+                    materialized,
+                    raw_rows=len(finalized),
+                    epoch=epoch,
+                    game_id=str(game["game_id"]),
+                    lookahead_horizons=config.architecture.lookahead_horizons,
+                )
+                raw_samples_added += len(finalized)
+                samples_added += len(materialized)
+                npz_writes.append(
+                    {
+                        "path": str(write_result.path),
+                        "sidecar_path": str(write_result.sidecar_path),
+                        "game_id": write_result.game_id,
+                        "raw_rows": write_result.raw_rows,
+                        "effective_rows": write_result.effective_rows,
+                        "policy_surprise_mean": weight_stats["policy_surprise_mean"],
+                        "frequency_weight_mean": weight_stats["frequency_weight_mean"],
+                    }
+                )
                 active.remove(game)
                 # A finished game cannot legally reuse its old native root.
                 mcts_session.discard(int(game["search_key"]))
@@ -281,6 +307,9 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
             "completed_games": completed_games,
             "truncated_games": truncated_games,
             "samples_added": samples_added,
+            "raw_samples_added": raw_samples_added,
+            "effective_samples_added": samples_added,
+            "selfplay_npz_files": len(npz_writes),
             "searched_positions": searched_positions,
             "mcts_simulations": mcts_simulations,
             "mcts_search_elapsed_seconds": mcts_search_elapsed,
@@ -311,6 +340,7 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
             "mcts_session_cache_max_states": config.selfplay.mcts_session_cache_max_states,
             "mcts_active_root_limit": active_root_limit,
             "mcts_diagnostics": mcts_diagnostics,
+            "npz_writes": npz_writes,
         },
     )
     return {
@@ -324,9 +354,11 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
         "games": completed_games,
         "truncated_games": truncated_games,
         "samples_added": samples_added,
+        "raw_samples_added": raw_samples_added,
+        "effective_samples_added": samples_added,
         "searched_positions": searched_positions,
         "mcts_simulations": mcts_simulations,
-        "buffer_count": buffer.sample_count,
+        "selfplay_npz_files": len(npz_writes),
         "record_path": str(record_path),
         "debug_path": str(debug_path),
         "elapsed_seconds": elapsed,

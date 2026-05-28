@@ -98,7 +98,13 @@ class TrainingPipeline:
             ctx.config,
         )
         manifest = write_run_manifest(ctx)
-        sample_store = prepare_sample_store(ctx, components)
+        if components.model.uses_shared_sample_store:
+            sample_store = prepare_sample_store(ctx, components)
+        else:
+            sample_store = {
+                "status": "skipped",
+                "reason": "model owns replay storage",
+            }
         return {
             "config": str(normalized_config),
             "manifest": str(manifest),

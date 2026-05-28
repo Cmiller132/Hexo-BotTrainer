@@ -41,14 +41,24 @@ class Model1TrainingConfig:
     lookahead_weight: float = 0.25
     amp: bool = True
     max_grad_norm: float = 1.0
+    train_samples_per_epoch: int = 100_000
+    max_train_bucket_per_new_data: float = 8.0
+    max_train_bucket_size: float = 500_000.0
+    no_repeat_files: bool = True
+    max_validation_samples: int = 100_000
 
 
 @dataclass(frozen=True, slots=True)
 class Model1SampleConfig:
-    capacity: int = 200_000
-    train_sample_count: int = 4096
-    recency_halflife: float = 50_000.0
     compression_level: int = 6
+    shuffle_min_rows: int = 100_000
+    shuffle_keep_target_rows: int = 600_000
+    shuffle_taper_window_exponent: float = 0.65
+    shuffle_expand_window_per_row: float = 0.4
+    shuffle_taper_window_scale: float = 50_000.0
+    approx_rows_per_out_file: int = 70_000
+    shuffle_worker_group_size: int = 80_000
+    validation_fraction: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,12 +156,27 @@ def parse_model1_config(raw: Mapping[str, Any] | None) -> Model1Config:
             "lookahead_weight",
             "amp",
             "max_grad_norm",
+            "train_samples_per_epoch",
+            "max_train_bucket_per_new_data",
+            "max_train_bucket_size",
+            "no_repeat_files",
+            "max_validation_samples",
         },
     )
     samples = _section(
         config,
         "samples",
-        {"capacity", "train_sample_count", "recency_halflife", "compression_level"},
+        {
+            "compression_level",
+            "shuffle_min_rows",
+            "shuffle_keep_target_rows",
+            "shuffle_taper_window_exponent",
+            "shuffle_expand_window_per_row",
+            "shuffle_taper_window_scale",
+            "approx_rows_per_out_file",
+            "shuffle_worker_group_size",
+            "validation_fraction",
+        },
     )
     selfplay = _section(
         config,
@@ -231,6 +256,23 @@ def parse_model1_config(raw: Mapping[str, Any] | None) -> Model1Config:
     if max(performance_config.selfplay_batch_candidates) > selfplay_config.mcts_active_root_limit:
         raise ValueError("selfplay_batch_candidates must be <= mcts_active_root_limit")
 
+    training_config = Model1TrainingConfig(
+        batch_size=_positive_int(training, "batch_size", 128),
+        learning_rate=_positive_float(training, "learning_rate", 1.0e-3),
+        weight_decay=_nonnegative_float(training, "weight_decay", 1.0e-4),
+        policy_weight=_nonnegative_float(training, "policy_weight", 1.0),
+        value_weight=_nonnegative_float(training, "value_weight", 1.0),
+        opp_policy_weight=_nonnegative_float(training, "opp_policy_weight", 0.25),
+        lookahead_weight=_nonnegative_float(training, "lookahead_weight", 0.25),
+        amp=_bool(training, "amp", True),
+        max_grad_norm=_nonnegative_float(training, "max_grad_norm", 1.0),
+        train_samples_per_epoch=_positive_int(training, "train_samples_per_epoch", 100_000),
+        max_train_bucket_per_new_data=_positive_float(training, "max_train_bucket_per_new_data", 8.0),
+        max_train_bucket_size=_positive_float(training, "max_train_bucket_size", 500_000.0),
+        no_repeat_files=_bool(training, "no_repeat_files", True),
+        max_validation_samples=_positive_int(training, "max_validation_samples", 100_000),
+    )
+
     return Model1Config(
         architecture=Model1ArchitectureConfig(
             input_channels=_positive_int(arch, "input_channels", INPUT_CHANNELS),
@@ -239,22 +281,17 @@ def parse_model1_config(raw: Mapping[str, Any] | None) -> Model1Config:
             dropout=_bounded_float(arch, "dropout", 0.0, minimum=0.0, maximum=1.0, include_maximum=False),
             lookahead_horizons=_positive_int_tuple(arch, "lookahead_horizons", ()),
         ),
-        training=Model1TrainingConfig(
-            batch_size=_positive_int(training, "batch_size", 128),
-            learning_rate=_positive_float(training, "learning_rate", 1.0e-3),
-            weight_decay=_nonnegative_float(training, "weight_decay", 1.0e-4),
-            policy_weight=_nonnegative_float(training, "policy_weight", 1.0),
-            value_weight=_nonnegative_float(training, "value_weight", 1.0),
-            opp_policy_weight=_nonnegative_float(training, "opp_policy_weight", 0.25),
-            lookahead_weight=_nonnegative_float(training, "lookahead_weight", 0.25),
-            amp=_bool(training, "amp", True),
-            max_grad_norm=_nonnegative_float(training, "max_grad_norm", 1.0),
-        ),
+        training=training_config,
         samples=Model1SampleConfig(
-            capacity=_minimum_int(samples, "capacity", 200_000, minimum=200_000),
-            train_sample_count=_positive_int(samples, "train_sample_count", 4096),
-            recency_halflife=_positive_float(samples, "recency_halflife", 50_000.0),
             compression_level=_int_range(samples, "compression_level", 6, minimum=0, maximum=9),
+            shuffle_min_rows=_positive_int(samples, "shuffle_min_rows", 100_000),
+            shuffle_keep_target_rows=_positive_int(samples, "shuffle_keep_target_rows", 600_000),
+            shuffle_taper_window_exponent=_positive_float(samples, "shuffle_taper_window_exponent", 0.65),
+            shuffle_expand_window_per_row=_nonnegative_float(samples, "shuffle_expand_window_per_row", 0.4),
+            shuffle_taper_window_scale=_positive_float(samples, "shuffle_taper_window_scale", 50_000.0),
+            approx_rows_per_out_file=_positive_int(samples, "approx_rows_per_out_file", 70_000),
+            shuffle_worker_group_size=_positive_int(samples, "shuffle_worker_group_size", 80_000),
+            validation_fraction=_bounded_float(samples, "validation_fraction", 0.0, minimum=0.0, maximum=1.0, include_maximum=False),
         ),
         selfplay=selfplay_config,
         evaluation=Model1EvalConfig(
@@ -325,13 +362,6 @@ def _positive_int(raw: Mapping[str, Any], key: str, default: int) -> int:
     value = _int_value(raw, key, default)
     if value <= 0:
         raise ValueError(f"{key} must be > 0")
-    return value
-
-
-def _minimum_int(raw: Mapping[str, Any], key: str, default: int, *, minimum: int) -> int:
-    value = _int_value(raw, key, default)
-    if value < minimum:
-        raise ValueError(f"{key} must be >= {minimum}")
     return value
 
 

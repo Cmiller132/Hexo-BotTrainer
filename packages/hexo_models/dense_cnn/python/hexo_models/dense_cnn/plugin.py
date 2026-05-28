@@ -2,9 +2,9 @@
 
 `hexo_train` discovers this plugin and calls it to build model-specific
 components. The plugin is the composition boundary: it wires config parsing,
-network construction, optimizer setup, replay buffer, checkpoint IO, self-play,
-training, performance calibration, sample-finalization reporting, and
-evaluation into the generic training pipeline.
+network construction, optimizer setup, checkpoint IO, self-play, NPZ training,
+performance calibration, NPZ replay, and evaluation into the
+generic training pipeline.
 """
 
 from __future__ import annotations
@@ -20,8 +20,6 @@ from .checkpoints import DenseCNNCheckpointLoader, DenseCNNCheckpointSaver
 from .config import parse_model1_config
 from .evaluation import evaluate_epoch
 from .performance import calibrate_dense_cnn
-from .samples import SampleBuffer
-from .samples_finalizer import DenseCNNSampleFinalizer
 from .selfplay import generate_selfplay_epoch
 from .trainer import DenseCNNTrainer
 
@@ -59,11 +57,6 @@ class DenseCNNPlugin:
         if model is None:
             raise ValueError("DenseCNNPlugin requires build_model() to run first")
         parsed = parse_model1_config(config)
-        buffer = SampleBuffer(
-            capacity=parsed.samples.capacity,
-            recency_halflife=parsed.samples.recency_halflife,
-            compression_level=parsed.samples.compression_level,
-        )
         optimizer = torch.optim.AdamW(
             model.parameters(),
             lr=parsed.training.learning_rate,
@@ -72,19 +65,18 @@ class DenseCNNPlugin:
         trainer = DenseCNNTrainer(
             model=model,
             config=parsed,
-            buffer=buffer,
             optimizer=optimizer,
         )
         return ComponentOverrides(
-            sample_finalizer=DenseCNNSampleFinalizer(buffer),
             trainer=trainer,
             optimizer=optimizer,
             checkpoint_loader=DenseCNNCheckpointLoader(),
             checkpoint_saver=DenseCNNCheckpointSaver(),
+            uses_shared_sample_store=False,
             extra={
                 "model_family": "dense_cnn",
-                "sample_capacity": parsed.samples.capacity,
-                "train_sample_count": parsed.samples.train_sample_count,
+                "train_samples_per_epoch": parsed.training.train_samples_per_epoch,
+                "shuffle_min_rows": parsed.samples.shuffle_min_rows,
                 "selfplay_mode": "game_driven_all_mcts",
                 "selfplay_active_games": parsed.selfplay.active_games,
                 "evaluation_games_per_epoch": parsed.evaluation.games_per_epoch,

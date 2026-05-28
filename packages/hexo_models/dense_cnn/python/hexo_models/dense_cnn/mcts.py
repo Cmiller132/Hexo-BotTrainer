@@ -149,6 +149,7 @@ class SearchResult:
     visit_policy: Sequence[tuple[int, float]]
     root_value: float
     visits: int
+    root_prior_policy: Sequence[tuple[int, float]]
     diagnostics: Mapping[str, Any] = field(default_factory=dict)
 
 
@@ -160,31 +161,36 @@ def _result_from_payload(payload: Mapping[str, Any]) -> SearchResult:
         diagnostics["action_selection"] = str(payload["action_selection"])
     return SearchResult(
         action_id=int(payload["action_id"]),
-        visit_policy=_visit_policy_from_payload(payload),
+        visit_policy=_policy_from_payload(payload, prefix="visit_policy"),
         root_value=float(payload["root_value"]),
         visits=int(payload["visits"]),
+        root_prior_policy=_policy_from_payload(payload, prefix="root_prior_policy"),
         diagnostics=diagnostics,
     )
 
 
-def _visit_policy_from_payload(payload: Mapping[str, Any]) -> Sequence[tuple[int, float]]:
-    """Read the strict byte-only visit-policy payload produced by Rust."""
+def _policy_from_payload(
+    payload: Mapping[str, Any],
+    *,
+    prefix: str,
+) -> Sequence[tuple[int, float]]:
+    """Read a strict byte-only action/weight policy payload produced by Rust."""
 
     required = (
-        "visit_policy_action_ids_bytes",
-        "visit_policy_weights_bytes",
-        "visit_policy_count",
+        f"{prefix}_action_ids_bytes",
+        f"{prefix}_weights_bytes",
+        f"{prefix}_count",
     )
     missing = [key for key in required if key not in payload]
     if missing:
         raise ValueError(f"MCTS result payload missing required byte field(s): {', '.join(missing)}")
-    count = int(payload["visit_policy_count"])
-    action_ids_bytes = bytes(payload["visit_policy_action_ids_bytes"])
-    weights_bytes = bytes(payload["visit_policy_weights_bytes"])
+    count = int(payload[f"{prefix}_count"])
+    action_ids_bytes = bytes(payload[f"{prefix}_action_ids_bytes"])
+    weights_bytes = bytes(payload[f"{prefix}_weights_bytes"])
     expected = count * 4
     if len(action_ids_bytes) != expected or len(weights_bytes) != expected:
         raise ValueError(
-            "MCTS result visit policy byte lengths must match visit_policy_count"
+            f"MCTS result {prefix} byte lengths must match {prefix}_count"
         )
     return CompactVisitPolicy(
         action_ids_bytes=action_ids_bytes,

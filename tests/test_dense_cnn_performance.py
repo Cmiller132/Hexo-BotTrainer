@@ -277,10 +277,15 @@ def _write_pipeline_config(tmp_path: Path) -> Path:
                 "weight_decay = 0.0",
                 "amp = false",
                 "max_grad_norm = 1.0",
+                "train_samples_per_epoch = 2",
+                "max_train_bucket_per_new_data = 8.0",
+                "max_train_bucket_size = 16",
                 "",
                 "[model.config.samples]",
-                "train_sample_count = 1",
                 "compression_level = 1",
+                "shuffle_min_rows = 1",
+                "shuffle_keep_target_rows = 16",
+                "approx_rows_per_out_file = 8",
                 "",
                 "[model.config.selfplay]",
                 "search_visits = 1",
@@ -332,36 +337,6 @@ def _read_json(path: Path) -> Mapping[str, Any]:
     payload = json.loads(path.read_text(encoding="utf-8"))
     assert isinstance(payload, Mapping), f"{path} must contain a JSON object"
     return payload
-
-
-def _compact_sample(index: int) -> Any:
-    samples = importlib.import_module("hexo_models.dense_cnn.samples")
-    d6 = importlib.import_module("hexo_models.dense_cnn.d6")
-    q = index % 2
-    action_id = int(d6.pack_coord_id(d6.Axial(q, 0)))
-    data = samples.Model1SampleData(
-        game_id=f"perf-sample-{index}",
-        turn_index=index,
-        current_player="player0",
-        phase="Opening",
-        center=(0, 0),
-        stones=(),
-        legal_action_ids=(action_id,),
-        policy=((action_id, 1.0),),
-        opp_policy=((action_id, 1.0),),
-        value=0.0,
-        metadata={"sample_id": f"perf-sample-{index}"},
-    )
-    return samples.CompressedSample.from_data(data)
-
-
-def _field(value: Any, *names: str) -> Any:
-    for name in names:
-        if isinstance(value, Mapping) and name in value:
-            return value[name]
-        if hasattr(value, name):
-            return getattr(value, name)
-    raise AssertionError(f"{type(value).__name__} must expose one of {names!r}: {value!r}")
 
 
 def test_calibration_api_selects_batches_and_reports_measured_throughput() -> None:
@@ -547,6 +522,7 @@ def test_selfplay_benchmark_counts_every_root_as_its_own_128_sim_search(monkeypa
                     visit_policy={int(engine.legal_action_ids(state)[0]): 1.0},
                     root_value=0.0,
                     visits=visits,
+                    root_prior_policy={int(engine.legal_action_ids(state)[0]): 1.0},
                 )
                 for state in root_states
             ]
@@ -593,6 +569,7 @@ def test_selfplay_benchmark_reports_actual_searches_when_batch_overshoots_probe(
                     visit_policy={int(engine.legal_action_ids(state)[0]): 1.0},
                     root_value=0.0,
                     visits=visits,
+                    root_prior_policy={int(engine.legal_action_ids(state)[0]): 1.0},
                 )
                 for state in root_states
             ]
@@ -645,10 +622,14 @@ def test_dense_cnn_rust_batch_input_encoder_matches_python_sample_encoder() -> N
 
     assert shape == (len(states), dense_cnn.INPUT_CHANNELS, dense_cnn.BOARD_SIZE, dense_cnn.BOARD_SIZE)
     for index, encoded_state in enumerate(states):
+        legal_ids = tuple(int(item) for item in payload["legal_action_ids"][index])
+        if not legal_ids:
+            continue
         sample = samples_module.sample_from_state(
             encoded_state,
             game_id=f"encoder-parity-{index}",
             turn_index=index,
+            root_prior_policy={legal_ids[0]: 1.0},
         )
         expected = samples_module.expand_sample(sample)["input"]
 
@@ -1154,6 +1135,9 @@ def test_dense_cnn_mcts_python_boundary_delegates_to_rust(monkeypatch: pytest.Mo
                 "visit_policy_action_ids_bytes": struct.pack("2I", 17, 23),
                 "visit_policy_weights_bytes": struct.pack("2f", 0.75, 0.25),
                 "visit_policy_count": 2,
+                "root_prior_policy_action_ids_bytes": struct.pack("2I", 17, 23),
+                "root_prior_policy_weights_bytes": struct.pack("2f", 0.60, 0.40),
+                "root_prior_policy_count": 2,
                 "root_value": -0.125,
                 "visits": visits,
             },
@@ -1184,8 +1168,12 @@ def test_dense_cnn_mcts_python_boundary_delegates_to_rust(monkeypatch: pytest.Mo
     assert result.action_id == 17
     assert [action for action, _weight in result.visit_policy] == [17, 23]
     assert [weight for _action, weight in result.visit_policy] == pytest.approx([0.75, 0.25])
+    assert [action for action, _weight in result.root_prior_policy] == [17, 23]
+    assert [weight for _action, weight in result.root_prior_policy] == pytest.approx([0.60, 0.40])
     assert result.root_value == pytest.approx(-0.125)
     assert result.visits == 3
+    assert not hasattr(result, "policy_surprise")
+    assert not hasattr(result, "frequency_weight")
     assert calls == [
         {
             "session": native_session,
@@ -1255,6 +1243,40 @@ def test_dense_cnn_mcts_delegates_active_root_limit_to_rust_boundary(monkeypatch
         session.run([0, 1, 2], [object(), object(), object()], FakeInference(), visits=7, active_root_limit=2)
 
 
+def test_dense_cnn_mcts_requires_root_prior_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+    mcts_module = importlib.import_module("hexo_models.dense_cnn.mcts")
+    rust_bridge = importlib.import_module("hexo_models.dense_cnn.rust_bridge")
+
+    class FakeInference:
+        evaluate_model1_payload = object()
+
+    def fake_model1_mcts_session_search(
+        _session: object,
+        _game_keys: Sequence[int],
+        states: Sequence[object],
+        **kwargs: object,
+    ) -> tuple[Mapping[str, Any], ...]:
+        visits = int(kwargs["visits"])
+        return tuple(
+            {
+                "action_id": 1,
+                "visit_policy_action_ids_bytes": struct.pack("I", 1),
+                "visit_policy_weights_bytes": struct.pack("f", 1.0),
+                "visit_policy_count": 1,
+                "root_value": 0.0,
+                "visits": visits,
+            }
+            for _state in states
+        )
+
+    monkeypatch.setattr(rust_bridge, "model1_new_mcts_session", lambda **_kwargs: object())
+    monkeypatch.setattr(rust_bridge, "model1_mcts_session_search", fake_model1_mcts_session_search)
+
+    session = mcts_module.new_mcts_session(max_states=100)
+    with pytest.raises(ValueError, match="root_prior_policy"):
+        session.run([0], [object()], FakeInference(), visits=1)
+
+
 def test_dense_cnn_mcts_leaves_default_active_root_limit_to_rust(monkeypatch: pytest.MonkeyPatch) -> None:
     mcts_module = importlib.import_module("hexo_models.dense_cnn.mcts")
     rust_bridge = importlib.import_module("hexo_models.dense_cnn.rust_bridge")
@@ -1277,6 +1299,9 @@ def test_dense_cnn_mcts_leaves_default_active_root_limit_to_rust(monkeypatch: py
                 "visit_policy_action_ids_bytes": struct.pack("I", 1),
                 "visit_policy_weights_bytes": struct.pack("f", 1.0),
                 "visit_policy_count": 1,
+                "root_prior_policy_action_ids_bytes": struct.pack("I", 1),
+                "root_prior_policy_weights_bytes": struct.pack("f", 1.0),
+                "root_prior_policy_count": 1,
                 "root_value": 0.0,
                 "visits": visits,
             }
@@ -1354,31 +1379,15 @@ def test_dense_cnn_payload_inference_rejects_legacy_legal_index_payload() -> Non
         )
 
 
-def test_batch_inference_fast_path_runs_compact_samples_in_one_forward_pass() -> None:
-    torch = _torch()
+def test_dense_cnn_inference_exposes_only_production_state_and_payload_paths() -> None:
     dense_cnn = _dense_cnn()
     inference_cls = _public_attr(dense_cnn, "DenseCNNInference")
 
-    class CountingModel(torch.nn.Module):
-        def __init__(self, inner: torch.nn.Module) -> None:
-            super().__init__()
-            self.inner = inner
-            self.batch_sizes: list[int] = []
+    inference = inference_cls(_small_model(), device="cpu", amp=False)
 
-        def forward(self, inputs: torch.Tensor) -> Mapping[str, torch.Tensor]:
-            self.batch_sizes.append(int(inputs.shape[0]))
-            return self.inner(inputs)
-
-    model = CountingModel(_small_model())
-    inference = inference_cls(model, device="cpu", amp=False)
-    infer_many = _public_attr(inference, "infer_batch", "infer_samples")
-
-    results = tuple(infer_many([_compact_sample(0), _compact_sample(1)]))
-
-    assert len(results) == 2
-    assert model.batch_sizes == [2], "batch inference must run the model once for the whole input batch"
-    for result in results:
-        policy_logits = _field(result, "policy_logits", "policy")
-        value_logits = _field(result, "value_logits", "value")
-        assert tuple(policy_logits.shape) == (dense_cnn.BOARD_AREA,)
-        assert tuple(value_logits.shape) == (dense_cnn.VALUE_BINS,)
+    assert hasattr(inference, "infer_state")
+    assert hasattr(inference, "infer_states")
+    assert hasattr(inference, "infer_inputs")
+    assert hasattr(inference, "evaluate_model1_payload")
+    assert not hasattr(inference, "infer_batch")
+    assert not hasattr(inference, "infer_samples")

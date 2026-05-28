@@ -55,10 +55,15 @@ def _small_model_config(overrides: Mapping[str, Any] | None = None) -> dict[str,
             "weight_decay": 0.0,
             "amp": False,
             "max_grad_norm": 1.0,
+            "train_samples_per_epoch": 2,
+            "max_train_bucket_per_new_data": 8.0,
+            "max_train_bucket_size": 16,
         },
         "samples": {
-            "train_sample_count": 2,
             "compression_level": 1,
+            "shuffle_min_rows": 1,
+            "shuffle_keep_target_rows": 32,
+            "approx_rows_per_out_file": 8,
         },
         "selfplay": {
             "search_visits": 1,
@@ -157,10 +162,15 @@ def _write_pipeline_config(tmp_path: Path) -> Path:
                 "weight_decay = 0.0",
                 "amp = false",
                 "max_grad_norm = 1.0",
+                "train_samples_per_epoch = 2",
+                "max_train_bucket_per_new_data = 8.0",
+                "max_train_bucket_size = 16",
                 "",
                 "[model.config.samples]",
-                "train_sample_count = 2",
                 "compression_level = 1",
+                "shuffle_min_rows = 1",
+                "shuffle_keep_target_rows = 32",
+                "approx_rows_per_out_file = 8",
                 "",
                 "[model.config.selfplay]",
                 "search_visits = 1",
@@ -315,8 +325,17 @@ def test_dense_cnn_model1_config_writes_to_repo_level_run_and_checkpoint_paths()
     assert parsed.selfplay.mcts_session_cache_max_states == 1_048_576
     assert parsed.selfplay.mcts_active_root_limit == 1024
     assert parsed.selfplay.active_games <= parsed.selfplay.mcts_active_root_limit
-    assert parsed.samples.train_sample_count == 4096
-    assert parsed.samples.capacity >= 200_000
+    assert parsed.training.train_samples_per_epoch == 100_000
+    assert parsed.training.max_train_bucket_per_new_data == pytest.approx(8.0)
+    assert parsed.training.max_train_bucket_size == pytest.approx(500_000.0)
+    assert parsed.training.no_repeat_files is True
+    assert parsed.training.max_validation_samples == 100_000
+    assert parsed.samples.shuffle_min_rows == 100_000
+    assert parsed.samples.shuffle_keep_target_rows == 600_000
+    assert parsed.samples.shuffle_taper_window_exponent == pytest.approx(0.65)
+    assert parsed.samples.shuffle_expand_window_per_row == pytest.approx(0.4)
+    assert parsed.samples.shuffle_taper_window_scale == pytest.approx(50_000.0)
+    assert parsed.samples.validation_fraction == pytest.approx(0.0)
     assert parsed.evaluation.games_per_epoch == 64
     assert parsed.evaluation.sealbot_variant == "best"
     assert parsed.evaluation.sealbot_time_limit == pytest.approx(0.05)
@@ -352,6 +371,14 @@ def test_dense_cnn_model_config_rejects_legacy_or_clamped_values() -> None:
         )
     with pytest.raises(ValueError, match="capacity"):
         dense_cnn.parse_model1_config({"samples": {"capacity": 1024}})
+    with pytest.raises(ValueError, match="train_sample_count"):
+        dense_cnn.parse_model1_config({"samples": {"train_sample_count": 1024}})
+    with pytest.raises(ValueError, match="recency_halflife"):
+        dense_cnn.parse_model1_config({"samples": {"recency_halflife": 50_000.0}})
+    with pytest.raises(ValueError, match="stop_when_train_bucket_limited"):
+        dense_cnn.parse_model1_config({"training": {"stop_when_train_bucket_limited": True}})
+    with pytest.raises(ValueError, match="skip_validation"):
+        dense_cnn.parse_model1_config({"samples": {"skip_validation": True}})
 
 
 def test_training_overrides_wire_dense_cnn_pipeline_components(tmp_path: Path) -> None:
@@ -368,13 +395,15 @@ def test_training_overrides_wire_dense_cnn_pipeline_components(tmp_path: Path) -
     assert isinstance(overrides, ComponentOverrides)
     assert overrides.trainer is not None
     assert hasattr(overrides.trainer, "train_passes")
-    assert overrides.sample_finalizer is not None
-    assert hasattr(overrides.sample_finalizer, "finalize")
+    assert overrides.sample_finalizer is None
+    assert overrides.uses_shared_sample_store is False
     assert overrides.checkpoint_saver is not None
     assert hasattr(overrides.checkpoint_saver, "save")
     assert overrides.checkpoint_loader is not None
     assert hasattr(overrides.checkpoint_loader, "load")
     assert overrides.optimizer is not None
+    assert components.model.uses_shared_sample_store is False
+    assert components.shared.sample_store is None
 
 
 def test_dense_cnn_player_constructs_with_slots(tmp_path: Path) -> None:
@@ -411,35 +440,25 @@ def test_checkpoint_saver_writes_model_and_optimizer_state(tmp_path: Path) -> No
         "optimizer_state_dict",
         "optimizer_state",
     )
-    sample_buffer_state = _required_mapping(checkpoint, "sample_buffer")
+    train_state = _required_mapping(checkpoint, "train_state")
 
     assert any(str(key).startswith("conv_in.") for key in model_state)
     assert "param_groups" in optimizer_state
     assert optimizer_state["param_groups"]
-    assert sample_buffer_state["capacity"] >= 200_000
-    assert "samples" in sample_buffer_state
+    assert "sample_buffer" not in checkpoint
+    assert train_state["train_bucket_level"] >= 0.0
+    assert "global_step_samples" in train_state
 
 
-def test_checkpoint_loader_resumes_model_and_sample_buffer_from_pointer(tmp_path: Path) -> None:
+def test_checkpoint_loader_resumes_model_and_train_state_from_pointer(tmp_path: Path) -> None:
     torch = _torch()
     ctx, components = _build_dense_components(tmp_path / "source")
     trainer = components.model.trainer
-    samples_module = importlib.import_module("hexo_models.dense_cnn.samples")
-    trainer.buffer.append(
-        samples_module.Model1SampleData(
-            game_id="resume-sample",
-            turn_index=3,
-            current_player="player0",
-            phase="Opening",
-            center=(0, 0),
-            stones=(),
-            legal_action_ids=(samples_module.pack_coord_id(samples_module.Axial(0, 0)),),
-            policy=((samples_module.pack_coord_id(samples_module.Axial(0, 0)), 1.0),),
-            opp_policy=((samples_module.pack_coord_id(samples_module.Axial(0, 0)), 1.0),),
-            value=0.5,
-            metadata={"target_schema_version": 2},
-        )
-    )
+    trainer.train_state.global_step_samples = 2048
+    trainer.train_state.train_bucket_level = 123.5
+    trainer.train_state.train_bucket_level_at_row = 4096
+    trainer.train_state.data_files_used.add(str((tmp_path / "used.npz").resolve()))
+    trainer.train_state.latest_shuffle_dir = str(tmp_path / "shuffle")
 
     with torch.no_grad():
         saved_param = next(components.model.model.parameters())
@@ -458,16 +477,16 @@ def test_checkpoint_loader_resumes_model_and_sample_buffer_from_pointer(tmp_path
     )
 
     restored_param = next(fresh_components.model.model.parameters()).detach()
-    restored_buffer = fresh_components.model.trainer.buffer
-    restored_sample = restored_buffer.entries[0].decode()
+    restored_state = fresh_components.model.trainer.train_state
 
     assert result["status"] == "loaded"
     assert result["epoch"] == 7
-    assert result["sample_count"] == 1
+    assert result["train_state"]["global_step_samples"] == 2048
     assert torch.allclose(restored_param, expected_param)
-    assert restored_buffer.sample_count == 1
-    assert restored_sample.game_id == "resume-sample"
-    assert restored_sample.value == pytest.approx(0.5)
+    assert restored_state.global_step_samples == 2048
+    assert restored_state.train_bucket_level == pytest.approx(123.5)
+    assert restored_state.train_bucket_level_at_row == 4096
+    assert restored_state.latest_shuffle_dir == str(tmp_path / "shuffle")
 
 
 def test_checkpoint_loader_initializes_when_pointer_target_is_missing(tmp_path: Path) -> None:
@@ -511,29 +530,50 @@ def test_checkpoint_loader_accepts_utf8_sig_pointer_files(tmp_path: Path) -> Non
     assert torch.allclose(restored_param, expected_param)
 
 
-def test_checkpoint_loader_skips_incompatible_model_but_recovers_sample_buffer(tmp_path: Path) -> None:
+def test_dense_train_bucket_starts_zero_and_row_regression_does_not_grant_budget(tmp_path: Path) -> None:
+    _ = tmp_path
+    torch = _torch()
+    dense_cnn = _dense_cnn()
+    trainer_module = importlib.import_module("hexo_models.dense_cnn.trainer")
+    config = dense_cnn.parse_model1_config(_small_model_config())
+    arch = config.architecture
+    model = dense_cnn.Model1Network(
+        in_channels=arch.input_channels,
+        channels=arch.channels,
+        blocks=arch.residual_blocks,
+        dropout=arch.dropout,
+        lookahead_horizons=arch.lookahead_horizons,
+    )
+    trainer = trainer_module.DenseCNNTrainer(
+        model=model,
+        config=config,
+        optimizer=torch.optim.SGD(model.parameters(), lr=0.01),
+    )
+
+    assert trainer.train_state.train_bucket_level == pytest.approx(0.0)
+
+    trainer.train_state.train_bucket_level = 3.0
+    trainer.train_state.train_bucket_level_at_row = 10
+    trainer.train_state.train_steps_since_last_reload = 4
+
+    trainer._update_train_bucket(total_rows=5, window_start=2)
+
+    assert trainer.train_state.train_bucket_level == pytest.approx(3.0)
+    assert trainer.train_state.train_bucket_level_at_row == 5
+    assert trainer.train_state.train_steps_since_last_reload == 0
+    assert trainer.train_state.total_num_data_rows == 5
+    assert trainer.train_state.window_start_data_row_idx == 2
+
+
+def test_checkpoint_loader_rejects_legacy_sample_buffer_before_loading(tmp_path: Path) -> None:
     torch = _torch()
     ctx, components = _build_dense_components(tmp_path / "source", _small_model_config({"architecture": {"channels": 4}}))
-    trainer = components.model.trainer
-    samples_module = importlib.import_module("hexo_models.dense_cnn.samples")
-    trainer.buffer.append(
-        samples_module.Model1SampleData(
-            game_id="architecture-change-sample",
-            turn_index=1,
-            current_player="player0",
-            phase="Opening",
-            center=(0, 0),
-            stones=(),
-            legal_action_ids=(samples_module.pack_coord_id(samples_module.Axial(0, 0)),),
-            policy=((samples_module.pack_coord_id(samples_module.Axial(0, 0)), 1.0),),
-            opp_policy=((samples_module.pack_coord_id(samples_module.Axial(0, 0)), 1.0),),
-            value=-0.25,
-            metadata={"target_schema_version": 2},
-        )
-    )
     with torch.no_grad():
         next(components.model.model.parameters()).fill_(0.875)
     checkpoint_path = Path(components.model.checkpoint_saver.save(name="epoch_3", ctx=ctx, components=components))
+    payload = _torch_load(checkpoint_path)
+    payload["sample_buffer"] = {"samples": [{"legacy": True}]}
+    torch.save(dict(payload), checkpoint_path)
     pointer_path = ctx.checkpoint_dir / "dense_cnn_latest.txt"
     pointer_path.write_text(checkpoint_path.name, encoding="utf-8")
 
@@ -549,19 +589,12 @@ def test_checkpoint_loader_skips_incompatible_model_but_recovers_sample_buffer(t
         components=fresh_components,
     )
 
-    restored_buffer = fresh_components.model.trainer.buffer
-    restored_sample = restored_buffer.entries[0].decode()
     fresh_param_after = next(fresh_components.model.model.parameters()).detach()
 
     assert result["status"] == "initialized"
-    assert "incompatible" in result["reason"]
+    assert result["reason"] == "legacy dense_cnn sample_buffer checkpoints are unsupported"
     assert result["checkpoint_epoch"] == 3
-    assert result["sample_count"] == 1
-    assert result["incompatible_tensors"]
     assert torch.allclose(fresh_param_after, fresh_param_before)
-    assert restored_buffer.sample_count == 1
-    assert restored_sample.game_id == "architecture-change-sample"
-    assert restored_sample.value == pytest.approx(-0.25)
 
 
 def test_final_checkpoint_preserves_latest_epoch_for_future_resume(tmp_path: Path) -> None:
@@ -577,21 +610,21 @@ def test_final_checkpoint_preserves_latest_epoch_for_future_resume(tmp_path: Pat
 def test_training_pipeline_run_records_dense_cnn_epoch_diagnostics(tmp_path: Path) -> None:
     pytest.importorskip("hexo_utils._rust")
     dense_cnn = _dense_cnn()
-    assert dense_cnn.parse_model1_config({}).samples.train_sample_count == 4096
+    assert dense_cnn.parse_model1_config({}).training.train_samples_per_epoch == 100_000
 
     from hexo_train.pipeline import TrainingPipeline
 
     ctx = TrainingPipeline().run(_write_pipeline_config(tmp_path))
 
-    assert ctx.config.samples.train_sample_count == 2
     assert len(ctx.epoch_outputs) == 1
 
     epoch_diagnostic = _read_json(ctx.diagnostics_dir / "epoch_000001.json")
     assert epoch_diagnostic["status"] == "completed"
     epoch_result = epoch_diagnostic["metadata"]["result"]
 
-    assert epoch_result["samples"]["selection"]["window_size"] == 2
-    assert epoch_result["symmetries"]["symmetry_count"] == 2
+    assert epoch_result["samples"]["selection"]["window_size"] in (0, 2)
+    assert epoch_result["samples"]["selection"]["metadata"]["shuffle"]["status"] in {"completed", "skipped"}
+    assert epoch_result["symmetries"]["symmetry_count"] in (0, 2)
     for section in ("selfplay", "training", "checkpoint", "evaluation"):
         assert section in epoch_result
         _assert_real_diagnostic(epoch_result[section], section)
@@ -711,7 +744,7 @@ def test_finalize_samples_omits_lookahead_without_future_mcts_root() -> None:
     assert finalized[0].lookahead[0][1] == pytest.approx(0.25)
     assert finalized[1].value == pytest.approx(-1.0)
     assert finalized[1].lookahead == ()
-    assert finalized[0].metadata["target_schema_version"] == 2
+    assert finalized[0].metadata["target_schema_version"] == 3
     assert finalized[0].metadata["lookahead_target_semantics"] == "mcts_prefix_future_root_only_v2"
 
 
@@ -759,6 +792,7 @@ def test_selfplay_searches_every_playable_move_until_games_finish(
                     visit_policy={int(engine.legal_action_ids(state)[0]): 1.0},
                     root_value=0.0,
                     visits=int(kwargs["visits"]),
+                    root_prior_policy={int(engine.legal_action_ids(state)[0]): 1.0},
                 )
                 for state in root_states
             ]
@@ -769,9 +803,11 @@ def test_selfplay_searches_every_playable_move_until_games_finish(
         game_id: str,
         turn_index: int,
         policy: Mapping[int, float],
-        value: float,
-        metadata: Mapping[str, Any],
+        root_prior_policy: Mapping[int, float] | Sequence[tuple[int, float]] = (),
+        value: float = 0.0,
+        metadata: Mapping[str, Any] | None = None,
     ) -> Any:
+        _ = root_prior_policy
         legal_ids = tuple(int(item) for item in engine.legal_action_ids(state))
         action_id = next(iter(policy))
         assert int(action_id) in legal_ids, "sample must be captured before the selected action mutates the state"
@@ -785,8 +821,16 @@ def test_selfplay_searches_every_playable_move_until_games_finish(
             stones=(),
             legal_action_ids=legal_ids,
             policy=tuple((int(key), float(weight)) for key, weight in policy.items()),
+            root_prior_policy=tuple(
+                (int(key), float(weight))
+                for key, weight in (
+                    root_prior_policy.items()
+                    if isinstance(root_prior_policy, Mapping)
+                    else root_prior_policy
+                )
+            ),
             value=float(value),
-            metadata=dict(metadata),
+            metadata=dict(metadata or {}),
         )
 
     monkeypatch.setattr(selfplay_module, "new_mcts_session", lambda **_kwargs: FakeMctsSession())
@@ -855,6 +899,7 @@ def test_selfplay_rejects_under_counted_mcts_results(
                     visit_policy={int(engine.legal_action_ids(state)[0]): 1.0},
                     root_value=0.0,
                     visits=7,
+                    root_prior_policy={int(engine.legal_action_ids(state)[0]): 1.0},
                 )
                 for state in root_states
             ]

@@ -73,6 +73,7 @@ class ComponentOverrides:
     optimizer: Any | None = None
     checkpoint_loader: Any | None = None
     checkpoint_saver: Any | None = None
+    uses_shared_sample_store: bool = True
     extra: Mapping[str, Any] = field(default_factory=dict)
 
 
@@ -96,6 +97,7 @@ class ModelComponents:
     checkpoint_saver: Any | None = None
     scalar_value_target: Any | None = None
     legal_policy_target: Any | None = None
+    uses_shared_sample_store: bool = True
     extra: Mapping[str, Any] = field(default_factory=dict)
 
 
@@ -154,6 +156,7 @@ def build_model_components(
         or defaults.scalar_value_target,
         legal_policy_target=overrides.legal_policy_target
         or defaults.legal_policy_target,
+        uses_shared_sample_store=bool(overrides.uses_shared_sample_store),
         extra=overrides.extra,
     )
 

@@ -7,6 +7,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 for package in ("hexo_models", "hexo_engine"):
@@ -75,6 +77,7 @@ def test_sample_from_state_delegates_live_facts_to_rust_without_python_mirror(mo
         game_id="game",
         turn_index=3,
         policy={99: 1.0},
+        root_prior_policy={99: 1.0},
         value=0.25,
         metadata={"sample_source": "mcts"},
     )
@@ -84,6 +87,24 @@ def test_sample_from_state_delegates_live_facts_to_rust_without_python_mirror(mo
     assert calls["turn_index"] == 3
     assert sample.policy == ((99, 1.0),)
     assert sample.metadata["sample_source"] == "mcts"
+
+
+def test_sample_from_state_requires_root_prior_before_rust(monkeypatch: Any) -> None:
+    samples = importlib.import_module("hexo_models.dense_cnn.samples")
+
+    class FakeDenseCnnRust:
+        def model1_sample_from_state(self, *_args: object, **_kwargs: object) -> dict[str, Any]:
+            raise AssertionError("rust should not be called without root_prior_policy")
+
+    monkeypatch.setattr(samples.rust_bridge, "_dense_cnn_module", lambda: FakeDenseCnnRust())
+
+    with pytest.raises(ValueError, match="root_prior_policy"):
+        samples.sample_from_state(
+            object(),
+            game_id="game",
+            turn_index=0,
+            policy={1: 1.0},
+        )
 
 
 def test_rust_bridge_forwards_live_states_without_history_conversion(monkeypatch: Any) -> None:

@@ -57,6 +57,12 @@ def finalize_samples(
         # The finalizer owns sample meaning. `hexo_train` only supplies the run
         # context, component handles, and current epoch number.
         return finalizer.finalize(ctx=ctx, components=components, epoch=epoch)
+    if not components.model.uses_shared_sample_store:
+        return {
+            "status": "skipped",
+            "epoch": epoch,
+            "reason": "model finalizes samples during self-play",
+        }
     return {
         "status": "skipped",
         "epoch": epoch,

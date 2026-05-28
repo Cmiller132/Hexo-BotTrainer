@@ -22,7 +22,7 @@ use hexo_engine::{
     pack_coord, Axis, HexCoord, HexoState as RustHexoState, PackedCoord, Player, TurnPhase,
 };
 
-const TARGET_SCHEMA_VERSION: i64 = 2;
+const TARGET_SCHEMA_VERSION: i64 = 3;
 const LOOKAHEAD_TARGET_SEMANTICS: &str = "mcts_prefix_future_root_only_v2";
 
 #[pyfunction(
@@ -226,6 +226,7 @@ fn sample_to_dict<'py>(
         "opponent_hot",
         "opponent_last_turn",
         "policy",
+        "root_prior_policy",
         "opp_policy",
         "value",
         "lookahead",

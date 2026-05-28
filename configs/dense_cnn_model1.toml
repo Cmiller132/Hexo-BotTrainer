@@ -22,12 +22,22 @@ opp_policy_weight = 0.25
 lookahead_weight = 0.25
 amp = true
 max_grad_norm = 1.0
+train_samples_per_epoch = 100000
+max_train_bucket_per_new_data = 8.0
+max_train_bucket_size = 500000
+no_repeat_files = true
+max_validation_samples = 100000
 
 [model.config.samples]
-capacity = 200000
-train_sample_count = 4096
-recency_halflife = 50000.0
 compression_level = 6
+shuffle_min_rows = 100000
+shuffle_keep_target_rows = 600000
+shuffle_taper_window_exponent = 0.65
+shuffle_expand_window_per_row = 0.4
+shuffle_taper_window_scale = 50000.0
+approx_rows_per_out_file = 70000
+shuffle_worker_group_size = 80000
+validation_fraction = 0.0
 
 [model.config.selfplay]
 search_visits = 128
@@ -77,9 +87,6 @@ epochs = 30
 games_per_epoch = 256
 update_checkpoint_pointer = true
 checkpoint_pointer = "../data/checkpoints/dense_cnn_model1_latest.txt"
-
-[samples]
-train_sample_count = 4096
 
 [train]
 passes_per_epoch = 1

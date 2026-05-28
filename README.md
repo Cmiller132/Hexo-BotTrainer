@@ -54,11 +54,11 @@ bounded to i16 coordinate components.
 The production Model 1 implementation lives under
 `hexo_models.dense_cnn`, separate from other model families. A baseline
 training config is available at `configs/dense_cnn_model1.toml` and follows
-the 65,536 self-play sample / 4,096 training sample epoch path with 200k
-compressed sample capacity and 64 SealBot-best 50 ms evaluation games per
-epoch. Self-play keeps a 2,048-game production batch but targets at least 32
-MCTS-labeled positions per active game before rolling out the remaining game
-tail, so the training buffer is not dominated by opening positions.
+game-driven self-play with 256 complete games per epoch, KataGo-style NPZ
+shuffle windows, a 100k-row dense training budget, and 64 SealBot-best 50 ms
+evaluation games per epoch. Self-play searches every playable nonterminal move
+with MCTS until terminal or `max_actions`; there are no policy rollout tails or
+checkpointed in-memory replay buffers.
 
 Dense CNN self-play uses the Rust Model 1 encoder and Rust batched MCTS bridge.
 Calibration keeps the search count fixed at exactly 128 MCTS simulations per
