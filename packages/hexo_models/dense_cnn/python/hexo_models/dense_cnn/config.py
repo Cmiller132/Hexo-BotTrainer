@@ -45,6 +45,13 @@ class Model1SelfPlayConfig:
     samples_per_epoch: int = 4096
     search_visits: int = 128
     active_games: int = 2048
+    progressive_widening_initial_actions: int = 128
+    progressive_widening_child_initial_actions: int = 32
+    progressive_widening_candidate_actions: int = 192
+    progressive_widening_growth_interval: float = 40.0
+    progressive_widening_growth_base: float = 1.3
+    mcts_evaluation_cache_max_states: int = 131_072
+    mcts_active_root_limit: int = 512
     max_actions: int = 1024
     temperature: float = 1.0
     worker_count: int = 1
@@ -63,11 +70,11 @@ class Model1EvalConfig:
 class Model1PerformanceConfig:
     calibrate: bool = True
     target_selfplay_positions_per_second: float = 128.0
-    inference_batch_candidates: tuple[int, ...] = (128, 256, 512, 1024, 2048)
-    selfplay_batch_candidates: tuple[int, ...] = (512, 1024, 2048)
-    training_batch_candidates: tuple[int, ...] = (64, 128, 192, 256, 384, 512)
+    inference_batch_candidates: tuple[int, ...] = (128, 256, 512, 1024)
+    selfplay_batch_candidates: tuple[int, ...] = (2048,)
+    training_batch_candidates: tuple[int, ...] = (64, 128, 192, 256)
     mcts_visit_candidates: tuple[int, ...] = (128,)
-    mcts_virtual_batch_candidates: tuple[int, ...] = (4, 8, 16, 32)
+    mcts_virtual_batch_candidates: tuple[int, ...] = (4,)
     selfplay_probe_positions: int = 4096
     probe_batches: int = 1
 
@@ -133,6 +140,31 @@ def parse_model1_config(raw: Mapping[str, Any] | None) -> Model1Config:
             samples_per_epoch=int(selfplay.get("samples_per_epoch", 4096)),
             search_visits=int(selfplay.get("search_visits", 128)),
             active_games=int(selfplay.get("active_games", selfplay.get("batch_size", 2048))),
+            progressive_widening_initial_actions=max(
+                1,
+                int(selfplay.get("progressive_widening_initial_actions", 128)),
+            ),
+            progressive_widening_child_initial_actions=max(
+                1,
+                int(selfplay.get("progressive_widening_child_initial_actions", 32)),
+            ),
+            progressive_widening_candidate_actions=max(
+                1,
+                int(selfplay.get("progressive_widening_candidate_actions", 192)),
+            ),
+            progressive_widening_growth_interval=max(
+                1.0,
+                float(selfplay.get("progressive_widening_growth_interval", 40.0)),
+            ),
+            progressive_widening_growth_base=max(
+                1.000001,
+                float(selfplay.get("progressive_widening_growth_base", 1.3)),
+            ),
+            mcts_evaluation_cache_max_states=max(
+                1,
+                int(selfplay.get("mcts_evaluation_cache_max_states", 131_072)),
+            ),
+            mcts_active_root_limit=max(1, int(selfplay.get("mcts_active_root_limit", 512))),
             max_actions=int(selfplay.get("max_actions", 1024)),
             temperature=float(selfplay.get("temperature", 1.0)),
             worker_count=int(selfplay.get("worker_count", 1)),
@@ -147,11 +179,11 @@ def parse_model1_config(raw: Mapping[str, Any] | None) -> Model1Config:
         performance=Model1PerformanceConfig(
             calibrate=bool(performance.get("calibrate", performance.get("calibration_enabled", True))),
             target_selfplay_positions_per_second=float(performance.get("target_selfplay_positions_per_second", 128.0)),
-            inference_batch_candidates=tuple(int(item) for item in performance.get("inference_batch_candidates", (128, 256, 512, 1024, 2048))),
-            selfplay_batch_candidates=tuple(int(item) for item in performance.get("selfplay_batch_candidates", (512, 1024, 2048))),
-            training_batch_candidates=tuple(int(item) for item in performance.get("training_batch_candidates", (64, 128, 192, 256, 384, 512))),
+            inference_batch_candidates=tuple(int(item) for item in performance.get("inference_batch_candidates", (128, 256, 512, 1024))),
+            selfplay_batch_candidates=tuple(int(item) for item in performance.get("selfplay_batch_candidates", (2048,))),
+            training_batch_candidates=tuple(int(item) for item in performance.get("training_batch_candidates", (64, 128, 192, 256))),
             mcts_visit_candidates=tuple(int(item) for item in performance.get("mcts_visit_candidates", (selfplay.get("search_visits", 128),))),
-            mcts_virtual_batch_candidates=tuple(int(item) for item in performance.get("mcts_virtual_batch_candidates", (4, 8, 16, 32))),
+            mcts_virtual_batch_candidates=tuple(int(item) for item in performance.get("mcts_virtual_batch_candidates", (4,))),
             selfplay_probe_positions=max(1, int(performance.get("selfplay_probe_positions", 4096))),
             probe_batches=max(1, int(performance.get("probe_batches", performance.get("calibration_measurement_batches", 1)))),
         ),

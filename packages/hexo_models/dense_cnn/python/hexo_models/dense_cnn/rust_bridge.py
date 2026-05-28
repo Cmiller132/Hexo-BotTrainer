@@ -34,6 +34,12 @@ def model1_batched_mcts(
     seed: int,
     evaluator: object,
     virtual_batch_size: int | None = None,
+    progressive_widening_initial_actions: int | None = None,
+    progressive_widening_child_initial_actions: int | None = None,
+    progressive_widening_candidate_actions: int | None = None,
+    progressive_widening_growth_interval: float | None = None,
+    progressive_widening_growth_base: float | None = None,
+    evaluation_cache: object | None = None,
 ) -> tuple[Mapping[str, Any], ...]:
     """Run dense-cnn Rust MCTS from live engine states."""
 
@@ -46,7 +52,21 @@ def model1_batched_mcts(
             int(seed),
             evaluator,
             None if virtual_batch_size is None else max(1, int(virtual_batch_size)),
+            None if progressive_widening_initial_actions is None else max(1, int(progressive_widening_initial_actions)),
+            None if progressive_widening_child_initial_actions is None else max(1, int(progressive_widening_child_initial_actions)),
+            None if progressive_widening_growth_interval is None else max(1.0, float(progressive_widening_growth_interval)),
+            None if progressive_widening_growth_base is None else max(1.000001, float(progressive_widening_growth_base)),
+            None if progressive_widening_candidate_actions is None else max(1, int(progressive_widening_candidate_actions)),
+            evaluation_cache,
         )
+    )
+
+
+def model1_new_mcts_evaluation_cache(*, max_states: int | None = None) -> object:
+    """Create a native scoped MCTS evaluation cache for one model-weight snapshot."""
+
+    return _dense_cnn_module().Model1MctsEvaluationCache(
+        None if max_states is None else max(1, int(max_states))
     )
 
 

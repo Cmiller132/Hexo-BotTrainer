@@ -67,7 +67,10 @@ fn clone_py_engine_state_with_api(
 ) -> PyResult<RustHexoState> {
     let mut raw: *mut c_void = ptr::null_mut();
     let code = unsafe {
-        (api.clone_state)(state_obj.as_ptr() as *mut c_void, &mut raw as *mut *mut c_void)
+        (api.clone_state)(
+            state_obj.as_ptr() as *mut c_void,
+            &mut raw as *mut *mut c_void,
+        )
     };
     if code != 0 || raw.is_null() {
         return Err(PyValueError::new_err(format!(

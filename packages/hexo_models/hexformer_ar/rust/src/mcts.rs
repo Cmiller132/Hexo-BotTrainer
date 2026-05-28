@@ -9,10 +9,10 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
 use std::collections::HashMap;
 
-use crate::engine_state::clone_py_engine_states;
-use crate::mcts_eval::evaluate_states_cached;
-use crate::mcts_tree::{select_root_action, terminal_value, RustLeaf, RustSearch};
-use crate::sample_gen::{ArchitectureConfig, CandidateConfig};
+use super::engine_state::clone_py_engine_states;
+use super::mcts_eval::evaluate_states_cached;
+use super::mcts_tree::{select_root_action, terminal_value, RustLeaf, RustSearch};
+use super::sample_gen::{ArchitectureConfig, CandidateConfig};
 
 #[pyfunction(signature = (root_state, visits, c_puct, temperature, seed, evaluator, architecture, candidates))]
 pub fn hexformer_ar_mcts(
@@ -124,11 +124,7 @@ pub fn hexformer_ar_batched_mcts(
                     let node = &searches[root_index].nodes[node_id];
                     immediate.push((root_index, selected.path, node.player, node.value()));
                 } else {
-                    searches[root_index].mark_pending(
-                        selected.parent_node,
-                        selected.edge_index,
-                        1,
-                    );
+                    searches[root_index].mark_pending(selected.parent_node, selected.edge_index, 1);
                     leaves.push(RustLeaf {
                         root_index,
                         parent_node: selected.parent_node,

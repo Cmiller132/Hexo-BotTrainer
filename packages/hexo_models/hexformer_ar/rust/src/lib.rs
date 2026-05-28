@@ -6,9 +6,9 @@
 
 mod constants;
 mod engine_state;
+mod mcts;
 mod mcts_eval;
 mod mcts_tree;
-mod mcts;
 mod sample_gen;
 
 use pyo3::prelude::*;

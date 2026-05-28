@@ -5,12 +5,12 @@
 //! evaluation payloads, MCTS, and compact sample generation.
 
 mod constants;
-mod state;
 mod encoding;
+mod mcts;
 mod mcts_eval;
 mod mcts_tree;
-mod mcts;
 mod sample_gen;
+mod state;
 
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -24,6 +24,17 @@ pub fn capabilities(py: Python<'_>) -> PyResult<Py<PyAny>> {
     dict.set_item("coordinate_encoding", "u32_i16_pair")?;
     dict.set_item("model1_batch_inputs", true)?;
     dict.set_item("model1_batched_mcts", true)?;
+    dict.set_item("model1_mcts_progressive_widening", true)?;
+    dict.set_item(
+        "model1_mcts_progressive_widening_reference",
+        "Chaslot_2008_progressive_unpruning",
+    )?;
+    dict.set_item("model1_mcts_evaluation_cache", true)?;
+    dict.set_item("model1_mcts_lazy_staged_edges", true)?;
+    dict.set_item(
+        "model1_mcts_lazy_staged_edges_reference",
+        "KataGo_SearchNode_children0_1_2",
+    )?;
     dict.set_item("model1_sample_from_state", true)?;
     dict.set_item("model1_finalize_game_samples", true)?;
     Ok(dict.into_any().unbind())

@@ -24,6 +24,9 @@ def _install_package_shell(monkeypatch: pytest.MonkeyPatch, *, rust: object = MI
     hexo_models = types.ModuleType("hexo_models")
     if rust is not MISSING:
         hexo_models._rust = rust
+        monkeypatch.setitem(sys.modules, "hexo_models._rust", rust)
+    else:
+        monkeypatch.delitem(sys.modules, "hexo_models._rust", raising=False)
     hexformer_pkg = types.ModuleType("hexo_models.hexformer_ar")
     hexformer_pkg.__path__ = []
     inference = types.ModuleType("hexo_models.hexformer_ar.inference")

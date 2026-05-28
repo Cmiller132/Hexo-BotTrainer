@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from random import Random
 from time import perf_counter
-from typing import Any
+from typing import Any, Mapping
 
 import hexo_engine as engine
 from hexo_engine.types import unpack_coord_id
@@ -12,7 +12,8 @@ from hexo_runner.records import AbortRecord, HexoRecordFile, HexoRecordPlayer
 
 from .debug_artifacts import render_preview_game_actions
 from .inference import DenseCNNInference
-from .mcts import SearchResult, run_batched_mcts
+from .mcts import SearchResult, new_mcts_evaluation_cache, run_batched_mcts
+from .performance import _extend_mcts_diagnostic_batches, _summarize_mcts_diagnostic_batches
 from .samples import Model1SampleData, finalize_game_samples, sample_from_state
 
 
@@ -25,6 +26,7 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
         device=trainer.device,
         amp=config.training.amp,
         return_logits=False,
+        max_batch_size=getattr(trainer, "inference_batch_size", 1024),
     )
     target_samples = int(config.selfplay.samples_per_epoch)
     max_games = max(int(games_per_epoch or 0), 1)
@@ -40,6 +42,8 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
     mcts_simulations = 0
     completed_games = 0
     truncated_games = 0
+    mcts_search_elapsed = 0.0
+    mcts_diagnostic_batches: list[Mapping[str, Any]] = []
     started = perf_counter()
 
     players = (
@@ -48,6 +52,48 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
     )
     active_limit = max(1, int(getattr(trainer, "selfplay_batch_size", config.selfplay.active_games)))
     virtual_batch_size = getattr(trainer, "mcts_virtual_batch_size", None)
+    progressive_widening_initial_actions = int(
+        getattr(
+            trainer,
+            "mcts_progressive_widening_initial_actions",
+            config.selfplay.progressive_widening_initial_actions,
+        )
+    )
+    progressive_widening_child_initial_actions = int(
+        getattr(
+            trainer,
+            "mcts_progressive_widening_child_initial_actions",
+            config.selfplay.progressive_widening_child_initial_actions,
+        )
+    )
+    progressive_widening_candidate_actions = int(
+        getattr(
+            trainer,
+            "mcts_progressive_widening_candidate_actions",
+            config.selfplay.progressive_widening_candidate_actions,
+        )
+    )
+    progressive_widening_growth_interval = float(
+        getattr(
+            trainer,
+            "mcts_progressive_widening_growth_interval",
+            config.selfplay.progressive_widening_growth_interval,
+        )
+    )
+    progressive_widening_growth_base = float(
+        getattr(
+            trainer,
+            "mcts_progressive_widening_growth_base",
+            config.selfplay.progressive_widening_growth_base,
+        )
+    )
+    evaluation_cache = new_mcts_evaluation_cache(
+        max_states=config.selfplay.mcts_evaluation_cache_max_states
+    )
+    active_root_limit = max(
+        1,
+        int(getattr(trainer, "mcts_active_root_limit", config.selfplay.mcts_active_root_limit)),
+    )
     next_game_index = 0
     active: list[dict[str, Any]] = []
     with HexoRecordFile.create(record_path, engine.engine_metadata(), players) as record_file:
@@ -82,6 +128,7 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
                 search_games = playable[:remaining_samples]
                 rollout_games = playable[remaining_samples:]
                 if search_games:
+                    search_started = perf_counter()
                     searches = _search_playable_games(
                         search_games,
                         inference=inference,
@@ -89,7 +136,17 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
                         temperature=config.selfplay.temperature,
                         seed=(ctx.config.run.seed or 0) + epoch,
                         virtual_batch_size=virtual_batch_size,
+                        progressive_widening_initial_actions=progressive_widening_initial_actions,
+                        progressive_widening_child_initial_actions=progressive_widening_child_initial_actions,
+                        progressive_widening_candidate_actions=progressive_widening_candidate_actions,
+                        progressive_widening_growth_interval=progressive_widening_growth_interval,
+                        progressive_widening_growth_base=progressive_widening_growth_base,
+                        evaluation_cache=evaluation_cache,
+                        active_root_limit=active_root_limit,
                     )
+                    if searches:
+                        _extend_mcts_diagnostic_batches(mcts_diagnostic_batches, searches)
+                    mcts_search_elapsed += perf_counter() - search_started
                 else:
                     searches = []
                 for game, search in zip(search_games, searches):
@@ -178,6 +235,9 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
                 active.remove(game)
 
     elapsed = perf_counter() - started
+    search_positions_per_second = searched_positions / max(mcts_search_elapsed, 1.0e-9)
+    end_to_end_positions_per_second = searched_positions / max(elapsed, 1.0e-9)
+    mcts_diagnostics = _summarize_mcts_diagnostic_batches(mcts_diagnostic_batches)
     preview_artifacts: list[dict[str, Any]] = []
     if config.debug.write_sample_previews and debug_games:
         preview_dir = ctx.output_dir / "diagnostics" / "dense_cnn_previews" / f"epoch_{epoch:06d}"
@@ -215,6 +275,9 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
             "samples_added": samples_added,
             "searched_positions": searched_positions,
             "mcts_simulations": mcts_simulations,
+            "mcts_search_elapsed_seconds": mcts_search_elapsed,
+            "search_positions_per_second": search_positions_per_second,
+            "end_to_end_positions_per_second": end_to_end_positions_per_second,
             "search_visits": int(getattr(trainer, "search_visits", config.selfplay.search_visits)),
             "mcts_sims_per_searched_position": (
                 mcts_simulations / searched_positions if searched_positions else 0.0
@@ -222,6 +285,14 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
             "completion_rollout": "model_policy_after_sample_budget",
             "active_games": active_limit,
             "mcts_virtual_batch_size": virtual_batch_size,
+            "mcts_progressive_widening_initial_actions": progressive_widening_initial_actions,
+            "mcts_progressive_widening_child_initial_actions": progressive_widening_child_initial_actions,
+            "mcts_progressive_widening_candidate_actions": progressive_widening_candidate_actions,
+            "mcts_progressive_widening_growth_interval": progressive_widening_growth_interval,
+            "mcts_progressive_widening_growth_base": progressive_widening_growth_base,
+            "mcts_evaluation_cache_max_states": config.selfplay.mcts_evaluation_cache_max_states,
+            "mcts_active_root_limit": active_root_limit,
+            "mcts_diagnostics": mcts_diagnostics,
         },
     )
     return {
@@ -237,9 +308,13 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
         "game_history_path": str(game_history_path) if game_history_path is not None else None,
         "debug_path": str(debug_path),
         "elapsed_seconds": elapsed,
-        "positions_per_second": searched_positions / max(elapsed, 1.0e-9),
+        "mcts_search_elapsed_seconds": mcts_search_elapsed,
+        "positions_per_second": end_to_end_positions_per_second,
+        "search_positions_per_second": search_positions_per_second,
+        "end_to_end_positions_per_second": end_to_end_positions_per_second,
         "samples_per_second": samples_added / max(elapsed, 1.0e-9),
         "completion_rollout": "model_policy_after_sample_budget",
+        "mcts_diagnostics": mcts_diagnostics,
     }
 
 
@@ -265,6 +340,13 @@ def _search_playable_games(
     temperature: float,
     seed: int,
     virtual_batch_size: int | None = None,
+    progressive_widening_initial_actions: int | None = None,
+    progressive_widening_child_initial_actions: int | None = None,
+    progressive_widening_candidate_actions: int | None = None,
+    progressive_widening_growth_interval: float | None = None,
+    progressive_widening_growth_base: float | None = None,
+    evaluation_cache: object | None = None,
+    active_root_limit: int | None = None,
 ) -> list[SearchResult]:
     return run_batched_mcts(
         [game["state"] for game in playable],
@@ -273,6 +355,13 @@ def _search_playable_games(
         temperature=temperature,
         seed=seed,
         virtual_batch_size=virtual_batch_size,
+        progressive_widening_initial_actions=progressive_widening_initial_actions,
+        progressive_widening_child_initial_actions=progressive_widening_child_initial_actions,
+        progressive_widening_candidate_actions=progressive_widening_candidate_actions,
+        progressive_widening_growth_interval=progressive_widening_growth_interval,
+        progressive_widening_growth_base=progressive_widening_growth_base,
+        evaluation_cache=evaluation_cache,
+        active_root_limit=active_root_limit,
     )
 
 

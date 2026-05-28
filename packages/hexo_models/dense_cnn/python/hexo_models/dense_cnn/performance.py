@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 from time import perf_counter
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 import torch
 
 from .config import Model1Config
 from .constants import BOARD_SIZE, INPUT_CHANNELS
 from .losses import model1_loss
+
+CALIBRATION_CACHE_VERSION = 4
+MCTS_BACKEND_SIGNATURE = "dense_cnn_katago_staged_edges_bounded_cache_active_roots_v1"
+MCTS_EVAL_CHUNK_STATES = 1024
 
 
 def calibrate_dense_cnn(
@@ -36,7 +40,13 @@ def calibrate_dense_cnn(
 
     requested = torch.device(config.device)
     device = requested if requested.type != "cuda" or torch.cuda.is_available() else torch.device("cpu")
-    model.to(device)
+    if device.type == "cuda":
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        model.to(device=device, memory_format=torch.channels_last)
+    else:
+        model.to(device)
     model.eval()
 
     model_state = _clone_state_dict(model.state_dict())
@@ -67,8 +77,11 @@ def calibrate_dense_cnn(
         )
     finally:
         model.load_state_dict(model_state)
+        if device.type == "cuda":
+            model.to(device=device, memory_format=torch.channels_last)
         if optimizer is not None and optimizer_state is not None:
             optimizer.load_state_dict(optimizer_state)
+        _clear_cache(device)
     selected_inference_benchmark = _best_batch(inference_results)
     selected_training = _best_batch(training_results)
     selected_selfplay = _select_selfplay_setting(
@@ -85,9 +98,18 @@ def calibrate_dense_cnn(
         "status": "completed",
         "device": str(device),
         "amp": bool(config.training.amp and device.type == "cuda"),
+        "calibration_cache_version": CALIBRATION_CACHE_VERSION,
+        "mcts_backend_signature": MCTS_BACKEND_SIGNATURE,
+        "mcts_eval_chunk_states": MCTS_EVAL_CHUNK_STATES,
         "selected_inference_batch_size": int(selected_inference_benchmark.get("batch_size", 1)),
         "selected_selfplay_batch_size": int(selected_selfplay.get("selfplay_batch_size", config.selfplay.active_games)),
         "selected_mcts_virtual_batch_size": int(selected_selfplay.get("mcts_virtual_batch_size", 0)),
+        "mcts_progressive_widening_initial_actions": config.selfplay.progressive_widening_initial_actions,
+        "mcts_progressive_widening_child_initial_actions": config.selfplay.progressive_widening_child_initial_actions,
+        "mcts_progressive_widening_candidate_actions": config.selfplay.progressive_widening_candidate_actions,
+        "mcts_progressive_widening_growth_interval": config.selfplay.progressive_widening_growth_interval,
+        "mcts_progressive_widening_growth_base": config.selfplay.progressive_widening_growth_base,
+        "mcts_active_root_limit": config.selfplay.mcts_active_root_limit,
         "selected_training_batch_size": int(selected_training.get("batch_size", config.training.batch_size)),
         "selected_mcts_visits": int(selected_selfplay.get("visits", config.selfplay.search_visits)),
         "inference_positions_per_second": float(selected_inference_benchmark.get("positions_per_second", 0.0)),
@@ -142,6 +164,8 @@ def _benchmark_inference(
         batch = max(1, int(batch_size))
         try:
             inputs = torch.randn(batch, INPUT_CHANNELS, BOARD_SIZE, BOARD_SIZE, device=device)
+            if device.type == "cuda":
+                inputs = inputs.contiguous(memory_format=torch.channels_last)
             _sync(device)
             started = perf_counter()
             with torch.no_grad():
@@ -179,6 +203,8 @@ def _benchmark_training(
         batch = max(1, int(batch_size))
         try:
             inputs = torch.randn(batch, INPUT_CHANNELS, BOARD_SIZE, BOARD_SIZE, device=device)
+            if device.type == "cuda":
+                inputs = inputs.contiguous(memory_format=torch.channels_last)
             target = {
                 "policy": torch.full((batch, BOARD_SIZE * BOARD_SIZE), 1.0 / (BOARD_SIZE * BOARD_SIZE), device=device),
                 "opp_policy": torch.full((batch, BOARD_SIZE * BOARD_SIZE), 1.0 / (BOARD_SIZE * BOARD_SIZE), device=device),
@@ -220,7 +246,7 @@ def _benchmark_selfplay(
     from hexo_engine.types import unpack_coord_id
 
     from .inference import DenseCNNInference
-    from .mcts import run_batched_mcts
+    from .mcts import new_mcts_evaluation_cache, run_batched_mcts
 
     results: list[dict[str, Any]] = []
     inference = DenseCNNInference(
@@ -228,6 +254,7 @@ def _benchmark_selfplay(
         device=config.device,
         amp=config.training.amp,
         return_logits=False,
+        max_batch_size=max(1, min(1024, max(int(item) for item in config.performance.inference_batch_candidates))),
     )
     for selfplay_batch_size in batch_candidates:
         for virtual_batch_size in virtual_batch_candidates:
@@ -256,7 +283,7 @@ def _benchmark_selfplay_setting(
     import hexo_engine as engine
     from hexo_engine.types import unpack_coord_id
 
-    from .mcts import run_batched_mcts
+    from .mcts import new_mcts_evaluation_cache, run_batched_mcts
 
     resolved_visits = max(1, int(visits))
     target_positions = max(1, int(probe_positions))
@@ -272,6 +299,10 @@ def _benchmark_selfplay_setting(
     mcts_simulations = 0
     completed_games = 0
     exact_visit_results = 0
+    mcts_diagnostic_batches: list[Mapping[str, Any]] = []
+    evaluation_cache = new_mcts_evaluation_cache(
+        max_states=config.selfplay.mcts_evaluation_cache_max_states
+    )
     started = perf_counter()
     while positions < target_positions:
         playable = [
@@ -297,7 +328,16 @@ def _benchmark_selfplay_setting(
             temperature=config.selfplay.temperature,
             seed=17_000 + resolved_visits + positions,
             virtual_batch_size=virtual_batch_size,
+            progressive_widening_initial_actions=config.selfplay.progressive_widening_initial_actions,
+            progressive_widening_child_initial_actions=config.selfplay.progressive_widening_child_initial_actions,
+            progressive_widening_candidate_actions=config.selfplay.progressive_widening_candidate_actions,
+            progressive_widening_growth_interval=config.selfplay.progressive_widening_growth_interval,
+            progressive_widening_growth_base=config.selfplay.progressive_widening_growth_base,
+            evaluation_cache=evaluation_cache,
+            active_root_limit=config.selfplay.mcts_active_root_limit,
         )
+        if searches:
+            _extend_mcts_diagnostic_batches(mcts_diagnostic_batches, searches)
         for game, search in zip(playable, searches):
             if search.visits == resolved_visits:
                 exact_visit_results += 1
@@ -310,9 +350,17 @@ def _benchmark_selfplay_setting(
         "status": "completed",
         "visits": resolved_visits,
         "selfplay_batch_size": active_limit,
-        "inference_batch_size": active_limit,
+        "inference_batch_size": int(getattr(inference, "max_batch_size", active_limit)),
         "batch_size": active_limit,
         "mcts_virtual_batch_size": virtual_batch_size,
+        "mcts_progressive_widening_initial_actions": config.selfplay.progressive_widening_initial_actions,
+        "mcts_progressive_widening_child_initial_actions": config.selfplay.progressive_widening_child_initial_actions,
+        "mcts_progressive_widening_candidate_actions": config.selfplay.progressive_widening_candidate_actions,
+        "mcts_progressive_widening_growth_interval": config.selfplay.progressive_widening_growth_interval,
+        "mcts_progressive_widening_growth_base": config.selfplay.progressive_widening_growth_base,
+        "mcts_evaluation_cache_max_states": config.selfplay.mcts_evaluation_cache_max_states,
+        "mcts_active_root_limit": config.selfplay.mcts_active_root_limit,
+        "mcts_diagnostics": _summarize_mcts_diagnostic_batches(mcts_diagnostic_batches),
         "positions": int(positions),
         "searched_positions": int(positions),
         "recorded_positions": int(positions),
@@ -322,6 +370,80 @@ def _benchmark_selfplay_setting(
         "elapsed_seconds": elapsed,
         "positions_per_second": positions / max(elapsed, 1.0e-9),
     }
+
+
+def _summarize_mcts_diagnostic_batches(batches: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    summary: dict[str, Any] = {"batch_count": len(batches)}
+    if not batches:
+        return summary
+
+    tree_sum_fields = (
+        "node_count",
+        "active_edge_count",
+        "hidden_prior_count",
+        "completed_visits",
+        "widened_edges_total",
+    )
+    tree_max_fields = (
+        "root_count",
+        "max_nodes_per_root",
+        "max_active_edges_per_root",
+        "max_hidden_priors_per_root",
+        "max_active_edges_per_node",
+        "max_hidden_priors_per_node",
+    )
+    eval_sum_fields = (
+        "requested_states",
+        "cache_hits",
+        "duplicate_hits",
+        "unique_states",
+        "evaluator_chunks",
+        "encoded_states",
+        "encoded_legal_actions",
+        "input_bytes",
+        "legal_index_bytes",
+        "value_bytes",
+        "prior_bytes",
+        "cache_inserts",
+        "cache_insert_skipped",
+    )
+    eval_max_fields = ("max_chunk_states", "max_chunk_legal_actions", "cache_size", "cache_size_peak")
+
+    for field in tree_sum_fields:
+        summary[f"tree_{field}"] = sum(_int_nested(batch, "tree", field) for batch in batches)
+    for field in tree_max_fields:
+        summary[f"tree_{field}"] = max(_int_nested(batch, "tree", field) for batch in batches)
+    for field in eval_sum_fields:
+        summary[f"eval_{field}"] = sum(_int_nested(batch, "evaluation", field) for batch in batches)
+    for field in eval_max_fields:
+        summary[f"eval_{field}"] = max(_int_nested(batch, "evaluation", field) for batch in batches)
+    return summary
+
+
+def _extend_mcts_diagnostic_batches(destination: list[Mapping[str, Any]], searches: Sequence[Any]) -> None:
+    seen: set[int] = set()
+    for search in searches:
+        diagnostics = getattr(search, "diagnostics", {})
+        if not isinstance(diagnostics, Mapping):
+            continue
+        batch_diagnostics = diagnostics.get("batch", {})
+        if not isinstance(batch_diagnostics, Mapping):
+            continue
+        marker = id(batch_diagnostics)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        destination.append(batch_diagnostics)
+
+
+def _int_nested(mapping: Mapping[str, Any], section: str, field: str) -> int:
+    section_value = mapping.get(section, {})
+    if not isinstance(section_value, Mapping):
+        return 0
+    try:
+        return int(section_value.get(field, 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _best_batch(results: Sequence[dict[str, Any]]) -> dict[str, Any]:

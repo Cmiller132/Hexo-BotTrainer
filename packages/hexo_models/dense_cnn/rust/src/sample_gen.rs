@@ -26,8 +26,8 @@ pub fn model1_sample_from_state(
     lookahead: &Bound<'_, PyAny>,
     metadata: &Bound<'_, PyAny>,
 ) -> PyResult<Py<PyAny>> {
-    let state = crate::state::state_from_py_state(py, state)?;
-    let center = crate::encoding::model1_crop_center(&state);
+    let state = super::state::state_from_py_state(py, state)?;
+    let center = super::encoding::model1_crop_center(&state);
 
     let dict = PyDict::new(py);
     dict.set_item("game_id", game_id)?;
@@ -36,7 +36,10 @@ pub fn model1_sample_from_state(
     dict.set_item("phase", phase_label(state.phase()))?;
     dict.set_item("center", (center.q, center.r))?;
     dict.set_item("stones", stones_obj(py, &state)?)?;
-    dict.set_item("legal_action_ids", legal_action_ids_obj(py, &state, center)?)?;
+    dict.set_item(
+        "legal_action_ids",
+        legal_action_ids_obj(py, &state, center)?,
+    )?;
     dict.set_item("placement_history", placement_history_obj(py, &state)?)?;
     dict.set_item("first_stone", first_stone_tuple(state.phase()))?;
 
@@ -48,13 +51,19 @@ pub fn model1_sample_from_state(
         coord_list_obj(py, &opponent_last_turn(&state))?,
     )?;
 
-    dict.set_item("policy", action_weight_pairs_obj(py, &action_weight_pairs(policy)?)?)?;
+    dict.set_item(
+        "policy",
+        action_weight_pairs_obj(py, &action_weight_pairs(policy)?)?,
+    )?;
     dict.set_item(
         "opp_policy",
         action_weight_pairs_obj(py, &action_weight_pairs(opp_policy)?)?,
     )?;
     dict.set_item("value", value)?;
-    dict.set_item("lookahead", lookahead_pairs_obj(py, &lookahead_pairs(lookahead)?)?)?;
+    dict.set_item(
+        "lookahead",
+        lookahead_pairs_obj(py, &lookahead_pairs(lookahead)?)?,
+    )?;
     dict.set_item("metadata", mapping_to_dict(py, metadata)?)?;
     Ok(dict.into_any().unbind())
 }
@@ -223,7 +232,7 @@ fn legal_action_ids_obj(
     let mut legal = Vec::with_capacity(state.legal_move_count());
     state.write_legal_moves(&mut legal);
     for coord in legal {
-        if crate::encoding::model1_flat_index(coord, center).is_some() {
+        if super::encoding::model1_flat_index(coord, center).is_some() {
             list.append(pack_coord(coord))?;
         }
     }
@@ -386,7 +395,9 @@ fn horizon_values(horizons: &Bound<'_, PyAny>) -> PyResult<Vec<usize>> {
     for item in horizons.try_iter()? {
         let horizon = item?.extract::<i64>()?;
         if horizon < 0 {
-            return Err(PyValueError::new_err("lookahead horizons must be non-negative"));
+            return Err(PyValueError::new_err(
+                "lookahead horizons must be non-negative",
+            ));
         }
         values.push(horizon as usize);
     }

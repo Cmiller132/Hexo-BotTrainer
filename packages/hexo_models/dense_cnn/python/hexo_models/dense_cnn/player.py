@@ -42,6 +42,12 @@ class DenseCNNPlayer:
             self.inference,
             visits=self.trainer.config.selfplay.search_visits,
             temperature=0.0,
+            progressive_widening_initial_actions=self.trainer.config.selfplay.progressive_widening_initial_actions,
+            progressive_widening_child_initial_actions=self.trainer.config.selfplay.progressive_widening_child_initial_actions,
+            progressive_widening_candidate_actions=self.trainer.config.selfplay.progressive_widening_candidate_actions,
+            progressive_widening_growth_interval=self.trainer.config.selfplay.progressive_widening_growth_interval,
+            progressive_widening_growth_base=self.trainer.config.selfplay.progressive_widening_growth_base,
+            evaluation_cache=None,
         )
         action = engine.PlacementAction(unpack_coord_id(search.action_id))
         return DecisionResult(

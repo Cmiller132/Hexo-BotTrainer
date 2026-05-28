@@ -107,6 +107,12 @@ def test_rust_bridge_forwards_live_states_without_history_conversion(monkeypatch
             seed: int,
             callback: object,
             virtual_batch_size: int | None,
+            progressive_widening_initial_actions: int | None,
+            progressive_widening_child_initial_actions: int | None,
+            progressive_widening_growth_interval: float | None,
+            progressive_widening_growth_base: float | None,
+            progressive_widening_candidate_actions: int | None,
+            evaluation_cache: object | None,
         ) -> tuple[dict[str, Any], ...]:
             calls["mcts"] = {
                 "states": states,
@@ -116,6 +122,12 @@ def test_rust_bridge_forwards_live_states_without_history_conversion(monkeypatch
                 "seed": seed,
                 "callback": callback,
                 "virtual_batch_size": virtual_batch_size,
+                "progressive_widening_initial_actions": progressive_widening_initial_actions,
+                "progressive_widening_child_initial_actions": progressive_widening_child_initial_actions,
+                "progressive_widening_candidate_actions": progressive_widening_candidate_actions,
+                "progressive_widening_growth_interval": progressive_widening_growth_interval,
+                "progressive_widening_growth_base": progressive_widening_growth_base,
+                "evaluation_cache": evaluation_cache,
             }
             return ({"action_id": 7, "visit_policy": ((7, 1.0),), "root_value": 0.0, "visits": visits},)
 
@@ -146,6 +158,12 @@ def test_rust_bridge_forwards_live_states_without_history_conversion(monkeypatch
         "seed": 13,
         "callback": evaluator,
         "virtual_batch_size": 3,
+        "progressive_widening_initial_actions": None,
+        "progressive_widening_child_initial_actions": None,
+        "progressive_widening_candidate_actions": None,
+        "progressive_widening_growth_interval": None,
+        "progressive_widening_growth_base": None,
+        "evaluation_cache": None,
     }
     assert payloads[0]["action_id"] == 7
 

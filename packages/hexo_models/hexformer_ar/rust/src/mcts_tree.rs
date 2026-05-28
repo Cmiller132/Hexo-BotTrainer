@@ -8,12 +8,12 @@ use pyo3::prelude::*;
 use std::cmp::Ordering;
 
 use hexo_engine::{
-    apply_placement, unpack_coord, GameOutcome, HexoState as RustHexoState, PackedCoord,
-    Placement, Player,
+    apply_placement, unpack_coord, GameOutcome, HexoState as RustHexoState, PackedCoord, Placement,
+    Player,
 };
 
-use crate::mcts_eval::RustEvaluation;
-use crate::engine_state::move_error;
+use super::engine_state::move_error;
+use super::mcts_eval::RustEvaluation;
 
 #[derive(Clone, Debug)]
 pub(crate) struct RustEdge {
@@ -89,7 +89,11 @@ impl RustSearch {
         self.nodes[0].edges.is_empty()
     }
 
-    pub(crate) fn add_node_from_eval(&mut self, state: &RustHexoState, evaluation: &RustEvaluation) -> usize {
+    pub(crate) fn add_node_from_eval(
+        &mut self,
+        state: &RustHexoState,
+        evaluation: &RustEvaluation,
+    ) -> usize {
         let id = self.nodes.len();
         self.nodes.push(node_from_evaluation(state, evaluation));
         id
@@ -181,7 +185,12 @@ impl RustSearch {
         }
     }
 
-    pub(crate) fn backup_virtual(&mut self, path: &[(usize, usize)], leaf_player: Player, leaf_value: f32) {
+    pub(crate) fn backup_virtual(
+        &mut self,
+        path: &[(usize, usize)],
+        leaf_player: Player,
+        leaf_value: f32,
+    ) {
         for &(node_id, edge_index) in path {
             let value = if self.nodes[node_id].player == leaf_player {
                 leaf_value
@@ -271,7 +280,11 @@ pub(crate) fn terminal_value(outcome: GameOutcome, player: Player) -> f32 {
     }
 }
 
-pub(crate) fn select_root_action(node: &RustNode, temperature: f32, seed: u64) -> Option<PackedCoord> {
+pub(crate) fn select_root_action(
+    node: &RustNode,
+    temperature: f32,
+    seed: u64,
+) -> Option<PackedCoord> {
     if node.edges.is_empty() {
         return None;
     }
@@ -318,7 +331,10 @@ mod tests {
         state.write_legal_action_ids(&mut legal);
         RustEvaluation {
             value,
-            priors: legal.into_iter().map(|action_id| (action_id, 1.0)).collect(),
+            priors: legal
+                .into_iter()
+                .map(|action_id| (action_id, 1.0))
+                .collect(),
         }
     }
 
@@ -341,7 +357,8 @@ mod tests {
             } else {
                 let eval = evaluation_for_state(&selected.state, 0.5);
                 let child_id = search.add_node_from_eval(&selected.state, &eval);
-                search.nodes[selected.parent_node].edges[selected.edge_index].child = Some(child_id);
+                search.nodes[selected.parent_node].edges[selected.edge_index].child =
+                    Some(child_id);
                 let child_player = search.nodes[child_id].player;
                 let child_value = search.nodes[child_id].value();
                 search.backup_virtual(&selected.path, child_player, child_value);

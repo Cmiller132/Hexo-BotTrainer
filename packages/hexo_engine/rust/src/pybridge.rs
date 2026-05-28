@@ -191,14 +191,11 @@ fn move_error(error: MoveError) -> PyErr {
     PyValueError::new_err(error.to_string())
 }
 
-unsafe extern "C" fn clone_state_for_capsule(
-    object: *mut c_void,
-    out: *mut *mut c_void,
-) -> i32 {
+unsafe extern "C" fn clone_state_for_capsule(object: *mut c_void, out: *mut *mut c_void) -> i32 {
     if object.is_null() || out.is_null() {
         return STATE_API_NULL_ARGUMENT;
     }
-    Python::with_gil(|py| {
+    Python::try_attach(|py| {
         let any =
             unsafe { Bound::<PyAny>::from_borrowed_ptr(py, object as *mut pyo3::ffi::PyObject) };
         let Ok(state) = any.extract::<PyRef<'_, PyHexoState>>() else {
@@ -210,6 +207,7 @@ unsafe extern "C" fn clone_state_for_capsule(
         }
         STATE_API_OK
     })
+    .unwrap_or(STATE_API_TYPE_ERROR)
 }
 
 unsafe extern "C" fn free_state_for_capsule(state: *mut c_void) {

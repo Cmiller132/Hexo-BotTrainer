@@ -183,6 +183,16 @@ def _write_pipeline_config(tmp_path: Path) -> Path:
                 "sealbot_time_limit = 0.001",
                 "max_actions = 4",
                 "",
+                "[model.config.performance]",
+                "calibrate = true",
+                "target_selfplay_positions_per_second = 128",
+                "inference_batch_candidates = [1, 2]",
+                "training_batch_candidates = [1, 2]",
+                "selfplay_batch_candidates = [1, 2]",
+                "mcts_virtual_batch_candidates = [1, 2]",
+                "selfplay_probe_positions = 4",
+                "probe_batches = 1",
+                "",
                 "[model.config.debug]",
                 "write_game_history = true",
                 "write_policy_targets = true",
@@ -306,6 +316,13 @@ def test_dense_cnn_model1_config_writes_to_repo_level_run_and_checkpoint_paths()
     assert config.checkpoint.resume_from == ROOT / "data" / "checkpoints" / "dense_cnn_model1_latest.txt"
     assert parsed.selfplay.search_visits == 128
     assert parsed.selfplay.samples_per_epoch == 4096
+    assert parsed.selfplay.progressive_widening_initial_actions == 128
+    assert parsed.selfplay.progressive_widening_child_initial_actions == 32
+    assert parsed.selfplay.progressive_widening_candidate_actions == 192
+    assert parsed.selfplay.progressive_widening_growth_interval == pytest.approx(40.0)
+    assert parsed.selfplay.progressive_widening_growth_base == pytest.approx(1.3)
+    assert parsed.selfplay.mcts_evaluation_cache_max_states == 131_072
+    assert parsed.selfplay.mcts_active_root_limit == 512
     assert parsed.samples.train_sample_count == 4096
     assert parsed.samples.capacity >= 200_000
     assert parsed.evaluation.games_per_epoch == 64
@@ -314,6 +331,10 @@ def test_dense_cnn_model1_config_writes_to_repo_level_run_and_checkpoint_paths()
     assert parsed.evaluation.require_sealbot is True
     assert parsed.performance.target_selfplay_positions_per_second == pytest.approx(128.0)
     assert parsed.performance.selfplay_probe_positions >= max(parsed.performance.selfplay_batch_candidates)
+    assert parsed.performance.inference_batch_candidates[-1] <= 1024
+    assert parsed.performance.selfplay_batch_candidates == (2048,)
+    assert parsed.performance.mcts_virtual_batch_candidates == (4,)
+    assert max(parsed.performance.training_batch_candidates) <= 256
 
 
 def test_training_overrides_wire_dense_cnn_pipeline_components(tmp_path: Path) -> None:
@@ -617,6 +638,9 @@ def test_selfplay_records_only_sample_budget_with_mcts_and_rolls_out_tail(
     assert result["samples_added"] == 2
     assert result["searched_positions"] == 2
     assert result["mcts_simulations"] == 2
+    assert result["mcts_search_elapsed_seconds"] >= 0.0
+    assert result["positions_per_second"] == result["end_to_end_positions_per_second"]
+    assert result["end_to_end_positions_per_second"] <= result["search_positions_per_second"]
     assert mcts_batch_sizes == [2]
     assert len(sampled_turns) == 2
     assert rollout_batch_sizes, "non-sample tail moves should use policy rollout instead of MCTS"

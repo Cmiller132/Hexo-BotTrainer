@@ -12,8 +12,8 @@ use hexo_engine::{
     pack_coord, Axis, HexCoord, HexoState as RustHexoState, PackedCoord, Player, TurnPhase,
 };
 
-use crate::constants::*;
-use crate::state::states_from_py_states;
+use super::constants::*;
+use super::state::states_from_py_states;
 
 pub(crate) struct Model1EncodedState {
     pub(crate) planes: Vec<f32>,
@@ -56,7 +56,6 @@ pub fn model1_batch_inputs(py: Python<'_>, states: &Bound<'_, PyAny>) -> PyResul
     dict.set_item("centers", centers)?;
     Ok(dict.into_any().unbind())
 }
-
 
 pub fn register_pybridge(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(model1_batch_inputs, module)?)?;
@@ -258,6 +257,19 @@ pub(crate) fn model1_flat_index(coord: HexCoord, center: HexCoord) -> Option<usi
     Some(row as usize * MODEL1_BOARD_SIZE + col as usize)
 }
 
+pub(crate) fn model1_coord_from_flat(flat: usize, center: HexCoord) -> Option<HexCoord> {
+    if flat >= MODEL1_BOARD_AREA {
+        return None;
+    }
+    let half = (MODEL1_BOARD_SIZE / 2) as i32;
+    let row = flat / MODEL1_BOARD_SIZE;
+    let col = flat % MODEL1_BOARD_SIZE;
+    Some(HexCoord {
+        q: (col as i32 - half + center.q as i32) as i16,
+        r: (row as i32 - half + center.r as i32) as i16,
+    })
+}
+
 fn fill_distance_plane(planes: &mut [f32]) {
     let half = (MODEL1_BOARD_SIZE / 2) as i32;
     for row in 0..MODEL1_BOARD_SIZE {
@@ -265,7 +277,8 @@ fn fill_distance_plane(planes: &mut [f32]) {
             let r = row as i32 - half;
             let q = col as i32 - half;
             let s = -r - q;
-            let distance = r.abs().max(q.abs()).max(s.abs()) as f32 / (MODEL1_BOARD_SIZE - 1) as f32;
+            let distance =
+                r.abs().max(q.abs()).max(s.abs()) as f32 / (MODEL1_BOARD_SIZE - 1) as f32;
             set_plane(
                 planes,
                 MODEL1_PLANE_CENTER_DISTANCE,

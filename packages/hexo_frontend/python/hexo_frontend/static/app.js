@@ -3,6 +3,7 @@ const SQRT3 = Math.sqrt(3);
 const FIT_MOVE_COUNT = 8;
 const FIT_LEGAL_RADIUS = 5;
 const HISTORY_ALL_RUNS = "__all__";
+const HISTORY_PAGE_SIZE = 400;
 
 let state = null;
 let tacticsOn = false;
@@ -28,6 +29,7 @@ let trainingLoadError = "";
 let activeScreen = screenFromHash();
 let historyFilters = { query: "", source: "all", winner: "all" };
 let historySelectedRun = HISTORY_ALL_RUNS;
+let historyVisibleLimit = HISTORY_PAGE_SIZE;
 let historyDetailsLoading = false;
 let selectedHistoryKey = "";
 let historyView = false;
@@ -78,6 +80,7 @@ if (historyRefreshBtn) historyRefreshBtn.addEventListener("click", loadTrainingR
 trainingRunSelect.addEventListener("change", () => loadTrainingRun(trainingRunSelect.value));
 if (historyRunSelect) historyRunSelect.addEventListener("change", async () => {
   historySelectedRun = historyRunSelect.value || HISTORY_ALL_RUNS;
+  historyVisibleLimit = HISTORY_PAGE_SIZE;
   await ensureHistorySelectionLoaded();
   renderGameHistoryPage();
 });
@@ -96,14 +99,17 @@ if (gameHistoryList) gameHistoryList.addEventListener("click", handleGameHistory
 if (gameHistoryDetail) gameHistoryDetail.addEventListener("click", handleGameHistoryClick);
 if (historySearchInput) historySearchInput.addEventListener("input", event => {
   historyFilters.query = event.target.value || "";
+  historyVisibleLimit = HISTORY_PAGE_SIZE;
   renderGameHistoryPage();
 });
 if (historySourceSelect) historySourceSelect.addEventListener("change", event => {
   historyFilters.source = event.target.value || "all";
+  historyVisibleLimit = HISTORY_PAGE_SIZE;
   renderGameHistoryPage();
 });
 if (historyWinnerSelect) historyWinnerSelect.addEventListener("change", event => {
   historyFilters.winner = event.target.value || "all";
+  historyVisibleLimit = HISTORY_PAGE_SIZE;
   renderGameHistoryPage();
 });
 window.addEventListener("hashchange", () => setScreen(screenFromHash(), { preserveHash: true }));
@@ -1973,9 +1979,15 @@ function renderGameHistoryPage() {
 
   const filtered = filteredHistoryItems(histories);
   const selected = selectedHistoryItem(histories, filtered);
+  const visible = filtered.slice(0, historyVisibleLimit);
   historyOverview.innerHTML = renderHistoryOverview(histories, filtered);
   gameHistoryList.innerHTML = filtered.length
-    ? filtered.map(item => gameHistoryListRow(item.run, item)).join("")
+    ? [
+      ...visible.map(item => gameHistoryListRow(item.run, item)),
+      filtered.length > visible.length
+        ? `<button class="history-list-more" type="button" data-history-more>Show ${Math.min(HISTORY_PAGE_SIZE, filtered.length - visible.length)} more games (${visible.length} of ${filtered.length})</button>`
+        : "",
+    ].join("")
     : `<div class="empty-list">No games match the current filters</div>`;
   gameHistoryDetail.innerHTML = selected
     ? gameHistoryDetailHtml(selected.run, selected)
@@ -2002,6 +2014,13 @@ function historyItemsForPage(runs) {
 }
 
 function handleGameHistoryClick(event) {
+  const moreButton = event.target.closest("[data-history-more]");
+  if (moreButton) {
+    event.preventDefault();
+    historyVisibleLimit += HISTORY_PAGE_SIZE;
+    renderGameHistoryPage();
+    return;
+  }
   const loadButton = event.target.closest("[data-history-load]");
   if (loadButton) {
     event.preventDefault();
@@ -2123,7 +2142,11 @@ function gameHistoryListRow(runName, item) {
     <div><span class="winner-pill ${winnerClass(item.winner)}">${escapeText(winner)}</span></div>
     <div><strong>${escapeText(item.length || item.actions || 0)}</strong><span>moves</span></div>
     <div><strong>P0 ${escapeText(p0)}</strong><span>P1 ${escapeText(p1)}</span></div>
-    <div><strong>${escapeText(diagnostics)}</strong><span>${escapeText(formatHistoryDate(item.modified))}</span></div>
+    <div class="history-row-actions">
+      <strong>${escapeText(diagnostics)}</strong>
+      <span>${escapeText(formatHistoryDate(item.modified))}</span>
+      <button class="history-row-load" type="button" data-history-load data-history-run="${escapeAttr(runName || "")}" data-history-path="${escapeAttr(item.path)}" data-record-index="${escapeAttr(item.record_index || 0)}">Replay</button>
+    </div>
   </div>`;
 }
 

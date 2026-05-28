@@ -17,8 +17,8 @@ use hexo_engine::{
     PackedCoord, Player, TurnPhase,
 };
 
-use crate::constants::*;
-use crate::engine_state::{clone_py_engine_state, clone_py_engine_states, STATE_API_VERSION};
+use super::constants::*;
+use super::engine_state::{clone_py_engine_state, clone_py_engine_states, STATE_API_VERSION};
 
 const ENGINE_STATE_SOURCE: &str = "engine_state_clone";
 
@@ -63,18 +63,30 @@ impl ArchitectureConfig {
     pub(crate) fn from_py(raw: &Bound<'_, PyAny>) -> PyResult<Self> {
         let default = Self::default();
         Ok(Self {
-            candidate_feature_dim: get_usize(raw, "candidate_feature_dim", default.candidate_feature_dim)?,
+            candidate_feature_dim: get_usize(
+                raw,
+                "candidate_feature_dim",
+                default.candidate_feature_dim,
+            )?,
             stone_feature_dim: get_usize(raw, "stone_feature_dim", default.stone_feature_dim)?,
             window_feature_dim: get_usize(raw, "window_feature_dim", default.window_feature_dim)?,
             global_feature_dim: get_usize(raw, "global_feature_dim", default.global_feature_dim)?,
-            local_input_channels: get_usize(raw, "local_input_channels", default.local_input_channels)?,
+            local_input_channels: get_usize(
+                raw,
+                "local_input_channels",
+                default.local_input_channels,
+            )?,
             local_crop_size: get_usize(raw, "local_crop_size", default.local_crop_size)?,
             max_local_windows: get_usize(raw, "max_local_windows", default.max_local_windows)?,
             max_candidates: get_usize(raw, "max_candidates", default.max_candidates)?,
             max_stones: get_usize(raw, "max_stones", default.max_stones)?,
             max_windows: get_usize(raw, "max_windows", default.max_windows)?,
             max_rel_edges: get_usize(raw, "max_rel_edges", default.max_rel_edges)?,
-            rel_edge_feature_dim: get_usize(raw, "rel_edge_feature_dim", default.rel_edge_feature_dim)?,
+            rel_edge_feature_dim: get_usize(
+                raw,
+                "rel_edge_feature_dim",
+                default.rel_edge_feature_dim,
+            )?,
             lookahead_horizons: get_i32_vec(raw, "lookahead_horizons", default.lookahead_horizons)?,
         })
     }
@@ -315,12 +327,8 @@ pub fn sparse_input_payload_from_state(
     };
     let state = clone_py_engine_state(py, state)?;
     let payload = build_sparse_payload(&state, &arch, &candidate_cfg, &targets);
-    let metadata = metadata_with_state_source(
-        py,
-        metadata,
-        ENGINE_STATE_SOURCE,
-        Some(STATE_API_VERSION),
-    )?;
+    let metadata =
+        metadata_with_state_source(py, metadata, ENGINE_STATE_SOURCE, Some(STATE_API_VERSION))?;
     sparse_payload_to_py(py, &payload, metadata.as_any())
 }
 
@@ -469,7 +477,10 @@ fn selfplay_sample_payloads_for_states(
 pub fn register_pybridge(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(sparse_input_payload_from_state, module)?)?;
     module.add_function(wrap_pyfunction!(sparse_input_payloads_from_states, module)?)?;
-    module.add_function(wrap_pyfunction!(selfplay_sample_payloads_from_states, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        selfplay_sample_payloads_from_states,
+        module
+    )?)?;
     Ok(())
 }
 
@@ -484,7 +495,8 @@ pub(crate) fn build_sparse_payload(
     let mut legal_action_ids = Vec::with_capacity(state.legal_move_count());
     state.write_legal_action_ids(&mut legal_action_ids);
     let tactical = build_tactical_summary(state, &legal_action_ids);
-    let candidate_set = build_candidate_frontier(state, &legal_action_ids, &tactical, candidate_cfg);
+    let candidate_set =
+        build_candidate_frontier(state, &legal_action_ids, &tactical, candidate_cfg);
     let opening = matches!(state.phase(), TurnPhase::Opening);
     let anchor = choose_anchor(state.board().occupied_cells(), opening);
     let candidates = candidate_set
@@ -498,8 +510,7 @@ pub(crate) fn build_sparse_payload(
         .map(|candidate| candidate.action_id)
         .collect::<Vec<_>>();
 
-    let mut candidate_features =
-        vec![0.0; candidates.len() * architecture.candidate_feature_dim];
+    let mut candidate_features = vec![0.0; candidates.len() * architecture.candidate_feature_dim];
     let mut candidate_coords = vec![0.0; candidates.len() * 5];
     let immediate_set = tactical
         .immediate_win_action_ids
@@ -673,8 +684,9 @@ pub(crate) fn build_sparse_payload(
 
     let (local_inputs, local_window_coords, local_window_mask) =
         build_local_windows(state, &candidate_ids, &tactical, anchor, architecture);
-    let crop_area =
-        architecture.local_input_channels * architecture.local_crop_size * architecture.local_crop_size;
+    let crop_area = architecture.local_input_channels
+        * architecture.local_crop_size
+        * architecture.local_crop_size;
     let local_input = if local_inputs.data.is_empty() {
         TensorF32 {
             shape: vec![
@@ -695,10 +707,19 @@ pub(crate) fn build_sparse_payload(
         }
     };
 
-    let (rel_edge_index, rel_edge_features, rel_edge_mask) =
-        build_rel_edges(&candidates, &stones, &windows, local_inputs.shape[0], architecture);
-    let global_features =
-        build_global_features(state, anchor, candidate_ids.len(), architecture.global_feature_dim);
+    let (rel_edge_index, rel_edge_features, rel_edge_mask) = build_rel_edges(
+        &candidates,
+        &stones,
+        &windows,
+        local_inputs.shape[0],
+        architecture,
+    );
+    let global_features = build_global_features(
+        state,
+        anchor,
+        candidate_ids.len(),
+        architecture.global_feature_dim,
+    );
 
     SparsePayload {
         candidate_action_ids: candidate_ids.clone(),
@@ -761,10 +782,12 @@ pub(crate) fn build_sparse_payload(
         lookahead_targets: targets
             .lookahead
             .iter()
-            .filter_map(|(horizon, value)| wdl_target(Some(*value)).map(|target| (*horizon, target)))
+            .filter_map(|(horizon, value)| {
+                wdl_target(Some(*value)).map(|target| (*horizon, target))
+            })
             .collect(),
         anchor,
-        placements_made: state.placements_made(),
+        placements_made: state.placements_made() as usize,
         phase: phase_label(state.phase()),
         current_player: player_label(state.current_player()),
         legal_action_count: legal_action_ids.len(),
@@ -773,7 +796,10 @@ pub(crate) fn build_sparse_payload(
     }
 }
 
-fn build_tactical_summary(state: &RustHexoState, legal_action_ids: &[PackedCoord]) -> TacticalSummary {
+fn build_tactical_summary(
+    state: &RustHexoState,
+    legal_action_ids: &[PackedCoord],
+) -> TacticalSummary {
     // Windows are the tactical backbone for Hexformer: immediate wins, forced
     // blocks, and nearby candidate expansion all start from this scan.
     let legal_set = legal_action_ids.iter().copied().collect::<HashSet<_>>();
@@ -1156,8 +1182,9 @@ fn build_local_windows(
         unique.push(anchor);
     }
 
-    let crop_area =
-        architecture.local_input_channels * architecture.local_crop_size * architecture.local_crop_size;
+    let crop_area = architecture.local_input_channels
+        * architecture.local_crop_size
+        * architecture.local_crop_size;
     let mut local_inputs = vec![0.0; unique.len() * crop_area];
     let mut local_window_coords = vec![0.0; unique.len() * 5];
     for (index, local_anchor) in unique.iter().copied().enumerate() {
@@ -1215,7 +1242,11 @@ fn fill_local_crop(
         let q = coord.q as i32 - anchor.q as i32 + half;
         let r = coord.r as i32 - anchor.r as i32 + half;
         if q >= 0 && r >= 0 && q < size as i32 && r < size as i32 {
-            let plane = if player == state.current_player() { 0 } else { 1 };
+            let plane = if player == state.current_player() {
+                0
+            } else {
+                1
+            };
             set_local(
                 local_inputs,
                 local_index,
@@ -1276,34 +1307,35 @@ fn build_rel_edges(
     let mut edge_index = Vec::<i64>::new();
     let mut edge_features = Vec::<f32>::new();
 
-    let mut add = |src: usize, dst: usize, left: HexCoord, right: HexCoord, relation_type: usize| {
-        if edge_index.len() / 2 >= architecture.max_rel_edges {
-            return;
-        }
-        let dq = right.q as i32 - left.q as i32;
-        let dr = right.r as i32 - left.r as i32;
-        let ds = -dq - dr;
-        let dist = dq.abs().max(dr.abs()).max(ds.abs());
-        let base = [
-            dq as f32,
-            dr as f32,
-            ds as f32,
-            dist as f32,
-            (dq == 0) as u8 as f32,
-            (dr == 0) as u8 as f32,
-            (ds == 0) as u8 as f32,
-            (relation_type == 0) as u8 as f32,
-            (relation_type == 1) as u8 as f32,
-            (relation_type == 2) as u8 as f32,
-            (relation_type == 3) as u8 as f32,
-            1.0,
-        ];
-        edge_index.push(src as i64);
-        edge_index.push(dst as i64);
-        for index in 0..architecture.rel_edge_feature_dim {
-            edge_features.push(base.get(index).copied().unwrap_or(0.0));
-        }
-    };
+    let mut add =
+        |src: usize, dst: usize, left: HexCoord, right: HexCoord, relation_type: usize| {
+            if edge_index.len() / 2 >= architecture.max_rel_edges {
+                return;
+            }
+            let dq = right.q as i32 - left.q as i32;
+            let dr = right.r as i32 - left.r as i32;
+            let ds = -dq - dr;
+            let dist = dq.abs().max(dr.abs()).max(ds.abs());
+            let base = [
+                dq as f32,
+                dr as f32,
+                ds as f32,
+                dist as f32,
+                (dq == 0) as u8 as f32,
+                (dr == 0) as u8 as f32,
+                (ds == 0) as u8 as f32,
+                (relation_type == 0) as u8 as f32,
+                (relation_type == 1) as u8 as f32,
+                (relation_type == 2) as u8 as f32,
+                (relation_type == 3) as u8 as f32,
+                1.0,
+            ];
+            edge_index.push(src as i64);
+            edge_index.push(dst as i64);
+            for index in 0..architecture.rel_edge_feature_dim {
+                edge_features.push(base.get(index).copied().unwrap_or(0.0));
+            }
+        };
 
     for (ci, candidate) in candidates.iter().enumerate() {
         let ctoken = candidate_offset + ci;
@@ -1586,12 +1618,18 @@ pub(crate) fn sparse_payload_to_py(
         "candidate_coords",
         tensor_payload_f32(py, &payload.candidate_coords)?,
     )?;
-    dict.set_item("candidate_mask", tensor_payload_i8(py, &payload.candidate_mask)?)?;
+    dict.set_item(
+        "candidate_mask",
+        tensor_payload_i8(py, &payload.candidate_mask)?,
+    )?;
     dict.set_item(
         "stone_features",
         tensor_payload_f32(py, &payload.stone_features)?,
     )?;
-    dict.set_item("stone_coords", tensor_payload_f32(py, &payload.stone_coords)?)?;
+    dict.set_item(
+        "stone_coords",
+        tensor_payload_f32(py, &payload.stone_coords)?,
+    )?;
     dict.set_item("stone_mask", tensor_payload_i8(py, &payload.stone_mask)?)?;
     dict.set_item(
         "window_features",
@@ -1603,7 +1641,10 @@ pub(crate) fn sparse_payload_to_py(
     )?;
     dict.set_item("window_mask", tensor_payload_i8(py, &payload.window_mask)?)?;
     dict.set_item("local_input", tensor_payload_f32(py, &payload.local_input)?)?;
-    dict.set_item("local_inputs", tensor_payload_f32(py, &payload.local_inputs)?)?;
+    dict.set_item(
+        "local_inputs",
+        tensor_payload_f32(py, &payload.local_inputs)?,
+    )?;
     dict.set_item(
         "local_window_coords",
         tensor_payload_f32(py, &payload.local_window_coords)?,
@@ -1612,12 +1653,18 @@ pub(crate) fn sparse_payload_to_py(
         "local_window_mask",
         tensor_payload_i8(py, &payload.local_window_mask)?,
     )?;
-    dict.set_item("rel_edge_index", tensor_payload_i64(py, &payload.rel_edge_index)?)?;
+    dict.set_item(
+        "rel_edge_index",
+        tensor_payload_i64(py, &payload.rel_edge_index)?,
+    )?;
     dict.set_item(
         "rel_edge_features",
         tensor_payload_f32(py, &payload.rel_edge_features)?,
     )?;
-    dict.set_item("rel_edge_mask", tensor_payload_i8(py, &payload.rel_edge_mask)?)?;
+    dict.set_item(
+        "rel_edge_mask",
+        tensor_payload_i8(py, &payload.rel_edge_mask)?,
+    )?;
     dict.set_item(
         "global_features",
         tensor_payload_f32(py, &payload.global_features)?,
@@ -1634,7 +1681,10 @@ pub(crate) fn sparse_payload_to_py(
     if let Some(target) = &payload.distance_target {
         dict.set_item("distance_target", tensor_payload_f32(py, target)?)?;
     }
-    dict.set_item("threat_target", tensor_payload_i64(py, &payload.threat_target)?)?;
+    dict.set_item(
+        "threat_target",
+        tensor_payload_i64(py, &payload.threat_target)?,
+    )?;
     dict.set_item(
         "relevance_target",
         tensor_payload_f32(py, &payload.relevance_target)?,
@@ -1685,10 +1735,16 @@ fn metadata_to_py<'py>(
     metadata.set_item("phase", payload.phase)?;
     metadata.set_item("current_player", payload.current_player)?;
     metadata.set_item("legal_action_count", payload.legal_action_count)?;
-    metadata.set_item("candidate_count", payload.candidate_metadata.candidate_count)?;
+    metadata.set_item(
+        "candidate_count",
+        payload.candidate_metadata.candidate_count,
+    )?;
     let candidate = PyDict::new(py);
     candidate.set_item("legal_count", payload.candidate_metadata.legal_count)?;
-    candidate.set_item("candidate_count", payload.candidate_metadata.candidate_count)?;
+    candidate.set_item(
+        "candidate_count",
+        payload.candidate_metadata.candidate_count,
+    )?;
     candidate.set_item(
         "generated_candidate_count",
         payload.candidate_metadata.generated_candidate_count,
@@ -1731,7 +1787,10 @@ fn metadata_to_py<'py>(
         "immediate_win_recall",
         payload.candidate_metadata.immediate_win_recall,
     )?;
-    candidate.set_item("must_block_count", payload.candidate_metadata.must_block_count)?;
+    candidate.set_item(
+        "must_block_count",
+        payload.candidate_metadata.must_block_count,
+    )?;
     candidate.set_item(
         "must_block_included_count",
         payload.candidate_metadata.must_block_included_count,
@@ -1756,9 +1815,18 @@ fn metadata_to_py<'py>(
         "tactical_missing_count",
         payload.candidate_metadata.tactical_missing_count,
     )?;
-    candidate.set_item("tactical_recall", payload.candidate_metadata.tactical_recall)?;
-    candidate.set_item("tactical_radius", payload.candidate_metadata.tactical_radius)?;
-    candidate.set_item("frontier_radius", payload.candidate_metadata.frontier_radius)?;
+    candidate.set_item(
+        "tactical_recall",
+        payload.candidate_metadata.tactical_recall,
+    )?;
+    candidate.set_item(
+        "tactical_radius",
+        payload.candidate_metadata.tactical_radius,
+    )?;
+    candidate.set_item(
+        "frontier_radius",
+        payload.candidate_metadata.frontier_radius,
+    )?;
     candidate.set_item(
         "require_tactical_candidates",
         payload.candidate_metadata.require_tactical_candidates,
@@ -1778,15 +1846,24 @@ fn metadata_to_py<'py>(
     if payload.candidate_metadata.candidate_diagnostics {
         candidate.set_item(
             "immediate_win_missing_action_ids",
-            payload.candidate_metadata.immediate_win_missing_action_ids.clone(),
+            payload
+                .candidate_metadata
+                .immediate_win_missing_action_ids
+                .clone(),
         )?;
         candidate.set_item(
             "must_block_missing_action_ids",
-            payload.candidate_metadata.must_block_missing_action_ids.clone(),
+            payload
+                .candidate_metadata
+                .must_block_missing_action_ids
+                .clone(),
         )?;
         candidate.set_item(
             "tactical_missing_action_ids",
-            payload.candidate_metadata.tactical_missing_action_ids.clone(),
+            payload
+                .candidate_metadata
+                .tactical_missing_action_ids
+                .clone(),
         )?;
     }
     metadata.set_item("candidate", candidate)?;
@@ -1801,7 +1878,10 @@ fn metadata_to_py<'py>(
         "immediate_win_count",
         payload.tactical_metadata.immediate_win_count,
     )?;
-    tactical.set_item("must_block_count", payload.tactical_metadata.must_block_count)?;
+    tactical.set_item(
+        "must_block_count",
+        payload.tactical_metadata.must_block_count,
+    )?;
     metadata.set_item("tactical", tactical)?;
     Ok(metadata)
 }
@@ -1819,7 +1899,6 @@ fn metadata_with_state_source<'py>(
     }
     Ok(metadata)
 }
-
 
 fn parse_policy_rows(rows: &Bound<'_, PyAny>) -> PyResult<Vec<Vec<(PackedCoord, f32)>>> {
     // Boundary parsing stays at the edge of the module; downstream code works
@@ -1904,10 +1983,7 @@ fn validate_len(name: &str, actual: usize, expected: usize) -> PyResult<()> {
     Ok(())
 }
 
-fn copy_py_mapping<'py>(
-    py: Python<'py>,
-    raw: &Bound<'py, PyAny>,
-) -> PyResult<Bound<'py, PyDict>> {
+fn copy_py_mapping<'py>(py: Python<'py>, raw: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyDict>> {
     let out = PyDict::new(py);
     if raw.is_none() {
         return Ok(out);
@@ -2219,7 +2295,10 @@ mod tests {
                 .map(|candidate| candidate.action_id)
                 .collect::<Vec<_>>()
         );
-        assert_eq!(left.metadata.candidate_count, right.metadata.candidate_count);
+        assert_eq!(
+            left.metadata.candidate_count,
+            right.metadata.candidate_count
+        );
     }
 
     #[test]
@@ -2238,10 +2317,13 @@ mod tests {
             max_candidates: 16,
             ..CandidateConfig::default()
         };
-        let mut legal = Vec::new();
-        state.write_legal_action_ids(&mut legal);
+        let candidate_probe = build_sparse_payload(&state, &arch, &cfg, &SparseTargets::default());
+        let target_action = *candidate_probe
+            .candidate_action_ids
+            .first()
+            .expect("sample state should expose at least one candidate action");
         let targets = SparseTargets {
-            policy: vec![(legal[0], 3.0)],
+            policy: vec![(target_action, 3.0)],
             value: Some(1.0),
             distance: Some(0.25),
             lookahead: vec![(1, 0.0)],
@@ -2253,7 +2335,10 @@ mod tests {
         assert!(!payload.candidate_action_ids.is_empty());
         assert_eq!(
             payload.candidate_features.shape,
-            vec![payload.candidate_action_ids.len(), arch.candidate_feature_dim]
+            vec![
+                payload.candidate_action_ids.len(),
+                arch.candidate_feature_dim
+            ]
         );
         assert_eq!(payload.local_input.shape, vec![13, 9, 9]);
         assert_eq!(payload.rel_edge_index.shape[1], 2);

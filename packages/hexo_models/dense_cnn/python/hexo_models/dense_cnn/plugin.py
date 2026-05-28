@@ -119,6 +119,7 @@ class DenseCNNRandomExpansionSymmetrySelector:
             metadata={
                 "sample_count": count,
                 "mode": "random_per_training_expansion",
+                "d6_group_size": 12,
                 "note": "dense_cnn trainer samples a fresh random D6 transform when each compact sample is expanded",
             },
         )

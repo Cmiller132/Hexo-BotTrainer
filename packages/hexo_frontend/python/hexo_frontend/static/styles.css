@@ -1850,6 +1850,33 @@ body:not(.tactics-on) .tactic-legend {
   font-size: 11px;
 }
 
+.history-row-actions {
+  display: grid;
+  gap: 5px;
+}
+
+.history-row-load,
+.history-list-more {
+  min-height: 28px;
+  border: 1px solid rgba(39, 215, 230, 0.38);
+  border-radius: 6px;
+  background: rgba(10, 31, 38, 0.86);
+  color: #ecfbff;
+  font-size: 11px;
+  font-weight: 850;
+}
+
+.history-row-load:hover,
+.history-list-more:hover {
+  border-color: var(--accent);
+  background: rgba(29, 76, 86, 0.96);
+}
+
+.history-list-more {
+  width: calc(100% - 24px);
+  margin: 12px;
+}
+
 .winner-pill {
   width: fit-content;
   max-width: 100%;
@@ -1994,6 +2021,10 @@ body:not(.tactics-on) .tactic-legend {
   .history-page-head,
   .history-layout {
     grid-template-columns: 1fr;
+  }
+
+  .history-detail-panel {
+    order: -1;
   }
 
   .history-table-panel,

@@ -41,11 +41,23 @@ class DenseCNNTrainer:
         self.optimizer = optimizer
         requested = torch.device(config.device)
         self.device = requested if requested.type != "cuda" or torch.cuda.is_available() else torch.device("cpu")
-        self.model.to(self.device)
+        if self.device.type == "cuda":
+            torch.backends.cudnn.benchmark = True
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+            self.model.to(device=self.device, memory_format=torch.channels_last)
+        else:
+            self.model.to(self.device)
         self.scaler = torch.amp.GradScaler("cuda", enabled=config.training.amp and self.device.type == "cuda")
         self.inference_batch_size = 1
         self.selfplay_batch_size = config.selfplay.active_games
         self.mcts_virtual_batch_size: int | None = None
+        self.mcts_progressive_widening_initial_actions = config.selfplay.progressive_widening_initial_actions
+        self.mcts_progressive_widening_child_initial_actions = config.selfplay.progressive_widening_child_initial_actions
+        self.mcts_progressive_widening_candidate_actions = config.selfplay.progressive_widening_candidate_actions
+        self.mcts_progressive_widening_growth_interval = config.selfplay.progressive_widening_growth_interval
+        self.mcts_progressive_widening_growth_base = config.selfplay.progressive_widening_growth_base
+        self.mcts_active_root_limit = config.selfplay.mcts_active_root_limit
         self.training_batch_size = config.training.batch_size
         self.search_visits = config.selfplay.search_visits
 
@@ -141,7 +153,11 @@ class DenseCNNTrainer:
                         )
                     expanded.append(decoded)
                 batch = stack_expanded(expanded)
-                inputs = batch.pop("input").to(self.device, non_blocking=True)
+                inputs = batch.pop("input")
+                if self.device.type == "cuda" and inputs.ndim == 4:
+                    inputs = inputs.to(self.device, non_blocking=True, memory_format=torch.channels_last)
+                else:
+                    inputs = inputs.to(self.device, non_blocking=True)
                 batch = {key: value.to(self.device, non_blocking=True) for key, value in batch.items()}
 
                 self.optimizer.zero_grad(set_to_none=True)

@@ -8,6 +8,8 @@ use std::sync::OnceLock;
 pub(crate) const MODEL1_BOARD_SIZE: usize = 41;
 pub(crate) const MODEL1_BOARD_AREA: usize = MODEL1_BOARD_SIZE * MODEL1_BOARD_SIZE;
 pub(crate) const MODEL1_INPUT_CHANNELS: usize = 13;
+pub(crate) const MODEL1_EVAL_CHUNK_STATES: usize = 1024;
+pub(crate) const MODEL1_EVAL_CACHE_MAX_STATES: usize = 16_384;
 pub(crate) const MODEL1_PLANE_OWN_STONES: usize = 0;
 pub(crate) const MODEL1_PLANE_OPPONENT_STONES: usize = 1;
 pub(crate) const MODEL1_PLANE_EMPTY: usize = 2;

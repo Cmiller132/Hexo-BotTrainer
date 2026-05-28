@@ -93,6 +93,9 @@ def _small_config() -> Any:
                 "target_selfplay_positions_per_second": 128,
                 "inference_batch_candidates": (1, 2),
                 "training_batch_candidates": (1, 2),
+                "selfplay_batch_candidates": (1, 2),
+                "mcts_virtual_batch_candidates": (1, 2),
+                "selfplay_probe_positions": 4,
                 "probe_batches": 1,
             },
         }
@@ -223,6 +226,9 @@ def _write_pipeline_config(tmp_path: Path) -> Path:
                 "target_selfplay_positions_per_second = 128",
                 "inference_batch_candidates = [1, 2]",
                 "training_batch_candidates = [1, 2]",
+                "selfplay_batch_candidates = [1, 2]",
+                "mcts_virtual_batch_candidates = [1, 2]",
+                "selfplay_probe_positions = 4",
                 "probe_batches = 1",
                 "",
                 "[model.config.debug]",
@@ -580,6 +586,11 @@ def test_dense_cnn_rust_capabilities_smoke() -> None:
     assert capabilities["state_source"] == "direct_engine_state"
     assert capabilities["model1_batch_inputs"] is True
     assert capabilities["model1_batched_mcts"] is True
+    assert capabilities["model1_mcts_progressive_widening"] is True
+    assert capabilities["model1_mcts_progressive_widening_reference"] == "Chaslot_2008_progressive_unpruning"
+    assert capabilities["model1_mcts_evaluation_cache"] is True
+    assert capabilities["model1_mcts_lazy_staged_edges"] is True
+    assert capabilities["model1_mcts_lazy_staged_edges_reference"] == "KataGo_SearchNode_children0_1_2"
     assert capabilities["model1_sample_from_state"] is True
     assert "model1_sample_from_history" not in capabilities
     assert capabilities["coordinate_encoding"] == "u32_i16_pair"
@@ -625,6 +636,52 @@ def test_dense_cnn_rust_mcts_uses_model_local_accelerator() -> None:
     assert int(first["action_id"]) == int(second["action_id"])
     assert int(first["visits"]) == 3
     assert sum(float(weight) for _action_id, weight in first["visit_policy"]) == pytest.approx(1.0)
+
+
+def test_dense_cnn_rust_mcts_initial_progressive_widening_uses_top_128_priors() -> None:
+    engine = importlib.import_module("hexo_engine")
+    rust_bridge = importlib.import_module("hexo_models.dense_cnn.rust_bridge")
+    _skip_without_direct_state_rust(rust_bridge)
+
+    state = engine.new_game()
+    engine.apply_action(state, engine.PlacementAction(engine.AxialCoord(0, 0)))
+    legal_action_ids = tuple(rust_bridge.model1_batch_inputs([state])["legal_action_ids"][0])
+    assert len(legal_action_ids) > 128
+
+    def evaluator(payload: Mapping[str, Any]) -> Mapping[str, bytes]:
+        rows = int(payload["shape"][0])
+        offsets = tuple(int(item) for item in payload["legal_row_offsets"])
+        prior_count = max(0, offsets[-1])
+        return {
+            "values_bytes": struct.pack(f"{rows}f", *([0.0] * rows)),
+            "priors_bytes": struct.pack(
+                f"{prior_count}f",
+                *(float(index + 1) for index in range(prior_count)),
+            ),
+        }
+
+    result = rust_bridge.model1_batched_mcts(
+        [state],
+        visits=1,
+        c_puct=1.5,
+        temperature=0.0,
+        seed=11,
+        evaluator=evaluator,
+        virtual_batch_size=1,
+        progressive_widening_initial_actions=128,
+        progressive_widening_child_initial_actions=32,
+        progressive_widening_candidate_actions=192,
+        progressive_widening_growth_interval=40.0,
+        progressive_widening_growth_base=1.3,
+    )[0]
+
+    returned_action_ids = {int(action_id) for action_id, _weight in result["visit_policy"]}
+    assert returned_action_ids == {int(legal_action_ids[-1])}
+    root_diagnostics = dict(result["diagnostics"]["root"])
+    assert int(root_diagnostics["root_active_edges"]) == 1
+    assert int(root_diagnostics["root_hidden_priors"]) == len(legal_action_ids) - 1
+    assert int(result["visits"]) == 1
+    assert sum(float(weight) for _action_id, weight in result["visit_policy"]) == pytest.approx(1.0)
 
 
 def test_dense_cnn_rust_mcts_deduplicates_duplicate_roots_without_mutating_live_state() -> None:
@@ -707,6 +764,12 @@ def test_dense_cnn_mcts_python_boundary_delegates_to_rust(monkeypatch: pytest.Mo
         seed: int,
         evaluator: object,
         virtual_batch_size: int | None,
+        progressive_widening_initial_actions: int | None,
+        progressive_widening_child_initial_actions: int | None,
+        progressive_widening_candidate_actions: int | None,
+        progressive_widening_growth_interval: float | None,
+        progressive_widening_growth_base: float | None,
+        evaluation_cache: object | None,
     ) -> tuple[Mapping[str, Any], ...]:
         calls.append(
             {
@@ -717,6 +780,12 @@ def test_dense_cnn_mcts_python_boundary_delegates_to_rust(monkeypatch: pytest.Mo
                 "seed": seed,
                 "evaluator": evaluator,
                 "virtual_batch_size": virtual_batch_size,
+                "progressive_widening_initial_actions": progressive_widening_initial_actions,
+                "progressive_widening_child_initial_actions": progressive_widening_child_initial_actions,
+                "progressive_widening_candidate_actions": progressive_widening_candidate_actions,
+                "progressive_widening_growth_interval": progressive_widening_growth_interval,
+                "progressive_widening_growth_base": progressive_widening_growth_base,
+                "evaluation_cache": evaluation_cache,
             }
         )
         return (
@@ -761,8 +830,100 @@ def test_dense_cnn_mcts_python_boundary_delegates_to_rust(monkeypatch: pytest.Mo
             "seed": 0,
             "evaluator": inference.evaluate_model1_payload,
             "virtual_batch_size": 3,
+            "progressive_widening_initial_actions": 128,
+            "progressive_widening_child_initial_actions": 32,
+            "progressive_widening_candidate_actions": 192,
+            "progressive_widening_growth_interval": 40.0,
+            "progressive_widening_growth_base": 1.3,
+            "evaluation_cache": None,
         }
     ]
+
+
+def test_dense_cnn_mcts_clamps_explicit_virtual_batch_to_safe_leaf_budget() -> None:
+    mcts_module = importlib.import_module("hexo_models.dense_cnn.mcts")
+
+    assert mcts_module._resolve_virtual_batch_size(
+        root_count=2048,
+        visits=128,
+        virtual_batch_size=32,
+    ) == 4
+    assert mcts_module._resolve_virtual_batch_size(
+        root_count=512,
+        visits=128,
+        virtual_batch_size=32,
+    ) == 16
+
+
+def test_dense_cnn_mcts_chunks_active_roots_before_rust_boundary(monkeypatch: pytest.MonkeyPatch) -> None:
+    mcts_module = importlib.import_module("hexo_models.dense_cnn.mcts")
+    rust_bridge = importlib.import_module("hexo_models.dense_cnn.rust_bridge")
+    calls: list[tuple[int, int]] = []
+
+    class FakeInference:
+        evaluate_model1_payload = object()
+
+    def fake_model1_batched_mcts(states: Sequence[object], **kwargs: object) -> tuple[Mapping[str, Any], ...]:
+        calls.append((len(states), int(kwargs["seed"])))
+        visits = int(kwargs["visits"])
+        return tuple(
+            {
+                "action_id": index + 1,
+                "visit_policy": ((index + 1, 1.0),),
+                "root_value": 0.0,
+                "visits": visits,
+            }
+            for index, _state in enumerate(states)
+        )
+
+    monkeypatch.setattr(rust_bridge, "model1_batched_mcts", fake_model1_batched_mcts)
+
+    results = mcts_module.run_batched_mcts(
+        [object() for _ in range(5)],
+        FakeInference(),
+        visits=7,
+        seed=11,
+        virtual_batch_size=4,
+        active_root_limit=2,
+    )
+
+    assert [result.visits for result in results] == [7, 7, 7, 7, 7]
+    assert calls == [(2, 11), (2, 13), (1, 15)]
+
+
+def test_dense_cnn_payload_inference_respects_configured_max_batch_size() -> None:
+    torch = _torch()
+    dense_cnn = _dense_cnn()
+    inference_cls = _public_attr(dense_cnn, "DenseCNNInference")
+
+    class CountingModel(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.batch_sizes: list[int] = []
+
+        def forward(self, inputs: torch.Tensor) -> Mapping[str, torch.Tensor]:
+            batch = int(inputs.shape[0])
+            self.batch_sizes.append(batch)
+            return {
+                "policy": torch.zeros((batch, dense_cnn.BOARD_AREA), dtype=torch.float32, device=inputs.device),
+                "value": torch.zeros((batch, dense_cnn.VALUE_BINS), dtype=torch.float32, device=inputs.device),
+            }
+
+    model = CountingModel()
+    inference = inference_cls(model, device="cpu", amp=False, max_batch_size=2)
+    rows = 5
+    inputs = torch.zeros((rows, dense_cnn.INPUT_CHANNELS, dense_cnn.BOARD_SIZE, dense_cnn.BOARD_SIZE), dtype=torch.float32)
+    payload = {
+        "inputs": inputs.numpy().tobytes(),
+        "shape": inputs.shape,
+        "legal_flat_indices_bytes": b"",
+        "legal_row_offsets": tuple(0 for _ in range(rows + 1)),
+    }
+
+    output = inference.evaluate_model1_payload(payload)
+
+    assert set(output) == {"values_bytes", "priors_bytes"}
+    assert model.batch_sizes == [2, 2, 1]
 
 
 def test_batch_inference_fast_path_runs_compact_samples_in_one_forward_pass() -> None:

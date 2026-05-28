@@ -12,7 +12,7 @@ use std::collections::{HashMap, HashSet};
 use hexo_engine::{HexoState as RustHexoState, PackedCoord};
 use hexo_utils::{hash_state, StateHash};
 
-use crate::sample_gen::{sparse_payloads_to_py, ArchitectureConfig, CandidateConfig};
+use super::sample_gen::{sparse_payloads_to_py, ArchitectureConfig, CandidateConfig};
 
 #[derive(Clone, Debug)]
 pub(crate) struct RustEvaluation {
@@ -66,7 +66,8 @@ pub(crate) fn evaluate_states_cached(
     }
 
     if !unique_states.is_empty() {
-        let unique_evals = evaluate_states(py, evaluator, &unique_states, architecture, candidates)?;
+        let unique_evals =
+            evaluate_states(py, evaluator, &unique_states, architecture, candidates)?;
         for (key, evaluation) in unique_keys.into_iter().zip(unique_evals.into_iter()) {
             cache.insert(key, evaluation);
         }
