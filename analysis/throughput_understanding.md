@@ -146,6 +146,31 @@ epoch (games_per_epoch == active) averages **lower** because its drain tail runs
 at low concurrency (pos/s falls ~20× — §4); rolling replenishment is what
 realizes the body rate across the whole epoch.
 
+## 7b. VALIDATION (final, before trusting for a real run)
+- **TRT FP16 strength gate — FAIL → keep OFF.** Per-forward correctness on REAL
+  positions: policy-argmax match **96.9%**, decoded-value err **~5e-5**. But the
+  search-outcome test (512-sim searches) hit **`NaN` value outputs from the TRT
+  engine on real positions** (strongly-typed pure-fp16 overflow; the Rust
+  finiteness guard caught it → search aborts; in a real run this crash-loops).
+  torch FP16 (autocast, mixed-precision) does NOT NaN. **Verdict: TRT FP16 is NOT
+  safe for training-data generation as-built; `inference_use_tensorrt=false`.**
+  Integration (build + gate + torch fallback) stays in place; re-enable only after
+  the fp16 overflow is fixed (value/sensitive layers in fp32, or INT8-calibrate)
+  AND a SealBot best-50ms win-rate A/B passes.
+- **Bucketing — equivalence-preserving (verified):** decoded-value Δ ≤ 7.8e-3,
+  prior Δ ≤ 6.4e-6 (≤ fp16 noise; cuDNN per-shape algo selection, same property
+  the existing pow2 bucketing already has). Kept ON.
+- **Replenishment — mechanism confirmed (smoke):** at `games_per_epoch>active` the
+  pool tops up (smoke: 18 games ran with active=6, 3 cohorts, no drain until the
+  end). `games_per_epoch=512`.
+- **Full-config smoke (native, optimized path) — PASS:** bootstrap-load → selfplay
+  (bucketing+replenishment) → shuffle → train → checkpoint, 2 epochs, both
+  `epoch_*.pt` written, clean completion. No integration errors.
+- **Supervisor:** no wall-clock breaker exists (`proc.WaitForExit`, no timeout;
+  no-progress guard counts relaunches not time) → a longer epoch can't false-trip
+  on time. Bumped `MaxNoProgressRelaunches` 3→5 for crash-resume margin on the
+  longer epoch.
+
 ## 8. Chosen combination + adoption (quality-safe)
 **Adopted:** TensorRT FP16 (correctness-gated + torch fallback) + rolling
 replenishment (`games_per_epoch=1024 > active_games=256`) + bucketing (mult-16).
@@ -162,10 +187,11 @@ the **WSL2** venv. On native-Windows torch 2.10 (no py3.14 TRT wheel) the flag
 **cleanly falls back to torch** (verified: native `+trt` == baseline). So the
 ~2.4× forward win requires launching self-play under WSL.
 
-**Correctness status / SealBot re-validation:** value error is tiny (≤0.0012–0.011
-decoded). The build-time gate checks policy-argmax match + value tolerance and
-**falls back to torch on failure**. _TBD: report the real argmax-match on
-representative inputs (tu8-rerun)._ **RECOMMENDATION: gate the TRT flag on a
+**Correctness status / SealBot re-validation:** the build-time gate (representative
+inputs) measures **policy argmax match = 1.0000** and **decoded-value max-err =
+4.6e-5** → TRT FP16 adopts; raw policy-logit max-err ≈ 0.125 (fp16 scale). The
+gate **falls back to torch on failure** (verified: a buggy channels-last/in-place
+build correctly fell back). **RECOMMENDATION: gate the TRT flag on a
 SealBot best-50ms strength re-validation over the full 512-sim search before
 trusting TRT for real training-data generation** — FP16-TRT logit error (~0.05)
 can compound over 512 sequential sims and the policy argmax can occasionally flip;
