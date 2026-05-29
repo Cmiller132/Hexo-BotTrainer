@@ -114,6 +114,15 @@ class Model1PerformanceConfig:
     mcts_virtual_batch_candidates: tuple[int, ...] = (4,)
     selfplay_probe_positions: int = 8192
     probe_batches: int = 1
+    # Inference-forward optimizations (adopted, quality-safe). TensorRT FP16 is
+    # correctness-gated at build time and falls back to the torch forward if the
+    # gate fails or TRT is unavailable. Bucket pad multiple > 1 rounds the padded
+    # forward batch up to that multiple instead of a power of two (less padding
+    # waste); 0 keeps the power-of-two buckets. Both are equivalence-/quality-safe
+    # (TRT gated; bucketing is pure batching). Env vars HEXO_TRT /
+    # HEXO_BUCKET_PAD_MULTIPLE override these when set (launch-path escape hatch).
+    inference_use_tensorrt: bool = False
+    inference_bucket_pad_multiple: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -218,6 +227,8 @@ def parse_model1_config(raw: Mapping[str, Any] | None) -> Model1Config:
             mcts_virtual_batch_candidates=_int_tuple(performance.get("mcts_virtual_batch_candidates", (4,))),
             selfplay_probe_positions=int(performance.get("selfplay_probe_positions", 8192)),
             probe_batches=int(performance.get("probe_batches", 1)),
+            inference_use_tensorrt=bool(performance.get("inference_use_tensorrt", False)),
+            inference_bucket_pad_multiple=int(performance.get("inference_bucket_pad_multiple", 0)),
         ),
         device=str(config.get("device", "cuda")),
         checkpoint_path=Path(str(checkpoint_path)) if checkpoint_path else None,

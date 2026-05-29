@@ -28,6 +28,15 @@ from .performance import _extend_mcts_diagnostic_batches, _summarize_mcts_diagno
 from .replay import materialize_policy_surprise_rows, write_selfplay_npz
 from .samples import Model1SampleData, finalize_game_samples, sample_from_state
 
+import os as _os
+
+
+def _adaptive_vbatch_enabled() -> bool:
+    # Env-gated adaptive virtual_batch_size: hold the per-round leaf budget
+    # constant as game concurrency drains (keeps the GPU fed in the tail).
+    # Read at runtime so the gate can be toggled per process/epoch. Default off.
+    return _os.environ.get("HEXO_ADAPTIVE_VBATCH", "").strip() in ("1", "true", "True")
+
 
 def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_epoch: int) -> dict[str, Any]:
     """Generate one epoch of dense_cnn self-play, writing per-game NPZ shards."""
@@ -45,8 +54,11 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
         amp=config.training.amp,
         return_logits=False,
         max_batch_size=trainer.inference_batch_size,
+        use_trt=config.performance.inference_use_tensorrt,
+        bucket_pad_multiple=(config.performance.inference_bucket_pad_multiple or None),
     )
     active_limit = int(trainer.selfplay_batch_size)
+    adaptive_vbatch = _adaptive_vbatch_enabled()
     if active_limit <= 0:
         raise ValueError("selfplay active game count must be > 0")
     if active_limit > selfplay.mcts_active_root_limit:
@@ -101,6 +113,20 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
             ]
             if playable:
                 search_started = perf_counter()
+                # Adaptive virtual_batch_size (env-gated): as games finish and
+                # concurrency falls, raise leaves-per-root to hold the per-round
+                # leaf-request budget (~active_limit * base_vbatch) constant, so
+                # forwards stay fat and the GPU stays fed through the drain tail.
+                # Bounded by search_visits. Costs a little search quality in the
+                # tail (higher vbatch -> more virtual-loss-correlated selection),
+                # affecting only the few late, low-concurrency positions.
+                effective_vbatch = trainer.mcts_virtual_batch_size
+                if adaptive_vbatch and len(playable) > 0:
+                    budget = active_limit * trainer.mcts_virtual_batch_size
+                    effective_vbatch = max(
+                        trainer.mcts_virtual_batch_size,
+                        min(int(selfplay.search_visits), -(-budget // len(playable))),
+                    )
                 searches = mcts_session.run(
                     [game["search_key"] for game in playable],
                     [game["state"] for game in playable],
@@ -109,7 +135,7 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
                     c_puct=selfplay.c_puct,
                     temperature=selfplay.temperature,
                     seed=base_seed + epoch,
-                    virtual_batch_size=trainer.mcts_virtual_batch_size,
+                    virtual_batch_size=effective_vbatch,
                     active_root_limit=selfplay.mcts_active_root_limit,
                     root_dirichlet_total_alpha=(
                         selfplay.root_dirichlet_total_alpha if selfplay.root_dirichlet_noise_enabled else None

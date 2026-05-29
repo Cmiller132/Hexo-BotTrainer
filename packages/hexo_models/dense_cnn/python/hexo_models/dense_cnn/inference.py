@@ -95,9 +95,11 @@ class DenseCNNInference:
         # per-sample after BN folding), so outputs stay byte-identical for any
         # bucket size. The forward still chunks oversize leaf batches to
         # max_batch_size before this runs, so the shape count stays bounded.
-        if bucket_pad_multiple is None:
-            env_mult = os.environ.get("HEXO_BUCKET_PAD_MULTIPLE", "").strip()
-            bucket_pad_multiple = int(env_mult) if env_mult else None
+        # Resolution order: env var (launch-path override) > constructor arg
+        # (config) > default (power-of-two).
+        env_mult = os.environ.get("HEXO_BUCKET_PAD_MULTIPLE", "").strip()
+        if env_mult:
+            bucket_pad_multiple = int(env_mult)
         self.bucket_pad_multiple = (
             int(bucket_pad_multiple) if bucket_pad_multiple and int(bucket_pad_multiple) > 1 else None
         )
@@ -109,6 +111,9 @@ class DenseCNNInference:
         else:
             self.model.to(self.device)
         self.model.eval()
+        # Initialized before warmup because _forward_device_inputs references it.
+        self._trt_forward = None
+        self.trt_info: dict[str, Any] = {"adopted": False, "reason": "disabled"}
         if self.device.type == "cuda":
             self._warm_up_cuda()
 
@@ -117,15 +122,26 @@ class DenseCNNInference:
         # FP16 reference; on any failure we keep the torch forward (fallback).
         # Rebuild a fresh DenseCNNInference per epoch to refresh the engine when
         # weights change (~44 s build, amortized over a multi-minute epoch).
-        self._trt_forward = None
-        self.trt_info: dict[str, Any] = {"adopted": False, "reason": "disabled"}
-        if use_trt is None:
-            use_trt = os.environ.get("HEXO_TRT", "").strip() in ("1", "true", "True")
+        # Resolution order: env var (launch-path override) > constructor arg
+        # (config) > default (off).
+        env_trt = os.environ.get("HEXO_TRT", "").strip()
+        if env_trt:
+            use_trt = env_trt in ("1", "true", "True")
+        elif use_trt is None:
+            use_trt = False
         if use_trt and self.device.type == "cuda":
             from . import trt_backend
-            sample = torch.zeros(
-                (min(128, self.max_batch_size), INPUT_CHANNELS, BOARD_SIZE, BOARD_SIZE)
-            )
+            # Representative (NON-zero) gate inputs: all-zeros make the policy
+            # uniform -> argmax ties -> spurious gate failure. Sparse binary-ish
+            # planes resemble real board occupancy and break ties.
+            gen = torch.Generator().manual_seed(0)
+            sample = (
+                torch.rand(
+                    (min(128, self.max_batch_size), INPUT_CHANNELS, BOARD_SIZE, BOARD_SIZE),
+                    generator=gen,
+                )
+                > 0.7
+            ).float()
             self._trt_forward, self.trt_info = trt_backend.build_trt_forward(
                 self.model, max_batch=self.max_batch_size, device=str(self.device),
                 sample_inputs=sample,

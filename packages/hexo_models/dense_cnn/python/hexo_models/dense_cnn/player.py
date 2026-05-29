@@ -45,6 +45,8 @@ class DenseCNNPlayer:
             self.model,
             device=self.trainer.device,
             amp=self.trainer.config.training.amp,
+            use_trt=self.trainer.config.performance.inference_use_tensorrt,
+            bucket_pad_multiple=(self.trainer.config.performance.inference_bucket_pad_multiple or None),
         )
         self.mcts_session = new_mcts_session(
             max_states=self.trainer.config.selfplay.mcts_session_cache_max_states
