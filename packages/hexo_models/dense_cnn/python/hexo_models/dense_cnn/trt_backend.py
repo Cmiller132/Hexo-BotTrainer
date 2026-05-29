@@ -49,7 +49,12 @@ def trt_available() -> bool:
 
 
 def _export_onnx(model: nn.Module, path: Path, device: str, dtype: torch.dtype) -> None:
-    wrap = _PVTuple(model).eval().to(device).to(dtype)
+    # Force CONTIGUOUS (NCHW) layout for the traced copy: the production inference
+    # model is channels_last, but the TRT runner feeds NCHW-contiguous buffers, so
+    # exporting a channels_last graph produces an engine that misreads the input
+    # (garbage outputs -> gate fail). memory_format changes strides only, not
+    # weights/outputs, so this is equivalence-preserving.
+    wrap = _PVTuple(model).eval().to(device).to(dtype).to(memory_format=torch.contiguous_format)
     dummy = torch.zeros(128, 13, 41, 41, device=device, dtype=dtype)
     torch.onnx.export(
         wrap, (dummy,), str(path),
