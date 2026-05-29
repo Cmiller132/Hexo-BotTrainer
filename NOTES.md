@@ -92,6 +92,92 @@ develop`).
 
 New entries on top. Written for the next watcher run. NOTE: the scheduled-task prompt
 
+### 2026-05-29 ~19:2x EDT — TRT FP16 VALIDATED + ENABLED (strength-equivalent); optimized config launch-ready
+
+TRT FP16 is now **enabled** in `dense_cnn_model1_target_96x6.toml`
+(`inference_use_tensorrt=true`, gated + torch fallback). Journey: the earlier
+"NaN" was a runner stream-race (fixed), NOT fp16 overflow. FP16 beat BF16 on speed
+AND fidelity. Strength validated by a low-variance paired per-decision value-regret
+(tv5): **mean regret -0.002 ± 0.0035 win-prob over 400 512-sim decisions** (flips
+13 TRT-better / 10 torch-better) = strength-equivalent. **Measured end-to-end
+self-play @256 concurrency: baseline ~36 → +TRT+bucketing ~84 full pos/s (2.31×,
+~2.6× the 32 target).** Engages under WSL only (native Windows falls back to torch
+FP16). Branch `bench/inference-backends-wsl` (HEAD f8e60e4). Run still DOWN by
+design; no training run started. NOTE for env: built SealBot `minimax_cpp` for
+WSL (`E:/SealBot/best/minimax_cpp.cpython-312-...so`) for the strength A/B harness.
+
+### 2026-05-29 19:03 EDT — RUN STILL DOWN BY DESIGN; TRT bench agent ACTIVE (now BF16 cmp + SealBot A/B); NO ACTION
+
+**Verdict:** training run intentionally stopped (NOT a crash, NOT a stall, NOT a breaker halt).
+The inference-opt/TRT implementation phase is STILL running and STILL owns the GPU via WSL.
+User has NOT relaunched the trainer. I took **NO action** (decision-tree branch #3, same as the
+16:03/17:03/18:03 entries). Nothing to fix, nothing to relaunch.
+
+**State found / how verified (cross-checked flags + files + native procs + WSL procs + GPU +
+git; no single signal trusted):**
+- **Flags:** neither `supervisor_halted.flag` nor `supervisor_completed.flag` present → not a
+  breaker halt, not a clean completion. Down for the deliberate (external) reason.
+- **supervisor.log:** UNCHANGED — still ONLY `LAUNCH pid=28292` at 14:59:45, no
+  EXIT/RELAUNCH/CAPTURE/HALT after it. User has NOT relaunched; it was the clean stop, not a
+  crash-loop. Pidfiles still hold the ORIGINAL launch PIDs (supervisor.pid=28292,
+  supervisor.self.pid=54612) — **both confirmed DEAD via Get-Process**. STALE; re-derive.
+- **Native procs:** NO live trainer/supervisor (`supervise_target_96x6.ps1`)/watchdog. Only
+  relevant native python = pid **52864** = dashboard (`hexo_frontend.web` 0.0.0.0:8080, up by
+  design, started 14:50). PowerShell pids 51484/44756 spawned 18:59–19:03 are MY OWN tool
+  shells (self-artifact caveat) — ignore.
+- **GPU = 27% / 4230 MiB / 49 °C — BUSY, but NOT the trainer.** Consumer is **WSL python PID
+  401 @ 713% CPU** (confirmed via `wsl.exe ... ps`). WSL procs are invisible to
+  `Win32_Process`/`Get-Process` — exactly why the GPU is busy with no native trainer. This is
+  the TRT bench agent (do NOT kill). Lower GPU% than the 84–100% seen earlier = the
+  comparison/A-B harness phase, not a heavy sweep.
+- **Bench agent ACTIVELY iterating (freshest signal in the system):** HEAD of
+  `bench/inference-backends-wsl` is `cc36471 TRT FP16-vs-BF16-vs-torch comparison + SealBot A/B
+  harness` stamped **19:01:06** — only ~2.5 min before now (19:03:43). Directly above this
+  entry, the ~18:5x note said "BF16 comparison running. Then pick winner + decide whether to
+  enable inference_use_tensorrt" — cc36471 IS that BF16 comparison + the SealBot A/B strength
+  harness (the OPEN Goal-#4 TRT re-validation). So the TRT work has advanced past 6b84075
+  (the 18:46 stream-race fix). Workspace-cleanup branch also advanced (2aa245f/6d65d09 @ 18:32,
+  isolated worktree — does not touch our files).
+- **No progress, no crash:** only `bootstrap_sealbot_prefit.pt` (epoch 0) in checkpoints/, NO
+  `epoch_*.pt`. events.jsonl ends `stage_started epoch_000001` (calibrate done: meets_target=
+  false @ 12.8 pos/s, the known 96×6/512-sim profile). 99 epoch-1 selfplay shards, newest
+  stamped **15:31:59** (~3.5 h cold) — NOT a stall (no live trainer to stall; deliberately-
+  stopped run idle). No `crashdumps/` dir. Newest err.log (`trainer.20260529_145945.err.log`,
+  last write **15:00:05**, unchanged since the stop) — prior entries scanned it clean (only the
+  two benign warnings: Triton cosmetic + inference.py:214 non-writable-buffer; 0 fault-sig
+  hits). No `dense_cnn.evaluation.*.json`.
+
+**Why no action:** run is OFF by deliberate choice for the (still-active) TRT phase, which owns
+the GPU via WSL and just committed 2.5 min ago. No halt flag, no crash, no stall. Relaunching
+would (a) override a deliberate stop and (b) contend for the GPU with the live bench agent. Per
+the hard rules I do NOT auto-relaunch.
+
+**Still open / next-step instructions for next watcher:**
+1. **First re-check whether the user relaunched:** NEW `LAUNCH` line in supervisor.log dated
+   AFTER 14:59:45 AND a live `supervise_target_96x6.ps1` (supervisor.self.pid) + a live NATIVE
+   python trainer with the config arg. If present → switch to the normal advancing/halted/
+   stalled tree (flags → events.jsonl last stage → selfplay shard mtimes vs now → Get-Process on
+   pidfiles → watchdog tail). All PIDs here are STALE — re-derive every time.
+2. **Liveness gotcha (recurring, important):** a busy GPU with NO native trainer does NOT mean a
+   relaunch — check WSL (`wsl.exe -e bash -lc "ps -eo pid,pcpu,comm --sort=-pcpu | head"`). The
+   TRT bench agent runs python IN WSL, invisible to Win32_Process. Confirm "trainer relaunched"
+   by supervisor.log + a NATIVE python with the config arg, NOT GPU% alone. Also cross-check the
+   `bench/inference-backends-wsl` HEAD commit time — a very-recent commit = bench agent still live.
+3. **If still down + bench agent active (as now):** log a note, take NO action, do NOT relaunch
+   (deliberate stop + GPU contention). Exact resume command is in the "RUN INTENTIONALLY STOPPED
+   ~15:1x" entry below (supervisor `-ValidateOnly` then detached `Start-Process`). Caveat: if the
+   first post-resume shuffle errors on a truncated final `selfplay/*.npz`, delete the newest shard.
+4. **OPEN — TRT FP16 quality gate / Goal-#4 re-validation:** cc36471 added a "SealBot A/B harness"
+   — likely the long-OPEN TRT-vs-torch strength re-validation over 512 sims (per-forward gate !=
+   search-outcome equivalence; 18:0x noted ~3% per-leaf top-1 flips, 18:5x noted 93.75% search
+   move-agreement / 6.25% flip on TRT fp16). Check for a NEW validation artifact / NOTES entry +
+   the final TRT-on/off + gate-threshold decision before the TRT flag is trusted for real data.
+5. **Still NO Goal-#4 datapoint for the 96×6 arch** — no `epoch_*.pt`, no eval JSON. First
+   milestone once training resumes: `epoch_000001` finishing in events.jsonl + first
+   `dense_cnn.evaluation.epoch_000001.json` (wins/losses/mean_turns; scratch_64 baseline to beat
+   = 2–6 wins/64 vs SealBot best-50ms). At ~12.8 pos/s epochs are SLOW — judge stalls by "no new
+   selfplay shard / no events progress >25 min WHILE a trainer is live", not by wall-clock.
+
 ### 2026-05-29 ~18:5x EDT — TRT NaN ROOT-CAUSED + FIXED (was a runner stream race, NOT fp16 overflow)
 
 The earlier "TRT FP16 NaN" was a **stream-ordering race in my TRT runner** (input
