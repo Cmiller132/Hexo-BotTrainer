@@ -21,8 +21,7 @@ use pyo3::types::{PyBytes, PyDict, PyTuple};
 use rayon::prelude::*;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use hexo_engine::{HexoState as RustHexoState, PackedCoord};
@@ -63,13 +62,15 @@ pub(crate) struct EvaluationStats {
     pub(crate) cache_size_peak: usize,
     pub(crate) encoding_seconds: f64,
     pub(crate) evaluator_seconds: f64,
+    pub(crate) parse_seconds: f64,
 }
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct RustEvaluationCache {
     // `Arc` (not `Rc`) so that tree nodes holding a shared prior list stay `Send`
-    // for the rayon root-selection parallelism in `run_searches_to_targets`. The
-    // cache wrapper itself stays single-threaded (`SharedEvaluationCache`).
+    // for the rayon root-selection parallelism in `run_searches_to_targets`, and
+    // so the cache itself can be `Arc<Mutex<…>>` (`SharedEvaluationCache`) shared
+    // across the A1 select↔eval pipeline threads.
     entries: HashMap<StateHash, Arc<RustEvaluation>>,
     insertion_order: VecDeque<StateHash>,
 }
@@ -107,15 +108,30 @@ impl RustEvaluationCache {
     }
 }
 
-pub(crate) type SharedEvaluationCache = Rc<RefCell<RustEvaluationCache>>;
-pub(crate) type SharedEvaluationStats = Rc<RefCell<EvaluationStats>>;
+// `Arc<Mutex<…>>` (M2): the cache and stats are shared across the A1 pipeline's
+// eval thread and the scoped selection thread, so they must be `Send + Sync`.
+// Access is at eval boundaries only (never in the hot per-ply select loop), so a
+// single mutex does not serialize search work. A sharded lock would only matter
+// for a future many-worker design; deferred until profiling shows lock contention.
+pub(crate) type SharedEvaluationCache = Arc<Mutex<RustEvaluationCache>>;
+pub(crate) type SharedEvaluationStats = Arc<Mutex<EvaluationStats>>;
 
 pub(crate) fn new_shared_evaluation_cache() -> SharedEvaluationCache {
-    Rc::new(RefCell::new(RustEvaluationCache::default()))
+    Arc::new(Mutex::new(RustEvaluationCache::default()))
 }
 
 pub(crate) fn new_shared_evaluation_stats() -> SharedEvaluationStats {
-    Rc::new(RefCell::new(EvaluationStats::default()))
+    Arc::new(Mutex::new(EvaluationStats::default()))
+}
+
+#[inline]
+fn lock_cache(cache: &SharedEvaluationCache) -> std::sync::MutexGuard<'_, RustEvaluationCache> {
+    cache.lock().expect("evaluation cache mutex poisoned")
+}
+
+#[inline]
+fn lock_stats(stats: &SharedEvaluationStats) -> std::sync::MutexGuard<'_, EvaluationStats> {
+    stats.lock().expect("evaluation stats mutex poisoned")
 }
 
 pub(crate) fn state_hash(state: &RustHexoState) -> StateHash {
@@ -194,7 +210,7 @@ fn evaluate_model1_states_chunk(
         std::slice::from_raw_parts(legal_flat_indices.as_ptr() as *const u8, flat_byte_len)
     };
     if let Some(stats) = stats {
-        let mut stats = stats.borrow_mut();
+        let mut stats = lock_stats(stats);
         stats.evaluator_chunks += 1;
         stats.encoded_states += encoded.len();
         stats.encoded_legal_actions += legal_flat_indices.len();
@@ -225,7 +241,7 @@ fn evaluate_model1_states_chunk(
     let evaluator_started = Instant::now();
     let output = evaluator.call1((payload,))?;
     if let Some(stats) = stats {
-        stats.borrow_mut().evaluator_seconds += evaluator_started.elapsed().as_secs_f64();
+        lock_stats(stats).evaluator_seconds += evaluator_started.elapsed().as_secs_f64();
     }
     let values_obj = output.get_item("values_bytes").map_err(|_| {
         PyValueError::new_err("dense_cnn evaluator output missing required values_bytes")
@@ -237,7 +253,7 @@ fn evaluate_model1_states_chunk(
     let prior_bytes = priors_obj.downcast::<PyBytes>()?.as_bytes();
     require_exact_bytes("values_bytes", value_bytes.len(), encoded.len(), 4)?;
     if let Some(stats) = stats {
-        let mut stats = stats.borrow_mut();
+        let mut stats = lock_stats(stats);
         stats.value_bytes += value_bytes.len();
         stats.prior_bytes += prior_bytes.len();
     }
@@ -246,22 +262,41 @@ fn evaluate_model1_states_chunk(
     // written into the row-offset payload sent above.
     let expected_prior_count: usize = encoded.iter().map(|row| row.legal_action_ids.len()).sum();
     require_exact_bytes("priors_bytes", prior_bytes.len(), expected_prior_count, 4)?;
-    let mut evaluations = Vec::with_capacity(encoded.len());
-    let mut prior_offset = 0usize;
-    for (row_index, row) in encoded.iter().enumerate() {
-        let value = read_value(value_bytes, row_index)?;
-        let mut row_priors = Vec::with_capacity(row.legal_action_ids.len());
-        for action_id in row.legal_action_ids.iter().copied() {
-            let prior = read_prior(prior_bytes, prior_offset, row_index)?;
-            row_priors.push((action_id, prior));
-            prior_offset += 1;
-        }
-        finalize_model_priors(&mut row_priors, row.all_legal_action_count, row_index)?;
-        evaluations.push(RustEvaluation {
-            value,
-            legal_action_count: row.all_legal_action_count,
-            priors: row_priors,
-        });
+    // Parse priors/values per row. Rows are independent (each reads a disjoint
+    // slice of `prior_bytes` and one value), and the per-row prior decode + sort
+    // (`finalize_model_priors`) was the dominant main-thread cost once the forward
+    // is FP16 (~39% of a self-play move). Precompute per-row offsets so the rows
+    // can be decoded across rayon workers; output stays row-ordered, so this is
+    // byte-identical to the previous sequential parse.
+    let parse_started = Instant::now();
+    let mut prior_offsets = Vec::with_capacity(encoded.len() + 1);
+    let mut running = 0usize;
+    prior_offsets.push(0usize);
+    for row in &encoded {
+        running += row.legal_action_ids.len();
+        prior_offsets.push(running);
+    }
+    let evaluations: Vec<RustEvaluation> = encoded
+        .par_iter()
+        .enumerate()
+        .map(|(row_index, row)| {
+            let value = read_value(value_bytes, row_index)?;
+            let base = prior_offsets[row_index];
+            let mut row_priors = Vec::with_capacity(row.legal_action_ids.len());
+            for (offset, action_id) in row.legal_action_ids.iter().copied().enumerate() {
+                let prior = read_prior(prior_bytes, base + offset, row_index)?;
+                row_priors.push((action_id, prior));
+            }
+            finalize_model_priors(&mut row_priors, row.all_legal_action_count, row_index)?;
+            Ok(RustEvaluation {
+                value,
+                legal_action_count: row.all_legal_action_count,
+                priors: row_priors,
+            })
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+    if let Some(stats) = stats {
+        lock_stats(stats).parse_seconds += parse_started.elapsed().as_secs_f64();
     }
     Ok(evaluations)
     })
@@ -301,13 +336,13 @@ pub(crate) fn evaluate_model1_state_refs_cached(
     let mut unique_index_by_key: HashMap<StateHash, usize> = HashMap::new();
     let mut slot_to_unique: Vec<Option<usize>> = vec![None; requests.len()];
     if let Some(stats) = stats {
-        stats.borrow_mut().requested_states += requests.len();
+        lock_stats(stats).requested_states += requests.len();
     }
 
     {
-        let cached = cache.borrow();
+        let cached = lock_cache(cache);
         if let Some(stats) = stats {
-            let mut stats = stats.borrow_mut();
+            let mut stats = lock_stats(stats);
             stats.cache_size_peak = stats.cache_size_peak.max(cached.len());
         }
         for (index, request) in requests.iter().enumerate() {
@@ -315,14 +350,14 @@ pub(crate) fn evaluate_model1_state_refs_cached(
             if let Some(cached_eval) = cached.get(&key) {
                 result_slots[index] = Some(cached_eval);
                 if let Some(stats) = stats {
-                    stats.borrow_mut().cache_hits += 1;
+                    lock_stats(stats).cache_hits += 1;
                 }
                 continue;
             }
             if unique_index_by_key.contains_key(&key) {
                 slot_to_unique[index] = unique_index_by_key.get(&key).copied();
                 if let Some(stats) = stats {
-                    stats.borrow_mut().duplicate_hits += 1;
+                    lock_stats(stats).duplicate_hits += 1;
                 }
                 continue;
             }
@@ -335,12 +370,14 @@ pub(crate) fn evaluate_model1_state_refs_cached(
 
     if !unique_states.is_empty() {
         if let Some(stats) = stats {
-            stats.borrow_mut().unique_states += unique_states.len();
+            lock_stats(stats).unique_states += unique_states.len();
         }
         let unique_evals = evaluate_model1_state_refs(py, evaluator, &unique_states, stats)?;
-        // Wrap each freshly computed evaluation in an `Rc` once. Cache inserts and
-        // duplicate-slot fills below are refcount bumps, not deep copies of the
-        // (up to several-hundred-entry) prior vector.
+        // Wrap each freshly computed evaluation in an `Arc` once (`Arc`, not `Rc`,
+        // so nodes holding the shared prior list stay `Send` for rayon — see the
+        // `RustEvaluationCache` note above). Cache inserts and duplicate-slot fills
+        // below are refcount bumps, not deep copies of the (up to several-hundred-
+        // entry) prior vector.
         let unique_evals: Vec<Arc<RustEvaluation>> = unique_evals
             .into_iter()
             .map(|mut eval| {
@@ -349,14 +386,14 @@ pub(crate) fn evaluate_model1_state_refs_cached(
             })
             .collect();
         {
-            let mut cached = cache.borrow_mut();
+            let mut cached = lock_cache(cache);
             let mut inserted = 0usize;
             for (key, evaluation) in unique_keys.iter().copied().zip(unique_evals.iter()) {
                 cached.insert_bounded(key, Arc::clone(evaluation), cache_max_states);
                 inserted += 1;
             }
             if let Some(stats) = stats {
-                let mut stats = stats.borrow_mut();
+                let mut stats = lock_stats(stats);
                 stats.cache_inserts += inserted;
                 stats.cache_size_peak = stats.cache_size_peak.max(cached.len());
             }

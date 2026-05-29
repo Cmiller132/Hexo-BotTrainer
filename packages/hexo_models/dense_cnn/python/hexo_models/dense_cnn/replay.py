@@ -750,6 +750,13 @@ def _build_split_outputs(
             shard_dir = split_scratch / f"data{output_index:05d}"
             shard_dir.mkdir(parents=True, exist_ok=True)
             part_path = shard_dir / f"part_{group_index:05d}.npz"
+            # TODO(P3, deferred — analysis/optimization_plan.md): these phase-1 scratch parts are
+            # written here and re-read at _load_part_arrays() a few lines below, then deleted with
+            # the scratch_root. Compressing them costs ~40 s/epoch of zlib (shuffle is
+            # compress-bound, ~538 MB/s) for no benefit, since nothing outside this function reads
+            # them. Switch to compresslevel=1 (or np.savez uncompressed) once the optimization
+            # stage lands. Intentionally NOT changed now: it shifts byte layout of in-flight
+            # shuffle artifacts and is out of scope for the current planning pass.
             np.savez_compressed(part_path, **{key: value[indices] for key, value in arrays.items()})
             scratch_parts += 1
 

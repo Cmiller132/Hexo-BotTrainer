@@ -1,0 +1,130 @@
+# Model 1 TARGET config — the coupled (sims + head + trunk) fix as ONE fresh run.
+#
+# This is a FRESH run, NOT a resume of dense_cnn_model1_scratch_64: the policy
+# head (P7, fully-conv) and trunk shape (96ch x 6block) both change the checkpoint
+# shape, so epoch_000022.pt will NOT load. Output goes to a new run dir.
+#
+# The three coupled changes (per analysis/optimization_plan.md + the policy-
+# diffuseness investigation), shipped together:
+#   - P7 fully-conv policy head  (automatic: architecture.py PolicyHead is now conv)
+#   - channels 64 -> 96
+#   - residual_blocks 4 -> 6
+#   - search_visits 128 -> 512
+# Verified ready (Phase 4): model instantiates (2.12M params), a forward+AMP train
+# step fits in 12 GB VRAM at bs256 (peak ~3.9 GB / 32%; bs128 ~2.0 GB), FP16 forward
+# is 2.5-2.9x and numerically safe at 96x6, and the inference-optimized (conv-folded)
+# P7 head matches the training head.
+
+[model]
+name = "dense_cnn"
+module = "hexo_models.dense_cnn.plugin"
+
+[model.config]
+device = "cuda"
+
+[model.config.architecture]
+input_channels = 13
+channels = 96
+residual_blocks = 6
+dropout = 0.0
+short_term_value_horizons = [1, 4, 8]
+
+[model.config.training]
+batch_size = 256
+learning_rate = 0.001
+weight_decay = 0.0001
+policy_weight = 1.0
+value_weight = 1.0
+opp_policy_weight = 0.25
+short_term_value_weight = 0.25
+amp = true
+max_grad_norm = 1.0
+train_samples_per_epoch = 100000
+max_train_bucket_per_new_data = 8.0
+max_train_bucket_size = 500000
+no_repeat_files = true
+max_validation_samples = 100000
+
+[model.config.samples]
+shuffle_min_rows = 100000
+# Kept at the RAM-safe 300000 (see scratch_64 notes: 600000 crash-looped the
+# shuffle on the 12 GB host budget). P8 freed eval-cache host RAM; re-widening is a
+# separate decision to validate against the watchdog, not bundled here.
+shuffle_keep_target_rows = 300000
+shuffle_taper_window_exponent = 0.65
+shuffle_expand_window_per_row = 0.4
+shuffle_taper_window_scale = 50000.0
+approx_rows_per_out_file = 8000
+shuffle_worker_group_size = 8000
+validation_fraction = 0.0
+policy_surprise_uniform_fraction = 0.5
+policy_surprise_max_weight = 8.0
+
+[model.config.selfplay]
+# The co-primary fix: 512 search visits (4x) to generate sharp, well-explored
+# policy targets that the P7 head + bigger trunk can actually learn from.
+search_visits = 512
+active_games = 256
+c_puct = 1.5
+root_dirichlet_noise_enabled = true
+root_dirichlet_noise_fraction = 0.25
+root_dirichlet_total_alpha = 10.83
+root_policy_temperature = 1.1
+fpu_reduction = 0.20
+virtual_loss = 1.0
+widening_policy_mass = 0.95
+widening_max_children = 32
+widening_min_children = 2
+# Host-RAM headroom (P8): the eval cache is CPU priors, throughput-neutral here.
+mcts_session_cache_max_states = 131072
+mcts_active_root_limit = 256
+max_actions = 1024
+temperature = 1.0
+
+[model.config.evaluation]
+games_per_epoch = 64
+sealbot_variant = "best"
+sealbot_time_limit = 0.05
+max_actions = 1024
+require_sealbot = true
+opening_temperature = 0.6
+opening_moves = 8
+# OPTIONAL eval-speed lever (Phase 3): a value >0 fattens the single-game eval
+# forwards (fewer passes -> lower latency, ~3.4x from 4->32 at 512 sims) at a
+# modest search-quality cost. Left at 0 (unchanged) pending a SealBot-strength
+# validation on the trained net. To cut eval wall time, try 8-16 and confirm the
+# win rate holds:
+# virtual_batch_size = 16
+
+[model.config.performance]
+calibrate = true
+target_selfplay_positions_per_second = 64.0
+inference_batch_candidates = [128, 256, 512, 1024]
+selfplay_batch_candidates = [256]
+# bs256 fits 96x6 at ~32% VRAM (measured); the calibration OOM guard still drops
+# any candidate that OOMs and selects the largest viable batch automatically.
+training_batch_candidates = [64, 128, 192, 256]
+mcts_virtual_batch_candidates = [4]
+selfplay_probe_positions = 2048
+probe_batches = 1
+
+[run]
+name = "dense_cnn_model1_target_96x6"
+output_dir = "../runs/dense_cnn_model1_target_96x6"
+seed = 1
+
+[loop]
+epochs = 60
+
+[selfplay]
+games_per_epoch = 256
+update_checkpoint_pointer = true
+checkpoint_pointer = "../data/checkpoints/dense_cnn_model1_target_96x6_latest.txt"
+
+[train]
+passes_per_epoch = 1
+
+[checkpoint]
+# Fresh run: no resume_from, no initialize_from. The 64x4 / FC-head checkpoints
+# are shape-incompatible with 96x6 + P7 and will not load.
+save_name = "latest"

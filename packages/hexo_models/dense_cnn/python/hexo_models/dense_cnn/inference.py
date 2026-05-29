@@ -73,6 +73,15 @@ class DenseCNNInference:
         self.max_batch_size = 1024 if max_batch_size is None else int(max_batch_size)
         if self.max_batch_size <= 0:
             raise ValueError("max_batch_size must be > 0")
+        # A7 (production form of PB): keep cuDNN autotune ON, but pad forward
+        # batches to a small set of power-of-two buckets so the evaluator sees a
+        # handful of shapes instead of ~900. cuDNN re-autotunes (~925 ms) on every
+        # never-seen batch shape; without bucketing a cold/relaunch epoch pays
+        # ~830 s of autotune thrash (and once hung >10 min). Bucketing bounds the
+        # distinct shapes to ~log2(max_batch)+1, so autotune converges in seconds
+        # and stays converged, while padded rows are discarded (per-sample conv/
+        # eval-BN/FC ops never let padding leak into the real rows).
+        self.pad_to_buckets = self.device.type == "cuda"
         if self.device.type == "cuda":
             torch.backends.cudnn.benchmark = True
             torch.backends.cuda.matmul.allow_tf32 = True
@@ -150,12 +159,29 @@ class DenseCNNInference:
 
     @torch.inference_mode()
     def _forward_device_inputs(self, inputs: torch.Tensor) -> dict[str, torch.Tensor]:
+        rows = int(inputs.shape[0])
+        padded = self._pad_to_bucket(inputs, rows)
         with torch.autocast(device_type=self.device.type, enabled=self.amp):
             if hasattr(self.model, "forward_policy_value"):
-                output = self.model.forward_policy_value(inputs)
+                output = self.model.forward_policy_value(padded)
             else:
-                output = self.model(inputs)
-        return {key: value.detach().float() for key, value in output.items()}
+                output = self.model(padded)
+        # Slice padding off every head; rows [:rows] are the real samples.
+        return {key: value.detach().float()[:rows] for key, value in output.items()}
+
+    def _pad_to_bucket(self, inputs: torch.Tensor, rows: int) -> torch.Tensor:
+        """Pad the batch dim up to a power-of-two bucket (A7 shape stabilization)."""
+
+        if not self.pad_to_buckets:
+            return inputs
+        target = _bucket_batch_size(rows, self.max_batch_size)
+        if target == rows:
+            return inputs
+        padded = torch.zeros((target, *inputs.shape[1:]), dtype=inputs.dtype, device=inputs.device)
+        if inputs.ndim == 4:
+            padded = padded.to(memory_format=torch.channels_last)
+        padded[:rows].copy_(inputs)
+        return padded
 
     @torch.inference_mode()
     def _warm_up_cuda(self) -> None:
@@ -251,6 +277,24 @@ def _legal_priors_from_flats(
         int(action_id): float(prob)
         for action_id, prob in zip(legal_action_ids, probs)
     }
+
+
+def _bucket_batch_size(rows: int, cap: int) -> int:
+    """Smallest power-of-two >= ``rows``, clamped to ``cap`` (A7 batch buckets).
+
+    Batches at or above ``cap`` are returned unchanged: the evaluator already
+    chunks oversized leaf batches to ``max_batch_size`` before the forward, so
+    those land on the ``cap`` bucket. Padding is therefore at most ~2x the real
+    rows, while the number of distinct shapes cuDNN must autotune is bounded to
+    ``log2(cap) + 1``.
+    """
+
+    if rows <= 0 or rows >= cap:
+        return rows
+    size = 1
+    while size < rows:
+        size <<= 1
+    return min(size, cap)
 
 
 def _to_inference_device(inputs: torch.Tensor, device: torch.device) -> torch.Tensor:

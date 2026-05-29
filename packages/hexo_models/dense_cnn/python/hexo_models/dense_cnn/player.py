@@ -72,6 +72,12 @@ class DenseCNNPlayer:
         in_opening = move_index < self.opening_moves and self.opening_temperature > 0.0
         temperature = self.opening_temperature if in_opening else 0.0
         move_seed = int(self.eval_seed) * 1_000_003 + move_index
+        # Eval/play latency is bound by the number of NN forwards. An eval-only
+        # virtual_batch_size > 0 fattens each forward (fewer passes -> lower
+        # latency) at a modest search-quality cost; 0 falls back to the calibrated
+        # self-play value (unchanged behavior). See Model1EvalConfig.
+        eval_vbatch = self.trainer.config.evaluation.virtual_batch_size
+        virtual_batch_size = eval_vbatch if eval_vbatch > 0 else self.trainer.mcts_virtual_batch_size
         search = self.mcts_session.run(
             [0],
             [state],
@@ -80,7 +86,7 @@ class DenseCNNPlayer:
             c_puct=selfplay.c_puct,
             temperature=temperature,
             seed=move_seed,
-            virtual_batch_size=self.trainer.mcts_virtual_batch_size,
+            virtual_batch_size=virtual_batch_size,
             active_root_limit=selfplay.mcts_active_root_limit,
             root_policy_temperature=selfplay.root_policy_temperature,
             fpu_reduction=selfplay.fpu_reduction,

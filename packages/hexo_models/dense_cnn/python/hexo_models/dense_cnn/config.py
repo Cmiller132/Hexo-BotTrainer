@@ -94,6 +94,14 @@ class Model1EvalConfig:
     # behavior.
     opening_temperature: float = 0.0
     opening_moves: int = 0
+    # Eval/play-only MCTS virtual batch size. The single-game (player.decide)
+    # search latency is bound by the NUMBER of NN forwards, not by selection:
+    # raising the virtual batch fattens each forward and cuts latency ~linearly
+    # in passes (measured ~3.4x from 4->32 at 512 sims) at a modest search-quality
+    # cost (larger virtual-loss window). 0 keeps the calibrated self-play value.
+    # This is the measured single-game latency lever — root parallelism and
+    # shared-tree atomics were both benchmarked and found inferior.
+    virtual_batch_size: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -199,6 +207,7 @@ def parse_model1_config(raw: Mapping[str, Any] | None) -> Model1Config:
             require_sealbot=bool(evaluation.get("require_sealbot", False)),
             opening_temperature=float(evaluation.get("opening_temperature", 0.0)),
             opening_moves=int(evaluation.get("opening_moves", 0)),
+            virtual_batch_size=int(evaluation.get("virtual_batch_size", 0)),
         ),
         performance=Model1PerformanceConfig(
             calibrate=bool(performance.get("calibrate", True)),

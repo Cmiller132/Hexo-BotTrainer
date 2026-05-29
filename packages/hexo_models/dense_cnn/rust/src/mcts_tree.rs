@@ -141,7 +141,7 @@ pub(crate) struct RustSearchDiagnostics {
     pub(crate) max_hidden_priors_per_node: usize,
     pub(crate) active_edge_bytes: usize,
     pub(crate) hidden_prior_bytes: usize,
-    // Nodes that reference cache priors by `Rc`, and the total candidate slots so
+    // Nodes that reference cache priors by `Arc`, and the total candidate slots so
     // referenced. These are NOT retained per node (the bytes live once in the
     // eval cache), so they are reported separately from `hidden_prior_*`.
     pub(crate) shared_prior_nodes: usize,

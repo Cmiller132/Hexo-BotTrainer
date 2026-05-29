@@ -107,6 +107,406 @@ Validate-only (safe, no side effects): add `-ValidateOnly`.
 
 ## LOG (newest entry first — prepend new entries here)
 
+### 2026-05-29 ~17:?? — PHASE 4 — MODEL-CHANGE GATE proven READY (P7 + 96×6 + 512 sims); fresh config written; NO run started
+**TL;DR:** Landed the coupled model change as one coherent unit and proved it's sound without starting a run.
+**P7 fully-conv policy head** replaces the FC head (`architecture.py`) — drop-in: outputs `(N, BOARD_AREA)` so
+loss / inference flat-index / Rust contracts are unchanged; removes the ~11.3M FC-head params (64×4 model:
+12M→973K; 96×6: **2.12M**). New fresh-run config `configs/dense_cnn_model1_target_96x6.toml` (96ch, 6block,
+search_visits 512). **Verified:** parses; `plugin.build_model` builds it; P7 heads confirmed fully-conv (no
+`Linear`); inference-optimized (conv-folded) head matches training head to ~1e-8; a **512-sim self-play search
+runs end-to-end** (4 roots, exactly 512 visits each, valid actions); a **forward+AMP+optimizer train step fits
+in 12 GB VRAM at bs256 = 3875 MiB (32%)**, bs128 = 1992 MiB; FP16 forward safe at 96×6 (Phase 3.5). Full suite
+**154 passed**. Run still STOPPED at `epoch_000022.pt` — **no training launched** (the new config is a fresh run;
+the 64×4/FC checkpoints are shape-incompatible and won't load).
+
+**R1 (VRAM) is a non-issue, better than the audit feared:** bs256 at 96×6 uses only ~32% of the 12 GB card
+(the small P7 head + modest trunk keep activations low), so the bs256→128 calibration fallback exists but isn't
+needed. Verify the calibration log on the first epoch as a formality.
+
+**P7 details:** `PolicyHead` is now `HexConv2d(C→C,3×3) → ReLU → Conv2d(C→1,1×1) → flatten` (per the plan's
+"3×3 Conv→ReLU→1×1 Conv→1 logit/cell"). Both `policy_head` and `opp_policy_head` use it. `HexConv2d` keeps the
+trunk's hex adjacency; `_replace_remaining_hex_convs` folds it to a plain conv for CUDA inference. The spatial
+training target `policyTargetsNCHW (N,1,41,41)` flattens to the same `(N,1681)` the head emits — no replay/D6/
+schema change. **D6 augmentation untouched** (it operates on the compact→dense expansion, head-agnostic).
+
+**Config notes:** fresh `output_dir`/`name` (does not clobber scratch_64); no `resume_from`/`initialize_from`
+(fresh random init); kept the RAM-safe shuffle window (300k) and P8 cache cap (131072); eval
+`virtual_batch_size` left at 0 (default) with a commented hint to enable the Phase-3 eval-latency lever after a
+SealBot-strength validation. `calibrate=true` retains the OOM-guarded batch auto-select.
+
+**To start the fresh run (user decision — NOT done here):** point the supervisor/launcher at
+`configs/dense_cnn_model1_target_96x6.toml`. This abandons the 64×4 scratch_64 lineage by design.
+
+### 2026-05-29 ~16:?? — PHASE 3.5 — FP16 confirmed (already on, safe @96×6); A3/A4 measured NOT worth it; **parse parallelization = real 18% self-play win**
+**TL;DR:** Measured each Phase-3.5 target before building. **FP16 is already enabled** (`config.training.amp=true`
+→ self-play + eval inference) and gives a **2.3–2.9× forward speedup**, numerically safe at both 64×4 and the
+96×6 target (softmax max-diff ~1e-7 / ~5e-7). **A3 (state-on-node) is NOT worth building** — select-replay is
+~2% of a move even at 512 sims (widening keeps trees bushy not deep). **A4 (on-GPU gather) is marginal** — the
+gather/softmax is already on-device. The real main-thread cost (once the forward is FP16) was the **Rust prior
+parse (~1650 ms/move, ~39%)**; I **parallelized it across rayon** (per-row, independent) → **~1650 ms → 75 ms
+(22×)**, cutting the self-play move **7100 ms → 5849 ms (~18%)** at amp=False, **byte-identical** (equiv digest
+unchanged `d9d0aa9a`, 0 invariant failures). Full suite **154 passed**. Run still STOPPED at `epoch_000022.pt`.
+
+**Important correction to earlier Phase-2/3 numbers:** those benches used `amp=False`, so they *overstated* the
+production forward by ~2.4×. Production self-play (amp=true) forward ≈ 2000 ms/move, not ~4900 ms. With FP16 on +
+this parse fix, a production move ≈ forward 2000 + encode 350 + parse 75 + tree/orch ~500 ≈ **~2.9 s/move** vs the
+amp=False sequential-parse ~7.1 s — and the parse fix is the part this session newly captured.
+
+**Measurements:**
+- *FP16* ([`analysis/forward_fp_bench.py`](analysis/forward_fp_bench.py)): forward fp32→fp16 — 64×4: 2.3–2.5×;
+  96×6: 2.5–2.9×. Numerics (max abs diff, b256): 64×4 value 1.5e-4 / policy-softmax 2.4e-7; 96×6 value 2.7e-4 /
+  softmax 5.1e-7. **FP16 is on and safe for the Phase-4 96×6 model** — no code change needed.
+- *A3 sizing*: at 512 sims/64 roots the select (incl. O(depth) replay) is ~90–177 ms/move (~2%) — A3 would save
+  ~2% even at the target. **Not built.**
+- *Parse*: per-row decode + `finalize_model_priors` sort over ~32k leaves/move was ~1650 ms serial on the GIL
+  thread. Parallelized with `par_iter` (precomputed per-row prior offsets; rows are independent and output stays
+  row-ordered → identical bytes). New `parse_seconds` stat exposed in batch diagnostics.
+
+**Shipped:** parse parallelization in `evaluate_model1_state_refs` (`mcts_eval.rs`) + `parse_seconds` stat. A4 and
+A3 deliberately not built (measured low-value). **Net Phase-3.5 self-play win: ~18% (parse) on top of the
+already-present 2.4× FP16 forward.** New artifact: `forward_fp_bench.py`.
+
+### 2026-05-29 ~15:?? — PHASE 3 (§4.2) — MEASURED the lever; shared-tree atomics & root-parallel are BOTH the WRONG lever; shipped a safe vbatch knob
+**TL;DR:** Applied the measurement-first discipline to §4.2 before building the high-risk shared-tree atomics —
+and the data says **don't build them.** Single-game (eval/play) latency is bound by the NUMBER of NN forwards,
+not by selection. The right lever is simply the single-tree **virtual_batch_size** (fewer, fatter forwards):
+measured **~3.4× latency cut** (512 sims: 317 ms→94 ms/move from vb4→vb32). Both alternatives the plan named are
+**measured inferior**: (a) root parallelism (N shallow trees, sum visits) collapses quality — splitting sims
+across independent shallow trees loses depth; (b) §4.2 shared-tree atomics produce the *identical* leaves/forward
+and *identical* virtual-loss window as raising vbatch, just selecting them on T threads (selection is cheap), so
+they're strictly dominated by the vbatch knob at zero concurrency risk. **Shipped** an opt-in eval-only
+`virtual_batch_size` (default 0 = unchanged) instead of the atomics. Run still STOPPED at `epoch_000022.pt`.
+
+**Measurements (CUDA, 64×4 net; fresh positions, real forwards):**
+- *Single-game latency vs vbatch* ([`analysis/single_game_latency_bench.py`](analysis/single_game_latency_bench.py)):
+  128 sims: vb4 80 ms → vb32 24 ms (3.3×); 512 sims: vb4 317 ms → vb32 94 ms → vb64 88 ms (3.4×). avg forward
+  batch tracks vbatch exactly (a single tree fills the batch — no root-blocking, Q3 not limiting here).
+  *(First pass was contaminated by re-searching one cached position → fixed to advance the game so each move is a
+  fresh position.)*
+- *Quality vs lever at equal latency* ([`analysis/root_parallel_bench.py`](analysis/root_parallel_bench.py),
+  agreement of the played move with a strong 1024-sim/vb4 reference): single vb4/512s = 100%; single vb32/512s =
+  73% @214 ms; **root4 (4×128s) = 27% @233 ms; root8 (8×64s) = 9% @100 ms.** Root parallelism is both slower-per-
+  quality AND far worse — confirms "scales worse per core." (Numbers use a *random* net, which exaggerates argmax
+  sensitivity; a trained net's sharper policy is more stable, so these are a pessimistic quality bound — validate
+  the chosen vbatch on the real net via a SealBot eval.)
+
+**Why §4.2 shared-tree atomics are dominated (the key argument):** T threads each selecting `vbatch` leaves from
+one shared tree = T·vbatch leaves/forward with a T·vbatch virtual-loss window — *exactly* what single-tree
+`virtual_batch_size = T·vbatch` produces, with the same quality. The only thing §4.2 adds is parallel *selection*,
+which Phase-2 measured at ~2-3% of move time. So §4.2 buys ~nothing over the vbatch knob while costing a high-risk
+shared-tree concurrency model (atomic stats, false-sharing, virtual-loss-cancellation correctness). **Not built —
+recommend not building it.** Root parallelism likewise not built (measured worse).
+
+**Shipped (safe, opt-in):** `Model1EvalConfig.virtual_batch_size` (config.py) + plumb in `player.decide`
+(player.py) — eval/play uses it when >0, else the calibrated self-play value (default 0 → **behavior
+unchanged**). This exposes the measured latency lever so eval-phase wall (64 games played serially, ~4× at 512
+sims) can be cut with an explicit, validated speed/quality trade. Config parses (default 0; override 16 OK); full
+suite **154 passed**.
+
+**Recommendation:** to cut eval-phase wall time at the 512-sim target, set `[evaluation] virtual_batch_size` to a
+small value (8–16 conservative, 32 for max speed) and **validate strength with a real SealBot eval** before
+trusting the win-rate (the quality cost is real but likely smaller on the trained net than the random-net bound
+above). Do NOT invest in §4.2 atomics or root parallelism. **Deploy 50 ms budget:** even vb64 at 512 sims is
+~88 ms on this net, so the plan's "decouple deploy-sims from train-sims" remains the right call for real-time play.
+
+**No deviation harm:** I implemented the *measured* right lever instead of the planned §4.2 atomics, per the
+"flag if the plan premise doesn't hold" guidance. New analysis artifacts: `single_game_latency_bench.py`,
+`root_parallel_bench.py`.
+
+### 2026-05-29 ~14:?? — PHASE 2 (M2 + A1) IMPLEMENTED & MEASURED — A1 CORRECT but **NO throughput gain** (key finding); STOP for checkpoint
+**TL;DR:** Implemented M2 (thread-safe eval cache) and A1 (select↔eval pipeline) on `impl/scratch64-phase1-opt`.
+Both build clean, full suite **154 passed**, A1 is **correct, deterministic, and search-quality-neutral**. BUT a
+direct serial-vs-A1 benchmark shows **A1 yields ~0 throughput gain** (35.4 → 35.1 pos/s) at the current
+64×4 / 128-visit / 256-root config. Root cause measured: the work A1 overlaps (leaf *selection*) is only
+**~2-3% of move time**; the move is dominated by the GPU forward + Python marshal + Rust encode/parse, none of
+which A1 overlaps. The plan's "~29% GPU duty → fill it" was a self-play-*phase* metric (incl. Python
+orchestration *outside* `session.run`), NOT the overlappable fraction inside search. **Stopping at the phase
+boundary as instructed — recommend the user reconsider A1's priority before Phase 3.** Run still STOPPED at
+`epoch_000022.pt`; nothing run-state touched. Rust `.pyd` rebuilt into the worktree (built via `cargo build
+--release` + copy, since no venv for `maturin develop`).
+
+**M2 — eval cache + stats `Rc<RefCell>` → `Arc<Mutex>` (`mcts_eval.rs`, `mcts.rs`):** mechanical, behavior-
+preserving (uncontended `Mutex` == `RefCell` in single-thread use). Added `lock_cache`/`lock_stats` helpers;
+converted all 14 borrow sites (the `ENCODE_SCRATCH` thread-local RefCell is unrelated, left as-is). Now
+`Send + Sync`, satisfying A1's prerequisite. Single mutex is fine because cache access is at eval boundaries
+only (never the hot select loop); a sharded lock is deferred until profiling shows contention. **Verified:**
+full suite 154 passed; the MCTS trajectory fingerprint
+([`analysis/mcts_equiv_harness.py`](analysis/mcts_equiv_harness.py)) is deterministic with 0 invariant failures
+(`mcts_baseline_pre_a1.json`, digest `9c78bcc3`).
+
+**A1 — select↔eval pipeline (`mcts.rs run_searches_to_targets`):** rewrote the serial barrier into a 2-stage
+software pipeline via `std::thread::scope`: the current leaf batch is evaluated on the GIL thread while the
+*next* batch is selected on a scoped worker (internally rayon). Trees have a single mutator at all times
+(select during the scope; backup after join), so **no tree lock**; virtual loss (already applied at selection)
+is the sync primitive. Extracted `select_leaf_batch` + `apply_eval_backups` helpers.
+- **Correctness (verified):** deterministic for a fixed seed (digest `d9d0aa9a`, identical across runs); exactly
+  128 visits per root every move; `visit_policy` sums to 1, no negative weights → 0 invariant failures; 154
+  tests pass. NOT bit-identical to the serial barrier (expected — the next batch is selected before the current
+  is backed up, extending the virtual-loss window by ~1 batch). **Search-quality-neutral, proven:** on *aligned*
+  positions ([`analysis/mcts_aligned_harness.py`](analysis/mcts_aligned_harness.py), advance by NN-prior argmax
+  so both builds traverse identical positions) serial-vs-A1 = **75.8% visit-argmax agreement, TV-dist mean 0.16**
+  — *identical* to the natural vbatch window sensitivity within one build (vb4-vs-vb1 = 75.0%, vb4-vs-vb2 = 75.8%).
+  I.e. A1's perturbation = the perturbation the project already accepts by running vbatch=4 vs true-sequential.
+  It shrinks at higher (target 512) visits where the search is more converged.
+- **Bug found & fixed during verification:** my first loop keyed termination off the prefetch making progress;
+  on a *narrow* tree (move 0 has a single legal action) the prefetch is blocked by the in-flight pending edge,
+  returns empty, and the loop terminated early (visits=1 not 128). Fixed: terminate off `needs_visits`; when the
+  prefetch is starved by a narrow tree, fall back to a synchronous select after backup (overlap is best-effort,
+  correctness is not). Re-verified all moves hit 128 visits.
+- **THROUGHPUT (the key negative result):** serial **35.4 pos/s / 7224 ms-move** vs A1 **35.1 pos/s / 7291 ms-move**
+  ([`analysis/a1_throughput_bench.py`](analysis/a1_throughput_bench.py), 256 roots, 128 visits, vbatch 4, CUDA,
+  apples-to-apples — only the Rust loop differs). Env-gated `HEXO_MCTS_TRACE` instrumentation in
+  `run_searches_to_targets` shows per timed move: **eval ≈ 7000 ms, select ≈ 170 ms (overlapped, hidden),
+  backup ≈ 80 ms**, and `scope_wall ≈ eval` (overlap works — select fully hides). So the overlap is real but the
+  overlappable slice (select) is ~2-3% of move time. The ~7000 ms "eval" is forward+marshal (~4900 ms,
+  `evaluator.call1`) **+ Rust encode/parse/finalize (~2000 ms, on the main thread inside the eval call — NOT
+  overlapped by A1).**
+- **Why this matters for the plan:** the real self-play levers are (1) the **GPU forward** (→ FP16/TensorRT — the
+  plan's §4.6 "only remaining lever"), and (2) the **Rust encode + payload parse (~2000 ms/move)**, which a
+  *finer* pipeline (encode/parse batch i+1 while forward batch i) or A4 (on-GPU marshal) would overlap — NOT leaf
+  selection. Note A3 (state-on-node) would *shrink* select further, making A1's overlap even less valuable. So
+  A1 as specified is not the throughput lever the plan assumed at either the current or the target config.
+
+**Recommendation for the checkpoint:** A1 is correct, safe (no measurable slowdown), quality-neutral, and is the
+structural prerequisite §4.2 tree-parallelism reuses — so **keep it**, but **re-prioritize**: the measured
+bottleneck says the next high-ROI work is (a) FP16/TensorRT on the eval forward and (b) overlapping/cutting the
+Rust encode+parse, ahead of more MCTS-CPU pipelining. M2 stands on its own (needed for any threaded eval work).
+Awaiting greenlight for Phase 3 (§4.2) or a pivot.
+
+**Build/test status:** `cargo check` + `cargo build --release` clean (6 pre-existing dead-code warnings); full
+`tests/` suite **154 passed**; MCTS equivalence harness deterministic, 0 invariant failures. New analysis
+artifacts: `mcts_equiv_harness.py`, `mcts_aligned_harness.py`, `mcts_aligned_diff.py`, `a1_throughput_bench.py`
+(+ `mcts_baseline_pre_a1.json`, `mcts_post_a1_fixed.json`, `aligned_serial.json`, `aligned_a1.json`).
+**Deviation from plan:** Q3 deliberately NOT folded into A1 — analysis showed the budget-loop `break` only fires
+on full *root* blockage (rare at vbatch=4), the deep-collision case backs up an existing node inline (no abort),
+and a naive break→continue risks an infinite loop; Q3's real value is for A5 (large vbatch), where it belongs.
+
+### 2026-05-29 ~13:04 — BACKSTOP: run still DOWN by design (optimization stage); NO action taken
+**TL;DR:** Confirmed the run remains intentionally stopped — unchanged since the deliberate ~10:17 stop
+for the optimization/investigation stage. NOT a crash/halt/stall/completion. No state-changing action
+taken; did NOT restart the supervisor (same reasoning as every cycle since ~11:03: this is not a breaker
+halt with a fixable bug — the GPU is intentionally freed and Phase-1 opt work is on a branch, not yet
+activated on the run). Resume point still `epoch_000022.pt` → epoch 23.
+
+**How verified (cross-checked, multiple signals, at 13:03–13:04):**
+- **Flags:** `supervisor_halted.flag` and `supervisor_completed.flag` BOTH absent.
+- **Liveness (2 signals):** `Get-Process` → both pidfile PIDs **DEAD** (supervisor 45320, trainer 53664).
+  Process scan for `train_model|supervise_scratch64|watch_model1|resource_watchdog` → only my own
+  NonInteractive tool shell (pid 3032). No trainer / supervisor / watchdog alive.
+- **Pidfiles stale & dead:** `supervisor.self.pid=45320`, `supervisor.pid=53664` (note BOM in the file
+  → shows as `﻿53664`), both mtime **08:08:38** — left by the supervisor killed at the stop. Unchanged.
+- **supervisor.log tail:** last line still `[08:08:38] ADOPT existing trainer pid=53664`. NO
+  EXIT/RELAUNCH/CAPTURE after it → killed before any relaunch (documented stop order: supervisor first).
+- **No advancement (expected — nothing is up):** newest checkpoint `epoch_000022.pt` @ **10:07:41**
+  (146,588,369 B); newest selfplay shard `epoch_000023_game_*.npz` @ **10:16:37** (from the killed
+  epoch-23 selfplay — regenerated on resume, harmless). ~2h47m since last activity = "stopped," not
+  "stalled."
+- **No crash:** newest `crash_artifacts/` dir = `20260529_074646` (morning watchdog-kill history);
+  `crashdumps/` = EMPTY; newest err.log = `trainer.20260529_074646.err.log` (829 B, mtime **07:47:22**,
+  unchanged from prior cycles that confirmed it benign Triton/torch warnings). No new err.log after the
+  stop → external kill, not a fault.
+
+**RESUME POINT (unchanged):** `checkpoints\epoch_000022.pt` (10:07:41) → resumes at **epoch 23**
+(loader = top-level `payload['epoch']`+1). Pointer `data\checkpoints\...latest.txt` agrees. CAVEATS
+(still true): (a) config literal `[checkpoint] resume_from` says `epoch_000015.pt`; the supervisor
+overwrites it with the latest on launch, but a MANUAL launch would redo from 15 — set it first. (b) If
+Phase-1/structural work changes architecture (channels/blocks), `epoch_000022.pt` won't load → fresh run.
+
+**What changed since last cycle:** nothing on the RUN. The ~13:?? entry below records that Phase-1
+optimizations (P0 NPZ load-once, PB/A7 cuDNN bucketing, P8 cache cap, Q5 comment fix) were IMPLEMENTED
+on branch `impl/scratch64-phase1-opt` (current git branch), build+tests green, but **not committed to the
+shared review branch and NOT activated on the run** — the config change (P8 cache cap → 131072) only
+takes effect on the next supervisor relaunch, which the user controls. So the run state is identical to
+the ~12:03 cycle; only the worktree carries new (uncommitted) opt code.
+
+**SealBot eval trend (frozen at epoch 22, best-50ms wins/64):** 17=6, 18=6, 19=2, 20=2, 21=4, 22=4 —
+bouncing 2–6/64, no upward slope; mean_turns falling 41→31. This plateau is exactly what motivated the
+stop + the [[scratch64-policy-bottleneck]] investigation. Grinding more epochs of THIS config won't move
+the win rate — the Phase-1 opts are speed/foundation work; the strength fix is the gated MODEL-CHANGE
+GATE (P7 fully-conv head + 96×6 trunk + 512 sims) per `analysis/optimization_plan.md`.
+
+**NEXT CYCLE, do (in order):**
+1. **First check whether the run is back up.** If a new trainer/supervisor is alive and advancing
+   (newest `epoch_*.pt`/shard mtime within ~15 min, no flags) → user resumed; revert to the normal
+   decision tree, log progress + new eval rows (epoch 23+). If architecture changed (Phase 1/gate
+   landed), `epoch_000022.pt` may not load (fresh run) — note it. Also check the live config for the
+   P8 cache cap (131072) and whether `pad_to_buckets` / bucketing (PB/A7) is active.
+2. **If still down (expected):** re-confirm the same terminal signals (no procs, dead pidfiles, no
+   flags, no new crash_artifacts/dumps, benign err.log) and log a one-line "still intentionally down."
+   Do NOT restart the supervisor.
+3. Only resume if the **user explicitly asks**: `-ValidateOnly` first, confirm no live supervisor
+   (pidfile + supervisor.log), then launch (auto-injects `resume_from`=latest epoch_*.pt).
+
+**Open items (report-don't-act, unchanged):** (i) ~19 stale `shuffleddata\*epoch_000016*` .tmp dirs —
+safe to delete (well past epoch 16). (ii) WER minidumps still not enabled (irrelevant — zero native
+crashes since the morning shuffle-RAM fix). (iii) Phase-1 opt branch `impl/scratch64-phase1-opt` is
+uncommitted to the shared review branch and unactivated; the structural/strength work (A1, §4.2,
+MODEL-CHANGE GATE) is gated on the user.
+
+### 2026-05-29 ~13:?? — PHASE 1 IMPLEMENTED (P0, PB/A7, P8, Q5) on branch `impl/scratch64-phase1-opt`; run still STOPPED
+**TL;DR:** Implemented the low-risk Phase-1 foundation from
+[`analysis/optimization_plan.md`](analysis/optimization_plan.md) on a NEW branch
+`impl/scratch64-phase1-opt` (cut from `review/scratch64-optimization-stage`, carrying its
+working-tree changes). Build + tests green; measured before/after where feasible. **STOPPED before
+all structural work** (A1, M2, §4.2, the MODEL-CHANGE GATE / 96×6 / P7) as instructed. **Did NOT
+touch the live run** — resume point still `epoch_000022.pt`; supervisor not started; no checkpoint
+changed. NOT committed to the shared review branch (kept on the impl branch).
+
+**Environment gotcha (important for any future test run):** the installed `hexo_models` is a PEP-420
+namespace package whose `__init__.py` (in site-packages) hardcodes the dense_cnn source root relative
+to ITS OWN location → `import hexo_models.dense_cnn` resolves to a STALE COPY at
+`site-packages\dense_cnn\python\…`, NOT the worktree. A plain `pytest` tests the stale copy. To test
+worktree edits you MUST prepend the worktree pkg dir:
+`PYTHONPATH=E:/Hexo-BotTrainer/packages/hexo_models/python` (the worktree `__init__.py` then points its
+relative roots back at `packages/hexo_models/dense_cnn/python/...`). This mirrors what
+`start_model1_training.ps1` does. All test/bench numbers below were taken with that PYTHONPATH set.
+
+**P0 — NPZ load-once (`trainer.py`):** added `_materialize_npz()` (decompress each of the 6 batch
+arrays once per shard) and switched both `train_passes` and `_run_validation` to slice the in-RAM dict
+instead of `data[KEY][start:stop]` per batch (NpzFile re-decompresses the whole array on every access).
+`_batch_from_npz` is unchanged. **Measured** ([`analysis/p0_loadonce_microbench.py`](analysis/p0_loadonce_microbench.py)
+on real shard `…epoch_000016/train/data00000.npz`, 7936 rows, bs128): data-prep **13475 ms → 234 ms =
+57.7×**; batches verified **byte-identical** (`torch.equal` over every batch & key) ⇒ training numerics
+unchanged. Confirms the plan's −~95 s/epoch (model-independent).
+
+**PB / A7 — cuDNN cold-start fix (`inference.py`):** chose the production A7 form (NOT a bare
+`benchmark=False`): keep `cudnn.benchmark=True`, but pad every forward batch up to a power-of-two
+bucket (`_bucket_batch_size`, `_pad_to_bucket` at the single `_forward_device_inputs` chokepoint), so
+the evaluator presents ≤11 shapes (1,2,…,1024) instead of the measured ~900. Padded rows are sliced
+off; correctness rests on per-sample independence (conv / **eval-mode** BatchNorm running stats / FC —
+no cross-batch op), **proven** by `test_padding_does_not_leak_into_real_rows` (byte-identical real rows
+regardless of padding content) + on/off equivalence + bucket-math tests
+([`tests/test_dense_cnn_inference_bucketing.py`](tests/test_dense_cnn_inference_bucketing.py), 4 pass).
+**Measured** cold autotune ([`analysis/a7_autotune_bench.py`](analysis/a7_autotune_bench.py), 64×4,
+32 distinct input shapes, fresh process each): OFF **26.85 s** (~0.84 s/shape) vs ON **5.13 s** (32
+inputs → 6 buckets). Extrapolated to the production ~900 shapes that's ~755 s → matches the plan's
+~830 s tax; bucketing caps it at ~9 s/process regardless of shape variety, killing the recurring
+cold/relaunch thrash AND the >10-min-hang risk. *Tradeoff:* ≤2× compute on under-filled forwards in
+steady state; at the current 64×4 config self-play is CPU-bound (GPU ~29% duty) so this hides, and it
+is the right form for the 96×6 target (bigger kernels prefer autotune). Not measured: steady-state
+self-play wall-clock delta (needs a full epoch). If a regression shows there, `benchmark=False` is the
+fallback (set `pad_to_buckets=False` + flip the flag).
+
+**P8 — eval-cache cap (`configs/dense_cnn_model1_scratch_64.toml`):** `mcts_session_cache_max_states`
+262144 → 131072 with the **audit-corrected** justification (HOST RAM, ~−340 MB; NOT VRAM — it's an
+`Rc<RefCell<HashMap>>` of `Arc` priors on CPU). Throughput-neutral (cache fills ~190k/262k and inserts
+== unique states). I did **NOT** re-widen the replay window (`shuffle_keep_target_rows` stays 300000) —
+that re-grows the shuffle peak that crash-looped epoch 16, so it's a separate higher-risk decision; the
+freed RAM merely enables it later. Verified the TOML still parses via `parse_model1_config` → value
+131072. (Config change takes effect only on the next supervisor relaunch, which the user controls.)
+
+**Q5 (done) / Q3 (skipped):** fixed two stale `Rc`→`Arc` comments that mis-describe the threading
+contract A1/§4.2 depend on — `mcts_eval.rs:341` and `mcts_tree.rs:144` (the live code already uses
+`Arc<RustEvaluation>`; only the comments lagged). Comment-only, zero behavioral change; `cargo check
+--manifest-path packages/hexo_models/Cargo.toml --features python` clean (6 pre-existing dead-code
+warnings, unrelated), no `.pyd` rebuild needed. **Q3 deliberately SKIPPED** — "don't abort a root's
+batch on a pending collision" is a *behavioral* change to MCTS batch-fill and is coupled to A5/A1;
+per the plan it belongs in the A1 PR, not this low-risk pass.
+
+**Build/test status:** full `tests/` suite **154 passed** (worktree PYTHONPATH). `cargo check` clean.
+New artifacts (untracked): `analysis/p0_loadonce_microbench.py`, `analysis/a7_autotune_bench.py`,
+`tests/test_dense_cnn_inference_bucketing.py`.
+
+**Deviations from plan:** (1) PB implemented as the A7 bucketing form (per instruction "production-safe
+form, not a hack"), not `benchmark=False`. (2) P0 measured 57.7× data-prep (vs plan's 20–23×) because
+the microbench isolates pure data-prep on a real shard. (3) Discovered the stale-copy import gotcha
+above — prior pytest baselines in this repo may have tested the installed copy, not the worktree.
+
+**STOPPED before structural work** (A1 select↔eval, M2 cache-Send, §4.2 tree parallelism, P7/96×6/512)
+as instructed — checkpoint with the user before starting those.
+
+### 2026-05-29 ~12:35 — FINAL CHECK of the optimization plan: **GO**; P7 folded into mandatory; 1 error fixed (doc-only)
+**TL;DR:** Rigorously audited [`analysis/optimization_plan.md`](analysis/optimization_plan.md) against
+the profiling, MCTS review (+ microbench JSON), and diffuseness reports before implementation. **Verdict:
+GO.** The feasibility math is arithmetically sound (every number re-derived below), the dependency
+ordering is correct, and the mandatory set is well-motivated. **Doc-only changes** — NO production code,
+config, model, supervisor, or checkpoint touched; run still stopped at `epoch_000022.pt`.
+
+**Task 1 — P7 folded into MANDATORY (user decision):** moved the fully-conv policy head from "out of
+scope / separate workstream" into the mandatory set and a new **Group F**, tied explicitly to the
+model/sims change. It now lands as **one fresh run** with channels 64→96, blocks 4→6, and sims 128→512
+(a "MODEL-CHANGE GATE" added to the §2 sequence). Rationale per diffuseness §7/§8: head ⊕ trunk ⊕ sims
+are coupled — a 96×6 trunk feeding the current FC head still trains on prior-echoing targets, wasting the
+capacity. P7 is **speed-neutral** (472↔473 ms [P]) so it changes **none** of the §4 feasibility seconds;
+schema-compatible (target `policyTargetsNCHW` is already spatial); it also deletes the ~11.3 M FC-head
+param bloat. Updated §1, §2, §5, and the bottom line.
+
+**Task 2 — audit results:**
+- **Feasibility math: VERIFIED, no arithmetic errors.** Re-derived: model FLOPs `(6·96²)/(4·64²)=3.375×`
+  ✓; sims 4× ✓; self-play serial `816+192+344+200+129=1681 s` ✓ → pipelined `max(816, 566)≈850 s` ✓;
+  training `619+0+150≈770 s` ✓; epoch totals baseline 1141≈1143 ✓, naive 3913 (~65 min) ✓, optimized
+  1966 (~33 min, 1.74×) ✓; deploy `184·4·2.5/8≈240 ms` (~5× over 50 ms) ✓; current-workload cumulative
+  `384+250+60+116=810 s` (1.4×) ✓.
+- **Dependency ordering: CORRECT.** A1 → §4.2 (reuses A1's virtual-loss/leaf machinery, no conflict —
+  A1 uses per-tree ownership, §4.2 adds shared-tree atomics on top). Q3 → A5. A3 must precede 512-live
+  (steepest-growing CPU term). **M2 is a genuine HARD prerequisite for A1** — confirmed the eval cache is
+  `Rc<RefCell<…>>` (`mcts_eval.rs:110`), not even `Send`, so A1's worker threads literally cannot share
+  it as-is. Nothing in Phase 1/2 depends on anything later.
+- **ERROR FOUND + FIXED (doc-only): P8 conflated RAM with VRAM.** The plan claimed lowering the eval
+  cache "buys headroom for the 96×6 activations / VRAM." It does **not** — the cache is host RAM (CPU
+  `Rc<RefCell<HashMap>>` of `Arc<RustEvaluation>` priors), so it's irrelevant to the 12 GB VRAM risk.
+  Corrected P8's justification to host-RAM-for-replay-window-rewiden (the window was cut 600k→300k for
+  RAM), and fixed two §2 references.
+- **VRAM risk R1: addressed, and BETTER than the plan claimed.** Verified `calibrate=true` +
+  `performance.py:194/241` wrap every candidate batch (training, inference, self-play) in a
+  `try/except → _is_oom` guard that drops OOM candidates and selects the largest viable batch. So the
+  bs256→bs128 fallback at 96×6 is **automatic**, covering the self-play `inference_batch_candidates`
+  (incl. 1024) too. Documented this in R1.
+- **Eval phase: §4.2 mandatory confirmed.** Verified SealBot eval plays its 64 games **serially**
+  (`evaluation.py:90` `for game_index in range(...)`) on the single-root `player.decide` path — so the
+  ~4× sims blow-up is real and tree parallelism is genuinely needed for the eval phase, not only deploy.
+- **Minor (left as-is):** PB's "−830 s / identical steady speed" is [M] at 64×4, an extrapolation to
+  96×6 — the plan correctly hedges by making A7 (bucketed shapes + benchmark=True) the production form.
+
+**Task 3 — VERDICT: GO.** **First implementation step:** ship **Phase 1** — P0 (NPZ load-once,
+`trainer.py`), PB (`cudnn.benchmark=False`, `inference.py:77`), P8 (cache cap → 131072, config). All
+free/near-free, no dependencies, individually testable, and they expose the GPU floor before the model
+grows. **Concretely start with P0** (measured −95 s/epoch, ~5-line correctness-neutral change, covered by
+`test_dense_cnn_pipeline.py`/`performance.py`). **Mandatory ordered sequence:**
+1. P0, PB, P8 (Phase 1, days, independent)
+2. Q3 + Q5 → **A1/P5** (keystone) ⊕ **M2** (cache shard, prereq) → A2 + A3 + A4 + A5 + A7 (CPU-cut tuning under the A1 PR)
+3. **§4.2** tree parallelism (reuses A1 machinery; root-parallel eval as the zero-risk first step)
+4. **MODEL-CHANGE GATE:** P7 + channels 96 + blocks 6 + sims 512 as one fresh run (checkpoint shape
+   changes → `epoch_000022.pt` won't load)
+**Plan corrections made (doc-only):** P7 → mandatory (Group F + gate + §5 + bottom line); P8 RAM/VRAM
+fix; R1 auto-fallback note. Nothing applied to code/config/run — implementation is the next, gated step.
+
+### 2026-05-29 ~12:20 — OPTIMIZATION PLAN written (planning only; NO production code changed, run still down by design)
+**TL;DR:** Consolidated the profiling fix list (P0–P8) + the MCTS review (A1–A7, §4.2 tree parallelism,
+M1–M4) into one dependency-ordered plan of attack oriented on ONE goal: **make 512 MCTS sims feasible
+alongside a 96ch×6block model** (current: 128 sims, 64ch×4block). Written to
+[`analysis/optimization_plan.md`](analysis/optimization_plan.md). **Read-only w.r.t. the run** — no
+config/checkpoint/supervisor change, no training launched; resume point still `epoch_000022.pt` → epoch
+23. The ONE tiny code touch (allowed by the user): a `TODO(P3, deferred)` comment at
+[`replay.py:753`](packages/hexo_models/dense_cnn/python/hexo_models/dense_cnn/replay.py:753) marking the
+uncompressed-scratch optimization as intentionally deferred (P3 itself NOT implemented).
+
+**The two compute axes, quantified:**
+- sims 128→512 = **4×** on sim-scaling buckets (evaluator/tree/encode); orchestration is sim-independent.
+- model 64ch×4b→96ch×6b = **3.375×** trunk FLOPs `(6·96²)/(4·64²)` → forward + training step ×3.4;
+  ~2.25× activation memory (VRAM risk at bs256 on the 12 GB card). Worst single component (eval forward)
+  = 4×3.4 = **13.6×** raw.
+
+**Feasibility verdict (the headline math):**
+| epoch | training | self-play | eval | shuffle | total |
+|---|---:|---:|---:|---:|---:|
+| baseline 128/64×4 [P] | 479 | 373 | 173 | 116 | **1143 s (19 min)** |
+| target 512/96×6 NAIVE | 916 | 1681 | ~1200 | 116 | **~3913 s (~65 min)** |
+| target 512/96×6 OPTIMIZED | 770 | 850 | ~230 | 116 | **~1966 s (~33 min, ~1.7×)** |
+
+- **A1 (pipeline select↔eval) is the keystone** — converts self-play from serial `sum(GPU+CPU)=1681 s`
+  to `max(GPU 816, CPU 566)≈850 s`. Motivated by the measured root-saturation at ~8 roots [M].
+- After opts the **critical path is raw 96×6 GPU compute** (~1435 s of the ~1966 s epoch is the trunk
+  fwd/bwd in self-play+training). Only further lever: FP16/TensorRT + torch.compile (unmeasured).
+- **Still falls short on the 50 ms DEPLOY budget**: even with §4.2 tree parallelism (~8×), one 512-sim
+  96×6 move ≈ ~240 ms ⇒ ~5× over 50 ms. Recommendation: **decouple training-sims (512) from
+  deployment-sims** (standard AZ/KataGo) — high sims only needed at train time to generate good targets.
+
+**Mandatory set for the goal:** P0, PB/A7, A1/P5, A2+A3, §4.2 tree parallelism, M2 (cache shard) + Q3/Q5
+(concurrency prereqs). **Headline cumulative steady speedup on TODAY's workload ≈ 1.4× (1143→~810 s)
+plus −830 s on every cold/relaunch epoch [M].** Full per-item effort/deps/risk + ordered sequence in the
+plan. Nothing applied — gated on the user; this is the plan, not the implementation.
+
 ### 2026-05-29 ~12:08 — PROFILING: DEEP PASS (thoroughness-first); two self-corrections; all 4 phases measured
 **TL;DR:** Per user direction (prioritize thoroughness, don't publish until the picture is solid),
 I went well past the first cut. All four phases now have a defensible per-phase budget and a

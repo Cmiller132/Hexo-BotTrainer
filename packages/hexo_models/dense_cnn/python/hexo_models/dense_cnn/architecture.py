@@ -111,18 +111,33 @@ class GatedResBlock(nn.Module):
 
 
 class PolicyHead(nn.Module):
-    """Dense crop policy logits over crop cells."""
+    """Fully-convolutional dense crop policy head — one logit per crop cell (P7).
+
+    Replaces the old `Conv(C->2) + Linear(2*BOARD_AREA -> BOARD_AREA)` FC head.
+    The training target `policyTargetsNCHW` is already spatial `(N, 1, 41, 41)`,
+    so a fully-conv head produces it directly; flattening to `(N, BOARD_AREA)`
+    keeps the exact downstream contract (cross-entropy target shape, and the
+    flat-crop-index gather used by inference / `mcts_eval.rs`), so no loss,
+    inference, or Rust change is needed.
+
+    Why P7 (per the policy-diffuseness investigation): the FC head's giant
+    `2*BOARD_AREA -> BOARD_AREA` matrix (~5.6M params/head) is parameter-heavy and
+    translation-variant, which made it echo a diffuse prior instead of learning a
+    sharp policy. A conv head is translation-equivariant and tiny, so it can
+    represent a peaked distribution and is the head half of the coupled
+    (sims + head + trunk) fix. Uses `HexConv2d` for the 3x3 to match the trunk's
+    hex adjacency; `optimized_model1_for_inference` folds it to a plain conv.
+    """
 
     def __init__(self, channels: int) -> None:
         super().__init__()
-        self.conv = nn.Sequential(
-            nn.Conv2d(channels, 2, kernel_size=1),
-            nn.ReLU(inplace=True),
-        )
-        self.linear = nn.Linear(2 * BOARD_AREA, BOARD_AREA)
+        self.conv = HexConv2d(channels, channels, kernel_size=3, padding=1)
+        self.activation = nn.ReLU(inplace=True)
+        self.head = nn.Conv2d(channels, 1, kernel_size=1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.linear(self.conv(x).flatten(start_dim=1))
+        # (N, C, 41, 41) -> (N, 1, 41, 41) -> (N, BOARD_AREA)
+        return self.head(self.activation(self.conv(x))).flatten(start_dim=1)
 
 
 class ValueBinnedHead(nn.Module):

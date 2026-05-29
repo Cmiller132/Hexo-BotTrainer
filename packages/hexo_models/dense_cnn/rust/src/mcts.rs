@@ -23,8 +23,8 @@ use hexo_engine::PackedCoord;
 use super::constants::{MODEL1_ACTIVE_ROOT_LIMIT, MODEL1_EVAL_CACHE_MAX_STATES};
 use super::mcts_eval::{
     evaluate_model1_state_refs_cached, evaluate_model1_states_cached, new_shared_evaluation_cache,
-    new_shared_evaluation_stats, state_hash, EvaluationStats, RustEvaluationRequest,
-    SharedEvaluationCache, SharedEvaluationStats,
+    new_shared_evaluation_stats, state_hash, EvaluationStats, RustEvaluation,
+    RustEvaluationRequest, SharedEvaluationCache, SharedEvaluationStats,
 };
 use super::mcts_tree::{
     terminal_value, RootDirichletNoise, RustEdge, RustLeaf, RustNode, RustSearch,
@@ -68,7 +68,10 @@ impl Model1MctsSession {
 
     fn clear(&mut self) {
         self.searches.clear();
-        self.evaluation_cache.borrow_mut().clear();
+        self.evaluation_cache
+            .lock()
+            .expect("evaluation cache mutex poisoned")
+            .clear();
     }
 
     fn discard(&mut self, game_key: u64) {
@@ -237,8 +240,15 @@ impl Model1MctsSession {
             self.cache_max_states,
             virtual_loss,
         )?;
-        let cache_len = self.evaluation_cache.borrow().len();
-        let evaluation_stats = evaluation_stats.borrow().clone();
+        let cache_len = self
+            .evaluation_cache
+            .lock()
+            .expect("evaluation cache mutex poisoned")
+            .len();
+        let evaluation_stats = evaluation_stats
+            .lock()
+            .expect("evaluation stats mutex poisoned")
+            .clone();
         let batch_diagnostics = build_batch_diagnostics(
             py,
             &searches,
@@ -297,107 +307,233 @@ fn run_searches_to_targets(
     cache_max_states: usize,
     virtual_loss: f32,
 ) -> PyResult<()> {
-    // Each outer pass gathers several pending leaves per root, evaluates the
-    // unique uncached states as one Python/Torch batch, and then backs values
-    // into independent root trees. Root selection is independent per tree, so
-    // it runs across CPU workers while the shared cache remains only at eval
-    // boundaries.
-    while searches.iter().any(RustSearch::needs_visits) {
-        let work_results: Vec<PyResult<RootSelectionWork>> = searches
-            .par_iter_mut()
-            .enumerate()
-            .map(|(root_index, search)| {
-                let mut leaves = Vec::new();
-                let mut made_progress = false;
-                if !search.needs_visits() {
-                    return Ok(RootSelectionWork {
-                        leaves,
-                        made_progress,
-                    });
-                }
-                let budget = leaf_batch_per_root.min(search.remaining_visits());
-                for _ in 0..budget {
-                    let selected = search.select_pending_leaf(c_puct)?;
-                    let Some(selected) = selected else {
-                        break;
-                    };
-                    search.apply_virtual_visit(&selected.path, virtual_loss);
-                    made_progress = true;
+    // A1 (select↔eval pipeline). The serial form selected a leaf batch, ran one
+    // Python/Torch forward while every CPU worker sat idle, then backed up — so
+    // GPU duty was ~29%. Here we overlap the two halves with a two-stage software
+    // pipeline: the *current* batch is evaluated on this GIL-holding thread while
+    // the *next* batch is selected on a scoped worker thread (which itself fans
+    // out across rayon). Virtual loss (already applied at selection) is the sync
+    // primitive — the next batch sees the in-flight leaves as pending and avoids
+    // them, exactly as virtual-loss parallel MCTS intends.
+    //
+    // Tree-access discipline (no lock needed): during the scope ONLY the select
+    // thread touches the trees; the eval thread reads only the owned leaf batch +
+    // the (thread-safe) cache. Backup runs after the scope joins, with exclusive
+    // access on this thread. So the trees have a single mutator at every instant.
+    //
+    // This is deterministic for a fixed seed but NOT bit-identical to the serial
+    // barrier: the next batch is selected before the current batch is backed up,
+    // extending the virtual-loss window by one batch. That is the intended,
+    // search-quality-neutral behavior of pipelined MCTS.
+    //
+    // Termination is keyed off `needs_visits` (visit budget counts virtual visits
+    // at selection time), NOT off the prefetch making progress. The prefetch can
+    // legitimately come up empty on a *narrow* tree — every selectable path is
+    // already in-flight (pending) for the batch currently being evaluated, so the
+    // next batch is blocked until that batch is backed up. When that happens we
+    // fall back to a synchronous select after backup so the search always advances
+    // to its visit target (overlap is best-effort, correctness is not).
+    // Optional diagnostics (HEXO_MCTS_TRACE): per-pass eval vs select vs scope
+    // wall, to confirm the overlap is real and size the overlappable fraction.
+    let trace = std::env::var("HEXO_MCTS_TRACE").is_ok();
+    let mut tr_passes = 0u64;
+    let mut tr_leaves = 0u64;
+    let mut tr_eval = 0f64;
+    let mut tr_select = 0f64;
+    let mut tr_scope = 0f64;
+    let mut tr_backup = 0f64;
 
-                    if let Some(outcome) = selected.terminal {
-                        let leaf_player = selected.state.current_player();
-                        let leaf_value = terminal_value(outcome, leaf_player);
-                        search.backup_virtual(
-                            &selected.path,
-                            leaf_player,
-                            leaf_value,
-                            virtual_loss,
-                        );
-                    } else if let Some(node_id) = selected.existing_node {
-                        let node = &search.nodes[node_id];
-                        search.backup_virtual(
-                            &selected.path,
-                            node.player,
-                            node.value(),
-                            virtual_loss,
-                        );
-                    } else {
-                        search.mark_pending(selected.parent_node, selected.edge_index, 1);
-                        leaves.push(RustLeaf {
-                            root_index,
-                            parent_node: selected.parent_node,
-                            edge_index: selected.edge_index,
-                            path: selected.path,
-                            state: selected.state,
-                            state_hash: selected.state_hash,
-                        });
-                    }
+    let (mut pending_leaves, _primed_progress) =
+        select_leaf_batch(searches, c_puct, leaf_batch_per_root, virtual_loss)?;
+
+    loop {
+        if pending_leaves.is_empty() {
+            if !searches.iter().any(RustSearch::needs_visits) {
+                break;
+            }
+            // Nothing in flight to overlap with; select synchronously to advance.
+            let (leaves, made_progress) =
+                select_leaf_batch(searches, c_puct, leaf_batch_per_root, virtual_loss)?;
+            if leaves.is_empty() {
+                // No leaf needs evaluation. Either inline (terminal/existing)
+                // backups advanced the search and we retry, or nothing at all
+                // could be selected (every needs-visits root is structurally
+                // blocked) — break rather than spin.
+                if !made_progress {
+                    break;
                 }
-                Ok(RootSelectionWork {
+                continue;
+            }
+            pending_leaves = leaves;
+        }
+
+        // Overlap: evaluate the in-flight batch on this GIL thread while the next
+        // batch is selected on a worker thread. Prefetch only if visits remain;
+        // each root self-limits to its remaining budget inside `select_leaf_batch`.
+        let prefetch_next = searches.iter().any(RustSearch::needs_visits);
+        let scope_start = std::time::Instant::now();
+        let (evaluations, next_leaves, eval_s, select_s) = std::thread::scope(
+            |scope| -> PyResult<(Vec<Arc<RustEvaluation>>, Vec<RustLeaf>, f64, f64)> {
+                let select_handle = if prefetch_next {
+                    let select_searches: &mut [RustSearch] = &mut *searches;
+                    Some(scope.spawn(move || {
+                        let started = std::time::Instant::now();
+                        let result =
+                            select_leaf_batch(select_searches, c_puct, leaf_batch_per_root, virtual_loss);
+                        (result, started.elapsed().as_secs_f64())
+                    }))
+                } else {
+                    None
+                };
+
+                // Building the requests here keeps their borrow of `pending_leaves`
+                // local to the scope, so it is free to move into backup after.
+                let leaf_requests: Vec<_> = pending_leaves
+                    .iter()
+                    .map(|leaf| RustEvaluationRequest {
+                        state: &leaf.state,
+                        state_hash: leaf.state_hash,
+                    })
+                    .collect();
+                let eval_start = std::time::Instant::now();
+                let evaluations = evaluate_model1_state_refs_cached(
+                    py,
+                    evaluator,
+                    &leaf_requests,
+                    evaluation_cache,
+                    Some(evaluation_stats),
+                    cache_max_states,
+                )?;
+                let eval_s = eval_start.elapsed().as_secs_f64();
+
+                let (next_leaves, select_s) = match select_handle {
+                    Some(handle) => {
+                        let (result, select_s) =
+                            handle.join().expect("mcts select worker panicked");
+                        (result?.0, select_s)
+                    }
+                    None => (Vec::new(), 0.0),
+                };
+                Ok((evaluations, next_leaves, eval_s, select_s))
+            },
+        )?;
+
+        if trace {
+            tr_passes += 1;
+            tr_leaves += pending_leaves.len() as u64;
+            tr_eval += eval_s;
+            tr_select += select_s;
+            tr_scope += scope_start.elapsed().as_secs_f64();
+        }
+
+        // Backup the batch we just evaluated (exclusive tree access on this thread).
+        let backup_start = std::time::Instant::now();
+        apply_eval_backups(searches, pending_leaves, &evaluations, virtual_loss)?;
+        if trace {
+            tr_backup += backup_start.elapsed().as_secs_f64();
+        }
+        pending_leaves = next_leaves;
+    }
+
+    if trace {
+        eprintln!(
+            "[mcts-trace] passes={} leaves={} eval={:.1}ms select={:.1}ms scope={:.1}ms backup={:.1}ms \
+             overlap_saved~={:.1}ms (eval+select-scope)",
+            tr_passes,
+            tr_leaves,
+            tr_eval * 1e3,
+            tr_select * 1e3,
+            tr_scope * 1e3,
+            tr_backup * 1e3,
+            (tr_eval + tr_select - tr_scope) * 1e3,
+        );
+    }
+    Ok(())
+}
+
+// Select up to one virtual batch of leaves across every root that still needs
+// visits. Pure Rust (no Python, no cache): terminal and already-expanded leaves
+// are backed up inline; only leaves that still need a network evaluation are
+// returned. `made_progress` is true if any root selected at least one leaf.
+fn select_leaf_batch(
+    searches: &mut [RustSearch],
+    c_puct: f32,
+    leaf_batch_per_root: u32,
+    virtual_loss: f32,
+) -> PyResult<(Vec<RustLeaf>, bool)> {
+    let work_results: Vec<PyResult<RootSelectionWork>> = searches
+        .par_iter_mut()
+        .enumerate()
+        .map(|(root_index, search)| {
+            let mut leaves = Vec::new();
+            let mut made_progress = false;
+            if !search.needs_visits() {
+                return Ok(RootSelectionWork {
                     leaves,
                     made_progress,
-                })
-            })
-            .collect();
-        let mut leaves = Vec::new();
-        let mut made_progress = false;
-        for work in work_results {
-            let work = work?;
-            made_progress |= work.made_progress;
-            leaves.extend(work.leaves);
-        }
-
-        if !leaves.is_empty() {
-            let leaf_requests: Vec<_> = leaves
-                .iter()
-                .map(|leaf| RustEvaluationRequest {
-                    state: &leaf.state,
-                    state_hash: leaf.state_hash,
-                })
-                .collect();
-            let evaluations = evaluate_model1_state_refs_cached(
-                py,
-                evaluator,
-                &leaf_requests,
-                evaluation_cache,
-                Some(evaluation_stats),
-                cache_max_states,
-            )?;
-            for (leaf, evaluation) in leaves.into_iter().zip(evaluations.iter()) {
-                let search = &mut searches[leaf.root_index];
-                let child_id =
-                    search.add_node_from_eval(&leaf.state, leaf.state_hash, Arc::clone(evaluation))?;
-                search.nodes[leaf.parent_node].edges[leaf.edge_index].child = Some(child_id);
-                search.mark_pending(leaf.parent_node, leaf.edge_index, -1);
-                let child_player = search.nodes[child_id].player;
-                let child_value = search.nodes[child_id].value();
-                search.backup_virtual(&leaf.path, child_player, child_value, virtual_loss);
+                });
             }
-        }
+            let budget = leaf_batch_per_root.min(search.remaining_visits());
+            for _ in 0..budget {
+                let selected = search.select_pending_leaf(c_puct)?;
+                let Some(selected) = selected else {
+                    break;
+                };
+                search.apply_virtual_visit(&selected.path, virtual_loss);
+                made_progress = true;
 
-        if !made_progress {
-            break;
-        }
+                if let Some(outcome) = selected.terminal {
+                    let leaf_player = selected.state.current_player();
+                    let leaf_value = terminal_value(outcome, leaf_player);
+                    search.backup_virtual(&selected.path, leaf_player, leaf_value, virtual_loss);
+                } else if let Some(node_id) = selected.existing_node {
+                    let node = &search.nodes[node_id];
+                    search.backup_virtual(&selected.path, node.player, node.value(), virtual_loss);
+                } else {
+                    search.mark_pending(selected.parent_node, selected.edge_index, 1);
+                    leaves.push(RustLeaf {
+                        root_index,
+                        parent_node: selected.parent_node,
+                        edge_index: selected.edge_index,
+                        path: selected.path,
+                        state: selected.state,
+                        state_hash: selected.state_hash,
+                    });
+                }
+            }
+            Ok(RootSelectionWork {
+                leaves,
+                made_progress,
+            })
+        })
+        .collect();
+    let mut leaves = Vec::new();
+    let mut made_progress = false;
+    for work in work_results {
+        let work = work?;
+        made_progress |= work.made_progress;
+        leaves.extend(work.leaves);
+    }
+    Ok((leaves, made_progress))
+}
+
+// Attach the evaluated children to their parent edges and back up their values.
+// Exclusive `&mut searches` access — called only after the select scope joins.
+fn apply_eval_backups(
+    searches: &mut [RustSearch],
+    leaves: Vec<RustLeaf>,
+    evaluations: &[Arc<RustEvaluation>],
+    virtual_loss: f32,
+) -> PyResult<()> {
+    for (leaf, evaluation) in leaves.into_iter().zip(evaluations.iter()) {
+        let search = &mut searches[leaf.root_index];
+        let child_id =
+            search.add_node_from_eval(&leaf.state, leaf.state_hash, Arc::clone(evaluation))?;
+        search.nodes[leaf.parent_node].edges[leaf.edge_index].child = Some(child_id);
+        search.mark_pending(leaf.parent_node, leaf.edge_index, -1);
+        let child_player = search.nodes[child_id].player;
+        let child_value = search.nodes[child_id].value();
+        search.backup_virtual(&leaf.path, child_player, child_value, virtual_loss);
     }
     Ok(())
 }
@@ -843,6 +979,7 @@ fn build_batch_diagnostics<'py>(
     eval.set_item("cache_size_peak", evaluation.cache_size_peak.max(cache_len))?;
     eval.set_item("encoding_seconds", evaluation.encoding_seconds)?;
     eval.set_item("evaluator_seconds", evaluation.evaluator_seconds)?;
+    eval.set_item("parse_seconds", evaluation.parse_seconds)?;
 
     let diagnostics = PyDict::new(py);
     diagnostics.set_item("tree", tree)?;

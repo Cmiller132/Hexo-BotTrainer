@@ -73,7 +73,17 @@ virtual_loss = 1.0
 widening_policy_mass = 0.95
 widening_max_children = 32
 widening_min_children = 2
-mcts_session_cache_max_states = 262144
+# P8 (2026-05-29): lowered 262144->131072. The eval cache fills ~190k/262k
+# within 24 moves and inserts == unique states (no recompute on eviction within
+# an epoch), so halving the cap is throughput-neutral and frees ~340 MB.
+# CORRECTION (audit): this is HOST RAM, not VRAM -- the cache is an
+# Rc<RefCell<HashMap>> of Arc<RustEvaluation> priors on the CPU, so it does
+# nothing for the 12 GB VRAM/activation risk (handled separately by calibration's
+# auto-OOM fallback). Its value is host-RAM headroom to later re-widen the replay
+# window (shuffle_keep_target_rows was cut 600k->300k for RAM). That re-widen is a
+# SEPARATE, higher-risk change (it re-grows the shuffle peak that crash-looped
+# epoch 16) and is NOT applied here.
+mcts_session_cache_max_states = 131072
 mcts_active_root_limit = 256
 max_actions = 1024
 temperature = 1.0

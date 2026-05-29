@@ -225,16 +225,17 @@ class DenseCNNTrainer:
             if trained_rows >= target_rows:
                 break
             with np.load(file_path) as data:
-                rows = int(data[INPUT_KEY].shape[0])
-                offset = 0
-                while offset < rows and trained_rows < target_rows:
-                    take = min(batch_size, rows - offset, target_rows - trained_rows)
-                    batch = _batch_from_npz(data, offset, offset + take, self.config.architecture.short_term_value_horizons)
-                    offset += take
-                    trained_rows += take
-                    loss_value = self._optimizer_step(batch)
-                    total_loss += loss_value
-                    steps += 1
+                arrays = _materialize_npz(data)
+            rows = int(arrays[INPUT_KEY].shape[0])
+            offset = 0
+            while offset < rows and trained_rows < target_rows:
+                take = min(batch_size, rows - offset, target_rows - trained_rows)
+                batch = _batch_from_npz(arrays, offset, offset + take, self.config.architecture.short_term_value_horizons)
+                offset += take
+                trained_rows += take
+                loss_value = self._optimizer_step(batch)
+                total_loss += loss_value
+                steps += 1
 
         if steps <= 0:
             return {
@@ -312,31 +313,32 @@ class DenseCNNTrainer:
             if rows_seen >= max_rows:
                 break
             with np.load(file_path) as data:
-                rows = int(data[INPUT_KEY].shape[0])
-                offset = 0
-                while offset < rows and rows_seen < max_rows:
-                    take = min(batch_size, rows - offset, max_rows - rows_seen)
-                    batch = _batch_from_npz(data, offset, offset + take, self.config.architecture.short_term_value_horizons)
-                    offset += take
-                    rows_seen += take
-                    inputs = batch.pop("input")
-                    if self.device.type == "cuda" and inputs.ndim == 4:
-                        inputs = inputs.to(self.device, non_blocking=True, memory_format=torch.channels_last)
-                    else:
-                        inputs = inputs.to(self.device, non_blocking=True)
-                    batch = {key: value.to(self.device, non_blocking=True) for key, value in batch.items()}
-                    with torch.autocast(device_type=self.device.type, enabled=self.config.training.amp and self.device.type == "cuda"):
-                        outputs = self.model(inputs)
-                        loss, _components_map = model1_loss(
-                            outputs,
-                            batch,
-                            policy_weight=self.config.training.policy_weight,
-                            value_weight=self.config.training.value_weight,
-                            opp_policy_weight=self.config.training.opp_policy_weight,
-                            short_term_value_weight=self.config.training.short_term_value_weight,
-                        )
-                    total_loss += float(loss.detach().cpu().item())
-                    steps += 1
+                arrays = _materialize_npz(data)
+            rows = int(arrays[INPUT_KEY].shape[0])
+            offset = 0
+            while offset < rows and rows_seen < max_rows:
+                take = min(batch_size, rows - offset, max_rows - rows_seen)
+                batch = _batch_from_npz(arrays, offset, offset + take, self.config.architecture.short_term_value_horizons)
+                offset += take
+                rows_seen += take
+                inputs = batch.pop("input")
+                if self.device.type == "cuda" and inputs.ndim == 4:
+                    inputs = inputs.to(self.device, non_blocking=True, memory_format=torch.channels_last)
+                else:
+                    inputs = inputs.to(self.device, non_blocking=True)
+                batch = {key: value.to(self.device, non_blocking=True) for key, value in batch.items()}
+                with torch.autocast(device_type=self.device.type, enabled=self.config.training.amp and self.device.type == "cuda"):
+                    outputs = self.model(inputs)
+                    loss, _components_map = model1_loss(
+                        outputs,
+                        batch,
+                        policy_weight=self.config.training.policy_weight,
+                        value_weight=self.config.training.value_weight,
+                        opp_policy_weight=self.config.training.opp_policy_weight,
+                        short_term_value_weight=self.config.training.short_term_value_weight,
+                    )
+                total_loss += float(loss.detach().cpu().item())
+                steps += 1
         if was_training:
             self.model.train()
         if steps <= 0:
@@ -410,6 +412,32 @@ class DenseCNNTrainer:
 
     def _shuffled_root(self, ctx: Any) -> Any:
         return ctx.output_dir / "shuffleddata"
+
+
+# Keys consumed by `_batch_from_npz`; materialized once per shard for P0.
+_NPZ_BATCH_KEYS: tuple[str, ...] = (
+    INPUT_KEY,
+    POLICY_KEY,
+    OPP_POLICY_KEY,
+    VALUE_KEY,
+    SHORT_TERM_VALUE_KEY,
+    SHORT_TERM_VALUE_MASK_KEY,
+)
+
+
+def _materialize_npz(data: Any) -> dict[str, np.ndarray]:
+    """Decompress each needed NPZ array exactly once (P0).
+
+    `numpy.lib.npyio.NpzFile.__getitem__` re-reads and re-decompresses the whole
+    array on every access, so slicing ``data[KEY][start:stop]`` per 256-row batch
+    paid the full-shard decompress tax (inputNCHW is ~694 MB uncompressed, ~31x
+    compressed) once per batch. Reading each array a single time here and slicing
+    the resident arrays removes that tax; the returned data is byte-identical to
+    the per-batch path, so training numerics are unchanged. One decompressed shard
+    (~694 MB) is resident at a time — bounded and well within budget.
+    """
+
+    return {key: data[key] for key in _NPZ_BATCH_KEYS}
 
 
 def _batch_from_npz(data: Any, start: int, stop: int, horizons: tuple[int, ...]) -> dict[str, torch.Tensor]:
