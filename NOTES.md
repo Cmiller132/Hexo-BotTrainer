@@ -92,6 +92,19 @@ develop`).
 
 New entries on top. Written for the next watcher run. NOTE: the scheduled-task prompt
 
+### 2026-05-29 ~18:5x EDT — TRT NaN ROOT-CAUSED + FIXED (was a runner stream race, NOT fp16 overflow)
+
+The earlier "TRT FP16 NaN" was a **stream-ordering race in my TRT runner** (input
+copied on the default stream; TRT enqueued on a separate stream w/o cross-stream
+sync → read-before-ready → garbage/NaN), NOT an fp16 overflow (pinpoint: pure-fp16
+torch max activation ~47 vs fp16 max 65504, no NaN). Fixed: run copy+enqueue+read
+on one stream + zeroed output buffers (committed 6b84075). With the fix, **FP16 TRT
+is NaN-free over 80×512-sim searches**: forward **2.35–2.67× over torch FP16**
+(bs128 7043→16567, bs256 6440→17195 fwd/s), move-agreement vs torch **93.75%**
+(6.25% flip; torch-vs-torch is 100% deterministic here so the flip is purely TRT
+fp16 numerics), value decoded-err ~5e-5. BF16 comparison running. Then pick winner
++ decide whether to enable `inference_use_tensorrt`. Run still DOWN by design.
+
 ### 2026-05-29 ~18:3x EDT — VALIDATION PHASE (bench/inference-backends-wsl); games_per_epoch=512; TRT strength test running
 
 Config now `games_per_epoch = 512` (middle ground, was 1024). Validating before any

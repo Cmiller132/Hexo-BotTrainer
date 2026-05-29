@@ -171,6 +171,35 @@ realizes the body rate across the whole epoch.
   on time. Bumped `MaxNoProgressRelaunches` 3→5 for crash-resume margin on the
   longer epoch.
 
+## 7c. TRT NaN fixed — FP16 vs BF16 vs torch comparison (the real verdict)
+**Root cause of the earlier NaN: a stream-ordering race in the TRT runner**, NOT
+an fp16 overflow. Pinpoint (tv2): pure-fp16 torch on 256 real positions had max
+activation ~47 (fp16 max 65504), zero NaN. The runner prepped the input on the
+default stream but enqueued TRT on a *separate* stream with no cross-stream sync
+→ TRT read the input before the copy finished → garbage/NaN. Fixed: one-stream
+copy+enqueue+read, zeroed output buffers. (So mixed-precision FP16 is unnecessary
+— there is no overflow to protect.)
+
+Comparison (forward fwd/s = CUDA-event timed; move-agreement / flip over 80 real
+512-sim searches, torch-vs-torch was **100% deterministic** so flips are purely
+the evaluator's numerics):
+
+| backend | fwd/s bs128 | fwd/s bs256 | vs torch | NaN over 512-sim search | move-agree vs torch | decoded-value err |
+|---|---|---|---|---|---|---|
+| torch FP16 (baseline) | 7043 | 6440 | 1.00× | none | 100% (ref) | 0 |
+| **TRT FP16** | **16567** | **17195** | **2.35–2.67×** | **none** | **93.75%** (6.25% flip) | ~5e-5 |
+| TRT BF16 | 10405 | 10629 | 1.48–1.65× | none | 83.75% (16.25% flip) | — |
+
+**BF16 loses on both axes** (slower AND 2.6× more move-flips — fewer mantissa
+bits). **TRT FP16 is the winner**: fastest and closest to torch. End-to-end
+self-play (estimated, Amdahl on the ~70% forward fraction): ~1.7× → **~63 search
+pos/s** at 256 concurrency (baseline ~38).
+
+**Strength gate (SealBot best-50ms A/B, TRT vs torch, paired seeds):** _TBD —
+running (24 games/arm). Move-agreement 93.75% + 100% deterministic torch baseline
+predicts near-identical win-rates; the A/B confirms or refutes a strength
+regression._ Verdict + enable/keep-off decision follow the A/B.
+
 ## 8. Chosen combination + adoption (quality-safe)
 **Adopted:** TensorRT FP16 (correctness-gated + torch fallback) + rolling
 replenishment (`games_per_epoch=1024 > active_games=256`) + bucketing (mult-16).
