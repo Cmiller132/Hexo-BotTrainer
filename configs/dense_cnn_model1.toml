@@ -72,7 +72,7 @@ inference_batch_candidates = [128, 256, 512, 1024]
 selfplay_batch_candidates = [1024]
 training_batch_candidates = [64, 128, 192, 256]
 mcts_virtual_batch_candidates = [4]
-selfplay_probe_positions = 65536
+selfplay_probe_positions = 8192
 probe_batches = 1
 
 [run]
@@ -89,7 +89,7 @@ update_checkpoint_pointer = true
 checkpoint_pointer = "../data/checkpoints/dense_cnn_model1_latest.txt"
 
 [train]
-passes_per_epoch = 8
+passes_per_epoch = 1
 
 [checkpoint]
 resume_from = "../data/checkpoints/dense_cnn_model1_latest.txt"

@@ -17,6 +17,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use hexo_engine::{
     apply_placement, unpack_coord, GameOutcome, HexCoord, HexoState as RustHexoState, PackedCoord,
@@ -98,6 +99,19 @@ pub(crate) struct Widening {
 }
 
 #[derive(Clone, Debug)]
+pub(crate) enum NodePriors {
+    /// Interior nodes share the eval cache's prior vector by reference (no
+    /// per-node copy). The cache priors are sorted DESCENDING and normalized, and
+    /// edges are materialized strictly highest-first, so the next unexpanded
+    /// candidate is always `priors[edges.len()]`.
+    Shared(Arc<RustEvaluation>),
+    /// Root nodes only: an owned, mutable candidate list (root-policy temperature
+    /// + Dirichlet noise mutate priors). Sorted ASCENDING; the highest prior is
+    /// popped from the back as edges are materialized.
+    Owned(Vec<RustPriorCandidate>),
+}
+
+#[derive(Clone, Debug)]
 pub(crate) struct RustNode {
     pub(crate) state_hash: StateHash,
     pub(crate) player: Player,
@@ -107,7 +121,7 @@ pub(crate) struct RustNode {
     pub(crate) edges: Vec<RustEdge>,
     // KataGo-style staged children: keep legal policy candidates compact and
     // materialize an edge only when PUCT actually selects that move.
-    pub(crate) unexpanded_priors: Vec<RustPriorCandidate>,
+    pub(crate) priors: NodePriors,
     // Policy-nucleus widening cap: the most edges this node may ever materialize,
     // computed once from the prior distribution at expansion time.
     pub(crate) max_eligible_children: usize,
@@ -116,9 +130,22 @@ pub(crate) struct RustNode {
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct RustSearchDiagnostics {
     pub(crate) node_count: usize,
+    // `hidden_prior_*` count only OWNED (root) candidate lists, which are the
+    // sole per-node retained prior allocations. Interior nodes share their priors
+    // by reference with the eval cache and retain no separate copy.
     pub(crate) active_edge_count: usize,
+    pub(crate) hidden_prior_count: usize,
     pub(crate) root_active_edges: usize,
+    pub(crate) root_hidden_priors: usize,
     pub(crate) max_active_edges_per_node: usize,
+    pub(crate) max_hidden_priors_per_node: usize,
+    pub(crate) active_edge_bytes: usize,
+    pub(crate) hidden_prior_bytes: usize,
+    // Nodes that reference cache priors by `Rc`, and the total candidate slots so
+    // referenced. These are NOT retained per node (the bytes live once in the
+    // eval cache), so they are reported separately from `hidden_prior_*`.
+    pub(crate) shared_prior_nodes: usize,
+    pub(crate) shared_prior_refs: usize,
 }
 
 impl RustNode {
@@ -131,7 +158,63 @@ impl RustNode {
     }
 
     fn has_actions(&self) -> bool {
-        !self.edges.is_empty() || !self.unexpanded_priors.is_empty()
+        !self.edges.is_empty() || self.remaining_prior_count() > 0
+    }
+
+    /// Count of in-crop legal priors not yet materialized into edges.
+    pub(crate) fn remaining_prior_count(&self) -> usize {
+        match &self.priors {
+            NodePriors::Shared(eval) => eval.priors.len().saturating_sub(self.edges.len()),
+            NodePriors::Owned(unexpanded) => unexpanded.len(),
+        }
+    }
+
+    /// The next staged candidate (highest unmaterialized prior) or `None`.
+    fn peek_next_candidate(&self) -> Option<(PackedCoord, f32)> {
+        match &self.priors {
+            NodePriors::Shared(eval) => eval.priors.get(self.edges.len()).copied(),
+            NodePriors::Owned(unexpanded) => unexpanded
+                .last()
+                .map(|candidate| (candidate.action_id, candidate.prior)),
+        }
+    }
+
+    /// Pop the next staged candidate into a fresh edge. Callers must check
+    /// `peek_next_candidate` first; the cursor advances by pushing onto `edges`
+    /// for the shared variant, so this must be called before the edge is pushed.
+    fn materialize_next_candidate(&mut self) -> RustEdge {
+        match &mut self.priors {
+            NodePriors::Owned(unexpanded) => unexpanded
+                .pop()
+                .expect("last prior candidate exists")
+                .into_edge(),
+            NodePriors::Shared(eval) => {
+                let (action_id, prior) = eval.priors[self.edges.len()];
+                RustEdge {
+                    action_id,
+                    action: unpack_coord(action_id),
+                    prior,
+                    visits: 0,
+                    value_sum: 0.0,
+                    pending: 0,
+                    child: None,
+                }
+            }
+        }
+    }
+
+    /// The unmaterialized priors as `(action_id, prior)` pairs, for root export.
+    pub(crate) fn remaining_priors(&self) -> Vec<(PackedCoord, f32)> {
+        match &self.priors {
+            NodePriors::Shared(eval) => eval.priors[self.edges.len().min(eval.priors.len())..]
+                .iter()
+                .copied()
+                .collect(),
+            NodePriors::Owned(unexpanded) => unexpanded
+                .iter()
+                .map(|candidate| (candidate.action_id, candidate.prior))
+                .collect(),
+        }
     }
 }
 
@@ -182,7 +265,7 @@ impl RustSearch {
         // materialized lazily by `select_or_materialize_edge` according to PUCT
         // score. Root-policy temperature and Dirichlet noise apply at the root.
         let root_hash = state_hash(&root_state);
-        let root_node = node_from_evaluation(
+        let root_node = owned_root_from_evaluation(
             root_hash,
             &root_state,
             evaluation,
@@ -206,9 +289,36 @@ impl RustSearch {
         })
     }
 
-    pub(crate) fn apply_root_dirichlet_noise(&mut self, noise: RootDirichletNoise) {
+    /// Promote a reused (interior, `Shared`) root to an owned, mutable candidate
+    /// list so root-policy noise can rewrite its priors. The not-yet-materialized
+    /// tail of the shared descending priors is rebuilt ascending — exactly the
+    /// layout a fresh owned root would have for those same candidates. Already
+    /// materialized edges (and their visit stats) are untouched.
+    fn ensure_root_owned(&mut self) {
         let root = &mut self.nodes[0];
-        let count = root.edges.len() + root.unexpanded_priors.len();
+        let owned = match &root.priors {
+            NodePriors::Owned(_) => return,
+            NodePriors::Shared(eval) => {
+                let start = root.edges.len().min(eval.priors.len());
+                let mut unexpanded: Vec<RustPriorCandidate> = eval.priors[start..]
+                    .iter()
+                    .map(|&(action_id, prior)| RustPriorCandidate { action_id, prior })
+                    .collect();
+                unexpanded.reverse();
+                unexpanded.shrink_to_fit();
+                unexpanded
+            }
+        };
+        root.priors = NodePriors::Owned(owned);
+    }
+
+    pub(crate) fn apply_root_dirichlet_noise(&mut self, noise: RootDirichletNoise) {
+        self.ensure_root_owned();
+        let root = &mut self.nodes[0];
+        let NodePriors::Owned(unexpanded) = &mut root.priors else {
+            return;
+        };
+        let count = root.edges.len() + unexpanded.len();
         if count == 0 || noise.total_alpha <= 0.0 || noise.fraction <= 0.0 {
             return;
         }
@@ -217,11 +327,7 @@ impl RustSearch {
             .edges
             .iter()
             .map(|edge| edge.prior)
-            .chain(
-                root.unexpanded_priors
-                    .iter()
-                    .map(|candidate| candidate.prior),
-            )
+            .chain(unexpanded.iter().map(|candidate| candidate.prior))
             .filter(|prior| prior.is_finite())
             .sum();
         let fraction = noise.fraction;
@@ -231,13 +337,13 @@ impl RustSearch {
                 (1.0 - fraction) * edge.prior + fraction * samples[sample_index] * visible_total;
             sample_index += 1;
         }
-        for candidate in &mut root.unexpanded_priors {
+        for candidate in unexpanded.iter_mut() {
             candidate.prior = (1.0 - fraction) * candidate.prior
                 + fraction * samples[sample_index] * visible_total;
             sample_index += 1;
         }
-        root.unexpanded_priors.sort_by(compare_prior_candidate);
-        root.unexpanded_priors.reverse();
+        unexpanded.sort_by(compare_prior_candidate);
+        unexpanded.reverse();
     }
 
     pub(crate) fn root_edges_empty(&self) -> bool {
@@ -269,55 +375,17 @@ impl RustSearch {
             .collect()
     }
 
-    pub(crate) fn apply_root_dirichlet_noise(&mut self, alpha: f32, fraction: f32, seed: u64) {
-        if !alpha.is_finite() || alpha <= 0.0 || !fraction.is_finite() || fraction <= 0.0 {
-            return;
-        }
-        let fraction = fraction.clamp(0.0, 1.0);
-        let root = &mut self.nodes[0];
-        let count = root.edges.len() + root.unexpanded_priors.len();
-        if count < 2 {
-            return;
-        }
-
-        let mut noise = Vec::with_capacity(count);
-        let mut noise_total = 0.0f64;
-        for index in 0..count {
-            let sample = gamma_sample(alpha as f64, seed.wrapping_add(index as u64));
-            noise_total += sample;
-            noise.push(sample);
-        }
-        if !noise_total.is_finite() || noise_total <= 0.0 {
-            return;
-        }
-
-        let keep = 1.0 - fraction;
-        let mut index = 0usize;
-        for edge in &mut root.edges {
-            let eta = (noise[index] / noise_total) as f32;
-            edge.prior = (keep * edge.prior + fraction * eta).max(1.0e-8);
-            index += 1;
-        }
-        for prior in &mut root.unexpanded_priors {
-            let eta = (noise[index] / noise_total) as f32;
-            prior.prior = (keep * prior.prior + fraction * eta).max(1.0e-8);
-            index += 1;
-        }
-        root.unexpanded_priors.sort_by(compare_prior_candidate);
-        root.unexpanded_priors.reverse();
-    }
-
     pub(crate) fn add_node_from_eval(
         &mut self,
         state: &RustHexoState,
         hash: StateHash,
-        evaluation: &RustEvaluation,
+        evaluation: Arc<RustEvaluation>,
     ) -> PyResult<usize> {
         if let Some(existing) = self.node_table.get(&hash).copied() {
             return Ok(existing);
         }
         let id = self.nodes.len();
-        let node = node_from_evaluation(hash, state, evaluation, None, None, self.widening)?;
+        let node = shared_from_cache(hash, state, evaluation, self.widening);
         self.nodes.push(node);
         self.node_table.insert(hash, id);
         Ok(id)
@@ -432,20 +500,17 @@ impl RustSearch {
         let can_widen =
             self.nodes[node_id].edges.len() < self.nodes[node_id].max_eligible_children;
         if can_widen {
-            if let Some(candidate) = self.nodes[node_id].unexpanded_priors.last() {
-                let score = candidate.prior * exploration_scale;
-                let candidate_key = (usize::MAX, score, 0, candidate.action_id);
+            if let Some((action_id, prior)) = self.nodes[node_id].peek_next_candidate() {
+                let score = prior * exploration_scale;
+                let candidate_key = (usize::MAX, score, 0, action_id);
                 let replace = match best {
                     Some(current) => compare_edge_score(candidate_key, current) == Ordering::Greater,
                     None => true,
                 };
                 if replace {
-                    let candidate = self.nodes[node_id]
-                        .unexpanded_priors
-                        .pop()
-                        .expect("last prior candidate exists");
                     let edge_index = self.nodes[node_id].edges.len();
-                    self.nodes[node_id].edges.push(candidate.into_edge());
+                    let edge = self.nodes[node_id].materialize_next_candidate();
+                    self.nodes[node_id].edges.push(edge);
                     self.record_materialized_edge(node_id);
                     return Some(edge_index);
                 }
@@ -504,11 +569,38 @@ impl RustSearch {
     }
 
     pub(crate) fn diagnostics(&self) -> RustSearchDiagnostics {
+        let mut hidden_prior_count = 0usize;
+        let mut max_hidden_priors_per_node = 0usize;
+        let mut shared_prior_nodes = 0usize;
+        let mut shared_prior_refs = 0usize;
+        for node in &self.nodes {
+            match &node.priors {
+                NodePriors::Owned(unexpanded) => {
+                    hidden_prior_count += unexpanded.len();
+                    max_hidden_priors_per_node = max_hidden_priors_per_node.max(unexpanded.len());
+                }
+                NodePriors::Shared(_) => {
+                    shared_prior_nodes += 1;
+                    shared_prior_refs += node.remaining_prior_count();
+                }
+            }
+        }
         RustSearchDiagnostics {
             node_count: self.nodes.len(),
             active_edge_count: self.active_edge_count,
+            hidden_prior_count,
             root_active_edges: self.nodes.first().map(|node| node.edges.len()).unwrap_or(0),
+            root_hidden_priors: self
+                .nodes
+                .first()
+                .map(|node| node.remaining_prior_count())
+                .unwrap_or(0),
             max_active_edges_per_node: self.max_active_edges_per_node,
+            max_hidden_priors_per_node,
+            active_edge_bytes: self.active_edge_count * std::mem::size_of::<RustEdge>(),
+            hidden_prior_bytes: hidden_prior_count * std::mem::size_of::<RustPriorCandidate>(),
+            shared_prior_nodes,
+            shared_prior_refs,
         }
     }
 
@@ -608,7 +700,29 @@ fn clone_subtree_nodes(
     new_id
 }
 
-fn node_from_evaluation(
+/// Build an interior node that shares the cache's prior vector by reference. The
+/// cache priors are already validated, descending, and normalized, so there is
+/// no per-node copy, dedup, or normalization here.
+fn shared_from_cache(
+    state_hash: StateHash,
+    state: &RustHexoState,
+    evaluation: Arc<RustEvaluation>,
+    widening: Widening,
+) -> RustNode {
+    let max_eligible_children = nucleus_count_pairs(&evaluation.priors, widening);
+    RustNode {
+        state_hash,
+        player: state.current_player(),
+        eval_value: evaluation.value,
+        visits: 0,
+        value_sum: 0.0,
+        edges: Vec::new(),
+        priors: NodePriors::Shared(evaluation),
+        max_eligible_children,
+    }
+}
+
+fn owned_root_from_evaluation(
     state_hash: StateHash,
     state: &RustHexoState,
     evaluation: &RustEvaluation,
@@ -642,6 +756,7 @@ fn node_from_evaluation(
     // Compute the policy-nucleus cap from the final (normalized, possibly noised)
     // prior distribution. Static for the node's lifetime — no visit-based growth.
     let max_eligible_children = nucleus_count(&candidates, widening);
+    candidates.shrink_to_fit();
     Ok(RustNode {
         state_hash,
         player: state.current_player(),
@@ -649,16 +764,27 @@ fn node_from_evaluation(
         visits: 0,
         value_sum: 0.0,
         edges: Vec::new(),
-        unexpanded_priors: candidates,
+        priors: NodePriors::Owned(candidates),
         max_eligible_children,
     })
 }
 
 fn nucleus_count(candidates: &[RustPriorCandidate], widening: Widening) -> usize {
+    nucleus_count_values(
+        candidates.iter().map(|candidate| candidate.prior).collect(),
+        widening,
+    )
+}
+
+fn nucleus_count_pairs(priors: &[(PackedCoord, f32)], widening: Widening) -> usize {
+    nucleus_count_values(priors.iter().map(|(_, prior)| *prior).collect(), widening)
+}
+
+fn nucleus_count_values(mut priors: Vec<f32>, widening: Widening) -> usize {
     // Smallest set of top-prior candidates whose cumulative prior reaches
     // `widening.mass`, clamped to [min_children, min(max_children, total)]. Priors
     // are already normalized to sum 1.0, so the cumulative cutoff is well defined.
-    let total = candidates.len();
+    let total = priors.len();
     if total == 0 {
         return 0;
     }
@@ -667,7 +793,6 @@ fn nucleus_count(candidates: &[RustPriorCandidate], widening: Widening) -> usize
     if lo >= hi {
         return hi;
     }
-    let mut priors: Vec<f32> = candidates.iter().map(|candidate| candidate.prior).collect();
     priors.sort_by(|a, b| b.partial_cmp(a).unwrap_or(Ordering::Equal));
     let mut cumulative = 0.0f32;
     let mut count = 0usize;
@@ -845,42 +970,6 @@ fn random_unit(seed: u64) -> f64 {
     ((value >> 11) as f64) * (1.0 / ((1u64 << 53) as f64))
 }
 
-fn gamma_sample(shape: f64, seed: u64) -> f64 {
-    if !shape.is_finite() || shape <= 0.0 {
-        return 0.0;
-    }
-    if shape < 1.0 {
-        let boosted = gamma_sample(shape + 1.0, seed ^ 0xD1B5_4A32_D192_ED03);
-        let uniform = random_unit(seed ^ 0xABC9_83A4_2E91_7D5B).max(1.0e-12);
-        return boosted * uniform.powf(1.0 / shape);
-    }
-
-    let d = shape - (1.0 / 3.0);
-    let c = 1.0 / (9.0 * d).sqrt();
-    for attempt in 0..32u64 {
-        let x = normal_sample(seed ^ attempt.wrapping_mul(0x9E37_79B9_7F4A_7C15));
-        let candidate = 1.0 + c * x;
-        if candidate <= 0.0 {
-            continue;
-        }
-        let v = candidate * candidate * candidate;
-        let uniform =
-            random_unit(seed ^ attempt.wrapping_mul(0xBF58_476D_1CE4_E5B9) ^ 0x94D0_49BB_1331_11EB)
-                .max(1.0e-12);
-        if uniform < 1.0 - 0.0331 * x.powi(4) || uniform.ln() < 0.5 * x * x + d * (1.0 - v + v.ln())
-        {
-            return d * v;
-        }
-    }
-    shape.max(1.0e-12)
-}
-
-fn normal_sample(seed: u64) -> f64 {
-    let u1 = random_unit(seed ^ 0xA076_1D64_78BD_642F).max(1.0e-12);
-    let u2 = random_unit(seed ^ 0xE703_7ED1_A0B4_28DB);
-    (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
-}
-
 #[cfg(test)]
 mod tests {
     use hexo_engine::{pack_coord, HexCoord, HexoState as RustHexoState};
@@ -927,6 +1016,22 @@ mod tests {
             legal_action_count: count,
             priors,
         }
+    }
+
+    /// Mirror the eval cache's `finalize_model_priors` post-processing: sort priors
+    /// DESCENDING and normalize to sum 1.0. `shared_from_cache` assumes its input is
+    /// already in this form (the production cache guarantees it), so tests that build
+    /// shared nodes directly must hand it cache-ready priors.
+    fn cache_ready(mut eval: RustEvaluation) -> RustEvaluation {
+        eval.priors
+            .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
+        let total: f32 = eval.priors.iter().map(|(_, prior)| prior).sum();
+        if total > 0.0 {
+            for entry in eval.priors.iter_mut() {
+                entry.1 /= total;
+            }
+        }
+        eval
     }
 
     fn candidates(priors: &[f32]) -> Vec<RustPriorCandidate> {
@@ -979,7 +1084,7 @@ mod tests {
         }
         assert_eq!(materialized, 4);
         assert_eq!(search.nodes[0].edges.len(), 4);
-        assert_eq!(search.nodes[0].unexpanded_priors.len(), 12);
+        assert_eq!(search.nodes[0].remaining_prior_count(), 12);
     }
 
     #[test]
@@ -993,7 +1098,7 @@ mod tests {
             search.nodes[0].edges[edge_index].pending = 1;
         }
         assert_eq!(search.nodes[0].edges.len(), 8);
-        assert!(search.nodes[0].unexpanded_priors.is_empty());
+        assert_eq!(search.nodes[0].remaining_prior_count(), 0);
         // First materialized edge is the highest-prior move.
         assert_eq!(
             search.nodes[0].edges[0].action_id,
@@ -1004,46 +1109,129 @@ mod tests {
     #[test]
     fn root_policy_temperature_flattens_priors() {
         let state = RustHexoState::new();
-        let sharp =
-            node_from_evaluation(0, &state, &evaluation_with_priors(4), Some(1.0), None, wide_open())
-                .unwrap();
-        let flat =
-            node_from_evaluation(0, &state, &evaluation_with_priors(4), Some(2.0), None, wide_open())
-                .unwrap();
-        let sharp_top = sharp.unexpanded_priors.last().unwrap().prior;
-        let flat_top = flat.unexpanded_priors.last().unwrap().prior;
+        let sharp = owned_root_from_evaluation(
+            0,
+            &state,
+            &evaluation_with_priors(4),
+            Some(1.0),
+            None,
+            wide_open(),
+        )
+        .unwrap();
+        let flat = owned_root_from_evaluation(
+            0,
+            &state,
+            &evaluation_with_priors(4),
+            Some(2.0),
+            None,
+            wide_open(),
+        )
+        .unwrap();
+        let sharp_top = sharp.peek_next_candidate().unwrap().1;
+        let flat_top = flat.peek_next_candidate().unwrap().1;
         // Temperature > 1 reduces the gap between the top prior and uniform.
         assert!(flat_top < sharp_top);
     }
 
     #[test]
-    fn root_dirichlet_noise_changes_root_priors_without_changing_actions() {
-        let config = ProgressiveWideningConfig::new(8, 4, 256.0, 1.3);
+    fn shared_node_materializes_like_owned() {
+        // An interior (shared) node must materialize edges in the same order and
+        // count as an owned node built from the same evaluation.
         let state = RustHexoState::new();
-        let mut search = RustSearch::new(state, &evaluation_with_priors(32), 128, config);
-        let before: Vec<_> = search.nodes[0]
-            .unexpanded_priors
+        let eval = evaluation_with_priors(8);
+        let widening = wide_open();
+
+        let mut owned_search =
+            RustSearch::new(state.clone(), &eval, 128, 0.20, 1.0, None, widening).unwrap();
+        let mut owned_order = Vec::new();
+        for _ in 0..8 {
+            let edge_index = owned_search.select_or_materialize_edge(0, 1.5).unwrap();
+            owned_search.nodes[0].edges[edge_index].pending = 1;
+            owned_order.push(owned_search.nodes[0].edges[edge_index].action_id);
+        }
+
+        let mut shared_search =
+            RustSearch::new(state.clone(), &uniform_evaluation(1), 128, 0.20, 1.0, None, widening)
+                .unwrap();
+        shared_search
+            .nodes
+            .push(shared_from_cache(12345, &state, Arc::new(cache_ready(eval.clone())), widening));
+        let mut shared_order = Vec::new();
+        for _ in 0..8 {
+            let edge_index = shared_search.select_or_materialize_edge(1, 1.5).unwrap();
+            shared_search.nodes[1].edges[edge_index].pending = 1;
+            shared_order.push(shared_search.nodes[1].edges[edge_index].action_id);
+        }
+
+        assert_eq!(owned_order, shared_order);
+        assert_eq!(shared_search.nodes[1].edges.len(), 8);
+        assert_eq!(shared_search.nodes[1].remaining_prior_count(), 0);
+    }
+
+    #[test]
+    fn shared_node_caps_at_max_eligible_children() {
+        let state = RustHexoState::new();
+        let widening = wide(0.95, 2, 4);
+        let mut search =
+            RustSearch::new(state.clone(), &uniform_evaluation(1), 128, 0.20, 1.0, None, widening)
+                .unwrap();
+        search.nodes.push(shared_from_cache(
+            7,
+            &state,
+            Arc::new(cache_ready(uniform_evaluation(16))),
+            widening,
+        ));
+        assert_eq!(search.nodes[1].max_eligible_children, 4);
+        let mut materialized = 0;
+        for _ in 0..16 {
+            match search.select_or_materialize_edge(1, 1.5) {
+                Some(edge_index) => {
+                    search.nodes[1].edges[edge_index].pending = 1;
+                    materialized += 1;
+                }
+                None => break,
+            }
+        }
+        assert_eq!(materialized, 4);
+        assert_eq!(search.nodes[1].remaining_prior_count(), 12);
+    }
+
+    #[test]
+    fn ensure_root_owned_preserves_full_prior_set() {
+        // Converting a partially expanded shared root to owned must reproduce the
+        // exact edges ∪ remaining action/prior set the export depends on.
+        let state = RustHexoState::new();
+        let eval = evaluation_with_priors(8);
+        let widening = wide_open();
+        let mut search =
+            RustSearch::new(state.clone(), &uniform_evaluation(1), 128, 0.20, 1.0, None, widening)
+                .unwrap();
+        search.nodes[0] = shared_from_cache(search.root_hash, &state, Arc::new(cache_ready(eval)), widening);
+        for _ in 0..3 {
+            let edge_index = search.select_or_materialize_edge(0, 1.5).unwrap();
+            search.nodes[0].edges[edge_index].pending = 1;
+        }
+
+        let mut before: Vec<(PackedCoord, f32)> = search.nodes[0]
+            .edges
             .iter()
-            .map(|prior| (prior.action_id, prior.prior))
+            .map(|edge| (edge.action_id, edge.prior))
             .collect();
+        before.extend(search.nodes[0].remaining_priors());
+        before.sort_by_key(|(action_id, _)| *action_id);
 
-        search.apply_root_dirichlet_noise(0.1, 0.25, 99);
+        search.ensure_root_owned();
 
-        let after: Vec<_> = search.nodes[0]
-            .unexpanded_priors
+        let mut after: Vec<(PackedCoord, f32)> = search.nodes[0]
+            .edges
             .iter()
-            .map(|prior| (prior.action_id, prior.prior))
+            .map(|edge| (edge.action_id, edge.prior))
             .collect();
-        let before_actions: HashSet<_> = before.iter().map(|(action, _prior)| *action).collect();
-        let after_actions: HashSet<_> = after.iter().map(|(action, _prior)| *action).collect();
+        after.extend(search.nodes[0].remaining_priors());
+        after.sort_by_key(|(action_id, _)| *action_id);
 
-        assert_eq!(before_actions, after_actions);
-        assert!(before
-            .iter()
-            .zip(after.iter())
-            .any(
-                |((_, before_prior), (_, after_prior))| (*before_prior - *after_prior).abs()
-                    > 1.0e-6
-            ));
+        assert_eq!(before, after);
+        assert!(matches!(search.nodes[0].priors, NodePriors::Owned(_)));
+        assert_eq!(search.nodes[0].edges.len(), 3);
     }
 }

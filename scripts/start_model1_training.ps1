@@ -1,8 +1,13 @@
 param(
     [string]$RepositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path,
     [string]$ConfigPath = "configs\dense_cnn_model1.toml",
+    [string]$RunName = "",
     [string]$PythonExe = "C:\Python314\python.exe",
     [string]$SealBotPath = "E:\SealBot",
+    [double]$MinFreeRamGb = 4.0,
+    [double]$MinFreeVirtualGb = 12.0,
+    [double]$MinGpuFreeGb = 2.5,
+    [double]$MaxTrainerPrivateGb = 18.0,
     [switch]$NoWatchdog,
     [switch]$RestartWatchdog,
     [switch]$StopExistingTrainer,
@@ -17,7 +22,26 @@ $config = if ([System.IO.Path]::IsPathRooted($ConfigPath)) {
 } else {
     (Resolve-Path -LiteralPath (Join-Path $repo $ConfigPath)).Path
 }
-$diagnosticsDir = Join-Path $repo "runs\dense_cnn_model1\diagnostics"
+
+function Get-RunNameFromConfig {
+    param([string]$Path)
+
+    $section = ""
+    foreach ($line in Get-Content -LiteralPath $Path) {
+        $trimmed = $line.Trim()
+        if ($trimmed -match '^\[(.+)\]$') {
+            $section = $Matches[1]
+            continue
+        }
+        if ($section -eq "run" -and $trimmed -match '^name\s*=\s*"([^"]+)"') {
+            return $Matches[1]
+        }
+    }
+    return "dense_cnn_model1"
+}
+
+$resolvedRunName = if ($RunName) { $RunName } else { Get-RunNameFromConfig -Path $config }
+$diagnosticsDir = Join-Path $repo ("runs\" + $resolvedRunName + "\diagnostics")
 New-Item -ItemType Directory -Force -Path $diagnosticsDir | Out-Null
 
 $packagePaths = @(
@@ -42,7 +66,7 @@ function Get-Model1TrainerProcess {
         Where-Object {
             $_.Name -match "python" -and
             $_.CommandLine -match "hexo_train\.cli\.train_model" -and
-            $_.CommandLine -match "dense_cnn_model1\.toml"
+            $_.CommandLine -match "dense_cnn.*\.toml"
         }
 }
 
@@ -82,16 +106,18 @@ if (-not $NoWatchdog) {
             (Join-Path $repo "scripts\watch_model1_resources.ps1"),
             "-RepositoryRoot",
             $repo,
+            "-RunName",
+            $resolvedRunName,
             "-IntervalSeconds",
             "6",
             "-MinFreeRamGb",
-            "8",
+            ([string]$MinFreeRamGb),
             "-MinFreeVirtualGb",
-            "12",
+            ([string]$MinFreeVirtualGb),
             "-MinGpuFreeGb",
-            "2.5",
+            ([string]$MinGpuFreeGb),
             "-MaxTrainerPrivateGb",
-            "18"
+            ([string]$MaxTrainerPrivateGb)
         )
         if (-not $DryRun) {
             $watchdog = Start-Process -FilePath "powershell.exe" -ArgumentList $watchArgs -WorkingDirectory $repo -WindowStyle Hidden -PassThru
@@ -110,6 +136,7 @@ if (-not $DryRun) {
 
 [pscustomobject]@{
     repository_root = $repo
+    run_name = $resolvedRunName
     config_path = $config
     python = $PythonExe
     pythonpath = $env:PYTHONPATH

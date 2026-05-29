@@ -16,6 +16,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList, PyTuple};
 use rayon::prelude::*;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use hexo_engine::PackedCoord;
 
@@ -200,7 +201,7 @@ impl Model1MctsSession {
             {
                 searches[index] = Some(RustSearch::new(
                     root,
-                    evaluation,
+                    &**evaluation,
                     target_visits,
                     fpu_reduction,
                     root_policy_temperature,
@@ -217,12 +218,6 @@ impl Model1MctsSession {
         if searches.iter().any(RustSearch::root_edges_empty) {
             return Err(PyValueError::new_err("MCTS root has no legal actions"));
         }
-        apply_root_noise(
-            &mut searches,
-            root_dirichlet_alpha,
-            root_exploration_fraction,
-            seed,
-        );
 
         let baselines: Vec<HashMap<PackedCoord, u32>> = searches
             .iter()
@@ -288,26 +283,6 @@ impl Model1MctsSession {
         }
 
         Ok(results)
-    }
-}
-
-fn apply_root_noise(
-    searches: &mut [RustSearch],
-    root_dirichlet_alpha: Option<f32>,
-    root_exploration_fraction: Option<f32>,
-    seed: u64,
-) {
-    let alpha = root_dirichlet_alpha.unwrap_or(0.0);
-    let fraction = root_exploration_fraction.unwrap_or(0.0);
-    if !alpha.is_finite() || alpha <= 0.0 || !fraction.is_finite() || fraction <= 0.0 {
-        return;
-    }
-    let fraction = fraction.clamp(0.0, 1.0);
-    if fraction <= 0.0 {
-        return;
-    }
-    for (index, search) in searches.iter_mut().enumerate() {
-        search.apply_root_dirichlet_noise(alpha, fraction, seed.wrapping_add(index as u64));
     }
 }
 
@@ -410,7 +385,8 @@ fn run_searches_to_targets(
             )?;
             for (leaf, evaluation) in leaves.into_iter().zip(evaluations.iter()) {
                 let search = &mut searches[leaf.root_index];
-                let child_id = search.add_node_from_eval(&leaf.state, leaf.state_hash, evaluation)?;
+                let child_id =
+                    search.add_node_from_eval(&leaf.state, leaf.state_hash, Arc::clone(evaluation))?;
                 search.nodes[leaf.parent_node].edges[leaf.edge_index].child = Some(child_id);
                 search.mark_pending(leaf.parent_node, leaf.edge_index, -1);
                 let child_player = search.nodes[child_id].player;
@@ -509,17 +485,22 @@ fn build_search_result_payloads(
 
 fn root_prior_policy(root: &RustNode) -> (Vec<PackedCoord>, Vec<f32>) {
     // Every in-crop legal move is staged as either a materialized edge or an
-    // unexpanded prior, so the root prior is exactly their union normalized.
+    // unexpanded prior, so the root prior is exactly their union normalized. This
+    // holds for both an owned root and a reused (shared) root: `remaining_priors`
+    // returns the not-yet-materialized candidates for whichever variant the root
+    // is, so the exported distribution stays byte-identical to the pre-refactor
+    // edges ∪ unexpanded union.
+    let remaining = root.remaining_priors();
     let mut priors: HashMap<PackedCoord, f32> =
-        HashMap::with_capacity(root.edges.len() + root.unexpanded_priors.len());
+        HashMap::with_capacity(root.edges.len() + remaining.len());
     for edge in &root.edges {
         if edge.prior.is_finite() && edge.prior > 0.0 {
             priors.insert(edge.action_id, edge.prior);
         }
     }
-    for candidate in &root.unexpanded_priors {
-        if candidate.prior.is_finite() && candidate.prior > 0.0 {
-            priors.insert(candidate.action_id, candidate.prior);
+    for (action_id, prior) in remaining {
+        if prior.is_finite() && prior > 0.0 {
+            priors.insert(action_id, prior);
         }
     }
     let mut pairs: Vec<(PackedCoord, f32)> = priors.into_iter().collect();
@@ -759,8 +740,18 @@ fn build_result_diagnostics<'py>(
     let root = PyDict::new(py);
     root.set_item("node_count", search.node_count)?;
     root.set_item("active_edge_count", search.active_edge_count)?;
+    root.set_item("hidden_prior_count", search.hidden_prior_count)?;
     root.set_item("root_active_edges", search.root_active_edges)?;
+    root.set_item("root_hidden_priors", search.root_hidden_priors)?;
     root.set_item("max_active_edges_per_node", search.max_active_edges_per_node)?;
+    root.set_item(
+        "max_hidden_priors_per_node",
+        search.max_hidden_priors_per_node,
+    )?;
+    root.set_item("active_edge_bytes", search.active_edge_bytes)?;
+    root.set_item("hidden_prior_bytes", search.hidden_prior_bytes)?;
+    root.set_item("shared_prior_nodes", search.shared_prior_nodes)?;
+    root.set_item("shared_prior_refs", search.shared_prior_refs)?;
     diagnostics.set_item("root", root)?;
     diagnostics.set_item("batch", batch)?;
     Ok(diagnostics)
@@ -778,17 +769,28 @@ fn build_batch_diagnostics<'py>(
     let mut completed_visits = 0u64;
     let mut max_nodes_per_root = 0usize;
     let mut max_active_edges_per_root = 0usize;
+    let mut max_hidden_priors_per_root = 0usize;
     for search in searches {
         let stats = search.diagnostics();
         aggregate.node_count += stats.node_count;
         aggregate.active_edge_count += stats.active_edge_count;
+        aggregate.hidden_prior_count += stats.hidden_prior_count;
         aggregate.root_active_edges += stats.root_active_edges;
+        aggregate.root_hidden_priors += stats.root_hidden_priors;
         aggregate.max_active_edges_per_node = aggregate
             .max_active_edges_per_node
             .max(stats.max_active_edges_per_node);
+        aggregate.max_hidden_priors_per_node = aggregate
+            .max_hidden_priors_per_node
+            .max(stats.max_hidden_priors_per_node);
+        aggregate.active_edge_bytes += stats.active_edge_bytes;
+        aggregate.hidden_prior_bytes += stats.hidden_prior_bytes;
+        aggregate.shared_prior_nodes += stats.shared_prior_nodes;
+        aggregate.shared_prior_refs += stats.shared_prior_refs;
         completed_visits += search.completed_visits as u64;
         max_nodes_per_root = max_nodes_per_root.max(stats.node_count);
         max_active_edges_per_root = max_active_edges_per_root.max(stats.active_edge_count);
+        max_hidden_priors_per_root = max_hidden_priors_per_root.max(stats.hidden_prior_count);
     }
 
     let tree = PyDict::new(py);
@@ -798,10 +800,21 @@ fn build_batch_diagnostics<'py>(
     tree.set_item("completed_visits", completed_visits)?;
     tree.set_item("node_count", aggregate.node_count)?;
     tree.set_item("active_edge_count", aggregate.active_edge_count)?;
+    tree.set_item("hidden_prior_count", aggregate.hidden_prior_count)?;
     tree.set_item("root_active_edges", aggregate.root_active_edges)?;
+    tree.set_item("root_hidden_priors", aggregate.root_hidden_priors)?;
     tree.set_item("max_nodes_per_root", max_nodes_per_root)?;
     tree.set_item("max_active_edges_per_root", max_active_edges_per_root)?;
+    tree.set_item("max_hidden_priors_per_root", max_hidden_priors_per_root)?;
     tree.set_item("max_active_edges_per_node", aggregate.max_active_edges_per_node)?;
+    tree.set_item(
+        "max_hidden_priors_per_node",
+        aggregate.max_hidden_priors_per_node,
+    )?;
+    tree.set_item("active_edge_bytes", aggregate.active_edge_bytes)?;
+    tree.set_item("hidden_prior_bytes", aggregate.hidden_prior_bytes)?;
+    tree.set_item("shared_prior_nodes", aggregate.shared_prior_nodes)?;
+    tree.set_item("shared_prior_refs", aggregate.shared_prior_refs)?;
 
     let eval = PyDict::new(py);
     eval.set_item("requested_states", evaluation.requested_states)?;
@@ -820,6 +833,10 @@ fn build_batch_diagnostics<'py>(
     eval.set_item("legal_index_bytes", evaluation.legal_index_bytes)?;
     eval.set_item("value_bytes", evaluation.value_bytes)?;
     eval.set_item("prior_bytes", evaluation.prior_bytes)?;
+    eval.set_item(
+        "cache_prior_pair_bytes",
+        evaluation.encoded_legal_actions * std::mem::size_of::<(PackedCoord, f32)>(),
+    )?;
     eval.set_item("cache_inserts", evaluation.cache_inserts)?;
     eval.set_item("cache_insert_skipped", evaluation.cache_insert_skipped)?;
     eval.set_item("cache_size", cache_len)?;

@@ -23,7 +23,6 @@ pub(crate) struct Model1EncodedState {
     // MCTS can only act on policy cells represented by the fixed 41x41 crop, so
     // this count intentionally excludes out-of-crop legal engine moves.
     pub(crate) all_legal_action_count: usize,
-    pub(crate) crop_legal_action_count: usize,
     pub(crate) legal_action_ids: Vec<PackedCoord>,
     pub(crate) legal_flat_indices: Vec<i64>,
     pub(crate) center: HexCoord,
@@ -122,7 +121,6 @@ fn encode_model1_state_inner(
     } else {
         Vec::new()
     };
-    let mut crop_legal_action_count = 0usize;
     for coord in legal_coords {
         let action_id = pack_coord(coord);
         if let Some(flat) = model1_flat_index(coord, center) {
@@ -171,7 +169,6 @@ fn encode_model1_state_inner(
     Model1EncodedState {
         planes,
         all_legal_action_count,
-        crop_legal_action_count,
         legal_action_ids,
         legal_flat_indices,
         center,

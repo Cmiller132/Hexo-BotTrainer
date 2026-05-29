@@ -82,9 +82,12 @@ def sample_from_state(
         turn_index=turn_index,
         metadata={**dict(metadata or {}), "target_schema_version": CURRENT_TARGET_SCHEMA_VERSION},
     )
+    policy_pairs = _pairs(policy)
+    if not policy_pairs:
+        policy_pairs = _pairs(root_prior_policy, normalize=True)
     return replace(
         _sample_data_from_facts(facts),
-        policy=_pairs(policy),
+        policy=policy_pairs,
         root_prior_policy=_pairs(root_prior_policy, normalize=True),
     )
 

@@ -1,0 +1,124 @@
+[model]
+name = "dense_cnn"
+module = "hexo_models.dense_cnn.plugin"
+
+[model.config]
+device = "cuda"
+
+[model.config.architecture]
+input_channels = 13
+channels = 64
+residual_blocks = 4
+dropout = 0.0
+short_term_value_horizons = [1, 4, 8]
+
+[model.config.training]
+batch_size = 128
+learning_rate = 0.001
+weight_decay = 0.0001
+policy_weight = 1.0
+value_weight = 1.0
+opp_policy_weight = 0.25
+short_term_value_weight = 0.25
+amp = true
+max_grad_norm = 1.0
+train_samples_per_epoch = 100000
+max_train_bucket_per_new_data = 8.0
+max_train_bucket_size = 500000
+no_repeat_files = true
+max_validation_samples = 100000
+
+[model.config.samples]
+shuffle_min_rows = 100000
+# Reduced 600000->300000 on 2026-05-29: the two-phase shuffle's peak RAM grew
+# with the replay window and at epoch 16 spiked to ~20 GB private / 0.8 GB free,
+# tripping the resource watchdog (kill). 10672 ran epochs 9-15 at <=12.4 GB with
+# the window smaller. Bounding the window keeps the shuffle peak in budget.
+# TRADE-OFF (revisit): smaller replay window = less historical-data diversity per
+# epoch, mildly slower learning. Raise back up if RAM headroom allows.
+shuffle_keep_target_rows = 300000
+shuffle_taper_window_exponent = 0.65
+shuffle_expand_window_per_row = 0.4
+shuffle_taper_window_scale = 50000.0
+# Reduced 70000->8000 and 40000->8000 on 2026-05-29 (backstop watcher): the
+# 80k->40k group reduction above was INSUFFICIENT and the run crash-looped on
+# epoch 16 for 6.5h (17 relaunches, never advancing past epoch 15). ROOT CAUSE
+# (verified from resource_watchdog.stop.json + RAM trajectory): selfplay
+# completes all 256 games at a flat ~7.5 GB private, then the shuffle's phase-1
+# group load (replay.py:738 _load_group_kept_arrays -> np.concatenate) spikes
+# ~5.5 GB in one ~6s step (priv 8->13.5 GB), dropping system free RAM 11->5 GB
+# and tripping the watchdog's `free_ram_gb < 8` kill. Each dense row is ~110 KB
+# (13x41x41 f32 input + policy planes), so a 40000-row group = ~4.4 GB resident
+# + concat transient = the spike. approx_rows_per_out_file drives the (later,
+# even larger) phase-2 bucket load, so it must shrink too. At 8000 rows each
+# peak is ~0.9 GB resident / ~1.7 GB transient -> free stays ~9+ GB. The
+# scatter->gather two-phase shuffle is correctness-neutral at any group/bucket
+# size (KataGo bounds RAM the same way); cost is only more, smaller files + I/O.
+approx_rows_per_out_file = 8000
+shuffle_worker_group_size = 8000
+validation_fraction = 0.0
+policy_surprise_uniform_fraction = 0.5
+policy_surprise_max_weight = 8.0
+
+[model.config.selfplay]
+search_visits = 128
+active_games = 256
+c_puct = 1.5
+root_dirichlet_noise_enabled = true
+root_dirichlet_noise_fraction = 0.25
+root_dirichlet_total_alpha = 10.83
+root_policy_temperature = 1.1
+fpu_reduction = 0.20
+virtual_loss = 1.0
+widening_policy_mass = 0.95
+widening_max_children = 32
+widening_min_children = 2
+mcts_session_cache_max_states = 262144
+mcts_active_root_limit = 256
+max_actions = 1024
+temperature = 1.0
+
+[model.config.evaluation]
+games_per_epoch = 64
+sealbot_variant = "best"
+sealbot_time_limit = 0.05
+max_actions = 1024
+require_sealbot = true
+# Diversify eval openings: sample the dense player's first 8 moves at a small
+# temperature (per-game seeded) so the 64 games are distinct trajectories
+# instead of collapsing to ~3. Greedy after the opening.
+opening_temperature = 0.6
+opening_moves = 8
+
+[model.config.performance]
+calibrate = true
+target_selfplay_positions_per_second = 64.0
+inference_batch_candidates = [128, 256, 512, 1024]
+selfplay_batch_candidates = [256]
+training_batch_candidates = [64, 128, 192, 256]
+mcts_virtual_batch_candidates = [4]
+selfplay_probe_positions = 2048
+probe_batches = 1
+
+[run]
+name = "dense_cnn_model1_scratch_64"
+output_dir = "../runs/dense_cnn_model1_scratch_64"
+seed = 1
+
+[loop]
+# Raised from 30 for overnight autonomy: the supervisor keeps relaunching/
+# advancing toward this cap, then stops cleanly. Lower it to halt sooner.
+epochs = 60
+
+[selfplay]
+games_per_epoch = 256
+update_checkpoint_pointer = true
+checkpoint_pointer = "../data/checkpoints/dense_cnn_model1_scratch_64_latest.txt"
+
+[train]
+passes_per_epoch = 1
+
+[checkpoint]
+resume_from = "E:/Hexo-BotTrainer/runs/dense_cnn_model1_scratch_64/checkpoints/epoch_000015.pt"
+initialize_from = "../runs/dense_cnn_model1/checkpoints/bootstrap_sealbot_050000_prefit_epoch_000008_remote_replay_converted.pt"
+save_name = "latest"

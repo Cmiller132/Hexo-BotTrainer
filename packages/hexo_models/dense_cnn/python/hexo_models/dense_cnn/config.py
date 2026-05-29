@@ -86,6 +86,14 @@ class Model1EvalConfig:
     sealbot_time_limit: float = 0.05
     max_actions: int = 1024
     require_sealbot: bool = False
+    # Opening diversification. With temperature 0 the dense player is fully
+    # deterministic, so every eval game from the same start collapses to one
+    # trajectory. Sampling the dense player's first `opening_moves` decisions at
+    # `opening_temperature` (per-game seeded) spreads the openings so the win /
+    # game-length signal reflects many distinct games. 0 keeps the old greedy
+    # behavior.
+    opening_temperature: float = 0.0
+    opening_moves: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -189,6 +197,8 @@ def parse_model1_config(raw: Mapping[str, Any] | None) -> Model1Config:
             sealbot_time_limit=float(evaluation.get("sealbot_time_limit", 0.05)),
             max_actions=int(evaluation.get("max_actions", 1024)),
             require_sealbot=bool(evaluation.get("require_sealbot", False)),
+            opening_temperature=float(evaluation.get("opening_temperature", 0.0)),
+            opening_moves=int(evaluation.get("opening_moves", 0)),
         ),
         performance=Model1PerformanceConfig(
             calibrate=bool(performance.get("calibrate", True)),

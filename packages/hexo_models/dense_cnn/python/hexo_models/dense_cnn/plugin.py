@@ -94,17 +94,6 @@ class DenseCNNPlugin:
     def evaluate_epoch(self, *, ctx: Any, components: Any, epoch: int) -> dict[str, Any]:
         return evaluate_epoch(ctx=ctx, components=components, epoch=epoch)
 
-    def cleanup_after_epoch(self, *, ctx: Any, components: Any, epoch: int) -> dict[str, Any]:
-        _ = ctx
-        trainer = components.model.trainer
-        if hasattr(trainer, "release_epoch_resources"):
-            return trainer.release_epoch_resources(epoch=epoch)
-        return {
-            "status": "skipped",
-            "epoch": epoch,
-            "reason": "dense_cnn trainer has no release_epoch_resources hook",
-        }
-
     def calibrate_performance(self, *, ctx: Any, components: Any) -> dict[str, Any]:
         """Run calibration and copy selected settings onto the trainer."""
 

@@ -16,31 +16,8 @@ config normalization or the pipeline itself.
 from __future__ import annotations
 
 import argparse
-import sys
 from pathlib import Path
 from typing import Sequence
-
-
-def _prepend_workspace_package_paths() -> None:
-    """Prefer sibling workspace packages when running the CLI from a repo checkout."""
-
-    package_dir = Path(__file__).resolve()
-    packages_dir = package_dir.parents[4]
-    if not (packages_dir / "hexo_models").is_dir():
-        return
-    for relative in (
-        ("hexo_models", "python"),
-        ("hexo_train", "python"),
-        ("hexo_runner", "python"),
-        ("hexo_engine", "python"),
-        ("hexo_utils", "python"),
-    ):
-        path = str(packages_dir.joinpath(*relative))
-        if path not in sys.path:
-            sys.path.insert(0, path)
-
-
-_prepend_workspace_package_paths()
 
 from hexo_train.pipeline import TrainingPipeline
 

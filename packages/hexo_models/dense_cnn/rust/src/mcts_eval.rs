@@ -21,8 +21,8 @@ use pyo3::types::{PyBytes, PyDict, PyTuple};
 use rayon::prelude::*;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::os::raw::c_char;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Instant;
 
 use hexo_engine::{HexoState as RustHexoState, PackedCoord};
@@ -67,7 +67,10 @@ pub(crate) struct EvaluationStats {
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct RustEvaluationCache {
-    entries: HashMap<StateHash, RustEvaluation>,
+    // `Arc` (not `Rc`) so that tree nodes holding a shared prior list stay `Send`
+    // for the rayon root-selection parallelism in `run_searches_to_targets`. The
+    // cache wrapper itself stays single-threaded (`SharedEvaluationCache`).
+    entries: HashMap<StateHash, Arc<RustEvaluation>>,
     insertion_order: VecDeque<StateHash>,
 }
 
@@ -81,11 +84,11 @@ impl RustEvaluationCache {
         self.entries.len()
     }
 
-    fn get(&self, key: &StateHash) -> Option<&RustEvaluation> {
-        self.entries.get(key)
+    fn get(&self, key: &StateHash) -> Option<Arc<RustEvaluation>> {
+        self.entries.get(key).map(Arc::clone)
     }
 
-    fn insert_bounded(&mut self, key: StateHash, evaluation: RustEvaluation, max_states: usize) {
+    fn insert_bounded(&mut self, key: StateHash, evaluation: Arc<RustEvaluation>, max_states: usize) {
         if self.entries.contains_key(&key) {
             self.entries.insert(key, evaluation);
             return;
@@ -155,13 +158,28 @@ fn evaluate_model1_states_chunk(
         .map(|state| encode_model1_state_for_mcts(state, true))
         .collect();
     let plane_values_per_row = MODEL1_INPUT_CHANNELS * MODEL1_BOARD_AREA;
-    let mut planes = vec![0.0f32; encoded.len() * plane_values_per_row];
+
+    thread_local! {
+        // Reused across chunk evaluations on the calling thread to avoid
+        // reallocating the ~89 MB plane buffer plus the legal-index buffer every
+        // chunk. This function runs serially on the GIL-holding thread (the rayon
+        // work only fills per-row `encoded` data and the disjoint plane chunks),
+        // so a thread-local scratch is safe.
+        static ENCODE_SCRATCH: RefCell<(Vec<f32>, Vec<i64>)> =
+            RefCell::new((Vec::new(), Vec::new()));
+    }
+
+    ENCODE_SCRATCH.with(|scratch| {
+    let mut scratch = scratch.borrow_mut();
+    let (planes, legal_flat_indices) = &mut *scratch;
+    planes.clear();
+    planes.resize(encoded.len() * plane_values_per_row, 0.0);
     planes
         .par_chunks_mut(plane_values_per_row)
         .zip(encoded.par_iter())
         .for_each(|(target, row)| target.copy_from_slice(&row.planes));
 
-    let mut legal_flat_indices = Vec::new();
+    legal_flat_indices.clear();
     let mut legal_row_offsets = Vec::with_capacity(encoded.len() + 1);
     legal_row_offsets.push(0i64);
     for row in &encoded {
@@ -246,6 +264,7 @@ fn evaluate_model1_states_chunk(
         });
     }
     Ok(evaluations)
+    })
 }
 
 pub(crate) fn evaluate_model1_states_cached(
@@ -255,7 +274,7 @@ pub(crate) fn evaluate_model1_states_cached(
     cache: &SharedEvaluationCache,
     stats: Option<&SharedEvaluationStats>,
     cache_max_states: usize,
-) -> PyResult<Vec<RustEvaluation>> {
+) -> PyResult<Vec<Arc<RustEvaluation>>> {
     let requests: Vec<_> = states
         .iter()
         .map(|state| RustEvaluationRequest {
@@ -273,10 +292,10 @@ pub(crate) fn evaluate_model1_state_refs_cached(
     cache: &SharedEvaluationCache,
     stats: Option<&SharedEvaluationStats>,
     cache_max_states: usize,
-) -> PyResult<Vec<RustEvaluation>> {
+) -> PyResult<Vec<Arc<RustEvaluation>>> {
     // Cache slots preserve caller order. `unique_states` contains only misses,
     // and `slot_to_unique` maps duplicate misses back to their first occurrence.
-    let mut result_slots: Vec<Option<RustEvaluation>> = vec![None; requests.len()];
+    let mut result_slots: Vec<Option<Arc<RustEvaluation>>> = vec![None; requests.len()];
     let mut unique_states: Vec<&RustHexoState> = Vec::new();
     let mut unique_keys: Vec<StateHash> = Vec::new();
     let mut unique_index_by_key: HashMap<StateHash, usize> = HashMap::new();
@@ -294,7 +313,7 @@ pub(crate) fn evaluate_model1_state_refs_cached(
         for (index, request) in requests.iter().enumerate() {
             let key = request.state_hash;
             if let Some(cached_eval) = cached.get(&key) {
-                result_slots[index] = Some(cached_eval.clone());
+                result_slots[index] = Some(cached_eval);
                 if let Some(stats) = stats {
                     stats.borrow_mut().cache_hits += 1;
                 }
@@ -319,11 +338,21 @@ pub(crate) fn evaluate_model1_state_refs_cached(
             stats.borrow_mut().unique_states += unique_states.len();
         }
         let unique_evals = evaluate_model1_state_refs(py, evaluator, &unique_states, stats)?;
+        // Wrap each freshly computed evaluation in an `Rc` once. Cache inserts and
+        // duplicate-slot fills below are refcount bumps, not deep copies of the
+        // (up to several-hundred-entry) prior vector.
+        let unique_evals: Vec<Arc<RustEvaluation>> = unique_evals
+            .into_iter()
+            .map(|mut eval| {
+                eval.priors.shrink_to_fit();
+                Arc::new(eval)
+            })
+            .collect();
         {
             let mut cached = cache.borrow_mut();
             let mut inserted = 0usize;
             for (key, evaluation) in unique_keys.iter().copied().zip(unique_evals.iter()) {
-                cached.insert_bounded(key, evaluation.clone(), cache_max_states);
+                cached.insert_bounded(key, Arc::clone(evaluation), cache_max_states);
                 inserted += 1;
             }
             if let Some(stats) = stats {
@@ -337,7 +366,7 @@ pub(crate) fn evaluate_model1_state_refs_cached(
                 continue;
             }
             if let Some(unique_index) = unique_index {
-                result_slots[index] = Some(unique_evals[unique_index].clone());
+                result_slots[index] = Some(Arc::clone(&unique_evals[unique_index]));
             }
         }
     }
@@ -402,6 +431,16 @@ fn finalize_model_priors(
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| left.0.cmp(&right.0))
     });
+    // Pre-normalize to sum 1.0 so tree nodes can consume the cached priors
+    // directly without an extra per-node normalization pass. This is behavior
+    // neutral: interior nodes previously re-normalized at construction, and the
+    // root export / Python targets normalize regardless. Applying root-policy
+    // temperature later to a pre-normalized prior is identical because the
+    // normalization constant cancels (`normalize(x^(1/T))` is invariant to a
+    // uniform prescaling of `x`).
+    for entry in priors.iter_mut() {
+        entry.1 /= total;
+    }
     Ok(())
 }
 

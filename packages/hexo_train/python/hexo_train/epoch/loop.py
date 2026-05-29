@@ -83,9 +83,6 @@ def run_epochs(
             status="completed",
             metadata={"result": result},
         )
-        cleanup_result = cleanup_epoch_resources(ctx, components, epoch=epoch)
-        if cleanup_result.get("status") != "skipped":
-            ctx.diagnostics.write_json(f"epoch_{epoch:06d}.cleanup.json", cleanup_result)
 
     return {
         "epochs": len(results),
@@ -144,25 +141,6 @@ def evaluate_epoch(
         "status": "skipped",
         "epoch": epoch,
         "reason": "model plugin has no evaluate_epoch hook",
-    }
-
-
-def cleanup_epoch_resources(
-    ctx: RunContext,
-    components: TrainingComponents,
-    *,
-    epoch: int,
-) -> dict[str, Any]:
-    """Let model-owned trainers release large transient epoch allocations."""
-
-    plugin = components.model.plugin
-    if hasattr(plugin, "cleanup_after_epoch"):
-        result = plugin.cleanup_after_epoch(ctx=ctx, components=components, epoch=epoch)
-        return dict(result) if isinstance(result, Mapping) else {"status": "completed", "result": repr(result)}
-    return {
-        "status": "skipped",
-        "epoch": epoch,
-        "reason": "model plugin has no cleanup_after_epoch hook",
     }
 
 

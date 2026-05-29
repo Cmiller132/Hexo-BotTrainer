@@ -21,6 +21,8 @@ let boardView = null;
 let boardViewDirty = false;
 let boardDrag = null;
 let suppressBoardClick = false;
+const activePointers = new Map(); // pointerId -> {x, y} for pan + pinch gestures
+let pinchState = null;
 let adapters = null;
 let adapterLoadError = null;
 let trainingRuns = [];
@@ -400,6 +402,10 @@ function setScreen(screen, options = {}) {
     if (window.location.hash && window.location.hash !== hash) window.history.replaceState(null, "", hash);
   }
   renderGameHistoryPage();
+  // Re-render the match view once it is actually visible so layout-dependent
+  // work (move-history centering, board fit) runs with real element widths
+  // instead of the zero width it would see while the screen was hidden.
+  if (activeScreen === "match" && state) render();
 }
 
 function syncTrainingRunSelect(selected = "") {
@@ -854,49 +860,125 @@ function bindBoardViewEvents() {
   boardArea.addEventListener("pointerdown", event => {
     if (!boardView || pendingRequest || (event.pointerType === "mouse" && event.button !== 0)) return;
     if (event.target.closest(".board-view-controls") || event.target.closest(".legend")) return;
-    const rect = svg.getBoundingClientRect();
-    boardDrag = {
-      pointerId: event.pointerId,
-      clientX: event.clientX,
-      clientY: event.clientY,
-      scaleX: boardView.width / Math.max(1, rect.width),
-      scaleY: boardView.height / Math.max(1, rect.height),
-      view: { ...boardView },
-      moved: false,
-    };
+    activePointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
     boardArea.setPointerCapture(event.pointerId);
     boardArea.classList.add("dragging");
     hideTip();
+    if (activePointers.size >= 2) {
+      beginPinch(); // a second finger upgrades the gesture to pinch-zoom
+    } else {
+      beginPan(event);
+    }
   });
 
   boardArea.addEventListener("pointermove", event => {
-    if (!boardDrag || event.pointerId !== boardDrag.pointerId) return;
+    if (!activePointers.has(event.pointerId)) return;
     event.preventDefault();
-    const dx = (event.clientX - boardDrag.clientX) * boardDrag.scaleX;
-    const dy = (event.clientY - boardDrag.clientY) * boardDrag.scaleY;
-    if (Math.hypot(event.clientX - boardDrag.clientX, event.clientY - boardDrag.clientY) > 4) boardDrag.moved = true;
-    boardView = {
-      ...boardDrag.view,
-      x: boardDrag.view.x - dx,
-      y: boardDrag.view.y - dy,
-    };
-    boardViewDirty = true;
-    applyBoardView();
-  });
+    activePointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    if (pinchState && activePointers.size >= 2) {
+      updatePinch();
+    } else if (boardDrag && event.pointerId === boardDrag.pointerId) {
+      updatePan(event);
+    }
+  }, { passive: false });
 
-  boardArea.addEventListener("pointerup", finishBoardDrag);
-  boardArea.addEventListener("pointercancel", finishBoardDrag);
+  boardArea.addEventListener("pointerup", endBoardPointer);
+  boardArea.addEventListener("pointercancel", endBoardPointer);
 }
 
-function finishBoardDrag(event) {
-  if (!boardDrag || event.pointerId !== boardDrag.pointerId) return;
-  if (boardDrag.moved) {
-    suppressBoardClick = true;
-    window.setTimeout(() => { suppressBoardClick = false; }, 80);
-  }
+function boardDragScales() {
+  const rect = svg.getBoundingClientRect();
+  return {
+    scaleX: boardView.width / Math.max(1, rect.width),
+    scaleY: boardView.height / Math.max(1, rect.height),
+  };
+}
+
+function beginPan(event) {
+  const { scaleX, scaleY } = boardDragScales();
+  boardDrag = {
+    pointerId: event.pointerId,
+    clientX: event.clientX,
+    clientY: event.clientY,
+    scaleX,
+    scaleY,
+    view: { ...boardView },
+    moved: false,
+  };
+}
+
+function updatePan(event) {
+  const dx = (event.clientX - boardDrag.clientX) * boardDrag.scaleX;
+  const dy = (event.clientY - boardDrag.clientY) * boardDrag.scaleY;
+  if (Math.hypot(event.clientX - boardDrag.clientX, event.clientY - boardDrag.clientY) > 4) boardDrag.moved = true;
+  boardView = { ...boardDrag.view, x: boardDrag.view.x - dx, y: boardDrag.view.y - dy };
+  boardViewDirty = true;
+  applyBoardView();
+}
+
+function pinchPointers() {
+  return [...activePointers.values()].slice(0, 2);
+}
+
+function beginPinch() {
+  boardDrag = null; // pan and pinch are mutually exclusive
+  const [a, b] = pinchPointers();
+  const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+  pinchState = {
+    rect: svg.getBoundingClientRect(),
+    startDist: Math.max(1, Math.hypot(a.x - b.x, a.y - b.y)),
+    startView: { ...boardView },
+    anchorBoard: clientToBoardPoint(mid.x, mid.y),
+  };
+  suppressBoardClick = true;
+}
+
+// Two-finger pinch: zoom by the change in finger distance, keeping the board
+// point that was under the initial midpoint pinned beneath the moving midpoint
+// (so the gesture also pans).
+function updatePinch() {
+  const [a, b] = pinchPointers();
+  if (!a || !b) return;
+  const dist = Math.max(1, Math.hypot(a.x - b.x, a.y - b.y));
+  const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+  const base = boardBaseView || pinchState.startView;
+  const nextWidth = clamp(pinchState.startView.width * (pinchState.startDist / dist), base.width * 0.14, base.width * 4.2);
+  const scale = nextWidth / pinchState.startView.width;
+  const nextHeight = pinchState.startView.height * scale;
+  const rect = pinchState.rect;
+  const viewScaleX = nextWidth / Math.max(1, rect.width);
+  const viewScaleY = nextHeight / Math.max(1, rect.height);
+  boardView = {
+    width: nextWidth,
+    height: nextHeight,
+    x: pinchState.anchorBoard.x - (mid.x - rect.left) * viewScaleX,
+    y: pinchState.anchorBoard.y - (mid.y - rect.top) * viewScaleY,
+  };
+  boardViewDirty = true;
+  applyBoardView();
+}
+
+function endBoardPointer(event) {
+  if (!activePointers.has(event.pointerId)) return;
+  activePointers.delete(event.pointerId);
   if (boardArea.hasPointerCapture(event.pointerId)) boardArea.releasePointerCapture(event.pointerId);
-  boardDrag = null;
-  boardArea.classList.remove("dragging");
+
+  const moved = (boardDrag && boardDrag.moved) || Boolean(pinchState);
+  if (activePointers.size < 2) pinchState = null;
+
+  if (activePointers.size === 1) {
+    // Dropped from pinch to a single finger — resume panning from it.
+    const [pointerId, point] = [...activePointers.entries()][0];
+    beginPan({ pointerId, clientX: point.x, clientY: point.y });
+    boardDrag.moved = true;
+  } else if (activePointers.size === 0) {
+    boardDrag = null;
+    boardArea.classList.remove("dragging");
+    if (moved) {
+      suppressBoardClick = true;
+      window.setTimeout(() => { suppressBoardClick = false; }, 80);
+    }
+  }
 }
 
 function viewForBox(box, pad) {
@@ -1039,38 +1121,67 @@ function renderTurnBanner(active) {
   sub.textContent = `${playerKindLabel(active)} - ${placementStepLabel()}`;
 }
 
+// The move list is a bounded, wrapping, vertically-scrolling box. Chips flow and
+// wrap inside it, so the element is always exactly its container's width and can
+// never push the page sideways — regardless of move count (a 1000-move game just
+// scrolls vertically). Chips are only rebuilt when the move list grows, so live
+// polling of a long game doesn't churn ~1000 DOM nodes every tick.
+let moveHistoryBound = false;
+let moveHistoryStructSig = "";
+
 function renderMoves() {
   renderMoveHistory();
-  bindMoveSelectors();
 }
 
 function renderMoveHistory() {
   const history = document.getElementById("moveHistory");
+  if (!history) return;
+  ensureMoveHistoryEvents(history);
   const placements = state.placements || [];
   const selected = viewedPlacementCount();
+
   if (!placements.length) {
+    moveHistoryStructSig = "";
+    history.classList.remove("has-moves");
     history.innerHTML = `<div class="empty-list">No moves yet</div>`;
     return;
   }
-  history.innerHTML = placements.map(p => {
-    const cls = p.player === "player0" ? "p0" : "p1";
-    const selectedClass = selected === p.index ? "selected" : "";
-    return `<button class="history-chip ${cls} ${selectedClass}" data-move-index="${p.index}">
+
+  history.classList.add("has-moves");
+  const structSig = `${placements.length}:${placements[placements.length - 1].index}`;
+  if (structSig !== moveHistoryStructSig) {
+    moveHistoryStructSig = structSig;
+    history.innerHTML = placements.map(p => {
+      const cls = p.player === "player0" ? "p0" : "p1";
+      return `<button class="history-chip ${cls}" data-move-index="${p.index}">
       <span class="chip-index">${p.index}</span>
       <span class="chip-dot"></span>
       <span class="chip-text">${playerShort(p.player)} (${p.q}, ${p.r})</span>
     </button>`;
-  }).join("");
-  const selectedChip = history.querySelector(".history-chip.selected");
-  if (selectedChip) {
-    const centered = selectedChip.offsetLeft - history.clientWidth / 2 + selectedChip.clientWidth / 2;
-    history.scrollLeft = Math.max(0, centered);
+    }).join("");
+  }
+
+  // Update the selection without a full rebuild, then scroll it into view.
+  const previous = history.querySelector(".history-chip.selected");
+  if (previous) previous.classList.remove("selected");
+  const current = history.querySelector(`.history-chip[data-move-index="${selected}"]`);
+  if (current) {
+    current.classList.add("selected");
+    if (history.clientHeight) {
+      const top = current.offsetTop - history.clientHeight / 2 + current.clientHeight / 2;
+      history.scrollTop = Math.max(0, top);
+    }
   }
 }
 
-function bindMoveSelectors() {
-  document.querySelectorAll("[data-move-index]").forEach(el => {
-    el.addEventListener("click", () => setReplayIndex(Number(el.dataset.moveIndex)));
+function ensureMoveHistoryEvents(history) {
+  if (moveHistoryBound) return;
+  moveHistoryBound = true;
+  // Delegated click so chip rebuilds never leave stale per-chip listeners.
+  history.addEventListener("click", event => {
+    const chip = event.target.closest("[data-move-index]");
+    if (!chip) return;
+    setReplayIndex(Number(chip.dataset.moveIndex));
   });
 }
 

@@ -27,9 +27,17 @@ class DenseCNNPlayer:
     model: Any
     trainer: Any
     record_samples: bool = False
+    # Opening diversification (eval). The first `opening_moves` decisions are
+    # sampled at `opening_temperature` with a distinct per-(game, move) seed;
+    # afterwards play is greedy (temperature 0). Both default to the old
+    # fully-deterministic behavior.
+    eval_seed: int = 0
+    opening_temperature: float = 0.0
+    opening_moves: int = 0
     identity: PlayerIdentity = field(init=False)
     inference: DenseCNNInference = field(init=False)
     mcts_session: BatchedMctsSession = field(init=False)
+    _decisions_made: int = field(init=False, default=0)
 
     def __post_init__(self) -> None:
         self.identity = PlayerIdentity(self.identity_id, label="Dense CNN")
@@ -50,18 +58,28 @@ class DenseCNNPlayer:
         # Runner games are independent. Clearing prevents a previous game's
         # subtree from surviving under the single player-side key used below.
         self.mcts_session.clear()
+        self._decisions_made = 0
 
     def decide(self, state: object) -> DecisionResult:
         """Search the current live runner state and return one placement action."""
 
         selfplay = self.trainer.config.selfplay
+        # Sample the opening at a small temperature so eval games diverge; go
+        # greedy once past the configured opening. The per-move seed only
+        # affects sampling (temperature > 0); greedy selection ignores it.
+        move_index = self._decisions_made
+        self._decisions_made += 1
+        in_opening = move_index < self.opening_moves and self.opening_temperature > 0.0
+        temperature = self.opening_temperature if in_opening else 0.0
+        move_seed = int(self.eval_seed) * 1_000_003 + move_index
         search = self.mcts_session.run(
             [0],
             [state],
             self.inference,
             visits=selfplay.search_visits,
             c_puct=selfplay.c_puct,
-            temperature=0.0,
+            temperature=temperature,
+            seed=move_seed,
             virtual_batch_size=self.trainer.mcts_virtual_batch_size,
             active_root_limit=selfplay.mcts_active_root_limit,
             root_policy_temperature=selfplay.root_policy_temperature,

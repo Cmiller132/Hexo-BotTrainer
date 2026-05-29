@@ -24,8 +24,6 @@ from .architecture import Model1Network, optimized_model1_for_inference
 from .constants import BOARD_SIZE, INPUT_CHANNELS
 from .losses import decode_binned_value
 
-DEFAULT_MAX_BATCH_SIZE = 2048
-
 
 @dataclass(frozen=True, slots=True)
 class InferenceResult:
@@ -76,14 +74,9 @@ class DenseCNNInference:
         if self.max_batch_size <= 0:
             raise ValueError("max_batch_size must be > 0")
         if self.device.type == "cuda":
-            # MCTS sends variable-sized evaluator batches; cuDNN autotune can spend
-            # more time benchmarking new shapes than running the compact CNN.
-            torch.backends.cudnn.benchmark = False
+            torch.backends.cudnn.benchmark = True
             torch.backends.cuda.matmul.allow_tf32 = True
             torch.backends.cudnn.allow_tf32 = True
-            self._cuda_cache_trim_threshold_bytes = int(
-                torch.cuda.get_device_properties(self.device).total_memory * 0.60
-            )
             self.model.to(device=self.device, memory_format=torch.channels_last)
         else:
             self.model.to(self.device)
@@ -99,14 +92,7 @@ class DenseCNNInference:
     def infer_states(self, states: Sequence[object]) -> list[InferenceResult]:
         if not states:
             return []
-        if len(states) <= self.max_batch_size:
-            return self._infer_states_rust(states)
-        results: list[InferenceResult] = []
-        for start in range(0, len(states), self.max_batch_size):
-            results.extend(self._infer_states_rust(states[start : start + self.max_batch_size]))
-            if self.device.type == "cuda":
-                _trim_cuda_cache_if_needed(self.device, self._cuda_cache_trim_threshold_bytes)
-        return results
+        return self._infer_states_rust(states)
 
     @torch.no_grad()
     def _infer_states_rust(self, states: Sequence[object]) -> list[InferenceResult]:
@@ -135,9 +121,6 @@ class DenseCNNInference:
                     diagnostics={"device": str(self.device), "amp": self.amp, "batched": len(states) > 1, "encoder": "rust"},
                 )
             )
-        if self.device.type == "cuda":
-            del outputs, policy_batch, value_batch, values, inputs
-            _trim_cuda_cache_if_needed(self.device, self._cuda_cache_trim_threshold_bytes)
         return results
 
     @torch.no_grad()
@@ -178,7 +161,7 @@ class DenseCNNInference:
     def _warm_up_cuda(self) -> None:
         """Prime cuDNN algorithm selection and GPU clocks before timed search."""
 
-        warmup_batch = min(DEFAULT_MAX_BATCH_SIZE, self.max_batch_size)
+        warmup_batch = min(1024, self.max_batch_size)
         dtype = torch.float16 if self.amp else torch.float32
         inputs = torch.zeros(
             (warmup_batch, INPUT_CHANNELS, BOARD_SIZE, BOARD_SIZE),
@@ -204,25 +187,6 @@ class DenseCNNInference:
         _require_byte_length("inputs", payload["inputs"], _shape_product(shape), 4)
         inputs = torch.frombuffer(payload["inputs"], dtype=torch.float32).reshape(shape)
         max_batch = self.max_batch_size
-        raw_crop_legal_counts = payload.get("crop_legal_counts")
-        crop_legal_counts = (
-            tuple(max(0, int(item)) for item in raw_crop_legal_counts)
-            if raw_crop_legal_counts is not None
-            else None
-        )
-        if crop_legal_counts is not None and len(crop_legal_counts) != int(inputs.shape[0]):
-            crop_legal_counts = None
-        if (
-            inputs.shape[0] > max_batch
-            and payload.get("legal_mask_from_inputs")
-            and int(payload.get("max_prior_candidates") or 0) > 0
-        ):
-            return self._evaluate_large_model1_payload_from_input_mask(
-                inputs,
-                max_candidates=int(payload["max_prior_candidates"]),
-                max_batch=max_batch,
-                crop_legal_counts=crop_legal_counts,
-            )
         if inputs.shape[0] > max_batch:
             # MCTS can ask for a large leaf batch. Chunking happens here because
             # only the Python inference wrapper knows the safe Torch batch size.
@@ -291,14 +255,9 @@ def _legal_priors_from_flats(
 
 def _to_inference_device(inputs: torch.Tensor, device: torch.device) -> torch.Tensor:
     non_blocking = bool(inputs.is_cuda or inputs.is_pinned())
+    if device.type == "cuda" and inputs.ndim == 4:
+        return inputs.to(device, non_blocking=non_blocking, memory_format=torch.channels_last)
     return inputs.to(device, non_blocking=non_blocking)
-
-
-def _trim_cuda_cache_if_needed(device: torch.device, threshold_bytes: int) -> None:
-    if device.type != "cuda" or threshold_bytes <= 0:
-        return
-    if int(torch.cuda.memory_reserved(device)) >= int(threshold_bytes):
-        torch.cuda.empty_cache()
 
 
 def _contains_model1_network(model: torch.nn.Module) -> bool:

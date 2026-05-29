@@ -81,12 +81,6 @@ def calibrate_dense_cnn(
             candidates=training_batch_candidates or perf.training_batch_candidates,
             probe_batches=perf.probe_batches,
         )
-        model.load_state_dict(model_state)
-        if optimizer is not None and optimizer_state is not None:
-            optimizer.load_state_dict(optimizer_state)
-        if device.type == "cuda":
-            model.to(device=device, memory_format=torch.channels_last)
-        model.eval()
         selfplay_results = _benchmark_selfplay(
             model,
             config=config,
@@ -110,12 +104,6 @@ def calibrate_dense_cnn(
         configured_visits=config.selfplay.search_visits,
     )
     measured_selfplay = float(selected_selfplay.get("positions_per_second", 0.0))
-    mcts_diagnostics = selected_selfplay.get("mcts_diagnostics", {})
-    if not isinstance(mcts_diagnostics, Mapping):
-        mcts_diagnostics = {}
-    selected_unique_eval_states = int(mcts_diagnostics.get("eval_unique_states", 0) or 0)
-    selected_mcts_simulations = int(selected_selfplay.get("mcts_simulations", 0))
-    unique_eval_states_per_simulation = selected_unique_eval_states / max(1, selected_mcts_simulations)
     selected_exact = (
         int(selected_selfplay.get("visits", 0)) == int(config.selfplay.search_visits)
         and bool(selected_selfplay.get("all_searches_exact", False))
@@ -152,13 +140,6 @@ def calibrate_dense_cnn(
         "recorded_positions": int(selected_selfplay.get("recorded_positions", selected_selfplay.get("positions", 0))),
         "mcts_simulations": int(selected_selfplay.get("mcts_simulations", 0)),
         "exact_visit_results": int(selected_selfplay.get("exact_visit_results", 0)),
-        "mcts_unique_eval_states": selected_unique_eval_states,
-        "mcts_unique_eval_states_per_simulation": unique_eval_states_per_simulation,
-        "cache_reuse_warning": (
-            "selfplay benchmark evaluated unusually few unique states; throughput may be dominated by cache reuse"
-            if unique_eval_states_per_simulation < 0.02
-            else None
-        ),
         "all_searches_exact": selected_exact,
         "meets_target": measured_selfplay >= perf.target_selfplay_positions_per_second and selected_exact,
     }
@@ -391,21 +372,13 @@ def _benchmark_selfplay_setting(
         )
         if searches:
             _extend_mcts_diagnostic_batches(mcts_diagnostic_batches, searches)
-        for game, search in zip(search_games, searches):
+        for game, search in zip(playable, searches):
             if search.visits == resolved_visits:
                 exact_visit_results += 1
             mcts_simulations += int(search.visits)
             engine.apply_action(game["state"], engine.PlacementAction(unpack_coord_id(search.action_id)))
             game["actions"].append(int(search.action_id))
             positions += 1
-        remaining_games = []
-        for game in games:
-            terminal = engine.terminal(game["state"])
-            if terminal is not None or len(game["actions"]) >= config.selfplay.max_actions:
-                completed_games += 1
-            else:
-                remaining_games.append(game)
-        games = remaining_games
     elapsed = perf_counter() - started
     return {
         "status": "completed",
@@ -446,6 +419,8 @@ def _summarize_mcts_diagnostic_batches(batches: Sequence[Mapping[str, Any]]) -> 
         "hidden_prior_count",
         "completed_visits",
         "widened_edges_total",
+        "active_edge_bytes",
+        "hidden_prior_bytes",
     )
     tree_max_fields = (
         "root_count",
@@ -467,6 +442,7 @@ def _summarize_mcts_diagnostic_batches(batches: Sequence[Mapping[str, Any]]) -> 
         "legal_index_bytes",
         "value_bytes",
         "prior_bytes",
+        "cache_prior_pair_bytes",
         "cache_inserts",
         "cache_insert_skipped",
     )

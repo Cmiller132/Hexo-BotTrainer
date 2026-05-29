@@ -91,18 +91,22 @@ def evaluate_epoch(*, ctx: Any, components: Any, epoch: int) -> dict[str, Any]:
         # Alternate colors so the evaluation result is not tied to one fixed
         # first-player role.
         dense_is_p0 = game_index % 2 == 0
+        game_seed = (ctx.config.run.seed or 0) + epoch * 100_000 + game_index
         dense = DenseCNNPlayer(
             identity_id="dense-cnn-eval",
             model=components.model.model,
             trainer=trainer,
             record_samples=False,
+            eval_seed=game_seed,
+            opening_temperature=eval_config.opening_temperature,
+            opening_moves=eval_config.opening_moves,
         )
         sealbot = SealBotPlayer(sealbot_config, player_id="sealbot-best-50ms")
         players = (dense, sealbot) if dense_is_p0 else (sealbot, dense)
         result = run_match(
             GameSpec(
                 game_id=f"eval-{epoch:06d}-{game_index:04d}",
-                seed=(ctx.config.run.seed or 0) + epoch * 100_000 + game_index,
+                seed=game_seed,
                 is_evaluation=True,
                 max_actions=eval_config.max_actions,
             ),

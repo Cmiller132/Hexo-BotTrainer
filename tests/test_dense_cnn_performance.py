@@ -736,6 +736,50 @@ def test_dense_cnn_mcts_session_reuses_tree_and_reports_exact_delta_visits() -> 
     assert int(second.diagnostics["batch"]["tree"]["completed_visits"]) > second.visits
 
 
+def test_dense_cnn_mcts_session_exports_full_root_prior_across_tree_reuse() -> None:
+    # Regression guard for the shared-prior (Arc + cursor) refactor: the exported
+    # root_prior_policy must remain the FULL in-crop legal distribution, both for a
+    # freshly searched root and for a promoted (reused) interior root. Truncating the
+    # shared prior list would silently shrink this distribution and corrupt the
+    # policy-surprise weighting and the rootPolicy auxiliary target.
+    engine = importlib.import_module("hexo_engine")
+    engine_types = importlib.import_module("hexo_engine.types")
+    mcts_module = importlib.import_module("hexo_models.dense_cnn.mcts")
+    rust_bridge = importlib.import_module("hexo_models.dense_cnn.rust_bridge")
+    _skip_without_direct_state_rust(rust_bridge)
+
+    class FakeInference:
+        def evaluate_model1_payload(self, payload: Mapping[str, Any]) -> Mapping[str, object]:
+            return _full_prior_payload(payload)
+
+    def in_crop_legal_count(state: object) -> int:
+        return len(rust_bridge.model1_batch_inputs([state])["legal_action_ids"][0])
+
+    state = engine.new_game()
+    inference = FakeInference()
+    session = mcts_module.new_mcts_session(max_states=100)
+
+    expected_first = in_crop_legal_count(state)
+    first = session.run(
+        [7], [state], inference, visits=8, temperature=0.0, seed=1, virtual_batch_size=1
+    )[0]
+    assert len(first.root_prior_policy) == expected_first
+
+    engine.apply_action(
+        state,
+        engine.PlacementAction(engine_types.unpack_coord_id(first.action_id)),
+    )
+
+    expected_second = in_crop_legal_count(state)
+    second = session.run(
+        [7], [state], inference, visits=8, temperature=0.0, seed=2, virtual_batch_size=1
+    )[0]
+    # The second move reuses the tree (the root is a promoted interior node), so this
+    # exercises the Shared->Owned export path, not a freshly evaluated owned root.
+    assert int(second.diagnostics["batch"]["tree"]["completed_visits"]) > second.visits
+    assert len(second.root_prior_policy) == expected_second
+
+
 def test_dense_cnn_rust_mcts_rejects_short_compact_evaluator_payloads() -> None:
     engine = importlib.import_module("hexo_engine")
     rust_bridge = importlib.import_module("hexo_models.dense_cnn.rust_bridge")

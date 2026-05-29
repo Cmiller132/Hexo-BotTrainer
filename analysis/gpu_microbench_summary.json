@@ -1,0 +1,60 @@
+{
+  "meta": {
+    "torch": "2.10.0+cu126",
+    "gpu": "NVIDIA GeForce RTX 4070 Ti",
+    "channels": 64,
+    "blocks": 4,
+    "batch": 256,
+    "horizons": [
+      1,
+      4,
+      8
+    ],
+    "clocks_before": {
+      "nvidia_smi_clocks_sm_maxsm_power_temp": "210 MHz, 3135 MHz, 8.86 W, 42"
+    },
+    "clocks_after": {
+      "nvidia_smi_clocks_sm_maxsm_power_temp": "2790 MHz, 3135 MHz, 226.06 W, 64"
+    }
+  },
+  "C_npz": {
+    "shard": "E:\\Hexo-BotTrainer\\runs\\dense_cnn_model1_scratch_64\\shuffleddata\\1780063093843353200-epoch_000022\\train\\data00008.npz",
+    "rows": 7936,
+    "nbatches": 31,
+    "reindex_per_batch_s": 7.4183304000180215,
+    "load_once_then_slice_s": 0.37259320000885054,
+    "speedup_x": 19.909999430590272
+  },
+  "A_training": {
+    "full_step_pageable_h2d_ms": 260.55942000006326,
+    "gpu_step_with_sync_ms": 258.6678149999352,
+    "gpu_step_no_sync_ms": 257.94494500005385,
+    "gpu_step_noclip_nosync_ms": 258.1659929998568,
+    "fwd_only_ms": 91.99766999983694,
+    "h2d_pageable_ms": 2.1245220000855625,
+    "h2d_pinned_ms": 2.217693999991752,
+    "steps_per_epoch": 390,
+    "projected_epoch_train_s_full_pageable": 101.61817380002466,
+    "projected_epoch_train_s_gpu_only_nosync": 100.598528550021
+  },
+  "B_inference": {
+    "bs256": {
+      "full_policy_value_ms": 14.190515999798663,
+      "trunk_only_ms": 13.731620999751613,
+      "trunk_plus_policy_ms": 13.98986199987121,
+      "policy_head_ms_est": 0.2582410001195967,
+      "value_head_plus_overhead_ms_est": 0.2006539999274537,
+      "full_us_per_state": 55.43170312421353,
+      "trunk_us_per_state": 53.63914453027974
+    },
+    "bs1024": {
+      "full_policy_value_ms": 56.87429300014628,
+      "trunk_only_ms": 55.30760299996473,
+      "trunk_plus_policy_ms": 56.13280399993528,
+      "policy_head_ms_est": 0.8252009999705479,
+      "value_head_plus_overhead_ms_est": 0.7414890002110042,
+      "full_us_per_state": 55.54130175795535,
+      "trunk_us_per_state": 54.011331054653056
+    }
+  }
+}

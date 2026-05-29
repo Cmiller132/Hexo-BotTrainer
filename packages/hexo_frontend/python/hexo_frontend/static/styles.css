@@ -112,6 +112,10 @@ main {
   display: grid;
   grid-template-rows: auto auto;
   gap: 10px;
+  /* Backstop: the viewer is fixed-size, so the page must never scroll
+     horizontally even if a child briefly mis-sizes. */
+  min-width: 0;
+  overflow-x: hidden;
 }
 
 .top-grid {
@@ -1098,6 +1102,7 @@ body.pending button:disabled {
 
 .history-panel,
 .replay-panel {
+  min-width: 0;
   overflow: visible;
 }
 
@@ -1107,19 +1112,34 @@ body.pending button:disabled {
   padding-bottom: 6px;
 }
 
+/* Bounded box: chips wrap and the box scrolls vertically, so it is always
+   exactly its container's width and never pushes the layout sideways no matter
+   how many moves a game has. */
 .move-history {
-  min-height: 54px;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  height: 92px;
+  min-height: 92px;
   display: flex;
-  gap: 8px;
-  overflow-x: auto;
-  padding: 10px 10px 9px;
-  align-items: center;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  gap: 6px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 9px 10px;
+}
+
+.move-history .empty-list {
+  align-self: center;
+  padding: 2px 4px;
 }
 
 .history-chip {
-  flex: 0 0 112px;
-  height: 30px;
-  min-height: 30px;
+  flex: 0 0 auto;
+  width: 110px;
+  height: 28px;
+  min-height: 28px;
   border: 1px solid var(--border);
   border-radius: 5px;
   background: rgba(8, 15, 23, 0.82);
@@ -1470,10 +1490,6 @@ body:not(.tactics-on) .tactic-legend {
   .toolbar,
   .replay-buttons {
     gap: 6px;
-  }
-
-  .history-chip {
-    flex-basis: 108px;
   }
 
   .history-page-actions,
@@ -2005,7 +2021,12 @@ body:not(.tactics-on) .tactic-legend {
 .history-table-head,
 .game-history-row {
   display: grid;
-  grid-template-columns: minmax(220px, 1.35fr) 112px 86px 82px minmax(170px, 1fr) minmax(150px, 0.9fr);
+  /* All tracks have a 0 minimum so the row always fits the panel width and
+     cells ellipsize instead of overflowing under the panel's overflow:hidden
+     (which previously cropped the Players/Diagnostics headers and columns). */
+  grid-template-columns:
+    minmax(0, 2.2fr) minmax(0, 1.15fr) minmax(0, 0.95fr)
+    minmax(0, 0.7fr) minmax(0, 1.4fr) minmax(0, 1.3fr);
   gap: 8px;
   align-items: center;
 }
@@ -2018,6 +2039,13 @@ body:not(.tactics-on) .tactic-legend {
   font-weight: 900;
   letter-spacing: 1px;
   text-transform: uppercase;
+}
+
+.history-table-head span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .game-history-list {
