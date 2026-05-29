@@ -9,9 +9,8 @@ device = "cuda"
 input_channels = 13
 channels = 64
 residual_blocks = 4
-crop_size = 41
 dropout = 0.0
-lookahead_horizons = [1, 4, 8]
+short_term_value_horizons = [1, 4, 8]
 
 [model.config.training]
 batch_size = 128
@@ -20,34 +19,44 @@ weight_decay = 0.0001
 policy_weight = 1.0
 value_weight = 1.0
 opp_policy_weight = 0.25
-lookahead_weight = 0.25
+short_term_value_weight = 0.25
 amp = true
 max_grad_norm = 1.0
+train_samples_per_epoch = 100000
+max_train_bucket_per_new_data = 8.0
+max_train_bucket_size = 500000
+no_repeat_files = true
+max_validation_samples = 100000
 
 [model.config.samples]
-capacity = 200000
-train_sample_count = 65536
-recency_halflife = 50000.0
-classical_replay_min_fraction = 0.75
-compression_level = 6
+shuffle_min_rows = 100000
+shuffle_keep_target_rows = 600000
+shuffle_taper_window_exponent = 0.65
+shuffle_expand_window_per_row = 0.4
+shuffle_taper_window_scale = 50000.0
+approx_rows_per_out_file = 70000
+shuffle_worker_group_size = 80000
+validation_fraction = 0.0
+policy_surprise_uniform_fraction = 0.5
+policy_surprise_max_weight = 8.0
 
 [model.config.selfplay]
-samples_per_epoch = 65536
 search_visits = 128
-active_games = 2048
-min_mcts_samples_per_game = 32
-progressive_widening_initial_actions = 8
-progressive_widening_child_initial_actions = 4
-progressive_widening_candidate_actions = 128
-progressive_widening_growth_interval = 256.0
-progressive_widening_growth_base = 1.3
-root_dirichlet_alpha = 0.1
-root_exploration_fraction = 0.25
-mcts_evaluation_cache_max_states = 1048576
+active_games = 1024
+c_puct = 1.5
+root_dirichlet_noise_enabled = true
+root_dirichlet_noise_fraction = 0.25
+root_dirichlet_total_alpha = 10.83
+root_policy_temperature = 1.1
+fpu_reduction = 0.20
+virtual_loss = 1.0
+widening_policy_mass = 0.95
+widening_max_children = 32
+widening_min_children = 2
+mcts_session_cache_max_states = 1048576
 mcts_active_root_limit = 1024
 max_actions = 1024
 temperature = 1.0
-worker_count = 1
 
 [model.config.evaluation]
 games_per_epoch = 64
@@ -59,19 +68,12 @@ require_sealbot = true
 [model.config.performance]
 calibrate = true
 target_selfplay_positions_per_second = 128.0
-inference_batch_candidates = [512, 1024]
-selfplay_batch_candidates = [2048]
+inference_batch_candidates = [128, 256, 512, 1024]
+selfplay_batch_candidates = [1024]
 training_batch_candidates = [64, 128, 192, 256]
-mcts_visit_candidates = [128]
 mcts_virtual_batch_candidates = [4]
 selfplay_probe_positions = 65536
 probe_batches = 1
-
-[model.config.debug]
-write_game_history = true
-write_policy_targets = true
-write_sample_previews = true
-preview_games = 4
 
 [run]
 name = "dense_cnn_model1"
@@ -82,12 +84,9 @@ seed = 1
 epochs = 30
 
 [selfplay]
-games_per_epoch = 4096
+games_per_epoch = 256
 update_checkpoint_pointer = true
 checkpoint_pointer = "../data/checkpoints/dense_cnn_model1_latest.txt"
-
-[samples]
-train_sample_count = 65536
 
 [train]
 passes_per_epoch = 8

@@ -1,4 +1,15 @@
-"""Required-Rust MCTS boundary for the dense CNN self-play path."""
+"""Required Rust MCTS boundary for dense CNN search.
+
+This module is deliberately thin. Python owns the user-facing session object and
+turns byte-backed native results into Python dataclasses, while the Rust session
+owns state cloning, argument validation, tree reuse, PUCT search, evaluator
+payload construction, and action selection.
+
+The only production search entry point is `BatchedMctsSession.run`: callers pass
+game keys, live `hexo_engine.HexoState` roots, and a `DenseCNNInference`
+instance. There are no one-shot Python search wrappers or Python-side state
+payload fallbacks.
+"""
 
 from __future__ import annotations
 
@@ -11,16 +22,6 @@ from . import rust_bridge
 from .inference import DenseCNNInference
 
 
-DEFAULT_ACTIVE_ROOT_LIMIT = 1024
-DEFAULT_EVAL_CHUNK_STATES = 4096
-
-
-def new_mcts_evaluation_cache(*, max_states: int = 1_048_576) -> object:
-    """Create a native cache scoped to a single model-weight snapshot."""
-
-    return rust_bridge.model1_new_mcts_evaluation_cache(max_states=max_states)
-
-
 def new_mcts_session(*, max_states: int = 1_048_576) -> "BatchedMctsSession":
     """Create a native search session that keeps selected subtrees per game."""
 
@@ -28,7 +29,12 @@ def new_mcts_session(*, max_states: int = 1_048_576) -> "BatchedMctsSession":
 
 
 class BatchedMctsSession:
-    """KataGo-style selected-subtree reuse for batched self-play games."""
+    """KataGo-style selected-subtree reuse for batched self-play games.
+
+    `game_keys` identify independent games across turns. Rust promotes the
+    selected child after each search, then keeps that subtree under the same key
+    until the caller discards it or sends a state whose hash no longer matches.
+    """
 
     def __init__(self, *, max_states: int = 1_048_576) -> None:
         self._session = rust_bridge.model1_new_mcts_session(max_states=max_states)
@@ -53,73 +59,59 @@ class BatchedMctsSession:
         temperature: float = 1.0,
         seed: int | None = None,
         virtual_batch_size: int | None = None,
-        progressive_widening_initial_actions: int | None = 8,
-        progressive_widening_child_initial_actions: int | None = 4,
-        progressive_widening_candidate_actions: int | None = 128,
-        progressive_widening_growth_interval: float | None = 256.0,
-        progressive_widening_growth_base: float | None = 1.3,
-        root_dirichlet_alpha: float | None = None,
-        root_exploration_fraction: float | None = None,
         active_root_limit: int | None = None,
+        root_dirichlet_total_alpha: float | None = None,
+        root_dirichlet_noise_fraction: float | None = None,
+        root_policy_temperature: float | None = None,
+        fpu_reduction: float | None = None,
+        virtual_loss: float | None = None,
+        widening_policy_mass: float | None = None,
+        widening_max_children: int | None = None,
+        widening_min_children: int | None = None,
     ) -> list["SearchResult"]:
+        """Search live root states through the native dense-cnn MCTS session.
+
+        The Python side supplies the `DenseCNNInference` callback. Every other
+        search detail, including cloning engine states, batching leaves over all
+        legal moves, parsing evaluator bytes, and selecting the returned action,
+        belongs to Rust.
+        """
+
         if not root_states:
             return []
-        if len(game_keys) != len(root_states):
-            raise ValueError(f"received {len(game_keys)} game keys for {len(root_states)} root states")
-        target_visits = max(1, int(visits))
-        root_limit = max(1, int(active_root_limit or DEFAULT_ACTIVE_ROOT_LIMIT))
-        if len(root_states) > root_limit:
-            results: list[SearchResult] = []
-            for start in range(0, len(root_states), root_limit):
-                results.extend(
-                    self.run(
-                        game_keys[start : start + root_limit],
-                        root_states[start : start + root_limit],
-                        inference,
-                        visits=target_visits,
-                        c_puct=c_puct,
-                        temperature=temperature,
-                        seed=(0 if seed is None else int(seed)) + start,
-                        virtual_batch_size=virtual_batch_size,
-                        progressive_widening_initial_actions=progressive_widening_initial_actions,
-                        progressive_widening_child_initial_actions=progressive_widening_child_initial_actions,
-                        progressive_widening_candidate_actions=progressive_widening_candidate_actions,
-                        progressive_widening_growth_interval=progressive_widening_growth_interval,
-                        progressive_widening_growth_base=progressive_widening_growth_base,
-                        root_dirichlet_alpha=root_dirichlet_alpha,
-                        root_exploration_fraction=root_exploration_fraction,
-                        active_root_limit=root_limit,
-                    )
-                )
-            return results
         payloads = rust_bridge.model1_mcts_session_search(
             self._session,
             game_keys,
             root_states,
-            visits=target_visits,
+            visits=visits,
             c_puct=c_puct,
             temperature=temperature,
             seed=0 if seed is None else int(seed),
             evaluator=inference.evaluate_model1_payload,
-            virtual_batch_size=_resolve_virtual_batch_size(
-                root_count=len(root_states),
-                visits=target_visits,
-                virtual_batch_size=virtual_batch_size,
-            ),
-            progressive_widening_initial_actions=progressive_widening_initial_actions,
-            progressive_widening_child_initial_actions=progressive_widening_child_initial_actions,
-            progressive_widening_candidate_actions=progressive_widening_candidate_actions,
-            progressive_widening_growth_interval=progressive_widening_growth_interval,
-            progressive_widening_growth_base=progressive_widening_growth_base,
-            root_dirichlet_alpha=root_dirichlet_alpha,
-            root_exploration_fraction=root_exploration_fraction,
-            active_root_limit=root_limit,
+            virtual_batch_size=virtual_batch_size,
+            active_root_limit=active_root_limit,
+            root_dirichlet_total_alpha=root_dirichlet_total_alpha,
+            root_dirichlet_noise_fraction=root_dirichlet_noise_fraction,
+            root_policy_temperature=root_policy_temperature,
+            fpu_reduction=fpu_reduction,
+            virtual_loss=virtual_loss,
+            widening_policy_mass=widening_policy_mass,
+            widening_max_children=widening_max_children,
+            widening_min_children=widening_min_children,
         )
         return [_result_from_payload(payload) for payload in payloads]
 
 
 @dataclass(frozen=True, slots=True)
 class CompactVisitPolicy(Sequence[tuple[int, float]]):
+    """Byte-backed visit policy returned by Rust.
+
+    Rust serializes action ids and weights into two contiguous buffers so large
+    policies do not allocate thousands of Python tuples during search. This
+    wrapper decodes lazily when callers iterate, index, or pass it to sample
+    generation.
+    """
+
     action_ids_bytes: bytes
     weights_bytes: bytes
     count: int
@@ -147,159 +139,57 @@ class CompactVisitPolicy(Sequence[tuple[int, float]]):
 
 @dataclass(frozen=True, slots=True)
 class SearchResult:
+    """One searched root result returned to self-play or runner players."""
+
     action_id: int
     visit_policy: Sequence[tuple[int, float]]
     root_value: float
     visits: int
+    root_prior_policy: Sequence[tuple[int, float]]
     diagnostics: Mapping[str, Any] = field(default_factory=dict)
 
 
-def run_mcts(
-    root_state: object,
-    inference: DenseCNNInference,
-    *,
-    visits: int,
-    c_puct: float = 1.5,
-    temperature: float = 1.0,
-    seed: int | None = None,
-    progressive_widening_initial_actions: int | None = 8,
-    progressive_widening_child_initial_actions: int | None = 4,
-    progressive_widening_candidate_actions: int | None = 128,
-    progressive_widening_growth_interval: float | None = 256.0,
-    progressive_widening_growth_base: float | None = 1.3,
-    root_dirichlet_alpha: float | None = None,
-    root_exploration_fraction: float | None = None,
-    evaluation_cache: object | None = None,
-    active_root_limit: int | None = None,
-) -> SearchResult:
-    """Run a single-root dense CNN MCTS search in Rust."""
-
-    return run_batched_mcts(
-        [root_state],
-        inference,
-        visits=visits,
-        c_puct=c_puct,
-        temperature=temperature,
-        seed=seed,
-        progressive_widening_initial_actions=progressive_widening_initial_actions,
-        progressive_widening_child_initial_actions=progressive_widening_child_initial_actions,
-        progressive_widening_candidate_actions=progressive_widening_candidate_actions,
-        progressive_widening_growth_interval=progressive_widening_growth_interval,
-        progressive_widening_growth_base=progressive_widening_growth_base,
-        root_dirichlet_alpha=root_dirichlet_alpha,
-        root_exploration_fraction=root_exploration_fraction,
-        evaluation_cache=evaluation_cache,
-        active_root_limit=active_root_limit,
-    )[0]
-
-
-def run_batched_mcts(
-    root_states: Sequence[object],
-    inference: DenseCNNInference,
-    *,
-    visits: int,
-    c_puct: float = 1.5,
-    temperature: float = 1.0,
-    seed: int | None = None,
-    virtual_batch_size: int | None = None,
-    progressive_widening_initial_actions: int | None = 8,
-    progressive_widening_child_initial_actions: int | None = 4,
-    progressive_widening_candidate_actions: int | None = 128,
-    progressive_widening_growth_interval: float | None = 256.0,
-    progressive_widening_growth_base: float | None = 1.3,
-    root_dirichlet_alpha: float | None = None,
-    root_exploration_fraction: float | None = None,
-    evaluation_cache: object | None = None,
-    active_root_limit: int | None = None,
-) -> list[SearchResult]:
-    """Run dense CNN root searches through the required Rust accelerator."""
-
-    if not root_states:
-        return []
-    target_visits = max(1, int(visits))
-    root_limit = max(1, int(active_root_limit or DEFAULT_ACTIVE_ROOT_LIMIT))
-    if len(root_states) > root_limit:
-        results: list[SearchResult] = []
-        for start in range(0, len(root_states), root_limit):
-            chunk = root_states[start : start + root_limit]
-            results.extend(
-                run_batched_mcts(
-                    chunk,
-                    inference,
-                    visits=target_visits,
-                    c_puct=c_puct,
-                    temperature=temperature,
-                    seed=(0 if seed is None else int(seed)) + start,
-                    virtual_batch_size=virtual_batch_size,
-                    progressive_widening_initial_actions=progressive_widening_initial_actions,
-                    progressive_widening_child_initial_actions=progressive_widening_child_initial_actions,
-                    progressive_widening_candidate_actions=progressive_widening_candidate_actions,
-                    progressive_widening_growth_interval=progressive_widening_growth_interval,
-                    progressive_widening_growth_base=progressive_widening_growth_base,
-                    root_dirichlet_alpha=root_dirichlet_alpha,
-                    root_exploration_fraction=root_exploration_fraction,
-                    evaluation_cache=evaluation_cache,
-                    active_root_limit=root_limit,
-                )
-            )
-        return results
-    payloads = rust_bridge.model1_batched_mcts(
-        root_states,
-        visits=target_visits,
-        c_puct=float(c_puct),
-        temperature=float(temperature),
-        seed=0 if seed is None else int(seed),
-        evaluator=inference.evaluate_model1_payload,
-        virtual_batch_size=_resolve_virtual_batch_size(
-            root_count=len(root_states),
-            visits=target_visits,
-            virtual_batch_size=virtual_batch_size,
-        ),
-        progressive_widening_initial_actions=progressive_widening_initial_actions,
-        progressive_widening_child_initial_actions=progressive_widening_child_initial_actions,
-        progressive_widening_candidate_actions=progressive_widening_candidate_actions,
-        progressive_widening_growth_interval=progressive_widening_growth_interval,
-        progressive_widening_growth_base=progressive_widening_growth_base,
-        root_dirichlet_alpha=root_dirichlet_alpha,
-        root_exploration_fraction=root_exploration_fraction,
-        evaluation_cache=evaluation_cache,
-        active_root_limit=root_limit,
-    )
-    return [_result_from_payload(payload) for payload in payloads]
-
-
-def _resolve_virtual_batch_size(
-    *,
-    root_count: int,
-    visits: int,
-    virtual_batch_size: int | None,
-) -> int:
-    max_total_virtual_leaves = DEFAULT_EVAL_CHUNK_STATES
-    max_virtual_per_root = max(1, max_total_virtual_leaves // max(1, int(root_count)))
-    if virtual_batch_size is not None:
-        return max(1, min(int(virtual_batch_size), int(visits), max_virtual_per_root))
-    return max(1, min(max(1, int(visits)), max_virtual_per_root))
-
-
 def _result_from_payload(payload: Mapping[str, Any]) -> SearchResult:
+    """Convert the native result dict into the small Python result dataclass."""
+
+    diagnostics = dict(payload.get("diagnostics", {}))
+    if "action_selection" in payload:
+        diagnostics["action_selection"] = str(payload["action_selection"])
     return SearchResult(
         action_id=int(payload["action_id"]),
-        visit_policy=_visit_policy_from_payload(payload),
+        visit_policy=_policy_from_payload(payload, prefix="visit_policy"),
         root_value=float(payload["root_value"]),
         visits=int(payload["visits"]),
-        diagnostics=dict(payload.get("diagnostics", {})),
+        root_prior_policy=_policy_from_payload(payload, prefix="root_prior_policy"),
+        diagnostics=diagnostics,
     )
 
 
-def _visit_policy_from_payload(payload: Mapping[str, Any]) -> Sequence[tuple[int, float]]:
-    if "visit_policy_action_ids_bytes" in payload:
-        count = int(payload.get("visit_policy_count", 0))
-        return CompactVisitPolicy(
-            action_ids_bytes=bytes(payload["visit_policy_action_ids_bytes"]),
-            weights_bytes=bytes(payload["visit_policy_weights_bytes"]),
-            count=count,
+def _policy_from_payload(
+    payload: Mapping[str, Any],
+    *,
+    prefix: str,
+) -> Sequence[tuple[int, float]]:
+    """Read a strict byte-only action/weight policy payload produced by Rust."""
+
+    required = (
+        f"{prefix}_action_ids_bytes",
+        f"{prefix}_weights_bytes",
+        f"{prefix}_count",
+    )
+    missing = [key for key in required if key not in payload]
+    if missing:
+        raise ValueError(f"MCTS result payload missing required byte field(s): {', '.join(missing)}")
+    count = int(payload[f"{prefix}_count"])
+    action_ids_bytes = bytes(payload[f"{prefix}_action_ids_bytes"])
+    weights_bytes = bytes(payload[f"{prefix}_weights_bytes"])
+    expected = count * 4
+    if len(action_ids_bytes) != expected or len(weights_bytes) != expected:
+        raise ValueError(
+            f"MCTS result {prefix} byte lengths must match {prefix}_count"
         )
-    return tuple(
-        (int(action_id), float(weight))
-        for action_id, weight in payload["visit_policy"]
+    return CompactVisitPolicy(
+        action_ids_bytes=action_ids_bytes,
+        weights_bytes=weights_bytes,
+        count=count,
     )

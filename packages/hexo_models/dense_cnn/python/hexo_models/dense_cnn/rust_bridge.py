@@ -1,4 +1,13 @@
-"""Required Rust acceleration owned by the dense CNN model package."""
+"""Thin Python import/call boundary for dense CNN Rust acceleration.
+
+All production acceleration lives in `hexo_models._rust.dense_cnn`, registered
+from `rust/src`. This module keeps the import error message readable and gives
+Python code named functions for native calls.
+
+It intentionally does not duplicate Rust MCTS scalar validation. The native
+session is the actual search boundary; Python forwards values and lets PyO3/Rust
+raise clear errors for invalid native search configuration.
+"""
 
 from __future__ import annotations
 
@@ -25,63 +34,10 @@ def model1_batch_inputs(states: Sequence[object]) -> Mapping[str, Any]:
     return _dense_cnn_module().model1_batch_inputs(tuple(states))
 
 
-def model1_batched_mcts(
-    states: Sequence[object],
-    *,
-    visits: int,
-    c_puct: float,
-    temperature: float,
-    seed: int,
-    evaluator: object,
-    virtual_batch_size: int | None = None,
-    progressive_widening_initial_actions: int | None = None,
-    progressive_widening_child_initial_actions: int | None = None,
-    progressive_widening_candidate_actions: int | None = None,
-    progressive_widening_growth_interval: float | None = None,
-    progressive_widening_growth_base: float | None = None,
-    root_dirichlet_alpha: float | None = None,
-    root_exploration_fraction: float | None = None,
-    evaluation_cache: object | None = None,
-    active_root_limit: int | None = None,
-) -> tuple[Mapping[str, Any], ...]:
-    """Run dense-cnn Rust MCTS from live engine states."""
-
-    return tuple(
-        _dense_cnn_module().model1_batched_mcts(
-            tuple(states),
-            int(visits),
-            float(c_puct),
-            float(temperature),
-            int(seed),
-            evaluator,
-            None if virtual_batch_size is None else max(1, int(virtual_batch_size)),
-            None if progressive_widening_initial_actions is None else max(1, int(progressive_widening_initial_actions)),
-            None if progressive_widening_child_initial_actions is None else max(1, int(progressive_widening_child_initial_actions)),
-            None if progressive_widening_growth_interval is None else max(1.0, float(progressive_widening_growth_interval)),
-            None if progressive_widening_growth_base is None else max(1.000001, float(progressive_widening_growth_base)),
-            None if progressive_widening_candidate_actions is None else max(1, int(progressive_widening_candidate_actions)),
-            None if root_dirichlet_alpha is None else max(0.0, float(root_dirichlet_alpha)),
-            None if root_exploration_fraction is None else min(1.0, max(0.0, float(root_exploration_fraction))),
-            evaluation_cache,
-            None if active_root_limit is None else max(1, int(active_root_limit)),
-        )
-    )
-
-
-def model1_new_mcts_evaluation_cache(*, max_states: int | None = None) -> object:
-    """Create a native scoped MCTS evaluation cache for one model-weight snapshot."""
-
-    return _dense_cnn_module().Model1MctsEvaluationCache(
-        None if max_states is None else max(1, int(max_states))
-    )
-
-
 def model1_new_mcts_session(*, max_states: int | None = None) -> object:
     """Create a native MCTS session that reuses selected subtrees across moves."""
 
-    return _dense_cnn_module().Model1MctsSession(
-        None if max_states is None else max(1, int(max_states))
-    )
+    return _dense_cnn_module().Model1MctsSession(max_states)
 
 
 def model1_mcts_session_search(
@@ -95,35 +51,42 @@ def model1_mcts_session_search(
     seed: int,
     evaluator: object,
     virtual_batch_size: int | None = None,
-    progressive_widening_initial_actions: int | None = None,
-    progressive_widening_child_initial_actions: int | None = None,
-    progressive_widening_candidate_actions: int | None = None,
-    progressive_widening_growth_interval: float | None = None,
-    progressive_widening_growth_base: float | None = None,
-    root_dirichlet_alpha: float | None = None,
-    root_exploration_fraction: float | None = None,
     active_root_limit: int | None = None,
+    root_dirichlet_total_alpha: float | None = None,
+    root_dirichlet_noise_fraction: float | None = None,
+    root_policy_temperature: float | None = None,
+    fpu_reduction: float | None = None,
+    virtual_loss: float | None = None,
+    widening_policy_mass: float | None = None,
+    widening_max_children: int | None = None,
+    widening_min_children: int | None = None,
 ) -> tuple[Mapping[str, Any], ...]:
-    """Search through a native MCTS session, preserving chosen subtrees."""
+    """Search through a native MCTS session, preserving chosen subtrees.
+
+    Arguments are forwarded in the PyO3 signature order expected by
+    `rust/src/mcts.rs`. Each node materializes at most a policy-nucleus subset of
+    its legal moves (top-p widening).
+    """
 
     return tuple(
         session.search(
             tuple(int(item) for item in game_keys),
             tuple(states),
-            int(visits),
-            float(c_puct),
-            float(temperature),
+            visits,
+            c_puct,
+            temperature,
             int(seed),
             evaluator,
-            None if virtual_batch_size is None else max(1, int(virtual_batch_size)),
-            None if progressive_widening_initial_actions is None else max(1, int(progressive_widening_initial_actions)),
-            None if progressive_widening_child_initial_actions is None else max(1, int(progressive_widening_child_initial_actions)),
-            None if progressive_widening_growth_interval is None else max(1.0, float(progressive_widening_growth_interval)),
-            None if progressive_widening_growth_base is None else max(1.000001, float(progressive_widening_growth_base)),
-            None if progressive_widening_candidate_actions is None else max(1, int(progressive_widening_candidate_actions)),
-            None if root_dirichlet_alpha is None else max(0.0, float(root_dirichlet_alpha)),
-            None if root_exploration_fraction is None else min(1.0, max(0.0, float(root_exploration_fraction))),
-            None if active_root_limit is None else max(1, int(active_root_limit)),
+            virtual_batch_size,
+            active_root_limit,
+            root_dirichlet_total_alpha,
+            root_dirichlet_noise_fraction,
+            root_policy_temperature,
+            fpu_reduction,
+            virtual_loss,
+            widening_policy_mass,
+            widening_max_children,
+            widening_min_children,
         )
     )
 
@@ -133,46 +96,21 @@ def model1_sample_from_state(
     *,
     game_id: str,
     turn_index: int,
-    policy: Mapping[int, float] | Sequence[tuple[int, float]] = (),
-    value: float = 0.0,
-    opp_policy: Mapping[int, float] | Sequence[tuple[int, float]] = (),
-    lookahead: Mapping[int, float] | Sequence[tuple[int, float]] = (),
     metadata: Mapping[str, Any] | None = None,
 ) -> Mapping[str, Any]:
-    """Build one compact sample from a live engine state in Rust."""
+    """Build one compact sample's state-derived facts from a live engine state."""
 
     return _dense_cnn_module().model1_sample_from_state(
         state,
         str(game_id),
         int(turn_index),
-        policy,
-        float(value),
-        opp_policy,
-        lookahead,
         dict(metadata or {}),
     )
 
 
-def model1_finalize_game_samples(
-    pending: Sequence[tuple[str, Mapping[str, Any], float]],
-    *,
-    winner: str | None,
-    horizons: Sequence[int],
-    truncated: bool,
-) -> tuple[Mapping[str, Any], ...]:
-    """Finalize compact game samples in Rust."""
-
-    return tuple(
-        _dense_cnn_module().model1_finalize_game_samples(
-            tuple(pending),
-            winner,
-            tuple(int(item) for item in horizons),
-            bool(truncated),
-        )
-    )
-
-
 def _dense_cnn_module() -> Any:
+    """Return the loaded native dense_cnn module or raise a clear error."""
+
     module = getattr(_rust, "dense_cnn", None) if _rust is not None else None
     if module is None:
         raise RuntimeError(f"dense_cnn Rust accelerator is unavailable: {_IMPORT_ERROR}")

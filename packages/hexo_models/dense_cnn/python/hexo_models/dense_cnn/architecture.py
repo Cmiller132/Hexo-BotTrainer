@@ -1,4 +1,19 @@
-"""Model 1 hex convolutional network."""
+"""PyTorch architecture for dense CNN Model 1.
+
+The architecture consumes the 13-plane crop encoded by `input.py` and
+`rust/src/encoding.rs`. It produces the exact heads consumed by training and
+search:
+
+- `policy`: logits over the 41x41 dense crop.
+- `value`: a 65-bin scalar value distribution in `[-1, 1]`.
+- `opp_policy`: an auxiliary policy target from the next opponent MCTS policy.
+- `stvalue_<horizon>`: optional short-term value heads for EMA future-root targets.
+
+The model uses `HexConv2d`, a normal 3x3 convolution whose two square-grid
+corners are masked away so each kernel footprint matches axial hex adjacency.
+`optimized_model1_for_inference` clones an eval-only copy and folds the masked
+convs plus batch norms into plain `nn.Conv2d` modules for faster CUDA search.
+"""
 
 from __future__ import annotations
 
@@ -20,7 +35,13 @@ from .constants import (
 
 
 class HexConv2d(nn.Conv2d):
-    """3x3 convolution with the invalid square-grid hex corners masked out."""
+    """3x3 convolution with invalid square-grid hex corners masked out.
+
+    The dense crop is stored as a square tensor for GPU efficiency, but axial
+    hex adjacency has six neighbors instead of eight. Masking `(0, 0)` and
+    `(2, 2)` in every 3x3 kernel makes the local receptive field match the
+    axial directions used by the engine.
+    """
 
     def __init__(self, *args: object, **kwargs: object) -> None:
         super().__init__(*args, **kwargs)
@@ -47,6 +68,8 @@ class HexConv2d(nn.Conv2d):
         )
 
     def masked_weight(self) -> torch.Tensor:
+        """Return the masked kernel, caching it only for eval/no-grad use."""
+
         if self.training or torch.is_grad_enabled():
             return self.weight * self.hex_mask
         version = int(getattr(self.weight, "_version", 0))
@@ -122,7 +145,12 @@ class ValueBinnedHead(nn.Module):
 
 
 class Model1Network(nn.Module):
-    """Model 1 trunk and heads exactly matching the training target surface."""
+    """Model 1 trunk and heads matching the training target surface.
+
+    `forward` returns all training heads. `forward_policy_value` skips auxiliary
+    heads during MCTS inference, which keeps search batches focused on the two
+    outputs Rust needs: policy logits and scalar-value bins.
+    """
 
     def __init__(
         self,
@@ -131,14 +159,14 @@ class Model1Network(nn.Module):
         channels: int = DEFAULT_CHANNELS,
         blocks: int = DEFAULT_BLOCKS,
         dropout: float = 0.0,
-        lookahead_horizons: tuple[int, ...] = (),
+        short_term_value_horizons: tuple[int, ...] = (),
     ) -> None:
         super().__init__()
         self.in_channels = int(in_channels)
         self.channels = int(channels)
         self.blocks_count = int(blocks)
         self.board_size = BOARD_SIZE
-        self.lookahead_horizons = tuple(int(item) for item in lookahead_horizons)
+        self.short_term_value_horizons = tuple(int(item) for item in short_term_value_horizons)
 
         self.conv_in = HexConv2d(self.in_channels, self.channels, kernel_size=3, padding=1)
         self.activation = nn.ReLU(inplace=True)
@@ -148,8 +176,8 @@ class Model1Network(nn.Module):
         self.policy_head = PolicyHead(self.channels)
         self.value_head = ValueBinnedHead(self.channels)
         self.opp_policy_head = PolicyHead(self.channels)
-        self.lookahead_heads = nn.ModuleDict(
-            {str(horizon): ValueBinnedHead(self.channels) for horizon in self.lookahead_horizons}
+        self.short_term_value_heads = nn.ModuleDict(
+            {str(horizon): ValueBinnedHead(self.channels) for horizon in self.short_term_value_horizons}
         )
 
     def trunk(self, x: torch.Tensor) -> torch.Tensor:
@@ -163,8 +191,8 @@ class Model1Network(nn.Module):
             "value": self.value_head(features),
             "opp_policy": self.opp_policy_head(features),
         }
-        for horizon, head in self.lookahead_heads.items():
-            outputs[f"lookahead_{horizon}"] = head(features)
+        for horizon, head in self.short_term_value_heads.items():
+            outputs[f"stvalue_{horizon}"] = head(features)
         return outputs
 
     def forward_policy_value(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
@@ -187,7 +215,13 @@ class Model1Network(nn.Module):
 
 
 def optimized_model1_for_inference(model: nn.Module) -> nn.Module:
-    """Return a cloned eval-only model with HexConv/BatchNorm overhead folded away."""
+    """Return a cloned eval-only model with HexConv/BatchNorm overhead folded away.
+
+    The training model keeps `HexConv2d` masks explicit so gradients always hit
+    the masked parameter tensor. For CUDA inference, the mask is already fixed,
+    so the clone can replace hex convs with plain `nn.Conv2d` and fuse adjacent
+    batch norms without changing outputs.
+    """
 
     optimized = copy.deepcopy(model).to("cpu").eval()
     for module in optimized.modules():
@@ -239,6 +273,8 @@ def _set_child_module(parent: nn.Module, name: str, child: nn.Module) -> None:
 
 
 def _hex_conv_as_conv2d(conv: HexConv2d) -> nn.Conv2d:
+    """Copy a masked `HexConv2d` into a plain `nn.Conv2d` for eval clones."""
+
     converted = nn.Conv2d(
         conv.in_channels,
         conv.out_channels,

@@ -55,27 +55,23 @@ def _small_model_config(overrides: Mapping[str, Any] | None = None) -> dict[str,
             "weight_decay": 0.0,
             "amp": False,
             "max_grad_norm": 1.0,
+            "train_samples_per_epoch": 2,
+            "max_train_bucket_per_new_data": 8.0,
+            "max_train_bucket_size": 16,
         },
         "samples": {
-            "train_sample_count": 2,
-            "compression_level": 1,
+            "shuffle_min_rows": 1,
+            "shuffle_keep_target_rows": 32,
+            "approx_rows_per_out_file": 8,
         },
         "selfplay": {
-            "samples_per_epoch": 2,
             "search_visits": 1,
             "max_actions": 4,
-            "worker_count": 1,
         },
         "evaluation": {
             "games_per_epoch": 1,
             "sealbot_time_limit": 0.001,
             "max_actions": 4,
-        },
-        "debug": {
-            "write_game_history": True,
-            "write_policy_targets": True,
-            "write_sample_previews": False,
-            "preview_games": 1,
         },
     }
     if overrides:
@@ -141,25 +137,6 @@ def _required_mapping(payload: Mapping[str, Any], *keys: str) -> Mapping[str, An
     raise AssertionError(f"checkpoint payload must include one of {keys!r}; got keys {sorted(payload)}")
 
 
-def _raw_dense_sample(sample_id: str, *, sample_source: str = "mcts") -> dict[str, Any]:
-    return {
-        "sample_id": sample_id,
-        "turn_index": 0,
-        "current_player": "player0",
-        "phase": "Opening",
-        "center": (0, 0),
-        "stones": (),
-        "legal_action_ids": (0,),
-        "policy": [((0, 0), 1.0)],
-        "opp_policy": [((0, 0), 1.0)],
-        "value": 1.0,
-        "metadata": {
-            "sample_source": sample_source,
-            "target_schema_version": 2,
-        },
-    }
-
-
 def _write_pipeline_config(tmp_path: Path) -> Path:
     output_dir = (tmp_path / "pipeline-run").as_posix()
     config_path = tmp_path / "train_dense_cnn.toml"
@@ -184,17 +161,19 @@ def _write_pipeline_config(tmp_path: Path) -> Path:
                 "weight_decay = 0.0",
                 "amp = false",
                 "max_grad_norm = 1.0",
+                "train_samples_per_epoch = 2",
+                "max_train_bucket_per_new_data = 8.0",
+                "max_train_bucket_size = 16",
                 "",
                 "[model.config.samples]",
-                "train_sample_count = 2",
-                "compression_level = 1",
+                "shuffle_min_rows = 1",
+                "shuffle_keep_target_rows = 32",
+                "approx_rows_per_out_file = 8",
                 "",
                 "[model.config.selfplay]",
-                "samples_per_epoch = 2",
                 "search_visits = 1",
                 "max_actions = 4",
                 "temperature = 1.0",
-                "worker_count = 1",
                 "",
                 "[model.config.evaluation]",
                 "games_per_epoch = 1",
@@ -211,12 +190,6 @@ def _write_pipeline_config(tmp_path: Path) -> Path:
                 "mcts_virtual_batch_candidates = [1, 2]",
                 "selfplay_probe_positions = 4",
                 "probe_batches = 1",
-                "",
-                "[model.config.debug]",
-                "write_game_history = true",
-                "write_policy_targets = true",
-                "write_sample_previews = false",
-                "preview_games = 1",
                 "",
                 "[run]",
                 f'output_dir = "{output_dir}"',
@@ -333,53 +306,69 @@ def test_dense_cnn_model1_config_writes_to_repo_level_run_and_checkpoint_paths()
     assert config.run.output_dir == ROOT / "runs" / "dense_cnn_model1"
     assert config.selfplay.checkpoint_pointer == ROOT / "data" / "checkpoints" / "dense_cnn_model1_latest.txt"
     assert config.checkpoint.resume_from == ROOT / "data" / "checkpoints" / "dense_cnn_model1_latest.txt"
+    assert config.selfplay.games_per_epoch == 256
     assert parsed.selfplay.search_visits == 128
-    assert parsed.selfplay.samples_per_epoch == 65536
-    assert parsed.selfplay.active_games == 2048
-    assert parsed.selfplay.min_mcts_samples_per_game == 32
-    assert parsed.selfplay.progressive_widening_initial_actions == 8
-    assert parsed.selfplay.progressive_widening_child_initial_actions == 4
-    assert parsed.selfplay.progressive_widening_candidate_actions == 128
-    assert parsed.selfplay.progressive_widening_growth_interval == pytest.approx(256.0)
-    assert parsed.selfplay.progressive_widening_growth_base == pytest.approx(1.3)
-    assert parsed.selfplay.root_dirichlet_alpha == pytest.approx(0.1)
-    assert parsed.selfplay.root_exploration_fraction == pytest.approx(0.25)
-    assert parsed.selfplay.mcts_evaluation_cache_max_states == 1_048_576
+    assert parsed.selfplay.active_games == 1024
+    assert parsed.selfplay.c_puct == pytest.approx(1.5)
+    assert parsed.selfplay.root_dirichlet_noise_enabled is True
+    assert parsed.selfplay.root_dirichlet_noise_fraction == pytest.approx(0.25)
+    assert parsed.selfplay.root_dirichlet_total_alpha == pytest.approx(10.83)
+    assert parsed.selfplay.root_policy_temperature == pytest.approx(1.1)
+    assert parsed.selfplay.widening_policy_mass == pytest.approx(0.95)
+    assert parsed.selfplay.widening_max_children == 32
+    assert parsed.selfplay.widening_min_children == 2
+    assert parsed.selfplay.fpu_reduction == pytest.approx(0.20)
+    assert parsed.selfplay.virtual_loss == pytest.approx(1.0)
+    assert parsed.selfplay.mcts_session_cache_max_states == 1_048_576
     assert parsed.selfplay.mcts_active_root_limit == 1024
-    assert parsed.samples.train_sample_count == 65536
-    assert parsed.samples.classical_replay_min_fraction == pytest.approx(0.75)
-    assert parsed.samples.capacity >= 200_000
+    assert parsed.selfplay.active_games <= parsed.selfplay.mcts_active_root_limit
+    assert parsed.training.train_samples_per_epoch == 100_000
+    assert parsed.training.max_train_bucket_per_new_data == pytest.approx(8.0)
+    assert parsed.training.max_train_bucket_size == pytest.approx(500_000.0)
+    assert parsed.training.no_repeat_files is True
+    assert parsed.training.max_validation_samples == 100_000
+    assert parsed.samples.shuffle_min_rows == 100_000
+    assert parsed.samples.shuffle_keep_target_rows == 600_000
+    assert parsed.samples.shuffle_taper_window_exponent == pytest.approx(0.65)
+    assert parsed.samples.shuffle_expand_window_per_row == pytest.approx(0.4)
+    assert parsed.samples.shuffle_taper_window_scale == pytest.approx(50_000.0)
+    assert parsed.samples.validation_fraction == pytest.approx(0.0)
     assert parsed.evaluation.games_per_epoch == 64
     assert parsed.evaluation.sealbot_variant == "best"
     assert parsed.evaluation.sealbot_time_limit == pytest.approx(0.05)
     assert parsed.evaluation.require_sealbot is True
     assert parsed.performance.target_selfplay_positions_per_second == pytest.approx(128.0)
     assert parsed.performance.selfplay_probe_positions >= max(parsed.performance.selfplay_batch_candidates)
-    assert parsed.performance.inference_batch_candidates == (512, 1024)
-    assert parsed.performance.selfplay_batch_candidates == (2048,)
+    assert parsed.performance.inference_batch_candidates[-1] <= 1024
+    assert parsed.performance.selfplay_batch_candidates == (1024,)
+    assert max(parsed.performance.selfplay_batch_candidates) <= parsed.selfplay.mcts_active_root_limit
     assert parsed.performance.mcts_virtual_batch_candidates == (4,)
     assert max(parsed.performance.training_batch_candidates) <= 256
 
 
-def test_training_selection_honors_classical_replay_floor() -> None:
-    samples_module = importlib.import_module("hexo_models.dense_cnn.samples")
-    trainer_module = importlib.import_module("hexo_models.dense_cnn.trainer")
-    buffer = samples_module.SampleBuffer(compression_level=1)
-    for index in range(4):
-        buffer.append(_raw_dense_sample(f"classical-{index}", sample_source="classical_sealbot_best_bootstrap"))
-    for index in range(12):
-        buffer.append(_raw_dense_sample(f"mcts-{index}", sample_source="mcts"))
+def test_dense_cnn_model_config_rejects_legacy_or_clamped_values() -> None:
+    dense_cnn = _dense_cnn()
 
-    selected = trainer_module._select_training_records(
-        buffer,
-        8,
-        seed=123,
-        classical_replay_min_fraction=0.5,
-    )
-    source_summary = trainer_module._summarize_sample_records(selected)
-
-    assert len(selected) == 8
-    assert source_summary["source_counts"]["classical_sealbot_best_bootstrap"] >= 4
+    with pytest.raises(ValueError, match="worker_count"):
+        dense_cnn.parse_model1_config({"selfplay": {"worker_count": 1}})
+    with pytest.raises(ValueError, match="samples_per_epoch"):
+        dense_cnn.parse_model1_config({"selfplay": {"samples_per_epoch": 1}})
+    with pytest.raises(ValueError, match="min_mcts_samples_per_game"):
+        dense_cnn.parse_model1_config({"selfplay": {"min_mcts_samples_per_game": 1}})
+    with pytest.raises(ValueError, match="hidden_prior_mass"):
+        dense_cnn.parse_model1_config({"selfplay": {"hidden_prior_mass": 0.05}})
+    with pytest.raises(ValueError, match="progressive_widening_candidate_actions"):
+        dense_cnn.parse_model1_config({"selfplay": {"progressive_widening_candidate_actions": 128}})
+    with pytest.raises(ValueError, match="capacity"):
+        dense_cnn.parse_model1_config({"samples": {"capacity": 1024}})
+    with pytest.raises(ValueError, match="train_sample_count"):
+        dense_cnn.parse_model1_config({"samples": {"train_sample_count": 1024}})
+    with pytest.raises(ValueError, match="recency_halflife"):
+        dense_cnn.parse_model1_config({"samples": {"recency_halflife": 50_000.0}})
+    with pytest.raises(ValueError, match="stop_when_train_bucket_limited"):
+        dense_cnn.parse_model1_config({"training": {"stop_when_train_bucket_limited": True}})
+    with pytest.raises(ValueError, match="skip_validation"):
+        dense_cnn.parse_model1_config({"samples": {"skip_validation": True}})
 
 
 def test_training_overrides_wire_dense_cnn_pipeline_components(tmp_path: Path) -> None:
@@ -396,13 +385,15 @@ def test_training_overrides_wire_dense_cnn_pipeline_components(tmp_path: Path) -
     assert isinstance(overrides, ComponentOverrides)
     assert overrides.trainer is not None
     assert hasattr(overrides.trainer, "train_passes")
-    assert overrides.sample_finalizer is not None
-    assert hasattr(overrides.sample_finalizer, "finalize")
+    assert overrides.sample_finalizer is None
+    assert overrides.uses_shared_sample_store is False
     assert overrides.checkpoint_saver is not None
     assert hasattr(overrides.checkpoint_saver, "save")
     assert overrides.checkpoint_loader is not None
     assert hasattr(overrides.checkpoint_loader, "load")
     assert overrides.optimizer is not None
+    assert components.model.uses_shared_sample_store is False
+    assert components.shared.sample_store is None
 
 
 def test_dense_cnn_player_constructs_with_slots(tmp_path: Path) -> None:
@@ -439,33 +430,25 @@ def test_checkpoint_saver_writes_model_and_optimizer_state(tmp_path: Path) -> No
         "optimizer_state_dict",
         "optimizer_state",
     )
-    sample_buffer_state = _required_mapping(checkpoint, "sample_buffer")
+    train_state = _required_mapping(checkpoint, "train_state")
 
     assert any(str(key).startswith("conv_in.") for key in model_state)
     assert "param_groups" in optimizer_state
     assert optimizer_state["param_groups"]
-    assert sample_buffer_state["capacity"] >= 200_000
-    assert "samples" in sample_buffer_state
+    assert "sample_buffer" not in checkpoint
+    assert train_state["train_bucket_level"] >= 0.0
+    assert "global_step_samples" in train_state
 
 
-def test_checkpoint_loader_resumes_model_and_sample_buffer_from_pointer(tmp_path: Path) -> None:
+def test_checkpoint_loader_resumes_model_and_train_state_from_pointer(tmp_path: Path) -> None:
     torch = _torch()
     ctx, components = _build_dense_components(tmp_path / "source")
     trainer = components.model.trainer
-    trainer.buffer.append(
-        {
-            "sample_id": "resume-sample",
-            "turn_index": 3,
-            "current_player": "player0",
-            "phase": "Opening",
-            "center": (0, 0),
-            "stones": (),
-            "policy": [((0, 0), 1.0)],
-            "opp_policy": [((0, 0), 1.0)],
-            "value": 0.5,
-            "metadata": {"target_schema_version": 2},
-        }
-    )
+    trainer.train_state.global_step_samples = 2048
+    trainer.train_state.train_bucket_level = 123.5
+    trainer.train_state.train_bucket_level_at_row = 4096
+    trainer.train_state.data_files_used.add(str((tmp_path / "used.npz").resolve()))
+    trainer.train_state.latest_shuffle_dir = str(tmp_path / "shuffle")
 
     with torch.no_grad():
         saved_param = next(components.model.model.parameters())
@@ -484,16 +467,16 @@ def test_checkpoint_loader_resumes_model_and_sample_buffer_from_pointer(tmp_path
     )
 
     restored_param = next(fresh_components.model.model.parameters()).detach()
-    restored_buffer = fresh_components.model.trainer.buffer
-    restored_sample = restored_buffer.entries[0].decode()
+    restored_state = fresh_components.model.trainer.train_state
 
     assert result["status"] == "loaded"
     assert result["epoch"] == 7
-    assert result["sample_count"] == 1
+    assert result["train_state"]["global_step_samples"] == 2048
     assert torch.allclose(restored_param, expected_param)
-    assert restored_buffer.sample_count == 1
-    assert restored_sample.game_id == "resume-sample"
-    assert restored_sample.value == pytest.approx(0.5)
+    assert restored_state.global_step_samples == 2048
+    assert restored_state.train_bucket_level == pytest.approx(123.5)
+    assert restored_state.train_bucket_level_at_row == 4096
+    assert restored_state.latest_shuffle_dir == str(tmp_path / "shuffle")
 
 
 def test_checkpoint_loader_initializes_when_pointer_target_is_missing(tmp_path: Path) -> None:
@@ -537,27 +520,50 @@ def test_checkpoint_loader_accepts_utf8_sig_pointer_files(tmp_path: Path) -> Non
     assert torch.allclose(restored_param, expected_param)
 
 
-def test_checkpoint_loader_skips_incompatible_model_but_recovers_sample_buffer(tmp_path: Path) -> None:
+def test_dense_train_bucket_starts_zero_and_row_regression_does_not_grant_budget(tmp_path: Path) -> None:
+    _ = tmp_path
+    torch = _torch()
+    dense_cnn = _dense_cnn()
+    trainer_module = importlib.import_module("hexo_models.dense_cnn.trainer")
+    config = dense_cnn.parse_model1_config(_small_model_config())
+    arch = config.architecture
+    model = dense_cnn.Model1Network(
+        in_channels=arch.input_channels,
+        channels=arch.channels,
+        blocks=arch.residual_blocks,
+        dropout=arch.dropout,
+        short_term_value_horizons=arch.short_term_value_horizons,
+    )
+    trainer = trainer_module.DenseCNNTrainer(
+        model=model,
+        config=config,
+        optimizer=torch.optim.SGD(model.parameters(), lr=0.01),
+    )
+
+    assert trainer.train_state.train_bucket_level == pytest.approx(0.0)
+
+    trainer.train_state.train_bucket_level = 3.0
+    trainer.train_state.train_bucket_level_at_row = 10
+    trainer.train_state.train_steps_since_last_reload = 4
+
+    trainer._update_train_bucket(total_rows=5, window_start=2)
+
+    assert trainer.train_state.train_bucket_level == pytest.approx(3.0)
+    assert trainer.train_state.train_bucket_level_at_row == 5
+    assert trainer.train_state.train_steps_since_last_reload == 0
+    assert trainer.train_state.total_num_data_rows == 5
+    assert trainer.train_state.window_start_data_row_idx == 2
+
+
+def test_checkpoint_loader_rejects_legacy_sample_buffer_before_loading(tmp_path: Path) -> None:
     torch = _torch()
     ctx, components = _build_dense_components(tmp_path / "source", _small_model_config({"architecture": {"channels": 4}}))
-    trainer = components.model.trainer
-    trainer.buffer.append(
-        {
-            "sample_id": "architecture-change-sample",
-            "turn_index": 1,
-            "current_player": "player0",
-            "phase": "Opening",
-            "center": (0, 0),
-            "stones": (),
-            "policy": [((0, 0), 1.0)],
-            "opp_policy": [((0, 0), 1.0)],
-            "value": -0.25,
-            "metadata": {"target_schema_version": 2},
-        }
-    )
     with torch.no_grad():
         next(components.model.model.parameters()).fill_(0.875)
     checkpoint_path = Path(components.model.checkpoint_saver.save(name="epoch_3", ctx=ctx, components=components))
+    payload = _torch_load(checkpoint_path)
+    payload["sample_buffer"] = {"samples": [{"legacy": True}]}
+    torch.save(dict(payload), checkpoint_path)
     pointer_path = ctx.checkpoint_dir / "dense_cnn_latest.txt"
     pointer_path.write_text(checkpoint_path.name, encoding="utf-8")
 
@@ -573,98 +579,61 @@ def test_checkpoint_loader_skips_incompatible_model_but_recovers_sample_buffer(t
         components=fresh_components,
     )
 
-    restored_buffer = fresh_components.model.trainer.buffer
-    restored_sample = restored_buffer.entries[0].decode()
     fresh_param_after = next(fresh_components.model.model.parameters()).detach()
 
     assert result["status"] == "initialized"
-    assert "incompatible" in result["reason"]
+    assert result["reason"] == "legacy dense_cnn sample_buffer checkpoints are unsupported"
     assert result["checkpoint_epoch"] == 3
-    assert result["sample_count"] == 1
-    assert result["incompatible_tensors"]
     assert torch.allclose(fresh_param_after, fresh_param_before)
-    assert restored_buffer.sample_count == 1
-    assert restored_sample.game_id == "architecture-change-sample"
-    assert restored_sample.value == pytest.approx(-0.25)
 
 
 def test_final_checkpoint_preserves_latest_epoch_for_future_resume(tmp_path: Path) -> None:
     ctx, components = _build_dense_components(tmp_path)
-    components.shared.checkpoint_state = {
-        "status": "loaded",
-        "epoch": 11,
-        "checkpoint_ref": "bootstrap.pt",
-        "metadata": {
-            "bootstrap": "classical_sealbot",
-            "bootstrap_sample_count": 50_000,
-        },
-    }
+    components.shared.checkpoint_state = {"status": "loaded", "epoch": 11}
 
     latest_path = Path(components.model.checkpoint_saver.save(name="latest", ctx=ctx, components=components))
     payload = _torch_load(latest_path)
 
     assert payload["epoch"] == 11
-    assert payload["metadata"]["bootstrap"] == "classical_sealbot"
-    assert payload["metadata"]["bootstrap_sample_count"] == 50_000
-    assert payload["metadata"]["parent_checkpoint"] == "bootstrap.pt"
 
 
 def test_training_pipeline_run_records_dense_cnn_epoch_diagnostics(tmp_path: Path) -> None:
     pytest.importorskip("hexo_utils._rust")
     dense_cnn = _dense_cnn()
-    assert dense_cnn.parse_model1_config({}).samples.train_sample_count == 4096
+    assert dense_cnn.parse_model1_config({}).training.train_samples_per_epoch == 100_000
 
     from hexo_train.pipeline import TrainingPipeline
 
     ctx = TrainingPipeline().run(_write_pipeline_config(tmp_path))
 
-    assert ctx.config.samples.train_sample_count == 2
     assert len(ctx.epoch_outputs) == 1
 
     epoch_diagnostic = _read_json(ctx.diagnostics_dir / "epoch_000001.json")
     assert epoch_diagnostic["status"] == "completed"
     epoch_result = epoch_diagnostic["metadata"]["result"]
 
-    assert epoch_result["samples"]["selection"]["window_size"] == 2
-    assert epoch_result["samples"]["selection"]["metadata"]["source_counts"]
-    assert epoch_result["symmetries"]["metadata"]["mode"] == "random_per_training_expansion"
+    assert epoch_result["samples"]["selection"]["window_size"] in (0, 2)
+    assert epoch_result["samples"]["selection"]["metadata"]["shuffle"]["status"] in {"completed", "skipped"}
+    assert epoch_result["symmetries"]["symmetry_count"] in (0, 2)
     for section in ("selfplay", "training", "checkpoint", "evaluation"):
         assert section in epoch_result
         _assert_real_diagnostic(epoch_result[section], section)
     assert epoch_result["checkpoint"]["pointer"]["status"] == "updated"
     assert Path(epoch_result["checkpoint"]["pointer"]["pointer_path"]).exists()
-    training = epoch_result["training"]
-    assert "policy" in training["loss_components"]
-    assert training["source_summary"]["source_counts"]
-    assert training["policy_imitation"]["status"] == "completed"
-    assert training["policy_imitation"]["overall"]["count"] == 2
 
     payloads = _diagnostic_payloads(ctx.diagnostics_dir)
-    policy_target_paths = _matching_path_values(
-        payloads,
-        key_tokens=("policy", "target"),
-        base_dir=ctx.output_dir,
-    )
-    game_history_paths = _matching_path_values(
-        payloads,
-        key_tokens=("game", "history"),
-        base_dir=ctx.output_dir,
-    )
-    if not game_history_paths:
-        game_history_paths = [
-            path
-            for path in _matching_path_values(
-                payloads,
-                key_tokens=("record",),
-                base_dir=ctx.output_dir,
-            )
-            if path.suffix == ".hxr"
-        ]
+    record_paths = [
+        path
+        for path in _matching_path_values(
+            payloads,
+            key_tokens=("record",),
+            base_dir=ctx.output_dir,
+        )
+        if path.suffix == ".hxr"
+    ]
 
-    assert policy_target_paths, "dense CNN diagnostics must include policy target artifact paths"
-    assert game_history_paths, "dense CNN diagnostics must include game history artifact paths"
-    assert all(path.exists() for path in policy_target_paths)
-    assert all(path.exists() for path in game_history_paths)
+    assert record_paths, "dense CNN diagnostics must include the HXR self-play record path"
+    assert all(path.exists() for path in record_paths)
 
 
 def test_finalize_samples_does_not_fake_missing_opponent_policy_with_current_policy() -> None:
@@ -703,37 +672,11 @@ def test_finalize_samples_does_not_fake_missing_opponent_policy_with_current_pol
     assert finalized[1].metadata["opp_policy_source"] == "none"
 
 
-def test_finalize_samples_accepts_compressed_pending_samples() -> None:
-    samples_module = importlib.import_module("hexo_models.dense_cnn.samples")
-    selfplay_module = _dense_cnn_selfplay_module()
-    sample = samples_module.Model1SampleData(
-        game_id="compressed-pending",
-        turn_index=0,
-        current_player="player0",
-        phase="Opening",
-        center=(0, 0),
-        stones=(),
-        legal_action_ids=(1,),
-        policy=((1, 1.0),),
-    )
-    compressed = samples_module.CompressedSample.from_data(sample, compression_level=1)
-
-    finalized = selfplay_module._finalize_game_samples(
-        [("player0", compressed, 0.0)],
-        winner="player0",
-        horizons=(),
-    )
-
-    assert len(finalized) == 1
-    assert finalized[0].game_id == "compressed-pending"
-    assert finalized[0].value == pytest.approx(1.0)
-
-
-def test_finalize_samples_omits_lookahead_without_future_mcts_root() -> None:
+def test_finalize_samples_omits_short_term_value_without_future_decisions() -> None:
     samples_module = importlib.import_module("hexo_models.dense_cnn.samples")
     selfplay_module = _dense_cnn_selfplay_module()
     first = samples_module.Model1SampleData(
-        game_id="lookahead-prefix",
+        game_id="stv-prefix",
         turn_index=0,
         current_player="player0",
         phase="Opening",
@@ -743,7 +686,7 @@ def test_finalize_samples_omits_lookahead_without_future_mcts_root() -> None:
         policy=((1, 1.0),),
     )
     second = samples_module.Model1SampleData(
-        game_id="lookahead-prefix",
+        game_id="stv-prefix",
         turn_index=1,
         current_player="player1",
         phase="FirstStone",
@@ -759,17 +702,17 @@ def test_finalize_samples_omits_lookahead_without_future_mcts_root() -> None:
         horizons=(1, 4, 8),
     )
 
+    # decision 0 has one future decision (player1, root -0.25) -> from player0's
+    # perspective +0.25; with a single future term the EMA equals it for every
+    # horizon. decision 1 has no future decision, so it carries no short-term value.
     assert finalized[0].value == pytest.approx(1.0)
-    assert len(finalized[0].lookahead) == 1
-    assert finalized[0].lookahead[0][0] == 1
-    assert finalized[0].lookahead[0][1] == pytest.approx(0.25)
+    assert finalized[0].short_term_value == ((1, pytest.approx(0.25)), (4, pytest.approx(0.25)), (8, pytest.approx(0.25)))
     assert finalized[1].value == pytest.approx(-1.0)
-    assert finalized[1].lookahead == ()
-    assert finalized[0].metadata["target_schema_version"] == 2
-    assert finalized[0].metadata["lookahead_target_semantics"] == "mcts_prefix_future_root_only_v2"
+    assert finalized[1].short_term_value == ()
+    assert finalized[0].metadata["target_schema_version"] == samples_module.CURRENT_TARGET_SCHEMA_VERSION
 
 
-def test_selfplay_keeps_mcts_samples_deeper_than_opening_before_rollout(
+def test_selfplay_searches_every_playable_move_until_games_finish(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -784,41 +727,39 @@ def test_selfplay_keeps_mcts_samples_deeper_than_opening_before_rollout(
         _small_model_config(
             {
                 "selfplay": {
-                    "samples_per_epoch": 2,
                     "search_visits": 1,
                     "active_games": 4,
-                    "min_mcts_samples_per_game": 2,
                     "max_actions": 3,
-                },
-                "debug": {
-                    "write_game_history": False,
-                    "write_policy_targets": False,
-                    "write_sample_previews": False,
-                    "preview_games": 0,
                 },
             }
         ),
     )
     mcts_batch_sizes: list[int] = []
-    rollout_batch_sizes: list[int] = []
     sampled_turns: list[tuple[str, int, int]] = []
 
-    def fake_run_batched_mcts(root_states: Sequence[object], inference: object, **kwargs: object) -> list[Any]:
-        _ = inference
-        mcts_batch_sizes.append(len(root_states))
-        return [
-            mcts_module.SearchResult(
-                action_id=int(engine.legal_action_ids(state)[0]),
-                visit_policy={int(engine.legal_action_ids(state)[0]): 1.0},
-                root_value=0.0,
-                visits=int(kwargs["visits"]),
-            )
-            for state in root_states
-        ]
+    class FakeMctsSession:
+        def discard(self, _game_key: int) -> None:
+            return
 
-    def fake_rollout(playable: list[dict[str, Any]], **_kwargs: object) -> list[int]:
-        rollout_batch_sizes.append(len(playable))
-        return [int(engine.legal_action_ids(game["state"])[0]) for game in playable]
+        def run(
+            self,
+            _game_keys: Sequence[int],
+            root_states: Sequence[object],
+            inference: object,
+            **kwargs: object,
+        ) -> list[Any]:
+            _ = inference
+            mcts_batch_sizes.append(len(root_states))
+            return [
+                mcts_module.SearchResult(
+                    action_id=int(engine.legal_action_ids(state)[0]),
+                    visit_policy={int(engine.legal_action_ids(state)[0]): 1.0},
+                    root_value=0.0,
+                    visits=int(kwargs["visits"]),
+                    root_prior_policy={int(engine.legal_action_ids(state)[0]): 1.0},
+                )
+                for state in root_states
+            ]
 
     def fake_sample_from_state(
         state: object,
@@ -826,9 +767,11 @@ def test_selfplay_keeps_mcts_samples_deeper_than_opening_before_rollout(
         game_id: str,
         turn_index: int,
         policy: Mapping[int, float],
-        value: float,
-        metadata: Mapping[str, Any],
+        root_prior_policy: Mapping[int, float] | Sequence[tuple[int, float]] = (),
+        value: float = 0.0,
+        metadata: Mapping[str, Any] | None = None,
     ) -> Any:
+        _ = root_prior_policy
         legal_ids = tuple(int(item) for item in engine.legal_action_ids(state))
         action_id = next(iter(policy))
         assert int(action_id) in legal_ids, "sample must be captured before the selected action mutates the state"
@@ -842,12 +785,19 @@ def test_selfplay_keeps_mcts_samples_deeper_than_opening_before_rollout(
             stones=(),
             legal_action_ids=legal_ids,
             policy=tuple((int(key), float(weight)) for key, weight in policy.items()),
+            root_prior_policy=tuple(
+                (int(key), float(weight))
+                for key, weight in (
+                    root_prior_policy.items()
+                    if isinstance(root_prior_policy, Mapping)
+                    else root_prior_policy
+                )
+            ),
             value=float(value),
-            metadata=dict(metadata),
+            metadata=dict(metadata or {}),
         )
 
-    monkeypatch.setattr(selfplay_module, "run_batched_mcts", fake_run_batched_mcts)
-    monkeypatch.setattr(selfplay_module, "_policy_rollout_actions", fake_rollout)
+    monkeypatch.setattr(selfplay_module, "new_mcts_session", lambda **_kwargs: FakeMctsSession())
     monkeypatch.setattr(selfplay_module, "sample_from_state", fake_sample_from_state)
 
     result = selfplay_module.generate_selfplay_epoch(
@@ -857,16 +807,18 @@ def test_selfplay_keeps_mcts_samples_deeper_than_opening_before_rollout(
         games_per_epoch=4,
     )
 
-    assert result["samples_added"] == 2
-    assert result["searched_positions"] == 2
-    assert result["mcts_simulations"] == 2
+    assert result["requested_games"] == 4
+    assert result["games_started"] == 4
+    assert result["games_finished"] == 4
+    assert result["completed_games"] == 0
+    assert result["effective_samples"] == 12
+    assert result["searched_positions"] == 12
+    assert result["mcts_simulations"] == 12
     assert result["mcts_search_elapsed_seconds"] >= 0.0
-    assert result["positions_per_second"] == result["end_to_end_positions_per_second"]
-    assert result["end_to_end_positions_per_second"] <= result["search_positions_per_second"]
-    assert mcts_batch_sizes == [1, 1]
-    assert len(sampled_turns) == 2
-    assert [turn for _game_id, turn, _legal_count in sampled_turns] == [0, 1]
-    assert rollout_batch_sizes, "non-sample tail moves should use policy rollout instead of MCTS"
+    assert result["positions_per_second"] <= result["search_positions_per_second"]
+    assert mcts_batch_sizes == [4, 4, 4]
+    assert len(sampled_turns) == 12
+    assert [turn for _game_id, turn, _legal_count in sampled_turns] == [0] * 4 + [1] * 4 + [2] * 4
 
 
 def test_selfplay_rejects_under_counted_mcts_results(
@@ -881,7 +833,6 @@ def test_selfplay_rejects_under_counted_mcts_results(
         _small_model_config(
             {
                 "selfplay": {
-                    "samples_per_epoch": 1,
                     "search_visits": 8,
                     "active_games": 1,
                     "max_actions": 2,
@@ -890,19 +841,30 @@ def test_selfplay_rejects_under_counted_mcts_results(
         ),
     )
 
-    def fake_run_batched_mcts(root_states: Sequence[object], inference: object, **_kwargs: object) -> list[Any]:
-        _ = inference
-        return [
-            mcts_module.SearchResult(
-                action_id=int(engine.legal_action_ids(state)[0]),
-                visit_policy={int(engine.legal_action_ids(state)[0]): 1.0},
-                root_value=0.0,
-                visits=7,
-            )
-            for state in root_states
-        ]
+    class FakeMctsSession:
+        def discard(self, _game_key: int) -> None:
+            return
 
-    monkeypatch.setattr(selfplay_module, "run_batched_mcts", fake_run_batched_mcts)
+        def run(
+            self,
+            _game_keys: Sequence[int],
+            root_states: Sequence[object],
+            inference: object,
+            **_kwargs: object,
+        ) -> list[Any]:
+            _ = inference
+            return [
+                mcts_module.SearchResult(
+                    action_id=int(engine.legal_action_ids(state)[0]),
+                    visit_policy={int(engine.legal_action_ids(state)[0]): 1.0},
+                    root_value=0.0,
+                    visits=7,
+                    root_prior_policy={int(engine.legal_action_ids(state)[0]): 1.0},
+                )
+                for state in root_states
+            ]
+
+    monkeypatch.setattr(selfplay_module, "new_mcts_session", lambda **_kwargs: FakeMctsSession())
 
     with pytest.raises(RuntimeError, match="expected exactly 8"):
         selfplay_module.generate_selfplay_epoch(

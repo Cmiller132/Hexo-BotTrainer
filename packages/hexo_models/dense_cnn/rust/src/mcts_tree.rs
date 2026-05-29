@@ -2,10 +2,18 @@
 //!
 //! The tree mirrors the usual KataGo-style ownership pattern at a smaller
 //! scale: a search owns one root state, an arena of nodes, an exact hash table
-//! for already-expanded states, and root visit accounting. Nodes intentionally store only statistics and outgoing edges;
-//! traversal recreates leaf states from a root clone plus selected actions so
-//! the implementation stays memory-light and easy to inspect.
+//! for already-expanded states, and root visit accounting. Nodes intentionally
+//! store only statistics and outgoing edges; traversal recreates leaf states
+//! from a root clone plus selected actions so the implementation stays
+//! memory-light and keeps move legality inside `hexo_engine`.
+//!
+//! This module does not call Python and does not encode tensors. It consumes
+//! validated `RustEvaluation` values from `mcts_eval`, stages every in-crop legal
+//! prior as a lazy candidate, and materializes an edge only when PUCT selects it.
+//! Every legal in-crop move is a candidate; there is no progressive widening or
+//! candidate cap.
 
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
@@ -20,68 +28,22 @@ use super::mcts_eval::{state_hash, RustEvaluation};
 use super::state::move_error;
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct ProgressiveWideningConfig {
-    pub(crate) root_initial_actions: usize,
-    pub(crate) child_initial_actions: usize,
-    pub(crate) growth_interval: f32,
-    pub(crate) growth_base: f32,
-}
-
-impl ProgressiveWideningConfig {
-    pub(crate) fn new(
-        root_initial_actions: usize,
-        child_initial_actions: usize,
-        growth_interval: f32,
-        growth_base: f32,
-    ) -> Option<Self> {
-        let root_initial_actions = root_initial_actions.max(1);
-        let child_initial_actions = child_initial_actions.max(1);
-        let growth_interval = if growth_interval.is_finite() && growth_interval > 0.0 {
-            growth_interval
-        } else {
-            256.0
-        };
-        let growth_base = if growth_base.is_finite() && growth_base > 1.0 {
-            growth_base
-        } else {
-            1.3
-        };
-        Some(Self {
-            root_initial_actions,
-            child_initial_actions,
-            growth_interval,
-            growth_base,
-        })
-    }
-
-    fn edge_limit(&self, visits: u32, total_actions: usize, is_root: bool) -> usize {
-        let initial_actions = if is_root {
-            self.root_initial_actions
-        } else {
-            self.child_initial_actions
-        };
-        if total_actions <= initial_actions {
-            return total_actions;
-        }
-        // Chaslot et al.'s progressive unpruning keeps the k_init highest
-        // heuristic children, then unprunes k children when parent visits pass
-        // A * B^(k-k_init). The dense CNN policy prior is the heuristic.
-        let visits = visits as f32;
-        if visits < self.growth_interval {
-            return initial_actions;
-        }
-        let extra = (visits / self.growth_interval)
-            .log(self.growth_base)
-            .floor()
-            .max(0.0) as usize;
-        (initial_actions + extra).min(total_actions)
-    }
+pub(crate) struct RootDirichletNoise {
+    /// Total Dirichlet concentration spread across legal moves; the per-action
+    /// concentration is `total_alpha / legal_count` (KataGo's scheme, so the
+    /// noise strength does not depend on how many moves are legal).
+    pub(crate) total_alpha: f32,
+    pub(crate) fraction: f32,
+    pub(crate) seed: u64,
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct RustEdge {
+    /// Packed engine coordinate used by Python payloads and visit policies.
     pub(crate) action_id: PackedCoord,
+    /// Unpacked coordinate used by `hexo_engine::apply_placement`.
     pub(crate) action: HexCoord,
+    /// PUCT prior mass for this materialized edge.
     pub(crate) prior: f32,
     pub(crate) visits: u32,
     pub(crate) value_sum: f32,
@@ -95,6 +57,14 @@ impl RustEdge {
             0.0
         } else {
             self.value_sum / self.visits as f32
+        }
+    }
+
+    fn value_or_fpu(&self, parent_value: f32, fpu_reduction: f32) -> f32 {
+        if self.visits == 0 {
+            parent_value - fpu_reduction
+        } else {
+            self.value()
         }
     }
 }
@@ -119,30 +89,36 @@ impl RustPriorCandidate {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Widening {
+    /// Cumulative policy mass (top-p / nucleus) a node's candidate set must cover.
+    pub(crate) mass: f32,
+    pub(crate) min_children: usize,
+    pub(crate) max_children: usize,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct RustNode {
     pub(crate) state_hash: StateHash,
     pub(crate) player: Player,
     pub(crate) eval_value: f32,
-    pub(crate) total_legal_actions: usize,
     pub(crate) visits: u32,
     pub(crate) value_sum: f32,
     pub(crate) edges: Vec<RustEdge>,
     // KataGo-style staged children: keep legal policy candidates compact and
     // materialize an edge only when PUCT actually selects that move.
     pub(crate) unexpanded_priors: Vec<RustPriorCandidate>,
+    // Policy-nucleus widening cap: the most edges this node may ever materialize,
+    // computed once from the prior distribution at expansion time.
+    pub(crate) max_eligible_children: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct RustSearchDiagnostics {
     pub(crate) node_count: usize,
     pub(crate) active_edge_count: usize,
-    pub(crate) hidden_prior_count: usize,
     pub(crate) root_active_edges: usize,
-    pub(crate) root_hidden_priors: usize,
     pub(crate) max_active_edges_per_node: usize,
-    pub(crate) max_hidden_priors_per_node: usize,
-    pub(crate) widened_edges_total: usize,
 }
 
 impl RustNode {
@@ -154,10 +130,8 @@ impl RustNode {
         }
     }
 
-    fn hidden_action_count(&self) -> usize {
-        self.total_legal_actions
-            .saturating_sub(self.edges.len())
-            .max(self.unexpanded_priors.len())
+    fn has_actions(&self) -> bool {
+        !self.edges.is_empty() || !self.unexpanded_priors.is_empty()
     }
 }
 
@@ -169,12 +143,10 @@ pub(crate) struct RustSearch {
     pub(crate) node_table: HashMap<StateHash, usize>,
     pub(crate) target_visits: u32,
     pub(crate) completed_visits: u32,
-    widening: Option<ProgressiveWideningConfig>,
+    fpu_reduction: f32,
+    widening: Widening,
     active_edge_count: usize,
-    hidden_prior_count: usize,
     max_active_edges_per_node: usize,
-    max_hidden_priors_per_node: usize,
-    widened_edges_total: usize,
 }
 
 pub(crate) struct RustSelectedLeaf {
@@ -201,31 +173,75 @@ impl RustSearch {
         root_state: RustHexoState,
         evaluation: &RustEvaluation,
         target_visits: u32,
-        widening: Option<ProgressiveWideningConfig>,
-    ) -> Self {
+        fpu_reduction: f32,
+        root_policy_temperature: f32,
+        root_noise: Option<RootDirichletNoise>,
+        widening: Widening,
+    ) -> PyResult<Self> {
+        // The root node starts with priors staged but no active edges. Edges are
+        // materialized lazily by `select_or_materialize_edge` according to PUCT
+        // score. Root-policy temperature and Dirichlet noise apply at the root.
         let root_hash = state_hash(&root_state);
-        let root_node = node_from_evaluation(root_hash, &root_state, evaluation, widening, true);
-        let root_hidden = root_node.hidden_action_count();
+        let root_node = node_from_evaluation(
+            root_hash,
+            &root_state,
+            evaluation,
+            Some(root_policy_temperature),
+            root_noise,
+            widening,
+        )?;
         let mut node_table = HashMap::new();
         node_table.insert(root_hash, 0);
-        Self {
+        Ok(Self {
             root_state,
             root_hash,
             nodes: vec![root_node],
             node_table,
             target_visits,
             completed_visits: 0,
+            fpu_reduction,
             widening,
             active_edge_count: 0,
-            hidden_prior_count: root_hidden,
             max_active_edges_per_node: 0,
-            max_hidden_priors_per_node: root_hidden,
-            widened_edges_total: 0,
+        })
+    }
+
+    pub(crate) fn apply_root_dirichlet_noise(&mut self, noise: RootDirichletNoise) {
+        let root = &mut self.nodes[0];
+        let count = root.edges.len() + root.unexpanded_priors.len();
+        if count == 0 || noise.total_alpha <= 0.0 || noise.fraction <= 0.0 {
+            return;
         }
+        let samples = dirichlet_samples(count, noise);
+        let visible_total: f32 = root
+            .edges
+            .iter()
+            .map(|edge| edge.prior)
+            .chain(
+                root.unexpanded_priors
+                    .iter()
+                    .map(|candidate| candidate.prior),
+            )
+            .filter(|prior| prior.is_finite())
+            .sum();
+        let fraction = noise.fraction;
+        let mut sample_index = 0usize;
+        for edge in &mut root.edges {
+            edge.prior =
+                (1.0 - fraction) * edge.prior + fraction * samples[sample_index] * visible_total;
+            sample_index += 1;
+        }
+        for candidate in &mut root.unexpanded_priors {
+            candidate.prior = (1.0 - fraction) * candidate.prior
+                + fraction * samples[sample_index] * visible_total;
+            sample_index += 1;
+        }
+        root.unexpanded_priors.sort_by(compare_prior_candidate);
+        root.unexpanded_priors.reverse();
     }
 
     pub(crate) fn root_edges_empty(&self) -> bool {
-        self.nodes[0].edges.is_empty() && self.nodes[0].hidden_action_count() == 0
+        !self.nodes[0].has_actions()
     }
 
     pub(crate) fn needs_visits(&self) -> bool {
@@ -237,7 +253,7 @@ impl RustSearch {
     }
 
     pub(crate) fn set_additional_visits(&mut self, visits: u32) {
-        self.target_visits = self.completed_visits.saturating_add(visits.max(1));
+        self.target_visits = self.completed_visits.saturating_add(visits);
     }
 
     pub(crate) fn root(&self) -> &RustNode {
@@ -296,24 +312,24 @@ impl RustSearch {
         state: &RustHexoState,
         hash: StateHash,
         evaluation: &RustEvaluation,
-    ) -> usize {
+    ) -> PyResult<usize> {
         if let Some(existing) = self.node_table.get(&hash).copied() {
-            return existing;
+            return Ok(existing);
         }
         let id = self.nodes.len();
-        let node = node_from_evaluation(hash, state, evaluation, self.widening, false);
-        let hidden = node.hidden_action_count();
-        self.hidden_prior_count += hidden;
-        self.max_hidden_priors_per_node = self.max_hidden_priors_per_node.max(hidden);
+        let node = node_from_evaluation(hash, state, evaluation, None, None, self.widening)?;
         self.nodes.push(node);
         self.node_table.insert(hash, id);
-        id
+        Ok(id)
     }
 
     pub(crate) fn select_pending_leaf(
         &mut self,
         c_puct: f32,
     ) -> PyResult<Option<RustSelectedLeaf>> {
+        // Recreate the selected leaf state by replaying edge actions from the
+        // root clone. Nodes store search statistics only, so the engine remains
+        // the single source of truth for move application and terminal checks.
         let mut state = self.root_state.clone();
         let mut node_id = 0usize;
         let mut path = Vec::new();
@@ -322,7 +338,9 @@ impl RustSearch {
         let mut current_hash = self.root_hash;
 
         loop {
-            let Some(edge_index) = self.select_or_materialize_edge(node_id, c_puct, &state) else {
+            let Some(edge_index) = self.select_or_materialize_edge(node_id, c_puct) else {
+                // No edge can be selected from this node. If we reached it via a
+                // parent edge, return the existing node value for backup.
                 let Some(parent_node) = last_parent else {
                     return Ok(None);
                 };
@@ -340,6 +358,9 @@ impl RustSearch {
 
             let edge = &self.nodes[node_id].edges[edge_index];
             if edge.pending > 0 && edge.child.is_none() {
+                // Another virtual batch already selected this edge and is
+                // waiting for evaluation, so avoid duplicating the same pending
+                // leaf in this batch.
                 return Ok(None);
             }
 
@@ -381,49 +402,20 @@ impl RustSearch {
         }
     }
 
-    fn eligible_unmaterialized_count(&mut self, node_id: usize, state: &RustHexoState) -> usize {
-        self.refresh_total_legal_actions(node_id, state);
-        let node = &self.nodes[node_id];
-        let Some(config) = self.widening else {
-            if !node.unexpanded_priors.is_empty() {
-                return node.unexpanded_priors.len();
-            }
-            return node.hidden_action_count();
-        };
-        let initial_limit = if node_id == 0 {
-            config.root_initial_actions
-        } else {
-            config.child_initial_actions
-        }
-        .min(node.total_legal_actions);
-        if node.edges.len() < initial_limit && !node.unexpanded_priors.is_empty() {
-            return (initial_limit - node.edges.len()).min(node.unexpanded_priors.len());
-        }
-        let hidden_count = node.hidden_action_count();
-        if hidden_count == 0 {
-            return 0;
-        }
-        let edge_limit = config.edge_limit(node.visits, node.total_legal_actions, node_id == 0);
-        if edge_limit <= node.edges.len() {
-            return 0;
-        }
-        (edge_limit - node.edges.len()).min(hidden_count)
-    }
-
-    fn select_or_materialize_edge(
-        &mut self,
-        node_id: usize,
-        c_puct: f32,
-        state: &RustHexoState,
-    ) -> Option<usize> {
+    fn select_or_materialize_edge(&mut self, node_id: usize, c_puct: f32) -> Option<usize> {
+        // First score already-materialized edges. Then compare the best existing
+        // edge against the next staged prior candidate, materializing that
+        // candidate only if its prior/exploration score wins.
         let node = &self.nodes[node_id];
         let exploration_scale = c_puct * (node.visits.max(1) as f32).sqrt();
+        let parent_value = node.value();
         let mut best: Option<(usize, f32, u32, PackedCoord)> = None;
         for (index, edge) in node.edges.iter().enumerate() {
             if edge.pending > 0 && edge.child.is_none() {
                 continue;
             }
-            let score = edge.value() + edge.prior * exploration_scale / (1.0 + edge.visits as f32);
+            let score = edge.value_or_fpu(parent_value, self.fpu_reduction)
+                + edge.prior * exploration_scale / (1.0 + edge.visits as f32);
             let candidate = (index, score, edge.visits, edge.action_id);
             let replace = match best {
                 Some(current) => compare_edge_score(candidate, current) == Ordering::Greater,
@@ -434,15 +426,17 @@ impl RustSearch {
             }
         }
 
-        let eligible_new = self.eligible_unmaterialized_count(node_id, state);
-        if eligible_new > 0 {
+        // Policy-nucleus widening: only ever materialize up to `max_eligible_children`
+        // edges (the top-prior moves covering the configured policy mass). Once the
+        // cap is reached the candidate set is closed and PUCT chooses among edges.
+        let can_widen =
+            self.nodes[node_id].edges.len() < self.nodes[node_id].max_eligible_children;
+        if can_widen {
             if let Some(candidate) = self.nodes[node_id].unexpanded_priors.last() {
                 let score = candidate.prior * exploration_scale;
                 let candidate_key = (usize::MAX, score, 0, candidate.action_id);
                 let replace = match best {
-                    Some(current) => {
-                        compare_edge_score(candidate_key, current) == Ordering::Greater
-                    }
+                    Some(current) => compare_edge_score(candidate_key, current) == Ordering::Greater,
                     None => true,
                 };
                 if replace {
@@ -455,39 +449,21 @@ impl RustSearch {
                     self.record_materialized_edge(node_id);
                     return Some(edge_index);
                 }
-            } else if let Some(action_id) = next_lazy_legal_action_id(state, &self.nodes[node_id]) {
-                let fallback_prior = fallback_prior(&self.nodes[node_id]);
-                let score = fallback_prior * exploration_scale;
-                let candidate_key = (usize::MAX, score, 0, action_id);
-                let replace = match best {
-                    Some(current) => {
-                        compare_edge_score(candidate_key, current) == Ordering::Greater
-                    }
-                    None => true,
-                };
-                if replace {
-                    let edge_index = self.nodes[node_id].edges.len();
-                    self.nodes[node_id].edges.push(
-                        RustPriorCandidate {
-                            action_id,
-                            prior: fallback_prior,
-                        }
-                        .into_edge(),
-                    );
-                    self.record_materialized_edge(node_id);
-                    return Some(edge_index);
-                }
             }
         }
 
         best.map(|item| item.0)
     }
 
-    pub(crate) fn apply_virtual_visit(&mut self, path: &[(usize, usize)]) {
+    pub(crate) fn apply_virtual_visit(&mut self, path: &[(usize, usize)], virtual_loss: f32) {
+        // Virtual visits reserve a path during batched leaf gathering. The
+        // later backup adds back the virtual loss and the real leaf value.
         self.completed_visits = self.completed_visits.saturating_add(1);
         for &(node_id, edge_index) in path {
             self.nodes[node_id].visits += 1;
+            self.nodes[node_id].value_sum -= virtual_loss;
             self.nodes[node_id].edges[edge_index].visits += 1;
+            self.nodes[node_id].edges[edge_index].value_sum -= virtual_loss;
         }
     }
 
@@ -496,15 +472,18 @@ impl RustSearch {
         path: &[(usize, usize)],
         leaf_player: Player,
         leaf_value: f32,
+        virtual_loss: f32,
     ) {
+        // Values are stored from each node player's perspective, so a leaf value
+        // is negated whenever the node player differs from the evaluated player.
         for &(node_id, edge_index) in path {
             let value = if self.nodes[node_id].player == leaf_player {
                 leaf_value
             } else {
                 -leaf_value
             };
-            self.nodes[node_id].value_sum += value;
-            self.nodes[node_id].edges[edge_index].value_sum += value;
+            self.nodes[node_id].value_sum += value + virtual_loss;
+            self.nodes[node_id].edges[edge_index].value_sum += value + virtual_loss;
         }
     }
 
@@ -519,49 +498,23 @@ impl RustSearch {
 
     fn record_materialized_edge(&mut self, node_id: usize) {
         self.active_edge_count += 1;
-        self.hidden_prior_count = self.hidden_prior_count.saturating_sub(1);
-        self.widened_edges_total += 1;
         self.max_active_edges_per_node = self
             .max_active_edges_per_node
             .max(self.nodes[node_id].edges.len());
-    }
-
-    fn refresh_total_legal_actions(&mut self, node_id: usize, state: &RustHexoState) {
-        let node = &self.nodes[node_id];
-        if !node.unexpanded_priors.is_empty() || node.edges.len() < node.total_legal_actions {
-            return;
-        }
-        let refreshed = state.legal_move_count().max(node.total_legal_actions);
-        if refreshed <= node.total_legal_actions {
-            return;
-        }
-        let added_hidden = refreshed - node.total_legal_actions;
-        self.nodes[node_id].total_legal_actions = refreshed;
-        self.hidden_prior_count += added_hidden;
-        self.max_hidden_priors_per_node = self
-            .max_hidden_priors_per_node
-            .max(self.nodes[node_id].hidden_action_count());
     }
 
     pub(crate) fn diagnostics(&self) -> RustSearchDiagnostics {
         RustSearchDiagnostics {
             node_count: self.nodes.len(),
             active_edge_count: self.active_edge_count,
-            hidden_prior_count: self.hidden_prior_count,
             root_active_edges: self.nodes.first().map(|node| node.edges.len()).unwrap_or(0),
-            root_hidden_priors: self
-                .nodes
-                .first()
-                .map(RustNode::hidden_action_count)
-                .unwrap_or(0),
             max_active_edges_per_node: self.max_active_edges_per_node,
-            max_hidden_priors_per_node: self.max_hidden_priors_per_node,
-            widened_edges_total: self.widened_edges_total,
-            ..RustSearchDiagnostics::default()
         }
     }
 
     pub(crate) fn advance_root(&mut self, action_id: PackedCoord) -> PyResult<bool> {
+        // Promote the selected child subtree after a move. If the child was not
+        // expanded or the move ends the game, the session simply drops the tree.
         let Some((edge_index, edge)) = self
             .nodes
             .first()
@@ -620,18 +573,12 @@ impl RustSearch {
 
     fn recompute_accounting(&mut self) {
         self.active_edge_count = 0;
-        self.hidden_prior_count = 0;
         self.max_active_edges_per_node = 0;
-        self.max_hidden_priors_per_node = 0;
         for node in &self.nodes {
             let active = node.edges.len();
-            let hidden = node.hidden_action_count();
             self.active_edge_count += active;
-            self.hidden_prior_count += hidden;
             self.max_active_edges_per_node = self.max_active_edges_per_node.max(active);
-            self.max_hidden_priors_per_node = self.max_hidden_priors_per_node.max(hidden);
         }
-        self.widened_edges_total = self.active_edge_count;
     }
 }
 
@@ -665,75 +612,177 @@ fn node_from_evaluation(
     state_hash: StateHash,
     state: &RustHexoState,
     evaluation: &RustEvaluation,
-    widening: Option<ProgressiveWideningConfig>,
-    is_root: bool,
-) -> RustNode {
+    root_policy_temperature: Option<f32>,
+    root_noise: Option<RootDirichletNoise>,
+    widening: Widening,
+) -> PyResult<RustNode> {
+    // The evaluator returns one prior per in-crop legal move, so every legal
+    // candidate is staged here. Root-policy temperature softens the prior at the
+    // root before Dirichlet noise; both are skipped for interior nodes.
     let mut candidates: Vec<_> = evaluation
         .priors
         .iter()
         .map(|(action_id, prior)| RustPriorCandidate {
             action_id: *action_id,
-            prior: sanitize_prior(*prior),
+            prior: *prior,
         })
         .collect();
     candidates.sort_by(compare_prior_candidate);
     let mut seen_actions = HashSet::new();
     candidates.retain(|candidate| seen_actions.insert(candidate.action_id));
+    if let Some(temperature) = root_policy_temperature {
+        apply_root_policy_temperature(&mut candidates, temperature);
+    }
+    normalize_candidate_priors(&mut candidates)?;
+    if let Some(noise) = root_noise {
+        apply_dirichlet_noise(&mut candidates, noise);
+    }
+    candidates.sort_by(compare_prior_candidate);
     candidates.reverse();
-    let total_legal_actions = if is_root {
-        evaluation.legal_action_count.max(candidates.len())
-    } else {
-        candidates.len()
-    };
-    let _ = (widening, is_root);
-    RustNode {
+    // Compute the policy-nucleus cap from the final (normalized, possibly noised)
+    // prior distribution. Static for the node's lifetime — no visit-based growth.
+    let max_eligible_children = nucleus_count(&candidates, widening);
+    Ok(RustNode {
         state_hash,
         player: state.current_player(),
-        eval_value: evaluation.value.clamp(-1.0, 1.0),
-        total_legal_actions,
+        eval_value: evaluation.value,
         visits: 0,
         value_sum: 0.0,
         edges: Vec::new(),
         unexpanded_priors: candidates,
-    }
-}
-
-fn fallback_prior(node: &RustNode) -> f32 {
-    let edge_min = node
-        .edges
-        .iter()
-        .map(|edge| edge.prior)
-        .filter(|prior| prior.is_finite() && *prior > 0.0)
-        .fold(f32::INFINITY, f32::min);
-    let hidden_min = node
-        .unexpanded_priors
-        .iter()
-        .map(|candidate| candidate.prior)
-        .filter(|prior| prior.is_finite() && *prior > 0.0)
-        .fold(f32::INFINITY, f32::min);
-    let min_positive = edge_min.min(hidden_min);
-    if min_positive.is_finite() {
-        (min_positive * 0.01).max(1.0e-8)
-    } else if node.total_legal_actions > 0 {
-        1.0 / node.total_legal_actions as f32
-    } else {
-        0.0
-    }
-}
-
-fn next_lazy_legal_action_id(state: &RustHexoState, node: &RustNode) -> Option<PackedCoord> {
-    if node.edges.len() >= node.total_legal_actions {
-        return None;
-    }
-    let mut legal_action_ids = Vec::with_capacity(node.total_legal_actions);
-    state.write_legal_action_ids(&mut legal_action_ids);
-    legal_action_ids.into_iter().find(|action_id| {
-        !node.edges.iter().any(|edge| edge.action_id == *action_id)
-            && !node
-                .unexpanded_priors
-                .iter()
-                .any(|candidate| candidate.action_id == *action_id)
+        max_eligible_children,
     })
+}
+
+fn nucleus_count(candidates: &[RustPriorCandidate], widening: Widening) -> usize {
+    // Smallest set of top-prior candidates whose cumulative prior reaches
+    // `widening.mass`, clamped to [min_children, min(max_children, total)]. Priors
+    // are already normalized to sum 1.0, so the cumulative cutoff is well defined.
+    let total = candidates.len();
+    if total == 0 {
+        return 0;
+    }
+    let lo = widening.min_children.max(1).min(total);
+    let hi = widening.max_children.max(lo).min(total);
+    if lo >= hi {
+        return hi;
+    }
+    let mut priors: Vec<f32> = candidates.iter().map(|candidate| candidate.prior).collect();
+    priors.sort_by(|a, b| b.partial_cmp(a).unwrap_or(Ordering::Equal));
+    let mut cumulative = 0.0f32;
+    let mut count = 0usize;
+    for prior in priors {
+        cumulative += prior;
+        count += 1;
+        if cumulative >= widening.mass {
+            break;
+        }
+    }
+    count.clamp(lo, hi)
+}
+
+fn apply_root_policy_temperature(candidates: &mut [RustPriorCandidate], temperature: f32) {
+    // Raise each prior to 1 / temperature (KataGo root policy softmax temperature).
+    // temperature > 1 flattens the prior so search explores beyond the model's
+    // current favorite; temperature == 1 is a no-op.
+    if !temperature.is_finite() || temperature <= 0.0 || (temperature - 1.0).abs() < 1.0e-6 {
+        return;
+    }
+    let inverse = 1.0 / temperature;
+    for candidate in candidates.iter_mut() {
+        if candidate.prior.is_finite() && candidate.prior > 0.0 {
+            candidate.prior = candidate.prior.powf(inverse);
+        }
+    }
+}
+
+fn apply_dirichlet_noise(candidates: &mut [RustPriorCandidate], noise: RootDirichletNoise) {
+    if candidates.is_empty() || noise.total_alpha <= 0.0 || noise.fraction <= 0.0 {
+        return;
+    }
+    let fraction = noise.fraction;
+    let samples = dirichlet_samples(candidates.len(), noise);
+    for (candidate, sampled) in candidates.iter_mut().zip(samples) {
+        candidate.prior = (1.0 - fraction) * candidate.prior + fraction * sampled;
+    }
+}
+
+fn dirichlet_samples(count: usize, noise: RootDirichletNoise) -> Vec<f32> {
+    if count == 0 {
+        return Vec::new();
+    }
+    // KataGo spreads a total concentration across legal moves: per-action alpha
+    // is total_alpha / legal_count.
+    let per_action_alpha = (noise.total_alpha as f64 / count as f64).max(1.0e-6);
+    let mut sampler = DirichletSampler::new(noise.seed);
+    let mut samples = Vec::with_capacity(count);
+    let mut total = 0.0f64;
+    for _ in 0..count {
+        let value = sampler.gamma(per_action_alpha);
+        samples.push(value);
+        total += value;
+    }
+    if total <= 0.0 || !total.is_finite() {
+        return vec![1.0 / count as f32; count];
+    }
+    samples
+        .into_iter()
+        .map(|sample| (sample / total) as f32)
+        .collect()
+}
+
+struct DirichletSampler {
+    state: u64,
+}
+
+impl DirichletSampler {
+    fn new(seed: u64) -> Self {
+        Self {
+            state: seed ^ 0xD1B5_4A32_D192_ED03,
+        }
+    }
+
+    fn uniform_open(&mut self) -> f64 {
+        random_unit(self.next_u64()).clamp(f64::MIN_POSITIVE, 1.0 - f64::EPSILON)
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        self.state = self
+            .state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        self.state
+    }
+
+    fn normal(&mut self) -> f64 {
+        let u1 = self.uniform_open();
+        let u2 = self.uniform_open();
+        (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()
+    }
+
+    fn gamma(&mut self, alpha: f64) -> f64 {
+        if alpha < 1.0 {
+            let boosted = self.gamma(alpha + 1.0);
+            return boosted * self.uniform_open().powf(1.0 / alpha);
+        }
+        let d = alpha - 1.0 / 3.0;
+        let c = (1.0 / (9.0 * d)).sqrt();
+        loop {
+            let x = self.normal();
+            let v = 1.0 + c * x;
+            if v <= 0.0 {
+                continue;
+            }
+            let v3 = v * v * v;
+            let u = self.uniform_open();
+            if u < 1.0 - 0.0331 * x.powi(4) {
+                return d * v3;
+            }
+            if u.ln() < 0.5 * x * x + d * (1.0 - v3 + v3.ln()) {
+                return d * v3;
+            }
+        }
+    }
 }
 
 fn compare_prior_candidate(left: &RustPriorCandidate, right: &RustPriorCandidate) -> Ordering {
@@ -744,12 +793,29 @@ fn compare_prior_candidate(left: &RustPriorCandidate, right: &RustPriorCandidate
         .then_with(|| left.action_id.cmp(&right.action_id))
 }
 
-fn sanitize_prior(prior: f32) -> f32 {
-    if prior.is_finite() && prior > 0.0 {
-        prior
-    } else {
-        0.0
+fn normalize_candidate_priors(candidates: &mut [RustPriorCandidate]) -> PyResult<()> {
+    let mut total = 0.0f32;
+    for candidate in candidates.iter() {
+        if !candidate.prior.is_finite() || candidate.prior < 0.0 {
+            return Err(PyValueError::new_err(format!(
+                "prior for action {} must be finite and >= 0",
+                candidate.action_id
+            )));
+        }
+        total += candidate.prior;
     }
+    if candidates.is_empty() {
+        return Ok(());
+    }
+    if total <= 0.0 {
+        return Err(PyValueError::new_err(
+            "candidate priors must contain positive mass",
+        ));
+    }
+    for candidate in candidates {
+        candidate.prior /= total;
+    }
+    Ok(())
 }
 
 fn compare_edge_score(
@@ -769,39 +835,6 @@ pub(crate) fn terminal_value(outcome: GameOutcome, player: Player) -> f32 {
     } else {
         -1.0
     }
-}
-
-pub(crate) fn select_root_action(
-    node: &RustNode,
-    temperature: f32,
-    seed: u64,
-) -> Option<PackedCoord> {
-    if node.edges.is_empty() {
-        return None;
-    }
-    if temperature <= 1.0e-6 {
-        return node
-            .edges
-            .iter()
-            .max_by_key(|edge| (edge.visits, std::cmp::Reverse(edge.action_id)))
-            .map(|edge| edge.action_id);
-    }
-    let inv_temperature = 1.0 / temperature.max(1.0e-3);
-    let mut total = 0.0f64;
-    let mut weights = Vec::with_capacity(node.edges.len());
-    for edge in &node.edges {
-        let weight = (edge.visits.max(1) as f32).powf(inv_temperature) as f64;
-        total += weight;
-        weights.push(weight);
-    }
-    let mut threshold = random_unit(seed) * total;
-    for (edge, weight) in node.edges.iter().zip(weights) {
-        threshold -= weight;
-        if threshold <= 0.0 {
-            return Some(edge.action_id);
-        }
-    }
-    node.edges.last().map(|edge| edge.action_id)
 }
 
 fn random_unit(seed: u64) -> f64 {
@@ -854,6 +887,18 @@ mod tests {
 
     use super::*;
 
+    fn wide(mass: f32, min_children: usize, max_children: usize) -> Widening {
+        Widening {
+            mass,
+            min_children,
+            max_children,
+        }
+    }
+
+    fn wide_open() -> Widening {
+        wide(1.0, 1, usize::MAX)
+    }
+
     fn evaluation_with_priors(count: usize) -> RustEvaluation {
         let priors = (0..count)
             .map(|index| {
@@ -873,84 +918,102 @@ mod tests {
         }
     }
 
-    #[test]
-    fn progressive_widening_starts_with_top_initial_priors() {
-        let config = ProgressiveWideningConfig::new(128, 32, 40.0, 1.3);
-        let state = RustHexoState::new();
-        let node = node_from_evaluation(0, &state, &evaluation_with_priors(200), config, true);
+    fn uniform_evaluation(count: usize) -> RustEvaluation {
+        let priors = (0..count)
+            .map(|index| (pack_coord(HexCoord { q: index as i16, r: 0 }), 1.0))
+            .collect();
+        RustEvaluation {
+            value: 0.0,
+            legal_action_count: count,
+            priors,
+        }
+    }
 
-        assert_eq!(node.edges.len(), 0);
-        assert_eq!(node.unexpanded_priors.len(), 200);
-        assert!(node
-            .unexpanded_priors
+    fn candidates(priors: &[f32]) -> Vec<RustPriorCandidate> {
+        priors
             .iter()
-            .rev()
-            .take(128)
-            .any(|prior| prior.action_id == pack_coord(HexCoord { q: 199, r: 0 })));
-        assert!(!node
-            .unexpanded_priors
-            .iter()
-            .rev()
-            .take(128)
-            .any(|prior| prior.action_id == pack_coord(HexCoord { q: 0, r: 0 })));
+            .enumerate()
+            .map(|(index, &prior)| RustPriorCandidate {
+                action_id: pack_coord(HexCoord {
+                    q: index as i16,
+                    r: 0,
+                }),
+                prior,
+            })
+            .collect()
     }
 
     #[test]
-    fn progressive_widening_materializes_edges_lazily_as_visits_grow() {
-        let config = ProgressiveWideningConfig::new(128, 32, 40.0, 1.3);
-        let state = RustHexoState::new();
-        let mut search = RustSearch::new(state, &evaluation_with_priors(300), 128, config);
+    fn nucleus_count_picks_smallest_set_covering_mass() {
+        // Sharp policy: the top move already covers 0.9, the second reaches 0.95.
+        assert_eq!(nucleus_count(&candidates(&[0.9, 0.05, 0.03, 0.02]), wide(0.95, 1, 32)), 2);
+        // Flat policy: needs all four to reach 0.95.
+        assert_eq!(nucleus_count(&candidates(&[0.25, 0.25, 0.25, 0.25]), wide(0.95, 1, 32)), 4);
+    }
 
-        let root_state = search.root_state.clone();
-        assert_eq!(search.eligible_unmaterialized_count(0, &root_state), 128);
-        for _ in 0..128 {
-            let root_state = search.root_state.clone();
-            let edge_index = search
-                .select_or_materialize_edge(0, 1.5, &root_state)
+    #[test]
+    fn nucleus_count_respects_min_and_max_clamps() {
+        // Very sharp: cutoff would be 1, but the floor lifts it to 2.
+        assert_eq!(nucleus_count(&candidates(&[0.99, 0.01]), wide(0.95, 2, 32)), 2);
+        // Flat over 16: cutoff would be ~16, but max_children caps it at 4.
+        let flat: Vec<f32> = (0..16).map(|_| 1.0 / 16.0).collect();
+        assert_eq!(nucleus_count(&candidates(&flat), wide(0.95, 2, 4)), 4);
+    }
+
+    #[test]
+    fn widening_caps_materialized_edges_under_many_visits() {
+        let state = RustHexoState::new();
+        let mut search =
+            RustSearch::new(state, &uniform_evaluation(16), 128, 0.20, 1.0, None, wide(0.95, 2, 4))
                 .unwrap();
+        assert_eq!(search.nodes[0].max_eligible_children, 4);
+        let mut materialized = 0;
+        for _ in 0..16 {
+            match search.select_or_materialize_edge(0, 1.5) {
+                Some(edge_index) => {
+                    search.nodes[0].edges[edge_index].pending = 1;
+                    materialized += 1;
+                }
+                None => break,
+            }
+        }
+        assert_eq!(materialized, 4);
+        assert_eq!(search.nodes[0].edges.len(), 4);
+        assert_eq!(search.nodes[0].unexpanded_priors.len(), 12);
+    }
+
+    #[test]
+    fn edges_materialize_lazily_in_prior_order() {
+        let state = RustHexoState::new();
+        let mut search =
+            RustSearch::new(state, &evaluation_with_priors(8), 128, 0.20, 1.0, None, wide_open())
+                .unwrap();
+        for _ in 0..8 {
+            let edge_index = search.select_or_materialize_edge(0, 1.5).unwrap();
             search.nodes[0].edges[edge_index].pending = 1;
         }
-        assert_eq!(search.nodes[0].edges.len(), 128);
-        let root_state = search.root_state.clone();
-        assert_eq!(search.eligible_unmaterialized_count(0, &root_state), 0);
-        search.nodes[0].visits = 52;
-        let root_state = search.root_state.clone();
-        assert_eq!(search.eligible_unmaterialized_count(0, &root_state), 1);
-        let root_state = search.root_state.clone();
-        assert!(search
-            .select_or_materialize_edge(0, 1.5, &root_state)
-            .is_some());
-        assert_eq!(search.nodes[0].edges.len(), 129);
-        assert_eq!(search.nodes[0].unexpanded_priors.len(), 171);
+        assert_eq!(search.nodes[0].edges.len(), 8);
+        assert!(search.nodes[0].unexpanded_priors.is_empty());
+        // First materialized edge is the highest-prior move.
+        assert_eq!(
+            search.nodes[0].edges[0].action_id,
+            pack_coord(HexCoord { q: 7, r: 0 })
+        );
     }
 
     #[test]
-    fn progressive_widening_uses_smaller_child_frontier() {
-        let config = ProgressiveWideningConfig::new(128, 32, 40.0, 1.3);
+    fn root_policy_temperature_flattens_priors() {
         let state = RustHexoState::new();
-        let mut search = RustSearch::new(state.clone(), &evaluation_with_priors(200), 128, config);
-
-        let child_id = search.add_node_from_eval(&state, 1, &evaluation_with_priors(200));
-        let root_state = search.root_state.clone();
-        assert_eq!(
-            search.eligible_unmaterialized_count(child_id, &root_state),
-            32
-        );
-        let node = &search.nodes[child_id];
-        assert_eq!(node.edges.len(), 0);
-        assert_eq!(node.unexpanded_priors.len(), 200);
-        assert!(node
-            .unexpanded_priors
-            .iter()
-            .rev()
-            .take(32)
-            .any(|prior| prior.action_id == pack_coord(HexCoord { q: 199, r: 0 })));
-        assert!(!node
-            .unexpanded_priors
-            .iter()
-            .rev()
-            .take(32)
-            .any(|prior| prior.action_id == pack_coord(HexCoord { q: 100, r: 0 })));
+        let sharp =
+            node_from_evaluation(0, &state, &evaluation_with_priors(4), Some(1.0), None, wide_open())
+                .unwrap();
+        let flat =
+            node_from_evaluation(0, &state, &evaluation_with_priors(4), Some(2.0), None, wide_open())
+                .unwrap();
+        let sharp_top = sharp.unexpanded_priors.last().unwrap().prior;
+        let flat_top = flat.unexpanded_priors.last().unwrap().prior;
+        // Temperature > 1 reduces the gap between the top prior and uniform.
+        assert!(flat_top < sharp_top);
     }
 
     #[test]

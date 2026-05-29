@@ -6,10 +6,8 @@ VENV="${VENV:-/root/.venvs/hexo-bottrainer-wsl}"
 RUN_ROOT="${RUN_ROOT:-$ROOT/runs/dense_cnn_model1_wsl_smoke}"
 CHECKPOINT="${CHECKPOINT:-$ROOT/data/checkpoints/dense_cnn_model1_latest.txt}"
 
-SELFPLAY_SAMPLES="${SELFPLAY_SAMPLES:-65536}"
 ACTIVE_GAMES="${ACTIVE_GAMES:-1024}"
-MIN_MCTS_SAMPLES_PER_GAME="${MIN_MCTS_SAMPLES_PER_GAME:-32}"
-GAMES_PER_EPOCH="${GAMES_PER_EPOCH:-4096}"
+GAMES_PER_EPOCH="${GAMES_PER_EPOCH:-256}"
 EVAL_GAMES="${EVAL_GAMES:-0}"
 MONITOR_INTERVAL_SECONDS="${MONITOR_INTERVAL_SECONDS:-6}"
 SELFPLAY_PROBE_POSITIONS="${SELFPLAY_PROBE_POSITIONS:-65536}"
@@ -99,9 +97,8 @@ device = "cuda"
 input_channels = 13
 channels = 64
 residual_blocks = 4
-crop_size = 41
 dropout = 0.0
-lookahead_horizons = [1, 4, 8]
+short_term_value_horizons = [1, 4, 8]
 
 [model.config.training]
 batch_size = 128
@@ -113,31 +110,30 @@ opp_policy_weight = 0.25
 lookahead_weight = 0.25
 amp = true
 max_grad_norm = 1.0
+train_samples_per_epoch = 100000
+max_train_bucket_per_new_data = 8.0
+max_train_bucket_size = 500000
+no_repeat_files = true
+max_validation_samples = 100000
 
 [model.config.samples]
-capacity = 200000
-train_sample_count = 32768
-classical_replay_min_fraction = 0.5
-recency_halflife = 50000.0
 compression_level = 6
+shuffle_min_rows = 100000
+shuffle_keep_target_rows = 600000
+shuffle_taper_window_exponent = 0.65
+shuffle_expand_window_per_row = 0.4
+shuffle_taper_window_scale = 50000.0
+approx_rows_per_out_file = 70000
+shuffle_worker_group_size = 80000
+validation_fraction = 0.0
 
 [model.config.selfplay]
-samples_per_epoch = $SELFPLAY_SAMPLES
 search_visits = 128
 active_games = $ACTIVE_GAMES
-min_mcts_samples_per_game = $MIN_MCTS_SAMPLES_PER_GAME
-progressive_widening_initial_actions = 8
-progressive_widening_child_initial_actions = 4
-progressive_widening_candidate_actions = 128
-progressive_widening_growth_interval = 256.0
-progressive_widening_growth_base = 1.3
-root_dirichlet_alpha = 0.1
-root_exploration_fraction = 0.25
-mcts_evaluation_cache_max_states = 1048576
+mcts_session_cache_max_states = 1048576
 mcts_active_root_limit = 1024
 max_actions = 1024
 temperature = 1.0
-worker_count = 1
 
 [model.config.evaluation]
 games_per_epoch = $EVAL_GAMES
@@ -149,19 +145,12 @@ require_sealbot = false
 [model.config.performance]
 calibrate = true
 target_selfplay_positions_per_second = 128.0
-inference_batch_candidates = [$INFERENCE_BATCH_CANDIDATES]
-selfplay_batch_candidates = [$SELFPLAY_BATCH_CANDIDATES]
+inference_batch_candidates = [128, 256, 512, 1024]
+selfplay_batch_candidates = [1024]
 training_batch_candidates = [64, 128, 192, 256]
-mcts_visit_candidates = [128]
 mcts_virtual_batch_candidates = [4]
 selfplay_probe_positions = $SELFPLAY_PROBE_POSITIONS
 probe_batches = 1
-
-[model.config.debug]
-write_game_history = true
-write_policy_targets = true
-write_sample_previews = true
-preview_games = 4
 
 [run]
 name = "dense_cnn_model1_wsl_smoke"
@@ -175,9 +164,6 @@ epochs = $TARGET_EPOCHS
 games_per_epoch = $GAMES_PER_EPOCH
 update_checkpoint_pointer = false
 checkpoint_pointer = "$RUN_ROOT/selfplay_checkpoint.txt"
-
-[samples]
-train_sample_count = 32768
 
 [train]
 passes_per_epoch = 4
@@ -204,15 +190,10 @@ caps = dict(capabilities())
 
 assert torch.cuda.is_available(), "CUDA is not available to PyTorch inside WSL"
 assert BOARD_SIZE == 41 and INPUT_CHANNELS == 13
-assert cfg.architecture.crop_size == 41
 assert cfg.selfplay.max_actions == 1024
 assert cfg.evaluation.max_actions == 1024
 assert cfg.selfplay.search_visits == 128
-assert cfg.performance.mcts_visit_candidates == (128,)
-assert cfg.selfplay.progressive_widening_candidate_actions == 128
-assert CURRENT_TARGET_SCHEMA_VERSION == 2
-assert caps["model1_mcts_progressive_widening"]
-assert caps["model1_mcts_lazy_staged_edges"]
+assert caps["model1_mcts_policy_nucleus_widening"]
 assert caps["model1_mcts_tree_reuse_session"]
 
 print(json.dumps({

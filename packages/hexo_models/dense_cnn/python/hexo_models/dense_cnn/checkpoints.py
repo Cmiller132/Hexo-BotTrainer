@@ -1,4 +1,13 @@
-"""Checkpoint IO for the dense CNN model."""
+"""Checkpoint IO for dense CNN training state.
+
+The generic training pipeline owns when checkpoints are loaded and saved. This
+module owns what dense_cnn needs to persist inside those checkpoints: model
+weights, optimizer state, and KataGo-style train-bucket state.
+
+Loading is strict about model-weight compatibility and the current replay
+schema. Legacy checkpoints that still contain the removed in-memory replay
+buffer are rejected so dense CNN has only one supported training path.
+"""
 
 from __future__ import annotations
 
@@ -9,7 +18,11 @@ import torch
 
 
 class DenseCNNCheckpointLoader:
+    """Load dense_cnn checkpoint payloads into generic pipeline components."""
+
     def load(self, checkpoint_ref: object | None, *, ctx: Any, components: Any) -> dict[str, Any]:
+        """Load model, optimizer, and dense_cnn train state if usable."""
+
         if checkpoint_ref is None:
             return {"status": "initialized", "checkpoint_ref": None}
         path = _resolve_checkpoint_ref(Path(str(checkpoint_ref)))
@@ -26,12 +39,15 @@ class DenseCNNCheckpointLoader:
                 "reason": "checkpoint target is missing",
             }
         payload = torch.load(path, map_location="cpu")
-        sample_buffer = payload.get("sample_buffer")
         trainer = getattr(components.model, "trainer", None)
-        buffer = getattr(trainer, "buffer", None)
-        sample_buffer_load_stats = None
-        if sample_buffer is not None and buffer is not None and hasattr(buffer, "load_state_dict"):
-            sample_buffer_load_stats = _sample_buffer_load_stats(buffer.load_state_dict(sample_buffer), buffer)
+        if payload.get("sample_buffer") is not None:
+            return {
+                "status": "initialized",
+                "checkpoint_ref": str(path),
+                "reason": "legacy dense_cnn sample_buffer checkpoints are unsupported",
+                "checkpoint_epoch": payload.get("epoch"),
+                "metadata": payload.get("metadata", {}),
+            }
 
         model_state = payload.get("model_state")
         incompatibilities = _state_dict_incompatibilities(components.model.model.state_dict(), model_state)
@@ -43,33 +59,33 @@ class DenseCNNCheckpointLoader:
                 "incompatible_tensors": incompatibilities,
                 "checkpoint_epoch": payload.get("epoch"),
                 "metadata": payload.get("metadata", {}),
-                "sample_count": getattr(buffer, "sample_count", None),
-                "sample_buffer_load_stats": sample_buffer_load_stats,
-                "sample_buffer_loaded_count": _sample_buffer_loaded_count(sample_buffer_load_stats),
-                "sample_buffer_filtered_count": _sample_buffer_filtered_count(sample_buffer_load_stats),
             }
 
         components.model.model.load_state_dict(model_state)
         optimizer_state = payload.get("optimizer_state")
         if optimizer_state is not None and components.model.optimizer is not None:
             components.model.optimizer.load_state_dict(optimizer_state)
+        train_state = payload.get("train_state")
+        if trainer is not None and hasattr(trainer, "load_train_state") and isinstance(train_state, Mapping):
+            trainer.load_train_state(train_state)
         return {
             "status": "loaded",
             "checkpoint_ref": str(path),
             "epoch": payload.get("epoch"),
             "metadata": payload.get("metadata", {}),
-            "sample_count": getattr(buffer, "sample_count", None),
-            "sample_buffer_load_stats": sample_buffer_load_stats,
-            "sample_buffer_loaded_count": _sample_buffer_loaded_count(sample_buffer_load_stats),
-            "sample_buffer_filtered_count": _sample_buffer_filtered_count(sample_buffer_load_stats),
+            "train_state": train_state if isinstance(train_state, Mapping) else None,
         }
 
 
 class DenseCNNCheckpointSaver:
+    """Save dense_cnn checkpoint payloads from generic pipeline components."""
+
     def save(self, *, name: str, ctx: Any, components: Any) -> Path:
+        """Persist model, optimizer, and train-bucket state for one checkpoint."""
+
         path = ctx.checkpoint_dir / f"{name}.pt"
         trainer = getattr(components.model, "trainer", None)
-        buffer = getattr(trainer, "buffer", None)
+        train_state = getattr(trainer, "train_state", None)
         payload = {
             "model": "hexo_models.dense_cnn",
             "model_state": components.model.model.state_dict(),
@@ -78,13 +94,12 @@ class DenseCNNCheckpointSaver:
                 if components.model.optimizer is not None
                 else None
             ),
-            "sample_buffer": (
-                buffer.state_dict()
-                if buffer is not None and hasattr(buffer, "state_dict")
-                else None
-            ),
+            "train_state": train_state.to_dict() if hasattr(train_state, "to_dict") else None,
             "epoch": _epoch_from_name(name) or _latest_epoch(ctx, components),
-            "metadata": _checkpoint_metadata(ctx=ctx, components=components, buffer=buffer),
+            "metadata": {
+                "run": ctx.config.run.name,
+                "sample_count": getattr(trainer, "sample_count", None),
+            },
         }
         torch.save(payload, path)
         return path
@@ -131,6 +146,8 @@ def _state_dict_incompatibilities(
     *,
     limit: int = 12,
 ) -> list[dict[str, object]]:
+    """Return a bounded list of tensor/key mismatches before loading weights."""
+
     if not isinstance(candidate, Mapping):
         return [{"key": "model_state", "expected": "mapping", "actual": type(candidate).__name__}]
 
@@ -156,33 +173,6 @@ def _state_dict_incompatibilities(
         if len(issues) >= limit:
             return issues
     return issues
-
-
-def _sample_buffer_load_stats(load_result: object, buffer: object) -> dict[str, object] | None:
-    if isinstance(load_result, Mapping):
-        return dict(load_result)
-    stats = getattr(buffer, "last_load_stats", None)
-    if isinstance(stats, Mapping):
-        return dict(stats)
-    return None
-
-
-def _sample_buffer_loaded_count(stats: Mapping[str, object] | None) -> int | None:
-    return _optional_int(stats.get("loaded")) if stats is not None else None
-
-
-def _sample_buffer_filtered_count(stats: Mapping[str, object] | None) -> int | None:
-    return _optional_int(stats.get("filtered")) if stats is not None else None
-
-
-def _optional_int(value: object) -> int | None:
-    if value is None or isinstance(value, bool):
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
 
 def _resolve_checkpoint_ref(path: Path) -> Path | None:
     resolved = path.expanduser()

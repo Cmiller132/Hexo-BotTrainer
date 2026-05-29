@@ -1,4 +1,10 @@
-"""Epoch evaluation against SealBot for dense CNN checkpoints."""
+"""Epoch evaluation adapter for dense CNN checkpoints.
+
+The generic trainer asks the model plugin to evaluate an epoch. This module
+turns the current dense CNN model into a `hexo_runner` player, pairs it against
+SealBot when available, and returns runner/evaluation metadata. It does not
+generate training samples and does not mutate the replay buffer.
+"""
 
 from __future__ import annotations
 
@@ -39,6 +45,8 @@ class _SealBotFactory:
 
 
 def evaluate_epoch(*, ctx: Any, components: Any, epoch: int) -> dict[str, Any]:
+    """Run configured SealBot evaluation games for one checkpoint epoch."""
+
     trainer = components.model.trainer
     config = trainer.config
     eval_config = config.evaluation
@@ -80,6 +88,8 @@ def evaluate_epoch(*, ctx: Any, components: Any, epoch: int) -> dict[str, Any]:
     completed = 0
     turns: list[int] = []
     for game_index in range(eval_config.games_per_epoch):
+        # Alternate colors so the evaluation result is not tied to one fixed
+        # first-player role.
         dense_is_p0 = game_index % 2 == 0
         dense = DenseCNNPlayer(
             identity_id="dense-cnn-eval",

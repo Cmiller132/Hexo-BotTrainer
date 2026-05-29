@@ -1,4 +1,10 @@
-"""Shared Model 1 constants."""
+"""Dense CNN Model 1 tensor constants.
+
+These values define the Python side of the model contract. The Rust encoder has
+matching values in `rust/src/constants.rs`; any change to board size, channel
+count, value bins, or plane order must update both files and the tests that
+exercise the Python/Rust boundary.
+"""
 
 BOARD_SIZE = 41
 BOARD_AREA = BOARD_SIZE * BOARD_SIZE

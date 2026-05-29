@@ -1,8 +1,20 @@
-"""Sequential self-play sample generation for the dense CNN model."""
+"""Game-driven self-play sample generation for dense CNN Model 1.
+
+The self-play loop works from live `hexo_engine.HexoState` objects. It batches
+active games through one persistent Rust MCTS session, records a compact
+pre-decision sample for every searched position, applies the chosen action
+through the engine, writes `.hxr` records, and finalizes targets once each game
+reaches a terminal outcome or `max_actions`.
+
+Every active nonterminal position is searched with MCTS over all legal moves.
+There are no rollout tails and no progressive widening.
+
+Calibration tunes only the inference/self-play/virtual batch sizes (read from the
+trainer); every other search setting comes directly from `config.selfplay`.
+"""
 
 from __future__ import annotations
 
-from random import Random
 from time import perf_counter
 from typing import Any, Mapping
 
@@ -10,117 +22,68 @@ import hexo_engine as engine
 from hexo_engine.types import unpack_coord_id
 from hexo_runner.records import AbortRecord, HexoRecordFile, HexoRecordPlayer
 
-from .debug_artifacts import render_preview_game_actions
-from .inference import DEFAULT_MAX_BATCH_SIZE, DenseCNNInference
-from .mcts import BatchedMctsSession, SearchResult, new_mcts_session, run_batched_mcts
+from .inference import DenseCNNInference
+from .mcts import SearchResult, new_mcts_session
 from .performance import _extend_mcts_diagnostic_batches, _summarize_mcts_diagnostic_batches
-from .samples import CompressedSample, Model1SampleData, finalize_game_samples, sample_from_state
-
-_ORIGINAL_RUN_BATCHED_MCTS = run_batched_mcts
+from .replay import materialize_policy_surprise_rows, write_selfplay_npz
+from .samples import Model1SampleData, finalize_game_samples, sample_from_state
 
 
 def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_epoch: int) -> dict[str, Any]:
+    """Generate one epoch of dense_cnn self-play, writing per-game NPZ shards."""
+
     trainer = components.model.trainer
     config = trainer.config
-    buffer = trainer.buffer
+    selfplay = config.selfplay
+    requested_games = int(games_per_epoch or 0)
+    if requested_games < 0:
+        raise ValueError("games_per_epoch must be >= 0")
+
     inference = DenseCNNInference(
         components.model.model,
         device=trainer.device,
         amp=config.training.amp,
         return_logits=False,
-        max_batch_size=getattr(trainer, "inference_batch_size", DEFAULT_MAX_BATCH_SIZE),
+        max_batch_size=trainer.inference_batch_size,
     )
-    target_samples = int(config.selfplay.samples_per_epoch)
-    max_games = max(int(games_per_epoch or 0), 1)
-    if target_samples > 0:
-        max_games = max(max_games, target_samples)
+    active_limit = int(trainer.selfplay_batch_size)
+    if active_limit <= 0:
+        raise ValueError("selfplay active game count must be > 0")
+    if active_limit > selfplay.mcts_active_root_limit:
+        raise ValueError("selfplay active game count must be <= mcts_active_root_limit")
 
     record_dir = ctx.output_dir / "selfplay"
     record_dir.mkdir(parents=True, exist_ok=True)
     record_path = record_dir / f"epoch_{epoch:06d}.hxr"
-    debug_games: list[dict[str, Any]] = []
+    horizons = config.architecture.short_term_value_horizons
+    base_seed = ctx.config.run.seed or 0
+
     samples_added = 0
+    raw_samples_added = 0
     searched_positions = 0
     mcts_simulations = 0
+    games_started = 0
     completed_games = 0
     truncated_games = 0
-    game_lengths: list[int] = []
-    winner_counts: dict[str, int] = {"player0": 0, "player1": 0, "none": 0}
     mcts_search_elapsed = 0.0
     mcts_diagnostic_batches: list[Mapping[str, Any]] = []
+    npz_writes: list[Mapping[str, Any]] = []
     started = perf_counter()
 
     players = (
         HexoRecordPlayer("dense-cnn-a", "player0", "Dense CNN A"),
         HexoRecordPlayer("dense-cnn-b", "player1", "Dense CNN B"),
     )
-    configured_active_limit = max(1, int(getattr(trainer, "selfplay_batch_size", config.selfplay.active_games)))
-    min_mcts_samples_per_game = max(1, int(config.selfplay.min_mcts_samples_per_game))
-    if target_samples > 0:
-        sample_depth_active_limit = max(
-            1,
-            (target_samples + min_mcts_samples_per_game - 1) // min_mcts_samples_per_game,
-        )
-        active_limit = min(configured_active_limit, sample_depth_active_limit)
-    else:
-        active_limit = configured_active_limit
-    virtual_batch_size = getattr(trainer, "mcts_virtual_batch_size", None)
-    progressive_widening_initial_actions = int(
-        getattr(
-            trainer,
-            "mcts_progressive_widening_initial_actions",
-            config.selfplay.progressive_widening_initial_actions,
-        )
-    )
-    progressive_widening_child_initial_actions = int(
-        getattr(
-            trainer,
-            "mcts_progressive_widening_child_initial_actions",
-            config.selfplay.progressive_widening_child_initial_actions,
-        )
-    )
-    progressive_widening_candidate_actions = int(
-        getattr(
-            trainer,
-            "mcts_progressive_widening_candidate_actions",
-            config.selfplay.progressive_widening_candidate_actions,
-        )
-    )
-    progressive_widening_growth_interval = float(
-        getattr(
-            trainer,
-            "mcts_progressive_widening_growth_interval",
-            config.selfplay.progressive_widening_growth_interval,
-        )
-    )
-    progressive_widening_growth_base = float(
-        getattr(
-            trainer,
-            "mcts_progressive_widening_growth_base",
-            config.selfplay.progressive_widening_growth_base,
-        )
-    )
-    root_dirichlet_alpha = float(config.selfplay.root_dirichlet_alpha)
-    root_exploration_fraction = float(config.selfplay.root_exploration_fraction)
-    mcts_session = new_mcts_session(max_states=config.selfplay.mcts_evaluation_cache_max_states)
-    active_root_limit = max(
-        1,
-        int(getattr(trainer, "mcts_active_root_limit", config.selfplay.mcts_active_root_limit)),
-    )
+    mcts_session = new_mcts_session(max_states=selfplay.mcts_session_cache_max_states)
     next_game_index = 0
     active: list[dict[str, Any]] = []
     with HexoRecordFile.create(record_path, engine.engine_metadata(), players) as record_file:
-        while (samples_added < target_samples or active) and (next_game_index < max_games or active):
-            while (
-                len(active) < active_limit
-                and next_game_index < max_games
-                and len(active) < max(0, target_samples - samples_added - sum(len(game["pending"]) for game in active))
-            ):
-                game_id = f"epoch-{epoch:06d}-selfplay-{next_game_index:06d}"
-                seed = (ctx.config.run.seed or 0) + epoch * 1_000_000 + next_game_index
+        while next_game_index < requested_games or active:
+            while len(active) < active_limit and next_game_index < requested_games:
+                seed = base_seed + epoch * 1_000_000 + next_game_index
                 active.append(
                     {
-                        "game_id": game_id,
+                        "game_id": f"epoch-{epoch:06d}-selfplay-{next_game_index:06d}",
                         "search_key": next_game_index,
                         "seed": seed,
                         "state": engine.new_game(seed=seed),
@@ -129,99 +92,80 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
                     }
                 )
                 next_game_index += 1
+                games_started += 1
 
             playable = [
                 game
                 for game in active
-                if engine.terminal(game["state"]) is None
-                and len(game["actions"]) < config.selfplay.max_actions
+                if engine.terminal(game["state"]) is None and len(game["actions"]) < selfplay.max_actions
             ]
             if playable:
-                pending_count = sum(len(item["pending"]) for item in active)
-                remaining_samples = max(0, target_samples - samples_added - pending_count)
-                search_games = playable[:remaining_samples]
-                rollout_games = playable[remaining_samples:]
-                if search_games:
-                    search_started = perf_counter()
-                    searches = _search_playable_games(
-                        search_games,
-                        inference=inference,
-                        visits=getattr(trainer, "search_visits", config.selfplay.search_visits),
-                        temperature=config.selfplay.temperature,
-                        seed=(ctx.config.run.seed or 0) + epoch,
-                        virtual_batch_size=virtual_batch_size,
-                        progressive_widening_initial_actions=progressive_widening_initial_actions,
-                        progressive_widening_child_initial_actions=progressive_widening_child_initial_actions,
-                        progressive_widening_candidate_actions=progressive_widening_candidate_actions,
-                        progressive_widening_growth_interval=progressive_widening_growth_interval,
-                        progressive_widening_growth_base=progressive_widening_growth_base,
-                        root_dirichlet_alpha=root_dirichlet_alpha,
-                        root_exploration_fraction=root_exploration_fraction,
-                        evaluation_cache=None,
-                        mcts_session=mcts_session,
-                        active_root_limit=active_root_limit,
+                search_started = perf_counter()
+                searches = mcts_session.run(
+                    [game["search_key"] for game in playable],
+                    [game["state"] for game in playable],
+                    inference,
+                    visits=selfplay.search_visits,
+                    c_puct=selfplay.c_puct,
+                    temperature=selfplay.temperature,
+                    seed=base_seed + epoch,
+                    virtual_batch_size=trainer.mcts_virtual_batch_size,
+                    active_root_limit=selfplay.mcts_active_root_limit,
+                    root_dirichlet_total_alpha=(
+                        selfplay.root_dirichlet_total_alpha if selfplay.root_dirichlet_noise_enabled else None
+                    ),
+                    root_dirichlet_noise_fraction=(
+                        selfplay.root_dirichlet_noise_fraction if selfplay.root_dirichlet_noise_enabled else None
+                    ),
+                    root_policy_temperature=selfplay.root_policy_temperature,
+                    fpu_reduction=selfplay.fpu_reduction,
+                    virtual_loss=selfplay.virtual_loss,
+                    widening_policy_mass=selfplay.widening_policy_mass,
+                    widening_max_children=selfplay.widening_max_children,
+                    widening_min_children=selfplay.widening_min_children,
+                )
+                mcts_search_elapsed += perf_counter() - search_started
+                if len(searches) != len(playable):
+                    raise RuntimeError(
+                        f"dense_cnn MCTS returned {len(searches)} results for {len(playable)} playable games"
                     )
-                    if searches:
-                        _extend_mcts_diagnostic_batches(mcts_diagnostic_batches, searches)
-                    mcts_search_elapsed += perf_counter() - search_started
-                else:
-                    searches = []
-                for game, search in zip(search_games, searches):
-                    configured_visits = int(getattr(trainer, "search_visits", config.selfplay.search_visits))
-                    if int(search.visits) != configured_visits:
+                _extend_mcts_diagnostic_batches(mcts_diagnostic_batches, searches)
+                for game, search in zip(playable, searches):
+                    if int(search.visits) != selfplay.search_visits:
                         raise RuntimeError(
-                            f"dense_cnn MCTS returned {search.visits} visits; expected exactly {configured_visits}"
+                            f"dense_cnn MCTS returned {search.visits} visits; expected exactly {selfplay.search_visits}"
                         )
                     searched_positions += 1
                     mcts_simulations += int(search.visits)
                     state = game["state"]
+                    # The sample is captured before the chosen action mutates the
+                    # state: policy/legal describe the decision position; outcome
+                    # targets are filled once the game ends.
                     sample = sample_from_state(
                         state,
                         game_id=game["game_id"],
                         turn_index=len(game["actions"]),
                         policy=search.visit_policy,
-                        value=search.root_value,
-                        metadata={
-                            "epoch": epoch,
-                            "search_visits": search.visits,
-                            "configured_search_visits": configured_visits,
-                            "mcts_sims_exact": True,
-                            "sample_source": "mcts",
-                        },
+                        root_prior_policy=search.root_prior_policy,
+                        metadata={"epoch": epoch, "search_visits": search.visits},
                     )
-                    compressed_sample = CompressedSample.from_data(
-                        sample,
-                        compression_level=config.samples.compression_level,
-                    )
-                    game["pending"].append((sample.current_player, compressed_sample, search.root_value))
-                    action = engine.PlacementAction(unpack_coord_id(search.action_id))
-                    engine.apply_action(state, action)
+                    game["pending"].append((sample.current_player, sample, search.root_value))
+                    engine.apply_action(state, engine.PlacementAction(unpack_coord_id(search.action_id)))
                     game["actions"].append(search.action_id)
-                if rollout_games:
-                    rollout_actions = _policy_rollout_actions(
-                        rollout_games,
-                        inference=inference,
-                        temperature=config.selfplay.temperature,
-                        seed=(ctx.config.run.seed or 0) + epoch + searched_positions,
-                    )
-                    for game, action_id in zip(rollout_games, rollout_actions):
-                        action = engine.PlacementAction(unpack_coord_id(action_id))
-                        engine.apply_action(game["state"], action)
-                        game["actions"].append(action_id)
 
             finished = [
                 game
                 for game in active
-                if engine.terminal(game["state"]) is not None
-                or len(game["actions"]) >= config.selfplay.max_actions
+                if engine.terminal(game["state"]) is not None or len(game["actions"]) >= selfplay.max_actions
             ]
             for game in finished:
                 terminal = engine.terminal(game["state"])
                 truncated = terminal is None
-                winner = _player_label(terminal.winner) if terminal is not None and terminal.winner is not None else None
-                length = len(game["actions"])
-                game_lengths.append(length)
-                winner_counts[winner if winner in ("player0", "player1") else "none"] += 1
+                winner = (
+                    _player_label(terminal.winner)
+                    if terminal is not None and terminal.winner is not None
+                    else None
+                )
                 writer = record_file.begin_game(game["game_id"], seed=game["seed"])
                 for action_id in game["actions"]:
                     writer.record_action(engine.PlacementAction(unpack_coord_id(action_id)))
@@ -230,143 +174,75 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
                         AbortRecord(
                             stage="selfplay",
                             exception_type="MaxActionsReached",
-                            message=f"dense_cnn self-play reached max_actions={config.selfplay.max_actions}",
+                            message=f"dense_cnn self-play reached max_actions={selfplay.max_actions}",
                         )
                     )
                     truncated_games += 1
                 else:
-                    writer.finish_completed(winner, length)
+                    writer.finish_completed(winner, len(game["actions"]))
                     completed_games += 1
 
-                finalized = _finalize_game_samples(
-                    game["pending"],
-                    winner,
-                    config.architecture.lookahead_horizons,
-                    truncated=truncated,
+                finalized = _finalize_game_samples(game["pending"], winner, horizons, truncated=truncated)
+                materialized, weight_stats = materialize_policy_surprise_rows(
+                    finalized,
+                    seed=base_seed + epoch * 1_000_000_003 + int(game["search_key"]),
+                    uniform_fraction=config.samples.policy_surprise_uniform_fraction,
+                    max_weight=config.samples.policy_surprise_max_weight,
                 )
-                buffer.extend(finalized)
-                samples_added += len(finalized)
-                if len(debug_games) < config.debug.preview_games:
-                    debug_games.append(
-                        {
-                            "game_id": game["game_id"],
-                            "winner": winner,
-                            "truncated": truncated,
-                            "actions": game["actions"],
-                            "samples": len(finalized),
-                        }
-                    )
+                npz_path = record_dir / f"epoch_{epoch:06d}_game_{int(game['search_key']):06d}.npz"
+                write_result = write_selfplay_npz(
+                    npz_path,
+                    materialized,
+                    raw_rows=len(finalized),
+                    epoch=epoch,
+                    game_id=str(game["game_id"]),
+                    short_term_value_horizons=horizons,
+                )
+                raw_samples_added += len(finalized)
+                samples_added += len(materialized)
+                npz_writes.append(
+                    {
+                        "path": str(write_result.path),
+                        "raw_rows": write_result.raw_rows,
+                        "effective_rows": write_result.effective_rows,
+                        "policy_surprise_mean": weight_stats["policy_surprise_mean"],
+                        "frequency_weight_mean": weight_stats["frequency_weight_mean"],
+                    }
+                )
                 active.remove(game)
                 mcts_session.discard(int(game["search_key"]))
 
     elapsed = perf_counter() - started
-    search_positions_per_second = searched_positions / max(mcts_search_elapsed, 1.0e-9)
-    end_to_end_positions_per_second = searched_positions / max(elapsed, 1.0e-9)
-    mcts_diagnostics = _summarize_mcts_diagnostic_batches(mcts_diagnostic_batches)
-    length_stats = _length_stats(game_lengths)
-    preview_artifacts: list[dict[str, Any]] = []
-    if config.debug.write_sample_previews and debug_games:
-        preview_dir = ctx.output_dir / "diagnostics" / "dense_cnn_previews" / f"epoch_{epoch:06d}"
-        for game in debug_games:
-            preview_artifacts.append(
-                render_preview_game_actions(
-                    game["actions"],
-                    preview_dir,
-                    game_id=game["game_id"],
-                    file_prefix=game["game_id"],
-                    max_actions=config.selfplay.max_actions,
-                    max_images=4,
-                    actions_per_image=64,
-                )
-            )
-    game_history_path = None
-    if config.debug.write_game_history:
-        game_history_path = ctx.diagnostics.write_json(
-            f"dense_cnn.game_history.epoch_{epoch:06d}.json",
-            {
-                "epoch": epoch,
-                "record_path": str(record_path),
-                "summary": {
-                    "games": completed_games + truncated_games,
-                    "completed_games": completed_games,
-                    "truncated_games": truncated_games,
-                    "winner_counts": dict(winner_counts),
-                    "lengths": length_stats,
-                },
-                "games": debug_games,
-                "preview_artifacts": preview_artifacts,
-            },
-        )
-    debug_path = ctx.diagnostics.write_json(
-        f"dense_cnn.selfplay.epoch_{epoch:06d}.json",
-        {
-            "epoch": epoch,
-            "record_path": str(record_path),
-            "game_history_path": str(game_history_path) if game_history_path is not None else None,
-            "preview_games": debug_games,
-            "preview_artifacts": preview_artifacts,
-            "games": completed_games,
-            "completed_games": completed_games,
-            "truncated_games": truncated_games,
-            "winner_counts": dict(winner_counts),
-            "lengths": length_stats,
-            "samples_added": samples_added,
-            "searched_positions": searched_positions,
-            "mcts_simulations": mcts_simulations,
-            "mcts_search_elapsed_seconds": mcts_search_elapsed,
-            "search_positions_per_second": search_positions_per_second,
-            "end_to_end_positions_per_second": end_to_end_positions_per_second,
-            "search_visits": int(getattr(trainer, "search_visits", config.selfplay.search_visits)),
-            "mcts_sims_per_searched_position": (
-                mcts_simulations / searched_positions if searched_positions else 0.0
-            ),
-            "completion_rollout": "mcts_until_sample_budget_then_model_policy_rollout",
-            "configured_active_games": configured_active_limit,
-            "active_games": active_limit,
-            "min_mcts_samples_per_game": min_mcts_samples_per_game,
-            "mcts_virtual_batch_size": virtual_batch_size,
-            "mcts_tree_reuse_session": True,
-            "mcts_progressive_widening_initial_actions": progressive_widening_initial_actions,
-            "mcts_progressive_widening_child_initial_actions": progressive_widening_child_initial_actions,
-            "mcts_progressive_widening_candidate_actions": progressive_widening_candidate_actions,
-            "mcts_progressive_widening_growth_interval": progressive_widening_growth_interval,
-            "mcts_progressive_widening_growth_base": progressive_widening_growth_base,
-            "mcts_root_dirichlet_alpha": root_dirichlet_alpha,
-            "mcts_root_exploration_fraction": root_exploration_fraction,
-            "mcts_evaluation_cache_max_states": config.selfplay.mcts_evaluation_cache_max_states,
-            "mcts_active_root_limit": active_root_limit,
-            "mcts_diagnostics": mcts_diagnostics,
-        },
-    )
-    return {
+    summary = {
         "status": "completed",
         "epoch": epoch,
-        "games": completed_games,
+        "requested_games": requested_games,
+        "games_started": games_started,
+        "completed_games": completed_games,
         "truncated_games": truncated_games,
-        "samples_added": samples_added,
+        "games_finished": completed_games + truncated_games,
+        "raw_samples": raw_samples_added,
+        "effective_samples": samples_added,
         "searched_positions": searched_positions,
         "mcts_simulations": mcts_simulations,
-        "buffer_count": buffer.sample_count,
+        "search_visits": selfplay.search_visits,
+        "selfplay_npz_files": len(npz_writes),
         "record_path": str(record_path),
-        "game_history_path": str(game_history_path) if game_history_path is not None else None,
-        "debug_path": str(debug_path),
         "elapsed_seconds": elapsed,
         "mcts_search_elapsed_seconds": mcts_search_elapsed,
-        "positions_per_second": end_to_end_positions_per_second,
-        "search_positions_per_second": search_positions_per_second,
-        "end_to_end_positions_per_second": end_to_end_positions_per_second,
-        "samples_per_second": samples_added / max(elapsed, 1.0e-9),
-        "completion_rollout": "mcts_until_sample_budget_then_model_policy_rollout",
-        "configured_active_games": configured_active_limit,
+        "search_positions_per_second": searched_positions / max(mcts_search_elapsed, 1.0e-9),
+        "positions_per_second": searched_positions / max(elapsed, 1.0e-9),
         "active_games": active_limit,
-        "min_mcts_samples_per_game": min_mcts_samples_per_game,
-        "mcts_tree_reuse_session": True,
-        "mcts_diagnostics": mcts_diagnostics,
+        "mcts_virtual_batch_size": trainer.mcts_virtual_batch_size,
+        "mcts_diagnostics": _summarize_mcts_diagnostic_batches(mcts_diagnostic_batches),
+        "npz_writes": npz_writes,
     }
+    ctx.diagnostics.write_json(f"dense_cnn.selfplay.epoch_{epoch:06d}.json", summary)
+    return summary
 
 
 def _finalize_game_samples(
-    pending: list[tuple[str, Model1SampleData | CompressedSample, float]],
+    pending: list[tuple[str, Model1SampleData, float]],
     winner: str | None,
     horizons: tuple[int, ...],
     *,
@@ -377,123 +253,3 @@ def _finalize_game_samples(
 
 def _player_label(value: object) -> str:
     return str(getattr(value, "value", value))
-
-
-def _length_stats(lengths: Sequence[int]) -> dict[str, float | int | None]:
-    if not lengths:
-        return {
-            "count": 0,
-            "min": None,
-            "max": None,
-            "mean": None,
-            "median": None,
-        }
-    ordered = sorted(int(item) for item in lengths)
-    midpoint = len(ordered) // 2
-    median = (
-        float(ordered[midpoint])
-        if len(ordered) % 2 == 1
-        else (ordered[midpoint - 1] + ordered[midpoint]) / 2.0
-    )
-    return {
-        "count": len(ordered),
-        "min": ordered[0],
-        "max": ordered[-1],
-        "mean": sum(ordered) / len(ordered),
-        "median": median,
-    }
-
-
-def _search_playable_games(
-    playable: list[dict[str, Any]],
-    *,
-    inference: DenseCNNInference,
-    visits: int,
-    temperature: float,
-    seed: int,
-    virtual_batch_size: int | None = None,
-    progressive_widening_initial_actions: int | None = None,
-    progressive_widening_child_initial_actions: int | None = None,
-    progressive_widening_candidate_actions: int | None = None,
-    progressive_widening_growth_interval: float | None = None,
-    progressive_widening_growth_base: float | None = None,
-    root_dirichlet_alpha: float | None = None,
-    root_exploration_fraction: float | None = None,
-    evaluation_cache: object | None = None,
-    mcts_session: BatchedMctsSession | None = None,
-    active_root_limit: int | None = None,
-) -> list[SearchResult]:
-    if (
-        mcts_session is not None
-        and run_batched_mcts is _ORIGINAL_RUN_BATCHED_MCTS
-        and hasattr(inference, "evaluate_model1_payload")
-    ):
-        return mcts_session.run(
-            [int(game["search_key"]) for game in playable],
-            [game["state"] for game in playable],
-            inference,
-            visits=visits,
-            temperature=temperature,
-            seed=seed,
-            virtual_batch_size=virtual_batch_size,
-            progressive_widening_initial_actions=progressive_widening_initial_actions,
-            progressive_widening_child_initial_actions=progressive_widening_child_initial_actions,
-            progressive_widening_candidate_actions=progressive_widening_candidate_actions,
-            progressive_widening_growth_interval=progressive_widening_growth_interval,
-            progressive_widening_growth_base=progressive_widening_growth_base,
-            root_dirichlet_alpha=root_dirichlet_alpha,
-            root_exploration_fraction=root_exploration_fraction,
-            active_root_limit=active_root_limit,
-        )
-    return run_batched_mcts(
-        [game["state"] for game in playable],
-        inference,
-        visits=visits,
-        temperature=temperature,
-        seed=seed,
-        virtual_batch_size=virtual_batch_size,
-        progressive_widening_initial_actions=progressive_widening_initial_actions,
-        progressive_widening_child_initial_actions=progressive_widening_child_initial_actions,
-        progressive_widening_candidate_actions=progressive_widening_candidate_actions,
-        progressive_widening_growth_interval=progressive_widening_growth_interval,
-        progressive_widening_growth_base=progressive_widening_growth_base,
-        root_dirichlet_alpha=root_dirichlet_alpha,
-        root_exploration_fraction=root_exploration_fraction,
-        evaluation_cache=evaluation_cache,
-        active_root_limit=active_root_limit,
-    )
-
-
-def _sample_policy_action(policy: Any, *, temperature: float, seed: int) -> int:
-    items = [(int(action_id), max(0.0, float(weight))) for action_id, weight in policy.items()]
-    if not items:
-        raise RuntimeError("cannot sample from an empty visit policy")
-    if temperature <= 1.0e-6:
-        return max(items, key=lambda item: (item[1], -item[0]))[0]
-    inv_temperature = 1.0 / max(temperature, 1.0e-3)
-    weights = [(weight or 1.0e-12) ** inv_temperature for _action, weight in items]
-    total = sum(weights)
-    threshold = Random(seed).random() * total
-    for (action_id, _weight), weight in zip(items, weights):
-        threshold -= weight
-        if threshold <= 0:
-            return action_id
-    return items[-1][0]
-
-
-def _policy_rollout_actions(
-    playable: list[dict[str, Any]],
-    *,
-    inference: DenseCNNInference,
-    temperature: float,
-    seed: int,
-) -> list[int]:
-    evaluations = inference.infer_states([game["state"] for game in playable])
-    return [
-        _sample_policy_action(
-            evaluation.legal_priors,
-            temperature=temperature,
-            seed=seed + index * 1_000_003,
-        )
-        for index, evaluation in enumerate(evaluations)
-    ]
