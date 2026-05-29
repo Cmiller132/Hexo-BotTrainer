@@ -31,7 +31,7 @@ struct RootSelectionWork {
     made_progress: bool,
 }
 
-#[pyfunction(signature = (states, visits, c_puct, temperature, seed, evaluator, virtual_batch_size=None, progressive_widening_initial_actions=None, progressive_widening_child_initial_actions=None, progressive_widening_growth_interval=None, progressive_widening_growth_base=None, progressive_widening_candidate_actions=None, evaluation_cache=None, active_root_limit=None))]
+#[pyfunction(signature = (states, visits, c_puct, temperature, seed, evaluator, virtual_batch_size=None, progressive_widening_initial_actions=None, progressive_widening_child_initial_actions=None, progressive_widening_growth_interval=None, progressive_widening_growth_base=None, progressive_widening_candidate_actions=None, root_dirichlet_alpha=None, root_exploration_fraction=None, evaluation_cache=None, active_root_limit=None))]
 pub fn model1_batched_mcts(
     py: Python<'_>,
     states: &Bound<'_, PyAny>,
@@ -46,6 +46,8 @@ pub fn model1_batched_mcts(
     progressive_widening_growth_interval: Option<f32>,
     progressive_widening_growth_base: Option<f32>,
     progressive_widening_candidate_actions: Option<u32>,
+    root_dirichlet_alpha: Option<f32>,
+    root_exploration_fraction: Option<f32>,
     evaluation_cache: Option<PyRef<'_, Model1MctsEvaluationCache>>,
     active_root_limit: Option<usize>,
 ) -> PyResult<Py<PyAny>> {
@@ -100,6 +102,12 @@ pub fn model1_batched_mcts(
     if searches.iter().any(RustSearch::root_edges_empty) {
         return Err(PyValueError::new_err("MCTS root has no legal actions"));
     }
+    apply_root_noise(
+        &mut searches,
+        root_dirichlet_alpha,
+        root_exploration_fraction,
+        seed,
+    );
 
     run_searches_to_targets(
         py,
@@ -157,7 +165,7 @@ impl Model1MctsSession {
         self.searches.len()
     }
 
-    #[pyo3(signature = (game_keys, states, visits, c_puct, temperature, seed, evaluator, virtual_batch_size=None, progressive_widening_initial_actions=None, progressive_widening_child_initial_actions=None, progressive_widening_growth_interval=None, progressive_widening_growth_base=None, progressive_widening_candidate_actions=None, active_root_limit=None))]
+    #[pyo3(signature = (game_keys, states, visits, c_puct, temperature, seed, evaluator, virtual_batch_size=None, progressive_widening_initial_actions=None, progressive_widening_child_initial_actions=None, progressive_widening_growth_interval=None, progressive_widening_growth_base=None, progressive_widening_candidate_actions=None, root_dirichlet_alpha=None, root_exploration_fraction=None, active_root_limit=None))]
     fn search(
         &mut self,
         py: Python<'_>,
@@ -174,6 +182,8 @@ impl Model1MctsSession {
         progressive_widening_growth_interval: Option<f32>,
         progressive_widening_growth_base: Option<f32>,
         progressive_widening_candidate_actions: Option<u32>,
+        root_dirichlet_alpha: Option<f32>,
+        root_exploration_fraction: Option<f32>,
         active_root_limit: Option<usize>,
     ) -> PyResult<Py<PyAny>> {
         let roots = states_from_py_states(py, states)?;
@@ -255,6 +265,12 @@ impl Model1MctsSession {
         if searches.iter().any(RustSearch::root_edges_empty) {
             return Err(PyValueError::new_err("MCTS root has no legal actions"));
         }
+        apply_root_noise(
+            &mut searches,
+            root_dirichlet_alpha,
+            root_exploration_fraction,
+            seed,
+        );
 
         let baselines: Vec<HashMap<PackedCoord, u32>> = searches
             .iter()
@@ -310,6 +326,26 @@ impl Model1MctsSession {
         }
 
         Ok(results)
+    }
+}
+
+fn apply_root_noise(
+    searches: &mut [RustSearch],
+    root_dirichlet_alpha: Option<f32>,
+    root_exploration_fraction: Option<f32>,
+    seed: u64,
+) {
+    let alpha = root_dirichlet_alpha.unwrap_or(0.0);
+    let fraction = root_exploration_fraction.unwrap_or(0.0);
+    if !alpha.is_finite() || alpha <= 0.0 || !fraction.is_finite() || fraction <= 0.0 {
+        return;
+    }
+    let fraction = fraction.clamp(0.0, 1.0);
+    if fraction <= 0.0 {
+        return;
+    }
+    for (index, search) in searches.iter_mut().enumerate() {
+        search.apply_root_dirichlet_noise(alpha, fraction, seed.wrapping_add(index as u64));
     }
 }
 

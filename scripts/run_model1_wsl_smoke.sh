@@ -4,19 +4,25 @@ set -euo pipefail
 ROOT="${ROOT:-/mnt/e/Hexo-BotTrainer}"
 VENV="${VENV:-/root/.venvs/hexo-bottrainer-wsl}"
 RUN_ROOT="${RUN_ROOT:-$ROOT/runs/dense_cnn_model1_wsl_smoke}"
-CHECKPOINT="${CHECKPOINT:-$ROOT/runs/dense_cnn_model1/checkpoints/epoch_000006.pt}"
+CHECKPOINT="${CHECKPOINT:-$ROOT/data/checkpoints/dense_cnn_model1_latest.txt}"
 
 SELFPLAY_SAMPLES="${SELFPLAY_SAMPLES:-65536}"
-ACTIVE_GAMES="${ACTIVE_GAMES:-2048}"
+ACTIVE_GAMES="${ACTIVE_GAMES:-1024}"
 MIN_MCTS_SAMPLES_PER_GAME="${MIN_MCTS_SAMPLES_PER_GAME:-32}"
 GAMES_PER_EPOCH="${GAMES_PER_EPOCH:-4096}"
 EVAL_GAMES="${EVAL_GAMES:-0}"
 MONITOR_INTERVAL_SECONDS="${MONITOR_INTERVAL_SECONDS:-6}"
+SELFPLAY_PROBE_POSITIONS="${SELFPLAY_PROBE_POSITIONS:-65536}"
+INFERENCE_BATCH_CANDIDATES="${INFERENCE_BATCH_CANDIDATES:-512, 1024}"
+SELFPLAY_BATCH_CANDIDATES="${SELFPLAY_BATCH_CANDIDATES:-$ACTIVE_GAMES}"
+MIN_WSL_MEM_AVAILABLE_GB="${MIN_WSL_MEM_AVAILABLE_GB:-4}"
+MIN_WSL_GPU_FREE_GB="${MIN_WSL_GPU_FREE_GB:-1.0}"
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-max_split_size_mb:128}"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}"
 export RAYON_NUM_THREADS="${RAYON_NUM_THREADS:-4}"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/root/.cache/hexo-bottrainer-cargo-target}"
 
 if [[ ! -d "$VENV" ]]; then
   echo "Missing WSL venv: $VENV" >&2
@@ -32,6 +38,7 @@ mkdir -p "$SESSION"
 CONFIG_PATH="$SESSION/config.toml"
 LOG_PATH="$SESSION/train.log"
 MONITOR_PATH="$SESSION/resource_monitor.jsonl"
+GUARD_STOP_PATH="$SESSION/resource_guard.stop.json"
 SUMMARY_PATH="$SESSION/summary.json"
 
 python - "$CHECKPOINT" <<'PY' > "$SESSION/checkpoint.json"
@@ -41,9 +48,24 @@ import sys
 
 import torch
 
-path = Path(sys.argv[1])
+def coerce_path(value: str, *, base: Path | None = None) -> Path:
+    text = value.strip()
+    if len(text) >= 3 and text[1] == ":" and text[2] in {"\\", "/"}:
+        drive = text[0].lower()
+        rest = text[3:].replace("\\", "/")
+        return Path(f"/mnt/{drive}/{rest}")
+    path = Path(text)
+    if path.is_absolute():
+        return path
+    return (base / path) if base is not None else path
+
+path = coerce_path(sys.argv[1])
 if not path.exists():
     raise SystemExit(f"checkpoint missing: {path}")
+if path.is_file() and path.suffix == ".txt":
+    path = coerce_path(path.read_text(encoding="utf-8"), base=path.parent)
+if not path.exists():
+    raise SystemExit(f"resolved checkpoint missing: {path}")
 payload = torch.load(path, map_location="cpu", weights_only=False)
 epoch = int(payload.get("epoch") or 0)
 if epoch < 1:
@@ -55,6 +77,13 @@ NEXT_EPOCH="$(python - "$SESSION/checkpoint.json" <<'PY'
 import json
 import sys
 print(json.loads(open(sys.argv[1], encoding="utf-8").read())["next_epoch"])
+PY
+)"
+TARGET_EPOCHS="${LOOP_EPOCHS:-$NEXT_EPOCH}"
+RESOLVED_CHECKPOINT="$(python - "$SESSION/checkpoint.json" <<'PY'
+import json
+import sys
+print(json.loads(open(sys.argv[1], encoding="utf-8").read())["checkpoint"])
 PY
 )"
 
@@ -87,7 +116,8 @@ max_grad_norm = 1.0
 
 [model.config.samples]
 capacity = 200000
-train_sample_count = 4096
+train_sample_count = 32768
+classical_replay_min_fraction = 0.5
 recency_halflife = 50000.0
 compression_level = 6
 
@@ -101,6 +131,8 @@ progressive_widening_child_initial_actions = 4
 progressive_widening_candidate_actions = 128
 progressive_widening_growth_interval = 256.0
 progressive_widening_growth_base = 1.3
+root_dirichlet_alpha = 0.1
+root_exploration_fraction = 0.25
 mcts_evaluation_cache_max_states = 1048576
 mcts_active_root_limit = 1024
 max_actions = 1024
@@ -117,12 +149,12 @@ require_sealbot = false
 [model.config.performance]
 calibrate = true
 target_selfplay_positions_per_second = 128.0
-inference_batch_candidates = [128, 256, 512, 1024]
-selfplay_batch_candidates = [2048]
+inference_batch_candidates = [$INFERENCE_BATCH_CANDIDATES]
+selfplay_batch_candidates = [$SELFPLAY_BATCH_CANDIDATES]
 training_batch_candidates = [64, 128, 192, 256]
 mcts_visit_candidates = [128]
 mcts_virtual_batch_candidates = [4]
-selfplay_probe_positions = 8192
+selfplay_probe_positions = $SELFPLAY_PROBE_POSITIONS
 probe_batches = 1
 
 [model.config.debug]
@@ -137,7 +169,7 @@ output_dir = "$RUN_ROOT"
 seed = 1
 
 [loop]
-epochs = $NEXT_EPOCH
+epochs = $TARGET_EPOCHS
 
 [selfplay]
 games_per_epoch = $GAMES_PER_EPOCH
@@ -145,13 +177,13 @@ update_checkpoint_pointer = false
 checkpoint_pointer = "$RUN_ROOT/selfplay_checkpoint.txt"
 
 [samples]
-train_sample_count = 4096
+train_sample_count = 32768
 
 [train]
-passes_per_epoch = 1
+passes_per_epoch = 4
 
 [checkpoint]
-resume_from = "$CHECKPOINT"
+resume_from = "$RESOLVED_CHECKPOINT"
 save_name = "wsl_smoke_latest"
 TOML
 
@@ -163,6 +195,7 @@ from pathlib import Path
 import torch
 
 from hexo_models.dense_cnn import BOARD_SIZE, INPUT_CHANNELS, parse_model1_config
+from hexo_models.dense_cnn.samples import CURRENT_TARGET_SCHEMA_VERSION
 from hexo_models.dense_cnn.rust_bridge import capabilities
 
 raw = tomllib.loads(Path("configs/dense_cnn_model1.toml").read_text(encoding="utf-8"))
@@ -177,6 +210,7 @@ assert cfg.evaluation.max_actions == 1024
 assert cfg.selfplay.search_visits == 128
 assert cfg.performance.mcts_visit_candidates == (128,)
 assert cfg.selfplay.progressive_widening_candidate_actions == 128
+assert CURRENT_TARGET_SCHEMA_VERSION == 2
 assert caps["model1_mcts_progressive_widening"]
 assert caps["model1_mcts_lazy_staged_edges"]
 assert caps["model1_mcts_tree_reuse_session"]
@@ -189,6 +223,7 @@ print(json.dumps({
     "cuda_mem_info": torch.cuda.mem_get_info(),
     "board_size": BOARD_SIZE,
     "input_channels": INPUT_CHANNELS,
+    "target_schema_version": CURRENT_TARGET_SCHEMA_VERSION,
     "capabilities": caps,
 }, indent=2, sort_keys=True))
 PY
@@ -201,13 +236,18 @@ echo "$TRAIN_PID" > "$SESSION/pid"
 START_SECONDS="$(date +%s)"
 
 while kill -0 "$TRAIN_PID" 2>/dev/null; do
-  python - "$TRAIN_PID" <<'PY' >> "$MONITOR_PATH" || true
+  python - "$TRAIN_PID" "$GUARD_STOP_PATH" "$MIN_WSL_MEM_AVAILABLE_GB" "$MIN_WSL_GPU_FREE_GB" <<'PY' >> "$MONITOR_PATH" || true
 import json
+import os
 import subprocess
 import sys
+import signal
 import time
 
 pid = sys.argv[1]
+guard_stop_path = sys.argv[2]
+min_mem_available_gb = float(sys.argv[3])
+min_gpu_free_gb = float(sys.argv[4])
 
 def gb_from_kb(value: int) -> float:
     return round(value / 1024 / 1024, 3)
@@ -249,7 +289,7 @@ try:
 except Exception as exc:
     gpu = {"error": repr(exc)}
 
-print(json.dumps({
+row = {
     "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     "pid": int(pid),
     "rss_gb": gb_from_kb(status_kb("VmRSS")),
@@ -258,7 +298,23 @@ print(json.dumps({
     "mem_available_gb": gb_from_kb(mem.get("MemAvailable", 0)),
     "swap_free_gb": gb_from_kb(mem.get("SwapFree", 0)),
     "gpu": gpu,
-}, sort_keys=True))
+}
+critical = []
+if row["mem_available_gb"] < min_mem_available_gb:
+    critical.append(f"mem_available_gb < {min_mem_available_gb}")
+if isinstance(gpu, dict) and "free_gb" in gpu and float(gpu["free_gb"]) < min_gpu_free_gb:
+    critical.append(f"gpu_free_gb < {min_gpu_free_gb}")
+row["critical"] = critical
+print(json.dumps(row, sort_keys=True))
+if critical:
+    stop = dict(row)
+    stop["status"] = "stopping_trainer"
+    with open(guard_stop_path, "w", encoding="utf-8") as handle:
+        json.dump(stop, handle, indent=2, sort_keys=True)
+    try:
+        os.kill(int(pid), signal.SIGTERM)
+    except ProcessLookupError:
+        pass
 PY
   sleep "$MONITOR_INTERVAL_SECONDS"
 done

@@ -37,6 +37,7 @@ class Model1SampleConfig:
     capacity: int = 200_000
     train_sample_count: int = 4096
     recency_halflife: float = 50_000.0
+    classical_replay_min_fraction: float = 0.0
     compression_level: int = 6
 
 
@@ -51,6 +52,8 @@ class Model1SelfPlayConfig:
     progressive_widening_candidate_actions: int = 128
     progressive_widening_growth_interval: float = 256.0
     progressive_widening_growth_base: float = 1.3
+    root_dirichlet_alpha: float = 0.1
+    root_exploration_fraction: float = 0.25
     mcts_evaluation_cache_max_states: int = 1_048_576
     mcts_active_root_limit: int = 1024
     max_actions: int = 1024
@@ -71,7 +74,7 @@ class Model1EvalConfig:
 class Model1PerformanceConfig:
     calibrate: bool = True
     target_selfplay_positions_per_second: float = 128.0
-    inference_batch_candidates: tuple[int, ...] = (128, 256, 512, 1024)
+    inference_batch_candidates: tuple[int, ...] = (512, 1024)
     selfplay_batch_candidates: tuple[int, ...] = (2048,)
     training_batch_candidates: tuple[int, ...] = (64, 128, 192, 256)
     mcts_visit_candidates: tuple[int, ...] = (128,)
@@ -135,6 +138,10 @@ def parse_model1_config(raw: Mapping[str, Any] | None) -> Model1Config:
             capacity=max(200_000, int(samples.get("capacity", 200_000))),
             train_sample_count=int(samples.get("train_sample_count", config.get("train_sample_count", 4096))),
             recency_halflife=float(samples.get("recency_halflife", 50_000.0)),
+            classical_replay_min_fraction=min(
+                1.0,
+                max(0.0, float(samples.get("classical_replay_min_fraction", 0.0))),
+            ),
             compression_level=int(samples.get("compression_level", 6)),
         ),
         selfplay=Model1SelfPlayConfig(
@@ -162,6 +169,14 @@ def parse_model1_config(raw: Mapping[str, Any] | None) -> Model1Config:
                 1.000001,
                 float(selfplay.get("progressive_widening_growth_base", 1.3)),
             ),
+            root_dirichlet_alpha=max(
+                0.0,
+                float(selfplay.get("root_dirichlet_alpha", 0.1)),
+            ),
+            root_exploration_fraction=min(
+                1.0,
+                max(0.0, float(selfplay.get("root_exploration_fraction", 0.25))),
+            ),
             mcts_evaluation_cache_max_states=max(
                 1,
                 int(selfplay.get("mcts_evaluation_cache_max_states", 1_048_576)),
@@ -181,7 +196,7 @@ def parse_model1_config(raw: Mapping[str, Any] | None) -> Model1Config:
         performance=Model1PerformanceConfig(
             calibrate=bool(performance.get("calibrate", performance.get("calibration_enabled", True))),
             target_selfplay_positions_per_second=float(performance.get("target_selfplay_positions_per_second", 128.0)),
-            inference_batch_candidates=tuple(int(item) for item in performance.get("inference_batch_candidates", (128, 256, 512, 1024))),
+            inference_batch_candidates=tuple(int(item) for item in performance.get("inference_batch_candidates", (512, 1024))),
             selfplay_batch_candidates=tuple(int(item) for item in performance.get("selfplay_batch_candidates", (2048,))),
             training_batch_candidates=tuple(int(item) for item in performance.get("training_batch_candidates", (64, 128, 192, 256))),
             mcts_visit_candidates=tuple(int(item) for item in performance.get("mcts_visit_candidates", (selfplay.get("search_visits", 128),))),

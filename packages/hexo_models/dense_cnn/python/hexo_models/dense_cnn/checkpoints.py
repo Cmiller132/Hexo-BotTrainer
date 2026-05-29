@@ -84,10 +84,7 @@ class DenseCNNCheckpointSaver:
                 else None
             ),
             "epoch": _epoch_from_name(name) or _latest_epoch(ctx, components),
-            "metadata": {
-                "run": ctx.config.run.name,
-                "sample_count": getattr(buffer, "sample_count", None),
-            },
+            "metadata": _checkpoint_metadata(ctx=ctx, components=components, buffer=buffer),
         }
         torch.save(payload, path)
         return path
@@ -110,6 +107,22 @@ def _latest_epoch(ctx: Any, components: Any) -> int | None:
     if isinstance(checkpoint_state, dict) and checkpoint_state.get("epoch") is not None:
         return int(checkpoint_state["epoch"])
     return None
+
+
+def _checkpoint_metadata(*, ctx: Any, components: Any, buffer: Any) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+    checkpoint_state = getattr(getattr(components, "shared", None), "checkpoint_state", None)
+    if isinstance(checkpoint_state, Mapping):
+        parent_metadata = checkpoint_state.get("metadata")
+        if isinstance(parent_metadata, Mapping):
+            metadata.update(dict(parent_metadata))
+        checkpoint_ref = checkpoint_state.get("checkpoint_ref") or checkpoint_state.get("checkpoint_path")
+        if checkpoint_ref is not None:
+            metadata["parent_checkpoint"] = str(checkpoint_ref)
+
+    metadata["run"] = ctx.config.run.name
+    metadata["sample_count"] = getattr(buffer, "sample_count", None)
+    return metadata
 
 
 def _state_dict_incompatibilities(

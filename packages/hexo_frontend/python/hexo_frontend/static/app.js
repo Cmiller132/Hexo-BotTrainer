@@ -2016,7 +2016,8 @@ function renderGameHistoryPage() {
     if (historyLearningHealth) historyLearningHealth.innerHTML = "";
     if (historyEvalTrend) historyEvalTrend.innerHTML = "";
     if (historyEpochProgress) historyEpochProgress.innerHTML = "";
-    gameHistoryList.innerHTML = `<div class="empty-list">${historyDetailsLoading ? "Loading game histories" : "No training run selected"}</div>`;
+    const pendingSelection = historyDetailsLoading || historySelectionPendingDetails();
+    gameHistoryList.innerHTML = `<div class="empty-list">${pendingSelection ? "Loading game histories" : "No training run selected"}</div>`;
     gameHistoryDetail.innerHTML = `<div class="empty-list">No game selected</div>`;
     return;
   }
@@ -2054,6 +2055,14 @@ function historyRunsForPage() {
   const selected = trainingRunDetails[historySelectedRun] ||
     (trainingRun && trainingRun.name === historySelectedRun ? trainingRun : null);
   return selected ? [selected] : [];
+}
+
+function historySelectionPendingDetails() {
+  if (!trainingRuns.length) return false;
+  if (historySelectedRun === HISTORY_ALL_RUNS) {
+    return trainingRuns.some(run => run.name && !trainingRunDetails[run.name]);
+  }
+  return trainingRuns.some(run => run.name === historySelectedRun) && !trainingRunDetails[historySelectedRun];
 }
 
 function historyItemsForPage(runs) {
@@ -2203,6 +2212,12 @@ function formatRate(value, unit) {
   return `${number.toFixed(number >= 100 ? 0 : 1)} ${unit}`;
 }
 
+function formatPercent(value, digits = 0) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "--";
+  return `${(number * 100).toFixed(digits)}%`;
+}
+
 function formatGib(value) {
   const number = Number(value);
   if (!Number.isFinite(number)) return "--";
@@ -2210,21 +2225,23 @@ function formatGib(value) {
 }
 
 function renderHistoryOverview(histories, filtered) {
-  const epochs = historyEpochs(histories);
+  const epochs = historyEpochs(filtered);
   const runCount = new Set(histories.map(item => item.run).filter(Boolean)).size;
-  const lengths = histories.map(item => Number(item.length || item.actions || 0)).filter(value => Number.isFinite(value) && value > 0);
+  const filteredRunCount = new Set(filtered.map(item => item.run).filter(Boolean)).size;
+  const lengths = filtered.map(item => Number(item.length || item.actions || 0)).filter(value => Number.isFinite(value) && value > 0);
   const avgLength = lengths.length ? (lengths.reduce((sum, value) => sum + value, 0) / lengths.length).toFixed(1) : "--";
-  const p0Wins = histories.filter(item => item.winner === "player0").length;
-  const p1Wins = histories.filter(item => item.winner === "player1").length;
-  const completed = histories.filter(item => item.status === "completed").length;
+  const p0Wins = filtered.filter(item => item.winner === "player0").length;
+  const p1Wins = filtered.filter(item => item.winner === "player1").length;
+  const completed = filtered.filter(item => item.status === "completed").length;
   const evalSummary = latestDiagnosticSummary(histories, "evaluation");
   const selfplaySummary = latestDiagnosticSummary(histories, "selfplay");
   const liveStatus = latestRunStatusForHistoryPage();
   const liveWatchdog = liveStatus && liveStatus.watchdog ? liveStatus.watchdog : {};
   const liveCalibration = liveStatus && liveStatus.calibration ? liveStatus.calibration : {};
+  const liveTraining = liveStatus && liveStatus.training_progress ? liveStatus.training_progress : {};
   const cards = [
     ["Stage", runStageLabel(liveStatus), "Live trainer"],
-    ["Runs", runCount || "--", historySelectedRun === HISTORY_ALL_RUNS ? "All loaded runs" : "Selected run"],
+    ["Runs", filteredRunCount || runCount || "--", historySelectedRun === HISTORY_ALL_RUNS ? "Filtered / loaded runs" : "Selected run"],
     ["Games", `${filtered.length} / ${histories.length}`, "Filtered / total"],
     ["Epochs", epochs.length ? `${epochs[0]}-${epochs[epochs.length - 1]}` : "--", `${epochs.length} observed`],
     ["Winners", `P0 ${p0Wins} | P1 ${p1Wins}`, `${completed} completed`],
@@ -2236,6 +2253,9 @@ function renderHistoryOverview(histories, filtered) {
   if (liveWatchdog && (liveWatchdog.free_ram_gb !== undefined || liveWatchdog.gpu_free_gb !== undefined)) {
     cards.push(["Resources", `${formatGib(liveWatchdog.free_ram_gb)} RAM | ${formatGib(liveWatchdog.gpu_free_gb)} GPU`, liveWatchdog.status || "watchdog"]);
   }
+  if (liveTraining && liveTraining.epoch !== undefined) {
+    cards.push(["Training", formatTrainingProgress(liveTraining), trainingProgressSubtext(liveTraining)]);
+  }
   if (evalSummary) cards.push(["Evaluation", historyDiagnosticsText({ evaluation: { summary: evalSummary } }), "Latest diagnostics"]);
   if (selfplaySummary) cards.push(["Selfplay", historyDiagnosticsText({ selfplay: { summary: selfplaySummary } }), "Latest diagnostics"]);
   return cards.map(([label, value, sub]) => `
@@ -2245,6 +2265,21 @@ function renderHistoryOverview(histories, filtered) {
       <small>${escapeText(sub)}</small>
     </div>
   `).join("");
+}
+
+function formatTrainingProgress(progress) {
+  const epoch = progress && progress.epoch !== undefined ? `e${progress.epoch}` : "train";
+  const pct = progress && progress.progress !== undefined ? formatPercent(progress.progress) : "--";
+  return `${epoch} ${pct}`;
+}
+
+function trainingProgressSubtext(progress) {
+  if (!progress || typeof progress !== "object") return "Training progress";
+  const steps = progress.steps !== undefined && progress.total_steps !== undefined
+    ? `${progress.steps}/${progress.total_steps} steps`
+    : "steps pending";
+  const loss = progress.loss !== undefined ? `loss ${formatDecimal(progress.loss, 3)}` : String(progress.status || "training");
+  return `${steps} | ${loss}`;
 }
 
 function renderLearningHealth(runs) {
@@ -2259,6 +2294,9 @@ function renderLearningHealth(runs) {
     ["Best", health.best_eval_mean_turns !== null && health.best_eval_mean_turns !== undefined ? `${formatDecimal(health.best_eval_mean_turns, 1)} turns` : "--"],
     ["Speed", formatRate(health.latest_selfplay_pos_s, "pos/s")],
     ["Exact", health.latest_exact_128 ? "128 sims" : "--"],
+    ["Classical", formatPercent(health.latest_classical_fraction)],
+    ["Policy@1", formatPercent(health.latest_policy_top1)],
+    ["Target Mass", formatPercent(health.latest_policy_target_mass, 1)],
   ];
   return `<section class="learning-health-panel ${learningHealthClass(status)}" aria-label="Learning health">
     <div class="learning-health-head">
@@ -2379,7 +2417,9 @@ function epochProgressRow(item) {
     ? `${selfplay.samples_added} samples | ${formatRate(selfplay.search_positions_per_second, "pos/s")}`
     : "pending";
   const trainText = training.loss !== undefined
-    ? `loss ${formatDecimal(training.loss, 3)} | ${formatRate(training.samples_per_second, "samples/s")}`
+    ? `loss ${formatDecimal(training.loss, 3)} | C ${formatPercent(classicalReplayFraction(training))} | P@1 ${formatPercent(policyTop1(training))}`
+    : training.progress
+      ? `${formatTrainingProgress({ ...training.progress, epoch: item.epoch })} | ${trainingProgressSubtext(training.progress)}`
     : "pending";
   const evalText = evaluation.games !== undefined
     ? `${Number(evaluation.wins || 0)}-${Number(evaluation.losses || 0)} | ${formatDecimal(evaluation.mean_turns, 1)} turns`
@@ -2397,6 +2437,25 @@ function epochProgressRow(item) {
     <span>${escapeText(d6Text)}</span>
     <span>${escapeText(checkpointText)}</span>
   </div>`;
+}
+
+function classicalReplayFraction(training) {
+  const counts = training && training.source_summary && training.source_summary.source_counts;
+  if (!counts || typeof counts !== "object") return null;
+  let total = 0;
+  let classical = 0;
+  for (const [key, rawValue] of Object.entries(counts)) {
+    const value = Number(rawValue);
+    if (!Number.isFinite(value)) continue;
+    total += value;
+    if (String(key).toLowerCase().includes("classical")) classical += value;
+  }
+  return total > 0 ? classical / total : null;
+}
+
+function policyTop1(training) {
+  const overall = training && training.policy_imitation && training.policy_imitation.overall;
+  return overall ? overall.top1_accuracy : null;
 }
 
 function epochProgressSummary(item) {
@@ -2547,7 +2606,11 @@ function historyDiagnosticsText(diagnostics) {
   }
   const selfplaySummary = diagnostics.selfplay && diagnostics.selfplay.summary;
   if (selfplaySummary) {
-    if (selfplaySummary.samples_added !== undefined) return `${selfplaySummary.samples_added} samples`;
+    const parts = [];
+    if (selfplaySummary.samples_added !== undefined) parts.push(`${selfplaySummary.samples_added} samples`);
+    if (selfplaySummary.games !== undefined) parts.push(`${selfplaySummary.games}g`);
+    if (selfplaySummary.lengths && selfplaySummary.lengths.mean !== undefined) parts.push(`${Number(selfplaySummary.lengths.mean).toFixed(1)}t`);
+    if (parts.length) return parts.join(" ");
     if (selfplaySummary.searched_positions !== undefined) return `${selfplaySummary.searched_positions} pos`;
     return "Selfplay";
   }

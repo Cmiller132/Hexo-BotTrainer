@@ -253,6 +253,44 @@ impl RustSearch {
             .collect()
     }
 
+    pub(crate) fn apply_root_dirichlet_noise(&mut self, alpha: f32, fraction: f32, seed: u64) {
+        if !alpha.is_finite() || alpha <= 0.0 || !fraction.is_finite() || fraction <= 0.0 {
+            return;
+        }
+        let fraction = fraction.clamp(0.0, 1.0);
+        let root = &mut self.nodes[0];
+        let count = root.edges.len() + root.unexpanded_priors.len();
+        if count < 2 {
+            return;
+        }
+
+        let mut noise = Vec::with_capacity(count);
+        let mut noise_total = 0.0f64;
+        for index in 0..count {
+            let sample = gamma_sample(alpha as f64, seed.wrapping_add(index as u64));
+            noise_total += sample;
+            noise.push(sample);
+        }
+        if !noise_total.is_finite() || noise_total <= 0.0 {
+            return;
+        }
+
+        let keep = 1.0 - fraction;
+        let mut index = 0usize;
+        for edge in &mut root.edges {
+            let eta = (noise[index] / noise_total) as f32;
+            edge.prior = (keep * edge.prior + fraction * eta).max(1.0e-8);
+            index += 1;
+        }
+        for prior in &mut root.unexpanded_priors {
+            let eta = (noise[index] / noise_total) as f32;
+            prior.prior = (keep * prior.prior + fraction * eta).max(1.0e-8);
+            index += 1;
+        }
+        root.unexpanded_priors.sort_by(compare_prior_candidate);
+        root.unexpanded_priors.reverse();
+    }
+
     pub(crate) fn add_node_from_eval(
         &mut self,
         state: &RustHexoState,
@@ -774,6 +812,42 @@ fn random_unit(seed: u64) -> f64 {
     ((value >> 11) as f64) * (1.0 / ((1u64 << 53) as f64))
 }
 
+fn gamma_sample(shape: f64, seed: u64) -> f64 {
+    if !shape.is_finite() || shape <= 0.0 {
+        return 0.0;
+    }
+    if shape < 1.0 {
+        let boosted = gamma_sample(shape + 1.0, seed ^ 0xD1B5_4A32_D192_ED03);
+        let uniform = random_unit(seed ^ 0xABC9_83A4_2E91_7D5B).max(1.0e-12);
+        return boosted * uniform.powf(1.0 / shape);
+    }
+
+    let d = shape - (1.0 / 3.0);
+    let c = 1.0 / (9.0 * d).sqrt();
+    for attempt in 0..32u64 {
+        let x = normal_sample(seed ^ attempt.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+        let candidate = 1.0 + c * x;
+        if candidate <= 0.0 {
+            continue;
+        }
+        let v = candidate * candidate * candidate;
+        let uniform =
+            random_unit(seed ^ attempt.wrapping_mul(0xBF58_476D_1CE4_E5B9) ^ 0x94D0_49BB_1331_11EB)
+                .max(1.0e-12);
+        if uniform < 1.0 - 0.0331 * x.powi(4) || uniform.ln() < 0.5 * x * x + d * (1.0 - v + v.ln())
+        {
+            return d * v;
+        }
+    }
+    shape.max(1.0e-12)
+}
+
+fn normal_sample(seed: u64) -> f64 {
+    let u1 = random_unit(seed ^ 0xA076_1D64_78BD_642F).max(1.0e-12);
+    let u2 = random_unit(seed ^ 0xE703_7ED1_A0B4_28DB);
+    (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
+}
+
 #[cfg(test)]
 mod tests {
     use hexo_engine::{pack_coord, HexCoord, HexoState as RustHexoState};
@@ -877,5 +951,36 @@ mod tests {
             .rev()
             .take(32)
             .any(|prior| prior.action_id == pack_coord(HexCoord { q: 100, r: 0 })));
+    }
+
+    #[test]
+    fn root_dirichlet_noise_changes_root_priors_without_changing_actions() {
+        let config = ProgressiveWideningConfig::new(8, 4, 256.0, 1.3);
+        let state = RustHexoState::new();
+        let mut search = RustSearch::new(state, &evaluation_with_priors(32), 128, config);
+        let before: Vec<_> = search.nodes[0]
+            .unexpanded_priors
+            .iter()
+            .map(|prior| (prior.action_id, prior.prior))
+            .collect();
+
+        search.apply_root_dirichlet_noise(0.1, 0.25, 99);
+
+        let after: Vec<_> = search.nodes[0]
+            .unexpanded_priors
+            .iter()
+            .map(|prior| (prior.action_id, prior.prior))
+            .collect();
+        let before_actions: HashSet<_> = before.iter().map(|(action, _prior)| *action).collect();
+        let after_actions: HashSet<_> = after.iter().map(|(action, _prior)| *action).collect();
+
+        assert_eq!(before_actions, after_actions);
+        assert!(before
+            .iter()
+            .zip(after.iter())
+            .any(
+                |((_, before_prior), (_, after_prior))| (*before_prior - *after_prior).abs()
+                    > 1.0e-6
+            ));
     }
 }

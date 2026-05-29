@@ -12,6 +12,7 @@ use pyo3::types::{PyBytes, PyDict, PyTuple};
 use rayon::prelude::*;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::os::raw::c_char;
 use std::rc::Rc;
 use std::time::Instant;
 
@@ -261,7 +262,7 @@ fn evaluate_model1_states_chunk(
         stats.encoding_seconds += encoding_started.elapsed().as_secs_f64();
     }
     let payload = PyDict::new(py);
-    payload.set_item("inputs", PyBytes::new(py, bytes))?;
+    payload.set_item("inputs", readonly_memoryview_from_slice(py, bytes)?)?;
     if use_half_inputs {
         payload.set_item("input_dtype", "float16")?;
     }
@@ -277,6 +278,13 @@ fn evaluate_model1_states_chunk(
     if let Some(limit) = prior_candidate_limit {
         payload.set_item("max_prior_candidates", limit.max(1))?;
         payload.set_item("legal_mask_from_inputs", true)?;
+        payload.set_item(
+            "crop_legal_counts",
+            PyTuple::new(
+                py,
+                encoded.iter().map(|row| row.crop_legal_action_count as i64),
+            )?,
+        )?;
     } else {
         payload.set_item("legal_flat_indices_bytes", PyBytes::new(py, flat_bytes))?;
         payload.set_item("legal_row_offsets", PyTuple::new(py, legal_row_offsets)?)?;
@@ -664,6 +672,20 @@ fn validate_row_offsets(name: &str, offsets: &[usize], rows: usize) -> PyResult<
         }
     }
     Ok(())
+}
+
+fn readonly_memoryview_from_slice(py: Python<'_>, bytes: &[u8]) -> PyResult<Py<PyAny>> {
+    let view = unsafe {
+        pyo3::ffi::PyMemoryView_FromMemory(
+            bytes.as_ptr() as *mut c_char,
+            bytes.len() as pyo3::ffi::Py_ssize_t,
+            pyo3::ffi::PyBUF_READ,
+        )
+    };
+    if view.is_null() {
+        return Err(PyErr::fetch(py));
+    }
+    Ok(unsafe { Py::<PyAny>::from_owned_ptr(py, view) })
 }
 
 fn renormalize_priors(priors: &mut [(PackedCoord, f32)]) {

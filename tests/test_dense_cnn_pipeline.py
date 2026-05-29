@@ -141,6 +141,25 @@ def _required_mapping(payload: Mapping[str, Any], *keys: str) -> Mapping[str, An
     raise AssertionError(f"checkpoint payload must include one of {keys!r}; got keys {sorted(payload)}")
 
 
+def _raw_dense_sample(sample_id: str, *, sample_source: str = "mcts") -> dict[str, Any]:
+    return {
+        "sample_id": sample_id,
+        "turn_index": 0,
+        "current_player": "player0",
+        "phase": "Opening",
+        "center": (0, 0),
+        "stones": (),
+        "legal_action_ids": (0,),
+        "policy": [((0, 0), 1.0)],
+        "opp_policy": [((0, 0), 1.0)],
+        "value": 1.0,
+        "metadata": {
+            "sample_source": sample_source,
+            "target_schema_version": 2,
+        },
+    }
+
+
 def _write_pipeline_config(tmp_path: Path) -> Path:
     output_dir = (tmp_path / "pipeline-run").as_posix()
     config_path = tmp_path / "train_dense_cnn.toml"
@@ -316,15 +335,19 @@ def test_dense_cnn_model1_config_writes_to_repo_level_run_and_checkpoint_paths()
     assert config.checkpoint.resume_from == ROOT / "data" / "checkpoints" / "dense_cnn_model1_latest.txt"
     assert parsed.selfplay.search_visits == 128
     assert parsed.selfplay.samples_per_epoch == 65536
+    assert parsed.selfplay.active_games == 2048
     assert parsed.selfplay.min_mcts_samples_per_game == 32
     assert parsed.selfplay.progressive_widening_initial_actions == 8
     assert parsed.selfplay.progressive_widening_child_initial_actions == 4
     assert parsed.selfplay.progressive_widening_candidate_actions == 128
     assert parsed.selfplay.progressive_widening_growth_interval == pytest.approx(256.0)
     assert parsed.selfplay.progressive_widening_growth_base == pytest.approx(1.3)
+    assert parsed.selfplay.root_dirichlet_alpha == pytest.approx(0.1)
+    assert parsed.selfplay.root_exploration_fraction == pytest.approx(0.25)
     assert parsed.selfplay.mcts_evaluation_cache_max_states == 1_048_576
     assert parsed.selfplay.mcts_active_root_limit == 1024
-    assert parsed.samples.train_sample_count == 4096
+    assert parsed.samples.train_sample_count == 65536
+    assert parsed.samples.classical_replay_min_fraction == pytest.approx(0.75)
     assert parsed.samples.capacity >= 200_000
     assert parsed.evaluation.games_per_epoch == 64
     assert parsed.evaluation.sealbot_variant == "best"
@@ -332,10 +355,31 @@ def test_dense_cnn_model1_config_writes_to_repo_level_run_and_checkpoint_paths()
     assert parsed.evaluation.require_sealbot is True
     assert parsed.performance.target_selfplay_positions_per_second == pytest.approx(128.0)
     assert parsed.performance.selfplay_probe_positions >= max(parsed.performance.selfplay_batch_candidates)
-    assert parsed.performance.inference_batch_candidates[-1] <= 1024
+    assert parsed.performance.inference_batch_candidates == (512, 1024)
     assert parsed.performance.selfplay_batch_candidates == (2048,)
     assert parsed.performance.mcts_virtual_batch_candidates == (4,)
     assert max(parsed.performance.training_batch_candidates) <= 256
+
+
+def test_training_selection_honors_classical_replay_floor() -> None:
+    samples_module = importlib.import_module("hexo_models.dense_cnn.samples")
+    trainer_module = importlib.import_module("hexo_models.dense_cnn.trainer")
+    buffer = samples_module.SampleBuffer(compression_level=1)
+    for index in range(4):
+        buffer.append(_raw_dense_sample(f"classical-{index}", sample_source="classical_sealbot_best_bootstrap"))
+    for index in range(12):
+        buffer.append(_raw_dense_sample(f"mcts-{index}", sample_source="mcts"))
+
+    selected = trainer_module._select_training_records(
+        buffer,
+        8,
+        seed=123,
+        classical_replay_min_fraction=0.5,
+    )
+    source_summary = trainer_module._summarize_sample_records(selected)
+
+    assert len(selected) == 8
+    assert source_summary["source_counts"]["classical_sealbot_best_bootstrap"] >= 4
 
 
 def test_training_overrides_wire_dense_cnn_pipeline_components(tmp_path: Path) -> None:
@@ -546,12 +590,23 @@ def test_checkpoint_loader_skips_incompatible_model_but_recovers_sample_buffer(t
 
 def test_final_checkpoint_preserves_latest_epoch_for_future_resume(tmp_path: Path) -> None:
     ctx, components = _build_dense_components(tmp_path)
-    components.shared.checkpoint_state = {"status": "loaded", "epoch": 11}
+    components.shared.checkpoint_state = {
+        "status": "loaded",
+        "epoch": 11,
+        "checkpoint_ref": "bootstrap.pt",
+        "metadata": {
+            "bootstrap": "classical_sealbot",
+            "bootstrap_sample_count": 50_000,
+        },
+    }
 
     latest_path = Path(components.model.checkpoint_saver.save(name="latest", ctx=ctx, components=components))
     payload = _torch_load(latest_path)
 
     assert payload["epoch"] == 11
+    assert payload["metadata"]["bootstrap"] == "classical_sealbot"
+    assert payload["metadata"]["bootstrap_sample_count"] == 50_000
+    assert payload["metadata"]["parent_checkpoint"] == "bootstrap.pt"
 
 
 def test_training_pipeline_run_records_dense_cnn_epoch_diagnostics(tmp_path: Path) -> None:
@@ -571,12 +626,18 @@ def test_training_pipeline_run_records_dense_cnn_epoch_diagnostics(tmp_path: Pat
     epoch_result = epoch_diagnostic["metadata"]["result"]
 
     assert epoch_result["samples"]["selection"]["window_size"] == 2
+    assert epoch_result["samples"]["selection"]["metadata"]["source_counts"]
     assert epoch_result["symmetries"]["metadata"]["mode"] == "random_per_training_expansion"
     for section in ("selfplay", "training", "checkpoint", "evaluation"):
         assert section in epoch_result
         _assert_real_diagnostic(epoch_result[section], section)
     assert epoch_result["checkpoint"]["pointer"]["status"] == "updated"
     assert Path(epoch_result["checkpoint"]["pointer"]["pointer_path"]).exists()
+    training = epoch_result["training"]
+    assert "policy" in training["loss_components"]
+    assert training["source_summary"]["source_counts"]
+    assert training["policy_imitation"]["status"] == "completed"
+    assert training["policy_imitation"]["overall"]["count"] == 2
 
     payloads = _diagnostic_payloads(ctx.diagnostics_dir)
     policy_target_paths = _matching_path_values(

@@ -26,8 +26,9 @@ max_grad_norm = 1.0
 
 [model.config.samples]
 capacity = 200000
-train_sample_count = 4096
+train_sample_count = 65536
 recency_halflife = 50000.0
+classical_replay_min_fraction = 0.75
 compression_level = 6
 
 [model.config.selfplay]
@@ -40,6 +41,8 @@ progressive_widening_child_initial_actions = 4
 progressive_widening_candidate_actions = 128
 progressive_widening_growth_interval = 256.0
 progressive_widening_growth_base = 1.3
+root_dirichlet_alpha = 0.1
+root_exploration_fraction = 0.25
 mcts_evaluation_cache_max_states = 1048576
 mcts_active_root_limit = 1024
 max_actions = 1024
@@ -56,12 +59,12 @@ require_sealbot = true
 [model.config.performance]
 calibrate = true
 target_selfplay_positions_per_second = 128.0
-inference_batch_candidates = [128, 256, 512, 1024]
+inference_batch_candidates = [512, 1024]
 selfplay_batch_candidates = [2048]
 training_batch_candidates = [64, 128, 192, 256]
 mcts_visit_candidates = [128]
 mcts_virtual_batch_candidates = [4]
-selfplay_probe_positions = 8192
+selfplay_probe_positions = 65536
 probe_batches = 1
 
 [model.config.debug]
@@ -84,10 +87,10 @@ update_checkpoint_pointer = true
 checkpoint_pointer = "../data/checkpoints/dense_cnn_model1_latest.txt"
 
 [samples]
-train_sample_count = 4096
+train_sample_count = 65536
 
 [train]
-passes_per_epoch = 1
+passes_per_epoch = 8
 
 [checkpoint]
 resume_from = "../data/checkpoints/dense_cnn_model1_latest.txt"

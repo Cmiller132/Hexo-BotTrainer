@@ -112,6 +112,8 @@ def test_rust_bridge_forwards_live_states_without_history_conversion(monkeypatch
             progressive_widening_growth_interval: float | None,
             progressive_widening_growth_base: float | None,
             progressive_widening_candidate_actions: int | None,
+            root_dirichlet_alpha: float | None,
+            root_exploration_fraction: float | None,
             evaluation_cache: object | None,
             active_root_limit: int | None,
         ) -> tuple[dict[str, Any], ...]:
@@ -128,6 +130,8 @@ def test_rust_bridge_forwards_live_states_without_history_conversion(monkeypatch
                 "progressive_widening_candidate_actions": progressive_widening_candidate_actions,
                 "progressive_widening_growth_interval": progressive_widening_growth_interval,
                 "progressive_widening_growth_base": progressive_widening_growth_base,
+                "root_dirichlet_alpha": root_dirichlet_alpha,
+                "root_exploration_fraction": root_exploration_fraction,
                 "evaluation_cache": evaluation_cache,
                 "active_root_limit": active_root_limit,
             }
@@ -165,6 +169,8 @@ def test_rust_bridge_forwards_live_states_without_history_conversion(monkeypatch
         "progressive_widening_candidate_actions": None,
         "progressive_widening_growth_interval": None,
         "progressive_widening_growth_base": None,
+        "root_dirichlet_alpha": None,
+        "root_exploration_fraction": None,
         "evaluation_cache": None,
         "active_root_limit": None,
     }

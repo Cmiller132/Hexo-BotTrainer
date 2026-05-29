@@ -219,3 +219,44 @@ def test_training_run_lists_multi_record_history_metadata_and_loads_selected_rec
             "winner": "player0",
         },
     ]
+
+
+def test_training_run_skips_quarantine_and_does_not_expand_bootstrap_hxr(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    import hexo_frontend.web as web
+    from hexo_engine.types import AxialCoord, pack_coord_id
+    from hexo_runner.records import HexoRecordFile, HexoRecordPlayer
+
+    monkeypatch.chdir(tmp_path)
+    run_dir = tmp_path / "runs" / "dense_cnn_history"
+    selfplay = run_dir / "selfplay"
+    bootstrap = run_dir / "bootstrap" / "sealbot_050000"
+    quarantine = run_dir / "quarantine" / "stale_restart"
+    for path in (selfplay, bootstrap, quarantine):
+        path.mkdir(parents=True)
+
+    players = (
+        HexoRecordPlayer("dense-cnn", "player0", "Dense CNN"),
+        HexoRecordPlayer("sealbot-best", "player1", "SealBot best"),
+    )
+
+    for hxr, game_id in (
+        (selfplay / "epoch_000001.hxr", "selfplay-game"),
+        (bootstrap / "classical_sealbot_bootstrap.hxr", "bootstrap-game"),
+        (quarantine / "epoch_000001.hxr", "quarantined-game"),
+    ):
+        with HexoRecordFile.create(hxr, {"rules_version": 1, "backend": "test"}, players) as record_file:
+            writer = record_file.begin_game(game_id, seed=1)
+            writer.record_action(pack_coord_id(AxialCoord(q=0, r=0)))
+            writer.finish_completed("player0", 1)
+
+    run = web._training_run("dense_cnn_history")
+    artifact_paths = {item["path"] for item in run["artifacts"]}
+    history_ids = {item["game_id"] for item in run["histories"]}
+
+    assert "selfplay/epoch_000001.hxr" in artifact_paths
+    assert "bootstrap/sealbot_050000/classical_sealbot_bootstrap.hxr" in artifact_paths
+    assert "quarantine/stale_restart/epoch_000001.hxr" not in artifact_paths
+    assert history_ids == {"selfplay-game"}

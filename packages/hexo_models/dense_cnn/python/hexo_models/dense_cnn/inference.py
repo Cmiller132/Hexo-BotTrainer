@@ -14,6 +14,8 @@ from .d6 import unpack_coord_pair
 from .losses import decode_binned_value
 from .samples import CompressedSample, Model1SampleData, expand_sample, stack_expanded
 
+DEFAULT_MAX_BATCH_SIZE = 2048
+
 
 @dataclass(frozen=True, slots=True)
 class InferenceResult:
@@ -48,11 +50,17 @@ class DenseCNNInference:
         )
         self.amp = bool(amp and self.device.type == "cuda")
         self.return_logits = bool(return_logits)
-        self.max_batch_size = max(1, int(max_batch_size or 1024))
+        self.max_batch_size = max(1, int(max_batch_size or DEFAULT_MAX_BATCH_SIZE))
+        self._cuda_cache_trim_threshold_bytes = 0
         if self.device.type == "cuda":
-            torch.backends.cudnn.benchmark = True
+            # MCTS sends variable-sized evaluator batches; cuDNN autotune can spend
+            # more time benchmarking new shapes than running the compact CNN.
+            torch.backends.cudnn.benchmark = False
             torch.backends.cuda.matmul.allow_tf32 = True
             torch.backends.cudnn.allow_tf32 = True
+            self._cuda_cache_trim_threshold_bytes = int(
+                torch.cuda.get_device_properties(self.device).total_memory * 0.60
+            )
             self.model.to(device=self.device, memory_format=torch.channels_last)
         else:
             self.model.to(self.device)
@@ -68,7 +76,14 @@ class DenseCNNInference:
     def infer_states(self, states: Sequence[object]) -> list[InferenceResult]:
         if not states:
             return []
-        return self._infer_states_rust(states)
+        if len(states) <= self.max_batch_size:
+            return self._infer_states_rust(states)
+        results: list[InferenceResult] = []
+        for start in range(0, len(states), self.max_batch_size):
+            results.extend(self._infer_states_rust(states[start : start + self.max_batch_size]))
+            if self.device.type == "cuda":
+                _trim_cuda_cache_if_needed(self.device, self._cuda_cache_trim_threshold_bytes)
+        return results
 
     @torch.no_grad()
     def _infer_states_rust(self, states: Sequence[object]) -> list[InferenceResult]:
@@ -95,6 +110,9 @@ class DenseCNNInference:
                     diagnostics={"device": str(self.device), "amp": self.amp, "batched": len(states) > 1, "encoder": "rust"},
                 )
             )
+        if self.device.type == "cuda":
+            del outputs, policy_batch, value_batch, values, inputs
+            _trim_cuda_cache_if_needed(self.device, self._cuda_cache_trim_threshold_bytes)
         return results
 
     @torch.no_grad()
@@ -185,7 +203,7 @@ class DenseCNNInference:
     def _warm_up_cuda(self) -> None:
         """Prime cuDNN algorithm selection and GPU clocks before timed search."""
 
-        warmup_batch = min(1024, self.max_batch_size)
+        warmup_batch = min(DEFAULT_MAX_BATCH_SIZE, self.max_batch_size)
         dtype = torch.float16 if self.amp else torch.float32
         inputs = torch.zeros(
             (warmup_batch, INPUT_CHANNELS, BOARD_SIZE, BOARD_SIZE),
@@ -206,6 +224,25 @@ class DenseCNNInference:
         if inputs.dtype != torch.float32 and (self.device.type != "cuda" or not self.amp):
             inputs = inputs.float()
         max_batch = self.max_batch_size
+        raw_crop_legal_counts = payload.get("crop_legal_counts")
+        crop_legal_counts = (
+            tuple(max(0, int(item)) for item in raw_crop_legal_counts)
+            if raw_crop_legal_counts is not None
+            else None
+        )
+        if crop_legal_counts is not None and len(crop_legal_counts) != int(inputs.shape[0]):
+            crop_legal_counts = None
+        if (
+            inputs.shape[0] > max_batch
+            and payload.get("legal_mask_from_inputs")
+            and int(payload.get("max_prior_candidates") or 0) > 0
+        ):
+            return self._evaluate_large_model1_payload_from_input_mask(
+                inputs,
+                max_candidates=int(payload["max_prior_candidates"]),
+                max_batch=max_batch,
+                crop_legal_counts=crop_legal_counts,
+            )
         if inputs.shape[0] > max_batch:
             output_chunks = []
             for start in range(0, inputs.shape[0], max_batch):
@@ -232,6 +269,7 @@ class DenseCNNInference:
                 policy_batch=policy_batch,
                 inputs=mask_inputs,
                 max_candidates=int(payload["max_prior_candidates"]),
+                crop_legal_counts=crop_legal_counts,
             )
         elif "legal_flat_indices_bytes" in payload:
             if len(payload["legal_flat_indices_bytes"]) == 0:
@@ -296,6 +334,82 @@ class DenseCNNInference:
         if payload.get("legal_mask_from_inputs") and selected_flats is not None and selected_offsets is not None:
             result["selected_flat_indices_bytes"] = selected_flats.contiguous().numpy().tobytes()
             result["selected_row_offsets"] = tuple(int(item) for item in selected_offsets)
+        if self.device.type == "cuda":
+            try:
+                del outputs
+            except UnboundLocalError:
+                pass
+            try:
+                del device_inputs
+            except UnboundLocalError:
+                pass
+            del policy_batch, value_batch, mask_inputs
+            _trim_cuda_cache_if_needed(self.device, self._cuda_cache_trim_threshold_bytes)
+        return result
+
+    @torch.inference_mode()
+    def _evaluate_large_model1_payload_from_input_mask(
+        self,
+        inputs: torch.Tensor,
+        *,
+        max_candidates: int,
+        max_batch: int,
+        crop_legal_counts: Sequence[int] | None = None,
+    ) -> dict[str, Any]:
+        values: list[torch.Tensor] = []
+        priors: list[torch.Tensor] = []
+        selected_flats: list[torch.Tensor] = []
+        selected_offsets = [0]
+        use_counted_topk = crop_legal_counts is not None and len(crop_legal_counts) == int(inputs.shape[0])
+        for start in range(0, int(inputs.shape[0]), max_batch):
+            chunk = inputs[start : start + max_batch]
+            device_inputs = _to_inference_device(chunk, self.device)
+            outputs = self._forward_device_inputs(device_inputs)
+            values.append(decode_binned_value(outputs["value"]).cpu().contiguous())
+            if use_counted_topk:
+                priors_tensor, flats_tensor, chunk_offsets = _topk_legal_priors_from_input_mask_device(
+                    policy_batch=outputs["policy"],
+                    inputs=device_inputs,
+                    max_candidates=max_candidates,
+                    crop_legal_counts=crop_legal_counts[start : start + max_batch],
+                )
+                priors.append(priors_tensor.cpu().contiguous())
+                selected_flats.append(flats_tensor.cpu().to(dtype=torch.int64).contiguous())
+            else:
+                priors_tensor, flats_tensor, chunk_offsets = _topk_legal_priors_from_input_mask(
+                    policy_batch=outputs["policy"],
+                    inputs=device_inputs,
+                    max_candidates=max_candidates,
+                )
+                priors.append(priors_tensor)
+                selected_flats.append(flats_tensor)
+            base = selected_offsets[-1]
+            selected_offsets.extend(base + int(offset) for offset in chunk_offsets[1:])
+            del outputs, device_inputs, priors_tensor, flats_tensor
+
+        values_tensor = (
+            torch.cat(values).contiguous()
+            if values
+            else torch.empty(0, dtype=torch.float32)
+        )
+        priors_tensor = (
+            torch.cat(priors).contiguous()
+            if priors
+            else torch.empty(0, dtype=torch.float32)
+        )
+        flats_tensor = (
+            torch.cat(selected_flats).to(dtype=torch.int64).contiguous()
+            if selected_flats
+            else torch.empty(0, dtype=torch.int64)
+        )
+        result = {
+            "values_bytes": values_tensor.numpy().tobytes(),
+            "priors_bytes": priors_tensor.numpy().tobytes(),
+            "selected_flat_indices_bytes": flats_tensor.numpy().tobytes(),
+            "selected_row_offsets": tuple(int(item) for item in selected_offsets),
+        }
+        if self.device.type == "cuda":
+            _trim_cuda_cache_if_needed(self.device, self._cuda_cache_trim_threshold_bytes)
         return result
 
 
@@ -346,9 +460,14 @@ def _legal_priors_from_flats(
 
 def _to_inference_device(inputs: torch.Tensor, device: torch.device) -> torch.Tensor:
     non_blocking = bool(inputs.is_cuda or inputs.is_pinned())
-    if device.type == "cuda" and inputs.ndim == 4:
-        return inputs.to(device, non_blocking=non_blocking, memory_format=torch.channels_last)
     return inputs.to(device, non_blocking=non_blocking)
+
+
+def _trim_cuda_cache_if_needed(device: torch.device, threshold_bytes: int) -> None:
+    if device.type != "cuda" or threshold_bytes <= 0:
+        return
+    if int(torch.cuda.memory_reserved(device)) >= int(threshold_bytes):
+        torch.cuda.empty_cache()
 
 
 def _contains_model1_network(model: torch.nn.Module) -> bool:
@@ -427,7 +546,21 @@ def _topk_legal_priors_from_input_mask(
     policy_batch: torch.Tensor,
     inputs: torch.Tensor,
     max_candidates: int,
+    crop_legal_counts: Sequence[int] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, list[int]]:
+    if crop_legal_counts is not None and len(crop_legal_counts) == int(policy_batch.shape[0]):
+        priors, flats, selected_offsets = _topk_legal_priors_from_input_mask_device(
+            policy_batch=policy_batch,
+            inputs=inputs,
+            max_candidates=max_candidates,
+            crop_legal_counts=crop_legal_counts,
+        )
+        return (
+            priors.cpu().contiguous(),
+            flats.cpu().to(dtype=torch.int64).contiguous(),
+            selected_offsets,
+        )
+
     row_count = int(policy_batch.shape[0])
     if row_count <= 0:
         return torch.empty(0, dtype=torch.float32), torch.empty(0, dtype=torch.int64), [0]
@@ -442,7 +575,13 @@ def _topk_legal_priors_from_input_mask(
 
     k = min(max(1, int(max_candidates)), int(policy_batch.shape[1]))
     masked_logits = policy_batch.masked_fill(~legal_mask, float("-inf"))
-    values, selected_flats = torch.topk(masked_logits, k=k, dim=1, largest=True, sorted=True)
+    values, selected_flats = torch.topk(
+        masked_logits,
+        k=k,
+        dim=1,
+        largest=True,
+        sorted=True,
+    )
     valid = torch.isfinite(values)
     masked_values = values.masked_fill(~valid, float("-inf"))
     prob_matrix = torch.softmax(masked_values, dim=1).masked_fill(~valid, 0.0).float().cpu()
@@ -471,3 +610,73 @@ def _topk_legal_priors_from_input_mask(
     if priors:
         return torch.cat(priors).contiguous(), torch.cat(flats).contiguous(), selected_offsets
     return torch.empty(0, dtype=torch.float32), torch.empty(0, dtype=torch.int64), selected_offsets
+
+
+def _topk_legal_priors_from_input_mask_device(
+    *,
+    policy_batch: torch.Tensor,
+    inputs: torch.Tensor,
+    max_candidates: int,
+    crop_legal_counts: Sequence[int],
+) -> tuple[torch.Tensor, torch.Tensor, list[int]]:
+    row_count = int(policy_batch.shape[0])
+    device = policy_batch.device
+    if row_count <= 0:
+        return (
+            torch.empty(0, dtype=torch.float32, device=device),
+            torch.empty(0, dtype=torch.int64, device=device),
+            [0],
+        )
+
+    legal_mask = inputs[:, PLANE_LEGAL].reshape(row_count, -1).to(
+        device=device,
+        dtype=torch.bool,
+        non_blocking=True,
+    )
+    k = min(max(1, int(max_candidates)), int(policy_batch.shape[1]))
+    keep_counts = [min(k, max(0, int(count))) for count in crop_legal_counts]
+    if len(keep_counts) != row_count:
+        return _topk_legal_priors_from_input_mask(
+            policy_batch=policy_batch,
+            inputs=inputs,
+            max_candidates=max_candidates,
+            crop_legal_counts=None,
+        )
+
+    max_keep = max(keep_counts, default=0)
+    selected_offsets = [0]
+    for keep in keep_counts:
+        selected_offsets.append(selected_offsets[-1] + keep)
+    if max_keep <= 0:
+        return (
+            torch.empty(0, dtype=torch.float32, device=device),
+            torch.empty(0, dtype=torch.int64, device=device),
+            selected_offsets,
+        )
+
+    masked_logits = policy_batch.masked_fill(~legal_mask, float("-inf"))
+    values, selected_flats = torch.topk(
+        masked_logits,
+        k=max_keep,
+        dim=1,
+        largest=True,
+        sorted=True,
+    )
+
+    if all(keep == max_keep for keep in keep_counts):
+        return (
+            torch.softmax(values, dim=1).float().reshape(-1).contiguous(),
+            selected_flats.to(dtype=torch.int64).reshape(-1).contiguous(),
+            selected_offsets,
+        )
+
+    keep_tensor = torch.as_tensor(keep_counts, dtype=torch.long, device=device)
+    column_ids = torch.arange(max_keep, dtype=torch.long, device=device).unsqueeze(0)
+    valid = column_ids < keep_tensor.unsqueeze(1)
+    masked_values = values.masked_fill(~valid, float("-inf"))
+    prob_matrix = torch.softmax(masked_values, dim=1).masked_fill(~valid, 0.0).float()
+    return (
+        prob_matrix[valid].contiguous(),
+        selected_flats[valid].to(dtype=torch.int64).contiguous(),
+        selected_offsets,
+    )

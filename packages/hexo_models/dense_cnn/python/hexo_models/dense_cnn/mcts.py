@@ -12,7 +12,7 @@ from .inference import DenseCNNInference
 
 
 DEFAULT_ACTIVE_ROOT_LIMIT = 1024
-DEFAULT_EVAL_CHUNK_STATES = 1024
+DEFAULT_EVAL_CHUNK_STATES = 4096
 
 
 def new_mcts_evaluation_cache(*, max_states: int = 1_048_576) -> object:
@@ -58,6 +58,8 @@ class BatchedMctsSession:
         progressive_widening_candidate_actions: int | None = 128,
         progressive_widening_growth_interval: float | None = 256.0,
         progressive_widening_growth_base: float | None = 1.3,
+        root_dirichlet_alpha: float | None = None,
+        root_exploration_fraction: float | None = None,
         active_root_limit: int | None = None,
     ) -> list["SearchResult"]:
         if not root_states:
@@ -84,6 +86,8 @@ class BatchedMctsSession:
                         progressive_widening_candidate_actions=progressive_widening_candidate_actions,
                         progressive_widening_growth_interval=progressive_widening_growth_interval,
                         progressive_widening_growth_base=progressive_widening_growth_base,
+                        root_dirichlet_alpha=root_dirichlet_alpha,
+                        root_exploration_fraction=root_exploration_fraction,
                         active_root_limit=root_limit,
                     )
                 )
@@ -107,6 +111,8 @@ class BatchedMctsSession:
             progressive_widening_candidate_actions=progressive_widening_candidate_actions,
             progressive_widening_growth_interval=progressive_widening_growth_interval,
             progressive_widening_growth_base=progressive_widening_growth_base,
+            root_dirichlet_alpha=root_dirichlet_alpha,
+            root_exploration_fraction=root_exploration_fraction,
             active_root_limit=root_limit,
         )
         return [_result_from_payload(payload) for payload in payloads]
@@ -161,6 +167,8 @@ def run_mcts(
     progressive_widening_candidate_actions: int | None = 128,
     progressive_widening_growth_interval: float | None = 256.0,
     progressive_widening_growth_base: float | None = 1.3,
+    root_dirichlet_alpha: float | None = None,
+    root_exploration_fraction: float | None = None,
     evaluation_cache: object | None = None,
     active_root_limit: int | None = None,
 ) -> SearchResult:
@@ -178,6 +186,8 @@ def run_mcts(
         progressive_widening_candidate_actions=progressive_widening_candidate_actions,
         progressive_widening_growth_interval=progressive_widening_growth_interval,
         progressive_widening_growth_base=progressive_widening_growth_base,
+        root_dirichlet_alpha=root_dirichlet_alpha,
+        root_exploration_fraction=root_exploration_fraction,
         evaluation_cache=evaluation_cache,
         active_root_limit=active_root_limit,
     )[0]
@@ -197,6 +207,8 @@ def run_batched_mcts(
     progressive_widening_candidate_actions: int | None = 128,
     progressive_widening_growth_interval: float | None = 256.0,
     progressive_widening_growth_base: float | None = 1.3,
+    root_dirichlet_alpha: float | None = None,
+    root_exploration_fraction: float | None = None,
     evaluation_cache: object | None = None,
     active_root_limit: int | None = None,
 ) -> list[SearchResult]:
@@ -224,6 +236,8 @@ def run_batched_mcts(
                     progressive_widening_candidate_actions=progressive_widening_candidate_actions,
                     progressive_widening_growth_interval=progressive_widening_growth_interval,
                     progressive_widening_growth_base=progressive_widening_growth_base,
+                    root_dirichlet_alpha=root_dirichlet_alpha,
+                    root_exploration_fraction=root_exploration_fraction,
                     evaluation_cache=evaluation_cache,
                     active_root_limit=root_limit,
                 )
@@ -246,6 +260,8 @@ def run_batched_mcts(
         progressive_widening_candidate_actions=progressive_widening_candidate_actions,
         progressive_widening_growth_interval=progressive_widening_growth_interval,
         progressive_widening_growth_base=progressive_widening_growth_base,
+        root_dirichlet_alpha=root_dirichlet_alpha,
+        root_exploration_fraction=root_exploration_fraction,
         evaluation_cache=evaluation_cache,
         active_root_limit=root_limit,
     )

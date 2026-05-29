@@ -19,6 +19,7 @@ pub(crate) struct Model1EncodedState {
     pub(crate) planes: Vec<f32>,
     pub(crate) half_planes: Vec<u16>,
     pub(crate) all_legal_action_count: usize,
+    pub(crate) crop_legal_action_count: usize,
     pub(crate) legal_action_ids: Vec<PackedCoord>,
     pub(crate) legal_flat_indices: Vec<i64>,
     pub(crate) center: HexCoord,
@@ -97,8 +98,10 @@ pub(crate) fn encode_model1_state_half_for_mcts(state: &RustHexoState) -> Model1
     let mut legal_coords = Vec::with_capacity(state.legal_move_count());
     state.write_legal_moves(&mut legal_coords);
     let all_legal_action_count = legal_coords.len();
+    let mut crop_legal_action_count = 0usize;
     for coord in legal_coords {
         if let Some(flat) = model1_flat_index(coord, center) {
+            crop_legal_action_count += 1;
             set_half_plane(&mut half_planes, MODEL1_PLANE_LEGAL, flat, half_one());
         }
     }
@@ -140,6 +143,7 @@ pub(crate) fn encode_model1_state_half_for_mcts(state: &RustHexoState) -> Model1
         planes: Vec::new(),
         half_planes,
         all_legal_action_count,
+        crop_legal_action_count,
         legal_action_ids: Vec::new(),
         legal_flat_indices: Vec::new(),
         center,
@@ -183,9 +187,11 @@ fn encode_model1_state_inner(
     } else {
         Vec::new()
     };
+    let mut crop_legal_action_count = 0usize;
     for coord in legal_coords {
         let action_id = pack_coord(coord);
         if let Some(flat) = model1_flat_index(coord, center) {
+            crop_legal_action_count += 1;
             set_plane(&mut planes, MODEL1_PLANE_LEGAL, flat, 1.0);
             if include_crop_legal_lists {
                 legal_action_ids.push(action_id);
@@ -231,6 +237,7 @@ fn encode_model1_state_inner(
         planes,
         half_planes: Vec::new(),
         all_legal_action_count,
+        crop_legal_action_count,
         legal_action_ids,
         legal_flat_indices,
         center,

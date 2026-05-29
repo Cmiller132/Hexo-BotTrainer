@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import sys
+import os
+import subprocess
 import tempfile
 import types
 import unittest
@@ -114,6 +116,44 @@ class TrainingPipelineSimplificationTests(unittest.TestCase):
             with patch("hexo_train.registry.entry_points", lambda *, group: []):
                 with self.assertRaisesRegex(LookupError, "fake_model"):
                     load_model_plugin(ModelConfig(name="fake_model"))
+
+    def test_train_model_cli_prefers_workspace_model_packages(self) -> None:
+        env = dict(os.environ)
+        env["PYTHONPATH"] = str(ROOT / "packages" / "hexo_train" / "python")
+        script = "\n".join(
+            (
+                "from hexo_train.cli import train_model",
+                "import hexo_models.dense_cnn.config as config",
+                "print(config.__file__)",
+                "print(hasattr(config.Model1SampleConfig(), 'classical_replay_min_fraction'))",
+            )
+        )
+
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=ROOT,
+            env=env,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        lines = result.stdout.strip().splitlines()
+        self.assertTrue(
+            lines[0].startswith(
+                str(
+                    ROOT
+                    / "packages"
+                    / "hexo_models"
+                    / "dense_cnn"
+                    / "python"
+                    / "hexo_models"
+                    / "dense_cnn"
+                )
+            ),
+            lines[0],
+        )
+        self.assertEqual(lines[1], "True")
 
     def test_model_is_built_before_component_overrides(self) -> None:
         from hexo_train.components import ComponentOverrides, build_model_components

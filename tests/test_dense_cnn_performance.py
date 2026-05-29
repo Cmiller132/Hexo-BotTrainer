@@ -469,6 +469,73 @@ def test_calibration_success_requires_exact_configured_mcts_visits(monkeypatch: 
     assert report["meets_target"] is False
 
 
+def test_calibration_restores_training_probe_before_selfplay(monkeypatch: pytest.MonkeyPatch) -> None:
+    torch = _torch()
+    performance_module = importlib.import_module("hexo_models.dense_cnn.performance")
+    model = _small_model()
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1.0e-3)
+    baseline = next(model.parameters()).detach().clone()
+    seen: dict[str, bool] = {"selfplay": False}
+
+    monkeypatch.setattr(
+        performance_module,
+        "_benchmark_inference",
+        lambda *_args, **_kwargs: [
+            {
+                "status": "completed",
+                "batch_size": 2,
+                "positions_per_second": 1_000_000.0,
+            }
+        ],
+    )
+
+    def fake_training(probe_model: Any, *, optimizer: Any | None, **_kwargs: object) -> list[dict[str, Any]]:
+        with torch.no_grad():
+            next(probe_model.parameters()).add_(10.0)
+        if optimizer is not None:
+            optimizer.state[next(probe_model.parameters())]["sentinel"] = torch.tensor(1.0)
+        return [
+            {
+                "status": "completed",
+                "batch_size": 2,
+                "positions_per_second": 1_000_000.0,
+            }
+        ]
+
+    def fake_selfplay(probe_model: Any, **_kwargs: object) -> list[dict[str, Any]]:
+        torch.testing.assert_close(next(probe_model.parameters()).detach(), baseline)
+        seen["selfplay"] = True
+        return [
+            {
+                "status": "completed",
+                "visits": 1,
+                "selfplay_batch_size": 2,
+                "mcts_virtual_batch_size": 1,
+                "positions": 4,
+                "searched_positions": 4,
+                "recorded_positions": 4,
+                "mcts_simulations": 4,
+                "exact_visit_results": 4,
+                "all_searches_exact": True,
+                "positions_per_second": 1_000_000.0,
+            }
+        ]
+
+    monkeypatch.setattr(performance_module, "_benchmark_training", fake_training)
+    monkeypatch.setattr(performance_module, "_benchmark_selfplay", fake_selfplay)
+
+    result = performance_module.calibrate_dense_cnn(
+        model=model,
+        optimizer=optimizer,
+        config=_small_config(),
+    )
+
+    assert seen["selfplay"] is True
+    assert result["meets_target"] is True
+    torch.testing.assert_close(next(model.parameters()).detach(), baseline)
+    assert optimizer.state == {}
+
+
 def test_selfplay_benchmark_counts_every_root_as_its_own_128_sim_search(monkeypatch: pytest.MonkeyPatch) -> None:
     dense_cnn = _dense_cnn()
     performance_module = importlib.import_module("hexo_models.dense_cnn.performance")
@@ -509,7 +576,7 @@ def test_selfplay_benchmark_counts_every_root_as_its_own_128_sim_search(monkeypa
     assert result["all_searches_exact"] is True
 
 
-def test_selfplay_benchmark_reports_actual_searches_when_batch_overshoots_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_selfplay_benchmark_caps_last_batch_to_probe_positions(monkeypatch: pytest.MonkeyPatch) -> None:
     performance_module = importlib.import_module("hexo_models.dense_cnn.performance")
     mcts_module = importlib.import_module("hexo_models.dense_cnn.mcts")
     engine = _engine_with_rust()
@@ -541,11 +608,111 @@ def test_selfplay_benchmark_reports_actual_searches_when_batch_overshoots_probe(
         probe_positions=2,
     )
 
-    assert calls == [4]
-    assert result["searched_positions"] == 4
-    assert result["recorded_positions"] == 4
-    assert result["mcts_simulations"] == 4 * 128
+    assert calls == [2]
+    assert result["searched_positions"] == 2
+    assert result["recorded_positions"] == 2
+    assert result["mcts_simulations"] == 2 * 128
     assert result["all_searches_exact"] is True
+
+
+def test_dense_cnn_mcts_virtual_batch_four_survives_production_root_count() -> None:
+    mcts_module = importlib.import_module("hexo_models.dense_cnn.mcts")
+
+    resolved = mcts_module._resolve_virtual_batch_size(
+        root_count=1024,
+        visits=128,
+        virtual_batch_size=4,
+    )
+
+    assert resolved == 4
+
+
+def test_dense_cnn_input_mask_topk_matches_bruteforce_legal_topk() -> None:
+    torch = _torch()
+    dense_cnn = _dense_cnn()
+    constants = importlib.import_module("hexo_models.dense_cnn.constants")
+    inference_module = importlib.import_module("hexo_models.dense_cnn.inference")
+
+    row_count = 3
+    candidates = 5
+    generator = torch.Generator().manual_seed(1234)
+    policy = torch.randn(row_count, dense_cnn.BOARD_AREA, generator=generator)
+    inputs = torch.zeros(
+        row_count,
+        dense_cnn.INPUT_CHANNELS,
+        dense_cnn.BOARD_SIZE,
+        dense_cnn.BOARD_SIZE,
+    )
+    legal_mask = torch.ones(row_count, dense_cnn.BOARD_AREA, dtype=torch.bool)
+    illegal_by_row = (
+        (0, 3, 9),
+        (1, 2, 4, 8, 16, 32, 64),
+        (5, 7),
+    )
+    for row, illegal in enumerate(illegal_by_row):
+        legal_mask[row, list(illegal)] = False
+        policy[row, list(illegal)] = 100.0 - torch.arange(len(illegal), dtype=policy.dtype)
+    inputs[:, constants.PLANE_LEGAL] = legal_mask.reshape(
+        row_count,
+        dense_cnn.BOARD_SIZE,
+        dense_cnn.BOARD_SIZE,
+    ).to(dtype=inputs.dtype)
+
+    priors, flats, offsets = inference_module._topk_legal_priors_from_input_mask(
+        policy_batch=policy,
+        inputs=inputs,
+        max_candidates=candidates,
+    )
+
+    expected_priors: list[torch.Tensor] = []
+    expected_flats: list[torch.Tensor] = []
+    expected_offsets = [0]
+    for row in range(row_count):
+        legal = torch.where(legal_mask[row])[0]
+        values = policy[row, legal]
+        top_values, top_ordinals = torch.topk(values, k=candidates, largest=True, sorted=True)
+        expected_priors.append(torch.softmax(top_values, dim=0))
+        expected_flats.append(legal[top_ordinals].to(dtype=torch.int64))
+        expected_offsets.append(expected_offsets[-1] + candidates)
+
+    torch.testing.assert_close(priors, torch.cat(expected_priors), rtol=1.0e-6, atol=1.0e-6)
+    assert flats.tolist() == torch.cat(expected_flats).tolist()
+    assert offsets == expected_offsets
+
+
+def test_dense_cnn_input_mask_topk_uses_crop_legal_counts_without_padding() -> None:
+    torch = _torch()
+    dense_cnn = _dense_cnn()
+    constants = importlib.import_module("hexo_models.dense_cnn.constants")
+    inference_module = importlib.import_module("hexo_models.dense_cnn.inference")
+
+    row_count = 3
+    policy = torch.arange(row_count * dense_cnn.BOARD_AREA, dtype=torch.float32).reshape(
+        row_count,
+        dense_cnn.BOARD_AREA,
+    )
+    inputs = torch.zeros(
+        row_count,
+        dense_cnn.INPUT_CHANNELS,
+        dense_cnn.BOARD_SIZE,
+        dense_cnn.BOARD_SIZE,
+    )
+    legal_by_row = ((1, 5, 9, 13, 17), (2, 4), ())
+    for row, flats in enumerate(legal_by_row):
+        for flat in flats:
+            inputs[row, constants.PLANE_LEGAL, flat // dense_cnn.BOARD_SIZE, flat % dense_cnn.BOARD_SIZE] = 1.0
+
+    priors, flats, offsets = inference_module._topk_legal_priors_from_input_mask(
+        policy_batch=policy,
+        inputs=inputs,
+        max_candidates=4,
+        crop_legal_counts=tuple(len(row) for row in legal_by_row),
+    )
+
+    assert offsets == [0, 4, 6, 6]
+    assert flats.tolist() == [17, 13, 9, 5, 4, 2]
+    assert float(priors[:4].sum()) == pytest.approx(1.0)
+    assert float(priors[4:].sum()) == pytest.approx(1.0)
 
 
 def test_dense_cnn_rust_batch_input_encoder_matches_python_sample_encoder() -> None:
@@ -763,6 +930,9 @@ def test_dense_cnn_rust_mcts_keeps_authoritative_legal_actions_outside_dense_cro
 
 
 def test_dense_cnn_rust_mcts_keeps_out_of_crop_legal_actions_hidden_when_topk_is_full() -> None:
+    torch = _torch()
+    dense_cnn = _dense_cnn()
+    constants = importlib.import_module("hexo_models.dense_cnn.constants")
     engine = importlib.import_module("hexo_engine")
     engine_types = importlib.import_module("hexo_engine.types")
     rust_bridge = importlib.import_module("hexo_models.dense_cnn.rust_bridge")
@@ -796,6 +966,12 @@ def test_dense_cnn_rust_mcts_keeps_out_of_crop_legal_actions_hidden_when_topk_is
         rows = int(payload["shape"][0])
         assert int(payload["max_prior_candidates"]) == 4
         assert bool(payload["legal_mask_from_inputs"]) is True
+        assert type(payload["inputs"]).__name__ == "memoryview"
+        encoded = torch.frombuffer(payload["inputs"], dtype=torch.float16).reshape(tuple(int(item) for item in payload["shape"]))
+        legal_counts = encoded[:, constants.PLANE_LEGAL].reshape(rows, dense_cnn.BOARD_AREA).count_nonzero(dim=1)
+        assert tuple(int(item) for item in payload["crop_legal_counts"]) == tuple(
+            int(item) for item in legal_counts.tolist()
+        )
         return {
             "values_bytes": struct.pack(f"{rows}f", *([0.0] * rows)),
             "priors_bytes": struct.pack("4f", 0.4, 0.3, 0.2, 0.1),
@@ -1061,6 +1237,8 @@ def test_dense_cnn_mcts_python_boundary_delegates_to_rust(monkeypatch: pytest.Mo
         progressive_widening_candidate_actions: int | None,
         progressive_widening_growth_interval: float | None,
         progressive_widening_growth_base: float | None,
+        root_dirichlet_alpha: float | None,
+        root_exploration_fraction: float | None,
         evaluation_cache: object | None,
         active_root_limit: int | None,
     ) -> tuple[Mapping[str, Any], ...]:
@@ -1078,6 +1256,8 @@ def test_dense_cnn_mcts_python_boundary_delegates_to_rust(monkeypatch: pytest.Mo
                 "progressive_widening_candidate_actions": progressive_widening_candidate_actions,
                 "progressive_widening_growth_interval": progressive_widening_growth_interval,
                 "progressive_widening_growth_base": progressive_widening_growth_base,
+                "root_dirichlet_alpha": root_dirichlet_alpha,
+                "root_exploration_fraction": root_exploration_fraction,
                 "evaluation_cache": evaluation_cache,
                 "active_root_limit": active_root_limit,
             }
@@ -1129,6 +1309,8 @@ def test_dense_cnn_mcts_python_boundary_delegates_to_rust(monkeypatch: pytest.Mo
             "progressive_widening_candidate_actions": 128,
             "progressive_widening_growth_interval": 256.0,
             "progressive_widening_growth_base": 1.3,
+            "root_dirichlet_alpha": None,
+            "root_exploration_fraction": None,
             "evaluation_cache": None,
             "active_root_limit": 1024,
         }
@@ -1138,22 +1320,22 @@ def test_dense_cnn_mcts_python_boundary_delegates_to_rust(monkeypatch: pytest.Mo
 def test_dense_cnn_mcts_clamps_explicit_virtual_batch_to_safe_leaf_budget() -> None:
     mcts_module = importlib.import_module("hexo_models.dense_cnn.mcts")
 
-    assert mcts_module.DEFAULT_EVAL_CHUNK_STATES == 1024
+    assert mcts_module.DEFAULT_EVAL_CHUNK_STATES == 4096
     assert mcts_module._resolve_virtual_batch_size(
         root_count=1024,
         visits=128,
         virtual_batch_size=4,
-    ) == 1
+    ) == 4
     assert mcts_module._resolve_virtual_batch_size(
         root_count=512,
         visits=128,
         virtual_batch_size=32,
-    ) == 2
+    ) == 8
     assert mcts_module._resolve_virtual_batch_size(
         root_count=128,
         visits=128,
         virtual_batch_size=32,
-    ) == 8
+    ) == 32
 
 
 def test_dense_cnn_mcts_chunks_active_roots_before_rust_boundary(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1259,6 +1441,52 @@ def test_dense_cnn_payload_inference_respects_configured_max_batch_size() -> Non
     output = inference.evaluate_model1_payload(payload)
 
     assert set(output) == {"values_bytes", "priors_bytes"}
+    assert model.batch_sizes == [2, 2, 1]
+
+
+def test_dense_cnn_state_inference_respects_configured_max_batch_size(monkeypatch: pytest.MonkeyPatch) -> None:
+    torch = _torch()
+    dense_cnn = _dense_cnn()
+    inference_cls = _public_attr(dense_cnn, "DenseCNNInference")
+    rust_bridge = importlib.import_module("hexo_models.dense_cnn.rust_bridge")
+
+    class CountingModel(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.batch_sizes: list[int] = []
+
+        def forward(self, inputs: torch.Tensor) -> Mapping[str, torch.Tensor]:
+            batch = int(inputs.shape[0])
+            self.batch_sizes.append(batch)
+            return {
+                "policy": torch.zeros((batch, dense_cnn.BOARD_AREA), dtype=torch.float32, device=inputs.device),
+                "value": torch.zeros((batch, dense_cnn.VALUE_BINS), dtype=torch.float32, device=inputs.device),
+            }
+
+    bridge_batches: list[int] = []
+
+    def fake_model1_batch_inputs(states: Sequence[object]) -> Mapping[str, Any]:
+        batch = len(states)
+        bridge_batches.append(batch)
+        inputs = torch.zeros(
+            (batch, dense_cnn.INPUT_CHANNELS, dense_cnn.BOARD_SIZE, dense_cnn.BOARD_SIZE),
+            dtype=torch.float32,
+        )
+        return {
+            "inputs": inputs.numpy().tobytes(),
+            "shape": inputs.shape,
+            "legal_action_ids": tuple((0,) for _ in range(batch)),
+            "legal_flat_indices": tuple((0,) for _ in range(batch)),
+        }
+
+    monkeypatch.setattr(rust_bridge, "model1_batch_inputs", fake_model1_batch_inputs)
+
+    model = CountingModel()
+    inference = inference_cls(model, device="cpu", amp=False, return_logits=False, max_batch_size=2)
+    results = inference.infer_states([object() for _ in range(5)])
+
+    assert len(results) == 5
+    assert bridge_batches == [2, 2, 1]
     assert model.batch_sizes == [2, 2, 1]
 
 

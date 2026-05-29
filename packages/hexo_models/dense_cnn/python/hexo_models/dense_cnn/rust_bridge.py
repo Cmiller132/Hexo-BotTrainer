@@ -39,6 +39,8 @@ def model1_batched_mcts(
     progressive_widening_candidate_actions: int | None = None,
     progressive_widening_growth_interval: float | None = None,
     progressive_widening_growth_base: float | None = None,
+    root_dirichlet_alpha: float | None = None,
+    root_exploration_fraction: float | None = None,
     evaluation_cache: object | None = None,
     active_root_limit: int | None = None,
 ) -> tuple[Mapping[str, Any], ...]:
@@ -58,6 +60,8 @@ def model1_batched_mcts(
             None if progressive_widening_growth_interval is None else max(1.0, float(progressive_widening_growth_interval)),
             None if progressive_widening_growth_base is None else max(1.000001, float(progressive_widening_growth_base)),
             None if progressive_widening_candidate_actions is None else max(1, int(progressive_widening_candidate_actions)),
+            None if root_dirichlet_alpha is None else max(0.0, float(root_dirichlet_alpha)),
+            None if root_exploration_fraction is None else min(1.0, max(0.0, float(root_exploration_fraction))),
             evaluation_cache,
             None if active_root_limit is None else max(1, int(active_root_limit)),
         )
@@ -96,6 +100,8 @@ def model1_mcts_session_search(
     progressive_widening_candidate_actions: int | None = None,
     progressive_widening_growth_interval: float | None = None,
     progressive_widening_growth_base: float | None = None,
+    root_dirichlet_alpha: float | None = None,
+    root_exploration_fraction: float | None = None,
     active_root_limit: int | None = None,
 ) -> tuple[Mapping[str, Any], ...]:
     """Search through a native MCTS session, preserving chosen subtrees."""
@@ -115,6 +121,8 @@ def model1_mcts_session_search(
             None if progressive_widening_growth_interval is None else max(1.0, float(progressive_widening_growth_interval)),
             None if progressive_widening_growth_base is None else max(1.000001, float(progressive_widening_growth_base)),
             None if progressive_widening_candidate_actions is None else max(1, int(progressive_widening_candidate_actions)),
+            None if root_dirichlet_alpha is None else max(0.0, float(root_dirichlet_alpha)),
+            None if root_exploration_fraction is None else min(1.0, max(0.0, float(root_exploration_fraction))),
             None if active_root_limit is None else max(1, int(active_root_limit)),
         )
     )
