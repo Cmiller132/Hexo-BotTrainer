@@ -20,6 +20,7 @@ torch. Nothing in this module runs at import time.
 
 from __future__ import annotations
 
+import copy
 import tempfile
 import time
 from pathlib import Path
@@ -54,7 +55,10 @@ def _export_onnx(model: nn.Module, path: Path, device: str, dtype: torch.dtype) 
     # exporting a channels_last graph produces an engine that misreads the input
     # (garbage outputs -> gate fail). memory_format changes strides only, not
     # weights/outputs, so this is equivalence-preserving.
-    wrap = _PVTuple(model).eval().to(device).to(dtype).to(memory_format=torch.contiguous_format)
+    # deepcopy: .to(dtype) is in-place on module params, so exporting from the
+    # live model would corrupt self.model (the torch fallback). Export a throwaway
+    # NCHW fp16 copy instead.
+    wrap = _PVTuple(copy.deepcopy(model)).eval().to(device).to(dtype).to(memory_format=torch.contiguous_format)
     dummy = torch.zeros(128, 13, 41, 41, device=device, dtype=dtype)
     torch.onnx.export(
         wrap, (dummy,), str(path),
@@ -173,15 +177,20 @@ def build_trt_forward(
             with torch.autocast(device_type="cuda", dtype=torch.float16):
                 ref = model.forward_policy_value(x)
             trt_out = fwd.forward_policy_value(x)
+        from .losses import decode_binned_value
         ref_p = ref["policy"].float(); ref_v = ref["value"].float()
         trt_p = trt_out["policy"].float(); trt_v = trt_out["value"].float()
         policy_argmax_match = (ref_p.argmax(1) == trt_p.argmax(1)).float().mean().item()
         policy_max_err = (ref_p - trt_p).abs().max().item()
-        value_max_err = (ref_v - trt_v).abs().max().item()
+        # Gate on the DECODED scalar value (what search consumes), in [-1, 1] —
+        # not the raw 65-bin logits (a logit tolerance is the wrong scale).
+        value_logit_max_err = (ref_v - trt_v).abs().max().item()
+        value_max_err = (decode_binned_value(ref_v) - decode_binned_value(trt_v)).abs().max().item()
         info.update({
             "policy_argmax_match": policy_argmax_match,
             "policy_max_abs_err": policy_max_err,
             "value_max_abs_err": value_max_err,
+            "value_logit_max_abs_err": value_logit_max_err,
         })
         gate_ok = (policy_argmax_match >= argmax_match_min
                    and value_max_err <= value_tol)
