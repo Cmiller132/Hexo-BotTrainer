@@ -86,7 +86,10 @@ def search_move(session, state, inf, parsed, seed):
 
 def main():
     import argparse
-    ap = argparse.ArgumentParser(); ap.add_argument("--n", type=int, default=64); args = ap.parse_args()
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--n", type=int, default=64)
+    ap.add_argument("--precision", default="fp16", choices=["fp16", "bf16"])
+    args = ap.parse_args()
     torch.backends.cudnn.benchmark = True
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
@@ -97,33 +100,64 @@ def main():
 
     from hexo_models.dense_cnn import trt_backend
     model, parsed = build_model_cfg()
-    print("[tv1] building torch + TRT evaluators...", flush=True)
+    print(f"[tv1] precision={args.precision}; building torch + TRT evaluators...", flush=True)
     inf_torch = DenseCNNInference(model, device="cuda", amp=True, max_batch_size=1024, use_trt=False)
     # FORCE TRT on for the strength test (bypass the per-forward build gate) so we
-    # measure the true SEARCH-OUTCOME effect of TRT, not the conservative fallback.
+    # measure the true SEARCH-OUTCOME effect, not the conservative fallback.
     inf_trt = DenseCNNInference(model, device="cuda", amp=True, max_batch_size=1024, use_trt=False)
     fwd, gate = trt_backend.build_trt_forward(
         inf_trt.model, max_batch=1024, device="cuda",
-        argmax_match_min=0.0, value_tol=1.0e9,  # always adopt for the test
+        precision=args.precision, argmax_match_min=0.0, value_tol=1.0e9,  # always adopt for the test
     )
     inf_trt._trt_forward = fwd
     inf_trt.trt_info = gate
     trt_adopted = fwd is not None
-    print(f"[tv1] TRT force-adopted={trt_adopted} per-forward gate={gate}", flush=True)
+    print(f"[tv1] TRT({args.precision}) force-adopted={trt_adopted} per-forward gate={gate}", flush=True)
+
+    # Forward speed: torch FP16 vs TRT, at the production buckets, CUDA-event timed.
+    def time_fwd(forward_fn, bs):
+        xx = torch.zeros((bs, 13, 41, 41), device="cuda").to(memory_format=torch.channels_last)
+        nz = (torch.rand((bs, 13, 41, 41), device="cuda") > 0.7).float().to(memory_format=torch.channels_last)
+        for _ in range(40):
+            forward_fn(nz)
+        torch.cuda.synchronize()
+        s = [torch.cuda.Event(enable_timing=True) for _ in range(100)]
+        e = [torch.cuda.Event(enable_timing=True) for _ in range(100)]
+        for k in range(100):
+            s[k].record(); forward_fn(nz); e[k].record()
+        torch.cuda.synchronize()
+        ms = float(np.mean([a.elapsed_time(b) for a, b in zip(s, e)]))
+        return bs / (ms / 1000.0)
+    def torch_fwd(z):
+        with torch.inference_mode(), torch.autocast("cuda", dtype=torch.float16):
+            return inf_torch.model.forward_policy_value(z)
+    speed = {}
+    for bs in (128, 256):
+        speed[f"torch_fp16_bs{bs}"] = time_fwd(torch_fwd, bs)
+        speed[f"trt_{args.precision}_bs{bs}"] = time_fwd(fwd, bs)
+    print(f"[tv1] forward fwd/s: {json.dumps({k: round(v) for k, v in speed.items()})}", flush=True)
 
     states = gen_positions(args.n)
-    print(f"[tv1] {len(states)} positions; running 512-sim searches torch vs TRT...", flush=True)
-    agree = 0
-    l1s = []
-    flips = []
+    print(f"[tv1] {len(states)} positions; 512-sim searches torch vs TRT({args.precision})...", flush=True)
+    agree = 0; compared = 0; nan_aborts = 0
+    torch_self_agree = 0  # torch-vs-torch nondeterminism floor (same eval, fresh session)
+    l1s = []; flips = []
     for i, st in enumerate(states):
         sess_t = new_mcts_session(max_states=parsed.selfplay.mcts_session_cache_max_states)
+        sess_t2 = new_mcts_session(max_states=parsed.selfplay.mcts_session_cache_max_states)
         sess_r = new_mcts_session(max_states=parsed.selfplay.mcts_session_cache_max_states)
         mt, vt = search_move(sess_t, engine.clone_state(st), inf_torch, parsed, seed=1000 + i)
-        mr, vr = search_move(sess_r, engine.clone_state(st), inf_trt, parsed, seed=1000 + i)
-        same = (mt == mr)
-        agree += int(same)
-        # visit-distribution L1 over the union of actions (normalized visit shares).
+        mt2, _ = search_move(sess_t2, engine.clone_state(st), inf_torch, parsed, seed=1000 + i)
+        torch_self_agree += int(mt == mt2)
+        try:
+            mr, vr = search_move(sess_r, engine.clone_state(st), inf_trt, parsed, seed=1000 + i)
+        except Exception as ex:
+            if "finite" in str(ex).lower() or "nan" in str(ex).lower():
+                nan_aborts += 1
+                continue
+            raise
+        compared += 1
+        same = (mt == mr); agree += int(same)
         keys = set(vt) | set(vr)
         st_sum = sum(vt.values()) or 1.0; sr_sum = sum(vr.values()) or 1.0
         l1 = sum(abs(vt.get(k, 0) / st_sum - vr.get(k, 0) / sr_sum) for k in keys)
@@ -132,18 +166,21 @@ def main():
             flips.append({"pos": i, "torch_move": mt, "trt_move": mr, "visit_l1": round(l1, 4)})
 
     out = {
-        "n_positions": len(states),
-        "trt_adopted": trt_adopted,
-        "trt_gate": inf_trt.trt_info,
-        "move_agreement": agree / max(len(states), 1),
-        "move_flip_rate": 1.0 - agree / max(len(states), 1),
-        "visit_l1_mean": float(np.mean(l1s)),
-        "visit_l1_p95": float(np.percentile(l1s, 95)),
+        "precision": args.precision, "n_positions": len(states),
+        "trt_adopted": trt_adopted, "trt_gate": inf_trt.trt_info, "forward_fwd_per_s": speed,
+        "nan_aborts": nan_aborts, "compared": compared,
+        "torch_vs_torch_agreement": torch_self_agree / max(len(states), 1),
+        "move_agreement": agree / max(compared, 1),
+        "move_flip_rate": 1.0 - agree / max(compared, 1),
+        "trt_excess_flip_vs_torch_nondeterminism": (torch_self_agree / max(len(states), 1)) - (agree / max(compared, 1)),
+        "visit_l1_mean": float(np.mean(l1s)) if l1s else None,
+        "visit_l1_p95": float(np.percentile(l1s, 95)) if l1s else None,
         "flips": flips[:20],
     }
-    print(json.dumps(out, indent=2), flush=True)
-    RESULT.write_text(json.dumps(out, indent=2))
-    print(f"[tv1] wrote {RESULT.name}", flush=True)
+    print(json.dumps({k: v for k, v in out.items() if k != "flips"}, indent=2), flush=True)
+    Path(str(RESULT).replace(".json", f"_{args.precision}.json")).write_text(json.dumps(out, indent=2))
+    print(f"[tv1] done precision={args.precision} nan_aborts={nan_aborts} "
+          f"move_agreement={out['move_agreement']:.4f}", flush=True)
 
 
 if __name__ == "__main__":

@@ -145,7 +145,6 @@ class TRTForward:
         self.engine = engine
         self.ctx = engine.create_execution_context()
         self.device = device
-        self.stream = torch.cuda.Stream(device=device)
         names = [engine.get_tensor_name(i) for i in range(engine.num_io_tensors)]
         self.in_name = "input"
         self.out_names = [n for n in names if n != self.in_name]
@@ -155,17 +154,24 @@ class TRTForward:
     def forward_policy_value(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
         bs = int(x.shape[0])
         self.ctx.set_input_shape(self.in_name, (bs, 13, 41, 41))
+        # Run on the CURRENT stream so the input copy (.to/.contiguous), the TRT
+        # enqueue that reads it, and the output reads are all ordered on one
+        # stream. (A separate stream without cross-stream sync raced the input
+        # copy against the TRT kernel -> garbage/NaN.) zeros_ (not empty) so a
+        # short-writing engine can never leak uninitialized garbage into outputs.
+        stream = torch.cuda.current_stream(device=self.device)
         xin = x.to(self.in_dt).contiguous()
+        self.ctx.set_tensor_address(self.in_name, xin.data_ptr())
         outs: dict[str, torch.Tensor] = {}
-        with torch.cuda.stream(self.stream):
-            self.ctx.set_tensor_address(self.in_name, xin.data_ptr())
-            for n in self.out_names:
-                shp = tuple(self.ctx.get_tensor_shape(n))
-                buf = torch.empty(shp, device=self.device, dtype=_TRT_TO_TORCH[self.engine.get_tensor_dtype(n)])
-                outs[n] = buf
-                self.ctx.set_tensor_address(n, buf.data_ptr())
-            self.ctx.execute_async_v3(self.stream.cuda_stream)
-        self.stream.synchronize()
+        for n in self.out_names:
+            shp = tuple(self.ctx.get_tensor_shape(n))
+            buf = torch.zeros(shp, device=self.device, dtype=_TRT_TO_TORCH[self.engine.get_tensor_dtype(n)])
+            outs[n] = buf
+            self.ctx.set_tensor_address(n, buf.data_ptr())
+        ok = self.ctx.execute_async_v3(stream.cuda_stream)
+        if not ok:
+            raise RuntimeError("TRT execute_async_v3 returned False")
+        stream.synchronize()
         # Return float32 to match the torch path's downstream (decode/gather).
         return {"policy": outs["policy"].float(), "value": outs["value"].float()}
 
@@ -179,6 +185,7 @@ def build_trt_forward(
     policy_tol: float = 0.05,
     value_tol: float = 0.05,
     argmax_match_min: float = 0.99,
+    precision: str = "fp16",
     verbose: bool = True,
 ) -> tuple[Callable | None, Mapping]:
     """Build a TRT FP16 forward from `model` (the folded inference clone) and gate
@@ -193,12 +200,14 @@ def build_trt_forward(
         return None, info
     try:
         import tensorrt as trt
-        tmp = Path(tempfile.mkdtemp(prefix="dense_cnn_trt_"))
-        onnx_path = tmp / "model_fp16.onnx"
+        export_dtype = {"fp16": torch.float16, "bf16": torch.bfloat16}[precision]
+        tmp = Path(tempfile.mkdtemp(prefix=f"dense_cnn_trt_{precision}_"))
+        onnx_path = tmp / f"model_{precision}.onnx"
         t0 = time.perf_counter()
-        _export_onnx(model, onnx_path, device, torch.float16)
+        _export_onnx(model, onnx_path, device, export_dtype)
         engine = _build_engine(onnx_path, max_batch=max_batch)
         build_s = time.perf_counter() - t0
+        info["precision"] = precision
         info["build_seconds"] = build_s
         info["trt_version"] = trt.__version__
         fwd = TRTForward(engine, device=device)
