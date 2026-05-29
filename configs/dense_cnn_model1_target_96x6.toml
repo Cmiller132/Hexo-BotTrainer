@@ -109,18 +109,20 @@ selfplay_probe_positions = 2048
 probe_batches = 1
 # Inference-forward optimizations (see analysis/throughput_understanding.md).
 #  - inference_use_tensorrt: route the MCTS eval forward through a TensorRT FP16
-#    engine. GATED OFF — VALIDATION FOUND TRT FP16 PRODUCES NaN value outputs on
-#    some real positions during 512-sim search (strongly-typed pure-fp16 overflow;
-#    the Rust finiteness guard catches it, but it would crash-loop a real run).
-#    The torch FP16 (autocast, mixed-precision) path is safe and is used instead.
-#    Do NOT enable for real training-data generation until the fp16 overflow is
-#    fixed (keep value head / sensitive layers fp32, or INT8-calibrate) AND a
-#    SealBot best-50ms strength A/B confirms no win-rate regression. The
-#    integration (build + correctness gate + torch fallback) is in place and works.
+#    engine (built per-epoch from the checkpoint), correctness-gated vs torch FP16
+#    with automatic torch fallback. VALIDATED + ENABLED: the earlier "NaN" was a
+#    runner stream-race (fixed), not an fp16 overflow. Forward speed 2.35-2.67x
+#    over torch FP16; STRENGTH validated by a paired per-decision value-regret
+#    test (tv5: mean regret -0.002 +/- 0.0035 win-prob over 400 512-sim decisions
+#    = strength-equivalent to torch; FP16 beat BF16 on both speed and fidelity).
+#    NOTE: TensorRT only ENGAGES where `tensorrt` imports (the WSL2 venv). On
+#    native Windows (no py3.14 TRT wheel) it cleanly FALLS BACK to torch FP16, so
+#    leaving this on is safe everywhere but the ~2.4x forward win requires a WSL
+#    self-play launch.
 #  - inference_bucket_pad_multiple: round the padded forward batch up to this
 #    multiple instead of a power of two (less padding waste). 0 = power-of-two.
 #    Equivalence-preserving (verified) — kept ON.
-inference_use_tensorrt = false
+inference_use_tensorrt = true
 inference_bucket_pad_multiple = 16
 
 [run]

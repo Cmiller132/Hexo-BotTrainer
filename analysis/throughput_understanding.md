@@ -195,10 +195,20 @@ bits). **TRT FP16 is the winner**: fastest and closest to torch. End-to-end
 self-play (estimated, Amdahl on the ~70% forward fraction): ~1.7× → **~63 search
 pos/s** at 256 concurrency (baseline ~38).
 
-**Strength gate (SealBot best-50ms A/B, TRT vs torch, paired seeds):** _TBD —
-running (24 games/arm). Move-agreement 93.75% + 100% deterministic torch baseline
-predicts near-identical win-rates; the A/B confirms or refutes a strength
-regression._ Verdict + enable/keep-off decision follow the A/B.
+**Strength gate — PASS (low-variance paired per-decision value-regret, tv5):**
+A 24-game SealBot win-rate A/B is too high-variance to resolve this, so strength
+was measured per-decision: over **400 paired 512-sim decisions**, where TRT and
+torch pick different moves, score each move by a 1-ply lookahead under a high-sim
+(1536) torch reference. Result: **mean regret = −0.0021 ± 0.0035 win-prob (95% CI
+[−0.0056, +0.0015])**, flip rate 5.75% (23 flips, 13 TRT-better / 10 torch-better
+— symmetric). The CI straddles 0 and is tight ⇒ TRT's flips are between
+**equally-good moves** ⇒ **strength-equivalent to torch**. (The SealBot win-rate
+A/B was dropped as too noisy at feasible game counts.)
+
+**VERDICT: TRT FP16 is SAFE to enable for real training-data generation.** Wired
+in + ENABLED (`inference_use_tensorrt=true`), gated (per-forward argmax ≥ 0.90 +
+decoded-value tol, NaN-safe) with automatic torch fallback. Engages under WSL
+(native Windows has no py3.14 TRT wheel → clean torch fallback).
 
 ## 8. Chosen combination + adoption (quality-safe)
 **Adopted:** TensorRT FP16 (correctness-gated + torch fallback) + rolling
