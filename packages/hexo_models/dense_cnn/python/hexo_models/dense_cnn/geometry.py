@@ -9,7 +9,7 @@ The Rust encoder implements the same projection in `rust/src/encoding.rs`.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable
 
 from .constants import BOARD_SIZE
 from .d6 import Axial
@@ -70,15 +70,6 @@ def hex_distance(left: Axial | tuple[int, int], right: Axial | tuple[int, int]) 
     dq = lq - rq
     dr = lr - rr
     return max(abs(dq), abs(dr), abs(-dq - dr))
-
-
-def normalize_dense_target(values: Sequence[float]) -> tuple[float, ...]:
-    """Normalize nonnegative dense weights, returning zeros for zero mass."""
-
-    total = sum(max(0.0, float(value)) for value in values)
-    if total <= 0.0:
-        return tuple(0.0 for _ in values)
-    return tuple(max(0.0, float(value)) / total for value in values)
 
 
 def _pair(coord: Axial | tuple[int, int]) -> tuple[int, int]:
