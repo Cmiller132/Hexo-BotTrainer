@@ -1,0 +1,107 @@
+# TEMP smoke config (validation only; delete after) — exercises the OPTIMIZED
+# path end-to-end fast: TRT FP16 + bucketing + rolling replenishment, 2 epochs to
+# confirm the per-epoch TRT engine rebuild from the new checkpoint. Eval is OFF
+# (SealBot is a Windows exe, unavailable under WSL where TRT runs). Separate
+# output_dir.
+[model]
+name = "dense_cnn"
+module = "hexo_models.dense_cnn.plugin"
+
+[model.config]
+device = "cuda"
+
+[model.config.architecture]
+input_channels = 13
+channels = 96
+residual_blocks = 6
+dropout = 0.0
+short_term_value_horizons = [1, 4, 8]
+
+[model.config.training]
+batch_size = 64
+learning_rate = 0.001
+weight_decay = 0.0001
+policy_weight = 1.0
+value_weight = 1.0
+opp_policy_weight = 0.25
+short_term_value_weight = 0.25
+amp = true
+max_grad_norm = 1.0
+train_samples_per_epoch = 200
+max_train_bucket_per_new_data = 8.0
+max_train_bucket_size = 5000
+no_repeat_files = false
+max_validation_samples = 0
+
+[model.config.samples]
+shuffle_min_rows = 100
+shuffle_keep_target_rows = 5000
+shuffle_taper_window_exponent = 0.65
+shuffle_expand_window_per_row = 0.4
+shuffle_taper_window_scale = 50000.0
+approx_rows_per_out_file = 200
+shuffle_worker_group_size = 200
+validation_fraction = 0.0
+policy_surprise_uniform_fraction = 0.5
+policy_surprise_max_weight = 8.0
+
+[model.config.selfplay]
+search_visits = 64
+active_games = 6
+c_puct = 1.5
+root_dirichlet_noise_enabled = true
+root_dirichlet_noise_fraction = 0.25
+root_dirichlet_total_alpha = 10.83
+root_policy_temperature = 1.1
+fpu_reduction = 0.20
+virtual_loss = 1.0
+widening_policy_mass = 0.95
+widening_max_children = 32
+widening_min_children = 2
+mcts_session_cache_max_states = 131072
+mcts_active_root_limit = 256
+max_actions = 1024
+temperature = 1.0
+
+[model.config.evaluation]
+games_per_epoch = 0
+sealbot_variant = "best"
+sealbot_time_limit = 0.05
+max_actions = 1024
+require_sealbot = false
+opening_temperature = 0.6
+opening_moves = 8
+
+[model.config.performance]
+calibrate = false
+target_selfplay_positions_per_second = 64.0
+inference_batch_candidates = [256]
+selfplay_batch_candidates = [6]
+training_batch_candidates = [64]
+mcts_virtual_batch_candidates = [4]
+selfplay_probe_positions = 64
+probe_batches = 1
+# the adopted optimizations under test (TRT off — matches production after the
+# NaN finding; the production path is torch FP16 + bucketing + replenishment):
+inference_use_tensorrt = false
+inference_bucket_pad_multiple = 16
+
+[run]
+name = "dense_cnn_model1_target_96x6_smoke_opt"
+output_dir = "../runs/dense_cnn_model1_target_96x6_smoke_opt"
+seed = 1
+
+[loop]
+epochs = 2
+
+[selfplay]
+# games_per_epoch (18) > active_games (6) -> rolling replenishment exercised.
+games_per_epoch = 18
+update_checkpoint_pointer = false
+
+[train]
+passes_per_epoch = 1
+
+[checkpoint]
+initialize_from = "../runs/dense_cnn_model1_target_96x6/checkpoints/bootstrap_sealbot_prefit.pt"
+save_name = "latest"

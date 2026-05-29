@@ -131,20 +131,11 @@ class DenseCNNInference:
             use_trt = False
         if use_trt and self.device.type == "cuda":
             from . import trt_backend
-            # Representative (NON-zero) gate inputs: all-zeros make the policy
-            # uniform -> argmax ties -> spurious gate failure. Sparse binary-ish
-            # planes resemble real board occupancy and break ties.
-            gen = torch.Generator().manual_seed(0)
-            sample = (
-                torch.rand(
-                    (min(128, self.max_batch_size), INPUT_CHANNELS, BOARD_SIZE, BOARD_SIZE),
-                    generator=gen,
-                )
-                > 0.7
-            ).float()
+            # sample_inputs=None -> the gate generates REAL encoded game positions
+            # (sharp P7 policy -> stable argmax); synthetic random boards give a
+            # diffuse policy whose argmax fp16 flips spuriously.
             self._trt_forward, self.trt_info = trt_backend.build_trt_forward(
                 self.model, max_batch=self.max_batch_size, device=str(self.device),
-                sample_inputs=sample,
             )
 
     @torch.no_grad()

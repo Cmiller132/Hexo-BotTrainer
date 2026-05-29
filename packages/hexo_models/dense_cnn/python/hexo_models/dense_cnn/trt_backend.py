@@ -40,6 +40,41 @@ class _PVTuple(nn.Module):
         return o["policy"], o["value"]
 
 
+def _representative_inputs(n: int) -> "torch.Tensor | None":
+    """Real encoded game positions for the correctness gate. Random board inputs
+    give a diffuse policy (near-tied logits) so fp16 flips the argmax spuriously;
+    real mid-game positions have the sharp P7 policy that production sees, making
+    the argmax-match gate meaningful. Returns None if the engine path is
+    unavailable (caller then uses a synthetic fallback)."""
+    try:
+        import random
+        import hexo_engine as engine
+        from hexo_engine.types import unpack_coord_id
+        from . import rust_bridge
+        import numpy as np
+
+        rng = random.Random(12345)
+        states = []
+        gi = 0
+        while len(states) < n:
+            st = engine.new_game(seed=500_000 + gi); gi += 1
+            for _ in range(rng.randint(6, 120)):
+                if engine.terminal(st) is not None:
+                    break
+                aids = engine.legal_action_ids(st)
+                if not aids:
+                    break
+                engine.apply_action(st, engine.PlacementAction(unpack_coord_id(rng.choice(aids))))
+            if engine.terminal(st) is None:
+                states.append(engine.clone_state(st))
+        payload = rust_bridge.model1_batch_inputs(states[:n])
+        shape = tuple(int(x) for x in payload["shape"])
+        arr = np.frombuffer(bytes(payload["inputs"]), dtype=np.float32).reshape(shape).copy()
+        return torch.from_numpy(arr)
+    except Exception:
+        return None
+
+
 def trt_available() -> bool:
     try:
         import tensorrt  # noqa: F401
@@ -168,7 +203,10 @@ def build_trt_forward(
         info["trt_version"] = trt.__version__
         fwd = TRTForward(engine, device=device)
 
-        # Correctness gate vs torch FP16 reference on representative inputs.
+        # Correctness gate vs torch FP16 reference on REAL game positions (sharp
+        # policy -> meaningful argmax); fall back to synthetic only if unavailable.
+        if sample_inputs is None:
+            sample_inputs = _representative_inputs(min(128, max_batch))
         if sample_inputs is None:
             g = torch.Generator().manual_seed(0)
             sample_inputs = (torch.rand((128, 13, 41, 41), generator=g) > 0.7).float()

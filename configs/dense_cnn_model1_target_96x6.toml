@@ -107,18 +107,20 @@ training_batch_candidates = [64, 128, 192, 256]
 mcts_virtual_batch_candidates = [4]
 selfplay_probe_positions = 2048
 probe_batches = 1
-# Inference-forward optimizations (ADOPTED — quality-safe; see
-# analysis/throughput_understanding.md). Both are equivalence/quality-preserving.
+# Inference-forward optimizations (see analysis/throughput_understanding.md).
 #  - inference_use_tensorrt: route the MCTS eval forward through a TensorRT FP16
-#    engine (built per-epoch from the checkpoint), correctness-gated vs the torch
-#    FP16 reference with automatic torch fallback. NOTE: TensorRT only ENGAGES
-#    when `tensorrt` is importable — i.e. under the WSL2 venv. On native Windows
-#    (no TRT wheel for py3.14) it cleanly FALLS BACK to the torch forward, so this
-#    flag is safe to leave on but the ~2.4x forward win requires launching
-#    self-play in WSL. Gate is on policy-argmax + value tolerance.
+#    engine. GATED OFF — VALIDATION FOUND TRT FP16 PRODUCES NaN value outputs on
+#    some real positions during 512-sim search (strongly-typed pure-fp16 overflow;
+#    the Rust finiteness guard catches it, but it would crash-loop a real run).
+#    The torch FP16 (autocast, mixed-precision) path is safe and is used instead.
+#    Do NOT enable for real training-data generation until the fp16 overflow is
+#    fixed (keep value head / sensitive layers fp32, or INT8-calibrate) AND a
+#    SealBot best-50ms strength A/B confirms no win-rate regression. The
+#    integration (build + correctness gate + torch fallback) is in place and works.
 #  - inference_bucket_pad_multiple: round the padded forward batch up to this
 #    multiple instead of a power of two (less padding waste). 0 = power-of-two.
-inference_use_tensorrt = true
+#    Equivalence-preserving (verified) — kept ON.
+inference_use_tensorrt = false
 inference_bucket_pad_multiple = 16
 
 [run]
@@ -136,11 +138,13 @@ epochs = 60
 # epoch instead of the old fixed-cohort drain (which spent its tail at low
 # concurrency / low cache-hit / low GPU duty, ~20x slower per position). 1024 = a
 # 4x-longer epoch (4x more self-play samples) with the low-concurrency tail cut to
-# the final 256-game cohort (~1/4 of games) instead of the whole epoch. Tunable:
-# higher shrinks the tail fraction further at the cost of longer epochs. NOTE: a
-# longer epoch delays the per-epoch checkpoint — confirm the supervisor's
-# no-progress window tolerates it before a long unattended run.
-games_per_epoch = 1024
+# the final 256-game cohort instead of the whole epoch. 512 = a 2x-longer epoch
+# (2x samples) with the pool full for the first ~256 games, then the final
+# 256-game drain (~50% of games at full concurrency vs 0% for the old fixed
+# cohort). Middle-ground choice; tunable higher to shrink the tail fraction at
+# the cost of longer epochs. NOTE: a longer epoch delays the per-epoch checkpoint
+# — the supervisor no-progress window was widened to tolerate it.
+games_per_epoch = 512
 update_checkpoint_pointer = true
 checkpoint_pointer = "../data/checkpoints/dense_cnn_model1_target_96x6_latest.txt"
 
