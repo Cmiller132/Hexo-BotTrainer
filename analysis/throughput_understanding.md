@@ -191,9 +191,21 @@ the evaluator's numerics):
 | TRT BF16 | 10405 | 10629 | 1.48–1.65× | none | 83.75% (16.25% flip) | — |
 
 **BF16 loses on both axes** (slower AND 2.6× more move-flips — fewer mantissa
-bits). **TRT FP16 is the winner**: fastest and closest to torch. End-to-end
-self-play (estimated, Amdahl on the ~70% forward fraction): ~1.7× → **~63 search
-pos/s** at 256 concurrency (baseline ~38).
+bits). **TRT FP16 is the winner**: fastest and closest to torch.
+
+**Measured end-to-end self-play pos/s @256 concurrency (TRT now engaging):**
+
+| config | search pos/s | ~full pos/s | ×baseline |
+|---|---|---|---|
+| baseline (torch FP16) | 38.9 | ~36 | 1.00× |
+| + bucketing | 41.0 | ~38 | 1.05× |
+| + TRT FP16 | 77.0 | ~72 | **1.98×** |
+| **+ TRT FP16 + bucketing** | **89.9** | **~84** | **2.31×** |
+
+TRT lifts the evaluator-callback throughput 2.4–3× (cb_fwd/s 4003→12348), so the
+**measured** end-to-end gain (2.31×) exceeds the earlier Amdahl estimate. With
+rolling replenishment holding the epoch at this body rate, the optimized config
+runs self-play at **~84 pos/s — 2.3× baseline and ~2.6× the 32 target.**
 
 **Strength gate — PASS (low-variance paired per-decision value-regret, tv5):**
 A 24-game SealBot win-rate A/B is too high-variance to resolve this, so strength
