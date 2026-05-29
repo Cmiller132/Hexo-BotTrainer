@@ -14,6 +14,7 @@ byte-count checks live here because this is the Python/Torch boundary.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
@@ -59,6 +60,8 @@ class DenseCNNInference:
         return_logits: bool = True,
         max_batch_size: int | None = None,
         optimize_for_inference: bool = True,
+        bucket_pad_multiple: int | None = None,
+        use_trt: bool | None = None,
     ) -> None:
         self.device = torch.device(device)
         if self.device.type == "cuda" and not torch.cuda.is_available():
@@ -82,6 +85,22 @@ class DenseCNNInference:
         # and stays converged, while padded rows are discarded (per-sample conv/
         # eval-BN/FC ops never let padding leak into the real rows).
         self.pad_to_buckets = self.device.type == "cuda"
+        # Bucketing granularity. Default (None / env unset) keeps the original
+        # power-of-two buckets (~log2(cap)+1 distinct shapes). Setting a multiple
+        # (constructor arg or HEXO_BUCKET_PAD_MULTIPLE env) rounds the padded
+        # batch up to the nearest multiple instead — a TIGHTER effective batch
+        # that cuts padding waste (e.g. 70 -> 80 at mult=16 instead of -> 128),
+        # at the cost of more distinct cuDNN-autotune shapes (cap/multiple of
+        # them). Pure batching: padded rows never affect real rows (every op is
+        # per-sample after BN folding), so outputs stay byte-identical for any
+        # bucket size. The forward still chunks oversize leaf batches to
+        # max_batch_size before this runs, so the shape count stays bounded.
+        if bucket_pad_multiple is None:
+            env_mult = os.environ.get("HEXO_BUCKET_PAD_MULTIPLE", "").strip()
+            bucket_pad_multiple = int(env_mult) if env_mult else None
+        self.bucket_pad_multiple = (
+            int(bucket_pad_multiple) if bucket_pad_multiple and int(bucket_pad_multiple) > 1 else None
+        )
         if self.device.type == "cuda":
             torch.backends.cudnn.benchmark = True
             torch.backends.cuda.matmul.allow_tf32 = True
@@ -92,6 +111,25 @@ class DenseCNNInference:
         self.model.eval()
         if self.device.type == "cuda":
             self._warm_up_cuda()
+
+        # Optional TensorRT FP16 forward (config/env-gated). Built from the folded
+        # inference model's CURRENT weights, with a correctness gate vs the torch
+        # FP16 reference; on any failure we keep the torch forward (fallback).
+        # Rebuild a fresh DenseCNNInference per epoch to refresh the engine when
+        # weights change (~44 s build, amortized over a multi-minute epoch).
+        self._trt_forward = None
+        self.trt_info: dict[str, Any] = {"adopted": False, "reason": "disabled"}
+        if use_trt is None:
+            use_trt = os.environ.get("HEXO_TRT", "").strip() in ("1", "true", "True")
+        if use_trt and self.device.type == "cuda":
+            from . import trt_backend
+            sample = torch.zeros(
+                (min(128, self.max_batch_size), INPUT_CHANNELS, BOARD_SIZE, BOARD_SIZE)
+            )
+            self._trt_forward, self.trt_info = trt_backend.build_trt_forward(
+                self.model, max_batch=self.max_batch_size, device=str(self.device),
+                sample_inputs=sample,
+            )
 
     @torch.no_grad()
     def infer_state(self, state: object) -> InferenceResult:
@@ -161,11 +199,15 @@ class DenseCNNInference:
     def _forward_device_inputs(self, inputs: torch.Tensor) -> dict[str, torch.Tensor]:
         rows = int(inputs.shape[0])
         padded = self._pad_to_bucket(inputs, rows)
-        with torch.autocast(device_type=self.device.type, enabled=self.amp):
-            if hasattr(self.model, "forward_policy_value"):
-                output = self.model.forward_policy_value(padded)
-            else:
-                output = self.model(padded)
+        if self._trt_forward is not None:
+            # TRT engine is fp16-internal; no autocast needed.
+            output = self._trt_forward(padded)
+        else:
+            with torch.autocast(device_type=self.device.type, enabled=self.amp):
+                if hasattr(self.model, "forward_policy_value"):
+                    output = self.model.forward_policy_value(padded)
+                else:
+                    output = self.model(padded)
         # Slice padding off every head; rows [:rows] are the real samples.
         return {key: value.detach().float()[:rows] for key, value in output.items()}
 
@@ -174,7 +216,7 @@ class DenseCNNInference:
 
         if not self.pad_to_buckets:
             return inputs
-        target = _bucket_batch_size(rows, self.max_batch_size)
+        target = _bucket_batch_size(rows, self.max_batch_size, self.bucket_pad_multiple)
         if target == rows:
             return inputs
         padded = torch.zeros((target, *inputs.shape[1:]), dtype=inputs.dtype, device=inputs.device)
@@ -279,18 +321,24 @@ def _legal_priors_from_flats(
     }
 
 
-def _bucket_batch_size(rows: int, cap: int) -> int:
-    """Smallest power-of-two >= ``rows``, clamped to ``cap`` (A7 batch buckets).
+def _bucket_batch_size(rows: int, cap: int, pad_multiple: int | None = None) -> int:
+    """Bucketed batch size >= ``rows``, clamped to ``cap``.
 
-    Batches at or above ``cap`` are returned unchanged: the evaluator already
-    chunks oversized leaf batches to ``max_batch_size`` before the forward, so
-    those land on the ``cap`` bucket. Padding is therefore at most ~2x the real
-    rows, while the number of distinct shapes cuDNN must autotune is bounded to
-    ``log2(cap) + 1``.
+    Default (``pad_multiple`` None): smallest power-of-two >= ``rows`` — the A7
+    scheme, ~``log2(cap)+1`` distinct shapes, padding up to ~2x.
+
+    Tighter (``pad_multiple`` set): nearest multiple of ``pad_multiple`` >=
+    ``rows`` — padding bounded to < ``pad_multiple`` rows, at the cost of up to
+    ``cap/pad_multiple`` distinct cuDNN-autotune shapes. Either way batches at/
+    above ``cap`` are returned unchanged (the evaluator chunks to ``max_batch_size``
+    first), and padding never affects real rows, so outputs are byte-identical.
     """
 
     if rows <= 0 or rows >= cap:
         return rows
+    if pad_multiple and pad_multiple > 1:
+        size = ((rows + pad_multiple - 1) // pad_multiple) * pad_multiple
+        return min(size, cap)
     size = 1
     while size < rows:
         size <<= 1

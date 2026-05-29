@@ -75,8 +75,9 @@ def main():
 
     # Patch the inference constructed inside generate_selfplay_epoch so we can
     # instrument the callback. We wrap DenseCNNInference.evaluate_model1_payload.
-    stats = {"calls": 0, "rows": 0, "time_s": 0.0, "hist": []}
+    stats = {"calls": 0, "rows": 0, "time_s": 0.0, "hist": [], "trace": []}
     orig_eval = DenseCNNInference.evaluate_model1_payload
+    run_start = time.perf_counter()
 
     def wrapped(self, payload):
         rows = int(payload["shape"][0])
@@ -86,6 +87,14 @@ def main():
         stats["rows"] += rows
         stats["time_s"] += time.perf_counter() - t0
         stats["hist"].append(rows)
+        # sparse trace: (wall_since_start, batch) every call — used to find the
+        # opening->midgame->tail trajectory and the low-batch (tail) wall fraction.
+        stats["trace"].append((time.perf_counter() - run_start, rows))
+        if stats["calls"] % 4000 == 0:
+            el = time.perf_counter() - run_start
+            recent = stats["hist"][-2000:]
+            print(f"  [progress] t={el:6.1f}s calls={stats['calls']} "
+                  f"recent_mean_batch={sum(recent)/len(recent):6.1f}", flush=True)
         return out
 
     DenseCNNInference.evaluate_model1_payload = wrapped
@@ -110,7 +119,32 @@ def main():
     wall = time.perf_counter() - t0
 
     hist = np.array(stats["hist"]) if stats["hist"] else np.array([0])
+
+    # Trajectory / tail analysis from the (wall, batch) trace. dt between
+    # consecutive calls approximates per-call wall (incl. non-callback gaps);
+    # the "tail" is wall spent at low batch (deep + draining concurrency).
+    tr = np.array(stats["trace"]) if stats["trace"] else np.zeros((1, 2))
+    walls = tr[:, 0]; batches = tr[:, 1]
+    dt = np.diff(walls, prepend=0.0)
+    total_w = float(walls[-1]) if len(walls) else 0.0
+    def wall_frac_below(thresh):
+        return float(dt[batches < thresh].sum()) / max(total_w, 1e-9)
+    # batch trajectory in 8 wall-time quantiles
+    traj = []
+    if total_w > 0:
+        edges = np.linspace(0, total_w, 9)
+        for i in range(8):
+            mask = (walls >= edges[i]) & (walls < edges[i + 1])
+            traj.append(round(float(batches[mask].mean()) if mask.any() else 0.0, 1))
+
     out = {
+        "tail_analysis": {
+            "total_callback_wall_s": total_w,
+            "wall_frac_batch_lt_25": wall_frac_below(25),
+            "wall_frac_batch_lt_50": wall_frac_below(50),
+            "wall_frac_batch_lt_100": wall_frac_below(100),
+            "batch_trajectory_8quantiles": traj,
+        },
         "settings": {"games": args.games, "active": args.active, "vbatch": args.vbatch,
                      "visits": parsed.selfplay.search_visits},
         "searched_positions": summary["searched_positions"],

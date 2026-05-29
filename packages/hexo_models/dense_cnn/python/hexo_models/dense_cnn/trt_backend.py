@@ -1,0 +1,199 @@
+"""TensorRT FP16 backend for the dense_cnn inference forward (optional, WSL/Linux).
+
+This provides a drop-in replacement for the PyTorch forward used by
+`DenseCNNInference`: a callable `forward_policy_value(x) -> {"policy","value"}`
+backed by a prebuilt TensorRT engine, plus a builder that compiles the engine
+from the CURRENT model weights and gates adoption on a correctness check vs the
+torch FP16 reference.
+
+Design (matches the microbench that measured ~2.4-2.7x at bs128/256):
+  - TRT 10/11 dropped FP16/BF16 builder flags, so we use STRONGLY_TYPED networks
+    with FP16 baked into the ONNX (model exported in half).
+  - One dynamic-batch engine (opt profile 1..max_batch) handles every bucket.
+  - Inference via the v3 API with torch CUDA tensors as device buffers (no
+    pycuda); a dedicated CUDA stream avoids the default-stream sync penalty.
+  - Built from the optimized (folded) inference model so it matches production.
+
+Everything here imports tensorrt/onnx lazily; absence => caller falls back to
+torch. Nothing in this module runs at import time.
+"""
+
+from __future__ import annotations
+
+import tempfile
+import time
+from pathlib import Path
+from typing import Callable, Mapping
+
+import torch
+from torch import nn
+
+
+class _PVTuple(nn.Module):
+    def __init__(self, m: nn.Module) -> None:
+        super().__init__()
+        self.m = m
+
+    def forward(self, x):
+        o = self.m.forward_policy_value(x)
+        return o["policy"], o["value"]
+
+
+def trt_available() -> bool:
+    try:
+        import tensorrt  # noqa: F401
+        import onnx  # noqa: F401
+        return torch.cuda.is_available()
+    except Exception:
+        return False
+
+
+def _export_onnx(model: nn.Module, path: Path, device: str, dtype: torch.dtype) -> None:
+    wrap = _PVTuple(model).eval().to(device).to(dtype)
+    dummy = torch.zeros(128, 13, 41, 41, device=device, dtype=dtype)
+    torch.onnx.export(
+        wrap, (dummy,), str(path),
+        input_names=["input"], output_names=["policy", "value"],
+        dynamic_axes={"input": {0: "batch"}, "policy": {0: "batch"}, "value": {0: "batch"}},
+        opset_version=17, dynamo=False,
+    )
+
+
+def _build_engine(onnx_path: Path, max_batch: int, opt_batch: int = 128):
+    import tensorrt as trt
+
+    logger = trt.Logger(trt.Logger.WARNING)
+    builder = trt.Builder(logger)
+    flags = 1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED)
+    network = builder.create_network(flags)
+    parser = trt.OnnxParser(network, logger)
+    with open(onnx_path, "rb") as f:
+        if not parser.parse(f.read()):
+            errs = "; ".join(str(parser.get_error(i)) for i in range(parser.num_errors))
+            raise RuntimeError(f"ONNX parse failed: {errs}")
+    cfg = builder.create_builder_config()
+    cfg.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 4 << 30)
+    profile = builder.create_optimization_profile()
+    profile.set_shape("input", (1, 13, 41, 41), (opt_batch, 13, 41, 41), (max_batch, 13, 41, 41))
+    cfg.add_optimization_profile(profile)
+    serialized = builder.build_serialized_network(network, cfg)
+    if serialized is None:
+        raise RuntimeError("TRT engine build returned None")
+    runtime = trt.Runtime(logger)
+    return runtime.deserialize_cuda_engine(serialized)
+
+
+_TRT_TO_TORCH = None
+
+
+class TRTForward:
+    """Callable forward backed by a TRT engine; matches model.forward_policy_value."""
+
+    def __init__(self, engine, device: str = "cuda") -> None:
+        import tensorrt as trt
+
+        global _TRT_TO_TORCH
+        if _TRT_TO_TORCH is None:
+            _TRT_TO_TORCH = {
+                trt.DataType.FLOAT: torch.float32, trt.DataType.HALF: torch.float16,
+                trt.DataType.BF16: torch.bfloat16, trt.DataType.INT32: torch.int32,
+            }
+        self.engine = engine
+        self.ctx = engine.create_execution_context()
+        self.device = device
+        self.stream = torch.cuda.Stream(device=device)
+        names = [engine.get_tensor_name(i) for i in range(engine.num_io_tensors)]
+        self.in_name = "input"
+        self.out_names = [n for n in names if n != self.in_name]
+        self.in_dt = _TRT_TO_TORCH[engine.get_tensor_dtype(self.in_name)]
+
+    @torch.inference_mode()
+    def forward_policy_value(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
+        bs = int(x.shape[0])
+        self.ctx.set_input_shape(self.in_name, (bs, 13, 41, 41))
+        xin = x.to(self.in_dt).contiguous()
+        outs: dict[str, torch.Tensor] = {}
+        with torch.cuda.stream(self.stream):
+            self.ctx.set_tensor_address(self.in_name, xin.data_ptr())
+            for n in self.out_names:
+                shp = tuple(self.ctx.get_tensor_shape(n))
+                buf = torch.empty(shp, device=self.device, dtype=_TRT_TO_TORCH[self.engine.get_tensor_dtype(n)])
+                outs[n] = buf
+                self.ctx.set_tensor_address(n, buf.data_ptr())
+            self.ctx.execute_async_v3(self.stream.cuda_stream)
+        self.stream.synchronize()
+        # Return float32 to match the torch path's downstream (decode/gather).
+        return {"policy": outs["policy"].float(), "value": outs["value"].float()}
+
+
+def build_trt_forward(
+    model: nn.Module,
+    *,
+    max_batch: int,
+    device: str = "cuda",
+    sample_inputs: torch.Tensor | None = None,
+    policy_tol: float = 0.05,
+    value_tol: float = 0.05,
+    argmax_match_min: float = 0.99,
+    verbose: bool = True,
+) -> tuple[Callable | None, Mapping]:
+    """Build a TRT FP16 forward from `model` (the folded inference clone) and gate
+    on correctness vs the torch FP16 reference. Returns (trt_forward_or_None, info).
+
+    On any failure (no TRT, build error, correctness gate fail) returns (None, info)
+    so the caller falls back to the torch forward.
+    """
+    info: dict = {"adopted": False, "reason": None}
+    if not trt_available():
+        info["reason"] = "tensorrt/onnx unavailable"
+        return None, info
+    try:
+        import tensorrt as trt
+        tmp = Path(tempfile.mkdtemp(prefix="dense_cnn_trt_"))
+        onnx_path = tmp / "model_fp16.onnx"
+        t0 = time.perf_counter()
+        _export_onnx(model, onnx_path, device, torch.float16)
+        engine = _build_engine(onnx_path, max_batch=max_batch)
+        build_s = time.perf_counter() - t0
+        info["build_seconds"] = build_s
+        info["trt_version"] = trt.__version__
+        fwd = TRTForward(engine, device=device)
+
+        # Correctness gate vs torch FP16 reference on representative inputs.
+        if sample_inputs is None:
+            g = torch.Generator().manual_seed(0)
+            sample_inputs = (torch.rand((128, 13, 41, 41), generator=g) > 0.7).float()
+        x = sample_inputs.to(device).to(memory_format=torch.channels_last)
+        with torch.inference_mode():
+            with torch.autocast(device_type="cuda", dtype=torch.float16):
+                ref = model.forward_policy_value(x)
+            trt_out = fwd.forward_policy_value(x)
+        ref_p = ref["policy"].float(); ref_v = ref["value"].float()
+        trt_p = trt_out["policy"].float(); trt_v = trt_out["value"].float()
+        policy_argmax_match = (ref_p.argmax(1) == trt_p.argmax(1)).float().mean().item()
+        policy_max_err = (ref_p - trt_p).abs().max().item()
+        value_max_err = (ref_v - trt_v).abs().max().item()
+        info.update({
+            "policy_argmax_match": policy_argmax_match,
+            "policy_max_abs_err": policy_max_err,
+            "value_max_abs_err": value_max_err,
+        })
+        gate_ok = (policy_argmax_match >= argmax_match_min
+                   and value_max_err <= value_tol)
+        if not gate_ok:
+            info["reason"] = (f"correctness gate FAILED (argmax_match={policy_argmax_match:.4f}, "
+                              f"value_err={value_max_err:.4f})")
+            if verbose:
+                print(f"[trt_backend] {info['reason']} -> falling back to torch", flush=True)
+            return None, info
+        info["adopted"] = True
+        info["reason"] = "ok"
+        if verbose:
+            print(f"[trt_backend] adopted TRT FP16 (build {build_s:.1f}s, "
+                  f"argmax_match={policy_argmax_match:.4f}, value_err={value_max_err:.4f})", flush=True)
+        return fwd.forward_policy_value, info
+    except Exception as e:  # any failure -> fallback
+        info["reason"] = f"exception: {e!r}"
+        if verbose:
+            print(f"[trt_backend] build/gate failed: {e!r} -> falling back to torch", flush=True)
+        return None, info
