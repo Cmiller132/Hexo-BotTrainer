@@ -1,0 +1,19 @@
+{
+  "shard": "data00000.npz",
+  "rows": 7680,
+  "compressed_MB": 27.06,
+  "uncompressed_MB": 839.49,
+  "compression_ratio": 31.0,
+  "per_row_uncompressed_KB": 109.3,
+  "decompress_MBps": 2018.0,
+  "recompress_MBps": 538.0,
+  "rawwrite_MBps": 964.0,
+  "window_rows": 300000,
+  "window_uncompressed_GB": 32.8,
+  "group_bucket_rows": 8000,
+  "peak_RAM_per_group_GB": 0.87,
+  "est_shuffle_decomp_s": 33.0,
+  "est_shuffle_comp_s": 122.0,
+  "est_shuffle_total_s": 154.0,
+  "est_shuffle_P3_uncompressed_scratch_s": 113.0
+}

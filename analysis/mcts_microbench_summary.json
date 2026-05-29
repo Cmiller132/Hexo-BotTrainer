@@ -1,0 +1,399 @@
+{
+  "device": "cuda",
+  "torch": "2.10.0+cu126",
+  "cudnn_benchmark": false,
+  "sims_scaling_256roots": [
+    {
+      "visits": 128,
+      "roots": 256,
+      "wall_s": 3.921409650007263,
+      "eval_s": 2.4520571,
+      "encode_s": 0.21783994999999998,
+      "tree+orch_s": 1.2515126000072627,
+      "node_count": 17247
+    },
+    {
+      "visits": 256,
+      "roots": 256,
+      "wall_s": 7.865662600001087,
+      "eval_s": 4.904415999999999,
+      "encode_s": 0.42967734999999996,
+      "tree+orch_s": 2.531569250001088,
+      "node_count": 34195
+    },
+    {
+      "visits": 400,
+      "roots": 256,
+      "wall_s": 12.501003900004434,
+      "eval_s": 7.675053750000001,
+      "encode_s": 0.7624487000000002,
+      "tree+orch_s": 4.063501450004433,
+      "node_count": 53281
+    },
+    {
+      "visits": 800,
+      "roots": 256,
+      "wall_s": 44.04210474999854,
+      "eval_s": 33.99706904999999,
+      "encode_s": 1.5303701000000007,
+      "tree+orch_s": 8.51466559999855,
+      "node_count": 106865
+    }
+  ],
+  "sims_scaling_1root": [
+    {
+      "visits": 128,
+      "roots": 1,
+      "wall_ms": 183.6522666659827
+    },
+    {
+      "visits": 256,
+      "roots": 1,
+      "wall_ms": 372.4008666564866
+    },
+    {
+      "visits": 400,
+      "roots": 1,
+      "wall_ms": 575.5112999953175
+    },
+    {
+      "visits": 800,
+      "roots": 1,
+      "wall_ms": 1162.5157333328389
+    }
+  ],
+  "root_scaling": [
+    {
+      "roots": 1,
+      "visits": 128,
+      "wall_s": 0.18529900000430644,
+      "wall_per_root_ms": 185.29900000430644
+    },
+    {
+      "roots": 8,
+      "visits": 128,
+      "wall_s": 0.4481967000028817,
+      "wall_per_root_ms": 56.02458750036021
+    },
+    {
+      "roots": 32,
+      "visits": 128,
+      "wall_s": 1.9039946499979123,
+      "wall_per_root_ms": 59.49983281243476
+    },
+    {
+      "roots": 128,
+      "visits": 128,
+      "wall_s": 7.278966450001462,
+      "wall_per_root_ms": 56.866925390636425
+    },
+    {
+      "roots": 256,
+      "visits": 128,
+      "wall_s": 14.604572999989614,
+      "wall_per_root_ms": 57.04911328120943
+    }
+  ],
+  "game_timeline": [
+    {
+      "move": 0,
+      "active_roots": 32,
+      "wall_s": 0.5208391000051051,
+      "node_count": 8224,
+      "active_edge_bytes": 327680,
+      "hidden_prior_bytes": 24321792,
+      "cache_size": 257,
+      "max_nodes_per_root": 257
+    },
+    {
+      "move": 1,
+      "active_roots": 32,
+      "wall_s": 0.8256472999928519,
+      "node_count": 16384,
+      "active_edge_bytes": 654080,
+      "hidden_prior_bytes": 49952512,
+      "cache_size": 1842,
+      "max_nodes_per_root": 512
+    },
+    {
+      "move": 2,
+      "active_roots": 32,
+      "wall_s": 3.5385368000133894,
+      "node_count": 9137,
+      "active_edge_bytes": 364200,
+      "hidden_prior_bytes": 33030704,
+      "cache_size": 9595,
+      "max_nodes_per_root": 380
+    },
+    {
+      "move": 3,
+      "active_roots": 32,
+      "wall_s": 3.7137736000004224,
+      "node_count": 8868,
+      "active_edge_bytes": 353440,
+      "hidden_prior_bytes": 35656432,
+      "cache_size": 17787,
+      "max_nodes_per_root": 324
+    },
+    {
+      "move": 4,
+      "active_roots": 32,
+      "wall_s": 3.793371500010835,
+      "node_count": 8768,
+      "active_edge_bytes": 349440,
+      "hidden_prior_bytes": 39425440,
+      "cache_size": 25979,
+      "max_nodes_per_root": 322
+    },
+    {
+      "move": 5,
+      "active_roots": 32,
+      "wall_s": 3.8584649999975227,
+      "node_count": 9003,
+      "active_edge_bytes": 358840,
+      "hidden_prior_bytes": 43976576,
+      "cache_size": 34171,
+      "max_nodes_per_root": 367
+    },
+    {
+      "move": 6,
+      "active_roots": 32,
+      "wall_s": 3.958751800004393,
+      "node_count": 8813,
+      "active_edge_bytes": 351240,
+      "hidden_prior_bytes": 48344848,
+      "cache_size": 42363,
+      "max_nodes_per_root": 322
+    },
+    {
+      "move": 7,
+      "active_roots": 32,
+      "wall_s": 4.024344300007215,
+      "node_count": 8945,
+      "active_edge_bytes": 356520,
+      "hidden_prior_bytes": 51416728,
+      "cache_size": 50555,
+      "max_nodes_per_root": 322
+    },
+    {
+      "move": 8,
+      "active_roots": 32,
+      "wall_s": 4.091750999999931,
+      "node_count": 8822,
+      "active_edge_bytes": 351600,
+      "hidden_prior_bytes": 53988056,
+      "cache_size": 58747,
+      "max_nodes_per_root": 322
+    },
+    {
+      "move": 9,
+      "active_roots": 32,
+      "wall_s": 4.108599700004561,
+      "node_count": 9001,
+      "active_edge_bytes": 358760,
+      "hidden_prior_bytes": 57580792,
+      "cache_size": 66939,
+      "max_nodes_per_root": 365
+    },
+    {
+      "move": 10,
+      "active_roots": 32,
+      "wall_s": 4.215624899981776,
+      "node_count": 8878,
+      "active_edge_bytes": 353840,
+      "hidden_prior_bytes": 60307616,
+      "cache_size": 75131,
+      "max_nodes_per_root": 322
+    },
+    {
+      "move": 11,
+      "active_roots": 32,
+      "wall_s": 4.3057973999821115,
+      "node_count": 8865,
+      "active_edge_bytes": 353320,
+      "hidden_prior_bytes": 61743072,
+      "cache_size": 83323,
+      "max_nodes_per_root": 322
+    },
+    {
+      "move": 12,
+      "active_roots": 32,
+      "wall_s": 4.327001099998597,
+      "node_count": 8851,
+      "active_edge_bytes": 352760,
+      "hidden_prior_bytes": 64161736,
+      "cache_size": 91515,
+      "max_nodes_per_root": 322
+    },
+    {
+      "move": 13,
+      "active_roots": 32,
+      "wall_s": 4.347853600018425,
+      "node_count": 8925,
+      "active_edge_bytes": 355720,
+      "hidden_prior_bytes": 67797312,
+      "cache_size": 99707,
+      "max_nodes_per_root": 322
+    },
+    {
+      "move": 14,
+      "active_roots": 32,
+      "wall_s": 4.4576006999996025,
+      "node_count": 8913,
+      "active_edge_bytes": 355240,
+      "hidden_prior_bytes": 71264904,
+      "cache_size": 107899,
+      "max_nodes_per_root": 322
+    },
+    {
+      "move": 15,
+      "active_roots": 32,
+      "wall_s": 3.6213553000125103,
+      "node_count": 8842,
+      "active_edge_bytes": 352400,
+      "hidden_prior_bytes": 72062296,
+      "cache_size": 116091,
+      "max_nodes_per_root": 322
+    },
+    {
+      "move": 16,
+      "active_roots": 32,
+      "wall_s": 2.7483643000014126,
+      "node_count": 8753,
+      "active_edge_bytes": 348840,
+      "hidden_prior_bytes": 72637968,
+      "cache_size": 124283,
+      "max_nodes_per_root": 320
+    },
+    {
+      "move": 17,
+      "active_roots": 32,
+      "wall_s": 2.758895400009351,
+      "node_count": 8811,
+      "active_edge_bytes": 351160,
+      "hidden_prior_bytes": 74421368,
+      "cache_size": 132475,
+      "max_nodes_per_root": 315
+    },
+    {
+      "move": 18,
+      "active_roots": 32,
+      "wall_s": 2.7871550999989267,
+      "node_count": 8839,
+      "active_edge_bytes": 352280,
+      "hidden_prior_bytes": 77368384,
+      "cache_size": 140667,
+      "max_nodes_per_root": 309
+    },
+    {
+      "move": 19,
+      "active_roots": 32,
+      "wall_s": 2.8433729000098538,
+      "node_count": 8905,
+      "active_edge_bytes": 354920,
+      "hidden_prior_bytes": 78790520,
+      "cache_size": 148859,
+      "max_nodes_per_root": 320
+    },
+    {
+      "move": 20,
+      "active_roots": 32,
+      "wall_s": 2.8723276000237092,
+      "node_count": 8866,
+      "active_edge_bytes": 353360,
+      "hidden_prior_bytes": 79650384,
+      "cache_size": 157051,
+      "max_nodes_per_root": 320
+    },
+    {
+      "move": 21,
+      "active_roots": 32,
+      "wall_s": 2.8460142000112683,
+      "node_count": 8891,
+      "active_edge_bytes": 354360,
+      "hidden_prior_bytes": 82002168,
+      "cache_size": 165243,
+      "max_nodes_per_root": 322
+    },
+    {
+      "move": 22,
+      "active_roots": 32,
+      "wall_s": 2.874306899990188,
+      "node_count": 8901,
+      "active_edge_bytes": 354760,
+      "hidden_prior_bytes": 84699472,
+      "cache_size": 173435,
+      "max_nodes_per_root": 320
+    },
+    {
+      "move": 23,
+      "active_roots": 32,
+      "wall_s": 2.8993460000201594,
+      "node_count": 8941,
+      "active_edge_bytes": 356360,
+      "hidden_prior_bytes": 86050728,
+      "cache_size": 181627,
+      "max_nodes_per_root": 320
+    },
+    {
+      "move": 24,
+      "active_roots": 32,
+      "wall_s": 2.9385641000117175,
+      "node_count": 8964,
+      "active_edge_bytes": 357280,
+      "hidden_prior_bytes": 87149920,
+      "cache_size": 189819,
+      "max_nodes_per_root": 320
+    },
+    {
+      "move": 25,
+      "active_roots": 32,
+      "wall_s": 2.9911041000159457,
+      "node_count": 9239,
+      "active_edge_bytes": 368280,
+      "hidden_prior_bytes": 90591464,
+      "cache_size": 198011,
+      "max_nodes_per_root": 322
+    },
+    {
+      "move": 26,
+      "active_roots": 32,
+      "wall_s": 3.0034202999959234,
+      "node_count": 8897,
+      "active_edge_bytes": 354600,
+      "hidden_prior_bytes": 89104576,
+      "cache_size": 206203,
+      "max_nodes_per_root": 374
+    },
+    {
+      "move": 27,
+      "active_roots": 32,
+      "wall_s": 2.973147400014568,
+      "node_count": 9098,
+      "active_edge_bytes": 362640,
+      "hidden_prior_bytes": 91631632,
+      "cache_size": 214395,
+      "max_nodes_per_root": 368
+    },
+    {
+      "move": 28,
+      "active_roots": 32,
+      "wall_s": 3.0099603999988176,
+      "node_count": 8944,
+      "active_edge_bytes": 356480,
+      "hidden_prior_bytes": 91035752,
+      "cache_size": 222587,
+      "max_nodes_per_root": 319
+    },
+    {
+      "move": 29,
+      "active_roots": 32,
+      "wall_s": 3.057131700013997,
+      "node_count": 9173,
+      "active_edge_bytes": 365640,
+      "hidden_prior_bytes": 94216096,
+      "cache_size": 230779,
+      "max_nodes_per_root": 320
+    }
+  ]
+}

@@ -1,0 +1,6 @@
+{
+  "latency_per_step_synced_ms": 466.3366374998683,
+  "throughput_per_step_pipelined_ms": 461.23013083318557,
+  "recoverable_gap_ms": 5.106506666682719,
+  "recoverable_per_epoch_s_391": 1.9966441066729432
+}

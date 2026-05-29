@@ -107,6 +107,137 @@ Validate-only (safe, no side effects): add `-ValidateOnly`.
 
 ## LOG (newest entry first — prepend new entries here)
 
+### 2026-05-29 ~12:08 — PROFILING: DEEP PASS (thoroughness-first); two self-corrections; all 4 phases measured
+**TL;DR:** Per user direction (prioritize thoroughness, don't publish until the picture is solid),
+I went well past the first cut. All four phases now have a defensible per-phase budget and a
+measured binding constraint. Report rewritten: [`analysis/performance_profiling.md`](analysis/performance_profiling.md).
+New re-runnable probes (all committed): `parse_selfplay_diag.py`, `reconstruct_epoch_timeline.py`,
+`evaluator_microbench.py`, `train_microbench.py`, `train_step_reconcile.py`,
+`train_step_pipeline.py`, `train_step_components.py`, `shuffle_mem_probe.py` (+ `*_summary.json`).
+
+**Per-phase budget (epoch 21, reconciled to within 2 s of the instrumented epoch total):**
+training **41.9%** (479 s), self-play **32.6%** (373 s), eval **15.2%** (173 s), shuffle **10.2%**
+(116 s). selfplay+training instrumented; shuffle+eval from an mtime timeline summing to 1141 s vs
+total 1143 s.
+
+**Binding constraints, now pinned with evidence:**
+- **Self-play is CPU/Python-bound, NOT GPU-bound.** Per searched position (35.2 ms): orchestration
+  35%, NN-eval 29% (92–95% of which is the GPU forward), Rust tree 23%, encode 13%. GPU duty ~29%,
+  raw forward ~16%. Cache hit ~10% → ~113 NN evals/position.
+- **"11 pos/s" = cuDNN `benchmark=True` autotune**, PROVEN: first forward on a never-seen batch
+  shape ~925 ms vs 32 ms steady; 0 ms with `benchmark=False`. ~925 ms × ~900 shapes ≈ 830 s ≈ the
+  observed 842 s cold-epoch penalty. Fix = `cudnn.benchmark=False` (or bucket batch sizes).
+- **Training step = ~465 ms GPU compute** (trunk fwd+bwd), 4 concordant measurements; latency ≈
+  pipelined throughput (no sync win). + NPZ re-decompress bug ~244 ms/step (~95 s/epoch, 20–23×).
+- **Shuffle is CPU-zlib-COMPRESS-bound** (~122 s of ~154 s modeled); peak RAM 0.87 GB/8000-row
+  group over a 32.8 GB window. Memory is NOT a current constraint.
+
+**Two self-corrections from repeated measurement:** (1) my first cut's 260 ms training step was a
+non-reproducible transient — real value ~465 ms (caught by re-running + 3 other methods); (2) my
+first cut said "~half the evaluator is Python marshaling" — measured it is 92–95% GPU forward.
+Also CONFIRMED in BOTH inference and training that the FC policy head is **speed-neutral**
+(quality-only; 472↔473 ms with a tiny conv head).
+
+**Top fixes (measured impact):** P0 NPZ load-once (−~95 s/epoch, free); PB `cudnn.benchmark=False`
+(−~830 s on every cold/relaunch epoch); P3 uncompressed shuffle scratch (−~40 s). Self-play CPU
+buckets (P4–P6) are next; P7 fully-conv head = quality only.
+
+**Cross-ref:** the companion `mcts_code_review.md` (entry below) MEASURES sims-scaling and surfaces
+the key Goal-#4 finding my pass missed — MCTS is **root-parallel only**, so the **single-game eval/
+play path is fully serial** (184 ms/128-sim, 576 ms/400-sim move). Cited in report §9.
+
+**Still-needed (flagged):** in-situ `cProfile` over one real train epoch to size the cold-shard
+disk-IO part of the training residual; direct `build_katago_shuffle` instrumentation; measured
+SealBot-eval timing. No fixes applied — report only; run stays intentionally stopped.
+
+### 2026-05-29 ~12:03 — BACKSTOP: run still DOWN by design (investigation stage); NO action taken
+**TL;DR:** Confirmed the run remains intentionally stopped (policy-diffuseness / optimization stage),
+unchanged since the deliberate ~10:17 stop. NOT a crash/halt/stall/completion. No state-changing
+action taken; did NOT restart the supervisor (same reasoning as the ~11:03 entry — this is not a
+breaker halt with a fixable bug, and the GPU is intentionally freed for the investigation).
+
+**How verified (cross-checked, multiple signals, at 12:03):**
+- **Flags:** `supervisor_halted.flag` and `supervisor_completed.flag` BOTH absent.
+- **No live procs:** the only `train_model|supervise_scratch64|watch_model1` match was my own
+  NonInteractive tool shell (pid 46140). No trainer / supervisor / watchdog alive.
+- **Pidfiles stale & dead:** `supervisor.self.pid=45320`→alive=False, `supervisor.pid=53664`→alive=False
+  (both mtime 08:08:38 — the supervisor killed at the stop). Unchanged from the ~11:03 cycle.
+- **supervisor.log tail:** last line still `[08:08:38] ADOPT existing trainer pid=53664`. NO
+  EXIT/RELAUNCH/CAPTURE after it → killed before any relaunch (documented stop order).
+- **No crash:** newest crash_artifacts dir is `20260529_074646` (morning watchdog-kill history);
+  crashdumps\ = none; newest err.log = `trainer.20260529_074646.err.log` (829 B, mtime 07:47:22) —
+  fault-signature scan (Fatal Python error/panicked/Traceback/0xc0000005/access violation/STATUS_/
+  SIGSEGV/SIGABRT) = NONE. No new err.log after the stop → external kill, not a fault.
+- **Last activity:** `epoch_000022.pt` @ 10:07:41; newest selfplay shard `epoch_000023_game_062.npz`
+  @ 10:16:37 (from the killed epoch-23 selfplay, regenerated on resume — harmless). So nothing has
+  advanced in ~1h47m, consistent with "stopped," not "stalled" (no process is up to stall).
+- **GPU free:** `nvidia-smi` 0% / 726 MiB used / 11269 MiB free. One python proc alive (pid 41584) is
+  the **`hexo_frontend.web` dashboard** (port 8080, up since 5/28 20:21) — NOT the trainer; left alone.
+
+**RESUME POINT (unchanged):** `checkpoints\epoch_000022.pt` (146,588,369 B, 10:07:41) → resumes at
+**epoch 23**. Pointer `data\checkpoints\...latest.txt` agrees. CAVEAT (still true): config's literal
+`[checkpoint] resume_from` says `epoch_000015.pt`; the supervisor overwrites it with the latest on
+launch, but a MANUAL trainer launch would redo from epoch 15 — set it first. If the investigation
+changes architecture (channels/blocks), epoch_000022.pt won't load (fresh run, not a resume).
+
+**SealBot eval trend (frozen at epoch 22, best-50ms wins/64):** 17=6, 18=6, 19=2, 20=2, 21=4, 22=4 —
+bouncing 2–6/64, no upward slope; mean_turns falling 41→31. This plateau is exactly what motivated the
+stop + the [[scratch64-policy-bottleneck]] investigation (search budget=128 too low for the 400–1400
+action space + diffuse FC policy head). Grinding more epochs of this config won't move the win rate.
+
+**Context — investigation work has continued (read-only, no run-state change):** since the stop, prior
+cycles produced [`analysis/performance_profiling.md`](analysis/performance_profiling.md) (~11:30) and
+[`analysis/mcts_code_review.md`](analysis/mcts_code_review.md) (~12:00), both using the free GPU then
+releasing it. None applied any fix or touched the supervisor/config/checkpoint. The proposed fixes
+(raise sims ≥400 + widening, rebalance/shrink the FC policy head, NPZ load-once loader, then test
+128ch/8block) remain NOT applied — gated on the user.
+
+**NEXT CYCLE, do (in order):**
+1. **First check whether the run is back up.** If a new trainer/supervisor is alive and advancing
+   (newest `epoch_*.pt`/shard mtime within ~15 min, no flags) → user resumed; revert to the normal
+   decision tree, log progress + new eval rows (epoch 23+). If a config/architecture change landed,
+   epoch_000022.pt may not load (fresh run) — note it.
+2. **If still down (expected):** re-confirm the same terminal signals (no procs, dead pidfiles, no
+   flags, no new crash_artifacts/dumps, benign err.log) and log a one-line "still intentionally down".
+   Do NOT restart the supervisor.
+3. Only resume if the **user explicitly asks**: `-ValidateOnly` first, confirm no live supervisor
+   (pidfile + supervisor.log), then launch (auto-injects `resume_from`=latest epoch_*.pt).
+
+**Open items (report-don't-act, unchanged):** (i) ~19 stale `shuffleddata\*epoch_000016*` .tmp dirs —
+safe to delete (well past epoch 16). (ii) WER minidumps still not enabled (irrelevant — zero native
+crashes since the morning shuffle-RAM fix). (iii) policy-diffuseness fixes proposed but not applied.
+
+### 2026-05-29 ~12:00 — MCTS CODE REVIEW (read-only; GPU used then freed; NO run-state change)
+**TL;DR:** Wrote a full code-quality + performance + multithreading + memory review of the dense_cnn
+MCTS → [`analysis/mcts_code_review.md`](analysis/mcts_code_review.md). **Read-only** w.r.t. the run:
+no config/checkpoint/supervisor change, no training launched, run remains intentionally stopped
+(resume point `epoch_000022.pt` → epoch 23, unchanged). I used the free GPU for a read-only
+microbenchmark, then **freed it again** (verified 0% / 722 MiB at finish).
+
+**What I ran:** [`analysis/mcts_microbench.py`](analysis/mcts_microbench.py) → 
+[`analysis/mcts_microbench_summary.json`](analysis/mcts_microbench_summary.json) — random-init
+64ch/4block net + production `DenseCNNInference` + real native `BatchedMctsSession`, driving fresh
+`hexo_engine` games like self-play. Measures search mechanics/throughput (NOT strength).
+
+**Key measured findings:**
+- Search cost is **linear in sims** through 400 (128/256/400 = 1.0/2.0/3.2×); 800 showed an eval
+  blow-up that is an autotune-off regime artifact, not tree behavior.
+- **Single-root (eval/play) latency:** 128 sims = **184 ms/move**, 400 = 576 ms — single-game
+  high-sims does NOT fit a 50 ms SealBot budget; the `player.decide` path is fully serial (1 root).
+- **Root parallelism amortizes 3.3× (185→57 ms/root) then saturates at ~8 roots** on the serial
+  GPU-eval stage → motivates pipelining select↔eval.
+- Live tree is cheap/bounded (edges ~0.35 MB/32 trees); the dominant RAM pools are the **eval cache**
+  (fills ~190k/262k in 24 moves) and a large **staged-prior pool** (24→87 MB, flagged to investigate).
+
+**Two stuck processes cleaned up:** my FIRST benchmark attempt hung in cuDNN autotune thrash
+(variable batch shapes + `cudnn.benchmark=True`); I killed that python (pid 53688) + its bash waiter
+and re-ran with autotune disabled. Both were MY benchmark processes, not the trainer/supervisor —
+verified no trainer/supervisor/watchdog was alive before or after (run was already stopped by design).
+
+**No backstop action taken / needed:** still no halt/completed flags, no crash artifacts, run down by
+design. This entry is just to record GPU use + the new analysis artifacts; do not treat the benchmark
+as run activity.
+
 ### 2026-05-29 ~11:30 — PERFORMANCE PROFILING COMPLETE (epoch-cycle deep-dive; GPU micro-benchmarks run)
 **TL;DR:** Took over the stuck profiling session. Killed a **hung GPU probe** (orphan
 `python -` from the prior session, PID 33056, pegging the GPU at 100% / 11.7 GB VRAM — the

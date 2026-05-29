@@ -1,0 +1,28 @@
+{
+  "current": {
+    "mode": "current",
+    "rows": 30000,
+    "steps": 118,
+    "wall_s": 95.79991750000045,
+    "open_s": 1.0412440999934915,
+    "decompress_s": 28.78064389989595,
+    "gpu_step_s": 65.97740590022295,
+    "wall_per_step_ms": 811.8637076271225,
+    "decompress_per_step_ms": 243.903761863525,
+    "gpu_step_per_step_ms": 559.1305584764657,
+    "proj_epoch_391steps_s": 317.4387096822049
+  },
+  "loadonce": {
+    "mode": "loadonce",
+    "rows": 30000,
+    "steps": 118,
+    "wall_s": 59.37432719999924,
+    "open_s": 2.6805901000334416,
+    "decompress_s": 0.025956700032111257,
+    "gpu_step_s": 56.66725380011485,
+    "wall_per_step_ms": 503.1722644067732,
+    "decompress_per_step_ms": 0.2199720341704344,
+    "gpu_step_per_step_ms": 480.230964407753,
+    "proj_epoch_391steps_s": 196.74035538304832
+  }
+}

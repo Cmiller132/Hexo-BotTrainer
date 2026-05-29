@@ -1,0 +1,18 @@
+{
+  "full_model": {
+    "tag": "full_model_FC_heads",
+    "params_M": 12.21,
+    "forward_ms": 199.4,
+    "backward_ms": 313.1,
+    "opt_clip_ms": -40.4,
+    "full_ms": 472.1
+  },
+  "conv_head_variant": {
+    "tag": "conv_policy_heads",
+    "params_M": 0.97,
+    "forward_ms": 202.2,
+    "backward_ms": 312.2,
+    "opt_clip_ms": -41.3,
+    "full_ms": 473.1
+  }
+}
