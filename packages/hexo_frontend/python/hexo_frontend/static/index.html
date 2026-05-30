@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Hexo Match</title>
-<link rel="stylesheet" href="/static/styles.css?v=20260529-fixed-viewer">
+<link rel="stylesheet" href="/static/styles.css?v=20260529-controls-moved">
 </head>
 <body>
 <header>
@@ -44,6 +44,25 @@
           <span><span class="ldot" style="background:#101924;border:1px solid var(--border)"></span>Legal</span>
           <span class="tactic-legend"><span class="ldot" style="background:var(--green)"></span>Win</span>
           <span class="tactic-legend"><span class="ldot" style="background:var(--red)"></span>Block</span>
+        </div>
+      </div>
+      <div class="replay-bar" aria-label="Replay controls">
+        <div class="replay-row">
+          <div class="replay-buttons">
+            <button id="replayStartBtn" type="button" aria-label="Jump to start">|&lt;</button>
+            <button id="replayPrevBtn" type="button" aria-label="Previous move">&lt;</button>
+            <button id="replayPlayBtn" type="button" aria-label="Play replay">Play</button>
+            <button id="replayNextBtn" type="button" aria-label="Next move">&gt;</button>
+            <button id="replayLiveBtn" type="button" aria-label="Jump to latest move">&gt;|</button>
+          </div>
+          <div class="replay-status">
+            <div id="replayLabel">0 / 0</div>
+            <div id="replaySub">Opening</div>
+          </div>
+          <div class="slider-wrap">
+            <input id="replaySlider" type="range" min="0" max="0" value="0" step="1" aria-label="Move position" aria-describedby="replayLabel">
+            <div class="slider-ticks"><span>0</span><span id="replayMidTick">0</span><span id="replayMaxTick">0</span></div>
+          </div>
         </div>
       </div>
     </section>
@@ -127,23 +146,23 @@
         <div class="section-title">Tactical Filters</div>
         <div class="overlay-controls">
           <div class="seg" id="modeSeg">
-            <button data-mode="forcing">Forcing</button>
-            <button data-mode="threats">Threats</button>
-            <button data-mode="windows">Active</button>
-            <button data-mode="all">All</button>
+            <button type="button" data-mode="forcing">Forcing</button>
+            <button type="button" data-mode="threats">Threats</button>
+            <button type="button" data-mode="windows">Active</button>
+            <button type="button" data-mode="all">All</button>
           </div>
           <div class="seg" id="playerSeg">
-            <button data-player="both">Both</button>
-            <button data-player="player0">P0</button>
-            <button data-player="player1">P1</button>
+            <button type="button" data-player="both">Both</button>
+            <button type="button" data-player="player0">P0</button>
+            <button type="button" data-player="player1">P1</button>
           </div>
           <div class="seg" id="axisSeg">
-            <button data-axis="all">Axis</button>
-            <button data-axis="Q">Q</button>
-            <button data-axis="R">R</button>
-            <button data-axis="QR">QR</button>
+            <button type="button" data-axis="all">Axis</button>
+            <button type="button" data-axis="Q">Q</button>
+            <button type="button" data-axis="R">R</button>
+            <button type="button" data-axis="QR">QR</button>
           </div>
-          <button id="inspectBtn">Inspect</button>
+          <button id="inspectBtn" type="button">Inspect</button>
         </div>
       </section>
 
@@ -167,30 +186,10 @@
     </aside>
   </section>
 
-  <section class="bottom-dock" aria-label="Move history and replay">
+  <section class="bottom-dock" aria-label="Move history">
     <div class="history-panel">
       <div class="dock-title">Move History</div>
       <div class="move-history" id="moveHistory"></div>
-    </div>
-    <div class="replay-panel">
-      <div class="dock-title">Replay Controls</div>
-      <div class="replay-row">
-        <div class="replay-buttons">
-          <button id="replayStartBtn" aria-label="Start">|&lt;</button>
-          <button id="replayPrevBtn" aria-label="Previous">&lt;</button>
-          <button id="replayPlayBtn" aria-label="Play">Play</button>
-          <button id="replayNextBtn" aria-label="Next">&gt;</button>
-          <button id="replayLiveBtn" aria-label="Latest">&gt;|</button>
-        </div>
-        <div class="replay-status">
-          <div id="replayLabel">0 / 0</div>
-          <div id="replaySub">Opening</div>
-        </div>
-        <div class="slider-wrap">
-          <input id="replaySlider" type="range" min="0" max="0" value="0" step="1">
-          <div class="slider-ticks"><span>0</span><span id="replayMidTick">0</span><span id="replayMaxTick">0</span></div>
-        </div>
-      </div>
     </div>
   </section>
 </main>
@@ -255,6 +254,6 @@
     </div>
   </section>
 </main>
-<script src="/static/app.js?v=20260529-fixed-viewer"></script>
+<script src="/static/app.js?v=20260529-controls-moved"></script>
 </body>
 </html>

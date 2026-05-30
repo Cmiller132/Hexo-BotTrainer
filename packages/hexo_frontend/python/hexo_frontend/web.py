@@ -578,7 +578,7 @@ class HexoPlayHandler(BaseHTTPRequestHandler):
             return {"error": message}
 
     def _send_static(self, name: str) -> None:
-        if not name or "/" in name or name.startswith("."):
+        if (not name) or ("/" in name) or ("\\" in name) or name.startswith("."):
             self.send_error(HTTPStatus.NOT_FOUND)
             return
 
@@ -641,19 +641,24 @@ def _training_runs() -> dict[str, object]:
     for root in _training_roots():
         if not root.exists():
             continue
-        for path in sorted(root.iterdir(), key=lambda item: item.stat().st_mtime if item.exists() else 0, reverse=True):
+        for path in sorted(
+            root.iterdir(),
+            key=lambda item: (lambda s: s.st_mtime if s is not None else 0)(_safe_stat(item)),
+            reverse=True,
+        ):
             if not path.is_dir():
                 continue
             diagnostics = path / "diagnostics"
             selfplay = path / "selfplay"
             if not diagnostics.exists() and not selfplay.exists():
                 continue
+            stat = _safe_stat(path)
             current = {
                 "name": path.name,
                 "path": str(path),
                 "diagnostics": str(diagnostics),
                 "selfplay": str(selfplay),
-                "modified": path.stat().st_mtime,
+                "modified": stat.st_mtime if stat is not None else 0,
             }
             existing = runs_by_name.get(path.name)
             if existing is None or float(current["modified"]) > float(existing["modified"]):
@@ -672,18 +677,23 @@ def _training_run(name: str) -> dict[str, object]:
     histories_by_path = _training_histories(run_dir, diagnostics_by_epoch, live_status)
     epoch_history = _epoch_history(run_dir)
     evaluation_history = _evaluation_history(run_dir)
-    for path in sorted(_iter_training_files(run_dir), key=lambda item: item.stat().st_mtime if item.exists() else 0, reverse=True):
+    for path in sorted(
+        _iter_training_files(run_dir),
+        key=lambda item: (lambda s: s.st_mtime if s is not None else 0)(_safe_stat(item)),
+        reverse=True,
+    ):
         if not path.is_file():
             continue
         if path.suffix.lower() not in ARTIFACT_SUFFIXES:
             continue
         rel = path.relative_to(run_dir).as_posix()
         history_count = len(histories_by_path.get(rel, ()))
+        stat = _safe_stat(path)
         artifact: dict[str, object] = {
             "path": rel,
             "name": path.name,
-            "bytes": path.stat().st_size,
-            "modified": path.stat().st_mtime,
+            "bytes": stat.st_size if stat is not None else 0,
+            "modified": stat.st_mtime if stat is not None else 0,
             "kind": path.suffix.lower().lstrip(".") or "file",
             "loadable_history": history_count > 0,
             "history_count": history_count,
@@ -726,7 +736,8 @@ def _training_history(run_name: str, artifact_path: str, record_index: int = 0) 
     path = _resolve_run_path(run_name, artifact_path)
     if path is None or not path.is_file() or path.suffix.lower() != ".hxr":
         raise ValueError("Unknown game history artifact")
-    if path.stat().st_size <= 0:
+    stat = _safe_stat(path)
+    if stat is None or stat.st_size <= 0:
         raise ValueError("Game history artifact is empty")
 
     with HexoRecordFile.open(path) as record_file:
@@ -749,7 +760,7 @@ def _training_history(run_name: str, artifact_path: str, record_index: int = 0) 
     payload = dashboard_state(engine.to_python_state(state))
     payload.update(
         {
-            "version": int(path.stat().st_mtime_ns % 9_000_000_000_000_000),
+            "version": int(stat.st_mtime_ns % 9_000_000_000_000_000),
             "game_id": f"{run_name}:{record.game_id}",
             "mode": "history",
             "players": _players_by_role(players),
@@ -814,7 +825,8 @@ def _training_histories(
 ) -> dict[str, list[dict[str, object]]]:
     histories: dict[str, list[dict[str, object]]] = {}
     for path in sorted(_iter_training_files(run_dir, suffix=".hxr")):
-        if not path.is_file() or path.stat().st_size <= 0:
+        stat = _safe_stat(path)
+        if not path.is_file() or stat is None or stat.st_size <= 0:
             continue
         rel = path.relative_to(run_dir).as_posix()
         if rel.split("/", 1)[0] not in {"selfplay", "evaluation"}:
@@ -857,8 +869,8 @@ def _training_histories(
                     "seed": record.seed,
                     "players": _players_by_role(players),
                     "diagnostics": _history_diagnostics_brief(diagnostics),
-                    "modified": path.stat().st_mtime,
-                    "bytes": path.stat().st_size,
+                    "modified": stat.st_mtime,
+                    "bytes": stat.st_size,
                     "abort": _abort_payload(record.abort),
                 }
             )
@@ -939,6 +951,7 @@ def _evaluation_history(run_dir: Path) -> list[dict[str, object]]:
                 epoch = int(payload["epoch"])
             except (TypeError, ValueError):
                 epoch = None
+        stat = _safe_stat(path)
         rows.append(
             {
                 "epoch": epoch,
@@ -949,7 +962,7 @@ def _evaluation_history(run_dir: Path) -> list[dict[str, object]]:
                 "losses": payload.get("losses"),
                 "mean_turns": payload.get("mean_turns"),
                 "path": f"diagnostics/{path.name}",
-                "modified": path.stat().st_mtime,
+                "modified": stat.st_mtime if stat is not None else 0,
             }
         )
     rows.sort(key=lambda item: int(item.get("epoch") or 0))
@@ -996,6 +1009,7 @@ def _epoch_history(run_dir: Path) -> list[dict[str, object]]:
             row = rows.setdefault(epoch, {"epoch": epoch})
             row["evaluation"] = _evaluation_epoch_summary(payload)
 
+        # NOTE: no current producer emits this file; see dense_cnn/selfplay.py (kept for forward-compat / manual drops).
         for path in sorted(diagnostics_dir.glob("dense_cnn.policy_targets.epoch_*.json")):
             payload = _read_json_file(path)
             if not isinstance(payload, dict):
@@ -1023,6 +1037,7 @@ def _epoch_history(run_dir: Path) -> list[dict[str, object]]:
                 if isinstance(payload.get("policy_imitation"), dict):
                     training["policy_imitation"] = payload["policy_imitation"]
 
+        # NOTE: no current producer emits this file; see dense_cnn/selfplay.py (kept for forward-compat / manual drops).
         for path in sorted(diagnostics_dir.glob("dense_cnn.training_progress.epoch_*.json")):
             payload = _read_json_file(path)
             if not isinstance(payload, dict):
@@ -1042,10 +1057,11 @@ def _epoch_history(run_dir: Path) -> list[dict[str, object]]:
             if epoch is None:
                 continue
             row = rows.setdefault(epoch, {"epoch": epoch})
+            stat = _safe_stat(path)
             row["checkpoint"] = {
                 "path": path.relative_to(run_dir).as_posix(),
-                "bytes": path.stat().st_size,
-                "modified": path.stat().st_mtime,
+                "bytes": stat.st_size if stat is not None else 0,
+                "modified": stat.st_mtime if stat is not None else 0,
             }
 
     for row in rows.values():
@@ -1429,14 +1445,15 @@ def _training_run_status(run_dir: Path, histories: list[dict[str, object]], live
     }
     latest_selfplay = max(
         (path for path in (run_dir / "selfplay").glob("*.hxr") if path.is_file()),
-        key=lambda item: item.stat().st_mtime,
+        key=lambda item: (lambda s: s.st_mtime if s is not None else 0)(_safe_stat(item)),
         default=None,
     )
     if latest_selfplay is not None:
+        stat = _safe_stat(latest_selfplay)
         status["latest_selfplay_record"] = {
             "path": latest_selfplay.relative_to(run_dir).as_posix(),
-            "bytes": latest_selfplay.stat().st_size,
-            "modified": latest_selfplay.stat().st_mtime,
+            "bytes": stat.st_size if stat is not None else 0,
+            "modified": stat.st_mtime if stat is not None else 0,
         }
     return status
 
@@ -1460,9 +1477,10 @@ def _live_history_diagnostic_summary(live_status: dict[str, object]) -> dict[str
 
 
 def _latest_training_progress(diagnostics_dir: Path) -> dict[str, object] | None:
+    # NOTE: no current producer emits this file; see dense_cnn/selfplay.py (kept for forward-compat / manual drops).
     latest = max(
         diagnostics_dir.glob("dense_cnn.training_progress.epoch_*.json"),
-        key=lambda item: item.stat().st_mtime,
+        key=lambda item: (lambda s: s.st_mtime if s is not None else 0)(_safe_stat(item)),
         default=None,
     )
     if latest is None:
@@ -1472,9 +1490,10 @@ def _latest_training_progress(diagnostics_dir: Path) -> dict[str, object] | None
 
 
 def _latest_bootstrap_training_progress(run_dir: Path) -> dict[str, object] | None:
+    # NOTE: no current producer emits this file; see dense_cnn/selfplay.py (kept for forward-compat / manual drops).
     latest = max(
         (run_dir / "bootstrap").glob("*/diagnostics/dense_cnn.training_progress.epoch_*.json"),
-        key=lambda item: item.stat().st_mtime,
+        key=lambda item: (lambda s: s.st_mtime if s is not None else 0)(_safe_stat(item)),
         default=None,
     )
     if latest is None:
@@ -1624,13 +1643,26 @@ def _read_last_jsonl(path: Path) -> object | None:
     return records[-1] if records else None
 
 
-def _read_json_file(path: Path) -> object | None:
-    if not path.is_file():
-        return None
+def _safe_stat(path: Path) -> os.stat_result | None:
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return path.stat()
+    except OSError:
         return None
+
+
+def _read_json_file(path: Path, *, retries: int = 1) -> object | None:
+    for attempt in range(retries + 1):
+        if not path.is_file():
+            return None
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            if attempt < retries:
+                continue
+            return None
+        except OSError:
+            return None
+    return None
 
 
 def _artifact_summary(payload: object) -> object:
@@ -1678,7 +1710,7 @@ def _resolve_run_dir(name: str) -> Path | None:
             matches.append(path)
     if not matches:
         return None
-    return max(matches, key=lambda item: item.stat().st_mtime)
+    return max(matches, key=lambda item: (lambda s: s.st_mtime if s is not None else 0)(_safe_stat(item)))
 
 
 def _resolve_run_path(run_name: str, artifact_path: str) -> Path | None:

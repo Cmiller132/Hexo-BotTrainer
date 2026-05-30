@@ -128,8 +128,7 @@ main {
 
 .board-panel,
 .panel-card,
-.history-panel,
-.replay-panel {
+.history-panel {
   background: linear-gradient(180deg, rgba(16, 29, 42, 0.92), rgba(9, 17, 25, 0.94));
   border: 1px solid var(--line);
   border-radius: 6px;
@@ -138,14 +137,16 @@ main {
 
 .board-panel {
   min-width: 0;
-  height: clamp(460px, calc(100vh - 230px), 780px);
+  height: clamp(460px, calc(100vh - 150px), 820px);
   min-height: 420px;
   overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
 
 .board-area {
+  flex: 1 1 auto;
   width: 100%;
-  height: 100%;
   min-height: 0;
   position: relative;
   overflow: hidden;
@@ -430,7 +431,7 @@ select:disabled {
 }
 
 .section-title::before {
-  content: "v";
+  content: "\25BE";
   display: inline-block;
   margin-right: 9px;
   color: #718092;
@@ -504,10 +505,6 @@ select:disabled {
   background: rgba(7, 13, 19, 0.52);
   font-size: 13px;
   min-width: 0;
-}
-
-.info-row:last-child {
-  grid-column: auto;
 }
 
 .turn-row {
@@ -1094,20 +1091,15 @@ body.pending button:disabled {
 .bottom-dock {
   height: auto;
   min-height: 0;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(520px, 0.85fr);
-  grid-template-rows: auto;
-  gap: 8px;
+  display: block;
 }
 
-.history-panel,
-.replay-panel {
+.history-panel {
   min-width: 0;
   overflow: visible;
 }
 
-.history-panel .dock-title,
-.replay-panel .dock-title {
+.history-panel .dock-title {
   padding-top: 7px;
   padding-bottom: 6px;
 }
@@ -1188,12 +1180,16 @@ body.pending button:disabled {
   text-overflow: ellipsis;
 }
 
+.replay-bar {
+  border-top: 1px solid var(--line);
+}
+
 .replay-row {
   display: grid;
   grid-template-columns: minmax(180px, 260px) minmax(86px, 110px) minmax(180px, 1fr);
   gap: 12px;
   align-items: center;
-  padding: 12px;
+  padding: 8px 12px;
   min-width: 0;
 }
 
@@ -1372,11 +1368,6 @@ body:not(.tactics-on) .tactic-legend {
     overflow: visible;
   }
 
-  .bottom-dock {
-    grid-template-columns: 1fr;
-    grid-template-rows: auto auto;
-  }
-
   .history-page-head,
   .history-layout {
     grid-template-columns: 1fr;
@@ -1400,12 +1391,6 @@ body:not(.tactics-on) .tactic-legend {
   .board-panel {
     height: min(62vh, 560px);
     min-height: 380px;
-  }
-
-  .bottom-dock {
-    height: auto;
-    min-height: 236px;
-    grid-template-rows: auto auto;
   }
 
   .replay-row {
@@ -1473,10 +1458,6 @@ body:not(.tactics-on) .tactic-legend {
 
   .setup-grid {
     grid-template-columns: 1fr;
-  }
-
-  .info-row:last-child {
-    grid-column: auto;
   }
 
   .metric-row {

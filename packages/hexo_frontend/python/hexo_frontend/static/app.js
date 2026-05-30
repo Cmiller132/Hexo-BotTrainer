@@ -42,6 +42,7 @@ let historyView = false;
 let polling = false;
 let pollTimer = null;
 let pollAbort = null;
+let pollFailures = 0;
 let lastStatusError = "";
 let matchConfig = {
   players: { player0: "manual", player1: "sealbot-current" },
@@ -79,13 +80,25 @@ const historyLearningHealth = document.getElementById("historyLearningHealth");
 const historyEvalTrend = document.getElementById("historyEvalTrend");
 const historyEpochProgress = document.getElementById("historyEpochProgress");
 
-document.getElementById("newBtn").addEventListener("click", () => {
+// Null-guarded binding helper: one missing/renamed id should warn and skip,
+// not throw and brick the whole script before init() ever runs.
+function on(id, evt, fn, opts) {
+  const el = document.getElementById(id);
+  if (!el) {
+    console.warn("missing element #" + id);
+    return null;
+  }
+  el.addEventListener(evt, fn, opts);
+  return el;
+}
+
+on("newBtn", "click", () => {
   historyView = false;
   clearBoardView();
   resetReplay();
   post("/api/new", buildNewMatchPayload(), { resetReplay: true, clearBoard: true });
 });
-document.getElementById("trainingRefreshBtn").addEventListener("click", loadTrainingRuns);
+on("trainingRefreshBtn", "click", loadTrainingRuns);
 if (historyRefreshBtn) historyRefreshBtn.addEventListener("click", loadTrainingRuns);
 trainingRunSelect.addEventListener("change", () => loadTrainingRun(trainingRunSelect.value));
 if (historyRunSelect) historyRunSelect.addEventListener("change", async () => {
@@ -130,9 +143,9 @@ if (historySortSelect) historySortSelect.addEventListener("change", event => {
 });
 window.addEventListener("hashchange", () => setScreen(screenFromHash(), { preserveHash: true }));
 window.setInterval(refreshHistoryIfVisible, HISTORY_REFRESH_INTERVAL_MS);
-document.getElementById("fitBtn").addEventListener("click", fitBoard);
-document.getElementById("zoomInBtn").addEventListener("click", () => zoomBoardAtCenter(0.82));
-document.getElementById("zoomOutBtn").addEventListener("click", () => zoomBoardAtCenter(1.22));
+on("fitBtn", "click", fitBoard);
+on("zoomInBtn", "click", () => zoomBoardAtCenter(0.82));
+on("zoomOutBtn", "click", () => zoomBoardAtCenter(1.22));
 document.querySelectorAll("[data-player-select]").forEach(select => {
   select.addEventListener("change", event => {
     matchConfig.players[event.target.dataset.playerSelect] = event.target.value || "manual";
@@ -140,16 +153,16 @@ document.querySelectorAll("[data-player-select]").forEach(select => {
     render();
   });
 });
-document.getElementById("timeLimitInput").addEventListener("change", event => {
+on("timeLimitInput", "change", event => {
   const value = Number(event.target.value);
   matchConfig.time_limit = Number.isFinite(value) && value > 0 ? value : 0.05;
   event.target.value = String(matchConfig.time_limit);
 });
-document.getElementById("seedInput").addEventListener("change", event => {
+on("seedInput", "change", event => {
   const value = event.target.value.trim();
   matchConfig.seed = value === "" ? null : Number(value);
 });
-document.getElementById("tacticsBtn").addEventListener("click", () => {
+on("tacticsBtn", "click", () => {
   tacticsOn = !tacticsOn;
   if (tacticsOn) tacticsView = "overview";
   if (!tacticsOn) clearTacticSelection();
@@ -164,18 +177,18 @@ document.querySelectorAll("#playerSeg button").forEach(button => {
 document.querySelectorAll("#axisSeg button").forEach(button => {
   button.addEventListener("click", () => { tacticFilters.axis = button.dataset.axis; clearTacticSelection(); render(); });
 });
-document.getElementById("inspectBtn").addEventListener("click", () => {
+on("inspectBtn", "click", () => {
   tacticFilters.inspect = !tacticFilters.inspect;
   if (!tacticFilters.inspect) clearTacticSelection();
   if (tacticFilters.inspect) tacticsView = "cell";
   render();
 });
-document.getElementById("replayStartBtn").addEventListener("click", () => setReplayIndex(0));
-document.getElementById("replayPrevBtn").addEventListener("click", () => setReplayIndex(viewedPlacementCount() - 1));
-document.getElementById("replayPlayBtn").addEventListener("click", toggleReplayPlay);
-document.getElementById("replayNextBtn").addEventListener("click", () => setReplayIndex(viewedPlacementCount() + 1));
-document.getElementById("replayLiveBtn").addEventListener("click", () => setReplayIndex(totalPlacements()));
-document.getElementById("replaySlider").addEventListener("input", event => setReplayIndex(Number(event.target.value)));
+on("replayStartBtn", "click", () => setReplayIndex(0));
+on("replayPrevBtn", "click", () => setReplayIndex(viewedPlacementCount() - 1));
+on("replayPlayBtn", "click", toggleReplayPlay);
+on("replayNextBtn", "click", () => setReplayIndex(viewedPlacementCount() + 1));
+on("replayLiveBtn", "click", () => setReplayIndex(totalPlacements()));
+on("replaySlider", "input", event => setReplayIndex(Number(event.target.value)));
 window.addEventListener("resize", () => { if (state) render(); });
 boardArea.addEventListener("click", handleBoardClick);
 bindBoardViewEvents();
@@ -205,6 +218,7 @@ async function loadAdapters() {
     adapterLoadError = null;
     syncDefaultVariant();
   } catch (error) {
+    console.warn("loadAdapters: adapter API request failed", error);
     adapters = null;
     adapterLoadError = error && error.message ? error.message : "Adapter API unavailable";
   }
@@ -352,6 +366,7 @@ async function post(url, payload, options = {}) {
       });
     }
   } catch (error) {
+    console.error("post: request to " + url + " failed", error);
     if (seq === requestSeq) {
       lastStatusError = "Request failed";
       render();
@@ -374,7 +389,8 @@ function setPending(value) {
 async function safeJson(res) {
   try {
     return await res.json();
-  } catch (_) {
+  } catch (error) {
+    console.warn("safeJson: failed to parse response body", error);
     return null;
   }
 }
@@ -390,7 +406,19 @@ function navigateScreen(screen) {
 }
 
 function setScreen(screen, options = {}) {
+  const previousScreen = activeScreen;
   activeScreen = screen === "history" ? "history" : "match";
+  // Match-screen lifecycle: stop the long-poll and any replay timer when we
+  // leave it, and resume polling when we (re)enter it. schedulePoll/pollState
+  // also gate on activeScreen === "match", so this can never run while History
+  // is up.
+  if (previousScreen === "match" && activeScreen !== "match") {
+    abortPoll();
+    stopReplay();
+    window.clearTimeout(pollTimer);
+  } else if (activeScreen === "match" && previousScreen !== "match") {
+    schedulePoll(0);
+  }
   if (matchScreen) matchScreen.hidden = activeScreen !== "match";
   if (historyScreen) historyScreen.hidden = activeScreen !== "history";
   document.querySelectorAll("[data-screen]").forEach(button => {
@@ -468,7 +496,9 @@ function isNewerOrSameState(next) {
 }
 
 function schedulePoll(delay = 0) {
-  if (historyView) return;
+  // The match long-poll only runs while the match screen is active and we are
+  // not pinned to a static history view.
+  if (historyView || activeScreen !== "match") return;
   window.clearTimeout(pollTimer);
   pollTimer = window.setTimeout(pollState, delay);
 }
@@ -482,7 +512,7 @@ function abortPoll() {
 }
 
 async function pollState() {
-  if (historyView) return;
+  if (historyView || activeScreen !== "match") return;
   if (polling || pendingRequest) {
     schedulePoll(600);
     return;
@@ -490,6 +520,7 @@ async function pollState() {
   polling = true;
   const controller = new AbortController();
   pollAbort = controller;
+  let failed = false;
   try {
     const params = new URLSearchParams();
     const version = stateVersion();
@@ -500,18 +531,28 @@ async function pollState() {
     const res = await fetch(`/api/state${params.toString() ? "?" + params.toString() : ""}`, { signal: controller.signal });
     const data = await safeJson(res);
     if (res.ok && data) {
+      pollFailures = 0;
       if (lastStatusError === "Live update paused") lastStatusError = "";
       applyState(data, { preserveReplay: true });
     }
   } catch (error) {
     if (!controller.signal.aborted) {
+      failed = true;
+      console.warn("pollState: live state poll failed", error);
       lastStatusError = "Live update paused";
       render();
     }
   } finally {
     if (pollAbort === controller) pollAbort = null;
     polling = false;
-    schedulePoll(document.hidden ? 2500 : 300);
+    // On consecutive failures, back off exponentially (capped) instead of
+    // hammering the server every 300ms; a successful response resets the streak.
+    if (failed) {
+      pollFailures += 1;
+      schedulePoll(Math.min(300 * Math.pow(2, pollFailures), 5000));
+    } else {
+      schedulePoll(document.hidden ? 2500 : 300);
+    }
   }
 }
 
@@ -524,7 +565,7 @@ function render() {
   const board = buildBoardModel();
   renderBoard(board);
   renderStatus();
-  renderMoves();
+  renderMoveHistory();
   renderTacticsPanel(board.tacticMaps);
   renderBotPanel();
   renderTurnOverlay();
@@ -1129,10 +1170,6 @@ function renderTurnBanner(active) {
 let moveHistoryBound = false;
 let moveHistoryStructSig = "";
 
-function renderMoves() {
-  renderMoveHistory();
-}
-
 function renderMoveHistory() {
   const history = document.getElementById("moveHistory");
   if (!history) return;
@@ -1714,10 +1751,6 @@ function flag(label, value) {
 function playerPill(player) {
   const cls = player === "player1" ? "p1" : player === "player0" ? "p0" : "blocked";
   return `<span class="pill ${cls}">${playerShort(player)}</span>`;
-}
-
-function coordList(coords) {
-  return (coords || []).map(c => `(${c.q},${c.r})`).join(" ") || "-";
 }
 
 function idList(ids) {
@@ -2311,28 +2344,35 @@ function averageHistoryLength(histories) {
   return lengths.length ? lengths.reduce((sum, value) => sum + value, 0) / lengths.length : null;
 }
 
+function asFinite(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
 function formatDecimal(value, digits = 1) {
-  const number = Number(value);
-  if (!Number.isFinite(number)) return "--";
+  const number = asFinite(value);
+  if (number === null) return "--";
   return number.toFixed(digits);
 }
 
 function formatRate(value, unit) {
-  const number = Number(value);
-  if (!Number.isFinite(number)) return "--";
+  const number = asFinite(value);
+  if (number === null) return "--";
   return `${number.toFixed(number >= 100 ? 0 : 1)} ${unit}`;
 }
 
 function formatPercent(value, digits = 0) {
-  const number = Number(value);
-  if (!Number.isFinite(number)) return "--";
+  const number = asFinite(value);
+  if (number === null) return "--";
   return `${(number * 100).toFixed(digits)}%`;
 }
 
 function formatGib(value) {
-  const number = Number(value);
-  if (!Number.isFinite(number)) return "--";
-  return `${number.toFixed(1)} GB`;
+  const number = asFinite(value);
+  if (number === null) return "--";
+  // Values are GiB (binary); label honestly to match the /1024 sizing used
+  // elsewhere rather than the misleading decimal "GB".
+  return `${number.toFixed(1)} GiB`;
 }
 
 function renderHistoryOverview(histories, filtered) {
@@ -2752,10 +2792,11 @@ function formatHistoryDate(value) {
 }
 
 function formatBytes(value) {
-  const bytes = Number(value) || 0;
+  const bytes = asFinite(value) || 0;
+  // Binary (1024-based) divisions, so use binary unit labels (KiB/MiB).
   if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
 }
 
 async function init() {
