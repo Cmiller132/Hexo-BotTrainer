@@ -92,6 +92,180 @@ develop`).
 
 New entries on top. Written for the next watcher run. NOTE: the scheduled-task prompt
 
+### 2026-05-30 ~01:04 UTC (21:04 EDT) — **RUN ADVANCING NORMALLY (WSL+TRT live, epoch 1 selfplay in flight)** — NO ACTION
+
+**Verdict:** the WSL+TRT run launched ~13 min ago (00:50:53Z) is **healthy and advancing**. TRT FP16
+is genuinely engaged (not torch fallback), selfplay is actively writing epoch-1 shards, RAM is fine,
+zero crash signatures. First clean datapoint for the 96×6 arch is now imminent. I took NO action
+(advancing branch) — only logged this note.
+
+**State found / how verified (cross-checked WSL procs + supervisor log + events + shard mtimes +
+err/out logs + RAM sampler; no single signal trusted):**
+- **WSL liveness (CONFIRMED live):** `pgrep` shows supervisor `supervise_target_96x6_wsl.sh` **pid
+  410** (+ child 427) AND trainer **pid 446** (`hexo_train.cli.train_model ...target_96x6.toml`) at
+  **311% CPU, 19.9% MEM** — top process in WSL. These are WSL procs (invisible to Get-Process); this
+  is why a native `Get-Process` would show nothing. Matches the 00:51 entry's pids exactly (410/446)
+  → same launch, no relaunch yet.
+- **supervisor_wsl.log:** a SINGLE `LAUNCH pid=446` at 00:50:53Z, bootstrapped via `initialize_from`
+  (SealBot prefit, no epoch checkpoint to resume). NO EXIT/RELAUNCH/CAPTURE/HALT/COMPLETED after it
+  → clean first launch, **zero crashes** this run. (The old PS `supervisor.log` is stale — ignore it.)
+- **Flags:** neither `supervisor_halted.flag` nor `supervisor_completed.flag` present → not halted,
+  not completed. No `crashdumps/` dir.
+- **TRT CONFIRMED ADOPTED (not fallback):** out.log line `[trt_backend] adopted TRT FP16 (build
+  50.8s, argmax_match=0.9922, value_err=0.0078)` — the per-epoch engine built in ~51s and passed the
+  quality gate (99.22% argmax match, value err 0.0078, both within the validated tolerances from the
+  18:5x/19:2x bench entries). Config is fail-loud (no silent torch fallback), so a build failure
+  would have crashed — it didn't. So the 2.31× TRT path is actually live this run, unlike every
+  prior native-torch attempt. (The only other out.log line is a benign TRT default-stream perf
+  warning.)
+- **events.jsonl:** `load_checkpoint`=loaded (epoch 0, arch 96×6 P7 confirmed) → `calibrate_
+  performance` finished (207s, **meets_target=false @ 10.4 pos/s** — note this is the CALIBRATION
+  probe metric, the known-low full-pipeline number; NOT the live TRT selfplay rate, which the bench
+  measured at ~84 pos/s) → `run_epochs` → `stage_started epoch_000001`. No `stage_finished` for
+  epoch 1 yet (in progress).
+- **Selfplay ADVANCING (freshest signal):** 79 epoch-1 shards, newest `epoch_000001_game_000188.npz`
+  stamped **21:03:26** vs my check at **21:03:31** — i.e. written ~5 s before I looked. Game indices
+  run up to ~253 (rolling replenishment, `games_per_epoch=512`, so shard count < max index is
+  normal). Definitively NOT a stall.
+- **No crash:** newest err.log `trainer.20260530_005053.err.log` (last write 20:54:29, startup
+  warnings only) — fault-sig scan (Fatal Python error|Current thread|panicked|stack backtrace|
+  Traceback|0xc0000005|access violation|STATUS_|SIGSEGV|SIGABRT) = **0 hits**. Tail = only the two
+  known-benign warnings (inference.py non-writable-buffer + architecture.py TracerWarning).
+- **RAM healthy:** `watch_wsl.jsonl` actively sampling (latest 01:04:09Z), **free_ram_gb ~21.8,
+  flat** — nowhere near the 4 GB floor. No pressure (host protected by the 28 GB WSL2 cap).
+- **No checkpoints/eval yet:** checkpoints/ holds ONLY `bootstrap_sealbot_prefit.pt` (epoch 0). No
+  `epoch_*.pt`, no `dense_cnn.evaluation.*.json`. Expected — epoch 1 hasn't finished.
+
+**Why no action:** run is up, TRT engaged, selfplay producing shards in real time, RAM fine, no flag,
+no crash, no stall. Nothing to fix, nothing to relaunch (the supervisor owns relaunch anyway).
+
+**Still open / next-step instructions for next watcher:**
+1. **Re-derive liveness via WSL, NOT native procs.** Run `wsl.exe -e bash -lc "pgrep -af
+   'supervise_target_96x6_wsl|train_model'"`. Expect supervisor (was pid 410) + trainer (was 446) —
+   **pids are point-in-time; a different trainer pid + a new `RELAUNCH`/`LAUNCH` line in
+   supervisor_wsl.log = the supervisor restarted after a crash** (then root-cause from the new
+   err.log + any crash_artifacts/ before assuming healthy). A momentary process gap during a
+   relaunch is NORMAL — confirm "crash" via the halt flag + supervisor_wsl.log, not a momentary
+   absence.
+2. **FIRST Goal-#4 milestone is imminent — watch for it:** `stage_finished epoch_000001` in
+   events.jsonl + the first `checkpoints/epoch_000001.pt` + first
+   `diagnostics/dense_cnn.evaluation.epoch_000001.json`. Report wins/losses/mean_turns. **Baseline to
+   beat = scratch_64's 2–6 wins/64 vs SealBot best-50ms** — the 96×6 + P7 + 512-sim + TRT change
+   exists to clear that plateau. This will be the FIRST-EVER eval datapoint for the 96×6 arch.
+3. **TRT re-checks each epoch:** the engine rebuilds per epoch (~51s). Confirm each new epoch's
+   out.log still shows `[trt_backend] adopted TRT FP16 (... argmax_match≈0.99 ...)` — if an epoch's
+   build ever FAILS, fail-loud will crash the trainer (supervisor relaunches; watch the breaker).
+   The 20:0x-entry blockers (unreliable in-process build, eval-rebuilds-per-game) were fixed before
+   this launch (subprocess-isolated build + selfplay-only TRT per the recent commits 0fde413/320032a
+   /26821ac/867a8de/bc17400), and the 50.8s clean build here confirms the fix held for epoch 1.
+4. **Throughput sanity (optional):** if you want a live pos/s, compute it from epoch-1 shard mtime
+   spread or wait for `epoch_000001`'s `stage_finished` elapsed_seconds. Don't trust the calibration's
+   10.4 pos/s as the live rate — TRT selfplay should be materially faster (~84 pos/s bench).
+5. **Decision tree unchanged:** advancing → log only (as here). Halted (flag) → root-cause + maybe
+   fix + clear flag + restart supervisor. Completed (flag) → report final eval, ask re raising
+   loop.epochs. Stalled (live trainer but no new shard / no events progress >25 min, no flag) →
+   capture err/events tails + flag a hang.
+
+### 2026-05-30 ~00:51 UTC (20:51 EDT) — **RUN RE-LAUNCHED (LIVE) under the WSL supervisor with TRT FP16** — user-authorized
+
+The training run is **LIVE again** (user explicitly authorized the launch). It now runs **in WSL**
+(so TensorRT FP16 engages) under a NEW supervisor: **`scripts/supervise_target_96x6_wsl.sh`**
+(the Windows `supervise_target_96x6.ps1` CANNOT drive a WSL trainer — WSL procs are invisible to
+Win32_Process). Same guardrails (resume-from-latest, fast-crash×3 / >6/hr / no-progress×5 breaker,
+crash artifacts, RAM-floor sampler; host protected by the 28GB WSL2 cap).
+- **Optimized config**: TRT FP16 ON (`inference_use_tensorrt=true`, **fail-loud, NO silent torch
+  fallback** — fallback is opt-in via `inference_trt_allow_torch_fallback`/`HEXO_TRT_ALLOW_FALLBACK`),
+  bucketing (mult-16), rolling replenishment (`games_per_epoch=512`). Eval is torch (selfplay-only TRT).
+- **PIDs (point-in-time, WSL — re-derive!):** supervisor bash **pid 410**, trainer **pid 446**.
+  Bootstrapped from the SealBot prefit (`initialize_from`, NOT random) — log confirms.
+- **Logs:** `runs/dense_cnn_model1_target_96x6/diagnostics/supervisor_wsl.log` (WSL supervisor),
+  `trainer.<stamp>.out/err.log`, `watch_wsl.jsonl` (RAM). The OLD `supervisor.log` (PS) is stale.
+- **Backstop watcher note:** the trainer is a **WSL** process (invisible to `Get-Process`/Win32_Process)
+  — check liveness via `wsl ... pgrep -af supervise_target_96x6_wsl|train_model` and the WSL supervisor
+  log, NOT the native process list. Do NOT relaunch the PS supervisor. TRT builds per epoch (~46s).
+- Validation done first (8/8 TRT build reliability, fail-loud unit test, 2-epoch WSL smoke adopted 2/2
+  fail=0 + completed). Measured TRT end-to-end ~84 search-pos/s @256 (2.3x). Verifying live pos/s now.
+
+### 2026-05-29 ~20:0x EDT — TRT PHASE FINISHED (launch ABORTED); GPU now IDLE; run STILL DOWN by design; NO ACTION
+
+**Verdict:** training run still intentionally stopped (NOT a crash, NOT a stall, NOT a breaker
+halt). The inference-opt / TRT phase that owned the GPU has now **FINISHED** — and unlike every
+prior entry today, **the GPU is IDLE and the WSL bench agent is gone.** The bench agent's final
+act was to **abort the TRT launch** (2 build blockers) and commit it; it did NOT start a training
+run. User has NOT relaunched. I took **NO action** (decision-tree branch #3, deliberate stop). The
+new wrinkle vs prior entries: the GPU is now free and the bench phase is done, so this is the
+"down + benchmark FINISHED + user hasn't relaunched, awaiting their launch decision" case.
+
+**State found / how verified (cross-checked flags + files + git + native procs + WSL procs + GPU;
+no single signal trusted):**
+- **Flags:** neither `supervisor_halted.flag` nor `supervisor_completed.flag` present → not a
+  breaker halt, not a clean completion. Down for the deliberate (external) reason.
+- **supervisor.log:** UNCHANGED — still ONLY `LAUNCH pid=28292` at 14:59:45, no
+  EXIT/RELAUNCH/CAPTURE/HALT/COMPLETED after it. User has NOT relaunched. Pidfiles still hold the
+  ORIGINAL launch pids (supervisor.self.pid=54612, supervisor.pid=28292) — **both DEAD** (absent
+  from `Get-CimInstance Win32_Process`). STALE; re-derive every time.
+- **Native procs:** NO live trainer/supervisor/watchdog. Only relevant native python = pid
+  **52864** = dashboard (`hexo_frontend.web` 0.0.0.0:8080, up by design, started 14:50).
+  powershell pid 19844 (created 20:04) is MY OWN tool shell — ignore (self-artifact).
+- **GPU = 0% / 733 MiB / 41 °C — IDLE (CHANGE).** First time since ~15:1x the GPU is free. The
+  WSL `ps` top is now only systemd housekeeping (systemd/snapd/udevd at <15% CPU) — **NO WSL
+  python**. So the TRT/bench agent that held the GPU at 27–100% in the 16:0x–19:0x entries has
+  EXITED. (`wsl.exe` prints a benign "131072x1 screen size is bogus" warning — cosmetic, ignore.)
+- **Bench agent's FINAL state (freshest signal in the system):** HEAD of
+  `bench/inference-backends-wsl` is `bc17400 WSL supervisor + pre-flight smoke: ABORT TRT launch
+  (2 build blockers found)` stamped **20:02:26** — only ~1 min before this check (20:03). The two
+  newest commits are `4b78b99` (19:25, NOTES: TRT validated+enabled) and `bc17400` (20:02, the
+  abort). So the TRT journey is fully recorded and the agent CHOSE NOT to launch a run (see the
+  ~20:0x entry directly below this one for the 2 blockers: unreliable in-process TRT build +
+  eval rebuilding TRT per game). It went idle after committing — no run pending.
+- **No progress, no crash:** only `bootstrap_sealbot_prefit.pt` (epoch 0, 96×6 P7, 25.6 MB) in
+  checkpoints/, NO `epoch_*.pt`. events.jsonl ends `stage_started epoch_000001` (calibrate done:
+  meets_target=false @ 12.8 pos/s, the known 96×6/512-sim profile). 99 epoch-1 selfplay shards,
+  newest `epoch_000001_game_000015.npz` stamped **15:31** (~4.5 h cold) — NOT a stall (no live
+  trainer to stall; deliberately-stopped run sitting idle). No `crashdumps/` dir. Newest err.log
+  `trainer.20260529_145945.err.log` last write **15:00:05** (the stop), fault-signature scan
+  (Fatal Python error|Current thread|panicked|stack backtrace|Traceback|0xc0000005|access
+  violation|STATUS_|SIGSEGV|SIGABRT) = **0 hits**. No `dense_cnn.evaluation.*.json`.
+
+**Why no action:** run is OFF by deliberate choice; the bench phase that justified the stop is now
+complete and the GPU is free, but the bench agent deliberately ABORTED the launch (the optimized
+WSL+TRT path has 2 unresolved blockers). Relaunching is a USER decision with a real fork (see
+next steps), and the hard rule forbids me auto-relaunching a deliberate stop. No halt flag, no
+crash, no stall. Nothing to fix in the training/Rust code, nothing to relaunch.
+
+**Still open / next-step instructions for next watcher:**
+1. **First re-check whether the user relaunched:** NEW `LAUNCH` line in supervisor.log dated AFTER
+   14:59:45 AND a live `supervise_target_96x6.ps1` (supervisor.self.pid) + a live NATIVE python
+   trainer with the config arg. If present → switch to the normal advancing/halted/stalled tree
+   (flags → events.jsonl last stage → selfplay shard mtimes vs now → Get-Process on pidfiles →
+   watchdog tail). All PIDs here are STALE — re-derive every time.
+2. **GPU is now idle + WSL bench gone (NEW since 16:0x–19:0x):** unlike all of today's earlier
+   entries, the GPU is no longer held by a WSL bench python. If you find the GPU busy again with
+   NO native trainer, still check WSL (`wsl.exe -e bash -lc "ps -eo pid,pcpu,comm --sort=-pcpu |
+   head"`) before concluding anything — but as of now there's no WSL python. Confirm a relaunch by
+   supervisor.log + a NATIVE python with the config arg, NOT GPU% alone.
+3. **THE OPEN DECISION (user's, not the watcher's) — which launch path:** the bench agent left two
+   launch-ready options (do NOT auto-pick; report and wait):
+   - **(a) Cheap path, native Windows, launch-ready NOW:** TRT off → torch FP16 + bucketing +
+     replenishment, measured ~36–41 pos/s (already > the 32 target). No blockers. This is the
+     resume command in the "RUN INTENTIONALLY STOPPED ~15:1x" entry (supervisor `-ValidateOnly`
+     then detached `Start-Process` of `supervise_target_96x6.ps1`). Caveat: if the first
+     post-resume shuffle errors on a truncated final `selfplay/*.npz`, delete the newest shard.
+     NOTE: `dense_cnn_model1_target_96x6.toml` currently has `inference_use_tensorrt=true`, which
+     **only engages under WSL** — on native Windows it silently falls back to torch FP16, so the
+     cheap path "just works" natively without a config edit (you lose only the 2.31× TRT win).
+   - **(b) Optimized WSL+TRT path, ~84 pos/s (2.31×), BLOCKED:** needs the 2 fixes from the ~20:0x
+     entry below first — (i) make TRT selfplay-ONLY (player.py/eval → torch; eval strength ==
+     TRT per the regret test) so the engine builds once/epoch not once/eval-game; (ii) reliable
+     TRT build (isolate per-build state / single global logger / build-once+REFIT / subprocess).
+     Then re-smoke under WSL and launch via `scripts/supervise_target_96x6_wsl.sh`.
+4. **Still NO Goal-#4 datapoint for the 96×6 arch** — no `epoch_*.pt`, no eval JSON. First
+   milestone once training resumes: `epoch_000001` finishing in events.jsonl + first
+   `dense_cnn.evaluation.epoch_000001.json` (wins/losses/mean_turns; scratch_64 baseline to beat =
+   2–6 wins/64 vs SealBot best-50ms). At ~12.8 pos/s (native torch path) epochs are SLOW — judge
+   stalls by "no new selfplay shard / no events progress >25 min WHILE a trainer is live", not by
+   wall-clock. The WSL+TRT path (~84 pos/s) would make epochs ~6× faster if (b) is unblocked.
+
 ### 2026-05-29 ~19:2x EDT — TRT FP16 VALIDATED + ENABLED (strength-equivalent); optimized config launch-ready
 
 TRT FP16 is now **enabled** in `dense_cnn_model1_target_96x6.toml`
@@ -645,3 +819,42 @@ wall-clock expectation.
    selfplay/shuffle. Capture artifacts, write the diagnosis, only then (if safe) fix +
    rebuild (maturin/cargo per Environment gotcha) + clear flag + restart supervisor.
 4. Do NOT start a second supervisor; do NOT relaunch/kill the trainer yourself.
+
+---
+
+## 2026-05-30 — Live self-play pos/s on the dashboard (feature)
+
+User asked the frontend to show the *proper* pos/s and have it be live. Problem: during
+an active self-play epoch (the dominant phase) the dashboard had NO fresh pos/s — the
+"Speed" card showed `calibration.selfplay_pos_s` (measured once at run start; for this
+run a misleading **10.4 pos/s**) and the per-epoch `search_positions_per_second` is only
+written when the whole epoch *finishes*. (`dense_cnn.training_progress.epoch_*.json` is
+read by the dashboard but written by nothing — dead path.)
+
+**Fix (producer → consumer → frontend):**
+- `dense_cnn/.../selfplay.py`: writes `diagnostics/dense_cnn.selfplay.live.json` every
+  ~2 s during the epoch loop (status `running`) + a final `completed` snapshot at epoch
+  end. Carries the SAME authoritative metric the completed-epoch summary/calibration use
+  (`search_positions_per_second = searched_positions / mcts_search_elapsed`), plus a
+  wall-clock `timestamp` for staleness. Tiny JSON; negligible overhead.
+- `hexo_frontend/web.py`: `_training_live_status` reads it; `_selfplay_live_summary`
+  marks `live = (status==running AND age<=20s)` and exposes `search_pos_s` etc.
+- `static/app.js`: Speed card prefers the live search-pos/s (`● LIVE · e{n} · {done}/{req}
+  games`) while running, shows `(done)` for the last epoch, else falls back to calibration.
+
+**Verified:** py_compile clean; consumer unit test (running/stale/completed) passes;
+dashboard API returns the new `selfplay_live` field.
+
+**Activation (user chose "bounce at epoch boundary"):**
+- Dashboard on :8080 RESTARTED now (old pid 52864 → new pid 35520) so the Python consumer
+  + new app.js are served. Same launch: `C:\Python314\python -m hexo_frontend.web --host
+  0.0.0.0 --port 8080 --sealbot-path E:/SealBot`, PYTHONPATH=worktree pkgs. Log:
+  `diagnostics/dashboard_8080.out.log`.
+- Trainer (pid 446) still runs OLD selfplay.py (one process / all 60 epochs), so it won't
+  emit the live file until restarted. Plan: wait for `checkpoints/epoch_000001.pt` to
+  stabilize, then bounce the trainer ONCE so the supervisor resumes epoch 2 with the new
+  code (near-zero lost work). Background watcher: `scripts/_wait_epoch1_boundary.sh`.
+  Bounce = kill the pid in `diagnostics/trainer_wsl.pid`; uptime>180s so NOT a fast-crash,
+  and the new epoch-1 ckpt resets no-progress — safe vs the breaker.
+- This is the ONE authorized trainer bounce (supersedes the older "don't relaunch/kill the
+  trainer yourself" note, for this single epoch-boundary restart only).

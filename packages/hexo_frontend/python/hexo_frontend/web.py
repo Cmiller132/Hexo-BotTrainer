@@ -13,7 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
 from pathlib import Path
 from threading import Condition, RLock, Thread
-from time import monotonic, perf_counter
+from time import monotonic, perf_counter, time as wall_clock
 from typing import Any, ClassVar
 from urllib.parse import parse_qs, unquote, urlparse
 
@@ -1364,6 +1364,7 @@ def _training_live_status(run_dir: Path) -> dict[str, object]:
     events = _stage_status_from_events(diagnostics / "events.jsonl")
     watchdog = _read_last_jsonl(diagnostics / "resource_watchdog.jsonl")
     calibration = _read_json_file(diagnostics / "dense_cnn.performance_calibration.json")
+    selfplay_live = _read_json_file(diagnostics / "dense_cnn.selfplay.live.json")
     training_progress = _latest_training_progress(diagnostics)
     bootstrap_progress = _latest_bootstrap_training_progress(run_dir)
     trainer_command = ""
@@ -1393,6 +1394,8 @@ def _training_live_status(run_dir: Path) -> dict[str, object]:
         status["watchdog"] = _watchdog_summary(watchdog)
     if isinstance(calibration, dict):
         status["calibration"] = _calibration_summary(calibration)
+    if isinstance(selfplay_live, dict):
+        status["selfplay_live"] = _selfplay_live_summary(selfplay_live)
     if isinstance(training_progress, dict):
         status["training_progress"] = _training_progress_summary(training_progress)
     return status
@@ -1572,6 +1575,32 @@ def _calibration_summary(payload: dict[str, object]) -> dict[str, object]:
         "selected_selfplay_batch_size": payload.get("selected_selfplay_batch_size"),
         "selected_training_batch_size": payload.get("selected_training_batch_size"),
         "selected_mcts_virtual_batch_size": payload.get("selected_mcts_virtual_batch_size"),
+    }
+
+
+def _selfplay_live_summary(payload: dict[str, object]) -> dict[str, object]:
+    # Self-play writes this file every couple of seconds during an epoch and a
+    # final "completed" snapshot at epoch end. "live" means the writer is still
+    # running and the file is fresh, so the dashboard can trust the in-progress
+    # search-pos/s; a stale "running" file (writer died) falls back to not-live.
+    timestamp = payload.get("timestamp")
+    age_seconds: float | None = None
+    if isinstance(timestamp, (int, float)):
+        age_seconds = max(0.0, wall_clock() - float(timestamp))
+    status = str(payload.get("status") or "")
+    is_live = status == "running" and age_seconds is not None and age_seconds <= 20.0
+    return {
+        "status": status or "unknown",
+        "live": is_live,
+        "age_seconds": age_seconds,
+        "epoch": payload.get("epoch"),
+        "search_pos_s": payload.get("search_positions_per_second"),
+        "pos_s": payload.get("positions_per_second"),
+        "searched_positions": payload.get("searched_positions"),
+        "games_finished": payload.get("games_finished"),
+        "requested_games": payload.get("requested_games"),
+        "active_games": payload.get("active_games"),
+        "elapsed_seconds": payload.get("elapsed_seconds"),
     }
 
 

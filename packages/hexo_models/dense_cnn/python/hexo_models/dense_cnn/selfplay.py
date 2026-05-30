@@ -15,7 +15,7 @@ trainer); every other search setting comes directly from `config.selfplay`.
 
 from __future__ import annotations
 
-from time import perf_counter
+from time import perf_counter, time as wall_clock
 from typing import Any, Mapping
 
 import hexo_engine as engine
@@ -29,6 +29,12 @@ from .replay import materialize_policy_surprise_rows, write_selfplay_npz
 from .samples import Model1SampleData, finalize_game_samples, sample_from_state
 
 import os as _os
+
+# Minimum wall-clock seconds between live-progress writes during a self-play
+# epoch. The dashboard polls these to show a live pos/s; the write itself is a
+# tiny JSON file so the only reason to throttle is to avoid spamming the disk.
+_LIVE_PROGRESS_INTERVAL_SECONDS = 2.0
+_LIVE_PROGRESS_NAME = "dense_cnn.selfplay.live.json"
 
 
 def _adaptive_vbatch_enabled() -> bool:
@@ -90,6 +96,41 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
     mcts_session = new_mcts_session(max_states=selfplay.mcts_session_cache_max_states)
     next_game_index = 0
     active: list[dict[str, Any]] = []
+
+    last_live_write = 0.0
+
+    def _write_live_progress(status: str) -> None:
+        # Snapshot of the in-progress epoch so the dashboard can show a live
+        # pos/s. The authoritative throughput figure is the same one the
+        # completed-epoch summary and calibration report
+        # (searched_positions / mcts_search_elapsed), so the live and final
+        # numbers are consistent. Overwrites a single per-run file; a wall-clock
+        # timestamp lets the reader detect a stale (run-ended) file.
+        now = perf_counter()
+        ctx.diagnostics.write_json(
+            _LIVE_PROGRESS_NAME,
+            {
+                "status": status,
+                "epoch": epoch,
+                "timestamp": wall_clock(),
+                "requested_games": requested_games,
+                "games_started": games_started,
+                "completed_games": completed_games,
+                "truncated_games": truncated_games,
+                "games_finished": completed_games + truncated_games,
+                "active_games": len(active),
+                "active_limit": active_limit,
+                "searched_positions": searched_positions,
+                "mcts_simulations": mcts_simulations,
+                "raw_samples": raw_samples_added,
+                "effective_samples": samples_added,
+                "elapsed_seconds": now - started,
+                "mcts_search_elapsed_seconds": mcts_search_elapsed,
+                "search_positions_per_second": searched_positions / max(mcts_search_elapsed, 1.0e-9),
+                "positions_per_second": searched_positions / max(now - started, 1.0e-9),
+            },
+        )
+
     with HexoRecordFile.create(record_path, engine.engine_metadata(), players) as record_file:
         while next_game_index < requested_games or active:
             while len(active) < active_limit and next_game_index < requested_games:
@@ -239,6 +280,10 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
                 active.remove(game)
                 mcts_session.discard(int(game["search_key"]))
 
+            if perf_counter() - last_live_write >= _LIVE_PROGRESS_INTERVAL_SECONDS:
+                _write_live_progress("running")
+                last_live_write = perf_counter()
+
     elapsed = perf_counter() - started
     summary = {
         "status": "completed",
@@ -265,6 +310,9 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
         "npz_writes": npz_writes,
     }
     ctx.diagnostics.write_json(f"dense_cnn.selfplay.epoch_{epoch:06d}.json", summary)
+    # Final live snapshot so the dashboard reflects the just-finished epoch's
+    # numbers (status "completed") until the next epoch's self-play begins.
+    _write_live_progress("completed")
     return summary
 
 

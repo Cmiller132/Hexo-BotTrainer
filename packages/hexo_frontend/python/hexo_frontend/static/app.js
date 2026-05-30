@@ -2349,6 +2349,7 @@ function renderHistoryOverview(histories, filtered) {
   const liveStatus = latestRunStatusForHistoryPage();
   const liveWatchdog = liveStatus && liveStatus.watchdog ? liveStatus.watchdog : {};
   const liveCalibration = liveStatus && liveStatus.calibration ? liveStatus.calibration : {};
+  const liveSelfplay = liveStatus && liveStatus.selfplay_live ? liveStatus.selfplay_live : {};
   const liveTraining = liveStatus && liveStatus.training_progress ? liveStatus.training_progress : {};
   const cards = [
     ["Stage", runStageLabel(liveStatus), "Live trainer"],
@@ -2358,7 +2359,15 @@ function renderHistoryOverview(histories, filtered) {
     ["Winners", `P0 ${p0Wins} | P1 ${p1Wins}`, `${completed} completed`],
     ["Avg Length", avgLength, "Moves per game"],
   ];
-  if (liveCalibration && liveCalibration.selfplay_pos_s !== undefined) {
+  const liveSpeed = liveSelfplay && liveSelfplay.search_pos_s !== undefined && liveSelfplay.search_pos_s !== null;
+  if (liveSpeed && liveSelfplay.live) {
+    const games = liveSelfplay.requested_games
+      ? `${liveSelfplay.games_finished || 0}/${liveSelfplay.requested_games} games`
+      : "selfplay";
+    cards.push(["Speed", formatRate(liveSelfplay.search_pos_s, "pos/s"), `● LIVE · e${liveSelfplay.epoch} · ${games}`]);
+  } else if (liveSpeed && liveSelfplay.status === "completed") {
+    cards.push(["Speed", formatRate(liveSelfplay.search_pos_s, "pos/s"), `e${liveSelfplay.epoch} selfplay (done)`]);
+  } else if (liveCalibration && liveCalibration.selfplay_pos_s !== undefined) {
     cards.push(["Speed", formatRate(liveCalibration.selfplay_pos_s, "pos/s"), liveCalibration.exact_128 ? "Exact 128 sims" : "Calibration"]);
   }
   if (liveWatchdog && (liveWatchdog.free_ram_gb !== undefined || liveWatchdog.gpu_free_gb !== undefined)) {
