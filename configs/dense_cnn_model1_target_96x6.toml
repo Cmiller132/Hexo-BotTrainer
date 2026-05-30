@@ -80,6 +80,13 @@ mcts_session_cache_max_states = 131072
 mcts_active_root_limit = 256
 max_actions = 1024
 temperature = 1.0
+# KataGo forced playouts (k=2): guarantee each materialized root child
+# ~sqrt(k * prior * root_visits) visits so Dirichlet root noise survives PUCT into
+# the visit counts. Fixes the measured opening collapse (post-MCTS visits ~1.75 eff
+# moves vs prior ~8). The exported policy target prunes the forced visits back out
+# (policy-target pruning) so the network is not taught the forced exploration; the
+# PLAYED move still samples the un-pruned visits, so self-play openings diversify.
+forced_playout_k = 2.0
 
 [model.config.evaluation]
 games_per_epoch = 64
