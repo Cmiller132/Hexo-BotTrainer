@@ -1230,29 +1230,69 @@ def _merge_epoch_result(row: dict[str, object], result: dict[str, object]) -> No
 
 
 def _selfplay_epoch_summary(payload: dict[str, object]) -> dict[str, object]:
+    # Producer: dense_cnn/selfplay.py generate_selfplay_epoch (the summary dict).
+    # Real keys: status, epoch, requested_games, games_started, completed_games,
+    # truncated_games, games_finished, raw_samples, effective_samples,
+    # searched_positions, mcts_simulations, search_visits, selfplay_npz_files,
+    # record_path, elapsed_seconds, mcts_search_elapsed_seconds,
+    # search_positions_per_second, positions_per_second, active_games,
+    # mcts_virtual_batch_size, mcts_diagnostics, npz_writes.
+    # Output key names are consumed by app.js and must stay unchanged; only the
+    # source key each is populated FROM changes.
+    completed_games = payload.get("completed_games")
+    truncated_games = payload.get("truncated_games")
+
+    # app.js reads selfplay.games; populate from games_finished, then fall back.
+    games = payload.get("games_finished")
+    if games is None:
+        if completed_games is not None or truncated_games is not None:
+            games = (completed_games or 0) + (truncated_games or 0)
+        else:
+            games = payload.get("games_started")
+
+    # app.js reads selfplay.samples_added; producer emits effective_samples.
+    samples_added = payload.get("effective_samples")
+    if samples_added is None:
+        samples_added = payload.get("raw_samples")
+
+    # No producer key for per-searched-position sims; derive when both present.
+    mcts_simulations = payload.get("mcts_simulations")
+    searched_positions = payload.get("searched_positions")
+    mcts_sims_per_searched_position: float | None = None
+    sims = _optional_float(mcts_simulations)
+    searched = _optional_float(searched_positions)
+    if sims is not None and searched is not None and searched > 0.0:
+        mcts_sims_per_searched_position = sims / searched
+
     return {
         "status": payload.get("status"),
-        "games": payload.get("games"),
-        "completed_games": payload.get("completed_games"),
-        "truncated_games": payload.get("truncated_games"),
-        "winner_counts": payload.get("winner_counts") if isinstance(payload.get("winner_counts"), dict) else None,
-        "lengths": payload.get("lengths") if isinstance(payload.get("lengths"), dict) else None,
-        "samples_added": payload.get("samples_added"),
-        "searched_positions": payload.get("searched_positions"),
-        "mcts_simulations": payload.get("mcts_simulations"),
+        "games": games,
+        "completed_games": completed_games,
+        "truncated_games": truncated_games,
+        "winner_counts": None,  # no producer key (separate worker handles display)
+        "lengths": None,  # no producer key (separate worker handles display)
+        "samples_added": samples_added,
+        "searched_positions": searched_positions,
+        "mcts_simulations": mcts_simulations,
         "search_positions_per_second": payload.get("search_positions_per_second"),
-        "mcts_sims_per_searched_position": payload.get("mcts_sims_per_searched_position"),
+        "mcts_sims_per_searched_position": mcts_sims_per_searched_position,
         "elapsed_seconds": payload.get("elapsed_seconds"),
     }
 
 
 def _training_epoch_summary(payload: dict[str, object]) -> dict[str, object]:
+    # Producer: dense_cnn/trainer.py DenseCNNTrainer.train_passes return dict.
+    # Real keys: status, epoch, passes, generic_passes_requested, steps, samples,
+    # batch_size, loss, validation, elapsed_seconds, samples_per_second,
+    # train_state. loss_components/source_summary/policy_imitation are NOT in this
+    # payload; the dense_cnn.policy_targets.epoch_*.json overlay populates them on
+    # the row afterward (see _epoch_history), so they are None here.
     return {
         "status": payload.get("status"),
         "loss": payload.get("loss"),
-        "loss_components": payload.get("loss_components") if isinstance(payload.get("loss_components"), dict) else None,
-        "source_summary": payload.get("source_summary") if isinstance(payload.get("source_summary"), dict) else None,
-        "policy_imitation": payload.get("policy_imitation") if isinstance(payload.get("policy_imitation"), dict) else None,
+        "loss_components": None,  # no producer key (overlaid from policy_targets file)
+        "source_summary": None,  # no producer key (overlaid from policy_targets file)
+        "policy_imitation": None,  # no producer key (overlaid from policy_targets file)
         "steps": payload.get("steps"),
         "samples": payload.get("samples"),
         "batch_size": payload.get("batch_size"),

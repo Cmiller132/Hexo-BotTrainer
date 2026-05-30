@@ -2068,6 +2068,22 @@ function escapeAttr(text) {
   return escapeText(text);
 }
 
+// Human-friendly stringification for raw values interpolated into the UI:
+// null/undefined/"" become an em dash rather than the literal "null"/"undefined",
+// finite numbers pass through, and objects/arrays are JSON-encoded compactly.
+function displayValue(value, empty = "—") {
+  if (value === null || value === undefined || value === "") return empty;
+  if (typeof value === "number") return Number.isFinite(value) ? String(value) : empty;
+  if (typeof value === "object") {
+    try {
+      return JSON.stringify(value);
+    } catch (error) {
+      return empty;
+    }
+  }
+  return String(value);
+}
+
 function placementStepLabel() {
   if (!state || state.phase === "opening") return "Opening";
   return state.phase === "second_stone" ? "Placement 2 of 2" : "Placement 1 of 2";
@@ -2125,14 +2141,14 @@ function renderTraining() {
 function trainingArtifactRow(runName, item) {
   const href = `/api/training/file?run=${encodeURIComponent(runName)}&path=${encodeURIComponent(item.path)}`;
   const summary = item.summary
-    ? Object.entries(item.summary).map(([key, value]) => `${key}: ${value}`).join(" | ")
-    : `${item.kind} | ${formatBytes(item.bytes)}`;
+    ? Object.entries(item.summary).map(([key, value]) => `${key}: ${displayValue(value)}`).join(" | ")
+    : `${item.kind || "file"} | ${formatBytes(item.bytes)}`;
   const preview = item.kind === "png" ? `<img src="${href}" alt="">` : "";
   const loadButton = item.loadable_history
     ? `<button class="artifact-load-btn" type="button" data-history-path="${escapeAttr(item.path)}" data-record-index="0">Load game</button>`
     : "";
   return `<div class="artifact-row">
-    <a class="artifact-link" href="${href}" target="_blank" rel="noreferrer">
+    <a class="artifact-link" href="${href}" target="_blank" rel="noreferrer" title="${escapeAttr(item.path || item.name || "")}">
       ${preview}
       <span>${escapeText(item.name)}</span>
       <small>${escapeText(summary)}</small>
@@ -2187,7 +2203,7 @@ function renderGameHistoryPage() {
 }
 
 function summaryMetric(key, value) {
-  return `<div><span>${escapeText(key)}</span><strong>${escapeText(value)}</strong></div>`;
+  return `<div><span>${escapeText(key)}</span><strong>${escapeText(displayValue(value))}</strong></div>`;
 }
 
 function historyRunsForPage() {
@@ -2329,12 +2345,35 @@ function latestRunStatusForHistoryPage() {
     .sort((a, b) => Number(b.history && b.history.latest_modified || 0) - Number(a.history && a.history.latest_modified || 0))[0] || null;
 }
 
+function humanizeStageId(stage) {
+  const raw = String(stage || "").trim();
+  if (!raw) return "Unknown";
+  const lower = raw.toLowerCase();
+  const epochMatch = lower.match(/^epoch[_-]?0*(\d+)/);
+  if (epochMatch) return `Epoch ${Number(epochMatch[1])}`;
+  if (lower.includes("write_diagnostics") || lower.includes("diagnostic")) return "Writing diagnostics";
+  if (lower.includes("calibrat")) return "Calibrating";
+  if (lower.includes("initialize")) return "Initializing";
+  if (lower.includes("load_checkpoint")) return "Loading checkpoint";
+  if (lower.includes("publish")) return "Publishing checkpoint";
+  if (lower.includes("selfplay")) return "Self-play";
+  if (lower.includes("shuffle")) return "Shuffling data";
+  if (lower.includes("evaluat")) return "Evaluating";
+  if (lower.includes("train")) return "Training";
+  // Unknown id: prettify rather than dumping the raw token.
+  return raw.replace(/[_-]+/g, " ").replace(/\b\w/g, ch => ch.toUpperCase());
+}
+
 function runStageLabel(status) {
   if (!status || typeof status !== "object") return "--";
-  const stage = status.stage || "unknown";
-  const epoch = status.current_epoch ? ` e${status.current_epoch}` : "";
-  const state = status.stage_status && status.stage_status !== "unknown" ? ` ${status.stage_status}` : "";
-  return `${stage}${epoch}${state}`;
+  const stage = humanizeStageId(status.stage || "unknown");
+  // Epoch ids already carry the epoch number; avoid "Epoch 1 · e1".
+  const epochNum = asFinite(status.current_epoch);
+  const epoch = epochNum !== null && !/^epoch/i.test(String(status.stage || "")) ? ` · Epoch ${epochNum}` : "";
+  const stageStatus = status.stage_status && status.stage_status !== "unknown"
+    ? ` · ${String(status.stage_status).replace(/[_-]+/g, " ")}`
+    : "";
+  return `${stage}${epoch}${stageStatus}`;
 }
 
 function averageHistoryLength(histories) {
@@ -2345,6 +2384,9 @@ function averageHistoryLength(histories) {
 }
 
 function asFinite(value) {
+  // Treat null/undefined/"" as missing, not as the numeric 0 that Number()
+  // would coerce them to (Number(null) === 0). A real numeric 0 still passes.
+  if (value === null || value === undefined || value === "") return null;
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
 }
@@ -2400,14 +2442,16 @@ function renderHistoryOverview(histories, filtered) {
     ["Avg Length", avgLength, "Moves per game"],
   ];
   const liveSpeed = liveSelfplay && liveSelfplay.search_pos_s !== undefined && liveSelfplay.search_pos_s !== null;
+  const liveSelfplayEpoch = asFinite(liveSelfplay && liveSelfplay.epoch);
+  const liveSelfplayEpochLabel = liveSelfplayEpoch !== null ? `e${liveSelfplayEpoch}` : "selfplay";
   if (liveSpeed && liveSelfplay.live) {
     const games = liveSelfplay.requested_games
       ? `${liveSelfplay.games_finished || 0}/${liveSelfplay.requested_games} games`
       : "selfplay";
-    cards.push(["Speed", formatRate(liveSelfplay.search_pos_s, "pos/s"), `● LIVE · e${liveSelfplay.epoch} · ${games}`]);
+    cards.push(["Speed", formatRate(liveSelfplay.search_pos_s, "pos/s"), `● LIVE · ${liveSelfplayEpochLabel} · ${games}`]);
   } else if (liveSpeed && liveSelfplay.status === "completed") {
-    cards.push(["Speed", formatRate(liveSelfplay.search_pos_s, "pos/s"), `e${liveSelfplay.epoch} selfplay (done)`]);
-  } else if (liveCalibration && liveCalibration.selfplay_pos_s !== undefined) {
+    cards.push(["Speed", formatRate(liveSelfplay.search_pos_s, "pos/s"), `${liveSelfplayEpochLabel} selfplay (done)`]);
+  } else if (liveCalibration && liveCalibration.selfplay_pos_s !== undefined && liveCalibration.selfplay_pos_s !== null) {
     cards.push(["Speed", formatRate(liveCalibration.selfplay_pos_s, "pos/s"), liveCalibration.exact_128 ? "Exact 128 sims" : "Calibration"]);
   }
   if (liveWatchdog && (liveWatchdog.free_ram_gb !== undefined || liveWatchdog.gpu_free_gb !== undefined)) {
@@ -2428,17 +2472,18 @@ function renderHistoryOverview(histories, filtered) {
 }
 
 function formatTrainingProgress(progress) {
-  const epoch = progress && progress.epoch !== undefined ? `e${progress.epoch}` : "train";
-  const pct = progress && progress.progress !== undefined ? formatPercent(progress.progress) : "--";
+  const epochNum = progress ? asFinite(progress.epoch) : null;
+  const epoch = epochNum !== null ? `e${epochNum}` : "train";
+  const pct = progress && progress.progress !== undefined && progress.progress !== null ? formatPercent(progress.progress) : "--";
   return `${epoch} ${pct}`;
 }
 
 function trainingProgressSubtext(progress) {
   if (!progress || typeof progress !== "object") return "Training progress";
-  const steps = progress.steps !== undefined && progress.total_steps !== undefined
+  const steps = asFinite(progress.steps) !== null && asFinite(progress.total_steps) !== null
     ? `${progress.steps}/${progress.total_steps} steps`
     : "steps pending";
-  const loss = progress.loss !== undefined ? `loss ${formatDecimal(progress.loss, 3)}` : String(progress.status || "training");
+  const loss = progress.loss !== undefined && progress.loss !== null ? `loss ${formatDecimal(progress.loss, 3)}` : String(progress.status || "training");
   return `${steps} | ${loss}`;
 }
 
@@ -2573,15 +2618,19 @@ function epochProgressRow(item) {
   const evaluation = item.evaluation || {};
   const d6 = item.d6 || {};
   const checkpoint = item.checkpoint || {};
-  const selfplayText = selfplay.samples_added !== undefined
-    ? `${selfplay.samples_added} samples | ${formatRate(selfplay.search_positions_per_second, "pos/s")}`
-    : "pending";
-  const trainText = training.loss !== undefined
+  const samplesAdded = asFinite(selfplay.samples_added);
+  const selfplayRate = formatRate(selfplay.search_positions_per_second, "pos/s");
+  const selfplayText = samplesAdded !== null
+    ? `${samplesAdded} samples | ${selfplayRate}`
+    : (selfplay.search_positions_per_second !== undefined && selfplay.search_positions_per_second !== null
+      ? selfplayRate
+      : "pending");
+  const trainText = (training.loss !== undefined && training.loss !== null)
     ? `loss ${formatDecimal(training.loss, 3)} | C ${formatPercent(classicalReplayFraction(training))} | P@1 ${formatPercent(policyTop1(training))}`
     : training.progress
       ? `${formatTrainingProgress({ ...training.progress, epoch: item.epoch })} | ${trainingProgressSubtext(training.progress)}`
     : "pending";
-  const evalText = evaluation.games !== undefined
+  const evalText = (evaluation.games !== undefined && evaluation.games !== null)
     ? `${Number(evaluation.wins || 0)}-${Number(evaluation.losses || 0)} | ${formatDecimal(evaluation.mean_turns, 1)} turns`
     : "pending";
   const d6Text = d6.preview_symmetries && d6.preview_symmetries.length
@@ -2623,8 +2672,8 @@ function epochProgressSummary(item) {
   const training = item.training || {};
   const evaluation = item.evaluation || {};
   const parts = [`E${item.epoch}`];
-  if (training.loss !== undefined) parts.push(`loss ${formatDecimal(training.loss, 3)}`);
-  if (evaluation.games !== undefined) parts.push(`eval ${Number(evaluation.wins || 0)}-${Number(evaluation.losses || 0)}`);
+  if (training.loss !== undefined && training.loss !== null) parts.push(`loss ${formatDecimal(training.loss, 3)}`);
+  if (evaluation.games !== undefined && evaluation.games !== null) parts.push(`eval ${Number(evaluation.wins || 0)}-${Number(evaluation.losses || 0)}`);
   if (item.status && item.status !== "completed") parts.push(item.status);
   return parts.join(" | ");
 }
@@ -2649,8 +2698,8 @@ function gameHistoryListRow(runName, item) {
   const selected = key === selectedHistoryKey;
   return `<div class="game-history-row ${selected ? "selected" : ""}" data-history-key="${escapeAttr(key)}">
     <button class="game-history-select" type="button" data-history-key="${escapeAttr(key)}">
-      <span class="history-game-title">${escapeText(item.game_id || item.path)}</span>
-      <span class="history-game-meta">${escapeText(runName || "run")} | ${escapeText(item.path || "")}</span>
+      <span class="history-game-title" title="${escapeAttr(item.game_id || item.path || "")}">${escapeText(item.game_id || item.path || "—")}</span>
+      <span class="history-game-meta" title="${escapeAttr(`${runName || "run"} | ${item.path || ""}`)}">${escapeText(runName || "run")} | ${escapeText(item.path || "—")}</span>
     </button>
     <div><strong>${escapeText(epoch)}</strong><span>${escapeText(source)} | ${escapeText(status)}</span></div>
     <div><span class="winner-pill ${winnerClass(item.winner)}">${escapeText(winner)}</span></div>
@@ -2694,7 +2743,7 @@ function gameHistoryDetailHtml(runName, item) {
       ${detailRow("Status", item.status || "unknown")}
       ${detailRow("Seed", item.seed === null || item.seed === undefined ? "--" : item.seed)}
       ${detailRow("Record", Number(item.record_index || 0))}
-      ${detailRow("Path", item.path || "")}
+      ${detailRow("Path", item.path || "—", item.path || "")}
       ${detailRow("Modified", formatHistoryDate(item.modified))}
     </div>
     <div class="history-detail-section">
@@ -2713,8 +2762,9 @@ function gameHistoryDetailHtml(runName, item) {
   </div>`;
 }
 
-function detailRow(label, value) {
-  return `<div class="detail-row"><span>${escapeText(label)}</span><strong>${escapeText(value)}</strong></div>`;
+function detailRow(label, value, titleValue) {
+  const title = titleValue ? ` title="${escapeAttr(titleValue)}"` : "";
+  return `<div class="detail-row"><span>${escapeText(label)}</span><strong${title}>${escapeText(value)}</strong></div>`;
 }
 
 function playerDetail(slot, player) {
@@ -2737,7 +2787,7 @@ function diagnosticDetailsHtml(diagnostics) {
     return `<div class="diagnostic-block">
       <div class="diagnostic-title">${escapeText(label)}</div>
       <div class="diagnostic-grid">
-        ${entries.length ? entries.map(([key, value]) => `<div><span>${escapeText(key)}</span><strong>${escapeText(value)}</strong></div>`).join("") : `<div><span>Artifact</span><strong>${escapeText(diagnostic && diagnostic.name || "attached")}</strong></div>`}
+        ${entries.length ? entries.map(([key, value]) => `<div><span>${escapeText(key)}</span><strong>${escapeText(displayValue(value))}</strong></div>`).join("") : `<div><span>Artifact</span><strong>${escapeText(diagnostic && diagnostic.name || "attached")}</strong></div>`}
       </div>
     </div>`;
   }).join("");
@@ -2759,19 +2809,19 @@ function historyDiagnosticsText(diagnostics) {
   const evalSummary = diagnostics.evaluation && diagnostics.evaluation.summary;
   if (evalSummary) {
     const parts = [];
-    if (evalSummary.games !== undefined) parts.push(`${evalSummary.games}g`);
-    if (evalSummary.wins !== undefined || evalSummary.losses !== undefined) parts.push(`${evalSummary.wins || 0}-${evalSummary.losses || 0}`);
-    if (evalSummary.mean_turns !== undefined) parts.push(`${Number(evalSummary.mean_turns).toFixed(1)}t`);
+    if (asFinite(evalSummary.games) !== null) parts.push(`${evalSummary.games}g`);
+    if (asFinite(evalSummary.wins) !== null || asFinite(evalSummary.losses) !== null) parts.push(`${evalSummary.wins || 0}-${evalSummary.losses || 0}`);
+    if (asFinite(evalSummary.mean_turns) !== null) parts.push(`${asFinite(evalSummary.mean_turns).toFixed(1)}t`);
     return parts.length ? parts.join(" ") : "Eval";
   }
   const selfplaySummary = diagnostics.selfplay && diagnostics.selfplay.summary;
   if (selfplaySummary) {
     const parts = [];
-    if (selfplaySummary.samples_added !== undefined) parts.push(`${selfplaySummary.samples_added} samples`);
-    if (selfplaySummary.games !== undefined) parts.push(`${selfplaySummary.games}g`);
-    if (selfplaySummary.lengths && selfplaySummary.lengths.mean !== undefined) parts.push(`${Number(selfplaySummary.lengths.mean).toFixed(1)}t`);
+    if (asFinite(selfplaySummary.samples_added) !== null) parts.push(`${selfplaySummary.samples_added} samples`);
+    if (asFinite(selfplaySummary.games) !== null) parts.push(`${selfplaySummary.games}g`);
+    if (selfplaySummary.lengths && asFinite(selfplaySummary.lengths.mean) !== null) parts.push(`${asFinite(selfplaySummary.lengths.mean).toFixed(1)}t`);
     if (parts.length) return parts.join(" ");
-    if (selfplaySummary.searched_positions !== undefined) return `${selfplaySummary.searched_positions} pos`;
+    if (asFinite(selfplaySummary.searched_positions) !== null) return `${selfplaySummary.searched_positions} pos`;
     return "Selfplay";
   }
   return Object.keys(diagnostics).length ? Object.keys(diagnostics).join(", ") : "None";
