@@ -41,11 +41,17 @@ class DenseCNNPlayer:
 
     def __post_init__(self) -> None:
         self.identity = PlayerIdentity(self.identity_id, label="Dense CNN")
+        # TRT is SELFPLAY-ONLY. This player drives epoch EVALUATION (a fresh
+        # player per eval game); building a TRT engine per game would cost
+        # ~64x42s/epoch. Eval is a benchmark, not training data, and TRT is
+        # strength-equivalent to torch (validated: per-decision regret ~0), so
+        # eval runs on the torch FP16 path. Bucketing (equivalence-preserving) is
+        # kept. Self-play builds TRT once/epoch (selfplay.py).
         self.inference = DenseCNNInference(
             self.model,
             device=self.trainer.device,
             amp=self.trainer.config.training.amp,
-            use_trt=self.trainer.config.performance.inference_use_tensorrt,
+            use_trt=False,
             bucket_pad_multiple=(self.trainer.config.performance.inference_bucket_pad_multiple or None),
         )
         self.mcts_session = new_mcts_session(

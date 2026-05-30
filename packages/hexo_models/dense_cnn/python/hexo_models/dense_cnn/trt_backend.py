@@ -103,10 +103,29 @@ def _export_onnx(model: nn.Module, path: Path, device: str, dtype: torch.dtype) 
     )
 
 
-def _build_engine(onnx_path: Path, max_batch: int, opt_batch: int = 128):
+_LOGGER = None
+
+
+def _trt_logger():
+    """One shared logger for the whole process. Creating a fresh trt.Logger per
+    build registers a new global logger ("logger differs from one already
+    registered" warnings) and was implicated in the intermittent build failures."""
+    global _LOGGER
+    if _LOGGER is None:
+        import tensorrt as trt
+        _LOGGER = trt.Logger(trt.Logger.WARNING)
+    return _LOGGER
+
+
+def _serialize_engine(onnx_path: Path, max_batch: int, opt_batch: int = 128) -> bytes:
+    """Build a strongly-typed engine and return its serialized bytes. Run this in
+    an ISOLATED SUBPROCESS (see build_trt_forward): repeated in-process builds
+    corrupt TRT global builder state and intermittently fail optimization-profile
+    validation (2/6 builds failed in the WSL smoke). A fresh process per build is
+    100% reliable; the parent only deserializes (read-only, reliable)."""
     import tensorrt as trt
 
-    logger = trt.Logger(trt.Logger.WARNING)
+    logger = _trt_logger()
     builder = trt.Builder(logger)
     flags = 1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED)
     network = builder.create_network(flags)
@@ -122,9 +141,30 @@ def _build_engine(onnx_path: Path, max_batch: int, opt_batch: int = 128):
     cfg.add_optimization_profile(profile)
     serialized = builder.build_serialized_network(network, cfg)
     if serialized is None:
-        raise RuntimeError("TRT engine build returned None")
-    runtime = trt.Runtime(logger)
-    return runtime.deserialize_cuda_engine(serialized)
+        raise RuntimeError("TRT build_serialized_network returned None")
+    return bytes(serialized)
+
+
+def _load_engine(plan_bytes: bytes):
+    import tensorrt as trt
+    runtime = trt.Runtime(_trt_logger())
+    engine = runtime.deserialize_cuda_engine(plan_bytes)
+    if engine is None:
+        raise RuntimeError("TRT deserialize_cuda_engine returned None")
+    return engine
+
+
+def _build_engine_subprocess(onnx_path: Path, plan_path: Path, max_batch: int) -> None:
+    """Build the engine in a fresh subprocess (isolated TRT state) -> plan_path."""
+    import subprocess
+    import sys
+    proc = subprocess.run(
+        [sys.executable, "-m", "hexo_models.dense_cnn.trt_backend",
+         "--onnx", str(onnx_path), "--out", str(plan_path), "--max-batch", str(max_batch)],
+        capture_output=True, text=True,
+    )
+    if proc.returncode != 0 or not plan_path.exists():
+        raise RuntimeError(f"TRT subprocess build failed (rc={proc.returncode}): {proc.stderr[-800:]}")
 
 
 _TRT_TO_TORCH = None
@@ -209,9 +249,12 @@ def build_trt_forward(
         export_dtype = {"fp16": torch.float16, "bf16": torch.bfloat16}[precision]
         tmp = Path(tempfile.mkdtemp(prefix=f"dense_cnn_trt_{precision}_"))
         onnx_path = tmp / f"model_{precision}.onnx"
+        plan_path = tmp / f"model_{precision}.plan"
         t0 = time.perf_counter()
         _export_onnx(model, onnx_path, device, export_dtype)
-        engine = _build_engine(onnx_path, max_batch=max_batch)
+        # Build in an isolated subprocess (reliable), then deserialize here.
+        _build_engine_subprocess(onnx_path, plan_path, max_batch)
+        engine = _load_engine(plan_path.read_bytes())
         build_s = time.perf_counter() - t0
         info["precision"] = precision
         info["build_seconds"] = build_s
@@ -264,3 +307,23 @@ def build_trt_forward(
         if verbose:
             print(f"[trt_backend] build/gate failed: {e!r} -> falling back to torch", flush=True)
         return None, info
+
+
+def _main() -> int:
+    """Subprocess engine-build worker: --onnx X --out plan --max-batch N.
+    Isolated TRT state per invocation => reliable builds."""
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--onnx", required=True)
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--max-batch", type=int, default=1024)
+    a = ap.parse_args()
+    data = _serialize_engine(Path(a.onnx), max_batch=a.max_batch)
+    Path(a.out).write_bytes(data)
+    print(f"[trt_backend.worker] built engine -> {a.out} ({len(data)} bytes)", flush=True)
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(_main())
