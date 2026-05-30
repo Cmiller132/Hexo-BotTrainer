@@ -64,11 +64,11 @@ max_actions = 1024
 temperature = 1.0
 
 [model.config.evaluation]
-games_per_epoch = 0
+games_per_epoch = 2
 sealbot_variant = "best"
 sealbot_time_limit = 0.05
 max_actions = 1024
-require_sealbot = false
+require_sealbot = true
 opening_temperature = 0.6
 opening_moves = 8
 
@@ -81,9 +81,9 @@ training_batch_candidates = [64]
 mcts_virtual_batch_candidates = [4]
 selfplay_probe_positions = 64
 probe_batches = 1
-# the adopted optimizations under test (TRT off — matches production after the
-# NaN finding; the production path is torch FP16 + bucketing + replenishment):
-inference_use_tensorrt = false
+# the adopted optimizations under test (TRT ON to validate the full WSL pipeline
+# incl. per-epoch TRT engine rebuild + SealBot eval, matching production):
+inference_use_tensorrt = true
 inference_bucket_pad_multiple = 16
 
 [run]

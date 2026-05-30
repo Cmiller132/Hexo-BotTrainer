@@ -106,6 +106,29 @@ FP16). Branch `bench/inference-backends-wsl` (HEAD f8e60e4). Run still DOWN by
 design; no training run started. NOTE for env: built SealBot `minimax_cpp` for
 WSL (`E:/SealBot/best/minimax_cpp.cpython-312-...so`) for the strength A/B harness.
 
+### 2026-05-29 ~20:0x EDT — LAUNCH ABORTED: WSL pre-flight smoke found 2 TRT blockers; run still DOWN (NOT launched)
+
+Attempted to start the real run in WSL (TRT). Pre-flight WSL smoke (optimized
+config, 2 epochs, TRT on, SealBot eval) COMPLETED and proved the full WSL pipeline
+works (selfplay→shuffle→train→checkpoint→SealBot-eval, both epochs, run.completed)
+— BUT only via torch fallback, exposing two TRT blockers, so I did NOT launch:
+ 1. **TRT build unreliable**: 2 of 6 in-process builds failed
+    (`IOptimizationProfile::isValid Err4 MIN<=OPT<=MAX` on a valid (1,128,1024)
+    profile; "logger differs from one already registered" warnings) → TRT
+    global-state corruption across repeated in-process builds → TRT engages
+    inconsistently (~33% silently fall back to torch → lose the 2.4x unpredictably).
+ 2. **Eval rebuilds TRT per game**: `player.py` builds DenseCNNInference per
+    DenseCNNPlayer = per eval game; at eval games_per_epoch=64 that's ~64x42s≈45
+    min/epoch of build overhead. Prohibitive.
+FIX NEEDED before a TRT launch: (a) TRT selfplay-ONLY (player.py/eval → torch;
+eval strength == TRT per the regret test, and eval is a benchmark not training
+data) so it's built once/epoch amortized over 512 games; (b) reliable build —
+isolate TRT state per build (del+gc, single global logger) or build-once+REFIT
+weights per epoch, or build in a subprocess. Then re-smoke + launch.
+Cheap path (TRT off: torch FP16 + bucketing + replenishment, ~36-41 pos/s > 32)
+is validated + launch-ready if an immediate non-TRT start is wanted. Branch
+bench/inference-backends-wsl. WSL supervisor written (scripts/supervise_target_96x6_wsl.sh).
+
 ### 2026-05-29 19:03 EDT — RUN STILL DOWN BY DESIGN; TRT bench agent ACTIVE (now BF16 cmp + SealBot A/B); NO ACTION
 
 **Verdict:** training run intentionally stopped (NOT a crash, NOT a stall, NOT a breaker halt).
