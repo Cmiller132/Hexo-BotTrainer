@@ -155,16 +155,29 @@ def _load_engine(plan_bytes: bytes):
 
 
 def _build_engine_subprocess(onnx_path: Path, plan_path: Path, max_batch: int) -> None:
-    """Build the engine in a fresh subprocess (isolated TRT state) -> plan_path."""
+    """Build the engine in a fresh subprocess (isolated TRT state) -> plan_path.
+
+    Invoke this module by ABSOLUTE FILE PATH (not `-m package`) so the worker
+    needs no package import path — robust to PYTHONPATH being relative or the
+    trainer having chdir'd (which broke `-m hexo_models...` in the pipeline: the
+    build path uses only torch + tensorrt + this file's own functions). Also pass
+    the parent's full sys.path as PYTHONPATH as a belt-and-suspenders.
+    """
+    import os
     import subprocess
     import sys
+    worker = str(Path(__file__).resolve())
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join(p for p in sys.path if p)}
     proc = subprocess.run(
-        [sys.executable, "-m", "hexo_models.dense_cnn.trt_backend",
+        [sys.executable, worker,
          "--onnx", str(onnx_path), "--out", str(plan_path), "--max-batch", str(max_batch)],
-        capture_output=True, text=True,
+        capture_output=True, text=True, env=env,
     )
     if proc.returncode != 0 or not plan_path.exists():
-        raise RuntimeError(f"TRT subprocess build failed (rc={proc.returncode}): {proc.stderr[-800:]}")
+        raise RuntimeError(
+            f"TRT subprocess build failed (rc={proc.returncode}) "
+            f"stderr={proc.stderr[-700:]!r} stdout={proc.stdout[-300:]!r}"
+        )
 
 
 _TRT_TO_TORCH = None
