@@ -62,6 +62,7 @@ class DenseCNNInference:
         optimize_for_inference: bool = True,
         bucket_pad_multiple: int | None = None,
         use_trt: bool | None = None,
+        trt_allow_fallback: bool | None = None,
     ) -> None:
         self.device = torch.device(device)
         if self.device.type == "cuda" and not torch.cuda.is_available():
@@ -117,25 +118,31 @@ class DenseCNNInference:
         if self.device.type == "cuda":
             self._warm_up_cuda()
 
-        # Optional TensorRT FP16 forward (config/env-gated). Built from the folded
-        # inference model's CURRENT weights, with a correctness gate vs the torch
-        # FP16 reference; on any failure we keep the torch forward (fallback).
-        # Rebuild a fresh DenseCNNInference per epoch to refresh the engine when
-        # weights change (~44 s build, amortized over a multi-minute epoch).
-        # Resolution order: env var (launch-path override) > constructor arg
-        # (config) > default (off).
+        # Optional TensorRT FP16 forward (config/env-gated). Built per-epoch from
+        # the folded inference model's CURRENT weights, correctness-gated vs torch.
+        # FAIL-LOUD by default: if use_trt and the build/gate fails, build_trt_forward
+        # RAISES (aborting __init__ -> the trainer crashes -> supervisor captures it)
+        # so a silent torch fallback can NEVER hide that TRT didn't engage. Opt into
+        # a (still loudly-logged) torch fallback via trt_allow_fallback / env
+        # HEXO_TRT_ALLOW_FALLBACK. Resolution: env > arg (config) > default.
         env_trt = os.environ.get("HEXO_TRT", "").strip()
         if env_trt:
             use_trt = env_trt in ("1", "true", "True")
         elif use_trt is None:
             use_trt = False
+        env_fb = os.environ.get("HEXO_TRT_ALLOW_FALLBACK", "").strip()
+        if env_fb:
+            trt_allow_fallback = env_fb in ("1", "true", "True")
+        elif trt_allow_fallback is None:
+            trt_allow_fallback = False
         if use_trt and self.device.type == "cuda":
             from . import trt_backend
             # sample_inputs=None -> the gate generates REAL encoded game positions
-            # (sharp P7 policy -> stable argmax); synthetic random boards give a
-            # diffuse policy whose argmax fp16 flips spuriously.
+            # (sharp P7 policy -> stable argmax). On failure this RAISES unless
+            # trt_allow_fallback (loud either way).
             self._trt_forward, self.trt_info = trt_backend.build_trt_forward(
                 self.model, max_batch=self.max_batch_size, device=str(self.device),
+                allow_torch_fallback=bool(trt_allow_fallback),
             )
 
     @torch.no_grad()

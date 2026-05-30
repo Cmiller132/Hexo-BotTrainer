@@ -56,6 +56,7 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
         max_batch_size=trainer.inference_batch_size,
         use_trt=config.performance.inference_use_tensorrt,
         bucket_pad_multiple=(config.performance.inference_bucket_pad_multiple or None),
+        trt_allow_fallback=config.performance.inference_trt_allow_torch_fallback,
     )
     active_limit = int(trainer.selfplay_batch_size)
     adaptive_vbatch = _adaptive_vbatch_enabled()

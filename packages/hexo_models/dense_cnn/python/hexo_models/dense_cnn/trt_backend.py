@@ -30,6 +30,12 @@ import torch
 from torch import nn
 
 
+class TRTAdoptError(RuntimeError):
+    """Raised when TensorRT FP16 cannot be adopted and torch fallback is disabled
+    (fail-loud default). Distinct type so build_trt_forward can re-raise its own
+    loud error while routing unexpected build exceptions through the fallback gate."""
+
+
 class _PVTuple(nn.Module):
     def __init__(self, m: nn.Module) -> None:
         super().__init__()
@@ -277,18 +283,38 @@ def build_trt_forward(
     # grossly-wrong engine (the old buffer/stream bug gave argmax 0.0).
     argmax_match_min: float = 0.90,
     precision: str = "fp16",
+    allow_torch_fallback: bool = False,
     verbose: bool = True,
 ) -> tuple[Callable | None, Mapping]:
     """Build a TRT FP16 forward from `model` (the folded inference clone) and gate
-    on correctness vs the torch FP16 reference. Returns (trt_forward_or_None, info).
+    on correctness vs the torch FP16 reference.
 
-    On any failure (no TRT, build error, correctness gate fail) returns (None, info)
-    so the caller falls back to the torch forward.
+    FAIL-LOUD by default: on ANY failure (no TRT, build error, correctness-gate
+    fail) this RAISES a prominent RuntimeError and aborts — it does NOT silently
+    revert to torch (silent fallback is exactly what hid the build bugs). Set
+    `allow_torch_fallback=True` (config `inference_trt_allow_torch_fallback` /
+    env `HEXO_TRT_ALLOW_FALLBACK=1`) to opt into returning (None, info) so the
+    caller runs torch — still logged loudly. On success returns (forward, info).
     """
     info: dict = {"adopted": False, "reason": None}
+    _BANNER = "!" * 72
+
+    def _fail(reason, exc=None):
+        info["reason"] = reason
+        if allow_torch_fallback:
+            if verbose:
+                print(f"\n{_BANNER}\n[trt_backend] TensorRT FP16 NOT ADOPTED: {reason}\n"
+                      f"[trt_backend] allow_torch_fallback=True -> running on TORCH "
+                      f"(NO ~2.4x TRT speedup this epoch).\n{_BANNER}", flush=True)
+            return None, info
+        msg = (f"\n{_BANNER}\n[trt_backend] FATAL: TensorRT FP16 NOT ADOPTED and torch fallback is "
+               f"DISABLED.\n[trt_backend] reason: {reason}\n[trt_backend] To permit a (logged) torch "
+               f"fallback set inference_trt_allow_torch_fallback=true (env HEXO_TRT_ALLOW_FALLBACK=1).\n{_BANNER}")
+        print(msg, flush=True)
+        raise TRTAdoptError(f"TensorRT FP16 NOT ADOPTED and torch fallback disabled: {reason}") from exc
+
     if not trt_available():
-        info["reason"] = "tensorrt/onnx unavailable"
-        return None, info
+        return _fail("tensorrt/onnx unavailable (is this the WSL venv?)")
     try:
         import tensorrt as trt
         export_dtype = {"fp16": torch.float16, "bf16": torch.bfloat16}[precision]
@@ -336,22 +362,18 @@ def build_trt_forward(
         gate_ok = (policy_argmax_match >= argmax_match_min
                    and value_max_err <= value_tol)
         if not gate_ok:
-            info["reason"] = (f"correctness gate FAILED (argmax_match={policy_argmax_match:.4f}, "
-                              f"value_err={value_max_err:.4f})")
-            if verbose:
-                print(f"[trt_backend] {info['reason']} -> falling back to torch", flush=True)
-            return None, info
+            return _fail(f"correctness gate FAILED (argmax_match={policy_argmax_match:.4f} < "
+                         f"{argmax_match_min}, or decoded-value_err={value_max_err:.4f} > {value_tol})")
         info["adopted"] = True
         info["reason"] = "ok"
         if verbose:
             print(f"[trt_backend] adopted TRT FP16 (build {build_s:.1f}s, "
                   f"argmax_match={policy_argmax_match:.4f}, value_err={value_max_err:.4f})", flush=True)
         return fwd.forward_policy_value, info
-    except Exception as e:  # any failure -> fallback
-        info["reason"] = f"exception: {e!r}"
-        if verbose:
-            print(f"[trt_backend] build/gate failed: {e!r} -> falling back to torch", flush=True)
-        return None, info
+    except TRTAdoptError:
+        raise  # our own loud _fail() raise -> propagate (abort)
+    except Exception as e:  # build/gate exception -> route through _fail (loud or opt-in fallback)
+        return _fail(f"exception during build/gate: {e!r}", exc=e)
 
 
 def _main() -> int:

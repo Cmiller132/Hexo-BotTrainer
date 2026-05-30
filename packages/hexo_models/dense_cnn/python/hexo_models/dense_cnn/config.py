@@ -123,6 +123,10 @@ class Model1PerformanceConfig:
     # HEXO_BUCKET_PAD_MULTIPLE override these when set (launch-path escape hatch).
     inference_use_tensorrt: bool = False
     inference_bucket_pad_multiple: int = 0
+    # Fail-loud default: if TRT is on and the build/gate fails, abort with a
+    # prominent error rather than silently running torch. Set true only to permit
+    # a (still-logged) torch fallback. (env HEXO_TRT_ALLOW_FALLBACK overrides.)
+    inference_trt_allow_torch_fallback: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -229,6 +233,7 @@ def parse_model1_config(raw: Mapping[str, Any] | None) -> Model1Config:
             probe_batches=int(performance.get("probe_batches", 1)),
             inference_use_tensorrt=bool(performance.get("inference_use_tensorrt", False)),
             inference_bucket_pad_multiple=int(performance.get("inference_bucket_pad_multiple", 0)),
+            inference_trt_allow_torch_fallback=bool(performance.get("inference_trt_allow_torch_fallback", False)),
         ),
         device=str(config.get("device", "cuda")),
         checkpoint_path=Path(str(checkpoint_path)) if checkpoint_path else None,
