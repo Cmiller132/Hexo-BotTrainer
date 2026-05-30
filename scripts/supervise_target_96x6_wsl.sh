@@ -59,10 +59,14 @@ set_resume(){ # inject [checkpoint].resume_from in-place (matches PS Set-ResumeF
   "$PY" - "$CONFIG" "$1" <<'PY'
 import sys,re,pathlib
 cfg=pathlib.Path(sys.argv[1]); rf=sys.argv[2].replace("\\","/"); t=cfg.read_text()
-if "resume_from" in t:
-    t=re.sub(r'(?m)^\s*resume_from\s*=.*$', f'resume_from = "{rf}"', t)
-else:
-    t=re.sub(r'(?m)^(\[checkpoint\]\s*)$', r'\1\nresume_from = "'+rf+'"', t, count=1)
+# Replace an EXISTING `resume_from = ...` assignment if present; otherwise insert
+# one after the [checkpoint] header. Use subn's count, not `"resume_from" in t`:
+# the config's comments mention "resume_from", so a substring check spuriously took
+# the substitute branch and matched no real assignment, silently injecting nothing
+# (every relaunch then restarted from the bootstrap instead of resuming).
+t, n = re.subn(r'(?m)^[ \t]*resume_from[ \t]*=.*$', f'resume_from = "{rf}"', t)
+if n == 0:
+    t = re.sub(r'(?m)^(\[checkpoint\][ \t]*)$', r'\1\nresume_from = "'+rf+'"', t, count=1)
 cfg.write_text(t)
 PY
 }
