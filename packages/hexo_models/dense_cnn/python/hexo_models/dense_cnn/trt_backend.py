@@ -118,6 +118,13 @@ def _trt_logger():
 
 
 def _serialize_engine(onnx_path: Path, max_batch: int, opt_batch: int = 128) -> bytes:
+    # Clamp so 1 <= min <= opt <= max ALWAYS holds. The hardcoded opt=128 exceeded
+    # max_batch when max_batch was small (e.g. the trainer passed a small
+    # inference_batch_size) -> profile rejected ("MIN<=OPT<=MAX") -> build failed.
+    # This was the real root cause of the in-pipeline build failures (standalone
+    # tests used max_batch=1024, so opt=128<=1024 was valid and masked it).
+    max_batch = max(1, int(max_batch))
+    opt_batch = max(1, min(int(opt_batch), max_batch))
     """Build a strongly-typed engine and return its serialized bytes. Run this in
     an ISOLATED SUBPROCESS (see build_trt_forward): repeated in-process builds
     corrupt TRT global builder state and intermittently fail optimization-profile
@@ -134,10 +141,35 @@ def _serialize_engine(onnx_path: Path, max_batch: int, opt_batch: int = 128) -> 
         if not parser.parse(f.read()):
             errs = "; ".join(str(parser.get_error(i)) for i in range(parser.num_errors))
             raise RuntimeError(f"ONNX parse failed: {errs}")
+    n_in_diag = network.num_inputs
+    for i in range(n_in_diag):
+        t = network.get_input(i)
+        try:
+            is_shape = t.is_shape_tensor
+        except Exception:
+            is_shape = "?"
+        print(f"[trt_backend.worker] input[{i}] name={t.name!r} shape={list(t.shape)} "
+              f"dtype={t.dtype} is_shape_tensor={is_shape}", flush=True)
     cfg = builder.create_builder_config()
     cfg.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 4 << 30)
     profile = builder.create_optimization_profile()
-    profile.set_shape("input", (1, 13, 41, 41), (opt_batch, 13, 41, 41), (max_batch, 13, 41, 41))
+    # Build the profile from the network's ACTUAL inputs (name + shape), not a
+    # hardcoded "input"/(B,13,41,41). The trainer-context ONNX export can name the
+    # input differently or shape it subtly, which made a hardcoded profile fail
+    # isValid in-pipeline (worked standalone). For every input with a dynamic
+    # (-1) dim — only the batch dim here — set min/opt/max = 1/opt/max on the
+    # dynamic dims and keep static dims as-is.
+    n_in = network.num_inputs
+    for i in range(n_in):
+        t = network.get_input(i)
+        shape = list(t.shape)
+        if not any(d < 0 for d in shape):
+            continue  # static input: no profile needed
+        def _with(b):
+            return tuple(b if d < 0 else d for d in shape)
+        profile.set_shape(t.name, _with(1), _with(opt_batch), _with(max_batch))
+        print(f"[trt_backend.worker] profile {t.name}: shape={shape} -> "
+              f"min={_with(1)} opt={_with(opt_batch)} max={_with(max_batch)}", flush=True)
     cfg.add_optimization_profile(profile)
     serialized = builder.build_serialized_network(network, cfg)
     if serialized is None:
@@ -176,7 +208,7 @@ def _build_engine_subprocess(onnx_path: Path, plan_path: Path, max_batch: int) -
     if proc.returncode != 0 or not plan_path.exists():
         raise RuntimeError(
             f"TRT subprocess build failed (rc={proc.returncode}) "
-            f"stderr={proc.stderr[-700:]!r} stdout={proc.stdout[-300:]!r}"
+            f"stdout={proc.stdout[-1200:]!r} stderr={proc.stderr[-1200:]!r}"
         )
 
 
