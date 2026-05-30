@@ -115,6 +115,7 @@ def test_mcts_session_search_forwards_slim_signature(monkeypatch: Any) -> None:
             widening_policy_mass: float | None,
             widening_max_children: int | None,
             widening_min_children: int | None,
+            forced_playout_k: float | None,
         ) -> tuple[dict[str, Any], ...]:
             calls["args"] = {
                 "game_keys": game_keys,
@@ -134,6 +135,7 @@ def test_mcts_session_search_forwards_slim_signature(monkeypatch: Any) -> None:
                 "widening_policy_mass": widening_policy_mass,
                 "widening_max_children": widening_max_children,
                 "widening_min_children": widening_min_children,
+                "forced_playout_k": forced_playout_k,
             }
             return (
                 {
@@ -187,6 +189,7 @@ def test_mcts_session_search_forwards_slim_signature(monkeypatch: Any) -> None:
         "widening_policy_mass": None,
         "widening_max_children": None,
         "widening_min_children": None,
+        "forced_playout_k": None,
     }
     assert payloads[0]["action_id"] == 7
 

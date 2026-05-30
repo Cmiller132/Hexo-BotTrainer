@@ -82,7 +82,7 @@ impl Model1MctsSession {
         self.searches.len()
     }
 
-    #[pyo3(signature = (game_keys, states, visits, c_puct, temperature, seed, evaluator, virtual_batch_size=None, active_root_limit=None, root_dirichlet_total_alpha=None, root_dirichlet_noise_fraction=None, root_policy_temperature=None, fpu_reduction=None, virtual_loss=None, widening_policy_mass=None, widening_max_children=None, widening_min_children=None))]
+    #[pyo3(signature = (game_keys, states, visits, c_puct, temperature, seed, evaluator, virtual_batch_size=None, active_root_limit=None, root_dirichlet_total_alpha=None, root_dirichlet_noise_fraction=None, root_policy_temperature=None, fpu_reduction=None, virtual_loss=None, widening_policy_mass=None, widening_max_children=None, widening_min_children=None, forced_playout_k=None))]
     fn search(
         &mut self,
         py: Python<'_>,
@@ -103,6 +103,7 @@ impl Model1MctsSession {
         widening_policy_mass: Option<f32>,
         widening_max_children: Option<u32>,
         widening_min_children: Option<u32>,
+        forced_playout_k: Option<f32>,
     ) -> PyResult<Py<PyAny>> {
         // Validate true native-search boundaries here. The Python wrapper is a
         // transport layer and intentionally does not duplicate these checks.
@@ -140,6 +141,8 @@ impl Model1MctsSession {
             validate_positive_f32("root_policy_temperature", root_policy_temperature.unwrap_or(1.0))?;
         let fpu_reduction = validate_nonnegative_f32("fpu_reduction", fpu_reduction.unwrap_or(0.20))?;
         let virtual_loss = validate_nonnegative_f32("virtual_loss", virtual_loss.unwrap_or(1.0))?;
+        let forced_playout_k =
+            validate_nonnegative_f32("forced_playout_k", forced_playout_k.unwrap_or(0.0))?;
         let root_noise_config =
             root_noise_config(root_dirichlet_total_alpha, root_dirichlet_noise_fraction)?;
 
@@ -175,6 +178,7 @@ impl Model1MctsSession {
             if let Some(mut search) = self.searches.remove(game_key) {
                 if search.root_hash == root_hash {
                     search.set_additional_visits(target_visits);
+                    search.set_forced_playout_k(forced_playout_k);
                     if let Some(noise) = root_noise(root_noise_config, seed, index) {
                         search.apply_root_dirichlet_noise(noise);
                     }
@@ -210,6 +214,7 @@ impl Model1MctsSession {
                     root_policy_temperature,
                     root_noise(root_noise_config, seed, index),
                     widening,
+                    forced_playout_k,
                 )?);
             }
         }
@@ -276,6 +281,8 @@ impl Model1MctsSession {
             temperature,
             seed,
             Some(&baselines),
+            c_puct,
+            forced_playout_k,
         )?;
 
         for ((game_key, mut search), selected) in game_keys
@@ -545,6 +552,8 @@ fn build_search_result_payloads(
     temperature: f32,
     seed: u64,
     baselines: Option<&[HashMap<PackedCoord, u32>]>,
+    c_puct: f32,
+    forced_playout_k: f32,
 ) -> PyResult<Py<PyAny>> {
     // The Python wrapper expects byte-backed policies. This avoids allocating a
     // Python tuple for every legal move while still supporting lazy iteration.
@@ -553,7 +562,19 @@ fn build_search_result_payloads(
         let result = PyDict::new(py);
         let root = search.root();
         let baseline = baselines.and_then(|items| items.get(index));
+        // RAW visit policy: drives the played move (kept identical to the action
+        // used to advance the native root in `run`, so play stays diverse) and the
+        // reported visit total.
         let (policy_action_ids, policy_weights, policy_total) = visit_policy(root, baseline);
+        // EXPORTED policy = training target: with forced playouts on, prune the
+        // forced visits back out (KataGo policy-target pruning) so the network is
+        // not taught to like the artificially-explored moves. With k==0 this is a
+        // byte-identical copy of the raw policy.
+        let (export_action_ids, export_weights) = if forced_playout_k > 0.0 {
+            pruned_visit_policy(root, baseline, forced_playout_k, c_puct)
+        } else {
+            (policy_action_ids.clone(), policy_weights.clone())
+        };
         let (root_prior_action_ids, root_prior_weights) = root_prior_policy(root);
         let selected = select_action_from_policy(
             &policy_action_ids,
@@ -570,20 +591,20 @@ fn build_search_result_payloads(
                 "cumulative_visit_policy"
             },
         )?;
-        let action_byte_len = policy_action_ids.len() * std::mem::size_of::<u32>();
-        let weight_byte_len = policy_weights.len() * std::mem::size_of::<f32>();
+        let action_byte_len = export_action_ids.len() * std::mem::size_of::<u32>();
+        let weight_byte_len = export_weights.len() * std::mem::size_of::<f32>();
         let action_bytes = unsafe {
-            std::slice::from_raw_parts(policy_action_ids.as_ptr() as *const u8, action_byte_len)
+            std::slice::from_raw_parts(export_action_ids.as_ptr() as *const u8, action_byte_len)
         };
         let weight_bytes = unsafe {
-            std::slice::from_raw_parts(policy_weights.as_ptr() as *const u8, weight_byte_len)
+            std::slice::from_raw_parts(export_weights.as_ptr() as *const u8, weight_byte_len)
         };
         result.set_item(
             "visit_policy_action_ids_bytes",
             PyBytes::new(py, action_bytes),
         )?;
         result.set_item("visit_policy_weights_bytes", PyBytes::new(py, weight_bytes))?;
-        result.set_item("visit_policy_count", policy_action_ids.len())?;
+        result.set_item("visit_policy_count", export_action_ids.len())?;
         let prior_action_byte_len = root_prior_action_ids.len() * std::mem::size_of::<u32>();
         let prior_weight_byte_len = root_prior_weights.len() * std::mem::size_of::<f32>();
         let prior_action_bytes = unsafe {
@@ -795,6 +816,128 @@ fn edge_delta_visits(edge: &RustEdge, baseline: Option<&HashMap<PackedCoord, u32
     edge.visits.saturating_sub(before)
 }
 
+/// KataGo policy-target pruning. Starts from the raw per-edge DELTA visits (the
+/// visits this search call added) and subtracts each non-best root child's forced
+/// playouts back out, so the exported TRAINING target reflects what PUCT would
+/// have chosen on its own — not the visits forced purely to keep root noise alive.
+/// For every child except the most-visited one, remove up to
+/// `n_forced = floor(sqrt(k * prior * root_visits))` visits, stopping early if a
+/// further removal would raise that child's PUCT selection value above the
+/// most-visited child's (meaning PUCT genuinely preferred it, so the visit is
+/// real). Children pruned to zero drop out of the target. The PLAYED move is
+/// chosen from the un-pruned policy elsewhere, so play stays diverse.
+fn pruned_visit_policy(
+    root: &RustNode,
+    baseline: Option<&HashMap<PackedCoord, u32>>,
+    forced_playout_k: f32,
+    c_puct: f32,
+) -> (Vec<PackedCoord>, Vec<f32>) {
+    let edges = &root.edges;
+    let deltas: Vec<u32> = edges
+        .iter()
+        .map(|edge| edge_delta_visits(edge, baseline))
+        .collect();
+    let priors: Vec<f32> = edges.iter().map(|edge| edge.prior).collect();
+    let cumulative: Vec<u32> = edges.iter().map(|edge| edge.visits).collect();
+    let values: Vec<f32> = edges.iter().map(|edge| edge.value()).collect();
+    let pruned = prune_forced_delta_counts(
+        &deltas,
+        &priors,
+        &cumulative,
+        &values,
+        root.visits,
+        forced_playout_k,
+        c_puct,
+    );
+    let total: u32 = pruned.iter().sum();
+    if total == 0 {
+        // Defensive: pruning never removes the most-visited child, so this only
+        // triggers when no visits were added this call. Fall back to raw policy.
+        let (ids, weights, _total) = visit_policy(root, baseline);
+        return (ids, weights);
+    }
+    let mut out_ids = Vec::with_capacity(edges.len());
+    let mut weights = Vec::with_capacity(edges.len());
+    for (index, edge) in edges.iter().enumerate() {
+        if pruned[index] == 0 {
+            continue;
+        }
+        out_ids.push(edge.action_id);
+        weights.push(pruned[index] as f32 / total as f32);
+    }
+    (out_ids, weights)
+}
+
+/// Pure core of policy-target pruning (no tree types, so it is unit-testable).
+/// Returns the pruned per-child DELTA visit counts. The most-visited child (ties
+/// -> lower action id) is never pruned; for each other child remove up to
+/// `floor(sqrt(k * prior * root_visits))` visits, stopping when a further removal
+/// would lift that child's PUCT value above the most-visited child's.
+fn prune_forced_delta_counts(
+    deltas: &[u32],
+    priors: &[f32],
+    cumulative: &[u32],
+    values: &[f32],
+    root_visits: u32,
+    forced_playout_k: f32,
+    c_puct: f32,
+) -> Vec<u32> {
+    let mut pruned = deltas.to_vec();
+    if forced_playout_k <= 0.0 {
+        return pruned;
+    }
+    // Reference child = most visits added this call; ties resolve to the lower
+    // index (we scan ascending and only replace on a strictly greater delta).
+    let mut best_idx: Option<usize> = None;
+    for index in 0..deltas.len() {
+        if deltas[index] == 0 {
+            continue;
+        }
+        best_idx = match best_idx {
+            None => Some(index),
+            Some(current) => {
+                if deltas[index] > deltas[current] {
+                    Some(index)
+                } else {
+                    Some(current)
+                }
+            }
+        };
+    }
+    let Some(best_idx) = best_idx else {
+        return pruned;
+    };
+    let root_n = root_visits.max(1) as f32;
+    let explore = c_puct * root_n.sqrt();
+    let u_best = values[best_idx] + priors[best_idx] * explore / (1.0 + cumulative[best_idx] as f32);
+    for index in 0..deltas.len() {
+        if index == best_idx || pruned[index] == 0 {
+            continue;
+        }
+        if !(priors[index].is_finite() && priors[index] > 0.0) {
+            continue;
+        }
+        let n_forced = (forced_playout_k * priors[index] * root_n).sqrt().floor() as u32;
+        if n_forced == 0 {
+            continue;
+        }
+        let q = values[index];
+        let mut removed = 0u32;
+        while removed < n_forced && pruned[index] > 0 {
+            // Reduce the child's CUMULATIVE visit count for the PUCT test (Q held
+            // fixed). `pruned[index] > 0` keeps the reduced count >= baseline.
+            let reduced = cumulative[index].saturating_sub(removed + 1);
+            let u = q + priors[index] * explore / (1.0 + reduced as f32);
+            if u > u_best {
+                break; // PUCT would genuinely have made this visit; keep it.
+            }
+            removed += 1;
+            pruned[index] -= 1;
+        }
+    }
+    pruned
+}
+
 fn select_action_from_policy(
     action_ids: &[PackedCoord],
     weights: &[f32],
@@ -990,4 +1133,65 @@ fn build_batch_diagnostics<'py>(
 pub fn register_pybridge(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<Model1MctsSession>()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod forced_playout_tests {
+    use super::prune_forced_delta_counts;
+
+    const K: f32 = 2.0;
+    const CPUCT: f32 = 1.5;
+
+    #[test]
+    fn k_zero_is_identity() {
+        let deltas = [80u32, 10, 3];
+        let priors = [0.6f32, 0.05, 0.02];
+        let cumulative = [80u32, 10, 3];
+        let values = [0.5f32, 0.1, -0.2];
+        let pruned = prune_forced_delta_counts(&deltas, &priors, &cumulative, &values, 100, 0.0, CPUCT);
+        assert_eq!(pruned, deltas.to_vec(), "k=0 must not change any count");
+    }
+
+    #[test]
+    fn removes_forced_tail_keeps_best() {
+        // best = idx 0 (most delta). u_best = 0.5 + 0.6*1.5*sqrt(100)/(1+80) = 0.6111.
+        // child1 prior .05: n_forced=floor(sqrt(2*.05*100))=3, all 3 removable (U stays < u_best) -> 10-3=7.
+        // child2 prior .02: n_forced=floor(sqrt(2*.02*100))=2, both removable -> 3-2=1.
+        let deltas = [80u32, 10, 3];
+        let priors = [0.6f32, 0.05, 0.02];
+        let cumulative = [80u32, 10, 3];
+        let values = [0.5f32, 0.1, -0.2];
+        let pruned = prune_forced_delta_counts(&deltas, &priors, &cumulative, &values, 100, K, CPUCT);
+        assert_eq!(pruned, vec![80u32, 7, 1]);
+        assert_eq!(pruned[0], 80, "most-visited child is never pruned");
+        let raw_tail: u32 = deltas[1..].iter().sum();
+        let pruned_tail: u32 = pruned[1..].iter().sum();
+        assert!(pruned_tail < raw_tail, "forced tail visits must shrink");
+    }
+
+    #[test]
+    fn keeps_puct_preferred_high_value_child() {
+        // child1 has high Q (0.7) and few visits: PUCT genuinely prefers it, so even
+        // though it is not the most-visited, its visits must NOT be pruned away.
+        // u_best (idx0) = 0.4 + 0.5*1.5*10/(1+90)=0.4824. child1 reduced-by-1 U
+        // = 0.7 + 0.3*15/(1+19)=0.925 > u_best -> stop immediately, remove 0.
+        let deltas = [90u32, 20];
+        let priors = [0.5f32, 0.3];
+        let cumulative = [90u32, 20];
+        let values = [0.4f32, 0.7];
+        let pruned = prune_forced_delta_counts(&deltas, &priors, &cumulative, &values, 100, K, CPUCT);
+        assert_eq!(pruned, vec![90u32, 20], "a PUCT-preferred child keeps its visits");
+    }
+
+    #[test]
+    fn never_prunes_below_baseline_or_to_negative() {
+        // delta < cumulative (reused root): only the delta portion is prunable.
+        let deltas = [50u32, 4];           // child1 added 4 this call (cumulative 30)
+        let priors = [0.7f32, 0.05];
+        let cumulative = [200u32, 30];
+        let values = [0.5f32, 0.0];
+        let pruned = prune_forced_delta_counts(&deltas, &priors, &cumulative, &values, 230, K, CPUCT);
+        assert!(pruned[1] <= 4, "cannot remove more than the delta visits");
+        assert_eq!(pruned[0], 50, "best untouched");
+    }
 }

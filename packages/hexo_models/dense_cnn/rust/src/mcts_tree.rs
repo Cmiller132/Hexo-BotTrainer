@@ -228,6 +228,10 @@ pub(crate) struct RustSearch {
     pub(crate) completed_visits: u32,
     fpu_reduction: f32,
     widening: Widening,
+    /// KataGo forced-playout strength `k` (0 = disabled). Guarantees each
+    /// materialized ROOT child at least `sqrt(k * prior * root_visits)` visits so
+    /// Dirichlet root noise survives PUCT exploitation into the visit counts.
+    forced_playout_k: f32,
     active_edge_count: usize,
     max_active_edges_per_node: usize,
 }
@@ -260,6 +264,7 @@ impl RustSearch {
         root_policy_temperature: f32,
         root_noise: Option<RootDirichletNoise>,
         widening: Widening,
+        forced_playout_k: f32,
     ) -> PyResult<Self> {
         // The root node starts with priors staged but no active edges. Edges are
         // materialized lazily by `select_or_materialize_edge` according to PUCT
@@ -284,9 +289,16 @@ impl RustSearch {
             completed_visits: 0,
             fpu_reduction,
             widening,
+            forced_playout_k,
             active_edge_count: 0,
             max_active_edges_per_node: 0,
         })
+    }
+
+    /// Set the forced-playout strength for a reused search (it changes only if the
+    /// caller passes a different value across calls; default 0 disables forcing).
+    pub(crate) fn set_forced_playout_k(&mut self, k: f32) {
+        self.forced_playout_k = k;
     }
 
     /// Promote a reused (interior, `Shared`) root to an owned, mutable candidate
@@ -517,7 +529,51 @@ impl RustSearch {
             }
         }
 
+        // Forced playouts (KataGo), ROOT only: once widening has not materialized a
+        // new candidate this selection (so the policy nucleus still fills by prior
+        // first), guarantee each materialized root child at least
+        // `n_forced = sqrt(k * prior * root_visits)` visits. This keeps the
+        // Dirichlet root noise alive in the visit counts instead of being starved
+        // by PUCT exploitation, which is what diversifies self-play openings.
+        if node_id == 0 && self.forced_playout_k > 0.0 {
+            if let Some(forced) = self.forced_root_edge() {
+                return Some(forced);
+            }
+        }
+
         best.map(|item| item.0)
+    }
+
+    /// Return a root edge that is below its forced-playout quota, choosing the one
+    /// with the largest visit deficit (ties resolve to the lower edge index for
+    /// determinism). `None` if every materialized root child already meets quota.
+    fn forced_root_edge(&self) -> Option<usize> {
+        let root = &self.nodes[0];
+        let root_visits = root.visits.max(1) as f32;
+        let k = self.forced_playout_k;
+        let mut best: Option<(usize, f32)> = None;
+        for (index, edge) in root.edges.iter().enumerate() {
+            // Skip edges another virtual-batch leaf is already waiting on, and
+            // ignore non-positive priors (no meaningful child to force).
+            if edge.pending > 0 && edge.child.is_none() {
+                continue;
+            }
+            if !(edge.prior.is_finite() && edge.prior > 0.0) {
+                continue;
+            }
+            let n_forced = (k * edge.prior * root_visits).sqrt();
+            let deficit = n_forced - edge.visits as f32;
+            if deficit > 0.0 {
+                let replace = match best {
+                    Some((_, best_deficit)) => deficit > best_deficit,
+                    None => true,
+                };
+                if replace {
+                    best = Some((index, deficit));
+                }
+            }
+        }
+        best.map(|(index, _)| index)
     }
 
     pub(crate) fn apply_virtual_visit(&mut self, path: &[(usize, usize)], virtual_loss: f32) {

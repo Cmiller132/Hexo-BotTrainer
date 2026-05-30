@@ -77,6 +77,11 @@ class Model1SelfPlayConfig:
     mcts_active_root_limit: int = 1024
     max_actions: int = 1024
     temperature: float = 1.0
+    # KataGo forced-playout strength (0 disables). Guarantees each materialized
+    # root child ~sqrt(k * prior * root_visits) visits so Dirichlet root noise
+    # survives PUCT into the visit counts (self-play opening diversity); the
+    # exported policy target prunes the forced visits back out. k=2 is KataGo's.
+    forced_playout_k: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,6 +216,7 @@ def parse_model1_config(raw: Mapping[str, Any] | None) -> Model1Config:
             mcts_active_root_limit=int(selfplay.get("mcts_active_root_limit", 1024)),
             max_actions=int(selfplay.get("max_actions", 1024)),
             temperature=float(selfplay.get("temperature", 1.0)),
+            forced_playout_k=float(selfplay.get("forced_playout_k", 0.0)),
         ),
         evaluation=Model1EvalConfig(
             games_per_epoch=int(evaluation.get("games_per_epoch", 64)),

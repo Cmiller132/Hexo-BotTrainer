@@ -60,6 +60,7 @@ def model1_mcts_session_search(
     widening_policy_mass: float | None = None,
     widening_max_children: int | None = None,
     widening_min_children: int | None = None,
+    forced_playout_k: float | None = None,
 ) -> tuple[Mapping[str, Any], ...]:
     """Search through a native MCTS session, preserving chosen subtrees.
 
@@ -87,6 +88,7 @@ def model1_mcts_session_search(
             widening_policy_mass,
             widening_max_children,
             widening_min_children,
+            forced_playout_k,
         )
     )
 

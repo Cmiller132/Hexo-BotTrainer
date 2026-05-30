@@ -191,6 +191,7 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
                     widening_policy_mass=selfplay.widening_policy_mass,
                     widening_max_children=selfplay.widening_max_children,
                     widening_min_children=selfplay.widening_min_children,
+                    forced_playout_k=selfplay.forced_playout_k,
                 )
                 mcts_search_elapsed += perf_counter() - search_started
                 if len(searches) != len(playable):
