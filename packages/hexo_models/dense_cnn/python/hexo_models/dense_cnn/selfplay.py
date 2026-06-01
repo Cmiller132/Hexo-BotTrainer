@@ -37,6 +37,60 @@ _LIVE_PROGRESS_INTERVAL_SECONDS = 2.0
 _LIVE_PROGRESS_NAME = "dense_cnn.selfplay.live.json"
 
 
+def _move_temperature(
+    move_index: int,
+    *,
+    initial: float,
+    final: float,
+    decay_moves: int,
+    schedule: tuple[tuple[int, float], ...] = (),
+    floor: float = 0.0,
+) -> float:
+    """Temperature for the played move at ply `move_index`.
+
+    If `schedule` (a tuple of ``(move, temperature)`` anchors) is given it takes
+    precedence: piecewise-linear interpolation between anchors, the first anchor's
+    value before it, and the final segment's slope continued past the last anchor
+    down to `floor` (then held). Otherwise: linear decay from `initial` (ply 0) to
+    `final` (ply >= `decay_moves`), held flat afterwards (`decay_moves <= 0` keeps
+    `initial`). Either way the opening explores and the endgame sharpens.
+    """
+
+    if schedule:
+        return _scheduled_temperature(move_index, schedule, floor)
+    if decay_moves <= 0:
+        return initial
+    fraction = min(move_index, decay_moves) / decay_moves
+    return initial + (final - initial) * fraction
+
+
+def _scheduled_temperature(
+    move_index: int, schedule: tuple[tuple[int, float], ...], floor: float
+) -> float:
+    """Piecewise-linear temperature from ``(move, temperature)`` anchors.
+
+    Held flat at the first anchor before it; linearly interpolated between
+    anchors; past the last anchor the final segment's slope continues down to
+    `floor`, then holds. Anchors are assumed sorted with unique ascending moves
+    (enforced by ``config._parse_temperature_schedule``).
+    """
+
+    first_move, first_temp = schedule[0]
+    if move_index <= first_move:
+        return first_temp
+    for index in range(1, len(schedule)):
+        m0, t0 = schedule[index - 1]
+        m1, t1 = schedule[index]
+        if move_index <= m1:
+            return t0 + (t1 - t0) * (move_index - m0) / (m1 - m0)
+    if len(schedule) >= 2:
+        m0, t0 = schedule[-2]
+        m1, t1 = schedule[-1]
+        slope = (t1 - t0) / (m1 - m0) if m1 != m0 else 0.0
+        return max(floor, t1 + slope * (move_index - m1))
+    return max(floor, schedule[-1][1])
+
+
 def _adaptive_vbatch_enabled() -> bool:
     # Env-gated adaptive virtual_batch_size: hold the per-round leaf budget
     # constant as game concurrency drains (keeps the GPU fed in the tail).
@@ -169,6 +223,20 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
                         trainer.mcts_virtual_batch_size,
                         min(int(selfplay.search_visits), -(-budget // len(playable))),
                     )
+                # Per-move temperature decay: each playable game is at its own ply
+                # (len(actions)), so the played-move temperature is resolved per
+                # game and passed as a vector aligned with the playable order.
+                move_temperatures = [
+                    _move_temperature(
+                        len(game["actions"]),
+                        initial=selfplay.temperature,
+                        final=selfplay.final_temperature,
+                        decay_moves=selfplay.temperature_decay_moves,
+                        schedule=selfplay.temperature_schedule,
+                        floor=selfplay.temperature_floor,
+                    )
+                    for game in playable
+                ]
                 searches = mcts_session.run(
                     [game["search_key"] for game in playable],
                     [game["state"] for game in playable],
@@ -192,6 +260,7 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
                     widening_max_children=selfplay.widening_max_children,
                     widening_min_children=selfplay.widening_min_children,
                     forced_playout_k=selfplay.forced_playout_k,
+                    move_temperatures=move_temperatures,
                 )
                 mcts_search_elapsed += perf_counter() - search_started
                 if len(searches) != len(playable):

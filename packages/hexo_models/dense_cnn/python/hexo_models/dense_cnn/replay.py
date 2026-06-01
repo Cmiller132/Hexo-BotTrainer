@@ -11,14 +11,11 @@ from typing import Any, Mapping, Sequence
 import hashlib
 import json
 import shutil
-import zipfile
 
 import numpy as np
-import torch
-from numpy.lib import format as np_format
 
-from .constants import BOARD_SIZE, INPUT_CHANNELS
-from .samples import CURRENT_TARGET_SCHEMA_VERSION, Model1SampleData, expand_sample, stack_expanded
+from . import compact_io
+from .samples import CURRENT_TARGET_SCHEMA_VERSION, Model1SampleData
 
 INPUT_KEY = "inputNCHW"
 POLICY_KEY = "policyTargetsNCHW"
@@ -219,12 +216,11 @@ def write_selfplay_npz(
     game_id: str,
     short_term_value_horizons: Sequence[int],
 ) -> DenseSelfplayWriteResult:
-    """Write one self-play game shard as dense training rows."""
+    """Write one self-play game shard as compact rows (expanded at train read)."""
 
     path.parent.mkdir(parents=True, exist_ok=True)
     sidecar_path = sidecar_for_npz(path)
-    arrays = _samples_to_arrays(samples, short_term_value_horizons=short_term_value_horizons)
-    np.savez_compressed(path, **arrays)
+    compact_io.write_compact_shard(path, samples, short_term_value_horizons=short_term_value_horizons)
     policy_surprises = [float(sample.policy_surprise) for sample in samples]
     frequency_weights = [float(sample.frequency_weight) for sample in samples]
     sidecar = {
@@ -319,47 +315,37 @@ def build_katago_shuffle(
 
     generation = f"{time_ns():019d}-epoch_{int(epoch):06d}"
     shuffled_root.mkdir(parents=True, exist_ok=True)
-    scratch_dir.mkdir(parents=True, exist_ok=True)
     tmp_dir = shuffled_root / f"{generation}.tmp"
     shuffle_dir = shuffled_root / generation
-    scratch_root = scratch_dir / generation
     if tmp_dir.exists():
         shutil.rmtree(tmp_dir)
-    if scratch_root.exists():
-        shutil.rmtree(scratch_root)
     tmp_dir.mkdir(parents=True, exist_ok=False)
-    scratch_root.mkdir(parents=True, exist_ok=False)
 
     rng = np.random.default_rng(int(seed))
     window_start = max(0, int(total_rows - used_rows))
     try:
-        train = _build_split_outputs(
+        train = _build_compact_split(
             split="train",
             infos=train_infos,
             output_root=tmp_dir,
-            scratch_root=scratch_root,
             keep_prob=keep_prob,
             rng=rng,
             approx_rows_per_out_file=approx_rows_per_out_file,
             batch_size=batch_size,
-            worker_group_size=worker_group_size,
         )
-        val = _build_split_outputs(
+        val = _build_compact_split(
             split="val",
             infos=val_infos,
             output_root=tmp_dir,
-            scratch_root=scratch_root,
             keep_prob=keep_prob,
             rng=rng,
             approx_rows_per_out_file=approx_rows_per_out_file,
             batch_size=batch_size,
-            worker_group_size=worker_group_size,
         ) if validation_fraction > 0.0 else None
 
         if train.output_rows <= 0:
             return _cleanup_skipped_shuffle(
                 tmp_dir=tmp_dir,
-                scratch_root=scratch_root,
                 total_rows=total_rows,
                 desired_rows=desired_rows,
                 used_rows=used_rows,
@@ -437,8 +423,8 @@ def build_katago_shuffle(
             shutil.rmtree(shuffle_dir)
         tmp_dir.rename(shuffle_dir)
     finally:
-        if scratch_root.exists():
-            shutil.rmtree(scratch_root)
+        if tmp_dir.exists():
+            shutil.rmtree(tmp_dir)
 
     train_files = tuple(shuffle_dir / path.relative_to(tmp_dir) for path in train.output_files)
     val_files = (
@@ -526,8 +512,7 @@ def npz_row_count(path: Path) -> int:
             return int(data.get("num_rows", data.get("effective_rows", 0)))
         except (OSError, TypeError, ValueError, json.JSONDecodeError):
             pass
-    shape = _npz_array_shape(path, INPUT_KEY)
-    return int(shape[0])
+    return compact_io.compact_row_count(path)
 
 
 def sidecar_for_npz(path: Path) -> Path:
@@ -547,84 +532,6 @@ def compute_katago_window_rows(
     unscaled = power_law_x ** taper_window_exponent - offset ** taper_window_exponent
     scaled = unscaled / (taper_window_exponent * (offset ** (taper_window_exponent - 1.0)))
     return int(scaled * expand_window_per_row + float(min_rows))
-
-
-def _samples_to_arrays(
-    samples: Sequence[Model1SampleData],
-    *,
-    short_term_value_horizons: Sequence[int],
-) -> dict[str, np.ndarray]:
-    expanded = []
-    horizons = tuple(int(horizon) for horizon in short_term_value_horizons)
-    for sample in samples:
-        row = expand_sample(sample)
-        for horizon in horizons:
-            key = f"stvalue_{horizon}"
-            mask_key = f"{key}_mask"
-            if key in row:
-                row[mask_key] = torch.tensor(1.0, dtype=torch.float32)
-            else:
-                row[key] = torch.tensor(0.0, dtype=torch.float32)
-                row[mask_key] = torch.tensor(0.0, dtype=torch.float32)
-        expanded.append(row)
-    if not expanded:
-        return {
-            INPUT_KEY: np.zeros((0, INPUT_CHANNELS, BOARD_SIZE, BOARD_SIZE), dtype=np.float32),
-            POLICY_KEY: np.zeros((0, 1, BOARD_SIZE, BOARD_SIZE), dtype=np.float32),
-            OPP_POLICY_KEY: np.zeros((0, 1, BOARD_SIZE, BOARD_SIZE), dtype=np.float32),
-            ROOT_POLICY_KEY: np.zeros((0, 1, BOARD_SIZE, BOARD_SIZE), dtype=np.float32),
-            LEGAL_MASK_KEY: np.zeros((0, 1, BOARD_SIZE, BOARD_SIZE), dtype=np.bool_),
-            VALUE_KEY: np.zeros((0,), dtype=np.float32),
-            SHORT_TERM_VALUE_KEY: np.zeros((0, len(horizons)), dtype=np.float32),
-            SHORT_TERM_VALUE_MASK_KEY: np.zeros((0, len(horizons)), dtype=np.float32),
-            METADATA_KEY: np.zeros((0, 4), dtype=np.float32),
-        }
-    batch = stack_expanded(expanded)
-    short_term_value_targets = []
-    short_term_value_masks = []
-    for horizon in horizons:
-        short_term_value_targets.append(batch[f"stvalue_{horizon}"].reshape(-1, 1))
-        short_term_value_masks.append(batch[f"stvalue_{horizon}_mask"].reshape(-1, 1))
-    metadata = np.asarray(
-        [
-            [
-                float(sample.turn_index),
-                float(sample.policy_surprise),
-                float(sample.frequency_weight),
-                float(sample.metadata.get("search_visits", 0)),
-            ]
-            for sample in samples
-        ],
-        dtype=np.float32,
-    )
-    return {
-        INPUT_KEY: batch["input"].cpu().numpy().astype(np.float32, copy=False),
-        POLICY_KEY: _flat_to_nchw(batch["policy"]),
-        OPP_POLICY_KEY: _flat_to_nchw(batch["opp_policy"]),
-        ROOT_POLICY_KEY: _flat_to_nchw(batch["root_policy"]),
-        LEGAL_MASK_KEY: _flat_to_nchw(batch["legal_mask"].to(dtype=torch.float32)).astype(np.bool_),
-        VALUE_KEY: batch["value"].cpu().numpy().astype(np.float32, copy=False),
-        SHORT_TERM_VALUE_KEY: (
-            torch.cat(short_term_value_targets, dim=1).cpu().numpy().astype(np.float32, copy=False)
-            if short_term_value_targets
-            else np.zeros((len(samples), 0), dtype=np.float32)
-        ),
-        SHORT_TERM_VALUE_MASK_KEY: (
-            torch.cat(short_term_value_masks, dim=1).cpu().numpy().astype(np.float32, copy=False)
-            if short_term_value_masks
-            else np.zeros((len(samples), 0), dtype=np.float32)
-        ),
-        METADATA_KEY: metadata,
-    }
-
-
-def _flat_to_nchw(tensor: torch.Tensor) -> np.ndarray:
-    return (
-        tensor.reshape(tensor.shape[0], 1, BOARD_SIZE, BOARD_SIZE)
-        .cpu()
-        .numpy()
-        .astype(np.float32, copy=False)
-    )
 
 
 def _policy_kl(
@@ -704,91 +611,77 @@ def _split_by_md5(
     return train_infos, val_infos
 
 
-def _build_split_outputs(
+def _build_compact_split(
     *,
     split: str,
     infos: Sequence[ShuffleFileInfo],
     output_root: Path,
-    scratch_root: Path,
     keep_prob: float,
     rng: np.random.Generator,
     approx_rows_per_out_file: int,
     batch_size: int,
-    worker_group_size: int,
 ) -> _SplitBuildResult:
+    """Shuffle compact rows from the selected shards in RAM, write compact output shards.
+
+    Compact rows are small (no dense planes), so the whole split fits in memory
+    and the dense two-phase on-disk shuffle is unnecessary: load -> per-row
+    keep_prob -> permute -> batch-align -> write fixed-size compact output shards
+    (each a whole number of batches). Output horizons are inherited from the input
+    shards so the schema stays self-describing.
+    """
+
     split_dir = output_root / split
-    split_scratch = scratch_root / split
     split_dir.mkdir(parents=True, exist_ok=True)
-    split_scratch.mkdir(parents=True, exist_ok=True)
     input_rows = sum(info.rows for info in infos)
     expected_rows = int(round(float(input_rows) * float(keep_prob)))
+    empty = _SplitBuildResult(
+        split=split,
+        output_dir=split_dir,
+        output_files=(),
+        output_rows=0,
+        expected_rows=int(max(0, expected_rows)),
+        scratch_parts=0,
+        input_files=tuple(info.path for info in infos),
+        input_rows=int(input_rows),
+    )
     if input_rows <= 0 or expected_rows <= 0:
-        return _SplitBuildResult(
-            split=split,
-            output_dir=split_dir,
-            output_files=(),
-            output_rows=0,
-            expected_rows=0,
-            scratch_parts=0,
-            input_files=tuple(info.path for info in infos),
-            input_rows=int(input_rows),
-        )
-    output_count = max(1, int(round(expected_rows / max(1, approx_rows_per_out_file))))
-    scratch_parts = 0
-    for group_index, group in enumerate(_worker_groups(infos, worker_group_size)):
-        arrays = _load_group_kept_arrays(group, keep_prob=keep_prob, rng=rng)
-        rows = int(arrays.get(INPUT_KEY, np.zeros((0,), dtype=np.float32)).shape[0])
-        if rows <= 0:
-            continue
-        permutation = rng.permutation(rows)
-        arrays = {key: value[permutation] for key, value in arrays.items()}
-        buckets = rng.integers(0, output_count, size=rows, endpoint=False)
-        for output_index in range(output_count):
-            indices = np.nonzero(buckets == output_index)[0]
-            if indices.size <= 0:
-                continue
-            shard_dir = split_scratch / f"data{output_index:05d}"
-            shard_dir.mkdir(parents=True, exist_ok=True)
-            part_path = shard_dir / f"part_{group_index:05d}.npz"
-            # TODO(P3, deferred — analysis/optimization_plan.md): these phase-1 scratch parts are
-            # written here and re-read at _load_part_arrays() a few lines below, then deleted with
-            # the scratch_root. Compressing them costs ~40 s/epoch of zlib (shuffle is
-            # compress-bound, ~538 MB/s) for no benefit, since nothing outside this function reads
-            # them. Switch to compresslevel=1 (or np.savez uncompressed) once the optimization
-            # stage lands. Intentionally NOT changed now: it shifts byte layout of in-flight
-            # shuffle artifacts and is out of scope for the current planning pass.
-            np.savez_compressed(part_path, **{key: value[indices] for key, value in arrays.items()})
-            scratch_parts += 1
+        return empty
 
+    horizons = compact_io.read_shard_horizons(infos[0].path)
+    rows: list[Model1SampleData] = []
+    for info in infos:
+        shard = compact_io.read_compact_shard(info.path)
+        if keep_prob >= 1.0:
+            rows.extend(shard)
+        else:
+            keep = rng.random(len(shard)) < keep_prob
+            rows.extend(sample for sample, k in zip(shard, keep) if k)
+    if not rows:
+        return empty
+
+    permutation = rng.permutation(len(rows))
+    rows = [rows[i] for i in permutation]
+    aligned = (len(rows) // batch_size) * batch_size
+    if aligned <= 0:
+        return empty
+    rows = rows[:aligned]
+
+    chunk = max(batch_size, (approx_rows_per_out_file // batch_size) * batch_size)
     output_files: list[Path] = []
     output_rows = 0
-    for output_index in range(output_count):
-        shard_dir = split_scratch / f"data{output_index:05d}"
-        if not shard_dir.exists():
-            continue
-        part_paths = list(sorted(shard_dir.glob("part_*.npz")))
-        if not part_paths:
-            continue
-        rng.shuffle(part_paths)
-        arrays = _load_part_arrays(part_paths)
-        rows = int(arrays[INPUT_KEY].shape[0])
-        if rows <= 0:
-            continue
-        permutation = rng.permutation(rows)
-        aligned = (rows // batch_size) * batch_size
-        if aligned <= 0:
-            continue
-        output_arrays = {key: value[permutation[:aligned]] for key, value in arrays.items()}
+    start = 0
+    while start < aligned:
+        stop = min(start + chunk, aligned)
+        out_rows = rows[start:stop]
         out_path = split_dir / f"data{len(output_files):05d}.npz"
-        np.savez_compressed(out_path, **output_arrays)
+        compact_io.write_compact_shard(out_path, out_rows, short_term_value_horizons=horizons)
         sidecar_for_npz(out_path).write_text(
             json.dumps(
                 {
-                    "num_rows": int(aligned),
-                    "num_batches": int(aligned // batch_size),
+                    "num_rows": int(len(out_rows)),
+                    "num_batches": int(len(out_rows) // batch_size),
                     "target_schema_version": int(CURRENT_TARGET_SCHEMA_VERSION),
                     "split": split,
-                    "source_parts": len(part_paths),
                 },
                 sort_keys=True,
                 indent=2,
@@ -796,66 +689,18 @@ def _build_split_outputs(
             encoding="utf-8",
         )
         output_files.append(out_path)
-        output_rows += aligned
+        output_rows += len(out_rows)
+        start = stop
     return _SplitBuildResult(
         split=split,
         output_dir=split_dir,
         output_files=tuple(output_files),
         output_rows=int(output_rows),
         expected_rows=int(expected_rows),
-        scratch_parts=int(scratch_parts),
+        scratch_parts=0,
         input_files=tuple(info.path for info in infos),
         input_rows=int(input_rows),
     )
-
-
-def _worker_groups(infos: Sequence[ShuffleFileInfo], worker_group_size: int) -> list[list[ShuffleFileInfo]]:
-    groups: list[list[ShuffleFileInfo]] = []
-    current: list[ShuffleFileInfo] = []
-    rows = 0
-    for info in infos:
-        if current and rows + info.rows > worker_group_size:
-            groups.append(current)
-            current = []
-            rows = 0
-        current.append(info)
-        rows += info.rows
-    if current:
-        groups.append(current)
-    return groups
-
-
-def _load_group_kept_arrays(
-    group: Sequence[ShuffleFileInfo],
-    *,
-    keep_prob: float,
-    rng: np.random.Generator,
-) -> dict[str, np.ndarray]:
-    chunks: dict[str, list[np.ndarray]] = {key: [] for key in NPZ_KEYS}
-    for info in group:
-        with np.load(info.path) as data:
-            rows = int(data[INPUT_KEY].shape[0])
-            if rows <= 0:
-                continue
-            if keep_prob >= 1.0:
-                indices = np.arange(rows)
-            else:
-                keep = rng.random(rows) < keep_prob
-                indices = np.nonzero(keep)[0]
-            if indices.size <= 0:
-                continue
-            for key in NPZ_KEYS:
-                chunks[key].append(data[key][indices])
-    return {key: np.concatenate(values, axis=0) for key, values in chunks.items() if values}
-
-
-def _load_part_arrays(part_paths: Sequence[Path]) -> dict[str, np.ndarray]:
-    chunks: dict[str, list[np.ndarray]] = {key: [] for key in NPZ_KEYS}
-    for part_path in part_paths:
-        with np.load(part_path) as data:
-            for key in NPZ_KEYS:
-                chunks[key].append(data[key])
-    return {key: np.concatenate(values, axis=0) for key, values in chunks.items() if values}
 
 
 def _split_json(
@@ -923,7 +768,6 @@ def _skipped_shuffle(
 def _cleanup_skipped_shuffle(
     *,
     tmp_dir: Path,
-    scratch_root: Path,
     total_rows: int,
     desired_rows: int,
     used_rows: int,
@@ -932,8 +776,6 @@ def _cleanup_skipped_shuffle(
 ) -> DenseShuffleResult:
     if tmp_dir.exists():
         shutil.rmtree(tmp_dir)
-    if scratch_root.exists():
-        shutil.rmtree(scratch_root)
     return _skipped_shuffle(
         total_rows=total_rows,
         desired_rows=desired_rows,
@@ -946,19 +788,3 @@ def _cleanup_skipped_shuffle(
 def _md5_path_fraction(value: str) -> float:
     digest = hashlib.md5(value.encode("utf-8")).hexdigest()[:13]
     return int("0x" + digest, 16) / float(2**52)
-
-
-def _npz_array_shape(path: Path, key: str) -> tuple[int, ...]:
-    member = f"{key}.npy"
-    with zipfile.ZipFile(path) as archive:
-        with archive.open(member) as handle:
-            version = np_format.read_magic(handle)
-            if version == (1, 0):
-                shape, _fortran, _dtype = np_format.read_array_header_1_0(handle)
-            elif version == (2, 0):
-                shape, _fortran, _dtype = np_format.read_array_header_2_0(handle)
-            elif version == (3, 0):
-                shape, _fortran, _dtype = np_format.read_array_header_2_0(handle)
-            else:
-                raise ValueError(f"unsupported npy header version {version!r} in {path}")
-    return tuple(int(item) for item in shape)

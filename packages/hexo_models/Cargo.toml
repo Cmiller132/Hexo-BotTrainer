@@ -15,5 +15,6 @@ python = ["dep:pyo3"]
 [dependencies]
 hexo_engine.workspace = true
 hexo_utils.workspace = true
+half = "2"
 pyo3 = { workspace = true, optional = true }
 rayon.workspace = true

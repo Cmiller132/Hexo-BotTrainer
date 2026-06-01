@@ -18,6 +18,35 @@ from typing import Any, Mapping, Sequence
 from .constants import DEFAULT_BLOCKS, DEFAULT_CHANNELS, INPUT_CHANNELS
 
 
+def _parse_temperature_schedule(raw: Any) -> tuple[tuple[int, float], ...]:
+    """Coerce a TOML temperature schedule (list of [move, temperature] pairs).
+
+    Returns a tuple of (move, temperature) sorted by move with unique, ascending
+    moves and positive temperatures. Empty input yields an empty schedule (the
+    linear ``final_temperature``/``temperature_decay_moves`` scheme stays in use).
+    """
+
+    if not raw:
+        return ()
+    points: list[tuple[int, float]] = []
+    for item in raw:
+        pair = tuple(item)
+        if len(pair) != 2:
+            raise ValueError("temperature_schedule entries must be [move, temperature] pairs")
+        move = int(pair[0])
+        temperature = float(pair[1])
+        if move < 0:
+            raise ValueError("temperature_schedule moves must be >= 0")
+        if not temperature > 0.0:
+            raise ValueError("temperature_schedule temperatures must be > 0")
+        points.append((move, temperature))
+    points.sort(key=lambda point: point[0])
+    moves = [move for move, _ in points]
+    if len(set(moves)) != len(moves):
+        raise ValueError("temperature_schedule moves must have unique move indices")
+    return tuple(points)
+
+
 @dataclass(frozen=True, slots=True)
 class Model1ArchitectureConfig:
     input_channels: int = INPUT_CHANNELS
@@ -76,7 +105,24 @@ class Model1SelfPlayConfig:
     mcts_session_cache_max_states: int = 1_048_576
     mcts_active_root_limit: int = 1024
     max_actions: int = 1024
+    # Move-selection temperature SCHEDULE. `temperature` is the value used for the
+    # opening; play linearly decays it to `final_temperature` over the first
+    # `temperature_decay_moves` plies, then holds `final_temperature`. With
+    # `temperature_decay_moves == 0` the schedule is flat at `temperature` (the old
+    # behavior). AlphaZero/KataGo decay the opening temperature so endgames are
+    # played decisively instead of sampled — keeping temperature high all game
+    # produces noisy, weak-looking self-play tails.
     temperature: float = 1.0
+    final_temperature: float = 1.0
+    temperature_decay_moves: int = 0
+    # Optional anchor-point temperature schedule. When non-empty it OVERRIDES the
+    # linear `final_temperature`/`temperature_decay_moves` scheme: a tuple of
+    # (move, temperature) points, linearly interpolated, holding the first point
+    # before it and continuing the final segment's slope after the last point down
+    # to `temperature_floor` (then held). Lets the opening stay hot while mid/late
+    # play sharpens through chosen waypoints, e.g. [(0,1.0),(30,0.5),(90,0.3)].
+    temperature_schedule: tuple[tuple[int, float], ...] = ()
+    temperature_floor: float = 0.1
     # KataGo forced-playout strength (0 disables). Guarantees each materialized
     # root child ~sqrt(k * prior * root_visits) visits so Dirichlet root noise
     # survives PUCT into the visit counts (self-play opening diversity); the
@@ -216,6 +262,10 @@ def parse_model1_config(raw: Mapping[str, Any] | None) -> Model1Config:
             mcts_active_root_limit=int(selfplay.get("mcts_active_root_limit", 1024)),
             max_actions=int(selfplay.get("max_actions", 1024)),
             temperature=float(selfplay.get("temperature", 1.0)),
+            final_temperature=float(selfplay.get("final_temperature", selfplay.get("temperature", 1.0))),
+            temperature_decay_moves=int(selfplay.get("temperature_decay_moves", 0)),
+            temperature_schedule=_parse_temperature_schedule(selfplay.get("temperature_schedule", ())),
+            temperature_floor=float(selfplay.get("temperature_floor", 0.1)),
             forced_playout_k=float(selfplay.get("forced_playout_k", 0.0)),
         ),
         evaluation=Model1EvalConfig(

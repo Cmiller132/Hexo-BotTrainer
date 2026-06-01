@@ -1,7 +1,14 @@
-"""Optimizer-backed training over KataGo-style shuffled dense CNN NPZ rows."""
+"""Optimizer-backed training over KataGo-style shuffled compact CNN rows.
+
+Shards store compact sample facts; each row is expanded to dense tensors at read
+time under a fresh per-epoch D6 symmetry (``samples.expand_sample``), so board
+symmetry augmentation is exact and re-randomized every epoch.
+"""
 
 from __future__ import annotations
 
+import os
+from concurrent.futures import FIRST_COMPLETED, wait
 from pathlib import Path
 from time import perf_counter
 from types import SimpleNamespace
@@ -10,15 +17,11 @@ from typing import Any, Mapping
 import numpy as np
 import torch
 
+from . import compact_io
 from .config import Model1Config
+from .d6 import D6_SIZE
 from .losses import model1_loss
 from .replay import (
-    INPUT_KEY,
-    SHORT_TERM_VALUE_KEY,
-    SHORT_TERM_VALUE_MASK_KEY,
-    OPP_POLICY_KEY,
-    POLICY_KEY,
-    VALUE_KEY,
     DenseNpzSampleWindow,
     DenseTrainState,
     build_katago_shuffle,
@@ -61,10 +64,37 @@ class DenseCNNTrainer:
         self.selfplay_batch_size = config.selfplay.active_games
         self.mcts_virtual_batch_size: int | None = None
         self.training_batch_size = config.training.batch_size
+        # Train-read sample expansion (build_input_planes + D6) is CPU-bound; a
+        # persistent spawn process-pool parallelizes whole-shard expansion across
+        # cores so the GPU is fed instead of starved. Created lazily, reused across
+        # epochs, and skipped for small workloads (tests) and validation.
+        self._expand_pool: Any | None = None
+        self._expand_workers = _resolve_expand_workers()
 
     @property
     def sample_count(self) -> int:
         return int(self.train_state.total_num_data_rows)
+
+    def _get_expand_pool(self) -> Any | None:
+        """Lazily build the persistent spawn pool (None when parallelism is off)."""
+
+        if self._expand_workers <= 1:
+            return None
+        if self._expand_pool is None:
+            import multiprocessing as mp
+            from concurrent.futures import ProcessPoolExecutor
+
+            self._expand_pool = ProcessPoolExecutor(
+                max_workers=self._expand_workers, mp_context=mp.get_context("spawn")
+            )
+        return self._expand_pool
+
+    def close(self) -> None:
+        """Shut down the expansion pool, if any."""
+
+        if self._expand_pool is not None:
+            self._expand_pool.shutdown(wait=False, cancel_futures=True)
+            self._expand_pool = None
 
     def select_training_samples(self, *, ctx: Any, components: Any, epoch: int) -> dict[str, Any]:
         """Build/read the latest shuffled NPZ window and reserve one training epoch."""
@@ -200,9 +230,9 @@ class DenseCNNTrainer:
         components: Any,
         epoch: int,
     ) -> Mapping[str, Any]:
-        """Train over shuffled NPZ rows under the dense CNN train bucket."""
+        """Train over shuffled compact rows, expanding each under a fresh D6 symmetry."""
 
-        _ = (passes, sample_symmetries, ctx, components)
+        _ = (passes, ctx, components)
         if sample_window is None or not sample_window.files:
             return {
                 "status": "skipped",
@@ -215,27 +245,69 @@ class DenseCNNTrainer:
         batch_size = int(self.training_batch_size)
         if batch_size <= 0:
             raise ValueError("dense_cnn training batch size must be > 0")
+        horizons = tuple(int(h) for h in self.config.architecture.short_term_value_horizons)
+        # Per-(run, epoch) D6 draw: each row is expanded under an independently
+        # sampled symmetry, re-randomized every epoch (exact, train-time augmentation).
+        sym_rng = np.random.default_rng(_aug_seed(sample_symmetries, sample_window, epoch))
         total_loss = 0.0
+        component_sums: dict[str, float] = {}
         steps = 0
         trained_rows = 0
         target_rows = int(sample_window.target_rows)
         started = perf_counter()
 
+        # Draw a whole-shard symmetry vector per file (deterministic file order,
+        # re-randomized each epoch), then expand shards into dense arrays — across
+        # worker processes for large epochs, serially for small ones.
+        shard_syms: list[tuple[Path, np.ndarray]] = []
+        total_available = 0
         for file_path in sample_window.files:
-            if trained_rows >= target_rows:
-                break
-            with np.load(file_path) as data:
-                arrays = _materialize_npz(data)
-            rows = int(arrays[INPUT_KEY].shape[0])
-            offset = 0
-            while offset < rows and trained_rows < target_rows:
-                take = min(batch_size, rows - offset, target_rows - trained_rows)
-                batch = _batch_from_npz(arrays, offset, offset + take, self.config.architecture.short_term_value_horizons)
-                offset += take
-                trained_rows += take
-                loss_value = self._optimizer_step(batch)
-                total_loss += loss_value
+            n = int(compact_io.compact_row_count(file_path))
+            total_available += n
+            shard_syms.append((file_path, sym_rng.integers(0, D6_SIZE, size=n)))
+
+        def _train_arrays(arrays: Mapping[str, np.ndarray]) -> None:
+            nonlocal trained_rows, steps, total_loss
+            remaining = target_rows - trained_rows
+            if remaining <= 0:
+                return
+            for batch in _batches_from_arrays(arrays, batch_size, remaining):
+                trained_rows += int(batch["value"].shape[0])
+                components = self._optimizer_step(batch)
+                total_loss += components["total"]
+                for key, value in components.items():
+                    component_sums[key] = component_sums.get(key, 0.0) + value
                 steps += 1
+
+        pool = self._get_expand_pool() if total_available >= _PARALLEL_MIN_ROWS else None
+        if pool is None:
+            for file_path, syms in shard_syms:
+                if trained_rows >= target_rows:
+                    break
+                _train_arrays(compact_io.expand_shard_to_arrays(file_path, syms, horizons))
+        else:
+            pending_iter = iter(shard_syms)
+            inflight: dict[Any, Path] = {}
+
+            def _submit_one() -> bool:
+                for fpath, fsyms in pending_iter:
+                    inflight[pool.submit(compact_io.expand_shard_to_arrays, fpath, fsyms, horizons)] = fpath
+                    return True
+                return False
+
+            for _ in range(self._expand_workers + 2):
+                if not _submit_one():
+                    break
+            while inflight and trained_rows < target_rows:
+                done, _ = wait(list(inflight), return_when=FIRST_COMPLETED)
+                for fut in done:
+                    inflight.pop(fut, None)
+                    if trained_rows >= target_rows:
+                        continue
+                    _train_arrays(fut.result())
+                    _submit_one()
+            for fut in inflight:  # abandon any surplus shards once the row target is met
+                fut.cancel()
 
         if steps <= 0:
             return {
@@ -260,6 +332,11 @@ class DenseCNNTrainer:
             "samples": trained_rows,
             "batch_size": batch_size,
             "loss": total_loss / steps,
+            # Per-component epoch means (unweighted CE per head + the weighted total).
+            # Read these instead of the bare "loss": across epochs the policy-CE floor
+            # drifts with the self-play target entropy, so the scalar loss is not
+            # comparable epoch-to-epoch but the component split (esp. value) is legible.
+            "loss_components": {key: value / steps for key, value in component_sums.items()},
             "validation": validation,
             "elapsed_seconds": elapsed,
             "samples_per_second": trained_rows / max(elapsed, 1.0e-9),
@@ -269,7 +346,7 @@ class DenseCNNTrainer:
     def load_train_state(self, state: Mapping[str, Any] | None) -> None:
         self.train_state = DenseTrainState.from_mapping(state)
 
-    def _optimizer_step(self, batch: dict[str, torch.Tensor]) -> float:
+    def _optimizer_step(self, batch: dict[str, torch.Tensor]) -> dict[str, float]:
         inputs = batch.pop("input")
         if self.device.type == "cuda" and inputs.ndim == 4:
             inputs = inputs.to(self.device, non_blocking=True, memory_format=torch.channels_last)
@@ -280,7 +357,7 @@ class DenseCNNTrainer:
         self.optimizer.zero_grad(set_to_none=True)
         with torch.autocast(device_type=self.device.type, enabled=self.config.training.amp and self.device.type == "cuda"):
             outputs = self.model(inputs)
-            loss, _components_map = model1_loss(
+            loss, components_map = model1_loss(
                 outputs,
                 batch,
                 policy_weight=self.config.training.policy_weight,
@@ -294,7 +371,11 @@ class DenseCNNTrainer:
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.training.max_grad_norm)
         self.scaler.step(self.optimizer)
         self.scaler.update()
-        return float(loss.detach().cpu().item())
+        # Return the UNWEIGHTED per-component losses (policy/value/opp_policy/stvalue_*
+        # and the weighted total) so the epoch can report a component breakdown. The
+        # bare scalar loss alone is misleading across epochs because the self-play
+        # targets drift (e.g. forced-playout widening raises the policy-CE floor).
+        return {key: float(tensor.detach().cpu().item()) for key, tensor in components_map.items()}
 
     @torch.no_grad()
     def _run_validation(self, sample_window: DenseNpzSampleWindow) -> dict[str, Any]:
@@ -309,18 +390,16 @@ class DenseCNNTrainer:
         steps = 0
         rows_seen = 0
         total_loss = 0.0
+        component_sums: dict[str, float] = {}
+        horizons = tuple(int(h) for h in self.config.architecture.short_term_value_horizons)
         for file_path in sample_window.validation_files:
             if rows_seen >= max_rows:
                 break
-            with np.load(file_path) as data:
-                arrays = _materialize_npz(data)
-            rows = int(arrays[INPUT_KEY].shape[0])
-            offset = 0
-            while offset < rows and rows_seen < max_rows:
-                take = min(batch_size, rows - offset, max_rows - rows_seen)
-                batch = _batch_from_npz(arrays, offset, offset + take, self.config.architecture.short_term_value_horizons)
-                offset += take
-                rows_seen += take
+            # Identity expansion (no augmentation): validation loss stays deterministic.
+            n = int(compact_io.compact_row_count(file_path))
+            arrays = compact_io.expand_shard_to_arrays(file_path, np.zeros(n, dtype=np.int64), horizons)
+            for batch in _batches_from_arrays(arrays, batch_size, max_rows - rows_seen):
+                rows_seen += int(batch["value"].shape[0])
                 inputs = batch.pop("input")
                 if self.device.type == "cuda" and inputs.ndim == 4:
                     inputs = inputs.to(self.device, non_blocking=True, memory_format=torch.channels_last)
@@ -329,7 +408,7 @@ class DenseCNNTrainer:
                 batch = {key: value.to(self.device, non_blocking=True) for key, value in batch.items()}
                 with torch.autocast(device_type=self.device.type, enabled=self.config.training.amp and self.device.type == "cuda"):
                     outputs = self.model(inputs)
-                    loss, _components_map = model1_loss(
+                    loss, components_map = model1_loss(
                         outputs,
                         batch,
                         policy_weight=self.config.training.policy_weight,
@@ -338,6 +417,8 @@ class DenseCNNTrainer:
                         short_term_value_weight=self.config.training.short_term_value_weight,
                     )
                 total_loss += float(loss.detach().cpu().item())
+                for key, tensor in components_map.items():
+                    component_sums[key] = component_sums.get(key, 0.0) + float(tensor.detach().cpu().item())
                 steps += 1
         if was_training:
             self.model.train()
@@ -348,6 +429,7 @@ class DenseCNNTrainer:
             "samples": int(rows_seen),
             "steps": int(steps),
             "loss": total_loss / steps,
+            "loss_components": {key: value / steps for key, value in component_sums.items()},
         }
 
     def _update_train_bucket(self, *, total_rows: int, window_start: int) -> None:
@@ -414,51 +496,63 @@ class DenseCNNTrainer:
         return ctx.output_dir / "shuffleddata"
 
 
-# Keys consumed by `_batch_from_npz`; materialized once per shard for P0.
-_NPZ_BATCH_KEYS: tuple[str, ...] = (
-    INPUT_KEY,
-    POLICY_KEY,
-    OPP_POLICY_KEY,
-    VALUE_KEY,
-    SHORT_TERM_VALUE_KEY,
-    SHORT_TERM_VALUE_MASK_KEY,
-)
+def _aug_seed(sample_symmetries: Any, sample_window: DenseNpzSampleWindow, epoch: int) -> int:
+    """Deterministic per-(run, epoch) seed for the D6 augmentation draw.
 
-
-def _materialize_npz(data: Any) -> dict[str, np.ndarray]:
-    """Decompress each needed NPZ array exactly once (P0).
-
-    `numpy.lib.npyio.NpzFile.__getitem__` re-reads and re-decompresses the whole
-    array on every access, so slicing ``data[KEY][start:stop]`` per 256-row batch
-    paid the full-shard decompress tax (inputNCHW is ~694 MB uncompressed, ~31x
-    compressed) once per batch. Reading each array a single time here and slicing
-    the resident arrays removes that tax; the returned data is byte-identical to
-    the per-batch path, so training numerics are unchanged. One decompressed shard
-    (~694 MB) is resident at a time — bounded and well within budget.
+    Prefers the run seed carried by the generic pipeline's `sample_symmetries`
+    selection, falling back to the sample window's seed (prefit passes
+    `sample_symmetries=None`). Folding `epoch` in re-randomizes each row's
+    orientation every epoch while staying reproducible.
     """
 
-    return {key: data[key] for key in _NPZ_BATCH_KEYS}
+    base = None
+    if sample_symmetries is not None:
+        base = getattr(sample_symmetries, "seed", None)
+    if base is None:
+        base = getattr(sample_window, "seed", 0)
+    return (int(base) * 1_000_003 + int(epoch) * 9_176 + 1) & 0x7FFFFFFF
 
 
-def _batch_from_npz(data: Any, start: int, stop: int, horizons: tuple[int, ...]) -> dict[str, torch.Tensor]:
-    policy = torch.from_numpy(data[POLICY_KEY][start:stop].reshape(stop - start, -1).astype(np.float32, copy=False))
-    opp_policy = torch.from_numpy(data[OPP_POLICY_KEY][start:stop].reshape(stop - start, -1).astype(np.float32, copy=False))
-    batch: dict[str, torch.Tensor] = {
-        "input": torch.from_numpy(data[INPUT_KEY][start:stop].astype(np.float32, copy=False)),
-        "policy": policy,
-        "opp_policy": opp_policy,
-        "value": torch.from_numpy(data[VALUE_KEY][start:stop].astype(np.float32, copy=False)),
-    }
-    short_term_value = data[SHORT_TERM_VALUE_KEY][start:stop].astype(np.float32, copy=False)
-    masks = data[SHORT_TERM_VALUE_MASK_KEY][start:stop].astype(np.float32, copy=False)
-    for index, horizon in enumerate(horizons):
-        if index >= short_term_value.shape[1]:
-            batch[f"stvalue_{int(horizon)}"] = torch.zeros((stop - start,), dtype=torch.float32)
-            batch[f"stvalue_{int(horizon)}_mask"] = torch.zeros((stop - start,), dtype=torch.float32)
-        else:
-            batch[f"stvalue_{int(horizon)}"] = torch.from_numpy(short_term_value[:, index])
-            batch[f"stvalue_{int(horizon)}_mask"] = torch.from_numpy(masks[:, index])
-    return batch
+def _resolve_expand_workers() -> int:
+    """Worker count for parallel train-read expansion.
+
+    Overridable via ``DENSE_CNN_EXPAND_WORKERS`` (set to 1 to force serial).
+    Defaults to ~half the logical CPUs, capped at 16, leaving headroom for the
+    main process feeding the GPU.
+    """
+
+    override = os.environ.get("DENSE_CNN_EXPAND_WORKERS")
+    if override is not None:
+        try:
+            return max(1, int(override))
+        except ValueError:
+            pass
+    # Each spawn worker imports torch (~250-400 MB RSS), so default conservatively
+    # to bound idle-pool RAM against the WSL host budget / RAM watchdog; bump via
+    # DENSE_CNN_EXPAND_WORKERS when there is headroom.
+    return min(8, max(1, (os.cpu_count() or 4) // 4))
+
+
+# Expand below this many rows-per-epoch serially (tests / tiny runs) to skip the
+# spawn-pool startup cost; large real epochs use the pool.
+_PARALLEL_MIN_ROWS = 2048
+
+
+def _batches_from_arrays(
+    arrays: Mapping[str, "np.ndarray"], batch_size: int, max_rows: int
+) -> "list[dict[str, torch.Tensor]]":
+    """Slice expanded shard arrays into ``<= max_rows`` worth of training batches."""
+
+    rows = min(int(arrays["value"].shape[0]), int(max_rows))
+    batches: list[dict[str, torch.Tensor]] = []
+    offset = 0
+    while offset < rows:
+        take = min(batch_size, rows - offset)
+        batches.append(
+            {key: torch.from_numpy(np.ascontiguousarray(value[offset:offset + take])) for key, value in arrays.items()}
+        )
+        offset += take
+    return batches
 
 
 def _select_files_for_rows(

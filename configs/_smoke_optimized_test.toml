@@ -73,7 +73,7 @@ opening_temperature = 0.6
 opening_moves = 8
 
 [model.config.performance]
-calibrate = false
+calibrate = true
 target_selfplay_positions_per_second = 64.0
 inference_batch_candidates = [256]
 selfplay_batch_candidates = [6]

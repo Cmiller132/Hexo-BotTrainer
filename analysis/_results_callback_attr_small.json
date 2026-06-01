@@ -1,0 +1,30 @@
+[
+  {
+    "real_rows": 70,
+    "raw_forward_ms": 8.256348666618578,
+    "full_callback_ms": 19.86050066673973,
+    "forward_fraction_of_callback": 0.4157170458670984,
+    "marshalling_ms": 11.60415200012115
+  },
+  {
+    "real_rows": 99,
+    "raw_forward_ms": 12.824096000016047,
+    "full_callback_ms": 20.231354333324514,
+    "forward_fraction_of_callback": 0.633872344319162,
+    "marshalling_ms": 7.407258333308468
+  },
+  {
+    "real_rows": 128,
+    "raw_forward_ms": 18.263248666674674,
+    "full_callback_ms": 20.496580333371337,
+    "forward_fraction_of_callback": 0.8910388157257392,
+    "marshalling_ms": 2.233331666696664
+  },
+  {
+    "real_rows": 256,
+    "raw_forward_ms": 39.84206633331875,
+    "full_callback_ms": 43.7505630000184,
+    "forward_fraction_of_callback": 0.9106640829582465,
+    "marshalling_ms": 3.908496666699655
+  }
+]

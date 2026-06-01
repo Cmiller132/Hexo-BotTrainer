@@ -1,0 +1,136 @@
+# Model 1 — SMALLER 64x4 variant for FAST iteration.
+#
+# Purpose: a smaller trunk (64ch x 4block) than target_96x6 so epochs turn over
+# faster and we get a learning signal sooner. Same self-play / replay / eval
+# pipeline as 96x6; the deltas from that config are:
+#   - architecture: channels 96 -> 64, residual_blocks 6 -> 4 (the documented
+#     baseline trunk; smaller forward => higher self-play pos/s).
+#   - selfplay: ADD a move-temperature decay schedule (1.0 -> 0.2 over 30 plies,
+#     then held at 0.2) so self-play endgames are played decisively instead of
+#     sampled at temperature 1.0 the whole game (the cause of the "weird"-looking
+#     self-play tails). Opening still explores (temp 1.0 + Dirichlet + forced
+#     playouts) so target diversity is preserved.
+#   - samples: enable a small validation_fraction so each epoch reports a HELD-OUT
+#     loss with a per-component (policy / value / opp / stvalue) breakdown — the
+#     bare training loss is not comparable across epochs (the forced-playout
+#     widening raises the policy-CE floor as targets get flatter).
+# Fresh run: own run dir + own SealBot bootstrap prefit (shape differs from 96x6).
+
+[model]
+name = "dense_cnn"
+module = "hexo_models.dense_cnn.plugin"
+
+[model.config]
+device = "cuda"
+
+[model.config.architecture]
+input_channels = 13
+channels = 64
+residual_blocks = 4
+dropout = 0.0
+short_term_value_horizons = [1, 4, 8]
+
+[model.config.training]
+batch_size = 256
+learning_rate = 0.001
+weight_decay = 0.0001
+policy_weight = 1.0
+value_weight = 1.0
+opp_policy_weight = 0.25
+short_term_value_weight = 0.25
+amp = true
+max_grad_norm = 1.0
+train_samples_per_epoch = 100000
+max_train_bucket_per_new_data = 8.0
+max_train_bucket_size = 500000
+no_repeat_files = true
+max_validation_samples = 20000
+
+[model.config.samples]
+shuffle_min_rows = 100000
+shuffle_keep_target_rows = 300000
+shuffle_taper_window_exponent = 0.65
+shuffle_expand_window_per_row = 0.4
+shuffle_taper_window_scale = 50000.0
+approx_rows_per_out_file = 8000
+shuffle_worker_group_size = 8000
+# Held-out fraction for the per-epoch validation loss (legible component split).
+validation_fraction = 0.02
+policy_surprise_uniform_fraction = 0.5
+policy_surprise_max_weight = 8.0
+
+[model.config.selfplay]
+# 256 sims — middle ground. 128 sims was too weak for a RANDOM cold-start net: search
+# could not steer games to a terminal, so games meandered ~3x longer (active games hit
+# ~170+ plies), which cancelled the pos/s win and starved completed-game throughput.
+# 256 keeps self-play ~2x faster than the 512 baseline while search is strong enough to
+# end games. (self-play wall-time is ~linear in sims; it is overhead/dispatch-bound, so
+# sims — not model size — is the real iteration-speed lever.)
+search_visits = 256
+active_games = 256
+c_puct = 1.5
+root_dirichlet_noise_enabled = true
+root_dirichlet_noise_fraction = 0.25
+root_dirichlet_total_alpha = 10.83
+root_policy_temperature = 1.1
+fpu_reduction = 0.20
+virtual_loss = 1.0
+widening_policy_mass = 0.95
+widening_max_children = 32
+widening_min_children = 2
+mcts_session_cache_max_states = 131072
+mcts_active_root_limit = 256
+max_actions = 1024
+# Move-selection temperature decay: explore the opening at 1.0, decay linearly to
+# 0.2 by ply 30, then hold 0.2. Applied per game (each playable game uses its own
+# ply's temperature within a batch). Sharpens endgames without killing opening
+# diversity.
+temperature = 1.0
+final_temperature = 0.2
+temperature_decay_moves = 30
+forced_playout_k = 2.0
+
+[model.config.evaluation]
+games_per_epoch = 64
+sealbot_variant = "best"
+sealbot_time_limit = 0.05
+max_actions = 1024
+require_sealbot = true
+opening_temperature = 0.6
+opening_moves = 8
+
+[model.config.performance]
+calibrate = true
+target_selfplay_positions_per_second = 128.0
+inference_batch_candidates = [128, 256, 512, 1024]
+selfplay_batch_candidates = [256]
+training_batch_candidates = [64, 128, 192, 256]
+mcts_virtual_batch_candidates = [4]
+selfplay_probe_positions = 2048
+probe_batches = 1
+inference_use_tensorrt = true
+inference_bucket_pad_multiple = 16
+
+[run]
+name = "dense_cnn_model1_target_64x4"
+output_dir = "../runs/dense_cnn_model1_target_64x4"
+seed = 1
+
+[loop]
+epochs = 60
+
+[selfplay]
+games_per_epoch = 512
+update_checkpoint_pointer = true
+checkpoint_pointer = "../data/checkpoints/dense_cnn_model1_target_64x4_latest.txt"
+
+[train]
+passes_per_epoch = 1
+
+[checkpoint]
+resume_from = "/mnt/e/Hexo-BotTrainer/runs/dense_cnn_model1_target_64x4/checkpoints/epoch_000040.pt"
+# COLD START (no initialize_from): train from random init so the true from-scratch
+# learning curve is visible. The supervisor injects resume_from=<latest epoch_*.pt>
+# on each relaunch; the first launch has neither resume_from nor initialize_from, so
+# the pipeline initializes random weights.
+save_name = "latest"

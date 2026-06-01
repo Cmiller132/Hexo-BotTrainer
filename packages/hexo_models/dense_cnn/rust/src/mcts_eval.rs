@@ -15,20 +15,89 @@
 //! Python returns one prior per flat. No fallback format is accepted; malformed
 //! bytes raise `PyValueError`.
 
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyBufferError, PyValueError};
+use pyo3::ffi;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyTuple};
 use rayon::prelude::*;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::os::raw::{c_char, c_int, c_void};
+use std::ptr;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use half::slice::HalfFloatSliceExt;
 use hexo_engine::{HexoState as RustHexoState, PackedCoord};
 use hexo_utils::{hash_state, StateHash};
 
 use super::constants::*;
 use super::encoding::encode_model1_state_for_mcts;
+
+/// Zero-copy f16 plane buffer handed to the Python evaluator.
+///
+/// Holds the contiguous MCTS leaf planes (as `f16`) and exposes them through the
+/// Python buffer protocol so `torch.frombuffer(dtype=float16)` views them in place
+/// (then copies straight to the GPU) instead of paying a serial `PyBytes` memcpy on
+/// the GIL thread every forward pass. Read-only, 1-D, itemsize 1 (raw bytes).
+///
+/// f16 is the host->device TRANSPORT dtype: it halves the ~89 MB plane H2D copy.
+/// Python upcasts to f32 on-device before the (TRT/torch) forward, which is gated
+/// byte-identical because the TRT engine already downcasts its f32 input to f16
+/// internally (see scripts/_fp16_input_gate.py).
+#[pyclass]
+pub(crate) struct PlaneBuffer {
+    data: Vec<half::f16>,
+}
+
+#[pymethods]
+impl PlaneBuffer {
+    /// Byte length, so the Python evaluator's `len(payload["inputs"])` check is
+    /// exact (f16 == 2 bytes/element).
+    fn __len__(&self) -> usize {
+        self.data.len() * std::mem::size_of::<half::f16>()
+    }
+
+    /// SAFETY: `view` is the CPython-supplied `Py_buffer` to populate. We expose a
+    /// read-only 1-D byte view over `data` and keep `slf` alive via `view.obj`, so
+    /// the backing `Vec` outlives the buffer.
+    unsafe fn __getbuffer__(
+        slf: Bound<'_, Self>,
+        view: *mut ffi::Py_buffer,
+        flags: c_int,
+    ) -> PyResult<()> {
+        if view.is_null() {
+            return Err(PyBufferError::new_err("buffer view is null"));
+        }
+        if (flags & ffi::PyBUF_WRITABLE) == ffi::PyBUF_WRITABLE {
+            (*view).obj = ptr::null_mut();
+            return Err(PyBufferError::new_err("PlaneBuffer is read-only"));
+        }
+        let guard = slf.borrow();
+        let data = &guard.data;
+        (*view).buf = data.as_ptr() as *mut c_void;
+        (*view).len = (data.len() * std::mem::size_of::<half::f16>()) as ffi::Py_ssize_t;
+        (*view).readonly = 1;
+        (*view).itemsize = 1;
+        (*view).format = if (flags & ffi::PyBUF_FORMAT) == ffi::PyBUF_FORMAT {
+            // Static NUL-terminated "B" (unsigned bytes); 'static keeps the pointer
+            // valid for the life of the view.
+            b"B\0".as_ptr() as *mut c_char
+        } else {
+            ptr::null_mut()
+        };
+        (*view).ndim = 1;
+        (*view).shape = ptr::null_mut();
+        (*view).strides = ptr::null_mut();
+        (*view).suboffsets = ptr::null_mut();
+        (*view).internal = ptr::null_mut();
+        // Hold a strong reference so the Vec lives until __releasebuffer__.
+        (*view).obj = slf.clone().into_any().into_ptr();
+        Ok(())
+    }
+
+    unsafe fn __releasebuffer__(&self, _view: *mut ffi::Py_buffer) {}
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct RustEvaluation {
@@ -63,6 +132,13 @@ pub(crate) struct EvaluationStats {
     pub(crate) encoding_seconds: f64,
     pub(crate) evaluator_seconds: f64,
     pub(crate) parse_seconds: f64,
+    // PROFILING (perf attribution of the ~half-of-wall "glue"): payload =
+    // PyDict/PyBytes construction (the per-pass plane buffer copy into Python);
+    // dedup = cache-check + duplicate coalescing; cache_insert = bounded insert/
+    // eviction churn. All on the GIL/eval thread, previously uninstrumented.
+    pub(crate) payload_seconds: f64,
+    pub(crate) dedup_seconds: f64,
+    pub(crate) cache_insert_seconds: f64,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -175,68 +251,85 @@ fn evaluate_model1_states_chunk(
         .collect();
     let plane_values_per_row = MODEL1_INPUT_CHANNELS * MODEL1_BOARD_AREA;
 
-    thread_local! {
-        // Reused across chunk evaluations on the calling thread to avoid
-        // reallocating the ~89 MB plane buffer plus the legal-index buffer every
-        // chunk. This function runs serially on the GIL-holding thread (the rayon
-        // work only fills per-row `encoded` data and the disjoint plane chunks),
-        // so a thread-local scratch is safe.
-        static ENCODE_SCRATCH: RefCell<(Vec<f32>, Vec<i64>)> =
-            RefCell::new((Vec::new(), Vec::new()));
+    // Planes go to Python as a ZERO-COPY buffer view (PlaneBuffer), not a PyBytes
+    // copy. The old `PyBytes::new` path memcpy'd the whole (~89 MB at batch 1024)
+    // plane buffer on the single GIL-holding thread every pass — ~46% of self-play
+    // wall-clock (see payload_seconds). `torch.frombuffer` only needs a
+    // buffer-protocol view, which it copies straight to the GPU, so the intermediate
+    // Python copy was pure waste.
+    let total = encoded.len() * plane_values_per_row;
+    let mut planes: Vec<half::f16> = Vec::with_capacity(total);
+    // SAFETY: the par_chunks_mut fill below tiles the entire buffer exactly
+    // (`encoded.len()` chunks of `plane_values_per_row`, summing to `total`) and
+    // writes every element via `convert_from_f32_slice` before any read; `f16` has
+    // no invalid bit patterns. This also drops the redundant zero-fill the reused
+    // scratch paid on every pass.
+    unsafe {
+        planes.set_len(total);
     }
-
-    ENCODE_SCRATCH.with(|scratch| {
-    let mut scratch = scratch.borrow_mut();
-    let (planes, legal_flat_indices) = &mut *scratch;
-    planes.clear();
-    planes.resize(encoded.len() * plane_values_per_row, 0.0);
+    // f32 -> f16 happens here in the parallel assembly (SIMD via `half`), so the
+    // buffer crossing to Python and the H2D copy are half-size. Plane values are
+    // binary masks / [0,1] soft features, so f16 is loss-free for search (gated).
     planes
         .par_chunks_mut(plane_values_per_row)
         .zip(encoded.par_iter())
-        .for_each(|(target, row)| target.copy_from_slice(&row.planes));
+        .for_each(|(target, row)| target.convert_from_f32_slice(&row.planes));
+    let byte_len = total * std::mem::size_of::<half::f16>();
+    let plane_buffer = Py::new(py, PlaneBuffer { data: planes })?;
 
-    legal_flat_indices.clear();
-    let mut legal_row_offsets = Vec::with_capacity(encoded.len() + 1);
-    legal_row_offsets.push(0i64);
-    for row in &encoded {
-        legal_flat_indices.extend_from_slice(&row.legal_flat_indices);
-        legal_row_offsets.push(legal_flat_indices.len() as i64);
+    thread_local! {
+        // Legal flat indices are small (~5 MB at batch 1024) and still travel as a
+        // PyBytes copy; reuse one buffer across passes to avoid reallocations.
+        static LEGAL_SCRATCH: RefCell<Vec<i64>> = const { RefCell::new(Vec::new()) };
     }
 
-    let byte_len = planes.len() * std::mem::size_of::<f32>();
-    let bytes = unsafe { std::slice::from_raw_parts(planes.as_ptr() as *const u8, byte_len) };
-    let flat_byte_len = legal_flat_indices.len() * std::mem::size_of::<i64>();
-    let flat_bytes = unsafe {
-        std::slice::from_raw_parts(legal_flat_indices.as_ptr() as *const u8, flat_byte_len)
-    };
-    if let Some(stats) = stats {
-        let mut stats = lock_stats(stats);
-        stats.evaluator_chunks += 1;
-        stats.encoded_states += encoded.len();
-        stats.encoded_legal_actions += legal_flat_indices.len();
-        stats.max_chunk_states = stats.max_chunk_states.max(encoded.len());
-        stats.max_chunk_legal_actions =
-            stats.max_chunk_legal_actions.max(legal_flat_indices.len());
-        stats.input_bytes += byte_len;
-        stats.legal_index_bytes += flat_byte_len;
-        stats.encoding_seconds += encoding_started.elapsed().as_secs_f64();
-    }
+    let payload = LEGAL_SCRATCH.with(|scratch| -> PyResult<Bound<'_, PyDict>> {
+        let mut legal_flat_indices = scratch.borrow_mut();
+        legal_flat_indices.clear();
+        let mut legal_row_offsets = Vec::with_capacity(encoded.len() + 1);
+        legal_row_offsets.push(0i64);
+        for row in &encoded {
+            legal_flat_indices.extend_from_slice(&row.legal_flat_indices);
+            legal_row_offsets.push(legal_flat_indices.len() as i64);
+        }
+        let flat_byte_len = legal_flat_indices.len() * std::mem::size_of::<i64>();
+        let flat_bytes = unsafe {
+            std::slice::from_raw_parts(legal_flat_indices.as_ptr() as *const u8, flat_byte_len)
+        };
+        if let Some(stats) = stats {
+            let mut stats = lock_stats(stats);
+            stats.evaluator_chunks += 1;
+            stats.encoded_states += encoded.len();
+            stats.encoded_legal_actions += legal_flat_indices.len();
+            stats.max_chunk_states = stats.max_chunk_states.max(encoded.len());
+            stats.max_chunk_legal_actions =
+                stats.max_chunk_legal_actions.max(legal_flat_indices.len());
+            stats.input_bytes += byte_len;
+            stats.legal_index_bytes += flat_byte_len;
+            stats.encoding_seconds += encoding_started.elapsed().as_secs_f64();
+        }
 
-    // This dictionary is the native evaluator ABI consumed by
-    // `DenseCNNInference.evaluate_model1_payload`.
-    let payload = PyDict::new(py);
-    payload.set_item("inputs", PyBytes::new(py, bytes))?;
-    payload.set_item(
-        "shape",
-        (
-            encoded.len(),
-            MODEL1_INPUT_CHANNELS,
-            MODEL1_BOARD_SIZE,
-            MODEL1_BOARD_SIZE,
-        ),
-    )?;
-    payload.set_item("legal_flat_indices_bytes", PyBytes::new(py, flat_bytes))?;
-    payload.set_item("legal_row_offsets", PyTuple::new(py, legal_row_offsets)?)?;
+        // This dictionary is the native evaluator ABI consumed by
+        // `DenseCNNInference.evaluate_model1_payload`.
+        let payload_started = Instant::now();
+        let payload = PyDict::new(py);
+        payload.set_item("inputs", plane_buffer)?;
+        payload.set_item(
+            "shape",
+            (
+                encoded.len(),
+                MODEL1_INPUT_CHANNELS,
+                MODEL1_BOARD_SIZE,
+                MODEL1_BOARD_SIZE,
+            ),
+        )?;
+        payload.set_item("legal_flat_indices_bytes", PyBytes::new(py, flat_bytes))?;
+        payload.set_item("legal_row_offsets", PyTuple::new(py, legal_row_offsets)?)?;
+        if let Some(stats) = stats {
+            lock_stats(stats).payload_seconds += payload_started.elapsed().as_secs_f64();
+        }
+        Ok(payload)
+    })?;
 
     let evaluator_started = Instant::now();
     let output = evaluator.call1((payload,))?;
@@ -299,7 +392,6 @@ fn evaluate_model1_states_chunk(
         lock_stats(stats).parse_seconds += parse_started.elapsed().as_secs_f64();
     }
     Ok(evaluations)
-    })
 }
 
 pub(crate) fn evaluate_model1_states_cached(
@@ -339,6 +431,7 @@ pub(crate) fn evaluate_model1_state_refs_cached(
         lock_stats(stats).requested_states += requests.len();
     }
 
+    let dedup_started = Instant::now();
     {
         let cached = lock_cache(cache);
         if let Some(stats) = stats {
@@ -367,6 +460,9 @@ pub(crate) fn evaluate_model1_state_refs_cached(
             unique_states.push(request.state);
         }
     }
+    if let Some(stats) = stats {
+        lock_stats(stats).dedup_seconds += dedup_started.elapsed().as_secs_f64();
+    }
 
     if !unique_states.is_empty() {
         if let Some(stats) = stats {
@@ -386,6 +482,7 @@ pub(crate) fn evaluate_model1_state_refs_cached(
             })
             .collect();
         {
+            let insert_started = Instant::now();
             let mut cached = lock_cache(cache);
             let mut inserted = 0usize;
             for (key, evaluation) in unique_keys.iter().copied().zip(unique_evals.iter()) {
@@ -396,6 +493,7 @@ pub(crate) fn evaluate_model1_state_refs_cached(
                 let mut stats = lock_stats(stats);
                 stats.cache_inserts += inserted;
                 stats.cache_size_peak = stats.cache_size_peak.max(cached.len());
+                stats.cache_insert_seconds += insert_started.elapsed().as_secs_f64();
             }
         }
         for (index, unique_index) in slot_to_unique.into_iter().enumerate() {

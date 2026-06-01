@@ -207,6 +207,15 @@ class DenseCNNInference:
     @torch.inference_mode()
     def _forward_inputs_device(self, inputs: torch.Tensor) -> dict[str, torch.Tensor]:
         inputs = _to_inference_device(inputs, self.device)
+        if inputs.dtype == torch.float16:
+            # f16 is only the host->device TRANSPORT dtype for the MCTS evaluator
+            # (Rust emits f16 planes, halving the ~89 MB plane H2D copy). Upcast to
+            # f32 on-device so the forward (TRT/torch), bucket padding, and every
+            # downstream op are unchanged. Gated byte-identical: the TRT engine
+            # already downcasts its f32 input to f16 internally, and the planes are
+            # binary/[0,1] features (see scripts/_fp16_input_gate.py). The direct
+            # (non-MCTS) inference path still passes f32 and is untouched.
+            inputs = inputs.float()
         return self._forward_device_inputs(inputs)
 
     @torch.inference_mode()
@@ -266,8 +275,10 @@ class DenseCNNInference:
         """
 
         shape = _payload_shape(payload)
-        _require_byte_length("inputs", payload["inputs"], _shape_product(shape), 4)
-        inputs = torch.frombuffer(payload["inputs"], dtype=torch.float32).reshape(shape)
+        # Rust hands the MCTS evaluator f16 plane bytes (2 bytes/element) as a
+        # zero-copy buffer view; `_forward_inputs_device` upcasts to f32 on-device.
+        _require_byte_length("inputs", payload["inputs"], _shape_product(shape), 2)
+        inputs = torch.frombuffer(payload["inputs"], dtype=torch.float16).reshape(shape)
         max_batch = self.max_batch_size
         if inputs.shape[0] > max_batch:
             # MCTS can ask for a large leaf batch. Chunking happens here because

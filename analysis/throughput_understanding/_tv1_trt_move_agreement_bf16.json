@@ -1,0 +1,110 @@
+{
+  "precision": "bf16",
+  "n_positions": 80,
+  "trt_adopted": true,
+  "trt_gate": {
+    "adopted": true,
+    "reason": "ok",
+    "precision": "bf16",
+    "build_seconds": 7.7257017750000045,
+    "trt_version": "11.0.0.114",
+    "policy_argmax_match": 0.96875,
+    "policy_max_abs_err": 0.1015625,
+    "value_max_abs_err": 0.09257200360298157,
+    "value_logit_max_abs_err": 0.3125
+  },
+  "forward_fwd_per_s": {
+    "torch_fp16_bs128": 7039.856264409316,
+    "trt_bf16_bs128": 10405.42149654009,
+    "torch_fp16_bs256": 6435.841707330524,
+    "trt_bf16_bs256": 10629.486156943956
+  },
+  "nan_aborts": 0,
+  "compared": 80,
+  "torch_vs_torch_agreement": 1.0,
+  "move_agreement": 0.8375,
+  "move_flip_rate": 0.16249999999999998,
+  "trt_excess_flip_vs_torch_nondeterminism": 0.16249999999999998,
+  "visit_l1_mean": 0.196728515625,
+  "visit_l1_p95": 0.8439453125,
+  "flips": [
+    {
+      "pos": 7,
+      "torch_move": 2147450887,
+      "trt_move": 2146795550,
+      "visit_l1": 0.6797
+    },
+    {
+      "pos": 11,
+      "torch_move": 2147581959,
+      "trt_move": 2147647495,
+      "visit_l1": 0.2109
+    },
+    {
+      "pos": 17,
+      "torch_move": 2146729991,
+      "trt_move": 2146664455,
+      "visit_l1": 0.2188
+    },
+    {
+      "pos": 20,
+      "torch_move": 2147844089,
+      "trt_move": 2147254288,
+      "visit_l1": 0.2422
+    },
+    {
+      "pos": 29,
+      "torch_move": 2147844086,
+      "trt_move": 2147909624,
+      "visit_l1": 0.1289
+    },
+    {
+      "pos": 33,
+      "torch_move": 2147581957,
+      "trt_move": 2147450876,
+      "visit_l1": 0.3594
+    },
+    {
+      "pos": 45,
+      "torch_move": 2147188748,
+      "trt_move": 2146598918,
+      "visit_l1": 0.1133
+    },
+    {
+      "pos": 47,
+      "torch_move": 2147778549,
+      "trt_move": 2147909621,
+      "visit_l1": 1.0703
+    },
+    {
+      "pos": 62,
+      "torch_move": 2148958198,
+      "trt_move": 2148499457,
+      "visit_l1": 0.9609
+    },
+    {
+      "pos": 67,
+      "torch_move": 2148499444,
+      "trt_move": 2147581948,
+      "visit_l1": 0.1055
+    },
+    {
+      "pos": 70,
+      "torch_move": 2145943562,
+      "trt_move": 2145812495,
+      "visit_l1": 0.6719
+    },
+    {
+      "pos": 71,
+      "torch_move": 2146729992,
+      "trt_move": 2146926598,
+      "visit_l1": 0.3477
+    },
+    {
+      "pos": 77,
+      "torch_move": 2147713017,
+      "trt_move": 2147254277,
+      "visit_l1": 0.9219
+    }
+  ]
+}

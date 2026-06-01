@@ -612,7 +612,10 @@ def test_dense_cnn_rust_batch_input_encoder_matches_python_sample_encoder() -> N
         expected = samples_module.expand_sample(sample)["input"]
 
         assert tuple(int(item) for item in payload["centers"][index]) == sample.center
-        assert tuple(int(item) for item in payload["legal_action_ids"][index]) == sample.legal_action_ids
+        # legal_action_ids is now a compact array("q"); compare decoded to ints.
+        assert tuple(int(item) for item in payload["legal_action_ids"][index]) == tuple(
+            int(item) for item in sample.legal_action_ids
+        )
         torch.testing.assert_close(rust_inputs[index], expected, rtol=0.0, atol=0.0)
 
 
@@ -907,6 +910,8 @@ def test_dense_cnn_mcts_python_boundary_delegates_to_rust(monkeypatch: pytest.Mo
         widening_policy_mass: float | None,
         widening_max_children: int | None,
         widening_min_children: int | None,
+        forced_playout_k: float | None = None,
+        move_temperatures: Sequence[float] | None = None,
     ) -> tuple[Mapping[str, Any], ...]:
         calls.append(
             {
@@ -928,6 +933,8 @@ def test_dense_cnn_mcts_python_boundary_delegates_to_rust(monkeypatch: pytest.Mo
                 "widening_policy_mass": widening_policy_mass,
                 "widening_max_children": widening_max_children,
                 "widening_min_children": widening_min_children,
+                "forced_playout_k": forced_playout_k,
+                "move_temperatures": move_temperatures,
             }
         )
         return (
@@ -995,6 +1002,8 @@ def test_dense_cnn_mcts_python_boundary_delegates_to_rust(monkeypatch: pytest.Mo
             "widening_policy_mass": None,
             "widening_max_children": None,
             "widening_min_children": None,
+            "forced_playout_k": None,
+            "move_temperatures": None,
         }
     ]
 
@@ -1138,7 +1147,8 @@ def test_dense_cnn_payload_inference_respects_configured_max_batch_size() -> Non
     model = CountingModel()
     inference = inference_cls(model, device="cpu", amp=False, max_batch_size=2)
     rows = 5
-    inputs = torch.zeros((rows, dense_cnn.INPUT_CHANNELS, dense_cnn.BOARD_SIZE, dense_cnn.BOARD_SIZE), dtype=torch.float32)
+    # MCTS evaluator inputs are f16 transport (Rust PlaneBuffer); upcast on-device.
+    inputs = torch.zeros((rows, dense_cnn.INPUT_CHANNELS, dense_cnn.BOARD_SIZE, dense_cnn.BOARD_SIZE), dtype=torch.float16)
     payload = {
         "inputs": inputs.numpy().tobytes(),
         "shape": inputs.shape,
@@ -1166,7 +1176,7 @@ def test_dense_cnn_payload_inference_rejects_legacy_legal_index_payload() -> Non
             }
 
     inference = inference_cls(Model(), device="cpu", amp=False)
-    inputs = torch.zeros((1, dense_cnn.INPUT_CHANNELS, dense_cnn.BOARD_SIZE, dense_cnn.BOARD_SIZE), dtype=torch.float32)
+    inputs = torch.zeros((1, dense_cnn.INPUT_CHANNELS, dense_cnn.BOARD_SIZE, dense_cnn.BOARD_SIZE), dtype=torch.float16)
 
     with pytest.raises(ValueError, match="legal_flat_indices_bytes"):
         inference.evaluate_model1_payload(

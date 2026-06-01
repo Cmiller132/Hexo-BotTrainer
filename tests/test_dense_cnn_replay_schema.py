@@ -77,8 +77,9 @@ def test_policy_surprise_materializes_frequency_weighted_rows_deterministically(
     assert all(row.policy_surprise >= 0.0 for row in first)
 
 
-def test_selfplay_npz_writer_uses_fixed_schema_and_sidecar(tmp_path: Path) -> None:
+def test_selfplay_npz_writer_uses_compact_schema_and_sidecar(tmp_path: Path) -> None:
     replay = _replay_module()
+    compact_io = importlib.import_module("hexo_models.dense_cnn.compact_io")
     rows = replay.materialize_policy_surprise_rows(
         (
             _sample("a", policy=((_action(0, 0), 1.0),), prior=((_action(0, 0), 1.0),)),
@@ -98,14 +99,20 @@ def test_selfplay_npz_writer_uses_fixed_schema_and_sidecar(tmp_path: Path) -> No
 
     assert result.path.exists()
     assert result.sidecar_path.exists()
-    with np.load(result.path) as data:
-        assert set(data.files) == set(replay.NPZ_KEYS)
-        assert data[replay.INPUT_KEY].shape[0] == len(rows)
-        assert data[replay.POLICY_KEY].shape[1:] == (1, 41, 41)
-        assert data[replay.ROOT_POLICY_KEY].shape[1:] == (1, 41, 41)
-        assert data[replay.LEGAL_MASK_KEY].dtype == np.bool_
-        assert data[replay.SHORT_TERM_VALUE_KEY].shape == (len(rows), 2)
-        assert data[replay.METADATA_KEY].shape == (len(rows), 4)
+    # Compact columnar schema: per-row scalar arrays + variable-length data + offsets.
+    with np.load(result.path, allow_pickle=True) as data:
+        keys = set(data.files)
+        assert {
+            "turn_index", "value", "stvalue", "stvalue_mask", "horizons",
+            "stones_off", "legal_ids", "legal_off", "pol_act", "pol_w", "pol_off",
+        } <= keys
+        assert data["turn_index"].shape == (len(rows),)
+        assert data["value"].shape == (len(rows),)
+        assert data["stvalue"].shape == (len(rows), 2)
+        assert tuple(int(h) for h in data["horizons"]) == (1, 4)
+        assert data["legal_off"].shape == (len(rows) + 1,)
+    assert compact_io.compact_row_count(result.path) == len(rows)
+    assert len(compact_io.read_compact_shard(result.path)) == len(rows)
     sidecar = json.loads(result.sidecar_path.read_text(encoding="utf-8"))
     assert sidecar["num_rows"] == len(rows)
     assert sidecar["raw_rows"] == 2

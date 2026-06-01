@@ -70,9 +70,10 @@ def test_sample_from_state_attaches_search_targets_to_rust_facts(monkeypatch: An
     assert calls["turn_index"] == 3
     assert calls["metadata"]["sample_source"] == "mcts"
     assert calls["metadata"]["target_schema_version"] == samples.CURRENT_TARGET_SCHEMA_VERSION
-    # Python attaches the search policy and normalizes the root prior.
-    assert sample.policy == ((99, 4.0),)
-    assert sample.root_prior_policy == ((99, 1.0),)
+    # Python attaches the search policy and normalizes the root prior. Both are
+    # stored byte-backed (CompactVisitPolicy) now; decode to pairs to compare.
+    assert tuple(sample.policy) == ((99, 4.0),)
+    assert tuple(sample.root_prior_policy) == ((99, 1.0),)
     assert sample.value == 0.0  # outcome target is filled at finalization, not here
 
 
@@ -116,6 +117,7 @@ def test_mcts_session_search_forwards_slim_signature(monkeypatch: Any) -> None:
             widening_max_children: int | None,
             widening_min_children: int | None,
             forced_playout_k: float | None,
+            move_temperatures: list[float] | None,
         ) -> tuple[dict[str, Any], ...]:
             calls["args"] = {
                 "game_keys": game_keys,
@@ -136,6 +138,7 @@ def test_mcts_session_search_forwards_slim_signature(monkeypatch: Any) -> None:
                 "widening_max_children": widening_max_children,
                 "widening_min_children": widening_min_children,
                 "forced_playout_k": forced_playout_k,
+                "move_temperatures": move_temperatures,
             }
             return (
                 {
@@ -169,6 +172,7 @@ def test_mcts_session_search_forwards_slim_signature(monkeypatch: Any) -> None:
         virtual_batch_size=3,
         root_dirichlet_total_alpha=10.83,
         root_policy_temperature=1.1,
+        move_temperatures=[0.9, 0.2],
     )
 
     assert calls["args"] == {
@@ -190,6 +194,7 @@ def test_mcts_session_search_forwards_slim_signature(monkeypatch: Any) -> None:
         "widening_max_children": None,
         "widening_min_children": None,
         "forced_playout_k": None,
+        "move_temperatures": [0.9, 0.2],
     }
     assert payloads[0]["action_id"] == 7
 

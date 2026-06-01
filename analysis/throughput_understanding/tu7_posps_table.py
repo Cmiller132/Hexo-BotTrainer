@@ -37,11 +37,13 @@ CONFIG = REPO / "configs" / "dense_cnn_model1_target_96x6.toml"
 CKPT = REPO / "runs" / "dense_cnn_model1_target_96x6" / "checkpoints" / "bootstrap_sealbot_prefit.pt"
 RESULT = Path(__file__).resolve().parent / "_tu7_posps_table.json"
 
+_KEYS = ("HEXO_TRT", "HEXO_BUCKET_PAD_MULTIPLE", "HEXO_ADAPTIVE_VBATCH")
 CONFIGS = [
-    ("baseline",    {"HEXO_TRT": None, "HEXO_BUCKET_PAD_MULTIPLE": None}),
-    ("+bucketing",  {"HEXO_TRT": None, "HEXO_BUCKET_PAD_MULTIPLE": "16"}),
-    ("+trt",        {"HEXO_TRT": "1",  "HEXO_BUCKET_PAD_MULTIPLE": None}),
-    ("+trt+bucket", {"HEXO_TRT": "1",  "HEXO_BUCKET_PAD_MULTIPLE": "16"}),
+    ("baseline",   {}),
+    ("+bucketing", {"HEXO_BUCKET_PAD_MULTIPLE": "16"}),
+    ("+adaptivevb",{"HEXO_ADAPTIVE_VBATCH": "1"}),
+    ("+trt",       {"HEXO_TRT": "1"}),
+    ("+combined",  {"HEXO_TRT": "1", "HEXO_BUCKET_PAD_MULTIPLE": "16", "HEXO_ADAPTIVE_VBATCH": "1"}),
 ]
 
 
@@ -118,6 +120,7 @@ def main():
     model, parsed = build()
     results = []
     for name, env in CONFIGS:
+        set_env({k: None for k in _KEYS})  # clear all gates first
         set_env(env)
         print(f"\n=== config {name} (env {env}) ===", flush=True)
         r = run_one(name, model, parsed, args.games, args.active, args.vbatch)
@@ -125,7 +128,7 @@ def main():
         ti = r["trt_info"] or {}
         print(f"  full_pos/s={r['full_pos_per_s']:.2f} search_pos/s={r['search_pos_per_s']:.2f} "
               f"trt_adopted={ti.get('adopted')} bucket_mult={r['bucket_pad_multiple']}", flush=True)
-        set_env({k: None for k in env})
+    set_env({k: None for k in _KEYS})
 
     base = results[0]["full_pos_per_s"]
     print("\n=== pos/s table (full pipeline) ===", flush=True)

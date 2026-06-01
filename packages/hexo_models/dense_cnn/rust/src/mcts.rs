@@ -82,7 +82,7 @@ impl Model1MctsSession {
         self.searches.len()
     }
 
-    #[pyo3(signature = (game_keys, states, visits, c_puct, temperature, seed, evaluator, virtual_batch_size=None, active_root_limit=None, root_dirichlet_total_alpha=None, root_dirichlet_noise_fraction=None, root_policy_temperature=None, fpu_reduction=None, virtual_loss=None, widening_policy_mass=None, widening_max_children=None, widening_min_children=None, forced_playout_k=None))]
+    #[pyo3(signature = (game_keys, states, visits, c_puct, temperature, seed, evaluator, virtual_batch_size=None, active_root_limit=None, root_dirichlet_total_alpha=None, root_dirichlet_noise_fraction=None, root_policy_temperature=None, fpu_reduction=None, virtual_loss=None, widening_policy_mass=None, widening_max_children=None, widening_min_children=None, forced_playout_k=None, move_temperatures=None))]
     fn search(
         &mut self,
         py: Python<'_>,
@@ -104,6 +104,13 @@ impl Model1MctsSession {
         widening_max_children: Option<u32>,
         widening_min_children: Option<u32>,
         forced_playout_k: Option<f32>,
+        // Optional per-root move-selection temperature (one entry per game key,
+        // aligned with `game_keys`). When provided, each root's played action is
+        // sampled at its own temperature instead of the scalar `temperature`; this
+        // is how self-play applies a per-move temperature decay across a batch of
+        // games that are each at a different move number. `temperature` remains the
+        // validated fallback used when this is None.
+        move_temperatures: Option<Vec<f32>>,
     ) -> PyResult<Py<PyAny>> {
         // Validate true native-search boundaries here. The Python wrapper is a
         // transport layer and intentionally does not duplicate these checks.
@@ -119,6 +126,29 @@ impl Model1MctsSession {
                 roots.len()
             )));
         }
+        // Resolve the per-root move-selection temperatures once: an explicit vector
+        // (validated to match the root count and be finite/non-negative) or the
+        // scalar `temperature` broadcast to every root.
+        let move_temps: Vec<f32> = match move_temperatures {
+            Some(values) => {
+                if values.len() != roots.len() {
+                    return Err(PyValueError::new_err(format!(
+                        "move_temperatures has {} entries for {} roots",
+                        values.len(),
+                        roots.len()
+                    )));
+                }
+                for value in &values {
+                    if !value.is_finite() || *value < 0.0 {
+                        return Err(PyValueError::new_err(
+                            "move_temperatures entries must be finite and >= 0",
+                        ));
+                    }
+                }
+                values
+            }
+            None => vec![temperature; roots.len()],
+        };
         let root_limit = validate_positive_usize(
             "active_root_limit",
             active_root_limit.unwrap_or(MODEL1_ACTIVE_ROOT_LIMIT),
@@ -269,7 +299,7 @@ impl Model1MctsSession {
                 select_search_action(
                     search,
                     baselines.get(index),
-                    temperature,
+                    move_temps[index],
                     seed.wrapping_add(index as u64),
                 )
             })
@@ -278,7 +308,7 @@ impl Model1MctsSession {
             py,
             &searches,
             &batch_diagnostics,
-            temperature,
+            &move_temps,
             seed,
             Some(&baselines),
             c_puct,
@@ -549,7 +579,7 @@ fn build_search_result_payloads(
     py: Python<'_>,
     searches: &[RustSearch],
     batch_diagnostics: &Bound<'_, PyDict>,
-    temperature: f32,
+    temperatures: &[f32],
     seed: u64,
     baselines: Option<&[HashMap<PackedCoord, u32>]>,
     c_puct: f32,
@@ -579,7 +609,7 @@ fn build_search_result_payloads(
         let selected = select_action_from_policy(
             &policy_action_ids,
             &policy_weights,
-            temperature,
+            temperatures[index],
             seed.wrapping_add(index as u64),
         )?;
         result.set_item("action_id", selected.unwrap_or(0))?;
@@ -1123,6 +1153,9 @@ fn build_batch_diagnostics<'py>(
     eval.set_item("encoding_seconds", evaluation.encoding_seconds)?;
     eval.set_item("evaluator_seconds", evaluation.evaluator_seconds)?;
     eval.set_item("parse_seconds", evaluation.parse_seconds)?;
+    eval.set_item("payload_seconds", evaluation.payload_seconds)?;
+    eval.set_item("dedup_seconds", evaluation.dedup_seconds)?;
+    eval.set_item("cache_insert_seconds", evaluation.cache_insert_seconds)?;
 
     let diagnostics = PyDict::new(py);
     diagnostics.set_item("tree", tree)?;

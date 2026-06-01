@@ -61,6 +61,7 @@ def model1_mcts_session_search(
     widening_max_children: int | None = None,
     widening_min_children: int | None = None,
     forced_playout_k: float | None = None,
+    move_temperatures: Sequence[float] | None = None,
 ) -> tuple[Mapping[str, Any], ...]:
     """Search through a native MCTS session, preserving chosen subtrees.
 
@@ -89,6 +90,7 @@ def model1_mcts_session_search(
             widening_max_children,
             widening_min_children,
             forced_playout_k,
+            None if move_temperatures is None else [float(t) for t in move_temperatures],
         )
     )
 

@@ -161,6 +161,7 @@ checkpoint_pointer = "../data/checkpoints/dense_cnn_model1_target_96x6_latest.tx
 passes_per_epoch = 1
 
 [checkpoint]
+resume_from = "/mnt/e/Hexo-BotTrainer/runs/dense_cnn_model1_target_96x6/checkpoints/epoch_000002.pt"
 # Fresh run: no resume_from (the supervisor injects resume_from=<latest epoch_*.pt>
 # on each relaunch; first launch has none and uses initialize_from below).
 # initialize_from is the FRESH SealBot-bootstrapped prefit for THIS architecture

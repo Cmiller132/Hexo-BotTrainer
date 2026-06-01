@@ -1,0 +1,18 @@
+{
+  "n_positions": 400,
+  "search_visits": 512,
+  "ref_sims": 1536,
+  "flip_rate": 0.0575,
+  "flips": 23,
+  "mean_regret": -0.0020536801812704652,
+  "regret_std": 0.036141497214845546,
+  "regret_95ci": 0.003541866727054863,
+  "regret_ci_low": -0.005595546908325328,
+  "regret_ci_high": 0.001488186545784398,
+  "mean_regret_on_flips_only": -0.03572173913043478,
+  "flips_torch_better": 10,
+  "flips_trt_better": 13,
+  "flips_tied": 0,
+  "max_single_regret": 0.1872,
+  "note": "regret = quality(torch_move) - quality(trt_move) in win-prob units; >0 => TRT worse"
+}

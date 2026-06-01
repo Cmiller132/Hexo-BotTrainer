@@ -1,148 +1,135 @@
-# Handoff — dense_cnn Model 1 (scratch_64) MCTS memory work + crash hunt
+# HANDOFF — dense_cnn Model 1 (target_64x4) cold-start run
 
-This is a session handoff for continuing the dense_cnn Model 1 training work. It
-assumes the reader has read `Model 1 goal.md` (the staged goals) and
-`CLAUDE.md` (build/test/run conventions). Branch: **`rust-rebuild`**.
+Date: 2026-05-30. Branch: **`bench/inference-backends-wsl`** (all work below is uncommitted on
+this branch). Read `CLAUDE.md` first for repo layout/build; this doc is the live state + recent
+work. Tight orientation also in `NOTES.md`; deep perf writeup in
+`runs/selfplay_profile_findings.md`. (A prior `rust-rebuild`/scratch_64 crash-hunt handoff was
+here before — it is superseded by this doc.)
 
-## Where this sits in the Model 1 goals
+## 1. What this project is
+Single-machine reinforcement-learning trainer for the board game **Hexo** (Ryzen 7950X + one
+CUDA GPU, RTX 4070 Ti 12 GB). Self-play → train → checkpoint → eval, AlphaZero/KataGo-style.
+Production target is **Model 1**, a dense CNN in the `hexo_models.dense_cnn` package. Six
+installable packages (Rust+PyO3 for engine/utils/models, pure-Python for runner/train/frontend).
+Board is fixed 41×41, 13 input planes, 65-bin value head, `ActionId = u32_i16_pair`. Training is
+driven by the config CLI: `python -m hexo_train.cli.train_model <config.toml>`; lifecycle lives
+in `hexo_train.pipeline.TrainingPipeline`.
 
-We are in **Goal #4 territory** (train many epochs until the model holds its own
-vs SealBot best-50ms), running the small **64-channel / 4-block** config
-(`configs/dense_cnn_model1_scratch_64.toml`). Goal #2's calibration and the
-KataGo-style selfplay/shuffler/training split are in place. The immediate work
-is *keeping a long run alive* — which is currently blocked by an intermittent
-native crash (see "Open issue" below).
+## 2. The model (dense_cnn "Model 1")
+- **Architecture** (`architecture.py`): conv-in (13→C) + N gated residual blocks (HexConv2d, a
+  3×3 conv with the two non-hex corners masked) + heads: **policy** (fully-conv P7, one logit per
+  41×41 crop cell), **value** (65-bin KataGo-style), **opp_policy**, short-term-value heads
+  (horizons 1/4/8). `forward_policy_value` is the search-only path (policy+value).
+  `optimized_model1_for_inference` folds HexConv/BN into plain convs for CUDA.
+- **Current run config** (`configs/dense_cnn_model1_target_64x4.toml`): **64 channels × 4
+  blocks** (small trunk for fast iteration), **256 MCTS sims/move**, `active_games=256`,
+  `forced_playout_k=2`, temperature decay 1.0→0.2 by ply 30, **cold start from random init (no
+  SealBot bootstrap — `initialize_from`/`resume_from` are absent; the supervisor's "uses
+  initialize_from → bootstrapped" log line is COSMETIC)**, TensorRT FP16 self-play eval, 60
+  epochs, `games_per_epoch=512`, `max_actions=1024`.
+- **Python/Rust split:** Python owns PyTorch, config, self-play control, sample finalization, NPZ
+  replay/shuffle, training, checkpoints. Rust owns live `HexoState` intake, dense tensor
+  encoding, batched PUCT MCTS (tree reuse via `advance_root`, policy-nucleus widening
+  max_children=32), and state-derived sample facts. Native calls go through
+  `hexo_models._rust.dense_cnn` — built INTO the `hexo_models` package via `#[path]` includes, so
+  editing `dense_cnn/rust/src/*.rs` requires rebuilding **`hexo_models`**, not a separate crate.
 
-## What was done this session
+## 3. What's going on right now (THIS session's work)
+The run was relaunched after a **self-play performance + memory effort**. All changes are
+**byte-identical / functionally verified** (§5). Three landed fixes:
 
-### 1. MCTS memory & churn reduction (Change 1 — KEEP)
-Implemented the approved "Dense CNN MCTS — memory & churn reduction" plan in
-`packages/hexo_models/dense_cnn/rust/src/{mcts_eval.rs,mcts_tree.rs,mcts.rs}`:
-- Eval-cache priors are now shared via **`Arc<RustEvaluation>`** (not `Rc` —
-  `RustSearch` must be `Send` for `searches.par_iter_mut()` under rayon).
-- Node priors are a `NodePriors` enum: `Shared(Arc<RustEvaluation>)` for interior
-  nodes (no per-node prior copy) and `Owned(Vec<RustPriorCandidate>)` for roots
-  (mutable for temperature + Dirichlet noise). `ensure_root_owned()` converts a
-  reused/promoted `Shared` root to `Owned` before noise.
-- Cache priors are normalized + sorted descending in `finalize_model_priors`.
-- `root_prior_policy` exports the full distribution from either variant, so the
-  training data (`root_prior_policy` → policy-surprise weights + `rootPolicy`
-  target) stays **byte-identical**. This was the hard constraint and it holds.
-- **Result: real memory win.** Tree prior memory ~6 MB (shared, counted once)
-  vs ~1–1.6 GB of duplicated per-node priors before. Throughput-neutral.
+1. **Zero-copy plane buffer (≈1.85× self-play)** — `mcts_eval.rs`. The Rust→Python `inputs`
+   handoff was a serial ~89 MB `PyBytes` memcpy *every forward pass* (was 46% of self-play
+   wall). Replaced with a buffer-protocol `#[pyclass] PlaneBuffer` that `torch.frombuffer` views
+   zero-copy. (Diagnosed with `scripts/_profile_selfplay.py`: forwards were already full 1024,
+   eval cache 0% hit mid-game — the copy, not the GPU, was the bottleneck.)
+2. **f16 input transport (≈1.06×, halves H2D)** — `PlaneBuffer` now carries **f16** planes;
+   `inference.py` reads `dtype=float16` and upcasts f16→f32 **on-device** after the halved
+   host→device copy, so the TRT engine + forward are unchanged. Added `half` crate to
+   `hexo_models/Cargo.toml`. Gated byte-identical (TRT already downcasts its f32 input to f16).
+3. **Sample compaction (~13× smaller pending samples — fixes an OOM)** — `samples.py`, pure
+   Python. See §4.
 
-### 2. Change 2 (eval-cache cap) — REVERTED, and the reason matters
-A prior session lowered `MODEL1_EVAL_CACHE_MAX_STATES` to 131,072 believing it
-caused a throughput regression, then reverted it (scratch_64 → 262144, main +
-defaults + test → 1,048,576). **The revert is in place but the diagnosis behind
-it was wrong.** Direct per-epoch diagnostics show:
+Net: self-play **~29 → ~58 pos/s**, and the pending-sample OOM is gone.
 
-| Cap     | real epoch-9 pos/s | unique states | recomputes (inserts−unique) |
-|---------|--------------------|---------------|-----------------------------|
-| 131072  | 11.48              | 1,416,161     | **0**                       |
-| 262144  | 11.31              | 1,395,037     | **0**                       |
+## 4. The OOM that was fixed (key context)
+On the first optimized relaunch the run climbed to **27.7 GB RSS and OOM'd mid-epoch**.
+Root-caused (NOT the perf fixes — proven via a leak probe = +0 KB/call; and MCTS trees are
+bounded): **cold-start games barely terminate** (random net), so 256 concurrent games run ~426
+plies deep toward `max_actions=1024`, each hoarding a per-ply `pending` policy-sample list. Each
+sample was **~320 KB** — ~75% Python-object overhead on packable arrays (`root_prior_policy`
+stored all ~1471 legal-move priors as Python `(int,float)` tuples; `legal_action_ids` as Python
+ints; `stones`/`placement_history` grew O(ply) as tuples-of-tuples).
 
-`eval_cache_inserts == eval_unique_states` in every block → **eviction never
-forces a recompute** (tree reuse holds live states in the shared Arc nodes; only
-dead states get evicted). There was never any cache thrashing. The "30 → 13
-pos/s regression" was a **phantom**: ~30–34 was the *calibration probe* (2048
-fresh-root positions, full GPU parallelism), while real-epoch selfplay is
-~11 pos/s **regardless of cap or Change 1** — it's bounded by the GPU evaluator
-running ~1.4M unique forward passes/epoch. The two numbers were never the same
-metric.
+Fix (`samples.py`): policies → byte-backed `CompactVisitPolicy` (search already returns this);
+`legal_action_ids` → `array("q")`; `stones`/`placement_history` → columnar
+`_PackedStones`/`_PackedHistory` (int16 coords + 1-byte owner) that **iterate to the identical
+tuples the encoder expects** (so `input.py build_input_planes` is unchanged), dropping 3
+encoder-unused history fields. **Sample 312 KB → ~24 KB.** In-memory only — NPZ schema unchanged.
 
-**Implication:** the cache cap is throughput-neutral. Re-applying Change 2
-(131072) would reclaim ~340 MB of cache RAM for free, but it's not urgent.
-Decision was left to the user.
+## 5. Verification done (all green)
+- **Full test suite: 154 passed** (`scripts/_run_all_tests.sh`). Updated 3 tests + 1 stale fake
+  to the compact/f16 representations.
+- **Functional identity PROVEN** (`scripts/_equiv_check.py`): expanding a compacted sample vs a
+  tuple-form sample of identical data through `expand_sample` under all 12 D6 symmetries →
+  **4284/4284 training tensors `torch.equal`**. Training data is bit-identical.
+- **Production RAM verified plateaus** (`scripts/_ram_monitor.sh`): over ~13.5 min / 29 games
+  trainer RSS held ~5.5→6.5 GB with ~21.5 GB free and a *flattening* slope (pre-fix hit 27 GB and
+  OOM'd by ~30 min). pos/s steady ~58, TRT argmax-match 1.0, search-exact.
 
-### 3. Change 3 (thread_local encode scratch) — KEEP
-`evaluate_model1_states_chunk` reuses a `thread_local` `(Vec<f32>, Vec<i64>)`
-scratch instead of re-allocating ~89 MB planes per chunk.
+## 6. Current state / what's running
+- **Supervised cold-start epoch RUNNING** (relaunched 2026-05-30 ~21:42 UTC). Supervisor PID
+  ~3381, trainer ~3412 (WSL). Epoch 1 self-play in progress (~30 of 512 games done at writing),
+  RAM healthy. **No checkpoint yet** — epoch 1 self-play must finish before train+checkpoint+eval.
+- WSL venv `/root/.venvs/hexo-bottrainer-wsl` (py3.12, torch, tensorrt). The supervisor sets
+  `PYTHONPATH` to the worktree `packages/*/python` so it uses the freshly-built native module.
 
-### Tests + build
-Rust unit tests (3 new in `mcts_tree.rs`) + a Python two-move tree-reuse
-regression test (`tests/test_dense_cnn_performance.py`) pass. Native extension is
-built via `maturin build` (no venv on this machine — see build note below) and
-the `.pyd` extracted into `packages/hexo_models/python/hexo_models/`.
+## 7. How to operate (WSL; invoke via PowerShell: `wsl -d Ubuntu-24.04 -- bash <script-path>`)
+- **Status:** `scripts/_status_64x4.sh` · `scripts/_ram_check.sh` (RSS/MemAvailable/live pos/s).
+- **Stop:** `scripts/_stop_64x4.sh` (kills supervisor FIRST so it can't relaunch, then trainer).
+- **Relaunch clean:** `scripts/_wipe_and_relaunch_64x4.sh` (refuses if procs alive; wipes run dir;
+  detaches via `setsid nohup … < /dev/null &` — a plain `disown` dies on WSL session exit).
+- **Wait for self-play:** `scripts/_wait_selfplay_64x4.sh`.
+- **Rebuild native after Rust edits:** `scripts/_rebuild_and_profile.sh` (sets `VIRTUAL_ENV` +
+  rustup cargo on PATH — apt cargo is too old for lockfile v4; full `cargo clean` only on an
+  E0461 ICE). **Pure-Python edits (e.g. `samples.py`) need NO rebuild.**
+- **Diagnostic probes (on-demand, each has a `_run_*.sh` wrapper):** `_profile_selfplay.py`
+  (time split + forward floor + batch histogram), `_sample_size_probe.py` (per-field bytes),
+  `_tree_growth_probe.py` (`PROBE_PENDING=1 PROBE_PLIES=N` → RAM-vs-plies), `_leak_probe.py`
+  (eval-path leak), `_equiv_check.py` (functional identity), `_mem_breakdown.sh`.
+- **GOTCHAS:** inline `bash -c "...$(...)..."` via the PowerShell→wsl bridge mangles quoting —
+  always run a **script file**. Native Windows GPU memory (~3 GB) is the Windows desktop sharing
+  the GPU, not our process. Run dir: `runs/dense_cnn_model1_target_64x4/`
+  (`selfplay/`, `checkpoints/`, `diagnostics/`). Dashboard: http://localhost:8080. Supervisor
+  guardrails: auto-relaunch + resume-from-latest; circuit breaker (3 crashes <180s OR >6/hr OR 5
+  no-progress → `diagnostics/supervisor_halted.flag`); RAM watchdog → `diagnostics/watch_wsl.jsonl`.
 
-## OPEN ISSUE (blocking) — intermittent native crash during selfplay
+## 8. Open items / watch next
+- **First epoch result:** when epoch 1 self-play finishes, expect a checkpoint + a training step
+  (`loss_components`: policy/value/opp/stvalue, train + held-out val in `diagnostics/
+  epoch_000001.json`) + a SealBot best-50ms eval (`dense_cnn.evaluation.epoch_*.json`). Report
+  whether **policy CE drops** and value CE / winrate / mean game-length move — the real "is it
+  learning" signal. (Prior 96×6 lesson: a *rising* epoch-loss was a measurement artifact, not
+  divergence; the real limiter was a diffuse policy head — so trust the fixed-holdout val + a
+  `_loss_decomp.py`-style check over checkpoints, not the raw epoch loss.)
+- **Cold-start games are long** (don't terminate at random init) → epoch 1 self-play is the
+  slowest; later epochs speed up as games shorten. Expected, not a bug.
+- **Uncommitted:** all of §3-4 (Rust + Python + `half` dep + config + test updates + scripts) is
+  on `bench/inference-backends-wsl`. Commit when the user asks.
+- **Further memory headroom (NOT needed — OOM solved):** `array('q')→'I'` on legal ids (8→4 B);
+  shrink the eval cache (`mcts_session_cache_max_states` 131072, ~0% hit ≈ 2 GB); or recompute
+  board facts from the move history at expand-time (O(N) vs O(N²), trades CPU for memory).
+- **96×6 run is PAUSED, not deleted** — `runs/dense_cnn_model1_target_96x6/checkpoints/
+  epoch_000011.pt` preserved; resume with `scripts/supervise_target_96x6_wsl.sh`. Never run both
+  (one GPU).
 
-The trainer **self-terminates natively** roughly once per 1–2 epochs during
-selfplay. Two confirmed occurrences:
-- Run A (PID 47300): at the epoch 9→10 boundary.
-- Run B (PID 23156): mid-epoch-11.
-
-Signature: **no Python traceback, no Windows Error Reporting event, no crash
-dump, no resource pressure** (watchdog `status: ok`, ~17 GB free RAM, GPU idle at
-the time) and **not** a watchdog kill. Both crashed builds include Change 1, and
-there is **no no-Change-1 baseline**, so Change 1 is a suspect but unproven — a
-code audit of the new hot path (`materialize_next_candidate` is guarded by a
-prior `peek_next_candidate`; `can_widen` bounds `edges.len() < max_eligible ≤
-priors.len()`; `ensure_root_owned`/`remaining_priors` use `.min(len)`) found
-**no unguarded panic**. The fault could be pre-existing (inference/engine).
-
-### Instrumented run currently live
-Run C is up with diagnostics enabled to make the next crash talk:
-- **Trainer PID: 10672**, logs `runs/dense_cnn_model1_scratch_64/diagnostics/trainer.20260528_231854.{out,err}.log`
-- Env set at launch (inherited via `Start-Process`):
-  `PYTHONFAULTHANDLER=1` (dumps Python+native frame on SIGSEGV/SIGABRT to stderr),
-  `PYTHONUNBUFFERED=1`, `RUST_BACKTRACE=full`.
-- Restarts at **epoch 9** (config uses `[checkpoint] initialize_from` = bootstrap
-  epoch 8, which always reloads the bootstrap → start at epoch 9). Latest saved
-  checkpoint on disk is `epoch_000010.pt`.
-
-### Next steps when it crashes
-1. Read the tail of the `.err.log` — `PYTHONFAULTHANDLER` should print
-   `Fatal Python error` / `Current thread ...` with the active Python frame
-   (tells you whether it died in inference forward, the Rust MCTS step, or the
-   engine). A Rust unwinding panic prints `thread '...' panicked at ...` +
-   `stack backtrace:`.
-2. If there is **no** faulthandler dump either, it's a hard crash (stack
-   overflow / CUDA driver abort) — escalate to a real minidump by setting
-   `HKLM\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\python.exe`
-   (`DumpType=2`) and inspect the faulting module.
-3. **Do NOT keep blindly relaunching.** Root-cause first. If Change 1 is
-   implicated, the fix is in `mcts_tree.rs` / `mcts.rs`; rebuild per the note
-   below.
-
-## Monitoring routine (session-based — re-arm each session)
-
-The routine is **session-only by design** (dies when the Claude session ends; it
-is NOT a durable/disk-backed cron). To re-establish it in a new session:
-
-1. **Recurring 30-min check-in** — create a session cron (`CronCreate`, NOT
-   durable) firing at off-minutes, e.g. `17,47 * * * *`, with a prompt that:
-   checks PID 10672 liveness, the latest checkpoint, current epoch + selfplay
-   game count, and scans the `.err.log` for fault signatures; on crash, dumps and
-   analyzes the captured stderr fault/backtrace and STOPS (no auto-relaunch).
-2. **Real-time crash monitor** — a persistent `Monitor` that polls
-   `powershell.exe Get-Process -Id 10672` for liveness, greps the `.err.log` for
-   `Fatal Python error|Current thread|panicked|stack backtrace|SIGSEGV|SIGABRT`,
-   flags new checkpoints, ~3-min heartbeat, and on exit dumps the last ~40 stderr
-   lines. This catches the crash in real time (the cron is just the periodic
-   check-in cadence on top).
-
-If the PID has changed (relaunch), update both to the new PID and log stamp.
-
-## Key facts / commands
-
-- **Shell quirks:** the Bash tool is **git-bash** — repo is `/e/Hexo-BotTrainer`
-  (NOT `/mnt/e/...`, which is WSL and does not exist here). Windows-native
-  `C:\Python314\python.exe` cannot open `/e/...` paths — use `E:/...` in
-  `python -c` file opens (stdin pipes are fine).
-- **Build (no venv):**
-  `C:\Python314\python.exe -m maturin build --release -m packages\hexo_models\Cargo.toml --features python`
-  then extract `hexo_models/_rust.cp314-win_amd64.pyd` from
-  `target/wheels/hexo_models-0.1.0-cp314-cp314-win_amd64.whl` into
-  `packages/hexo_models/python/hexo_models/`. `maturin develop` FAILS (no venv).
-- **PYTHONPATH for tests/runs:** the five package `python/` dirs
-  (`hexo_models, hexo_train, hexo_runner, hexo_engine, hexo_utils`).
-- **Launcher:** `scripts\start_model1_training.ps1 -ConfigPath configs\dense_cnn_model1_scratch_64.toml -SealBotPath E:\SealBot`
-  (starts watchdog + trainer; inherits current shell env, so set the diagnostic
-  env vars in the same PowerShell command).
-- **Progress source of truth:** `runs/.../diagnostics/events.jsonl` (stage_started
-  / stage_finished per epoch) and the per-game `selfplay/epoch_NNNNNN_game_*.npz`
-  shards. The `.out.log` is empty (app logs to events.jsonl + stderr, not stdout).
-- **Working state at handoff:** PID 10672 alive, redoing epoch 9, ~45 games in;
-  SealBot eval shows `wins: 0` vs best-50ms (expected this early — watch game
-  length per Goal #4, not just wins).
+## 9. Key file map (dense_cnn)
+- Self-play loop: `dense_cnn/python/.../selfplay.py` · MCTS Python boundary + `CompactVisitPolicy`:
+  `mcts.py` · Torch evaluator/inference (+ f16 upcast): `inference.py` · **samples (compaction):
+  `samples.py`** · tensor expansion: `input.py` · trainer/losses: `trainer.py`/`losses.py` ·
+  replay/NPZ + policy-surprise: `replay.py` · calibration: `performance.py` · plugin/registry:
+  `plugin.py`, `hexo_train/registry.py`.
+- Rust: `dense_cnn/rust/src/mcts.rs` (PUCT, result payloads), **`mcts_eval.rs` (PlaneBuffer +
+  eval cache + encode→Python)**, `encoding.rs` (planes), `sample_gen.rs` (state facts).
+- When changing the representation, update BOTH language halves together (CLAUDE.md lists the
+  exact file pairs).
