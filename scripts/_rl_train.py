@@ -193,9 +193,11 @@ def main():
             def make_dense(seed):
                 return DenseCNNPlayer(identity_id="dense-cnn-e24", model=dmodel, trainer=dtrainer,
                                       record_samples=False, eval_seed=seed)
+            # FIXED eval seed across epochs -> the SAME games each time, so a
+            # win-rate change is the model improving, not seed variance (paired).
             r = run_head_to_head(make_hexgt, make_dense, games=args.eval_games,
                                  output_dir=eval_dir / f"epoch_{rl_epoch:06d}_vs_dense",
-                                 base_seed=4242 + rl_epoch, max_actions=args.max_actions,
+                                 base_seed=4242, max_actions=args.max_actions,
                                  game_id_prefix=f"e{rl_epoch}vsdense")
             results["vs_dense_cnn_e24"] = r.as_dict()
         except Exception:
@@ -210,7 +212,7 @@ def main():
                     return SealBotPlayer(sb, player_id="sealbot-best-50ms")
                 rs = run_head_to_head(make_hexgt, make_sb, games=args.eval_games,
                                       output_dir=eval_dir / f"epoch_{rl_epoch:06d}_vs_sealbot",
-                                      base_seed=4242 + rl_epoch, max_actions=args.max_actions,
+                                      base_seed=4242, max_actions=args.max_actions,
                                       game_id_prefix=f"e{rl_epoch}vssb")
                 results["vs_sealbot"] = rs.as_dict()
             except Exception as exc:
@@ -220,6 +222,23 @@ def main():
 
     last_save = None
     try:
+        # Pre-training BC-seed baseline at the exact eval settings -> the anchor
+        # the RL trend is measured against (the documented BC h2h was 55% @ 40
+        # games/visits=200; this re-confirms it at our 24-game/visits-200 setting).
+        if start_epoch == 0:
+            base_ev = run_eval(-1)
+            with open(eval_dir / "baseline_bc_eval.json", "w") as bfh:
+                json.dump(base_ev, bfh, indent=2)
+            bd = base_ev.get("vs_dense_cnn_e24", {})
+            bmsg = (f">>> BC-SEED BASELINE (pre-RL) vs dense_cnn e24: "
+                    f"{bd.get('wins')}W/{bd.get('losses')}L/{bd.get('draws')}D "
+                    f"= {bd.get('win_rate', float('nan')):.1%} (visits={args.eval_visits}, games={args.eval_games})")
+            if "vs_sealbot" in base_ev:
+                bs = base_ev["vs_sealbot"]
+                bmsg += (f" | vs SealBot: {bs.get('wins')}W/{bs.get('losses')}L/{bs.get('draws')}D "
+                         f"= {bs.get('win_rate', float('nan')):.1%}")
+            log(bmsg, fh)
+
         for rl_epoch in range(start_epoch, args.epochs):
             ep_t0 = time.perf_counter()
             # --- 1) self-play ----------------------------------------------------
