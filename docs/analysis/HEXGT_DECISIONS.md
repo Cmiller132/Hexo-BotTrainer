@@ -7,6 +7,36 @@ records the decision, the plan reference, and the rationale. The plan's §11
 
 ---
 
+## Phase 5 — torch FP16 inference + throughput (the make-or-break gate)
+
+**Finding (GPU FP16 forward throughput on RTX 4070 Ti, REAL 96x8 positions, n=3,
+~260 candidates/pos):**
+- Original per-graph Python attention loop: ~270 pos/s (kernel-launch-bound) →
+  **NO-GO**, exactly the lever §6.1/§6.3 flagged.
+- **FIX: vectorized batched padded attention** (`build_attention_layout` +
+  rewritten `GraphTransformerLayer`): one batched MHA over (B, max_ctx/cand, D)
+  with key-padding masks instead of B Python iterations. Correctness preserved
+  (D6 equivariance + all 27 tests still pass). → **~2,600 pos/s**.
+- **+ `torch.compile(dynamic=True)`: ~5,400 pos/s** (another ~2×). Scales cleanly
+  to batch 512.
+
+**Implied self-play pos/s** (cache-free lower bound = forward_tput / 512 sims):
+**~10.5** with compile, vs dense_cnn **~23 (96x8) / ~58 (64x4)**.
+
+**GO/NO-GO: CONDITIONAL GO.** The dynamic GNN is feasible — it runs correctly,
+scales, and at ~5,400 forward pos/s sits within ~2× of dense_cnn 96x8's self-play
+rate *even by the pessimistic cache-free estimate*. The MCTS transposition cache
++ tree reuse (same framework) cut NN forwards far below 512/searched-position, so
+the real self-play rate should be materially higher — but confirming it needs the
+full Rust MCTS graph-payload integration (next step). NOT the "unworkable,
+reconsider" no-go the plan worried about. Remaining headroom: GNN op fusion (the
+5-edge-type einsum + edge gather dominate), size-bucketing to cut padding waste,
+shallower trunk. `inference.HexgtInference` is the torch-FP16 evaluator (no TRT,
+§6.1); the Rust zero-copy payload transport + the in-loop MCTS measurement are
+the remaining Phase-5 work.
+
+---
+
 ## Environment / safety (build isolation)
 
 **Live-run isolation.** The dense_cnn 96×8 run is live on the GPU, editable-

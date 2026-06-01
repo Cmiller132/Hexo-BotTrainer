@@ -86,17 +86,65 @@ class RelationalMessagePassing(nn.Module):
         et = edge_type.clamp(0, self.num_edge_types - 1)
         m = project[et, src] + self.edge_proj(edge_attr)
         m = torch.relu(m)
+        # Under AMP autocast the matmuls emit half while `h` may be float; keep the
+        # scatter dtype-consistent (index_add_ requires matching scalar types).
+        m = m.to(h.dtype)
         agg = h.new_zeros(n, self.dim).index_add_(0, dst, m)
         counts = h.new_zeros(n).index_add_(0, dst, h.new_ones(dst.shape[0]))
         agg = agg / counts.clamp_min(1.0).unsqueeze(-1)
         return self.norm(h + self.out_proj(agg))
 
 
+class _AttentionLayout:
+    """Precomputed padded (B, max_tokens) gather/scatter indices + key-pad masks.
+
+    Built ONCE per forward from the packed batch and shared by all transformer
+    layers, so attention is a handful of BATCHED kernels over (B, max_ctx, D) /
+    (B, max_cand, D) instead of a Python loop over graphs (the throughput fix).
+    """
+
+    __slots__ = ("ctx_index", "ctx_pad", "ctx_valid", "cand_index", "cand_pad", "cand_valid")
+
+    def __init__(self, ctx_index, ctx_pad, cand_index, cand_pad):
+        self.ctx_index = ctx_index    # (B, max_ctx) long, padded with 0
+        self.ctx_pad = ctx_pad        # (B, max_ctx) bool, True = padding
+        self.ctx_valid = ~ctx_pad
+        self.cand_index = cand_index  # (B, max_cand) long
+        self.cand_pad = cand_pad
+        self.cand_valid = ~cand_pad
+
+
+def _padded_index(node_subset: torch.Tensor, node_graph: torch.Tensor, num_graphs: int):
+    """Build (B, max) padded index + pad-mask for a subset of nodes (graphs are
+    contiguous in the packed layout, so within-graph rank is arange - offset)."""
+
+    g = node_graph.index_select(0, node_subset)
+    counts = torch.bincount(g, minlength=num_graphs)
+    max_tok = int(counts.max().item()) if counts.numel() else 0
+    max_tok = max(max_tok, 1)
+    offsets = torch.cumsum(counts, 0) - counts
+    rank = torch.arange(node_subset.shape[0], device=node_subset.device) - offsets.index_select(0, g)
+    index = node_subset.new_zeros(num_graphs, max_tok)
+    pad = torch.ones(num_graphs, max_tok, dtype=torch.bool, device=node_subset.device)
+    index[g, rank] = node_subset
+    pad[g, rank] = False
+    return index, pad
+
+
+def build_attention_layout(node_graph: torch.Tensor, is_candidate: torch.Tensor, num_graphs: int) -> _AttentionLayout:
+    ctx_nodes = (~is_candidate).nonzero(as_tuple=True)[0]
+    cand_nodes = is_candidate.nonzero(as_tuple=True)[0]
+    ctx_index, ctx_pad = _padded_index(ctx_nodes, node_graph, num_graphs)
+    cand_index, cand_pad = _padded_index(cand_nodes, node_graph, num_graphs)
+    return _AttentionLayout(ctx_index, ctx_pad, cand_index, cand_pad)
+
+
 class GraphTransformerLayer(nn.Module):
-    """Per-graph context self-attention + candidate→context cross-attention.
+    """Batched context self-attention + candidate→context cross-attention.
 
     Context tokens = {side, stone, window} nodes; candidate tokens = candidates.
-    Both updated with a residual FFN. Runs per graph over contiguous slices.
+    Both gathered into padded (B, max, D) tensors and updated with one batched
+    MHA + residual FFN each (no Python per-graph loop).
     """
 
     def __init__(self, dim: int, heads: int, ffn_dim: int, dropout: float = 0.0) -> None:
@@ -110,35 +158,23 @@ class GraphTransformerLayer(nn.Module):
         self.ffn_ctx = nn.Sequential(nn.Linear(dim, ffn_dim), nn.ReLU(inplace=True), nn.Linear(ffn_dim, dim))
         self.ffn_cand = nn.Sequential(nn.Linear(dim, ffn_dim), nn.ReLU(inplace=True), nn.Linear(ffn_dim, dim))
 
-    def forward(
-        self,
-        h: torch.Tensor,
-        slices: list[tuple[int, int]],
-        is_candidate: torch.Tensor,
-    ) -> torch.Tensor:
+    def forward(self, h: torch.Tensor, layout: _AttentionLayout) -> torch.Tensor:
         out = h.clone()
-        for start, end in slices:
-            if end <= start:
-                continue
-            idx = torch.arange(start, end, device=h.device)
-            cand_mask = is_candidate[start:end]
-            ctx_local = idx[~cand_mask]
-            cand_local = idx[cand_mask]
-            if ctx_local.numel() == 0:
-                continue
-            ctx = h.index_select(0, ctx_local).unsqueeze(0)  # (1, M_ctx, D)
-            # context self-attention
-            a, _ = self.ctx_attn(ctx, ctx, ctx, need_weights=False)
-            ctx = self.norm_ctx1(ctx + a)
-            ctx = self.norm_ctx2(ctx + self.ffn_ctx(ctx))
-            out.index_copy_(0, ctx_local, ctx.squeeze(0))
-            # candidate -> context cross-attention
-            if cand_local.numel() > 0:
-                cand = h.index_select(0, cand_local).unsqueeze(0)  # (1, M_cand, D)
-                a2, _ = self.cand_attn(cand, ctx, ctx, need_weights=False)
-                cand = self.norm_cand1(cand + a2)
-                cand = self.norm_cand2(cand + self.ffn_cand(cand))
-                out.index_copy_(0, cand_local, cand.squeeze(0))
+
+        # context self-attention (batched, padded; mask padded keys)
+        ctx = h[layout.ctx_index]  # (B, max_ctx, D)
+        a, _ = self.ctx_attn(ctx, ctx, ctx, key_padding_mask=layout.ctx_pad, need_weights=False)
+        ctx = self.norm_ctx1(ctx + a)
+        ctx = self.norm_ctx2(ctx + self.ffn_ctx(ctx))
+        out[layout.ctx_index[layout.ctx_valid]] = ctx[layout.ctx_valid].to(out.dtype)
+
+        # candidate -> context cross-attention (query candidates, key/value = ctx)
+        if layout.cand_index.shape[1] > 0:
+            cand = h[layout.cand_index]  # (B, max_cand, D)
+            a2, _ = self.cand_attn(cand, ctx, ctx, key_padding_mask=layout.ctx_pad, need_weights=False)
+            cand = self.norm_cand1(cand + a2)
+            cand = self.norm_cand2(cand + self.ffn_cand(cand))
+            out[layout.cand_index[layout.cand_valid]] = cand[layout.cand_valid].to(out.dtype)
         return out
 
 
@@ -210,10 +246,10 @@ class HexgtNetwork(nn.Module):
             h = layer(h, edge_index, edge_type, edge_attr)
 
         num_graphs = int(batch["num_graphs"])
-        slices = _graph_slices(batch["node_graph"], num_graphs)
         is_candidate = batch["node_type"] == NODE_TYPE_CANDIDATE
+        layout = build_attention_layout(batch["node_graph"], is_candidate, num_graphs)
         for layer in self.transformer:
-            h = layer(h, slices, is_candidate)
+            h = layer(h, layout)
         return h
 
     def _graph_readout(self, batch: Mapping[str, torch.Tensor], node_emb: torch.Tensor) -> torch.Tensor:
