@@ -22,7 +22,9 @@ from typing import Any, Mapping, Sequence
 import torch
 
 from . import rust_bridge
-from .d6 import Axial, D6_SIZE, D6Symmetry
+from .constants import BOARD_SIZE
+from .d6 import Axial, D6_SIZE, D6Symmetry, transform_coord, unpack_coord_pair
+from .geometry import coord_to_row_col
 from .input import build_input_planes, dense_policy_target, legal_mask_flat
 from .mcts import CompactVisitPolicy
 
@@ -233,6 +235,73 @@ def expand_sample(
     for horizon, value in sample.short_term_value:
         tensors[f"stvalue_{int(horizon)}"] = torch.tensor(float(value), dtype=torch.float32)
     return tensors
+
+
+def symmetry_drops_support(sample: Model1SampleData, symmetry: D6Symmetry | int) -> bool:
+    """Return True if `symmetry` (non-identity) rotates any in-crop-at-identity fact
+    of `sample` out of the 41x41 square crop.
+
+    The dense view is an axial *square* crop, but D6 is the *hexagonal* symmetry
+    group, so the square is not closed under it: a fact at hex-distance > BOARD_SIZE//2
+    from the crop center (the four corner triangles) can leave the crop under a
+    rotation/reflection. When that happens ``build_input_planes`` silently drops the
+    fact and ``dense_policy_target`` renormalizes the survivors -- so a *partial* spill
+    produces a truncated/renormalized policy target and a counterfactual board with no
+    exception raised. Callers use this to fall the whole row back to identity (which the
+    sample was authored to fit) when the drawn symmetry would drop support, keeping
+    train-time D6 augmentation exact.
+
+    Only facts at hex-distance > half can spill (D6 preserves hex-distance and the
+    hex-disk of that radius is contained in the square), so the per-coordinate transform
+    runs only for those rare corner facts; everything else is rejected by two cheap
+    bound checks.
+    """
+
+    if int(getattr(symmetry, "index", symmetry)) == 0:
+        return False
+    center = Axial(*sample.center)
+    cq, cr = int(center.q), int(center.r)
+    half = BOARD_SIZE // 2
+
+    def spills(q: int, r: int) -> bool:
+        dq, dr = q - cq, r - cr
+        if abs(dq) > half or abs(dr) > half:
+            return False  # already out of crop at identity -> not a symmetry-induced drop
+        if max(abs(dq), abs(dr), abs(dq + dr)) <= half:
+            return False  # within the hex-disk the square contains -> faithful under all D6
+        return coord_to_row_col(transform_coord((q, r), symmetry, center=center), center=center) is None
+
+    for action_id, _weight in sample.policy:
+        q, r = unpack_coord_pair(int(action_id))
+        if spills(q, r):
+            return True
+    for action_id, _weight in sample.opp_policy:
+        q, r = unpack_coord_pair(int(action_id))
+        if spills(q, r):
+            return True
+    for action_id in sample.legal_action_ids:
+        q, r = unpack_coord_pair(int(action_id))
+        if spills(q, r):
+            return True
+    for q, r, _player in sample.stones:
+        if spills(int(q), int(r)):
+            return True
+    for item in sample.placement_history:
+        if spills(int(item[0]), int(item[1])):
+            return True
+    for q, r in sample.own_hot:
+        if spills(int(q), int(r)):
+            return True
+    for q, r in sample.opponent_hot:
+        if spills(int(q), int(r)):
+            return True
+    for q, r in sample.opponent_last_turn:
+        if spills(int(q), int(r)):
+            return True
+    if sample.first_stone is not None:
+        if spills(int(sample.first_stone[0]), int(sample.first_stone[1])):
+            return True
+    return False
 
 
 def stack_expanded(samples: Sequence[Mapping[str, torch.Tensor]]) -> dict[str, torch.Tensor]:

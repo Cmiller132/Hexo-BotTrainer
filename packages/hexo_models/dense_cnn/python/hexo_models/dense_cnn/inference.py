@@ -293,7 +293,13 @@ class DenseCNNInference:
             outputs = self._forward_inputs_device(_to_inference_device(inputs, self.device))
             policy_batch = outputs["policy"]
             value_batch = outputs["value"]
-        values_tensor = decode_binned_value(value_batch).cpu().contiguous()
+        # Clamp into [-1, 1] before handing the bytes to Rust: decode_binned_value is a
+        # convex combination of bin centers in [-1, 1], but float32 rounding on a
+        # confident value head can land it ~1 ULP past +-1. The native read_value
+        # rejects any out-of-range value with PyValueError, which aborts the WHOLE
+        # batched search (every game's leaves), so a benign rounding artifact must not
+        # escape here. The training value-target path validates [-1, 1] independently.
+        values_tensor = decode_binned_value(value_batch).clamp_(-1.0, 1.0).cpu().contiguous()
 
         if "legal_flat_indices_bytes" not in payload or "legal_row_offsets" not in payload:
             raise ValueError(

@@ -278,6 +278,13 @@ def build_katago_shuffle(
         md5_ubound=md5_ubound,
     )
     files = scan_selfplay_npz_files(selfplay_dir)
+    # Apply any md5 sub-range to the file SET up front, so total_rows, the recent-window
+    # selection, and window_start_data_row_idx are all consistent over the sub-ranged
+    # stream. Filtering AFTER window selection (the old behavior) left window_start
+    # meaningless and shrank the realized window below desired_rows. Default [0, 1) is a
+    # no-op that keeps every file.
+    if md5_lbound > 0.0 or md5_ubound < 1.0:
+        files = [info for info in files if md5_lbound <= _md5_path_fraction(str(info.path)) < md5_ubound]
     total_rows = sum(item.rows for item in files)
     if total_rows < min_rows:
         return _skipped_shuffle(total_rows=total_rows, reason=f"not enough rows: {total_rows} < {min_rows}")
@@ -291,17 +298,11 @@ def build_katago_shuffle(
     )
     desired_rows = max(int(desired_rows), int(min_rows))
     selected, used_rows = _select_recent_window(files, desired_rows)
-    selected = [
-        info
-        for info in selected
-        if md5_lbound <= _md5_path_fraction(str(info.path)) < md5_ubound
-    ]
-    used_rows = sum(info.rows for info in selected)
     if not selected:
         return _skipped_shuffle(
             total_rows=total_rows,
             desired_rows=desired_rows,
-            reason="no files selected after md5 range split",
+            reason="no files selected for the window",
         )
     keep_prob = min(float(keep_target_rows), float(used_rows)) / float(used_rows)
     train_infos, val_infos = _split_by_md5(selected, validation_fraction=validation_fraction)
@@ -648,6 +649,18 @@ def _build_compact_split(
         return empty
 
     horizons = compact_io.read_shard_horizons(infos[0].path)
+    # All shards in a window must share the same short_term_value horizons: the output
+    # is written with one `horizons` set, so rows from a shard with a different set would
+    # be silently mis-slotted / dropped (poisoning the short-term-value head). This only
+    # happens if the horizon config changed mid-run; fail loudly rather than corrupt.
+    for info in infos[1:]:
+        other = compact_io.read_shard_horizons(info.path)
+        if tuple(other) != tuple(horizons):
+            raise ValueError(
+                f"dense_cnn shuffle window mixes short_term_value horizons: "
+                f"{tuple(horizons)} (from {infos[0].path.name}) vs {tuple(other)} "
+                f"(from {info.path.name}); refusing to silently mis-slot stval targets"
+            )
     rows: list[Model1SampleData] = []
     for info in infos:
         shard = compact_io.read_compact_shard(info.path)

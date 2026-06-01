@@ -90,11 +90,25 @@ class DenseCNNTrainer:
         return self._expand_pool
 
     def close(self) -> None:
-        """Shut down the expansion pool, if any."""
+        """Shut down the expansion pool, if any.
+
+        Called by the pipeline's run-end teardown (and the prefit script) so the
+        spawn workers -- each holding ~250-400 MB of torch RSS -- are reclaimed when
+        the run finishes instead of lingering until interpreter exit.
+        """
 
         if self._expand_pool is not None:
             self._expand_pool.shutdown(wait=False, cancel_futures=True)
             self._expand_pool = None
+
+    def __del__(self) -> None:
+        # Best-effort backstop if the trainer is GC'd without an explicit close().
+        # The reliable teardown is the pipeline finally / the prefit close(); a
+        # finalizer cannot rely on ProcessPoolExecutor.shutdown at interpreter exit.
+        try:
+            self.close()
+        except Exception:
+            pass
 
     def select_training_samples(self, *, ctx: Any, components: Any, epoch: int) -> dict[str, Any]:
         """Build/read the latest shuffled NPZ window and reserve one training epoch."""
@@ -273,18 +287,26 @@ class DenseCNNTrainer:
                 return
             for batch in _batches_from_arrays(arrays, batch_size, remaining):
                 trained_rows += int(batch["value"].shape[0])
-                components = self._optimizer_step(batch)
-                total_loss += components["total"]
-                for key, value in components.items():
+                loss_components = self._optimizer_step(batch)
+                total_loss += loss_components["total"]
+                for key, value in loss_components.items():
                     component_sums[key] = component_sums.get(key, 0.0) + value
                 steps += 1
 
+        # Record only shards that actually contribute >=1 trained row. Marking every
+        # selected file as used (below) would, with no_repeat_files=True, permanently
+        # exclude shards that were submitted-but-cancelled or never reached before the
+        # row target was met -- shrinking the eligible pool for no benefit.
+        consumed: set[Path] = set()
         pool = self._get_expand_pool() if total_available >= _PARALLEL_MIN_ROWS else None
         if pool is None:
             for file_path, syms in shard_syms:
                 if trained_rows >= target_rows:
                     break
+                before = trained_rows
                 _train_arrays(compact_io.expand_shard_to_arrays(file_path, syms, horizons))
+                if trained_rows > before:
+                    consumed.add(file_path)
         else:
             pending_iter = iter(shard_syms)
             inflight: dict[Any, Path] = {}
@@ -301,10 +323,13 @@ class DenseCNNTrainer:
             while inflight and trained_rows < target_rows:
                 done, _ = wait(list(inflight), return_when=FIRST_COMPLETED)
                 for fut in done:
-                    inflight.pop(fut, None)
+                    fpath = inflight.pop(fut, None)
                     if trained_rows >= target_rows:
                         continue
+                    before = trained_rows
                     _train_arrays(fut.result())
+                    if trained_rows > before and fpath is not None:
+                        consumed.add(fpath)
                     _submit_one()
             for fut in inflight:  # abandon any surplus shards once the row target is met
                 fut.cancel()
@@ -318,7 +343,7 @@ class DenseCNNTrainer:
             }
         self.train_state.global_step_samples += trained_rows
         self.train_state.latest_shuffle_dir = str(sample_window.shuffle_dir) if sample_window.shuffle_dir else None
-        for file_path in sample_window.files:
+        for file_path in consumed:
             self.train_state.data_files_used.add(str(file_path.resolve()))
 
         validation = self._run_validation(sample_window)

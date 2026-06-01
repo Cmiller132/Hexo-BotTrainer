@@ -250,12 +250,15 @@ def prefit(config, out_dir: Path, *, prefit_epochs: int):
     ctx = SimpleNamespace(output_dir=out_dir, config=SimpleNamespace(run=SimpleNamespace(seed=0)))
     components = SimpleNamespace(shared=SimpleNamespace())
     losses = []
-    for ep in range(prefit_epochs):
-        res = trainer.train_passes(passes=1, sample_window=window, sample_symmetries=None,
-                                   ctx=ctx, components=components, epoch=ep)
-        losses.append(res.get("loss"))
-        print(f"  [prefit] epoch {ep}: status={res.get('status')} steps={res.get('steps')} "
-              f"loss={res.get('loss')}", flush=True)
+    try:
+        for ep in range(prefit_epochs):
+            res = trainer.train_passes(passes=1, sample_window=window, sample_symmetries=None,
+                                       ctx=ctx, components=components, epoch=ep)
+            losses.append(res.get("loss"))
+            print(f"  [prefit] epoch {ep}: status={res.get('status')} steps={res.get('steps')} "
+                  f"loss={res.get('loss')}", flush=True)
+    finally:
+        trainer.close()  # release the spawn expansion pool (torch workers) at prefit end
     return model, optimizer, {"total_rows": total_rows, "shards": len(shards), "losses": losses}
 
 

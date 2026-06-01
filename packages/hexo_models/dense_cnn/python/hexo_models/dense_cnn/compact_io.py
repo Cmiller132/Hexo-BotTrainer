@@ -26,7 +26,7 @@ import numpy as np
 from numpy.lib import format as np_format
 
 from .constants import BOARD_SIZE, INPUT_CHANNELS
-from .samples import Model1SampleData, _PackedHistory, _PackedStones, expand_sample
+from .samples import Model1SampleData, _PackedHistory, _PackedStones, expand_sample, symmetry_drops_support
 
 _BOARD_AREA = BOARD_SIZE * BOARD_SIZE
 
@@ -273,37 +273,32 @@ def expand_shard_to_arrays(
     if not samples:
         return _empty()
 
-    # Expand each row under its drawn D6 symmetry. The 41x41 *square* crop is NOT
-    # closed under hexagonal D6: a symmetry can rotate a row's entire policy mass
-    # outside the crop (e.g. corner offset (20,20) -> (-20,40) under a 60deg turn),
-    # so dense_policy_target raises "positive probability mass". When that happens we
-    # re-expand the whole row at identity (symmetry 0), which the sample was authored
-    # to fit, so the row trains un-augmented instead of crashing the epoch's training
-    # pass. A row degenerate even at identity (genuine bad data) is dropped. Both are
-    # rare; the count is logged once per shard for visibility.
+    # The 41x41 *square* crop is NOT closed under hexagonal D6, so a drawn symmetry can
+    # rotate some-or-all of a row's facts (policy / opp_policy / legal / stones / recency
+    # / hot) out of the crop. A TOTAL policy spill raises, but a PARTIAL spill silently
+    # drops the out-of-crop actions and renormalizes the survivors -- a truncated target
+    # and a counterfactual board, with NO exception. symmetry_drops_support() detects
+    # BOTH cases up front; when the drawn symmetry would drop any in-crop-at-identity
+    # fact we expand the whole row at identity (which the sample was authored to fit),
+    # keeping augmentation exact. A row degenerate even at identity (e.g. empty source
+    # policy) raises and is dropped. Both are rare; counts are logged per shard.
     expanded = []
     aug_fallbacks = 0
     dropped = 0
     for i, sample in enumerate(samples):
         sym = int(symmetries[i])
+        if sym != 0 and symmetry_drops_support(sample, sym):
+            sym = 0
+            aug_fallbacks += 1
         try:
             expanded.append(expand_sample(sample, symmetry=sym))
-            continue
         except ValueError:
-            pass
-        if sym != 0:
-            try:
-                expanded.append(expand_sample(sample, symmetry=0))
-                aug_fallbacks += 1
-                continue
-            except ValueError:
-                pass
-        dropped += 1
+            dropped += 1
     if aug_fallbacks or dropped:
         import sys
 
         print(
-            f"[compact_io] D6 square-crop guard in {getattr(path, 'name', path)}: "
+            f"[compact_io] D6 coverage guard in {getattr(path, 'name', path)}: "
             f"{aug_fallbacks} row(s) -> identity, {dropped} dropped (of {len(samples)})",
             file=sys.stderr,
             flush=True,
