@@ -10,9 +10,9 @@ from pathlib import Path
 _PACKAGE_DIR = Path(__file__).resolve().parent
 _MODEL_PACKAGE_ROOTS = (
     _PACKAGE_DIR.parents[1] / "dense_cnn" / "python" / "hexo_models",
-    _PACKAGE_DIR.parents[1] / "hexformer_ar" / "python" / "hexo_models",
+    _PACKAGE_DIR.parents[1] / "hexgt" / "python" / "hexo_models",
     _PACKAGE_DIR.parent / "dense_cnn" / "python" / "hexo_models",
-    _PACKAGE_DIR.parent / "hexformer_ar" / "python" / "hexo_models",
+    _PACKAGE_DIR.parent / "hexgt" / "python" / "hexo_models",
 )
 
 for _root in _MODEL_PACKAGE_ROOTS:
