@@ -32,6 +32,7 @@ def main():
     ap.add_argument("--out", default="/mnt/e/Hexo-BotTrainer-hexgt/_hexgt_bc_smoke.pt")
     ap.add_argument("--lr", type=float, default=None)
     ap.add_argument("--warmup", type=int, default=None)
+    ap.add_argument("--epochs", type=int, default=1)
     args = ap.parse_args()
     device = torch.device(args.device if (args.device != "cuda" or torch.cuda.is_available()) else "cpu")
 
@@ -66,7 +67,7 @@ def main():
     print(f"BC source: {len(shards)} shards from {shards[0].name.split('_game_')[0]}", flush=True)
 
     t0 = time.perf_counter()
-    history = trainer.train_on_shards(shards, batch_size=args.batch, max_steps=args.steps)
+    history = trainer.train_on_shards(shards, batch_size=args.batch, max_steps=args.steps, epochs=args.epochs)
     dt = time.perf_counter() - t0
     if not history:
         print("NO STEPS RAN (all rows pruned?)", flush=True)

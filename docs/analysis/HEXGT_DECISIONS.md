@@ -187,10 +187,23 @@ BC model — a real BC/RL run is many thousands of steps; the ~228 ms/step is
 dominated by the same Python featurization that bounds self-play, so the
 Phase-5-deferred Rust feature-buffer transport also speeds up training.)
 
-**Still open (next session):** a converged BC run + first eval vs SealBot and vs
-dense_cnn (matched-compute). Eval needs hexgt player/eval-component wiring (the
-plugin's evaluation hooks are still Phase-5+ stubs) and benefits from the
-feature-buffer optimization for tolerable game-play speed.
+**First eval — held-out imitation vs the dense_cnn MCTS teacher** (no game-play /
+SealBot needed; `scripts/_bc_eval.py` on epoch_000022, untouched by the
+epoch_000024 BC run; 700-step BC model `_hexgt_bc.pt`, policy CE reached ~3.0):
+- held-out policy CE **3.17** (≈ train CE → generalizes, tiny gap; uniform ≈5.6).
+- top-1 policy agreement **28.4%** (chance ~0.4%) — hexgt's argmax candidate ==
+  dense_cnn's most-visited move on UNSEEN positions 28% of the time. Strong for a
+  700-step smoke BC; confirms the whole model+training+data pipeline learns real
+  play, not noise.
+- value MAE **0.88** (in [-1,1]) — value head is learning (train loss 1.12→0.55)
+  but early/conservative (predicts near 0 vs ±1 outcomes); needs more steps.
+
+**Still open (next session):** a converged BC/RL run + a head-to-head GAME eval vs
+SealBot and vs dense_cnn (matched-compute). That eval needs hexgt player/eval
+component wiring (the plugin's evaluation hooks are still Phase-5+ stubs) and
+benefits from the deferred feature-buffer optimization for tolerable game-play
+speed. The held-out imitation eval above is the achievable "first eval" without
+that infra and already validates BC success.
 
 ---
 
