@@ -22,6 +22,7 @@ from hexo_train.components import ComponentOverrides
 from .architecture import HexgtNetwork
 from .checkpoints import HexgtCheckpointLoader, HexgtCheckpointSaver
 from .config import parse_hexgt_config
+from .evaluation import evaluate_epoch as _evaluate_epoch
 from .trainer import HexgtTrainer
 
 
@@ -83,6 +84,11 @@ class HexgtPlugin:
                 "candidate_radius": parsed.architecture.candidate_radius,
             },
         )
+
+    def evaluate_epoch(self, *, ctx: Any, components: Any, epoch: int) -> dict[str, Any]:
+        """Head-to-head SealBot evaluation for one checkpoint epoch."""
+
+        return _evaluate_epoch(ctx=ctx, components=components, epoch=epoch)
 
 
 plugin = HexgtPlugin()
