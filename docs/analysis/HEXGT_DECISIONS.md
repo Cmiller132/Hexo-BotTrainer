@@ -37,6 +37,72 @@ the remaining Phase-5 work.
 
 ---
 
+## Phase 5b — forward throughput characterization (optimize + test pass)
+
+Re-measured forward pos/s on REAL n=3 96x8 positions (epoch ≤24 shards) across the
+candidate-count distribution, after profiling where time actually goes. Scripts:
+`_profile_hexgt_breakdown.py`, `_profile_hexgt_phases.py`, `_profile_hexgt_trunk_sweep.py`.
+
+**Where time goes (batch 512, eager, mixed positions) — corrects the Phase-5 note.**
+The 5-edge-type GNN einsum is NOT the dominant cost. Split: node_in 0.7ms, **GNN
+×3 = 65ms (33%)**, **transformer ×3 = 125ms (64%)**, heads 0.9ms. The transformer
+(context self-attn + candidate→context cross-attn) is the bottleneck, and within
+it the candidate side dominates (max_cand ≫ max_ctx; cand FFN over B·max_cand
+tokens × 3 layers). The GNN einsum is already FLOP-efficient (T·N projections <
+E edge-gathers), so GNN op fusion is low-value.
+
+**Compile modes (batch 512):** plain `torch.compile(dynamic=True)` is best
+(~5,800 pos/s); `dynamic=False`, `reduce-overhead` (CUDA graphs), and
+`max-autotune` are all *slightly slower* — the per-position shape variation
+defeats CUDA-graph capture. **Keep dynamic=True.** FP16 autocast already on.
+
+**Realistic per-phase curve (compiled, UNIFORM same-size batches — the real
+self-play case where one tree's leaves have near-identical graph sizes):**
+
+| phase   | cands/pos | compiled pos/s | implied self-play (÷512, cache-free) |
+|---|---|---|---|
+| opening | ~132 | ~18,700 | ~36 |
+| midgame | ~248 | ~8,700  | ~17 |
+| endgame | ~504 | ~3,700  | ~7  |
+
+The mixed-position profile (~5,800) UNDERSTATES self-play because it pads every
+graph to the largest in the batch (ctx-token efficiency only ~29%); a real search
+batch is near-uniform so padding waste nearly vanishes. Peak GPU mem at batch 512
+is 5.33 GB (ample headroom on the 12 GB 4070 Ti). Scales cleanly to 512+.
+
+**Trunk speed knob (compiled, uniform; the `[architecture]` token_dim/gnn_layers/
+ctx_layers are all config-exposed, so this is a TOML A/B, no code change):**
+
+| config        | params | mid pos/s | end pos/s | vs ref |
+|---|---|---|---|---|
+| ref 168/g3/c3 | 1.96M | 8,686  | 3,704 | 1.00× |
+| ctx2 168/g3/c2| 1.50M | 11,344 | 4,791 | 1.31× |
+| shal 192/g2/c2| 1.73M | 14,539 | 6,640 | 1.67× |
+| wide 224/g2/c2| 2.35M | 12,638 | 5,825 | 1.46× |
+| g2c3 176/g2/c3| 1.96M | 10,019 | 4,232 | 1.15× |
+
+**Finding:** trunk DEPTH (especially `ctx_layers`) is the throughput lever; WIDTH
+(token_dim) is comparatively cheap (efficient matmuls). The shallow-wide regime
+(192/g2/c2) is 1.67× faster at FEWER params — the window-hub graph already gives
+2-hop long-range connectivity, so gnn=2 is plausibly sufficient. The model is
+UNTRAINED, so switching trunk costs nothing but a learnability question.
+
+**DECISION:** keep `ref 168/g3/c3` (+ st-value heads = 2.07M) as the
+fair-comparison primary, and carry `shal 192/g2/c2` as the speed-optimized A/B
+candidate. Pick between them empirically in the BC step (compare eval strength —
+the plan's matched-compute fairness), not by guessing. Deferred (low-value /
+training-only): GNN op fusion (GNN not the bottleneck), training-batch size-
+bucketing (matters for mixed-size train batches, not the uniform self-play gate;
+revisit if BC throughput is slow), candidate-cross-attention-once restructuring
+(the single biggest forward lever but a real learnability bet — revisit with the
+BC harness as validator if step-2 cache-assisted self-play proves inadequate).
+
+**GO/NO-GO: GO (firmer than Phase-5's CONDITIONAL).** Forward throughput is
+feasible with headroom; the remaining question is purely the cache-assisted
+self-play rate, which only the Rust MCTS integration can answer (next step).
+
+---
+
 ## Environment / safety (build isolation)
 
 **Live-run isolation.** The dense_cnn 96×8 run is live on the GPU, editable-
