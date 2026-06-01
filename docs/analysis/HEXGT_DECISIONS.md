@@ -7,6 +7,66 @@ records the decision, the plan reference, and the rationale. The plan's §11
 
 ---
 
+## Phase 7 — MCTS design: ASYNC leaf-eval batcher (user-directed divergence from dense_cnn)
+
+**DECISION (binding, user): the production hexgt MCTS is an ASYNCHRONOUS
+leaf-evaluation batcher, NOT dense_cnn's synchronous lockstep model.** dense_cnn
+runs ~256 games in lockstep with fixed per-game leaf batches; for hexgt that
+wastes GPU because per-position cost is highly variable (candidate count grows
+opening→midgame→endgame), so the group waits on the slowest tree. The Phase-5c
+synchronous copy (mcts.rs/mcts_tree.rs from dense_cnn) is the WORKING BASELINE
+(2.3–4.9 pos/s) and stays as the reference + the deterministic eval path; the
+async batcher replaces it for RL self-play.
+
+Target architecture: many concurrent games, each its own MCTS tree, running on a
+thread pool. When a tree's selection reaches a leaf needing NN eval, it builds the
+leaf's graph payload, submits to a SHARED request queue, and YIELDS (does not block
+the group). A central BATCHER coalesces pending leaf requests across ALL games up
+to `max_batch` OR a short `latency_window` (whichever first — the partial-batch
+flush is mandatory; a max-only batcher deadlocks when a single leaf is in flight),
+forms one size-bucketed batch of variable-size graphs, runs ONE GPU forward, and
+routes results back to the originating trees, which expand/backup and continue.
+Virtual loss lets one tree hold multiple leaves in flight; a `max_in_flight`
+backpressure cap bounds memory. Cache-check before enqueue; integrate tree reuse.
+Net: leaf generation is decoupled from NN eval; the GPU stays fed from the global
+pool regardless of per-game variance.
+
+**Reproducibility:** async batch composition is nondeterministic — acceptable for
+RL self-play. For head-to-head EVAL vs dense_cnn/SealBot, keep a DETERMINISTIC
+path (fixed batch / single-game; the synchronous baseline serves this) so
+comparisons are fair and repeatable.
+
+**Sequencing:** get the async batcher + integration WORKING and measure real
+cache-assisted self-play pos/s + CPU/GPU util FIRST, then tune (queue depth,
+max_batch, latency_window, bucket sizes). Don't over-build before the baseline.
+
+### Standing directive — maximize CPU multithreading + GPU utilization (Ryzen 7950X, 16c/32t)
+Single-threaded CPU work is the current self-play limiter (89% Python
+featurization). Parallelize across ~all 32 threads (CONFIG-DRIVEN worker count,
+default high ~30, leaving headroom): state reconstruction / placement-history
+replay, graph construction / expand-at-time, candidate+active-window computation
+(rayon in Rust where applicable), and the trainer's shard-expand → graph-collation
+pipeline (a worker pool like dense_cnn's expansion pool, sized to cores). The async
+batcher runs many concurrent games so CPU (tree search + graph build) and GPU
+(batched NN eval) are both saturated; concurrent-game count + max-in-flight are
+tunable and set high enough to keep the GPU continuously fed. Keep GPU maxed:
+FP16 + compiled model, size-bucketed batches large enough to saturate, minimal
+idle. Caution: watch free RAM (the box has had OOM pressure); pool sizes
+config-driven so they can be dialed back.
+
+### Standing directive — RAM-compact data discipline (mirror dense_cnn)
+Keep in-memory reps COMPACT/packed (byte-packed/columnar, the compact_io
+discipline — dense_cnn went 312KB→~24KB/sample). PREFER store-compact +
+unpack-on-demand on the CPU worker pool over holding expanded forms in RAM (aligns
+with recompute-at-expand: shards stay raw-fact/compact, graph tensors built on the
+fly, no big expanded-graph cache). Compress where it helps. Trade CPU cycles (now
+parallelized across 32 threads) for RAM, not the reverse. Watch free RAM; keep
+pool/cache sizes config-driven. (Concrete blueprint — file-level tasks + config
+knobs — synthesized by the `hexgt-async-mcts-blueprint` workflow; appended below
+once implemented.)
+
+---
+
 ## Phase 5 — torch FP16 inference + throughput (the make-or-break gate)
 
 **Finding (GPU FP16 forward throughput on RTX 4070 Ti, REAL 96x8 positions, n=3,
