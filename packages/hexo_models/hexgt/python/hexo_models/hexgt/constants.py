@@ -41,20 +41,21 @@ WINDOW_COUNT_MAX_TOKEN = 5
 WINDOW_LEN = 6                 # engine win length (six-in-a-line)
 
 # --- Candidate-set rule (§4): active windows UNION n-radius --------------------
-# `n` is the single tunable neighborhood radius, range [2, 8] (same hex-distance
-# metric as the engine's LEGAL_RADIUS = 8).
+# `n` is the single tunable neighborhood radius (same hex-distance metric as the
+# engine's LEGAL_RADIUS = 8). Practical range ~[2, 4].
 #
-# Phase-1 finding (HEXGT_DECISIONS.md): the plan's n=2 default covers only
-# ~85-92% of dense_cnn's strong played/visited moves; the misses are FAR spread
-# plays (68% at hex-distance 6-8), so ~100% coverage requires n=8 (= the full
-# engine legal set). To avoid handicapping the move vocabulary vs dense_cnn, the
-# MVP default is n=8 (candidate_set ≡ legal set, 100% coverage). The graph's
-# value-add over dense_cnn is its tactical STRUCTURE (window-hub tokens, typed
-# edges), validated by the no-explosion gate, not candidate pruning. `n` stays
-# the single knob to sweep the coverage/throughput frontier down in Phase 5.
-DEFAULT_CANDIDATE_RADIUS = 8
+# DECISION (user, informed by the Phase-1 coverage sweep): default n = 3. n=2
+# covers ~91% of dense_cnn's strong moves by visit mass, n=3 ~92%, n=4 ~92%; the
+# remaining ~8% are FAR "spread" placements (68% at hex-distance 6-8) that only
+# n=8 (≈ the full legal set) reaches. Those far moves are dense_cnn's LEARNED
+# novel-far-placement strategy and are NOT needed for high-level play, so we do
+# NOT widen the radius to fit them. Recorded positions whose played move / policy
+# mass falls outside the n=3 candidate set are handled by DATASET PRUNING in the
+# BC/sample-gen path (see expand.py + HexgtSampleConfig.bc_prune_max_dropped_mass),
+# NOT by enlarging the candidate set. The "up to 8" framing is dropped.
+DEFAULT_CANDIDATE_RADIUS = 3
 MIN_CANDIDATE_RADIUS = 2
-MAX_CANDIDATE_RADIUS = 8
+MAX_CANDIDATE_RADIUS = 4
 ENGINE_LEGAL_RADIUS = 8
 
 # --- Node feature layout (gap A) — D6-INVARIANT (see d6.py / features.py) ------

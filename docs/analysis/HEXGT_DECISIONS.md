@@ -222,15 +222,27 @@ CSR ordering, checkpoint round-trip + incompat detection. Full suite 174 passed.
 
 ---
 
-**DECISION (candidate-set policy for the MVP):** default `candidate_radius`
-raised to **n = 8 (candidate_set ≡ engine legal set)** for the from-scratch MVP,
-overriding the plan's n=2 default. Rationale: 100% coverage → no move-vocabulary
-handicap vs dense_cnn (fair comparison, §10) and ~0 BC dropped-mass (open-q #4);
-consistent with "truly dynamic / no caps"; the no-explosion gate confirms edges
-stay linear even at full-legal N, so it is tractable. The tactical value-add over
-dense_cnn is the GRAPH STRUCTURE (window-hub tokens, typed edges), not candidate
-pruning. **Compute tradeoff (noted for Phase 5):** at n=8 the dense
-candidate↔context attention is ~O(#candidates·#context) and endgame candidates
-≈ full legal (~800–1400), ~5× the n=2 cost — `candidate_radius` stays the single
-tunable knob to sweep down the coverage/throughput frontier in Phase 5 with the
-real model + MCTS. (Surfaced to the user as a major decision.)
+**DECISION (candidate-set policy) — SUPERSEDED by the user's n=3 call below.**
+My earlier interim choice was n=8 (candidate≡legal, 100% coverage) to avoid a
+move-vocabulary handicap. The user, after seeing the coverage/compute tradeoff,
+made the binding call:
+
+**BINDING DECISION (user): default `candidate_radius = 3`, practical range [2,4],
+drop the "up to 8" framing + DATASET PRUNING for the out-of-set tail.** Rationale:
+n=8 only matters for dense_cnn's LEARNED novel-far-placement strategy, which isn't
+needed for high-level play; n=3 covers practically all useful moves at far lower
+attention cost. The ~8% far-spread tail is handled by PRUNING recorded positions
+in BC/sample-gen (`HexgtSampleConfig.bc_prune_max_dropped_mass=0.15`,
+`expand.build_training_batch` / `HexgtTrainer`), NOT by widening the radius:
+a position is dropped when >15% of its policy visit-mass (or all of it) lands
+outside the n=3 candidate set; survivors renormalize over in-set candidates. The
+prune rate is logged.
+
+**Validated on RECENT 96x8 (epoch-24 games, the highest-quality data):**
+- n=3 coverage: played **91.8%** / visited-count 78.2% / **visited-mass 90.2%**.
+  By phase (visited-mass): opening **66%** (sparse-board far openings — the bulk
+  of the misses), midgame **96.6%**, endgame **98.1%**.
+- BC PRUNE RATE @ n=3, threshold 0.15: **10.0%** of positions pruned → **~90% of
+  96x8 data survives BC** (n=2: 11.3%, n=4: 9.6%). Value round-trip 822/822.
+- Candidate counts at n=3 (median): ~270 (vs ~610 at n=8) — ~2× cheaper dense
+  candidate↔context attention than the old n=8 choice.

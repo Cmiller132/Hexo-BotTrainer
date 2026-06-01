@@ -43,9 +43,16 @@ candidate set, no padding/no-TRT)
   > **`candidate_set(position) = { empty cells in ANY active window of either
   > player }  ∪  { empty cells within hex-distance ≤ n of ANY placed stone }`**
 
-  with **`n` a single config parameter, default `n = 2`, tunable in `[2, 8]`**
-  (same hex-distance metric as the engine's legality radius, so `n = 8` ≈ the
-  engine's full legal set). The active-window component guarantees every far
+  with **`n` a single config parameter, default `n = 3`, practical range `[2, 4]`**
+  (same hex-distance metric as the engine's legality radius). **[AMENDED — user
+  decision, see HEXGT_DECISIONS.md]** The original draft used `n = 2` tunable to
+  8; validation showed n only reaches ~100% move-coverage at n=8 (≈ the full legal
+  set), because dense_cnn's far "spread" openings are a learned strategy not needed
+  for high-level play. So the default is **n = 3** (~90% visited-mass coverage on
+  recent 96x8; ~97% in mid/endgame, lower only in the sparse opening) and the
+  far-spread tail is handled by **dataset pruning** in BC/sample-gen
+  (`bc_prune_max_dropped_mass`, ~10% of 96x8 positions pruned at n=3), NOT by
+  widening the radius. The active-window component guarantees every far
   threat-completion / must-block cell (up to 5 line-cells from a stone) and all
   developing-line cells; the n-radius component adds the local "start a new
   window nearby" development moves the active-window rule alone cannot reach. An
@@ -222,11 +229,13 @@ candidate_set(position) = { empty cells in ANY active window of either player } 
                          ∪ { empty cells within hex-distance ≤ n of ANY stone }   (B)
 ```
 
-- **`n` is a single clean config parameter, default `n = 2`, tunable in `[2, 8]`.**
+- **`n` is a single clean config parameter, default `n = 3`, practical range
+  `[2, 4]`** (AMENDED — see §0 / HEXGT_DECISIONS.md; the far-spread tail beyond
+  n=3 is handled by BC/sample-gen dataset pruning, not by raising `n`).
   It uses the **same hex-distance metric as the engine's legality radius**
   (`hex_distance`, cube max-norm, `coord.rs:77-82`; `LEGAL_RADIUS = 8`,
   `legal.rs:10-11`), so `n` is directly comparable: `n = 8` ≈ the engine's full
-  legal set, `n = 2` is a tight local neighborhood.
+  legal set, `n = 3` is a tight local neighborhood.
 - **Component (A)** — Rust: iterate `board().windows().entries()`, keep
   `is_active()` (either color, any count ≥ 1), collect `empty_cells()`, dedupe.
 - **Component (B)** — Rust: union `coords_within_radius(stone, n)` over all

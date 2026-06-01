@@ -69,6 +69,9 @@ class HexgtTrainer:
         self._amp = bool(config.training.amp)
         self._horizons = tuple(int(h) for h in config.architecture.short_term_value_horizons)
         self._candidate_radius = int(config.architecture.candidate_radius)
+        self._prune_max_dropped_mass = float(config.samples.bc_prune_max_dropped_mass)
+        self.pruned_rows = 0
+        self.kept_rows = 0
         self._weights = dict(
             policy_weight=config.training.policy_weight,
             value_weight=config.training.value_weight,
@@ -79,6 +82,13 @@ class HexgtTrainer:
     @property
     def sample_count(self) -> int:
         return int(self.train_state.total_num_data_rows)
+
+    @property
+    def prune_rate(self) -> float:
+        """Fraction of expanded rows pruned for out-of-candidate policy mass."""
+
+        seen = self.pruned_rows + self.kept_rows
+        return self.pruned_rows / seen if seen else 0.0
 
     def load_train_state(self, state: Mapping[str, Any] | None) -> None:
         self.train_state = HexgtTrainState.from_mapping(state)
@@ -140,10 +150,18 @@ class HexgtTrainer:
                 if not chunk:
                     continue
                 batch, targets = build_training_batch(
-                    chunk, n=self._candidate_radius, horizons=self._horizons
+                    chunk,
+                    n=self._candidate_radius,
+                    horizons=self._horizons,
+                    prune_max_dropped_mass=self._prune_max_dropped_mass,
                 )
+                if batch is None:  # every row in this chunk was pruned
+                    self.pruned_rows += len(chunk)
+                    continue
+                self.pruned_rows += int(targets.get("_pruned", 0))
+                self.kept_rows += int(targets.get("_kept", 0))
                 history.append(self.optimizer_step(batch, targets))
-                self.train_state.total_num_data_rows += len(chunk)
+                self.train_state.total_num_data_rows += int(targets.get("_kept", len(chunk)))
                 step += 1
                 if max_steps is not None and step >= max_steps:
                     return history

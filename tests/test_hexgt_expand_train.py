@@ -99,6 +99,46 @@ def test_build_training_batch_is_byte_stable() -> None:
     assert torch.equal(t1["policy"], t2["policy"])
 
 
+def test_dataset_pruning_drops_far_policy_positions() -> None:
+    """A position whose visit mass is on a far move (outside the n=3 candidate
+    set) is pruned; an in-set position is kept."""
+    _torch()
+    from hexo_models.hexgt import rust_bridge
+    from hexo_models.hexgt.expand import expand_row_to_graph, build_training_batch
+    from hexo_engine.types import unpack_coord_id
+
+    # in-set row: policy on an actual n=3 candidate
+    row_in, state = _synthetic_row(seed=4, steps=16)
+    cand3 = rust_bridge.candidate_ids(state, 3)
+    assert cand3, "expected candidates"
+    row_in.policy = [(int(cand3[0]), 2.0)]
+    exp_in = expand_row_to_graph(row_in, n=3, horizons=())
+    assert not exp_in.should_prune(0.15)
+    assert exp_in.dropped_policy_mass < 1e-9
+
+    # far row: a legal move at hex-distance > 3 from every stone (outside n=3)
+    legal = list(__import__("hexo_engine").api.legal_action_ids(state))
+    stones = {(int(q), int(r)) for q, r, *_ in row_in.placement_history}
+    far = None
+    for a in legal:
+        c = unpack_coord_id(int(a))
+        d = min(max(abs(c.q - s[0]), abs(c.r - s[1]), abs((-c.q - c.r) - (-s[0] - s[1]))) for s in stones)
+        if d > 3:
+            far = int(a)
+            break
+    if far is None:
+        import pytest as _pt
+        _pt.skip("no far (>3) legal move available in this position")
+    row_far = _synthetic_row(seed=4, steps=16)[0]
+    row_far.policy = [(far, 5.0)]
+    exp_far = expand_row_to_graph(row_far, n=3, horizons=())
+    assert exp_far.should_prune(0.15), exp_far.dropped_policy_fraction
+
+    # build_training_batch prunes the far row, keeps the in-set row
+    batch, targets = build_training_batch([row_in, row_far], n=3, prune_max_dropped_mass=0.15)
+    assert targets["_pruned"] == 1 and targets["_kept"] == 1
+
+
 def test_cpu_training_pass_decreases_loss() -> None:
     torch = _torch()
     from hexo_models.hexgt.architecture import HexgtNetwork

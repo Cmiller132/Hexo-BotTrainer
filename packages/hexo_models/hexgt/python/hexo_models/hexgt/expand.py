@@ -36,9 +36,12 @@ from . import rust_bridge
 class ExpandedRow:
     """One expanded position: graph tensors + per-graph training targets."""
 
-    __slots__ = ("graph", "policy", "opp_policy", "value", "stvalue", "stvalue_mask", "dropped_policy_mass")
+    __slots__ = (
+        "graph", "policy", "opp_policy", "value", "stvalue", "stvalue_mask",
+        "dropped_policy_mass", "policy_total",
+    )
 
-    def __init__(self, graph, policy, opp_policy, value, stvalue, stvalue_mask, dropped_policy_mass):
+    def __init__(self, graph, policy, opp_policy, value, stvalue, stvalue_mask, dropped_policy_mass, policy_total):
         self.graph = graph
         self.policy = policy            # (C,) float32 visit weights over candidates
         self.opp_policy = opp_policy    # (C,) float32
@@ -46,6 +49,19 @@ class ExpandedRow:
         self.stvalue = stvalue          # dict horizon -> scalar
         self.stvalue_mask = stvalue_mask  # dict horizon -> 0/1
         self.dropped_policy_mass = dropped_policy_mass
+        self.policy_total = policy_total  # total recorded visit mass (in+out of set)
+
+    @property
+    def dropped_policy_fraction(self) -> float:
+        return self.dropped_policy_mass / self.policy_total if self.policy_total > 0 else 0.0
+
+    def should_prune(self, max_dropped_mass: float) -> bool:
+        """Prune if no candidate carries policy mass, or too much mass fell outside."""
+
+        in_set = self.policy_total - self.dropped_policy_mass
+        if in_set <= 0.0:
+            return True
+        return self.dropped_policy_fraction > float(max_dropped_mass)
 
 
 def reconstruct_state(placement_history: Sequence[Any]) -> object:
@@ -95,6 +111,7 @@ def expand_row_to_graph(row: Any, n: int = DEFAULT_CANDIDATE_RADIUS, horizons: S
         stvalue=stvalue,
         stvalue_mask=stvalue_mask,
         dropped_policy_mass=dropped,
+        policy_total=float(sum(float(w) for _a, w in row.policy)),
     )
 
 
@@ -103,18 +120,26 @@ def build_training_batch(
     *,
     n: int = DEFAULT_CANDIDATE_RADIUS,
     horizons: Sequence[int] = (),
-    import_torch: bool = True,
-) -> tuple[dict, dict]:
+    prune_max_dropped_mass: float = 1.0,
+) -> tuple[dict, dict] | tuple[None, None]:
     """Expand + collate a list of compact rows into a (batch, targets) pair.
 
     `batch` is the model forward input; `targets` carries the per-candidate
     `policy`/`opp_policy` and the per-graph `value`/`stvalue_*`(+mask) for
-    `hexgt_loss`. Returns torch tensors.
+    `hexgt_loss`. DATASET PRUNING (candidate_radius decision): rows whose policy
+    visit-mass falls outside the candidate set beyond `prune_max_dropped_mass`
+    (or with zero in-set mass) are dropped; `targets["_pruned"]/["_kept"]` report
+    the rate. Surviving rows renormalize over in-set candidates (the segmented CE
+    normalizes per graph). Returns (None, None) if every row is pruned.
     """
 
     import torch
 
-    expanded = [expand_row_to_graph(r, n=n, horizons=horizons) for r in rows]
+    all_expanded = [expand_row_to_graph(r, n=n, horizons=horizons) for r in rows]
+    expanded = [e for e in all_expanded if not e.should_prune(prune_max_dropped_mass)]
+    n_pruned = len(all_expanded) - len(expanded)
+    if not expanded:
+        return None, None
     graphs = [e.graph for e in expanded]
     batch = collate_graphs(graphs)
 
@@ -137,4 +162,6 @@ def build_training_batch(
             np.array([e.stvalue_mask[int(h)] for e in expanded], dtype=np.float32)
         )
     targets["_dropped_policy_mass"] = float(sum(e.dropped_policy_mass for e in expanded))
+    targets["_pruned"] = int(n_pruned)
+    targets["_kept"] = int(len(expanded))
     return batch, targets

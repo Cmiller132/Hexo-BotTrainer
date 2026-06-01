@@ -102,6 +102,12 @@ class HexgtSampleConfig:
     validation_fraction: float = 0.0
     policy_surprise_uniform_fraction: float = 0.5
     policy_surprise_max_weight: float = 8.0
+    # Dataset pruning for BC/sample-gen (candidate_radius decision): a recorded
+    # position is PRUNED when the fraction of its policy visit-mass that lands
+    # OUTSIDE the n-radius candidate set exceeds this threshold (a far-spread move
+    # the new rep deliberately cannot represent). Surviving positions renormalize
+    # over the in-set candidates. Set to 1.0 to disable pruning.
+    bc_prune_max_dropped_mass: float = 0.15
 
 
 @dataclass(frozen=True, slots=True)
@@ -226,6 +232,7 @@ def parse_hexgt_config(raw: Mapping[str, Any] | None) -> HexgtConfig:
             validation_fraction=float(samples.get("validation_fraction", 0.0)),
             policy_surprise_uniform_fraction=float(samples.get("policy_surprise_uniform_fraction", 0.5)),
             policy_surprise_max_weight=float(samples.get("policy_surprise_max_weight", 8.0)),
+            bc_prune_max_dropped_mass=float(samples.get("bc_prune_max_dropped_mass", 0.15)),
         ),
         selfplay=HexgtSelfPlayConfig(
             search_visits=int(selfplay.get("search_visits", 128)),

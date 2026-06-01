@@ -63,20 +63,32 @@ def main() -> None:
         "--runs",
         nargs="*",
         default=[
-            "runs/dense_cnn_model1_target_96x6/selfplay",
-            "runs/dense_cnn_model1_target_64x4/selfplay",
+            "runs/dense_cnn_model1_target_96x8/selfplay",
         ],
     )
     ap.add_argument("--max-games", type=int, default=40)
-    ap.add_argument("--default-n", type=int, default=2)
+    ap.add_argument("--default-n", type=int, default=3)
+    ap.add_argument("--recent", action="store_true", help="sample the most recent (highest-epoch) games")
     args = ap.parse_args()
 
     npzs: list[Path] = []
     for run in args.runs:
         npzs.extend(sorted(Path(run).glob("*_game_*.npz")))
-    npzs = npzs[: args.max_games]
+    npzs = sorted(npzs)
+    if args.recent:
+        # Highest-epoch games are the best data; skip the single latest epoch
+        # (the run may have stopped mid-epoch, leaving partial files).
+        def _epoch(p: Path) -> str:
+            return p.name.split("_game_")[0]
+        epochs = sorted({_epoch(p) for p in npzs})
+        if len(epochs) > 1:
+            npzs = [p for p in npzs if _epoch(p) != epochs[-1]]
+        npzs = npzs[-args.max_games:]
+    else:
+        npzs = npzs[: args.max_games]
     if not npzs:
         raise SystemExit(f"no game npz files found under {args.runs}")
+    print(f"sampling {len(npzs)} games: {npzs[0].name} .. {npzs[-1].name}")
 
     # coverage[phase][n] -> [played_total, played_cov, vcount_total, vcount_cov, vmass_total, vmass_cov]
     def _cov_block():

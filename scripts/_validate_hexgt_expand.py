@@ -26,17 +26,29 @@ def main() -> None:
         "runs/dense_cnn_model1_target_96x8/selfplay",
     ])
     ap.add_argument("--max-games", type=int, default=20)
-    ap.add_argument("--radii", nargs="*", type=int, default=[2, 8])
+    ap.add_argument("--radii", nargs="*", type=int, default=[2, 3, 4])
+    ap.add_argument("--recent", action="store_true", help="sample most recent (highest-epoch) games")
+    ap.add_argument("--prune-threshold", type=float, default=0.15)
     args = ap.parse_args()
 
     npzs = []
     for run in args.runs:
         npzs.extend(sorted(Path(run).glob("*_game_*.npz")))
-    npzs = npzs[: args.max_games]
+    npzs = sorted(npzs)
+    if args.recent:
+        def _epoch(p: Path) -> str:
+            return p.name.split("_game_")[0]
+        epochs = sorted({_epoch(p) for p in npzs})
+        if len(epochs) > 1:
+            npzs = [p for p in npzs if _epoch(p) != epochs[-1]]
+        npzs = npzs[-args.max_games:]
+    else:
+        npzs = npzs[: args.max_games]
     if not npzs:
         raise SystemExit(f"no shards under {args.runs}")
+    print(f"sampling {len(npzs)} games: {npzs[0].name} .. {npzs[-1].name}")
 
-    per_n = {n: {"rows": 0, "drop_mass": [], "rows_with_drop": 0, "cands": []} for n in args.radii}
+    per_n = {n: {"rows": 0, "drop_mass": [], "rows_with_drop": 0, "pruned": 0, "cands": []} for n in args.radii}
     value_ok = 0
     value_total = 0
 
@@ -56,6 +68,8 @@ def main() -> None:
                 per_n[n]["drop_mass"].append(frac)
                 if exp.dropped_policy_mass > 1e-9:
                     per_n[n]["rows_with_drop"] += 1
+                if exp.should_prune(args.prune_threshold):
+                    per_n[n]["pruned"] += 1
                 per_n[n]["cands"].append(int(exp.graph.candidate_ids.shape[0]))
                 if n == args.radii[-1]:
                     value_total += 1
@@ -74,6 +88,7 @@ def main() -> None:
         print(
             f"  n={n}: rows={d['rows']} mean_dropped_mass={mean_drop*100:.3f}% "
             f"p95={p95_drop*100:.3f}% rows_with_any_drop={100*d['rows_with_drop']/d['rows']:.1f}% "
+            f"PRUNE_RATE@{args.prune_threshold:.2f}={100*d['pruned']/d['rows']:.1f}% "
             f"median_candidates={med_cand:.0f}"
         )
 
