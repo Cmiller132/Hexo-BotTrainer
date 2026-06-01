@@ -29,18 +29,20 @@ candidate set, no padding/no-TRT)
   crop.** The head emits one logit per candidate node; this maps *directly* onto
   the Rust MCTS priors contract, which is already per-legal-move CSR
   (`legal_row_offsets` + `priors_bytes`, §2.6).
-- **The candidate set is defined by a single engine-grounded rule — no radius,
-  no hyperparameter:**
+- **The candidate set is a union of an engine-grounded active-window component
+  and a small local-neighborhood component:**
 
-  > **`candidate_set(position) = { every EMPTY cell that lies in ≥1 ACTIVE
-  > window of EITHER player }`**
+  > **`candidate_set(position) = { empty cells in ANY active window of either
+  > player }  ∪  { empty cells within hex-distance ≤ n of ANY placed stone }`**
 
-  where an *active window* is the engine's existing concept — a length-6 line
-  window containing stones of exactly one player (`tactics.rs:183-186`). This
-  covers threat-completion/block cells (count 4/5), developing cells (count 1–3),
-  own extensions and opponent blocks, and naturally **excludes** vacuum cells
-  (windows with zero stones) and dead cells (windows contested by both colors).
-  See §4.
+  with **`n` a single config parameter, default `n = 2`, tunable in `[2, 8]`**
+  (same hex-distance metric as the engine's legality radius, so `n = 8` ≈ the
+  engine's full legal set). The active-window component guarantees every far
+  threat-completion / must-block cell (up to 5 line-cells from a stone) and all
+  developing-line cells; the n-radius component adds the local "start a new
+  window nearby" development moves the active-window rule alone cannot reach. An
+  *active window* is the engine's concept — a length-6 line window containing
+  stones of exactly one player (`tactics.rs:183-186`). See §4.
 - **Tactical-window tokens** are the **count-3/4/5 active windows of both
   colors** (developing threes + live threats + win/block windows). No forks, no
   other window types. The candidate-cell filter uses *all* active windows
@@ -205,72 +207,83 @@ All quotes from `packages/hexo_engine/rust/src/`.
 
 ## 4. The candidate set — the move vocabulary at each node
 
-### 4.1 Definition (engine-grounded, no hyperparameter)
+### 4.1 Definition (active-window union local-neighborhood)
 
 ```
-candidate_set(position) = { every EMPTY cell that lies in ≥1 ACTIVE window
-                            of EITHER player }
+candidate_set(position) = { empty cells in ANY active window of either player }   (A)
+                         ∪ { empty cells within hex-distance ≤ n of ANY stone }   (B)
 ```
 
-Concretely in Rust: iterate `board().windows().entries()`, keep those with
-`is_active()` (either color, any count ≥ 1), collect their `empty_cells()`,
-dedupe. This is exactly the set of empty cells that could **extend** one of the
-current player's lines or **block** one of the opponent's. It:
+- **`n` is a single clean config parameter, default `n = 2`, tunable in `[2, 8]`.**
+  It uses the **same hex-distance metric as the engine's legality radius**
+  (`hex_distance`, cube max-norm, `coord.rs:77-82`; `LEGAL_RADIUS = 8`,
+  `legal.rs:10-11`), so `n` is directly comparable: `n = 8` ≈ the engine's full
+  legal set, `n = 2` is a tight local neighborhood.
+- **Component (A)** — Rust: iterate `board().windows().entries()`, keep
+  `is_active()` (either color, any count ≥ 1), collect `empty_cells()`, dedupe.
+- **Component (B)** — Rust: union `coords_within_radius(stone, n)` over all
+  stones (`coord.rs:87-96`), keep empties. This is the same construction the
+  engine uses for legality at radius 8, just with a tunable, smaller `n`.
 
-- **includes** threat-completion and must-block cells (count 4/5 windows),
-  developing cells (count 1–3 windows), own extensions, and opponent blocks;
-- **excludes** vacuum cells (cells whose only windows have zero stones) and dead
-  cells (cells all of whose windows are contested by both colors → no active
-  window).
+The two components have **distinct, complementary roles** (§4.2). The set is the
+union; **no top-k, no `max_candidates`, no fallback logits.** Count is dynamic.
 
-**No radius, no `n`, no top-k, no `max_candidates`, no fallback logits.** The
-count is dynamic per position.
+### 4.2 Why the union — each component's role
 
-### 4.2 Why prune at all (model tractability, not legality)
+- **(A) active windows → guarantees all far threat / block / developing cells.**
+  Because win length is 6, a window-completing (threat-completion or must-block)
+  cell can sit up to **5 line-cells from the nearest stone** of that window —
+  *beyond* a small `n`-radius. Component (A) includes every such cell by
+  construction (it belongs to an active window), at any distance, so the policy/
+  search can always answer or complete a threat. (A) also includes every
+  developing-line cell of an existing one-sided line.
+- **(B) n-radius → adds local "create a NEW window" development moves.** This is
+  the failure mode of an active-window-**only** set: (A) can only *extend or
+  block existing* one-sided lines; it **cannot start a new window in a fresh
+  direction.** **Concrete move-2 example:** with a lone stone at origin, the only
+  active windows are the length-6 windows along the 3 axes through origin, so an
+  active-window-only candidate set is limited to cells **on those 3 axis lines**
+  — far too restrictive (it can never play off-axis to begin a new line). The
+  `n = 2` neighborhood adds the nearby empties needed to start new windows.
+- **Why `n = 2` as default.** `n = 2` is enough to respond to any threat
+  (component (A) already covers completions; (B) just needs local development),
+  `n ≈ 3` gives more developmental reach, and full `n = 8` (engine legal) is more
+  than needed — so we **test `n = 2`** but keep it trivially tunable to any value
+  in `[2, 8]` for later sweeps.
 
-The prune exists for **model tractability, not MCTS legality**. dense_cnn's conv
-policy head outputs all 1681 crop logits "for free" from a fixed-size feature
-map. A token GNN/transformer instead pays ~O(N²) attention and per-node message
-cost in the **number of candidate tokens** N. The active-window filter bounds N
-to the *connection-relevant* empty cells — the only cells that can extend or
-block a six-in-a-line — which is exactly the move vocabulary a 6-in-a-row game
-actually uses. Because the dynamic policy is defined over these candidate tokens,
+**Why prune at all (model tractability, not legality).** dense_cnn's conv policy
+head emits all 1681 crop logits "for free" from a fixed feature map; a token
+GNN/transformer instead pays ~O(N²) attention + per-node message cost in the
+**number of candidate tokens** N. The union bounds N to the connection-relevant
+cells (existing-line cells + local development) — the move vocabulary a 6-in-a-
+row game actually uses. Because the dynamic policy is defined over these tokens,
 **the candidate set is also exactly what MCTS expands at that node** (priors are
-emitted per candidate; the Rust search children = candidate tokens).
+emitted per candidate; the Rust search children = candidate tokens). `n` is the
+single knob trading tractability against breadth; the §4.6 coverage gate decides
+whether `n = 2` is wide enough.
 
-This is sound for Hexo specifically: a move that lies in **no** active window
-neither extends any existing one-color line nor blocks any opponent line, so it
-cannot create or defend a six — it is strictly a tempo-losing/“vacuum” move in a
-pure connection game with no captures and no territory. Pruning such moves
-removes only moves that cannot participate in the win condition.
+### 4.3 Rejected alternatives
 
-### 4.3 Relationship to the old radius idea (dropped)
-
-A hex-distance `n` radius around stones is **dropped entirely**. Note *why a pure
-radius would have been unsafe*: with win length 6, a window-completing cell can
-sit up to 5 line-cells from the nearest stone of that window, so a small radius
-(e.g. n=3) could exclude a legal threat-completion/block move. The active-window
-rule has **no such failure mode** — every completable line's empty cells are
-included by construction, at any distance, because they belong to an active
-window. This is strictly safer than any radius and needs no tuning.
-
-> The attention-bias / fixed-shape padded formulation considered earlier is a
-> **non-GNN approximation and is rejected**: it cannot represent the truly
-> dynamic, unbounded graph structure the user wants and would reintroduce caps/
-> padding. It is mentioned only to record that it was evaluated and declined.
+> The **active-window-only** rule (no `n`) is **rejected** as too restrictive —
+> it cannot start a new window in a fresh direction (the move-2 example above).
+> The **attention-bias / fixed-shape padded** formulation is **rejected** as a
+> non-GNN approximation: it cannot represent the truly dynamic, unbounded graph
+> structure the user wants and would reintroduce caps/padding. Both are recorded
+> here only to note they were evaluated and declined.
 
 ### 4.4 Opening special case
 
-On an **empty board there are no stones, hence no windows, hence an empty
-candidate set.** Handling:
+On an **empty board there are no stones, hence neither component (A) nor (B)
+yields anything → an empty candidate set.** Handling:
 
 - **Move 1** is the engine-forced `Opening` placement at `(0,0)`
   ([rules.rs:16-23](packages/hexo_engine/rust/src/rules.rs:16), [state.rs:224-228](packages/hexo_engine/rust/src/state.rs:224)) — a single candidate; no model choice
   needed. The pipeline can hard-code it (matching engine legality).
-- **Move 2 onward:** once the center stone exists, the 18 windows through `(0,0)`
-  are active (count 1, owner Player 0), so `candidate_set` is non-empty — it is
-  the empty cells of those 18 length-6 lines through the center (the natural
-  opening region). No special code needed beyond move 1.
+- **Move 2 onward:** once the center stone exists, the set is non-empty from both
+  components — (A) the empty cells of the 18 active length-6 windows through
+  `(0,0)`, **and** (B) the empty cells within hex-distance `n` of `(0,0)` (the
+  off-axis local development the active-window component alone would miss, §4.2).
+  No special code needed beyond move 1.
 - **Safety net:** if any non-terminal position ever yields an empty candidate set
   (should only be the pre-opening empty board), fall back to the engine's legal
   move list for that node and log it loudly (no silent divergence between
@@ -278,28 +291,32 @@ candidate set.** Handling:
 
 ### 4.5 Rust parity (training ↔ play)
 
-The candidate-set construction **and** the active-window detection must run in
-**one shared Rust path** used by **both** sample-gen and live MCTS, so the move
-vocabulary at a node is identical in training data and in play. (Mismatch would
-train the policy over a different support than search expands.) This is a single
-function over the engine `WindowStore`, called from both `sample_gen` and the
-MCTS encoder.
+Both components — the active-window enumeration (A) **and** the `n`-radius
+neighborhood (B) — must run in **one shared Rust path** (parameterized by the
+single `n`) used by **both** sample-gen and live MCTS, so the move vocabulary at
+a node is identical in training data and in play. (Mismatch would train the
+policy over a different support than search expands.) This is a single function
+over the engine `WindowStore` + `coords_within_radius`, called from both
+`sample_gen` and the MCTS encoder, with `n` threaded from config to both.
 
 ### 4.6 Validation gates (before locking the design)
 
 Replay dense_cnn's recorded games (`runs/.../selfplay/*.hxr` / shards,
 read-only) and measure:
 
-1. **Completeness/safety:** fraction of dense_cnn's **actually-played** moves and
-   **MCTS-visited** moves that fall inside `candidate_set`. **Target ≈ 100%.**
-   (dense_cnn searches the full radius-8 legal set, so this directly tests
-   whether the active-window prune ever excludes a move a strong player used. If
-   < ~100%, investigate the excluded moves — they should be vacuum/dead by
-   construction; a genuine miss is a design red flag.)
-2. **Cost distribution:** the **size distribution** of `candidate_set` across
-   game phases (opening / midgame / endgame): report median, typical, and p95
-   candidate counts, plus active-window-token counts. This sets the GNN's
-   per-node cost and the realistic batch sizes for the throughput phase.
+1. **Completeness/safety at `n = 2`:** fraction of dense_cnn's **actually-played**
+   moves and **MCTS-visited** moves that fall inside `candidate_set` with the
+   default `n = 2`. **Target ≈ 100%.** (dense_cnn searches the full radius-8 legal
+   set, so this directly tests whether the union ever excludes a move a strong
+   player used.) **Sweep `n = 2..8`** in this same check and report the coverage
+   curve — this empirically sets the smallest `n` that achieves ~100% coverage
+   and flags whether the default needs raising. A genuine miss at `n = 8` (the
+   full legal radius) would be a design red flag.
+2. **Cost distribution at `n = 2`:** the **size distribution** of `candidate_set`
+   across game phases (opening / midgame / endgame): report median, typical, and
+   p95 candidate counts, plus active-window-token counts. This sets the GNN's
+   per-node cost and the realistic batch sizes for the throughput phase. (Re-run
+   at the chosen `n` if the sweep moves it off 2.)
 
 Both are **gates**: (1) proves the prune is complete/safe; (2) proves the dynamic
 cost is bounded enough to be trainable and searchable at acceptable throughput.
@@ -321,11 +338,13 @@ the candidate filter. Typed by `(owner ∈ {current, opponent}, count ∈ {3,4,5
 | **T4 developing three** | current | 3 | developing line | active window, `count(current)==3` |
 | **T5 developing three** | opponent | 3 | opponent developing line | active window, `count(opp)==3` |
 
-Relationship to the candidate filter: the **candidate-cell filter uses ALL
-active windows (count ≥ 1)**; the **window tokens are the higher-count (3/4/5)
-subset**. Count-1/2 active windows still contribute their empty cells as
-candidates but are not emitted as tactical tokens (they carry little structure
-beyond locality, which the candidate node's own features already express).
+Relationship to the candidate set: the candidate set's active-window component
+(§4 (A)) uses **ALL active windows (count ≥ 1)** for their empty cells; the
+**window tokens are the higher-count (3/4/5) subset**. Count-1/2 active windows
+still contribute their empty cells as candidates (via (A), and also via the
+`n`-radius component (B)) but are not emitted as tactical tokens (they carry
+little structure beyond locality, which the candidate node's own features and the
+`n`-radius edges already express).
 
 **No forks / double-threats are computed.** A cell sitting in multiple active
 windows *is* a fork; the GNN/transformer learns this implicitly because that
@@ -567,8 +586,9 @@ dense_cnn) so the comparison is apples-to-apples:
 discipline (§1); **drop-in PIPELINE compatibility, not shape-matching** (§2);
 **dynamic per-candidate policy, no 1681** (§3.4, §6.4); **truly dynamic GNN — no
 padding/caps/top-k, no TRT, torch FP16** (§6.1); attention-bias formulation
-**rejected** as a non-GNN approximation (§4.3); **candidate set = empty cells in
-any active window of either player, no radius/no `n`/no top-k** (§4); **tactical
+**rejected** as a non-GNN approximation (§4.3); **candidate set = (empty cells in
+any active window of either player) ∪ (empty cells within hex-distance ≤ `n` of
+any stone), `n` default 2, tunable [2,8], no top-k/no caps** (§4); **tactical
 tokens = count-3/4/5 active windows of both colors, no forks, no other types**
 (§5); **all stones as nodes, no budget** (§6.2); **BC = conversion rewrite**
 (§8); **full-D6 equivariance test** (§6.5); **matched-compute fairness** (§10);
