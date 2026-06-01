@@ -458,14 +458,25 @@ sidecars, per-epoch D6-at-read, checkpoint hygiene, config/plugin/test patterns)
 1. **Shared Rust candidate/active-window path** (§4.5): one function over the
    engine `WindowStore` producing the candidate set + the count-3/4/5 window
    tokens, called by both sample-gen and live MCTS.
-2. **Rust sample-gen:** emit typed-node raw facts (all stones, candidates, active
-   windows) + typed edges. Likely a new `SCHEMA_VERSION` (graph fields) or
-   recompute the graph at expand time from the raw facts the compact schema
-   already stores (`stones_qr`, `legal_ids`, plus windows recomputable from
-   stones) for the MVP.
-3. **Expand step (`expand_row_to_graph`, new):** compact row + D6 symmetry →
-   typed node tensors + typed edge lists + dynamic policy/opp targets + 65-bin
-   value/stvalue targets. Replaces dense_cnn's `expand_*_to_planes`.
+2. **Rust sample-gen (representation-agnostic for MVP):** shards stay raw-fact
+   only — the existing compact schema (`stones_qr`, `legal_ids`, history, plus
+   windows recomputable from stones) is sufficient. **DECIDED:**
+   **recompute-at-expand for the MVP** — the candidate set, active-window tokens,
+   typed nodes, and typed edges are **rebuilt at expand time** from the raw-fact
+   shards (via the shared Rust candidate/active-window path, item 1). **No new
+   `SCHEMA_VERSION` for the MVP.** Caching the graph/edges into a new
+   `SCHEMA_VERSION` is a **later optimization, gated on the model being proven to
+   work** (§9 Phase 8), not MVP. **Accepted MVP tradeoff:** expand-time recompute
+   spends CPU every epoch (the graph is rebuilt per read), but keeps the shard
+   format representation-agnostic while the graph representation is still in flux
+   — flexibility over CPU now, caching later once the rep is locked.
+3. **Expand step (`expand_row_to_graph`, new — the MVP graph constructor):**
+   compact raw-fact row + D6 symmetry → (recompute candidate set + active-window
+   tokens + typed nodes/edges) → typed node tensors + typed edge lists + dynamic
+   policy/opp targets + 65-bin value/stvalue targets. Replaces dense_cnn's
+   `expand_*_to_planes`. This is the per-epoch recompute path; it must use the
+   same shared Rust candidate/active-window function (item 1) as live MCTS so
+   training support == search expansion (§4.5).
 4. **Variable-size graph collation/batching (new):** pack a batch into one
    disjoint graph with `graph_id`; deterministic, byte-stable, tested.
 5. **New trainer (`HexgtTrainer`):** consumes packed graph batches; **same loss
@@ -530,12 +541,16 @@ dynamic policy + 65-bin value heads. Packed-graph collation.
 *Gate:* forward on packed synthetic graphs; **D6 equivariance test passes for all
 12 elements** (§6.5); overfits one tiny fixed batch.
 
-**Phase 4 — Sample-gen + expand + trainer (CPU). [MAJOR]** Rust typed-node +
-typed-edge sample-gen (§7); `expand_row_to_graph`; `HexgtTrainer` (dense_cnn
-loss/AMP/clip discipline; dynamic policy CE). Validate targets vs dense_cnn raw
-facts for shared rows.
-*Gate:* byte-stable graph batches; targets consistent with engine facts; a CPU
-training pass decreases loss.
+**Phase 4 — Expand-time graph construction + trainer (CPU). [MAJOR]** Build
+`expand_row_to_graph` as the **MVP recompute-at-expand path**: rebuild the
+candidate set, active-window tokens, typed nodes, and typed edges per epoch from
+the **raw-fact shards** (via the shared Rust function, §4.5/§7 item 1) — **no new
+shard `SCHEMA_VERSION`**, shards stay representation-agnostic. Add `HexgtTrainer`
+(dense_cnn loss/AMP/clip discipline; dynamic policy CE). Validate targets vs
+dense_cnn raw facts for shared rows.
+*Gate:* byte-stable graph batches from recompute; targets consistent with engine
+facts; a CPU training pass decreases loss. (Accepted tradeoff: per-epoch CPU
+recompute cost — measured here so Phase 8 has a baseline to beat.)
 
 **Phase 5 — MCTS integration + torch throughput (GPU). [MAKE-OR-BREAK GATE]**
 Rust MCTS encoder emits the graph payload via the zero-copy buffer transport;
@@ -556,6 +571,16 @@ self-play RL. Reuse the scratch-64 autonomy supervisor; watch opening entropy
 under matched search compute (§10).
 *Gate:* Model 2 reaches a defined fraction of dense_cnn's SealBot win-rate at
 matched compute — or a clear, honest verdict that it does not.
+
+**Phase 8 — Graph-cache schema bump (deferred perf; gated on the model working).**
+*Only once Phases 5–7 prove the model and the graph representation is locked:*
+bump the shard `SCHEMA_VERSION` to **cache the precomputed candidate set /
+active-window tokens / typed edges** in the shards, replacing per-epoch
+recompute. Keep the recompute path as the reference/fallback and assert
+cache-vs-recompute byte-equality.
+*Gate:* cached expansion is byte-identical to recompute; measured per-epoch CPU
+drop vs the Phase 4 baseline. **Not MVP** — skip entirely if recompute is cheap
+enough in practice.
 
 ---
 
@@ -593,7 +618,13 @@ tokens = count-3/4/5 active windows of both colors, no forks, no other types**
 (§5); **all stones as nodes, no budget** (§6.2); **BC = conversion rewrite**
 (§8); **full-D6 equivariance test** (§6.5); **matched-compute fairness** (§10);
 **Rust parity of candidate/window detection across sample-gen and play** (§4.5);
-**validation gates** on candidate completeness and size distribution (§4.6).
+**validation gates** on candidate completeness and size distribution (§4.6);
+**recompute-at-expand for the MVP, cache-the-graph-when-proven** — shards stay
+raw-fact / representation-agnostic with no MVP `SCHEMA_VERSION` bump; the
+candidate set, active-window tokens, nodes, and edges are rebuilt per epoch at
+expand time; caching into a new `SCHEMA_VERSION` is a later perf phase gated on
+the model working (§7 item 2, §9 Phase 8). Accepted MVP tradeoff: per-epoch CPU
+recompute in exchange for keeping the representation flexible while it is in flux.
 
 **Open questions:**
 1. **Package name:** `hexgt` acceptable?
@@ -601,10 +632,14 @@ tokens = count-3/4/5 active windows of both colors, no forks, no other types**
    as private aux off the pipeline contract).
 3. **opp_policy / stvalue:** include both auxiliaries in the MVP, or value+policy
    only first?
-4. **Graph in shard vs recompute-at-expand:** cache edges/windows in a new
-   `SCHEMA_VERSION`, or recompute from raw facts at expand time for the MVP?
-5. **BC dropped-mass tolerance:** what dropped-visit fraction (from §4.6/§8) is
+4. **BC dropped-mass tolerance:** what dropped-visit fraction (from §4.6/§8) is
    acceptable before widening the candidate rule or revisiting?
+
+**Resolved (was open):**
+- **Graph in shard vs recompute-at-expand → DECIDED: recompute-at-expand for the
+  MVP; cache into a new `SCHEMA_VERSION` only once the model is proven** (§7
+  item 2, §9 Phase 8). Rationale: keep shards representation-agnostic while the
+  graph rep is still being proven; the schema bump is a deferred optimization.
 
 ---
 
