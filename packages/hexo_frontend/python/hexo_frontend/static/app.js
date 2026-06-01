@@ -3,8 +3,10 @@ const SQRT3 = Math.sqrt(3);
 const FIT_MOVE_COUNT = 8;
 const FIT_LEGAL_RADIUS = 5;
 const HISTORY_ALL_RUNS = "__all__";
-const HISTORY_PAGE_SIZE = 400;
+const HISTORY_PAGE_SIZE = 50;
+const HISTORY_AUTOLOAD_PAGE_SIZE = 500;
 const HISTORY_REFRESH_INTERVAL_MS = 15000;
+const ARTIFACT_PAGE_SIZE = 50;
 
 let state = null;
 let tacticsOn = false;
@@ -37,6 +39,18 @@ let historySelectionTouched = false;
 let historyVisibleLimit = HISTORY_PAGE_SIZE;
 let historyDetailsLoading = false;
 let historyRefreshInFlight = false;
+let historySearchTimer = null;
+let historyPage = {
+  items: [],
+  nextCursor: null,
+  complete: true,
+  totalMatches: null,
+  loading: false,
+  loaded: false,
+  requestKey: "",
+  countLoading: false,
+  countRequestKey: "",
+};
 let selectedHistoryKey = "";
 let historyView = false;
 let polling = false;
@@ -98,14 +112,16 @@ on("newBtn", "click", () => {
   resetReplay();
   post("/api/new", buildNewMatchPayload(), { resetReplay: true, clearBoard: true });
 });
-on("trainingRefreshBtn", "click", loadTrainingRuns);
-if (historyRefreshBtn) historyRefreshBtn.addEventListener("click", loadTrainingRuns);
+on("trainingRefreshBtn", "click", () => loadTrainingRuns());
+if (historyRefreshBtn) historyRefreshBtn.addEventListener("click", () => loadTrainingRuns({ preserveHistoryPage: true }));
 trainingRunSelect.addEventListener("change", () => loadTrainingRun(trainingRunSelect.value));
 if (historyRunSelect) historyRunSelect.addEventListener("change", async () => {
   historySelectedRun = historyRunSelect.value || HISTORY_ALL_RUNS;
   historySelectionTouched = true;
   historyVisibleLimit = HISTORY_PAGE_SIZE;
+  resetHistoryPage();
   await ensureHistorySelectionLoaded();
+  await loadHistoryPage({ reset: true });
   renderGameHistoryPage();
 });
 document.querySelectorAll("[data-screen]").forEach(button => {
@@ -114,6 +130,12 @@ document.querySelectorAll("[data-screen]").forEach(button => {
   });
 });
 trainingArtifacts.addEventListener("click", event => {
+  const moreButton = event.target.closest("[data-artifacts-more]");
+  if (moreButton) {
+    event.preventDefault();
+    loadMoreArtifacts();
+    return;
+  }
   const button = event.target.closest("[data-history-path]");
   if (!button) return;
   event.preventDefault();
@@ -124,21 +146,30 @@ if (gameHistoryDetail) gameHistoryDetail.addEventListener("click", handleGameHis
 if (historySearchInput) historySearchInput.addEventListener("input", event => {
   historyFilters.query = event.target.value || "";
   historyVisibleLimit = HISTORY_PAGE_SIZE;
+  resetHistoryPage();
+  window.clearTimeout(historySearchTimer);
+  historySearchTimer = window.setTimeout(() => loadHistoryPage({ reset: true }), 250);
   renderGameHistoryPage();
 });
 if (historySourceSelect) historySourceSelect.addEventListener("change", event => {
   historyFilters.source = event.target.value || "all";
   historyVisibleLimit = HISTORY_PAGE_SIZE;
+  resetHistoryPage();
+  loadHistoryPage({ reset: true });
   renderGameHistoryPage();
 });
 if (historyWinnerSelect) historyWinnerSelect.addEventListener("change", event => {
   historyFilters.winner = event.target.value || "all";
   historyVisibleLimit = HISTORY_PAGE_SIZE;
+  resetHistoryPage();
+  loadHistoryPage({ reset: true });
   renderGameHistoryPage();
 });
 if (historySortSelect) historySortSelect.addEventListener("change", event => {
   historySort = event.target.value || "newest";
   historyVisibleLimit = HISTORY_PAGE_SIZE;
+  resetHistoryPage();
+  loadHistoryPage({ reset: true });
   renderGameHistoryPage();
 });
 window.addEventListener("hashchange", () => setScreen(screenFromHash(), { preserveHash: true }));
@@ -225,7 +256,9 @@ async function loadAdapters() {
   render();
 }
 
-async function loadTrainingRuns() {
+async function loadTrainingRuns(options = {}) {
+  const preserveHistoryPage = Boolean(options.preserveHistoryPage);
+  const previousHistoryPageKey = activeScreen === "history" ? currentHistoryPageKey() : "";
   const preferred = (trainingRun && trainingRun.name) || trainingRunSelect.value || (historyRunSelect && historyRunSelect.value) || "";
   try {
     const res = await fetch("/api/training/runs");
@@ -242,7 +275,12 @@ async function loadTrainingRuns() {
     syncHistoryRunSelect(historySelectedRun);
     if (trainingRuns.length) {
       await loadTrainingRun(selected, { preserveHistorySelection: true });
-      await ensureHistorySelectionLoaded();
+      if (activeScreen === "history") {
+        const canPreserveHistoryPage = preserveHistoryPage && currentHistoryPageKey() === previousHistoryPageKey;
+        if (!canPreserveHistoryPage) resetHistoryPage();
+        await ensureHistorySelectionLoaded();
+        await loadHistoryPage({ reset: true, preserve: canPreserveHistoryPage });
+      }
     }
     else {
       trainingRun = null;
@@ -306,11 +344,223 @@ async function ensureHistorySelectionLoaded() {
   }
 }
 
+function resetHistoryPage() {
+  historyPage = {
+    items: [],
+    nextCursor: null,
+    complete: true,
+    totalMatches: null,
+    loading: false,
+    loaded: false,
+    requestKey: "",
+    countLoading: false,
+    countRequestKey: "",
+  };
+  selectedHistoryKey = "";
+}
+
+function currentHistoryPageKey() {
+  return JSON.stringify({
+    run: historySelectedRun || HISTORY_ALL_RUNS,
+    source: historyFilters.source || "all",
+    winner: historyFilters.winner || "all",
+    sort: historySort || "newest",
+    query: historyFilters.query || "",
+  });
+}
+
+function currentHistoryTargets() {
+  const runs = historyRunsForPage();
+  const liveStatus = latestRunStatusForHistoryPage();
+  const liveEpoch = asFinite(liveStatus && liveStatus.current_epoch);
+  const selfplayEpochsSeen = runs
+    .flatMap(run => (run.epoch_history || []).map(item => asFinite(item.epoch)))
+    .filter(value => value !== null);
+  const latestSelfplayEpoch = selfplayEpochsSeen.length ? Math.max(...selfplayEpochsSeen) : null;
+  const currentEpoch = liveEpoch !== null ? liveEpoch : latestSelfplayEpoch;
+  const previousEpoch = currentEpoch !== null ? currentEpoch - 1 : null;
+  const selfplayEpochs = new Set([currentEpoch, previousEpoch].filter(value => value !== null && value >= 0));
+  const evalEpochsSeen = runs
+    .flatMap(run => (run.evaluation_history || []).map(item => asFinite(item.epoch)))
+    .filter(value => value !== null && (currentEpoch === null || value <= currentEpoch));
+  const latestEvalEpoch = evalEpochsSeen.length ? Math.max(...evalEpochsSeen) : null;
+  const evaluationEpochs = new Set([latestEvalEpoch].filter(value => value !== null));
+  const allTargets = [...selfplayEpochs, ...evaluationEpochs];
+  return {
+    currentEpoch,
+    previousEpoch,
+    selfplayEpochs,
+    evaluationEpochs,
+    minEpoch: allTargets.length ? Math.min(...allTargets) : null,
+  };
+}
+
+function shouldAutoloadHistoryWindow() {
+  return historySort === "newest" &&
+    (historyFilters.source || "all") === "all" &&
+    (historyFilters.winner || "all") === "all" &&
+    !(historyFilters.query || "").trim();
+}
+
+function historyItemInTargetWindow(item, targets) {
+  const epoch = asFinite(item && item.epoch);
+  if (epoch === null) return false;
+  const source = String(item && item.source || "history");
+  if (source === "selfplay") return targets.selfplayEpochs.has(epoch);
+  if (source === "evaluation") return targets.evaluationEpochs.has(epoch);
+  return false;
+}
+
+function historyWindowBoundaryReached(items, targets) {
+  if (targets.minEpoch === null) return true;
+  return items.some(item => {
+    const epoch = asFinite(item && item.epoch);
+    return epoch !== null && epoch < targets.minEpoch;
+  });
+}
+
+async function enterHistoryScreen() {
+  if (!trainingRuns.length) return;
+  await ensureHistorySelectionLoaded();
+  if (!historyPage.loaded && !historyPage.loading) {
+    await loadHistoryPage({ reset: true });
+  }
+}
+
+async function loadHistoryPage(options = {}) {
+  if (!trainingRuns.length || historyPage.loading) return;
+  const reset = Boolean(options.reset);
+  const append = Boolean(options.append);
+  const preserve = Boolean(options.preserve);
+  const autoloadWindow = reset && !append && shouldAutoloadHistoryWindow();
+  const targets = autoloadWindow ? currentHistoryTargets() : null;
+  if (reset && !preserve) {
+    historyPage.items = [];
+    historyPage.nextCursor = null;
+    historyPage.complete = true;
+    historyPage.totalMatches = null;
+    historyPage.loaded = false;
+  }
+  if (append && !historyPage.nextCursor) return;
+
+  const requestKey = currentHistoryPageKey();
+  historyPage.loading = true;
+  historyPage.requestKey = requestKey;
+  renderGameHistoryPage();
+  try {
+    const fetchedItems = [];
+    let data = null;
+    let cursor = append ? historyPage.nextCursor : "";
+    let pageCount = 0;
+    do {
+      const params = new URLSearchParams({
+        run: historySelectedRun || HISTORY_ALL_RUNS,
+        limit: String(autoloadWindow ? HISTORY_AUTOLOAD_PAGE_SIZE : HISTORY_PAGE_SIZE),
+        source: historyFilters.source || "all",
+        winner: historyFilters.winner || "all",
+        sort: historySort || "newest",
+        query: historyFilters.query || "",
+        include_total: "0",
+      });
+      if (cursor) params.set("cursor", cursor);
+      const res = await fetch(`/api/training/history-page?${params.toString()}`);
+      data = await safeJson(res);
+      if (!res.ok) throw new Error((data && data.error) || "Game histories unavailable");
+      fetchedItems.push(...((data && data.items) || []));
+      cursor = (data && data.next_cursor) || "";
+      pageCount += 1;
+    } while (
+      autoloadWindow &&
+      cursor &&
+      pageCount < 8 &&
+      !historyWindowBoundaryReached(fetchedItems, targets)
+    );
+    if (historyPage.requestKey !== requestKey) return;
+    const items = autoloadWindow && targets && targets.minEpoch !== null
+      ? fetchedItems.filter(item => historyItemInTargetWindow(item, targets))
+      : fetchedItems;
+    historyPage.items = append ? [...historyPage.items, ...items] : items;
+    historyPage.nextCursor = (data && data.next_cursor) || null;
+    historyPage.complete = Boolean(data && data.complete);
+    if (data && data.total_matches !== null && data.total_matches !== undefined) {
+      historyPage.totalMatches = data.total_matches;
+    } else if (autoloadWindow) {
+      historyPage.totalMatches = items.length;
+    } else if (!append && !preserve) {
+      historyPage.totalMatches = null;
+    }
+    historyPage.loaded = true;
+    trainingLoadError = "";
+    if (!append && !autoloadWindow) loadHistoryCount(requestKey);
+  } catch (error) {
+    trainingLoadError = error && error.message ? error.message : "Game histories unavailable";
+  } finally {
+    if (historyPage.requestKey === requestKey) {
+      historyPage.loading = false;
+      renderGameHistoryPage();
+    }
+  }
+}
+
+async function loadHistoryCount(expectedKey = "") {
+  if (!trainingRuns.length) return;
+  const requestKey = expectedKey || currentHistoryPageKey();
+  if (historyPage.countLoading && historyPage.countRequestKey === requestKey) return;
+  historyPage.countLoading = true;
+  historyPage.countRequestKey = requestKey;
+  renderGameHistoryPage();
+  try {
+    const params = new URLSearchParams({
+      run: historySelectedRun || HISTORY_ALL_RUNS,
+      source: historyFilters.source || "all",
+      winner: historyFilters.winner || "all",
+      query: historyFilters.query || "",
+    });
+    const res = await fetch(`/api/training/history-count?${params.toString()}`);
+    const data = await safeJson(res);
+    if (!res.ok) throw new Error((data && data.error) || "Game count unavailable");
+    if (historyPage.countRequestKey !== requestKey || currentHistoryPageKey() !== requestKey) return;
+    historyPage.totalMatches = data && data.total_matches !== undefined ? data.total_matches : null;
+    trainingLoadError = "";
+  } catch (error) {
+    console.warn("loadHistoryCount: history count request failed", error);
+  } finally {
+    if (historyPage.countRequestKey === requestKey) {
+      historyPage.countLoading = false;
+      renderGameHistoryPage();
+    }
+  }
+}
+
+async function loadMoreArtifacts() {
+  if (!trainingRun || !trainingRun.artifacts_page || !trainingRun.artifacts_page.next_cursor) return;
+  try {
+    const params = new URLSearchParams({
+      run: trainingRun.name,
+      limit: String(ARTIFACT_PAGE_SIZE),
+      cursor: trainingRun.artifacts_page.next_cursor,
+    });
+    const res = await fetch(`/api/training/artifacts-page?${params.toString()}`);
+    const data = await safeJson(res);
+    if (!res.ok) throw new Error((data && data.error) || "Artifacts unavailable");
+    trainingRun.artifacts = [...(trainingRun.artifacts || []), ...((data && data.items) || [])];
+    trainingRun.artifacts_page = {
+      ...(trainingRun.artifacts_page || {}),
+      next_cursor: (data && data.next_cursor) || null,
+      complete: Boolean(data && data.complete),
+    };
+    trainingLoadError = "";
+  } catch (error) {
+    trainingLoadError = error && error.message ? error.message : "Artifacts unavailable";
+  }
+  renderTraining();
+}
+
 async function refreshHistoryIfVisible() {
   if (activeScreen !== "history" || historyRefreshInFlight || pendingRequest) return;
   historyRefreshInFlight = true;
   try {
-    await loadTrainingRuns();
+    await loadTrainingRuns({ preserveHistoryPage: true });
   } finally {
     historyRefreshInFlight = false;
   }
@@ -430,6 +680,7 @@ function setScreen(screen, options = {}) {
     if (window.location.hash && window.location.hash !== hash) window.history.replaceState(null, "", hash);
   }
   renderGameHistoryPage();
+  if (activeScreen === "history") enterHistoryScreen();
   // Re-render the match view once it is actually visible so layout-dependent
   // work (move-history centering, board fit) runs with real element widths
   // instead of the zero width it would see while the screen was hidden.
@@ -2121,7 +2372,7 @@ function renderTraining() {
   const calibration = status.calibration || {};
   const statusMetrics = [
     summaryMetric("Stage", runStageLabel(status)),
-    summaryMetric("Games", firstPresent(history.games, histories.length)),
+    summaryMetric("Recent Games", firstPresent(history.games, histories.length)),
     summaryMetric("Epochs", epochs.length ? `${epochs[0]}-${epochs[epochs.length - 1]}` : "--"),
     summaryMetric("P0 / P1", `${firstPresent(history.p0_wins, p0Wins)} / ${firstPresent(history.p1_wins, p1Wins)}`),
     summaryMetric("Avg Len", formatDecimal(firstPresent(history.avg_length, averageHistoryLength(histories)), 1)),
@@ -2133,8 +2384,11 @@ function renderTraining() {
     ? Object.entries(latest.summary).slice(0, 4).map(([key, value]) => summaryMetric(key, value))
     : [summaryMetric("Artifacts", artifacts.length)];
   trainingSummary.innerHTML = [...statusMetrics, ...fallbackMetrics].join("");
-  const shown = artifacts.slice(0, 50);
-  trainingArtifacts.innerHTML = shown.map(item => trainingArtifactRow(trainingRun.name, item)).join("");
+  const shown = artifacts.slice(0, artifacts.length);
+  const moreArtifacts = trainingRun.artifacts_page && trainingRun.artifacts_page.next_cursor
+    ? `<button class="history-list-more" type="button" data-artifacts-more>Show more artifacts</button>`
+    : "";
+  trainingArtifacts.innerHTML = `${shown.map(item => trainingArtifactRow(trainingRun.name, item)).join("")}${moreArtifacts}`;
   renderGameHistoryPage();
 }
 
@@ -2182,9 +2436,10 @@ function renderGameHistoryPage() {
     return;
   }
 
-  const filtered = sortedHistoryItems(filteredHistoryItems(histories));
+  const usingServerPage = historyPage.loaded || historyPage.loading || historyPage.items.length > 0;
+  const filtered = usingServerPage ? histories : sortedHistoryItems(filteredHistoryItems(histories));
   const selected = selectedHistoryItem(histories, filtered);
-  const visible = filtered.slice(0, historyVisibleLimit);
+  const visible = usingServerPage ? filtered : filtered.slice(0, historyVisibleLimit);
   historyOverview.innerHTML = renderHistoryOverview(histories, filtered);
   if (historyLearningHealth) historyLearningHealth.innerHTML = renderLearningHealth(runs);
   if (historyEvalTrend) historyEvalTrend.innerHTML = renderEvaluationTrend(runs);
@@ -2192,11 +2447,13 @@ function renderGameHistoryPage() {
   gameHistoryList.innerHTML = filtered.length
     ? [
       ...visible.map(item => gameHistoryListRow(item.run, item)),
-      filtered.length > visible.length
+      usingServerPage && historyPage.nextCursor
+        ? `<button class="history-list-more" type="button" data-history-more>${historyPage.loading ? "Loading games" : `Load more games (${visible.length} loaded)`}</button>`
+        : !usingServerPage && filtered.length > visible.length
         ? `<button class="history-list-more" type="button" data-history-more>Show ${Math.min(HISTORY_PAGE_SIZE, filtered.length - visible.length)} more games (${visible.length} of ${filtered.length})</button>`
         : "",
     ].join("")
-    : `<div class="empty-list">No games match the current filters</div>`;
+    : `<div class="empty-list">${historyPage.loading ? "Loading game histories" : "No games match the current filters"}</div>`;
   gameHistoryDetail.innerHTML = selected
     ? gameHistoryDetailHtml(selected.run, selected)
     : `<div class="empty-list">No game selected</div>`;
@@ -2226,6 +2483,9 @@ function historySelectionPendingDetails() {
 }
 
 function historyItemsForPage(runs) {
+  if (historyPage.loaded || historyPage.loading || historyPage.items.length > 0) {
+    return historyPage.items || [];
+  }
   return runs.flatMap(run => (run.histories || []).map(item => ({ ...item, run: run.name })));
 }
 
@@ -2233,6 +2493,10 @@ function handleGameHistoryClick(event) {
   const moreButton = event.target.closest("[data-history-more]");
   if (moreButton) {
     event.preventDefault();
+    if (historyPage.nextCursor) {
+      loadHistoryPage({ append: true });
+      return;
+    }
     historyVisibleLimit += HISTORY_PAGE_SIZE;
     renderGameHistoryPage();
     return;
@@ -2417,6 +2681,24 @@ function formatGib(value) {
   return `${number.toFixed(1)} GiB`;
 }
 
+function historyWinStats(items) {
+  const rows = (items || []).filter(item => item && item.status === "completed");
+  const p0Wins = rows.filter(item => item.winner === "player0").length;
+  const p1Wins = rows.filter(item => item.winner === "player1").length;
+  const games = rows.length;
+  return { games, p0Wins, p1Wins };
+}
+
+function historyWinRateText(stats) {
+  if (!stats || !stats.games) return "P0 -- | P1 --";
+  return `P0 ${formatPercent(stats.p0Wins / stats.games)} | P1 ${formatPercent(stats.p1Wins / stats.games)}`;
+}
+
+function historyWinRateSubtext(stats, label) {
+  if (!stats || !stats.games) return `${label} | 0 completed`;
+  return `${label} | ${stats.p0Wins}-${stats.p1Wins} (${stats.games}g)`;
+}
+
 function renderHistoryOverview(histories, filtered) {
   const epochs = historyEpochs(filtered);
   const runCount = new Set(histories.map(item => item.run).filter(Boolean)).size;
@@ -2429,16 +2711,36 @@ function renderHistoryOverview(histories, filtered) {
   const evalSummary = latestDiagnosticSummary(histories, "evaluation");
   const selfplaySummary = latestDiagnosticSummary(histories, "selfplay");
   const liveStatus = latestRunStatusForHistoryPage();
+  const targets = currentHistoryTargets();
   const liveWatchdog = liveStatus && liveStatus.watchdog ? liveStatus.watchdog : {};
   const liveCalibration = liveStatus && liveStatus.calibration ? liveStatus.calibration : {};
   const liveSelfplay = liveStatus && liveStatus.selfplay_live ? liveStatus.selfplay_live : {};
   const liveTraining = liveStatus && liveStatus.training_progress ? liveStatus.training_progress : {};
+  const currentSelfplayRows = targets.currentEpoch !== null
+    ? filtered.filter(item => item.source === "selfplay" && asFinite(item.epoch) === targets.currentEpoch)
+    : [];
+  const currentSelfplayStats = historyWinStats(currentSelfplayRows);
+  const currentLabel = targets.currentEpoch !== null ? `Current e${targets.currentEpoch}` : "Current epoch";
+  const evaluationRows = filtered.filter(item => item.source === "evaluation" && targets.evaluationEpochs.has(asFinite(item.epoch)));
+  const evaluationStats = historyWinStats(evaluationRows);
+  const evaluationEpoch = [...targets.evaluationEpochs][0];
+  const evaluationLabel = evaluationEpoch !== undefined ? `Eval e${evaluationEpoch}` : "Eval";
+  const totalMatches = historyPage.totalMatches !== null && historyPage.totalMatches !== undefined
+    ? historyPage.totalMatches
+    : null;
+  const gameCountText = totalMatches !== null
+    ? `${filtered.length} / ${totalMatches}`
+    : historyPage.countLoading
+      ? `${filtered.length} / counting`
+    : historyPage.loaded || historyPage.items.length
+      ? `${filtered.length} loaded`
+      : `${filtered.length} / ${histories.length}`;
   const cards = [
     ["Stage", runStageLabel(liveStatus), "Live trainer"],
     ["Runs", filteredRunCount || runCount || "--", historySelectedRun === HISTORY_ALL_RUNS ? "Filtered / loaded runs" : "Selected run"],
-    ["Games", `${filtered.length} / ${histories.length}`, "Filtered / total"],
+    ["Games", gameCountText, historyPage.loaded || historyPage.items.length ? "Paged result set" : "Filtered / recent"],
     ["Epochs", epochs.length ? `${epochs[0]}-${epochs[epochs.length - 1]}` : "--", `${epochs.length} observed`],
-    ["Winners", `P0 ${p0Wins} | P1 ${p1Wins}`, `${completed} completed`],
+    ["Winners", historyWinRateText(currentSelfplayStats), historyWinRateSubtext(currentSelfplayStats, currentLabel)],
     ["Avg Length", avgLength, "Moves per game"],
   ];
   const liveSpeed = liveSelfplay && liveSelfplay.search_pos_s !== undefined && liveSelfplay.search_pos_s !== null;
@@ -2460,7 +2762,11 @@ function renderHistoryOverview(histories, filtered) {
   if (liveTraining && liveTraining.epoch !== undefined) {
     cards.push(["Training", formatTrainingProgress(liveTraining), trainingProgressSubtext(liveTraining)]);
   }
-  if (evalSummary) cards.push(["Evaluation", historyDiagnosticsText({ evaluation: { summary: evalSummary } }), "Latest diagnostics"]);
+  if (evaluationRows.length) {
+    cards.push(["Evaluation", historyWinRateText(evaluationStats), historyWinRateSubtext(evaluationStats, evaluationLabel)]);
+  } else if (evalSummary) {
+    cards.push(["Evaluation", historyDiagnosticsText({ evaluation: { summary: evalSummary } }), "Latest diagnostics"]);
+  }
   if (selfplaySummary) cards.push(["Selfplay", historyDiagnosticsText({ selfplay: { summary: selfplaySummary } }), "Latest diagnostics"]);
   return cards.map(([label, value, sub]) => `
     <div class="history-metric-card">

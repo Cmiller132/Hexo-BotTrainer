@@ -50,6 +50,13 @@ ARTIFACT_TYPES = {
 }
 ARTIFACT_SUFFIXES = frozenset(ARTIFACT_TYPES)
 TRAINING_SCAN_EXCLUDED_DIRS = frozenset({"archive", "quarantine", "__pycache__"})
+HISTORY_ALL_RUNS = "__all__"
+TRAINING_OVERVIEW_HISTORY_LIMIT = 50
+TRAINING_OVERVIEW_ARTIFACT_LIMIT = 50
+HISTORY_PAGE_DEFAULT_LIMIT = 400
+HISTORY_PAGE_MAX_LIMIT = 500
+ARTIFACT_PAGE_DEFAULT_LIMIT = 50
+ARTIFACT_PAGE_MAX_LIMIT = 200
 BotFactory = Callable[[str, float], object]
 PLAYER_ROLES = ("player0", "player1")
 MANUAL_KIND = "manual"
@@ -75,6 +82,8 @@ _static_cache: dict[str, tuple[float, tuple[bytes, bytes, str, str, str]]] = {}
 _training_cache_lock = Lock()
 _training_run_cache: dict[str, tuple[float, dict[str, object]]] = {}
 _training_runs_cache: list[tuple[float, dict[str, object]]] = []
+_hxr_history_cache: dict[str, tuple[int, int, list[dict[str, object]]]] = {}
+_hxr_count_cache: dict[str, tuple[int, int, int]] = {}
 
 
 def _strong_etag(data: bytes) -> str:
@@ -605,6 +614,48 @@ class HexoPlayHandler(BaseHTTPRequestHandler):
             elif path == "/api/training/run":
                 query = parse_qs(parsed.query)
                 self._send_json(_training_run_cached(str(query.get("name", [""])[0])))
+            elif path == "/api/training/history-page":
+                query = parse_qs(parsed.query)
+                self._send_json(
+                    _training_history_page(
+                        run_name=str(query.get("run", [""])[0]),
+                        limit=_query_limit(
+                            query.get("limit", [None])[0],
+                            default=HISTORY_PAGE_DEFAULT_LIMIT,
+                            maximum=HISTORY_PAGE_MAX_LIMIT,
+                        ),
+                        cursor=str(query.get("cursor", [""])[0] or ""),
+                        source=str(query.get("source", ["all"])[0] or "all"),
+                        winner=str(query.get("winner", ["all"])[0] or "all"),
+                        sort=str(query.get("sort", ["newest"])[0] or "newest"),
+                        query_text=str(query.get("query", [""])[0] or ""),
+                        include_total=_query_bool(query.get("include_total", ["1"])[0], default=True),
+                    )
+                )
+            elif path == "/api/training/history-count":
+                query = parse_qs(parsed.query)
+                self._send_json(
+                    _training_history_count(
+                        run_name=str(query.get("run", [""])[0]),
+                        source=str(query.get("source", ["all"])[0] or "all"),
+                        winner=str(query.get("winner", ["all"])[0] or "all"),
+                        query_text=str(query.get("query", [""])[0] or ""),
+                    )
+                )
+            elif path == "/api/training/artifacts-page":
+                query = parse_qs(parsed.query)
+                self._send_json(
+                    _training_artifacts_page(
+                        run_name=str(query.get("run", [""])[0]),
+                        limit=_query_limit(
+                            query.get("limit", [None])[0],
+                            default=ARTIFACT_PAGE_DEFAULT_LIMIT,
+                            maximum=ARTIFACT_PAGE_MAX_LIMIT,
+                        ),
+                        cursor=str(query.get("cursor", [""])[0] or ""),
+                        kind=str(query.get("kind", ["all"])[0] or "all"),
+                    )
+                )
             elif path == "/api/training/file":
                 query = parse_qs(parsed.query)
                 self._send_training_file(
@@ -740,13 +791,13 @@ class HexoPlayHandler(BaseHTTPRequestHandler):
             self.send_error(HTTPStatus.NOT_FOUND)
             return
         raw, gz, etag, last_modified, content_type = entry
-        # Cacheable (index.html cache-busts JS/CSS via ?v=) with ETag revalidation, and
-        # served pre-gzipped -- so a reload is a 304 (no body) or a cache hit, not a
-        # fresh ~173 KB download.
+        # Versioned assets are cacheable. index.html must revalidate so a changed
+        # app.js query string is picked up immediately after a frontend restart.
+        cache_control = "no-cache" if name == "index.html" else f"public, max-age={STATIC_MAX_AGE_SECONDS}"
         self._send_body(
             raw,
             content_type,
-            cache_control=f"public, max-age={STATIC_MAX_AGE_SECONDS}",
+            cache_control=cache_control,
             etag=etag,
             last_modified=last_modified,
             gzip_body=gz,
@@ -772,6 +823,19 @@ def _query_int(value: str | None) -> int | None:
     if value in {"", None}:
         return None
     return int(value)
+
+
+def _query_bool(value: str | None, *, default: bool) -> bool:
+    if value in {"", None}:
+        return default
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _query_limit(value: str | None, *, default: int, maximum: int) -> int:
+    raw = _query_int(value)
+    if raw is None:
+        return default
+    return max(1, min(int(raw), maximum))
 
 
 def _training_roots() -> tuple[Path, ...]:
@@ -823,59 +887,44 @@ def _training_run(name: str) -> dict[str, object]:
     run_dir = _resolve_run_dir(name)
     if run_dir is None:
         raise ValueError("Unknown training run")
-    artifacts = []
     diagnostics_by_epoch = _diagnostics_by_epoch(run_dir)
     live_status = _training_live_status(run_dir)
-    histories_by_path = _training_histories(run_dir, diagnostics_by_epoch, live_status)
     epoch_history = _epoch_history(run_dir)
     evaluation_history = _evaluation_history(run_dir)
-    for path in sorted(
-        _iter_training_files(run_dir),
-        key=lambda item: (lambda s: s.st_mtime if s is not None else 0)(_safe_stat(item)),
-        reverse=True,
-    ):
-        if not path.is_file():
-            continue
-        if path.suffix.lower() not in ARTIFACT_SUFFIXES:
-            continue
-        rel = path.relative_to(run_dir).as_posix()
-        history_count = len(histories_by_path.get(rel, ()))
-        stat = _safe_stat(path)
-        artifact: dict[str, object] = {
-            "path": rel,
-            "name": path.name,
-            "bytes": stat.st_size if stat is not None else 0,
-            "modified": stat.st_mtime if stat is not None else 0,
-            "kind": path.suffix.lower().lstrip(".") or "file",
-            "loadable_history": history_count > 0,
-            "history_count": history_count,
-        }
-        if path.suffix.lower() == ".json":
-            try:
-                payload = json.loads(path.read_text(encoding="utf-8"))
-                artifact["summary"] = _artifact_summary(payload)
-            except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-                artifact["summary"] = None
-        artifacts.append(artifact)
-    histories = [
-        item
-        for path_histories in histories_by_path.values()
-        for item in path_histories
-    ]
-    histories.sort(
-        key=lambda item: (
-            float(item.get("modified") or 0.0),
-            int(item.get("epoch") or 0),
-            str(item.get("path") or ""),
-            int(item.get("record_index") or 0),
-        ),
-        reverse=True,
+    artifacts_page = _training_artifacts_overview_page(
+        run_dir,
+        limit=TRAINING_OVERVIEW_ARTIFACT_LIMIT,
     )
+    history_page = _training_history_page_for_runs(
+        [(run_dir.name, run_dir)],
+        limit=TRAINING_OVERVIEW_HISTORY_LIMIT,
+        cursor="",
+        source="all",
+        winner="all",
+        sort="newest",
+        query_text="",
+        include_total=False,
+        diagnostics_cache={run_dir.name: diagnostics_by_epoch},
+        live_status_cache={run_dir.name: live_status},
+    )
+    histories = list(history_page["items"])
     return {
         "name": run_dir.name,
         "path": str(run_dir),
-        "artifacts": artifacts,
+        "artifacts": artifacts_page["items"],
+        "artifacts_page": {
+            "limit": TRAINING_OVERVIEW_ARTIFACT_LIMIT,
+            "next_cursor": artifacts_page["next_cursor"],
+            "complete": artifacts_page["complete"],
+        },
         "histories": histories,
+        "history_page": {
+            "limit": TRAINING_OVERVIEW_HISTORY_LIMIT,
+            "next_cursor": history_page["next_cursor"],
+            "complete": history_page["complete"],
+            "history_complete": False,
+            "recent_history_count": len(histories),
+        },
         "diagnostics_by_epoch": diagnostics_by_epoch,
         "epoch_history": epoch_history,
         "evaluation_history": evaluation_history,
@@ -950,6 +999,673 @@ def _training_history(run_name: str, artifact_path: str, record_index: int = 0) 
         }
     )
     return payload
+
+
+def _training_artifacts_page(
+    *,
+    run_name: str,
+    limit: int = ARTIFACT_PAGE_DEFAULT_LIMIT,
+    cursor: str = "",
+    kind: str = "all",
+) -> dict[str, object]:
+    run_dir = _resolve_run_dir(run_name)
+    if run_dir is None:
+        raise ValueError("Unknown training run")
+    return _training_artifacts_page_for_run(run_dir, limit=limit, cursor=cursor, kind=kind)
+
+
+def _training_artifacts_overview_page(run_dir: Path, *, limit: int) -> dict[str, object]:
+    paths: list[Path] = []
+
+    def add_direct(root: Path, suffixes: set[str] | frozenset[str] = ARTIFACT_SUFFIXES) -> None:
+        try:
+            entries = list(os.scandir(root))
+        except OSError:
+            return
+        for entry in entries:
+            if entry.is_file() and Path(entry.name).suffix.lower() in suffixes:
+                paths.append(Path(entry.path))
+
+    def add_recent_child_dirs(
+        root: Path,
+        suffixes: set[str] | frozenset[str],
+        *,
+        max_dirs: int = 2,
+    ) -> None:
+        try:
+            entries = list(os.scandir(root))
+        except OSError:
+            return
+        dirs: list[tuple[float, Path]] = []
+        for entry in entries:
+            if entry.is_file() and Path(entry.name).suffix.lower() in suffixes:
+                paths.append(Path(entry.path))
+            elif entry.is_dir():
+                try:
+                    dirs.append((entry.stat().st_mtime, Path(entry.path)))
+                except OSError:
+                    continue
+        for _, directory in sorted(dirs, reverse=True)[:max_dirs]:
+            add_direct(directory, suffixes)
+
+    def add_recursive_limited(
+        root: Path,
+        suffixes: set[str] | frozenset[str] = ARTIFACT_SUFFIXES,
+        *,
+        max_files: int = 100,
+    ) -> None:
+        if not root.is_dir():
+            return
+        for path in _iter_training_files(root, suffix=None):
+            if path.is_file() and path.suffix.lower() in suffixes:
+                paths.append(path)
+                if len(paths) >= max_files:
+                    return
+
+    add_direct(run_dir)
+    add_direct(run_dir / "diagnostics")
+    add_direct(run_dir / "selfplay", {".hxr"})
+    add_recent_child_dirs(run_dir / "evaluation", {".hxr"})
+    add_direct(run_dir / "checkpoints")
+    add_recursive_limited(run_dir / "bootstrap")
+
+    unique = {str(path.resolve()): path for path in paths}
+    paths = list(unique.values())
+    paths.sort(key=lambda item: (lambda s: s.st_mtime if s is not None else 0)(_safe_stat(item)), reverse=True)
+    selected = paths[: limit + 1]
+    return {
+        "run": run_dir.name,
+        "items": [_artifact_payload(run_dir, path) for path in selected[:limit]],
+        "next_cursor": str(limit) if len(selected) > limit else None,
+        "complete": len(selected) <= limit,
+        "scanned_files": len(paths),
+    }
+
+
+def _training_artifacts_page_for_run(
+    run_dir: Path,
+    *,
+    limit: int,
+    cursor: str,
+    kind: str,
+) -> dict[str, object]:
+    offset = max(0, _query_int(cursor) or 0)
+    wanted_kind = str(kind or "all").lower()
+    paths = [
+        path
+        for path in _iter_training_files(run_dir)
+        if path.is_file()
+        and path.suffix.lower() in ARTIFACT_SUFFIXES
+        and (wanted_kind == "all" or path.suffix.lower().lstrip(".") == wanted_kind)
+    ]
+    paths.sort(key=lambda item: (lambda s: s.st_mtime if s is not None else 0)(_safe_stat(item)), reverse=True)
+    selected = paths[offset : offset + limit + 1]
+    items = [_artifact_payload(run_dir, path) for path in selected[:limit]]
+    next_offset = offset + limit
+    return {
+        "run": run_dir.name,
+        "items": items,
+        "next_cursor": str(next_offset) if len(selected) > limit else None,
+        "complete": len(selected) <= limit,
+        "scanned_files": len(paths),
+    }
+
+
+def _artifact_payload(run_dir: Path, path: Path) -> dict[str, object]:
+    rel = path.relative_to(run_dir).as_posix()
+    stat = _safe_stat(path)
+    suffix = path.suffix.lower()
+    artifact: dict[str, object] = {
+        "path": rel,
+        "name": path.name,
+        "bytes": stat.st_size if stat is not None else 0,
+        "modified": stat.st_mtime if stat is not None else 0,
+        "kind": suffix.lstrip(".") or "file",
+        "loadable_history": False,
+        "history_count": 0,
+    }
+    if suffix == ".json":
+        payload = _read_json_file(path)
+        artifact["summary"] = _artifact_summary(payload)
+    elif suffix == ".hxr" and _is_loadable_history_path(rel) and stat is not None and stat.st_size > 0:
+        rows = _hxr_base_rows(path, run_dir)
+        history_count = len(rows)
+        artifact["loadable_history"] = history_count > 0
+        artifact["history_count"] = history_count
+    return artifact
+
+
+def _training_history_page(
+    *,
+    run_name: str,
+    limit: int = HISTORY_PAGE_DEFAULT_LIMIT,
+    cursor: str = "",
+    source: str = "all",
+    winner: str = "all",
+    sort: str = "newest",
+    query_text: str = "",
+    include_total: bool = True,
+) -> dict[str, object]:
+    run_infos = _history_run_infos(run_name)
+    if not run_infos:
+        raise ValueError("Unknown training run")
+    return _training_history_page_for_runs(
+        run_infos,
+        limit=limit,
+        cursor=cursor,
+        source=source,
+        winner=winner,
+        sort=sort,
+        query_text=query_text,
+        include_total=include_total,
+    )
+
+
+def _training_history_count(
+    *,
+    run_name: str,
+    source: str = "all",
+    winner: str = "all",
+    query_text: str = "",
+) -> dict[str, object]:
+    run_infos = _history_run_infos(run_name)
+    if not run_infos:
+        raise ValueError("Unknown training run")
+    total_matches, scanned_files, scanned_games = _training_history_count_for_runs(
+        run_infos,
+        source=source,
+        winner=winner,
+        query_text=query_text,
+    )
+    return {
+        "total_matches": total_matches,
+        "scanned_files": scanned_files,
+        "scanned_games": scanned_games,
+    }
+
+
+def _training_history_count_for_runs(
+    run_infos: list[tuple[str, Path]],
+    *,
+    source: str,
+    winner: str,
+    query_text: str,
+) -> tuple[int, int, int]:
+    total_matches = 0
+    scanned_files = 0
+    scanned_games = 0
+    can_count_without_rows = _history_filter_matches_all(winner=winner, query_text=query_text)
+    diagnostics_cache: dict[str, dict[str, object]] | None = None
+    live_status_cache: dict[str, dict[str, object]] | None = None
+    if not can_count_without_rows:
+        diagnostics_cache = {
+            run_name: _diagnostics_by_epoch(run_dir)
+            for run_name, run_dir in run_infos
+        }
+        live_status_cache = {
+            run_name: _training_live_status(run_dir)
+            for run_name, run_dir in run_infos
+        }
+
+    for run_name, run_dir, path, _stat in _history_files_for_runs(run_infos, source=source, reverse=True):
+        scanned_files += 1
+        if can_count_without_rows:
+            record_count = _hxr_record_count(path, run_dir)
+            total_matches += record_count
+            scanned_games += record_count
+            continue
+        rows = _history_rows_for_file(
+            run_name,
+            run_dir,
+            path,
+            diagnostics_cache=diagnostics_cache,
+            live_status_cache=live_status_cache,
+            reverse_records=False,
+        )
+        scanned_games += len(rows)
+        total_matches += sum(1 for row in rows if _history_row_matches(row, winner=winner, query_text=query_text))
+
+    return total_matches, scanned_files, scanned_games
+
+
+def _training_history_page_for_runs(
+    run_infos: list[tuple[str, Path]],
+    *,
+    limit: int,
+    cursor: str,
+    source: str,
+    winner: str,
+    sort: str,
+    query_text: str,
+    include_total: bool = True,
+    diagnostics_cache: dict[str, dict[str, object]] | None = None,
+    live_status_cache: dict[str, dict[str, object]] | None = None,
+) -> dict[str, object]:
+    diagnostics_cache = diagnostics_cache or {
+        run_name: _diagnostics_by_epoch(run_dir)
+        for run_name, run_dir in run_infos
+    }
+    live_status_cache = live_status_cache or {
+        run_name: _training_live_status(run_dir)
+        for run_name, run_dir in run_infos
+    }
+    normalized_sort = sort if sort in {"newest", "oldest", "longest", "shortest", "winner"} else "newest"
+    if normalized_sort in {"longest", "shortest", "winner"}:
+        rows, scanned_files, scanned_games = _collect_history_rows(
+            run_infos,
+            source=source,
+            diagnostics_cache=diagnostics_cache,
+            live_status_cache=live_status_cache,
+        )
+        rows = [row for row in rows if _history_row_matches(row, winner=winner, query_text=query_text)]
+        rows.sort(key=lambda item: _history_complete_sort_key(item, normalized_sort))
+        offset = max(0, _query_int(cursor) or 0)
+        selected = rows[offset : offset + limit]
+        next_offset = offset + limit
+        return {
+            "items": selected,
+            "next_cursor": str(next_offset) if next_offset < len(rows) else None,
+            "complete": next_offset >= len(rows),
+            "total_matches": len(rows),
+            "scanned_files": scanned_files,
+            "scanned_games": scanned_games,
+            "sort": normalized_sort,
+        }
+
+    return _training_history_streaming_page(
+        run_infos,
+        limit=limit,
+        cursor=cursor,
+        source=source,
+        winner=winner,
+        sort=normalized_sort,
+        query_text=query_text,
+        include_total=include_total,
+        diagnostics_cache=diagnostics_cache,
+        live_status_cache=live_status_cache,
+    )
+
+
+def _training_history_streaming_page(
+    run_infos: list[tuple[str, Path]],
+    *,
+    limit: int,
+    cursor: str,
+    source: str,
+    winner: str,
+    sort: str,
+    query_text: str,
+    include_total: bool,
+    diagnostics_cache: dict[str, dict[str, object]] | None,
+    live_status_cache: dict[str, dict[str, object]] | None,
+) -> dict[str, object]:
+    reverse = sort != "oldest"
+    cursor_key = _decode_history_cursor(cursor)
+    passed_cursor = cursor_key is None
+    selected: list[dict[str, object]] = []
+    has_more = False
+    total_matches: int | None = 0 if include_total else None
+    can_count_without_rows = include_total and _history_filter_matches_all(winner=winner, query_text=query_text)
+    scanned_files = 0
+    scanned_games = 0
+
+    for run_name, run_dir, path, _stat in _history_files_for_runs(run_infos, source=source, reverse=reverse):
+        scanned_files += 1
+        if can_count_without_rows and has_more:
+            record_count = _hxr_record_count(path, run_dir)
+            total_matches = (total_matches or 0) + record_count
+            scanned_games += record_count
+            continue
+        rows = _history_rows_for_file(
+            run_name,
+            run_dir,
+            path,
+            diagnostics_cache=diagnostics_cache,
+            live_status_cache=live_status_cache,
+            reverse_records=reverse,
+        )
+        scanned_games += len(rows)
+        if can_count_without_rows:
+            total_matches = (total_matches or 0) + len(rows)
+        for row in rows:
+            matches = True if can_count_without_rows else _history_row_matches(row, winner=winner, query_text=query_text)
+            if include_total and not can_count_without_rows and matches:
+                total_matches = (total_matches or 0) + 1
+            row_key = _history_cursor_key(row)
+            if not passed_cursor:
+                if row_key == cursor_key:
+                    passed_cursor = True
+                continue
+            if not matches:
+                continue
+            if len(selected) >= limit:
+                has_more = True
+                if include_total:
+                    if can_count_without_rows:
+                        break
+                    continue
+                break
+            selected.append(row)
+        if has_more and not include_total:
+            break
+
+    return {
+        "items": selected,
+        "next_cursor": _encode_history_cursor(_history_cursor_key(selected[-1])) if has_more and selected else None,
+        "complete": not has_more,
+        "total_matches": total_matches,
+        "scanned_files": scanned_files,
+        "scanned_games": scanned_games,
+        "sort": sort,
+    }
+
+
+def _history_run_infos(run_name: str) -> list[tuple[str, Path]]:
+    if run_name == HISTORY_ALL_RUNS:
+        infos: list[tuple[str, Path]] = []
+        for item in _training_runs()["runs"]:
+            resolved = _resolve_run_dir(str(item.get("name") or ""))
+            if resolved is not None:
+                infos.append((resolved.name, resolved))
+        return infos
+    run_dir = _resolve_run_dir(run_name)
+    return [] if run_dir is None else [(run_dir.name, run_dir)]
+
+
+def _collect_history_rows(
+    run_infos: list[tuple[str, Path]],
+    *,
+    source: str,
+    diagnostics_cache: dict[str, dict[str, object]] | None,
+    live_status_cache: dict[str, dict[str, object]] | None,
+) -> tuple[list[dict[str, object]], int, int]:
+    rows: list[dict[str, object]] = []
+    scanned_files = 0
+    scanned_games = 0
+    for run_name, run_dir, path, _stat in _history_files_for_runs(run_infos, source=source, reverse=True):
+        scanned_files += 1
+        file_rows = _history_rows_for_file(
+            run_name,
+            run_dir,
+            path,
+            diagnostics_cache=diagnostics_cache,
+            live_status_cache=live_status_cache,
+            reverse_records=False,
+        )
+        rows.extend(file_rows)
+        scanned_games += len(file_rows)
+    return rows, scanned_files, scanned_games
+
+
+def _history_files_for_runs(
+    run_infos: list[tuple[str, Path]],
+    *,
+    source: str,
+    reverse: bool,
+) -> list[tuple[str, Path, Path, os.stat_result]]:
+    files: list[tuple[str, Path, Path, os.stat_result]] = []
+    for run_name, run_dir in run_infos:
+        for path, stat in _iter_history_artifact_files(run_dir, source=source):
+            if stat.st_size <= 0:
+                continue
+            rel = path.relative_to(run_dir).as_posix()
+            if not _is_loadable_history_path(rel):
+                continue
+            files.append((run_name, run_dir, path, stat))
+    files.sort(
+        key=lambda item: (
+            _epoch_from_artifact_path(item[2].relative_to(item[1]).as_posix()) or 0,
+            item[3].st_mtime,
+            str(item[0]),
+            item[2].relative_to(item[1]).as_posix(),
+        ),
+        reverse=reverse,
+    )
+    return files
+
+
+def _iter_history_artifact_files(
+    run_dir: Path,
+    *,
+    source: str,
+) -> list[tuple[Path, os.stat_result]]:
+    normalized_source = str(source or "all").lower()
+    roots: list[Path] = []
+    if normalized_source in {"", "all", "selfplay"}:
+        roots.append(run_dir / "selfplay")
+    if normalized_source in {"", "all", "evaluation"}:
+        roots.append(run_dir / "evaluation")
+
+    files: list[tuple[Path, os.stat_result]] = []
+    for root in roots:
+        if not root.is_dir():
+            continue
+        stack = [root]
+        while stack:
+            current = stack.pop()
+            try:
+                entries = list(os.scandir(current))
+            except OSError:
+                continue
+            for entry in entries:
+                name = entry.name
+                if name.startswith(".") or name in TRAINING_SCAN_EXCLUDED_DIRS:
+                    continue
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        stack.append(Path(entry.path))
+                    elif entry.is_file(follow_symlinks=False) and name.endswith(".hxr"):
+                        files.append((Path(entry.path), entry.stat(follow_symlinks=False)))
+                except OSError:
+                    continue
+    return files
+
+
+def _history_rows_for_file(
+    run_name: str,
+    run_dir: Path,
+    path: Path,
+    *,
+    diagnostics_cache: dict[str, dict[str, object]] | None,
+    live_status_cache: dict[str, dict[str, object]] | None,
+    reverse_records: bool,
+) -> list[dict[str, object]]:
+    rel = path.relative_to(run_dir).as_posix()
+    base_rows = _hxr_base_rows(path, run_dir)
+    if reverse_records:
+        base_rows = list(reversed(base_rows))
+    epoch = _epoch_from_artifact_path(rel)
+    source = _history_source(rel)
+    diagnostics_by_epoch = (
+        diagnostics_cache.get(run_name)
+        if diagnostics_cache is not None and run_name in diagnostics_cache
+        else _diagnostics_by_epoch(run_dir)
+    )
+    live_status = (
+        live_status_cache.get(run_name)
+        if live_status_cache is not None and run_name in live_status_cache
+        else _training_live_status(run_dir)
+    )
+    diagnostics = dict(diagnostics_by_epoch.get(str(epoch), {})) if epoch is not None else {}
+    if (
+        live_status
+        and source == "selfplay"
+        and epoch is not None
+        and int(live_status.get("current_epoch") or -1) == int(epoch)
+        and "selfplay" not in diagnostics
+    ):
+        diagnostics["live"] = {
+            "path": rel,
+            "summary": _live_history_diagnostic_summary(live_status),
+        }
+    brief = _history_diagnostics_brief(diagnostics)
+    rows: list[dict[str, object]] = []
+    for row in base_rows:
+        item = dict(row)
+        item["run"] = run_name
+        item["diagnostics"] = brief
+        rows.append(item)
+    return rows
+
+
+def _hxr_base_rows(path: Path, run_dir: Path) -> list[dict[str, object]]:
+    stat = _safe_stat(path)
+    if stat is None or stat.st_size <= 0:
+        return []
+    cache_key = str(path.resolve())
+    with _training_cache_lock:
+        hit = _hxr_history_cache.get(cache_key)
+        if hit is not None and hit[0] == stat.st_mtime_ns and hit[1] == stat.st_size:
+            return [dict(row) for row in hit[2]]
+
+    rel = path.relative_to(run_dir).as_posix()
+    try:
+        with HexoRecordFile.open(path) as record_file:
+            players = [_record_player_payload(player) for player in record_file.players]
+            records = list(record_file.iter_records())
+    except Exception:
+        return []
+
+    rows: list[dict[str, object]] = []
+    epoch = _epoch_from_artifact_path(rel)
+    source = _history_source(rel)
+    players_by_role = _players_by_role(players)
+    for index, record in enumerate(records):
+        length = int(record.placements or len(record.action_ids))
+        rows.append(
+            {
+                "path": rel,
+                "record_index": index,
+                "game_id": record.game_id,
+                "status": record.status,
+                "winner": record.winner,
+                "winner_label": _winner_label(record.winner),
+                "length": length,
+                "actions": len(record.action_ids),
+                "epoch": epoch,
+                "source": source,
+                "seed": record.seed,
+                "players": players_by_role,
+                "modified": stat.st_mtime,
+                "modified_ns": stat.st_mtime_ns,
+                "bytes": stat.st_size,
+                "abort": _abort_payload(record.abort),
+            }
+        )
+    with _training_cache_lock:
+        _hxr_history_cache[cache_key] = (stat.st_mtime_ns, stat.st_size, [dict(row) for row in rows])
+    return rows
+
+
+def _hxr_record_count(path: Path, run_dir: Path) -> int:
+    stat = _safe_stat(path)
+    if stat is None or stat.st_size <= 0:
+        return 0
+    cache_key = str(path.resolve())
+    with _training_cache_lock:
+        hit = _hxr_history_cache.get(cache_key)
+        if hit is not None and hit[0] == stat.st_mtime_ns and hit[1] == stat.st_size:
+            return len(hit[2])
+        count_hit = _hxr_count_cache.get(cache_key)
+        if count_hit is not None and count_hit[0] == stat.st_mtime_ns and count_hit[1] == stat.st_size:
+            return count_hit[2]
+
+    try:
+        with HexoRecordFile.open(path) as record_file:
+            count = sum(1 for _ in record_file.iter_records())
+    except Exception:
+        return 0
+    with _training_cache_lock:
+        _hxr_count_cache[cache_key] = (stat.st_mtime_ns, stat.st_size, count)
+    return count
+
+
+def _is_loadable_history_path(rel: str) -> bool:
+    return rel.split("/", 1)[0] in {"selfplay", "evaluation"}
+
+
+def _history_filter_matches_all(*, winner: str, query_text: str) -> bool:
+    return str(winner or "all").lower() in {"", "all"} and not str(query_text or "").strip()
+
+
+def _history_row_matches(row: dict[str, object], *, winner: str, query_text: str) -> bool:
+    normalized_winner = str(winner or "all").lower()
+    if normalized_winner == "none":
+        if row.get("winner") is not None:
+            return False
+    elif normalized_winner not in {"", "all"} and row.get("winner") != normalized_winner:
+        return False
+
+    query = str(query_text or "").strip().lower()
+    if not query:
+        return True
+    players = row.get("players") if isinstance(row.get("players"), dict) else {}
+    diagnostics = row.get("diagnostics") if isinstance(row.get("diagnostics"), dict) else {}
+    haystack = " ".join(
+        str(value)
+        for value in (
+            row.get("game_id"),
+            row.get("run"),
+            row.get("path"),
+            row.get("status"),
+            row.get("source"),
+            row.get("epoch"),
+            row.get("seed"),
+            row.get("winner_label"),
+            row.get("length"),
+            history_player_label(players.get("player0") if isinstance(players, dict) else None),
+            history_player_label(players.get("player1") if isinstance(players, dict) else None),
+            json.dumps(diagnostics, sort_keys=True) if diagnostics else "",
+        )
+        if value is not None
+    ).lower()
+    return query in haystack
+
+
+def history_player_label(player: object) -> str:
+    if not isinstance(player, dict):
+        return "Unknown"
+    return str(player.get("label") or player.get("kind") or "Unknown")
+
+
+def _history_complete_sort_key(row: dict[str, object], sort: str) -> tuple[object, ...]:
+    newest = (
+        -float(row.get("modified") or 0.0),
+        -int(row.get("epoch") or 0),
+        str(row.get("run") or ""),
+        str(row.get("path") or ""),
+        -int(row.get("record_index") or 0),
+    )
+    if sort == "longest":
+        return (-int(row.get("length") or row.get("actions") or 0),) + newest
+    if sort == "shortest":
+        return (int(row.get("length") or row.get("actions") or 0),) + newest
+    if sort == "winner":
+        return (str(row.get("winner_label") or _winner_label(row.get("winner"))),) + newest
+    return newest
+
+
+def _history_cursor_key(row: dict[str, object]) -> list[object]:
+    return [
+        row.get("run"),
+        row.get("path"),
+        int(row.get("record_index") or 0),
+        int(row.get("modified_ns") or 0),
+    ]
+
+
+def _encode_history_cursor(key: list[object]) -> str:
+    return json.dumps(key, separators=(",", ":"))
+
+
+def _decode_history_cursor(cursor: str) -> list[object] | None:
+    if not cursor:
+        return None
+    try:
+        value = json.loads(cursor)
+    except json.JSONDecodeError:
+        return None
+    return value if isinstance(value, list) else None
 
 
 def _record_player_payload(player: object) -> dict[str, object]:
@@ -1625,6 +2341,8 @@ def _training_run_status(run_dir: Path, histories: list[dict[str, object]], live
     p1_wins = sum(1 for item in histories if item.get("winner") == "player1")
     status["history"] = {
         "games": len(histories),
+        "complete": False,
+        "scope": "recent",
         "completed": sum(1 for item in histories if item.get("status") == "completed"),
         "aborted": sum(1 for item in histories if item.get("status") != "completed"),
         "p0_wins": p0_wins,

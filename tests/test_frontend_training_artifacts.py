@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import os
 from pathlib import Path
 from typing import Any
 
@@ -260,3 +261,150 @@ def test_training_run_skips_quarantine_and_does_not_expand_bootstrap_hxr(
     assert "bootstrap/sealbot_050000/classical_sealbot_bootstrap.hxr" in artifact_paths
     assert "quarantine/stale_restart/epoch_000001.hxr" not in artifact_paths
     assert history_ids == {"selfplay-game"}
+
+
+def test_training_run_overview_limits_histories_and_artifacts(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    import hexo_frontend.web as web
+    from hexo_engine.types import AxialCoord, pack_coord_id
+    from hexo_runner.records import HexoRecordFile, HexoRecordPlayer
+
+    monkeypatch.chdir(tmp_path)
+    run_dir = tmp_path / "runs" / "dense_cnn_many"
+    selfplay = run_dir / "selfplay"
+    diagnostics = run_dir / "diagnostics"
+    selfplay.mkdir(parents=True)
+    diagnostics.mkdir(parents=True)
+    players = (
+        HexoRecordPlayer("dense-cnn", "player0", "Dense CNN"),
+        HexoRecordPlayer("sealbot-best", "player1", "SealBot best"),
+    )
+    for index in range(60):
+        (diagnostics / f"extra_{index:06d}.json").write_text('{"status":"ok"}', encoding="utf-8")
+        hxr = selfplay / f"epoch_{index:06d}.hxr"
+        with HexoRecordFile.create(hxr, {"rules_version": 1, "backend": "test"}, players) as record_file:
+            writer = record_file.begin_game(f"game-{index:06d}", seed=index)
+            writer.record_action(pack_coord_id(AxialCoord(q=index, r=0)))
+            writer.finish_completed("player0" if index % 2 == 0 else "player1", 1)
+
+    run = web._training_run("dense_cnn_many")
+
+    assert len(run["histories"]) == 50
+    assert len(run["artifacts"]) == 50
+    assert run["history_page"]["history_complete"] is False
+    assert run["history_page"]["recent_history_count"] == 50
+    assert run["history_page"]["next_cursor"]
+    assert run["artifacts_page"]["next_cursor"]
+
+
+def test_training_history_page_paginates_and_filters(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    import hexo_frontend.web as web
+    from hexo_engine.types import AxialCoord, pack_coord_id
+    from hexo_runner.records import HexoRecordFile, HexoRecordPlayer
+
+    monkeypatch.chdir(tmp_path)
+    run_dir = tmp_path / "runs" / "dense_cnn_paged"
+    selfplay = run_dir / "selfplay"
+    evaluation = run_dir / "evaluation"
+    selfplay.mkdir(parents=True)
+    evaluation.mkdir(parents=True)
+    players = (
+        HexoRecordPlayer("dense-cnn", "player0", "Dense CNN"),
+        HexoRecordPlayer("sealbot-best", "player1", "SealBot best"),
+    )
+
+    selfplay_hxr = selfplay / "epoch_000001.hxr"
+    evaluation_hxr = evaluation / "epoch_000002.hxr"
+    with HexoRecordFile.create(selfplay_hxr, {"rules_version": 1, "backend": "test"}, players) as record_file:
+        for index in range(3):
+            writer = record_file.begin_game(f"selfplay-{index}", seed=index)
+            for q in range(index + 1):
+                writer.record_action(pack_coord_id(AxialCoord(q=q, r=0)))
+            writer.finish_completed("player0", index + 1)
+
+    with HexoRecordFile.create(evaluation_hxr, {"rules_version": 1, "backend": "test"}, players) as record_file:
+        for index in range(3):
+            writer = record_file.begin_game(f"eval-{index}", seed=100 + index)
+            for q in range(index + 4):
+                writer.record_action(pack_coord_id(AxialCoord(q=q, r=1)))
+            writer.finish_completed("player1", index + 4)
+    os.utime(selfplay_hxr, (1, 1))
+    os.utime(evaluation_hxr, (2, 2))
+
+    first = web._training_history_page(
+        run_name="dense_cnn_paged",
+        limit=2,
+        cursor="",
+        source="all",
+        winner="all",
+        sort="newest",
+        query_text="",
+    )
+    second = web._training_history_page(
+        run_name="dense_cnn_paged",
+        limit=2,
+        cursor=str(first["next_cursor"]),
+        source="all",
+        winner="all",
+        sort="newest",
+        query_text="",
+    )
+    filtered = web._training_history_page(
+        run_name="dense_cnn_paged",
+        limit=10,
+        cursor="",
+        source="evaluation",
+        winner="player1",
+        sort="longest",
+        query_text="eval",
+    )
+
+    assert [item["game_id"] for item in first["items"]] == ["eval-2", "eval-1"]
+    assert [item["game_id"] for item in second["items"]] == ["eval-0", "selfplay-2"]
+    assert first["total_matches"] == 6
+    assert second["total_matches"] == 6
+    assert [item["game_id"] for item in filtered["items"]] == ["eval-2", "eval-1", "eval-0"]
+    assert filtered["total_matches"] == 3
+    assert filtered["complete"] is True
+
+
+def test_training_history_page_can_merge_all_runs(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    import hexo_frontend.web as web
+    from hexo_engine.types import AxialCoord, pack_coord_id
+    from hexo_runner.records import HexoRecordFile, HexoRecordPlayer
+
+    monkeypatch.chdir(tmp_path)
+    players = (
+        HexoRecordPlayer("dense-cnn", "player0", "Dense CNN"),
+        HexoRecordPlayer("sealbot-best", "player1", "SealBot best"),
+    )
+    for run_name in ("run_a", "run_b"):
+        selfplay = tmp_path / "runs" / run_name / "selfplay"
+        selfplay.mkdir(parents=True)
+        hxr_path = selfplay / "epoch_000001.hxr"
+        with HexoRecordFile.create(hxr_path, {"rules_version": 1, "backend": "test"}, players) as record_file:
+            writer = record_file.begin_game(f"{run_name}-game", seed=1)
+            writer.record_action(pack_coord_id(AxialCoord(q=0, r=0)))
+            writer.finish_completed("player0", 1)
+        os.utime(hxr_path, (1, 1))
+
+    page = web._training_history_page(
+        run_name=web.HISTORY_ALL_RUNS,
+        limit=10,
+        cursor="",
+        source="all",
+        winner="all",
+        sort="newest",
+        query_text="",
+    )
+
+    assert {item["run"] for item in page["items"]} == {"run_a", "run_b"}
+    assert {item["game_id"] for item in page["items"]} == {"run_a-game", "run_b-game"}
