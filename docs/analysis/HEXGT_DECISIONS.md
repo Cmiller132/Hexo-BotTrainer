@@ -542,3 +542,57 @@ prune rate is logged.
   96x8 data survives BC** (n=2: 11.3%, n=4: 9.6%). Value round-trip 822/822.
 - Candidate counts at n=3 (median): ~270 (vs ~610 at n=8) — ~2× cheaper dense
   candidate↔context attention than the old n=8 choice.
+
+---
+
+## Phase 5d — feature-buffer optimization (the Phase-5c bottleneck fix)
+
+The Phase-5c bottleneck (self-play ~89% Python featurization) is FIXED. Ported
+`features.build_graph_tensors` + `collate.collate_graphs` into Rust
+(`hexgt/rust/src/features.rs`), parallelized per-graph across rayon, emitted to
+Python as ZERO-COPY buffer-protocol views (`HexgtF32Buffer`/`HexgtI64Buffer`,
+mirroring dense_cnn's `PlaneBuffer`). `mcts_eval.rs` now featurizes+collates the
+whole leaf batch in Rust; `inference.evaluate_featurized_batch` just
+`torch.frombuffer` (≈0.01 ms, free) + the GNN forward. Byte-identity gated by
+`tests/test_hexgt_feature_buffer.py` (max|d| = 0 vs the Python path over 1.8M
+feature values — a mismatch silently poisons the model).
+
+**CRITICAL FIX:** do NOT release the GIL (`py.detach`, pyo3-0.28's renamed
+`allow_threads`) inside the eval callback. The copied dense_cnn MCTS drives its
+select↔eval pipeline across rayon threads; a per-chunk GIL hand-off there
+collapsed self-play to **0.5 pos/s** (9× regression, invisible to single-thread
+micro-benchmarks — `scripts/_eval_pathbench.py` confirmed the forward itself is
+identical old/new at every batch size). Hold the GIL while rayon featurizes.
+
+**Cache-assisted self-play throughput (64 games × visits=128, REAL 96x8 leaves,
+RTX 4070 Ti; `scripts/_mcts_selfplay_probe.py`):** baseline 4.3 pos/s
+(featurization-bound) → Rust featurize 5.9 (vbatch=16) / 9.4 (vbatch=64) /
+**29.7 (vbatch=64 + torch.compile)**. The compiled rate EXCEEDS dense_cnn 96x8's
+~23, inside the 17–68 ceiling. **GO — the dynamic GNN is throughput-competitive.**
+Use vbatch=64 + compile for self-play. (Training featurization in `expand.py`
+still uses the Python path; ~240 ms/step, tolerable for BC; port if RL needs it.)
+
+## Phase 7 — player + head-to-head eval wiring (Phase-5+ stubs → real)
+
+`HexgtPlayer` (`player.py`): a `hexo_runner` player wrapping `HexgtInference` +
+`HexgtMctsSession` (mirrors `DenseCNNPlayer`), DETERMINISTIC by default (greedy
+temperature=0, NO root Dirichlet noise, fixed per-(game,move) seed) so
+comparisons are repeatable; other search knobs match self-play (matched compute).
+`evaluation.run_head_to_head` is the reusable match driver (alternates colors,
+fixed seeds, scores from A's view); `evaluate_epoch` pairs hexgt vs SealBot
+best-50ms (plugin hook). `scripts/_head_to_head.py` runs hexgt vs the dense_cnn
+epoch-24 checkpoint (read-only) and vs SealBot at a matched visit budget. Gated by
+`tests/test_hexgt_player.py`.
+
+## Phase 8 — converged behavioral-clone run
+
+`scripts/_bc_train.py`: RAM-disciplined streaming converged BC (stream shard
+groups → train one pass → free; periodic checkpoint + held-out imitation eval on
+an epoch never trained on; crash-safe). 96x8 epochs 20/21/23/24 train, epoch 22
+held out, lr 1e-3 / warmup 500, ~240 ms/step. Components drop steadily (policy
+5.4→~2.9, value 4.2→~0.6); the policy CE floor (~2.9) is the diffuse-teacher
+limit, so top-1 agreement is the truer signal. NOTE: `hexgt_loss` reports the
+total under key `"total"` (not `"loss"`). RL self-play (a hexgt `selfplay.py`
+mirroring dense_cnn's game-driven loop, reusing the representation-agnostic
+compact sample format `expand.py` already reads) is the documented next step; the
+29.7 pos/s rate makes it viable.
