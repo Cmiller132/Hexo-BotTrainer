@@ -1,5 +1,6 @@
 param(
     [string]$RepositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path,
+    [string]$RunName = "dense_cnn_model1",
     [int]$IntervalSeconds = 6,
     [double]$MinFreeRamGb = 8.0,
     [double]$MinFreeVirtualGb = 12.0,
@@ -8,7 +9,7 @@ param(
 )
 
 $ErrorActionPreference = "Continue"
-$runDir = Join-Path $RepositoryRoot "runs\dense_cnn_model1"
+$runDir = Join-Path $RepositoryRoot ("runs\" + $RunName)
 $diagnosticsDir = Join-Path $runDir "diagnostics"
 New-Item -ItemType Directory -Force -Path $diagnosticsDir | Out-Null
 $logPath = Join-Path $diagnosticsDir "resource_watchdog.jsonl"

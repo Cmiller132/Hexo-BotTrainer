@@ -3,8 +3,10 @@ const SQRT3 = Math.sqrt(3);
 const FIT_MOVE_COUNT = 8;
 const FIT_LEGAL_RADIUS = 5;
 const HISTORY_ALL_RUNS = "__all__";
-const HISTORY_PAGE_SIZE = 400;
+const HISTORY_PAGE_SIZE = 50;
+const HISTORY_AUTOLOAD_PAGE_SIZE = 500;
 const HISTORY_REFRESH_INTERVAL_MS = 15000;
+const ARTIFACT_PAGE_SIZE = 50;
 
 let state = null;
 let tacticsOn = false;
@@ -21,6 +23,8 @@ let boardView = null;
 let boardViewDirty = false;
 let boardDrag = null;
 let suppressBoardClick = false;
+const activePointers = new Map(); // pointerId -> {x, y} for pan + pinch gestures
+let pinchState = null;
 let adapters = null;
 let adapterLoadError = null;
 let trainingRuns = [];
@@ -35,11 +39,24 @@ let historySelectionTouched = false;
 let historyVisibleLimit = HISTORY_PAGE_SIZE;
 let historyDetailsLoading = false;
 let historyRefreshInFlight = false;
+let historySearchTimer = null;
+let historyPage = {
+  items: [],
+  nextCursor: null,
+  complete: true,
+  totalMatches: null,
+  loading: false,
+  loaded: false,
+  requestKey: "",
+  countLoading: false,
+  countRequestKey: "",
+};
 let selectedHistoryKey = "";
 let historyView = false;
 let polling = false;
 let pollTimer = null;
 let pollAbort = null;
+let pollFailures = 0;
 let lastStatusError = "";
 let matchConfig = {
   players: { player0: "manual", player1: "sealbot-current" },
@@ -77,20 +94,34 @@ const historyLearningHealth = document.getElementById("historyLearningHealth");
 const historyEvalTrend = document.getElementById("historyEvalTrend");
 const historyEpochProgress = document.getElementById("historyEpochProgress");
 
-document.getElementById("newBtn").addEventListener("click", () => {
+// Null-guarded binding helper: one missing/renamed id should warn and skip,
+// not throw and brick the whole script before init() ever runs.
+function on(id, evt, fn, opts) {
+  const el = document.getElementById(id);
+  if (!el) {
+    console.warn("missing element #" + id);
+    return null;
+  }
+  el.addEventListener(evt, fn, opts);
+  return el;
+}
+
+on("newBtn", "click", () => {
   historyView = false;
   clearBoardView();
   resetReplay();
   post("/api/new", buildNewMatchPayload(), { resetReplay: true, clearBoard: true });
 });
-document.getElementById("trainingRefreshBtn").addEventListener("click", loadTrainingRuns);
-if (historyRefreshBtn) historyRefreshBtn.addEventListener("click", loadTrainingRuns);
+on("trainingRefreshBtn", "click", () => loadTrainingRuns());
+if (historyRefreshBtn) historyRefreshBtn.addEventListener("click", () => loadTrainingRuns({ preserveHistoryPage: true }));
 trainingRunSelect.addEventListener("change", () => loadTrainingRun(trainingRunSelect.value));
 if (historyRunSelect) historyRunSelect.addEventListener("change", async () => {
   historySelectedRun = historyRunSelect.value || HISTORY_ALL_RUNS;
   historySelectionTouched = true;
   historyVisibleLimit = HISTORY_PAGE_SIZE;
+  resetHistoryPage();
   await ensureHistorySelectionLoaded();
+  await loadHistoryPage({ reset: true });
   renderGameHistoryPage();
 });
 document.querySelectorAll("[data-screen]").forEach(button => {
@@ -99,6 +130,12 @@ document.querySelectorAll("[data-screen]").forEach(button => {
   });
 });
 trainingArtifacts.addEventListener("click", event => {
+  const moreButton = event.target.closest("[data-artifacts-more]");
+  if (moreButton) {
+    event.preventDefault();
+    loadMoreArtifacts();
+    return;
+  }
   const button = event.target.closest("[data-history-path]");
   if (!button) return;
   event.preventDefault();
@@ -109,28 +146,37 @@ if (gameHistoryDetail) gameHistoryDetail.addEventListener("click", handleGameHis
 if (historySearchInput) historySearchInput.addEventListener("input", event => {
   historyFilters.query = event.target.value || "";
   historyVisibleLimit = HISTORY_PAGE_SIZE;
+  resetHistoryPage();
+  window.clearTimeout(historySearchTimer);
+  historySearchTimer = window.setTimeout(() => loadHistoryPage({ reset: true }), 250);
   renderGameHistoryPage();
 });
 if (historySourceSelect) historySourceSelect.addEventListener("change", event => {
   historyFilters.source = event.target.value || "all";
   historyVisibleLimit = HISTORY_PAGE_SIZE;
+  resetHistoryPage();
+  loadHistoryPage({ reset: true });
   renderGameHistoryPage();
 });
 if (historyWinnerSelect) historyWinnerSelect.addEventListener("change", event => {
   historyFilters.winner = event.target.value || "all";
   historyVisibleLimit = HISTORY_PAGE_SIZE;
+  resetHistoryPage();
+  loadHistoryPage({ reset: true });
   renderGameHistoryPage();
 });
 if (historySortSelect) historySortSelect.addEventListener("change", event => {
   historySort = event.target.value || "newest";
   historyVisibleLimit = HISTORY_PAGE_SIZE;
+  resetHistoryPage();
+  loadHistoryPage({ reset: true });
   renderGameHistoryPage();
 });
 window.addEventListener("hashchange", () => setScreen(screenFromHash(), { preserveHash: true }));
 window.setInterval(refreshHistoryIfVisible, HISTORY_REFRESH_INTERVAL_MS);
-document.getElementById("fitBtn").addEventListener("click", fitBoard);
-document.getElementById("zoomInBtn").addEventListener("click", () => zoomBoardAtCenter(0.82));
-document.getElementById("zoomOutBtn").addEventListener("click", () => zoomBoardAtCenter(1.22));
+on("fitBtn", "click", fitBoard);
+on("zoomInBtn", "click", () => zoomBoardAtCenter(0.82));
+on("zoomOutBtn", "click", () => zoomBoardAtCenter(1.22));
 document.querySelectorAll("[data-player-select]").forEach(select => {
   select.addEventListener("change", event => {
     matchConfig.players[event.target.dataset.playerSelect] = event.target.value || "manual";
@@ -138,16 +184,16 @@ document.querySelectorAll("[data-player-select]").forEach(select => {
     render();
   });
 });
-document.getElementById("timeLimitInput").addEventListener("change", event => {
+on("timeLimitInput", "change", event => {
   const value = Number(event.target.value);
   matchConfig.time_limit = Number.isFinite(value) && value > 0 ? value : 0.05;
   event.target.value = String(matchConfig.time_limit);
 });
-document.getElementById("seedInput").addEventListener("change", event => {
+on("seedInput", "change", event => {
   const value = event.target.value.trim();
   matchConfig.seed = value === "" ? null : Number(value);
 });
-document.getElementById("tacticsBtn").addEventListener("click", () => {
+on("tacticsBtn", "click", () => {
   tacticsOn = !tacticsOn;
   if (tacticsOn) tacticsView = "overview";
   if (!tacticsOn) clearTacticSelection();
@@ -162,18 +208,18 @@ document.querySelectorAll("#playerSeg button").forEach(button => {
 document.querySelectorAll("#axisSeg button").forEach(button => {
   button.addEventListener("click", () => { tacticFilters.axis = button.dataset.axis; clearTacticSelection(); render(); });
 });
-document.getElementById("inspectBtn").addEventListener("click", () => {
+on("inspectBtn", "click", () => {
   tacticFilters.inspect = !tacticFilters.inspect;
   if (!tacticFilters.inspect) clearTacticSelection();
   if (tacticFilters.inspect) tacticsView = "cell";
   render();
 });
-document.getElementById("replayStartBtn").addEventListener("click", () => setReplayIndex(0));
-document.getElementById("replayPrevBtn").addEventListener("click", () => setReplayIndex(viewedPlacementCount() - 1));
-document.getElementById("replayPlayBtn").addEventListener("click", toggleReplayPlay);
-document.getElementById("replayNextBtn").addEventListener("click", () => setReplayIndex(viewedPlacementCount() + 1));
-document.getElementById("replayLiveBtn").addEventListener("click", () => setReplayIndex(totalPlacements()));
-document.getElementById("replaySlider").addEventListener("input", event => setReplayIndex(Number(event.target.value)));
+on("replayStartBtn", "click", () => setReplayIndex(0));
+on("replayPrevBtn", "click", () => setReplayIndex(viewedPlacementCount() - 1));
+on("replayPlayBtn", "click", toggleReplayPlay);
+on("replayNextBtn", "click", () => setReplayIndex(viewedPlacementCount() + 1));
+on("replayLiveBtn", "click", () => setReplayIndex(totalPlacements()));
+on("replaySlider", "input", event => setReplayIndex(Number(event.target.value)));
 window.addEventListener("resize", () => { if (state) render(); });
 boardArea.addEventListener("click", handleBoardClick);
 bindBoardViewEvents();
@@ -203,13 +249,16 @@ async function loadAdapters() {
     adapterLoadError = null;
     syncDefaultVariant();
   } catch (error) {
+    console.warn("loadAdapters: adapter API request failed", error);
     adapters = null;
     adapterLoadError = error && error.message ? error.message : "Adapter API unavailable";
   }
   render();
 }
 
-async function loadTrainingRuns() {
+async function loadTrainingRuns(options = {}) {
+  const preserveHistoryPage = Boolean(options.preserveHistoryPage);
+  const previousHistoryPageKey = activeScreen === "history" ? currentHistoryPageKey() : "";
   const preferred = (trainingRun && trainingRun.name) || trainingRunSelect.value || (historyRunSelect && historyRunSelect.value) || "";
   try {
     const res = await fetch("/api/training/runs");
@@ -226,7 +275,12 @@ async function loadTrainingRuns() {
     syncHistoryRunSelect(historySelectedRun);
     if (trainingRuns.length) {
       await loadTrainingRun(selected, { preserveHistorySelection: true });
-      await ensureHistorySelectionLoaded();
+      if (activeScreen === "history") {
+        const canPreserveHistoryPage = preserveHistoryPage && currentHistoryPageKey() === previousHistoryPageKey;
+        if (!canPreserveHistoryPage) resetHistoryPage();
+        await ensureHistorySelectionLoaded();
+        await loadHistoryPage({ reset: true, preserve: canPreserveHistoryPage });
+      }
     }
     else {
       trainingRun = null;
@@ -290,11 +344,223 @@ async function ensureHistorySelectionLoaded() {
   }
 }
 
+function resetHistoryPage() {
+  historyPage = {
+    items: [],
+    nextCursor: null,
+    complete: true,
+    totalMatches: null,
+    loading: false,
+    loaded: false,
+    requestKey: "",
+    countLoading: false,
+    countRequestKey: "",
+  };
+  selectedHistoryKey = "";
+}
+
+function currentHistoryPageKey() {
+  return JSON.stringify({
+    run: historySelectedRun || HISTORY_ALL_RUNS,
+    source: historyFilters.source || "all",
+    winner: historyFilters.winner || "all",
+    sort: historySort || "newest",
+    query: historyFilters.query || "",
+  });
+}
+
+function currentHistoryTargets() {
+  const runs = historyRunsForPage();
+  const liveStatus = latestRunStatusForHistoryPage();
+  const liveEpoch = asFinite(liveStatus && liveStatus.current_epoch);
+  const selfplayEpochsSeen = runs
+    .flatMap(run => (run.epoch_history || []).map(item => asFinite(item.epoch)))
+    .filter(value => value !== null);
+  const latestSelfplayEpoch = selfplayEpochsSeen.length ? Math.max(...selfplayEpochsSeen) : null;
+  const currentEpoch = liveEpoch !== null ? liveEpoch : latestSelfplayEpoch;
+  const previousEpoch = currentEpoch !== null ? currentEpoch - 1 : null;
+  const selfplayEpochs = new Set([currentEpoch, previousEpoch].filter(value => value !== null && value >= 0));
+  const evalEpochsSeen = runs
+    .flatMap(run => (run.evaluation_history || []).map(item => asFinite(item.epoch)))
+    .filter(value => value !== null && (currentEpoch === null || value <= currentEpoch));
+  const latestEvalEpoch = evalEpochsSeen.length ? Math.max(...evalEpochsSeen) : null;
+  const evaluationEpochs = new Set([latestEvalEpoch].filter(value => value !== null));
+  const allTargets = [...selfplayEpochs, ...evaluationEpochs];
+  return {
+    currentEpoch,
+    previousEpoch,
+    selfplayEpochs,
+    evaluationEpochs,
+    minEpoch: allTargets.length ? Math.min(...allTargets) : null,
+  };
+}
+
+function shouldAutoloadHistoryWindow() {
+  return historySort === "newest" &&
+    (historyFilters.source || "all") === "all" &&
+    (historyFilters.winner || "all") === "all" &&
+    !(historyFilters.query || "").trim();
+}
+
+function historyItemInTargetWindow(item, targets) {
+  const epoch = asFinite(item && item.epoch);
+  if (epoch === null) return false;
+  const source = String(item && item.source || "history");
+  if (source === "selfplay") return targets.selfplayEpochs.has(epoch);
+  if (source === "evaluation") return targets.evaluationEpochs.has(epoch);
+  return false;
+}
+
+function historyWindowBoundaryReached(items, targets) {
+  if (targets.minEpoch === null) return true;
+  return items.some(item => {
+    const epoch = asFinite(item && item.epoch);
+    return epoch !== null && epoch < targets.minEpoch;
+  });
+}
+
+async function enterHistoryScreen() {
+  if (!trainingRuns.length) return;
+  await ensureHistorySelectionLoaded();
+  if (!historyPage.loaded && !historyPage.loading) {
+    await loadHistoryPage({ reset: true });
+  }
+}
+
+async function loadHistoryPage(options = {}) {
+  if (!trainingRuns.length || historyPage.loading) return;
+  const reset = Boolean(options.reset);
+  const append = Boolean(options.append);
+  const preserve = Boolean(options.preserve);
+  const autoloadWindow = reset && !append && shouldAutoloadHistoryWindow();
+  const targets = autoloadWindow ? currentHistoryTargets() : null;
+  if (reset && !preserve) {
+    historyPage.items = [];
+    historyPage.nextCursor = null;
+    historyPage.complete = true;
+    historyPage.totalMatches = null;
+    historyPage.loaded = false;
+  }
+  if (append && !historyPage.nextCursor) return;
+
+  const requestKey = currentHistoryPageKey();
+  historyPage.loading = true;
+  historyPage.requestKey = requestKey;
+  renderGameHistoryPage();
+  try {
+    const fetchedItems = [];
+    let data = null;
+    let cursor = append ? historyPage.nextCursor : "";
+    let pageCount = 0;
+    do {
+      const params = new URLSearchParams({
+        run: historySelectedRun || HISTORY_ALL_RUNS,
+        limit: String(autoloadWindow ? HISTORY_AUTOLOAD_PAGE_SIZE : HISTORY_PAGE_SIZE),
+        source: historyFilters.source || "all",
+        winner: historyFilters.winner || "all",
+        sort: historySort || "newest",
+        query: historyFilters.query || "",
+        include_total: "0",
+      });
+      if (cursor) params.set("cursor", cursor);
+      const res = await fetch(`/api/training/history-page?${params.toString()}`);
+      data = await safeJson(res);
+      if (!res.ok) throw new Error((data && data.error) || "Game histories unavailable");
+      fetchedItems.push(...((data && data.items) || []));
+      cursor = (data && data.next_cursor) || "";
+      pageCount += 1;
+    } while (
+      autoloadWindow &&
+      cursor &&
+      pageCount < 8 &&
+      !historyWindowBoundaryReached(fetchedItems, targets)
+    );
+    if (historyPage.requestKey !== requestKey) return;
+    const items = autoloadWindow && targets && targets.minEpoch !== null
+      ? fetchedItems.filter(item => historyItemInTargetWindow(item, targets))
+      : fetchedItems;
+    historyPage.items = append ? [...historyPage.items, ...items] : items;
+    historyPage.nextCursor = (data && data.next_cursor) || null;
+    historyPage.complete = Boolean(data && data.complete);
+    if (data && data.total_matches !== null && data.total_matches !== undefined) {
+      historyPage.totalMatches = data.total_matches;
+    } else if (autoloadWindow) {
+      historyPage.totalMatches = items.length;
+    } else if (!append && !preserve) {
+      historyPage.totalMatches = null;
+    }
+    historyPage.loaded = true;
+    trainingLoadError = "";
+    if (!append && !autoloadWindow) loadHistoryCount(requestKey);
+  } catch (error) {
+    trainingLoadError = error && error.message ? error.message : "Game histories unavailable";
+  } finally {
+    if (historyPage.requestKey === requestKey) {
+      historyPage.loading = false;
+      renderGameHistoryPage();
+    }
+  }
+}
+
+async function loadHistoryCount(expectedKey = "") {
+  if (!trainingRuns.length) return;
+  const requestKey = expectedKey || currentHistoryPageKey();
+  if (historyPage.countLoading && historyPage.countRequestKey === requestKey) return;
+  historyPage.countLoading = true;
+  historyPage.countRequestKey = requestKey;
+  renderGameHistoryPage();
+  try {
+    const params = new URLSearchParams({
+      run: historySelectedRun || HISTORY_ALL_RUNS,
+      source: historyFilters.source || "all",
+      winner: historyFilters.winner || "all",
+      query: historyFilters.query || "",
+    });
+    const res = await fetch(`/api/training/history-count?${params.toString()}`);
+    const data = await safeJson(res);
+    if (!res.ok) throw new Error((data && data.error) || "Game count unavailable");
+    if (historyPage.countRequestKey !== requestKey || currentHistoryPageKey() !== requestKey) return;
+    historyPage.totalMatches = data && data.total_matches !== undefined ? data.total_matches : null;
+    trainingLoadError = "";
+  } catch (error) {
+    console.warn("loadHistoryCount: history count request failed", error);
+  } finally {
+    if (historyPage.countRequestKey === requestKey) {
+      historyPage.countLoading = false;
+      renderGameHistoryPage();
+    }
+  }
+}
+
+async function loadMoreArtifacts() {
+  if (!trainingRun || !trainingRun.artifacts_page || !trainingRun.artifacts_page.next_cursor) return;
+  try {
+    const params = new URLSearchParams({
+      run: trainingRun.name,
+      limit: String(ARTIFACT_PAGE_SIZE),
+      cursor: trainingRun.artifacts_page.next_cursor,
+    });
+    const res = await fetch(`/api/training/artifacts-page?${params.toString()}`);
+    const data = await safeJson(res);
+    if (!res.ok) throw new Error((data && data.error) || "Artifacts unavailable");
+    trainingRun.artifacts = [...(trainingRun.artifacts || []), ...((data && data.items) || [])];
+    trainingRun.artifacts_page = {
+      ...(trainingRun.artifacts_page || {}),
+      next_cursor: (data && data.next_cursor) || null,
+      complete: Boolean(data && data.complete),
+    };
+    trainingLoadError = "";
+  } catch (error) {
+    trainingLoadError = error && error.message ? error.message : "Artifacts unavailable";
+  }
+  renderTraining();
+}
+
 async function refreshHistoryIfVisible() {
   if (activeScreen !== "history" || historyRefreshInFlight || pendingRequest) return;
   historyRefreshInFlight = true;
   try {
-    await loadTrainingRuns();
+    await loadTrainingRuns({ preserveHistoryPage: true });
   } finally {
     historyRefreshInFlight = false;
   }
@@ -350,6 +616,7 @@ async function post(url, payload, options = {}) {
       });
     }
   } catch (error) {
+    console.error("post: request to " + url + " failed", error);
     if (seq === requestSeq) {
       lastStatusError = "Request failed";
       render();
@@ -372,7 +639,8 @@ function setPending(value) {
 async function safeJson(res) {
   try {
     return await res.json();
-  } catch (_) {
+  } catch (error) {
+    console.warn("safeJson: failed to parse response body", error);
     return null;
   }
 }
@@ -388,7 +656,19 @@ function navigateScreen(screen) {
 }
 
 function setScreen(screen, options = {}) {
+  const previousScreen = activeScreen;
   activeScreen = screen === "history" ? "history" : "match";
+  // Match-screen lifecycle: stop the long-poll and any replay timer when we
+  // leave it, and resume polling when we (re)enter it. schedulePoll/pollState
+  // also gate on activeScreen === "match", so this can never run while History
+  // is up.
+  if (previousScreen === "match" && activeScreen !== "match") {
+    abortPoll();
+    stopReplay();
+    window.clearTimeout(pollTimer);
+  } else if (activeScreen === "match" && previousScreen !== "match") {
+    schedulePoll(0);
+  }
   if (matchScreen) matchScreen.hidden = activeScreen !== "match";
   if (historyScreen) historyScreen.hidden = activeScreen !== "history";
   document.querySelectorAll("[data-screen]").forEach(button => {
@@ -400,6 +680,11 @@ function setScreen(screen, options = {}) {
     if (window.location.hash && window.location.hash !== hash) window.history.replaceState(null, "", hash);
   }
   renderGameHistoryPage();
+  if (activeScreen === "history") enterHistoryScreen();
+  // Re-render the match view once it is actually visible so layout-dependent
+  // work (move-history centering, board fit) runs with real element widths
+  // instead of the zero width it would see while the screen was hidden.
+  if (activeScreen === "match" && state) render();
 }
 
 function syncTrainingRunSelect(selected = "") {
@@ -462,7 +747,9 @@ function isNewerOrSameState(next) {
 }
 
 function schedulePoll(delay = 0) {
-  if (historyView) return;
+  // The match long-poll only runs while the match screen is active and we are
+  // not pinned to a static history view.
+  if (historyView || activeScreen !== "match") return;
   window.clearTimeout(pollTimer);
   pollTimer = window.setTimeout(pollState, delay);
 }
@@ -476,7 +763,7 @@ function abortPoll() {
 }
 
 async function pollState() {
-  if (historyView) return;
+  if (historyView || activeScreen !== "match") return;
   if (polling || pendingRequest) {
     schedulePoll(600);
     return;
@@ -484,6 +771,7 @@ async function pollState() {
   polling = true;
   const controller = new AbortController();
   pollAbort = controller;
+  let failed = false;
   try {
     const params = new URLSearchParams();
     const version = stateVersion();
@@ -494,18 +782,28 @@ async function pollState() {
     const res = await fetch(`/api/state${params.toString() ? "?" + params.toString() : ""}`, { signal: controller.signal });
     const data = await safeJson(res);
     if (res.ok && data) {
+      pollFailures = 0;
       if (lastStatusError === "Live update paused") lastStatusError = "";
       applyState(data, { preserveReplay: true });
     }
   } catch (error) {
     if (!controller.signal.aborted) {
+      failed = true;
+      console.warn("pollState: live state poll failed", error);
       lastStatusError = "Live update paused";
       render();
     }
   } finally {
     if (pollAbort === controller) pollAbort = null;
     polling = false;
-    schedulePoll(document.hidden ? 2500 : 300);
+    // On consecutive failures, back off exponentially (capped) instead of
+    // hammering the server every 300ms; a successful response resets the streak.
+    if (failed) {
+      pollFailures += 1;
+      schedulePoll(Math.min(300 * Math.pow(2, pollFailures), 5000));
+    } else {
+      schedulePoll(document.hidden ? 2500 : 300);
+    }
   }
 }
 
@@ -518,7 +816,7 @@ function render() {
   const board = buildBoardModel();
   renderBoard(board);
   renderStatus();
-  renderMoves();
+  renderMoveHistory();
   renderTacticsPanel(board.tacticMaps);
   renderBotPanel();
   renderTurnOverlay();
@@ -854,49 +1152,125 @@ function bindBoardViewEvents() {
   boardArea.addEventListener("pointerdown", event => {
     if (!boardView || pendingRequest || (event.pointerType === "mouse" && event.button !== 0)) return;
     if (event.target.closest(".board-view-controls") || event.target.closest(".legend")) return;
-    const rect = svg.getBoundingClientRect();
-    boardDrag = {
-      pointerId: event.pointerId,
-      clientX: event.clientX,
-      clientY: event.clientY,
-      scaleX: boardView.width / Math.max(1, rect.width),
-      scaleY: boardView.height / Math.max(1, rect.height),
-      view: { ...boardView },
-      moved: false,
-    };
+    activePointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
     boardArea.setPointerCapture(event.pointerId);
     boardArea.classList.add("dragging");
     hideTip();
+    if (activePointers.size >= 2) {
+      beginPinch(); // a second finger upgrades the gesture to pinch-zoom
+    } else {
+      beginPan(event);
+    }
   });
 
   boardArea.addEventListener("pointermove", event => {
-    if (!boardDrag || event.pointerId !== boardDrag.pointerId) return;
+    if (!activePointers.has(event.pointerId)) return;
     event.preventDefault();
-    const dx = (event.clientX - boardDrag.clientX) * boardDrag.scaleX;
-    const dy = (event.clientY - boardDrag.clientY) * boardDrag.scaleY;
-    if (Math.hypot(event.clientX - boardDrag.clientX, event.clientY - boardDrag.clientY) > 4) boardDrag.moved = true;
-    boardView = {
-      ...boardDrag.view,
-      x: boardDrag.view.x - dx,
-      y: boardDrag.view.y - dy,
-    };
-    boardViewDirty = true;
-    applyBoardView();
-  });
+    activePointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    if (pinchState && activePointers.size >= 2) {
+      updatePinch();
+    } else if (boardDrag && event.pointerId === boardDrag.pointerId) {
+      updatePan(event);
+    }
+  }, { passive: false });
 
-  boardArea.addEventListener("pointerup", finishBoardDrag);
-  boardArea.addEventListener("pointercancel", finishBoardDrag);
+  boardArea.addEventListener("pointerup", endBoardPointer);
+  boardArea.addEventListener("pointercancel", endBoardPointer);
 }
 
-function finishBoardDrag(event) {
-  if (!boardDrag || event.pointerId !== boardDrag.pointerId) return;
-  if (boardDrag.moved) {
-    suppressBoardClick = true;
-    window.setTimeout(() => { suppressBoardClick = false; }, 80);
-  }
+function boardDragScales() {
+  const rect = svg.getBoundingClientRect();
+  return {
+    scaleX: boardView.width / Math.max(1, rect.width),
+    scaleY: boardView.height / Math.max(1, rect.height),
+  };
+}
+
+function beginPan(event) {
+  const { scaleX, scaleY } = boardDragScales();
+  boardDrag = {
+    pointerId: event.pointerId,
+    clientX: event.clientX,
+    clientY: event.clientY,
+    scaleX,
+    scaleY,
+    view: { ...boardView },
+    moved: false,
+  };
+}
+
+function updatePan(event) {
+  const dx = (event.clientX - boardDrag.clientX) * boardDrag.scaleX;
+  const dy = (event.clientY - boardDrag.clientY) * boardDrag.scaleY;
+  if (Math.hypot(event.clientX - boardDrag.clientX, event.clientY - boardDrag.clientY) > 4) boardDrag.moved = true;
+  boardView = { ...boardDrag.view, x: boardDrag.view.x - dx, y: boardDrag.view.y - dy };
+  boardViewDirty = true;
+  applyBoardView();
+}
+
+function pinchPointers() {
+  return [...activePointers.values()].slice(0, 2);
+}
+
+function beginPinch() {
+  boardDrag = null; // pan and pinch are mutually exclusive
+  const [a, b] = pinchPointers();
+  const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+  pinchState = {
+    rect: svg.getBoundingClientRect(),
+    startDist: Math.max(1, Math.hypot(a.x - b.x, a.y - b.y)),
+    startView: { ...boardView },
+    anchorBoard: clientToBoardPoint(mid.x, mid.y),
+  };
+  suppressBoardClick = true;
+}
+
+// Two-finger pinch: zoom by the change in finger distance, keeping the board
+// point that was under the initial midpoint pinned beneath the moving midpoint
+// (so the gesture also pans).
+function updatePinch() {
+  const [a, b] = pinchPointers();
+  if (!a || !b) return;
+  const dist = Math.max(1, Math.hypot(a.x - b.x, a.y - b.y));
+  const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+  const base = boardBaseView || pinchState.startView;
+  const nextWidth = clamp(pinchState.startView.width * (pinchState.startDist / dist), base.width * 0.14, base.width * 4.2);
+  const scale = nextWidth / pinchState.startView.width;
+  const nextHeight = pinchState.startView.height * scale;
+  const rect = pinchState.rect;
+  const viewScaleX = nextWidth / Math.max(1, rect.width);
+  const viewScaleY = nextHeight / Math.max(1, rect.height);
+  boardView = {
+    width: nextWidth,
+    height: nextHeight,
+    x: pinchState.anchorBoard.x - (mid.x - rect.left) * viewScaleX,
+    y: pinchState.anchorBoard.y - (mid.y - rect.top) * viewScaleY,
+  };
+  boardViewDirty = true;
+  applyBoardView();
+}
+
+function endBoardPointer(event) {
+  if (!activePointers.has(event.pointerId)) return;
+  activePointers.delete(event.pointerId);
   if (boardArea.hasPointerCapture(event.pointerId)) boardArea.releasePointerCapture(event.pointerId);
-  boardDrag = null;
-  boardArea.classList.remove("dragging");
+
+  const moved = (boardDrag && boardDrag.moved) || Boolean(pinchState);
+  if (activePointers.size < 2) pinchState = null;
+
+  if (activePointers.size === 1) {
+    // Dropped from pinch to a single finger — resume panning from it.
+    const [pointerId, point] = [...activePointers.entries()][0];
+    beginPan({ pointerId, clientX: point.x, clientY: point.y });
+    boardDrag.moved = true;
+  } else if (activePointers.size === 0) {
+    boardDrag = null;
+    boardArea.classList.remove("dragging");
+    if (moved) {
+      suppressBoardClick = true;
+      window.setTimeout(() => { suppressBoardClick = false; }, 80);
+    }
+  }
 }
 
 function viewForBox(box, pad) {
@@ -1039,38 +1413,63 @@ function renderTurnBanner(active) {
   sub.textContent = `${playerKindLabel(active)} - ${placementStepLabel()}`;
 }
 
-function renderMoves() {
-  renderMoveHistory();
-  bindMoveSelectors();
-}
+// The move list is a bounded, wrapping, vertically-scrolling box. Chips flow and
+// wrap inside it, so the element is always exactly its container's width and can
+// never push the page sideways — regardless of move count (a 1000-move game just
+// scrolls vertically). Chips are only rebuilt when the move list grows, so live
+// polling of a long game doesn't churn ~1000 DOM nodes every tick.
+let moveHistoryBound = false;
+let moveHistoryStructSig = "";
 
 function renderMoveHistory() {
   const history = document.getElementById("moveHistory");
+  if (!history) return;
+  ensureMoveHistoryEvents(history);
   const placements = state.placements || [];
   const selected = viewedPlacementCount();
+
   if (!placements.length) {
+    moveHistoryStructSig = "";
+    history.classList.remove("has-moves");
     history.innerHTML = `<div class="empty-list">No moves yet</div>`;
     return;
   }
-  history.innerHTML = placements.map(p => {
-    const cls = p.player === "player0" ? "p0" : "p1";
-    const selectedClass = selected === p.index ? "selected" : "";
-    return `<button class="history-chip ${cls} ${selectedClass}" data-move-index="${p.index}">
+
+  history.classList.add("has-moves");
+  const structSig = `${placements.length}:${placements[placements.length - 1].index}`;
+  if (structSig !== moveHistoryStructSig) {
+    moveHistoryStructSig = structSig;
+    history.innerHTML = placements.map(p => {
+      const cls = p.player === "player0" ? "p0" : "p1";
+      return `<button class="history-chip ${cls}" data-move-index="${p.index}">
       <span class="chip-index">${p.index}</span>
       <span class="chip-dot"></span>
       <span class="chip-text">${playerShort(p.player)} (${p.q}, ${p.r})</span>
     </button>`;
-  }).join("");
-  const selectedChip = history.querySelector(".history-chip.selected");
-  if (selectedChip) {
-    const centered = selectedChip.offsetLeft - history.clientWidth / 2 + selectedChip.clientWidth / 2;
-    history.scrollLeft = Math.max(0, centered);
+    }).join("");
+  }
+
+  // Update the selection without a full rebuild, then scroll it into view.
+  const previous = history.querySelector(".history-chip.selected");
+  if (previous) previous.classList.remove("selected");
+  const current = history.querySelector(`.history-chip[data-move-index="${selected}"]`);
+  if (current) {
+    current.classList.add("selected");
+    if (history.clientHeight) {
+      const top = current.offsetTop - history.clientHeight / 2 + current.clientHeight / 2;
+      history.scrollTop = Math.max(0, top);
+    }
   }
 }
 
-function bindMoveSelectors() {
-  document.querySelectorAll("[data-move-index]").forEach(el => {
-    el.addEventListener("click", () => setReplayIndex(Number(el.dataset.moveIndex)));
+function ensureMoveHistoryEvents(history) {
+  if (moveHistoryBound) return;
+  moveHistoryBound = true;
+  // Delegated click so chip rebuilds never leave stale per-chip listeners.
+  history.addEventListener("click", event => {
+    const chip = event.target.closest("[data-move-index]");
+    if (!chip) return;
+    setReplayIndex(Number(chip.dataset.moveIndex));
   });
 }
 
@@ -1605,10 +2004,6 @@ function playerPill(player) {
   return `<span class="pill ${cls}">${playerShort(player)}</span>`;
 }
 
-function coordList(coords) {
-  return (coords || []).map(c => `(${c.q},${c.r})`).join(" ") || "-";
-}
-
 function idList(ids) {
   return (ids || []).map(escapeText).join(" ");
 }
@@ -1924,6 +2319,22 @@ function escapeAttr(text) {
   return escapeText(text);
 }
 
+// Human-friendly stringification for raw values interpolated into the UI:
+// null/undefined/"" become an em dash rather than the literal "null"/"undefined",
+// finite numbers pass through, and objects/arrays are JSON-encoded compactly.
+function displayValue(value, empty = "—") {
+  if (value === null || value === undefined || value === "") return empty;
+  if (typeof value === "number") return Number.isFinite(value) ? String(value) : empty;
+  if (typeof value === "object") {
+    try {
+      return JSON.stringify(value);
+    } catch (error) {
+      return empty;
+    }
+  }
+  return String(value);
+}
+
 function placementStepLabel() {
   if (!state || state.phase === "opening") return "Opening";
   return state.phase === "second_stone" ? "Placement 2 of 2" : "Placement 1 of 2";
@@ -1961,7 +2372,7 @@ function renderTraining() {
   const calibration = status.calibration || {};
   const statusMetrics = [
     summaryMetric("Stage", runStageLabel(status)),
-    summaryMetric("Games", firstPresent(history.games, histories.length)),
+    summaryMetric("Recent Games", firstPresent(history.games, histories.length)),
     summaryMetric("Epochs", epochs.length ? `${epochs[0]}-${epochs[epochs.length - 1]}` : "--"),
     summaryMetric("P0 / P1", `${firstPresent(history.p0_wins, p0Wins)} / ${firstPresent(history.p1_wins, p1Wins)}`),
     summaryMetric("Avg Len", formatDecimal(firstPresent(history.avg_length, averageHistoryLength(histories)), 1)),
@@ -1973,22 +2384,25 @@ function renderTraining() {
     ? Object.entries(latest.summary).slice(0, 4).map(([key, value]) => summaryMetric(key, value))
     : [summaryMetric("Artifacts", artifacts.length)];
   trainingSummary.innerHTML = [...statusMetrics, ...fallbackMetrics].join("");
-  const shown = artifacts.slice(0, 50);
-  trainingArtifacts.innerHTML = shown.map(item => trainingArtifactRow(trainingRun.name, item)).join("");
+  const shown = artifacts.slice(0, artifacts.length);
+  const moreArtifacts = trainingRun.artifacts_page && trainingRun.artifacts_page.next_cursor
+    ? `<button class="history-list-more" type="button" data-artifacts-more>Show more artifacts</button>`
+    : "";
+  trainingArtifacts.innerHTML = `${shown.map(item => trainingArtifactRow(trainingRun.name, item)).join("")}${moreArtifacts}`;
   renderGameHistoryPage();
 }
 
 function trainingArtifactRow(runName, item) {
   const href = `/api/training/file?run=${encodeURIComponent(runName)}&path=${encodeURIComponent(item.path)}`;
   const summary = item.summary
-    ? Object.entries(item.summary).map(([key, value]) => `${key}: ${value}`).join(" | ")
-    : `${item.kind} | ${formatBytes(item.bytes)}`;
+    ? Object.entries(item.summary).map(([key, value]) => `${key}: ${displayValue(value)}`).join(" | ")
+    : `${item.kind || "file"} | ${formatBytes(item.bytes)}`;
   const preview = item.kind === "png" ? `<img src="${href}" alt="">` : "";
   const loadButton = item.loadable_history
     ? `<button class="artifact-load-btn" type="button" data-history-path="${escapeAttr(item.path)}" data-record-index="0">Load game</button>`
     : "";
   return `<div class="artifact-row">
-    <a class="artifact-link" href="${href}" target="_blank" rel="noreferrer">
+    <a class="artifact-link" href="${href}" target="_blank" rel="noreferrer" title="${escapeAttr(item.path || item.name || "")}">
       ${preview}
       <span>${escapeText(item.name)}</span>
       <small>${escapeText(summary)}</small>
@@ -2016,14 +2430,16 @@ function renderGameHistoryPage() {
     if (historyLearningHealth) historyLearningHealth.innerHTML = "";
     if (historyEvalTrend) historyEvalTrend.innerHTML = "";
     if (historyEpochProgress) historyEpochProgress.innerHTML = "";
-    gameHistoryList.innerHTML = `<div class="empty-list">${historyDetailsLoading ? "Loading game histories" : "No training run selected"}</div>`;
+    const pendingSelection = historyDetailsLoading || historySelectionPendingDetails();
+    gameHistoryList.innerHTML = `<div class="empty-list">${pendingSelection ? "Loading game histories" : "No training run selected"}</div>`;
     gameHistoryDetail.innerHTML = `<div class="empty-list">No game selected</div>`;
     return;
   }
 
-  const filtered = sortedHistoryItems(filteredHistoryItems(histories));
+  const usingServerPage = historyPage.loaded || historyPage.loading || historyPage.items.length > 0;
+  const filtered = usingServerPage ? histories : sortedHistoryItems(filteredHistoryItems(histories));
   const selected = selectedHistoryItem(histories, filtered);
-  const visible = filtered.slice(0, historyVisibleLimit);
+  const visible = usingServerPage ? filtered : filtered.slice(0, historyVisibleLimit);
   historyOverview.innerHTML = renderHistoryOverview(histories, filtered);
   if (historyLearningHealth) historyLearningHealth.innerHTML = renderLearningHealth(runs);
   if (historyEvalTrend) historyEvalTrend.innerHTML = renderEvaluationTrend(runs);
@@ -2031,18 +2447,20 @@ function renderGameHistoryPage() {
   gameHistoryList.innerHTML = filtered.length
     ? [
       ...visible.map(item => gameHistoryListRow(item.run, item)),
-      filtered.length > visible.length
+      usingServerPage && historyPage.nextCursor
+        ? `<button class="history-list-more" type="button" data-history-more>${historyPage.loading ? "Loading games" : `Load more games (${visible.length} loaded)`}</button>`
+        : !usingServerPage && filtered.length > visible.length
         ? `<button class="history-list-more" type="button" data-history-more>Show ${Math.min(HISTORY_PAGE_SIZE, filtered.length - visible.length)} more games (${visible.length} of ${filtered.length})</button>`
         : "",
     ].join("")
-    : `<div class="empty-list">No games match the current filters</div>`;
+    : `<div class="empty-list">${historyPage.loading ? "Loading game histories" : "No games match the current filters"}</div>`;
   gameHistoryDetail.innerHTML = selected
     ? gameHistoryDetailHtml(selected.run, selected)
     : `<div class="empty-list">No game selected</div>`;
 }
 
 function summaryMetric(key, value) {
-  return `<div><span>${escapeText(key)}</span><strong>${escapeText(value)}</strong></div>`;
+  return `<div><span>${escapeText(key)}</span><strong>${escapeText(displayValue(value))}</strong></div>`;
 }
 
 function historyRunsForPage() {
@@ -2056,7 +2474,18 @@ function historyRunsForPage() {
   return selected ? [selected] : [];
 }
 
+function historySelectionPendingDetails() {
+  if (!trainingRuns.length) return false;
+  if (historySelectedRun === HISTORY_ALL_RUNS) {
+    return trainingRuns.some(run => run.name && !trainingRunDetails[run.name]);
+  }
+  return trainingRuns.some(run => run.name === historySelectedRun) && !trainingRunDetails[historySelectedRun];
+}
+
 function historyItemsForPage(runs) {
+  if (historyPage.loaded || historyPage.loading || historyPage.items.length > 0) {
+    return historyPage.items || [];
+  }
   return runs.flatMap(run => (run.histories || []).map(item => ({ ...item, run: run.name })));
 }
 
@@ -2064,6 +2493,10 @@ function handleGameHistoryClick(event) {
   const moreButton = event.target.closest("[data-history-more]");
   if (moreButton) {
     event.preventDefault();
+    if (historyPage.nextCursor) {
+      loadHistoryPage({ append: true });
+      return;
+    }
     historyVisibleLimit += HISTORY_PAGE_SIZE;
     renderGameHistoryPage();
     return;
@@ -2176,12 +2609,35 @@ function latestRunStatusForHistoryPage() {
     .sort((a, b) => Number(b.history && b.history.latest_modified || 0) - Number(a.history && a.history.latest_modified || 0))[0] || null;
 }
 
+function humanizeStageId(stage) {
+  const raw = String(stage || "").trim();
+  if (!raw) return "Unknown";
+  const lower = raw.toLowerCase();
+  const epochMatch = lower.match(/^epoch[_-]?0*(\d+)/);
+  if (epochMatch) return `Epoch ${Number(epochMatch[1])}`;
+  if (lower.includes("write_diagnostics") || lower.includes("diagnostic")) return "Writing diagnostics";
+  if (lower.includes("calibrat")) return "Calibrating";
+  if (lower.includes("initialize")) return "Initializing";
+  if (lower.includes("load_checkpoint")) return "Loading checkpoint";
+  if (lower.includes("publish")) return "Publishing checkpoint";
+  if (lower.includes("selfplay")) return "Self-play";
+  if (lower.includes("shuffle")) return "Shuffling data";
+  if (lower.includes("evaluat")) return "Evaluating";
+  if (lower.includes("train")) return "Training";
+  // Unknown id: prettify rather than dumping the raw token.
+  return raw.replace(/[_-]+/g, " ").replace(/\b\w/g, ch => ch.toUpperCase());
+}
+
 function runStageLabel(status) {
   if (!status || typeof status !== "object") return "--";
-  const stage = status.stage || "unknown";
-  const epoch = status.current_epoch ? ` e${status.current_epoch}` : "";
-  const state = status.stage_status && status.stage_status !== "unknown" ? ` ${status.stage_status}` : "";
-  return `${stage}${epoch}${state}`;
+  const stage = humanizeStageId(status.stage || "unknown");
+  // Epoch ids already carry the epoch number; avoid "Epoch 1 · e1".
+  const epochNum = asFinite(status.current_epoch);
+  const epoch = epochNum !== null && !/^epoch/i.test(String(status.stage || "")) ? ` · Epoch ${epochNum}` : "";
+  const stageStatus = status.stage_status && status.stage_status !== "unknown"
+    ? ` · ${String(status.stage_status).replace(/[_-]+/g, " ")}`
+    : "";
+  return `${stage}${epoch}${stageStatus}`;
 }
 
 function averageHistoryLength(histories) {
@@ -2191,52 +2647,126 @@ function averageHistoryLength(histories) {
   return lengths.length ? lengths.reduce((sum, value) => sum + value, 0) / lengths.length : null;
 }
 
+function asFinite(value) {
+  // Treat null/undefined/"" as missing, not as the numeric 0 that Number()
+  // would coerce them to (Number(null) === 0). A real numeric 0 still passes.
+  if (value === null || value === undefined || value === "") return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
 function formatDecimal(value, digits = 1) {
-  const number = Number(value);
-  if (!Number.isFinite(number)) return "--";
+  const number = asFinite(value);
+  if (number === null) return "--";
   return number.toFixed(digits);
 }
 
 function formatRate(value, unit) {
-  const number = Number(value);
-  if (!Number.isFinite(number)) return "--";
+  const number = asFinite(value);
+  if (number === null) return "--";
   return `${number.toFixed(number >= 100 ? 0 : 1)} ${unit}`;
 }
 
+function formatPercent(value, digits = 0) {
+  const number = asFinite(value);
+  if (number === null) return "--";
+  return `${(number * 100).toFixed(digits)}%`;
+}
+
 function formatGib(value) {
-  const number = Number(value);
-  if (!Number.isFinite(number)) return "--";
-  return `${number.toFixed(1)} GB`;
+  const number = asFinite(value);
+  if (number === null) return "--";
+  // Values are GiB (binary); label honestly to match the /1024 sizing used
+  // elsewhere rather than the misleading decimal "GB".
+  return `${number.toFixed(1)} GiB`;
+}
+
+function historyWinStats(items) {
+  const rows = (items || []).filter(item => item && item.status === "completed");
+  const p0Wins = rows.filter(item => item.winner === "player0").length;
+  const p1Wins = rows.filter(item => item.winner === "player1").length;
+  const games = rows.length;
+  return { games, p0Wins, p1Wins };
+}
+
+function historyWinRateText(stats) {
+  if (!stats || !stats.games) return "P0 -- | P1 --";
+  return `P0 ${formatPercent(stats.p0Wins / stats.games)} | P1 ${formatPercent(stats.p1Wins / stats.games)}`;
+}
+
+function historyWinRateSubtext(stats, label) {
+  if (!stats || !stats.games) return `${label} | 0 completed`;
+  return `${label} | ${stats.p0Wins}-${stats.p1Wins} (${stats.games}g)`;
 }
 
 function renderHistoryOverview(histories, filtered) {
-  const epochs = historyEpochs(histories);
+  const epochs = historyEpochs(filtered);
   const runCount = new Set(histories.map(item => item.run).filter(Boolean)).size;
-  const lengths = histories.map(item => Number(item.length || item.actions || 0)).filter(value => Number.isFinite(value) && value > 0);
+  const filteredRunCount = new Set(filtered.map(item => item.run).filter(Boolean)).size;
+  const lengths = filtered.map(item => Number(item.length || item.actions || 0)).filter(value => Number.isFinite(value) && value > 0);
   const avgLength = lengths.length ? (lengths.reduce((sum, value) => sum + value, 0) / lengths.length).toFixed(1) : "--";
-  const p0Wins = histories.filter(item => item.winner === "player0").length;
-  const p1Wins = histories.filter(item => item.winner === "player1").length;
-  const completed = histories.filter(item => item.status === "completed").length;
+  const p0Wins = filtered.filter(item => item.winner === "player0").length;
+  const p1Wins = filtered.filter(item => item.winner === "player1").length;
+  const completed = filtered.filter(item => item.status === "completed").length;
   const evalSummary = latestDiagnosticSummary(histories, "evaluation");
   const selfplaySummary = latestDiagnosticSummary(histories, "selfplay");
   const liveStatus = latestRunStatusForHistoryPage();
+  const targets = currentHistoryTargets();
   const liveWatchdog = liveStatus && liveStatus.watchdog ? liveStatus.watchdog : {};
   const liveCalibration = liveStatus && liveStatus.calibration ? liveStatus.calibration : {};
+  const liveSelfplay = liveStatus && liveStatus.selfplay_live ? liveStatus.selfplay_live : {};
+  const liveTraining = liveStatus && liveStatus.training_progress ? liveStatus.training_progress : {};
+  const currentSelfplayRows = targets.currentEpoch !== null
+    ? filtered.filter(item => item.source === "selfplay" && asFinite(item.epoch) === targets.currentEpoch)
+    : [];
+  const currentSelfplayStats = historyWinStats(currentSelfplayRows);
+  const currentLabel = targets.currentEpoch !== null ? `Current e${targets.currentEpoch}` : "Current epoch";
+  const evaluationRows = filtered.filter(item => item.source === "evaluation" && targets.evaluationEpochs.has(asFinite(item.epoch)));
+  const evaluationStats = historyWinStats(evaluationRows);
+  const evaluationEpoch = [...targets.evaluationEpochs][0];
+  const evaluationLabel = evaluationEpoch !== undefined ? `Eval e${evaluationEpoch}` : "Eval";
+  const totalMatches = historyPage.totalMatches !== null && historyPage.totalMatches !== undefined
+    ? historyPage.totalMatches
+    : null;
+  const gameCountText = totalMatches !== null
+    ? `${filtered.length} / ${totalMatches}`
+    : historyPage.countLoading
+      ? `${filtered.length} / counting`
+    : historyPage.loaded || historyPage.items.length
+      ? `${filtered.length} loaded`
+      : `${filtered.length} / ${histories.length}`;
   const cards = [
     ["Stage", runStageLabel(liveStatus), "Live trainer"],
-    ["Runs", runCount || "--", historySelectedRun === HISTORY_ALL_RUNS ? "All loaded runs" : "Selected run"],
-    ["Games", `${filtered.length} / ${histories.length}`, "Filtered / total"],
+    ["Runs", filteredRunCount || runCount || "--", historySelectedRun === HISTORY_ALL_RUNS ? "Filtered / loaded runs" : "Selected run"],
+    ["Games", gameCountText, historyPage.loaded || historyPage.items.length ? "Paged result set" : "Filtered / recent"],
     ["Epochs", epochs.length ? `${epochs[0]}-${epochs[epochs.length - 1]}` : "--", `${epochs.length} observed`],
-    ["Winners", `P0 ${p0Wins} | P1 ${p1Wins}`, `${completed} completed`],
+    ["Winners", historyWinRateText(currentSelfplayStats), historyWinRateSubtext(currentSelfplayStats, currentLabel)],
     ["Avg Length", avgLength, "Moves per game"],
   ];
-  if (liveCalibration && liveCalibration.selfplay_pos_s !== undefined) {
+  const liveSpeed = liveSelfplay && liveSelfplay.search_pos_s !== undefined && liveSelfplay.search_pos_s !== null;
+  const liveSelfplayEpoch = asFinite(liveSelfplay && liveSelfplay.epoch);
+  const liveSelfplayEpochLabel = liveSelfplayEpoch !== null ? `e${liveSelfplayEpoch}` : "selfplay";
+  if (liveSpeed && liveSelfplay.live) {
+    const games = liveSelfplay.requested_games
+      ? `${liveSelfplay.games_finished || 0}/${liveSelfplay.requested_games} games`
+      : "selfplay";
+    cards.push(["Speed", formatRate(liveSelfplay.search_pos_s, "pos/s"), `● LIVE · ${liveSelfplayEpochLabel} · ${games}`]);
+  } else if (liveSpeed && liveSelfplay.status === "completed") {
+    cards.push(["Speed", formatRate(liveSelfplay.search_pos_s, "pos/s"), `${liveSelfplayEpochLabel} selfplay (done)`]);
+  } else if (liveCalibration && liveCalibration.selfplay_pos_s !== undefined && liveCalibration.selfplay_pos_s !== null) {
     cards.push(["Speed", formatRate(liveCalibration.selfplay_pos_s, "pos/s"), liveCalibration.exact_128 ? "Exact 128 sims" : "Calibration"]);
   }
   if (liveWatchdog && (liveWatchdog.free_ram_gb !== undefined || liveWatchdog.gpu_free_gb !== undefined)) {
     cards.push(["Resources", `${formatGib(liveWatchdog.free_ram_gb)} RAM | ${formatGib(liveWatchdog.gpu_free_gb)} GPU`, liveWatchdog.status || "watchdog"]);
   }
-  if (evalSummary) cards.push(["Evaluation", historyDiagnosticsText({ evaluation: { summary: evalSummary } }), "Latest diagnostics"]);
+  if (liveTraining && liveTraining.epoch !== undefined) {
+    cards.push(["Training", formatTrainingProgress(liveTraining), trainingProgressSubtext(liveTraining)]);
+  }
+  if (evaluationRows.length) {
+    cards.push(["Evaluation", historyWinRateText(evaluationStats), historyWinRateSubtext(evaluationStats, evaluationLabel)]);
+  } else if (evalSummary) {
+    cards.push(["Evaluation", historyDiagnosticsText({ evaluation: { summary: evalSummary } }), "Latest diagnostics"]);
+  }
   if (selfplaySummary) cards.push(["Selfplay", historyDiagnosticsText({ selfplay: { summary: selfplaySummary } }), "Latest diagnostics"]);
   return cards.map(([label, value, sub]) => `
     <div class="history-metric-card">
@@ -2245,6 +2775,22 @@ function renderHistoryOverview(histories, filtered) {
       <small>${escapeText(sub)}</small>
     </div>
   `).join("");
+}
+
+function formatTrainingProgress(progress) {
+  const epochNum = progress ? asFinite(progress.epoch) : null;
+  const epoch = epochNum !== null ? `e${epochNum}` : "train";
+  const pct = progress && progress.progress !== undefined && progress.progress !== null ? formatPercent(progress.progress) : "--";
+  return `${epoch} ${pct}`;
+}
+
+function trainingProgressSubtext(progress) {
+  if (!progress || typeof progress !== "object") return "Training progress";
+  const steps = asFinite(progress.steps) !== null && asFinite(progress.total_steps) !== null
+    ? `${progress.steps}/${progress.total_steps} steps`
+    : "steps pending";
+  const loss = progress.loss !== undefined && progress.loss !== null ? `loss ${formatDecimal(progress.loss, 3)}` : String(progress.status || "training");
+  return `${steps} | ${loss}`;
 }
 
 function renderLearningHealth(runs) {
@@ -2259,6 +2805,9 @@ function renderLearningHealth(runs) {
     ["Best", health.best_eval_mean_turns !== null && health.best_eval_mean_turns !== undefined ? `${formatDecimal(health.best_eval_mean_turns, 1)} turns` : "--"],
     ["Speed", formatRate(health.latest_selfplay_pos_s, "pos/s")],
     ["Exact", health.latest_exact_128 ? "128 sims" : "--"],
+    ["Classical", formatPercent(health.latest_classical_fraction)],
+    ["Policy@1", formatPercent(health.latest_policy_top1)],
+    ["Target Mass", formatPercent(health.latest_policy_target_mass, 1)],
   ];
   return `<section class="learning-health-panel ${learningHealthClass(status)}" aria-label="Learning health">
     <div class="learning-health-head">
@@ -2375,13 +2924,19 @@ function epochProgressRow(item) {
   const evaluation = item.evaluation || {};
   const d6 = item.d6 || {};
   const checkpoint = item.checkpoint || {};
-  const selfplayText = selfplay.samples_added !== undefined
-    ? `${selfplay.samples_added} samples | ${formatRate(selfplay.search_positions_per_second, "pos/s")}`
+  const samplesAdded = asFinite(selfplay.samples_added);
+  const selfplayRate = formatRate(selfplay.search_positions_per_second, "pos/s");
+  const selfplayText = samplesAdded !== null
+    ? `${samplesAdded} samples | ${selfplayRate}`
+    : (selfplay.search_positions_per_second !== undefined && selfplay.search_positions_per_second !== null
+      ? selfplayRate
+      : "pending");
+  const trainText = (training.loss !== undefined && training.loss !== null)
+    ? `loss ${formatDecimal(training.loss, 3)} | C ${formatPercent(classicalReplayFraction(training))} | P@1 ${formatPercent(policyTop1(training))}`
+    : training.progress
+      ? `${formatTrainingProgress({ ...training.progress, epoch: item.epoch })} | ${trainingProgressSubtext(training.progress)}`
     : "pending";
-  const trainText = training.loss !== undefined
-    ? `loss ${formatDecimal(training.loss, 3)} | ${formatRate(training.samples_per_second, "samples/s")}`
-    : "pending";
-  const evalText = evaluation.games !== undefined
+  const evalText = (evaluation.games !== undefined && evaluation.games !== null)
     ? `${Number(evaluation.wins || 0)}-${Number(evaluation.losses || 0)} | ${formatDecimal(evaluation.mean_turns, 1)} turns`
     : "pending";
   const d6Text = d6.preview_symmetries && d6.preview_symmetries.length
@@ -2399,13 +2954,32 @@ function epochProgressRow(item) {
   </div>`;
 }
 
+function classicalReplayFraction(training) {
+  const counts = training && training.source_summary && training.source_summary.source_counts;
+  if (!counts || typeof counts !== "object") return null;
+  let total = 0;
+  let classical = 0;
+  for (const [key, rawValue] of Object.entries(counts)) {
+    const value = Number(rawValue);
+    if (!Number.isFinite(value)) continue;
+    total += value;
+    if (String(key).toLowerCase().includes("classical")) classical += value;
+  }
+  return total > 0 ? classical / total : null;
+}
+
+function policyTop1(training) {
+  const overall = training && training.policy_imitation && training.policy_imitation.overall;
+  return overall ? overall.top1_accuracy : null;
+}
+
 function epochProgressSummary(item) {
   if (!item) return "--";
   const training = item.training || {};
   const evaluation = item.evaluation || {};
   const parts = [`E${item.epoch}`];
-  if (training.loss !== undefined) parts.push(`loss ${formatDecimal(training.loss, 3)}`);
-  if (evaluation.games !== undefined) parts.push(`eval ${Number(evaluation.wins || 0)}-${Number(evaluation.losses || 0)}`);
+  if (training.loss !== undefined && training.loss !== null) parts.push(`loss ${formatDecimal(training.loss, 3)}`);
+  if (evaluation.games !== undefined && evaluation.games !== null) parts.push(`eval ${Number(evaluation.wins || 0)}-${Number(evaluation.losses || 0)}`);
   if (item.status && item.status !== "completed") parts.push(item.status);
   return parts.join(" | ");
 }
@@ -2430,8 +3004,8 @@ function gameHistoryListRow(runName, item) {
   const selected = key === selectedHistoryKey;
   return `<div class="game-history-row ${selected ? "selected" : ""}" data-history-key="${escapeAttr(key)}">
     <button class="game-history-select" type="button" data-history-key="${escapeAttr(key)}">
-      <span class="history-game-title">${escapeText(item.game_id || item.path)}</span>
-      <span class="history-game-meta">${escapeText(runName || "run")} | ${escapeText(item.path || "")}</span>
+      <span class="history-game-title" title="${escapeAttr(item.game_id || item.path || "")}">${escapeText(item.game_id || item.path || "—")}</span>
+      <span class="history-game-meta" title="${escapeAttr(`${runName || "run"} | ${item.path || ""}`)}">${escapeText(runName || "run")} | ${escapeText(item.path || "—")}</span>
     </button>
     <div><strong>${escapeText(epoch)}</strong><span>${escapeText(source)} | ${escapeText(status)}</span></div>
     <div><span class="winner-pill ${winnerClass(item.winner)}">${escapeText(winner)}</span></div>
@@ -2475,7 +3049,7 @@ function gameHistoryDetailHtml(runName, item) {
       ${detailRow("Status", item.status || "unknown")}
       ${detailRow("Seed", item.seed === null || item.seed === undefined ? "--" : item.seed)}
       ${detailRow("Record", Number(item.record_index || 0))}
-      ${detailRow("Path", item.path || "")}
+      ${detailRow("Path", item.path || "—", item.path || "")}
       ${detailRow("Modified", formatHistoryDate(item.modified))}
     </div>
     <div class="history-detail-section">
@@ -2494,8 +3068,9 @@ function gameHistoryDetailHtml(runName, item) {
   </div>`;
 }
 
-function detailRow(label, value) {
-  return `<div class="detail-row"><span>${escapeText(label)}</span><strong>${escapeText(value)}</strong></div>`;
+function detailRow(label, value, titleValue) {
+  const title = titleValue ? ` title="${escapeAttr(titleValue)}"` : "";
+  return `<div class="detail-row"><span>${escapeText(label)}</span><strong${title}>${escapeText(value)}</strong></div>`;
 }
 
 function playerDetail(slot, player) {
@@ -2518,7 +3093,7 @@ function diagnosticDetailsHtml(diagnostics) {
     return `<div class="diagnostic-block">
       <div class="diagnostic-title">${escapeText(label)}</div>
       <div class="diagnostic-grid">
-        ${entries.length ? entries.map(([key, value]) => `<div><span>${escapeText(key)}</span><strong>${escapeText(value)}</strong></div>`).join("") : `<div><span>Artifact</span><strong>${escapeText(diagnostic && diagnostic.name || "attached")}</strong></div>`}
+        ${entries.length ? entries.map(([key, value]) => `<div><span>${escapeText(key)}</span><strong>${escapeText(displayValue(value))}</strong></div>`).join("") : `<div><span>Artifact</span><strong>${escapeText(diagnostic && diagnostic.name || "attached")}</strong></div>`}
       </div>
     </div>`;
   }).join("");
@@ -2540,15 +3115,19 @@ function historyDiagnosticsText(diagnostics) {
   const evalSummary = diagnostics.evaluation && diagnostics.evaluation.summary;
   if (evalSummary) {
     const parts = [];
-    if (evalSummary.games !== undefined) parts.push(`${evalSummary.games}g`);
-    if (evalSummary.wins !== undefined || evalSummary.losses !== undefined) parts.push(`${evalSummary.wins || 0}-${evalSummary.losses || 0}`);
-    if (evalSummary.mean_turns !== undefined) parts.push(`${Number(evalSummary.mean_turns).toFixed(1)}t`);
+    if (asFinite(evalSummary.games) !== null) parts.push(`${evalSummary.games}g`);
+    if (asFinite(evalSummary.wins) !== null || asFinite(evalSummary.losses) !== null) parts.push(`${evalSummary.wins || 0}-${evalSummary.losses || 0}`);
+    if (asFinite(evalSummary.mean_turns) !== null) parts.push(`${asFinite(evalSummary.mean_turns).toFixed(1)}t`);
     return parts.length ? parts.join(" ") : "Eval";
   }
   const selfplaySummary = diagnostics.selfplay && diagnostics.selfplay.summary;
   if (selfplaySummary) {
-    if (selfplaySummary.samples_added !== undefined) return `${selfplaySummary.samples_added} samples`;
-    if (selfplaySummary.searched_positions !== undefined) return `${selfplaySummary.searched_positions} pos`;
+    const parts = [];
+    if (asFinite(selfplaySummary.samples_added) !== null) parts.push(`${selfplaySummary.samples_added} samples`);
+    if (asFinite(selfplaySummary.games) !== null) parts.push(`${selfplaySummary.games}g`);
+    if (selfplaySummary.lengths && asFinite(selfplaySummary.lengths.mean) !== null) parts.push(`${asFinite(selfplaySummary.lengths.mean).toFixed(1)}t`);
+    if (parts.length) return parts.join(" ");
+    if (asFinite(selfplaySummary.searched_positions) !== null) return `${selfplaySummary.searched_positions} pos`;
     return "Selfplay";
   }
   return Object.keys(diagnostics).length ? Object.keys(diagnostics).join(", ") : "None";
@@ -2569,10 +3148,11 @@ function formatHistoryDate(value) {
 }
 
 function formatBytes(value) {
-  const bytes = Number(value) || 0;
+  const bytes = asFinite(value) || 0;
+  // Binary (1024-based) divisions, so use binary unit labels (KiB/MiB).
   if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
 }
 
 async function init() {

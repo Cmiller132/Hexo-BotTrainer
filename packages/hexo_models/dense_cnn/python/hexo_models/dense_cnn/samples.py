@@ -14,17 +14,76 @@ values (KataGo-style).
 
 from __future__ import annotations
 
+import struct
+from array import array
 from dataclasses import dataclass, field, replace
 from typing import Any, Mapping, Sequence
 
 import torch
 
 from . import rust_bridge
-from .d6 import Axial, D6_SIZE, D6Symmetry
+from .constants import BOARD_SIZE
+from .d6 import Axial, D6_SIZE, D6Symmetry, transform_coord, unpack_coord_pair
+from .geometry import coord_to_row_col
 from .input import build_input_planes, dense_policy_target, legal_mask_flat
+from .mcts import CompactVisitPolicy
 
 D6_TRANSFORMS = tuple(D6Symmetry(index) for index in range(D6_SIZE))
 CURRENT_TARGET_SCHEMA_VERSION = 4
+
+# Stone/placement owners are one of the two engine players; store a 1-byte index
+# instead of repeating the string per stone.
+_PLAYERS = ("player0", "player1")
+_PLAYER_INDEX = {"player0": 0, "player1": 1}
+
+
+@dataclass(frozen=True, slots=True)
+class _PackedStones:
+    """Columnar board stones (q,r as int16, owner as 1 byte) that iterates to the
+    same ``(q, r, player)`` tuples ``build_input_planes`` expects — ~30x smaller
+    than a tuple of Python tuples for a full late-game board, decoded lazily."""
+
+    coords: "array"  # int16, interleaved q, r
+    owners: bytes  # one index into _PLAYERS per stone
+
+    def __len__(self) -> int:
+        return len(self.owners)
+
+    def __getitem__(self, index: int) -> tuple[int, int, str]:
+        return (int(self.coords[2 * index]), int(self.coords[2 * index + 1]), _PLAYERS[self.owners[index]])
+
+    def __iter__(self):
+        for index in range(len(self.owners)):
+            yield self[index]
+
+
+@dataclass(frozen=True, slots=True)
+class _PackedHistory:
+    """Columnar placement history. Stores only the four fields the encoder uses
+    (q, r, owner, placement_index); the unused phase/first_q/first_r slots are
+    yielded as None so ``build_input_planes`` unpacks the same 7-tuple shape."""
+
+    coords: "array"  # int16, interleaved q, r
+    owners: bytes
+    indices: "array"  # int32 placement_index
+
+    def __len__(self) -> int:
+        return len(self.owners)
+
+    def __getitem__(self, index: int) -> tuple[int, int, str, None, int, None, None]:
+        return (
+            int(self.coords[2 * index]),
+            int(self.coords[2 * index + 1]),
+            _PLAYERS[self.owners[index]],
+            None,
+            int(self.indices[index]),
+            None,
+            None,
+        )
+
+    def __iter__(self):
+        for index in range(len(self.owners)):
+            yield self[index]
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,15 +101,28 @@ class Model1SampleData:
     current_player: str
     phase: str
     center: tuple[int, int]
-    stones: tuple[tuple[int, int, str], ...]
-    legal_action_ids: tuple[int, ...]
-    placement_history: tuple[tuple[int, int, str, str, int, int | None, int | None], ...] = ()
+    # Columnar-packed for memory (see _PackedStones); a plain tuple of (q,r,player)
+    # also works (tests construct one), since both iterate to the same tuples.
+    stones: Sequence[tuple[int, int, str]]
+    # Stored compactly to keep pending self-play samples small: ~1471 legal moves
+    # per late-game position as a tuple of Python ints would be ~57 KB; an
+    # ``array("q")`` is ~8x smaller and still iterates to Python ints, which is all
+    # the expansion consumers need.
+    legal_action_ids: Sequence[int]
+    # Columnar-packed (see _PackedHistory); yields the same 7-tuple shape the
+    # encoder unpacks, with unused phase/first_q/first_r as None.
+    placement_history: Sequence[tuple[int, int, str, str | None, int, int | None, int | None]] = ()
     first_stone: tuple[int, int] | None = None
     own_hot: tuple[tuple[int, int], ...] = ()
     opponent_hot: tuple[tuple[int, int], ...] = ()
     opponent_last_turn: tuple[tuple[int, int], ...] = ()
-    policy: tuple[tuple[int, float], ...] = ()
-    root_prior_policy: tuple[tuple[int, float], ...] = ()
+    # ``policy`` and ``root_prior_policy`` are byte-backed (CompactVisitPolicy):
+    # ~8 bytes/entry vs ~117 bytes for a Python (int,float) tuple. root_prior_policy
+    # carries every in-crop legal prior (hundreds-to-~1500 entries), so this is the
+    # single biggest pending-memory saving. Both are still Sequence[(int,float)], so
+    # dense_policy_target / _policy_kl consume them unchanged.
+    policy: Sequence[tuple[int, float]] = ()
+    root_prior_policy: Sequence[tuple[int, float]] = ()
     opp_policy: tuple[tuple[int, float], ...] = ()
     value: float = 0.0
     short_term_value: tuple[tuple[int, float], ...] = ()
@@ -82,10 +154,14 @@ def sample_from_state(
         turn_index=turn_index,
         metadata={**dict(metadata or {}), "target_schema_version": CURRENT_TARGET_SCHEMA_VERSION},
     )
+    root_prior_compact = _compact_policy(root_prior_policy, normalize=True)
+    policy_compact = _compact_policy(policy)
+    if len(policy_compact) == 0:
+        policy_compact = root_prior_compact
     return replace(
         _sample_data_from_facts(facts),
-        policy=_pairs(policy),
-        root_prior_policy=_pairs(root_prior_policy, normalize=True),
+        policy=policy_compact,
+        root_prior_policy=root_prior_compact,
     )
 
 
@@ -159,6 +235,73 @@ def expand_sample(
     for horizon, value in sample.short_term_value:
         tensors[f"stvalue_{int(horizon)}"] = torch.tensor(float(value), dtype=torch.float32)
     return tensors
+
+
+def symmetry_drops_support(sample: Model1SampleData, symmetry: D6Symmetry | int) -> bool:
+    """Return True if `symmetry` (non-identity) rotates any in-crop-at-identity fact
+    of `sample` out of the 41x41 square crop.
+
+    The dense view is an axial *square* crop, but D6 is the *hexagonal* symmetry
+    group, so the square is not closed under it: a fact at hex-distance > BOARD_SIZE//2
+    from the crop center (the four corner triangles) can leave the crop under a
+    rotation/reflection. When that happens ``build_input_planes`` silently drops the
+    fact and ``dense_policy_target`` renormalizes the survivors -- so a *partial* spill
+    produces a truncated/renormalized policy target and a counterfactual board with no
+    exception raised. Callers use this to fall the whole row back to identity (which the
+    sample was authored to fit) when the drawn symmetry would drop support, keeping
+    train-time D6 augmentation exact.
+
+    Only facts at hex-distance > half can spill (D6 preserves hex-distance and the
+    hex-disk of that radius is contained in the square), so the per-coordinate transform
+    runs only for those rare corner facts; everything else is rejected by two cheap
+    bound checks.
+    """
+
+    if int(getattr(symmetry, "index", symmetry)) == 0:
+        return False
+    center = Axial(*sample.center)
+    cq, cr = int(center.q), int(center.r)
+    half = BOARD_SIZE // 2
+
+    def spills(q: int, r: int) -> bool:
+        dq, dr = q - cq, r - cr
+        if abs(dq) > half or abs(dr) > half:
+            return False  # already out of crop at identity -> not a symmetry-induced drop
+        if max(abs(dq), abs(dr), abs(dq + dr)) <= half:
+            return False  # within the hex-disk the square contains -> faithful under all D6
+        return coord_to_row_col(transform_coord((q, r), symmetry, center=center), center=center) is None
+
+    for action_id, _weight in sample.policy:
+        q, r = unpack_coord_pair(int(action_id))
+        if spills(q, r):
+            return True
+    for action_id, _weight in sample.opp_policy:
+        q, r = unpack_coord_pair(int(action_id))
+        if spills(q, r):
+            return True
+    for action_id in sample.legal_action_ids:
+        q, r = unpack_coord_pair(int(action_id))
+        if spills(q, r):
+            return True
+    for q, r, _player in sample.stones:
+        if spills(int(q), int(r)):
+            return True
+    for item in sample.placement_history:
+        if spills(int(item[0]), int(item[1])):
+            return True
+    for q, r in sample.own_hot:
+        if spills(int(q), int(r)):
+            return True
+    for q, r in sample.opponent_hot:
+        if spills(int(q), int(r)):
+            return True
+    for q, r in sample.opponent_last_turn:
+        if spills(int(q), int(r)):
+            return True
+    if sample.first_stone is not None:
+        if spills(int(sample.first_stone[0]), int(sample.first_stone[1])):
+            return True
+    return False
 
 
 def stack_expanded(samples: Sequence[Mapping[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
@@ -235,12 +378,11 @@ def _sample_data_from_facts(facts: Mapping[str, Any]) -> Model1SampleData:
         current_player=str(facts["current_player"]),
         phase=str(facts["phase"]),
         center=tuple(int(item) for item in facts["center"]),  # type: ignore[arg-type]
-        stones=tuple((int(q), int(r), str(player)) for q, r, player in facts["stones"]),
-        legal_action_ids=tuple(int(item) for item in facts["legal_action_ids"]),
-        placement_history=tuple(
-            (int(q), int(r), str(player), str(phase), int(idx), _optional_int(fq), _optional_int(fr))
-            for q, r, player, phase, idx, fq, fr in facts.get("placement_history", ())
-        ),
+        stones=_pack_stones(facts["stones"]),
+        # array("q") (signed 64-bit) holds the u32 action ids, iterates to Python
+        # ints for the expansion consumers, and is ~8x smaller than a tuple of ints.
+        legal_action_ids=array("q", (int(item) for item in facts["legal_action_ids"])),
+        placement_history=_pack_history(facts.get("placement_history", ())),
         first_stone=(
             tuple(int(item) for item in facts["first_stone"]) if facts.get("first_stone") is not None else None
         ),  # type: ignore[arg-type]
@@ -249,6 +391,30 @@ def _sample_data_from_facts(facts: Mapping[str, Any]) -> Model1SampleData:
         opponent_last_turn=tuple((int(q), int(r)) for q, r in facts.get("opponent_last_turn", ())),
         metadata=dict(facts.get("metadata", {})),
     )
+
+
+def _pack_stones(stones_facts: Sequence[tuple[int, int, str]]) -> _PackedStones:
+    coords = array("h")
+    owners = bytearray()
+    for q, r, player in stones_facts:
+        coords.append(int(q))
+        coords.append(int(r))
+        owners.append(_PLAYER_INDEX[str(player)])
+    return _PackedStones(coords=coords, owners=bytes(owners))
+
+
+def _pack_history(history_facts: Sequence[tuple]) -> _PackedHistory:
+    coords = array("h")
+    owners = bytearray()
+    indices = array("i")
+    # Rust facts carry (q, r, player, phase, idx, first_q, first_r); the encoder
+    # only uses q, r, player, idx, so the rest is intentionally dropped here.
+    for q, r, player, _phase, idx, _first_q, _first_r in history_facts:
+        coords.append(int(q))
+        coords.append(int(r))
+        owners.append(_PLAYER_INDEX[str(player)])
+        indices.append(int(idx))
+    return _PackedHistory(coords=coords, owners=bytes(owners), indices=indices)
 
 
 def _optional_int(value: object) -> int | None:
@@ -268,3 +434,41 @@ def _pairs(
     if total <= 0.0:
         raise ValueError("policy weights must contain positive mass")
     return tuple((action, weight / total) for action, weight in pairs)
+
+
+def _compact_policy(
+    weights: Mapping[int, float] | Sequence[tuple[int, float]] | None,
+    *,
+    normalize: bool = False,
+) -> CompactVisitPolicy:
+    """Pack a sparse policy into a byte-backed CompactVisitPolicy (~8 B/entry).
+
+    The self-play search already hands back a CompactVisitPolicy (normalized in
+    Rust), so the common path returns it unchanged with zero re-packing. Mapping /
+    list inputs (runner players, tests) are packed here, normalized if requested.
+    Stored policies feed dense_policy_target (which re-normalizes) and _policy_kl,
+    both of which only iterate (int, float) pairs.
+    """
+
+    if weights is None:
+        weights = ()
+    # Fast path: native search output is already a normalized byte-backed policy.
+    if isinstance(weights, CompactVisitPolicy):
+        return weights
+    items = weights.items() if isinstance(weights, Mapping) else tuple(weights)
+    actions: list[int] = []
+    values: list[float] = []
+    for action, weight in items:
+        actions.append(int(action))
+        values.append(float(weight))
+    if normalize:
+        total = sum(values)
+        if total <= 0.0:
+            raise ValueError("policy weights must contain positive mass")
+        values = [value / total for value in values]
+    count = len(actions)
+    return CompactVisitPolicy(
+        action_ids_bytes=struct.pack(f"{count}I", *actions),
+        weights_bytes=struct.pack(f"{count}f", *values),
+        count=count,
+    )

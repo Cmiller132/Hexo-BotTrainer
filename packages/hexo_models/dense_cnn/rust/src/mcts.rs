@@ -16,14 +16,15 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList, PyTuple};
 use rayon::prelude::*;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use hexo_engine::PackedCoord;
 
 use super::constants::{MODEL1_ACTIVE_ROOT_LIMIT, MODEL1_EVAL_CACHE_MAX_STATES};
 use super::mcts_eval::{
     evaluate_model1_state_refs_cached, evaluate_model1_states_cached, new_shared_evaluation_cache,
-    new_shared_evaluation_stats, state_hash, EvaluationStats, RustEvaluationRequest,
-    SharedEvaluationCache, SharedEvaluationStats,
+    new_shared_evaluation_stats, state_hash, EvaluationStats, RustEvaluation,
+    RustEvaluationRequest, SharedEvaluationCache, SharedEvaluationStats,
 };
 use super::mcts_tree::{
     terminal_value, RootDirichletNoise, RustEdge, RustLeaf, RustNode, RustSearch,
@@ -67,7 +68,10 @@ impl Model1MctsSession {
 
     fn clear(&mut self) {
         self.searches.clear();
-        self.evaluation_cache.borrow_mut().clear();
+        self.evaluation_cache
+            .lock()
+            .expect("evaluation cache mutex poisoned")
+            .clear();
     }
 
     fn discard(&mut self, game_key: u64) {
@@ -78,7 +82,7 @@ impl Model1MctsSession {
         self.searches.len()
     }
 
-    #[pyo3(signature = (game_keys, states, visits, c_puct, temperature, seed, evaluator, virtual_batch_size=None, active_root_limit=None, root_dirichlet_total_alpha=None, root_dirichlet_noise_fraction=None, root_policy_temperature=None, fpu_reduction=None, virtual_loss=None, widening_policy_mass=None, widening_max_children=None, widening_min_children=None))]
+    #[pyo3(signature = (game_keys, states, visits, c_puct, temperature, seed, evaluator, virtual_batch_size=None, active_root_limit=None, root_dirichlet_total_alpha=None, root_dirichlet_noise_fraction=None, root_policy_temperature=None, fpu_reduction=None, virtual_loss=None, widening_policy_mass=None, widening_max_children=None, widening_min_children=None, forced_playout_k=None, move_temperatures=None))]
     fn search(
         &mut self,
         py: Python<'_>,
@@ -99,6 +103,14 @@ impl Model1MctsSession {
         widening_policy_mass: Option<f32>,
         widening_max_children: Option<u32>,
         widening_min_children: Option<u32>,
+        forced_playout_k: Option<f32>,
+        // Optional per-root move-selection temperature (one entry per game key,
+        // aligned with `game_keys`). When provided, each root's played action is
+        // sampled at its own temperature instead of the scalar `temperature`; this
+        // is how self-play applies a per-move temperature decay across a batch of
+        // games that are each at a different move number. `temperature` remains the
+        // validated fallback used when this is None.
+        move_temperatures: Option<Vec<f32>>,
     ) -> PyResult<Py<PyAny>> {
         // Validate true native-search boundaries here. The Python wrapper is a
         // transport layer and intentionally does not duplicate these checks.
@@ -114,6 +126,29 @@ impl Model1MctsSession {
                 roots.len()
             )));
         }
+        // Resolve the per-root move-selection temperatures once: an explicit vector
+        // (validated to match the root count and be finite/non-negative) or the
+        // scalar `temperature` broadcast to every root.
+        let move_temps: Vec<f32> = match move_temperatures {
+            Some(values) => {
+                if values.len() != roots.len() {
+                    return Err(PyValueError::new_err(format!(
+                        "move_temperatures has {} entries for {} roots",
+                        values.len(),
+                        roots.len()
+                    )));
+                }
+                for value in &values {
+                    if !value.is_finite() || *value < 0.0 {
+                        return Err(PyValueError::new_err(
+                            "move_temperatures entries must be finite and >= 0",
+                        ));
+                    }
+                }
+                values
+            }
+            None => vec![temperature; roots.len()],
+        };
         let root_limit = validate_positive_usize(
             "active_root_limit",
             active_root_limit.unwrap_or(MODEL1_ACTIVE_ROOT_LIMIT),
@@ -136,6 +171,8 @@ impl Model1MctsSession {
             validate_positive_f32("root_policy_temperature", root_policy_temperature.unwrap_or(1.0))?;
         let fpu_reduction = validate_nonnegative_f32("fpu_reduction", fpu_reduction.unwrap_or(0.20))?;
         let virtual_loss = validate_nonnegative_f32("virtual_loss", virtual_loss.unwrap_or(1.0))?;
+        let forced_playout_k =
+            validate_nonnegative_f32("forced_playout_k", forced_playout_k.unwrap_or(0.0))?;
         let root_noise_config =
             root_noise_config(root_dirichlet_total_alpha, root_dirichlet_noise_fraction)?;
 
@@ -171,6 +208,7 @@ impl Model1MctsSession {
             if let Some(mut search) = self.searches.remove(game_key) {
                 if search.root_hash == root_hash {
                     search.set_additional_visits(target_visits);
+                    search.set_forced_playout_k(forced_playout_k);
                     if let Some(noise) = root_noise(root_noise_config, seed, index) {
                         search.apply_root_dirichlet_noise(noise);
                     }
@@ -200,12 +238,13 @@ impl Model1MctsSession {
             {
                 searches[index] = Some(RustSearch::new(
                     root,
-                    evaluation,
+                    &**evaluation,
                     target_visits,
                     fpu_reduction,
                     root_policy_temperature,
                     root_noise(root_noise_config, seed, index),
                     widening,
+                    forced_playout_k,
                 )?);
             }
         }
@@ -236,8 +275,15 @@ impl Model1MctsSession {
             self.cache_max_states,
             virtual_loss,
         )?;
-        let cache_len = self.evaluation_cache.borrow().len();
-        let evaluation_stats = evaluation_stats.borrow().clone();
+        let cache_len = self
+            .evaluation_cache
+            .lock()
+            .expect("evaluation cache mutex poisoned")
+            .len();
+        let evaluation_stats = evaluation_stats
+            .lock()
+            .expect("evaluation stats mutex poisoned")
+            .clone();
         let batch_diagnostics = build_batch_diagnostics(
             py,
             &searches,
@@ -253,7 +299,7 @@ impl Model1MctsSession {
                 select_search_action(
                     search,
                     baselines.get(index),
-                    temperature,
+                    move_temps[index],
                     seed.wrapping_add(index as u64),
                 )
             })
@@ -262,9 +308,11 @@ impl Model1MctsSession {
             py,
             &searches,
             &batch_diagnostics,
-            temperature,
+            &move_temps,
             seed,
             Some(&baselines),
+            c_puct,
+            forced_playout_k,
         )?;
 
         for ((game_key, mut search), selected) in game_keys
@@ -296,106 +344,233 @@ fn run_searches_to_targets(
     cache_max_states: usize,
     virtual_loss: f32,
 ) -> PyResult<()> {
-    // Each outer pass gathers several pending leaves per root, evaluates the
-    // unique uncached states as one Python/Torch batch, and then backs values
-    // into independent root trees. Root selection is independent per tree, so
-    // it runs across CPU workers while the shared cache remains only at eval
-    // boundaries.
-    while searches.iter().any(RustSearch::needs_visits) {
-        let work_results: Vec<PyResult<RootSelectionWork>> = searches
-            .par_iter_mut()
-            .enumerate()
-            .map(|(root_index, search)| {
-                let mut leaves = Vec::new();
-                let mut made_progress = false;
-                if !search.needs_visits() {
-                    return Ok(RootSelectionWork {
-                        leaves,
-                        made_progress,
-                    });
-                }
-                let budget = leaf_batch_per_root.min(search.remaining_visits());
-                for _ in 0..budget {
-                    let selected = search.select_pending_leaf(c_puct)?;
-                    let Some(selected) = selected else {
-                        break;
-                    };
-                    search.apply_virtual_visit(&selected.path, virtual_loss);
-                    made_progress = true;
+    // A1 (select↔eval pipeline). The serial form selected a leaf batch, ran one
+    // Python/Torch forward while every CPU worker sat idle, then backed up — so
+    // GPU duty was ~29%. Here we overlap the two halves with a two-stage software
+    // pipeline: the *current* batch is evaluated on this GIL-holding thread while
+    // the *next* batch is selected on a scoped worker thread (which itself fans
+    // out across rayon). Virtual loss (already applied at selection) is the sync
+    // primitive — the next batch sees the in-flight leaves as pending and avoids
+    // them, exactly as virtual-loss parallel MCTS intends.
+    //
+    // Tree-access discipline (no lock needed): during the scope ONLY the select
+    // thread touches the trees; the eval thread reads only the owned leaf batch +
+    // the (thread-safe) cache. Backup runs after the scope joins, with exclusive
+    // access on this thread. So the trees have a single mutator at every instant.
+    //
+    // This is deterministic for a fixed seed but NOT bit-identical to the serial
+    // barrier: the next batch is selected before the current batch is backed up,
+    // extending the virtual-loss window by one batch. That is the intended,
+    // search-quality-neutral behavior of pipelined MCTS.
+    //
+    // Termination is keyed off `needs_visits` (visit budget counts virtual visits
+    // at selection time), NOT off the prefetch making progress. The prefetch can
+    // legitimately come up empty on a *narrow* tree — every selectable path is
+    // already in-flight (pending) for the batch currently being evaluated, so the
+    // next batch is blocked until that batch is backed up. When that happens we
+    // fall back to a synchronous select after backup so the search always advances
+    // to its visit target (overlap is best-effort, correctness is not).
+    // Optional diagnostics (HEXO_MCTS_TRACE): per-pass eval vs select vs scope
+    // wall, to confirm the overlap is real and size the overlappable fraction.
+    let trace = std::env::var("HEXO_MCTS_TRACE").is_ok();
+    let mut tr_passes = 0u64;
+    let mut tr_leaves = 0u64;
+    let mut tr_eval = 0f64;
+    let mut tr_select = 0f64;
+    let mut tr_scope = 0f64;
+    let mut tr_backup = 0f64;
 
-                    if let Some(outcome) = selected.terminal {
-                        let leaf_player = selected.state.current_player();
-                        let leaf_value = terminal_value(outcome, leaf_player);
-                        search.backup_virtual(
-                            &selected.path,
-                            leaf_player,
-                            leaf_value,
-                            virtual_loss,
-                        );
-                    } else if let Some(node_id) = selected.existing_node {
-                        let node = &search.nodes[node_id];
-                        search.backup_virtual(
-                            &selected.path,
-                            node.player,
-                            node.value(),
-                            virtual_loss,
-                        );
-                    } else {
-                        search.mark_pending(selected.parent_node, selected.edge_index, 1);
-                        leaves.push(RustLeaf {
-                            root_index,
-                            parent_node: selected.parent_node,
-                            edge_index: selected.edge_index,
-                            path: selected.path,
-                            state: selected.state,
-                            state_hash: selected.state_hash,
-                        });
-                    }
+    let (mut pending_leaves, _primed_progress) =
+        select_leaf_batch(searches, c_puct, leaf_batch_per_root, virtual_loss)?;
+
+    loop {
+        if pending_leaves.is_empty() {
+            if !searches.iter().any(RustSearch::needs_visits) {
+                break;
+            }
+            // Nothing in flight to overlap with; select synchronously to advance.
+            let (leaves, made_progress) =
+                select_leaf_batch(searches, c_puct, leaf_batch_per_root, virtual_loss)?;
+            if leaves.is_empty() {
+                // No leaf needs evaluation. Either inline (terminal/existing)
+                // backups advanced the search and we retry, or nothing at all
+                // could be selected (every needs-visits root is structurally
+                // blocked) — break rather than spin.
+                if !made_progress {
+                    break;
                 }
-                Ok(RootSelectionWork {
+                continue;
+            }
+            pending_leaves = leaves;
+        }
+
+        // Overlap: evaluate the in-flight batch on this GIL thread while the next
+        // batch is selected on a worker thread. Prefetch only if visits remain;
+        // each root self-limits to its remaining budget inside `select_leaf_batch`.
+        let prefetch_next = searches.iter().any(RustSearch::needs_visits);
+        let scope_start = std::time::Instant::now();
+        let (evaluations, next_leaves, eval_s, select_s) = std::thread::scope(
+            |scope| -> PyResult<(Vec<Arc<RustEvaluation>>, Vec<RustLeaf>, f64, f64)> {
+                let select_handle = if prefetch_next {
+                    let select_searches: &mut [RustSearch] = &mut *searches;
+                    Some(scope.spawn(move || {
+                        let started = std::time::Instant::now();
+                        let result =
+                            select_leaf_batch(select_searches, c_puct, leaf_batch_per_root, virtual_loss);
+                        (result, started.elapsed().as_secs_f64())
+                    }))
+                } else {
+                    None
+                };
+
+                // Building the requests here keeps their borrow of `pending_leaves`
+                // local to the scope, so it is free to move into backup after.
+                let leaf_requests: Vec<_> = pending_leaves
+                    .iter()
+                    .map(|leaf| RustEvaluationRequest {
+                        state: &leaf.state,
+                        state_hash: leaf.state_hash,
+                    })
+                    .collect();
+                let eval_start = std::time::Instant::now();
+                let evaluations = evaluate_model1_state_refs_cached(
+                    py,
+                    evaluator,
+                    &leaf_requests,
+                    evaluation_cache,
+                    Some(evaluation_stats),
+                    cache_max_states,
+                )?;
+                let eval_s = eval_start.elapsed().as_secs_f64();
+
+                let (next_leaves, select_s) = match select_handle {
+                    Some(handle) => {
+                        let (result, select_s) =
+                            handle.join().expect("mcts select worker panicked");
+                        (result?.0, select_s)
+                    }
+                    None => (Vec::new(), 0.0),
+                };
+                Ok((evaluations, next_leaves, eval_s, select_s))
+            },
+        )?;
+
+        if trace {
+            tr_passes += 1;
+            tr_leaves += pending_leaves.len() as u64;
+            tr_eval += eval_s;
+            tr_select += select_s;
+            tr_scope += scope_start.elapsed().as_secs_f64();
+        }
+
+        // Backup the batch we just evaluated (exclusive tree access on this thread).
+        let backup_start = std::time::Instant::now();
+        apply_eval_backups(searches, pending_leaves, &evaluations, virtual_loss)?;
+        if trace {
+            tr_backup += backup_start.elapsed().as_secs_f64();
+        }
+        pending_leaves = next_leaves;
+    }
+
+    if trace {
+        eprintln!(
+            "[mcts-trace] passes={} leaves={} eval={:.1}ms select={:.1}ms scope={:.1}ms backup={:.1}ms \
+             overlap_saved~={:.1}ms (eval+select-scope)",
+            tr_passes,
+            tr_leaves,
+            tr_eval * 1e3,
+            tr_select * 1e3,
+            tr_scope * 1e3,
+            tr_backup * 1e3,
+            (tr_eval + tr_select - tr_scope) * 1e3,
+        );
+    }
+    Ok(())
+}
+
+// Select up to one virtual batch of leaves across every root that still needs
+// visits. Pure Rust (no Python, no cache): terminal and already-expanded leaves
+// are backed up inline; only leaves that still need a network evaluation are
+// returned. `made_progress` is true if any root selected at least one leaf.
+fn select_leaf_batch(
+    searches: &mut [RustSearch],
+    c_puct: f32,
+    leaf_batch_per_root: u32,
+    virtual_loss: f32,
+) -> PyResult<(Vec<RustLeaf>, bool)> {
+    let work_results: Vec<PyResult<RootSelectionWork>> = searches
+        .par_iter_mut()
+        .enumerate()
+        .map(|(root_index, search)| {
+            let mut leaves = Vec::new();
+            let mut made_progress = false;
+            if !search.needs_visits() {
+                return Ok(RootSelectionWork {
                     leaves,
                     made_progress,
-                })
-            })
-            .collect();
-        let mut leaves = Vec::new();
-        let mut made_progress = false;
-        for work in work_results {
-            let work = work?;
-            made_progress |= work.made_progress;
-            leaves.extend(work.leaves);
-        }
-
-        if !leaves.is_empty() {
-            let leaf_requests: Vec<_> = leaves
-                .iter()
-                .map(|leaf| RustEvaluationRequest {
-                    state: &leaf.state,
-                    state_hash: leaf.state_hash,
-                })
-                .collect();
-            let evaluations = evaluate_model1_state_refs_cached(
-                py,
-                evaluator,
-                &leaf_requests,
-                evaluation_cache,
-                Some(evaluation_stats),
-                cache_max_states,
-            )?;
-            for (leaf, evaluation) in leaves.into_iter().zip(evaluations.iter()) {
-                let search = &mut searches[leaf.root_index];
-                let child_id = search.add_node_from_eval(&leaf.state, leaf.state_hash, evaluation)?;
-                search.nodes[leaf.parent_node].edges[leaf.edge_index].child = Some(child_id);
-                search.mark_pending(leaf.parent_node, leaf.edge_index, -1);
-                let child_player = search.nodes[child_id].player;
-                let child_value = search.nodes[child_id].value();
-                search.backup_virtual(&leaf.path, child_player, child_value, virtual_loss);
+                });
             }
-        }
+            let budget = leaf_batch_per_root.min(search.remaining_visits());
+            for _ in 0..budget {
+                let selected = search.select_pending_leaf(c_puct)?;
+                let Some(selected) = selected else {
+                    break;
+                };
+                search.apply_virtual_visit(&selected.path, virtual_loss);
+                made_progress = true;
 
-        if !made_progress {
-            break;
-        }
+                if let Some(outcome) = selected.terminal {
+                    let leaf_player = selected.state.current_player();
+                    let leaf_value = terminal_value(outcome, leaf_player);
+                    search.backup_virtual(&selected.path, leaf_player, leaf_value, virtual_loss);
+                } else if let Some(node_id) = selected.existing_node {
+                    let node = &search.nodes[node_id];
+                    search.backup_virtual(&selected.path, node.player, node.value(), virtual_loss);
+                } else {
+                    search.mark_pending(selected.parent_node, selected.edge_index, 1);
+                    leaves.push(RustLeaf {
+                        root_index,
+                        parent_node: selected.parent_node,
+                        edge_index: selected.edge_index,
+                        path: selected.path,
+                        state: selected.state,
+                        state_hash: selected.state_hash,
+                    });
+                }
+            }
+            Ok(RootSelectionWork {
+                leaves,
+                made_progress,
+            })
+        })
+        .collect();
+    let mut leaves = Vec::new();
+    let mut made_progress = false;
+    for work in work_results {
+        let work = work?;
+        made_progress |= work.made_progress;
+        leaves.extend(work.leaves);
+    }
+    Ok((leaves, made_progress))
+}
+
+// Attach the evaluated children to their parent edges and back up their values.
+// Exclusive `&mut searches` access — called only after the select scope joins.
+fn apply_eval_backups(
+    searches: &mut [RustSearch],
+    leaves: Vec<RustLeaf>,
+    evaluations: &[Arc<RustEvaluation>],
+    virtual_loss: f32,
+) -> PyResult<()> {
+    for (leaf, evaluation) in leaves.into_iter().zip(evaluations.iter()) {
+        let search = &mut searches[leaf.root_index];
+        let child_id =
+            search.add_node_from_eval(&leaf.state, leaf.state_hash, Arc::clone(evaluation))?;
+        search.nodes[leaf.parent_node].edges[leaf.edge_index].child = Some(child_id);
+        search.mark_pending(leaf.parent_node, leaf.edge_index, -1);
+        let child_player = search.nodes[child_id].player;
+        let child_value = search.nodes[child_id].value();
+        search.backup_virtual(&leaf.path, child_player, child_value, virtual_loss);
     }
     Ok(())
 }
@@ -404,9 +579,11 @@ fn build_search_result_payloads(
     py: Python<'_>,
     searches: &[RustSearch],
     batch_diagnostics: &Bound<'_, PyDict>,
-    temperature: f32,
+    temperatures: &[f32],
     seed: u64,
     baselines: Option<&[HashMap<PackedCoord, u32>]>,
+    c_puct: f32,
+    forced_playout_k: f32,
 ) -> PyResult<Py<PyAny>> {
     // The Python wrapper expects byte-backed policies. This avoids allocating a
     // Python tuple for every legal move while still supporting lazy iteration.
@@ -415,12 +592,24 @@ fn build_search_result_payloads(
         let result = PyDict::new(py);
         let root = search.root();
         let baseline = baselines.and_then(|items| items.get(index));
+        // RAW visit policy: drives the played move (kept identical to the action
+        // used to advance the native root in `run`, so play stays diverse) and the
+        // reported visit total.
         let (policy_action_ids, policy_weights, policy_total) = visit_policy(root, baseline);
+        // EXPORTED policy = training target: with forced playouts on, prune the
+        // forced visits back out (KataGo policy-target pruning) so the network is
+        // not taught to like the artificially-explored moves. With k==0 this is a
+        // byte-identical copy of the raw policy.
+        let (export_action_ids, export_weights) = if forced_playout_k > 0.0 {
+            pruned_visit_policy(root, baseline, forced_playout_k, c_puct)
+        } else {
+            (policy_action_ids.clone(), policy_weights.clone())
+        };
         let (root_prior_action_ids, root_prior_weights) = root_prior_policy(root);
         let selected = select_action_from_policy(
             &policy_action_ids,
             &policy_weights,
-            temperature,
+            temperatures[index],
             seed.wrapping_add(index as u64),
         )?;
         result.set_item("action_id", selected.unwrap_or(0))?;
@@ -432,20 +621,20 @@ fn build_search_result_payloads(
                 "cumulative_visit_policy"
             },
         )?;
-        let action_byte_len = policy_action_ids.len() * std::mem::size_of::<u32>();
-        let weight_byte_len = policy_weights.len() * std::mem::size_of::<f32>();
+        let action_byte_len = export_action_ids.len() * std::mem::size_of::<u32>();
+        let weight_byte_len = export_weights.len() * std::mem::size_of::<f32>();
         let action_bytes = unsafe {
-            std::slice::from_raw_parts(policy_action_ids.as_ptr() as *const u8, action_byte_len)
+            std::slice::from_raw_parts(export_action_ids.as_ptr() as *const u8, action_byte_len)
         };
         let weight_bytes = unsafe {
-            std::slice::from_raw_parts(policy_weights.as_ptr() as *const u8, weight_byte_len)
+            std::slice::from_raw_parts(export_weights.as_ptr() as *const u8, weight_byte_len)
         };
         result.set_item(
             "visit_policy_action_ids_bytes",
             PyBytes::new(py, action_bytes),
         )?;
         result.set_item("visit_policy_weights_bytes", PyBytes::new(py, weight_bytes))?;
-        result.set_item("visit_policy_count", policy_action_ids.len())?;
+        result.set_item("visit_policy_count", export_action_ids.len())?;
         let prior_action_byte_len = root_prior_action_ids.len() * std::mem::size_of::<u32>();
         let prior_weight_byte_len = root_prior_weights.len() * std::mem::size_of::<f32>();
         let prior_action_bytes = unsafe {
@@ -483,17 +672,22 @@ fn build_search_result_payloads(
 
 fn root_prior_policy(root: &RustNode) -> (Vec<PackedCoord>, Vec<f32>) {
     // Every in-crop legal move is staged as either a materialized edge or an
-    // unexpanded prior, so the root prior is exactly their union normalized.
+    // unexpanded prior, so the root prior is exactly their union normalized. This
+    // holds for both an owned root and a reused (shared) root: `remaining_priors`
+    // returns the not-yet-materialized candidates for whichever variant the root
+    // is, so the exported distribution stays byte-identical to the pre-refactor
+    // edges ∪ unexpanded union.
+    let remaining = root.remaining_priors();
     let mut priors: HashMap<PackedCoord, f32> =
-        HashMap::with_capacity(root.edges.len() + root.unexpanded_priors.len());
+        HashMap::with_capacity(root.edges.len() + remaining.len());
     for edge in &root.edges {
         if edge.prior.is_finite() && edge.prior > 0.0 {
             priors.insert(edge.action_id, edge.prior);
         }
     }
-    for candidate in &root.unexpanded_priors {
-        if candidate.prior.is_finite() && candidate.prior > 0.0 {
-            priors.insert(candidate.action_id, candidate.prior);
+    for (action_id, prior) in remaining {
+        if prior.is_finite() && prior > 0.0 {
+            priors.insert(action_id, prior);
         }
     }
     let mut pairs: Vec<(PackedCoord, f32)> = priors.into_iter().collect();
@@ -652,6 +846,128 @@ fn edge_delta_visits(edge: &RustEdge, baseline: Option<&HashMap<PackedCoord, u32
     edge.visits.saturating_sub(before)
 }
 
+/// KataGo policy-target pruning. Starts from the raw per-edge DELTA visits (the
+/// visits this search call added) and subtracts each non-best root child's forced
+/// playouts back out, so the exported TRAINING target reflects what PUCT would
+/// have chosen on its own — not the visits forced purely to keep root noise alive.
+/// For every child except the most-visited one, remove up to
+/// `n_forced = floor(sqrt(k * prior * root_visits))` visits, stopping early if a
+/// further removal would raise that child's PUCT selection value above the
+/// most-visited child's (meaning PUCT genuinely preferred it, so the visit is
+/// real). Children pruned to zero drop out of the target. The PLAYED move is
+/// chosen from the un-pruned policy elsewhere, so play stays diverse.
+fn pruned_visit_policy(
+    root: &RustNode,
+    baseline: Option<&HashMap<PackedCoord, u32>>,
+    forced_playout_k: f32,
+    c_puct: f32,
+) -> (Vec<PackedCoord>, Vec<f32>) {
+    let edges = &root.edges;
+    let deltas: Vec<u32> = edges
+        .iter()
+        .map(|edge| edge_delta_visits(edge, baseline))
+        .collect();
+    let priors: Vec<f32> = edges.iter().map(|edge| edge.prior).collect();
+    let cumulative: Vec<u32> = edges.iter().map(|edge| edge.visits).collect();
+    let values: Vec<f32> = edges.iter().map(|edge| edge.value()).collect();
+    let pruned = prune_forced_delta_counts(
+        &deltas,
+        &priors,
+        &cumulative,
+        &values,
+        root.visits,
+        forced_playout_k,
+        c_puct,
+    );
+    let total: u32 = pruned.iter().sum();
+    if total == 0 {
+        // Defensive: pruning never removes the most-visited child, so this only
+        // triggers when no visits were added this call. Fall back to raw policy.
+        let (ids, weights, _total) = visit_policy(root, baseline);
+        return (ids, weights);
+    }
+    let mut out_ids = Vec::with_capacity(edges.len());
+    let mut weights = Vec::with_capacity(edges.len());
+    for (index, edge) in edges.iter().enumerate() {
+        if pruned[index] == 0 {
+            continue;
+        }
+        out_ids.push(edge.action_id);
+        weights.push(pruned[index] as f32 / total as f32);
+    }
+    (out_ids, weights)
+}
+
+/// Pure core of policy-target pruning (no tree types, so it is unit-testable).
+/// Returns the pruned per-child DELTA visit counts. The most-visited child (ties
+/// -> lower action id) is never pruned; for each other child remove up to
+/// `floor(sqrt(k * prior * root_visits))` visits, stopping when a further removal
+/// would lift that child's PUCT value above the most-visited child's.
+fn prune_forced_delta_counts(
+    deltas: &[u32],
+    priors: &[f32],
+    cumulative: &[u32],
+    values: &[f32],
+    root_visits: u32,
+    forced_playout_k: f32,
+    c_puct: f32,
+) -> Vec<u32> {
+    let mut pruned = deltas.to_vec();
+    if forced_playout_k <= 0.0 {
+        return pruned;
+    }
+    // Reference child = most visits added this call; ties resolve to the lower
+    // index (we scan ascending and only replace on a strictly greater delta).
+    let mut best_idx: Option<usize> = None;
+    for index in 0..deltas.len() {
+        if deltas[index] == 0 {
+            continue;
+        }
+        best_idx = match best_idx {
+            None => Some(index),
+            Some(current) => {
+                if deltas[index] > deltas[current] {
+                    Some(index)
+                } else {
+                    Some(current)
+                }
+            }
+        };
+    }
+    let Some(best_idx) = best_idx else {
+        return pruned;
+    };
+    let root_n = root_visits.max(1) as f32;
+    let explore = c_puct * root_n.sqrt();
+    let u_best = values[best_idx] + priors[best_idx] * explore / (1.0 + cumulative[best_idx] as f32);
+    for index in 0..deltas.len() {
+        if index == best_idx || pruned[index] == 0 {
+            continue;
+        }
+        if !(priors[index].is_finite() && priors[index] > 0.0) {
+            continue;
+        }
+        let n_forced = (forced_playout_k * priors[index] * root_n).sqrt().floor() as u32;
+        if n_forced == 0 {
+            continue;
+        }
+        let q = values[index];
+        let mut removed = 0u32;
+        while removed < n_forced && pruned[index] > 0 {
+            // Reduce the child's CUMULATIVE visit count for the PUCT test (Q held
+            // fixed). `pruned[index] > 0` keeps the reduced count >= baseline.
+            let reduced = cumulative[index].saturating_sub(removed + 1);
+            let u = q + priors[index] * explore / (1.0 + reduced as f32);
+            if u > u_best {
+                break; // PUCT would genuinely have made this visit; keep it.
+            }
+            removed += 1;
+            pruned[index] -= 1;
+        }
+    }
+    pruned
+}
+
 fn select_action_from_policy(
     action_ids: &[PackedCoord],
     weights: &[f32],
@@ -733,8 +1049,18 @@ fn build_result_diagnostics<'py>(
     let root = PyDict::new(py);
     root.set_item("node_count", search.node_count)?;
     root.set_item("active_edge_count", search.active_edge_count)?;
+    root.set_item("hidden_prior_count", search.hidden_prior_count)?;
     root.set_item("root_active_edges", search.root_active_edges)?;
+    root.set_item("root_hidden_priors", search.root_hidden_priors)?;
     root.set_item("max_active_edges_per_node", search.max_active_edges_per_node)?;
+    root.set_item(
+        "max_hidden_priors_per_node",
+        search.max_hidden_priors_per_node,
+    )?;
+    root.set_item("active_edge_bytes", search.active_edge_bytes)?;
+    root.set_item("hidden_prior_bytes", search.hidden_prior_bytes)?;
+    root.set_item("shared_prior_nodes", search.shared_prior_nodes)?;
+    root.set_item("shared_prior_refs", search.shared_prior_refs)?;
     diagnostics.set_item("root", root)?;
     diagnostics.set_item("batch", batch)?;
     Ok(diagnostics)
@@ -752,17 +1078,28 @@ fn build_batch_diagnostics<'py>(
     let mut completed_visits = 0u64;
     let mut max_nodes_per_root = 0usize;
     let mut max_active_edges_per_root = 0usize;
+    let mut max_hidden_priors_per_root = 0usize;
     for search in searches {
         let stats = search.diagnostics();
         aggregate.node_count += stats.node_count;
         aggregate.active_edge_count += stats.active_edge_count;
+        aggregate.hidden_prior_count += stats.hidden_prior_count;
         aggregate.root_active_edges += stats.root_active_edges;
+        aggregate.root_hidden_priors += stats.root_hidden_priors;
         aggregate.max_active_edges_per_node = aggregate
             .max_active_edges_per_node
             .max(stats.max_active_edges_per_node);
+        aggregate.max_hidden_priors_per_node = aggregate
+            .max_hidden_priors_per_node
+            .max(stats.max_hidden_priors_per_node);
+        aggregate.active_edge_bytes += stats.active_edge_bytes;
+        aggregate.hidden_prior_bytes += stats.hidden_prior_bytes;
+        aggregate.shared_prior_nodes += stats.shared_prior_nodes;
+        aggregate.shared_prior_refs += stats.shared_prior_refs;
         completed_visits += search.completed_visits as u64;
         max_nodes_per_root = max_nodes_per_root.max(stats.node_count);
         max_active_edges_per_root = max_active_edges_per_root.max(stats.active_edge_count);
+        max_hidden_priors_per_root = max_hidden_priors_per_root.max(stats.hidden_prior_count);
     }
 
     let tree = PyDict::new(py);
@@ -772,10 +1109,21 @@ fn build_batch_diagnostics<'py>(
     tree.set_item("completed_visits", completed_visits)?;
     tree.set_item("node_count", aggregate.node_count)?;
     tree.set_item("active_edge_count", aggregate.active_edge_count)?;
+    tree.set_item("hidden_prior_count", aggregate.hidden_prior_count)?;
     tree.set_item("root_active_edges", aggregate.root_active_edges)?;
+    tree.set_item("root_hidden_priors", aggregate.root_hidden_priors)?;
     tree.set_item("max_nodes_per_root", max_nodes_per_root)?;
     tree.set_item("max_active_edges_per_root", max_active_edges_per_root)?;
+    tree.set_item("max_hidden_priors_per_root", max_hidden_priors_per_root)?;
     tree.set_item("max_active_edges_per_node", aggregate.max_active_edges_per_node)?;
+    tree.set_item(
+        "max_hidden_priors_per_node",
+        aggregate.max_hidden_priors_per_node,
+    )?;
+    tree.set_item("active_edge_bytes", aggregate.active_edge_bytes)?;
+    tree.set_item("hidden_prior_bytes", aggregate.hidden_prior_bytes)?;
+    tree.set_item("shared_prior_nodes", aggregate.shared_prior_nodes)?;
+    tree.set_item("shared_prior_refs", aggregate.shared_prior_refs)?;
 
     let eval = PyDict::new(py);
     eval.set_item("requested_states", evaluation.requested_states)?;
@@ -794,12 +1142,20 @@ fn build_batch_diagnostics<'py>(
     eval.set_item("legal_index_bytes", evaluation.legal_index_bytes)?;
     eval.set_item("value_bytes", evaluation.value_bytes)?;
     eval.set_item("prior_bytes", evaluation.prior_bytes)?;
+    eval.set_item(
+        "cache_prior_pair_bytes",
+        evaluation.encoded_legal_actions * std::mem::size_of::<(PackedCoord, f32)>(),
+    )?;
     eval.set_item("cache_inserts", evaluation.cache_inserts)?;
     eval.set_item("cache_insert_skipped", evaluation.cache_insert_skipped)?;
     eval.set_item("cache_size", cache_len)?;
     eval.set_item("cache_size_peak", evaluation.cache_size_peak.max(cache_len))?;
     eval.set_item("encoding_seconds", evaluation.encoding_seconds)?;
     eval.set_item("evaluator_seconds", evaluation.evaluator_seconds)?;
+    eval.set_item("parse_seconds", evaluation.parse_seconds)?;
+    eval.set_item("payload_seconds", evaluation.payload_seconds)?;
+    eval.set_item("dedup_seconds", evaluation.dedup_seconds)?;
+    eval.set_item("cache_insert_seconds", evaluation.cache_insert_seconds)?;
 
     let diagnostics = PyDict::new(py);
     diagnostics.set_item("tree", tree)?;
@@ -810,4 +1166,65 @@ fn build_batch_diagnostics<'py>(
 pub fn register_pybridge(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<Model1MctsSession>()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod forced_playout_tests {
+    use super::prune_forced_delta_counts;
+
+    const K: f32 = 2.0;
+    const CPUCT: f32 = 1.5;
+
+    #[test]
+    fn k_zero_is_identity() {
+        let deltas = [80u32, 10, 3];
+        let priors = [0.6f32, 0.05, 0.02];
+        let cumulative = [80u32, 10, 3];
+        let values = [0.5f32, 0.1, -0.2];
+        let pruned = prune_forced_delta_counts(&deltas, &priors, &cumulative, &values, 100, 0.0, CPUCT);
+        assert_eq!(pruned, deltas.to_vec(), "k=0 must not change any count");
+    }
+
+    #[test]
+    fn removes_forced_tail_keeps_best() {
+        // best = idx 0 (most delta). u_best = 0.5 + 0.6*1.5*sqrt(100)/(1+80) = 0.6111.
+        // child1 prior .05: n_forced=floor(sqrt(2*.05*100))=3, all 3 removable (U stays < u_best) -> 10-3=7.
+        // child2 prior .02: n_forced=floor(sqrt(2*.02*100))=2, both removable -> 3-2=1.
+        let deltas = [80u32, 10, 3];
+        let priors = [0.6f32, 0.05, 0.02];
+        let cumulative = [80u32, 10, 3];
+        let values = [0.5f32, 0.1, -0.2];
+        let pruned = prune_forced_delta_counts(&deltas, &priors, &cumulative, &values, 100, K, CPUCT);
+        assert_eq!(pruned, vec![80u32, 7, 1]);
+        assert_eq!(pruned[0], 80, "most-visited child is never pruned");
+        let raw_tail: u32 = deltas[1..].iter().sum();
+        let pruned_tail: u32 = pruned[1..].iter().sum();
+        assert!(pruned_tail < raw_tail, "forced tail visits must shrink");
+    }
+
+    #[test]
+    fn keeps_puct_preferred_high_value_child() {
+        // child1 has high Q (0.7) and few visits: PUCT genuinely prefers it, so even
+        // though it is not the most-visited, its visits must NOT be pruned away.
+        // u_best (idx0) = 0.4 + 0.5*1.5*10/(1+90)=0.4824. child1 reduced-by-1 U
+        // = 0.7 + 0.3*15/(1+19)=0.925 > u_best -> stop immediately, remove 0.
+        let deltas = [90u32, 20];
+        let priors = [0.5f32, 0.3];
+        let cumulative = [90u32, 20];
+        let values = [0.4f32, 0.7];
+        let pruned = prune_forced_delta_counts(&deltas, &priors, &cumulative, &values, 100, K, CPUCT);
+        assert_eq!(pruned, vec![90u32, 20], "a PUCT-preferred child keeps its visits");
+    }
+
+    #[test]
+    fn never_prunes_below_baseline_or_to_negative() {
+        // delta < cumulative (reused root): only the delta portion is prunable.
+        let deltas = [50u32, 4];           // child1 added 4 this call (cumulative 30)
+        let priors = [0.7f32, 0.05];
+        let cumulative = [200u32, 30];
+        let values = [0.5f32, 0.0];
+        let pruned = prune_forced_delta_counts(&deltas, &priors, &cumulative, &values, 230, K, CPUCT);
+        assert!(pruned[1] <= 4, "cannot remove more than the delta visits");
+        assert_eq!(pruned[0], 50, "best untouched");
+    }
 }

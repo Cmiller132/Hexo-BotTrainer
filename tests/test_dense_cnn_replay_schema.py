@@ -77,8 +77,9 @@ def test_policy_surprise_materializes_frequency_weighted_rows_deterministically(
     assert all(row.policy_surprise >= 0.0 for row in first)
 
 
-def test_selfplay_npz_writer_uses_fixed_schema_and_sidecar(tmp_path: Path) -> None:
+def test_selfplay_npz_writer_uses_compact_schema_and_sidecar(tmp_path: Path) -> None:
     replay = _replay_module()
+    compact_io = importlib.import_module("hexo_models.dense_cnn.compact_io")
     rows = replay.materialize_policy_surprise_rows(
         (
             _sample("a", policy=((_action(0, 0), 1.0),), prior=((_action(0, 0), 1.0),)),
@@ -98,14 +99,20 @@ def test_selfplay_npz_writer_uses_fixed_schema_and_sidecar(tmp_path: Path) -> No
 
     assert result.path.exists()
     assert result.sidecar_path.exists()
-    with np.load(result.path) as data:
-        assert set(data.files) == set(replay.NPZ_KEYS)
-        assert data[replay.INPUT_KEY].shape[0] == len(rows)
-        assert data[replay.POLICY_KEY].shape[1:] == (1, 41, 41)
-        assert data[replay.ROOT_POLICY_KEY].shape[1:] == (1, 41, 41)
-        assert data[replay.LEGAL_MASK_KEY].dtype == np.bool_
-        assert data[replay.SHORT_TERM_VALUE_KEY].shape == (len(rows), 2)
-        assert data[replay.METADATA_KEY].shape == (len(rows), 4)
+    # Compact columnar schema: per-row scalar arrays + variable-length data + offsets.
+    with np.load(result.path, allow_pickle=True) as data:
+        keys = set(data.files)
+        assert {
+            "turn_index", "value", "stvalue", "stvalue_mask", "horizons",
+            "stones_off", "legal_ids", "legal_off", "pol_act", "pol_w", "pol_off",
+        } <= keys
+        assert data["turn_index"].shape == (len(rows),)
+        assert data["value"].shape == (len(rows),)
+        assert data["stvalue"].shape == (len(rows), 2)
+        assert tuple(int(h) for h in data["horizons"]) == (1, 4)
+        assert data["legal_off"].shape == (len(rows) + 1,)
+    assert compact_io.compact_row_count(result.path) == len(rows)
+    assert len(compact_io.read_compact_shard(result.path)) == len(rows)
     sidecar = json.loads(result.sidecar_path.read_text(encoding="utf-8"))
     assert sidecar["num_rows"] == len(rows)
     assert sidecar["raw_rows"] == 2
@@ -204,6 +211,55 @@ def test_katago_shuffle_builds_latest_batch_aligned_train_dir(tmp_path: Path) ->
     assert train_json["worker_group_size"] == 4
     assert train_json["window_start_data_row_idx"] == 4
     assert all(replay.npz_row_count(path) % 2 == 0 for path in result.output_files)
+
+
+def _write_game(replay: Any, selfplay_dir: Path, name: str, *, epoch: int, horizons: tuple[int, ...], n: int = 4) -> Path:
+    rows = [_sample(name, policy=((_action(0, 0), 1.0),), prior=((_action(0, 0), 1.0),)) for _ in range(n)]
+    return replay.write_selfplay_npz(
+        selfplay_dir / f"{name}.npz", rows, raw_rows=n, epoch=epoch, game_id=name,
+        short_term_value_horizons=horizons,
+    ).path
+
+
+def test_shuffle_rejects_mixed_horizon_window(tmp_path: Path) -> None:
+    # #6: a window spanning shards with different short_term_value horizons would
+    # silently mis-slot stval targets (the output is written with one horizon set).
+    # The shuffle must fail loudly instead.
+    replay = _replay_module()
+    selfplay_dir = tmp_path / "selfplay"
+    _write_game(replay, selfplay_dir, "a", epoch=1, horizons=(1, 4))
+    _write_game(replay, selfplay_dir, "b", epoch=2, horizons=(1, 4, 8))  # different horizons
+    # Full-window params (expand_per_row=1.0, min_rows=1) so BOTH shards are in the
+    # window -> the mixed-horizon guard must trigger.
+    with pytest.raises(ValueError, match="mixes short_term_value horizons"):
+        replay.build_katago_shuffle(
+            selfplay_dir=selfplay_dir, shuffled_root=tmp_path / "shuf", scratch_dir=tmp_path / "scr",
+            epoch=5, seed=1, min_rows=1, keep_target_rows=64, taper_window_exponent=1.0,
+            expand_window_per_row=1.0, taper_window_scale=None, approx_rows_per_out_file=4,
+            batch_size=2, worker_group_size=4,
+        )
+
+
+def test_shuffle_trivial_md5_range_is_unchanged(tmp_path: Path) -> None:
+    # #5: the md5 sub-range is now applied to the file SET first; the default [0, 1)
+    # range must keep every file and leave window_start_data_row_idx correct.
+    replay = _replay_module()
+    selfplay_dir = tmp_path / "selfplay"
+    _write_game(replay, selfplay_dir, "old", epoch=1, horizons=())
+    _write_game(replay, selfplay_dir, "new", epoch=2, horizons=())
+    result = replay.build_katago_shuffle(
+        selfplay_dir=selfplay_dir, shuffled_root=tmp_path / "shuf", scratch_dir=tmp_path / "scr",
+        epoch=5, seed=3, min_rows=4, keep_target_rows=64, taper_window_exponent=0.65,
+        expand_window_per_row=0.0, taper_window_scale=50_000.0, approx_rows_per_out_file=4,
+        batch_size=2, worker_group_size=4,
+    )
+    assert result.status == "completed"
+    train_json = replay.load_train_json(result.shuffle_dir)
+    # md5 default range kept every file, so the full stream length is unchanged and
+    # window_start stays a valid offset into it (exact value depends on the window
+    # formula / mtimes; the dedicated batch-aligned test pins it).
+    assert train_json["total_num_data_rows"] == 8
+    assert 0 <= train_json["window_start_data_row_idx"] <= 8
 
 
 def test_checkpoint_loader_rejects_legacy_sample_buffer_payload(tmp_path: Path) -> None:

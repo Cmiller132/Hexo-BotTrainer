@@ -612,7 +612,10 @@ def test_dense_cnn_rust_batch_input_encoder_matches_python_sample_encoder() -> N
         expected = samples_module.expand_sample(sample)["input"]
 
         assert tuple(int(item) for item in payload["centers"][index]) == sample.center
-        assert tuple(int(item) for item in payload["legal_action_ids"][index]) == sample.legal_action_ids
+        # legal_action_ids is now a compact array("q"); compare decoded to ints.
+        assert tuple(int(item) for item in payload["legal_action_ids"][index]) == tuple(
+            int(item) for item in sample.legal_action_ids
+        )
         torch.testing.assert_close(rust_inputs[index], expected, rtol=0.0, atol=0.0)
 
 
@@ -734,6 +737,50 @@ def test_dense_cnn_mcts_session_reuses_tree_and_reports_exact_delta_visits() -> 
     assert sum(weight for _action_id, weight in first.visit_policy) == pytest.approx(1.0)
     assert sum(weight for _action_id, weight in second.visit_policy) == pytest.approx(1.0)
     assert int(second.diagnostics["batch"]["tree"]["completed_visits"]) > second.visits
+
+
+def test_dense_cnn_mcts_session_exports_full_root_prior_across_tree_reuse() -> None:
+    # Regression guard for the shared-prior (Arc + cursor) refactor: the exported
+    # root_prior_policy must remain the FULL in-crop legal distribution, both for a
+    # freshly searched root and for a promoted (reused) interior root. Truncating the
+    # shared prior list would silently shrink this distribution and corrupt the
+    # policy-surprise weighting and the rootPolicy auxiliary target.
+    engine = importlib.import_module("hexo_engine")
+    engine_types = importlib.import_module("hexo_engine.types")
+    mcts_module = importlib.import_module("hexo_models.dense_cnn.mcts")
+    rust_bridge = importlib.import_module("hexo_models.dense_cnn.rust_bridge")
+    _skip_without_direct_state_rust(rust_bridge)
+
+    class FakeInference:
+        def evaluate_model1_payload(self, payload: Mapping[str, Any]) -> Mapping[str, object]:
+            return _full_prior_payload(payload)
+
+    def in_crop_legal_count(state: object) -> int:
+        return len(rust_bridge.model1_batch_inputs([state])["legal_action_ids"][0])
+
+    state = engine.new_game()
+    inference = FakeInference()
+    session = mcts_module.new_mcts_session(max_states=100)
+
+    expected_first = in_crop_legal_count(state)
+    first = session.run(
+        [7], [state], inference, visits=8, temperature=0.0, seed=1, virtual_batch_size=1
+    )[0]
+    assert len(first.root_prior_policy) == expected_first
+
+    engine.apply_action(
+        state,
+        engine.PlacementAction(engine_types.unpack_coord_id(first.action_id)),
+    )
+
+    expected_second = in_crop_legal_count(state)
+    second = session.run(
+        [7], [state], inference, visits=8, temperature=0.0, seed=2, virtual_batch_size=1
+    )[0]
+    # The second move reuses the tree (the root is a promoted interior node), so this
+    # exercises the Shared->Owned export path, not a freshly evaluated owned root.
+    assert int(second.diagnostics["batch"]["tree"]["completed_visits"]) > second.visits
+    assert len(second.root_prior_policy) == expected_second
 
 
 def test_dense_cnn_rust_mcts_rejects_short_compact_evaluator_payloads() -> None:
@@ -863,6 +910,8 @@ def test_dense_cnn_mcts_python_boundary_delegates_to_rust(monkeypatch: pytest.Mo
         widening_policy_mass: float | None,
         widening_max_children: int | None,
         widening_min_children: int | None,
+        forced_playout_k: float | None = None,
+        move_temperatures: Sequence[float] | None = None,
     ) -> tuple[Mapping[str, Any], ...]:
         calls.append(
             {
@@ -884,6 +933,8 @@ def test_dense_cnn_mcts_python_boundary_delegates_to_rust(monkeypatch: pytest.Mo
                 "widening_policy_mass": widening_policy_mass,
                 "widening_max_children": widening_max_children,
                 "widening_min_children": widening_min_children,
+                "forced_playout_k": forced_playout_k,
+                "move_temperatures": move_temperatures,
             }
         )
         return (
@@ -951,6 +1002,8 @@ def test_dense_cnn_mcts_python_boundary_delegates_to_rust(monkeypatch: pytest.Mo
             "widening_policy_mass": None,
             "widening_max_children": None,
             "widening_min_children": None,
+            "forced_playout_k": None,
+            "move_temperatures": None,
         }
     ]
 
@@ -1094,7 +1147,8 @@ def test_dense_cnn_payload_inference_respects_configured_max_batch_size() -> Non
     model = CountingModel()
     inference = inference_cls(model, device="cpu", amp=False, max_batch_size=2)
     rows = 5
-    inputs = torch.zeros((rows, dense_cnn.INPUT_CHANNELS, dense_cnn.BOARD_SIZE, dense_cnn.BOARD_SIZE), dtype=torch.float32)
+    # MCTS evaluator inputs are f16 transport (Rust PlaneBuffer); upcast on-device.
+    inputs = torch.zeros((rows, dense_cnn.INPUT_CHANNELS, dense_cnn.BOARD_SIZE, dense_cnn.BOARD_SIZE), dtype=torch.float16)
     payload = {
         "inputs": inputs.numpy().tobytes(),
         "shape": inputs.shape,
@@ -1122,7 +1176,7 @@ def test_dense_cnn_payload_inference_rejects_legacy_legal_index_payload() -> Non
             }
 
     inference = inference_cls(Model(), device="cpu", amp=False)
-    inputs = torch.zeros((1, dense_cnn.INPUT_CHANNELS, dense_cnn.BOARD_SIZE, dense_cnn.BOARD_SIZE), dtype=torch.float32)
+    inputs = torch.zeros((1, dense_cnn.INPUT_CHANNELS, dense_cnn.BOARD_SIZE, dense_cnn.BOARD_SIZE), dtype=torch.float16)
 
     with pytest.raises(ValueError, match="legal_flat_indices_bytes"):
         inference.evaluate_model1_payload(

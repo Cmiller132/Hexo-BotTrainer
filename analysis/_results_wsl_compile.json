@@ -1,0 +1,136 @@
+{
+  "torch": "2.11.0+cu128",
+  "cross_check": {
+    "wsl_fp32_vs_native_fp32_policy_max_abs": 0.0,
+    "wsl_fp32_vs_native_fp32_value_max_abs": 0.0
+  },
+  "variants": [
+    {
+      "mean_ms": 1.529354133605957,
+      "std_ms": 0.14488898143801632,
+      "p50_ms": 1.4622880220413208,
+      "p95_ms": 1.7777376115322112,
+      "min_ms": 1.3294399976730347,
+      "iters": 300,
+      "label": "wsl_eager_fp16_bs1",
+      "batch": 1,
+      "forwards_per_s_mean": 653.8707929223494,
+      "forwards_per_s_p95": 562.5127091382803,
+      "clk_idle_mhz": 2820,
+      "clk_warm_mhz": 2265
+    },
+    {
+      "mean_ms": 18.18428829828898,
+      "std_ms": 0.013239232663162244,
+      "p50_ms": 18.183168411254883,
+      "p95_ms": 18.196387577056885,
+      "min_ms": 18.164640426635742,
+      "iters": 300,
+      "label": "wsl_eager_fp16_bs128",
+      "batch": 128,
+      "forwards_per_s_mean": 7039.043700821876,
+      "forwards_per_s_p95": 7034.36324698811,
+      "clk_idle_mhz": 2265,
+      "clk_warm_mhz": 2790
+    },
+    {
+      "mean_ms": 39.71413299560547,
+      "std_ms": 0.016577995886323863,
+      "p50_ms": 39.7127685546875,
+      "p95_ms": 39.73324966430664,
+      "min_ms": 39.66566467285156,
+      "iters": 300,
+      "label": "wsl_eager_fp16_bs256",
+      "batch": 256,
+      "forwards_per_s_mean": 6446.067953399045,
+      "forwards_per_s_p95": 6442.966587501931,
+      "clk_idle_mhz": 2790,
+      "clk_warm_mhz": 2790
+    },
+    {
+      "mean_ms": 168.68729553222656,
+      "std_ms": 0.03208240077737458,
+      "p50_ms": 168.68414306640625,
+      "p95_ms": 168.73749237060548,
+      "min_ms": 168.6097869873047,
+      "iters": 300,
+      "label": "wsl_eager_fp16_bs1024",
+      "batch": 1024,
+      "forwards_per_s_mean": 6070.403801123078,
+      "forwards_per_s_p95": 6068.597948290853,
+      "clk_idle_mhz": 2790,
+      "clk_warm_mhz": 2790
+    },
+    {
+      "mean_ms": 0.20812799721956254,
+      "std_ms": 0.023031296031863536,
+      "p50_ms": 0.20684799551963806,
+      "p95_ms": 0.20787200331687927,
+      "min_ms": 0.20582400262355804,
+      "iters": 300,
+      "label": "wsl_compile_fp16_bs1",
+      "batch": 1,
+      "forwards_per_s_mean": 4804.735611543218,
+      "forwards_per_s_p95": 4810.652632599128,
+      "clk_idle_mhz": 2805,
+      "clk_warm_mhz": 2790
+    },
+    {
+      "mean_ms": 13.416495803197225,
+      "std_ms": 0.04491095090175703,
+      "p50_ms": 13.409279823303223,
+      "p95_ms": 13.477939319610595,
+      "min_ms": 13.320192337036133,
+      "iters": 300,
+      "label": "wsl_compile_fp16_bs128",
+      "batch": 128,
+      "forwards_per_s_mean": 9540.494170578944,
+      "forwards_per_s_p95": 9497.000762850903,
+      "clk_idle_mhz": 2790,
+      "clk_warm_mhz": 2745
+    },
+    {
+      "mean_ms": 27.653672943115236,
+      "std_ms": 0.04557872494323747,
+      "p50_ms": 27.633663177490234,
+      "p95_ms": 27.7146107673645,
+      "min_ms": 27.482112884521484,
+      "iters": 300,
+      "label": "wsl_compile_fp16_bs256",
+      "batch": 256,
+      "forwards_per_s_mean": 9257.35979182956,
+      "forwards_per_s_p95": 9237.005063821942,
+      "clk_idle_mhz": 2745,
+      "clk_warm_mhz": 2745
+    },
+    {
+      "mean_ms": 119.43547190348308,
+      "std_ms": 0.03684462262398865,
+      "p50_ms": 119.43218994140625,
+      "p95_ms": 119.44960021972656,
+      "min_ms": 119.4076156616211,
+      "iters": 300,
+      "label": "wsl_compile_fp16_bs1024",
+      "batch": 1024,
+      "forwards_per_s_mean": 8573.667300678511,
+      "forwards_per_s_p95": 8572.653220407272,
+      "clk_idle_mhz": 2745,
+      "clk_warm_mhz": 2790
+    }
+  ],
+  "correctness": {
+    "compile_fp16_vs_wsl_fp32": {
+      "policy_logit_max_abs_err": 0.013137102127075195,
+      "value_logit_max_abs_err": 0.029354095458984375,
+      "decoded_value_max_abs_err": 0.008189111948013306,
+      "policy_softmax_mae": 1.2572517107400927e-06,
+      "policy_softmax_max_abs_err": 0.0029367804527282715
+    }
+  },
+  "compile_wall_seconds": {
+    "bs1": 6.68115339500001,
+    "bs128": 5.195218546000007,
+    "bs256": 5.236678449999999,
+    "bs1024": 5.345550777
+  }
+}

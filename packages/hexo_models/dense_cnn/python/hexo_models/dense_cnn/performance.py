@@ -419,6 +419,8 @@ def _summarize_mcts_diagnostic_batches(batches: Sequence[Mapping[str, Any]]) -> 
         "hidden_prior_count",
         "completed_visits",
         "widened_edges_total",
+        "active_edge_bytes",
+        "hidden_prior_bytes",
     )
     tree_max_fields = (
         "root_count",
@@ -440,6 +442,7 @@ def _summarize_mcts_diagnostic_batches(batches: Sequence[Mapping[str, Any]]) -> 
         "legal_index_bytes",
         "value_bytes",
         "prior_bytes",
+        "cache_prior_pair_bytes",
         "cache_inserts",
         "cache_insert_skipped",
     )

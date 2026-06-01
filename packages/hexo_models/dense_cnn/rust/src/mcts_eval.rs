@@ -15,20 +15,89 @@
 //! Python returns one prior per flat. No fallback format is accepted; malformed
 //! bytes raise `PyValueError`.
 
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyBufferError, PyValueError};
+use pyo3::ffi;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyTuple};
 use rayon::prelude::*;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::rc::Rc;
+use std::os::raw::{c_char, c_int, c_void};
+use std::ptr;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use half::slice::HalfFloatSliceExt;
 use hexo_engine::{HexoState as RustHexoState, PackedCoord};
 use hexo_utils::{hash_state, StateHash};
 
 use super::constants::*;
 use super::encoding::encode_model1_state_for_mcts;
+
+/// Zero-copy f16 plane buffer handed to the Python evaluator.
+///
+/// Holds the contiguous MCTS leaf planes (as `f16`) and exposes them through the
+/// Python buffer protocol so `torch.frombuffer(dtype=float16)` views them in place
+/// (then copies straight to the GPU) instead of paying a serial `PyBytes` memcpy on
+/// the GIL thread every forward pass. Read-only, 1-D, itemsize 1 (raw bytes).
+///
+/// f16 is the host->device TRANSPORT dtype: it halves the ~89 MB plane H2D copy.
+/// Python upcasts to f32 on-device before the (TRT/torch) forward, which is gated
+/// byte-identical because the TRT engine already downcasts its f32 input to f16
+/// internally (see scripts/_fp16_input_gate.py).
+#[pyclass]
+pub(crate) struct PlaneBuffer {
+    data: Vec<half::f16>,
+}
+
+#[pymethods]
+impl PlaneBuffer {
+    /// Byte length, so the Python evaluator's `len(payload["inputs"])` check is
+    /// exact (f16 == 2 bytes/element).
+    fn __len__(&self) -> usize {
+        self.data.len() * std::mem::size_of::<half::f16>()
+    }
+
+    /// SAFETY: `view` is the CPython-supplied `Py_buffer` to populate. We expose a
+    /// read-only 1-D byte view over `data` and keep `slf` alive via `view.obj`, so
+    /// the backing `Vec` outlives the buffer.
+    unsafe fn __getbuffer__(
+        slf: Bound<'_, Self>,
+        view: *mut ffi::Py_buffer,
+        flags: c_int,
+    ) -> PyResult<()> {
+        if view.is_null() {
+            return Err(PyBufferError::new_err("buffer view is null"));
+        }
+        if (flags & ffi::PyBUF_WRITABLE) == ffi::PyBUF_WRITABLE {
+            (*view).obj = ptr::null_mut();
+            return Err(PyBufferError::new_err("PlaneBuffer is read-only"));
+        }
+        let guard = slf.borrow();
+        let data = &guard.data;
+        (*view).buf = data.as_ptr() as *mut c_void;
+        (*view).len = (data.len() * std::mem::size_of::<half::f16>()) as ffi::Py_ssize_t;
+        (*view).readonly = 1;
+        (*view).itemsize = 1;
+        (*view).format = if (flags & ffi::PyBUF_FORMAT) == ffi::PyBUF_FORMAT {
+            // Static NUL-terminated "B" (unsigned bytes); 'static keeps the pointer
+            // valid for the life of the view.
+            b"B\0".as_ptr() as *mut c_char
+        } else {
+            ptr::null_mut()
+        };
+        (*view).ndim = 1;
+        (*view).shape = ptr::null_mut();
+        (*view).strides = ptr::null_mut();
+        (*view).suboffsets = ptr::null_mut();
+        (*view).internal = ptr::null_mut();
+        // Hold a strong reference so the Vec lives until __releasebuffer__.
+        (*view).obj = slf.clone().into_any().into_ptr();
+        Ok(())
+    }
+
+    unsafe fn __releasebuffer__(&self, _view: *mut ffi::Py_buffer) {}
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct RustEvaluation {
@@ -62,11 +131,23 @@ pub(crate) struct EvaluationStats {
     pub(crate) cache_size_peak: usize,
     pub(crate) encoding_seconds: f64,
     pub(crate) evaluator_seconds: f64,
+    pub(crate) parse_seconds: f64,
+    // PROFILING (perf attribution of the ~half-of-wall "glue"): payload =
+    // PyDict/PyBytes construction (the per-pass plane buffer copy into Python);
+    // dedup = cache-check + duplicate coalescing; cache_insert = bounded insert/
+    // eviction churn. All on the GIL/eval thread, previously uninstrumented.
+    pub(crate) payload_seconds: f64,
+    pub(crate) dedup_seconds: f64,
+    pub(crate) cache_insert_seconds: f64,
 }
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct RustEvaluationCache {
-    entries: HashMap<StateHash, RustEvaluation>,
+    // `Arc` (not `Rc`) so that tree nodes holding a shared prior list stay `Send`
+    // for the rayon root-selection parallelism in `run_searches_to_targets`, and
+    // so the cache itself can be `Arc<Mutex<…>>` (`SharedEvaluationCache`) shared
+    // across the A1 select↔eval pipeline threads.
+    entries: HashMap<StateHash, Arc<RustEvaluation>>,
     insertion_order: VecDeque<StateHash>,
 }
 
@@ -80,11 +161,11 @@ impl RustEvaluationCache {
         self.entries.len()
     }
 
-    fn get(&self, key: &StateHash) -> Option<&RustEvaluation> {
-        self.entries.get(key)
+    fn get(&self, key: &StateHash) -> Option<Arc<RustEvaluation>> {
+        self.entries.get(key).map(Arc::clone)
     }
 
-    fn insert_bounded(&mut self, key: StateHash, evaluation: RustEvaluation, max_states: usize) {
+    fn insert_bounded(&mut self, key: StateHash, evaluation: Arc<RustEvaluation>, max_states: usize) {
         if self.entries.contains_key(&key) {
             self.entries.insert(key, evaluation);
             return;
@@ -103,15 +184,30 @@ impl RustEvaluationCache {
     }
 }
 
-pub(crate) type SharedEvaluationCache = Rc<RefCell<RustEvaluationCache>>;
-pub(crate) type SharedEvaluationStats = Rc<RefCell<EvaluationStats>>;
+// `Arc<Mutex<…>>` (M2): the cache and stats are shared across the A1 pipeline's
+// eval thread and the scoped selection thread, so they must be `Send + Sync`.
+// Access is at eval boundaries only (never in the hot per-ply select loop), so a
+// single mutex does not serialize search work. A sharded lock would only matter
+// for a future many-worker design; deferred until profiling shows lock contention.
+pub(crate) type SharedEvaluationCache = Arc<Mutex<RustEvaluationCache>>;
+pub(crate) type SharedEvaluationStats = Arc<Mutex<EvaluationStats>>;
 
 pub(crate) fn new_shared_evaluation_cache() -> SharedEvaluationCache {
-    Rc::new(RefCell::new(RustEvaluationCache::default()))
+    Arc::new(Mutex::new(RustEvaluationCache::default()))
 }
 
 pub(crate) fn new_shared_evaluation_stats() -> SharedEvaluationStats {
-    Rc::new(RefCell::new(EvaluationStats::default()))
+    Arc::new(Mutex::new(EvaluationStats::default()))
+}
+
+#[inline]
+fn lock_cache(cache: &SharedEvaluationCache) -> std::sync::MutexGuard<'_, RustEvaluationCache> {
+    cache.lock().expect("evaluation cache mutex poisoned")
+}
+
+#[inline]
+fn lock_stats(stats: &SharedEvaluationStats) -> std::sync::MutexGuard<'_, EvaluationStats> {
+    stats.lock().expect("evaluation stats mutex poisoned")
 }
 
 pub(crate) fn state_hash(state: &RustHexoState) -> StateHash {
@@ -154,59 +250,91 @@ fn evaluate_model1_states_chunk(
         .map(|state| encode_model1_state_for_mcts(state, true))
         .collect();
     let plane_values_per_row = MODEL1_INPUT_CHANNELS * MODEL1_BOARD_AREA;
-    let mut planes = vec![0.0f32; encoded.len() * plane_values_per_row];
+
+    // Planes go to Python as a ZERO-COPY buffer view (PlaneBuffer), not a PyBytes
+    // copy. The old `PyBytes::new` path memcpy'd the whole (~89 MB at batch 1024)
+    // plane buffer on the single GIL-holding thread every pass — ~46% of self-play
+    // wall-clock (see payload_seconds). `torch.frombuffer` only needs a
+    // buffer-protocol view, which it copies straight to the GPU, so the intermediate
+    // Python copy was pure waste.
+    let total = encoded.len() * plane_values_per_row;
+    let mut planes: Vec<half::f16> = Vec::with_capacity(total);
+    // SAFETY: the par_chunks_mut fill below tiles the entire buffer exactly
+    // (`encoded.len()` chunks of `plane_values_per_row`, summing to `total`) and
+    // writes every element via `convert_from_f32_slice` before any read; `f16` has
+    // no invalid bit patterns. This also drops the redundant zero-fill the reused
+    // scratch paid on every pass.
+    unsafe {
+        planes.set_len(total);
+    }
+    // f32 -> f16 happens here in the parallel assembly (SIMD via `half`), so the
+    // buffer crossing to Python and the H2D copy are half-size. Plane values are
+    // binary masks / [0,1] soft features, so f16 is loss-free for search (gated).
     planes
         .par_chunks_mut(plane_values_per_row)
         .zip(encoded.par_iter())
-        .for_each(|(target, row)| target.copy_from_slice(&row.planes));
+        .for_each(|(target, row)| target.convert_from_f32_slice(&row.planes));
+    let byte_len = total * std::mem::size_of::<half::f16>();
+    let plane_buffer = Py::new(py, PlaneBuffer { data: planes })?;
 
-    let mut legal_flat_indices = Vec::new();
-    let mut legal_row_offsets = Vec::with_capacity(encoded.len() + 1);
-    legal_row_offsets.push(0i64);
-    for row in &encoded {
-        legal_flat_indices.extend_from_slice(&row.legal_flat_indices);
-        legal_row_offsets.push(legal_flat_indices.len() as i64);
+    thread_local! {
+        // Legal flat indices are small (~5 MB at batch 1024) and still travel as a
+        // PyBytes copy; reuse one buffer across passes to avoid reallocations.
+        static LEGAL_SCRATCH: RefCell<Vec<i64>> = const { RefCell::new(Vec::new()) };
     }
 
-    let byte_len = planes.len() * std::mem::size_of::<f32>();
-    let bytes = unsafe { std::slice::from_raw_parts(planes.as_ptr() as *const u8, byte_len) };
-    let flat_byte_len = legal_flat_indices.len() * std::mem::size_of::<i64>();
-    let flat_bytes = unsafe {
-        std::slice::from_raw_parts(legal_flat_indices.as_ptr() as *const u8, flat_byte_len)
-    };
-    if let Some(stats) = stats {
-        let mut stats = stats.borrow_mut();
-        stats.evaluator_chunks += 1;
-        stats.encoded_states += encoded.len();
-        stats.encoded_legal_actions += legal_flat_indices.len();
-        stats.max_chunk_states = stats.max_chunk_states.max(encoded.len());
-        stats.max_chunk_legal_actions =
-            stats.max_chunk_legal_actions.max(legal_flat_indices.len());
-        stats.input_bytes += byte_len;
-        stats.legal_index_bytes += flat_byte_len;
-        stats.encoding_seconds += encoding_started.elapsed().as_secs_f64();
-    }
+    let payload = LEGAL_SCRATCH.with(|scratch| -> PyResult<Bound<'_, PyDict>> {
+        let mut legal_flat_indices = scratch.borrow_mut();
+        legal_flat_indices.clear();
+        let mut legal_row_offsets = Vec::with_capacity(encoded.len() + 1);
+        legal_row_offsets.push(0i64);
+        for row in &encoded {
+            legal_flat_indices.extend_from_slice(&row.legal_flat_indices);
+            legal_row_offsets.push(legal_flat_indices.len() as i64);
+        }
+        let flat_byte_len = legal_flat_indices.len() * std::mem::size_of::<i64>();
+        let flat_bytes = unsafe {
+            std::slice::from_raw_parts(legal_flat_indices.as_ptr() as *const u8, flat_byte_len)
+        };
+        if let Some(stats) = stats {
+            let mut stats = lock_stats(stats);
+            stats.evaluator_chunks += 1;
+            stats.encoded_states += encoded.len();
+            stats.encoded_legal_actions += legal_flat_indices.len();
+            stats.max_chunk_states = stats.max_chunk_states.max(encoded.len());
+            stats.max_chunk_legal_actions =
+                stats.max_chunk_legal_actions.max(legal_flat_indices.len());
+            stats.input_bytes += byte_len;
+            stats.legal_index_bytes += flat_byte_len;
+            stats.encoding_seconds += encoding_started.elapsed().as_secs_f64();
+        }
 
-    // This dictionary is the native evaluator ABI consumed by
-    // `DenseCNNInference.evaluate_model1_payload`.
-    let payload = PyDict::new(py);
-    payload.set_item("inputs", PyBytes::new(py, bytes))?;
-    payload.set_item(
-        "shape",
-        (
-            encoded.len(),
-            MODEL1_INPUT_CHANNELS,
-            MODEL1_BOARD_SIZE,
-            MODEL1_BOARD_SIZE,
-        ),
-    )?;
-    payload.set_item("legal_flat_indices_bytes", PyBytes::new(py, flat_bytes))?;
-    payload.set_item("legal_row_offsets", PyTuple::new(py, legal_row_offsets)?)?;
+        // This dictionary is the native evaluator ABI consumed by
+        // `DenseCNNInference.evaluate_model1_payload`.
+        let payload_started = Instant::now();
+        let payload = PyDict::new(py);
+        payload.set_item("inputs", plane_buffer)?;
+        payload.set_item(
+            "shape",
+            (
+                encoded.len(),
+                MODEL1_INPUT_CHANNELS,
+                MODEL1_BOARD_SIZE,
+                MODEL1_BOARD_SIZE,
+            ),
+        )?;
+        payload.set_item("legal_flat_indices_bytes", PyBytes::new(py, flat_bytes))?;
+        payload.set_item("legal_row_offsets", PyTuple::new(py, legal_row_offsets)?)?;
+        if let Some(stats) = stats {
+            lock_stats(stats).payload_seconds += payload_started.elapsed().as_secs_f64();
+        }
+        Ok(payload)
+    })?;
 
     let evaluator_started = Instant::now();
     let output = evaluator.call1((payload,))?;
     if let Some(stats) = stats {
-        stats.borrow_mut().evaluator_seconds += evaluator_started.elapsed().as_secs_f64();
+        lock_stats(stats).evaluator_seconds += evaluator_started.elapsed().as_secs_f64();
     }
     let values_obj = output.get_item("values_bytes").map_err(|_| {
         PyValueError::new_err("dense_cnn evaluator output missing required values_bytes")
@@ -218,7 +346,7 @@ fn evaluate_model1_states_chunk(
     let prior_bytes = priors_obj.downcast::<PyBytes>()?.as_bytes();
     require_exact_bytes("values_bytes", value_bytes.len(), encoded.len(), 4)?;
     if let Some(stats) = stats {
-        let mut stats = stats.borrow_mut();
+        let mut stats = lock_stats(stats);
         stats.value_bytes += value_bytes.len();
         stats.prior_bytes += prior_bytes.len();
     }
@@ -227,22 +355,41 @@ fn evaluate_model1_states_chunk(
     // written into the row-offset payload sent above.
     let expected_prior_count: usize = encoded.iter().map(|row| row.legal_action_ids.len()).sum();
     require_exact_bytes("priors_bytes", prior_bytes.len(), expected_prior_count, 4)?;
-    let mut evaluations = Vec::with_capacity(encoded.len());
-    let mut prior_offset = 0usize;
-    for (row_index, row) in encoded.iter().enumerate() {
-        let value = read_value(value_bytes, row_index)?;
-        let mut row_priors = Vec::with_capacity(row.legal_action_ids.len());
-        for action_id in row.legal_action_ids.iter().copied() {
-            let prior = read_prior(prior_bytes, prior_offset, row_index)?;
-            row_priors.push((action_id, prior));
-            prior_offset += 1;
-        }
-        finalize_model_priors(&mut row_priors, row.all_legal_action_count, row_index)?;
-        evaluations.push(RustEvaluation {
-            value,
-            legal_action_count: row.all_legal_action_count,
-            priors: row_priors,
-        });
+    // Parse priors/values per row. Rows are independent (each reads a disjoint
+    // slice of `prior_bytes` and one value), and the per-row prior decode + sort
+    // (`finalize_model_priors`) was the dominant main-thread cost once the forward
+    // is FP16 (~39% of a self-play move). Precompute per-row offsets so the rows
+    // can be decoded across rayon workers; output stays row-ordered, so this is
+    // byte-identical to the previous sequential parse.
+    let parse_started = Instant::now();
+    let mut prior_offsets = Vec::with_capacity(encoded.len() + 1);
+    let mut running = 0usize;
+    prior_offsets.push(0usize);
+    for row in &encoded {
+        running += row.legal_action_ids.len();
+        prior_offsets.push(running);
+    }
+    let evaluations: Vec<RustEvaluation> = encoded
+        .par_iter()
+        .enumerate()
+        .map(|(row_index, row)| {
+            let value = read_value(value_bytes, row_index)?;
+            let base = prior_offsets[row_index];
+            let mut row_priors = Vec::with_capacity(row.legal_action_ids.len());
+            for (offset, action_id) in row.legal_action_ids.iter().copied().enumerate() {
+                let prior = read_prior(prior_bytes, base + offset, row_index)?;
+                row_priors.push((action_id, prior));
+            }
+            finalize_model_priors(&mut row_priors, row.all_legal_action_count, row_index)?;
+            Ok(RustEvaluation {
+                value,
+                legal_action_count: row.all_legal_action_count,
+                priors: row_priors,
+            })
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+    if let Some(stats) = stats {
+        lock_stats(stats).parse_seconds += parse_started.elapsed().as_secs_f64();
     }
     Ok(evaluations)
 }
@@ -254,7 +401,7 @@ pub(crate) fn evaluate_model1_states_cached(
     cache: &SharedEvaluationCache,
     stats: Option<&SharedEvaluationStats>,
     cache_max_states: usize,
-) -> PyResult<Vec<RustEvaluation>> {
+) -> PyResult<Vec<Arc<RustEvaluation>>> {
     let requests: Vec<_> = states
         .iter()
         .map(|state| RustEvaluationRequest {
@@ -272,37 +419,38 @@ pub(crate) fn evaluate_model1_state_refs_cached(
     cache: &SharedEvaluationCache,
     stats: Option<&SharedEvaluationStats>,
     cache_max_states: usize,
-) -> PyResult<Vec<RustEvaluation>> {
+) -> PyResult<Vec<Arc<RustEvaluation>>> {
     // Cache slots preserve caller order. `unique_states` contains only misses,
     // and `slot_to_unique` maps duplicate misses back to their first occurrence.
-    let mut result_slots: Vec<Option<RustEvaluation>> = vec![None; requests.len()];
+    let mut result_slots: Vec<Option<Arc<RustEvaluation>>> = vec![None; requests.len()];
     let mut unique_states: Vec<&RustHexoState> = Vec::new();
     let mut unique_keys: Vec<StateHash> = Vec::new();
     let mut unique_index_by_key: HashMap<StateHash, usize> = HashMap::new();
     let mut slot_to_unique: Vec<Option<usize>> = vec![None; requests.len()];
     if let Some(stats) = stats {
-        stats.borrow_mut().requested_states += requests.len();
+        lock_stats(stats).requested_states += requests.len();
     }
 
+    let dedup_started = Instant::now();
     {
-        let cached = cache.borrow();
+        let cached = lock_cache(cache);
         if let Some(stats) = stats {
-            let mut stats = stats.borrow_mut();
+            let mut stats = lock_stats(stats);
             stats.cache_size_peak = stats.cache_size_peak.max(cached.len());
         }
         for (index, request) in requests.iter().enumerate() {
             let key = request.state_hash;
             if let Some(cached_eval) = cached.get(&key) {
-                result_slots[index] = Some(cached_eval.clone());
+                result_slots[index] = Some(cached_eval);
                 if let Some(stats) = stats {
-                    stats.borrow_mut().cache_hits += 1;
+                    lock_stats(stats).cache_hits += 1;
                 }
                 continue;
             }
             if unique_index_by_key.contains_key(&key) {
                 slot_to_unique[index] = unique_index_by_key.get(&key).copied();
                 if let Some(stats) = stats {
-                    stats.borrow_mut().duplicate_hits += 1;
+                    lock_stats(stats).duplicate_hits += 1;
                 }
                 continue;
             }
@@ -312,23 +460,40 @@ pub(crate) fn evaluate_model1_state_refs_cached(
             unique_states.push(request.state);
         }
     }
+    if let Some(stats) = stats {
+        lock_stats(stats).dedup_seconds += dedup_started.elapsed().as_secs_f64();
+    }
 
     if !unique_states.is_empty() {
         if let Some(stats) = stats {
-            stats.borrow_mut().unique_states += unique_states.len();
+            lock_stats(stats).unique_states += unique_states.len();
         }
         let unique_evals = evaluate_model1_state_refs(py, evaluator, &unique_states, stats)?;
+        // Wrap each freshly computed evaluation in an `Arc` once (`Arc`, not `Rc`,
+        // so nodes holding the shared prior list stay `Send` for rayon — see the
+        // `RustEvaluationCache` note above). Cache inserts and duplicate-slot fills
+        // below are refcount bumps, not deep copies of the (up to several-hundred-
+        // entry) prior vector.
+        let unique_evals: Vec<Arc<RustEvaluation>> = unique_evals
+            .into_iter()
+            .map(|mut eval| {
+                eval.priors.shrink_to_fit();
+                Arc::new(eval)
+            })
+            .collect();
         {
-            let mut cached = cache.borrow_mut();
+            let insert_started = Instant::now();
+            let mut cached = lock_cache(cache);
             let mut inserted = 0usize;
             for (key, evaluation) in unique_keys.iter().copied().zip(unique_evals.iter()) {
-                cached.insert_bounded(key, evaluation.clone(), cache_max_states);
+                cached.insert_bounded(key, Arc::clone(evaluation), cache_max_states);
                 inserted += 1;
             }
             if let Some(stats) = stats {
-                let mut stats = stats.borrow_mut();
+                let mut stats = lock_stats(stats);
                 stats.cache_inserts += inserted;
                 stats.cache_size_peak = stats.cache_size_peak.max(cached.len());
+                stats.cache_insert_seconds += insert_started.elapsed().as_secs_f64();
             }
         }
         for (index, unique_index) in slot_to_unique.into_iter().enumerate() {
@@ -336,7 +501,7 @@ pub(crate) fn evaluate_model1_state_refs_cached(
                 continue;
             }
             if let Some(unique_index) = unique_index {
-                result_slots[index] = Some(unique_evals[unique_index].clone());
+                result_slots[index] = Some(Arc::clone(&unique_evals[unique_index]));
             }
         }
     }
@@ -401,6 +566,16 @@ fn finalize_model_priors(
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| left.0.cmp(&right.0))
     });
+    // Pre-normalize to sum 1.0 so tree nodes can consume the cached priors
+    // directly without an extra per-node normalization pass. This is behavior
+    // neutral: interior nodes previously re-normalized at construction, and the
+    // root export / Python targets normalize regardless. Applying root-policy
+    // temperature later to a pre-normalized prior is identical because the
+    // normalization constant cancels (`normalize(x^(1/T))` is invariant to a
+    // uniform prescaling of `x`).
+    for entry in priors.iter_mut() {
+        entry.1 /= total;
+    }
     Ok(())
 }
 

@@ -80,12 +80,25 @@ h1 {
 
 .status {
   margin-left: auto;
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: 9px;
   color: var(--muted);
   font-size: 14px;
   white-space: nowrap;
+}
+
+/* Status message can be long; let it shrink-and-ellipsis within the fixed-height
+   header instead of overflowing. The leading status dot stays fixed-size. */
+#statusText {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.status .dot {
+  flex: 0 0 auto;
 }
 
 .dot {
@@ -112,6 +125,10 @@ main {
   display: grid;
   grid-template-rows: auto auto;
   gap: 10px;
+  /* Backstop: the viewer is fixed-size, so the page must never scroll
+     horizontally even if a child briefly mis-sizes. */
+  min-width: 0;
+  overflow-x: hidden;
 }
 
 .top-grid {
@@ -124,8 +141,7 @@ main {
 
 .board-panel,
 .panel-card,
-.history-panel,
-.replay-panel {
+.history-panel {
   background: linear-gradient(180deg, rgba(16, 29, 42, 0.92), rgba(9, 17, 25, 0.94));
   border: 1px solid var(--line);
   border-radius: 6px;
@@ -134,14 +150,16 @@ main {
 
 .board-panel {
   min-width: 0;
-  height: clamp(460px, calc(100vh - 230px), 780px);
+  height: clamp(460px, calc(100vh - 150px), 820px);
   min-height: 420px;
   overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
 
 .board-area {
+  flex: 1 1 auto;
   width: 100%;
-  height: 100%;
   min-height: 0;
   position: relative;
   overflow: hidden;
@@ -426,7 +444,7 @@ select:disabled {
 }
 
 .section-title::before {
-  content: "v";
+  content: "\25BE";
   display: inline-block;
   margin-right: 9px;
   color: #718092;
@@ -502,10 +520,6 @@ select:disabled {
   min-width: 0;
 }
 
-.info-row:last-child {
-  grid-column: auto;
-}
-
 .turn-row {
   border-color: rgba(39, 215, 230, 0.42);
 }
@@ -515,12 +529,14 @@ select:disabled {
 }
 
 .value {
+  min-width: 0;
   text-align: left;
   font-weight: 650;
   color: var(--text);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  /* State-summary values (coords, phase, game id, last move) are meaningful and
+     vary in length; wrap rather than clip. */
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .toolbar {
@@ -680,9 +696,10 @@ body.pending button:disabled {
   color: var(--text);
   font-size: 13px;
   line-height: 1.2;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  /* Values like "Ready for next match" or a variant label are meaningful;
+     wrap rather than clip. */
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .adapter-error-list {
@@ -787,9 +804,9 @@ body.pending button:disabled {
 .mini-metric span {
   display: block;
   margin-top: 2px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  /* Labels like "P0 Windows" / "QR Axis" are meaningful; wrap rather than
+     clip in the tight 3-column grid. */
+  overflow-wrap: anywhere;
 }
 
 .metric-grid {
@@ -1090,36 +1107,47 @@ body.pending button:disabled {
 .bottom-dock {
   height: auto;
   min-height: 0;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(520px, 0.85fr);
-  grid-template-rows: auto;
-  gap: 8px;
+  display: block;
 }
 
-.history-panel,
-.replay-panel {
+.history-panel {
+  min-width: 0;
   overflow: visible;
 }
 
-.history-panel .dock-title,
-.replay-panel .dock-title {
+.history-panel .dock-title {
   padding-top: 7px;
   padding-bottom: 6px;
 }
 
+/* Bounded box: chips wrap and the box scrolls vertically, so it is always
+   exactly its container's width and never pushes the layout sideways no matter
+   how many moves a game has. */
 .move-history {
-  min-height: 54px;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  height: 92px;
+  min-height: 92px;
   display: flex;
-  gap: 8px;
-  overflow-x: auto;
-  padding: 10px 10px 9px;
-  align-items: center;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  gap: 6px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 9px 10px;
+}
+
+.move-history .empty-list {
+  align-self: center;
+  padding: 2px 4px;
 }
 
 .history-chip {
-  flex: 0 0 112px;
-  height: 30px;
-  min-height: 30px;
+  flex: 0 0 auto;
+  width: 110px;
+  height: 28px;
+  min-height: 28px;
   border: 1px solid var(--border);
   border-radius: 5px;
   background: rgba(8, 15, 23, 0.82);
@@ -1168,12 +1196,16 @@ body.pending button:disabled {
   text-overflow: ellipsis;
 }
 
+.replay-bar {
+  border-top: 1px solid var(--line);
+}
+
 .replay-row {
   display: grid;
   grid-template-columns: minmax(180px, 260px) minmax(86px, 110px) minmax(180px, 1fr);
   gap: 12px;
   align-items: center;
-  padding: 12px;
+  padding: 8px 12px;
   min-width: 0;
 }
 
@@ -1352,11 +1384,6 @@ body:not(.tactics-on) .tactic-legend {
     overflow: visible;
   }
 
-  .bottom-dock {
-    grid-template-columns: 1fr;
-    grid-template-rows: auto auto;
-  }
-
   .history-page-head,
   .history-layout {
     grid-template-columns: 1fr;
@@ -1380,12 +1407,6 @@ body:not(.tactics-on) .tactic-legend {
   .board-panel {
     height: min(62vh, 560px);
     min-height: 380px;
-  }
-
-  .bottom-dock {
-    height: auto;
-    min-height: 236px;
-    grid-template-rows: auto auto;
   }
 
   .replay-row {
@@ -1455,10 +1476,6 @@ body:not(.tactics-on) .tactic-legend {
     grid-template-columns: 1fr;
   }
 
-  .info-row:last-child {
-    grid-column: auto;
-  }
-
   .metric-row {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -1470,10 +1487,6 @@ body:not(.tactics-on) .tactic-legend {
   .toolbar,
   .replay-buttons {
     gap: 6px;
-  }
-
-  .history-chip {
-    flex-basis: 108px;
   }
 
   .history-page-actions,
@@ -1585,6 +1598,19 @@ body:not(.tactics-on) .tactic-legend {
   gap: 10px;
   border-bottom: 1px solid var(--border);
   padding-bottom: 4px;
+}
+
+.training-summary div span {
+  flex: 0 0 auto;
+  color: var(--muted);
+}
+
+/* Values (e.g. the Stage "epoch_000001 e1 running") can be long; let them wrap
+   and stay right-aligned instead of overflowing the narrow side panel. */
+.training-summary div strong {
+  min-width: 0;
+  text-align: right;
+  overflow-wrap: anywhere;
 }
 
 .training-artifacts {
@@ -1779,7 +1805,6 @@ body:not(.tactics-on) .tactic-legend {
   background: rgba(7, 13, 19, 0.54);
 }
 
-.learning-health-metrics strong,
 .learning-health-messages div {
   min-width: 0;
   overflow: hidden;
@@ -1788,8 +1813,12 @@ body:not(.tactics-on) .tactic-legend {
 }
 
 .learning-health-metrics strong {
+  min-width: 0;
   color: var(--text);
   font-size: 12px;
+  /* Short metric values ("12.3 turns", "85.0%") — wrap rather than clip. */
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .learning-health-messages {
@@ -1868,9 +1897,10 @@ body:not(.tactics-on) .tactic-legend {
 .eval-trend-row strong,
 .eval-trend-row span {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  /* Short, meaningful values ("Epoch 5", "3-1", "12.3 turns", "75% win");
+     wrap rather than clip. */
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .eval-trend-row strong {
@@ -1907,9 +1937,10 @@ body:not(.tactics-on) .tactic-legend {
 .epoch-progress-row strong,
 .epoch-progress-row span {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  /* Cells hold short, meaningful values (epoch, status, loss, eval, time);
+     wrap rather than clip within the grid tracks. */
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .epoch-progress-row strong {
@@ -1950,12 +1981,23 @@ body:not(.tactics-on) .tactic-legend {
   padding: 10px 12px;
 }
 
-.history-metric-card span,
-.history-metric-card small {
+.history-metric-card span {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.history-metric-card small {
+  min-width: 0;
+  /* Sub-text (e.g. "e1 selfplay (done)", "Latest diagnostics") is meaningful;
+     allow up to 2 lines rather than clipping with an ellipsis. */
+  white-space: normal;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
 }
 
 .history-metric-card span {
@@ -1969,11 +2011,16 @@ body:not(.tactics-on) .tactic-legend {
 .history-metric-card strong {
   min-width: 0;
   color: var(--text);
-  font-size: 18px;
-  line-height: 1.15;
+  font-size: clamp(14px, 1.4vw, 18px);
+  line-height: 1.2;
+  /* Values like "epoch_000001 e1 running" or "11.4 GiB RAM | 8.9 GiB GPU" are
+     meaningful and variable-length; wrap to up to 2 lines instead of clipping. */
+  white-space: normal;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .history-metric-card small {
@@ -2005,7 +2052,12 @@ body:not(.tactics-on) .tactic-legend {
 .history-table-head,
 .game-history-row {
   display: grid;
-  grid-template-columns: minmax(220px, 1.35fr) 112px 86px 82px minmax(170px, 1fr) minmax(150px, 0.9fr);
+  /* All tracks have a 0 minimum so the row always fits the panel width and
+     cells ellipsize instead of overflowing under the panel's overflow:hidden
+     (which previously cropped the Players/Diagnostics headers and columns). */
+  grid-template-columns:
+    minmax(0, 2.2fr) minmax(0, 1.15fr) minmax(0, 0.95fr)
+    minmax(0, 0.7fr) minmax(0, 1.4fr) minmax(0, 1.3fr);
   gap: 8px;
   align-items: center;
 }
@@ -2018,6 +2070,13 @@ body:not(.tactics-on) .tactic-legend {
   font-weight: 900;
   letter-spacing: 1px;
   text-transform: uppercase;
+}
+
+.history-table-head span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .game-history-list {

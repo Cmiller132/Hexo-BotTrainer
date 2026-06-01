@@ -67,18 +67,37 @@ class TrainingPipeline:
         model = build_model_components(plugin=plugin, ctx=ctx, shared=shared)
         components = TrainingComponents(shared=shared, model=model)
 
-        self._run_step("initialize_run", self._initialize_run, ctx, components)
-        self._run_step(
-            "load_checkpoint",
-            load_or_initialize_checkpoint,
-            ctx,
-            components,
-        )
-        self._run_step("calibrate_performance", self._calibrate_performance, ctx, components)
-        self._run_step("run_epochs", run_epochs, ctx, components)
-        self._run_step("publish_final_model", self._publish_final_model, ctx, components)
-        self._run_step("write_diagnostics", write_final_diagnostics, ctx, components)
-        return ctx
+        try:
+            self._run_step("initialize_run", self._initialize_run, ctx, components)
+            self._run_step(
+                "load_checkpoint",
+                load_or_initialize_checkpoint,
+                ctx,
+                components,
+            )
+            self._run_step("calibrate_performance", self._calibrate_performance, ctx, components)
+            self._run_step("run_epochs", run_epochs, ctx, components)
+            self._run_step("publish_final_model", self._publish_final_model, ctx, components)
+            self._run_step("write_diagnostics", write_final_diagnostics, ctx, components)
+            return ctx
+        finally:
+            self._teardown_components(components)
+
+    def _teardown_components(self, components: TrainingComponents) -> None:
+        """Release model-owned resources at run end (success or failure).
+
+        Generic: a model trainer that holds external resources (e.g. dense_cnn's
+        persistent expansion process-pool) may expose ``close()``; calling it in a
+        finally keeps those resources from leaking past the run. Best-effort.
+        """
+
+        trainer = getattr(getattr(components, "model", None), "trainer", None)
+        close = getattr(trainer, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:  # noqa: BLE001 - teardown must never mask the real result
+                pass
 
     def _initialize_run(
         self,

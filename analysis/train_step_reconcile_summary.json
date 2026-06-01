@@ -1,0 +1,7 @@
+{
+  "static_resident_ms": 485.7119980000425,
+  "fresh_h2d_predecompressed_ms": 466.1176850000629,
+  "current_reindex_each_step_ms": 714.516476666904,
+  "delta_fresh_minus_static_ms": -19.594312999979593,
+  "delta_current_minus_fresh_ms": 248.39879166684113
+}

@@ -1,0 +1,24 @@
+{
+  "games_per_arm": 2,
+  "sealbot": "best-50ms",
+  "search_visits": 512,
+  "torch": {
+    "arm": "torch",
+    "games": 2,
+    "completed": 2,
+    "wins": 0,
+    "losses": 2,
+    "draws": 0,
+    "win_rate": 0.0
+  },
+  "trt": {
+    "arm": "trt",
+    "games": 2,
+    "completed": 2,
+    "wins": 0,
+    "losses": 2,
+    "draws": 0,
+    "win_rate": 0.0
+  },
+  "win_rate_delta_trt_minus_torch": 0.0
+}

@@ -15,7 +15,7 @@ trainer); every other search setting comes directly from `config.selfplay`.
 
 from __future__ import annotations
 
-from time import perf_counter
+from time import perf_counter, time as wall_clock
 from typing import Any, Mapping
 
 import hexo_engine as engine
@@ -27,6 +27,75 @@ from .mcts import SearchResult, new_mcts_session
 from .performance import _extend_mcts_diagnostic_batches, _summarize_mcts_diagnostic_batches
 from .replay import materialize_policy_surprise_rows, write_selfplay_npz
 from .samples import Model1SampleData, finalize_game_samples, sample_from_state
+
+import os as _os
+
+# Minimum wall-clock seconds between live-progress writes during a self-play
+# epoch. The dashboard polls these to show a live pos/s; the write itself is a
+# tiny JSON file so the only reason to throttle is to avoid spamming the disk.
+_LIVE_PROGRESS_INTERVAL_SECONDS = 2.0
+_LIVE_PROGRESS_NAME = "dense_cnn.selfplay.live.json"
+
+
+def _move_temperature(
+    move_index: int,
+    *,
+    initial: float,
+    final: float,
+    decay_moves: int,
+    schedule: tuple[tuple[int, float], ...] = (),
+    floor: float = 0.0,
+) -> float:
+    """Temperature for the played move at ply `move_index`.
+
+    If `schedule` (a tuple of ``(move, temperature)`` anchors) is given it takes
+    precedence: piecewise-linear interpolation between anchors, the first anchor's
+    value before it, and the final segment's slope continued past the last anchor
+    down to `floor` (then held). Otherwise: linear decay from `initial` (ply 0) to
+    `final` (ply >= `decay_moves`), held flat afterwards (`decay_moves <= 0` keeps
+    `initial`). Either way the opening explores and the endgame sharpens.
+    """
+
+    if schedule:
+        return _scheduled_temperature(move_index, schedule, floor)
+    if decay_moves <= 0:
+        return initial
+    fraction = min(move_index, decay_moves) / decay_moves
+    return initial + (final - initial) * fraction
+
+
+def _scheduled_temperature(
+    move_index: int, schedule: tuple[tuple[int, float], ...], floor: float
+) -> float:
+    """Piecewise-linear temperature from ``(move, temperature)`` anchors.
+
+    Held flat at the first anchor before it; linearly interpolated between
+    anchors; past the last anchor the final segment's slope continues down to
+    `floor`, then holds. Anchors are assumed sorted with unique ascending moves
+    (enforced by ``config._parse_temperature_schedule``).
+    """
+
+    first_move, first_temp = schedule[0]
+    if move_index <= first_move:
+        return first_temp
+    for index in range(1, len(schedule)):
+        m0, t0 = schedule[index - 1]
+        m1, t1 = schedule[index]
+        if move_index <= m1:
+            return t0 + (t1 - t0) * (move_index - m0) / (m1 - m0)
+    if len(schedule) >= 2:
+        m0, t0 = schedule[-2]
+        m1, t1 = schedule[-1]
+        slope = (t1 - t0) / (m1 - m0) if m1 != m0 else 0.0
+        return max(floor, t1 + slope * (move_index - m1))
+    return max(floor, schedule[-1][1])
+
+
+def _adaptive_vbatch_enabled() -> bool:
+    # Env-gated adaptive virtual_batch_size: hold the per-round leaf budget
+    # constant as game concurrency drains (keeps the GPU fed in the tail).
+    # Read at runtime so the gate can be toggled per process/epoch. Default off.
+    return _os.environ.get("HEXO_ADAPTIVE_VBATCH", "").strip() in ("1", "true", "True")
 
 
 def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_epoch: int) -> dict[str, Any]:
@@ -45,8 +114,12 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
         amp=config.training.amp,
         return_logits=False,
         max_batch_size=trainer.inference_batch_size,
+        use_trt=config.performance.inference_use_tensorrt,
+        bucket_pad_multiple=(config.performance.inference_bucket_pad_multiple or None),
+        trt_allow_fallback=config.performance.inference_trt_allow_torch_fallback,
     )
     active_limit = int(trainer.selfplay_batch_size)
+    adaptive_vbatch = _adaptive_vbatch_enabled()
     if active_limit <= 0:
         raise ValueError("selfplay active game count must be > 0")
     if active_limit > selfplay.mcts_active_root_limit:
@@ -77,6 +150,41 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
     mcts_session = new_mcts_session(max_states=selfplay.mcts_session_cache_max_states)
     next_game_index = 0
     active: list[dict[str, Any]] = []
+
+    last_live_write = 0.0
+
+    def _write_live_progress(status: str) -> None:
+        # Snapshot of the in-progress epoch so the dashboard can show a live
+        # pos/s. The authoritative throughput figure is the same one the
+        # completed-epoch summary and calibration report
+        # (searched_positions / mcts_search_elapsed), so the live and final
+        # numbers are consistent. Overwrites a single per-run file; a wall-clock
+        # timestamp lets the reader detect a stale (run-ended) file.
+        now = perf_counter()
+        ctx.diagnostics.write_json(
+            _LIVE_PROGRESS_NAME,
+            {
+                "status": status,
+                "epoch": epoch,
+                "timestamp": wall_clock(),
+                "requested_games": requested_games,
+                "games_started": games_started,
+                "completed_games": completed_games,
+                "truncated_games": truncated_games,
+                "games_finished": completed_games + truncated_games,
+                "active_games": len(active),
+                "active_limit": active_limit,
+                "searched_positions": searched_positions,
+                "mcts_simulations": mcts_simulations,
+                "raw_samples": raw_samples_added,
+                "effective_samples": samples_added,
+                "elapsed_seconds": now - started,
+                "mcts_search_elapsed_seconds": mcts_search_elapsed,
+                "search_positions_per_second": searched_positions / max(mcts_search_elapsed, 1.0e-9),
+                "positions_per_second": searched_positions / max(now - started, 1.0e-9),
+            },
+        )
+
     with HexoRecordFile.create(record_path, engine.engine_metadata(), players) as record_file:
         while next_game_index < requested_games or active:
             while len(active) < active_limit and next_game_index < requested_games:
@@ -101,6 +209,34 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
             ]
             if playable:
                 search_started = perf_counter()
+                # Adaptive virtual_batch_size (env-gated): as games finish and
+                # concurrency falls, raise leaves-per-root to hold the per-round
+                # leaf-request budget (~active_limit * base_vbatch) constant, so
+                # forwards stay fat and the GPU stays fed through the drain tail.
+                # Bounded by search_visits. Costs a little search quality in the
+                # tail (higher vbatch -> more virtual-loss-correlated selection),
+                # affecting only the few late, low-concurrency positions.
+                effective_vbatch = trainer.mcts_virtual_batch_size
+                if adaptive_vbatch and len(playable) > 0:
+                    budget = active_limit * trainer.mcts_virtual_batch_size
+                    effective_vbatch = max(
+                        trainer.mcts_virtual_batch_size,
+                        min(int(selfplay.search_visits), -(-budget // len(playable))),
+                    )
+                # Per-move temperature decay: each playable game is at its own ply
+                # (len(actions)), so the played-move temperature is resolved per
+                # game and passed as a vector aligned with the playable order.
+                move_temperatures = [
+                    _move_temperature(
+                        len(game["actions"]),
+                        initial=selfplay.temperature,
+                        final=selfplay.final_temperature,
+                        decay_moves=selfplay.temperature_decay_moves,
+                        schedule=selfplay.temperature_schedule,
+                        floor=selfplay.temperature_floor,
+                    )
+                    for game in playable
+                ]
                 searches = mcts_session.run(
                     [game["search_key"] for game in playable],
                     [game["state"] for game in playable],
@@ -109,7 +245,7 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
                     c_puct=selfplay.c_puct,
                     temperature=selfplay.temperature,
                     seed=base_seed + epoch,
-                    virtual_batch_size=trainer.mcts_virtual_batch_size,
+                    virtual_batch_size=effective_vbatch,
                     active_root_limit=selfplay.mcts_active_root_limit,
                     root_dirichlet_total_alpha=(
                         selfplay.root_dirichlet_total_alpha if selfplay.root_dirichlet_noise_enabled else None
@@ -123,6 +259,8 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
                     widening_policy_mass=selfplay.widening_policy_mass,
                     widening_max_children=selfplay.widening_max_children,
                     widening_min_children=selfplay.widening_min_children,
+                    forced_playout_k=selfplay.forced_playout_k,
+                    move_temperatures=move_temperatures,
                 )
                 mcts_search_elapsed += perf_counter() - search_started
                 if len(searches) != len(playable):
@@ -212,6 +350,10 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
                 active.remove(game)
                 mcts_session.discard(int(game["search_key"]))
 
+            if perf_counter() - last_live_write >= _LIVE_PROGRESS_INTERVAL_SECONDS:
+                _write_live_progress("running")
+                last_live_write = perf_counter()
+
     elapsed = perf_counter() - started
     summary = {
         "status": "completed",
@@ -238,6 +380,9 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
         "npz_writes": npz_writes,
     }
     ctx.diagnostics.write_json(f"dense_cnn.selfplay.epoch_{epoch:06d}.json", summary)
+    # Final live snapshot so the dashboard reflects the just-finished epoch's
+    # numbers (status "completed") until the next epoch's self-play begins.
+    _write_live_progress("completed")
     return summary
 
 

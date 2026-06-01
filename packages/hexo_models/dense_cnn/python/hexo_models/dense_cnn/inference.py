@@ -14,6 +14,7 @@ byte-count checks live here because this is the Python/Torch boundary.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
@@ -59,6 +60,9 @@ class DenseCNNInference:
         return_logits: bool = True,
         max_batch_size: int | None = None,
         optimize_for_inference: bool = True,
+        bucket_pad_multiple: int | None = None,
+        use_trt: bool | None = None,
+        trt_allow_fallback: bool | None = None,
     ) -> None:
         self.device = torch.device(device)
         if self.device.type == "cuda" and not torch.cuda.is_available():
@@ -73,6 +77,33 @@ class DenseCNNInference:
         self.max_batch_size = 1024 if max_batch_size is None else int(max_batch_size)
         if self.max_batch_size <= 0:
             raise ValueError("max_batch_size must be > 0")
+        # A7 (production form of PB): keep cuDNN autotune ON, but pad forward
+        # batches to a small set of power-of-two buckets so the evaluator sees a
+        # handful of shapes instead of ~900. cuDNN re-autotunes (~925 ms) on every
+        # never-seen batch shape; without bucketing a cold/relaunch epoch pays
+        # ~830 s of autotune thrash (and once hung >10 min). Bucketing bounds the
+        # distinct shapes to ~log2(max_batch)+1, so autotune converges in seconds
+        # and stays converged, while padded rows are discarded (per-sample conv/
+        # eval-BN/FC ops never let padding leak into the real rows).
+        self.pad_to_buckets = self.device.type == "cuda"
+        # Bucketing granularity. Default (None / env unset) keeps the original
+        # power-of-two buckets (~log2(cap)+1 distinct shapes). Setting a multiple
+        # (constructor arg or HEXO_BUCKET_PAD_MULTIPLE env) rounds the padded
+        # batch up to the nearest multiple instead — a TIGHTER effective batch
+        # that cuts padding waste (e.g. 70 -> 80 at mult=16 instead of -> 128),
+        # at the cost of more distinct cuDNN-autotune shapes (cap/multiple of
+        # them). Pure batching: padded rows never affect real rows (every op is
+        # per-sample after BN folding), so outputs stay byte-identical for any
+        # bucket size. The forward still chunks oversize leaf batches to
+        # max_batch_size before this runs, so the shape count stays bounded.
+        # Resolution order: env var (launch-path override) > constructor arg
+        # (config) > default (power-of-two).
+        env_mult = os.environ.get("HEXO_BUCKET_PAD_MULTIPLE", "").strip()
+        if env_mult:
+            bucket_pad_multiple = int(env_mult)
+        self.bucket_pad_multiple = (
+            int(bucket_pad_multiple) if bucket_pad_multiple and int(bucket_pad_multiple) > 1 else None
+        )
         if self.device.type == "cuda":
             torch.backends.cudnn.benchmark = True
             torch.backends.cuda.matmul.allow_tf32 = True
@@ -81,8 +112,38 @@ class DenseCNNInference:
         else:
             self.model.to(self.device)
         self.model.eval()
+        # Initialized before warmup because _forward_device_inputs references it.
+        self._trt_forward = None
+        self.trt_info: dict[str, Any] = {"adopted": False, "reason": "disabled"}
         if self.device.type == "cuda":
             self._warm_up_cuda()
+
+        # Optional TensorRT FP16 forward (config/env-gated). Built per-epoch from
+        # the folded inference model's CURRENT weights, correctness-gated vs torch.
+        # FAIL-LOUD by default: if use_trt and the build/gate fails, build_trt_forward
+        # RAISES (aborting __init__ -> the trainer crashes -> supervisor captures it)
+        # so a silent torch fallback can NEVER hide that TRT didn't engage. Opt into
+        # a (still loudly-logged) torch fallback via trt_allow_fallback / env
+        # HEXO_TRT_ALLOW_FALLBACK. Resolution: env > arg (config) > default.
+        env_trt = os.environ.get("HEXO_TRT", "").strip()
+        if env_trt:
+            use_trt = env_trt in ("1", "true", "True")
+        elif use_trt is None:
+            use_trt = False
+        env_fb = os.environ.get("HEXO_TRT_ALLOW_FALLBACK", "").strip()
+        if env_fb:
+            trt_allow_fallback = env_fb in ("1", "true", "True")
+        elif trt_allow_fallback is None:
+            trt_allow_fallback = False
+        if use_trt and self.device.type == "cuda":
+            from . import trt_backend
+            # sample_inputs=None -> the gate generates REAL encoded game positions
+            # (sharp P7 policy -> stable argmax). On failure this RAISES unless
+            # trt_allow_fallback (loud either way).
+            self._trt_forward, self.trt_info = trt_backend.build_trt_forward(
+                self.model, max_batch=self.max_batch_size, device=str(self.device),
+                allow_torch_fallback=bool(trt_allow_fallback),
+            )
 
     @torch.no_grad()
     def infer_state(self, state: object) -> InferenceResult:
@@ -146,16 +207,46 @@ class DenseCNNInference:
     @torch.inference_mode()
     def _forward_inputs_device(self, inputs: torch.Tensor) -> dict[str, torch.Tensor]:
         inputs = _to_inference_device(inputs, self.device)
+        if inputs.dtype == torch.float16:
+            # f16 is only the host->device TRANSPORT dtype for the MCTS evaluator
+            # (Rust emits f16 planes, halving the ~89 MB plane H2D copy). Upcast to
+            # f32 on-device so the forward (TRT/torch), bucket padding, and every
+            # downstream op are unchanged. Gated byte-identical: the TRT engine
+            # already downcasts its f32 input to f16 internally, and the planes are
+            # binary/[0,1] features (see scripts/_fp16_input_gate.py). The direct
+            # (non-MCTS) inference path still passes f32 and is untouched.
+            inputs = inputs.float()
         return self._forward_device_inputs(inputs)
 
     @torch.inference_mode()
     def _forward_device_inputs(self, inputs: torch.Tensor) -> dict[str, torch.Tensor]:
-        with torch.autocast(device_type=self.device.type, enabled=self.amp):
-            if hasattr(self.model, "forward_policy_value"):
-                output = self.model.forward_policy_value(inputs)
-            else:
-                output = self.model(inputs)
-        return {key: value.detach().float() for key, value in output.items()}
+        rows = int(inputs.shape[0])
+        padded = self._pad_to_bucket(inputs, rows)
+        if self._trt_forward is not None:
+            # TRT engine is fp16-internal; no autocast needed.
+            output = self._trt_forward(padded)
+        else:
+            with torch.autocast(device_type=self.device.type, enabled=self.amp):
+                if hasattr(self.model, "forward_policy_value"):
+                    output = self.model.forward_policy_value(padded)
+                else:
+                    output = self.model(padded)
+        # Slice padding off every head; rows [:rows] are the real samples.
+        return {key: value.detach().float()[:rows] for key, value in output.items()}
+
+    def _pad_to_bucket(self, inputs: torch.Tensor, rows: int) -> torch.Tensor:
+        """Pad the batch dim up to a power-of-two bucket (A7 shape stabilization)."""
+
+        if not self.pad_to_buckets:
+            return inputs
+        target = _bucket_batch_size(rows, self.max_batch_size, self.bucket_pad_multiple)
+        if target == rows:
+            return inputs
+        padded = torch.zeros((target, *inputs.shape[1:]), dtype=inputs.dtype, device=inputs.device)
+        if inputs.ndim == 4:
+            padded = padded.to(memory_format=torch.channels_last)
+        padded[:rows].copy_(inputs)
+        return padded
 
     @torch.inference_mode()
     def _warm_up_cuda(self) -> None:
@@ -184,8 +275,10 @@ class DenseCNNInference:
         """
 
         shape = _payload_shape(payload)
-        _require_byte_length("inputs", payload["inputs"], _shape_product(shape), 4)
-        inputs = torch.frombuffer(payload["inputs"], dtype=torch.float32).reshape(shape)
+        # Rust hands the MCTS evaluator f16 plane bytes (2 bytes/element) as a
+        # zero-copy buffer view; `_forward_inputs_device` upcasts to f32 on-device.
+        _require_byte_length("inputs", payload["inputs"], _shape_product(shape), 2)
+        inputs = torch.frombuffer(payload["inputs"], dtype=torch.float16).reshape(shape)
         max_batch = self.max_batch_size
         if inputs.shape[0] > max_batch:
             # MCTS can ask for a large leaf batch. Chunking happens here because
@@ -200,7 +293,13 @@ class DenseCNNInference:
             outputs = self._forward_inputs_device(_to_inference_device(inputs, self.device))
             policy_batch = outputs["policy"]
             value_batch = outputs["value"]
-        values_tensor = decode_binned_value(value_batch).cpu().contiguous()
+        # Clamp into [-1, 1] before handing the bytes to Rust: decode_binned_value is a
+        # convex combination of bin centers in [-1, 1], but float32 rounding on a
+        # confident value head can land it ~1 ULP past +-1. The native read_value
+        # rejects any out-of-range value with PyValueError, which aborts the WHOLE
+        # batched search (every game's leaves), so a benign rounding artifact must not
+        # escape here. The training value-target path validates [-1, 1] independently.
+        values_tensor = decode_binned_value(value_batch).clamp_(-1.0, 1.0).cpu().contiguous()
 
         if "legal_flat_indices_bytes" not in payload or "legal_row_offsets" not in payload:
             raise ValueError(
@@ -251,6 +350,30 @@ def _legal_priors_from_flats(
         int(action_id): float(prob)
         for action_id, prob in zip(legal_action_ids, probs)
     }
+
+
+def _bucket_batch_size(rows: int, cap: int, pad_multiple: int | None = None) -> int:
+    """Bucketed batch size >= ``rows``, clamped to ``cap``.
+
+    Default (``pad_multiple`` None): smallest power-of-two >= ``rows`` — the A7
+    scheme, ~``log2(cap)+1`` distinct shapes, padding up to ~2x.
+
+    Tighter (``pad_multiple`` set): nearest multiple of ``pad_multiple`` >=
+    ``rows`` — padding bounded to < ``pad_multiple`` rows, at the cost of up to
+    ``cap/pad_multiple`` distinct cuDNN-autotune shapes. Either way batches at/
+    above ``cap`` are returned unchanged (the evaluator chunks to ``max_batch_size``
+    first), and padding never affects real rows, so outputs are byte-identical.
+    """
+
+    if rows <= 0 or rows >= cap:
+        return rows
+    if pad_multiple and pad_multiple > 1:
+        size = ((rows + pad_multiple - 1) // pad_multiple) * pad_multiple
+        return min(size, cap)
+    size = 1
+    while size < rows:
+        size <<= 1
+    return min(size, cap)
 
 
 def _to_inference_device(inputs: torch.Tensor, device: torch.device) -> torch.Tensor:

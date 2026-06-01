@@ -1,0 +1,398 @@
+{
+  "config": {
+    "seed": 1234,
+    "games": 8,
+    "moves": 6,
+    "visits": 128,
+    "vbatch": 4
+  },
+  "trajectory_digest": "d9d0aa9a729e65bf",
+  "n_records": 48,
+  "invariant_failures": [],
+  "moves": [
+    {
+      "move": 0,
+      "game": 0,
+      "action_id": 2147516416,
+      "visits": 128,
+      "n_actions": 1,
+      "policy_hash": "d83002f5810ea78b"
+    },
+    {
+      "move": 0,
+      "game": 1,
+      "action_id": 2147516416,
+      "visits": 128,
+      "n_actions": 1,
+      "policy_hash": "d83002f5810ea78b"
+    },
+    {
+      "move": 0,
+      "game": 2,
+      "action_id": 2147516416,
+      "visits": 128,
+      "n_actions": 1,
+      "policy_hash": "d83002f5810ea78b"
+    },
+    {
+      "move": 0,
+      "game": 3,
+      "action_id": 2147516416,
+      "visits": 128,
+      "n_actions": 1,
+      "policy_hash": "d83002f5810ea78b"
+    },
+    {
+      "move": 0,
+      "game": 4,
+      "action_id": 2147516416,
+      "visits": 128,
+      "n_actions": 1,
+      "policy_hash": "d83002f5810ea78b"
+    },
+    {
+      "move": 0,
+      "game": 5,
+      "action_id": 2147516416,
+      "visits": 128,
+      "n_actions": 1,
+      "policy_hash": "d83002f5810ea78b"
+    },
+    {
+      "move": 0,
+      "game": 6,
+      "action_id": 2147516416,
+      "visits": 128,
+      "n_actions": 1,
+      "policy_hash": "d83002f5810ea78b"
+    },
+    {
+      "move": 0,
+      "game": 7,
+      "action_id": 2147516416,
+      "visits": 128,
+      "n_actions": 1,
+      "policy_hash": "d83002f5810ea78b"
+    },
+    {
+      "move": 1,
+      "game": 0,
+      "action_id": 2148040704,
+      "visits": 128,
+      "n_actions": 32,
+      "policy_hash": "144bac127ec399f4"
+    },
+    {
+      "move": 1,
+      "game": 1,
+      "action_id": 2147516423,
+      "visits": 128,
+      "n_actions": 32,
+      "policy_hash": "d8d2cd4f7a61eb63"
+    },
+    {
+      "move": 1,
+      "game": 2,
+      "action_id": 2147581952,
+      "visits": 128,
+      "n_actions": 32,
+      "policy_hash": "3aaa30540b831642"
+    },
+    {
+      "move": 1,
+      "game": 3,
+      "action_id": 2147516413,
+      "visits": 128,
+      "n_actions": 32,
+      "policy_hash": "a4636ed22de88e85"
+    },
+    {
+      "move": 1,
+      "game": 4,
+      "action_id": 2148040698,
+      "visits": 128,
+      "n_actions": 32,
+      "policy_hash": "1e9b486e8863f8f6"
+    },
+    {
+      "move": 1,
+      "game": 5,
+      "action_id": 2147516424,
+      "visits": 128,
+      "n_actions": 32,
+      "policy_hash": "10202730b2adee7a"
+    },
+    {
+      "move": 1,
+      "game": 6,
+      "action_id": 2147581957,
+      "visits": 128,
+      "n_actions": 32,
+      "policy_hash": "5cbdf550948a2db9"
+    },
+    {
+      "move": 1,
+      "game": 7,
+      "action_id": 2147844099,
+      "visits": 128,
+      "n_actions": 32,
+      "policy_hash": "6fa762dc09324bc1"
+    },
+    {
+      "move": 2,
+      "game": 0,
+      "action_id": 2147909637,
+      "visits": 128,
+      "n_actions": 25,
+      "policy_hash": "1a34d9469484d87a"
+    },
+    {
+      "move": 2,
+      "game": 1,
+      "action_id": 2147188747,
+      "visits": 128,
+      "n_actions": 27,
+      "policy_hash": "0ae93f8308d51c88"
+    },
+    {
+      "move": 2,
+      "game": 2,
+      "action_id": 2147581953,
+      "visits": 128,
+      "n_actions": 26,
+      "policy_hash": "ef7b5b020aec4917"
+    },
+    {
+      "move": 2,
+      "game": 3,
+      "action_id": 2146992127,
+      "visits": 128,
+      "n_actions": 26,
+      "policy_hash": "b87653ab147a0c26"
+    },
+    {
+      "move": 2,
+      "game": 4,
+      "action_id": 2147123206,
+      "visits": 128,
+      "n_actions": 27,
+      "policy_hash": "eba50c3279dac5f6"
+    },
+    {
+      "move": 2,
+      "game": 5,
+      "action_id": 2147713023,
+      "visits": 128,
+      "n_actions": 26,
+      "policy_hash": "bb6a2c4ed30719ed"
+    },
+    {
+      "move": 2,
+      "game": 6,
+      "action_id": 2147450893,
+      "visits": 128,
+      "n_actions": 25,
+      "policy_hash": "22a4c649d76358aa"
+    },
+    {
+      "move": 2,
+      "game": 7,
+      "action_id": 2147516421,
+      "visits": 128,
+      "n_actions": 28,
+      "policy_hash": "451c594f8e672d02"
+    },
+    {
+      "move": 3,
+      "game": 0,
+      "action_id": 2148106246,
+      "visits": 128,
+      "n_actions": 29,
+      "policy_hash": "6f4db6f355b89a03"
+    },
+    {
+      "move": 3,
+      "game": 1,
+      "action_id": 2147581952,
+      "visits": 128,
+      "n_actions": 32,
+      "policy_hash": "ef0ff8903d09a953"
+    },
+    {
+      "move": 3,
+      "game": 2,
+      "action_id": 2147647491,
+      "visits": 128,
+      "n_actions": 32,
+      "policy_hash": "f26d0fa5f160db0f"
+    },
+    {
+      "move": 3,
+      "game": 3,
+      "action_id": 2147844096,
+      "visits": 128,
+      "n_actions": 31,
+      "policy_hash": "c069b97f89407bf9"
+    },
+    {
+      "move": 3,
+      "game": 4,
+      "action_id": 2148106235,
+      "visits": 128,
+      "n_actions": 26,
+      "policy_hash": "d8ea6afdcc63b936"
+    },
+    {
+      "move": 3,
+      "game": 5,
+      "action_id": 2147844089,
+      "visits": 128,
+      "n_actions": 25,
+      "policy_hash": "bb55d52f049f445b"
+    },
+    {
+      "move": 3,
+      "game": 6,
+      "action_id": 2147647505,
+      "visits": 128,
+      "n_actions": 26,
+      "policy_hash": "8f7b4bc5fd0dc684"
+    },
+    {
+      "move": 3,
+      "game": 7,
+      "action_id": 2147844096,
+      "visits": 128,
+      "n_actions": 32,
+      "policy_hash": "f3262e2557f95ee0"
+    },
+    {
+      "move": 4,
+      "game": 0,
+      "action_id": 2147319816,
+      "visits": 128,
+      "n_actions": 29,
+      "policy_hash": "50c72cf7b3dc0732"
+    },
+    {
+      "move": 4,
+      "game": 1,
+      "action_id": 2147254280,
+      "visits": 128,
+      "n_actions": 31,
+      "policy_hash": "0348f41308f99693"
+    },
+    {
+      "move": 4,
+      "game": 2,
+      "action_id": 2147188739,
+      "visits": 128,
+      "n_actions": 31,
+      "policy_hash": "cb2863228c5b019c"
+    },
+    {
+      "move": 4,
+      "game": 3,
+      "action_id": 2147975163,
+      "visits": 128,
+      "n_actions": 31,
+      "policy_hash": "fe664ea9110148b9"
+    },
+    {
+      "move": 4,
+      "game": 4,
+      "action_id": 2148171775,
+      "visits": 128,
+      "n_actions": 23,
+      "policy_hash": "0ba49a40ced91383"
+    },
+    {
+      "move": 4,
+      "game": 5,
+      "action_id": 2147450890,
+      "visits": 128,
+      "n_actions": 23,
+      "policy_hash": "7e379f185619b7ed"
+    },
+    {
+      "move": 4,
+      "game": 6,
+      "action_id": 2147975178,
+      "visits": 128,
+      "n_actions": 26,
+      "policy_hash": "7fb6d67bacf9f48c"
+    },
+    {
+      "move": 4,
+      "game": 7,
+      "action_id": 2147057669,
+      "visits": 128,
+      "n_actions": 32,
+      "policy_hash": "ddf9cd0bff7d2967"
+    },
+    {
+      "move": 5,
+      "game": 0,
+      "action_id": 2147450894,
+      "visits": 128,
+      "n_actions": 30,
+      "policy_hash": "b694b7302e7272f8"
+    },
+    {
+      "move": 5,
+      "game": 1,
+      "action_id": 2146992143,
+      "visits": 128,
+      "n_actions": 32,
+      "policy_hash": "97f6dc45644944cf"
+    },
+    {
+      "move": 5,
+      "game": 2,
+      "action_id": 2147581947,
+      "visits": 128,
+      "n_actions": 32,
+      "policy_hash": "b913ec50c975410d"
+    },
+    {
+      "move": 5,
+      "game": 3,
+      "action_id": 2148237300,
+      "visits": 128,
+      "n_actions": 32,
+      "policy_hash": "b5fd8f794114dce1"
+    },
+    {
+      "move": 5,
+      "game": 4,
+      "action_id": 2147057664,
+      "visits": 128,
+      "n_actions": 26,
+      "policy_hash": "8afe052436277195"
+    },
+    {
+      "move": 5,
+      "game": 5,
+      "action_id": 2147975157,
+      "visits": 128,
+      "n_actions": 26,
+      "policy_hash": "e432b90f8294cfd9"
+    },
+    {
+      "move": 5,
+      "game": 6,
+      "action_id": 2147057672,
+      "visits": 128,
+      "n_actions": 27,
+      "policy_hash": "4226232e7787f746"
+    },
+    {
+      "move": 5,
+      "game": 7,
+      "action_id": 2148368386,
+      "visits": 128,
+      "n_actions": 32,
+      "policy_hash": "d0d07151d746225b"
+    }
+  ]
+}

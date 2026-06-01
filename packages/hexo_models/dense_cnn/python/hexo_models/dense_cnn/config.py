@@ -18,6 +18,35 @@ from typing import Any, Mapping, Sequence
 from .constants import DEFAULT_BLOCKS, DEFAULT_CHANNELS, INPUT_CHANNELS
 
 
+def _parse_temperature_schedule(raw: Any) -> tuple[tuple[int, float], ...]:
+    """Coerce a TOML temperature schedule (list of [move, temperature] pairs).
+
+    Returns a tuple of (move, temperature) sorted by move with unique, ascending
+    moves and positive temperatures. Empty input yields an empty schedule (the
+    linear ``final_temperature``/``temperature_decay_moves`` scheme stays in use).
+    """
+
+    if not raw:
+        return ()
+    points: list[tuple[int, float]] = []
+    for item in raw:
+        pair = tuple(item)
+        if len(pair) != 2:
+            raise ValueError("temperature_schedule entries must be [move, temperature] pairs")
+        move = int(pair[0])
+        temperature = float(pair[1])
+        if move < 0:
+            raise ValueError("temperature_schedule moves must be >= 0")
+        if not temperature > 0.0:
+            raise ValueError("temperature_schedule temperatures must be > 0")
+        points.append((move, temperature))
+    points.sort(key=lambda point: point[0])
+    moves = [move for move, _ in points]
+    if len(set(moves)) != len(moves):
+        raise ValueError("temperature_schedule moves must have unique move indices")
+    return tuple(points)
+
+
 @dataclass(frozen=True, slots=True)
 class Model1ArchitectureConfig:
     input_channels: int = INPUT_CHANNELS
@@ -76,7 +105,29 @@ class Model1SelfPlayConfig:
     mcts_session_cache_max_states: int = 1_048_576
     mcts_active_root_limit: int = 1024
     max_actions: int = 1024
+    # Move-selection temperature SCHEDULE. `temperature` is the value used for the
+    # opening; play linearly decays it to `final_temperature` over the first
+    # `temperature_decay_moves` plies, then holds `final_temperature`. With
+    # `temperature_decay_moves == 0` the schedule is flat at `temperature` (the old
+    # behavior). AlphaZero/KataGo decay the opening temperature so endgames are
+    # played decisively instead of sampled — keeping temperature high all game
+    # produces noisy, weak-looking self-play tails.
     temperature: float = 1.0
+    final_temperature: float = 1.0
+    temperature_decay_moves: int = 0
+    # Optional anchor-point temperature schedule. When non-empty it OVERRIDES the
+    # linear `final_temperature`/`temperature_decay_moves` scheme: a tuple of
+    # (move, temperature) points, linearly interpolated, holding the first point
+    # before it and continuing the final segment's slope after the last point down
+    # to `temperature_floor` (then held). Lets the opening stay hot while mid/late
+    # play sharpens through chosen waypoints, e.g. [(0,1.0),(30,0.5),(90,0.3)].
+    temperature_schedule: tuple[tuple[int, float], ...] = ()
+    temperature_floor: float = 0.1
+    # KataGo forced-playout strength (0 disables). Guarantees each materialized
+    # root child ~sqrt(k * prior * root_visits) visits so Dirichlet root noise
+    # survives PUCT into the visit counts (self-play opening diversity); the
+    # exported policy target prunes the forced visits back out. k=2 is KataGo's.
+    forced_playout_k: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,6 +137,22 @@ class Model1EvalConfig:
     sealbot_time_limit: float = 0.05
     max_actions: int = 1024
     require_sealbot: bool = False
+    # Opening diversification. With temperature 0 the dense player is fully
+    # deterministic, so every eval game from the same start collapses to one
+    # trajectory. Sampling the dense player's first `opening_moves` decisions at
+    # `opening_temperature` (per-game seeded) spreads the openings so the win /
+    # game-length signal reflects many distinct games. 0 keeps the old greedy
+    # behavior.
+    opening_temperature: float = 0.0
+    opening_moves: int = 0
+    # Eval/play-only MCTS virtual batch size. The single-game (player.decide)
+    # search latency is bound by the NUMBER of NN forwards, not by selection:
+    # raising the virtual batch fattens each forward and cuts latency ~linearly
+    # in passes (measured ~3.4x from 4->32 at 512 sims) at a modest search-quality
+    # cost (larger virtual-loss window). 0 keeps the calibrated self-play value.
+    # This is the measured single-game latency lever — root parallelism and
+    # shared-tree atomics were both benchmarked and found inferior.
+    virtual_batch_size: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,6 +165,19 @@ class Model1PerformanceConfig:
     mcts_virtual_batch_candidates: tuple[int, ...] = (4,)
     selfplay_probe_positions: int = 8192
     probe_batches: int = 1
+    # Inference-forward optimizations (adopted, quality-safe). TensorRT FP16 is
+    # correctness-gated at build time and falls back to the torch forward if the
+    # gate fails or TRT is unavailable. Bucket pad multiple > 1 rounds the padded
+    # forward batch up to that multiple instead of a power of two (less padding
+    # waste); 0 keeps the power-of-two buckets. Both are equivalence-/quality-safe
+    # (TRT gated; bucketing is pure batching). Env vars HEXO_TRT /
+    # HEXO_BUCKET_PAD_MULTIPLE override these when set (launch-path escape hatch).
+    inference_use_tensorrt: bool = False
+    inference_bucket_pad_multiple: int = 0
+    # Fail-loud default: if TRT is on and the build/gate fails, abort with a
+    # prominent error rather than silently running torch. Set true only to permit
+    # a (still-logged) torch fallback. (env HEXO_TRT_ALLOW_FALLBACK overrides.)
+    inference_trt_allow_torch_fallback: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,6 +262,11 @@ def parse_model1_config(raw: Mapping[str, Any] | None) -> Model1Config:
             mcts_active_root_limit=int(selfplay.get("mcts_active_root_limit", 1024)),
             max_actions=int(selfplay.get("max_actions", 1024)),
             temperature=float(selfplay.get("temperature", 1.0)),
+            final_temperature=float(selfplay.get("final_temperature", selfplay.get("temperature", 1.0))),
+            temperature_decay_moves=int(selfplay.get("temperature_decay_moves", 0)),
+            temperature_schedule=_parse_temperature_schedule(selfplay.get("temperature_schedule", ())),
+            temperature_floor=float(selfplay.get("temperature_floor", 0.1)),
+            forced_playout_k=float(selfplay.get("forced_playout_k", 0.0)),
         ),
         evaluation=Model1EvalConfig(
             games_per_epoch=int(evaluation.get("games_per_epoch", 64)),
@@ -189,6 +274,9 @@ def parse_model1_config(raw: Mapping[str, Any] | None) -> Model1Config:
             sealbot_time_limit=float(evaluation.get("sealbot_time_limit", 0.05)),
             max_actions=int(evaluation.get("max_actions", 1024)),
             require_sealbot=bool(evaluation.get("require_sealbot", False)),
+            opening_temperature=float(evaluation.get("opening_temperature", 0.0)),
+            opening_moves=int(evaluation.get("opening_moves", 0)),
+            virtual_batch_size=int(evaluation.get("virtual_batch_size", 0)),
         ),
         performance=Model1PerformanceConfig(
             calibrate=bool(performance.get("calibrate", True)),
@@ -199,6 +287,9 @@ def parse_model1_config(raw: Mapping[str, Any] | None) -> Model1Config:
             mcts_virtual_batch_candidates=_int_tuple(performance.get("mcts_virtual_batch_candidates", (4,))),
             selfplay_probe_positions=int(performance.get("selfplay_probe_positions", 8192)),
             probe_batches=int(performance.get("probe_batches", 1)),
+            inference_use_tensorrt=bool(performance.get("inference_use_tensorrt", False)),
+            inference_bucket_pad_multiple=int(performance.get("inference_bucket_pad_multiple", 0)),
+            inference_trt_allow_torch_fallback=bool(performance.get("inference_trt_allow_torch_fallback", False)),
         ),
         device=str(config.get("device", "cuda")),
         checkpoint_path=Path(str(checkpoint_path)) if checkpoint_path else None,
