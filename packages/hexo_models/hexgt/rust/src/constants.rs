@@ -20,3 +20,38 @@ pub(crate) const HEXGT_EVAL_CACHE_MAX_STATES: usize = 1_048_576;
 
 /// Strict upper bound on the number of active roots per `search` call.
 pub(crate) const HEXGT_ACTIVE_ROOT_LIMIT: usize = 1024;
+
+// --- Node/edge feature layout (MUST mirror python/.../constants.py + features.py).
+// Any change here is a model-weights + replay-schema change; the parity test
+// (test_hexgt_featurize_parity) guards Rust<->Python equality.
+pub(crate) const NODE_FEATURE_DIM: usize = 32;
+pub(crate) const NUM_NODE_TYPES: i64 = 4;
+pub(crate) const NUM_EDGE_TYPES_F: i64 = 5;
+pub(crate) const EDGE_ATTR_DIM: usize = 6; // NUM_EDGE_TYPES + 1
+pub(crate) const EDGE_ATTR_DIST: usize = 5; // offset of the hex-distance scalar
+pub(crate) const COORD_SCALE: f32 = 16.0;
+pub(crate) const COUNT_SCALE: f32 = 32.0;
+pub(crate) const WINDOW_LEN_F: f32 = 6.0;
+
+// node type ids (mirror candidates.rs NODE_* / python NODE_TYPE_*)
+pub(crate) const FT_NODE_SIDE: i64 = 0;
+pub(crate) const FT_NODE_STONE: i64 = 1;
+pub(crate) const FT_NODE_WINDOW: i64 = 3;
+pub(crate) const FT_EDGE_CANDIDATE_WINDOW: i64 = 2;
+
+// feature slot offsets
+pub(crate) const F_TYPE_ONEHOT: usize = 0; // [0:4)
+pub(crate) const F_OWNER_OWN: usize = 4;
+pub(crate) const F_OWNER_OPP: usize = 5;
+pub(crate) const F_CENTER_DISTANCE: usize = 6;
+pub(crate) const F_STONE_RECENCY: usize = 7;
+pub(crate) const F_WIN_COUNT_ONEHOT: usize = 8; // [8:11)
+pub(crate) const F_WIN_EMPTY_CELLS: usize = 11;
+pub(crate) const F_CAND_COMPLETE_OWN: usize = 12;
+pub(crate) const F_CAND_COMPLETE_OPP: usize = 13;
+pub(crate) const F_CAND_NWIN_OWN: usize = 14;
+pub(crate) const F_CAND_NWIN_OPP: usize = 15;
+pub(crate) const F_SIDE_PHASE_ONEHOT: usize = 16; // [16:19)
+pub(crate) const F_SIDE_STONES_OWN: usize = 19;
+pub(crate) const F_SIDE_STONES_OPP: usize = 20;
+pub(crate) const F_SIDE_MOVE_NUMBER: usize = 21;

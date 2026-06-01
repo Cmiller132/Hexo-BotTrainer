@@ -17,6 +17,7 @@
 
 mod candidates;
 mod constants;
+mod features;
 mod mcts;
 mod mcts_eval;
 mod mcts_tree;
@@ -43,6 +44,7 @@ pub fn capabilities(py: Python<'_>) -> PyResult<Py<PyAny>> {
 pub fn register_pybridge(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(capabilities, module)?)?;
     candidates::register_pybridge(module)?;
+    features::register_pybridge(module)?;
     mcts::register_pybridge(module)?;
     Ok(())
 }

@@ -20,7 +20,7 @@
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict, PyList};
+use pyo3::types::PyBytes;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -28,8 +28,8 @@ use std::time::Instant;
 use hexo_engine::{pack_coord, HexoState as RustHexoState, PackedCoord};
 use hexo_utils::{hash_state, StateHash};
 
-use super::candidates::{build_graph, position_graph_to_py_dict};
 use super::constants::HEXGT_EVAL_CHUNK_STATES;
+use super::features::{collated_to_py_dict, featurize_collate_states};
 
 #[derive(Clone, Debug)]
 pub(crate) struct RustEvaluation {
@@ -164,16 +164,26 @@ fn evaluate_states_chunk(
     stats: Option<&SharedEvaluationStats>,
 ) -> PyResult<Vec<RustEvaluation>> {
     let encoding_started = Instant::now();
-    // Build one graph-facts dict per unique leaf, straight from the Rust state.
-    let facts = PyList::empty(py);
-    for state in states {
-        let g = build_graph(state, n);
-        facts.append(position_graph_to_py_dict(py, state, &g, n as i64)?)?;
-    }
-    let payload = PyDict::new(py);
-    payload.set_item("graph_facts", &facts)?;
-    payload.set_item("n", n)?;
-    payload.set_item("state_source", "engine_state_clone")?;
+    // Featurize + collate the whole leaf batch IN RUST (rayon across graphs:
+    // build_graph + D6-invariant featurization + disjoint-graph collation),
+    // emitted to Python as zero-copy buffers it just frombuffer+forwards. This
+    // replaces the former per-graph Python featurization (the ~88% bottleneck,
+    // HEXGT_DECISIONS Phase-5c). The GIL is released for the rayon work.
+    // NOTE: do NOT release the GIL here. This callback runs inside the MCTS
+    // select<->eval pipeline (which is itself driven across rayon threads); a
+    // py.detach() per chunk triggers GIL hand-off contention that collapsed
+    // throughput ~9x. featurize_collate_states still parallelizes the per-graph
+    // featurization across rayon internally (pure-Rust workers need no GIL).
+    let mut collated = featurize_collate_states(states, n);
+    // The candidate ids/CSR row lengths stay Rust-side: priors come back in the
+    // same packed candidate order, so we zip positionally with no id round-trip.
+    let candidate_ids: Vec<PackedCoord> = std::mem::take(&mut collated.candidate_ids)
+        .iter()
+        .map(|&v| v as u32)
+        .collect();
+    let candidate_counts = std::mem::take(&mut collated.candidate_counts);
+    let num_candidates = collated.num_candidates;
+    let payload = collated_to_py_dict(py, collated, false)?;
     if let Some(stats) = stats {
         let mut s = lock_stats(stats);
         s.evaluator_chunks += 1;
@@ -190,31 +200,32 @@ fn evaluate_states_chunk(
 
     let parse_started = Instant::now();
     let values = read_values(&output, states.len())?;
-    let candidate_rows = read_candidate_rows(&output)?;
-    let prior_rows = read_prior_rows(&output, &candidate_rows)?;
-    if candidate_rows.len() != states.len() || prior_rows.len() != states.len() {
+    let priors_obj = output.get_item("priors_bytes").map_err(|_| {
+        PyValueError::new_err("hexgt evaluator output missing required priors_bytes")
+    })?;
+    let prior_bytes = priors_obj.downcast::<PyBytes>()?.as_bytes();
+    require_exact_bytes("priors_bytes", prior_bytes.len(), num_candidates, 4)?;
+    if candidate_counts.len() != states.len() {
         return Err(PyValueError::new_err(format!(
-            "hexgt evaluator returned {} candidate rows and {} prior rows for {} states",
-            candidate_rows.len(),
-            prior_rows.len(),
+            "hexgt collation produced {} candidate rows for {} states",
+            candidate_counts.len(),
             states.len()
         )));
     }
 
     let mut evaluations = Vec::with_capacity(states.len());
     let mut total_candidates = 0usize;
+    let mut offset = 0usize;
     for (row_index, state) in states.iter().enumerate() {
-        let candidate_row = &candidate_rows[row_index];
-        let prior_row = &prior_rows[row_index];
-        if candidate_row.len() != prior_row.len() {
-            return Err(PyValueError::new_err(format!(
-                "hexgt evaluator row {row_index} returned {} candidates but {} priors",
-                candidate_row.len(),
-                prior_row.len()
-            )));
+        let count = candidate_counts[row_index];
+        let id_row = &candidate_ids[offset..offset + count];
+        let mut prior_row = Vec::with_capacity(count);
+        for i in 0..count {
+            prior_row.push(read_f32(prior_bytes, offset + i).unwrap_or(0.0));
         }
+        offset += count;
         let value = read_value_checked(values[row_index], row_index)?;
-        let priors = finalize_candidate_row(state, candidate_row, prior_row, row_index)?;
+        let priors = finalize_candidate_row(state, id_row, &prior_row, row_index)?;
         total_candidates += priors.len();
         evaluations.push(RustEvaluation {
             value,
@@ -412,81 +423,6 @@ fn read_values(output: &Bound<'_, PyAny>, expected: usize) -> PyResult<Vec<f32>>
     Ok(values)
 }
 
-fn read_candidate_rows(output: &Bound<'_, PyAny>) -> PyResult<Vec<Vec<PackedCoord>>> {
-    if let (Ok(bytes_obj), Ok(offsets_obj)) = (
-        output.get_item("candidate_action_ids_bytes"),
-        output.get_item("candidate_row_offsets"),
-    ) {
-        let bytes = bytes_obj.downcast::<PyBytes>()?.as_bytes();
-        let offsets = offsets_obj
-            .try_iter()?
-            .map(|item| item?.extract::<usize>())
-            .collect::<PyResult<Vec<_>>>()?;
-        if offsets.is_empty() {
-            return Err(PyValueError::new_err("candidate_row_offsets is empty"));
-        }
-        let mut rows = Vec::with_capacity(offsets.len().saturating_sub(1));
-        for window in offsets.windows(2) {
-            let (start, end) = (window[0], window[1]);
-            if end < start {
-                return Err(PyValueError::new_err("candidate_row_offsets not monotonic"));
-            }
-            let mut row = Vec::with_capacity(end - start);
-            for index in start..end {
-                row.push(read_packed_coord(bytes, index).ok_or_else(|| {
-                    PyValueError::new_err("candidate_action_ids_bytes truncated")
-                })?);
-            }
-            rows.push(row);
-        }
-        return Ok(rows);
-    }
-    let rows_obj = output.get_item("candidate_action_ids")?;
-    let mut rows = Vec::new();
-    for row in rows_obj.try_iter()? {
-        let row = row?;
-        let mut ids = Vec::new();
-        for item in row.try_iter()? {
-            ids.push(item?.extract::<PackedCoord>()?);
-        }
-        rows.push(ids);
-    }
-    Ok(rows)
-}
-
-fn read_prior_rows(
-    output: &Bound<'_, PyAny>,
-    candidate_rows: &[Vec<PackedCoord>],
-) -> PyResult<Vec<Vec<f32>>> {
-    if let Ok(priors_obj) = output.get_item("priors_bytes") {
-        let bytes = priors_obj.downcast::<PyBytes>()?.as_bytes();
-        let total: usize = candidate_rows.iter().map(|r| r.len()).sum();
-        require_exact_bytes("priors_bytes", bytes.len(), total, 4)?;
-        let mut offset = 0usize;
-        let mut rows = Vec::with_capacity(candidate_rows.len());
-        for candidates in candidate_rows {
-            let mut row = Vec::with_capacity(candidates.len());
-            for _ in candidates {
-                row.push(read_f32(bytes, offset).unwrap_or(0.0));
-                offset += 1;
-            }
-            rows.push(row);
-        }
-        return Ok(rows);
-    }
-    let rows_obj = output.get_item("priors")?;
-    let mut rows = Vec::new();
-    for row in rows_obj.try_iter()? {
-        let row = row?;
-        let mut priors = Vec::new();
-        for item in row.try_iter()? {
-            priors.push(item?.extract::<f32>()?);
-        }
-        rows.push(priors);
-    }
-    Ok(rows)
-}
-
 fn read_value_checked(value: f32, row_index: usize) -> PyResult<f32> {
     if !value.is_finite() {
         return Err(PyValueError::new_err(format!(
@@ -517,10 +453,4 @@ fn read_f32(bytes: &[u8], index: usize) -> Option<f32> {
     let start = index.checked_mul(4)?;
     let chunk = bytes.get(start..start + 4)?;
     Some(f32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-}
-
-fn read_packed_coord(bytes: &[u8], index: usize) -> Option<PackedCoord> {
-    let start = index.checked_mul(4)?;
-    let chunk = bytes.get(start..start + 4)?;
-    Some(u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
 }

@@ -84,7 +84,7 @@ class HexgtMctsSession:
             c_puct=c_puct,
             temperature=temperature,
             seed=0 if seed is None else int(seed),
-            evaluator=inference.evaluate_graph_facts,
+            evaluator=inference.evaluate_featurized_batch,
             virtual_batch_size=virtual_batch_size,
             active_root_limit=active_root_limit,
             root_dirichlet_total_alpha=root_dirichlet_total_alpha,

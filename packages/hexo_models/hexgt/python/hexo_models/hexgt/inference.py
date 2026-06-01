@@ -18,9 +18,7 @@ from typing import Any, Sequence
 import numpy as np
 import torch
 
-from .collate import collate_graphs
 from .constants import DEFAULT_CANDIDATE_RADIUS
-from .features import build_graph_tensors
 from .graph_build import batch_from_states
 from .losses import decode_binned_value, segment_log_softmax
 
@@ -47,49 +45,57 @@ class HexgtInference:
         return out, batch
 
     @torch.no_grad()
-    def evaluate_graph_facts(self, payload: dict) -> dict[str, Any]:
-        """MCTS evaluator callback (the Rust `mcts_eval` byte contract).
+    def evaluate_featurized_batch(self, payload: dict) -> dict[str, Any]:
+        """MCTS evaluator callback consuming a RUST-featurized + collated batch
+        (the parallel `features.rs` path — no per-graph Python featurization).
 
-        The Rust session builds one graph-facts dict per unique leaf state and
-        hands them here as ``payload["graph_facts"]``. We featurize + collate
-        (the EXACT training graph path), forward, and return byte buffers:
-
-        - ``values_bytes``: f32[num_graphs], current-player value.
-        - ``candidate_action_ids_bytes``: u32, packed coords, CSR-concatenated.
-        - ``candidate_row_offsets``: int[num_graphs+1], CSR segment offsets.
-        - ``priors_bytes``: f32, per-candidate softmax priors, CSR-aligned.
-
-        Candidate ids come straight from the collated batch (CSR order), so the
-        Rust side zips ids<->priors positionally and never re-derives order.
+        `payload` carries the collated batch as ZERO-COPY buffer-protocol objects
+        (see `features.rs::collated_to_py_dict`): `node_feat`/`edge_attr` (f32),
+        `node_type`/`node_graph`/`edge_index` (i64, edge_index packed 2*E)/
+        `edge_type`/`candidate_index`/`candidate_graph` (i64), plus scalar sizes.
+        Candidate ids stay Rust-side, so we return ONLY `{values_bytes,
+        priors_bytes}` with priors in the SAME packed candidate order Rust built
+        (zipped positionally there via `candidate_counts`). Featurization (the
+        former Python bottleneck) now runs in Rust rayon; this path is just
+        frombuffer + GNN forward + per-graph softmax.
         """
 
-        facts_list = list(payload["graph_facts"])
-        if not facts_list:
-            return {
-                "values_bytes": b"",
-                "candidate_action_ids_bytes": b"",
-                "candidate_row_offsets": [0],
-                "priors_bytes": b"",
-            }
-        graphs = [build_graph_tensors(f) for f in facts_list]
-        batch = collate_graphs(graphs)
+        num_graphs = int(payload["num_graphs"])
+        tc = int(payload["total_candidates"])
+        if num_graphs == 0 or tc == 0:
+            return {"values_bytes": b"", "priors_bytes": b""}
+        tn = int(payload["total_nodes"])
+        te = int(payload["total_edges"])
+        fd = int(payload["feat_dim"])
+        ad = int(payload["attr_dim"])
+        node_feat = torch.frombuffer(payload["node_feat"], dtype=torch.float32).reshape(tn, fd)
+        node_type = torch.frombuffer(payload["node_type"], dtype=torch.int64)
+        node_graph = torch.frombuffer(payload["node_graph"], dtype=torch.int64)
+        if te:
+            edge_index = torch.frombuffer(payload["edge_index"], dtype=torch.int64).reshape(2, te)
+            edge_type = torch.frombuffer(payload["edge_type"], dtype=torch.int64)
+            edge_attr = torch.frombuffer(payload["edge_attr"], dtype=torch.float32).reshape(te, ad)
+        else:
+            edge_index = torch.zeros((2, 0), dtype=torch.int64)
+            edge_type = torch.zeros((0,), dtype=torch.int64)
+            edge_attr = torch.zeros((0, ad), dtype=torch.float32)
+        candidate_index = torch.frombuffer(payload["candidate_index"], dtype=torch.int64)
+        candidate_graph = torch.frombuffer(payload["candidate_graph"], dtype=torch.int64)
+        batch = {
+            "node_feat": node_feat, "node_type": node_type, "node_graph": node_graph,
+            "edge_index": edge_index, "edge_type": edge_type, "edge_attr": edge_attr,
+            "candidate_index": candidate_index, "candidate_graph": candidate_graph,
+            "num_graphs": num_graphs,
+        }
         out, dev_batch = self.forward_batch(batch)
-        num_graphs = int(batch["num_graphs"])
-        cand_graph = dev_batch["candidate_graph"]
+        cg = dev_batch["candidate_graph"]
         policy = out["policy"].float()
-        log_probs = segment_log_softmax(policy, cand_graph, num_graphs)
+        log_probs = segment_log_softmax(policy, cg, num_graphs)
         priors = log_probs.exp().cpu().numpy().astype(np.float32, copy=False)
         values = decode_binned_value(out["value"].float()).cpu().numpy()
         values = np.clip(values, -1.0, 1.0).astype(np.float32, copy=False)
-        cand_ids = batch["candidate_ids"].cpu().numpy().astype(np.uint32, copy=False)
-        cand_graph_cpu = batch["candidate_graph"].cpu().numpy()
-
-        counts = np.bincount(cand_graph_cpu, minlength=num_graphs)
-        offsets = np.concatenate([[0], np.cumsum(counts)]).astype(np.int64)
         return {
             "values_bytes": np.ascontiguousarray(values).tobytes(),
-            "candidate_action_ids_bytes": np.ascontiguousarray(cand_ids).tobytes(),
-            "candidate_row_offsets": [int(o) for o in offsets],
             "priors_bytes": np.ascontiguousarray(priors).tobytes(),
         }
 
