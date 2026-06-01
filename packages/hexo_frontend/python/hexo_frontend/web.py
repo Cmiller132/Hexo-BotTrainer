@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import argparse
+import gzip
+import hashlib
 import json
 import os
 import re
 import tempfile
 from collections.abc import Callable
+from email.utils import formatdate
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
 from pathlib import Path
-from threading import Condition, RLock, Thread
+from threading import Condition, Lock, RLock, Thread
 from time import monotonic, perf_counter, time as wall_clock
 from typing import Any, ClassVar
 from urllib.parse import parse_qs, unquote, urlparse
@@ -51,6 +54,92 @@ BotFactory = Callable[[str, float], object]
 PLAYER_ROLES = ("player0", "player1")
 MANUAL_KIND = "manual"
 SEALBOT_PREFIX = "sealbot-"
+
+# --- Transfer efficiency (gzip + caching) -----------------------------------
+# The dashboard is often viewed over LAN/VPN, where uncompressed payloads and
+# per-request connections are slow. Responses below this size aren't worth
+# gzipping (the ~20-byte gzip header/overhead dominates).
+GZIP_MIN_BYTES = 600
+# Browser cache window for static assets. index.html cache-busts app.js/styles.css
+# with a ?v= query, so a few minutes of caching is safe and makes reloads ~free;
+# the ETag still forces revalidation (304, no body) once it expires.
+STATIC_MAX_AGE_SECONDS = 300
+# The training-run/list scans walk the run tree and open many .hxr files. The
+# history screen re-polls every 15s, so memoize the built payload briefly to bound
+# that work to at most once per interval regardless of poll/client count.
+TRAINING_CACHE_TTL_SECONDS = 3.0
+
+_static_lock = Lock()
+# name -> (mtime, (raw_bytes, gzipped_bytes, etag, last_modified, content_type))
+_static_cache: dict[str, tuple[float, tuple[bytes, bytes, str, str, str]]] = {}
+_training_cache_lock = Lock()
+_training_run_cache: dict[str, tuple[float, dict[str, object]]] = {}
+_training_runs_cache: list[tuple[float, dict[str, object]]] = []
+
+
+def _strong_etag(data: bytes) -> str:
+    return '"' + hashlib.sha1(data).hexdigest()[:20] + '"'
+
+
+def _static_entry(name: str) -> tuple[bytes, bytes, str, str, str] | None:
+    """Return (raw, gzipped, etag, last_modified, content_type) for a static asset.
+
+    Memoized by (name, mtime): the file is read, gzipped, and hashed at most once
+    per version, so serving it is just a dict lookup + socket write. Returns None
+    when the asset is missing.
+    """
+
+    resource = STATIC_ROOT.joinpath(name)
+    mtime: float | None
+    try:
+        mtime = Path(str(resource)).stat().st_mtime
+    except (OSError, TypeError, ValueError):
+        mtime = None
+    if mtime is not None:
+        with _static_lock:
+            hit = _static_cache.get(name)
+            if hit is not None and hit[0] == mtime:
+                return hit[1]
+    try:
+        raw = resource.read_bytes()
+    except (FileNotFoundError, IsADirectoryError, OSError):
+        return None
+    extension = name.rsplit(".", 1)[-1]
+    content_type = STATIC_TYPES.get(extension, "application/octet-stream")
+    entry = (
+        raw,
+        gzip.compress(raw, 6),
+        _strong_etag(raw),
+        formatdate(mtime, usegmt=True) if mtime else formatdate(usegmt=True),
+        content_type,
+    )
+    if mtime is not None:
+        with _static_lock:
+            _static_cache[name] = (mtime, entry)
+    return entry
+
+
+def _training_run_cached(name: str) -> dict[str, object]:
+    now = monotonic()
+    with _training_cache_lock:
+        hit = _training_run_cache.get(name)
+        if hit is not None and now - hit[0] < TRAINING_CACHE_TTL_SECONDS:
+            return hit[1]
+    payload = _training_run(name)  # heavy scan, kept outside the lock
+    with _training_cache_lock:
+        _training_run_cache[name] = (monotonic(), payload)
+    return payload
+
+
+def _training_runs_cached() -> dict[str, object]:
+    now = monotonic()
+    with _training_cache_lock:
+        if _training_runs_cache and now - _training_runs_cache[0][0] < TRAINING_CACHE_TTL_SECONDS:
+            return _training_runs_cache[0][1]
+    payload = _training_runs()
+    with _training_cache_lock:
+        _training_runs_cache[:] = [(monotonic(), payload)]
+    return payload
 
 
 class MoveConflict(ValueError):
@@ -492,6 +581,12 @@ def _player_payload(player_index: int, kind: str) -> dict[str, object]:
 
 class HexoPlayHandler(BaseHTTPRequestHandler):
     server_version = "hexo-frontend-play/0.1"
+    # HTTP/1.1 keep-alive: reuse one TCP connection for index.html + app.js +
+    # styles.css + the API calls instead of a fresh connection per request -- the
+    # big win over high-latency LAN/VPN links. Every response sets Content-Length
+    # (required for keep-alive); 304s carry no body.
+    protocol_version = "HTTP/1.1"
+    timeout = 30  # reap idle keep-alive connections so handler threads don't pile up
     controller: ClassVar[ManualMatchController]
 
     def do_GET(self) -> None:
@@ -506,10 +601,10 @@ class HexoPlayHandler(BaseHTTPRequestHandler):
             elif path == "/api/adapters":
                 self._send_json(self.controller.adapters())
             elif path == "/api/training/runs":
-                self._send_json(_training_runs())
+                self._send_json(_training_runs_cached())
             elif path == "/api/training/run":
                 query = parse_qs(parsed.query)
-                self._send_json(_training_run(str(query.get("name", [""])[0])))
+                self._send_json(_training_run_cached(str(query.get("name", [""])[0])))
             elif path == "/api/training/file":
                 query = parse_qs(parsed.query)
                 self._send_training_file(
@@ -560,16 +655,75 @@ class HexoPlayHandler(BaseHTTPRequestHandler):
             return {}
         return json.loads(self.rfile.read(length).decode("utf-8"))
 
-    def _send_json(self, payload: object, status: HTTPStatus = HTTPStatus.OK) -> None:
-        encoded = json.dumps(payload).encode("utf-8")
+    def _accepts_gzip(self) -> bool:
+        return "gzip" in (self.headers.get("Accept-Encoding") or "").lower()
+
+    def _send_body(
+        self,
+        body: bytes,
+        content_type: str,
+        status: HTTPStatus = HTTPStatus.OK,
+        *,
+        cache_control: str | None = None,
+        etag: str | None = None,
+        last_modified: str | None = None,
+        gzip_body: bytes | None = None,
+        allow_gzip: bool = True,
+    ) -> None:
+        """Write one response with conditional-GET (304), gzip, and Content-Length.
+
+        ``gzip_body`` lets callers pass pre-compressed bytes (static assets) so they
+        are not re-gzipped per request; otherwise the body is gzipped on the fly when
+        the client accepts it and it is large enough to be worth it.
+        """
+
+        if etag is not None and status == HTTPStatus.OK:
+            inm = self.headers.get("If-None-Match")
+            if inm and any(etag == token.strip() for token in inm.split(",")):
+                self.send_response(HTTPStatus.NOT_MODIFIED)
+                self.send_header("ETag", etag)
+                if cache_control:
+                    self.send_header("Cache-Control", cache_control)
+                self.end_headers()
+                return
+
+        encoding: str | None = None
+        if allow_gzip and self._accepts_gzip():
+            if gzip_body is not None:
+                body, encoding = gzip_body, "gzip"
+            elif len(body) >= GZIP_MIN_BYTES:
+                body, encoding = gzip.compress(body, 6), "gzip"
+
         self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(encoded)))
+        self.send_header("Content-Type", content_type)
+        if encoding is not None:
+            self.send_header("Content-Encoding", encoding)
+            self.send_header("Vary", "Accept-Encoding")
+        if cache_control:
+            self.send_header("Cache-Control", cache_control)
+        if etag:
+            self.send_header("ETag", etag)
+        if last_modified:
+            self.send_header("Last-Modified", last_modified)
+        self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         try:
-            self.wfile.write(encoded)
+            self.wfile.write(body)
         except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
             return
+
+    def _send_json(self, payload: object, status: HTTPStatus = HTTPStatus.OK) -> None:
+        encoded = json.dumps(payload).encode("utf-8")
+        # ETag + revalidation lets the history screen's periodic re-poll receive a 304
+        # (no body) whenever the run data is unchanged since the last fetch.
+        etag = _strong_etag(encoded) if status == HTTPStatus.OK else None
+        self._send_body(
+            encoded,
+            "application/json; charset=utf-8",
+            status,
+            cache_control="no-cache" if etag else None,
+            etag=etag,
+        )
 
     def _error_payload(self, message: str) -> dict[str, object]:
         try:
@@ -581,24 +735,22 @@ class HexoPlayHandler(BaseHTTPRequestHandler):
         if (not name) or ("/" in name) or ("\\" in name) or name.startswith("."):
             self.send_error(HTTPStatus.NOT_FOUND)
             return
-
-        resource = STATIC_ROOT.joinpath(name)
-        try:
-            encoded = resource.read_bytes()
-        except (FileNotFoundError, IsADirectoryError):
+        entry = _static_entry(name)
+        if entry is None:
             self.send_error(HTTPStatus.NOT_FOUND)
             return
-
-        extension = name.rsplit(".", 1)[-1]
-        self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", STATIC_TYPES.get(extension, "application/octet-stream"))
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("Content-Length", str(len(encoded)))
-        self.end_headers()
-        try:
-            self.wfile.write(encoded)
-        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
-            return
+        raw, gz, etag, last_modified, content_type = entry
+        # Cacheable (index.html cache-busts JS/CSS via ?v=) with ETag revalidation, and
+        # served pre-gzipped -- so a reload is a 304 (no body) or a cache hit, not a
+        # fresh ~173 KB download.
+        self._send_body(
+            raw,
+            content_type,
+            cache_control=f"public, max-age={STATIC_MAX_AGE_SECONDS}",
+            etag=etag,
+            last_modified=last_modified,
+            gzip_body=gz,
+        )
 
     def _send_training_file(self, run_name: str, artifact_path: str) -> None:
         path = _resolve_run_path(run_name, artifact_path)
@@ -606,14 +758,14 @@ class HexoPlayHandler(BaseHTTPRequestHandler):
             self.send_error(HTTPStatus.NOT_FOUND)
             return
         encoded = path.read_bytes()
-        self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", ARTIFACT_TYPES.get(path.suffix.lower(), "application/octet-stream"))
-        self.send_header("Content-Length", str(len(encoded)))
-        self.end_headers()
-        try:
-            self.wfile.write(encoded)
-        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
-            return
+        suffix = path.suffix.lower()
+        # Only gzip text artifacts (.json/.jsonl); .png/.hxr are already compact and
+        # would just waste CPU.
+        self._send_body(
+            encoded,
+            ARTIFACT_TYPES.get(suffix, "application/octet-stream"),
+            allow_gzip=suffix in {".json", ".jsonl"},
+        )
 
 
 def _query_int(value: str | None) -> int | None:
