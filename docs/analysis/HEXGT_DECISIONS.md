@@ -143,6 +143,41 @@ plan's premise that a *small* n retains ~100% does NOT hold for Hexo: strong
 play genuinely uses far tenuki/spread moves spread across the whole legal radius.
 There is no intermediate n with both ~100% coverage and a small candidate set.
 
+## Phase 4 — expand-time graph construction + HexgtTrainer
+
+**Recompute-at-expand (`expand.py`)**: reconstruct each compact raw-fact row's
+position by replaying its placement history through the engine, build the graph
+via the SHARED Rust path, and assemble targets. The compact shard schema is
+REUSED unchanged (no new SCHEMA_VERSION) — `dense_cnn.compact_io.read_compact_shard`
+reads them, and `dense_cnn`'s replay/shuffle is model-agnostic, so only the
+expand step (graphs vs planes) is hexgt-specific.
+
+**Target construction (gap C)** reuses dense_cnn's already-finalized facts
+(value / opp_policy / short-term-value are per-per-placement-turn) — the only
+remap is the policy/opp visit distribution from action-id space onto the
+candidate nodes in CSR order. At candidate_radius=8, candidate≡legal so dropped
+visit mass is ~0 (validated: 0.000% over 954 real rows; n=2 drops 7.6%, matching
+Phase-1 coverage). Value round-trip 954/954.
+
+**D6 augmentation SKIPPED** — the model is D6-invariant by construction, so
+rotating the data yields identical training signal (augmentation is redundant).
+This is the payoff of the Phase-3 invariance decision; the equivariance test
+guarantees the symmetry without 12× data.
+
+**`HexgtTrainer`** mirrors dense_cnn discipline: AdamW + linear warmup, AMP
+autocast (cuda), grad-clip, `hexgt_loss` with the configured weights, per-
+component loss reporting, and a KataGo-style `HexgtTrainState` that round-trips
+through the checkpoint (`to_dict`/`from_mapping`, `sample_count`). `optimizer_step`
++ `train_on_rows`/`train_on_shards` drive the CPU gate; the full replay-window /
+train-bucket integration (reusing dense_cnn's model-agnostic replay) is wired in
+the GPU phases. The plugin now returns the trainer.
+
+**Gates met:** byte-stable graph batches; targets consistent with engine facts
+(value round-trip 100%, n=8 zero dropped mass); a CPU training pass decreases
+loss. Full suite 177 passed.
+
+---
+
 ## Phase 3 — dynamic GNN + transformer model + D6 equivariance
 
 **D6 handling (gap D) — architectural INVARIANCE, not augmentation.** All node

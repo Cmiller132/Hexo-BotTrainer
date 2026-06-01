@@ -1,0 +1,171 @@
+"""HexgtTrainer — training loop with dense_cnn discipline for the graph model.
+
+Mirrors `DenseCNNTrainer`'s discipline (AdamW, AMP autocast, grad-clip, the
+65-bin value loss, per-component loss reporting, KataGo-style train-state that
+round-trips through the checkpoint) but consumes packed-graph batches and uses
+the dynamic per-graph policy CE (`losses.hexgt_loss`). Inputs are recomputed at
+expand time from the compact raw-fact shards (`expand.py`).
+
+This Phase-4 trainer owns the optimizer step, the warmup LR schedule, and a
+shard-driven training pass sufficient for the CPU gate ("a CPU training pass
+decreases loss"). The full KataGo replay-window / train-bucket integration
+(reusing dense_cnn's model-agnostic replay/shuffle) is wired in the GPU phases.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Mapping, Sequence
+
+import torch
+
+from .expand import build_training_batch
+from .losses import hexgt_loss
+
+
+@dataclass
+class HexgtTrainState:
+    """KataGo-style train-bucket state persisted in the checkpoint."""
+
+    global_step: int = 0
+    global_step_samples: int = 0
+    total_num_data_rows: int = 0
+    data_files_used: set[str] = field(default_factory=set)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "global_step": int(self.global_step),
+            "global_step_samples": int(self.global_step_samples),
+            "total_num_data_rows": int(self.total_num_data_rows),
+            "data_files_used": sorted(self.data_files_used),
+        }
+
+    @classmethod
+    def from_mapping(cls, state: Mapping[str, Any] | None) -> "HexgtTrainState":
+        if not state:
+            return cls()
+        return cls(
+            global_step=int(state.get("global_step", 0)),
+            global_step_samples=int(state.get("global_step_samples", 0)),
+            total_num_data_rows=int(state.get("total_num_data_rows", 0)),
+            data_files_used=set(str(p) for p in state.get("data_files_used", ())),
+        )
+
+
+class HexgtTrainer:
+    def __init__(self, *, model: torch.nn.Module, config: Any, optimizer: torch.optim.Optimizer) -> None:
+        self.model = model
+        self.config = config
+        self.optimizer = optimizer
+        self.train_state = HexgtTrainState()
+        self.training_batch_size = int(config.training.batch_size)
+        self.inference_batch_size = 1
+        self.selfplay_batch_size = 1
+        self.mcts_virtual_batch_size: int | None = None
+        self._base_lr = float(config.training.learning_rate)
+        self._warmup_steps = max(0, int(config.training.warmup_steps))
+        self._max_grad_norm = float(config.training.max_grad_norm)
+        self._amp = bool(config.training.amp)
+        self._horizons = tuple(int(h) for h in config.architecture.short_term_value_horizons)
+        self._candidate_radius = int(config.architecture.candidate_radius)
+        self._weights = dict(
+            policy_weight=config.training.policy_weight,
+            value_weight=config.training.value_weight,
+            opp_policy_weight=config.training.opp_policy_weight,
+            short_term_value_weight=config.training.short_term_value_weight,
+        )
+
+    @property
+    def sample_count(self) -> int:
+        return int(self.train_state.total_num_data_rows)
+
+    def load_train_state(self, state: Mapping[str, Any] | None) -> None:
+        self.train_state = HexgtTrainState.from_mapping(state)
+
+    def _lr_at_step(self, step: int) -> float:
+        if self._warmup_steps > 0 and step < self._warmup_steps:
+            return self._base_lr * float(step + 1) / float(self._warmup_steps)
+        return self._base_lr
+
+    def _set_lr(self, lr: float) -> None:
+        for group in self.optimizer.param_groups:
+            group["lr"] = lr
+
+    def optimizer_step(self, batch: Mapping[str, Any], targets: Mapping[str, Any]) -> dict[str, float]:
+        """One optimizer step on a packed-graph batch; returns loss components."""
+
+        self.model.train()
+        device = next(self.model.parameters()).device
+        batch = _to_device(batch, device)
+        targets = _to_device(targets, device)
+
+        lr = self._lr_at_step(int(self.train_state.global_step))
+        self._set_lr(lr)
+        self.optimizer.zero_grad(set_to_none=True)
+
+        use_amp = self._amp and device.type == "cuda"
+        with torch.autocast(device_type=device.type, enabled=use_amp):
+            outputs = self.model(batch)
+            loss, components = hexgt_loss(outputs, targets, **self._weights)
+
+        loss.backward()
+        if self._max_grad_norm > 0:
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self._max_grad_norm)
+        self.optimizer.step()
+
+        self.train_state.global_step += 1
+        self.train_state.global_step_samples += int(batch["num_graphs"])
+        report = {k: float(v.detach()) for k, v in components.items()}
+        report["lr"] = lr
+        report["dropped_policy_mass"] = float(targets.get("_dropped_policy_mass", 0.0))
+        return report
+
+    def train_on_rows(
+        self,
+        rows: Sequence[Any],
+        *,
+        batch_size: int | None = None,
+        max_steps: int | None = None,
+        epochs: int = 1,
+    ) -> list[dict[str, float]]:
+        """Expand + train over compact rows (CPU gate path). Returns loss history."""
+
+        bs = int(batch_size or self.training_batch_size)
+        history: list[dict[str, float]] = []
+        step = 0
+        for _ in range(epochs):
+            for start in range(0, len(rows), bs):
+                chunk = rows[start : start + bs]
+                if not chunk:
+                    continue
+                batch, targets = build_training_batch(
+                    chunk, n=self._candidate_radius, horizons=self._horizons
+                )
+                history.append(self.optimizer_step(batch, targets))
+                self.train_state.total_num_data_rows += len(chunk)
+                step += 1
+                if max_steps is not None and step >= max_steps:
+                    return history
+        return history
+
+    def train_on_shards(self, shard_paths: Sequence[Path], **kwargs: Any) -> list[dict[str, float]]:
+        """Read compact shards and train over their rows (reuses dense_cnn IO)."""
+
+        from hexo_models.dense_cnn.compact_io import read_compact_shard
+
+        rows: list[Any] = []
+        for path in shard_paths:
+            rows.extend(read_compact_shard(Path(path)))
+            self.train_state.data_files_used.add(str(Path(path).resolve()))
+        return self.train_on_rows(rows, **kwargs)
+
+    def close(self) -> None:
+        pass
+
+
+def _to_device(d: Mapping[str, Any], device: torch.device) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for k, v in d.items():
+        out[k] = v.to(device) if isinstance(v, torch.Tensor) else v
+    return out

@@ -22,6 +22,7 @@ from hexo_train.components import ComponentOverrides
 from .architecture import HexgtNetwork
 from .checkpoints import HexgtCheckpointLoader, HexgtCheckpointSaver
 from .config import parse_hexgt_config
+from .trainer import HexgtTrainer
 
 
 class HexgtPlugin:
@@ -65,10 +66,9 @@ class HexgtPlugin:
             lr=parsed.training.learning_rate,
             weight_decay=parsed.training.weight_decay,
         )
-        # The trainer is added in Phase 4 (HexgtTrainer); until then the pipeline
-        # can still load/save checkpoints and hold the optimizer.
+        trainer = HexgtTrainer(model=model, config=parsed, optimizer=optimizer)
         return ComponentOverrides(
-            trainer=None,
+            trainer=trainer,
             optimizer=optimizer,
             checkpoint_loader=HexgtCheckpointLoader(),
             checkpoint_saver=HexgtCheckpointSaver(),
