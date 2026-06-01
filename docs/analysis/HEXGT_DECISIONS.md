@@ -61,9 +61,45 @@ unpack-on-demand on the CPU worker pool over holding expanded forms in RAM (alig
 with recompute-at-expand: shards stay raw-fact/compact, graph tensors built on the
 fly, no big expanded-graph cache). Compress where it helps. Trade CPU cycles (now
 parallelized across 32 threads) for RAM, not the reverse. Watch free RAM; keep
-pool/cache sizes config-driven. (Concrete blueprint — file-level tasks + config
-knobs — synthesized by the `hexgt-async-mcts-blueprint` workflow; appended below
-once implemented.)
+pool/cache sizes config-driven. **Implementation blueprint** (synthesized by the `hexgt-async-mcts-blueprint`
+workflow — 3 parallel audits + synthesis):
+
+- **Architecture:** batcher in Rust = 1 GIL-holding evaluator thread + N GIL-free
+  rayon selection workers (one per concurrent game). Workers walk their tree,
+  cache-check, on miss push a `PooledLeafRequest` + apply virtual loss + continue;
+  the evaluator coalesces across all games to `max_batch` OR `latency_window_ms`
+  (whichever first; partial-flush mandatory), takes the GIL once, forwards, routes
+  `Arc<RustEvaluation>` back over per-tree channels.
+- **KEY FINDING (reshapes priority):** the async batcher ALONE does not fix
+  throughput — it only overlaps featurization across games, and the GIL-held
+  evaluator still serializes the per-graph Python featurization that is ~89% of
+  the cost. **The decisive win is moving `build_graph_tensors` featurization into
+  Rust rayon** (parallelizes the 89% across 32 threads, removes the GIL
+  serialization, and also speeds the sync path + BC training + eval).
+- **Phases:** P0 baseline probe (have it); P1 minimal async batcher w/ existing
+  Python featurization (overlap-only, modest); **P2 Rust featurizer (the real
+  win)**; P3 size-bucketing + 32-thread tuning; P4 trainer process-pool.
+- **Config (`[mcts.async]` + `[memory]`, 32t/12GB):** `concurrent_games=24`,
+  `worker_threads=30`, `max_batch_size=256`, **`latency_window_ms=8`** (NOT 100 —
+  starves a fast GPU), `max_in_flight=8`, `max_in_flight_global=1536`,
+  `bucket_boundaries=[1,32,128,256,500]`, `eval_cache_max_entries=200000` (bounded
+  LRU — a P1 PREREQUISITE; the cache is currently unbounded), `log_peak_memory`,
+  `memory_pressure_warn_mb=4096`.
+- **Deterministic eval path:** reuse the existing synchronous
+  `run_searches_to_targets` (single game, fixed seed/batch, no virtual-loss races)
+  for vs-dense_cnn/SealBot so comparisons are repeatable.
+- **Mandatory gates:** featurizer Rust↔Python golden parity test (1e-6) BEFORE any
+  training (a mismatch silently poisons the model — the dense_cnn D6 bug class);
+  single-leaf latency-flush liveness test; bounded LRU cache before scaling games.
+
+**SEQUENCING DECISION (autonomous, justified):** implement the **Rust featurizer
+FIRST** (blueprint P2), not the async batcher (P1). Rationale: the blueprint shows
+featurization is THE bottleneck and the async batcher gives only overlap gains
+until it's parallel; the featurizer is lower-risk (pure-Rust rayon + a parity gate
+vs GIL/channel/thread concurrency), and it immediately speeds the already-working
+synchronous self-play path AND BC training AND eval — fulfilling the "parallelize
+featurization across 32 threads" directive directly. The async batcher (P1, GPU
+saturation) is built on top once featurization is parallel.
 
 ---
 
