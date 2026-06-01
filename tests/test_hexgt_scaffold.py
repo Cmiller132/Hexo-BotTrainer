@@ -203,7 +203,7 @@ def test_config_defaults_and_candidate_radius() -> None:
 
     cfg = parse_hexgt_config({"architecture": {"candidate_radius": 4}})
     assert cfg.architecture.candidate_radius == 4
-    assert cfg.architecture.token_dim == 128
+    assert cfg.architecture.token_dim == 168
     assert cfg.training.warmup_steps == 1000
 
 

@@ -19,11 +19,11 @@ device = "cuda"
 [model.config.architecture]
 # Dynamic graph model shape (sized to ~2.1M params in Phase 3).
 node_feature_dim = 32
-token_dim = 128
+token_dim = 168
 gnn_layers = 3
 ctx_layers = 3
 attention_heads = 4
-ffn_dim = 256
+ffn_dim = 336
 dropout = 0.0
 short_term_value_horizons = [1, 4, 8]
 # The single candidate-set neighborhood radius n (active windows UNION n-radius),

@@ -143,6 +143,50 @@ plan's premise that a *small* n retains ~100% does NOT hold for Hexo: strong
 play genuinely uses far tenuki/spread moves spread across the whole legal radius.
 There is no intermediate n with both ~100% coverage and a small candidate set.
 
+## Phase 3 — dynamic GNN + transformer model + D6 equivariance
+
+**D6 handling (gap D) — architectural INVARIANCE, not augmentation.** All node
+and edge features are D6-INVARIANT: NO raw axial coords, NO window axis labels
+(both rotate under D6). The one coord-derived feature is `center_distance`
+(max-norm from the opening (0,0), which D6 fixes). Geometry rides on the graph
+STRUCTURE (adjacency + window-membership edges) + an invariant per-edge
+hex-distance. Since every op (relational message passing, attention) is
+permutation-equivariant and inputs are invariant, the model is D6-invariant by
+construction → the §6.5 equivariance test passes EXACTLY for all 12 elements with
+no augmentation. This is the principled choice for a rotationally-symmetric game
+and avoids the dense_cnn D6-corruption class of bugs entirely. `d6.py` re-derives
+the 12-element group from cube coords (tested: group laws + distance preservation).
+
+**Node features (gap A) — finalized, D6-invariant** (`constants.py` / `features.py`,
+F=32): type one-hot, owner, center_distance, stone recency, window count one-hot
++ empty-count, candidate completion/`nwin` tactical flags (from window-membership
+edges), side-node phase/counts/move-number. Edge attr = edge-type one-hot ++
+hex-distance (`EDGE_ATTR_DIM=6`).
+
+**Model body (§6.3):** `RelationalMessagePassing` (per-edge-type linear via einsum,
+edge-attr-aware, mean-aggregated, residual+LN) ×`gnn_layers`, then
+`GraphTransformerLayer` (per-graph context self-attention over {side,stone,window}
++ candidate→context cross-attention) ×`ctx_layers`. Attention is computed
+per-graph over the contiguous packed slices (cost O(#ctx²+#cand·#ctx)/graph, not
+O(N²)) — the Python per-graph loop is the Phase-5 vectorization lever. Value reads
+out from the SIDE hub node (one per graph).
+
+**Hyperparameters (gap H) — sized to ~2.1M:** `token_dim=168, ffn=336,
+gnn_layers=3, ctx_layers=3, heads=4` → **2,073,214 params** (1.3% under the 96x8
+baseline's ~2.1M). Verified by `sum(p.numel())` (test gate 1.89–2.31M).
+
+**Collation (gap I):** `collate.py` packs per-graph `GraphTensors` into one
+disjoint graph (contiguous per-graph node slices, offset edges/candidates,
+`candidate_graph` segments, `candidate_ids` CSR). `graph_build.py` ties Rust facts
+→ featurizer → collate (shared by training + search). PyO3 maps `Vec<u8>` → Python
+`bytes`, so the featurizer coerces the u8 columns via `np.frombuffer`.
+
+**Tests (all green):** D6 equivariance (12 elements, end-to-end via rotated
+replays), param budget, real-graph forward, overfit a tiny batch, candidate↔priors
+CSR ordering, checkpoint round-trip + incompat detection. Full suite 174 passed.
+
+---
+
 **DECISION (candidate-set policy for the MVP):** default `candidate_radius`
 raised to **n = 8 (candidate_set ≡ engine legal set)** for the from-scratch MVP,
 overriding the plan's n=2 default. Rationale: 100% coverage → no move-vocabulary

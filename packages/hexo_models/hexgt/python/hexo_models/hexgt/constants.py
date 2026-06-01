@@ -57,41 +57,48 @@ MIN_CANDIDATE_RADIUS = 2
 MAX_CANDIDATE_RADIUS = 8
 ENGINE_LEGAL_RADIUS = 8
 
-# --- Node feature layout (gap A) — PROVISIONAL, finalized in Phase 4 expand ---
+# --- Node feature layout (gap A) — D6-INVARIANT (see d6.py / features.py) ------
 # Unified per-node feature vector of fixed width NODE_FEATURE_DIM. Slots are
 # type-routed: a node only fills the slots relevant to its type, the rest are 0.
-# The contract only requires the Rust/Python graph builder and the model's input
-# projection to agree on this layout. Coordinates are center-relative axial,
-# scaled by COORD_SCALE so the unbounded board never saturates a fixed range.
+#
+# ALL features are D6-INVARIANT: there are NO raw axial coords and NO window axis
+# labels (both rotate under D6). Geometry is carried by the graph STRUCTURE
+# (adjacency / window-membership edges) + the invariant per-edge hex-distance
+# (see EDGE_ATTR_DIM). This makes the model D6-invariant by construction, so the
+# equivariance test passes exactly for all 12 elements with no augmentation.
+# `center_distance` (max-norm from the opening (0,0)) is D6-invariant (D6 fixes
+# the origin) and is the one coord-derived scalar retained.
 NODE_FEATURE_DIM = 32
-COORD_SCALE = 16.0            # divide relative axial coords by this before use
+COORD_SCALE = 16.0            # normalization scale for distances / counts
+COUNT_SCALE = 32.0           # normalization scale for stone/move counts
 
-# Named feature offsets (half-open ranges where noted).
-F_TYPE_ONEHOT = 0            # [0:4)  node-type one-hot
+F_TYPE_ONEHOT = 0            # [0:4)  node-type one-hot (side, stone, candidate, window)
 F_OWNER_OWN = 4             # 1 if node belongs to side-to-move (stone/window)
 F_OWNER_OPP = 5             # 1 if node belongs to the opponent
-F_REL_Q = 6                # center-relative axial q / COORD_SCALE
-F_REL_R = 7                # center-relative axial r / COORD_SCALE
-F_REL_S = 8                # center-relative axial s (= -q-r) / COORD_SCALE
-F_STONE_RECENCY = 9        # stone hist_idx normalized to [0,1]
-F_WIN_COUNT_ONEHOT = 10    # [10:13) window count one-hot (3,4,5)
-F_WIN_AXIS_ONEHOT = 13     # [13:16) window axis one-hot (Q,R,QR)
-F_WIN_EMPTY_CELLS = 16     # window empty-cell count / WINDOW_LEN
-F_CAND_NWIN_OWN = 17       # candidate: # active own windows through this cell (norm)
-F_CAND_NWIN_OPP = 18       # candidate: # active opp windows through this cell (norm)
-F_CAND_COMPLETE_OWN = 19   # candidate completes a count-5 own window (winning move)
-F_CAND_COMPLETE_OPP = 20   # candidate completes a count-5 opp window (must-block)
-F_SIDE_TO_MOVE = 21        # side node: side-to-move indicator
-F_SIDE_PHASE_ONEHOT = 22   # [22:25) side node: turn-phase one-hot (Opening/First/Second)
-F_SIDE_STONES_OWN = 25     # side node: own stone count (norm)
-F_SIDE_STONES_OPP = 26     # side node: opp stone count (norm)
-F_SIDE_MOVE_NUMBER = 27    # side node: move number (norm)
-# [28:32) reserved for Phase 4 finalization.
+F_CENTER_DISTANCE = 6      # max-norm(coord) / COORD_SCALE (D6-invariant)
+F_STONE_RECENCY = 7        # stone hist_idx normalized to [0,1]
+F_WIN_COUNT_ONEHOT = 8     # [8:11) window count one-hot (3,4,5)
+F_WIN_EMPTY_CELLS = 11     # window empty-cell count / WINDOW_LEN
+F_CAND_COMPLETE_OWN = 12   # candidate completes a count-5 own window (winning move)
+F_CAND_COMPLETE_OPP = 13   # candidate completes a count-5 opp window (must-block)
+F_CAND_NWIN_OWN = 14       # candidate: # active own windows through this cell (norm)
+F_CAND_NWIN_OPP = 15       # candidate: # active opp windows through this cell (norm)
+F_SIDE_PHASE_ONEHOT = 16   # [16:19) side node: turn-phase one-hot (Opening/First/Second)
+F_SIDE_STONES_OWN = 19     # side node: own stone count (norm)
+F_SIDE_STONES_OPP = 20     # side node: opp stone count (norm)
+F_SIDE_MOVE_NUMBER = 21    # side node: move number (norm)
+# [22:32) reserved.
 
-# --- Default GNN/transformer hyperparameters (gap H) — sized in Phase 3 -------
-# Provisional defaults aiming at the ~2.1M-param budget (verified in Phase 3).
-DEFAULT_TOKEN_DIM = 128
+# --- Edge attributes (D6-invariant) -------------------------------------------
+# Per-edge feature vector: edge-type one-hot ++ endpoint hex-distance (invariant).
+EDGE_ATTR_DIM = NUM_EDGE_TYPES + 1  # NUM_EDGE_TYPES defined above
+EDGE_ATTR_DIST = NUM_EDGE_TYPES     # offset of the hex-distance scalar
+
+# --- Default GNN/transformer hyperparameters (gap H) — sized to ~2.1M params ---
+# Verified by sum(p.numel()) in Phase 3 to land within ~10% of the running 96x8
+# baseline (~2.1M). token_dim 168 / ffn 336, 3 GNN + 3 transformer layers.
+DEFAULT_TOKEN_DIM = 168
 DEFAULT_GNN_LAYERS = 3
 DEFAULT_CTX_LAYERS = 3
 DEFAULT_ATTENTION_HEADS = 4
-DEFAULT_FFN_DIM = 256
+DEFAULT_FFN_DIM = 336

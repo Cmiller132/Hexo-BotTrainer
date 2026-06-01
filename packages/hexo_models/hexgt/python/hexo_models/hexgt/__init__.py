@@ -13,13 +13,18 @@ pipeline (drop-in PIPELINE compatibility, not tensor-shape matching). See
 """
 
 from .architecture import HexgtNetwork
+from .collate import collate_graphs
 from .config import HexgtConfig, parse_hexgt_config
 from .constants import (
+    DEFAULT_CANDIDATE_RADIUS,
+    EDGE_ATTR_DIM,
     NODE_FEATURE_DIM,
     NUM_EDGE_TYPES,
     NUM_NODE_TYPES,
     VALUE_BINS,
 )
+from .d6 import D6_SIZE, transform_coord
+from .features import GraphTensors, build_graph_tensors
 from .losses import (
     binned_value_loss,
     decode_binned_value,
@@ -29,6 +34,10 @@ from .losses import (
 )
 
 __all__ = [
+    "D6_SIZE",
+    "DEFAULT_CANDIDATE_RADIUS",
+    "EDGE_ATTR_DIM",
+    "GraphTensors",
     "HexgtConfig",
     "HexgtNetwork",
     "NODE_FEATURE_DIM",
@@ -36,9 +45,12 @@ __all__ = [
     "NUM_NODE_TYPES",
     "VALUE_BINS",
     "binned_value_loss",
+    "build_graph_tensors",
+    "collate_graphs",
     "decode_binned_value",
     "hexgt_loss",
     "parse_hexgt_config",
     "scalar_to_binned_target",
     "segment_softmax_cross_entropy",
+    "transform_coord",
 ]

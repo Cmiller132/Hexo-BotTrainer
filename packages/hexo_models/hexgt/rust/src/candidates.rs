@@ -19,7 +19,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use std::collections::HashMap;
 
-use hexo_engine::{pack_coord, Axis, HexCoord, HexoState as RustHexoState, Player};
+use hexo_engine::{pack_coord, Axis, HexCoord, HexoState as RustHexoState, Player, TurnPhase};
 
 // Node type ids (mirror of hexgt/python/.../constants.py).
 pub const NODE_SIDE: u8 = 0;
@@ -373,6 +373,19 @@ pub fn hexgt_graph_facts(py: Python<'_>, state: &Bound<'_, PyAny>, n: i64) -> Py
     let dict = PyDict::new(py);
     dict.set_item("n", n)?;
     dict.set_item("used_legal_fallback", g.used_legal_fallback)?;
+
+    // Global context for the SIDE node + sample targets.
+    let meta = PyDict::new(py);
+    let phase_idx: u8 = match state.phase() {
+        TurnPhase::Opening => 0,
+        TurnPhase::FirstStone => 1,
+        TurnPhase::SecondStone { .. } => 2,
+    };
+    meta.set_item("phase", phase_idx)?;
+    meta.set_item("placements", state.placements_made())?;
+    meta.set_item("current_player", state.current_player().index())?;
+    meta.set_item("is_terminal", state.is_terminal())?;
+    dict.set_item("meta", meta)?;
 
     let counts = PyDict::new(py);
     counts.set_item("side", 1)?;
