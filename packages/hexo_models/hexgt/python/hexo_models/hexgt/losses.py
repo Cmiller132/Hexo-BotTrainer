@@ -111,6 +111,10 @@ def segment_log_softmax(
         raise ValueError(f"segment_log_softmax expects 1-D logits, got shape {tuple(logits.shape)}")
     if segment_ids.shape != logits.shape:
         raise ValueError("segment_ids must match logits shape")
+    # Compute the softmax/log in fp32 for numerical stability and to stay
+    # dtype-consistent under AMP autocast (which promotes exp/log to fp32 while
+    # `logits` may be fp16, breaking the index_add scatters below).
+    logits = logits.float()
     seg = segment_ids.to(dtype=torch.long)
     seg_max = logits.new_full((num_segments,), float("-inf"))
     seg_max = seg_max.scatter_reduce(0, seg, logits, reduce="amax", include_self=True)
@@ -137,6 +141,8 @@ def segment_softmax_cross_entropy(
     the mean cross entropy across graphs (with positive mass) is returned.
     """
 
+    # fp32 loss math (consistent under AMP; the model forward stays autocast-fp16).
+    logits = logits.float()
     target = target.to(device=logits.device, dtype=logits.dtype)
     if target.shape != logits.shape:
         raise ValueError(f"policy target shape {tuple(target.shape)} does not match logits {tuple(logits.shape)}")

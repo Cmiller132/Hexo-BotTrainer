@@ -161,6 +161,39 @@ dense_cnn's ~23).
 
 ---
 
+## Phase 6 — first behavioral-clone from 96x8 (training-path validation)
+
+BC reads pre-recorded compact shards (no self-play), so it is independent of the
+Phase-5c featurization throughput bottleneck. `HexgtTrainer.train_on_shards`
+drives: compact shard → `expand.build_training_batch` (recompute-at-expand graph
++ targets) → `model(batch)` (full forward, aux heads) → `hexgt_loss` → AdamW step.
+
+**Bug found + fixed (latent, AMP-only):** `losses.segment_log_softmax` /
+`segment_softmax_cross_entropy` mixed dtypes under AMP autocast — autocast
+promotes `exp`/`log` to fp32 while the policy logits are fp16, so the `index_add`
+segment scatters hit `self (Half) vs source (Float)`. The CPU gate tests never
+ran AMP, so it was invisible until the first CUDA BC step. Fix: compute the
+segmented softmax/CE in fp32 (cast logits at entry — standard, numerically
+stable; no-op for the fp32 inference path). Regression test added
+(`test_segment_losses_under_amp_autocast`). Full suite 184 green.
+
+**BC result (epoch_000024 shards, 512 shards ≈ 25.5k rows, 200 steps, batch 128,
+warmup 30, lr 1e-3, RTX 4070 Ti, ~228 ms/step):** all three heads learn clearly —
+policy CE 4.48 → 3.42 (from ~ln(270)≈5.6 uniform), value 2.00 → 0.65, opp_policy
+5.14 → 4.26. Prune rate 12.6% (matches the documented n=3 BC prune). This
+validates the entire training path on real data; the model genuinely imitates the
+dense_cnn MCTS visit distribution + value. (200 steps is a smoke, not a converged
+BC model — a real BC/RL run is many thousands of steps; the ~228 ms/step is
+dominated by the same Python featurization that bounds self-play, so the
+Phase-5-deferred Rust feature-buffer transport also speeds up training.)
+
+**Still open (next session):** a converged BC run + first eval vs SealBot and vs
+dense_cnn (matched-compute). Eval needs hexgt player/eval-component wiring (the
+plugin's evaluation hooks are still Phase-5+ stubs) and benefits from the
+feature-buffer optimization for tolerable game-play speed.
+
+---
+
 ## Environment / safety (build isolation)
 
 **Live-run isolation.** The dense_cnn 96×8 run is live on the GPU, editable-

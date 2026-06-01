@@ -88,6 +88,26 @@ def test_eval_cache_accounting_and_persistence():
     assert act in list(eng.legal_actions(state))
 
 
+def test_segment_losses_under_amp_autocast():
+    """Regression: the segmented policy loss must be dtype-consistent under AMP
+    autocast (autocast promotes exp/log to fp32 while logits are fp16, which used
+    to break the index_add scatters). Guards the fp32-loss-math fix."""
+    if not torch.cuda.is_available():
+        pytest.skip("AMP autocast dtype path needs CUDA")
+    from hexo_models.hexgt.losses import segment_softmax_cross_entropy, segment_log_softmax
+
+    with torch.autocast(device_type="cuda"):
+        # A matmul under autocast yields fp16 logits (the model-forward case).
+        logits = (torch.randn(6, 1, device="cuda") @ torch.randn(1, 1, device="cuda")).squeeze(-1)
+        assert logits.dtype == torch.float16
+        seg = torch.tensor([0, 0, 0, 1, 1, 1], device="cuda")
+        target = torch.tensor([1.0, 2.0, 0.0, 3.0, 1.0, 0.0], device="cuda")
+        lp = segment_log_softmax(logits, seg, 2)
+        ce = segment_softmax_cross_entropy(logits, target, seg, 2)
+    assert lp.dtype == torch.float32 and torch.isfinite(lp).all()
+    assert torch.isfinite(ce) and ce.item() >= 0.0
+
+
 def test_candidate_priors_are_legal_normalized():
     # The Rust eval intersects candidates with engine legality and normalizes;
     # the visit policy actions must all be legal placements.
