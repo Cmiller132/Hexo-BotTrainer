@@ -1,699 +1,613 @@
-# Hexformer Rewrite Plan — GNN + Transformer Hybrid (Model 2)
+# Hexformer Rewrite Plan — Dynamic GNN + Transformer Hybrid (Model 2)
 
 **Status:** Design / planning only. No implementation, no pipeline changes. The
 dense_cnn 96×8 run is live on the GPU — this plan must not compete for GPU and
 nothing here is to be run during that run.
 
-**Date:** 2026-06-01 (revised after user direction)
+**Date:** 2026-06-01 (revised: dynamic policy, active-window tactics, dynamic
+candidate set, no padding/no-TRT)
 **Author:** read-only analysis pass
-**Reference baseline / template to emulate:** `hexo_models.dense_cnn` (Model 1),
-96ch×8blk, currently beating SealBot best-50ms (~92% @ e17 — see `MEMORY.md`).
+**Reference to emulate (discipline, not architecture):** `hexo_models.dense_cnn`
+(Model 1), 96ch×8blk, currently beating SealBot best-50ms (~92% @ e17, `MEMORY.md`).
 
 ---
 
 ## 0. TL;DR / Executive summary
 
-- **Decision (binding): delete `hexformer_ar` and build Model 2 from scratch.**
-  `hexformer_ar` is completely untested (no `runs/hexformer_ar` artifacts, never
-  trained), bloated, and is **not** a sound basis. We do **not** carry its model
-  or its scaffolding forward as the foundation. The build is **modeled on
-  `dense_cnn`**, the proven reference — its package structure, config system,
-  `ModelPlugin` pattern, trainer/replay/checkpoint discipline, MCTS integration,
-  and test discipline are the template to emulate. `hexformer_ar` is referenced
-  only as a *cautionary example* and, at most, as a non-authoritative source for
-  a couple of small pure-math helpers (hex-D6 group, axial/cube coordinate
-  packing) that we will re-derive and re-test from scratch rather than import.
-- **The model is fundamentally a GNN.** Model 2 is the user's hybrid: a **typed
-  heterogeneous GNN local encoder** (placed stones / legal moves / tactical
-  windows / side+goal tokens, with typed edges) → **transformer global
-  attention** → **dense_cnn-style heads** (65-bin value + per-move policy +
-  opponent-policy aux + short-term value). The explicit typed GNN is a
-  **first-class component**, not an implementation detail. A fixed-shape,
-  padded, *attention-bias* formulation is presented as an **optimization option**
-  for making the GNN performant and TRT-exportable — evaluated in the throughput
-  phase — **not** as a substitute that removes the GNN (§3, §4.1).
-- **This is a major sample-generation and training rewrite — say so plainly.**
-  We emulate dense_cnn's *data discipline* (raw-fact NPZ shards, power-law
-  replay window, on-disk shuffle, per-epoch D6 at read, byte-identical schema
-  versioning, checkpoint hygiene). But the **graph representation requires
-  substantial NEW work**: graph/token + typed-edge construction (the Rust
-  sample-gen + the expand step), variable-size graph collation/batching, and a
-  new trainer. This is **not** "reuse the replay code wholesale" — it is "adopt
-  the discipline, rewrite the sample-gen and training for the graph rep" (§5,
-  §6).
-- **The single make-or-break risk is inference throughput in the 512-sim MCTS
-  hot loop.** dense_cnn fought to ~58 pos/s with a fixed-shape CNN + TensorRT
-  FP16. A message-passing GNN is harder to batch and may not export to TRT. The
-  throughput phase (Phase 5) is a hard go/no-go gate that decides the model's
-  final form and viability.
-- **Drop-in compatibility is a hard requirement.** Model 2 must honor the exact
-  contracts dense_cnn already satisfies (forward output keys/shapes, the Rust↔
-  Python MCTS evaluator callback, checkpoint payload, plugin protocol, SealBot
-  eval harness) so the existing machinery and the head-to-head comparison "just
-  work." These contracts are catalogued in §2 and matched in §3.4 / §9.
+- **Delete `hexformer_ar` and build Model 2 from scratch**, modeled on
+  `dense_cnn`'s *discipline* (package structure, config system, `ModelPlugin`
+  pattern, replay/checkpoint hygiene, test discipline, Rust↔Python MCTS handoff).
+  `hexformer_ar` is untested, bloated, off-pattern, and is **not** a foundation
+  (§1). We do not carry its model, scaffolding, trainer, samples, or Rust crate
+  forward.
+- **The model is a *truly dynamic* typed heterogeneous GNN → transformer
+  hybrid.** Nodes: **all** placed stones, the dynamic candidate set of empty
+  cells, the active-window tactical tokens, and side/goal tokens. No padding, no
+  fixed shapes, no `max_candidates`, no fallback logits, no top-k anywhere.
+  Variable node/edge counts are first-class (§3).
+- **The policy is dynamic and per-legal-move (pointer/CSR), not a 1681 dense
+  crop.** The head emits one logit per candidate node; this maps *directly* onto
+  the Rust MCTS priors contract, which is already per-legal-move CSR
+  (`legal_row_offsets` + `priors_bytes`, §2.6).
+- **The candidate set is defined by a single engine-grounded rule — no radius,
+  no hyperparameter:**
+
+  > **`candidate_set(position) = { every EMPTY cell that lies in ≥1 ACTIVE
+  > window of EITHER player }`**
+
+  where an *active window* is the engine's existing concept — a length-6 line
+  window containing stones of exactly one player (`tactics.rs:183-186`). This
+  covers threat-completion/block cells (count 4/5), developing cells (count 1–3),
+  own extensions and opponent blocks, and naturally **excludes** vacuum cells
+  (windows with zero stones) and dead cells (windows contested by both colors).
+  See §4.
+- **Tactical-window tokens** are the **count-3/4/5 active windows of both
+  colors** (developing threes + live threats + win/block windows). No forks, no
+  other window types. The candidate-cell filter uses *all* active windows
+  (count ≥ 1); the window *tokens* are the higher-count (3/4/5) subset (§5).
+- **No TensorRT.** A truly dynamic GNN does not export to TRT. Inference is
+  **torch (FP16 ok)**; the throughput phase is *"make the dynamic GNN fast
+  enough in torch,"* not *"pad/export it."* The attention-bias / fixed-shape
+  formulation is explicitly a **non-GNN approximation and is rejected** for this
+  design (§4.3, §6.1).
+- **"Drop-in" means PIPELINE compatibility, not matching dense_cnn's tensor
+  shapes.** Model 2 slots into the existing training / MCTS / replay / eval
+  pipeline (plugin protocol, Rust↔Python evaluator callback, checkpoint payload,
+  SealBot eval harness, replay window/shuffle discipline). Its policy shape is
+  deliberately different (dynamic); its value head stays 65-bin because that's
+  pipeline-convenient, not because shapes must match (§2).
+- **Major sample-gen + training rewrite** (say so): emulate dense_cnn's
+  raw-fact NPZ + replay discipline, but the Rust graph/active-window sample-gen,
+  the expand-to-graph step, variable-size graph collation, and the trainer are
+  largely new (§7). Behavioral cloning from dense_cnn shards is useful but is a
+  **conversion rewrite**, not free reuse (§8).
 
 ---
 
-## 1. What the current `hexformer_ar` is — and why it is the wrong basis
+## 1. The current `hexformer_ar` and why it is deleted
 
-Package: `packages/hexo_models/hexformer_ar/` — Python in
-`python/hexo_models/hexformer_ar/`, Rust in `rust/src/`. ~3,200 lines Python +
-~3,500 lines Rust.
-
-### 1.1 Architecture (`architecture.py`)
-
-A sparse hybrid: local hex-CNN encoder → typed-token GraphGPS stack →
-candidate-pointer policy. The "AR" (autoregressive) in the name is vestigial —
-`forward()` is single-shot.
-
-- **`LocalHexEncoder`** ([architecture.py:71-84](packages/hexo_models/hexformer_ar/python/hexo_models/hexformer_ar/architecture.py:71)):
-  `HexConv2d` (corners masked for the hex 6-neighborhood) → `GatedHexBlock`
-  stack → avg-pool → `Linear` to `token_dim`.
-- **Typed token assembly** ([architecture.py:221](packages/hexo_models/hexformer_ar/python/hexo_models/hexformer_ar/architecture.py:221)): concat
-  `[global, local_window, candidate, stone, window]` tokens, each tagged with one
-  of 5 learned `type_embedding` rows.
-- **`GraphGPSBlock` × `gps_layers`** ([architecture.py:87-164](packages/hexo_models/hexformer_ar/python/hexo_models/hexformer_ar/architecture.py:87)):
-  coordinate-conditioned local MLP message + **explicit edge message passing via
-  a per-batch-element Python `for` loop with `index_add_`** (`_edge_aggregate`,
-  [architecture.py:134-164](packages/hexo_models/hexformer_ar/python/hexo_models/hexformer_ar/architecture.py:134)) + full `nn.MultiheadAttention` + FFN.
-- **Pointer policy** ([architecture.py:240-264](packages/hexo_models/hexformer_ar/python/hexo_models/hexformer_ar/architecture.py:240)): one logit per
-  candidate, masked to legal.
-
-`forward()` returns `policy_logits/policy [B,C]`, `opp_policy [B,C]`, `wdl_logits
-[B,3]`, `distance [B]`, `threat_logits [B,C,6]`, `rz_logits [B,C]`,
-`lookahead_{1,2,4,8} [B,3]`. **This breaks the dense_cnn contract**: 3-class WDL
-instead of the 65-bin distributional value; variable `(B,C)` pointer policy
-instead of the trainer-side `(N,1681)`; and a different aux-head set.
-
-### 1.2 Why it is a bad basis (the verdict)
+Package `packages/hexo_models/hexformer_ar/` (~3,200 Py + ~3,500 Rust lines). It
+is a sparse hybrid (local hex-CNN → GraphGPS token stack → candidate-pointer
+policy) — conceptually adjacent to the target, but:
 
 - **Never trained / wholly unvalidated.** No `runs/hexformer_ar` artifacts;
-  `MEMORY.md` records dense_cnn iteration only. The unused `HexformerOutputs`
-  dataclass ([architecture.py:15-23](packages/hexo_models/hexformer_ar/python/hexo_models/hexformer_ar/architecture.py:15)) and vestigial "AR" name signal
-  design drift never shaken out by real training.
-- **Bloated and structurally off-pattern.** The GNN is a per-batch-element
-  Python loop (`_edge_aggregate`) — slow and not exportable. Replay is an
-  in-memory **zlib+JSON** buffer ([samples.py:42-53](packages/hexo_models/hexformer_ar/python/hexo_models/hexformer_ar/samples.py:42)) and the
-  checkpoint **persists `sample_buffer`** — the *opposite* of dense_cnn's
-  discipline (which rejects legacy `sample_buffer` payloads).
-- **Diverged contracts.** Heads, value representation, and policy shape all
-  diverge from the proven dense_cnn contract, so "drop-in comparison" would
-  require undoing its choices anyway.
+  `MEMORY.md` records dense_cnn only. The unused `HexformerOutputs` dataclass
+  ([architecture.py:15-23](packages/hexo_models/hexformer_ar/python/hexo_models/hexformer_ar/architecture.py:15)) and vestigial "AR" name signal abandoned
+  drift.
+- **Off-pattern / bloated.** Its GNN is a per-batch-element Python `for` loop
+  (`_edge_aggregate`, [architecture.py:134-164](packages/hexo_models/hexformer_ar/python/hexo_models/hexformer_ar/architecture.py:134)); replay is in-memory
+  zlib+JSON ([samples.py:42-53](packages/hexo_models/hexformer_ar/python/hexo_models/hexformer_ar/samples.py:42)); the checkpoint persists `sample_buffer`
+  — the opposite of dense_cnn discipline.
+- **Diverged contracts.** 3-class WDL value, fixed-shape padded candidates, a
+  different aux-head set.
 
-**Verdict: DELETE `hexformer_ar`. Build Model 2 fresh, modeled on dense_cnn.**
-We do not copy its package, plugin, config, trainer, samples, or Rust crate as a
-foundation. The only artifacts we may consult (not import) are the hex-D6 group
-math and the axial/cube coordinate packing — and even those we re-derive and
-re-test from scratch in the new package, because the whole point is a clean,
-tested build on the proven pattern. See §7 for what "delete" means in practice
-(remove the package dir, its entry point, and its `#[path]` include).
+**Verdict: DELETE.** Build Model 2 fresh, modeled on dense_cnn's patterns.
+"Delete" concretely (part of the build work, not this planning pass): remove
+`packages/hexo_models/hexformer_ar/`, its entry point + source-include lists in
+`packages/hexo_models/pyproject.toml`, its `#[path]` include +
+`sys.modules` registration in `packages/hexo_models/rust/src/lib.rs:7-9,24-29`,
+`configs/hexformer_ar.toml`, and any `hexformer_ar` tests. We may *consult* (not
+import) its hex-D6 group and coordinate-packing math, re-deriving and re-testing
+them in the new package.
 
 ---
 
-## 2. The dense_cnn contracts Model 2 must honor (for drop-in + fair comparison)
+## 2. Pipeline compatibility — what Model 2 must slot into
 
-dense_cnn is both the **template to emulate** and the set of **contracts to
-match**. Quote-accurate as of this writing.
+dense_cnn is the **template for discipline** and the source of the **pipeline
+interfaces** Model 2 must satisfy. The requirement is **drop-in PIPELINE
+compatibility**, not matching dense_cnn's exact tensor shapes.
 
-### 2.1 Forward output contract (`dense_cnn/architecture.py`)
+### 2.1 What must match (pipeline interfaces)
 
-`Model1Network.forward(x)` → `dict[str,Tensor]`
-([architecture.py:202-211](packages/hexo_models/dense_cnn/python/hexo_models/dense_cnn/architecture.py:202)):
-
-```python
-outputs = {
-    "policy":     self.policy_head(features),     # (N, 1681)  == (N, BOARD_AREA)
-    "value":      self.value_head(features),      # (N, 65)    == (N, VALUE_BINS)
-    "opp_policy": self.opp_policy_head(features), # (N, 1681)
-}
-for horizon, head in self.short_term_value_heads.items():
-    outputs[f"stvalue_{horizon}"] = head(features)  # (N, 65) each; key is int horizon
-```
-
-- `policy`/`opp_policy`: `(N, 1681)`, `BOARD_AREA = 41*41` (`constants.py:10`).
-- `value`: `(N, 65)` — **65-bin distributional head** over fixed support
-  `torch.linspace(-1.0, 1.0, 65)` (`losses.py:20-23`); decode = softmax·bins.
-- `forward_policy_value(x)` ([architecture.py:213-220](packages/hexo_models/dense_cnn/python/hexo_models/dense_cnn/architecture.py:213)) returns only
-  `{"policy","value"}` — the inference path the Rust MCTS uses.
-
-**Param count** is config-derived (defaults 96/6), not asserted. 96×6 ≈ ~1.6M,
-96×8 ≈ ~2.1M by hand estimate. The "~2.6M" in the brief is **not in code**
-(only the removed FC-head's "~5.6M params/head" comment). Size Model 2 to the
-*running* 96×8 baseline (~2.1M), measured by `sum(p.numel())`.
-
-### 2.2 Input representation
-
-`constants.py`: `BOARD_SIZE=41`, `BOARD_AREA=1681`, `INPUT_CHANNELS=13`,
-`VALUE_BINS=65`. 13 fixed planes (`constants.py:16-28`). Geometry
-(`geometry.py`): crop center = rounded mean axial coord; `coord_to_flat =
-row*41 + col`, `half=20` — the **1681 action-space mapping**; out-of-crop facts
-silently dropped. `ActionId u32_i16_pair` (`d6.py:19,41-59`): `_COORD_OFFSET =
-1<<15`; pack `((q+32768)<<16) | (r+32768)`.
-
-### 2.3 Trainer / loss (`dense_cnn/trainer.py`, `losses.py`)
-
-`DenseCNNTrainer(model, config, optimizer)`; optimizer is **AdamW**. Loss
-`model1_loss` (`losses.py:114-140`):
-
-```
-total = policy_weight*CE(policy) + value_weight*binnedCE(value)
-      + opp_policy_weight*CE(opp_policy)
-      + short_term_value_weight*binnedCE(stvalue_h, mask=stvalue_h_mask)
-```
-
-Defaults `policy=1.0, value=1.0, opp_policy=0.25, short_term_value=0.25`. Step
-consumes `batch: dict[str,Tensor]` with `"input" (N,13,41,41)` + target keys;
-AMP via `GradScaler`; optional `clip_grad_norm_`.
-
-### 2.4 Compact NPZ schema (`compact_io.py`, `replay.py`) — discipline to emulate
-
-`COMPACT_SCHEMA_VERSION = 1` (`compact_io.py:33`). One `.npz` = N rows,
-columnar, varlen fields as concatenated data + `int64` offsets `(N+1)`. **Raw
-game facts, not planes** — `turn_index`, `current_player`, `phase`,
-`center_q/r`, `value`, `first_q/r/present`, `stvalue`/`stvalue_mask`,
-`stones_qr`(+`stones_off`,`stones_owner`), `legal_ids`(+`legal_off`),
-`hist_qr`(+`hist_owner`,`hist_idx`,`hist_off`),
-`own_hot_qr`/`opp_hot_qr`/`last_hot_qr`(+offs), `pol_act`(+`pol_w`,`pol_off`),
-`opp_act`(+`opp_w`,`opp_off`). `expand_shard_to_arrays`
-(`compact_io.py:243-322`) expands row `i` under `symmetries[i]` to **dense
-planes**.
-
-> **What we emulate vs rewrite (be honest):** the *schema philosophy* (raw facts
-> + offsets + version), the *replay window/shuffle/split* mechanics
-> (`replay.py:523-755`), and the *per-epoch D6-at-read* are worth emulating and
-> can be closely mirrored. But the **expansion step is a from-scratch rewrite**
-> (`expand_*_to_planes` → `expand_*_to_graph`), the **Rust sample-gen** that
-> emits typed-edge facts is new (§6.1), and the schema likely **gains
-> graph-specific fields** (a version bump). See §5 for the full scope.
-
-### 2.5 Samples / D6 / checkpoint / config / plugin (dense_cnn patterns)
-
-- **Samples** (`samples.py`): Rust authors state-derived facts; Python attaches
-  search policy + finalizes (`finalize_game_samples`: winner value, future-opp
-  policy, EMA short-term value). `expand_sample` applies D6 then builds tensors.
-  `symmetry_drops_support` detects square-crop spill.
-- **D6** (`d6.py`): `D6_SIZE=12`; applied at read/expand time via a
-  per-(run,epoch) symmetry vector, re-randomized each epoch. Square crop is not
-  D6-closed → identity fallback for spilling rows.
-- **Checkpoint** (`checkpoints.py`): `{"model","model_state","optimizer_state",
-  "train_state","epoch","metadata"}`. Rejects a non-None `sample_buffer`,
-  incompatible `model_state`, missing `.txt` pointer. Supports `.txt`
-  indirection.
-- **Config** (`config.py`): `parse_model1_config`; frozen dataclass sections;
-  per-section unknown-key rejection; per-scalar coercion; no range validation.
-- **Plugin / registry** (`registry.py:24-103`, `dense_cnn/plugin.py:27-119`):
+- **Plugin / registry** (`hexo_train/registry.py:24-103`): implement the
   `ModelPlugin` Protocol — `name`, `build_model(game_spec, config)`,
   `training_component_overrides(*, defaults, config, shared, model) ->
   ComponentOverrides`; optional `calibrate_performance`, `generate_selfplay`,
-  `evaluate_epoch`. Resolution by `module` → `entry_point` → `name` over the
-  `"hexo_train.models"` group.
+  `evaluate_epoch`. Register under the `"hexo_train.models"` entry-point group.
+- **Rust↔Python MCTS evaluator callback** (the load-bearing interface,
+  `dense_cnn/rust/src/mcts_eval.rs:315-390`): Rust calls
+  `evaluator.call1((payload,))`; Python returns `{"values_bytes": <N f32, clamped
+  [-1,1]>, "priors_bytes": <f32, one per legal/candidate move, row-major in
+  legal_row_offsets order>}`. Rust validates finite/nonneg/positive-mass and
+  normalizes. **This contract is already per-move CSR** — a dynamic per-candidate
+  policy maps onto it directly (§3.4). Model 2 ships its *own* payload contents
+  (a graph, not planes) but reuses the **buffer-protocol zero-copy transport**
+  pattern (the `PlaneBuffer` `#[pyclass]`, `mcts_eval.rs:48-100`) for its node/
+  edge tensors.
+- **Checkpoint payload** (`dense_cnn/checkpoints.py:80-105`): `{"model",
+  "model_state","optimizer_state","train_state","epoch","metadata"}`; reject a
+  non-None `sample_buffer`, incompatible `model_state`, and missing `.txt`
+  pointer; support `.txt` indirection.
+- **Replay discipline** (`dense_cnn/{replay.py,compact_io.py}`): raw-fact
+  columnar NPZ shards + `int64` offset arrays + a `SCHEMA_VERSION`; power-law
+  replay window (`replay.py:523-535`); md5 train/val split; batch-aligned output
+  shards; per-shard JSON sidecars; **per-epoch D6 applied at read/expand time**.
+- **Config** (`dense_cnn/config.py`): frozen dataclass sections; per-section
+  unknown-key rejection; per-scalar coercion; no range validation.
+- **Eval harness** (`dense_cnn/{evaluation.py,player.py}`): `evaluate_epoch` →
+  `hexo_runner.modes.match.run_match` vs `SealBotPlayer`; `use_trt=False` for
+  eval; opening-diversity controls.
 
-### 2.6 The Rust ↔ Python MCTS evaluator callback — the load-bearing interface
+### 2.2 What deliberately differs from dense_cnn
 
-Rust owns the search loop and calls back per leaf batch:
-`evaluator.call1((payload,))` ([mcts_eval.rs:335](packages/hexo_models/dense_cnn/rust/src/mcts_eval.rs:335)).
+- **Policy:** dynamic per-candidate logits (variable length), **not** `(N,1681)`.
+  Remove all 1681 dense-policy framing for this model (§3.4).
+- **Inputs:** a typed heterogeneous **graph** (variable nodes/edges), not a
+  `(13,41,41)` plane stack. The 41×41 crop, `BOARD_AREA=1681`, and `coord_to_flat`
+  mapping are dense_cnn-only and do not apply to Model 2.
+- **Value:** kept as the **65-bin distributional head** over `linspace(-1,1,65)`
+  (`dense_cnn/losses.py:20-30`) — not because shapes must match, but because it's
+  pipeline-convenient and proven; reuse the binning math verbatim.
 
-**Rust → Python payload dict** (for dense_cnn): `"inputs"` = a `PlaneBuffer`
-`#[pyclass]` exposing the **Python buffer protocol** over a `Vec<half::f16>`
-(**zero-copy**; Python does `torch.frombuffer(...).reshape(shape)`), `"shape"` =
-`(N,13,41,41)`, `"legal_flat_indices_bytes"` = i64, `"legal_row_offsets"` = N+1
-i64 CSR. **Python → Rust:** `"values_bytes"` (N f32, clamped `[-1,1]`),
-`"priors_bytes"` (f32, **one per legal flat index**, row-major in
-`legal_row_offsets` order; Rust validates finite/nonneg/unique/positive-mass and
-normalizes).
+### 2.3 Parameter budget for a fair comparison
 
-> **Key for Model 2:** the priors contract is **already per-legal-move (CSR)**.
-> dense_cnn computes dense `(N,1681)` then gathers; a **per-legal-move GNN/pointer
-> policy maps directly onto `priors_bytes`** with no dense intermediate. Model 2
-> reuses this *protocol shape* (the buffer-protocol payload + CSR offsets) but
-> ships a **graph/token payload** instead of planes (§6.2).
-
-### 2.7 TensorRT (`dense_cnn/trt_backend.py`)
-
-`build_trt_forward(model, ...)` → drop-in `forward_policy_value`. STRONGLY_TYPED
-FP16 baked into exported ONNX; engine built per-epoch in an isolated subprocess
-from folded inference weights; correctness-gated (`policy_argmax_match ≥ 0.90`,
-decoded `value_max_err ≤ 0.05`), else fail-loud (opt-in torch fallback). **TRT
-is self-play only**; eval uses `use_trt=False`.
+Size to the running 96×8 baseline (~2.1M params by hand estimate; the "~2.6M" in
+prior briefs is not in code). Verify with `sum(p.numel())` and land within ~10%.
 
 ---
 
-## 3. Model 2 — the GNN + transformer hybrid, concretely
+## 3. The engine rules (grounded) — what the model and tactics are built on
 
-Working name: **`hexgt`** (Hex Graph-Transformer). The model is **fundamentally a
-typed heterogeneous GNN**; the transformer provides global attention on top; the
-heads reproduce dense_cnn's contract.
+All quotes from `packages/hexo_engine/rust/src/`.
 
-### 3.1 Architecture: explicit typed GNN is first-class
+- **Win = six-in-a-line.** `WINDOW_LEN = 6` ([tactics.rs:14](packages/hexo_engine/rust/src/tactics.rs:14)); a window is
+  a length-6 segment along one of three axes Q `(1,0)`, R `(0,1)`, QR `(1,-1)`
+  ([tactics.rs:23-53](packages/hexo_engine/rust/src/tactics.rs:23)). A win is an active window fully filled by one
+  player: `is_win_for` = `active_player()==Some(p) && count(p)==6`
+  ([tactics.rs:206-208](packages/hexo_engine/rust/src/tactics.rs:206)). "A win is checked after every single placement."
+  ([state.rs:9](packages/hexo_engine/rust/src/state.rs:9)). Each placement touches exactly 18 windows (3 axes × 6
+  offsets, [tactics.rs:14-17](packages/hexo_engine/rust/src/tactics.rs:14)).
+- **ACTIVE WINDOW (the core concept).**
+  > `is_active` — *"True when the window contains stones from exactly one
+  > player."* ([tactics.rs:183-186](packages/hexo_engine/rust/src/tactics.rs:183))
+  >
+  > `active_player` returns `Some(p)` only for `(true,false)`/`(false,true)`
+  > occupancy of the two player masks ([tactics.rs:172-181](packages/hexo_engine/rust/src/tactics.rs:172)).
+
+  So an active window has ≥1 stone of exactly one player and **zero** of the
+  other; the remaining cells are empty and the window is still *completable*. A
+  single opponent stone makes it inactive (dead) — test
+  `blocked_windows_are_not_threats` ([tactics.rs:620-636](packages/hexo_engine/rust/src/tactics.rs:620)).
+- **Threat = one-sided count ≥ 4.** `threat_player` = active player with
+  `count(player) >= 4`; `is_threat` ([tactics.rs:189-198](packages/hexo_engine/rust/src/tactics.rs:189)).
+- **Count is a popcount of the 6-bit mask, NOT contiguous.** `count(player) =
+  mask(player).count_ones()` ([tactics.rs:133-136](packages/hexo_engine/rust/src/tactics.rs:133)). **Implication:** gapped /
+  broken shapes like `XX_XX` inside a 6-window are already counted as a count-4
+  threat — there is no separate "broken threat" case to detect. (This corrects
+  earlier brainstorming.)
+- **`WindowStore` maintains active/threat/win windows incrementally** and can
+  enumerate them cheaply: `entries()` ([tactics.rs:378](packages/hexo_engine/rust/src/tactics.rs:378)),
+  `threat_entries(player)` ([tactics.rs:386-389](packages/hexo_engine/rust/src/tactics.rs:386)), `threats()`
+  ([tactics.rs:392-395](packages/hexo_engine/rust/src/tactics.rs:392)); per-window `empty_cells()`
+  ([tactics.rs:154-156](packages/hexo_engine/rust/src/tactics.rs:154)), `count`, `active_player`, `stone_cells`. The store only
+  holds *touched* windows (those that ever received a stone,
+  [tactics.rs:343-345,419](packages/hexo_engine/rust/src/tactics.rs:343)), so active windows ⊆ touched windows and
+  enumeration is O(#touched).
+- **Legal moves are already locality-bounded.** Non-opening legal moves = empty
+  cells within `LEGAL_RADIUS = 8` of any stone ([legal.rs:10-11,124-128](packages/hexo_engine/rust/src/legal.rs:10);
+  recompute reference `state.rs:559-569`). One stone ⇒ 216 legal cells
+  ([legal.rs:224](packages/hexo_engine/rust/src/legal.rs:224)).
+- **Two-stone autoregressive turns.** `Opening` (Player 0 forced at `(0,0)`) →
+  `FirstStone` → `SecondStone` (same player places the 2nd) → control passes
+  ([state.rs:46-56,312-330](packages/hexo_engine/rust/src/state.rs:46)). If the first stone wins, the second is never
+  played ([state.rs:9-10,304-310](packages/hexo_engine/rust/src/state.rs:9)).
+- **No captures, no draws, unbounded board.** Stones are only placed/undone (no
+  removal); `GameOutcome` has a winner only, "Hexo has no normal draw"
+  ([state.rs:64-71](packages/hexo_engine/rust/src/state.rs:64)); the board is a "Sparse unlimited board"
+  ([state.rs:98](packages/hexo_engine/rust/src/state.rs:98)) on an "unlimited hex grid" ([coord.rs:1-9](packages/hexo_engine/rust/src/coord.rs:1)), bounded
+  only by the i16 coordinate range. **There are no playing-field edges** in
+  normal play — the "41×41 board" is only dense_cnn's crop, irrelevant to a
+  relative-coordinate graph model. (No edge/boundary window type is needed.)
+- `hex_distance` = cube max-norm `max(|dq|,|dr|,|ds|)` ([coord.rs:77-82](packages/hexo_engine/rust/src/coord.rs:77)).
+
+---
+
+## 4. The candidate set — the move vocabulary at each node
+
+### 4.1 Definition (engine-grounded, no hyperparameter)
 
 ```
-inputs: placed stones + all legal moves + selected tactical-window tokens
-        + side/goal tokens   (typed nodes with relative axial/cube coords)
-   │
-   ▼
-[1] TYPED HETEROGENEOUS GNN local encoder        ← FIRST-CLASS, the core of the model
-   │   node types: {stone, legal_move, window, side/goal}
-   │   typed edges (see §3.3): adjacency, line-membership, candidate-of, recency,
-   │     side-context. Each edge type has its own message function.
-   │   L_gnn rounds of typed message passing (local graph reasoning).
-   ▼
-[2] CONTEXT TRANSFORMER over encoded nodes        ← global attention
-   │   full self-attention across {side/goal, stone, window} context nodes
-   │   (KataGo-style global mixing the local GNN can't reach).
-   ▼
-[3] LEGAL-MOVE CROSS-ATTENTION to context         ← "legal moves attend to state"
-   │   legal-move nodes are queries; context nodes are keys/values.
-   ▼
-[4] (optional) ONE SPARSE LEGAL-MOVE SELF-ATTN    ← legal moves attend to each other
-   │   masked to spatial neighborhoods.
-   ▼
-[5] HEADS (dense_cnn contract — §3.4):
-      policy  (per legal move → priors_bytes; scattered to (N,1681) for training)
-      value   (N,65)   ·  opp_policy (per legal move)  ·  stvalue_<h> (N,65)
+candidate_set(position) = { every EMPTY cell that lies in ≥1 ACTIVE window
+                            of EITHER player }
 ```
 
-The GNN in **[1]** is the model's identity and is kept explicit. **[2]–[4]** are
-the transformer half of the hybrid. The decision about *how* the typed message
-passing is implemented in the inference hot path (true scatter/gather message
-passing vs the fixed-shape attention-bias realization) is an **optimization
-question resolved in Phase 5**, not a reason to drop the GNN — see §4.1.
+Concretely in Rust: iterate `board().windows().entries()`, keep those with
+`is_active()` (either color, any count ≥ 1), collect their `empty_cells()`,
+dedupe. This is exactly the set of empty cells that could **extend** one of the
+current player's lines or **block** one of the opponent's. It:
 
-### 3.2 Node/token types and features
+- **includes** threat-completion and must-block cells (count 4/5 windows),
+  developing cells (count 1–3 windows), own extensions, and opponent blocks;
+- **excludes** vacuum cells (cells whose only windows have zero stones) and dead
+  cells (cells all of whose windows are contested by both colors → no active
+  window).
 
-| type | source (compact facts) | budget (initial, measure) | features |
+**No radius, no `n`, no top-k, no `max_candidates`, no fallback logits.** The
+count is dynamic per position.
+
+### 4.2 Why prune at all (model tractability, not legality)
+
+The prune exists for **model tractability, not MCTS legality**. dense_cnn's conv
+policy head outputs all 1681 crop logits "for free" from a fixed-size feature
+map. A token GNN/transformer instead pays ~O(N²) attention and per-node message
+cost in the **number of candidate tokens** N. The active-window filter bounds N
+to the *connection-relevant* empty cells — the only cells that can extend or
+block a six-in-a-line — which is exactly the move vocabulary a 6-in-a-row game
+actually uses. Because the dynamic policy is defined over these candidate tokens,
+**the candidate set is also exactly what MCTS expands at that node** (priors are
+emitted per candidate; the Rust search children = candidate tokens).
+
+This is sound for Hexo specifically: a move that lies in **no** active window
+neither extends any existing one-color line nor blocks any opponent line, so it
+cannot create or defend a six — it is strictly a tempo-losing/“vacuum” move in a
+pure connection game with no captures and no territory. Pruning such moves
+removes only moves that cannot participate in the win condition.
+
+### 4.3 Relationship to the old radius idea (dropped)
+
+A hex-distance `n` radius around stones is **dropped entirely**. Note *why a pure
+radius would have been unsafe*: with win length 6, a window-completing cell can
+sit up to 5 line-cells from the nearest stone of that window, so a small radius
+(e.g. n=3) could exclude a legal threat-completion/block move. The active-window
+rule has **no such failure mode** — every completable line's empty cells are
+included by construction, at any distance, because they belong to an active
+window. This is strictly safer than any radius and needs no tuning.
+
+> The attention-bias / fixed-shape padded formulation considered earlier is a
+> **non-GNN approximation and is rejected**: it cannot represent the truly
+> dynamic, unbounded graph structure the user wants and would reintroduce caps/
+> padding. It is mentioned only to record that it was evaluated and declined.
+
+### 4.4 Opening special case
+
+On an **empty board there are no stones, hence no windows, hence an empty
+candidate set.** Handling:
+
+- **Move 1** is the engine-forced `Opening` placement at `(0,0)`
+  ([rules.rs:16-23](packages/hexo_engine/rust/src/rules.rs:16), [state.rs:224-228](packages/hexo_engine/rust/src/state.rs:224)) — a single candidate; no model choice
+  needed. The pipeline can hard-code it (matching engine legality).
+- **Move 2 onward:** once the center stone exists, the 18 windows through `(0,0)`
+  are active (count 1, owner Player 0), so `candidate_set` is non-empty — it is
+  the empty cells of those 18 length-6 lines through the center (the natural
+  opening region). No special code needed beyond move 1.
+- **Safety net:** if any non-terminal position ever yields an empty candidate set
+  (should only be the pre-opening empty board), fall back to the engine's legal
+  move list for that node and log it loudly (no silent divergence between
+  candidates and legality).
+
+### 4.5 Rust parity (training ↔ play)
+
+The candidate-set construction **and** the active-window detection must run in
+**one shared Rust path** used by **both** sample-gen and live MCTS, so the move
+vocabulary at a node is identical in training data and in play. (Mismatch would
+train the policy over a different support than search expands.) This is a single
+function over the engine `WindowStore`, called from both `sample_gen` and the
+MCTS encoder.
+
+### 4.6 Validation gates (before locking the design)
+
+Replay dense_cnn's recorded games (`runs/.../selfplay/*.hxr` / shards,
+read-only) and measure:
+
+1. **Completeness/safety:** fraction of dense_cnn's **actually-played** moves and
+   **MCTS-visited** moves that fall inside `candidate_set`. **Target ≈ 100%.**
+   (dense_cnn searches the full radius-8 legal set, so this directly tests
+   whether the active-window prune ever excludes a move a strong player used. If
+   < ~100%, investigate the excluded moves — they should be vacuum/dead by
+   construction; a genuine miss is a design red flag.)
+2. **Cost distribution:** the **size distribution** of `candidate_set` across
+   game phases (opening / midgame / endgame): report median, typical, and p95
+   candidate counts, plus active-window-token counts. This sets the GNN's
+   per-node cost and the realistic batch sizes for the throughput phase.
+
+Both are **gates**: (1) proves the prune is complete/safe; (2) proves the dynamic
+cost is bounded enough to be trainable and searchable at acceptable throughput.
+
+---
+
+## 5. Tactical-window tokens (active windows by count)
+
+The tactical-window **tokens** are the **count-3/4/5 active windows of BOTH
+colors** — the connection-relevant subset of the same active windows used for
+the candidate filter. Typed by `(owner ∈ {current, opponent}, count ∈ {3,4,5})`:
+
+| token | owner | count | engine meaning | detection (from `WindowStore`) |
+|---|---|---|---|---|
+| **T0 win-in-1** | current | 5 | single empty cell completes the six → immediate win | active window, `count(current)==5`, `empty_mask.count_ones()==1` |
+| **T1 must-block** | opponent | 5 | opponent's single empty cell wins next → must block | active window, `count(opp)==5`, single empty |
+| **T2 live threat** | current | 4 | one-sided count ≥4 → live threat (per `threat_player`) | `threat_entries(current)` filtered to `count==4` |
+| **T3 live threat** | opponent | 4 | opponent live threat to answer | `threat_entries(opponent)` filtered to `count==4` |
+| **T4 developing three** | current | 3 | developing line | active window, `count(current)==3` |
+| **T5 developing three** | opponent | 3 | opponent developing line | active window, `count(opp)==3` |
+
+Relationship to the candidate filter: the **candidate-cell filter uses ALL
+active windows (count ≥ 1)**; the **window tokens are the higher-count (3/4/5)
+subset**. Count-1/2 active windows still contribute their empty cells as
+candidates but are not emitted as tactical tokens (they carry little structure
+beyond locality, which the candidate node's own features already express).
+
+**No forks / double-threats are computed.** A cell sitting in multiple active
+windows *is* a fork; the GNN/transformer learns this implicitly because that
+candidate node attends to (is edged to) multiple window tokens (§6.3). **No
+other window types** (broken/gapped is already covered by popcount §3; no
+intersection/VCF/dead-line/edge tokens). **No top-k** — all count-3/4/5 active
+windows are emitted; the count is dynamic.
+
+Token features per active-window node: owner (current/opponent), count
+(3/4/5 one-hot), axis (Q/R/QR one-hot), the window's empty-cell count, and a
+relative anchor coordinate (e.g. the window's start or centroid in
+center-relative axial coords). Detection cost is O(#touched windows) and largely
+already paid by the engine's incremental threat tracking.
+
+---
+
+## 6. Model 2 — the dynamic GNN + transformer hybrid
+
+Working name **`hexgt`** (Hex Graph-Transformer). It is fundamentally a **typed
+heterogeneous GNN**; a transformer adds global attention; heads produce a dynamic
+policy + the 65-bin value (+ aux). **Truly dynamic: no padding, no fixed shapes,
+no caps.**
+
+### 6.1 Why dynamic, and why no TRT
+
+- Node and edge counts vary per position (stones grow; candidate/window counts
+  vary, §4.6). The user requires handling **truly unbounded play**, so we do not
+  pad to a max or cap candidates.
+- A dynamic message-passing GNN uses `scatter`/segment reductions over
+  variable-length edge lists, which **do not export cleanly to TensorRT**.
+  Therefore **inference is torch (FP16 acceptable), no TRT.** The throughput
+  phase (§9, Phase 5) is *"make the dynamic GNN fast enough in torch,"* not
+  *"pad/export it."* Concretely: batch positions by **packing into one big
+  disjoint graph** (PyG-style: concatenate all nodes across the batch with a
+  per-node `graph_id`; message passing via segment scatter; attention masked
+  block-diagonally per graph). This runs efficiently on GPU in eager torch; the
+  costs are kernel-launch overhead and the absence of TRT fusion — accepted and
+  measured.
+- The attention-bias / fixed-shape realization is **rejected** (§4.3): it is a
+  non-GNN approximation that cannot represent the dynamic structure.
+
+### 6.2 Node types and features
+
+| type | source | count | features |
 |---|---|---|---|
-| **side/goal** (1–2) | `current_player`, `phase`, global counts | 1–2 | side-to-move, phase one-hot, stone counts, move number, goal encoding |
-| **stone** | `stones_qr`+`stones_owner` | ≤ `max_stones` (~256) | owner, recency (`hist_idx`), hot flags, rel-coord |
-| **legal-move** | `legal_ids` | ≤ `max_candidates` (~384) | rel-coord, ring/distance, local neighbor occupancy, tactical flags |
-| **tactical-window** | derived in Rust (§3.3) | ≤ `max_windows` (~64) | window axis, own/opp/empty counts along the line, open-ends |
+| **side/goal** (1–2) | `current_player`, `phase`, global counts | fixed small | side-to-move, phase one-hot, stone counts, move number |
+| **stone** | ALL placed stones (no budget) | = #stones | owner (own/opp), recency (`hist_idx`), relative axial coord |
+| **candidate** | §4 candidate set | dynamic | relative axial coord, #active windows through this cell (by owner/count), is-it-a-window-completing cell |
+| **active-window** | §5 (count 3/4/5, both colors) | dynamic | owner, count one-hot, axis one-hot, empty-cell count, anchor coord |
 
-Coordinates are **relative axial/cube anchored at the crop center** (re-derived
-coordinate helpers, re-tested). "Tactical window" = a fixed-length axis-aligned
-line segment (engine win-length) through/near recent or contested cells, scored
-by `(own_count, opp_count, open_ends)` and top-k kept. Windows are **derived**,
-so for the MVP they can be recomputed at expand time from `stones_qr`+`legal_ids`
-(no schema field) or cached in the shard (schema bump — §6.1).
+All coordinates are **center-relative axial/cube** (re-derived, re-tested helpers;
+the engine's `pack_coord`/`hex_distance` are the references, `legal.rs:24-35`,
+`coord.rs:77-82`). The unbounded board means relative coords never hit an edge.
 
-### 3.3 Typed edges (the heterogeneous graph)
+### 6.3 Typed edges (the heterogeneous graph)
 
-Edge types (each with its own learned message function in [1]):
+- **stone↔stone** hex-adjacency and same-axis-line membership (group structure).
+- **window↔stone**: a window node connects to the (one-color) stones it contains.
+- **window↔candidate**: a window node connects to its empty cells — this is the
+  edge that lets a candidate “see” every threat/extension it participates in
+  (and thus learn forks implicitly).
+- **candidate↔stone**: a candidate connects to nearby stones (local context).
+- **side/goal↔all**: global broadcast.
 
-- **hex-adjacency**: stone↔stone / stone↔legal_move / legal_move↔legal_move when
-  within the hex 6-neighborhood (locality).
-- **line-membership**: window↔stone and window↔legal_move for cells on that
-  window's line (threat structure).
-- **candidate-of**: legal_move↔stone for the moves adjacent to a stone group.
-- **recency**: stone↔stone ordered by `hist_idx` (temporal structure).
-- **side-context**: side/goal↔everything (global broadcast).
+Message passing is type-conditioned: `m_{j→i} = φ_{edge_type}(h_j, h_i,
+rel_coord_{ij})`, aggregated per target node (segment scatter) over `L_gnn`
+rounds. Then a transformer block set provides global attention (context
+self-attention over {side, stone, window}; candidate→context cross-attention;
+optionally one candidate↔candidate sparse self-attention), all masked
+block-diagonally per graph in a packed batch.
 
-Edges are constructed in Rust at sample-gen and/or at expand time (§6.1). The
-message-passing scheme is type-conditioned: `m_{j→i} = φ_{edge_type}(h_j, h_i,
-rel_coord_{ij})`, aggregated per target node (mean/sum), per round.
+### 6.4 Heads (dynamic policy + pipeline-compatible value/aux)
 
-### 3.4 Heads — EXACT dense_cnn contract mapping
+| head | output | notes |
+|---|---|---|
+| **policy** | one logit per **candidate** node | dynamic length; softmax over the candidate set → emitted as `priors_bytes` in `legal_row_offsets` order (§2.6). No 1681 dense form. |
+| **value** | `(N,65)` 65-bin distributional | reuse `linspace(-1,1,65)` + `binned_value_loss` from dense_cnn |
+| **opp_policy** (aux) | one logit per candidate | opponent's policy target, same dynamic shape |
+| **stvalue_<h>** (aux, optional) | `(N,65)` per horizon | reuse dense_cnn binning + mask |
 
-| dense_cnn head | Model 2 analog | shape | notes |
-|---|---|---|---|
-| `policy (N,1681)` | per-legal-move logit → **scatter** to `coord_to_flat` for the training target; **gather** per-legal-move for inference `priors_bytes` | `(N,1681)` train / `(N,n_legal)` infer | one head, two read-outs |
-| `value (N,65)` | 65-bin head on pooled side/goal token | `(N,65)` | **identical**; reuse the `linspace(-1,1,65)` support + `binned_value_loss` math |
-| `opp_policy (N,1681)` | per-legal-move opp head, same scatter | `(N,1681)` | from compact `opp_act`/`opp_w` |
-| `stvalue_<h> (N,65)` + mask | per-horizon 65-bin head | `(N,65)` | from compact `stvalue`/`stvalue_mask` |
+Training policy target: dense_cnn-style visit counts, but **defined over the
+candidate nodes** (not a 1681 grid). Because MCTS expands exactly the candidate
+set (§4.2), every visited move is a candidate node — the target is well-defined
+with no scatter to a crop. Drop hexformer's WDL/distance/threat/lookahead heads.
 
-**Drop** the hexformer-specific `wdl/distance/threat/rz/lookahead` heads from the
-MVP contract (they break value-binning + MCTS value reuse). Threat/relevance can
-return later as *private* auxiliaries off the shared contract.
+### 6.5 D6 symmetry (cleaner on a dynamic graph)
 
-**Policy scatter detail:** for the training target, scatter each legal-move logit
-to `coord_to_flat(action_coord, center)` and set non-legal flats to `-inf`
-(dense_cnn's legal mask); compute `soft_cross_entropy` exactly as dense_cnn. For
-inference, skip the scatter and emit per-legal-move softmax as `priors_bytes` in
-`legal_row_offsets` order. Same head, both read-outs — byte-compatible with the
-trainer's policy CE and the Rust priors contract.
-
-### 3.5 Token budget vs full legal coverage (real tension)
-
-Policy must cover **all** legal moves (≤1681 late game). If `max_candidates <
-n_legal`, some moves get no logit. Plan: (1) **measure** the real legal-count
-distribution from existing dense_cnn shards (`legal_off` diffs) before fixing the
-budget — hex frontiers are sparse, so ~384–512 likely covers most positions;
-(2) `overflow_policy="fail_fast"` during bring-up so truncation is loud; (3) add
-a cheap shared **fallback logit** for the long tail only if the data demands it.
-No silent caps.
-
-### 3.6 Parameter budget
-
-Match the running 96×8 baseline (~2.1M). Target `token_dim≈128`, `L_gnn≈2–3`,
-`L_ctx≈2–4`, `L_cross≈2`, `L_self∈{0,1}`, 4 heads; verify with `sum(p.numel())`
-and land within ~10% of the dense_cnn baseline. Report the exact count.
+- Re-derive/re-test the hex-D6 group (12 elements). Apply **at read/expand time**
+  via a per-(run,epoch) symmetry vector (dense_cnn discipline).
+- D6 acts on each node's **relative coordinate** and permutes/reflects the
+  **window axis labels** (Q/R/QR map among themselves under rotation/reflection).
+  Node and edge **identity is permutation-invariant**, so the graph is unchanged
+  except for rotated coords and relabeled axes.
+- Because the rep is relative-coordinate and **not bound to a square crop**, the
+  dense_cnn corner-spill problem disappears: the **full D6 group is usable with
+  no identity fallback**. This is a real advantage of the dynamic graph rep.
+- **Equivariance test (non-negotiable):** applying D6 to the input graph and
+  inverse-D6 to the policy output must equal the un-augmented forward (within fp
+  tolerance) for all 12 elements — the test that prevents subtly poisoning the
+  model (the dense_cnn D6 lesson, `MEMORY.md`).
 
 ---
 
-## 4. The hard problems, honestly
+## 7. Sample-gen + training rewrite (scope, honestly)
 
-### 4.1 Inference throughput in the 512-sim MCTS loop — THE make-or-break risk
+**Emulate dense_cnn's discipline** (raw-fact columnar NPZ + offsets +
+`SCHEMA_VERSION`, power-law replay window, md5 split, batch-aligned shards, JSON
+sidecars, per-epoch D6-at-read, checkpoint hygiene, config/plugin/test patterns).
 
-dense_cnn reaches ~58 pos/s at 512 sims with a fixed `(N,13,41,41)` CNN + TRT
-FP16, after a zero-copy buffer war (the `PlaneBuffer` pyclass). A **message-
-passing GNN is fundamentally harder**:
-
-- **Variable graph size** (nodes/edges differ per position) resists static
-  batching and a fixed export signature.
-- **Explicit message passing** (`scatter`/`index_add_` over variable edge lists)
-  **does not export cleanly to TensorRT** and is slow in eager torch.
-- **The transformer half** is O(T²·d); fine if `T` is bounded and dense, costly
-  if attention is sparse/dynamic.
-
-**This does NOT mean abandoning the GNN.** It means the GNN must be *implemented*
-in a form that batches and (ideally) exports. The throughput phase evaluates,
-in order of preference:
-
-1. **Fixed-shape padded GNN.** Pad node sets to fixed budgets (`max_stones`,
-   `max_candidates`, `max_windows`) with key-padding masks; represent typed
-   edges as **fixed-shape padded neighbor tensors** (gather a constant `K`
-   neighbors per node per edge type) so message passing is dense, static-shape
-   tensor ops — batchable and ONNX/TRT-exportable. This keeps the *explicit
-   typed GNN* while making it exportable. **Preferred if it meets the gate.**
-2. **Attention-bias realization (optimization option, NOT a replacement).** Fold
-   the typed local message passing into **additive attention biases** on the
-   context transformer (typed-edge bias + hex-distance/locality bias +
-   adjacency bias). This is mathematically a typed graph aggregation expressed as
-   masked dense attention — fully fixed-shape and TRT-friendly. We treat this as
-   a *performance equivalent* of the GNN to fall back to **only if** the explicit
-   message-passing GNN can't hit the throughput gate, and we validate that it
-   preserves the GNN's behavior (accuracy parity check), so the model is still
-   "a GNN" in effect. It is an optimization path, evaluated empirically — not a
-   silent substitution.
-3. **Torch-FP16 fallback (no TRT).** If neither (1) nor (2) exports but eager
-   `scaled_dot_product_attention` / fused-gather throughput is workable, run
-   self-play on torch FP16 and **normalize the comparison by search compute**
-   (§9), accepting lower pos/s.
-
-**Feasibility verdict:** a *truly dynamic* message-passing GNN is unlikely to
-export to TRT and will probably run below dense_cnn's pos/s in eager torch. The
-fixed-shape padded GNN (1) is the bet that keeps the explicit GNN *and* exports;
-the attention-bias form (2) is the proven-exportable safety net; torch FP16 (3)
-is the floor. **Phase 5 is the go/no-go gate** that picks the final form and
-decides project viability. Be honest in the run notes about which form ships and
-what it cost vs dense_cnn.
-
-**Bake in from day one:** bounded, *measured* `T`; mirror the `PlaneBuffer`
-zero-copy transport for a `(N,T,F)` f16 token payload + small int bias/edge
-tables; cache context KV across the cross-attention blocks; profile with
-`scripts/_profile_selfplay.py` before committing to TRT.
-
-### 4.2 Variable-size graphs and batched MCTS eval
-
-Solved by the **fixed node budgets + padding + key-padding masks** (and, for the
-GNN, fixed-`K` padded neighbor tensors per edge type). Rust hands Python a
-`(N,T,F)` buffer + edge/bias tables + per-row legal counts (CSR
-`legal_row_offsets`); Python masks pads, runs one batched forward, writes
-`priors_bytes` by reading the first `n_legal[row]` legal-token logits. No
-per-position Python loop. **Variable-size collation in *training*** (batching
-graphs of different sizes) is new work and is scoped in §5.
-
-### 4.3 D6 symmetry on a graph/token representation
-
-- Re-derive and re-test the hex-D6 group (`D6_SIZE=12`) and apply it **at
-  read/expand time** via a per-(run,epoch) symmetry vector — exactly dense_cnn's
-  discipline. D6 acts on each node's relative coordinate and on window axis
-  labels; **node/edge identity is permutation-invariant**, so only coords/edge-
-  geometry rotate.
-- **Spill advantage:** a pure-token/graph rep anchored on relative coords is
-  **not bound to the 41×41 square crop**, so dense_cnn's corner-spill problem
-  largely disappears — the **full D6 group is usable with no identity fallback**.
-  (Only if a local square-crop CNN feature is added back does spill return; the
-  MVP avoids it.)
-- **Equivariance test (non-negotiable):** applying D6 to the input and inverse-D6
-  to the policy output must equal the un-augmented forward (within fp tolerance)
-  for all 12 elements. This is the test that prevents subtly poisoning the model
-  (the dense_cnn D6 lesson, `MEMORY.md`).
-
-### 4.4 Capacity / fairness
-
-Size to ~2.1M (§3.6). The honest fairness axis is **search compute and
-wall-clock**, not params alone, because a GNN+transformer and a CNN have
-different FLOPs/param and inference profiles. State all axes in the comparison
-(§9).
+**New, largely-rewritten work:**
+1. **Shared Rust candidate/active-window path** (§4.5): one function over the
+   engine `WindowStore` producing the candidate set + the count-3/4/5 window
+   tokens, called by both sample-gen and live MCTS.
+2. **Rust sample-gen:** emit typed-node raw facts (all stones, candidates, active
+   windows) + typed edges. Likely a new `SCHEMA_VERSION` (graph fields) or
+   recompute the graph at expand time from the raw facts the compact schema
+   already stores (`stones_qr`, `legal_ids`, plus windows recomputable from
+   stones) for the MVP.
+3. **Expand step (`expand_row_to_graph`, new):** compact row + D6 symmetry →
+   typed node tensors + typed edge lists + dynamic policy/opp targets + 65-bin
+   value/stvalue targets. Replaces dense_cnn's `expand_*_to_planes`.
+4. **Variable-size graph collation/batching (new):** pack a batch into one
+   disjoint graph with `graph_id`; deterministic, byte-stable, tested.
+5. **New trainer (`HexgtTrainer`):** consumes packed graph batches; **same loss
+   weights, AMP, grad-clip, optimizer (AdamW), and reporting discipline as
+   dense_cnn**, with a dynamic (variable-length, per-graph-normalized) policy CE.
+6. **New inference module:** graph payload → per-candidate `priors_bytes` +
+   `values_bytes` (§2.6), using the zero-copy buffer-protocol transport.
 
 ---
 
-## 5. Scope of the sample-generation + training rewrite (be explicit)
+## 8. Behavioral cloning from dense_cnn shards (useful but a rewrite)
 
-This is a **major rewrite**, not a reuse. What is emulated vs newly built:
+BC is a fast signal that Model 2 can fit targets before paying for self-play, but
+it is **not free reuse** — it is a **conversion rewrite**:
 
-**Emulate dense_cnn's discipline (mirror the patterns, adapt the code):**
-- Raw-fact columnar NPZ shards with offset arrays + a `SCHEMA_VERSION`.
-- Power-law replay window, md5 train/val split, batch-aligned output shards,
-  JSON sidecars (`replay.py` mechanics).
-- Per-epoch D6-at-read symmetry vector; checkpoint hygiene (no `sample_buffer`);
-  config/plugin/test discipline.
+- dense_cnn shards store plane-oriented inputs and **visit-count policy targets
+  over action ids / crop flats**. BC must **reconstruct the graph** (stones,
+  candidates, active windows, edges) from the compact raw facts and **map
+  dense_cnn's visit-count policy onto Model 2's candidate nodes**.
+- **Support mismatch:** dense_cnn searches the full radius-8 legal set; Model 2's
+  candidates are the active-window set. Visits on moves outside the
+  active-window set (vacuum/dead cells) have **no candidate node**. Handling:
+  drop those visits and renormalize over the candidate support, and **log the
+  dropped mass** (it should be near-zero if the §4.6 completeness gate holds —
+  this is the same measurement). 65-bin value and opp_policy convert directly.
+- **Why limited:** BC teaches dense_cnn's policy *as projected onto a different
+  move vocabulary and a different architecture* — an initialization aid, not a
+  faithful clone. Treat its result as a warm start, then do cold-start/continued
+  self-play RL.
 
-**New work (largely rewritten for the graph rep):**
-1. **Rust sample-gen (`sample_gen.rs`, from scratch):** emit typed-node facts +
-   **typed-edge construction** (adjacency / line / candidate-of / recency /
-   side-context) + tactical-window scoring. This is the bulk of the new Rust.
-2. **Schema extension:** likely add graph-specific fields (edge lists per type,
-   window facts) → a new `SCHEMA_VERSION`; or recompute edges/windows at expand
-   time for the MVP (no field) and cache later if it's a measured bottleneck.
-3. **Expand step (`expand_row_to_graph`, from scratch):** compact row + symmetry
-   → typed node tensors `(T,F)` + typed padded neighbor/edge tensors + scattered
-   `(1681,)` policy/opp targets + `(65)`-binned value/stvalue targets. Replaces
-   dense_cnn's `expand_*_to_planes`.
-4. **Variable-size graph collation/batching (new):** pad-to-budget + masks (and
-   fixed-`K` neighbor tensors); deterministic, byte-stable, tested.
-5. **New trainer (`HexgtTrainer`):** consumes the graph batch; **same loss
-   weights, AMP, grad-clip, optimizer (AdamW), and reporting as dense_cnn** so
-   the training discipline matches even though the data path differs.
-6. **New inference module:** graph payload → `priors_bytes`/`values_bytes` per
-   the §2.6 protocol.
-
-Framing for the roadmap: **"emulate dense_cnn's discipline, but sample-gen and
-training are largely rewritten for the graph representation."**
+Scope BC as a real module (`bc_convert`) with its own tests, not a flag.
 
 ---
 
-## 6. Rust changes
+## 9. Phased roadmap (from-scratch build, modeled on dense_cnn discipline)
 
-### 6.1 Sample generation (`sample_gen.rs`) — from scratch
+Phases 0–4 are CPU-only (no GPU contention with the live dense_cnn run). GPU
+phases (5+) wait until the 96×8 run frees the GPU.
 
-- Author the typed-node raw facts and **typed edges** (§3.3). Tactical-window
-  scoring can take the *idea* from the old hexformer candidate scoring
-  (`tactical_radius`, `frontier_radius`) but is re-implemented and tested fresh.
-- MVP: recompute edges/windows at expand time from `stones_qr`+`legal_ids` (no
-  schema field, can read existing dense_cnn shards for the behavioral-clone
-  bootstrap). Cache in the shard (schema bump) only if measured to be a
-  bottleneck.
-
-### 6.2 MCTS integration — model fresh, framework pattern from dense_cnn
-
-- Build the new model's batched-PUCT MCTS by **following dense_cnn's Rust
-  pattern** (`dense_cnn/rust/src/{mcts.rs,mcts_eval.rs,encoding.rs}`): a native
-  session, a transposition cache, and the Python-callback eval loop. We do **not**
-  fork hexformer's MCTS crate; we mirror dense_cnn's, retargeting the encoding to
-  emit the **graph/token payload**.
-- **Mirror dense_cnn's zero-copy `PlaneBuffer`** (`mcts_eval.rs:48-100`): a
-  `#[pyclass]` exposing `__getbuffer__` over a `Vec<f16>` for the `(N,T,F)` token
-  features; ship edge/bias tables and `legal_row_offsets` as small int `PyBytes`.
-  Same payload-dict protocol (§2.6).
-- Build wiring: new crate `#[path]`-included into `hexo_models/rust/src/lib.rs`,
-  registered as `hexo_models._rust.hexgt`; rebuild the **`hexo_models`** package
-  (`maturin develop -m packages\hexo_models\Cargo.toml --features python`).
-
----
-
-## 7. Package layout, naming, and the deletion
-
-**Create a new package `packages/hexo_models/hexgt/` from scratch, structured as
-a sibling of `dense_cnn`** (mirror dense_cnn's module set), and **delete
-`hexformer_ar`** outright. "Delete" concretely means:
-
-- Remove `packages/hexo_models/hexformer_ar/` (Python + Rust).
-- Remove its entry point from `packages/hexo_models/pyproject.toml` (and the
-  source-include lists).
-- Remove its `#[path]` include + `sys.modules` registration from
-  `packages/hexo_models/rust/src/lib.rs:7-9,24-29`.
-- Remove `configs/hexformer_ar.toml`.
-- Drop any `hexformer_ar` test files.
-
-(The deletion is part of the build work, not this planning pass.)
-
-Layout (each module **authored fresh, modeled on the dense_cnn file of the same
-name**):
-
-```
-packages/hexo_models/hexgt/
-  python/hexo_models/hexgt/
-    __init__.py        # stable public surface
-    constants.py       # BOARD_SIZE=41, INPUT_CHANNELS=13, VALUE_BINS=65, token/edge budgets
-    config.py          # parse_hexgt_config — modeled on dense_cnn/config.py
-    coordinates.py     # axial/cube + pack_coord_id helpers, re-derived + tested
-    d6.py              # hex-D6 group, re-derived + tested (full group, no crop fallback)
-    architecture.py    # typed GNN + context transformer + cross-attn + dense_cnn-contract heads
-    losses.py          # binned value (dense_cnn math) + policy/opp CE
-    samples.py         # finalize (dense_cnn pattern) + expand_row_to_graph (new)
-    replay.py          # replay window/shuffle/split, modeled on dense_cnn/replay.py
-    compact_io.py      # columnar NPZ + graph expansion (new expansion target)
-    inference.py       # graph payload → priors_bytes/values_bytes
-    trainer.py         # HexgtTrainer: dense_cnn loss/AMP/clip discipline, graph batch
-    checkpoints.py     # dense_cnn checkpoint shape; sample_buffer rejection; no buffer write
-    selfplay.py        # modeled on dense_cnn/selfplay.py
-    evaluation.py      # SealBot match loop, modeled on dense_cnn/evaluation.py
-    player.py          # hexo_runner adapter, modeled on dense_cnn/player.py
-    performance.py     # calibration
-    trt_backend.py     # ONNX export of the fixed-shape model (Phase 5)
-    plugin.py          # ModelPlugin, modeled on dense_cnn/plugin.py
-  rust/src/
-    lib.rs, constants.rs, state.rs           # modeled on dense_cnn rust
-    mcts.rs, mcts_eval.rs, encoding.rs       # dense_cnn pattern, graph payload
-    sample_gen.rs                            # new typed-node + typed-edge facts
-```
-
-Entry point (after deleting hexformer):
-```toml
-[project.entry-points."hexo_train.models"]
-dense_cnn = "hexo_models.dense_cnn.plugin:get_plugin"
-hexgt     = "hexo_models.hexgt.plugin:get_plugin"
-```
-
----
-
-## 8. Phased roadmap — from-scratch build modeled on dense_cnn
-
-Each phase has a milestone gate. **No GPU contention with the live dense_cnn
-run** — phases 0–4 are CPU-only; GPU phases (5+) wait until the 96×8 run frees
-the GPU.
-
-**Phase 0 — Delete + scaffold (CPU).** Delete `hexformer_ar` (§7). Create
+**Phase 0 — Delete + scaffold (CPU).** Delete `hexformer_ar` (§1). Create
 `packages/hexo_models/hexgt/` mirroring dense_cnn's module set; `constants.py`,
-`config.py`; stub `architecture.py` returning the exact dense_cnn output keys
-with random weights; add the entry point.
-*Gate:* package installs editable; `load_model_plugin` resolves `hexgt`;
-`forward` returns `{"policy","value","opp_policy"[,"stvalue_*"]}` with shapes
-`(N,1681)/(N,65)/(N,1681)`.
+`config.py`; stub `architecture.py`; add the entry point.
+*Gate:* installs editable; `load_model_plugin` resolves `hexgt`; forward returns
+`{"policy"(dynamic),"value"(N,65),"opp_policy"(dynamic)[,"stvalue_*"]}`.
 
-**Phase 1 — Contract-conformance tests (CPU).** Mirror dense_cnn's test files as
-`tests/test_hexgt_*.py`: output keys/shapes; checkpoint round-trip +
-`sample_buffer` rejection; config unknown-key rejection; policy scatter↔gather
-equivalence.
-*Gate:* all contract tests green on random weights.
+**Phase 1 — Engine-grounded candidate/window path + validation (CPU). [GATE]**
+Implement the shared Rust candidate-set + active-window enumeration (§4.5) over
+the engine `WindowStore`. Run the §4.6 validation on dense_cnn's recorded games:
+(1) completeness ≈ 100%, (2) candidate/window size distributions.
+*Gate:* completeness ≈ 100% (else investigate/adjust); cost distribution
+acceptable for training/search. **This gates the whole design.**
 
-**Phase 2 — GNN + transformer model body (CPU).** Implement the typed GNN
-(message passing over typed edges, §3.1/§3.3), context transformer, legal-move
-cross-attention, optional self-attention, and the dense_cnn-contract heads.
-*Gate:* forward runs on a synthetic graph batch; D6 **equivariance test** passes
-for all 12 elements (§4.3); overfits one tiny fixed batch (loss → ~0).
+**Phase 2 — Contract-conformance tests (CPU).** Mirror dense_cnn's test files as
+`tests/test_hexgt_*.py`: forward keys/shapes (dynamic policy length = #candidates),
+checkpoint round-trip + `sample_buffer` rejection, config unknown-key rejection,
+candidate↔priors CSR ordering.
+*Gate:* all green on random weights.
 
-**Phase 3 — Sample-gen + expand rewrite (CPU). [MAJOR]** Author the Rust typed-
-node + typed-edge sample-gen (§6.1) and `expand_row_to_graph` (§5). Validate the
-scattered `(1681,)` policy target matches dense_cnn's expansion for shared rows
-read from existing `runs/` shards (read-only). Implement variable-size graph
-collation/batching.
-*Gate:* byte-stable graph batches; policy/value targets match dense_cnn
-expansion for shared rows; D6-at-read symmetry vector wired.
+**Phase 3 — Dynamic GNN + transformer body (CPU).** Typed message passing (§6.3),
+context transformer, candidate cross-attention, optional candidate self-attn,
+dynamic policy + 65-bin value heads. Packed-graph collation.
+*Gate:* forward on packed synthetic graphs; **D6 equivariance test passes for all
+12 elements** (§6.5); overfits one tiny fixed batch.
 
-**Phase 4 — Trainer + MCTS integration (CPU/light). [MAJOR]** Implement
-`HexgtTrainer` (dense_cnn loss/AMP/clip/optimizer discipline; §5.5). Implement
-the Rust MCTS session (dense_cnn pattern) + zero-copy graph payload + Python
-`inference.evaluate_payload` → `priors_bytes`/`values_bytes`; reuse dense_cnn's
-priors validation.
-*Gate:* a short CPU self-play run produces legal games end-to-end; priors
-validation passes; transposition cache hits; a CPU training pass decreases loss.
+**Phase 4 — Sample-gen + expand + trainer (CPU). [MAJOR]** Rust typed-node +
+typed-edge sample-gen (§7); `expand_row_to_graph`; `HexgtTrainer` (dense_cnn
+loss/AMP/clip discipline; dynamic policy CE). Validate targets vs dense_cnn raw
+facts for shared rows.
+*Gate:* byte-stable graph batches; targets consistent with engine facts; a CPU
+training pass decreases loss.
 
-**Phase 5 — Throughput + form decision (GPU). [MAKE-OR-BREAK GATE]** Profile the
-explicit message-passing GNN's pos/s at 512 sims (`scripts/_profile_selfplay.py`).
-Evaluate, in order: (1) fixed-shape padded GNN TRT export; (2) attention-bias
-realization TRT export (validate accuracy parity vs the explicit GNN); (3) torch
-FP16. Run the dense_cnn-style correctness gate.
-*Gate (go/no-go):* pick the fastest form that meets the correctness gate and an
-acceptable pos/s. If the explicit GNN exports/runs acceptably → ship it. If only
-the attention-bias form does → ship it as the GNN's performant realization
-(parity-checked). If only torch FP16 is workable → proceed, compute-normalize
-(§9). If none is workable → stop and reconsider (shrink `T`/layers or rethink).
+**Phase 5 — MCTS integration + torch throughput (GPU). [MAKE-OR-BREAK GATE]**
+Rust MCTS encoder emits the graph payload via the zero-copy buffer transport;
+Python `inference.evaluate_payload` → `priors_bytes`/`values_bytes`; reuse
+dense_cnn's priors validation. Profile pos/s at 512 sims with
+`scripts/_profile_selfplay.py` on **torch FP16 (no TRT)**; tune packing/batching.
+*Gate (go/no-go):* legal end-to-end self-play; priors validation passes; pos/s
+acceptable for self-play (normalized vs dense_cnn by search compute, §10). If
+unworkable, reduce model depth or reconsider — honestly.
 
-**Phase 6 — Bootstrap / cold-start (GPU, after dense_cnn frees GPU).**
-(a) **Behavioral-clone** Model 2 supervised on existing dense_cnn shards (fast
-signal it can fit the targets) → then (b) **cold-start RL** self-play from random
-init (dense_cnn 64×4 path). Reuse the scratch-64 autonomy supervisor; watch
-opening entropy (`forced_playout_k` / opening-temperature lessons, `MEMORY.md`).
-*Gate:* training loss decreases on real targets; healthy self-play opening
-diversity.
+**Phase 6 — BC warm-start + cold-start RL (GPU, after dense_cnn frees GPU).**
+`bc_convert` from dense_cnn shards (§8) → warm start → continued/cold-start
+self-play RL. Reuse the scratch-64 autonomy supervisor; watch opening entropy
+(`forced_playout_k` / opening-temperature lessons, `MEMORY.md`).
+*Gate:* loss decreases on real targets; healthy self-play opening diversity.
 
 **Phase 7 — Head-to-head vs dense_cnn (GPU).** SealBot eval + direct matches
-under matched search compute (§9).
+under matched search compute (§10).
 *Gate:* Model 2 reaches a defined fraction of dense_cnn's SealBot win-rate at
 matched compute — or a clear, honest verdict that it does not.
 
 ---
 
-## 9. Head-to-head evaluation methodology
+## 10. Head-to-head evaluation methodology
 
-Reuse the *exact* dense_cnn eval harness (re-implemented in `hexgt`, modeled on
+Re-implement the exact dense_cnn eval harness in `hexgt` (modeled on
 dense_cnn) so the comparison is apples-to-apples:
 
-- **Same SealBot eval:** `evaluate_epoch` → `hexo_runner.modes.match.run_match`
-  vs `SealBotPlayer` at `sealbot_variant="best"`, `time_limit=0.05`, alternating
-  colors, `games_per_epoch=64`. Eval uses `use_trt=False` for both (TRT-
-  independent strength).
+- **Same SealBot eval:** `evaluate_epoch` → `run_match` vs `SealBotPlayer`,
+  `sealbot_variant="best"`, `time_limit=0.05`, alternating colors,
+  `games_per_epoch=64`; `use_trt=False` for both.
 - **Same MCTS:** same batched PUCT + transposition cache + same `search_visits`
   (512 for strength). Only the network + payload encoding differ.
 - **Matched compute — lead with this.** Report three axes: (1) **matched search
-  visits** (per-search quality, the "is the network smarter" signal); (2)
-  **matched wall-clock self-play budget** (penalizes slow inference honestly);
-  (3) **matched param count** (~2.1M, the capacity footnote).
+  visits** (per-search quality); (2) **matched wall-clock self-play budget**
+  (penalizes the torch-only/no-TRT throughput honestly vs dense_cnn's TRT
+  self-play); (3) **matched param count** (~2.1M, capacity footnote).
 - **Direct match:** Model 2 vs dense_cnn (`run_match`, alternating colors, ≥200
   games), win-rate ± Wilson interval.
 - **Same opening-diversity controls** (`opening_moves`/`opening_temperature`,
-  per-(game,move) seeds — the eval-diversity lesson in `MEMORY.md`).
+  per-(game,move) seeds, `MEMORY.md`).
 
 ---
 
-## 10. Decisions reflected + remaining open questions
+## 11. Decisions reflected + open questions
 
-**Binding decisions reflected in this revision:**
-1. **Delete `hexformer_ar`; build fresh modeled on dense_cnn** (§0, §1.2, §7,
-   §8 Phase 0). hexformer's code/scaffolding is not the foundation; dense_cnn's
-   patterns are.
-2. **The typed GNN is first-class** (§3.1, §3.3). The attention-bias / fixed-
-   shape formulation is an **optimization option evaluated in Phase 5**, not a
-   silent replacement (§4.1).
-3. **Major sample-gen + training rewrite, stated explicitly** (§5, §6, §8 Phases
-   3–4). We emulate dense_cnn's *discipline*; the graph sample-gen, expansion,
-   collation, and trainer are largely new.
+**Binding decisions reflected:** delete `hexformer_ar`, build fresh on dense_cnn
+discipline (§1); **drop-in PIPELINE compatibility, not shape-matching** (§2);
+**dynamic per-candidate policy, no 1681** (§3.4, §6.4); **truly dynamic GNN — no
+padding/caps/top-k, no TRT, torch FP16** (§6.1); attention-bias formulation
+**rejected** as a non-GNN approximation (§4.3); **candidate set = empty cells in
+any active window of either player, no radius/no `n`/no top-k** (§4); **tactical
+tokens = count-3/4/5 active windows of both colors, no forks, no other types**
+(§5); **all stones as nodes, no budget** (§6.2); **BC = conversion rewrite**
+(§8); **full-D6 equivariance test** (§6.5); **matched-compute fairness** (§10);
+**Rust parity of candidate/window detection across sample-gen and play** (§4.5);
+**validation gates** on candidate completeness and size distribution (§4.6).
 
-**Retained from the prior analysis (still in force):** the Phase-5 throughput
-gate, drop-in contract matching for a fair comparison (§2, §3.4), full-group D6
-with the equivariance test (§4.3), and the matched-compute fairness methodology
-(§9).
-
-**Open questions for the user:**
-1. **Package name:** `hexgt` (proposed) acceptable?
-2. **Auxiliary heads:** confirm dropping WDL/threat/lookahead from the MVP
-   contract (re-add later as private aux) is acceptable.
-3. **Token budget fallback:** OK to start `fail_fast` and add a long-tail
-   fallback logit only if measured legal counts demand it?
-4. **Bootstrap:** behavioral-clone from dense_cnn shards first (recommended), or
-   straight to cold-start RL for a "clean" comparison?
-5. **If Phase 5 shows the explicit message-passing GNN can't hit the throughput
-   gate**, is the attention-bias realization (parity-checked, still a GNN in
-   effect) an acceptable ship form, or must the explicit message-passing form be
-   preserved even at a throughput cost?
+**Open questions:**
+1. **Package name:** `hexgt` acceptable?
+2. **Aux heads:** confirm dropping WDL/threat/lookahead from the MVP (re-add later
+   as private aux off the pipeline contract).
+3. **opp_policy / stvalue:** include both auxiliaries in the MVP, or value+policy
+   only first?
+4. **Graph in shard vs recompute-at-expand:** cache edges/windows in a new
+   `SCHEMA_VERSION`, or recompute from raw facts at expand time for the MVP?
+5. **BC dropped-mass tolerance:** what dropped-visit fraction (from §4.6/§8) is
+   acceptable before widening the candidate rule or revisiting?
 
 ---
 
-## Appendix A — file:line index of contracts referenced
+## Appendix A — engine + pipeline file:line index
 
-- dense_cnn forward: `packages/hexo_models/dense_cnn/python/hexo_models/dense_cnn/architecture.py:202-220`
-- dense_cnn value bins: `.../dense_cnn/losses.py:20-30`
-- dense_cnn constants/planes: `.../dense_cnn/constants.py:9-28`
-- dense_cnn geometry/flat index: `.../dense_cnn/geometry.py:36-62`
-- dense_cnn ActionId pack: `.../dense_cnn/d6.py:19,41-59`
-- dense_cnn compact schema: `.../dense_cnn/compact_io.py:33,49-216,243-322`
-- dense_cnn replay window/shuffle: `.../dense_cnn/replay.py:523-535,615-755`
+Engine rules:
+- Win / `WINDOW_LEN=6` / axes: `packages/hexo_engine/rust/src/tactics.rs:14-53`
+- **Active window** definition: `tactics.rs:172-186`
+- Threat (count≥4): `tactics.rs:189-198`; popcount count: `tactics.rs:133-136`
+- Win window: `tactics.rs:206-208`; blocked-not-threat test: `tactics.rs:620-636`
+- WindowStore enumeration: `tactics.rs:154-156,378,386-395`
+- Legal radius 8: `packages/hexo_engine/rust/src/legal.rs:10-11,124-128`
+- Turn phases / two-stone turns / win check: `packages/hexo_engine/rust/src/state.rs:9-10,46-56,304-330`
+- No draws / unbounded board: `state.rs:64-71,98`; `coord.rs:1-9`
+- hex_distance / coords_within_radius: `coord.rs:77-96`
+- Opening forced to (0,0): `rules.rs:16-23`, `state.rs:224-228`
+
+Pipeline contracts:
+- dense_cnn value bins: `packages/hexo_models/dense_cnn/python/hexo_models/dense_cnn/losses.py:20-30`
 - dense_cnn checkpoint: `.../dense_cnn/checkpoints.py:23-105`
+- dense_cnn replay window/shuffle: `.../dense_cnn/replay.py:523-535,615-755`
 - dense_cnn config: `.../dense_cnn/config.py:183-318`
 - dense_cnn plugin/entry point: `.../dense_cnn/plugin.py:27-119`, `packages/hexo_models/pyproject.toml:17-19`
-- Rust↔Python evaluator payload: `.../dense_cnn/rust/src/mcts_eval.rs:48-100,315-390`
-- TRT: `.../dense_cnn/trt_backend.py:93-396`
+- Rust↔Python evaluator payload + zero-copy buffer: `.../dense_cnn/rust/src/mcts_eval.rs:48-100,315-390`
 - ModelPlugin protocol: `packages/hexo_train/python/hexo_train/registry.py:24-103`
-- hexformer (to delete) architecture: `.../hexformer_ar/architecture.py:15-265`
 - hexformer (to delete) Rust include: `packages/hexo_models/rust/src/lib.rs:7-9,24-29`
