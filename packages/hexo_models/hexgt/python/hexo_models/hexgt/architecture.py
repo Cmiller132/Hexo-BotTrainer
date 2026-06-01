@@ -232,8 +232,8 @@ class HexgtNetwork(nn.Module):
 
     # -- internals -------------------------------------------------------------
 
-    def _encode_nodes(self, batch: Mapping[str, torch.Tensor]) -> torch.Tensor:
-        self._validate_batch(batch)
+    def _encode_nodes(self, batch: Mapping[str, torch.Tensor], *, validate_range: bool = True) -> torch.Tensor:
+        self._validate_batch(batch, validate_range=validate_range)
         h = self.node_in(batch["node_feat"])
         edge_index = batch["edge_index"]
         edge_type = batch.get("edge_type")
@@ -284,16 +284,23 @@ class HexgtNetwork(nn.Module):
         return self._heads(batch, self._encode_nodes(batch), with_aux=True)
 
     def forward_policy_value(self, batch: Mapping[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-        """Inference-only forward path for search (policy + value only)."""
+        """Inference-only forward path for search (policy + value only).
 
-        return self._heads(batch, self._encode_nodes(batch), with_aux=False)
+        Skips the node-type RANGE validation (an ``.any().item()`` GPU->CPU sync
+        that graph-breaks ``torch.compile`` and serializes every search forward).
+        The cheap shape check is kept; the range check is redundant in search —
+        the Rust featurizer always emits valid node types, and the trainer's
+        ``forward`` still runs the full check. This is the throughput-critical
+        path (self-play + eval), so the sync is removed here only."""
 
-    def _validate_batch(self, batch: Mapping[str, torch.Tensor]) -> None:
+        return self._heads(batch, self._encode_nodes(batch, validate_range=False), with_aux=False)
+
+    def _validate_batch(self, batch: Mapping[str, torch.Tensor], *, validate_range: bool = True) -> None:
         node_feat = batch["node_feat"]
         if node_feat.ndim != 2 or node_feat.shape[1] != self.node_feature_dim:
             raise ValueError(
                 f"node_feat must be (Ntot, {self.node_feature_dim}), got {tuple(node_feat.shape)}"
             )
         node_type = batch.get("node_type")
-        if node_type is not None and node_type.numel() and bool(((node_type < 0) | (node_type >= NUM_NODE_TYPES)).any().item()):
+        if validate_range and node_type is not None and node_type.numel() and bool(((node_type < 0) | (node_type >= NUM_NODE_TYPES)).any().item()):
             raise ValueError("node_type out of range")
