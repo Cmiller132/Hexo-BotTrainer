@@ -23,6 +23,7 @@ from .architecture import HexgtNetwork
 from .checkpoints import HexgtCheckpointLoader, HexgtCheckpointSaver
 from .config import parse_hexgt_config
 from .evaluation import evaluate_epoch as _evaluate_epoch
+from .selfplay import generate_selfplay_epoch as _generate_selfplay_epoch
 from .trainer import HexgtTrainer
 
 
@@ -83,6 +84,13 @@ class HexgtPlugin:
                 "evaluation_games_per_epoch": parsed.evaluation.games_per_epoch,
                 "candidate_radius": parsed.architecture.candidate_radius,
             },
+        )
+
+    def generate_selfplay(self, *, ctx: Any, components: Any, epoch: int, games_per_epoch: int) -> dict[str, Any]:
+        """Generate one epoch of game-driven self-play, writing compact shards."""
+
+        return _generate_selfplay_epoch(
+            ctx=ctx, components=components, epoch=epoch, games_per_epoch=games_per_epoch
         )
 
     def evaluate_epoch(self, *, ctx: Any, components: Any, epoch: int) -> dict[str, Any]:
