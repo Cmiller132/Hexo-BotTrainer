@@ -102,3 +102,56 @@ MVP. Total edges linear in (#nodes + #windows) — the §4.6 no-explosion gate.
   (detailed in Phase 4).
 - **(A) node features, (D) D6 edge-relabel, (H) GNN/transformer hypers ~2.1M,
   (I) collation** — designed here / in later phase entries.
+
+---
+
+## Phase 1 — candidate/window/edge Rust path + validation gates
+
+**Implemented** (`hexgt/rust/src/candidates.rs`, `state.rs`): the single shared
+builder (§4.5) over the engine `WindowStore` + a local `coords_within_radius`
+(not exported by the engine). Produces candidate set (A∪B), count-3/4/5 window
+tokens, and the bounded typed graph (window-hub edges, no cliques). Exposed via
+`rust_bridge.candidate_ids(state, n)` and `rust_bridge.graph_facts(state, n)`.
+Edges stored symmetric (both directions, same type). Candidate ⊆ legal verified.
+
+**Validation (`scripts/_validate_hexgt_candidates.py`)** on 60 recorded 96x8
+games (4547 positions, compact raw-fact shards, read-only):
+
+**Gate (3) NO-EXPLOSION — PASSES.** edges/node ≈ 6.2 (opening) → 7.4 (mid) →
+7.7 (end) median, p95 ≤ 8.3, never growing with position size. Edges are LINEAR
+in #nodes; the window-hub routing avoids the same-axis clique. ✓ Candidate sizes
+(n=2): median 95/201/388 (open/mid/end), p95 up to 842, max ~1146.
+
+**Gate (1) COVERAGE — n=2 is TOO TIGHT (key finding).**
+
+| n | played% | visited-count% | visited-mass% |
+|---|---|---|---|
+| 2 | 90.5 | 84.9 | 91.2 |
+| 4 | 92.2 | 87.7 | 92.5 |
+| 6 | 95.1 | 93.3 | 95.6 |
+| 7 | 97.8 | 96.5 | 97.6 |
+| 8 | **100.0** | **100.0** | **100.0** |
+
+Per phase at n=2: opening 80%/64%/84% (worst), midgame 93%/90%/94%, endgame
+90%/87%/90% (played/vcount/vmass). Missed PLAYED moves at n=2 are FAR spread
+plays: 68% at hex-distance 6–8 from the nearest stone (only 5% at dist 3) — so
+raising n incrementally barely helps; ~100% needs n=8.
+
+**Interpretation:** the union rule is SOUND (100% at n=8 = full legal radius, no
+red flag — `coords_within_radius(stone, 8)` ≈ the engine legal set). But the
+plan's premise that a *small* n retains ~100% does NOT hold for Hexo: strong
+play genuinely uses far tenuki/spread moves spread across the whole legal radius.
+There is no intermediate n with both ~100% coverage and a small candidate set.
+
+**DECISION (candidate-set policy for the MVP):** default `candidate_radius`
+raised to **n = 8 (candidate_set ≡ engine legal set)** for the from-scratch MVP,
+overriding the plan's n=2 default. Rationale: 100% coverage → no move-vocabulary
+handicap vs dense_cnn (fair comparison, §10) and ~0 BC dropped-mass (open-q #4);
+consistent with "truly dynamic / no caps"; the no-explosion gate confirms edges
+stay linear even at full-legal N, so it is tractable. The tactical value-add over
+dense_cnn is the GRAPH STRUCTURE (window-hub tokens, typed edges), not candidate
+pruning. **Compute tradeoff (noted for Phase 5):** at n=8 the dense
+candidate↔context attention is ~O(#candidates·#context) and endgame candidates
+≈ full legal (~800–1400), ~5× the n=2 cost — `candidate_radius` stays the single
+tunable knob to sweep down the coverage/throughput frontier in Phase 5 with the
+real model + MCTS. (Surfaced to the user as a major decision.)

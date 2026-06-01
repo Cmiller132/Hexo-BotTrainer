@@ -26,6 +26,23 @@ def capabilities() -> Mapping[str, Any]:
     return _hexgt_module().capabilities()
 
 
+def candidate_ids(state: object, n: int) -> list[int]:
+    """Packed candidate action ids for a live engine state at radius `n` (§4)."""
+
+    return list(_hexgt_module().hexgt_candidate_ids(state, int(n)))
+
+
+def graph_facts(state: object, n: int) -> Mapping[str, Any]:
+    """Full bounded-graph facts for a live engine state at radius `n`.
+
+    Returns candidate ids/order, count-3/4/5 window tokens, typed node/edge
+    arrays, and per-type counts (the §4.6 no-explosion gate). This is the shared
+    construction reused by the Phase-4 expand step and (later) live MCTS.
+    """
+
+    return _hexgt_module().hexgt_graph_facts(state, int(n))
+
+
 def _hexgt_module() -> Any:
     """Return the loaded native hexgt module or raise a clear error."""
 

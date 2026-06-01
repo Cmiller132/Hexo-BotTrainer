@@ -27,8 +27,11 @@ ffn_dim = 256
 dropout = 0.0
 short_term_value_horizons = [1, 4, 8]
 # The single candidate-set neighborhood radius n (active windows UNION n-radius),
-# default 2, tunable [2, 8]. Threaded into BOTH sample-gen and live MCTS.
-candidate_radius = 2
+# tunable [2, 8]. Threaded into BOTH sample-gen and live MCTS. Phase-1 validation
+# showed n=2 covers only ~85-92% of dense_cnn's strong moves (misses are far
+# spread plays); n=8 = full legal set = 100% coverage. MVP uses 8 to avoid a
+# move-vocabulary handicap; sweep down in Phase 5 for throughput.
+candidate_radius = 8
 
 [model.config.training]
 batch_size = 128

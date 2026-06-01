@@ -41,9 +41,18 @@ WINDOW_COUNT_MAX_TOKEN = 5
 WINDOW_LEN = 6                 # engine win length (six-in-a-line)
 
 # --- Candidate-set rule (§4): active windows UNION n-radius --------------------
-# `n` is the single tunable neighborhood radius, default 2, range [2, 8] (same
-# hex-distance metric as the engine's LEGAL_RADIUS = 8).
-DEFAULT_CANDIDATE_RADIUS = 2
+# `n` is the single tunable neighborhood radius, range [2, 8] (same hex-distance
+# metric as the engine's LEGAL_RADIUS = 8).
+#
+# Phase-1 finding (HEXGT_DECISIONS.md): the plan's n=2 default covers only
+# ~85-92% of dense_cnn's strong played/visited moves; the misses are FAR spread
+# plays (68% at hex-distance 6-8), so ~100% coverage requires n=8 (= the full
+# engine legal set). To avoid handicapping the move vocabulary vs dense_cnn, the
+# MVP default is n=8 (candidate_set ≡ legal set, 100% coverage). The graph's
+# value-add over dense_cnn is its tactical STRUCTURE (window-hub tokens, typed
+# edges), validated by the no-explosion gate, not candidate pruning. `n` stays
+# the single knob to sweep the coverage/throughput frontier down in Phase 5.
+DEFAULT_CANDIDATE_RADIUS = 8
 MIN_CANDIDATE_RADIUS = 2
 MAX_CANDIDATE_RADIUS = 8
 ENGINE_LEGAL_RADIUS = 8

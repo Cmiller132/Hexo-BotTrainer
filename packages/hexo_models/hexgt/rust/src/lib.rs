@@ -15,13 +15,16 @@
 //! `lib.rs` only registers pieces into the Python submodule and publishes
 //! capability metadata; it contains no model logic.
 
+mod candidates;
+mod state;
+
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 #[pyfunction]
 pub fn capabilities(py: Python<'_>) -> PyResult<Py<PyAny>> {
     let dict = PyDict::new(py);
-    dict.set_item("status", "scaffold")?;
+    dict.set_item("status", "candidates")?;
     dict.set_item("model_family", "hexgt")?;
     dict.set_item("state_source", "direct_engine_state")?;
     dict.set_item("coordinate_encoding", "u32_i16_pair")?;
@@ -33,5 +36,6 @@ pub fn capabilities(py: Python<'_>) -> PyResult<Py<PyAny>> {
 
 pub fn register_pybridge(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(capabilities, module)?)?;
+    candidates::register_pybridge(module)?;
     Ok(())
 }
