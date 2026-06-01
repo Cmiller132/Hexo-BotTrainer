@@ -9,7 +9,7 @@ session search (Phase 5) are added to this boundary as they land.
 
 from __future__ import annotations
 
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 try:
     from hexo_models import _rust
@@ -41,6 +41,71 @@ def graph_facts(state: object, n: int) -> Mapping[str, Any]:
     """
 
     return _hexgt_module().hexgt_graph_facts(state, int(n))
+
+
+def new_mcts_session(*, max_states: int | None = None, n: int | None = None) -> object:
+    """Create a native hexgt MCTS session (transposition cache + subtree reuse).
+
+    `n` is the candidate-set radius (move vocabulary); it is immutable for the
+    session's lifetime so the state-hash transposition cache stays sound.
+    """
+
+    return _hexgt_module().HexgtMctsSession(max_states, n)
+
+
+def mcts_session_search(
+    session: object,
+    game_keys: Sequence[int],
+    states: Sequence[object],
+    *,
+    visits: int,
+    c_puct: float,
+    temperature: float,
+    seed: int,
+    evaluator: object,
+    virtual_batch_size: int | None = None,
+    active_root_limit: int | None = None,
+    root_dirichlet_total_alpha: float | None = None,
+    root_dirichlet_noise_fraction: float | None = None,
+    root_policy_temperature: float | None = None,
+    fpu_reduction: float | None = None,
+    virtual_loss: float | None = None,
+    widening_policy_mass: float | None = None,
+    widening_max_children: int | None = None,
+    widening_min_children: int | None = None,
+    forced_playout_k: float | None = None,
+    move_temperatures: Sequence[float] | None = None,
+) -> tuple[Mapping[str, Any], ...]:
+    """Search through a native hexgt MCTS session, preserving chosen subtrees.
+
+    Arguments are forwarded in the PyO3 signature order expected by
+    `rust/src/mcts.rs`. Each node materializes at most a policy-nucleus subset of
+    its candidate moves (top-p widening), identical to dense_cnn.
+    """
+
+    return tuple(
+        session.search(
+            tuple(int(item) for item in game_keys),
+            tuple(states),
+            visits,
+            c_puct,
+            temperature,
+            int(seed),
+            evaluator,
+            virtual_batch_size,
+            active_root_limit,
+            root_dirichlet_total_alpha,
+            root_dirichlet_noise_fraction,
+            root_policy_temperature,
+            fpu_reduction,
+            virtual_loss,
+            widening_policy_mass,
+            widening_max_children,
+            widening_min_children,
+            forced_playout_k,
+            None if move_temperatures is None else [float(t) for t in move_temperatures],
+        )
+    )
 
 
 def _hexgt_module() -> Any:

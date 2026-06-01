@@ -12,7 +12,7 @@ use pyo3::prelude::*;
 use std::ffi::c_void;
 use std::ptr;
 
-use hexo_engine::HexoState as RustHexoState;
+use hexo_engine::{HexoState as RustHexoState, MoveError};
 
 const STATE_API_CAPSULE_NAME: &str = "hexo_engine._rust.state_api";
 const STATE_API_VERSION: u32 = 2;
@@ -29,6 +29,28 @@ pub(crate) fn state_from_py_state(
     state: &Bound<'_, PyAny>,
 ) -> PyResult<RustHexoState> {
     state_from_py_state_with_api(engine_state_api(py)?, state)
+}
+
+/// Clone a Python iterable of live engine states into owned Rust handles. The
+/// capsule is resolved once per batch (mirrors `dense_cnn/state.rs`). Used by the
+/// MCTS session to take search-local copies of the active roots.
+pub(crate) fn states_from_py_states(
+    py: Python<'_>,
+    states: &Bound<'_, PyAny>,
+) -> PyResult<Vec<RustHexoState>> {
+    let api = engine_state_api(py)?;
+    let mut roots = Vec::new();
+    for item in states.try_iter()? {
+        let item = item?;
+        roots.push(state_from_py_state_with_api(api, &item)?);
+    }
+    Ok(roots)
+}
+
+/// Adapt an engine `MoveError` into a Python `ValueError` (the tree replays
+/// candidate edges through `apply_placement` and surfaces illegality this way).
+pub(crate) fn move_error(error: MoveError) -> PyErr {
+    PyValueError::new_err(error.to_string())
 }
 
 fn engine_state_api(py: Python<'_>) -> PyResult<&'static HexoStateApi> {

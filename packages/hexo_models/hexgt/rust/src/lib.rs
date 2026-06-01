@@ -16,6 +16,10 @@
 //! capability metadata; it contains no model logic.
 
 mod candidates;
+mod constants;
+mod mcts;
+mod mcts_eval;
+mod mcts_tree;
 mod state;
 
 use pyo3::prelude::*;
@@ -24,18 +28,21 @@ use pyo3::types::PyDict;
 #[pyfunction]
 pub fn capabilities(py: Python<'_>) -> PyResult<Py<PyAny>> {
     let dict = PyDict::new(py);
-    dict.set_item("status", "candidates")?;
+    dict.set_item("status", "mcts")?;
     dict.set_item("model_family", "hexgt")?;
     dict.set_item("state_source", "direct_engine_state")?;
     dict.set_item("coordinate_encoding", "u32_i16_pair")?;
     dict.set_item("candidate_set", "active_windows_union_n_radius")?;
     dict.set_item("edge_construction", "window_hub_bounded_no_cliques")?;
     dict.set_item("policy", "dynamic_per_candidate")?;
+    dict.set_item("search", "batched_puct_nucleus_widening")?;
+    dict.set_item("eval_transport", "graph_facts_candidate_csr")?;
     Ok(dict.into_any().unbind())
 }
 
 pub fn register_pybridge(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(capabilities, module)?)?;
     candidates::register_pybridge(module)?;
+    mcts::register_pybridge(module)?;
     Ok(())
 }

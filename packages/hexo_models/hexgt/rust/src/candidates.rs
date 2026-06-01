@@ -350,26 +350,16 @@ pub fn build_graph(state: &RustHexoState, n: i16) -> PositionGraph {
     }
 }
 
-// --- PyO3 surface ------------------------------------------------------------
-
-/// Candidate packed action ids for `state` at radius `n` (deterministic order).
-#[pyfunction]
-#[pyo3(signature = (state, n))]
-pub fn hexgt_candidate_ids(py: Python<'_>, state: &Bound<'_, PyAny>, n: i64) -> PyResult<Vec<u32>> {
-    let state = super::state::state_from_py_state(py, state)?;
-    let (cells, _) = candidate_cells(&state, n as i16);
-    Ok(cells.into_iter().map(pack_coord).collect())
-}
-
-/// Full graph facts for `state` at radius `n`: counts (for the no-explosion
-/// gate), candidate ids/order, window tokens, and the typed node/edge arrays
-/// (reused by the Phase-4 expand step).
-#[pyfunction]
-#[pyo3(signature = (state, n))]
-pub fn hexgt_graph_facts(py: Python<'_>, state: &Bound<'_, PyAny>, n: i64) -> PyResult<Py<PyAny>> {
-    let state = super::state::state_from_py_state(py, state)?;
-    let g = build_graph(&state, n as i16);
-
+/// Pack a built `PositionGraph` + its state context into the Python graph-facts
+/// dict consumed by `features.build_graph_tensors`. Shared by the PyO3
+/// `hexgt_graph_facts` entry (Py state in) and the MCTS eval (Rust leaf states,
+/// no Py->Rust reclone), so training inputs == search inputs byte-for-byte.
+pub(crate) fn position_graph_to_py_dict(
+    py: Python<'_>,
+    state: &RustHexoState,
+    g: &PositionGraph,
+    n: i64,
+) -> PyResult<Py<PyAny>> {
     let dict = PyDict::new(py);
     dict.set_item("n", n)?;
     dict.set_item("used_legal_fallback", g.used_legal_fallback)?;
@@ -404,31 +394,31 @@ pub fn hexgt_graph_facts(py: Python<'_>, state: &Bound<'_, PyAny>, n: i64) -> Py
     ecounts.set_item("total_edges", g.edge_src.len())?;
     dict.set_item("edge_counts", ecounts)?;
 
-    dict.set_item("candidate_ids", g.candidate_ids)?;
-    dict.set_item("candidate_nodes", g.candidate_nodes)?;
+    dict.set_item("candidate_ids", g.candidate_ids.clone())?;
+    dict.set_item("candidate_nodes", g.candidate_nodes.clone())?;
 
     // Typed node arrays.
     let nodes = PyDict::new(py);
-    nodes.set_item("node_type", g.node_type)?;
-    nodes.set_item("node_q", g.node_q)?;
-    nodes.set_item("node_r", g.node_r)?;
-    nodes.set_item("node_owner", g.node_owner)?;
-    nodes.set_item("node_recency", g.node_recency)?;
-    nodes.set_item("node_wcount", g.node_wcount)?;
-    nodes.set_item("node_waxis", g.node_waxis)?;
-    nodes.set_item("node_wempty", g.node_wempty)?;
+    nodes.set_item("node_type", g.node_type.clone())?;
+    nodes.set_item("node_q", g.node_q.clone())?;
+    nodes.set_item("node_r", g.node_r.clone())?;
+    nodes.set_item("node_owner", g.node_owner.clone())?;
+    nodes.set_item("node_recency", g.node_recency.clone())?;
+    nodes.set_item("node_wcount", g.node_wcount.clone())?;
+    nodes.set_item("node_waxis", g.node_waxis.clone())?;
+    nodes.set_item("node_wempty", g.node_wempty.clone())?;
     dict.set_item("nodes", nodes)?;
 
     // Typed edge arrays.
     let edges = PyDict::new(py);
-    edges.set_item("edge_src", g.edge_src)?;
-    edges.set_item("edge_dst", g.edge_dst)?;
-    edges.set_item("edge_type", g.edge_type)?;
+    edges.set_item("edge_src", g.edge_src.clone())?;
+    edges.set_item("edge_dst", g.edge_dst.clone())?;
+    edges.set_item("edge_type", g.edge_type.clone())?;
     dict.set_item("edges", edges)?;
 
     // Window tokens (owner_is_current, count, axis_index, anchor_q, anchor_r, empty_count).
     let toks = PyList::empty(py);
-    for t in window_tokens(&state) {
+    for t in window_tokens(state) {
         toks.append((
             t.owner_is_current,
             t.count,
@@ -441,6 +431,28 @@ pub fn hexgt_graph_facts(py: Python<'_>, state: &Bound<'_, PyAny>, n: i64) -> Py
     dict.set_item("window_tokens", toks)?;
 
     Ok(dict.into_any().unbind())
+}
+
+// --- PyO3 surface ------------------------------------------------------------
+
+/// Candidate packed action ids for `state` at radius `n` (deterministic order).
+#[pyfunction]
+#[pyo3(signature = (state, n))]
+pub fn hexgt_candidate_ids(py: Python<'_>, state: &Bound<'_, PyAny>, n: i64) -> PyResult<Vec<u32>> {
+    let state = super::state::state_from_py_state(py, state)?;
+    let (cells, _) = candidate_cells(&state, n as i16);
+    Ok(cells.into_iter().map(pack_coord).collect())
+}
+
+/// Full graph facts for `state` at radius `n`: counts (for the no-explosion
+/// gate), candidate ids/order, window tokens, and the typed node/edge arrays
+/// (reused by the Phase-4 expand step).
+#[pyfunction]
+#[pyo3(signature = (state, n))]
+pub fn hexgt_graph_facts(py: Python<'_>, state: &Bound<'_, PyAny>, n: i64) -> PyResult<Py<PyAny>> {
+    let state = super::state::state_from_py_state(py, state)?;
+    let g = build_graph(&state, n as i16);
+    position_graph_to_py_dict(py, &state, &g, n)
 }
 
 pub fn register_pybridge(module: &Bound<'_, PyModule>) -> PyResult<()> {

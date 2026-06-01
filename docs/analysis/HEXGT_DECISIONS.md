@@ -103,6 +103,64 @@ self-play rate, which only the Rust MCTS integration can answer (next step).
 
 ---
 
+## Phase 5c — Rust MCTS graph-payload integration (transposition cache + tree reuse)
+
+**Approach (chosen): copy dense_cnn's feature-complete tree+session verbatim into
+the hexgt crate; replace ONLY the eval boundary.** The Plan-agent analysis +
+direct read confirmed `mcts_tree.rs` is model-AGNOSTIC (couples only to
+`RustEvaluation{value, legal_action_count, priors}` + `state_hash` + `move_error`),
+and `mcts.rs` is ~90% pure session orchestration. So `mcts_tree.rs`/`mcts.rs` were
+copied byte-for-byte (inheriting the proven nucleus widening / forced playouts /
+virtual-loss select↔eval pipeline / subtree reuse), and only these changed:
+- new `mcts_eval.rs` (hexgt): builds a `{"graph_facts":[...]}` payload **in Rust**
+  from the leaf `HexoState`s via the shared `candidates::build_graph` +
+  `position_graph_to_py_dict` (no Py→Rust reclone), calls the Python evaluator,
+  parses the per-candidate byte contract (values + CSR candidate ids + priors —
+  the hexformer_ar pattern), intersects with engine legality, then
+  DESCENDING-sorts + normalizes priors (the contract the copied tree requires).
+- new `constants.rs`; `state.rs` gains `states_from_py_states`/`move_error`;
+  `candidates.rs` factors the graph-facts dict packer out of `hexgt_graph_facts`;
+  `mcts.rs` edits: session renamed `HexgtMctsSession`, stores immutable `n`
+  (threaded to eval; `n` is NOT in the state hash so it must be session-constant
+  for cache soundness), eval-fn renames. dense_cnn is touched ZERO lines.
+- Python: `inference.evaluate_graph_facts` (the byte-contract evaluator callback,
+  reusing the EXACT training featurize+collate path so search inputs == training
+  inputs), a `mcts.py` session wrapper, `rust_bridge` entry points.
+
+**Bug found + fixed:** a self-deadlock — `lock_stats(stats)` called twice in one
+statement held the non-reentrant mutex while re-locking it (py-spy native dump
+pinpointed `evaluate_state_refs_cached` → `Mutex::lock_contended`). One-line fix.
+
+**Verified (CPU tests, `tests/test_hexgt_mcts.py`, all green; full suite 183):**
+legal action selection; candidate priors ⊆ legal + normalized; untrained value
+≈0; cache accounting balances (requested = unique + hits + dups); transposition
+cache hit across game keys; subtree reuse.
+
+**REAL cache-assisted self-play throughput (RTX 4070 Ti, 64 games × visits=128,
+vbatch=16, untrained eager):** **~4.9 searched pos/s** (vbatch=8: ~2.3).
+The time split is the key result — the GPU forward is NOT the limiter:
+- Rust graph-encode (build_graph + dict pack): **3.2s (8%)** — fast.
+- Python evaluator: **34.8s (89%)** — of which the GNN forward is only ~2.6s
+  (22.9k unique states ÷ ~8.7k pos/s); the other **~32s is Python-side per-graph
+  featurization (`build_graph_tensors`) + collation**.
+- parse 0.4s. Cache hit-rate ~7%, ~119/128 NN-forwards per searched position
+  (modest cache assist — untrained diffuse priors + Dirichlet noise + wide
+  candidate sets make transpositions rare; expected to improve with a trained,
+  sharper policy and deeper tree reuse).
+
+**Bottleneck = Python featurization, not the GPU or the Rust encode.** The clear
+fix (deferred, next optimization): mirror dense_cnn's `PlaneBuffer` — have Rust
+emit the FINAL collated batch tensors (node_feat/edge/candidate arrays) as
+zero-copy buffers so Python only `torch.frombuffer`+forwards, eliminating the
+per-leaf Python featurize+collate. This requires porting `features.py`'s
+node-feature encoding into Rust (kept byte-identical to training). The current
+2.3–4.9 pos/s is the correct, functional v1 integration baseline; the optimized
+rate is expected to approach the forward-bound ceiling (forward-only implies
+~8.7k/128 ≈ 17–68 pos/s depending on cache assist, i.e. competitive with
+dense_cnn's ~23).
+
+---
+
 ## Environment / safety (build isolation)
 
 **Live-run isolation.** The dense_cnn 96×8 run is live on the GPU, editable-
