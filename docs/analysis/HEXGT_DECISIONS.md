@@ -596,3 +596,23 @@ total under key `"total"` (not `"loss"`). RL self-play (a hexgt `selfplay.py`
 mirroring dense_cnn's game-driven loop, reusing the representation-agnostic
 compact sample format `expand.py` already reads) is the documented next step; the
 29.7 pos/s rate makes it viable.
+
+## Phase 9 — head-to-head: IS THE GNN COMPETITIVE? (yes)
+
+**`scripts/_head_to_head.py`, hexgt step-6009 (BC-only, held-out top-1 33.5%) vs
+dense_cnn epoch-24, 40 games, MATCHED visits=200, deterministic (greedy / no
+Dirichlet noise, alternating colors), e24 loaded read-only:**
+
+```
+hexgt vs dense_cnn e24:  22 W / 18 L / 0 D  →  55.0%  (40/40 completed, mean 131 turns)
+hexgt vs SealBot:        SKIPPED (no SEALBOT_PATH in the isolated build env)
+```
+
+The BC-distilled dynamic GNN plays slightly BETTER than the 96x8 teacher it was
+distilled from, at equal search. At n=40 the honest read is "on par to slightly
+ahead" (95% CI ≈ 39–70%), not dominance — but combined with the 29.7 pos/s
+self-play rate (beating dense_cnn 96x8's ~23), the dynamic GNN architecture is
+**validated end-to-end**: feasible, throughput-competitive, and strength-
+competitive as a pure BC distillation. The expected next gain is RL self-play on
+top of the BC seed (Phase-8 note). To add the SealBot leg, point `SEALBOT_PATH`
+at a SealBot checkout and pass `--sealbot`.
