@@ -23,8 +23,16 @@ candidate set, no padding/no-TRT)
 - **The model is a *truly dynamic* typed heterogeneous GNN → transformer
   hybrid.** Nodes: **all** placed stones, the dynamic candidate set of empty
   cells, the active-window tactical tokens, and side/goal tokens. No padding, no
-  fixed shapes, no `max_candidates`, no fallback logits, no top-k anywhere.
-  Variable node/edge counts are first-class (§3).
+  fixed shapes, no `max_candidates`, no fallback logits, and **no cap/top-k on
+  the model's candidate set**. Variable node/edge counts are first-class (§3).
+- **Two layers — model scores ALL candidates; MCTS may nucleus-widen within
+  that support.** (1) The policy produces logits over the **full** candidate set
+  (no cap). (2) MCTS may *expand/visit* only a top-p (nucleus, mass-based) subset
+  *inside* that support — mirroring dense_cnn's `widening_policy_mass=0.95`. This
+  is search-side and is **not** a contradiction of "no candidate cap": the model
+  still scores every candidate and the training target is still defined over the
+  full support (un-expanded children get ~0 visits, dense_cnn discipline). See
+  §6.6.
 - **The policy is dynamic and per-legal-move (pointer/CSR), not a 1681 dense
   crop.** The head emits one logit per candidate node; this maps *directly* onto
   the Rust MCTS priors contract, which is already per-legal-move CSR
@@ -226,7 +234,10 @@ candidate_set(position) = { empty cells in ANY active window of either player } 
   engine uses for legality at radius 8, just with a tunable, smaller `n`.
 
 The two components have **distinct, complementary roles** (§4.2). The set is the
-union; **no top-k, no `max_candidates`, no fallback logits.** Count is dynamic.
+union; **no top-k, no `max_candidates`, no fallback logits on the candidate set
+itself.** Count is dynamic. (Distinct from this: MCTS may later nucleus-widen
+*which* of these candidates it expands — a search-side subset *inside* the full
+support, not a cap on the model's moveset. See §6.6.)
 
 ### 4.2 Why the union — each component's role
 
@@ -317,9 +328,18 @@ read-only) and measure:
    p95 candidate counts, plus active-window-token counts. This sets the GNN's
    per-node cost and the realistic batch sizes for the throughput phase. (Re-run
    at the chosen `n` if the sweep moves it off 2.)
+3. **Node- AND edge-count distribution at `n = 2`:** for each position, count
+   total nodes (stones + candidates + active-window tokens + side/goal) and
+   **total edges by type** under the bounded construction (§6.3); report median /
+   typical / p95 per game phase. **This is the explicit no-explosion gate** — it
+   empirically confirms the edge count stays **linear in (#nodes +
+   #active-windows)** (no same-axis clique) **before** committing to the GNN cost.
+   A super-linear edge growth here is a hard stop to revisit edge construction.
 
-Both are **gates**: (1) proves the prune is complete/safe; (2) proves the dynamic
-cost is bounded enough to be trainable and searchable at acceptable throughput.
+All three are **gates**: (1) proves the prune is complete/safe; (2) proves the
+candidate (node) cost is bounded; (3) proves the **edge** cost does not explode.
+Together they prove the dynamic graph is trainable and searchable at acceptable
+throughput before the GNN is built.
 
 ---
 
@@ -350,8 +370,10 @@ little structure beyond locality, which the candidate node's own features and th
 windows *is* a fork; the GNN/transformer learns this implicitly because that
 candidate node attends to (is edged to) multiple window tokens (§6.3). **No
 other window types** (broken/gapped is already covered by popcount §3; no
-intersection/VCF/dead-line/edge tokens). **No top-k** — all count-3/4/5 active
-windows are emitted; the count is dynamic.
+intersection/VCF/dead-line/edge tokens). **No top-k on the tokens** — all
+count-3/4/5 active windows are emitted; the count is dynamic. (MCTS nucleus
+widening, §6.6, is a separate search-side concern and does not drop window
+tokens.)
 
 Token features per active-window node: owner (current/opponent), count
 (3/4/5 one-hot), axis (Q/R/QR one-hot), the window's empty-cell count, and a
@@ -399,22 +421,48 @@ All coordinates are **center-relative axial/cube** (re-derived, re-tested helper
 the engine's `pack_coord`/`hex_distance` are the references, `legal.rs:24-35`,
 `coord.rs:77-82`). The unbounded board means relative coords never hit an edge.
 
-### 6.3 Typed edges (the heterogeneous graph)
+### 6.3 Typed edges — bounded construction (NO same-axis cliques)
 
-- **stone↔stone** hex-adjacency and same-axis-line membership (group structure).
-- **window↔stone**: a window node connects to the (one-color) stones it contains.
-- **window↔candidate**: a window node connects to its empty cells — this is the
-  edge that lets a candidate “see” every threat/extension it participates in
-  (and thus learn forks implicitly).
-- **candidate↔stone**: a candidate connects to nearby stones (local context).
-- **side/goal↔all**: global broadcast.
+**Make-or-break risk:** naïve "same-axis-line membership" edges that connect
+**every pair** of stones/candidates sharing a line form an **O(N²) clique** that
+explodes on dense boards. This is the specific stone↔stone-line failure the user
+flagged. The design **forbids all-pairs co-linearity edges.** Instead:
+
+**Route all line / co-linearity relationships THROUGH WINDOW NODES as the hub.**
+Each length-6 window has ≤6 cells, so membership edges are **O(#windows × 6)** —
+bounded, not quadratic. A stone and a candidate that share a line are then **2
+hops apart via the shared window node**, with no direct clique. The window node
+is the line's representative; co-linearity is learned through it.
+
+Edge types, each with an **explicit cardinality bound**:
+
+| edge type | endpoints | bound | role |
+|---|---|---|---|
+| **hex-adjacency** | node ↔ node within hex-distance 1 | **≤ 6 per node** (hex has 6 neighbors) → O(#nodes) | local locality |
+| **stone↔window membership** | window ↔ its one-color stones | **≤ 6 per window** → O(#windows·6) | line/group structure via hub |
+| **candidate↔window membership** | window ↔ its empty cells | **≤ 6 per window** → O(#windows·6) | a candidate "sees" every threat/extension it's in (forks learned implicitly) |
+| **recency** | stone ↔ immediately-preceding/following stone in placement order | **chain, 2 per stone** → O(#stones) | temporal structure |
+| **side/state/goal context** | side/goal node ↔ all nodes | O(#nodes), 1 hub | global broadcast |
+
+**If a DIRECT on-line edge between cells is ever wanted** (it is not required for
+the MVP — the window hub suffices), restrict it to a **nearest-neighbor-along-
+line chain**: each node links only to its immediate predecessor/successor on that
+axis line — **O(N) per line, never a clique.**
+
+**Total-edge bound:** `O(#nodes·6) + O(#active_windows·6) + O(#stones) +
+O(#nodes)` = **linear in (#nodes + #active_windows)** — no quadratic term. With
+the side/goal hub the only all-to-one edges. (#active_windows here = the windows
+materialized for membership; the touched-window count, O(#stones) in practice.)
 
 Message passing is type-conditioned: `m_{j→i} = φ_{edge_type}(h_j, h_i,
 rel_coord_{ij})`, aggregated per target node (segment scatter) over `L_gnn`
 rounds. Then a transformer block set provides global attention (context
 self-attention over {side, stone, window}; candidate→context cross-attention;
 optionally one candidate↔candidate sparse self-attention), all masked
-block-diagonally per graph in a packed batch.
+block-diagonally per graph in a packed batch. **Note:** the transformer's
+candidate↔context attention is itself ~O(#candidates·#context) per graph — the
+nucleus widening in §6.6 bounds *search* cost but not this dense attention, so
+the Phase-1 node/edge-count gate (§4.6) is what guards the GNN/attention cost.
 
 ### 6.4 Heads (dynamic policy + pipeline-compatible value/aux)
 
@@ -445,6 +493,37 @@ with no scatter to a crop. Drop hexformer's WDL/distance/threat/lookahead heads.
   inverse-D6 to the policy output must equal the un-augmented forward (within fp
   tolerance) for all 12 elements — the test that prevents subtly poisoning the
   model (the dense_cnn D6 lesson, `MEMORY.md`).
+
+### 6.6 Two layers: full-support scoring vs MCTS nucleus widening
+
+These are **distinct concerns** and must not be conflated:
+
+- **Layer 1 — model support (no cap).** The policy head emits a logit for
+  **every** candidate in the full set (§4 union). The softmax and the training
+  policy target are defined over this **full support**. No top-k, no cap, no
+  fallback — the model always scores its entire moveset. This is what the
+  earlier "no top-k / no candidate cap" statements mean.
+- **Layer 2 — MCTS expansion (top-p / nucleus, mass-based).** The Rust search
+  may *expand/visit* only a subset of that support, selected by **nucleus
+  (top-p) widening**: materialize children in descending prior until their
+  cumulative prior mass reaches a threshold (mirroring dense_cnn's
+  `widening_policy_mass = 0.95`). **Prefer nucleus/top-p (mass-based) over top-k
+  (count-based)** so the breadth adapts to how peaked the policy is. This
+  operates **strictly inside Layer 1's full support** — it never adds an
+  out-of-support move and never changes the model's scores.
+
+**Why this is not a contradiction of "no candidate cap":** the model still
+scores all candidates; the policy *target* is still over the full support;
+un-expanded children simply receive ~0 visits — exactly dense_cnn's discipline
+(the visit-count target naturally concentrates mass on expanded children while
+leaving the rest near zero). Widening bounds *search* branching/compute, not the
+model's moveset or its training signal. (The dense GNN/attention cost over the
+full candidate set is bounded separately by the §4.6 node/edge-count gate, not
+by widening.)
+
+The widening threshold is a search/eval config knob (default ~0.95, like
+dense_cnn), tuned in Phase 5/7; it must be identical between self-play and the
+head-to-head eval so the comparison is fair (§10).
 
 ---
 
@@ -522,12 +601,16 @@ phases (5+) wait until the 96×8 run frees the GPU.
 *Gate:* installs editable; `load_model_plugin` resolves `hexgt`; forward returns
 `{"policy"(dynamic),"value"(N,65),"opp_policy"(dynamic)[,"stvalue_*"]}`.
 
-**Phase 1 — Engine-grounded candidate/window path + validation (CPU). [GATE]**
-Implement the shared Rust candidate-set + active-window enumeration (§4.5) over
-the engine `WindowStore`. Run the §4.6 validation on dense_cnn's recorded games:
-(1) completeness ≈ 100%, (2) candidate/window size distributions.
-*Gate:* completeness ≈ 100% (else investigate/adjust); cost distribution
-acceptable for training/search. **This gates the whole design.**
+**Phase 1 — Engine-grounded candidate/window path + bounded edges + validation
+(CPU). [GATE]** Implement the shared Rust candidate-set + active-window
+enumeration (§4.5) **and the bounded edge construction (§6.3, window-hub, no
+cliques)** over the engine `WindowStore`. Run the §4.6 validation on dense_cnn's
+recorded games: (1) completeness ≈ 100% (sweep `n=2..8`), (2) candidate/window
+size distribution, (3) **node- and edge-count distribution by type (the
+no-explosion gate)**.
+*Gate:* completeness ≈ 100% (else investigate/adjust); candidate cost acceptable;
+**edge count linear in (#nodes + #active-windows) — no super-linear growth.**
+**This gates the whole design.**
 
 **Phase 2 — Contract-conformance tests (CPU).** Mirror dense_cnn's test files as
 `tests/test_hexgt_*.py`: forward keys/shapes (dynamic policy length = #candidates),
@@ -609,8 +692,12 @@ dense_cnn) so the comparison is apples-to-apples:
 
 **Binding decisions reflected:** delete `hexformer_ar`, build fresh on dense_cnn
 discipline (§1); **drop-in PIPELINE compatibility, not shape-matching** (§2);
-**dynamic per-candidate policy, no 1681** (§3.4, §6.4); **truly dynamic GNN — no
-padding/caps/top-k, no TRT, torch FP16** (§6.1); attention-bias formulation
+**dynamic per-candidate policy, no 1681** (§3.4, §6.4); **two layers: model
+scores the FULL candidate support (no cap), MCTS nucleus/top-p widens within it
+(≈0.95 mass, like dense_cnn)** (§6.6); **bounded edge construction — line
+relations via window-node hub, NO same-axis cliques, edges linear in #nodes +
+#active-windows** (§6.3); **truly dynamic GNN — no padding/caps, no TRT, torch
+FP16** (§6.1); attention-bias formulation
 **rejected** as a non-GNN approximation (§4.3); **candidate set = (empty cells in
 any active window of either player) ∪ (empty cells within hex-distance ≤ `n` of
 any stone), `n` default 2, tunable [2,8], no top-k/no caps** (§4); **tactical
@@ -618,7 +705,8 @@ tokens = count-3/4/5 active windows of both colors, no forks, no other types**
 (§5); **all stones as nodes, no budget** (§6.2); **BC = conversion rewrite**
 (§8); **full-D6 equivariance test** (§6.5); **matched-compute fairness** (§10);
 **Rust parity of candidate/window detection across sample-gen and play** (§4.5);
-**validation gates** on candidate completeness and size distribution (§4.6);
+**validation gates** on candidate completeness, candidate size, and **node/edge
+counts (no-explosion gate)** (§4.6);
 **recompute-at-expand for the MVP, cache-the-graph-when-proven** — shards stay
 raw-fact / representation-agnostic with no MVP `SCHEMA_VERSION` bump; the
 candidate set, active-window tokens, nodes, and edges are rebuilt per epoch at
@@ -640,6 +728,98 @@ recompute in exchange for keeping the representation flexible while it is in flu
   MVP; cache into a new `SCHEMA_VERSION` only once the model is proven** (§7
   item 2, §9 Phase 8). Rationale: keep shards representation-agnostic while the
   graph rep is still being proven; the schema bump is a deferred optimization.
+
+---
+
+## 12. Readiness review — specification gaps before implementation
+
+Honest pass over the plan. Each item: what's underspecified, and whether it
+**blocks Phase 0** (scaffold/stub), blocks a **later phase**, or is **decide-later**.
+Phase 0 only needs: the package skeleton, config stub, and a forward stub
+returning the right output **keys** — so most gaps below are *not* Phase-0
+blockers, but several must be nailed before the phase that depends on them.
+
+**A. Exact node feature vectors (dims + encodings).** §6.2 lists feature
+*contents* but not concrete dimensions, normalization, or how categoricals
+(owner, phase, axis, count) are encoded (one-hot vs embedding) or how relative
+coords are featurized (raw q/r/s vs sin/cos). *Blocks Phase 3* (model body) and
+the Phase 4 expand step; **not** Phase 0. Decide alongside the first GNN
+implementation; lock before training.
+
+**B. Two-stone turns → policy/MCTS action mapping + ActionId.** The engine turn
+is autoregressive (FirstStone → SecondStone, `state.rs:46-56`), but the plan does
+not state whether the model/MCTS treats each **single stone** as one action
+(matching the engine's per-placement legality, simplest, and what dense_cnn's
+per-move CSR implies) or a two-stone macro-action. Almost certainly per-single-
+stone (the engine exposes single-placement legality and the priors contract is
+per-move). **This must be confirmed explicitly** — it affects the policy target,
+the value perspective sign across the two half-moves, and `opp_policy`
+("opponent's next decision" must be defined w.r.t. the two-stone turn boundary).
+ActionId is the engine's `pack_coord` u32 (`legal.rs:24-35`) — already settled.
+*Blocks Phase 4* (sample-gen/targets); **decide before Phase 4**, not Phase 0.
+
+**C. Value & short-term-value target definitions on the new rep.** §6.4 reuses
+dense_cnn's 65-bin head, but the **target-construction** (winner→±1 value,
+`opp_policy` = future opponent decision, EMA short-term value per horizon) is
+dense_cnn's `finalize_game_samples` logic and must be re-derived for two-stone
+turns and the dynamic candidate support (esp. how `opp_policy` maps onto *this*
+position's candidate nodes vs the opponent's later candidate set). *Blocks
+Phase 4.* Tied to (B).
+
+**D. D6 applied to typed edges (not just coords).** §6.5 says node/edge identity
+is permutation-invariant and axes relabel, but does not spell out the **axis
+permutation map** under each of the 12 group elements (which of Q/R/QR maps where
+under each rotation/reflection) nor that edge *endpoints* are preserved while
+edge *type* (if axis-typed) must relabel. The equivariance test depends on this
+being exact. *Blocks Phase 3* (the equivariance test). Specify the axis-relabel
+table when implementing `d6.py`.
+
+**E. BC conversion specifics.** §8 scopes the rewrite but leaves open: the exact
+mapping from dense_cnn's crop-flat/action-id visit targets onto candidate nodes,
+the renormalization after dropping out-of-candidate visits, and the
+dropped-mass tolerance (open question #4). *Blocks Phase 6 only* (BC is a
+warm-start, late). Decide after the Phase-1 coverage numbers are in.
+
+**F. Optimizer / LR / loss-weight starting points.** The plan says "same
+discipline as dense_cnn" but gives no concrete starting values for the new rep
+(dense_cnn defaults: AdamW, lr 1e-3, wd 1e-4, policy 1.0 / value 1.0 / opp 0.25 /
+stvalue 0.25). A transformer/GNN typically wants a lower LR + warmup than a CNN.
+*Blocks Phase 4/6 training*, not Phase 0. Start from dense_cnn weights, add
+warmup; tune empirically.
+
+**G. Eval/MCTS config for the fair comparison.** §10 fixes most of it
+(`search_visits=512`, SealBot best-50ms, alternating colors, `use_trt=False`),
+but the **nucleus widening threshold** (§6.6) and `c_puct`, dirichlet/temperature
+schedule, and `max_actions` for Model 2 are unspecified. They must be **identical
+between self-play and eval** and comparable to dense_cnn's. *Blocks Phase 5/7.*
+Default to dense_cnn's selfplay config values; document any deviation.
+
+**H. GNN/transformer hyperparameters (depth/width).** §3.6 gives a target param
+budget (~2.1M) and rough shape (`token_dim≈128`, `L_gnn 2–3`, `L_ctx 2–4`) but
+not final layer counts, aggregation (mean vs sum vs attention-pool), or the
+context-attention sparsity. *Blocks Phase 3.* Pick to hit the param budget after
+the Phase-1 cost numbers; iterate.
+
+**I. Packed-graph collation contract.** §6.1/§6.3 name PyG-style packing +
+block-diagonal masking but don't define the concrete batch tensors (the
+`graph_id`/segment layout, per-type node/edge index tensors, the CSR mapping from
+candidate nodes back to `legal_row_offsets` for `priors_bytes`). *Blocks Phase 3
+(collation) and Phase 5 (Rust payload).* This is the interface between the Rust
+encoder and the torch model — specify it before Phase 5.
+
+**J. Transposition-cache key on the dynamic rep.** dense_cnn's Rust MCTS keys the
+cache by `hash_state`; the plan reuses the framework but doesn't confirm the key
+is the engine state hash (it should be — the graph is a deterministic function of
+state). *Decide-later*, low risk; confirm in Phase 5.
+
+**Not gaps (already settled):** candidate-set rule + `n` (§4), tactical-token
+taxonomy (§5), delete-and-rebuild + pipeline interfaces (§1–2), recompute-at-
+expand (§7/Phase 8), no-TRT torch inference (§6.1), edge-cardinality bounds
+(§6.3), the validation gates (§4.6).
+
+**Phase-0 blockers: none** — scaffolding can proceed. **Earliest hard blockers**
+are (B)+(C) for Phase 4 and (A)+(D)+(H)+(I) for Phase 3; resolve those two
+clusters first once implementation starts.
 
 ---
 
