@@ -616,3 +616,85 @@ self-play rate (beating dense_cnn 96x8's ~23), the dynamic GNN architecture is
 competitive as a pure BC distillation. The expected next gain is RL self-play on
 top of the BC seed (Phase-8 note). To add the SealBot leg, point `SEALBOT_PATH`
 at a SealBot checkout and pass `--sealbot`.
+
+---
+
+## Phase 10 — RL self-play infra + VRAM compression + eval harness
+
+**Self-play (`selfplay.py`):** game-driven loop mirroring dense_cnn (keep N games
+in flight, search every playable position to terminal/`max_actions`, temp decay +
+forced playouts k=2 + root Dirichlet) on the dynamic-GNN `HexgtMctsSession`,
+writing the dense_cnn COMPACT shard format `expand.py` already reads (reuses
+`sample_from_state`/`finalize_game_samples`/`write_compact_shard`). **Async-batcher
+decision:** did NOT build the Phase-7 async Rust batcher — the existing synchronous
+session already coalesces all concurrent games' leaves into one batched forward per
+round (`virtual_batch_size`+`active_root_limit`), the same throughput property, and
+the "baseline-first" rule + the 29.7 pos/s result make the proven path right.
+
+**VRAM compression (the big fix):** profiling the search forward showed the padded
+candidate attention was only **~22% packing-efficient** (a couple of endgame graphs
+at max_cand ~1281 force EVERY graph in the leaf batch to pad to that max, avg ~260),
+and the batch is unbounded (MCTS submits `active*vbatch` ~2-4k leaves): 512g=8GB,
+1024g=16GB (SPILLS to host RAM → the throughput killer), 2048g+=OOM. Fix
+(`HexgtInference.forward_batch`): split the forward into sub-batches SORTED by
+candidate count + bounded by a padded-slot budget, so each chunk pads to its LOCAL
+max (~90%+) and peak is capped regardless of leaf count. Graphs are independent
+(per-graph attention; global softmax after reassembly) → BIT-IDENTICAL (gated). Live
+self-play VRAM **11.7→3.0 GB**, throughput 13→28-62 pos/s (no more host spilling).
+
+**Eval harness:** `run_head_to_head_parallel` + `HexgtBatchedSearcher` step many
+games at once (each round partitions by whose turn, batches each side's positions
+into ONE forward; deterministic per-game, reproduces the sequential driver). Added
+**optional opening variety** (first K plies sampled at a temperature, per-(round,game)
+seeded → decorrelates the otherwise-correlated greedy games into ~independent samples
+→ smoother win rate, still repeatable). Plus a **fp16-overflow NaN guard**: deep eval
+games (max_actions 1024) overflow fp16 to NaN on extreme positions; sanitize the
+trunk logits so a poisoned position degrades to neutral instead of crashing the run.
+
+## Phase 11 — exploration-constant ablation (C1/C2/C3) + chosen config
+
+Plan: `docs/analysis/HEXGT_EXPLORATION_ABLATION_PLAN.md`. Three SHORT BC-seeded RL
+runs (5 epochs × 96 games × visits 96, active=64), judged by LEARNING + self-play
+DATA QUALITY (NOT static strength); Dirichlet/temp judged by Q-metrics, not the
+deterministic L1 (which only `c_puct`/`root_policy_temperature` affect). Derived
+Dirichlet `total_alpha=6.6` from the measured n=3 candidate median (220).
+
+Configs (α_i = total_alpha/count): **C1** baseline (6.6/eps0.25/rpt1.0/cpuct1.5/
+temp1.0→0.2@30); **C2** higher-exp (9.0/0.35/1.0/2.0/1.2→0.3@45); **C3** lower-exp
+(4.5/0.15/1.0/1.0/1.0→0.1@20).
+
+**Results (C1 & C3 ran 5 epochs; C2 died at ep1 on a transient `CUDA device not
+ready`, supervisor-recoverable, NOT a code bug):**
+
+| metric ep0→ep4 | C1 | C3 |
+|---|---|---|
+| Q1 decisive | 79%→100% | 74%→100% |
+| Q2 unique-opening (diversity) | 60%→**68.8%** | 55%→57.3% (collapsing) |
+| Q3 prior entropy (sharpening) | 3.57→3.14 | 3.53→2.81 (sharpest) |
+| Q4 mean \|value\| | 0.64→1.00 | 0.60→1.00 |
+| L2 holdout CE | 2.78→3.01 | 2.78→3.02 |
+| L1 vs frozen seed | 31→20% | 33→38% (noisy) |
+| NaN sanitizes (stability) | 486 | **0** |
+
+**Shared dynamic (all configs):** rapid policy sharpening (priorH↓, decisive→100%,
+|val|→1.0), L2-holdout-CE RISING (the model moving OFF the dense_cnn imitation
+target — expected under RL, not necessarily degradation), and a lumpy/declining L1
+vs the frozen seed. The 5-epoch window can't tell "healthy sharpening" from "early
+over-commitment"; the overnight 60-epoch run is what resolves it. Also: NaN-sanitize
+count scales with exploration (C3=0, C1=486, C2=1785) — more search visits more
+extreme positions.
+
+**CHOSEN: C1 (derived baseline).** Rationale: among the stable, completed runs it
+best embodies the data-quality target — becomes fully decisive (good value signal)
+while RETAINING the most opening diversity (Q2 68.8% vs C3's collapsing 57.3%), i.e.
+"diverse AND decisive," the healthiest profile for a long run; numerically stable
+(486 rare per-position sanitizes, no crash) vs C2's instability. C3 (sharper, 0-NaN,
+diversity-collapsing) is the fallback if C1 destabilizes over many epochs.
+
+## Phase 12 — overnight main RL run (LIVE)
+
+Launched the unbounded BC-seeded RL run with config C1 under the supervisor (auto-
+relaunch + RAM watchdog + circuit breaker), `runs/hexgt_rl_main`, 60-epoch cap,
+visits=128, refilled concurrency (96 games > active 64), eval every 3 epochs vs
+dense_cnn e24 + SealBot (opening-variety) + holdout + Q-metrics. Starting anchors:
+45.8% vs dense_cnn e24, 0% vs SealBot. See root `notes.md` for status/stop/resume.
