@@ -38,6 +38,7 @@ from typing import Any, Callable, Sequence
 
 import hexo_engine as engine
 from hexo_engine.types import unpack_coord_id
+from hexo_runner.records import AbortRecord, HexoRecordFile, HexoRecordPlayer
 
 from hexo_models.dense_cnn.compact_io import write_compact_shard
 from hexo_models.dense_cnn.samples import (
@@ -206,6 +207,35 @@ class SelfPlayResult:
         }
 
 
+# Players recorded in the .hxr game records (P0 opens, P1 second), mirroring
+# dense_cnn's selfplay record players.
+_RECORD_PLAYERS = (
+    HexoRecordPlayer("hexgt-a", "player0", "hexgt A"),
+    HexoRecordPlayer("hexgt-b", "player1", "hexgt B"),
+)
+
+
+def _write_game_record(record_file, game, winner, truncated, max_actions):
+    """Persist the COMPLETE self-play game as a .hxr record (mirrors dense_cnn /
+    the eval harness). `game["actions"]` is the full move sequence INCLUDING the
+    terminal/winning move, so the .hxr is the authoritative replay — unlike the
+    .npz training shards, which only sample nonterminal positions and therefore
+    omit the final move. Truncated games (max_actions) finish as aborted."""
+    writer = record_file.begin_game(game["game_id"], seed=game["seed"])
+    for action_id in game["actions"]:
+        writer.record_action(engine.PlacementAction(unpack_coord_id(int(action_id))))
+    if truncated:
+        writer.finish_aborted(
+            AbortRecord(
+                stage="selfplay",
+                exception_type="MaxActionsReached",
+                message=f"hexgt self-play reached max_actions={max_actions}",
+            )
+        )
+    else:
+        writer.finish_completed(winner, len(game["actions"]))
+
+
 def run_selfplay_games(
     model: Any,
     config: HexgtConfig,
@@ -275,6 +305,13 @@ def run_selfplay_games(
     started = perf_counter()
     _OPENING_PLIES = 6
     _FORCED_THRESHOLD = 0.9
+
+    # Full-game .hxr record for the epoch (one file, all games), alongside the
+    # .npz training shards. Written incrementally per finished game and closed
+    # after the loop. This is the authoritative replay source (the shards omit
+    # the terminal/winning move). Mirrors dense_cnn's per-epoch record file.
+    record_path = output_dir / f"epoch_{epoch:06d}.hxr"
+    record_file = HexoRecordFile.create(record_path, engine.engine_metadata(), _RECORD_PLAYERS)
 
     while next_game_index < num_games or active:
         while len(active) < active_limit and next_game_index < num_games:
@@ -403,6 +440,8 @@ def run_selfplay_games(
                 if terminal is not None and terminal.winner is not None
                 else None
             )
+            # Persist the full game record (incl. the terminal/winning move).
+            _write_game_record(record_file, game, winner, truncated, selfplay.max_actions)
             finalized = finalize_game_samples(
                 game["pending"], winner, horizons, truncated=truncated
             )
@@ -447,6 +486,8 @@ def run_selfplay_games(
                 f"{searched_positions} pos, "
                 f"{searched_positions / max(perf_counter() - started, 1e-9):.1f} pos/s"
             )
+
+    record_file.close()
 
     elapsed = perf_counter() - started
     sp = max(1, searched_positions)

@@ -82,6 +82,12 @@ def test_selfplay_writes_trainable_compact_shards(tmp_path) -> None:
     assert len(result.shard_paths) == 3
     for p in result.shard_paths:
         assert Path(p).exists()
+
+    # Self-play also writes ONE per-epoch full-game .hxr record (one record/game).
+    from hexo_runner.records import HexoRecordFile
+    hxr = tmp_path / "epoch_000000.hxr"
+    assert hxr.exists(), "self-play did not write the per-epoch .hxr game records"
+    assert len(list(HexoRecordFile.open(hxr).iter_records())) == 3
     assert result.completed_games + result.truncated_games == 3
     assert result.searched_positions > 0
     assert result.raw_samples > 0
@@ -123,6 +129,56 @@ def test_selfplay_shards_train_one_step(tmp_path) -> None:
     assert history, "trainer produced no steps from self-play shards"
     assert "total" in history[0]
     assert history[0]["total"] == history[0]["total"]  # finite (not NaN)
+
+
+def test_hxr_record_holds_full_game_through_winning_move(tmp_path) -> None:
+    """The .hxr record must contain the COMPLETE game incl. the terminal/winning
+    move + the correct winner (unlike the .npz shards, which sample only
+    nonterminal positions and so omit the final move). Deterministic: play a real
+    game to terminal with fixed-RNG legal moves (no model), persist it via the
+    self-play record writer, then re-read and verify it replays to that terminal +
+    winner with the full move count."""
+    _torch()
+    import hexo_engine as engine
+    import hexo_engine.api as eng
+    from hexo_engine.types import pack_coord_id, unpack_coord_id
+    from hexo_runner.records import HexoRecordFile
+    from hexo_models.hexgt.selfplay import _RECORD_PLAYERS, _write_game_record
+
+    # Deterministic terminal game: always play the most central available cell, so
+    # both colours pack densely and a 6-in-a-line forms quickly (random play on the
+    # sparse board spreads out and rarely lines up). No model/search involved.
+    state = eng.new_game(seed=1)
+    action_ids: list[int] = []
+    terminal = None
+    for _ in range(600):
+        terminal = eng.terminal(state)
+        if terminal is not None:
+            break
+        legal = list(eng.legal_actions(state))
+        act = min(legal, key=lambda a: (abs(a.coord.q) + abs(a.coord.r), a.coord.q, a.coord.r))
+        action_ids.append(int(pack_coord_id(act.coord)))
+        eng.apply_action(state, act)
+    assert terminal is not None and terminal.winner is not None, "central-fill game did not terminate"
+    winner = str(getattr(terminal.winner, "value", terminal.winner))
+
+    path = tmp_path / "epoch_000000.hxr"
+    rf = HexoRecordFile.create(path, engine.engine_metadata(), _RECORD_PLAYERS)
+    _write_game_record(rf, {"game_id": "t-0", "seed": 0, "actions": action_ids},
+                       winner=winner, truncated=False, max_actions=9999)
+    rf.close()
+
+    rec = list(HexoRecordFile.open(path).iter_records())[0]
+    # Full move sequence preserved, INCLUDING the terminal/winning move.
+    assert [int(a) for a in rec.action_ids] == action_ids
+    assert str(rec.winner) == winner
+    # Replaying the recorded moves reaches the same terminal + winner.
+    s2 = eng.new_game()
+    for aid in rec.action_ids:
+        eng.apply_action(s2, engine.PlacementAction(unpack_coord_id(int(aid))))
+    t2 = eng.terminal(s2)
+    assert t2 is not None, ".hxr game does not replay to a terminal (winning move missing)"
+    assert str(getattr(t2.winner, "value", t2.winner)) == winner
 
 
 def test_selfplay_captures_example_traces(tmp_path) -> None:
