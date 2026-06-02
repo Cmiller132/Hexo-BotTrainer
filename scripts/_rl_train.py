@@ -462,7 +462,8 @@ def main():
             log(f"epoch {rl_epoch} train: {comp_n} steps (step={trainer.train_state.global_step}) "
                 f"total={avg('total'):.4f} policy={avg('policy'):.4f} value={avg('value'):.4f} "
                 f"opp={avg('opp_policy'):.4f} prune={trainer.prune_rate:.1%} {ms_per:.0f}ms/step "
-                f"window={len(win_epochs)}ep[{span}] {len(shards)}sh pool~{pool_pos // 1000}k "
+                f"window={len(win_epochs)}ep[{span}] {len(shards)}sh "
+                f"pool~{pool_pos // 1000}k/{args.replay_pool_cap // 1000}k "
                 f"decay={args.replay_recency_decay}", fh)
 
             # --- 3) checkpoint ---------------------------------------------------
