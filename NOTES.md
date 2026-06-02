@@ -1,89 +1,105 @@
-# NOTES — dense_cnn Model 1 (target_64x4 cold-start) live run
+# hexgt (Model 2) — state notes
 
-Tight current-state / orientation doc. Verbose history is in `NOTES_archive.md`.
-Keep THIS file tight. Backstop logs to `runs/dense_cnn_model1_target_64x4/diagnostics/backstop_log.md`.
+_Continuity snapshot for the hexgt dynamic-GNN rewrite on branch `hexgt-rewrite`.
+Written the night the overnight RL run was launched. (The previous dense_cnn
+Model-1 notes live on branch `bench/inference-backends-wsl`.)_
 
-## Last action
-2026-05-30 ~19:54 UTC: **relaunched the 64×4 COLD-START at 256 sims on the
-optimized build** (wiped the partial pre-opt epoch-1 shards for a clean curve).
-Self-play is now **~2.2× faster (~62 pos/s in production**, was ~24–29) after two
-byte-identical eval-path fixes — see "Self-play throughput optimizations" below.
-96×6 stays **paused** (`epoch_000011.pt` preserved). Supervisor owns relaunch/resume.
+## What hexgt is
 
-## Self-play throughput optimizations (2026-05-30, branch bench/inference-backends-wsl)
-Profiled with `scripts/_profile_selfplay.py`; full writeup `runs/selfplay_profile_findings.md`.
-1. **Zero-copy plane buffer** (1.85×): the Rust→Python `inputs` handoff was a serial ~89 MB
-   `PyBytes` memcpy/pass (was 46% of wall). Replaced with a buffer-protocol `#[pyclass]
-   PlaneBuffer` viewed zero-copy by `torch.frombuffer`. `mcts_eval.rs`.
-2. **f16 input transport** (~1.06×): `PlaneBuffer` now carries **f16** planes; Python upcasts
-   f16→f32 **on-device** after the halved H2D, so TRT/forward are byte-for-byte unchanged.
-   Gated byte-identical (`scripts/_fp16_input_gate.py`: 320/320 argmax, 0 err — TRT already
-   downcasts its input to f16). Added `half` crate to hexo_models.
-Self-play is now **forward-bound** (callback ≈89% NN forward). Next levers are NOT in the
-pipeline: smaller net / INT8, or fewer sims (revisit post-epoch-1). 59 dense_cnn tests pass.
+Model 2 for the Hexo RL trainer: a **dynamic GNN + graph-transformer** that scores
+a per-position **candidate set** (active-windows ∪ n-radius, `candidate_radius=3`)
+instead of a dense 41×41 plane (dense_cnn = Model 1). It is **D6-invariant by
+construction** (no augmentation needed), ~2.0M params (token_dim 168, gnn×3,
+ctx×3), and produces a per-candidate policy + 65-bin distributional value +
+opp-policy + short-term-value heads. Package: `packages/hexo_models/hexgt/`
+(Python) + `hexgt/rust/` (candidate/window/graph builder, featurizer, MCTS).
 
-## What's running (ACTIVE)
-Cold-start (random init, **no bootstrap**) self-play RL of **dense_cnn Model 1**:
-- Architecture **64 ch × 4 blocks + P7 fully-conv policy head**, **256 MCTS sims/move** (settled at 256 on 2026-05-30 ~17:30 UTC: tried 128 but a random cold-start net + weak search made games meander ~3× longer — active games hit ~170+ plies, cancelling the pos/s win; 256 is strong enough to terminate games while ~2× faster than the 512 baseline. Sims is the real speed lever, not model size — see findings below).
-- **Self-play temperature DECAY**: 1.0 at the opening → linearly to **0.2 by ply 30**, held 0.2
-  after (per-game, per-ply; new `move_temperatures` vector through native MCTS). Opening still
-  explores (temp 1.0 + Dirichlet + forced playouts); endgames are now played decisively.
-- **forced_playout_k = 2** (KataGo forced playouts + policy-target pruning).
-- **TensorRT FP16** forward, self-play only, fail-loud; engages in WSL only.
-- **validation_fraction = 0.02** → per-epoch HELD-OUT loss; both train & val now log a
-  **per-component breakdown** (`loss_components`: policy / value / opp_policy / stvalue_*).
-- Bucketing (pad mult-16) + rolling replenishment (`games_per_epoch=512` > `active_games=256`). 60 epochs.
+## What's built (all on `hexgt-rewrite`, pushed)
 
-## Paths / branch / dashboard
-- Run dir: `runs/dense_cnn_model1_target_64x4/` — `selfplay/ checkpoints/ diagnostics/`
-- Config: `configs/dense_cnn_model1_target_64x4.toml` (cold start — no `initialize_from`)
-- WSL supervisor: `scripts/supervise_target_64x4_wsl.sh`; **launch detached** with
-  `scripts/_launch_verify_64x4.sh` via `wsl -d Ubuntu-24.04 -- bash /mnt/e/.../_launch_verify_64x4.sh`.
-  GOTCHA: a plain `nohup ... & disown` dies on WSL session exit — must use **`setsid nohup ... < /dev/null &`**
-  (the launch script does). Status: `scripts/_status_64x4.sh`.
-- Native build: rebuild in WSL with **rustup cargo** (`export PATH=/root/.cargo/bin:$PATH`; the apt cargo
-  is too old for lockfile v4). If a stale-rlib **E0461 ICE** appears, run a **full `cargo clean`** (pyo3/rayon
-  rlibs from an older rustc must be rebuilt too). Reusable: `scripts/_rebuild_hexo_models_clean.sh`.
-- Branch: **bench/inference-backends-wsl**. Dashboard: http://localhost:8080
-- Diagnostic tool (run on demand): `scripts/_loss_decomp.py` — scores any checkpoints on a FIXED batch
-  (the decisive "is the model actually learning" test). `scripts/_target_trend.py` — per-epoch target entropy + game length.
+- **Model** (`architecture.py`): relational message passing (per-edge-type einsum)
+  ×3 + graph-transformer (context self-attn + candidate→context cross-attn) ×3,
+  vectorized padded attention. D6-equivariance gated by tests.
+- **MCTS** (`rust/src/mcts*.rs`, `mcts.py`): dense_cnn's tree+session copied
+  verbatim (nucleus widening, forced playouts, virtual-loss select↔eval, subtree
+  reuse); only the eval boundary differs (graph payload + per-candidate priors).
+  The synchronous batched session already coalesces all concurrent games' leaves
+  into one forward/round (= the "async batcher" throughput property); a true async
+  Rust batcher was deliberately NOT built (the sync path already beats dense_cnn).
+- **Featurizer** (`rust/src/features.rs`): Rust+rayon, zero-copy buffers → Python
+  `frombuffer` + forward. Byte-identical to the Python path (gated).
+- **Trainer** (`trainer.py`): AdamW + warmup + AMP, `hexgt_loss`, recompute-at-
+  expand from compact shards (`expand.py`). Reuses dense_cnn's compact IO/replay.
+- **Self-play** (`selfplay.py`): game-driven loop → dense_cnn COMPACT shards (so
+  the trainer reads them unchanged). Emits Q1–Q5 self-play data-quality metrics.
+- **Inference** (`inference.py`): torch FP16; **chunked forward** (sorted, budget-
+  bounded sub-batches) caps search-forward VRAM ~3–4 GB and is bit-identical;
+  fp16-overflow NaN guard.
+- **Eval harness** (`evaluation.py`): `run_head_to_head_parallel` (many games
+  batched, deterministic per-game) + optional opening variety (decorrelates the
+  win-rate estimate, still repeatable). `HexgtPlayer` (deterministic runner
+  player). SealBot leg wired (`SEALBOT_PATH=/mnt/e/SealBot`).
+- **Drivers**: `scripts/_rl_train.py` (resumable main RL run), `scripts/_rl_ablate.py`
+  (short exploration ablations), `scripts/_rl_supervise.sh` (supervisor), the
+  converged BC trainer `scripts/_bc_train.py`. Suite: **196 tests green**.
 
-## Bootstrap / resume
-- COLD START: first launch has neither `resume_from` nor `initialize_from` → `load(None)` → random init
-  (verified: load_checkpoint status "initialized", checkpoint_ref null).
-- Relaunch: supervisor injects `[checkpoint].resume_from = <newest checkpoints/epoch_*.pt>`.
-  (The supervisor's "uses initialize_from → bootstrapped" log line is cosmetic; there is no prefit here.)
+## Key results / anchors
 
-## Stability guardrails (WSL supervisor owns relaunching)
-- Auto-relaunch on trainer exit + resume-from-latest. Single-instance lock `diagnostics/supervisor_wsl.lock`.
-- Circuit breaker → `diagnostics/supervisor_halted.flag` on: 3 consecutive crashes <180 s, OR >6/hr, OR
-  5 relaunches with no new epoch checkpoint. Completion → `supervisor_completed.flag`. Crash tails → `crash_artifacts/`.
-- RAM watchdog → `diagnostics/watch_wsl.jsonl`; WSL 28 GB cap + Linux OOM are the hard backstop.
+- **BC seed** `runs/hexgt_bc/hexgt_bc_step006009.pt`: converged behavioral clone of
+  dense_cnn e24 (held-out top-1 33.5%). Starting head-to-head anchors (deterministic,
+  visits=200, opening-variety eval): **45.8% vs dense_cnn epoch-24** (on par), **0%
+  vs SealBot best-50ms** (expected pre-RL — dense_cnn only beat SealBot after RL).
+- **Throughput**: ~28–62 self-play pos/s (64 concurrent games + vbatch 64 + compile,
+  after the VRAM-compression fix removed host-RAM spilling). Beats dense_cnn ~23.
+- **Architecture finding**: the GNN's raw policy PRIOR is diffuse (entropy ~3.3–3.6)
+  but MCTS sharpens it hard into decisive play; RL further sharpens the prior itself.
+- **Ablation (C1/C2/C3)**: chose **C1** (derived baseline) — `total_alpha=6.6,
+  eps=0.25, root_policy_temperature=1.0, c_puct=1.5, temp 1.0→0.2@30, forced_k=2`.
+  Best "diverse AND decisive" data profile; details in HEXGT_DECISIONS.md Phase 11.
 
-## Backstop decision tree
-1. Terminal flags first: `supervisor_halted.flag`, `supervisor_completed.flag`.
-2. Advancement: newest `checkpoints/epoch_*.pt` + `selfplay/epoch_*_game_*.npz` mtimes vs now;
-   `dense_cnn.selfplay.live.json` (live pos/s); `events.jsonl` last stage.
-3. `supervisor_wsl.log` tail (LAUNCH/EXIT/RELAUNCH/breaker/halt). WSL procs are invisible to Windows
-   Get-Process — check liveness via `wsl -d Ubuntu-24.04 -- pgrep -af train_model` AND file freshness.
-4. TRT engaged: grep `[trt_backend] adopted TRT FP16` in newest `trainer.*.out.log`.
-5. **Halted** → root-cause (flag + newest `trainer.*.err.log` + `crash_artifacts/`). Safe fix → rebuild
-   (full clean if ICE), clear flag, relaunch via `_launch_verify_64x4.sh`.
-6. Learning trend: `epoch_*.json` `loss_components` (val especially) + `dense_cnn.evaluation.epoch_*.json`
-   (wins/losses/mean_turns vs SealBot best-50ms).
-- HARD RULES: don't kill/relaunch the trainer yourself (supervisor owns it); don't start a 2nd supervisor;
-  capture artifacts before changing anything; a brief process gap during a relaunch is normal.
+## The overnight run (LIVE)
 
-## Key findings (from the 96×6 investigation that motivated this run)
-- **"Rising loss" was a MEASUREMENT ARTIFACT, not divergence.** On a FIXED held-out batch every later 96×6
-  checkpoint was strictly better (policy CE 3.99→3.16, value CE 0.81→0.29). The reported epoch-loss rose
-  because (a) forced-playout widening raised the policy-target entropy (0.22→1.27 nats → higher CE floor)
-  and (b) policy-surprise resampling oversamples high-CE rows. → fixed by logging `loss_components` + a
-  held-out val loss.
-- **Flat SealBot winrate (~1/64) is GENUINE but early.** Eval is a fair greedy eval (argmax after 8 opening
-  moves, no noise/forced-playouts). Limiter = **diffuse policy head** (model policy CE ≫ target entropy);
-  value head is strong. Watch whether policy CE keeps dropping.
-- **"Weird" self-play games = no temperature decay** (96×6 played temp=1.0 the whole game). → fixed here
-  with the 1.0→0.2-by-ply-30 schedule.
-- Self-play is forward/overhead-bound (GPU SM ~38%); **k=2 ~halves throughput**; **vbatch=4** is the
-  quality/throughput sweet spot. TRT FP16 ≈2.4× forward, strength-neutral.
+- **Run dir**: `runs/hexgt_rl_main/` (worktree `E:\Hexo-BotTrainer-hexgt`).
+- **Config**: C1, BC-seeded, 60-epoch cap, visits=128, 96 games/epoch (active=64,
+  refilled), train 300 steps/epoch, lr 2e-4, eval every 3 epochs (vs dense_cnn e24
+  + SealBot + holdout + Q-metrics). Under the supervisor (auto-relaunch + RAM
+  watchdog + circuit breaker), so it advances unattended through crashes.
+- **Check status**: `cat runs/hexgt_rl_main/rl_train.log` (per-epoch self-play
+  pos/s + Q1–Q5; eval lines `>>> ... EVAL`), `tail runs/hexgt_rl_main/supervisor.log`,
+  `runs/hexgt_rl_main/eval/epoch_*_eval.json`. Checkpoints:
+  `runs/hexgt_rl_main/checkpoints/hexgt_rl_{epochNNNNNN,latest}.pt`.
+- **Stop cleanly**: `touch runs/hexgt_rl_main/supervisor_halted.flag` (stops the
+  supervisor from relaunching), then `pkill -9 -f _rl_train.py` (and the supervisor
+  bash). The foreground launch is a Bash background task; the halt flag is the clean
+  brake.
+- **Resume**: relaunch `bash _rl_run_fg.sh` — the driver auto-resumes from
+  `hexgt_rl_latest.pt` (model + optimizer + train-state + rl_epoch).
+
+## Watch items / known caveats
+
+- **The key open question**: the 5-epoch ablation showed all configs sharpen fast
+  with a lumpy/declining L1-vs-frozen and a rising L2-holdout-CE (model moving off
+  the dense_cnn imitation target). Whether 60 epochs RECOVERS and pushes past the
+  45.8% baseline (vs over-commits/collapses) is exactly what this run answers.
+  Judge by the **head-to-head vs dense_cnn e24 + SealBot** trend + Q-metric
+  diversity retention, NOT raw epoch loss.
+- **VRAM compile-cache growth**: torch.compile caches sub-batch shape variants;
+  reserved VRAM grows from ~3 GB to ~8 GB over epochs but plateaus (well under 12
+  GB; `expandable_segments` on). If it ever approaches the ceiling, lower `--vbatch`.
+- **fp16-overflow NaNs** are sanitized (logged to `driver.*.err` as "sanitized N
+  non-finite"); frequency scales with exploration. If excessive, run eval in fp32.
+- **candidate_radius=3** drops ~10% of far-spread moves (pruned in training); a
+  deliberate move-vocabulary choice (HEXGT_DECISIONS.md candidate-set decision).
+- **Isolation**: everything runs in the `E:\Hexo-BotTrainer-hexgt` worktree with its
+  own WSL venv `/root/.venvs/hexgt-build`. Do NOT touch the live tree
+  `/mnt/e/Hexo-BotTrainer`, its 96x8 checkpoints (read-only for eval), or the
+  dashboard (`hexo_frontend.web` :8080, separate venv). Commits via Windows git.
+  Bash tool = Git-Bash/MINGW (paths `/e/...`); run WSL via
+  `wsl.exe -- bash -lc "tr -d '\r' < /mnt/e/.../script.sh | bash"`.
+
+## Open items (post-overnight)
+
+- Read the morning trajectory; decide continue / adjust lr / switch to C3 if C1
+  destabilized. Pull example games to characterize play style vs the BC seed.
+- If throughput-starved later: the true async Rust leaf batcher (deferred).
+- If NaN frequency bites: fp32 eval forward, or clamp attention logits at the root.
+- Port `expand.py` training featurization to the Rust path if BC/RL step time bites.
