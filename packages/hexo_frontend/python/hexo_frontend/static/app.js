@@ -2709,7 +2709,6 @@ function renderHistoryOverview(histories, filtered) {
   const p1Wins = filtered.filter(item => item.winner === "player1").length;
   const completed = filtered.filter(item => item.status === "completed").length;
   const evalSummary = latestDiagnosticSummary(histories, "evaluation");
-  const selfplaySummary = latestDiagnosticSummary(histories, "selfplay");
   const liveStatus = latestRunStatusForHistoryPage();
   const targets = currentHistoryTargets();
   const liveWatchdog = liveStatus && liveStatus.watchdog ? liveStatus.watchdog : {};
@@ -2735,14 +2734,18 @@ function renderHistoryOverview(histories, filtered) {
     : historyPage.loaded || historyPage.items.length
       ? `${filtered.length} loaded`
       : `${filtered.length} / ${histories.length}`;
-  const cards = [
-    ["Stage", runStageLabel(liveStatus), "Live trainer"],
-    ["Runs", filteredRunCount || runCount || "--", historySelectedRun === HISTORY_ALL_RUNS ? "Filtered / loaded runs" : "Selected run"],
+  // "Runs" only matters in the multi-run (All runs) view; for a single selected
+  // run it is always "1" — drop it there to keep the strip scannable.
+  const cards = [["Stage", runStageLabel(liveStatus), "Live trainer"]];
+  if (historySelectedRun === HISTORY_ALL_RUNS) {
+    cards.push(["Runs", filteredRunCount || runCount || "--", "Filtered / loaded runs"]);
+  }
+  cards.push(
     ["Games", gameCountText, historyPage.loaded || historyPage.items.length ? "Paged result set" : "Filtered / recent"],
     ["Epochs", epochs.length ? `${epochs[0]}-${epochs[epochs.length - 1]}` : "--", `${epochs.length} observed`],
     ["Winners", historyWinRateText(currentSelfplayStats), historyWinRateSubtext(currentSelfplayStats, currentLabel)],
     ["Avg Length", avgLength, "Moves per game"],
-  ];
+  );
   const liveSpeed = liveSelfplay && liveSelfplay.search_pos_s !== undefined && liveSelfplay.search_pos_s !== null;
   const liveSelfplayEpoch = asFinite(liveSelfplay && liveSelfplay.epoch);
   const liveSelfplayEpochLabel = liveSelfplayEpoch !== null ? `e${liveSelfplayEpoch}` : "selfplay";
@@ -2767,7 +2770,8 @@ function renderHistoryOverview(histories, filtered) {
   } else if (evalSummary) {
     cards.push(["Evaluation", historyDiagnosticsText({ evaluation: { summary: evalSummary } }), "Latest diagnostics"]);
   }
-  if (selfplaySummary) cards.push(["Selfplay", historyDiagnosticsText({ selfplay: { summary: selfplaySummary } }), "Latest diagnostics"]);
+  // NOTE: the old "Selfplay (latest diagnostics)" card was dropped — it duplicated
+  // the live Speed card + the per-epoch self-play column in Epoch Progress.
   return cards.map(([label, value, sub]) => `
     <div class="history-metric-card">
       <span>${escapeText(label)}</span>
@@ -2798,17 +2802,34 @@ function renderLearningHealth(runs) {
   if (!health) return "";
   const messages = Array.isArray(health.messages) ? health.messages : [];
   const status = health.status || "collecting";
+  // Head-to-head WIN RATE is the signal that matters; survival-turns is a
+  // SealBot-only proxy kept as secondary. Each metric is rendered only when its
+  // value is present — dead/absent fields (e.g. the retired exact-128 /
+  // classical-replay / policy-imitation overlays, never populated for hexgt or
+  // current dense_cnn runs) are HIDDEN, not shown as "--".
+  const winRate = asFinite(health.latest_eval_win_rate);
+  const wins = asFinite(health.latest_eval_wins);
+  const games = asFinite(health.latest_eval_games);
+  const bestWr = asFinite(health.best_eval_win_rate);
+  const bestEpoch = asFinite(health.best_eval_win_epoch);
+  const lossDelta = asFinite(health.loss_delta_from_first);
+  const wrDelta = asFinite(health.eval_win_rate_delta);
+  const latestLoss = asFinite(health.latest_loss);
   const metrics = [
-    ["Latest", health.latest_epoch ? `Epoch ${health.latest_epoch}` : "--"],
-    ["Loss", health.latest_loss !== null && health.latest_loss !== undefined ? formatDecimal(health.latest_loss, 3) : "--"],
-    ["Eval", health.latest_eval_mean_turns !== null && health.latest_eval_mean_turns !== undefined ? `${formatDecimal(health.latest_eval_mean_turns, 1)} turns` : "--"],
-    ["Best", health.best_eval_mean_turns !== null && health.best_eval_mean_turns !== undefined ? `${formatDecimal(health.best_eval_mean_turns, 1)} turns` : "--"],
-    ["Speed", formatRate(health.latest_selfplay_pos_s, "pos/s")],
-    ["Exact", health.latest_exact_128 ? "128 sims" : "--"],
-    ["Classical", formatPercent(health.latest_classical_fraction)],
-    ["Policy@1", formatPercent(health.latest_policy_top1)],
-    ["Target Mass", formatPercent(health.latest_policy_target_mass, 1)],
-  ];
+    ["Epoch", health.latest_epoch ? `${health.latest_epoch}` : null],
+    ["Loss", latestLoss !== null
+      ? `${formatDecimal(latestLoss, 3)}${lossDelta !== null ? ` ${lossDelta <= 0 ? "▼" : "▲"}${formatDecimal(Math.abs(lossDelta), 3)}` : ""}`
+      : null],
+    ["Win rate", winRate !== null
+      ? `${(winRate * 100).toFixed(0)}%${wins !== null && games !== null ? ` (${wins}/${games})` : ""}${wrDelta !== null ? ` ${wrDelta >= 0 ? "▲" : "▼"}${(Math.abs(wrDelta) * 100).toFixed(0)}%` : ""}`
+      : null],
+    ["Best WR", bestWr !== null ? `${(bestWr * 100).toFixed(0)}%${bestEpoch !== null ? ` @e${bestEpoch}` : ""}` : null],
+    ["Survival", asFinite(health.latest_eval_mean_turns) !== null ? `${formatDecimal(health.latest_eval_mean_turns, 1)} turns` : null],
+    ["Speed", asFinite(health.latest_selfplay_pos_s) !== null ? formatRate(health.latest_selfplay_pos_s, "pos/s") : null],
+    // dense_cnn-only training overlays — shown only when actually emitted.
+    ["Classical", asFinite(health.latest_classical_fraction) !== null ? formatPercent(health.latest_classical_fraction) : null],
+    ["Policy@1", asFinite(health.latest_policy_top1) !== null ? formatPercent(health.latest_policy_top1) : null],
+  ].filter(([, value]) => value !== null && value !== undefined);
   return `<section class="learning-health-panel ${learningHealthClass(status)}" aria-label="Learning health">
     <div class="learning-health-head">
       <span>Learning Health</span>
@@ -2854,19 +2875,22 @@ function renderEvaluationTrend(runs) {
     return `<div class="eval-trend-empty">No SealBot evaluation diagnostics yet.</div>`;
   }
   const latest = rows[rows.length - 1];
+  // "Best" by WIN RATE (head-to-head strength), not survival-turns; tie-break on
+  // more games. The trend opponent is run-dependent (hexgt evals vs dense_cnn,
+  // dense_cnn evals vs SealBot), so the heading stays opponent-neutral.
+  const winRateOf = item => { const g = Number(item.games || 0); return g > 0 ? Number(item.wins || 0) / g : 0; };
   const best = rows.reduce((current, item) => {
-    const currentTurns = Number(current.mean_turns || 0);
-    const itemTurns = Number(item.mean_turns || 0);
-    if (itemTurns !== currentTurns) return itemTurns > currentTurns ? item : current;
-    return Number(item.wins || 0) > Number(current.wins || 0) ? item : current;
+    const a = winRateOf(item), b = winRateOf(current);
+    if (a !== b) return a > b ? item : current;
+    return Number(item.games || 0) > Number(current.games || 0) ? item : current;
   }, rows[0]);
-  return `<section class="eval-trend-panel" aria-label="SealBot evaluation trend">
+  return `<section class="eval-trend-panel" aria-label="Evaluation trend">
     <div class="eval-trend-head">
       <div>
-        <span>SealBot Evaluation Trend</span>
+        <span>Evaluation Trend</span>
         <strong>${escapeText(evalTrendSummary(latest))}</strong>
       </div>
-      <small>Best survival: ${escapeText(evalTrendSummary(best))}</small>
+      <small>Best win rate: ${escapeText(evalTrendSummary(best))}</small>
     </div>
     <div class="eval-trend-list">
       ${rows.slice(-12).map(evalTrendRow).join("")}
@@ -2883,15 +2907,17 @@ function evalTrendRow(item) {
   const cls = wins > 0 ? "has-win" : "no-win";
   return `<div class="eval-trend-row ${cls}">
     <strong>Epoch ${escapeText(item.epoch)}</strong>
+    <span>${escapeText(winRate)} win</span>
     <span>${escapeText(`${wins}-${losses}`)}</span>
     <span>${escapeText(meanTurns)} turns</span>
-    <span>${escapeText(winRate)} win</span>
   </div>`;
 }
 
 function evalTrendSummary(item) {
   if (!item) return "--";
-  return `E${item.epoch}: ${Number(item.wins || 0)}-${Number(item.losses || 0)}, ${formatDecimal(item.mean_turns, 1)} turns`;
+  const games = Number(item.games || 0);
+  const winRate = games > 0 ? ` (${((Number(item.wins || 0) / games) * 100).toFixed(0)}%)` : "";
+  return `E${item.epoch}: ${Number(item.wins || 0)}-${Number(item.losses || 0)}${winRate}, ${formatDecimal(item.mean_turns, 1)}t`;
 }
 
 function renderEpochProgress(runs) {
