@@ -60,7 +60,11 @@ def main():
     ap.add_argument("--active", type=int, default=48)
     ap.add_argument("--vbatch", type=int, default=64)
     ap.add_argument("--visits", type=int, default=128)
-    ap.add_argument("--max-actions", type=int, default=240)
+    # Self-play move cap. 512 (was 240) lets long-tail games run to their natural
+    # terminal — the 240 cap truncated real games (max length pegged at 240) and a
+    # truncated game is not a true terminal, distorting the length distribution +
+    # value targets. Eval uses its own higher cap (--eval-max-actions=1024).
+    ap.add_argument("--max-actions", type=int, default=512)
     ap.add_argument("--train-steps-per-epoch", type=int, default=400)
     ap.add_argument("--batch", type=int, default=128)
     ap.add_argument("--lr", type=float, default=2.0e-4)
