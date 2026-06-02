@@ -13,6 +13,7 @@ the throughput gate (this module + `_profile_hexgt_forward.py`) says go.
 
 from __future__ import annotations
 
+import os
 from typing import Any, Sequence
 
 import numpy as np
@@ -102,6 +103,11 @@ def _subbatch(batch: dict, gids: torch.Tensor) -> tuple[dict, torch.Tensor]:
 class HexgtInference:
     """Batched torch evaluator for live engine states."""
 
+    #: Host tensors with at least this many elements are staged through pinned
+    #: (page-locked) memory for a faster async HtoD copy; smaller ones are not
+    #: worth the pinning overhead. Tunable via the constructor.
+    DEFAULT_PIN_MIN_NUMEL = 4096
+
     def __init__(
         self,
         model: torch.nn.Module,
@@ -109,16 +115,38 @@ class HexgtInference:
         device: str | torch.device = "cuda",
         fp16: bool = True,
         forward_pad_budget: int = DEFAULT_FORWARD_PAD_BUDGET,
+        pin_host_transfer: bool = True,
+        pin_min_numel: int = DEFAULT_PIN_MIN_NUMEL,
     ) -> None:
         self.device = torch.device(device)
         self.fp16 = bool(fp16) and self.device.type == "cuda"
         self.model = model.to(self.device).eval()
         self.forward_pad_budget = int(forward_pad_budget)
+        # Env override lets the knob be A/B-profiled without code changes.
+        env_pin = os.environ.get("HEXGT_PIN_HOST")
+        if env_pin is not None:
+            pin_host_transfer = env_pin not in ("0", "false", "False")
+        self.pin_host_transfer = bool(pin_host_transfer) and self.device.type == "cuda"
+        self.pin_min_numel = int(pin_min_numel)
+
+    def _host_to_device(self, t: torch.Tensor) -> torch.Tensor:
+        """Move one host tensor to the device. Large buffers go through pinned
+        (page-locked) memory + a non-blocking DMA, which is ~2x the pageable-copy
+        bandwidth and lets kernel launches overlap the transfer (the default
+        pageable HtoD was ~10% of GPU time at 512 sims). `frombuffer` views are
+        non-writable, so `pin_memory` makes a writable pinned copy; torch's
+        caching host allocator keeps that copy alive until the async DMA
+        completes, so this is safe with `non_blocking=True`."""
+        if not self.pin_host_transfer or t.device.type != "cpu":
+            return t.to(self.device)
+        if t.numel() < self.pin_min_numel:
+            return t.to(self.device)
+        return t.pin_memory().to(self.device, non_blocking=True)
 
     def _to_device(self, batch: dict) -> dict:
         out = {}
         for k, v in batch.items():
-            out[k] = v.to(self.device) if isinstance(v, torch.Tensor) else v
+            out[k] = self._host_to_device(v) if isinstance(v, torch.Tensor) else v
         return out
 
     @torch.no_grad()
