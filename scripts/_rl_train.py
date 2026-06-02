@@ -68,16 +68,22 @@ def main():
     ap.add_argument("--replay-window-epochs", type=int, default=8)
     ap.add_argument("--group-size", type=int, default=30)
     ap.add_argument("--n", type=int, default=3)
-    # Self-play exploration schedule (decay opening temperature, forced playouts
-    # to prevent the opening collapse seen on dense_cnn target runs).
+    # Self-play exploration config (the ablation-chosen knobs).
+    ap.add_argument("--total-alpha", type=float, default=6.6)        # Dirichlet sum (derived)
+    ap.add_argument("--eps", type=float, default=0.25)               # root noise fraction
+    ap.add_argument("--root-policy-temperature", type=float, default=1.0)
+    ap.add_argument("--c-puct", type=float, default=1.5)
     ap.add_argument("--temperature", type=float, default=1.0)
     ap.add_argument("--final-temperature", type=float, default=0.2)
     ap.add_argument("--temperature-decay-moves", type=int, default=30)
+    ap.add_argument("--temperature-floor", type=float, default=0.1)
     ap.add_argument("--forced-playout-k", type=float, default=2.0)
     # Eval
     ap.add_argument("--eval-every", type=int, default=2)
     ap.add_argument("--eval-games", type=int, default=40)
     ap.add_argument("--eval-visits", type=int, default=200)
+    ap.add_argument("--eval-opening-moves", type=int, default=10)
+    ap.add_argument("--eval-opening-temperature", type=float, default=0.6)
     # Eval games run to completion (a long Hexo game truncated to a draw would
     # deflate the win rate); keep this well above the self-play max_actions.
     ap.add_argument("--eval-max-actions", type=int, default=1024)
@@ -103,8 +109,12 @@ def main():
         "training": {"learning_rate": args.lr, "warmup_steps": args.warmup, "batch_size": args.batch},
         "selfplay": {
             "search_visits": args.visits, "max_actions": args.max_actions,
+            "c_puct": args.c_puct, "root_policy_temperature": args.root_policy_temperature,
+            "root_dirichlet_noise_enabled": True, "root_dirichlet_total_alpha": args.total_alpha,
+            "root_dirichlet_noise_fraction": args.eps,
             "temperature": args.temperature, "final_temperature": args.final_temperature,
             "temperature_decay_moves": args.temperature_decay_moves,
+            "temperature_floor": args.temperature_floor,
             "forced_playout_k": args.forced_playout_k,
         },
     })
@@ -171,8 +181,12 @@ def main():
         cfg_eval = parse_hexgt_config({"device": str(device), "architecture": {"candidate_radius": args.n},
                                        "selfplay": {"search_visits": args.eval_visits}})
         model.eval()
+        # Slight opening variety decorrelates the eval games -> smoother win rate
+        # (still deterministic/repeatable via the per-(game,move) seed).
         make_hexgt = make_hexgt_factory(model, cfg_eval, device=str(device),
-                                        fp16=(device.type == "cuda"), identity_id="hexgt-rl")
+                                        fp16=(device.type == "cuda"), identity_id="hexgt-rl",
+                                        opening_moves=args.eval_opening_moves,
+                                        opening_temperature=args.eval_opening_temperature)
         results = {}
         # vs dense_cnn e24
         try:
@@ -254,8 +268,15 @@ def main():
             )
             log(f"epoch {rl_epoch} selfplay: {sp.completed_games}C/{sp.truncated_games}T games, "
                 f"{sp.searched_positions} pos, {sp.positions_per_second:.1f} pos/s | "
-                f"cand={sp.mean_candidate_count:.0f} visit_H={sp.mean_visit_entropy:.2f} "
-                f"prior_H={sp.mean_prior_entropy:.2f} top_visit={sp.mean_top_visit_fraction:.2f}", fh)
+                f"cand={sp.mean_candidate_count:.0f} | "
+                f"Q1 decisive={sp.decisive_fraction:.1%} len_med={sp.game_length_median:.0f} | "
+                f"Q2 uniq_open={sp.opening_unique_fraction:.1%} m2H={sp.move2_entropy:.2f} | "
+                f"Q3 visitH={sp.mean_visit_entropy:.2f} priorH={sp.mean_prior_entropy:.2f} | "
+                f"Q4 |val|={sp.mean_abs_value:.2f} draw={sp.draw_fraction:.1%} | "
+                f"Q5 forced={sp.forced_move_fraction:.1%}", fh)
+            # Also persist the full self-play metric dict per epoch for later analysis.
+            with open(eval_dir / f"epoch_{rl_epoch:06d}_selfplay.json", "w") as sp_fh:
+                json.dump(sp.as_dict(), sp_fh, indent=2)
             # Dump example traces for play-style analysis.
             with open(eval_dir / f"epoch_{rl_epoch:06d}_examples.json", "w") as ex_fh:
                 json.dump(sp.example_games, ex_fh)
