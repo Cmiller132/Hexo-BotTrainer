@@ -492,9 +492,18 @@ def main():
                 return comp_sum.get(k, float("nan")) / comp_n if comp_n else float("nan")
             ms_per = (time.perf_counter() - tr_t0) / max(1, comp_n) * 1000
             span = f"{win_epochs[0]}-{win_epochs[-1]}" if win_epochs else "-"
+            # Per-head loss components: log the short-term-value heads (stvalue_<h>)
+            # alongside total/policy/value/opp so the dashboard can surface EVERY
+            # head. Built dynamically from whatever stvalue_* keys the loss emits
+            # (graceful if the horizons change), sorted by horizon for stable
+            # columns; inserted between opp= and prune= (additive — the bridge
+            # regexes skip over it via .*?, so old log readers stay valid).
+            stv_keys = sorted((k for k in comp_sum if k.startswith("stvalue_")),
+                              key=lambda k: int(k.rsplit("_", 1)[1]))
+            stv_str = "".join(f" {k.replace('stvalue_', 'stv')}={avg(k):.4f}" for k in stv_keys)
             log(f"epoch {rl_epoch} train: {comp_n} steps (step={trainer.train_state.global_step}) "
                 f"total={avg('total'):.4f} policy={avg('policy'):.4f} value={avg('value'):.4f} "
-                f"opp={avg('opp_policy'):.4f} prune={trainer.prune_rate:.1%} {ms_per:.0f}ms/step "
+                f"opp={avg('opp_policy'):.4f}{stv_str} prune={trainer.prune_rate:.1%} {ms_per:.0f}ms/step "
                 f"window={len(win_epochs)}ep[{span}] {len(shards)}sh "
                 f"pool~{pool_pos // 1000}k/{args.replay_pool_cap // 1000}k "
                 f"decay={args.replay_recency_decay}", fh)
