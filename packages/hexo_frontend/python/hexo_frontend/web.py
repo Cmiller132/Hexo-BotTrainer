@@ -2145,6 +2145,12 @@ def _selfplay_epoch_summary(payload: dict[str, object]) -> dict[str, object]:
         "search_positions_per_second": payload.get("search_positions_per_second"),
         "mcts_sims_per_searched_position": mcts_sims_per_searched_position,
         "elapsed_seconds": payload.get("elapsed_seconds"),
+        # Game-length stats (None for producers that don't emit them, e.g. older
+        # dense_cnn runs, so the frontend just omits them — additive, non-breaking).
+        "game_length_mean": payload.get("game_length_mean"),
+        "game_length_median": payload.get("game_length_median"),
+        "game_length_max": payload.get("game_length_max"),
+        "game_length_stdev": payload.get("game_length_stdev"),
     }
 
 
