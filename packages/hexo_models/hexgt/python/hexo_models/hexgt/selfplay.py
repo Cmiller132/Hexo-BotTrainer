@@ -107,6 +107,30 @@ def _policy_entropy(pairs: Sequence[tuple[int, float]]) -> tuple[float, float, i
     return ent, top, len(weights)
 
 
+def _percentile(values: Sequence[float], pct: float) -> float:
+    if not values:
+        return 0.0
+    s = sorted(values)
+    k = (len(s) - 1) * (pct / 100.0)
+    lo = int(k)
+    hi = min(lo + 1, len(s) - 1)
+    return float(s[lo] + (s[hi] - s[lo]) * (k - lo))
+
+
+def _counter_entropy(counts: Sequence[int]) -> float:
+    """Shannon entropy (nats) of a list of bucket counts."""
+
+    total = sum(counts)
+    if total <= 0:
+        return 0.0
+    ent = 0.0
+    for c in counts:
+        if c > 0:
+            p = c / total
+            ent -= p * log(p)
+    return ent
+
+
 @dataclass
 class SelfPlayResult:
     """Summary of one self-play batch + the shards it wrote + example traces."""
@@ -124,11 +148,26 @@ class SelfPlayResult:
     search_positions_per_second: float
     shard_paths: list[str] = field(default_factory=list)
     example_games: list[dict[str, Any]] = field(default_factory=list)
-    # Aggregate play-style signal across all searched positions.
+    # Q3 + play-style: aggregate signal across all searched positions.
     mean_visit_entropy: float = 0.0
     mean_prior_entropy: float = 0.0
     mean_top_visit_fraction: float = 0.0
     mean_candidate_count: float = 0.0
+    # Q1 decisiveness / game length.
+    decisive_fraction: float = 0.0
+    game_length_median: float = 0.0
+    game_length_p95: float = 0.0
+    # Q2 opening / move diversity.
+    opening_unique_fraction: float = 0.0
+    opening_entropy: float = 0.0
+    move2_entropy: float = 0.0
+    # Q4 value-target balance.
+    win_p0_fraction: float = 0.0
+    win_p1_fraction: float = 0.0
+    draw_fraction: float = 0.0
+    mean_abs_value: float = 0.0
+    # Q5 tactical proxy: fraction of decisions with a near-forced best move.
+    forced_move_fraction: float = 0.0
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -144,10 +183,26 @@ class SelfPlayResult:
             "positions_per_second": self.positions_per_second,
             "search_positions_per_second": self.search_positions_per_second,
             "selfplay_npz_files": len(self.shard_paths),
+            # Q3 / play-style
             "mean_visit_entropy": self.mean_visit_entropy,
             "mean_prior_entropy": self.mean_prior_entropy,
             "mean_top_visit_fraction": self.mean_top_visit_fraction,
             "mean_candidate_count": self.mean_candidate_count,
+            # Q1 decisiveness
+            "decisive_fraction": self.decisive_fraction,
+            "game_length_median": self.game_length_median,
+            "game_length_p95": self.game_length_p95,
+            # Q2 diversity
+            "opening_unique_fraction": self.opening_unique_fraction,
+            "opening_entropy": self.opening_entropy,
+            "move2_entropy": self.move2_entropy,
+            # Q4 value balance
+            "win_p0_fraction": self.win_p0_fraction,
+            "win_p1_fraction": self.win_p1_fraction,
+            "draw_fraction": self.draw_fraction,
+            "mean_abs_value": self.mean_abs_value,
+            # Q5 tactical proxy
+            "forced_move_fraction": self.forced_move_fraction,
         }
 
 
@@ -207,9 +262,19 @@ def run_selfplay_games(
     ent_prior_sum = 0.0
     top_visit_sum = 0.0
     cand_count_sum = 0
+    forced_decisions = 0
+    # Q-metric accumulators.
+    game_lengths: list[int] = []
+    openings: list[tuple[int, ...]] = []  # first-6-ply action ids per game
+    move2_choices: list[int] = []         # the 2nd-ply action (first real decision)
+    win_counts = {"player0": 0, "player1": 0, "draw": 0}
+    abs_value_sum = 0.0
+    abs_value_n = 0
     next_game_index = 0
     active: list[dict[str, Any]] = []
     started = perf_counter()
+    _OPENING_PLIES = 6
+    _FORCED_THRESHOLD = 0.9
 
     while next_game_index < num_games or active:
         while len(active) < active_limit and next_game_index < num_games:
@@ -292,6 +357,8 @@ def run_selfplay_games(
                 ent_prior_sum += p_ent
                 top_visit_sum += v_top
                 cand_count_sum += len(prior_pairs)
+                if v_top >= _FORCED_THRESHOLD:
+                    forced_decisions += 1
                 sample = sample_from_state(
                     state,
                     game_id=game["game_id"],
@@ -343,6 +410,20 @@ def run_selfplay_games(
             write_compact_shard(npz_path, finalized, short_term_value_horizons=horizons)
             shard_paths.append(str(npz_path))
             raw_samples += len(finalized)
+            # Q1 length, Q2 diversity, Q4 value balance.
+            game_lengths.append(len(game["actions"]))
+            openings.append(tuple(int(a) for a in game["actions"][:_OPENING_PLIES]))
+            if len(game["actions"]) >= 2:
+                move2_choices.append(int(game["actions"][1]))
+            if truncated:
+                win_counts["draw"] += 1
+            elif winner in win_counts:
+                win_counts[winner] += 1
+            else:
+                win_counts["draw"] += 1
+            for fs in finalized:
+                abs_value_sum += abs(float(fs.value))
+                abs_value_n += 1
             if truncated:
                 truncated_games += 1
             else:
@@ -369,6 +450,10 @@ def run_selfplay_games(
 
     elapsed = perf_counter() - started
     sp = max(1, searched_positions)
+    n_games = max(1, completed_games + truncated_games)
+    from collections import Counter
+    opening_counts = Counter(openings)
+    move2_counts = Counter(move2_choices)
     return SelfPlayResult(
         epoch=epoch,
         requested_games=num_games,
@@ -387,6 +472,17 @@ def run_selfplay_games(
         mean_prior_entropy=ent_prior_sum / sp,
         mean_top_visit_fraction=top_visit_sum / sp,
         mean_candidate_count=cand_count_sum / sp,
+        decisive_fraction=completed_games / n_games,
+        game_length_median=_percentile(game_lengths, 50),
+        game_length_p95=_percentile(game_lengths, 95),
+        opening_unique_fraction=len(opening_counts) / n_games,
+        opening_entropy=_counter_entropy(list(opening_counts.values())),
+        move2_entropy=_counter_entropy(list(move2_counts.values())),
+        win_p0_fraction=win_counts["player0"] / n_games,
+        win_p1_fraction=win_counts["player1"] / n_games,
+        draw_fraction=win_counts["draw"] / n_games,
+        mean_abs_value=abs_value_sum / max(1, abs_value_n),
+        forced_move_fraction=forced_decisions / sp,
     )
 
 
