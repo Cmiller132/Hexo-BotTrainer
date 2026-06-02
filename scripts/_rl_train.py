@@ -134,14 +134,18 @@ def main():
         arch_meta = ck["arch"]
         model = build_model(arch_meta, device)
         model.load_state_dict(ck["model"])
-        seed_desc = f"BC seed {Path(args.bc_seed).name} (step={ck.get('step')})"
+        seed_desc = (f"SEED from {Path(args.bc_seed).name} (step={ck.get('step')}"
+                     f"{', rl_epoch=' + str(ck['rl_epoch']) if 'rl_epoch' in ck else ''})")
 
     nparams = sum(p.numel() for p in model.parameters())
     opt = torch.optim.AdamW(model.parameters(), lr=cfg.training.learning_rate, weight_decay=cfg.training.weight_decay)
     trainer = HexgtTrainer(model=model, config=cfg, optimizer=opt)
-    if latest.exists() and "optimizer" in ck:
+    # Load optimizer momentum from the seed/resume checkpoint when present (the BC
+    # seed has none -> fresh momentum; an RL-epoch checkpoint does -> warm-start).
+    if "optimizer" in ck:
         try:
             opt.load_state_dict(ck["optimizer"])
+            log(f"  (optimizer state restored from {Path(args.bc_seed).name if not latest.exists() else latest.name})", fh)
         except Exception as exc:  # optimizer state shape drift -> start fresh momentum
             log(f"  (optimizer state not restored: {exc})", fh)
     if latest.exists() and "train_state" in ck:
