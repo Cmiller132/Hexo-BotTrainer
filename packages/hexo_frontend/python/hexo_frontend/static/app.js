@@ -2926,11 +2926,19 @@ function epochProgressRow(item) {
   const checkpoint = item.checkpoint || {};
   const samplesAdded = asFinite(selfplay.samples_added);
   const selfplayRate = formatRate(selfplay.search_positions_per_second, "pos/s");
-  const selfplayText = samplesAdded !== null
+  let selfplayText = samplesAdded !== null
     ? `${samplesAdded} samples | ${selfplayRate}`
     : (selfplay.search_positions_per_second !== undefined && selfplay.search_positions_per_second !== null
       ? selfplayRate
       : "pending");
+  // Game-length stats (mean/median/max/stdev), appended when the producer emits
+  // them (omitted otherwise, so dense_cnn runs are unaffected).
+  const lenMean = asFinite(selfplay.game_length_mean);
+  const lenMed = asFinite(selfplay.game_length_median);
+  if (lenMean !== null || lenMed !== null) {
+    selfplayText += ` | len μ${formatDecimal(lenMean, 1)} med ${formatDecimal(lenMed, 0)}`
+      + ` max ${asFinite(selfplay.game_length_max) ?? "--"} σ${formatDecimal(selfplay.game_length_stdev, 1)}`;
+  }
   const trainText = (training.loss !== undefined && training.loss !== null)
     ? `loss ${formatDecimal(training.loss, 3)} | C ${formatPercent(classicalReplayFraction(training))} | P@1 ${formatPercent(policyTop1(training))}`
     : training.progress
