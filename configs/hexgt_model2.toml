@@ -67,7 +67,13 @@ bc_prune_max_dropped_mass = 0.15
 
 [model.config.selfplay]
 search_visits = 512
-active_games = 256
+# Concurrent self-play games kept in flight (and the MCTS leaf-batch width). 64 is
+# the throughput sweet spot at 512 sims: profiling (docs/analysis/HEXGT_PERF_512.md)
+# found active=256 was actually SLOWER (~5 vs ~8 searched pos/s) at 2x the RAM,
+# because the search loop is featurize/forward-bound, not starved for leaves —
+# more concurrent games just add proportional per-chunk work. Raise only if a
+# future change makes the GPU the bottleneck again (then the extra leaves help).
+active_games = 64
 c_puct = 1.5
 root_dirichlet_noise_enabled = true
 root_dirichlet_noise_fraction = 0.25
