@@ -36,6 +36,7 @@ pub(crate) const WINDOW_LEN_F: f32 = 6.0;
 // node type ids (mirror candidates.rs NODE_* / python NODE_TYPE_*)
 pub(crate) const FT_NODE_SIDE: i64 = 0;
 pub(crate) const FT_NODE_STONE: i64 = 1;
+pub(crate) const FT_NODE_CANDIDATE: i64 = 2;
 pub(crate) const FT_NODE_WINDOW: i64 = 3;
 pub(crate) const FT_EDGE_CANDIDATE_WINDOW: i64 = 2;
 
@@ -55,3 +56,13 @@ pub(crate) const F_SIDE_PHASE_ONEHOT: usize = 16; // [16:19)
 pub(crate) const F_SIDE_STONES_OWN: usize = 19;
 pub(crate) const F_SIDE_STONES_OPP: usize = 20;
 pub(crate) const F_SIDE_MOVE_NUMBER: usize = 21;
+// Tactical feature-set v2 ([22:30) of the same 32-wide vector; D6-invariant).
+// MUST mirror python/.../constants.py (gated by test_hexgt_feature_buffer).
+pub(crate) const F_CAND_OWN_WIN3: usize = 22; // own count-3 windows through cell (norm)
+pub(crate) const F_CAND_OWN_WIN4: usize = 23; // own count-4
+pub(crate) const F_CAND_OWN_WIN5: usize = 24; // own count-5
+pub(crate) const F_CAND_OPP_WIN3: usize = 25; // opp count-3
+pub(crate) const F_CAND_OPP_WIN4: usize = 26; // opp count-4
+pub(crate) const F_CAND_OPP_WIN5: usize = 27; // opp count-5
+pub(crate) const F_CAND_DIST_FIRST: usize = 28; // hex-dist to this turn's first stone (norm)
+pub(crate) const F_SIDE_IS_SECOND: usize = 29; // side: 1 if current placement is 2nd stone

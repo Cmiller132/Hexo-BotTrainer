@@ -24,8 +24,9 @@ from pathlib import Path
 
 import torch
 
-from hexo_models.hexgt.architecture import HexgtNetwork
+from hexo_models.hexgt.architecture import HexgtNetwork, zero_init_expanded_feature_columns
 from hexo_models.hexgt.config import parse_hexgt_config
+from hexo_models.hexgt.constants import FEATURE_SCHEMA_VERSION
 from hexo_models.hexgt.selfplay import run_selfplay_games
 from hexo_models.hexgt.trainer import HexgtTrainer
 
@@ -168,6 +169,19 @@ def main():
         seed_desc = (f"SEED from {Path(args.bc_seed).name} (step={ck.get('step')}"
                      f"{', rl_epoch=' + str(ck['rl_epoch']) if 'rl_epoch' in ck else ''})")
 
+    # ZERO-INIT LAYER-EXPANSION (one-time): a checkpoint predating the current
+    # feature schema (no/lower feature_schema_version) carries random, never-
+    # trained node_in columns for the newly-activated slots. Zero them so the
+    # FIRST forward after resume is byte-identical to that checkpoint; the next
+    # save stamps the current version, so later resumes skip this. Gated on the
+    # ABSOLUTE version in the checkpoint, so the supervisor's fixed relaunch
+    # command can't re-zero already-learned columns.
+    loaded_fsv = int(ck.get("feature_schema_version", 1))
+    if loaded_fsv < FEATURE_SCHEMA_VERSION:
+        zeroed = zero_init_expanded_feature_columns(model)
+        seed_desc += (f" + ZERO-INIT feature-expansion v{loaded_fsv}->v{FEATURE_SCHEMA_VERSION} "
+                      f"(zeroed {len(zeroed)} node_in cols {zeroed})")
+
     nparams = sum(p.numel() for p in model.parameters())
     opt = torch.optim.AdamW(model.parameters(), lr=cfg.training.learning_rate, weight_decay=cfg.training.weight_decay)
     trainer = HexgtTrainer(model=model, config=cfg, optimizer=opt)
@@ -197,6 +211,7 @@ def main():
             "model": model.state_dict(), "optimizer": opt.state_dict(),
             "train_state": trainer.train_state.to_dict(), "arch": arch_meta,
             "step": trainer.train_state.global_step, "rl_epoch": rl_epoch,
+            "feature_schema_version": FEATURE_SCHEMA_VERSION,
         }
         torch.save(payload, ckpt_dir / f"hexgt_rl_{tag}.pt")
         torch.save(payload, ckpt_dir / "hexgt_rl_latest.pt")

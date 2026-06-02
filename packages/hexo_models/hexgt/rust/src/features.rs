@@ -39,7 +39,12 @@ pub(crate) struct GraphFeat {
 }
 
 /// Featurize one position's graph (mirror of `features.build_graph_tensors`).
-pub(crate) fn featurize_position_graph(g: &PositionGraph, placements: i32, phase: u8) -> GraphFeat {
+pub(crate) fn featurize_position_graph(
+    g: &PositionGraph,
+    placements: i32,
+    phase: u8,
+    first_stone: Option<(i16, i16)>,
+) -> GraphFeat {
     let n = g.node_count();
     let mut feat = vec![0f32; n * NODE_FEATURE_DIM];
     let denom_recency = placements.max(1) as f32;
@@ -75,6 +80,17 @@ pub(crate) fn featurize_position_graph(g: &PositionGraph, placements: i32, phase
             let widx = ((g.node_wcount[i] as i64) - 3).clamp(0, 2) as usize;
             feat[base + F_WIN_COUNT_ONEHOT + widx] = 1.0;
             feat[base + F_WIN_EMPTY_CELLS] = (g.node_wempty[i] as f32) / WINDOW_LEN_F;
+        } else if t == FT_NODE_CANDIDATE {
+            // v2: hex-distance from this candidate to THIS turn's first stone.
+            // 0 (left zero) when there is no first stone yet — i.e. on the turn's
+            // FIRST placement (Opening/FirstStone). D6-invariant (a hex distance).
+            if let Some((fq, fr)) = first_stone {
+                let dq = q - fq as i32;
+                let dr = r - fr as i32;
+                let dd = -dq - dr;
+                let d = dq.abs().max(dr.abs()).max(dd.abs()) as f32;
+                feat[base + F_CAND_DIST_FIRST] = d / COORD_SCALE;
+            }
         }
     }
 
@@ -86,6 +102,8 @@ pub(crate) fn featurize_position_graph(g: &PositionGraph, placements: i32, phase
             feat[base + F_SIDE_STONES_OWN] = stones_own as f32 / COUNT_SCALE;
             feat[base + F_SIDE_STONES_OPP] = stones_opp as f32 / COUNT_SCALE;
             feat[base + F_SIDE_MOVE_NUMBER] = placements as f32 / COUNT_SCALE;
+            // v2: 1 when the current placement is the turn's SECOND stone.
+            feat[base + F_SIDE_IS_SECOND] = if ph == 2 { 1.0 } else { 0.0 };
         }
     }
 
@@ -122,11 +140,25 @@ pub(crate) fn featurize_position_graph(g: &PositionGraph, placements: i32, phase
                     let cnt = g.node_wcount[wsrc] as i64;
                     if own == 0 {
                         feat[cbase + F_CAND_NWIN_OWN] += 1.0;
+                        // v2: per-count breakdown of the own active windows.
+                        match cnt {
+                            3 => feat[cbase + F_CAND_OWN_WIN3] += 1.0,
+                            4 => feat[cbase + F_CAND_OWN_WIN4] += 1.0,
+                            5 => feat[cbase + F_CAND_OWN_WIN5] += 1.0,
+                            _ => {}
+                        }
                         if cnt == 5 {
                             feat[cbase + F_CAND_COMPLETE_OWN] = 1.0;
                         }
                     } else if own == 1 {
                         feat[cbase + F_CAND_NWIN_OPP] += 1.0;
+                        // v2: per-count breakdown of the opp active windows.
+                        match cnt {
+                            3 => feat[cbase + F_CAND_OPP_WIN3] += 1.0,
+                            4 => feat[cbase + F_CAND_OPP_WIN4] += 1.0,
+                            5 => feat[cbase + F_CAND_OPP_WIN5] += 1.0,
+                            _ => {}
+                        }
                         if cnt == 5 {
                             feat[cbase + F_CAND_COMPLETE_OPP] = 1.0;
                         }
@@ -135,8 +167,17 @@ pub(crate) fn featurize_position_graph(g: &PositionGraph, placements: i32, phase
             }
         }
         for i in 0..n {
-            feat[i * NODE_FEATURE_DIM + F_CAND_NWIN_OWN] /= COORD_SCALE;
-            feat[i * NODE_FEATURE_DIM + F_CAND_NWIN_OPP] /= COORD_SCALE;
+            let b = i * NODE_FEATURE_DIM;
+            feat[b + F_CAND_NWIN_OWN] /= COORD_SCALE;
+            feat[b + F_CAND_NWIN_OPP] /= COORD_SCALE;
+            // v2 count splits share the NWIN normalization (so the three own bins
+            // sum to NWIN_OWN, the three opp bins to NWIN_OPP — gated by tests).
+            feat[b + F_CAND_OWN_WIN3] /= COORD_SCALE;
+            feat[b + F_CAND_OWN_WIN4] /= COORD_SCALE;
+            feat[b + F_CAND_OWN_WIN5] /= COORD_SCALE;
+            feat[b + F_CAND_OPP_WIN3] /= COORD_SCALE;
+            feat[b + F_CAND_OPP_WIN4] /= COORD_SCALE;
+            feat[b + F_CAND_OPP_WIN5] /= COORD_SCALE;
         }
     }
 
@@ -334,12 +375,12 @@ pub(crate) fn featurize_collate_states(states: &[&RustHexoState], n: i16) -> Col
         .map(|s| {
             let g = build_graph(s, n);
             let placements = s.placements_made() as i32;
-            let phase = match s.phase() {
-                TurnPhase::Opening => 0u8,
-                TurnPhase::FirstStone => 1u8,
-                TurnPhase::SecondStone { .. } => 2u8,
+            let (phase, first_stone) = match s.phase() {
+                TurnPhase::Opening => (0u8, None),
+                TurnPhase::FirstStone => (1u8, None),
+                TurnPhase::SecondStone { first } => (2u8, Some((first.q, first.r))),
             };
-            featurize_position_graph(&g, placements, phase)
+            featurize_position_graph(&g, placements, phase, first_stone)
         })
         .collect();
     collate(&feats)
