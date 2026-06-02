@@ -197,11 +197,26 @@ class HexgtInference:
         }
         out, dev_batch = self.forward_batch(batch)
         cg = dev_batch["candidate_graph"]
-        policy = out["policy"].float()
-        log_probs = segment_log_softmax(policy, cg, num_graphs)
+        # Sanitize the trunk output: fp16 autocast can overflow to inf/NaN on rare
+        # extreme positions (e.g. very deep endgames with huge candidate sets in
+        # long eval games). A non-finite logit poisons the per-graph softmax/value
+        # and the Rust evaluator rejects it (crashing the run). Replace non-finite
+        # LOGITS with neutral finite values so the softmax stays well-defined and
+        # positive (the affected position just gets a near-uniform prior + neutral
+        # value, instead of taking down a multi-hour run). Rare, and logged.
+        raw_policy = out["policy"].float()
+        raw_value = out["value"].float()
+        n_bad = int((~torch.isfinite(raw_policy)).sum()) + int((~torch.isfinite(raw_value)).sum())
+        if n_bad:
+            import sys as _sys
+            print(f"[hexgt.inference] sanitized {n_bad} non-finite logit(s) "
+                  f"(fp16 overflow) over {num_graphs} graphs", file=_sys.stderr, flush=True)
+            raw_policy = torch.nan_to_num(raw_policy, nan=0.0, posinf=30.0, neginf=-30.0)
+            raw_value = torch.nan_to_num(raw_value, nan=0.0, posinf=30.0, neginf=-30.0)
+        log_probs = segment_log_softmax(raw_policy, cg, num_graphs)
         priors = log_probs.exp().cpu().numpy().astype(np.float32, copy=False)
-        values = decode_binned_value(out["value"].float()).cpu().numpy()
-        values = np.clip(values, -1.0, 1.0).astype(np.float32, copy=False)
+        values = decode_binned_value(raw_value).cpu().numpy()
+        values = np.nan_to_num(np.clip(values, -1.0, 1.0), nan=0.0).astype(np.float32, copy=False)
         return {
             "values_bytes": np.ascontiguousarray(values).tobytes(),
             "priors_bytes": np.ascontiguousarray(priors).tobytes(),
@@ -216,10 +231,11 @@ class HexgtInference:
         out, dev_batch = self.forward_batch(batch)
         num_graphs = int(batch["num_graphs"])
         cand_graph = dev_batch["candidate_graph"]
-        policy = out["policy"].float()
+        # Same fp16-overflow guard as evaluate_featurized_batch (see there).
+        policy = torch.nan_to_num(out["policy"].float(), nan=0.0, posinf=30.0, neginf=-30.0)
         log_probs = segment_log_softmax(policy, cand_graph, num_graphs)
         priors = log_probs.exp().cpu().numpy()
-        values = decode_binned_value(out["value"].float()).cpu().numpy()
+        values = decode_binned_value(torch.nan_to_num(out["value"].float(), nan=0.0, posinf=30.0, neginf=-30.0)).cpu().numpy()
         cand_ids = batch["candidate_ids"].cpu().numpy()
         cand_graph_cpu = batch["candidate_graph"].cpu().numpy()
 
