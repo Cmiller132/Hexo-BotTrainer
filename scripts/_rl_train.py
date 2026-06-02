@@ -78,6 +78,9 @@ def main():
     ap.add_argument("--eval-every", type=int, default=2)
     ap.add_argument("--eval-games", type=int, default=40)
     ap.add_argument("--eval-visits", type=int, default=200)
+    # Eval games run to completion (a long Hexo game truncated to a draw would
+    # deflate the win rate); keep this well above the self-play max_actions.
+    ap.add_argument("--eval-max-actions", type=int, default=1024)
     ap.add_argument("--dense-ckpt", default="/mnt/e/Hexo-BotTrainer/runs/dense_cnn_model1_target_96x8/checkpoints/epoch_000024.pt")
     ap.add_argument("--dense-config", default="/mnt/e/Hexo-BotTrainer-hexgt/configs/dense_cnn_model1_target_96x8.toml")
     ap.add_argument("--sealbot", action="store_true")
@@ -197,7 +200,7 @@ def main():
             # win-rate change is the model improving, not seed variance (paired).
             r = run_head_to_head(make_hexgt, make_dense, games=args.eval_games,
                                  output_dir=eval_dir / f"epoch_{rl_epoch:06d}_vs_dense",
-                                 base_seed=4242, max_actions=args.max_actions,
+                                 base_seed=4242, max_actions=args.eval_max_actions,
                                  game_id_prefix=f"e{rl_epoch}vsdense")
             results["vs_dense_cnn_e24"] = r.as_dict()
         except Exception:
@@ -212,7 +215,7 @@ def main():
                     return SealBotPlayer(sb, player_id="sealbot-best-50ms")
                 rs = run_head_to_head(make_hexgt, make_sb, games=args.eval_games,
                                       output_dir=eval_dir / f"epoch_{rl_epoch:06d}_vs_sealbot",
-                                      base_seed=4242, max_actions=args.max_actions,
+                                      base_seed=4242, max_actions=args.eval_max_actions,
                                       game_id_prefix=f"e{rl_epoch}vssb")
                 results["vs_sealbot"] = rs.as_dict()
             except Exception as exc:
