@@ -291,3 +291,91 @@ python -u scripts/_perf_512.py \
 ```
 
 Logs: `runs/_perf_512.log`, `runs/_perf_512_a256.log`.
+
+---
+
+# Part 2 — implemented optimizations + after numbers
+
+Everything in Part 1 above is the **baseline** (pre-optimization). This part
+records the fixes landed against it and the re-profiled result, same workload
+(512 sims, active=64, vbatch=64, compile; real `runs/hexgt_rl_main/selfplay`
+positions, RTX 4070 Ti / 7950X).
+
+## What changed
+
+1. **Parallel collation (`features.rs::collate`).** A focused probe
+   (`scripts/_feat_probe.py`) showed the rayon pool was 32 threads and the
+   per-graph featurize was already fast (~12 ms / 1024 graphs), but the **serial
+   `collate()` concatenation was ~122 ms — 91 % of the featurize wall** (it
+   gathers from ~1024 cache-cold, separately-allocated `GraphFeat`s). Rewrote
+   `collate` to size the output buffers from a serial prefix-sum, carve each into
+   disjoint per-graph slices, and **scatter all graphs in parallel** across the
+   rayon pool. Result: featurize+collate **160 → 46 µs/state (3.5×)**; cores busy
+   during featurization **1 → 11 mean / 27 peak**. Byte-identical to the serial
+   form (gated by `test_hexgt_feature_buffer.py`).
+
+2. **Featurize↔forward pipeline (`mcts_eval.rs`).** The eval loop now overlaps
+   the two halves: a **GIL-free rayon worker featurizes chunk N+1 while the
+   GIL-holding consumer runs chunk N's forward + parse** (a bounded
+   `sync_channel` gives backpressure = `pipeline_depth`, default 2). The worker
+   never touches Python, so the GIL stays on one thread (avoiding the Phase-5d
+   hand-off regression). Depth + chunk size are tunable via
+   `HEXGT_EVAL_PIPELINE_DEPTH` / `HEXGT_EVAL_CHUNK_STATES`. Bit-identical to the
+   serial path, gated by the new `test_hexgt_eval_pipeline.py` (multi-chunk ==
+   single-chunk; depth-invariant).
+
+3. **Pinned-memory HtoD (`inference.py`).** Large host buffers are staged through
+   page-locked memory + a non-blocking DMA (`_host_to_device`). The GPU timeline
+   confirms the switch (`Memcpy HtoD (Pageable→Pinned)`). Throughput-neutral on
+   this workload (HtoD was not the binding constraint; A/B within run-variance),
+   but it removes the pageable copy as intended and enables async overlap. Gated
+   off via `HEXGT_PIN_HOST=0`.
+
+4. **`active_games` default 256 → 64** (`configs/hexgt_model2.toml`) — fixes the
+   Part-1 regression (active=256 was slower at 2× RAM).
+
+5. **fp16 sgemm — investigated, not a model fix.** In **eager** mode every GEMM is
+   already fp16 (`ampere_fp16_sgemm_fp16…`), and autocast lowers the GNN einsum to
+   fp16 on its own. The fp32 `ampere_sgemm_128x128_nn` appears **only under
+   `torch.compile`** — an inductor codegen choice, not a model-level fp32 op, so
+   it is not cleanly fixable at the model level (would need inductor config /
+   attention surgery). Deferred; no speculative cast left in the code.
+
+## After numbers (512 sims, active=64, vbatch=64, compile)
+
+| metric | before | after | change |
+|---|---|---|---|
+| **searched / self-play pos/s** | 7.6–9.6 (~8.5) | **13–17 (median ~15)** | **~1.8×** |
+| GPU util (mean) | 38–46 % | **62–65 %** | +20 pts |
+| CPU util (mean, full loop) | ~7 % | **~18 %** | 2.5× |
+| featurize cores busy (isolated) | 1 / 32 | **11 mean, 27 peak** | parallel |
+| featurize+collate (isolated) | 160 µs/state | **46 µs/state** | 3.5× |
+| encode share of wall | ~35 % (serial) | **~20 % and overlapped** | hidden |
+| VRAM alloc / reserved peak | 1.6 / 1.8 GB | 1.7 / 1.9 GB | ~flat |
+| system RAM (proc peak) | 2.7 GB | 3.7 GB | +1 GB (pinned + queued chunks; trivial vs 28 GB) |
+
+The pipeline overlap is directly visible in the stage timers: the per-stage
+seconds now **sum to MORE than wall** (the profiler prints "MCTS tree ops" as
+`wall − Σstages` = **−13 %**), i.e. featurization runs concurrently with the
+forward. After the fixes the GPU forward is the clear dominant cost (~64 % of wall
+via the cuda-event split) and GPU util is ~63 % — the bottleneck has shifted from
+"co-bottlenecked + serialized" to "GPU-forward-bound," as intended.
+
+**Correctness:** full suite **199 passed** (196 + 3 new pipeline tests); the
+featurizer byte-parity test (Rust == Python, max|Δ| = 0) and the D6-equivariance
+test both still hold, so the parallel/pipelined path is provably identical to the
+serial one.
+
+## Remaining headroom (unchanged ranking, now from the new baseline)
+
+GPU forward is now ~64 % of wall at ~63 % util — the next wins are GPU-side and on
+the consumer's serial transport+parse (~30 % of wall, not overlapped with *their
+own* chunk's forward):
+- Deepen the pipeline to also overlap transport/D2H/parse with the forward (drive
+  GPU util toward saturation).
+- The inductor fp32 sgemm (~9 % of GPU time) via inductor config or an attention
+  restructure.
+- Shallower `ctx_layers` (Phase-5b: up to 1.3–1.7× the forward) — a learnability
+  bet, validate in BC/RL eval.
+- Raise `forward_pad_budget` (VRAM is at ~15 % of the 12 GB cap).
+
