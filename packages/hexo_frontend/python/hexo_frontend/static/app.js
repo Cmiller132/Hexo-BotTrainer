@@ -2918,42 +2918,98 @@ function renderEpochProgress(runs) {
   </section>`;
 }
 
+// One labeled stat line inside a main epoch cell (dim uppercase label + value).
+function epochStat(label, value, extraClass = "") {
+  return `<span class="epoch-stat ${extraClass}"><i>${escapeText(label)}</i> ${escapeText(value)}</span>`;
+}
+
+// One labeled chip inside the detail sub-row (dim label + value).
+function epochChip(label, value, extraClass = "") {
+  return `<span class="epoch-chip ${extraClass}"><i>${escapeText(label)}</i> ${escapeText(value)}</span>`;
+}
+
+// Optional full-width detail band beneath an epoch row: a Buffer group and a
+// per-head Losses group (total + policy/value/opp + every short-term-value head).
+// Rendered only when the producer emits the nested `buffer` object (hexgt RL);
+// dense_cnn rows have no buffer, so this returns "" and the row is unchanged
+// (additive / dense-safe).
+function epochProgressDetail(buf) {
+  if (!buf) return "";
+  const k = (n) => (asFinite(n) === null ? "--" : `${Math.round(Number(n) / 1000)}k`);
+  const windowSpan = buf.window_span ? ` [${buf.window_span}]` : "";
+  const bufferChips = [
+    epochChip("pool", `${k(buf.samples)}/${k(buf.cap)}`),
+    epochChip("window", `${asFinite(buf.window_epochs) ?? "--"}ep${windowSpan}`),
+    epochChip("decay", formatDecimal(buf.decay, 2)),
+    epochChip("train", `${asFinite(buf.train_steps) ?? "--"}×${asFinite(buf.train_batch) ?? "--"} = ${k(buf.train_samples_per_epoch)}/ep`),
+  ].join("");
+
+  // Per-head losses; each head is emitted only when present, so a run missing a
+  // head (e.g. pre-deploy epochs without stvalue) just omits that chip.
+  const lossChips = [];
+  if (asFinite(buf.loss_total) !== null) lossChips.push(epochChip("Σ total", formatDecimal(buf.loss_total, 3), "epoch-chip-total"));
+  if (asFinite(buf.loss_policy) !== null) lossChips.push(epochChip("policy", formatDecimal(buf.loss_policy, 3)));
+  if (asFinite(buf.loss_value) !== null) lossChips.push(epochChip("value", formatDecimal(buf.loss_value, 3)));
+  if (asFinite(buf.loss_opp) !== null) lossChips.push(epochChip("opp", formatDecimal(buf.loss_opp, 3)));
+  // Short-term-value heads: every loss_stvalue_<h> the bridge surfaced, by horizon.
+  Object.keys(buf)
+    .map(key => /^loss_stvalue_(\d+)$/.exec(key))
+    .filter(Boolean)
+    .sort((a, b) => Number(a[1]) - Number(b[1]))
+    .forEach(match => {
+      if (asFinite(buf[match[0]]) !== null) lossChips.push(epochChip(`stv${match[1]}`, formatDecimal(buf[match[0]], 3)));
+    });
+
+  const lossGroup = lossChips.length
+    ? `<div class="epoch-detail-group"><span class="epoch-detail-label">Losses</span>${lossChips.join("")}</div>`
+    : "";
+  return `<div class="epoch-progress-detail">
+    <div class="epoch-detail-group"><span class="epoch-detail-label">Buffer</span>${bufferChips}</div>
+    ${lossGroup}
+  </div>`;
+}
+
 function epochProgressRow(item) {
   const selfplay = item.selfplay || {};
   const training = item.training || {};
   const evaluation = item.evaluation || {};
   const d6 = item.d6 || {};
   const checkpoint = item.checkpoint || {};
+  const buf = selfplay.buffer || null;
+  const status = item.status || "partial";
+
+  // --- Self-play cell: games / speed / length, each on its own labeled line ---
   const samplesAdded = asFinite(selfplay.samples_added);
-  const selfplayRate = formatRate(selfplay.search_positions_per_second, "pos/s");
-  let selfplayText = samplesAdded !== null
-    ? `${samplesAdded} samples | ${selfplayRate}`
-    : (selfplay.search_positions_per_second !== undefined && selfplay.search_positions_per_second !== null
-      ? selfplayRate
-      : "pending");
-  // Game-length stats (mean/median/max/stdev), appended when the producer emits
-  // them (omitted otherwise, so dense_cnn runs are unaffected).
+  const hasRate = selfplay.search_positions_per_second !== undefined && selfplay.search_positions_per_second !== null;
+  const spLines = [];
+  if (samplesAdded !== null) spLines.push(epochStat("games", `${samplesAdded} smp`));
+  if (hasRate) spLines.push(epochStat("speed", formatRate(selfplay.search_positions_per_second, "pos/s")));
   const lenMean = asFinite(selfplay.game_length_mean);
   const lenMed = asFinite(selfplay.game_length_median);
   if (lenMean !== null || lenMed !== null) {
-    selfplayText += ` | len μ${formatDecimal(lenMean, 1)} med ${formatDecimal(lenMed, 0)}`
-      + ` max ${asFinite(selfplay.game_length_max) ?? "--"} σ${formatDecimal(selfplay.game_length_stdev, 1)}`;
+    spLines.push(epochStat("len", `μ${formatDecimal(lenMean, 1)} · med ${formatDecimal(lenMed, 0)}`
+      + ` · max ${asFinite(selfplay.game_length_max) ?? "--"} · σ${formatDecimal(selfplay.game_length_stdev, 1)}`));
   }
-  // Replay-buffer + training stats (appended when the producer emits the nested
-  // `buffer` object; omitted otherwise, so dense_cnn runs are unaffected).
-  const buf = selfplay.buffer || null;
-  if (buf) {
-    const k = (n) => (asFinite(n) === null ? "--" : `${Math.round(Number(n) / 1000)}k`);
-    selfplayText += ` | buf ${k(buf.samples)}/${k(buf.cap)}`
-      + ` (${asFinite(buf.window_epochs) ?? "--"}ep ${escapeText(buf.window_span ?? "")}) decay ${formatDecimal(buf.decay, 2)}`
-      + ` | train ${asFinite(buf.train_steps) ?? "--"}st×${asFinite(buf.train_batch) ?? "--"}=${k(buf.train_samples_per_epoch)}/ep`
-      + ` loss t${formatDecimal(buf.loss_total, 3)} p${formatDecimal(buf.loss_policy, 3)} v${formatDecimal(buf.loss_value, 3)}`;
+  const selfplayCell = spLines.length ? spLines.join("") : epochStat("", "pending", "muted");
+
+  // --- Train cell: total loss, then (when present) classical-replay % and policy
+  // top-1. Per-head losses live in the detail band below (hexgt); dense_cnn keeps
+  // C / P@1 here and just omits the absent metrics.
+  const trainLines = [];
+  const totalLoss = asFinite(training.loss);
+  if (totalLoss !== null) {
+    trainLines.push(epochStat("loss", formatDecimal(totalLoss, 3)));
+    const cFrac = classicalReplayFraction(training);
+    if (cFrac !== null) trainLines.push(epochStat("C", formatPercent(cFrac)));
+    const p1 = policyTop1(training);
+    if (p1 !== null) trainLines.push(epochStat("P@1", formatPercent(p1)));
+  } else if (training.progress) {
+    trainLines.push(epochStat("", formatTrainingProgress({ ...training.progress, epoch: item.epoch })));
+    trainLines.push(epochStat("", trainingProgressSubtext(training.progress), "muted"));
   }
-  const trainText = (training.loss !== undefined && training.loss !== null)
-    ? `loss ${formatDecimal(training.loss, 3)} | C ${formatPercent(classicalReplayFraction(training))} | P@1 ${formatPercent(policyTop1(training))}`
-    : training.progress
-      ? `${formatTrainingProgress({ ...training.progress, epoch: item.epoch })} | ${trainingProgressSubtext(training.progress)}`
-    : "pending";
+  const trainCell = trainLines.length ? trainLines.join("") : epochStat("", "pending", "muted");
+
+  // --- Eval / D6 / checkpoint: single short value each (unchanged content) ---
   const evalText = (evaluation.games !== undefined && evaluation.games !== null)
     ? `${Number(evaluation.wins || 0)}-${Number(evaluation.losses || 0)} | ${formatDecimal(evaluation.mean_turns, 1)} turns`
     : "pending";
@@ -2961,15 +3017,16 @@ function epochProgressRow(item) {
     ? `${d6.preview_symmetries.slice(0, 6).join(",")}${d6.preview_symmetries.length > 6 ? "..." : ""}`
     : (d6.mode ? "random" : "pending");
   const checkpointText = checkpoint.path || checkpoint.name ? "saved" : "pending";
-  const status = item.status || "partial";
-  return `<div class="epoch-progress-row ${status === "completed" ? "completed" : "partial"}">
+
+  const mainRow = `<div class="epoch-progress-row ${status === "completed" ? "completed" : "partial"}">
     <strong>Epoch ${escapeText(item.epoch)}</strong>
-    <span>${escapeText(selfplayText)}</span>
-    <span>${escapeText(trainText)}</span>
+    <div class="epoch-cell">${selfplayCell}</div>
+    <div class="epoch-cell">${trainCell}</div>
     <span>${escapeText(evalText)}</span>
     <span>${escapeText(d6Text)}</span>
     <span>${escapeText(checkpointText)}</span>
   </div>`;
+  return `<div class="epoch-progress-group">${mainRow}${epochProgressDetail(buf)}</div>`;
 }
 
 function classicalReplayFraction(training) {
