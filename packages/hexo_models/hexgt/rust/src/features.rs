@@ -174,47 +174,138 @@ pub(crate) struct CollatedFeatures {
     pub(crate) num_candidates: usize,
 }
 
-pub(crate) fn collate(feats: &[GraphFeat]) -> CollatedFeatures {
-    let num_nodes: usize = feats.iter().map(|g| g.num_nodes).sum();
-    let num_edges: usize = feats.iter().map(|g| g.edge_type.len()).sum();
-    let num_candidates: usize = feats.iter().map(|g| g.candidate_ids.len()).sum();
+/// Disjoint mutable destination slices into the collated buffers for ONE graph.
+/// Writing through these is data-race-free because every graph owns a non-
+/// overlapping region (the offsets partition each buffer exactly).
+struct GraphDst<'a> {
+    node_feat: &'a mut [f32],
+    node_type: &'a mut [i64],
+    node_graph: &'a mut [i64],
+    edge_src: &'a mut [i64], // first half of edge_index
+    edge_dst: &'a mut [i64], // second half of edge_index
+    edge_type: &'a mut [i64],
+    edge_attr: &'a mut [f32],
+    candidate_index: &'a mut [i64],
+    candidate_graph: &'a mut [i64],
+    candidate_ids: &'a mut [i64],
+}
 
-    let mut node_feat = Vec::with_capacity(num_nodes * NODE_FEATURE_DIM);
-    let mut node_type = Vec::with_capacity(num_nodes);
-    let mut node_graph = Vec::with_capacity(num_nodes);
-    let mut edge_src = Vec::with_capacity(num_edges);
-    let mut edge_dst = Vec::with_capacity(num_edges);
-    let mut edge_type = Vec::with_capacity(num_edges);
-    let mut edge_attr = Vec::with_capacity(num_edges * EDGE_ATTR_DIM);
-    let mut candidate_index = Vec::with_capacity(num_candidates);
-    let mut candidate_graph = Vec::with_capacity(num_candidates);
-    let mut candidate_ids = Vec::with_capacity(num_candidates);
-    let mut candidate_counts = Vec::with_capacity(feats.len());
-
-    let mut node_offset: i64 = 0;
-    for (gid, g) in feats.iter().enumerate() {
-        let gid = gid as i64;
-        node_feat.extend_from_slice(&g.node_feat);
-        node_type.extend_from_slice(&g.node_type);
-        node_graph.extend(std::iter::repeat(gid).take(g.num_nodes));
-        for k in 0..g.edge_src.len() {
-            edge_src.push(g.edge_src[k] + node_offset);
-            edge_dst.push(g.edge_dst[k] + node_offset);
-        }
-        edge_type.extend_from_slice(&g.edge_type);
-        edge_attr.extend_from_slice(&g.edge_attr);
-        for &c in &g.candidate_nodes {
-            candidate_index.push(c + node_offset);
-        }
-        candidate_graph.extend(std::iter::repeat(gid).take(g.candidate_nodes.len()));
-        candidate_ids.extend_from_slice(&g.candidate_ids);
-        candidate_counts.push(g.candidate_ids.len());
-        node_offset += g.num_nodes as i64;
+/// Carve a preallocated buffer into per-graph sub-slices of the given lengths.
+/// Cheap pointer arithmetic (no copies); the returned slices tile `buf` exactly.
+fn carve<'a, T>(buf: &'a mut [T], lens: impl Iterator<Item = usize>) -> Vec<&'a mut [T]> {
+    let mut rest = buf;
+    let mut out = Vec::new();
+    for len in lens {
+        let (head, tail) = rest.split_at_mut(len);
+        out.push(head);
+        rest = tail;
     }
+    out
+}
 
-    // edge_index = [all src, all dst]; Python `reshape(2, num_edges)`.
-    let mut edge_index = edge_src;
-    edge_index.extend_from_slice(&edge_dst);
+/// Collate per-graph features into one disjoint packed graph, in PARALLEL.
+///
+/// The serial concatenation this replaces was ~90% of the featurization wall (it
+/// is memory-latency-bound: it gathers from ~`num_graphs` separately-allocated,
+/// cache-cold `GraphFeat`s). We instead size the output buffers up front from a
+/// serial prefix-sum of per-graph counts, carve each buffer into disjoint
+/// per-graph destination slices, then scatter every graph's data into its own
+/// slice across the rayon pool. Output bytes are identical to the serial form
+/// (gated by `tests/test_hexgt_feature_buffer.py`).
+pub(crate) fn collate(feats: &[GraphFeat]) -> CollatedFeatures {
+    let num_graphs = feats.len();
+
+    // Per-graph node base (exclusive prefix sum) — the only offset the scatter
+    // needs, to rebase each graph's local edge/candidate node indices into the
+    // packed numbering. Buffer positions are handled by `carve` below.
+    let mut node_offsets = Vec::with_capacity(num_graphs);
+    let mut node_acc = 0usize;
+    for g in feats {
+        node_offsets.push(node_acc as i64);
+        node_acc += g.num_nodes;
+    }
+    let num_nodes = node_acc;
+    let num_edges: usize = feats.iter().map(|g| g.edge_src.len()).sum();
+    let num_candidates: usize = feats.iter().map(|g| g.candidate_nodes.len()).sum();
+    let candidate_counts: Vec<usize> = feats.iter().map(|g| g.candidate_ids.len()).collect();
+
+    // Allocate the collated buffers once, at exact final size.
+    let mut node_feat = vec![0f32; num_nodes * NODE_FEATURE_DIM];
+    let mut node_type = vec![0i64; num_nodes];
+    let mut node_graph = vec![0i64; num_nodes];
+    // edge_index packs [all src .. , all dst ..] so Python recovers (2, E) with
+    // one reshape; split it into the two halves before carving per-graph slices.
+    let mut edge_index = vec![0i64; 2 * num_edges];
+    let mut edge_type = vec![0i64; num_edges];
+    let mut edge_attr = vec![0f32; num_edges * EDGE_ATTR_DIM];
+    let mut candidate_index = vec![0i64; num_candidates];
+    let mut candidate_graph = vec![0i64; num_candidates];
+    let mut candidate_ids = vec![0i64; num_candidates];
+
+    let (edge_src_buf, edge_dst_buf) = edge_index.split_at_mut(num_edges);
+    let mut node_feat_dst = carve(&mut node_feat, feats.iter().map(|g| g.num_nodes * NODE_FEATURE_DIM));
+    let mut node_type_dst = carve(&mut node_type, feats.iter().map(|g| g.num_nodes));
+    let mut node_graph_dst = carve(&mut node_graph, feats.iter().map(|g| g.num_nodes));
+    let mut edge_src_dst = carve(edge_src_buf, feats.iter().map(|g| g.edge_src.len()));
+    let mut edge_dst_dst = carve(edge_dst_buf, feats.iter().map(|g| g.edge_src.len()));
+    let mut edge_type_dst = carve(&mut edge_type, feats.iter().map(|g| g.edge_type.len()));
+    let mut edge_attr_dst = carve(&mut edge_attr, feats.iter().map(|g| g.edge_attr.len()));
+    let mut cand_index_dst = carve(&mut candidate_index, feats.iter().map(|g| g.candidate_nodes.len()));
+    let mut cand_graph_dst = carve(&mut candidate_graph, feats.iter().map(|g| g.candidate_nodes.len()));
+    let mut cand_ids_dst = carve(&mut candidate_ids, feats.iter().map(|g| g.candidate_ids.len()));
+
+    // Zip the per-graph destination slices into one handle per graph, so a single
+    // parallel pass fills every buffer (each graph touches only its own region).
+    let mut dsts: Vec<GraphDst<'_>> = node_feat_dst
+        .drain(..)
+        .zip(node_type_dst.drain(..))
+        .zip(node_graph_dst.drain(..))
+        .zip(edge_src_dst.drain(..))
+        .zip(edge_dst_dst.drain(..))
+        .zip(edge_type_dst.drain(..))
+        .zip(edge_attr_dst.drain(..))
+        .zip(cand_index_dst.drain(..))
+        .zip(cand_graph_dst.drain(..))
+        .zip(cand_ids_dst.drain(..))
+        .map(
+            |(((((((((nf, nt), ng), es), ed), et), ea), ci), cg), cid)| GraphDst {
+                node_feat: nf,
+                node_type: nt,
+                node_graph: ng,
+                edge_src: es,
+                edge_dst: ed,
+                edge_type: et,
+                edge_attr: ea,
+                candidate_index: ci,
+                candidate_graph: cg,
+                candidate_ids: cid,
+            },
+        )
+        .collect();
+
+    dsts.par_iter_mut()
+        .zip(feats.par_iter())
+        .zip(node_offsets.par_iter())
+        .enumerate()
+        .for_each(|(gid, ((dst, g), &node_offset))| {
+            let gid = gid as i64;
+            dst.node_feat.copy_from_slice(&g.node_feat);
+            dst.node_type.copy_from_slice(&g.node_type);
+            dst.node_graph.fill(gid);
+            for (out, &v) in dst.edge_src.iter_mut().zip(&g.edge_src) {
+                *out = v + node_offset;
+            }
+            for (out, &v) in dst.edge_dst.iter_mut().zip(&g.edge_dst) {
+                *out = v + node_offset;
+            }
+            dst.edge_type.copy_from_slice(&g.edge_type);
+            dst.edge_attr.copy_from_slice(&g.edge_attr);
+            for (out, &c) in dst.candidate_index.iter_mut().zip(&g.candidate_nodes) {
+                *out = c + node_offset;
+            }
+            dst.candidate_graph.fill(gid);
+            dst.candidate_ids.copy_from_slice(&g.candidate_ids);
+        });
 
     CollatedFeatures {
         node_feat,
@@ -227,7 +318,7 @@ pub(crate) fn collate(feats: &[GraphFeat]) -> CollatedFeatures {
         candidate_graph,
         candidate_ids,
         candidate_counts,
-        num_graphs: feats.len(),
+        num_graphs,
         num_nodes,
         num_edges,
         num_candidates,
