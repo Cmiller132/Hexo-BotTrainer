@@ -2370,16 +2370,20 @@ function renderTraining() {
   const history = status.history || {};
   const watchdog = status.watchdog || {};
   const calibration = status.calibration || {};
+  // Core run stats (always meaningful). The calibration/watchdog resource
+  // metrics are appended only when their source is actually present — runs that
+  // don't emit them (hexgt has no watchdog/calibration; current dense_cnn emits
+  // no watchdog) hide the metric instead of showing a dead "--".
   const statusMetrics = [
     summaryMetric("Stage", runStageLabel(status)),
     summaryMetric("Recent Games", firstPresent(history.games, histories.length)),
     summaryMetric("Epochs", epochs.length ? `${epochs[0]}-${epochs[epochs.length - 1]}` : "--"),
     summaryMetric("P0 / P1", `${firstPresent(history.p0_wins, p0Wins)} / ${firstPresent(history.p1_wins, p1Wins)}`),
     summaryMetric("Avg Len", formatDecimal(firstPresent(history.avg_length, averageHistoryLength(histories)), 1)),
-    summaryMetric("Selfplay", formatRate(calibration.selfplay_pos_s, "pos/s")),
-    summaryMetric("RAM Free", formatGib(watchdog.free_ram_gb)),
-    summaryMetric("GPU Free", formatGib(watchdog.gpu_free_gb)),
   ];
+  if (asFinite(calibration.selfplay_pos_s) !== null) statusMetrics.push(summaryMetric("Selfplay", formatRate(calibration.selfplay_pos_s, "pos/s")));
+  if (asFinite(watchdog.free_ram_gb) !== null) statusMetrics.push(summaryMetric("RAM Free", formatGib(watchdog.free_ram_gb)));
+  if (asFinite(watchdog.gpu_free_gb) !== null) statusMetrics.push(summaryMetric("GPU Free", formatGib(watchdog.gpu_free_gb)));
   const fallbackMetrics = latest && latest.summary
     ? Object.entries(latest.summary).slice(0, 4).map(([key, value]) => summaryMetric(key, value))
     : [summaryMetric("Artifacts", artifacts.length)];
