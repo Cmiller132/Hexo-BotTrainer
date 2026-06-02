@@ -6,8 +6,13 @@
 //!
 //! Candidate set (§4):
 //!   candidate_set = { empty cells in ANY active window of either player }      (A)
-//!                 ∪ { empty cells within hex-distance <= n of ANY stone }      (B)
-//! with `n` the single tunable radius (default 2, range [2, 8]).
+//!                 ∪ { empty cells within hex-distance <= n of ANY stone that
+//!                     are NOT "dead" }                                          (B)
+//! with `n` the single tunable radius (default 2, range [2, 8]). A radius-n cell
+//! is "dead" (and dropped) only when EVERY length-6 line through it is BLOCKED
+//! (contains both colors -> uncompletable); a cell on any active or open line is
+//! kept. Dead cells are useless moves; in practice they are rare (mostly dense
+//! endgames) and carry ~0 of a strong player's visit mass (validated).
 //!
 //! Tactical-window tokens (§5): the count-3/4/5 active windows of both colors.
 //!
@@ -61,6 +66,35 @@ fn coords_within_radius(center: HexCoord, radius: i16) -> Vec<HexCoord> {
         }
     }
     out
+}
+
+/// True when some length-6 line through `c` is ENTIRELY empty — i.e. `c` still
+/// has an OPEN/completable line and is NOT boxed in entirely by blocked (both-
+/// color, uncompletable) lines. Used by the n-radius dead-cell exclusion: a
+/// candidate is kept if it is in an active window OR has any open line; it is
+/// dropped only when every line through it is blocked. Scans the board directly
+/// (the three axes Q/R/QR), so it needs no canonical window keys.
+fn has_open_window(state: &RustHexoState, c: HexCoord) -> bool {
+    const WIN: i16 = 6; // length-6 windows (fixed game constant)
+    let board = state.board();
+    for axis in Axis::ALL {
+        let v = axis.vector();
+        // The six windows containing `c` along this axis place `c` at offset `o`
+        // (0..6); the window's cells are `c + (k - o) * v` for k in 0..6.
+        for o in 0..WIN {
+            let mut all_empty = true;
+            for k in 0..WIN {
+                if !board.is_cell_empty(c + v.scale(k - o)) {
+                    all_empty = false;
+                    break;
+                }
+            }
+            if all_empty {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// One count-3/4/5 active-window token (§5).
@@ -122,19 +156,30 @@ fn candidate_cells(state: &RustHexoState, n: i16) -> (Vec<HexCoord>, bool) {
     let mut set: std::collections::BTreeSet<(i16, i16)> = std::collections::BTreeSet::new();
 
     // (A) empty cells of every ACTIVE window (either color, any count >= 1).
+    let mut active_empty: std::collections::BTreeSet<(i16, i16)> = std::collections::BTreeSet::new();
     for entry in board.windows().entries() {
         if entry.is_active() {
             for cell in entry.empty_cells() {
-                set.insert((cell.q, cell.r));
+                active_empty.insert((cell.q, cell.r));
             }
         }
     }
-    // (B) empty cells within hex-distance n of any stone.
+    set.extend(active_empty.iter().copied());
+    // (B) empty cells within hex-distance n of any stone, EXCLUDING "dead" cells:
+    // a cell is dead when EVERY length-6 line through it is BLOCKED (both colors,
+    // uncompletable). Such a cell can never start or complete a line, so it is a
+    // useless move and dropped. It is KEPT if it is in an active window (already
+    // a live line) OR has any open/completable line (`has_open_window`).
     for &stone in board.occupied_cells() {
         for cell in coords_within_radius(stone, n) {
-            if board.is_cell_empty(cell) {
-                set.insert((cell.q, cell.r));
+            if !board.is_cell_empty(cell) {
+                continue;
             }
+            let key = (cell.q, cell.r);
+            if active_empty.contains(&key) || has_open_window(state, cell) {
+                set.insert(key);
+            }
+            // else: boxed in entirely by blocked lines -> dead -> dropped
         }
     }
 
