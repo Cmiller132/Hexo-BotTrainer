@@ -78,6 +78,13 @@ def main():
     ap.add_argument("--temperature-decay-moves", type=int, default=30)
     ap.add_argument("--temperature-floor", type=float, default=0.1)
     ap.add_argument("--forced-playout-k", type=float, default=2.0)
+    # MCTS nucleus widening. Defaults match configs/hexgt_model2.toml (documented
+    # intent) + dense_cnn's 96x8 run. The driver previously passed NONE of these,
+    # so they silently fell to the parse defaults (max_children=32), narrowing
+    # search vs the intended 96.
+    ap.add_argument("--widening-max-children", type=int, default=96)
+    ap.add_argument("--widening-min-children", type=int, default=2)
+    ap.add_argument("--widening-policy-mass", type=float, default=0.95)
     # Eval
     ap.add_argument("--eval-every", type=int, default=2)
     ap.add_argument("--eval-games", type=int, default=40)
@@ -116,6 +123,9 @@ def main():
             "temperature_decay_moves": args.temperature_decay_moves,
             "temperature_floor": args.temperature_floor,
             "forced_playout_k": args.forced_playout_k,
+            "widening_max_children": args.widening_max_children,
+            "widening_min_children": args.widening_min_children,
+            "widening_policy_mass": args.widening_policy_mass,
         },
     })
 

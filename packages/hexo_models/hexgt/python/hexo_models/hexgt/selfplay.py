@@ -30,6 +30,7 @@ turn), exactly as `expand.py` expects.
 
 from __future__ import annotations
 
+import statistics
 from dataclasses import dataclass, field
 from math import log
 from pathlib import Path
@@ -157,6 +158,9 @@ class SelfPlayResult:
     # Q1 decisiveness / game length.
     decisive_fraction: float = 0.0
     game_length_median: float = 0.0
+    game_length_mean: float = 0.0
+    game_length_max: int = 0
+    game_length_stdev: float = 0.0
     game_length_p95: float = 0.0
     # Q2 opening / move diversity.
     opening_unique_fraction: float = 0.0
@@ -192,6 +196,9 @@ class SelfPlayResult:
             # Q1 decisiveness
             "decisive_fraction": self.decisive_fraction,
             "game_length_median": self.game_length_median,
+            "game_length_mean": self.game_length_mean,
+            "game_length_max": self.game_length_max,
+            "game_length_stdev": self.game_length_stdev,
             "game_length_p95": self.game_length_p95,
             # Q2 diversity
             "opening_unique_fraction": self.opening_unique_fraction,
@@ -305,6 +312,15 @@ def run_selfplay_games(
     started = perf_counter()
     _OPENING_PLIES = 6
     _FORCED_THRESHOLD = 0.9
+    # Per-search-round counter feeding a DISTINCT seed into each MCTS batch. Using
+    # a fixed `base_seed + epoch` for every round (the old behavior) made the root
+    # Dirichlet noise + temperature sampling repeat across rounds — the native
+    # session derives per-root randomness from (seed, root_index), so a constant
+    # seed gives correlated noise across rounds and identical root noise for a game
+    # that keeps its batch index across moves, reducing self-play diversity. A
+    # per-round seed decorrelates both. Offset by 100_000 to stay clear of the
+    # per-game state-init seed range (base_seed + epoch*1e6 + game_index).
+    search_round = 0
 
     # Full-game .hxr record for the epoch (one file, all games), alongside the
     # .npz training shards. Written incrementally per finished game and closed
@@ -355,7 +371,7 @@ def run_selfplay_games(
                 visits=selfplay.search_visits,
                 c_puct=selfplay.c_puct,
                 temperature=selfplay.temperature,
-                seed=base_seed + epoch,
+                seed=base_seed + epoch * 1_000_000 + 100_000 + search_round,
                 virtual_batch_size=vbatch,
                 active_root_limit=selfplay.mcts_active_root_limit,
                 root_dirichlet_total_alpha=(
@@ -377,6 +393,7 @@ def run_selfplay_games(
                 forced_playout_k=selfplay.forced_playout_k,
                 move_temperatures=move_temperatures,
             )
+            search_round += 1
             mcts_search_elapsed += perf_counter() - search_started
             if len(searches) != len(playable):
                 raise RuntimeError(
@@ -515,6 +532,9 @@ def run_selfplay_games(
         mean_candidate_count=cand_count_sum / sp,
         decisive_fraction=completed_games / n_games,
         game_length_median=_percentile(game_lengths, 50),
+        game_length_mean=(sum(game_lengths) / len(game_lengths)) if game_lengths else 0.0,
+        game_length_max=max(game_lengths) if game_lengths else 0,
+        game_length_stdev=(statistics.pstdev(game_lengths) if len(game_lengths) > 1 else 0.0),
         game_length_p95=_percentile(game_lengths, 95),
         opening_unique_fraction=len(opening_counts) / n_games,
         opening_entropy=_counter_entropy(list(opening_counts.values())),

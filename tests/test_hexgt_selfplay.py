@@ -181,6 +181,34 @@ def test_hxr_record_holds_full_game_through_winning_move(tmp_path) -> None:
     assert str(getattr(t2.winner, "value", t2.winner)) == winner
 
 
+def test_selfplay_uses_distinct_seed_per_search_round(tmp_path, monkeypatch) -> None:
+    """Each MCTS batch in an epoch must get a DISTINCT seed so the root Dirichlet
+    noise + temperature sampling decorrelate across rounds (the native session
+    derives per-root randomness from (seed, root_index), so a constant per-epoch
+    seed correlates noise across rounds). Regression for the per-round-seed fix."""
+    _torch()
+    from hexo_models.hexgt import mcts as mcts_mod
+    from hexo_models.hexgt.selfplay import run_selfplay_games
+
+    seeds: list[int] = []
+    original_run = mcts_mod.HexgtMctsSession.run
+
+    def capture(self, *args, **kwargs):
+        seeds.append(kwargs.get("seed"))
+        return original_run(self, *args, **kwargs)
+
+    monkeypatch.setattr(mcts_mod.HexgtMctsSession, "run", capture)
+    cfg = _tiny_config()
+    model = _tiny_model(cfg)
+    run_selfplay_games(
+        model, cfg, num_games=2, output_dir=tmp_path, epoch=0,
+        device="cpu", fp16=False, base_seed=5, active_games=2, virtual_batch_size=2,
+    )
+    assert len(seeds) >= 2, f"expected multiple search rounds, got {len(seeds)}"
+    assert all(s is not None for s in seeds)
+    assert len(set(seeds)) == len(seeds), f"seeds must be distinct per round, got {seeds}"
+
+
 def test_selfplay_captures_example_traces(tmp_path) -> None:
     _torch()
     from hexo_models.hexgt.selfplay import run_selfplay_games
