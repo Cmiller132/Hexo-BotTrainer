@@ -88,7 +88,45 @@ F_SIDE_PHASE_ONEHOT = 16   # [16:19) side node: turn-phase one-hot (Opening/Firs
 F_SIDE_STONES_OWN = 19     # side node: own stone count (norm)
 F_SIDE_STONES_OPP = 20     # side node: opp stone count (norm)
 F_SIDE_MOVE_NUMBER = 21    # side node: move number (norm)
-# [22:32) reserved.
+
+# --- Tactical feature-set v2 (added into the reserved range; D6-INVARIANT) -----
+# Activated by FEATURE_SCHEMA_VERSION 2. These occupy slots [22:30) of the SAME
+# fixed NODE_FEATURE_DIM=32 vector, so the unified `node_in` projection keeps
+# shape (token_dim, 32): a checkpoint trained before v2 LOADS WITHOUT SHAPE
+# REJECTION, and the ZERO-INIT LAYER-EXPANSION (architecture.zero_init_expanded_
+# feature_columns) zeroes exactly these input-weight COLUMNS once at the
+# introducing resume so the model output is byte-identical to that checkpoint,
+# then learns them as training continues. Splitting candidate window counts by
+# owner+count generalizes F_CAND_NWIN_{OWN,OPP} (their per-count breakdown; the
+# three own bins sum to the own nwin count, likewise opp — gated by tests).
+#
+# D6-invariance: window counts through a cell are preserved by every D6 element
+# (windows/owners/counts map bijectively, the cell maps to its image); hex
+# distance is a D6 invariant; the placement flag is phase-derived (D6 fixes
+# phase). So all eight are invariant and the equivariance test holds unchanged.
+F_CAND_OWN_WIN3 = 22       # candidate: # active OWN count-3 windows through cell (norm)
+F_CAND_OWN_WIN4 = 23       # candidate: # active OWN count-4 windows through cell (norm)
+F_CAND_OWN_WIN5 = 24       # candidate: # active OWN count-5 windows through cell (norm)
+F_CAND_OPP_WIN3 = 25       # candidate: # active OPP count-3 windows through cell (norm)
+F_CAND_OPP_WIN4 = 26       # candidate: # active OPP count-4 windows through cell (norm)
+F_CAND_OPP_WIN5 = 27       # candidate: # active OPP count-5 windows through cell (norm)
+F_CAND_DIST_FIRST = 28     # candidate: hex-dist to THIS turn's first stone (0 on the
+                           #   turn's first placement) / COORD_SCALE (D6-invariant)
+F_SIDE_IS_SECOND = 29      # side node: 1.0 if the current placement is the turn's
+                           #   SECOND stone (phase == SecondStone), else 0.0
+# [30:32) reserved.
+
+# Feature schema version. Bumped whenever a NEW always-zero-until-now slot is
+# activated, so the RL resume path knows to zero-init its node_in columns ONCE
+# (checkpoints predating the bump report a lower version / none -> treated as 1).
+FEATURE_SCHEMA_VERSION = 2
+# The slots activated in v2 — the zero-init layer-expansion target (node_in input
+# columns to zero at the introducing resume). Order is irrelevant (a column set).
+NEW_FEATURE_SLOTS_V2 = (
+    F_CAND_OWN_WIN3, F_CAND_OWN_WIN4, F_CAND_OWN_WIN5,
+    F_CAND_OPP_WIN3, F_CAND_OPP_WIN4, F_CAND_OPP_WIN5,
+    F_CAND_DIST_FIRST, F_SIDE_IS_SECOND,
+)
 
 # --- Edge attributes (D6-invariant) -------------------------------------------
 # Per-edge feature vector: edge-type one-hot ++ endpoint hex-distance (invariant).

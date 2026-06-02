@@ -29,11 +29,19 @@ from .constants import (
     EDGE_TYPE_CANDIDATE_WINDOW,
     F_CAND_COMPLETE_OPP,
     F_CAND_COMPLETE_OWN,
+    F_CAND_DIST_FIRST,
     F_CAND_NWIN_OPP,
     F_CAND_NWIN_OWN,
+    F_CAND_OPP_WIN3,
+    F_CAND_OPP_WIN4,
+    F_CAND_OPP_WIN5,
+    F_CAND_OWN_WIN3,
+    F_CAND_OWN_WIN4,
+    F_CAND_OWN_WIN5,
     F_CENTER_DISTANCE,
     F_OWNER_OPP,
     F_OWNER_OWN,
+    F_SIDE_IS_SECOND,
     F_SIDE_MOVE_NUMBER,
     F_SIDE_PHASE_ONEHOT,
     F_SIDE_STONES_OPP,
@@ -111,6 +119,8 @@ def build_graph_tensors(facts: Mapping[str, Any]) -> GraphTensors:
     meta = facts.get("meta", {})
     placements = int(meta.get("placements", max(1, int(recency.max()) if n else 1)))
     phase_idx = int(meta.get("phase", 0))
+    # This turn's first-stone coord on the SECOND placement, else None (v2).
+    first_stone = meta.get("first_stone")
     denom_recency = float(max(1, placements))
 
     feat = np.zeros((n, NODE_FEATURE_DIM), dtype=np.float32)
@@ -136,6 +146,17 @@ def build_graph_tensors(facts: Mapping[str, Any]) -> GraphTensors:
     feat[np.arange(n)[is_win], F_WIN_COUNT_ONEHOT + win_idx[is_win]] = 1.0
     feat[is_win, F_WIN_EMPTY_CELLS] = wempty[is_win] / float(WINDOW_LEN)
 
+    # candidate distance to this turn's first stone (v2; D6-invariant). Left 0
+    # when there is no first stone yet (the turn's FIRST placement).
+    is_cand = node_type == NODE_TYPE_CANDIDATE
+    if first_stone is not None:
+        fq, fr = int(first_stone[0]), int(first_stone[1])
+        dq = nq - fq
+        dr = nr - fr
+        dd = -dq - dr
+        cdist = np.maximum(np.maximum(np.abs(dq), np.abs(dr)), np.abs(dd)).astype(np.float32)
+        feat[is_cand, F_CAND_DIST_FIRST] = cdist[is_cand] / COORD_SCALE
+
     # side node (index 0 by construction)
     side_nodes = np.nonzero(node_type == NODE_TYPE_SIDE)[0]
     stones_own = int(np.count_nonzero(is_stone & (owner == 0)))
@@ -145,6 +166,8 @@ def build_graph_tensors(facts: Mapping[str, Any]) -> GraphTensors:
         feat[s, F_SIDE_STONES_OWN] = stones_own / COUNT_SCALE
         feat[s, F_SIDE_STONES_OPP] = stones_opp / COUNT_SCALE
         feat[s, F_SIDE_MOVE_NUMBER] = placements / COUNT_SCALE
+        # v2: 1 when the current placement is the turn's SECOND stone.
+        feat[s, F_SIDE_IS_SECOND] = 1.0 if phase_idx == 2 else 0.0
 
     # edges
     edges = facts["edges"]
@@ -175,15 +198,33 @@ def build_graph_tensors(facts: Mapping[str, Any]) -> GraphTensors:
             cnt = wcount[wsrc]
             if own == 0:
                 feat[cdst, F_CAND_NWIN_OWN] += 1.0
+                # v2: per-count breakdown of the own active windows.
+                if cnt == 3:
+                    feat[cdst, F_CAND_OWN_WIN3] += 1.0
+                elif cnt == 4:
+                    feat[cdst, F_CAND_OWN_WIN4] += 1.0
+                elif cnt == 5:
+                    feat[cdst, F_CAND_OWN_WIN5] += 1.0
                 if cnt == 5:
                     feat[cdst, F_CAND_COMPLETE_OWN] = 1.0
             elif own == 1:
                 feat[cdst, F_CAND_NWIN_OPP] += 1.0
+                # v2: per-count breakdown of the opp active windows.
+                if cnt == 3:
+                    feat[cdst, F_CAND_OPP_WIN3] += 1.0
+                elif cnt == 4:
+                    feat[cdst, F_CAND_OPP_WIN4] += 1.0
+                elif cnt == 5:
+                    feat[cdst, F_CAND_OPP_WIN5] += 1.0
                 if cnt == 5:
                     feat[cdst, F_CAND_COMPLETE_OPP] = 1.0
-        # normalize the nwin counts
+        # normalize the nwin counts (+ the v2 per-count splits share the scale, so
+        # the three own bins sum to NWIN_OWN and the three opp bins to NWIN_OPP).
         feat[:, F_CAND_NWIN_OWN] /= COORD_SCALE
         feat[:, F_CAND_NWIN_OPP] /= COORD_SCALE
+        for _col in (F_CAND_OWN_WIN3, F_CAND_OWN_WIN4, F_CAND_OWN_WIN5,
+                     F_CAND_OPP_WIN3, F_CAND_OPP_WIN4, F_CAND_OPP_WIN5):
+            feat[:, _col] /= COORD_SCALE
 
     candidate_index = np.asarray(facts["candidate_nodes"], dtype=np.int64)
     candidate_ids = np.asarray(facts["candidate_ids"], dtype=np.int64)

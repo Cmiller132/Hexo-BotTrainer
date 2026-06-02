@@ -416,10 +416,18 @@ pub(crate) fn position_graph_to_py_dict(
         TurnPhase::FirstStone => 1,
         TurnPhase::SecondStone { .. } => 2,
     };
+    // This turn's first-stone coord on the SECOND placement (else None) — the
+    // Python featurizer needs it for F_CAND_DIST_FIRST (Rust gets it from the
+    // state directly). None on the turn's first placement.
+    let first_stone: Option<(i16, i16)> = match state.phase() {
+        TurnPhase::SecondStone { first } => Some((first.q, first.r)),
+        _ => None,
+    };
     meta.set_item("phase", phase_idx)?;
     meta.set_item("placements", state.placements_made())?;
     meta.set_item("current_player", state.current_player().index())?;
     meta.set_item("is_terminal", state.is_terminal())?;
+    meta.set_item("first_stone", first_stone)?;
     dict.set_item("meta", meta)?;
 
     let counts = PyDict::new(py);

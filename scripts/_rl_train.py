@@ -22,10 +22,12 @@ import time
 import traceback
 from pathlib import Path
 
+import numpy as np
 import torch
 
-from hexo_models.hexgt.architecture import HexgtNetwork
+from hexo_models.hexgt.architecture import HexgtNetwork, zero_init_expanded_feature_columns
 from hexo_models.hexgt.config import parse_hexgt_config
+from hexo_models.hexgt.constants import FEATURE_SCHEMA_VERSION
 from hexo_models.hexgt.selfplay import run_selfplay_games
 from hexo_models.hexgt.trainer import HexgtTrainer
 
@@ -68,6 +70,40 @@ def eval_missing(eval_dir, rl_epoch):
     return not eval_result_path(eval_dir, rl_epoch).exists()
 
 
+def select_window_epochs(current_epoch, epoch_positions, *, base_window, pool_cap):
+    """Recent epochs (newest->oldest) whose cumulative positions fit under
+    ``pool_cap``, always including at least ``base_window`` newest epochs. The
+    window GROWS over training up to the cap, then drops the oldest. The callable
+    ``epoch_positions(e)`` returns the position count of epoch ``e``. Returns
+    ``(sorted_epochs, total_positions)``.
+
+    RAM-safety by construction: this returns only an epoch LIST (the driver then
+    lists shard PATHS for them) — no shard CONTENTS are loaded here. The pool stays
+    disk-resident; the driver reads ONE ~group-sized batch of shards at a time at
+    train-read (expand -> train -> free), so peak RAM is bounded by one group +
+    model + optimizer, NOT by the (up to ``pool_cap``) pool. ``epoch_positions`` is
+    queried lazily once per candidate epoch and is expected to read only cheap
+    metadata (a one-line self-play summary, or shard ``num_rows`` headers)."""
+
+    epochs: list[int] = []
+    total = 0
+    for e in range(int(current_epoch), -1, -1):
+        pos = max(0, int(epoch_positions(e)))
+        within_floor = (current_epoch - e) < base_window
+        if epochs and not within_floor and total + pos > pool_cap:
+            break
+        epochs.append(e)
+        total += pos
+    return sorted(epochs), total
+
+
+def epoch_recency_weight(epoch, current_epoch, decay):
+    """Geometric recency weight ``decay^(current_epoch - epoch)``: the newest epoch
+    weighs 1.0, one epoch old ``decay``, two ``decay^2`` … so sampling shards
+    proportional to it over-represents recent self-play and decays old games out."""
+    return float(decay) ** max(0, int(current_epoch) - int(epoch))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--bc-seed", default="/mnt/e/Hexo-BotTrainer-hexgt/runs/hexgt_bc/hexgt_bc_step006009.pt")
@@ -86,7 +122,14 @@ def main():
     ap.add_argument("--batch", type=int, default=128)
     ap.add_argument("--lr", type=float, default=2.0e-4)
     ap.add_argument("--warmup", type=int, default=200)
-    ap.add_argument("--replay-window-epochs", type=int, default=8)
+    ap.add_argument("--replay-window-epochs", type=int, default=8)  # MINIMUM window (floor)
+    # Recency-weighted, cap-bounded replay (KataGo-style). The window grows beyond
+    # the floor to include as many recent epochs as fit under --replay-pool-cap
+    # positions (dropping the oldest); shards are sampled PROPORTIONAL to
+    # decay^(age_in_epochs), so recent epochs are over-represented and old ones
+    # decay out. RAM stays bounded by ONE shard group (pool is disk-resident).
+    ap.add_argument("--replay-recency-decay", type=float, default=0.9)
+    ap.add_argument("--replay-pool-cap", type=int, default=500_000)
     ap.add_argument("--group-size", type=int, default=30)
     ap.add_argument("--n", type=int, default=3)
     # Self-play exploration config (the ablation-chosen knobs).
@@ -168,6 +211,19 @@ def main():
         seed_desc = (f"SEED from {Path(args.bc_seed).name} (step={ck.get('step')}"
                      f"{', rl_epoch=' + str(ck['rl_epoch']) if 'rl_epoch' in ck else ''})")
 
+    # ZERO-INIT LAYER-EXPANSION (one-time): a checkpoint predating the current
+    # feature schema (no/lower feature_schema_version) carries random, never-
+    # trained node_in columns for the newly-activated slots. Zero them so the
+    # FIRST forward after resume is byte-identical to that checkpoint; the next
+    # save stamps the current version, so later resumes skip this. Gated on the
+    # ABSOLUTE version in the checkpoint, so the supervisor's fixed relaunch
+    # command can't re-zero already-learned columns.
+    loaded_fsv = int(ck.get("feature_schema_version", 1))
+    if loaded_fsv < FEATURE_SCHEMA_VERSION:
+        zeroed = zero_init_expanded_feature_columns(model)
+        seed_desc += (f" + ZERO-INIT feature-expansion v{loaded_fsv}->v{FEATURE_SCHEMA_VERSION} "
+                      f"(zeroed {len(zeroed)} node_in cols {zeroed})")
+
     nparams = sum(p.numel() for p in model.parameters())
     opt = torch.optim.AdamW(model.parameters(), lr=cfg.training.learning_rate, weight_decay=cfg.training.weight_decay)
     trainer = HexgtTrainer(model=model, config=cfg, optimizer=opt)
@@ -197,16 +253,56 @@ def main():
             "model": model.state_dict(), "optimizer": opt.state_dict(),
             "train_state": trainer.train_state.to_dict(), "arch": arch_meta,
             "step": trainer.train_state.global_step, "rl_epoch": rl_epoch,
+            "feature_schema_version": FEATURE_SCHEMA_VERSION,
         }
         torch.save(payload, ckpt_dir / f"hexgt_rl_{tag}.pt")
         torch.save(payload, ckpt_dir / "hexgt_rl_latest.pt")
 
-    def replay_window(current_epoch):
-        lo = max(0, current_epoch - args.replay_window_epochs + 1)
-        shards = []
-        for e in range(lo, current_epoch + 1):
-            shards += sorted(selfplay_dir.glob(f"epoch_{e:06d}_game_*.npz"))
-        return shards
+    _epoch_pos_cache: dict[int, int] = {}
+
+    def epoch_positions(e):
+        """Position count for epoch ``e`` (memoized). Prefers the one-file self-play
+        summary (``searched_positions``); falls back to summing shard ``num_rows``
+        headers. Only COMPLETED epochs are queried (self-play finishes before the
+        train step), so the count is stable and safe to cache. Reads only metadata
+        — never shard contents — so the pool stays disk-resident."""
+        if e in _epoch_pos_cache:
+            return _epoch_pos_cache[e]
+        n = 0
+        spj = eval_dir / f"epoch_{e:06d}_selfplay.json"
+        if spj.exists():
+            try:
+                with open(spj) as f:
+                    n = int(json.load(f).get("searched_positions") or 0)
+            except Exception:
+                n = 0
+        if not n:
+            for sh in selfplay_dir.glob(f"epoch_{e:06d}_game_*.npz"):
+                try:
+                    with np.load(sh) as z:
+                        n += int(z["num_rows"])
+                except Exception:
+                    pass
+        _epoch_pos_cache[e] = n
+        return n
+
+    def build_replay_window(current_epoch):
+        """Recency-weighted, cap-bounded replay window for ``current_epoch``.
+        Returns ``(shards, weights, epochs, total_pos)`` where ``weights[i]`` is the
+        recency weight of ``shards[i]``'s epoch (the driver samples groups
+        proportional to these). Holds only PATHS + floats — no shard data."""
+        epochs, total = select_window_epochs(
+            current_epoch, epoch_positions,
+            base_window=args.replay_window_epochs, pool_cap=args.replay_pool_cap,
+        )
+        shards: list = []
+        weights: list = []
+        for e in epochs:
+            w = epoch_recency_weight(e, current_epoch, args.replay_recency_decay)
+            for sh in sorted(selfplay_dir.glob(f"epoch_{e:06d}_game_*.npz")):
+                shards.append(sh)
+                weights.append(w)
+        return shards, weights, epochs, total
 
     def run_eval(rl_epoch):
         # Lazy import keeps the dense_cnn eval deps off the hot path.
@@ -341,18 +437,17 @@ def main():
             with open(eval_dir / f"epoch_{rl_epoch:06d}_examples.json", "w") as ex_fh:
                 json.dump(sp.example_games, ex_fh)
 
-            # --- 2) train over the replay window --------------------------------
+            # --- 2) train over the recency-weighted, cap-bounded replay window ---
             model.train()
-            window = replay_window(rl_epoch)
-            rng.shuffle(window)
+            shards, weights, win_epochs, pool_pos = build_replay_window(rl_epoch)
             target = trainer.train_state.global_step + args.train_steps_per_epoch
             comp_sum = {}; comp_n = 0; tr_t0 = time.perf_counter()
-            wi = 0
-            while trainer.train_state.global_step < target and window:
-                group = window[wi:wi + args.group_size]
-                if not group:
-                    rng.shuffle(window); wi = 0; continue
-                wi += args.group_size
+            while trainer.train_state.global_step < target and shards:
+                # Sample a group of shards PROPORTIONAL to recency weight (with
+                # replacement). Each group is loaded, expanded, trained, and freed
+                # before the next, so peak RAM is bounded by ONE group (not the
+                # disk-resident pool).
+                group = rng.choices(shards, weights=weights, k=args.group_size)
                 hist = trainer.train_on_shards(group, batch_size=args.batch,
                                                max_steps=target - trainer.train_state.global_step)
                 for h in hist:
@@ -363,10 +458,13 @@ def main():
             def avg(k):
                 return comp_sum.get(k, float("nan")) / comp_n if comp_n else float("nan")
             ms_per = (time.perf_counter() - tr_t0) / max(1, comp_n) * 1000
+            span = f"{win_epochs[0]}-{win_epochs[-1]}" if win_epochs else "-"
             log(f"epoch {rl_epoch} train: {comp_n} steps (step={trainer.train_state.global_step}) "
                 f"total={avg('total'):.4f} policy={avg('policy'):.4f} value={avg('value'):.4f} "
                 f"opp={avg('opp_policy'):.4f} prune={trainer.prune_rate:.1%} {ms_per:.0f}ms/step "
-                f"window={len(window)} shards", fh)
+                f"window={len(win_epochs)}ep[{span}] {len(shards)}sh "
+                f"pool~{pool_pos // 1000}k/{args.replay_pool_cap // 1000}k "
+                f"decay={args.replay_recency_decay}", fh)
 
             # --- 3) checkpoint ---------------------------------------------------
             save(f"epoch{rl_epoch:06d}", rl_epoch); last_save = rl_epoch

@@ -29,6 +29,7 @@ from torch import nn
 
 from .constants import (
     EDGE_ATTR_DIM,
+    NEW_FEATURE_SLOTS_V2,
     NODE_FEATURE_DIM,
     NODE_TYPE_CANDIDATE,
     NODE_TYPE_SIDE,
@@ -304,3 +305,33 @@ class HexgtNetwork(nn.Module):
         node_type = batch.get("node_type")
         if validate_range and node_type is not None and node_type.numel() and bool(((node_type < 0) | (node_type >= NUM_NODE_TYPES)).any().item()):
             raise ValueError("node_type out of range")
+
+
+def zero_init_expanded_feature_columns(
+    model: HexgtNetwork, slots: tuple[int, ...] = NEW_FEATURE_SLOTS_V2
+) -> list[int]:
+    """ZERO-INIT LAYER-EXPANSION for newly-activated node-feature slots.
+
+    hexgt routes every node type through ONE shared input projection
+    (``model.node_in``); a feature lives in a fixed COLUMN of that projection's
+    first ``Linear``. When a previously-always-zero slot is activated (feature
+    schema bump), the column's weights still hold their original random init
+    (they got zero gradient while the input was always 0). Zeroing exactly those
+    columns makes the projection — and therefore the whole forward — produce
+    output IDENTICAL to the pre-expansion checkpoint on the first step after
+    resume, while leaving every trained weight untouched; training then learns
+    the new features from zero. The matching optimizer moments are already ~0
+    (zero past gradient), so no optimizer surgery is needed.
+
+    Call this ONCE, right after loading a pre-expansion checkpoint's weights (the
+    RL resume path gates it on the checkpoint's feature-schema version). Returns
+    the zeroed column indices (for logging / tests).
+    """
+
+    first_linear = model.node_in[0]
+    in_features = first_linear.weight.shape[1]
+    valid = [int(s) for s in slots if 0 <= int(s) < in_features]
+    with torch.no_grad():
+        for slot in valid:
+            first_linear.weight[:, slot].zero_()
+    return valid
