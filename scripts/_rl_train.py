@@ -39,6 +39,27 @@ def log(msg, fh=None):
         fh.write(line + "\n"); fh.flush()
 
 
+# KataGo-style short-term-value (EMA) auxiliary heads. Horizon h uses the EMA of
+# future ROOT values with decay lambda = h/(h+1) (effective look-ahead h moves,
+# see dense_cnn.samples._short_term_value_targets — the shared, proven target).
+# Training-only aux heads (with_aux); they never touch the search/play forward, so
+# enabling them leaves policy/value output identical. NEW-SAMPLES-ONLY: the root-
+# value trajectory isn't persisted, so targets ramp in over post-deploy epochs.
+STV_HORIZONS = (4, 12, 24)
+
+
+def _validate_stv_resume_load(load_info) -> None:
+    """strict=False load is used so the NEW short-term-value heads can be fresh-
+    init while the trunk + policy/value/opp_policy load EXACTLY. Guard that the
+    ONLY thing missing from the checkpoint is stv-head params, and nothing in the
+    checkpoint went unused — so a real trunk/key mismatch can't slip through."""
+    unexpected = list(load_info.unexpected_keys)
+    nonstv_missing = [k for k in load_info.missing_keys if not k.startswith("short_term_value_heads")]
+    if unexpected or nonstv_missing:
+        raise RuntimeError(
+            f"STV resume load mismatch: unexpected={unexpected} non-stv-missing={nonstv_missing}")
+
+
 def build_model(arch_meta, device):
     return HexgtNetwork(
         token_dim=arch_meta["token_dim"], gnn_layers=arch_meta["gnn_layers"],
@@ -176,7 +197,8 @@ def main():
 
     cfg = parse_hexgt_config({
         "device": str(device),
-        "architecture": {"candidate_radius": args.n},
+        "architecture": {"candidate_radius": args.n,
+                         "short_term_value_horizons": list(STV_HORIZONS)},
         "training": {"learning_rate": args.lr, "warmup_steps": args.warmup, "batch_size": args.batch},
         "selfplay": {
             "search_visits": args.visits, "max_actions": args.max_actions,
@@ -196,20 +218,31 @@ def main():
     # --- model: resume from RL latest if present, else seed from BC -----------
     latest = ckpt_dir / "hexgt_rl_latest.pt"
     start_epoch = 0
+    # STV GRAFT: force the short-term-value horizons on (overriding a checkpoint
+    # built with []), build the model WITH the 3 aux heads, and load strict=False
+    # so the trunk + policy/value/opp_policy load EXACTLY while the new stv heads
+    # keep fresh init. _validate_stv_resume_load guards that ONLY stv-head params
+    # were missing. The stv heads are aux (with_aux), so policy/value/play output
+    # is identical at resume; only the training loss gains the stvalue_* terms.
     if latest.exists():
         ck = torch.load(latest, map_location=device, weights_only=False)
-        model = build_model(ck["arch"], device)
-        model.load_state_dict(ck["model"])
-        arch_meta = ck["arch"]
+        arch_meta = dict(ck["arch"])
+        arch_meta["short_term_value_horizons"] = list(STV_HORIZONS)
+        model = build_model(arch_meta, device)
+        _validate_stv_resume_load(model.load_state_dict(ck["model"], strict=False))
         start_epoch = int(ck.get("rl_epoch", 0)) + 1
-        seed_desc = f"RESUME from {latest.name} (rl_epoch={ck.get('rl_epoch')}, step={ck.get('step')})"
+        had_stv = bool(tuple(ck["arch"].get("short_term_value_horizons", ())))
+        seed_desc = (f"RESUME from {latest.name} (rl_epoch={ck.get('rl_epoch')}, step={ck.get('step')})"
+                     + ("" if had_stv else f" + GRAFT STV-heads {STV_HORIZONS} (fresh-init, aux-only)"))
     else:
         ck = torch.load(args.bc_seed, map_location=device, weights_only=False)
-        arch_meta = ck["arch"]
+        arch_meta = dict(ck["arch"])
+        arch_meta["short_term_value_horizons"] = list(STV_HORIZONS)
         model = build_model(arch_meta, device)
-        model.load_state_dict(ck["model"])
+        _validate_stv_resume_load(model.load_state_dict(ck["model"], strict=False))
         seed_desc = (f"SEED from {Path(args.bc_seed).name} (step={ck.get('step')}"
-                     f"{', rl_epoch=' + str(ck['rl_epoch']) if 'rl_epoch' in ck else ''})")
+                     f"{', rl_epoch=' + str(ck['rl_epoch']) if 'rl_epoch' in ck else ''})"
+                     f" + STV-heads {STV_HORIZONS}")
 
     # ZERO-INIT LAYER-EXPANSION (one-time): a checkpoint predating the current
     # feature schema (no/lower feature_schema_version) carries random, never-
