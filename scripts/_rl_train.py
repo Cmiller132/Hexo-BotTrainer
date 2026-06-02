@@ -51,6 +51,23 @@ def chunks(seq, size):
         yield seq[i:i + size]
 
 
+def eval_due(rl_epoch, eval_every, total_epochs):
+    """Is an eval scheduled at this ABSOLUTE epoch? Keyed off the absolute epoch
+    (not a resume-relative counter) so a restart can never shift the schedule."""
+    return (rl_epoch % eval_every == 0) or (rl_epoch == total_epochs - 1)
+
+
+def eval_result_path(eval_dir, rl_epoch):
+    return Path(eval_dir) / f"epoch_{rl_epoch:06d}_eval.json"
+
+
+def eval_missing(eval_dir, rl_epoch):
+    """An eval is 'missing' if its result JSON was never written (e.g. a restart
+    killed the process mid-eval). The JSON is written only after the eval fully
+    completes, so its absence is the authoritative 'not done' marker."""
+    return not eval_result_path(eval_dir, rl_epoch).exists()
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--bc-seed", default="/mnt/e/Hexo-BotTrainer-hexgt/runs/hexgt_bc/hexgt_bc_step006009.pt")
@@ -255,6 +272,23 @@ def main():
         model.train()
         return results
 
+    def do_eval(rl_epoch):
+        """Run the periodic eval for `rl_epoch`, write its result JSON, and log it.
+        Shared by the in-loop scheduler and the resume backfill so a restart never
+        skips a due eval."""
+        ev = run_eval(rl_epoch)
+        with open(eval_result_path(eval_dir, rl_epoch), "w") as ev_fh:
+            json.dump(ev, ev_fh, indent=2)
+        vd = ev.get("vs_dense_cnn_e24", {})
+        msg = (f"epoch {rl_epoch} EVAL vs dense_cnn e24: "
+               f"{vd.get('wins')}W/{vd.get('losses')}L/{vd.get('draws')}D "
+               f"= {vd.get('win_rate', float('nan')):.1%} (visits={args.eval_visits}, games={args.eval_games})")
+        if "vs_sealbot" in ev:
+            vs = ev["vs_sealbot"]
+            msg += (f" | vs SealBot: {vs.get('wins')}W/{vs.get('losses')}L/{vs.get('draws')}D "
+                    f"= {vs.get('win_rate', float('nan')):.1%}")
+        log(f">>> {msg}", fh)
+
     last_save = None
     try:
         # Pre-training BC-seed baseline at the exact eval settings -> the anchor
@@ -273,6 +307,14 @@ def main():
                 bmsg += (f" | vs SealBot: {bs.get('wins')}W/{bs.get('losses')}L/{bs.get('draws')}D "
                          f"= {bs.get('win_rate', float('nan')):.1%}")
             log(bmsg, fh)
+
+        # Resume eval-safety: if we resumed PAST an epoch whose eval was due but
+        # never completed (e.g. a restart killed the process mid-eval), run it now
+        # rather than skipping ahead — so a restart never drops a scheduled eval.
+        prev = start_epoch - 1
+        if prev >= 0 and eval_due(prev, args.eval_every, args.epochs) and eval_missing(eval_dir, prev):
+            log(f"resume: backfilling missing eval for epoch {prev} (was due, no result on disk)", fh)
+            do_eval(prev)
 
         for rl_epoch in range(start_epoch, args.epochs):
             ep_t0 = time.perf_counter()
@@ -329,20 +371,9 @@ def main():
             # --- 3) checkpoint ---------------------------------------------------
             save(f"epoch{rl_epoch:06d}", rl_epoch); last_save = rl_epoch
 
-            # --- 4) periodic eval ------------------------------------------------
-            if (rl_epoch % args.eval_every == 0) or (rl_epoch == args.epochs - 1):
-                ev = run_eval(rl_epoch)
-                with open(eval_dir / f"epoch_{rl_epoch:06d}_eval.json", "w") as ev_fh:
-                    json.dump(ev, ev_fh, indent=2)
-                vd = ev.get("vs_dense_cnn_e24", {})
-                msg = (f"epoch {rl_epoch} EVAL vs dense_cnn e24: "
-                       f"{vd.get('wins')}W/{vd.get('losses')}L/{vd.get('draws')}D "
-                       f"= {vd.get('win_rate', float('nan')):.1%} (visits={args.eval_visits}, games={args.eval_games})")
-                if "vs_sealbot" in ev:
-                    vs = ev["vs_sealbot"]
-                    msg += (f" | vs SealBot: {vs.get('wins')}W/{vs.get('losses')}L/{vs.get('draws')}D "
-                            f"= {vs.get('win_rate', float('nan')):.1%}")
-                log(f">>> {msg}", fh)
+            # --- 4) periodic eval (absolute-epoch schedule) ----------------------
+            if eval_due(rl_epoch, args.eval_every, args.epochs):
+                do_eval(rl_epoch)
 
             log(f"epoch {rl_epoch} done in {(time.perf_counter()-ep_t0)/60:.1f} min", fh)
         log(f"=== hexgt RL DONE (through epoch {last_save}) ===", fh)
