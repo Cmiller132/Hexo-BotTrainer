@@ -379,3 +379,39 @@ own* chunk's forward):
   bet, validate in BC/RL eval.
 - Raise `forward_pad_budget` (VRAM is at ~15 % of the 12 GB cap).
 
+---
+
+# Part 3 — headroom-tuning sweep (concurrency + pad-budget): NO change warranted
+
+With the optimizations in, the spare RAM/VRAM headroom raised the question: does a
+higher `active_games` (more in-flight games) or a bigger `forward_pad_budget`
+(fatter GPU forwards) now buy throughput? Swept at 512 sims, real positions,
+`scripts/_sweep_active.py` (2 repeats/config; results were stable — best==median):
+
+| active | vbatch | pad_budget | pos/s | VRAM reserved | nvidia-smi | RSS | GPU% |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| **64** | 64 | **200k** | **13.2** | 1.8 GB | 2.7 GB | 3.0 GB | 67 |
+| 64 | 64 | 600k | 13.3 | 3.0 GB | 3.9 GB | 3.2 GB | 71 |
+| 96 | 64 | 600k | 10.8 | 3.9 GB | 4.7 GB | 3.9 GB | 72 |
+| 128 | 64 | 600k | 9.2 | 5.1 GB | 5.8 GB | 4.2 GB | 73 |
+| 128 | 96 | 1000k | 9.3 | 5.1 GB | 5.8 GB | 4.5 GB | 73 |
+| 192 | 64 | 1000k | 8.6 | 5.6 GB | 6.3 GB | 5.4 GB | 74 |
+
+**Verdict: keep `active_games=64` and the default `forward_pad_budget` (200k).**
+- **active > 64 is strictly worse** — pos/s falls monotonically (64→13.2, 96→10.8,
+  128→9.2, 192→8.6, a ~35 % loss at 192). GPU util only creeps 67→74 %, i.e. the
+  GPU is *not* batch-starved at active=64; extra games add per-round chunk +
+  padding overhead that grows faster than any GPU-feeding benefit. The earlier
+  "active=64 optimal" finding **still holds after** the parallel-featurize +
+  pipeline fixes (the hypothesis that the GPU could now absorb more in-flight
+  games is refuted by measurement).
+- **Bigger pad-budget is neutral** (64: 200k→600k = 13.2→13.3, noise) while ~2×
+  the VRAM — at active=64 the chunks already fit, so the budget was never the
+  binding constraint. Throughput here is bound by the 512-sim GPU-forward FLOPs
+  per position, not by batch fullness or VRAM. The headroom is real but not
+  convertible to throughput at this operating point.
+
+The `forward_pad_budget` knob (`HEXGT_FORWARD_PAD_BUDGET` env / constructor arg)
+is kept for future regimes (e.g. a much larger model, or if a later change makes
+the forward batch-starved), defaulting to the measured-optimal 200k.
+

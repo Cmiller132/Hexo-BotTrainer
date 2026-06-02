@@ -26,8 +26,10 @@ from .losses import decode_binned_value, segment_log_softmax
 
 # Default per-chunk padded-candidate budget (graphs_in_chunk * chunk_max_cand).
 # The transformer's peak VRAM is ~linear in this product (~12 B/slot for the 168/
-# 336 trunk), so ~200k slots ≈ ~2.5 GB/chunk — comfortable on a 12 GB card while
-# keeping chunks fat enough to saturate the GPU. Tunable via the constructor.
+# 336 trunk), so ~200k slots ≈ ~2.5 GB/chunk. A LARGER budget means fewer, fatter
+# GPU forwards (higher util/throughput) at the cost of more VRAM + padding waste,
+# so size it to the available headroom. Tunable via the constructor or the
+# HEXGT_FORWARD_PAD_BUDGET env var (the run launcher sets it to exploit headroom).
 DEFAULT_FORWARD_PAD_BUDGET = 200_000
 
 
@@ -114,13 +116,19 @@ class HexgtInference:
         *,
         device: str | torch.device = "cuda",
         fp16: bool = True,
-        forward_pad_budget: int = DEFAULT_FORWARD_PAD_BUDGET,
+        forward_pad_budget: int | None = None,
         pin_host_transfer: bool = True,
         pin_min_numel: int = DEFAULT_PIN_MIN_NUMEL,
     ) -> None:
         self.device = torch.device(device)
         self.fp16 = bool(fp16) and self.device.type == "cuda"
         self.model = model.to(self.device).eval()
+        # Resolve the chunk pad-budget: explicit arg > HEXGT_FORWARD_PAD_BUDGET env
+        # > module default. Lets the run launcher dial it to the VRAM headroom
+        # without threading a new arg through every construction site.
+        if forward_pad_budget is None:
+            env_budget = os.environ.get("HEXGT_FORWARD_PAD_BUDGET")
+            forward_pad_budget = int(env_budget) if env_budget else DEFAULT_FORWARD_PAD_BUDGET
         self.forward_pad_budget = int(forward_pad_budget)
         # Env override lets the knob be A/B-profiled without code changes.
         env_pin = os.environ.get("HEXGT_PIN_HOST")
