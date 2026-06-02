@@ -110,6 +110,11 @@ def main():
     # L1 (vs frozen BC seed) + L2 (holdout)
     ap.add_argument("--l1-games", type=int, default=60)
     ap.add_argument("--l1-visits", type=int, default=96)
+    # Slight opening variety decorrelates the L1 games -> smoother win rate (the
+    # games are otherwise near-identical under greedy + fixed seeds). Per-game
+    # seeded, so still repeatable across epochs (valid paired comparison).
+    ap.add_argument("--l1-opening-moves", type=int, default=10)
+    ap.add_argument("--l1-opening-temperature", type=float, default=0.6)
     ap.add_argument("--bc-seed", default="/mnt/e/Hexo-BotTrainer-hexgt/runs/hexgt_bc/hexgt_bc_step006009.pt")
     ap.add_argument("--holdout-glob", default="/mnt/e/Hexo-BotTrainer/runs/dense_cnn_model1_target_96x8/selfplay/epoch_000022_game_*.npz")
     ap.add_argument("--holdout-shards", type=int, default=60)
@@ -153,7 +158,9 @@ def main():
         model.forward_policy_value = torch.compile(model.forward_policy_value, dynamic=True)
         # frozen reference stays EAGER: a 2nd inductor workspace would duplicate
         # VRAM for a model only used in the periodic L1 eval.
-    frozen_searcher = HexgtBatchedSearcher(frozen, cfg_l1, device=str(device), fp16=(device.type == "cuda"), visits=args.l1_visits)
+    frozen_searcher = HexgtBatchedSearcher(frozen, cfg_l1, device=str(device), fp16=(device.type == "cuda"),
+                                           visits=args.l1_visits, opening_moves=args.l1_opening_moves,
+                                           opening_temperature=args.l1_opening_temperature)
 
     def _free():
         # Release each phase's cached CUDA pool so self-play / train / L1 peaks do
@@ -205,7 +212,9 @@ def main():
             tr = {k: csum[k] / cn for k in csum} if cn else {}
             # L1: current (compiled) vs frozen BC seed
             model.eval()
-            cur_searcher = HexgtBatchedSearcher(model, cfg_l1, device=str(device), fp16=(device.type == "cuda"), visits=args.l1_visits)
+            cur_searcher = HexgtBatchedSearcher(model, cfg_l1, device=str(device), fp16=(device.type == "cuda"),
+                                                visits=args.l1_visits, opening_moves=args.l1_opening_moves,
+                                                opening_temperature=args.l1_opening_temperature)
             l1 = run_head_to_head_parallel(cur_searcher, frozen_searcher, games=args.l1_games,
                                            base_seed=9000, max_actions=1024, active_limit=args.active)
             model.train()

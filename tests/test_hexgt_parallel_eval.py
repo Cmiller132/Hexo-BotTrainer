@@ -91,3 +91,27 @@ def test_parallel_concurrency_cap_invariant(tmp_path) -> None:
     r_small = play(2)
     assert (r_full.wins, r_full.losses, r_full.draws) == (r_small.wins, r_small.losses, r_small.draws)
     assert r_full.mean_turns == r_small.mean_turns
+
+
+def test_opening_variety_is_repeatable(tmp_path) -> None:
+    """Opening sampling decorrelates games but stays REPEATABLE (same seeds ->
+    same result), so it remains a valid paired eval across epochs."""
+
+    _torch()
+    from hexo_models.hexgt.evaluation import HexgtBatchedSearcher, run_head_to_head_parallel
+
+    cfg, model = _cfg_and_model()
+    visits = cfg.selfplay.search_visits
+    kw = dict(games=6, base_seed=21, max_actions=30)
+
+    def play():
+        sa = HexgtBatchedSearcher(model, cfg, device="cpu", fp16=False, visits=visits,
+                                  opening_moves=6, opening_temperature=0.8)
+        sb = HexgtBatchedSearcher(model, cfg, device="cpu", fp16=False, visits=visits,
+                                  opening_moves=6, opening_temperature=0.8)
+        return run_head_to_head_parallel(sa, sb, **kw)
+
+    r1 = play()
+    r2 = play()
+    assert (r1.wins, r1.losses, r1.draws) == (r2.wins, r2.losses, r2.draws), "opening variety must be repeatable"
+    assert r1.mean_turns == r2.mean_turns

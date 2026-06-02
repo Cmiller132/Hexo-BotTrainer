@@ -127,29 +127,43 @@ class BatchedSearcher(Protocol):
     `reset` clears all state between matches.
     """
 
-    def search_batch(self, keys: Sequence[int], states: Sequence[object], *, seed: int) -> list[int]: ...
+    def search_batch(self, keys: Sequence[int], states: Sequence[object], *, seed: int, plies: Sequence[int] | None = None) -> list[int]: ...
     def discard(self, key: int) -> None: ...
     def reset(self) -> None: ...
 
 
 class HexgtBatchedSearcher:
-    """Batched deterministic hexgt searcher backed by ONE persistent native
-    session (subtree reuse across rounds). Uses the SAME search settings as the
-    deterministic `HexgtPlayer` (greedy, NO Dirichlet, NO forced playouts), so a
-    parallel match reproduces the sequential one — only the GPU batch composition
-    differs, which a deterministic forward + greedy selection are invariant to."""
+    """Batched hexgt searcher backed by ONE persistent native session (subtree
+    reuse across rounds). Greedy + NO Dirichlet by default, so a parallel match
+    reproduces the sequential one (batch composition is invariant under a
+    deterministic forward + greedy selection).
 
-    def __init__(self, model: Any, config: HexgtConfig, *, device: str, fp16: bool, visits: int) -> None:
+    OPENING VARIETY (optional): for the first `opening_moves` plies it samples the
+    action at `opening_temperature` instead of greedy. This decorrelates the
+    eval games (pure-greedy on fixed seeds replays near-identical lines, so the
+    win rate is lumpy); the sampling is per-(round,game) seeded so it stays
+    REPEATABLE across epochs (a valid paired comparison) and independent of GPU
+    batch composition. Greedy resumes after the opening, so the bulk of each game
+    still measures skill, not noise."""
+
+    def __init__(self, model: Any, config: HexgtConfig, *, device: str, fp16: bool, visits: int,
+                 opening_moves: int = 0, opening_temperature: float = 0.0) -> None:
         self.config = config
         self.visits = int(visits)
+        self.opening_moves = int(opening_moves)
+        self.opening_temperature = float(opening_temperature)
         self.inference = HexgtInference(model, device=device, fp16=fp16)
         self.session = new_mcts_session(
             max_states=config.selfplay.mcts_session_cache_max_states,
             n=config.architecture.candidate_radius,
         )
 
-    def search_batch(self, keys: Sequence[int], states: Sequence[object], *, seed: int) -> list[int]:
+    def search_batch(self, keys: Sequence[int], states: Sequence[object], *, seed: int,
+                     plies: Sequence[int] | None = None) -> list[int]:
         sp = self.config.selfplay
+        move_temps: list[float] | None = None
+        if self.opening_moves > 0 and self.opening_temperature > 0.0 and plies is not None:
+            move_temps = [self.opening_temperature if int(p) < self.opening_moves else 0.0 for p in plies]
         results = self.session.run(
             list(keys), list(states), self.inference,
             visits=self.visits, c_puct=sp.c_puct, temperature=0.0, seed=seed,
@@ -157,6 +171,7 @@ class HexgtBatchedSearcher:
             root_policy_temperature=sp.root_policy_temperature, fpu_reduction=sp.fpu_reduction,
             virtual_loss=sp.virtual_loss, widening_policy_mass=sp.widening_policy_mass,
             widening_max_children=sp.widening_max_children, widening_min_children=sp.widening_min_children,
+            move_temperatures=move_temps,
         )
         return [int(r.action_id) for r in results]
 
@@ -195,6 +210,7 @@ def run_head_to_head_parallel(
     a_keys: set[int] = set()
     b_keys: set[int] = set()
     active: list[dict[str, Any]] = []
+    round_idx = 0  # per-round seed offset -> reproducible opening sampling
 
     while next_game < games or active:
         while len(active) < limit and next_game < games:
@@ -242,12 +258,14 @@ def run_head_to_head_parallel(
             if not grp:
                 continue
             actions = searcher.search_batch(
-                [g["i"] for g in grp], [g["state"] for g in grp], seed=base_seed
+                [g["i"] for g in grp], [g["state"] for g in grp],
+                seed=base_seed + round_idx, plies=[g["plies"] for g in grp],
             )
             for g, act in zip(grp, actions):
                 engine.apply_action(g["state"], engine.PlacementAction(unpack_coord_id(act)))
                 g["plies"] += 1
                 keyset.add(g["i"])
+        round_idx += 1
 
     return HeadToHeadResult(
         games=games, completed=completed, wins=wins, losses=losses, draws=draws,
