@@ -151,8 +151,15 @@ def main():
     trainer = HexgtTrainer(model=model, config=cfg, optimizer=opt)
     if (not args.no_compile) and device.type == "cuda":
         model.forward_policy_value = torch.compile(model.forward_policy_value, dynamic=True)
-        frozen.forward_policy_value = torch.compile(frozen.forward_policy_value, dynamic=True)
+        # frozen reference stays EAGER: a 2nd inductor workspace would duplicate
+        # VRAM for a model only used in the periodic L1 eval.
     frozen_searcher = HexgtBatchedSearcher(frozen, cfg_l1, device=str(device), fp16=(device.type == "cuda"), visits=args.l1_visits)
+
+    def _free():
+        # Release each phase's cached CUDA pool so self-play / train / L1 peaks do
+        # not STACK (each phase reuses freed memory instead of allocating on top).
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
 
     holdout_rows = []
     import glob as _glob
@@ -176,6 +183,7 @@ def main():
             sp = run_selfplay_games(model, cfg, num_games=args.games_per_epoch, output_dir=sp_dir, epoch=ep,
                                     device=str(device), fp16=(device.type == "cuda"), base_seed=2000 + ep * 6361,
                                     active_games=args.active, virtual_batch_size=args.vbatch, collect_examples=2)
+            _free()
             # train over the recent replay window (this run's own shards)
             model.train()
             lo = max(0, ep - args.replay_window_epochs + 1)

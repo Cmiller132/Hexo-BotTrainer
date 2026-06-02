@@ -23,13 +23,97 @@ from .graph_build import batch_from_states
 from .losses import decode_binned_value, segment_log_softmax
 
 
+# Default per-chunk padded-candidate budget (graphs_in_chunk * chunk_max_cand).
+# The transformer's peak VRAM is ~linear in this product (~12 B/slot for the 168/
+# 336 trunk), so ~200k slots ≈ ~2.5 GB/chunk — comfortable on a 12 GB card while
+# keeping chunks fat enough to saturate the GPU. Tunable via the constructor.
+DEFAULT_FORWARD_PAD_BUDGET = 200_000
+
+
+def _plan_chunks(counts: torch.Tensor, budget: int) -> list[torch.Tensor]:
+    """Partition graph ids into chunks (each a LongTensor of ids), SORTED by
+    candidate count so a chunk pads only to its LOCAL max, and bounded so
+    ``len(chunk) * chunk_max_cand <= budget``. This is the compression: a global
+    batch is ~22% packing-efficient (a few endgame graphs force huge padding);
+    sorted chunks are ~90%+, and the budget caps peak VRAM regardless of how many
+    leaves MCTS submits."""
+
+    order = torch.argsort(counts)
+    cs = counts[order].tolist()  # ascending -> cs[i] is the running chunk max
+    bounds = []
+    start = 0
+    for i in range(len(cs)):
+        ln = i - start + 1
+        if ln > 1 and ln * cs[i] > budget:
+            bounds.append((start, i))
+            start = i
+    bounds.append((start, len(cs)))
+    # Candidate-count sorting decides chunk MEMBERSHIP (group similar sizes), but
+    # each chunk's ids are returned ASCENDING: the model's per-graph layout
+    # (`_padded_index`) requires nodes in contiguous ascending-graph-id blocks,
+    # which the original collation guarantees and a 0-based remap of an ascending
+    # id subset preserves.
+    return [order[a:b].sort().values for a, b in bounds]
+
+
+def _subbatch(batch: dict, gids: torch.Tensor) -> tuple[dict, torch.Tensor]:
+    """Extract a self-contained sub-batch for the graphs in `gids` (re-indexed to
+    0-based). Returns (sub_batch, candidate_mask) where candidate_mask selects the
+    sub-batch's candidates from the full candidate array (in original order), so
+    per-candidate outputs scatter straight back. Graphs are independent, so the
+    sub-batch forward is bit-identical to the same graphs in the full batch."""
+
+    device = batch["node_feat"].device
+    ng = int(batch["num_graphs"])
+    gset = torch.zeros(ng, dtype=torch.bool, device=device)
+    gset[gids] = True
+    remap = torch.full((ng,), -1, dtype=torch.long, device=device)
+    remap[gids] = torch.arange(gids.numel(), device=device)
+
+    ngph = batch["node_graph"]
+    nsel = gset[ngph]
+    node_map = torch.full((ngph.numel(),), -1, dtype=torch.long, device=device)
+    node_map[nsel] = torch.arange(int(nsel.sum()), device=device)
+
+    sub: dict = {
+        "node_feat": batch["node_feat"][nsel],
+        "node_type": batch["node_type"][nsel],
+        "node_graph": remap[ngph[nsel]],
+        "num_graphs": int(gids.numel()),
+    }
+    ei = batch["edge_index"]
+    if ei.numel():
+        esel = nsel[ei[0]]  # an edge sits within one graph -> src selected <=> dst selected
+        sub["edge_index"] = node_map[ei[:, esel]]
+        sub["edge_type"] = batch["edge_type"][esel]
+        sub["edge_attr"] = batch["edge_attr"][esel]
+    else:
+        sub["edge_index"] = ei
+        sub["edge_type"] = batch.get("edge_type")
+        sub["edge_attr"] = batch.get("edge_attr")
+
+    cg = batch["candidate_graph"]
+    csel = gset[cg]
+    sub["candidate_index"] = node_map[batch["candidate_index"][csel]]
+    sub["candidate_graph"] = remap[cg[csel]]
+    return sub, csel
+
+
 class HexgtInference:
     """Batched torch evaluator for live engine states."""
 
-    def __init__(self, model: torch.nn.Module, *, device: str | torch.device = "cuda", fp16: bool = True) -> None:
+    def __init__(
+        self,
+        model: torch.nn.Module,
+        *,
+        device: str | torch.device = "cuda",
+        fp16: bool = True,
+        forward_pad_budget: int = DEFAULT_FORWARD_PAD_BUDGET,
+    ) -> None:
         self.device = torch.device(device)
         self.fp16 = bool(fp16) and self.device.type == "cuda"
         self.model = model.to(self.device).eval()
+        self.forward_pad_budget = int(forward_pad_budget)
 
     def _to_device(self, batch: dict) -> dict:
         out = {}
@@ -39,10 +123,34 @@ class HexgtInference:
 
     @torch.no_grad()
     def forward_batch(self, batch: dict) -> dict[str, torch.Tensor]:
+        """Forward returning RAW per-candidate policy logits + per-graph value, in
+        the batch's original candidate/graph order. When the padded size would
+        exceed the budget, the forward is split into sorted, bounded chunks
+        (compression: ~4x less wasted padding + capped peak VRAM); each graph is
+        independent so the reassembled output is identical to a single forward."""
+
         batch = self._to_device(batch)
+        num_graphs = int(batch["num_graphs"])
         with torch.autocast(device_type=self.device.type, dtype=torch.float16, enabled=self.fp16):
-            out = self.model.forward_policy_value(batch)
-        return out, batch
+            if num_graphs <= 1:
+                return self.model.forward_policy_value(batch), batch
+            cg = batch["candidate_graph"]
+            counts = torch.bincount(cg, minlength=num_graphs)
+            padded = int(counts.max()) * num_graphs
+            if padded <= self.forward_pad_budget:
+                return self.model.forward_policy_value(batch), batch
+            # Chunked path: sorted, budget-bounded sub-batches.
+            chunks = _plan_chunks(counts, self.forward_pad_budget)
+            policy = torch.empty(cg.numel(), device=self.device, dtype=torch.float32)
+            value: torch.Tensor | None = None
+            for gids in chunks:
+                sub, csel = _subbatch(batch, gids)
+                out = self.model.forward_policy_value(sub)
+                policy[csel] = out["policy"].float()
+                if value is None:
+                    value = torch.empty((num_graphs, out["value"].shape[-1]), device=self.device, dtype=torch.float32)
+                value[gids] = out["value"].float()
+        return {"policy": policy, "value": value}, batch
 
     @torch.no_grad()
     def evaluate_featurized_batch(self, payload: dict) -> dict[str, Any]:
