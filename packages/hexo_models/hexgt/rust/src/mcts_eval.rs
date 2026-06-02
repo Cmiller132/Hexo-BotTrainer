@@ -29,7 +29,7 @@ use hexo_engine::{pack_coord, HexoState as RustHexoState, PackedCoord};
 use hexo_utils::{hash_state, StateHash};
 
 use super::constants::HEXGT_EVAL_CHUNK_STATES;
-use super::features::{collated_to_py_dict, featurize_collate_states};
+use super::features::{collated_to_py_dict, featurize_collate_states, CollatedFeatures};
 
 #[derive(Clone, Debug)]
 pub(crate) struct RustEvaluation {
@@ -137,8 +137,43 @@ pub(crate) struct RustEvaluationRequest<'a> {
     pub(crate) state_hash: StateHash,
 }
 
-/// Evaluate a chunk of unique leaf states: build graph-facts -> Python forward ->
+/// Depth of the featurize<->forward pipeline: how many leaf chunks may be
+/// featurized ahead of the GPU forward. 2 = double-buffering (the next chunk is
+/// featurized on a worker thread while the current chunk runs on the GPU), which
+/// hides featurization behind the forward at a bounded extra-memory cost. Larger
+/// depths rarely help once featurization fits inside one forward. Tunable via
+/// `HEXGT_EVAL_PIPELINE_DEPTH` for profiling.
+fn eval_pipeline_depth() -> usize {
+    std::env::var("HEXGT_EVAL_PIPELINE_DEPTH")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&d| d >= 1)
+        .unwrap_or(2)
+}
+
+/// Max unique leaves featurized + forwarded per pipeline chunk. Defaults to
+/// `HEXGT_EVAL_CHUNK_STATES`; overridable via the same-named env var for tuning
+/// and for tests that exercise the multi-chunk pipeline with small batches.
+fn eval_chunk_states() -> usize {
+    std::env::var("HEXGT_EVAL_CHUNK_STATES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&c| c >= 1)
+        .unwrap_or(HEXGT_EVAL_CHUNK_STATES)
+}
+
+/// Evaluate a batch of unique leaf states: featurize -> Python/Torch forward ->
 /// parse per-candidate priors. `n` is the candidate radius (move vocabulary).
+///
+/// Concurrency model: featurization (`build_graph` + node featurize + collate) is
+/// pure Rust and rayon-parallel, while the forward holds the GIL and is GPU-bound.
+/// For multi-chunk batches we run them as a software PIPELINE: a worker thread
+/// featurizes chunk N+1 (GIL-free) while this GIL-holding thread runs chunk N's
+/// forward + parse, so the GPU is not stalled waiting on the CPU featurizer (and
+/// vice-versa). The worker NEVER touches Python — only the consumer builds the
+/// payload dict and calls the evaluator — so this avoids the per-chunk GIL
+/// hand-off that previously collapsed throughput (HEXGT_DECISIONS Phase-5d): the
+/// GIL stays on one thread, and rayon featurization runs alongside it.
 fn evaluate_state_refs_uncached(
     py: Python<'_>,
     evaluator: &Bound<'_, PyAny>,
@@ -146,35 +181,71 @@ fn evaluate_state_refs_uncached(
     n: i16,
     stats: Option<&SharedEvaluationStats>,
 ) -> PyResult<Vec<RustEvaluation>> {
-    if states.len() > HEXGT_EVAL_CHUNK_STATES {
-        let mut evaluations = Vec::with_capacity(states.len());
-        for chunk in states.chunks(HEXGT_EVAL_CHUNK_STATES) {
-            evaluations.extend(evaluate_states_chunk(py, evaluator, chunk, n, stats)?);
-        }
-        return Ok(evaluations);
+    let chunk_size = eval_chunk_states();
+    // Single chunk: nothing to overlap, featurize + consume inline.
+    if states.len() <= chunk_size {
+        let collated = featurize_leaf_chunk(states, n, stats);
+        return consume_featurized_chunk(py, evaluator, collated, states, stats);
     }
-    evaluate_states_chunk(py, evaluator, states, n, stats)
+
+    let chunks: Vec<&[&RustHexoState]> = states.chunks(chunk_size).collect();
+    let chunks_ref = &chunks;
+    let mut evaluations = Vec::with_capacity(states.len());
+    std::thread::scope(|scope| -> PyResult<()> {
+        // Bounded channel = backpressure: the featurizer runs at most `depth`
+        // chunks ahead, capping the queued-features memory.
+        let (tx, rx) = std::sync::mpsc::sync_channel::<(usize, CollatedFeatures)>(eval_pipeline_depth());
+        scope.spawn(move || {
+            for (index, chunk) in chunks_ref.iter().enumerate() {
+                let collated = featurize_leaf_chunk(chunk, n, stats);
+                if tx.send((index, collated)).is_err() {
+                    break; // consumer hit an error and dropped the receiver
+                }
+            }
+        });
+        for expected in 0..chunks_ref.len() {
+            let (index, collated) = rx
+                .recv()
+                .expect("hexgt eval featurizer thread terminated before sending all chunks");
+            debug_assert_eq!(index, expected, "pipelined eval chunks must arrive in order");
+            let chunk_states = chunks_ref[index];
+            evaluations.extend(consume_featurized_chunk(py, evaluator, collated, chunk_states, stats)?);
+        }
+        Ok(())
+    })?;
+    Ok(evaluations)
 }
 
-fn evaluate_states_chunk(
-    py: Python<'_>,
-    evaluator: &Bound<'_, PyAny>,
+/// PRODUCER half: featurize + collate one chunk of unique leaves (pure Rust,
+/// rayon-parallel, GIL-free). Records the featurization (encoding) time.
+fn featurize_leaf_chunk(
     states: &[&RustHexoState],
     n: i16,
     stats: Option<&SharedEvaluationStats>,
-) -> PyResult<Vec<RustEvaluation>> {
+) -> CollatedFeatures {
     let encoding_started = Instant::now();
-    // Featurize + collate the whole leaf batch IN RUST (rayon across graphs:
-    // build_graph + D6-invariant featurization + disjoint-graph collation),
-    // emitted to Python as zero-copy buffers it just frombuffer+forwards. This
-    // replaces the former per-graph Python featurization (the ~88% bottleneck,
-    // HEXGT_DECISIONS Phase-5c). The GIL is released for the rayon work.
-    // NOTE: do NOT release the GIL here. This callback runs inside the MCTS
-    // select<->eval pipeline (which is itself driven across rayon threads); a
-    // py.detach() per chunk triggers GIL hand-off contention that collapsed
-    // throughput ~9x. featurize_collate_states still parallelizes the per-graph
-    // featurization across rayon internally (pure-Rust workers need no GIL).
-    let mut collated = featurize_collate_states(states, n);
+    let collated = featurize_collate_states(states, n);
+    if let Some(stats) = stats {
+        let mut s = lock_stats(stats);
+        s.evaluator_chunks += 1;
+        s.encoded_states += states.len();
+        s.max_chunk_states = s.max_chunk_states.max(states.len());
+        s.encoding_seconds += encoding_started.elapsed().as_secs_f64();
+    }
+    collated
+}
+
+/// CONSUMER half: pack the featurized chunk into the zero-copy payload, run the
+/// Python/Torch forward, and parse per-candidate priors back to `RustEvaluation`
+/// (legality intersect + descending sort + normalize). Holds the GIL.
+fn consume_featurized_chunk(
+    py: Python<'_>,
+    evaluator: &Bound<'_, PyAny>,
+    mut collated: CollatedFeatures,
+    states: &[&RustHexoState],
+    stats: Option<&SharedEvaluationStats>,
+) -> PyResult<Vec<RustEvaluation>> {
+    let payload_started = Instant::now();
     // The candidate ids/CSR row lengths stay Rust-side: priors come back in the
     // same packed candidate order, so we zip positionally with no id round-trip.
     let candidate_ids: Vec<PackedCoord> = std::mem::take(&mut collated.candidate_ids)
@@ -185,11 +256,7 @@ fn evaluate_states_chunk(
     let num_candidates = collated.num_candidates;
     let payload = collated_to_py_dict(py, collated, false)?;
     if let Some(stats) = stats {
-        let mut s = lock_stats(stats);
-        s.evaluator_chunks += 1;
-        s.encoded_states += states.len();
-        s.max_chunk_states = s.max_chunk_states.max(states.len());
-        s.encoding_seconds += encoding_started.elapsed().as_secs_f64();
+        lock_stats(stats).payload_seconds += payload_started.elapsed().as_secs_f64();
     }
 
     let evaluator_started = Instant::now();
