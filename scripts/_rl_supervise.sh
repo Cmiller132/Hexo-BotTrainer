@@ -49,7 +49,26 @@ rm -f "$DONE"
       echo "[$(date -u +%FT%TZ)] WARN free RAM ${fg}GB < ${MIN_FREE_RAM_GB}GB" >> "$SUPLOG"
     sleep 20
   done ) & WATCH_PID=$!
-trap 'rm -f "$LOCK"; kill $WATCH_PID 2>/dev/null' EXIT
+
+# Dashboard bridge watchdog: keep the read-only :8080 mirror bridge alive for the
+# LIFE OF THE RUN. The bridge is a CHILD of this persistent supervisor (not a
+# transient wsl.exe relay), so it survives any dispatch session ending — fixing
+# the recurring "bridge keeps dying" problem; this loop also restarts it within
+# ~30s if it exits. Single-instance: it only launches when no _dashboard_bridge.py
+# is already running, so it never double-writes the mirror. Inherits the
+# supervisor's PYTHONPATH/venv so the bridge's imports resolve.
+BRIDGE_SCRIPT="$ROOT/_dashboard_bridge.py"; BRIDGE_WATCH_PID=""
+if [[ -f "$BRIDGE_SCRIPT" ]]; then
+  ( while :; do
+      if ! pgrep -f "_dashboard_bridge.py" >/dev/null 2>&1; then
+        echo "[$(date -u +%FT%TZ)] (re)starting dashboard bridge" >> "$RUNDIR/bridge.log"
+        "$PY" -u "$BRIDGE_SCRIPT" >> "$RUNDIR/bridge.log" 2>&1 &
+      fi
+      sleep 30
+    done ) & BRIDGE_WATCH_PID=$!
+  log "bridge watchdog started (pid=$BRIDGE_WATCH_PID -> $BRIDGE_SCRIPT)"
+fi
+trap 'rm -f "$LOCK"; kill $WATCH_PID $BRIDGE_WATCH_PID 2>/dev/null; pkill -f "_dashboard_bridge.py" 2>/dev/null' EXIT
 
 rl_epoch(){ # highest completed rl_epoch from epoch checkpoints, else -1
   local f; f=$(ls -1 "$CKPTS"/hexgt_rl_epoch*.pt 2>/dev/null | sort -V | tail -1)
