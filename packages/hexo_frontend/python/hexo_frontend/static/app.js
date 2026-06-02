@@ -2939,6 +2939,16 @@ function epochProgressRow(item) {
     selfplayText += ` | len μ${formatDecimal(lenMean, 1)} med ${formatDecimal(lenMed, 0)}`
       + ` max ${asFinite(selfplay.game_length_max) ?? "--"} σ${formatDecimal(selfplay.game_length_stdev, 1)}`;
   }
+  // Replay-buffer + training stats (appended when the producer emits the nested
+  // `buffer` object; omitted otherwise, so dense_cnn runs are unaffected).
+  const buf = selfplay.buffer || null;
+  if (buf) {
+    const k = (n) => (asFinite(n) === null ? "--" : `${Math.round(Number(n) / 1000)}k`);
+    selfplayText += ` | buf ${k(buf.samples)}/${k(buf.cap)}`
+      + ` (${asFinite(buf.window_epochs) ?? "--"}ep ${escapeText(buf.window_span ?? "")}) decay ${formatDecimal(buf.decay, 2)}`
+      + ` | train ${asFinite(buf.train_steps) ?? "--"}st×${asFinite(buf.train_batch) ?? "--"}=${k(buf.train_samples_per_epoch)}/ep`
+      + ` loss t${formatDecimal(buf.loss_total, 3)} p${formatDecimal(buf.loss_policy, 3)} v${formatDecimal(buf.loss_value, 3)}`;
+  }
   const trainText = (training.loss !== undefined && training.loss !== null)
     ? `loss ${formatDecimal(training.loss, 3)} | C ${formatPercent(classicalReplayFraction(training))} | P@1 ${formatPercent(policyTop1(training))}`
     : training.progress
