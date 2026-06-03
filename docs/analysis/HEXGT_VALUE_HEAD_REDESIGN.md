@@ -3,6 +3,315 @@
 Design / analysis only. **No code, config, or model files are changed by this
 document, and nothing here runs training or touches any live/stopped run.**
 
+---
+
+# ⚠️ CRITICAL RE-EXAMINATION (2026-06-03) — read this first
+
+> **This section is a skeptical stress-test added on top of the original analysis
+> below. Where it disagrees with §0–§8, THIS SECTION SUPERSEDES THEM.** The original
+> recommendation ("ship trunk-fusion **B** + PMA readout **A** together as the
+> headline") was constructive-by-default and **overstated the SIDE-token bottleneck
+> and the dual-stream case.** The mandate this pass is to be willing to conclude *"the
+> premise is partly wrong."* It partly is. Nothing below is deleted; the parts now
+> known to be weak are flagged inline and in §0–§8 are to be treated as **superseded by
+> this section**.
+
+## TL;DR headline
+
+1. **The SIDE-token bottleneck is NOT isolated and is probably OVER-WEIGHTED relative
+   to the three causes already on the table** (distribution collapse, coarse threat
+   features, label saturation). The measured value blindness (`v≈+0.8` before losing,
+   `v(A)+v(B)≈+0.82`) is **fully explained** by the documented self-play
+   distribution collapse + anti-calibration + ±1 hard labels
+   (`HEXGT_DEFENSE_DEEP_ANALYSIS.md` HEADLINE, §5, ADDENDUM) **without needing the
+   readout to be the cause at all.** And the readout is **already not** SIDE-only — it
+   is shipped `[SIDE | mean | max]`. The owner's framing is aimed at a head that *also
+   already has the pool*.
+
+2. **The value head does NOT need a dedicated dual-stream readout over "both the GNN
+   and the transformer."** The data flow (verified, `architecture.py:262-270`) is
+   **GNN → transformer-over-GNN-outputs, sequentially.** The transformer *consumes* the
+   GNN node embeddings (its input `h` is the GNN output) and is **residual**
+   (`architecture.py:172-174, 180-182`), so the post-transformer embeddings the readout
+   already reads **already integrate the local typed GNN features AND global
+   attention.** Pooling the pre-transformer GNN states *in addition* is **largely
+   redundant.** Option C as a separate intervention is **rejected.**
+
+3. **"Truly reason about the board" is a category error for a value head.** A value
+   head is a one-shot positional **evaluator**, not a sequential reasoner. The
+   "if I don't block, they win there" lookahead is the job of **MCTS + the TSS depth-1
+   leaf override** that is already planned. The correct, *limited* bar for the head is:
+   *integrate all relevant local+global features into a well-calibrated, threat-aware
+   SCALAR.* Re-architecting the head to "reason" is **over-engineering the head to do
+   search's job.**
+
+4. **The ONE structural lever with strong, same-domain grounding is KataGo-style
+   global-context fusion into the TRUNK (Option B / SE).** Everything else
+   (PMA readout, +GNN depth, value-token-over-candidates) is **speculative** — plausible
+   capacity arguments, no evidence it is the binding constraint here. **B is the only
+   structural change worth a restart slot, and even B should be gated behind the cheap
+   already-planned fixes proving insufficient first.**
+
+**Bottom line:** *The high-confidence plan is: ship the already-planned soft-Z +
+v3 threat features + TSS + exploration-restore FIRST as the control, MEASURE, and only
+then — if a structural gap remains — add **SE-style trunk fusion (B)**. Mean+max + the
+planned fixes is plausibly adequate; the SIDE-token redesign is a speculative bet that
+has not been isolated. Do not build A+B+C together. Do not build a dual-stream readout.*
+
+---
+
+## CR-1. Is the SIDE-token bottleneck a REAL, ISOLATED problem — or overblown?
+
+**Both sides, honestly.**
+
+**The case that it IS a real bottleneck (steelman):**
+- The shipped readout's only *learnable* whole-board view, before the pool was added,
+  was a single SIDE token (`_graph_readout`, `architecture.py:272-282`). The literature
+  is explicit that **a single-vector readout is a genuine information bottleneck for
+  SPARSE, LOCALIZED, multi-instance signals** — global pooling into one descriptor lets
+  "quieter but important events get overshadowed," and the CLS attention "becomes
+  diffuse in later layers" (audio multi-label probing work, Sources). "Is there a lone
+  opponent ≥4 window among 200+ nodes" is *exactly* a sparse-localized signal. So the
+  steelman is not nothing.
+- The SIDE-hub asymmetry is real and verified: SIDE updates only via context
+  self-attention (`architecture.py:170-174`) and never cross-attends to candidate
+  tokens (`architecture.py:177-182` — candidates query context, not the reverse). The
+  candidate→candidate "double threat" relationship has no direct path to the value
+  readout except via window tokens and the GNN's *mean*-aggregated CONTEXT edge
+  (`architecture.py:99`).
+
+**The case that it is OVERBLOWN (the skeptical verdict, and the stronger case):**
+- **(i) Single-token CLS readouts work fine GIVEN ENOUGH DEPTH/HEADS — BERT, ViT.**
+  CLS-token classification is the *default* and is strong for *global/semantic*
+  targets; the bottleneck literature only bites for *sparse-localized multi-label*
+  readout. Whether Hexo value is "diffuse global" (material/tempo — CLS fine) or
+  "sparse localized" (a lone unblockable window — CLS struggles) is **an empirical
+  question nobody has measured.** And critically: **the head is no longer SIDE-only.**
+  `max`-pool is *precisely* the sparse-existence detector the CLS bottleneck lacks
+  (`max_i h_i[c]` fires iff some node lights channel `c` — original §2.1). So the one
+  thing the single-token readout was bad at (existence of a lone threat) is **already
+  covered by the shipped max-pool.** This substantially deflates the steelman.
+- **(ii) The cause has NOT been isolated — it is fully confounded with three other
+  causes that ARE evidenced.** `HEXGT_DEFENSE_DEEP_ANALYSIS.md` attributes the *entire*
+  failure to **distribution collapse** (games shorten 59→37, 100% decisive, midgame
+  played near-greedily at temp 0.2 → defensive structures never generated → OOD →
+  anti-calibrated value, §5/§B/§#4) plus **±1 hard labels** driving value to the
+  extremes (ADDENDUM: `v(A)+v(B)=+0.82`, *never* strongly negative — a label/optimism
+  artifact, not obviously a readout-capacity artifact). That doc explicitly ranks
+  **capacity LAST** ("the net is confidently *wrong*, not *uncertain* →
+  distribution/calibration, not raw capacity"; "value fits its training targets fine —
+  loss 0.58"). **A model that fits its training targets at loss 0.58 is not
+  representation-starved on the training distribution** — which directly undercuts "the
+  readout cannot represent defense." The readout-capacity story and the
+  distribution/label story predict the *same* symptom, so the symptom **cannot
+  distinguish them.** Attributing the failure to the SIDE token is currently an
+  *assumption*, not a finding.
+
+**How to ACTUALLY isolate it (do this BEFORE any readout redesign):**
+1. **Linear-probe recoverability.** On a fixed dataset of real positions (the eval
+   `.hxr` set used in the defense analysis), freeze the current trunk and train a
+   *linear* probe to predict "∃ active opponent ≥4 window" (cheap label via
+   `F_CAND_OPP_THREAT`, `constants.py:132`) from **(a)** the SIDE token embedding vs
+   **(b)** the mean+max pool vs **(c)** raw pooled node embeddings. *If the probe
+   recovers the threat from the pool at high AUC, the information is THERE and the
+   readout is not the bottleneck — the head just isn't using it, which a few epochs of
+   training or soft-Z fixes, not a new module.* This is the single most decisive cheap
+   experiment and it requires **zero architecture change.**
+2. **Attention-weight inspection.** Dump the SIDE token's context-self-attention
+   weights (`ctx_attn`, `architecture.py:171`) on the 8/8 lost positions. Does SIDE
+   attend to the dangerous window token at all? If yes, the path exists and the problem
+   is downstream (label/calibration); if no, that is direct evidence for the readout
+   asymmetry.
+3. **Fixed-dataset readout bake-off.** On a frozen featurized dataset, train *only*
+   different readout heads (SIDE-only / mean+max / PMA) on the *same* trunk and targets;
+   compare value Brier on the opponent-hot slice. Isolates readout capacity from
+   trunk and from self-play dynamics.
+
+**VERDICT (CR-1):** **OVERBLOWN relative to the distribution / label / feature causes.**
+The bottleneck is *plausible* (the asymmetry and the sparse-signal literature are real)
+but **un-isolated**, and the shipped max-pool already covers its worst-named weakness
+(lone-threat existence). The evidence in hand (fits training targets at 0.58; failure
+is OOD anti-calibration; capacity ranked last by the diagnosis doc) points away from the
+readout as the binding constraint. **Treat "SIDE-token bottleneck" as an unproven
+hypothesis to be isolated by probe (CR-1.1), not a justification to rebuild the head.**
+
+---
+
+## CR-2. Does the value head need BOTH the GNN and the transformer? — NO (data flow proves it)
+
+**The data flow, verified and quoted.** `_encode_nodes` (`architecture.py:252-270`):
+
+```
+# architecture.py:262-263  — GNN runs FIRST
+for layer in self.gnn:
+    h = layer(h, edge_index, edge_type, edge_attr)
+...
+# architecture.py:268-269  — transformer runs over the GNN OUTPUT h
+for layer in self.transformer:
+    h = layer(h, layout)
+return h                     # post-transformer embeddings ONLY
+```
+
+The transformer's input is `h`, the **GNN output**. It is **sequential GNN → transformer**,
+not two parallel streams. And every transformer update is **residual**:
+`ctx = norm(ctx + attn(...))` then `ctx = norm(ctx + ffn(ctx))`
+(`architecture.py:172-173`), likewise the candidate path (`:180-181`). So the final
+embeddings the readout already consumes are `GNN_features + attention_refinement` — they
+**already contain the local typed GNN content** plus global attention. **A dual-stream
+readout that *additionally* pools the pre-transformer GNN states is therefore
+re-reading information the post-transformer embeddings already carry.**
+
+The *only* way dual-stream adds signal is if the 3 residual transformer layers
+**actively destroy** a local GNN feature — but with residual connections and only 3
+layers, washout is modest, and if it happens the fix is "stop washing it out" (LayerNorm
+placement / fewer layers), not "bolt on a second readout that re-reads the discarded
+copy." **Option C (dual-stream) is REJECTED as a separate intervention** — the original
+doc already half-conceded this (§3 Option C: "partly redundant," "fold into A") but then
+kept dual-stream framing alive in the owner-facing answer; this section makes the
+rejection explicit and the headline.
+
+**So which stream is "enough"?** A strong readout over the **post-transformer
+embeddings alone** is sufficient *representationally*, because those embeddings are a
+superset (GNN ⊕ attention). The open question is purely whether the *readout operator*
+(fixed mean+max vs learnable PMA) extracts enough from that single stream — that is
+CR-1's isolation question, not a "need both streams" question.
+
+**VERDICT (CR-2):** **One stream (post-transformer) is enough.** Do not build a
+dual-stream readout. If a learnable readout is ever justified (gated by CR-1.1), run it
+over the existing post-transformer embeddings only.
+
+---
+
+## CR-3. Reframe "truly reason about the board"
+
+The owner wants the head to "truly reason." **A value head structurally cannot and
+should not do multi-step reasoning** — it is a single feed-forward map from a position
+to a scalar. "If I don't block here, they complete the line there next turn" is a
+**lookahead**, and lookahead is exactly what the system *already* delegates to:
+- **MCTS** (the search backs up leaf values — `mcts_session.run`), and
+- **the planned TSS depth-1 leaf override** (`HEXGT_TSS_AND_SOFT_VALUE_DESIGN.md`
+  PART 1): an engine-confirmed `count≥4` forcing check that **hard-overrides the leaf
+  value** when a forced win/loss is proven. That is the literal "they win there if I
+  don't block" reasoning, done correctly by a solver, not by hoping a pooled MLP learns
+  to simulate search.
+
+The correct, *bounded* bar for the value head is: **integrate all relevant local+global
+features into a well-calibrated, threat-AWARE scalar.** "Threat-aware" = the head's
+input must *contain* "there is an unanswered opponent ≥4 threat" as a usable feature —
+which is delivered by **the v3 `F_CAND_OPP_THREAT` feature** (`constants.py:132`) and
+surfaced existence-wise by **the shipped max-pool.** Meeting that bar does **not** require
+the head to *reason*; it requires (a) the feature to exist (planned), (b) the readout to
+expose it (max-pool already does for existence; PMA *would* help for *weighing* — CR-1),
+and (c) the label not to be saturated (soft-Z, planned).
+
+**CAUTION:** Re-architecting the head toward "reasoning" (stacked value-specific
+transformer layers, Option D depth) is **over-engineering the head to do search's job**,
+adds params/throughput cost, and is *not* what closes the diagnosed gap. **Reject
+multi-layer value-reasoning modules.**
+
+---
+
+## CR-4. Directly-applicable research, RANKED by applicability (directly-applicable vs analogical)
+
+| Rank | Source | Directly-applicable or analogical? | What it actually predicts for hexgt |
+|---|---|---|---|
+| **1 (highest)** | **KataGo SE-style global-pooling fusion INTO the trunk** (Wu 2019, arXiv 1902.10565; fetched in original §Sources) | **DIRECTLY applicable** — same problem domain (board game, value+policy, "global context beyond the local perceptual radius"), proven by a **measured 1.60× learning-efficiency ablation.** | Predicts that **conditioning every trunk layer on a pooled global summary** (mean/max/std → FC → channelwise bias added back to nodes) materially helps — because today the trunk computes node features with **zero whole-board conditioning** until the very end (`architecture.py:262-270`). This is the one structural lever with same-domain evidence. NOTE: hexgt's transformer *partially* already does this (SIDE-hub CONTEXT edge + context self-attention give *some* global mixing), so the marginal gain over hexgt's existing global attention is **smaller than KataGo's gain over a pure-conv net** — KataGo's baseline had NO global path; hexgt has one. So "1.60×" is an upper bound, not a prediction for hexgt. |
+| **2** | **Set Transformer PMA / attentional graph readout** (Lee 2019, arXiv 1810.00825; fetched) | **Applicable for the readout operator** (permutation-invariant, generalizes mean/sum/max, k learnable seeds). | Predicts a learnable pool **can** represent cross-node weighing + soft threat-counting that fixed mean+max cannot (original §2.2). But "can represent" ≠ "is the binding constraint" — **speculative until CR-1.1 shows the info isn't already linearly recoverable from the existing pool.** |
+| **3** | **ViT / BERT CLS-token evidence** (probing literature, Sources this pass) | **Analogical** (different domain, no two-stones/hex specifics). | **Cuts BOTH ways:** CLS works for global/semantic readout given depth (→ SIDE/single-token is *not* inherently broken), BUT is a genuine bottleneck for *sparse-localized multi-label* signals (→ *if* Hexo value is sparse-localized, a single token struggles). Since the shipped readout already adds max-pool, the sparse-existence weakness is already mitigated. Net: weak support for "rebuild the readout," moderate support for "a single-token-only readout would have been bad." |
+| **4 (lowest)** | **AlphaZero value-head practice** (global average pool → FC → scalar) | **Analogical / weak.** | AlphaZero uses a *fixed-grid conv + global pool*; it does not speak to permutation-invariant graph readouts and offers no specific prediction here beyond "a simple pooled readout is usually adequate" — which mildly *supports* the skeptical view that mean+max + good features is enough. |
+
+**Research verdict:** Only **Rank 1 (KataGo SE trunk fusion)** is directly applicable AND
+evidenced AND structural. Ranks 2–4 are capacity arguments or analogies that do not
+establish the readout is the binding constraint.
+
+---
+
+## CR-5. The honest plan: HIGH-CONFIDENCE vs SPECULATIVE, and an ABLATION LADDER
+
+### (a) Confidence labels
+
+| Lever | Confidence | Why |
+|---|---|---|
+| soft-Z value targets + restore midgame exploration + v3 threat features + TSS leaf override | **HIGH** | These attack the *evidenced* root (distribution collapse + label saturation + missing count-4 signal) per `HEXGT_DEFENSE_DEEP_ANALYSIS.md`. Cheap, already specified, already partly grafted. |
+| KataGo SE-style **trunk** global-context fusion (Option B) | **MEDIUM** (the best of the structural bets) | Same-domain, ablation-backed *in KataGo*; but hexgt already has *some* global path (transformer + SIDE CONTEXT edge), so marginal gain is uncertain. |
+| PMA learnable readout (Option A) | **SPECULATIVE** | Capacity argument only; not isolated; shipped max-pool already covers the named weakness. Gate behind CR-1.1 probe. |
+| +1 GNN layer / value-token-over-candidates (E/D) | **SPECULATIVE** | Hop-count argument; transformer global attention may already compensate. |
+| Dual-stream readout (Option C) | **REJECTED** | CR-2: post-transformer embeddings already contain GNN features (residual, sequential). |
+
+### (b) Ablation ladder (one change at a time — a full restart is acceptable, so these are clean re-trains, not stacked grafts)
+
+**Rung 0 — CONTROL (cheap, no arch change):** baseline + **soft-Z + v3 features + TSS +
+exploration-restore** (all already planned). **Metric gate:** same-board `v(A)+v(B)`
+moves from +0.82 toward 0; opponent-hot-slice value Brier improves; the 8/8 lost-game
+value trace stops pinning near +0.8; H2H vs dense_cnn e24 (`run_head_to_head`). **If
+Rung 0 closes the gap, STOP — no head/trunk change is needed, and the SIDE-token premise
+was wrong.** *This rung exists specifically to find out whether any structural change is
+even warranted.*
+
+**Rung 0.5 — ISOLATION PROBE (no training):** the CR-1.1 linear probe on the Rung-0
+trunk — is "∃ opponent ≥4 window" linearly recoverable from the mean+max pool? **If yes,
+the readout is not the bottleneck** and Rung 2 is dropped.
+
+**Rung 1 — +SE trunk fusion (Option B) ON TOP OF Rung 0.** Only if Rung 0 leaves a
+measurable defensive-calibration gap. **Metric:** same gates as Rung 0; the question is
+whether B *further* improves opponent-hot Brier / H2H over Rung 0 alone. This is the one
+structural lever with same-domain grounding.
+
+**Rung 2 — +PMA readout (Option A) ON TOP of the better of {Rung 0, Rung 1}.** Only if
+Rung 0.5 showed the signal is *not* already recoverable AND a gap remains. **Metric:**
+opponent-hot-slice value Brier specifically (the slice PMA is designed to fix);
+same-board sum.
+
+**Rung 3 — +1 GNN layer (E).** Last and most speculative; only if Rungs 0–2 leave a
+residual gap attributable to trunk depth (re-run the search-depth/value-trace forensic).
+
+Each rung changes **one** thing and is judged by the **same** metric battery
+(same-board `v(A)+v(B)`→0; opponent-hot Brier/reliability; the 8/8 lost-game value
+trace; H2H), plus the D6 parity gate
+(`test_hexgt_value_readout.py` permutation-invariance + `test_hexgt_d6.py`) before any
+training of an arch change.
+
+### (c) Levers RANKED by expected impact / confidence / cost
+
+| Rank | Lever | Expected impact | Confidence | Cost |
+|---|---|---|---|---|
+| 1 | soft-Z + exploration-restore + v3 features + TSS (Rung 0) | **High** (hits evidenced root) | **High** | **Low** (specified/grafted) |
+| 2 | SE trunk fusion (B) | Medium | Medium | Moderate (~85–170K params, retrain) |
+| 3 | PMA readout (A) | Low–Medium (only if probe says info missing) | Speculative | Small (~115K) |
+| 4 | +1 GNN layer (E) | Low | Speculative | Small–moderate |
+| — | Dual-stream (C) | — | **Rejected** (CR-2) | — |
+
+**Headline conclusion (restated):** **mean+max + the already-planned soft-Z + v3 threat
+features + TSS is plausibly adequate; the SIDE-token bottleneck is over-weighted and
+un-isolated.** Run Rung 0 + the Rung-0.5 probe FIRST. If a structural lever is ever
+justified, it is **SE-style trunk fusion (B)** — the only one with same-domain evidence —
+not a dual-stream or multi-layer "reasoning" head. **Do not build A+B+C together; do not
+build a dual-stream readout; do not make the head reason — that is search's job.**
+
+### Sources added this pass
+
+- **Reasoned-about (search snippets, not load-bearing):** BERT/ViT CLS-token probing —
+  single-token readout is a real bottleneck for *sparse-localized multi-label* signals
+  but adequate for *global/semantic* targets given depth
+  ([Unmute the Patch Tokens, arXiv 2509.24901](https://arxiv.org/pdf/2509.24901);
+  [BERT representations](https://mbrenndoerfer.com/writing/bert-representations-extracting-contextual-embeddings);
+  [Inserting Information Bottlenecks in Transformers, arXiv 2012.13838](https://arxiv.org/pdf/2012.13838)).
+- **Re-used from original doc (fetched there):** KataGo (arXiv 1902.10565, 1.60×
+  global-pooling ablation), Set Transformer (arXiv 1810.00825, PMA).
+- **Code (read directly this pass):** `architecture.py` full (esp. `_encode_nodes`
+  :252-270 GNN→transformer order; `GraphTransformerLayer` :147-183 residual + SIDE
+  asymmetry; `_value_readout` :306-311), `constants.py` (feature schema v2/v3, layer
+  defaults :174-178), `HEXGT_DEFENSE_DEEP_ANALYSIS.md` (full diagnosis).
+
+---
+
+> **Everything below this line is the ORIGINAL (2026-06-02) constructive analysis,
+> retained for reference. Where it ranks B+A as the joint headline or treats the
+> SIDE-token bottleneck / dual-stream readout as established, it is SUPERSEDED by the
+> CRITICAL RE-EXAMINATION above.**
+
+---
+
 This goes deep on **one question the owner raised**: the Phase-2 value head reads
 `[SIDE hub | mean-pool | max-pool]` over the node embeddings, and the owner finds
 mean+max *"insufficient — a fixed, lossy, non-learnable aggregation."* The goal is a
