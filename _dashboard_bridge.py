@@ -24,10 +24,10 @@ from pathlib import Path
 # NEW work (caches keep it cheap), so a tight interval is light on disk/CPU.
 REFRESH_INTERVAL_SECONDS = 7
 
-WT = Path("/mnt/e/Hexo-BotTrainer-hexgt/runs/hexgt_rl_main2")   # worktree RL run (read)
+WT = Path("/mnt/e/Hexo-BotTrainer-hexgt/runs/hexgt_rl_main3")   # worktree RL run (read) -- the ACTIVE run
 EVAL = WT / "eval"
 SELFPLAY = WT / "selfplay"                                       # per-game .npz (read)
-MAIN = Path("/mnt/e/Hexo-BotTrainer/runs/hexgt_rl_main2")        # main-tree mirror (write)
+MAIN = Path("/mnt/e/Hexo-BotTrainer/runs/hexgt_rl_main3")        # main-tree mirror (write) -> :8080 dashboard
 # Write diagnostics ONLY to the main-tree mirror (the :8080 dashboard). The
 # worktree :8081 dashboard was retired, so we no longer mirror into WT/diagnostics.
 DIAG_DIRS = [MAIN / "diagnostics"]
