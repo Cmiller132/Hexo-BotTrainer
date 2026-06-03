@@ -28,6 +28,7 @@ import torch
 from torch import nn
 
 from .constants import (
+    DEFAULT_VALUE_PMA_SEEDS,
     EDGE_ATTR_DIM,
     NEW_FEATURE_SLOTS_V2,
     NODE_FEATURE_DIM,
@@ -37,6 +38,15 @@ from .constants import (
     NUM_NODE_TYPES,
     VALUE_BINS,
 )
+
+
+# Value readout = [SIDE hub | PMA_k pooled vectors], each token_dim wide, so the
+# value MLP first Linear reads (1 + value_pma_seeds) * token_dim. With the owner's
+# default k=2 this is 3*token_dim — identical width to the prior [SIDE|mean|max]
+# readout (VALUE_READOUT_DEFAULT_MULT below), so a same-k checkpoint round-trips
+# at the same shape. (The fixed mean+max pool was REPLACED by the learnable PMA
+# pool — HEXGT_PMA_VALUE_HEAD_PLAN.md.)
+VALUE_READOUT_MULT = 1 + DEFAULT_VALUE_PMA_SEEDS  # == 3 for k=2 (back-compat alias)
 
 
 def _graph_slices(node_graph: torch.Tensor, num_graphs: int) -> list[tuple[int, int]]:
@@ -179,6 +189,42 @@ class GraphTransformerLayer(nn.Module):
         return out
 
 
+class PMAValuePool(nn.Module):
+    """Set-Transformer PMA pooling for the value readout (HEXGT_PMA_VALUE_HEAD_PLAN).
+
+    ``num_seeds`` learnable seed queries attend (``heads``-head) over ALL of a
+    graph's post-transformer node embeddings (keys/values), pooling the set into
+    ``num_seeds`` summary vectors: ``PMA_k(Z) = MAB(S, Z)`` (Lee et al. 2019,
+    arXiv:1810.00825). This REPLACES the fixed mean+max pool with a learnable,
+    cross-node / cross-channel soft pooling — a strict generalization (a seed can
+    learn uniform attention ~= mean or a sharp attention ~= soft-max), letting the
+    value head weight "this opponent threat vs my counter" rather than averaging.
+
+    Permutation-INVARIANT over the node set (no positional encoding; the seeds are
+    graph-independent learned constants and D6 acts on nodes, not seeds), hence
+    D6-invariant — the property the value readout requires. Reuses the same
+    per-graph padded-attention gather (`_padded_index`) as the trunk transformer.
+    """
+
+    def __init__(self, dim: int, heads: int, num_seeds: int) -> None:
+        super().__init__()
+        self.dim = int(dim)
+        self.num_seeds = int(num_seeds)
+        # seeds ~ small init (mirrors attention query scale); learned, role-free.
+        self.seeds = nn.Parameter(torch.randn(self.num_seeds, self.dim) * (self.dim ** -0.5))
+        self.attn = nn.MultiheadAttention(self.dim, heads, batch_first=True)
+
+    def forward(self, node_emb: torch.Tensor, node_graph: torch.Tensor, num_graphs: int) -> torch.Tensor:
+        # Pad ALL nodes per graph into (G, max_n, D); every graph has >=1 node, so
+        # no query attends to an all-masked key set (no NaN).
+        all_nodes = torch.arange(node_emb.shape[0], device=node_emb.device)
+        index, pad = _padded_index(all_nodes, node_graph.to(torch.long), num_graphs)
+        keys = node_emb[index]  # (G, max_n, D)
+        query = self.seeds.to(node_emb.dtype).unsqueeze(0).expand(num_graphs, -1, -1)  # (G, k, D)
+        pooled, _ = self.attn(query, keys, keys, key_padding_mask=pad, need_weights=False)  # (G, k, D)
+        return pooled.reshape(num_graphs, self.num_seeds * self.dim)  # (G, k*D)
+
+
 class HexgtNetwork(nn.Module):
     """Dynamic typed GNN + transformer producing the hexgt training heads."""
 
@@ -194,6 +240,7 @@ class HexgtNetwork(nn.Module):
         dropout: float = 0.0,
         short_term_value_horizons: tuple[int, ...] = (),
         edge_attr_dim: int = EDGE_ATTR_DIM,
+        value_pma_seeds: int = DEFAULT_VALUE_PMA_SEEDS,
     ) -> None:
         super().__init__()
         self.node_feature_dim = int(node_feature_dim)
@@ -204,6 +251,7 @@ class HexgtNetwork(nn.Module):
         self.ffn_dim = int(ffn_dim)
         self.edge_attr_dim = int(edge_attr_dim)
         self.short_term_value_horizons = tuple(int(h) for h in short_term_value_horizons)
+        self.value_pma_seeds = int(value_pma_seeds)
 
         self.node_in = nn.Sequential(
             nn.Linear(self.node_feature_dim, self.token_dim),
@@ -219,8 +267,20 @@ class HexgtNetwork(nn.Module):
 
         self.policy_head = nn.Linear(self.token_dim, 1)
         self.opp_policy_head = nn.Linear(self.token_dim, 1)
+        # The value head reads a whole-board readout: the SIDE hub embedding
+        # concatenated with a Set-Transformer PMA pool (k = value_pma_seeds learned
+        # seed queries, attention_heads-head) over ALL post-transformer node
+        # embeddings -> [SIDE | PMA_k], width (1 + k) * token_dim. PMA is a
+        # learnable generalization of the prior fixed mean+max pool (a seed can
+        # learn uniform ~= mean or sharp ~= soft-max attention), giving the value
+        # head a cross-node/cross-channel soft pooling for defensive calibration
+        # (HEXGT_PMA_VALUE_HEAD_PLAN.md). The SIDE block is FIRST (kept for the
+        # dedicated whole-board hub); the PMA block follows.
+        self.value_pool = PMAValuePool(self.token_dim, self.attention_heads, self.value_pma_seeds)
         self.value_head = nn.Sequential(
-            nn.Linear(self.token_dim, self.token_dim), nn.ReLU(inplace=True), nn.Linear(self.token_dim, VALUE_BINS)
+            nn.Linear((1 + self.value_pma_seeds) * self.token_dim, self.token_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(self.token_dim, VALUE_BINS),
         )
         self.short_term_value_heads = nn.ModuleDict(
             {
@@ -265,15 +325,25 @@ class HexgtNetwork(nn.Module):
         readout[node_graph[side_rows]] = node_emb.index_select(0, side_rows)
         return readout
 
+    def _value_readout(self, batch: Mapping[str, torch.Tensor], node_emb: torch.Tensor) -> torch.Tensor:
+        """Whole-board value readout: [SIDE hub | PMA_k pool] (G, (1+k)*D)."""
+
+        num_graphs = int(batch["num_graphs"])
+        side = self._graph_readout(batch, node_emb)
+        pooled = self.value_pool(node_emb, batch["node_graph"], num_graphs)
+        return torch.cat([side, pooled], dim=-1)
+
     def _heads(self, batch: Mapping[str, torch.Tensor], node_emb: torch.Tensor, *, with_aux: bool) -> dict[str, torch.Tensor]:
         candidate_index = batch["candidate_index"].to(dtype=torch.long)
         cand_emb = node_emb.index_select(0, candidate_index)
-        graph_emb = self._graph_readout(batch, node_emb)
+        value_emb = self._value_readout(batch, node_emb)
         outputs: dict[str, torch.Tensor] = {
             "policy": self.policy_head(cand_emb).squeeze(-1),
-            "value": self.value_head(graph_emb),
+            "value": self.value_head(value_emb),
         }
         if with_aux:
+            # STV aux heads keep the SIDE-hub readout (unchanged, resume-exact).
+            graph_emb = self._graph_readout(batch, node_emb)
             outputs["opp_policy"] = self.opp_policy_head(cand_emb).squeeze(-1)
             for horizon, head in self.short_term_value_heads.items():
                 outputs[f"stvalue_{horizon}"] = head(graph_emb)
@@ -335,3 +405,47 @@ def zero_init_expanded_feature_columns(
         for slot in valid:
             first_linear.weight[:, slot].zero_()
     return valid
+
+
+def expand_value_readout_columns(
+    model: HexgtNetwork,
+    state_dict: dict,
+    *,
+    key: str = "value_head.0.weight",
+) -> bool:
+    """ZERO-INIT EXPANSION for the global-pooled value readout (Phase 2).
+
+    A pre-expansion checkpoint's value-head first ``Linear`` read ONLY the SIDE
+    hub: weight shape ``(token_dim, token_dim)``. The new head reads
+    ``[side | mean | max]``: ``(token_dim, VALUE_READOUT_MULT * token_dim)``. This
+    rewrites the checkpoint tensor IN PLACE in ``state_dict`` into the wider shape
+    — the old weight in the leading SIDE block ``[:, :token_dim]`` and ZEROS in
+    the mean/max blocks — so the loaded head produces output IDENTICAL to the
+    pre-expansion checkpoint on the first step (the pooled features contribute 0),
+    while training then learns the pooled signal from zero. Matching optimizer
+    moments for the new columns are ~0, so no optimizer surgery is needed.
+
+    Mirrors ``zero_init_expanded_feature_columns`` but for an INPUT-WIDTH change
+    of one Linear rather than zeroing existing columns. No-op (returns ``False``)
+    when the checkpoint already carries the wide shape (resuming a post-expansion
+    run). Call BEFORE ``load_state_dict(..., strict=False)`` so the value-head key
+    matches and the load stays strict elsewhere. Returns ``True`` if it expanded.
+    """
+
+    w = state_dict.get(key)
+    if w is None:
+        return False
+    target = model.value_head[0].weight
+    if tuple(w.shape) == tuple(target.shape):
+        return False
+    d = model.token_dim
+    if tuple(w.shape) != (int(target.shape[0]), d):
+        raise ValueError(
+            f"cannot expand {key}: checkpoint shape {tuple(w.shape)} is neither the "
+            f"pre-pool SIDE-only shape ({int(target.shape[0])}, {d}) nor the target "
+            f"{tuple(target.shape)}"
+        )
+    new_w = w.new_zeros(tuple(target.shape))
+    new_w[:, :d] = w  # SIDE-hub block first; mean/max blocks stay zero
+    state_dict[key] = new_w
+    return True

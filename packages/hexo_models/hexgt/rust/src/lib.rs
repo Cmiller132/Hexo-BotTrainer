@@ -22,6 +22,8 @@ mod mcts;
 mod mcts_eval;
 mod mcts_tree;
 mod state;
+mod threats;
+mod vcf;
 
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -46,5 +48,7 @@ pub fn register_pybridge(module: &Bound<'_, PyModule>) -> PyResult<()> {
     candidates::register_pybridge(module)?;
     features::register_pybridge(module)?;
     mcts::register_pybridge(module)?;
+    threats::register_pybridge(module)?;
+    vcf::register_pybridge(module)?;
     Ok(())
 }

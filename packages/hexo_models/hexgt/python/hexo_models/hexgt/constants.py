@@ -114,12 +114,30 @@ F_CAND_DIST_FIRST = 28     # candidate: hex-dist to THIS turn's first stone (0 o
                            #   turn's first placement) / COORD_SCALE (D6-invariant)
 F_SIDE_IS_SECOND = 29      # side node: 1.0 if the current placement is the turn's
                            #   SECOND stone (phase == SecondStone), else 0.0
-# [30:32) reserved.
+
+# --- Tactical feature-set v3 (slots [30:32); D6-INVARIANT, PHASE-AWARE) --------
+# Activated by FEATURE_SCHEMA_VERSION 3. These are PHASE-AWARE win-now flags,
+# distinct from the v2 count-{3,4,5} window-count splits (which only COUNT windows)
+# and from F_CAND_COMPLETE_{OWN,OPP} (which fire only at count-5). They give the
+# net the count-4-with-correct-phase tactical signal the count-5-only completion
+# flags miss (HEXGT_TSS_AND_SOFT_VALUE_DESIGN.md PART 1 (c)). Same zero-init
+# layer-expansion path as v2 (architecture.zero_init_expanded_feature_columns).
+#
+# D6-invariance: window owner/count/membership through a cell maps bijectively
+# under every D6 element; the placement budget B is phase-derived (D6 fixes phase).
+# Both flags are invariant, so the equivariance test holds unchanged.
+F_CAND_WIN_NOW_OWN = 30    # candidate: placing here is (part of) an OWN win THIS turn
+                           #   -- own count-5 (any B), or own count-4 only at FirstStone
+                           #   (B==2). A count-4 at SecondStone is NOT a win (TEST G).
+F_CAND_OPP_THREAT = 31     # candidate: cell is an empty of an active OPPONENT >=4 window
+                           #   (count-4 OR count-5) -- the must-answer block-cell set (the
+                           #   opponent's own turn always has B==2, so count-4 is a genuine
+                           #   immediate threat). Count-4-inclusive analog of COMPLETE_OPP.
 
 # Feature schema version. Bumped whenever a NEW always-zero-until-now slot is
 # activated, so the RL resume path knows to zero-init its node_in columns ONCE
 # (checkpoints predating the bump report a lower version / none -> treated as 1).
-FEATURE_SCHEMA_VERSION = 2
+FEATURE_SCHEMA_VERSION = 3
 # The slots activated in v2 — the zero-init layer-expansion target (node_in input
 # columns to zero at the introducing resume). Order is irrelevant (a column set).
 NEW_FEATURE_SLOTS_V2 = (
@@ -127,6 +145,23 @@ NEW_FEATURE_SLOTS_V2 = (
     F_CAND_OPP_WIN3, F_CAND_OPP_WIN4, F_CAND_OPP_WIN5,
     F_CAND_DIST_FIRST, F_SIDE_IS_SECOND,
 )
+# The slots activated in v3 (the phase-aware win-now flags).
+NEW_FEATURE_SLOTS_V3 = (F_CAND_WIN_NOW_OWN, F_CAND_OPP_THREAT)
+
+
+def feature_slots_after(version: int) -> tuple[int, ...]:
+    """Node-feature columns introduced in schema versions strictly greater than
+    `version` — the zero-init layer-expansion target when resuming from a
+    checkpoint stamped `version`. A checkpoint at v2 needs only the v3 slots
+    zeroed (its v2 columns are trained); a v1/none checkpoint needs v2 + v3.
+    """
+
+    slots: list[int] = []
+    if version < 2:
+        slots.extend(NEW_FEATURE_SLOTS_V2)
+    if version < 3:
+        slots.extend(NEW_FEATURE_SLOTS_V3)
+    return tuple(slots)
 
 # --- Edge attributes (D6-invariant) -------------------------------------------
 # Per-edge feature vector: edge-type one-hot ++ endpoint hex-distance (invariant).
@@ -141,3 +176,6 @@ DEFAULT_GNN_LAYERS = 3
 DEFAULT_CTX_LAYERS = 3
 DEFAULT_ATTENTION_HEADS = 4
 DEFAULT_FFN_DIM = 336
+# PMA value-head seed count k (HEXGT_PMA_VALUE_HEAD_PLAN.md): the value readout is
+# [SIDE | PMA_k]. Owner's chosen build uses k=2 (the doc's analytic default is 1).
+DEFAULT_VALUE_PMA_SEEDS = 2

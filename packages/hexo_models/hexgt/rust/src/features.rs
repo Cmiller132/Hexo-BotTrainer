@@ -150,6 +150,12 @@ pub(crate) fn featurize_position_graph(
                         if cnt == 5 {
                             feat[cbase + F_CAND_COMPLETE_OWN] = 1.0;
                         }
+                        // v3: phase-aware own win-now. count-5 wins with one
+                        // placement (any B); a count-4 wins only with two
+                        // placements left -> FirstStone (ph == 1) only.
+                        if cnt == 5 || (cnt == 4 && ph == 1) {
+                            feat[cbase + F_CAND_WIN_NOW_OWN] = 1.0;
+                        }
                     } else if own == 1 {
                         feat[cbase + F_CAND_NWIN_OPP] += 1.0;
                         // v2: per-count breakdown of the opp active windows.
@@ -161,6 +167,12 @@ pub(crate) fn featurize_position_graph(
                         }
                         if cnt == 5 {
                             feat[cbase + F_CAND_COMPLETE_OPP] = 1.0;
+                        }
+                        // v3: any opponent >=4 window through this empty cell is a
+                        // must-answer immediate threat (opp turn has B==2, so a
+                        // count-4 also wins). This is the block-cell set.
+                        if cnt >= 4 {
+                            feat[cbase + F_CAND_OPP_THREAT] = 1.0;
                         }
                     }
                 }

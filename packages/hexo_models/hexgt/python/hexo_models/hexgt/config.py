@@ -25,6 +25,7 @@ from .constants import (
     DEFAULT_FFN_DIM,
     DEFAULT_GNN_LAYERS,
     DEFAULT_TOKEN_DIM,
+    DEFAULT_VALUE_PMA_SEEDS,
     NODE_FEATURE_DIM,
 )
 
@@ -68,6 +69,9 @@ class HexgtArchitectureConfig:
     # The single candidate-set neighborhood radius `n` (§4). Threaded into both
     # sample-gen and live MCTS so training support == search expansion.
     candidate_radius: int = DEFAULT_CANDIDATE_RADIUS
+    # PMA value-head seed count k (HEXGT_PMA_VALUE_HEAD_PLAN.md). The value readout
+    # is [SIDE | PMA_k]; k=2 is the owner's chosen build (doc default is 1).
+    value_pma_seeds: int = DEFAULT_VALUE_PMA_SEEDS
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,6 +112,13 @@ class HexgtSampleConfig:
     # the new rep deliberately cannot represent). Surviving positions renormalize
     # over the in-set candidates. Set to 1.0 to disable pruning.
     bc_prune_max_dropped_mass: float = 0.15
+    # Soft-Z value target (Willemsen/Baier/Kaisers 2022): the main value label is
+    # the convex blend ``(1 - soft_z_lambda) * z + soft_z_lambda * root_value``
+    # where ``z`` is the hard game outcome and ``root_value`` is the MCTS root
+    # value at the position. Recalibrates the saturated +-1 label / +0.82 optimism
+    # bias. 0.0 == pure hard outcome; start 0.5, anneal ~0.3->0.7 (see
+    # docs/analysis/HEXGT_TSS_AND_SOFT_VALUE_DESIGN.md PART 2).
+    soft_z_lambda: float = 0.5
 
 
 @dataclass(frozen=True, slots=True)
@@ -203,6 +214,7 @@ def parse_hexgt_config(raw: Mapping[str, Any] | None) -> HexgtConfig:
             dropout=float(arch.get("dropout", 0.0)),
             short_term_value_horizons=_int_tuple(arch.get("short_term_value_horizons", ())),
             candidate_radius=int(arch.get("candidate_radius", DEFAULT_CANDIDATE_RADIUS)),
+            value_pma_seeds=int(arch.get("value_pma_seeds", DEFAULT_VALUE_PMA_SEEDS)),
         ),
         training=HexgtTrainingConfig(
             batch_size=int(training.get("batch_size", 128)),
@@ -233,6 +245,7 @@ def parse_hexgt_config(raw: Mapping[str, Any] | None) -> HexgtConfig:
             policy_surprise_uniform_fraction=float(samples.get("policy_surprise_uniform_fraction", 0.5)),
             policy_surprise_max_weight=float(samples.get("policy_surprise_max_weight", 8.0)),
             bc_prune_max_dropped_mass=float(samples.get("bc_prune_max_dropped_mass", 0.15)),
+            soft_z_lambda=float(samples.get("soft_z_lambda", 0.5)),
         ),
         selfplay=HexgtSelfPlayConfig(
             search_visits=int(selfplay.get("search_visits", 128)),

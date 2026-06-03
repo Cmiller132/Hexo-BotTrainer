@@ -171,18 +171,38 @@ def finalize_game_samples(
     horizons: Sequence[int],
     *,
     truncated: bool = False,
+    soft_z_lambda: float = 0.0,
 ) -> list[Model1SampleData]:
     """Assign outcome targets to a finished game's pre-decision samples.
 
     `pending` is the ordered `(player, sample, root_value)` sequence collected
     during self-play. Value, opponent-policy, and short-term value targets are
     computed here from the sequence and winner.
+
+    `soft_z_lambda` mixes the hard game outcome with the MCTS root value at the
+    position itself (the "soft-Z" target of Willemsen/Baier/Kaisers 2022):
+
+        value = (1 - lambda) * z + lambda * root_value
+
+    `z = _winner_value(winner, player)` is the hard +1/-1/0 outcome and
+    `root_value` is `search.root_value` captured at the decision, which is
+    already in the side-to-move's (i.e. `player`'s) perspective -- the same
+    convention the short-term-value heads consume -- so it needs no sign flip.
+    A convex blend of two values in [-1, 1] stays in [-1, 1], so it flows
+    through the unchanged 65-bin `scalar_to_binned_target` mapping with no
+    head/schema change. `lambda = 0` (default) reproduces the pure hard-outcome
+    target; `lambda = 1` is the paper's pure soft-Z. For truncated/draw rows
+    (`winner is None`, `z = 0`) the blended target carries `lambda * root_value`,
+    a free recalibration of otherwise-zeroed draw labels.
     """
 
     decisions = list(pending)
     horizons = tuple(int(horizon) for horizon in horizons)
+    lam = float(soft_z_lambda)
+    if not 0.0 <= lam <= 1.0:
+        raise ValueError(f"soft_z_lambda must be in [0, 1], got {soft_z_lambda!r}")
     finalized: list[Model1SampleData] = []
-    for index, (player, sample, _root_value) in enumerate(decisions):
+    for index, (player, sample, root_value) in enumerate(decisions):
         opp_policy, opp_source = _future_opponent_policy(decisions, index, player)
         metadata = {
             **dict(sample.metadata),
@@ -192,10 +212,15 @@ def finalize_game_samples(
         }
         if truncated:
             metadata["value_target_reason"] = "max_actions_draw"
+        hard_z = _winner_value(winner, player)
+        if lam > 0.0:
+            value_target = (1.0 - lam) * hard_z + lam * float(root_value)
+        else:
+            value_target = hard_z
         finalized.append(
             replace(
                 sample,
-                value=_winner_value(winner, player),
+                value=value_target,
                 opp_policy=opp_policy,
                 short_term_value=_short_term_value_targets(decisions, index, player, horizons),
                 metadata=metadata,

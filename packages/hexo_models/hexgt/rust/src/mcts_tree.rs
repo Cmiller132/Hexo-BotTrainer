@@ -20,13 +20,14 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use hexo_engine::{
-    apply_placement, unpack_coord, GameOutcome, HexCoord, HexoState as RustHexoState, PackedCoord,
-    Placement, Player,
+    apply_placement, pack_coord, unpack_coord, GameOutcome, HexCoord, HexoState as RustHexoState,
+    PackedCoord, Placement, Player,
 };
 use hexo_utils::StateHash;
 
 use super::mcts_eval::{state_hash, RustEvaluation};
 use super::state::move_error;
+use super::threats;
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct RootDirichletNoise {
@@ -50,6 +51,12 @@ pub(crate) struct RustEdge {
     pub(crate) value_sum: f32,
     pub(crate) pending: u32,
     pub(crate) child: Option<usize>,
+    /// True for a Phase-4 tactically INJECTED edge. Such an edge is guaranteed at
+    /// least one visit (forced exploration in `select_or_materialize_edge`) so its
+    /// true value — safe (~0), proven win (+1), or override-proven loss (-1) — is
+    /// discovered instead of being starved by FPU under a low prior and a losing
+    /// parent value (which would leave the search blind to the defense).
+    pub(crate) forced: bool,
 }
 
 impl RustEdge {
@@ -86,6 +93,7 @@ impl RustPriorCandidate {
             value_sum: 0.0,
             pending: 0,
             child: None,
+            forced: false,
         }
     }
 }
@@ -198,6 +206,7 @@ impl RustNode {
                     value_sum: 0.0,
                     pending: 0,
                     child: None,
+                    forced: false,
                 }
             }
         }
@@ -280,6 +289,9 @@ impl RustSearch {
         )?;
         let mut node_table = HashMap::new();
         node_table.insert(root_hash, 0);
+        // The root may already carry Phase-4 injected edges, so seed the edge
+        // accounting from the root node rather than assuming zero.
+        let root_edges = root_node.edges.len();
         Ok(Self {
             root_state,
             root_hash,
@@ -290,8 +302,8 @@ impl RustSearch {
             fpu_reduction,
             widening,
             forced_playout_k,
-            active_edge_count: 0,
-            max_active_edges_per_node: 0,
+            active_edge_count: root_edges,
+            max_active_edges_per_node: root_edges,
         })
     }
 
@@ -397,9 +409,20 @@ impl RustSearch {
             return Ok(existing);
         }
         let id = self.nodes.len();
-        let node = shared_from_cache(hash, state, evaluation, self.widening);
+        // Phase 4 injection: a node with an active >=4 threat is built as an OWNED
+        // node with the tactical cells force-materialized (bypassing the nucleus
+        // cap); the threat-free common case keeps the cheap shared-by-Arc path.
+        let tactical = threats::tactical_cells(state);
+        let node = if tactical.is_empty() {
+            shared_from_cache(hash, state, evaluation, self.widening)
+        } else {
+            owned_with_injection_from_eval(hash, state, &evaluation, self.widening, &tactical)
+        };
+        let injected_edges = node.edges.len();
         self.nodes.push(node);
         self.node_table.insert(hash, id);
+        self.active_edge_count += injected_edges;
+        self.max_active_edges_per_node = self.max_active_edges_per_node.max(injected_edges);
         Ok(id)
     }
 
@@ -483,6 +506,19 @@ impl RustSearch {
     }
 
     fn select_or_materialize_edge(&mut self, node_id: usize, c_puct: f32) -> Option<usize> {
+        // Phase-4 injected edges get a guaranteed first visit BEFORE normal PUCT:
+        // a low-prior tactical block under a losing parent value would otherwise be
+        // starved by FPU (parent_value - fpu stays below the explored losers), so
+        // the search would never evaluate the defense and would wrongly conclude a
+        // loss. One forced visit per injected edge reveals its true value (then PUCT
+        // takes over). Forced edges exist only at threat nodes, so the common path
+        // is unaffected. Skip an edge already in flight this batch (pending).
+        for (index, edge) in self.nodes[node_id].edges.iter().enumerate() {
+            if edge.forced && edge.visits == 0 && !(edge.pending > 0 && edge.child.is_none()) {
+                return Some(index);
+            }
+        }
+
         // First score already-materialized edges. Then compare the best existing
         // edge against the next staged prior candidate, materializing that
         // candidate only if its prior/exploration score wins.
@@ -778,6 +814,98 @@ fn shared_from_cache(
     }
 }
 
+/// Pre-materialize the TACTICAL cells (Phase 4 injection) as forced edges and
+/// lift the widening cap so they survive. `candidates` is the node's ASCENDING
+/// (highest-prior at back) owned prior list; tactical cells present in it are
+/// pulled out into eager edges, the rest stay as staged priors (order preserved,
+/// so `materialize_next_candidate` still pops the highest non-tactical prior).
+///
+/// The injection is **ADDITIVE**: the normal top-`nucleus` prior set is ALWAYS
+/// preserved, and the tactical cells are added ON TOP of it — not in place of it.
+/// So `cap = nucleus + |tactical cells ranked OUTSIDE the top-nucleus|`. A
+/// tactical cell already inside the nucleus costs nothing extra; one outside the
+/// nucleus widens the cap by one so it is materialized in addition to (never
+/// instead of) a normal top-prior child. (The earlier `max(nucleus, |forced|)`
+/// was wrong: when `|forced| <= nucleus` it kept the cap at `nucleus`, so each
+/// out-of-nucleus tactical edge consumed a nucleus slot and DISPLACED the
+/// lowest-ranked top-prior children — severe for a sharp policy where the nucleus
+/// is small.) The common (no-threat) path is a no-op. Tactical cells are a subset
+/// of the candidate set (the candidate builder seeds active-window empties), so
+/// this never creates an illegal move; any absent cell is skipped.
+fn split_tactical(
+    candidates: Vec<RustPriorCandidate>,
+    tactical: &[HexCoord],
+    nucleus: usize,
+) -> (Vec<RustEdge>, Vec<RustPriorCandidate>, usize) {
+    if tactical.is_empty() {
+        return (Vec::new(), candidates, nucleus);
+    }
+    let tac: HashSet<PackedCoord> = tactical.iter().map(|c| pack_coord(*c)).collect();
+    // The top-`nucleus` action ids by prior (order-agnostic w.r.t. how `candidates`
+    // is sorted) — the normal nucleus set that must be preserved intact.
+    let mut by_prior: Vec<usize> = (0..candidates.len()).collect();
+    by_prior.sort_by(|&a, &c| {
+        candidates[c]
+            .prior
+            .partial_cmp(&candidates[a].prior)
+            .unwrap_or(Ordering::Equal)
+    });
+    let nucleus_set: HashSet<PackedCoord> = by_prior
+        .iter()
+        .take(nucleus)
+        .map(|&i| candidates[i].action_id)
+        .collect();
+    let mut forced = Vec::new();
+    let mut rest = Vec::with_capacity(candidates.len());
+    let mut extra_beyond_nucleus = 0usize;
+    for candidate in candidates {
+        if tac.contains(&candidate.action_id) {
+            if !nucleus_set.contains(&candidate.action_id) {
+                extra_beyond_nucleus += 1;
+            }
+            let mut edge = candidate.into_edge();
+            edge.forced = true; // guarantee a visit so its value is discovered
+            forced.push(edge);
+        } else {
+            rest.push(candidate);
+        }
+    }
+    let cap = nucleus + extra_beyond_nucleus;
+    (forced, rest, cap)
+}
+
+/// Build an interior node as an OWNED prior list with the tactical set injected
+/// as forced edges (Phase 4). Used in place of `shared_from_cache` ONLY when the
+/// node's state carries an active >=4 threat (rare), so the cheap shared-by-Arc
+/// path stays the common case. The eval priors are descending+normalized; they
+/// are reversed to the ascending owned layout (highest at back) before injection.
+fn owned_with_injection_from_eval(
+    state_hash: StateHash,
+    state: &RustHexoState,
+    evaluation: &RustEvaluation,
+    widening: Widening,
+    tactical: &[HexCoord],
+) -> RustNode {
+    let nucleus = nucleus_count_pairs(&evaluation.priors, widening);
+    let mut candidates: Vec<RustPriorCandidate> = evaluation
+        .priors
+        .iter()
+        .map(|&(action_id, prior)| RustPriorCandidate { action_id, prior })
+        .collect();
+    candidates.reverse(); // descending -> ascending (highest popped from back)
+    let (edges, rest, max_eligible_children) = split_tactical(candidates, tactical, nucleus);
+    RustNode {
+        state_hash,
+        player: state.current_player(),
+        eval_value: evaluation.value,
+        visits: 0,
+        value_sum: 0.0,
+        edges,
+        priors: NodePriors::Owned(rest),
+        max_eligible_children,
+    }
+}
+
 fn owned_root_from_evaluation(
     state_hash: StateHash,
     state: &RustHexoState,
@@ -811,7 +939,13 @@ fn owned_root_from_evaluation(
     candidates.reverse();
     // Compute the policy-nucleus cap from the final (normalized, possibly noised)
     // prior distribution. Static for the node's lifetime — no visit-based growth.
-    let max_eligible_children = nucleus_count(&candidates, widening);
+    let nucleus = nucleus_count(&candidates, widening);
+    // Phase 4: inject the tactical cells at the root as guaranteed children so an
+    // urgent block/own-win with a low prior is searched (the load-bearing fix —
+    // a leaf override can't fire on a child the nucleus cap never materializes).
+    let tactical = threats::tactical_cells(state);
+    let (edges, mut candidates, max_eligible_children) =
+        split_tactical(candidates, &tactical, nucleus);
     candidates.shrink_to_fit();
     Ok(RustNode {
         state_hash,
@@ -819,7 +953,7 @@ fn owned_root_from_evaluation(
         eval_value: evaluation.value,
         visits: 0,
         value_sum: 0.0,
-        edges: Vec::new(),
+        edges,
         priors: NodePriors::Owned(candidates),
         max_eligible_children,
     })
@@ -1125,7 +1259,7 @@ mod tests {
     fn widening_caps_materialized_edges_under_many_visits() {
         let state = RustHexoState::new();
         let mut search =
-            RustSearch::new(state, &uniform_evaluation(16), 128, 0.20, 1.0, None, wide(0.95, 2, 4))
+            RustSearch::new(state, &uniform_evaluation(16), 128, 0.20, 1.0, None, wide(0.95, 2, 4), 0.0)
                 .unwrap();
         assert_eq!(search.nodes[0].max_eligible_children, 4);
         let mut materialized = 0;
@@ -1147,7 +1281,7 @@ mod tests {
     fn edges_materialize_lazily_in_prior_order() {
         let state = RustHexoState::new();
         let mut search =
-            RustSearch::new(state, &evaluation_with_priors(8), 128, 0.20, 1.0, None, wide_open())
+            RustSearch::new(state, &evaluation_with_priors(8), 128, 0.20, 1.0, None, wide_open(), 0.0)
                 .unwrap();
         for _ in 0..8 {
             let edge_index = search.select_or_materialize_edge(0, 1.5).unwrap();
@@ -1198,7 +1332,7 @@ mod tests {
         let widening = wide_open();
 
         let mut owned_search =
-            RustSearch::new(state.clone(), &eval, 128, 0.20, 1.0, None, widening).unwrap();
+            RustSearch::new(state.clone(), &eval, 128, 0.20, 1.0, None, widening, 0.0).unwrap();
         let mut owned_order = Vec::new();
         for _ in 0..8 {
             let edge_index = owned_search.select_or_materialize_edge(0, 1.5).unwrap();
@@ -1207,7 +1341,7 @@ mod tests {
         }
 
         let mut shared_search =
-            RustSearch::new(state.clone(), &uniform_evaluation(1), 128, 0.20, 1.0, None, widening)
+            RustSearch::new(state.clone(), &uniform_evaluation(1), 128, 0.20, 1.0, None, widening, 0.0)
                 .unwrap();
         shared_search
             .nodes
@@ -1229,7 +1363,7 @@ mod tests {
         let state = RustHexoState::new();
         let widening = wide(0.95, 2, 4);
         let mut search =
-            RustSearch::new(state.clone(), &uniform_evaluation(1), 128, 0.20, 1.0, None, widening)
+            RustSearch::new(state.clone(), &uniform_evaluation(1), 128, 0.20, 1.0, None, widening, 0.0)
                 .unwrap();
         search.nodes.push(shared_from_cache(
             7,
@@ -1260,7 +1394,7 @@ mod tests {
         let eval = evaluation_with_priors(8);
         let widening = wide_open();
         let mut search =
-            RustSearch::new(state.clone(), &uniform_evaluation(1), 128, 0.20, 1.0, None, widening)
+            RustSearch::new(state.clone(), &uniform_evaluation(1), 128, 0.20, 1.0, None, widening, 0.0)
                 .unwrap();
         search.nodes[0] = shared_from_cache(search.root_hash, &state, Arc::new(cache_ready(eval)), widening);
         for _ in 0..3 {
@@ -1289,5 +1423,57 @@ mod tests {
         assert_eq!(before, after);
         assert!(matches!(search.nodes[0].priors, NodePriors::Owned(_)));
         assert_eq!(search.nodes[0].edges.len(), 3);
+    }
+
+    // --- Phase-4 injection is ADDITIVE (owner feedback item 1) ----------------
+
+    #[test]
+    fn injection_is_additive_and_preserves_top_prior_set() {
+        // priors c0>c1>...>c9 (10..1); coords (0,0)..(9,0). nucleus = top-4.
+        let cands = candidates(&[10.0, 9.0, 8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0]);
+        let nucleus = 4;
+        // two LOW-prior tactical cells (ranks 8,9) -> both OUTSIDE the top-4.
+        let tactical = vec![HexCoord { q: 7, r: 0 }, HexCoord { q: 8, r: 0 }];
+        let (forced, rest, cap) = split_tactical(cands, &tactical, nucleus);
+
+        // ADDITIVE: cap = nucleus + 2 out-of-nucleus tactical = 6 (NOT max(4,2)=4).
+        assert_eq!(cap, 6, "cap must be additive, not consume nucleus budget");
+        assert_eq!(forced.len(), 2);
+        let forced_ids: HashSet<PackedCoord> = forced.iter().map(|e| e.action_id).collect();
+        assert!(forced_ids.contains(&pack_coord(HexCoord { q: 7, r: 0 })));
+        assert!(forced_ids.contains(&pack_coord(HexCoord { q: 8, r: 0 })));
+
+        // The full top-4 prior set survives in `rest` (none displaced); widening
+        // fills cap - |forced| = 4 nucleus slots, so the top-4 all materialize
+        // alongside the 2 forced tactical edges.
+        let rest_ids: HashSet<PackedCoord> = rest.iter().map(|c| c.action_id).collect();
+        for q in 0..4i16 {
+            assert!(
+                rest_ids.contains(&pack_coord(HexCoord { q, r: 0 })),
+                "top-prior child c{q} was displaced by injection"
+            );
+        }
+        assert_eq!(cap - forced.len(), nucleus); // 4 nucleus slots still open to widen into
+    }
+
+    #[test]
+    fn injection_tactical_inside_nucleus_costs_no_extra_cap() {
+        let cands = candidates(&[10.0, 9.0, 8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0]);
+        let nucleus = 4;
+        // one HIGH-prior tactical (rank 2, inside top-4) + one outside (rank 9).
+        let tactical = vec![HexCoord { q: 1, r: 0 }, HexCoord { q: 8, r: 0 }];
+        let (forced, _rest, cap) = split_tactical(cands, &tactical, nucleus);
+        // only the out-of-nucleus cell widens the cap: 4 + 1 = 5.
+        assert_eq!(cap, 5);
+        assert_eq!(forced.len(), 2);
+    }
+
+    #[test]
+    fn injection_no_tactical_is_noop() {
+        let cands = candidates(&[3.0, 2.0, 1.0]);
+        let (forced, rest, cap) = split_tactical(cands, &[], 2);
+        assert!(forced.is_empty());
+        assert_eq!(rest.len(), 3);
+        assert_eq!(cap, 2);
     }
 }
