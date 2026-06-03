@@ -1125,7 +1125,7 @@ mod tests {
     fn widening_caps_materialized_edges_under_many_visits() {
         let state = RustHexoState::new();
         let mut search =
-            RustSearch::new(state, &uniform_evaluation(16), 128, 0.20, 1.0, None, wide(0.95, 2, 4))
+            RustSearch::new(state, &uniform_evaluation(16), 128, 0.20, 1.0, None, wide(0.95, 2, 4), 0.0)
                 .unwrap();
         assert_eq!(search.nodes[0].max_eligible_children, 4);
         let mut materialized = 0;
@@ -1147,7 +1147,7 @@ mod tests {
     fn edges_materialize_lazily_in_prior_order() {
         let state = RustHexoState::new();
         let mut search =
-            RustSearch::new(state, &evaluation_with_priors(8), 128, 0.20, 1.0, None, wide_open())
+            RustSearch::new(state, &evaluation_with_priors(8), 128, 0.20, 1.0, None, wide_open(), 0.0)
                 .unwrap();
         for _ in 0..8 {
             let edge_index = search.select_or_materialize_edge(0, 1.5).unwrap();
@@ -1198,7 +1198,7 @@ mod tests {
         let widening = wide_open();
 
         let mut owned_search =
-            RustSearch::new(state.clone(), &eval, 128, 0.20, 1.0, None, widening).unwrap();
+            RustSearch::new(state.clone(), &eval, 128, 0.20, 1.0, None, widening, 0.0).unwrap();
         let mut owned_order = Vec::new();
         for _ in 0..8 {
             let edge_index = owned_search.select_or_materialize_edge(0, 1.5).unwrap();
@@ -1207,7 +1207,7 @@ mod tests {
         }
 
         let mut shared_search =
-            RustSearch::new(state.clone(), &uniform_evaluation(1), 128, 0.20, 1.0, None, widening)
+            RustSearch::new(state.clone(), &uniform_evaluation(1), 128, 0.20, 1.0, None, widening, 0.0)
                 .unwrap();
         shared_search
             .nodes
@@ -1229,7 +1229,7 @@ mod tests {
         let state = RustHexoState::new();
         let widening = wide(0.95, 2, 4);
         let mut search =
-            RustSearch::new(state.clone(), &uniform_evaluation(1), 128, 0.20, 1.0, None, widening)
+            RustSearch::new(state.clone(), &uniform_evaluation(1), 128, 0.20, 1.0, None, widening, 0.0)
                 .unwrap();
         search.nodes.push(shared_from_cache(
             7,
@@ -1260,7 +1260,7 @@ mod tests {
         let eval = evaluation_with_priors(8);
         let widening = wide_open();
         let mut search =
-            RustSearch::new(state.clone(), &uniform_evaluation(1), 128, 0.20, 1.0, None, widening)
+            RustSearch::new(state.clone(), &uniform_evaluation(1), 128, 0.20, 1.0, None, widening, 0.0)
                 .unwrap();
         search.nodes[0] = shared_from_cache(search.root_hash, &state, Arc::new(cache_ready(eval)), widening);
         for _ in 0..3 {
