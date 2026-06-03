@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Hexo Match</title>
-<link rel="stylesheet" href="/static/styles.css?v=20260530-qol">
+<link rel="stylesheet" href="/static/styles.css?v=20260602-gamenav">
 </head>
 <body>
 <header>
@@ -47,6 +47,11 @@
         </div>
       </div>
       <div class="replay-bar" aria-label="Replay controls">
+        <div class="game-nav" id="gameNav" hidden>
+          <button id="gamePrevBtn" type="button" aria-label="Previous game (Left arrow)">&#9664; Prev</button>
+          <span id="gameNavLabel" class="game-nav-label">Game</span>
+          <button id="gameNextBtn" type="button" aria-label="Next game (Right arrow)">Next &#9654;</button>
+        </div>
         <div class="replay-row">
           <div class="replay-buttons">
             <button id="replayStartBtn" type="button" aria-label="Jump to start">|&lt;</button>
@@ -254,6 +259,6 @@
     </div>
   </section>
 </main>
-<script src="/static/app.js?v=20260601-epoch-window"></script>
+<script src="/static/app.js?v=20260602-gamenav2"></script>
 </body>
 </html>

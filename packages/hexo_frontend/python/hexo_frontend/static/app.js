@@ -5,7 +5,7 @@ const FIT_LEGAL_RADIUS = 5;
 const HISTORY_ALL_RUNS = "__all__";
 const HISTORY_PAGE_SIZE = 50;
 const HISTORY_AUTOLOAD_PAGE_SIZE = 500;
-const HISTORY_REFRESH_INTERVAL_MS = 15000;
+const HISTORY_REFRESH_INTERVAL_MS = 7000;
 const ARTIFACT_PAGE_SIZE = 50;
 
 let state = null;
@@ -52,6 +52,9 @@ let historyPage = {
   countRequestKey: "",
 };
 let selectedHistoryKey = "";
+// The current ordered game list (filtered + sorted), captured whenever the
+// history page renders, so the loaded-game viewer can step Prev/Next through it.
+let historyOrderedItems = [];
 let historyView = false;
 let polling = false;
 let pollTimer = null;
@@ -220,6 +223,21 @@ on("replayPlayBtn", "click", toggleReplayPlay);
 on("replayNextBtn", "click", () => setReplayIndex(viewedPlacementCount() + 1));
 on("replayLiveBtn", "click", () => setReplayIndex(totalPlacements()));
 on("replaySlider", "input", event => setReplayIndex(Number(event.target.value)));
+on("gamePrevBtn", "click", () => navigateAdjacentGame(-1));
+on("gameNextBtn", "click", () => navigateAdjacentGame(1));
+// Keyboard Left/Right steps between games while a list-backed replay is loaded.
+// Ignored when typing in a field, or when modifier keys are held, so it never
+// hijacks slider/native arrow behavior.
+window.addEventListener("keydown", event => {
+  if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+  if (event.altKey || event.ctrlKey || event.metaKey) return;
+  const el = document.activeElement;
+  const tag = el && el.tagName ? el.tagName.toLowerCase() : "";
+  if (tag === "input" || tag === "select" || tag === "textarea") return;
+  if (currentHistoryGameIndex() < 0) return;
+  event.preventDefault();
+  navigateAdjacentGame(event.key === "ArrowLeft" ? -1 : 1);
+});
 window.addEventListener("resize", () => { if (state) render(); });
 boardArea.addEventListener("click", handleBoardClick);
 bindBoardViewEvents();
@@ -590,6 +608,49 @@ async function loadTrainingHistory(runName, artifactPath, recordIndex = 0) {
   }
 }
 
+// Index of the currently-loaded history game within the ordered list, or -1.
+function currentHistoryGameIndex() {
+  if (!historyView || !selectedHistoryKey || !historyOrderedItems.length) return -1;
+  return historyOrderedItems.findIndex(item => historyItemKey(item) === selectedHistoryKey);
+}
+
+// Step Prev/Next through the current ordered game list and load that game's
+// replay. Bounded (no wrap): callers/UI disable at the ends. Works for any run
+// (dense_cnn included) since it just reuses the row's run/path/record_index.
+function navigateAdjacentGame(direction) {
+  if (pendingRequest) return;
+  const idx = currentHistoryGameIndex();
+  if (idx < 0) return;
+  const nextIdx = idx + direction;
+  if (nextIdx < 0 || nextIdx >= historyOrderedItems.length) return;
+  const item = historyOrderedItems[nextIdx];
+  if (!item) return;
+  loadTrainingHistory(item.run || (trainingRun && trainingRun.name), item.path, Number(item.record_index || 0));
+}
+
+// Show the Prev/Next game bar only while a list-backed history game is loaded;
+// label "Game N / M" and disable the ends. Hidden for live play and one-off
+// loads with no list context (index -1), so it never clutters normal play.
+function renderGameNav() {
+  const nav = document.getElementById("gameNav");
+  if (!nav) return;
+  const idx = currentHistoryGameIndex();
+  const total = historyOrderedItems.length;
+  const show = idx >= 0 && total > 1;
+  nav.hidden = !show;
+  if (!show) return;
+  const label = document.getElementById("gameNavLabel");
+  if (label) label.textContent = `Game ${idx + 1} / ${total}`;
+  // Disable only at the list ends. A mid-load (pendingRequest) click is already a
+  // no-op via navigateAdjacentGame's guard, so gating disabled on pendingRequest
+  // here would just leave the buttons stuck disabled after a load settles (no
+  // render fires when pending clears).
+  const prev = document.getElementById("gamePrevBtn");
+  const next = document.getElementById("gameNextBtn");
+  if (prev) prev.disabled = idx <= 0;
+  if (next) next.disabled = idx >= total - 1;
+}
+
 async function post(url, payload, options = {}) {
   if (pendingRequest) return;
   abortPoll();
@@ -821,6 +882,7 @@ function render() {
   renderBotPanel();
   renderTurnOverlay();
   renderReplay();
+  renderGameNav();
 }
 
 function renderControls() {
@@ -2370,16 +2432,20 @@ function renderTraining() {
   const history = status.history || {};
   const watchdog = status.watchdog || {};
   const calibration = status.calibration || {};
+  // Core run stats (always meaningful). The calibration/watchdog resource
+  // metrics are appended only when their source is actually present — runs that
+  // don't emit them (hexgt has no watchdog/calibration; current dense_cnn emits
+  // no watchdog) hide the metric instead of showing a dead "--".
   const statusMetrics = [
     summaryMetric("Stage", runStageLabel(status)),
     summaryMetric("Recent Games", firstPresent(history.games, histories.length)),
     summaryMetric("Epochs", epochs.length ? `${epochs[0]}-${epochs[epochs.length - 1]}` : "--"),
     summaryMetric("P0 / P1", `${firstPresent(history.p0_wins, p0Wins)} / ${firstPresent(history.p1_wins, p1Wins)}`),
     summaryMetric("Avg Len", formatDecimal(firstPresent(history.avg_length, averageHistoryLength(histories)), 1)),
-    summaryMetric("Selfplay", formatRate(calibration.selfplay_pos_s, "pos/s")),
-    summaryMetric("RAM Free", formatGib(watchdog.free_ram_gb)),
-    summaryMetric("GPU Free", formatGib(watchdog.gpu_free_gb)),
   ];
+  if (asFinite(calibration.selfplay_pos_s) !== null) statusMetrics.push(summaryMetric("Selfplay", formatRate(calibration.selfplay_pos_s, "pos/s")));
+  if (asFinite(watchdog.free_ram_gb) !== null) statusMetrics.push(summaryMetric("RAM Free", formatGib(watchdog.free_ram_gb)));
+  if (asFinite(watchdog.gpu_free_gb) !== null) statusMetrics.push(summaryMetric("GPU Free", formatGib(watchdog.gpu_free_gb)));
   const fallbackMetrics = latest && latest.summary
     ? Object.entries(latest.summary).slice(0, 4).map(([key, value]) => summaryMetric(key, value))
     : [summaryMetric("Artifacts", artifacts.length)];
@@ -2438,6 +2504,7 @@ function renderGameHistoryPage() {
 
   const usingServerPage = historyPage.loaded || historyPage.loading || historyPage.items.length > 0;
   const filtered = usingServerPage ? histories : sortedHistoryItems(filteredHistoryItems(histories));
+  historyOrderedItems = filtered;  // remember the ordered list for Prev/Next game nav
   const selected = selectedHistoryItem(histories, filtered);
   const visible = usingServerPage ? filtered : filtered.slice(0, historyVisibleLimit);
   historyOverview.innerHTML = renderHistoryOverview(histories, filtered);
@@ -2709,7 +2776,6 @@ function renderHistoryOverview(histories, filtered) {
   const p1Wins = filtered.filter(item => item.winner === "player1").length;
   const completed = filtered.filter(item => item.status === "completed").length;
   const evalSummary = latestDiagnosticSummary(histories, "evaluation");
-  const selfplaySummary = latestDiagnosticSummary(histories, "selfplay");
   const liveStatus = latestRunStatusForHistoryPage();
   const targets = currentHistoryTargets();
   const liveWatchdog = liveStatus && liveStatus.watchdog ? liveStatus.watchdog : {};
@@ -2735,14 +2801,18 @@ function renderHistoryOverview(histories, filtered) {
     : historyPage.loaded || historyPage.items.length
       ? `${filtered.length} loaded`
       : `${filtered.length} / ${histories.length}`;
-  const cards = [
-    ["Stage", runStageLabel(liveStatus), "Live trainer"],
-    ["Runs", filteredRunCount || runCount || "--", historySelectedRun === HISTORY_ALL_RUNS ? "Filtered / loaded runs" : "Selected run"],
+  // "Runs" only matters in the multi-run (All runs) view; for a single selected
+  // run it is always "1" — drop it there to keep the strip scannable.
+  const cards = [["Stage", runStageLabel(liveStatus), "Live trainer"]];
+  if (historySelectedRun === HISTORY_ALL_RUNS) {
+    cards.push(["Runs", filteredRunCount || runCount || "--", "Filtered / loaded runs"]);
+  }
+  cards.push(
     ["Games", gameCountText, historyPage.loaded || historyPage.items.length ? "Paged result set" : "Filtered / recent"],
     ["Epochs", epochs.length ? `${epochs[0]}-${epochs[epochs.length - 1]}` : "--", `${epochs.length} observed`],
     ["Winners", historyWinRateText(currentSelfplayStats), historyWinRateSubtext(currentSelfplayStats, currentLabel)],
     ["Avg Length", avgLength, "Moves per game"],
-  ];
+  );
   const liveSpeed = liveSelfplay && liveSelfplay.search_pos_s !== undefined && liveSelfplay.search_pos_s !== null;
   const liveSelfplayEpoch = asFinite(liveSelfplay && liveSelfplay.epoch);
   const liveSelfplayEpochLabel = liveSelfplayEpoch !== null ? `e${liveSelfplayEpoch}` : "selfplay";
@@ -2767,7 +2837,8 @@ function renderHistoryOverview(histories, filtered) {
   } else if (evalSummary) {
     cards.push(["Evaluation", historyDiagnosticsText({ evaluation: { summary: evalSummary } }), "Latest diagnostics"]);
   }
-  if (selfplaySummary) cards.push(["Selfplay", historyDiagnosticsText({ selfplay: { summary: selfplaySummary } }), "Latest diagnostics"]);
+  // NOTE: the old "Selfplay (latest diagnostics)" card was dropped — it duplicated
+  // the live Speed card + the per-epoch self-play column in Epoch Progress.
   return cards.map(([label, value, sub]) => `
     <div class="history-metric-card">
       <span>${escapeText(label)}</span>
@@ -2798,17 +2869,34 @@ function renderLearningHealth(runs) {
   if (!health) return "";
   const messages = Array.isArray(health.messages) ? health.messages : [];
   const status = health.status || "collecting";
+  // Head-to-head WIN RATE is the signal that matters; survival-turns is a
+  // SealBot-only proxy kept as secondary. Each metric is rendered only when its
+  // value is present — dead/absent fields (e.g. the retired exact-128 /
+  // classical-replay / policy-imitation overlays, never populated for hexgt or
+  // current dense_cnn runs) are HIDDEN, not shown as "--".
+  const winRate = asFinite(health.latest_eval_win_rate);
+  const wins = asFinite(health.latest_eval_wins);
+  const games = asFinite(health.latest_eval_games);
+  const bestWr = asFinite(health.best_eval_win_rate);
+  const bestEpoch = asFinite(health.best_eval_win_epoch);
+  const lossDelta = asFinite(health.loss_delta_from_first);
+  const wrDelta = asFinite(health.eval_win_rate_delta);
+  const latestLoss = asFinite(health.latest_loss);
   const metrics = [
-    ["Latest", health.latest_epoch ? `Epoch ${health.latest_epoch}` : "--"],
-    ["Loss", health.latest_loss !== null && health.latest_loss !== undefined ? formatDecimal(health.latest_loss, 3) : "--"],
-    ["Eval", health.latest_eval_mean_turns !== null && health.latest_eval_mean_turns !== undefined ? `${formatDecimal(health.latest_eval_mean_turns, 1)} turns` : "--"],
-    ["Best", health.best_eval_mean_turns !== null && health.best_eval_mean_turns !== undefined ? `${formatDecimal(health.best_eval_mean_turns, 1)} turns` : "--"],
-    ["Speed", formatRate(health.latest_selfplay_pos_s, "pos/s")],
-    ["Exact", health.latest_exact_128 ? "128 sims" : "--"],
-    ["Classical", formatPercent(health.latest_classical_fraction)],
-    ["Policy@1", formatPercent(health.latest_policy_top1)],
-    ["Target Mass", formatPercent(health.latest_policy_target_mass, 1)],
-  ];
+    ["Epoch", health.latest_epoch ? `${health.latest_epoch}` : null],
+    ["Loss", latestLoss !== null
+      ? `${formatDecimal(latestLoss, 3)}${lossDelta !== null ? ` ${lossDelta <= 0 ? "▼" : "▲"}${formatDecimal(Math.abs(lossDelta), 3)}` : ""}`
+      : null],
+    ["Win rate", winRate !== null
+      ? `${(winRate * 100).toFixed(0)}%${wins !== null && games !== null ? ` (${wins}/${games})` : ""}${wrDelta !== null ? ` ${wrDelta >= 0 ? "▲" : "▼"}${(Math.abs(wrDelta) * 100).toFixed(0)}%` : ""}`
+      : null],
+    ["Best WR", bestWr !== null ? `${(bestWr * 100).toFixed(0)}%${bestEpoch !== null ? ` @e${bestEpoch}` : ""}` : null],
+    ["Survival", asFinite(health.latest_eval_mean_turns) !== null ? `${formatDecimal(health.latest_eval_mean_turns, 1)} turns` : null],
+    ["Speed", asFinite(health.latest_selfplay_pos_s) !== null ? formatRate(health.latest_selfplay_pos_s, "pos/s") : null],
+    // dense_cnn-only training overlays — shown only when actually emitted.
+    ["Classical", asFinite(health.latest_classical_fraction) !== null ? formatPercent(health.latest_classical_fraction) : null],
+    ["Policy@1", asFinite(health.latest_policy_top1) !== null ? formatPercent(health.latest_policy_top1) : null],
+  ].filter(([, value]) => value !== null && value !== undefined);
   return `<section class="learning-health-panel ${learningHealthClass(status)}" aria-label="Learning health">
     <div class="learning-health-head">
       <span>Learning Health</span>
@@ -2854,19 +2942,22 @@ function renderEvaluationTrend(runs) {
     return `<div class="eval-trend-empty">No SealBot evaluation diagnostics yet.</div>`;
   }
   const latest = rows[rows.length - 1];
+  // "Best" by WIN RATE (head-to-head strength), not survival-turns; tie-break on
+  // more games. The trend opponent is run-dependent (hexgt evals vs dense_cnn,
+  // dense_cnn evals vs SealBot), so the heading stays opponent-neutral.
+  const winRateOf = item => { const g = Number(item.games || 0); return g > 0 ? Number(item.wins || 0) / g : 0; };
   const best = rows.reduce((current, item) => {
-    const currentTurns = Number(current.mean_turns || 0);
-    const itemTurns = Number(item.mean_turns || 0);
-    if (itemTurns !== currentTurns) return itemTurns > currentTurns ? item : current;
-    return Number(item.wins || 0) > Number(current.wins || 0) ? item : current;
+    const a = winRateOf(item), b = winRateOf(current);
+    if (a !== b) return a > b ? item : current;
+    return Number(item.games || 0) > Number(current.games || 0) ? item : current;
   }, rows[0]);
-  return `<section class="eval-trend-panel" aria-label="SealBot evaluation trend">
+  return `<section class="eval-trend-panel" aria-label="Evaluation trend">
     <div class="eval-trend-head">
       <div>
-        <span>SealBot Evaluation Trend</span>
+        <span>Evaluation Trend</span>
         <strong>${escapeText(evalTrendSummary(latest))}</strong>
       </div>
-      <small>Best survival: ${escapeText(evalTrendSummary(best))}</small>
+      <small>Best win rate: ${escapeText(evalTrendSummary(best))}</small>
     </div>
     <div class="eval-trend-list">
       ${rows.slice(-12).map(evalTrendRow).join("")}
@@ -2883,15 +2974,17 @@ function evalTrendRow(item) {
   const cls = wins > 0 ? "has-win" : "no-win";
   return `<div class="eval-trend-row ${cls}">
     <strong>Epoch ${escapeText(item.epoch)}</strong>
+    <span>${escapeText(winRate)} win</span>
     <span>${escapeText(`${wins}-${losses}`)}</span>
     <span>${escapeText(meanTurns)} turns</span>
-    <span>${escapeText(winRate)} win</span>
   </div>`;
 }
 
 function evalTrendSummary(item) {
   if (!item) return "--";
-  return `E${item.epoch}: ${Number(item.wins || 0)}-${Number(item.losses || 0)}, ${formatDecimal(item.mean_turns, 1)} turns`;
+  const games = Number(item.games || 0);
+  const winRate = games > 0 ? ` (${((Number(item.wins || 0) / games) * 100).toFixed(0)}%)` : "";
+  return `E${item.epoch}: ${Number(item.wins || 0)}-${Number(item.losses || 0)}${winRate}, ${formatDecimal(item.mean_turns, 1)}t`;
 }
 
 function renderEpochProgress(runs) {
@@ -2918,32 +3011,98 @@ function renderEpochProgress(runs) {
   </section>`;
 }
 
+// One labeled stat line inside a main epoch cell (dim uppercase label + value).
+function epochStat(label, value, extraClass = "") {
+  return `<span class="epoch-stat ${extraClass}"><i>${escapeText(label)}</i> ${escapeText(value)}</span>`;
+}
+
+// One labeled chip inside the detail sub-row (dim label + value).
+function epochChip(label, value, extraClass = "") {
+  return `<span class="epoch-chip ${extraClass}"><i>${escapeText(label)}</i> ${escapeText(value)}</span>`;
+}
+
+// Optional full-width detail band beneath an epoch row: a Buffer group and a
+// per-head Losses group (total + policy/value/opp + every short-term-value head).
+// Rendered only when the producer emits the nested `buffer` object (hexgt RL);
+// dense_cnn rows have no buffer, so this returns "" and the row is unchanged
+// (additive / dense-safe).
+function epochProgressDetail(buf) {
+  if (!buf) return "";
+  const k = (n) => (asFinite(n) === null ? "--" : `${Math.round(Number(n) / 1000)}k`);
+  const windowSpan = buf.window_span ? ` [${buf.window_span}]` : "";
+  const bufferChips = [
+    epochChip("pool", `${k(buf.samples)}/${k(buf.cap)}`),
+    epochChip("window", `${asFinite(buf.window_epochs) ?? "--"}ep${windowSpan}`),
+    epochChip("decay", formatDecimal(buf.decay, 2)),
+    epochChip("train", `${asFinite(buf.train_steps) ?? "--"}×${asFinite(buf.train_batch) ?? "--"} = ${k(buf.train_samples_per_epoch)}/ep`),
+  ].join("");
+
+  // Per-head losses; each head is emitted only when present, so a run missing a
+  // head (e.g. pre-deploy epochs without stvalue) just omits that chip.
+  const lossChips = [];
+  if (asFinite(buf.loss_total) !== null) lossChips.push(epochChip("Σ total", formatDecimal(buf.loss_total, 3), "epoch-chip-total"));
+  if (asFinite(buf.loss_policy) !== null) lossChips.push(epochChip("policy", formatDecimal(buf.loss_policy, 3)));
+  if (asFinite(buf.loss_value) !== null) lossChips.push(epochChip("value", formatDecimal(buf.loss_value, 3)));
+  if (asFinite(buf.loss_opp) !== null) lossChips.push(epochChip("opp", formatDecimal(buf.loss_opp, 3)));
+  // Short-term-value heads: every loss_stvalue_<h> the bridge surfaced, by horizon.
+  Object.keys(buf)
+    .map(key => /^loss_stvalue_(\d+)$/.exec(key))
+    .filter(Boolean)
+    .sort((a, b) => Number(a[1]) - Number(b[1]))
+    .forEach(match => {
+      if (asFinite(buf[match[0]]) !== null) lossChips.push(epochChip(`stv${match[1]}`, formatDecimal(buf[match[0]], 3)));
+    });
+
+  const lossGroup = lossChips.length
+    ? `<div class="epoch-detail-group"><span class="epoch-detail-label">Losses</span>${lossChips.join("")}</div>`
+    : "";
+  return `<div class="epoch-progress-detail">
+    <div class="epoch-detail-group"><span class="epoch-detail-label">Buffer</span>${bufferChips}</div>
+    ${lossGroup}
+  </div>`;
+}
+
 function epochProgressRow(item) {
   const selfplay = item.selfplay || {};
   const training = item.training || {};
   const evaluation = item.evaluation || {};
   const d6 = item.d6 || {};
   const checkpoint = item.checkpoint || {};
+  const buf = selfplay.buffer || null;
+  const status = item.status || "partial";
+
+  // --- Self-play cell: games / speed / length, each on its own labeled line ---
   const samplesAdded = asFinite(selfplay.samples_added);
-  const selfplayRate = formatRate(selfplay.search_positions_per_second, "pos/s");
-  let selfplayText = samplesAdded !== null
-    ? `${samplesAdded} samples | ${selfplayRate}`
-    : (selfplay.search_positions_per_second !== undefined && selfplay.search_positions_per_second !== null
-      ? selfplayRate
-      : "pending");
-  // Game-length stats (mean/median/max/stdev), appended when the producer emits
-  // them (omitted otherwise, so dense_cnn runs are unaffected).
+  const hasRate = selfplay.search_positions_per_second !== undefined && selfplay.search_positions_per_second !== null;
+  const spLines = [];
+  if (samplesAdded !== null) spLines.push(epochStat("games", `${samplesAdded} smp`));
+  if (hasRate) spLines.push(epochStat("speed", formatRate(selfplay.search_positions_per_second, "pos/s")));
   const lenMean = asFinite(selfplay.game_length_mean);
   const lenMed = asFinite(selfplay.game_length_median);
   if (lenMean !== null || lenMed !== null) {
-    selfplayText += ` | len μ${formatDecimal(lenMean, 1)} med ${formatDecimal(lenMed, 0)}`
-      + ` max ${asFinite(selfplay.game_length_max) ?? "--"} σ${formatDecimal(selfplay.game_length_stdev, 1)}`;
+    spLines.push(epochStat("len", `μ${formatDecimal(lenMean, 1)} · med ${formatDecimal(lenMed, 0)}`
+      + ` · max ${asFinite(selfplay.game_length_max) ?? "--"} · σ${formatDecimal(selfplay.game_length_stdev, 1)}`));
   }
-  const trainText = (training.loss !== undefined && training.loss !== null)
-    ? `loss ${formatDecimal(training.loss, 3)} | C ${formatPercent(classicalReplayFraction(training))} | P@1 ${formatPercent(policyTop1(training))}`
-    : training.progress
-      ? `${formatTrainingProgress({ ...training.progress, epoch: item.epoch })} | ${trainingProgressSubtext(training.progress)}`
-    : "pending";
+  const selfplayCell = spLines.length ? spLines.join("") : epochStat("", "pending", "muted");
+
+  // --- Train cell: total loss, then (when present) classical-replay % and policy
+  // top-1. Per-head losses live in the detail band below (hexgt); dense_cnn keeps
+  // C / P@1 here and just omits the absent metrics.
+  const trainLines = [];
+  const totalLoss = asFinite(training.loss);
+  if (totalLoss !== null) {
+    trainLines.push(epochStat("loss", formatDecimal(totalLoss, 3)));
+    const cFrac = classicalReplayFraction(training);
+    if (cFrac !== null) trainLines.push(epochStat("C", formatPercent(cFrac)));
+    const p1 = policyTop1(training);
+    if (p1 !== null) trainLines.push(epochStat("P@1", formatPercent(p1)));
+  } else if (training.progress) {
+    trainLines.push(epochStat("", formatTrainingProgress({ ...training.progress, epoch: item.epoch })));
+    trainLines.push(epochStat("", trainingProgressSubtext(training.progress), "muted"));
+  }
+  const trainCell = trainLines.length ? trainLines.join("") : epochStat("", "pending", "muted");
+
+  // --- Eval / D6 / checkpoint: single short value each (unchanged content) ---
   const evalText = (evaluation.games !== undefined && evaluation.games !== null)
     ? `${Number(evaluation.wins || 0)}-${Number(evaluation.losses || 0)} | ${formatDecimal(evaluation.mean_turns, 1)} turns`
     : "pending";
@@ -2951,15 +3110,16 @@ function epochProgressRow(item) {
     ? `${d6.preview_symmetries.slice(0, 6).join(",")}${d6.preview_symmetries.length > 6 ? "..." : ""}`
     : (d6.mode ? "random" : "pending");
   const checkpointText = checkpoint.path || checkpoint.name ? "saved" : "pending";
-  const status = item.status || "partial";
-  return `<div class="epoch-progress-row ${status === "completed" ? "completed" : "partial"}">
+
+  const mainRow = `<div class="epoch-progress-row ${status === "completed" ? "completed" : "partial"}">
     <strong>Epoch ${escapeText(item.epoch)}</strong>
-    <span>${escapeText(selfplayText)}</span>
-    <span>${escapeText(trainText)}</span>
+    <div class="epoch-cell">${selfplayCell}</div>
+    <div class="epoch-cell">${trainCell}</div>
     <span>${escapeText(evalText)}</span>
     <span>${escapeText(d6Text)}</span>
     <span>${escapeText(checkpointText)}</span>
   </div>`;
+  return `<div class="epoch-progress-group">${mainRow}${epochProgressDetail(buf)}</div>`;
 }
 
 function classicalReplayFraction(training) {
