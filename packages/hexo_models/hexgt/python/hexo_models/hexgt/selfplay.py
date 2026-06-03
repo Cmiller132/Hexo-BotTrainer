@@ -460,7 +460,11 @@ def run_selfplay_games(
             # Persist the full game record (incl. the terminal/winning move).
             _write_game_record(record_file, game, winner, truncated, selfplay.max_actions)
             finalized = finalize_game_samples(
-                game["pending"], winner, horizons, truncated=truncated
+                game["pending"],
+                winner,
+                horizons,
+                truncated=truncated,
+                soft_z_lambda=config.samples.soft_z_lambda,
             )
             npz_path = output_dir / f"epoch_{epoch:06d}_game_{int(game['search_key']):06d}.npz"
             write_compact_shard(npz_path, finalized, short_term_value_horizons=horizons)

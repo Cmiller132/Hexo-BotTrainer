@@ -108,6 +108,13 @@ class HexgtSampleConfig:
     # the new rep deliberately cannot represent). Surviving positions renormalize
     # over the in-set candidates. Set to 1.0 to disable pruning.
     bc_prune_max_dropped_mass: float = 0.15
+    # Soft-Z value target (Willemsen/Baier/Kaisers 2022): the main value label is
+    # the convex blend ``(1 - soft_z_lambda) * z + soft_z_lambda * root_value``
+    # where ``z`` is the hard game outcome and ``root_value`` is the MCTS root
+    # value at the position. Recalibrates the saturated +-1 label / +0.82 optimism
+    # bias. 0.0 == pure hard outcome; start 0.5, anneal ~0.3->0.7 (see
+    # docs/analysis/HEXGT_TSS_AND_SOFT_VALUE_DESIGN.md PART 2).
+    soft_z_lambda: float = 0.5
 
 
 @dataclass(frozen=True, slots=True)
@@ -233,6 +240,7 @@ def parse_hexgt_config(raw: Mapping[str, Any] | None) -> HexgtConfig:
             policy_surprise_uniform_fraction=float(samples.get("policy_surprise_uniform_fraction", 0.5)),
             policy_surprise_max_weight=float(samples.get("policy_surprise_max_weight", 8.0)),
             bc_prune_max_dropped_mass=float(samples.get("bc_prune_max_dropped_mass", 0.15)),
+            soft_z_lambda=float(samples.get("soft_z_lambda", 0.5)),
         ),
         selfplay=HexgtSelfPlayConfig(
             search_visits=int(selfplay.get("search_visits", 128)),

@@ -264,3 +264,94 @@ def test_finalize_truncated_game_is_a_draw() -> None:
     assert finalized[0].value == 0.0
     assert finalized[0].metadata["value_target_reason"] == "max_actions_draw"
     assert finalized[0].short_term_value == ()
+
+
+def _softz_pending(samples: Any) -> list[Any]:
+    def mk(player: str, turn: int, policy: tuple[tuple[int, float], ...]) -> Any:
+        return samples.Model1SampleData(
+            game_id="g",
+            turn_index=turn,
+            current_player=player,
+            phase="Opening",
+            center=(0, 0),
+            stones=(),
+            legal_action_ids=(1, 2),
+            policy=policy,
+        )
+
+    # root_value is in the *side-to-move* perspective at each decision.
+    return [
+        ("player0", mk("player0", 0, ((1, 1.0),)), 0.2),   # winner -> z=+1
+        ("player1", mk("player1", 1, ((2, 1.0),)), -0.3),  # loser  -> z=-1
+        ("player0", mk("player0", 2, ((1, 1.0),)), 0.5),   # winner -> z=+1
+    ]
+
+
+def test_soft_z_lambda_zero_is_hard_outcome() -> None:
+    samples = importlib.import_module("hexo_models.dense_cnn.samples")
+    pending = _softz_pending(samples)
+    finalized = samples.finalize_game_samples(pending, winner="player0", horizons=(1,), soft_z_lambda=0.0)
+    assert [f.value for f in finalized] == [1.0, -1.0, 1.0]
+
+
+def test_soft_z_lambda_blends_outcome_with_root_value() -> None:
+    samples = importlib.import_module("hexo_models.dense_cnn.samples")
+    pending = _softz_pending(samples)
+    lam = 0.5
+    finalized = samples.finalize_game_samples(pending, winner="player0", horizons=(1,), soft_z_lambda=lam)
+    # value = (1-lam)*z + lam*root_value, root_value already in player perspective.
+    assert finalized[0].value == pytest.approx(0.5 * 1.0 + 0.5 * 0.2)    # +0.6
+    assert finalized[1].value == pytest.approx(0.5 * -1.0 + 0.5 * -0.3)  # -0.65
+    assert finalized[2].value == pytest.approx(0.5 * 1.0 + 0.5 * 0.5)    # +0.75
+    # The blend stays within the head's valid range.
+    assert all(-1.0 <= f.value <= 1.0 for f in finalized)
+
+
+def test_soft_z_lambda_one_is_pure_root_value() -> None:
+    samples = importlib.import_module("hexo_models.dense_cnn.samples")
+    pending = _softz_pending(samples)
+    finalized = samples.finalize_game_samples(pending, winner="player0", horizons=(1,), soft_z_lambda=1.0)
+    assert [f.value for f in finalized] == pytest.approx([0.2, -0.3, 0.5])
+
+
+def test_soft_z_draw_row_carries_root_value() -> None:
+    samples = importlib.import_module("hexo_models.dense_cnn.samples")
+    sample = samples.Model1SampleData(
+        game_id="g", turn_index=0, current_player="player0", phase="Opening",
+        center=(0, 0), stones=(), legal_action_ids=(1,), policy=((1, 1.0),),
+    )
+    # Draw: hard z=0, so the blended target is purely lam*root_value.
+    finalized = samples.finalize_game_samples(
+        [("player0", sample, 0.4)], winner=None, horizons=(1,), truncated=True, soft_z_lambda=0.5
+    )
+    assert finalized[0].value == pytest.approx(0.5 * 0.4)
+
+
+def test_soft_z_blend_maps_onto_value_bins_consistently() -> None:
+    """The blended scalar must flow through the unchanged 65-bin mapping and
+    decode back to the same scalar (and share sign with the outcome)."""
+
+    samples = importlib.import_module("hexo_models.dense_cnn.samples")
+    losses = importlib.import_module("hexo_models.hexgt.losses")
+    constants = importlib.import_module("hexo_models.hexgt.constants")
+    import torch
+
+    pending = _softz_pending(samples)
+    finalized = samples.finalize_game_samples(pending, winner="player0", horizons=(1,), soft_z_lambda=0.5)
+    bin_centers = torch.linspace(-1.0, 1.0, constants.VALUE_BINS)
+    for f in finalized:
+        target = losses.scalar_to_binned_target(torch.tensor(float(f.value)))
+        assert target.shape == (constants.VALUE_BINS,)
+        assert float(target.sum()) == pytest.approx(1.0)            # two-bin soft target normalized
+        decoded = float((target * bin_centers).sum())               # expectation == original scalar
+        assert decoded == pytest.approx(f.value, abs=1e-5)
+    # Winner row stays positive, loser row stays negative after the blend+binning.
+    assert finalized[0].value > 0 and finalized[1].value < 0
+
+
+def test_soft_z_lambda_out_of_range_rejected() -> None:
+    samples = importlib.import_module("hexo_models.dense_cnn.samples")
+    pending = _softz_pending(samples)
+    for bad in (-0.1, 1.5):
+        with pytest.raises(ValueError):
+            samples.finalize_game_samples(pending, winner="player0", horizons=(1,), soft_z_lambda=bad)
