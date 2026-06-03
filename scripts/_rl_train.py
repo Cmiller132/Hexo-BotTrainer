@@ -161,6 +161,11 @@ def main():
     ap.add_argument("--batch", type=int, default=128)
     ap.add_argument("--lr", type=float, default=2.0e-4)
     ap.add_argument("--warmup", type=int, default=200)
+    # Aux loss weight shared by the 3 short-term-value (lookahead) heads. Default
+    # 0.25 (the config default) is a no-op; the run passes 0.10 so the 3 stv heads
+    # collectively (~0.10x7.8=0.78 effective) ~= the value head instead of ~3x it,
+    # restoring policy dominance of the shared trunk (~main 62 / aux 38).
+    ap.add_argument("--short-term-value-weight", type=float, default=0.25)
     ap.add_argument("--replay-window-epochs", type=int, default=8)  # MINIMUM window (floor)
     # Recency-weighted, cap-bounded replay (KataGo-style). The window grows beyond
     # the floor to include as many recent epochs as fit under --replay-pool-cap
@@ -217,7 +222,8 @@ def main():
         "device": str(device),
         "architecture": {"candidate_radius": args.n,
                          "short_term_value_horizons": list(STV_HORIZONS)},
-        "training": {"learning_rate": args.lr, "warmup_steps": args.warmup, "batch_size": args.batch},
+        "training": {"learning_rate": args.lr, "warmup_steps": args.warmup, "batch_size": args.batch,
+                     "short_term_value_weight": args.short_term_value_weight},
         "selfplay": {
             "search_visits": args.visits, "max_actions": args.max_actions,
             "c_puct": args.c_puct, "root_policy_temperature": args.root_policy_temperature,
@@ -307,7 +313,9 @@ def main():
         f"compile={compiled} ===", fh)
     log(f"    epochs={args.epochs} games/epoch={args.games_per_epoch} visits={args.visits} "
         f"active={args.active} vbatch={args.vbatch} | train_steps/epoch={args.train_steps_per_epoch} "
-        f"batch={args.batch} lr={args.lr} replay_window={args.replay_window_epochs} ep", fh)
+        f"batch={args.batch} lr={args.lr} replay_window={args.replay_window_epochs} ep | "
+        f"loss_w: policy={cfg.training.policy_weight} value={cfg.training.value_weight} "
+        f"opp={cfg.training.opp_policy_weight} stv={cfg.training.short_term_value_weight}", fh)
 
     def save(tag, rl_epoch, epoch_train_complete=True):
         payload = {
