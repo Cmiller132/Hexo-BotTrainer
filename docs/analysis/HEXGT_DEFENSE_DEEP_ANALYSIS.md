@@ -190,6 +190,36 @@ the net still can't represent defenses it has now seen in-distribution.
 
 ---
 
+## ADDENDUM — quantified side-to-move OPTIMISM bias (both players think they're winning)
+Same identical board, value evaluated from each side's perspective (FirstStone
+positions, owner-swap exact; 250 positions each):
+
+| set | mean(vA+vB) | median | BOTH predict win | sum>+0.5 | sum<−0.5 |
+|---|---|---|---|---|---|
+| self-play (in-dist) | **+0.82** | +0.80 | **51%** | 196/250 | **0/250** |
+| eval (OOD) | +0.60 | +0.52 | 38% | 135/250 | 0/250 |
+
+A zero-sum-consistent value would sum to ~0; instead it sums to **+0.8** and is **never
+strongly negative** — a pure, systematic **optimism bias of ~+0.4 per side**: whoever is
+to move is told they're ~0.4 ahead even on a balanced board, so **both players think
+they're winning** (51% of identical boards). This is the mechanistic source of the
+defensive blindness: each side's value says "I'm ahead, press the attack" → neither
+prioritizes defense → attacker wins fast → short games; and it's exactly why the
+first/initiative player over-presses and under-converts (#6). (Within-game adjacent
+cross-player ply pairs are both-positive only 6–8% — lower because those span a real
+board change; the same-board test isolates the pure bias.) This optimism + the OOD
+extrapolation together produce the anti-calibrated confident-wrong values (#2/#5).
+
+**Binning is IDENTICAL to dense_cnn** (confirmed): both 65 bins, `linspace(-1,1,65)`,
+`position=(v+1)*((65-1)/2)` adjacent-bin soft target, cross-entropy loss.
+hexgt: `losses.py:27-94` (`scalar_to_binned_target`/`binned_value_loss`), value head
+`architecture.py:221-223` reading the SIDE hub token (`_graph_readout`
+`architecture.py:256-265`). dense_cnn: `constants.py:12` (VALUE_BINS=65),
+`losses.py:33/80`, value head `ValueBinnedHead` `architecture.py:143-159` (1×1 conv →
+flatten over all 1681 board cells → MLP). **The bin structure + loss are the same; the
+only difference is the READOUT** (hexgt: single SIDE token; dense_cnn: whole-board pool).
+This makes value soft-label calibration (plan item 1) directly portable from dense_cnn.
+
 ## NOT the cause (ruled out with data)
 - **Candidate generation** — block is always a candidate (#1, 0/28 missing).
 - **Opening-exploration collapse** — opening diversity 99–100%, rising (B).
