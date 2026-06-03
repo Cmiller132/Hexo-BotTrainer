@@ -3,7 +3,8 @@ SAME richness as a dense_cnn run — epoch/eval summaries, per-epoch loss/traini
 detail, AND the actual GAME RECORDS (clickable move replays). Reads ONLY the
 worktree RL run's own outputs (eval/*.json, eval/*/*.hxr, rl_train.log); writes
 ONLY into derived locations (diagnostics/, and copies of game records) under the
-run dirs — never touches dense_cnn data or the RL job's files. Loops every 30s.
+run dirs — never touches dense_cnn data or the RL job's files. Loops every
+REFRESH_INTERVAL_SECONDS (default 7s) so the dashboard mirror stays near-live.
 
 Translations:
   - eval/epoch_*_vs_{dense,sealbot}/*.hxr  -> MAIN/evaluation/<same>/*.hxr   (the
@@ -17,6 +18,11 @@ Translations:
 from __future__ import annotations
 import json, time, sys, shutil, re
 from pathlib import Path
+
+# Mirror-refresh cadence. Kept low (was 30s) so the :8080 dashboard reflects new
+# self-play games / epoch loss / eval within a few seconds; each loop only does
+# NEW work (caches keep it cheap), so a tight interval is light on disk/CPU.
+REFRESH_INTERVAL_SECONDS = 7
 
 WT = Path("/mnt/e/Hexo-BotTrainer-hexgt/runs/hexgt_rl_main2")   # worktree RL run (read)
 EVAL = WT / "eval"
@@ -483,7 +489,7 @@ def main():
             print(f"[bridge] error: {exc}", flush=True)
         if once:
             break
-        time.sleep(30)
+        time.sleep(REFRESH_INTERVAL_SECONDS)
 
 
 if __name__ == "__main__":
