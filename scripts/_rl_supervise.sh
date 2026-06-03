@@ -68,12 +68,49 @@ if [[ -f "$BRIDGE_SCRIPT" ]]; then
     done ) & BRIDGE_WATCH_PID=$!
   log "bridge watchdog started (pid=$BRIDGE_WATCH_PID -> $BRIDGE_SCRIPT)"
 fi
-trap 'rm -f "$LOCK"; kill $WATCH_PID $BRIDGE_WATCH_PID 2>/dev/null; pkill -f "_dashboard_bridge.py" 2>/dev/null' EXIT
+
+# GPU telemetry sampler (1 Hz) for crash forensics: temp/power/clocks/util/mem +
+# clocks_throttle_reasons.active (directly flags sw/hw thermal slowdown, power cap,
+# or reliability throttle). Appends to a CSV in the run dir; a CHILD of this
+# persistent supervisor, restarted within ~30s if it dies. So the seconds before a
+# crash are on record -> thermal/power vs a clean transient is distinguishable.
+TELEM_CSV="$RUNDIR/gpu_telemetry.csv"; TELEM_WATCH_PID=""
+( while :; do
+    if ! pgrep -f "query-gpu=timestamp,temperature" >/dev/null 2>&1; then
+      echo "[$(date -u +%FT%TZ)] (re)starting gpu telemetry sampler" >> "$RUNDIR/gpu_telemetry.err"
+      nvidia-smi --query-gpu=timestamp,temperature.gpu,power.draw,power.limit,clocks.sm,clocks.mem,utilization.gpu,memory.used,clocks_throttle_reasons.active \
+        --format=csv -l 1 >> "$TELEM_CSV" 2>>"$RUNDIR/gpu_telemetry.err" &
+    fi
+    sleep 30
+  done ) & TELEM_WATCH_PID=$!
+log "gpu telemetry sampler watchdog started (pid=$TELEM_WATCH_PID -> $TELEM_CSV)"
+
+trap 'rm -f "$LOCK"; kill $WATCH_PID $BRIDGE_WATCH_PID $TELEM_WATCH_PID 2>/dev/null; pkill -f "_dashboard_bridge.py" 2>/dev/null; pkill -f "query-gpu=timestamp,temperature" 2>/dev/null' EXIT
 
 rl_epoch(){ # highest completed rl_epoch from epoch checkpoints, else -1
   local f; f=$(ls -1 "$CKPTS"/hexgt_rl_epoch*.pt 2>/dev/null | sort -V | tail -1)
   [[ -z "$f" ]] && { echo -1; return; }
   basename "$f" | sed -E 's/hexgt_rl_epoch0*([0-9]+)\.pt/\1/'
+}
+
+capture_crash_diag(){ # $1=stamp $2=err_log $3=code $4=uptime — full forensic bundle
+  # Make the next crash ATTRIBUTABLE without guessing: bundle the run-log error,
+  # the 1Hz GPU telemetry window just before the crash (temp/power/throttle), the
+  # NVIDIA error/Xid snapshot, and the Windows Event Log (TDR 4101 / nvlddmkm /
+  # WHEA) around the crash time. -> TDR-only (4101, flat telemetry) vs thermal
+  # (temp/throttle spike) vs power (power cap) vs a specific Xid hardware fault.
+  local stamp="$1" err="$2" code="$3" up="$4"
+  local dir="$CRASH/crash_diag_$stamp"; mkdir -p "$dir"
+  { echo "stamp=$stamp exit=$code uptime=${up}s host_utc=$(date -u +%FT%TZ)";
+    echo "--- driver err tail ---"; tail -n 60 "$err" 2>/dev/null;
+    echo "--- rl_train.log tail ---"; tail -n 40 "$RUNDIR/rl_train.log" 2>/dev/null;
+  } > "$dir/error.txt" 2>&1
+  tail -n 150 "$TELEM_CSV" > "$dir/gpu_telemetry_window.csv" 2>/dev/null  # ~last 150s
+  nvidia-smi -q -d ERRORS > "$dir/nvidia_smi_errors.txt" 2>&1             # Xid/ECC snapshot
+  # Windows Event Log: TDR (4101) + NVIDIA/Display/WHEA in the last 20 min (single-
+  # quoted so $ goes to PowerShell, not bash). Harmless if interop is unavailable.
+  powershell.exe -NoProfile -Command '$s=(Get-Date).AddMinutes(-20); Get-WinEvent -FilterHashtable @{LogName="System"; StartTime=$s} -ErrorAction SilentlyContinue | Where-Object { $_.Id -eq 4101 -or $_.ProviderName -match "nvlddmkm|Display|WHEA" } | Select-Object TimeCreated,ProviderName,Id,LevelDisplayName | Format-Table -AutoSize | Out-String -Width 200' > "$dir/win_eventlog.txt" 2>&1
+  log "CRASH DIAG captured -> $dir (telemetry window + nvidia errors + win eventlog)"
 }
 
 log "RL SUPERVISOR start (pid=$$) run=$RUNDIR epochs=$EPOCHS games/epoch=$GAMES_PER_EPOCH eval_every=$EVAL_EVERY"
@@ -97,6 +134,9 @@ while :; do
 
   cur="$(rl_epoch)"
   if (( code == 0 )); then echo "driver exited 0 at rl_epoch $cur" > "$DONE"; log "DONE: driver exited 0 (rl_epoch $cur)"; break; fi
+  # NON-ZERO EXIT = crash: capture the full forensic bundle (telemetry window, Xid,
+  # Windows TDR/Display events) before relaunching, so it is fully attributable.
+  capture_crash_diag "$stamp" "$err" "$code" "$up"
   if (( cur + 1 >= EPOCHS )); then echo "completed through rl_epoch $cur" > "$DONE"; log "COMPLETED through rl_epoch $cur"; break; fi
 
   if (( cur > last_prog )); then last_prog=$cur; no_progress=0; else no_progress=$((no_progress+1)); fi
