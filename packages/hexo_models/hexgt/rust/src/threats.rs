@@ -145,11 +145,26 @@ fn min_hitting_set(sets: &[Vec<HexCoord>], budget: u8) -> Option<u8> {
     None
 }
 
-/// Phase-aware 1-ply threat analysis for the side to move at `state`.
+/// Phase-aware 1-ply threat analysis for the side to move at `state`. Single
+/// pass over the live threat windows (this runs at every searched leaf in the
+/// override, so it avoids the two separate `threat_entries` scans).
 pub(crate) fn analyze(state: &RustHexoState) -> ThreatAnalysis {
     let b = placements_remaining(state);
-    let own_win_now = !own_winning_cells(state, b).is_empty();
-    let opp_empties = opponent_threat_empties(state);
+    let me = state.current_player();
+    let mut own_win_now = false;
+    let mut opp_empties: Vec<Vec<HexCoord>> = Vec::new();
+    for (player, entry) in state.board().windows().threats() {
+        if player == me {
+            // own win-now: count-5 (1 placement) any B; count-4 only at B==2.
+            match entry.count(me) {
+                5 => own_win_now = true,
+                4 if b >= 2 => own_win_now = true,
+                _ => {}
+            }
+        } else {
+            opp_empties.push(entry.empty_cells());
+        }
+    }
     let opp_threat_count = opp_empties.len();
     let min_hitting_set = min_hitting_set(&opp_empties, b);
     ThreatAnalysis {

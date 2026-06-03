@@ -75,9 +75,12 @@ def test_low_prior_opponent_block_is_injected_and_searched():
     assert res.visits > 0
 
 
-def test_own_winning_completion_is_injected_and_searched():
-    # TEST G FirstStone: P0 owns a count-4; its empties are an own win-now (B==2)
-    # and must be injected as searched root children.
+def test_own_winning_completion_is_injected_and_found():
+    # TEST G FirstStone: P0 owns a count-4; its empties are an own win-now (B==2).
+    # The injected winning completion is searched and FOUND -- the chosen move is a
+    # winning cell and the root value resolves to a win. (Both cells are equally
+    # winning, so PUCT may pour visits into just one; the robust signal is that the
+    # win is found, not that both equal cells are visited.)
     import hexo_models.hexgt.rust_bridge as rb
 
     state = _play([(0, 0), (0, 7), (2, 7), (1, 0), (4, 0), (4, 7), (6, 7), (5, 0), (0, -2), (0, 8), (2, 8)])
@@ -85,12 +88,14 @@ def test_own_winning_completion_is_injected_and_searched():
     assert info["own_win_now"] is True
     tactical = {tuple(c) for c in info["tactical_cells"]}
     assert tactical, "expected own winning cells"
+    tactical_ids = {_action_id(q, r) for (q, r) in tactical}
 
     sess = new_mcts_session(max_states=4096, n=3)
     res = sess.run([0], [state], _inference(), **_tight_kwargs())[0]
-    searched = {int(aid) for aid, _visits in res.visit_policy}
-    for (q, r) in tactical:
-        assert _action_id(q, r) in searched, f"own win cell {(q, r)} not injected/searched"
+    # The search picks an injected winning completion and the root value resolves
+    # to a win (the override propagates +1 from the proven-win leaf).
+    assert int(res.action_id) in tactical_ids, "search did not pick an injected winning cell"
+    assert res.root_value > 0.85, f"own win not resolved to a win: {res.root_value}"
 
 
 def test_no_threat_search_is_normal_and_capped():

@@ -34,6 +34,7 @@ use super::mcts_tree::{
     RustSearchDiagnostics, Widening,
 };
 use super::state::states_from_py_states;
+use super::threats;
 
 struct RootSelectionWork {
     // Leaves selected by one root during one virtual batch.
@@ -542,6 +543,17 @@ fn select_leaf_batch(
                 } else if let Some(node_id) = selected.existing_node {
                     let node = &search.nodes[node_id];
                     search.backup_virtual(&selected.path, node.player, node.value(), virtual_loss);
+                } else if let Some(verdict) = threats::analyze(&selected.state).verdict() {
+                    // Phase 5: phase-aware hitting-set leaf value OVERRIDE. This
+                    // fresh leaf is a proven 1-ply forced win/loss for the side to
+                    // move (own win completable with B placements, or opponent
+                    // threats whose minimum hitting set exceeds B). Back up the
+                    // hard +-1 through the same terminal path and SKIP the network
+                    // eval/node creation — a proven node is as good as terminal,
+                    // and Phase-4 injection has already guaranteed the covering
+                    // children exist for the must-answer (non-proven) case.
+                    let leaf_player = selected.state.current_player();
+                    search.backup_virtual(&selected.path, leaf_player, verdict, virtual_loss);
                 } else {
                     search.mark_pending(selected.parent_node, selected.edge_index, 1);
                     leaves.push(RustLeaf {
