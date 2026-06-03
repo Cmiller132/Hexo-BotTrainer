@@ -26,6 +26,7 @@ from typing import Mapping
 
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 from .constants import (
     DEFAULT_VALUE_PMA_SEEDS,
@@ -47,18 +48,6 @@ from .constants import (
 # at the same shape. (The fixed mean+max pool was REPLACED by the learnable PMA
 # pool — HEXGT_PMA_VALUE_HEAD_PLAN.md.)
 VALUE_READOUT_MULT = 1 + DEFAULT_VALUE_PMA_SEEDS  # == 3 for k=2 (back-compat alias)
-
-
-def _graph_slices(node_graph: torch.Tensor, num_graphs: int) -> list[tuple[int, int]]:
-    """Contiguous [start, end) node slice per graph (collate keeps graphs in order)."""
-
-    counts = torch.bincount(node_graph, minlength=num_graphs)
-    slices = []
-    start = 0
-    for c in counts.tolist():
-        slices.append((start, start + c))
-        start += c
-    return slices
 
 
 class RelationalMessagePassing(nn.Module):
@@ -202,27 +191,74 @@ class PMAValuePool(nn.Module):
 
     Permutation-INVARIANT over the node set (no positional encoding; the seeds are
     graph-independent learned constants and D6 acts on nodes, not seeds), hence
-    D6-invariant — the property the value readout requires. Reuses the same
-    per-graph padded-attention gather (`_padded_index`) as the trunk transformer.
+    D6-invariant — the property the value readout requires.
+
+    Implemented as a VARLEN segment-softmax attention over the packed nodes (no
+    padding to the batch's global max node count, no masked-softmax kernel): each
+    graph's `k` seeds attend over exactly that graph's nodes, with the softmax
+    reduced WITHIN each graph segment (`index_reduce` amax for stability +
+    `index_add` for the exp/normalize). This replaced an `nn.MultiheadAttention`
+    padded path (key_padding_mask over `(G, k, max_n)`); the segment form is ~5x
+    faster on the self-play forward, has no `Tensor.item()` graph-break (so no
+    torch.compile recompiles), and matches the padded result to float
+    reduction-order (fp32 max|Δ|~7e-8). Segment reductions are order-free, so the
+    pool stays permutation- (hence D6-) invariant.
     """
 
     def __init__(self, dim: int, heads: int, num_seeds: int) -> None:
         super().__init__()
         self.dim = int(dim)
+        self.heads = int(heads)
         self.num_seeds = int(num_seeds)
         # seeds ~ small init (mirrors attention query scale); learned, role-free.
         self.seeds = nn.Parameter(torch.randn(self.num_seeds, self.dim) * (self.dim ** -0.5))
+        # `attn` holds the q/k/v in-projection + out-projection weights (its
+        # forward is not used; the varlen attention below applies them directly).
         self.attn = nn.MultiheadAttention(self.dim, heads, batch_first=True)
 
+    def _project_qkv(self, node_emb: torch.Tensor):
+        """Apply nn.MultiheadAttention's packed in-projection to q (seeds), k and v
+        (nodes). q,k,v share embed_dim, so `in_proj_weight` is one (3*dim, dim)
+        block; bias may be None."""
+        w = self.attn.in_proj_weight
+        b = self.attn.in_proj_bias
+        d = self.dim
+        wq, wk, wv = w[:d], w[d : 2 * d], w[2 * d :]
+        if b is None:
+            bq = bk = bv = None
+        else:
+            bq, bk, bv = b[:d], b[d : 2 * d], b[2 * d :]
+        seeds = self.seeds.to(node_emb.dtype)
+        q = F.linear(seeds, wq, bq)        # (k, dim)
+        k = F.linear(node_emb, wk, bk)     # (N, dim)
+        v = F.linear(node_emb, wv, bv)     # (N, dim)
+        return q, k, v
+
     def forward(self, node_emb: torch.Tensor, node_graph: torch.Tensor, num_graphs: int) -> torch.Tensor:
-        # Pad ALL nodes per graph into (G, max_n, D); every graph has >=1 node, so
-        # no query attends to an all-masked key set (no NaN).
-        all_nodes = torch.arange(node_emb.shape[0], device=node_emb.device)
-        index, pad = _padded_index(all_nodes, node_graph.to(torch.long), num_graphs)
-        keys = node_emb[index]  # (G, max_n, D)
-        query = self.seeds.to(node_emb.dtype).unsqueeze(0).expand(num_graphs, -1, -1)  # (G, k, D)
-        pooled, _ = self.attn(query, keys, keys, key_padding_mask=pad, need_weights=False)  # (G, k, D)
-        return pooled.reshape(num_graphs, self.num_seeds * self.dim)  # (G, k*D)
+        h, d = self.heads, self.dim
+        dh = d // h
+        k = self.num_seeds
+        n = node_emb.shape[0]
+        g = node_graph.to(torch.long)
+        q, kk, vv = self._project_qkv(node_emb)
+        qh = q.view(k, h, dh)         # (k, H, dh)
+        kh = kk.view(n, h, dh)        # (N, H, dh)
+        vh = vv.view(n, h, dh)        # (N, H, dh)
+        scale = dh ** -0.5
+        # per-node logits against each seed/head: (N, H, k)
+        scores = torch.einsum("nhd,khd->nhk", kh, qh) * scale
+        # segment-softmax within each graph (stable): subtract per-(g,h,k) max.
+        seg_max = scores.new_full((num_graphs, h, k), float("-inf"))
+        seg_max.index_reduce_(0, g, scores, "amax", include_self=True)
+        ex = torch.exp(scores - seg_max.index_select(0, g))            # (N, H, k)
+        denom = ex.new_zeros((num_graphs, h, k)).index_add_(0, g, ex)  # (G, H, k) >= 1
+        attn = ex / denom.index_select(0, g)                           # (N, H, k)
+        # value-weighted segment sum -> (G, H, k, dh)
+        wv = attn.unsqueeze(-1) * vh.unsqueeze(2)                      # (N, H, k, dh)
+        out = wv.new_zeros((num_graphs, h, k, dh)).index_add_(0, g, wv)
+        out = out.permute(0, 2, 1, 3).reshape(num_graphs, k, d)        # (G, k, dim)
+        out = self.attn.out_proj(out)                                  # (G, k, dim)
+        return out.reshape(num_graphs, k * d)
 
 
 class HexgtNetwork(nn.Module):

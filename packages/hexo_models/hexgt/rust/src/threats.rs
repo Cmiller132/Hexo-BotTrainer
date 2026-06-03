@@ -72,35 +72,6 @@ impl ThreatAnalysis {
     }
 }
 
-/// Own windows the side to move can complete THIS turn, returned as the cells
-/// that (together) complete them: a count-5's single empty (always), and — only
-/// when `B == 2` — both empties of a count-4. These are the own-win injection
-/// cells; `own_win_now` is true iff this is non-empty.
-fn own_winning_cells(state: &RustHexoState, b: u8) -> Vec<HexCoord> {
-    let me = state.current_player();
-    let mut cells = Vec::new();
-    for entry in state.board().windows().threat_entries(me) {
-        match entry.count(me) {
-            5 => push_unique(&mut cells, entry.empty_cells()), // 1 empty; one placement wins
-            4 if b >= 2 => push_unique(&mut cells, entry.empty_cells()), // 2 empties; both placed
-            _ => {}
-        }
-    }
-    cells
-}
-
-/// Empty-cell sets of every active opponent >=4 window (the hitting-set search
-/// space and the block-injection cells).
-fn opponent_threat_empties(state: &RustHexoState) -> Vec<Vec<HexCoord>> {
-    let opp = state.current_player().other();
-    state
-        .board()
-        .windows()
-        .threat_entries(opp)
-        .map(|entry| entry.empty_cells())
-        .collect()
-}
-
 /// Smallest number of cells hitting >=1 element of every set in `sets`, capped
 /// at `budget`. `Some(0)` if `sets` is empty; `Some(k)` for the least `k <=
 /// budget` that hits all; `None` if more than `budget` are needed. `budget` is
@@ -179,13 +150,32 @@ pub(crate) fn analyze(state: &RustHexoState) -> ThreatAnalysis {
 /// with any active >=4 threat (Phase 4): own winning completions (phase-aware)
 /// UNION the empties of every opponent >=4 window. Deduplicated. Empty when the
 /// node has no >=4 threat (the common path — injection is a no-op there).
+///
+/// SINGLE PASS over the live threat windows (perf): the prior version scanned the
+/// window store twice (`threat_entries(me)` then `threat_entries(opp)`); this
+/// buckets own/opp in one `threats()` pass. Bit-identical — `threats()` yields the
+/// same windows in the same store-iteration order as the two filtered scans, and
+/// the result is assembled in the same own-then-opp order with the same
+/// first-occurrence dedup.
 pub(crate) fn tactical_cells(state: &RustHexoState) -> Vec<HexCoord> {
     let b = placements_remaining(state);
-    let mut cells = own_winning_cells(state, b);
-    for set in opponent_threat_empties(state) {
-        push_unique(&mut cells, set);
+    let me = state.current_player();
+    let mut own: Vec<HexCoord> = Vec::new();
+    let mut opp: Vec<HexCoord> = Vec::new();
+    for (player, entry) in state.board().windows().threats() {
+        if player == me {
+            // own winning completions: count-5 (1 placement) any B; count-4 at B==2.
+            match entry.count(me) {
+                5 => push_unique(&mut own, entry.empty_cells()),
+                4 if b >= 2 => push_unique(&mut own, entry.empty_cells()),
+                _ => {}
+            }
+        } else {
+            push_unique(&mut opp, entry.empty_cells());
+        }
     }
-    cells
+    push_unique(&mut own, opp); // own cells first, then opponent empties (deduped)
+    own
 }
 
 fn push_unique(dst: &mut Vec<HexCoord>, src: Vec<HexCoord>) {
