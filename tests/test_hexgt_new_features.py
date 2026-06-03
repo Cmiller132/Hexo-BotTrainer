@@ -230,3 +230,200 @@ def test_side_is_second_flag() -> None:
     assert side_flag(s) == 1.0, "second placement should have is_second=1"
     eng.apply_action(s, PlacementAction(AxialCoord(q=-3, r=1)))  # completes turn -> P0 FirstStone
     assert side_flag(s) == 0.0, "back to a first placement"
+
+
+# --- Tactical feature-set v3: phase-aware win-now flags ------------------------
+
+def test_feature_slots_after_version_ranges() -> None:
+    from hexo_models.hexgt.constants import (
+        FEATURE_SCHEMA_VERSION, NEW_FEATURE_SLOTS_V2, NEW_FEATURE_SLOTS_V3,
+        feature_slots_after,
+    )
+
+    assert FEATURE_SCHEMA_VERSION == 3
+    # A v2 checkpoint needs ONLY the v3 slots zeroed (its v2 columns are trained).
+    assert set(feature_slots_after(2)) == set(NEW_FEATURE_SLOTS_V3)
+    # A v1/none checkpoint needs both.
+    assert set(feature_slots_after(1)) == set(NEW_FEATURE_SLOTS_V2) | set(NEW_FEATURE_SLOTS_V3)
+    assert set(feature_slots_after(0)) == set(NEW_FEATURE_SLOTS_V2) | set(NEW_FEATURE_SLOTS_V3)
+    # A current checkpoint needs nothing.
+    assert feature_slots_after(3) == ()
+
+
+def test_v3_zero_init_is_identical_output() -> None:
+    """Zeroing the v3 node_in columns makes a model trained with those slots always
+    zero (a v2 checkpoint) produce IDENTICAL output once they carry real values —
+    the no-cold-start property for the v2->v3 resume."""
+
+    torch = _torch()
+    from hexo_models.hexgt.architecture import HexgtNetwork, zero_init_expanded_feature_columns
+    from hexo_models.hexgt.collate import collate_graphs
+    from hexo_models.hexgt.constants import NEW_FEATURE_SLOTS_V3
+    from hexo_models.hexgt.graph_build import graph_tensors_from_state
+
+    eng = _eng()
+    import random
+
+    rng = random.Random(9)
+    s = eng.new_game(seed=9)
+    for _ in range(24):
+        if eng.terminal(s) is not None:
+            break
+        acts = list(eng.legal_actions(s))
+        if not acts:
+            break
+        eng.apply_action(s, rng.choice(acts))
+    batch = collate_graphs([graph_tensors_from_state(s, 3)])
+
+    torch.manual_seed(0)
+    model = HexgtNetwork(token_dim=48, gnn_layers=2, ctx_layers=2, attention_heads=4, ffn_dim=64)
+    model.eval()
+
+    batch_old = {k: (v.clone() if hasattr(v, "clone") else v) for k, v in batch.items()}
+    batch_old["node_feat"][:, list(NEW_FEATURE_SLOTS_V3)] = 0.0
+    with torch.no_grad():
+        out_old = model(batch_old)
+
+    batch_new = {k: (v.clone() if hasattr(v, "clone") else v) for k, v in batch.items()}
+    for j, slot in enumerate(NEW_FEATURE_SLOTS_V3):
+        batch_new["node_feat"][:, slot] = 0.1 * (j + 1)
+    with torch.no_grad():
+        out_pert = model(batch_new)
+    assert not torch.allclose(out_pert["value"], out_old["value"], atol=1e-6), "v3 columns already ~0"
+
+    zeroed = zero_init_expanded_feature_columns(model, NEW_FEATURE_SLOTS_V3)
+    assert sorted(zeroed) == sorted(NEW_FEATURE_SLOTS_V3)
+    with torch.no_grad():
+        out_new = model(batch_new)
+    assert torch.allclose(out_new["policy"], out_old["policy"], atol=1e-6)
+    assert torch.allclose(out_new["value"], out_old["value"], atol=1e-6)
+
+
+def _phase_idx(state) -> int:
+    return {"OPENING": 0, "FIRST_STONE": 1, "SECOND_STONE": 2}[
+        importlib.import_module("hexo_engine.api").to_python_state(state).phase.name
+    ]
+
+
+def test_win_now_and_opp_threat_match_count_window_semantics() -> None:
+    """Cross-check the v3 flags against the v2 per-count window-membership splits
+    over many real positions (parity proves Rust==Python; this proves they're
+    RIGHT): WIN_NOW_OWN == [own count-5 through cell] OR [FirstStone AND own
+    count-4 through cell]; OPP_THREAT == [opp count-4 OR count-5 through cell]."""
+
+    np = _np()
+    from hexo_models.hexgt.constants import (
+        F_CAND_OPP_THREAT, F_CAND_OPP_WIN4, F_CAND_OPP_WIN5,
+        F_CAND_OWN_WIN4, F_CAND_OWN_WIN5, F_CAND_WIN_NOW_OWN, NODE_TYPE_CANDIDATE,
+    )
+    from hexo_models.hexgt.features import build_graph_tensors
+
+    eng = _eng()
+    import random
+
+    rng = random.Random(31)
+    saw_win_now = saw_threat = False
+    for trial in range(40):
+        s = eng.new_game(seed=500 + trial)
+        for _ in range(rng.randint(15, 80)):
+            if eng.terminal(s) is not None:
+                break
+            acts = list(eng.legal_actions(s))
+            if not acts:
+                break
+            eng.apply_action(s, rng.choice(acts))
+        if eng.terminal(s) is not None:
+            continue
+        ph = _phase_idx(s)
+        g = build_graph_tensors(_facts_for(s))
+        feat = g.node_feat
+        cand = g.node_type == NODE_TYPE_CANDIDATE
+        own4 = feat[:, F_CAND_OWN_WIN4] > 0
+        own5 = feat[:, F_CAND_OWN_WIN5] > 0
+        opp4 = feat[:, F_CAND_OPP_WIN4] > 0
+        opp5 = feat[:, F_CAND_OPP_WIN5] > 0
+        exp_win_now = (own5 | (own4 & (ph == 1))) & cand
+        exp_threat = (opp4 | opp5) & cand
+        got_win_now = (feat[:, F_CAND_WIN_NOW_OWN] > 0) & cand
+        got_threat = (feat[:, F_CAND_OPP_THREAT] > 0) & cand
+        assert np.array_equal(exp_win_now, got_win_now), f"win-now mismatch (phase {ph})"
+        assert np.array_equal(exp_threat, got_threat), "opp-threat mismatch"
+        # the flags are exactly {0,1}
+        assert set(np.unique(feat[cand, F_CAND_WIN_NOW_OWN]).tolist()) <= {0.0, 1.0}
+        assert set(np.unique(feat[cand, F_CAND_OPP_THREAT]).tolist()) <= {0.0, 1.0}
+        saw_win_now = saw_win_now or bool(got_win_now.any())
+        saw_threat = saw_threat or bool(got_threat.any())
+    # The relationship is validated wherever threats occur (and held vacuously
+    # otherwise); a constructed opp >=4 threat is checked in the next test.
+
+
+def test_opp_threat_fires_on_constructed_opponent_four() -> None:
+    """TEST C position: the opponent owns a simple count-4; its two empty cells are
+    seeded as candidates (active-window empties), and both must carry OPP_THREAT."""
+
+    np = _np()
+    from hexo_engine.types import AxialCoord, PlacementAction, unpack_coord_id
+    from hexo_models.hexgt.constants import F_CAND_OPP_THREAT, NODE_TYPE_CANDIDATE
+    from hexo_models.hexgt.features import build_graph_tensors
+
+    eng = _eng()
+    # From scripts/_tss_verify_c.py: P1 four {(0,4),(1,4),(4,4),(5,4)} gaps {(2,4),(3,4)};
+    # P0 (the side to move / defender) to move.
+    coords = [(0, 0), (0, 4), (1, 4), (0, 2), (0, -2), (4, 4), (5, 4)]
+    s = eng.new_game()
+    for q, r in coords:
+        eng.apply_action(s, PlacementAction(AxialCoord(q=q, r=r)))
+    g = build_graph_tensors(_facts_for(s))
+    cand = g.node_type == NODE_TYPE_CANDIDATE
+    threat_coords = set()
+    for node_idx, cid in zip(g.candidate_index.tolist(), g.candidate_ids.tolist()):
+        if g.node_feat[node_idx, F_CAND_OPP_THREAT] > 0:
+            c = unpack_coord_id(int(cid))
+            threat_coords.add((int(c.q), int(c.r)))
+    assert int(np.count_nonzero(g.node_feat[cand, F_CAND_OPP_THREAT] > 0)) >= 2
+    # the opponent four's two gaps are exactly block cells -> flagged.
+    assert (2, 4) in threat_coords and (3, 4) in threat_coords
+
+
+def test_win_now_own_is_phase_aware_for_count4() -> None:
+    """TEST G semantics: an own count-4 is win-now at FirstStone (its empties carry
+    WIN_NOW_OWN) but NOT after the first stone is spent elsewhere (SecondStone)."""
+
+    np = _np()
+    from hexo_engine.types import AxialCoord, PlacementAction
+    from hexo_models.hexgt.constants import (
+        F_CAND_OWN_WIN4, F_CAND_OWN_WIN5, F_CAND_WIN_NOW_OWN, NODE_TYPE_CANDIDATE,
+    )
+    from hexo_models.hexgt.features import build_graph_tensors
+
+    eng = _eng()
+
+    def play(coords):
+        s = eng.new_game()
+        for q, r in coords:
+            eng.apply_action(s, PlacementAction(AxialCoord(q=int(q), r=int(r))))
+        return s
+
+    def win_now_count(state):
+        g = build_graph_tensors(_facts_for(state))
+        cand = g.node_type == NODE_TYPE_CANDIDATE
+        return int(np.count_nonzero(g.node_feat[cand, F_CAND_WIN_NOW_OWN] > 0))
+
+    def own5_count(state):
+        g = build_graph_tensors(_facts_for(state))
+        cand = g.node_type == NODE_TYPE_CANDIDATE
+        return int(np.count_nonzero(g.node_feat[cand, F_CAND_OWN_WIN5] > 0))
+
+    # TEST G position: P0 owns a count-4 at FirstStone (from scripts/_tss_verify2).
+    coords = [(0, 0), (0, 7), (2, 7), (1, 0), (4, 0), (4, 7), (6, 7), (5, 0), (0, -2), (0, 8), (2, 8)]
+    s = play(coords)
+    assert _phase_idx(s) == 1, "expected FirstStone"
+    assert own5_count(s) == 0, "this position should have a count-4, not count-5, own threat"
+    assert win_now_count(s) > 0, "own count-4 at FirstStone must be flagged win-now"
+
+    # Waste the first stone on an unrelated cell -> SecondStone; the count-4 is no
+    # longer win-now (filling one gap -> count-5, control passes).
+    eng.apply_action(s, PlacementAction(AxialCoord(q=0, r=2)))
+    assert _phase_idx(s) == 2, "expected SecondStone"
+    assert own5_count(s) == 0, "still a count-4, not count-5"
+    assert win_now_count(s) == 0, "count-4 at SecondStone must NOT be flagged win-now (TEST G)"

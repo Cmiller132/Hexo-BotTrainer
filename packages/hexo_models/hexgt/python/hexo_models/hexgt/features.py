@@ -35,9 +35,11 @@ from .constants import (
     F_CAND_OPP_WIN3,
     F_CAND_OPP_WIN4,
     F_CAND_OPP_WIN5,
+    F_CAND_OPP_THREAT,
     F_CAND_OWN_WIN3,
     F_CAND_OWN_WIN4,
     F_CAND_OWN_WIN5,
+    F_CAND_WIN_NOW_OWN,
     F_CENTER_DISTANCE,
     F_OWNER_OPP,
     F_OWNER_OWN,
@@ -207,6 +209,10 @@ def build_graph_tensors(facts: Mapping[str, Any]) -> GraphTensors:
                     feat[cdst, F_CAND_OWN_WIN5] += 1.0
                 if cnt == 5:
                     feat[cdst, F_CAND_COMPLETE_OWN] = 1.0
+                # v3: phase-aware own win-now (count-5 any B; count-4 only at
+                # FirstStone, phase_idx == 1).
+                if cnt == 5 or (cnt == 4 and phase_idx == 1):
+                    feat[cdst, F_CAND_WIN_NOW_OWN] = 1.0
             elif own == 1:
                 feat[cdst, F_CAND_NWIN_OPP] += 1.0
                 # v2: per-count breakdown of the opp active windows.
@@ -218,6 +224,10 @@ def build_graph_tensors(facts: Mapping[str, Any]) -> GraphTensors:
                     feat[cdst, F_CAND_OPP_WIN5] += 1.0
                 if cnt == 5:
                     feat[cdst, F_CAND_COMPLETE_OPP] = 1.0
+                # v3: any opponent >=4 window through this empty cell is a
+                # must-answer immediate threat (block-cell set).
+                if cnt >= 4:
+                    feat[cdst, F_CAND_OPP_THREAT] = 1.0
         # normalize the nwin counts (+ the v2 per-count splits share the scale, so
         # the three own bins sum to NWIN_OWN and the three opp bins to NWIN_OPP).
         feat[:, F_CAND_NWIN_OWN] /= COORD_SCALE

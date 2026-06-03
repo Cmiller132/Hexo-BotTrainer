@@ -31,7 +31,7 @@ from hexo_models.hexgt.architecture import (
     zero_init_expanded_feature_columns,
 )
 from hexo_models.hexgt.config import parse_hexgt_config
-from hexo_models.hexgt.constants import FEATURE_SCHEMA_VERSION
+from hexo_models.hexgt.constants import FEATURE_SCHEMA_VERSION, feature_slots_after
 from hexo_models.hexgt.selfplay import run_selfplay_games
 from hexo_models.hexgt.trainer import HexgtTrainer
 
@@ -293,7 +293,11 @@ def main():
     # command can't re-zero already-learned columns.
     loaded_fsv = int(ck.get("feature_schema_version", 1))
     if loaded_fsv < FEATURE_SCHEMA_VERSION:
-        zeroed = zero_init_expanded_feature_columns(model)
+        # Zero only the columns introduced AFTER the checkpoint's version (a v2
+        # checkpoint keeps its trained v2 columns; only the new v3 slots are
+        # zeroed), so the first forward is identical and trained weights survive.
+        target_slots = feature_slots_after(loaded_fsv)
+        zeroed = zero_init_expanded_feature_columns(model, target_slots)
         seed_desc += (f" + ZERO-INIT feature-expansion v{loaded_fsv}->v{FEATURE_SCHEMA_VERSION} "
                       f"(zeroed {len(zeroed)} node_in cols {zeroed})")
     if vr_expanded:

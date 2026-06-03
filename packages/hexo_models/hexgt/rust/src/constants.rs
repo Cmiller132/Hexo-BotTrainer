@@ -66,3 +66,18 @@ pub(crate) const F_CAND_OPP_WIN4: usize = 26; // opp count-4
 pub(crate) const F_CAND_OPP_WIN5: usize = 27; // opp count-5
 pub(crate) const F_CAND_DIST_FIRST: usize = 28; // hex-dist to this turn's first stone (norm)
 pub(crate) const F_SIDE_IS_SECOND: usize = 29; // side: 1 if current placement is 2nd stone
+// Tactical feature-set v3 ([30:32) of the same 32-wide vector; D6-invariant,
+// PHASE-AWARE win-now flags). Distinct from the v2 count-{3,4,5} window-count
+// SPLITS (F_CAND_*_WIN{3,4,5}, which only count windows) and from F_CAND_COMPLETE_*
+// (which fire only at count-5). MUST mirror python/.../constants.py (gated by
+// test_hexgt_feature_buffer).
+pub(crate) const F_CAND_WIN_NOW_OWN: usize = 30; // placing here is (part of) an OWN win
+                                                 // THIS turn: own count-5 (any B), or own
+                                                 // count-4 only at FirstStone (B==2). NOT a
+                                                 // win for a count-4 at SecondStone (TEST G).
+pub(crate) const F_CAND_OPP_THREAT: usize = 31;  // cell is an empty of an active OPPONENT
+                                                 // >=4 window (count-4 OR count-5): the
+                                                 // must-answer block-cell set (the opponent's
+                                                 // own turn always has B==2, so count-4 is a
+                                                 // genuine immediate threat). Count-4-inclusive
+                                                 // analog of F_CAND_COMPLETE_OPP (count-5 only).
