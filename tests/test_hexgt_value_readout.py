@@ -80,19 +80,36 @@ def _model(token_dim=48, **kw):
 
 # --- shape / wiring -----------------------------------------------------------
 
-def test_value_head_input_is_three_blocks() -> None:
+def test_value_head_reads_side_plus_pma_seeds() -> None:
     torch = _torch()
-    from hexo_models.hexgt.architecture import VALUE_READOUT_MULT
 
     td = 48
-    model = _model(token_dim=td)
-    assert VALUE_READOUT_MULT == 3
-    # first Linear of the value head reads [side|mean|max] = 3*token_dim.
-    assert model.value_head[0].weight.shape[1] == VALUE_READOUT_MULT * td
-    # STV/value bin width unchanged.
+    model = _model(token_dim=td)  # default k=2
+    k = model.value_pma_seeds
+    assert k == 2  # owner's chosen seed count
+    # PMA pool: k learnable seed queries of width token_dim.
+    assert tuple(model.value_pool.seeds.shape) == (k, td)
+    # value head first Linear reads [SIDE | PMA_k] = (1 + k) * token_dim.
+    assert model.value_head[0].weight.shape[1] == (1 + k) * td
     from hexo_models.hexgt.constants import VALUE_BINS
 
     assert model.value_head[-1].weight.shape[0] == VALUE_BINS
+    # k is configurable.
+    m1 = _model(token_dim=td, value_pma_seeds=1)
+    assert m1.value_pool.seeds.shape[0] == 1
+    assert m1.value_head[0].weight.shape[1] == 2 * td
+
+
+def test_pma_pool_output_shape() -> None:
+    torch = _torch()
+    model = _model()
+    model.eval()
+    batch = _batch(_random_coords(14, 14))
+    g = int(batch["num_graphs"])
+    with torch.no_grad():
+        node_emb = model._encode_nodes(batch)
+        pooled = model.value_pool(node_emb, batch["node_graph"], g)
+    assert pooled.shape == (g, model.value_pma_seeds * model.token_dim)
 
 
 def test_forward_value_shape_and_readout_width() -> None:
@@ -108,16 +125,17 @@ def test_forward_value_shape_and_readout_width() -> None:
     from hexo_models.hexgt.constants import VALUE_BINS
 
     assert out["value"].shape == (g, VALUE_BINS)
-    assert vr.shape == (g, 3 * model.token_dim)
+    assert vr.shape == (g, (1 + model.value_pma_seeds) * model.token_dim)
     # STV head still reads the SIDE-hub width (token_dim), unchanged.
     assert out["stvalue_4"].shape == (g, VALUE_BINS)
 
 
-# --- permutation (=> D6) invariance of the pooling ----------------------------
+# --- permutation (=> D6) invariance of the PMA pooling ------------------------
 
-def test_global_pool_is_permutation_invariant() -> None:
-    """Shuffling node order within a graph must not change the pooled value
-    readout (mean/max are symmetric; D6 permutes nodes bijectively)."""
+def test_pma_value_readout_is_permutation_invariant() -> None:
+    """Shuffling node order within a graph must not change the PMA value readout
+    (Set-Transformer PMA is permutation-invariant over the key set; D6 permutes
+    nodes bijectively, so this is the readout's D6-invariance property)."""
 
     torch = _torch()
     model = _model()

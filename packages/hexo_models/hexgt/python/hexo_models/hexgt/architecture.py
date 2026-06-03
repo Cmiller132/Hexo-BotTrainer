@@ -39,8 +39,14 @@ from .constants import (
 )
 
 
-# Value readout = [SIDE hub | mean-pool | max-pool], each token_dim wide.
-VALUE_READOUT_MULT = 3
+# Value readout = [SIDE hub | PMA_k pooled vectors], each token_dim wide, so the
+# value MLP first Linear reads (1 + value_pma_seeds) * token_dim. With the owner's
+# default k=2 this is 3*token_dim — identical width to the prior [SIDE|mean|max]
+# readout (VALUE_READOUT_DEFAULT_MULT below), so a same-k checkpoint round-trips
+# at the same shape. (The fixed mean+max pool was REPLACED by the learnable PMA
+# pool — HEXGT_PMA_VALUE_HEAD_PLAN.md.)
+DEFAULT_VALUE_PMA_SEEDS = 2
+VALUE_READOUT_MULT = 1 + DEFAULT_VALUE_PMA_SEEDS  # == 3 for k=2 (back-compat alias)
 
 
 def _graph_slices(node_graph: torch.Tensor, num_graphs: int) -> list[tuple[int, int]]:
@@ -183,6 +189,42 @@ class GraphTransformerLayer(nn.Module):
         return out
 
 
+class PMAValuePool(nn.Module):
+    """Set-Transformer PMA pooling for the value readout (HEXGT_PMA_VALUE_HEAD_PLAN).
+
+    ``num_seeds`` learnable seed queries attend (``heads``-head) over ALL of a
+    graph's post-transformer node embeddings (keys/values), pooling the set into
+    ``num_seeds`` summary vectors: ``PMA_k(Z) = MAB(S, Z)`` (Lee et al. 2019,
+    arXiv:1810.00825). This REPLACES the fixed mean+max pool with a learnable,
+    cross-node / cross-channel soft pooling — a strict generalization (a seed can
+    learn uniform attention ~= mean or a sharp attention ~= soft-max), letting the
+    value head weight "this opponent threat vs my counter" rather than averaging.
+
+    Permutation-INVARIANT over the node set (no positional encoding; the seeds are
+    graph-independent learned constants and D6 acts on nodes, not seeds), hence
+    D6-invariant — the property the value readout requires. Reuses the same
+    per-graph padded-attention gather (`_padded_index`) as the trunk transformer.
+    """
+
+    def __init__(self, dim: int, heads: int, num_seeds: int) -> None:
+        super().__init__()
+        self.dim = int(dim)
+        self.num_seeds = int(num_seeds)
+        # seeds ~ small init (mirrors attention query scale); learned, role-free.
+        self.seeds = nn.Parameter(torch.randn(self.num_seeds, self.dim) * (self.dim ** -0.5))
+        self.attn = nn.MultiheadAttention(self.dim, heads, batch_first=True)
+
+    def forward(self, node_emb: torch.Tensor, node_graph: torch.Tensor, num_graphs: int) -> torch.Tensor:
+        # Pad ALL nodes per graph into (G, max_n, D); every graph has >=1 node, so
+        # no query attends to an all-masked key set (no NaN).
+        all_nodes = torch.arange(node_emb.shape[0], device=node_emb.device)
+        index, pad = _padded_index(all_nodes, node_graph.to(torch.long), num_graphs)
+        keys = node_emb[index]  # (G, max_n, D)
+        query = self.seeds.to(node_emb.dtype).unsqueeze(0).expand(num_graphs, -1, -1)  # (G, k, D)
+        pooled, _ = self.attn(query, keys, keys, key_padding_mask=pad, need_weights=False)  # (G, k, D)
+        return pooled.reshape(num_graphs, self.num_seeds * self.dim)  # (G, k*D)
+
+
 class HexgtNetwork(nn.Module):
     """Dynamic typed GNN + transformer producing the hexgt training heads."""
 
@@ -198,6 +240,7 @@ class HexgtNetwork(nn.Module):
         dropout: float = 0.0,
         short_term_value_horizons: tuple[int, ...] = (),
         edge_attr_dim: int = EDGE_ATTR_DIM,
+        value_pma_seeds: int = DEFAULT_VALUE_PMA_SEEDS,
     ) -> None:
         super().__init__()
         self.node_feature_dim = int(node_feature_dim)
@@ -208,6 +251,7 @@ class HexgtNetwork(nn.Module):
         self.ffn_dim = int(ffn_dim)
         self.edge_attr_dim = int(edge_attr_dim)
         self.short_term_value_horizons = tuple(int(h) for h in short_term_value_horizons)
+        self.value_pma_seeds = int(value_pma_seeds)
 
         self.node_in = nn.Sequential(
             nn.Linear(self.node_feature_dim, self.token_dim),
@@ -223,18 +267,18 @@ class HexgtNetwork(nn.Module):
 
         self.policy_head = nn.Linear(self.token_dim, 1)
         self.opp_policy_head = nn.Linear(self.token_dim, 1)
-        # The value head reads a GLOBAL-POOLED whole-board readout: the SIDE hub
-        # embedding concatenated with mean- and max-pooling over ALL node
-        # embeddings (VALUE_READOUT_MULT == 3 blocks of token_dim, in the order
-        # [side | mean | max]). A 3-hop GNN + single-SIDE-hub readout structurally
-        # under-propagates multi-window danger ("the opponent has a >=4 conjunction
-        # I cannot parry"); pooling gives the value head whole-board receptive
-        # field (HEXGT_TSS_AND_SOFT_VALUE_DESIGN.md PART 2 / companion Rank 1).
-        # The SIDE block is FIRST so a pre-pool checkpoint expands in-place by
-        # placing its (token_dim,token_dim) weight there and zeroing the pooled
-        # blocks (expand_value_readout_columns) -> identical first-step output.
+        # The value head reads a whole-board readout: the SIDE hub embedding
+        # concatenated with a Set-Transformer PMA pool (k = value_pma_seeds learned
+        # seed queries, attention_heads-head) over ALL post-transformer node
+        # embeddings -> [SIDE | PMA_k], width (1 + k) * token_dim. PMA is a
+        # learnable generalization of the prior fixed mean+max pool (a seed can
+        # learn uniform ~= mean or sharp ~= soft-max attention), giving the value
+        # head a cross-node/cross-channel soft pooling for defensive calibration
+        # (HEXGT_PMA_VALUE_HEAD_PLAN.md). The SIDE block is FIRST (kept for the
+        # dedicated whole-board hub); the PMA block follows.
+        self.value_pool = PMAValuePool(self.token_dim, self.attention_heads, self.value_pma_seeds)
         self.value_head = nn.Sequential(
-            nn.Linear(VALUE_READOUT_MULT * self.token_dim, self.token_dim),
+            nn.Linear((1 + self.value_pma_seeds) * self.token_dim, self.token_dim),
             nn.ReLU(inplace=True),
             nn.Linear(self.token_dim, VALUE_BINS),
         )
@@ -281,34 +325,13 @@ class HexgtNetwork(nn.Module):
         readout[node_graph[side_rows]] = node_emb.index_select(0, side_rows)
         return readout
 
-    def _global_pool(self, batch: Mapping[str, torch.Tensor], node_emb: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """Per-graph mean and max pooling over ALL node embeddings.
-
-        Permutation-invariant (so D6-invariant: D6 permutes nodes bijectively),
-        and `.item()`-free so the search forward stays torch.compile-friendly.
-        Every hexgt graph has >=1 node (SIDE + candidates + windows), but empty
-        graphs are still handled (mean count clamped to 1; max -inf -> 0)."""
+    def _value_readout(self, batch: Mapping[str, torch.Tensor], node_emb: torch.Tensor) -> torch.Tensor:
+        """Whole-board value readout: [SIDE hub | PMA_k pool] (G, (1+k)*D)."""
 
         num_graphs = int(batch["num_graphs"])
-        node_graph = batch["node_graph"].to(dtype=torch.long)
-
-        mean_pool = node_emb.new_zeros(num_graphs, self.token_dim)
-        mean_pool.index_add_(0, node_graph, node_emb)
-        counts = node_emb.new_zeros(num_graphs, 1)
-        counts.index_add_(0, node_graph, node_emb.new_ones(node_emb.shape[0], 1))
-        mean_pool = mean_pool / counts.clamp(min=1.0)
-
-        max_pool = node_emb.new_full((num_graphs, self.token_dim), float("-inf"))
-        max_pool.index_reduce_(0, node_graph, node_emb, "amax", include_self=True)
-        max_pool = torch.where(torch.isfinite(max_pool), max_pool, node_emb.new_zeros(()))
-        return mean_pool, max_pool
-
-    def _value_readout(self, batch: Mapping[str, torch.Tensor], node_emb: torch.Tensor) -> torch.Tensor:
-        """Whole-board value readout: [SIDE hub | mean-pool | max-pool] (G, 3*D)."""
-
         side = self._graph_readout(batch, node_emb)
-        mean_pool, max_pool = self._global_pool(batch, node_emb)
-        return torch.cat([side, mean_pool, max_pool], dim=-1)
+        pooled = self.value_pool(node_emb, batch["node_graph"], num_graphs)
+        return torch.cat([side, pooled], dim=-1)
 
     def _heads(self, batch: Mapping[str, torch.Tensor], node_emb: torch.Tensor, *, with_aux: bool) -> dict[str, torch.Tensor]:
         candidate_index = batch["candidate_index"].to(dtype=torch.long)
