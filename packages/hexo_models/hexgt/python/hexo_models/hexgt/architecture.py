@@ -28,6 +28,7 @@ import torch
 from torch import nn
 
 from .constants import (
+    DEFAULT_VALUE_PMA_SEEDS,
     EDGE_ATTR_DIM,
     NEW_FEATURE_SLOTS_V2,
     NODE_FEATURE_DIM,
@@ -45,7 +46,6 @@ from .constants import (
 # readout (VALUE_READOUT_DEFAULT_MULT below), so a same-k checkpoint round-trips
 # at the same shape. (The fixed mean+max pool was REPLACED by the learnable PMA
 # pool — HEXGT_PMA_VALUE_HEAD_PLAN.md.)
-DEFAULT_VALUE_PMA_SEEDS = 2
 VALUE_READOUT_MULT = 1 + DEFAULT_VALUE_PMA_SEEDS  # == 3 for k=2 (back-compat alias)
 
 

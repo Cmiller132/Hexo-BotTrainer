@@ -25,6 +25,7 @@ from .constants import (
     DEFAULT_FFN_DIM,
     DEFAULT_GNN_LAYERS,
     DEFAULT_TOKEN_DIM,
+    DEFAULT_VALUE_PMA_SEEDS,
     NODE_FEATURE_DIM,
 )
 
@@ -68,6 +69,9 @@ class HexgtArchitectureConfig:
     # The single candidate-set neighborhood radius `n` (§4). Threaded into both
     # sample-gen and live MCTS so training support == search expansion.
     candidate_radius: int = DEFAULT_CANDIDATE_RADIUS
+    # PMA value-head seed count k (HEXGT_PMA_VALUE_HEAD_PLAN.md). The value readout
+    # is [SIDE | PMA_k]; k=2 is the owner's chosen build (doc default is 1).
+    value_pma_seeds: int = DEFAULT_VALUE_PMA_SEEDS
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,6 +214,7 @@ def parse_hexgt_config(raw: Mapping[str, Any] | None) -> HexgtConfig:
             dropout=float(arch.get("dropout", 0.0)),
             short_term_value_horizons=_int_tuple(arch.get("short_term_value_horizons", ())),
             candidate_radius=int(arch.get("candidate_radius", DEFAULT_CANDIDATE_RADIUS)),
+            value_pma_seeds=int(arch.get("value_pma_seeds", DEFAULT_VALUE_PMA_SEEDS)),
         ),
         training=HexgtTrainingConfig(
             batch_size=int(training.get("batch_size", 128)),

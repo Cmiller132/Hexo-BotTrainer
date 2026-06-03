@@ -1,0 +1,107 @@
+# Model 3 (hexgt) config — the PMA + 4-GNN-layer + full-TSS/soft-Z build.
+#
+# Clean config for the NEW run (does NOT mutate hexgt_model2.toml / the halted
+# lineage). Differences from model2:
+#   * gnn_layers 3 -> 4 (deeper trunk so cross-window threat relationships are
+#     more likely computed before the value readout pools them).
+#   * value_pma_seeds = 2 -> PMA value-head readout [SIDE | PMA_2] replacing the
+#     mean+max pool (HEXGT_PMA_VALUE_HEAD_PLAN.md; owner's k=2).
+#   * soft-Z value targets (samples.soft_z_lambda = 0.5).
+#   * short_term_value_horizons [4,12,24] (the RL-run STV horizons).
+#
+# The following are CODE-LEVEL and always-on for hexgt now (no config flag):
+# TSS tactical-candidate INJECTION at expansion + forced first visit, the
+# phase-aware hitting-set leaf value OVERRIDE, the tactical-safety MOVE-SELECTION
+# guard, and the count-4 / threat hot-token CANDIDATE features (FEATURE_SCHEMA_
+# VERSION 3). See HEXGT_TSS_AND_SOFT_VALUE_DESIGN.md. ~2.42M params.
+
+[model]
+name = "hexgt"
+module = "hexo_models.hexgt.plugin"
+
+[model.config]
+device = "cuda"
+
+[model.config.architecture]
+node_feature_dim = 32
+token_dim = 168
+gnn_layers = 4                       # deeper trunk (was 3)
+ctx_layers = 3
+attention_heads = 4                  # = PMA head count H
+ffn_dim = 336
+dropout = 0.0
+short_term_value_horizons = [4, 12, 24]
+candidate_radius = 3
+value_pma_seeds = 2                  # PMA value-head: [SIDE | PMA_2] readout
+
+[model.config.training]
+batch_size = 128
+learning_rate = 0.0002
+weight_decay = 0.0001
+warmup_steps = 200
+policy_weight = 1.0
+value_weight = 1.0
+opp_policy_weight = 0.25
+short_term_value_weight = 0.25
+amp = true
+max_grad_norm = 1.0
+train_samples_per_epoch = 100000
+max_train_bucket_per_new_data = 8.0
+max_train_bucket_size = 500000
+no_repeat_files = true
+max_validation_samples = 100000
+
+[model.config.samples]
+shuffle_min_rows = 100000
+shuffle_keep_target_rows = 300000
+shuffle_taper_window_exponent = 0.65
+shuffle_expand_window_per_row = 0.4
+shuffle_taper_window_scale = 50000.0
+approx_rows_per_out_file = 8000
+shuffle_worker_group_size = 8000
+validation_fraction = 0.0
+policy_surprise_uniform_fraction = 0.5
+policy_surprise_max_weight = 8.0
+bc_prune_max_dropped_mass = 0.15
+# soft-Z value target: value = (1-lambda)*z + lambda*root_value (HEXGT_TSS_AND_
+# SOFT_VALUE_DESIGN.md PART 2). Start 0.5.
+soft_z_lambda = 0.5
+
+[model.config.selfplay]
+search_visits = 128
+active_games = 64
+c_puct = 1.5
+root_dirichlet_noise_enabled = true
+root_dirichlet_noise_fraction = 0.25
+root_dirichlet_total_alpha = 6.6
+root_policy_temperature = 1.0
+fpu_reduction = 0.20
+virtual_loss = 1.0
+widening_policy_mass = 0.95
+widening_max_children = 96
+widening_min_children = 2
+mcts_session_cache_max_states = 131072
+mcts_active_root_limit = 256
+max_actions = 512
+temperature = 1.0
+final_temperature = 0.2
+temperature_decay_moves = 30
+temperature_floor = 0.1
+forced_playout_k = 2.0
+
+[model.config.evaluation]
+games_per_epoch = 24
+sealbot_variant = "best"
+sealbot_time_limit = 0.05
+max_actions = 1024
+require_sealbot = false
+opening_temperature = 0.6
+opening_moves = 10
+
+[run]
+name = "hexgt_model3"
+output_dir = "../runs/hexgt_rl_main3"
+seed = 7
+
+[loop]
+epochs = 40

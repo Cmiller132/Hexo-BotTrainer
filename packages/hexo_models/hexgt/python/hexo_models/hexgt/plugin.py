@@ -47,6 +47,7 @@ class HexgtPlugin:
             ffn_dim=arch.ffn_dim,
             dropout=arch.dropout,
             short_term_value_horizons=arch.short_term_value_horizons,
+            value_pma_seeds=arch.value_pma_seeds,
         )
 
     def training_component_overrides(

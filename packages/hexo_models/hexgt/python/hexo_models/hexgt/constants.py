@@ -176,3 +176,6 @@ DEFAULT_GNN_LAYERS = 3
 DEFAULT_CTX_LAYERS = 3
 DEFAULT_ATTENTION_HEADS = 4
 DEFAULT_FFN_DIM = 336
+# PMA value-head seed count k (HEXGT_PMA_VALUE_HEAD_PLAN.md): the value readout is
+# [SIDE | PMA_k]. Owner's chosen build uses k=2 (the doc's analytic default is 1).
+DEFAULT_VALUE_PMA_SEEDS = 2

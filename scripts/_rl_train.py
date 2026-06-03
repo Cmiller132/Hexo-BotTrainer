@@ -70,6 +70,8 @@ def build_model(arch_meta, device):
         ctx_layers=arch_meta["ctx_layers"], ffn_dim=arch_meta["ffn_dim"],
         attention_heads=arch_meta["attention_heads"],
         short_term_value_horizons=tuple(arch_meta["short_term_value_horizons"]),
+        # PMA value-head seed count (default k=2 if a pre-PMA checkpoint omits it).
+        value_pma_seeds=int(arch_meta.get("value_pma_seeds", 2)),
     ).to(device)
 
 
