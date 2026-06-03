@@ -42,7 +42,7 @@ warmup_steps = 200
 policy_weight = 1.0
 value_weight = 1.0
 opp_policy_weight = 0.25
-short_term_value_weight = 0.25
+short_term_value_weight = 0.10
 amp = true
 max_grad_norm = 1.0
 train_samples_per_epoch = 100000
@@ -74,7 +74,7 @@ bc_prune_max_dropped_mass = 0.15
 soft_z_lambda = 0.5
 
 [model.config.selfplay]
-search_visits = 128
+search_visits = 512
 active_games = 64
 c_puct = 1.5
 root_dirichlet_noise_enabled = true
@@ -96,7 +96,7 @@ temperature_floor = 0.1
 forced_playout_k = 2.0
 
 [model.config.evaluation]
-games_per_epoch = 24
+games_per_epoch = 40
 sealbot_variant = "best"
 sealbot_time_limit = 0.05
 max_actions = 1024

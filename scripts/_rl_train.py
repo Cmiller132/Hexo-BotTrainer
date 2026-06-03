@@ -436,8 +436,12 @@ def main():
                                         opening_moves=args.eval_opening_moves,
                                         opening_temperature=args.eval_opening_temperature)
         results = {}
-        # vs dense_cnn e24
+        # vs dense_cnn e24 — SKIPPED cleanly when the e24 checkpoint is unavailable
+        # (it was lost in the E: integrity event). SealBot (below) is the strength
+        # benchmark; a missing dense ckpt must not nan/spam or break the run.
         try:
+            if not Path(args.dense_ckpt).exists():
+                raise FileNotFoundError(f"dense_cnn e24 checkpoint missing: {args.dense_ckpt}")
             from hexo_models.dense_cnn.config import parse_model1_config
             from hexo_models.dense_cnn.architecture import Model1Network
             from hexo_models.dense_cnn.trainer import DenseCNNTrainer
@@ -465,6 +469,9 @@ def main():
                                  base_seed=4242, max_actions=args.eval_max_actions,
                                  game_id_prefix=f"e{rl_epoch}vsdense")
             results["vs_dense_cnn_e24"] = r.as_dict()
+        except FileNotFoundError as exc:
+            log(f"  eval: vs-dense_cnn SKIPPED — {exc}", fh)
+            results["vs_dense_cnn_e24_skipped"] = str(args.dense_ckpt)
         except Exception:
             results["vs_dense_cnn_e24_error"] = traceback.format_exc()
         # vs SealBot (optional)
