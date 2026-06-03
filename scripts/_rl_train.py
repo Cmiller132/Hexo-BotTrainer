@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 import time
 import traceback
@@ -41,6 +42,23 @@ def log(msg, fh=None):
     print(line, flush=True)
     if fh:
         fh.write(line + "\n"); fh.flush()
+
+
+def log_gpu_mem(tag, fh=None, reset=True):
+    """Log the CUDA caching-allocator RESERVED peak (what governs OOM / verifies the
+    run is on the ~2.4GB compiled+expandable path, not the ~11.8GB eager path) plus
+    the live reserved and the true allocated peak, then reset the peak so the next
+    window is measured fresh. No-op without CUDA."""
+    if not torch.cuda.is_available():
+        return
+    st = torch.cuda.memory_stats()
+    res_peak = st.get("reserved_bytes.all.peak", 0) / 1e9
+    res_now = st.get("reserved_bytes.all.current", 0) / 1e9
+    alloc_peak = torch.cuda.max_memory_allocated() / 1e9
+    log(f"  GPU mem [{tag}]: reserved_peak={res_peak:.2f}GB reserved_now={res_now:.2f}GB "
+        f"alloc_peak={alloc_peak:.2f}GB", fh)
+    if reset:
+        torch.cuda.reset_peak_memory_stats()
 
 
 # KataGo-style short-term-value (EMA) auxiliary heads. Horizon h uses the EMA of
@@ -324,6 +342,17 @@ def main():
     if compiled:
         model.forward_policy_value = torch.compile(model.forward_policy_value, dynamic=True)
 
+    # One-time confirmation that the production memory/compile config is engaged:
+    # torch.compile active + expandable_segments (so self-play runs on the ~2.4GB
+    # compiled+expandable path, not the ~11.8GB eager cell). Loud if either is OFF.
+    if device.type == "cuda":
+        alloc_conf = os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "")
+        expandable = "expandable_segments:true" in alloc_conf.lower()
+        total_gb = torch.cuda.get_device_properties(device).total_memory / 1e9
+        warn = "" if (compiled and expandable) else "  <-- WARNING: expected compile+expandable for the production mem profile"
+        log(f"    GPU mem config: compile={compiled} expandable_segments={'ON' if expandable else 'OFF'} "
+            f"(PYTORCH_CUDA_ALLOC_CONF={alloc_conf or 'unset'}) total={total_gb:.1f}GB{warn}", fh)
+
     log(f"=== hexgt RL start: {seed_desc} | params={nparams:,} n={args.n} device={device} "
         f"compile={compiled} ===", fh)
     log(f"    epochs={args.epochs} games/epoch={args.games_per_epoch} visits={args.visits} "
@@ -547,6 +576,10 @@ def main():
                     f"Q3 visitH={sp.mean_visit_entropy:.2f} priorH={sp.mean_prior_entropy:.2f} | "
                     f"Q4 |val|={sp.mean_abs_value:.2f} draw={sp.draw_fraction:.1%} | "
                     f"Q5 forced={sp.forced_move_fraction:.1%}{saniti_str}", fh)
+                # Per-epoch GPU reserved-memory peak for the self-play phase (the
+                # VRAM-binding phase): verifies the run holds the compiled+expandable
+                # envelope and flags any creep toward the card limit.
+                log_gpu_mem(f"epoch {rl_epoch} selfplay", fh)
                 # Also persist the full self-play metric dict per epoch for later analysis.
                 with open(eval_dir / f"epoch_{rl_epoch:06d}_selfplay.json", "w") as sp_fh:
                     json.dump(sp.as_dict(), sp_fh, indent=2)
