@@ -20,13 +20,14 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use hexo_engine::{
-    apply_placement, unpack_coord, GameOutcome, HexCoord, HexoState as RustHexoState, PackedCoord,
-    Placement, Player,
+    apply_placement, pack_coord, unpack_coord, GameOutcome, HexCoord, HexoState as RustHexoState,
+    PackedCoord, Placement, Player,
 };
 use hexo_utils::StateHash;
 
 use super::mcts_eval::{state_hash, RustEvaluation};
 use super::state::move_error;
+use super::threats;
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct RootDirichletNoise {
@@ -280,6 +281,9 @@ impl RustSearch {
         )?;
         let mut node_table = HashMap::new();
         node_table.insert(root_hash, 0);
+        // The root may already carry Phase-4 injected edges, so seed the edge
+        // accounting from the root node rather than assuming zero.
+        let root_edges = root_node.edges.len();
         Ok(Self {
             root_state,
             root_hash,
@@ -290,8 +294,8 @@ impl RustSearch {
             fpu_reduction,
             widening,
             forced_playout_k,
-            active_edge_count: 0,
-            max_active_edges_per_node: 0,
+            active_edge_count: root_edges,
+            max_active_edges_per_node: root_edges,
         })
     }
 
@@ -397,9 +401,20 @@ impl RustSearch {
             return Ok(existing);
         }
         let id = self.nodes.len();
-        let node = shared_from_cache(hash, state, evaluation, self.widening);
+        // Phase 4 injection: a node with an active >=4 threat is built as an OWNED
+        // node with the tactical cells force-materialized (bypassing the nucleus
+        // cap); the threat-free common case keeps the cheap shared-by-Arc path.
+        let tactical = threats::tactical_cells(state);
+        let node = if tactical.is_empty() {
+            shared_from_cache(hash, state, evaluation, self.widening)
+        } else {
+            owned_with_injection_from_eval(hash, state, &evaluation, self.widening, &tactical)
+        };
+        let injected_edges = node.edges.len();
         self.nodes.push(node);
         self.node_table.insert(hash, id);
+        self.active_edge_count += injected_edges;
+        self.max_active_edges_per_node = self.max_active_edges_per_node.max(injected_edges);
         Ok(id)
     }
 
@@ -778,6 +793,69 @@ fn shared_from_cache(
     }
 }
 
+/// Pre-materialize the TACTICAL cells (Phase 4 injection) as forced edges and
+/// lift the widening cap so they survive. `candidates` is the node's ASCENDING
+/// (highest-prior at back) owned prior list; tactical cells present in it are
+/// pulled out into eager edges, the rest stay as staged priors (order preserved,
+/// so `materialize_next_candidate` still pops the highest non-tactical prior).
+/// `cap = max(nucleus, |forced|)` so the nucleus cutoff can never exclude an
+/// injected cell, and the common (no-threat) path is a no-op. Tactical cells are
+/// a subset of the candidate set (the candidate builder seeds active-window
+/// empties), so this never creates an illegal move; any absent cell is skipped.
+fn split_tactical(
+    candidates: Vec<RustPriorCandidate>,
+    tactical: &[HexCoord],
+    nucleus: usize,
+) -> (Vec<RustEdge>, Vec<RustPriorCandidate>, usize) {
+    if tactical.is_empty() {
+        return (Vec::new(), candidates, nucleus);
+    }
+    let tac: HashSet<PackedCoord> = tactical.iter().map(|c| pack_coord(*c)).collect();
+    let mut forced = Vec::new();
+    let mut rest = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        if tac.contains(&candidate.action_id) {
+            forced.push(candidate.into_edge());
+        } else {
+            rest.push(candidate);
+        }
+    }
+    let cap = nucleus.max(forced.len());
+    (forced, rest, cap)
+}
+
+/// Build an interior node as an OWNED prior list with the tactical set injected
+/// as forced edges (Phase 4). Used in place of `shared_from_cache` ONLY when the
+/// node's state carries an active >=4 threat (rare), so the cheap shared-by-Arc
+/// path stays the common case. The eval priors are descending+normalized; they
+/// are reversed to the ascending owned layout (highest at back) before injection.
+fn owned_with_injection_from_eval(
+    state_hash: StateHash,
+    state: &RustHexoState,
+    evaluation: &RustEvaluation,
+    widening: Widening,
+    tactical: &[HexCoord],
+) -> RustNode {
+    let nucleus = nucleus_count_pairs(&evaluation.priors, widening);
+    let mut candidates: Vec<RustPriorCandidate> = evaluation
+        .priors
+        .iter()
+        .map(|&(action_id, prior)| RustPriorCandidate { action_id, prior })
+        .collect();
+    candidates.reverse(); // descending -> ascending (highest popped from back)
+    let (edges, rest, max_eligible_children) = split_tactical(candidates, tactical, nucleus);
+    RustNode {
+        state_hash,
+        player: state.current_player(),
+        eval_value: evaluation.value,
+        visits: 0,
+        value_sum: 0.0,
+        edges,
+        priors: NodePriors::Owned(rest),
+        max_eligible_children,
+    }
+}
+
 fn owned_root_from_evaluation(
     state_hash: StateHash,
     state: &RustHexoState,
@@ -811,7 +889,13 @@ fn owned_root_from_evaluation(
     candidates.reverse();
     // Compute the policy-nucleus cap from the final (normalized, possibly noised)
     // prior distribution. Static for the node's lifetime — no visit-based growth.
-    let max_eligible_children = nucleus_count(&candidates, widening);
+    let nucleus = nucleus_count(&candidates, widening);
+    // Phase 4: inject the tactical cells at the root as guaranteed children so an
+    // urgent block/own-win with a low prior is searched (the load-bearing fix —
+    // a leaf override can't fire on a child the nucleus cap never materializes).
+    let tactical = threats::tactical_cells(state);
+    let (edges, mut candidates, max_eligible_children) =
+        split_tactical(candidates, &tactical, nucleus);
     candidates.shrink_to_fit();
     Ok(RustNode {
         state_hash,
@@ -819,7 +903,7 @@ fn owned_root_from_evaluation(
         eval_value: evaluation.value,
         visits: 0,
         value_sum: 0.0,
-        edges: Vec::new(),
+        edges,
         priors: NodePriors::Owned(candidates),
         max_eligible_children,
     })
