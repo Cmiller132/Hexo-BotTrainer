@@ -25,7 +25,11 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from hexo_models.hexgt.architecture import HexgtNetwork, zero_init_expanded_feature_columns
+from hexo_models.hexgt.architecture import (
+    HexgtNetwork,
+    expand_value_readout_columns,
+    zero_init_expanded_feature_columns,
+)
 from hexo_models.hexgt.config import parse_hexgt_config
 from hexo_models.hexgt.constants import FEATURE_SCHEMA_VERSION
 from hexo_models.hexgt.selfplay import run_selfplay_games
@@ -249,11 +253,13 @@ def main():
     # were missing. The stv heads are aux (with_aux), so policy/value/play output
     # is identical at resume; only the training loss gains the stvalue_* terms.
     resume_incomplete_train = False
+    vr_expanded = False
     if latest.exists():
         ck = torch.load(latest, map_location=device, weights_only=False)
         arch_meta = dict(ck["arch"])
         arch_meta["short_term_value_horizons"] = list(STV_HORIZONS)
         model = build_model(arch_meta, device)
+        vr_expanded = expand_value_readout_columns(model, ck["model"])
         _validate_stv_resume_load(model.load_state_dict(ck["model"], strict=False))
         loaded_epoch = int(ck.get("rl_epoch", 0))
         # RE-TRAIN-ON-CRASH: a checkpoint whose epoch training did NOT complete (a
@@ -272,6 +278,7 @@ def main():
         arch_meta = dict(ck["arch"])
         arch_meta["short_term_value_horizons"] = list(STV_HORIZONS)
         model = build_model(arch_meta, device)
+        vr_expanded = expand_value_readout_columns(model, ck["model"])
         _validate_stv_resume_load(model.load_state_dict(ck["model"], strict=False))
         seed_desc = (f"SEED from {Path(args.bc_seed).name} (step={ck.get('step')}"
                      f"{', rl_epoch=' + str(ck['rl_epoch']) if 'rl_epoch' in ck else ''})"
@@ -289,6 +296,8 @@ def main():
         zeroed = zero_init_expanded_feature_columns(model)
         seed_desc += (f" + ZERO-INIT feature-expansion v{loaded_fsv}->v{FEATURE_SCHEMA_VERSION} "
                       f"(zeroed {len(zeroed)} node_in cols {zeroed})")
+    if vr_expanded:
+        seed_desc += " + EXPAND value-readout to global-pool [side|mean|max] (zero-init, identical first step)"
 
     nparams = sum(p.numel() for p in model.parameters())
     opt = torch.optim.AdamW(model.parameters(), lr=cfg.training.learning_rate, weight_decay=cfg.training.weight_decay)

@@ -39,6 +39,10 @@ from .constants import (
 )
 
 
+# Value readout = [SIDE hub | mean-pool | max-pool], each token_dim wide.
+VALUE_READOUT_MULT = 3
+
+
 def _graph_slices(node_graph: torch.Tensor, num_graphs: int) -> list[tuple[int, int]]:
     """Contiguous [start, end) node slice per graph (collate keeps graphs in order)."""
 
@@ -219,8 +223,20 @@ class HexgtNetwork(nn.Module):
 
         self.policy_head = nn.Linear(self.token_dim, 1)
         self.opp_policy_head = nn.Linear(self.token_dim, 1)
+        # The value head reads a GLOBAL-POOLED whole-board readout: the SIDE hub
+        # embedding concatenated with mean- and max-pooling over ALL node
+        # embeddings (VALUE_READOUT_MULT == 3 blocks of token_dim, in the order
+        # [side | mean | max]). A 3-hop GNN + single-SIDE-hub readout structurally
+        # under-propagates multi-window danger ("the opponent has a >=4 conjunction
+        # I cannot parry"); pooling gives the value head whole-board receptive
+        # field (HEXGT_TSS_AND_SOFT_VALUE_DESIGN.md PART 2 / companion Rank 1).
+        # The SIDE block is FIRST so a pre-pool checkpoint expands in-place by
+        # placing its (token_dim,token_dim) weight there and zeroing the pooled
+        # blocks (expand_value_readout_columns) -> identical first-step output.
         self.value_head = nn.Sequential(
-            nn.Linear(self.token_dim, self.token_dim), nn.ReLU(inplace=True), nn.Linear(self.token_dim, VALUE_BINS)
+            nn.Linear(VALUE_READOUT_MULT * self.token_dim, self.token_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(self.token_dim, VALUE_BINS),
         )
         self.short_term_value_heads = nn.ModuleDict(
             {
@@ -265,15 +281,46 @@ class HexgtNetwork(nn.Module):
         readout[node_graph[side_rows]] = node_emb.index_select(0, side_rows)
         return readout
 
+    def _global_pool(self, batch: Mapping[str, torch.Tensor], node_emb: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Per-graph mean and max pooling over ALL node embeddings.
+
+        Permutation-invariant (so D6-invariant: D6 permutes nodes bijectively),
+        and `.item()`-free so the search forward stays torch.compile-friendly.
+        Every hexgt graph has >=1 node (SIDE + candidates + windows), but empty
+        graphs are still handled (mean count clamped to 1; max -inf -> 0)."""
+
+        num_graphs = int(batch["num_graphs"])
+        node_graph = batch["node_graph"].to(dtype=torch.long)
+
+        mean_pool = node_emb.new_zeros(num_graphs, self.token_dim)
+        mean_pool.index_add_(0, node_graph, node_emb)
+        counts = node_emb.new_zeros(num_graphs, 1)
+        counts.index_add_(0, node_graph, node_emb.new_ones(node_emb.shape[0], 1))
+        mean_pool = mean_pool / counts.clamp(min=1.0)
+
+        max_pool = node_emb.new_full((num_graphs, self.token_dim), float("-inf"))
+        max_pool.index_reduce_(0, node_graph, node_emb, "amax", include_self=True)
+        max_pool = torch.where(torch.isfinite(max_pool), max_pool, node_emb.new_zeros(()))
+        return mean_pool, max_pool
+
+    def _value_readout(self, batch: Mapping[str, torch.Tensor], node_emb: torch.Tensor) -> torch.Tensor:
+        """Whole-board value readout: [SIDE hub | mean-pool | max-pool] (G, 3*D)."""
+
+        side = self._graph_readout(batch, node_emb)
+        mean_pool, max_pool = self._global_pool(batch, node_emb)
+        return torch.cat([side, mean_pool, max_pool], dim=-1)
+
     def _heads(self, batch: Mapping[str, torch.Tensor], node_emb: torch.Tensor, *, with_aux: bool) -> dict[str, torch.Tensor]:
         candidate_index = batch["candidate_index"].to(dtype=torch.long)
         cand_emb = node_emb.index_select(0, candidate_index)
-        graph_emb = self._graph_readout(batch, node_emb)
+        value_emb = self._value_readout(batch, node_emb)
         outputs: dict[str, torch.Tensor] = {
             "policy": self.policy_head(cand_emb).squeeze(-1),
-            "value": self.value_head(graph_emb),
+            "value": self.value_head(value_emb),
         }
         if with_aux:
+            # STV aux heads keep the SIDE-hub readout (unchanged, resume-exact).
+            graph_emb = self._graph_readout(batch, node_emb)
             outputs["opp_policy"] = self.opp_policy_head(cand_emb).squeeze(-1)
             for horizon, head in self.short_term_value_heads.items():
                 outputs[f"stvalue_{horizon}"] = head(graph_emb)
@@ -335,3 +382,47 @@ def zero_init_expanded_feature_columns(
         for slot in valid:
             first_linear.weight[:, slot].zero_()
     return valid
+
+
+def expand_value_readout_columns(
+    model: HexgtNetwork,
+    state_dict: dict,
+    *,
+    key: str = "value_head.0.weight",
+) -> bool:
+    """ZERO-INIT EXPANSION for the global-pooled value readout (Phase 2).
+
+    A pre-expansion checkpoint's value-head first ``Linear`` read ONLY the SIDE
+    hub: weight shape ``(token_dim, token_dim)``. The new head reads
+    ``[side | mean | max]``: ``(token_dim, VALUE_READOUT_MULT * token_dim)``. This
+    rewrites the checkpoint tensor IN PLACE in ``state_dict`` into the wider shape
+    — the old weight in the leading SIDE block ``[:, :token_dim]`` and ZEROS in
+    the mean/max blocks — so the loaded head produces output IDENTICAL to the
+    pre-expansion checkpoint on the first step (the pooled features contribute 0),
+    while training then learns the pooled signal from zero. Matching optimizer
+    moments for the new columns are ~0, so no optimizer surgery is needed.
+
+    Mirrors ``zero_init_expanded_feature_columns`` but for an INPUT-WIDTH change
+    of one Linear rather than zeroing existing columns. No-op (returns ``False``)
+    when the checkpoint already carries the wide shape (resuming a post-expansion
+    run). Call BEFORE ``load_state_dict(..., strict=False)`` so the value-head key
+    matches and the load stays strict elsewhere. Returns ``True`` if it expanded.
+    """
+
+    w = state_dict.get(key)
+    if w is None:
+        return False
+    target = model.value_head[0].weight
+    if tuple(w.shape) == tuple(target.shape):
+        return False
+    d = model.token_dim
+    if tuple(w.shape) != (int(target.shape[0]), d):
+        raise ValueError(
+            f"cannot expand {key}: checkpoint shape {tuple(w.shape)} is neither the "
+            f"pre-pool SIDE-only shape ({int(target.shape[0])}, {d}) nor the target "
+            f"{tuple(target.shape)}"
+        )
+    new_w = w.new_zeros(tuple(target.shape))
+    new_w[:, :d] = w  # SIDE-hub block first; mean/max blocks stay zero
+    state_dict[key] = new_w
+    return True
