@@ -62,6 +62,12 @@ shuffle_worker_group_size = 8000
 validation_fraction = 0.0
 policy_surprise_uniform_fraction = 0.5
 policy_surprise_max_weight = 8.0
+# KataGo policy-surprise weighting: duplicate self-play rows by KL(visits||prior)
+# so positions where search most disagreed with the prior carry more training
+# signal (targets the diagnosed defensive blind spots). Off by default in code;
+# enabled here for the active run. Composes with the recency-weighted shard
+# sampling (per-shard) and STV/soft-Z targets (per-row, copied into each duplicate).
+policy_surprise_enabled = true
 bc_prune_max_dropped_mass = 0.15
 # soft-Z value target: value = (1-lambda)*z + lambda*root_value (HEXGT_TSS_AND_
 # SOFT_VALUE_DESIGN.md PART 2). Start 0.5.

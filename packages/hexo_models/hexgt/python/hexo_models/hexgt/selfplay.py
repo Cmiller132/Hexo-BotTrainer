@@ -42,6 +42,7 @@ from hexo_engine.types import unpack_coord_id
 from hexo_runner.records import AbortRecord, HexoRecordFile, HexoRecordPlayer
 
 from hexo_models.dense_cnn.compact_io import write_compact_shard
+from hexo_models.dense_cnn.replay import materialize_policy_surprise_rows
 from hexo_models.dense_cnn.samples import (
     Model1SampleData,
     finalize_game_samples,
@@ -181,6 +182,10 @@ class SelfPlayResult:
     sanitized_positions: int = 0         # graphs/leaves with >=1 sanitized logit
     sanitized_search_rounds: int = 0     # search rounds in which >=1 logit was sanitized
     sanitized_samples_excluded: int = 0  # training rows dropped (their search round was tainted)
+    # KataGo policy-surprise weighting (row duplication; see materialize_policy_surprise_rows).
+    effective_samples: int = 0           # rows actually written (= raw after duplication)
+    policy_surprise_mean: float = 0.0    # mean KL(visits||prior) over written positions
+    frequency_weight_mean: float = 0.0   # mean per-row duplication weight (1.0 when off)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -224,6 +229,10 @@ class SelfPlayResult:
             "sanitized_positions": self.sanitized_positions,
             "sanitized_search_rounds": self.sanitized_search_rounds,
             "sanitized_samples_excluded": self.sanitized_samples_excluded,
+            # Policy-surprise weighting
+            "effective_samples": self.effective_samples,
+            "policy_surprise_mean": self.policy_surprise_mean,
+            "frequency_weight_mean": self.frequency_weight_mean,
         }
 
 
@@ -323,6 +332,11 @@ def run_selfplay_games(
     # Sanitization-audit accumulators (see HexgtInference._count_and_sanitize).
     sanitized_search_rounds = 0
     sanitized_samples_excluded = 0
+    # Policy-surprise (row-duplication) accumulators.
+    effective_samples = 0
+    surprise_sum = 0.0
+    freq_sum = 0.0
+    surprise_n = 0
     next_game_index = 0
     active: list[dict[str, Any]] = []
     started = perf_counter()
@@ -504,10 +518,28 @@ def run_selfplay_games(
             # is not a trustworthy training target. The drop count is surfaced.
             to_write = [s for s in finalized if not s.metadata.get("search_sanitized")]
             sanitized_samples_excluded += len(finalized) - len(to_write)
+            # KataGo policy-surprise weighting: repeat each position by a frequency
+            # weight driven by KL(visit-policy || root-prior), so positions where the
+            # search most disagreed with the network prior are trained on more. The
+            # root prior (which compact_io drops at write time) is still present on the
+            # finalized samples HERE, so the KL is exact. Off -> rows written 1:1.
+            if config.samples.policy_surprise_enabled and to_write:
+                materialized, weight_stats = materialize_policy_surprise_rows(
+                    to_write,
+                    seed=base_seed + epoch * 1_000_000_003 + int(game["search_key"]),
+                    uniform_fraction=config.samples.policy_surprise_uniform_fraction,
+                    max_weight=config.samples.policy_surprise_max_weight,
+                )
+                surprise_sum += weight_stats["policy_surprise_mean"] * len(to_write)
+                freq_sum += weight_stats["frequency_weight_mean"] * len(to_write)
+                surprise_n += len(to_write)
+            else:
+                materialized = to_write
             npz_path = output_dir / f"epoch_{epoch:06d}_game_{int(game['search_key']):06d}.npz"
-            write_compact_shard(npz_path, to_write, short_term_value_horizons=horizons)
+            write_compact_shard(npz_path, materialized, short_term_value_horizons=horizons)
             shard_paths.append(str(npz_path))
             raw_samples += len(to_write)
+            effective_samples += len(materialized)
             # Q1 length, Q2 diversity, Q4 value balance.
             game_lengths.append(len(game["actions"]))
             openings.append(tuple(int(a) for a in game["actions"][:_OPENING_PLIES]))
@@ -590,6 +622,9 @@ def run_selfplay_games(
         sanitized_positions=int(inference.sanitized_graph_total),
         sanitized_search_rounds=int(sanitized_search_rounds),
         sanitized_samples_excluded=int(sanitized_samples_excluded),
+        effective_samples=int(effective_samples),
+        policy_surprise_mean=(surprise_sum / surprise_n) if surprise_n else 0.0,
+        frequency_weight_mean=(freq_sum / surprise_n) if surprise_n else 0.0,
     )
 
 

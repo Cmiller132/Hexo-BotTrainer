@@ -111,6 +111,15 @@ class HexgtSampleConfig:
     validation_fraction: float = 0.0
     policy_surprise_uniform_fraction: float = 0.5
     policy_surprise_max_weight: float = 8.0
+    # KataGo policy-surprise sample weighting via row duplication (KL(visits||prior)).
+    # When enabled, self-play repeats each finalized position by a frequency weight
+    # mixing a uniform floor (`policy_surprise_uniform_fraction`) with a term
+    # proportional to its policy surprise, clamped to `policy_surprise_max_weight`, so
+    # positions where the search most disagreed with the network prior carry more
+    # training signal. OFF by default so the existing/halted lineages are unchanged;
+    # the active run opts in via its TOML. Interacts cleanly with the recency-weighted
+    # shard sampling (per-shard) and STV/soft-Z targets (per-row, copied verbatim).
+    policy_surprise_enabled: bool = False
     # Dataset pruning for BC/sample-gen (candidate_radius decision): a recorded
     # position is PRUNED when the fraction of its policy visit-mass that lands
     # OUTSIDE the n-radius candidate set exceeds this threshold (a far-spread move
@@ -250,6 +259,7 @@ def parse_hexgt_config(raw: Mapping[str, Any] | None) -> HexgtConfig:
             validation_fraction=float(samples.get("validation_fraction", 0.0)),
             policy_surprise_uniform_fraction=float(samples.get("policy_surprise_uniform_fraction", 0.5)),
             policy_surprise_max_weight=float(samples.get("policy_surprise_max_weight", 8.0)),
+            policy_surprise_enabled=bool(samples.get("policy_surprise_enabled", False)),
             bc_prune_max_dropped_mass=float(samples.get("bc_prune_max_dropped_mass", 0.15)),
             soft_z_lambda=float(samples.get("soft_z_lambda", 0.5)),
         ),
