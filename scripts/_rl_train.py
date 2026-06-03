@@ -125,6 +125,24 @@ def epoch_recency_weight(epoch, current_epoch, decay):
     return float(decay) ** max(0, int(current_epoch) - int(epoch))
 
 
+def resume_plan(loaded_epoch, epoch_train_complete):
+    """Decide the next epoch to run from a checkpoint's (rl_epoch, completion).
+
+    Returns ``(start_epoch, resume_incomplete_train)``. A COMPLETE epoch advances
+    to the next one (normal). An INCOMPLETE one (mid-training crash) re-runs THAT
+    epoch's training — ``resume_incomplete_train=True`` makes the first loop
+    iteration skip self-play and re-train from the existing on-disk shards."""
+    if epoch_train_complete:
+        return loaded_epoch + 1, False
+    return loaded_epoch, True
+
+
+def should_skip_selfplay(rl_epoch, start_epoch, resume_incomplete_train):
+    """Self-play is skipped ONLY for the crashing epoch being re-trained on resume
+    (its shards already exist) — and only on the first loop iteration."""
+    return bool(resume_incomplete_train) and rl_epoch == start_epoch
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--bc-seed", default="/mnt/e/Hexo-BotTrainer-hexgt/runs/hexgt_bc/hexgt_bc_step006009.pt")
@@ -224,16 +242,25 @@ def main():
     # keep fresh init. _validate_stv_resume_load guards that ONLY stv-head params
     # were missing. The stv heads are aux (with_aux), so policy/value/play output
     # is identical at resume; only the training loss gains the stvalue_* terms.
+    resume_incomplete_train = False
     if latest.exists():
         ck = torch.load(latest, map_location=device, weights_only=False)
         arch_meta = dict(ck["arch"])
         arch_meta["short_term_value_horizons"] = list(STV_HORIZONS)
         model = build_model(arch_meta, device)
         _validate_stv_resume_load(model.load_state_dict(ck["model"], strict=False))
-        start_epoch = int(ck.get("rl_epoch", 0)) + 1
+        loaded_epoch = int(ck.get("rl_epoch", 0))
+        # RE-TRAIN-ON-CRASH: a checkpoint whose epoch training did NOT complete (a
+        # mid-training crash) RE-RUNS that epoch's training from the existing
+        # self-play shards instead of advancing past it (which under-trained/skipped
+        # the epoch). Old checkpoints lack the flag -> treated as complete (advance),
+        # preserving prior behavior.
+        epoch_train_complete = bool(ck.get("epoch_train_complete", True))
+        start_epoch, resume_incomplete_train = resume_plan(loaded_epoch, epoch_train_complete)
         had_stv = bool(tuple(ck["arch"].get("short_term_value_horizons", ())))
         seed_desc = (f"RESUME from {latest.name} (rl_epoch={ck.get('rl_epoch')}, step={ck.get('step')})"
-                     + ("" if had_stv else f" + GRAFT STV-heads {STV_HORIZONS} (fresh-init, aux-only)"))
+                     + ("" if had_stv else f" + GRAFT STV-heads {STV_HORIZONS} (fresh-init, aux-only)")
+                     + ("" if epoch_train_complete else f" + RE-TRAIN incomplete epoch {loaded_epoch} (reuse shards, no re-self-play)"))
     else:
         ck = torch.load(args.bc_seed, map_location=device, weights_only=False)
         arch_meta = dict(ck["arch"])
@@ -260,6 +287,7 @@ def main():
     nparams = sum(p.numel() for p in model.parameters())
     opt = torch.optim.AdamW(model.parameters(), lr=cfg.training.learning_rate, weight_decay=cfg.training.weight_decay)
     trainer = HexgtTrainer(model=model, config=cfg, optimizer=opt)
+    trainer.cuda_retry_log = lambda m: log(m, fh)  # surface transient-CUDA retries in the run log
     # Load optimizer momentum from the seed/resume checkpoint when present (the BC
     # seed has none -> fresh momentum; an RL-epoch checkpoint does -> warm-start).
     if "optimizer" in ck:
@@ -281,12 +309,16 @@ def main():
         f"active={args.active} vbatch={args.vbatch} | train_steps/epoch={args.train_steps_per_epoch} "
         f"batch={args.batch} lr={args.lr} replay_window={args.replay_window_epochs} ep", fh)
 
-    def save(tag, rl_epoch):
+    def save(tag, rl_epoch, epoch_train_complete=True):
         payload = {
             "model": model.state_dict(), "optimizer": opt.state_dict(),
             "train_state": trainer.train_state.to_dict(), "arch": arch_meta,
             "step": trainer.train_state.global_step, "rl_epoch": rl_epoch,
             "feature_schema_version": FEATURE_SCHEMA_VERSION,
+            # RE-TRAIN-ON-CRASH marker: True only when this epoch's training reached
+            # its step target. A crash mid-training writes False so resume re-runs
+            # the epoch's training (from existing shards) instead of skipping it.
+            "epoch_train_complete": epoch_train_complete,
         }
         torch.save(payload, ckpt_dir / f"hexgt_rl_{tag}.pt")
         torch.save(payload, ckpt_dir / "hexgt_rl_latest.pt")
@@ -419,6 +451,8 @@ def main():
         log(f">>> {msg}", fh)
 
     last_save = None
+    cur_epoch = None            # epoch currently being processed (for crash bookkeeping)
+    cur_epoch_shards_ready = False  # cur_epoch's self-play shards are on disk (re-trainable)
     try:
         # Pre-training BC-seed baseline at the exact eval settings -> the anchor
         # the RL trend is measured against (the documented BC h2h was 55% @ 40
@@ -447,28 +481,39 @@ def main():
 
         for rl_epoch in range(start_epoch, args.epochs):
             ep_t0 = time.perf_counter()
+            cur_epoch = rl_epoch
+            # On a RE-TRAIN resume (mid-training crash), the crashing epoch's
+            # self-play shards are already on disk — skip self-play and go straight
+            # to re-training over them (only for the first epoch after such a resume).
+            skip_selfplay = should_skip_selfplay(rl_epoch, start_epoch, resume_incomplete_train)
+            cur_epoch_shards_ready = skip_selfplay  # shards already exist in this case
             # --- 1) self-play ----------------------------------------------------
-            model.eval()
-            sp = run_selfplay_games(
-                model, cfg, num_games=args.games_per_epoch, output_dir=selfplay_dir,
-                epoch=rl_epoch, device=str(device), fp16=(device.type == "cuda"),
-                base_seed=1000 + rl_epoch * 7919, active_games=args.active,
-                virtual_batch_size=args.vbatch, collect_examples=3,
-            )
-            log(f"epoch {rl_epoch} selfplay: {sp.completed_games}C/{sp.truncated_games}T games, "
-                f"{sp.searched_positions} pos, {sp.positions_per_second:.1f} pos/s | "
-                f"cand={sp.mean_candidate_count:.0f} | "
-                f"Q1 decisive={sp.decisive_fraction:.1%} len_med={sp.game_length_median:.0f} | "
-                f"Q2 uniq_open={sp.opening_unique_fraction:.1%} m2H={sp.move2_entropy:.2f} | "
-                f"Q3 visitH={sp.mean_visit_entropy:.2f} priorH={sp.mean_prior_entropy:.2f} | "
-                f"Q4 |val|={sp.mean_abs_value:.2f} draw={sp.draw_fraction:.1%} | "
-                f"Q5 forced={sp.forced_move_fraction:.1%}", fh)
-            # Also persist the full self-play metric dict per epoch for later analysis.
-            with open(eval_dir / f"epoch_{rl_epoch:06d}_selfplay.json", "w") as sp_fh:
-                json.dump(sp.as_dict(), sp_fh, indent=2)
-            # Dump example traces for play-style analysis.
-            with open(eval_dir / f"epoch_{rl_epoch:06d}_examples.json", "w") as ex_fh:
-                json.dump(sp.example_games, ex_fh)
+            if skip_selfplay:
+                log(f"epoch {rl_epoch}: RE-TRAIN after mid-training crash — reusing "
+                    f"existing self-play shards, skipping self-play", fh)
+            else:
+                model.eval()
+                sp = run_selfplay_games(
+                    model, cfg, num_games=args.games_per_epoch, output_dir=selfplay_dir,
+                    epoch=rl_epoch, device=str(device), fp16=(device.type == "cuda"),
+                    base_seed=1000 + rl_epoch * 7919, active_games=args.active,
+                    virtual_batch_size=args.vbatch, collect_examples=3,
+                )
+                cur_epoch_shards_ready = True  # self-play finished -> shards on disk
+                log(f"epoch {rl_epoch} selfplay: {sp.completed_games}C/{sp.truncated_games}T games, "
+                    f"{sp.searched_positions} pos, {sp.positions_per_second:.1f} pos/s | "
+                    f"cand={sp.mean_candidate_count:.0f} | "
+                    f"Q1 decisive={sp.decisive_fraction:.1%} len_med={sp.game_length_median:.0f} | "
+                    f"Q2 uniq_open={sp.opening_unique_fraction:.1%} m2H={sp.move2_entropy:.2f} | "
+                    f"Q3 visitH={sp.mean_visit_entropy:.2f} priorH={sp.mean_prior_entropy:.2f} | "
+                    f"Q4 |val|={sp.mean_abs_value:.2f} draw={sp.draw_fraction:.1%} | "
+                    f"Q5 forced={sp.forced_move_fraction:.1%}", fh)
+                # Also persist the full self-play metric dict per epoch for later analysis.
+                with open(eval_dir / f"epoch_{rl_epoch:06d}_selfplay.json", "w") as sp_fh:
+                    json.dump(sp.as_dict(), sp_fh, indent=2)
+                # Dump example traces for play-style analysis.
+                with open(eval_dir / f"epoch_{rl_epoch:06d}_examples.json", "w") as ex_fh:
+                    json.dump(sp.example_games, ex_fh)
 
             # --- 2) train over the recency-weighted, cap-bounded replay window ---
             model.train()
@@ -519,8 +564,20 @@ def main():
         log(f"=== hexgt RL DONE (through epoch {last_save}) ===", fh)
     except Exception:
         log("EXCEPTION — saving crash checkpoint:\n" + traceback.format_exc(), fh)
-        if last_save is not None or start_epoch < args.epochs:
-            save("crash", last_save if last_save is not None else start_epoch)
+        if cur_epoch is not None and cur_epoch_shards_ready:
+            # Crash during/after TRAINING: the crashing epoch's self-play shards are
+            # on disk, so keep the partial weights but mark this epoch's training
+            # INCOMPLETE — resume RE-TRAINS it from those shards (no re-self-play,
+            # no skip). This is the common case (the CUDA crashes hit the training
+            # forward/backward).
+            save("crash", cur_epoch, epoch_train_complete=False)
+            log(f"  (crash during epoch {cur_epoch} training -> saved INCOMPLETE; resume will re-train it)", fh)
+        else:
+            # Crash during self-play (weights unchanged since the last checkpoint):
+            # leave the existing latest checkpoint as the resume point so resume
+            # cleanly redoes this epoch (self-play + train) from the last completed
+            # epoch — overwriting would risk skipping the epoch.
+            log("  (crash before training shards were ready; leaving last checkpoint as the resume point)", fh)
         raise
     finally:
         fh.close()

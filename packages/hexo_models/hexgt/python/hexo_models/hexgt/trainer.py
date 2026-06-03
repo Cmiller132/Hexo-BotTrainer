@@ -14,6 +14,8 @@ decreases loss"). The full KataGo replay-window / train-bucket integration
 
 from __future__ import annotations
 
+import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -22,6 +24,26 @@ import torch
 
 from .expand import build_training_batch
 from .losses import hexgt_loss
+
+
+# Transient CUDA-driver errors we RETRY (a WSL2/consumer-GPU TDR-style reset
+# surfaces as "device not ready" at the next sync — observed crashing the training
+# forward AND backward). Real, non-recoverable errors are excluded so they still
+# raise immediately and are never masked.
+_TRANSIENT_CUDA_MARKERS = ("device not ready", "cudaerrornotready")
+_NONTRANSIENT_CUDA_MARKERS = (
+    "out of memory", "illegal memory access", "device-side assert",
+    "misaligned address", "cublas", "cudnn",
+)
+
+
+def _is_transient_cuda_error(exc: BaseException) -> bool:
+    """True only for transient, retryable CUDA driver hiccups. OOM, illegal-access,
+    device-side asserts, shape/library errors are NEVER matched (they re-raise)."""
+    msg = str(exc).lower()
+    if any(m in msg for m in _NONTRANSIENT_CUDA_MARKERS):
+        return False
+    return any(m in msg for m in _TRANSIENT_CUDA_MARKERS)
 
 
 @dataclass
@@ -78,6 +100,13 @@ class HexgtTrainer:
             opp_policy_weight=config.training.opp_policy_weight,
             short_term_value_weight=config.training.short_term_value_weight,
         )
+        # Retry guard for transient CUDA driver hiccups (see _is_transient_cuda_error).
+        # A step is retried up to this many times (synchronize + backoff) before it
+        # falls through to the crash path. cuda_retry_log: optional callback(msg) the
+        # driver sets to surface retries in its log (defaults to stderr).
+        self.cuda_retry_attempts = 3
+        self.cuda_retry_backoff = 0.5
+        self.cuda_retry_log = None
 
     @property
     def sample_count(self) -> int:
@@ -112,17 +141,45 @@ class HexgtTrainer:
 
         lr = self._lr_at_step(int(self.train_state.global_step))
         self._set_lr(lr)
-        self.optimizer.zero_grad(set_to_none=True)
-
         use_amp = self._amp and device.type == "cuda"
-        with torch.autocast(device_type=device.type, enabled=use_amp):
-            outputs = self.model(batch)
-            loss, components = hexgt_loss(outputs, targets, **self._weights)
 
-        loss.backward()
-        if self._max_grad_norm > 0:
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self._max_grad_norm)
-        self.optimizer.step()
+        # Run the step under a retry guard: a transient CUDA driver hiccup (e.g. a
+        # WSL2/consumer-GPU TDR-style "device not ready", which has crashed both the
+        # forward SDPA and loss.backward()) is recovered by synchronize + brief
+        # backoff + retrying the WHOLE step. The optimizer hasn't stepped on a failed
+        # attempt, so a retry is safe. Real errors (OOM/illegal-access/shape) are not
+        # matched and re-raise immediately; exhausting retries re-raises too (the
+        # supervisor then relaunches and the epoch is re-trained).
+        attempts = max(1, int(self.cuda_retry_attempts))
+        components: dict[str, torch.Tensor] = {}
+        for attempt in range(attempts):
+            try:
+                self.optimizer.zero_grad(set_to_none=True)
+                with torch.autocast(device_type=device.type, enabled=use_amp):
+                    outputs = self.model(batch)
+                    loss, components = hexgt_loss(outputs, targets, **self._weights)
+                loss.backward()
+                if self._max_grad_norm > 0:
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self._max_grad_norm)
+                self.optimizer.step()
+                break
+            except RuntimeError as exc:
+                if attempt >= attempts - 1 or not _is_transient_cuda_error(exc):
+                    raise
+                msg = (f"[trainer] transient CUDA error on step {self.train_state.global_step} "
+                       f"(attempt {attempt + 1}/{attempts}): {str(exc).splitlines()[0]} "
+                       f"-> synchronize + retry")
+                (self.cuda_retry_log or (lambda m: print(m, file=sys.stderr, flush=True)))(msg)
+                if device.type == "cuda":
+                    try:
+                        torch.cuda.synchronize(device)
+                    except Exception:
+                        pass
+                    try:
+                        torch.cuda.empty_cache()
+                    except Exception:
+                        pass
+                time.sleep(self.cuda_retry_backoff * (attempt + 1))
 
         self.train_state.global_step += 1
         self.train_state.global_step_samples += int(batch["num_graphs"])
