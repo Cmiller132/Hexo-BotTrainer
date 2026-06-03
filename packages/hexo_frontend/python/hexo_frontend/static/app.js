@@ -5,7 +5,7 @@ const FIT_LEGAL_RADIUS = 5;
 const HISTORY_ALL_RUNS = "__all__";
 const HISTORY_PAGE_SIZE = 50;
 const HISTORY_AUTOLOAD_PAGE_SIZE = 500;
-const HISTORY_REFRESH_INTERVAL_MS = 15000;
+const HISTORY_REFRESH_INTERVAL_MS = 7000;
 const ARTIFACT_PAGE_SIZE = 50;
 
 let state = null;
@@ -52,6 +52,9 @@ let historyPage = {
   countRequestKey: "",
 };
 let selectedHistoryKey = "";
+// The current ordered game list (filtered + sorted), captured whenever the
+// history page renders, so the loaded-game viewer can step Prev/Next through it.
+let historyOrderedItems = [];
 let historyView = false;
 let polling = false;
 let pollTimer = null;
@@ -220,6 +223,21 @@ on("replayPlayBtn", "click", toggleReplayPlay);
 on("replayNextBtn", "click", () => setReplayIndex(viewedPlacementCount() + 1));
 on("replayLiveBtn", "click", () => setReplayIndex(totalPlacements()));
 on("replaySlider", "input", event => setReplayIndex(Number(event.target.value)));
+on("gamePrevBtn", "click", () => navigateAdjacentGame(-1));
+on("gameNextBtn", "click", () => navigateAdjacentGame(1));
+// Keyboard Left/Right steps between games while a list-backed replay is loaded.
+// Ignored when typing in a field, or when modifier keys are held, so it never
+// hijacks slider/native arrow behavior.
+window.addEventListener("keydown", event => {
+  if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+  if (event.altKey || event.ctrlKey || event.metaKey) return;
+  const el = document.activeElement;
+  const tag = el && el.tagName ? el.tagName.toLowerCase() : "";
+  if (tag === "input" || tag === "select" || tag === "textarea") return;
+  if (currentHistoryGameIndex() < 0) return;
+  event.preventDefault();
+  navigateAdjacentGame(event.key === "ArrowLeft" ? -1 : 1);
+});
 window.addEventListener("resize", () => { if (state) render(); });
 boardArea.addEventListener("click", handleBoardClick);
 bindBoardViewEvents();
@@ -590,6 +608,49 @@ async function loadTrainingHistory(runName, artifactPath, recordIndex = 0) {
   }
 }
 
+// Index of the currently-loaded history game within the ordered list, or -1.
+function currentHistoryGameIndex() {
+  if (!historyView || !selectedHistoryKey || !historyOrderedItems.length) return -1;
+  return historyOrderedItems.findIndex(item => historyItemKey(item) === selectedHistoryKey);
+}
+
+// Step Prev/Next through the current ordered game list and load that game's
+// replay. Bounded (no wrap): callers/UI disable at the ends. Works for any run
+// (dense_cnn included) since it just reuses the row's run/path/record_index.
+function navigateAdjacentGame(direction) {
+  if (pendingRequest) return;
+  const idx = currentHistoryGameIndex();
+  if (idx < 0) return;
+  const nextIdx = idx + direction;
+  if (nextIdx < 0 || nextIdx >= historyOrderedItems.length) return;
+  const item = historyOrderedItems[nextIdx];
+  if (!item) return;
+  loadTrainingHistory(item.run || (trainingRun && trainingRun.name), item.path, Number(item.record_index || 0));
+}
+
+// Show the Prev/Next game bar only while a list-backed history game is loaded;
+// label "Game N / M" and disable the ends. Hidden for live play and one-off
+// loads with no list context (index -1), so it never clutters normal play.
+function renderGameNav() {
+  const nav = document.getElementById("gameNav");
+  if (!nav) return;
+  const idx = currentHistoryGameIndex();
+  const total = historyOrderedItems.length;
+  const show = idx >= 0 && total > 1;
+  nav.hidden = !show;
+  if (!show) return;
+  const label = document.getElementById("gameNavLabel");
+  if (label) label.textContent = `Game ${idx + 1} / ${total}`;
+  // Disable only at the list ends. A mid-load (pendingRequest) click is already a
+  // no-op via navigateAdjacentGame's guard, so gating disabled on pendingRequest
+  // here would just leave the buttons stuck disabled after a load settles (no
+  // render fires when pending clears).
+  const prev = document.getElementById("gamePrevBtn");
+  const next = document.getElementById("gameNextBtn");
+  if (prev) prev.disabled = idx <= 0;
+  if (next) next.disabled = idx >= total - 1;
+}
+
 async function post(url, payload, options = {}) {
   if (pendingRequest) return;
   abortPoll();
@@ -821,6 +882,7 @@ function render() {
   renderBotPanel();
   renderTurnOverlay();
   renderReplay();
+  renderGameNav();
 }
 
 function renderControls() {
@@ -2442,6 +2504,7 @@ function renderGameHistoryPage() {
 
   const usingServerPage = historyPage.loaded || historyPage.loading || historyPage.items.length > 0;
   const filtered = usingServerPage ? histories : sortedHistoryItems(filteredHistoryItems(histories));
+  historyOrderedItems = filtered;  // remember the ordered list for Prev/Next game nav
   const selected = selectedHistoryItem(histories, filtered);
   const visible = usingServerPage ? filtered : filtered.slice(0, historyVisibleLimit);
   historyOverview.innerHTML = renderHistoryOverview(histories, filtered);

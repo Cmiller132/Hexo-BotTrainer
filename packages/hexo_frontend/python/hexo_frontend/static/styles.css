@@ -1200,6 +1200,43 @@ body.pending button:disabled {
   border-top: 1px solid var(--line);
 }
 
+/* Game-level Prev/Next nav, shown above the move-replay controls only while a
+   list-backed history game is loaded. The explicit [hidden] guard is required —
+   `display:flex` would otherwise override the default [hidden] display:none. */
+.game-nav {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--line);
+  background: rgba(7, 13, 19, 0.4);
+}
+
+.game-nav[hidden] {
+  display: none;
+}
+
+.game-nav button {
+  min-width: 0;
+  padding: 4px 14px;
+  font-weight: 700;
+}
+
+.game-nav button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.game-nav-label {
+  min-width: 96px;
+  text-align: center;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+}
+
 .replay-row {
   display: grid;
   grid-template-columns: minmax(180px, 260px) minmax(86px, 110px) minmax(180px, 1fr);
