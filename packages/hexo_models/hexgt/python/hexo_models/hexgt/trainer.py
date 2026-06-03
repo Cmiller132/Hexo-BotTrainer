@@ -89,6 +89,20 @@ class HexgtTrainer:
         self._warmup_steps = max(0, int(config.training.warmup_steps))
         self._max_grad_norm = float(config.training.max_grad_norm)
         self._amp = bool(config.training.amp)
+        # AMP loss scaling. `optimizer_step` runs the forward under `torch.autocast`
+        # with NO explicit dtype, so on CUDA the autocast dtype is fp16 (the torch
+        # default), whose ~6e-5 smallest-normal underflows small gradients to zero
+        # without loss scaling. A `GradScaler` scales the loss up before backward and
+        # unscales the grads before the clip/step, recovering those gradients (bf16
+        # would not need this -- it keeps fp32's exponent range -- but this path is
+        # fp16, matching the fp16 inference evaluator). The scaler is a no-op when AMP
+        # is off or on CPU. Its scale factor is intentionally NOT checkpointed (it
+        # re-warms from the default within a few hundred steps on resume), matching
+        # dense_cnn's trainer.
+        scaler_device = next(model.parameters()).device
+        self.scaler = torch.amp.GradScaler(
+            "cuda", enabled=(self._amp and scaler_device.type == "cuda")
+        )
         self._horizons = tuple(int(h) for h in config.architecture.short_term_value_horizons)
         self._candidate_radius = int(config.architecture.candidate_radius)
         self._prune_max_dropped_mass = float(config.samples.bc_prune_max_dropped_mass)
@@ -158,10 +172,20 @@ class HexgtTrainer:
                 with torch.autocast(device_type=device.type, enabled=use_amp):
                     outputs = self.model(batch)
                     loss, components = hexgt_loss(outputs, targets, **self._weights)
-                loss.backward()
+                # Scale the loss before backward so fp16 gradients do not underflow;
+                # unscale before the grad-norm clip so the clip threshold applies to the
+                # true (unscaled) gradients; `scaler.step` skips the optimizer update on
+                # an inf/NaN gradient and `scaler.update` adapts the scale. The
+                # transient-CUDA retries documented below occur in the forward/backward
+                # (SDPA / loss.backward); `scaler.scale()` only multiplies the loss and
+                # registers no per-optimizer state, so re-running the whole step on a
+                # retry is safe (no double `unscale_`).
+                self.scaler.scale(loss).backward()
                 if self._max_grad_norm > 0:
+                    self.scaler.unscale_(self.optimizer)
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), self._max_grad_norm)
-                self.optimizer.step()
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
                 break
             except RuntimeError as exc:
                 if attempt >= attempts - 1 or not _is_transient_cuda_error(exc):
