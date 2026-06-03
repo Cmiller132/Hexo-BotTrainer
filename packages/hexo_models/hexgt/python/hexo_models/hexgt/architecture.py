@@ -277,6 +277,7 @@ class HexgtNetwork(nn.Module):
         short_term_value_horizons: tuple[int, ...] = (),
         edge_attr_dim: int = EDGE_ATTR_DIM,
         value_pma_seeds: int = DEFAULT_VALUE_PMA_SEEDS,
+        value_head_use_side: bool = True,
     ) -> None:
         super().__init__()
         self.node_feature_dim = int(node_feature_dim)
@@ -288,6 +289,7 @@ class HexgtNetwork(nn.Module):
         self.edge_attr_dim = int(edge_attr_dim)
         self.short_term_value_horizons = tuple(int(h) for h in short_term_value_horizons)
         self.value_pma_seeds = int(value_pma_seeds)
+        self.value_head_use_side = bool(value_head_use_side)
 
         self.node_in = nn.Sequential(
             nn.Linear(self.node_feature_dim, self.token_dim),
@@ -303,18 +305,20 @@ class HexgtNetwork(nn.Module):
 
         self.policy_head = nn.Linear(self.token_dim, 1)
         self.opp_policy_head = nn.Linear(self.token_dim, 1)
-        # The value head reads a whole-board readout: the SIDE hub embedding
-        # concatenated with a Set-Transformer PMA pool (k = value_pma_seeds learned
-        # seed queries, attention_heads-head) over ALL post-transformer node
-        # embeddings -> [SIDE | PMA_k], width (1 + k) * token_dim. PMA is a
-        # learnable generalization of the prior fixed mean+max pool (a seed can
-        # learn uniform ~= mean or sharp ~= soft-max attention), giving the value
-        # head a cross-node/cross-channel soft pooling for defensive calibration
-        # (HEXGT_PMA_VALUE_HEAD_PLAN.md). The SIDE block is FIRST (kept for the
-        # dedicated whole-board hub); the PMA block follows.
+        # The value head reads a whole-board readout: a Set-Transformer PMA pool
+        # (k = value_pma_seeds learned seed queries, attention_heads-head) over ALL
+        # post-transformer node embeddings, OPTIONALLY prefixed with the SIDE hub
+        # embedding. With `value_head_use_side` (default) the readout is
+        # [SIDE | PMA_k], width (1 + k) * token_dim (the SIDE block FIRST); when
+        # False it is PMA-only, width k * token_dim (an A/B toggle to isolate the
+        # PMA pool's contribution). PMA is a learnable generalization of the prior
+        # fixed mean+max pool (a seed can learn uniform ~= mean or sharp ~= soft-max
+        # attention), giving the value head a cross-node/cross-channel soft pooling
+        # for defensive calibration (HEXGT_PMA_VALUE_HEAD_PLAN.md).
         self.value_pool = PMAValuePool(self.token_dim, self.attention_heads, self.value_pma_seeds)
+        value_readout_blocks = (1 if self.value_head_use_side else 0) + self.value_pma_seeds
         self.value_head = nn.Sequential(
-            nn.Linear((1 + self.value_pma_seeds) * self.token_dim, self.token_dim),
+            nn.Linear(value_readout_blocks * self.token_dim, self.token_dim),
             nn.ReLU(inplace=True),
             nn.Linear(self.token_dim, VALUE_BINS),
         )
@@ -362,11 +366,14 @@ class HexgtNetwork(nn.Module):
         return readout
 
     def _value_readout(self, batch: Mapping[str, torch.Tensor], node_emb: torch.Tensor) -> torch.Tensor:
-        """Whole-board value readout: [SIDE hub | PMA_k pool] (G, (1+k)*D)."""
+        """Whole-board value readout: [SIDE hub | PMA_k pool] (G, (1+k)*D), or
+        PMA-only (G, k*D) when ``value_head_use_side`` is False."""
 
         num_graphs = int(batch["num_graphs"])
-        side = self._graph_readout(batch, node_emb)
         pooled = self.value_pool(node_emb, batch["node_graph"], num_graphs)
+        if not self.value_head_use_side:
+            return pooled
+        side = self._graph_readout(batch, node_emb)
         return torch.cat([side, pooled], dim=-1)
 
     def _heads(self, batch: Mapping[str, torch.Tensor], node_emb: torch.Tensor, *, with_aux: bool) -> dict[str, torch.Tensor]:

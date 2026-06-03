@@ -72,6 +72,11 @@ class HexgtArchitectureConfig:
     # PMA value-head seed count k (HEXGT_PMA_VALUE_HEAD_PLAN.md). The value readout
     # is [SIDE | PMA_k]; k=2 is the owner's chosen build (doc default is 1).
     value_pma_seeds: int = DEFAULT_VALUE_PMA_SEEDS
+    # Whether the value head concatenates the SIDE-hub embedding before the PMA pool
+    # (`[SIDE | PMA_k]`, width (1+k)*token_dim). False -> PMA-only (`[PMA_k]`, width
+    # k*token_dim), an A/B toggle to isolate the PMA pool's contribution. Default
+    # True keeps the current build; a no-SIDE run retrains from a pretrain seed.
+    value_head_use_side: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -215,6 +220,7 @@ def parse_hexgt_config(raw: Mapping[str, Any] | None) -> HexgtConfig:
             short_term_value_horizons=_int_tuple(arch.get("short_term_value_horizons", ())),
             candidate_radius=int(arch.get("candidate_radius", DEFAULT_CANDIDATE_RADIUS)),
             value_pma_seeds=int(arch.get("value_pma_seeds", DEFAULT_VALUE_PMA_SEEDS)),
+            value_head_use_side=bool(arch.get("value_head_use_side", True)),
         ),
         training=HexgtTrainingConfig(
             batch_size=int(training.get("batch_size", 128)),

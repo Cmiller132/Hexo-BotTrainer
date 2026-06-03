@@ -60,7 +60,7 @@ def main():
         node_feature_dim=a.node_feature_dim, token_dim=a.token_dim, gnn_layers=a.gnn_layers,
         ctx_layers=a.ctx_layers, attention_heads=a.attention_heads, ffn_dim=a.ffn_dim,
         dropout=a.dropout, short_term_value_horizons=a.short_term_value_horizons,
-        value_pma_seeds=a.value_pma_seeds,
+        value_pma_seeds=a.value_pma_seeds, value_head_use_side=a.value_head_use_side,
     ).to(dev)
     nparams = sum(p.numel() for p in model.parameters())
     print(f"[model] params={nparams:,} device={dev}", flush=True)

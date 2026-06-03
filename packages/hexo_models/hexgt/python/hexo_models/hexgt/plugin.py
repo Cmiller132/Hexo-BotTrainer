@@ -48,6 +48,7 @@ class HexgtPlugin:
             dropout=arch.dropout,
             short_term_value_horizons=arch.short_term_value_horizons,
             value_pma_seeds=arch.value_pma_seeds,
+            value_head_use_side=arch.value_head_use_side,
         )
 
     def training_component_overrides(
