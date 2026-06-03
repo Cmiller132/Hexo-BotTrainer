@@ -139,6 +139,49 @@ def build_attention_layout(node_graph: torch.Tensor, is_candidate: torch.Tensor,
     return _AttentionLayout(ctx_index, ctx_pad, cand_index, cand_pad)
 
 
+# Keys under which a PRECOMPUTED attention layout travels in the batch dict. The
+# layout's only data-dependent ops (`nonzero`/`bincount`/`.item()` to size the
+# padded gather) graph-break `torch.compile` and force a recompile per distinct
+# padded size. The eager inference wrapper computes the layout ONCE (outside the
+# compiled region) and attaches it under these keys; `_layout_from_batch` then
+# consumes the ready tensors so the compiled forward has zero such breaks. The
+# uncompiled training / direct-`forward()` path leaves them absent and builds the
+# layout inline (unchanged).
+LAYOUT_BATCH_KEYS = ("attn_ctx_index", "attn_ctx_pad", "attn_cand_index", "attn_cand_pad")
+
+
+def precompute_attention_layout(node_graph: torch.Tensor, node_type: torch.Tensor, num_graphs: int) -> dict[str, torch.Tensor]:
+    """Build the data-dependent index tensors the compiled forward needs — the
+    padded attention layout AND the SIDE-hub rows — for attaching to a batch dict.
+    Both are `nonzero`/`bincount`/`.item()`-based (graph-breaking + recompiling
+    under torch.compile); computing them EAGERLY here and passing them in leaves
+    the compiled forward free of every such op. Call OUTSIDE torch.compile."""
+    is_candidate = node_type == NODE_TYPE_CANDIDATE
+    layout = build_attention_layout(node_graph, is_candidate, num_graphs)
+    side_rows = (node_type == NODE_TYPE_SIDE).nonzero(as_tuple=True)[0]
+    return {
+        "attn_ctx_index": layout.ctx_index,
+        "attn_ctx_pad": layout.ctx_pad,
+        "attn_cand_index": layout.cand_index,
+        "attn_cand_pad": layout.cand_pad,
+        "side_rows": side_rows,
+        "side_graph": node_graph.index_select(0, side_rows),
+    }
+
+
+def _layout_from_batch(batch: Mapping[str, torch.Tensor], num_graphs: int) -> _AttentionLayout:
+    """Use the PRECOMPUTED layout (LAYOUT_BATCH_KEYS, attached eagerly by the
+    inference wrapper) when present — so the compiled forward does no
+    nonzero/bincount/.item — else build it here (training / direct forward)."""
+    if all(k in batch for k in LAYOUT_BATCH_KEYS):
+        return _AttentionLayout(
+            batch["attn_ctx_index"], batch["attn_ctx_pad"],
+            batch["attn_cand_index"], batch["attn_cand_pad"],
+        )
+    is_candidate = batch["node_type"] == NODE_TYPE_CANDIDATE
+    return build_attention_layout(batch["node_graph"], is_candidate, num_graphs)
+
+
 class GraphTransformerLayer(nn.Module):
     """Batched context self-attention + candidate→context cross-attention.
 
@@ -347,8 +390,7 @@ class HexgtNetwork(nn.Module):
             h = layer(h, edge_index, edge_type, edge_attr)
 
         num_graphs = int(batch["num_graphs"])
-        is_candidate = batch["node_type"] == NODE_TYPE_CANDIDATE
-        layout = build_attention_layout(batch["node_graph"], is_candidate, num_graphs)
+        layout = _layout_from_batch(batch, num_graphs)
         for layer in self.transformer:
             h = layer(h, layout)
         return h
@@ -357,12 +399,18 @@ class HexgtNetwork(nn.Module):
         """Per-graph readout from the SIDE hub node (one per graph)."""
 
         num_graphs = int(batch["num_graphs"])
-        node_type = batch["node_type"]
-        node_graph = batch["node_graph"]
-        side_rows = (node_type == NODE_TYPE_SIDE).nonzero(as_tuple=True)[0]
+        # Use the PRECOMPUTED side-hub rows (attached eagerly, alongside the
+        # attention layout) when present — so the compiled forward has no nonzero
+        # here either — else compute them inline (training / direct forward()).
+        if "side_rows" in batch:
+            side_rows = batch["side_rows"]
+            side_graph = batch["side_graph"]
+        else:
+            side_rows = (batch["node_type"] == NODE_TYPE_SIDE).nonzero(as_tuple=True)[0]
+            side_graph = batch["node_graph"].index_select(0, side_rows)
         readout = node_emb.new_zeros(num_graphs, self.token_dim)
         # last side node per graph (there is exactly one)
-        readout[node_graph[side_rows]] = node_emb.index_select(0, side_rows)
+        readout[side_graph] = node_emb.index_select(0, side_rows)
         return readout
 
     def _value_readout(self, batch: Mapping[str, torch.Tensor], node_emb: torch.Tensor) -> torch.Tensor:

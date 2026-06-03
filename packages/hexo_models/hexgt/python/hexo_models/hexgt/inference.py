@@ -20,6 +20,7 @@ from typing import Any, Sequence
 import numpy as np
 import torch
 
+from .architecture import precompute_attention_layout
 from .constants import DEFAULT_CANDIDATE_RADIUS
 from .graph_build import batch_from_states
 from .losses import decode_binned_value, segment_log_softmax
@@ -229,13 +230,18 @@ class HexgtInference:
 
         batch = self._to_device(batch)
         num_graphs = int(batch["num_graphs"])
+        # Build the attention layout EAGERLY here (outside the compiled
+        # forward_policy_value) and pass it in, so the compiled forward has no
+        # data-dependent nonzero/bincount/.item -> no graph-break / recompile.
         with torch.autocast(device_type=self.device.type, dtype=torch.float16, enabled=self.fp16):
             if num_graphs <= 1:
+                batch = {**batch, **precompute_attention_layout(batch["node_graph"], batch["node_type"], num_graphs)}
                 return self.model.forward_policy_value(batch), batch
             cg = batch["candidate_graph"]
             counts = torch.bincount(cg, minlength=num_graphs)
             padded = int(counts.max()) * num_graphs
             if padded <= self.forward_pad_budget:
+                batch = {**batch, **precompute_attention_layout(batch["node_graph"], batch["node_type"], num_graphs)}
                 return self.model.forward_policy_value(batch), batch
             # Chunked path: sorted, budget-bounded sub-batches.
             chunks = _plan_chunks(counts, self.forward_pad_budget)
@@ -243,6 +249,7 @@ class HexgtInference:
             value: torch.Tensor | None = None
             for gids in chunks:
                 sub, csel = _subbatch(batch, gids)
+                sub = {**sub, **precompute_attention_layout(sub["node_graph"], sub["node_type"], sub["num_graphs"])}
                 out = self.model.forward_policy_value(sub)
                 policy[csel] = out["policy"].float()
                 if value is None:
