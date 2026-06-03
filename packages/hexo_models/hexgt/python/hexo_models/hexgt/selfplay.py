@@ -31,7 +31,7 @@ turn), exactly as `expand.py` expects.
 from __future__ import annotations
 
 import statistics
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from math import log
 from pathlib import Path
 from time import perf_counter
@@ -173,6 +173,14 @@ class SelfPlayResult:
     mean_abs_value: float = 0.0
     # Q5 tactical proxy: fraction of decisions with a near-forced best move.
     forced_move_fraction: float = 0.0
+    # Non-finite-logit sanitization audit (see HexgtInference._count_and_sanitize).
+    # A healthy model should keep these at 0; a non-zero count is a red flag (fp16
+    # overflow / model instability) AND drives training exclusion of the affected
+    # positions, so it is surfaced in diagnostics rather than left silent.
+    sanitized_logit_events: int = 0      # non-finite logit values sanitized this epoch
+    sanitized_positions: int = 0         # graphs/leaves with >=1 sanitized logit
+    sanitized_search_rounds: int = 0     # search rounds in which >=1 logit was sanitized
+    sanitized_samples_excluded: int = 0  # training rows dropped (their search round was tainted)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -211,6 +219,11 @@ class SelfPlayResult:
             "mean_abs_value": self.mean_abs_value,
             # Q5 tactical proxy
             "forced_move_fraction": self.forced_move_fraction,
+            # Sanitization audit
+            "sanitized_logit_events": self.sanitized_logit_events,
+            "sanitized_positions": self.sanitized_positions,
+            "sanitized_search_rounds": self.sanitized_search_rounds,
+            "sanitized_samples_excluded": self.sanitized_samples_excluded,
         }
 
 
@@ -307,6 +320,9 @@ def run_selfplay_games(
     win_counts = {"player0": 0, "player1": 0, "draw": 0}
     abs_value_sum = 0.0
     abs_value_n = 0
+    # Sanitization-audit accumulators (see HexgtInference._count_and_sanitize).
+    sanitized_search_rounds = 0
+    sanitized_samples_excluded = 0
     next_game_index = 0
     active: list[dict[str, Any]] = []
     started = perf_counter()
@@ -364,6 +380,7 @@ def run_selfplay_games(
                 for game in playable
             ]
             search_started = perf_counter()
+            sanitize_before = inference.sanitized_logit_total
             searches = mcts_session.run(
                 [game["search_key"] for game in playable],
                 [game["state"] for game in playable],
@@ -395,6 +412,16 @@ def run_selfplay_games(
             )
             search_round += 1
             mcts_search_elapsed += perf_counter() - search_started
+            # Conservative round-level sanitization taint: the native session
+            # coalesces the in-flight leaves of ALL concurrent games into one batched
+            # eval, so Python cannot attribute a sanitized leaf to a single game/
+            # position (that needs a Rust-side per-leaf signal). A sanitized leaf still
+            # backs up into the per-game root statistics, so when ANY logit was
+            # sanitized this round we flag EVERY position decided in it and exclude
+            # them at write time. Rare in a healthy model; the counters surface it.
+            round_tainted = inference.sanitized_logit_total > sanitize_before
+            if round_tainted:
+                sanitized_search_rounds += 1
             if len(searches) != len(playable):
                 raise RuntimeError(
                     f"hexgt MCTS returned {len(searches)} results for {len(playable)} playable games"
@@ -421,6 +448,12 @@ def run_selfplay_games(
                     root_prior_policy=prior_pairs,
                     metadata={"epoch": epoch, "search_visits": search.visits},
                 )
+                if round_tainted:
+                    # Flag so finalize/write can exclude this position from training
+                    # targets (a sanitized neutral output must not become a target).
+                    sample = replace(
+                        sample, metadata={**dict(sample.metadata), "search_sanitized": True}
+                    )
                 game["pending"].append((sample.current_player, sample, search.root_value))
                 if game["trace"] is not None:
                     game["trace"].append(
@@ -466,10 +499,15 @@ def run_selfplay_games(
                 truncated=truncated,
                 soft_z_lambda=config.samples.soft_z_lambda,
             )
+            # EXCLUDE positions whose search round was sanitization-tainted: a
+            # near-uniform prior + neutral value produced by the fp16-overflow guard
+            # is not a trustworthy training target. The drop count is surfaced.
+            to_write = [s for s in finalized if not s.metadata.get("search_sanitized")]
+            sanitized_samples_excluded += len(finalized) - len(to_write)
             npz_path = output_dir / f"epoch_{epoch:06d}_game_{int(game['search_key']):06d}.npz"
-            write_compact_shard(npz_path, finalized, short_term_value_horizons=horizons)
+            write_compact_shard(npz_path, to_write, short_term_value_horizons=horizons)
             shard_paths.append(str(npz_path))
-            raw_samples += len(finalized)
+            raw_samples += len(to_write)
             # Q1 length, Q2 diversity, Q4 value balance.
             game_lengths.append(len(game["actions"]))
             openings.append(tuple(int(a) for a in game["actions"][:_OPENING_PLIES]))
@@ -548,6 +586,10 @@ def run_selfplay_games(
         draw_fraction=win_counts["draw"] / n_games,
         mean_abs_value=abs_value_sum / max(1, abs_value_n),
         forced_move_fraction=forced_decisions / sp,
+        sanitized_logit_events=int(inference.sanitized_logit_total),
+        sanitized_positions=int(inference.sanitized_graph_total),
+        sanitized_search_rounds=int(sanitized_search_rounds),
+        sanitized_samples_excluded=int(sanitized_samples_excluded),
     )
 
 

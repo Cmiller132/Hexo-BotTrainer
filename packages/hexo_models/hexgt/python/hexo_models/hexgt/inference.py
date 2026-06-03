@@ -14,6 +14,7 @@ the throughput gate (this module + `_profile_hexgt_forward.py`) says go.
 from __future__ import annotations
 
 import os
+import sys
 from typing import Any, Sequence
 
 import numpy as np
@@ -136,6 +137,67 @@ class HexgtInference:
             pin_host_transfer = env_pin not in ("0", "false", "False")
         self.pin_host_transfer = bool(pin_host_transfer) and self.device.type == "cuda"
         self.pin_min_numel = int(pin_min_numel)
+        # --- Non-finite-logit sanitization audit counters -------------------------
+        # The forward (fp16 autocast) can emit inf/NaN logits on rare pathological
+        # positions; `_count_and_sanitize` replaces them with neutral finite values so
+        # the run survives, but a sanitized output is a near-uniform prior + neutral
+        # value that must NOT silently become a training target. These counters make
+        # the guard auditable: callers (self-play) snapshot them per search round to
+        # FLAG + exclude affected positions, and surface the totals in diagnostics.
+        # A non-zero/rising count is a red flag (model instability, e.g. fp16 training
+        # underflow before the GradScaler fix, or a genuinely broken state), not a
+        # benign event. Counts are cumulative over this evaluator's lifetime; self-play
+        # builds a fresh evaluator per epoch, so the per-epoch total is read at end.
+        self.sanitized_logit_total = 0      # count of individual non-finite logit values
+        self.sanitized_forward_calls = 0    # forward batches that contained >=1 non-finite
+        self.sanitized_graph_total = 0      # graphs (positions) with >=1 non-finite logit
+
+    def _count_and_sanitize(
+        self,
+        raw_policy: torch.Tensor,
+        raw_value: torch.Tensor,
+        candidate_graph: torch.Tensor | None,
+        num_graphs: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, int]:
+        """Count + replace non-finite logits, returning (policy, value, n_bad).
+
+        fp16 autocast can overflow to inf/NaN on rare extreme positions (e.g. very
+        deep endgames with huge candidate sets). A non-finite logit poisons the
+        per-graph softmax/value and the Rust evaluator rejects it (crashing the run).
+        We replace non-finite LOGITS with neutral finite values so the softmax stays
+        well-defined (the affected position gets a near-uniform prior + neutral value
+        instead of taking down a multi-hour run), but -- unlike a silent guard -- we
+        COUNT the event, log it with the running totals, and let self-play exclude the
+        affected positions from training. Returns the (sanitized) tensors and the
+        number of non-finite logit values found (0 == untouched)."""
+
+        bad_policy = ~torch.isfinite(raw_policy)
+        bad_value = ~torch.isfinite(raw_value)
+        n_bad = int(bad_policy.sum().item()) + int(bad_value.sum().item())
+        if not n_bad:
+            return raw_policy, raw_value, 0
+        affected = torch.zeros(num_graphs, dtype=torch.bool, device=raw_value.device)
+        if bad_value.ndim >= 2:
+            affected |= bad_value.any(dim=-1)
+        else:
+            affected |= bad_value.reshape(-1)[:num_graphs]
+        if candidate_graph is not None and bool(bad_policy.any().item()):
+            affected[candidate_graph[bad_policy].to(torch.long)] = True
+        n_graphs_bad = int(affected.sum().item())
+        self.sanitized_logit_total += n_bad
+        self.sanitized_forward_calls += 1
+        self.sanitized_graph_total += n_graphs_bad
+        print(
+            f"[hexgt.inference] sanitized {n_bad} non-finite logit(s) (fp16 overflow) "
+            f"over {n_graphs_bad}/{num_graphs} graph(s) "
+            f"[run totals: {self.sanitized_logit_total} logits in "
+            f"{self.sanitized_forward_calls} batch(es), {self.sanitized_graph_total} positions]",
+            file=sys.stderr,
+            flush=True,
+        )
+        raw_policy = torch.nan_to_num(raw_policy, nan=0.0, posinf=30.0, neginf=-30.0)
+        raw_value = torch.nan_to_num(raw_value, nan=0.0, posinf=30.0, neginf=-30.0)
+        return raw_policy, raw_value, n_bad
 
     def _host_to_device(self, t: torch.Tensor) -> torch.Tensor:
         """Move one host tensor to the device. Large buffers go through pinned
@@ -233,22 +295,13 @@ class HexgtInference:
         }
         out, dev_batch = self.forward_batch(batch)
         cg = dev_batch["candidate_graph"]
-        # Sanitize the trunk output: fp16 autocast can overflow to inf/NaN on rare
-        # extreme positions (e.g. very deep endgames with huge candidate sets in
-        # long eval games). A non-finite logit poisons the per-graph softmax/value
-        # and the Rust evaluator rejects it (crashing the run). Replace non-finite
-        # LOGITS with neutral finite values so the softmax stays well-defined and
-        # positive (the affected position just gets a near-uniform prior + neutral
-        # value, instead of taking down a multi-hour run). Rare, and logged.
-        raw_policy = out["policy"].float()
-        raw_value = out["value"].float()
-        n_bad = int((~torch.isfinite(raw_policy)).sum()) + int((~torch.isfinite(raw_value)).sum())
-        if n_bad:
-            import sys as _sys
-            print(f"[hexgt.inference] sanitized {n_bad} non-finite logit(s) "
-                  f"(fp16 overflow) over {num_graphs} graphs", file=_sys.stderr, flush=True)
-            raw_policy = torch.nan_to_num(raw_policy, nan=0.0, posinf=30.0, neginf=-30.0)
-            raw_value = torch.nan_to_num(raw_value, nan=0.0, posinf=30.0, neginf=-30.0)
+        # Count + sanitize non-finite trunk outputs (see `_count_and_sanitize`): the
+        # affected positions get a near-uniform prior + neutral value to keep the run
+        # alive, but the event is recorded so self-play can FLAG/exclude them from
+        # training targets instead of silently learning the neutral output.
+        raw_policy, raw_value, _n_bad = self._count_and_sanitize(
+            out["policy"].float(), out["value"].float(), cg, num_graphs
+        )
         log_probs = segment_log_softmax(raw_policy, cg, num_graphs)
         priors = log_probs.exp().cpu().numpy().astype(np.float32, copy=False)
         values = decode_binned_value(raw_value).cpu().numpy()
@@ -267,11 +320,14 @@ class HexgtInference:
         out, dev_batch = self.forward_batch(batch)
         num_graphs = int(batch["num_graphs"])
         cand_graph = dev_batch["candidate_graph"]
-        # Same fp16-overflow guard as evaluate_featurized_batch (see there).
-        policy = torch.nan_to_num(out["policy"].float(), nan=0.0, posinf=30.0, neginf=-30.0)
+        # Same fp16-overflow guard as evaluate_featurized_batch, now counted + logged
+        # (this Python-driven path was previously silent).
+        policy, raw_value, _n_bad = self._count_and_sanitize(
+            out["policy"].float(), out["value"].float(), cand_graph, num_graphs
+        )
         log_probs = segment_log_softmax(policy, cand_graph, num_graphs)
         priors = log_probs.exp().cpu().numpy()
-        values = decode_binned_value(torch.nan_to_num(out["value"].float(), nan=0.0, posinf=30.0, neginf=-30.0)).cpu().numpy()
+        values = decode_binned_value(raw_value).cpu().numpy()
         cand_ids = batch["candidate_ids"].cpu().numpy()
         cand_graph_cpu = batch["candidate_graph"].cpu().numpy()
 

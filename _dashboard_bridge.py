@@ -205,6 +205,10 @@ def bridge_diagnostics():
             "searched_positions": latest_sp.get("searched_positions"),
             "search_positions_per_second": latest_sp.get("search_positions_per_second"),
             "positions_per_second": latest_sp.get("positions_per_second"),
+            # Non-finite-logit sanitization audit (0 in a healthy run; non-zero is a
+            # red flag and drives training exclusion -- surfaced at a glance here).
+            "sanitized_logit_events": latest_sp.get("sanitized_logit_events"),
+            "sanitized_samples_excluded": latest_sp.get("sanitized_samples_excluded"),
             "timestamp": time.time(),
         }))
     return latest_ep

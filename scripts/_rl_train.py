@@ -476,6 +476,11 @@ def main():
     last_save = None
     cur_epoch = None            # epoch currently being processed (for crash bookkeeping)
     cur_epoch_shards_ready = False  # cur_epoch's self-play shards are on disk (re-trainable)
+    # Per-RUN non-finite-logit sanitization tally (per-epoch comes from the self-play
+    # result). A rising count is a red flag (fp16 overflow / model instability), so it
+    # is surfaced in the run log alongside the per-epoch breakdown.
+    run_sanitized_logits = 0
+    run_sanitized_excluded = 0
     try:
         # Pre-training BC-seed baseline at the exact eval settings -> the anchor
         # the RL trend is measured against (the documented BC h2h was 55% @ 40
@@ -523,6 +528,17 @@ def main():
                     virtual_batch_size=args.vbatch, collect_examples=3,
                 )
                 cur_epoch_shards_ready = True  # self-play finished -> shards on disk
+                run_sanitized_logits += int(sp.sanitized_logit_events)
+                run_sanitized_excluded += int(sp.sanitized_samples_excluded)
+                # Sanitization segment: appended only when the guard fired this epoch
+                # (clean runs stay quiet; a non-zero count is loud). Placed LAST so the
+                # dashboard bridge's existing selfplay-line regexes are unaffected.
+                saniti_str = (
+                    f" | SANITIZED {sp.sanitized_logit_events} logits/"
+                    f"{sp.sanitized_search_rounds} rounds excl={sp.sanitized_samples_excluded} "
+                    f"(run {run_sanitized_logits} logits/{run_sanitized_excluded} excl)"
+                    if sp.sanitized_logit_events else ""
+                )
                 log(f"epoch {rl_epoch} selfplay: {sp.completed_games}C/{sp.truncated_games}T games, "
                     f"{sp.searched_positions} pos, {sp.positions_per_second:.1f} pos/s | "
                     f"cand={sp.mean_candidate_count:.0f} | "
@@ -530,7 +546,7 @@ def main():
                     f"Q2 uniq_open={sp.opening_unique_fraction:.1%} m2H={sp.move2_entropy:.2f} | "
                     f"Q3 visitH={sp.mean_visit_entropy:.2f} priorH={sp.mean_prior_entropy:.2f} | "
                     f"Q4 |val|={sp.mean_abs_value:.2f} draw={sp.draw_fraction:.1%} | "
-                    f"Q5 forced={sp.forced_move_fraction:.1%}", fh)
+                    f"Q5 forced={sp.forced_move_fraction:.1%}{saniti_str}", fh)
                 # Also persist the full self-play metric dict per epoch for later analysis.
                 with open(eval_dir / f"epoch_{rl_epoch:06d}_selfplay.json", "w") as sp_fh:
                     json.dump(sp.as_dict(), sp_fh, indent=2)
