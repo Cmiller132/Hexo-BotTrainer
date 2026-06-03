@@ -18,6 +18,36 @@ fetched vs. reasoned-about) is listed in the final section** so the reader knows
 which formulas are quoted verbatim and which are reconstructed from the
 well-documented method.
 
+> ## HEADLINE (corrected threat model)
+>
+> **Threat model (authoritative).** Hexo/Connect6 place **two stones per move**,
+> so **any active length-6 window with ≥4 of one player's stones is an immediate
+> winning threat**: a count-4 has two empty gaps the owner fills with one
+> two-stone move; a count-5 has one gap. **A single four is forcing**, count-4
+> and count-5 are roughly equal danger, and an open four/five usually costs the
+> defender *both* placements to block. **Any unanswered ≥4 window loses** — which
+> makes the defensive problem *more* acute than an earlier draft of this doc
+> claimed (that draft wrongly treated only the *double*-four as forcing). The
+> engine agrees: its threat predicate is `count(player) >= 4`
+> (`tactics.rs:188-203`).
+>
+> **Recommended TSS form.** A depth-1 threat probe whose candidate set is **the
+> empty cells inside any active ≥4 window** (offense = complete; defense = cover).
+> Land it in three pieces: (1) a **depth-1 leaf override** in MCTS that returns a
+> HARD WIN if the side to move can complete a ≥4 window this move, else a HARD
+> LOSS if it cannot cover all of the opponent's ≥4-window gaps with its two
+> placements — the *hard ground-truth fix* for "value +0.8 right before a forced
+> loss"; (2) **complete-now / must-answer "hot token" CANDIDATE features**
+> (including the currently-missing **count-4** completion flag); (3) graded
+> forcing/open-ends severity features. Defer the full multi-ply VCF/VCDT solver
+> (root-only, depth-bounded if ever).
+>
+> **Where it ranks.** Soft value targets (PART 2) stay **Rank 0a — do first**.
+> The TSS hot-token features sit **just below Rank 1** (folded into the readout
+> pool); the **depth-1 leaf override** is a new, sharper member of that family —
+> the search-side *guarantee* the feature/readout fixes only make *likely*. The
+> deep in-tree solver remains the deferred search-side option.
+
 ---
 
 ## 0. The failure this is meant to fix (recap, grounded)
@@ -74,44 +104,75 @@ the sole arbiter of "am I about to lose to a forced threat."
 
 # PART 1 — Threat-Space Search (TSS) for Connect6 / Hexo
 
-## 1.1 What a "threat" is (grounded in the Connect6 literature)
+> **Correction note (this revision).** An earlier draft of this section
+> imported the *Gomoku* threat hierarchy wholesale and asserted that "in
+> Connect6/Hexo a single four is NOT forcing — the defender blocks with one of
+> two stones." **That is wrong for this game and was the load-bearing error in
+> the old Part 1.** Because Hexo/Connect6 place **two stones per move**, a
+> **count-4 window is an *immediate* winning threat**: it has two empty gaps,
+> and the mover fills *both* gaps with their two placements next turn to make
+> six. A count-5 (one gap) wins with a single placement. So **a single four is
+> forcing**, count-4 and count-5 are roughly equal danger, and the old
+> "double-threat is the unit of analysis" framing understated the defensive
+> problem. The corrected model below — and the engine's own
+> `count >= 4 ⇒ threat` predicate — is the authority; the Connect6 papers are
+> reconciled *to* it, not the reverse. The reason the change is auditable: it
+> makes the defensive burden *strictly worse* than the old draft claimed (ANY
+> unanswered ≥4 window loses, not just an unanswered double-four), which is
+> exactly the direction that matches hexgt's measured "+0.8 right before a
+> forced loss."
+
+## 1.1 What a "threat" is (corrected model — and it matches the engine)
 
 In the *k*-in-a-row family (Gomoku/Renju, Connect6, six-in-a-row), a **threat**
-is a partial line that needs **one more move to complete a win**. In the
-Connect6 literature the standard definition is (Wu & Kang, *Dependency-Based
-Search for Connect6*; restated in the RZOP / TSS line):
+is a partial line that is close enough to completion that the opponent must
+respond. The Connect6 literature's working definition (Wu & Kang,
+*Dependency-Based Search for Connect6*; restated in the RZOP / TSS line) is:
 
 > *A "threat" is the number of connections of five or four stones which can
 > become checkmate only with one more move.*
 
-So a threat is a window (a length-`k` line segment) held by one player that is
-**one stone short of a win** and has the empty cell(s) that complete it.
-Severity grades:
+**The decisive detail for Hexo/Connect6 is the two-stones-per-move rule**
+(`TurnPhase::FirstStone` then `SecondStone`, `candidates.rs:414-418`;
+`F_SIDE_IS_SECOND`, `constants.py:115-116`). Under it, "one more *move*" is **one
+more two-stone move**, so a window that is **two stones short of six is still
+one move from a win.** Concretely, on a length-6 window:
 
-- **Five-threat** (a "five"): a length-6 window with 5 of the player's stones
-  and **1 empty** — placing on that empty cell wins. The empty cell is the
-  *winning/threat cell*.
-- **Four-threat** (a "four"): a window two stones short, but arranged so it
-  *forces* — most importantly an **open four / double-ended four**, which
-  threatens to become a five in **two distinct ways**, so a single block cannot
-  kill it.
-- A **winning threat sequence** is a chain of forcing moves (each creating a
-  threat the opponent must answer) that ends in an unanswerable threat.
+- **Count-5 (a "five"): 1 empty gap.** One placement fills it → six. An
+  immediate winning threat.
+- **Count-4 (a "four"): 2 empty gaps.** The mover fills **both gaps with the two
+  placements of a single move** → six. **This is also an immediate winning
+  threat.** Count-4 and count-5 are therefore *roughly equal danger* — both lose
+  for the defender if left unanswered.
+- **A threat = any active window with `count(player) >= 4`** (count-4 or
+  count-5). There is no "non-forcing four" in this game.
+- **Blocking a four or five usually costs the defender two placements**, because
+  an open-ended four/five belongs to several overlapping 6-windows and filling a
+  single gap does not neutralize all of its completions. So the defender's
+  whole move can be consumed answering *one* ≥4 window.
+- A **winning threat sequence** is a chain of forcing moves (each creating or
+  extending a ≥4 window the opponent must answer) that ends in a position the
+  defender's two stones cannot cover.
 
-**Hexo maps onto this exactly.** Hexo's win is a **length-6 line** (engine
-`WINDOW_LEN = 6`, `tactics.rs:14`) along one of **three hex axes** Q / R / QR
-(`tactics.rs::Axis`, `tactics.rs:22-53`). The engine already exposes the entire
-threat vocabulary on each length-6 window:
-`count(player)` (`tactics.rs:134`), `empty_mask` / `empty_cells`
-(`tactics.rs:144-156`), `is_win_for` (count == 6, `tactics.rs:206-208`),
-`active_player` (one-color window, `tactics.rs:172-181`), and crucially a
-ready-made threat predicate: **`is_threat` / `threat_player` = an active window
-with `count(player) >= 4`** (`tactics.rs:188-203`), plus window-pair relations
-`intersects` / `touches` (`tactics.rs:210-222`) for relating two threats.
-**A TSS solver for Hexo needs almost no new geometry** — the threat windows are
-already enumerated incrementally (18 windows per placement, `tactics.rs:16-17`)
-and surfaced as WINDOW tokens in the graph builder (`candidates.rs::window_tokens`,
-`candidates.rs:203-227`, count-3/4/5).
+**Hexo maps onto this exactly, and the engine already encodes the corrected
+definition.** Hexo's win is a **length-6 line** (engine `WINDOW_LEN = 6`,
+`tactics.rs:14`) along one of **three hex axes** Q / R / QR (`tactics.rs::Axis`,
+`tactics.rs:22-53`). The engine exposes the entire threat vocabulary on each
+length-6 window: `count(player)` (`tactics.rs:134`), `empty_mask` /
+`empty_cells` (`tactics.rs:144-156`), `is_win_for` (count == 6,
+`tactics.rs:206-208`), `active_player` (one-color window, `tactics.rs:172-181`),
+and — **crucially and in agreement with the corrected model** — a ready-made
+threat predicate: **`is_threat` / `threat_player` / `is_threat_for` = an active
+window with `count(player) >= 4`** (`tactics.rs:188-203`), plus window-pair
+relations `intersects` / `touches` (`tactics.rs:210-222`). The store even
+maintains live threat iterators `threat_entries(player)` and `threats()`
+(`tactics.rs:386-395`). So the engine's own `threat` is precisely
+"any ≥4 active window," matching the corrected model — **not** the
+double-four-only notion the old draft used. **A TSS solver for Hexo needs almost
+no new geometry** — the threat windows are already enumerated incrementally
+(18 windows per placement, `tactics.rs:16-17`) and surfaced as WINDOW tokens in
+the graph builder (`candidates.rs::window_tokens`, `candidates.rs:203-227`,
+count-3/4/5).
 
 ## 1.2 Threat-Space Search, VCF, VCDT — the real method
 
@@ -124,9 +185,13 @@ opponent cannot all parry.
 
 **VCF (Victory by Continuous Fours).** The Gomoku/Renju form: a chain of
 **fours** (each a one-move-from-win threat), where every opponent reply is the
-forced block, ending in a double-four (two fours at once) that cannot be
-blocked. The defender answers each four but eventually faces two simultaneous
-fours and loses.
+forced block, ending in a position the defender cannot answer. In Hexo the
+analog is **a chain of ≥4 windows**: each forcing move makes a fresh ≥4 window
+(or extends one to count-5), the defender must spend their move neutralizing it,
+and the attacker keeps the initiative until the defender's two stones can no
+longer cover all live completions. **Unlike Gomoku, a single four already
+forces here** (it is win-in-one-move), so the "continuous" chain is built from
+*single* ≥4 threats, not only from doubles.
 
 **Dependency-Based Search (DBS).** Wu & Kang's refinement (the
 `Dependency-Based Search for Connect6` paper). The insight: threats in
@@ -146,9 +211,9 @@ for **combinations of independent chains** that overwhelm the defender. (DBS
 generalizes Allis's threat-space search + the "conflict / combination" idea to
 Connect6's two-stone rule.)
 
-**VCDT (Victory by Continuous Double-Threat-or-more).** The Connect6 analog of
-VCF. Wu et al. proved a winning strategy of **continuous double-threat-or-more
-moves**:
+**VCDT (Victory by Continuous Double-Threat-or-more).** The Connect6
+forcing-search method. Wu et al. studied a winning strategy of **continuous
+double-threat-or-more moves**:
 
 > *Wu et al. showed a winning strategy called victory by continuous
 > double-threat-or-more moves (VCDT), similar to victory by continuous four
@@ -156,116 +221,212 @@ moves**:
 > triple-threat, or non-threat; one player clearly wins by a
 > triple-threat-or-more move.*
 
-This is the crux for the next subsection.
+**How VCDT reconciles to the corrected model.** VCDT's "double/triple-threat"
+classification is about **what *guarantees* an unstoppable continuation given
+optimal defense**, not about what counts as a threat at all. A *single* ≥4
+window already forces a response (it is win-in-one-move under the two-stone
+rule), so it constrains the opponent — but the defender's *own* two stones can
+usually parry one single threat and still develop. A move that creates **two
+independent ≥4 windows at once** forces the defender to spend *both* stones, and
+a **triple-threat-or-more** cannot be covered by two stones at all and wins
+outright. So in VCDT terms: single ≥4 threats are the *forcing currency that
+keeps initiative*; double/triple threats are the *terminating conjunctions that
+end the chain*. This is the crux for the next subsection — but note the chain is
+made of single forcing threats, and the win condition is the unanswerable
+conjunction, **not** (as the old draft wrongly had it) that single fours fail to
+force.
 
-## 1.3 Why two-stones-per-move changes everything (the Hexo crux)
+## 1.3 What two-stones-per-move actually does (the Hexo crux — corrected)
 
-In **Gomoku** (one stone per move) a single **four** *is* forcing: the opponent
-has only one stone to place and must spend it blocking, or lose. A VCF chain of
-single fours therefore wins.
+In **Gomoku** (one stone per move) a **four** is one cell short of a win, so it
+is forcing; a **three** is two short and not forcing.
 
-In **Connect6 / Hexo** the defender places **two stones per move** (Hexo:
-`TurnPhase::FirstStone` then `SecondStone`, `candidates.rs:414-425`;
-`F_SIDE_IS_SECOND`, `constants.py:115`). Consequences:
+In **Connect6 / Hexo** the mover places **two stones per move** (Hexo:
+`TurnPhase::FirstStone` then `SecondStone`, `candidates.rs:414-418`;
+`F_SIDE_IS_SECOND`, `constants.py:115-116`). The two-stone rule does **not** make
+single fours harmless — it does the opposite: it makes the *count-4* window a
+**win-in-one-move** threat, because one move now completes *two* cells.
+Consequences:
 
-- **A single four is NOT forcing.** The defender blocks the threatening empty
-  cell with **one** of their two stones and still has a **second stone free** to
-  develop their own attack. So a lone four costs the attacker tempo for nothing.
-  (The Connect6 literature notes the defender can simply "place a stone at the
-  rightmost empty cell within a threat window" to neutralize a single threat.)
-- **You need a DOUBLE threat to force.** A move that creates **two simultaneous
-  threats** (two distinct fours/fives whose blockers differ) forces the
-  defender to spend **both** stones blocking — buying the attacker tempo or, if
-  the threats can't both be blocked, winning. This is why VCDT is "continuous
-  **double**-threat," not "continuous four."
-- **A triple-threat-or-more wins outright** (the defender's two stones cannot
-  cover three independent threats), modulo the defender themselves having a
-  faster win.
-- **Defender symmetry — the same logic flips.** Because the defender also gets
-  two stones, *attacker* analysis and *defender* analysis are both about
-  **double threats**: the attacker seeks an unanswerable double/triple; the
-  defender, to survive, must be able to answer **every** opponent double-threat
-  AND not be already lost. **This is exactly hexgt's blind spot:** the
-  value head must recognize "the opponent has a double-threat I cannot fully
-  parry" — a *conjunction of two independent threats* — which §1.4 Gap C of the
-  companion doc shows is a deep, multi-window relationship its 3-hop GNN +
-  single-SIDE-hub readout under-propagates.
+- **A single ≥4 window IS forcing.** A count-4 window has two empty gaps; the
+  owner fills *both* with their next move and wins. A count-5 wins with one of
+  the two placements. Either way, **an unanswered ≥4 window loses for the
+  defender on the very next move.** The defender cannot ignore it. (This is the
+  exact correction to the prior draft, which wrongly said a single four "is NOT
+  forcing.")
+- **Answering a ≥4 window typically costs the defender both stones.** An
+  open-ended four/five lies on multiple overlapping 6-windows; filling one gap
+  leaves another completion live, so the defender often must place **both**
+  stones to neutralize a *single* threat — and then has nothing left to develop.
+  So a single forcing threat already seizes the initiative.
+- **A double threat (two independent ≥4 windows) forces both defender stones**
+  and, if their gaps cannot all be covered by two placements, **wins outright.**
+  A **triple-threat-or-more** can never be covered by two stones and is a win,
+  modulo the defender having a strictly faster win of their own. This is the
+  VCDT terminating condition.
+- **Because single fours already force, the defensive problem is MORE acute,
+  not less.** The old draft's "you need a double threat to force" understated
+  the danger. The true statement: **ANY unanswered ≥4 window is a loss.** The
+  defender must, every move, neutralize *every* opponent ≥4 window AND avoid
+  walking into one — often spending their whole two-stone move just to survive.
+- **Defender symmetry.** Both sides get two stones, so attacker and defender
+  analysis are the same predicate read from each side: the attacker chains ≥4
+  threats toward an unanswerable conjunction; the defender must answer **every**
+  live opponent ≥4 window with their two stones and not already be lost. **This
+  is exactly hexgt's blind spot:** the value head must recognize "the opponent
+  has a ≥4 window (or a conjunction of them) I cannot fully parry with my two
+  stones" — a multi-window relationship that §1.4 Gap C of the companion doc
+  shows a 3-hop GNN + single-SIDE-hub readout under-propagates.
 
-**Design implication.** Any TSS for Hexo must reason about **double threats
-across the 3 axes**, not single fours. The unit of analysis is *a move (≤2
-cells) that yields ≥2 distinct winning windows*, and the unit of defense is
-*can the defender's 2 stones cover all of the opponent's winning cells?* This is
-more expensive than Gomoku VCF (the move is a pair, and "block all" is a
-set-cover over winning cells) but the **enumeration primitives already exist**
-in `tactics.rs` (`count >= 4` threat windows, their `empty_cells`,
-`intersects`/`touches` to test independence).
+**Design implication.** A TSS for Hexo reasons about **≥4 windows across the 3
+axes** as the forcing unit. The atom of *offense* is *a placement-pair that
+creates or completes a ≥4 window* (completing a count-4 needs the pair — both
+gaps; completing a count-5 needs one). The atom of *defense* is *can the
+defender's 2 placements cover the empty gaps of every live opponent ≥4 window?*
+— a small **set-cover over the threats' empty cells**, where two threats are
+independent when their gaps differ (use `WindowKey::intersects`/`touches`,
+`tactics.rs:210-222`). All the enumeration primitives already exist in
+`tactics.rs` (`count >= 4` threat windows via `threat_player`/`is_threat_for`,
+their `empty_cells`, the pairwise relations) and are surfaced as window tokens
+with their `empty_cells` in `candidates.rs:203-227`.
 
 ## 1.4 How hexgt would do TSS — three options, evaluated
 
 All three reuse the **existing window walk** — there is no new board scan. The
 windows are already enumerated by the engine (`tactics.rs`) and materialized as
-WINDOW tokens (`candidates.rs::window_tokens`) with `count` and `empty_count`
-per window. The candidate↔window edge loop in the featurizer
-(`features.rs:131-182`) already visits exactly the (candidate, window, owner,
-count) tuples a threat detector needs.
+WINDOW tokens (`candidates.rs::window_tokens`, `candidates.rs:203-227`) with
+`count`, `empty_count`, and the actual `empty_cells`/`stone_cells` per window.
+The candidate↔window edge loop in the featurizer (`features.rs:131-182`) already
+visits exactly the (candidate, window, owner, count) tuples a threat detector
+needs — and a CANDIDATE node is joined to a WINDOW node by an
+`EDGE_CANDIDATE_WINDOW` edge **precisely when that candidate is an empty cell of
+that window** (`candidates.rs:354-358`). So "the empty cells inside an active ≥4
+window" are *already* an explicit, cheap relation in the graph.
+
+### The TSS candidate set (corrected)
+
+**TSS candidate set = the empty cells inside ANY active count-4 or count-5
+window** (i.e. the `empty_cells` of every window token with `count >= 4`). Those
+are exactly the cells that (offense) complete a threat or (defense) block one,
+so TSS expands only these forcing/defensive cells instead of all legal moves.
+Two facts make this nearly free in hexgt:
+
+1. The candidate builder **already seeds candidates from active-window empties**
+   (`candidate_cells` walks `entry.empty_cells()` for active windows,
+   `candidates.rs:162`), so the threat cells are present as candidate nodes.
+2. The `EDGE_CANDIDATE_WINDOW` join (`candidates.rs:354-358`) lets a detector
+   recover, for each candidate, the set of ≥4 windows it sits in — the offense
+   side — and for each ≥4 opponent window, the empty cells that must be covered
+   — the defense side — by one pass over those edges.
+
+Restricting/augmenting expansion to this set whenever threats are present
+guarantees defensive lines are always searched (the search can never "miss" the
+move that answers a ≥4 window).
 
 ### Shared data structures (cheap, grounded)
 
 ```
-Threat       = { owner, axis, window_key, count∈{4,5}, winning_cells: SmallVec<HexCoord> }
-                 // winning_cells = the empty cells whose placement completes a 6
-                 //   count==5 → 1 winning cell; open/double-ended four → 2.
+Threat       = { owner, axis, window_key, count∈{4,5}, gaps: SmallVec<HexCoord> }
+                 // gaps = the window's empty cells (from WindowEntry::empty_cells)
+                 //   count==5 → 1 gap (one placement completes the six)
+                 //   count==4 → 2 gaps (the two placements of ONE move complete it)
+                 // BOTH counts are immediate winning threats under the 2-stone rule.
 ThreatMap    = per owner: Vec<Threat>, plus an index cell→[threat ids] (which
-                 threats a given empty cell completes — this is the "must-block"
-                 / "double-threat" pivot).
+                 ≥4 windows a given empty cell belongs to — the "must-cover"
+                 pivot for both completion and blocking).
 ```
 
 Building `ThreatMap` is **O(active windows)** with the fields already on each
-WindowToken (`count`, `empty_cells`). A cell is:
+WindowToken (`count`, `empty_cells`). Cell/move classifications under the
+corrected model:
 
-- **own-win-now** if it is the lone winning cell of an own `count==5` window;
-- **opp-win-now (must-block)** if it is the lone winning cell of an opp
-  `count==5` window — *already* the `F_CAND_COMPLETE_OPP` feature
-  (`features.rs:163`, `constants.py:84`);
-- on a **double threat** if `cell→[threat ids]` for one owner has ≥2 threats
-  with **distinct** winning cells (use `WindowKey::intersects`/`touches`,
-  `tactics.rs:210-222`, to confirm independence — two threats that share their
-  single winning cell are one threat, not two).
+- **own-win-now (move):** the side to move can WIN THIS MOVE if it owns a
+  `count==5` window (fill its 1 gap with one of the two placements) **or** a
+  `count==4` window (fill BOTH gaps with the move's two placements). The latter
+  is the case the engine/feature layer does **not** currently flag (see the code
+  note below) and the new detector adds.
+- **opp-win-next (must-answer):** the opponent owns a ≥4 window. The defender's
+  move must cover its gap(s) (1 gap for count-5, 2 for count-4) or lose next
+  move. Whether the defender's **two** placements can cover the gaps of **all**
+  live opponent ≥4 windows is a small set-cover; if not, the position is a
+  **forced loss for the side to move.**
+- **double/triple threat:** an owner has ≥2 *independent* ≥4 windows (distinct
+  gap sets; confirm independence with `WindowKey::intersects`/`touches`,
+  `tactics.rs:210-222`). Two stones cover at most a bounded gap set, so a
+  triple-threat-or-more is unanswerable.
+
+**Code note (correction to the old draft).** The old draft equated the existing
+`F_CAND_COMPLETE_OPP`/`F_CAND_COMPLETE_OWN` features with "win-now / must-block."
+In the actual code those flags are set **only when `cnt == 5`**
+(`features.rs:150-152` for own, `features.rs:162-163` for opp;
+`constants.py:83-84` document them as "completes a **count-5** window"). Under
+the corrected model a **count-4 window is also win-now** (with two placements),
+and there is currently **no feature flagging the count-4 completion** — the v2
+slots `F_CAND_OWN_WIN4`/`F_CAND_OPP_WIN4` (`features.rs:146,158`;
+`constants.py:108,111`) merely *count* count-4 windows through a cell, they do
+not mark "completable this move." This gap is precisely what Option (b)/(c)
+below should fill, and it is one reason the value head is blind to count-4
+losses.
 
 ### Option (a) — TSS/VCF tactical solver inside MCTS (root and/or nodes)
 
-A bounded forcing-move solver that, at a node, runs **own-attack VCDT** and
-**opponent-attack VCDT** and **overrides the net** when it finds a proof:
+A bounded forcing-move solver that, at a node, reads the `ThreatMap` for both
+sides and **overrides the net** when a depth-1 proof exists:
 
-- If **own** has an immediate win (own `count==5` lone cell, or a move yielding
-  ≥2 independent winning windows the opponent can't both block) → set node
-  value to **+1**, collapse policy to the winning move(s).
-- If **opponent** has an unstoppable double/triple threat *on their next move*
-  that this side cannot prevent → set node value to **−1** (forced loss). This
-  is the **direct cure for "value ≈ +0.8 right before losing."**
-- Otherwise, if there is a **single must-block** (opp `count==5` lone cell), it
-  is not auto-losing (the defender has a second stone), but the solver can mark
-  the must-block cell so PUCT prioritizes it.
+- **HARD WIN (+1) — checked FIRST, since the side to move moves first:** the
+  side to move owns any ≥4 window it can complete this move — a `count==5` window
+  (one placement fills the gap) **or** a `count==4` window (the move's two
+  placements fill both gaps). It simply plays the completing move and wins before
+  the opponent replies. (No double-threat is required — a single ≥4 window the
+  mover owns is already a win on its own move.) Set node value **+1**. This
+  dominates any opponent threat, because the mover acts first.
+- **HARD LOSS (−1) — only when there is NO own win:** the side to move cannot
+  win this move, AND the opponent has one or more ≥4 windows whose gaps the side
+  to move **cannot all cover with its two placements** (a tiny set-cover over the
+  opponent's threat gaps; trivially true if the opponent has a
+  triple-threat-or-more, or two independent fours/fives whose gaps exceed two
+  cells). Then the opponent wins on its next move regardless — set node value
+  **−1**. This is the **direct cure for "value ≈ +0.8 right before losing."**
+- **MUST-ANSWER (no override, mark only):** the opponent has ≥4 window(s) the
+  side to move *can* still cover with its two placements (e.g. a single count-5
+  whose one gap is coverable, or a single count-4 whose two gaps the move can
+  fill). Not auto-losing, but the solver marks the covering cell(s) so PUCT
+  prioritizes the forced defense and the search does not wander.
+
+Note the asymmetry vs. the old draft: a HARD WIN needs only a *single* own ≥4
+window (because a four is win-in-one-move here), and a HARD LOSS triggers
+whenever the opponent's ≥4 threats *out-run* the defender's two stones — which,
+because single fours force, happens far more often than the old "unstoppable
+double/triple only" rule admitted.
 
 **Where it hooks (grounded).** The MCTS leaf/backup is in `mcts.rs`:
-`select_leaf_batch` (`mcts.rs:511-571`) classifies leaves as terminal /
-existing / needs-eval, and `terminal_value` (imported from `mcts_tree`,
-`mcts.rs:33`) supplies the hard ±1 for engine-terminal leaves. **A TSS override
-is "a one-ply-lookahead terminal":** in `select_leaf_batch`, *before* requesting
-a network eval for a leaf, run the bounded VCDT probe on `selected.state`; if it
-proves win/loss, back up ±1 via the existing
-`search.backup_virtual(&selected.path, leaf_player, ±1, virtual_loss)` path
-(`mcts.rs:541`) and **skip the net eval entirely** (do not push to `leaves`).
-That is the minimal, surgical hook — it reuses the terminal-leaf code path and
-the cache stays correct (a proven node is as good as terminal).
+`select_leaf_batch` (`mcts.rs:511-571`) classifies each selected leaf as
+terminal / existing-node / needs-eval. For an engine-terminal leaf it computes
+`terminal_value(outcome, leaf_player)` (imported from `mcts_tree`, `mcts.rs:33`)
+and backs it up via `search.backup_virtual(&selected.path, leaf_player,
+leaf_value, virtual_loss)` (`mcts.rs:538-541`); otherwise it pushes the leaf for
+a network eval (`mcts.rs:545-555`). Crucially, the full leaf `state` is in hand
+at this point — line 539 already calls `selected.state.current_player()`, so
+`selected.state.board().windows()` (the `WindowStore`, with `threat_entries` /
+`threats` and per-window `count`/`empty_cells`) is directly available to compute
+the depth-1 threat check. **A TSS override is "a one-ply-lookahead terminal":**
+in `select_leaf_batch`, *before* the needs-eval branch, run the depth-1 threat
+probe on `selected.state`; if it proves a HARD WIN/LOSS, back up ±1 via the
+existing `backup_virtual` path (`mcts.rs:541`) and **skip the net eval entirely**
+(do not push to `leaves`). That is the minimal, surgical hook — it reuses the
+terminal-leaf code path and the cache stays correct (a proven node is as good as
+terminal). The "side to move can complete a ≥4 window now" check is computable
+from exactly what the leaf already exposes (the window store), so no extra state
+plumbing is needed.
 
-**Compute cost.** A *shallow* VCDT (depth 1–2: "is there a forced win/loss
-within the next own/opp move-pair?") is cheap — it is the double-threat scan
-over `ThreatMap`, O(active windows) per leaf, far cheaper than a GNN forward.
-A *deep* VCF/VCDT proof (the full forcing-sequence search) is the expensive
-classic algorithm and would dominate leaf cost; it should be **root-only and
-depth-bounded** if used at all. Recommendation: **depth-1 (immediate) at every
-leaf, optional depth-bounded VCDT at the root only.**
+**Compute cost.** The *depth-1* probe is cheap — one pass over the active
+windows to read each side's ≥4 windows and run the two-stone set-cover, O(active
+windows) per leaf, far cheaper than a GNN forward. A *deep* VCF/VCDT proof (the
+full forcing-sequence search that chains threats over multiple plies) is the
+expensive classic algorithm and would dominate leaf cost; it should be
+**root-only and depth-bounded** if used at all. Recommendation: **depth-1
+(immediate win/loss) at every leaf, optional depth-bounded forcing-move TSS at
+the root only.**
 
 **Pure-self-play interaction (important caveat).** A hard value override
 **changes the training target distribution**: leaves the solver proves never
@@ -290,7 +451,7 @@ That is the point — but it interacts with two existing mechanisms:
    self-play (`selfplay.py` opening logging) and judge by H2H, not game length.
 
 **D6-safety.** Threats are pure board geometry; D6 maps windows→windows,
-owners→owners, winning-cells→images bijectively (the same argument
+owners→owners, threat-gaps→images bijectively (the same argument
 `constants.py:103-106` makes for the v2 window-count features and §5.5 of the
 companion doc makes for hot cells). A ±1 override is a **scalar**, D6-invariant.
 **Safe** — the solver does not touch the D6-invariant feature/graph
@@ -298,11 +459,18 @@ construction.
 
 ### Option (b) — TSS as a candidate/feature generator ("hot tokens")
 
-Run the **depth-1 double-threat detector** and emit, on CANDIDATE nodes, the
-must-block / forced-win flags in the **reserved slots `[30:32)`**
-(`constants.py:117`). This is exactly the companion doc's §5 "hot tokens (i)" +
-its §6.3 reconciliation that hot tokens are "the neural-network-side analog of
-TSS/VCF." It feeds the net richer tactical inputs without changing the search.
+Run the **depth-1 ≥4-threat detector** and emit, on CANDIDATE nodes, the
+**complete-now-own / must-answer-opp** flags in the **reserved slots `[30:32)`**
+(`constants.py:117`). The point of these two slots is to fix the count-4 gap
+identified above: a candidate gets **complete-now-own = 1** when it sits in an
+own ≥4 window the side to move can finish this move (count-5: that cell is the
+gap; count-4: this cell is one of the two gaps the move fills), and
+**must-answer-opp = 1** when it sits in (or covers the gaps of) an opponent ≥4
+window — covering **both** count-4 and count-5 opponent threats, where the
+existing `F_CAND_COMPLETE_OPP` only fires on count-5 (`features.rs:162-163`).
+This is exactly the companion doc's §5 "hot tokens (i)" + its §6.3
+reconciliation that hot tokens are "the neural-network-side analog of TSS/VCF."
+It feeds the net richer tactical inputs without changing the search.
 
 **Where it hooks.** `features.rs` candidate↔window loop (`features.rs:131-182`),
 writing two new columns; `constants.rs`/`constants.py` slot names + a
@@ -326,9 +494,13 @@ hard value override (a).
 A middle form: run the depth-1 detector and set the **graded "forcing" / open-
 ends features** the companion doc's Rank 2 already proposes (window `open_ends ∈
 {0,1,2}`, a `forcing` flag, candidate `n_opp_winning_replies`), *plus* the
-binary hot flags of (b). Same hooks as (b) (`features.rs` + constants + parity
-test), same D6-safety and drop-in story. It is (b) with continuous severity
-added, which the companion doc Rank 2 argues helps mid-game calibration.
+binary hot flags of (b). Under the corrected model the `forcing` flag fires for
+**any ≥4 window** (count-4 and count-5 alike, since both are win-in-one-move),
+and `n_opp_winning_replies` counts the opponent ≥4 windows whose gaps the
+defender's two stones would fail to cover — i.e. graded "how close to a forced
+loss." Same hooks as (b) (`features.rs` + constants + parity test), same
+D6-safety and drop-in story. It is (b) with continuous severity added, which the
+companion doc Rank 2 argues helps mid-game calibration.
 
 ### Recommendation for Part 1
 
@@ -605,18 +777,23 @@ loss (a documented measurement-artifact pitfall in this project — the dense_cn
   externally validated and already proven on this pipeline via STV. **Do it
   first.**
 - **TSS for hexgt = the cheap detector + a depth-1 leaf override, full solver
-  deferred.** Land **(b)/(c)**: the depth-1 double-threat / must-block detector
-  emitting opponent-hot/own-hot + graded-forcing CANDIDATE features in the
-  reserved slots `[30:32)` (rides the proven zero-init feature-expansion, no cold
-  start, D6-safe, reuses the existing window walk in `features.rs`). Then add the
-  **depth-1 forced-win/forced-loss value override at the MCTS leaf**
-  (`select_leaf_batch`, reusing the terminal-value backup path) — the only thing
-  that *hard-guarantees* the value head can't be "+0.8 before a forced loss."
-  Keep the override on value/selection only (don't hard-collapse the policy
-  target) to avoid distorting the visit/KL policy under forced playouts.
-  **Defer** the full deep in-tree VCDT solver (root-only, depth-bounded if ever)
-  — highest ceiling, highest cost, most target distortion; pursue only if the
-  cheaper fixes don't move the defensive-calibration metric.
+  deferred.** The forcing unit is **any active ≥4 window** (single fours force
+  here — two placements complete a count-4), and the TSS candidate set is **the
+  empty cells inside active ≥4 windows**. Land **(b)/(c)**: the depth-1
+  ≥4-threat detector emitting **complete-now-own / must-answer-opp** (including
+  the currently-missing count-4 completion flag) + graded-forcing CANDIDATE
+  features in the reserved slots `[30:32)` (rides the proven zero-init
+  feature-expansion, no cold start, D6-safe, reuses the existing window walk in
+  `features.rs`). Then add the **depth-1 forced-win/forced-loss value override at
+  the MCTS leaf** (`select_leaf_batch`, reusing the terminal-value backup path):
+  HARD WIN if the side to move can complete a ≥4 window this move, else HARD LOSS
+  if its two placements cannot cover every opponent ≥4-window gap — the only
+  thing that *hard-guarantees* the value head can't be "+0.8 before a forced
+  loss." Keep the override on value/selection only (don't hard-collapse the
+  policy target) to avoid distorting the visit/KL policy under forced playouts.
+  **Defer** the full deep in-tree VCF/VCDT solver (root-only, depth-bounded if
+  ever) — highest ceiling, highest cost, most target distortion; pursue only if
+  the cheaper fixes don't move the defensive-calibration metric.
 
 **How these rank among the existing fixes** (companion doc): soft-Z stays
 **Rank 0a (try first)**. The TSS detector features are the **§5 "hot tokens"
@@ -645,25 +822,35 @@ fixes only make *likely*. The deep in-tree solver is the companion doc's §6.3
 
 - **Validated externally:** soft-Z/A0C/A0GB beat hard-z (Connect-Four,
   Breakthrough; A0GB optimal in tabular) — paper full-text read. TSS/VCF/VCDT as
-  the domain-standard way to handle forcing threats, and the two-stone
-  double-threat crux — confirmed from multiple Connect6 sources.
+  the domain-standard way to handle forcing threats — confirmed from multiple
+  Connect6 sources. The **corrected** two-stone crux — that a single ≥4 window is
+  already a win-in-one-move (count-4 completed by the two placements of one move)
+  so any unanswered ≥4 window forces — is confirmed by the engine's own threat
+  predicate `count(player) >= 4` (`tactics.rs:188-203`) and supersedes the
+  earlier draft's incorrect "only a double-four forces" reading of the Connect6
+  papers.
 - **Validated on this pipeline:** training a value head on `root_value` is
   stable and learns (the STV heads already do it).
 - **Grounded in code (this pass):** every hexgt hook cited above — the hard
   value target (`samples.py:198`), `root_value` in hand at finalize
   (`selfplay.py:424`, `samples.py:185`), the 65-bin head & verbatim binning
   (`losses.py`, `constants.py:16`), the leaf classification/backup path
-  (`mcts.rs:511-571`), forced playouts & policy-target pruning
-  (`mcts.rs:865-915`), the window/threat primitives (`tactics.rs:134-222`,
-  `candidates.rs:203-227`, `features.rs:131-182`), the reserved feature slots &
-  zero-init graft (`constants.py:117-129`).
+  (`mcts.rs:511-571`, leaf has full `state`/`WindowStore` access at lines
+  538-541), forced playouts & policy-target pruning (`pruned_visit_policy`
+  `mcts.rs:875`+), the window/threat primitives — the `count >= 4` threat
+  predicate (`tactics.rs:188-203`), `empty_cells`/`count` (`tactics.rs:134-156`),
+  window-pair `intersects`/`touches` (`tactics.rs:210-222`), window tokens with
+  `empty_cells` (`candidates.rs:203-227`), the candidate↔window-empty-cell edge
+  (`candidates.rs:354-358`), the candidate↔window feature loop with the
+  count-5-only completion flags (`features.rs:131-182`, esp. 150-163) — the
+  reserved feature slots & zero-init graft (`constants.py:117-129`).
 - **Speculative (hypotheses to validate, not yet measured):** that soft-Z
   *will* move the +0.82 sum toward 0 and fix the 8/8 trace by the quantitative
   amounts hoped; that λ=0.5 is the right start (sweep it); that the depth-1
   override improves H2H net of the diversity cost; that a deep VCDT solver's
   ceiling is worth its cost in this pure-self-play regime. The *mechanism*
-  arguments (saturation, anti-calibration, zero-sum shrinkage,
-  double-threat blindness) are reasoned and code-grounded; the *magnitudes* are
+  arguments (saturation, anti-calibration, zero-sum shrinkage, blindness to
+  unanswered ≥4 windows) are reasoned and code-grounded; the *magnitudes* are
   not yet measured.
 
 ---
