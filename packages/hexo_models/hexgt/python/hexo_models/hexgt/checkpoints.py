@@ -158,6 +158,16 @@ def _state_dict_incompatibilities(
 
 
 def _resolve_checkpoint_ref(path: Path) -> Path | None:
+    """Resolve a checkpoint reference, following ``.txt`` pointer indirection.
+
+    A ``.txt`` ref is a pointer file the run publishes once a checkpoint is ready;
+    its contents are the path to the real ``.pt`` payload (relative paths resolve
+    against the pointer's directory). Returns ``None`` when the pointer does not
+    exist yet or is empty (checkpoint not published), so the caller falls back to
+    fresh init. A non-``.txt`` ref is returned as-is. The pointer is read with
+    ``utf-8-sig`` to tolerate a Windows BOM written by other tools.
+    """
+
     resolved = path.expanduser()
     if resolved.suffix.lower() == ".txt" and not resolved.exists():
         return None

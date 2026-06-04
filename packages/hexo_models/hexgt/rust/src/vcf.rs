@@ -29,7 +29,7 @@ use hexo_engine::{
     apply_placement, HexCoord, HexoState as RustHexoState, Placement, Player,
 };
 
-use super::threats::{analyze, placements_remaining};
+use super::threats::analyze;
 
 pub(crate) struct VcfResult {
     pub(crate) win: bool,
@@ -163,7 +163,8 @@ pub(crate) fn solve(
         deadline: Instant::now() + std::time::Duration::from_millis(time_limit_ms),
         hit_limit: false,
     };
-    let _ = placements_remaining(state); // (documents that B is phase-derived)
+    // The placement budget B (placements remaining this turn) is phase-derived;
+    // see `threats::placements_remaining`, used by the threat analysis below.
     let win = prove(state, attacker, ply_budget, &mut budget);
     VcfResult {
         win,

@@ -134,7 +134,7 @@ impl HexgtMctsSession {
         }
         if roots.len() != game_keys.len() {
             return Err(PyValueError::new_err(format!(
-                "dense_cnn MCTS session received {} game keys for {} states",
+                "hexgt MCTS session received {} game keys for {} states",
                 game_keys.len(),
                 roots.len()
             )));
@@ -168,7 +168,7 @@ impl HexgtMctsSession {
         )?;
         if roots.len() > root_limit {
             return Err(PyValueError::new_err(format!(
-                "dense_cnn MCTS session received {} active roots, above strict limit {}",
+                "hexgt MCTS session received {} active roots, above strict limit {}",
                 roots.len(),
                 root_limit
             )));

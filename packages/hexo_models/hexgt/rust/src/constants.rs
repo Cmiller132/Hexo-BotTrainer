@@ -26,7 +26,9 @@ pub(crate) const HEXGT_ACTIVE_ROOT_LIMIT: usize = 1024;
 // (test_hexgt_featurize_parity) guards Rust<->Python equality.
 pub(crate) const NODE_FEATURE_DIM: usize = 32;
 pub(crate) const NUM_NODE_TYPES: i64 = 4;
-pub(crate) const NUM_EDGE_TYPES_F: i64 = 5;
+// i64 sibling of `candidates::NUM_EDGE_TYPES` (usize), for edge-type clamp
+// arithmetic in the featurizer. Both mirror python `NUM_EDGE_TYPES`.
+pub(crate) const NUM_EDGE_TYPES: i64 = 5;
 pub(crate) const EDGE_ATTR_DIM: usize = 6; // NUM_EDGE_TYPES + 1
 pub(crate) const EDGE_ATTR_DIST: usize = 5; // offset of the hex-distance scalar
 pub(crate) const COORD_SCALE: f32 = 16.0;

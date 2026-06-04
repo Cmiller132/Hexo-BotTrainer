@@ -101,6 +101,9 @@ class HexgtPlayer:
             virtual_batch_size=vbatch,
             active_root_limit=selfplay.mcts_active_root_limit,
             # No root Dirichlet noise in eval -> repeatable, fair comparisons.
+            # `forced_playout_k` is likewise omitted: forced playouts are a
+            # self-play EXPLORATION device (guarantee visits to low-prior moves
+            # for training diversity), not wanted in deterministic eval.
             root_policy_temperature=selfplay.root_policy_temperature,
             fpu_reduction=selfplay.fpu_reduction,
             virtual_loss=selfplay.virtual_loss,

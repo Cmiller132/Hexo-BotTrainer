@@ -28,6 +28,13 @@ mod vcf;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
+/// Capability metadata for the hexgt accelerator, surfaced to Python via
+/// `rust_bridge.capabilities()`. The generic pipeline (`hexo_runner` /
+/// `hexo_train`) reads these strings to confirm it is driving the expected model
+/// family + state/transport contract before wiring self-play and MCTS:
+/// `status`/`model_family` identify the build, `state_source`/`coordinate_encoding`
+/// the engine-state intake, `candidate_set`/`edge_construction`/`policy` the graph
+/// + head contract, and `search`/`eval_transport` the MCTS + byte-payload path.
 #[pyfunction]
 pub fn capabilities(py: Python<'_>) -> PyResult<Py<PyAny>> {
     let dict = PyDict::new(py);

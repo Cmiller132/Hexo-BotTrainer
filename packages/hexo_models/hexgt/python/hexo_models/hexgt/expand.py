@@ -41,15 +41,38 @@ class ExpandedRow:
         "dropped_policy_mass", "policy_total",
     )
 
-    def __init__(self, graph, policy, opp_policy, value, stvalue, stvalue_mask, dropped_policy_mass, policy_total):
+    def __init__(
+        self,
+        graph: GraphTensors,
+        policy: np.ndarray,
+        opp_policy: np.ndarray,
+        value: float,
+        stvalue: dict[int, float],
+        stvalue_mask: dict[int, float],
+        dropped_policy_mass: float,
+        policy_total: float,
+    ) -> None:
+        """Bundle the graph tensors and the per-graph training targets that
+        trainer / selfplay / evaluation read directly off this row.
+
+        Args:
+            graph: the candidate/window typed graph for this position.
+            policy: (C,) float32 visit weights over the C candidates (CSR order).
+            opp_policy: (C,) float32 opponent visit weights, same order.
+            value: scalar game-result target in [-1, 1].
+            stvalue: short-term value target per horizon (horizon -> scalar).
+            stvalue_mask: 1.0/0.0 presence flag per horizon (horizon -> mask).
+            dropped_policy_mass: visit mass that fell outside the candidate set.
+            policy_total: total recorded visit mass (in- and out-of-set).
+        """
         self.graph = graph
-        self.policy = policy            # (C,) float32 visit weights over candidates
-        self.opp_policy = opp_policy    # (C,) float32
-        self.value = value              # scalar in [-1, 1]
-        self.stvalue = stvalue          # dict horizon -> scalar
-        self.stvalue_mask = stvalue_mask  # dict horizon -> 0/1
+        self.policy = policy
+        self.opp_policy = opp_policy
+        self.value = value
+        self.stvalue = stvalue
+        self.stvalue_mask = stvalue_mask
         self.dropped_policy_mass = dropped_policy_mass
-        self.policy_total = policy_total  # total recorded visit mass (in+out of set)
+        self.policy_total = policy_total
 
     @property
     def dropped_policy_fraction(self) -> float:

@@ -221,12 +221,14 @@ class HexgtInference:
         return out
 
     @torch.no_grad()
-    def forward_batch(self, batch: dict) -> dict[str, torch.Tensor]:
-        """Forward returning RAW per-candidate policy logits + per-graph value, in
-        the batch's original candidate/graph order. When the padded size would
-        exceed the budget, the forward is split into sorted, bounded chunks
-        (compression: ~4x less wasted padding + capped peak VRAM); each graph is
-        independent so the reassembled output is identical to a single forward."""
+    def forward_batch(self, batch: dict) -> tuple[dict[str, torch.Tensor], dict]:
+        """Forward returning ``(out, dev_batch)``: ``out`` holds RAW per-candidate
+        policy logits + per-graph value in the batch's original candidate/graph
+        order, and ``dev_batch`` is the on-device batch (with attention layout) the
+        callers read ``candidate_graph`` from. When the padded size would exceed the
+        budget, the forward is split into sorted, bounded chunks (compression: ~4x
+        less wasted padding + capped peak VRAM); each graph is independent so the
+        reassembled output is identical to a single forward."""
 
         batch = self._to_device(batch)
         num_graphs = int(batch["num_graphs"])

@@ -23,7 +23,7 @@
 //! D6-safe: D6 maps windows/owners/empties bijectively; every output here is the
 //! image set / a phase-derived (D6-fixed) scalar.
 
-use hexo_engine::{HexCoord, HexoState as RustHexoState, Player, TurnPhase};
+use hexo_engine::{HexCoord, HexoState as RustHexoState, TurnPhase};
 
 /// Placements remaining in the current turn for the side to move:
 /// 2 at FirstStone, 1 at Opening and SecondStone. This is the budget `B` that
@@ -121,6 +121,20 @@ fn min_hitting_set(sets: &[Vec<HexCoord>], budget: u8) -> Option<u8> {
 /// override, so it avoids the two separate `threat_entries` scans).
 pub(crate) fn analyze(state: &RustHexoState) -> ThreatAnalysis {
     let b = placements_remaining(state);
+    // Threat-free short-circuit (the common case). With no active >= 4 window the
+    // loop below buckets nothing: own_win_now stays false and `opp_empties` stays
+    // empty, so `min_hitting_set(&[], b) == Some(0)` and `opp_threat_count == 0`.
+    // This returns exactly that, skipping the O(all-touched-windows) scan. The
+    // `has_threats()` index is an exact mirror of the scan, so the result is
+    // bit-identical.
+    if !state.board().windows().has_threats() {
+        return ThreatAnalysis {
+            b,
+            own_win_now: false,
+            min_hitting_set: Some(0),
+            opp_threat_count: 0,
+        };
+    }
     let me = state.current_player();
     let mut own_win_now = false;
     let mut opp_empties: Vec<Vec<HexCoord>> = Vec::new();
@@ -158,6 +172,12 @@ pub(crate) fn analyze(state: &RustHexoState) -> ThreatAnalysis {
 /// the result is assembled in the same own-then-opp order with the same
 /// first-occurrence dedup.
 pub(crate) fn tactical_cells(state: &RustHexoState) -> Vec<HexCoord> {
+    // Threat-free short-circuit (the common case): with no active >= 4 window the
+    // scan below collects nothing, so the tactical set is empty. Identical result,
+    // no full-window scan. `has_threats()` exactly mirrors the scan.
+    if !state.board().windows().has_threats() {
+        return Vec::new();
+    }
     let b = placements_remaining(state);
     let me = state.current_player();
     let mut own: Vec<HexCoord> = Vec::new();
@@ -178,6 +198,8 @@ pub(crate) fn tactical_cells(state: &RustHexoState) -> Vec<HexCoord> {
     own
 }
 
+/// Append the items of `src` onto `dst`, skipping any already present, so `dst`
+/// keeps insertion order with no duplicates. `src` is consumed.
 fn push_unique(dst: &mut Vec<HexCoord>, src: Vec<HexCoord>) {
     for c in src {
         if !dst.contains(&c) {

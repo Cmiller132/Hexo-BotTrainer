@@ -14,7 +14,6 @@ use std::ptr;
 
 use hexo_engine::{HexoState as RustHexoState, MoveError};
 
-const STATE_API_CAPSULE_NAME: &str = "hexo_engine._rust.state_api";
 const STATE_API_VERSION: u32 = 2;
 
 #[repr(C)]
@@ -53,11 +52,13 @@ pub(crate) fn move_error(error: MoveError) -> PyErr {
     PyValueError::new_err(error.to_string())
 }
 
+/// Resolve the engine's state-API capsule. The returned `&'static HexoStateApi`
+/// borrows the capsule's interior pointer: it is only valid for the duration of
+/// the current FFI use (the immediate batch) and MUST NOT be stored across calls.
 fn engine_state_api(py: Python<'_>) -> PyResult<&'static HexoStateApi> {
     let module = py.import("hexo_engine._rust")?;
     let capsule = module.call_method0("state_api_capsule")?;
     let name = pyo3::ffi::c_str!("hexo_engine._rust.state_api");
-    debug_assert_eq!(name.to_string_lossy(), STATE_API_CAPSULE_NAME);
     let pointer = unsafe { pyo3::ffi::PyCapsule_GetPointer(capsule.as_ptr(), name.as_ptr()) };
     if pointer.is_null() {
         return Err(PyErr::fetch(py));

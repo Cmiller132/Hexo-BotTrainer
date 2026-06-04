@@ -58,6 +58,15 @@ MIN_CANDIDATE_RADIUS = 2
 MAX_CANDIDATE_RADIUS = 4
 ENGINE_LEGAL_RADIUS = 8
 
+# --- Turn phase ids (engine placement phase within a turn) --------------------
+# A turn places up to two stones; the phase indexes where we are in it. Used by
+# the side-node phase one-hot (F_SIDE_PHASE_ONEHOT, width NUM_TURN_PHASES) and by
+# the phase-aware v2/v3 candidate features in features.py.
+PHASE_OPENING = 0
+PHASE_FIRST_STONE = 1
+PHASE_SECOND_STONE = 2
+NUM_TURN_PHASES = 3
+
 # --- Node feature layout (gap A) — D6-INVARIANT (see d6.py / features.py) ------
 # Unified per-node feature vector of fixed width NODE_FEATURE_DIM. Slots are
 # type-routed: a node only fills the slots relevant to its type, the rest are 0.

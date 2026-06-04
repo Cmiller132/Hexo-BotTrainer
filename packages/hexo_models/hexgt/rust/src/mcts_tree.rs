@@ -1,4 +1,4 @@
-//! Dense CNN PUCT tree mechanics.
+//! hexgt PUCT tree mechanics (model-agnostic; copied verbatim from dense_cnn).
 //!
 //! The tree mirrors the usual KataGo-style ownership pattern at a smaller
 //! scale: a search owns one root state, an arena of nodes, an exact hash table
@@ -699,16 +699,15 @@ impl RustSearch {
     pub(crate) fn advance_root(&mut self, action_id: PackedCoord) -> PyResult<bool> {
         // Promote the selected child subtree after a move. If the child was not
         // expanded or the move ends the game, the session simply drops the tree.
-        let Some((edge_index, edge)) = self
+        let Some(edge) = self
             .nodes
             .first()
             .and_then(|node| {
                 node.edges
                     .iter()
-                    .enumerate()
-                    .find(|(_, edge)| edge.action_id == action_id)
+                    .find(|edge| edge.action_id == action_id)
             })
-            .map(|(index, edge)| (index, edge.clone()))
+            .cloned()
         else {
             return Ok(false);
         };
@@ -751,7 +750,6 @@ impl RustSearch {
             .iter()
             .fold(self.nodes[0].visits, |total, edge| total.max(edge.visits));
         self.recompute_accounting();
-        let _ = edge_index;
         Ok(true)
     }
 
