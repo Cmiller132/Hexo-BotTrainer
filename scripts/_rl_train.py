@@ -284,6 +284,10 @@ def main():
     ap.add_argument("--final-temperature", type=float, default=0.2)
     ap.add_argument("--temperature-decay-moves", type=int, default=30)
     ap.add_argument("--temperature-floor", type=float, default=0.1)
+    # KataGo-style smooth exponential-halflife move temperature. >0 takes precedence
+    # over the linear decay: temp(ply)=floor+(temperature-floor)*2**(-ply/halflife).
+    # MUST be threaded into the cfg dict below (the driver does not read TOML [selfplay]).
+    ap.add_argument("--temperature-halflife", type=float, default=0.0)
     ap.add_argument("--forced-playout-k", type=float, default=2.0)
     # MCTS nucleus widening. Defaults match configs/hexgt_model2.toml (documented
     # intent) + dense_cnn's 96x8 run. The driver previously passed NONE of these,
@@ -358,6 +362,7 @@ def main():
             "temperature": args.temperature, "final_temperature": args.final_temperature,
             "temperature_decay_moves": args.temperature_decay_moves,
             "temperature_floor": args.temperature_floor,
+            "temperature_halflife": args.temperature_halflife,
             "forced_playout_k": args.forced_playout_k,
             "widening_max_children": args.widening_max_children,
             "widening_min_children": args.widening_min_children,
@@ -487,6 +492,17 @@ def main():
         f"loss_w: policy={cfg.training.policy_weight} value={cfg.training.value_weight} "
         f"opp={cfg.training.opp_policy_weight} stv={cfg.training.short_term_value_weight} "
         f"soft_z_lambda={cfg.samples.soft_z_lambda} policy_surprise={cfg.samples.policy_surprise_enabled}", fh)
+    _sp = cfg.selfplay
+    if _sp.temperature_halflife > 0:
+        _temp_desc = (f"halflife start={_sp.temperature} floor={_sp.temperature_floor} "
+                      f"halflife={_sp.temperature_halflife} "
+                      f"[t(0)={_sp.temperature_floor + (_sp.temperature - _sp.temperature_floor):.3f} "
+                      f"t(80)={_sp.temperature_floor + (_sp.temperature - _sp.temperature_floor) * 2 ** (-80 / _sp.temperature_halflife):.3f} "
+                      f"t(200)={_sp.temperature_floor + (_sp.temperature - _sp.temperature_floor) * 2 ** (-200 / _sp.temperature_halflife):.3f}]")
+    else:
+        _temp_desc = (f"linear start={_sp.temperature} final={_sp.final_temperature} "
+                      f"decay_moves={_sp.temperature_decay_moves} floor={_sp.temperature_floor}")
+    log(f"    move-temperature: {_temp_desc}", fh)
 
     def save(tag, rl_epoch, epoch_train_complete=True):
         payload = {

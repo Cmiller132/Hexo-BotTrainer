@@ -63,15 +63,22 @@ def _move_temperature(
     decay_moves: int,
     schedule: tuple[tuple[int, float], ...] = (),
     floor: float = 0.0,
+    halflife: float = 0.0,
 ) -> float:
     """Played-move temperature at ply `move_index` (copy of dense_cnn's rule).
 
-    `schedule` (sorted ``(move, temp)`` anchors) takes precedence: piecewise
-    linear, held at the first anchor before it, the final slope continued past
-    the last anchor down to `floor`. Otherwise linear decay `initial`->`final`
-    over `decay_moves`, held flat after. The opening explores, the endgame sharpens.
+    `halflife` (KataGo-style smooth exponential decay) takes precedence when > 0:
+    ``temp = floor + (initial - floor) * 2**(-move_index / halflife)`` — starts at
+    `initial`, halves the gap to `floor` every `halflife` plies, asymptotes to `floor`
+    (honored late-game floor, never goes greedy). Else `schedule` (sorted
+    ``(move, temp)`` anchors) takes precedence: piecewise linear, held at the first
+    anchor before it, the final slope continued past the last anchor down to `floor`.
+    Otherwise linear decay `initial`->`final` over `decay_moves`, held flat after.
+    The opening explores, the endgame sharpens.
     """
 
+    if halflife > 0.0:
+        return float(floor + (initial - floor) * (2.0 ** (-float(move_index) / halflife)))
     if schedule:
         first_move, first_temp = schedule[0]
         if move_index <= first_move:
@@ -391,6 +398,7 @@ def run_selfplay_games(
                     decay_moves=selfplay.temperature_decay_moves,
                     schedule=selfplay.temperature_schedule,
                     floor=selfplay.temperature_floor,
+                    halflife=selfplay.temperature_halflife,
                 )
                 for game in playable
             ]

@@ -159,6 +159,12 @@ class HexgtSelfPlayConfig:
     temperature_decay_moves: int = 0
     temperature_schedule: tuple[tuple[int, float], ...] = ()
     temperature_floor: float = 0.1
+    # KataGo-style smooth exponential-halflife move temperature. When > 0 it takes
+    # precedence over the linear/`temperature_schedule` decay:
+    #   temp(ply) = temperature_floor + (temperature - temperature_floor) * 2**(-ply/halflife)
+    # i.e. starts at `temperature`, decays by half every `temperature_halflife` plies,
+    # and asymptotes to `temperature_floor` (the honored late-game floor).
+    temperature_halflife: float = 0.0
     forced_playout_k: float = 0.0
 
 
@@ -284,6 +290,7 @@ def parse_hexgt_config(raw: Mapping[str, Any] | None) -> HexgtConfig:
             temperature_decay_moves=int(selfplay.get("temperature_decay_moves", 0)),
             temperature_schedule=_parse_temperature_schedule(selfplay.get("temperature_schedule", ())),
             temperature_floor=float(selfplay.get("temperature_floor", 0.1)),
+            temperature_halflife=float(selfplay.get("temperature_halflife", 0.0)),
             forced_playout_k=float(selfplay.get("forced_playout_k", 0.0)),
         ),
         evaluation=HexgtEvalConfig(
