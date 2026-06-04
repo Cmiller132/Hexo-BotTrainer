@@ -30,7 +30,6 @@ from __future__ import annotations
 import json
 import sys
 from collections import OrderedDict
-from dataclasses import asdict
 from typing import Any
 
 from . import debug_infer as di

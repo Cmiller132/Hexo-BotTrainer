@@ -52,7 +52,6 @@ from hexo_models.hexgt.constants import (
 from hexo_models.hexgt import rust_bridge
 from hexo_models.hexgt.collate import collate_graphs
 from hexo_models.hexgt.features import build_graph_tensors
-from hexo_models.hexgt.graph_build import batch_from_states  # noqa: F401 (kept for parity/imports)
 from hexo_models.hexgt.inference import HexgtInference
 from hexo_models.hexgt.losses import decode_binned_value, value_bins
 from hexo_models.hexgt.mcts import new_mcts_session
