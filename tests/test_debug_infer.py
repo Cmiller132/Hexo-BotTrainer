@@ -208,3 +208,21 @@ def test_position_from_actions_rejects_garbage():
         web._debug_position_from_actions("run", "12, not_a_number", 0)
     with pytest.raises(ValueError):
         web._debug_position_from_actions("run", "   ", 0)
+
+
+def test_debug_run_root_override(tmp_path, monkeypatch):
+    """HEXO_DEBUG_RUN_ROOT is searched first (so Debug finds checkpoints in the
+    live worktree even when the dashboard cwd is a bridge mirror); unset falls
+    back to the normal cwd roots."""
+    root = tmp_path / "wt"
+    (root / "runs").mkdir(parents=True)
+    monkeypatch.setenv("HEXO_DEBUG_RUN_ROOT", str(root))
+    roots = [p.resolve() for p in web._debug_training_roots()]
+    assert (root / "runs").resolve() == roots[0]
+    # cwd roots still present as fallback
+    assert len(roots) >= 1
+
+    monkeypatch.delenv("HEXO_DEBUG_RUN_ROOT", raising=False)
+    fallback = [p.resolve() for p in web._debug_training_roots()]
+    assert (root / "runs").resolve() not in fallback
+    assert fallback == [p.resolve() for p in web._training_roots()]

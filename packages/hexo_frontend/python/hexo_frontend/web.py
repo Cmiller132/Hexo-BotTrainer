@@ -1068,8 +1068,85 @@ def _debug_worker() -> "debug_service.DebugWorker":
     return debug_service.get_worker()
 
 
+def _debug_training_roots() -> tuple[Path, ...]:
+    """Run-dir search roots for the Debug endpoints. Prefers ``HEXO_DEBUG_RUN_ROOT``
+    (e.g. the live worktree, which holds the real checkpoints + every .hxr) so the
+    Debug tab works even when the dashboard serves its training/history panels
+    from a bridge-mirror cwd that has the diagnostics but NOT the checkpoints.
+    Falls back to the normal cwd-derived roots when the override is unset, so the
+    default single-tree setup is unchanged."""
+
+    roots: list[Path] = []
+    seen: set[str] = set()
+    override = os.environ.get("HEXO_DEBUG_RUN_ROOT")
+    if override:
+        base = Path(override).expanduser()
+        for candidate in (base / "runs", base):  # accept the tree root or its runs/ dir
+            if candidate.is_dir():
+                key = str(candidate.resolve())
+                if key not in seen:
+                    seen.add(key)
+                    roots.append(candidate)
+    for root in _training_roots():
+        key = str(root.resolve())
+        if key not in seen:
+            seen.add(key)
+            roots.append(root)
+    return tuple(roots)
+
+
+def _debug_run_dirs(name: str) -> list[Path]:
+    """Every existing run dir named ``name`` across the Debug roots, in priority
+    order (override/worktree first, then the cwd roots)."""
+
+    if not name or "/" in name or "\\" in name or name.startswith("."):
+        return []
+    dirs: list[Path] = []
+    for root in _debug_training_roots():
+        resolved_root = root.resolve()
+        path = (resolved_root / name).resolve()
+        if resolved_root != path and resolved_root not in path.parents:
+            continue
+        if path.is_dir():
+            dirs.append(path)
+    return dirs
+
+
+def _debug_resolve_run_dir(name: str) -> Path | None:
+    """First existing run dir in Debug-root priority order (worktree before the
+    bridge-mirror cwd) — deterministic, so checkpoint/game listing comes from the
+    tree that actually has the data rather than whichever has the newest mtime."""
+
+    dirs = _debug_run_dirs(name)
+    return dirs[0] if dirs else None
+
+
+def _debug_resolve_run_path(run_name: str, artifact_path: str) -> Path | None:
+    """Resolve an artifact path under whichever Debug run dir actually contains it.
+
+    The dashboard's History tab may serve from a bridge-mirror cwd while the Debug
+    endpoints prefer the live worktree, and the two trees can differ (the worktree
+    leads on checkpoints; the mirror can momentarily lead on a just-rolled epoch
+    .hxr). Trying each run dir in priority order and returning the first that holds
+    the file lets a deep-link resolve regardless of which tree has that game."""
+
+    if not artifact_path or artifact_path.startswith(("/", "\\")):
+        return None
+    fallback: Path | None = None
+    for run_dir in _debug_run_dirs(run_name):
+        resolved_root = run_dir.resolve()
+        path = (run_dir / artifact_path).resolve()
+        if resolved_root != path and resolved_root not in path.parents:
+            continue
+        if fallback is None:
+            fallback = path
+        if path.exists():
+            return path
+    return fallback  # confined but absent -> caller raises a clear "unknown artifact"
+
+
 def _debug_checkpoints(run_name: str) -> dict[str, object]:
-    run_dir = _resolve_run_dir(run_name)
+    run_dir = _debug_resolve_run_dir(run_name)
     if run_dir is None:
         raise ValueError("Unknown training run")
     ckpt_dir = run_dir / "checkpoints"
@@ -1106,7 +1183,7 @@ def _debug_games(run_name: str, source: str) -> dict[str, object]:
     """List the recorded game files (``.hxr``) available for inspection. Self-play
     files are one-per-epoch; evaluation files live in ``eval*/`` subdirectories."""
 
-    run_dir = _resolve_run_dir(run_name)
+    run_dir = _debug_resolve_run_dir(run_name)
     if run_dir is None:
         raise ValueError("Unknown training run")
 
@@ -1154,14 +1231,14 @@ def _debug_resolve_checkpoint(run_name: str, checkpoint: str) -> Path:
         raise ValueError("checkpoint is required")
     if "/" in name or "\\" in name:  # accept a bare filename only, resolve under the run
         name = Path(name).name
-    path = _resolve_run_path(run_name, f"checkpoints/{name}")
+    path = _debug_resolve_run_path(run_name, f"checkpoints/{name}")
     if path is None or not path.is_file():
         raise ValueError(f"Unknown checkpoint: {checkpoint}")
     return path
 
 
 def _debug_open_record(run_name: str, artifact_path: str, record_index: int):
-    path = _resolve_run_path(run_name, artifact_path)
+    path = _debug_resolve_run_path(run_name, artifact_path)
     if path is None or not path.is_file() or path.suffix.lower() != ".hxr":
         raise ValueError("Unknown game history artifact")
     with HexoRecordFile.open(path) as record_file:
@@ -1338,7 +1415,7 @@ def _debug_recorded_trajectory(run_dir: Path, artifact_path: str, game_id: objec
 
 
 def _debug_trajectory(run_name: str, artifact_path: str, record_index: int, checkpoint: str, max_points: int = 160) -> dict[str, object]:
-    run_dir = _resolve_run_dir(run_name)
+    run_dir = _debug_resolve_run_dir(run_name)
     if run_dir is None:
         raise ValueError("Unknown training run")
     record, _players, _records = _debug_open_record(run_name, artifact_path, record_index)
