@@ -45,7 +45,7 @@ def _states(n_states: int, n_radius: int = 4, seed: int = 0):
     return out
 
 
-def test_param_budget_within_10pct_of_2_1M() -> None:
+def test_param_budget_within_10pct_of_2_4M() -> None:
     _torch()
     from hexo_models.hexgt.architecture import HexgtNetwork
     from hexo_models.hexgt.constants import (
@@ -58,7 +58,10 @@ def test_param_budget_within_10pct_of_2_1M() -> None:
         short_term_value_horizons=(1, 4, 8),
     )
     params = sum(p.numel() for p in model.parameters())
-    assert 1.89e6 <= params <= 2.31e6, f"param count {params} not within ~10% of 2.1M"
+    # Budget bumped ~2.1M -> ~2.4M: the STV/lookahead heads now read the same
+    # [SIDE | PMA_k] readout as the main value head, widening each head's first
+    # Linear from token_dim to (1+k)*token_dim (+~169k params for 3 heads @ k=2).
+    assert 2.17e6 <= params <= 2.65e6, f"param count {params} not within ~10% of 2.4M"
 
 
 def test_forward_on_real_packed_graphs() -> None:

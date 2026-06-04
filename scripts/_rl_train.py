@@ -28,6 +28,7 @@ import torch
 
 from hexo_models.hexgt.architecture import (
     HexgtNetwork,
+    expand_stv_readout_columns,
     expand_value_readout_columns,
     zero_init_expanded_feature_columns,
 )
@@ -373,6 +374,7 @@ def main():
         arch_meta["short_term_value_horizons"] = list(STV_HORIZONS)
         model = build_model(arch_meta, device)
         vr_expanded = expand_value_readout_columns(model, ck["model"])
+        stv_expanded = expand_stv_readout_columns(model, ck["model"])
         _validate_stv_resume_load(model.load_state_dict(ck["model"], strict=False))
         loaded_epoch = int(ck.get("rl_epoch", 0))
         # RE-TRAIN-ON-CRASH: a checkpoint whose epoch training did NOT complete (a
@@ -385,6 +387,7 @@ def main():
         had_stv = bool(tuple(ck["arch"].get("short_term_value_horizons", ())))
         seed_desc = (f"RESUME from {latest.name} (rl_epoch={ck.get('rl_epoch')}, step={ck.get('step')})"
                      + ("" if had_stv else f" + GRAFT STV-heads {STV_HORIZONS} (fresh-init, aux-only)")
+                     + (f" + EXPAND STV readout to [SIDE|PMA] (zero-init PMA cols, identical first step): {len(stv_expanded)} heads" if stv_expanded else "")
                      + ("" if epoch_train_complete else f" + RE-TRAIN incomplete epoch {loaded_epoch} (reuse shards, no re-self-play)"))
     else:
         ck = torch.load(args.bc_seed, map_location=device, weights_only=False)
@@ -392,6 +395,7 @@ def main():
         arch_meta["short_term_value_horizons"] = list(STV_HORIZONS)
         model = build_model(arch_meta, device)
         vr_expanded = expand_value_readout_columns(model, ck["model"])
+        stv_expanded = expand_stv_readout_columns(model, ck["model"])
         _validate_stv_resume_load(model.load_state_dict(ck["model"], strict=False))
         seed_desc = (f"SEED from {Path(args.bc_seed).name} (step={ck.get('step')}"
                      f"{', rl_epoch=' + str(ck['rl_epoch']) if 'rl_epoch' in ck else ''})"
