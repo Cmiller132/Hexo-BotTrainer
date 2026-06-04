@@ -43,11 +43,15 @@ BC_SEED="$RUNDIR/pretrain/hexgt_model3_pretrain.pt"
 # GNN batch is the dominant variable-size term). REVERSIBLE; resume-safe (batch is not
 # in the checkpoint). NOTE: this drops samples/pass 65,536->32,768 vs the documented
 # main2 parity; to restore parity instead, owner may prefer --train-steps-per-epoch 1024.
-# MOVE TEMPERATURE 2026-06-04 (owner): KataGo-style smooth exponential halflife to
-# prolong mid/late-game self-play exploration. temp(ply)=0.3+(1.0-0.3)*2^(-ply/44.26)
-# => t(0)=1.0, t(80)=0.5, asymptotes to the 0.3 floor (t(200)~0.33). --temperature-halflife
-# >0 SUPERSEDES the linear --final-temperature/--temperature-decay-moves (kept as inert
-# fallback). Tactical guard still masks proven 1-ply losses before sampling.
+# MOVE TEMPERATURE 2026-06-04 (owner): KataGo-style smooth exponential halflife.
+# temp(ply)=0.3+(1.0-0.3)*2^(-ply/halflife). HALFLIFE 44.26 -> 33 (2nd tweak): measured
+# that opening exploration is ~free (valΔ~0) but midgame temp~0.70 is slightly high;
+# shorter halflife trims midgame (t(35) 0.70->0.61) while keeping the opening high
+# (t(10)~0.86). Floor kept at 0.3 (owner: don't lower noise floor). Pairs with --eps
+# 0.25 -> 0.30: "more noise, less temp" -- shift exploration to root Dirichlet (shapes
+# policy targets / search, no z-noise at lambda=0) from played-move temperature (writes
+# +/-1 outcomes). New curve: t(0)=1.0, t(80)=0.43, t(200)=0.31. --temperature-halflife
+# >0 SUPERSEDES the linear --final-temperature/--temperature-decay-moves (inert fallback).
 # VBATCH 2026-06-04 (owner): --vbatch 128 -> 16. Measured (vs sequential vbatch=1 on real
 # positions): vbatch=128 distorted the visit policy by KL~0.69 / root value ~0.36 and changed
 # the played move ~1/3 of the time; vbatch=16 is near-sequential (KL~0.08). 512/16 = 32 NN-
@@ -61,8 +65,8 @@ export EXTRA_ARGS="--bc-seed $BC_SEED \
 --train-steps-per-epoch 512 --batch 64 --lr 2e-4 --warmup 200 --replay-window-epochs 8 \
 --replay-pool-cap 500000 --replay-recency-decay 0.9 \
 --eval-games 40 --eval-visits 512 --eval-max-actions 1024 --eval-opening-moves 10 --eval-opening-temperature 0.6 \
---n 3 --total-alpha 6.6 --eps 0.25 --root-policy-temperature 1.0 --c-puct 1.5 \
---temperature 1.0 --temperature-floor 0.3 --temperature-halflife 44.26 --forced-playout-k 2.0 \
+--n 3 --total-alpha 6.6 --eps 0.30 --root-policy-temperature 1.0 --c-puct 1.5 \
+--temperature 1.0 --temperature-floor 0.3 --temperature-halflife 33 --forced-playout-k 2.0 \
 --final-temperature 0.2 --temperature-decay-moves 30 \
 --widening-max-children 96 --short-term-value-weight 0.10 \
 --soft-z-lambda 0"
