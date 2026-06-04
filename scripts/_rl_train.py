@@ -44,6 +44,79 @@ def log(msg, fh=None):
         fh.write(line + "\n"); fh.flush()
 
 
+def measure_value_optimism(model, hxr_path, device, n_radius, max_pos=64):
+    """Cheap per-epoch value-head CALIBRATION probe (seconds, diagnostic-only).
+
+    At FirstStone midgame positions, evaluate the IDENTICAL board from BOTH
+    perspectives via a facts-level owner-swap (0<->1) — `build_graph_tensors`
+    re-derives every feature (including the SIDE-node own/opp counts the value
+    head reads) from the swapped owners, so the swap is an exact perspective flip.
+    Returns mean(v_side + v_oppside): 0 = zero-sum-consistent / calibrated, >0 =
+    optimism (both sides predict winning), <0 = pessimism. Tracks calibration
+    drift over the run (pretrain seed ~ -0.06; the old dense_cnn head was +0.82).
+
+    Wrapped end-to-end in try/except: a probe failure must NEVER crash training.
+    """
+    try:
+        import statistics as _st
+
+        import hexo_engine.api as _eng
+        from hexo_engine.types import AxialCoord, PlacementAction, unpack_coord_id
+        from hexo_runner.records import HexoRecordFile
+        from hexo_models.hexgt.features import build_graph_tensors
+        from hexo_models.hexgt.collate import collate_graphs
+        from hexo_models.hexgt import rust_bridge
+        from hexo_models.hexgt.losses import decode_binned_value
+
+        if not Path(hxr_path).exists():
+            return {"optimism_sum_mean": float("nan"), "optimism_positions": 0}
+
+        def _val(facts):
+            b = collate_graphs([build_graph_tensors(facts)])
+            b = {k: (v.to(device) if hasattr(v, "to") else v) for k, v in b.items()}
+            return float(decode_binned_value(model.forward_policy_value(b)["value"].float().cpu())[0])
+
+        def _swap(facts):
+            own = list(facts["nodes"]["node_owner"])
+            sw = [1 if o == 0 else (0 if o == 1 else o) for o in own]
+            return {**facts, "nodes": {**facts["nodes"], "node_owner": sw}}
+
+        was_training = model.training
+        model.eval()
+        sums, both_pos = [], 0
+        with torch.no_grad():
+            rf = HexoRecordFile.open(str(hxr_path))
+            for rec in rf.iter_records():
+                if len(sums) >= max_pos:
+                    break
+                coords = [unpack_coord_id(int(c)) for c in rec.action_ids]
+                s = _eng.new_game()
+                for i, c in enumerate(coords):
+                    if 10 <= i <= 50:
+                        facts = rust_bridge.graph_facts(s, n_radius)
+                        if facts.get("meta", {}).get("first_stone") is None:
+                            va, vb = _val(facts), _val(_swap(facts))
+                            sums.append(va + vb)
+                            if va > 0.05 and vb > 0.05:
+                                both_pos += 1
+                            if len(sums) >= max_pos:
+                                break
+                    _eng.apply_action(s, PlacementAction(AxialCoord(q=int(c.q), r=int(c.r))))
+        if was_training:
+            model.train()
+        if not sums:
+            return {"optimism_sum_mean": float("nan"), "optimism_positions": 0}
+        return {
+            "optimism_sum_mean": _st.mean(sums),
+            "optimism_sum_median": _st.median(sums),
+            "optimism_both_positive_frac": both_pos / len(sums),
+            "optimism_positions": len(sums),
+        }
+    except Exception as exc:  # diagnostic only — never abort the epoch
+        return {"optimism_sum_mean": float("nan"), "optimism_positions": 0,
+                "optimism_error": repr(exc)}
+
+
 def log_gpu_mem(tag, fh=None, reset=True):
     """Log the CUDA caching-allocator RESERVED peak (what governs OOM / verifies the
     run is on the ~2.4GB compiled+expandable path, not the ~11.8GB eager path) plus
@@ -217,6 +290,16 @@ def main():
     ap.add_argument("--widening-max-children", type=int, default=96)
     ap.add_argument("--widening-min-children", type=int, default=2)
     ap.add_argument("--widening-policy-mass", type=float, default=0.95)
+    # KataGo policy-surprise sample weighting (row duplication by KL(visits||prior)).
+    # The driver builds its config from ARGS only and never read the [samples]
+    # section of any TOML, so configs/hexgt_model3.toml's `policy_surprise_enabled
+    # = true` NEVER reached the self-play config -> epochs 0-4 trained WITHOUT it
+    # (effective_samples == raw, policy_surprise_mean == 0.0). Default ON here so it
+    # engages at the next supervisor relaunch without changing the fixed relaunch
+    # command; --no-policy-surprise opts out. Values match the intended TOML.
+    ap.add_argument("--policy-surprise", action=argparse.BooleanOptionalAction, default=True)
+    ap.add_argument("--policy-surprise-uniform-fraction", type=float, default=0.5)
+    ap.add_argument("--policy-surprise-max-weight", type=float, default=8.0)
     # Eval
     ap.add_argument("--eval-every", type=int, default=2)
     ap.add_argument("--eval-games", type=int, default=40)
@@ -248,6 +331,16 @@ def main():
                          "short_term_value_horizons": list(STV_HORIZONS)},
         "training": {"learning_rate": args.lr, "warmup_steps": args.warmup, "batch_size": args.batch,
                      "short_term_value_weight": args.short_term_value_weight},
+        # Self-play row finalization. policy_surprise_* MUST be threaded here: the
+        # driver does not read any TOML [samples] section, so omitting this leaves
+        # the dataclass default policy_surprise_enabled=False (the bug that kept it
+        # off through epoch 4). selfplay.py:run_selfplay_games reads
+        # config.samples.policy_surprise_enabled to gate materialize_policy_surprise_rows.
+        "samples": {
+            "policy_surprise_enabled": bool(args.policy_surprise),
+            "policy_surprise_uniform_fraction": args.policy_surprise_uniform_fraction,
+            "policy_surprise_max_weight": args.policy_surprise_max_weight,
+        },
         "selfplay": {
             "search_visits": args.visits, "max_actions": args.max_actions,
             "c_puct": args.c_puct, "root_policy_temperature": args.root_policy_temperature,
@@ -631,6 +724,20 @@ def main():
                 f"window={len(win_epochs)}ep[{span}] {len(shards)}sh "
                 f"pool~{pool_pos // 1000}k/{args.replay_pool_cap // 1000}k "
                 f"decay={args.replay_recency_decay}", fh)
+
+            # --- 2b) value-head CALIBRATION probe (cheap, diagnostic) ------------
+            # Same-board both-perspectives optimism on this epoch's self-play boards,
+            # so the dashboard/logs surface value-head calibration drift over the run
+            # (the run's |val| was rising + games shortening — this quantifies whether
+            # the head is staying zero-sum-consistent or drifting optimistic). Failsafe.
+            calib = measure_value_optimism(
+                model, selfplay_dir / f"epoch_{rl_epoch:06d}.hxr", device, args.n, max_pos=64)
+            log(f"epoch {rl_epoch} calib: optimism_sum_mean={calib.get('optimism_sum_mean', float('nan')):+.4f} "
+                f"both_pos={calib.get('optimism_both_positive_frac', float('nan')):.0%} "
+                f"n={calib.get('optimism_positions', 0)} "
+                f"(0=calibrated >0=optimistic)", fh)
+            with open(eval_dir / f"epoch_{rl_epoch:06d}_calibration.json", "w") as cfh:
+                json.dump(calib, cfh, indent=2)
 
             # --- 3) checkpoint ---------------------------------------------------
             save(f"epoch{rl_epoch:06d}", rl_epoch); last_save = rl_epoch
