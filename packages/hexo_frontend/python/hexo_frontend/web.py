@@ -695,14 +695,24 @@ class HexoPlayHandler(BaseHTTPRequestHandler):
                 )
             elif path == "/api/debug/position":
                 query = parse_qs(parsed.query)
-                self._send_json(
-                    _debug_position(
-                        str(query.get("run", [""])[0]),
-                        str(query.get("path", [""])[0]),
-                        _query_int(query.get("record", [None])[0]) or 0,
-                        _query_int(query.get("ply", [None])[0]) or 0,
+                actions_csv = str(query.get("actions", [""])[0] or "")
+                if actions_csv:
+                    self._send_json(
+                        _debug_position_from_actions(
+                            str(query.get("run", [""])[0]),
+                            actions_csv,
+                            _query_int(query.get("ply", [None])[0]) or 0,
+                        )
                     )
-                )
+                else:
+                    self._send_json(
+                        _debug_position(
+                            str(query.get("run", [""])[0]),
+                            str(query.get("path", [""])[0]),
+                            _query_int(query.get("record", [None])[0]) or 0,
+                            _query_int(query.get("ply", [None])[0]) or 0,
+                        )
+                    )
             elif path == "/" or path == "/index.html":
                 self._send_static("index.html")
             elif path.startswith("/static/"):
@@ -1164,46 +1174,81 @@ def _debug_open_record(run_name: str, artifact_path: str, record_index: int):
     return records[record_index], players, records
 
 
+def _debug_build_position(action_ids: list[int], ply: int, *, seed: object = None) -> dict[str, object]:
+    """Replay ``action_ids[:ply]`` into a board-state payload. Coordinates
+    (including the last move) are resolved server-side via the engine, so the
+    client never re-implements action-id unpacking."""
+
+    total = len(action_ids)
+    ply = max(0, min(int(ply), total))
+    state = engine.new_game(seed=seed)
+    last_coord = None
+    for action_id in action_ids[:ply]:
+        coord = unpack_coord_id(action_id)
+        engine.apply_action(state, engine.PlacementAction(coord))
+        last_coord = coord
+
+    payload = dashboard_state(engine.to_python_state(state))
+    payload["mode"] = "debug"
+    payload["debug"] = {
+        "ply": ply,
+        "total": total,
+        "action_ids": action_ids,
+        "last_action_id": action_ids[ply - 1] if ply > 0 else None,
+        "last_q": int(last_coord.q) if last_coord is not None else None,
+        "last_r": int(last_coord.r) if last_coord is not None else None,
+    }
+    return payload
+
+
 def _debug_position(run_name: str, artifact_path: str, record_index: int, ply: int) -> dict[str, object]:
     record, players, records = _debug_open_record(run_name, artifact_path, record_index)
     action_ids = [int(a) for a in record.action_ids]
-    total = len(action_ids)
-    ply = max(0, min(int(ply), total))
-    state = engine.new_game(seed=record.seed)
-    for action_id in action_ids[:ply]:
-        engine.apply_action(state, engine.PlacementAction(unpack_coord_id(action_id)))
-
-    payload = dashboard_state(engine.to_python_state(state))
-    payload.update(
+    payload = _debug_build_position(action_ids, ply, seed=record.seed)
+    payload["game_id"] = f"{run_name}:{record.game_id}"
+    payload["players"] = _players_by_role(players)
+    payload["debug"].update(
         {
-            "mode": "debug",
-            "game_id": f"{run_name}:{record.game_id}",
-            "players": _players_by_role(players),
-            "debug": {
-                "run": run_name,
-                "path": artifact_path,
-                "record_index": record_index,
-                "record_count": len(records),
-                "ply": ply,
-                "total": total,
-                "action_ids": action_ids,
-                "last_action_id": action_ids[ply - 1] if ply > 0 else None,
-                "winner": record.winner,
-                "status": record.status,
-                "seed": record.seed,
-            },
-            "record_games": [
-                {
-                    "index": index,
-                    "game_id": item.game_id,
-                    "status": item.status,
-                    "actions": len(item.action_ids),
-                    "winner": item.winner,
-                }
-                for index, item in enumerate(records)
-            ],
+            "run": run_name,
+            "path": artifact_path,
+            "record_index": record_index,
+            "record_count": len(records),
+            "winner": record.winner,
+            "status": record.status,
+            "seed": record.seed,
         }
     )
+    payload["record_games"] = [
+        {
+            "index": index,
+            "game_id": item.game_id,
+            "status": item.status,
+            "actions": len(item.action_ids),
+            "winner": item.winner,
+        }
+        for index, item in enumerate(records)
+    ]
+    return payload
+
+
+def _debug_position_from_actions(run_name: str, actions_csv: str, ply: int) -> dict[str, object]:
+    """Board payload for a pasted/imported action-id list (no .hxr)."""
+
+    action_ids: list[int] = []
+    for token in re.split(r"[\s,]+", actions_csv.strip()):
+        if not token:
+            continue
+        try:
+            action_ids.append(int(token))
+        except ValueError as exc:
+            raise ValueError(f"invalid action id: {token!r}") from exc
+    if not action_ids:
+        raise ValueError("no action ids provided")
+    ply = len(action_ids) if ply <= 0 else ply
+    payload = _debug_build_position(action_ids, ply)
+    payload["game_id"] = f"{run_name}:imported"
+    payload["debug"].update({"run": run_name, "imported": True, "winner": None})
+    payload["record_games"] = []
     return payload
 
 

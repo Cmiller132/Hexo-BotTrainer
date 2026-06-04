@@ -3426,40 +3426,23 @@ async function debugLoadPosition({ resetPly = false, ply = null } = {}) {
 }
 
 async function debugLoadImported(ply = null) {
-  // Build a synthetic position payload from an imported action-id list by asking
-  // the position endpoint? Imported lists have no .hxr, so we render a minimal
-  // board client-side via the analyze result's candidates + reconstructed stones.
-  const ids = dbg.imported;
+  // Imported positions are reconstructed by the SERVER (true engine coords +
+  // legal cells + tactics), exactly like recorded games — so overlays/threats
+  // work and no action-id unpacking happens in the browser.
+  const ids = dbg.imported || [];
+  if (!ids.length) return;
   const targetPly = ply != null ? Math.max(0, Math.min(ply, ids.length)) : ids.length;
-  dbg.position = {
-    placements: debugStonesFromActions(ids.slice(0, targetPly)),
-    legal: [],
-    mode: "debug-import",
-    debug: { ply: targetPly, total: ids.length, action_ids: ids, last_action_id: targetPly > 0 ? ids[targetPly - 1] : null, winner: null, imported: true },
-    record_games: [],
-  };
-  dbg.records = [];
-  dbg.analysis = null;
-  dbg.search = null;
-  debugRenderAll();
-  await debugAnalyze();
-}
-
-function debugStonesFromActions(ids) {
-  // action_id -> (q,r) via the same packing the engine uses (low 16 bits each,
-  // sign-extended). Mirrors hexo_engine.types.unpack_coord_id for display only.
-  const stones = [];
-  ids.forEach((aid, i) => {
-    const { q, r } = debugUnpackCoord(aid);
-    stones.push({ q, r, player: i % 2 === 0 ? "player0" : "player1", index: i + 1 });
-  });
-  return stones;
-}
-
-function debugUnpackCoord(actionId) {
-  const raw = Number(actionId) >>> 0;
-  const toS16 = v => (v & 0x8000) ? v - 0x10000 : v;
-  return { q: toS16(raw & 0xffff), r: toS16((raw >>> 16) & 0xffff) };
+  const params = new URLSearchParams({ run: dbg.run || "", actions: ids.join(","), ply: String(targetPly) });
+  try {
+    dbg.position = await debugFetchJson(`/api/debug/position?${params.toString()}`);
+    dbg.records = [];
+    dbg.analysis = null;
+    dbg.search = null;
+    debugRenderAll();
+    await debugAnalyze();
+  } catch (e) {
+    debugSetStatus(`Import: ${e.message}`, "error");
+  }
 }
 
 function debugActionPrefix() {
@@ -3619,8 +3602,9 @@ function debugRenderBoard() {
   debugBoardSvg.setAttribute("viewBox", `${minX} ${minY} ${maxX - minX} ${maxY - minY}`);
   debugBoardSvg.setAttribute("preserveAspectRatio", "xMidYMid meet");
 
-  const lastId = pos.debug.last_action_id;
-  const lastCoord = lastId != null ? debugUnpackCoord(lastId) : null;
+  // Last-move coords come from the server (true engine unpack); never recomputed here.
+  const lastCoord = (pos.debug.last_q != null && pos.debug.last_r != null)
+    ? { q: pos.debug.last_q, r: pos.debug.last_r } : null;
   data.sort((a, b) => (a.placement ? 1 : 0) - (b.placement ? 1 : 0));
   let html = "";
 

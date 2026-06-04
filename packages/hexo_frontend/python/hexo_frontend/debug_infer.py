@@ -317,6 +317,10 @@ def search_position(
     state = state_from_actions(action_ids)
     inference = HexgtInference(loaded.model, device="cpu", fp16=False)
     session = new_mcts_session(n=radius)
+    # A DEBUG search must be a clean, reproducible read of the model's own
+    # judgement: no root exploration noise, neutral root-policy temperature, fixed
+    # seed. So the reported root prior is exactly the network prior (matching the
+    # analyze view) and re-running the same position yields the same tree.
     result = session.run(
         [0],
         [state],
@@ -325,6 +329,11 @@ def search_position(
         c_puct=float(c_puct),
         temperature=1.0,
         seed=int(seed),
+        # noise_fraction=0 disables root noise (alpha is then unused but the API
+        # requires both); neutral root-policy temperature keeps the prior raw.
+        root_dirichlet_total_alpha=1.0,
+        root_dirichlet_noise_fraction=0.0,
+        root_policy_temperature=1.0,
     )[0]
 
     visit_rows = _policy_pairs_to_rows(result.visit_policy, normalize=True)

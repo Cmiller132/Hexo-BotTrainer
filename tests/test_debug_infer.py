@@ -130,6 +130,46 @@ def test_both_perspectives_swap_is_symmetric_ish(cpu_only):
     assert -2.0 <= result["optimism"] <= 2.0
 
 
+def test_analyze_priors_match_canonical_evaluator(cpu_only):
+    """The displayed policy prior MUST be the model's real prior: assert it equals
+    the canonical ``HexgtInference.evaluate_states`` priors per action id (this is
+    the alignment guarantee — candidate_ids[i] <-> policy[i] — that makes the
+    heatmap trustworthy)."""
+    from hexo_models.hexgt.inference import HexgtInference
+    from hexo_engine.types import unpack_coord_id
+
+    loaded = di.load_checkpoint(_checkpoint("hexgt_rl_latest.pt"))
+    actions = _sample_actions(12)
+    analysis = di.analyze_position(loaded, actions)
+    ana = {(r["q"], r["r"]): r["p"] for r in analysis["policy"]}
+
+    state = di.state_from_actions(actions)
+    canon = HexgtInference(loaded.model, device="cpu", fp16=False).evaluate_states([state])[0]
+    ref = {}
+    for aid, p in zip(canon["candidate_ids"].tolist(), canon["priors"].tolist()):
+        c = unpack_coord_id(int(aid))
+        ref[(int(c.q), int(c.r))] = float(p)
+
+    assert set(ana) == set(ref)
+    assert max(abs(ana[k] - ref[k]) for k in ana) < 1e-5
+    assert abs(analysis["value"] - canon["value"]) < 1e-5
+
+
+def test_debug_search_is_clean_and_deterministic(cpu_only):
+    """A debug search carries no root noise, so it is reproducible and its reported
+    root prior equals the raw network prior shown by analyze."""
+    loaded = di.load_checkpoint(_checkpoint("hexgt_rl_latest.pt"))
+    actions = _sample_actions(12)
+    s1 = di.search_position(loaded, actions, visits=64)
+    s2 = di.search_position(loaded, actions, visits=64)
+    pick = lambda s: [(r["action_id"], round(r["p"], 5)) for r in s["visit_policy"]]
+    assert pick(s1) == pick(s2)  # deterministic
+
+    ana = {r["action_id"]: r["p"] for r in di.analyze_position(loaded, actions)["policy"]}
+    for row in s1["root_prior"]:
+        assert abs(row["p"] - ana.get(row["action_id"], 0.0)) < 1e-5
+
+
 def test_search_position(cpu_only):
     loaded = di.load_checkpoint(_checkpoint("hexgt_rl_latest.pt"))
     actions = _sample_actions(16)
@@ -143,3 +183,28 @@ def test_search_position(cpu_only):
     # best action is one of the visited candidates
     best = result["best_action_id"]
     assert any(row["action_id"] == best for row in result["visit_policy"])
+
+
+# --------------------------------------------------------------------------
+# Server-layer: imported-position reconstruction (needs the engine build).
+# --------------------------------------------------------------------------
+
+web = pytest.importorskip("hexo_frontend.web", reason="needs hexo_runner/engine build")
+
+
+def test_position_from_actions_reconstructs_board(cpu_only):
+    actions = _sample_actions(6)
+    csv = ", ".join(str(a) for a in actions)
+    payload = web._debug_position_from_actions("hexgt_rl_main3", csv, 0)
+    assert payload["debug"]["imported"] is True
+    assert payload["debug"]["total"] == 6
+    assert payload["debug"]["ply"] == 6  # ply<=0 defaults to all moves
+    assert payload["debug"]["last_q"] is not None and payload["debug"]["last_r"] is not None
+    assert len(payload.get("placements", [])) == 6  # six stones on the board
+
+
+def test_position_from_actions_rejects_garbage():
+    with pytest.raises(ValueError):
+        web._debug_position_from_actions("run", "12, not_a_number", 0)
+    with pytest.raises(ValueError):
+        web._debug_position_from_actions("run", "   ", 0)
