@@ -16,6 +16,7 @@ Usage (under the supervisor, see _rl_supervise.sh):
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import os
 import random
@@ -301,6 +302,12 @@ def main():
     ap.add_argument("--policy-surprise", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--policy-surprise-uniform-fraction", type=float, default=0.5)
     ap.add_argument("--policy-surprise-max-weight", type=float, default=8.0)
+    # Soft-Z value-target blend: value = (1-lambda)*z + lambda*root_value at finalize.
+    # MUST be threaded into the cfg dict below (the driver does NOT read any TOML
+    # [samples] section, so a TOML soft_z_lambda is silently ignored -- same trap as
+    # policy_surprise). Default 0.5 (the prior behavior); the launcher sets 0 to
+    # disable soft-Z (pure hard outcome targets) per the 2026-06-04 owner decision.
+    ap.add_argument("--soft-z-lambda", type=float, default=0.5)
     # Eval
     ap.add_argument("--eval-every", type=int, default=2)
     ap.add_argument("--eval-games", type=int, default=40)
@@ -341,6 +348,7 @@ def main():
             "policy_surprise_enabled": bool(args.policy_surprise),
             "policy_surprise_uniform_fraction": args.policy_surprise_uniform_fraction,
             "policy_surprise_max_weight": args.policy_surprise_max_weight,
+            "soft_z_lambda": args.soft_z_lambda,
         },
         "selfplay": {
             "search_visits": args.visits, "max_actions": args.max_actions,
@@ -432,6 +440,27 @@ def main():
             log(f"  (optimizer state restored from {Path(args.bc_seed).name if not latest.exists() else latest.name})", fh)
         except Exception as exc:  # optimizer state shape drift -> start fresh momentum
             log(f"  (optimizer state not restored: {exc})", fh)
+        # COLUMN-EXPANSION OPTIMIZER RECONCILIATION: Optimizer.load_state_dict maps
+        # saved moments to params POSITIONALLY and does NOT check per-tensor shapes,
+        # so a zero-init column-expansion (STV / value readout, e.g. 168->504) silently
+        # installs OLD-width exp_avg/exp_avg_sq onto a now-wider param; the mismatch
+        # only surfaces later inside adam.step()'s _foreach_lerp_ (RuntimeError: size
+        # of tensor a (168) must match b (504)) -- past the try/except above. Drop the
+        # stale per-param state for any param whose moment shape != the param shape so
+        # Adam reinitializes fresh ZERO moments for exactly those params (correct for
+        # the zero-init'd new columns), while every unchanged param keeps warm-start.
+        drifted = 0
+        for group in opt.param_groups:
+            for p in group["params"]:
+                st = opt.state.get(p)
+                if not st:
+                    continue
+                ea = st.get("exp_avg")
+                if ea is not None and tuple(ea.shape) != tuple(p.shape):
+                    opt.state.pop(p, None)
+                    drifted += 1
+        if drifted:
+            log(f"  (reset fresh momentum for {drifted} shape-drifted param(s) after column-expansion)", fh)
     if latest.exists() and "train_state" in ck:
         trainer.load_train_state(ck["train_state"])
 
@@ -456,7 +485,8 @@ def main():
         f"active={args.active} vbatch={args.vbatch} | train_steps/epoch={args.train_steps_per_epoch} "
         f"batch={args.batch} lr={args.lr} replay_window={args.replay_window_epochs} ep | "
         f"loss_w: policy={cfg.training.policy_weight} value={cfg.training.value_weight} "
-        f"opp={cfg.training.opp_policy_weight} stv={cfg.training.short_term_value_weight}", fh)
+        f"opp={cfg.training.opp_policy_weight} stv={cfg.training.short_term_value_weight} "
+        f"soft_z_lambda={cfg.samples.soft_z_lambda} policy_surprise={cfg.samples.policy_surprise_enabled}", fh)
 
     def save(tag, rl_epoch, epoch_train_complete=True):
         payload = {
@@ -692,6 +722,17 @@ def main():
                     json.dump(sp.example_games, ex_fh)
 
             # --- 2) train over the recency-weighted, cap-bounded replay window ---
+            # Release the self-play inference reservation BEFORE training allocates.
+            # run_selfplay_games builds a local HexgtInference (MCTS session cache +
+            # vbatch=128 eval buffers) that goes out of scope on return but leaves
+            # ~5GB cached in the torch allocator; on this 12GB card the training
+            # batch + autograd graph + grads then crest the VRAM ceiling at the
+            # self-play->train transition (telemetry-confirmed OOM at epoch-0 train
+            # step ~6, 2026-06-04: nvidia-smi 7661->11978 MiB / 97.5%). Returning the
+            # cached pool first restores the headroom. Cost: one sync + gc per epoch.
+            if torch.cuda.is_available():
+                gc.collect()
+                torch.cuda.empty_cache()
             model.train()
             shards, weights, win_epochs, pool_pos = build_replay_window(rl_epoch)
             target = trainer.train_state.global_step + args.train_steps_per_epoch

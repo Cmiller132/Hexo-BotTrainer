@@ -9,7 +9,11 @@
 #   512 train steps x batch 128 = 65,536 samples/pass, 500k replay pool cap,
 #   recency decay 0.9, widening-max-children 96, eval-every 3, eval-games 40,
 #   eval-visits 512, STV horizons [4,12,24] @ weight 0.10, total-alpha 6.6,
-#   epochs 60, dead-cell candidate rule (code-level in candidates.rs), soft_z=0.5.
+#   epochs 60, dead-cell candidate rule (code-level in candidates.rs).
+# SOFT-Z DISABLED 2026-06-04 (owner decision): --soft-z-lambda 0 -> pure hard
+#   outcome value targets (z), threaded via the driver cfg dict (the TOML [samples]
+#   section is NOT read by the driver). Fixes the soft-Z->opening-optimism feedback
+#   loop confirmed by the lambda0 A/B; buffer swapped to hard-z mirror at relaunch.
 # ISOLATED RUNDIR; the halted lineage (hexgt_rl, hexgt_rl_main2) is untouched.
 set -uo pipefail
 export PATH="$HOME/.cargo/bin:$PATH"
@@ -29,14 +33,25 @@ BC_SEED="$RUNDIR/pretrain/hexgt_model3_pretrain.pt"
 # virtual-loss/eval-batch interaction (4 vs 8 sequential NN-eval rounds per move at
 # 512 visits -> different self-play trajectories), accepted as the throughput choice.
 # TSS no-scan short-circuit + featurize-forward overlap remain bit-identical.
+# BACKSTOP SALVAGE 2026-06-04 (backstop watcher): training --batch 128 -> 64.
+# The run halted (breaker noProgress=4) never completing epoch 0: telemetry-confirmed
+# VRAM-ceiling crash at the self-play->train transition (self-play floor ~6.2GB, then
+# training crests >10.8GB and dies at the ~12.3GB card limit; manifests as either
+# cudaErrorMemoryAllocation or the expandable_segments "!handles_.at(i)" allocator
+# assert). The in-code gc.collect()+empty_cache() at _rl_train.py:607-609 is
+# insufficient. batch=64 halves the training-phase activation/grad peak (the dynamic
+# GNN batch is the dominant variable-size term). REVERSIBLE; resume-safe (batch is not
+# in the checkpoint). NOTE: this drops samples/pass 65,536->32,768 vs the documented
+# main2 parity; to restore parity instead, owner may prefer --train-steps-per-epoch 1024.
 export EXTRA_ARGS="--bc-seed $BC_SEED \
 --active 64 --vbatch 128 --visits 512 --max-actions 512 \
---train-steps-per-epoch 512 --batch 128 --lr 2e-4 --warmup 200 --replay-window-epochs 8 \
+--train-steps-per-epoch 512 --batch 64 --lr 2e-4 --warmup 200 --replay-window-epochs 8 \
 --replay-pool-cap 500000 --replay-recency-decay 0.9 \
 --eval-games 40 --eval-visits 512 --eval-max-actions 1024 --eval-opening-moves 10 --eval-opening-temperature 0.6 \
 --n 3 --total-alpha 6.6 --eps 0.25 --root-policy-temperature 1.0 --c-puct 1.5 \
 --temperature 1.0 --final-temperature 0.2 --temperature-decay-moves 30 --temperature-floor 0.1 --forced-playout-k 2.0 \
---widening-max-children 96 --short-term-value-weight 0.10"
+--widening-max-children 96 --short-term-value-weight 0.10 \
+--soft-z-lambda 0"
 
 if [[ ! -f "$BC_SEED" ]]; then echo "ABORT: pretrained seed missing: $BC_SEED" >&2; exit 2; fi
 mkdir -p "$RUNDIR"

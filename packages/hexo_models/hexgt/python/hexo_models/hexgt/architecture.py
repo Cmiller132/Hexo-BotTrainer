@@ -563,8 +563,11 @@ def expand_stv_readout_columns(model: HexgtNetwork, state_dict: dict) -> list[st
     leading SIDE block ``[:, :token_dim]`` and ZEROS in the PMA block(s) — so each
     head's output is IDENTICAL to the pre-expansion checkpoint on the first step
     (the pooled features contribute 0), while training then learns the pool.
-    Matching optimizer moments for the new columns are ~0, so no optimizer surgery
-    is needed.
+    NOTE: this rewrites only the MODEL weight. The optimizer's saved moments for
+    this param are still the OLD (SIDE-only) width, and Optimizer.load_state_dict
+    installs them WITHOUT a shape check -> the mismatch crashes adam.step()'s
+    _foreach_lerp_. The resume path in _rl_train.py must reconcile this (drop the
+    shape-drifted per-param optimizer state so Adam reinitializes fresh moments).
 
     Mirrors ``expand_value_readout_columns`` but over every ``short_term_value_heads``
     entry. Per-head no-op when the checkpoint already carries the wide shape
