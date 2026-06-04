@@ -2364,3 +2364,70 @@ body:not(.tactics-on) .tactic-legend {
     grid-template-columns: 1fr;
   }
 }
+
+/* Per-epoch detail band: Buffer + per-head Losses + Calibration chip groups
+   rendered beneath each hexgt RL epoch row (epochProgressDetail in app.js). */
+.epoch-progress-detail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  padding: 6px 10px 7px 80px;   /* indent under the Epoch column */
+  border: 1px solid rgba(143, 155, 170, 0.14);
+  border-radius: 5px;
+  background: rgba(7, 13, 19, 0.34);
+}
+
+.epoch-detail-group {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+}
+
+.epoch-detail-label {
+  font-size: 9px;
+  font-weight: 900;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-right: 2px;
+}
+
+.epoch-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  padding: 2px 7px;
+  font-size: 11px;
+  color: var(--text);
+  border: 1px solid rgba(143, 155, 170, 0.20);
+  border-radius: 10px;
+  background: rgba(7, 13, 19, 0.50);
+  white-space: nowrap;
+}
+
+.epoch-chip i {
+  font-style: normal;
+  font-weight: 700;
+  font-size: 9px;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.epoch-chip-total {
+  border-color: rgba(39, 215, 230, 0.40);
+  background: rgba(39, 215, 230, 0.10);
+}
+
+.epoch-chip-total,
+.epoch-chip-total i {
+  color: var(--text);
+}
+
+@media (max-width: 1100px) {
+  .epoch-progress-detail {
+    padding-left: 10px;   /* drop the desktop column-indent on narrow screens */
+  }
+}

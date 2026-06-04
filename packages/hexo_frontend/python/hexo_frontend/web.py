@@ -2151,6 +2151,12 @@ def _selfplay_epoch_summary(payload: dict[str, object]) -> dict[str, object]:
         "game_length_median": payload.get("game_length_median"),
         "game_length_max": payload.get("game_length_max"),
         "game_length_stdev": payload.get("game_length_stdev"),
+        # Replay-buffer + per-head training-loss + calibration stats (nested object,
+        # None for producers that don't emit it — e.g. dense_cnn runs — so the
+        # frontend just omits the detail band). The dashboard bridge attaches this
+        # to the published selfplay payload; without this passthrough the per-head
+        # Losses group never reaches epochProgressDetail in app.js.
+        "buffer": payload.get("buffer"),
     }
 
 

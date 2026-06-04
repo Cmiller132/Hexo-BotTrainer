@@ -156,6 +156,14 @@ def _buffer_stats() -> dict[int, dict]:
             "loss_opp": float(opp_m.group(1)) if opp_m else None,
             **stv,
         }
+    # Value-head calibration: the per-epoch `calib: optimism_sum_mean=` line (a
+    # SEPARATE log line from the train line) — 0 = zero-sum-consistent, >0 =
+    # optimistic. Merged onto the matching epoch's buffer block; epochs logged
+    # before the calib-probe deploy simply get no key (additive / dense-safe).
+    for cm in re.finditer(r"epoch (\d+) calib: optimism_sum_mean=([-+\d.]+)", txt):
+        block = out.get(_disp(int(cm.group(1))))
+        if block is not None:
+            block["optimism_sum_mean"] = float(cm.group(2))
     return out
 
 

@@ -2918,6 +2918,57 @@ function renderEpochProgress(runs) {
   </section>`;
 }
 
+function epochChip(label, value, extraClass = "") {
+  return `<span class="epoch-chip ${extraClass}"><i>${escapeText(label)}</i> ${escapeText(value)}</span>`;
+}
+
+// Optional full-width detail band beneath an epoch row: a Buffer group, a per-head
+// Losses group (total + policy/value/opp + every short-term-value head), and a
+// Calibration group (value-head optimism). Rendered only when the producer emits
+// the nested `buffer` object (hexgt RL); dense_cnn rows have no buffer, so this
+// returns "" and the row is unchanged (additive / dense-safe).
+function epochProgressDetail(buf) {
+  if (!buf) return "";
+  const k = (n) => (asFinite(n) === null ? "--" : `${Math.round(Number(n) / 1000)}k`);
+  const windowSpan = buf.window_span ? ` [${buf.window_span}]` : "";
+  const bufferChips = [
+    epochChip("pool", `${k(buf.samples)}/${k(buf.cap)}`),
+    epochChip("window", `${asFinite(buf.window_epochs) ?? "--"}ep${windowSpan}`),
+    epochChip("decay", formatDecimal(buf.decay, 2)),
+    epochChip("train", `${asFinite(buf.train_steps) ?? "--"}×${asFinite(buf.train_batch) ?? "--"} = ${k(buf.train_samples_per_epoch)}/ep`),
+  ].join("");
+
+  // Per-head losses; each head is emitted only when present, so a run missing a
+  // head (e.g. pre-deploy epochs without stvalue) just omits that chip.
+  const lossChips = [];
+  if (asFinite(buf.loss_total) !== null) lossChips.push(epochChip("Σ total", formatDecimal(buf.loss_total, 3), "epoch-chip-total"));
+  if (asFinite(buf.loss_policy) !== null) lossChips.push(epochChip("policy", formatDecimal(buf.loss_policy, 3)));
+  if (asFinite(buf.loss_value) !== null) lossChips.push(epochChip("value", formatDecimal(buf.loss_value, 3)));
+  if (asFinite(buf.loss_opp) !== null) lossChips.push(epochChip("opp", formatDecimal(buf.loss_opp, 3)));
+  // Short-term-value heads: every loss_stvalue_<h> the bridge surfaced, by horizon.
+  Object.keys(buf)
+    .map(key => /^loss_stvalue_(\d+)$/.exec(key))
+    .filter(Boolean)
+    .sort((a, b) => Number(a[1]) - Number(b[1]))
+    .forEach(match => {
+      if (asFinite(buf[match[0]]) !== null) lossChips.push(epochChip(`stv${match[1]}`, formatDecimal(buf[match[0]], 3)));
+    });
+
+  const lossGroup = lossChips.length
+    ? `<div class="epoch-detail-group"><span class="epoch-detail-label">Losses</span>${lossChips.join("")}</div>`
+    : "";
+  // Value-head calibration: optimism_sum_mean (0 = zero-sum-consistent, >0 =
+  // optimistic). Emitted by the bridge once the per-epoch calib line is logged.
+  const calibGroup = asFinite(buf.optimism_sum_mean) !== null
+    ? `<div class="epoch-detail-group"><span class="epoch-detail-label">Calibration</span>${epochChip("optimism", formatDecimal(buf.optimism_sum_mean, 3))}</div>`
+    : "";
+  return `<div class="epoch-progress-detail">
+    <div class="epoch-detail-group"><span class="epoch-detail-label">Buffer</span>${bufferChips}</div>
+    ${lossGroup}
+    ${calibGroup}
+  </div>`;
+}
+
 function epochProgressRow(item) {
   const selfplay = item.selfplay || {};
   const training = item.training || {};
@@ -2952,7 +3003,7 @@ function epochProgressRow(item) {
     : (d6.mode ? "random" : "pending");
   const checkpointText = checkpoint.path || checkpoint.name ? "saved" : "pending";
   const status = item.status || "partial";
-  return `<div class="epoch-progress-row ${status === "completed" ? "completed" : "partial"}">
+  const mainRow = `<div class="epoch-progress-row ${status === "completed" ? "completed" : "partial"}">
     <strong>Epoch ${escapeText(item.epoch)}</strong>
     <span>${escapeText(selfplayText)}</span>
     <span>${escapeText(trainText)}</span>
@@ -2960,6 +3011,10 @@ function epochProgressRow(item) {
     <span>${escapeText(d6Text)}</span>
     <span>${escapeText(checkpointText)}</span>
   </div>`;
+  // The bridge attaches the replay-buffer + per-head-loss + calibration block to
+  // the selfplay payload, and web.py passes it through as selfplay.buffer.
+  const buf = selfplay.buffer || null;
+  return `<div class="epoch-progress-group">${mainRow}${epochProgressDetail(buf)}</div>`;
 }
 
 function classicalReplayFraction(training) {
