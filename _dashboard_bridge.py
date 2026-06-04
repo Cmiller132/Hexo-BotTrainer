@@ -19,10 +19,10 @@ from __future__ import annotations
 import json, time, sys, shutil, re
 from pathlib import Path
 
-# Mirror-refresh cadence. Kept low (was 30s) so the :8080 dashboard reflects new
-# self-play games / epoch loss / eval within a few seconds; each loop only does
-# NEW work (caches keep it cheap), so a tight interval is light on disk/CPU.
-REFRESH_INTERVAL_SECONDS = 7
+# Mirror-refresh cadence. 15s (was 7s): still near-live for the dashboard, but
+# halves the scan/disk churn so it does not compete with the CPU-bound MCTS select
+# threads during self-play. Each loop only does NEW work (caches keep it cheap).
+REFRESH_INTERVAL_SECONDS = 15
 
 WT = Path("/mnt/e/Hexo-BotTrainer-hexgt/runs/hexgt_rl_main3")   # worktree RL run (read) -- the ACTIVE run
 EVAL = WT / "eval"
