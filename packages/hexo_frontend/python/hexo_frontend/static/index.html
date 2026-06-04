@@ -12,6 +12,7 @@
   <nav class="app-nav" aria-label="Dashboard screens">
     <button type="button" data-screen="match">Match</button>
     <button type="button" data-screen="history">Game History</button>
+    <button type="button" data-screen="debug">Debug</button>
   </nav>
   <div class="status"><span class="dot"></span><span id="statusText">Ready</span></div>
 </header>
@@ -254,6 +255,122 @@
     </div>
   </section>
 </main>
-<script src="/static/app.js?v=20260601-epoch-window"></script>
+<main id="debugScreen" class="app-screen debug-screen" hidden>
+  <section class="debug-page">
+    <div class="debug-page-head">
+      <div>
+        <div class="section-title page-title">Model Debug</div>
+        <div class="page-subtitle">Open any position and inspect what the model thinks — policy prior, search, value distribution, opponent &amp; lookahead heads — re-evaluated on demand on CPU against any checkpoint.</div>
+      </div>
+      <div class="debug-source-bar">
+        <label class="select-field"><span>Run</span><select id="debugRunSelect" aria-label="Run"></select></label>
+        <label class="select-field"><span>Source</span>
+          <select id="debugSourceSelect" aria-label="Game source">
+            <option value="selfplay">Self-play</option>
+            <option value="evaluation">Evaluation</option>
+          </select>
+        </label>
+        <label class="select-field"><span>Game file</span><select id="debugGameSelect" aria-label="Game file"></select></label>
+        <label class="select-field"><span>Game #</span><select id="debugRecordSelect" aria-label="Game record"></select></label>
+        <label class="select-field"><span>Checkpoint</span><select id="debugCheckpointSelect" aria-label="Checkpoint"></select></label>
+        <button id="debugRefreshBtn" type="button">Refresh</button>
+      </div>
+    </div>
+
+    <div id="debugStatus" class="debug-status" hidden></div>
+
+    <section class="top-grid debug-grid">
+      <section class="board-panel" aria-label="Debug board">
+        <div class="board-area" id="debugBoardArea">
+          <svg id="debugBoardSvg"></svg>
+          <div class="board-hud" id="debugBoardHud"><div>Hover a cell</div></div>
+          <div class="legend debug-legend">
+            <span><span class="ldot" style="background:var(--p0)"></span>P0</span>
+            <span><span class="ldot" style="background:var(--p1)"></span>P1</span>
+            <span><span class="ldot" style="background:var(--accent)"></span>Prior</span>
+            <span><span class="ldot" style="background:var(--yellow)"></span>Visits</span>
+          </div>
+        </div>
+        <div class="replay-bar debug-replay" aria-label="Ply navigation">
+          <div class="replay-row">
+            <div class="replay-buttons">
+              <button id="debugPlyStart" type="button" aria-label="First ply">|&lt;</button>
+              <button id="debugPlyPrev" type="button" aria-label="Previous ply">&lt;</button>
+              <button id="debugPlyNext" type="button" aria-label="Next ply">&gt;</button>
+              <button id="debugPlyEnd" type="button" aria-label="Last ply">&gt;|</button>
+            </div>
+            <div class="replay-status">
+              <div id="debugPlyLabel">0 / 0</div>
+              <div id="debugPlySub">No game</div>
+            </div>
+            <div class="slider-wrap">
+              <input id="debugPlySlider" type="range" min="0" max="0" value="0" step="1" aria-label="Ply">
+            </div>
+            <button id="debugAnalyzeBtn" class="primary-action" type="button">Analyze</button>
+          </div>
+        </div>
+        <div class="debug-overlay-controls" aria-label="Board overlays">
+          <span class="overlay-label">Overlays</span>
+          <label><input type="checkbox" id="debugOvPolicy" checked> Policy</label>
+          <label><input type="checkbox" id="debugOvVisits"> Search visits</label>
+          <label><input type="checkbox" id="debugOvOpp"> Opp policy</label>
+          <label><input type="checkbox" id="debugOvThreats"> Threats</label>
+          <label><input type="checkbox" id="debugOvNumbers" checked> Move #</label>
+        </div>
+        <div class="debug-import" aria-label="Import position">
+          <input id="debugMoveInput" type="text" placeholder="Paste action-id list (comma/space separated) to inspect an arbitrary position">
+          <button id="debugImportBtn" type="button">Import</button>
+        </div>
+      </section>
+
+      <aside class="side-stack" aria-label="Model readout">
+        <section class="panel-card">
+          <div class="section-title">Position</div>
+          <div id="debugPositionInfo" class="info"></div>
+        </section>
+        <section class="panel-card">
+          <div class="section-title">Value <span id="debugValueChip" class="debug-chip"></span></div>
+          <div id="debugValuePanel" class="debug-value-panel"></div>
+        </section>
+        <section class="panel-card">
+          <div class="section-title">Top moves</div>
+          <div id="debugMovesPanel" class="debug-moves-panel"></div>
+        </section>
+        <section class="panel-card debug-search-card">
+          <div class="section-title">Fresh search (CPU)</div>
+          <div class="debug-search-controls">
+            <label class="field-block"><span>Visits</span><input id="debugSearchVisits" type="number" min="1" max="20000" step="1" value="512"></label>
+            <button id="debugSearchBtn" type="button">Run search</button>
+          </div>
+          <div id="debugSearchPanel" class="debug-search-panel"></div>
+        </section>
+        <section class="panel-card">
+          <div class="section-title">Checkpoint</div>
+          <div id="debugCheckpointInfo" class="info"></div>
+        </section>
+        <section class="panel-card">
+          <div class="section-title">Compare A/B</div>
+          <div class="debug-compare-controls">
+            <label class="select-field"><span>Checkpoint B</span><select id="debugCompareSelect" aria-label="Compare checkpoint"><option value="">— none —</option></select></label>
+          </div>
+          <div id="debugComparePanel" class="info"></div>
+        </section>
+      </aside>
+    </section>
+
+    <section class="panel-card debug-trajectory-card">
+      <div class="section-title">Value trajectory
+        <button id="debugTrajectoryBtn" type="button" class="debug-inline-btn">Plot</button>
+        <span id="debugTrajectoryNote" class="dbg-muted"></span>
+      </div>
+      <svg id="debugTrajectorySvg" class="debug-trajectory-svg" viewBox="0 0 1000 220" preserveAspectRatio="none"></svg>
+      <div class="debug-trajectory-legend">
+        <span><span class="ldot" style="background:var(--accent)"></span>Re-evaluated (selected ckpt, P0 view)</span>
+        <span><span class="ldot" style="background:var(--yellow)"></span>Recorded root value</span>
+      </div>
+    </section>
+  </section>
+</main>
+<script src="/static/app.js?v=20260604-debug4"></script>
 </body>
 </html>

@@ -2431,3 +2431,92 @@ body:not(.tactics-on) .tactic-legend {
     padding-left: 10px;   /* drop the desktop column-indent on narrow screens */
   }
 }
+
+/* ============================ Debug tab ============================ */
+.debug-page { padding: 16px 18px 28px; }
+.debug-page-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; flex-wrap: wrap; margin-bottom: 12px; }
+.debug-source-bar { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; }
+.debug-source-bar .select-field { min-width: 0; }
+.debug-source-bar select { max-width: 230px; }
+.debug-source-bar button { align-self: flex-end; }
+
+.debug-status { margin: 6px 0 12px; padding: 8px 12px; border-radius: 8px; font-size: 13px;
+  border: 1px solid var(--border); background: var(--panel); }
+.debug-status-busy { border-color: rgba(39,215,230,0.45); background: rgba(39,215,230,0.08); color: var(--accent); }
+.debug-status-error { border-color: rgba(255,86,80,0.5); background: rgba(255,86,80,0.10); color: var(--p1); }
+
+.debug-grid { align-items: start; }
+.debug-screen .board-area { min-height: 360px; }
+#debugBoardSvg { width: 100%; height: 100%; display: block; }
+.dbg-stone-label { fill: #fff; font-size: 11px; font-weight: 600; pointer-events: none; }
+.dbg-cell { cursor: crosshair; }
+.debug-legend { gap: 12px; }
+
+.debug-overlay-controls { display: flex; flex-wrap: wrap; gap: 12px; align-items: center;
+  margin-top: 10px; padding: 8px 10px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; font-size: 13px; }
+.debug-overlay-controls label { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
+.debug-overlay-controls .overlay-label { color: var(--muted); font-weight: 600; }
+
+.debug-import { display: flex; gap: 8px; margin-top: 10px; }
+.debug-import input { flex: 1; }
+
+.debug-replay .replay-row { gap: 10px; }
+.debug-replay .primary-action { white-space: nowrap; }
+
+.debug-chip { font-size: 13px; font-weight: 700; padding: 1px 8px; border-radius: 999px; margin-left: 6px;
+  border: 1px solid var(--border); }
+.debug-chip.pos { color: var(--green); border-color: rgba(80,220,140,0.5); }
+.debug-chip.neg { color: var(--p1); border-color: rgba(255,86,80,0.5); }
+.pos { color: var(--green); } .neg { color: var(--p1); }
+.dbg-muted { color: var(--muted); }
+.debug-empty { color: var(--muted); font-size: 13px; padding: 6px 0; }
+
+.dbg-value-scalar { font-size: 14px; margin-bottom: 8px; }
+.dbg-value-scalar strong { font-size: 16px; }
+.dbg-vdist { display: flex; align-items: flex-end; gap: 1px; height: 70px; padding: 4px 0;
+  background: rgba(255,255,255,0.02); border-radius: 6px; }
+.dbg-vbar { flex: 1 1 0; min-width: 1px; border-radius: 1px 1px 0 0; opacity: 0.92; }
+.dbg-vbar.pos { background: var(--green); } .dbg-vbar.neg { background: var(--p1); }
+.dbg-vdist-axis { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); margin-top: 2px; }
+.dbg-stv { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; }
+.dbg-stv-row { display: grid; grid-template-columns: 60px 1fr 52px; align-items: center; gap: 8px; font-size: 12px; }
+.dbg-bar-track { position: relative; height: 8px; background: rgba(255,255,255,0.06); border-radius: 4px; }
+.dbg-bar-track::before { content:""; position:absolute; left:50%; top:-2px; bottom:-2px; width:1px; background: var(--border); }
+.dbg-bar-fill { position: absolute; top: 0; bottom: 0; border-radius: 4px; }
+.dbg-bar-fill.pos { background: var(--green); } .dbg-bar-fill.neg { background: var(--p1); }
+.dbg-stv-row .value { text-align: right; }
+
+.debug-moves-panel, .debug-search-panel { font-size: 13px; }
+.dbg-move-row { display: grid; grid-template-columns: 28px 1fr 64px 64px; gap: 6px; padding: 3px 4px; border-radius: 4px; }
+.debug-search-panel .dbg-move-row { grid-template-columns: 1fr 64px 64px; }
+.dbg-move-head { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; border-bottom: 1px solid var(--border); }
+.dbg-move-row:nth-child(odd of .dbg-move-row) { background: rgba(255,255,255,0.02); }
+.dbg-move-best { background: rgba(39,215,230,0.12) !important; }
+.debug-search-controls { display: flex; gap: 10px; align-items: flex-end; margin-bottom: 8px; }
+.debug-search-controls .field-block { display: flex; flex-direction: column; }
+.debug-search-controls input { width: 90px; }
+.dbg-search-summary { display: flex; gap: 14px; flex-wrap: wrap; margin-bottom: 8px; font-size: 13px; }
+
+/* Debug: both-perspectives / optimism */
+.dbg-perspectives { margin-top: 10px; display: flex; flex-direction: column; gap: 4px; padding: 8px 10px;
+  background: rgba(255,255,255,0.02); border: 1px solid var(--border); border-radius: 6px; font-size: 12px; }
+.dbg-perspectives > div { display: flex; justify-content: space-between; }
+.dbg-perspectives .label { color: var(--muted); }
+.dbg-opt-ok { color: var(--green); } .dbg-opt-warn { color: var(--yellow); }
+
+/* Debug: compare A/B */
+.debug-compare-controls { margin-bottom: 8px; }
+.debug-compare-controls select { width: 100%; }
+
+/* Debug: value trajectory */
+.debug-trajectory-card { margin-top: 14px; }
+.debug-inline-btn { font-size: 12px; padding: 2px 10px; margin-left: 8px; }
+.debug-trajectory-svg { width: 100%; height: 220px; display: block; background: rgba(255,255,255,0.02);
+  border: 1px solid var(--border); border-radius: 6px; }
+.debug-trajectory-legend { display: flex; gap: 16px; font-size: 12px; color: var(--muted); margin-top: 6px; }
+
+/* History -> Debug deep link */
+.history-detail-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+.history-debug-btn { padding: 8px 14px; border-radius: 8px; border: 1px solid var(--accent);
+  background: rgba(39,215,230,0.10); color: var(--accent); cursor: pointer; font-weight: 600; }
+.history-debug-btn:hover { background: rgba(39,215,230,0.18); }
