@@ -2520,3 +2520,8 @@ body:not(.tactics-on) .tactic-legend {
 .history-debug-btn { padding: 8px 14px; border-radius: 8px; border: 1px solid var(--accent);
   background: rgba(39,215,230,0.10); color: var(--accent); cursor: pointer; font-weight: 600; }
 .history-debug-btn:hover { background: rgba(39,215,230,0.18); }
+
+/* Match-tab artifact "Debug" button (opens the game in the Debug tab) */
+.artifact-debug-btn { margin-left: 6px; padding: 2px 9px; border-radius: 6px; font-size: 12px;
+  border: 1px solid var(--accent); background: rgba(39,215,230,0.10); color: var(--accent); cursor: pointer; }
+.artifact-debug-btn:hover { background: rgba(39,215,230,0.18); }

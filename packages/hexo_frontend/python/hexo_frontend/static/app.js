@@ -2417,6 +2417,7 @@ function trainingArtifactRow(runName, item) {
   const preview = item.kind === "png" ? `<img src="${href}" alt="">` : "";
   const loadButton = item.loadable_history
     ? `<button class="artifact-load-btn" type="button" data-history-path="${escapeAttr(item.path)}" data-record-index="0">Load game</button>`
+      + `<button class="artifact-debug-btn" type="button" data-debug-open data-debug-run="${escapeAttr(runName || "")}" data-debug-path="${escapeAttr(item.path)}" data-debug-record="0">Debug</button>`
     : "";
   return `<div class="artifact-row">
     <a class="artifact-link" href="${href}" target="_blank" rel="noreferrer" title="${escapeAttr(item.path || item.name || "")}">
@@ -2516,6 +2517,17 @@ function handleGameHistoryClick(event) {
     }
     historyVisibleLimit += HISTORY_PAGE_SIZE;
     renderGameHistoryPage();
+    return;
+  }
+  const debugButton = event.target.closest("[data-debug-open]");
+  if (debugButton) {
+    event.preventDefault();
+    debugOpenFromHistory({
+      run: debugButton.dataset.debugRun || (trainingRun && trainingRun.name) || "",
+      path: debugButton.dataset.debugPath,
+      record: Number(debugButton.dataset.debugRecord || 0),
+      ply: null,
+    });
     return;
   }
   const loadButton = event.target.closest("[data-history-load]");
@@ -3289,6 +3301,13 @@ async function debugFetchJson(url, options) {
   const res = await fetch(url, options);
   const data = await safeJson(res);
   if (!res.ok || (data && data.error)) {
+    // A 404 on a /api/debug/* route means the running server predates the Debug
+    // backend (its routes were loaded at process start). Static assets are read
+    // from disk per request, so the tab can appear while the API is missing —
+    // say so plainly instead of a cryptic "HTTP 404".
+    if (res.status === 404 && url.indexOf("/api/debug/") !== -1) {
+      throw new Error("Debug API not found — restart the dashboard server to load the new Debug backend (it must serve the current hexo_frontend from this worktree).");
+    }
     throw new Error((data && data.error) || `HTTP ${res.status}`);
   }
   return data;
@@ -3320,13 +3339,17 @@ async function debugInit() {
   if (!preferred && historySelectedRun && runNames.includes(historySelectedRun)) preferred = historySelectedRun;
   dbg.run = preferred && runNames.includes(preferred) ? preferred : (runNames[0] || "");
   debugSyncRunSelect();
+  // Clear the "Loading runs…" notice now; do NOT blanket-clear afterward, or a
+  // real error raised while loading games/position/analyze (e.g. a game file the
+  // live run is mid-roll on) would be silently wiped, leaving a blank board with
+  // no explanation. The per-step handlers own the status from here on.
+  debugSetStatus("");
   await debugLoadRun();
   if (dbg.pendingDeepLink) {
     const link = dbg.pendingDeepLink;
     dbg.pendingDeepLink = null;
     await debugApplyDeepLink(link);
   }
-  debugSetStatus("");
 }
 
 function debugSyncRunSelect() {
@@ -3532,7 +3555,10 @@ async function debugApplyDeepLink({ run, path, record, ply }) {
     dbg.gameFile = path;
     dbg.record = Number(record) || 0;
     const gsel = dbgEl("debugGameSelect"); if (gsel) gsel.value = dbg.gameFile;
-    await debugLoadPosition({ ply: ply != null ? Number(ply) : null });
+    // An explicit ply jumps there; otherwise default to the game's final position
+    // (resetPly) rather than inheriting the previously-viewed ply.
+    if (ply != null) await debugLoadPosition({ ply: Number(ply) });
+    else await debugLoadPosition({ resetPly: true });
   }
 }
 
