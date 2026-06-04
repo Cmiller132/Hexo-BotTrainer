@@ -360,15 +360,24 @@ class HexgtNetwork(nn.Module):
         # for defensive calibration (HEXGT_PMA_VALUE_HEAD_PLAN.md).
         self.value_pool = PMAValuePool(self.token_dim, self.attention_heads, self.value_pma_seeds)
         value_readout_blocks = (1 if self.value_head_use_side else 0) + self.value_pma_seeds
+        self.value_readout_blocks = value_readout_blocks
         self.value_head = nn.Sequential(
             nn.Linear(value_readout_blocks * self.token_dim, self.token_dim),
             nn.ReLU(inplace=True),
             nn.Linear(self.token_dim, VALUE_BINS),
         )
+        # STV (short-term-value / lookahead) heads consume the SAME whole-board
+        # readout as the main value head — the [SIDE | PMA_k] vector
+        # (``value_readout_blocks * token_dim`` wide, SIDE block FIRST), already
+        # computed once in the forward (no extra pooling cost). Previously these
+        # read only the SIDE hub (``token_dim``); see expand_stv_readout_columns for
+        # the zero-init graft that keeps a resumed checkpoint bit-identical at init.
         self.short_term_value_heads = nn.ModuleDict(
             {
                 str(h): nn.Sequential(
-                    nn.Linear(self.token_dim, self.token_dim), nn.ReLU(inplace=True), nn.Linear(self.token_dim, VALUE_BINS)
+                    nn.Linear(value_readout_blocks * self.token_dim, self.token_dim),
+                    nn.ReLU(inplace=True),
+                    nn.Linear(self.token_dim, VALUE_BINS),
                 )
                 for h in self.short_term_value_horizons
             }
@@ -433,11 +442,12 @@ class HexgtNetwork(nn.Module):
             "value": self.value_head(value_emb),
         }
         if with_aux:
-            # STV aux heads keep the SIDE-hub readout (unchanged, resume-exact).
-            graph_emb = self._graph_readout(batch, node_emb)
+            # STV aux heads read the SAME [SIDE | PMA_k] whole-board readout as the
+            # main value head (value_emb, computed once above) — richer than the
+            # SIDE-only hub they used before, at no extra pooling cost.
             outputs["opp_policy"] = self.opp_policy_head(cand_emb).squeeze(-1)
             for horizon, head in self.short_term_value_heads.items():
-                outputs[f"stvalue_{horizon}"] = head(graph_emb)
+                outputs[f"stvalue_{horizon}"] = head(value_emb)
         return outputs
 
     # -- public forward --------------------------------------------------------
@@ -540,3 +550,48 @@ def expand_value_readout_columns(
     new_w[:, :d] = w  # SIDE-hub block first; mean/max blocks stay zero
     state_dict[key] = new_w
     return True
+
+
+def expand_stv_readout_columns(model: HexgtNetwork, state_dict: dict) -> list[str]:
+    """ZERO-INIT EXPANSION for the STV (short-term-value) heads' readout (Phase 3).
+
+    Each pre-expansion STV head's first ``Linear`` read ONLY the SIDE hub:
+    ``(token_dim, token_dim)``. The new heads read the SAME ``[SIDE | PMA_k]``
+    whole-board readout as the main value head:
+    ``(token_dim, value_readout_blocks * token_dim)``, SIDE block FIRST. For each
+    head this rewrites the checkpoint tensor IN PLACE — the old weight in the
+    leading SIDE block ``[:, :token_dim]`` and ZEROS in the PMA block(s) — so each
+    head's output is IDENTICAL to the pre-expansion checkpoint on the first step
+    (the pooled features contribute 0), while training then learns the pool.
+    Matching optimizer moments for the new columns are ~0, so no optimizer surgery
+    is needed.
+
+    Mirrors ``expand_value_readout_columns`` but over every ``short_term_value_heads``
+    entry. Per-head no-op when the checkpoint already carries the wide shape
+    (resuming a post-expansion run) or omits the key (a seed without STV heads).
+    Call BEFORE ``load_state_dict(..., strict=False)`` so the STV keys match and the
+    load stays strict elsewhere. Returns the list of expanded keys (for logging /
+    tests).
+    """
+
+    expanded: list[str] = []
+    d = model.token_dim
+    for horizon, head in model.short_term_value_heads.items():
+        key = f"short_term_value_heads.{horizon}.0.weight"
+        w = state_dict.get(key)
+        if w is None:
+            continue
+        target = head[0].weight
+        if tuple(w.shape) == tuple(target.shape):
+            continue
+        if tuple(w.shape) != (int(target.shape[0]), d):
+            raise ValueError(
+                f"cannot expand {key}: checkpoint shape {tuple(w.shape)} is neither the "
+                f"pre-pool SIDE-only shape ({int(target.shape[0])}, {d}) nor the target "
+                f"{tuple(target.shape)}"
+            )
+        new_w = w.new_zeros(tuple(target.shape))
+        new_w[:, :d] = w  # SIDE-hub block first; PMA blocks stay zero
+        state_dict[key] = new_w
+        expanded.append(key)
+    return expanded

@@ -24,7 +24,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use std::collections::HashMap;
 
-use hexo_engine::{pack_coord, Axis, HexCoord, HexoState as RustHexoState, Player, TurnPhase};
+use hexo_engine::{pack_coord, Axis, HexCoord, HexoState as RustHexoState, TurnPhase};
 
 // Node type ids (mirror of hexgt/python/.../constants.py).
 pub const NODE_SIDE: u8 = 0;

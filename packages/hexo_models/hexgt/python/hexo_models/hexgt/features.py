@@ -59,6 +59,9 @@ from .constants import (
     NODE_TYPE_WINDOW,
     NUM_EDGE_TYPES,
     NUM_NODE_TYPES,
+    NUM_TURN_PHASES,
+    PHASE_FIRST_STONE,
+    PHASE_SECOND_STONE,
     WINDOW_LEN,
 )
 
@@ -96,13 +99,6 @@ def _ints(x: Any) -> np.ndarray:
     if isinstance(x, (bytes, bytearray)):
         return np.frombuffer(bytes(x), dtype=np.uint8).astype(np.int64)
     return np.asarray(x, dtype=np.int64)
-
-
-def _hex_distance(q0: int, r0: int, q1: int, r1: int) -> int:
-    dq = q0 - q1
-    dr = r0 - r1
-    ds = -dq - dr
-    return max(abs(dq), abs(dr), abs(ds))
 
 
 def build_graph_tensors(facts: Mapping[str, Any]) -> GraphTensors:
@@ -164,12 +160,12 @@ def build_graph_tensors(facts: Mapping[str, Any]) -> GraphTensors:
     stones_own = int(np.count_nonzero(is_stone & (owner == 0)))
     stones_opp = int(np.count_nonzero(is_stone & (owner == 1)))
     for s in side_nodes:
-        feat[s, F_SIDE_PHASE_ONEHOT + min(max(phase_idx, 0), 2)] = 1.0
+        feat[s, F_SIDE_PHASE_ONEHOT + min(max(phase_idx, 0), NUM_TURN_PHASES - 1)] = 1.0
         feat[s, F_SIDE_STONES_OWN] = stones_own / COUNT_SCALE
         feat[s, F_SIDE_STONES_OPP] = stones_opp / COUNT_SCALE
         feat[s, F_SIDE_MOVE_NUMBER] = placements / COUNT_SCALE
         # v2: 1 when the current placement is the turn's SECOND stone.
-        feat[s, F_SIDE_IS_SECOND] = 1.0 if phase_idx == 2 else 0.0
+        feat[s, F_SIDE_IS_SECOND] = 1.0 if phase_idx == PHASE_SECOND_STONE else 0.0
 
     # edges
     edges = facts["edges"]
@@ -210,8 +206,8 @@ def build_graph_tensors(facts: Mapping[str, Any]) -> GraphTensors:
                 if cnt == 5:
                     feat[cdst, F_CAND_COMPLETE_OWN] = 1.0
                 # v3: phase-aware own win-now (count-5 any B; count-4 only at
-                # FirstStone, phase_idx == 1).
-                if cnt == 5 or (cnt == 4 and phase_idx == 1):
+                # FirstStone).
+                if cnt == 5 or (cnt == 4 and phase_idx == PHASE_FIRST_STONE):
                     feat[cdst, F_CAND_WIN_NOW_OWN] = 1.0
             elif own == 1:
                 feat[cdst, F_CAND_NWIN_OPP] += 1.0

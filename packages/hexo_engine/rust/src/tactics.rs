@@ -342,6 +342,15 @@ impl WindowUpdate {
 #[derive(Clone, Debug, Default)]
 pub struct WindowStore {
     masks_by_key: AHashMap<WindowKey, [u8; 2]>,
+    /// Incrementally maintained set of currently-active threat windows
+    /// (single-colour, count >= 4) keyed by window -> owning player. Updated in
+    /// lockstep with `masks_by_key` in `update_for_placement_with_delta` /
+    /// `restore_delta` (only the <= 18 windows a placement touches can change
+    /// threat status, so this is O(18) per placement). It is an exact mirror of
+    /// `entries().filter_map(threat_player)` and changes NO public output — it
+    /// exists only so `has_threats()` is O(1), letting the hexgt TSS hot path
+    /// skip its full `threats()` scan in the (common) threat-free case.
+    live_threats: AHashMap<WindowKey, Player>,
 }
 
 /// Incremental window-mask changes made by one placement.
@@ -394,6 +403,14 @@ impl WindowStore {
             .filter_map(|entry| entry.threat_player().map(|player| (player, entry)))
     }
 
+    /// True when at least one active >= 4 (single-colour) threat window exists for
+    /// either player. O(1): reads the incrementally maintained `live_threats`
+    /// index. Exactly equivalent to `threats().next().is_some()` (asserted by the
+    /// `live_threats_mirror_*` tests over random games with undo).
+    pub fn has_threats(&self) -> bool {
+        !self.live_threats.is_empty()
+    }
+
     /// Update the 18 windows affected by one newly placed stone.
     #[cfg(test)]
     pub(crate) fn update_for_placement(&mut self, coord: HexCoord, player: Player) -> WindowUpdate {
@@ -429,6 +446,18 @@ impl WindowStore {
                 if entry.is_win_for(player) {
                     update.winning_windows.push(key);
                 }
+
+                // Keep the incremental threat index exact: this window's threat
+                // status is fully determined by its new mask, so set-or-clear
+                // unconditionally (idempotent; correct regardless of prior state).
+                match entry.threat_player() {
+                    Some(owner) => {
+                        self.live_threats.insert(key, owner);
+                    }
+                    None => {
+                        self.live_threats.remove(&key);
+                    }
+                }
             }
         }
 
@@ -439,8 +468,19 @@ impl WindowStore {
         for (key, previous) in delta.previous_masks.into_iter().rev() {
             if let Some(masks) = previous {
                 self.masks_by_key.insert(key, masks);
+                // Restore the threat index from the restored mask (set-or-clear,
+                // mirroring the forward update above).
+                match (WindowEntry { key, masks }).threat_player() {
+                    Some(owner) => {
+                        self.live_threats.insert(key, owner);
+                    }
+                    None => {
+                        self.live_threats.remove(&key);
+                    }
+                }
             } else {
                 self.masks_by_key.remove(&key);
+                self.live_threats.remove(&key);
             }
         }
     }
@@ -708,5 +748,108 @@ mod tests {
         assert!(threats
             .iter()
             .any(|(player, entry)| *player == Player::Player1 && (*entry).is_threat()));
+    }
+
+    // --- incremental live-threat index mirrors the full scan (perf invariant) ---
+
+    fn sort_key(key: WindowKey) -> (u8, i16, i16) {
+        (key.axis.index(), key.start.q, key.start.r)
+    }
+
+    /// Threats computed by the authoritative full scan over every touched window.
+    fn slow_threats(store: &WindowStore) -> Vec<(WindowKey, Player)> {
+        let mut v: Vec<_> = store
+            .entries()
+            .filter_map(|entry| entry.threat_player().map(|p| (entry.key(), p)))
+            .collect();
+        v.sort_by_key(|(k, _)| sort_key(*k));
+        v
+    }
+
+    /// The incrementally maintained `live_threats` index, as a sorted vec.
+    fn live_index(store: &WindowStore) -> Vec<(WindowKey, Player)> {
+        let mut v: Vec<_> = store.live_threats.iter().map(|(k, p)| (*k, *p)).collect();
+        v.sort_by_key(|(k, _)| sort_key(*k));
+        v
+    }
+
+    fn assert_index_matches_scan(store: &WindowStore) {
+        let scan = slow_threats(store);
+        assert_eq!(live_index(store), scan, "live_threats diverged from full scan");
+        assert_eq!(
+            store.has_threats(),
+            !scan.is_empty(),
+            "has_threats() disagreed with the full scan"
+        );
+    }
+
+    #[test]
+    fn live_threats_mirror_scan_through_create_and_block() {
+        let mut store = WindowStore::new();
+        assert_index_matches_scan(&store);
+
+        // P0 builds a count-4 threat (creation).
+        place_q_line(&mut store, Player::Player0, 0, 3);
+        assert!(store.has_threats());
+        assert_index_matches_scan(&store);
+
+        // P1 plays into one of the threat's empties, two-colouring those windows
+        // and killing the threat (destruction). Index must drop the killed window.
+        store.update_for_placement(HexCoord::new(4, 0), Player::Player1);
+        assert_index_matches_scan(&store);
+    }
+
+    #[test]
+    fn live_threats_mirror_scan_over_random_games_with_undo() {
+        // Random legal games via the full engine, asserting the incremental index
+        // matches the full scan after every apply AND after every undo (so the
+        // restore_delta path is exercised too).
+        for game in 0..16u64 {
+            let mut state = HexoState::new();
+            let mut rng = Lcg::new(0xD1CE_5EED ^ game);
+            assert_index_matches_scan(state.board().windows());
+
+            for _ in 0..90 {
+                let mut legal = Vec::new();
+                state.write_legal_action_ids(&mut legal);
+                if legal.is_empty() {
+                    break;
+                }
+                let coord = crate::legal::unpack_coord(legal[rng.index(legal.len())]);
+
+                // apply -> undo -> re-apply, checking the index at each transition.
+                let (_r, delta) = state.apply_with_delta(Placement { coord }).unwrap();
+                assert_index_matches_scan(state.board().windows());
+                state.undo(delta);
+                assert_index_matches_scan(state.board().windows());
+                apply_placement(&mut state, Placement { coord }).unwrap();
+                assert_index_matches_scan(state.board().windows());
+
+                if state.is_terminal() {
+                    break;
+                }
+            }
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct Lcg {
+        state: u64,
+    }
+
+    impl Lcg {
+        fn new(seed: u64) -> Self {
+            Self { state: seed.wrapping_add(0x9E37_79B9_7F4A_7C15) }
+        }
+        fn next_u64(&mut self) -> u64 {
+            self.state = self
+                .state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            self.state
+        }
+        fn index(&mut self, len: usize) -> usize {
+            (self.next_u64() % len as u64) as usize
+        }
     }
 }

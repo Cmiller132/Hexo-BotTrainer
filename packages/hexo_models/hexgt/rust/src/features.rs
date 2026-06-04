@@ -118,7 +118,7 @@ pub(crate) fn featurize_position_graph(
         let du = g.edge_dst[k] as usize;
         edge_src.push(g.edge_src[k] as i64);
         edge_dst.push(g.edge_dst[k] as i64);
-        let et = (g.edge_type[k] as i64).clamp(0, NUM_EDGE_TYPES_F - 1) as usize;
+        let et = (g.edge_type[k] as i64).clamp(0, NUM_EDGE_TYPES - 1) as usize;
         edge_type.push(g.edge_type[k] as i64);
         edge_attr[k * EDGE_ATTR_DIM + et] = 1.0;
         let dq = g.node_q[su] as i32 - g.node_q[du] as i32;
@@ -300,7 +300,7 @@ pub(crate) fn collate(feats: &[GraphFeat]) -> CollatedFeatures {
     let mut node_type_dst = carve(&mut node_type, feats.iter().map(|g| g.num_nodes));
     let mut node_graph_dst = carve(&mut node_graph, feats.iter().map(|g| g.num_nodes));
     let mut edge_src_dst = carve(edge_src_buf, feats.iter().map(|g| g.edge_src.len()));
-    let mut edge_dst_dst = carve(edge_dst_buf, feats.iter().map(|g| g.edge_src.len()));
+    let mut edge_dst_dst = carve(edge_dst_buf, feats.iter().map(|g| g.edge_dst.len()));
     let mut edge_type_dst = carve(&mut edge_type, feats.iter().map(|g| g.edge_type.len()));
     let mut edge_attr_dst = carve(&mut edge_attr, feats.iter().map(|g| g.edge_attr.len()));
     let mut cand_index_dst = carve(&mut candidate_index, feats.iter().map(|g| g.candidate_nodes.len()));

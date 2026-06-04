@@ -25,8 +25,12 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 BC_SEED="$RUNDIR/pretrain/hexgt_model3_pretrain.pt"
 # main2 EXTRA_ARGS verbatim, except --bc-seed (model-3 pretrain, not main's e8) and
 # explicit --replay-pool-cap/--replay-recency-decay (main2 used the same defaults).
+# vbatch=128 (owner decision): measured ~1.23x pos/s vs vbatch=64. It changes the
+# virtual-loss/eval-batch interaction (4 vs 8 sequential NN-eval rounds per move at
+# 512 visits -> different self-play trajectories), accepted as the throughput choice.
+# TSS no-scan short-circuit + featurize-forward overlap remain bit-identical.
 export EXTRA_ARGS="--bc-seed $BC_SEED \
---active 64 --vbatch 64 --visits 512 --max-actions 512 \
+--active 64 --vbatch 128 --visits 512 --max-actions 512 \
 --train-steps-per-epoch 512 --batch 128 --lr 2e-4 --warmup 200 --replay-window-epochs 8 \
 --replay-pool-cap 500000 --replay-recency-decay 0.9 \
 --eval-games 40 --eval-visits 512 --eval-max-actions 1024 --eval-opening-moves 10 --eval-opening-temperature 0.6 \

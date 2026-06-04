@@ -35,9 +35,19 @@ def candidate_ids(state: object, n: int) -> list[int]:
 def graph_facts(state: object, n: int) -> Mapping[str, Any]:
     """Full bounded-graph facts for a live engine state at radius `n`.
 
-    Returns candidate ids/order, count-3/4/5 window tokens, typed node/edge
-    arrays, and per-type counts (the §4.6 no-explosion gate). This is the shared
-    construction reused by the Phase-4 expand step and (later) live MCTS.
+    The returned dict (consumed by `features.build_graph_tensors`) carries:
+
+    - ``nodes``: ``node_type``/``node_q``/``node_r``/``node_owner``/
+      ``node_recency``/``node_wcount``/``node_wempty`` (u8 columns arrive as
+      bytes; the rest as ``list[int]``).
+    - ``edges``: ``edge_src``/``edge_dst``/``edge_type`` (symmetric typed edges).
+    - ``meta``: ``placements``, ``phase`` (turn-phase id), and ``first_stone``
+      (this turn's first-stone coord or ``None``).
+    - ``candidate_nodes`` / ``candidate_ids``: candidate node rows + their action
+      ids in CSR/legal order (the priors order).
+
+    This is the shared construction reused by the Phase-4 expand step and live
+    MCTS, so training inputs == search inputs.
     """
 
     return _hexgt_module().hexgt_graph_facts(state, int(n))

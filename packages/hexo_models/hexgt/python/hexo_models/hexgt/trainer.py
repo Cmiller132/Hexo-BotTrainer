@@ -22,6 +22,7 @@ from typing import Any, Mapping, Sequence
 
 import torch
 
+from .config import HexgtConfig
 from .expand import build_training_batch
 from .losses import hexgt_loss
 
@@ -76,7 +77,7 @@ class HexgtTrainState:
 
 
 class HexgtTrainer:
-    def __init__(self, *, model: torch.nn.Module, config: Any, optimizer: torch.optim.Optimizer) -> None:
+    def __init__(self, *, model: torch.nn.Module, config: HexgtConfig, optimizer: torch.optim.Optimizer) -> None:
         self.model = model
         self.config = config
         self.optimizer = optimizer

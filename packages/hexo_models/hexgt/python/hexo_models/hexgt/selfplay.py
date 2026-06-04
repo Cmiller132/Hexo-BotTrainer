@@ -31,6 +31,7 @@ turn), exactly as `expand.py` expects.
 from __future__ import annotations
 
 import statistics
+from collections import Counter
 from dataclasses import dataclass, field, replace
 from math import log
 from pathlib import Path
@@ -583,7 +584,6 @@ def run_selfplay_games(
     elapsed = perf_counter() - started
     sp = max(1, searched_positions)
     n_games = max(1, completed_games + truncated_games)
-    from collections import Counter
     opening_counts = Counter(openings)
     move2_counts = Counter(move2_choices)
     return SelfPlayResult(

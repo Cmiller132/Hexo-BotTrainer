@@ -1964,22 +1964,6 @@ def _learning_health(
     best_turns = _optional_float(best_eval.get("mean_turns"))
     latest_wins = int(latest_eval.get("wins") or 0) if latest_eval else 0
     latest_games = int(latest_eval.get("games") or 0) if latest_eval else 0
-
-    # Head-to-head WIN RATE is the signal that actually matters (survival-turns is
-    # a SealBot-only proxy). Compute latest/first/best win rate; "best" is by win
-    # rate, not turns, so the panel reports the strongest checkpoint honestly.
-    def _win_rate(item: object) -> float | None:
-        if not isinstance(item, dict):
-            return None
-        games = int(item.get("games") or 0)
-        return (int(item.get("wins") or 0) / games) if games else None
-
-    latest_eval_win_rate = _win_rate(latest_eval)
-    first_eval_win_rate = _win_rate(first_eval)
-    best_eval_by_winrate = max(evals, key=lambda item: (_win_rate(item) or 0.0), default={})
-    best_eval_win_rate = _win_rate(best_eval_by_winrate)
-    best_eval_win_epoch = best_eval_by_winrate.get("epoch") if best_eval_by_winrate else None
-
     latest_selfplay = latest.get("selfplay") if isinstance(latest.get("selfplay"), dict) else {}
     latest_d6 = latest.get("d6") if isinstance(latest.get("d6"), dict) else {}
     latest_source_summary = (
@@ -2015,52 +1999,43 @@ def _learning_health(
     elif latest_loss is not None:
         messages.append(f"Latest training loss is {latest_loss:.3f}.")
 
-    # Evaluation opponent is run-dependent (dense_cnn evals vs SealBot; hexgt evals
-    # vs the dense_cnn teacher), and web.py can't tell which from the data — so
-    # keep these messages opponent-NEUTRAL ("evaluation"), correct for every run.
     if latest_turns is None:
         status = "collecting"
-        messages.append("No evaluation result yet for the completed epochs.")
+        messages.append("No SealBot evaluation result yet for the completed epochs.")
     else:
         delta = latest_turns - (first_turns if first_turns is not None else latest_turns)
-        win_pct = f" ({latest_eval_win_rate * 100:.0f}%)" if latest_eval_win_rate is not None else ""
         if latest_wins > 0:
             status = "improving"
-            messages.append(f"Latest evaluation: {latest_wins}/{latest_games} wins{win_pct}.")
+            messages.append(f"Latest SealBot eval has {latest_wins}/{latest_games} wins.")
         elif delta > 3.0:
             status = "improving"
-            messages.append(f"Evaluation survival improved by {delta:.1f} turns.")
+            messages.append(f"SealBot survival improved by {delta:.1f} turns.")
         elif len(evals) >= 2:
             status = "watch"
-            messages.append(f"Evaluation survival is flat at {latest_turns:.1f} turns.")
+            messages.append(f"SealBot survival is flat at {latest_turns:.1f} turns.")
         else:
-            messages.append(f"Initial evaluation survival is {latest_turns:.1f} turns.")
+            messages.append(f"Initial SealBot survival is {latest_turns:.1f} turns.")
         if latest_epoch >= 6 and latest_wins == 0 and (best_turns or 0.0) <= 30.0:
             status = "intervene"
             messages.append("Epoch 6+ is still under 30 turns with no wins; inspect games and training targets before continuing blindly.")
         elif status == "watch":
             messages.append("Keep training for now, but inspect previews if this remains flat near epoch 6.")
 
-    # Self-play speed is INFORMATIONAL only. The old `speed >= 128 && exact_128`
-    # gate was dense_cnn 64x4's calibration target; current runs (incl. hexgt
-    # visits=512 at ~11 pos/s) are healthy at far lower rates and never emit the
-    # exact-128 sims marker, so the gate produced a permanent false "needs
-    # attention" that wrongly forced every run to "watch". Report the rate, don't
-    # penalize it.
     exact_128 = abs((_optional_float(latest_selfplay.get("mcts_sims_per_searched_position")) or 0.0) - 128.0) < 1.0e-6
     speed = _optional_float(latest_selfplay.get("search_positions_per_second"))
-    if speed is not None and speed > 0.0:
-        messages.append(f"Self-play speed is {speed:.0f} pos/s.")
+    if speed is not None and speed >= 128.0 and exact_128:
+        messages.append(f"Self-play speed is healthy at {speed:.0f} pos/s with exact 128 sims.")
+    elif speed is not None:
+        status = "watch" if status != "intervene" else status
+        messages.append(f"Self-play speed needs attention: {speed:.0f} pos/s, exact128={exact_128}.")
 
-    # D6 preview / classical-replay / policy-imitation come from the
-    # dense_cnn.policy_targets.epoch_*.json overlay, which NO current producer
-    # emits (and hexgt is D6-invariant by construction, needing no augmentation).
-    # Surface them ONLY when actually present — never penalize their absence,
-    # which previously pinned every run to "watch" on a dead signal.
     d6_mode = str(latest_d6.get("mode") or "")
     d6_preview = latest_d6.get("preview_symmetries") if isinstance(latest_d6.get("preview_symmetries"), list) else []
     if "random_per_training_expansion" in d6_mode or d6_preview:
         messages.append("D6 training augmentation previews are present.")
+    elif latest_epoch > 0:
+        status = "watch" if status != "intervene" else status
+        messages.append("D6 augmentation preview is missing for the latest epoch.")
 
     if latest_classical_fraction is not None:
         messages.append(f"Training window classical replay is {latest_classical_fraction * 100.0:.0f}%.")
@@ -2081,15 +2056,6 @@ def _learning_health(
         "eval_delta_from_first": (latest_turns - first_turns) if latest_turns is not None and first_turns is not None else None,
         "latest_eval_wins": latest_wins,
         "latest_eval_games": latest_games,
-        "latest_eval_win_rate": latest_eval_win_rate,
-        "first_eval_win_rate": first_eval_win_rate,
-        "best_eval_win_rate": best_eval_win_rate,
-        "best_eval_win_epoch": best_eval_win_epoch,
-        "eval_win_rate_delta": (
-            (latest_eval_win_rate - first_eval_win_rate)
-            if (latest_eval_win_rate is not None and first_eval_win_rate is not None)
-            else None
-        ),
         "latest_selfplay_pos_s": speed,
         "latest_exact_128": exact_128,
         "latest_classical_fraction": latest_classical_fraction,
@@ -2185,8 +2151,11 @@ def _selfplay_epoch_summary(payload: dict[str, object]) -> dict[str, object]:
         "game_length_median": payload.get("game_length_median"),
         "game_length_max": payload.get("game_length_max"),
         "game_length_stdev": payload.get("game_length_stdev"),
-        # Replay-buffer + training stats (nested object, None for producers that
-        # don't emit it — e.g. dense_cnn runs — so the frontend just omits it).
+        # Replay-buffer + per-head training-loss + calibration stats (nested object,
+        # None for producers that don't emit it — e.g. dense_cnn runs — so the
+        # frontend just omits the detail band). The dashboard bridge attaches this
+        # to the published selfplay payload; without this passthrough the per-head
+        # Losses group never reaches epochProgressDetail in app.js.
         "buffer": payload.get("buffer"),
     }
 

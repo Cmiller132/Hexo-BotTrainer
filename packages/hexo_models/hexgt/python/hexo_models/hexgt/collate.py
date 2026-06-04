@@ -58,8 +58,12 @@ def collate_graphs(graphs: Sequence[GraphTensors]) -> dict[str, torch.Tensor | i
         node_offset += n
 
     def _cat(parts, dim=0, dtype=None, empty_shape=None):
+        """Concatenate `parts`, coercing to `dtype`; an empty list yields a
+        zero-length array of `empty_shape`. `dtype` is enforced on BOTH branches
+        so callers never need a trailing `.astype()`."""
         if parts:
-            return np.concatenate(parts, axis=dim)
+            out = np.concatenate(parts, axis=dim)
+            return out.astype(dtype) if dtype is not None else out
         return np.zeros(empty_shape, dtype=dtype)
 
     ei_src = _cat(edge_src, dtype=np.int64, empty_shape=(0,))
@@ -73,20 +77,12 @@ def collate_graphs(graphs: Sequence[GraphTensors]) -> dict[str, torch.Tensor | i
         "node_feat": torch.from_numpy(np.concatenate(node_feat, axis=0).astype(np.float32)),
         "node_type": torch.from_numpy(np.concatenate(node_type, axis=0).astype(np.int64)),
         "node_graph": torch.from_numpy(np.concatenate(node_graph, axis=0).astype(np.int64)),
-        "edge_index": torch.from_numpy(edge_index.astype(np.int64)),
-        "edge_type": torch.from_numpy(_cat(edge_type, dtype=np.int64, empty_shape=(0,)).astype(np.int64)),
-        "edge_attr": torch.from_numpy(
-            _cat(edge_attr, dtype=np.float32, empty_shape=(0, attr_dim)).astype(np.float32)
-        ),
-        "candidate_index": torch.from_numpy(
-            _cat(candidate_index, dtype=np.int64, empty_shape=(0,)).astype(np.int64)
-        ),
-        "candidate_graph": torch.from_numpy(
-            _cat(candidate_graph, dtype=np.int64, empty_shape=(0,)).astype(np.int64)
-        ),
-        "candidate_ids": torch.from_numpy(
-            _cat(candidate_ids, dtype=np.int64, empty_shape=(0,)).astype(np.int64)
-        ),
+        "edge_index": torch.from_numpy(edge_index),
+        "edge_type": torch.from_numpy(_cat(edge_type, dtype=np.int64, empty_shape=(0,))),
+        "edge_attr": torch.from_numpy(_cat(edge_attr, dtype=np.float32, empty_shape=(0, attr_dim))),
+        "candidate_index": torch.from_numpy(_cat(candidate_index, dtype=np.int64, empty_shape=(0,))),
+        "candidate_graph": torch.from_numpy(_cat(candidate_graph, dtype=np.int64, empty_shape=(0,))),
+        "candidate_ids": torch.from_numpy(_cat(candidate_ids, dtype=np.int64, empty_shape=(0,))),
         "num_graphs": len(graphs),
         "_feat_dim": feat_dim,
     }

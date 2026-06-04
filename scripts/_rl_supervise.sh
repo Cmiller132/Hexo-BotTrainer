@@ -78,8 +78,11 @@ TELEM_CSV="$RUNDIR/gpu_telemetry.csv"; TELEM_WATCH_PID=""
 ( while :; do
     if ! pgrep -f "query-gpu=timestamp,temperature" >/dev/null 2>&1; then
       echo "[$(date -u +%FT%TZ)] (re)starting gpu telemetry sampler" >> "$RUNDIR/gpu_telemetry.err"
+      # 0.2 Hz (was 1 Hz): a continuous nvidia-smi poll is one of the few things
+      # that can steal cycles from the CPU-bound MCTS select threads; 5s still
+      # captures the pre-crash thermal/power/throttle window for forensics.
       nvidia-smi --query-gpu=timestamp,temperature.gpu,power.draw,power.limit,clocks.sm,clocks.mem,utilization.gpu,memory.used,clocks_throttle_reasons.active \
-        --format=csv -l 1 >> "$TELEM_CSV" 2>>"$RUNDIR/gpu_telemetry.err" &
+        --format=csv -l 5 >> "$TELEM_CSV" 2>>"$RUNDIR/gpu_telemetry.err" &
     fi
     sleep 30
   done ) & TELEM_WATCH_PID=$!

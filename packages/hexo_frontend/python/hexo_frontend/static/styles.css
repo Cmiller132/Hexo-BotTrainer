@@ -1200,43 +1200,6 @@ body.pending button:disabled {
   border-top: 1px solid var(--line);
 }
 
-/* Game-level Prev/Next nav, shown above the move-replay controls only while a
-   list-backed history game is loaded. The explicit [hidden] guard is required —
-   `display:flex` would otherwise override the default [hidden] display:none. */
-.game-nav {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 12px;
-  padding: 7px 12px;
-  border-bottom: 1px solid var(--line);
-  background: rgba(7, 13, 19, 0.4);
-}
-
-.game-nav[hidden] {
-  display: none;
-}
-
-.game-nav button {
-  min-width: 0;
-  padding: 4px 14px;
-  font-weight: 700;
-}
-
-.game-nav button:disabled {
-  opacity: 0.4;
-  cursor: default;
-}
-
-.game-nav-label {
-  min-width: 96px;
-  text-align: center;
-  color: var(--text);
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: 0.3px;
-}
-
 .replay-row {
   display: grid;
   grid-template-columns: minmax(180px, 260px) minmax(86px, 110px) minmax(180px, 1fr);
@@ -1998,105 +1961,6 @@ body:not(.tactics-on) .tactic-legend {
   text-transform: uppercase;
 }
 
-/* Structured epoch rows: each main cell stacks labeled stat-lines, and runs that
-   emit a replay buffer get an indented detail band (Buffer + per-head Losses)
-   below the row. dense_cnn rows have no buffer so they render no band — their
-   layout is unchanged (additive / dense-safe). */
-.epoch-progress-group {
-  min-width: 0;
-  display: grid;
-  gap: 3px;
-}
-
-.epoch-cell {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.epoch-progress-row .epoch-stat {
-  min-width: 0;
-  font-size: 11px;
-  color: var(--text);
-  white-space: normal;
-  overflow-wrap: anywhere;
-}
-
-.epoch-progress-row .epoch-stat i {
-  font-style: normal;
-  font-weight: 800;
-  font-size: 9px;
-  letter-spacing: 0.5px;
-  text-transform: uppercase;
-  color: var(--muted);
-  margin-right: 3px;
-}
-
-.epoch-progress-row .epoch-stat.muted,
-.epoch-progress-row .epoch-stat.muted i {
-  color: var(--muted);
-}
-
-.epoch-progress-detail {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px 16px;
-  padding: 6px 10px 7px 80px;   /* indent under the 72px Epoch column + 8px gap */
-  border: 1px solid rgba(143, 155, 170, 0.14);
-  border-radius: 5px;
-  background: rgba(7, 13, 19, 0.34);
-}
-
-.epoch-detail-group {
-  min-width: 0;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 5px;
-}
-
-.epoch-detail-label {
-  font-size: 9px;
-  font-weight: 900;
-  letter-spacing: 1px;
-  text-transform: uppercase;
-  color: var(--muted);
-  margin-right: 2px;
-}
-
-.epoch-chip {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 4px;
-  padding: 2px 7px;
-  font-size: 11px;
-  color: var(--text);
-  border: 1px solid rgba(143, 155, 170, 0.20);
-  border-radius: 10px;
-  background: rgba(7, 13, 19, 0.50);
-  white-space: nowrap;
-}
-
-.epoch-chip i {
-  font-style: normal;
-  font-weight: 700;
-  font-size: 9px;
-  letter-spacing: 0.5px;
-  text-transform: uppercase;
-  color: var(--muted);
-}
-
-.epoch-chip-total {
-  border-color: rgba(39, 215, 230, 0.40);
-  background: rgba(39, 215, 230, 0.10);
-}
-
-.epoch-chip-total,
-.epoch-chip-total i {
-  color: var(--text);
-}
-
 .eval-trend-empty {
   padding: 8px 2px;
 }
@@ -2478,10 +2342,6 @@ body:not(.tactics-on) .tactic-legend {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .epoch-progress-detail {
-    padding-left: 10px;   /* drop the desktop column-indent on narrow screens */
-  }
-
   .game-history-select {
     grid-column: 1 / -1;
   }
@@ -2502,5 +2362,72 @@ body:not(.tactics-on) .tactic-legend {
   .game-history-row,
   .learning-health-metrics {
     grid-template-columns: 1fr;
+  }
+}
+
+/* Per-epoch detail band: Buffer + per-head Losses + Calibration chip groups
+   rendered beneath each hexgt RL epoch row (epochProgressDetail in app.js). */
+.epoch-progress-detail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  padding: 6px 10px 7px 80px;   /* indent under the Epoch column */
+  border: 1px solid rgba(143, 155, 170, 0.14);
+  border-radius: 5px;
+  background: rgba(7, 13, 19, 0.34);
+}
+
+.epoch-detail-group {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+}
+
+.epoch-detail-label {
+  font-size: 9px;
+  font-weight: 900;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-right: 2px;
+}
+
+.epoch-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  padding: 2px 7px;
+  font-size: 11px;
+  color: var(--text);
+  border: 1px solid rgba(143, 155, 170, 0.20);
+  border-radius: 10px;
+  background: rgba(7, 13, 19, 0.50);
+  white-space: nowrap;
+}
+
+.epoch-chip i {
+  font-style: normal;
+  font-weight: 700;
+  font-size: 9px;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.epoch-chip-total {
+  border-color: rgba(39, 215, 230, 0.40);
+  background: rgba(39, 215, 230, 0.10);
+}
+
+.epoch-chip-total,
+.epoch-chip-total i {
+  color: var(--text);
+}
+
+@media (max-width: 1100px) {
+  .epoch-progress-detail {
+    padding-left: 10px;   /* drop the desktop column-indent on narrow screens */
   }
 }

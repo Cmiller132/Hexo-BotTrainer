@@ -32,6 +32,13 @@ from .player import HexgtPlayer
 # A player factory takes the per-game seed and returns a fresh runner player.
 PlayerFactory = Callable[[int], Any]
 
+# String contract at the hexo_engine / hexo_runner boundary: match status and
+# player-role identifiers are compared as strings (stringified enums). Named here
+# so the contract lives in one place and typos surface as NameErrors.
+_STATUS_COMPLETED = "completed"
+_ROLE_PLAYER0 = "player0"
+_ROLE_PLAYER1 = "player1"
+
 
 @dataclass(frozen=True, slots=True)
 class HeadToHeadResult:
@@ -96,10 +103,10 @@ def run_head_to_head(
             players,  # type: ignore[arg-type]
             output_dir,
         )
-        if str(result.status) == "completed":
+        if str(result.status) == _STATUS_COMPLETED:
             completed += 1
         turns.append(int(result.turns))
-        a_role = "player0" if a_is_p0 else "player1"
+        a_role = _ROLE_PLAYER0 if a_is_p0 else _ROLE_PLAYER1
         if result.winner == a_role:
             wins += 1
         elif result.winner is not None:
@@ -234,12 +241,12 @@ def run_head_to_head_parallel(
                 g["truncated"] = term is None
                 finished.append(g)
                 continue
-            mover_is_a = (str(engine.current_player(g["state"])) == "player0") == g["a_is_p0"]
+            mover_is_a = (str(engine.current_player(g["state"])) == _ROLE_PLAYER0) == g["a_is_p0"]
             (a_grp if mover_is_a else b_grp).append(g)
 
         for g in finished:
             turns.append(g["plies"])
-            a_role = "player0" if g["a_is_p0"] else "player1"
+            a_role = _ROLE_PLAYER0 if g["a_is_p0"] else _ROLE_PLAYER1
             if g["winner"] == a_role:
                 wins += 1
             elif g["winner"] is not None:
