@@ -100,6 +100,40 @@ representation change), because total work = positions x visits x O(edges) and t
 midgame edge explosion dominates. The only reliable path to >=200 stays **lower
 visits** (~64).
 
+## Sparser-graph rewrite — measured ceiling at 512 visits (no PCR)
+
+A design fan-out mapped the Rust graph build. Edge drivers: ADJACENCY (candidate↔
+candidate spatial, ~6/node) + CONTEXT (SIDE hub ↔ EVERY node), both scaling with
+candidate count => cutting candidates is the master lever. `n` (candidate radius)
+is a runtime knob, and active-window (tactical) cells are radius-independent, so
+n=2 is threat-safe by construction.
+
+Measured (td96/gnn2, active=512, visits=512, no-PCR, opening-region):
+| candidate radius | pos/s | nodes/leaf | edges/leaf | cand/leaf |
+|---|--:|--:|--:|--:|
+| n=3 | 28.0 | 277 | 1,972 | 263 |
+| **n=2** | **41.2** (+47%) | 200 | 1,370 (-30%) | 185 (-30%) |
+
+The chosen "not-too-far" sparsification (phase-gated radius n2->n3 + mandatory
+tactical-cell inclusion + CONTEXT-hub cap to {candidates,windows,recent-64 stones}
++ adjacency restricted near stones/threats) keeps ALL active-window empties, all
+window tokens, and all STONE/CANDIDATE_WINDOW edges => threat features byte-
+identical, D6 preserved, hitting-set sees the full opp >=4 list. Estimated edge
+reduction ~30-40% (the radius drop dominates early; adjacency dominates midgame;
+CONTEXT barely shrinks midgame because nearly all nodes are candidates/windows).
+
+The codebase is ALREADY heavily optimized: rayon featurize across the batch, a
+select<->eval prefetch pipeline (mcts.rs), a featurize<->forward double-buffer
+(mcts_eval.rs), and an eval cache. Remaining levers: board-occupancy topology
+caching (has_open_window is recomputed per leaf), deeper pipeline depth + verified
+GIL release during the forward, pinned-host ring buffer.
+
+**Honest ceiling @512 visits, full rewrite:** ~40-65 pos/s opening / ~30-45
+full-game (~2x current). Triangulated by profiling + the design's own edge
+estimate + the direct n=2 measurement. **100 @512 full-game is NOT reachable**
+without lower visits or a tactics-gutting sparsification (excluded by "don't go
+too far"). >=100 needs visits ~128-192; >=200 needs ~64.
+
 **What reaches >=200 pos/s:** drop the AVERAGE visits to ~64. td96/gnn2 @ visits=64
 measured 242 pos/s (opening; ~120-180 full-game est). visits=128 -> 135 (opening).
 PCR helps at HIGH visits (lowers the average) but its two-call split adds overhead
