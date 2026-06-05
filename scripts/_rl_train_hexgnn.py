@@ -135,6 +135,16 @@ def should_skip_selfplay(rl_epoch, start_epoch, resume_incomplete_train):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--bc-seed", default=str(_ROOT / "runs/hexgnn_rl/pretrain/hexgnn_pretrain.pt"))
+    # FROM-SCRATCH (no pretraining): build a random-init model from these arch args
+    # instead of loading a seed. The arch is stamped into every checkpoint so resume
+    # rebuilds the same shape. Ignored once a hexgnn_rl_latest.pt exists (resume).
+    ap.add_argument("--from-scratch", action="store_true",
+                    help="random-init the model from --token-dim/--gnn-layers/... (no --bc-seed)")
+    ap.add_argument("--token-dim", type=int, default=128)
+    ap.add_argument("--gnn-layers", type=int, default=3)
+    ap.add_argument("--attention-heads", type=int, default=4)
+    ap.add_argument("--value-pma-seeds", type=int, default=2)
+    ap.add_argument("--value-head-use-side", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--out-dir", default=str(_ROOT / "runs/hexgnn_rl"))
     ap.add_argument("--epochs", type=int, default=40)
     ap.add_argument("--games-per-epoch", type=int, default=64)
@@ -246,6 +256,20 @@ def main():
         start_epoch, resume_incomplete_train = resume_plan(loaded_epoch, epoch_train_complete)
         seed_desc = (f"RESUME from {latest.name} (rl_epoch={ck.get('rl_epoch')}, step={ck.get('step')})"
                      + ("" if epoch_train_complete else f" + RE-TRAIN incomplete epoch {loaded_epoch}"))
+    elif args.from_scratch:
+        # FRESH random init — no pretraining. Arch comes straight from CLI args and
+        # is stamped at the CURRENT feature-schema version, so no seed load, no
+        # value-readout expansion, and no feature zero-init are needed.
+        ck = None
+        arch_meta = {
+            "token_dim": args.token_dim, "gnn_layers": args.gnn_layers,
+            "attention_heads": args.attention_heads, "value_pma_seeds": args.value_pma_seeds,
+            "value_head_use_side": bool(args.value_head_use_side),
+        }
+        model = build_model(arch_meta, device)
+        seed_desc = (f"FROM SCRATCH (random init, no pretraining): token_dim={args.token_dim} "
+                     f"gnn_layers={args.gnn_layers} heads={args.attention_heads} "
+                     f"pma_k={args.value_pma_seeds} use_side={bool(args.value_head_use_side)}")
     else:
         ck = torch.load(args.bc_seed, map_location=device, weights_only=False)
         arch_meta = dict(ck["arch"])
@@ -255,7 +279,7 @@ def main():
         seed_desc = (f"SEED from {Path(args.bc_seed).name} (step={ck.get('step')}"
                      f"{', rl_epoch=' + str(ck['rl_epoch']) if 'rl_epoch' in ck else ''})")
 
-    loaded_fsv = int(ck.get("feature_schema_version", 1))
+    loaded_fsv = int(ck.get("feature_schema_version", 1)) if ck is not None else FEATURE_SCHEMA_VERSION
     if loaded_fsv < FEATURE_SCHEMA_VERSION:
         target_slots = feature_slots_after(loaded_fsv)
         zeroed = zero_init_expanded_feature_columns(model, target_slots)
@@ -268,7 +292,7 @@ def main():
     opt = torch.optim.AdamW(model.parameters(), lr=cfg.training.learning_rate, weight_decay=cfg.training.weight_decay)
     trainer = HexgnnTrainer(model=model, config=cfg, optimizer=opt)
     trainer.cuda_retry_log = lambda m: log(m, fh)
-    if "optimizer" in ck:
+    if ck is not None and "optimizer" in ck:
         try:
             opt.load_state_dict(ck["optimizer"])
             log(f"  (optimizer state restored from {Path(args.bc_seed).name if not latest.exists() else latest.name})", fh)
