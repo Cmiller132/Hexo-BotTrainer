@@ -34,6 +34,7 @@ from hexo_runner.session import GameSpec
 from hexo_engine.types import unpack_coord_id
 
 from .dashboard import dashboard_state
+from . import debug_service
 
 
 STATIC_ROOT = files("hexo_frontend").joinpath("static")
@@ -671,6 +672,47 @@ class HexoPlayHandler(BaseHTTPRequestHandler):
                         _query_int(query.get("record", [None])[0]) or 0,
                     )
                 )
+            elif path == "/api/debug/checkpoints":
+                query = parse_qs(parsed.query)
+                self._send_json(_debug_checkpoints(str(query.get("run", [""])[0])))
+            elif path == "/api/debug/games":
+                query = parse_qs(parsed.query)
+                self._send_json(
+                    _debug_games(
+                        str(query.get("run", [""])[0]),
+                        str(query.get("source", ["selfplay"])[0] or "selfplay"),
+                    )
+                )
+            elif path == "/api/debug/trajectory":
+                query = parse_qs(parsed.query)
+                self._send_json(
+                    _debug_trajectory(
+                        str(query.get("run", [""])[0]),
+                        str(query.get("path", [""])[0]),
+                        _query_int(query.get("record", [None])[0]) or 0,
+                        str(query.get("checkpoint", [""])[0]),
+                    )
+                )
+            elif path == "/api/debug/position":
+                query = parse_qs(parsed.query)
+                actions_csv = str(query.get("actions", [""])[0] or "")
+                if actions_csv:
+                    self._send_json(
+                        _debug_position_from_actions(
+                            str(query.get("run", [""])[0]),
+                            actions_csv,
+                            _query_int(query.get("ply", [None])[0]) or 0,
+                        )
+                    )
+                else:
+                    self._send_json(
+                        _debug_position(
+                            str(query.get("run", [""])[0]),
+                            str(query.get("path", [""])[0]),
+                            _query_int(query.get("record", [None])[0]) or 0,
+                            _query_int(query.get("ply", [None])[0]) or 0,
+                        )
+                    )
             elif path == "/" or path == "/index.html":
                 self._send_static("index.html")
             elif path.startswith("/static/"):
@@ -688,6 +730,10 @@ class HexoPlayHandler(BaseHTTPRequestHandler):
             elif path == "/api/move":
                 body = self._read_json()
                 self._send_json(self.controller.submit_move(int(body["q"]), int(body["r"])))
+            elif path == "/api/debug/analyze":
+                self._send_json(_debug_analyze(self._read_json()))
+            elif path == "/api/debug/search":
+                self._send_json(_debug_search(self._read_json()))
             else:
                 self.send_error(HTTPStatus.NOT_FOUND)
         except MoveConflict as exc:
@@ -999,6 +1045,414 @@ def _training_history(run_name: str, artifact_path: str, record_index: int = 0) 
         }
     )
     return payload
+
+
+# ---------------------------------------------------------------------------
+# Debug tab: position inspection via the CPU inference worker (debug_service).
+#
+# These endpoints reconstruct a board position from a recorded game (or a raw
+# move list) and ask the out-of-process, CPU-only worker what the model thinks —
+# policy prior, value distribution, opponent-policy + STV heads, and on-demand
+# MCTS. The worker is launched with CUDA_VISIBLE_DEVICES="" so it never contends
+# for the training GPU, and results are cached so re-opening a view is instant.
+# ---------------------------------------------------------------------------
+
+_DEBUG_CKPT_EPOCH_RE = re.compile(r"epoch(\d+)\.pt$")
+# The STV graft widened the value/STV readout heads at RL epoch 7 (also visible
+# as a ~29 MB -> ~31 MB checkpoint-size jump); used only for a display hint.
+_DEBUG_GRAFT_EPOCH = 7
+_DEBUG_GRAFT_SIZE_BYTES = 30_500_000
+
+
+def _debug_worker() -> "debug_service.DebugWorker":
+    return debug_service.get_worker()
+
+
+def _debug_training_roots() -> tuple[Path, ...]:
+    """Run-dir search roots for the Debug endpoints. Prefers ``HEXO_DEBUG_RUN_ROOT``
+    (e.g. the live worktree, which holds the real checkpoints + every .hxr) so the
+    Debug tab works even when the dashboard serves its training/history panels
+    from a bridge-mirror cwd that has the diagnostics but NOT the checkpoints.
+    Falls back to the normal cwd-derived roots when the override is unset, so the
+    default single-tree setup is unchanged."""
+
+    roots: list[Path] = []
+    seen: set[str] = set()
+    override = os.environ.get("HEXO_DEBUG_RUN_ROOT")
+    if override:
+        base = Path(override).expanduser()
+        for candidate in (base / "runs", base):  # accept the tree root or its runs/ dir
+            if candidate.is_dir():
+                key = str(candidate.resolve())
+                if key not in seen:
+                    seen.add(key)
+                    roots.append(candidate)
+    for root in _training_roots():
+        key = str(root.resolve())
+        if key not in seen:
+            seen.add(key)
+            roots.append(root)
+    return tuple(roots)
+
+
+def _debug_run_dirs(name: str) -> list[Path]:
+    """Every existing run dir named ``name`` across the Debug roots, in priority
+    order (override/worktree first, then the cwd roots)."""
+
+    if not name or "/" in name or "\\" in name or name.startswith("."):
+        return []
+    dirs: list[Path] = []
+    for root in _debug_training_roots():
+        resolved_root = root.resolve()
+        path = (resolved_root / name).resolve()
+        if resolved_root != path and resolved_root not in path.parents:
+            continue
+        if path.is_dir():
+            dirs.append(path)
+    return dirs
+
+
+def _debug_resolve_run_dir(name: str) -> Path | None:
+    """First existing run dir in Debug-root priority order (worktree before the
+    bridge-mirror cwd) — deterministic, so checkpoint/game listing comes from the
+    tree that actually has the data rather than whichever has the newest mtime."""
+
+    dirs = _debug_run_dirs(name)
+    return dirs[0] if dirs else None
+
+
+def _debug_resolve_run_path(run_name: str, artifact_path: str) -> Path | None:
+    """Resolve an artifact path under whichever Debug run dir actually contains it.
+
+    The dashboard's History tab may serve from a bridge-mirror cwd while the Debug
+    endpoints prefer the live worktree, and the two trees can differ (the worktree
+    leads on checkpoints; the mirror can momentarily lead on a just-rolled epoch
+    .hxr). Trying each run dir in priority order and returning the first that holds
+    the file lets a deep-link resolve regardless of which tree has that game."""
+
+    if not artifact_path or artifact_path.startswith(("/", "\\")):
+        return None
+    fallback: Path | None = None
+    for run_dir in _debug_run_dirs(run_name):
+        resolved_root = run_dir.resolve()
+        path = (run_dir / artifact_path).resolve()
+        if resolved_root != path and resolved_root not in path.parents:
+            continue
+        if fallback is None:
+            fallback = path
+        if path.exists():
+            return path
+    return fallback  # confined but absent -> caller raises a clear "unknown artifact"
+
+
+def _debug_checkpoints(run_name: str) -> dict[str, object]:
+    run_dir = _debug_resolve_run_dir(run_name)
+    if run_dir is None:
+        raise ValueError("Unknown training run")
+    ckpt_dir = run_dir / "checkpoints"
+    items: list[dict[str, object]] = []
+    if ckpt_dir.is_dir():
+        for entry in os.scandir(ckpt_dir):
+            if not entry.is_file() or not entry.name.endswith(".pt"):
+                continue
+            match = _DEBUG_CKPT_EPOCH_RE.search(entry.name)
+            epoch = int(match.group(1)) if match else None
+            stat = _safe_stat(Path(entry.path))
+            size = int(stat.st_size) if stat else 0
+            if epoch is not None:
+                graft = "post" if epoch >= _DEBUG_GRAFT_EPOCH else "pre"
+            elif size:
+                graft = "post" if size > _DEBUG_GRAFT_SIZE_BYTES else "pre"
+            else:
+                graft = None
+            items.append(
+                {
+                    "name": entry.name,
+                    "epoch": epoch,
+                    "size": size,
+                    "mtime": int(stat.st_mtime) if stat else 0,
+                    "latest": entry.name == "hexgt_rl_latest.pt",
+                    "graft": graft,
+                }
+            )
+    items.sort(key=lambda x: (not x["latest"], -(x["epoch"] if x["epoch"] is not None else -1), str(x["name"])))
+    return {"run": run_name, "checkpoints": items, "worker": _debug_worker().status()}
+
+
+def _debug_games(run_name: str, source: str) -> dict[str, object]:
+    """List the recorded game files (``.hxr``) available for inspection. Self-play
+    files are one-per-epoch; evaluation files live in ``eval*/`` subdirectories."""
+
+    run_dir = _debug_resolve_run_dir(run_name)
+    if run_dir is None:
+        raise ValueError("Unknown training run")
+
+    def rel(p: Path) -> str:
+        return p.relative_to(run_dir).as_posix()
+
+    def hxr_in(directory: Path, recurse: bool) -> list[Path]:
+        found: list[Path] = []
+        if not directory.is_dir():
+            return found
+        for entry in os.scandir(directory):
+            if entry.is_file() and entry.name.endswith(".hxr"):
+                found.append(Path(entry.path))
+            elif recurse and entry.is_dir():
+                for sub in os.scandir(entry.path):
+                    if sub.is_file() and sub.name.endswith(".hxr"):
+                        found.append(Path(sub.path))
+        return found
+
+    files: list[Path] = []
+    if source in ("selfplay", "all"):
+        files += hxr_in(run_dir / "selfplay", recurse=False)
+    if source in ("evaluation", "all"):
+        files += hxr_in(run_dir / "evaluation", recurse=True)
+        files += hxr_in(run_dir / "eval", recurse=True)
+
+    items = []
+    for path in files:
+        stat = _safe_stat(path)
+        items.append(
+            {
+                "path": rel(path),
+                "name": path.name,
+                "size": int(stat.st_size) if stat else 0,
+                "mtime": int(stat.st_mtime) if stat else 0,
+            }
+        )
+    items.sort(key=lambda x: str(x["path"]), reverse=True)
+    return {"run": run_name, "source": source, "games": items}
+
+
+def _debug_resolve_checkpoint(run_name: str, checkpoint: str) -> Path:
+    name = checkpoint.strip()
+    if not name:
+        raise ValueError("checkpoint is required")
+    if "/" in name or "\\" in name:  # accept a bare filename only, resolve under the run
+        name = Path(name).name
+    path = _debug_resolve_run_path(run_name, f"checkpoints/{name}")
+    if path is None or not path.is_file():
+        raise ValueError(f"Unknown checkpoint: {checkpoint}")
+    return path
+
+
+def _debug_open_record(run_name: str, artifact_path: str, record_index: int):
+    path = _debug_resolve_run_path(run_name, artifact_path)
+    if path is None or not path.is_file() or path.suffix.lower() != ".hxr":
+        raise ValueError("Unknown game history artifact")
+    with HexoRecordFile.open(path) as record_file:
+        players = [_record_player_payload(player) for player in record_file.players]
+        records = list(record_file.iter_records())
+    if not records:
+        raise ValueError("Game history artifact contains no games")
+    if record_index < 0 or record_index >= len(records):
+        raise ValueError(f"Game history record index out of range: {record_index}")
+    return records[record_index], players, records
+
+
+def _debug_build_position(action_ids: list[int], ply: int, *, seed: object = None) -> dict[str, object]:
+    """Replay ``action_ids[:ply]`` into a board-state payload. Coordinates
+    (including the last move) are resolved server-side via the engine, so the
+    client never re-implements action-id unpacking."""
+
+    total = len(action_ids)
+    ply = max(0, min(int(ply), total))
+    state = engine.new_game(seed=seed)
+    last_coord = None
+    for action_id in action_ids[:ply]:
+        coord = unpack_coord_id(action_id)
+        engine.apply_action(state, engine.PlacementAction(coord))
+        last_coord = coord
+
+    payload = dashboard_state(engine.to_python_state(state))
+    payload["mode"] = "debug"
+    payload["debug"] = {
+        "ply": ply,
+        "total": total,
+        "action_ids": action_ids,
+        "last_action_id": action_ids[ply - 1] if ply > 0 else None,
+        "last_q": int(last_coord.q) if last_coord is not None else None,
+        "last_r": int(last_coord.r) if last_coord is not None else None,
+    }
+    return payload
+
+
+def _debug_position(run_name: str, artifact_path: str, record_index: int, ply: int) -> dict[str, object]:
+    record, players, records = _debug_open_record(run_name, artifact_path, record_index)
+    action_ids = [int(a) for a in record.action_ids]
+    payload = _debug_build_position(action_ids, ply, seed=record.seed)
+    payload["game_id"] = f"{run_name}:{record.game_id}"
+    payload["players"] = _players_by_role(players)
+    payload["debug"].update(
+        {
+            "run": run_name,
+            "path": artifact_path,
+            "record_index": record_index,
+            "record_count": len(records),
+            "winner": record.winner,
+            "status": record.status,
+            "seed": record.seed,
+        }
+    )
+    payload["record_games"] = [
+        {
+            "index": index,
+            "game_id": item.game_id,
+            "status": item.status,
+            "actions": len(item.action_ids),
+            "winner": item.winner,
+        }
+        for index, item in enumerate(records)
+    ]
+    return payload
+
+
+def _debug_position_from_actions(run_name: str, actions_csv: str, ply: int) -> dict[str, object]:
+    """Board payload for a pasted/imported action-id list (no .hxr)."""
+
+    action_ids: list[int] = []
+    for token in re.split(r"[\s,]+", actions_csv.strip()):
+        if not token:
+            continue
+        try:
+            action_ids.append(int(token))
+        except ValueError as exc:
+            raise ValueError(f"invalid action id: {token!r}") from exc
+    if not action_ids:
+        raise ValueError("no action ids provided")
+    ply = len(action_ids) if ply <= 0 else ply
+    payload = _debug_build_position(action_ids, ply)
+    payload["game_id"] = f"{run_name}:imported"
+    payload["debug"].update({"run": run_name, "imported": True, "winner": None})
+    payload["record_games"] = []
+    return payload
+
+
+def _debug_action_prefix(body: dict[str, Any]) -> tuple[str, list[int]]:
+    """Resolve (run, action_id prefix) from a debug request body. Either an
+    explicit ``action_ids`` list (paste/import) or a recorded game + ``ply``."""
+
+    run = str(body.get("run", ""))
+    raw = body.get("action_ids")
+    if raw is not None:
+        return run, [int(a) for a in raw]
+    record, _players, _records = _debug_open_record(run, str(body.get("path", "")), int(body.get("record", 0) or 0))
+    full = [int(a) for a in record.action_ids]
+    ply = int(body.get("ply", len(full)))
+    ply = max(0, min(ply, len(full)))
+    return run, full[:ply]
+
+
+def _debug_signature(prefix: str, ckpt_path: Path, action_ids: list[int], n: object) -> str:
+    return json.dumps([prefix, str(ckpt_path), action_ids, n], separators=(",", ":"))
+
+
+def _debug_analyze(body: dict[str, Any]) -> dict[str, object]:
+    run, action_ids = _debug_action_prefix(body)
+    ckpt_path = _debug_resolve_checkpoint(run, str(body.get("checkpoint", "")))
+    n = body.get("n")
+    signature = _debug_signature("analyze", ckpt_path, action_ids, n)
+    return _debug_worker().cached(
+        signature, "analyze", checkpoint=str(ckpt_path), action_ids=action_ids, n=n
+    )
+
+
+def _debug_search(body: dict[str, Any]) -> dict[str, object]:
+    run, action_ids = _debug_action_prefix(body)
+    ckpt_path = _debug_resolve_checkpoint(run, str(body.get("checkpoint", "")))
+    n = body.get("n")
+    visits = int(body.get("visits", 512))
+    c_puct = float(body.get("c_puct", 1.5))
+    visits = max(1, min(visits, 20_000))  # bound CPU work per request
+    signature = _debug_signature(f"search:{visits}:{c_puct}", ckpt_path, action_ids, n)
+    return _debug_worker().cached(
+        signature,
+        "search",
+        timeout=debug_service.DEFAULT_TIMEOUT,
+        checkpoint=str(ckpt_path),
+        action_ids=action_ids,
+        visits=visits,
+        c_puct=c_puct,
+        n=n,
+    )
+
+
+def _debug_recorded_trajectory(run_dir: Path, artifact_path: str, game_id: object) -> list[dict[str, object]]:
+    """Best-effort recorded root_value per move from ``eval/epoch_*_examples.json``.
+
+    Only self-play example games carry per-move traces, so this returns ``[]`` when
+    no matching trace exists. Values are normalized to player-0's perspective."""
+
+    match = re.search(r"epoch_(\d+)", Path(artifact_path).name)
+    if match is None:
+        return []
+    epoch = int(match.group(1))
+    examples_path = run_dir / "eval" / f"epoch_{epoch:06d}_examples.json"
+    if not examples_path.is_file():
+        return []
+    try:
+        with examples_path.open("r", encoding="utf-8") as handle:
+            games = json.load(handle)
+    except (OSError, ValueError):
+        return []
+    trace = None
+    for game in games if isinstance(games, list) else []:
+        if str(game.get("game_id")) == str(game_id):
+            trace = game.get("moves") or []
+            break
+    if not trace:
+        return []
+    out = []
+    for move in trace:
+        rv = move.get("root_value")
+        if rv is None:
+            continue
+        ply = int(move.get("move", 0))
+        player0 = str(move.get("player", "player0")).endswith("0")
+        out.append({"ply": ply, "root_value": float(rv), "root_value_p0": float(rv) if player0 else -float(rv)})
+    return out
+
+
+def _debug_trajectory(run_name: str, artifact_path: str, record_index: int, checkpoint: str, max_points: int = 160) -> dict[str, object]:
+    run_dir = _debug_resolve_run_dir(run_name)
+    if run_dir is None:
+        raise ValueError("Unknown training run")
+    record, _players, _records = _debug_open_record(run_name, artifact_path, record_index)
+    action_ids = [int(a) for a in record.action_ids]
+    total = len(action_ids)
+    ckpt_path = _debug_resolve_checkpoint(run_name, checkpoint)
+
+    # Evaluate plies 0..total, strided so a long game stays bounded (one forward
+    # per point). The stride is surfaced so the UI never implies full coverage.
+    stride = max(1, -(-(total + 1) // max_points))
+    plies = list(range(0, total + 1, stride))
+    if plies[-1] != total:
+        plies.append(total)
+    sequences = [action_ids[:p] for p in plies]
+
+    signature = _debug_signature(f"trajectory:{stride}", ckpt_path, action_ids, max_points)
+    raw = _debug_worker().cached(
+        signature, "reeval", checkpoint=str(ckpt_path), sequences=sequences, timeout=debug_service.DEFAULT_TIMEOUT
+    )
+    reeval = []
+    for entry in raw.get("values", []):
+        cp = int(entry.get("current_player", 0))
+        value = float(entry.get("value", 0.0))
+        reeval.append({"ply": int(entry["ply"]), "value": value, "current_player": cp,
+                       "value_p0": value if cp == 0 else -value})
+
+    return {
+        "run": run_name,
+        "path": artifact_path,
+        "record": record_index,
+        "total": total,
+        "stride": stride,
+        "checkpoint": ckpt_path.name,
+        "winner": record.winner,
+        "reeval": reeval,
+        "recorded": _debug_recorded_trajectory(run_dir, artifact_path, record.game_id),
+    }
 
 
 def _training_artifacts_page(

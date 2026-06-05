@@ -198,10 +198,17 @@ def bridge_diagnostics():
             continue
         vd = d.get("vs_dense_cnn_e24") or {}
         vs = d.get("vs_sealbot") or {}
+        # The dashboard's eval panel is the "SealBot Evaluation Trend" and renders
+        # games/wins/losses/mean_turns. vs_dense_cnn is SKIPPED whenever the
+        # dense_cnn e24 baseline checkpoint is absent (it was lost), so sourcing the
+        # display W/L/turns from vd left them all null -> the panel rendered blank.
+        # Prefer the SealBot leg (which actually ran) for those fields; fall back to
+        # dense_cnn only if SealBot is the one missing. Both win-rate fields kept.
+        primary = vs if vs.get("games") is not None else vd
         out = {
             "status": "completed", "epoch": _disp(ep),
-            "games": vd.get("games"), "completed": vd.get("completed"),
-            "wins": vd.get("wins"), "losses": vd.get("losses"), "mean_turns": vd.get("mean_turns"),
+            "games": primary.get("games"), "completed": primary.get("completed"),
+            "wins": primary.get("wins"), "losses": primary.get("losses"), "mean_turns": primary.get("mean_turns"),
             "win_rate_vs_dense_cnn_e24": vd.get("win_rate"), "win_rate_vs_sealbot": vs.get("win_rate"),
         }
         _write_all(f"dense_cnn.evaluation.epoch_{_disp(ep):06d}.json", json.dumps(out))
@@ -213,6 +220,13 @@ def bridge_diagnostics():
             "searched_positions": latest_sp.get("searched_positions"),
             "search_positions_per_second": latest_sp.get("search_positions_per_second"),
             "positions_per_second": latest_sp.get("positions_per_second"),
+            # KataGo Playout Cap Randomization: surface the full/fast mix + recorded-row
+            # count (recorded ~= half of searched when PCR is on). All .get -> safe/None
+            # when absent (pre-PCR shards), so the panel degrades cleanly.
+            "pcr_enabled": latest_sp.get("pcr_enabled"),
+            "recorded_positions": latest_sp.get("recorded_positions"),
+            "full_search_count": latest_sp.get("full_search_count"),
+            "fast_search_count": latest_sp.get("fast_search_count"),
             # Non-finite-logit sanitization audit (0 in a healthy run; non-zero is a
             # red flag and drives training exclusion -- surfaced at a glance here).
             "sanitized_logit_events": latest_sp.get("sanitized_logit_events"),
@@ -395,10 +409,13 @@ def bridge_baseline_eval():
     vd = d.get("vs_dense_cnn_e24") or {}
     vs = d.get("vs_sealbot") or {}
     # Pre-RL baseline = display epoch 0 (the seed anchor; RL epochs start at 1).
+    # Prefer the SealBot leg for the displayed W/L/turns (see bridge_diagnostics):
+    # vs_dense_cnn is skipped when the baseline checkpoint is absent.
+    primary = vs if vs.get("games") is not None else vd
     out = {
         "status": "completed", "epoch": _disp(-1), "baseline": True,
-        "games": vd.get("games"), "completed": vd.get("completed"),
-        "wins": vd.get("wins"), "losses": vd.get("losses"), "mean_turns": vd.get("mean_turns"),
+        "games": primary.get("games"), "completed": primary.get("completed"),
+        "wins": primary.get("wins"), "losses": primary.get("losses"), "mean_turns": primary.get("mean_turns"),
         "win_rate_vs_dense_cnn_e24": vd.get("win_rate"), "win_rate_vs_sealbot": vs.get("win_rate"),
     }
     _write_all(f"dense_cnn.evaluation.epoch_{_disp(-1):06d}.json", json.dumps(out))

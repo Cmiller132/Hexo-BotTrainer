@@ -63,15 +63,22 @@ def _move_temperature(
     decay_moves: int,
     schedule: tuple[tuple[int, float], ...] = (),
     floor: float = 0.0,
+    halflife: float = 0.0,
 ) -> float:
     """Played-move temperature at ply `move_index` (copy of dense_cnn's rule).
 
-    `schedule` (sorted ``(move, temp)`` anchors) takes precedence: piecewise
-    linear, held at the first anchor before it, the final slope continued past
-    the last anchor down to `floor`. Otherwise linear decay `initial`->`final`
-    over `decay_moves`, held flat after. The opening explores, the endgame sharpens.
+    `halflife` (KataGo-style smooth exponential decay) takes precedence when > 0:
+    ``temp = floor + (initial - floor) * 2**(-move_index / halflife)`` — starts at
+    `initial`, halves the gap to `floor` every `halflife` plies, asymptotes to `floor`
+    (honored late-game floor, never goes greedy). Else `schedule` (sorted
+    ``(move, temp)`` anchors) takes precedence: piecewise linear, held at the first
+    anchor before it, the final slope continued past the last anchor down to `floor`.
+    Otherwise linear decay `initial`->`final` over `decay_moves`, held flat after.
+    The opening explores, the endgame sharpens.
     """
 
+    if halflife > 0.0:
+        return float(floor + (initial - floor) * (2.0 ** (-float(move_index) / halflife)))
     if schedule:
         first_move, first_temp = schedule[0]
         if move_index <= first_move:
@@ -91,6 +98,42 @@ def _move_temperature(
         return initial
     fraction = min(move_index, decay_moves) / decay_moves
     return initial + (final - initial) * fraction
+
+
+_PCR_MASK = (1 << 64) - 1
+
+
+def _pcr_is_full(
+    base_seed: int, epoch: int, game_key: int, move_index: int, full_proportion: float
+) -> bool:
+    """KataGo Playout Cap Randomization per-move coin (Wu 2020).
+
+    Returns True for a FULL search (large visit cap, recorded as a training row,
+    with Dirichlet noise + forced playouts + the temperature schedule) with
+    probability ``full_proportion``, else False for a FAST search (small cap, NOT
+    recorded, no noise, played greedily). The draw is a deterministic splitmix64
+    hash of ``(base_seed, epoch, game_key, move_index)`` so the full/fast schedule
+    is reproducible AND decorrelated across games/moves/epochs (the unique move
+    coordinate avoids the correlated-noise trap the per-round search seed fixed).
+    """
+
+    if full_proportion >= 1.0:
+        return True
+    if full_proportion <= 0.0:
+        return False
+    x = (
+        (int(base_seed) & _PCR_MASK)
+        ^ ((int(epoch) * 0x9E3779B97F4A7C15) & _PCR_MASK)
+        ^ ((int(game_key) * 0xC2B2AE3D27D4EB4F) & _PCR_MASK)
+        ^ ((int(move_index) * 0x165667B19E3779F9) & _PCR_MASK)
+    ) & _PCR_MASK
+    # splitmix64 finalizer.
+    x = (x + 0x9E3779B97F4A7C15) & _PCR_MASK
+    x = ((x ^ (x >> 30)) * 0xBF58476D1CE4E5B9) & _PCR_MASK
+    x = ((x ^ (x >> 27)) * 0x94D049BB133111EB) & _PCR_MASK
+    x = (x ^ (x >> 31)) & _PCR_MASK
+    unit = (x >> 11) * (1.0 / float(1 << 53))
+    return unit < float(full_proportion)
 
 
 def _policy_entropy(pairs: Sequence[tuple[int, float]]) -> tuple[float, float, int]:
@@ -187,6 +230,18 @@ class SelfPlayResult:
     effective_samples: int = 0           # rows actually written (= raw after duplication)
     policy_surprise_mean: float = 0.0    # mean KL(visits||prior) over written positions
     frequency_weight_mean: float = 0.0   # mean per-row duplication weight (1.0 when off)
+    # KataGo Playout Cap Randomization (see _pcr_is_full / HEXGT_PCR_KATAGO_MAPPING.md).
+    # When OFF, every searched position is a full search and recorded (full==searched,
+    # fast==0), so these stay consistent with a non-PCR run.
+    pcr_enabled: bool = False
+    pcr_full_proportion: float = 0.0
+    pcr_full_visits: int = 0             # full-search visit cap (= search_visits)
+    pcr_fast_visits: int = 0             # fast-search visit cap
+    full_search_count: int = 0           # positions searched at the full cap (recorded)
+    fast_search_count: int = 0           # positions searched at the fast cap (NOT recorded)
+    recorded_positions: int = 0          # positions that became training rows (== full)
+    pcr_fast_rows_excluded: int = 0      # finalized rows dropped because they were fast moves
+    mean_search_visits: float = 0.0      # mean visits per searched position (full+fast)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -234,6 +289,16 @@ class SelfPlayResult:
             "effective_samples": self.effective_samples,
             "policy_surprise_mean": self.policy_surprise_mean,
             "frequency_weight_mean": self.frequency_weight_mean,
+            # Playout Cap Randomization
+            "pcr_enabled": self.pcr_enabled,
+            "pcr_full_proportion": self.pcr_full_proportion,
+            "pcr_full_visits": self.pcr_full_visits,
+            "pcr_fast_visits": self.pcr_fast_visits,
+            "full_search_count": self.full_search_count,
+            "fast_search_count": self.fast_search_count,
+            "recorded_positions": self.recorded_positions,
+            "pcr_fast_rows_excluded": self.pcr_fast_rows_excluded,
+            "mean_search_visits": self.mean_search_visits,
         }
 
 
@@ -338,6 +403,26 @@ def run_selfplay_games(
     surprise_sum = 0.0
     freq_sum = 0.0
     surprise_n = 0
+    # KataGo Playout Cap Randomization (see _pcr_is_full / HEXGT_PCR_KATAGO_MAPPING.md).
+    # FULL searches use selfplay.search_visits (recorded, noise + forced playouts +
+    # temperature); FAST searches use pcr_fast_visits (NOT recorded, no noise, greedy).
+    pcr_enabled = bool(selfplay.pcr_enabled)
+    pcr_full_proportion = float(selfplay.pcr_full_proportion)
+    full_visits = int(selfplay.search_visits)
+    fast_visits = int(selfplay.pcr_fast_visits)
+    if pcr_enabled:
+        if not 0.0 < pcr_full_proportion <= 1.0:
+            raise ValueError(
+                f"pcr_full_proportion must be in (0, 1], got {pcr_full_proportion!r}"
+            )
+        if fast_visits < 1:
+            raise ValueError(
+                f"pcr_fast_visits must be >= 1 when PCR is enabled, got {fast_visits!r}"
+            )
+    full_search_count = 0
+    fast_search_count = 0
+    recorded_positions = 0
+    pcr_fast_rows_excluded = 0
     next_game_index = 0
     active: list[dict[str, Any]] = []
     started = perf_counter()
@@ -383,113 +468,171 @@ def run_selfplay_games(
             and len(game["actions"]) < selfplay.max_actions
         ]
         if playable:
-            move_temperatures = [
-                _move_temperature(
-                    len(game["actions"]),
-                    initial=selfplay.temperature,
-                    final=selfplay.final_temperature,
-                    decay_moves=selfplay.temperature_decay_moves,
-                    schedule=selfplay.temperature_schedule,
-                    floor=selfplay.temperature_floor,
+            # KataGo Playout Cap Randomization: assign each playable game's CURRENT
+            # move to a FULL or FAST search by a deterministic per-(game, move) coin.
+            # FULL == search_visits, recorded, with Dirichlet noise + forced playouts +
+            # the temperature schedule. FAST == pcr_fast_visits, NOT recorded, no noise,
+            # no forced playouts, played greedily. Each subset is searched in its own
+            # batched run() call (leaves still coalesce within the subset), preserving
+            # the batched-throughput property. When PCR is off there is one subset (all
+            # full), identical to the pre-PCR single call. See HEXGT_PCR_KATAGO_MAPPING.md.
+            if pcr_enabled:
+                full_games: list[dict[str, Any]] = []
+                fast_games: list[dict[str, Any]] = []
+                for game in playable:
+                    bucket = (
+                        full_games
+                        if _pcr_is_full(
+                            base_seed, epoch, int(game["search_key"]),
+                            len(game["actions"]), pcr_full_proportion,
+                        )
+                        else fast_games
+                    )
+                    bucket.append(game)
+                search_specs = [(full_games, True), (fast_games, False)]
+            else:
+                search_specs = [(playable, True)]
+            round_seed_base = base_seed + epoch * 1_000_000 + 100_000 + search_round
+            for spec_index, (spec_games, is_full) in enumerate(search_specs):
+                if not spec_games:
+                    continue
+                spec_visits = full_visits if is_full else fast_visits
+                if is_full:
+                    # Full searches carry the exploration machinery (KataGo: full only).
+                    move_temperatures = [
+                        _move_temperature(
+                            len(game["actions"]),
+                            initial=selfplay.temperature,
+                            final=selfplay.final_temperature,
+                            decay_moves=selfplay.temperature_decay_moves,
+                            schedule=selfplay.temperature_schedule,
+                            floor=selfplay.temperature_floor,
+                            halflife=selfplay.temperature_halflife,
+                        )
+                        for game in spec_games
+                    ]
+                    spec_alpha = (
+                        selfplay.root_dirichlet_total_alpha
+                        if selfplay.root_dirichlet_noise_enabled
+                        else None
+                    )
+                    spec_fraction = (
+                        selfplay.root_dirichlet_noise_fraction
+                        if selfplay.root_dirichlet_noise_enabled
+                        else None
+                    )
+                    spec_forced_k = selfplay.forced_playout_k
+                else:
+                    # Fast searches run clean: no Dirichlet noise, no forced playouts,
+                    # greedy move selection (temperature 0 -> argmax of the visit policy).
+                    move_temperatures = [0.0] * len(spec_games)
+                    spec_alpha = None
+                    spec_fraction = None
+                    spec_forced_k = 0.0
+                # Distinct seed per subset so full/fast noise + sampling stay decorrelated.
+                spec_seed = round_seed_base + spec_index * 0x5DEECE66D
+                search_started = perf_counter()
+                sanitize_before = inference.sanitized_logit_total
+                searches = mcts_session.run(
+                    [game["search_key"] for game in spec_games],
+                    [game["state"] for game in spec_games],
+                    inference,
+                    visits=spec_visits,
+                    c_puct=selfplay.c_puct,
+                    temperature=selfplay.temperature,
+                    seed=spec_seed,
+                    virtual_batch_size=vbatch,
+                    active_root_limit=selfplay.mcts_active_root_limit,
+                    root_dirichlet_total_alpha=spec_alpha,
+                    root_dirichlet_noise_fraction=spec_fraction,
+                    root_policy_temperature=selfplay.root_policy_temperature,
+                    fpu_reduction=selfplay.fpu_reduction,
+                    virtual_loss=selfplay.virtual_loss,
+                    widening_policy_mass=selfplay.widening_policy_mass,
+                    widening_max_children=selfplay.widening_max_children,
+                    widening_min_children=selfplay.widening_min_children,
+                    forced_playout_k=spec_forced_k,
+                    move_temperatures=move_temperatures,
                 )
-                for game in playable
-            ]
-            search_started = perf_counter()
-            sanitize_before = inference.sanitized_logit_total
-            searches = mcts_session.run(
-                [game["search_key"] for game in playable],
-                [game["state"] for game in playable],
-                inference,
-                visits=selfplay.search_visits,
-                c_puct=selfplay.c_puct,
-                temperature=selfplay.temperature,
-                seed=base_seed + epoch * 1_000_000 + 100_000 + search_round,
-                virtual_batch_size=vbatch,
-                active_root_limit=selfplay.mcts_active_root_limit,
-                root_dirichlet_total_alpha=(
-                    selfplay.root_dirichlet_total_alpha
-                    if selfplay.root_dirichlet_noise_enabled
-                    else None
-                ),
-                root_dirichlet_noise_fraction=(
-                    selfplay.root_dirichlet_noise_fraction
-                    if selfplay.root_dirichlet_noise_enabled
-                    else None
-                ),
-                root_policy_temperature=selfplay.root_policy_temperature,
-                fpu_reduction=selfplay.fpu_reduction,
-                virtual_loss=selfplay.virtual_loss,
-                widening_policy_mass=selfplay.widening_policy_mass,
-                widening_max_children=selfplay.widening_max_children,
-                widening_min_children=selfplay.widening_min_children,
-                forced_playout_k=selfplay.forced_playout_k,
-                move_temperatures=move_temperatures,
-            )
-            search_round += 1
-            mcts_search_elapsed += perf_counter() - search_started
-            # Conservative round-level sanitization taint: the native session
-            # coalesces the in-flight leaves of ALL concurrent games into one batched
-            # eval, so Python cannot attribute a sanitized leaf to a single game/
-            # position (that needs a Rust-side per-leaf signal). A sanitized leaf still
-            # backs up into the per-game root statistics, so when ANY logit was
-            # sanitized this round we flag EVERY position decided in it and exclude
-            # them at write time. Rare in a healthy model; the counters surface it.
-            round_tainted = inference.sanitized_logit_total > sanitize_before
-            if round_tainted:
-                sanitized_search_rounds += 1
-            if len(searches) != len(playable):
-                raise RuntimeError(
-                    f"hexgt MCTS returned {len(searches)} results for {len(playable)} playable games"
-                )
-            for game, search, temp in zip(playable, searches, move_temperatures):
-                searched_positions += 1
-                mcts_simulations += int(search.visits)
-                state = game["state"]
-                visit_pairs = list(search.visit_policy)
-                prior_pairs = list(search.root_prior_policy)
-                v_ent, v_top, v_support = _policy_entropy(visit_pairs)
-                p_ent, _p_top, _p_support = _policy_entropy(prior_pairs)
-                ent_visit_sum += v_ent
-                ent_prior_sum += p_ent
-                top_visit_sum += v_top
-                cand_count_sum += len(prior_pairs)
-                if v_top >= _FORCED_THRESHOLD:
-                    forced_decisions += 1
-                sample = sample_from_state(
-                    state,
-                    game_id=game["game_id"],
-                    turn_index=len(game["actions"]),
-                    policy=visit_pairs,
-                    root_prior_policy=prior_pairs,
-                    metadata={"epoch": epoch, "search_visits": search.visits},
-                )
+                mcts_search_elapsed += perf_counter() - search_started
+                # Conservative round-level sanitization taint: the native session
+                # coalesces the in-flight leaves of ALL concurrent games into one batched
+                # eval, so Python cannot attribute a sanitized leaf to a single game/
+                # position (that needs a Rust-side per-leaf signal). A sanitized leaf still
+                # backs up into the per-game root statistics, so when ANY logit was
+                # sanitized this subset's run we flag EVERY position decided in it and
+                # exclude them at write time. Rare in a healthy model; counters surface it.
+                round_tainted = inference.sanitized_logit_total > sanitize_before
                 if round_tainted:
-                    # Flag so finalize/write can exclude this position from training
-                    # targets (a sanitized neutral output must not become a target).
-                    sample = replace(
-                        sample, metadata={**dict(sample.metadata), "search_sanitized": True}
+                    sanitized_search_rounds += 1
+                if len(searches) != len(spec_games):
+                    raise RuntimeError(
+                        f"hexgt MCTS returned {len(searches)} results for {len(spec_games)} playable games"
                     )
-                game["pending"].append((sample.current_player, sample, search.root_value))
-                if game["trace"] is not None:
-                    game["trace"].append(
-                        {
-                            "move": len(game["actions"]),
-                            "player": str(sample.current_player),
-                            "action_id": int(search.action_id),
-                            "root_value": float(search.root_value),
-                            "visits": int(search.visits),
-                            "candidates": int(len(prior_pairs)),
-                            "visit_entropy": float(v_ent),
-                            "prior_entropy": float(p_ent),
-                            "top_visit_fraction": float(v_top),
-                            "visit_support": int(v_support),
-                            "temperature": float(temp),
-                        }
+                for game, search, temp in zip(spec_games, searches, move_temperatures):
+                    searched_positions += 1
+                    mcts_simulations += int(search.visits)
+                    if is_full:
+                        full_search_count += 1
+                        recorded_positions += 1
+                    else:
+                        fast_search_count += 1
+                    state = game["state"]
+                    visit_pairs = list(search.visit_policy)
+                    prior_pairs = list(search.root_prior_policy)
+                    v_ent, v_top, v_support = _policy_entropy(visit_pairs)
+                    p_ent, _p_top, _p_support = _policy_entropy(prior_pairs)
+                    # Play-style / data-quality aggregates describe the RECORDED (full)
+                    # positions only, so they stay comparable to a non-PCR run (where
+                    # every searched position is recorded). Fast moves are counted but
+                    # not folded into these means.
+                    if is_full:
+                        ent_visit_sum += v_ent
+                        ent_prior_sum += p_ent
+                        top_visit_sum += v_top
+                        cand_count_sum += len(prior_pairs)
+                        if v_top >= _FORCED_THRESHOLD:
+                            forced_decisions += 1
+                    sample = sample_from_state(
+                        state,
+                        game_id=game["game_id"],
+                        turn_index=len(game["actions"]),
+                        policy=visit_pairs,
+                        root_prior_policy=prior_pairs,
+                        metadata={"epoch": epoch, "search_visits": search.visits},
                     )
-                engine.apply_action(
-                    state, engine.PlacementAction(unpack_coord_id(search.action_id))
-                )
-                game["actions"].append(search.action_id)
+                    # Tag the PCR class so the write step keeps only full-search rows as
+                    # training data (KataGo records full only). Fast rows still feed the
+                    # DENSE STV/opp-policy aux chain in `pending` (Option A), then drop.
+                    sample_meta = {**dict(sample.metadata), "pcr_full": bool(is_full)}
+                    if round_tainted:
+                        # Flag so finalize/write can exclude this position from training
+                        # targets (a sanitized neutral output must not become a target).
+                        sample_meta["search_sanitized"] = True
+                    sample = replace(sample, metadata=sample_meta)
+                    game["pending"].append((sample.current_player, sample, search.root_value))
+                    if game["trace"] is not None:
+                        game["trace"].append(
+                            {
+                                "move": len(game["actions"]),
+                                "player": str(sample.current_player),
+                                "action_id": int(search.action_id),
+                                "root_value": float(search.root_value),
+                                "visits": int(search.visits),
+                                "pcr_full": bool(is_full),
+                                "candidates": int(len(prior_pairs)),
+                                "visit_entropy": float(v_ent),
+                                "prior_entropy": float(p_ent),
+                                "top_visit_fraction": float(v_top),
+                                "visit_support": int(v_support),
+                                "temperature": float(temp),
+                            }
+                        )
+                    engine.apply_action(
+                        state, engine.PlacementAction(unpack_coord_id(search.action_id))
+                    )
+                    game["actions"].append(search.action_id)
+            search_round += 1
 
         finished = [
             game
@@ -507,18 +650,30 @@ def run_selfplay_games(
             )
             # Persist the full game record (incl. the terminal/winning move).
             _write_game_record(record_file, game, winner, truncated, selfplay.max_actions)
+            # Finalize over the DENSE pending trajectory (full AND fast moves) so the
+            # STV (EMA-of-future-root-value) and opp-policy aux targets keep their
+            # per-ply horizon semantics; PCR fast rows are dropped below, not here.
             finalized = finalize_game_samples(
                 game["pending"],
                 winner,
                 horizons,
                 truncated=truncated,
                 soft_z_lambda=config.samples.soft_z_lambda,
+                # PCR: only train the opponent-policy head on full->full transitions
+                # (mask the target when the next opponent move was a fast search).
+                mask_opp_from_fast=pcr_enabled,
             )
             # EXCLUDE positions whose search round was sanitization-tainted: a
             # near-uniform prior + neutral value produced by the fp16-overflow guard
             # is not a trustworthy training target. The drop count is surfaced.
-            to_write = [s for s in finalized if not s.metadata.get("search_sanitized")]
-            sanitized_samples_excluded += len(finalized) - len(to_write)
+            clean = [s for s in finalized if not s.metadata.get("search_sanitized")]
+            sanitized_samples_excluded += len(finalized) - len(clean)
+            # KataGo Playout Cap Randomization: record ONLY full-search positions as
+            # training rows. Fast moves advanced the game and fed the dense STV/opp
+            # chain above, but never become policy/value targets. `pcr_full` defaults
+            # True so a non-PCR shard (flag always True) keeps every row unchanged.
+            to_write = [s for s in clean if s.metadata.get("pcr_full", True)]
+            pcr_fast_rows_excluded += len(clean) - len(to_write)
             # KataGo policy-surprise weighting: repeat each position by a frequency
             # weight driven by KL(visit-policy || root-prior), so positions where the
             # search most disagreed with the network prior are trained on more. The
@@ -552,7 +707,9 @@ def run_selfplay_games(
                 win_counts[winner] += 1
             else:
                 win_counts["draw"] += 1
-            for fs in finalized:
+            # |value| over the RECORDED rows (the training targets), so it reflects the
+            # data the model actually learns from (and stays comparable under PCR).
+            for fs in to_write:
                 abs_value_sum += abs(float(fs.value))
                 abs_value_n += 1
             if truncated:
@@ -583,6 +740,9 @@ def run_selfplay_games(
 
     elapsed = perf_counter() - started
     sp = max(1, searched_positions)
+    # Play-style / data-quality means are accumulated over RECORDED (full-search)
+    # positions only, so divide by that count (== searched when PCR is off).
+    rp = max(1, recorded_positions)
     n_games = max(1, completed_games + truncated_games)
     opening_counts = Counter(openings)
     move2_counts = Counter(move2_choices)
@@ -600,10 +760,10 @@ def run_selfplay_games(
         search_positions_per_second=searched_positions / max(mcts_search_elapsed, 1e-9),
         shard_paths=shard_paths,
         example_games=example_games,
-        mean_visit_entropy=ent_visit_sum / sp,
-        mean_prior_entropy=ent_prior_sum / sp,
-        mean_top_visit_fraction=top_visit_sum / sp,
-        mean_candidate_count=cand_count_sum / sp,
+        mean_visit_entropy=ent_visit_sum / rp,
+        mean_prior_entropy=ent_prior_sum / rp,
+        mean_top_visit_fraction=top_visit_sum / rp,
+        mean_candidate_count=cand_count_sum / rp,
         decisive_fraction=completed_games / n_games,
         game_length_median=_percentile(game_lengths, 50),
         game_length_mean=(sum(game_lengths) / len(game_lengths)) if game_lengths else 0.0,
@@ -617,7 +777,7 @@ def run_selfplay_games(
         win_p1_fraction=win_counts["player1"] / n_games,
         draw_fraction=win_counts["draw"] / n_games,
         mean_abs_value=abs_value_sum / max(1, abs_value_n),
-        forced_move_fraction=forced_decisions / sp,
+        forced_move_fraction=forced_decisions / rp,
         sanitized_logit_events=int(inference.sanitized_logit_total),
         sanitized_positions=int(inference.sanitized_graph_total),
         sanitized_search_rounds=int(sanitized_search_rounds),
@@ -625,6 +785,15 @@ def run_selfplay_games(
         effective_samples=int(effective_samples),
         policy_surprise_mean=(surprise_sum / surprise_n) if surprise_n else 0.0,
         frequency_weight_mean=(freq_sum / surprise_n) if surprise_n else 0.0,
+        pcr_enabled=pcr_enabled,
+        pcr_full_proportion=(pcr_full_proportion if pcr_enabled else 0.0),
+        pcr_full_visits=full_visits,
+        pcr_fast_visits=(fast_visits if pcr_enabled else 0),
+        full_search_count=int(full_search_count),
+        fast_search_count=int(fast_search_count),
+        recorded_positions=int(recorded_positions),
+        pcr_fast_rows_excluded=int(pcr_fast_rows_excluded),
+        mean_search_visits=(mcts_simulations / sp),
     )
 
 

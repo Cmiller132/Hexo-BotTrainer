@@ -10,6 +10,16 @@
         "$env:PYTHONPATH=(('hexo_engine','hexo_utils','hexo_runner','hexo_train','hexo_models','hexo_frontend') | ForEach-Object { \"E:\\Hexo-BotTrainer\\packages\\$_\\python\" }) -join ';'; C:\\Python314\\python.exe -m hexo_frontend.web --host 0.0.0.0 --port 8080 --sealbot-path E:/SealBot"
       ],
       "port": 8080
+    },
+    {
+      "name": "hexo-debug-worktree",
+      "runtimeExecutable": "powershell",
+      "runtimeArgs": [
+        "-NoProfile",
+        "-Command",
+        "$env:PYTHONPATH=(('hexo_frontend','hexo_runner') | ForEach-Object { \"E:\\Hexo-BotTrainer-hexgt\\packages\\$_\\python\" }) -join ';'; C:\\Python314\\python.exe -m hexo_frontend.web --host 127.0.0.1 --port 8131"
+      ],
+      "port": 8131
     }
   ]
 }

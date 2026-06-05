@@ -16,6 +16,7 @@ Usage (under the supervisor, see _rl_supervise.sh):
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import os
 import random
@@ -259,6 +260,17 @@ def main():
     ap.add_argument("--batch", type=int, default=128)
     ap.add_argument("--lr", type=float, default=2.0e-4)
     ap.add_argument("--warmup", type=int, default=200)
+    # Post-warmup exponential LR decay (KataGo-style, keyed to global_step so it is
+    # resume-safe with NO scheduler state — recomputed from the checkpointed step each
+    # train step; survives the frequent supervisor bounces). lr = base until
+    # --lr-decay-start-step (anchor at the engage step -> no discontinuity with the
+    # prior flat 2e-4), then halve every --lr-decay-halflife-steps, clamped at --lr-min.
+    # MUST be threaded into the cfg dict (driver does not read TOML [training]). Default
+    # OFF. See docs/analysis/HEXGT_PCR_KATAGO_MAPPING.md / the LR-decay rationale.
+    ap.add_argument("--lr-decay", action=argparse.BooleanOptionalAction, default=False)
+    ap.add_argument("--lr-decay-start-step", type=int, default=0)
+    ap.add_argument("--lr-decay-halflife-steps", type=float, default=0.0)
+    ap.add_argument("--lr-min", type=float, default=0.0)
     # Aux loss weight shared by the 3 short-term-value (lookahead) heads. Default
     # 0.25 (the config default) is a no-op; the run passes 0.10 so the 3 stv heads
     # collectively (~0.10x7.8=0.78 effective) ~= the value head instead of ~3x it,
@@ -283,7 +295,23 @@ def main():
     ap.add_argument("--final-temperature", type=float, default=0.2)
     ap.add_argument("--temperature-decay-moves", type=int, default=30)
     ap.add_argument("--temperature-floor", type=float, default=0.1)
+    # KataGo-style smooth exponential-halflife move temperature. >0 takes precedence
+    # over the linear decay: temp(ply)=floor+(temperature-floor)*2**(-ply/halflife).
+    # MUST be threaded into the cfg dict below (the driver does not read TOML [selfplay]).
+    ap.add_argument("--temperature-halflife", type=float, default=0.0)
     ap.add_argument("--forced-playout-k", type=float, default=2.0)
+    # KataGo Playout Cap Randomization (Wu 2020). Per MOVE, with prob
+    # --pcr-full-proportion do a FULL search (--visits, recorded, with noise + forced
+    # playouts + the temperature schedule); else a FAST search (--pcr-fast-visits, NOT
+    # recorded, no noise, greedy). Only full positions become policy/value training
+    # rows (~halves rows/epoch); fast moves still advance the game + feed the dense STV/
+    # opp aux chain. MUST be threaded into the cfg dict (the driver does not read TOML
+    # [selfplay]) — same trap as --soft-z-lambda / --temperature-halflife. Default OFF
+    # so the relaunch command is byte-identical until the launcher opts in. See
+    # docs/analysis/HEXGT_PCR_KATAGO_MAPPING.md. n=170 == KataGo's 1/6 ratio at N=1024.
+    ap.add_argument("--pcr", action=argparse.BooleanOptionalAction, default=False)
+    ap.add_argument("--pcr-full-proportion", type=float, default=0.5)
+    ap.add_argument("--pcr-fast-visits", type=int, default=170)
     # MCTS nucleus widening. Defaults match configs/hexgt_model2.toml (documented
     # intent) + dense_cnn's 96x8 run. The driver previously passed NONE of these,
     # so they silently fell to the parse defaults (max_children=32), narrowing
@@ -301,6 +329,12 @@ def main():
     ap.add_argument("--policy-surprise", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--policy-surprise-uniform-fraction", type=float, default=0.5)
     ap.add_argument("--policy-surprise-max-weight", type=float, default=8.0)
+    # Soft-Z value-target blend: value = (1-lambda)*z + lambda*root_value at finalize.
+    # MUST be threaded into the cfg dict below (the driver does NOT read any TOML
+    # [samples] section, so a TOML soft_z_lambda is silently ignored -- same trap as
+    # policy_surprise). Default 0.5 (the prior behavior); the launcher sets 0 to
+    # disable soft-Z (pure hard outcome targets) per the 2026-06-04 owner decision.
+    ap.add_argument("--soft-z-lambda", type=float, default=0.5)
     # Eval
     ap.add_argument("--eval-every", type=int, default=2)
     ap.add_argument("--eval-games", type=int, default=40)
@@ -331,7 +365,12 @@ def main():
         "architecture": {"candidate_radius": args.n,
                          "short_term_value_horizons": list(STV_HORIZONS)},
         "training": {"learning_rate": args.lr, "warmup_steps": args.warmup, "batch_size": args.batch,
-                     "short_term_value_weight": args.short_term_value_weight},
+                     "short_term_value_weight": args.short_term_value_weight,
+                     # LR decay threaded here (driver does not read TOML [training]).
+                     "lr_decay_enabled": bool(args.lr_decay),
+                     "lr_decay_start_step": args.lr_decay_start_step,
+                     "lr_decay_halflife_steps": args.lr_decay_halflife_steps,
+                     "lr_min": args.lr_min},
         # Self-play row finalization. policy_surprise_* MUST be threaded here: the
         # driver does not read any TOML [samples] section, so omitting this leaves
         # the dataclass default policy_surprise_enabled=False (the bug that kept it
@@ -341,6 +380,7 @@ def main():
             "policy_surprise_enabled": bool(args.policy_surprise),
             "policy_surprise_uniform_fraction": args.policy_surprise_uniform_fraction,
             "policy_surprise_max_weight": args.policy_surprise_max_weight,
+            "soft_z_lambda": args.soft_z_lambda,
         },
         "selfplay": {
             "search_visits": args.visits, "max_actions": args.max_actions,
@@ -350,10 +390,15 @@ def main():
             "temperature": args.temperature, "final_temperature": args.final_temperature,
             "temperature_decay_moves": args.temperature_decay_moves,
             "temperature_floor": args.temperature_floor,
+            "temperature_halflife": args.temperature_halflife,
             "forced_playout_k": args.forced_playout_k,
             "widening_max_children": args.widening_max_children,
             "widening_min_children": args.widening_min_children,
             "widening_policy_mass": args.widening_policy_mass,
+            # KataGo Playout Cap Randomization (threaded here; TOML [selfplay] unread).
+            "pcr_enabled": bool(args.pcr),
+            "pcr_full_proportion": args.pcr_full_proportion,
+            "pcr_fast_visits": args.pcr_fast_visits,
         },
     })
 
@@ -432,6 +477,27 @@ def main():
             log(f"  (optimizer state restored from {Path(args.bc_seed).name if not latest.exists() else latest.name})", fh)
         except Exception as exc:  # optimizer state shape drift -> start fresh momentum
             log(f"  (optimizer state not restored: {exc})", fh)
+        # COLUMN-EXPANSION OPTIMIZER RECONCILIATION: Optimizer.load_state_dict maps
+        # saved moments to params POSITIONALLY and does NOT check per-tensor shapes,
+        # so a zero-init column-expansion (STV / value readout, e.g. 168->504) silently
+        # installs OLD-width exp_avg/exp_avg_sq onto a now-wider param; the mismatch
+        # only surfaces later inside adam.step()'s _foreach_lerp_ (RuntimeError: size
+        # of tensor a (168) must match b (504)) -- past the try/except above. Drop the
+        # stale per-param state for any param whose moment shape != the param shape so
+        # Adam reinitializes fresh ZERO moments for exactly those params (correct for
+        # the zero-init'd new columns), while every unchanged param keeps warm-start.
+        drifted = 0
+        for group in opt.param_groups:
+            for p in group["params"]:
+                st = opt.state.get(p)
+                if not st:
+                    continue
+                ea = st.get("exp_avg")
+                if ea is not None and tuple(ea.shape) != tuple(p.shape):
+                    opt.state.pop(p, None)
+                    drifted += 1
+        if drifted:
+            log(f"  (reset fresh momentum for {drifted} shape-drifted param(s) after column-expansion)", fh)
     if latest.exists() and "train_state" in ck:
         trainer.load_train_state(ck["train_state"])
 
@@ -456,7 +522,46 @@ def main():
         f"active={args.active} vbatch={args.vbatch} | train_steps/epoch={args.train_steps_per_epoch} "
         f"batch={args.batch} lr={args.lr} replay_window={args.replay_window_epochs} ep | "
         f"loss_w: policy={cfg.training.policy_weight} value={cfg.training.value_weight} "
-        f"opp={cfg.training.opp_policy_weight} stv={cfg.training.short_term_value_weight}", fh)
+        f"opp={cfg.training.opp_policy_weight} stv={cfg.training.short_term_value_weight} "
+        f"soft_z_lambda={cfg.samples.soft_z_lambda} policy_surprise={cfg.samples.policy_surprise_enabled}", fh)
+    _sp = cfg.selfplay
+    if _sp.temperature_halflife > 0:
+        _temp_desc = (f"halflife start={_sp.temperature} floor={_sp.temperature_floor} "
+                      f"halflife={_sp.temperature_halflife} "
+                      f"[t(0)={_sp.temperature_floor + (_sp.temperature - _sp.temperature_floor):.3f} "
+                      f"t(80)={_sp.temperature_floor + (_sp.temperature - _sp.temperature_floor) * 2 ** (-80 / _sp.temperature_halflife):.3f} "
+                      f"t(200)={_sp.temperature_floor + (_sp.temperature - _sp.temperature_floor) * 2 ** (-200 / _sp.temperature_halflife):.3f}]")
+    else:
+        _temp_desc = (f"linear start={_sp.temperature} final={_sp.final_temperature} "
+                      f"decay_moves={_sp.temperature_decay_moves} floor={_sp.temperature_floor}")
+    log(f"    move-temperature: {_temp_desc}", fh)
+    # PCR confirmation: a loud startup line so the effective full/fast caps + proportion
+    # are verifiable in the log (the driver builds cfg from CLI args, not TOML). When OFF
+    # this prints the plain full-search visit count so the line is always present.
+    if _sp.pcr_enabled:
+        _exp_visits = (_sp.pcr_full_proportion * _sp.search_visits
+                       + (1.0 - _sp.pcr_full_proportion) * _sp.pcr_fast_visits)
+        log(f"    PCR (KataGo playout-cap-randomization): ENABLED p_full={_sp.pcr_full_proportion} "
+            f"full_visits={_sp.search_visits} fast_visits={_sp.pcr_fast_visits} "
+            f"-> ~{_exp_visits:.0f} visits/move avg; full searches recorded (noise+forced-playouts"
+            f"+temperature), fast NOT recorded (no-noise, greedy). recorded rows/epoch ~halve.", fh)
+    else:
+        log(f"    PCR (KataGo playout-cap-randomization): DISABLED (every move full search "
+            f"@ {_sp.search_visits} visits, all recorded)", fh)
+    # LR-schedule confirmation incl. the EFFECTIVE LR at the resume step (so a bounce
+    # can be checked to resume at the right LR — the schedule is a pure function of the
+    # checkpointed global_step, so it is resume-safe with no scheduler state).
+    _tr = cfg.training
+    _cur_step = int(trainer.train_state.global_step)
+    _eff_lr = trainer._lr_at_step(_cur_step)
+    if _tr.lr_decay_enabled and _tr.lr_decay_halflife_steps > 0:
+        _hl = _tr.lr_decay_halflife_steps
+        log(f"    LR schedule: exp-decay base={_tr.learning_rate:.2e} start_step={_tr.lr_decay_start_step} "
+            f"halflife={_hl:.0f} steps min={_tr.lr_min:.2e} | effective LR @ step {_cur_step} = {_eff_lr:.3e} "
+            f"[+10k steps -> {max(_tr.lr_min, _tr.learning_rate * 2 ** (-max(0, _cur_step + 10000 - _tr.lr_decay_start_step) / _hl)):.3e}]", fh)
+    else:
+        log(f"    LR schedule: flat {_tr.learning_rate:.2e} (post-warmup {_tr.warmup_steps} steps); "
+            f"effective LR @ step {_cur_step} = {_eff_lr:.3e}", fh)
 
     def save(tag, rl_epoch, epoch_train_complete=True):
         payload = {
@@ -672,6 +777,15 @@ def main():
                     f"(run {run_sanitized_logits} logits/{run_sanitized_excluded} excl)"
                     if sp.sanitized_logit_events else ""
                 )
+                # PCR segment: full/fast mix, recorded rows, avg visits/move. Appended
+                # after the Q-fields (and the sanitization segment) so the existing
+                # dashboard selfplay-line parsing is unaffected. Empty when PCR is off.
+                pcr_str = (
+                    f" | PCR full={sp.full_search_count}/{sp.full_search_count + sp.fast_search_count} "
+                    f"rec={sp.recorded_positions} (~{sp.mean_search_visits:.0f}v/move "
+                    f"N={sp.pcr_full_visits}/n={sp.pcr_fast_visits} p={sp.pcr_full_proportion:.2f})"
+                    if sp.pcr_enabled else ""
+                )
                 log(f"epoch {rl_epoch} selfplay: {sp.completed_games}C/{sp.truncated_games}T games, "
                     f"{sp.searched_positions} pos, {sp.positions_per_second:.1f} pos/s | "
                     f"cand={sp.mean_candidate_count:.0f} | "
@@ -679,7 +793,7 @@ def main():
                     f"Q2 uniq_open={sp.opening_unique_fraction:.1%} m2H={sp.move2_entropy:.2f} | "
                     f"Q3 visitH={sp.mean_visit_entropy:.2f} priorH={sp.mean_prior_entropy:.2f} | "
                     f"Q4 |val|={sp.mean_abs_value:.2f} draw={sp.draw_fraction:.1%} | "
-                    f"Q5 forced={sp.forced_move_fraction:.1%}{saniti_str}", fh)
+                    f"Q5 forced={sp.forced_move_fraction:.1%}{saniti_str}{pcr_str}", fh)
                 # Per-epoch GPU reserved-memory peak for the self-play phase (the
                 # VRAM-binding phase): verifies the run holds the compiled+expandable
                 # envelope and flags any creep toward the card limit.
@@ -692,6 +806,17 @@ def main():
                     json.dump(sp.example_games, ex_fh)
 
             # --- 2) train over the recency-weighted, cap-bounded replay window ---
+            # Release the self-play inference reservation BEFORE training allocates.
+            # run_selfplay_games builds a local HexgtInference (MCTS session cache +
+            # vbatch=128 eval buffers) that goes out of scope on return but leaves
+            # ~5GB cached in the torch allocator; on this 12GB card the training
+            # batch + autograd graph + grads then crest the VRAM ceiling at the
+            # self-play->train transition (telemetry-confirmed OOM at epoch-0 train
+            # step ~6, 2026-06-04: nvidia-smi 7661->11978 MiB / 97.5%). Returning the
+            # cached pool first restores the headroom. Cost: one sync + gc per epoch.
+            if torch.cuda.is_available():
+                gc.collect()
+                torch.cuda.empty_cache()
             model.train()
             shards, weights, win_epochs, pool_pos = build_replay_window(rl_epoch)
             target = trainer.train_state.global_step + args.train_steps_per_epoch
@@ -724,7 +849,7 @@ def main():
             stv_str = "".join(f" {k.replace('stvalue_', 'stv')}={avg(k):.4f}" for k in stv_keys)
             log(f"epoch {rl_epoch} train: {comp_n} steps (step={trainer.train_state.global_step}) "
                 f"total={avg('total'):.4f} policy={avg('policy'):.4f} value={avg('value'):.4f} "
-                f"opp={avg('opp_policy'):.4f}{stv_str} prune={trainer.prune_rate:.1%} {ms_per:.0f}ms/step "
+                f"opp={avg('opp_policy'):.4f}{stv_str} prune={trainer.prune_rate:.1%} lr={avg('lr'):.2e} {ms_per:.0f}ms/step "
                 f"window={len(win_epochs)}ep[{span}] {len(shards)}sh "
                 f"pool~{pool_pos // 1000}k/{args.replay_pool_cap // 1000}k "
                 f"decay={args.replay_recency_decay}", fh)
