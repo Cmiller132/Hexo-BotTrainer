@@ -1,37 +1,33 @@
 # hexgnn sparse-graph speed spec — efficient re-representation, not deletion
 
-**Goal:** make hexgnn's per-position graph carry the **same information the model
-sees today, at lower cost** — so the GNN forward (memory-bound on edge-scale
-scatter/gather, ~60% of self-play wall) and the Rust featurizer (O(edges), ~38%)
-both get cheaper **without moving the model's behavior**. Throughput target: kill
-the 0%-idle GPU gaps and push pos/s up; we measure **how far the model's view
-actually moved** (KL on policy, Δ on value) at every gate, not just tactical
-safety.
+**Goal:** carry the **same information the model uses today, at lower cost**, so the
+GNN forward (memory-bound on edge-scale scatter/gather, ~60% of self-play wall) and
+the Rust featurizer (O(edges), ~38%) both get cheaper. Throughput: kill the
+0%-idle GPU gaps and raise pos/s. We **measure how far the model's view moves**
+(policy KL / value Δ on real positions) at every gate.
 
-This is a **moderate rewrite of the hexgnn lineage only** (forked Rust crate
-`packages/hexgnn/rust/` -> `hexo_models._rust.hexgnn`; the live hexgt module is
-untouched). It is **not** a new model and **not** a behavior simplification.
+Scope: a **moderate rewrite of the hexgnn lineage only** — forked Rust crate
+`packages/hexgnn/rust/` → `hexo_models._rust.hexgnn` (the halted hexgt module is
+untouched). **WS0 is done and gated green** (byte-identical fork). **The build is
+ON HOLD** pending owner approval of this design + the visits option (1/2/3 below).
 
 ---
 
-## 0. Non-negotiable: TSS is fully kept (and is separable from the GNN graph)
+## 0. Non-negotiable: TSS is fully kept, and is separable from the GNN graph
 
-Verified in the code: `threats.rs` operates on the engine **WindowStore**
-("no graph/feature construction, no network", `threats.rs:3`). `tactical_cells()`
-and `min_hitting_set()` read `state.board().windows()` directly. The entire TSS
-stack — WindowStore threat index, tactical injection at expansion (union of
-opponent >=4-window empties + own win-now cells, additive cap, forced first
-visits; `mcts_tree.rs:412-425,509-514,815-946`), phase-aware hitting-set leaf
-overrides (HARD WIN/LOSS), and the tactical move-selection guard — reads the
-WindowStore, **NOT** the sparsified GNN graph. So sparsifying the GNN graph
-**cannot** blind TSS.
+Verified: `threats.rs:3` — TSS operates on the engine **WindowStore**, "no
+graph/feature construction, no network." `tactical_cells()` / `min_hitting_set()`
+read `state.board().windows()` directly. The whole TSS stack (WindowStore threat
+index, tactical injection at expansion, phase-aware hitting-set HARD WIN/LOSS leaf
+overrides, tactical move-selection guard) reads the WindowStore, **not** the GNN
+graph. **Removing window *nodes* from the GNN graph does not touch TSS at all** —
+TSS never read the GNN window nodes; it reads the WindowStore.
 
 The ONE coupling: TSS injects tactical cells as tree children whose **priors come
-from the GNN eval**. Behavior is preserved iff every tactical cell remains in the
-candidate set. **Invariant T0:** the sparse candidate set force-includes
-`tactical_cells(state)` at radius 0 in every phase (it is already a strict subset
-today). Gate: the **full TSS test suite** (injection-additive, hitting-set
-override, move-guard, two-stone defense, VCF) stays green at **every** phase.
+from the GNN eval**, so those cells must remain candidates. **Invariant T0:** the
+candidate set always ⊇ `active-window empties ∪ tactical_cells(state)`. The **full
+TSS test suite is a hard gate at every phase** (injection-additive, hitting-set
+override, move-guard, two-stone defense, VCF).
 
 ---
 
@@ -39,184 +35,193 @@ override, move-guard, two-stone defense, VCF) stays green at **every** phase.
 
 - Wall: **GNN forward (GPU) ~60%**, Rust MCTS+featurize ~38%, py glue ~1.5%.
 - Forward op mix: matmul only ~13-26%; the rest is **elementwise + scatter/gather
-  over the edge-scale tensors** (`index_add_`, `index`, `add`, `clamp_min`,
-  `copy_`) => **memory-bandwidth-bound on EDGES**, partly launch-bound in eager
-  (compile recovers 2.2-3x).
-- Per-leaf graph grows ~7x opening->ply60: nodes 222->1569, **edges 1499->11420**,
-  candidates 215->1507. Edges are the enemy.
+  over edge-scale tensors** ⇒ **memory-bandwidth-bound on EDGES** (compile recovers
+  2.2-3x of the eager launch overhead).
+- Per-leaf graph grows ~7x opening→ply60: nodes 222→1569, **edges 1499→11420**,
+  candidates 215→1507. **Edges are the enemy.**
 
-Edge classes today (`candidates.rs:312-377`), directed counts:
-| class | construction | count driver |
-|---|---|---|
-| **CONTEXT** | SIDE hub <-> EVERY other node | `2*(N-1)` — grows with N |
-| **ADJACENCY** | stones+candidates within hex-dist 1 | ~6 * spatial nodes |
-| CANDIDATE_WINDOW | window <-> its empty cells | <=6 per window, **overlaps** |
-| STONE_WINDOW | window <-> its one-color stones | <=6 per window |
-| RECENCY | consecutive stones | ~2 * stones |
-
-CONTEXT and ADJACENCY dominate; both scale with **candidate count**.
+Edge classes today (`candidates.rs:312-377`), directed:
+| class | construction | midgame share (≈) |
+|---|---|--:|
+| **ADJACENCY** | stones+candidates within hex-dist 1 (~6/node) | ~55% |
+| **CONTEXT** | SIDE hub ↔ EVERY node (`2·(N-1)`) | ~27% |
+| CANDIDATE_/STONE_WINDOW | window-token hub ↔ member cells | ~13% |
+| RECENCY | consecutive stones | ~3% |
+| WINDOW NODES | count-3/4/5 tokens (extra nodes, not edges) | ~5-13% of nodes |
 
 ---
 
-## 2. The sparse representation — each edge class, re-represented to keep its contribution
+## 2. CHOSEN DESIGN (owner-directed): stones + candidates only, no window nodes, richer edges
 
-Principle: for each edge class, identify *what computation it feeds the model*,
-then deliver that computation at lower cost. Three tiers, by behavioral risk.
+**Node set = placed stones + candidate cells. No window tokens. No SIDE node.**
+One uniform candidate rule, no phase gating.
 
-### 2A. CONTEXT hub -> analytic broadcast (BEHAVIOR-EXACT, the flagship win)
-**What it contributes:** every node reads a 1-hop message from the SIDE hub, and
-SIDE reads a mean message from all nodes. Message into node `i` =
-`relu(W_ctx · h_side + edge_proj(attr_{side->i}))`, where `W_ctx · h_side` is
-**identical for all i** and only `edge_proj(attr_i)` (type one-hot + hex-distance)
-varies. SIDE's incoming = `mean_i relu(W_ctx · h_i + edge_proj(attr_{i->side}))`.
+### 2.1 Drop the SIDE node — pool instead (justified)
+The SIDE node's only jobs were (a) carry global scalars (phase one-hot, move
+number, own/opp stone counts) and (b) be the CONTEXT hub. Both are removable:
+- (a) **Broadcast the global scalars onto every node's feature vector** (they are
+  D6-invariant counts/phase — adding them to stones+candidates is exact and cheap).
+- (b) The value head already has a **PMA global pool** over all nodes; with the SIDE
+  node gone the value readout is **PMA-only** (`value_head_use_side=False`, already
+  supported + tested). The policy/opp heads are per-candidate and never needed SIDE.
 
-**Re-representation:** compute the CONTEXT class **analytically, with zero
-materialized edges** — precompute the shared `W_ctx·h_side` once, add the per-node
-`edge_proj(attr)` as a dense `(N, d)` op, `relu`, and fold into each node's
-aggregation; compute SIDE's incoming as a segment-mean over nodes. This is the
-**exact same output** (fp-identical up to reduction order), but removes the single
-largest edge class (`2*(N-1)`) from the scatter/gather. Touches the message-
-passing kernel (`architecture.py` RelationalMessagePassing) + the graph builder
-(stop emitting CONTEXT edges; flag the class as analytic). **Closeness: exact
-(KL~=0, |Δv|~=1e-6).** Biggest single forward win, zero behavior change.
+⇒ **The entire CONTEXT edge class (`2·(N-1)`, ~27% of midgame edges) and the SIDE
+node disappear.** Behavioral cost: the value head loses the SIDE-token readout but
+keeps the PMA pool + the global scalars now on every node — measured by closeness.
 
-### 2B. Window-hub edges -> dedup + shared aggregation (NEAR-EXACT)
-**What it contributes:** a candidate/stone connected to its windows receives one
-message per incident window; overlapping windows (same cell in multiple lines)
-emit **duplicate CANDIDATE_WINDOW edges** to the same candidate. The GNN
-mean-aggregates them, so what the candidate actually sees is the **mean window
-message**, and the per-window count/owner is **already in the candidate's features**
-(`F_CAND_OWN/OPP_WIN{3,4,5}`, `F_CAND_NWIN_*`).
+### 2.2 Remove window tokens as NODES; fold their info into features + edges
+Window nodes were a hub to avoid same-axis cliques. We remove the hub and deliver
+the same tactical relationship two ways:
 
-**Re-representation options (closeness-gated, pick by metric):**
-- (i) **Dedup**: collapse parallel candidate<->window edges of the same
-  (owner,count) into one weighted edge (weight = multiplicity) so the mean is
-  preserved exactly under a multiplicity-weighted aggregation. Near-exact.
-- (ii) **Aggregated window-class hubs**: replace per-window tokens with up to 6
-  aggregated hub nodes per (owner in {own,opp} x count in {3,4,5}); a candidate
-  connects to the hub(s) it belongs to. Cuts window nodes+edges hard midgame.
-  Changes the message (per-window geometry is lost, but it is D6-non-invariant
-  anyway and largely captured by features) -> **must pass the closeness gate**.
-Default to (i) (near-exact); promote (ii) only if the closeness metric stays
-within gate AND the TSS suite stays green (TSS does not read these edges, so it
-will).
+**(i) Richer NODE features (already mostly present).** Candidate features already
+summarize window context: `F_CAND_OWN_WIN{3,4,5}`, `F_CAND_OPP_WIN{3,4,5}`,
+`F_CAND_NWIN_{OWN,OPP}`, `F_CAND_COMPLETE_{OWN,OPP}`, `F_CAND_WIN_NOW_OWN`,
+`F_CAND_OPP_THREAT`. So a candidate already *knows* "how many own/opp windows of
+each count pass through me." Add the analogous **per-stone** window-count features
+(stones currently lack them) so a stone knows its own line involvement. This keeps
+the per-cell window summary the window node used to provide.
 
-### 2C. Candidate set + adjacency -> relevance-capped, cold-shed (SMALL, MEASURED move)
-**What it contributes:** ADJACENCY gives local spatial structure; the radius-n
-filler gives the model "nearby empty" options. Today the set is
-`active-windows ∪ n-radius(open-line)` with a dead-cell prune already in place
-(`has_open_window`, `candidates.rs:77-98,168-184`).
+**(ii) Richer, more useful EDGES (the owner's "make the edges more useful").**
+Replace the window-hub fan-out with **direct typed LINE edges among the member
+cells of each ACTIVE window (count 3/4/5 only)** — so the tactical relationship
+that took candidate→window→stone (2 hops) is delivered in **1 hop**. To avoid the
+O(cells²) same-axis clique, the line edges are **bounded per window** and
+**stone↔candidate-oriented**: for each active window emit edges between its empty
+candidate cells and its stones (and the ≤1 candidate↔candidate pair), each carrying
+a **D6-INVARIANT edge feature vector**:
+  `[edge-type one-hot | hex-distance/scale | window-owner {own,opp} | window-count
+   one-hot {3,4,5} | shared-window multiplicity]`.
+A single line edge thus says "these two cells co-occur in an opponent count-4
+window at distance 2" — exactly the info the GNN previously reconstructed through
+the hub, now local and richer.
 
-**Re-representation:** keep **every tactically-live cell** (all active-window
-empties + all `tactical_cells`), shed only **provably-cold** cells:
-- **Phase-gated radius**: n=2 while `move_number < R_LATE_AFTER_MOVE` (default 30),
-  else n=3. Early boards are sparse, so radius-2 already covers the live region;
-  the documented coverage gap n2-vs-n3 is ~1% of strong-move mass.
-- **Relevance cap, not blunt radius**: a radius cell is kept iff it is in an active
-  window OR has an open completable line (existing `has_open_window`) — extend to
-  also keep cells adjacent to a stone (preserves ADJACENCY locality). Cells that
-  are cold by ALL criteria are dropped.
-- **Adjacency**: keep every edge with a stone endpoint or a tactical endpoint; drop
-  only candidate<->candidate edges in deep empty regions (both endpoints cold) —
-  these feed the model almost nothing (uniform empty neighborhood). Closeness-gated.
+**D6 constraint (must hold):** edge features are **owner / count / distance /
+multiplicity** — all D6-invariant. **No axis label, no direction** (those rotate
+under D6). Geometry stays in the graph STRUCTURE (which cells connect), features
+stay invariant — exactly the existing discipline (`features.rs` edge_attr =
+type one-hot + hex-distance). The equivariance test must pass for all 12 elements.
 
-All thresholds are **config knobs with current behavior reachable** (n=3 always,
-context analytic-off, no dedup, adjacency unrestricted) so every change is
-A/B-testable and revertible.
+### 2.3 One uniform candidate rule (no phase gating)
+`candidates = active-window empties (A) ∪ tactical_cells (T0) ∪ radius-n(open-line)
+filler (B)`, with a **single radius n = 2** (measured: n=3→n=2 cut edges/leaf 30%
+and raised pos/s +47%, and the documented n2-vs-n3 strong-move coverage gap is
+~1%). Dead cells still dropped (`has_open_window`). No move-number gate.
 
----
-
-## 3. Behavioral-closeness metric (new hard gate)
-
-For a corpus of ~512 real positions spanning ply bands (opening/mid/late), run the
-**same trained (or fixed-seed random) weights** through CURRENT vs SPARSE
-representation and compare the heads:
-- **policy**: per-position `KL(softmax(policy_current) || softmax(policy_sparse))`
-  over the shared candidate set; report mean + p95.
-- **value**: `|E[value_current] - E[value_sparse]|` (decoded scalar); mean + p95.
-- **opp_policy**: same KL as policy.
-
-**Gates** (per tier): 2A exact (mean KL < 1e-4, |Δv| < 1e-3). 2B/2C near: **mean
-KL < 0.03, p95 KL < 0.10, mean |Δv| < 0.02, p95 |Δv| < 0.05** (tightened if the
-owner wants closer). Any sparsification exceeding the gate is reverted or demoted
-to the exact tier. This quantifies "how far the model's view moved" — the owner's
-requirement — independent of tactical safety.
+### 2.4 What each edge class becomes
+| was | now |
+|---|---|
+| CONTEXT (SIDE↔all) | **removed** (pool + per-node global scalars) |
+| STONE_WINDOW + CANDIDATE_WINDOW (hub) | **removed**, replaced by bounded **line edges** with rich invariant features |
+| WINDOW nodes | **removed** (info → node features + line-edge features) |
+| ADJACENCY | **kept**, shrinks ~30% via radius 3→2 (fewer candidate nodes) |
+| RECENCY | kept |
 
 ---
 
-## 4. Expected edge reduction per ply band (estimate; re-measured at the gate)
+## 3. Estimated win (per ply band; re-measured at the gate)
 
-| ply band | lever(s) | edges/leaf now | edges/leaf sparse | cut |
-|---|---|--:|--:|--:|
-| opening (<10) | 2A + n2 | ~1,500 | ~600-700 | ~55% |
-| early-mid (10-30) | 2A + n2 + dedup | ~4,000 | ~1,900-2,300 | ~45% |
-| midgame (30-60) | 2A + adjacency-cold + dedup | ~11,400 | ~5,500-6,500 | ~45% |
+| ply band | nodes/leaf now→new | edges/leaf now→new | cut |
+|---|---|---|--:|
+| opening (<10) | 222 → ~150 | 1,499 → ~700-800 | ~50% |
+| early-mid (10-30) | ~600 → ~420 | ~4,000 → ~2,000-2,400 | ~45% |
+| midgame (30-60) | 1,569 → ~1,050 | 11,420 → ~5,500-6,500 | ~45-50% |
 
-2A (CONTEXT analytic) removes `~2*N` edges at every ply (largest at midgame where
-N~1569 -> ~3100 directed edges gone, exactly). Candidate/adjacency cuts add on top
-early-mid. **Direct measurement already in hand:** n=3 -> n=2 cut edges/leaf
-1972 -> 1370 (-30%) and raised pos/s 28.0 -> 41.2 (+47%) on td96/gnn2 @512.
+Drivers: CONTEXT removed (~27% midgame) + window-hub removed (~13%) + radius 3→2
+shrinks ADJACENCY (~30% of the ~55% adjacency share) ; line edges add back a small,
+bounded set (count-3/4/5 windows only). Window nodes removed (~5-13% of nodes).
+**Direct measurement in hand:** n=3→n=2 alone cut edges/leaf 1972→1370 (−30%) and
+raised pos/s 28.0→41.2 (+47%, td96/gnn2 @512 active=512 no-PCR).
+
+**Projected pos/s @512 visits (td96/gnn2, opening-region):** ~28 → ~50-60 from the
+representation change, + Rust-opt/pipeline (~1.3x) → **~65-75 opening / ~35-50
+full-game.** Honest: still ~2-2.5x; **≥100 @512 full-game also needs visits≈128-192
+or further structural loss** (surfaced as the option below).
+
+---
+
+## 4. Behavioral-closeness metric (hard gate — TARGET, not guarantee here)
+
+Removing window nodes is a **bigger representational change** than the rejected
+edge-cap design, so closeness is a **measured target**, not a guaranteed exact
+match. On a corpus of ~512 real positions across ply bands, run CURRENT vs NEW
+representation through the same fixed weights and compare heads:
+- **policy / opp_policy**: per-position `KL(softmax_current ‖ softmax_new)` over the
+  shared candidate set; report mean + p95.
+- **value**: `|E[value_current] − E[value_new]|` (decoded scalar); mean + p95.
+
+**Gate (initial):** mean KL < 0.10, p95 KL < 0.25, mean |Δv| < 0.04, p95 < 0.08.
+(Looser than an exact-tier change, reflecting the honest representational move; the
+owner can tighten.) We report the actual numbers so we know exactly how far the
+model moved, and can fall back (e.g. keep window nodes) if it moves too far.
 
 ---
 
 ## 5. Rust optimization (the 38%)
 
-1. **Single live-cell pass**: replace the per-candidate `has_open_window` O(18)
-   rescan with one forward sweep building a `HashSet<cell>` of live cells, then
-   membership-test radius cells — O(windows*6 + candidates) vs O(candidates*18).
-2. **Static-topology reuse**: within one move's search the leaves differ from the
-   root by few stones; cache the live-cell set + window enumeration keyed by board
-   occupancy (not full state hash) and reuse across that position's leaf builds.
+1. **Single live-cell pass**: replace per-candidate `has_open_window` O(18) rescan
+   with one sweep building a `HashSet<cell>` of live cells; O(windows·6+candidates).
+2. **Static-topology reuse** across a position's leaves (board differs by few
+   stones): cache the live-cell set + active-window enumeration keyed by board
+   occupancy, reuse across that position's leaf builds.
 3. **Dedicated featurize threadpool** so `build_graph`/featurize don't contend with
-   `select_leaf_batch`'s rayon over 512 roots; raise rayon grain (batch tiny
-   opening graphs per task to cut spawn overhead).
-4. Keep the zero-copy buffer output + pinned scatter unchanged (parity-preserving).
+   `select_leaf_batch`'s rayon over 512 roots; raise rayon grain for tiny graphs.
+4. Zero-copy buffer output + pinned scatter unchanged (parity-preserving).
 
 ## 6. Pipeline (kill the 0% GPU gaps)
 
-The session already has a select<->eval prefetch (`mcts.rs:440-545`) and a
-featurize<->forward double-buffer (`mcts_eval.rs:146-216`).
-1. **Deepen** `HEXGNN_EVAL_PIPELINE_DEPTH` 2 -> 3/4 so the featurizer queues ahead
-   while the GPU runs (now that the forward is ~60%).
+Already present: select↔eval prefetch (`mcts.rs:440-545`), featurize↔forward
+double-buffer (`mcts_eval.rs:146-216`), eval cache. Add:
+1. **Deepen** `HEXGNN_EVAL_PIPELINE_DEPTH` 2→3/4 so the featurizer queues ahead.
 2. **Verify/force GIL release** around `_host_to_device` + the forward
-   (`inference.py:224-260`) so the GIL-free Rust featurizer actually overlaps the
-   CUDA launch + H2D; drop the GIL if not.
-3. **Pinned-host ring buffer** (2-3x largest chunk) instead of per-call
-   `pin_memory()`.
-4. Optional later: CUDA graphs on bucketed shapes + a fused relational-message
-   scatter kernel (the `index_add_` is ~13-16% of forward CUDA time).
+   (`inference.py:224-260`) so the GIL-free Rust featurizer overlaps the CUDA launch.
+3. **Pinned-host ring buffer** instead of per-call `pin_memory()`.
+4. Optional later: CUDA graphs (bucketed shapes) + fused relational-message scatter.
 
 ---
 
 ## 7. Phased build + gates (each phase: commit via clone, report numbers)
 
-- **WS0 — fork + rebuild (unchanged):** register `hexo_models._rust.hexgnn`, point
-  hexgnn `rust_bridge` at it, maturin rebuild. **Gate:** featurizer parity (Rust
-  hexgnn vs Python), D6 equivariance, full TSS suite — all green on the
-  byte-identical fork. (Proves the fork/rebuild before any behavior change.)
-- **WS1a — CONTEXT analytic (2A):** **Gate:** closeness EXACT (KL<1e-4), parity,
-  D6, TSS green; edges/pos -2N; pos/s up.
-- **WS1b — window dedup + relevance candidate set (2B/2C):** **Gate:** closeness
-  within near-gate, parity (or updated featurizer parity if both halves change),
-  D6, **full TSS suite**, edges/pos per table; pos/s up.
-- **WS2 — Rust opt (sec 5):** **Gate:** featurize ms down, parity green, pos/s up.
-- **WS3 — pipeline (sec 6):** **Gate:** GPU util saturated (no 0% gaps), pos/s up.
-- **FINAL gate:** **>=100 pos/s @512 visits no-PCR on FULL-GAME self-play** (or the
-  honest best with the config that hits the owner's throughput goal), all quality
-  gates green, then HOLD for the launch decision.
+- **WS0 — fork + rebuild (DONE, green):** `hexo_models._rust.hexgnn`, parity/D6/
+  model/value/losses/self-play all pass on the byte-identical fork.
+- **WS1 — new representation (this doc):** stones+candidates nodes, drop SIDE +
+  CONTEXT, remove window nodes, add line edges + per-stone window features, single
+  radius=2. Changes BOTH halves (`candidates.rs`/`features.rs` Rust + the Python
+  featurizer + `architecture.py` value-readout to PMA-only + edge_attr width).
+  **Gate:** featurizer parity (Rust↔Python on the NEW layout), D6 (all 12), **full
+  TSS suite**, **closeness metric within gate**, edges/pos per §3, pos/s up.
+- **WS2 — Rust opt (§5):** featurize ms down, parity green, pos/s up.
+- **WS3 — pipeline (§6):** GPU util saturated, pos/s up.
+- **FINAL gate:** **≥100 pos/s @512 visits no-PCR on FULL-GAME self-play** (or the
+  honest best + the visits that hits the owner's throughput goal), all quality
+  gates green, then HOLD for launch.
 
-Quality gates at EVERY phase: featurizer parity (<1e-6), D6 equivariance (all 12
-elements), the **full TSS test suite**, the **closeness metric**, and shard sanity
-(lambda=0 hard targets, recorded rows, opp-mask).
+Quality gates EVERY phase: featurizer parity (<1e-6 on the active layout), D6 (12
+elements), the **full TSS suite**, the **closeness metric**, shard sanity (λ=0 hard
+targets, recorded rows, opp-mask).
 
 ---
 
-## 8. Honest ceiling note
+## 8. Rejected alternative (documented per owner request): phase-gated radius + hub cap
 
-Triangulated (profiling + design + the n=2 measurement): the "don't-go-too-far"
-sparse rewrite realistically reaches **~40-65 pos/s opening / ~30-45 full-game at
-512 visits (~2x)** with the GPU saturated. The CONTEXT-analytic win (2A) is the
-largest single behavior-exact lever. Hitting **>=100 @512 full-game** likely also
-needs a lower average visit count (e.g. visits ~128-192) OR promoting the
-behavior-near tier (2B option ii) — both surfaced to the owner as decisions, gated
-by the closeness metric so we always know how far the model moved.
+A prior design kept window nodes and used: a **phase-gated radius** (n=2 until move
+30, else n=3), a CONTEXT-hub fan-out cap to {candidates, windows, recent-64 stones},
+and an adjacency-near guard. **Rejected by the owner** ("I don't like the phase
+gating; rather simplify by removing/simplifying windows than have this kind of
+phase gating"). It was more behavior-preserving (≈exact CONTEXT-analytic option)
+but structurally more complex and yielded a smaller edge cut (~30-40%). The chosen
+design above is structurally simpler (fewer node types, uniform rule) and cuts more
+(~45-50%), at the cost of a measured (not guaranteed) behavioral move.
+
+---
+
+## 9. Open decisions for the owner
+
+**The honest ceiling stands** (triangulated: profiling + design estimates + the
+n=2 measurement): the sparse rewrite reaches **~2-2.5x → ~35-50 pos/s full-game at
+512 visits**, GPU saturated. **≥100 @512 full-game needs lower visits too.** Three
+options (visits choice still open):
+1. **(Recommended)** sparse rewrite **+ visits=192** → ~100-130 pos/s, strong search.
+2. sparse rewrite **@ visits=512** → ~35-50 pos/s full-game (best at 512, misses 100).
+3. **skip rewrite, n=2 + visits=128** → ~80-110 pos/s today, zero rebuild risk.
+
+**Build remains on hold** until the owner approves this design and picks 1/2/3.
