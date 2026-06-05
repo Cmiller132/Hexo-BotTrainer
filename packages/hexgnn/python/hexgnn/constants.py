@@ -20,17 +20,28 @@ VALUE_BINS = 65
 NODE_TYPE_SIDE = 0
 NODE_TYPE_STONE = 1
 NODE_TYPE_CANDIDATE = 2
-NODE_TYPE_WINDOW = 3
+NODE_TYPE_WINDOW = 3   # RETIRED (sparse rewrite: window nodes removed, never emitted) —
+                       # id reserved so the type one-hot width / column layout is unchanged.
 NUM_NODE_TYPES = 4
 
 # --- Edge types (bounded construction, §6.3 — NO same-axis cliques) -----------
-# Routed through window nodes as the line/co-linearity hub. Stored symmetric for
-# the MVP (each structural edge emitted in both directions with the same type).
+# SPARSE REWRITE (window-node removal): the WINDOW nodes and their STONE_WINDOW /
+# CANDIDATE_WINDOW hub edges are NO LONGER emitted — window-count information is
+# folded into per-node FEATURES instead (see features.py / the F_CAND_*/F_STONE_*
+# slots). Only ADJACENCY (+ the per-edge `edge_dir` index) and RECENCY edges are
+# materialized; the SIDE node stays edge-isolated (CONTEXT already removed).
+#
+# The edge-type ID SPACE and NUM_EDGE_TYPES are DELIBERATELY UNCHANGED so the
+# model's relational weight `(NUM_EDGE_TYPES, dim, dim)`, the EDGE_ATTR one-hot
+# width (= NUM_EDGE_TYPES + 1), and the `node_type` one-hot width are all
+# byte-identical to pre-rewrite checkpoints (no weights/schema bump). The
+# STONE_WINDOW / CANDIDATE_WINDOW / CONTEXT ids are now RETIRED (never emitted)
+# but keep their slots reserved so the one-hot columns do not shift.
 EDGE_TYPE_ADJACENCY = 0        # node <-> node within hex-distance 1 (<=6/node)
-EDGE_TYPE_STONE_WINDOW = 1     # window <-> its one-color stones (<=6/window)
-EDGE_TYPE_CANDIDATE_WINDOW = 2 # window <-> its empty cells (<=6/window)
+EDGE_TYPE_STONE_WINDOW = 1     # RETIRED (window hub removed) — id reserved, never emitted
+EDGE_TYPE_CANDIDATE_WINDOW = 2 # RETIRED (window hub removed) — id reserved, never emitted
 EDGE_TYPE_RECENCY = 3          # stone <-> immediately-preceding/following stone
-EDGE_TYPE_CONTEXT = 4          # side/goal hub <-> all nodes (1 hub)
+EDGE_TYPE_CONTEXT = 4          # RETIRED (side hub removed) — id reserved, never emitted
 NUM_EDGE_TYPES = 5
 
 # --- Tactical-window token taxonomy (§5): count-3/4/5 active windows ----------
@@ -82,13 +93,32 @@ NODE_FEATURE_DIM = 32
 COORD_SCALE = 16.0            # normalization scale for distances / counts
 COUNT_SCALE = 32.0           # normalization scale for stone/move counts
 
-F_TYPE_ONEHOT = 0            # [0:4)  node-type one-hot (side, stone, candidate, window)
-F_OWNER_OWN = 4             # 1 if node belongs to side-to-move (stone/window)
+F_TYPE_ONEHOT = 0            # [0:4)  node-type one-hot (side, stone, candidate, [window retired])
+F_OWNER_OWN = 4             # 1 if node belongs to side-to-move (stone)
 F_OWNER_OPP = 5             # 1 if node belongs to the opponent
 F_CENTER_DISTANCE = 6      # max-norm(coord) / COORD_SCALE (D6-invariant)
 F_STONE_RECENCY = 7        # stone hist_idx normalized to [0,1]
-F_WIN_COUNT_ONEHOT = 8     # [8:11) window count one-hot (3,4,5)
-F_WIN_EMPTY_CELLS = 11     # window empty-cell count / WINDOW_LEN
+
+# --- Per-STONE window-count features (sparse rewrite) -------------------------
+# Slots [8:12) FORMERLY held the WINDOW-node-only F_WIN_COUNT_ONEHOT [8:11) +
+# F_WIN_EMPTY_CELLS (11). With the window NODES removed those slots are free, and
+# are REPURPOSED for a per-STONE analogue of the candidate window-count features
+# (stones previously carried NO window features). For a STONE cell these count the
+# active windows that PASS THROUGH that cell (the cell is a stone_cell of the
+# owning color's windows), split by owner, with the same normalization as the
+# candidate nwin features (/COORD_SCALE). Zero on non-stone nodes.
+#
+# D6-invariance: the set of active windows through a cell maps bijectively under
+# every D6 element (windows/owners/counts permute, the cell maps to its image), so
+# the per-owner count through a fixed cell is invariant — the equivariance test
+# holds unchanged. These start always-zero in pre-rewrite checkpoints (windows
+# were never stone features), so they are zero-init layer-expansion columns at the
+# introducing resume (see FEATURE_SCHEMA_VERSION bump below).
+F_STONE_NWIN_OWN = 8       # stone: # active own windows through this stone's cell (norm)
+F_STONE_NWIN_OPP = 9       # stone: # active opp windows through this stone's cell (norm)
+F_RESERVED_10 = 10         # FREE (was window count one-hot slot) — reserved, always 0
+F_RESERVED_11 = 11         # FREE (was window empty-cell slot) — reserved, always 0
+
 F_CAND_COMPLETE_OWN = 12   # candidate completes a count-5 own window (winning move)
 F_CAND_COMPLETE_OPP = 13   # candidate completes a count-5 opp window (must-block)
 F_CAND_NWIN_OWN = 14       # candidate: # active own windows through this cell (norm)
@@ -146,7 +176,14 @@ F_CAND_OPP_THREAT = 31     # candidate: cell is an empty of an active OPPONENT >
 # Feature schema version. Bumped whenever a NEW always-zero-until-now slot is
 # activated, so the RL resume path knows to zero-init its node_in columns ONCE
 # (checkpoints predating the bump report a lower version / none -> treated as 1).
-FEATURE_SCHEMA_VERSION = 3
+#
+# v4 (sparse rewrite): window NODES + their hub edges are removed; the per-
+# candidate window-count features keep IDENTICAL VALUES (now sourced from the
+# window tokens directly, not hub edges), so the CANDIDATE columns are NOT
+# zero-init targets. The only NEW columns are the per-STONE window-count features
+# (F_STONE_NWIN_OWN/OPP), which were always zero before (no stone window
+# features), so v4 zero-inits exactly those.
+FEATURE_SCHEMA_VERSION = 4
 # The slots activated in v2 — the zero-init layer-expansion target (node_in input
 # columns to zero at the introducing resume). Order is irrelevant (a column set).
 NEW_FEATURE_SLOTS_V2 = (
@@ -156,13 +193,18 @@ NEW_FEATURE_SLOTS_V2 = (
 )
 # The slots activated in v3 (the phase-aware win-now flags).
 NEW_FEATURE_SLOTS_V3 = (F_CAND_WIN_NOW_OWN, F_CAND_OPP_THREAT)
+# The slots activated in v4 (the per-STONE window-count features). The former
+# window-node-only slots [8:11) and 11 became free when window nodes were removed;
+# slots 8/9 now carry per-stone window counts (always 0 before -> zero-init), and
+# slots 10/11 stay reserved-zero (not activated, so not listed here).
+NEW_FEATURE_SLOTS_V4 = (F_STONE_NWIN_OWN, F_STONE_NWIN_OPP)
 
 
 def feature_slots_after(version: int) -> tuple[int, ...]:
     """Node-feature columns introduced in schema versions strictly greater than
     `version` — the zero-init layer-expansion target when resuming from a
-    checkpoint stamped `version`. A checkpoint at v2 needs only the v3 slots
-    zeroed (its v2 columns are trained); a v1/none checkpoint needs v2 + v3.
+    checkpoint stamped `version`. A checkpoint at v2 needs only the v3+ slots
+    zeroed (its v2 columns are trained); a v1/none checkpoint needs v2 + v3 + v4.
     """
 
     slots: list[int] = []
@@ -170,6 +212,8 @@ def feature_slots_after(version: int) -> tuple[int, ...]:
         slots.extend(NEW_FEATURE_SLOTS_V2)
     if version < 3:
         slots.extend(NEW_FEATURE_SLOTS_V3)
+    if version < 4:
+        slots.extend(NEW_FEATURE_SLOTS_V4)
     return tuple(slots)
 
 # --- Edge attributes (D6-invariant) -------------------------------------------

@@ -26,7 +26,6 @@ from .constants import (
     COUNT_SCALE,
     EDGE_ATTR_DIM,
     EDGE_ATTR_DIST,
-    EDGE_TYPE_CANDIDATE_WINDOW,
     F_CAND_COMPLETE_OPP,
     F_CAND_COMPLETE_OWN,
     F_CAND_DIST_FIRST,
@@ -48,21 +47,19 @@ from .constants import (
     F_SIDE_PHASE_ONEHOT,
     F_SIDE_STONES_OPP,
     F_SIDE_STONES_OWN,
+    F_STONE_NWIN_OPP,
+    F_STONE_NWIN_OWN,
     F_STONE_RECENCY,
     F_TYPE_ONEHOT,
-    F_WIN_COUNT_ONEHOT,
-    F_WIN_EMPTY_CELLS,
     NODE_FEATURE_DIM,
     NODE_TYPE_CANDIDATE,
     NODE_TYPE_SIDE,
     NODE_TYPE_STONE,
-    NODE_TYPE_WINDOW,
     NUM_EDGE_TYPES,
     NUM_NODE_TYPES,
     NUM_TURN_PHASES,
     PHASE_FIRST_STONE,
     PHASE_SECOND_STONE,
-    WINDOW_LEN,
 )
 
 
@@ -104,9 +101,10 @@ class GraphTensors:
 
 
 def _ints(x: Any) -> np.ndarray:
-    """Coerce a Rust array to int64. PyO3 maps Vec<u8> -> Python bytes (so the
-    u8 columns node_type/node_wcount/node_wempty/edge_type arrive as bytes);
-    everything else arrives as list[int]."""
+    """Coerce a Rust array to int64. PyO3 maps Vec<u8> -> Python bytes (so the u8
+    columns node_type/edge_type arrive as bytes); the per-node window-count columns
+    are Vec<u16>/Vec<bool> and arrive as list[int]/list[bool]; everything else as
+    list[int]. np.asarray coerces all the list forms to int64 directly."""
 
     if isinstance(x, (bytes, bytearray)):
         return np.frombuffer(bytes(x), dtype=np.uint8).astype(np.int64)
@@ -122,9 +120,26 @@ def build_graph_tensors(facts: Mapping[str, Any]) -> GraphTensors:
     nr = _ints(nodes["node_r"])
     owner = _ints(nodes["node_owner"])
     recency = _ints(nodes["node_recency"])
-    wcount = _ints(nodes["node_wcount"])
-    wempty = _ints(nodes["node_wempty"])
     n = int(node_type.shape[0])
+
+    # Per-node window-count facts (sparse rewrite): computed in Rust build_graph
+    # from the active-window tokens, replacing the removed candidate<->window hub
+    # edges. Candidate columns reproduce the old edge-loop accumulation EXACTLY;
+    # the stone_nwin_* columns are the new per-stone window features. (u16 columns
+    # arrive as list[int] from PyO3.)
+    nwin_own = _ints(nodes["node_nwin_own"])
+    nwin_opp = _ints(nodes["node_nwin_opp"])
+    own_win3 = _ints(nodes["node_own_win3"])
+    own_win4 = _ints(nodes["node_own_win4"])
+    own_win5 = _ints(nodes["node_own_win5"])
+    opp_win3 = _ints(nodes["node_opp_win3"])
+    opp_win4 = _ints(nodes["node_opp_win4"])
+    opp_win5 = _ints(nodes["node_opp_win5"])
+    complete_own = _ints(nodes["node_complete_own"])
+    complete_opp = _ints(nodes["node_complete_opp"])
+    opp_threat = _ints(nodes["node_opp_threat"])
+    stone_nwin_own = _ints(nodes["node_stone_nwin_own"])
+    stone_nwin_opp = _ints(nodes["node_stone_nwin_opp"])
 
     meta = facts.get("meta", {})
     placements = int(meta.get("placements", max(1, int(recency.max()) if n else 1)))
@@ -150,11 +165,12 @@ def build_graph_tensors(facts: Mapping[str, Any]) -> GraphTensors:
     is_stone = node_type == NODE_TYPE_STONE
     feat[is_stone, F_STONE_RECENCY] = np.clip(recency[is_stone], 0, None) / denom_recency
 
-    # window count one-hot (3,4,5) + empty
-    is_win = node_type == NODE_TYPE_WINDOW
-    win_idx = np.clip(wcount - 3, 0, 2)
-    feat[np.arange(n)[is_win], F_WIN_COUNT_ONEHOT + win_idx[is_win]] = 1.0
-    feat[is_win, F_WIN_EMPTY_CELLS] = wempty[is_win] / float(WINDOW_LEN)
+    # per-STONE window-count features (sparse rewrite): active windows through this
+    # stone's cell, split by owner, normalized /COORD_SCALE like the candidate nwin.
+    # Sourced from the per-node stone_nwin_* columns (folded from the removed
+    # STONE_WINDOW hub edges). Zero on non-stone nodes (the columns are 0 there).
+    feat[is_stone, F_STONE_NWIN_OWN] = stone_nwin_own[is_stone] / COORD_SCALE
+    feat[is_stone, F_STONE_NWIN_OPP] = stone_nwin_opp[is_stone] / COORD_SCALE
 
     # candidate distance to this turn's first stone (v2; D6-invariant). Left 0
     # when there is no first stone yet (the turn's FIRST placement).
@@ -199,52 +215,31 @@ def build_graph_tensors(facts: Mapping[str, Any]) -> GraphTensors:
         dist = np.maximum(np.maximum(np.abs(dq), np.abs(dr)), np.abs(ds)).astype(np.float32)
         edge_attr[:, EDGE_ATTR_DIST] = dist / COORD_SCALE
 
-    # candidate tactical features from candidate<->window membership edges
-    # (window->candidate direction: src is a WINDOW node).
-    if e:
-        cw = etype == EDGE_TYPE_CANDIDATE_WINDOW
-        w_is_src = is_win[esrc] if e else np.zeros(0, dtype=bool)
-        sel = cw & w_is_src
-        for wsrc, cdst in zip(esrc[sel].tolist(), edst[sel].tolist()):
-            own = owner[wsrc]
-            cnt = wcount[wsrc]
-            if own == 0:
-                feat[cdst, F_CAND_NWIN_OWN] += 1.0
-                # v2: per-count breakdown of the own active windows.
-                if cnt == 3:
-                    feat[cdst, F_CAND_OWN_WIN3] += 1.0
-                elif cnt == 4:
-                    feat[cdst, F_CAND_OWN_WIN4] += 1.0
-                elif cnt == 5:
-                    feat[cdst, F_CAND_OWN_WIN5] += 1.0
-                if cnt == 5:
-                    feat[cdst, F_CAND_COMPLETE_OWN] = 1.0
-                # v3: phase-aware own win-now (count-5 any B; count-4 only at
-                # FirstStone).
-                if cnt == 5 or (cnt == 4 and phase_idx == PHASE_FIRST_STONE):
-                    feat[cdst, F_CAND_WIN_NOW_OWN] = 1.0
-            elif own == 1:
-                feat[cdst, F_CAND_NWIN_OPP] += 1.0
-                # v2: per-count breakdown of the opp active windows.
-                if cnt == 3:
-                    feat[cdst, F_CAND_OPP_WIN3] += 1.0
-                elif cnt == 4:
-                    feat[cdst, F_CAND_OPP_WIN4] += 1.0
-                elif cnt == 5:
-                    feat[cdst, F_CAND_OPP_WIN5] += 1.0
-                if cnt == 5:
-                    feat[cdst, F_CAND_COMPLETE_OPP] = 1.0
-                # v3: any opponent >=4 window through this empty cell is a
-                # must-answer immediate threat (block-cell set).
-                if cnt >= 4:
-                    feat[cdst, F_CAND_OPP_THREAT] = 1.0
-        # normalize the nwin counts (+ the v2 per-count splits share the scale, so
-        # the three own bins sum to NWIN_OWN and the three opp bins to NWIN_OPP).
-        feat[:, F_CAND_NWIN_OWN] /= COORD_SCALE
-        feat[:, F_CAND_NWIN_OPP] /= COORD_SCALE
-        for _col in (F_CAND_OWN_WIN3, F_CAND_OWN_WIN4, F_CAND_OWN_WIN5,
-                     F_CAND_OPP_WIN3, F_CAND_OPP_WIN4, F_CAND_OPP_WIN5):
-            feat[:, _col] /= COORD_SCALE
+    # Candidate tactical window-count features (sparse rewrite): sourced from the
+    # per-node window-count columns (computed in Rust build_graph from the active-
+    # window tokens), replacing the removed candidate<->window hub edges. These
+    # columns are populated by build_graph on CANDIDATE cells only (0 elsewhere), so
+    # the whole-array writes below leave non-candidate rows at 0 — identical to the
+    # old edge-driven values. Counts share the /COORD_SCALE normalization (the three
+    # own bins sum to NWIN_OWN, the three opp bins to NWIN_OPP).
+    feat[:, F_CAND_NWIN_OWN] = nwin_own / COORD_SCALE
+    feat[:, F_CAND_NWIN_OPP] = nwin_opp / COORD_SCALE
+    feat[:, F_CAND_OWN_WIN3] = own_win3 / COORD_SCALE
+    feat[:, F_CAND_OWN_WIN4] = own_win4 / COORD_SCALE
+    feat[:, F_CAND_OWN_WIN5] = own_win5 / COORD_SCALE
+    feat[:, F_CAND_OPP_WIN3] = opp_win3 / COORD_SCALE
+    feat[:, F_CAND_OPP_WIN4] = opp_win4 / COORD_SCALE
+    feat[:, F_CAND_OPP_WIN5] = opp_win5 / COORD_SCALE
+    # complete / threat flags (any own/opp count-5; any opp count>=4 -> threat).
+    feat[complete_own != 0, F_CAND_COMPLETE_OWN] = 1.0
+    feat[complete_opp != 0, F_CAND_COMPLETE_OPP] = 1.0
+    feat[opp_threat != 0, F_CAND_OPP_THREAT] = 1.0
+    # v3 phase-aware own win-now: own count-5 (any B) OR own count-4 only at
+    # FirstStone (phase == FirstStone). Reconstructed from the per-count own columns.
+    win_now = (own_win5 > 0)
+    if phase_idx == PHASE_FIRST_STONE:
+        win_now = win_now | (own_win4 > 0)
+    feat[win_now, F_CAND_WIN_NOW_OWN] = 1.0
 
     candidate_index = np.asarray(facts["candidate_nodes"], dtype=np.int64)
     candidate_ids = np.asarray(facts["candidate_ids"], dtype=np.int64)

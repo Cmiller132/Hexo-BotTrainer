@@ -16,9 +16,12 @@
 //!
 //! Tactical-window tokens (§5): the count-3/4/5 active windows of both colors.
 //!
-//! Bounded typed edges (§6.3) — line/co-linearity is routed THROUGH window nodes
-//! as hubs; there are NO all-pairs same-axis cliques. Total edges are linear in
-//! (#nodes + #window_tokens).
+//! Bounded typed edges (§6.3). SPARSE REWRITE: the WINDOW nodes and their
+//! STONE_WINDOW / CANDIDATE_WINDOW hub edges have been REMOVED — window-count
+//! information is folded into per-node FEATURES (computed here from
+//! `window_tokens`, encoded in features.rs / features.py). Only ADJACENCY (+ the
+//! per-edge `edge_dir` index) and RECENCY edges remain; the SIDE node is
+//! edge-isolated. Total edges are linear in #nodes.
 
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
@@ -30,14 +33,14 @@ use hexo_engine::{pack_coord, Axis, HexCoord, HexoState as RustHexoState, TurnPh
 pub const NODE_SIDE: u8 = 0;
 pub const NODE_STONE: u8 = 1;
 pub const NODE_CANDIDATE: u8 = 2;
-pub const NODE_WINDOW: u8 = 3;
+// NODE_WINDOW (=3) RETIRED in the sparse rewrite (window nodes never emitted); the
+// id is reserved (NUM_NODE_TYPES stays 4) so the type one-hot width is unchanged.
 
-// Edge type ids (mirror of constants.py).
+// Edge type ids (mirror of constants.py). STONE_WINDOW/CANDIDATE_WINDOW/CONTEXT are
+// RETIRED (never emitted) but keep their ids so NUM_EDGE_TYPES / the edge-type
+// one-hot width / the relational weight shape are byte-identical to pre-rewrite.
 pub const EDGE_ADJACENCY: u8 = 0;
-pub const EDGE_STONE_WINDOW: u8 = 1;
-pub const EDGE_CANDIDATE_WINDOW: u8 = 2;
 pub const EDGE_RECENCY: u8 = 3;
-pub const EDGE_CONTEXT: u8 = 4;
 pub const NUM_EDGE_TYPES: usize = 5;
 
 /// The six axial hex-neighbor directions.
@@ -128,6 +131,31 @@ pub struct WindowToken {
     pub empty_cells: Vec<HexCoord>,
 }
 
+/// Per-node window-count facts derived from the active-window tokens (sparse
+/// rewrite: these replace the removed STONE_WINDOW / CANDIDATE_WINDOW hub edges).
+/// Parallel to the per-node arrays. For CANDIDATE nodes they reproduce EXACTLY the
+/// values the old candidate<->window edge loop accumulated; for STONE nodes the
+/// per-owner nwin counts are the new per-stone window features. All zero on the
+/// SIDE node (and unused fields stay zero on stones / candidates respectively).
+#[derive(Clone, Default)]
+pub struct WinCounts {
+    // Candidate accumulators (per empty cell, over the windows it belongs to):
+    pub nwin_own: u16,
+    pub nwin_opp: u16,
+    pub own_win3: u16,
+    pub own_win4: u16,
+    pub own_win5: u16,
+    pub opp_win3: u16,
+    pub opp_win4: u16,
+    pub opp_win5: u16,
+    pub complete_own: bool, // any own count-5 window through cell
+    pub complete_opp: bool, // any opp count-5 window through cell
+    pub opp_threat: bool,   // any opp count>=4 window through cell
+    // Stone accumulators (per stone cell): active windows of each owner through it.
+    pub stone_nwin_own: u16,
+    pub stone_nwin_opp: u16,
+}
+
 /// The bounded typed graph for one position.
 pub struct PositionGraph {
     // Parallel per-node arrays (node 0 is always the SIDE hub).
@@ -136,9 +164,9 @@ pub struct PositionGraph {
     pub node_r: Vec<i16>,
     pub node_owner: Vec<i8>, // 0 current, 1 opponent, -1 none/side
     pub node_recency: Vec<i32>, // stone placement_index, else -1
-    pub node_wcount: Vec<u8>, // window count (3/4/5), else 0
-    pub node_waxis: Vec<i8>, // window axis index, else -1
-    pub node_wempty: Vec<u8>, // window empty-cell count, else 0
+    // Per-node window-count facts (sparse rewrite; one entry per node). Folds the
+    // removed window-hub edges into per-node features (see WinCounts).
+    pub node_wins: Vec<WinCounts>,
     // Candidate node indices, in deterministic (q, r) order == CSR/legal order.
     pub candidate_nodes: Vec<u32>,
     // Candidate packed action ids, aligned 1:1 with `candidate_nodes`.
@@ -164,9 +192,6 @@ impl PositionGraph {
     }
     pub fn candidate_count(&self) -> usize {
         self.candidate_nodes.len()
-    }
-    pub fn window_count(&self) -> usize {
-        self.node_type.iter().filter(|&&t| t == NODE_WINDOW).count()
     }
 }
 
@@ -262,25 +287,18 @@ pub fn build_graph(state: &RustHexoState, n: i16) -> PositionGraph {
     let mut node_r = Vec::new();
     let mut node_owner = Vec::new();
     let mut node_recency = Vec::new();
-    let mut node_wcount = Vec::new();
-    let mut node_waxis = Vec::new();
-    let mut node_wempty = Vec::new();
 
-    let mut push_node =
-        |t: u8, c: HexCoord, owner: i8, recency: i32, wc: u8, wa: i8, we: u8| -> u32 {
-            node_type.push(t);
-            node_q.push(c.q);
-            node_r.push(c.r);
-            node_owner.push(owner);
-            node_recency.push(recency);
-            node_wcount.push(wc);
-            node_waxis.push(wa);
-            node_wempty.push(we);
-            (node_type.len() - 1) as u32
-        };
+    let mut push_node = |t: u8, c: HexCoord, owner: i8, recency: i32| -> u32 {
+        node_type.push(t);
+        node_q.push(c.q);
+        node_r.push(c.r);
+        node_owner.push(owner);
+        node_recency.push(recency);
+        (node_type.len() - 1) as u32
+    };
 
     // node 0: SIDE hub.
-    let side_idx = push_node(NODE_SIDE, HexCoord::ZERO, -1, -1, 0, -1, 0);
+    let side_idx = push_node(NODE_SIDE, HexCoord::ZERO, -1, -1);
 
     // STONE nodes (sorted by (q,r)); record recency from placement_history.
     let mut recency_of: HashMap<(i16, i16), i32> = HashMap::new();
@@ -298,7 +316,7 @@ pub fn build_graph(state: &RustHexoState, n: i16) -> PositionGraph {
             None => -1i8,
         };
         let rec = *recency_of.get(&(c.q, c.r)).unwrap_or(&-1);
-        let idx = push_node(NODE_STONE, *c, owner, rec, 0, -1, 0);
+        let idx = push_node(NODE_STONE, *c, owner, rec);
         spatial.insert((c.q, c.r), idx);
         stone_idx.insert((c.q, c.r), idx);
     }
@@ -308,27 +326,65 @@ pub fn build_graph(state: &RustHexoState, n: i16) -> PositionGraph {
     let mut candidate_ids = Vec::with_capacity(cands.len());
     let mut cand_idx: HashMap<(i16, i16), u32> = HashMap::new();
     for c in &cands {
-        let idx = push_node(NODE_CANDIDATE, *c, -1, -1, 0, -1, 0);
+        let idx = push_node(NODE_CANDIDATE, *c, -1, -1);
         candidate_nodes.push(idx);
         candidate_ids.push(pack_coord(*c));
         spatial.insert((c.q, c.r), idx);
         cand_idx.insert((c.q, c.r), idx);
     }
 
-    // WINDOW nodes.
-    let mut window_node_idx = Vec::with_capacity(tokens.len());
+    let num_nodes = node_type.len();
+
+    // --- per-node window-count features (sparse rewrite: replaces the removed
+    // STONE_WINDOW / CANDIDATE_WINDOW hub edges). For each active-window token we
+    // visit its empty cells (candidate accumulators) and its stone cells (per-stone
+    // accumulators). The candidate accumulation reproduces EXACTLY what the old
+    // window->candidate edge loop did (same per-count increments + complete/threat
+    // flags), so the encoded candidate features are byte-identical; the per-stone
+    // own/opp nwin counts are the NEW per-stone window features.
+    let mut node_wins = vec![WinCounts::default(); num_nodes];
     for t in &tokens {
-        let owner = if t.owner_is_current { 0 } else { 1 };
-        let idx = push_node(
-            NODE_WINDOW,
-            t.anchor,
-            owner,
-            -1,
-            t.count,
-            axis_index(t.axis) as i8,
-            t.empty_count,
-        );
-        window_node_idx.push(idx);
+        for ec in &t.empty_cells {
+            if let Some(&ci) = cand_idx.get(&(ec.q, ec.r)) {
+                let w = &mut node_wins[ci as usize];
+                if t.owner_is_current {
+                    w.nwin_own += 1;
+                    match t.count {
+                        3 => w.own_win3 += 1,
+                        4 => w.own_win4 += 1,
+                        5 => w.own_win5 += 1,
+                        _ => {}
+                    }
+                    if t.count == 5 {
+                        w.complete_own = true;
+                    }
+                } else {
+                    w.nwin_opp += 1;
+                    match t.count {
+                        3 => w.opp_win3 += 1,
+                        4 => w.opp_win4 += 1,
+                        5 => w.opp_win5 += 1,
+                        _ => {}
+                    }
+                    if t.count == 5 {
+                        w.complete_opp = true;
+                    }
+                    if t.count >= 4 {
+                        w.opp_threat = true;
+                    }
+                }
+            }
+        }
+        for sc in &t.stone_cells {
+            if let Some(&si) = stone_idx.get(&(sc.q, sc.r)) {
+                let w = &mut node_wins[si as usize];
+                if t.owner_is_current {
+                    w.stone_nwin_own += 1;
+                } else {
+                    w.stone_nwin_opp += 1;
+                }
+            }
+        }
     }
 
     // --- edges (directed; emit both directions per structural edge) ----------
@@ -375,20 +431,11 @@ pub fn build_graph(state: &RustHexoState, n: i16) -> PositionGraph {
         }
     }
 
-    // STONE<->WINDOW and CANDIDATE<->WINDOW membership (window hub, <=6 each).
-    for (ti, t) in tokens.iter().enumerate() {
-        let widx = window_node_idx[ti];
-        for sc in &t.stone_cells {
-            if let Some(&s) = stone_idx.get(&(sc.q, sc.r)) {
-                add_undirected_dir(widx, s, EDGE_STONE_WINDOW, -1, -1);
-            }
-        }
-        for ec in &t.empty_cells {
-            if let Some(&c) = cand_idx.get(&(ec.q, ec.r)) {
-                add_undirected_dir(widx, c, EDGE_CANDIDATE_WINDOW, -1, -1);
-            }
-        }
-    }
+    // STONE<->WINDOW and CANDIDATE<->WINDOW membership edges REMOVED (sparse
+    // rewrite): the window nodes are gone and the membership information is folded
+    // into the per-node `node_wins` features above. `tokens` is still consumed (for
+    // those features and the py-dict window_tokens list); the candidate SET is
+    // unchanged.
 
     // ADJACENCY: spatial nodes (stones + candidates) within hex-distance 1.
     // Emit once per unordered pair (when neighbor index > self) to avoid dupes.
@@ -418,9 +465,7 @@ pub fn build_graph(state: &RustHexoState, n: i16) -> PositionGraph {
         node_r,
         node_owner,
         node_recency,
-        node_wcount,
-        node_waxis,
-        node_wempty,
+        node_wins,
         candidate_nodes,
         candidate_ids,
         edge_src,
@@ -471,32 +516,88 @@ pub(crate) fn position_graph_to_py_dict(
     counts.set_item("side", 1)?;
     counts.set_item("stone", g.stone_count())?;
     counts.set_item("candidate", g.candidate_count())?;
-    counts.set_item("window", g.window_count())?;
+    // window NODES removed (sparse rewrite): always 0 (kept for dict-shape compat).
+    counts.set_item("window", 0)?;
     counts.set_item("total_nodes", g.node_count())?;
     dict.set_item("node_counts", counts)?;
 
     let ecounts = PyDict::new(py);
     ecounts.set_item("adjacency", g.edge_counts[EDGE_ADJACENCY as usize])?;
-    ecounts.set_item("stone_window", g.edge_counts[EDGE_STONE_WINDOW as usize])?;
-    ecounts.set_item("candidate_window", g.edge_counts[EDGE_CANDIDATE_WINDOW as usize])?;
+    // STONE_WINDOW / CANDIDATE_WINDOW / CONTEXT edges removed: always 0.
+    ecounts.set_item("stone_window", 0)?;
+    ecounts.set_item("candidate_window", 0)?;
     ecounts.set_item("recency", g.edge_counts[EDGE_RECENCY as usize])?;
-    ecounts.set_item("context", g.edge_counts[EDGE_CONTEXT as usize])?;
+    ecounts.set_item("context", 0)?;
     ecounts.set_item("total_edges", g.edge_src.len())?;
     dict.set_item("edge_counts", ecounts)?;
 
     dict.set_item("candidate_ids", g.candidate_ids.clone())?;
     dict.set_item("candidate_nodes", g.candidate_nodes.clone())?;
 
-    // Typed node arrays.
+    // Typed node arrays. The former window-node columns (node_wcount/waxis/wempty)
+    // are GONE; instead the per-node window-count features (sparse rewrite) are
+    // exposed as parallel per-node arrays the Python featurizer reads directly
+    // (replacing the old candidate<->window edge accumulation). Candidate columns
+    // reproduce the old edge-loop values exactly; the stone_nwin_* columns are the
+    // new per-stone window features.
     let nodes = PyDict::new(py);
     nodes.set_item("node_type", g.node_type.clone())?;
     nodes.set_item("node_q", g.node_q.clone())?;
     nodes.set_item("node_r", g.node_r.clone())?;
     nodes.set_item("node_owner", g.node_owner.clone())?;
     nodes.set_item("node_recency", g.node_recency.clone())?;
-    nodes.set_item("node_wcount", g.node_wcount.clone())?;
-    nodes.set_item("node_waxis", g.node_waxis.clone())?;
-    nodes.set_item("node_wempty", g.node_wempty.clone())?;
+    nodes.set_item(
+        "node_nwin_own",
+        g.node_wins.iter().map(|w| w.nwin_own).collect::<Vec<u16>>(),
+    )?;
+    nodes.set_item(
+        "node_nwin_opp",
+        g.node_wins.iter().map(|w| w.nwin_opp).collect::<Vec<u16>>(),
+    )?;
+    nodes.set_item(
+        "node_own_win3",
+        g.node_wins.iter().map(|w| w.own_win3).collect::<Vec<u16>>(),
+    )?;
+    nodes.set_item(
+        "node_own_win4",
+        g.node_wins.iter().map(|w| w.own_win4).collect::<Vec<u16>>(),
+    )?;
+    nodes.set_item(
+        "node_own_win5",
+        g.node_wins.iter().map(|w| w.own_win5).collect::<Vec<u16>>(),
+    )?;
+    nodes.set_item(
+        "node_opp_win3",
+        g.node_wins.iter().map(|w| w.opp_win3).collect::<Vec<u16>>(),
+    )?;
+    nodes.set_item(
+        "node_opp_win4",
+        g.node_wins.iter().map(|w| w.opp_win4).collect::<Vec<u16>>(),
+    )?;
+    nodes.set_item(
+        "node_opp_win5",
+        g.node_wins.iter().map(|w| w.opp_win5).collect::<Vec<u16>>(),
+    )?;
+    nodes.set_item(
+        "node_complete_own",
+        g.node_wins.iter().map(|w| w.complete_own).collect::<Vec<bool>>(),
+    )?;
+    nodes.set_item(
+        "node_complete_opp",
+        g.node_wins.iter().map(|w| w.complete_opp).collect::<Vec<bool>>(),
+    )?;
+    nodes.set_item(
+        "node_opp_threat",
+        g.node_wins.iter().map(|w| w.opp_threat).collect::<Vec<bool>>(),
+    )?;
+    nodes.set_item(
+        "node_stone_nwin_own",
+        g.node_wins.iter().map(|w| w.stone_nwin_own).collect::<Vec<u16>>(),
+    )?;
+    nodes.set_item(
+        "node_stone_nwin_opp",
+        g.node_wins.iter().map(|w| w.stone_nwin_opp).collect::<Vec<u16>>(),
+    )?;
     dict.set_item("nodes", nodes)?;
 
     // Typed edge arrays.

@@ -77,10 +77,13 @@ pub(crate) fn featurize_position_graph(
             } else if owner == 1 {
                 stones_opp += 1;
             }
-        } else if t == FT_NODE_WINDOW {
-            let widx = ((g.node_wcount[i] as i64) - 3).clamp(0, 2) as usize;
-            feat[base + F_WIN_COUNT_ONEHOT + widx] = 1.0;
-            feat[base + F_WIN_EMPTY_CELLS] = (g.node_wempty[i] as f32) / WINDOW_LEN_F;
+            // Per-STONE window-count features (sparse rewrite): active windows
+            // through this stone's cell, split by owner, normalized like the
+            // candidate nwin (/COORD_SCALE). Sourced from node_wins (folded from the
+            // removed STONE_WINDOW hub edges).
+            let w = &g.node_wins[i];
+            feat[base + F_STONE_NWIN_OWN] = (w.stone_nwin_own as f32) / COORD_SCALE;
+            feat[base + F_STONE_NWIN_OPP] = (w.stone_nwin_opp as f32) / COORD_SCALE;
         } else if t == FT_NODE_CANDIDATE {
             // v2: hex-distance from this candidate to THIS turn's first stone.
             // 0 (left zero) when there is no first stone yet — i.e. on the turn's
@@ -132,68 +135,42 @@ pub(crate) fn featurize_position_graph(
         edge_attr[k * EDGE_ATTR_DIM + EDGE_ATTR_DIST] = dist / COORD_SCALE;
     }
 
-    // candidate tactical features from candidate<->window edges (window is src).
-    if e > 0 {
-        for k in 0..e {
-            if g.edge_type[k] as i64 == FT_EDGE_CANDIDATE_WINDOW {
-                let wsrc = g.edge_src[k] as usize;
-                if g.node_type[wsrc] as i64 == FT_NODE_WINDOW {
-                    let cdst = g.edge_dst[k] as usize;
-                    let cbase = cdst * NODE_FEATURE_DIM;
-                    let own = g.node_owner[wsrc];
-                    let cnt = g.node_wcount[wsrc] as i64;
-                    if own == 0 {
-                        feat[cbase + F_CAND_NWIN_OWN] += 1.0;
-                        // v2: per-count breakdown of the own active windows.
-                        match cnt {
-                            3 => feat[cbase + F_CAND_OWN_WIN3] += 1.0,
-                            4 => feat[cbase + F_CAND_OWN_WIN4] += 1.0,
-                            5 => feat[cbase + F_CAND_OWN_WIN5] += 1.0,
-                            _ => {}
-                        }
-                        if cnt == 5 {
-                            feat[cbase + F_CAND_COMPLETE_OWN] = 1.0;
-                        }
-                        // v3: phase-aware own win-now. count-5 wins with one
-                        // placement (any B); a count-4 wins only with two
-                        // placements left -> FirstStone (ph == 1) only.
-                        if cnt == 5 || (cnt == 4 && ph == 1) {
-                            feat[cbase + F_CAND_WIN_NOW_OWN] = 1.0;
-                        }
-                    } else if own == 1 {
-                        feat[cbase + F_CAND_NWIN_OPP] += 1.0;
-                        // v2: per-count breakdown of the opp active windows.
-                        match cnt {
-                            3 => feat[cbase + F_CAND_OPP_WIN3] += 1.0,
-                            4 => feat[cbase + F_CAND_OPP_WIN4] += 1.0,
-                            5 => feat[cbase + F_CAND_OPP_WIN5] += 1.0,
-                            _ => {}
-                        }
-                        if cnt == 5 {
-                            feat[cbase + F_CAND_COMPLETE_OPP] = 1.0;
-                        }
-                        // v3: any opponent >=4 window through this empty cell is a
-                        // must-answer immediate threat (opp turn has B==2, so a
-                        // count-4 also wins). This is the block-cell set.
-                        if cnt >= 4 {
-                            feat[cbase + F_CAND_OPP_THREAT] = 1.0;
-                        }
-                    }
-                }
-            }
+    // Candidate tactical window-count features (sparse rewrite): sourced directly
+    // from the per-node `node_wins` accumulators (computed in build_graph from the
+    // active-window tokens), replacing the removed candidate<->window hub edges.
+    // The accumulated counts/flags are IDENTICAL to what the old window->candidate
+    // edge loop produced, so the encoded candidate features are byte-identical; the
+    // only difference is the source of the counts (tokens vs hub edges). Counts are
+    // populated by build_graph on candidate cells only (stones use the stone_nwin_*
+    // fields, encoded above), so iterating all nodes is safe (non-candidates have 0).
+    for i in 0..n {
+        let b = i * NODE_FEATURE_DIM;
+        let w = &g.node_wins[i];
+        feat[b + F_CAND_NWIN_OWN] = (w.nwin_own as f32) / COORD_SCALE;
+        feat[b + F_CAND_NWIN_OPP] = (w.nwin_opp as f32) / COORD_SCALE;
+        // v2 per-count splits share the NWIN normalization (so the three own bins
+        // sum to NWIN_OWN, the three opp bins to NWIN_OPP — gated by tests).
+        feat[b + F_CAND_OWN_WIN3] = (w.own_win3 as f32) / COORD_SCALE;
+        feat[b + F_CAND_OWN_WIN4] = (w.own_win4 as f32) / COORD_SCALE;
+        feat[b + F_CAND_OWN_WIN5] = (w.own_win5 as f32) / COORD_SCALE;
+        feat[b + F_CAND_OPP_WIN3] = (w.opp_win3 as f32) / COORD_SCALE;
+        feat[b + F_CAND_OPP_WIN4] = (w.opp_win4 as f32) / COORD_SCALE;
+        feat[b + F_CAND_OPP_WIN5] = (w.opp_win5 as f32) / COORD_SCALE;
+        if w.complete_own {
+            feat[b + F_CAND_COMPLETE_OWN] = 1.0;
         }
-        for i in 0..n {
-            let b = i * NODE_FEATURE_DIM;
-            feat[b + F_CAND_NWIN_OWN] /= COORD_SCALE;
-            feat[b + F_CAND_NWIN_OPP] /= COORD_SCALE;
-            // v2 count splits share the NWIN normalization (so the three own bins
-            // sum to NWIN_OWN, the three opp bins to NWIN_OPP — gated by tests).
-            feat[b + F_CAND_OWN_WIN3] /= COORD_SCALE;
-            feat[b + F_CAND_OWN_WIN4] /= COORD_SCALE;
-            feat[b + F_CAND_OWN_WIN5] /= COORD_SCALE;
-            feat[b + F_CAND_OPP_WIN3] /= COORD_SCALE;
-            feat[b + F_CAND_OPP_WIN4] /= COORD_SCALE;
-            feat[b + F_CAND_OPP_WIN5] /= COORD_SCALE;
+        if w.complete_opp {
+            feat[b + F_CAND_COMPLETE_OPP] = 1.0;
+        }
+        // v3: phase-aware own win-now — own count-5 (any B) OR own count-4 only at
+        // FirstStone (ph == 1). Reconstructed from the per-count own accumulators.
+        if w.own_win5 > 0 || (w.own_win4 > 0 && ph == 1) {
+            feat[b + F_CAND_WIN_NOW_OWN] = 1.0;
+        }
+        // v3: any opponent >=4 window through this empty cell is a must-answer
+        // immediate threat (the block-cell set). Equivalent to opp_win4>0||opp_win5>0.
+        if w.opp_threat {
+            feat[b + F_CAND_OPP_THREAT] = 1.0;
         }
     }
 
