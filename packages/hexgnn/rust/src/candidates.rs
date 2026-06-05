@@ -324,13 +324,17 @@ pub fn build_graph(state: &RustHexoState, n: i16) -> PositionGraph {
         edge_counts[ty as usize] += 2;
     };
 
-    // CONTEXT: SIDE hub <-> every other node.
-    let total_nodes = node_type.len() as u32;
-    for idx in 0..total_nodes {
-        if idx != side_idx {
-            add_undirected(side_idx, idx, EDGE_CONTEXT);
-        }
-    }
+    // CONTEXT hub REMOVED (hexgnn sparse rewrite, phase 1; design #4: no global
+    // hub). The SIDE hub <-> every-node fan-out was 2*(N-1) edges (~27% of midgame
+    // edges) and memory-bound scatter dominated the forward. Per design #4 the
+    // global scalars (phase / move-number / stone counts) ride on the SIDE node's
+    // OWN features and feed the value head directly (the value readout still reads
+    // the SIDE row + the PMA pool over all nodes), so no per-node global broadcast
+    // edge is materialized. D6-INVARIANT (removing an invariant edge class). The
+    // SIDE node is now edge-isolated; the message passing leaves an edgeless node's
+    // embedding = norm(node_in(side_features)), exactly the intended "global scalars
+    // -> value head" path. `side_idx` retained for the value readout.
+    let _ = side_idx;
 
     // RECENCY: consecutive stones in placement order (chain).
     let mut hist: Vec<&hexo_engine::PlacementRecord> = state.placement_history().iter().collect();
