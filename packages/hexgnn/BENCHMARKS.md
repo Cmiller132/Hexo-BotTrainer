@@ -45,6 +45,61 @@ the MCTS, so a smaller model buys ~1.5x, not 10x. At 512 visits the realistic
 ceiling is ~20 pos/s (td128/gnn3) to ~30-50 pos/s (td96/gnn2 + cheap PCR), i.e.
 ~3-7x the old model-3 (~6-8 pos/s) — a real win, but not 200.
 
+## Detailed profiling — where the time goes (td128/gnn3, active=512, visits=512)
+
+### (1) Wall-time attribution (instrumented self-play, ~ply-18 sample, pos/s=30.2)
+| phase | %wall | notes |
+|---|--:|---|
+| NN forward (H2D + GNN compute) [GPU] | **59.9%** | the single biggest bucket; GROWS with ply |
+| Rust MCTS select/expand/backup + featurize + serialize + py loop | **38.5%** | CPU |
+| NN eval: build (frombuffer -> tensors) [CPU] | 0.1% | negligible (zero-copy buffers) |
+| NN eval: post (softmax/decode + D2H + tobytes) | 1.4% | negligible |
+
+So it is BOTH-bound but **forward-dominant (~60%) with a hard ~38% CPU/Rust floor**. The
+synchronous MCTS design has no GPU↔CPU overlap (Rust must back up the eval result
+before the next select), so the two phases are sequential — GPU sits idle (~0%, 8 W)
+during the 38% Rust phase and bursts during the 60% forward phase (avg util ~50-60%).
+
+### (2) Is the forward launch-/memory-/compute-bound? (torch profiler, eager op mix)
+Matmuls (addmm + sgemm) are only ~13-26% of forward CUDA time. The rest is
+**elementwise + scatter/gather over the EDGE-scale tensors**: aten::add ~29%,
+index_add_ (the message scatter) ~13-16%, aten::index (gather) ~10%, clamp_min ~15%,
+copy_ ~9%. At 445k params the matmul FLOPs are trivial — the cost is moving the
+`(edges × token_dim)` message tensors and scattering them => **memory-bandwidth-bound**,
+plus **kernel-launch pressure** in eager ("Command Buffer Full" 21-63%, hundreds of
+small kernels/forward). torch.compile (production) already fuses much of it:
+eager->compiled = 36.6->11.8 ms (opening, 3.1x) and 257->115 ms (ply-60, 2.2x).
+=> A narrower/shallower model helps the GPU half (per-edge vector + #layers) but NOT
+the edge COUNT or scatter-index overhead, so it buys ~1.5x, not 10x.
+
+### (3) Why pos/s decays 77 -> 20 as games leave the opening
+Per-leaf graph size grows ~7x by ply 60 (radius-3 candidate set + window-hub edges
+scale with accumulated stones/active windows):
+| | nodes/leaf | edges/leaf | cand/leaf | compiled fwd ms (512 leaves) |
+|---|--:|--:|--:|--:|
+| opening ~6 plies | 222 | 1,499 | 215 | 11.8 |
+| midgame ~60 plies | 1,569 | 11,420 | 1,507 | 115.4 |
+Forward is O(edges) memory-bound and featurize is O(nodes+edges), so each position
+costs ~7-10x more by midgame. Rust featurizer alone: 12.3 ms (opening) -> 85.7 ms
+(midgame) per 512 states. The cheap opening inflates the cumulative pos/s, which
+decays toward the midgame steady-state.
+
+### (4) Revised ceilings @512 visits IF the top fixes were applied
+Both buckets must improve (Amdahl over 60% forward / 38% Rust):
+- torch.compile: ALREADY ON (2.2-3x vs eager).
+- CUDA graphs (cut launch overhead; needs shape bucketing): ~1.2-1.3x forward.
+- Fused relational-message scatter kernel (torch_scatter segment-matmul / custom):
+  ~1.5-2x forward (kills the index_add_/index/add memory passes).
+- Rust-side graph-build batching + caching the static board adjacency across a
+  position's sims: ~1.2-1.4x on the Rust 38%.
+Stacking the plausible GPU fixes (~1.8x forward) + Rust (~1.3x): total ~1.55x ->
+config (B) ~30 pos/s(early)/~15-20(full) becomes ~45 pos/s(early)/~25-35(full).
+**Even fully fixed, config (B) @512 visits reaches ~30-50 pos/s, NOT 100+.** Hitting
+100+ @512 visits needs a fundamentally SPARSER graph (fewer edges/candidates — a
+representation change), because total work = positions x visits x O(edges) and the
+midgame edge explosion dominates. The only reliable path to >=200 stays **lower
+visits** (~64).
+
 **What reaches >=200 pos/s:** drop the AVERAGE visits to ~64. td96/gnn2 @ visits=64
 measured 242 pos/s (opening; ~120-180 full-game est). visits=128 -> 135 (opening).
 PCR helps at HIGH visits (lowers the average) but its two-call split adds overhead
