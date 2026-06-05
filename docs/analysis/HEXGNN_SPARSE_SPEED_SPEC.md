@@ -185,6 +185,71 @@ model moved, and can fall back (e.g. keep window nodes) if it moves too far.
 
 ---
 
+## 4.5 D6 = EXACT invariance via tied steerable edges (owner decision B)
+
+**Answering "how would keeping D6-invariant work, and the downsides?"**
+
+**The subtlety.** Direction-typed edges want a per-direction transform. Our node
+features are **invariant scalars** (owner/count/distance — they do NOT transform
+under D6). Exact D6-equivariance constrains the 6 direction weights by
+`W_{σ_g(d)} = ρ(g) W_d ρ(g)^{-1}`. With invariant features `ρ(g)=I`, and since D6
+acts **transitively** on the 6 hex directions, this forces `W_0=…=W_5` — i.e. tying
+to a single matrix would make the message **direction-agnostic** (blob = line).
+**So discrimination requires a small hidden component that transforms under D6.**
+(Group-lifting — 6/12 oriented copies of the whole feature — would also work but
+multiplies compute; rejected per the owner.)
+
+**The construction (tied weights + one steerable channel-set, ~zero cost).**
+Each node carries, beside its invariant scalars `s ∈ R^c`, a tiny **steerable
+2nd-moment feature** `T ∈ Sym(2)` (a 2×2 symmetric tensor = 3 numbers) that
+transforms as `T → R_g T R_gᵀ` under a D6 element `g` (acting on the hex plane as
+`R_g ∈ O(2)`; reflections included — Hexo has no chirality so they're free). Let
+`e_0…e_5` be the fixed hex unit directions (`R_g e_d = e_{σ_g(d)}`). The message
+layer (NO per-direction matrices):
+- **scalars** update with the existing tied/shared weights using only invariant
+  inputs (incl. the invariants of `T`): `s_v ← LN(s_v + MLP([s_v, Σ_u W·s_u,
+  tr T_v, det T_v]))`.
+- **steerable** accumulates direction structure: `T_v ← Σ_{u→v} γ(s_u,s_v,attr) ·
+  (e_d e_dᵀ)`, where `γ` is a learned **scalar** gate on invariant features and
+  `e_d e_dᵀ` is a precomputed constant 2×2 (no params). Optional channel-mixing
+  `T ← Σ_k a_k T_k` acts on the channel index (commutes with `R_g`).
+- **readout (heads)** uses only **O(2)-invariants** of `T` (`tr`, `det`, eigenvalue
+  gap) plus `s` → output is exactly invariant.
+
+**Why it's invariant.** Every learned weight touches invariant scalars or the
+channel index (commuting with `R_g`); the only geometry is the constant `e_d`,
+which transforms correctly; the readout takes O(2)-invariant contractions. So
+rotating/reflecting the input rotates every `T` and permutes directions
+consistently → `s` and all invariants of `T` are unchanged → **bitwise-equal output
+for all 12 elements** (the existing exact equivariance gate stays, same tolerance).
+
+**Why line-vs-blob survives (the whole point).** `T_v = Σ γ_u e_d e_dᵀ` is the
+(gated) **2nd moment of the neighbor directions**. Collinear neighbors (a line) →
+`T` is rank-1, aligned with the axis → large **anisotropy** (`λ_max−λ_min`); an
+isotropic blob → `T ∝ I` → ~zero anisotropy. The invariant anisotropy/`det`
+cleanly separates lines from blobs — and unlike a 1st-moment vector it does **not
+cancel** for a straight line through the node (e_d and e_{d+3}=−e_d give the same
+`e_d e_dᵀ`). Deeper layers read these invariants, so "I'm on a line" propagates.
+
+**Cost (~zero vs untied).** Per edge: one scalar gate `γ` (same MLP cost as today)
+× a constant 2×2 outer product accumulated into `T` — O(E·3) adds, negligible
+beside the O(E·d²) message matmul. Channels added: 3 (one `T`) to a few. **No
+6×/12× lifting.** Forward FLOPs ≈ untied-direction-weights; fewer params (tied).
+
+**Downsides beyond code complexity (flagged honestly):**
+1. **Expressivity restriction (real).** The model can use direction only through
+   O(2)-equivariant features — i.e. **axis-alignment / anisotropy**, not arbitrary
+   per-absolute-direction feature maps. For Hexo (a line game) the tactically
+   relevant direction signal *is* axis-alignment, so the match is good — but a
+   fully untied model could in principle learn richer direction-specific maps (at
+   the cost of needing augmentation and losing exactness). Mitigate with a few `T`
+   channels (more 2nd-moment capacity) if a closeness/strength gap shows.
+2. **Reflection-invariance** (full D6 tie): mirror images are indistinguishable —
+   free for Hexo (no chirality).
+3. **Numerics:** use **squared/polynomial invariants** (`tr`, `det`, `‖·‖²`), not a
+   raw `sqrt` eigen-gap, to keep gradients smooth near `T≈0`.
+4. Negligible extra activation memory (the few steerable channels).
+
 ## 5. Rust optimization (the 38%)
 
 1. **Single live-cell pass**: replace per-candidate `has_open_window` O(18) rescan
