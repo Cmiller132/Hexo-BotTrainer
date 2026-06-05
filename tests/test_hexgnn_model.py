@@ -136,8 +136,11 @@ def test_overfit_tiny_batch() -> None:
     model = HexgnnNetwork(token_dim=48, gnn_layers=2)
     model.train()
     opt = torch.optim.AdamW(model.parameters(), lr=5e-3)
+    # 400 steps (was 250): the tiny batch overfits comfortably, but multi-threaded
+    # CPU index_add_ is non-deterministic, so a borderline 250-step run flaked; the
+    # extra steps keep the >50%-drop assertion robust regardless of accumulation order.
     first = last = None
-    for step in range(250):
+    for step in range(400):
         opt.zero_grad()
         out = model(batch)
         loss, _ = hexgnn_loss(out, targets)

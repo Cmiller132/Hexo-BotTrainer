@@ -41,11 +41,74 @@ passing already mixes global board state into it — a complementary, cheap sign
 
 from __future__ import annotations
 
+import math
 from typing import Mapping
 
 import torch
 from torch import nn
 from torch.nn import functional as F
+
+
+# --- D6 steerable direction basis (spec §4.5) --------------------------------
+# The 6 hex axial unit directions and their 2x2 outer products e_d e_d^T, stored
+# as the 3 independent symmetric components [xx, yy, xy]. These are the ONLY place
+# absolute direction enters; under a D6 element the directions permute and each
+# outer product maps e_d e_d^T -> R_g (e_d e_d^T) R_g^T, so any O(2)-invariant of
+# the accumulated tensor T (trace, det) is unchanged => exact D6-invariance with
+# NO per-direction weights and NO group lifting (constant tensors, ~zero cost).
+_HEX_DIRS_AXIAL = ((1, 0), (1, -1), (0, -1), (-1, 0), (-1, 1), (0, 1))
+
+
+def _axial_to_xy(q: float, r: float) -> tuple[float, float]:
+    # axial -> cartesian on the hex plane (each of the 6 unit steps has length 1,
+    # 60 degrees apart), so D6 acts as a genuine O(2) rotation/reflection.
+    return (q + r / 2.0, r * math.sqrt(3.0) / 2.0)
+
+
+_DIR_XY = [_axial_to_xy(q, r) for (q, r) in _HEX_DIRS_AXIAL]
+# (6, 3): [e_x*e_x, e_y*e_y, e_x*e_y] per direction.
+_DIR_OUTER = [[x * x, y * y, x * y] for (x, y) in _DIR_XY]
+
+
+class SteerableTensorChannels(nn.Module):
+    """Tied-weight steerable edge feature (spec §4.5, owner option B).
+
+    Accumulates a per-node 2x2 symmetric tensor ``T_v = Σ_{u->v} γ(h_u) · e_d e_d^T``
+    over the n_steer channels, where γ is a learned SCALAR gate on the (D6-invariant)
+    source features and ``e_d`` is the constant hex-direction unit vector of the edge
+    (``edge_dir`` in 0..5; <0 = no direction => no contribution). Returns a
+    token_dim vector built ONLY from the O(2)-INVARIANTS of T (trace, det), so the
+    whole module is exactly D6-invariant for all 12 group elements while preserving
+    line-vs-blob discrimination (T is rank-1/anisotropic for collinear neighbours,
+    isotropic for a blob; a 2nd moment does not cancel for a straight line). No
+    per-direction matrices, no group lifting -> ~zero forward cost vs untied weights.
+    """
+
+    def __init__(self, dim: int, n_steer: int = 4) -> None:
+        super().__init__()
+        self.dim = int(dim)
+        self.n_steer = int(n_steer)
+        self.gate = nn.Linear(self.dim, self.n_steer)
+        self.out = nn.Linear(2 * self.n_steer, self.dim)  # (tr, det) per channel
+        self.register_buffer("dir_outer", torch.tensor(_DIR_OUTER, dtype=torch.float32))
+
+    def forward(self, h: torch.Tensor, edge_index: torch.Tensor, edge_dir: torch.Tensor) -> torch.Tensor:
+        n = h.shape[0]
+        if edge_index.shape[1] == 0:
+            return h.new_zeros(n, self.dim)
+        src, dst = edge_index[0], edge_index[1]
+        gate = self.gate(h)                       # (N, n_steer) from invariant feats
+        g_e = gate.index_select(0, src)           # (E, n_steer)
+        ed = edge_dir.to(torch.long)
+        valid = (ed >= 0).to(h.dtype)             # (E,)
+        outer = self.dir_outer.to(h.dtype).index_select(0, ed.clamp_min(0))  # (E, 3)
+        contrib = (g_e * valid.unsqueeze(-1)).unsqueeze(-1) * outer.unsqueeze(1)  # (E, n_steer, 3)
+        T = h.new_zeros(n, self.n_steer, 3).index_add_(0, dst, contrib.to(h.dtype))
+        txx, tyy, txy = T[..., 0], T[..., 1], T[..., 2]
+        tr = txx + tyy
+        det = txx * tyy - txy * txy
+        inv = torch.stack([tr, det], dim=-1).reshape(n, 2 * self.n_steer)  # O(2)-invariants
+        return self.out(inv)
 
 from .constants import (
     DEFAULT_VALUE_PMA_SEEDS,
@@ -74,7 +137,7 @@ class RelationalMessagePassing(nn.Module):
     hexgt — this is the shared GNN trunk.
     """
 
-    def __init__(self, dim: int, num_edge_types: int, edge_attr_dim: int) -> None:
+    def __init__(self, dim: int, num_edge_types: int, edge_attr_dim: int, *, steerable: int = 0) -> None:
         super().__init__()
         self.dim = dim
         self.num_edge_types = num_edge_types
@@ -84,6 +147,10 @@ class RelationalMessagePassing(nn.Module):
         self.out_proj = nn.Linear(dim, dim)
         self.norm = nn.LayerNorm(dim)
         nn.init.xavier_uniform_(self.weight)
+        # Optional D6 steerable direction channels (spec §4.5). Active only when the
+        # batch carries `edge_dir`; their output is built from O(2)-invariants of the
+        # accumulated tensor, so the layer stays exactly D6-invariant.
+        self.steerable = SteerableTensorChannels(dim, steerable) if steerable > 0 else None
 
     def forward(
         self,
@@ -91,6 +158,7 @@ class RelationalMessagePassing(nn.Module):
         edge_index: torch.Tensor,
         edge_type: torch.Tensor,
         edge_attr: torch.Tensor,
+        edge_dir: torch.Tensor | None = None,
     ) -> torch.Tensor:
         n = h.shape[0]
         if edge_index.shape[1] == 0:
@@ -108,7 +176,10 @@ class RelationalMessagePassing(nn.Module):
         agg = h.new_zeros(n, self.dim).index_add_(0, dst, m)
         counts = h.new_zeros(n).index_add_(0, dst, h.new_ones(dst.shape[0]))
         agg = agg / counts.clamp_min(1.0).unsqueeze(-1)
-        return self.norm(h + self.out_proj(agg))
+        update = self.out_proj(agg)
+        if self.steerable is not None and edge_dir is not None:
+            update = update + self.steerable(h, edge_index, edge_dir).to(h.dtype)
+        return self.norm(h + update)
 
 
 # Key under which the PRECOMPUTED SIDE-hub rows travel in the batch dict. The
@@ -231,6 +302,7 @@ class HexgnnNetwork(nn.Module):
         edge_attr_dim: int = EDGE_ATTR_DIM,
         value_pma_seeds: int = DEFAULT_VALUE_PMA_SEEDS,
         value_head_use_side: bool = True,
+        steerable_channels: int = 0,
     ) -> None:
         super().__init__()
         self.node_feature_dim = int(node_feature_dim)
@@ -241,6 +313,10 @@ class HexgnnNetwork(nn.Module):
         self.value_pma_seeds = int(value_pma_seeds)
         self.value_head_use_side = bool(value_head_use_side)
         self.dropout = float(dropout)
+        # D6 steerable direction channels (spec §4.5). 0 = off (current behavior);
+        # >0 builds each GNN layer with the tied steerable tensor channels, used when
+        # the batch carries `edge_dir`.
+        self.steerable_channels = int(steerable_channels)
 
         self.node_in = nn.Sequential(
             nn.Linear(self.node_feature_dim, self.token_dim),
@@ -248,7 +324,8 @@ class HexgnnNetwork(nn.Module):
             nn.Linear(self.token_dim, self.token_dim),
         )
         self.gnn = nn.ModuleList(
-            [RelationalMessagePassing(self.token_dim, NUM_EDGE_TYPES, self.edge_attr_dim) for _ in range(self.gnn_layers)]
+            [RelationalMessagePassing(self.token_dim, NUM_EDGE_TYPES, self.edge_attr_dim,
+                                      steerable=self.steerable_channels) for _ in range(self.gnn_layers)]
         )
 
         self.policy_head = nn.Linear(self.token_dim, 1)
@@ -280,8 +357,9 @@ class HexgnnNetwork(nn.Module):
             edge_type = h.new_zeros(edge_index.shape[1], dtype=torch.long)
         if edge_attr is None:
             edge_attr = h.new_zeros(edge_index.shape[1], self.edge_attr_dim)
+        edge_dir = batch.get("edge_dir")  # (E,) hex-direction index in 0..5, <0 = none
         for layer in self.gnn:
-            h = layer(h, edge_index, edge_type, edge_attr)
+            h = layer(h, edge_index, edge_type, edge_attr, edge_dir)
         return h
 
     def _graph_readout(self, batch: Mapping[str, torch.Tensor], node_emb: torch.Tensor) -> torch.Tensor:
