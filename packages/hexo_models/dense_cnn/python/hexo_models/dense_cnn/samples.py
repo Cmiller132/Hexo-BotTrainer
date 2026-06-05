@@ -172,6 +172,7 @@ def finalize_game_samples(
     *,
     truncated: bool = False,
     soft_z_lambda: float = 0.0,
+    mask_opp_from_fast: bool = False,
 ) -> list[Model1SampleData]:
     """Assign outcome targets to a finished game's pre-decision samples.
 
@@ -203,7 +204,9 @@ def finalize_game_samples(
         raise ValueError(f"soft_z_lambda must be in [0, 1], got {soft_z_lambda!r}")
     finalized: list[Model1SampleData] = []
     for index, (player, sample, root_value) in enumerate(decisions):
-        opp_policy, opp_source = _future_opponent_policy(decisions, index, player)
+        opp_policy, opp_source = _future_opponent_policy(
+            decisions, index, player, mask_from_fast=mask_opp_from_fast
+        )
         metadata = {
             **dict(sample.metadata),
             "target_schema_version": CURRENT_TARGET_SCHEMA_VERSION,
@@ -350,11 +353,24 @@ def _future_opponent_policy(
     decisions: Sequence[tuple[str, Model1SampleData, float]],
     index: int,
     player: str,
+    *,
+    mask_from_fast: bool = False,
 ) -> tuple[tuple[tuple[int, float], ...], str]:
-    """Return the next opponent decision's policy as the opponent-policy target."""
+    """Return the next opponent decision's policy as the opponent-policy target.
+
+    Under KataGo Playout Cap Randomization (`mask_from_fast=True`), the opponent
+    target is MASKED (empty -> dropped from the segmented opp loss denominator)
+    when the next opponent move was a FAST search (`pcr_full=False`): a fast move's
+    170-visit, unpruned, noise-free distribution is a systematically different
+    (sharper) target family, so we only train the opponent head on full->full
+    transitions (owner decision; see HEXGT_PCR_KATAGO_MAPPING.md). Default off keeps
+    the dense_cnn (non-PCR) behavior byte-identical.
+    """
 
     for future_player, future_sample, _root_value in decisions[index + 1 :]:
         if future_player != player:
+            if mask_from_fast and not future_sample.metadata.get("pcr_full", True):
+                return (), "fast_unrecorded_masked"
             return tuple(future_sample.policy), "future_opponent_mcts"
     return (), "none"
 

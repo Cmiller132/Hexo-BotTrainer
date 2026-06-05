@@ -260,6 +260,17 @@ def main():
     ap.add_argument("--batch", type=int, default=128)
     ap.add_argument("--lr", type=float, default=2.0e-4)
     ap.add_argument("--warmup", type=int, default=200)
+    # Post-warmup exponential LR decay (KataGo-style, keyed to global_step so it is
+    # resume-safe with NO scheduler state — recomputed from the checkpointed step each
+    # train step; survives the frequent supervisor bounces). lr = base until
+    # --lr-decay-start-step (anchor at the engage step -> no discontinuity with the
+    # prior flat 2e-4), then halve every --lr-decay-halflife-steps, clamped at --lr-min.
+    # MUST be threaded into the cfg dict (driver does not read TOML [training]). Default
+    # OFF. See docs/analysis/HEXGT_PCR_KATAGO_MAPPING.md / the LR-decay rationale.
+    ap.add_argument("--lr-decay", action=argparse.BooleanOptionalAction, default=False)
+    ap.add_argument("--lr-decay-start-step", type=int, default=0)
+    ap.add_argument("--lr-decay-halflife-steps", type=float, default=0.0)
+    ap.add_argument("--lr-min", type=float, default=0.0)
     # Aux loss weight shared by the 3 short-term-value (lookahead) heads. Default
     # 0.25 (the config default) is a no-op; the run passes 0.10 so the 3 stv heads
     # collectively (~0.10x7.8=0.78 effective) ~= the value head instead of ~3x it,
@@ -354,7 +365,12 @@ def main():
         "architecture": {"candidate_radius": args.n,
                          "short_term_value_horizons": list(STV_HORIZONS)},
         "training": {"learning_rate": args.lr, "warmup_steps": args.warmup, "batch_size": args.batch,
-                     "short_term_value_weight": args.short_term_value_weight},
+                     "short_term_value_weight": args.short_term_value_weight,
+                     # LR decay threaded here (driver does not read TOML [training]).
+                     "lr_decay_enabled": bool(args.lr_decay),
+                     "lr_decay_start_step": args.lr_decay_start_step,
+                     "lr_decay_halflife_steps": args.lr_decay_halflife_steps,
+                     "lr_min": args.lr_min},
         # Self-play row finalization. policy_surprise_* MUST be threaded here: the
         # driver does not read any TOML [samples] section, so omitting this leaves
         # the dataclass default policy_surprise_enabled=False (the bug that kept it
@@ -532,6 +548,20 @@ def main():
     else:
         log(f"    PCR (KataGo playout-cap-randomization): DISABLED (every move full search "
             f"@ {_sp.search_visits} visits, all recorded)", fh)
+    # LR-schedule confirmation incl. the EFFECTIVE LR at the resume step (so a bounce
+    # can be checked to resume at the right LR — the schedule is a pure function of the
+    # checkpointed global_step, so it is resume-safe with no scheduler state).
+    _tr = cfg.training
+    _cur_step = int(trainer.train_state.global_step)
+    _eff_lr = trainer._lr_at_step(_cur_step)
+    if _tr.lr_decay_enabled and _tr.lr_decay_halflife_steps > 0:
+        _hl = _tr.lr_decay_halflife_steps
+        log(f"    LR schedule: exp-decay base={_tr.learning_rate:.2e} start_step={_tr.lr_decay_start_step} "
+            f"halflife={_hl:.0f} steps min={_tr.lr_min:.2e} | effective LR @ step {_cur_step} = {_eff_lr:.3e} "
+            f"[+10k steps -> {max(_tr.lr_min, _tr.learning_rate * 2 ** (-max(0, _cur_step + 10000 - _tr.lr_decay_start_step) / _hl)):.3e}]", fh)
+    else:
+        log(f"    LR schedule: flat {_tr.learning_rate:.2e} (post-warmup {_tr.warmup_steps} steps); "
+            f"effective LR @ step {_cur_step} = {_eff_lr:.3e}", fh)
 
     def save(tag, rl_epoch, epoch_train_complete=True):
         payload = {
@@ -819,7 +849,7 @@ def main():
             stv_str = "".join(f" {k.replace('stvalue_', 'stv')}={avg(k):.4f}" for k in stv_keys)
             log(f"epoch {rl_epoch} train: {comp_n} steps (step={trainer.train_state.global_step}) "
                 f"total={avg('total'):.4f} policy={avg('policy'):.4f} value={avg('value'):.4f} "
-                f"opp={avg('opp_policy'):.4f}{stv_str} prune={trainer.prune_rate:.1%} {ms_per:.0f}ms/step "
+                f"opp={avg('opp_policy'):.4f}{stv_str} prune={trainer.prune_rate:.1%} lr={avg('lr'):.2e} {ms_per:.0f}ms/step "
                 f"window={len(win_epochs)}ep[{span}] {len(shards)}sh "
                 f"pool~{pool_pos // 1000}k/{args.replay_pool_cap // 1000}k "
                 f"decay={args.replay_recency_decay}", fh)

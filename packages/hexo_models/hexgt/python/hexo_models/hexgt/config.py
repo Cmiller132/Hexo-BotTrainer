@@ -97,6 +97,18 @@ class HexgtTrainingConfig:
     max_train_bucket_size: float = 500_000.0
     no_repeat_files: bool = True
     max_validation_samples: int = 100_000
+    # Optional post-warmup learning-rate decay (KataGo-style fixed schedule keyed to
+    # `global_step`, so it is resume-safe with NO scheduler state — the LR is a pure
+    # function of the checkpointed step, recomputed each step). When enabled:
+    #   lr = learning_rate                                  for warmup_end <= step < lr_decay_start_step
+    #   lr = max(lr_min, learning_rate * 2**(-(step - lr_decay_start_step)/lr_decay_halflife_steps))
+    #                                                       for step >= lr_decay_start_step
+    # Anchoring at `lr_decay_start_step` (the step at engage) keeps the LR continuous
+    # with the prior flat phase (no discontinuity). OFF by default (flat post-warmup).
+    lr_decay_enabled: bool = False
+    lr_decay_start_step: int = 0
+    lr_decay_halflife_steps: float = 0.0
+    lr_min: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -265,6 +277,10 @@ def parse_hexgt_config(raw: Mapping[str, Any] | None) -> HexgtConfig:
             max_train_bucket_size=float(training.get("max_train_bucket_size", 500_000.0)),
             no_repeat_files=bool(training.get("no_repeat_files", True)),
             max_validation_samples=int(training.get("max_validation_samples", 100_000)),
+            lr_decay_enabled=bool(training.get("lr_decay_enabled", False)),
+            lr_decay_start_step=int(training.get("lr_decay_start_step", 0)),
+            lr_decay_halflife_steps=float(training.get("lr_decay_halflife_steps", 0.0)),
+            lr_min=float(training.get("lr_min", 0.0)),
         ),
         samples=HexgtSampleConfig(
             shuffle_min_rows=int(samples.get("shuffle_min_rows", 100_000)),

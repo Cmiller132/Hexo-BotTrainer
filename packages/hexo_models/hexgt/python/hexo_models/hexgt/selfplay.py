@@ -659,6 +659,9 @@ def run_selfplay_games(
                 horizons,
                 truncated=truncated,
                 soft_z_lambda=config.samples.soft_z_lambda,
+                # PCR: only train the opponent-policy head on full->full transitions
+                # (mask the target when the next opponent move was a fast search).
+                mask_opp_from_fast=pcr_enabled,
             )
             # EXCLUDE positions whose search round was sanitization-tainted: a
             # near-uniform prior + neutral value produced by the fp16-overflow guard

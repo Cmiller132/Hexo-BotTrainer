@@ -23,7 +23,12 @@ export VENV=/root/.venvs/hexgt-build
 export RUNDIR="$ROOT/runs/hexgt_rl_main3"
 export SEALBOT_PATH=/mnt/e/SealBot
 export EPOCHS=60
-export GAMES_PER_EPOCH=256
+# GAMES 2026-06-04 (owner): 256 -> 512. PCR records only ~50% of moves, so this
+# restores (slightly over-restores) the fresh-recorded-rows/epoch volume to ~pre-PCR
+# levels (~20k recorded/epoch). Epoch self-play wall-time ~doubles on top of the PCR
+# ~1.8x; eval cadence (every 3 epochs) spans 2x games. Nothing else keys off 256
+# (replay window/recency are position/epoch-keyed; dashboard reads games/epoch from log).
+export GAMES_PER_EPOCH=512
 export EVAL_EVERY=3
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 BC_SEED="$RUNDIR/pretrain/hexgt_model3_pretrain.pt"
@@ -70,9 +75,16 @@ BC_SEED="$RUNDIR/pretrain/hexgt_model3_pretrain.pt"
 # eval-visits stays 512 (fixed SealBot-eval yardstick for cross-epoch trend continuity). PCR
 # threaded via the cfg dict (driver does NOT read TOML [selfplay]). Spec + faithful-mapping:
 # docs/analysis/HEXGT_PCR_KATAGO_MAPPING.md.
+# LR DECAY 2026-06-04 (owner): post-warmup exponential decay keyed to global_step
+# (resume-safe, no scheduler state -- recomputed from the checkpointed step each train
+# step, survives bounces). Anchored at the engage step 17429 (epoch-32 end) so LR is
+# CONTINUOUS with the prior flat 2e-4 (no discontinuity). halflife 10240 steps (=20
+# epochs x 512 steps): 2e-4 @ ep33 -> 1e-4 @ ep53 -> 5e-5 @ ep73 -> floor 2.5e-5 @ ~ep93.
+# Threaded via the cfg dict (driver does not read TOML [training]).
 export EXTRA_ARGS="--bc-seed $BC_SEED \
 --active 128 --vbatch 16 --visits 1024 --max-actions 512 \
 --pcr --pcr-full-proportion 0.5 --pcr-fast-visits 170 \
+--lr-decay --lr-decay-start-step 17429 --lr-decay-halflife-steps 10240 --lr-min 2.5e-5 \
 --train-steps-per-epoch 512 --batch 64 --lr 2e-4 --warmup 200 --replay-window-epochs 8 \
 --replay-pool-cap 500000 --replay-recency-decay 0.9 \
 --eval-games 40 --eval-visits 512 --eval-max-actions 1024 --eval-opening-moves 10 --eval-opening-temperature 0.6 \

@@ -263,6 +263,66 @@ def test_pcr_off_shards_unchanged_field_present(tmp_path) -> None:
     assert d["pcr_fast_rows_excluded"] == 0
 
 
+# --------------------------------------------------------------------------- #
+# 4) opp-policy target masking on fast next-ply (owner option (b))             #
+# --------------------------------------------------------------------------- #
+def test_opp_policy_masked_when_next_ply_is_fast() -> None:
+    """`_future_opponent_policy(mask_from_fast=True)` returns an empty (masked)
+    target when the next opponent move was a FAST search (pcr_full=False), and the
+    real distribution when it was full. Masking off reproduces dense_cnn behavior."""
+    from types import SimpleNamespace
+
+    from hexo_models.dense_cnn.samples import _future_opponent_policy
+
+    def d(player, policy, pcr_full):
+        return (player, SimpleNamespace(policy=policy, metadata={"pcr_full": pcr_full}), 0.0)
+
+    decisions = [
+        d("player0", ((1, 1.0),), True),   # 0: next opp = idx1 (P1 full)
+        d("player1", ((2, 1.0),), True),   # 1
+        d("player0", ((3, 1.0),), True),   # 2: next opp = idx3 (P1 FAST) -> masked
+        d("player1", ((4, 1.0),), False),  # 3 fast
+        d("player0", ((5, 1.0),), True),   # 4: no future opponent
+    ]
+    # mask on: full-next -> present; fast-next -> masked; no-future -> none.
+    assert _future_opponent_policy(decisions, 0, "player0", mask_from_fast=True) == (
+        ((2, 1.0),), "future_opponent_mcts")
+    assert _future_opponent_policy(decisions, 2, "player0", mask_from_fast=True) == (
+        (), "fast_unrecorded_masked")
+    assert _future_opponent_policy(decisions, 4, "player0", mask_from_fast=True) == ((), "none")
+    # mask off (dense_cnn default): the fast next-ply is used as-is.
+    assert _future_opponent_policy(decisions, 2, "player0", mask_from_fast=False) == (
+        ((4, 1.0),), "future_opponent_mcts")
+
+
+def test_selfplay_passes_opp_mask_only_when_pcr_enabled(monkeypatch) -> None:
+    """Self-play passes mask_opp_from_fast=True to finalize iff PCR is enabled, so
+    the non-PCR finalize path is byte-identical."""
+    _torch()
+    from hexo_models.hexgt import selfplay as sp_mod
+    from hexo_models.hexgt.selfplay import run_selfplay_games
+
+    seen: list[bool] = []
+    original = sp_mod.finalize_game_samples
+
+    def capture(*args, **kwargs):
+        seen.append(bool(kwargs.get("mask_opp_from_fast", False)))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(sp_mod, "finalize_game_samples", capture)
+
+    cfg_on = _cfg(pcr_enabled=True, full_visits=6, fast_visits=2)
+    run_selfplay_games(_model(cfg_on), cfg_on, num_games=2, output_dir=_tmp(monkeypatch),
+                       epoch=0, device="cpu", fp16=False, base_seed=5, active_games=2, virtual_batch_size=2)
+    assert seen and all(seen), "PCR on: every finalize call must mask fast opp targets"
+
+    seen.clear()
+    cfg_off = _cfg(pcr_enabled=False, full_visits=6)
+    run_selfplay_games(_model(cfg_off), cfg_off, num_games=2, output_dir=_tmp(monkeypatch),
+                       epoch=1, device="cpu", fp16=False, base_seed=5, active_games=2, virtual_batch_size=2)
+    assert seen and not any(seen), "PCR off: finalize must NOT mask (dense_cnn-identical)"
+
+
 def _tmp(monkeypatch):
     """A throwaway temp dir for tests that take monkeypatch but not tmp_path."""
     import tempfile
