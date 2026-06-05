@@ -146,3 +146,46 @@ def test_model_is_d6_equivariant() -> None:
                     f"element {e} seed {seed}: policy mismatch at {rc}: {rpol[rc]} vs {p}"
                 )
             assert torch.allclose(rout["value"][0], base_val, atol=2e-3), f"value not invariant under element {e}"
+
+
+def test_model_with_steerable_is_d6_equivariant() -> None:
+    """END-TO-END gate for the steerable edges: build the model with the D6 tied
+    steerable channels ACTIVE and the REAL Rust-computed `edge_dir`, and verify the
+    per-candidate policy + value are still exactly invariant under all 12 D6 elements.
+    Validates that the Rust direction index (candidates.rs dir_index/DIR_ORDER)
+    permutes consistently with D6 so the steerable tensor's invariants don't move."""
+    torch = _torch()
+    d6 = _d6()
+    from hexgnn.architecture import HexgnnNetwork
+    from hexgnn.graph_build import batch_from_states
+    from hexo_engine.types import unpack_coord_id
+
+    torch.manual_seed(0)
+    model = HexgnnNetwork(token_dim=48, gnn_layers=2, attention_heads=4, steerable_channels=4)
+    model.eval()
+
+    for seed in (11, 23, 37):
+        coords = _random_game_coords(seed, length=14)
+        if len(coords) < 6:
+            continue
+        base_batch = batch_from_states([_replay(coords)], n=4)
+        assert "edge_dir" in base_batch, "featurizer did not emit edge_dir"
+        with torch.no_grad():
+            base_out = model(base_batch)
+        base_pol = {cid: float(base_out["policy"][i]) for i, cid in enumerate(base_batch["candidate_ids"].tolist())}
+        base_val = base_out["value"][0]
+        for e in range(12):
+            rot = [d6.transform_coord(e, q, r) for q, r in coords]
+            rbatch = batch_from_states([_replay(rot)], n=4)
+            with torch.no_grad():
+                rout = model(rbatch)
+            rpol = {}
+            for i, cid in enumerate(rbatch["candidate_ids"].tolist()):
+                c = unpack_coord_id(int(cid))
+                rpol[(int(c.q), int(c.r))] = float(rout["policy"][i])
+            for cid, p in base_pol.items():
+                c = unpack_coord_id(int(cid))
+                rc = d6.transform_coord(e, int(c.q), int(c.r))
+                assert rc in rpol, f"steerable elem {e}: rotated candidate {rc} missing"
+                assert abs(rpol[rc] - p) < 3e-3, f"steerable elem {e} seed {seed}: policy moved at {rc}"
+            assert torch.allclose(rout["value"][0], base_val, atol=3e-3), f"steerable value not invariant under elem {e}"

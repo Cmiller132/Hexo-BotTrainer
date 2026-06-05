@@ -43,6 +43,24 @@ pub const NUM_EDGE_TYPES: usize = 5;
 /// The six axial hex-neighbor directions.
 const HEX_DIRS: [(i16, i16); 6] = [(1, 0), (-1, 0), (0, 1), (0, -1), (1, -1), (-1, 1)];
 
+/// Canonical hex-direction order for the per-edge `edge_dir` index. This MUST
+/// EXACTLY MATCH the Python steerable layer's basis
+/// `_HEX_DIRS_AXIAL = ((1,0),(1,-1),(0,-1),(-1,0),(-1,1),(0,1))`: for a directed
+/// adjacency edge A->B, `edge_dir` is the index `d` with
+/// `(B.q-A.q, B.r-A.r) == DIR_ORDER[d]`. Independent of `HEX_DIRS` ordering.
+const DIR_ORDER: [(i16, i16); 6] = [(1, 0), (1, -1), (0, -1), (-1, 0), (-1, 1), (0, 1)];
+
+/// Index of the axial delta `(dq, dr)` in `DIR_ORDER`, or `-1` if it is not a
+/// unit hex step (i.e. not one of the six neighbor directions).
+fn dir_index(dq: i16, dr: i16) -> i8 {
+    for (i, &(cq, cr)) in DIR_ORDER.iter().enumerate() {
+        if cq == dq && cr == dr {
+            return i as i8;
+        }
+    }
+    -1
+}
+
 fn axis_index(axis: Axis) -> u8 {
     match axis {
         Axis::Q => 0,
@@ -129,6 +147,10 @@ pub struct PositionGraph {
     pub edge_src: Vec<u32>,
     pub edge_dst: Vec<u32>,
     pub edge_type: Vec<u8>,
+    // Per-directed-edge hex-direction index in DIR_ORDER for ADJACENCY edges
+    // (which of the 6 axial directions src->dst points), else -1. Parallel to
+    // edge_src/edge_dst/edge_type (same length, same order).
+    pub edge_dir: Vec<i8>,
     pub edge_counts: [usize; NUM_EDGE_TYPES],
     pub used_legal_fallback: bool,
 }
@@ -313,14 +335,20 @@ pub fn build_graph(state: &RustHexoState, n: i16) -> PositionGraph {
     let mut edge_src = Vec::new();
     let mut edge_dst = Vec::new();
     let mut edge_type = Vec::new();
+    let mut edge_dir = Vec::new();
     let mut edge_counts = [0usize; NUM_EDGE_TYPES];
-    let mut add_undirected = |a: u32, b: u32, ty: u8| {
+    // Push both directed edges of a structural edge, recording a direction index
+    // for each (adjacency: the real DIR_ORDER index of the a->b / b->a delta;
+    // all other edge types: -1).
+    let mut add_undirected_dir = |a: u32, b: u32, ty: u8, dir_ab: i8, dir_ba: i8| {
         edge_src.push(a);
         edge_dst.push(b);
         edge_type.push(ty);
+        edge_dir.push(dir_ab);
         edge_src.push(b);
         edge_dst.push(a);
         edge_type.push(ty);
+        edge_dir.push(dir_ba);
         edge_counts[ty as usize] += 2;
     };
 
@@ -343,7 +371,7 @@ pub fn build_graph(state: &RustHexoState, n: i16) -> PositionGraph {
         let a = stone_idx.get(&(pair[0].coord.q, pair[0].coord.r));
         let b = stone_idx.get(&(pair[1].coord.q, pair[1].coord.r));
         if let (Some(&a), Some(&b)) = (a, b) {
-            add_undirected(a, b, EDGE_RECENCY);
+            add_undirected_dir(a, b, EDGE_RECENCY, -1, -1);
         }
     }
 
@@ -352,12 +380,12 @@ pub fn build_graph(state: &RustHexoState, n: i16) -> PositionGraph {
         let widx = window_node_idx[ti];
         for sc in &t.stone_cells {
             if let Some(&s) = stone_idx.get(&(sc.q, sc.r)) {
-                add_undirected(widx, s, EDGE_STONE_WINDOW);
+                add_undirected_dir(widx, s, EDGE_STONE_WINDOW, -1, -1);
             }
         }
         for ec in &t.empty_cells {
             if let Some(&c) = cand_idx.get(&(ec.q, ec.r)) {
-                add_undirected(widx, c, EDGE_CANDIDATE_WINDOW);
+                add_undirected_dir(widx, c, EDGE_CANDIDATE_WINDOW, -1, -1);
             }
         }
     }
@@ -374,7 +402,11 @@ pub fn build_graph(state: &RustHexoState, n: i16) -> PositionGraph {
             let nb = (coord.q + dq, coord.r + dr);
             if let Some(&nidx) = spatial.get(&nb) {
                 if nidx > *idx {
-                    add_undirected(*idx, nidx, EDGE_ADJACENCY);
+                    // src=*idx (coord), dst=nidx (nb): a->b delta is (dq,dr),
+                    // b->a delta is (-dq,-dr). Indices into DIR_ORDER.
+                    let dir_ab = dir_index(dq, dr);
+                    let dir_ba = dir_index(-dq, -dr);
+                    add_undirected_dir(*idx, nidx, EDGE_ADJACENCY, dir_ab, dir_ba);
                 }
             }
         }
@@ -394,6 +426,7 @@ pub fn build_graph(state: &RustHexoState, n: i16) -> PositionGraph {
         edge_src,
         edge_dst,
         edge_type,
+        edge_dir,
         edge_counts,
         used_legal_fallback,
     }
@@ -471,6 +504,8 @@ pub(crate) fn position_graph_to_py_dict(
     edges.set_item("edge_src", g.edge_src.clone())?;
     edges.set_item("edge_dst", g.edge_dst.clone())?;
     edges.set_item("edge_type", g.edge_type.clone())?;
+    // Per-directed-edge hex-direction index (adjacency: 0..5; else -1).
+    edges.set_item("edge_dir", g.edge_dir.clone())?;
     dict.set_item("edges", edges)?;
 
     // Window tokens (owner_is_current, count, axis_index, anchor_q, anchor_r, empty_count).

@@ -81,6 +81,7 @@ def build_model(arch_meta, device):
         attention_heads=arch_meta.get("attention_heads", 4),
         value_pma_seeds=int(arch_meta.get("value_pma_seeds", 2)),
         value_head_use_side=bool(arch_meta.get("value_head_use_side", True)),
+        steerable_channels=int(arch_meta.get("steerable_channels", 0)),
     ).to(device)
 
 
@@ -145,6 +146,9 @@ def main():
     ap.add_argument("--attention-heads", type=int, default=4)
     ap.add_argument("--value-pma-seeds", type=int, default=2)
     ap.add_argument("--value-head-use-side", action=argparse.BooleanOptionalAction, default=True)
+    # D6 tied steerable direction channels (spec §4.5). 0 = off; 4 = the perf-lineage
+    # default once the featurizer emits edge_dir (direction-typed "useful edges").
+    ap.add_argument("--steerable-channels", type=int, default=0)
     ap.add_argument("--out-dir", default=str(_ROOT / "runs/hexgnn_rl"))
     ap.add_argument("--epochs", type=int, default=40)
     ap.add_argument("--games-per-epoch", type=int, default=64)
@@ -265,6 +269,7 @@ def main():
             "token_dim": args.token_dim, "gnn_layers": args.gnn_layers,
             "attention_heads": args.attention_heads, "value_pma_seeds": args.value_pma_seeds,
             "value_head_use_side": bool(args.value_head_use_side),
+            "steerable_channels": args.steerable_channels,
         }
         model = build_model(arch_meta, device)
         seed_desc = (f"FROM SCRATCH (random init, no pretraining): token_dim={args.token_dim} "

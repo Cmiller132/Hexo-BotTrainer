@@ -32,6 +32,7 @@ pub(crate) struct GraphFeat {
     pub(crate) edge_src: Vec<i64>,  // num_edges (graph-local)
     pub(crate) edge_dst: Vec<i64>,
     pub(crate) edge_type: Vec<i64>,
+    pub(crate) edge_dir: Vec<i64>, // num_edges; adjacency 0..5, else -1
     pub(crate) edge_attr: Vec<f32>, // num_edges * EDGE_ATTR_DIM
     pub(crate) candidate_nodes: Vec<i64>, // graph-local node indices
     pub(crate) candidate_ids: Vec<i64>,
@@ -113,6 +114,7 @@ pub(crate) fn featurize_position_graph(
     let mut edge_src = Vec::with_capacity(e);
     let mut edge_dst = Vec::with_capacity(e);
     let mut edge_type = Vec::with_capacity(e);
+    let mut edge_dir = Vec::with_capacity(e);
     for k in 0..e {
         let su = g.edge_src[k] as usize;
         let du = g.edge_dst[k] as usize;
@@ -120,6 +122,8 @@ pub(crate) fn featurize_position_graph(
         edge_dst.push(g.edge_dst[k] as i64);
         let et = (g.edge_type[k] as i64).clamp(0, NUM_EDGE_TYPES - 1) as usize;
         edge_type.push(g.edge_type[k] as i64);
+        // Per-edge hex-direction index (adjacency 0..5, else -1); i8 -> i64.
+        edge_dir.push(g.edge_dir[k] as i64);
         edge_attr[k * EDGE_ATTR_DIM + et] = 1.0;
         let dq = g.node_q[su] as i32 - g.node_q[du] as i32;
         let dr = g.node_r[su] as i32 - g.node_r[du] as i32;
@@ -199,6 +203,7 @@ pub(crate) fn featurize_position_graph(
         edge_src,
         edge_dst,
         edge_type,
+        edge_dir,
         edge_attr,
         candidate_nodes: g.candidate_nodes.iter().map(|&c| c as i64).collect(),
         candidate_ids: g.candidate_ids.iter().map(|&c| c as i64).collect(),
@@ -216,6 +221,7 @@ pub(crate) struct CollatedFeatures {
     pub(crate) node_graph: Vec<i64>,
     pub(crate) edge_index: Vec<i64>, // 2 * num_edges
     pub(crate) edge_type: Vec<i64>,
+    pub(crate) edge_dir: Vec<i64>, // num_edges; adjacency 0..5, else -1
     pub(crate) edge_attr: Vec<f32>,
     pub(crate) candidate_index: Vec<i64>,
     pub(crate) candidate_graph: Vec<i64>,
@@ -237,6 +243,7 @@ struct GraphDst<'a> {
     edge_src: &'a mut [i64], // first half of edge_index
     edge_dst: &'a mut [i64], // second half of edge_index
     edge_type: &'a mut [i64],
+    edge_dir: &'a mut [i64],
     edge_attr: &'a mut [f32],
     candidate_index: &'a mut [i64],
     candidate_graph: &'a mut [i64],
@@ -290,6 +297,7 @@ pub(crate) fn collate(feats: &[GraphFeat]) -> CollatedFeatures {
     // one reshape; split it into the two halves before carving per-graph slices.
     let mut edge_index = vec![0i64; 2 * num_edges];
     let mut edge_type = vec![0i64; num_edges];
+    let mut edge_dir = vec![0i64; num_edges];
     let mut edge_attr = vec![0f32; num_edges * EDGE_ATTR_DIM];
     let mut candidate_index = vec![0i64; num_candidates];
     let mut candidate_graph = vec![0i64; num_candidates];
@@ -302,6 +310,7 @@ pub(crate) fn collate(feats: &[GraphFeat]) -> CollatedFeatures {
     let mut edge_src_dst = carve(edge_src_buf, feats.iter().map(|g| g.edge_src.len()));
     let mut edge_dst_dst = carve(edge_dst_buf, feats.iter().map(|g| g.edge_dst.len()));
     let mut edge_type_dst = carve(&mut edge_type, feats.iter().map(|g| g.edge_type.len()));
+    let mut edge_dir_dst = carve(&mut edge_dir, feats.iter().map(|g| g.edge_dir.len()));
     let mut edge_attr_dst = carve(&mut edge_attr, feats.iter().map(|g| g.edge_attr.len()));
     let mut cand_index_dst = carve(&mut candidate_index, feats.iter().map(|g| g.candidate_nodes.len()));
     let mut cand_graph_dst = carve(&mut candidate_graph, feats.iter().map(|g| g.candidate_nodes.len()));
@@ -316,18 +325,20 @@ pub(crate) fn collate(feats: &[GraphFeat]) -> CollatedFeatures {
         .zip(edge_src_dst.drain(..))
         .zip(edge_dst_dst.drain(..))
         .zip(edge_type_dst.drain(..))
+        .zip(edge_dir_dst.drain(..))
         .zip(edge_attr_dst.drain(..))
         .zip(cand_index_dst.drain(..))
         .zip(cand_graph_dst.drain(..))
         .zip(cand_ids_dst.drain(..))
         .map(
-            |(((((((((nf, nt), ng), es), ed), et), ea), ci), cg), cid)| GraphDst {
+            |((((((((((nf, nt), ng), es), ed), et), edir), ea), ci), cg), cid)| GraphDst {
                 node_feat: nf,
                 node_type: nt,
                 node_graph: ng,
                 edge_src: es,
                 edge_dst: ed,
                 edge_type: et,
+                edge_dir: edir,
                 edge_attr: ea,
                 candidate_index: ci,
                 candidate_graph: cg,
@@ -352,6 +363,7 @@ pub(crate) fn collate(feats: &[GraphFeat]) -> CollatedFeatures {
                 *out = v + node_offset;
             }
             dst.edge_type.copy_from_slice(&g.edge_type);
+            dst.edge_dir.copy_from_slice(&g.edge_dir);
             dst.edge_attr.copy_from_slice(&g.edge_attr);
             for (out, &c) in dst.candidate_index.iter_mut().zip(&g.candidate_nodes) {
                 *out = c + node_offset;
@@ -366,6 +378,7 @@ pub(crate) fn collate(feats: &[GraphFeat]) -> CollatedFeatures {
         node_graph,
         edge_index,
         edge_type,
+        edge_dir,
         edge_attr,
         candidate_index,
         candidate_graph,
@@ -517,6 +530,8 @@ pub(crate) fn collated_to_py_dict<'py>(
     d.set_item("node_graph", Py::new(py, HexgnnI64Buffer { data: c.node_graph })?)?;
     d.set_item("edge_index", Py::new(py, HexgnnI64Buffer { data: c.edge_index })?)?;
     d.set_item("edge_type", Py::new(py, HexgnnI64Buffer { data: c.edge_type })?)?;
+    // Per-edge hex-direction index (int64; adjacency 0..5, else -1).
+    d.set_item("edge_dir", Py::new(py, HexgnnI64Buffer { data: c.edge_dir })?)?;
     d.set_item("edge_attr", Py::new(py, HexgnnF32Buffer { data: c.edge_attr })?)?;
     d.set_item(
         "candidate_index",

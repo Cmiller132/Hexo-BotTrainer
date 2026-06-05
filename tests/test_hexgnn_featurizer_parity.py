@@ -70,6 +70,7 @@ def _rust_batch(states, n):
         candidate_index=np.frombuffer(d["candidate_index"], dtype=np.int64),
         candidate_graph=np.frombuffer(d["candidate_graph"], dtype=np.int64),
         candidate_ids=np.frombuffer(d["candidate_ids"], dtype=np.int64),
+        edge_dir=np.frombuffer(d["edge_dir"], dtype=np.int64),
         num_graphs=int(d["num_graphs"]),
     )
 
@@ -90,6 +91,7 @@ def test_rust_featurizer_matches_python_collate() -> None:
         "node_type",
         "node_graph",
         "edge_type",
+        "edge_dir",
         "candidate_index",
         "candidate_graph",
         "candidate_ids",

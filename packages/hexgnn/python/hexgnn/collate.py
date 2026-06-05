@@ -34,6 +34,7 @@ def collate_graphs(graphs: Sequence[GraphTensors]) -> dict[str, torch.Tensor | i
     edge_src = []
     edge_dst = []
     edge_type = []
+    edge_dir = []
     edge_attr = []
     candidate_index = []
     candidate_graph = []
@@ -49,6 +50,8 @@ def collate_graphs(graphs: Sequence[GraphTensors]) -> dict[str, torch.Tensor | i
             edge_src.append(g.edge_index[0] + node_offset)
             edge_dst.append(g.edge_index[1] + node_offset)
             edge_type.append(g.edge_type)
+            # Direction label — NOT a node index, so no offset.
+            edge_dir.append(g.edge_dir)
             edge_attr.append(g.edge_attr)
         c = int(g.candidate_index.shape[0])
         if c > 0:
@@ -79,6 +82,7 @@ def collate_graphs(graphs: Sequence[GraphTensors]) -> dict[str, torch.Tensor | i
         "node_graph": torch.from_numpy(np.concatenate(node_graph, axis=0).astype(np.int64)),
         "edge_index": torch.from_numpy(edge_index),
         "edge_type": torch.from_numpy(_cat(edge_type, dtype=np.int64, empty_shape=(0,))),
+        "edge_dir": torch.from_numpy(_cat(edge_dir, dtype=np.int64, empty_shape=(0,))),
         "edge_attr": torch.from_numpy(_cat(edge_attr, dtype=np.float32, empty_shape=(0, attr_dim))),
         "candidate_index": torch.from_numpy(_cat(candidate_index, dtype=np.int64, empty_shape=(0,))),
         "candidate_graph": torch.from_numpy(_cat(candidate_graph, dtype=np.int64, empty_shape=(0,))),

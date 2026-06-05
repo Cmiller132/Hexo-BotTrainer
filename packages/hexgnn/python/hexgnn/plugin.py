@@ -46,6 +46,7 @@ class HexgnnPlugin:
             dropout=arch.dropout,
             value_pma_seeds=arch.value_pma_seeds,
             value_head_use_side=arch.value_head_use_side,
+            steerable_channels=arch.steerable_channels,
         )
 
     def training_component_overrides(

@@ -88,15 +88,20 @@ def _subbatch(batch: dict, gids: torch.Tensor) -> tuple[dict, torch.Tensor]:
         "num_graphs": int(gids.numel()),
     }
     ei = batch["edge_index"]
+    has_dir = "edge_dir" in batch
     if ei.numel():
         esel = nsel[ei[0]]  # an edge sits within one graph -> src selected <=> dst selected
         sub["edge_index"] = node_map[ei[:, esel]]
         sub["edge_type"] = batch["edge_type"][esel]
         sub["edge_attr"] = batch["edge_attr"][esel]
+        if has_dir:
+            sub["edge_dir"] = batch["edge_dir"][esel]
     else:
         sub["edge_index"] = ei
         sub["edge_type"] = batch.get("edge_type")
         sub["edge_attr"] = batch.get("edge_attr")
+        if has_dir:
+            sub["edge_dir"] = batch["edge_dir"]
 
     cg = batch["candidate_graph"]
     csel = gset[cg]
@@ -292,10 +297,15 @@ class HexgnnInference:
             edge_index = torch.frombuffer(payload["edge_index"], dtype=torch.int64).reshape(2, te)
             edge_type = torch.frombuffer(payload["edge_type"], dtype=torch.int64)
             edge_attr = torch.frombuffer(payload["edge_attr"], dtype=torch.float32).reshape(te, ad)
+            # Per-edge hex-direction index for the D6 steerable layer (int64, 0..5 for
+            # adjacency, -1 otherwise). Present once the featurizer emits it; absent
+            # buffers fall back to None (steerable inactive).
+            edge_dir = torch.frombuffer(payload["edge_dir"], dtype=torch.int64) if "edge_dir" in payload else None
         else:
             edge_index = torch.zeros((2, 0), dtype=torch.int64)
             edge_type = torch.zeros((0,), dtype=torch.int64)
             edge_attr = torch.zeros((0, ad), dtype=torch.float32)
+            edge_dir = torch.zeros((0,), dtype=torch.int64) if "edge_dir" in payload else None
         candidate_index = torch.frombuffer(payload["candidate_index"], dtype=torch.int64)
         candidate_graph = torch.frombuffer(payload["candidate_graph"], dtype=torch.int64)
         batch = {
@@ -304,6 +314,8 @@ class HexgnnInference:
             "candidate_index": candidate_index, "candidate_graph": candidate_graph,
             "num_graphs": num_graphs,
         }
+        if edge_dir is not None:
+            batch["edge_dir"] = edge_dir
         out, dev_batch = self.forward_batch(batch)
         cg = dev_batch["candidate_graph"]
         # Count + sanitize non-finite trunk outputs (see `_count_and_sanitize`): the

@@ -74,17 +74,29 @@ class GraphTensors:
         "node_type",
         "edge_index",
         "edge_type",
+        "edge_dir",
         "edge_attr",
         "candidate_index",
         "candidate_ids",
         "num_nodes",
     )
 
-    def __init__(self, node_feat, node_type, edge_index, edge_type, edge_attr, candidate_index, candidate_ids):
+    def __init__(
+        self,
+        node_feat,
+        node_type,
+        edge_index,
+        edge_type,
+        edge_dir,
+        edge_attr,
+        candidate_index,
+        candidate_ids,
+    ):
         self.node_feat = node_feat
         self.node_type = node_type
         self.edge_index = edge_index
         self.edge_type = edge_type
+        self.edge_dir = edge_dir
         self.edge_attr = edge_attr
         self.candidate_index = candidate_index
         self.candidate_ids = candidate_ids
@@ -172,6 +184,8 @@ def build_graph_tensors(facts: Mapping[str, Any]) -> GraphTensors:
     esrc = _ints(edges["edge_src"])
     edst = _ints(edges["edge_dst"])
     etype = _ints(edges["edge_type"])
+    # Per-edge hex-direction index (adjacency 0..5, else -1). Empty -> int64[0].
+    edir = _ints(edges["edge_dir"])
     e = int(esrc.shape[0])
     edge_index = np.stack([esrc, edst], axis=0) if e else np.zeros((2, 0), dtype=np.int64)
     edge_attr = np.zeros((e, EDGE_ATTR_DIM), dtype=np.float32)
@@ -240,6 +254,7 @@ def build_graph_tensors(facts: Mapping[str, Any]) -> GraphTensors:
         node_type=node_type,
         edge_index=edge_index,
         edge_type=etype,
+        edge_dir=edir,
         edge_attr=edge_attr,
         candidate_index=candidate_index,
         candidate_ids=candidate_ids,

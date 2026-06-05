@@ -69,6 +69,9 @@ class HexgnnArchitectureConfig:
     # PMA value-head seed count k (HEXGT_PMA_VALUE_HEAD_PLAN.md). The value readout
     # is [SIDE | PMA_k]; k=2 is the owner's chosen build (doc default is 1).
     value_pma_seeds: int = DEFAULT_VALUE_PMA_SEEDS
+    # D6 tied steerable direction channels (spec §4.5). 0 = off; >0 activates the
+    # exactly-D6-invariant direction-typed edges (needs the featurizer's `edge_dir`).
+    steerable_channels: int = 0
     # Whether the value head concatenates the SIDE-hub embedding before the PMA pool
     # (`[SIDE | PMA_k]`, width (1+k)*token_dim). False -> PMA-only (`[PMA_k]`, width
     # k*token_dim), an A/B toggle to isolate the PMA pool's contribution. Default
@@ -253,6 +256,7 @@ def parse_hexgnn_config(raw: Mapping[str, Any] | None) -> HexgnnConfig:
             candidate_radius=int(arch.get("candidate_radius", DEFAULT_CANDIDATE_RADIUS)),
             value_pma_seeds=int(arch.get("value_pma_seeds", DEFAULT_VALUE_PMA_SEEDS)),
             value_head_use_side=bool(arch.get("value_head_use_side", True)),
+            steerable_channels=int(arch.get("steerable_channels", 0)),
         ),
         training=HexgnnTrainingConfig(
             batch_size=int(training.get("batch_size", 128)),

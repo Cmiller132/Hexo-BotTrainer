@@ -25,9 +25,9 @@ use super::constants::{
     HEXGT_ACTIVE_ROOT_LIMIT, HEXGT_DEFAULT_CANDIDATE_RADIUS, HEXGT_EVAL_CACHE_MAX_STATES,
 };
 use super::mcts_eval::{
-    evaluate_state_refs_cached, evaluate_states_cached, new_shared_evaluation_cache,
-    new_shared_evaluation_stats, state_hash, EvaluationStats, RustEvaluation,
-    RustEvaluationRequest, SharedEvaluationCache, SharedEvaluationStats,
+    evaluate_states_cached, finish_eval_prepared, new_shared_evaluation_cache,
+    new_shared_evaluation_stats, prepare_eval_refs, state_hash, EvaluationStats, PreparedEval,
+    RustEvaluation, RustEvaluationRequest, SharedEvaluationCache, SharedEvaluationStats,
 };
 use super::mcts_tree::{
     terminal_value, RootDirichletNoise, RustEdge, RustLeaf, RustNode, RustSearch,
@@ -437,34 +437,55 @@ fn run_searches_to_targets(
     candidate_radius: i16,
     virtual_loss: f32,
 ) -> PyResult<()> {
-    // A1 (select↔eval pipeline). The serial form selected a leaf batch, ran one
-    // Python/Torch forward while every CPU worker sat idle, then backed up — so
-    // GPU duty was ~29%. Here we overlap the two halves with a two-stage software
-    // pipeline: the *current* batch is evaluated on this GIL-holding thread while
-    // the *next* batch is selected on a scoped worker thread (which itself fans
-    // out across rayon). Virtual loss (already applied at selection) is the sync
-    // primitive — the next batch sees the in-flight leaves as pending and avoids
-    // them, exactly as virtual-loss parallel MCTS intends.
+    // A1 (select↔featurize↔forward pipeline). The serial form selected a leaf
+    // batch, ran one Python/Torch forward while every CPU worker sat idle, then
+    // backed up — so GPU duty was ~29%. We now overlap THREE stages with a software
+    // pipeline. On each pass, while this GIL-holding thread runs the *current*
+    // batch's GPU FORWARD (`finish_eval_prepared`), a scoped worker thread, GIL-
+    // free, both SELECTS the *next* leaf batch AND FEATURIZES it
+    // (`prepare_eval_refs`: cache dedup + rayon graph build/collate). So when the
+    // forward returns, the next batch's features are already built and the GPU can
+    // start its next forward immediately instead of waiting on the CPU featurizer.
+    // This closes the GPU-starvation gap profiled at active=512/visits=512, where
+    // each per-eval featurize stage ran serially BETWEEN forwards (the intra-batch
+    // featurize↔forward pipeline in mcts_eval never engaged because the unique-leaf
+    // count per eval is a single chunk).
     //
-    // Tree-access discipline (no lock needed): during the scope ONLY the select
-    // thread touches the trees; the eval thread reads only the owned leaf batch +
-    // the (thread-safe) cache. Backup runs after the scope joins, with exclusive
-    // access on this thread. So the trees have a single mutator at every instant.
+    // Virtual loss (already applied at selection) is the sync primitive — the next
+    // batch sees the in-flight leaves as pending and avoids them, exactly as
+    // virtual-loss parallel MCTS intends.
+    //
+    // Tree-access discipline (no lock needed): during the scope ONLY the worker
+    // thread touches the trees (select). The GIL thread runs `finish_eval_prepared`
+    // on the CURRENT batch's already-owned `PreparedEval`, reading only that owned
+    // value + the (thread-safe) cache. The worker, after select, builds the NEXT
+    // batch's `PreparedEval` from the leaf states it just produced (which it owns) +
+    // the thread-safe cache — it never reads or mutates a tree during featurize.
+    // Backup runs after the scope joins, with exclusive access on this thread. So
+    // the trees have a single mutator at every instant.
     //
     // This is deterministic for a fixed seed but NOT bit-identical to the serial
     // barrier: the next batch is selected before the current batch is backed up,
-    // extending the virtual-loss window by one batch. That is the intended,
-    // search-quality-neutral behavior of pipelined MCTS.
+    // extending the virtual-loss window by one batch. Additionally the next batch's
+    // cache-dedup now races the current batch's cache-insert, so a leaf shared by
+    // both batches may be featurized+forwarded twice instead of served from cache.
+    // That is correctness-neutral (the forward is a pure function of state, so the
+    // duplicate eval is identical and `insert_bounded` overwrites idempotently) and
+    // is the same class of search-quality-neutral pipelining tradeoff as the
+    // virtual-loss window. INTEGRATOR: please confirm you accept this widened cache
+    // race window (it cannot change search results, only do a little redundant GPU
+    // work on transpositions shared across adjacent batches).
     //
     // Termination is keyed off `needs_visits` (visit budget counts virtual visits
     // at selection time), NOT off the prefetch making progress. The prefetch can
     // legitimately come up empty on a *narrow* tree — every selectable path is
     // already in-flight (pending) for the batch currently being evaluated, so the
     // next batch is blocked until that batch is backed up. When that happens we
-    // fall back to a synchronous select after backup so the search always advances
-    // to its visit target (overlap is best-effort, correctness is not).
-    // Optional diagnostics (HEXO_MCTS_TRACE): per-pass eval vs select vs scope
-    // wall, to confirm the overlap is real and size the overlappable fraction.
+    // fall back to a synchronous select+prepare after backup so the search always
+    // advances to its visit target (overlap is best-effort, correctness is not).
+    // Optional diagnostics (HEXO_MCTS_TRACE): per-pass eval vs select(+featurize)
+    // vs scope wall, to confirm the overlap is real and size the overlappable
+    // fraction.
     let trace = std::env::var("HEXO_MCTS_TRACE").is_ok();
     let mut tr_passes = 0u64;
     let mut tr_leaves = 0u64;
@@ -473,15 +494,22 @@ fn run_searches_to_targets(
     let mut tr_scope = 0f64;
     let mut tr_backup = 0f64;
 
+    // Prime the pipeline: select + dedup/featurize the first batch synchronously.
     let (mut pending_leaves, _primed_progress) =
         select_leaf_batch(searches, c_puct, leaf_batch_per_root, virtual_loss)?;
+    let mut pending_prepared = prepare_leaf_batch(
+        &pending_leaves,
+        candidate_radius,
+        evaluation_cache,
+        evaluation_stats,
+    );
 
     loop {
         if pending_leaves.is_empty() {
             if !searches.iter().any(RustSearch::needs_visits) {
                 break;
             }
-            // Nothing in flight to overlap with; select synchronously to advance.
+            // Nothing in flight to overlap with; select+prepare synchronously.
             let (leaves, made_progress) =
                 select_leaf_batch(searches, c_puct, leaf_batch_per_root, virtual_loss)?;
             if leaves.is_empty() {
@@ -494,58 +522,83 @@ fn run_searches_to_targets(
                 }
                 continue;
             }
+            pending_prepared = prepare_leaf_batch(
+                &leaves,
+                candidate_radius,
+                evaluation_cache,
+                evaluation_stats,
+            );
             pending_leaves = leaves;
         }
 
-        // Overlap: evaluate the in-flight batch on this GIL thread while the next
-        // batch is selected on a worker thread. Prefetch only if visits remain;
-        // each root self-limits to its remaining budget inside `select_leaf_batch`.
+        // Overlap: run the in-flight batch's forward on this GIL thread while the
+        // next batch is selected AND featurized on a worker thread. Prefetch only
+        // if visits remain; each root self-limits to its remaining budget inside
+        // `select_leaf_batch`.
         let prefetch_next = searches.iter().any(RustSearch::needs_visits);
+        let current_prepared = pending_prepared;
         let scope_start = std::time::Instant::now();
-        let (evaluations, next_leaves, eval_s, select_s) = std::thread::scope(
-            |scope| -> PyResult<(Vec<Arc<RustEvaluation>>, Vec<RustLeaf>, f64, f64)> {
+        #[allow(clippy::type_complexity)]
+        let (evaluations, next_leaves, next_prepared, eval_s, select_s) = std::thread::scope(
+            |scope| -> PyResult<(
+                Vec<Arc<RustEvaluation>>,
+                Vec<RustLeaf>,
+                Option<PreparedEval>,
+                f64,
+                f64,
+            )> {
                 let select_handle = if prefetch_next {
                     let select_searches: &mut [RustSearch] = &mut *searches;
+                    // The worker owns the next batch end-to-end: select (the only
+                    // tree access in the scope) THEN dedup+featurize. Returning a
+                    // fully-owned `PreparedEval` keeps it free of any borrow of the
+                    // leaves it was built from, so it can cross the scope boundary.
                     Some(scope.spawn(move || {
                         let started = std::time::Instant::now();
-                        let result =
-                            select_leaf_batch(select_searches, c_puct, leaf_batch_per_root, virtual_loss);
-                        (result, started.elapsed().as_secs_f64())
+                        let select_result = select_leaf_batch(
+                            select_searches,
+                            c_puct,
+                            leaf_batch_per_root,
+                            virtual_loss,
+                        );
+                        match select_result {
+                            Ok((leaves, _progress)) => {
+                                let prepared = prepare_leaf_batch(
+                                    &leaves,
+                                    candidate_radius,
+                                    evaluation_cache,
+                                    evaluation_stats,
+                                );
+                                (Ok((leaves, prepared)), started.elapsed().as_secs_f64())
+                            }
+                            Err(err) => (Err(err), started.elapsed().as_secs_f64()),
+                        }
                     }))
                 } else {
                     None
                 };
 
-                // Building the requests here keeps their borrow of `pending_leaves`
-                // local to the scope, so it is free to move into backup after.
-                let leaf_requests: Vec<_> = pending_leaves
-                    .iter()
-                    .map(|leaf| RustEvaluationRequest {
-                        state: &leaf.state,
-                        state_hash: leaf.state_hash,
-                    })
-                    .collect();
                 let eval_start = std::time::Instant::now();
-                let evaluations = evaluate_state_refs_cached(
+                let evaluations = finish_eval_prepared(
                     py,
                     evaluator,
-                    &leaf_requests,
-                    candidate_radius,
+                    current_prepared,
                     evaluation_cache,
                     Some(evaluation_stats),
                     cache_max_states,
                 )?;
                 let eval_s = eval_start.elapsed().as_secs_f64();
 
-                let (next_leaves, select_s) = match select_handle {
+                let (next_leaves, next_prepared, select_s) = match select_handle {
                     Some(handle) => {
                         let (result, select_s) =
                             handle.join().expect("mcts select worker panicked");
-                        (result?.0, select_s)
+                        let (leaves, prepared) = result?;
+                        (leaves, Some(prepared), select_s)
                     }
-                    None => (Vec::new(), 0.0),
+                    None => (Vec::new(), None, 0.0),
                 };
-                Ok((evaluations, next_leaves, eval_s, select_s))
+                Ok((evaluations, next_leaves, next_prepared, eval_s, select_s))
             },
         )?;
 
@@ -564,12 +617,18 @@ fn run_searches_to_targets(
             tr_backup += backup_start.elapsed().as_secs_f64();
         }
         pending_leaves = next_leaves;
+        // If we did not prefetch, the next loop iteration sees empty leaves and
+        // hits the synchronous select+prepare branch above; the unused empty
+        // `pending_prepared` there is overwritten before use.
+        pending_prepared = next_prepared.unwrap_or_else(|| {
+            prepare_leaf_batch(&[], candidate_radius, evaluation_cache, evaluation_stats)
+        });
     }
 
     if trace {
         eprintln!(
-            "[mcts-trace] passes={} leaves={} eval={:.1}ms select={:.1}ms scope={:.1}ms backup={:.1}ms \
-             overlap_saved~={:.1}ms (eval+select-scope)",
+            "[mcts-trace] passes={} leaves={} forward={:.1}ms select+featurize={:.1}ms scope={:.1}ms backup={:.1}ms \
+             overlap_saved~={:.1}ms (forward+select_featurize-scope)",
             tr_passes,
             tr_leaves,
             tr_eval * 1e3,
@@ -580,6 +639,32 @@ fn run_searches_to_targets(
         );
     }
     Ok(())
+}
+
+/// Build the dedup+featurize (`PreparedEval`) for one selected leaf batch. Pure
+/// Rust / GIL-free: it constructs the per-leaf eval requests and calls
+/// `prepare_eval_refs`, which reads the thread-safe cache and runs the rayon
+/// featurizer. Used both to prime the pipeline and, on a worker thread, to
+/// featurize the NEXT batch concurrently with the CURRENT batch's GPU forward.
+fn prepare_leaf_batch(
+    leaves: &[RustLeaf],
+    candidate_radius: i16,
+    evaluation_cache: &SharedEvaluationCache,
+    evaluation_stats: &SharedEvaluationStats,
+) -> PreparedEval {
+    let leaf_requests: Vec<_> = leaves
+        .iter()
+        .map(|leaf| RustEvaluationRequest {
+            state: &leaf.state,
+            state_hash: leaf.state_hash,
+        })
+        .collect();
+    prepare_eval_refs(
+        &leaf_requests,
+        candidate_radius,
+        evaluation_cache,
+        Some(evaluation_stats),
+    )
 }
 
 // Select up to one virtual batch of leaves across every root that still needs
