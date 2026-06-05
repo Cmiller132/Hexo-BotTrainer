@@ -155,9 +155,21 @@ class HexgnnInference:
         # underflow before the GradScaler fix, or a genuinely broken state), not a
         # benign event. Counts are cumulative over this evaluator's lifetime; self-play
         # builds a fresh evaluator per epoch, so the per-epoch total is read at end.
-        self.sanitized_logit_total = 0      # count of individual non-finite logit values
-        self.sanitized_forward_calls = 0    # forward batches that contained >=1 non-finite
-        self.sanitized_graph_total = 0      # graphs (positions) with >=1 non-finite logit
+        # Accumulated ON-GPU (no per-pass .item() sync); the public totals below are
+        # PROPERTIES that sync once when read (self-play reads them per search round /
+        # per epoch, NOT per pass), removing the GPU->CPU stalls that dominated the
+        # eval-callback wall (Stage-1 eval-callback overhaul).
+        self._bad_logits = torch.zeros((), dtype=torch.long, device=self.device)
+        self._bad_graphs = torch.zeros((), dtype=torch.long, device=self.device)
+        self.sanitized_forward_calls = 0    # (approx; no longer tracked per-pass)
+
+    @property
+    def sanitized_logit_total(self) -> int:
+        return int(self._bad_logits.item())
+
+    @property
+    def sanitized_graph_total(self) -> int:
+        return int(self._bad_graphs.item())
 
     def _count_and_sanitize(
         self,
@@ -178,33 +190,28 @@ class HexgnnInference:
         affected positions from training. Returns the (sanitized) tensors and the
         number of non-finite logit values found (0 == untouched)."""
 
+        # SYNC-FREE hot path: nan_to_num is identity for finite logits and neutral for
+        # non-finite, so the returned priors/values (hence search) are IDENTICAL to the
+        # old guard; the bad-logit + affected-graph audit is accumulated on GPU scalars
+        # (no .item() here). The old code did 2-3 `.item()` GPU->CPU syncs PER PASS
+        # (x32 passes/move) even in the clean common case — the dominant eval-callback
+        # stall. Counts are read (synced) only via the public properties, per round.
         bad_policy = ~torch.isfinite(raw_policy)
         bad_value = ~torch.isfinite(raw_value)
-        n_bad = int(bad_policy.sum().item()) + int(bad_value.sum().item())
-        if not n_bad:
-            return raw_policy, raw_value, 0
-        affected = torch.zeros(num_graphs, dtype=torch.bool, device=raw_value.device)
+        self._bad_logits += bad_policy.sum() + bad_value.sum()
         if bad_value.ndim >= 2:
-            affected |= bad_value.any(dim=-1)
+            gbad = bad_value.any(dim=-1)
         else:
-            affected |= bad_value.reshape(-1)[:num_graphs]
-        if candidate_graph is not None and bool(bad_policy.any().item()):
-            affected[candidate_graph[bad_policy].to(torch.long)] = True
-        n_graphs_bad = int(affected.sum().item())
-        self.sanitized_logit_total += n_bad
-        self.sanitized_forward_calls += 1
-        self.sanitized_graph_total += n_graphs_bad
-        print(
-            f"[hexgnn.inference] sanitized {n_bad} non-finite logit(s) (fp16 overflow) "
-            f"over {n_graphs_bad}/{num_graphs} graph(s) "
-            f"[run totals: {self.sanitized_logit_total} logits in "
-            f"{self.sanitized_forward_calls} batch(es), {self.sanitized_graph_total} positions]",
-            file=sys.stderr,
-            flush=True,
-        )
+            gbad = bad_value.reshape(-1)[:num_graphs]
+        if candidate_graph is not None:
+            pol_bad = raw_value.new_zeros(num_graphs).index_add_(
+                0, candidate_graph.to(torch.long), bad_policy.to(raw_value.dtype)
+            )
+            gbad = gbad | (pol_bad > 0)
+        self._bad_graphs += gbad.sum()
         raw_policy = torch.nan_to_num(raw_policy, nan=0.0, posinf=30.0, neginf=-30.0)
         raw_value = torch.nan_to_num(raw_value, nan=0.0, posinf=30.0, neginf=-30.0)
-        return raw_policy, raw_value, n_bad
+        return raw_policy, raw_value, 0
 
     def _host_to_device(self, t: torch.Tensor) -> torch.Tensor:
         """Move one host tensor to the device. Large buffers go through pinned
