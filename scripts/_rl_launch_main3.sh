@@ -60,8 +60,19 @@ BC_SEED="$RUNDIR/pretrain/hexgt_model3_pretrain.pt"
 # concurrent games enlarge the coalesced forward batch to use the GPU headroom. 128 (not 256):
 # games/epoch=256 has 5-12x length variance, so active=256 (no refill) is gated by the longest
 # game with idle slots draining; 128 keeps refilling. vbatch=16 keeps self-play VRAM bounded.
+# VISITS + PCR 2026-06-04 (owner): --visits 512 -> 1024 AND KataGo Playout Cap Randomization
+# (Wu 2020), 50% full. Per MOVE, p=0.5 -> FULL search (1024 visits, RECORDED as a training
+# row, with Dirichlet noise + forced playouts + the temperature schedule); else FAST search
+# (--pcr-fast-visits 170 == KataGo's 1/6 ratio at N=1024, NOT recorded, no noise, played
+# greedily). Avg cost ~0.5*1024+0.5*170 = 597 visits/move (~+17% vs 512); recorded rows/epoch
+# ~HALVE but each is a 1024-visit target. Exploration machinery (noise/forced-playouts/temp)
+# is full-only; tactical injection/hitting-set/move-guard apply to BOTH (safety preserved).
+# eval-visits stays 512 (fixed SealBot-eval yardstick for cross-epoch trend continuity). PCR
+# threaded via the cfg dict (driver does NOT read TOML [selfplay]). Spec + faithful-mapping:
+# docs/analysis/HEXGT_PCR_KATAGO_MAPPING.md.
 export EXTRA_ARGS="--bc-seed $BC_SEED \
---active 128 --vbatch 16 --visits 512 --max-actions 512 \
+--active 128 --vbatch 16 --visits 1024 --max-actions 512 \
+--pcr --pcr-full-proportion 0.5 --pcr-fast-visits 170 \
 --train-steps-per-epoch 512 --batch 64 --lr 2e-4 --warmup 200 --replay-window-epochs 8 \
 --replay-pool-cap 500000 --replay-recency-decay 0.9 \
 --eval-games 40 --eval-visits 512 --eval-max-actions 1024 --eval-opening-moves 10 --eval-opening-temperature 0.6 \

@@ -289,6 +289,18 @@ def main():
     # MUST be threaded into the cfg dict below (the driver does not read TOML [selfplay]).
     ap.add_argument("--temperature-halflife", type=float, default=0.0)
     ap.add_argument("--forced-playout-k", type=float, default=2.0)
+    # KataGo Playout Cap Randomization (Wu 2020). Per MOVE, with prob
+    # --pcr-full-proportion do a FULL search (--visits, recorded, with noise + forced
+    # playouts + the temperature schedule); else a FAST search (--pcr-fast-visits, NOT
+    # recorded, no noise, greedy). Only full positions become policy/value training
+    # rows (~halves rows/epoch); fast moves still advance the game + feed the dense STV/
+    # opp aux chain. MUST be threaded into the cfg dict (the driver does not read TOML
+    # [selfplay]) — same trap as --soft-z-lambda / --temperature-halflife. Default OFF
+    # so the relaunch command is byte-identical until the launcher opts in. See
+    # docs/analysis/HEXGT_PCR_KATAGO_MAPPING.md. n=170 == KataGo's 1/6 ratio at N=1024.
+    ap.add_argument("--pcr", action=argparse.BooleanOptionalAction, default=False)
+    ap.add_argument("--pcr-full-proportion", type=float, default=0.5)
+    ap.add_argument("--pcr-fast-visits", type=int, default=170)
     # MCTS nucleus widening. Defaults match configs/hexgt_model2.toml (documented
     # intent) + dense_cnn's 96x8 run. The driver previously passed NONE of these,
     # so they silently fell to the parse defaults (max_children=32), narrowing
@@ -367,6 +379,10 @@ def main():
             "widening_max_children": args.widening_max_children,
             "widening_min_children": args.widening_min_children,
             "widening_policy_mass": args.widening_policy_mass,
+            # KataGo Playout Cap Randomization (threaded here; TOML [selfplay] unread).
+            "pcr_enabled": bool(args.pcr),
+            "pcr_full_proportion": args.pcr_full_proportion,
+            "pcr_fast_visits": args.pcr_fast_visits,
         },
     })
 
@@ -503,6 +519,19 @@ def main():
         _temp_desc = (f"linear start={_sp.temperature} final={_sp.final_temperature} "
                       f"decay_moves={_sp.temperature_decay_moves} floor={_sp.temperature_floor}")
     log(f"    move-temperature: {_temp_desc}", fh)
+    # PCR confirmation: a loud startup line so the effective full/fast caps + proportion
+    # are verifiable in the log (the driver builds cfg from CLI args, not TOML). When OFF
+    # this prints the plain full-search visit count so the line is always present.
+    if _sp.pcr_enabled:
+        _exp_visits = (_sp.pcr_full_proportion * _sp.search_visits
+                       + (1.0 - _sp.pcr_full_proportion) * _sp.pcr_fast_visits)
+        log(f"    PCR (KataGo playout-cap-randomization): ENABLED p_full={_sp.pcr_full_proportion} "
+            f"full_visits={_sp.search_visits} fast_visits={_sp.pcr_fast_visits} "
+            f"-> ~{_exp_visits:.0f} visits/move avg; full searches recorded (noise+forced-playouts"
+            f"+temperature), fast NOT recorded (no-noise, greedy). recorded rows/epoch ~halve.", fh)
+    else:
+        log(f"    PCR (KataGo playout-cap-randomization): DISABLED (every move full search "
+            f"@ {_sp.search_visits} visits, all recorded)", fh)
 
     def save(tag, rl_epoch, epoch_train_complete=True):
         payload = {
@@ -718,6 +747,15 @@ def main():
                     f"(run {run_sanitized_logits} logits/{run_sanitized_excluded} excl)"
                     if sp.sanitized_logit_events else ""
                 )
+                # PCR segment: full/fast mix, recorded rows, avg visits/move. Appended
+                # after the Q-fields (and the sanitization segment) so the existing
+                # dashboard selfplay-line parsing is unaffected. Empty when PCR is off.
+                pcr_str = (
+                    f" | PCR full={sp.full_search_count}/{sp.full_search_count + sp.fast_search_count} "
+                    f"rec={sp.recorded_positions} (~{sp.mean_search_visits:.0f}v/move "
+                    f"N={sp.pcr_full_visits}/n={sp.pcr_fast_visits} p={sp.pcr_full_proportion:.2f})"
+                    if sp.pcr_enabled else ""
+                )
                 log(f"epoch {rl_epoch} selfplay: {sp.completed_games}C/{sp.truncated_games}T games, "
                     f"{sp.searched_positions} pos, {sp.positions_per_second:.1f} pos/s | "
                     f"cand={sp.mean_candidate_count:.0f} | "
@@ -725,7 +763,7 @@ def main():
                     f"Q2 uniq_open={sp.opening_unique_fraction:.1%} m2H={sp.move2_entropy:.2f} | "
                     f"Q3 visitH={sp.mean_visit_entropy:.2f} priorH={sp.mean_prior_entropy:.2f} | "
                     f"Q4 |val|={sp.mean_abs_value:.2f} draw={sp.draw_fraction:.1%} | "
-                    f"Q5 forced={sp.forced_move_fraction:.1%}{saniti_str}", fh)
+                    f"Q5 forced={sp.forced_move_fraction:.1%}{saniti_str}{pcr_str}", fh)
                 # Per-epoch GPU reserved-memory peak for the self-play phase (the
                 # VRAM-binding phase): verifies the run holds the compiled+expandable
                 # envelope and flags any creep toward the card limit.

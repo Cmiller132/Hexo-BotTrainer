@@ -220,6 +220,13 @@ def bridge_diagnostics():
             "searched_positions": latest_sp.get("searched_positions"),
             "search_positions_per_second": latest_sp.get("search_positions_per_second"),
             "positions_per_second": latest_sp.get("positions_per_second"),
+            # KataGo Playout Cap Randomization: surface the full/fast mix + recorded-row
+            # count (recorded ~= half of searched when PCR is on). All .get -> safe/None
+            # when absent (pre-PCR shards), so the panel degrades cleanly.
+            "pcr_enabled": latest_sp.get("pcr_enabled"),
+            "recorded_positions": latest_sp.get("recorded_positions"),
+            "full_search_count": latest_sp.get("full_search_count"),
+            "fast_search_count": latest_sp.get("fast_search_count"),
             # Non-finite-logit sanitization audit (0 in a healthy run; non-zero is a
             # red flag and drives training exclusion -- surfaced at a glance here).
             "sanitized_logit_events": latest_sp.get("sanitized_logit_events"),

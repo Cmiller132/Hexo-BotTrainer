@@ -166,6 +166,18 @@ class HexgtSelfPlayConfig:
     # and asymptotes to `temperature_floor` (the honored late-game floor).
     temperature_halflife: float = 0.0
     forced_playout_k: float = 0.0
+    # KataGo Playout Cap Randomization (Wu 2020). Per MOVE, with probability
+    # `pcr_full_proportion` do a FULL search (`search_visits`, recorded as a training
+    # row, with Dirichlet noise + forced playouts + the temperature schedule);
+    # otherwise a FAST search (`pcr_fast_visits`, NOT recorded, no noise, no forced
+    # playouts, played greedily). Only full-search positions become policy/value
+    # training rows; fast moves still advance the game (and feed the dense STV/
+    # opp-policy aux chain). See docs/analysis/HEXGT_PCR_KATAGO_MAPPING.md. OFF by
+    # default so non-PCR lineages (and eval) are byte-identical; the active run opts
+    # in via the driver CLI (the driver does not read any TOML [selfplay] section).
+    pcr_enabled: bool = False
+    pcr_full_proportion: float = 0.5
+    pcr_fast_visits: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -292,6 +304,9 @@ def parse_hexgt_config(raw: Mapping[str, Any] | None) -> HexgtConfig:
             temperature_floor=float(selfplay.get("temperature_floor", 0.1)),
             temperature_halflife=float(selfplay.get("temperature_halflife", 0.0)),
             forced_playout_k=float(selfplay.get("forced_playout_k", 0.0)),
+            pcr_enabled=bool(selfplay.get("pcr_enabled", False)),
+            pcr_full_proportion=float(selfplay.get("pcr_full_proportion", 0.5)),
+            pcr_fast_visits=int(selfplay.get("pcr_fast_visits", 0)),
         ),
         evaluation=HexgtEvalConfig(
             games_per_epoch=int(evaluation.get("games_per_epoch", 64)),
