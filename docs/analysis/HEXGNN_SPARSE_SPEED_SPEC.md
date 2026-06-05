@@ -11,6 +11,27 @@ Scope: a **moderate rewrite of the hexgnn lineage only** — forked Rust crate
 untouched). **WS0 is done and gated green** (byte-identical fork). **The build is
 ON HOLD** pending owner approval of this design + the visits option (1/2/3 below).
 
+> **v3 — reconciled with the owner's authoritative design.** This adopts the
+> representation in **`docs/analysis/NEW_BASIC_MODEL_DESIGNS.md` design #4 (the
+> hex-GNN)**, which directly answers the stones+candidates / richer-edges redesign:
+> **direction-typed hex-adjacency edges (6-direction one-hot + same-owner flag)** as
+> the "useful edges" (NOT window-line edges — simpler and edges stay ≤6/node),
+> tactical signals folded into **per-node scalars** (near-complete-line me/opp/
+> contested), value via **mean+max pool + global scalars**. **OPEN RECONCILIATION
+> (needs owner confirm):** direction-typed edges with per-direction message weights
+> are **D6 via AUGMENTATION**, NOT D6-invariant by construction — this **drops** the
+> current hexgnn's exact-invariance guarantee (the gated exact equivariance test
+> would no longer pass; we'd switch to a D6-equivariance/augmentation regime, or
+> tie message weights across the 6-direction D6 orbit to keep exact equivariance at
+> more cost). See §4. **Revised acceptance bar: ≥50 pos/s @512 visits, full-game
+> measured.**
+>
+> NOTE: I could not locate a *newly pushed* plan beyond this doc on any branch/PR
+> (branch HEAD = our spec commit; main = merge of our work; PR #4 body/comments
+> empty). Treating NEW_BASIC_MODEL_DESIGNS design #4 as authoritative; **please
+> confirm that is the plan (or point me to it) and pick the D6 approach** before I
+> build.
+
 ---
 
 ## 0. Non-negotiable: TSS is fully kept, and is separable from the GNN graph
@@ -81,25 +102,30 @@ each count pass through me." Add the analogous **per-stone** window-count featur
 (stones currently lack them) so a stone knows its own line involvement. This keeps
 the per-cell window summary the window node used to provide.
 
-**(ii) Richer, more useful EDGES (the owner's "make the edges more useful").**
-Replace the window-hub fan-out with **direct typed LINE edges among the member
-cells of each ACTIVE window (count 3/4/5 only)** — so the tactical relationship
-that took candidate→window→stone (2 hops) is delivered in **1 hop**. To avoid the
-O(cells²) same-axis clique, the line edges are **bounded per window** and
-**stone↔candidate-oriented**: for each active window emit edges between its empty
-candidate cells and its stones (and the ≤1 candidate↔candidate pair), each carrying
-a **D6-INVARIANT edge feature vector**:
-  `[edge-type one-hot | hex-distance/scale | window-owner {own,opp} | window-count
-   one-hot {3,4,5} | shared-window multiplicity]`.
-A single line edge thus says "these two cells co-occur in an opponent count-4
-window at distance 2" — exactly the info the GNN previously reconstructed through
-the hub, now local and richer.
+**(ii) Richer, more useful EDGES — DIRECTION-TYPED hex-adjacency (per design #4).**
+Per the owner's authoritative design, the "useful edges" are **pure hex-adjacency
+edges (stone/candidate to its ≤6 hex neighbors) carrying a 6-dim one-hot of which
+of the six axial directions the edge points**, plus an optional 1-dim
+"both-endpoints-same-owner" flag. **Direction-typed edges are what let the GNN
+distinguish lines from blobs** — a run of same-direction edges *is* a line, so the
+4-round message passing detects near-complete lines and threats without any window
+hub. This keeps edges at **≤6 per node (|E| ≤ 3|V|)** — the structural efficiency
+that the window hub + CONTEXT fan-out destroyed. The window-membership counts a
+candidate needs are already in its node features (2.2(i)); direction edges supply
+the line geometry. (This REPLACES the window-line-edge idea from v2, which was more
+complex and added edges.)
 
-**D6 constraint (must hold):** edge features are **owner / count / distance /
-multiplicity** — all D6-invariant. **No axis label, no direction** (those rotate
-under D6). Geometry stays in the graph STRUCTURE (which cells connect), features
-stay invariant — exactly the existing discipline (`features.rs` edge_attr =
-type one-hot + hex-distance). The equivariance test must pass for all 12 elements.
+**D6 — OPEN RECONCILIATION (owner picks):** a 6-direction one-hot is **not**
+D6-invariant; under a D6 element the 6 channels permute. With **per-direction
+message weights** (design #4) the model is therefore **D6-equivariant only up to
+augmentation** — the exact by-construction equivariance test (currently green) would
+no longer hold; we adopt D6 **augmentation** (the 12 transforms permute coords +
+direction channels) ± test-time averaging, matching design #4. **Alternative
+(keeps exact equivariance):** tie the message weights across the 6-direction D6
+orbit (a group-equivariant message function) so rotating the input permutes the
+output exactly — more code, no augmentation. **Owner: augmentation (simple, per
+your doc) or equivariant weight-tying (exact, more cost)?** Either way the D6 gate
+becomes an *equivariance/augmentation* test, not the current exact-invariance one.
 
 ### 2.3 One uniform candidate rule (no phase gating)
 `candidates = active-window empties (A) ∪ tactical_cells (T0) ∪ radius-n(open-line)
@@ -111,10 +137,13 @@ and raised pos/s +47%, and the documented n2-vs-n3 strong-move coverage gap is
 | was | now |
 |---|---|
 | CONTEXT (SIDE↔all) | **removed** (pool + per-node global scalars) |
-| STONE_WINDOW + CANDIDATE_WINDOW (hub) | **removed**, replaced by bounded **line edges** with rich invariant features |
-| WINDOW nodes | **removed** (info → node features + line-edge features) |
-| ADJACENCY | **kept**, shrinks ~30% via radius 3→2 (fewer candidate nodes) |
-| RECENCY | kept |
+| STONE_WINDOW + CANDIDATE_WINDOW (hub) | **removed** (window counts already in node features) |
+| WINDOW nodes | **removed** (info → per-node tactical scalars) |
+| ADJACENCY | **kept + enriched**: 6-direction one-hot + same-owner flag (design #4); shrinks ~30% via radius 3→2 |
+| RECENCY | kept (or fold into node recency feature) |
+
+Net: edges collapse to **≤6/node hex-adjacency** (|E| ≤ 3|V|) — no CONTEXT, no
+window hub, no window nodes — with direction types making each edge more useful.
 
 ---
 
@@ -191,9 +220,9 @@ double-buffer (`mcts_eval.rs:146-216`), eval cache. Add:
   TSS suite**, **closeness metric within gate**, edges/pos per §3, pos/s up.
 - **WS2 — Rust opt (§5):** featurize ms down, parity green, pos/s up.
 - **WS3 — pipeline (§6):** GPU util saturated, pos/s up.
-- **FINAL gate:** **≥100 pos/s @512 visits no-PCR on FULL-GAME self-play** (or the
-  honest best + the visits that hits the owner's throughput goal), all quality
-  gates green, then HOLD for launch.
+- **FINAL gate:** **≥50 pos/s @512 visits no-PCR on FULL-GAME self-play** (revised
+  owner bar; report opening AND full-game), all quality gates green, then HOLD for
+  launch.
 
 Quality gates EVERY phase: featurizer parity (<1e-6 on the active layout), D6 (12
 elements), the **full TSS suite**, the **closeness metric**, shard sanity (λ=0 hard
@@ -216,12 +245,20 @@ design above is structurally simpler (fewer node types, uniform rule) and cuts m
 
 ## 9. Open decisions for the owner
 
-**The honest ceiling stands** (triangulated: profiling + design estimates + the
-n=2 measurement): the sparse rewrite reaches **~2-2.5x → ~35-50 pos/s full-game at
-512 visits**, GPU saturated. **≥100 @512 full-game needs lower visits too.** Three
-options (visits choice still open):
-1. **(Recommended)** sparse rewrite **+ visits=192** → ~100-130 pos/s, strong search.
-2. sparse rewrite **@ visits=512** → ~35-50 pos/s full-game (best at 512, misses 100).
-3. **skip rewrite, n=2 + visits=128** → ~80-110 pos/s today, zero rebuild risk.
+**Revised acceptance bar (owner): ≥50 pos/s @512 visits, FULL-GAME measured.**
+This is within reach of the rewrite: the pure-adjacency direction-typed graph
+(|E| ≤ 3|V|, no CONTEXT/window edges) is a bigger edge cut than v2, so ~35-50
+full-game @512 from the representation alone, + Rust-opt/pipeline (~1.3x) →
+**~45-60 full-game @512** — clears 50 if the deeper cuts land. I will report
+**opening AND full-game** numbers honestly at the gate.
 
-**Build remains on hold** until the owner approves this design and picks 1/2/3.
+**Two decisions needed before I build:**
+1. **Confirm the design source** — adopt NEW_BASIC_MODEL_DESIGNS design #4
+   (direction-typed adjacency, per-node tactical scalars, mean+max value pool), or
+   point me to the plan you pushed.
+2. **D6 approach** — augmentation (simple, per your doc) vs equivariant
+   weight-tying (exact, more cost). This changes the D6 gate.
+3. **Visits** (throughput vs search): visits=512 targets the 50-bar directly;
+   visits=192 would comfortably exceed it (~100+) with a thinner search.
+
+**Build remains on hold** until the owner confirms (1)+(2) and picks visits.
