@@ -25,6 +25,14 @@ use hexo_engine::{HexoState as RustHexoState, TurnPhase};
 use super::candidates::{build_graph, PositionGraph};
 use super::constants::*;
 
+/// Minimum number of consecutive graphs handled by a single rayon featurize task.
+/// build_graph+featurize for one opening graph (~150-250 nodes) is far cheaper than
+/// a rayon task spawn/steal, so a 1-graph-per-task split oversubscribes the pool;
+/// grouping this many per task amortizes the scheduling overhead. Affects ONLY work
+/// granularity (scheduling), never the output order or values — the indexed
+/// `par_iter().collect()` stays in input order.
+const FEATURIZE_RAYON_MIN_LEN: usize = 8;
+
 /// Per-graph featurized arrays (pre-collation).
 pub(crate) struct GraphFeat {
     pub(crate) node_feat: Vec<f32>, // num_nodes * NODE_FEATURE_DIM
@@ -328,6 +336,11 @@ pub(crate) fn collate(feats: &[GraphFeat]) -> CollatedFeatures {
         .zip(feats.par_iter())
         .zip(node_offsets.par_iter())
         .enumerate()
+        // Same rationale as featurize: opening graphs are tiny, so coarsen the
+        // per-graph scatter grain to avoid oversubscribing the pool. Each graph
+        // still writes ONLY its own disjoint output region, so grain affects
+        // scheduling only — the collated bytes are identical to a 1-per-task split.
+        .with_min_len(FEATURIZE_RAYON_MIN_LEN)
         .for_each(|(gid, ((dst, g), &node_offset))| {
             let gid = gid as i64;
             dst.node_feat.copy_from_slice(&g.node_feat);
@@ -372,8 +385,16 @@ pub(crate) fn collate(feats: &[GraphFeat]) -> CollatedFeatures {
 /// collate run under rayon). Used by the MCTS eval (Rust states) — the caller
 /// supplies the live states; per-state (placements, phase) come from each state.
 pub(crate) fn featurize_collate_states(states: &[&RustHexoState], n: i16) -> CollatedFeatures {
+    // Opening graphs are tiny (~150-250 nodes) and a batch can hold thousands of
+    // them, so a 1-graph-per-rayon-task split oversubscribes the pool with work
+    // items smaller than the spawn/steal overhead. `with_min_len` groups several
+    // consecutive graphs into one task to amortize that overhead. It only changes
+    // how the (indexed) parallel iterator is SPLIT, not the element order or the
+    // per-element computation, so `.collect()` still yields the graphs in input
+    // order and every `GraphFeat` is byte-identical to the 1-per-task form.
     let feats: Vec<GraphFeat> = states
         .par_iter()
+        .with_min_len(FEATURIZE_RAYON_MIN_LEN)
         .map(|s| {
             let g = build_graph(s, n);
             let placements = s.placements_made() as i32;

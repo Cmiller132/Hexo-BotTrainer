@@ -72,10 +72,13 @@ fn axis_index(axis: Axis) -> u8 {
     }
 }
 
-/// Iterate every coordinate within `radius` hex steps of `center` (cube diamond).
-/// Re-derived locally because `coords_within_radius` is not exported by the engine.
-fn coords_within_radius(center: HexCoord, radius: i16) -> Vec<HexCoord> {
-    let mut out = Vec::new();
+/// Append every coordinate within `radius` hex steps of `center` (cube diamond)
+/// into `out`. `out` is cleared first, so callers can reuse one scratch Vec across
+/// stones instead of allocating a fresh one per stone (the emission order is
+/// unchanged, so the candidate set built from it is bit-identical). Re-derived
+/// locally because `coords_within_radius` is not exported by the engine.
+fn coords_within_radius_into(center: HexCoord, radius: i16, out: &mut Vec<HexCoord>) {
+    out.clear();
     for dq in -radius..=radius {
         let r_min = (-radius).max(-dq - radius);
         let r_max = radius.min(-dq + radius);
@@ -86,7 +89,6 @@ fn coords_within_radius(center: HexCoord, radius: i16) -> Vec<HexCoord> {
             });
         }
     }
-    out
 }
 
 /// True when some length-6 line through `c` is ENTIRELY empty — i.e. `c` still
@@ -217,13 +219,33 @@ fn candidate_cells(state: &RustHexoState, n: i16) -> (Vec<HexCoord>, bool) {
     // uncompletable). Such a cell can never start or complete a line, so it is a
     // useless move and dropped. It is KEPT if it is in an active window (already
     // a live line) OR has any open/completable line (`has_open_window`).
+    //
+    // Perf (behavior-preserving): the radius diamonds of nearby stones overlap, so
+    // the SAME empty cell is visited from multiple stones — without memoization the
+    // (expensive, ~3*6*6 board lookups) `has_open_window` scan is recomputed each
+    // time. `has_open_window` is a pure function of (immutable state, cell), so
+    // caching its result per cell within this call is bit-identical. We reuse one
+    // scratch Vec for the radius diamond (cleared per stone) to avoid a per-stone
+    // heap allocation; the iteration order is unchanged.
+    let mut radius_buf: Vec<HexCoord> = Vec::new();
+    let mut open_memo: HashMap<(i16, i16), bool> = HashMap::new();
     for &stone in board.occupied_cells() {
-        for cell in coords_within_radius(stone, n) {
+        coords_within_radius_into(stone, n, &mut radius_buf);
+        for &cell in &radius_buf {
             if !board.is_cell_empty(cell) {
                 continue;
             }
             let key = (cell.q, cell.r);
-            if active_empty.contains(&key) || has_open_window(state, cell) {
+            if set.contains(&key) {
+                // Already kept (active-window cell or a previously-kept open cell):
+                // no need to recompute openness or re-insert. `set` starts as exactly
+                // `active_empty`, so this also covers the `active_empty.contains` case.
+                continue;
+            }
+            let open = *open_memo
+                .entry(key)
+                .or_insert_with(|| has_open_window(state, cell));
+            if open {
                 set.insert(key);
             }
             // else: boxed in entirely by blocked lines -> dead -> dropped
@@ -281,12 +303,19 @@ pub fn build_graph(state: &RustHexoState, n: i16) -> PositionGraph {
     let (cands, used_legal_fallback) = candidate_cells(state, n);
     let tokens = window_tokens(state);
 
+    let placement_history = state.placement_history();
+    let occupied_cells = board.occupied_cells();
+
     // --- nodes ---------------------------------------------------------------
-    let mut node_type = Vec::new();
-    let mut node_q = Vec::new();
-    let mut node_r = Vec::new();
-    let mut node_owner = Vec::new();
-    let mut node_recency = Vec::new();
+    // Exact final node count = 1 SIDE hub + #stones + #candidates. Pre-size the
+    // parallel per-node Vecs so the push loop never reallocs (capacity only —
+    // pushes are in the same order, so the arrays are bit-identical).
+    let node_cap = 1 + occupied_cells.len() + cands.len();
+    let mut node_type = Vec::with_capacity(node_cap);
+    let mut node_q = Vec::with_capacity(node_cap);
+    let mut node_r = Vec::with_capacity(node_cap);
+    let mut node_owner = Vec::with_capacity(node_cap);
+    let mut node_recency = Vec::with_capacity(node_cap);
 
     let mut push_node = |t: u8, c: HexCoord, owner: i8, recency: i32| -> u32 {
         node_type.push(t);
@@ -301,14 +330,18 @@ pub fn build_graph(state: &RustHexoState, n: i16) -> PositionGraph {
     let side_idx = push_node(NODE_SIDE, HexCoord::ZERO, -1, -1);
 
     // STONE nodes (sorted by (q,r)); record recency from placement_history.
-    let mut recency_of: HashMap<(i16, i16), i32> = HashMap::new();
-    for rec in state.placement_history() {
+    // Pre-size the per-build maps from the known counts (capacity only — does not
+    // change any key/value or iteration result, so output stays bit-identical).
+    let mut recency_of: HashMap<(i16, i16), i32> = HashMap::with_capacity(placement_history.len());
+    for rec in placement_history {
         recency_of.insert((rec.coord.q, rec.coord.r), rec.placement_index as i32);
     }
-    let mut occupied: Vec<HexCoord> = board.occupied_cells().to_vec();
+    let mut occupied: Vec<HexCoord> = occupied_cells.to_vec();
     occupied.sort_by_key(|c| (c.q, c.r));
-    let mut spatial: HashMap<(i16, i16), u32> = HashMap::new();
-    let mut stone_idx: HashMap<(i16, i16), u32> = HashMap::new();
+    // `spatial` holds every stone + every candidate; `stone_idx` only the stones.
+    let mut spatial: HashMap<(i16, i16), u32> =
+        HashMap::with_capacity(occupied.len() + cands.len());
+    let mut stone_idx: HashMap<(i16, i16), u32> = HashMap::with_capacity(occupied.len());
     for c in &occupied {
         let owner = match board.get(*c) {
             Some(p) if p == current => 0i8,
@@ -324,7 +357,7 @@ pub fn build_graph(state: &RustHexoState, n: i16) -> PositionGraph {
     // CANDIDATE nodes (already (q,r)-sorted); CSR order == this order.
     let mut candidate_nodes = Vec::with_capacity(cands.len());
     let mut candidate_ids = Vec::with_capacity(cands.len());
-    let mut cand_idx: HashMap<(i16, i16), u32> = HashMap::new();
+    let mut cand_idx: HashMap<(i16, i16), u32> = HashMap::with_capacity(cands.len());
     for c in &cands {
         let idx = push_node(NODE_CANDIDATE, *c, -1, -1);
         candidate_nodes.push(idx);
@@ -388,10 +421,17 @@ pub fn build_graph(state: &RustHexoState, n: i16) -> PositionGraph {
     }
 
     // --- edges (directed; emit both directions per structural edge) ----------
-    let mut edge_src = Vec::new();
-    let mut edge_dst = Vec::new();
-    let mut edge_type = Vec::new();
-    let mut edge_dir = Vec::new();
+    // Upper bound on directed edges (capacity only; over-reservation is harmless
+    // and the actual pushes are unchanged so the arrays stay bit-identical):
+    //   adjacency  <= 6 directed edges per spatial node (each node has <=6 hex
+    //                 neighbors; emitted once per unordered pair, x2 directions),
+    //   recency    <= 2 per consecutive placement-history pair.
+    let spatial_node_count = occupied.len() + candidate_nodes.len();
+    let edge_cap = 6 * spatial_node_count + 2 * placement_history.len().saturating_sub(1);
+    let mut edge_src = Vec::with_capacity(edge_cap);
+    let mut edge_dst = Vec::with_capacity(edge_cap);
+    let mut edge_type = Vec::with_capacity(edge_cap);
+    let mut edge_dir = Vec::with_capacity(edge_cap);
     let mut edge_counts = [0usize; NUM_EDGE_TYPES];
     // Push both directed edges of a structural edge, recording a direction index
     // for each (adjacency: the real DIR_ORDER index of the a->b / b->a delta;
@@ -421,7 +461,7 @@ pub fn build_graph(state: &RustHexoState, n: i16) -> PositionGraph {
     let _ = side_idx;
 
     // RECENCY: consecutive stones in placement order (chain).
-    let mut hist: Vec<&hexo_engine::PlacementRecord> = state.placement_history().iter().collect();
+    let mut hist: Vec<&hexo_engine::PlacementRecord> = placement_history.iter().collect();
     hist.sort_by_key(|r| r.placement_index);
     for pair in hist.windows(2) {
         let a = stone_idx.get(&(pair[0].coord.q, pair[0].coord.r));
@@ -439,10 +479,8 @@ pub fn build_graph(state: &RustHexoState, n: i16) -> PositionGraph {
 
     // ADJACENCY: spatial nodes (stones + candidates) within hex-distance 1.
     // Emit once per unordered pair (when neighbor index > self) to avoid dupes.
-    let mut spatial_nodes: Vec<(HexCoord, u32)> = spatial
-        .iter()
-        .map(|(&(q, r), &idx)| (HexCoord { q, r }, idx))
-        .collect();
+    let mut spatial_nodes: Vec<(HexCoord, u32)> = Vec::with_capacity(spatial.len());
+    spatial_nodes.extend(spatial.iter().map(|(&(q, r), &idx)| (HexCoord { q, r }, idx)));
     spatial_nodes.sort_by_key(|(_, idx)| *idx);
     for (coord, idx) in &spatial_nodes {
         for (dq, dr) in HEX_DIRS {

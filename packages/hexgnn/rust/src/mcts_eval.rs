@@ -470,9 +470,12 @@ fn dedup_requests<'a>(
     Vec<&'a RustHexoState>,
 ) {
     let mut result_slots: Vec<Option<Arc<RustEvaluation>>> = vec![None; requests.len()];
-    let mut unique_states: Vec<&RustHexoState> = Vec::new();
-    let mut unique_keys: Vec<StateHash> = Vec::new();
-    let mut unique_index_by_key: HashMap<StateHash, usize> = HashMap::new();
+    // Pre-size the per-batch scratch from the request count (capacity only — the
+    // dedup logic and resulting unique order are unchanged). The unique sets are at
+    // most `requests.len()` long; reserving avoids regrowth/rehash mid-loop.
+    let mut unique_states: Vec<&RustHexoState> = Vec::with_capacity(requests.len());
+    let mut unique_keys: Vec<StateHash> = Vec::with_capacity(requests.len());
+    let mut unique_index_by_key: HashMap<StateHash, usize> = HashMap::with_capacity(requests.len());
     let mut slot_to_unique: Vec<Option<usize>> = vec![None; requests.len()];
     if let Some(stats) = stats {
         lock_stats(stats).requested_states += requests.len();
@@ -494,8 +497,10 @@ fn dedup_requests<'a>(
                 }
                 continue;
             }
-            if unique_index_by_key.contains_key(&key) {
-                slot_to_unique[index] = unique_index_by_key.get(&key).copied();
+            // Single map probe (was contains_key + get): identical control flow,
+            // one fewer hash/lookup on the duplicate-leaf path.
+            if let Some(&dup_index) = unique_index_by_key.get(&key) {
+                slot_to_unique[index] = Some(dup_index);
                 if let Some(stats) = stats {
                     lock_stats(stats).duplicate_hits += 1;
                 }
@@ -656,7 +661,12 @@ pub(crate) fn finish_eval_prepared(
 fn legal_move_set(state: &RustHexoState) -> HashSet<PackedCoord> {
     let mut legal_cells = Vec::with_capacity(state.legal_move_count());
     state.write_legal_moves(&mut legal_cells);
-    legal_cells.into_iter().map(pack_coord).collect()
+    // Reserve the final set up front (the set is only probed via `.contains`, so
+    // its internal order is irrelevant — pre-sizing changes capacity only and the
+    // membership is identical) instead of growing/rehashing while inserting.
+    let mut set = HashSet::with_capacity(legal_cells.len());
+    set.extend(legal_cells.into_iter().map(pack_coord));
+    set
 }
 
 /// Intersect the evaluator's candidate row with engine legality, drop bad/dup
