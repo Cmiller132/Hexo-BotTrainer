@@ -8,6 +8,14 @@ mod dense_cnn;
 #[path = "../../hexgt/rust/src/lib.rs"]
 mod hexgt;
 
+// hexgnn: a forked-from-hexgt crate for the sparse-graph/perf rewrite. Compiled
+// into the SAME native module as a separate submodule `hexo_models._rust.hexgnn`
+// so the hexgnn lineage can sparsify/optimize the featurizer independently of the
+// (permanently-halted) hexgt run. See docs/analysis/HEXGNN_SPARSE_SPEED_SPEC.md.
+#[cfg(feature = "python")]
+#[path = "../../../hexgnn/rust/src/lib.rs"]
+mod hexgnn;
+
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
 
@@ -27,5 +35,12 @@ pub fn _rust(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
         .getattr("modules")?
         .set_item("hexo_models._rust.hexgt", &hexgt_module)?;
     module.add_submodule(&hexgt_module)?;
+
+    let hexgnn_module = PyModule::new(py, "hexgnn")?;
+    hexgnn::register_pybridge(&hexgnn_module)?;
+    py.import("sys")?
+        .getattr("modules")?
+        .set_item("hexo_models._rust.hexgnn", &hexgnn_module)?;
+    module.add_submodule(&hexgnn_module)?;
     Ok(())
 }

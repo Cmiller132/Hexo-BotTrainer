@@ -4,7 +4,7 @@ hexgnn package.
 hexgnn REUSES hexgt's already-built native accelerator (`hexo_models._rust.hexgt`)
 read-only — the feature/candidate/graph layout is unchanged, so parity carries
 over. This gate confirms it end-to-end: the Rust collated batch
-(`hexgt_featurize_states`, accessed via hexgnn.rust_bridge) must equal
+(`hexgnn_featurize_states`, accessed via hexgnn.rust_bridge) must equal
 `hexgnn.graph_build.batch_from_states` (the Python path) on real-ish positions,
 and the zero-copy buffers must be read-only views.
 """
@@ -55,8 +55,8 @@ def _rust_batch(states, n):
     np = _np()
     from hexgnn import rust_bridge
 
-    # native fn name stays `hexgt_featurize_states` (the shared native module).
-    d = rust_bridge._hexgt_module().hexgt_featurize_states(tuple(states), n)
+    # native fn name stays `hexgnn_featurize_states` (the shared native module).
+    d = rust_bridge._hexgnn_module().hexgnn_featurize_states(tuple(states), n)
     tn, te, tc = int(d["total_nodes"]), int(d["total_edges"]), int(d["total_candidates"])
     fd, ad = int(d["feat_dim"]), int(d["attr_dim"])
     ei = np.frombuffer(d["edge_index"], dtype=np.int64).reshape(2, te)
@@ -106,6 +106,6 @@ def test_feature_buffers_are_readonly_zero_copy() -> None:
     from hexgnn import rust_bridge
 
     states = _states(4, seed=11)
-    d = rust_bridge._hexgt_module().hexgt_featurize_states(tuple(states), 3)
+    d = rust_bridge._hexgnn_module().hexgnn_featurize_states(tuple(states), 3)
     arr = np.frombuffer(d["node_feat"], dtype=np.float32)
     assert not arr.flags.writeable

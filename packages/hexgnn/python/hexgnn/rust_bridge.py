@@ -1,7 +1,7 @@
-"""Thin Python import/call boundary for hexgt Rust acceleration.
+"""Thin Python import/call boundary for hexgnn Rust acceleration.
 
-All native acceleration lives in `hexo_models._rust.hexgt`, registered from
-`hexgt/rust/src`. This module keeps the import error message readable and gives
+All native acceleration lives in `hexo_models._rust.hexgnn`, registered from
+`hexgnn/rust/src`. This module keeps the import error message readable and gives
 Python code named functions for native calls. Phase 0 exposes only
 `capabilities()`; the candidate/window/graph builders (Phase 1) and the MCTS
 session search (Phase 5) are added to this boundary as they land.
@@ -23,13 +23,13 @@ else:
 def capabilities() -> Mapping[str, Any]:
     """Return the Rust accelerator capability payload."""
 
-    return _hexgt_module().capabilities()
+    return _hexgnn_module().capabilities()
 
 
 def candidate_ids(state: object, n: int) -> list[int]:
     """Packed candidate action ids for a live engine state at radius `n` (§4)."""
 
-    return list(_hexgt_module().hexgt_candidate_ids(state, int(n)))
+    return list(_hexgnn_module().hexgnn_candidate_ids(state, int(n)))
 
 
 def graph_facts(state: object, n: int) -> Mapping[str, Any]:
@@ -50,17 +50,17 @@ def graph_facts(state: object, n: int) -> Mapping[str, Any]:
     MCTS, so training inputs == search inputs.
     """
 
-    return _hexgt_module().hexgt_graph_facts(state, int(n))
+    return _hexgnn_module().hexgnn_graph_facts(state, int(n))
 
 
 def new_mcts_session(*, max_states: int | None = None, n: int | None = None) -> object:
-    """Create a native hexgt MCTS session (transposition cache + subtree reuse).
+    """Create a native hexgnn MCTS session (transposition cache + subtree reuse).
 
     `n` is the candidate-set radius (move vocabulary); it is immutable for the
     session's lifetime so the state-hash transposition cache stays sound.
     """
 
-    return _hexgt_module().HexgtMctsSession(max_states, n)
+    return _hexgnn_module().HexgnnMctsSession(max_states, n)
 
 
 def mcts_session_search(
@@ -89,7 +89,7 @@ def mcts_session_search(
     per_root_forced_playout_k: Sequence[float] | None = None,
     per_root_noise: Sequence[bool] | None = None,
 ) -> tuple[Mapping[str, Any], ...]:
-    """Search through a native hexgt MCTS session, preserving chosen subtrees.
+    """Search through a native hexgnn MCTS session, preserving chosen subtrees.
 
     Arguments are forwarded in the PyO3 signature order expected by
     `rust/src/mcts.rs`. Each node materializes at most a policy-nucleus subset of
@@ -124,10 +124,10 @@ def mcts_session_search(
     )
 
 
-def _hexgt_module() -> Any:
-    """Return the loaded native hexgt module or raise a clear error."""
+def _hexgnn_module() -> Any:
+    """Return the loaded native hexgnn module or raise a clear error."""
 
-    module = getattr(_rust, "hexgt", None) if _rust is not None else None
+    module = getattr(_rust, "hexgnn", None) if _rust is not None else None
     if module is None:
-        raise RuntimeError(f"hexgt Rust accelerator is unavailable: {_IMPORT_ERROR}")
+        raise RuntimeError(f"hexgnn Rust accelerator is unavailable: {_IMPORT_ERROR}")
     return module
