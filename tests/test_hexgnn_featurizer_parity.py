@@ -59,18 +59,21 @@ def _rust_batch(states, n):
     d = rust_bridge._hexgnn_module().hexgnn_featurize_states(tuple(states), n)
     tn, te, tc = int(d["total_nodes"]), int(d["total_edges"]), int(d["total_candidates"])
     fd, ad = int(d["feat_dim"]), int(d["attr_dim"])
-    ei = np.frombuffer(d["edge_index"], dtype=np.int64).reshape(2, te)
+    # Integer INDEX buffers ship as int32 (H2D-transport narrowing); `candidate_ids`
+    # (a u32 PackedCoord that can exceed 2^31) stays int64. np.array_equal compares
+    # int32 vs the Python path's int64 by value, so parity is unaffected.
+    ei = np.frombuffer(d["edge_index"], dtype=np.int32).reshape(2, te)
     return dict(
         node_feat=np.frombuffer(d["node_feat"], dtype=np.float32).reshape(tn, fd),
-        node_type=np.frombuffer(d["node_type"], dtype=np.int64),
-        node_graph=np.frombuffer(d["node_graph"], dtype=np.int64),
+        node_type=np.frombuffer(d["node_type"], dtype=np.int32),
+        node_graph=np.frombuffer(d["node_graph"], dtype=np.int32),
         edge_index=ei,
-        edge_type=np.frombuffer(d["edge_type"], dtype=np.int64),
+        edge_type=np.frombuffer(d["edge_type"], dtype=np.int32),
         edge_attr=np.frombuffer(d["edge_attr"], dtype=np.float32).reshape(te, ad),
-        candidate_index=np.frombuffer(d["candidate_index"], dtype=np.int64),
-        candidate_graph=np.frombuffer(d["candidate_graph"], dtype=np.int64),
+        candidate_index=np.frombuffer(d["candidate_index"], dtype=np.int32),
+        candidate_graph=np.frombuffer(d["candidate_graph"], dtype=np.int32),
         candidate_ids=np.frombuffer(d["candidate_ids"], dtype=np.int64),
-        edge_dir=np.frombuffer(d["edge_dir"], dtype=np.int64),
+        edge_dir=np.frombuffer(d["edge_dir"], dtype=np.int32),
         num_graphs=int(d["num_graphs"]),
     )
 

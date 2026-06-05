@@ -473,6 +473,52 @@ impl HexgnnI64Buffer {
     unsafe fn __releasebuffer__(&self, _view: *mut ffi::Py_buffer) {}
 }
 
+/// Read-only 1-D byte view over an owned `Vec<i32>` for
+/// `torch.frombuffer(buf, dtype=torch.int32)`.
+///
+/// H2D-TRANSPORT NARROWING: the collated integer INDEX buffers (`node_type`,
+/// `node_graph`, `edge_index`, `edge_type`, `candidate_index`, `candidate_graph`,
+/// `edge_dir`) are built as i64 (the carve/scatter offsets are i64) but emitted as
+/// i32 on the wire — node/edge/candidate counts and graph ids and packed node
+/// offsets are all < 2^31, and `edge_dir` is -1..5, so the narrowing is LOSSLESS.
+/// The Python consumer widens back to int64 ON the GPU after the (now ~half-size)
+/// H2D copy. `candidate_ids` (a u32 PackedCoord that can exceed 2^31) stays i64.
+#[pyclass]
+pub(crate) struct HexgnnI32Buffer {
+    data: Vec<i32>,
+}
+
+#[pymethods]
+impl HexgnnI32Buffer {
+    fn __len__(&self) -> usize {
+        self.data.len() * std::mem::size_of::<i32>()
+    }
+
+    unsafe fn __getbuffer__(
+        slf: Bound<'_, Self>,
+        view: *mut ffi::Py_buffer,
+        flags: c_int,
+    ) -> PyResult<()> {
+        let (buf, len) = {
+            let g = slf.borrow();
+            (
+                g.data.as_ptr() as *mut c_void,
+                g.data.len() * std::mem::size_of::<i32>(),
+            )
+        };
+        fill_byte_view(view, flags, buf, len, slf.clone().into_any())
+    }
+
+    unsafe fn __releasebuffer__(&self, _view: *mut ffi::Py_buffer) {}
+}
+
+/// Narrow an i64 index buffer to i32 for the wire (lossless: every value fits in
+/// i32 by construction — counts/ids/offsets < 2^31, edge_dir in -1..5).
+#[inline]
+fn narrow_i64_to_i32(data: Vec<i64>) -> Vec<i32> {
+    data.into_iter().map(|v| v as i32).collect()
+}
+
 /// Shared `__getbuffer__` body: a read-only, 1-D, itemsize-1 ("B") view of `len`
 /// bytes at `buf`, keeping `owner` alive for the life of the view.
 unsafe fn fill_byte_view(
@@ -524,22 +570,42 @@ pub(crate) fn collated_to_py_dict<'py>(
     d.set_item("feat_dim", NODE_FEATURE_DIM)?;
     d.set_item("attr_dim", EDGE_ATTR_DIM)?;
     d.set_item("node_feat", Py::new(py, HexgnnF32Buffer { data: c.node_feat })?)?;
-    d.set_item("node_type", Py::new(py, HexgnnI64Buffer { data: c.node_type })?)?;
-    d.set_item("node_graph", Py::new(py, HexgnnI64Buffer { data: c.node_graph })?)?;
-    d.set_item("edge_index", Py::new(py, HexgnnI64Buffer { data: c.edge_index })?)?;
-    d.set_item("edge_type", Py::new(py, HexgnnI64Buffer { data: c.edge_type })?)?;
-    // Per-edge hex-direction index (int64; adjacency 0..5, else -1).
-    d.set_item("edge_dir", Py::new(py, HexgnnI64Buffer { data: c.edge_dir })?)?;
+    // Integer INDEX buffers go on the wire as int32 (H2D-transport narrowing); the
+    // Python consumer widens them to int64 on the GPU after the copy. Lossless —
+    // every value is < 2^31 by construction (edge_dir in -1..5).
+    d.set_item(
+        "node_type",
+        Py::new(py, HexgnnI32Buffer { data: narrow_i64_to_i32(c.node_type) })?,
+    )?;
+    d.set_item(
+        "node_graph",
+        Py::new(py, HexgnnI32Buffer { data: narrow_i64_to_i32(c.node_graph) })?,
+    )?;
+    d.set_item(
+        "edge_index",
+        Py::new(py, HexgnnI32Buffer { data: narrow_i64_to_i32(c.edge_index) })?,
+    )?;
+    d.set_item(
+        "edge_type",
+        Py::new(py, HexgnnI32Buffer { data: narrow_i64_to_i32(c.edge_type) })?,
+    )?;
+    // Per-edge hex-direction index (int32 on the wire; adjacency 0..5, else -1).
+    d.set_item(
+        "edge_dir",
+        Py::new(py, HexgnnI32Buffer { data: narrow_i64_to_i32(c.edge_dir) })?,
+    )?;
     d.set_item("edge_attr", Py::new(py, HexgnnF32Buffer { data: c.edge_attr })?)?;
     d.set_item(
         "candidate_index",
-        Py::new(py, HexgnnI64Buffer { data: c.candidate_index })?,
+        Py::new(py, HexgnnI32Buffer { data: narrow_i64_to_i32(c.candidate_index) })?,
     )?;
     d.set_item(
         "candidate_graph",
-        Py::new(py, HexgnnI64Buffer { data: c.candidate_graph })?,
+        Py::new(py, HexgnnI32Buffer { data: narrow_i64_to_i32(c.candidate_graph) })?,
     )?;
     if include_candidate_ids {
+        // candidate_ids is a u32 PackedCoord (action id) that can exceed 2^31, so it
+        // stays int64 on the wire (it is consumed Rust-side / by the parity test).
         d.set_item(
             "candidate_ids",
             Py::new(py, HexgnnI64Buffer { data: c.candidate_ids })?,
@@ -564,5 +630,6 @@ pub fn register_pybridge(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(hexgnn_featurize_states, module)?)?;
     module.add_class::<HexgnnF32Buffer>()?;
     module.add_class::<HexgnnI64Buffer>()?;
+    module.add_class::<HexgnnI32Buffer>()?;
     Ok(())
 }

@@ -233,6 +233,35 @@ class HexgnnInference:
             out[k] = self._host_to_device(v) if isinstance(v, torch.Tensor) else v
         return out
 
+    #: Integer INDEX buffers that the Rust collator now ships as int32 on the wire
+    #: (H2D-transport narrowing — ~half the index bytes). They must be widened back
+    #: to int64 ON the device (after `_to_device`) before any indexing/scatter op
+    #: (index_add_/index_select/gather/bincount all require int64 indices). The
+    #: widening is a cheap on-GPU kernel; the H2D copy moves the narrow int32 bytes.
+    #: `candidate_ids` is NOT here (it stays Rust-side / int64). `node_feat` and
+    #: `edge_attr` are float and never narrowed.
+    _INT_INDEX_KEYS = (
+        "node_type",
+        "node_graph",
+        "edge_index",
+        "edge_type",
+        "edge_dir",
+        "candidate_index",
+        "candidate_graph",
+    )
+
+    def _widen_index_buffers(self, batch: dict) -> dict:
+        """Widen the transport-narrowed int32 index buffers to int64 IN PLACE on the
+        (already on-device) batch. A no-op for tensors that are already int64 (the
+        Python `evaluate_states` path builds int64 directly), so this is safe to run
+        for every `forward_batch` caller. Run AFTER `_to_device` so the widening is a
+        cheap device-side `.long()` and the H2D copy carried the narrow int32 bytes."""
+        for k in self._INT_INDEX_KEYS:
+            v = batch.get(k)
+            if isinstance(v, torch.Tensor) and v.dtype != torch.int64:
+                batch[k] = v.long()
+        return batch
+
     @torch.no_grad()
     def forward_batch(self, batch: dict) -> tuple[dict[str, torch.Tensor], dict]:
         """Forward returning ``(out, dev_batch)``: ``out`` holds RAW per-candidate
@@ -244,6 +273,10 @@ class HexgnnInference:
         reassembled output is identical to a single forward."""
 
         batch = self._to_device(batch)
+        # Widen the transport-narrowed int32 index buffers to int64 ON the device
+        # (after the H2D copy moved the narrow bytes) so every downstream index op
+        # sees int64. Cheap on-GPU kernels; no-op for already-int64 inputs.
+        batch = self._widen_index_buffers(batch)
         num_graphs = int(batch["num_graphs"])
         # Build the SIDE-hub rows EAGERLY here (outside the compiled
         # forward_policy_value) and pass them in, so the compiled forward has no
@@ -280,8 +313,10 @@ class HexgnnInference:
 
         `payload` carries the collated batch as ZERO-COPY buffer-protocol objects
         (see `features.rs::collated_to_py_dict`): `node_feat`/`edge_attr` (f32),
-        `node_type`/`node_graph`/`edge_index` (i64, edge_index packed 2*E)/
-        `edge_type`/`candidate_index`/`candidate_graph` (i64), plus scalar sizes.
+        `node_type`/`node_graph`/`edge_index` (INT32 on the wire, edge_index packed
+        2*E)/`edge_type`/`candidate_index`/`candidate_graph`/`edge_dir` (int32),
+        plus scalar sizes. The int32 index buffers are widened to int64 ON the
+        device in `forward_batch` (H2D-transport narrowing: ~half the index bytes).
         Candidate ids stay Rust-side, so we return ONLY `{values_bytes,
         priors_bytes}` with priors in the SAME packed candidate order Rust built
         (zipped positionally there via `candidate_counts`). Featurization (the
@@ -298,23 +333,29 @@ class HexgnnInference:
         fd = int(payload["feat_dim"])
         ad = int(payload["attr_dim"])
         node_feat = torch.frombuffer(payload["node_feat"], dtype=torch.float32).reshape(tn, fd)
-        node_type = torch.frombuffer(payload["node_type"], dtype=torch.int64)
-        node_graph = torch.frombuffer(payload["node_graph"], dtype=torch.int64)
+        # Integer index buffers arrive as INT32 (H2D-transport narrowing); they are
+        # widened to int64 on the GPU in `forward_batch._widen_index_buffers` after
+        # the (now ~half-size) host->device copy. `edge_index` reshape works the same
+        # on int32 as int64 (element count unchanged).
+        node_type = torch.frombuffer(payload["node_type"], dtype=torch.int32)
+        node_graph = torch.frombuffer(payload["node_graph"], dtype=torch.int32)
         if te:
-            edge_index = torch.frombuffer(payload["edge_index"], dtype=torch.int64).reshape(2, te)
-            edge_type = torch.frombuffer(payload["edge_type"], dtype=torch.int64)
+            edge_index = torch.frombuffer(payload["edge_index"], dtype=torch.int32).reshape(2, te)
+            edge_type = torch.frombuffer(payload["edge_type"], dtype=torch.int32)
             edge_attr = torch.frombuffer(payload["edge_attr"], dtype=torch.float32).reshape(te, ad)
-            # Per-edge hex-direction index for the D6 steerable layer (int64, 0..5 for
-            # adjacency, -1 otherwise). Present once the featurizer emits it; absent
-            # buffers fall back to None (steerable inactive).
-            edge_dir = torch.frombuffer(payload["edge_dir"], dtype=torch.int64) if "edge_dir" in payload else None
+            # Per-edge hex-direction index for the D6 steerable layer (int32 on the
+            # wire, 0..5 for adjacency, -1 otherwise; widened to int64 on device).
+            # Present once the featurizer emits it; absent buffers fall back to None.
+            edge_dir = torch.frombuffer(payload["edge_dir"], dtype=torch.int32) if "edge_dir" in payload else None
         else:
+            # Empty-edge fallback: build int64 directly (no buffer to narrow; the
+            # on-device widening is a no-op for these already-int64 zero tensors).
             edge_index = torch.zeros((2, 0), dtype=torch.int64)
             edge_type = torch.zeros((0,), dtype=torch.int64)
             edge_attr = torch.zeros((0, ad), dtype=torch.float32)
             edge_dir = torch.zeros((0,), dtype=torch.int64) if "edge_dir" in payload else None
-        candidate_index = torch.frombuffer(payload["candidate_index"], dtype=torch.int64)
-        candidate_graph = torch.frombuffer(payload["candidate_graph"], dtype=torch.int64)
+        candidate_index = torch.frombuffer(payload["candidate_index"], dtype=torch.int32)
+        candidate_graph = torch.frombuffer(payload["candidate_graph"], dtype=torch.int32)
         batch = {
             "node_feat": node_feat, "node_type": node_type, "node_graph": node_graph,
             "edge_index": edge_index, "edge_type": edge_type, "edge_attr": edge_attr,
@@ -332,13 +373,27 @@ class HexgnnInference:
         raw_policy, raw_value, _n_bad = self._count_and_sanitize(
             out["policy"].float(), out["value"].float(), cg, num_graphs
         )
-        log_probs = segment_log_softmax(raw_policy, cg, num_graphs)
-        priors = log_probs.exp().cpu().numpy().astype(np.float32, copy=False)
-        values = decode_binned_value(raw_value).cpu().numpy()
-        values = np.nan_to_num(np.clip(values, -1.0, 1.0), nan=0.0).astype(np.float32, copy=False)
+        # Everything below stays ON-DEVICE until a SINGLE fused device->host copy.
+        # The previous code did TWO separate `.cpu()` syncs (priors, then values) and
+        # ran the value clip/nan_to_num on host numpy — two GPU->CPU round-trips per
+        # forward (x search-rounds x moves). Concatenating values+priors into one
+        # contiguous device buffer and issuing ONE `.cpu()` halves the D2H sync count
+        # and keeps the clip/sanitize as fused device kernels. The math is unchanged:
+        # `torch.clamp`/`torch.nan_to_num` are bitwise-equal to the numpy ops they
+        # replace for finite inputs, and slicing the fused host array reproduces the
+        # exact same float32 values+priors bytes (verified byte-identical under
+        # deterministic algorithms in tests/test_hexgnn_eval_identity.py).
+        priors = segment_log_softmax(raw_policy, cg, num_graphs).exp()           # (tc,) f32
+        values = decode_binned_value(raw_value)                                  # (ng,) f32
+        values = torch.nan_to_num(values.clamp(-1.0, 1.0), nan=0.0)
+        fused = torch.cat([values.reshape(-1), priors.reshape(-1)]).to(
+            "cpu", torch.float32
+        ).numpy()
+        values_np = np.ascontiguousarray(fused[:num_graphs])
+        priors_np = np.ascontiguousarray(fused[num_graphs:])
         return {
-            "values_bytes": np.ascontiguousarray(values).tobytes(),
-            "priors_bytes": np.ascontiguousarray(priors).tobytes(),
+            "values_bytes": values_np.tobytes(),
+            "priors_bytes": priors_np.tobytes(),
         }
 
     @torch.no_grad()

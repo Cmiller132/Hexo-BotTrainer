@@ -33,14 +33,18 @@ pub(crate) const EDGE_ATTR_DIM: usize = 6; // NUM_EDGE_TYPES + 1
 pub(crate) const EDGE_ATTR_DIST: usize = 5; // offset of the hex-distance scalar
 pub(crate) const COORD_SCALE: f32 = 16.0;
 pub(crate) const COUNT_SCALE: f32 = 32.0;
+// Retained for reference (window empty-cell normalization); no longer used after
+// the window-node removal (sparse rewrite).
+#[allow(dead_code)]
 pub(crate) const WINDOW_LEN_F: f32 = 6.0;
 
 // node type ids (mirror candidates.rs NODE_* / python NODE_TYPE_*)
 pub(crate) const FT_NODE_SIDE: i64 = 0;
 pub(crate) const FT_NODE_STONE: i64 = 1;
 pub(crate) const FT_NODE_CANDIDATE: i64 = 2;
-pub(crate) const FT_NODE_WINDOW: i64 = 3;
-pub(crate) const FT_EDGE_CANDIDATE_WINDOW: i64 = 2;
+// FT_NODE_WINDOW (=3) RETIRED in the sparse rewrite (window nodes never emitted);
+// id reserved so the node-type one-hot width is unchanged. FT_EDGE_CANDIDATE_WINDOW
+// likewise retired (no candidate<->window edges).
 
 // feature slot offsets
 pub(crate) const F_TYPE_ONEHOT: usize = 0; // [0:4)
@@ -48,8 +52,11 @@ pub(crate) const F_OWNER_OWN: usize = 4;
 pub(crate) const F_OWNER_OPP: usize = 5;
 pub(crate) const F_CENTER_DISTANCE: usize = 6;
 pub(crate) const F_STONE_RECENCY: usize = 7;
-pub(crate) const F_WIN_COUNT_ONEHOT: usize = 8; // [8:11)
-pub(crate) const F_WIN_EMPTY_CELLS: usize = 11;
+// Per-STONE window-count features (sparse rewrite; former window-node-only slots
+// [8:11)+11 repurposed). MUST mirror python F_STONE_NWIN_OWN/OPP. Slots 10/11
+// stay reserved-zero. Counts are normalized /COORD_SCALE like the candidate nwin.
+pub(crate) const F_STONE_NWIN_OWN: usize = 8; // # active own windows through this stone cell (norm)
+pub(crate) const F_STONE_NWIN_OPP: usize = 9; // # active opp windows through this stone cell (norm)
 pub(crate) const F_CAND_COMPLETE_OWN: usize = 12;
 pub(crate) const F_CAND_COMPLETE_OPP: usize = 13;
 pub(crate) const F_CAND_NWIN_OWN: usize = 14;
