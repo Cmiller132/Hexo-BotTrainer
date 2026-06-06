@@ -3,7 +3,7 @@
 # lineage (td96/gnn2 + D6 steerable direction edges, ~200k params; sparse graph =
 # CONTEXT+window nodes removed; pipeline-overlap + Stage-1/2 perf). Owner launch
 # config (2026-06-05): from scratch (NO pretrain), active=256, games/epoch=512,
-# visits=512, NO PCR. Detached via setsid so it survives the wsl.exe session.
+# visits=1024, NO PCR. Detached via setsid so it survives the wsl.exe session.
 # ADDITIVE: isolated RUNDIR (runs/hexgnn_rl_main1); no other run is touched.
 set -uo pipefail
 export PATH="$HOME/.cargo/bin:$PATH"
@@ -18,7 +18,7 @@ export EVAL_EVERY=3
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 # FROM SCRATCH (random init, no --bc-seed): the driver builds the model from the
-# arch args and stamps it into every checkpoint. active=256 / games=512 / visits=512
+# arch args and stamps it into every checkpoint. active=256 / games=512 / visits=1024
 # / NO PCR per the owner. Everything else as proven: n=2 candidates, steerable=4 D6
 # direction edges, lambda=0 hard-z, policy-surprise ON (driver default), opp-mask
 # carried, KataGo move-temperature (halflife=33 floor=0.3), Dirichlet eps=0.30, and
@@ -26,7 +26,7 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 # first ~10 epochs while it learns, then halve every 20 epochs to a 2.5e-5 floor).
 export EXTRA_ARGS="--from-scratch --token-dim 96 --gnn-layers 2 --attention-heads 4 \
 --value-pma-seeds 2 --steerable-channels 4 --n 2 \
---active 256 --vbatch 16 --visits 512 --max-actions 512 \
+--active 256 --vbatch 16 --visits 1024 --max-actions 512 \
 --train-steps-per-epoch 512 --batch 128 --lr 2e-4 --warmup 200 \
 --lr-decay --lr-decay-start-step 5120 --lr-decay-halflife-steps 10240 --lr-min 2.5e-5 \
 --replay-window-epochs 8 --replay-pool-cap 500000 --replay-recency-decay 0.9 \

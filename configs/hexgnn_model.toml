@@ -76,7 +76,7 @@ bc_prune_max_dropped_mass = 0.15
 soft_z_lambda = 0.0
 
 [model.config.selfplay]
-search_visits = 512
+search_visits = 1024
 active_games = 64
 c_puct = 1.5
 root_dirichlet_noise_enabled = true
