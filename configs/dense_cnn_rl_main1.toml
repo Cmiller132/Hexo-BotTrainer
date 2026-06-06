@@ -130,10 +130,11 @@ seed = 1
 epochs = 60
 
 [selfplay]
-# ROLLING REPLENISHMENT: games_per_epoch > active_games (256) keeps the active pool
-# full as games finish. 512 = a 2x-longer epoch (2x samples) with the pool full for
-# the first ~256 games, then the final 256-game drain.
-games_per_epoch = 512
+# games_per_epoch=256 == active_games=256 (owner directive 2026-06-06): all 256 games
+# launch in ONE wave, no rolling replenishment / refill — the epoch is a single 256-game
+# wave (~half the samples of the prior 512). active==games_per_epoch is a clean case
+# (request 256, keep <=256 in flight, none left to refill once all started).
+games_per_epoch = 256
 update_checkpoint_pointer = false
 
 [train]
