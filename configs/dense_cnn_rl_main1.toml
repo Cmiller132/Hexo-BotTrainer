@@ -140,7 +140,11 @@ update_checkpoint_pointer = false
 passes_per_epoch = 1
 
 [checkpoint]
-# FROM SCRATCH (owner directive 2026-06-06, h2h vs hexgnn): NO resume_from and NO
-# initialize_from -> random init, no pretraining (both default None => fresh model).
-# A lean supervisor injects resume_from=<latest epoch_*.pt> on crash-relaunch only.
+# SHORT PRETRAIN warm-start (owner directive 2026-06-06): initialize_from a fresh
+# 64x10 SealBot-imitation prefit (scripts/bootstrap_dense_cnn_sealbot.py: 7220 SealBot
+# best-100ms samples, 4 prefit epochs, loss 6.97->3.18; strict-loads 1.64M params).
+# initialize_from loads ONLY the weights and starts RL at epoch 0 (fresh RL optimizer/
+# schedule) — NOT a resume. The supervisor injects resume_from=<latest epoch_*.pt> on
+# crash-relaunch (takes precedence over initialize_from).
+initialize_from = "/mnt/e/Hexo-BotTrainer/runs/dense_cnn_rl_main1_prefit/bootstrap_sealbot_prefit.pt"
 save_name = "latest"

@@ -19,6 +19,6 @@ if [[ -f "$RUNDIR/supervisor_halted.flag" ]]; then
 fi
 
 setsid bash -c "tr -d '\r' < $ROOT/scripts/_dc_supervise_main1.sh | bash" >"$RUNDIR/supervise.boot.log" 2>&1 &
-echo "launched dense_cnn_rl_main1 supervisor pid=$! (detached, FROM SCRATCH 64x10 @ 512). RUNDIR=$RUNDIR"
+echo "launched dense_cnn_rl_main1 supervisor pid=$! (detached, 64x10 @ 512; init per config). RUNDIR=$RUNDIR"
 sleep 2
 echo "--- boot log ---"; tail -6 "$RUNDIR/supervise.boot.log" 2>/dev/null

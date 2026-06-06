@@ -54,7 +54,7 @@ while :; do
     awk -v c="$lc" '/^\[checkpoint\]/{print; print "resume_from = \"" c "\""; next} {print}' "$CONFIG" > "$USE"
     log "RESUME from $(basename "$lc")"
   else
-    USE="$CONFIG"; log "FIRST LAUNCH (from scratch, random init)"
+    USE="$CONFIG"; log "FIRST LAUNCH (init per config: initialize_from prefit, else random)"
   fi
   stamp="$(date -u +%Y%m%d_%H%M%S)"
   t0=$(date +%s)
