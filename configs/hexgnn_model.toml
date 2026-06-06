@@ -39,7 +39,7 @@ token_dim = 168
 gnn_layers = 4                       # same GNN trunk as model-3
 attention_heads = 4                  # = PMA value-pool head count H
 dropout = 0.0
-candidate_radius = 5
+candidate_radius = 4
 value_pma_seeds = 2                  # value readout [SIDE | PMA_2]
 value_head_use_side = true
 

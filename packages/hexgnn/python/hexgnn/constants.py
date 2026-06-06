@@ -66,7 +66,7 @@ WINDOW_LEN = 6                 # engine win length (six-in-a-line)
 # NOT by enlarging the candidate set. The "up to 8" framing is dropped.
 DEFAULT_CANDIDATE_RADIUS = 3
 MIN_CANDIDATE_RADIUS = 2
-MAX_CANDIDATE_RADIUS = 5  # raised 4->5 for the live hexgnn_rl_main1 run (owner directive 2026-06-06); Rust featurizer supports up to 8
+MAX_CANDIDATE_RADIUS = 4  # live hexgnn_rl_main1 runs at n=4 (owner directive 2026-06-06); soft/unused — only Rust candidate_radius>=1 is enforced (Rust supports up to 8)
 ENGINE_LEGAL_RADIUS = 8
 
 # --- Turn phase ids (engine placement phase within a turn) --------------------
