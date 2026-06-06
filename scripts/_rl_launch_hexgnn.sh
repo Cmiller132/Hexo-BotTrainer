@@ -27,7 +27,6 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export EXTRA_ARGS="--from-scratch --token-dim 96 --gnn-layers 2 --attention-heads 4 \
 --value-pma-seeds 2 --steerable-channels 4 --n 4 \
 --active 256 --vbatch 16 --visits 1024 --max-actions 512 \
---pcr --pcr-full-proportion 0.5 --pcr-fast-visits 256 \
 --train-steps-per-epoch 512 --batch 128 --lr 2e-4 --warmup 200 \
 --lr-decay --lr-decay-start-step 5120 --lr-decay-halflife-steps 10240 --lr-min 2.5e-5 \
 --replay-window-epochs 8 --replay-pool-cap 500000 --replay-recency-decay 0.9 \
