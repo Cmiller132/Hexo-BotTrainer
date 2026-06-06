@@ -2394,7 +2394,50 @@ def _epoch_history(run_dir: Path) -> list[dict[str, object]]:
     for row in rows.values():
         if "status" not in row:
             row["status"] = "partial"
+        # Per-head/total training loss band. hexgnn/hexgt attach a `buffer` block
+        # (parsed from rl_train.log by their dashboard bridge); dense_cnn emits the
+        # same numbers in the epoch's `training` block (training.loss +
+        # training.loss_components). Surface them through the SAME selfplay.buffer
+        # loss band app.js renders, when no producer buffer is present. A skipped/
+        # untrained epoch (loss None) yields no buffer, so the band stays empty
+        # (graceful) and the main row shows the training status ("skipped").
+        training = row.get("training")
+        selfplay = row.get("selfplay")
+        # _selfplay_epoch_summary always carries a "buffer" key (None for dense_cnn,
+        # the bridge dict for hexgnn/hexgt), so guard on falsy — only synthesize when
+        # there is no producer buffer; hexgnn's real buffer (truthy) always wins.
+        if isinstance(training, dict) and isinstance(selfplay, dict) and not selfplay.get("buffer"):
+            loss_buffer = _loss_buffer_from_training(training)
+            if loss_buffer:
+                selfplay["buffer"] = loss_buffer
     return [rows[key] for key in sorted(rows)]
+
+
+def _loss_buffer_from_training(training: dict[str, object]) -> dict[str, object]:
+    """Build the `selfplay.buffer` loss block app.js renders (loss_total / loss_policy
+    / loss_value / loss_opp / loss_stvalue_<h>) from a dense_cnn epoch `training`
+    result. dense_cnn's trainer returns the weighted total (`loss`) plus the UNWEIGHTED
+    per-head components (`loss_components`: policy, value, opp_policy, stvalue_<h>).
+    hexgnn/hexgt feed the identical band via their bridge `buffer`; this surfaces the
+    dense_cnn lineage's losses through the SAME panel. Returns {} when there is no
+    numeric total loss (e.g. a skipped/untrained epoch) so the band degrades gracefully
+    rather than breaking."""
+    total = _optional_float(training.get("loss"))
+    if total is None:
+        return {}
+    out: dict[str, object] = {"loss_total": total}
+    components = training.get("loss_components")
+    if isinstance(components, dict):
+        for src, dst in (("policy", "loss_policy"), ("value", "loss_value"), ("opp_policy", "loss_opp")):
+            value = _optional_float(components.get(src))
+            if value is not None:
+                out[dst] = value
+        for key, raw in components.items():
+            if isinstance(key, str) and key.startswith("stvalue_"):
+                value = _optional_float(raw)
+                if value is not None:
+                    out[f"loss_{key}"] = value  # stvalue_1 -> loss_stvalue_1 (app.js renders stv<h>)
+    return out
 
 
 def _learning_health(
@@ -2714,14 +2757,15 @@ def _backfill_selfplay_game_stats(run_dir: Path, epoch: int, selfplay: dict[str,
 def _training_epoch_summary(payload: dict[str, object]) -> dict[str, object]:
     # Producer: dense_cnn/trainer.py DenseCNNTrainer.train_passes return dict.
     # Real keys: status, epoch, passes, generic_passes_requested, steps, samples,
-    # batch_size, loss, validation, elapsed_seconds, samples_per_second,
-    # train_state. loss_components/source_summary/policy_imitation are NOT in this
-    # payload; the dense_cnn.policy_targets.epoch_*.json overlay populates them on
-    # the row afterward (see _epoch_history), so they are None here.
+    # batch_size, loss, loss_components, validation, elapsed_seconds,
+    # samples_per_second, train_state. The trainer's return dict DOES carry the
+    # unweighted per-head `loss_components` (policy/value/opp_policy/stvalue_*) — pass
+    # it through so the per-head Loss band renders (the optional policy_targets overlay
+    # still augments source_summary/policy_imitation later in _epoch_history).
     return {
         "status": payload.get("status"),
         "loss": payload.get("loss"),
-        "loss_components": None,  # no producer key (overlaid from policy_targets file)
+        "loss_components": payload.get("loss_components"),  # per-head from dense_cnn trainer
         "source_summary": None,  # no producer key (overlaid from policy_targets file)
         "policy_imitation": None,  # no producer key (overlaid from policy_targets file)
         "steps": payload.get("steps"),
