@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import statistics
 import tempfile
 from collections.abc import Callable
 from email.utils import formatdate
@@ -2319,7 +2320,11 @@ def _epoch_history(run_dir: Path) -> list[dict[str, object]]:
             if epoch is None:
                 continue
             row = rows.setdefault(epoch, {"epoch": epoch})
-            row["selfplay"] = _selfplay_epoch_summary(payload)
+            selfplay_summary = _selfplay_epoch_summary(payload)
+            # dense_cnn self-play diagnostics omit the game-length + outcome stats
+            # hexgnn emits inline; backfill them display-side from the epoch's .hxr.
+            _backfill_selfplay_game_stats(run_dir, epoch, selfplay_summary)
+            row["selfplay"] = selfplay_summary
 
         for path in sorted(diagnostics_dir.glob("dense_cnn.evaluation.epoch_*.json")):
             payload = _read_json_file(path)
@@ -2599,12 +2604,24 @@ def _selfplay_epoch_summary(payload: dict[str, object]) -> dict[str, object]:
         "search_positions_per_second": payload.get("search_positions_per_second"),
         "mcts_sims_per_searched_position": mcts_sims_per_searched_position,
         "elapsed_seconds": payload.get("elapsed_seconds"),
-        # Game-length stats (None for producers that don't emit them, e.g. older
-        # dense_cnn runs, so the frontend just omits them — additive, non-breaking).
+        # Game-length stats. hexgnn/hexgt emit these inline; dense_cnn does not, so
+        # _epoch_history backfills any None from the epoch's .hxr records (display
+        # side). Producer-emitted values pass through unchanged. None values are
+        # omitted client-side, so a run with neither stays unaffected.
         "game_length_mean": payload.get("game_length_mean"),
         "game_length_median": payload.get("game_length_median"),
         "game_length_max": payload.get("game_length_max"),
         "game_length_stdev": payload.get("game_length_stdev"),
+        "game_length_p95": payload.get("game_length_p95"),
+        # Outcome distribution. Same backfill story as the lengths above — derived
+        # from finished .hxr games when the producer omits them.
+        "win_p0_fraction": payload.get("win_p0_fraction"),
+        "win_p1_fraction": payload.get("win_p1_fraction"),
+        "draw_fraction": payload.get("draw_fraction"),
+        "decisive_fraction": payload.get("decisive_fraction"),
+        # mean_abs_value (mean |value target|) needs the NPZ value labels / self-play
+        # internals, not the .hxr — passed through when emitted (hexgnn), else None.
+        "mean_abs_value": payload.get("mean_abs_value"),
         # Replay-buffer + per-head training-loss + calibration stats (nested object,
         # None for producers that don't emit it — e.g. dense_cnn runs — so the
         # frontend just omits the detail band). The dashboard bridge attaches this
@@ -2612,6 +2629,86 @@ def _selfplay_epoch_summary(payload: dict[str, object]) -> dict[str, object]:
         # Losses group never reaches epochProgressDetail in app.js.
         "buffer": payload.get("buffer"),
     }
+
+
+def _selfplay_game_stats_from_records(run_dir: Path, epoch: int) -> dict[str, object]:
+    """Derive game-length + win-fraction stats for one self-play epoch from its
+    ``.hxr`` game records, DISPLAY-SIDE.
+
+    hexgnn/hexgt self-play diagnostics carry these stats inline; dense_cnn's do
+    not. The dashboard already reads the same ``.hxr`` for the History panel via
+    ``_hxr_base_rows`` (memoized by mtime/size), so this reuse is cheap and adds no
+    new file I/O on a warm cache. Returns ``{}`` when the epoch record is absent or
+    has no completed games. Only stats that are honestly derivable from finished
+    game records are computed here — MCTS-internal diversity (visit/prior entropy,
+    candidate counts, opening/move2 entropy, forced-move fraction) and value-target
+    stats (mean_abs_value) need self-play internals/NPZ shards and stay absent."""
+
+    path = run_dir / "selfplay" / f"epoch_{epoch:06d}.hxr"
+    if not path.is_file():
+        return {}
+    rows = _hxr_base_rows(path, run_dir)
+    completed = [row for row in rows if str(row.get("status")) == "completed"]
+    if not completed:
+        return {}
+    lengths = [
+        int(row.get("length") or row.get("actions") or 0)
+        for row in completed
+    ]
+    lengths = [value for value in lengths if value > 0]
+    total = len(completed)
+    p0_wins = sum(1 for row in completed if row.get("winner") == "player0")
+    p1_wins = sum(1 for row in completed if row.get("winner") == "player1")
+    draws = total - p0_wins - p1_wins
+    stats: dict[str, object] = {
+        "win_p0_fraction": p0_wins / total,
+        "win_p1_fraction": p1_wins / total,
+        "draw_fraction": draws / total,
+        "decisive_fraction": (p0_wins + p1_wins) / total,
+    }
+    if lengths:
+        ordered = sorted(lengths)
+        idx = max(0, min(len(ordered) - 1, int(round(0.95 * (len(ordered) - 1)))))
+        stats.update(
+            {
+                "game_length_mean": statistics.fmean(lengths),
+                "game_length_median": statistics.median(lengths),
+                "game_length_max": max(lengths),
+                "game_length_stdev": statistics.pstdev(lengths) if len(lengths) > 1 else 0.0,
+                "game_length_p95": ordered[idx],
+            }
+        )
+    return stats
+
+
+def _backfill_selfplay_game_stats(run_dir: Path, epoch: int, selfplay: dict[str, object]) -> None:
+    """Fill in any game-stat field the self-play diagnostics left ``None`` with the
+    ``.hxr``-derived value, in place. Producer-emitted values always win; this only
+    populates gaps (so dense_cnn rows gain the stats hexgnn emits natively, while
+    hexgnn rows are untouched). Memoized record stats are computed at most once per
+    backfilled epoch per request."""
+
+    if not isinstance(selfplay, dict):
+        return
+    derivable = (
+        "game_length_mean",
+        "game_length_median",
+        "game_length_max",
+        "game_length_stdev",
+        "game_length_p95",
+        "win_p0_fraction",
+        "win_p1_fraction",
+        "draw_fraction",
+        "decisive_fraction",
+    )
+    if all(selfplay.get(key) is not None for key in derivable):
+        return
+    derived = _selfplay_game_stats_from_records(run_dir, epoch)
+    if not derived:
+        return
+    for key, value in derived.items():
+        if selfplay.get(key) is None:
+            selfplay[key] = value
 
 
 def _training_epoch_summary(payload: dict[str, object]) -> dict[str, object]:
