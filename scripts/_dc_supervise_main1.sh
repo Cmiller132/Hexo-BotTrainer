@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Lean unattended supervisor for the FROM-SCRATCH dense_cnn_rl_main1 run (Model 1
-# 96x8 @ 512 sims), the head-to-head baseline vs hexgnn. Mirrors the hexgnn
+# 64x10 @ 512 sims), the head-to-head baseline vs hexgnn. Mirrors the hexgnn
 # supervisor's shape (auto-relaunch + circuit breaker + single-instance lock +
 # halt flag) but drives the dense_cnn config-driven CLI (hexo_train.cli.train_model)
 # instead of the hexgnn driver. NO resource watchdog (owner: no watchers).
