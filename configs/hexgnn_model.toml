@@ -96,6 +96,10 @@ final_temperature = 0.2
 temperature_decay_moves = 30
 temperature_floor = 0.1
 forced_playout_k = 2.0
+temperature_halflife = 22.0
+pcr_enabled = true
+pcr_full_proportion = 0.5
+pcr_fast_visits = 256
 
 [model.config.evaluation]
 games_per_epoch = 40

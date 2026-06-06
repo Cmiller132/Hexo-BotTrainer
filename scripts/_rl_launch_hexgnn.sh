@@ -27,12 +27,13 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export EXTRA_ARGS="--from-scratch --token-dim 96 --gnn-layers 2 --attention-heads 4 \
 --value-pma-seeds 2 --steerable-channels 4 --n 4 \
 --active 256 --vbatch 16 --visits 1024 --max-actions 512 \
+--pcr --pcr-full-proportion 0.5 --pcr-fast-visits 256 \
 --train-steps-per-epoch 512 --batch 128 --lr 2e-4 --warmup 200 \
 --lr-decay --lr-decay-start-step 5120 --lr-decay-halflife-steps 10240 --lr-min 2.5e-5 \
 --replay-window-epochs 8 --replay-pool-cap 500000 --replay-recency-decay 0.9 \
 --eval-games 40 --eval-visits 512 --eval-max-actions 1024 --eval-opening-moves 10 --eval-opening-temperature 0.6 \
---total-alpha 6.6 --eps 0.30 --root-policy-temperature 1.0 --c-puct 1.5 \
---temperature 1.0 --temperature-floor 0.3 --temperature-halflife 33 --forced-playout-k 2.0 \
+--total-alpha 6.6 --eps 0.25 --root-policy-temperature 1.0 --c-puct 1.5 \
+--temperature 1.0 --temperature-floor 0.3 --temperature-halflife 22 --forced-playout-k 2.0 \
 --widening-max-children 96 --soft-z-lambda 0"
 
 mkdir -p "$RUNDIR"
