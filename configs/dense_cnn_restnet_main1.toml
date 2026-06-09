@@ -53,7 +53,12 @@ opp_policy_weight = 0.25
 short_term_value_weight = 0.25
 amp = true
 max_grad_norm = 1.0
-train_samples_per_epoch = 100000
+# 8000 (was 100000): the BINDING warmup gate. A train pass runs only when the
+# new shuffled rows >= train_samples_per_epoch (trainer.select_training_samples:
+# selected_rows >= requested_rows). At 100000 vs ~10k rows/epoch, every epoch was
+# "skipped / no new training files". 8000 (<1 epoch's ~10.3k rows) makes the pass
+# fire each epoch on the fresh games (owner 2026-06-09: train on what's there).
+train_samples_per_epoch = 8000
 max_train_bucket_per_new_data = 8.0
 max_train_bucket_size = 500000
 no_repeat_files = true
