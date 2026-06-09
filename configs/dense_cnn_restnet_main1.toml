@@ -42,9 +42,9 @@ dropout = 0.0
 short_term_value_horizons = [1, 4, 8]
 
 [model.config.training]
-# 64 (was 256): full 1681-token attention fwd+bwd is ~4x the conv model's memory.
-# Measured on the 12 GB RTX 4070 Ti (AMP): batch 64 ~8 GB. 256 OOMs instantly.
-batch_size = 64
+# 32 (was 256): full 1681-token attention fwd+bwd is heavy. MEASURED on the 12 GB
+# RTX 4070 Ti: batch 32 ~8.2 GB (fits), batch 64 ~16 GB (OOMs). 256 OOMs instantly.
+batch_size = 32
 learning_rate = 0.001
 weight_decay = 0.0001
 policy_weight = 1.0
@@ -111,7 +111,7 @@ target_selfplay_positions_per_second = 16.0   # full-attention trunk: expect low
 # calibration OOM guard drops any candidate that OOMs and keeps the largest viable.
 inference_batch_candidates = [32, 64, 128]
 selfplay_batch_candidates = [128]
-training_batch_candidates = [32, 64]
+training_batch_candidates = [16, 32]
 mcts_virtual_batch_candidates = [4]
 selfplay_probe_positions = 2048
 probe_batches = 1

@@ -258,18 +258,46 @@ class RelPosMHSA(nn.Module):
         rel_cols = cols[:, None] - cols[None, :] + (board_w - 1)  # (N, N) in [0, 2W-2]
         relative_index = rel_rows * (2 * board_w - 1) + rel_cols  # (N, N) in [0, (2H-1)(2W-1)-1]
         self.register_buffer("relative_index", relative_index.reshape(-1), persistent=False)
+        # Performance-only inference cache for the additive bias mask (B-speedup):
+        # the (1, heads, N, N) mask is a pure function of relative_bias_table, so
+        # under eval/no-grad (self-play, frozen weights) it is gathered ONCE and
+        # reused across forwards instead of re-gathering ~N*N*heads elements every
+        # call. Version-keyed (like HexConv2d.masked_weight) so it auto-invalidates
+        # the instant the table changes. Plain attributes -> NOT in state_dict, so
+        # this is bit-identical and checkpoint-compatible. Training (grad enabled)
+        # always recomputes, so gradients to the table are unaffected.
+        self._cached_bias: torch.Tensor | None = None
+        self._cached_bias_key: tuple | None = None
 
     def set_impl(self, impl: str) -> None:
         if impl not in ("sdpa", "materialized"):
             raise ValueError(f"attention impl must be 'sdpa' or 'materialized', got {impl!r}")
         self.impl = impl
 
-    def _relative_bias(self) -> torch.Tensor:
-        """Materialize the additive bias `(1, heads, N, N)` from the learned table."""
+    def _compute_relative_bias(self) -> torch.Tensor:
+        """Gather the additive bias `(1, heads, N, N)` fresh from the learned table."""
 
         bias = self.relative_bias_table[self.relative_index]  # (N*N, heads)
         bias = bias.view(self.token_len, self.token_len, self.num_heads)  # (N, N, heads): [query, key, head]
         return bias.permute(2, 0, 1).unsqueeze(0)  # (1, heads, N, N)
+
+    def _relative_bias(self, *, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
+        """Additive bias `(1, heads, N, N)` in the consumer's dtype/device.
+
+        Eval + no-grad reuses a cached, contiguous copy (gathered once); training
+        recomputes so the table still receives gradient. Numerically identical.
+        """
+
+        if self.training or torch.is_grad_enabled():
+            return self._compute_relative_bias().to(device=device, dtype=dtype)
+        version = int(getattr(self.relative_bias_table, "_version", 0))
+        key = (version, dtype, device)
+        if self._cached_bias is None or self._cached_bias_key != key:
+            self._cached_bias = (
+                self._compute_relative_bias().to(device=device, dtype=dtype).detach().contiguous()
+            )
+            self._cached_bias_key = key
+        return self._cached_bias
 
     def _project(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         b, n, _ = x.shape
@@ -288,7 +316,7 @@ class RelPosMHSA(nn.Module):
         b, n, _ = x.shape
         q, k, v = self._project(x)
         dots = torch.matmul(q, k.transpose(-2, -1)) * self.scaling  # (B, heads, N, N)
-        dots = dots + self._relative_bias().to(dots.dtype)
+        dots = dots + self._relative_bias(dtype=dots.dtype, device=dots.device)
         attn = torch.softmax(dots, dim=-1)
         out = torch.matmul(attn, v)  # (B, heads, N, head_dim)
         out = out.permute(0, 2, 1, 3).reshape(b, n, self.channels)
@@ -297,7 +325,7 @@ class RelPosMHSA(nn.Module):
     def _forward_sdpa(self, x: torch.Tensor) -> torch.Tensor:
         b, n, _ = x.shape
         q, k, v = self._project(x)
-        attn_mask = self._relative_bias().to(q.dtype)  # additive bias; SDPA scale = 1/sqrt(head_dim)
+        attn_mask = self._relative_bias(dtype=q.dtype, device=q.device)  # additive bias; SDPA scale = 1/sqrt(head_dim)
         out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
         out = out.permute(0, 2, 1, 3).reshape(b, n, self.channels)
         return self.out_drop(self.out_proj(out))
