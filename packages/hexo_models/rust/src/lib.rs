@@ -1,5 +1,11 @@
 //! Model-owned Rust accelerators for Hexo model families.
 
+// Threat-Space Search core, shared by every lineage's native MCTS (dense_cnn and
+// hexgt). Pure board geometry over the engine `WindowStore`; no graph/network
+// coupling, so both #[path]-included lineages reach it via `crate::threats_shared`
+// and there is a single definition of threat/win-now/forced-loss semantics.
+mod threats_shared;
+
 #[cfg(feature = "python")]
 #[path = "../../dense_cnn/rust/src/lib.rs"]
 mod dense_cnn;

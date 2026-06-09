@@ -16,7 +16,8 @@ use hexo_engine::{
 };
 
 use super::constants::*;
-use super::state::states_from_py_states;
+use super::state::{state_from_py_state, states_from_py_states};
+use crate::threats_shared as threats;
 
 pub(crate) struct Model1EncodedState {
     pub(crate) planes: Vec<f32>,
@@ -65,8 +66,39 @@ pub fn model1_batch_inputs(py: Python<'_>, states: &Bound<'_, PyAny>) -> PyResul
     Ok(dict.into_any().unbind())
 }
 
+/// Diagnostic: phase-aware threat analysis for a live engine state, plus the
+/// dense_cnn-specific crop view. Returns the SHARED analysis dict (so parity tests
+/// can compare it byte-for-byte against `hexgt_threat_analysis` — both funnel
+/// through `crate::threats_shared::analysis_pydict`) augmented with:
+///   * `crop_center`        — the (q, r) the 41x41 crop is centered on,
+///   * `tactical_cells_in_crop` — the subset of `tactical_cells` representable in
+///     the crop (i.e. the cells dense_cnn would actually inject as forced edges),
+///   * `tactical_cells_out_of_crop` — the residual that degrades gracefully.
+/// Lets the tests confirm the n=8 tactical set is fully covered in normal play and
+/// flag any out-of-crop residual.
+#[pyfunction]
+fn dense_cnn_threat_analysis(py: Python<'_>, state: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    let s = state_from_py_state(py, state)?;
+    let dict = threats::analysis_pydict(py, &s)?;
+    let center = model1_crop_center(&s);
+    dict.set_item("crop_center", (center.q, center.r))?;
+    let mut in_crop: Vec<(i16, i16)> = Vec::new();
+    let mut out_of_crop: Vec<(i16, i16)> = Vec::new();
+    for cell in threats::tactical_cells(&s) {
+        if model1_flat_index(cell, center).is_some() {
+            in_crop.push((cell.q, cell.r));
+        } else {
+            out_of_crop.push((cell.q, cell.r));
+        }
+    }
+    dict.set_item("tactical_cells_in_crop", in_crop)?;
+    dict.set_item("tactical_cells_out_of_crop", out_of_crop)?;
+    Ok(dict.into_any().unbind())
+}
+
 pub fn register_pybridge(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(model1_batch_inputs, module)?)?;
+    module.add_function(wrap_pyfunction!(dense_cnn_threat_analysis, module)?)?;
     Ok(())
 }
 
