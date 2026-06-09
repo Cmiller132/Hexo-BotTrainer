@@ -26,7 +26,14 @@ import numpy as np
 from numpy.lib import format as np_format
 
 from .constants import BOARD_SIZE, INPUT_CHANNELS
-from .samples import Model1SampleData, _PackedHistory, _PackedStones, expand_sample, symmetry_drops_support
+from .samples import (
+    SPILL_CATEGORIES,
+    Model1SampleData,
+    _PackedHistory,
+    _PackedStones,
+    count_spill,
+    expand_sample,
+)
 
 _BOARD_AREA = BOARD_SIZE * BOARD_SIZE
 
@@ -273,33 +280,34 @@ def expand_shard_to_arrays(
     if not samples:
         return _empty()
 
-    # The 41x41 *square* crop is NOT closed under hexagonal D6, so a drawn symmetry can
-    # rotate some-or-all of a row's facts (policy / opp_policy / legal / stones / recency
-    # / hot) out of the crop. A TOTAL policy spill raises, but a PARTIAL spill silently
-    # drops the out-of-crop actions and renormalizes the survivors -- a truncated target
-    # and a counterfactual board, with NO exception. symmetry_drops_support() detects
-    # BOTH cases up front; when the drawn symmetry would drop any in-crop-at-identity
-    # fact we expand the whole row at identity (which the sample was authored to fit),
-    # keeping augmentation exact. A row degenerate even at identity (e.g. empty source
-    # policy) raises and is dropped. Both are rare; counts are logged per shard.
+    # The radius-20 hex disk is closed under all 12 hexagonal D6 symmetries (a disk
+    # cell's hex distance to the crop center is preserved by every rotation /
+    # reflection, and the disk is contained in the square), so a drawn symmetry can
+    # never move a representable (in-disk) fact out of the crop. Augmentation is
+    # therefore exact at the drawn symmetry with NO identity fallback. The only drop
+    # is a row degenerate even at identity (e.g. all policy mass in the corners, so
+    # empty in-disk support): ``dense_policy_target`` raises and the row is dropped.
+    # Per-category spill (facts beyond hex distance ``half`` from the crop center,
+    # which the fixed crop cannot represent) is counted here for observation only.
     expanded = []
-    aug_fallbacks = 0
     dropped = 0
+    spill = {category: 0 for category in SPILL_CATEGORIES}
     for i, sample in enumerate(samples):
-        sym = int(symmetries[i])
-        if sym != 0 and symmetry_drops_support(sample, sym):
-            sym = 0
-            aug_fallbacks += 1
+        for category, count in count_spill(sample).items():
+            spill[category] += count
         try:
-            expanded.append(expand_sample(sample, symmetry=sym))
+            expanded.append(expand_sample(sample, symmetry=int(symmetries[i])))
         except ValueError:
             dropped += 1
-    if aug_fallbacks or dropped:
+    spill_total = sum(spill.values())
+    if dropped or spill_total:
         import sys
 
+        spill_detail = ", ".join(f"{category}={spill[category]}" for category in SPILL_CATEGORIES)
         print(
-            f"[compact_io] D6 coverage guard in {getattr(path, 'name', path)}: "
-            f"{aug_fallbacks} row(s) -> identity, {dropped} dropped (of {len(samples)})",
+            f"[compact_io] crop disk guard in {getattr(path, 'name', path)}: "
+            f"{dropped} dropped (of {len(samples)}); spill beyond hex-dist {BOARD_SIZE // 2}: "
+            f"{spill_total} ({spill_detail})",
             file=sys.stderr,
             flush=True,
         )

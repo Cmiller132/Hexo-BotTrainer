@@ -42,9 +42,9 @@ dropout = 0.0
 short_term_value_horizons = [1, 4, 8]
 
 [model.config.training]
-# 64 (was 256): full 1681-token attention fwd+bwd is ~4x the conv model's memory.
-# Measured on the 12 GB RTX 4070 Ti (AMP): batch 64 ~8 GB. 256 OOMs instantly.
-batch_size = 64
+# 32 (was 256): full 1681-token attention fwd+bwd is heavy. MEASURED on the 12 GB
+# RTX 4070 Ti: batch 32 ~8.2 GB (fits), batch 64 ~16 GB (OOMs). 256 OOMs instantly.
+batch_size = 32
 learning_rate = 0.001
 weight_decay = 0.0001
 policy_weight = 1.0
@@ -53,14 +53,23 @@ opp_policy_weight = 0.25
 short_term_value_weight = 0.25
 amp = true
 max_grad_norm = 1.0
-train_samples_per_epoch = 100000
+# 8000 (was 100000): the BINDING warmup gate. A train pass runs only when the
+# new shuffled rows >= train_samples_per_epoch (trainer.select_training_samples:
+# selected_rows >= requested_rows). At 100000 vs ~10k rows/epoch, every epoch was
+# "skipped / no new training files". 8000 (<1 epoch's ~10.3k rows) makes the pass
+# fire each epoch on the fresh games (owner 2026-06-09: train on what's there).
+train_samples_per_epoch = 8000
 max_train_bucket_per_new_data = 8.0
 max_train_bucket_size = 500000
 no_repeat_files = true
 max_validation_samples = 100000
 
 [model.config.samples]
-shuffle_min_rows = 100000
+# 8000 (was 100000): warmup floor. One self-play epoch records ~10.3k rows
+# (128 games), so 100k delayed the first train pass ~10 epochs. 8000 (<1 epoch)
+# starts training right after the first epoch on the games already generated
+# (owner 2026-06-09: don't wait for 100k, train on what's there).
+shuffle_min_rows = 8000
 shuffle_keep_target_rows = 300000
 shuffle_taper_window_exponent = 0.65
 shuffle_expand_window_per_row = 0.4
@@ -111,7 +120,7 @@ target_selfplay_positions_per_second = 16.0   # full-attention trunk: expect low
 # calibration OOM guard drops any candidate that OOMs and keeps the largest viable.
 inference_batch_candidates = [32, 64, 128]
 selfplay_batch_candidates = [128]
-training_batch_candidates = [32, 64]
+training_batch_candidates = [16, 32]
 mcts_virtual_batch_candidates = [4]
 selfplay_probe_positions = 2048
 probe_batches = 1

@@ -98,13 +98,15 @@ def test_relative_index_matches_bruteforce_3x3():
 def test_relative_bias_gather_is_correct():
     h = w = 3
     heads = 2
-    mhsa = RelPosMHSA(channels=4, num_heads=heads, board_h=h, board_w=w)
+    # "full" scope exercises the raw gather (no disk key mask); the mask is covered
+    # separately in test_dense_cnn_restnet_attention.py.
+    mhsa = RelPosMHSA(channels=4, num_heads=heads, board_h=h, board_w=w, attention_scope="full")
     # Fill the table with distinct per-(offset,head) values, then check the
     # (1, heads, N, N) materialized bias picks the right row for each pair.
     with torch.no_grad():
         rng = torch.arange(mhsa.relative_bias_table.numel(), dtype=torch.float32)
         mhsa.relative_bias_table.copy_(rng.view_as(mhsa.relative_bias_table))
-    bias = mhsa._relative_bias()  # (1, heads, N, N)
+    bias = mhsa._compute_relative_bias()  # (1, heads, N, N)
     idx = mhsa.relative_index.view(h * w, h * w)
     for head in range(heads):
         for i in (0, 4, 8):
@@ -131,6 +133,32 @@ def test_msa_sdpa_equals_materialized():
         mhsa.set_impl("sdpa")
         out_sdpa = mhsa(x)
     assert torch.allclose(out_mat, out_sdpa, atol=1e-5, rtol=1e-4)
+
+
+def test_relative_bias_inference_cache_matches_fresh():
+    # The B-speedup eval cache for the additive bias mask must be numerically
+    # identical to the fresh (training-path) gather, and must invalidate when the
+    # learned table changes.
+    torch.manual_seed(7)
+    h = w = 6
+    mhsa = RelPosMHSA(channels=16, num_heads=4, board_h=h, board_w=w)
+    with torch.no_grad():
+        mhsa.relative_bias_table.normal_(std=0.2)
+    x = torch.randn(2, h * w, 16)
+    mhsa.train()
+    with torch.enable_grad():
+        out_fresh = mhsa(x)
+    mhsa.eval()
+    with torch.no_grad():
+        out_cached1 = mhsa(x)  # populates the cache
+        out_cached2 = mhsa(x)  # hits the cache
+    assert torch.allclose(out_fresh, out_cached1, atol=1e-6)
+    assert torch.equal(out_cached1, out_cached2)  # cached path is bit-identical run-to-run
+    # mutate the table -> cache must invalidate (version bump)
+    with torch.no_grad():
+        mhsa.relative_bias_table.add_(0.5)
+        out_cached3 = mhsa(x)
+    assert not torch.allclose(out_cached1, out_cached3)
 
 
 def test_transformer_block_sdpa_equals_materialized():

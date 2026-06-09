@@ -23,13 +23,18 @@ import torch
 
 from . import rust_bridge
 from .constants import BOARD_SIZE
-from .d6 import Axial, D6_SIZE, D6Symmetry, transform_coord, unpack_coord_pair
-from .geometry import coord_to_row_col
+from .d6 import Axial, D6_SIZE, D6Symmetry, unpack_coord_pair
+from .geometry import hex_distance
 from .input import build_input_planes, dense_policy_target, legal_mask_flat
 from .mcts import CompactVisitPolicy
 
 D6_TRANSFORMS = tuple(D6Symmetry(index) for index in range(D6_SIZE))
 CURRENT_TARGET_SCHEMA_VERSION = 4
+_HALF = BOARD_SIZE // 2
+
+# Categories reported by ``count_spill`` (facts unrepresentable in the radius-20
+# hex disk). Observation-only telemetry; see Spec A spill telemetry.
+SPILL_CATEGORIES = ("stones", "legal", "policy", "history")
 
 # Stone/placement owners are one of the two engine players; store a 1-byte index
 # instead of repeating the string per stone.
@@ -265,71 +270,32 @@ def expand_sample(
     return tensors
 
 
-def symmetry_drops_support(sample: Model1SampleData, symmetry: D6Symmetry | int) -> bool:
-    """Return True if `symmetry` (non-identity) rotates any in-crop-at-identity fact
-    of `sample` out of the 41x41 square crop.
+def count_spill(sample: Model1SampleData) -> dict[str, int]:
+    """Count facts that fall outside the radius-20 hex disk (spill), per category.
 
-    The dense view is an axial *square* crop, but D6 is the *hexagonal* symmetry
-    group, so the square is not closed under it: a fact at hex-distance > BOARD_SIZE//2
-    from the crop center (the four corner triangles) can leave the crop under a
-    rotation/reflection. When that happens ``build_input_planes`` silently drops the
-    fact and ``dense_policy_target`` renormalizes the survivors -- so a *partial* spill
-    produces a truncated/renormalized policy target and a counterfactual board with no
-    exception raised. Callers use this to fall the whole row back to identity (which the
-    sample was authored to fit) when the drawn symmetry would drop support, keeping
-    train-time D6 augmentation exact.
+    A fact at hex-distance > ``BOARD_SIZE // 2`` from the crop center is
+    unrepresentable in the dense view and is silently dropped by the encoder under
+    the disk contract. This is observation-only telemetry (Spec A): it reports how
+    much signal the fixed crop cannot carry, per ``SPILL_CATEGORIES`` (stones,
+    legal, policy, history). Hex distance is D6-invariant, so the count is the same
+    under any augmentation symmetry; it is computed once at identity.
 
-    Only facts at hex-distance > half can spill (D6 preserves hex-distance and the
-    hex-disk of that radius is contained in the square), so the per-coordinate transform
-    runs only for those rare corner facts; everything else is rejected by two cheap
-    bound checks.
+    Note: ``legal`` and ``policy`` are disk-restricted at the source (the native
+    ``sample_gen`` / MCTS only emit in-disk legal actions and visit policy), so in
+    self-play their spill is structurally ~0; the meaningful signal is ``stones``
+    and ``history`` (the raw board facts the crop cannot represent).
     """
 
-    if int(getattr(symmetry, "index", symmetry)) == 0:
-        return False
-    center = Axial(*sample.center)
-    cq, cr = int(center.q), int(center.r)
-    half = BOARD_SIZE // 2
+    center = (int(sample.center[0]), int(sample.center[1]))
 
-    def spills(q: int, r: int) -> bool:
-        dq, dr = q - cq, r - cr
-        if abs(dq) > half or abs(dr) > half:
-            return False  # already out of crop at identity -> not a symmetry-induced drop
-        if max(abs(dq), abs(dr), abs(dq + dr)) <= half:
-            return False  # within the hex-disk the square contains -> faithful under all D6
-        return coord_to_row_col(transform_coord((q, r), symmetry, center=center), center=center) is None
+    def beyond(q: int, r: int) -> bool:
+        return hex_distance((int(q), int(r)), center) > _HALF
 
-    for action_id, _weight in sample.policy:
-        q, r = unpack_coord_pair(int(action_id))
-        if spills(q, r):
-            return True
-    for action_id, _weight in sample.opp_policy:
-        q, r = unpack_coord_pair(int(action_id))
-        if spills(q, r):
-            return True
-    for action_id in sample.legal_action_ids:
-        q, r = unpack_coord_pair(int(action_id))
-        if spills(q, r):
-            return True
-    for q, r, _player in sample.stones:
-        if spills(int(q), int(r)):
-            return True
-    for item in sample.placement_history:
-        if spills(int(item[0]), int(item[1])):
-            return True
-    for q, r in sample.own_hot:
-        if spills(int(q), int(r)):
-            return True
-    for q, r in sample.opponent_hot:
-        if spills(int(q), int(r)):
-            return True
-    for q, r in sample.opponent_last_turn:
-        if spills(int(q), int(r)):
-            return True
-    if sample.first_stone is not None:
-        if spills(int(sample.first_stone[0]), int(sample.first_stone[1])):
-            return True
-    return False
+    stones = sum(1 for q, r, _player in sample.stones if beyond(q, r))
+    legal = sum(1 for action_id in sample.legal_action_ids if beyond(*unpack_coord_pair(int(action_id))))
+    policy = sum(1 for action_id, _weight in sample.policy if beyond(*unpack_coord_pair(int(action_id))))
+    history = sum(1 for item in sample.placement_history if beyond(int(item[0]), int(item[1])))
+    return {"stones": stones, "legal": legal, "policy": policy, "history": history}
 
 
 def stack_expanded(samples: Sequence[Mapping[str, torch.Tensor]]) -> dict[str, torch.Tensor]:

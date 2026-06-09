@@ -58,6 +58,9 @@ from .constants import (
     BOARD_AREA,
     BOARD_SIZE,
     INPUT_CHANNELS,
+    PLANE_LEGAL,
+    PLANE_OPPONENT_STONES,
+    PLANE_OWN_STONES,
     VALUE_BINS,
 )
 
@@ -66,6 +69,55 @@ DEFAULT_BLOCKS_TYPE = "R_R_R_T_R_R_T_R"  # 8-block R3-family default (see parse_
 DEFAULT_ATTENTION_HEADS = 4
 DEFAULT_MLP_RATIO = 2
 DEFAULT_EMBED_KERNEL_SIZE = 3
+
+# Attention scope (Spec C / D): "full" attends over all 1681 tokens (the original
+# behavior, bit-for-bit), "disk" statically masks the 420 corner KEY columns so
+# attention never spends mass on out-of-crop cells, and "content" (Spec D) gathers
+# only the relevant tokens (occupied ∪ legal ∩ disk) into a true O(K²) attention.
+ATTENTION_SCOPES = ("full", "disk", "content")
+DEFAULT_ATTENTION_SCOPE = "disk"
+# Additive mask added to non-disk KEY columns under "disk"/"content". Large and
+# finite (NOT -inf): queries are unrestricted so no attention row is ever fully
+# masked, and a finite value keeps softmax/SDPA fp16-safe with no NaN risk.
+_DISK_MASK_VALUE = -1.0e9
+# Gathered ("content") attention pads the per-sample relevant-token count up to a
+# multiple of this so the forward sees a small set of token-length buckets (cuDNN/
+# kernel-shape stability), capped at the full board.
+_CONTENT_BUCKET_MULTIPLE = 64
+
+
+def _select_content_tokens(relevance: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Per-sample relevant-token selection for gathered ("content") attention.
+
+    ``relevance`` is a ``(B, N)`` bool mask (occupied ∪ legal ∩ disk). Returns
+    ``(idx, valid)``:
+
+    - ``idx`` ``(B, K_pad)`` long — each row's relevant token indices (ascending
+      board order), with padding slots set to 0 (a valid index, masked out below).
+    - ``valid`` ``(B, K_pad)`` bool — True for the ``K_i`` real tokens of each
+      sample, False for padding.
+
+    ``K_pad`` is the per-batch maximum relevant count, rounded up to a multiple of
+    ``_CONTENT_BUCKET_MULTIPLE`` and capped at ``N``. A batch with no relevant
+    tokens returns width-0 tensors (the caller treats the block as identity).
+    """
+
+    b, n = relevance.shape
+    counts = relevance.sum(dim=1)  # (B,)
+    k_max = int(counts.max().item()) if b > 0 else 0
+    if k_max <= 0:
+        return (
+            relevance.new_zeros((b, 0), dtype=torch.long),
+            relevance.new_zeros((b, 0), dtype=torch.bool),
+        )
+    k_pad = min(n, ((k_max + _CONTENT_BUCKET_MULTIPLE - 1) // _CONTENT_BUCKET_MULTIPLE) * _CONTENT_BUCKET_MULTIPLE)
+    # A stable descending sort of the 0/1 mask lists every relevant index first, in
+    # ascending board order (stability preserves the original order within ties).
+    order = torch.argsort(relevance.to(torch.int8), dim=1, descending=True, stable=True)  # (B, N)
+    idx = order[:, :k_pad].contiguous()  # (B, K_pad)
+    valid = torch.arange(k_pad, device=relevance.device).unsqueeze(0) < counts.unsqueeze(1)  # (B, K_pad)
+    idx = torch.where(valid, idx, torch.zeros_like(idx))  # padding slots -> index 0 (masked out)
+    return idx, valid
 
 
 def parse_blocks_type(blocks_type: str) -> tuple[str, ...]:
@@ -222,6 +274,7 @@ class RelPosMHSA(nn.Module):
         *,
         dropout: float = 0.0,
         impl: str = "sdpa",
+        attention_scope: str = DEFAULT_ATTENTION_SCOPE,
     ) -> None:
         super().__init__()
         if channels % num_heads != 0:
@@ -239,6 +292,7 @@ class RelPosMHSA(nn.Module):
         self.token_len = board_h * board_w
         self.scaling = self.head_dim ** -0.5
         self.set_impl(impl)
+        self.set_attention_scope(attention_scope)
 
         self.q_proj = nn.Linear(channels, channels)
         self.k_proj = nn.Linear(channels, channels)
@@ -258,18 +312,75 @@ class RelPosMHSA(nn.Module):
         rel_cols = cols[:, None] - cols[None, :] + (board_w - 1)  # (N, N) in [0, 2W-2]
         relative_index = rel_rows * (2 * board_w - 1) + rel_cols  # (N, N) in [0, (2H-1)(2W-1)-1]
         self.register_buffer("relative_index", relative_index.reshape(-1), persistent=False)
+        # Static radius-(H//2) hex-disk membership for every KEY token, from the SAME
+        # (row, col) grids as relative_index (Spec C). The 420 corner cells are
+        # out-of-crop, so under "disk"/"content" scope a large negative additive bias
+        # masks their KEY columns. persistent=False -> NOT in state_dict, so this is
+        # checkpoint-compatible and adds no params. Queries are never masked.
+        half = board_h // 2
+        drow = rows - half
+        dcol = cols - half
+        disk_flat = torch.maximum(torch.maximum(drow.abs(), dcol.abs()), (drow + dcol).abs()) <= half  # (N,) bool
+        self.register_buffer("disk_flat", disk_flat, persistent=False)
+        disk_key_bias = torch.zeros(self.token_len, dtype=torch.float32)
+        disk_key_bias[~disk_flat] = _DISK_MASK_VALUE  # additive -1e9 on corner KEY columns
+        self.register_buffer("disk_key_bias", disk_key_bias, persistent=False)
+        # Performance-only inference cache for the additive bias mask (B-speedup):
+        # the (1, heads, N, N) mask is a pure function of relative_bias_table, so
+        # under eval/no-grad (self-play, frozen weights) it is gathered ONCE and
+        # reused across forwards instead of re-gathering ~N*N*heads elements every
+        # call. Version-keyed (like HexConv2d.masked_weight) so it auto-invalidates
+        # the instant the table changes. Plain attributes -> NOT in state_dict, so
+        # this is bit-identical and checkpoint-compatible. Training (grad enabled)
+        # always recomputes, so gradients to the table are unaffected.
+        self._cached_bias: torch.Tensor | None = None
+        self._cached_bias_key: tuple | None = None
 
     def set_impl(self, impl: str) -> None:
         if impl not in ("sdpa", "materialized"):
             raise ValueError(f"attention impl must be 'sdpa' or 'materialized', got {impl!r}")
         self.impl = impl
 
-    def _relative_bias(self) -> torch.Tensor:
-        """Materialize the additive bias `(1, heads, N, N)` from the learned table."""
+    def set_attention_scope(self, scope: str) -> None:
+        if scope not in ATTENTION_SCOPES:
+            raise ValueError(f"attention_scope must be one of {ATTENTION_SCOPES}, got {scope!r}")
+        self.attention_scope = scope
+        # The cached eval bias depends on the scope's key mask, so invalidate it.
+        self._cached_bias = None
+        self._cached_bias_key = None
+
+    def _compute_relative_bias(self) -> torch.Tensor:
+        """Gather the additive bias `(1, heads, N, N)` fresh from the learned table.
+
+        Under "disk"/"content" scope the corner KEY columns receive a large negative
+        additive bias (``disk_key_bias``) so attention never spends mass on
+        out-of-crop cells; "full" returns the unmasked bias bit-for-bit.
+        """
 
         bias = self.relative_bias_table[self.relative_index]  # (N*N, heads)
         bias = bias.view(self.token_len, self.token_len, self.num_heads)  # (N, N, heads): [query, key, head]
-        return bias.permute(2, 0, 1).unsqueeze(0)  # (1, heads, N, N)
+        out = bias.permute(2, 0, 1).unsqueeze(0)  # (1, heads, N, N): [batch, head, query, key]
+        if self.attention_scope in ("disk", "content"):
+            out = out + self.disk_key_bias.view(1, 1, 1, self.token_len)  # mask corner KEY columns
+        return out
+
+    def _relative_bias(self, *, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
+        """Additive bias `(1, heads, N, N)` in the consumer's dtype/device.
+
+        Eval + no-grad reuses a cached, contiguous copy (gathered once); training
+        recomputes so the table still receives gradient. Numerically identical.
+        """
+
+        if self.training or torch.is_grad_enabled():
+            return self._compute_relative_bias().to(device=device, dtype=dtype)
+        version = int(getattr(self.relative_bias_table, "_version", 0))
+        key = (version, dtype, device)
+        if self._cached_bias is None or self._cached_bias_key != key:
+            self._cached_bias = (
+                self._compute_relative_bias().to(device=device, dtype=dtype).detach().contiguous()
+            )
+            self._cached_bias_key = key
+        return self._cached_bias
 
     def _project(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         b, n, _ = x.shape
@@ -288,7 +399,7 @@ class RelPosMHSA(nn.Module):
         b, n, _ = x.shape
         q, k, v = self._project(x)
         dots = torch.matmul(q, k.transpose(-2, -1)) * self.scaling  # (B, heads, N, N)
-        dots = dots + self._relative_bias().to(dots.dtype)
+        dots = dots + self._relative_bias(dtype=dots.dtype, device=dots.device)
         attn = torch.softmax(dots, dim=-1)
         out = torch.matmul(attn, v)  # (B, heads, N, head_dim)
         out = out.permute(0, 2, 1, 3).reshape(b, n, self.channels)
@@ -297,10 +408,51 @@ class RelPosMHSA(nn.Module):
     def _forward_sdpa(self, x: torch.Tensor) -> torch.Tensor:
         b, n, _ = x.shape
         q, k, v = self._project(x)
-        attn_mask = self._relative_bias().to(q.dtype)  # additive bias; SDPA scale = 1/sqrt(head_dim)
+        attn_mask = self._relative_bias(dtype=q.dtype, device=q.device)  # additive bias; SDPA scale = 1/sqrt(head_dim)
         out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
         out = out.permute(0, 2, 1, 3).reshape(b, n, self.channels)
         return self.out_drop(self.out_proj(out))
+
+    def _attend_with_bias(self, x: torch.Tensor, bias: torch.Tensor) -> torch.Tensor:
+        """Project + attend `x` (B, L, C) with an explicit additive `bias`.
+
+        ``bias`` is broadcastable to ``(B, heads, L, L)``. Respects ``self.impl``
+        ('sdpa' or 'materialized') with the same math as the dense paths, but over
+        an arbitrary token length L and per-sample bias (used by gathered attention).
+        """
+
+        b, length, _ = x.shape
+        q, k, v = self._project(x)  # (B, heads, L, head_dim)
+        if self.impl == "sdpa":
+            out = F.scaled_dot_product_attention(q, k, v, attn_mask=bias.to(dtype=q.dtype))
+        else:
+            dots = torch.matmul(q, k.transpose(-2, -1)) * self.scaling + bias.to(dtype=q.dtype)
+            out = torch.matmul(torch.softmax(dots, dim=-1), v)
+        out = out.permute(0, 2, 1, 3).reshape(b, length, self.channels)
+        return self.out_drop(self.out_proj(out))
+
+    def forward_gathered(self, tok: torch.Tensor, idx: torch.Tensor, valid: torch.Tensor) -> torch.Tensor:
+        """Gathered O(K²) attention over `tok` (B, K_pad, C) for "content" scope.
+
+        ``idx``/``valid`` come from :func:`_select_content_tokens`. The per-sample
+        ``(K_pad, K_pad, heads)`` relative-bias submatrix is gathered from the SAME
+        learned table/index as the dense path, so for a relevant query attending to
+        the relevant keys the bias is identical to dense attention — only the
+        non-relevant keys are absent (gathered out) instead of statically masked.
+        Padded KEY columns get the large-negative mask; queries are unrestricted.
+        """
+
+        b, k_pad, _ = tok.shape
+        rel2d = self.relative_index.view(self.token_len, self.token_len)  # (N, N)
+        rows = rel2d[idx]  # (B, K_pad, N): rows for each gathered query token
+        sub = torch.gather(rows, 2, idx.unsqueeze(1).expand(b, k_pad, k_pad))  # (B, K_pad, K_pad)
+        bias = self.relative_bias_table[sub]  # (B, K_pad, K_pad, heads)
+        bias = bias.permute(0, 3, 1, 2)  # (B, heads, K_pad, K_pad): [batch, head, query, key]
+        # Mask padded KEY columns. (Disk masking is implicit: relevance ⊆ disk, so
+        # every gathered token is already in-disk.)
+        key_pad = (~valid).view(b, 1, 1, k_pad).to(bias.dtype) * _DISK_MASK_VALUE
+        bias = bias + key_pad
+        return self._attend_with_bias(tok, bias)
 
 
 class TransformerBlock(nn.Module):
@@ -323,11 +475,15 @@ class TransformerBlock(nn.Module):
         board_w: int = BOARD_SIZE,
         dropout: float = 0.0,
         attention_impl: str = "sdpa",
+        attention_scope: str = DEFAULT_ATTENTION_SCOPE,
     ) -> None:
         super().__init__()
         self.channels = int(channels)
+        self.attention_scope = str(attention_scope)
         self.ln1 = nn.LayerNorm(channels)
-        self.attn = RelPosMHSA(channels, heads, board_h, board_w, dropout=dropout, impl=attention_impl)
+        self.attn = RelPosMHSA(
+            channels, heads, board_h, board_w, dropout=dropout, impl=attention_impl, attention_scope=attention_scope
+        )
         self.ln2 = nn.LayerNorm(channels)
         hidden = int(mlp_ratio) * int(channels)
         self.mlp = nn.Sequential(
@@ -336,12 +492,35 @@ class TransformerBlock(nn.Module):
             nn.Linear(hidden, channels),
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, content_sel: tuple | None = None) -> torch.Tensor:
         if x.dim() == 4:
             x = conv_to_tokens(x)
+        if self.attention_scope == "content" and content_sel is not None:
+            return self._forward_content(x, content_sel)
         x = x + self.attn(self.ln1(x))
         x = x + self.mlp(self.ln2(x))
         return x
+
+    def _forward_content(self, x: torch.Tensor, content_sel: tuple) -> torch.Tensor:
+        """Gathered-token transformer block (Spec D): attention + MLP over only the
+        relevant tokens, scattered back so non-relevant cells pass through unchanged.
+        """
+
+        relevance, idx, valid = content_sel  # (B, N) bool, (B, K_pad) long, (B, K_pad) bool
+        b, n, c = x.shape
+        if idx.shape[1] == 0:
+            return x  # no relevant tokens in the whole batch -> block is identity
+        idx_exp = idx.unsqueeze(-1).expand(b, idx.shape[1], c)  # (B, K_pad, C)
+        tok = x.gather(1, idx_exp)  # (B, K_pad, C); padding slots duplicate token 0
+        tok = tok + self.attn.forward_gathered(self.ln1(tok), idx, valid)
+        tok = tok + self.mlp(self.ln2(tok))
+        # Scatter the updated tokens back to their board positions. Padded slots are
+        # routed to a throwaway row (index n) and dropped; non-relevant cells keep x.
+        safe_idx = torch.where(valid, idx, torch.full_like(idx, n))  # invalid -> dump row
+        scattered = x.new_zeros((b, n + 1, c)).scatter(
+            1, safe_idx.unsqueeze(-1).expand(b, idx.shape[1], c), tok
+        )[:, :n, :]
+        return torch.where(relevance.unsqueeze(-1), scattered, x)
 
 
 class PolicyHead(nn.Module):
@@ -405,6 +584,7 @@ class RestnetNetwork(nn.Module):
         embed_kernel_size: int = DEFAULT_EMBED_KERNEL_SIZE,
         residual_conv: str = "hex",
         attention_impl: str = "sdpa",
+        attention_scope: str = DEFAULT_ATTENTION_SCOPE,
         dropout: float = 0.0,
         short_term_value_horizons: tuple[int, ...] = (),
     ) -> None:
@@ -414,6 +594,7 @@ class RestnetNetwork(nn.Module):
         self.board_size = BOARD_SIZE
         self.blocks_type = str(blocks_type)
         self.attention_impl = str(attention_impl)
+        self.attention_scope = str(attention_scope)
         self.residual_conv = str(residual_conv)
         self.short_term_value_horizons = tuple(int(item) for item in short_term_value_horizons)
         block_kinds = parse_blocks_type(self.blocks_type)
@@ -442,6 +623,7 @@ class RestnetNetwork(nn.Module):
                         board_w=BOARD_SIZE,
                         dropout=dropout,
                         attention_impl=attention_impl,
+                        attention_scope=attention_scope,
                     )
                 )
         self.blocks = nn.ModuleList(blocks)
@@ -452,6 +634,17 @@ class RestnetNetwork(nn.Module):
         self.short_term_value_heads = nn.ModuleDict(
             {str(horizon): ValueBinnedHead(self.channels) for horizon in self.short_term_value_horizons}
         )
+
+        # Static radius-(H//2) hex-disk membership for every board cell, used by the
+        # "content" scope to intersect relevance with the disk. persistent=False ->
+        # NOT in state_dict (adds no params; checkpoints cross-load across scopes).
+        half = BOARD_SIZE // 2
+        rows = torch.arange(BOARD_SIZE).repeat_interleave(BOARD_SIZE)
+        cols = torch.arange(BOARD_SIZE).repeat(BOARD_SIZE)
+        drow = rows - half
+        dcol = cols - half
+        disk_flat = torch.maximum(torch.maximum(drow.abs(), dcol.abs()), (drow + dcol).abs()) <= half
+        self.register_buffer("_disk_flat", disk_flat, persistent=False)
 
         # ViT-style init from the released code: trunc_normal on Linear, LN/BN
         # to (bias 0, weight 1). Conv layers keep PyTorch's default init.
@@ -465,14 +658,44 @@ class RestnetNetwork(nn.Module):
                 module.set_impl(impl)
         self.attention_impl = impl
 
+    def set_attention_scope(self, scope: str) -> None:
+        """Switch all transformer blocks between 'full' / 'disk' / 'content' scope."""
+
+        for module in self.modules():
+            if isinstance(module, (RelPosMHSA, TransformerBlock)):
+                module.attention_scope = scope
+            if isinstance(module, RelPosMHSA):
+                module.set_attention_scope(scope)
+        self.attention_scope = scope
+
     def trunk(self, x: torch.Tensor) -> torch.Tensor:
         self._validate_input(x)
+        # "content" scope derives the relevant-token selection ONCE from the input
+        # planes (before the stem) and threads it through every transformer block.
+        content_sel = self._content_selection(x) if self.attention_scope == "content" else None
         x = self.activation(self.stem_bn(self.stem_conv(x)))
         for block in self.blocks:
-            x = block(x)
+            if isinstance(block, TransformerBlock):
+                x = block(x, content_sel)
+            else:
+                x = block(x)
         if x.dim() == 3:
             x = tokens_to_conv(x, self.channels, BOARD_SIZE, BOARD_SIZE)
         return x
+
+    def _content_selection(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Relevant-token selection for "content" scope, from the input planes.
+
+        Relevance = (occupied ∪ legal) ∩ disk, read from ``PLANE_OWN_STONES`` /
+        ``PLANE_OPPONENT_STONES`` / ``PLANE_LEGAL`` of the raw input ``x``
+        (B, INPUT_CHANNELS, 41, 41), flattened to ``(B, N)`` in row-major board
+        order (the token order). Returns ``(relevance, idx, valid)``.
+        """
+
+        planes = x[:, PLANE_OWN_STONES] + x[:, PLANE_OPPONENT_STONES] + x[:, PLANE_LEGAL]  # (B, H, W)
+        relevance = (planes > 0).reshape(x.shape[0], -1) & self._disk_flat  # (B, N) bool
+        idx, valid = _select_content_tokens(relevance)
+        return relevance, idx, valid
 
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
         features = self.trunk(x)

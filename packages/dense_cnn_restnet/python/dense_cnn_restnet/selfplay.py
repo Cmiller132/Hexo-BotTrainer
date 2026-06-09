@@ -26,7 +26,7 @@ from .inference import DenseCNNInference
 from .mcts import SearchResult, new_mcts_session
 from .performance import _extend_mcts_diagnostic_batches, _summarize_mcts_diagnostic_batches
 from .replay import materialize_policy_surprise_rows, write_selfplay_npz
-from .samples import Model1SampleData, finalize_game_samples, sample_from_state
+from .samples import SPILL_CATEGORIES, Model1SampleData, count_spill, finalize_game_samples, sample_from_state
 
 import os as _os
 
@@ -139,6 +139,10 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
     completed_games = 0
     truncated_games = 0
     mcts_search_elapsed = 0.0
+    # Observation-only spill telemetry: per-category facts beyond hex distance 20
+    # from the crop center, which the fixed radius-20 disk crop cannot represent
+    # (Spec A). Accumulated over every searched position's sample.
+    epoch_spill = {category: 0 for category in SPILL_CATEGORIES}
     mcts_diagnostic_batches: list[Mapping[str, Any]] = []
     npz_writes: list[Mapping[str, Any]] = []
     started = perf_counter()
@@ -287,6 +291,8 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
                         root_prior_policy=search.root_prior_policy,
                         metadata={"epoch": epoch, "search_visits": search.visits},
                     )
+                    for category, count in count_spill(sample).items():
+                        epoch_spill[category] += count
                     game["pending"].append((sample.current_player, sample, search.root_value))
                     engine.apply_action(state, engine.PlacementAction(unpack_coord_id(search.action_id)))
                     game["actions"].append(search.action_id)
@@ -378,6 +384,9 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
         "mcts_virtual_batch_size": trainer.mcts_virtual_batch_size,
         "mcts_diagnostics": _summarize_mcts_diagnostic_batches(mcts_diagnostic_batches),
         "npz_writes": npz_writes,
+        # Per-category facts the radius-20 hex-disk crop cannot represent (spill),
+        # plus the total. Observation only (Spec A); never affects training.
+        "spill": {**epoch_spill, "total": sum(epoch_spill.values())},
     }
     ctx.diagnostics.write_json(f"dense_cnn.selfplay.epoch_{epoch:06d}.json", summary)
     # Final live snapshot so the dashboard reflects the just-finished epoch's

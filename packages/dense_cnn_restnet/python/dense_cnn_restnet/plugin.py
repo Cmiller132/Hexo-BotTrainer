@@ -44,6 +44,7 @@ class DenseCNNRestnetPlugin:
             embed_kernel_size=arch.embed_kernel_size,
             residual_conv=arch.residual_conv,
             attention_impl=arch.attention_impl,
+            attention_scope=arch.attention_scope,
             dropout=arch.dropout,
             short_term_value_horizons=arch.short_term_value_horizons,
         )

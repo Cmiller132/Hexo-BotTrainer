@@ -37,7 +37,19 @@ from .constants import (
     PLANE_SECOND_PLACEMENT,
 )
 from .d6 import Axial, D6Symmetry, transform_action_id, transform_coord, unpack_coord_id, unpack_coord_pair
-from .geometry import coord_to_flat, coord_to_row_col, hex_distance
+from .geometry import coord_to_flat, coord_to_row_col, disk_mask, hex_distance, in_disk
+
+
+def _flat_in_disk(flat: int) -> bool:
+    """Whether a flat row-major crop index lands inside the radius-20 hex disk.
+
+    The 420 corner cells are permanently invalid (see ``geometry.in_disk``), so a
+    fact projecting onto one is treated as out-of-crop exactly like the existing
+    out-of-square skip. Pure integer arithmetic (no tensor indexing) keeps the
+    per-action legal/policy loops cheap.
+    """
+
+    return in_disk(flat // BOARD_SIZE, flat % BOARD_SIZE)
 
 
 def build_input_planes(
@@ -78,6 +90,8 @@ def build_input_planes(
         if row_col is None:
             continue
         row, col = row_col
+        if not in_disk(row, col):
+            continue
         plane = PLANE_OWN_STONES if player == current_player else PLANE_OPPONENT_STONES
         planes[plane, row, col] = 1.0
         planes[PLANE_EMPTY, row, col] = 0.0
@@ -89,7 +103,7 @@ def build_input_planes(
             if identity
             else coord_to_flat(unpack_coord_id(transform_action_id(action_id, symmetry, center=center)), center=center)
         )
-        if flat is None:
+        if flat is None or not _flat_in_disk(flat):
             continue
         legal_plane[flat] = 1.0
 
@@ -115,6 +129,8 @@ def build_input_planes(
         if row_col is None:
             continue
         row, col = row_col
+        if not in_disk(row, col):
+            continue
         weight = 1.0 / (1.0 + latest_index - int(placement_index))
         plane = PLANE_OWN_RECENCY if player == current_player else PLANE_OPPONENT_RECENCY
         if weight > float(planes[plane, row, col]):
@@ -132,6 +148,12 @@ def build_input_planes(
             center,
         )
 
+    # The 420 corner cells are out-of-crop under the radius-20 hex-disk contract.
+    # Zero them across EVERY plane (not just the fact planes): the constant fill
+    # planes (empty, player-colour, second-placement) and center-distance must be
+    # masked too, so a corner cell is uniformly zero. Mirrors Rust
+    # `zero_corner_cells` so the two encoders agree cell-for-cell.
+    planes.mul_(disk_mask(BOARD_SIZE).to(planes.dtype))
     return planes
 
 
@@ -156,7 +178,7 @@ def dense_policy_target(
             if identity
             else coord_to_flat(unpack_coord_id(transform_action_id(int(action_id), symmetry, center=center)), center=center)
         )
-        if flat is None:
+        if flat is None or not _flat_in_disk(flat):
             continue
         target[flat] += weight
 
@@ -184,7 +206,7 @@ def legal_mask_flat(
             if identity
             else coord_to_flat(unpack_coord_id(transform_action_id(action_id, symmetry, center=center)), center=center)
         )
-        if flat is None:
+        if flat is None or not _flat_in_disk(flat):
             continue
         mask[flat] = True
     return mask
@@ -195,6 +217,8 @@ def _set_coord(planes: torch.Tensor, plane: int, coord: Axial, center: Axial) ->
     if row_col is None:
         return
     row, col = row_col
+    if not in_disk(row, col):
+        return
     planes[plane, row, col] = 1.0
 
 
@@ -222,4 +246,7 @@ def _distance_plane(size: int) -> torch.Tensor:
     rows = torch.arange(size, dtype=torch.float32).view(size, 1) - half
     cols = torch.arange(size, dtype=torch.float32).view(1, size) - half
     s = -rows - cols
-    return torch.maximum(torch.maximum(rows.abs(), cols.abs()), s.abs()) / float(size - 1)
+    distance = torch.maximum(torch.maximum(rows.abs(), cols.abs()), s.abs()) / float(size - 1)
+    # Corner cells are out-of-crop under the radius-20 hex-disk contract, so the
+    # center-distance plane is zeroed there (matching Rust ``fill_distance_plane``).
+    return distance * disk_mask(size).to(distance.dtype)
