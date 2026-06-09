@@ -1,0 +1,138 @@
+# dense_cnn_restnet_main1 — FROM-SCRATCH faithful ResTNet (interleaved residual +
+# transformer trunk; IJCAI 2025 arXiv:2410.05347), owner directive 2026-06-09.
+#
+# Architecture (faithful to the released code, github.com/rlglab/restnet):
+#   - 96 channels, 8 blocks, R3-family interleave.
+#   - blocks_type = "R_R_R_T_R_R_T_R": 3 leading residual blocks, then a
+#     transformer block every 3rd, ending residual (RRR T RR T R). 2 transformer
+#     blocks. >>> OWNER: confirm/tweak this 8-block string. The paper's canonical
+#     10-block R3(RRT) is "R_R_R_T_R_R_T_R_R_T" (3 T-blocks) if you want deeper.
+#   - Full O(N^2) attention over all 41x41 = 1681 board-cell tokens (no
+#     windowing/downsampling — performance is an EXPLICIT non-goal). attention_impl
+#     "sdpa" computes the identical full attention memory-efficiently.
+#   - heads/loss/replay are the dense_cnn binned-value contract (kept), so the
+#     existing pipeline, MCTS, and replay schema are reused unchanged.
+#
+# Reuses the native hexo_models._rust.dense_cnn accelerator read-only (Python-only
+# fork; NO Rust rebuild). FROM SCRATCH: no initialize_from / no prefit.
+#
+# NOTE (throughput, non-goal but plan for it): the faithful full-attention trunk
+# is much slower than the conv-only dense_cnn run; self-play pos/s will be low and
+# the SealBot eval slower. If calibration OOMs or self-play is impractically slow,
+# the owner may lower active_games / search_visits / inference_batch_candidates —
+# none of which change the architecture.
+
+[model]
+name = "dense_cnn_restnet"
+module = "dense_cnn_restnet.plugin"
+
+[model.config]
+device = "cuda"
+
+[model.config.architecture]
+input_channels = 13
+channels = 96
+blocks_type = "R_R_R_T_R_R_T_R"   # 8-block R3-family default (OWNER: confirm)
+attention_heads = 4
+mlp_ratio = 2
+embed_kernel_size = 3
+residual_conv = "hex"             # hex-masked 3x3 (board-correct); "plain" = literal paper conv
+attention_impl = "sdpa"           # identical math to "materialized", memory-efficient
+dropout = 0.0
+short_term_value_horizons = [1, 4, 8]
+
+[model.config.training]
+batch_size = 256
+learning_rate = 0.001
+weight_decay = 0.0001
+policy_weight = 1.0
+value_weight = 1.0
+opp_policy_weight = 0.25
+short_term_value_weight = 0.25
+amp = true
+max_grad_norm = 1.0
+train_samples_per_epoch = 100000
+max_train_bucket_per_new_data = 8.0
+max_train_bucket_size = 500000
+no_repeat_files = true
+max_validation_samples = 100000
+
+[model.config.samples]
+shuffle_min_rows = 100000
+shuffle_keep_target_rows = 300000
+shuffle_taper_window_exponent = 0.65
+shuffle_expand_window_per_row = 0.4
+shuffle_taper_window_scale = 50000.0
+approx_rows_per_out_file = 8000
+shuffle_worker_group_size = 8000
+validation_fraction = 0.0
+policy_surprise_uniform_fraction = 0.5
+policy_surprise_max_weight = 8.0
+
+[model.config.selfplay]
+search_visits = 512
+active_games = 256
+c_puct = 1.5
+root_dirichlet_noise_enabled = true
+root_dirichlet_noise_fraction = 0.25
+root_dirichlet_total_alpha = 10.83
+root_policy_temperature = 1.1
+fpu_reduction = 0.20
+virtual_loss = 1.0
+widening_policy_mass = 0.95
+widening_max_children = 96
+widening_min_children = 2
+mcts_session_cache_max_states = 131072
+mcts_active_root_limit = 256
+max_actions = 1024
+temperature = 1.0
+temperature_schedule = [[0, 1.0], [30, 0.5], [90, 0.3]]
+temperature_floor = 0.1
+forced_playout_k = 2.0
+
+[model.config.evaluation]
+games_per_epoch = 64
+eval_every = 3
+sealbot_variant = "best"
+sealbot_time_limit = 0.05
+max_actions = 1024
+require_sealbot = true
+opening_temperature = 0.6
+opening_moves = 8
+
+[model.config.performance]
+calibrate = true
+target_selfplay_positions_per_second = 16.0   # full-attention trunk: expect low pos/s (non-goal)
+# Attention memory grows with the forward batch, so probe a conservative set; the
+# calibration OOM guard drops any candidate that OOMs and keeps the largest viable.
+inference_batch_candidates = [64, 128, 256]
+selfplay_batch_candidates = [256]
+training_batch_candidates = [64, 128, 192, 256]
+mcts_virtual_batch_candidates = [4]
+selfplay_probe_positions = 2048
+probe_batches = 1
+inference_use_tensorrt = false   # attention does not export to TRT cleanly; torch backend
+inference_bucket_pad_multiple = 16
+
+[run]
+# OWNER: confirm output_dir matches your environment's mount (mirrors the live
+# dense_cnn run's prefix; the run name is new, so it is isolated from
+# dense_cnn_rl_main1).
+name = "dense_cnn_restnet_main1"
+output_dir = "/mnt/e/Hexo-BotTrainer/runs/dense_cnn_restnet_main1"
+seed = 1
+
+[loop]
+epochs = 60
+
+[selfplay]
+games_per_epoch = 256
+update_checkpoint_pointer = false
+
+[train]
+passes_per_epoch = 1
+
+[checkpoint]
+# FROM SCRATCH: no initialize_from / no resume_from. Random (trunc_normal) init.
+# The supervisor injects resume_from=<latest epoch_*.pt> on crash-relaunch.
+save_name = "latest"
