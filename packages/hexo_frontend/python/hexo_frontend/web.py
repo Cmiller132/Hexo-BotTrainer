@@ -2929,7 +2929,109 @@ def _training_live_status(run_dir: Path) -> dict[str, object]:
         status["selfplay_live"] = _selfplay_live_summary(selfplay_live)
     if isinstance(training_progress, dict):
         status["training_progress"] = _training_progress_summary(training_progress)
+    sub_phase, sub_phase_detail = _derive_sub_phase(
+        run_dir,
+        diagnostics,
+        events,
+        selfplay_live if isinstance(selfplay_live, dict) else None,
+    )
+    if sub_phase is not None:
+        status["sub_phase"] = sub_phase
+        if sub_phase_detail is not None:
+            status["sub_phase_detail"] = sub_phase_detail
     return status
+
+
+def _derive_sub_phase(
+    run_dir: Path,
+    diagnostics: Path,
+    events: dict[str, object],
+    selfplay_live: dict[str, object] | None,
+) -> tuple[str | None, str | None]:
+    """Derive the active within-epoch sub-phase (self-play / shuffling / training /
+    evaluating) for the CURRENT live epoch, purely from on-disk file signals.
+
+    A dense_cnn epoch runs self-play (~10 min) -> shuffle (~1 min) -> train (~2 min)
+    -> SealBot eval (~15-19 min), but the run-level ``stage`` stays ``epoch_NNNNNN``
+    the whole time, so the long eval reads as a stuck "epoch running". This surfaces
+    the sub-phase so the owner can tell self-play from the long eval.
+
+    Returns ``(None, None)`` when nothing can be derived (e.g. setup stages, stopped
+    runs, or models without these file signals) so callers fall back to the existing
+    ``stage``/``stage_status`` label. Robust to missing files."""
+
+    # Only derive during an actively-running epoch. Setup stages, finished/stopped
+    # runs (no active stage) and non-epoch stages fall through to None, which keeps
+    # stopped runs like hexgnn on their existing label.
+    if str(events.get("status") or "") != "running":
+        return None, None
+    epoch = events.get("epoch")
+    if not isinstance(epoch, int):
+        return None, None
+
+    sp_status = str((selfplay_live or {}).get("status") or "")
+    sp_epoch = (selfplay_live or {}).get("epoch")
+    sp_age = _file_age_seconds(diagnostics / "dense_cnn.selfplay.live.json")
+
+    # SELF-PLAY: live writer still running for this epoch and the file is fresh.
+    if (
+        sp_status == "running"
+        and sp_epoch == epoch
+        and sp_age is not None
+        and sp_age <= 30.0
+    ):
+        finished = (selfplay_live or {}).get("games_finished")
+        requested = (selfplay_live or {}).get("requested_games")
+        detail = None
+        if isinstance(finished, int) and isinstance(requested, int) and requested > 0:
+            detail = f"games {finished}/{requested}"
+        return "self-play", detail
+
+    # POST-SELF-PLAY (shuffle -> train -> eval). Self-play for this epoch reports
+    # completed, but the finished epoch_NNNNNN.json has not been written yet, so the
+    # run is somewhere in the brief shuffle/train or the long eval.
+    epoch_done = (diagnostics / f"epoch_{epoch:06d}.json").is_file()
+    if sp_status == "completed" and sp_epoch == epoch and not epoch_done:
+        shuffle_age = _shuffle_dir_age_seconds(run_dir, epoch)
+        if shuffle_age is None:
+            # Shuffle output for this epoch not on disk yet -> still shuffling.
+            return "shuffling", None
+        # Shuffle done. Training is ~2 min; treat the window right after the shuffle
+        # dir appears as training, and everything after as the long SealBot eval.
+        if shuffle_age <= 150.0:
+            return "training", None
+        return "evaluating", "SealBot"
+
+    return None, None
+
+
+def _file_age_seconds(path: Path) -> float | None:
+    stat = _safe_stat(path)
+    if stat is None:
+        return None
+    return max(0.0, wall_clock() - float(stat.st_mtime))
+
+
+def _shuffle_dir_age_seconds(run_dir: Path, epoch: int) -> float | None:
+    """Seconds since the shuffleddata dir for ``epoch`` was last written, or None if
+    no such dir exists yet (shuffle for this epoch has not produced output)."""
+    suffix = f"epoch_{epoch:06d}"
+    newest_mtime: float | None = None
+    try:
+        candidates = (run_dir / "shuffleddata").glob(f"*{suffix}")
+    except OSError:
+        return None
+    for candidate in candidates:
+        if not candidate.is_dir():
+            continue
+        stat = _safe_stat(candidate)
+        if stat is None:
+            continue
+        if newest_mtime is None or stat.st_mtime > newest_mtime:
+            newest_mtime = stat.st_mtime
+    if newest_mtime is None:
+        return None
+    return max(0.0, wall_clock() - newest_mtime)
 
 
 def _training_run_status(run_dir: Path, histories: list[dict[str, object]], live_status: dict[str, object]) -> dict[str, object]:

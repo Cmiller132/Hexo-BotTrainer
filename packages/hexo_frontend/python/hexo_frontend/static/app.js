@@ -2663,6 +2663,15 @@ function runStageLabel(status) {
   // Epoch ids already carry the epoch number; avoid "Epoch 1 · e1".
   const epochNum = asFinite(status.current_epoch);
   const epoch = epochNum !== null && !/^epoch/i.test(String(status.stage || "")) ? ` · Epoch ${epochNum}` : "";
+  // Prefer the derived within-epoch sub-phase (self-play / shuffling / training /
+  // evaluating) over the generic "running" stage_status, so the long SealBot eval
+  // is distinguishable from the rest of an epoch. Falls back to stage_status when
+  // no sub-phase is available.
+  const subPhase = status.sub_phase ? String(status.sub_phase) : "";
+  if (subPhase) {
+    const detail = status.sub_phase_detail ? ` ${String(status.sub_phase_detail)}` : "";
+    return `${stage}${epoch} · ${subPhase}${detail}`;
+  }
   const stageStatus = status.stage_status && status.stage_status !== "unknown"
     ? ` · ${String(status.stage_status).replace(/[_-]+/g, " ")}`
     : "";
