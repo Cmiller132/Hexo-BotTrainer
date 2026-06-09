@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import statistics
 import tempfile
 from collections.abc import Callable
 from email.utils import formatdate
@@ -2319,7 +2320,11 @@ def _epoch_history(run_dir: Path) -> list[dict[str, object]]:
             if epoch is None:
                 continue
             row = rows.setdefault(epoch, {"epoch": epoch})
-            row["selfplay"] = _selfplay_epoch_summary(payload)
+            selfplay_summary = _selfplay_epoch_summary(payload)
+            # dense_cnn self-play diagnostics omit the game-length + outcome stats
+            # hexgnn emits inline; backfill them display-side from the epoch's .hxr.
+            _backfill_selfplay_game_stats(run_dir, epoch, selfplay_summary)
+            row["selfplay"] = selfplay_summary
 
         for path in sorted(diagnostics_dir.glob("dense_cnn.evaluation.epoch_*.json")):
             payload = _read_json_file(path)
@@ -2389,7 +2394,50 @@ def _epoch_history(run_dir: Path) -> list[dict[str, object]]:
     for row in rows.values():
         if "status" not in row:
             row["status"] = "partial"
+        # Per-head/total training loss band. hexgnn/hexgt attach a `buffer` block
+        # (parsed from rl_train.log by their dashboard bridge); dense_cnn emits the
+        # same numbers in the epoch's `training` block (training.loss +
+        # training.loss_components). Surface them through the SAME selfplay.buffer
+        # loss band app.js renders, when no producer buffer is present. A skipped/
+        # untrained epoch (loss None) yields no buffer, so the band stays empty
+        # (graceful) and the main row shows the training status ("skipped").
+        training = row.get("training")
+        selfplay = row.get("selfplay")
+        # _selfplay_epoch_summary always carries a "buffer" key (None for dense_cnn,
+        # the bridge dict for hexgnn/hexgt), so guard on falsy — only synthesize when
+        # there is no producer buffer; hexgnn's real buffer (truthy) always wins.
+        if isinstance(training, dict) and isinstance(selfplay, dict) and not selfplay.get("buffer"):
+            loss_buffer = _loss_buffer_from_training(training)
+            if loss_buffer:
+                selfplay["buffer"] = loss_buffer
     return [rows[key] for key in sorted(rows)]
+
+
+def _loss_buffer_from_training(training: dict[str, object]) -> dict[str, object]:
+    """Build the `selfplay.buffer` loss block app.js renders (loss_total / loss_policy
+    / loss_value / loss_opp / loss_stvalue_<h>) from a dense_cnn epoch `training`
+    result. dense_cnn's trainer returns the weighted total (`loss`) plus the UNWEIGHTED
+    per-head components (`loss_components`: policy, value, opp_policy, stvalue_<h>).
+    hexgnn/hexgt feed the identical band via their bridge `buffer`; this surfaces the
+    dense_cnn lineage's losses through the SAME panel. Returns {} when there is no
+    numeric total loss (e.g. a skipped/untrained epoch) so the band degrades gracefully
+    rather than breaking."""
+    total = _optional_float(training.get("loss"))
+    if total is None:
+        return {}
+    out: dict[str, object] = {"loss_total": total}
+    components = training.get("loss_components")
+    if isinstance(components, dict):
+        for src, dst in (("policy", "loss_policy"), ("value", "loss_value"), ("opp_policy", "loss_opp")):
+            value = _optional_float(components.get(src))
+            if value is not None:
+                out[dst] = value
+        for key, raw in components.items():
+            if isinstance(key, str) and key.startswith("stvalue_"):
+                value = _optional_float(raw)
+                if value is not None:
+                    out[f"loss_{key}"] = value  # stvalue_1 -> loss_stvalue_1 (app.js renders stv<h>)
+    return out
 
 
 def _learning_health(
@@ -2599,12 +2647,24 @@ def _selfplay_epoch_summary(payload: dict[str, object]) -> dict[str, object]:
         "search_positions_per_second": payload.get("search_positions_per_second"),
         "mcts_sims_per_searched_position": mcts_sims_per_searched_position,
         "elapsed_seconds": payload.get("elapsed_seconds"),
-        # Game-length stats (None for producers that don't emit them, e.g. older
-        # dense_cnn runs, so the frontend just omits them — additive, non-breaking).
+        # Game-length stats. hexgnn/hexgt emit these inline; dense_cnn does not, so
+        # _epoch_history backfills any None from the epoch's .hxr records (display
+        # side). Producer-emitted values pass through unchanged. None values are
+        # omitted client-side, so a run with neither stays unaffected.
         "game_length_mean": payload.get("game_length_mean"),
         "game_length_median": payload.get("game_length_median"),
         "game_length_max": payload.get("game_length_max"),
         "game_length_stdev": payload.get("game_length_stdev"),
+        "game_length_p95": payload.get("game_length_p95"),
+        # Outcome distribution. Same backfill story as the lengths above — derived
+        # from finished .hxr games when the producer omits them.
+        "win_p0_fraction": payload.get("win_p0_fraction"),
+        "win_p1_fraction": payload.get("win_p1_fraction"),
+        "draw_fraction": payload.get("draw_fraction"),
+        "decisive_fraction": payload.get("decisive_fraction"),
+        # mean_abs_value (mean |value target|) needs the NPZ value labels / self-play
+        # internals, not the .hxr — passed through when emitted (hexgnn), else None.
+        "mean_abs_value": payload.get("mean_abs_value"),
         # Replay-buffer + per-head training-loss + calibration stats (nested object,
         # None for producers that don't emit it — e.g. dense_cnn runs — so the
         # frontend just omits the detail band). The dashboard bridge attaches this
@@ -2614,17 +2674,98 @@ def _selfplay_epoch_summary(payload: dict[str, object]) -> dict[str, object]:
     }
 
 
+def _selfplay_game_stats_from_records(run_dir: Path, epoch: int) -> dict[str, object]:
+    """Derive game-length + win-fraction stats for one self-play epoch from its
+    ``.hxr`` game records, DISPLAY-SIDE.
+
+    hexgnn/hexgt self-play diagnostics carry these stats inline; dense_cnn's do
+    not. The dashboard already reads the same ``.hxr`` for the History panel via
+    ``_hxr_base_rows`` (memoized by mtime/size), so this reuse is cheap and adds no
+    new file I/O on a warm cache. Returns ``{}`` when the epoch record is absent or
+    has no completed games. Only stats that are honestly derivable from finished
+    game records are computed here — MCTS-internal diversity (visit/prior entropy,
+    candidate counts, opening/move2 entropy, forced-move fraction) and value-target
+    stats (mean_abs_value) need self-play internals/NPZ shards and stay absent."""
+
+    path = run_dir / "selfplay" / f"epoch_{epoch:06d}.hxr"
+    if not path.is_file():
+        return {}
+    rows = _hxr_base_rows(path, run_dir)
+    completed = [row for row in rows if str(row.get("status")) == "completed"]
+    if not completed:
+        return {}
+    lengths = [
+        int(row.get("length") or row.get("actions") or 0)
+        for row in completed
+    ]
+    lengths = [value for value in lengths if value > 0]
+    total = len(completed)
+    p0_wins = sum(1 for row in completed if row.get("winner") == "player0")
+    p1_wins = sum(1 for row in completed if row.get("winner") == "player1")
+    draws = total - p0_wins - p1_wins
+    stats: dict[str, object] = {
+        "win_p0_fraction": p0_wins / total,
+        "win_p1_fraction": p1_wins / total,
+        "draw_fraction": draws / total,
+        "decisive_fraction": (p0_wins + p1_wins) / total,
+    }
+    if lengths:
+        ordered = sorted(lengths)
+        idx = max(0, min(len(ordered) - 1, int(round(0.95 * (len(ordered) - 1)))))
+        stats.update(
+            {
+                "game_length_mean": statistics.fmean(lengths),
+                "game_length_median": statistics.median(lengths),
+                "game_length_max": max(lengths),
+                "game_length_stdev": statistics.pstdev(lengths) if len(lengths) > 1 else 0.0,
+                "game_length_p95": ordered[idx],
+            }
+        )
+    return stats
+
+
+def _backfill_selfplay_game_stats(run_dir: Path, epoch: int, selfplay: dict[str, object]) -> None:
+    """Fill in any game-stat field the self-play diagnostics left ``None`` with the
+    ``.hxr``-derived value, in place. Producer-emitted values always win; this only
+    populates gaps (so dense_cnn rows gain the stats hexgnn emits natively, while
+    hexgnn rows are untouched). Memoized record stats are computed at most once per
+    backfilled epoch per request."""
+
+    if not isinstance(selfplay, dict):
+        return
+    derivable = (
+        "game_length_mean",
+        "game_length_median",
+        "game_length_max",
+        "game_length_stdev",
+        "game_length_p95",
+        "win_p0_fraction",
+        "win_p1_fraction",
+        "draw_fraction",
+        "decisive_fraction",
+    )
+    if all(selfplay.get(key) is not None for key in derivable):
+        return
+    derived = _selfplay_game_stats_from_records(run_dir, epoch)
+    if not derived:
+        return
+    for key, value in derived.items():
+        if selfplay.get(key) is None:
+            selfplay[key] = value
+
+
 def _training_epoch_summary(payload: dict[str, object]) -> dict[str, object]:
     # Producer: dense_cnn/trainer.py DenseCNNTrainer.train_passes return dict.
     # Real keys: status, epoch, passes, generic_passes_requested, steps, samples,
-    # batch_size, loss, validation, elapsed_seconds, samples_per_second,
-    # train_state. loss_components/source_summary/policy_imitation are NOT in this
-    # payload; the dense_cnn.policy_targets.epoch_*.json overlay populates them on
-    # the row afterward (see _epoch_history), so they are None here.
+    # batch_size, loss, loss_components, validation, elapsed_seconds,
+    # samples_per_second, train_state. The trainer's return dict DOES carry the
+    # unweighted per-head `loss_components` (policy/value/opp_policy/stvalue_*) — pass
+    # it through so the per-head Loss band renders (the optional policy_targets overlay
+    # still augments source_summary/policy_imitation later in _epoch_history).
     return {
         "status": payload.get("status"),
         "loss": payload.get("loss"),
-        "loss_components": None,  # no producer key (overlaid from policy_targets file)
+        "loss_components": payload.get("loss_components"),  # per-head from dense_cnn trainer
         "source_summary": None,  # no producer key (overlaid from policy_targets file)
         "policy_imitation": None,  # no producer key (overlaid from policy_targets file)
         "steps": payload.get("steps"),
@@ -2788,7 +2929,109 @@ def _training_live_status(run_dir: Path) -> dict[str, object]:
         status["selfplay_live"] = _selfplay_live_summary(selfplay_live)
     if isinstance(training_progress, dict):
         status["training_progress"] = _training_progress_summary(training_progress)
+    sub_phase, sub_phase_detail = _derive_sub_phase(
+        run_dir,
+        diagnostics,
+        events,
+        selfplay_live if isinstance(selfplay_live, dict) else None,
+    )
+    if sub_phase is not None:
+        status["sub_phase"] = sub_phase
+        if sub_phase_detail is not None:
+            status["sub_phase_detail"] = sub_phase_detail
     return status
+
+
+def _derive_sub_phase(
+    run_dir: Path,
+    diagnostics: Path,
+    events: dict[str, object],
+    selfplay_live: dict[str, object] | None,
+) -> tuple[str | None, str | None]:
+    """Derive the active within-epoch sub-phase (self-play / shuffling / training /
+    evaluating) for the CURRENT live epoch, purely from on-disk file signals.
+
+    A dense_cnn epoch runs self-play (~10 min) -> shuffle (~1 min) -> train (~2 min)
+    -> SealBot eval (~15-19 min), but the run-level ``stage`` stays ``epoch_NNNNNN``
+    the whole time, so the long eval reads as a stuck "epoch running". This surfaces
+    the sub-phase so the owner can tell self-play from the long eval.
+
+    Returns ``(None, None)`` when nothing can be derived (e.g. setup stages, stopped
+    runs, or models without these file signals) so callers fall back to the existing
+    ``stage``/``stage_status`` label. Robust to missing files."""
+
+    # Only derive during an actively-running epoch. Setup stages, finished/stopped
+    # runs (no active stage) and non-epoch stages fall through to None, which keeps
+    # stopped runs like hexgnn on their existing label.
+    if str(events.get("status") or "") != "running":
+        return None, None
+    epoch = events.get("epoch")
+    if not isinstance(epoch, int):
+        return None, None
+
+    sp_status = str((selfplay_live or {}).get("status") or "")
+    sp_epoch = (selfplay_live or {}).get("epoch")
+    sp_age = _file_age_seconds(diagnostics / "dense_cnn.selfplay.live.json")
+
+    # SELF-PLAY: live writer still running for this epoch and the file is fresh.
+    if (
+        sp_status == "running"
+        and sp_epoch == epoch
+        and sp_age is not None
+        and sp_age <= 30.0
+    ):
+        finished = (selfplay_live or {}).get("games_finished")
+        requested = (selfplay_live or {}).get("requested_games")
+        detail = None
+        if isinstance(finished, int) and isinstance(requested, int) and requested > 0:
+            detail = f"games {finished}/{requested}"
+        return "self-play", detail
+
+    # POST-SELF-PLAY (shuffle -> train -> eval). Self-play for this epoch reports
+    # completed, but the finished epoch_NNNNNN.json has not been written yet, so the
+    # run is somewhere in the brief shuffle/train or the long eval.
+    epoch_done = (diagnostics / f"epoch_{epoch:06d}.json").is_file()
+    if sp_status == "completed" and sp_epoch == epoch and not epoch_done:
+        shuffle_age = _shuffle_dir_age_seconds(run_dir, epoch)
+        if shuffle_age is None:
+            # Shuffle output for this epoch not on disk yet -> still shuffling.
+            return "shuffling", None
+        # Shuffle done. Training is ~2 min; treat the window right after the shuffle
+        # dir appears as training, and everything after as the long SealBot eval.
+        if shuffle_age <= 150.0:
+            return "training", None
+        return "evaluating", "SealBot"
+
+    return None, None
+
+
+def _file_age_seconds(path: Path) -> float | None:
+    stat = _safe_stat(path)
+    if stat is None:
+        return None
+    return max(0.0, wall_clock() - float(stat.st_mtime))
+
+
+def _shuffle_dir_age_seconds(run_dir: Path, epoch: int) -> float | None:
+    """Seconds since the shuffleddata dir for ``epoch`` was last written, or None if
+    no such dir exists yet (shuffle for this epoch has not produced output)."""
+    suffix = f"epoch_{epoch:06d}"
+    newest_mtime: float | None = None
+    try:
+        candidates = (run_dir / "shuffleddata").glob(f"*{suffix}")
+    except OSError:
+        return None
+    for candidate in candidates:
+        if not candidate.is_dir():
+            continue
+        stat = _safe_stat(candidate)
+        if stat is None:
+            continue
+        if newest_mtime is None or stat.st_mtime > newest_mtime:
+            newest_mtime = stat.st_mtime
+    if newest_mtime is None:
+        return None
+    return max(0.0, wall_clock() - newest_mtime)
 
 
 def _training_run_status(run_dir: Path, histories: list[dict[str, object]], live_status: dict[str, object]) -> dict[str, object]:

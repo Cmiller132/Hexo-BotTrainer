@@ -2663,6 +2663,15 @@ function runStageLabel(status) {
   // Epoch ids already carry the epoch number; avoid "Epoch 1 · e1".
   const epochNum = asFinite(status.current_epoch);
   const epoch = epochNum !== null && !/^epoch/i.test(String(status.stage || "")) ? ` · Epoch ${epochNum}` : "";
+  // Prefer the derived within-epoch sub-phase (self-play / shuffling / training /
+  // evaluating) over the generic "running" stage_status, so the long SealBot eval
+  // is distinguishable from the rest of an epoch. Falls back to stage_status when
+  // no sub-phase is available.
+  const subPhase = status.sub_phase ? String(status.sub_phase) : "";
+  if (subPhase) {
+    const detail = status.sub_phase_detail ? ` ${String(status.sub_phase_detail)}` : "";
+    return `${stage}${epoch} · ${subPhase}${detail}`;
+  }
   const stageStatus = status.stage_status && status.stage_status !== "unknown"
     ? ` · ${String(status.stage_status).replace(/[_-]+/g, " ")}`
     : "";
@@ -3011,13 +3020,23 @@ function epochProgressRow(item) {
     : (selfplay.search_positions_per_second !== undefined && selfplay.search_positions_per_second !== null
       ? selfplayRate
       : "pending");
-  // Game-length stats (mean/median/max/stdev), appended when the producer emits
-  // them (omitted otherwise, so dense_cnn runs are unaffected).
+  // Game-length stats (mean/median/max/stdev). hexgnn/hexgt emit these inline;
+  // dense_cnn's are backfilled server-side from the epoch .hxr (web.py). Each
+  // segment is appended only when its field is present, so a run with neither is
+  // unaffected and a run with partial data shows what it has.
   const lenMean = asFinite(selfplay.game_length_mean);
   const lenMed = asFinite(selfplay.game_length_median);
   if (lenMean !== null || lenMed !== null) {
     selfplayText += ` | len μ${formatDecimal(lenMean, 1)} med ${formatDecimal(lenMed, 0)}`
       + ` max ${asFinite(selfplay.game_length_max) ?? "--"} σ${formatDecimal(selfplay.game_length_stdev, 1)}`;
+  }
+  // Outcome distribution (P0/P1 win + draw share). Same backfill story as lengths.
+  const winP0 = asFinite(selfplay.win_p0_fraction);
+  const winP1 = asFinite(selfplay.win_p1_fraction);
+  const drawFrac = asFinite(selfplay.draw_fraction);
+  if (winP0 !== null || winP1 !== null) {
+    selfplayText += ` | W ${formatPercent(winP0)}/${formatPercent(winP1)}`;
+    if (drawFrac !== null) selfplayText += ` d ${formatPercent(drawFrac)}`;
   }
   const trainText = (training.loss !== undefined && training.loss !== null)
     ? `loss ${formatDecimal(training.loss, 3)} | C ${formatPercent(classicalReplayFraction(training))} | P@1 ${formatPercent(policyTop1(training))}`
