@@ -60,7 +60,11 @@ no_repeat_files = true
 max_validation_samples = 100000
 
 [model.config.samples]
-shuffle_min_rows = 100000
+# 8000 (was 100000): warmup floor. One self-play epoch records ~10.3k rows
+# (128 games), so 100k delayed the first train pass ~10 epochs. 8000 (<1 epoch)
+# starts training right after the first epoch on the games already generated
+# (owner 2026-06-09: don't wait for 100k, train on what's there).
+shuffle_min_rows = 8000
 shuffle_keep_target_rows = 300000
 shuffle_taper_window_exponent = 0.65
 shuffle_expand_window_per_row = 0.4
