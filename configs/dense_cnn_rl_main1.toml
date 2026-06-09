@@ -92,6 +92,7 @@ forced_playout_k = 2.0
 
 [model.config.evaluation]
 games_per_epoch = 64
+eval_every = 3   # run the ~15-min SealBot eval only every 3rd epoch (owner 2026-06-09)
 sealbot_variant = "best"
 sealbot_time_limit = 0.05
 max_actions = 1024

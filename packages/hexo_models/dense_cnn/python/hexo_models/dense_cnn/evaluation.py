@@ -50,6 +50,26 @@ def evaluate_epoch(*, ctx: Any, components: Any, epoch: int) -> dict[str, Any]:
     trainer = components.model.trainer
     config = trainer.config
     eval_config = config.evaluation
+
+    # Eval cadence (eval_every): when >1, only run the SealBot eval on epochs where
+    # epoch % eval_every == 0; otherwise skip it (the eval is the dominant ~15-min
+    # per-epoch cost). Behavior-preserving for eval_every in {0, 1} (every epoch).
+    # No eval diagnostic is written on a skip, so the dashboard eval-trend (which
+    # globs dense_cnn.evaluation.epoch_*.json) simply has a gap; the epoch result
+    # carries this skipped status for the per-epoch row.
+    eval_every = int(getattr(eval_config, "eval_every", 0) or 0)
+    if eval_every > 1 and (epoch % eval_every) != 0:
+        return {
+            "status": "skipped",
+            "epoch": epoch,
+            "reason": f"eval cadence: every {eval_every} epochs (epoch % {eval_every} != 0)",
+            "games": 0,
+            "completed": 0,
+            "wins": 0,
+            "losses": 0,
+            "mean_turns": None,
+        }
+
     output_dir = ctx.output_dir / "evaluation" / f"epoch_{epoch:06d}"
     output_dir.mkdir(parents=True, exist_ok=True)
 
