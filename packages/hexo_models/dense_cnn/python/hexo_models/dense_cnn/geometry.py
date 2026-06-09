@@ -10,9 +10,48 @@ The Rust encoder implements the same projection in `rust/src/encoding.rs`.
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
+from functools import lru_cache
+
+import torch
 
 from .constants import BOARD_SIZE
 from .d6 import Axial
+
+
+def in_disk(row: int, col: int, *, size: int = BOARD_SIZE) -> bool:
+    """Return True if crop cell ``(row, col)`` is inside the radius-``size//2`` hex disk.
+
+    The dense crop is stored as a square ``size×size`` tensor, but the only cells
+    representable without breaking hexagonal D6 symmetry are those within hex
+    distance ``half = size // 2`` of the crop center. A cell has centered offsets
+    ``dr = row - half`` / ``dc = col - half`` and hex distance
+    ``max(|dr|, |dc|, |dr + dc|)``; the 420 "corner" cells whose distance exceeds
+    ``half`` are permanently invalid (the crop is then exactly D6-closed). The
+    Rust encoder applies the identical check in ``rust/src/encoding.rs``.
+    """
+
+    half = size // 2
+    dr = int(row) - half
+    dc = int(col) - half
+    return max(abs(dr), abs(dc), abs(dr + dc)) <= half
+
+
+@lru_cache(maxsize=8)
+def disk_mask(size: int = BOARD_SIZE) -> torch.Tensor:
+    """Cached ``(size, size)`` bool tensor: True for in-disk cells, False at corners."""
+
+    half = size // 2
+    rows = torch.arange(size).view(size, 1) - half
+    cols = torch.arange(size).view(1, size) - half
+    distance = torch.maximum(torch.maximum(rows.abs(), cols.abs()), (rows + cols).abs())
+    return distance <= half
+
+
+@lru_cache(maxsize=8)
+def disk_mask_flat(size: int = BOARD_SIZE) -> torch.Tensor:
+    """Cached flat ``(size*size,)`` bool variant of :func:`disk_mask`."""
+
+    return disk_mask(size).reshape(-1).contiguous()
 
 
 def crop_center(coords: Iterable[Axial | tuple[int, int]]) -> Axial:

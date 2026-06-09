@@ -67,6 +67,10 @@ class Model1ArchitectureConfig:
     # Attention implementation: "sdpa" (memory-efficient, identical math, default)
     # or "materialized" (the literal MSA_rel correctness oracle).
     attention_impl: str = "sdpa"
+    # Attention scope: "full" (attend over all 1681 tokens, the original behavior),
+    # "disk" (static -1e9 mask on the 420 out-of-crop corner KEY columns; default),
+    # or "content" (gathered O(K^2) attention over occupied∪legal∩disk tokens).
+    attention_scope: str = "disk"
     # Retained for back-compat / config symmetry with dense_cnn; the trunk depth
     # is governed by `blocks_type`, so this field is IGNORED by build_model.
     residual_blocks: int = DEFAULT_BLOCKS
@@ -242,6 +246,7 @@ def parse_model1_config(raw: Mapping[str, Any] | None) -> Model1Config:
             embed_kernel_size=int(arch.get("embed_kernel_size", 3)),
             residual_conv=str(arch.get("residual_conv", "hex")),
             attention_impl=str(arch.get("attention_impl", "sdpa")),
+            attention_scope=str(arch.get("attention_scope", "disk")),
             residual_blocks=int(arch.get("residual_blocks", DEFAULT_BLOCKS)),
             dropout=float(arch.get("dropout", 0.0)),
             short_term_value_horizons=_int_tuple(arch.get("short_term_value_horizons", ())),

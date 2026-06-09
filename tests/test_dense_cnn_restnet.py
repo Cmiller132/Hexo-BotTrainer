@@ -98,7 +98,9 @@ def test_relative_index_matches_bruteforce_3x3():
 def test_relative_bias_gather_is_correct():
     h = w = 3
     heads = 2
-    mhsa = RelPosMHSA(channels=4, num_heads=heads, board_h=h, board_w=w)
+    # "full" scope exercises the raw gather (no disk key mask); the mask is covered
+    # separately in test_dense_cnn_restnet_attention.py.
+    mhsa = RelPosMHSA(channels=4, num_heads=heads, board_h=h, board_w=w, attention_scope="full")
     # Fill the table with distinct per-(offset,head) values, then check the
     # (1, heads, N, N) materialized bias picks the right row for each pair.
     with torch.no_grad():

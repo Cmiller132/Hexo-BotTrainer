@@ -73,14 +73,16 @@ fn legal_action_ids_obj(
     state: &RustHexoState,
     center: HexCoord,
 ) -> PyResult<Py<PyAny>> {
-    // The training policy head can represent only in-crop legal actions. The
-    // engine still owns total legality; this compact sample stores the action ids
-    // needed to build dense targets for the fixed crop.
+    // The training policy head can represent only in-crop legal actions, and under
+    // the radius-20 hex-disk crop contract "in-crop" means in-disk (the 420 corner
+    // cells are invalid). This must match the disk-restricted legal_flat_indices the
+    // encoder hands the MCTS evaluator, so the compact sample's legals equal the
+    // search legals cell-for-cell. The engine still owns total legality.
     let list = PyList::empty(py);
     let mut legal = Vec::with_capacity(state.legal_move_count());
     state.write_legal_moves(&mut legal);
     for coord in legal {
-        if super::encoding::model1_flat_index(coord, center).is_some() {
+        if super::encoding::model1_disk_flat_index(coord, center).is_some() {
             list.append(pack_coord(coord))?;
         }
     }

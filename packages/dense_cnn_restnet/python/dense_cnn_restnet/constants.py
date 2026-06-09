@@ -26,3 +26,19 @@ PLANE_OPPONENT_HOT = 9
 PLANE_OWN_HOT = 10
 PLANE_CENTER_DISTANCE = 11
 PLANE_OPPONENT_LAST_TURN = 12
+
+
+# Crop-geometry helpers live in ``geometry.py`` (they need torch and would create
+# an import cycle if defined here, since ``geometry`` imports ``BOARD_SIZE`` from
+# this module). They are re-exported lazily so ``constants.in_disk`` /
+# ``constants.disk_mask`` resolve without forcing a load order. The radius-20 hex
+# disk is the canonical crop contract; see ``geometry.in_disk``.
+_GEOMETRY_REEXPORTS = ("in_disk", "disk_mask", "disk_mask_flat")
+
+
+def __getattr__(name: str):  # PEP 562 module-level lazy attribute
+    if name in _GEOMETRY_REEXPORTS:
+        from . import geometry
+
+        return getattr(geometry, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
