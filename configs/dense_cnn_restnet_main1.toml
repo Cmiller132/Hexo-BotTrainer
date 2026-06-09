@@ -42,7 +42,9 @@ dropout = 0.0
 short_term_value_horizons = [1, 4, 8]
 
 [model.config.training]
-batch_size = 256
+# 64 (was 256): full 1681-token attention fwd+bwd is ~4x the conv model's memory.
+# Measured on the 12 GB RTX 4070 Ti (AMP): batch 64 ~8 GB. 256 OOMs instantly.
+batch_size = 64
 learning_rate = 0.001
 weight_decay = 0.0001
 policy_weight = 1.0
@@ -70,8 +72,10 @@ policy_surprise_uniform_fraction = 0.5
 policy_surprise_max_weight = 8.0
 
 [model.config.selfplay]
-search_visits = 512
-active_games = 256
+search_visits = 256
+# 128 (was 256): fewer concurrent games bounds self-play VRAM + tree memory for the
+# heavy full-attention model. games_per_epoch below matches (single wave).
+active_games = 128
 c_puct = 1.5
 root_dirichlet_noise_enabled = true
 root_dirichlet_noise_fraction = 0.25
@@ -105,9 +109,9 @@ calibrate = true
 target_selfplay_positions_per_second = 16.0   # full-attention trunk: expect low pos/s (non-goal)
 # Attention memory grows with the forward batch, so probe a conservative set; the
 # calibration OOM guard drops any candidate that OOMs and keeps the largest viable.
-inference_batch_candidates = [64, 128, 256]
-selfplay_batch_candidates = [256]
-training_batch_candidates = [64, 128, 192, 256]
+inference_batch_candidates = [32, 64, 128]
+selfplay_batch_candidates = [128]
+training_batch_candidates = [32, 64]
 mcts_virtual_batch_candidates = [4]
 selfplay_probe_positions = 2048
 probe_batches = 1
@@ -126,13 +130,17 @@ seed = 1
 epochs = 60
 
 [selfplay]
-games_per_epoch = 256
+games_per_epoch = 128
 update_checkpoint_pointer = false
 
 [train]
 passes_per_epoch = 1
 
 [checkpoint]
-# FROM SCRATCH: no initialize_from / no resume_from. Random (trunc_normal) init.
-# The supervisor injects resume_from=<latest epoch_*.pt> on crash-relaunch.
+# WARM START from the HuggingFace human-corpus prefit (BC on 6902 human games ->
+# 431,495 samples; see scripts/bootstrap_dense_cnn_restnet_hf.py). initialize_from
+# loads ONLY the weights and starts RL at epoch 0 (fresh RL optimizer/schedule) —
+# NOT a resume. The supervisor injects resume_from=<latest epoch_*.pt> on
+# crash-relaunch (which takes precedence over initialize_from).
+initialize_from = "/mnt/e/Hexo-BotTrainer-hexgt/runs/dense_cnn_restnet_main1_prefit/restnet_hf_prefit.pt"
 save_name = "latest"
