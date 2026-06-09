@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hexgnn"
+version = "0.1.0"
+description = "hexgnn — a stripped-down hexgt: GNN trunk + policy/value/opp heads, no context transformer, no STV. Reuses hexo_models._rust.hexgt natively."
+requires-python = ">=3.11"
+# PURE-PYTHON and ADDITIVE: hexgnn carries NO Rust of its own. It reuses the
+# already-built native accelerator inside hexo_models (`hexo_models._rust.hexgt`)
+# read-only, so installing/uninstalling hexgnn never rebuilds or touches the
+# native module the live hexgt run imports.
+dependencies = [
+  "torch>=2.2",
+  "numpy",
+  "hexo-engine==0.1.0",
+  "hexo-runner==0.1.0",
+  "hexo-train==0.1.0",
+  "hexo-models==0.1.0",
+]
+
+# Registers the plugin under the same entry-point group hexo_train discovers, so
+# the config-driven CLI (`python -m hexo_train.cli.train_model configs/hexgnn_model.toml`)
+# can resolve `name = "hexgnn"`. The driver scripts/_rl_train_hexgnn.py does NOT
+# need this (it builds the model directly), so PYTHONPATH-only use works without
+# installing.
+[project.entry-points."hexo_train.models"]
+hexgnn = "hexgnn.plugin:get_plugin"
+
+[tool.setuptools]
+package-dir = {"" = "python"}
+
+[tool.setuptools.packages.find]
+where = ["python"]
+include = ["hexgnn*"]

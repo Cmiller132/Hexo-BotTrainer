@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dense_cnn_restnet"
+version = "0.1.0"
+description = "dense_cnn_restnet — a faithful ResTNet (interleaved residual + transformer trunk, IJCAI 2025 arXiv:2410.05347) fork of the dense_cnn lineage. Reuses hexo_models._rust.dense_cnn natively."
+requires-python = ">=3.11"
+# PURE-PYTHON and ADDITIVE: dense_cnn_restnet carries NO Rust of its own. It
+# reuses the already-built native accelerator inside hexo_models
+# (`hexo_models._rust.dense_cnn`) read-only — the featurizer, MCTS, sample facts,
+# and the (N,13,41,41) byte contract are identical to dense_cnn; only the PyTorch
+# trunk differs. So installing/uninstalling dense_cnn_restnet never rebuilds or
+# touches the native module the live dense_cnn run imports.
+dependencies = [
+  "torch>=2.2",
+  "numpy",
+  "hexo-engine==0.1.0",
+  "hexo-runner==0.1.0",
+  "hexo-train==0.1.0",
+  "hexo-models==0.1.0",
+]
+
+# Registers the plugin under the same entry-point group hexo_train discovers, so
+# the config-driven CLI
+# (`python -m hexo_train.cli.train_model configs/dense_cnn_restnet_main1.toml`)
+# can resolve `name = "dense_cnn_restnet"`. PYTHONPATH-only use also works (the
+# config's `module = "dense_cnn_restnet.plugin"` resolves by module path).
+[project.entry-points."hexo_train.models"]
+dense_cnn_restnet = "dense_cnn_restnet.plugin:get_plugin"
+
+[tool.setuptools]
+package-dir = {"" = "python"}
+
+[tool.setuptools.packages.find]
+where = ["python"]
+include = ["dense_cnn_restnet*"]

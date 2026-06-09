@@ -20,13 +20,16 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use hexo_engine::{
-    apply_placement, unpack_coord, GameOutcome, HexCoord, HexoState as RustHexoState, PackedCoord,
-    Placement, Player,
+    apply_placement, pack_coord, unpack_coord, GameOutcome, HexCoord, HexoState as RustHexoState,
+    PackedCoord, Placement, Player,
 };
 use hexo_utils::StateHash;
 
 use super::mcts_eval::{state_hash, RustEvaluation};
 use super::state::move_error;
+// Threat-Space Search core, shared with the hexgt lineage. dense_cnn injects only
+// the tactical cells that fall inside its fixed crop (see `split_tactical`).
+use crate::threats_shared as threats;
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct RootDirichletNoise {
@@ -50,6 +53,11 @@ pub(crate) struct RustEdge {
     pub(crate) value_sum: f32,
     pub(crate) pending: u32,
     pub(crate) child: Option<usize>,
+    /// TSS tactical injection: a `forced` edge is a tactical cell (own win-now /
+    /// opponent >=4-window empty) pre-materialized at expansion and guaranteed a
+    /// first visit before normal PUCT, so an urgent low-prior block/win is never
+    /// starved by FPU. False for every ordinary prior-materialized edge.
+    pub(crate) forced: bool,
 }
 
 impl RustEdge {
@@ -86,6 +94,7 @@ impl RustPriorCandidate {
             value_sum: 0.0,
             pending: 0,
             child: None,
+            forced: false,
         }
     }
 }
@@ -198,6 +207,7 @@ impl RustNode {
                     value_sum: 0.0,
                     pending: 0,
                     child: None,
+                    forced: false,
                 }
             }
         }
@@ -397,9 +407,24 @@ impl RustSearch {
             return Ok(existing);
         }
         let id = self.nodes.len();
-        let node = shared_from_cache(hash, state, evaluation, self.widening);
+        // TSS expansion injection: a node with an active >=4 threat is built as an
+        // OWNED node with the in-crop tactical cells force-materialized (bypassing
+        // the nucleus cap); the threat-free common case keeps the cheap
+        // shared-by-Arc path. Tactical cells are full-board engine coords; those
+        // outside dense_cnn's fixed crop are not in the candidate set and are
+        // silently skipped by `split_tactical` (graceful crop degradation — the
+        // leaf override + guard still recognize the out-of-crop case by occupancy).
+        let tactical = threats::tactical_cells(state);
+        let node = if tactical.is_empty() {
+            shared_from_cache(hash, state, evaluation, self.widening)
+        } else {
+            owned_with_injection_from_eval(hash, state, &evaluation, self.widening, &tactical)
+        };
+        let injected_edges = node.edges.len();
         self.nodes.push(node);
         self.node_table.insert(hash, id);
+        self.active_edge_count += injected_edges;
+        self.max_active_edges_per_node = self.max_active_edges_per_node.max(injected_edges);
         Ok(id)
     }
 
@@ -483,6 +508,19 @@ impl RustSearch {
     }
 
     fn select_or_materialize_edge(&mut self, node_id: usize, c_puct: f32) -> Option<usize> {
+        // TSS injected edges get a guaranteed first visit BEFORE normal PUCT: a
+        // low-prior tactical block under a losing parent value would otherwise be
+        // starved by FPU (parent_value - fpu stays below the explored losers), so
+        // the search would never evaluate the defense and would wrongly conclude a
+        // loss. One forced visit per injected edge reveals its true value (then PUCT
+        // takes over). Forced edges exist only at threat nodes, so the common path
+        // is unaffected. Skip an edge already in flight this batch (pending).
+        for (index, edge) in self.nodes[node_id].edges.iter().enumerate() {
+            if edge.forced && edge.visits == 0 && !(edge.pending > 0 && edge.child.is_none()) {
+                return Some(index);
+            }
+        }
+
         // First score already-materialized edges. Then compare the best existing
         // edge against the next staged prior candidate, materializing that
         // candidate only if its prior/exploration score wins.
@@ -756,6 +794,102 @@ fn clone_subtree_nodes(
     new_id
 }
 
+/// Pre-materialize the TACTICAL cells (TSS injection) as forced edges and lift
+/// the widening cap so they survive. `candidates` is the node's ASCENDING
+/// (highest-prior at back) owned prior list; tactical cells present in it are
+/// pulled out into eager edges, the rest stay as staged priors (order preserved,
+/// so `materialize_next_candidate` still pops the highest non-tactical prior).
+///
+/// The injection is **ADDITIVE**: the normal top-`nucleus` prior set is ALWAYS
+/// preserved, and the tactical cells are added ON TOP of it — not in place of it.
+/// So `cap = nucleus + |tactical cells ranked OUTSIDE the top-nucleus|`. A
+/// tactical cell already inside the nucleus costs nothing extra; one outside the
+/// nucleus widens the cap by one so it is materialized in addition to (never
+/// instead of) a normal top-prior child. The common (no-threat) path is a no-op.
+///
+/// CROP HANDLING (dense_cnn): `tactical` is a full-board engine coordinate set,
+/// but `candidates` are exactly the in-crop legal moves (the evaluator returns one
+/// prior per in-crop legal move). A tactical cell is forced ONLY if it appears in
+/// `candidates`, i.e. it is in-crop and legal — so an out-of-crop tactical cell is
+/// simply skipped here (it has no representable child slot anyway). This is the
+/// graceful-degradation the feasibility report calls for, and it is consistent
+/// with dense_cnn's existing crop-relative action space: it could never play an
+/// out-of-crop move regardless of TSS.
+fn split_tactical(
+    candidates: Vec<RustPriorCandidate>,
+    tactical: &[HexCoord],
+    nucleus: usize,
+) -> (Vec<RustEdge>, Vec<RustPriorCandidate>, usize) {
+    if tactical.is_empty() {
+        return (Vec::new(), candidates, nucleus);
+    }
+    let tac: HashSet<PackedCoord> = tactical.iter().map(|c| pack_coord(*c)).collect();
+    // The top-`nucleus` action ids by prior (order-agnostic w.r.t. how `candidates`
+    // is sorted) — the normal nucleus set that must be preserved intact.
+    let mut by_prior: Vec<usize> = (0..candidates.len()).collect();
+    by_prior.sort_by(|&a, &c| {
+        candidates[c]
+            .prior
+            .partial_cmp(&candidates[a].prior)
+            .unwrap_or(Ordering::Equal)
+    });
+    let nucleus_set: HashSet<PackedCoord> = by_prior
+        .iter()
+        .take(nucleus)
+        .map(|&i| candidates[i].action_id)
+        .collect();
+    let mut forced = Vec::new();
+    let mut rest = Vec::with_capacity(candidates.len());
+    let mut extra_beyond_nucleus = 0usize;
+    for candidate in candidates {
+        if tac.contains(&candidate.action_id) {
+            if !nucleus_set.contains(&candidate.action_id) {
+                extra_beyond_nucleus += 1;
+            }
+            let mut edge = candidate.into_edge();
+            edge.forced = true; // guarantee a visit so its value is discovered
+            forced.push(edge);
+        } else {
+            rest.push(candidate);
+        }
+    }
+    let cap = nucleus + extra_beyond_nucleus;
+    (forced, rest, cap)
+}
+
+/// Build an interior node as an OWNED prior list with the tactical set injected as
+/// forced edges (TSS injection). Used in place of `shared_from_cache` ONLY when
+/// the node's state carries an active >=4 threat (rare), so the cheap
+/// shared-by-Arc path stays the common case. The eval priors are
+/// descending+normalized; they are reversed to the ascending owned layout (highest
+/// at back) before injection.
+fn owned_with_injection_from_eval(
+    state_hash: StateHash,
+    state: &RustHexoState,
+    evaluation: &RustEvaluation,
+    widening: Widening,
+    tactical: &[HexCoord],
+) -> RustNode {
+    let nucleus = nucleus_count_pairs(&evaluation.priors, widening);
+    let mut candidates: Vec<RustPriorCandidate> = evaluation
+        .priors
+        .iter()
+        .map(|&(action_id, prior)| RustPriorCandidate { action_id, prior })
+        .collect();
+    candidates.reverse(); // descending -> ascending (highest popped from back)
+    let (edges, rest, max_eligible_children) = split_tactical(candidates, tactical, nucleus);
+    RustNode {
+        state_hash,
+        player: state.current_player(),
+        eval_value: evaluation.value,
+        visits: 0,
+        value_sum: 0.0,
+        edges,
+        priors: NodePriors::Owned(rest),
+        max_eligible_children,
+    }
+}
+
 /// Build an interior node that shares the cache's prior vector by reference. The
 /// cache priors are already validated, descending, and normalized, so there is
 /// no per-node copy, dedup, or normalization here.
@@ -811,7 +945,15 @@ fn owned_root_from_evaluation(
     candidates.reverse();
     // Compute the policy-nucleus cap from the final (normalized, possibly noised)
     // prior distribution. Static for the node's lifetime — no visit-based growth.
-    let max_eligible_children = nucleus_count(&candidates, widening);
+    let nucleus = nucleus_count(&candidates, widening);
+    // TSS root injection: inject the in-crop tactical cells at the root as
+    // guaranteed children so an urgent block/own-win with a low prior is searched
+    // (the load-bearing fix — a leaf override can't fire on a child the nucleus cap
+    // never materializes). Crop handling is the same as interior nodes: only
+    // tactical cells present in the candidate set (in-crop legal) are forced.
+    let tactical = threats::tactical_cells(state);
+    let (edges, mut candidates, max_eligible_children) =
+        split_tactical(candidates, &tactical, nucleus);
     candidates.shrink_to_fit();
     Ok(RustNode {
         state_hash,
@@ -819,7 +961,7 @@ fn owned_root_from_evaluation(
         eval_value: evaluation.value,
         visits: 0,
         value_sum: 0.0,
-        edges: Vec::new(),
+        edges,
         priors: NodePriors::Owned(candidates),
         max_eligible_children,
     })
@@ -1289,5 +1431,103 @@ mod tests {
         assert_eq!(before, after);
         assert!(matches!(search.nodes[0].priors, NodePriors::Owned(_)));
         assert_eq!(search.nodes[0].edges.len(), 3);
+    }
+
+    #[test]
+    fn injection_no_tactical_is_noop() {
+        // The common (threat-free) path: no tactical cells -> no forced edges, the
+        // candidate list and nucleus cap are returned unchanged.
+        let cands = candidates(&[3.0, 2.0, 1.0]);
+        let (forced, rest, cap) = split_tactical(cands, &[], 2);
+        assert!(forced.is_empty());
+        assert_eq!(rest.len(), 3);
+        assert_eq!(cap, 2);
+    }
+
+    #[test]
+    fn injection_is_additive_and_preserves_top_prior_set() {
+        // priors c0>c1>...>c9 (10..1); coords (0,0)..(9,0). nucleus = top-4.
+        let cands = candidates(&[10.0, 9.0, 8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0]);
+        let nucleus = 4;
+        // two LOW-prior tactical cells (ranks 8,9) -> both OUTSIDE the top-4.
+        let tactical = vec![HexCoord { q: 7, r: 0 }, HexCoord { q: 8, r: 0 }];
+        let (forced, rest, cap) = split_tactical(cands, &tactical, nucleus);
+
+        // ADDITIVE: cap = nucleus + 2 out-of-nucleus tactical = 6 (NOT max(4,2)=4).
+        assert_eq!(cap, 6, "cap must be additive, not consume nucleus budget");
+        assert_eq!(forced.len(), 2);
+        assert!(forced.iter().all(|e| e.forced), "injected edges must be forced");
+        let forced_ids: HashSet<PackedCoord> = forced.iter().map(|e| e.action_id).collect();
+        assert!(forced_ids.contains(&pack_coord(HexCoord { q: 7, r: 0 })));
+        assert!(forced_ids.contains(&pack_coord(HexCoord { q: 8, r: 0 })));
+
+        // The full top-4 prior set survives in `rest` (none displaced).
+        let rest_ids: HashSet<PackedCoord> = rest.iter().map(|c| c.action_id).collect();
+        for q in 0..4i16 {
+            assert!(
+                rest_ids.contains(&pack_coord(HexCoord { q, r: 0 })),
+                "top-prior child c{q} was displaced by injection"
+            );
+        }
+        assert_eq!(cap - forced.len(), nucleus); // 4 nucleus slots still open
+    }
+
+    #[test]
+    fn injection_tactical_inside_nucleus_costs_no_extra_cap() {
+        let cands = candidates(&[10.0, 9.0, 8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0]);
+        let nucleus = 4;
+        // one HIGH-prior tactical (rank 2, inside top-4) + one outside (rank 9).
+        let tactical = vec![HexCoord { q: 1, r: 0 }, HexCoord { q: 8, r: 0 }];
+        let (forced, _rest, cap) = split_tactical(cands, &tactical, nucleus);
+        // only the out-of-nucleus cell widens the cap: 4 + 1 = 5.
+        assert_eq!(cap, 5);
+        assert_eq!(forced.len(), 2);
+    }
+
+    #[test]
+    fn injection_skips_cells_absent_from_candidates() {
+        // A tactical cell with no matching candidate (out-of-crop for dense_cnn) is
+        // silently skipped — the graceful crop degradation. (97,0) is not among the
+        // (0..10, 0) candidates, so it is never forced.
+        let cands = candidates(&[10.0, 9.0, 8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0]);
+        let tactical = vec![HexCoord { q: 97, r: 0 }, HexCoord { q: 9, r: 0 }];
+        let (forced, _rest, cap) = split_tactical(cands, &tactical, 4);
+        assert_eq!(forced.len(), 1, "absent (out-of-crop) tactical cell must be skipped");
+        assert_eq!(forced[0].action_id, pack_coord(HexCoord { q: 9, r: 0 }));
+        assert_eq!(cap, 5); // only the in-candidate out-of-nucleus cell widens
+    }
+
+    #[test]
+    fn forced_edge_is_visited_before_puct() {
+        // A forced (tactical) edge with a near-zero prior must still be selected for
+        // its guaranteed first visit ahead of every high-prior candidate.
+        let state = RustHexoState::new();
+        let mut search =
+            RustSearch::new(state, &evaluation_with_priors(8), 128, 0.20, 1.0, None, wide_open(), 0.0)
+                .unwrap();
+        let coord = HexCoord { q: 99, r: 0 };
+        search.nodes[0].edges.push(RustEdge {
+            action_id: pack_coord(coord),
+            action: coord,
+            prior: 0.0001,
+            visits: 0,
+            value_sum: 0.0,
+            pending: 0,
+            child: None,
+            forced: true,
+        });
+        let chosen = search.select_or_materialize_edge(0, 1.5).unwrap();
+        assert!(
+            search.nodes[0].edges[chosen].forced,
+            "the forced edge must win the first selection over high-prior candidates"
+        );
+        // After it has a visit, PUCT/widening takes over and the forced edge no
+        // longer pre-empts (a fresh high-prior candidate materializes instead).
+        search.nodes[0].edges[chosen].visits = 1;
+        let next = search.select_or_materialize_edge(0, 1.5).unwrap();
+        assert!(
+            !search.nodes[0].edges[next].forced,
+            "once visited, the forced edge stops pre-empting normal selection"
+        );
     }
 }

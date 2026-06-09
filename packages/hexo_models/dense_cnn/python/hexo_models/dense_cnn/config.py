@@ -137,6 +137,11 @@ class Model1EvalConfig:
     sealbot_time_limit: float = 0.05
     max_actions: int = 1024
     require_sealbot: bool = False
+    # SealBot eval cadence: run the eval only on epochs where epoch % eval_every == 0.
+    # 0 or 1 = every epoch (back-compat default). >1 amortizes the ~15-min SealBot eval
+    # (e.g. 3 = eval every third epoch); skipped epochs write no eval diagnostic, so the
+    # dashboard eval-trend simply has a gap.
+    eval_every: int = 0
     # Opening diversification. With temperature 0 the dense player is fully
     # deterministic, so every eval game from the same start collapses to one
     # trajectory. Sampling the dense player's first `opening_moves` decisions at
@@ -274,6 +279,7 @@ def parse_model1_config(raw: Mapping[str, Any] | None) -> Model1Config:
             sealbot_time_limit=float(evaluation.get("sealbot_time_limit", 0.05)),
             max_actions=int(evaluation.get("max_actions", 1024)),
             require_sealbot=bool(evaluation.get("require_sealbot", False)),
+            eval_every=int(evaluation.get("eval_every", 0)),
             opening_temperature=float(evaluation.get("opening_temperature", 0.0)),
             opening_moves=int(evaluation.get("opening_moves", 0)),
             virtual_batch_size=int(evaluation.get("virtual_batch_size", 0)),

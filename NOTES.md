@@ -4,6 +4,94 @@ _Continuity snapshot for the hexgt dynamic-GNN rewrite on branch `hexgt-rewrite`
 Written the night the overnight RL run was launched. (The previous dense_cnn
 Model-1 notes live on branch `bench/inference-backends-wsl`.)_
 
+---
+
+## LATEST STATE — Model 3 / `hexgt_rl_main3` (2026-06-03, LIVE)
+
+_This supersedes the "The overnight run (LIVE)" section below, which describes the
+earlier Model-2 `hexgt_rl_main` run. The stack has since advanced to **Model 3**
+(heavier 4-GNN + PMA value head) and a new run dir `runs/hexgt_rl_main3/`._
+
+### Live run health (verified 2026-06-03 ~23:24 EDT)
+- **ALIVE & healthy.** Supervisor (WSL pid 57835, `_rl_supervise.sh`) + driver
+  (pid 57883, `_rl_train.py`, ~426% CPU) both up; GPU ~54% util / 6.5 GB used of
+  12.3 GB; free system RAM ~19 GB. Driver err log shows only benign warnings
+  (non-writable `frombuffer`, `index_reduce` beta) — no crashes.
+- **Phase: epoch 0, self-play.** Pre-RL baseline already logged this launch
+  (vs SealBot 0W/40L = 0.0%, expected pre-RL; vs-dense_cnn no-op'd, see below);
+  **136 / 256** epoch-0 self-play games produced and advancing in real time
+  (newest shard `epoch_000000_game_000082.npz` written within the last minute).
+- **Note:** the keep-online supervisor has relaunched ~hourly (last launch
+  22:52 EDT). These are NOT crash-loops (far above the `fast<180s ×3` breaker);
+  each relaunch auto-resumes and re-runs the pre-RL baseline before continuing
+  epoch-0 self-play. Worth watching that epoch 0 actually completes & checkpoints
+  (`checkpoints/` still empty as of the first checkpoint at epoch end).
+
+### Model-3 stack (what changed vs Model 2)
+- **4 GNN layers** (was 3), **PMA value head** (k=2 seeds, scatter-softmax
+  varlen — replaces mean+max pooling), `value_head_use_side` default **true**
+  (a no-SIDE A/B toggle exists), **soft-Z value targets** (λ=0.5).
+- **Policy-surprise weighting** enabled (KataGo-style row-duplication via
+  `materialize_policy_surprise_rows`, KL(visits‖prior)).
+- **STV heads [4,12,24] @ weight 0.10**, **count-4 threat / hot-token features**.
+- **TSS always-on**: tactical injection + phase-aware hitting-set leaf override +
+  tactical-aware move-selection guard; engine threat lookup is **incremental**.
+- **AMP fp16 GradScaler fix** applied.
+- **Non-finite-logit sanitization is now audited** (counters + per-epoch/per-run
+  surfacing + dashboard); affected positions are **EXCLUDED from training shards**
+  (round-level).
+
+### Run config (driver args, verified)
+- 256 games/epoch, **512 sims** (self-play + eval), **65,536 train samples/epoch**
+  (512 steps × batch 128), **500k replay pool**, recency **0.9/epoch**, replay
+  window 8 ep, widening **96**, max-actions 512, **eval-every 3**, lr 2e-4,
+  warmup 200, active=64, **vbatch=128**. BC/seed = `runs/hexgt_rl_main3/pretrain/
+  hexgt_model3_pretrain.pt` (step=354, rl_epoch=0; 2,415,430 params).
+- **Compiled + `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`** — a startup
+  log line confirms both (`GPU mem config: compile=True expandable_segments=ON`),
+  warns loudly if not.
+
+### Eval
+- **dense_cnn e24 checkpoint was LOST** (see integrity event) — eval-vs-dense_cnn
+  is try/except-guarded and **no-ops** (logs "vs-dense_cnn SKIPPED … missing").
+  **SealBot is the strength benchmark now.**
+
+### Performance / VRAM findings
+- **Self-play ~6–8 pos/s** (old 3-layer/mean+max hexgt got ~12). Bottleneck = the
+  **NN forward (~78% of wall)** of the heavier 4-GNN+PMA model; GPU only ~45% util.
+  TSS threat scans are ~1% of wall (NOT the bottleneck — an incremental-threats +
+  short-circuit fix gave only ~1.05×, kept as a small bit-identical win).
+- Behavior-preserving "safe wins" (featurize‖forward overlap + dtype/host-overhead)
+  ≈1.3×; **vbatch 64→128 ≈1.23×** but is behavior-changing (fewer NN feedback
+  rounds per move: 4 vs 8 at 512 visits) and tops the throughput knobs. True 2×+
+  needs a **lighter trunk** (gnn_layers 4→3 / smaller token_dim) = a model change
+  needing re-pretrain.
+- **FlexAttention trunk** prototyped (correct, 0 recompiles) but **DEFERRED** (net
+  pos/s regression from per-forward mask build; no real VRAM win vs compiled-padded).
+- **VRAM is fine**: live peak ~1.4 GB compiled (model weights ~5 MB); the earlier
+  "11.8 GB / 96%" was allocator fragmentation under eager+default, fully reclaimed
+  by compile + expandable_segments (~2.4 GB envelope).
+
+### Integrity event + safe routines (IMPORTANT)
+- `E:\Hexo-BotTrainer` (the **main clone**) lost its `.git` and many files
+  (docs/configs/scripts/most packages) in a logical recursive deletion (drive
+  healthy — not us, not hardware). **All code + history is safe on origin**
+  (github Cmiller132/Hexo-BotTrainer); the `-hexgt` worktree is intact; the
+  dense_cnn eval checkpoint is gone (accepted). Restoring the main clone is a
+  re-clone-from-origin when desired (**deferred**).
+- The two old scheduled routines were disabled. A **SAFE 30-min keep-online
+  monitor** (task `hexo-epoch1-watch`) is re-enabled targeting `hexgt_rl_main3`:
+  it only health-checks and gently relaunches the supervisor if the run died,
+  with hard constraints against any delete/git/force-kill/destructive recovery.
+  The stale `hexo-bottrainer-overnight-monitor` (old 96×6/dense_cnn run) stays
+  **DISABLED**.
+- `origin/main` carries the consolidated stack (PMA varlen value head, hoisted-
+  layout padded trunk, TSS + soft-Z + policy-surprise + threat features,
+  GradScaler, logit audit, drop-SIDE flag, mem logging) up through the latest
+  commits.
+
+---
+
 ## What hexgt is
 
 Model 2 for the Hexo RL trainer: a **dynamic GNN + graph-transformer** that scores
@@ -56,7 +144,10 @@ opp-policy + short-term-value heads. Package: `packages/hexo_models/hexgt/`
   eps=0.25, root_policy_temperature=1.0, c_puct=1.5, temp 1.0→0.2@30, forced_k=2`.
   Best "diverse AND decisive" data profile; details in HEXGT_DECISIONS.md Phase 11.
 
-## The overnight run (LIVE)
+## The overnight run (Model 2 — `hexgt_rl_main`) — SUPERSEDED
+
+_Historical: this was the original Model-2 run. The live run is now Model 3 /
+`hexgt_rl_main3` — see "LATEST STATE" at the top._
 
 - **Run dir**: `runs/hexgt_rl_main/` (worktree `E:\Hexo-BotTrainer-hexgt`).
 - **Config**: C1, BC-seeded, 60-epoch cap, visits=128, 96 games/epoch (active=64,

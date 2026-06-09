@@ -900,3 +900,322 @@ def test_required_sealbot_evaluation_fails_fast_when_adapter_is_missing(
     payload = _read_json(ctx.diagnostics_dir / "dense_cnn.evaluation.epoch_000001.json")
     assert payload["status"] == "unavailable"
     assert payload["required"] is True
+
+
+def _dense_cnn_evaluation_module() -> Any:
+    pytest.importorskip("hexo_utils._rust")
+    return importlib.import_module("hexo_models.dense_cnn.evaluation")
+
+
+def _first_legal_action(engine: Any, state: object) -> object:
+    from hexo_engine.types import unpack_coord_id
+
+    return engine.PlacementAction(unpack_coord_id(int(engine.legal_action_ids(state)[0])))
+
+
+def _last_legal_action(engine: Any, state: object) -> object:
+    from hexo_engine.types import unpack_coord_id
+
+    return engine.PlacementAction(unpack_coord_id(int(engine.legal_action_ids(state)[-1])))
+
+
+def _simulate_reference_game(
+    engine: Any,
+    *,
+    seed: int,
+    dense_is_p0: bool,
+    max_actions: int,
+) -> dict[str, Any]:
+    """Independent single-game reference: dense=first-legal, opponent=last-legal.
+
+    Mirrors what the concurrent eval driver must produce for one game when the
+    dense search is stubbed to first-legal and the opponent to last-legal. The
+    trajectory is fully determined by whose turn it is, so this exercises turn
+    routing, terminal detection, max_actions truncation, and winner accounting.
+    """
+
+    dense_role = engine.Player.PLAYER_0 if dense_is_p0 else engine.Player.PLAYER_1
+    state = engine.new_game(seed=seed)
+    turns = 0
+    while engine.terminal(state) is None and turns < max_actions:
+        if engine.current_player(state) == dense_role:
+            action = _first_legal_action(engine, state)
+        else:
+            action = _last_legal_action(engine, state)
+        engine.apply_action(state, action)
+        turns += 1
+    terminal = engine.terminal(state)
+    dense_role_label = "player0" if dense_is_p0 else "player1"
+    if terminal is not None:
+        winner = str(terminal.winner) if terminal.winner is not None else None
+        status = "completed"
+    else:
+        winner = None
+        status = "aborted"
+    return {
+        "turns": turns,
+        "status": status,
+        "winner": winner,
+        "win": winner == dense_role_label,
+        "loss": winner is not None and winner != dense_role_label,
+    }
+
+
+def test_concurrent_eval_routing_matches_independent_simulation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The concurrent batched eval driver reproduces per-game outcomes exactly.
+
+    With the dense search stubbed to first-legal and SealBot stubbed to
+    last-legal, every game is deterministic, so the driver's wins/losses/
+    completed/mean_turns must equal an independent single-game simulation of the
+    same games. This proves the cross-game batching orchestration routes moves to
+    the right player, alternates colors, and accounts winners correctly.
+    """
+
+    evaluation = _dense_cnn_evaluation_module()
+    mcts_module = importlib.import_module("hexo_models.dense_cnn.mcts")
+    engine = importlib.import_module("hexo_engine")
+    sealbot_module = importlib.import_module("hexo_runner.adapters.sealbot")
+    from hexo_runner.player import DecisionResult
+
+    games_per_epoch = 6
+    max_actions = 40
+    epoch = 2
+    ctx, components = _build_dense_components(
+        tmp_path,
+        _small_model_config(
+            {
+                "selfplay": {"search_visits": 4, "max_actions": max_actions},
+                "evaluation": {
+                    "games_per_epoch": games_per_epoch,
+                    "sealbot_variant": "best",
+                    "require_sealbot": True,
+                    "max_actions": max_actions,
+                    "opening_moves": 0,
+                    "opening_temperature": 0.0,
+                },
+            }
+        ),
+    )
+
+    # SealBot checkout is absent in tests; the opponent is stubbed below, so skip
+    # the real availability probe.
+    monkeypatch.setattr(sealbot_module.SealBotConfig, "validate", lambda self: None)
+
+    class FakeMctsSession:
+        def discard(self, _game_key: int) -> None:
+            return
+
+        def run(
+            self,
+            _game_keys: Sequence[int],
+            root_states: Sequence[object],
+            inference: object,
+            **kwargs: object,
+        ) -> list[Any]:
+            _ = inference
+            results = []
+            for state in root_states:
+                action_id = int(engine.legal_action_ids(state)[0])
+                results.append(
+                    mcts_module.SearchResult(
+                        action_id=action_id,
+                        visit_policy={action_id: 1.0},
+                        root_value=0.0,
+                        visits=int(kwargs["visits"]),
+                        root_prior_policy={action_id: 1.0},
+                    )
+                )
+            return results
+
+    class FakeOpponent:
+        def decide(self, state: object) -> DecisionResult:
+            return DecisionResult(action=_last_legal_action(engine, state))
+
+        def close(self) -> None:
+            return
+
+    monkeypatch.setattr(evaluation, "new_mcts_session", lambda **_kwargs: FakeMctsSession())
+    monkeypatch.setattr(evaluation, "_build_opponent", lambda _config: FakeOpponent())
+
+    result = _dense_cnn_plugin().evaluate_epoch(ctx=ctx, components=components, epoch=epoch)
+
+    base_seed = ctx.config.run.seed or 0
+    references = [
+        _simulate_reference_game(
+            engine,
+            seed=base_seed + epoch * 100_000 + index,
+            dense_is_p0=index % 2 == 0,
+            max_actions=max_actions,
+        )
+        for index in range(games_per_epoch)
+    ]
+    expected_wins = sum(1 for ref in references if ref["win"])
+    expected_losses = sum(1 for ref in references if ref["loss"])
+    expected_completed = sum(1 for ref in references if ref["status"] == "completed")
+    expected_mean_turns = sum(ref["turns"] for ref in references) / games_per_epoch
+
+    assert result["status"] == "completed"
+    assert result["games"] == games_per_epoch
+    assert result["wins"] == expected_wins
+    assert result["losses"] == expected_losses
+    assert result["completed"] == expected_completed
+    assert result["mean_turns"] == pytest.approx(expected_mean_turns)
+
+    # Per-game .hxr records are written in the same per-game layout as before.
+    output_dir = ctx.output_dir / "evaluation" / f"epoch_{epoch:06d}"
+    for index in range(games_per_epoch):
+        assert (output_dir / f"eval-{epoch:06d}-{index:04d}.hxr").is_file()
+
+    # Diagnostics carry the timing split used to see where eval time goes.
+    payload = _read_json(ctx.diagnostics_dir / f"dense_cnn.evaluation.epoch_{epoch:06d}.json")
+    assert payload["wins"] == expected_wins
+    assert payload["dense_decisions"] >= 1
+    assert payload["rounds"] >= 1
+    assert "mcts_search_elapsed_seconds" in payload
+
+
+def test_concurrent_eval_batched_search_matches_serial(
+    tmp_path: Path,
+) -> None:
+    """Cross-game leaf batching does not change the dense player's chosen move.
+
+    The eval speedup comes from searching every game's root in one batched
+    `mcts_session.run([...keys], [...states])` instead of one game at a time. This
+    asserts the greedy action chosen for each root is identical whether the roots
+    are searched together (batched, as the driver does) or one at a time (serial,
+    as the old per-game eval did) — the strength-equivalence the speedup relies
+    on, verified on the real network.
+    """
+
+    _torch()
+    engine = importlib.import_module("hexo_engine")
+    mcts_module = importlib.import_module("hexo_models.dense_cnn.mcts")
+    inference_module = importlib.import_module("hexo_models.dense_cnn.inference")
+
+    ctx, components = _build_dense_components(
+        tmp_path,
+        _small_model_config({"selfplay": {"search_visits": 16, "max_actions": 64}}),
+    )
+    trainer = components.model.trainer
+    inference = inference_module.DenseCNNInference(
+        components.model.model,
+        device=trainer.device,
+        amp=False,
+        return_logits=False,
+        use_trt=False,
+    )
+
+    def _state_after_first_legal_moves(seed: int, moves: int) -> object:
+        from hexo_engine.types import unpack_coord_id
+
+        state = engine.new_game(seed=seed)
+        for _ in range(moves):
+            if engine.terminal(state) is not None:
+                break
+            action_id = int(engine.legal_action_ids(state)[0])
+            engine.apply_action(state, engine.PlacementAction(unpack_coord_id(action_id)))
+        return state
+
+    search_kwargs: dict[str, Any] = dict(
+        visits=16,
+        c_puct=1.5,
+        temperature=0.0,
+        seed=123,
+        widening_policy_mass=0.95,
+        widening_max_children=16,
+        widening_min_children=2,
+    )
+
+    # Distinct roots: different opening depths so the batch is heterogeneous.
+    seeds_and_depths = [(11, 0), (12, 2), (13, 4), (14, 6)]
+
+    serial_action_ids: list[int] = []
+    for seed, depth in seeds_and_depths:
+        session = mcts_module.new_mcts_session(max_states=4096)
+        state = _state_after_first_legal_moves(seed, depth)
+        result = session.run([0], [state], inference, **search_kwargs)[0]
+        serial_action_ids.append(int(result.action_id))
+
+    batched_session = mcts_module.new_mcts_session(max_states=4096)
+    batched_states = [_state_after_first_legal_moves(seed, depth) for seed, depth in seeds_and_depths]
+    batched_results = batched_session.run(
+        list(range(len(batched_states))),
+        batched_states,
+        inference,
+        **search_kwargs,
+    )
+    batched_action_ids = [int(result.action_id) for result in batched_results]
+
+    assert batched_action_ids == serial_action_ids
+
+
+def test_concurrent_eval_real_search_end_to_end(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Full driver with the real network + opening-temperature vector + records.
+
+    Exercises everything the stubbed routing test cannot: the real batched
+    `mcts_session.run` with a per-game `move_temperatures` vector (opening sampled,
+    then greedy), subtree discard, record writing, and the diagnostics payload.
+    Only the SealBot opponent is stubbed (no external checkout in tests).
+    """
+
+    _torch()
+    evaluation = _dense_cnn_evaluation_module()
+    engine = importlib.import_module("hexo_engine")
+    sealbot_module = importlib.import_module("hexo_runner.adapters.sealbot")
+    from hexo_runner.player import DecisionResult
+
+    games_per_epoch = 4
+    max_actions = 48
+    epoch = 3
+    ctx, components = _build_dense_components(
+        tmp_path,
+        _small_model_config(
+            {
+                "selfplay": {"search_visits": 8, "max_actions": max_actions},
+                "evaluation": {
+                    "games_per_epoch": games_per_epoch,
+                    "sealbot_variant": "best",
+                    "require_sealbot": True,
+                    "max_actions": max_actions,
+                    "opening_moves": 3,
+                    "opening_temperature": 0.6,
+                },
+            }
+        ),
+    )
+    # A calibrated vbatch is normally set by the performance step; eval falls back
+    # to it. Provide a small value so the batched search runs its leaf loop.
+    components.model.trainer.mcts_virtual_batch_size = 2
+
+    monkeypatch.setattr(sealbot_module.SealBotConfig, "validate", lambda self: None)
+
+    class FakeOpponent:
+        def decide(self, state: object) -> DecisionResult:
+            return DecisionResult(action=_first_legal_action(engine, state))
+
+        def close(self) -> None:
+            return
+
+    monkeypatch.setattr(evaluation, "_build_opponent", lambda _config: FakeOpponent())
+
+    result = _dense_cnn_plugin().evaluate_epoch(ctx=ctx, components=components, epoch=epoch)
+
+    assert result["status"] == "completed"
+    assert result["games"] == games_per_epoch
+    assert 0 <= result["completed"] <= games_per_epoch
+    # Win/loss accounting is internally consistent: every decided game is a win
+    # or a loss, and decided games never exceed completed games.
+    assert result["wins"] + result["losses"] <= result["completed"]
+    assert result["wins"] >= 0 and result["losses"] >= 0
+    assert result["dense_decisions"] >= games_per_epoch
+    assert result["rounds"] >= 1
+
+    output_dir = ctx.output_dir / "evaluation" / f"epoch_{epoch:06d}"
+    for index in range(games_per_epoch):
+        assert (output_dir / f"eval-{epoch:06d}-{index:04d}.hxr").is_file()

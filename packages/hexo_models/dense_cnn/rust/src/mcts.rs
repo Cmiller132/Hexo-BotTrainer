@@ -18,7 +18,13 @@ use rayon::prelude::*;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use hexo_engine::PackedCoord;
+use hexo_engine::{
+    apply_placement, unpack_coord, HexoState as RustHexoState, PackedCoord, Placement,
+};
+
+// Threat-Space Search core, shared with the hexgt lineage (leaf value override +
+// root move-selection guard). Pure board geometry; no graph/network coupling.
+use crate::threats_shared as threats;
 
 use super::constants::{MODEL1_ACTIVE_ROOT_LIMIT, MODEL1_EVAL_CACHE_MAX_STATES};
 use super::mcts_eval::{
@@ -526,6 +532,20 @@ fn select_leaf_batch(
                 } else if let Some(node_id) = selected.existing_node {
                     let node = &search.nodes[node_id];
                     search.backup_virtual(&selected.path, node.player, node.value(), virtual_loss);
+                } else if let Some(verdict) = threats::analyze(&selected.state).verdict() {
+                    // TSS phase-aware hitting-set leaf value OVERRIDE. This fresh
+                    // leaf is a proven 1-ply forced win/loss for the side to move
+                    // (own win completable with B placements, or opponent threats
+                    // whose minimum hitting set exceeds B). Back up the hard +-1
+                    // through the same terminal path and SKIP the network
+                    // eval/node creation — a proven node is as good as terminal,
+                    // and expansion injection has already guaranteed the covering
+                    // children exist for the must-answer (non-proven) case. Fires
+                    // at EVERY fresh leaf (root child and every inner leaf), reading
+                    // only board occupancy + phase, so it is crop-independent and
+                    // recognizes even out-of-crop forced losses.
+                    let leaf_player = selected.state.current_player();
+                    search.backup_virtual(&selected.path, leaf_player, verdict, virtual_loss);
                 } else {
                     search.mark_pending(selected.parent_node, selected.edge_index, 1);
                     leaves.push(RustLeaf {
@@ -606,9 +626,15 @@ fn build_search_result_payloads(
             (policy_action_ids.clone(), policy_weights.clone())
         };
         let (root_prior_action_ids, root_prior_weights) = root_prior_policy(root);
+        // TSS move-selection guard: identical inputs + determinism as
+        // `select_search_action`, so the reported action matches the one used to
+        // advance the native root. Masks the RAW selection weights only; the
+        // exported training policy below is left untouched.
+        let guarded_weights =
+            tactical_guard_weights(&search.root_state, &policy_action_ids, &policy_weights);
         let selected = select_action_from_policy(
             &policy_action_ids,
-            &policy_weights,
+            &guarded_weights,
             temperatures[index],
             seed.wrapping_add(index as u64),
         )?;
@@ -799,6 +825,87 @@ fn root_noise(
     })
 }
 
+/// Tactical-safety classification of a candidate ROOT move (TSS move-selection
+/// guard): `+1` if playing it is a proven 1-ply WIN for the side to move, `-1` if
+/// it is a proven 1-ply LOSS (an immediate terminal loss, or it leaves the
+/// opponent a forced win), else `0`. Exact and cheap — one placement + one
+/// phase-aware threat analysis — matching the depth-1 scope of the leaf override.
+fn classify_root_move(root_state: &RustHexoState, action_id: PackedCoord) -> i8 {
+    let me = root_state.current_player();
+    let mut child = root_state.clone();
+    let coord = unpack_coord(action_id);
+    match apply_placement(&mut child, Placement { coord }) {
+        Err(_) => 0, // not a legal move (shouldn't occur for a materialized edge)
+        Ok(res) => {
+            if let Some(outcome) = res.outcome {
+                return if outcome.winner == me { 1 } else { -1 };
+            }
+            match threats::analyze(&child).verdict() {
+                // verdict() is from the child's side to move; flip to `me` when the
+                // turn has passed to the opponent.
+                Some(v) => {
+                    let ours = if child.current_player() == me { v } else { -v };
+                    if ours > 0.5 {
+                        1
+                    } else if ours < -0.5 {
+                        -1
+                    } else {
+                        0
+                    }
+                }
+                None => 0,
+            }
+        }
+    }
+}
+
+/// Apply the 1-ply tactical-safety guard to the visit-policy weights used for the
+/// PLAYED move (TSS move-selection guard). Temperature/Dirichlet visit sampling
+/// alone can select a move the search has effectively proven losing (forced
+/// playouts keep a loser's visit count nonzero) or miss a proven win; this guard
+/// ensures a proven win is played and a proven-losing move is never selected when
+/// a non-losing move exists. It masks ONLY the selection weights — the exported
+/// TRAINING policy is left untouched (do not collapse the policy target). Gated on
+/// the root carrying a threat / own win, so the quiet common case is a no-op.
+/// Deterministic in (root_state, action_ids, weights), so both selection sites
+/// (advance + result payload) stay identical.
+fn tactical_guard_weights(
+    root_state: &RustHexoState,
+    action_ids: &[PackedCoord],
+    weights: &[f32],
+) -> Vec<f32> {
+    let analysis = threats::analyze(root_state);
+    if !analysis.own_win_now && analysis.opp_threat_count == 0 {
+        return weights.to_vec(); // no move can be a 1-ply win/loss here
+    }
+    let classes: Vec<i8> = action_ids
+        .iter()
+        .map(|&id| classify_root_move(root_state, id))
+        .collect();
+    let mut guarded = weights.to_vec();
+    if classes.iter().any(|&c| c == 1) {
+        // A proven win is available: restrict selection to winning moves.
+        for (i, &c) in classes.iter().enumerate() {
+            if c != 1 {
+                guarded[i] = 0.0;
+            }
+        }
+    } else if classes.iter().any(|&c| c != -1) {
+        // No win, but a non-losing move exists: exclude proven-losing moves.
+        for (i, &c) in classes.iter().enumerate() {
+            if c == -1 {
+                guarded[i] = 0.0;
+            }
+        }
+    }
+    // Safety net: never mask out the entire move set (e.g. a winning move with no
+    // visits) — fall back to the raw weights so a legal move is still selectable.
+    if guarded.iter().all(|&w| w <= 0.0) {
+        return weights.to_vec();
+    }
+    guarded
+}
+
 fn select_search_action(
     search: &RustSearch,
     baseline: Option<&HashMap<PackedCoord, u32>>,
@@ -806,7 +913,8 @@ fn select_search_action(
     seed: u64,
 ) -> PyResult<Option<PackedCoord>> {
     let (action_ids, weights, _total) = visit_policy(search.root(), baseline);
-    select_action_from_policy(&action_ids, &weights, temperature, seed)
+    let guarded = tactical_guard_weights(&search.root_state, &action_ids, &weights);
+    select_action_from_policy(&action_ids, &guarded, temperature, seed)
 }
 
 fn visit_policy(

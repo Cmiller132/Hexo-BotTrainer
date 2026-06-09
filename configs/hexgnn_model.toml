@@ -1,0 +1,119 @@
+# hexgnn config — a stripped-down hexgt: GNN trunk + policy/value/opp heads, NO
+# context transformer, NO short-term-value (STV) lookahead heads.
+#
+# Differences vs hexgt_model3.toml:
+#   * NO ctx_layers / ffn_dim (the context transformer is gone) and NO
+#     short_term_value_horizons / short_term_value_weight (the STV heads are gone)
+#     -> the config rejects those keys for this lineage.
+#   * gnn_layers = 4 keeps model-3's GNN TRUNK ("same GNN trunk").
+#   * value_pma_seeds = 2 -> the value readout is [SIDE | PMA_2] (kept; without the
+#     transformer the value head needs a global node pool, and the PMA pool is the
+#     proven, D6-invariant, compile-clean one — see hexgnn/architecture.py).
+#   * model.module points at the ADDITIVE top-level `hexgnn` package, which reuses
+#     the already-built native `hexo_models._rust.hexgt` accelerator read-only.
+#
+# All CODE-LEVEL hexgt behaviours carry over UNCHANGED because hexgnn reuses the
+# same native module: TSS tactical-candidate INJECTION at expansion + forced first
+# visit, the phase-aware hitting-set leaf value OVERRIDE, the tactical-safety
+# MOVE-SELECTION guard, the count-4 / threat hot-token CANDIDATE features
+# (FEATURE_SCHEMA_VERSION 3), nucleus widening, and the WindowStore threat index.
+# ~0.93M params (vs model-3's ~2.58M).
+#
+# NOTE: the config-driven CLI path requires the `hexgnn` package importable
+# (PYTHONPATH includes packages/hexgnn/python, or `pip install -e packages/hexgnn`).
+# The primary launch path is the driver scripts/_rl_train_hexgnn.py, which builds
+# its config from CLI args (it does NOT read the [selfplay]/[samples]/[training]
+# sections below — same trap as the hexgt driver); those sections document intent
+# and feed the config-CLI / pretrain paths.
+
+[model]
+name = "hexgnn"
+module = "hexgnn.plugin"
+
+[model.config]
+device = "cuda"
+
+[model.config.architecture]
+node_feature_dim = 32
+token_dim = 168
+gnn_layers = 4                       # same GNN trunk as model-3
+attention_heads = 4                  # = PMA value-pool head count H
+dropout = 0.0
+candidate_radius = 4
+value_pma_seeds = 2                  # value readout [SIDE | PMA_2]
+value_head_use_side = true
+
+[model.config.training]
+batch_size = 128
+learning_rate = 0.0002
+weight_decay = 0.0001
+warmup_steps = 200
+policy_weight = 1.0
+value_weight = 1.0
+opp_policy_weight = 0.25
+amp = true
+max_grad_norm = 1.0
+train_samples_per_epoch = 100000
+max_train_bucket_per_new_data = 8.0
+max_train_bucket_size = 500000
+no_repeat_files = true
+max_validation_samples = 100000
+
+[model.config.samples]
+shuffle_min_rows = 100000
+shuffle_keep_target_rows = 300000
+shuffle_taper_window_exponent = 0.65
+shuffle_expand_window_per_row = 0.4
+shuffle_taper_window_scale = 50000.0
+approx_rows_per_out_file = 8000
+shuffle_worker_group_size = 8000
+validation_fraction = 0.0
+policy_surprise_uniform_fraction = 0.5
+policy_surprise_max_weight = 8.0
+policy_surprise_enabled = true
+bc_prune_max_dropped_mass = 0.15
+# Pure hard-z value targets by default (the model-3 owner decision 2026-06-04).
+soft_z_lambda = 0.0
+
+[model.config.selfplay]
+search_visits = 1024
+active_games = 64
+c_puct = 1.5
+root_dirichlet_noise_enabled = true
+root_dirichlet_noise_fraction = 0.25
+root_dirichlet_total_alpha = 6.6
+root_policy_temperature = 1.0
+fpu_reduction = 0.20
+virtual_loss = 1.0
+widening_policy_mass = 0.95
+widening_max_children = 96
+widening_min_children = 2
+mcts_session_cache_max_states = 131072
+mcts_active_root_limit = 256
+max_actions = 512
+temperature = 1.0
+final_temperature = 0.2
+temperature_decay_moves = 30
+temperature_floor = 0.1
+forced_playout_k = 2.0
+temperature_halflife = 22.0
+pcr_enabled = false
+pcr_full_proportion = 0.5
+pcr_fast_visits = 256
+
+[model.config.evaluation]
+games_per_epoch = 40
+sealbot_variant = "best"
+sealbot_time_limit = 0.05
+max_actions = 1024
+require_sealbot = false
+opening_temperature = 0.6
+opening_moves = 10
+
+[run]
+name = "hexgnn_model"
+output_dir = "../runs/hexgnn_rl"
+seed = 7
+
+[loop]
+epochs = 40

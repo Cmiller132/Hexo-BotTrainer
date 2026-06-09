@@ -1,0 +1,106 @@
+"""Training plugin for the hexgnn (Model 2) dynamic-graph model family.
+
+`hexo_train` discovers this plugin (entry point `hexgnn` in the
+`hexo_train.models` group) and calls it to build model-specific components. The
+plugin is the composition boundary, mirroring `dense_cnn/plugin.py`.
+
+Phase 0 wires the minimum the pipeline can start from: `name`, `build_model`,
+and `training_component_overrides` returning the checkpoint loader/saver and an
+optimizer. The self-play / evaluation / calibration / trainer hooks land in the
+GPU phases (5+) and Phase 4 (trainer); they are intentionally absent here so the
+package builds and resolves before those exist.
+"""
+
+from __future__ import annotations
+
+from typing import Any, Mapping
+
+import torch
+
+from hexo_train.components import ComponentOverrides
+
+from .architecture import HexgnnNetwork
+from .checkpoints import HexgnnCheckpointLoader, HexgnnCheckpointSaver
+from .config import parse_hexgnn_config
+from .evaluation import evaluate_epoch as _evaluate_epoch
+from .selfplay import generate_selfplay_epoch as _generate_selfplay_epoch
+from .trainer import HexgnnTrainer
+
+
+class HexgnnPlugin:
+    """Model plugin object consumed by `hexo_train.registry`."""
+
+    name = "hexgnn"
+
+    def build_model(self, game_spec: Mapping[str, Any], config: Mapping[str, Any]) -> torch.nn.Module:
+        """Build the dynamic GNN-trunk network (NO transformer) from config."""
+
+        _ = game_spec
+        parsed = parse_hexgnn_config(config)
+        arch = parsed.architecture
+        return HexgnnNetwork(
+            node_feature_dim=arch.node_feature_dim,
+            token_dim=arch.token_dim,
+            gnn_layers=arch.gnn_layers,
+            attention_heads=arch.attention_heads,
+            dropout=arch.dropout,
+            value_pma_seeds=arch.value_pma_seeds,
+            value_head_use_side=arch.value_head_use_side,
+            steerable_channels=arch.steerable_channels,
+        )
+
+    def training_component_overrides(
+        self,
+        *,
+        defaults: Any,
+        config: Mapping[str, Any],
+        shared: Any,
+        model: torch.nn.Module | None,
+    ) -> ComponentOverrides:
+        """Create hexgnn-owned components for the generic training loop."""
+
+        _ = (defaults, shared)
+        if model is None:
+            raise ValueError("HexgnnPlugin requires build_model() to run first")
+        parsed = parse_hexgnn_config(config)
+        optimizer = torch.optim.AdamW(
+            model.parameters(),
+            lr=parsed.training.learning_rate,
+            weight_decay=parsed.training.weight_decay,
+        )
+        trainer = HexgnnTrainer(model=model, config=parsed, optimizer=optimizer)
+        return ComponentOverrides(
+            trainer=trainer,
+            optimizer=optimizer,
+            checkpoint_loader=HexgnnCheckpointLoader(),
+            checkpoint_saver=HexgnnCheckpointSaver(),
+            uses_shared_sample_store=False,
+            extra={
+                "model_family": "hexgnn",
+                "train_samples_per_epoch": parsed.training.train_samples_per_epoch,
+                "shuffle_min_rows": parsed.samples.shuffle_min_rows,
+                "selfplay_mode": "game_driven_all_mcts",
+                "selfplay_active_games": parsed.selfplay.active_games,
+                "evaluation_games_per_epoch": parsed.evaluation.games_per_epoch,
+                "candidate_radius": parsed.architecture.candidate_radius,
+            },
+        )
+
+    def generate_selfplay(self, *, ctx: Any, components: Any, epoch: int, games_per_epoch: int) -> dict[str, Any]:
+        """Generate one epoch of game-driven self-play, writing compact shards."""
+
+        return _generate_selfplay_epoch(
+            ctx=ctx, components=components, epoch=epoch, games_per_epoch=games_per_epoch
+        )
+
+    def evaluate_epoch(self, *, ctx: Any, components: Any, epoch: int) -> dict[str, Any]:
+        """Head-to-head SealBot evaluation for one checkpoint epoch."""
+
+        return _evaluate_epoch(ctx=ctx, components=components, epoch=epoch)
+
+
+plugin = HexgnnPlugin()
+
+
+def get_plugin() -> HexgnnPlugin:
+    return plugin

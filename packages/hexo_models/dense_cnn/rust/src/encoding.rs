@@ -16,7 +16,8 @@ use hexo_engine::{
 };
 
 use super::constants::*;
-use super::state::states_from_py_states;
+use super::state::{state_from_py_state, states_from_py_states};
+use crate::threats_shared as threats;
 
 pub(crate) struct Model1EncodedState {
     pub(crate) planes: Vec<f32>,
@@ -65,8 +66,39 @@ pub fn model1_batch_inputs(py: Python<'_>, states: &Bound<'_, PyAny>) -> PyResul
     Ok(dict.into_any().unbind())
 }
 
+/// Diagnostic: phase-aware threat analysis for a live engine state, plus the
+/// dense_cnn-specific crop view. Returns the SHARED analysis dict (so parity tests
+/// can compare it byte-for-byte against `hexgt_threat_analysis` — both funnel
+/// through `crate::threats_shared::analysis_pydict`) augmented with:
+///   * `crop_center`        — the (q, r) the 41x41 crop is centered on,
+///   * `tactical_cells_in_crop` — the subset of `tactical_cells` representable in
+///     the crop (i.e. the cells dense_cnn would actually inject as forced edges),
+///   * `tactical_cells_out_of_crop` — the residual that degrades gracefully.
+/// Lets the tests confirm the n=8 tactical set is fully covered in normal play and
+/// flag any out-of-crop residual.
+#[pyfunction]
+fn dense_cnn_threat_analysis(py: Python<'_>, state: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    let s = state_from_py_state(py, state)?;
+    let dict = threats::analysis_pydict(py, &s)?;
+    let center = model1_crop_center(&s);
+    dict.set_item("crop_center", (center.q, center.r))?;
+    let mut in_crop: Vec<(i16, i16)> = Vec::new();
+    let mut out_of_crop: Vec<(i16, i16)> = Vec::new();
+    for cell in threats::tactical_cells(&s) {
+        if model1_flat_index(cell, center).is_some() {
+            in_crop.push((cell.q, cell.r));
+        } else {
+            out_of_crop.push((cell.q, cell.r));
+        }
+    }
+    dict.set_item("tactical_cells_in_crop", in_crop)?;
+    dict.set_item("tactical_cells_out_of_crop", out_of_crop)?;
+    Ok(dict.into_any().unbind())
+}
+
 pub fn register_pybridge(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(model1_batch_inputs, module)?)?;
+    module.add_function(wrap_pyfunction!(dense_cnn_threat_analysis, module)?)?;
     Ok(())
 }
 
@@ -95,7 +127,7 @@ fn encode_model1_state_inner(
     // model contract change, not an engine concern.
     let current_player = state.current_player();
     for &coord in state.board().occupied_cells() {
-        let Some(flat) = model1_flat_index(coord, center) else {
+        let Some(flat) = model1_disk_flat_index(coord, center) else {
             continue;
         };
         let owner = state.board().get(coord).unwrap_or(current_player);
@@ -123,7 +155,7 @@ fn encode_model1_state_inner(
     };
     for coord in legal_coords {
         let action_id = pack_coord(coord);
-        if let Some(flat) = model1_flat_index(coord, center) {
+        if let Some(flat) = model1_disk_flat_index(coord, center) {
             all_legal_action_count += 1;
             set_plane(&mut planes, MODEL1_PLANE_LEGAL, flat, 1.0);
             if include_crop_legal_lists {
@@ -136,7 +168,7 @@ fn encode_model1_state_inner(
     match state.phase() {
         TurnPhase::SecondStone { first } => {
             fill_plane(&mut planes, MODEL1_PLANE_SECOND_PLACEMENT, 1.0);
-            if let Some(flat) = model1_flat_index(first, center) {
+            if let Some(flat) = model1_disk_flat_index(first, center) {
                 set_plane(&mut planes, MODEL1_PLANE_FIRST_STONE, flat, 1.0);
             }
         }
@@ -149,7 +181,7 @@ fn encode_model1_state_inner(
 
     let latest_index = state.placements_made();
     for record in state.placement_history().iter().rev() {
-        let Some(flat) = model1_flat_index(record.coord, center) else {
+        let Some(flat) = model1_disk_flat_index(record.coord, center) else {
             continue;
         };
         let age = latest_index.saturating_sub(record.placement_index);
@@ -165,6 +197,13 @@ fn encode_model1_state_inner(
 
     fill_hot_cells(state, current_player, center, &mut planes);
     fill_opponent_last_turn(state, current_player, center, &mut planes);
+
+    // The 420 corner cells are out-of-crop under the radius-20 hex-disk contract.
+    // The per-fact writes already skip them via `model1_disk_flat_index`, but the
+    // constant fill planes (empty, player-colour, second-placement) and the base
+    // distance plane still carry values there, so zero EVERY plane at every corner
+    // cell. Mirrors Python `build_input_planes`' final disk mask.
+    zero_corner_cells(&mut planes);
 
     Model1EncodedState {
         planes,
@@ -219,7 +258,7 @@ fn fill_hot_cells(
             if !state.board().is_cell_empty(coord) {
                 continue;
             }
-            if let Some(flat) = model1_flat_index(coord, center) {
+            if let Some(flat) = model1_disk_flat_index(coord, center) {
                 set_plane(planes, plane, flat, 1.0);
             }
         }
@@ -239,16 +278,16 @@ fn fill_opponent_last_turn(
         }
         match record.phase {
             TurnPhase::SecondStone { first } => {
-                if let Some(flat) = model1_flat_index(first, center) {
+                if let Some(flat) = model1_disk_flat_index(first, center) {
                     set_plane(planes, MODEL1_PLANE_OPPONENT_LAST_TURN, flat, 1.0);
                 }
-                if let Some(flat) = model1_flat_index(record.coord, center) {
+                if let Some(flat) = model1_disk_flat_index(record.coord, center) {
                     set_plane(planes, MODEL1_PLANE_OPPONENT_LAST_TURN, flat, 1.0);
                 }
                 return;
             }
             TurnPhase::Opening => {
-                if let Some(flat) = model1_flat_index(record.coord, center) {
+                if let Some(flat) = model1_disk_flat_index(record.coord, center) {
                     set_plane(planes, MODEL1_PLANE_OPPONENT_LAST_TURN, flat, 1.0);
                 }
                 return;
@@ -292,7 +331,9 @@ fn python_round(numerator: i32, denominator: i32) -> i32 {
 
 pub(crate) fn model1_flat_index(coord: HexCoord, center: HexCoord) -> Option<usize> {
     // Convert axial coordinates to row-major crop flats. Returning `None` is a
-    // representational limit of the crop, not an illegal game state.
+    // representational limit of the crop, not an illegal game state. This is the
+    // *square* projection; callers that classify crop membership (e.g. threat
+    // analysis) use it. The encoder uses `model1_disk_flat_index`.
     let half = (MODEL1_BOARD_SIZE / 2) as i32;
     let row = coord.r as i32 - center.r as i32 + half;
     let col = coord.q as i32 - center.q as i32 + half;
@@ -302,10 +343,41 @@ pub(crate) fn model1_flat_index(coord: HexCoord, center: HexCoord) -> Option<usi
     Some(row as usize * MODEL1_BOARD_SIZE + col as usize)
 }
 
+fn model1_in_disk(row: i32, col: i32) -> bool {
+    // Radius-(BOARD_SIZE/2) hex disk: a crop cell is representable only within hex
+    // distance `half` of the crop center. The 420 corner cells are permanently
+    // invalid so the crop is exactly D6-closed. Mirrors Python `geometry.in_disk`.
+    let half = (MODEL1_BOARD_SIZE / 2) as i32;
+    let dr = row - half;
+    let dc = col - half;
+    dr.abs().max(dc.abs()).max((dr + dc).abs()) <= half
+}
+
+pub(crate) fn model1_disk_flat_index(coord: HexCoord, center: HexCoord) -> Option<usize> {
+    // Disk-restricted projection used by the encoder: in-square AND in-disk. Corner
+    // cells return `None` (treated as out-of-crop) so input planes and the MCTS
+    // legal crop flats honor the radius-20 hex-disk contract. Mirrors the Python
+    // featurizer (`input.py` + `geometry.in_disk`).
+    let flat = model1_flat_index(coord, center)?;
+    let row = (flat / MODEL1_BOARD_SIZE) as i32;
+    let col = (flat % MODEL1_BOARD_SIZE) as i32;
+    if model1_in_disk(row, col) {
+        Some(flat)
+    } else {
+        None
+    }
+}
+
 fn fill_distance_plane(planes: &mut [f32]) {
     let half = (MODEL1_BOARD_SIZE / 2) as i32;
     for row in 0..MODEL1_BOARD_SIZE {
         for col in 0..MODEL1_BOARD_SIZE {
+            // Corner cells are out-of-crop under the radius-20 hex-disk contract, so
+            // the center-distance plane stays zero there (matches Python
+            // `_distance_plane`). The base plane is already zero-initialized.
+            if !model1_in_disk(row as i32, col as i32) {
+                continue;
+            }
             let r = row as i32 - half;
             let q = col as i32 - half;
             let s = -r - q;
@@ -317,6 +389,21 @@ fn fill_distance_plane(planes: &mut [f32]) {
                 row * MODEL1_BOARD_SIZE + col,
                 distance,
             );
+        }
+    }
+}
+
+fn zero_corner_cells(planes: &mut [f32]) {
+    // Set every out-of-disk (corner) cell to 0 across all input planes.
+    for row in 0..MODEL1_BOARD_SIZE {
+        for col in 0..MODEL1_BOARD_SIZE {
+            if model1_in_disk(row as i32, col as i32) {
+                continue;
+            }
+            let flat = row * MODEL1_BOARD_SIZE + col;
+            for plane in 0..MODEL1_INPUT_CHANNELS {
+                planes[plane * MODEL1_BOARD_AREA + flat] = 0.0;
+            }
         }
     }
 }

@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import statistics
 import tempfile
 from collections.abc import Callable
 from email.utils import formatdate
@@ -34,6 +35,7 @@ from hexo_runner.session import GameSpec
 from hexo_engine.types import unpack_coord_id
 
 from .dashboard import dashboard_state
+from . import debug_service
 
 
 STATIC_ROOT = files("hexo_frontend").joinpath("static")
@@ -671,6 +673,47 @@ class HexoPlayHandler(BaseHTTPRequestHandler):
                         _query_int(query.get("record", [None])[0]) or 0,
                     )
                 )
+            elif path == "/api/debug/checkpoints":
+                query = parse_qs(parsed.query)
+                self._send_json(_debug_checkpoints(str(query.get("run", [""])[0])))
+            elif path == "/api/debug/games":
+                query = parse_qs(parsed.query)
+                self._send_json(
+                    _debug_games(
+                        str(query.get("run", [""])[0]),
+                        str(query.get("source", ["selfplay"])[0] or "selfplay"),
+                    )
+                )
+            elif path == "/api/debug/trajectory":
+                query = parse_qs(parsed.query)
+                self._send_json(
+                    _debug_trajectory(
+                        str(query.get("run", [""])[0]),
+                        str(query.get("path", [""])[0]),
+                        _query_int(query.get("record", [None])[0]) or 0,
+                        str(query.get("checkpoint", [""])[0]),
+                    )
+                )
+            elif path == "/api/debug/position":
+                query = parse_qs(parsed.query)
+                actions_csv = str(query.get("actions", [""])[0] or "")
+                if actions_csv:
+                    self._send_json(
+                        _debug_position_from_actions(
+                            str(query.get("run", [""])[0]),
+                            actions_csv,
+                            _query_int(query.get("ply", [None])[0]) or 0,
+                        )
+                    )
+                else:
+                    self._send_json(
+                        _debug_position(
+                            str(query.get("run", [""])[0]),
+                            str(query.get("path", [""])[0]),
+                            _query_int(query.get("record", [None])[0]) or 0,
+                            _query_int(query.get("ply", [None])[0]) or 0,
+                        )
+                    )
             elif path == "/" or path == "/index.html":
                 self._send_static("index.html")
             elif path.startswith("/static/"):
@@ -688,6 +731,10 @@ class HexoPlayHandler(BaseHTTPRequestHandler):
             elif path == "/api/move":
                 body = self._read_json()
                 self._send_json(self.controller.submit_move(int(body["q"]), int(body["r"])))
+            elif path == "/api/debug/analyze":
+                self._send_json(_debug_analyze(self._read_json()))
+            elif path == "/api/debug/search":
+                self._send_json(_debug_search(self._read_json()))
             else:
                 self.send_error(HTTPStatus.NOT_FOUND)
         except MoveConflict as exc:
@@ -999,6 +1046,414 @@ def _training_history(run_name: str, artifact_path: str, record_index: int = 0) 
         }
     )
     return payload
+
+
+# ---------------------------------------------------------------------------
+# Debug tab: position inspection via the CPU inference worker (debug_service).
+#
+# These endpoints reconstruct a board position from a recorded game (or a raw
+# move list) and ask the out-of-process, CPU-only worker what the model thinks —
+# policy prior, value distribution, opponent-policy + STV heads, and on-demand
+# MCTS. The worker is launched with CUDA_VISIBLE_DEVICES="" so it never contends
+# for the training GPU, and results are cached so re-opening a view is instant.
+# ---------------------------------------------------------------------------
+
+_DEBUG_CKPT_EPOCH_RE = re.compile(r"epoch(\d+)\.pt$")
+# The STV graft widened the value/STV readout heads at RL epoch 7 (also visible
+# as a ~29 MB -> ~31 MB checkpoint-size jump); used only for a display hint.
+_DEBUG_GRAFT_EPOCH = 7
+_DEBUG_GRAFT_SIZE_BYTES = 30_500_000
+
+
+def _debug_worker() -> "debug_service.DebugWorker":
+    return debug_service.get_worker()
+
+
+def _debug_training_roots() -> tuple[Path, ...]:
+    """Run-dir search roots for the Debug endpoints. Prefers ``HEXO_DEBUG_RUN_ROOT``
+    (e.g. the live worktree, which holds the real checkpoints + every .hxr) so the
+    Debug tab works even when the dashboard serves its training/history panels
+    from a bridge-mirror cwd that has the diagnostics but NOT the checkpoints.
+    Falls back to the normal cwd-derived roots when the override is unset, so the
+    default single-tree setup is unchanged."""
+
+    roots: list[Path] = []
+    seen: set[str] = set()
+    override = os.environ.get("HEXO_DEBUG_RUN_ROOT")
+    if override:
+        base = Path(override).expanduser()
+        for candidate in (base / "runs", base):  # accept the tree root or its runs/ dir
+            if candidate.is_dir():
+                key = str(candidate.resolve())
+                if key not in seen:
+                    seen.add(key)
+                    roots.append(candidate)
+    for root in _training_roots():
+        key = str(root.resolve())
+        if key not in seen:
+            seen.add(key)
+            roots.append(root)
+    return tuple(roots)
+
+
+def _debug_run_dirs(name: str) -> list[Path]:
+    """Every existing run dir named ``name`` across the Debug roots, in priority
+    order (override/worktree first, then the cwd roots)."""
+
+    if not name or "/" in name or "\\" in name or name.startswith("."):
+        return []
+    dirs: list[Path] = []
+    for root in _debug_training_roots():
+        resolved_root = root.resolve()
+        path = (resolved_root / name).resolve()
+        if resolved_root != path and resolved_root not in path.parents:
+            continue
+        if path.is_dir():
+            dirs.append(path)
+    return dirs
+
+
+def _debug_resolve_run_dir(name: str) -> Path | None:
+    """First existing run dir in Debug-root priority order (worktree before the
+    bridge-mirror cwd) — deterministic, so checkpoint/game listing comes from the
+    tree that actually has the data rather than whichever has the newest mtime."""
+
+    dirs = _debug_run_dirs(name)
+    return dirs[0] if dirs else None
+
+
+def _debug_resolve_run_path(run_name: str, artifact_path: str) -> Path | None:
+    """Resolve an artifact path under whichever Debug run dir actually contains it.
+
+    The dashboard's History tab may serve from a bridge-mirror cwd while the Debug
+    endpoints prefer the live worktree, and the two trees can differ (the worktree
+    leads on checkpoints; the mirror can momentarily lead on a just-rolled epoch
+    .hxr). Trying each run dir in priority order and returning the first that holds
+    the file lets a deep-link resolve regardless of which tree has that game."""
+
+    if not artifact_path or artifact_path.startswith(("/", "\\")):
+        return None
+    fallback: Path | None = None
+    for run_dir in _debug_run_dirs(run_name):
+        resolved_root = run_dir.resolve()
+        path = (run_dir / artifact_path).resolve()
+        if resolved_root != path and resolved_root not in path.parents:
+            continue
+        if fallback is None:
+            fallback = path
+        if path.exists():
+            return path
+    return fallback  # confined but absent -> caller raises a clear "unknown artifact"
+
+
+def _debug_checkpoints(run_name: str) -> dict[str, object]:
+    run_dir = _debug_resolve_run_dir(run_name)
+    if run_dir is None:
+        raise ValueError("Unknown training run")
+    ckpt_dir = run_dir / "checkpoints"
+    items: list[dict[str, object]] = []
+    if ckpt_dir.is_dir():
+        for entry in os.scandir(ckpt_dir):
+            if not entry.is_file() or not entry.name.endswith(".pt"):
+                continue
+            match = _DEBUG_CKPT_EPOCH_RE.search(entry.name)
+            epoch = int(match.group(1)) if match else None
+            stat = _safe_stat(Path(entry.path))
+            size = int(stat.st_size) if stat else 0
+            if epoch is not None:
+                graft = "post" if epoch >= _DEBUG_GRAFT_EPOCH else "pre"
+            elif size:
+                graft = "post" if size > _DEBUG_GRAFT_SIZE_BYTES else "pre"
+            else:
+                graft = None
+            items.append(
+                {
+                    "name": entry.name,
+                    "epoch": epoch,
+                    "size": size,
+                    "mtime": int(stat.st_mtime) if stat else 0,
+                    "latest": entry.name == "hexgt_rl_latest.pt",
+                    "graft": graft,
+                }
+            )
+    items.sort(key=lambda x: (not x["latest"], -(x["epoch"] if x["epoch"] is not None else -1), str(x["name"])))
+    return {"run": run_name, "checkpoints": items, "worker": _debug_worker().status()}
+
+
+def _debug_games(run_name: str, source: str) -> dict[str, object]:
+    """List the recorded game files (``.hxr``) available for inspection. Self-play
+    files are one-per-epoch; evaluation files live in ``eval*/`` subdirectories."""
+
+    run_dir = _debug_resolve_run_dir(run_name)
+    if run_dir is None:
+        raise ValueError("Unknown training run")
+
+    def rel(p: Path) -> str:
+        return p.relative_to(run_dir).as_posix()
+
+    def hxr_in(directory: Path, recurse: bool) -> list[Path]:
+        found: list[Path] = []
+        if not directory.is_dir():
+            return found
+        for entry in os.scandir(directory):
+            if entry.is_file() and entry.name.endswith(".hxr"):
+                found.append(Path(entry.path))
+            elif recurse and entry.is_dir():
+                for sub in os.scandir(entry.path):
+                    if sub.is_file() and sub.name.endswith(".hxr"):
+                        found.append(Path(sub.path))
+        return found
+
+    files: list[Path] = []
+    if source in ("selfplay", "all"):
+        files += hxr_in(run_dir / "selfplay", recurse=False)
+    if source in ("evaluation", "all"):
+        files += hxr_in(run_dir / "evaluation", recurse=True)
+        files += hxr_in(run_dir / "eval", recurse=True)
+
+    items = []
+    for path in files:
+        stat = _safe_stat(path)
+        items.append(
+            {
+                "path": rel(path),
+                "name": path.name,
+                "size": int(stat.st_size) if stat else 0,
+                "mtime": int(stat.st_mtime) if stat else 0,
+            }
+        )
+    items.sort(key=lambda x: str(x["path"]), reverse=True)
+    return {"run": run_name, "source": source, "games": items}
+
+
+def _debug_resolve_checkpoint(run_name: str, checkpoint: str) -> Path:
+    name = checkpoint.strip()
+    if not name:
+        raise ValueError("checkpoint is required")
+    if "/" in name or "\\" in name:  # accept a bare filename only, resolve under the run
+        name = Path(name).name
+    path = _debug_resolve_run_path(run_name, f"checkpoints/{name}")
+    if path is None or not path.is_file():
+        raise ValueError(f"Unknown checkpoint: {checkpoint}")
+    return path
+
+
+def _debug_open_record(run_name: str, artifact_path: str, record_index: int):
+    path = _debug_resolve_run_path(run_name, artifact_path)
+    if path is None or not path.is_file() or path.suffix.lower() != ".hxr":
+        raise ValueError("Unknown game history artifact")
+    with HexoRecordFile.open(path) as record_file:
+        players = [_record_player_payload(player) for player in record_file.players]
+        records = list(record_file.iter_records())
+    if not records:
+        raise ValueError("Game history artifact contains no games")
+    if record_index < 0 or record_index >= len(records):
+        raise ValueError(f"Game history record index out of range: {record_index}")
+    return records[record_index], players, records
+
+
+def _debug_build_position(action_ids: list[int], ply: int, *, seed: object = None) -> dict[str, object]:
+    """Replay ``action_ids[:ply]`` into a board-state payload. Coordinates
+    (including the last move) are resolved server-side via the engine, so the
+    client never re-implements action-id unpacking."""
+
+    total = len(action_ids)
+    ply = max(0, min(int(ply), total))
+    state = engine.new_game(seed=seed)
+    last_coord = None
+    for action_id in action_ids[:ply]:
+        coord = unpack_coord_id(action_id)
+        engine.apply_action(state, engine.PlacementAction(coord))
+        last_coord = coord
+
+    payload = dashboard_state(engine.to_python_state(state))
+    payload["mode"] = "debug"
+    payload["debug"] = {
+        "ply": ply,
+        "total": total,
+        "action_ids": action_ids,
+        "last_action_id": action_ids[ply - 1] if ply > 0 else None,
+        "last_q": int(last_coord.q) if last_coord is not None else None,
+        "last_r": int(last_coord.r) if last_coord is not None else None,
+    }
+    return payload
+
+
+def _debug_position(run_name: str, artifact_path: str, record_index: int, ply: int) -> dict[str, object]:
+    record, players, records = _debug_open_record(run_name, artifact_path, record_index)
+    action_ids = [int(a) for a in record.action_ids]
+    payload = _debug_build_position(action_ids, ply, seed=record.seed)
+    payload["game_id"] = f"{run_name}:{record.game_id}"
+    payload["players"] = _players_by_role(players)
+    payload["debug"].update(
+        {
+            "run": run_name,
+            "path": artifact_path,
+            "record_index": record_index,
+            "record_count": len(records),
+            "winner": record.winner,
+            "status": record.status,
+            "seed": record.seed,
+        }
+    )
+    payload["record_games"] = [
+        {
+            "index": index,
+            "game_id": item.game_id,
+            "status": item.status,
+            "actions": len(item.action_ids),
+            "winner": item.winner,
+        }
+        for index, item in enumerate(records)
+    ]
+    return payload
+
+
+def _debug_position_from_actions(run_name: str, actions_csv: str, ply: int) -> dict[str, object]:
+    """Board payload for a pasted/imported action-id list (no .hxr)."""
+
+    action_ids: list[int] = []
+    for token in re.split(r"[\s,]+", actions_csv.strip()):
+        if not token:
+            continue
+        try:
+            action_ids.append(int(token))
+        except ValueError as exc:
+            raise ValueError(f"invalid action id: {token!r}") from exc
+    if not action_ids:
+        raise ValueError("no action ids provided")
+    ply = len(action_ids) if ply <= 0 else ply
+    payload = _debug_build_position(action_ids, ply)
+    payload["game_id"] = f"{run_name}:imported"
+    payload["debug"].update({"run": run_name, "imported": True, "winner": None})
+    payload["record_games"] = []
+    return payload
+
+
+def _debug_action_prefix(body: dict[str, Any]) -> tuple[str, list[int]]:
+    """Resolve (run, action_id prefix) from a debug request body. Either an
+    explicit ``action_ids`` list (paste/import) or a recorded game + ``ply``."""
+
+    run = str(body.get("run", ""))
+    raw = body.get("action_ids")
+    if raw is not None:
+        return run, [int(a) for a in raw]
+    record, _players, _records = _debug_open_record(run, str(body.get("path", "")), int(body.get("record", 0) or 0))
+    full = [int(a) for a in record.action_ids]
+    ply = int(body.get("ply", len(full)))
+    ply = max(0, min(ply, len(full)))
+    return run, full[:ply]
+
+
+def _debug_signature(prefix: str, ckpt_path: Path, action_ids: list[int], n: object) -> str:
+    return json.dumps([prefix, str(ckpt_path), action_ids, n], separators=(",", ":"))
+
+
+def _debug_analyze(body: dict[str, Any]) -> dict[str, object]:
+    run, action_ids = _debug_action_prefix(body)
+    ckpt_path = _debug_resolve_checkpoint(run, str(body.get("checkpoint", "")))
+    n = body.get("n")
+    signature = _debug_signature("analyze", ckpt_path, action_ids, n)
+    return _debug_worker().cached(
+        signature, "analyze", checkpoint=str(ckpt_path), action_ids=action_ids, n=n
+    )
+
+
+def _debug_search(body: dict[str, Any]) -> dict[str, object]:
+    run, action_ids = _debug_action_prefix(body)
+    ckpt_path = _debug_resolve_checkpoint(run, str(body.get("checkpoint", "")))
+    n = body.get("n")
+    visits = int(body.get("visits", 512))
+    c_puct = float(body.get("c_puct", 1.5))
+    visits = max(1, min(visits, 20_000))  # bound CPU work per request
+    signature = _debug_signature(f"search:{visits}:{c_puct}", ckpt_path, action_ids, n)
+    return _debug_worker().cached(
+        signature,
+        "search",
+        timeout=debug_service.DEFAULT_TIMEOUT,
+        checkpoint=str(ckpt_path),
+        action_ids=action_ids,
+        visits=visits,
+        c_puct=c_puct,
+        n=n,
+    )
+
+
+def _debug_recorded_trajectory(run_dir: Path, artifact_path: str, game_id: object) -> list[dict[str, object]]:
+    """Best-effort recorded root_value per move from ``eval/epoch_*_examples.json``.
+
+    Only self-play example games carry per-move traces, so this returns ``[]`` when
+    no matching trace exists. Values are normalized to player-0's perspective."""
+
+    match = re.search(r"epoch_(\d+)", Path(artifact_path).name)
+    if match is None:
+        return []
+    epoch = int(match.group(1))
+    examples_path = run_dir / "eval" / f"epoch_{epoch:06d}_examples.json"
+    if not examples_path.is_file():
+        return []
+    try:
+        with examples_path.open("r", encoding="utf-8") as handle:
+            games = json.load(handle)
+    except (OSError, ValueError):
+        return []
+    trace = None
+    for game in games if isinstance(games, list) else []:
+        if str(game.get("game_id")) == str(game_id):
+            trace = game.get("moves") or []
+            break
+    if not trace:
+        return []
+    out = []
+    for move in trace:
+        rv = move.get("root_value")
+        if rv is None:
+            continue
+        ply = int(move.get("move", 0))
+        player0 = str(move.get("player", "player0")).endswith("0")
+        out.append({"ply": ply, "root_value": float(rv), "root_value_p0": float(rv) if player0 else -float(rv)})
+    return out
+
+
+def _debug_trajectory(run_name: str, artifact_path: str, record_index: int, checkpoint: str, max_points: int = 160) -> dict[str, object]:
+    run_dir = _debug_resolve_run_dir(run_name)
+    if run_dir is None:
+        raise ValueError("Unknown training run")
+    record, _players, _records = _debug_open_record(run_name, artifact_path, record_index)
+    action_ids = [int(a) for a in record.action_ids]
+    total = len(action_ids)
+    ckpt_path = _debug_resolve_checkpoint(run_name, checkpoint)
+
+    # Evaluate plies 0..total, strided so a long game stays bounded (one forward
+    # per point). The stride is surfaced so the UI never implies full coverage.
+    stride = max(1, -(-(total + 1) // max_points))
+    plies = list(range(0, total + 1, stride))
+    if plies[-1] != total:
+        plies.append(total)
+    sequences = [action_ids[:p] for p in plies]
+
+    signature = _debug_signature(f"trajectory:{stride}", ckpt_path, action_ids, max_points)
+    raw = _debug_worker().cached(
+        signature, "reeval", checkpoint=str(ckpt_path), sequences=sequences, timeout=debug_service.DEFAULT_TIMEOUT
+    )
+    reeval = []
+    for entry in raw.get("values", []):
+        cp = int(entry.get("current_player", 0))
+        value = float(entry.get("value", 0.0))
+        reeval.append({"ply": int(entry["ply"]), "value": value, "current_player": cp,
+                       "value_p0": value if cp == 0 else -value})
+
+    return {
+        "run": run_name,
+        "path": artifact_path,
+        "record": record_index,
+        "total": total,
+        "stride": stride,
+        "checkpoint": ckpt_path.name,
+        "winner": record.winner,
+        "reeval": reeval,
+        "recorded": _debug_recorded_trajectory(run_dir, artifact_path, record.game_id),
+    }
 
 
 def _training_artifacts_page(
@@ -1865,7 +2320,11 @@ def _epoch_history(run_dir: Path) -> list[dict[str, object]]:
             if epoch is None:
                 continue
             row = rows.setdefault(epoch, {"epoch": epoch})
-            row["selfplay"] = _selfplay_epoch_summary(payload)
+            selfplay_summary = _selfplay_epoch_summary(payload)
+            # dense_cnn self-play diagnostics omit the game-length + outcome stats
+            # hexgnn emits inline; backfill them display-side from the epoch's .hxr.
+            _backfill_selfplay_game_stats(run_dir, epoch, selfplay_summary)
+            row["selfplay"] = selfplay_summary
 
         for path in sorted(diagnostics_dir.glob("dense_cnn.evaluation.epoch_*.json")):
             payload = _read_json_file(path)
@@ -1935,7 +2394,50 @@ def _epoch_history(run_dir: Path) -> list[dict[str, object]]:
     for row in rows.values():
         if "status" not in row:
             row["status"] = "partial"
+        # Per-head/total training loss band. hexgnn/hexgt attach a `buffer` block
+        # (parsed from rl_train.log by their dashboard bridge); dense_cnn emits the
+        # same numbers in the epoch's `training` block (training.loss +
+        # training.loss_components). Surface them through the SAME selfplay.buffer
+        # loss band app.js renders, when no producer buffer is present. A skipped/
+        # untrained epoch (loss None) yields no buffer, so the band stays empty
+        # (graceful) and the main row shows the training status ("skipped").
+        training = row.get("training")
+        selfplay = row.get("selfplay")
+        # _selfplay_epoch_summary always carries a "buffer" key (None for dense_cnn,
+        # the bridge dict for hexgnn/hexgt), so guard on falsy — only synthesize when
+        # there is no producer buffer; hexgnn's real buffer (truthy) always wins.
+        if isinstance(training, dict) and isinstance(selfplay, dict) and not selfplay.get("buffer"):
+            loss_buffer = _loss_buffer_from_training(training)
+            if loss_buffer:
+                selfplay["buffer"] = loss_buffer
     return [rows[key] for key in sorted(rows)]
+
+
+def _loss_buffer_from_training(training: dict[str, object]) -> dict[str, object]:
+    """Build the `selfplay.buffer` loss block app.js renders (loss_total / loss_policy
+    / loss_value / loss_opp / loss_stvalue_<h>) from a dense_cnn epoch `training`
+    result. dense_cnn's trainer returns the weighted total (`loss`) plus the UNWEIGHTED
+    per-head components (`loss_components`: policy, value, opp_policy, stvalue_<h>).
+    hexgnn/hexgt feed the identical band via their bridge `buffer`; this surfaces the
+    dense_cnn lineage's losses through the SAME panel. Returns {} when there is no
+    numeric total loss (e.g. a skipped/untrained epoch) so the band degrades gracefully
+    rather than breaking."""
+    total = _optional_float(training.get("loss"))
+    if total is None:
+        return {}
+    out: dict[str, object] = {"loss_total": total}
+    components = training.get("loss_components")
+    if isinstance(components, dict):
+        for src, dst in (("policy", "loss_policy"), ("value", "loss_value"), ("opp_policy", "loss_opp")):
+            value = _optional_float(components.get(src))
+            if value is not None:
+                out[dst] = value
+        for key, raw in components.items():
+            if isinstance(key, str) and key.startswith("stvalue_"):
+                value = _optional_float(raw)
+                if value is not None:
+                    out[f"loss_{key}"] = value  # stvalue_1 -> loss_stvalue_1 (app.js renders stv<h>)
+    return out
 
 
 def _learning_health(
@@ -2145,26 +2647,125 @@ def _selfplay_epoch_summary(payload: dict[str, object]) -> dict[str, object]:
         "search_positions_per_second": payload.get("search_positions_per_second"),
         "mcts_sims_per_searched_position": mcts_sims_per_searched_position,
         "elapsed_seconds": payload.get("elapsed_seconds"),
-        # Game-length stats (None for producers that don't emit them, e.g. older
-        # dense_cnn runs, so the frontend just omits them — additive, non-breaking).
+        # Game-length stats. hexgnn/hexgt emit these inline; dense_cnn does not, so
+        # _epoch_history backfills any None from the epoch's .hxr records (display
+        # side). Producer-emitted values pass through unchanged. None values are
+        # omitted client-side, so a run with neither stays unaffected.
         "game_length_mean": payload.get("game_length_mean"),
         "game_length_median": payload.get("game_length_median"),
         "game_length_max": payload.get("game_length_max"),
         "game_length_stdev": payload.get("game_length_stdev"),
+        "game_length_p95": payload.get("game_length_p95"),
+        # Outcome distribution. Same backfill story as the lengths above — derived
+        # from finished .hxr games when the producer omits them.
+        "win_p0_fraction": payload.get("win_p0_fraction"),
+        "win_p1_fraction": payload.get("win_p1_fraction"),
+        "draw_fraction": payload.get("draw_fraction"),
+        "decisive_fraction": payload.get("decisive_fraction"),
+        # mean_abs_value (mean |value target|) needs the NPZ value labels / self-play
+        # internals, not the .hxr — passed through when emitted (hexgnn), else None.
+        "mean_abs_value": payload.get("mean_abs_value"),
+        # Replay-buffer + per-head training-loss + calibration stats (nested object,
+        # None for producers that don't emit it — e.g. dense_cnn runs — so the
+        # frontend just omits the detail band). The dashboard bridge attaches this
+        # to the published selfplay payload; without this passthrough the per-head
+        # Losses group never reaches epochProgressDetail in app.js.
+        "buffer": payload.get("buffer"),
     }
+
+
+def _selfplay_game_stats_from_records(run_dir: Path, epoch: int) -> dict[str, object]:
+    """Derive game-length + win-fraction stats for one self-play epoch from its
+    ``.hxr`` game records, DISPLAY-SIDE.
+
+    hexgnn/hexgt self-play diagnostics carry these stats inline; dense_cnn's do
+    not. The dashboard already reads the same ``.hxr`` for the History panel via
+    ``_hxr_base_rows`` (memoized by mtime/size), so this reuse is cheap and adds no
+    new file I/O on a warm cache. Returns ``{}`` when the epoch record is absent or
+    has no completed games. Only stats that are honestly derivable from finished
+    game records are computed here — MCTS-internal diversity (visit/prior entropy,
+    candidate counts, opening/move2 entropy, forced-move fraction) and value-target
+    stats (mean_abs_value) need self-play internals/NPZ shards and stay absent."""
+
+    path = run_dir / "selfplay" / f"epoch_{epoch:06d}.hxr"
+    if not path.is_file():
+        return {}
+    rows = _hxr_base_rows(path, run_dir)
+    completed = [row for row in rows if str(row.get("status")) == "completed"]
+    if not completed:
+        return {}
+    lengths = [
+        int(row.get("length") or row.get("actions") or 0)
+        for row in completed
+    ]
+    lengths = [value for value in lengths if value > 0]
+    total = len(completed)
+    p0_wins = sum(1 for row in completed if row.get("winner") == "player0")
+    p1_wins = sum(1 for row in completed if row.get("winner") == "player1")
+    draws = total - p0_wins - p1_wins
+    stats: dict[str, object] = {
+        "win_p0_fraction": p0_wins / total,
+        "win_p1_fraction": p1_wins / total,
+        "draw_fraction": draws / total,
+        "decisive_fraction": (p0_wins + p1_wins) / total,
+    }
+    if lengths:
+        ordered = sorted(lengths)
+        idx = max(0, min(len(ordered) - 1, int(round(0.95 * (len(ordered) - 1)))))
+        stats.update(
+            {
+                "game_length_mean": statistics.fmean(lengths),
+                "game_length_median": statistics.median(lengths),
+                "game_length_max": max(lengths),
+                "game_length_stdev": statistics.pstdev(lengths) if len(lengths) > 1 else 0.0,
+                "game_length_p95": ordered[idx],
+            }
+        )
+    return stats
+
+
+def _backfill_selfplay_game_stats(run_dir: Path, epoch: int, selfplay: dict[str, object]) -> None:
+    """Fill in any game-stat field the self-play diagnostics left ``None`` with the
+    ``.hxr``-derived value, in place. Producer-emitted values always win; this only
+    populates gaps (so dense_cnn rows gain the stats hexgnn emits natively, while
+    hexgnn rows are untouched). Memoized record stats are computed at most once per
+    backfilled epoch per request."""
+
+    if not isinstance(selfplay, dict):
+        return
+    derivable = (
+        "game_length_mean",
+        "game_length_median",
+        "game_length_max",
+        "game_length_stdev",
+        "game_length_p95",
+        "win_p0_fraction",
+        "win_p1_fraction",
+        "draw_fraction",
+        "decisive_fraction",
+    )
+    if all(selfplay.get(key) is not None for key in derivable):
+        return
+    derived = _selfplay_game_stats_from_records(run_dir, epoch)
+    if not derived:
+        return
+    for key, value in derived.items():
+        if selfplay.get(key) is None:
+            selfplay[key] = value
 
 
 def _training_epoch_summary(payload: dict[str, object]) -> dict[str, object]:
     # Producer: dense_cnn/trainer.py DenseCNNTrainer.train_passes return dict.
     # Real keys: status, epoch, passes, generic_passes_requested, steps, samples,
-    # batch_size, loss, validation, elapsed_seconds, samples_per_second,
-    # train_state. loss_components/source_summary/policy_imitation are NOT in this
-    # payload; the dense_cnn.policy_targets.epoch_*.json overlay populates them on
-    # the row afterward (see _epoch_history), so they are None here.
+    # batch_size, loss, loss_components, validation, elapsed_seconds,
+    # samples_per_second, train_state. The trainer's return dict DOES carry the
+    # unweighted per-head `loss_components` (policy/value/opp_policy/stvalue_*) — pass
+    # it through so the per-head Loss band renders (the optional policy_targets overlay
+    # still augments source_summary/policy_imitation later in _epoch_history).
     return {
         "status": payload.get("status"),
         "loss": payload.get("loss"),
-        "loss_components": None,  # no producer key (overlaid from policy_targets file)
+        "loss_components": payload.get("loss_components"),  # per-head from dense_cnn trainer
         "source_summary": None,  # no producer key (overlaid from policy_targets file)
         "policy_imitation": None,  # no producer key (overlaid from policy_targets file)
         "steps": payload.get("steps"),
@@ -2328,7 +2929,109 @@ def _training_live_status(run_dir: Path) -> dict[str, object]:
         status["selfplay_live"] = _selfplay_live_summary(selfplay_live)
     if isinstance(training_progress, dict):
         status["training_progress"] = _training_progress_summary(training_progress)
+    sub_phase, sub_phase_detail = _derive_sub_phase(
+        run_dir,
+        diagnostics,
+        events,
+        selfplay_live if isinstance(selfplay_live, dict) else None,
+    )
+    if sub_phase is not None:
+        status["sub_phase"] = sub_phase
+        if sub_phase_detail is not None:
+            status["sub_phase_detail"] = sub_phase_detail
     return status
+
+
+def _derive_sub_phase(
+    run_dir: Path,
+    diagnostics: Path,
+    events: dict[str, object],
+    selfplay_live: dict[str, object] | None,
+) -> tuple[str | None, str | None]:
+    """Derive the active within-epoch sub-phase (self-play / shuffling / training /
+    evaluating) for the CURRENT live epoch, purely from on-disk file signals.
+
+    A dense_cnn epoch runs self-play (~10 min) -> shuffle (~1 min) -> train (~2 min)
+    -> SealBot eval (~15-19 min), but the run-level ``stage`` stays ``epoch_NNNNNN``
+    the whole time, so the long eval reads as a stuck "epoch running". This surfaces
+    the sub-phase so the owner can tell self-play from the long eval.
+
+    Returns ``(None, None)`` when nothing can be derived (e.g. setup stages, stopped
+    runs, or models without these file signals) so callers fall back to the existing
+    ``stage``/``stage_status`` label. Robust to missing files."""
+
+    # Only derive during an actively-running epoch. Setup stages, finished/stopped
+    # runs (no active stage) and non-epoch stages fall through to None, which keeps
+    # stopped runs like hexgnn on their existing label.
+    if str(events.get("status") or "") != "running":
+        return None, None
+    epoch = events.get("epoch")
+    if not isinstance(epoch, int):
+        return None, None
+
+    sp_status = str((selfplay_live or {}).get("status") or "")
+    sp_epoch = (selfplay_live or {}).get("epoch")
+    sp_age = _file_age_seconds(diagnostics / "dense_cnn.selfplay.live.json")
+
+    # SELF-PLAY: live writer still running for this epoch and the file is fresh.
+    if (
+        sp_status == "running"
+        and sp_epoch == epoch
+        and sp_age is not None
+        and sp_age <= 30.0
+    ):
+        finished = (selfplay_live or {}).get("games_finished")
+        requested = (selfplay_live or {}).get("requested_games")
+        detail = None
+        if isinstance(finished, int) and isinstance(requested, int) and requested > 0:
+            detail = f"games {finished}/{requested}"
+        return "self-play", detail
+
+    # POST-SELF-PLAY (shuffle -> train -> eval). Self-play for this epoch reports
+    # completed, but the finished epoch_NNNNNN.json has not been written yet, so the
+    # run is somewhere in the brief shuffle/train or the long eval.
+    epoch_done = (diagnostics / f"epoch_{epoch:06d}.json").is_file()
+    if sp_status == "completed" and sp_epoch == epoch and not epoch_done:
+        shuffle_age = _shuffle_dir_age_seconds(run_dir, epoch)
+        if shuffle_age is None:
+            # Shuffle output for this epoch not on disk yet -> still shuffling.
+            return "shuffling", None
+        # Shuffle done. Training is ~2 min; treat the window right after the shuffle
+        # dir appears as training, and everything after as the long SealBot eval.
+        if shuffle_age <= 150.0:
+            return "training", None
+        return "evaluating", "SealBot"
+
+    return None, None
+
+
+def _file_age_seconds(path: Path) -> float | None:
+    stat = _safe_stat(path)
+    if stat is None:
+        return None
+    return max(0.0, wall_clock() - float(stat.st_mtime))
+
+
+def _shuffle_dir_age_seconds(run_dir: Path, epoch: int) -> float | None:
+    """Seconds since the shuffleddata dir for ``epoch`` was last written, or None if
+    no such dir exists yet (shuffle for this epoch has not produced output)."""
+    suffix = f"epoch_{epoch:06d}"
+    newest_mtime: float | None = None
+    try:
+        candidates = (run_dir / "shuffleddata").glob(f"*{suffix}")
+    except OSError:
+        return None
+    for candidate in candidates:
+        if not candidate.is_dir():
+            continue
+        stat = _safe_stat(candidate)
+        if stat is None:
+            continue
+        if newest_mtime is None or stat.st_mtime > newest_mtime:
+            newest_mtime = stat.st_mtime
+    if newest_mtime is None:
+        return None
+    return max(0.0, wall_clock() - newest_mtime)
 
 
 def _training_run_status(run_dir: Path, histories: list[dict[str, object]], live_status: dict[str, object]) -> dict[str, object]:

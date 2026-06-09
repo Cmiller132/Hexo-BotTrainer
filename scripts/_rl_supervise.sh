@@ -91,9 +91,15 @@ log "gpu telemetry sampler watchdog started (pid=$TELEM_WATCH_PID -> $TELEM_CSV)
 trap 'rm -f "$LOCK"; kill $WATCH_PID $BRIDGE_WATCH_PID $TELEM_WATCH_PID 2>/dev/null; pkill -f "_dashboard_bridge.py" 2>/dev/null; pkill -f "query-gpu=timestamp,temperature" 2>/dev/null' EXIT
 
 rl_epoch(){ # highest completed rl_epoch from epoch checkpoints, else -1
-  local f; f=$(ls -1 "$CKPTS"/hexgt_rl_epoch*.pt 2>/dev/null | sort -V | tail -1)
+  # STRICT numeric match only: a non-standard name (e.g. a manual snapshot like
+  # hexgt_rl_epoch000007_lambda05.pt) sorts last under -V and fails the sed, leaving
+  # `cur` non-numeric -> the (( )) breaker arithmetic errors and no-progress detection
+  # is defeated (every crash counts as no-progress -> false premature HALT). Filter to
+  # the exact rotation pattern and guard the parsed value so this can't recur.
+  local f; f=$(ls -1 "$CKPTS"/hexgt_rl_epoch*.pt 2>/dev/null | grep -E '/hexgt_rl_epoch[0-9]+\.pt$' | sort -V | tail -1)
   [[ -z "$f" ]] && { echo -1; return; }
-  basename "$f" | sed -E 's/hexgt_rl_epoch0*([0-9]+)\.pt/\1/'
+  local e; e=$(basename "$f" | sed -E 's/hexgt_rl_epoch0*([0-9]+)\.pt/\1/')
+  [[ "$e" =~ ^[0-9]+$ ]] && echo "$e" || echo -1
 }
 
 capture_crash_diag(){ # $1=stamp $2=err_log $3=code $4=uptime — full forensic bundle

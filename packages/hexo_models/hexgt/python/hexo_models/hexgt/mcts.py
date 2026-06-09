@@ -71,8 +71,17 @@ class HexgtMctsSession:
         widening_min_children: int | None = None,
         forced_playout_k: float | None = None,
         move_temperatures: Sequence[float] | None = None,
+        per_root_visits: Sequence[int] | None = None,
+        per_root_forced_playout_k: Sequence[float] | None = None,
+        per_root_noise: Sequence[bool] | None = None,
     ) -> list["SearchResult"]:
-        """Search live root states through the native hexgt MCTS session."""
+        """Search live root states through the native hexgt MCTS session.
+
+        The ``per_root_*`` overrides (one entry per game key) let a SINGLE batched
+        call run roots with heterogeneous visit caps / forced-playouts / root noise —
+        coalescing KataGo PCR's full+fast move mix into one full-width forward stream.
+        Each None falls back to the scalar value broadcast to every root.
+        """
 
         if not root_states:
             return []
@@ -97,6 +106,9 @@ class HexgtMctsSession:
             widening_min_children=widening_min_children,
             forced_playout_k=forced_playout_k,
             move_temperatures=move_temperatures,
+            per_root_visits=per_root_visits,
+            per_root_forced_playout_k=per_root_forced_playout_k,
+            per_root_noise=per_root_noise,
         )
         return [_result_from_payload(payload) for payload in payloads]
 

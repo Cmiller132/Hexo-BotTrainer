@@ -88,6 +88,11 @@ class HexgtTrainer:
         self.mcts_virtual_batch_size: int | None = None
         self._base_lr = float(config.training.learning_rate)
         self._warmup_steps = max(0, int(config.training.warmup_steps))
+        # Optional resume-safe exponential LR decay keyed to global_step (see config).
+        self._lr_decay_enabled = bool(config.training.lr_decay_enabled)
+        self._lr_decay_start_step = int(config.training.lr_decay_start_step)
+        self._lr_decay_halflife = float(config.training.lr_decay_halflife_steps)
+        self._lr_min = float(config.training.lr_min)
         self._max_grad_norm = float(config.training.max_grad_norm)
         self._amp = bool(config.training.amp)
         # AMP loss scaling. `optimizer_step` runs the forward under `torch.autocast`
@@ -140,6 +145,19 @@ class HexgtTrainer:
     def _lr_at_step(self, step: int) -> float:
         if self._warmup_steps > 0 and step < self._warmup_steps:
             return self._base_lr * float(step + 1) / float(self._warmup_steps)
+        # Post-warmup exponential decay (resume-safe: pure function of `step`, which
+        # is the checkpointed global_step). Flat at base until lr_decay_start_step,
+        # then halve every lr_decay_halflife_steps, clamped at lr_min. Disabled or a
+        # non-positive halflife -> flat base_lr (the prior behavior).
+        if (
+            self._lr_decay_enabled
+            and self._lr_decay_halflife > 0.0
+            and step >= self._lr_decay_start_step
+        ):
+            decayed = self._base_lr * 2.0 ** (
+                -float(step - self._lr_decay_start_step) / self._lr_decay_halflife
+            )
+            return max(self._lr_min, decayed)
         return self._base_lr
 
     def _set_lr(self, lr: float) -> None:
