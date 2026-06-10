@@ -329,12 +329,17 @@ boundary bounce (halt → relaunch resuming from `epoch_000031.pt`, throughput k
 1. **Self-play opening-temperature anchor** (new code hook): `opening_temperature`
    /`opening_moves` added to `Model1SelfPlayConfig` + parser, and a floor in
    `selfplay._move_temperature` (`max(opening_temperature, adaptive_base)` for the
-   first `opening_moves` decisions). Set to **`opening_temperature=1.4`,
-   `opening_moves=8`**. Resulting opening curve at expected length ~97 (half-life
-   ~24 plies): **plies 0–7 held flat at 1.4**, then the existing adaptive decay
-   resumes (~0.79 @ ply 8 → 0.50 @ ply 24 → 0.10 floor). Chosen per the
-   opening-diversity analysis (recommended 1.3–1.5 over plies 0–6; the adaptive
-   scheme alone left the opening at only ~0.8–1.0, too low to diversify).
+   first `opening_moves` plies). **Unit of `opening_moves` = PLIES:** self-play
+   applies one `PlacementAction` per decision (`selfplay.py` apply/append), so
+   `move_index = len(actions)` is the ply index — 1 action = 1 placement = 1 ply.
+   Set to **`opening_temperature=1.4`, `opening_moves=5`** (covers `move_index`
+   0–4 = the first 5 plies; ply 0 is the forced origin / single legal move, so the
+   anchor is a no-op there and materially diversifies the first free plies 1–4).
+   *(Initially set to 8; revised to 5 on owner directive 2026-06-10.)* Resulting
+   opening curve at expected length ~97 (half-life ~24 plies): **plies 0–4 held flat
+   at 1.4**, then the existing adaptive decay resumes (~0.87 @ ply 5 → 0.50 @ ply 24
+   → 0.10 floor). Magnitude 1.4 per the opening-diversity analysis (recommended
+   1.3–1.5; the adaptive scheme alone left the opening at only ~0.8–1.0).
 2. **`train_samples_per_epoch` 32000 → 64000.**
 
 **Git: held uncommitted** (option A) — the commit clone is stale relative to the
