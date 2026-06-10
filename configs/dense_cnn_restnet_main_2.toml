@@ -65,16 +65,16 @@ short_term_value_weight = 0.1
 moves_left_weight = 0.1
 amp = true
 max_grad_norm = 1.0
-# 32000 (main1 ran 64000 = ~7.6x the ~8.4k generated rows/epoch, double the
-# ~4x KataGo reuse ceiling its own 32000-era comment cited — a plausible
-# contributor to the post-ep25 opening collapse). The trainer now trains
-# min(requested, available shuffled rows), so the early epochs (window smaller
-# than 32k) train on everything available instead of skipping. With PCR at
-# full_proportion=0.25 and 384 games/epoch (~100-ply games) the recorded yield
-# is ~10.8k effective rows/epoch -> ~3.0x reuse here. If reuse needs to move,
-# the lever is [selfplay].games_per_epoch (PCR makes games ~2.3x cheaper),
-# not this row count.
-train_samples_per_epoch = 32000
+# 48000 (raised from 32000 after the owner measured ~150-ply games). With PCR
+# at full_proportion=0.25 and 384 games/epoch at ~150 plies, the recorded yield
+# is ~14.4k raw / ~16.3k effective rows/epoch, so 48000 is ~2.9x reuse — inside
+# the ~1-4x KataGo band (32000 would under-use the data at ~2.0x; main1's
+# 64000 at its ~8.4k yield was ~7.6x, a plausible contributor to the post-ep25
+# opening collapse). The trainer trains min(requested, available shuffled
+# rows), so early short-game epochs train on everything available instead of
+# skipping. If yields shift again, retune via [selfplay].games_per_epoch and
+# this number together toward ~3x reuse.
+train_samples_per_epoch = 48000
 max_train_bucket_per_new_data = 8.0
 max_train_bucket_size = 500000
 no_repeat_files = true
@@ -99,7 +99,13 @@ soft_z_lambda = 0.1
 
 [model.config.selfplay]
 search_visits = 512
-active_games = 128
+# 192 (was 128 on main1). PCR shrinks most slots' trees (75% of moves search at
+# 128 visits), freeing tree memory, and 192 slots x virtual batch 4 = 768 max
+# in-flight leaves vs the 512 inference batch — the continuous scheduler's
+# flush queue can now always fill a full batch. WATCH epoch-1 VRAM: the old 128
+# bound was measured on all-full 512-visit trees, headroom is expected but not
+# yet measured. Must match performance.selfplay_batch_candidates below.
+active_games = 192
 c_puct = 1.5
 root_dirichlet_noise_enabled = true
 root_dirichlet_noise_fraction = 0.25
@@ -169,8 +175,11 @@ policy_init_max_plies = 8
 policy_init_temperature = 1.4
 
 [model.config.evaluation]
-games_per_epoch = 64
-eval_every = 3
+# 128 games every 5th epoch (was 64 every 3rd): about the same eval cost per
+# epoch, but each (rarer) reading carries a ±7% CI instead of ±10%, so the
+# trend line is worth more per point.
+games_per_epoch = 128
+eval_every = 5
 sealbot_variant = "best"
 sealbot_time_limit = 0.05
 max_actions = 1024
@@ -182,7 +191,7 @@ opening_moves = 8
 calibrate = true
 target_selfplay_positions_per_second = 16.0
 inference_batch_candidates = [128, 256, 512]
-selfplay_batch_candidates = [128]
+selfplay_batch_candidates = [192]   # = selfplay.active_games
 training_batch_candidates = [16, 32]
 mcts_virtual_batch_candidates = [4]
 selfplay_probe_positions = 2048
@@ -208,12 +217,11 @@ seed = 1
 epochs = 60
 
 [selfplay]
-# 384 games/epoch (rolling: 128 in flight, refilled), REINVESTING part of the
-# PCR saving in games. At ~100-ply games / 224 avg sims: ~8.6M sims/epoch =
-# ~66% of main1's all-full cost, 1.5x the games (and openings) per epoch, and
-# ~10.8k recorded rows -> ~3.0x reuse at train_samples_per_epoch=32000. 256
-# would bank the whole saving as speed but sit at ~4.4x reuse; 512 spends the
-# whole saving and slows the net-update cadence.
+# 384 games/epoch (rolling: 192 in flight, refilled), REINVESTING the PCR
+# saving in games. At the measured ~150-ply games / 224 avg sims:
+# ~12.9M sims/epoch — about main1's all-full per-epoch cost — buying 1.5x the
+# games (and openings) per epoch and ~14.4k recorded rows (~2.9x reuse at
+# train_samples_per_epoch=48000).
 games_per_epoch = 384
 update_checkpoint_pointer = false
 
