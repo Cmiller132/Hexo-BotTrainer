@@ -3436,13 +3436,30 @@ async function debugLoadGames() {
         ? dbg.games.map(g => `<option value="${escapeAttr(g.path)}">${escapeText(g.path)}</option>`).join("")
         : `<option value="">No ${dbg.source} games</option>`;
     }
-    if (!dbg.gameFile || !dbg.games.some(g => g.path === dbg.gameFile)) {
-      dbg.gameFile = dbg.games.length ? dbg.games[0].path : "";
+    const keepSelection = dbg.gameFile && dbg.games.some(g => g.path === dbg.gameFile);
+    if (keepSelection) {
+      if (sel) sel.value = dbg.gameFile;
+      await debugLoadPosition({ resetPly: true });
+    } else if (dbg.games.length) {
+      // Auto-pick the newest game that actually has records. The newest selfplay
+      // file is usually the IN-PROGRESS epoch (still being written by the live
+      // run), which has NO complete games yet — loading it fails with "contains
+      // no games", leaving dbg.position null so the board is blank and ply-nav
+      // (slider + prev/next) is inert. Probe newest-first and stop at the first
+      // game that loads, so the tab always opens on a usable game.
       dbg.record = 0;
+      dbg.position = null;
+      for (const g of dbg.games) {
+        dbg.gameFile = g.path;
+        if (sel) sel.value = dbg.gameFile;
+        await debugLoadPosition({ resetPly: true });
+        if (dbg.position) break;
+      }
+    } else {
+      dbg.gameFile = "";
+      dbg.position = null;
+      debugRenderAll();
     }
-    if (sel) sel.value = dbg.gameFile;
-    if (dbg.gameFile) await debugLoadPosition({ resetPly: true });
-    else { dbg.position = null; debugRenderAll(); }
   } catch (e) {
     debugSetStatus(`Games: ${e.message}`, "error");
   }
