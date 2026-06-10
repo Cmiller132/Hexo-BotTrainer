@@ -1,3 +1,53 @@
+// ---------------------------------------------------------------------------
+// On-screen diagnostics, anchored at the TOP. The Debug tab failed only on the
+// owner's real phone (never in headless/desktop), and an earlier BOTTOM-anchored
+// banner/version tag was hidden behind the Samsung system nav bar — so errors and
+// the version were invisible. This single top bar always shows the running
+// version, a live "last tap" echo (so a tap that registers is visible even if its
+// effect isn't), and any JS error (uncaught OR surfaced from the Debug code).
+const APP_VERSION = "20260610-debugnav7";
+function __diagBar() {
+  let el = document.getElementById("__diag");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "__diag";
+    el.style.cssText =
+      "position:fixed;left:0;right:0;top:0;z-index:2147483647;" +
+      "font:11px/1.4 ui-monospace,Menlo,Consolas,monospace;padding:4px 8px;" +
+      "white-space:pre-wrap;word-break:break-word;max-height:42vh;overflow:auto;";
+    el.addEventListener("click", () => { el.dataset.err = ""; __renderDiag(); });
+    (document.body || document.documentElement).appendChild(el);
+  }
+  return el;
+}
+function __renderDiag() {
+  const el = __diagBar();
+  const err = el.dataset.err || "";
+  const tap = el.dataset.tap || "";
+  el.style.background = err ? "#5a1020" : "rgba(8,20,30,0.92)";
+  el.style.color = err ? "#fff" : "#7fe0ff";
+  el.style.borderBottom = err ? "2px solid #ff5650" : "1px solid #1d3b50";
+  el.textContent = "v" + APP_VERSION + (tap ? "  ·  " + tap : "") + (err ? "\nERROR (tap to clear): " + err : "");
+}
+function reportError(msg) { try { __diagBar().dataset.err = String(msg); __renderDiag(); } catch (_e) {} }
+function diagTap(msg) { try { __diagBar().dataset.tap = String(msg); __renderDiag(); } catch (_e) {} }
+function showVersionTag() { try { __renderDiag(); } catch (_e) {} }
+window.__appVersion = APP_VERSION;
+window.addEventListener("error", e => {
+  const m = (e && e.error && (e.error.stack || e.error.message)) ||
+    `${e && e.message} @ ${e && e.filename}:${e && e.lineno}:${e && e.colno}`;
+  reportError(String(m));
+});
+window.addEventListener("unhandledrejection", e => {
+  const r = e && e.reason;
+  reportError("promise rejection: " + ((r && (r.stack || r.message)) || String(r)));
+});
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", showVersionTag);
+} else {
+  showVersionTag();
+}
+
 const HEX = 19;
 const SQRT3 = Math.sqrt(3);
 const FIT_MOVE_COUNT = 8;
@@ -3298,12 +3348,29 @@ const dbg = {
   imported: null,   // imported action-id list (overrides game when set)
   overlays: { policy: true, visits: false, opp: false, threats: false, numbers: true },
   pendingDeepLink: null,
+  // Monotonic request tokens so the LATEST navigation/analysis always wins. The
+  // dense_cnn_restnet CPU forward is far slower than hexgt's tiny graph forward,
+  // so without these guards a slow/stale position fetch or analyze can resolve
+  // AFTER a newer ply click and clobber dbg.position/dbg.analysis — which wedged
+  // forward/back stepping and slider scrubbing for that lineage. Each load/analyze
+  // claims a token and only commits if it is still the newest.
+  posSeq: 0,
+  anlSeq: 0,
+  // Full ordered stone list for the current game (each placement carries a 1-based
+  // `index`), captured from any loaded position. Lets prev/next/slider re-render
+  // the board for any ply INSTANTLY client-side (stones with index <= ply) without
+  // waiting on the server position fetch or the slow ResTNet analyze.
+  gamePlacements: [],
+  gameKey: "",
 };
 
 const dbgEl = id => document.getElementById(id);
 const debugBoardSvg = dbgEl("debugBoardSvg");
 
 function debugSetStatus(message, kind = "info") {
+  // Mirror real errors to the always-on-top banner so they're unmissable on a
+  // phone (the small inline status line is easy to miss on a narrow screen).
+  if (message && kind === "error") reportError(message);
   const el = dbgEl("debugStatus");
   if (!el) return;
   if (!message) {
@@ -3333,16 +3400,21 @@ async function debugFetchJson(url, options) {
 }
 
 async function enterDebugScreen() {
+  showVersionTag();
+  // Bind handlers in their OWN try so a later init failure can never leave the
+  // nav buttons unwired, and surface any exception to the on-screen banner (the
+  // real-phone failure mode we otherwise can't see). Each await is independently
+  // guarded so one throwing step can't kill the rest of init.
   if (!dbg.inited) {
     dbg.inited = true;
-    debugBindEvents();
-    await debugInit();  // consumes any pendingDeepLink itself
+    try { debugBindEvents(); } catch (e) { reportError("debugBindEvents: " + (e && (e.stack || e.message) || e)); }
+    try { await debugInit(); } catch (e) { reportError("debugInit: " + (e && (e.stack || e.message) || e)); }
   } else if (dbg.pendingDeepLink) {
     const link = dbg.pendingDeepLink;
     dbg.pendingDeepLink = null;
-    await debugApplyDeepLink(link);
+    try { await debugApplyDeepLink(link); } catch (e) { reportError("debugApplyDeepLink: " + (e && (e.stack || e.message) || e)); }
   } else {
-    debugRenderAll();
+    try { debugRenderAll(); } catch (e) { reportError("debugRenderAll: " + (e && (e.stack || e.message) || e)); }
   }
 }
 
@@ -3428,13 +3500,30 @@ async function debugLoadGames() {
         ? dbg.games.map(g => `<option value="${escapeAttr(g.path)}">${escapeText(g.path)}</option>`).join("")
         : `<option value="">No ${dbg.source} games</option>`;
     }
-    if (!dbg.gameFile || !dbg.games.some(g => g.path === dbg.gameFile)) {
-      dbg.gameFile = dbg.games.length ? dbg.games[0].path : "";
+    const keepSelection = dbg.gameFile && dbg.games.some(g => g.path === dbg.gameFile);
+    if (keepSelection) {
+      if (sel) sel.value = dbg.gameFile;
+      await debugLoadPosition({ resetPly: true });
+    } else if (dbg.games.length) {
+      // Auto-pick the newest game that actually has records. The newest selfplay
+      // file is usually the IN-PROGRESS epoch (still being written by the live
+      // run), which has NO complete games yet — loading it fails with "contains
+      // no games", leaving dbg.position null so the board is blank and ply-nav
+      // (slider + prev/next) is inert. Probe newest-first and stop at the first
+      // game that loads, so the tab always opens on a usable game.
       dbg.record = 0;
+      dbg.position = null;
+      for (const g of dbg.games) {
+        dbg.gameFile = g.path;
+        if (sel) sel.value = dbg.gameFile;
+        await debugLoadPosition({ resetPly: true });
+        if (dbg.position) break;
+      }
+    } else {
+      dbg.gameFile = "";
+      dbg.position = null;
+      debugRenderAll();
     }
-    if (sel) sel.value = dbg.gameFile;
-    if (dbg.gameFile) await debugLoadPosition({ resetPly: true });
-    else { dbg.position = null; debugRenderAll(); }
   } catch (e) {
     debugSetStatus(`Games: ${e.message}`, "error");
   }
@@ -3448,8 +3537,10 @@ async function debugLoadPosition({ resetPly = false, ply = null } = {}) {
   const params = new URLSearchParams({ run: dbg.run, path: dbg.gameFile, record: String(dbg.record) });
   if (targetPly != null) params.set("ply", String(targetPly));
   else params.set("ply", "0");
+  const seq = ++dbg.posSeq;  // claim latest; a newer load supersedes this one
   try {
     const data = await debugFetchJson(`/api/debug/position?${params.toString()}`);
+    if (seq !== dbg.posSeq) return;  // superseded by a newer ply nav — drop stale fetch
     if (targetPly == null && resetPly) {
       // Default to the final position so the whole game is visible at a glance.
       const total = data.debug.total;
@@ -3459,11 +3550,12 @@ async function debugLoadPosition({ resetPly = false, ply = null } = {}) {
     dbg.records = data.record_games || [];
     dbg.analysis = null;
     dbg.search = null;
+    debugCacheGamePlacements(data);
     debugSyncRecordSelect();
     debugRenderAll();
     await debugAnalyze();
   } catch (e) {
-    debugSetStatus(`Position: ${e.message}`, "error");
+    if (seq === dbg.posSeq) debugSetStatus(`Position: ${e.message}`, "error");
   }
 }
 
@@ -3475,15 +3567,19 @@ async function debugLoadImported(ply = null) {
   if (!ids.length) return;
   const targetPly = ply != null ? Math.max(0, Math.min(ply, ids.length)) : ids.length;
   const params = new URLSearchParams({ run: dbg.run || "", actions: ids.join(","), ply: String(targetPly) });
+  const seq = ++dbg.posSeq;  // claim latest (shared with debugLoadPosition)
   try {
-    dbg.position = await debugFetchJson(`/api/debug/position?${params.toString()}`);
+    const data = await debugFetchJson(`/api/debug/position?${params.toString()}`);
+    if (seq !== dbg.posSeq) return;  // superseded by a newer nav — drop stale fetch
+    dbg.position = data;
     dbg.records = [];
     dbg.analysis = null;
     dbg.search = null;
+    debugCacheGamePlacements(data);
     debugRenderAll();
     await debugAnalyze();
   } catch (e) {
-    debugSetStatus(`Import: ${e.message}`, "error");
+    if (seq === dbg.posSeq) debugSetStatus(`Import: ${e.message}`, "error");
   }
 }
 
@@ -3511,24 +3607,30 @@ function debugRequestBody() {
 async function debugAnalyze() {
   const body = debugRequestBody();
   if (!body || !dbg.checkpoint) { debugRenderAll(); return; }
+  const seq = ++dbg.anlSeq;  // claim latest; a slow dense analyze must not clobber a newer ply's
   dbg.loading = true;
   debugSetStatus("Evaluating position on CPU…", "busy");
   debugRenderAll();
   try {
-    dbg.analysis = await debugFetchJson("/api/debug/analyze", {
+    const analysis = await debugFetchJson("/api/debug/analyze", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
+    if (seq !== dbg.anlSeq) return;  // a newer position/analyze superseded us — drop stale result
+    dbg.analysis = analysis;
     debugSetStatus("");
   } catch (e) {
+    if (seq !== dbg.anlSeq) return;
     dbg.analysis = null;
     debugSetStatus(`Analyze: ${e.message}`, "error");
   } finally {
-    dbg.loading = false;
-    debugRenderAll();
+    if (seq === dbg.anlSeq) {
+      dbg.loading = false;
+      debugRenderAll();
+    }
   }
-  if (dbg.compareCheckpoint) debugRunCompare();
+  if (seq === dbg.anlSeq && dbg.compareCheckpoint) debugRunCompare();
 }
 
 async function debugRunSearch() {
@@ -3601,6 +3703,27 @@ function debugRenderAll() {
   debugRenderTrajectory();
 }
 
+function debugCacheGamePlacements(data) {
+  // Merge a loaded position's stones into the per-game cache (keyed by index), so
+  // the full game's board is known client-side regardless of which ply loaded.
+  const d = (data && data.debug) || {};
+  const key = `${dbg.run}|${dbg.gameFile}|${dbg.record}|${d.imported ? "imp" : ""}`;
+  if (key !== dbg.gameKey) { dbg.gameKey = key; dbg.gamePlacements = []; }
+  const byIndex = new Map(dbg.gamePlacements.map(p => [p.index, p]));
+  for (const p of (data.placements || [])) if (p && p.index != null) byIndex.set(p.index, p);
+  dbg.gamePlacements = [...byIndex.values()].sort((a, b) => a.index - b.index);
+}
+
+function debugCurrentPlacements() {
+  // Stones to show for the current ply. Prefer the cached full game filtered to
+  // `index <= ply` (instant, no round-trip); fall back to the server payload.
+  const pos = dbg.position;
+  if (!pos) return [];
+  const ply = pos.debug.ply;
+  if (dbg.gamePlacements.length) return dbg.gamePlacements.filter(p => p.index <= ply);
+  return pos.placements || [];
+}
+
 function debugHeatMaps() {
   // Build q,r -> normalized weight maps for the active overlays.
   const maps = { policy: new Map(), visits: new Map(), opp: new Map() };
@@ -3630,7 +3753,8 @@ function debugRenderBoard() {
     cells.set(key, Object.assign(existing, extra));
   };
   for (const c of (pos.legal || [])) addCell(c.q, c.r, { legal: true });
-  for (const p of (pos.placements || [])) addCell(p.q, p.r, { placement: p });
+  const placements = debugCurrentPlacements();
+  for (const p of placements) addCell(p.q, p.r, { placement: p });
   // Candidate cells from analysis (so heat shows even off the legal set).
   if (dbg.analysis) for (const r of dbg.analysis.policy || []) addCell(r.q, r.r, { candidate: true });
   for (const key of heat.policy.keys()) { const [q, r] = key.split(",").map(Number); addCell(q, r, {}); }
@@ -3647,9 +3771,14 @@ function debugRenderBoard() {
   debugBoardSvg.setAttribute("viewBox", `${minX} ${minY} ${maxX - minX} ${maxY - minY}`);
   debugBoardSvg.setAttribute("preserveAspectRatio", "xMidYMid meet");
 
-  // Last-move coords come from the server (true engine unpack); never recomputed here.
-  const lastCoord = (pos.debug.last_q != null && pos.debug.last_r != null)
-    ? { q: pos.debug.last_q, r: pos.debug.last_r } : null;
+  // Last move = the highest-index stone shown at this ply (derived client-side so
+  // the highlight tracks instantly on step). `placements` is sorted ascending by
+  // index, so the final element is the last move; ply 0 has none. Falls back to
+  // the server's engine-unpacked coords if the cache isn't populated yet.
+  const lastStone = placements.length ? placements[placements.length - 1] : null;
+  const lastCoord = lastStone
+    ? { q: lastStone.q, r: lastStone.r }
+    : ((pos.debug.last_q != null && pos.debug.last_r != null) ? { q: pos.debug.last_q, r: pos.debug.last_r } : null);
   data.sort((a, b) => (a.placement ? 1 : 0) - (b.placement ? 1 : 0));
   let html = "";
 
@@ -3772,12 +3901,20 @@ function debugRenderValue() {
       </div>`;
   }
 
+  // Moves-left head (dense lineages): decoded value in [-1,1] maps the binned
+  // [0, 80]-decision support, so remaining ≈ (v+1)/2 * 80. hexgt has no such head.
+  let movesLeftHtml = "";
+  if (a.moves_left && typeof a.moves_left.scalar === "number") {
+    const remaining = Math.max(0, (a.moves_left.scalar + 1) / 2 * 80);
+    movesLeftHtml = `<div class="dbg-stv-row"><span class="label">moves left</span><span class="dbg-bar-track"><span class="dbg-bar-fill pos" style="width:${(Math.min(1, remaining / 80) * 100).toFixed(1)}%;left:0"></span></span><span class="value">~${remaining.toFixed(0)}</span></div>`;
+  }
+
   el.innerHTML = `
     <div class="dbg-value-scalar">value <strong class="${a.value >= 0 ? "pos" : "neg"}">${a.value.toFixed(4)}</strong> <span class="dbg-muted">(side to move)</span></div>
     <div class="dbg-vdist" aria-label="65-bin value distribution">${bars}</div>
     <div class="dbg-vdist-axis"><span>loss −1</span><span>0</span><span>+1 win</span></div>
     ${optimismHtml}
-    ${stvRows ? `<div class="dbg-stv">${stvRows}</div>` : ""}
+    ${(stvRows || movesLeftHtml) ? `<div class="dbg-stv">${stvRows}${movesLeftHtml}</div>` : ""}
   `;
 }
 
@@ -3922,7 +4059,11 @@ function debugRenderCheckpointInfo() {
     if (ck.graft) rows.push(["Graft", ck.graft === "pre" ? "pre (≤e6, expanded)" : "post (≥e7)"]);
   }
   if (meta) {
+    if (meta.lineage) rows.push(["Lineage", escapeText(meta.lineage)]);
     if (meta.rl_epoch != null) rows.push(["RL epoch", String(meta.rl_epoch)]);
+    if (meta.arch && meta.arch.blocks_type) rows.push(["Trunk", escapeText(String(meta.arch.blocks_type))]);
+    if (meta.stv_horizons && meta.stv_horizons.length) rows.push(["STV", meta.stv_horizons.join(", ")]);
+    if (meta.has_moves_left) rows.push(["Moves-left", "yes"]);
     if (meta.expanded_stv && meta.expanded_stv.length) rows.push(["STV expand", `${meta.expanded_stv.length} heads`]);
     if (meta.load_warnings && meta.load_warnings.length) rows.push(["Warnings", escapeText(meta.load_warnings.join("; "))]);
   }
@@ -3932,23 +4073,54 @@ function debugRenderCheckpointInfo() {
 // ---- events ---------------------------------------------------------------
 
 function debugBindEvents() {
+  const root = dbgEl("debugScreen");
+  if (!root || root.__dbgDelegated) return;  // bind once on the stable ancestor
+  root.__dbgDelegated = true;
+
+  // BUTTONS via event DELEGATION on #debugScreen (which is never rebuilt), plus a
+  // touchend fallback. The previous per-button click listeners failed on the
+  // owner's phone: the controls were trapped in a fixed-height overflow:hidden
+  // panel that micro-scrolled under the finger, so the browser classified the tap
+  // as a scroll and never promoted touchend -> click — the button focused but the
+  // handler never ran. Delegation + an explicit touchend handler guarantees the
+  // action fires on tap; everything routes through reportError so a throw is
+  // visible on the device.
+  const ACTIONS = {
+    debugPlyStart:      { fn: () => debugStep(-1e9), tap: "|< start" },
+    debugPlyPrev:       { fn: () => debugStep(-1),   tap: "< prev" },
+    debugPlyNext:       { fn: () => debugStep(1),    tap: "> next" },
+    debugPlyEnd:        { fn: () => debugStep(1e9),  tap: ">| end" },
+    debugRefreshBtn:    { fn: () => debugLoadRun(),  tap: "refresh" },
+    debugAnalyzeBtn:    { fn: () => debugAnalyze(),  tap: "analyze" },
+    debugSearchBtn:     { fn: () => debugRunSearch(), tap: "search" },
+    debugImportBtn:     { fn: () => debugImport(),   tap: "import" },
+    debugTrajectoryBtn: { fn: () => debugPlotTrajectory(), tap: "plot" },
+  };
+  let lastTouchFire = 0;
+  const fire = (ev) => {
+    const hit = ev.target && ev.target.closest && ev.target.closest("button[id]");
+    if (!hit) return;
+    const act = ACTIONS[hit.id];
+    if (!act) return;
+    ev.preventDefault();
+    diagTap(act.tap);
+    try { act.fn(); } catch (e) { reportError("nav " + hit.id + ": " + (e && (e.stack || e.message) || e)); }
+  };
+  root.addEventListener("touchend", (ev) => { lastTouchFire = Date.now(); fire(ev); }, { passive: false });
+  root.addEventListener("click", (ev) => {
+    if (Date.now() - lastTouchFire < 700) return;  // touchend already handled this tap
+    fire(ev);
+  });
+
+  // Selects / slider / checkboxes / text input keep direct change/input listeners.
   const on = (id, ev, fn) => { const el = dbgEl(id); if (el) el.addEventListener(ev, fn); };
   on("debugRunSelect", "change", async e => { dbg.run = e.target.value; dbg.gameFile = ""; dbg.checkpoint = ""; await debugLoadRun(); });
   on("debugSourceSelect", "change", async e => { dbg.source = e.target.value; dbg.gameFile = ""; await debugLoadGames(); });
   on("debugGameSelect", "change", async e => { dbg.gameFile = e.target.value; dbg.record = 0; dbg.imported = null; await debugLoadPosition({ resetPly: true }); });
   on("debugRecordSelect", "change", async e => { dbg.record = Number(e.target.value) || 0; await debugLoadPosition({ resetPly: true }); });
   on("debugCheckpointSelect", "change", async e => { dbg.checkpoint = e.target.value; dbg.search = null; debugRenderCheckpointInfo(); await debugAnalyze(); });
-  on("debugRefreshBtn", "click", async () => { await debugLoadRun(); });
-  on("debugAnalyzeBtn", "click", () => debugAnalyze());
-  on("debugSearchBtn", "click", () => debugRunSearch());
   on("debugCompareSelect", "change", e => { dbg.compareCheckpoint = e.target.value; dbg.compare = null; debugRunCompare(); });
-  on("debugTrajectoryBtn", "click", () => debugPlotTrajectory());
-  on("debugPlyStart", "click", () => debugStep(-1e9));
-  on("debugPlyPrev", "click", () => debugStep(-1));
-  on("debugPlyNext", "click", () => debugStep(1));
-  on("debugPlyEnd", "click", () => debugStep(1e9));
-  on("debugPlySlider", "input", e => debugGotoPly(Number(e.target.value)));
-  on("debugImportBtn", "click", () => debugImport());
+  on("debugPlySlider", "input", e => { diagTap("slide " + e.target.value); debugGotoPly(Number(e.target.value)); });
   on("debugMoveInput", "keydown", e => { if (e.key === "Enter") debugImport(); });
   ["Policy", "Visits", "Opp", "Threats", "Numbers"].forEach(name => {
     on(`debugOv${name}`, "change", e => { dbg.overlays[name.toLowerCase()] = e.target.checked; debugRenderBoard(); });
@@ -3960,16 +4132,39 @@ function debugGotoPly(ply) {
   if (!dbg.position) return;
   dbg.position.debug.ply = Math.max(0, Math.min(ply, dbg.position.debug.total));
   dbg.position.debug.last_action_id = dbg.position.debug.ply > 0 ? dbg.position.debug.action_ids[dbg.position.debug.ply - 1] : null;
+  // INSTANT, analyze-independent step: update the ply bar AND the board right now
+  // from the client-side placement cache (stones with index <= ply). The board no
+  // longer waits on the server position fetch or the slow ResTNet analyze, so every
+  // press moves the move immediately. The previous ply's value/policy is cleared so
+  // those panels show "evaluating" instead of stale numbers until the async analyze
+  // for the new ply returns.
+  dbg.analysis = null;
+  dbg.search = null;
   debugRenderPlyBar();
-  // Debounce the position+analyze fetch while dragging the slider.
+  debugRenderBoard();
+  debugRenderPositionInfo();
+  debugRenderValue();
+  debugRenderMoves();
+  debugRenderSearch();
+  diagTap("ply " + dbg.position.debug.ply + "/" + dbg.position.debug.total);  // visible step feedback on-device
+  // Debounced, decoupled refresh: re-fetch the server position (legal cells /
+  // tactics) and run the analyze. These only fill in overlays/values when ready;
+  // they never gate the ply/board update above. A short debounce coalesces rapid
+  // presses and slider drags into a single fetch for the final ply.
   window.clearTimeout(debugPlyTimer);
-  debugPlyTimer = window.setTimeout(() => debugLoadPosition({ ply: dbg.position.debug.ply }), 180);
+  debugPlyTimer = window.setTimeout(() => debugLoadPosition({ ply: dbg.position.debug.ply }), 120);
 }
 
 function debugStep(delta) {
-  if (!dbg.position) return;
-  const ply = Math.max(0, Math.min(dbg.position.debug.ply + delta, dbg.position.debug.total));
-  debugGotoPly(ply);
+  // If a press does nothing, say WHY: no position loaded (the usual cause is the
+  // selected game failing to load) instead of silently returning.
+  if (!dbg.position) { debugSetStatus("No position loaded — pick a game with completed records.", "error"); return; }
+  try {
+    const ply = Math.max(0, Math.min(dbg.position.debug.ply + delta, dbg.position.debug.total));
+    debugGotoPly(ply);
+  } catch (e) {
+    reportError("debugStep/debugGotoPly: " + (e && (e.stack || e.message) || e));
+  }
 }
 
 function debugImport() {

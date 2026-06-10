@@ -333,6 +333,7 @@ class RelPosMHSA(nn.Module):
         dcol = cols - half
         disk_flat = torch.maximum(torch.maximum(drow.abs(), dcol.abs()), (drow + dcol).abs()) <= half  # (N,) bool
         self.register_buffer("disk_flat", disk_flat, persistent=False)
+        self.register_buffer("disk_indices", torch.nonzero(disk_flat, as_tuple=False).flatten(), persistent=False)
         disk_key_bias = torch.zeros(self.token_len, dtype=torch.float32)
         disk_key_bias[~disk_flat] = _DISK_MASK_VALUE  # additive -1e9 on corner KEY columns
         self.register_buffer("disk_key_bias", disk_key_bias, persistent=False)
@@ -346,6 +347,25 @@ class RelPosMHSA(nn.Module):
         # always recomputes, so gradients to the table are unaffected.
         self._cached_bias: torch.Tensor | None = None
         self._cached_bias_key: tuple | None = None
+        self._kv_gather_enabled = False
+        self._cached_kv_bias: torch.Tensor | None = None
+        self._cached_kv_bias_key: tuple | None = None
+        # Frozen inference bias (see freeze_inference_bias): a static additive-bias
+        # tensor for the active path, so the eval forward has NO data-dependent
+        # Python guards (version/None/tuple-compare) and is torch.compile +
+        # CUDA-graph traceable. `_bias_frozen` is a plain bool dynamo specializes on.
+        self._bias_frozen = False
+        self._frozen_bias: torch.Tensor | None = None
+        self._frozen_kv_bias: torch.Tensor | None = None
+
+    def _invalidate_bias_caches(self) -> None:
+        self._cached_bias = None
+        self._cached_bias_key = None
+        self._cached_kv_bias = None
+        self._cached_kv_bias_key = None
+        self._bias_frozen = False
+        self._frozen_bias = None
+        self._frozen_kv_bias = None
 
     def set_impl(self, impl: str) -> None:
         if impl not in ("sdpa", "materialized"):
@@ -357,8 +377,41 @@ class RelPosMHSA(nn.Module):
             raise ValueError(f"attention_scope must be one of {ATTENTION_SCOPES}, got {scope!r}")
         self.attention_scope = scope
         # The cached eval bias depends on the scope's key mask, so invalidate it.
-        self._cached_bias = None
-        self._cached_bias_key = None
+        self._invalidate_bias_caches()
+
+    def set_kv_gather(self, enabled: bool) -> None:
+        """Enable inference-only disk K/V gathering for SDPA attention."""
+
+        self._kv_gather_enabled = bool(enabled)
+        self._invalidate_bias_caches()
+
+    @torch.no_grad()
+    def freeze_inference_bias(self, *, dtype: torch.dtype, device: torch.device) -> None:
+        """Precompute the additive attention bias into a static tensor for the
+        ACTIVE eval path (dense-disk or KV-gathered), so the forward reads a
+        constant buffer instead of running the cache logic. This removes the
+        data-dependent Python guards that block torch.compile(fullgraph=True),
+        and is a strict superset of the runtime cache (computed once here).
+
+        Inference-only: the model must be in eval mode with frozen weights, at
+        its final dtype/device. Numerically identical to the unfrozen path (same
+        gather math); validated by the SDPA/materialized and KV-gather tests plus
+        the compile correctness gate.
+        """
+
+        self._frozen_bias = (
+            self._compute_relative_bias().to(device=device, dtype=dtype).contiguous()
+        )
+        if self._kv_gather_enabled:
+            rel2d = self.relative_index.view(self.token_len, self.token_len)
+            cols = self.disk_indices.to(device=rel2d.device)
+            sub_index = rel2d.index_select(1, cols).reshape(-1)
+            kv = self.relative_bias_table[sub_index]
+            kv = kv.view(self.token_len, int(cols.numel()), self.num_heads)
+            self._frozen_kv_bias = (
+                kv.permute(2, 0, 1).unsqueeze(0).to(device=device, dtype=dtype).contiguous()
+            )
+        self._bias_frozen = True
 
     def _compute_relative_bias(self) -> torch.Tensor:
         """Gather the additive bias `(1, heads, N, N)` fresh from the learned table.
@@ -393,6 +446,29 @@ class RelPosMHSA(nn.Module):
             self._cached_bias_key = key
         return self._cached_bias
 
+    def _relative_bias_kv_gathered(self, *, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
+        """Additive bias `(1, heads, N_query, N_disk_keys)` for gathered disk keys."""
+
+        rel2d = self.relative_index.view(self.token_len, self.token_len)
+        if self.training or torch.is_grad_enabled():
+            cols = self.disk_indices.to(device=rel2d.device)
+            sub_index = rel2d.index_select(1, cols).reshape(-1)
+            bias = self.relative_bias_table[sub_index]
+            bias = bias.view(self.token_len, int(cols.numel()), self.num_heads)
+            return bias.permute(2, 0, 1).unsqueeze(0).to(device=device, dtype=dtype)
+        version = int(getattr(self.relative_bias_table, "_version", 0))
+        key = (version, dtype, device)
+        if self._cached_kv_bias is None or self._cached_kv_bias_key != key:
+            cols = self.disk_indices.to(device=rel2d.device)
+            sub_index = rel2d.index_select(1, cols).reshape(-1)
+            bias = self.relative_bias_table[sub_index]
+            bias = bias.view(self.token_len, int(cols.numel()), self.num_heads)
+            self._cached_kv_bias = (
+                bias.permute(2, 0, 1).unsqueeze(0).to(device=device, dtype=dtype).detach().contiguous()
+            )
+            self._cached_kv_bias_key = key
+        return self._cached_kv_bias
+
     def _project(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         b, n, _ = x.shape
         shape = (b, n, self.num_heads, self.head_dim)
@@ -417,9 +493,36 @@ class RelPosMHSA(nn.Module):
         return self.out_drop(self.out_proj(out))
 
     def _forward_sdpa(self, x: torch.Tensor) -> torch.Tensor:
+        if (
+            self._kv_gather_enabled
+            and self.attention_scope == "disk"
+            and not self.training
+            and not torch.is_grad_enabled()
+        ):
+            return self._forward_sdpa_gathered(x)
         b, n, _ = x.shape
         q, k, v = self._project(x)
-        attn_mask = self._relative_bias(dtype=q.dtype, device=q.device)  # additive bias; SDPA scale = 1/sqrt(head_dim)
+        # additive bias; SDPA scale = 1/sqrt(head_dim). `_bias_frozen` is a plain
+        # bool (dynamo specializes on it) so the compiled graph has no branch.
+        if self._bias_frozen:
+            attn_mask = self._frozen_bias
+        else:
+            attn_mask = self._relative_bias(dtype=q.dtype, device=q.device)
+        out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
+        out = out.permute(0, 2, 1, 3).reshape(b, n, self.channels)
+        return self.out_drop(self.out_proj(out))
+
+    def _forward_sdpa_gathered(self, x: torch.Tensor) -> torch.Tensor:
+        """Full-query attention with K/V gathered to in-disk tokens only."""
+
+        b, n, _ = x.shape
+        q, k, v = self._project(x)
+        k = k.index_select(2, self.disk_indices)
+        v = v.index_select(2, self.disk_indices)
+        if self._bias_frozen:
+            attn_mask = self._frozen_kv_bias
+        else:
+            attn_mask = self._relative_bias_kv_gathered(dtype=q.dtype, device=q.device)
         out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
         out = out.permute(0, 2, 1, 3).reshape(b, n, self.channels)
         return self.out_drop(self.out_proj(out))
@@ -772,7 +875,7 @@ def _init_weights_trunc_normal(module: nn.Module) -> None:
             nn.init.constant_(module.weight, 1.0)
 
 
-def optimized_restnet_for_inference(model: nn.Module) -> nn.Module:
+def optimized_restnet_for_inference(model: nn.Module, *, attention_kv_gather: bool = False) -> nn.Module:
     """Return a cloned eval-only model with the residual convs/BNs folded away.
 
     Folds each plain `ResidualBlock` (Conv+BN -> Conv) and replaces remaining
@@ -791,6 +894,8 @@ def optimized_restnet_for_inference(model: nn.Module) -> nn.Module:
     for module in optimized.modules():
         if isinstance(module, ResidualBlock):
             _fuse_residual_block(module)
+        elif isinstance(module, RelPosMHSA):
+            module.set_kv_gather(attention_kv_gather)
     _replace_remaining_hex_convs(optimized)
     optimized.eval()
     return optimized

@@ -6,9 +6,11 @@ then two placements per turn). Python orchestration + Rust/PyO3 (maturin) for th
 (`/root/.venvs/hexgt-build`); run dirs live under `/mnt/e/Hexo-BotTrainer/runs/` (note: a
 different mount root than this repo).
 
-## Where the run is (as of 2026-06-10, ~00:30 UTC)
+## Where the run is (as of 2026-06-10, ~03:30 UTC)
 
-**Active line: `dense_cnn_restnet`, run `dense_cnn_restnet_main1` — LIVE at epoch 24.**
+**Active line: `dense_cnn_restnet`, run `dense_cnn_restnet_main1` — LIVE, resumed from
+`epoch_000025.pt` at the 03:22 UTC throughput bounce: CONTINUOUS MCTS scheduler + pure-fp16
+inference + batch-512 candidates (see the 2026-06-10 throughput section below).**
 Launched 2026-06-09 18:50 from the HF-prefit warm start; supervised by
 `scripts/_dc_restnet_supervise_main1.sh` (auto-resume + circuit breaker).
 
@@ -26,6 +28,67 @@ Launched 2026-06-09 18:50 from the HF-prefit warm start; supervised by
   picture: policy CE a level lower (legal-masked support), stvalue_2/6/16 near the uniform-bin
   floor (~4.17) training on new rows only, a moves_left component ramping in, value continuing
   from ~0.38.
+
+## 2026-06-10 throughput landing (continuous scheduler + GPU forward path)
+
+Problem (measured at epochs 23-24): the GPU evaluator was 84-93% of self-play wall but
+averaged only ~54 unique states per callback — tree reuse staggers each root's fresh-visit
+need, so roots dropped out of the lockstep eval rounds, and games idled at the per-move
+barrier in `selfplay.py`. Implemented by Codex from the staged plan, then reviewed/fixed/
+landed this session:
+
+- **Continuous scheduler (Rust, `mcts.rs run_continuous`, ADDITIVE — lockstep `search()`
+  untouched, parent dense_cnn + evaluation.py stay on it):** per-slot state machines, roots
+  keep <= virtual_batch_size leaves in flight, one eval queue (root inits included) flushed
+  at `scheduler_flush_target` (default = calibrated inference batch), move decided the
+  moment a root completes (`in_flight == 0` required so value_sums are final), game advanced
+  via a Python `on_move` callback (advance / replace-refill / done). Seeds are
+  `mix_seed(base, game_key, ply, stream)` (splitmix-style, golden-value cargo test) — fully
+  deterministic, i.i.d. per move, separate noise/move-select streams. Fail-loud on scheduler
+  stall (no silent partial epochs).
+- **Review fixes applied to the Codex draft:** removed a select-pass early-break that
+  starved high slots (only ~flush_target/vbatch slots ever progressed); select pass now
+  rayon-parallel across slots under `py.detach` (GIL released — the writer thread breathes);
+  per-move batch-diagnostics removed (was cloning cumulative eval stats per move and the
+  driver summed ~8.4k overlapping snapshots — payloads now carry root-only diagnostics, one
+  epoch aggregate in the summary); `mcts_virtual_batch_size=None` crash fixed (mirrors
+  lockstep default); end-of-epoch completeness assert; pow2-bucketed flush histogram.
+- **Driver (`selfplay.py _generate_selfplay_epoch_continuous`):** config-dispatched
+  (`selfplay.scheduler = "lockstep" | "continuous"`, lockstep body kept verbatim =
+  rollback path). Per-move work in `on_move` (sample capture, spill, apply, live progress);
+  game-end work (.hxr record, finalize, materialize, npz) on a background writer thread so
+  the GIL returns to the eval loop. Temperature precomputed per ply (half-life EMA is fixed
+  within an epoch). Epoch JSON gains `scheduler_diagnostics` (flush histogram/means,
+  on_move_seconds, moves_decided).
+- **fp16 inference (ON):** the folded inference clone runs `.half()` with no per-call
+  autocast; in-init fail-loud gate vs the fp32/autocast reference on real positions
+  (measured: argmax_match 0.977-1.000, decoded-value err 0.0007-0.0026; thresholds 0.90 /
+  0.05). `inference_batch_candidates` raised to [128, 256, 512] (batch-512 fp16 verified on
+  the 4070 Ti). Chunked eval payloads now stay on-GPU (the old chunked path silently did the
+  legal-priors softmax on CPU) and values+priors ship in ONE D2H sync.
+- **torch.compile backend (`compile_backend.py`, OFF):** reduce-overhead/CUDA-graphs wrapper
+  with per-bucket persistent input buffers + the TRT-style gate; flip
+  `inference_use_torch_compile` after a stable continuous epoch if wanted.
+- **KV-gathered disk attention (`architecture.py set_kv_gather`, OFF):** exact key exclusion
+  (K/V gathered to the 1261 in-disk tokens) for the folded inference model only; adopt only
+  if `scripts/_kv_gather_bench.py` shows >=10% forward win.
+- **Gates/tests:** `scripts/_continuous_ab_gate.py` (lockstep vs continuous on the live
+  checkpoint, GPU: both 100% sims-exact, continuous ~14% faster per unique eval on an
+  opening-biased probe) — rerun via `scripts/_run_ab_gate.sh`. 95 restnet-family pytest
+  green incl. 6 new native end-to-end scheduler tests (exact visits, determinism, refill,
+  exception propagation, diagnostics contract) + fp16/compile/KV-gather suites; parent
+  pipeline tests green. KNOWN PRE-EXISTING: 4 stale failures in
+  `tests/test_dense_cnn_compact_io.py` (parent package, assert pre-disk-crop semantics —
+  flagged as a separate cleanup task). `cargo test --features python` cannot link libpython
+  (pre-existing; pure-Rust scheduler logic is covered by the native pytest e2e instead).
+- **Rebuild:** use `scripts/_rebuild_hexo_models_hexgt.sh` (THIS checkout + hexgt-build venv,
+  `--release` — the old `_rebuild_hexo_models.sh` builds the SIBLING checkout). Rebuilt +
+  reinstalled 2026-06-10 ~03:10 UTC.
+- **First-epoch watchpoints:** `search_positions_per_second` (expect well above the 9.5
+  lockstep baseline), `mcts_simulations == 512 * searched_positions`,
+  `scheduler_diagnostics.flush_size_histogram` mass at >= 128, WSL RAM, SealBot eval at
+  epoch 27 as the quality backstop. Rollback = toml `scheduler = "lockstep"` (+
+  `inference_fp16_model = false` if needed) and bounce.
 
 ## 2026-06-09/10 session changes (all in `packages/dense_cnn_restnet` + its config/scripts; the
 parent `hexo_models.dense_cnn` package was NOT touched)

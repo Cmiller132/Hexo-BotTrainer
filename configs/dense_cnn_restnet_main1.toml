@@ -89,7 +89,7 @@ max_grad_norm = 1.0
 # self-play, so training remains the minority cost. The pass needs >=32k rows in
 # the shuffle output: satisfied from the current ~140k-row window; only a
 # from-scratch restart would skip the first ~4 epochs while the window fills.
-train_samples_per_epoch = 32000
+train_samples_per_epoch = 64000
 max_train_bucket_per_new_data = 8.0
 max_train_bucket_size = 500000
 no_repeat_files = true
@@ -135,6 +135,18 @@ widening_min_children = 2
 # measured ~4 KB/state and buys back repeat evaluations.
 mcts_session_cache_max_states = 262144
 mcts_active_root_limit = 256
+# Scheduler: PRODUCTION = "lockstep" (verified best 2026-06-10). Offline A/B on
+# the epoch-30 checkpoint with all GPU levers (fp16 + KV-gather + compile, both
+# exact + compile-adopted, 2048-position probe) measured lockstep 8.92 vs
+# continuous 8.81 pos/s — lockstep ~1.2% faster and simpler/proven. At the
+# current 512-visit / 128-game config lockstep's synchronized rounds already
+# batch ~410 states, so the continuous scheduler's per-move callback/slot
+# overhead slightly outweighs its staggered-completion bubble savings (the
+# "avg batch 54" motivation held only at the old 256-visit config). The
+# continuous path (run_continuous + scripts/_continuous_ab_gate.py) is retained,
+# additive and gated, for comparison only — set "continuous" to re-enable.
+scheduler = "lockstep"
+scheduler_flush_target = 0
 max_actions = 1024
 temperature = 1.0
 # Adaptive temperature decay (replaces the absolute-move anchor schedule, which
@@ -149,6 +161,22 @@ temperature = 1.0
 temperature_halflife_fraction = 0.25
 temperature_length_prior = 32.0
 temperature_floor = 0.1
+# Opening-diversity anchor (self-play, added 2026-06-10; opening_moves 8->5 on
+# owner directive). Hold a flat, higher played-move temperature over the first
+# `opening_moves` PLIES so the opening diversifies BEFORE the adaptive half-life
+# decay takes over; it is a floor (max(opening_temperature, adaptive_base)) so it
+# never sharpens the opening below the base curve. UNIT: self-play applies one
+# PlacementAction per decision, so move_index = len(actions) = ply index; thus
+# `opening_moves` is counted in PLIES (1 action = 1 placement = 1 ply). The opening
+# collapse ("origin + n=8-edge") is prior-driven, so the anchor must be meaningfully
+# higher than the adaptive opening (~0.8-1.0) to spread selection — 1.4 per the
+# opening-diversity analysis (recommended 1.3-1.5). opening_moves=5 covers move_index
+# 0..4 = the first 5 plies; ply 0 is the forced origin (single legal move, so the
+# anchor is a no-op there) and plies 1-4 are the first free decisions it diversifies.
+# At expected length ~97 (half-life ~24 plies): plies 0-4 held flat at 1.4, then
+# adaptive resumes (~0.87 at ply 5, 0.5 at ply 24, ... floor 0.1).
+opening_temperature = 1.4
+opening_moves = 5
 forced_playout_k = 2.0
 
 [model.config.evaluation]
@@ -164,15 +192,33 @@ opening_moves = 8
 [model.config.performance]
 calibrate = true
 target_selfplay_positions_per_second = 16.0   # full-attention trunk: expect low pos/s (non-goal)
-# Attention memory grows with the forward batch, so probe a conservative set; the
-# calibration OOM guard drops any candidate that OOMs and keeps the largest viable.
-inference_batch_candidates = [32, 64, 128]
+# Inference-only forwards are far lighter than training fwd+bwd (the old
+# [32,64,128] cap came from training-memory measurements); fp16 halves them
+# again. Batch 512 fp16 verified on the 4070 Ti 2026-06-10. The calibration OOM
+# guard still drops any candidate that OOMs and keeps the fastest viable.
+inference_batch_candidates = [128, 256, 512]
 selfplay_batch_candidates = [128]
 training_batch_candidates = [16, 32]
 mcts_virtual_batch_candidates = [4]
 selfplay_probe_positions = 2048
 probe_batches = 1
 inference_use_tensorrt = false   # attention does not export to TRT cleanly; torch backend
+# Pure-fp16 folded inference model (no per-call autocast). Correctness-gated at
+# construction on real positions, fail-loud (gate measured 2026-06-10:
+# argmax_match=1.0000, decoded value err=0.0026 vs the fp32/autocast reference).
+inference_fp16_model = true
+inference_fp16_allow_fallback = false
+# torch.compile(reduce-overhead) CUDA-graph forward, correctness-gated vs eager
+# on real positions. ENABLED 2026-06-10 (owner: GPU-only throughput levers, no
+# quality change). fallback ON so a compile/capture failure logs loudly and runs
+# eager rather than halting the live run; the gate still proves equivalence when
+# it adopts. Mutually exclusive with TRT.
+inference_use_torch_compile = true
+inference_compile_allow_torch_fallback = true
+# KV-gathered disk attention: SDPA over the 1261 in-disk keys, proven
+# bit-equivalent to the -1e9 dense key mask (tests/test_dense_cnn_restnet_attention,
+# atol 1e-5). ENABLED 2026-06-10 alongside compile; eval/no-grad path only.
+attention_kv_gather = true
 inference_bucket_pad_multiple = 16
 
 [run]

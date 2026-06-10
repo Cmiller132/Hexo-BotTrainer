@@ -2446,22 +2446,105 @@ body:not(.tactics-on) .tactic-legend {
 .debug-status-error { border-color: rgba(255,86,80,0.5); background: rgba(255,86,80,0.10); color: var(--p1); }
 
 .debug-grid { align-items: start; }
-.debug-screen .board-area { min-height: 360px; }
+/* ============================================================
+   Debug viewer (dbgv-*) — mobile-first, NEVER clipped. REWRITE 2026-06-10.
+   The board lives in its own bounded aspect box; all ply / overlay / import
+   controls live in normal document flow BELOW it. Previously these controls were
+   children of the shared fixed-height `overflow:hidden` `.board-panel`, so on a
+   phone the board filled the panel and the slider/Analyze/overlays were clipped
+   off-screen — AND the controls sat in a micro-scrolling clipped region where the
+   browser treated taps as scroll and suppressed the synthetic click (dead
+   buttons). Pulling the controls into normal flow fixes both. */
+.dbgv {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+/* Bounded, scalable board viewport. overflow:hidden here clips only the BOARD
+   (pan/zoom), never the controls (which are siblings, not children). */
+.dbgv-board {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  max-height: min(70vh, 620px);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  overflow: hidden;
+  background: linear-gradient(180deg, rgba(16, 29, 42, 0.92), rgba(9, 17, 25, 0.94));
+}
+.dbgv-board .board-area { position: absolute; inset: 0; width: 100%; height: 100%; min-height: 0; }
 #debugBoardSvg { width: 100%; height: 100%; display: block; }
+
+/* Controls bar: ALWAYS in normal flow under the board => never clipped. */
+.dbgv-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+.dbgv-nav { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.dbgv-nav button { min-height: 44px; touch-action: manipulation; }
+.dbgv-status { text-align: center; color: var(--text); line-height: 1.35; }
+.dbgv-slider-wrap { width: 100%; min-width: 0; }
+.dbgv-analyze { width: 100%; min-height: 44px; white-space: nowrap; touch-action: manipulation; }
+.dbgv-overlays {
+  display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: center;
+  padding: 8px 10px; background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--border); border-radius: 8px; font-size: 13px;
+}
+.dbgv-overlays label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; min-height: 32px; touch-action: manipulation; }
+.dbgv-overlays .overlay-label { color: var(--muted); font-weight: 600; }
+.dbgv-import { display: flex; gap: 8px; }
+.dbgv-import input { flex: 1; min-width: 0; }
+.dbgv-import button { min-height: 44px; touch-action: manipulation; }
+
+/* Custom range slider, visible on Android Chrome AND iOS Safari. The KEY for iOS
+   is `-webkit-appearance:none` on the INPUT itself (not only the thumb) — a prior
+   attempt set it only on the thumb and the slider rendered invisible on iOS. */
+#debugPlySlider {
+  -webkit-appearance: none; appearance: none;
+  width: 100%; height: 28px; margin: 0;
+  background: transparent; cursor: pointer; touch-action: manipulation;
+}
+#debugPlySlider::-webkit-slider-runnable-track { height: 10px; border-radius: 6px; background: #2c3d50; border: 1px solid var(--border); }
+#debugPlySlider::-moz-range-track { height: 10px; border-radius: 6px; background: #2c3d50; border: 1px solid var(--border); }
+#debugPlySlider::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none;
+  width: 24px; height: 24px; border-radius: 50%;
+  background: var(--accent); border: 2px solid #fff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5); margin-top: -8px;
+}
+#debugPlySlider::-moz-range-thumb {
+  width: 24px; height: 24px; border-radius: 50%;
+  background: var(--accent); border: 2px solid #fff; box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+}
+#debugPlySlider:focus { outline: none; }
+
 .dbg-stone-label { fill: #fff; font-size: 11px; font-weight: 600; pointer-events: none; }
 .dbg-cell { cursor: crosshair; }
 .debug-legend { gap: 12px; }
 
-.debug-overlay-controls { display: flex; flex-wrap: wrap; gap: 12px; align-items: center;
-  margin-top: 10px; padding: 8px 10px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; font-size: 13px; }
-.debug-overlay-controls label { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
-.debug-overlay-controls .overlay-label { color: var(--muted); font-weight: 600; }
-
-.debug-import { display: flex; gap: 8px; margin-top: 10px; }
-.debug-import input { flex: 1; }
-
-.debug-replay .replay-row { gap: 10px; }
-.debug-replay .primary-action { white-space: nowrap; }
+/* Desktop: nav | status | slider | analyze on one row; overlays + import full-width below. */
+@media (min-width: 981px) {
+  .dbgv-board { max-height: min(62vh, 600px); }
+  .dbgv-controls {
+    display: grid;
+    grid-template-columns: auto minmax(150px, 220px) minmax(180px, 1fr) auto;
+    grid-template-areas: "nav status slider analyze" "overlays overlays overlays overlays" "import import import import";
+    align-items: center; column-gap: 12px; row-gap: 10px;
+  }
+  .dbgv-nav { grid-area: nav; grid-template-columns: repeat(4, minmax(40px, 1fr)); }
+  .dbgv-status { grid-area: status; }
+  .dbgv-slider-wrap { grid-area: slider; }
+  .dbgv-analyze { grid-area: analyze; width: auto; padding: 0 18px; }
+  .dbgv-overlays { grid-area: overlays; }
+  .dbgv-import { grid-area: import; }
+}
 
 .debug-chip { font-size: 13px; font-weight: 700; padding: 1px 8px; border-radius: 999px; margin-left: 6px;
   border: 1px solid var(--border); }

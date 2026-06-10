@@ -387,3 +387,98 @@ def test_content_checkpoint_cross_loads_with_disk_and_full():
     assert not missing and not unexpected
     missing, unexpected = disk.load_state_dict(content.state_dict(), strict=True)
     assert not missing and not unexpected
+
+
+# =========================================================================== #
+# Stage D - inference-only KV-gathered disk attention.
+# =========================================================================== #
+def test_kv_gathered_disk_matches_dense_disk_attention():
+    torch.manual_seed(18)
+    mhsa = RelPosMHSA(channels=16, num_heads=4, board_h=BOARD_SIZE, board_w=BOARD_SIZE,
+                      attention_scope="disk").eval()
+    with torch.no_grad():
+        mhsa.relative_bias_table.normal_(std=0.2)
+    x = torch.randn(2, BOARD_AREA, 16)
+    with torch.no_grad():
+        mhsa.set_impl("sdpa")
+        mhsa.set_kv_gather(False)
+        dense = mhsa(x)
+        mhsa.set_kv_gather(True)
+        gathered = mhsa(x)
+    assert torch.allclose(gathered, dense, atol=1e-5, rtol=1e-4)
+
+
+def test_kv_gather_is_eval_only_training_uses_dense_path():
+    torch.manual_seed(19)
+    mhsa = RelPosMHSA(channels=16, num_heads=4, board_h=6, board_w=6,
+                      attention_scope="disk")
+    x = torch.randn(2, 36, 16)
+    mhsa.train()
+    with torch.enable_grad():
+        mhsa.set_kv_gather(False)
+        dense = mhsa(x)
+        mhsa.set_kv_gather(True)
+        gathered_flag = mhsa(x)
+    assert torch.allclose(gathered_flag, dense, atol=1e-6)
+
+
+def test_kv_gather_buffers_not_in_state_dict():
+    dense = RelPosMHSA(channels=16, num_heads=4, board_h=BOARD_SIZE, board_w=BOARD_SIZE,
+                       attention_scope="disk")
+    gathered = RelPosMHSA(channels=16, num_heads=4, board_h=BOARD_SIZE, board_w=BOARD_SIZE,
+                          attention_scope="disk")
+    gathered.set_kv_gather(True)
+    assert set(dense.state_dict()) == set(gathered.state_dict())
+    for key in gathered.state_dict():
+        assert "disk_indices" not in key and "kv_bias" not in key
+
+
+# =========================================================================== #
+# Frozen inference bias (torch.compile-friendly static bias buffers).
+# =========================================================================== #
+def test_frozen_bias_matches_unfrozen_dense_and_kv():
+    torch.manual_seed(20)
+    for kv_gather in (False, True):
+        mhsa = RelPosMHSA(channels=16, num_heads=4, board_h=BOARD_SIZE, board_w=BOARD_SIZE,
+                          attention_scope="disk").eval()
+        with torch.no_grad():
+            mhsa.relative_bias_table.normal_(std=0.2)
+        mhsa.set_kv_gather(kv_gather)
+        x = torch.randn(2, BOARD_AREA, 16)
+        with torch.no_grad():
+            unfrozen = mhsa(x)
+            mhsa.freeze_inference_bias(dtype=torch.float32, device=torch.device("cpu"))
+            assert mhsa._bias_frozen
+            frozen = mhsa(x)
+        assert torch.allclose(frozen, unfrozen, atol=1e-6), f"kv_gather={kv_gather}"
+
+
+def test_set_kv_gather_clears_frozen_bias():
+    mhsa = RelPosMHSA(channels=16, num_heads=4, board_h=BOARD_SIZE, board_w=BOARD_SIZE,
+                      attention_scope="disk").eval()
+    mhsa.freeze_inference_bias(dtype=torch.float32, device=torch.device("cpu"))
+    assert mhsa._bias_frozen
+    mhsa.set_kv_gather(True)
+    assert not mhsa._bias_frozen and mhsa._frozen_bias is None
+
+
+def test_frozen_kv_gather_forward_is_torch_compile_traceable():
+    """fullgraph compile of the frozen KV-gather path must NOT raise the
+    data-dependent-guard error that the runtime bias cache triggered. CPU trace
+    reproduces the dynamo failure mode device-independently."""
+
+    if not hasattr(torch, "compile"):
+        pytest.skip("torch.compile unavailable")
+    torch.manual_seed(21)
+    mhsa = RelPosMHSA(channels=16, num_heads=4, board_h=BOARD_SIZE, board_w=BOARD_SIZE,
+                      attention_scope="disk").eval()
+    with torch.no_grad():
+        mhsa.relative_bias_table.normal_(std=0.2)
+    mhsa.set_kv_gather(True)
+    mhsa.freeze_inference_bias(dtype=torch.float32, device=torch.device("cpu"))
+    x = torch.randn(2, BOARD_AREA, 16)
+    with torch.no_grad():
+        eager = mhsa(x)
+        compiled = torch.compile(mhsa, fullgraph=True, dynamic=False)
+        got = compiled(x)
+    assert torch.allclose(got, eager, atol=1e-5, rtol=1e-4)

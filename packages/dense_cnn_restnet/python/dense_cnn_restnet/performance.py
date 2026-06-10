@@ -20,8 +20,8 @@ from .config import Model1Config
 from .constants import BOARD_SIZE, INPUT_CHANNELS
 from .losses import model1_loss
 
-CALIBRATION_CACHE_VERSION = 6
-MCTS_BACKEND_SIGNATURE = "dense_cnn_katago_tree_reuse_in_crop_staged_edges_v2"
+CALIBRATION_CACHE_VERSION = 7
+MCTS_BACKEND_SIGNATURE = "dense_cnn_katago_tree_reuse_in_crop_staged_edges_v2_gpu_backends"
 MCTS_EVAL_CHUNK_STATES = 1024
 
 
@@ -73,6 +73,7 @@ def calibrate_dense_cnn(
             candidates=inference_batch_candidates or perf.inference_batch_candidates,
             probe_batches=perf.probe_batches,
         )
+        selected_inference_benchmark = _best_batch(inference_results)
         training_results = _benchmark_training(
             model,
             optimizer=optimizer,
@@ -88,6 +89,7 @@ def calibrate_dense_cnn(
             virtual_batch_candidates=mcts_virtual_batch_candidates or perf.mcts_virtual_batch_candidates,
             visits=config.selfplay.search_visits,
             probe_positions=perf.selfplay_probe_positions,
+            inference_batch_size=int(selected_inference_benchmark.get("batch_size", 1)),
         )
     finally:
         model.load_state_dict(model_state)
@@ -96,7 +98,6 @@ def calibrate_dense_cnn(
         if optimizer is not None and optimizer_state is not None:
             optimizer.load_state_dict(optimizer_state)
         _clear_cache(device)
-    selected_inference_benchmark = _best_batch(inference_results)
     selected_training = _best_batch(training_results)
     selected_selfplay = _select_selfplay_setting(
         selfplay_results,
@@ -257,6 +258,7 @@ def _benchmark_selfplay(
     virtual_batch_candidates: Sequence[int],
     visits: int,
     probe_positions: int,
+    inference_batch_size: int | None = None,
 ) -> list[dict[str, Any]]:
     from .inference import DenseCNNInference
 
@@ -266,7 +268,15 @@ def _benchmark_selfplay(
         device=config.device,
         amp=config.training.amp,
         return_logits=False,
-        max_batch_size=min(1024, max(int(item) for item in config.performance.inference_batch_candidates)),
+        max_batch_size=int(inference_batch_size or max(int(item) for item in config.performance.inference_batch_candidates)),
+        use_trt=config.performance.inference_use_tensorrt,
+        bucket_pad_multiple=(config.performance.inference_bucket_pad_multiple or None),
+        trt_allow_fallback=config.performance.inference_trt_allow_torch_fallback,
+        fp16_model=config.performance.inference_fp16_model,
+        fp16_allow_fallback=config.performance.inference_fp16_allow_fallback,
+        use_torch_compile=config.performance.inference_use_torch_compile,
+        compile_allow_fallback=config.performance.inference_compile_allow_torch_fallback,
+        attention_kv_gather=config.performance.attention_kv_gather,
     )
     for selfplay_batch_size in batch_candidates:
         for virtual_batch_size in virtual_batch_candidates:
@@ -319,6 +329,16 @@ def _benchmark_selfplay_setting(
     exact_visit_results = 0
     mcts_diagnostic_batches: list[Mapping[str, Any]] = []
     mcts_session = new_mcts_session(max_states=config.selfplay.mcts_session_cache_max_states)
+    if getattr(config.selfplay, "scheduler", "lockstep") == "continuous":
+        return _benchmark_selfplay_setting_continuous(
+            inference=inference,
+            config=config,
+            mcts_session=mcts_session,
+            selfplay_batch_size=active_limit,
+            virtual_batch_size=virtual_batch_size,
+            visits=resolved_visits,
+            probe_positions=target_positions,
+        )
     started = perf_counter()
     while positions < target_positions:
         # This mirrors self-play's search/apply loop without sample creation or
@@ -400,6 +420,117 @@ def _benchmark_selfplay_setting(
         "positions": int(positions),
         "searched_positions": int(positions),
         "recorded_positions": int(positions),
+        "mcts_simulations": int(mcts_simulations),
+        "exact_visit_results": int(exact_visit_results),
+        "all_searches_exact": exact_visit_results == positions,
+        "elapsed_seconds": elapsed,
+        "positions_per_second": positions / max(elapsed, 1.0e-9),
+    }
+
+
+def _benchmark_selfplay_setting_continuous(
+    *,
+    inference: Any,
+    config: Model1Config,
+    mcts_session: Any,
+    selfplay_batch_size: int,
+    virtual_batch_size: int,
+    visits: int,
+    probe_positions: int,
+) -> dict[str, Any]:
+    import hexo_engine as engine
+    from hexo_engine.types import unpack_coord_id
+    from .mcts import _result_from_payload
+
+    selfplay = config.selfplay
+    active_limit = int(selfplay_batch_size)
+    target_positions = int(probe_positions)
+    positions = 0
+    mcts_simulations = 0
+    exact_visit_results = 0
+    completed_games = 0
+    next_key = 0
+    active: dict[int, Any] = {}
+
+    def _new_state() -> tuple[int, Any]:
+        nonlocal next_key
+        key = next_key
+        next_key += 1
+        return key, engine.new_game(seed=410_000 + key)
+
+    while len(active) < active_limit:
+        key, state = _new_state()
+        active[key] = state
+
+    def _on_move(game_key: int, payload: Mapping[str, Any]) -> object:
+        nonlocal positions, mcts_simulations, exact_visit_results, completed_games
+        state = active.pop(int(game_key))
+        search = _result_from_payload(payload)
+        if int(search.visits) == visits:
+            exact_visit_results += 1
+        mcts_simulations += int(search.visits)
+        positions += 1
+        engine.apply_action(state, engine.PlacementAction(unpack_coord_id(int(search.action_id))))
+        if engine.terminal(state) is None and positions < target_positions:
+            active[int(game_key)] = state
+            return ("advance", state)
+        completed_games += 1
+        if positions < target_positions:
+            key, replacement = _new_state()
+            active[key] = replacement
+            return ("replace", key, replacement)
+        return None
+
+    started = perf_counter()
+    temperature_by_ply = [float(selfplay.temperature)] * max(1, int(selfplay.max_actions) + 1)
+    flush_target = int(selfplay.scheduler_flush_target or getattr(inference, "max_batch_size", active_limit))
+    flush_target = max(1, min(flush_target, active_limit * virtual_batch_size))
+    scheduler = mcts_session.run_continuous(
+        list(active.keys()),
+        list(active.values()),
+        inference,
+        _on_move,
+        visits=visits,
+        c_puct=selfplay.c_puct,
+        base_seed=29_000 + visits,
+        virtual_batch_size=virtual_batch_size,
+        flush_target=flush_target,
+        active_root_limit=selfplay.mcts_active_root_limit,
+        temperature_by_ply=temperature_by_ply,
+        root_dirichlet_total_alpha=(
+            selfplay.root_dirichlet_total_alpha if selfplay.root_dirichlet_noise_enabled else None
+        ),
+        root_dirichlet_noise_fraction=(
+            selfplay.root_dirichlet_noise_fraction if selfplay.root_dirichlet_noise_enabled else None
+        ),
+        root_policy_temperature=selfplay.root_policy_temperature,
+        fpu_reduction=selfplay.fpu_reduction,
+        virtual_loss=selfplay.virtual_loss,
+        widening_policy_mass=selfplay.widening_policy_mass,
+        widening_max_children=selfplay.widening_max_children,
+        widening_min_children=selfplay.widening_min_children,
+        forced_playout_k=selfplay.forced_playout_k,
+    )
+    elapsed = perf_counter() - started
+    scheduler = dict(scheduler)
+    batch_diagnostics = scheduler.pop("mcts_batch_diagnostics", None) or {}
+    return {
+        "status": "completed",
+        "scheduler": "continuous",
+        "scheduler_diagnostics": scheduler,
+        "visits": int(visits),
+        "selfplay_batch_size": active_limit,
+        "inference_batch_size": int(getattr(inference, "max_batch_size", active_limit)),
+        "batch_size": active_limit,
+        "mcts_virtual_batch_size": virtual_batch_size,
+        "mcts_tree_reuse_session": True,
+        "mcts_session_cache_max_states": selfplay.mcts_session_cache_max_states,
+        "mcts_active_root_limit": selfplay.mcts_active_root_limit,
+        "mcts_diagnostics": _summarize_mcts_diagnostic_batches([batch_diagnostics]),
+        "positions": int(positions),
+        "searched_positions": int(positions),
+        "recorded_positions": int(positions),
+        "completed_games": int(completed_games),
         "mcts_simulations": int(mcts_simulations),
         "exact_visit_results": int(exact_visit_results),
         "all_searches_exact": exact_visit_results == positions,

@@ -105,6 +105,66 @@ class BatchedMctsSession:
         )
         return [_result_from_payload(payload) for payload in payloads]
 
+    def run_continuous(
+        self,
+        game_keys: Sequence[int],
+        root_states: Sequence[object],
+        inference: DenseCNNInference,
+        on_move: object,
+        *,
+        visits: int,
+        c_puct: float = 1.5,
+        base_seed: int = 0,
+        virtual_batch_size: int,
+        flush_target: int,
+        active_root_limit: int,
+        temperature_by_ply: Sequence[float],
+        root_dirichlet_total_alpha: float | None = None,
+        root_dirichlet_noise_fraction: float | None = None,
+        root_policy_temperature: float | None = None,
+        fpu_reduction: float | None = None,
+        virtual_loss: float | None = None,
+        widening_policy_mass: float | None = None,
+        widening_max_children: int | None = None,
+        widening_min_children: int | None = None,
+        forced_playout_k: float | None = None,
+    ) -> Mapping[str, Any]:
+        if not root_states:
+            return {
+                "flush_count": 0,
+                "queued_states": 0,
+                "flushed_states": 0,
+                "mean_flush_states": 0.0,
+                "no_progress_flushes": 0,
+                "moves_decided": 0,
+                "flush_size_histogram": {},
+                "on_move_seconds": 0.0,
+                "mcts_batch_diagnostics": {},
+            }
+        return rust_bridge.model1_mcts_session_run_continuous(
+            self._session,
+            game_keys,
+            root_states,
+            evaluator=inference.evaluate_model1_payload,
+            on_move=on_move,
+            visits=visits,
+            c_puct=c_puct,
+            base_seed=base_seed,
+            virtual_batch_size=virtual_batch_size,
+            flush_target=flush_target,
+            active_root_limit=active_root_limit,
+            temperature_by_ply=temperature_by_ply,
+            root_dirichlet_total_alpha=root_dirichlet_total_alpha,
+            root_dirichlet_noise_fraction=root_dirichlet_noise_fraction,
+            root_policy_temperature=root_policy_temperature,
+            fpu_reduction=fpu_reduction,
+            virtual_loss=virtual_loss,
+            widening_policy_mass=widening_policy_mass,
+            widening_max_children=widening_max_children,
+            widening_min_children=widening_min_children,
+            forced_playout_k=forced_playout_k,
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class CompactVisitPolicy(Sequence[tuple[int, float]]):

@@ -202,6 +202,11 @@ def _run_games_concurrent(
         max_batch_size=trainer.inference_batch_size,
         use_trt=False,
         bucket_pad_multiple=(trainer.config.performance.inference_bucket_pad_multiple or None),
+        fp16_model=trainer.config.performance.inference_fp16_model,
+        fp16_allow_fallback=trainer.config.performance.inference_fp16_allow_fallback,
+        use_torch_compile=trainer.config.performance.inference_use_torch_compile,
+        compile_allow_fallback=trainer.config.performance.inference_compile_allow_torch_fallback,
+        attention_kv_gather=trainer.config.performance.attention_kv_gather,
     )
     # Same vbatch policy as the old single-game eval player: an eval-only override
     # if set, else the calibrated self-play value. This is per-game leaf
