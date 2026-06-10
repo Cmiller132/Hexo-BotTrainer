@@ -1,3 +1,59 @@
+// ---------------------------------------------------------------------------
+// On-screen diagnostics. The Debug tab failed ONLY on real phones (not in any
+// headless/desktop render), so we cannot see the device console. This paints the
+// running app.js version (always) and any JS error (uncaught OR surfaced from the
+// Debug code) into fixed on-screen elements the owner can read directly on the
+// phone — turning "it doesn't work" into a concrete error message.
+const APP_VERSION = "20260610-debugnav6";
+function reportError(msg) {
+  try {
+    let el = document.getElementById("__err_banner");
+    if (!el) {
+      el = document.createElement("div");
+      el.id = "__err_banner";
+      el.style.cssText =
+        "position:fixed;left:0;right:0;bottom:0;z-index:2147483647;background:#7a1020;" +
+        "color:#fff;font:12px/1.45 ui-monospace,Menlo,Consolas,monospace;padding:9px 12px;" +
+        "white-space:pre-wrap;word-break:break-word;max-height:48vh;overflow:auto;" +
+        "border-top:3px solid #ff5650;";
+      el.addEventListener("click", () => { el.style.display = "none"; });
+      (document.body || document.documentElement).appendChild(el);
+    }
+    el.style.display = "block";
+    el.textContent = `app ${APP_VERSION} — error (tap to dismiss):\n${msg}`;
+  } catch (_e) { /* never let the reporter itself throw */ }
+}
+function showVersionTag() {
+  try {
+    let el = document.getElementById("__ver_tag");
+    if (!el) {
+      el = document.createElement("div");
+      el.id = "__ver_tag";
+      el.style.cssText =
+        "position:fixed;right:4px;bottom:4px;z-index:2147483646;background:rgba(0,0,0,0.55);" +
+        "color:#9fb3c8;font:10px/1 ui-monospace,Menlo,Consolas,monospace;padding:3px 5px;" +
+        "border-radius:4px;pointer-events:none;";
+      (document.body || document.documentElement).appendChild(el);
+    }
+    el.textContent = "v" + APP_VERSION;
+  } catch (_e) {}
+}
+window.__appVersion = APP_VERSION;
+window.addEventListener("error", e => {
+  const m = (e && e.error && (e.error.stack || e.error.message)) ||
+    `${e && e.message} @ ${e && e.filename}:${e && e.lineno}:${e && e.colno}`;
+  reportError(String(m));
+});
+window.addEventListener("unhandledrejection", e => {
+  const r = e && e.reason;
+  reportError("promise rejection: " + ((r && (r.stack || r.message)) || String(r)));
+});
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", showVersionTag);
+} else {
+  showVersionTag();
+}
+
 const HEX = 19;
 const SQRT3 = Math.sqrt(3);
 const FIT_MOVE_COUNT = 8;
@@ -3318,6 +3374,9 @@ const dbgEl = id => document.getElementById(id);
 const debugBoardSvg = dbgEl("debugBoardSvg");
 
 function debugSetStatus(message, kind = "info") {
+  // Mirror real errors to the always-on-top banner so they're unmissable on a
+  // phone (the small inline status line is easy to miss on a narrow screen).
+  if (message && kind === "error") reportError(message);
   const el = dbgEl("debugStatus");
   if (!el) return;
   if (!message) {
@@ -3347,16 +3406,21 @@ async function debugFetchJson(url, options) {
 }
 
 async function enterDebugScreen() {
+  showVersionTag();
+  // Bind handlers in their OWN try so a later init failure can never leave the
+  // nav buttons unwired, and surface any exception to the on-screen banner (the
+  // real-phone failure mode we otherwise can't see). Each await is independently
+  // guarded so one throwing step can't kill the rest of init.
   if (!dbg.inited) {
     dbg.inited = true;
-    debugBindEvents();
-    await debugInit();  // consumes any pendingDeepLink itself
+    try { debugBindEvents(); } catch (e) { reportError("debugBindEvents: " + (e && (e.stack || e.message) || e)); }
+    try { await debugInit(); } catch (e) { reportError("debugInit: " + (e && (e.stack || e.message) || e)); }
   } else if (dbg.pendingDeepLink) {
     const link = dbg.pendingDeepLink;
     dbg.pendingDeepLink = null;
-    await debugApplyDeepLink(link);
+    try { await debugApplyDeepLink(link); } catch (e) { reportError("debugApplyDeepLink: " + (e && (e.stack || e.message) || e)); }
   } else {
-    debugRenderAll();
+    try { debugRenderAll(); } catch (e) { reportError("debugRenderAll: " + (e && (e.stack || e.message) || e)); }
   }
 }
 
@@ -4066,9 +4130,15 @@ function debugGotoPly(ply) {
 }
 
 function debugStep(delta) {
-  if (!dbg.position) return;
-  const ply = Math.max(0, Math.min(dbg.position.debug.ply + delta, dbg.position.debug.total));
-  debugGotoPly(ply);
+  // If a press does nothing, say WHY: no position loaded (the usual cause is the
+  // selected game failing to load) instead of silently returning.
+  if (!dbg.position) { debugSetStatus("No position loaded — pick a game with completed records.", "error"); return; }
+  try {
+    const ply = Math.max(0, Math.min(dbg.position.debug.ply + delta, dbg.position.debug.total));
+    debugGotoPly(ply);
+  } catch (e) {
+    reportError("debugStep/debugGotoPly: " + (e && (e.stack || e.message) || e));
+  }
 }
 
 function debugImport() {
