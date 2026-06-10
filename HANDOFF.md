@@ -42,7 +42,9 @@ fresh start — the old HF prefit will NOT strict-load heads_v3, rerun the boots
 - **Trainer min-rows clamp** (`trainer.py`): train pass now trains
   `min(train_samples_per_epoch, available shuffled rows)` instead of skipping when under-supplied
   (early epochs); bucket consumed by the effective count. main_2 sets
-  `train_samples_per_epoch=32000` (main1's 64000 ≈ 7.6x reuse busted the cited ~4x ceiling).
+  `train_samples_per_epoch=48000` against 384 games/epoch at the measured ~150 plies
+  (~14.4k recorded rows -> ~2.9x reuse; main1's 64000 ≈ 7.6x reuse busted the cited ~4x
+  ceiling). Retuned in the two follow-up commits after the owner measured real game length.
 - Game-length EMA now counts DECISIONS (incl. fast/init plies), not recorded rows.
 - Tests: `tests/test_dense_cnn_restnet_pcr_policy_init.py` (new), heads_v2 layout test updated
   for the split.
@@ -72,9 +74,11 @@ fresh start — the old HF prefit will NOT strict-load heads_v3, rerun the boots
 
 ## Where the run is (as of 2026-06-10, ~03:30 UTC)
 
-**Active line: `dense_cnn_restnet`, run `dense_cnn_restnet_main1` — LIVE, resumed from
+**STOPPED 2026-06-10 ~19:30 UTC at `epoch_000035.pt` to prepare main_2** (halt flag written,
+supervisor + trainer killed cleanly; clear `supervisor_halted.flag` to resume main1 instead).
+Was: `dense_cnn_restnet`, run `dense_cnn_restnet_main1` — resumed from
 `epoch_000025.pt` at the 03:22 UTC throughput bounce: CONTINUOUS MCTS scheduler + pure-fp16
-inference + batch-512 candidates (see the 2026-06-10 throughput section below).**
+inference + batch-512 candidates (see the 2026-06-10 throughput section below).
 Launched 2026-06-09 18:50 from the HF-prefit warm start; supervised by
 `scripts/_dc_restnet_supervise_main1.sh` (auto-resume + circuit breaker).
 

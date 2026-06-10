@@ -195,7 +195,9 @@ class Model1SelfPlayConfig:
     # which is KataGo's interpolateEarly mechanism (its self-play config runs
     # rootPolicyTemperatureEarly=1.25 -> rootPolicyTemperature=1.1). The halflife
     # is in PLIES and must be > 0 when the ramp is enabled. 0 disables (constant
-    # base temperature). Lockstep self-play only; eval/play uses the base scalar.
+    # base temperature). Self-play only, both schedulers (lockstep passes a
+    # per-ply vector; continuous ramps natively in Rust); eval/play uses the
+    # base scalar.
     root_policy_temperature_early: float = 0.0
     root_policy_temperature_halflife: float = 0.0
     # KataGo Playout Cap Randomization (Wu 2020). Each decision is independently a
@@ -205,7 +207,8 @@ class Model1SelfPlayConfig:
     # played greedily). Full positions get clean policy targets; fast moves buy
     # cheap game progression so more distinct games are generated per GPU-hour.
     # Mirrors the hexgt lineage implementation (HEXGT_PCR_KATAGO_MAPPING.md).
-    # Lockstep scheduler only (fail-loud under continuous).
+    # Both schedulers: lockstep splits full/fast subsets per round; continuous
+    # resolves the per-move coin natively in Rust (per-slot MoveClass).
     pcr_enabled: bool = False
     pcr_full_proportion: float = 0.5
     pcr_fast_visits: int = 0
@@ -219,7 +222,8 @@ class Model1SelfPlayConfig:
     # so the value net continuously trains on off-distribution openings — the
     # KataGo lever against opening-monoculture self-reinforcement. The forced
     # origin ply (single legal move) is unaffected by construction. 0 disables.
-    # Lockstep scheduler only (fail-loud under continuous).
+    # Both schedulers: lockstep samples in Python via a 1-visit probe;
+    # continuous samples natively in Rust from the raw root prior.
     policy_init_fraction: float = 0.0
     policy_init_avg_plies: float = 0.0
     policy_init_max_plies: int = 0
@@ -363,7 +367,7 @@ def parse_model1_config(raw: Mapping[str, Any] | None) -> Model1Config:
             validation_fraction=float(samples.get("validation_fraction", 0.0)),
             policy_surprise_uniform_fraction=float(samples.get("policy_surprise_uniform_fraction", 0.5)),
             policy_surprise_max_weight=float(samples.get("policy_surprise_max_weight", 8.0)),
-            soft_z_lambda=float(samples.get("soft_z_lambda", 0.0)),
+            soft_z_lambda=_soft_z_lambda(samples.get("soft_z_lambda", 0.0)),
         ),
         selfplay=Model1SelfPlayConfig(
             search_visits=int(selfplay.get("search_visits", 128)),
@@ -489,3 +493,10 @@ def _scheduler_flush_target(value: Any) -> int:
     if target < 0:
         raise ValueError("selfplay.scheduler_flush_target must be >= 0 (0 = calibrated inference batch)")
     return target
+
+
+def _soft_z_lambda(value: Any) -> float:
+    lam = float(value)
+    if not (0.0 <= lam <= 1.0):
+        raise ValueError(f"samples.soft_z_lambda must be in [0, 1], got {value!r}")
+    return lam
