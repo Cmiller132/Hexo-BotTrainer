@@ -3298,6 +3298,14 @@ const dbg = {
   imported: null,   // imported action-id list (overrides game when set)
   overlays: { policy: true, visits: false, opp: false, threats: false, numbers: true },
   pendingDeepLink: null,
+  // Monotonic request tokens so the LATEST navigation/analysis always wins. The
+  // dense_cnn_restnet CPU forward is far slower than hexgt's tiny graph forward,
+  // so without these guards a slow/stale position fetch or analyze can resolve
+  // AFTER a newer ply click and clobber dbg.position/dbg.analysis — which wedged
+  // forward/back stepping and slider scrubbing for that lineage. Each load/analyze
+  // claims a token and only commits if it is still the newest.
+  posSeq: 0,
+  anlSeq: 0,
 };
 
 const dbgEl = id => document.getElementById(id);
@@ -3448,8 +3456,10 @@ async function debugLoadPosition({ resetPly = false, ply = null } = {}) {
   const params = new URLSearchParams({ run: dbg.run, path: dbg.gameFile, record: String(dbg.record) });
   if (targetPly != null) params.set("ply", String(targetPly));
   else params.set("ply", "0");
+  const seq = ++dbg.posSeq;  // claim latest; a newer load supersedes this one
   try {
     const data = await debugFetchJson(`/api/debug/position?${params.toString()}`);
+    if (seq !== dbg.posSeq) return;  // superseded by a newer ply nav — drop stale fetch
     if (targetPly == null && resetPly) {
       // Default to the final position so the whole game is visible at a glance.
       const total = data.debug.total;
@@ -3463,7 +3473,7 @@ async function debugLoadPosition({ resetPly = false, ply = null } = {}) {
     debugRenderAll();
     await debugAnalyze();
   } catch (e) {
-    debugSetStatus(`Position: ${e.message}`, "error");
+    if (seq === dbg.posSeq) debugSetStatus(`Position: ${e.message}`, "error");
   }
 }
 
@@ -3475,15 +3485,18 @@ async function debugLoadImported(ply = null) {
   if (!ids.length) return;
   const targetPly = ply != null ? Math.max(0, Math.min(ply, ids.length)) : ids.length;
   const params = new URLSearchParams({ run: dbg.run || "", actions: ids.join(","), ply: String(targetPly) });
+  const seq = ++dbg.posSeq;  // claim latest (shared with debugLoadPosition)
   try {
-    dbg.position = await debugFetchJson(`/api/debug/position?${params.toString()}`);
+    const data = await debugFetchJson(`/api/debug/position?${params.toString()}`);
+    if (seq !== dbg.posSeq) return;  // superseded by a newer nav — drop stale fetch
+    dbg.position = data;
     dbg.records = [];
     dbg.analysis = null;
     dbg.search = null;
     debugRenderAll();
     await debugAnalyze();
   } catch (e) {
-    debugSetStatus(`Import: ${e.message}`, "error");
+    if (seq === dbg.posSeq) debugSetStatus(`Import: ${e.message}`, "error");
   }
 }
 
@@ -3511,24 +3524,30 @@ function debugRequestBody() {
 async function debugAnalyze() {
   const body = debugRequestBody();
   if (!body || !dbg.checkpoint) { debugRenderAll(); return; }
+  const seq = ++dbg.anlSeq;  // claim latest; a slow dense analyze must not clobber a newer ply's
   dbg.loading = true;
   debugSetStatus("Evaluating position on CPU…", "busy");
   debugRenderAll();
   try {
-    dbg.analysis = await debugFetchJson("/api/debug/analyze", {
+    const analysis = await debugFetchJson("/api/debug/analyze", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
+    if (seq !== dbg.anlSeq) return;  // a newer position/analyze superseded us — drop stale result
+    dbg.analysis = analysis;
     debugSetStatus("");
   } catch (e) {
+    if (seq !== dbg.anlSeq) return;
     dbg.analysis = null;
     debugSetStatus(`Analyze: ${e.message}`, "error");
   } finally {
-    dbg.loading = false;
-    debugRenderAll();
+    if (seq === dbg.anlSeq) {
+      dbg.loading = false;
+      debugRenderAll();
+    }
   }
-  if (dbg.compareCheckpoint) debugRunCompare();
+  if (seq === dbg.anlSeq && dbg.compareCheckpoint) debugRunCompare();
 }
 
 async function debugRunSearch() {
