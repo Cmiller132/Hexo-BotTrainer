@@ -2449,6 +2449,36 @@ body:not(.tactics-on) .tactic-legend {
 .debug-screen .board-area { min-height: 360px; }
 #debugBoardSvg { width: 100%; height: 100%; display: block; }
 #debugPlySlider { width: 100%; }
+
+/* Touch ergonomics for the Debug ply navigation (mobile). `touch-action:
+   manipulation` disables the browser's double-tap-zoom gesture on these controls
+   — otherwise mobile adds a ~300ms delay and can swallow rapid taps, which made
+   prev/next feel inconsistent / "do nothing" on phones (desktop was unaffected).
+   Larger min target height + a bigger slider thumb make them comfortable to tap
+   and drag by finger. */
+.debug-replay .replay-buttons button,
+.debug-replay #debugAnalyzeBtn,
+#debugPlySlider { touch-action: manipulation; }
+.debug-replay .replay-buttons button { min-height: 44px; }
+#debugPlySlider {
+  height: 30px;
+  accent-color: var(--accent);
+  background: transparent;
+  -webkit-tap-highlight-color: transparent;
+}
+#debugPlySlider::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none;
+  width: 26px; height: 26px; border-radius: 50%;
+  background: var(--accent); cursor: pointer; margin-top: -10px;
+}
+#debugPlySlider::-webkit-slider-runnable-track {
+  height: 6px; border-radius: 3px; background: var(--border);
+}
+#debugPlySlider::-moz-range-thumb {
+  width: 26px; height: 26px; border: 0; border-radius: 50%;
+  background: var(--accent); cursor: pointer;
+}
+#debugPlySlider::-moz-range-track { height: 6px; border-radius: 3px; background: var(--border); }
 .dbg-stone-label { fill: #fff; font-size: 11px; font-weight: 600; pointer-events: none; }
 .dbg-cell { cursor: crosshair; }
 .debug-legend { gap: 12px; }
