@@ -3772,12 +3772,20 @@ function debugRenderValue() {
       </div>`;
   }
 
+  // Moves-left head (dense lineages): decoded value in [-1,1] maps the binned
+  // [0, 80]-decision support, so remaining ≈ (v+1)/2 * 80. hexgt has no such head.
+  let movesLeftHtml = "";
+  if (a.moves_left && typeof a.moves_left.scalar === "number") {
+    const remaining = Math.max(0, (a.moves_left.scalar + 1) / 2 * 80);
+    movesLeftHtml = `<div class="dbg-stv-row"><span class="label">moves left</span><span class="dbg-bar-track"><span class="dbg-bar-fill pos" style="width:${(Math.min(1, remaining / 80) * 100).toFixed(1)}%;left:0"></span></span><span class="value">~${remaining.toFixed(0)}</span></div>`;
+  }
+
   el.innerHTML = `
     <div class="dbg-value-scalar">value <strong class="${a.value >= 0 ? "pos" : "neg"}">${a.value.toFixed(4)}</strong> <span class="dbg-muted">(side to move)</span></div>
     <div class="dbg-vdist" aria-label="65-bin value distribution">${bars}</div>
     <div class="dbg-vdist-axis"><span>loss −1</span><span>0</span><span>+1 win</span></div>
     ${optimismHtml}
-    ${stvRows ? `<div class="dbg-stv">${stvRows}</div>` : ""}
+    ${(stvRows || movesLeftHtml) ? `<div class="dbg-stv">${stvRows}${movesLeftHtml}</div>` : ""}
   `;
 }
 
@@ -3922,7 +3930,11 @@ function debugRenderCheckpointInfo() {
     if (ck.graft) rows.push(["Graft", ck.graft === "pre" ? "pre (≤e6, expanded)" : "post (≥e7)"]);
   }
   if (meta) {
+    if (meta.lineage) rows.push(["Lineage", escapeText(meta.lineage)]);
     if (meta.rl_epoch != null) rows.push(["RL epoch", String(meta.rl_epoch)]);
+    if (meta.arch && meta.arch.blocks_type) rows.push(["Trunk", escapeText(String(meta.arch.blocks_type))]);
+    if (meta.stv_horizons && meta.stv_horizons.length) rows.push(["STV", meta.stv_horizons.join(", ")]);
+    if (meta.has_moves_left) rows.push(["Moves-left", "yes"]);
     if (meta.expanded_stv && meta.expanded_stv.length) rows.push(["STV expand", `${meta.expanded_stv.length} heads`]);
     if (meta.load_warnings && meta.load_warnings.length) rows.push(["Warnings", escapeText(meta.load_warnings.join("; "))]);
   }
