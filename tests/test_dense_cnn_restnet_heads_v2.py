@@ -183,7 +183,7 @@ def test_shuffle_unions_mixed_horizons(tmp_path):
 # --- shared reduction + moves-left head + loss ---------------------------------
 
 
-def test_network_emits_moves_left_and_shares_reduction():
+def test_network_emits_moves_left_and_splits_reductions():
     net = architecture.RestnetNetwork(
         channels=16, blocks_type="R_T", attention_heads=4, short_term_value_horizons=(1, 16)
     )
@@ -193,13 +193,22 @@ def test_network_emits_moves_left_and_shares_reduction():
     assert out["moves_left"].shape == (2, constants.VALUE_BINS)
     assert out["stvalue_16"].shape == (2, constants.VALUE_BINS)
     assert set(net.forward_policy_value(x)) == {"policy", "value"}
-    # One shared reduction: exactly one BOARD_AREA->64 Linear in the whole model.
+    # heads_v3: the MAIN value head owns a private reduction and the auxiliary
+    # heads (stvalue/moves_left) share a second one -> exactly two
+    # BOARD_AREA->64 Linears in the whole model.
     big = [m for m in net.modules() if isinstance(m, torch.nn.Linear) and m.in_features == constants.BOARD_AREA]
-    assert len(big) == 1
-    disabled = architecture.RestnetNetwork(
+    assert len(big) == 2
+    assert net.aux_value_reduction is not None
+    # With no auxiliary heads at all there is no aux reduction.
+    plain = architecture.RestnetNetwork(
         channels=16, blocks_type="R_T", attention_heads=4, moves_left_head=False
     )
-    assert "moves_left" not in disabled(x)
+    assert "moves_left" not in plain(x)
+    assert plain.aux_value_reduction is None
+    plain_big = [
+        m for m in plain.modules() if isinstance(m, torch.nn.Linear) and m.in_features == constants.BOARD_AREA
+    ]
+    assert len(plain_big) == 1
 
 
 def test_model1_loss_moves_left_component():

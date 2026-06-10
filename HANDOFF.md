@@ -6,6 +6,49 @@ then two placements per turn). Python orchestration + Rust/PyO3 (maturin) for th
 (`/root/.venvs/hexgt-build`); run dirs live under `/mnt/e/Hexo-BotTrainer/runs/` (note: a
 different mount root than this repo).
 
+## 2026-06-10 — main_2 prep (branch `claude/wizardly-johnson-x90akh`, owner directives)
+
+KataGo self-play data levers for a FRESH run, motivated by the main1 opening-diversity /
+value-learning investigation (`docs/analysis/RESTNET_OPENING_DIVERSITY.md`,
+`RESTNET_EXPLORATION_KNOBS.md`). Config: **`configs/dense_cnn_restnet_main_2.toml`** (ready;
+fresh start — the old HF prefit will NOT strict-load heads_v3, rerun the bootstrap to warm-start).
+**Requires a maturin rebuild** (`scripts/_rebuild_hexo_models_hexgt.sh`) — the Rust search changed.
+
+- **Policy-initialized openings** (KataGo initGamesWithPolicy; lockstep only): per game, with
+  prob `policy_init_fraction`, the first N plies (N ~ truncated exp, mean
+  `policy_init_avg_plies`, cap `policy_init_max_plies`) are SAMPLED FROM THE RAW PRIOR at
+  `policy_init_temperature` via a 1-visit noise-free probe (exported `root_prior_policy` = raw
+  prior); NOT recorded as rows; pending chain gets masked placeholders (`pcr_full=False`,
+  `policy_init=True`) so STV/opp/moves-left targets stay per-ply exact.
+- **PCR** (KataGo cheapSearchProb; lockstep only): per-move deterministic coin
+  (`pcr_full_proportion`) full vs fast; fast = `pcr_fast_visits`, no noise, no forced
+  playouts, greedy, NOT recorded (dropped at write; opp-policy targets masked from fast next
+  moves via `mask_opp_from_fast`). Mirrors the hexgt implementation.
+- **Root FPU zeroed under root noise** (Rust, both schedulers): KataGo `rootFpuReductionMax=0`.
+  Root-only; eval/play (noise off) unchanged. Parent dense_cnn inherits on rebuild.
+- **Root-policy temperature reuse BUG FIX (Rust, both schedulers):** the temperature was only
+  applied to FRESH roots; with tree reuse every root after a game's first search skipped it —
+  the live main1 run's 1.1 effectively never applied. Reused roots now get
+  `apply_root_policy_temperature` (before noise; monotone transform, order preserved, applied
+  once per root lifetime). Affects parent dense_cnn semantics on rebuild (intended).
+- **Root-policy temperature early ramp** (KataGo 1.25→1.1, `interpolateEarly`-style):
+  `root_policy_temperature_early` / `_halflife` config; per-game per-ply vector plumbed through
+  a new optional `root_policy_temperatures` search kwarg (lockstep full searches only).
+- **Soft-Z** `samples.soft_z_lambda` (plumbing existed in finalize; now config-wired, both
+  schedulers). main_2 = 0.1.
+- **heads_v3 value-bottleneck split** (`architecture.py`): main value head gets a private
+  `ValueReduction`; stvalue_<h> + moves_left share an `aux_value_reduction` (absent when no aux
+  heads). Old checkpoints will not strict-load (fail-loud by design; fresh run).
+- **Trainer min-rows clamp** (`trainer.py`): train pass now trains
+  `min(train_samples_per_epoch, available shuffled rows)` instead of skipping when under-supplied
+  (early epochs); bucket consumed by the effective count. main_2 sets
+  `train_samples_per_epoch=32000` (main1's 64000 ≈ 7.6x reuse busted the cited ~4x ceiling).
+- Game-length EMA now counts DECISIONS (incl. fast/init plies), not recorded rows.
+- Tests: `tests/test_dense_cnn_restnet_pcr_policy_init.py` (new), heads_v2 layout test updated
+  for the split. Continuous scheduler fail-louds on PCR / policy-init / temp-ramp configs.
+- NOT run here (no torch/GPU in the prep environment): the pytest suite + the maturin rebuild —
+  run both on the WSL box before launching main_2.
+
 ## Where the run is (as of 2026-06-10, ~03:30 UTC)
 
 **Active line: `dense_cnn_restnet`, run `dense_cnn_restnet_main1` — LIVE, resumed from

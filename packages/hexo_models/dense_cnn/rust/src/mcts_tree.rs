@@ -237,6 +237,13 @@ pub(crate) struct RustSearch {
     pub(crate) target_visits: u32,
     pub(crate) completed_visits: u32,
     fpu_reduction: f32,
+    /// FPU reduction applied at the ROOT node only. KataGo zeroes the root FPU
+    /// reduction while Dirichlet root noise is on (`rootFpuReductionMax = 0`) so
+    /// unvisited, noise-boosted root children are not priced at
+    /// `parent_value - fpu` before their first visit (FPU would otherwise fight
+    /// the exploration noise). The session passes 0.0 when noise is enabled and
+    /// `fpu_reduction` otherwise, so eval/play searches are unchanged.
+    root_fpu_reduction: f32,
     widening: Widening,
     /// KataGo forced-playout strength `k` (0 = disabled). Guarantees each
     /// materialized ROOT child at least `sqrt(k * prior * root_visits)` visits so
@@ -266,11 +273,13 @@ pub(crate) struct RustLeaf {
 }
 
 impl RustSearch {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         root_state: RustHexoState,
         evaluation: &RustEvaluation,
         target_visits: u32,
         fpu_reduction: f32,
+        root_fpu_reduction: f32,
         root_policy_temperature: f32,
         root_noise: Option<RootDirichletNoise>,
         widening: Widening,
@@ -298,6 +307,7 @@ impl RustSearch {
             target_visits,
             completed_visits: 0,
             fpu_reduction,
+            root_fpu_reduction,
             widening,
             forced_playout_k,
             active_edge_count: 0,
@@ -309,6 +319,61 @@ impl RustSearch {
     /// caller passes a different value across calls; default 0 disables forcing).
     pub(crate) fn set_forced_playout_k(&mut self, k: f32) {
         self.forced_playout_k = k;
+    }
+
+    /// Set the root-only FPU reduction for a reused search (see the field doc).
+    pub(crate) fn set_root_fpu_reduction(&mut self, value: f32) {
+        self.root_fpu_reduction = value;
+    }
+
+    /// Apply the root-policy softmax temperature to a REUSED root's priors.
+    ///
+    /// Fresh roots get the temperature inside `owned_root_from_evaluation`; a
+    /// reused root (promoted interior node after `advance_root`) carries the raw
+    /// eval priors, so without this call the configured root-policy temperature
+    /// would only ever apply to each game's first searched position. Each node
+    /// becomes the root exactly once (`advance_root` moves strictly forward and
+    /// `search`/`run_continuous` advance after every decision), so the transform
+    /// is applied at most once per root lifetime.
+    ///
+    /// `p^(1/T)` is monotone for positive priors, so the ascending order of the
+    /// unexpanded candidate list is preserved and no re-sort is needed. Applied
+    /// BEFORE Dirichlet noise, matching the fresh-root order of operations.
+    pub(crate) fn apply_root_policy_temperature(&mut self, temperature: f32) {
+        if !temperature.is_finite() || temperature <= 0.0 || (temperature - 1.0).abs() < 1.0e-6 {
+            return;
+        }
+        self.ensure_root_owned();
+        let root = &mut self.nodes[0];
+        let NodePriors::Owned(unexpanded) = &mut root.priors else {
+            return;
+        };
+        let inverse = 1.0 / temperature;
+        let mut total = 0.0f32;
+        for edge in root.edges.iter_mut() {
+            if edge.prior.is_finite() && edge.prior > 0.0 {
+                edge.prior = edge.prior.powf(inverse);
+                total += edge.prior;
+            }
+        }
+        for candidate in unexpanded.iter_mut() {
+            if candidate.prior.is_finite() && candidate.prior > 0.0 {
+                candidate.prior = candidate.prior.powf(inverse);
+                total += candidate.prior;
+            }
+        }
+        if total > 0.0 {
+            for edge in root.edges.iter_mut() {
+                if edge.prior.is_finite() && edge.prior > 0.0 {
+                    edge.prior /= total;
+                }
+            }
+            for candidate in unexpanded.iter_mut() {
+                if candidate.prior.is_finite() && candidate.prior > 0.0 {
+                    candidate.prior /= total;
+                }
+            }
+        }
     }
 
     /// Promote a reused (interior, `Shared`) root to an owned, mutable candidate
@@ -527,12 +592,19 @@ impl RustSearch {
         let node = &self.nodes[node_id];
         let exploration_scale = c_puct * (node.visits.max(1) as f32).sqrt();
         let parent_value = node.value();
+        // Root children use the root-only FPU reduction (0 under Dirichlet noise,
+        // KataGo `rootFpuReductionMax`); interior nodes keep the normal value.
+        let fpu_reduction = if node_id == 0 {
+            self.root_fpu_reduction
+        } else {
+            self.fpu_reduction
+        };
         let mut best: Option<(usize, f32, u32, PackedCoord)> = None;
         for (index, edge) in node.edges.iter().enumerate() {
             if edge.pending > 0 && edge.child.is_none() {
                 continue;
             }
-            let score = edge.value_or_fpu(parent_value, self.fpu_reduction)
+            let score = edge.value_or_fpu(parent_value, fpu_reduction)
                 + edge.prior * exploration_scale / (1.0 + edge.visits as f32);
             let candidate = (index, score, edge.visits, edge.action_id);
             let replace = match best {
@@ -1267,7 +1339,7 @@ mod tests {
     fn widening_caps_materialized_edges_under_many_visits() {
         let state = RustHexoState::new();
         let mut search =
-            RustSearch::new(state, &uniform_evaluation(16), 128, 0.20, 1.0, None, wide(0.95, 2, 4), 0.0)
+            RustSearch::new(state, &uniform_evaluation(16), 128, 0.20, 0.20, 1.0, None, wide(0.95, 2, 4), 0.0)
                 .unwrap();
         assert_eq!(search.nodes[0].max_eligible_children, 4);
         let mut materialized = 0;
@@ -1289,7 +1361,7 @@ mod tests {
     fn edges_materialize_lazily_in_prior_order() {
         let state = RustHexoState::new();
         let mut search =
-            RustSearch::new(state, &evaluation_with_priors(8), 128, 0.20, 1.0, None, wide_open(), 0.0)
+            RustSearch::new(state, &evaluation_with_priors(8), 128, 0.20, 0.20, 1.0, None, wide_open(), 0.0)
                 .unwrap();
         for _ in 0..8 {
             let edge_index = search.select_or_materialize_edge(0, 1.5).unwrap();
@@ -1340,7 +1412,7 @@ mod tests {
         let widening = wide_open();
 
         let mut owned_search =
-            RustSearch::new(state.clone(), &eval, 128, 0.20, 1.0, None, widening, 0.0).unwrap();
+            RustSearch::new(state.clone(), &eval, 128, 0.20, 0.20, 1.0, None, widening, 0.0).unwrap();
         let mut owned_order = Vec::new();
         for _ in 0..8 {
             let edge_index = owned_search.select_or_materialize_edge(0, 1.5).unwrap();
@@ -1349,7 +1421,7 @@ mod tests {
         }
 
         let mut shared_search =
-            RustSearch::new(state.clone(), &uniform_evaluation(1), 128, 0.20, 1.0, None, widening, 0.0)
+            RustSearch::new(state.clone(), &uniform_evaluation(1), 128, 0.20, 0.20, 1.0, None, widening, 0.0)
                 .unwrap();
         shared_search
             .nodes
@@ -1371,7 +1443,7 @@ mod tests {
         let state = RustHexoState::new();
         let widening = wide(0.95, 2, 4);
         let mut search =
-            RustSearch::new(state.clone(), &uniform_evaluation(1), 128, 0.20, 1.0, None, widening, 0.0)
+            RustSearch::new(state.clone(), &uniform_evaluation(1), 128, 0.20, 0.20, 1.0, None, widening, 0.0)
                 .unwrap();
         search.nodes.push(shared_from_cache(
             7,
@@ -1402,7 +1474,7 @@ mod tests {
         let eval = evaluation_with_priors(8);
         let widening = wide_open();
         let mut search =
-            RustSearch::new(state.clone(), &uniform_evaluation(1), 128, 0.20, 1.0, None, widening, 0.0)
+            RustSearch::new(state.clone(), &uniform_evaluation(1), 128, 0.20, 0.20, 1.0, None, widening, 0.0)
                 .unwrap();
         search.nodes[0] = shared_from_cache(search.root_hash, &state, Arc::new(cache_ready(eval)), widening);
         for _ in 0..3 {
@@ -1503,7 +1575,7 @@ mod tests {
         // its guaranteed first visit ahead of every high-prior candidate.
         let state = RustHexoState::new();
         let mut search =
-            RustSearch::new(state, &evaluation_with_priors(8), 128, 0.20, 1.0, None, wide_open(), 0.0)
+            RustSearch::new(state, &evaluation_with_priors(8), 128, 0.20, 0.20, 1.0, None, wide_open(), 0.0)
                 .unwrap();
         let coord = HexCoord { q: 99, r: 0 };
         search.nodes[0].edges.push(RustEdge {

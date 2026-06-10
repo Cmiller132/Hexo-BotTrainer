@@ -112,6 +112,13 @@ class Model1SampleConfig:
     validation_fraction: float = 0.0
     policy_surprise_uniform_fraction: float = 0.5
     policy_surprise_max_weight: float = 8.0
+    # Soft-Z value-target blend (Willemsen/Baier/Kaisers 2022):
+    # `value = (1 - lambda) * z + lambda * root_value`, where z is the hard +1/-1
+    # game outcome and root_value is the MCTS root value at the decision (already
+    # side-to-move perspective). 0 (default) keeps the pure hard-outcome target;
+    # a small lambda regularizes the value head against the bimodal +-1 labels of
+    # an all-decisive game. See samples.finalize_game_samples.
+    soft_z_lambda: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,6 +181,42 @@ class Model1SelfPlayConfig:
     # survives PUCT into the visit counts (self-play opening diversity); the
     # exported policy target prunes the forced visits back out. k=2 is KataGo's.
     forced_playout_k: float = 0.0
+    # KataGo root-policy temperature early ramp. When `root_policy_temperature_early`
+    # > 0 the per-ply root softmax temperature interpolates exponentially from the
+    # early value to the base `root_policy_temperature`:
+    #   T(ply) = base + (early - base) * 0.5 ** (ply / halflife)
+    # which is KataGo's interpolateEarly mechanism (its self-play config runs
+    # rootPolicyTemperatureEarly=1.25 -> rootPolicyTemperature=1.1). The halflife
+    # is in PLIES and must be > 0 when the ramp is enabled. 0 disables (constant
+    # base temperature). Lockstep self-play only; eval/play uses the base scalar.
+    root_policy_temperature_early: float = 0.0
+    root_policy_temperature_halflife: float = 0.0
+    # KataGo Playout Cap Randomization (Wu 2020). Each decision is independently a
+    # FULL search with probability `pcr_full_proportion` (search_visits, recorded
+    # as a training row, Dirichlet noise + forced playouts + temperature) or a
+    # FAST search (`pcr_fast_visits`, NOT recorded, no noise, no forced playouts,
+    # played greedily). Full positions get clean policy targets; fast moves buy
+    # cheap game progression so more distinct games are generated per GPU-hour.
+    # Mirrors the hexgt lineage implementation (HEXGT_PCR_KATAGO_MAPPING.md).
+    # Lockstep scheduler only (fail-loud under continuous).
+    pcr_enabled: bool = False
+    pcr_full_proportion: float = 0.5
+    pcr_fast_visits: int = 0
+    # KataGo policy-initialized openings (initGamesWithPolicy). A fraction of
+    # self-play games begin with a few opening plies SAMPLED DIRECTLY FROM THE RAW
+    # NET PRIOR (no search): per selected game the ply count is drawn from a
+    # truncated exponential with mean `policy_init_avg_plies`, capped at
+    # `policy_init_max_plies`, and each such ply samples prior^(1/T) at
+    # T=`policy_init_temperature` over all legal moves. Policy-init plies are NOT
+    # recorded as training rows (there is no search target); they advance the game
+    # so the value net continuously trains on off-distribution openings — the
+    # KataGo lever against opening-monoculture self-reinforcement. The forced
+    # origin ply (single legal move) is unaffected by construction. 0 disables.
+    # Lockstep scheduler only (fail-loud under continuous).
+    policy_init_fraction: float = 0.0
+    policy_init_avg_plies: float = 0.0
+    policy_init_max_plies: int = 0
+    policy_init_temperature: float = 1.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -313,6 +356,7 @@ def parse_model1_config(raw: Mapping[str, Any] | None) -> Model1Config:
             validation_fraction=float(samples.get("validation_fraction", 0.0)),
             policy_surprise_uniform_fraction=float(samples.get("policy_surprise_uniform_fraction", 0.5)),
             policy_surprise_max_weight=float(samples.get("policy_surprise_max_weight", 8.0)),
+            soft_z_lambda=float(samples.get("soft_z_lambda", 0.0)),
         ),
         selfplay=Model1SelfPlayConfig(
             search_visits=int(selfplay.get("search_visits", 128)),
@@ -342,6 +386,15 @@ def parse_model1_config(raw: Mapping[str, Any] | None) -> Model1Config:
             opening_temperature=float(selfplay.get("opening_temperature", 0.0)),
             opening_moves=int(selfplay.get("opening_moves", 0)),
             forced_playout_k=float(selfplay.get("forced_playout_k", 0.0)),
+            root_policy_temperature_early=float(selfplay.get("root_policy_temperature_early", 0.0)),
+            root_policy_temperature_halflife=float(selfplay.get("root_policy_temperature_halflife", 0.0)),
+            pcr_enabled=bool(selfplay.get("pcr_enabled", False)),
+            pcr_full_proportion=float(selfplay.get("pcr_full_proportion", 0.5)),
+            pcr_fast_visits=int(selfplay.get("pcr_fast_visits", 0)),
+            policy_init_fraction=float(selfplay.get("policy_init_fraction", 0.0)),
+            policy_init_avg_plies=float(selfplay.get("policy_init_avg_plies", 0.0)),
+            policy_init_max_plies=int(selfplay.get("policy_init_max_plies", 0)),
+            policy_init_temperature=float(selfplay.get("policy_init_temperature", 1.0)),
         ),
         evaluation=Model1EvalConfig(
             games_per_epoch=int(evaluation.get("games_per_epoch", 64)),

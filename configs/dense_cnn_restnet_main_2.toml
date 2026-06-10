@@ -1,0 +1,209 @@
+# dense_cnn_restnet_main_2 — FRESH ResTNet run with the KataGo self-play data
+# levers added 2026-06-10 (owner directives), prepared from the opening-diversity
+# and exploration-knob investigations of dense_cnn_restnet_main1:
+#
+#   1. Policy-initialized openings (KataGo initGamesWithPolicy): a fraction of
+#      games open with plies sampled directly from the raw net prior (no search,
+#      not recorded) so the value net continuously trains on off-distribution
+#      openings — the structural fix for main1's opening monoculture.
+#   2. Playout Cap Randomization (KataGo cheapSearchProb): most moves run a cheap
+#      noise-free search and are NOT recorded; a fraction run the full recorded
+#      search. More distinct games per GPU-hour, cleaner policy targets.
+#   3. Root FPU zeroed under root noise (KataGo rootFpuReductionMax=0) — code
+#      behavior, automatic whenever Dirichlet noise is on (no key here).
+#   4. Root-policy temperature early ramp (KataGo 1.25 -> 1.1). NOTE: the reuse
+#      bug that silently skipped root_policy_temperature on reused roots is also
+#      fixed in code, so 1.1 now actually applies beyond each game's first move.
+#   5. Soft-Z value targets (lambda=0.1): blends the MCTS root value into the
+#      hard +-1 outcome to regularize the value head.
+#   6. heads_v3 value-bottleneck split: the main value head owns a private
+#      ValueReduction; stvalue_<h> + moves_left share a second one.
+#   7. train_samples_per_epoch back to 32000, with the trainer now clamping to
+#      min(requested, available shuffled rows) so early epochs train on what
+#      exists instead of skipping.
+#
+# Architecture is otherwise main1's: 96ch 8-block R3-family interleave,
+# attention_scope=disk, sdpa, heads on the dense_cnn binned-value contract.
+#
+# FRESH START: no [checkpoint] section. The main1 HF prefit checkpoint predates
+# the heads_v3 layout and will not strict-load; to warm-start, rerun
+# scripts/bootstrap_dense_cnn_restnet_hf.py against THIS config first and point
+# initialize_from at the new prefit.
+
+[model]
+name = "dense_cnn_restnet"
+module = "dense_cnn_restnet.plugin"
+
+[model.config]
+device = "cuda"
+
+[model.config.architecture]
+input_channels = 13
+channels = 96
+blocks_type = "R_R_R_T_R_R_T_R"
+attention_heads = 4
+mlp_ratio = 2
+embed_kernel_size = 3
+residual_conv = "hex"
+attention_impl = "sdpa"
+dropout = 0.0
+# Turn-aligned lookahead horizons in DECISIONS (even, config-validated):
+# [2, 6, 16] = 1 / 3 / 8 turns. heads_v3: these + moves_left share an auxiliary
+# ValueReduction; the main value head has its own.
+short_term_value_horizons = [2, 6, 16]
+moves_left_head = true
+
+[model.config.training]
+# Measured on the 12 GB RTX 4070 Ti (main1): batch 32 fits, 64 OOMs.
+batch_size = 32
+learning_rate = 0.001
+weight_decay = 0.0001
+policy_weight = 1.0
+value_weight = 1.0
+opp_policy_weight = 0.25
+short_term_value_weight = 0.1
+moves_left_weight = 0.1
+amp = true
+max_grad_norm = 1.0
+# 32000 (main1 ran 64000 = ~7.6x the ~8.4k generated rows/epoch, double the
+# ~4x KataGo reuse ceiling its own 32000-era comment cited — a plausible
+# contributor to the post-ep25 opening collapse). The trainer now trains
+# min(requested, available shuffled rows), so the early epochs (window smaller
+# than 32k) train on everything available instead of skipping. NOTE: with PCR
+# at full_proportion=0.25 the recorded-row yield is ~25% of decisions
+# (~6-8k rows / 256-game epoch at ~100-ply games), so 32000 is ~4-5x reuse;
+# if reuse runs hot, raising [selfplay].games_per_epoch (PCR makes games
+# ~2.3x cheaper) is the right lever, not lowering this.
+train_samples_per_epoch = 32000
+max_train_bucket_per_new_data = 8.0
+max_train_bucket_size = 500000
+no_repeat_files = true
+max_validation_samples = 100000
+
+[model.config.samples]
+# First shuffle fires after epoch 1 even at the lower PCR row yield.
+shuffle_min_rows = 4000
+shuffle_keep_target_rows = 300000
+shuffle_taper_window_exponent = 0.65
+shuffle_expand_window_per_row = 0.4
+shuffle_taper_window_scale = 50000.0
+approx_rows_per_out_file = 8000
+shuffle_worker_group_size = 8000
+validation_fraction = 0.0
+policy_surprise_uniform_fraction = 0.5
+policy_surprise_max_weight = 8.0
+# Soft-Z value target: value = 0.9 * z + 0.1 * root_value. Every Hexo game is
+# decisive (+-1), and main1 showed large value swings on identical opening
+# boards; the blend regularizes the value head at zero architectural cost.
+soft_z_lambda = 0.1
+
+[model.config.selfplay]
+search_visits = 512
+active_games = 128
+c_puct = 1.5
+root_dirichlet_noise_enabled = true
+root_dirichlet_noise_fraction = 0.25
+root_dirichlet_total_alpha = 10.83
+# KataGo root-policy softmax temperature with the early ramp:
+# T(ply) = 1.1 + (1.25 - 1.1) * 0.5^(ply / 16). KataGo's self-play runs
+# 1.25 -> 1.1; the halflife is scaled to Hexo's ~100-ply games (Go ~250 moves).
+# The reused-root fix means this now applies at EVERY searched position.
+root_policy_temperature = 1.1
+root_policy_temperature_early = 1.25
+root_policy_temperature_halflife = 16.0
+# Interior-node FPU. At the ROOT this is automatically zeroed while Dirichlet
+# noise is on (KataGo rootFpuReductionMax=0; code behavior, not a config key).
+fpu_reduction = 0.20
+virtual_loss = 1.0
+widening_policy_mass = 0.95
+widening_max_children = 96
+widening_min_children = 2
+mcts_session_cache_max_states = 262144
+mcts_active_root_limit = 256
+# PCR / policy-init / the root-temp ramp are lockstep-only (fail-loud otherwise).
+scheduler = "lockstep"
+scheduler_flush_target = 0
+max_actions = 1024
+temperature = 1.0
+# Adaptive played-move temperature decay (main1 scheme): half-life = 25% of the
+# expected game length (EMA of measured decisions/game, seeded by the prior on
+# a fresh run; PCR fast and policy-init plies count as decisions).
+temperature_halflife_fraction = 0.25
+temperature_length_prior = 32.0
+temperature_floor = 0.1
+# Opening played-move temperature anchor (main1, 2026-06-10): hold the first 5
+# plies at 1.4 before the adaptive decay takes over. Kept alongside policy-init:
+# the anchor diversifies the 75% of games that open with full searches.
+opening_temperature = 1.4
+opening_moves = 5
+# KataGo forced playouts + policy-target pruning (k=2 is KataGo's value).
+forced_playout_k = 2.0
+# KataGo Playout Cap Randomization: 25% of decisions run the full recorded
+# 512-visit search (noise + forced playouts + temperature); 75% run a cheap
+# 128-visit search (no noise, no forced playouts, greedy, NOT recorded).
+# Average ~224 sims/move = ~2.3x cheaper games than all-full; only full
+# positions become training rows. KataGo selfplay uses cheapSearchProb=0.75.
+pcr_enabled = true
+pcr_full_proportion = 0.25
+pcr_fast_visits = 128
+# KataGo policy-initialized openings: 25% of games open with N plies sampled
+# straight from the raw net prior at temperature 1.4 (N ~ truncated exponential,
+# mean 4, cap 8; ply 0 is the forced origin and unaffected). These plies are
+# never training rows; they exist so the value net keeps pricing
+# off-distribution openings (main1's opening collapsed because it never saw
+# any). KataGo applies this to ~every game — raise the fraction if opening
+# stereotypy reappears.
+policy_init_fraction = 0.25
+policy_init_avg_plies = 4.0
+policy_init_max_plies = 8
+policy_init_temperature = 1.4
+
+[model.config.evaluation]
+games_per_epoch = 64
+eval_every = 3
+sealbot_variant = "best"
+sealbot_time_limit = 0.05
+max_actions = 1024
+require_sealbot = true
+opening_temperature = 0.6
+opening_moves = 8
+
+[model.config.performance]
+calibrate = true
+target_selfplay_positions_per_second = 16.0
+inference_batch_candidates = [128, 256, 512]
+selfplay_batch_candidates = [128]
+training_batch_candidates = [16, 32]
+mcts_virtual_batch_candidates = [4]
+selfplay_probe_positions = 2048
+probe_batches = 1
+inference_use_tensorrt = false
+# GPU throughput levers proven on main1 (2026-06-10): pure-fp16 folded inference
+# (correctness-gated, fail-loud), torch.compile reduce-overhead (gated, eager
+# fallback allowed), KV-gathered disk attention (bit-equivalent, eval-only).
+inference_fp16_model = true
+inference_fp16_allow_fallback = false
+inference_use_torch_compile = true
+inference_compile_allow_torch_fallback = true
+attention_kv_gather = true
+inference_bucket_pad_multiple = 16
+
+[run]
+name = "dense_cnn_restnet_main_2"
+# OWNER: confirm the mount prefix matches your environment (mirrors main1).
+output_dir = "/mnt/e/Hexo-BotTrainer/runs/dense_cnn_restnet_main_2"
+seed = 1
+
+[loop]
+epochs = 60
+
+[selfplay]
+# 256 games/epoch (rolling: 128 in flight, refilled). With PCR the per-game cost
+# is ~2.3x lower than main1's all-full searches; if recorded-row reuse runs hot
+# (see train_samples_per_epoch), raise this toward 384-512 rather than touching
+# the training row count.
+games_per_epoch = 256
+update_checkpoint_pointer = false
+
+[train]
+passes_per_epoch = 1

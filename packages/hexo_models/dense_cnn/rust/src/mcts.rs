@@ -212,7 +212,7 @@ impl Model1MctsSession {
         self.searches.len()
     }
 
-    #[pyo3(signature = (game_keys, states, visits, c_puct, temperature, seed, evaluator, virtual_batch_size=None, active_root_limit=None, root_dirichlet_total_alpha=None, root_dirichlet_noise_fraction=None, root_policy_temperature=None, fpu_reduction=None, virtual_loss=None, widening_policy_mass=None, widening_max_children=None, widening_min_children=None, forced_playout_k=None, move_temperatures=None))]
+    #[pyo3(signature = (game_keys, states, visits, c_puct, temperature, seed, evaluator, virtual_batch_size=None, active_root_limit=None, root_dirichlet_total_alpha=None, root_dirichlet_noise_fraction=None, root_policy_temperature=None, fpu_reduction=None, virtual_loss=None, widening_policy_mass=None, widening_max_children=None, widening_min_children=None, forced_playout_k=None, move_temperatures=None, root_policy_temperatures=None))]
     fn search(
         &mut self,
         py: Python<'_>,
@@ -241,6 +241,11 @@ impl Model1MctsSession {
         // games that are each at a different move number. `temperature` remains the
         // validated fallback used when this is None.
         move_temperatures: Option<Vec<f32>>,
+        // Optional per-root root-policy softmax temperature (one entry per game
+        // key). Lets self-play run a KataGo-style early ramp (e.g. 1.25 at the
+        // opening decaying to 1.1) where each game sits at its own ply. The scalar
+        // `root_policy_temperature` is the fallback when this is None.
+        root_policy_temperatures: Option<Vec<f32>>,
     ) -> PyResult<Py<PyAny>> {
         // Validate true native-search boundaries here. The Python wrapper is a
         // transport layer and intentionally does not duplicate these checks.
@@ -301,6 +306,28 @@ impl Model1MctsSession {
             "root_policy_temperature",
             root_policy_temperature.unwrap_or(1.0),
         )?;
+        // Per-root root-policy temperatures (early-ramp support): an explicit
+        // vector aligned with `game_keys`, or the validated scalar broadcast.
+        let root_policy_temps: Vec<f32> = match root_policy_temperatures {
+            Some(values) => {
+                if values.len() != roots.len() {
+                    return Err(PyValueError::new_err(format!(
+                        "root_policy_temperatures has {} entries for {} roots",
+                        values.len(),
+                        roots.len()
+                    )));
+                }
+                for value in &values {
+                    if !value.is_finite() || *value <= 0.0 {
+                        return Err(PyValueError::new_err(
+                            "root_policy_temperatures entries must be finite and > 0",
+                        ));
+                    }
+                }
+                values
+            }
+            None => vec![root_policy_temperature; roots.len()],
+        };
         let fpu_reduction =
             validate_nonnegative_f32("fpu_reduction", fpu_reduction.unwrap_or(0.20))?;
         let virtual_loss = validate_nonnegative_f32("virtual_loss", virtual_loss.unwrap_or(1.0))?;
@@ -308,6 +335,15 @@ impl Model1MctsSession {
             validate_nonnegative_f32("forced_playout_k", forced_playout_k.unwrap_or(0.0))?;
         let root_noise_config =
             root_noise_config(root_dirichlet_total_alpha, root_dirichlet_noise_fraction)?;
+        // KataGo zeroes the root FPU reduction while Dirichlet root noise is on
+        // (`rootFpuReductionMax = 0`) so unvisited noise-boosted root children are
+        // not suppressed below `parent_value - fpu` before their first visit.
+        // Noise-free searches (eval/play, PCR fast searches) keep the normal FPU.
+        let root_fpu_reduction = if root_noise_config.is_some() {
+            0.0
+        } else {
+            fpu_reduction
+        };
 
         let widening_mass = widening_policy_mass.unwrap_or(0.95);
         if !widening_mass.is_finite() || widening_mass <= 0.0 || widening_mass > 1.0 {
@@ -344,6 +380,12 @@ impl Model1MctsSession {
                 if search.root_hash == root_hash {
                     search.set_additional_visits(target_visits);
                     search.set_forced_playout_k(forced_playout_k);
+                    search.set_root_fpu_reduction(root_fpu_reduction);
+                    // Reused roots carry raw eval priors; apply the root-policy
+                    // temperature here (before noise, matching the fresh-root
+                    // order) so it covers every searched position, not just each
+                    // game's first root.
+                    search.apply_root_policy_temperature(root_policy_temps[index]);
                     if let Some(noise) = root_noise(root_noise_config, seed, index) {
                         search.apply_root_dirichlet_noise(noise);
                     }
@@ -376,7 +418,8 @@ impl Model1MctsSession {
                     &**evaluation,
                     target_visits,
                     fpu_reduction,
-                    root_policy_temperature,
+                    root_fpu_reduction,
+                    root_policy_temps[index],
                     root_noise(root_noise_config, seed, index),
                     widening,
                     forced_playout_k,
@@ -522,6 +565,13 @@ impl Model1MctsSession {
             validate_nonnegative_f32("forced_playout_k", forced_playout_k.unwrap_or(0.0))?;
         let root_noise_config =
             root_noise_config(root_dirichlet_total_alpha, root_dirichlet_noise_fraction)?;
+        // Root-only FPU: zero under Dirichlet noise (KataGo `rootFpuReductionMax`),
+        // mirroring the lockstep `search` derivation above.
+        let root_fpu_reduction = if root_noise_config.is_some() {
+            0.0
+        } else {
+            fpu_reduction
+        };
         let widening_mass = widening_policy_mass.unwrap_or(0.95);
         if !widening_mass.is_finite() || widening_mass <= 0.0 || widening_mass > 1.0 {
             return Err(PyValueError::new_err(
@@ -577,6 +627,10 @@ impl Model1MctsSession {
                 if search.root_hash == root_hash {
                     search.set_additional_visits(visits);
                     search.set_forced_playout_k(forced_playout_k);
+                    search.set_root_fpu_reduction(root_fpu_reduction);
+                    // Reused roots carry raw eval priors; apply the root-policy
+                    // temperature before noise (fresh-root order of operations).
+                    search.apply_root_policy_temperature(root_policy_temperature);
                     if let Some(noise) = root_noise_exact(
                         root_noise_config,
                         mix_seed(base_seed, game_key, 0, SEED_STREAM_ROOT_NOISE),
@@ -700,6 +754,7 @@ impl Model1MctsSession {
                     &evaluations,
                     visits,
                     fpu_reduction,
+                    root_fpu_reduction,
                     root_policy_temperature,
                     root_noise_config,
                     widening,
@@ -723,6 +778,8 @@ impl Model1MctsSession {
                 visits,
                 c_puct,
                 forced_playout_k,
+                root_fpu_reduction,
+                root_policy_temperature,
                 &temperature_by_ply,
                 base_seed,
                 root_noise_config,
@@ -1152,12 +1209,14 @@ fn select_continuous_pass(
 // back up; RootInit results construct the slot's new search. Exclusive
 // `&mut slots` access — called only after the eval/prefetch scope joins.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn backup_continuous_items(
     slots: &mut [ContinuousSlot],
     items: Vec<ContinuousEvalItem>,
     evaluations: &[Arc<RustEvaluation>],
     visits: u32,
     fpu_reduction: f32,
+    root_fpu_reduction: f32,
     root_policy_temperature: f32,
     root_noise_config: Option<RootNoiseConfig>,
     widening: Widening,
@@ -1195,6 +1254,7 @@ fn backup_continuous_items(
                     &**evaluation,
                     visits,
                     fpu_reduction,
+                    root_fpu_reduction,
                     root_policy_temperature,
                     root_noise_exact(
                         root_noise_config,
@@ -1233,6 +1293,8 @@ fn complete_continuous_slots(
     visits: u32,
     c_puct: f32,
     forced_playout_k: f32,
+    root_fpu_reduction: f32,
+    root_policy_temperature: f32,
     temperature_by_ply: &[f32],
     base_seed: u64,
     root_noise_config: Option<RootNoiseConfig>,
@@ -1322,6 +1384,10 @@ fn complete_continuous_slots(
                     if search.advance_root(action_id)? && search.root_hash == next_hash {
                         search.set_additional_visits(visits);
                         search.set_forced_playout_k(forced_playout_k);
+                        search.set_root_fpu_reduction(root_fpu_reduction);
+                        // Reused roots carry raw eval priors; apply the
+                        // root-policy temperature before noise.
+                        search.apply_root_policy_temperature(root_policy_temperature);
                         if let Some(noise) = root_noise_exact(
                             root_noise_config,
                             mix_seed(base_seed, game_key, ply + 1, SEED_STREAM_ROOT_NOISE),

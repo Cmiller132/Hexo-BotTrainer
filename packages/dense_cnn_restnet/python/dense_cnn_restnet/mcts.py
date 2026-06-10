@@ -70,6 +70,7 @@ class BatchedMctsSession:
         widening_min_children: int | None = None,
         forced_playout_k: float | None = None,
         move_temperatures: Sequence[float] | None = None,
+        root_policy_temperatures: Sequence[float] | None = None,
     ) -> list["SearchResult"]:
         """Search live root states through the native dense-cnn MCTS session.
 
@@ -102,6 +103,7 @@ class BatchedMctsSession:
             widening_min_children=widening_min_children,
             forced_playout_k=forced_playout_k,
             move_temperatures=move_temperatures,
+            root_policy_temperatures=root_policy_temperatures,
         )
         return [_result_from_payload(payload) for payload in payloads]
 
