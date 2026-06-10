@@ -120,9 +120,19 @@ widening_max_children = 96
 widening_min_children = 2
 mcts_session_cache_max_states = 262144
 mcts_active_root_limit = 256
-# PCR / policy-init / the root-temp ramp are lockstep-only (fail-loud otherwise).
-scheduler = "lockstep"
+# CONTINUOUS scheduler (rewritten 2026-06-10 with native PCR / policy-init /
+# root-temp-ramp support, per-slot move classes). Under PCR the per-move work is
+# heterogeneous (512 full / 128 fast / 1 init) — exactly the regime the
+# continuous per-slot state machines + single flush-target eval queue are built
+# for; lockstep would run the small full-search subset as its own thin-batched
+# call. ROLLBACK: scheduler = "lockstep" also supports all the levers (subset
+# calls per round + adaptive_virtual_batch below keeping its batches full).
+scheduler = "continuous"
 scheduler_flush_target = 0
+# Lockstep-only: scale the per-root virtual batch by search-subset size so the
+# ~25% full-search games still fill the calibrated inference batch. No effect on
+# the continuous scheduler; kept on for the rollback path.
+adaptive_virtual_batch = true
 max_actions = 1024
 temperature = 1.0
 # Adaptive played-move temperature decay (main1 scheme): half-life = 25% of the

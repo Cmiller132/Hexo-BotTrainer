@@ -45,9 +45,30 @@ fresh start — the old HF prefit will NOT strict-load heads_v3, rerun the boots
   `train_samples_per_epoch=32000` (main1's 64000 ≈ 7.6x reuse busted the cited ~4x ceiling).
 - Game-length EMA now counts DECISIONS (incl. fast/init plies), not recorded rows.
 - Tests: `tests/test_dense_cnn_restnet_pcr_policy_init.py` (new), heads_v2 layout test updated
-  for the split. Continuous scheduler fail-louds on PCR / policy-init / temp-ramp configs.
+  for the split.
+- **Continuous scheduler REWRITTEN with native PCR / policy-init / temp-ramp (second pass,
+  same day):** per-slot `MoveClass` (Full/Fast/Init) resolved in Rust from dedicated
+  `mix_seed` streams (PCR coin, policy-init select/count/sample) — deterministic in
+  (base_seed, game_key, ply), no callback-contract change. Full = `visits` + noise + forced
+  playouts + temperature schedule; Fast = `pcr_fast_visits`, noise-free, greedy; Init =
+  1-visit probe, action sampled in Rust from the RAW root prior at `policy_init_temperature`
+  (payload `action_id` overridden; an unmaterialized sampled child falls back through
+  `advance_root == false` to a fresh RootInit — correct by construction). Payloads carry
+  `pcr_full` / `policy_init` flags; scheduler stats gain full/fast/init move counts; the
+  Python continuous driver reads the flags for recording/metadata/EMA exactly like lockstep.
+  **main_2 runs `scheduler = "continuous"`** (heterogeneous per-move work is the regime the
+  slot scheduler is built for); lockstep remains the rollback and ALSO supports all levers
+  (per-round subset calls + new `selfplay.adaptive_virtual_batch` knob scaling the per-root
+  virtual batch by subset size so the ~25% full-search games still fill the calibrated
+  inference batch).
+- New/updated continuous e2e tests in `tests/test_dense_cnn_continuous_scheduler.py`
+  (PCR visit mix + flag consistency + determinism, policy-init opening flags/counts,
+  ramp determinism, lever validation).
 - NOT run here (no torch/GPU in the prep environment): the pytest suite + the maturin rebuild —
-  run both on the WSL box before launching main_2.
+  run both on the WSL box before launching main_2. Suggested order:
+  `scripts/_rebuild_hexo_models_hexgt.sh` -> restnet+scheduler pytest ->
+  `scripts/_continuous_ab_gate.py` (lockstep vs continuous on a real checkpoint, now with the
+  PCR config) -> launch.
 
 ## Where the run is (as of 2026-06-10, ~03:30 UTC)
 

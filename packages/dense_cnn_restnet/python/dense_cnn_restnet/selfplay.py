@@ -233,6 +233,45 @@ def _sample_policy_init_action(
     return pairs[-1][0]
 
 
+def _validate_selfplay_levers(selfplay: Any) -> tuple[bool, bool, float, float]:
+    """Validate the PCR / policy-init / root-temp-ramp knobs (both schedulers).
+
+    Returns (pcr_enabled, policy_init_enabled, root_temp_early, root_temp_halflife).
+    """
+
+    pcr_enabled = bool(selfplay.pcr_enabled)
+    if pcr_enabled:
+        proportion = float(selfplay.pcr_full_proportion)
+        if not 0.0 < proportion <= 1.0:
+            raise ValueError(f"pcr_full_proportion must be in (0, 1], got {proportion!r}")
+        if int(selfplay.pcr_fast_visits) < 1:
+            raise ValueError(
+                f"pcr_fast_visits must be >= 1 when PCR is enabled, got {selfplay.pcr_fast_visits!r}"
+            )
+    policy_init_enabled = float(selfplay.policy_init_fraction) > 0.0
+    if policy_init_enabled:
+        if not 0.0 < float(selfplay.policy_init_fraction) <= 1.0:
+            raise ValueError(
+                f"policy_init_fraction must be in (0, 1], got {selfplay.policy_init_fraction!r}"
+            )
+        if float(selfplay.policy_init_avg_plies) <= 0.0 or int(selfplay.policy_init_max_plies) < 1:
+            raise ValueError(
+                "policy_init_avg_plies must be > 0 and policy_init_max_plies >= 1 "
+                "when policy-initialized openings are enabled"
+            )
+        if not float(selfplay.policy_init_temperature) > 0.0:
+            raise ValueError(
+                f"policy_init_temperature must be > 0, got {selfplay.policy_init_temperature!r}"
+            )
+    root_temp_early = float(selfplay.root_policy_temperature_early)
+    root_temp_halflife = float(selfplay.root_policy_temperature_halflife)
+    if root_temp_early > 0.0 and root_temp_halflife <= 0.0:
+        raise ValueError(
+            "root_policy_temperature_halflife must be > 0 when root_policy_temperature_early is set"
+        )
+    return pcr_enabled, policy_init_enabled, root_temp_early, root_temp_halflife
+
+
 # Adaptive expected-game-length state for the half-life temperature scheme: an
 # EMA of the measured mean decisions/game, persisted per run so it survives
 # process bounces and resumes alongside the run itself (not the checkpoint —
@@ -323,7 +362,7 @@ def _generate_selfplay_epoch_lockstep(*, ctx: Any, components: Any, epoch: int, 
         attention_kv_gather=config.performance.attention_kv_gather,
     )
     active_limit = int(trainer.selfplay_batch_size)
-    adaptive_vbatch = _adaptive_vbatch_enabled()
+    adaptive_vbatch = _adaptive_vbatch_enabled() or bool(selfplay.adaptive_virtual_batch)
     if active_limit <= 0:
         raise ValueError("selfplay active game count must be > 0")
     if active_limit > selfplay.mcts_active_root_limit:
@@ -345,43 +384,16 @@ def _generate_selfplay_epoch_lockstep(*, ctx: Any, components: Any, epoch: int, 
         else 0.0
     )
 
-    # KataGo Playout Cap Randomization (see _pcr_is_full / the hexgt lineage's
-    # HEXGT_PCR_KATAGO_MAPPING.md). FULL searches carry the exploration machinery
-    # and become training rows; FAST searches advance the game cheaply (no noise,
-    # no forced playouts, greedy) and are dropped at write time.
-    pcr_enabled = bool(selfplay.pcr_enabled)
+    # KataGo Playout Cap Randomization + policy-initialized openings + the
+    # root-policy temperature early ramp (see _pcr_is_full / _policy_init_plies /
+    # _root_policy_temperature and the hexgt lineage's HEXGT_PCR_KATAGO_MAPPING.md).
+    # FULL searches carry the exploration machinery and become training rows;
+    # FAST/INIT moves advance the game cheaply and are dropped at write time.
+    pcr_enabled, policy_init_enabled, root_temp_early, root_temp_halflife = (
+        _validate_selfplay_levers(selfplay)
+    )
     pcr_full_proportion = float(selfplay.pcr_full_proportion)
     pcr_fast_visits = int(selfplay.pcr_fast_visits)
-    if pcr_enabled:
-        if not 0.0 < pcr_full_proportion <= 1.0:
-            raise ValueError(f"pcr_full_proportion must be in (0, 1], got {pcr_full_proportion!r}")
-        if pcr_fast_visits < 1:
-            raise ValueError(f"pcr_fast_visits must be >= 1 when PCR is enabled, got {pcr_fast_visits!r}")
-    # KataGo policy-initialized openings (initGamesWithPolicy): selected games
-    # play their first few plies sampled directly from the raw net prior (no
-    # search); those plies are not recorded as training rows.
-    policy_init_enabled = float(selfplay.policy_init_fraction) > 0.0
-    if policy_init_enabled:
-        if not 0.0 < float(selfplay.policy_init_fraction) <= 1.0:
-            raise ValueError(
-                f"policy_init_fraction must be in (0, 1], got {selfplay.policy_init_fraction!r}"
-            )
-        if float(selfplay.policy_init_avg_plies) <= 0.0 or int(selfplay.policy_init_max_plies) < 1:
-            raise ValueError(
-                "policy_init_avg_plies must be > 0 and policy_init_max_plies >= 1 "
-                "when policy-initialized openings are enabled"
-            )
-        if not float(selfplay.policy_init_temperature) > 0.0:
-            raise ValueError(
-                f"policy_init_temperature must be > 0, got {selfplay.policy_init_temperature!r}"
-            )
-    # KataGo root-policy temperature early ramp (lockstep only).
-    root_temp_early = float(selfplay.root_policy_temperature_early)
-    root_temp_halflife = float(selfplay.root_policy_temperature_halflife)
-    if root_temp_early > 0.0 and root_temp_halflife <= 0.0:
-        raise ValueError(
-            "root_policy_temperature_halflife must be > 0 when root_policy_temperature_early is set"
-        )
 
     samples_added = 0
     raw_samples_added = 0
@@ -493,20 +505,6 @@ def _generate_selfplay_epoch_lockstep(*, ctx: Any, components: Any, epoch: int, 
             ]
             if playable:
                 search_started = perf_counter()
-                # Adaptive virtual_batch_size (env-gated): as games finish and
-                # concurrency falls, raise leaves-per-root to hold the per-round
-                # leaf-request budget (~active_limit * base_vbatch) constant, so
-                # forwards stay fat and the GPU stays fed through the drain tail.
-                # Bounded by search_visits. Costs a little search quality in the
-                # tail (higher vbatch -> more virtual-loss-correlated selection),
-                # affecting only the few late, low-concurrency positions.
-                effective_vbatch = trainer.mcts_virtual_batch_size
-                if adaptive_vbatch and len(playable) > 0:
-                    budget = active_limit * trainer.mcts_virtual_batch_size
-                    effective_vbatch = max(
-                        trainer.mcts_virtual_batch_size,
-                        min(int(selfplay.search_visits), -(-budget // len(playable))),
-                    )
                 # Split this round's playable games into search subsets:
                 # - "init": policy-initialized opening plies — a 1-visit probe
                 #   (noise off, root temperature 1.0) whose exported root prior IS
@@ -604,6 +602,21 @@ def _generate_selfplay_epoch_lockstep(*, ctx: Any, components: Any, epoch: int, 
                     # Distinct seed per subset so full/fast/init noise + sampling
                     # stay decorrelated within the round.
                     spec_seed = round_seed_base + spec_index * 0x5DEECE66D
+                    # Adaptive virtual_batch_size, PER SUBSET: hold the round's
+                    # leaf-request budget (~active_limit * base_vbatch) constant
+                    # across this subset's games, so a small subset (e.g. the
+                    # ~25% full-search games under PCR, or the end-of-epoch
+                    # drain tail) still fills the calibrated inference batch.
+                    # Bounded by the subset's visit cap. Costs a little search
+                    # quality (higher vbatch -> more virtual-loss-correlated
+                    # selection) on the affected searches.
+                    spec_vbatch = trainer.mcts_virtual_batch_size
+                    if adaptive_vbatch:
+                        budget = active_limit * trainer.mcts_virtual_batch_size
+                        spec_vbatch = max(
+                            trainer.mcts_virtual_batch_size,
+                            min(int(spec_visits), -(-budget // len(spec_games))),
+                        )
                     searches = mcts_session.run(
                         [game["search_key"] for game in spec_games],
                         [game["state"] for game in spec_games],
@@ -612,7 +625,7 @@ def _generate_selfplay_epoch_lockstep(*, ctx: Any, components: Any, epoch: int, 
                         c_puct=selfplay.c_puct,
                         temperature=selfplay.temperature,
                         seed=spec_seed,
-                        virtual_batch_size=effective_vbatch,
+                        virtual_batch_size=spec_vbatch,
                         active_root_limit=selfplay.mcts_active_root_limit,
                         root_dirichlet_total_alpha=spec_alpha,
                         root_dirichlet_noise_fraction=spec_fraction,
@@ -876,17 +889,17 @@ def _generate_selfplay_epoch_continuous(*, ctx: Any, components: Any, epoch: int
     requested_games = int(games_per_epoch or 0)
     if requested_games < 0:
         raise ValueError("games_per_epoch must be >= 0")
-    # PCR, policy-initialized openings, and the root-policy temperature early
-    # ramp are implemented in the lockstep driver only. Fail loud rather than
-    # silently running a continuous epoch without them.
-    if bool(selfplay.pcr_enabled):
-        raise ValueError("selfplay.pcr_enabled requires scheduler='lockstep'")
-    if float(selfplay.policy_init_fraction) > 0.0:
-        raise ValueError("selfplay.policy_init_fraction > 0 requires scheduler='lockstep'")
-    if float(selfplay.root_policy_temperature_early) > 0.0:
-        raise ValueError(
-            "selfplay.root_policy_temperature_early > 0 requires scheduler='lockstep'"
-        )
+    # PCR / policy-initialized openings / root-policy temperature ramp: the
+    # continuous scheduler implements these natively in Rust (per-slot move
+    # classes); validate the knobs here and pass them through. The per-game
+    # policy-init draw and the per-move PCR coin live Rust-side (deterministic
+    # in base_seed via dedicated mix_seed streams), so the driver only reads the
+    # class flags off each move payload.
+    pcr_enabled, policy_init_enabled, root_temp_early, root_temp_halflife = (
+        _validate_selfplay_levers(selfplay)
+    )
+    pcr_full_proportion = float(selfplay.pcr_full_proportion)
+    pcr_fast_visits = int(selfplay.pcr_fast_visits)
 
     inference = DenseCNNInference(
         components.model.model,
@@ -935,11 +948,17 @@ def _generate_selfplay_epoch_continuous(*, ctx: Any, components: Any, epoch: int
 
     samples_added = 0
     raw_samples_added = 0
+    total_decisions = 0
     searched_positions = 0
     mcts_simulations = 0
     games_started = 0
     completed_games = 0
     truncated_games = 0
+    full_search_count = 0
+    fast_search_count = 0
+    policy_init_moves = 0
+    pcr_fast_rows_excluded = 0
+    npz_skipped_empty = 0
     epoch_spill = {category: 0 for category in SPILL_CATEGORIES}
     npz_writes: list[Mapping[str, Any]] = []
     started = perf_counter()
@@ -1024,37 +1043,60 @@ def _generate_selfplay_epoch_continuous(*, ctx: Any, components: Any, epoch: int
                         )
                     else:
                         writer.finish_completed(winner, len(game["actions"]))
+                    # Finalize over the DENSE pending trajectory (full AND
+                    # fast/init placeholder rows) so the STV / opp-policy /
+                    # moves-left targets keep their per-ply semantics; non-full
+                    # rows are dropped below, not here.
                     finalized = _finalize_game_samples(
                         game["pending"],
                         winner,
                         horizons,
                         truncated=truncated,
                         soft_z_lambda=config.samples.soft_z_lambda,
+                        mask_opp_from_fast=(pcr_enabled or policy_init_enabled),
                     )
-                    materialized, weight_stats = materialize_policy_surprise_rows(
-                        finalized,
-                        seed=base_seed + epoch * 1_000_000_003 + int(game["search_key"]),
-                        uniform_fraction=config.samples.policy_surprise_uniform_fraction,
-                        max_weight=config.samples.policy_surprise_max_weight,
-                    )
-                    npz_path = record_dir / f"epoch_{epoch:06d}_game_{int(game['search_key']):06d}.npz"
-                    write_result = write_selfplay_npz(
-                        npz_path,
-                        materialized,
-                        raw_rows=len(finalized),
-                        epoch=epoch,
-                        game_id=str(game["game_id"]),
-                        short_term_value_horizons=horizons,
-                    )
-                    writer_results.append(
-                        {
-                            "path": str(write_result.path),
-                            "raw_rows": write_result.raw_rows,
-                            "effective_rows": write_result.effective_rows,
-                            "policy_surprise_mean": weight_stats["policy_surprise_mean"],
-                            "frequency_weight_mean": weight_stats["frequency_weight_mean"],
-                        }
-                    )
+                    to_write = [s for s in finalized if s.metadata.get("pcr_full", True)]
+                    if to_write:
+                        materialized, weight_stats = materialize_policy_surprise_rows(
+                            to_write,
+                            seed=base_seed + epoch * 1_000_000_003 + int(game["search_key"]),
+                            uniform_fraction=config.samples.policy_surprise_uniform_fraction,
+                            max_weight=config.samples.policy_surprise_max_weight,
+                        )
+                        npz_path = record_dir / f"epoch_{epoch:06d}_game_{int(game['search_key']):06d}.npz"
+                        write_result = write_selfplay_npz(
+                            npz_path,
+                            materialized,
+                            raw_rows=len(to_write),
+                            epoch=epoch,
+                            game_id=str(game["game_id"]),
+                            short_term_value_horizons=horizons,
+                        )
+                        writer_results.append(
+                            {
+                                "path": str(write_result.path),
+                                "raw_rows": write_result.raw_rows,
+                                "effective_rows": write_result.effective_rows,
+                                "policy_surprise_mean": weight_stats["policy_surprise_mean"],
+                                "frequency_weight_mean": weight_stats["frequency_weight_mean"],
+                                "decisions": len(finalized),
+                                "rows_excluded": len(finalized) - len(to_write),
+                            }
+                        )
+                    else:
+                        # Possible under PCR: a short game whose every move drew
+                        # the fast coin. Nothing to train on; skip the shard.
+                        writer_results.append(
+                            {
+                                "path": None,
+                                "raw_rows": 0,
+                                "effective_rows": 0,
+                                "policy_surprise_mean": 0.0,
+                                "frequency_weight_mean": 0.0,
+                                "decisions": len(finalized),
+                                "rows_excluded": len(finalized),
+                            }
+                        )
                 except BaseException as exc:
                     if not writer_errors:
                         writer_errors.append(exc)
@@ -1075,6 +1117,9 @@ def _generate_selfplay_epoch_continuous(*, ctx: Any, components: Any, epoch: int
         "mean_flush_states": 0.0,
         "no_progress_flushes": 0,
         "moves_decided": 0,
+        "full_moves": 0,
+        "fast_moves": 0,
+        "init_moves": 0,
         "flush_size_histogram": {},
         "on_move_seconds": 0.0,
     }
@@ -1086,6 +1131,7 @@ def _generate_selfplay_epoch_continuous(*, ctx: Any, components: Any, epoch: int
         def _on_move(game_key: int, payload: Mapping[str, Any]) -> object:
             nonlocal searched_positions, mcts_simulations, completed_games, truncated_games
             nonlocal next_game_index, games_started, last_live_write
+            nonlocal full_search_count, fast_search_count, policy_init_moves
             game = active.pop(int(game_key), None)
             if game is None:
                 raise RuntimeError(f"continuous MCTS callback received unknown game key {game_key}")
@@ -1093,23 +1139,52 @@ def _generate_selfplay_epoch_continuous(*, ctx: Any, components: Any, epoch: int
                 _write_live_progress("running")
                 last_live_write = perf_counter()
             search = _result_from_payload(payload)
-            if int(search.visits) != selfplay.search_visits:
+            # Move class flags set by the Rust scheduler (PCR / policy-init).
+            is_init = bool(payload.get("policy_init", False))
+            is_full = bool(payload.get("pcr_full", True)) and not is_init
+            if is_init:
+                expected_visits = 1
+            elif is_full:
+                expected_visits = selfplay.search_visits
+            else:
+                expected_visits = pcr_fast_visits
+            if int(search.visits) != expected_visits:
                 raise RuntimeError(
-                    f"dense_cnn MCTS returned {search.visits} visits; expected exactly {selfplay.search_visits}"
+                    f"dense_cnn MCTS returned {search.visits} visits; expected exactly "
+                    f"{expected_visits} ({'init' if is_init else 'full' if is_full else 'fast'})"
                 )
-            searched_positions += 1
-            mcts_simulations += int(search.visits)
+            if is_init:
+                policy_init_moves += 1
+            else:
+                searched_positions += 1
+                mcts_simulations += int(search.visits)
+                if is_full:
+                    full_search_count += 1
+                else:
+                    fast_search_count += 1
             state = game["state"]
+            # Fast/init rows feed the dense pending chain only (dropped at write
+            # time); the `pcr_full` tag drives that and the opp-policy masking.
+            metadata: dict[str, Any] = {
+                "epoch": epoch,
+                "search_visits": search.visits,
+                "pcr_full": is_full,
+            }
+            if is_init:
+                metadata["policy_init"] = True
             sample = sample_from_state(
                 state,
                 game_id=game["game_id"],
                 turn_index=len(game["actions"]),
                 policy=search.visit_policy,
                 root_prior_policy=search.root_prior_policy,
-                metadata={"epoch": epoch, "search_visits": search.visits},
+                metadata=metadata,
             )
-            for category, count in count_spill(sample).items():
-                epoch_spill[category] += count
+            if is_full:
+                # Spill telemetry describes RECORDED rows only (comparable to a
+                # non-PCR run).
+                for category, count in count_spill(sample).items():
+                    epoch_spill[category] += count
             game["pending"].append((sample.current_player, sample, search.root_value))
             engine.apply_action(state, engine.PlacementAction(unpack_coord_id(search.action_id)))
             game["actions"].append(search.action_id)
@@ -1177,6 +1252,24 @@ def _generate_selfplay_epoch_continuous(*, ctx: Any, components: Any, epoch: int
                     widening_max_children=selfplay.widening_max_children,
                     widening_min_children=selfplay.widening_min_children,
                     forced_playout_k=selfplay.forced_playout_k,
+                    root_policy_temperature_early=(root_temp_early if root_temp_early > 0.0 else None),
+                    root_policy_temperature_halflife=(
+                        root_temp_halflife if root_temp_early > 0.0 else None
+                    ),
+                    pcr_full_proportion=(pcr_full_proportion if pcr_enabled else None),
+                    pcr_fast_visits=(pcr_fast_visits if pcr_enabled else None),
+                    policy_init_fraction=(
+                        float(selfplay.policy_init_fraction) if policy_init_enabled else None
+                    ),
+                    policy_init_avg_plies=(
+                        float(selfplay.policy_init_avg_plies) if policy_init_enabled else None
+                    ),
+                    policy_init_max_plies=(
+                        int(selfplay.policy_init_max_plies) if policy_init_enabled else None
+                    ),
+                    policy_init_temperature=(
+                        float(selfplay.policy_init_temperature) if policy_init_enabled else None
+                    ),
                 )
                 mcts_search_elapsed += perf_counter() - search_started
         finally:
@@ -1194,13 +1287,21 @@ def _generate_selfplay_epoch_continuous(*, ctx: Any, components: Any, epoch: int
                 f"({games_started} started, {completed_games + truncated_games} finished)"
             )
 
-    npz_writes.extend(writer_results)
+    # Writer results carry per-game decision counts (the dense trajectory incl.
+    # fast/init plies) alongside the recorded-row counts; shards skipped for
+    # having no recordable rows have path=None.
+    total_decisions = sum(int(item.get("decisions", item["raw_rows"])) for item in writer_results)
+    pcr_fast_rows_excluded = sum(int(item.get("rows_excluded", 0)) for item in writer_results)
+    npz_skipped_empty = sum(1 for item in writer_results if item.get("path") is None)
+    npz_writes.extend(item for item in writer_results if item.get("path") is not None)
     raw_samples_added = sum(int(item["raw_rows"]) for item in npz_writes)
     samples_added = sum(int(item["effective_rows"]) for item in npz_writes)
     elapsed = perf_counter() - started
     games_done = completed_games + truncated_games
     if games_done > 0:
-        latest_mean_length = raw_samples_added / games_done
+        # Game length in DECISIONS (incl. fast/policy-init plies), NOT recorded
+        # training rows — the adaptive temperature half-life keys off real plies.
+        latest_mean_length = total_decisions / games_done
         updated_ema = (
             _LENGTH_EMA_DECAY * expected_game_length + (1.0 - _LENGTH_EMA_DECAY) * latest_mean_length
         )
@@ -1228,9 +1329,32 @@ def _generate_selfplay_epoch_continuous(*, ctx: Any, components: Any, epoch: int
         "games_finished": games_done,
         "raw_samples": raw_samples_added,
         "effective_samples": samples_added,
+        "total_decisions": total_decisions,
         "searched_positions": searched_positions,
         "mcts_simulations": mcts_simulations,
         "search_visits": selfplay.search_visits,
+        "pcr": {
+            "enabled": pcr_enabled,
+            "full_proportion": pcr_full_proportion if pcr_enabled else 1.0,
+            "fast_visits": pcr_fast_visits if pcr_enabled else 0,
+            "full_search_count": full_search_count,
+            "fast_search_count": fast_search_count,
+            "fast_rows_excluded": pcr_fast_rows_excluded,
+            "npz_skipped_empty": npz_skipped_empty,
+        },
+        "policy_init": {
+            "enabled": policy_init_enabled,
+            "fraction": float(selfplay.policy_init_fraction),
+            "avg_plies": float(selfplay.policy_init_avg_plies),
+            "max_plies": int(selfplay.policy_init_max_plies),
+            "temperature": float(selfplay.policy_init_temperature),
+            "moves": policy_init_moves,
+        },
+        "root_policy_temperature_control": {
+            "base": selfplay.root_policy_temperature,
+            "early": root_temp_early,
+            "halflife_plies": root_temp_halflife,
+        },
         "selfplay_npz_files": len(npz_writes),
         "record_path": str(record_path),
         "elapsed_seconds": elapsed,

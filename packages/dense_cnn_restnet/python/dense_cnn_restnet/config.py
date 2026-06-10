@@ -139,6 +139,13 @@ class Model1SelfPlayConfig:
     mcts_active_root_limit: int = 1024
     scheduler: str = "lockstep"
     scheduler_flush_target: int = 0
+    # Lockstep only: recompute the per-root virtual batch PER SEARCH SUBSET from
+    # the round's leaf budget (active_games * calibrated vbatch). Under PCR the
+    # full-search subset is only ~pcr_full_proportion of playable games, so the
+    # calibrated per-root vbatch leaves its eval batches mostly empty; scaling
+    # by the subset size keeps the GPU fed. Also covers the end-of-epoch drain
+    # tail. (Supersedes the HEXO_ADAPTIVE_VBATCH env gate, which still works.)
+    adaptive_virtual_batch: bool = False
     max_actions: int = 1024
     # Move-selection temperature SCHEDULE. `temperature` is the value used for the
     # opening; play linearly decays it to `final_temperature` over the first
@@ -375,6 +382,7 @@ def parse_model1_config(raw: Mapping[str, Any] | None) -> Model1Config:
             mcts_active_root_limit=int(selfplay.get("mcts_active_root_limit", 1024)),
             scheduler=_scheduler_name(selfplay.get("scheduler", "lockstep")),
             scheduler_flush_target=_scheduler_flush_target(selfplay.get("scheduler_flush_target", 0)),
+            adaptive_virtual_batch=bool(selfplay.get("adaptive_virtual_batch", False)),
             max_actions=int(selfplay.get("max_actions", 1024)),
             temperature=float(selfplay.get("temperature", 1.0)),
             final_temperature=float(selfplay.get("final_temperature", selfplay.get("temperature", 1.0))),

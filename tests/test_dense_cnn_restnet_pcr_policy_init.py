@@ -86,6 +86,14 @@ def test_config_parses_new_selfplay_and_samples_keys():
     assert parsed.samples.soft_z_lambda == pytest.approx(0.1)
 
 
+def test_config_parses_adaptive_virtual_batch():
+    parsed = config_module.parse_model1_config(
+        {"selfplay": {"adaptive_virtual_batch": True}}
+    )
+    assert parsed.selfplay.adaptive_virtual_batch is True
+    assert config_module.parse_model1_config({}).selfplay.adaptive_virtual_batch is False
+
+
 def test_config_defaults_disable_new_levers():
     parsed = config_module.parse_model1_config({})
     assert parsed.selfplay.pcr_enabled is False
