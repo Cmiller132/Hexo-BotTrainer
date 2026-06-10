@@ -322,8 +322,8 @@ arXiv:1902.10565; `lightvector/KataGo` `docs/KataGoMethods.md`,
 
 ## Postscript — config change applied live (2026-06-10, owner directive)
 
-Two owner-directed changes were applied to `dense_cnn_restnet_main1` via a clean
-boundary bounce (halt → relaunch resuming from `epoch_000031.pt`, throughput knobs
+Three owner-directed changes for `dense_cnn_restnet_main1`, applied via clean
+boundary bounces (halt → relaunch from the latest checkpoint, throughput knobs
 `scheduler=lockstep` / `torch.compile` / `attention_kv_gather` preserved):
 
 1. **Self-play opening-temperature anchor** (new code hook): `opening_temperature`
@@ -341,6 +341,29 @@ boundary bounce (halt → relaunch resuming from `epoch_000031.pt`, throughput k
    → 0.10 floor). Magnitude 1.4 per the opening-diversity analysis (recommended
    1.3–1.5; the adaptive scheme alone left the opening at only ~0.8–1.0).
 2. **`train_samples_per_epoch` 32000 → 64000.**
+3. **`MOVES_LEFT_CAP` 80 → 512** (`dense_cnn_restnet/constants.py`). The moves-left
+   auxiliary head maps remaining-decisions onto the 65-bin value support via
+   `normalized = 2·min(1, moves_left/MOVES_LEFT_CAP) − 1`. At cap=80, with measured
+   decisions-remaining ~mean 112 / median 80 / max ~600, ~half of targets saturated
+   to the top bin so the head's upper range was unlearnable; 512 covers the vast
+   majority. **Consistency finding (no mixed-cap problem):** the cap is applied at
+   **expansion / train-read time** (`samples.expand_sample`, reached by
+   `compact_io` batch expansion), **not** baked into shards — shards persist the
+   **raw uncapped** decisions-remaining scalar (`samples.py` finalize
+   `len(decisions)-index-1` → `compact_io` stores it raw → reads it raw). So
+   changing the cap re-applies uniformly to **every** row (including old cap-80-era
+   shards in the replay window) on the next train pass; there is no inconsistency
+   between old and new targets. **Strict-load verified:** the cap only changes the
+   scalar→bin mapping, not the 65-bin head shape, so the checkpoint state_dict
+   strict-loads (confirmed loading `epoch_000031.pt` into a fresh net). Inference
+   decode (`architecture.py`) uses the same cap symmetrically; the head is auxiliary
+   (not used by MCTS), so search is unaffected.
+
+**Staging note (2026-06-10):** changes 1 (anchor) + 2 (train_samples) went live in
+the first boundary bounce (anchor initially at `opening_moves=8`). The **revision
+`opening_moves=8→5`** and **change 3 (`MOVES_LEFT_CAP=512`)** are staged together for
+the **next** epoch-boundary bounce (resume from the latest checkpoint), per owner
+directive not to interrupt the current epoch.
 
 **Git: held uncommitted** (option A) — the commit clone is stale relative to the
 live run (origin lacks the throughput knobs, the adaptive-temperature block, and
