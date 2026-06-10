@@ -317,3 +317,47 @@ tradeoff, and confidence. **All are proposals; none have been applied.**
 `scripts/_explore_run.sh` (CPU wrapper). Checkpoint: `epoch_000030.pt`. KataGo refs:
 arXiv:1902.10565; `lightvector/KataGo` `docs/KataGoMethods.md`,
 `cpp/configs/training/selfplay8b20.cfg`, `cpp/search/searchexplorehelpers.cpp`.*
+
+---
+
+## Postscript — config change applied live (2026-06-10, owner directive)
+
+Two owner-directed changes were applied to `dense_cnn_restnet_main1` via a clean
+boundary bounce (halt → relaunch resuming from `epoch_000031.pt`, throughput knobs
+`scheduler=lockstep` / `torch.compile` / `attention_kv_gather` preserved):
+
+1. **Self-play opening-temperature anchor** (new code hook): `opening_temperature`
+   /`opening_moves` added to `Model1SelfPlayConfig` + parser, and a floor in
+   `selfplay._move_temperature` (`max(opening_temperature, adaptive_base)` for the
+   first `opening_moves` decisions). Set to **`opening_temperature=1.4`,
+   `opening_moves=8`**. Resulting opening curve at expected length ~97 (half-life
+   ~24 plies): **plies 0–7 held flat at 1.4**, then the existing adaptive decay
+   resumes (~0.79 @ ply 8 → 0.50 @ ply 24 → 0.10 floor). Chosen per the
+   opening-diversity analysis (recommended 1.3–1.5 over plies 0–6; the adaptive
+   scheme alone left the opening at only ~0.8–1.0, too low to diversify).
+2. **`train_samples_per_epoch` 32000 → 64000.**
+
+**Git: held uncommitted** (option A) — the commit clone is stale relative to the
+live run (origin lacks the throughput knobs, the adaptive-temperature block, and
+the 32000 setting; `selfplay.py`/`config.py` are +391/+34 lines ahead uncommitted),
+so a clean non-regressive commit isn't possible without the parallel session's
+coordination. The edits live in the `E:\Hexo-BotTrainer-hexgt` worktree like the
+rest of the run's uncommitted state. This doc is the record.
+
+**Honest caveat (opening diversity).** The opening collapse ("origin + n=8-edge")
+is **prior-driven** — the net's raw policy puts ~96% mass on the edge ring (argmax
+dist-8 in 140/140 probed boards). A *move-selection* temperature anchor acts
+**downstream of search**: it spreads selection across the moves the search already
+visited (mostly edge-ring), so it will increase **direction / which-edge-cell**
+diversity and give the occasional inner move more weight — but it is **unlikely to
+break the radius/shape stereotypy on its own**, because temperature cannot make the
+search visit moves the concentrated prior never surfaces. The higher-leverage levers
+for genuine opening-*shape* diversity act **before/inside search**: raise
+`root_policy_temperature` at the opening (flattens the prior pre-search so search
+actually explores non-edge moves), shaped/boosted root Dirichlet (see
+recommendation 1 above; the opening-diversity note suggests opening-only `eps→0.35`),
+or ultimately the prior/training side (the 96%-edge prior is learned and only shifts
+as the value signal teaches the net that inner openings are viable). **Assessment:
+1.4 is a reasonable, low-risk first touch that will measurably diversify the played
+opening, but treat it as necessary-not-sufficient — if opening *shape* doesn't
+broaden within a few epochs, the fix is on the prior/search side, not temperature.**
