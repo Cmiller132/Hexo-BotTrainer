@@ -838,9 +838,21 @@ class HexoPlayHandler(BaseHTTPRequestHandler):
             self.send_error(HTTPStatus.NOT_FOUND)
             return
         raw, gz, etag, last_modified, content_type = entry
-        # Versioned assets are cacheable. index.html must revalidate so a changed
-        # app.js query string is picked up immediately after a frontend restart.
-        cache_control = "no-cache" if name == "index.html" else f"public, max-age={STATIC_MAX_AGE_SECONDS}"
+        # Cache policy is deliberately strict so a browser (esp. a phone, which
+        # caches HTML aggressively) can NEVER run stale Debug code:
+        #   - index.html: no-store -> the HTML document is always re-fetched, so its
+        #     ?v= asset references are always current.
+        #   - app.js / styles.css: no-cache -> the browser revalidates via ETag on
+        #     every load and receives the current bytes the instant the file changes.
+        # The asset is served from disk by (name, mtime), IGNORING the ?v= query, so
+        # no-cache delivers fresh code even to a client still requesting an OLD ?v=
+        # URL from a previously-cached page — exactly the stuck-on-old-app.js case
+        # that left mobile on pre-fix Debug navigation. ETag still yields 304s when
+        # nothing changed, so revalidation stays cheap.
+        if name == "index.html":
+            cache_control = "no-store, no-cache, must-revalidate, max-age=0"
+        else:
+            cache_control = "no-cache"
         self._send_body(
             raw,
             content_type,
