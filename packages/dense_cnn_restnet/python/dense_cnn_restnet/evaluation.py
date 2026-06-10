@@ -232,9 +232,12 @@ def _run_games_concurrent(
     rounds = 0
     dense_forward_batches = 0
     dense_decisions = 0
-    # Deterministic per-run search seed; the native session derives a distinct
-    # per-root RNG (seed + root index) so the sampled openings still diverge
-    # across games, the same way self-play seeds a batch.
+    # Deterministic per-run search seed BASE; the native session derives a distinct
+    # per-root RNG (seed + root index) so games diverge within one round, and the
+    # per-round increment below gives each game a FRESH sampling draw at every
+    # opening move (a constant seed reused the same selection quantile for all
+    # `opening_moves` decisions of a game, collapsing the opening diversification
+    # this temperature exists for).
     search_seed = (base_seed or 0) + epoch
 
     def _finalize(game: _EvalGame) -> None:
@@ -284,7 +287,7 @@ def _run_games_concurrent(
                     visits=selfplay.search_visits,
                     c_puct=selfplay.c_puct,
                     temperature=0.0,
-                    seed=search_seed,
+                    seed=search_seed + rounds * 1_000_003,
                     virtual_batch_size=virtual_batch_size,
                     active_root_limit=selfplay.mcts_active_root_limit,
                     root_policy_temperature=selfplay.root_policy_temperature,

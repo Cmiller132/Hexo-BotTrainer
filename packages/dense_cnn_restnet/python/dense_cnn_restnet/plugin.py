@@ -47,6 +47,7 @@ class DenseCNNRestnetPlugin:
             attention_scope=arch.attention_scope,
             dropout=arch.dropout,
             short_term_value_horizons=arch.short_term_value_horizons,
+            moves_left_head=arch.moves_left_head,
         )
 
     def training_component_overrides(
@@ -63,10 +64,26 @@ class DenseCNNRestnetPlugin:
         if model is None:
             raise ValueError("DenseCNNRestnetPlugin requires build_model() to run first")
         parsed = parse_model1_config(config)
+        # Decoupled weight decay belongs on the matrix weights only: biases,
+        # norm gains (BatchNorm/LayerNorm, all 1-D), and the learned
+        # relative-position bias tables are excluded — decaying those pulls
+        # normalization scales and attention geometry toward zero for no
+        # regularization benefit.
+        decay_params: list[torch.nn.Parameter] = []
+        no_decay_params: list[torch.nn.Parameter] = []
+        for name, param in model.named_parameters():
+            if not param.requires_grad:
+                continue
+            if param.ndim <= 1 or name.endswith("relative_bias_table"):
+                no_decay_params.append(param)
+            else:
+                decay_params.append(param)
         optimizer = torch.optim.AdamW(
-            model.parameters(),
+            [
+                {"params": decay_params, "weight_decay": parsed.training.weight_decay},
+                {"params": no_decay_params, "weight_decay": 0.0},
+            ],
             lr=parsed.training.learning_rate,
-            weight_decay=parsed.training.weight_decay,
         )
         trainer = DenseCNNTrainer(
             model=model,

@@ -340,7 +340,9 @@ def test_config_parses_restnet_arch_keys():
                 "embed_kernel_size": 3,
                 "residual_conv": "hex",
                 "attention_impl": "sdpa",
-                "short_term_value_horizons": [1, 4, 8],
+                # Horizons must be even (turn-aligned) since the heads_v2
+                # even-offset EMA; see test_dense_cnn_restnet_heads_v2.py.
+                "short_term_value_horizons": [2, 6, 16],
             }
         }
     )

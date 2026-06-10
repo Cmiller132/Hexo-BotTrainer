@@ -22,7 +22,7 @@ from typing import Any, Mapping, Sequence
 import torch
 
 from . import rust_bridge
-from .constants import BOARD_SIZE
+from .constants import BOARD_SIZE, MOVES_LEFT_CAP
 from .d6 import Axial, D6_SIZE, D6Symmetry, unpack_coord_pair
 from .geometry import hex_distance
 from .input import build_input_planes, dense_policy_target, legal_mask_flat
@@ -131,6 +131,9 @@ class Model1SampleData:
     opp_policy: tuple[tuple[int, float], ...] = ()
     value: float = 0.0
     short_term_value: tuple[tuple[int, float], ...] = ()
+    # Decisions remaining AFTER this decision (0 at the game's final decision).
+    # Negative = absent/masked (pre-finalize samples, truncated games, old shards).
+    moves_left: float = -1.0
     policy_surprise: float = 0.0
     frequency_weight: float = 1.0
     metadata: Mapping[str, Any] = field(default_factory=dict)
@@ -231,6 +234,10 @@ def finalize_game_samples(
                 value=value_target,
                 opp_policy=opp_policy,
                 short_term_value=_short_term_value_targets(decisions, index, player, horizons),
+                # Moves-left auxiliary target: decisions remaining after this one
+                # (0 at the final decision). Masked (-1) for truncated games — a
+                # max_actions cutoff is not a real game end.
+                moves_left=float(len(decisions) - index - 1) if not truncated else -1.0,
                 metadata=metadata,
             )
         )
@@ -267,6 +274,11 @@ def expand_sample(
     }
     for horizon, value in sample.short_term_value:
         tensors[f"stvalue_{int(horizon)}"] = torch.tensor(float(value), dtype=torch.float32)
+    if float(sample.moves_left) >= 0.0:
+        # Normalize [0, MOVES_LEFT_CAP] (clamped) onto the binned value support
+        # [-1, 1] so the moves-left head reuses scalar_to_binned_target unchanged.
+        normalized = 2.0 * min(1.0, float(sample.moves_left) / MOVES_LEFT_CAP) - 1.0
+        tensors["moves_left"] = torch.tensor(normalized, dtype=torch.float32)
     return tensors
 
 
@@ -347,28 +359,41 @@ def _short_term_value_targets(
     player: str,
     horizons: Sequence[int],
 ) -> tuple[tuple[int, float], ...]:
-    """Exponential moving average of future root values, one per horizon.
+    """Per-horizon EMA of future root values, stepped over FULL TURNS.
 
-    Horizon `m` sets the EMA decay `lambda = m / (m + 1)`, whose effective mean
-    look-ahead distance is `m` moves. Future root values are taken from the side
-    to move at each future decision, so they are sign-flipped to this decision's
-    perspective. A horizon is omitted only when no future decision exists.
+    Every turn after the opening is TWO decisions by the same player
+    (FirstStone -> SecondStone), so consecutive future decisions alternate
+    within-turn phase and the side-to-move root value swings with that tempo
+    (a mover about to place their second stone is systematically up). A
+    per-decision EMA aliases that intra-turn swing into the target. Sampling
+    only at even decision offsets (+2, +4, ...) keeps every sampled value at
+    the SAME within-turn phase as this decision, removing the aliasing; the
+    sign still flips by actual mover label (even offsets alternate players).
+
+    The per-step decay `lambda = (m - 1) / (m + 1)` gives horizon `m` the same
+    effective mean look-ahead (`m + 1` decisions) as the old per-decision
+    scheme's `lambda = m / (m + 1)`, so horizon semantics are unchanged.
+    Horizons must therefore be even, turn-aligned decision counts (enforced at
+    the config boundary). A horizon is omitted (masked downstream) when no
+    even-offset future decision exists.
     """
 
     future = decisions[index + 1 :]
-    if not future:
-        return ()
     perspective = [
         root_value if future_player == player else -root_value
         for future_player, _sample, root_value in future
     ]
+    # future[k] sits at decision offset k+1; even offsets are k = 1, 3, 5, ...
+    stepped = perspective[1::2]
+    if not stepped:
+        return ()
     targets: list[tuple[int, float]] = []
     for horizon in horizons:
-        decay = horizon / (horizon + 1.0)
+        decay = (horizon - 1.0) / (horizon + 1.0)
         weighted_sum = 0.0
         weight_total = 0.0
         weight = 1.0
-        for value in perspective:
+        for value in stepped:
             weighted_sum += weight * value
             weight_total += weight
             weight *= decay

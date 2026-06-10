@@ -2,12 +2,18 @@
 
 This is a fork of the dense_cnn `architecture.py`. It keeps the dense_cnn input
 contract (the 13-plane 41x41 crop from `input.py` / `rust/src/encoding.rs`) and
-the EXACT training/search head surface:
+the dense_cnn search surface (`forward_policy_value`: `policy` + `value`), with
+this training head surface:
 
 - `policy`: logits over the 41x41 dense crop.
 - `value`: a 65-bin scalar value distribution in `[-1, 1]`.
 - `opp_policy`: an auxiliary policy target from the next opponent MCTS policy.
 - `stvalue_<horizon>`: optional short-term value heads.
+- `moves_left`: optional auxiliary head over remaining decisions, binned onto
+  the same 65-bin support via `[0, MOVES_LEFT_CAP] -> [-1, 1]`.
+
+All value-style heads share one `ValueReduction` (conv1x1 -> Linear 1681->64);
+each head is a 64->65 Linear top.
 
 What differs from dense_cnn is the TRUNK. Instead of a homogeneous stack of
 gated residual blocks, the trunk interleaves Residual (R) and Transformer (T)
@@ -76,9 +82,14 @@ DEFAULT_EMBED_KERNEL_SIZE = 3
 # only the relevant tokens (occupied ∪ legal ∩ disk) into a true O(K²) attention.
 ATTENTION_SCOPES = ("full", "disk", "content")
 DEFAULT_ATTENTION_SCOPE = "disk"
-# Additive mask added to non-disk KEY columns under "disk"/"content". Large and
-# finite (NOT -inf): queries are unrestricted so no attention row is ever fully
-# masked, and a finite value keeps softmax/SDPA fp16-safe with no NaN risk.
+# Additive mask added to non-disk KEY columns under "disk"/"content". Finite in
+# fp32/bf16, but NOTE: under fp16 autocast the cast saturates -1e9 to -inf. That
+# is still NaN-safe HERE because only KEY columns are masked and queries are
+# unrestricted, so no attention row is ever fully masked (softmax over a
+# partially -inf row is well defined; verified against the fp32 oracle). The one
+# latent hazard is a FULLY-masked row — only reachable in "content" scope for a
+# sample with zero relevant tokens inside a mixed batch, which real positions
+# cannot produce (in-disk legal moves always exist).
 _DISK_MASK_VALUE = -1.0e9
 # Gathered ("content") attention pads the per-sample relevant-token count up to a
 # multiple of this so the forward sees a small set of token-length buckets (cuDNN/
@@ -543,8 +554,21 @@ class PolicyHead(nn.Module):
         return self.head(self.activation(self.conv(x))).flatten(start_dim=1)
 
 
-class ValueBinnedHead(nn.Module):
-    """65-bin KataGo-style value head. Copied verbatim from dense_cnn."""
+class ValueReduction(nn.Module):
+    """Shared spatial reduction for every value-style head.
+
+    Conv1x1(C->1) -> ReLU -> flatten -> Linear(BOARD_AREA->64) -> ReLU, producing
+    one 64-d value embedding consumed by all the scalar-distribution tops (value,
+    stvalue_<h>, moves_left). This replaces the per-head copies of the same
+    reduction (4 x ~112k params -> 1 x ~108k + ~4k per top): the dominant
+    1681->64 Linear is supervised by every value-style target at once instead of
+    four private ones. Composition (conv+ReLU -> Linear -> ReLU -> top Linear) is
+    identical to the old per-head ValueBinnedHead, so old checkpoints migrate
+    function-preservingly for the main value head (see
+    scripts/_restnet_migrate_heads_v2.py). The spatial Linear (vs global pooling)
+    is deliberate: the crop is center-relative, so absolute crop position is
+    meaningful.
+    """
 
     def __init__(self, channels: int) -> None:
         super().__init__()
@@ -555,7 +579,6 @@ class ValueBinnedHead(nn.Module):
         self.mlp = nn.Sequential(
             nn.Linear(BOARD_AREA, 64),
             nn.ReLU(inplace=True),
-            nn.Linear(64, VALUE_BINS),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -587,6 +610,7 @@ class RestnetNetwork(nn.Module):
         attention_scope: str = DEFAULT_ATTENTION_SCOPE,
         dropout: float = 0.0,
         short_term_value_horizons: tuple[int, ...] = (),
+        moves_left_head: bool = True,
     ) -> None:
         super().__init__()
         self.in_channels = int(in_channels)
@@ -629,11 +653,17 @@ class RestnetNetwork(nn.Module):
         self.blocks = nn.ModuleList(blocks)
 
         self.policy_head = PolicyHead(self.channels)
-        self.value_head = ValueBinnedHead(self.channels)
         self.opp_policy_head = PolicyHead(self.channels)
+        # All value-style heads share one spatial reduction; each head is a
+        # 64 -> VALUE_BINS top. moves_left predicts remaining decisions binned
+        # over [0, MOVES_LEFT_CAP] via the same [-1, 1] support (training-only
+        # auxiliary; absent from forward_policy_value).
+        self.value_reduction = ValueReduction(self.channels)
+        self.value_head = nn.Linear(64, VALUE_BINS)
         self.short_term_value_heads = nn.ModuleDict(
-            {str(horizon): ValueBinnedHead(self.channels) for horizon in self.short_term_value_horizons}
+            {str(horizon): nn.Linear(64, VALUE_BINS) for horizon in self.short_term_value_horizons}
         )
+        self.moves_left_head = nn.Linear(64, VALUE_BINS) if moves_left_head else None
 
         # Static radius-(H//2) hex-disk membership for every board cell, used by the
         # "content" scope to intersect relevance with the disk. persistent=False ->
@@ -699,13 +729,16 @@ class RestnetNetwork(nn.Module):
 
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
         features = self.trunk(x)
+        value_embedding = self.value_reduction(features)
         outputs = {
             "policy": self.policy_head(features),
-            "value": self.value_head(features),
+            "value": self.value_head(value_embedding),
             "opp_policy": self.opp_policy_head(features),
         }
         for horizon, head in self.short_term_value_heads.items():
-            outputs[f"stvalue_{horizon}"] = head(features)
+            outputs[f"stvalue_{horizon}"] = head(value_embedding)
+        if self.moves_left_head is not None:
+            outputs["moves_left"] = self.moves_left_head(value_embedding)
         return outputs
 
     def forward_policy_value(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
@@ -714,7 +747,7 @@ class RestnetNetwork(nn.Module):
         features = self.trunk(x)
         return {
             "policy": self.policy_head(features),
-            "value": self.value_head(features),
+            "value": self.value_head(self.value_reduction(features)),
         }
 
     def _validate_input(self, x: torch.Tensor) -> None:

@@ -110,7 +110,16 @@ def _replay_game(game: dict, *, horizons: tuple[int, ...], validate: bool = Fals
     lastmover_winner = pending[-1][0]
     # Use the engine terminal winner (authoritative); it matches the sample
     # current_player string space (Player StrEnum: 'player0'/'player1').
-    finalized = finalize_game_samples(pending, winner=engine_winner, horizons=horizons, truncated=False)
+    #
+    # horizons=() — NOT the architecture horizons: short-term-value targets are
+    # EMAs of future MCTS root values, and human replay has no search, so every
+    # root_value above is 0.0. Passing real horizons here would emit stvalue
+    # targets of exactly 0 with mask=1, training the stvalue heads (and, through
+    # them, the trunk) toward a constant during the whole prefit. With no
+    # short_term_value on the samples the shard writer (which still receives the
+    # architecture horizons for schema parity) writes stvalue_mask=0, so the
+    # masked stvalue loss contributes exactly nothing.
+    finalized = finalize_game_samples(pending, winner=engine_winner, horizons=(), truncated=False)
     info = {
         "moves": len(moves),
         "samples": len(finalized),

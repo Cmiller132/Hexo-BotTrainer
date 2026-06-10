@@ -13,6 +13,13 @@ VALUE_BINS = 65
 DEFAULT_CHANNELS = 96
 DEFAULT_BLOCKS = 6
 
+# Moves-left auxiliary head: remaining decisions are clamped to this cap and
+# mapped affinely onto the binned value support [-1, 1], so the head reuses the
+# 65-bin machinery (scalar_to_binned_target / binned_value_loss) unchanged. The
+# cap only bounds target resolution (longest observed epoch means ~98 decisions;
+# typical games run ~30-50), it does not need to bound every game exactly.
+MOVES_LEFT_CAP = 80
+
 PLANE_OWN_STONES = 0
 PLANE_OPPONENT_STONES = 1
 PLANE_EMPTY = 2

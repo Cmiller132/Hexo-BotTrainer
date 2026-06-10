@@ -648,19 +648,29 @@ def _build_compact_split(
     if input_rows <= 0 or expected_rows <= 0:
         return empty
 
-    horizons = compact_io.read_shard_horizons(infos[0].path)
-    # All shards in a window must share the same short_term_value horizons: the output
-    # is written with one `horizons` set, so rows from a shard with a different set would
-    # be silently mis-slotted / dropped (poisoning the short-term-value head). This only
-    # happens if the horizon config changed mid-run; fail loudly rather than corrupt.
-    for info in infos[1:]:
-        other = compact_io.read_shard_horizons(info.path)
-        if tuple(other) != tuple(horizons):
-            raise ValueError(
-                f"dense_cnn shuffle window mixes short_term_value horizons: "
-                f"{tuple(horizons)} (from {infos[0].path.name}) vs {tuple(other)} "
-                f"(from {info.path.name}); refusing to silently mis-slot stval targets"
-            )
+    # The output is written with the UNION of every input shard's short_term_value
+    # horizons. Each row stores (horizon, value) pairs and the writer fills the
+    # per-row mask only for horizons the row actually carries, so rows from shards
+    # with different horizon sets coexist losslessly: a row simply has mask=0 for
+    # horizons it never had (e.g. after a mid-run horizon change old rows train
+    # the new horizon's head on nothing — no mis-slotting, no dropping). The
+    # trainer requests its config horizons at expansion; extra stored horizons
+    # are ignored there.
+    horizon_union: set[int] = set()
+    per_shard = []
+    for info in infos:
+        shard_horizons = tuple(int(h) for h in compact_io.read_shard_horizons(info.path))
+        per_shard.append(shard_horizons)
+        horizon_union.update(shard_horizons)
+    horizons = tuple(sorted(horizon_union))
+    if any(tuple(item) != horizons for item in per_shard):
+        import sys
+
+        print(
+            f"[replay] shuffle window mixes short_term_value horizons; writing union {horizons}",
+            file=sys.stderr,
+            flush=True,
+        )
     rows: list[Model1SampleData] = []
     for info in infos:
         shard = compact_io.read_compact_shard(info.path)

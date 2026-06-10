@@ -52,6 +52,17 @@ class DenseCNNCheckpointLoader:
         model_state = payload.get("model_state")
         incompatibilities = _state_dict_incompatibilities(components.model.model.state_dict(), model_state)
         if incompatibilities:
+            if not _is_initialize_only(checkpoint_ref, ctx):
+                # A RESUME pointing at an incompatible checkpoint must never fall
+                # through to a fresh initialization — that silently restarts the
+                # run from random weights on top of its own data. Typical cause:
+                # the architecture changed without running the checkpoint
+                # migration (scripts/_restnet_migrate_heads_v2.py).
+                raise RuntimeError(
+                    "dense_cnn_restnet resume checkpoint is incompatible with the current "
+                    f"architecture ({path}); run the checkpoint migration before relaunching. "
+                    f"First mismatches: {incompatibilities[:4]}"
+                )
             return {
                 "status": "initialized",
                 "checkpoint_ref": str(path),
@@ -62,18 +73,27 @@ class DenseCNNCheckpointLoader:
             }
 
         components.model.model.load_state_dict(model_state)
-        optimizer_state = payload.get("optimizer_state")
-        if optimizer_state is not None and components.model.optimizer is not None:
-            components.model.optimizer.load_state_dict(optimizer_state)
+        # `initialize_from` is a WEIGHTS-ONLY warm start: the new run gets a fresh
+        # optimizer (no stale moments/step counts from a different training phase,
+        # e.g. the BC prefit's Adam state) and fresh train-bucket state. Only a
+        # true `resume_from` restores optimizer and train state. The pipeline
+        # collapses both fields into one ref, so the intent is recovered here from
+        # the run config: resume_from set -> resume semantics, else initialize.
+        weights_only = _is_initialize_only(checkpoint_ref, ctx)
         train_state = payload.get("train_state")
-        if trainer is not None and hasattr(trainer, "load_train_state") and isinstance(train_state, Mapping):
-            trainer.load_train_state(train_state)
+        if not weights_only:
+            optimizer_state = payload.get("optimizer_state")
+            if optimizer_state is not None and components.model.optimizer is not None:
+                components.model.optimizer.load_state_dict(optimizer_state)
+            if trainer is not None and hasattr(trainer, "load_train_state") and isinstance(train_state, Mapping):
+                trainer.load_train_state(train_state)
         return {
             "status": "loaded",
             "checkpoint_ref": str(path),
+            "weights_only": weights_only,
             "epoch": payload.get("epoch"),
             "metadata": payload.get("metadata", {}),
-            "train_state": train_state if isinstance(train_state, Mapping) else None,
+            "train_state": train_state if (not weights_only and isinstance(train_state, Mapping)) else None,
         }
 
 
@@ -103,6 +123,25 @@ class DenseCNNCheckpointSaver:
         }
         torch.save(payload, path)
         return path
+
+
+def _is_initialize_only(checkpoint_ref: object, ctx: Any) -> bool:
+    """Whether `checkpoint_ref` reached us via `initialize_from` (weights only).
+
+    `hexo_train.checkpoints.load_or_initialize_checkpoint` resolves
+    `resume_from or initialize_from` before calling the loader, so when
+    `resume_from` is set the ref IS a resume (full restore). Only when
+    `resume_from` is unset and the ref matches `initialize_from` is this a
+    warm start. Defaults to full-restore on any config-shape surprise.
+    """
+
+    checkpoint = getattr(getattr(ctx, "config", None), "checkpoint", None)
+    if checkpoint is None:
+        return False
+    if getattr(checkpoint, "resume_from", None) is not None:
+        return False
+    initialize_from = getattr(checkpoint, "initialize_from", None)
+    return initialize_from is not None and str(checkpoint_ref) == str(initialize_from)
 
 
 def _epoch_from_name(name: str) -> int | None:

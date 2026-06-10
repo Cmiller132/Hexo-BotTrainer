@@ -45,17 +45,26 @@ def _move_temperature(
     decay_moves: int,
     schedule: tuple[tuple[int, float], ...] = (),
     floor: float = 0.0,
+    halflife_plies: float = 0.0,
 ) -> float:
     """Temperature for the played move at ply `move_index`.
 
-    If `schedule` (a tuple of ``(move, temperature)`` anchors) is given it takes
-    precedence: piecewise-linear interpolation between anchors, the first anchor's
+    With `halflife_plies > 0` (the adaptive scheme, preferred): exponential decay
+    `initial * 0.5 ** (move_index / halflife_plies)` clamped at `floor`. The
+    caller derives `halflife_plies` from an adaptive expected-game-length EMA, so
+    the decay rescales itself as self-play games lengthen/shorten — no absolute
+    move anchors to retune. Takes precedence over the anchor schemes below.
+
+    Otherwise, if `schedule` (a tuple of ``(move, temperature)`` anchors) is
+    given: piecewise-linear interpolation between anchors, the first anchor's
     value before it, and the final segment's slope continued past the last anchor
     down to `floor` (then held). Otherwise: linear decay from `initial` (ply 0) to
     `final` (ply >= `decay_moves`), held flat afterwards (`decay_moves <= 0` keeps
     `initial`). Either way the opening explores and the endgame sharpens.
     """
 
+    if halflife_plies > 0.0:
+        return max(floor, initial * 0.5 ** (move_index / halflife_plies))
     if schedule:
         return _scheduled_temperature(move_index, schedule, floor)
     if decay_moves <= 0:
@@ -89,6 +98,43 @@ def _scheduled_temperature(
         slope = (t1 - t0) / (m1 - m0) if m1 != m0 else 0.0
         return max(floor, t1 + slope * (move_index - m1))
     return max(floor, schedule[-1][1])
+
+
+# Adaptive expected-game-length state for the half-life temperature scheme: an
+# EMA of the measured mean decisions/game, persisted per run so it survives
+# process bounces and resumes alongside the run itself (not the checkpoint —
+# it is a property of current self-play, not of the weights).
+_LENGTH_EMA_NAME = "length_ema.json"
+_LENGTH_EMA_DECAY = 0.75  # ema = 0.75 * ema + 0.25 * latest epoch's mean length
+
+
+def _read_length_ema(record_dir: Any, prior: float) -> float:
+    try:
+        import json
+
+        payload = json.loads((record_dir / _LENGTH_EMA_NAME).read_text(encoding="utf-8"))
+        value = float(payload["mean_game_length_ema"])
+        return value if value > 0.0 else float(prior)
+    except (OSError, KeyError, TypeError, ValueError):
+        return float(prior)
+
+
+def _write_length_ema(record_dir: Any, value: float, *, epoch: int, latest_mean: float) -> None:
+    import json
+
+    (record_dir / _LENGTH_EMA_NAME).write_text(
+        json.dumps(
+            {
+                "mean_game_length_ema": float(value),
+                "latest_epoch": int(epoch),
+                "latest_mean_game_length": float(latest_mean),
+                "decay": _LENGTH_EMA_DECAY,
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
 
 
 def _adaptive_vbatch_enabled() -> bool:
@@ -131,6 +177,16 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
     horizons = config.architecture.short_term_value_horizons
     base_seed = ctx.config.run.seed or 0
 
+    # Adaptive temperature half-life: a fraction of the expected game length
+    # (EMA of measured mean decisions/game, seeded with the config prior on a
+    # fresh run). 0 disables the scheme and falls back to the anchor schedule.
+    expected_game_length = _read_length_ema(record_dir, selfplay.temperature_length_prior)
+    temperature_halflife_plies = (
+        selfplay.temperature_halflife_fraction * expected_game_length
+        if selfplay.temperature_halflife_fraction > 0.0
+        else 0.0
+    )
+
     samples_added = 0
     raw_samples_added = 0
     searched_positions = 0
@@ -154,6 +210,15 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
     mcts_session = new_mcts_session(max_states=selfplay.mcts_session_cache_max_states)
     next_game_index = 0
     active: list[dict[str, Any]] = []
+    # Per-round search seed counter. The native session derives its root-Dirichlet
+    # noise RNG and the played-move sampling uniform from (seed, batch index) ONLY,
+    # so a seed held constant across the epoch (the old `base_seed + epoch`) reused
+    # the SAME noise realization and the SAME selection quantile at every move of a
+    # game (and across games sharing a batch slot). Each game makes at most one
+    # move per `run` call, so bumping the seed per round restores the per-move
+    # i.i.d. draws the AlphaZero/KataGo exploration design assumes, while staying
+    # fully deterministic in (run seed, epoch, round).
+    search_rounds = 0
 
     last_live_write = 0.0
 
@@ -238,6 +303,7 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
                         decay_moves=selfplay.temperature_decay_moves,
                         schedule=selfplay.temperature_schedule,
                         floor=selfplay.temperature_floor,
+                        halflife_plies=temperature_halflife_plies,
                     )
                     for game in playable
                 ]
@@ -248,7 +314,7 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
                     visits=selfplay.search_visits,
                     c_puct=selfplay.c_puct,
                     temperature=selfplay.temperature,
-                    seed=base_seed + epoch,
+                    seed=base_seed + epoch * 1_000_003 + search_rounds,
                     virtual_batch_size=effective_vbatch,
                     active_root_limit=selfplay.mcts_active_root_limit,
                     root_dirichlet_total_alpha=(
@@ -267,6 +333,7 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
                     move_temperatures=move_temperatures,
                 )
                 mcts_search_elapsed += perf_counter() - search_started
+                search_rounds += 1
                 if len(searches) != len(playable):
                     raise RuntimeError(
                         f"dense_cnn MCTS returned {len(searches)} results for {len(playable)} playable games"
@@ -361,9 +428,21 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
                 last_live_write = perf_counter()
 
     elapsed = perf_counter() - started
+    games_done = completed_games + truncated_games
+    if games_done > 0:
+        latest_mean_length = raw_samples_added / games_done
+        updated_ema = (
+            _LENGTH_EMA_DECAY * expected_game_length + (1.0 - _LENGTH_EMA_DECAY) * latest_mean_length
+        )
+        _write_length_ema(record_dir, updated_ema, epoch=epoch, latest_mean=latest_mean_length)
     summary = {
         "status": "completed",
         "epoch": epoch,
+        "temperature_control": {
+            "expected_game_length": expected_game_length,
+            "halflife_plies": temperature_halflife_plies,
+            "halflife_fraction": selfplay.temperature_halflife_fraction,
+        },
         "requested_games": requested_games,
         "games_started": games_started,
         "completed_games": completed_games,

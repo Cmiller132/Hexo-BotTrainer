@@ -76,6 +76,9 @@ class Model1ArchitectureConfig:
     residual_blocks: int = DEFAULT_BLOCKS
     dropout: float = 0.0
     short_term_value_horizons: tuple[int, ...] = ()
+    # Auxiliary moves-left head (predicts remaining decisions to game end, binned
+    # over [0, MOVES_LEFT_CAP]). Training-only; shares the value reduction.
+    moves_left_head: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,6 +90,7 @@ class Model1TrainingConfig:
     value_weight: float = 1.0
     opp_policy_weight: float = 0.25
     short_term_value_weight: float = 0.25
+    moves_left_weight: float = 0.1
     amp: bool = True
     max_grad_norm: float = 1.0
     train_samples_per_epoch: int = 100_000
@@ -145,6 +149,15 @@ class Model1SelfPlayConfig:
     # play sharpens through chosen waypoints, e.g. [(0,1.0),(30,0.5),(90,0.3)].
     temperature_schedule: tuple[tuple[int, float], ...] = ()
     temperature_floor: float = 0.1
+    # Adaptive exponential temperature decay (preferred over the anchor schemes
+    # above; takes precedence when > 0). The played-move temperature is
+    # `temperature * 0.5 ** (ply / (temperature_halflife_fraction * L))` clamped
+    # at `temperature_floor`, where L is an EMA of the measured mean self-play
+    # game length in decisions (persisted per run in selfplay/length_ema.json,
+    # seeded with `temperature_length_prior` on a fresh run). The decay therefore
+    # rescales itself as games lengthen/shorten — no absolute move anchors.
+    temperature_halflife_fraction: float = 0.0
+    temperature_length_prior: float = 32.0
     # KataGo forced-playout strength (0 disables). Guarantees each materialized
     # root child ~sqrt(k * prior * root_visits) visits so Dirichlet root noise
     # survives PUCT into the visit counts (self-play opening diversity); the
@@ -249,7 +262,8 @@ def parse_model1_config(raw: Mapping[str, Any] | None) -> Model1Config:
             attention_scope=str(arch.get("attention_scope", "disk")),
             residual_blocks=int(arch.get("residual_blocks", DEFAULT_BLOCKS)),
             dropout=float(arch.get("dropout", 0.0)),
-            short_term_value_horizons=_int_tuple(arch.get("short_term_value_horizons", ())),
+            short_term_value_horizons=_even_horizons(arch.get("short_term_value_horizons", ())),
+            moves_left_head=bool(arch.get("moves_left_head", True)),
         ),
         training=Model1TrainingConfig(
             batch_size=int(training.get("batch_size", 128)),
@@ -259,6 +273,7 @@ def parse_model1_config(raw: Mapping[str, Any] | None) -> Model1Config:
             value_weight=float(training.get("value_weight", 1.0)),
             opp_policy_weight=float(training.get("opp_policy_weight", 0.25)),
             short_term_value_weight=float(training.get("short_term_value_weight", 0.25)),
+            moves_left_weight=float(training.get("moves_left_weight", 0.1)),
             amp=bool(training.get("amp", True)),
             max_grad_norm=float(training.get("max_grad_norm", 1.0)),
             train_samples_per_epoch=int(training.get("train_samples_per_epoch", 100_000)),
@@ -300,6 +315,8 @@ def parse_model1_config(raw: Mapping[str, Any] | None) -> Model1Config:
             temperature_decay_moves=int(selfplay.get("temperature_decay_moves", 0)),
             temperature_schedule=_parse_temperature_schedule(selfplay.get("temperature_schedule", ())),
             temperature_floor=float(selfplay.get("temperature_floor", 0.1)),
+            temperature_halflife_fraction=float(selfplay.get("temperature_halflife_fraction", 0.0)),
+            temperature_length_prior=float(selfplay.get("temperature_length_prior", 32.0)),
             forced_playout_k=float(selfplay.get("forced_playout_k", 0.0)),
         ),
         evaluation=Model1EvalConfig(
@@ -351,3 +368,20 @@ def _int_tuple(value: Sequence[int] | Any) -> tuple[int, ...]:
     if isinstance(value, (str, bytes, bytearray)) or not isinstance(value, (tuple, list)):
         raise ValueError(f"expected a sequence of integers, got {value!r}")
     return tuple(int(item) for item in value)
+
+
+def _even_horizons(value: Sequence[int] | Any) -> tuple[int, ...]:
+    """Lookahead horizons must be positive EVEN decision counts (full turns).
+
+    Every turn after the opening is two decisions by the same player; the
+    short-term-value EMA steps over full turns (see
+    ``samples._short_term_value_targets``), so an odd horizon has no meaning.
+    """
+
+    horizons = _int_tuple(value)
+    bad = [item for item in horizons if item <= 0 or item % 2 != 0]
+    if bad:
+        raise ValueError(
+            f"short_term_value_horizons must be positive even decision counts (full turns), got {bad!r}"
+        )
+    return horizons

@@ -1,26 +1,31 @@
-# dense_cnn_restnet_main1 — FROM-SCRATCH faithful ResTNet (interleaved residual +
-# transformer trunk; IJCAI 2025 arXiv:2410.05347), owner directive 2026-06-09.
+# dense_cnn_restnet_main1 — faithful ResTNet (interleaved residual + transformer
+# trunk; IJCAI 2025 arXiv:2410.05347), WARM-STARTED from the HF human-corpus
+# prefit (see [checkpoint] below). Owner directives 2026-06-09.
 #
 # Architecture (faithful to the released code, github.com/rlglab/restnet):
 #   - 96 channels, 8 blocks, R3-family interleave.
 #   - blocks_type = "R_R_R_T_R_R_T_R": 3 leading residual blocks, then a
 #     transformer block every 3rd, ending residual (RRR T RR T R). 2 transformer
-#     blocks. >>> OWNER: confirm/tweak this 8-block string. The paper's canonical
-#     10-block R3(RRT) is "R_R_R_T_R_R_T_R_R_T" (3 T-blocks) if you want deeper.
-#   - Full O(N^2) attention over all 41x41 = 1681 board-cell tokens (no
-#     windowing/downsampling — performance is an EXPLICIT non-goal). attention_impl
-#     "sdpa" computes the identical full attention memory-efficiently.
+#     blocks. The paper's canonical 10-block R3(RRT) is "R_R_R_T_R_R_T_R_R_T"
+#     (3 T-blocks) if a deeper trunk is ever wanted.
+#   - Attention runs at the package default scope "disk" (Spec C): the 420
+#     out-of-crop corner KEY columns carry a static large-negative additive bias,
+#     so attention is over the radius-20 hex disk's 1261 cells; queries are
+#     unrestricted. attention_impl "sdpa" computes the identical math to the
+#     materialized oracle memory-efficiently (no windowing/downsampling).
 #   - heads/loss/replay are the dense_cnn binned-value contract (kept), so the
 #     existing pipeline, MCTS, and replay schema are reused unchanged.
 #
-# Reuses the native hexo_models._rust.dense_cnn accelerator read-only (Python-only
-# fork; NO Rust rebuild). FROM SCRATCH: no initialize_from / no prefit.
+# Native accelerator: hexo_models._rust.dense_cnn, REBUILT 2026-06-09 with the
+# radius-20 hex-disk crop contract (encoding.rs zero_corner_cells +
+# sample_gen.rs in-disk legal/policy), matching the Python expansion path
+# (input.py / geometry.in_disk) cell-for-cell.
 #
-# NOTE (throughput, non-goal but plan for it): the faithful full-attention trunk
-# is much slower than the conv-only dense_cnn run; self-play pos/s will be low and
-# the SealBot eval slower. If calibration OOMs or self-play is impractically slow,
-# the owner may lower active_games / search_visits / inference_batch_candidates —
-# none of which change the architecture.
+# NOTE (throughput, non-goal but plan for it): the attention trunk is much slower
+# than the conv-only dense_cnn run. Measured at epoch ~17: ~22 pos/s self-play,
+# ~8.4k recorded rows / 256-game epoch (~6.5 min self-play). If calibration OOMs
+# or self-play degrades, the owner may lower active_games / search_visits /
+# inference_batch_candidates — none of which change the architecture.
 
 [model]
 name = "dense_cnn_restnet"
@@ -39,7 +44,19 @@ embed_kernel_size = 3
 residual_conv = "hex"             # hex-masked 3x3 (board-correct); "plain" = literal paper conv
 attention_impl = "sdpa"           # identical math to "materialized", memory-efficient
 dropout = 0.0
-short_term_value_horizons = [1, 4, 8]
+# Lookahead horizons in DECISIONS, turn-aligned: every turn after the opening is
+# TWO placements by the same player, the target EMA steps over full turns (even
+# offsets — see samples._short_term_value_targets), and horizons must be even
+# (config-validated). [2, 6, 16] = 1 / 3 / 8 turns of effective lookahead
+# (owner 2026-06-09 late evening: fix properly, no horizon-1 head). These keys
+# never appeared in this run's old shards ({1,4,8}), so via the horizon-UNION
+# shuffle the old rows train these heads on nothing — all three start on clean,
+# turn-aligned targets from relaunch onward.
+short_term_value_horizons = [2, 6, 16]
+# Auxiliary moves-left head: predicts decisions remaining (binned over
+# [0, MOVES_LEFT_CAP] on the shared value reduction). Training-only; teaches
+# urgency and exposes the game-length dynamics to the trunk.
+moves_left_head = true
 
 [model.config.training]
 # 32 (was 256): full 1681-token attention fwd+bwd is heavy. MEASURED on the 12 GB
@@ -50,25 +67,40 @@ weight_decay = 0.0001
 policy_weight = 1.0
 value_weight = 1.0
 opp_policy_weight = 0.25
-short_term_value_weight = 0.25
+# 0.1 (was 0.25): at 0.25 x 3 horizons the lookahead heads were ~47% of the
+# weighted loss at epoch ~19 — while their losses were RISING (targets are
+# search-derived and non-stationary; the heads also restart from a remapped
+# shared reduction after the heads_v2 migration). 0.1 keeps the auxiliary
+# shaping signal at a sane ~15-20% share during re-convergence.
+short_term_value_weight = 0.1
+# Moves-left auxiliary (remaining decisions, binned): cheap exact targets.
+moves_left_weight = 0.1
 amp = true
 max_grad_norm = 1.0
-# 8000 (was 100000): the BINDING warmup gate. A train pass runs only when the
-# new shuffled rows >= train_samples_per_epoch (trainer.select_training_samples:
-# selected_rows >= requested_rows). At 100000 vs ~10k rows/epoch, every epoch was
-# "skipped / no new training files". 8000 (<1 epoch's ~10.3k rows) makes the pass
-# fire each epoch on the fresh games (owner 2026-06-09: train on what's there).
-train_samples_per_epoch = 8000
+# 32000 (was 8000): rows trained per epoch, drawn from the fresh KataGo shuffle
+# of the replay window. MEASURED at epoch ~17: self-play generates ~8.4k rows /
+# 256-game epoch (~33 rows/game), so 8000 was ~1.0x the generation rate — each
+# position was trained about once over its whole window lifetime, the bottom of
+# the AlphaZero/KataGo range (~1-4x) and an under-use of the expensive
+# full-attention self-play games. 32000 ~= 3.8x generation: each position is
+# trained ~4x over its lifetime (KataGo's customary ceiling; the train bucket at
+# 8x/new-row stays above it, and still gates if self-play ever stalls). Cost:
+# ~1000 steps @ batch 32, measured ~140 rows/s => ~4 min/epoch vs ~6.5 min
+# self-play, so training remains the minority cost. The pass needs >=32k rows in
+# the shuffle output: satisfied from the current ~140k-row window; only a
+# from-scratch restart would skip the first ~4 epochs while the window fills.
+train_samples_per_epoch = 32000
 max_train_bucket_per_new_data = 8.0
 max_train_bucket_size = 500000
 no_repeat_files = true
 max_validation_samples = 100000
 
 [model.config.samples]
-# 8000 (was 100000): warmup floor. One self-play epoch records ~10.3k rows
-# (128 games), so 100k delayed the first train pass ~10 epochs. 8000 (<1 epoch)
-# starts training right after the first epoch on the games already generated
-# (owner 2026-06-09: don't wait for 100k, train on what's there).
+# 8000 (was 100000): the SHUFFLE-build floor (total self-play rows needed before
+# a shuffled window is built at all). One 256-game epoch records ~8.4k rows
+# (measured), so the first shuffle fires right after epoch 1 (owner 2026-06-09:
+# don't wait for 100k, train on what's there). Note the train pass itself is
+# gated separately by train_samples_per_epoch above.
 shuffle_min_rows = 8000
 shuffle_keep_target_rows = 300000
 shuffle_taper_window_exponent = 0.65
@@ -81,7 +113,10 @@ policy_surprise_uniform_fraction = 0.5
 policy_surprise_max_weight = 8.0
 
 [model.config.selfplay]
-search_visits = 256
+# 512 (was 256): finer policy targets (256 visits over up to 96 children left
+# the median child 0-3 visits). Roughly doubles per-position search cost —
+# expect self-play pos/s to drop toward ~11-13 (owner 2026-06-09 evening).
+search_visits = 512
 # 128 (was 256): fewer concurrent games bounds self-play VRAM + tree memory for the
 # heavy full-attention model. games_per_epoch below matches (single wave).
 active_games = 128
@@ -95,11 +130,24 @@ virtual_loss = 1.0
 widening_policy_mass = 0.95
 widening_max_children = 96
 widening_min_children = 2
-mcts_session_cache_max_states = 131072
+# 262144 (was 131072): the eval cache saturated at the old cap every epoch
+# (cache_size_peak == cap, ~15% hit rate). Doubling costs ~0.5 GB RAM at the
+# measured ~4 KB/state and buys back repeat evaluations.
+mcts_session_cache_max_states = 262144
 mcts_active_root_limit = 256
 max_actions = 1024
 temperature = 1.0
-temperature_schedule = [[0, 1.0], [30, 0.5], [90, 0.3]]
+# Adaptive temperature decay (replaces the absolute-move anchor schedule, which
+# was tuned for ~90-decision games — at the measured ~31-decision games it kept
+# EVERY move at temp >= 0.5 and the endgame never sharpened). The played-move
+# temperature decays exponentially with a half-life of 25% of the expected game
+# length, where the expectation is an EMA of measured mean decisions/game
+# (selfplay/length_ema.json; seeded by temperature_length_prior on a fresh run).
+# At L=32: ply 0 -> 1.0, ply 8 -> 0.5, ply 16 -> 0.25, ply 24 -> 0.125, floor
+# 0.1 — hot opening (~4 turns), decisive endgame, and the scale follows the
+# games automatically as they lengthen.
+temperature_halflife_fraction = 0.25
+temperature_length_prior = 32.0
 temperature_floor = 0.1
 forced_playout_k = 2.0
 
@@ -139,11 +187,11 @@ seed = 1
 epochs = 60
 
 [selfplay]
-# 256 (was 128): ~20k recorded rows/epoch (2x the ~10.3k at 128 games). With
-# active_games=128 this is a ROLLING epoch (128 in flight, refilled to 256 total),
-# NOT the single-wave active==games case. The 8000 shuffle_min_rows /
-# train_samples_per_epoch floors stay well under 1 epoch (~20k), so training still
-# engages after the first epoch (owner 2026-06-09).
+# 256 (was 128). With active_games=128 this is a ROLLING epoch (128 in flight,
+# refilled to 256 total), NOT the single-wave active==games case. MEASURED yield:
+# ~8.4k recorded rows / 256-game epoch (~33 rows/game — games are shorter than
+# the ~80-row/game pre-launch estimate), which is what the train_samples_per_epoch
+# reasoning above is calibrated against.
 games_per_epoch = 256
 update_checkpoint_pointer = false
 
@@ -152,9 +200,13 @@ passes_per_epoch = 1
 
 [checkpoint]
 # WARM START from the HuggingFace human-corpus prefit (BC on 6902 human games ->
-# 431,495 samples; see scripts/bootstrap_dense_cnn_restnet_hf.py). initialize_from
-# loads ONLY the weights and starts RL at epoch 0 (fresh RL optimizer/schedule) —
-# NOT a resume. The supervisor injects resume_from=<latest epoch_*.pt> on
-# crash-relaunch (which takes precedence over initialize_from).
+# ~431k samples; see scripts/bootstrap_dense_cnn_restnet_hf.py). initialize_from
+# loads ONLY the weights — DenseCNNCheckpointLoader detects the initialize-only
+# case (resume_from unset) and skips the checkpoint's optimizer/train state, so
+# RL starts at epoch 1 with a fresh AdamW. (The first launch of this run, before
+# 2026-06-09 evening, predated that guard and did import the prefit's Adam
+# moments; harmless by now — they were overwritten within a few epochs.) The
+# supervisor injects resume_from=<latest epoch_*.pt> on crash-relaunch, which
+# takes precedence and restores optimizer + train state as a true resume.
 initialize_from = "/mnt/e/Hexo-BotTrainer-hexgt/runs/dense_cnn_restnet_main1_prefit/restnet_hf_prefit.pt"
 save_name = "latest"
