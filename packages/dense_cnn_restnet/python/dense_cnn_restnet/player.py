@@ -53,6 +53,11 @@ class DenseCNNPlayer:
             amp=self.trainer.config.training.amp,
             use_trt=False,
             bucket_pad_multiple=(self.trainer.config.performance.inference_bucket_pad_multiple or None),
+            fp16_model=self.trainer.config.performance.inference_fp16_model,
+            fp16_allow_fallback=self.trainer.config.performance.inference_fp16_allow_fallback,
+            use_torch_compile=self.trainer.config.performance.inference_use_torch_compile,
+            compile_allow_fallback=self.trainer.config.performance.inference_compile_allow_torch_fallback,
+            attention_kv_gather=self.trainer.config.performance.attention_kv_gather,
         )
         self.mcts_session = new_mcts_session(
             max_states=self.trainer.config.selfplay.mcts_session_cache_max_states

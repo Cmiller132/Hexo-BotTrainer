@@ -63,12 +63,17 @@ class DenseCNNInference:
         bucket_pad_multiple: int | None = None,
         use_trt: bool | None = None,
         trt_allow_fallback: bool | None = None,
+        fp16_model: bool | None = None,
+        fp16_allow_fallback: bool | None = None,
+        use_torch_compile: bool | None = None,
+        compile_allow_fallback: bool | None = None,
+        attention_kv_gather: bool = False,
     ) -> None:
         self.device = torch.device(device)
         if self.device.type == "cuda" and not torch.cuda.is_available():
             self.device = torch.device("cpu")
         self.model = (
-            optimized_restnet_for_inference(model)
+            optimized_restnet_for_inference(model, attention_kv_gather=bool(attention_kv_gather))
             if optimize_for_inference and self.device.type == "cuda" and _contains_restnet_network(model)
             else model
         )
@@ -115,6 +120,69 @@ class DenseCNNInference:
         # Initialized before warmup because _forward_device_inputs references it.
         self._trt_forward = None
         self.trt_info: dict[str, Any] = {"adopted": False, "reason": "disabled"}
+        self._compiled_forward = None
+        self.compile_info: dict[str, Any] = {"adopted": False, "reason": "disabled"}
+        self._fp16_model = False
+        self.fp16_info: dict[str, Any] = {"adopted": False, "reason": "disabled"}
+
+        env_fp16 = os.environ.get("HEXO_FP16_MODEL", "").strip()
+        if env_fp16:
+            fp16_model = env_fp16 in ("1", "true", "True")
+        elif fp16_model is None:
+            fp16_model = False
+        env_fp16_fb = os.environ.get("HEXO_FP16_ALLOW_FALLBACK", "").strip()
+        if env_fp16_fb:
+            fp16_allow_fallback = env_fp16_fb in ("1", "true", "True")
+        elif fp16_allow_fallback is None:
+            fp16_allow_fallback = False
+        if fp16_model and self.device.type == "cuda":
+            self._adopt_fp16_model(allow_fallback=bool(fp16_allow_fallback))
+
+        env_compile = os.environ.get("HEXO_TORCH_COMPILE", "").strip()
+        if env_compile:
+            use_torch_compile = env_compile in ("1", "true", "True")
+        elif use_torch_compile is None:
+            use_torch_compile = False
+        env_compile_fb = os.environ.get("HEXO_COMPILE_ALLOW_FALLBACK", "").strip()
+        if env_compile_fb:
+            compile_allow_fallback = env_compile_fb in ("1", "true", "True")
+        elif compile_allow_fallback is None:
+            compile_allow_fallback = False
+        env_trt = os.environ.get("HEXO_TRT", "").strip()
+        if env_trt:
+            use_trt = env_trt in ("1", "true", "True")
+        elif use_trt is None:
+            use_trt = False
+        if use_trt and use_torch_compile:
+            raise ValueError("use_trt and use_torch_compile are mutually exclusive")
+        if use_torch_compile and self.device.type == "cuda":
+            # Freeze the attention bias into static buffers so fullgraph compile
+            # can trace the eval forward (the runtime bias cache has a
+            # data-dependent Python guard that breaks dynamo). Only safe under the
+            # pure-fp16 model: the frozen buffer is a fixed dtype, and the fp16
+            # path runs without autocast, so q/k/v and the bias dtype agree.
+            # (Without fp16 the eager fallback would autocast q to half against an
+            # fp32 buffer — so skip the freeze and let compile fall back instead.)
+            if self._fp16_model:
+                from .architecture import RelPosMHSA
+
+                model_dtype = next(self.model.parameters()).dtype
+                for module in self.model.modules():
+                    if isinstance(module, RelPosMHSA):
+                        module.freeze_inference_bias(dtype=model_dtype, device=self.device)
+            from . import compile_backend
+
+            previous_bucket_pad_multiple = self.bucket_pad_multiple
+            self._compiled_forward, self.compile_info = compile_backend.build_compiled_forward(
+                self.model,
+                max_batch=self.max_batch_size,
+                allow_torch_fallback=bool(compile_allow_fallback),
+            )
+            if self._compiled_forward is not None:
+                self.bucket_pad_multiple = None
+            else:
+                self.bucket_pad_multiple = previous_bucket_pad_multiple
+
         if self.device.type == "cuda":
             self._warm_up_cuda()
 
@@ -125,11 +193,6 @@ class DenseCNNInference:
         # so a silent torch fallback can NEVER hide that TRT didn't engage. Opt into
         # a (still loudly-logged) torch fallback via trt_allow_fallback / env
         # HEXO_TRT_ALLOW_FALLBACK. Resolution: env > arg (config) > default.
-        env_trt = os.environ.get("HEXO_TRT", "").strip()
-        if env_trt:
-            use_trt = env_trt in ("1", "true", "True")
-        elif use_trt is None:
-            use_trt = False
         env_fb = os.environ.get("HEXO_TRT_ALLOW_FALLBACK", "").strip()
         if env_fb:
             trt_allow_fallback = env_fb in ("1", "true", "True")
@@ -196,7 +259,9 @@ class DenseCNNInference:
         chunks: list[dict[str, torch.Tensor]] = []
         for start in range(0, inputs.shape[0], resolved_batch):
             chunk = inputs[start : start + resolved_batch].to(self.device)
-            with torch.autocast(device_type=self.device.type, enabled=self.amp):
+            if self._fp16_model:
+                chunk = chunk.half()
+            with torch.autocast(device_type=self.device.type, enabled=(self.amp and not self._fp16_model)):
                 output = self.model(chunk)
             chunks.append({key: value.detach().float().cpu() for key, value in output.items()})
         return {
@@ -207,7 +272,10 @@ class DenseCNNInference:
     @torch.inference_mode()
     def _forward_inputs_device(self, inputs: torch.Tensor) -> dict[str, torch.Tensor]:
         inputs = _to_inference_device(inputs, self.device)
-        if inputs.dtype == torch.float16:
+        if self._fp16_model:
+            if inputs.dtype != torch.float16:
+                inputs = inputs.half()
+        elif inputs.dtype == torch.float16:
             # f16 is only the host->device TRANSPORT dtype for the MCTS evaluator
             # (Rust emits f16 planes, halving the ~89 MB plane H2D copy). Upcast to
             # f32 on-device so the forward (TRT/torch), bucket padding, and every
@@ -222,11 +290,13 @@ class DenseCNNInference:
     def _forward_device_inputs(self, inputs: torch.Tensor) -> dict[str, torch.Tensor]:
         rows = int(inputs.shape[0])
         padded = self._pad_to_bucket(inputs, rows)
-        if self._trt_forward is not None:
+        if self._compiled_forward is not None:
+            output = self._compiled_forward(padded)
+        elif self._trt_forward is not None:
             # TRT engine is fp16-internal; no autocast needed.
             output = self._trt_forward(padded)
         else:
-            with torch.autocast(device_type=self.device.type, enabled=self.amp):
+            with torch.autocast(device_type=self.device.type, enabled=(self.amp and not self._fp16_model)):
                 if hasattr(self.model, "forward_policy_value"):
                     output = self.model.forward_policy_value(padded)
                 else:
@@ -253,7 +323,7 @@ class DenseCNNInference:
         """Prime cuDNN algorithm selection and GPU clocks before timed search."""
 
         warmup_batch = min(1024, self.max_batch_size)
-        dtype = torch.float16 if self.amp else torch.float32
+        dtype = torch.float16 if (self.amp or self._fp16_model) else torch.float32
         inputs = torch.zeros(
             (warmup_batch, INPUT_CHANNELS, BOARD_SIZE, BOARD_SIZE),
             device=self.device,
@@ -284,7 +354,7 @@ class DenseCNNInference:
             # MCTS can ask for a large leaf batch. Chunking happens here because
             # only the Python inference wrapper knows the safe Torch batch size.
             output_chunks = [
-                {key: value.cpu() for key, value in self._forward_inputs_device(inputs[start : start + max_batch]).items()}
+                self._forward_inputs_device(inputs[start : start + max_batch])
                 for start in range(0, inputs.shape[0], max_batch)
             ]
             policy_batch = torch.cat([chunk["policy"] for chunk in output_chunks], dim=0)
@@ -299,7 +369,7 @@ class DenseCNNInference:
         # rejects any out-of-range value with PyValueError, which aborts the WHOLE
         # batched search (every game's leaves), so a benign rounding artifact must not
         # escape here. The training value-target path validates [-1, 1] independently.
-        values_tensor = decode_binned_value(value_batch).clamp_(-1.0, 1.0).cpu().contiguous()
+        values_tensor = decode_binned_value(value_batch).clamp_(-1.0, 1.0).float().contiguous()
 
         if "legal_flat_indices_bytes" not in payload or "legal_row_offsets" not in payload:
             raise ValueError(
@@ -309,7 +379,8 @@ class DenseCNNInference:
         selected_count = offsets[-1]
         _require_byte_length("legal_flat_indices_bytes", payload["legal_flat_indices_bytes"], selected_count, 8)
         if selected_count == 0:
-            priors_tensor = torch.empty(0, dtype=torch.float32)
+            values_host = values_tensor.cpu().contiguous()
+            priors_host = torch.empty(0, dtype=torch.float32)
         else:
             counts = torch.as_tensor(
                 [offsets[index + 1] - offsets[index] for index in range(len(offsets) - 1)],
@@ -326,13 +397,92 @@ class DenseCNNInference:
             exp = torch.exp(selected - max_per_row[row_ids_device])
             sum_per_row = torch.zeros((len(counts),), dtype=selected.dtype, device=selected.device)
             sum_per_row.scatter_add_(0, row_ids_device, exp)
-            if bool((sum_per_row[counts.to(sum_per_row.device) > 0] <= 0).any().item()):
+            nonempty_rows = counts.to(sum_per_row.device) > 0
+            zero_mass = (sum_per_row[nonempty_rows] <= 0).any().to(torch.float32)
+            priors_tensor = (exp / sum_per_row[row_ids_device]).float().contiguous()
+            flat = torch.cat((values_tensor.view(-1), priors_tensor.view(-1), zero_mass.view(1)), dim=0)
+            host = flat.cpu().contiguous()
+            if bool(host[-1].item()):
                 raise ValueError("dense_cnn MCTS evaluator payload has a legal row with zero prior mass")
-            priors_tensor = (exp / sum_per_row[row_ids_device]).cpu().contiguous()
+            values_host = host[: values_tensor.numel()]
+            priors_host = host[values_tensor.numel() : -1]
         return {
-            "values_bytes": values_tensor.numpy().tobytes(),
-            "priors_bytes": priors_tensor.numpy().tobytes(),
+            "values_bytes": values_host.numpy().tobytes(),
+            "priors_bytes": priors_host.numpy().tobytes(),
         }
+
+    @torch.inference_mode()
+    def _adopt_fp16_model(self, *, allow_fallback: bool) -> None:
+        info: dict[str, Any] = {"adopted": False, "reason": None}
+        state_backup = (
+            {key: value.detach().cpu().clone() for key, value in self.model.state_dict().items()}
+            if allow_fallback
+            else None
+        )
+
+        def _fail(reason: str, exc: BaseException | None = None) -> None:
+            info["reason"] = reason
+            self.fp16_info = info
+            if allow_fallback:
+                print(
+                    "[dense_cnn_restnet.inference] fp16 inference model NOT ADOPTED: "
+                    f"{reason}; running torch fp32/autocast fallback.",
+                    flush=True,
+                )
+                self.model.float()
+                if state_backup is not None:
+                    self.model.load_state_dict(state_backup)
+                return
+            raise RuntimeError(f"fp16 inference model correctness gate failed: {reason}") from exc
+
+        try:
+            from . import trt_backend
+
+            sample_count = min(128, self.max_batch_size)
+            sample_inputs = trt_backend._representative_inputs(sample_count)
+            if sample_inputs is None:
+                _fail("representative real-position inputs unavailable")
+                return
+            x = sample_inputs.to(self.device, memory_format=torch.channels_last)
+            with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=True):
+                ref = self._call_policy_value(self.model, x)
+            self.model.half()
+            half_out = self._call_policy_value(self.model, x.half())
+            ref_policy = ref["policy"].float()
+            half_policy = half_out["policy"].float()
+            ref_value = ref["value"].float()
+            half_value = half_out["value"].float()
+            policy_argmax_match = (ref_policy.argmax(1) == half_policy.argmax(1)).float().mean().item()
+            value_max_err = (decode_binned_value(ref_value) - decode_binned_value(half_value)).abs().max().item()
+            info.update(
+                {
+                    "policy_argmax_match": float(policy_argmax_match),
+                    "value_max_abs_err": float(value_max_err),
+                }
+            )
+            if policy_argmax_match < 0.90 or value_max_err > 0.05:
+                _fail(
+                    "correctness gate FAILED "
+                    f"(argmax_match={policy_argmax_match:.4f}, decoded_value_err={value_max_err:.4f})"
+                )
+                return
+            self._fp16_model = True
+            info["adopted"] = True
+            info["reason"] = "ok"
+            self.fp16_info = info
+            print(
+                "[dense_cnn_restnet.inference] adopted fp16 inference model "
+                f"(argmax_match={policy_argmax_match:.4f}, value_err={value_max_err:.4f})",
+                flush=True,
+            )
+        except Exception as exc:
+            _fail(f"exception during fp16 gate: {exc!r}", exc=exc)
+
+    @staticmethod
+    def _call_policy_value(model: torch.nn.Module, inputs: torch.Tensor) -> dict[str, torch.Tensor]:
+        if hasattr(model, "forward_policy_value"):
+            return model.forward_policy_value(inputs)
+        return model(inputs)
 
 
 def _legal_priors_from_flats(

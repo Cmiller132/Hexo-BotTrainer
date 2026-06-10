@@ -76,6 +76,9 @@ class Model1ArchitectureConfig:
     residual_blocks: int = DEFAULT_BLOCKS
     dropout: float = 0.0
     short_term_value_horizons: tuple[int, ...] = ()
+    # Auxiliary moves-left head (predicts remaining decisions to game end, binned
+    # over [0, MOVES_LEFT_CAP]). Training-only; shares the value reduction.
+    moves_left_head: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,6 +90,7 @@ class Model1TrainingConfig:
     value_weight: float = 1.0
     opp_policy_weight: float = 0.25
     short_term_value_weight: float = 0.25
+    moves_left_weight: float = 0.1
     amp: bool = True
     max_grad_norm: float = 1.0
     train_samples_per_epoch: int = 100_000
@@ -126,6 +130,8 @@ class Model1SelfPlayConfig:
     widening_min_children: int = 2
     mcts_session_cache_max_states: int = 1_048_576
     mcts_active_root_limit: int = 1024
+    scheduler: str = "lockstep"
+    scheduler_flush_target: int = 0
     max_actions: int = 1024
     # Move-selection temperature SCHEDULE. `temperature` is the value used for the
     # opening; play linearly decays it to `final_temperature` over the first
@@ -145,6 +151,24 @@ class Model1SelfPlayConfig:
     # play sharpens through chosen waypoints, e.g. [(0,1.0),(30,0.5),(90,0.3)].
     temperature_schedule: tuple[tuple[int, float], ...] = ()
     temperature_floor: float = 0.1
+    # Adaptive exponential temperature decay (preferred over the anchor schemes
+    # above; takes precedence when > 0). The played-move temperature is
+    # `temperature * 0.5 ** (ply / (temperature_halflife_fraction * L))` clamped
+    # at `temperature_floor`, where L is an EMA of the measured mean self-play
+    # game length in decisions (persisted per run in selfplay/length_ema.json,
+    # seeded with `temperature_length_prior` on a fresh run). The decay therefore
+    # rescales itself as games lengthen/shorten — no absolute move anchors.
+    temperature_halflife_fraction: float = 0.0
+    temperature_length_prior: float = 32.0
+    # Opening-diversity anchor (self-play). For the first `opening_moves` decisions
+    # the played-move temperature is floored at `opening_temperature` (i.e.
+    # `max(opening_temperature, base)`), holding a higher/flatter opening before the
+    # adaptive decay takes over. The opening collapse is prior-driven and the
+    # adaptive scheme already gives only ~0.8-1.0 early, so the anchor must be
+    # meaningfully higher to diversify. 0 disables (default); never sharpens below
+    # the base curve. Mirrors the eval-only opening_temperature/opening_moves.
+    opening_temperature: float = 0.0
+    opening_moves: int = 0
     # KataGo forced-playout strength (0 disables). Guarantees each materialized
     # root child ~sqrt(k * prior * root_visits) visits so Dirichlet root noise
     # survives PUCT into the visit counts (self-play opening diversity); the
@@ -200,6 +224,11 @@ class Model1PerformanceConfig:
     # (TRT gated; bucketing is pure batching). Env vars HEXO_TRT /
     # HEXO_BUCKET_PAD_MULTIPLE override these when set (launch-path escape hatch).
     inference_use_tensorrt: bool = False
+    inference_fp16_model: bool = False
+    inference_fp16_allow_fallback: bool = False
+    inference_use_torch_compile: bool = False
+    inference_compile_allow_torch_fallback: bool = False
+    attention_kv_gather: bool = False
     inference_bucket_pad_multiple: int = 0
     # Fail-loud default: if TRT is on and the build/gate fails, abort with a
     # prominent error rather than silently running torch. Set true only to permit
@@ -236,6 +265,10 @@ def parse_model1_config(raw: Mapping[str, Any] | None) -> Model1Config:
     performance = _section(config, "performance", Model1PerformanceConfig)
 
     checkpoint_path = config.get("checkpoint_path")
+    use_trt = bool(performance.get("inference_use_tensorrt", False))
+    use_compile = bool(performance.get("inference_use_torch_compile", False))
+    if use_trt and use_compile:
+        raise ValueError("inference_use_tensorrt and inference_use_torch_compile are mutually exclusive")
     return Model1Config(
         architecture=Model1ArchitectureConfig(
             input_channels=int(arch.get("input_channels", INPUT_CHANNELS)),
@@ -249,7 +282,8 @@ def parse_model1_config(raw: Mapping[str, Any] | None) -> Model1Config:
             attention_scope=str(arch.get("attention_scope", "disk")),
             residual_blocks=int(arch.get("residual_blocks", DEFAULT_BLOCKS)),
             dropout=float(arch.get("dropout", 0.0)),
-            short_term_value_horizons=_int_tuple(arch.get("short_term_value_horizons", ())),
+            short_term_value_horizons=_even_horizons(arch.get("short_term_value_horizons", ())),
+            moves_left_head=bool(arch.get("moves_left_head", True)),
         ),
         training=Model1TrainingConfig(
             batch_size=int(training.get("batch_size", 128)),
@@ -259,6 +293,7 @@ def parse_model1_config(raw: Mapping[str, Any] | None) -> Model1Config:
             value_weight=float(training.get("value_weight", 1.0)),
             opp_policy_weight=float(training.get("opp_policy_weight", 0.25)),
             short_term_value_weight=float(training.get("short_term_value_weight", 0.25)),
+            moves_left_weight=float(training.get("moves_left_weight", 0.1)),
             amp=bool(training.get("amp", True)),
             max_grad_norm=float(training.get("max_grad_norm", 1.0)),
             train_samples_per_epoch=int(training.get("train_samples_per_epoch", 100_000)),
@@ -294,12 +329,18 @@ def parse_model1_config(raw: Mapping[str, Any] | None) -> Model1Config:
             widening_min_children=int(selfplay.get("widening_min_children", 2)),
             mcts_session_cache_max_states=int(selfplay.get("mcts_session_cache_max_states", 1_048_576)),
             mcts_active_root_limit=int(selfplay.get("mcts_active_root_limit", 1024)),
+            scheduler=_scheduler_name(selfplay.get("scheduler", "lockstep")),
+            scheduler_flush_target=_scheduler_flush_target(selfplay.get("scheduler_flush_target", 0)),
             max_actions=int(selfplay.get("max_actions", 1024)),
             temperature=float(selfplay.get("temperature", 1.0)),
             final_temperature=float(selfplay.get("final_temperature", selfplay.get("temperature", 1.0))),
             temperature_decay_moves=int(selfplay.get("temperature_decay_moves", 0)),
             temperature_schedule=_parse_temperature_schedule(selfplay.get("temperature_schedule", ())),
             temperature_floor=float(selfplay.get("temperature_floor", 0.1)),
+            temperature_halflife_fraction=float(selfplay.get("temperature_halflife_fraction", 0.0)),
+            temperature_length_prior=float(selfplay.get("temperature_length_prior", 32.0)),
+            opening_temperature=float(selfplay.get("opening_temperature", 0.0)),
+            opening_moves=int(selfplay.get("opening_moves", 0)),
             forced_playout_k=float(selfplay.get("forced_playout_k", 0.0)),
         ),
         evaluation=Model1EvalConfig(
@@ -322,7 +363,12 @@ def parse_model1_config(raw: Mapping[str, Any] | None) -> Model1Config:
             mcts_virtual_batch_candidates=_int_tuple(performance.get("mcts_virtual_batch_candidates", (4,))),
             selfplay_probe_positions=int(performance.get("selfplay_probe_positions", 8192)),
             probe_batches=int(performance.get("probe_batches", 1)),
-            inference_use_tensorrt=bool(performance.get("inference_use_tensorrt", False)),
+            inference_use_tensorrt=use_trt,
+            inference_fp16_model=bool(performance.get("inference_fp16_model", False)),
+            inference_fp16_allow_fallback=bool(performance.get("inference_fp16_allow_fallback", False)),
+            inference_use_torch_compile=use_compile,
+            inference_compile_allow_torch_fallback=bool(performance.get("inference_compile_allow_torch_fallback", False)),
+            attention_kv_gather=bool(performance.get("attention_kv_gather", False)),
             inference_bucket_pad_multiple=int(performance.get("inference_bucket_pad_multiple", 0)),
             inference_trt_allow_torch_fallback=bool(performance.get("inference_trt_allow_torch_fallback", False)),
         ),
@@ -351,3 +397,34 @@ def _int_tuple(value: Sequence[int] | Any) -> tuple[int, ...]:
     if isinstance(value, (str, bytes, bytearray)) or not isinstance(value, (tuple, list)):
         raise ValueError(f"expected a sequence of integers, got {value!r}")
     return tuple(int(item) for item in value)
+
+
+def _even_horizons(value: Sequence[int] | Any) -> tuple[int, ...]:
+    """Lookahead horizons must be positive EVEN decision counts (full turns).
+
+    Every turn after the opening is two decisions by the same player; the
+    short-term-value EMA steps over full turns (see
+    ``samples._short_term_value_targets``), so an odd horizon has no meaning.
+    """
+
+    horizons = _int_tuple(value)
+    bad = [item for item in horizons if item <= 0 or item % 2 != 0]
+    if bad:
+        raise ValueError(
+            f"short_term_value_horizons must be positive even decision counts (full turns), got {bad!r}"
+        )
+    return horizons
+
+
+def _scheduler_name(value: Any) -> str:
+    scheduler = str(value)
+    if scheduler not in ("lockstep", "continuous"):
+        raise ValueError("selfplay.scheduler must be 'lockstep' or 'continuous'")
+    return scheduler
+
+
+def _scheduler_flush_target(value: Any) -> int:
+    target = int(value)
+    if target < 0:
+        raise ValueError("selfplay.scheduler_flush_target must be >= 0 (0 = calibrated inference batch)")
+    return target

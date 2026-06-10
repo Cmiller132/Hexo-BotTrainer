@@ -838,9 +838,21 @@ class HexoPlayHandler(BaseHTTPRequestHandler):
             self.send_error(HTTPStatus.NOT_FOUND)
             return
         raw, gz, etag, last_modified, content_type = entry
-        # Versioned assets are cacheable. index.html must revalidate so a changed
-        # app.js query string is picked up immediately after a frontend restart.
-        cache_control = "no-cache" if name == "index.html" else f"public, max-age={STATIC_MAX_AGE_SECONDS}"
+        # Cache policy is deliberately strict so a browser (esp. a phone, which
+        # caches HTML aggressively) can NEVER run stale Debug code:
+        #   - index.html: no-store -> the HTML document is always re-fetched, so its
+        #     ?v= asset references are always current.
+        #   - app.js / styles.css: no-cache -> the browser revalidates via ETag on
+        #     every load and receives the current bytes the instant the file changes.
+        # The asset is served from disk by (name, mtime), IGNORING the ?v= query, so
+        # no-cache delivers fresh code even to a client still requesting an OLD ?v=
+        # URL from a previously-cached page — exactly the stuck-on-old-app.js case
+        # that left mobile on pre-fix Debug navigation. ETag still yields 304s when
+        # nothing changed, so revalidation stays cheap.
+        if name == "index.html":
+            cache_control = "no-store, no-cache, must-revalidate, max-age=0"
+        else:
+            cache_control = "no-cache"
         self._send_body(
             raw,
             content_type,
@@ -1058,7 +1070,7 @@ def _training_history(run_name: str, artifact_path: str, record_index: int = 0) 
 # for the training GPU, and results are cached so re-opening a view is instant.
 # ---------------------------------------------------------------------------
 
-_DEBUG_CKPT_EPOCH_RE = re.compile(r"epoch(\d+)\.pt$")
+_DEBUG_CKPT_EPOCH_RE = re.compile(r"epoch_?(\d+)\.pt$")  # hexgt 'epoch000040' + dense 'epoch_000030'
 # The STV graft widened the value/STV readout heads at RL epoch 7 (also visible
 # as a ~29 MB -> ~31 MB checkpoint-size jump); used only for a display hint.
 _DEBUG_GRAFT_EPOCH = 7
@@ -1146,10 +1158,34 @@ def _debug_resolve_run_path(run_name: str, artifact_path: str) -> Path | None:
     return fallback  # confined but absent -> caller raises a clear "unknown artifact"
 
 
+def _debug_run_lineage(run_dir: Path) -> str | None:
+    """Best-effort model lineage for a run, read from its ``manifest.json``.
+
+    Returns the model name (e.g. ``"hexgt"``, ``"dense_cnn_restnet"``,
+    ``"hexo_models.dense_cnn"``) or ``None`` if the manifest is absent/unreadable.
+    Used only for display hints (the authoritative lineage comes from the loaded
+    checkpoint's ``meta`` once a position is analyzed)."""
+
+    manifest = run_dir / "manifest.json"
+    if not manifest.is_file():
+        return None
+    try:
+        data = json.loads(manifest.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return None
+    name = data.get("model", {}).get("name")
+    return str(name) if name else None
+
+
 def _debug_checkpoints(run_name: str) -> dict[str, object]:
     run_dir = _debug_resolve_run_dir(run_name)
     if run_dir is None:
         raise ValueError("Unknown training run")
+    lineage = _debug_run_lineage(run_dir)
+    # The pre/post-STV graft is a hexgt-graph-lineage concept (the epoch-7 readout
+    # widening). It does not apply to the dense CNN lineages, so the graft chip is
+    # only attached for hexgt runs to avoid a misleading label.
+    is_hexgt = lineage is None or "hexgt" in lineage.lower()
     ckpt_dir = run_dir / "checkpoints"
     items: list[dict[str, object]] = []
     if ckpt_dir.is_dir():
@@ -1160,24 +1196,24 @@ def _debug_checkpoints(run_name: str) -> dict[str, object]:
             epoch = int(match.group(1)) if match else None
             stat = _safe_stat(Path(entry.path))
             size = int(stat.st_size) if stat else 0
-            if epoch is not None:
-                graft = "post" if epoch >= _DEBUG_GRAFT_EPOCH else "pre"
-            elif size:
-                graft = "post" if size > _DEBUG_GRAFT_SIZE_BYTES else "pre"
-            else:
-                graft = None
+            graft: str | None = None
+            if is_hexgt:
+                if epoch is not None:
+                    graft = "post" if epoch >= _DEBUG_GRAFT_EPOCH else "pre"
+                elif size:
+                    graft = "post" if size > _DEBUG_GRAFT_SIZE_BYTES else "pre"
             items.append(
                 {
                     "name": entry.name,
                     "epoch": epoch,
                     "size": size,
                     "mtime": int(stat.st_mtime) if stat else 0,
-                    "latest": entry.name == "hexgt_rl_latest.pt",
+                    "latest": entry.name.endswith("latest.pt"),
                     "graft": graft,
                 }
             )
     items.sort(key=lambda x: (not x["latest"], -(x["epoch"] if x["epoch"] is not None else -1), str(x["name"])))
-    return {"run": run_name, "checkpoints": items, "worker": _debug_worker().status()}
+    return {"run": run_name, "checkpoints": items, "lineage": lineage, "worker": _debug_worker().status()}
 
 
 def _debug_games(run_name: str, source: str) -> dict[str, object]:

@@ -18,7 +18,7 @@ from .architecture import (
     ResidualBlock,
     RestnetNetwork,
     TransformerBlock,
-    ValueBinnedHead,
+    ValueReduction,
     parse_blocks_type,
 )
 from .config import Model1Config, parse_model1_config
@@ -52,7 +52,7 @@ __all__ = [
     "RestnetNetwork",
     "TransformerBlock",
     "VALUE_BINS",
-    "ValueBinnedHead",
+    "ValueReduction",
     "binned_value_loss",
     "build_benchmark_report",
     "calibrate_dense_cnn",

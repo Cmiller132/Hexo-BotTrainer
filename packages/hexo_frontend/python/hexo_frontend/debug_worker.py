@@ -79,6 +79,7 @@ def _get_model(checkpoint: str) -> di.LoadedModel:
 
 def _model_meta(loaded: di.LoadedModel) -> dict[str, Any]:
     return {
+        "lineage": loaded.lineage,
         "rl_epoch": loaded.rl_epoch,
         "step": loaded.step,
         "graft": loaded.graft,
@@ -87,6 +88,8 @@ def _model_meta(loaded: di.LoadedModel) -> dict[str, Any]:
         "expanded_stv": loaded.expanded_stv,
         "zeroed_feature_cols": loaded.zeroed_feature_cols,
         "load_warnings": loaded.load_warnings,
+        "stv_horizons": list(loaded.stv_horizons),
+        "has_moves_left": loaded.has_moves_left,
         "arch": {k: loaded.arch[k] for k in sorted(loaded.arch) if _jsonable(loaded.arch[k])},
     }
 

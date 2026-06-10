@@ -95,7 +95,7 @@ impl HexgtMctsSession {
         self.searches.len()
     }
 
-    #[pyo3(signature = (game_keys, states, visits, c_puct, temperature, seed, evaluator, virtual_batch_size=None, active_root_limit=None, root_dirichlet_total_alpha=None, root_dirichlet_noise_fraction=None, root_policy_temperature=None, fpu_reduction=None, virtual_loss=None, widening_policy_mass=None, widening_max_children=None, widening_min_children=None, forced_playout_k=None, move_temperatures=None))]
+    #[pyo3(signature = (game_keys, states, visits, c_puct, temperature, seed, evaluator, virtual_batch_size=None, active_root_limit=None, root_dirichlet_total_alpha=None, root_dirichlet_noise_fraction=None, root_policy_temperature=None, fpu_reduction=None, virtual_loss=None, widening_policy_mass=None, widening_max_children=None, widening_min_children=None, forced_playout_k=None, move_temperatures=None, per_root_visits=None, per_root_forced_playout_k=None, per_root_noise=None))]
     fn search(
         &mut self,
         py: Python<'_>,
@@ -124,6 +124,21 @@ impl HexgtMctsSession {
         // games that are each at a different move number. `temperature` remains the
         // validated fallback used when this is None.
         move_temperatures: Option<Vec<f32>>,
+        // Per-root overrides (one entry per game key, aligned with `game_keys`) that
+        // let a SINGLE batched call run roots with heterogeneous search budgets +
+        // exploration. This is how KataGo PCR's full/fast move mix is coalesced into
+        // ONE forward stream (full-width leaf batching) instead of two half-width
+        // calls. Each None -> the scalar fallback is broadcast to every root, so the
+        // call stays byte-identical to the pre-existing scalar path:
+        //   per_root_visits           -> per-root visit cap (else `visits`)
+        //   per_root_forced_playout_k -> per-root forced-playout k, gating BOTH the
+        //                                in-search forced playouts and the exported
+        //                                policy-target pruning (else `forced_playout_k`)
+        //   per_root_noise            -> whether the configured root Dirichlet noise is
+        //                                applied to that root (else true == all roots)
+        per_root_visits: Option<Vec<u32>>,
+        per_root_forced_playout_k: Option<Vec<f32>>,
+        per_root_noise: Option<Vec<bool>>,
     ) -> PyResult<Py<PyAny>> {
         // Validate true native-search boundaries here. The Python wrapper is a
         // transport layer and intentionally does not duplicate these checks.
@@ -189,6 +204,62 @@ impl HexgtMctsSession {
         let root_noise_config =
             root_noise_config(root_dirichlet_total_alpha, root_dirichlet_noise_fraction)?;
 
+        // Resolve the per-root overrides: an explicit vector (length-checked +
+        // value-validated) or the scalar fallback broadcast to every root. With all
+        // three None this is exactly the prior scalar behavior (uniform caps, the
+        // configured forced-k, noise applied to all roots when configured).
+        let per_visits: Vec<u32> = match per_root_visits {
+            Some(values) => {
+                if values.len() != roots.len() {
+                    return Err(PyValueError::new_err(format!(
+                        "per_root_visits has {} entries for {} roots",
+                        values.len(),
+                        roots.len()
+                    )));
+                }
+                for v in &values {
+                    if *v == 0 {
+                        return Err(PyValueError::new_err("per_root_visits entries must be > 0"));
+                    }
+                }
+                values
+            }
+            None => vec![visits; roots.len()],
+        };
+        let per_forced_k: Vec<f32> = match per_root_forced_playout_k {
+            Some(values) => {
+                if values.len() != roots.len() {
+                    return Err(PyValueError::new_err(format!(
+                        "per_root_forced_playout_k has {} entries for {} roots",
+                        values.len(),
+                        roots.len()
+                    )));
+                }
+                for v in &values {
+                    if !v.is_finite() || *v < 0.0 {
+                        return Err(PyValueError::new_err(
+                            "per_root_forced_playout_k entries must be finite and >= 0",
+                        ));
+                    }
+                }
+                values
+            }
+            None => vec![forced_playout_k; roots.len()],
+        };
+        let per_noise: Vec<bool> = match per_root_noise {
+            Some(values) => {
+                if values.len() != roots.len() {
+                    return Err(PyValueError::new_err(format!(
+                        "per_root_noise has {} entries for {} roots",
+                        values.len(),
+                        roots.len()
+                    )));
+                }
+                values
+            }
+            None => vec![true; roots.len()],
+        };
+
         let widening_mass = widening_policy_mass.unwrap_or(0.95);
         if !widening_mass.is_finite() || widening_mass <= 0.0 || widening_mass > 1.0 {
             return Err(PyValueError::new_err("widening_policy_mass must be in (0, 1]"));
@@ -220,10 +291,12 @@ impl HexgtMctsSession {
             // reuse if an external caller advanced or reset the game.
             if let Some(mut search) = self.searches.remove(game_key) {
                 if search.root_hash == root_hash {
-                    search.set_additional_visits(target_visits);
-                    search.set_forced_playout_k(forced_playout_k);
-                    if let Some(noise) = root_noise(root_noise_config, seed, index) {
-                        search.apply_root_dirichlet_noise(noise);
+                    search.set_additional_visits(per_visits[index]);
+                    search.set_forced_playout_k(per_forced_k[index]);
+                    if per_noise[index] {
+                        if let Some(noise) = root_noise(root_noise_config, seed, index) {
+                            search.apply_root_dirichlet_noise(noise);
+                        }
                     }
                     searches.push(Some(search));
                     continue;
@@ -253,12 +326,16 @@ impl HexgtMctsSession {
                 searches[index] = Some(RustSearch::new(
                     root,
                     &**evaluation,
-                    target_visits,
+                    per_visits[index],
                     fpu_reduction,
                     root_policy_temperature,
-                    root_noise(root_noise_config, seed, index),
+                    if per_noise[index] {
+                        root_noise(root_noise_config, seed, index)
+                    } else {
+                        None
+                    },
                     widening,
-                    forced_playout_k,
+                    per_forced_k[index],
                 )?);
             }
         }
@@ -327,7 +404,7 @@ impl HexgtMctsSession {
             seed,
             Some(&baselines),
             c_puct,
-            forced_playout_k,
+            &per_forced_k,
         )?;
 
         for ((game_key, mut search), selected) in game_keys
@@ -611,7 +688,7 @@ fn build_search_result_payloads(
     seed: u64,
     baselines: Option<&[HashMap<PackedCoord, u32>]>,
     c_puct: f32,
-    forced_playout_k: f32,
+    forced_playout_k: &[f32],
 ) -> PyResult<Py<PyAny>> {
     // The Python wrapper expects byte-backed policies. This avoids allocating a
     // Python tuple for every legal move while still supporting lazy iteration.
@@ -624,12 +701,13 @@ fn build_search_result_payloads(
         // used to advance the native root in `run`, so play stays diverse) and the
         // reported visit total.
         let (policy_action_ids, policy_weights, policy_total) = visit_policy(root, baseline);
-        // EXPORTED policy = training target: with forced playouts on, prune the
-        // forced visits back out (KataGo policy-target pruning) so the network is
-        // not taught to like the artificially-explored moves. With k==0 this is a
-        // byte-identical copy of the raw policy.
-        let (export_action_ids, export_weights) = if forced_playout_k > 0.0 {
-            pruned_visit_policy(root, baseline, forced_playout_k, c_puct)
+        // EXPORTED policy = training target: with forced playouts on (per-root k),
+        // prune the forced visits back out (KataGo policy-target pruning) so the
+        // network is not taught to like the artificially-explored moves. With k==0
+        // (e.g. PCR fast roots) this is a byte-identical copy of the raw policy.
+        let root_forced_k = forced_playout_k[index];
+        let (export_action_ids, export_weights) = if root_forced_k > 0.0 {
+            pruned_visit_policy(root, baseline, root_forced_k, c_puct)
         } else {
             (policy_action_ids.clone(), policy_weights.clone())
         };

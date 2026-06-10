@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Hexo Match</title>
-<link rel="stylesheet" href="/static/styles.css?v=20260530-qol">
+<link rel="stylesheet" href="/static/styles.css?v=20260610-debugnav7">
 </head>
 <body>
 <header>
@@ -280,46 +280,52 @@
     <div id="debugStatus" class="debug-status" hidden></div>
 
     <section class="top-grid debug-grid">
-      <section class="board-panel" aria-label="Debug board">
-        <div class="board-area" id="debugBoardArea">
-          <svg id="debugBoardSvg"></svg>
-          <div class="board-hud" id="debugBoardHud"><div>Hover a cell</div></div>
-          <div class="legend debug-legend">
-            <span><span class="ldot" style="background:var(--p0)"></span>P0</span>
-            <span><span class="ldot" style="background:var(--p1)"></span>P1</span>
-            <span><span class="ldot" style="background:var(--accent)"></span>Prior</span>
-            <span><span class="ldot" style="background:var(--yellow)"></span>Visits</span>
+      <section class="dbgv" aria-label="Debug board">
+        <div class="dbgv-board">
+          <div class="board-area" id="debugBoardArea">
+            <svg id="debugBoardSvg"></svg>
+            <div class="board-hud" id="debugBoardHud"><div>Hover a cell</div></div>
+            <div class="legend debug-legend">
+              <span><span class="ldot" style="background:var(--p0)"></span>P0</span>
+              <span><span class="ldot" style="background:var(--p1)"></span>P1</span>
+              <span><span class="ldot" style="background:var(--accent)"></span>Prior</span>
+              <span><span class="ldot" style="background:var(--yellow)"></span>Visits</span>
+            </div>
           </div>
         </div>
-        <div class="replay-bar debug-replay" aria-label="Ply navigation">
-          <div class="replay-row">
-            <div class="replay-buttons">
-              <button id="debugPlyStart" type="button" aria-label="First ply">|&lt;</button>
-              <button id="debugPlyPrev" type="button" aria-label="Previous ply">&lt;</button>
-              <button id="debugPlyNext" type="button" aria-label="Next ply">&gt;</button>
-              <button id="debugPlyEnd" type="button" aria-label="Last ply">&gt;|</button>
-            </div>
-            <div class="replay-status">
-              <div id="debugPlyLabel">0 / 0</div>
-              <div id="debugPlySub">No game</div>
-            </div>
-            <div class="slider-wrap">
-              <input id="debugPlySlider" type="range" min="0" max="0" value="0" step="1" aria-label="Ply">
-            </div>
-            <button id="debugAnalyzeBtn" class="primary-action" type="button">Analyze</button>
+
+        <div class="dbgv-controls" aria-label="Ply navigation">
+          <div class="dbgv-nav">
+            <button id="debugPlyStart" type="button" aria-label="First ply">|&lt;</button>
+            <button id="debugPlyPrev" type="button" aria-label="Previous ply">&lt;</button>
+            <button id="debugPlyNext" type="button" aria-label="Next ply">&gt;</button>
+            <button id="debugPlyEnd" type="button" aria-label="Last ply">&gt;|</button>
           </div>
-        </div>
-        <div class="debug-overlay-controls" aria-label="Board overlays">
-          <span class="overlay-label">Overlays</span>
-          <label><input type="checkbox" id="debugOvPolicy" checked> Policy</label>
-          <label><input type="checkbox" id="debugOvVisits"> Search visits</label>
-          <label><input type="checkbox" id="debugOvOpp"> Opp policy</label>
-          <label><input type="checkbox" id="debugOvThreats"> Threats</label>
-          <label><input type="checkbox" id="debugOvNumbers" checked> Move #</label>
-        </div>
-        <div class="debug-import" aria-label="Import position">
-          <input id="debugMoveInput" type="text" placeholder="Paste action-id list (comma/space separated) to inspect an arbitrary position">
-          <button id="debugImportBtn" type="button">Import</button>
+
+          <div class="dbgv-status">
+            <div id="debugPlyLabel">0 / 0</div>
+            <div id="debugPlySub">No game</div>
+          </div>
+
+          <div class="dbgv-slider-wrap">
+            <input id="debugPlySlider" type="range" min="0" max="0" value="0" step="1" aria-label="Ply">
+          </div>
+
+          <button id="debugAnalyzeBtn" class="primary-action dbgv-analyze" type="button">Analyze</button>
+
+          <div class="dbgv-overlays" aria-label="Board overlays">
+            <span class="overlay-label">Overlays</span>
+            <label><input type="checkbox" id="debugOvPolicy" checked> Policy</label>
+            <label><input type="checkbox" id="debugOvVisits"> Search visits</label>
+            <label><input type="checkbox" id="debugOvOpp"> Opp policy</label>
+            <label><input type="checkbox" id="debugOvThreats"> Threats</label>
+            <label><input type="checkbox" id="debugOvNumbers" checked> Move #</label>
+          </div>
+
+          <div class="dbgv-import" aria-label="Import position">
+            <input id="debugMoveInput" type="text" placeholder="Paste action-id list (comma/space separated) to inspect an arbitrary position">
+            <button id="debugImportBtn" type="button">Import</button>
+          </div>
         </div>
       </section>
 
@@ -371,6 +377,6 @@
     </section>
   </section>
 </main>
-<script src="/static/app.js?v=20260604-debug9"></script>
+<script src="/static/app.js?v=20260610-debugnav7"></script>
 </body>
 </html>

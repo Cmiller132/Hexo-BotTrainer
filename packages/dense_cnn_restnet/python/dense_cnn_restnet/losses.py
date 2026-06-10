@@ -58,9 +58,27 @@ def soft_cross_entropy(
     target: torch.Tensor,
     *,
     allow_zero_rows: bool = False,
+    mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Cross entropy for dense policy distributions with strict target checks."""
+    """Cross entropy for dense policy distributions with strict target checks.
 
+    With ``mask`` (bool, broadcastable to ``logits``), the softmax support is
+    restricted to the True cells: masked-out logits receive a large negative
+    additive fill so they carry ~0 probability and ~0 gradient. This matches the
+    serve-time contract (the native evaluator gathers and renormalizes priors
+    over the in-disk LEGAL cells only), so training spends its gradient ranking
+    the legal moves instead of pushing ~1400 illegal/out-of-crop logits down.
+    The target must carry no mass outside the mask (checked, fail-loud).
+    """
+
+    if mask is not None:
+        if mask.shape != logits.shape:
+            raise ValueError(f"cross entropy mask shape {tuple(mask.shape)} does not match logits {tuple(logits.shape)}")
+        mask = mask.to(device=logits.device, dtype=torch.bool)
+        # Upcast BEFORE the fill: under fp16 autocast -1e9 saturates to -inf and
+        # the CE product `0 * log_softmax(-inf)` would be NaN; in fp32 the fill
+        # stays finite so masked cells contribute exactly 0.
+        logits = logits.float().masked_fill(~mask, -1.0e9)
     target = target.to(device=logits.device, dtype=logits.dtype)
     if logits.shape != target.shape:
         raise ValueError(f"cross entropy target shape {tuple(target.shape)} does not match logits {tuple(logits.shape)}")
@@ -68,6 +86,8 @@ def soft_cross_entropy(
         raise ValueError("cross entropy targets must be finite")
     if bool((target < 0).any().item()):
         raise ValueError("cross entropy targets must be nonnegative")
+    if mask is not None and bool((target[~mask] > 0).any().item()):
+        raise ValueError("cross entropy targets must carry no mass outside the mask")
     row_sum = target.sum(dim=-1, keepdim=True)
     positive = row_sum > 0
     if not allow_zero_rows and not bool(positive.all().item()):
@@ -119,11 +139,18 @@ def model1_loss(
     value_weight: float = 1.0,
     opp_policy_weight: float = 0.25,
     short_term_value_weight: float = 0.25,
+    moves_left_weight: float = 0.1,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """Compute the weighted loss surface expected by `DenseCNNTrainer`."""
 
     components: dict[str, torch.Tensor] = {}
-    components["policy"] = soft_cross_entropy(outputs["policy"], batch["policy"])
+    # The self policy is masked to this position's in-disk legal cells when the
+    # batch carries `legal_mask` (the MCTS visit target is supported there by
+    # construction). `opp_policy` is intentionally NOT masked: `legal_mask`
+    # describes THIS position/phase, and the opponent's next-decision legality
+    # (a different phase, e.g. SecondStone) is not guaranteed to be a subset, so
+    # masking it could clip genuine target mass.
+    components["policy"] = soft_cross_entropy(outputs["policy"], batch["policy"], mask=batch.get("legal_mask"))
     components["value"] = binned_value_loss(outputs["value"], batch["value"])
     total = policy_weight * components["policy"] + value_weight * components["value"]
 
@@ -135,6 +162,15 @@ def model1_loss(
         if key.startswith("stvalue_") and key in batch:
             components[key] = binned_value_loss(output, batch[key], mask=batch.get(f"{key}_mask"))
             total = total + short_term_value_weight * components[key]
+
+    if "moves_left" in outputs and "moves_left" in batch:
+        # Remaining-decisions auxiliary, already normalized onto the binned
+        # [-1, 1] support at expansion; masked rows (old shards, truncated
+        # games) contribute exactly nothing.
+        components["moves_left"] = binned_value_loss(
+            outputs["moves_left"], batch["moves_left"], mask=batch.get("moves_left_mask")
+        )
+        total = total + moves_left_weight * components["moves_left"]
 
     components["total"] = total
     return total, components

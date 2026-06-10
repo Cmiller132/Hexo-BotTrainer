@@ -107,7 +107,11 @@ def test_pcr_coin_deterministic_and_decorrelated() -> None:
 # --------------------------------------------------------------------------- #
 # 2) Per-subset search gating (full vs fast)                                   #
 # --------------------------------------------------------------------------- #
-def test_pcr_gates_noise_forced_playouts_and_temperature_per_subset(monkeypatch) -> None:
+def test_pcr_single_call_per_root_vectors_gate_full_vs_fast(monkeypatch) -> None:
+    """PCR runs ONE batched call per round with per-root overrides: full roots get the
+    full cap + Dirichlet noise (per_root_noise True) + forced playouts + a >0 temperature;
+    fast roots get the fast cap + no noise + forced_k 0 + greedy (temp 0). The vectors
+    are aligned per root (a full root has visits=6 AND noise AND forced_k=2.0 AND temp>0)."""
     _torch()
     from hexo_models.hexgt import mcts as mcts_mod
     from hexo_models.hexgt.selfplay import run_selfplay_games
@@ -117,43 +121,42 @@ def test_pcr_gates_noise_forced_playouts_and_temperature_per_subset(monkeypatch)
 
     def capture(self, *args, **kwargs):
         calls.append({
-            "visits": kwargs.get("visits"),
-            "seed": kwargs.get("seed"),
+            "per_visits": list(kwargs.get("per_root_visits") or []),
+            "per_forced_k": list(kwargs.get("per_root_forced_playout_k") or []),
+            "per_noise": list(kwargs.get("per_root_noise") or []),
+            "temps": list(kwargs.get("move_temperatures") or []),
             "alpha": kwargs.get("root_dirichlet_total_alpha"),
             "fraction": kwargs.get("root_dirichlet_noise_fraction"),
-            "forced_k": kwargs.get("forced_playout_k"),
-            "temps": list(kwargs.get("move_temperatures") or []),
         })
         return original_run(self, *args, **kwargs)
 
     monkeypatch.setattr(mcts_mod.HexgtMctsSession, "run", capture)
     cfg = _cfg(pcr_enabled=True, full_visits=6, fast_visits=2)
     run_selfplay_games(
-        _model(cfg), cfg, num_games=4, output_dir=_tmp(monkeypatch),
-        epoch=0, device="cpu", fp16=False, base_seed=5, active_games=4, virtual_batch_size=2,
+        _model(cfg), cfg, num_games=6, output_dir=_tmp(monkeypatch),
+        epoch=0, device="cpu", fp16=False, base_seed=5, active_games=6, virtual_batch_size=2,
     )
 
-    full_calls = [c for c in calls if c["visits"] == 6]
-    fast_calls = [c for c in calls if c["visits"] == 2]
-    assert full_calls, "expected at least one FULL-search subset call"
-    assert fast_calls, "expected at least one FAST-search subset call"
-    assert {c["visits"] for c in calls} == {6, 2}, "only the two configured caps should appear"
-
-    for c in full_calls:
-        assert c["alpha"] == pytest.approx(6.6), "full search must carry Dirichlet noise"
-        assert c["fraction"] == pytest.approx(0.30)
-        assert c["forced_k"] == pytest.approx(2.0), "full search must keep forced playouts"
-        assert any(t > 0.0 for t in c["temps"]), "full search uses the temperature schedule"
-    for c in fast_calls:
-        assert c["alpha"] is None, "fast search must run with NO Dirichlet noise"
-        assert c["fraction"] is None
-        assert c["forced_k"] == 0.0, "fast search must disable forced playouts"
-        assert all(t == 0.0 for t in c["temps"]), "fast search plays greedily (temp 0)"
-
-    # Full and fast subset calls use distinct seeds (decorrelated exploration).
-    full_seeds = {c["seed"] for c in full_calls}
-    fast_seeds = {c["seed"] for c in fast_calls}
-    assert full_seeds.isdisjoint(fast_seeds), "full/fast subsets must use distinct seeds"
+    # Every round is a single call carrying per-root vectors; the noise params are
+    # passed at call level (gated per-root by per_noise).
+    saw_full = saw_fast = False
+    for c in calls:
+        assert c["per_visits"], "PCR must pass per_root_visits (single batched call)"
+        assert len(c["per_visits"]) == len(c["per_forced_k"]) == len(c["per_noise"]) == len(c["temps"])
+        assert c["alpha"] == pytest.approx(6.6) and c["fraction"] == pytest.approx(0.30)
+        assert set(c["per_visits"]) <= {6, 2}, "only the two configured caps may appear"
+        for v, k, noise, t in zip(c["per_visits"], c["per_forced_k"], c["per_noise"], c["temps"]):
+            if v == 6:  # FULL root
+                saw_full = True
+                assert noise is True, "full root must apply Dirichlet noise"
+                assert k == pytest.approx(2.0), "full root keeps forced playouts"
+                assert t > 0.0, "full root uses the temperature schedule"
+            else:  # FAST root (v == 2)
+                saw_fast = True
+                assert noise is False, "fast root must NOT apply Dirichlet noise"
+                assert k == 0.0, "fast root disables forced playouts"
+                assert t == 0.0, "fast root plays greedily (temp 0)"
+    assert saw_full and saw_fast, "expected both full and fast roots across the run"
 
 
 def test_pcr_off_is_single_full_call_per_round(monkeypatch) -> None:

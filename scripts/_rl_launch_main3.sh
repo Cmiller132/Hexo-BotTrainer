@@ -31,6 +31,17 @@ export EPOCHS=60
 export GAMES_PER_EPOCH=512
 export EVAL_EVERY=3
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+# FORWARD CHUNK BUDGET 2026-06-05 (owner, throughput test -> REVERTED to default 200k):
+# tested raising HEXGT_FORWARD_PAD_BUDGET 200k->400k (behavior-preserving: graphs
+# independent, chunk-size bit-identical -- test_hexgt_forward_chunk; affects self-play
+# inference only, freed before train, so no train-transition OOM risk; VRAM safe at
+# ~6.2GB peak). RESULT: it made self-play SLOWER, not faster (whole-epoch ~5 vs 8.8
+# games/min pace; GPU util 70%->99% SATURATED but throughput DOWN). Cause: bigger chunks
+# group more varied-candidate graphs, each padded to the chunk local-max -> PADDING WASTE.
+# The forward is COMPUTE-bound (not overhead-bound), so fatter forwards add waste. Same
+# root cause as the single-call fix failing: self-play throughput is compute-bound on the
+# heavy 4-GNN+PMA model -- the only real >=10 lever is a lighter trunk (re-pretrain). Left
+# at the default 200k (no env). Behavior test stays green; per-root MCTS fix is uncommitted.
 BC_SEED="$RUNDIR/pretrain/hexgt_model3_pretrain.pt"
 # main2 EXTRA_ARGS verbatim, except --bc-seed (model-3 pretrain, not main's e8) and
 # explicit --replay-pool-cap/--replay-recency-decay (main2 used the same defaults).

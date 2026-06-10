@@ -71,6 +71,7 @@ def write_compact_shard(
     center_q = np.empty(n, dtype=np.int16)
     center_r = np.empty(n, dtype=np.int16)
     value = np.empty(n, dtype=np.float32)
+    moves_left = np.full(n, -1.0, dtype=np.float32)  # negative = absent/masked
     first_q = np.zeros(n, dtype=np.int16)
     first_r = np.zeros(n, dtype=np.int16)
     first_present = np.zeros(n, dtype=np.uint8)
@@ -120,6 +121,7 @@ def write_compact_shard(
         center_q[i] = int(sample.center[0])
         center_r[i] = int(sample.center[1])
         value[i] = float(sample.value)
+        moves_left[i] = float(sample.moves_left)
         if sample.first_stone is not None:
             first_q[i] = int(sample.first_stone[0])
             first_r[i] = int(sample.first_stone[1])
@@ -190,6 +192,7 @@ def write_compact_shard(
         "center_q": center_q,
         "center_r": center_r,
         "value": value,
+        "moves_left": moves_left,
         "first_q": first_q,
         "first_r": first_r,
         "first_present": first_present,
@@ -257,7 +260,10 @@ def expand_shard_to_arrays(
     Row ``i`` is expanded under ``symmetries[i]`` via the tested
     ``samples.expand_sample``. Returns plain numpy (picklable, so this runs in a
     worker process) with exactly the keys the trainer's optimizer step consumes:
-    ``input`` (N,C,41,41), ``policy``/``opp_policy`` (N,1681), ``value`` (N,), and
+    ``input`` (N,C,41,41), ``policy``/``opp_policy`` (N,1681), ``legal_mask``
+    (N,1681 bool — the in-disk legal cells the policy CE is masked to),
+    ``value`` (N,), ``moves_left`` + ``moves_left_mask`` (N,) (normalized to the
+    binned support; masked when absent — old shards, truncated games), and
     ``stvalue_<h>`` + ``stvalue_<h>_mask`` (N,) per horizon (missing horizons
     masked to 0). This is the parallelizable unit of train-read expansion.
     """
@@ -269,7 +275,10 @@ def expand_shard_to_arrays(
             "input": np.zeros((0, INPUT_CHANNELS, BOARD_SIZE, BOARD_SIZE), dtype=np.float32),
             "policy": np.zeros((0, _BOARD_AREA), dtype=np.float32),
             "opp_policy": np.zeros((0, _BOARD_AREA), dtype=np.float32),
+            "legal_mask": np.zeros((0, _BOARD_AREA), dtype=np.bool_),
             "value": np.zeros((0,), dtype=np.float32),
+            "moves_left": np.zeros((0,), dtype=np.float32),
+            "moves_left_mask": np.zeros((0,), dtype=np.float32),
         }
         for horizon in horizons:
             out[f"stvalue_{horizon}"] = np.zeros((0,), dtype=np.float32)
@@ -318,6 +327,7 @@ def expand_shard_to_arrays(
         "input": np.stack([row["input"].numpy() for row in expanded]).astype(np.float32, copy=False),
         "policy": np.stack([row["policy"].numpy() for row in expanded]).astype(np.float32, copy=False),
         "opp_policy": np.stack([row["opp_policy"].numpy() for row in expanded]).astype(np.float32, copy=False),
+        "legal_mask": np.stack([row["legal_mask"].numpy() for row in expanded]).astype(np.bool_, copy=False),
         "value": np.asarray([float(row["value"]) for row in expanded], dtype=np.float32),
     }
     for horizon in horizons:
@@ -327,6 +337,11 @@ def expand_shard_to_arrays(
             [float(row[key]) if ok else 0.0 for row, ok in zip(expanded, present)], dtype=np.float32
         )
         out[f"{key}_mask"] = np.asarray([1.0 if ok else 0.0 for ok in present], dtype=np.float32)
+    ml_present = ["moves_left" in row for row in expanded]
+    out["moves_left"] = np.asarray(
+        [float(row["moves_left"]) if ok else 0.0 for row, ok in zip(expanded, ml_present)], dtype=np.float32
+    )
+    out["moves_left_mask"] = np.asarray([1.0 if ok else 0.0 for ok in ml_present], dtype=np.float32)
     return out
 
 
@@ -344,6 +359,9 @@ def read_compact_shard(path: Path) -> list[Model1SampleData]:
 
     n = int(arrays["num_rows"])
     horizons = [int(h) for h in arrays["horizons"]]
+    # Back-compat: shards written before the moves-left column default to -1
+    # (absent/masked), so old replay windows keep training unchanged.
+    moves_left = arrays.get("moves_left")
     out: list[Model1SampleData] = []
 
     stones_qr = arrays["stones_qr"]
@@ -414,6 +432,7 @@ def read_compact_shard(path: Path) -> list[Model1SampleData]:
                 opp_policy=opp_policy,
                 value=float(arrays["value"][i]),
                 short_term_value=stval,
+                moves_left=float(moves_left[i]) if moves_left is not None else -1.0,
             )
         )
     return out

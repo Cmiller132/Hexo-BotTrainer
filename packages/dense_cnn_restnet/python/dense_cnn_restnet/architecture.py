@@ -2,12 +2,18 @@
 
 This is a fork of the dense_cnn `architecture.py`. It keeps the dense_cnn input
 contract (the 13-plane 41x41 crop from `input.py` / `rust/src/encoding.rs`) and
-the EXACT training/search head surface:
+the dense_cnn search surface (`forward_policy_value`: `policy` + `value`), with
+this training head surface:
 
 - `policy`: logits over the 41x41 dense crop.
 - `value`: a 65-bin scalar value distribution in `[-1, 1]`.
 - `opp_policy`: an auxiliary policy target from the next opponent MCTS policy.
 - `stvalue_<horizon>`: optional short-term value heads.
+- `moves_left`: optional auxiliary head over remaining decisions, binned onto
+  the same 65-bin support via `[0, MOVES_LEFT_CAP] -> [-1, 1]`.
+
+All value-style heads share one `ValueReduction` (conv1x1 -> Linear 1681->64);
+each head is a 64->65 Linear top.
 
 What differs from dense_cnn is the TRUNK. Instead of a homogeneous stack of
 gated residual blocks, the trunk interleaves Residual (R) and Transformer (T)
@@ -76,9 +82,14 @@ DEFAULT_EMBED_KERNEL_SIZE = 3
 # only the relevant tokens (occupied ∪ legal ∩ disk) into a true O(K²) attention.
 ATTENTION_SCOPES = ("full", "disk", "content")
 DEFAULT_ATTENTION_SCOPE = "disk"
-# Additive mask added to non-disk KEY columns under "disk"/"content". Large and
-# finite (NOT -inf): queries are unrestricted so no attention row is ever fully
-# masked, and a finite value keeps softmax/SDPA fp16-safe with no NaN risk.
+# Additive mask added to non-disk KEY columns under "disk"/"content". Finite in
+# fp32/bf16, but NOTE: under fp16 autocast the cast saturates -1e9 to -inf. That
+# is still NaN-safe HERE because only KEY columns are masked and queries are
+# unrestricted, so no attention row is ever fully masked (softmax over a
+# partially -inf row is well defined; verified against the fp32 oracle). The one
+# latent hazard is a FULLY-masked row — only reachable in "content" scope for a
+# sample with zero relevant tokens inside a mixed batch, which real positions
+# cannot produce (in-disk legal moves always exist).
 _DISK_MASK_VALUE = -1.0e9
 # Gathered ("content") attention pads the per-sample relevant-token count up to a
 # multiple of this so the forward sees a small set of token-length buckets (cuDNN/
@@ -322,6 +333,7 @@ class RelPosMHSA(nn.Module):
         dcol = cols - half
         disk_flat = torch.maximum(torch.maximum(drow.abs(), dcol.abs()), (drow + dcol).abs()) <= half  # (N,) bool
         self.register_buffer("disk_flat", disk_flat, persistent=False)
+        self.register_buffer("disk_indices", torch.nonzero(disk_flat, as_tuple=False).flatten(), persistent=False)
         disk_key_bias = torch.zeros(self.token_len, dtype=torch.float32)
         disk_key_bias[~disk_flat] = _DISK_MASK_VALUE  # additive -1e9 on corner KEY columns
         self.register_buffer("disk_key_bias", disk_key_bias, persistent=False)
@@ -335,6 +347,25 @@ class RelPosMHSA(nn.Module):
         # always recomputes, so gradients to the table are unaffected.
         self._cached_bias: torch.Tensor | None = None
         self._cached_bias_key: tuple | None = None
+        self._kv_gather_enabled = False
+        self._cached_kv_bias: torch.Tensor | None = None
+        self._cached_kv_bias_key: tuple | None = None
+        # Frozen inference bias (see freeze_inference_bias): a static additive-bias
+        # tensor for the active path, so the eval forward has NO data-dependent
+        # Python guards (version/None/tuple-compare) and is torch.compile +
+        # CUDA-graph traceable. `_bias_frozen` is a plain bool dynamo specializes on.
+        self._bias_frozen = False
+        self._frozen_bias: torch.Tensor | None = None
+        self._frozen_kv_bias: torch.Tensor | None = None
+
+    def _invalidate_bias_caches(self) -> None:
+        self._cached_bias = None
+        self._cached_bias_key = None
+        self._cached_kv_bias = None
+        self._cached_kv_bias_key = None
+        self._bias_frozen = False
+        self._frozen_bias = None
+        self._frozen_kv_bias = None
 
     def set_impl(self, impl: str) -> None:
         if impl not in ("sdpa", "materialized"):
@@ -346,8 +377,41 @@ class RelPosMHSA(nn.Module):
             raise ValueError(f"attention_scope must be one of {ATTENTION_SCOPES}, got {scope!r}")
         self.attention_scope = scope
         # The cached eval bias depends on the scope's key mask, so invalidate it.
-        self._cached_bias = None
-        self._cached_bias_key = None
+        self._invalidate_bias_caches()
+
+    def set_kv_gather(self, enabled: bool) -> None:
+        """Enable inference-only disk K/V gathering for SDPA attention."""
+
+        self._kv_gather_enabled = bool(enabled)
+        self._invalidate_bias_caches()
+
+    @torch.no_grad()
+    def freeze_inference_bias(self, *, dtype: torch.dtype, device: torch.device) -> None:
+        """Precompute the additive attention bias into a static tensor for the
+        ACTIVE eval path (dense-disk or KV-gathered), so the forward reads a
+        constant buffer instead of running the cache logic. This removes the
+        data-dependent Python guards that block torch.compile(fullgraph=True),
+        and is a strict superset of the runtime cache (computed once here).
+
+        Inference-only: the model must be in eval mode with frozen weights, at
+        its final dtype/device. Numerically identical to the unfrozen path (same
+        gather math); validated by the SDPA/materialized and KV-gather tests plus
+        the compile correctness gate.
+        """
+
+        self._frozen_bias = (
+            self._compute_relative_bias().to(device=device, dtype=dtype).contiguous()
+        )
+        if self._kv_gather_enabled:
+            rel2d = self.relative_index.view(self.token_len, self.token_len)
+            cols = self.disk_indices.to(device=rel2d.device)
+            sub_index = rel2d.index_select(1, cols).reshape(-1)
+            kv = self.relative_bias_table[sub_index]
+            kv = kv.view(self.token_len, int(cols.numel()), self.num_heads)
+            self._frozen_kv_bias = (
+                kv.permute(2, 0, 1).unsqueeze(0).to(device=device, dtype=dtype).contiguous()
+            )
+        self._bias_frozen = True
 
     def _compute_relative_bias(self) -> torch.Tensor:
         """Gather the additive bias `(1, heads, N, N)` fresh from the learned table.
@@ -382,6 +446,29 @@ class RelPosMHSA(nn.Module):
             self._cached_bias_key = key
         return self._cached_bias
 
+    def _relative_bias_kv_gathered(self, *, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
+        """Additive bias `(1, heads, N_query, N_disk_keys)` for gathered disk keys."""
+
+        rel2d = self.relative_index.view(self.token_len, self.token_len)
+        if self.training or torch.is_grad_enabled():
+            cols = self.disk_indices.to(device=rel2d.device)
+            sub_index = rel2d.index_select(1, cols).reshape(-1)
+            bias = self.relative_bias_table[sub_index]
+            bias = bias.view(self.token_len, int(cols.numel()), self.num_heads)
+            return bias.permute(2, 0, 1).unsqueeze(0).to(device=device, dtype=dtype)
+        version = int(getattr(self.relative_bias_table, "_version", 0))
+        key = (version, dtype, device)
+        if self._cached_kv_bias is None or self._cached_kv_bias_key != key:
+            cols = self.disk_indices.to(device=rel2d.device)
+            sub_index = rel2d.index_select(1, cols).reshape(-1)
+            bias = self.relative_bias_table[sub_index]
+            bias = bias.view(self.token_len, int(cols.numel()), self.num_heads)
+            self._cached_kv_bias = (
+                bias.permute(2, 0, 1).unsqueeze(0).to(device=device, dtype=dtype).detach().contiguous()
+            )
+            self._cached_kv_bias_key = key
+        return self._cached_kv_bias
+
     def _project(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         b, n, _ = x.shape
         shape = (b, n, self.num_heads, self.head_dim)
@@ -406,9 +493,36 @@ class RelPosMHSA(nn.Module):
         return self.out_drop(self.out_proj(out))
 
     def _forward_sdpa(self, x: torch.Tensor) -> torch.Tensor:
+        if (
+            self._kv_gather_enabled
+            and self.attention_scope == "disk"
+            and not self.training
+            and not torch.is_grad_enabled()
+        ):
+            return self._forward_sdpa_gathered(x)
         b, n, _ = x.shape
         q, k, v = self._project(x)
-        attn_mask = self._relative_bias(dtype=q.dtype, device=q.device)  # additive bias; SDPA scale = 1/sqrt(head_dim)
+        # additive bias; SDPA scale = 1/sqrt(head_dim). `_bias_frozen` is a plain
+        # bool (dynamo specializes on it) so the compiled graph has no branch.
+        if self._bias_frozen:
+            attn_mask = self._frozen_bias
+        else:
+            attn_mask = self._relative_bias(dtype=q.dtype, device=q.device)
+        out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
+        out = out.permute(0, 2, 1, 3).reshape(b, n, self.channels)
+        return self.out_drop(self.out_proj(out))
+
+    def _forward_sdpa_gathered(self, x: torch.Tensor) -> torch.Tensor:
+        """Full-query attention with K/V gathered to in-disk tokens only."""
+
+        b, n, _ = x.shape
+        q, k, v = self._project(x)
+        k = k.index_select(2, self.disk_indices)
+        v = v.index_select(2, self.disk_indices)
+        if self._bias_frozen:
+            attn_mask = self._frozen_kv_bias
+        else:
+            attn_mask = self._relative_bias_kv_gathered(dtype=q.dtype, device=q.device)
         out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
         out = out.permute(0, 2, 1, 3).reshape(b, n, self.channels)
         return self.out_drop(self.out_proj(out))
@@ -543,8 +657,21 @@ class PolicyHead(nn.Module):
         return self.head(self.activation(self.conv(x))).flatten(start_dim=1)
 
 
-class ValueBinnedHead(nn.Module):
-    """65-bin KataGo-style value head. Copied verbatim from dense_cnn."""
+class ValueReduction(nn.Module):
+    """Shared spatial reduction for every value-style head.
+
+    Conv1x1(C->1) -> ReLU -> flatten -> Linear(BOARD_AREA->64) -> ReLU, producing
+    one 64-d value embedding consumed by all the scalar-distribution tops (value,
+    stvalue_<h>, moves_left). This replaces the per-head copies of the same
+    reduction (4 x ~112k params -> 1 x ~108k + ~4k per top): the dominant
+    1681->64 Linear is supervised by every value-style target at once instead of
+    four private ones. Composition (conv+ReLU -> Linear -> ReLU -> top Linear) is
+    identical to the old per-head ValueBinnedHead, so old checkpoints migrate
+    function-preservingly for the main value head (see
+    scripts/_restnet_migrate_heads_v2.py). The spatial Linear (vs global pooling)
+    is deliberate: the crop is center-relative, so absolute crop position is
+    meaningful.
+    """
 
     def __init__(self, channels: int) -> None:
         super().__init__()
@@ -555,7 +682,6 @@ class ValueBinnedHead(nn.Module):
         self.mlp = nn.Sequential(
             nn.Linear(BOARD_AREA, 64),
             nn.ReLU(inplace=True),
-            nn.Linear(64, VALUE_BINS),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -587,6 +713,7 @@ class RestnetNetwork(nn.Module):
         attention_scope: str = DEFAULT_ATTENTION_SCOPE,
         dropout: float = 0.0,
         short_term_value_horizons: tuple[int, ...] = (),
+        moves_left_head: bool = True,
     ) -> None:
         super().__init__()
         self.in_channels = int(in_channels)
@@ -629,11 +756,17 @@ class RestnetNetwork(nn.Module):
         self.blocks = nn.ModuleList(blocks)
 
         self.policy_head = PolicyHead(self.channels)
-        self.value_head = ValueBinnedHead(self.channels)
         self.opp_policy_head = PolicyHead(self.channels)
+        # All value-style heads share one spatial reduction; each head is a
+        # 64 -> VALUE_BINS top. moves_left predicts remaining decisions binned
+        # over [0, MOVES_LEFT_CAP] via the same [-1, 1] support (training-only
+        # auxiliary; absent from forward_policy_value).
+        self.value_reduction = ValueReduction(self.channels)
+        self.value_head = nn.Linear(64, VALUE_BINS)
         self.short_term_value_heads = nn.ModuleDict(
-            {str(horizon): ValueBinnedHead(self.channels) for horizon in self.short_term_value_horizons}
+            {str(horizon): nn.Linear(64, VALUE_BINS) for horizon in self.short_term_value_horizons}
         )
+        self.moves_left_head = nn.Linear(64, VALUE_BINS) if moves_left_head else None
 
         # Static radius-(H//2) hex-disk membership for every board cell, used by the
         # "content" scope to intersect relevance with the disk. persistent=False ->
@@ -699,13 +832,16 @@ class RestnetNetwork(nn.Module):
 
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
         features = self.trunk(x)
+        value_embedding = self.value_reduction(features)
         outputs = {
             "policy": self.policy_head(features),
-            "value": self.value_head(features),
+            "value": self.value_head(value_embedding),
             "opp_policy": self.opp_policy_head(features),
         }
         for horizon, head in self.short_term_value_heads.items():
-            outputs[f"stvalue_{horizon}"] = head(features)
+            outputs[f"stvalue_{horizon}"] = head(value_embedding)
+        if self.moves_left_head is not None:
+            outputs["moves_left"] = self.moves_left_head(value_embedding)
         return outputs
 
     def forward_policy_value(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
@@ -714,7 +850,7 @@ class RestnetNetwork(nn.Module):
         features = self.trunk(x)
         return {
             "policy": self.policy_head(features),
-            "value": self.value_head(features),
+            "value": self.value_head(self.value_reduction(features)),
         }
 
     def _validate_input(self, x: torch.Tensor) -> None:
@@ -739,7 +875,7 @@ def _init_weights_trunc_normal(module: nn.Module) -> None:
             nn.init.constant_(module.weight, 1.0)
 
 
-def optimized_restnet_for_inference(model: nn.Module) -> nn.Module:
+def optimized_restnet_for_inference(model: nn.Module, *, attention_kv_gather: bool = False) -> nn.Module:
     """Return a cloned eval-only model with the residual convs/BNs folded away.
 
     Folds each plain `ResidualBlock` (Conv+BN -> Conv) and replaces remaining
@@ -758,6 +894,8 @@ def optimized_restnet_for_inference(model: nn.Module) -> nn.Module:
     for module in optimized.modules():
         if isinstance(module, ResidualBlock):
             _fuse_residual_block(module)
+        elif isinstance(module, RelPosMHSA):
+            module.set_kv_gather(attention_kv_gather)
     _replace_remaining_hex_convs(optimized)
     optimized.eval()
     return optimized

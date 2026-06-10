@@ -20,6 +20,17 @@
         "$env:PYTHONPATH=(('hexo_frontend','hexo_runner') | ForEach-Object { \"E:\\Hexo-BotTrainer-hexgt\\packages\\$_\\python\" }) -join ';'; C:\\Python314\\python.exe -m hexo_frontend.web --host 127.0.0.1 --port 8131"
       ],
       "port": 8131
+    },
+    {
+      "name": "hexo-dashboard-wsl",
+      "runtimeExecutable": "wsl.exe",
+      "runtimeArgs": [
+        "-e",
+        "bash",
+        "-lc",
+        "cd /mnt/e/Hexo-BotTrainer && /root/.venvs/hexgt-build/bin/python -m hexo_frontend.web --host 0.0.0.0 --port 8095"
+      ],
+      "port": 8095
     }
   ]
 }

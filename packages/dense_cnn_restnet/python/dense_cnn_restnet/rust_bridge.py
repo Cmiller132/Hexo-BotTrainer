@@ -95,6 +95,54 @@ def model1_mcts_session_search(
     )
 
 
+def model1_mcts_session_run_continuous(
+    session: object,
+    game_keys: Sequence[int],
+    states: Sequence[object],
+    *,
+    evaluator: object,
+    on_move: object,
+    visits: int,
+    c_puct: float,
+    base_seed: int,
+    virtual_batch_size: int,
+    flush_target: int,
+    active_root_limit: int,
+    temperature_by_ply: Sequence[float],
+    root_dirichlet_total_alpha: float | None = None,
+    root_dirichlet_noise_fraction: float | None = None,
+    root_policy_temperature: float | None = None,
+    fpu_reduction: float | None = None,
+    virtual_loss: float | None = None,
+    widening_policy_mass: float | None = None,
+    widening_max_children: int | None = None,
+    widening_min_children: int | None = None,
+    forced_playout_k: float | None = None,
+) -> Mapping[str, Any]:
+    return session.run_continuous(
+        tuple(int(item) for item in game_keys),
+        tuple(states),
+        evaluator,
+        on_move,
+        int(visits),
+        float(c_puct),
+        int(base_seed),
+        int(virtual_batch_size),
+        int(flush_target),
+        int(active_root_limit),
+        [float(item) for item in temperature_by_ply],
+        root_dirichlet_total_alpha,
+        root_dirichlet_noise_fraction,
+        root_policy_temperature,
+        fpu_reduction,
+        virtual_loss,
+        widening_policy_mass,
+        widening_max_children,
+        widening_min_children,
+        forced_playout_k,
+    )
+
+
 def model1_sample_from_state(
     state: object,
     *,

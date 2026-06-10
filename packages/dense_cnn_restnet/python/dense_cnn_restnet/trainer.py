@@ -389,6 +389,7 @@ class DenseCNNTrainer:
                 value_weight=self.config.training.value_weight,
                 opp_policy_weight=self.config.training.opp_policy_weight,
                 short_term_value_weight=self.config.training.short_term_value_weight,
+                moves_left_weight=self.config.training.moves_left_weight,
             )
         self.scaler.scale(loss).backward()
         if self.config.training.max_grad_norm > 0:
@@ -440,6 +441,7 @@ class DenseCNNTrainer:
                         value_weight=self.config.training.value_weight,
                         opp_policy_weight=self.config.training.opp_policy_weight,
                         short_term_value_weight=self.config.training.short_term_value_weight,
+                        moves_left_weight=self.config.training.moves_left_weight,
                     )
                 total_loss += float(loss.detach().cpu().item())
                 for key, tensor in components_map.items():

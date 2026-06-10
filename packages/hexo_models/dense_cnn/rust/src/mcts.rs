@@ -11,7 +11,7 @@
 //! subtree after every search. If the next call sends a root whose hash differs
 //! from the promoted tree, the old tree is discarded and a new one is evaluated.
 
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList, PyTuple};
 use rayon::prelude::*;
@@ -44,6 +44,130 @@ struct RootSelectionWork {
     // False means the root could not select any new or existing visit. The outer
     // loop uses this to stop if every root is blocked.
     made_progress: bool,
+}
+
+enum ContinuousPhase {
+    Active,
+    AwaitRootEval,
+    Empty,
+}
+
+// Deterministic per-(game, ply) RNG streams for the continuous scheduler: root
+// Dirichlet noise and played-move sampling must draw independently (the lockstep
+// path got this from separate seed bases; here one mixer with a stream tag).
+const SEED_STREAM_ROOT_NOISE: u64 = 0;
+const SEED_STREAM_MOVE_SELECT: u64 = 1;
+
+struct ContinuousSlot {
+    game_key: u64,
+    ply: u32,
+    search: Option<RustSearch>,
+    phase: ContinuousPhase,
+    in_flight: u32,
+    baseline: HashMap<PackedCoord, u32>,
+}
+
+enum ContinuousEvalItem {
+    Leaf(RustLeaf),
+    RootInit {
+        slot_index: usize,
+        state: RustHexoState,
+        state_hash: hexo_utils::StateHash,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ContinuousFlushDecision {
+    Hold,
+    Flush { no_progress: bool },
+    Stop,
+}
+
+#[derive(Default)]
+struct ContinuousSchedulerStats {
+    flush_count: u64,
+    no_progress_flushes: u64,
+    queued_states: u64,
+    flushed_states: u64,
+    // Keyed by power-of-two bucket (next_power_of_two of the unique state
+    // count), so the epoch JSON stays a handful of entries instead of one per
+    // distinct flush size. The exact mean is flushed_states / flush_count.
+    flush_size_histogram: HashMap<usize, u64>,
+    on_move_seconds: f64,
+    moves_decided: u64,
+}
+
+fn continuous_flush_decision(
+    queue_len: usize,
+    flush_target: usize,
+    made_progress: bool,
+) -> ContinuousFlushDecision {
+    if queue_len == 0 {
+        return if made_progress {
+            ContinuousFlushDecision::Hold
+        } else {
+            ContinuousFlushDecision::Stop
+        };
+    }
+    if queue_len >= flush_target {
+        return ContinuousFlushDecision::Flush {
+            no_progress: !made_progress,
+        };
+    }
+    if !made_progress {
+        return ContinuousFlushDecision::Flush { no_progress: true };
+    }
+    ContinuousFlushDecision::Hold
+}
+
+fn continuous_completion_ready(completed_visits: u32, target_visits: u32, in_flight: u32) -> bool {
+    completed_visits >= target_visits && in_flight == 0
+}
+
+#[derive(Default)]
+struct ContinuousTreeStats {
+    root_count: usize,
+    completed_visits: u64,
+    node_count: usize,
+    active_edge_count: usize,
+    hidden_prior_count: usize,
+    root_active_edges: usize,
+    root_hidden_priors: usize,
+    max_nodes_per_root: usize,
+    max_active_edges_per_root: usize,
+    max_hidden_priors_per_root: usize,
+    max_active_edges_per_node: usize,
+    max_hidden_priors_per_node: usize,
+    active_edge_bytes: usize,
+    hidden_prior_bytes: usize,
+    shared_prior_nodes: usize,
+    shared_prior_refs: usize,
+}
+
+impl ContinuousTreeStats {
+    fn record(&mut self, search: &RustSearch) {
+        let stats = search.diagnostics();
+        self.root_count += 1;
+        self.completed_visits += search.completed_visits as u64;
+        self.node_count += stats.node_count;
+        self.active_edge_count += stats.active_edge_count;
+        self.hidden_prior_count += stats.hidden_prior_count;
+        self.root_active_edges += stats.root_active_edges;
+        self.root_hidden_priors += stats.root_hidden_priors;
+        self.max_nodes_per_root = self.max_nodes_per_root.max(stats.node_count);
+        self.max_active_edges_per_root =
+            self.max_active_edges_per_root.max(stats.active_edge_count);
+        self.max_hidden_priors_per_root =
+            self.max_hidden_priors_per_root.max(stats.hidden_prior_count);
+        self.max_active_edges_per_node =
+            self.max_active_edges_per_node.max(stats.max_active_edges_per_node);
+        self.max_hidden_priors_per_node =
+            self.max_hidden_priors_per_node.max(stats.max_hidden_priors_per_node);
+        self.active_edge_bytes += stats.active_edge_bytes;
+        self.hidden_prior_bytes += stats.hidden_prior_bytes;
+        self.shared_prior_nodes += stats.shared_prior_nodes;
+        self.shared_prior_refs += stats.shared_prior_refs;
+    }
 }
 
 #[pyclass(unsendable)]
@@ -173,9 +297,12 @@ impl Model1MctsSession {
             virtual_batch_size.unwrap_or(target_visits),
         )?;
         let evaluation_stats = new_shared_evaluation_stats();
-        let root_policy_temperature =
-            validate_positive_f32("root_policy_temperature", root_policy_temperature.unwrap_or(1.0))?;
-        let fpu_reduction = validate_nonnegative_f32("fpu_reduction", fpu_reduction.unwrap_or(0.20))?;
+        let root_policy_temperature = validate_positive_f32(
+            "root_policy_temperature",
+            root_policy_temperature.unwrap_or(1.0),
+        )?;
+        let fpu_reduction =
+            validate_nonnegative_f32("fpu_reduction", fpu_reduction.unwrap_or(0.20))?;
         let virtual_loss = validate_nonnegative_f32("virtual_loss", virtual_loss.unwrap_or(1.0))?;
         let forced_playout_k =
             validate_nonnegative_f32("forced_playout_k", forced_playout_k.unwrap_or(0.0))?;
@@ -184,7 +311,9 @@ impl Model1MctsSession {
 
         let widening_mass = widening_policy_mass.unwrap_or(0.95);
         if !widening_mass.is_finite() || widening_mass <= 0.0 || widening_mass > 1.0 {
-            return Err(PyValueError::new_err("widening_policy_mass must be in (0, 1]"));
+            return Err(PyValueError::new_err(
+                "widening_policy_mass must be in (0, 1]",
+            ));
         }
         let widening = Widening {
             mass: widening_mass,
@@ -313,7 +442,7 @@ impl Model1MctsSession {
         let results = build_search_result_payloads(
             py,
             &searches,
-            &batch_diagnostics,
+            Some(&batch_diagnostics),
             &move_temps,
             seed,
             Some(&baselines),
@@ -336,6 +465,338 @@ impl Model1MctsSession {
         }
 
         Ok(results)
+    }
+
+    #[pyo3(signature = (game_keys, states, evaluator, on_move, visits, c_puct, base_seed, virtual_batch_size, flush_target, active_root_limit, temperature_by_ply, root_dirichlet_total_alpha=None, root_dirichlet_noise_fraction=None, root_policy_temperature=None, fpu_reduction=None, virtual_loss=None, widening_policy_mass=None, widening_max_children=None, widening_min_children=None, forced_playout_k=None))]
+    fn run_continuous(
+        &mut self,
+        py: Python<'_>,
+        game_keys: Vec<u64>,
+        states: &Bound<'_, PyAny>,
+        evaluator: &Bound<'_, PyAny>,
+        on_move: &Bound<'_, PyAny>,
+        visits: u32,
+        c_puct: f32,
+        base_seed: u64,
+        virtual_batch_size: u32,
+        flush_target: usize,
+        active_root_limit: usize,
+        temperature_by_ply: Vec<f32>,
+        root_dirichlet_total_alpha: Option<f32>,
+        root_dirichlet_noise_fraction: Option<f32>,
+        root_policy_temperature: Option<f32>,
+        fpu_reduction: Option<f32>,
+        virtual_loss: Option<f32>,
+        widening_policy_mass: Option<f32>,
+        widening_max_children: Option<u32>,
+        widening_min_children: Option<u32>,
+        forced_playout_k: Option<f32>,
+    ) -> PyResult<Py<PyAny>> {
+        validate_search_inputs(visits, c_puct, 0.0)?;
+        let roots = states_from_py_states(py, states)?;
+        if roots.len() != game_keys.len() {
+            return Err(PyValueError::new_err(format!(
+                "dense_cnn continuous MCTS received {} game keys for {} states",
+                game_keys.len(),
+                roots.len()
+            )));
+        }
+        let root_limit = validate_positive_usize("active_root_limit", active_root_limit)?;
+        if roots.len() > root_limit {
+            return Err(PyValueError::new_err(format!(
+                "dense_cnn continuous MCTS received {} active roots, above strict limit {}",
+                roots.len(),
+                root_limit
+            )));
+        }
+        let leaf_batch_per_root = validate_positive_u32("virtual_batch_size", virtual_batch_size)?;
+        let flush_target = validate_positive_usize("flush_target", flush_target)?;
+        let root_policy_temperature = validate_positive_f32(
+            "root_policy_temperature",
+            root_policy_temperature.unwrap_or(1.0),
+        )?;
+        let fpu_reduction =
+            validate_nonnegative_f32("fpu_reduction", fpu_reduction.unwrap_or(0.20))?;
+        let virtual_loss = validate_nonnegative_f32("virtual_loss", virtual_loss.unwrap_or(1.0))?;
+        let forced_playout_k =
+            validate_nonnegative_f32("forced_playout_k", forced_playout_k.unwrap_or(0.0))?;
+        let root_noise_config =
+            root_noise_config(root_dirichlet_total_alpha, root_dirichlet_noise_fraction)?;
+        let widening_mass = widening_policy_mass.unwrap_or(0.95);
+        if !widening_mass.is_finite() || widening_mass <= 0.0 || widening_mass > 1.0 {
+            return Err(PyValueError::new_err(
+                "widening_policy_mass must be in (0, 1]",
+            ));
+        }
+        let widening = Widening {
+            mass: widening_mass,
+            min_children: validate_positive_u32(
+                "widening_min_children",
+                widening_min_children.unwrap_or(2),
+            )? as usize,
+            max_children: validate_positive_u32(
+                "widening_max_children",
+                widening_max_children.unwrap_or(32),
+            )? as usize,
+        };
+        if widening.min_children > widening.max_children {
+            return Err(PyValueError::new_err(
+                "widening_min_children must be <= widening_max_children",
+            ));
+        }
+        if temperature_by_ply.is_empty() {
+            return Err(PyValueError::new_err(
+                "temperature_by_ply must not be empty",
+            ));
+        }
+        if temperature_by_ply
+            .iter()
+            .any(|value| !value.is_finite() || *value < 0.0)
+        {
+            return Err(PyValueError::new_err(
+                "temperature_by_ply entries must be finite and >= 0",
+            ));
+        }
+
+        let evaluation_stats = new_shared_evaluation_stats();
+        let mut slots = Vec::with_capacity(roots.len());
+        let mut queue: Vec<ContinuousEvalItem> = Vec::new();
+        for (slot_index, (game_key, root)) in
+            game_keys.into_iter().zip(roots.into_iter()).enumerate()
+        {
+            let root_hash = state_hash(&root);
+            let mut slot = ContinuousSlot {
+                game_key,
+                ply: 0,
+                search: None,
+                phase: ContinuousPhase::AwaitRootEval,
+                in_flight: 0,
+                baseline: HashMap::new(),
+            };
+            if let Some(mut search) = self.searches.remove(&game_key) {
+                if search.root_hash == root_hash {
+                    search.set_additional_visits(visits);
+                    search.set_forced_playout_k(forced_playout_k);
+                    if let Some(noise) = root_noise_exact(
+                        root_noise_config,
+                        mix_seed(base_seed, game_key, 0, SEED_STREAM_ROOT_NOISE),
+                    ) {
+                        search.apply_root_dirichlet_noise(noise);
+                    }
+                    slot.baseline = search.root_edge_visits().into_iter().collect();
+                    slot.search = Some(search);
+                    slot.phase = ContinuousPhase::Active;
+                }
+            }
+            if matches!(slot.phase, ContinuousPhase::AwaitRootEval) {
+                queue.push(ContinuousEvalItem::RootInit {
+                    slot_index,
+                    state: root,
+                    state_hash: root_hash,
+                });
+            }
+            slots.push(slot);
+        }
+
+        let mut stats = ContinuousSchedulerStats::default();
+        let mut tree_stats = ContinuousTreeStats::default();
+        // Select↔eval overlap (the lockstep A1 pipeline, slot-scheduler form):
+        // while a flush batch is being evaluated on the GIL thread, the NEXT
+        // select pass runs on a scoped worker. Safe for the same reason lockstep
+        // is — virtual loss is applied at selection — plus one continuous-only
+        // guard: a slot with prefetched leaves has in_flight > 0, so it cannot
+        // complete (and thus cannot advance_root and invalidate those leaves'
+        // node ids) until they are backed up. A prefetch that made no progress
+        // is discarded so the next iteration re-selects synchronously AFTER the
+        // backup freed the in-flight paths (lockstep's narrow-tree fallback).
+        let mut prefetched: Option<(Vec<RustLeaf>, bool)> = None;
+        while continuous_has_work(&slots) || !queue.is_empty() {
+            // SELECT: every Active slot tops its in-flight leaves up to the
+            // virtual-batch cap, in parallel across slots; results fold into the
+            // queue in slot order, so scheduling stays a pure function of
+            // (slots, seeds) — no timing dependence. Every slot gets a full turn
+            // each pass; an early queue-capacity break here would permanently
+            // starve high slots (low slots refill their in-flight budget every
+            // pass and would hit the cap alone). The GIL is released so the
+            // Python writer thread can drain finished games while selection runs.
+            let (new_leaves, made_progress) = match prefetched.take() {
+                Some(result) => result,
+                None => py.detach(|| {
+                    select_continuous_pass(&mut slots, c_puct, leaf_batch_per_root, virtual_loss)
+                })?,
+            };
+            queue.extend(new_leaves.into_iter().map(ContinuousEvalItem::Leaf));
+
+            let decision = continuous_flush_decision(queue.len(), flush_target, made_progress);
+            if let ContinuousFlushDecision::Flush { no_progress } = decision {
+                if no_progress {
+                    stats.no_progress_flushes += 1;
+                }
+                let items = std::mem::take(&mut queue);
+                stats.flush_count += 1;
+                stats.queued_states += items.len() as u64;
+                let unique_before = evaluation_stats
+                    .lock()
+                    .expect("evaluation stats mutex poisoned")
+                    .unique_states;
+                let requests: Vec<RustEvaluationRequest> = items
+                    .iter()
+                    .map(|item| match item {
+                        ContinuousEvalItem::Leaf(leaf) => RustEvaluationRequest {
+                            state: &leaf.state,
+                            state_hash: leaf.state_hash,
+                        },
+                        ContinuousEvalItem::RootInit {
+                            state, state_hash, ..
+                        } => RustEvaluationRequest {
+                            state,
+                            state_hash: *state_hash,
+                        },
+                    })
+                    .collect();
+                // Tree-access discipline inside the scope: ONLY the select
+                // worker touches slots/trees; the eval reads the owned flush
+                // items + the (thread-safe) cache. Backup runs after the join
+                // with exclusive access, so trees have one mutator at every
+                // instant. An eval error propagates after the scope's implicit
+                // join, so the worker never outlives its borrows.
+                let slots_worker: &mut Vec<ContinuousSlot> = &mut slots;
+                let (evaluations, prefetch_result) =
+                    std::thread::scope(|scope| -> PyResult<_> {
+                        let select_handle = scope.spawn(move || {
+                            select_continuous_pass(
+                                slots_worker,
+                                c_puct,
+                                leaf_batch_per_root,
+                                virtual_loss,
+                            )
+                        });
+                        let evaluations = evaluate_model1_state_refs_cached(
+                            py,
+                            evaluator,
+                            &requests,
+                            &self.evaluation_cache,
+                            Some(&evaluation_stats),
+                            self.cache_max_states,
+                        )?;
+                        let prefetch = select_handle
+                            .join()
+                            .expect("continuous select worker panicked")?;
+                        Ok((evaluations, prefetch))
+                    })?;
+                let unique_after = evaluation_stats
+                    .lock()
+                    .expect("evaluation stats mutex poisoned")
+                    .unique_states;
+                let unique_flushed = unique_after.saturating_sub(unique_before);
+                stats.flushed_states += unique_flushed as u64;
+                *stats
+                    .flush_size_histogram
+                    .entry(unique_flushed.max(1).next_power_of_two())
+                    .or_insert(0) += 1;
+                backup_continuous_items(
+                    &mut slots,
+                    items,
+                    &evaluations,
+                    visits,
+                    fpu_reduction,
+                    root_policy_temperature,
+                    root_noise_config,
+                    widening,
+                    forced_playout_k,
+                    base_seed,
+                    virtual_loss,
+                )?;
+                // A no-progress prefetch is stale advice (paths it saw as
+                // pending were just backed up): drop it and re-select fresh.
+                prefetched = if prefetch_result.1 {
+                    Some(prefetch_result)
+                } else {
+                    None
+                };
+            }
+
+            let moves_decided = complete_continuous_slots(
+                py,
+                on_move,
+                &mut slots,
+                visits,
+                c_puct,
+                forced_playout_k,
+                &temperature_by_ply,
+                base_seed,
+                root_noise_config,
+                &mut queue,
+                &mut stats,
+                &mut tree_stats,
+            )?;
+
+            // Stop fires only when the queue is empty AND no root could select —
+            // healthy schedules never reach it (slots exhaust to Empty and the
+            // loop condition exits). If a completion pass also made no progress,
+            // the scheduler is genuinely wedged (e.g. a root with no legal
+            // actions): fail loud rather than return a silently-partial epoch.
+            if matches!(decision, ContinuousFlushDecision::Stop) && moves_decided == 0 {
+                let stuck = slots
+                    .iter()
+                    .filter(|slot| !matches!(slot.phase, ContinuousPhase::Empty))
+                    .count();
+                return Err(PyRuntimeError::new_err(format!(
+                    "dense_cnn continuous MCTS scheduler stalled with {stuck} unfinished slots \
+                     (queue empty, no selectable leaves, no completable roots)"
+                )));
+            }
+        }
+
+        for slot in slots {
+            if let Some(search) = slot.search {
+                if matches!(slot.phase, ContinuousPhase::Active) {
+                    self.searches.insert(slot.game_key, search);
+                }
+            }
+        }
+
+        let dict = PyDict::new(py);
+        dict.set_item("flush_count", stats.flush_count)?;
+        dict.set_item("queued_states", stats.queued_states)?;
+        dict.set_item("flushed_states", stats.flushed_states)?;
+        dict.set_item(
+            "mean_flush_states",
+            if stats.flush_count > 0 {
+                stats.flushed_states as f64 / stats.flush_count as f64
+            } else {
+                0.0
+            },
+        )?;
+        dict.set_item("no_progress_flushes", stats.no_progress_flushes)?;
+        dict.set_item("moves_decided", stats.moves_decided)?;
+        let hist = PyDict::new(py);
+        let mut hist_items: Vec<_> = stats.flush_size_histogram.into_iter().collect();
+        hist_items.sort_unstable_by_key(|(size, _)| *size);
+        for (size, count) in hist_items {
+            hist.set_item(size, count)?;
+        }
+        dict.set_item("flush_size_histogram", hist)?;
+        dict.set_item("on_move_seconds", stats.on_move_seconds)?;
+        let eval_snapshot = evaluation_stats
+            .lock()
+            .expect("evaluation stats mutex poisoned")
+            .clone();
+        let cache_len = self
+            .evaluation_cache
+            .lock()
+            .expect("evaluation cache mutex poisoned")
+            .len();
+        let batch_diagnostics = build_continuous_batch_diagnostics(
+            py,
+            &tree_stats,
+            &eval_snapshot,
+            visits,
+            leaf_batch_per_root,
+            cache_len,
+        )?;
+        dict.set_item("mcts_batch_diagnostics", batch_diagnostics)?;
+        Ok(dict.into_any().unbind())
     }
 }
 
@@ -421,8 +882,12 @@ fn run_searches_to_targets(
                     let select_searches: &mut [RustSearch] = &mut *searches;
                     Some(scope.spawn(move || {
                         let started = std::time::Instant::now();
-                        let result =
-                            select_leaf_batch(select_searches, c_puct, leaf_batch_per_root, virtual_loss);
+                        let result = select_leaf_batch(
+                            select_searches,
+                            c_puct,
+                            leaf_batch_per_root,
+                            virtual_loss,
+                        );
                         (result, started.elapsed().as_secs_f64())
                     }))
                 } else {
@@ -595,10 +1060,348 @@ fn apply_eval_backups(
     Ok(())
 }
 
+fn select_continuous_leaves(
+    search: &mut RustSearch,
+    slot_index: usize,
+    c_puct: f32,
+    budget: u32,
+    virtual_loss: f32,
+) -> PyResult<(Vec<RustLeaf>, bool, u32)> {
+    let mut leaves = Vec::new();
+    let mut made_progress = false;
+    let mut added_in_flight = 0u32;
+    let budget = budget.min(search.remaining_visits());
+    for _ in 0..budget {
+        let selected = search.select_pending_leaf(c_puct)?;
+        let Some(selected) = selected else {
+            break;
+        };
+        search.apply_virtual_visit(&selected.path, virtual_loss);
+        made_progress = true;
+        if let Some(outcome) = selected.terminal {
+            let leaf_player = selected.state.current_player();
+            let leaf_value = terminal_value(outcome, leaf_player);
+            search.backup_virtual(&selected.path, leaf_player, leaf_value, virtual_loss);
+        } else if let Some(node_id) = selected.existing_node {
+            let node = &search.nodes[node_id];
+            search.backup_virtual(&selected.path, node.player, node.value(), virtual_loss);
+        } else if let Some(verdict) = threats::analyze(&selected.state).verdict() {
+            let leaf_player = selected.state.current_player();
+            search.backup_virtual(&selected.path, leaf_player, verdict, virtual_loss);
+        } else {
+            search.mark_pending(selected.parent_node, selected.edge_index, 1);
+            added_in_flight += 1;
+            leaves.push(RustLeaf {
+                root_index: slot_index,
+                parent_node: selected.parent_node,
+                edge_index: selected.edge_index,
+                path: selected.path,
+                state: selected.state,
+                state_hash: selected.state_hash,
+            });
+        }
+    }
+    Ok((leaves, made_progress, added_in_flight))
+}
+
+#[allow(clippy::too_many_arguments)]
+// One parallel selection sweep over every Active slot: top each slot's
+// in-flight leaves up to the virtual-batch cap (rayon across slots — each
+// closure owns one slot's tree, no shared mutable state; results concatenate in
+// slot order so the sweep is deterministic). Pure Rust: callers run it under
+// `py.detach` (synchronous form) or on the scoped prefetch worker (overlap form).
+fn select_continuous_pass(
+    slots: &mut [ContinuousSlot],
+    c_puct: f32,
+    leaf_batch_per_root: u32,
+    virtual_loss: f32,
+) -> PyResult<(Vec<RustLeaf>, bool)> {
+    let per_slot: PyResult<Vec<(Vec<RustLeaf>, bool)>> = slots
+        .par_iter_mut()
+        .enumerate()
+        .map(|(slot_index, slot)| {
+            if !matches!(slot.phase, ContinuousPhase::Active) {
+                return Ok((Vec::new(), false));
+            }
+            let cap = leaf_batch_per_root.saturating_sub(slot.in_flight);
+            if cap == 0 {
+                return Ok((Vec::new(), false));
+            }
+            let Some(search) = slot.search.as_mut() else {
+                return Ok((Vec::new(), false));
+            };
+            if !search.needs_visits() {
+                return Ok((Vec::new(), false));
+            }
+            let (leaves, progressed, added_in_flight) =
+                select_continuous_leaves(search, slot_index, c_puct, cap, virtual_loss)?;
+            slot.in_flight = slot.in_flight.saturating_add(added_in_flight);
+            Ok((leaves, progressed))
+        })
+        .collect();
+    let mut leaves = Vec::new();
+    let mut made_progress = false;
+    for (slot_leaves, progressed) in per_slot? {
+        made_progress |= progressed;
+        leaves.extend(slot_leaves);
+    }
+    Ok((leaves, made_progress))
+}
+
+// Attach one flush's evaluations back onto their trees: NN leaves expand and
+// back up; RootInit results construct the slot's new search. Exclusive
+// `&mut slots` access — called only after the eval/prefetch scope joins.
+#[allow(clippy::too_many_arguments)]
+fn backup_continuous_items(
+    slots: &mut [ContinuousSlot],
+    items: Vec<ContinuousEvalItem>,
+    evaluations: &[Arc<RustEvaluation>],
+    visits: u32,
+    fpu_reduction: f32,
+    root_policy_temperature: f32,
+    root_noise_config: Option<RootNoiseConfig>,
+    widening: Widening,
+    forced_playout_k: f32,
+    base_seed: u64,
+    virtual_loss: f32,
+) -> PyResult<()> {
+    for (item, evaluation) in items.into_iter().zip(evaluations.iter()) {
+        match item {
+            ContinuousEvalItem::Leaf(leaf) => {
+                let slot = &mut slots[leaf.root_index];
+                let Some(search) = slot.search.as_mut() else {
+                    return Err(PyValueError::new_err(
+                        "continuous MCTS leaf resolved for empty slot",
+                    ));
+                };
+                let child_id = search.add_node_from_eval(
+                    &leaf.state,
+                    leaf.state_hash,
+                    Arc::clone(evaluation),
+                )?;
+                search.nodes[leaf.parent_node].edges[leaf.edge_index].child = Some(child_id);
+                search.mark_pending(leaf.parent_node, leaf.edge_index, -1);
+                slot.in_flight = slot.in_flight.saturating_sub(1);
+                let child_player = search.nodes[child_id].player;
+                let child_value = search.nodes[child_id].value();
+                search.backup_virtual(&leaf.path, child_player, child_value, virtual_loss);
+            }
+            ContinuousEvalItem::RootInit {
+                slot_index, state, ..
+            } => {
+                let slot = &mut slots[slot_index];
+                let search = RustSearch::new(
+                    state,
+                    &**evaluation,
+                    visits,
+                    fpu_reduction,
+                    root_policy_temperature,
+                    root_noise_exact(
+                        root_noise_config,
+                        mix_seed(base_seed, slot.game_key, slot.ply, SEED_STREAM_ROOT_NOISE),
+                    ),
+                    widening,
+                    forced_playout_k,
+                )?;
+                if search.root_edges_empty() {
+                    return Err(PyValueError::new_err(
+                        "dense_cnn continuous MCTS root has no legal actions",
+                    ));
+                }
+                slot.baseline = search.root_edge_visits().into_iter().collect();
+                slot.search = Some(search);
+                slot.phase = ContinuousPhase::Active;
+                slot.in_flight = 0;
+            }
+        }
+    }
+    Ok(())
+}
+
+// Decide moves for every root that reached its visit target. Returns the number
+// of moves decided so the caller can distinguish a healthy pass from a stall.
+//
+// Per-move payloads carry root-only diagnostics (batch=None): a per-move batch
+// snapshot would clone the cumulative evaluation stats ~once per position and
+// the Python driver would then sum thousands of overlapping snapshots. The
+// epoch-wide aggregate is built once in `run_continuous` instead.
+#[allow(clippy::too_many_arguments)]
+fn complete_continuous_slots(
+    py: Python<'_>,
+    on_move: &Bound<'_, PyAny>,
+    slots: &mut [ContinuousSlot],
+    visits: u32,
+    c_puct: f32,
+    forced_playout_k: f32,
+    temperature_by_ply: &[f32],
+    base_seed: u64,
+    root_noise_config: Option<RootNoiseConfig>,
+    queue: &mut Vec<ContinuousEvalItem>,
+    stats: &mut ContinuousSchedulerStats,
+    tree_stats: &mut ContinuousTreeStats,
+) -> PyResult<u64> {
+    let mut moves_decided = 0u64;
+    for slot_index in 0..slots.len() {
+        if !matches!(slots[slot_index].phase, ContinuousPhase::Active) {
+            continue;
+        }
+        let complete = slots[slot_index]
+            .search
+            .as_ref()
+            .map(|search| {
+                continuous_completion_ready(
+                    search.completed_visits,
+                    search.target_visits,
+                    slots[slot_index].in_flight,
+                )
+            })
+            .unwrap_or(false);
+        if !complete {
+            continue;
+        }
+
+        let game_key = slots[slot_index].game_key;
+        let ply = slots[slot_index].ply;
+        let move_seed = mix_seed(base_seed, game_key, ply, SEED_STREAM_MOVE_SELECT);
+        let temperature = temperature_for_ply(temperature_by_ply, ply);
+        let baseline = slots[slot_index].baseline.clone();
+        let payloads = {
+            let search = slots[slot_index]
+                .search
+                .as_ref()
+                .expect("active continuous slot has search");
+            tree_stats.record(search);
+            let baselines = vec![baseline];
+            build_search_result_payloads(
+                py,
+                std::slice::from_ref(search),
+                None,
+                &[temperature],
+                move_seed,
+                Some(&baselines),
+                c_puct,
+                forced_playout_k,
+            )?
+        };
+        let payloads = payloads.bind(py).downcast::<PyList>()?;
+        let payload = payloads.get_item(0)?;
+        let payload_dict = payload.downcast::<PyDict>()?;
+        let action_id: PackedCoord = payload_dict
+            .get_item("action_id")?
+            .ok_or_else(|| PyValueError::new_err("continuous payload missing action_id"))?
+            .extract()?;
+
+        moves_decided += 1;
+        stats.moves_decided += 1;
+        let started = std::time::Instant::now();
+        let response = on_move.call1((game_key, payload_dict))?;
+        stats.on_move_seconds += started.elapsed().as_secs_f64();
+        if response.is_none() {
+            slots[slot_index].search = None;
+            slots[slot_index].phase = ContinuousPhase::Empty;
+            continue;
+        }
+        let tuple = response.downcast::<PyTuple>()?;
+        if tuple.is_empty() {
+            return Err(PyValueError::new_err(
+                "continuous on_move response tuple is empty",
+            ));
+        }
+        let action: String = tuple.get_item(0)?.extract()?;
+        match action.as_str() {
+            "advance" => {
+                if tuple.len() != 2 {
+                    return Err(PyValueError::new_err(
+                        "advance response must be ('advance', state)",
+                    ));
+                }
+                let next_state = single_state_from_py(py, &tuple.get_item(1)?)?;
+                let next_hash = state_hash(&next_state);
+                let mut keep_promoted = false;
+                if let Some(search) = slots[slot_index].search.as_mut() {
+                    if search.advance_root(action_id)? && search.root_hash == next_hash {
+                        search.set_additional_visits(visits);
+                        search.set_forced_playout_k(forced_playout_k);
+                        if let Some(noise) = root_noise_exact(
+                            root_noise_config,
+                            mix_seed(base_seed, game_key, ply + 1, SEED_STREAM_ROOT_NOISE),
+                        ) {
+                            search.apply_root_dirichlet_noise(noise);
+                        }
+                        slots[slot_index].baseline =
+                            search.root_edge_visits().into_iter().collect();
+                        keep_promoted = true;
+                    }
+                }
+                slots[slot_index].ply = slots[slot_index].ply.saturating_add(1);
+                slots[slot_index].in_flight = 0;
+                if keep_promoted {
+                    slots[slot_index].phase = ContinuousPhase::Active;
+                } else {
+                    slots[slot_index].search = None;
+                    slots[slot_index].phase = ContinuousPhase::AwaitRootEval;
+                    queue.push(ContinuousEvalItem::RootInit {
+                        slot_index,
+                        state: next_state,
+                        state_hash: next_hash,
+                    });
+                }
+            }
+            "replace" => {
+                if tuple.len() != 3 {
+                    return Err(PyValueError::new_err(
+                        "replace response must be ('replace', new_key, state)",
+                    ));
+                }
+                let new_key: u64 = tuple.get_item(1)?.extract()?;
+                let next_state = single_state_from_py(py, &tuple.get_item(2)?)?;
+                let next_hash = state_hash(&next_state);
+                slots[slot_index].game_key = new_key;
+                slots[slot_index].ply = 0;
+                slots[slot_index].search = None;
+                slots[slot_index].baseline.clear();
+                slots[slot_index].in_flight = 0;
+                slots[slot_index].phase = ContinuousPhase::AwaitRootEval;
+                queue.push(ContinuousEvalItem::RootInit {
+                    slot_index,
+                    state: next_state,
+                    state_hash: next_hash,
+                });
+            }
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "continuous on_move returned unsupported action {other:?}"
+                )));
+            }
+        }
+    }
+    Ok(moves_decided)
+}
+
+fn continuous_has_work(slots: &[ContinuousSlot]) -> bool {
+    slots
+        .iter()
+        .any(|slot| !matches!(slot.phase, ContinuousPhase::Empty))
+}
+
+fn temperature_for_ply(values: &[f32], ply: u32) -> f32 {
+    let index = (ply as usize).min(values.len().saturating_sub(1));
+    values[index]
+}
+
+fn single_state_from_py(py: Python<'_>, state: &Bound<'_, PyAny>) -> PyResult<RustHexoState> {
+    let tuple = PyTuple::new(py, [state])?;
+    let states = states_from_py_states(py, tuple.as_any())?;
+    states
+        .into_iter()
+        .next()
+        .ok_or_else(|| PyValueError::new_err("expected one state"))
+}
+
 fn build_search_result_payloads(
     py: Python<'_>,
     searches: &[RustSearch],
-    batch_diagnostics: &Bound<'_, PyDict>,
+    batch_diagnostics: Option<&Bound<'_, PyDict>>,
     temperatures: &[f32],
     seed: u64,
     baselines: Option<&[HashMap<PackedCoord, u32>]>,
@@ -718,10 +1521,7 @@ fn root_prior_policy(root: &RustNode) -> (Vec<PackedCoord>, Vec<f32>) {
     }
     let mut pairs: Vec<(PackedCoord, f32)> = priors.into_iter().collect();
     pairs.sort_unstable_by_key(|(action_id, _prior)| *action_id);
-    let action_ids: Vec<PackedCoord> = pairs
-        .iter()
-        .map(|(action_id, _prior)| *action_id)
-        .collect();
+    let action_ids: Vec<PackedCoord> = pairs.iter().map(|(action_id, _prior)| *action_id).collect();
     let mut weights: Vec<f32> = pairs.into_iter().map(|(_action_id, prior)| prior).collect();
     let total: f32 = weights.iter().copied().sum();
     if total > 0.0 {
@@ -761,14 +1561,18 @@ fn validate_positive_usize(name: &str, value: usize) -> PyResult<usize> {
 
 fn validate_positive_f32(name: &str, value: f32) -> PyResult<f32> {
     if !value.is_finite() || value <= 0.0 {
-        return Err(PyValueError::new_err(format!("{name} must be finite and > 0")));
+        return Err(PyValueError::new_err(format!(
+            "{name} must be finite and > 0"
+        )));
     }
     Ok(value)
 }
 
 fn validate_nonnegative_f32(name: &str, value: f32) -> PyResult<f32> {
     if !value.is_finite() || value < 0.0 {
-        return Err(PyValueError::new_err(format!("{name} must be finite and >= 0")));
+        return Err(PyValueError::new_err(format!(
+            "{name} must be finite and >= 0"
+        )));
     }
     Ok(value)
 }
@@ -823,6 +1627,25 @@ fn root_noise(
         fraction: config.fraction,
         seed: seed.wrapping_add((index as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)),
     })
+}
+
+fn root_noise_exact(config: Option<RootNoiseConfig>, seed: u64) -> Option<RootDirichletNoise> {
+    let config = config?;
+    Some(RootDirichletNoise {
+        total_alpha: config.total_alpha,
+        fraction: config.fraction,
+        seed,
+    })
+}
+
+fn mix_seed(base_seed: u64, game_key: u64, ply: u32, stream: u64) -> u64 {
+    let mut value = base_seed ^ 0xA076_1D64_78BD_642F;
+    value ^= game_key.wrapping_mul(0xE703_7ED1_A0B4_28DB);
+    value ^= (ply as u64).wrapping_mul(0x8EBC_6AF0_9C88_C6E3);
+    value ^= stream.wrapping_mul(0x5899_65CC_7537_4CC3);
+    value = (value ^ (value >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    value ^ (value >> 31)
 }
 
 /// Tactical-safety classification of a candidate ROOT move (TSS move-selection
@@ -1047,7 +1870,8 @@ fn prune_forced_delta_counts(
     };
     let root_n = root_visits.max(1) as f32;
     let explore = c_puct * root_n.sqrt();
-    let u_best = values[best_idx] + priors[best_idx] * explore / (1.0 + cumulative[best_idx] as f32);
+    let u_best =
+        values[best_idx] + priors[best_idx] * explore / (1.0 + cumulative[best_idx] as f32);
     for index in 0..deltas.len() {
         if index == best_idx || pruned[index] == 0 {
             continue;
@@ -1089,7 +1913,9 @@ fn select_action_from_policy(
         return Ok(None);
     }
     if action_ids.len() != weights.len() {
-        return Err(PyValueError::new_err("visit policy action and weight lengths differ"));
+        return Err(PyValueError::new_err(
+            "visit policy action and weight lengths differ",
+        ));
     }
     let total_weight: f32 = weights.iter().copied().sum();
     for weight in weights {
@@ -1151,7 +1977,7 @@ fn random_unit(seed: u64) -> f64 {
 fn build_result_diagnostics<'py>(
     py: Python<'py>,
     search: &RustSearchDiagnostics,
-    batch: &Bound<'py, PyDict>,
+    batch: Option<&Bound<'py, PyDict>>,
 ) -> PyResult<Bound<'py, PyDict>> {
     let diagnostics = PyDict::new(py);
     let root = PyDict::new(py);
@@ -1160,7 +1986,10 @@ fn build_result_diagnostics<'py>(
     root.set_item("hidden_prior_count", search.hidden_prior_count)?;
     root.set_item("root_active_edges", search.root_active_edges)?;
     root.set_item("root_hidden_priors", search.root_hidden_priors)?;
-    root.set_item("max_active_edges_per_node", search.max_active_edges_per_node)?;
+    root.set_item(
+        "max_active_edges_per_node",
+        search.max_active_edges_per_node,
+    )?;
     root.set_item(
         "max_hidden_priors_per_node",
         search.max_hidden_priors_per_node,
@@ -1170,7 +1999,52 @@ fn build_result_diagnostics<'py>(
     root.set_item("shared_prior_nodes", search.shared_prior_nodes)?;
     root.set_item("shared_prior_refs", search.shared_prior_refs)?;
     diagnostics.set_item("root", root)?;
-    diagnostics.set_item("batch", batch)?;
+    if let Some(batch) = batch {
+        diagnostics.set_item("batch", batch)?;
+    }
+    Ok(diagnostics)
+}
+
+fn build_continuous_batch_diagnostics<'py>(
+    py: Python<'py>,
+    tree_stats: &ContinuousTreeStats,
+    evaluation: &EvaluationStats,
+    target_visits: u32,
+    leaf_batch_per_root: u32,
+    cache_len: usize,
+) -> PyResult<Bound<'py, PyDict>> {
+    let tree = PyDict::new(py);
+    tree.set_item("root_count", tree_stats.root_count)?;
+    tree.set_item("target_visits", target_visits)?;
+    tree.set_item("leaf_batch_per_root", leaf_batch_per_root)?;
+    tree.set_item("completed_visits", tree_stats.completed_visits)?;
+    tree.set_item("node_count", tree_stats.node_count)?;
+    tree.set_item("active_edge_count", tree_stats.active_edge_count)?;
+    tree.set_item("hidden_prior_count", tree_stats.hidden_prior_count)?;
+    tree.set_item("root_active_edges", tree_stats.root_active_edges)?;
+    tree.set_item("root_hidden_priors", tree_stats.root_hidden_priors)?;
+    tree.set_item("max_nodes_per_root", tree_stats.max_nodes_per_root)?;
+    tree.set_item("max_active_edges_per_root", tree_stats.max_active_edges_per_root)?;
+    tree.set_item(
+        "max_hidden_priors_per_root",
+        tree_stats.max_hidden_priors_per_root,
+    )?;
+    tree.set_item(
+        "max_active_edges_per_node",
+        tree_stats.max_active_edges_per_node,
+    )?;
+    tree.set_item(
+        "max_hidden_priors_per_node",
+        tree_stats.max_hidden_priors_per_node,
+    )?;
+    tree.set_item("active_edge_bytes", tree_stats.active_edge_bytes)?;
+    tree.set_item("hidden_prior_bytes", tree_stats.hidden_prior_bytes)?;
+    tree.set_item("shared_prior_nodes", tree_stats.shared_prior_nodes)?;
+    tree.set_item("shared_prior_refs", tree_stats.shared_prior_refs)?;
+
+    let diagnostics = PyDict::new(py);
+    diagnostics.set_item("tree", tree)?;
+    diagnostics.set_item("evaluation", build_evaluation_diagnostics(py, evaluation, cache_len)?)?;
     Ok(diagnostics)
 }
 
@@ -1223,7 +2097,10 @@ fn build_batch_diagnostics<'py>(
     tree.set_item("max_nodes_per_root", max_nodes_per_root)?;
     tree.set_item("max_active_edges_per_root", max_active_edges_per_root)?;
     tree.set_item("max_hidden_priors_per_root", max_hidden_priors_per_root)?;
-    tree.set_item("max_active_edges_per_node", aggregate.max_active_edges_per_node)?;
+    tree.set_item(
+        "max_active_edges_per_node",
+        aggregate.max_active_edges_per_node,
+    )?;
     tree.set_item(
         "max_hidden_priors_per_node",
         aggregate.max_hidden_priors_per_node,
@@ -1233,6 +2110,19 @@ fn build_batch_diagnostics<'py>(
     tree.set_item("shared_prior_nodes", aggregate.shared_prior_nodes)?;
     tree.set_item("shared_prior_refs", aggregate.shared_prior_refs)?;
 
+    let eval = build_evaluation_diagnostics(py, evaluation, cache_len)?;
+
+    let diagnostics = PyDict::new(py);
+    diagnostics.set_item("tree", tree)?;
+    diagnostics.set_item("evaluation", eval)?;
+    Ok(diagnostics)
+}
+
+fn build_evaluation_diagnostics<'py>(
+    py: Python<'py>,
+    evaluation: &EvaluationStats,
+    cache_len: usize,
+) -> PyResult<Bound<'py, PyDict>> {
     let eval = PyDict::new(py);
     eval.set_item("requested_states", evaluation.requested_states)?;
     eval.set_item("cache_hits", evaluation.cache_hits)?;
@@ -1264,11 +2154,7 @@ fn build_batch_diagnostics<'py>(
     eval.set_item("payload_seconds", evaluation.payload_seconds)?;
     eval.set_item("dedup_seconds", evaluation.dedup_seconds)?;
     eval.set_item("cache_insert_seconds", evaluation.cache_insert_seconds)?;
-
-    let diagnostics = PyDict::new(py);
-    diagnostics.set_item("tree", tree)?;
-    diagnostics.set_item("evaluation", eval)?;
-    Ok(diagnostics)
+    Ok(eval)
 }
 
 pub fn register_pybridge(module: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -1278,7 +2164,10 @@ pub fn register_pybridge(module: &Bound<'_, PyModule>) -> PyResult<()> {
 
 #[cfg(test)]
 mod forced_playout_tests {
-    use super::prune_forced_delta_counts;
+    use super::{
+        continuous_completion_ready, continuous_flush_decision, mix_seed,
+        prune_forced_delta_counts, ContinuousFlushDecision,
+    };
 
     const K: f32 = 2.0;
     const CPUCT: f32 = 1.5;
@@ -1289,7 +2178,8 @@ mod forced_playout_tests {
         let priors = [0.6f32, 0.05, 0.02];
         let cumulative = [80u32, 10, 3];
         let values = [0.5f32, 0.1, -0.2];
-        let pruned = prune_forced_delta_counts(&deltas, &priors, &cumulative, &values, 100, 0.0, CPUCT);
+        let pruned =
+            prune_forced_delta_counts(&deltas, &priors, &cumulative, &values, 100, 0.0, CPUCT);
         assert_eq!(pruned, deltas.to_vec(), "k=0 must not change any count");
     }
 
@@ -1302,7 +2192,8 @@ mod forced_playout_tests {
         let priors = [0.6f32, 0.05, 0.02];
         let cumulative = [80u32, 10, 3];
         let values = [0.5f32, 0.1, -0.2];
-        let pruned = prune_forced_delta_counts(&deltas, &priors, &cumulative, &values, 100, K, CPUCT);
+        let pruned =
+            prune_forced_delta_counts(&deltas, &priors, &cumulative, &values, 100, K, CPUCT);
         assert_eq!(pruned, vec![80u32, 7, 1]);
         assert_eq!(pruned[0], 80, "most-visited child is never pruned");
         let raw_tail: u32 = deltas[1..].iter().sum();
@@ -1320,19 +2211,69 @@ mod forced_playout_tests {
         let priors = [0.5f32, 0.3];
         let cumulative = [90u32, 20];
         let values = [0.4f32, 0.7];
-        let pruned = prune_forced_delta_counts(&deltas, &priors, &cumulative, &values, 100, K, CPUCT);
-        assert_eq!(pruned, vec![90u32, 20], "a PUCT-preferred child keeps its visits");
+        let pruned =
+            prune_forced_delta_counts(&deltas, &priors, &cumulative, &values, 100, K, CPUCT);
+        assert_eq!(
+            pruned,
+            vec![90u32, 20],
+            "a PUCT-preferred child keeps its visits"
+        );
     }
 
     #[test]
     fn never_prunes_below_baseline_or_to_negative() {
         // delta < cumulative (reused root): only the delta portion is prunable.
-        let deltas = [50u32, 4];           // child1 added 4 this call (cumulative 30)
+        let deltas = [50u32, 4]; // child1 added 4 this call (cumulative 30)
         let priors = [0.7f32, 0.05];
         let cumulative = [200u32, 30];
         let values = [0.5f32, 0.0];
-        let pruned = prune_forced_delta_counts(&deltas, &priors, &cumulative, &values, 230, K, CPUCT);
+        let pruned =
+            prune_forced_delta_counts(&deltas, &priors, &cumulative, &values, 230, K, CPUCT);
         assert!(pruned[1] <= 4, "cannot remove more than the delta visits");
         assert_eq!(pruned[0], 50, "best untouched");
+    }
+
+    #[test]
+    fn continuous_seed_mixer_has_golden_values() {
+        assert_eq!(mix_seed(0, 0, 0, 0), 0x7de5_3de7_72ea_694c);
+        assert_eq!(mix_seed(1, 2, 3, 4), 0xa6a9_b091_cff9_d67a);
+        assert_eq!(
+            mix_seed(123_456_789, 987_654_321, 42, 1),
+            0x9fc4_975d_734f_10b3
+        );
+        assert_ne!(
+            mix_seed(123_456_789, 987_654_321, 42, 0),
+            mix_seed(123_456_789, 987_654_321, 42, 1),
+            "Dirichlet and move-sampling streams must diverge",
+        );
+    }
+
+    #[test]
+    fn continuous_flush_decision_table() {
+        use ContinuousFlushDecision::{Flush, Hold, Stop};
+
+        let cases = [
+            (0, 4, true, Hold),
+            (0, 4, false, Stop),
+            (3, 4, true, Hold),
+            (3, 4, false, Flush { no_progress: true }),
+            (4, 4, true, Flush { no_progress: false }),
+            (4, 4, false, Flush { no_progress: true }),
+            (7, 4, true, Flush { no_progress: false }),
+        ];
+        for (queue_len, flush_target, made_progress, expected) in cases {
+            assert_eq!(
+                continuous_flush_decision(queue_len, flush_target, made_progress),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn continuous_completion_requires_zero_in_flight() {
+        assert!(!continuous_completion_ready(64, 64, 1));
+        assert!(continuous_completion_ready(64, 64, 0));
+        assert!(continuous_completion_ready(65, 64, 0));
+        assert!(!continuous_completion_ready(63, 64, 0));
     }
 }
