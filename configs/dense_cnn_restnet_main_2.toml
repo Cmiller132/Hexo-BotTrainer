@@ -69,11 +69,11 @@ max_grad_norm = 1.0
 # ~4x KataGo reuse ceiling its own 32000-era comment cited — a plausible
 # contributor to the post-ep25 opening collapse). The trainer now trains
 # min(requested, available shuffled rows), so the early epochs (window smaller
-# than 32k) train on everything available instead of skipping. NOTE: with PCR
-# at full_proportion=0.25 the recorded-row yield is ~25% of decisions
-# (~6-8k rows / 256-game epoch at ~100-ply games), so 32000 is ~4-5x reuse;
-# if reuse runs hot, raising [selfplay].games_per_epoch (PCR makes games
-# ~2.3x cheaper) is the right lever, not lowering this.
+# than 32k) train on everything available instead of skipping. With PCR at
+# full_proportion=0.25 and 384 games/epoch (~100-ply games) the recorded yield
+# is ~10.8k effective rows/epoch -> ~3.0x reuse here. If reuse needs to move,
+# the lever is [selfplay].games_per_epoch (PCR makes games ~2.3x cheaper),
+# not this row count.
 train_samples_per_epoch = 32000
 max_train_bucket_per_new_data = 8.0
 max_train_bucket_size = 500000
@@ -208,11 +208,13 @@ seed = 1
 epochs = 60
 
 [selfplay]
-# 256 games/epoch (rolling: 128 in flight, refilled). With PCR the per-game cost
-# is ~2.3x lower than main1's all-full searches; if recorded-row reuse runs hot
-# (see train_samples_per_epoch), raise this toward 384-512 rather than touching
-# the training row count.
-games_per_epoch = 256
+# 384 games/epoch (rolling: 128 in flight, refilled), REINVESTING part of the
+# PCR saving in games. At ~100-ply games / 224 avg sims: ~8.6M sims/epoch =
+# ~66% of main1's all-full cost, 1.5x the games (and openings) per epoch, and
+# ~10.8k recorded rows -> ~3.0x reuse at train_samples_per_epoch=32000. 256
+# would bank the whole saving as speed but sit at ~4.4x reuse; 512 spends the
+# whole saving and slows the net-update cadence.
+games_per_epoch = 384
 update_checkpoint_pointer = false
 
 [train]
