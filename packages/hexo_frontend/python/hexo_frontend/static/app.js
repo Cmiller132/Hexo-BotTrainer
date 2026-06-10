@@ -3306,6 +3306,12 @@ const dbg = {
   // claims a token and only commits if it is still the newest.
   posSeq: 0,
   anlSeq: 0,
+  // Full ordered stone list for the current game (each placement carries a 1-based
+  // `index`), captured from any loaded position. Lets prev/next/slider re-render
+  // the board for any ply INSTANTLY client-side (stones with index <= ply) without
+  // waiting on the server position fetch or the slow ResTNet analyze.
+  gamePlacements: [],
+  gameKey: "",
 };
 
 const dbgEl = id => document.getElementById(id);
@@ -3486,6 +3492,7 @@ async function debugLoadPosition({ resetPly = false, ply = null } = {}) {
     dbg.records = data.record_games || [];
     dbg.analysis = null;
     dbg.search = null;
+    debugCacheGamePlacements(data);
     debugSyncRecordSelect();
     debugRenderAll();
     await debugAnalyze();
@@ -3510,6 +3517,7 @@ async function debugLoadImported(ply = null) {
     dbg.records = [];
     dbg.analysis = null;
     dbg.search = null;
+    debugCacheGamePlacements(data);
     debugRenderAll();
     await debugAnalyze();
   } catch (e) {
@@ -3637,6 +3645,27 @@ function debugRenderAll() {
   debugRenderTrajectory();
 }
 
+function debugCacheGamePlacements(data) {
+  // Merge a loaded position's stones into the per-game cache (keyed by index), so
+  // the full game's board is known client-side regardless of which ply loaded.
+  const d = (data && data.debug) || {};
+  const key = `${dbg.run}|${dbg.gameFile}|${dbg.record}|${d.imported ? "imp" : ""}`;
+  if (key !== dbg.gameKey) { dbg.gameKey = key; dbg.gamePlacements = []; }
+  const byIndex = new Map(dbg.gamePlacements.map(p => [p.index, p]));
+  for (const p of (data.placements || [])) if (p && p.index != null) byIndex.set(p.index, p);
+  dbg.gamePlacements = [...byIndex.values()].sort((a, b) => a.index - b.index);
+}
+
+function debugCurrentPlacements() {
+  // Stones to show for the current ply. Prefer the cached full game filtered to
+  // `index <= ply` (instant, no round-trip); fall back to the server payload.
+  const pos = dbg.position;
+  if (!pos) return [];
+  const ply = pos.debug.ply;
+  if (dbg.gamePlacements.length) return dbg.gamePlacements.filter(p => p.index <= ply);
+  return pos.placements || [];
+}
+
 function debugHeatMaps() {
   // Build q,r -> normalized weight maps for the active overlays.
   const maps = { policy: new Map(), visits: new Map(), opp: new Map() };
@@ -3666,7 +3695,8 @@ function debugRenderBoard() {
     cells.set(key, Object.assign(existing, extra));
   };
   for (const c of (pos.legal || [])) addCell(c.q, c.r, { legal: true });
-  for (const p of (pos.placements || [])) addCell(p.q, p.r, { placement: p });
+  const placements = debugCurrentPlacements();
+  for (const p of placements) addCell(p.q, p.r, { placement: p });
   // Candidate cells from analysis (so heat shows even off the legal set).
   if (dbg.analysis) for (const r of dbg.analysis.policy || []) addCell(r.q, r.r, { candidate: true });
   for (const key of heat.policy.keys()) { const [q, r] = key.split(",").map(Number); addCell(q, r, {}); }
@@ -3683,9 +3713,14 @@ function debugRenderBoard() {
   debugBoardSvg.setAttribute("viewBox", `${minX} ${minY} ${maxX - minX} ${maxY - minY}`);
   debugBoardSvg.setAttribute("preserveAspectRatio", "xMidYMid meet");
 
-  // Last-move coords come from the server (true engine unpack); never recomputed here.
-  const lastCoord = (pos.debug.last_q != null && pos.debug.last_r != null)
-    ? { q: pos.debug.last_q, r: pos.debug.last_r } : null;
+  // Last move = the highest-index stone shown at this ply (derived client-side so
+  // the highlight tracks instantly on step). `placements` is sorted ascending by
+  // index, so the final element is the last move; ply 0 has none. Falls back to
+  // the server's engine-unpacked coords if the cache isn't populated yet.
+  const lastStone = placements.length ? placements[placements.length - 1] : null;
+  const lastCoord = lastStone
+    ? { q: lastStone.q, r: lastStone.r }
+    : ((pos.debug.last_q != null && pos.debug.last_r != null) ? { q: pos.debug.last_q, r: pos.debug.last_r } : null);
   data.sort((a, b) => (a.placement ? 1 : 0) - (b.placement ? 1 : 0));
   let html = "";
 
@@ -4008,10 +4043,26 @@ function debugGotoPly(ply) {
   if (!dbg.position) return;
   dbg.position.debug.ply = Math.max(0, Math.min(ply, dbg.position.debug.total));
   dbg.position.debug.last_action_id = dbg.position.debug.ply > 0 ? dbg.position.debug.action_ids[dbg.position.debug.ply - 1] : null;
+  // INSTANT, analyze-independent step: update the ply bar AND the board right now
+  // from the client-side placement cache (stones with index <= ply). The board no
+  // longer waits on the server position fetch or the slow ResTNet analyze, so every
+  // press moves the move immediately. The previous ply's value/policy is cleared so
+  // those panels show "evaluating" instead of stale numbers until the async analyze
+  // for the new ply returns.
+  dbg.analysis = null;
+  dbg.search = null;
   debugRenderPlyBar();
-  // Debounce the position+analyze fetch while dragging the slider.
+  debugRenderBoard();
+  debugRenderPositionInfo();
+  debugRenderValue();
+  debugRenderMoves();
+  debugRenderSearch();
+  // Debounced, decoupled refresh: re-fetch the server position (legal cells /
+  // tactics) and run the analyze. These only fill in overlays/values when ready;
+  // they never gate the ply/board update above. A short debounce coalesces rapid
+  // presses and slider drags into a single fetch for the final ply.
   window.clearTimeout(debugPlyTimer);
-  debugPlyTimer = window.setTimeout(() => debugLoadPosition({ ply: dbg.position.debug.ply }), 180);
+  debugPlyTimer = window.setTimeout(() => debugLoadPosition({ ply: dbg.position.debug.ply }), 120);
 }
 
 function debugStep(delta) {
