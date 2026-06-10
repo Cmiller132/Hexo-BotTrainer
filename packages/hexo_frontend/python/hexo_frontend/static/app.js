@@ -1,43 +1,37 @@
 // ---------------------------------------------------------------------------
-// On-screen diagnostics. The Debug tab failed ONLY on real phones (not in any
-// headless/desktop render), so we cannot see the device console. This paints the
-// running app.js version (always) and any JS error (uncaught OR surfaced from the
-// Debug code) into fixed on-screen elements the owner can read directly on the
-// phone — turning "it doesn't work" into a concrete error message.
-const APP_VERSION = "20260610-debugnav6";
-function reportError(msg) {
-  try {
-    let el = document.getElementById("__err_banner");
-    if (!el) {
-      el = document.createElement("div");
-      el.id = "__err_banner";
-      el.style.cssText =
-        "position:fixed;left:0;right:0;bottom:0;z-index:2147483647;background:#7a1020;" +
-        "color:#fff;font:12px/1.45 ui-monospace,Menlo,Consolas,monospace;padding:9px 12px;" +
-        "white-space:pre-wrap;word-break:break-word;max-height:48vh;overflow:auto;" +
-        "border-top:3px solid #ff5650;";
-      el.addEventListener("click", () => { el.style.display = "none"; });
-      (document.body || document.documentElement).appendChild(el);
-    }
-    el.style.display = "block";
-    el.textContent = `app ${APP_VERSION} — error (tap to dismiss):\n${msg}`;
-  } catch (_e) { /* never let the reporter itself throw */ }
+// On-screen diagnostics, anchored at the TOP. The Debug tab failed only on the
+// owner's real phone (never in headless/desktop), and an earlier BOTTOM-anchored
+// banner/version tag was hidden behind the Samsung system nav bar — so errors and
+// the version were invisible. This single top bar always shows the running
+// version, a live "last tap" echo (so a tap that registers is visible even if its
+// effect isn't), and any JS error (uncaught OR surfaced from the Debug code).
+const APP_VERSION = "20260610-debugnav7";
+function __diagBar() {
+  let el = document.getElementById("__diag");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "__diag";
+    el.style.cssText =
+      "position:fixed;left:0;right:0;top:0;z-index:2147483647;" +
+      "font:11px/1.4 ui-monospace,Menlo,Consolas,monospace;padding:4px 8px;" +
+      "white-space:pre-wrap;word-break:break-word;max-height:42vh;overflow:auto;";
+    el.addEventListener("click", () => { el.dataset.err = ""; __renderDiag(); });
+    (document.body || document.documentElement).appendChild(el);
+  }
+  return el;
 }
-function showVersionTag() {
-  try {
-    let el = document.getElementById("__ver_tag");
-    if (!el) {
-      el = document.createElement("div");
-      el.id = "__ver_tag";
-      el.style.cssText =
-        "position:fixed;right:4px;bottom:4px;z-index:2147483646;background:rgba(0,0,0,0.55);" +
-        "color:#9fb3c8;font:10px/1 ui-monospace,Menlo,Consolas,monospace;padding:3px 5px;" +
-        "border-radius:4px;pointer-events:none;";
-      (document.body || document.documentElement).appendChild(el);
-    }
-    el.textContent = "v" + APP_VERSION;
-  } catch (_e) {}
+function __renderDiag() {
+  const el = __diagBar();
+  const err = el.dataset.err || "";
+  const tap = el.dataset.tap || "";
+  el.style.background = err ? "#5a1020" : "rgba(8,20,30,0.92)";
+  el.style.color = err ? "#fff" : "#7fe0ff";
+  el.style.borderBottom = err ? "2px solid #ff5650" : "1px solid #1d3b50";
+  el.textContent = "v" + APP_VERSION + (tap ? "  ·  " + tap : "") + (err ? "\nERROR (tap to clear): " + err : "");
 }
+function reportError(msg) { try { __diagBar().dataset.err = String(msg); __renderDiag(); } catch (_e) {} }
+function diagTap(msg) { try { __diagBar().dataset.tap = String(msg); __renderDiag(); } catch (_e) {} }
+function showVersionTag() { try { __renderDiag(); } catch (_e) {} }
 window.__appVersion = APP_VERSION;
 window.addEventListener("error", e => {
   const m = (e && e.error && (e.error.stack || e.error.message)) ||
@@ -4079,23 +4073,54 @@ function debugRenderCheckpointInfo() {
 // ---- events ---------------------------------------------------------------
 
 function debugBindEvents() {
+  const root = dbgEl("debugScreen");
+  if (!root || root.__dbgDelegated) return;  // bind once on the stable ancestor
+  root.__dbgDelegated = true;
+
+  // BUTTONS via event DELEGATION on #debugScreen (which is never rebuilt), plus a
+  // touchend fallback. The previous per-button click listeners failed on the
+  // owner's phone: the controls were trapped in a fixed-height overflow:hidden
+  // panel that micro-scrolled under the finger, so the browser classified the tap
+  // as a scroll and never promoted touchend -> click — the button focused but the
+  // handler never ran. Delegation + an explicit touchend handler guarantees the
+  // action fires on tap; everything routes through reportError so a throw is
+  // visible on the device.
+  const ACTIONS = {
+    debugPlyStart:      { fn: () => debugStep(-1e9), tap: "|< start" },
+    debugPlyPrev:       { fn: () => debugStep(-1),   tap: "< prev" },
+    debugPlyNext:       { fn: () => debugStep(1),    tap: "> next" },
+    debugPlyEnd:        { fn: () => debugStep(1e9),  tap: ">| end" },
+    debugRefreshBtn:    { fn: () => debugLoadRun(),  tap: "refresh" },
+    debugAnalyzeBtn:    { fn: () => debugAnalyze(),  tap: "analyze" },
+    debugSearchBtn:     { fn: () => debugRunSearch(), tap: "search" },
+    debugImportBtn:     { fn: () => debugImport(),   tap: "import" },
+    debugTrajectoryBtn: { fn: () => debugPlotTrajectory(), tap: "plot" },
+  };
+  let lastTouchFire = 0;
+  const fire = (ev) => {
+    const hit = ev.target && ev.target.closest && ev.target.closest("button[id]");
+    if (!hit) return;
+    const act = ACTIONS[hit.id];
+    if (!act) return;
+    ev.preventDefault();
+    diagTap(act.tap);
+    try { act.fn(); } catch (e) { reportError("nav " + hit.id + ": " + (e && (e.stack || e.message) || e)); }
+  };
+  root.addEventListener("touchend", (ev) => { lastTouchFire = Date.now(); fire(ev); }, { passive: false });
+  root.addEventListener("click", (ev) => {
+    if (Date.now() - lastTouchFire < 700) return;  // touchend already handled this tap
+    fire(ev);
+  });
+
+  // Selects / slider / checkboxes / text input keep direct change/input listeners.
   const on = (id, ev, fn) => { const el = dbgEl(id); if (el) el.addEventListener(ev, fn); };
   on("debugRunSelect", "change", async e => { dbg.run = e.target.value; dbg.gameFile = ""; dbg.checkpoint = ""; await debugLoadRun(); });
   on("debugSourceSelect", "change", async e => { dbg.source = e.target.value; dbg.gameFile = ""; await debugLoadGames(); });
   on("debugGameSelect", "change", async e => { dbg.gameFile = e.target.value; dbg.record = 0; dbg.imported = null; await debugLoadPosition({ resetPly: true }); });
   on("debugRecordSelect", "change", async e => { dbg.record = Number(e.target.value) || 0; await debugLoadPosition({ resetPly: true }); });
   on("debugCheckpointSelect", "change", async e => { dbg.checkpoint = e.target.value; dbg.search = null; debugRenderCheckpointInfo(); await debugAnalyze(); });
-  on("debugRefreshBtn", "click", async () => { await debugLoadRun(); });
-  on("debugAnalyzeBtn", "click", () => debugAnalyze());
-  on("debugSearchBtn", "click", () => debugRunSearch());
   on("debugCompareSelect", "change", e => { dbg.compareCheckpoint = e.target.value; dbg.compare = null; debugRunCompare(); });
-  on("debugTrajectoryBtn", "click", () => debugPlotTrajectory());
-  on("debugPlyStart", "click", () => debugStep(-1e9));
-  on("debugPlyPrev", "click", () => debugStep(-1));
-  on("debugPlyNext", "click", () => debugStep(1));
-  on("debugPlyEnd", "click", () => debugStep(1e9));
-  on("debugPlySlider", "input", e => debugGotoPly(Number(e.target.value)));
-  on("debugImportBtn", "click", () => debugImport());
+  on("debugPlySlider", "input", e => { diagTap("slide " + e.target.value); debugGotoPly(Number(e.target.value)); });
   on("debugMoveInput", "keydown", e => { if (e.key === "Enter") debugImport(); });
   ["Policy", "Visits", "Opp", "Threats", "Numbers"].forEach(name => {
     on(`debugOv${name}`, "change", e => { dbg.overlays[name.toLowerCase()] = e.target.checked; debugRenderBoard(); });
@@ -4121,6 +4146,7 @@ function debugGotoPly(ply) {
   debugRenderValue();
   debugRenderMoves();
   debugRenderSearch();
+  diagTap("ply " + dbg.position.debug.ply + "/" + dbg.position.debug.total);  // visible step feedback on-device
   // Debounced, decoupled refresh: re-fetch the server position (legal cells /
   // tactics) and run the analyze. These only fill in overlays/values when ready;
   // they never gate the ply/board update above. A short debounce coalesces rapid
