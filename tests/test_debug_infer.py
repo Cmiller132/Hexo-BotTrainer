@@ -226,3 +226,116 @@ def test_debug_run_root_override(tmp_path, monkeypatch):
     fallback = [p.resolve() for p in web._debug_training_roots()]
     assert (root / "runs").resolve() not in fallback
     assert fallback == [p.resolve() for p in web._training_roots()]
+
+
+# --------------------------------------------------------------------------
+# Model Debug v2: pure-Python PUCT tree, recorded-row reader, game-eval sweep.
+# --------------------------------------------------------------------------
+
+
+def _sample_shard():
+    """First self-play compact .npz shard of the run (skip when absent)."""
+    run_dir = _run_dir()
+    if run_dir is None:
+        pytest.skip("runs/hexgt_rl_main3 not present")
+    shards = sorted((run_dir / "selfplay").glob("epoch_*_game_*.npz"))
+    if not shards:
+        pytest.skip("no self-play .npz shards present")
+    return shards[0]
+
+
+def test_search_tree_is_deterministic(cpu_only):
+    """Same request => byte-identical serialized tree (seeded tie-breaks only)."""
+    import json
+
+    loaded = di.load_checkpoint(_checkpoint("hexgt_rl_latest.pt"))
+    actions = _sample_actions(12)
+    t1 = di.search_tree_position(loaded, actions, visits=64, seed=3)
+    t2 = di.search_tree_position(loaded, actions, visits=64, seed=3)
+    assert json.dumps(t1, sort_keys=True) == json.dumps(t2, sort_keys=True)
+    assert t1["engine"] == "py_debug"
+    assert t1["visits"] == 64
+    assert t1["pv"] and t1["pv"][0] == t1["best_action_id"]
+    assert -1.0 <= t1["root_value"] <= 1.0
+
+
+def test_search_tree_root_layer_tracks_production_search(cpu_only):
+    """The py-debug tree won't bit-match Rust tie-breaking, but the same priors
+    feed both searches, so the top visit sets must strongly overlap."""
+    loaded = di.load_checkpoint(_checkpoint("hexgt_rl_latest.pt"))
+    actions = _sample_actions(12)
+    tree = di.search_tree_position(loaded, actions, visits=128, top_k=32, min_n=1)
+    rust = di.search_position(loaded, actions, visits=128)
+    py_top = [child["action_id"] for child in tree["tree"]["children"][:5]]
+    rust_top = [row["action_id"] for row in rust["visit_policy"][:5]]
+    assert set(py_top) & set(rust_top), (py_top, rust_top)
+    # Root-child Q values live in the side-to-move band.
+    for child in tree["tree"]["children"]:
+        assert -1.0 <= child["qm"] <= 1.0
+
+
+def test_search_tree_respects_pruning_and_node_cap(cpu_only):
+    loaded = di.load_checkpoint(_checkpoint("hexgt_rl_latest.pt"))
+    actions = _sample_actions(12)
+    tree = di.search_tree_position(loaded, actions, visits=128, top_k=2, min_n=0, max_depth=3)
+
+    def walk(node, depth):
+        assert depth <= 3
+        assert len(node["children"]) <= 2
+        return 1 + sum(walk(child, depth + 1) for child in node["children"])
+
+    assert walk(tree["tree"], 0) == tree["node_count"]
+    assert tree["node_count"] <= 4000
+    assert tree["truncated"] is True  # hexgt branching guarantees pruned children
+
+
+def test_record_row_missing_shard_reports_not_found():
+    result = di.read_record_row("/definitely/not/a/real/shard.npz", 4, 0)
+    assert result["found"] is False
+    assert result["reason"] == "no_shard"
+    assert result["row"] is None
+
+
+def test_record_row_round_trips_a_real_shard(cpu_only):
+    np = pytest.importorskip("numpy")
+    shard = _sample_shard()
+    with np.load(shard, allow_pickle=True) as data:
+        turn = int(data["turn_index"][0])
+        player = int(data["current_player"][0])
+
+    result = di.read_record_row(str(shard), turn, player)
+    assert result["found"] is True and result["reason"] is None
+    row = result["row"]
+    assert row["current_player"] == player
+    assert row["policy"], "recorded visit policy must be present"
+    assert abs(sum(r["p"] for r in row["policy"]) - 1.0) < 1e-3
+    probs = [r["p"] for r in row["policy"]]
+    assert probs == sorted(probs, reverse=True)
+    assert set(row["stvalue"]) == {"4", "12", "24"}
+    assert -1.0 <= row["value_target"] <= 1.0
+    assert row["search_visits"] >= 0  # 0 = unknown (normalized visit policy stored)
+    assert row["frequency_weight"] >= 1.0
+
+    # Wrong turn -> no_row; wrong side-to-move -> row_mismatch (M8 guard).
+    assert di.read_record_row(str(shard), 10_000, player)["reason"] == "no_row"
+    mismatch = di.read_record_row(str(shard), turn, 1 - player)
+    assert mismatch["found"] is False and mismatch["reason"] == "row_mismatch"
+
+
+def test_game_eval_aligns_plies_and_kl_is_nonnegative(cpu_only):
+    loaded = di.load_checkpoint(_checkpoint("hexgt_rl_latest.pt"))
+    actions = _sample_actions(16)
+    shard = _sample_shard()
+    plies = [2, 3, 4]
+    result = di.game_eval_positions(loaded, actions, plies, npz_path=str(shard), winner=0)
+    rows = result["plies"]
+    assert [row["ply"] for row in rows] == plies
+    for row in rows:
+        assert row["current_player"] in (0, 1)
+        assert -1.0 <= row["value"] <= 1.0
+        expected_p0 = row["value"] if row["current_player"] == 0 else -row["value"]
+        assert row["value_p0"] == pytest.approx(expected_p0, abs=1e-6)
+        if row["kl"] is not None:
+            assert row["kl"] >= -1e-6
+        assert row["value_err_z"] == pytest.approx(row["value_p0"] - 1.0, abs=1e-4)
+        assert row["top1_match"] in (True, False)

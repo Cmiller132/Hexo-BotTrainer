@@ -36,6 +36,8 @@ others, and the worker's ``ping`` never pays an import it does not need.
 from __future__ import annotations
 
 import json
+import math
+import random
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -175,11 +177,21 @@ def _policy_pairs_to_rows(pairs: Sequence[tuple[int, float]], *, normalize: bool
 
 
 @torch.no_grad()
-def analyze_position(loaded: LoadedModel, action_ids: Sequence[int], *, n: int | None = None) -> dict[str, Any]:
-    """Full-head readout for the position reached by ``action_ids``."""
+def analyze_position(
+    loaded: LoadedModel,
+    action_ids: Sequence[int],
+    *,
+    n: int | None = None,
+    planes: bool = False,
+) -> dict[str, Any]:
+    """Full-head readout for the position reached by ``action_ids``.
+
+    ``planes=True`` additionally returns the raw featurizer input planes for the
+    dense lineages (``input_planes``); the key is present-but-null otherwise so
+    the response shape stays uniform (purely additive, see the debug-v2 spec)."""
 
     if loaded.lineage in (DENSE_RESTNET, DENSE_PLAIN):
-        return _analyze_dense(loaded, action_ids)
+        return _analyze_dense(loaded, action_ids, planes=planes)
     return _analyze_hexgt(loaded, action_ids, n=n)
 
 
@@ -428,7 +440,7 @@ def _decode_dist(losses_mod: Any, logits: torch.Tensor) -> dict[str, Any]:
 
 
 @torch.no_grad()
-def _analyze_dense(loaded: LoadedModel, action_ids: Sequence[int]) -> dict[str, Any]:
+def _analyze_dense(loaded: LoadedModel, action_ids: Sequence[int], *, planes: bool = False) -> dict[str, Any]:
     pkg = _dense_pkg(loaded.lineage)
     state = state_from_actions(action_ids)
     inputs, legal_action_ids, legal_flat = _dense_inputs(pkg, state)
@@ -448,6 +460,15 @@ def _analyze_dense(loaded: LoadedModel, action_ids: Sequence[int]) -> dict[str, 
             stv[str(horizon)] = _decode_dist(pkg.losses, out[key][0])
 
     moves_left = _decode_dist(pkg.losses, out["moves_left"][0]) if "moves_left" in out else None
+
+    input_planes = None
+    if planes:
+        plane_data = inputs[0].cpu().numpy()
+        input_planes = {
+            "names": _plane_names(loaded.lineage),
+            "shape": [int(x) for x in plane_data.shape],
+            "data": [[round(float(v), 4) for v in plane.reshape(-1)] for plane in plane_data],
+        }
 
     current = engine.current_player(state)
     current_role = getattr(current, "value", str(current))
@@ -470,6 +491,7 @@ def _analyze_dense(loaded: LoadedModel, action_ids: Sequence[int]) -> dict[str, 
         "opp_policy": opp,
         "stvalue": stv,
         "moves_left": moves_left,
+        "input_planes": input_planes,
     }
 
 
@@ -514,6 +536,21 @@ def _search_dense(
         "visit_policy": _policy_pairs_to_rows(result.visit_policy, normalize=True),
         "root_prior": _policy_pairs_to_rows(result.root_prior_policy, normalize=False),
     }
+
+
+def _plane_names(lineage: str) -> list[str]:
+    """Featurizer plane names in channel order, read off the package constants."""
+
+    if lineage == DENSE_RESTNET:
+        from dense_cnn_restnet import constants as c
+    else:
+        from hexo_models.dense_cnn import constants as c
+    by_index = {
+        int(getattr(c, key)): key.removeprefix("PLANE_").lower()
+        for key in dir(c)
+        if key.startswith("PLANE_")
+    }
+    return [by_index[i] for i in sorted(by_index)]
 
 
 # ===========================================================================
@@ -710,6 +747,7 @@ def _analyze_hexgt(loaded: LoadedModel, action_ids: Sequence[int], *, n: int | N
         "opp_policy": opp,
         "stvalue": stv,
         "moves_left": None,
+        "input_planes": None,  # graph-featurized lineage: no dense planes (spec §3.6)
     }
 
 
@@ -763,3 +801,500 @@ def _search_hexgt(
         "visit_policy": _policy_pairs_to_rows(result.visit_policy, normalize=True),
         "root_prior": _policy_pairs_to_rows(result.root_prior_policy, normalize=False),
     }
+
+
+# ===========================================================================
+# Model Debug v2 additions: checkpoint meta plumb-through, pure-Python PUCT
+# tree (the "debug search"), recorded .npz row reader, whole-game error sweep.
+# ===========================================================================
+
+
+def moves_left_cap(loaded: LoadedModel) -> int | None:
+    """Decode cap for the moves-left head; ``None`` when the lineage has none.
+
+    The dense ResTNet head maps remaining decisions affinely onto the 65-bin
+    support over ``[0, MOVES_LEFT_CAP]``; the UI needs the cap to undo that
+    mapping (spec B1)."""
+
+    if not loaded.has_moves_left:
+        return None
+    if loaded.lineage == DENSE_RESTNET:
+        from dense_cnn_restnet.constants import MOVES_LEFT_CAP
+
+        return int(MOVES_LEFT_CAP)
+    return None
+
+
+def param_count(loaded: LoadedModel) -> int | None:
+    """Total parameter count of the loaded model (display-only provenance)."""
+
+    try:
+        return int(sum(p.numel() for p in loaded.model.parameters()))
+    except Exception:
+        return None
+
+
+def _stm_index(state: Any) -> int:
+    """0/1 index of the side to move (replay-derived, never parity-assumed —
+    Hexo phases can give one player consecutive placements)."""
+
+    role = getattr(engine.current_player(state), "value", "")
+    return 1 if str(role).endswith("1") else 0
+
+
+def _player_index(player: Any) -> int:
+    return 1 if str(getattr(player, "value", player)).endswith("1") else 0
+
+
+def _tree_evaluator(loaded: LoadedModel, n: int | None):
+    """One-position ``state -> (prior_pairs, value_stm)`` closure.
+
+    Reuses the exact featurize+forward wrappers analyze/search already build for
+    both lineages: ``HexgtInference.evaluate_states`` for the graph lineage (the
+    canonical evaluator the alignment test pins) and the dense crop encode +
+    legal-set softmax for the CNN lineages. One net call per position; batch of
+    1 on CPU — fine at <=20k visits, ~4096 is the practical interactive ceiling."""
+
+    if loaded.lineage in (DENSE_RESTNET, DENSE_PLAIN):
+        pkg = _dense_pkg(loaded.lineage)
+
+        def evaluate(state: Any) -> tuple[list[tuple[int, float]], float]:
+            inputs, legal_action_ids, legal_flat = _dense_inputs(pkg, state)
+            out = loaded.model.forward(inputs)
+            value = float(
+                pkg.losses.decode_binned_value(out["value"][0].float().reshape(1, -1)).reshape(()).item()
+            )
+            if not legal_action_ids:
+                return [], value
+            idx = torch.as_tensor(legal_flat, dtype=torch.long)
+            priors = torch.softmax(out["policy"][0].float().index_select(0, idx), dim=0)
+            return list(zip(legal_action_ids, priors.tolist())), value
+
+        return evaluate
+
+    hx = _hexgt()
+    radius = int(n if n is not None else loaded.candidate_radius)
+    inference = hx.HexgtInference(loaded.model, device="cpu", fp16=False)
+
+    def evaluate(state: Any) -> tuple[list[tuple[int, float]], float]:
+        res = inference.evaluate_states([state], n=radius)[0]
+        pairs = [
+            (int(a), float(p))
+            for a, p in zip(res["candidate_ids"].tolist(), res["priors"].tolist())
+        ]
+        return pairs, float(res["value"])
+
+    return evaluate
+
+
+class DebugSearchNode:
+    """One node of the pure-Python debug PUCT tree (``search_tree_position``).
+
+    ``w`` accumulates backed-up values expressed from THIS node's side-to-move
+    perspective; ``stm`` is discovered on first arrival (replay-derived), and
+    ``children is None`` means unexpanded while ``[]`` means terminal."""
+
+    __slots__ = ("action_id", "prior", "n", "w", "v", "stm", "children", "terminal_value")
+
+    def __init__(self, action_id: int | None, prior: float) -> None:
+        self.action_id = action_id
+        self.prior = float(prior)
+        self.n = 0
+        self.w = 0.0
+        self.v: float | None = None
+        self.stm: int | None = None
+        self.children: list["DebugSearchNode"] | None = None
+        self.terminal_value: float | None = None
+
+    @property
+    def qm(self) -> float:
+        return self.w / self.n if self.n else 0.0
+
+
+def _select_puct(node: DebugSearchNode, c_puct: float, rng: random.Random) -> DebugSearchNode:
+    """argmax PUCT child; seeded rng breaks (near-)exact score ties only."""
+
+    assert node.children
+    sqrt_n = math.sqrt(max(1, node.n))
+    best: list[DebugSearchNode] = []
+    best_score: float | None = None
+    for child in node.children:
+        if child.n > 0 and child.stm is not None:
+            q = child.qm if child.stm == node.stm else -child.qm
+        else:
+            q = 0.0  # neutral FPU, matching the noise-free debug search intent
+        score = q + c_puct * child.prior * sqrt_n / (1 + child.n)
+        if best_score is None or score > best_score + 1e-12:
+            best, best_score = [child], score
+        elif score >= best_score - 1e-12:
+            best.append(child)
+    return best[0] if len(best) == 1 else rng.choice(best)
+
+
+# Hard ceiling on serialized tree nodes per response (spec §3.7).
+_TREE_NODE_CAP = 4000
+
+
+def _serialize_tree(
+    root: DebugSearchNode,
+    *,
+    c_puct: float,
+    max_depth: int,
+    top_k: int,
+    min_n: int,
+) -> tuple[dict[str, Any], int, bool]:
+    """Prune + serialize the tree; returns (node dict, node count, pruned any)."""
+
+    count = 0
+    pruned_any = False
+
+    def ser(node: DebugSearchNode, parent_n: int | None, depth: int) -> dict[str, Any]:
+        nonlocal count, pruned_any
+        count += 1
+        coord = _coord_of(node.action_id) if node.action_id is not None else {"q": None, "r": None}
+        kids = node.children or []
+        kept: list[DebugSearchNode] = []
+        if depth < max_depth:
+            eligible = [c for c in kids if c.n >= min_n]
+            eligible.sort(key=lambda c: (-c.n, -c.prior, c.action_id))
+            kept = eligible[:top_k]
+        n_pruned = len(kids) - len(kept)
+        if n_pruned > 0:
+            pruned_any = True
+        u = None
+        if parent_n is not None:
+            u = c_puct * node.prior * math.sqrt(max(1, parent_n)) / (1 + node.n)
+        qm = node.qm
+        qm_p0 = qm if node.stm in (None, 0) else -qm
+        return {
+            "action_id": node.action_id,
+            "q": coord["q"],
+            "r": coord["r"],
+            "n": int(node.n),
+            "qm": round(qm, 5),
+            "qm_p0": round(qm_p0, 5),
+            "p": round(node.prior, 6),
+            "u": round(u, 5) if u is not None else None,
+            "v": round(node.v, 5) if node.v is not None else None,
+            "pruned_children": int(n_pruned),
+            "children": [ser(child, node.n, depth + 1) for child in kept],
+        }
+
+    tree = ser(root, None, 0)
+    return tree, count, pruned_any
+
+
+@torch.no_grad()
+def search_tree_position(
+    loaded: LoadedModel,
+    action_ids: Sequence[int],
+    *,
+    visits: int = 512,
+    c_puct: float = 1.5,
+    seed: int = 0,
+    max_depth: int = 12,
+    top_k: int = 8,
+    min_n: int = 2,
+    n: int | None = None,
+) -> dict[str, Any]:
+    """Pure-Python deterministic PUCT for the Tree Explorer (spec §3.7).
+
+    A NEW debug-only search ("py_debug"): same inference wrappers as the
+    production search, no Dirichlet noise, neutral FPU/temperature, seeded RNG
+    used ONLY for exact-score tie-breaks — same request, identical JSON. It will
+    NOT bit-match the Rust engine's tie-breaking; the UI labels it accordingly."""
+
+    root_state = state_from_actions(action_ids)
+    if engine.terminal(root_state) is not None:
+        raise ValueError("position is terminal; nothing to search")
+
+    evaluate = _tree_evaluator(loaded, n)
+    rng = random.Random(int(seed))
+    root = DebugSearchNode(None, 1.0)
+
+    for _ in range(max(1, int(visits))):
+        state = engine.clone_state(root_state)
+        node = root
+        path = [node]
+        while True:
+            if node.stm is None:
+                node.stm = _stm_index(state)
+                term = engine.terminal(state)
+                if term is not None:
+                    node.children = []
+                    if term.winner is None:
+                        node.terminal_value = 0.0
+                    else:
+                        node.terminal_value = 1.0 if _player_index(term.winner) == node.stm else -1.0
+            if node.terminal_value is not None:
+                leaf_value, leaf_stm = node.terminal_value, node.stm
+                break
+            if node.children is None:
+                pairs, value = evaluate(state)
+                node.children = [DebugSearchNode(int(a), float(p)) for a, p in pairs]
+                node.v = float(value)
+                leaf_value, leaf_stm = node.v, node.stm
+                break
+            if not node.children:  # defensive: no candidates yet not terminal
+                leaf_value, leaf_stm = 0.0, node.stm
+                break
+            child = _select_puct(node, float(c_puct), rng)
+            engine.apply_action(state, engine.PlacementAction(unpack_coord_id(int(child.action_id))))
+            path.append(child)
+            node = child
+        for visited in path:
+            visited.n += 1
+            if visited.stm is not None:
+                visited.w += leaf_value if visited.stm == leaf_stm else -leaf_value
+
+    # PV = max-N path over the FULL tree (serialization pruning is separate).
+    pv: list[int] = []
+    node = root
+    while node.children:
+        best = max(node.children, key=lambda c: (c.n, c.prior, -c.action_id))
+        pv.append(int(best.action_id))
+        if best.n <= 0:
+            break
+        node = best
+    if not pv:
+        raise ValueError("debug tree produced no root children")
+    best_action_id = pv[0]
+
+    # Serialize under the hard node cap, tightening top_k until it fits.
+    effective_top_k = max(1, int(top_k))
+    forced_prune = False
+    while True:
+        tree, count, pruned = _serialize_tree(
+            root, c_puct=float(c_puct), max_depth=int(max_depth), top_k=effective_top_k, min_n=int(min_n)
+        )
+        if count <= _TREE_NODE_CAP or effective_top_k <= 1:
+            break
+        effective_top_k = max(1, effective_top_k // 2)
+        forced_prune = True
+
+    return {
+        "visits": int(root.n),
+        "root_value": round(root.qm, 5),
+        "best_action_id": int(best_action_id),
+        "pv": pv,
+        "node_count": int(count),
+        "truncated": bool(pruned or forced_prune),
+        "engine": "py_debug",
+        "params": {
+            "visits": int(visits),
+            "c_puct": float(c_puct),
+            "seed": int(seed),
+            "max_depth": int(max_depth),
+            "top_k": int(top_k),
+            "min_n": int(min_n),
+        },
+        "tree": tree,
+    }
+
+
+def _npz_policy_rows(
+    arrays: dict[str, Any], act_key: str, w_key: str, off_key: str, i: int
+) -> tuple[list[dict[str, Any]], float]:
+    """One row's (action_id -> weight) policy as normalized p-desc rows + raw total."""
+
+    off = arrays[off_key]
+    a, b = int(off[i]), int(off[i + 1])
+    acts = arrays[act_key][a:b]
+    weights = arrays[w_key][a:b]
+    total = float(weights.sum())
+    rows = []
+    for aid, w in zip(acts.tolist(), weights.tolist()):
+        coord = _coord_of(int(aid))
+        rows.append(
+            {
+                "action_id": int(aid),
+                "q": coord["q"],
+                "r": coord["r"],
+                "p": round(float(w) / total, 6) if total > 0 else 0.0,
+            }
+        )
+    rows.sort(key=lambda r: r["p"], reverse=True)
+    return rows, total
+
+
+def read_record_row(npz_path: str | Path, turn_index: int, expect_player: int | None) -> dict[str, Any]:
+    """Decode one recorded training row from a compact self-play shard (§3.9).
+
+    Never raises on mismatch — returns ``found:false`` with a reason instead.
+    The compact shard format intentionally drops some finalize-time facts
+    (``value_target_reason`` / ``policy_surprise`` / ``opp_policy_source`` /
+    ``truncated`` — see compact_io's docstring), so those come back at neutral
+    defaults here; ``search_visits`` is recovered from the raw visit mass and
+    ``frequency_weight`` from surprise-materialized row duplication. The server
+    overlays ``truncated``/``value_target_reason`` from the .hxr record."""
+
+    path = Path(npz_path)
+    if not path.is_file():
+        return {"found": False, "reason": "no_shard", "npz": None, "turn_index": None, "row": None}
+    try:
+        with np.load(path, allow_pickle=True) as data:
+            arrays = {key: data[key] for key in data.files}
+    except Exception:
+        return {"found": False, "reason": "no_shard", "npz": str(npz_path), "turn_index": None, "row": None}
+
+    miss = {"found": False, "reason": "no_row", "npz": str(npz_path), "turn_index": int(turn_index), "row": None}
+    if "num_rows" not in arrays or "turn_index" not in arrays:
+        return miss
+    n_rows = int(arrays["num_rows"])
+    turns = arrays["turn_index"]
+    matches = [i for i in range(n_rows) if int(turns[i]) == int(turn_index)]
+    if not matches:
+        return miss
+    i = matches[0]
+
+    player = int(arrays["current_player"][i])
+    if expect_player is not None and player != int(expect_player):
+        # M8 misalignment guard: a row whose stored side-to-move disagrees with
+        # the replay-derived one must be refused, never silently shown.
+        return {**miss, "reason": "row_mismatch"}
+
+    horizons = [int(h) for h in arrays["horizons"]]
+    policy, policy_total = _npz_policy_rows(arrays, "pol_act", "pol_w", "pol_off", i)
+    opp_policy, _opp_total = _npz_policy_rows(arrays, "opp_act", "opp_w", "opp_off", i)
+    stvalue = {
+        str(h): {
+            "target": round(float(arrays["stvalue"][i, c]), 5),
+            "mask": bool(arrays["stvalue_mask"][i, c] > 0.0),
+        }
+        for c, h in enumerate(horizons)
+    }
+    moves_left = None
+    if "moves_left" in arrays:  # restnet-era shards only; raw decisions remaining, -1 = masked
+        raw = float(arrays["moves_left"][i])
+        moves_left = {"target": round(raw, 3), "mask": bool(raw >= 0.0)}
+
+    row = {
+        "current_player": player,
+        "phase": str(arrays["phase"][i]),
+        "value_target": round(float(arrays["value"][i]), 5),
+        "value_target_reason": "",  # not persisted in compact shards (server overlays)
+        "policy": policy,
+        "opp_policy": opp_policy or None,
+        "opp_policy_source": None,  # not persisted in compact shards
+        "stvalue": stvalue,
+        "moves_left": moves_left,
+        "policy_surprise": 0.0,  # not persisted (baked into row duplication at write)
+        # Raw visit mass when the stored weights are counts; runs that store the
+        # NORMALIZED visit policy (sum ~1) can't recover it -> 0 means unknown.
+        "search_visits": int(round(policy_total)) if policy_total > 1.5 else 0,
+        "pcr_full": True,  # only full-search rows are ever written (PCR records full only)
+        "frequency_weight": float(len(matches)),  # surprise weighting = in-place duplication
+        "truncated": False,  # not persisted (server overlays from the .hxr record)
+    }
+    return {"found": True, "reason": None, "npz": str(npz_path), "turn_index": int(turn_index), "row": row}
+
+
+def _npz_rows_by_turn(npz_path: str | Path) -> dict[int, dict[str, Any]]:
+    """turn_index -> {policy pairs, value_target} for one shard (first row wins)."""
+
+    try:
+        with np.load(Path(npz_path), allow_pickle=True) as data:
+            arrays = {key: data[key] for key in data.files}
+    except Exception:
+        return {}
+    if "num_rows" not in arrays:
+        return {}
+    out: dict[int, dict[str, Any]] = {}
+    pol_off = arrays["pol_off"]
+    for i in range(int(arrays["num_rows"])):
+        turn = int(arrays["turn_index"][i])
+        if turn in out:
+            continue
+        a, b = int(pol_off[i]), int(pol_off[i + 1])
+        pairs = [
+            (int(aid), float(w))
+            for aid, w in zip(arrays["pol_act"][a:b].tolist(), arrays["pol_w"][a:b].tolist())
+        ]
+        out[turn] = {"policy": pairs, "value_target": float(arrays["value"][i])}
+    return out
+
+
+def _policy_kl(
+    recorded_pairs: Sequence[tuple[int, float]], prior_pairs: Sequence[tuple[int, float]]
+) -> float | None:
+    """KL(recorded ‖ prior) over the recorded support, prior renormalized over
+    that support and floored at 1e-9 (spec §4.1 definition)."""
+
+    total = sum(w for _, w in recorded_pairs)
+    if total <= 0:
+        return None
+    prior = {int(a): float(p) for a, p in prior_pairs}
+    support = [(int(a), float(w) / total) for a, w in recorded_pairs if w > 0]
+    prior_total = sum(prior.get(a, 0.0) for a, _ in support)
+    if prior_total <= 0:
+        prior_total = 1.0  # all prior mass off-support; the floor dominates
+    kl = 0.0
+    for aid, t in support:
+        p = max(prior.get(aid, 0.0) / prior_total, 1e-9)
+        kl += t * (math.log(t) - math.log(p))
+    return round(float(kl), 5)
+
+
+@torch.no_grad()
+def game_eval_positions(
+    loaded: LoadedModel,
+    action_ids: Sequence[int],
+    plies: Sequence[int],
+    npz_path: str | Path | None = None,
+    winner: int | None = None,
+    n: int | None = None,
+) -> dict[str, Any]:
+    """Game Error Sweep chunk (§3.10): one forward per requested ply, joined
+    against the game's .npz training rows (shard decoded ONCE per chunk).
+
+    The game is replayed incrementally with one engine walk (plies ascending),
+    not from scratch per ply. ``winner`` is the 0/1 winner index or None."""
+
+    action_ids = [int(a) for a in action_ids]
+    evaluate = _tree_evaluator(loaded, n)
+    wanted = sorted({int(p) for p in plies if 0 <= int(p) <= len(action_ids)})
+    rows = _npz_rows_by_turn(npz_path) if npz_path else {}
+
+    out: list[dict[str, Any]] = []
+    state = engine.new_game()
+    next_action = 0
+    for ply in wanted:
+        while next_action < ply:
+            engine.apply_action(
+                state, engine.PlacementAction(unpack_coord_id(action_ids[next_action]))
+            )
+            next_action += 1
+        pairs, value = evaluate(state)
+        current = _stm_index(state)
+        value_p0 = value if current == 0 else -value
+
+        top1_match = None
+        if pairs and ply < len(action_ids):
+            best_aid = max(pairs, key=lambda ap: (ap[1], -ap[0]))[0]
+            top1_match = bool(int(best_aid) == action_ids[ply])
+
+        kl = None
+        value_err_soft = None
+        row = rows.get(ply)
+        if row is not None:
+            kl = _policy_kl(row["policy"], pairs)
+            value_err_soft = round(value - float(row["value_target"]), 5)
+
+        value_err_z = None
+        if winner is not None:
+            z_p0 = 1.0 if int(winner) == 0 else -1.0
+            value_err_z = round(value_p0 - z_p0, 5)
+
+        out.append(
+            {
+                "ply": int(ply),
+                "current_player": int(current),
+                "value": round(float(value), 5),
+                "value_p0": round(float(value_p0), 5),
+                "kl": kl,
+                "top1_match": top1_match,
+                "value_err_z": value_err_z,
+                "value_err_soft": value_err_soft,
+            }
+        )
+    return {"plies": out}
