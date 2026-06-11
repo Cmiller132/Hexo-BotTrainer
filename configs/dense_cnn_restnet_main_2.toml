@@ -25,10 +25,12 @@
 # Architecture is otherwise main1's: 96ch 8-block R3-family interleave,
 # attention_scope=disk, sdpa, heads on the dense_cnn binned-value contract.
 #
-# FRESH START: no [checkpoint] section. The main1 HF prefit checkpoint predates
-# the heads_v3 layout and will not strict-load; to warm-start, rerun
-# scripts/bootstrap_dense_cnn_restnet_hf.py against THIS config first and point
-# initialize_from at the new prefit.
+# WARM START from the heads_v3 HF prefit (see [checkpoint] at the bottom),
+# regenerated 2026-06-10 against THIS config via
+# scripts/bootstrap_dense_cnn_restnet_hf.py (4 epochs over 431k human-corpus
+# rows, prefit batch 32 — 64+ exhausts the 12 GB card under WSL and surfaces
+# as "CUDA driver error: device not ready", not a clean OOM). The old main1
+# prefit predates the heads_v3 layout and will not strict-load.
 
 [model]
 name = "dense_cnn_restnet"
@@ -228,3 +230,11 @@ update_checkpoint_pointer = false
 
 [train]
 passes_per_epoch = 1
+
+[checkpoint]
+# WEIGHTS-ONLY warm start (DenseCNNCheckpointLoader detects the initialize-only
+# case and skips the prefit's Adam state): heads_v3 BC prefit on the HF human
+# corpus, built 2026-06-10 from scripts/bootstrap_dense_cnn_restnet_hf.py with
+# --config THIS file. Strict-load verified at write time.
+initialize_from = "/mnt/e/Hexo-BotTrainer-hexgt/runs/dense_cnn_restnet_main_2_prefit/restnet_hf_prefit.pt"
+save_name = "latest"
