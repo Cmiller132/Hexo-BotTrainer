@@ -5,7 +5,7 @@
 // the version were invisible. This single top bar always shows the running
 // version, a live "last tap" echo (so a tap that registers is visible even if its
 // effect isn't), and any JS error (uncaught OR surfaced from the Debug code).
-const APP_VERSION = "20260610-debugnav7";
+const APP_VERSION = "20260611-dbg2";
 function __diagBar() {
   let el = document.getElementById("__diag");
   if (!el) {
@@ -710,7 +710,10 @@ async function safeJson(res) {
 
 function screenFromHash() {
   const hash = String(window.location.hash || "").replace(/^#\/?/, "");
-  return SCREENS.includes(hash) ? hash : "match";
+  // `#debug?run=...` deep links carry nav state after `?` — any `#debug...`
+  // prefix still routes to the debug screen (the debug module owns the query).
+  const name = hash.split("?")[0];
+  return SCREENS.includes(name) ? name : "match";
 }
 
 function navigateScreen(screen) {
@@ -3320,34 +3323,102 @@ function formatBytes(value) {
 }
 
 // ===========================================================================
-// Debug tab — model inspection.
+// Debug tab — Model Debug v2 (single-position forensics workbench).
 //
-// Self-contained from the Match/History screens: its own board SVG and state,
-// reusing only the pure geometry helpers (center/path/playerColor/HEX). All
-// model outputs come from the CPU inference worker via /api/debug/* and are
-// rendered here; nothing in this module touches the live-match polling.
+// Self-contained from the Match/History screens: its own board SVG, state and
+// pan/zoom, reusing only the pure shared helpers (center/path/playerColor/HEX,
+// viewForBox/clamp, escape*, formatBytes, loadTrainingRuns, navigateScreen,
+// diagTap/reportError). All model outputs come from the CPU inference worker
+// via /api/debug/* per scripts/_debug_rewrite_spec.md §3; nothing here touches
+// the live-match polling.
+//
+// Canonical nav state (spec M1): one `dbg.nav` tuple serialized to the URL
+// hash (`#debug?run=..&src=..&path=..&rec=..&ply=..&ckptA=..&ckptB=..&acts=..
+// &tab=..&mode=..`). `dbgNavigate(patch, {replace})` is the ONLY mutation
+// entry point — it writes the hash, and `dbgApplyHash()` (driven by
+// `hashchange`) is the only code that applies state → fetch/render. Browser
+// Back/Forward therefore step the workbench, and any URL restores the exact
+// position including injected what-if moves and checkpoint B.
 // ===========================================================================
+
+const DBG_TABS = ["heads", "search", "targets", "compare", "inputs", "ckpt"];
+const DBG_TAB_IDS = {
+  heads: "dbgTabHeads",
+  search: "dbgTabSearch",
+  targets: "dbgTabTargets",
+  compare: "dbgTabCompare",
+  inputs: "dbgTabInputs",
+  ckpt: "dbgTabCkpt",
+};
+// Base heat modes — index in DBG_MODE_ORDER is the 1..8 keyboard digit.
+const DBG_MODE_ORDER = ["prior", "visits", "delta", "opp", "target", "mismatch", "childq", "plane"];
+const DBG_MODES = ["none"].concat(DBG_MODE_ORDER);
+const DBG_CACHE_MAX = 300;  // spec M12: client analysis cache LRU cap
+// Action ids are packed exactly like hexo_engine.types.pack_coord_id (which
+// mirrors the Rust legal-move store, so the packing is pinned): the board's
+// click-to-inject needs an id for ANY empty legal cell, and the position
+// payload's legal list carries only coordinates.
+const DBG_COORD_OFFSET = 32768;
 
 const dbg = {
   inited: false,
   loading: false,
-  run: "",
-  source: "selfplay",
-  games: [],
-  gameFile: "",
-  records: [],
-  record: 0,
-  checkpoints: [],
-  checkpoint: "",
-  position: null,   // /api/debug/position payload
-  analysis: null,   // /api/debug/analyze result
-  search: null,     // /api/debug/search result
-  compare: null,    // { checkpoint, analysis } for A/B
-  compareCheckpoint: "",
-  trajectory: null, // /api/debug/trajectory result
-  imported: null,   // imported action-id list (overrides game when set)
-  overlays: { policy: true, visits: false, opp: false, threats: false, numbers: true },
+  // Canonical nav tuple (spec M1). `ply: null` means "end of game, not yet
+  // resolved" — dbgApplyNav replaces it with the real total once known.
+  nav: dbgDefaultNav(),
+  navApplied: "",      // last hash fully handed to dbgApplyNav (dedupes the two hashchange listeners)
   pendingDeepLink: null,
+  // Loaded source lists + their identity (so run/src switches reload them).
+  loadedRun: "",
+  loadedGamesKey: "",
+  games: [],
+  checkpoints: [],
+  worker: null,        // worker status from /api/debug/checkpoints
+  records: [],         // record_games from the last recorded position payload
+  // Current data + the cache key each piece was rendered for (stale dots, M14).
+  position: null,
+  analysis: null,      // ckptA analyze
+  analysisB: null,     // ckptB analyze (COMPARE)
+  search: null,        // /api/debug/search result
+  tree: null,          // /api/debug/search_tree result (childq/Q/scatter/PV read it)
+  treeBusy: false,
+  treeOpen: new Map(), // tree-node path -> explicit expand/collapse (default: PV open)
+  treePreview: null,   // {key, ids} — clicked tree node's line, ghosted on the board
+  ladder: null,        // visit-ladder rows for ladderKey (spec S10)
+  ladderBusy: false,
+  // Game Error Sweeps (spec M9), keyed run|path|rec|ckptA so flipping checkpoints
+  // or games keeps each sweep; sweepRun is the single in-flight chunk loop.
+  sweeps: new Map(),
+  sweepRun: null,
+  trajectory: null,
+  trajectoryKey: "",
+  cmpHeat: false,      // COMPARE: client-computed prior Δ(A−B) board overlay
+  split: false,        // COMPARE: A/B split-board mode (spec S5)
+  pins: [],            // pin tray (spec S2), localStorage hexoDbgPins:<run>
+  pinsRun: "",
+  journal: [],         // session journal (spec S3), localStorage hexoDbgJournal:<run>
+  journalRun: "",
+  paletteItems: [],    // command palette (spec S1)
+  paletteShown: [],
+  paletteIdx: 0,
+  paletteGames: [],    // all-source game list for the palette (lazy)
+  paletteGamesRun: "",
+  ckptSweep: null,     // checkpoint sweep dock tab (spec S4)
+  prefetchAbort: null, // the ONE in-flight ply±1 prefetch (spec S7)
+  keys: { position: "", analysis: "", analysisB: "", search: "", tree: "" },
+  // Board UI state that intentionally does NOT live in the hash.
+  overlays: { threats: false, numbers: true, last: true, legalDim: false },
+  logScale: false,
+  opacity: 0.9,
+  sortKey: "prior",    // top-moves table sort column
+  dockTab: "trajectory",
+  hudMetrics: new Map(),  // per-render `q,r` -> metrics, so the hover HUD never does a linear .find (M3)
+  cellIndex: new Map(),   // per-render `q,r` -> cell info for click routing
+  // Debug-board pan/zoom (own copies — the Match board owns the globals).
+  view: null,
+  baseView: null,
+  viewDirty: false,
+  suppressClick: false,
   // Monotonic request tokens so the LATEST navigation/analysis always wins. The
   // dense_cnn_restnet CPU forward is far slower than hexgt's tiny graph forward,
   // so without these guards a slow/stale position fetch or analyze can resolve
@@ -3356,12 +3427,21 @@ const dbg = {
   // claims a token and only commits if it is still the newest.
   posSeq: 0,
   anlSeq: 0,
-  // Full ordered stone list for the current game (each placement carries a 1-based
-  // `index`), captured from any loaded position. Lets prev/next/slider re-render
-  // the board for any ply INSTANTLY client-side (stones with index <= ply) without
-  // waiting on the server position fetch or the slow ResTNet analyze.
+  anlSeqB: 0,
+  applySeq: 0,
+  // Client caches (spec M12): one LRU keyed run|path|rec|ply|ckpt|acts holding
+  // {position, analysis, search, tree, record_row}; revisiting a ply, undoing a
+  // chip, or flipping ckptA<->ckptB re-renders with zero network requests.
+  cache: new Map(),
+  ckptInfo: new Map(),    // `${run}|${ckpt}` -> /api/debug/ckpt_info payload (B3/M7)
+  // Full ordered stone list + action ids for the current RECORDED game, captured
+  // from any loaded position. Lets prev/next/slider re-render the board for any
+  // ply INSTANTLY client-side (stones with index <= ply) without waiting on the
+  // server position fetch or the slow ResTNet analyze.
   gamePlacements: [],
   gameKey: "",
+  gameActs: [],
+  gameActsKey: "",
 };
 
 const dbgEl = id => document.getElementById(id);
@@ -3399,316 +3479,426 @@ async function debugFetchJson(url, options) {
   return data;
 }
 
-async function enterDebugScreen() {
-  showVersionTag();
-  // Bind handlers in their OWN try so a later init failure can never leave the
-  // nav buttons unwired, and surface any exception to the on-screen banner (the
-  // real-phone failure mode we otherwise can't see). Each await is independently
-  // guarded so one throwing step can't kill the rest of init.
-  if (!dbg.inited) {
-    dbg.inited = true;
-    try { debugBindEvents(); } catch (e) { reportError("debugBindEvents: " + (e && (e.stack || e.message) || e)); }
-    try { await debugInit(); } catch (e) { reportError("debugInit: " + (e && (e.stack || e.message) || e)); }
-  } else if (dbg.pendingDeepLink) {
-    const link = dbg.pendingDeepLink;
-    dbg.pendingDeepLink = null;
-    try { await debugApplyDeepLink(link); } catch (e) { reportError("debugApplyDeepLink: " + (e && (e.stack || e.message) || e)); }
+function dbgStub(message) {
+  diagTap(message);
+  debugSetStatus(message, "info");
+}
+
+// ---- action-id packing (mirrors hexo_engine.types.pack/unpack_coord_id) ----
+
+function dbgPackActionId(q, r) {
+  return (q + DBG_COORD_OFFSET) * 65536 + (r + DBG_COORD_OFFSET);
+}
+
+function dbgUnpackActionId(actionId) {
+  const id = Number(actionId);
+  return { q: Math.floor(id / 65536) - DBG_COORD_OFFSET, r: (id % 65536) - DBG_COORD_OFFSET };
+}
+
+// ---- nav state + URL hash (spec M1) ----------------------------------------
+
+function dbgDefaultNav() {
+  return { run: "", src: "selfplay", path: "", rec: 0, ply: null, ckptA: "", ckptB: "", acts: [], tab: "heads", mode: "prior" };
+}
+
+function dbgNavToHash(nav) {
+  // Deterministic field order so identical navs serialize identically (the
+  // dedupe in dbgApplyHash relies on it). `/` and `,` stay readable.
+  const enc = v => encodeURIComponent(String(v)).replace(/%2F/gi, "/");
+  const parts = [];
+  if (nav.run) parts.push("run=" + enc(nav.run));
+  if (nav.src && nav.src !== "selfplay") parts.push("src=" + enc(nav.src));
+  if (nav.path) parts.push("path=" + enc(nav.path));
+  if (nav.rec) parts.push("rec=" + String(nav.rec));
+  if (nav.ply != null) parts.push("ply=" + String(nav.ply));
+  if (nav.ckptA) parts.push("ckptA=" + enc(nav.ckptA));
+  if (nav.ckptB) parts.push("ckptB=" + enc(nav.ckptB));
+  if (nav.acts && nav.acts.length) parts.push("acts=" + nav.acts.join(","));
+  if (nav.tab && nav.tab !== "heads") parts.push("tab=" + enc(nav.tab));
+  if (nav.mode && nav.mode !== "prior") parts.push("mode=" + enc(nav.mode));
+  return "#debug" + (parts.length ? "?" + parts.join("&") : "");
+}
+
+function dbgHashToNav(hash) {
+  const nav = dbgDefaultNav();
+  const qi = hash.indexOf("?");
+  if (qi === -1) return nav;
+  const params = new URLSearchParams(hash.slice(qi + 1));
+  nav.run = params.get("run") || "";
+  nav.src = params.get("src") === "evaluation" ? "evaluation" : "selfplay";
+  nav.path = params.get("path") || "";
+  nav.rec = Math.max(0, parseInt(params.get("rec"), 10) || 0);
+  const ply = parseInt(params.get("ply"), 10);
+  nav.ply = Number.isFinite(ply) ? Math.max(0, ply) : null;
+  nav.ckptA = params.get("ckptA") || "";
+  nav.ckptB = params.get("ckptB") || "";
+  nav.acts = (params.get("acts") || "").split(",").map(s => parseInt(s, 10)).filter(n => Number.isFinite(n));
+  const tab = params.get("tab");
+  nav.tab = DBG_TABS.includes(tab) ? tab : "heads";
+  const mode = params.get("mode");
+  nav.mode = DBG_MODES.includes(mode) ? mode : "prior";
+  return nav;
+}
+
+function dbgNavigate(patch, { replace = false } = {}) {
+  dbgAbortPrefetch();  // S7: any user action kills the speculative ply±1 fetch
+  const nav = Object.assign({}, dbg.nav, patch);
+  if (patch && patch.acts) nav.acts = patch.acts.slice();
+  const hash = dbgNavToHash(nav);
+  if (String(window.location.hash || "") === hash) {
+    dbgApplyHash();  // no-op unless a previous apply failed midway
+    return;
+  }
+  // Optimistic nav update: `location.hash =` fires hashchange ASYNCHRONOUSLY,
+  // so without this a rapid key-repeat step would read the stale nav and drop
+  // steps. dbgApplyHash re-parses the same tuple from the hash when it lands.
+  dbg.nav = nav;
+  if (replace) {
+    // replaceState fires no hashchange — apply directly (used for default
+    // resolution, slider scrubs, and tab/mode flips that shouldn't spam history).
+    window.history.replaceState(null, "", hash);
+    dbgApplyHash();
   } else {
-    try { debugRenderAll(); } catch (e) { reportError("debugRenderAll: " + (e && (e.stack || e.message) || e)); }
+    window.location.hash = hash;  // hashchange -> dbgApplyHash, the ONLY applier
   }
 }
 
-async function debugInit() {
-  debugSetStatus("Loading runs…");
-  try {
-    if (!trainingRuns.length) await loadTrainingRuns();
-  } catch (_e) { /* fall through with whatever we have */ }
-  const runNames = trainingRuns.map(r => r.name);
-  // Prefer a deep-link target, else the run already selected on History, else the
-  // first run that has a hexgt checkpoints dir, else the first run.
-  let preferred = dbg.pendingDeepLink && dbg.pendingDeepLink.run;
-  if (!preferred && historySelectedRun && runNames.includes(historySelectedRun)) preferred = historySelectedRun;
-  dbg.run = preferred && runNames.includes(preferred) ? preferred : (runNames[0] || "");
-  debugSyncRunSelect();
-  // Clear the "Loading runs…" notice now; do NOT blanket-clear afterward, or a
-  // real error raised while loading games/position/analyze (e.g. a game file the
-  // live run is mid-roll on) would be silently wiped, leaving a blank board with
-  // no explanation. The per-step handlers own the status from here on.
-  debugSetStatus("");
-  await debugLoadRun();
+function dbgApplyHash() {
+  if (!dbg.inited) return;
   if (dbg.pendingDeepLink) {
     const link = dbg.pendingDeepLink;
     dbg.pendingDeepLink = null;
-    await debugApplyDeepLink(link);
+    dbgNavigate(dbgDeepLinkPatch(link), { replace: true });
+    return;
   }
-}
-
-function debugSyncRunSelect() {
-  const sel = dbgEl("debugRunSelect");
-  if (!sel) return;
-  sel.innerHTML = trainingRuns.length
-    ? trainingRuns.map(r => `<option value="${escapeAttr(r.name)}">${escapeText(r.name)}</option>`).join("")
-    : `<option value="">No runs</option>`;
-  sel.value = dbg.run;
-}
-
-async function debugLoadRun() {
-  await Promise.allSettled([debugLoadCheckpoints(), debugLoadGames()]);
-}
-
-async function debugLoadCheckpoints() {
-  const sel = dbgEl("debugCheckpointSelect");
-  if (!dbg.run) { dbg.checkpoints = []; if (sel) sel.innerHTML = ""; return; }
-  try {
-    const data = await debugFetchJson(`/api/debug/checkpoints?run=${encodeURIComponent(dbg.run)}`);
-    dbg.checkpoints = data.checkpoints || [];
-    if (sel) {
-      sel.innerHTML = dbg.checkpoints.map(c => {
-        const label = c.epoch != null ? `epoch ${c.epoch}` : c.name.replace(/\.pt$/, "");
-        const graft = c.graft ? ` · ${c.graft}` : "";
-        return `<option value="${escapeAttr(c.name)}">${escapeText(label + graft)}</option>`;
-      }).join("");
-    }
-    if (!dbg.checkpoint || !dbg.checkpoints.some(c => c.name === dbg.checkpoint)) {
-      const latest = dbg.checkpoints.find(c => c.latest) || dbg.checkpoints[0];
-      dbg.checkpoint = latest ? latest.name : "";
-    }
-    if (sel) sel.value = dbg.checkpoint;
-    const cmp = dbgEl("debugCompareSelect");
-    if (cmp) {
-      const prev = cmp.value;
-      cmp.innerHTML = `<option value="">— none —</option>` + dbg.checkpoints.map(c => {
-        const label = c.epoch != null ? `epoch ${c.epoch}` : c.name.replace(/\.pt$/, "");
-        return `<option value="${escapeAttr(c.name)}">${escapeText(label)}</option>`;
-      }).join("");
-      cmp.value = dbg.checkpoints.some(c => c.name === prev) ? prev : "";
-    }
-    debugRenderCheckpointInfo();
-  } catch (e) {
-    debugSetStatus(`Checkpoints: ${e.message}`, "error");
+  const hash = String(window.location.hash || "");
+  if (!hash.startsWith("#debug")) return;
+  if (hash === dbg.navApplied) return;  // both hashchange listeners route here — apply once
+  if (hash === "#debug" && dbg.nav.run && dbg.nav.path) {
+    // A bare `#debug` (setScreen's replaceState strips the query when the nav
+    // buttons are used) restores the in-memory position instead of resetting.
+    dbgNavigate(dbg.nav, { replace: true });
+    return;
   }
+  dbg.navApplied = hash;
+  dbg.nav = dbgHashToNav(hash);
+  const seq = ++dbg.applySeq;
+  dbgApplyNav(dbg.nav, seq).catch(e => {
+    debugSetStatus(`Debug: ${(e && e.message) || e}`, "error");
+    reportError("dbgApplyNav: " + (e && (e.stack || e.message) || e));
+  });
 }
 
-async function debugLoadGames() {
-  const sel = dbgEl("debugGameSelect");
-  if (!dbg.run) { dbg.games = []; if (sel) sel.innerHTML = ""; return; }
-  try {
-    const data = await debugFetchJson(`/api/debug/games?run=${encodeURIComponent(dbg.run)}&source=${encodeURIComponent(dbg.source)}`);
-    dbg.games = data.games || [];
-    if (sel) {
-      sel.innerHTML = dbg.games.length
-        ? dbg.games.map(g => `<option value="${escapeAttr(g.path)}">${escapeText(g.path)}</option>`).join("")
-        : `<option value="">No ${dbg.source} games</option>`;
-    }
-    const keepSelection = dbg.gameFile && dbg.games.some(g => g.path === dbg.gameFile);
-    if (keepSelection) {
-      if (sel) sel.value = dbg.gameFile;
-      await debugLoadPosition({ resetPly: true });
-    } else if (dbg.games.length) {
-      // Auto-pick the newest game that actually has records. The newest selfplay
-      // file is usually the IN-PROGRESS epoch (still being written by the live
-      // run), which has NO complete games yet — loading it fails with "contains
-      // no games", leaving dbg.position null so the board is blank and ply-nav
-      // (slider + prev/next) is inert. Probe newest-first and stop at the first
-      // game that loads, so the tab always opens on a usable game.
-      dbg.record = 0;
-      dbg.position = null;
-      for (const g of dbg.games) {
-        dbg.gameFile = g.path;
-        if (sel) sel.value = dbg.gameFile;
-        await debugLoadPosition({ resetPly: true });
-        if (dbg.position) break;
-      }
-    } else {
-      dbg.gameFile = "";
-      dbg.position = null;
-      debugRenderAll();
-    }
-  } catch (e) {
-    debugSetStatus(`Games: ${e.message}`, "error");
+function dbgDeepLinkPatch(link) {
+  // detail from [data-debug-open]: { run, path, record, ply } — ply null = final.
+  const patch = {
+    run: link.run || dbg.nav.run,
+    src: link.path && String(link.path).startsWith("eval") ? "evaluation" : "selfplay",
+    path: link.path || "",
+    rec: Number(link.record != null ? link.record : link.rec) || 0,
+    ply: link.ply != null ? Number(link.ply) : null,
+    acts: [],
+  };
+  if (patch.run !== dbg.nav.run) {
+    patch.ckptA = "";  // checkpoints are per-run; let apply re-default
+    patch.ckptB = "";
   }
-}
-
-async function debugLoadPosition({ resetPly = false, ply = null } = {}) {
-  if (resetPly) { dbg.trajectory = null; const note = dbgEl("debugTrajectoryNote"); if (note) note.textContent = ""; }
-  if (dbg.imported) return debugLoadImported(ply);
-  if (!dbg.run || !dbg.gameFile) return;
-  const targetPly = ply != null ? ply : (resetPly ? null : (dbg.position && dbg.position.debug.ply));
-  const params = new URLSearchParams({ run: dbg.run, path: dbg.gameFile, record: String(dbg.record) });
-  if (targetPly != null) params.set("ply", String(targetPly));
-  else params.set("ply", "0");
-  const seq = ++dbg.posSeq;  // claim latest; a newer load supersedes this one
-  try {
-    const data = await debugFetchJson(`/api/debug/position?${params.toString()}`);
-    if (seq !== dbg.posSeq) return;  // superseded by a newer ply nav — drop stale fetch
-    if (targetPly == null && resetPly) {
-      // Default to the final position so the whole game is visible at a glance.
-      const total = data.debug.total;
-      if (total > 0 && data.debug.ply !== total) return debugLoadPosition({ ply: total });
-    }
-    dbg.position = data;
-    dbg.records = data.record_games || [];
-    dbg.analysis = null;
-    dbg.search = null;
-    debugCacheGamePlacements(data);
-    debugSyncRecordSelect();
-    debugRenderAll();
-    await debugAnalyze();
-  } catch (e) {
-    if (seq === dbg.posSeq) debugSetStatus(`Position: ${e.message}`, "error");
-  }
-}
-
-async function debugLoadImported(ply = null) {
-  // Imported positions are reconstructed by the SERVER (true engine coords +
-  // legal cells + tactics), exactly like recorded games — so overlays/threats
-  // work and no action-id unpacking happens in the browser.
-  const ids = dbg.imported || [];
-  if (!ids.length) return;
-  const targetPly = ply != null ? Math.max(0, Math.min(ply, ids.length)) : ids.length;
-  const params = new URLSearchParams({ run: dbg.run || "", actions: ids.join(","), ply: String(targetPly) });
-  const seq = ++dbg.posSeq;  // claim latest (shared with debugLoadPosition)
-  try {
-    const data = await debugFetchJson(`/api/debug/position?${params.toString()}`);
-    if (seq !== dbg.posSeq) return;  // superseded by a newer nav — drop stale fetch
-    dbg.position = data;
-    dbg.records = [];
-    dbg.analysis = null;
-    dbg.search = null;
-    debugCacheGamePlacements(data);
-    debugRenderAll();
-    await debugAnalyze();
-  } catch (e) {
-    if (seq === dbg.posSeq) debugSetStatus(`Import: ${e.message}`, "error");
-  }
-}
-
-function debugActionPrefix() {
-  // The move prefix corresponding to the displayed ply (for analyze/search).
-  if (!dbg.position) return null;
-  const dbgInfo = dbg.position.debug;
-  return (dbgInfo.action_ids || []).slice(0, dbgInfo.ply);
-}
-
-function debugRequestBody() {
-  const prefix = debugActionPrefix();
-  if (prefix == null) return null;
-  const body = { run: dbg.run, checkpoint: dbg.checkpoint };
-  if (dbg.imported || (dbg.position && dbg.position.debug.imported)) {
-    body.action_ids = prefix;
-  } else {
-    body.path = dbg.gameFile;
-    body.record = dbg.record;
-    body.ply = dbg.position.debug.ply;
-  }
-  return body;
-}
-
-async function debugAnalyze() {
-  const body = debugRequestBody();
-  if (!body || !dbg.checkpoint) { debugRenderAll(); return; }
-  const seq = ++dbg.anlSeq;  // claim latest; a slow dense analyze must not clobber a newer ply's
-  dbg.loading = true;
-  debugSetStatus("Evaluating position on CPU…", "busy");
-  debugRenderAll();
-  try {
-    const analysis = await debugFetchJson("/api/debug/analyze", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    if (seq !== dbg.anlSeq) return;  // a newer position/analyze superseded us — drop stale result
-    dbg.analysis = analysis;
-    debugSetStatus("");
-  } catch (e) {
-    if (seq !== dbg.anlSeq) return;
-    dbg.analysis = null;
-    debugSetStatus(`Analyze: ${e.message}`, "error");
-  } finally {
-    if (seq === dbg.anlSeq) {
-      dbg.loading = false;
-      debugRenderAll();
-    }
-  }
-  if (seq === dbg.anlSeq && dbg.compareCheckpoint) debugRunCompare();
-}
-
-async function debugRunSearch() {
-  const body = debugRequestBody();
-  if (!body || !dbg.checkpoint) return;
-  const visitsEl = dbgEl("debugSearchVisits");
-  body.visits = Math.max(1, Math.min(20000, parseInt(visitsEl && visitsEl.value, 10) || 512));
-  dbg.loading = true;
-  debugSetStatus(`Running ${body.visits}-visit CPU search…`, "busy");
-  debugRenderSearch();
-  try {
-    dbg.search = await debugFetchJson("/api/debug/search", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    debugSetStatus("");
-  } catch (e) {
-    dbg.search = null;
-    debugSetStatus(`Search: ${e.message}`, "error");
-  } finally {
-    dbg.loading = false;
-    debugRenderAll();
-  }
-}
-
-// ---- deep link (from History "Open in Debug") -----------------------------
-
-async function debugApplyDeepLink({ run, path, record, ply }) {
-  if (run && trainingRuns.some(r => r.name === run)) {
-    dbg.run = run;
-    debugSyncRunSelect();
-    await debugLoadRun();
-  }
-  // Pick the source (selfplay/evaluation) that contains the file.
-  if (path) {
-    const inSource = src => dbg.games.some(g => g.path === path);
-    if (!inSource()) {
-      dbg.source = path.startsWith("eval") ? "evaluation" : "selfplay";
-      const sel = dbgEl("debugSourceSelect"); if (sel) sel.value = dbg.source;
-      await debugLoadGames();
-    }
-    dbg.gameFile = path;
-    dbg.record = Number(record) || 0;
-    const gsel = dbgEl("debugGameSelect"); if (gsel) gsel.value = dbg.gameFile;
-    // An explicit ply jumps there; otherwise default to the game's final position
-    // (resetPly) rather than inheriting the previously-viewed ply.
-    if (ply != null) await debugLoadPosition({ ply: Number(ply) });
-    else await debugLoadPosition({ resetPly: true });
-  }
+  return patch;
 }
 
 function debugOpenFromHistory(detail) {
-  // detail: { run, path, record, ply }
+  // detail: { run, path, record, ply } — kept signature for the untouched
+  // [data-debug-open] delegation in History/Match. The deep link is consumed by
+  // dbgApplyHash on the hashchange navigateScreen() triggers (or directly from
+  // enterDebugScreen when no hashchange is coming).
   dbg.pendingDeepLink = detail;
   navigateScreen("debug");
 }
 
-// ---- rendering ------------------------------------------------------------
+// ---- apply: nav -> sources -> position -> panels ----------------------------
 
-function debugRenderAll() {
-  debugRenderBoard();
-  debugRenderPlyBar();
-  debugRenderPositionInfo();
-  debugRenderValue();
-  debugRenderMoves();
-  debugRenderSearch();
-  debugRenderCheckpointInfo();
-  debugRenderCompare();
-  debugRenderTrajectory();
+async function dbgApplyNav(nav, seq) {
+  dbgSyncControls();
+  dbgRenderCrumb();
+  if (!trainingRuns.length) {
+    debugSetStatus("Loading runs…");
+    try {
+      await loadTrainingRuns();
+    } catch (_e) { /* fall through with whatever we have */ }
+    if (seq !== dbg.applySeq) return;
+    debugSetStatus("");
+  }
+  const runNames = trainingRuns.map(r => r.name);
+  if (!runNames.length) {
+    debugSetStatus("No training runs found.", "error");
+    return;
+  }
+  if (!nav.run || !runNames.includes(nav.run)) {
+    // Prefer the run already selected on History, else the first run.
+    const preferred = historySelectedRun && runNames.includes(historySelectedRun) ? historySelectedRun : runNames[0];
+    dbgNavigate({ run: preferred, path: "", rec: 0, ply: null, acts: [], ckptA: "", ckptB: "" }, { replace: true });
+    return;
+  }
+  if (dbg.loadedRun !== nav.run) {
+    await dbgLoadCheckpoints(nav.run);
+    if (seq !== dbg.applySeq) return;
+    dbgSyncControls();
+  }
+  dbgLoadPins();
+  dbgLoadJournal();
+  if (dbg.checkpoints.length) {
+    if (!nav.ckptA || !dbg.checkpoints.some(c => c.name === nav.ckptA)) {
+      const latest = dbg.checkpoints.find(c => c.latest) || dbg.checkpoints[0];
+      dbgNavigate({ ckptA: latest.name }, { replace: true });
+      return;
+    }
+    if (nav.ckptB && !dbg.checkpoints.some(c => c.name === nav.ckptB)) {
+      dbgNavigate({ ckptB: "" }, { replace: true });
+      return;
+    }
+  }
+  const gamesKey = `${nav.run}|${nav.src}`;
+  if (dbg.loadedGamesKey !== gamesKey) {
+    await dbgLoadGames(nav.run, nav.src);
+    if (seq !== dbg.applySeq) return;
+    dbgSyncControls();
+  }
+  if (!dbg.games.length) {
+    dbgResetPosition();
+    dbgRenderAll();
+    debugSetStatus(`No ${nav.src} games in ${nav.run}.`, "error");
+    return;
+  }
+  if (!nav.path || !dbg.games.some(g => g.path === nav.path)) {
+    await dbgAutoPickGame(seq);
+    return;
+  }
+  const recorded = dbgRecordedActs();
+  if (nav.ply == null) {
+    if (recorded) {
+      dbgNavigate({ ply: recorded.length }, { replace: true });
+      return;
+    }
+    await dbgResolveEndPly(seq);
+    return;
+  }
+  if (recorded && nav.ply > recorded.length) {
+    dbgNavigate({ ply: recorded.length }, { replace: true });
+    return;
+  }
+  const key = dbgCurrentKey();
+  const entry = dbg.cache.get(key);
+  if (entry && entry.position) {
+    // Client cache hit (M12): zero network for the board; panels refill from the
+    // same entry, and only missing pieces are fetched.
+    dbgCommitEntry(key, entry);
+    if (nav.ckptB) {
+      const keyB = dbgCacheKey(nav, nav.ckptB);
+      const entryB = dbg.cache.get(keyB);
+      if (entryB && entryB.analysis) {
+        dbg.analysisB = entryB.analysis;
+        dbg.keys.analysisB = keyB;
+      }
+    }
+    debugSetStatus("");
+    dbgRenderAll();
+    if (!entry.analysis || (nav.ckptB && dbg.keys.analysisB !== dbgCacheKey(nav, nav.ckptB))) dbgScheduleFetch(0);
+  } else {
+    if (!nav.acts.length && recorded && dbg.gamePlacements.length) {
+      // INSTANT, analyze-independent step off the client-side placement cache;
+      // the debounced fetch below fills in legal cells/tactics + analysis.
+      dbgOptimisticStep();
+    } else {
+      debugSetStatus("Loading position…", "busy");
+    }
+    dbgRenderAll();
+    dbgScheduleFetch(120);  // coalesce rapid steps/slider drags into one fetch
+  }
+  if (nav.tab === "ckpt") dbgEnsureCkptInfo(false);
+  if (nav.tab === "inputs" || nav.mode === "plane") dbgEnsureInputs(false);
+  if (dbgWantRecordRow(nav)) dbgEnsureRecordRow(false);
 }
 
-function debugCacheGamePlacements(data) {
+// ---- source loading ---------------------------------------------------------
+
+async function dbgLoadCheckpoints(run) {
+  try {
+    const data = await debugFetchJson(`/api/debug/checkpoints?run=${encodeURIComponent(run)}`);
+    dbg.checkpoints = data.checkpoints || [];
+    dbg.worker = data.worker || null;
+    dbgRenderWorkerDot(dbg.worker && dbg.worker.alive ? "ok" : "");
+  } catch (e) {
+    dbg.checkpoints = [];
+    dbg.worker = null;
+    dbgRenderWorkerDot("err");
+    debugSetStatus(`Checkpoints: ${e.message}`, "error");
+  }
+  dbg.loadedRun = run;  // set even on error — the Refresh button clears it to retry
+}
+
+async function dbgLoadGames(run, src) {
+  try {
+    const data = await debugFetchJson(`/api/debug/games?run=${encodeURIComponent(run)}&source=${encodeURIComponent(src)}`);
+    dbg.games = data.games || [];
+  } catch (e) {
+    dbg.games = [];
+    debugSetStatus(`Games: ${e.message}`, "error");
+  }
+  dbg.loadedGamesKey = `${run}|${src}`;
+}
+
+async function dbgAutoPickGame(seq) {
+  // Auto-pick the newest game that actually loads. The newest selfplay file is
+  // usually the IN-PROGRESS epoch (still being written by the live run), which
+  // has NO complete games yet — probe newest-first and stop at the first game
+  // that loads, so the tab always opens on a usable game.
+  debugSetStatus("Loading game…", "busy");
+  for (const g of dbg.games) {
+    try {
+      const params = new URLSearchParams({ run: dbg.nav.run, path: g.path, record: "0", ply: "999999" });
+      const data = await debugFetchJson(`/api/debug/position?${params.toString()}`);
+      if (seq !== dbg.applySeq) return;
+      const total = data.debug.total;
+      const entry = dbgCacheEntry([dbg.nav.run, g.path, 0, total, dbg.nav.ckptA, ""].join("|"));
+      entry.position = data;
+      debugSetStatus("");
+      dbgNavigate({ path: g.path, rec: 0, ply: total, acts: [] }, { replace: true });
+      return;
+    } catch (_e) { /* probe the next (older) file */ }
+  }
+  if (seq !== dbg.applySeq) return;
+  dbgResetPosition();
+  dbgRenderAll();
+  debugSetStatus(`No loadable ${dbg.nav.src} games in ${dbg.nav.run}.`, "error");
+}
+
+async function dbgResolveEndPly(seq) {
+  // ply=null means "final position"; ask the server (it clamps) then pin the
+  // real total into the hash so the cache key and the URL stay canonical.
+  const nav = dbg.nav;
+  debugSetStatus("Loading position…", "busy");
+  try {
+    const params = new URLSearchParams({ run: nav.run, path: nav.path, record: String(nav.rec), ply: "999999" });
+    const data = await debugFetchJson(`/api/debug/position?${params.toString()}`);
+    if (seq !== dbg.applySeq) return;
+    const total = data.debug.total;
+    const entry = dbgCacheEntry([nav.run, nav.path, nav.rec, total, nav.ckptA, ""].join("|"));
+    entry.position = data;
+    debugSetStatus("");
+    dbgNavigate({ ply: total }, { replace: true });
+  } catch (e) {
+    if (seq === dbg.applySeq) debugSetStatus(`Position: ${e.message}`, "error");
+  }
+}
+
+function dbgRefreshSources() {
+  dbg.loadedRun = "";
+  dbg.loadedGamesKey = "";
+  dbg.navApplied = "";
+  dbgApplyHash();
+}
+
+// ---- cache + keys (spec M12) ------------------------------------------------
+
+function dbgCacheKey(nav, ckpt) {
+  return [nav.run, nav.path, nav.rec, nav.ply, ckpt || "", (nav.acts || []).join(",")].join("|");
+}
+
+function dbgCurrentKey() {
+  return dbgCacheKey(dbg.nav, dbg.nav.ckptA);
+}
+
+function dbgCacheEntry(key) {
+  let entry = dbg.cache.get(key);
+  if (entry) {
+    dbg.cache.delete(key);  // LRU bump to most-recently-used
+    dbg.cache.set(key, entry);
+    return entry;
+  }
+  entry = {};
+  dbg.cache.set(key, entry);
+  while (dbg.cache.size > DBG_CACHE_MAX) dbg.cache.delete(dbg.cache.keys().next().value);
+  return entry;
+}
+
+function dbgRecordRow() {
+  // Recorded .npz training row for the current key — fetched in stage F3; the
+  // value-dist soft-z marker / target heat read it opportunistically when set.
+  const entry = dbg.cache.get(dbgCurrentKey());
+  return (entry && entry.record_row) || null;
+}
+
+function dbgRecordedActs() {
+  const nav = dbg.nav;
+  return dbg.gameActsKey === `${nav.run}|${nav.path}|${nav.rec}` && dbg.gameActs.length ? dbg.gameActs : null;
+}
+
+function dbgRecordedTotal() {
+  // Total plies of the RECORDED game. While branched, dbg.position.debug.total
+  // is the branch prefix length (base ply + injected tail), not the game length,
+  // so the rail/crumb/clamps must read the recorded action list instead.
+  const recorded = dbgRecordedActs();
+  if (recorded) return recorded.length;
+  if (dbg.position && !dbg.nav.acts.length) return dbg.position.debug.total;
+  return null;
+}
+
+function dbgFreshData(kind) {
+  // Data gated to the CURRENT nav key: the board heat/HUD/Q columns must never
+  // paint a previous position's outputs. Panels instead keep their stale data
+  // visible with a stale dot until the refill lands (M14).
+  return dbg.keys[kind] === dbgCurrentKey() ? dbg[kind] : null;
+}
+
+function dbgResetPosition() {
+  dbg.position = null;
+  dbg.analysis = null;
+  dbg.analysisB = null;
+  dbg.search = null;
+  dbg.tree = null;
+  dbg.records = [];
+  dbg.gameActs = [];
+  dbg.gameActsKey = "";
+  dbg.gamePlacements = [];
+  dbg.gameKey = "";
+  dbg.keys = { position: "", analysis: "", analysisB: "", search: "", tree: "" };
+}
+
+function dbgCommitEntry(key, entry) {
+  dbgCommitPosition(entry.position, key);
+  if (entry.analysis) {
+    dbg.analysis = entry.analysis;
+    dbg.keys.analysis = key;
+  }
+  dbg.search = entry.search || null;
+  if (entry.search) dbg.keys.search = key;
+  dbg.tree = entry.tree || null;
+  if (entry.tree) dbg.keys.tree = key;
+}
+
+function dbgCommitPosition(data, key) {
+  dbg.position = data;
+  dbg.keys.position = key;
+  const d = data.debug || {};
+  if (Array.isArray(data.record_games) && data.record_games.length) dbg.records = data.record_games;
+  if (!d.imported && Array.isArray(d.action_ids)) {
+    // Harvest the full recorded action list — instant stepping, branch prefixes
+    // and the recorded-move highlights all read it client-side.
+    dbg.gameActs = d.action_ids;
+    dbg.gameActsKey = `${dbg.nav.run}|${dbg.nav.path}|${dbg.nav.rec}`;
+  }
+  if (!dbg.nav.acts.length) dbgCacheGamePlacements(data);
+}
+
+function dbgCacheGamePlacements(data) {
   // Merge a loaded position's stones into the per-game cache (keyed by index), so
   // the full game's board is known client-side regardless of which ply loaded.
-  const d = (data && data.debug) || {};
-  const key = `${dbg.run}|${dbg.gameFile}|${dbg.record}|${d.imported ? "imp" : ""}`;
-  if (key !== dbg.gameKey) { dbg.gameKey = key; dbg.gamePlacements = []; }
+  // Branch (acts) positions are NOT merged — their indexes shift with the base ply.
+  const key = `${dbg.nav.run}|${dbg.nav.path}|${dbg.nav.rec}`;
+  if (key !== dbg.gameKey) {
+    dbg.gameKey = key;
+    dbg.gamePlacements = [];
+  }
   const byIndex = new Map(dbg.gamePlacements.map(p => [p.index, p]));
   for (const p of (data.placements || [])) if (p && p.index != null) byIndex.set(p.index, p);
   dbg.gamePlacements = [...byIndex.values()].sort((a, b) => a.index - b.index);
@@ -3716,36 +3906,1833 @@ function debugCacheGamePlacements(data) {
 
 function debugCurrentPlacements() {
   // Stones to show for the current ply. Prefer the cached full game filtered to
-  // `index <= ply` (instant, no round-trip); fall back to the server payload.
+  // `index <= ply` (instant, no round-trip); branch positions use the payload.
   const pos = dbg.position;
   if (!pos) return [];
+  if (dbg.nav.acts.length) return pos.placements || [];
   const ply = pos.debug.ply;
   if (dbg.gamePlacements.length) return dbg.gamePlacements.filter(p => p.index <= ply);
   return pos.placements || [];
 }
 
-function debugHeatMaps() {
-  // Build q,r -> normalized weight maps for the active overlays.
-  const maps = { policy: new Map(), visits: new Map(), opp: new Map() };
-  const fill = (rows, key, field) => {
-    if (!rows || !rows.length) return;
-    const max = rows.reduce((m, r) => Math.max(m, r[field]), 0) || 1;
-    for (const r of rows) maps[key].set(`${r.q},${r.r}`, r[field] / max);
-  };
-  if (dbg.analysis) {
-    if (dbg.overlays.policy) fill(dbg.analysis.policy, "policy", "p");
-    if (dbg.overlays.opp) fill(dbg.analysis.opp_policy, "opp", "p");
-  }
-  if (dbg.search && dbg.overlays.visits) fill(dbg.search.visit_policy, "visits", "p");
-  return maps;
+function dbgOptimisticStep() {
+  // Clone (never mutate the cached payload) with the new ply; the real position
+  // payload + analysis land via the debounced fetch.
+  const nav = dbg.nav;
+  const pos = dbg.position;
+  const acts = dbgRecordedActs() || (pos.debug && pos.debug.action_ids) || [];
+  const ply = Math.max(0, Math.min(nav.ply, acts.length));
+  const last = ply > 0 ? dbgUnpackActionId(acts[ply - 1]) : null;
+  dbg.position = Object.assign({}, pos, {
+    debug: Object.assign({}, pos.debug, {
+      ply,
+      last_action_id: ply > 0 ? acts[ply - 1] : null,
+      last_q: last ? last.q : null,
+      last_r: last ? last.r : null,
+    }),
+  });
+  dbg.keys.position = "";  // optimistic — the real payload is still loading
+  diagTap("ply " + ply + "/" + acts.length);  // visible step feedback on-device
 }
 
-function debugRenderBoard() {
-  if (!debugBoardSvg) return;
-  const pos = dbg.position;
-  if (!pos) { debugBoardSvg.innerHTML = ""; return; }
+// ---- fetch plumbing ----------------------------------------------------------
 
-  const heat = debugHeatMaps();
+let dbgFetchTimer = null;
+
+function dbgScheduleFetch(delay) {
+  window.clearTimeout(dbgFetchTimer);
+  dbgFetchTimer = window.setTimeout(() => {
+    dbgFetchCurrent().catch(e => reportError("dbgFetchCurrent: " + (e && (e.stack || e.message) || e)));
+  }, delay);
+}
+
+async function dbgFetchCurrent() {
+  const nav = dbg.nav;
+  if (!nav.run || !nav.path || nav.ply == null) return;
+  const key = dbgCurrentKey();
+  const entry = dbgCacheEntry(key);
+  if (!entry.position) {
+    const seq = ++dbg.posSeq;  // claim latest; a newer ply nav supersedes this fetch
+    try {
+      let data;
+      if (nav.acts.length) {
+        // What-if branch (M4): full prefix = recorded actions[0..ply] + injected
+        // tail, reconstructed by the SERVER via ?actions= (true engine coords +
+        // legal cells + tactics, no client action-id unpacking for the board).
+        const recorded = await dbgEnsureRecordedActs();
+        if (seq !== dbg.posSeq) return;
+        const prefix = recorded.slice(0, nav.ply).concat(nav.acts);
+        const params = new URLSearchParams({ run: nav.run, actions: prefix.join(","), ply: String(prefix.length) });
+        data = await debugFetchJson(`/api/debug/position?${params.toString()}`);
+      } else {
+        const params = new URLSearchParams({ run: nav.run, path: nav.path, record: String(nav.rec), ply: String(nav.ply) });
+        data = await debugFetchJson(`/api/debug/position?${params.toString()}`);
+      }
+      if (seq !== dbg.posSeq) return;  // superseded by a newer nav — drop stale fetch
+      entry.position = data;
+    } catch (e) {
+      if (seq === dbg.posSeq) debugSetStatus(`Position: ${e.message}`, "error");
+      return;
+    }
+  }
+  if (key !== dbgCurrentKey()) return;  // nav moved on while we fetched
+  dbgCommitEntry(key, entry);
+  debugSetStatus("");
+  dbgRenderAll();
+  await dbgEnsureAnalysis(key, entry);
+  if (dbg.nav.ckptB) await dbgEnsureAnalysisB();
+  if (dbgWantRecordRow(dbg.nav)) dbgEnsureRecordRow(false);
+  dbgMaybePrefetch();  // S7: speculative ply±1 once the user's own requests settled
+}
+
+async function dbgEnsureRecordedActs() {
+  const nav = dbg.nav;
+  const recorded = dbgRecordedActs();
+  if (recorded) return recorded;
+  // Deep link straight into a branch: one recorded-position fetch supplies the
+  // full action-id list (and lands in the cache for the plain-ply key).
+  const params = new URLSearchParams({ run: nav.run, path: nav.path, record: String(nav.rec), ply: String(Math.max(0, nav.ply || 0)) });
+  const data = await debugFetchJson(`/api/debug/position?${params.toString()}`);
+  const d = data.debug || {};
+  dbg.gameActs = d.action_ids || [];
+  dbg.gameActsKey = `${nav.run}|${nav.path}|${nav.rec}`;
+  if (Array.isArray(data.record_games) && data.record_games.length) dbg.records = data.record_games;
+  const entry = dbgCacheEntry([nav.run, nav.path, nav.rec, d.ply, nav.ckptA, ""].join("|"));
+  if (!entry.position) entry.position = data;
+  return dbg.gameActs;
+}
+
+function dbgRequestBody(checkpoint) {
+  const nav = dbg.nav;
+  const body = { run: nav.run, checkpoint };
+  if (nav.acts.length) {
+    const recorded = dbgRecordedActs() || [];
+    body.action_ids = recorded.slice(0, nav.ply).concat(nav.acts);
+  } else {
+    body.path = nav.path;
+    body.record = nav.rec;
+    body.ply = nav.ply;
+  }
+  return body;
+}
+
+async function dbgEnsureAnalysis(key, entry) {
+  const nav = dbg.nav;
+  if (!nav.ckptA) return;
+  if (entry.analysis) {
+    if (key === dbgCurrentKey()) {
+      dbg.analysis = entry.analysis;
+      dbg.keys.analysis = key;
+      dbgRenderAll();
+    }
+    return;
+  }
+  if (entry.analysisPending) return;  // one in-flight analyze per cache entry
+  entry.analysisPending = true;
+  const seq = ++dbg.anlSeq;  // claim latest; a slow dense analyze must not clobber a newer ply's
+  dbg.loading = true;
+  debugSetStatus("Evaluating position on CPU…", "busy");
+  try {
+    const analysis = await debugFetchJson("/api/debug/analyze", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(dbgRequestBody(nav.ckptA)),
+    });
+    if (seq !== dbg.anlSeq) return;  // a newer position/analyze superseded us — drop stale result
+    entry.analysis = analysis;
+    dbgJournalLog(analysis, nav.ckptA, nav);  // S3: auto-log every completed analyze
+    if (key === dbgCurrentKey()) {
+      dbg.analysis = analysis;
+      dbg.keys.analysis = key;
+      debugSetStatus("");
+    }
+  } catch (e) {
+    if (seq === dbg.anlSeq) debugSetStatus(`Analyze: ${e.message}`, "error");
+  } finally {
+    entry.analysisPending = false;
+    if (seq === dbg.anlSeq) {
+      dbg.loading = false;
+      dbgRenderAll();
+    }
+  }
+}
+
+async function dbgEnsureAnalysisB() {
+  const nav = dbg.nav;
+  if (!nav.ckptB || nav.ply == null) return;
+  const keyB = dbgCacheKey(nav, nav.ckptB);
+  const entryB = dbgCacheEntry(keyB);
+  if (entryB.analysis) {
+    dbg.analysisB = entryB.analysis;
+    dbg.keys.analysisB = keyB;
+    dbgRenderComparePanel();
+    dbgUpdateStaleDots();
+    return;
+  }
+  if (entryB.analysisPending) return;
+  entryB.analysisPending = true;
+  const seq = ++dbg.anlSeqB;
+  debugSetStatus("Evaluating checkpoint B…", "busy");
+  try {
+    const analysis = await debugFetchJson("/api/debug/analyze", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(dbgRequestBody(nav.ckptB)),
+    });
+    if (seq !== dbg.anlSeqB) return;
+    entryB.analysis = analysis;
+    dbgJournalLog(analysis, nav.ckptB, nav);
+    if (keyB === dbgCacheKey(dbg.nav, dbg.nav.ckptB)) {
+      dbg.analysisB = analysis;
+      dbg.keys.analysisB = keyB;
+      debugSetStatus("");
+    }
+  } catch (e) {
+    if (seq === dbg.anlSeqB) debugSetStatus(`Compare: ${e.message}`, "error");
+  } finally {
+    entryB.analysisPending = false;
+    dbgRenderComparePanel();
+    dbgUpdateStaleDots();
+  }
+}
+
+function dbgAnalyzeNow(force) {
+  const nav = dbg.nav;
+  if (!nav.path || nav.ply == null) {
+    debugSetStatus("No position loaded — pick a game with completed records.", "error");
+    return;
+  }
+  if (force) delete dbgCacheEntry(dbgCurrentKey()).analysis;
+  dbgScheduleFetch(0);
+}
+
+async function dbgRunSearch() {
+  const nav = dbg.nav;
+  if (!nav.ckptA || !dbg.position) {
+    debugSetStatus("Pick a checkpoint and position before searching.", "error");
+    return;
+  }
+  const body = dbgRequestBody(nav.ckptA);
+  const visitsEl = dbgEl("dbgSearchVisits");
+  const cpuctEl = dbgEl("dbgSearchCpuct");
+  const seedEl = dbgEl("dbgSearchSeed");
+  body.visits = Math.max(1, Math.min(20000, parseInt(visitsEl && visitsEl.value, 10) || 512));
+  const cPuct = Number(cpuctEl && cpuctEl.value);
+  body.c_puct = Number.isFinite(cPuct) && cPuct > 0 ? cPuct : 1.5;
+  const seed = parseInt(seedEl && seedEl.value, 10);
+  body.seed = Number.isFinite(seed) ? seed : 0;  // B2/M6: the seed is forwarded server-side now
+  const key = dbgCurrentKey();
+  const entry = dbgCacheEntry(key);
+  debugSetStatus(`Running ${body.visits}-visit CPU search…`, "busy");
+  try {
+    const result = await debugFetchJson("/api/debug/search", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    entry.search = result;
+    if (key === dbgCurrentKey()) {
+      dbg.search = result;
+      dbg.keys.search = key;
+      debugSetStatus("");
+    }
+  } catch (e) {
+    debugSetStatus(`Search: ${e.message}`, "error");
+  }
+  dbgRenderAll();
+}
+
+async function dbgEnsureCkptInfo(force) {
+  // B3/M7: checkpoint provenance via the worker `info` op — one round-trip,
+  // readable WITHOUT paying an analyze.
+  const nav = dbg.nav;
+  for (const name of [nav.ckptA, nav.ckptB].filter(Boolean)) {
+    const key = `${nav.run}|${name}`;
+    if (force) dbg.ckptInfo.delete(key);
+    if (dbg.ckptInfo.has(key)) continue;
+    dbgRenderCkptPanel();  // show "loading…" while the worker round-trips
+    try {
+      const params = new URLSearchParams({ run: nav.run, checkpoint: name });
+      dbg.ckptInfo.set(key, await debugFetchJson(`/api/debug/ckpt_info?${params.toString()}`));
+    } catch (e) {
+      dbg.ckptInfo.set(key, { error: e.message });
+    }
+  }
+  dbgRenderCkptPanel();
+}
+
+async function dbgPlotTrajectory() {
+  // Legacy whole-game re-eval plot (kept as the no-sweep fallback per §3.4).
+  const nav = dbg.nav;
+  if (!nav.run || !nav.path || !nav.ckptA || nav.acts.length) {
+    debugSetStatus("Trajectory needs a recorded game + checkpoint (return to the game first).", "error");
+    return;
+  }
+  debugSetStatus("Re-evaluating the whole game on CPU…", "busy");
+  try {
+    const params = new URLSearchParams({ run: nav.run, path: nav.path, record: String(nav.rec), checkpoint: nav.ckptA });
+    dbg.trajectory = await debugFetchJson(`/api/debug/trajectory?${params.toString()}`);
+    dbg.trajectoryKey = `${nav.run}|${nav.path}|${nav.rec}|${nav.ckptA}`;
+    debugSetStatus("");
+  } catch (e) {
+    dbg.trajectory = null;
+    debugSetStatus(`Trajectory: ${e.message}`, "error");
+  }
+  dbgRenderDockChart();
+}
+
+// ---- TARGETS: recorded .npz training row (spec M8) ---------------------------------
+
+function dbgWantRecordRow(nav) {
+  // The row is only fetched when something actually displays it: the TARGETS
+  // tab, the target/mismatch board modes (the HEADS soft-z marker reads it
+  // opportunistically once cached, per spec).
+  return Boolean(nav.run && nav.path && nav.ply != null
+    && (nav.tab === "targets" || nav.mode === "target" || nav.mode === "mismatch"));
+}
+
+async function dbgEnsureRecordRow(force) {
+  const nav = dbg.nav;
+  if (!nav.run || !nav.path || nav.ply == null) return;
+  const key = dbgCurrentKey();
+  const entry = dbgCacheEntry(key);
+  if (force) delete entry.record_row;
+  if (nav.acts.length || nav.src !== "selfplay") {
+    // Branch positions / eval games never have training rows — synthesize the
+    // graceful miss client-side instead of paying a server round-trip.
+    if (!entry.record_row) entry.record_row = { found: false, reason: nav.acts.length ? "branched" : "not_selfplay" };
+    dbgRenderTargets();
+    return;
+  }
+  if (entry.record_row || entry.recordRowPending) {
+    dbgRenderTargets();
+    return;
+  }
+  entry.recordRowPending = true;
+  dbgRenderTargets();
+  try {
+    const params = new URLSearchParams({ run: nav.run, path: nav.path, record: String(nav.rec), ply: String(nav.ply) });
+    entry.record_row = await debugFetchJson(`/api/debug/record_row?${params.toString()}`);
+  } catch (e) {
+    entry.record_row = { found: false, reason: e.message };
+  } finally {
+    entry.recordRowPending = false;
+  }
+  if (key === dbgCurrentKey()) {
+    dbgRenderTargets();
+    dbgRenderHeads();   // soft-z marker on the value distribution
+    if (dbg.nav.mode === "target" || dbg.nav.mode === "mismatch") dbgRenderBoard();
+  }
+}
+
+const DBG_ROW_MISS_REASONS = {
+  not_selfplay: "eval games have no training rows",
+  branched: "what-if branches have no training rows",
+  no_shard: "no .npz training shard found for this game",
+  no_row: "no training row at this ply (fast-PCR / not recorded)",
+  row_mismatch: "row mismatch — not shown (turn/player disagree with the replay)",
+};
+
+function dbgRenderTargets() {
+  const note = dbgEl("dbgTargetsNote");
+  const body = document.querySelector("#dbgTabTargets .dbg-targets-body");
+  if (!note || !body) return;
+  const entry = dbg.cache.get(dbgCurrentKey());
+  const rr = entry && entry.record_row;
+  if (!rr) {
+    note.textContent = entry && entry.recordRowPending ? "Loading training row…" : "No training row loaded";
+    body.innerHTML = "";
+    return;
+  }
+  if (!rr.found || !rr.row) {
+    note.textContent = DBG_ROW_MISS_REASONS[rr.reason] || `no training row (${rr.reason || "unknown"})`;
+    body.innerHTML = "";
+    return;
+  }
+  const row = rr.row;
+  const a = dbgFreshData("analysis");
+  note.textContent = `${rr.npz || ""}${rr.npz ? " · " : ""}turn ${rr.turn_index} · P${row.current_player}${row.phase ? ` · ${row.phase}` : ""}`;
+  const num = v => (typeof v === "number" ? v.toFixed(3) : "—");
+  const d = (recV, liveV) => (typeof recV === "number" && typeof liveV === "number")
+    ? `${liveV - recV >= 0 ? "+" : ""}${(liveV - recV).toFixed(3)}` : "—";
+  const cols = (label, rec, live, dlt) => `<div class="dbg-target-row"><span class="label">${label}</span><span>${rec}</span><span class="dbg-muted">${live}</span><span>${dlt}</span></div>`;
+  const out = [`<div class="dbg-target-row dbg-move-head"><span>field</span><span>recorded</span><span>live ${escapeText(dbgCkptShort(dbg.nav.ckptA))}</span><span>Δ</span></div>`];
+  out.push(cols("value target", num(row.value_target), num(a && a.value), d(row.value_target, a && a.value)));
+  out.push(cols("reason", escapeText(row.value_target_reason || "—"), "", ""));
+  for (const h of Object.keys(row.stvalue || {}).sort((x, y) => Number(x) - Number(y))) {
+    const sv = row.stvalue[h];
+    const live = a && a.stvalue && a.stvalue[h] ? a.stvalue[h].scalar : null;
+    out.push(cols(`STV+${h}${sv.mask ? "" : " (masked)"}`, num(sv.target), num(live), sv.mask ? d(sv.target, live) : "—"));
+  }
+  if (row.moves_left) {
+    const liveMl = a && a.moves_left && typeof a.moves_left.scalar === "number"
+      ? (a.moves_left.scalar + 1) / 2 * ((a.meta && a.meta.moves_left_cap) || 512)
+      : null;
+    const recMl = row.moves_left.target;
+    out.push(cols(`moves left${row.moves_left.mask ? "" : " (masked)"}`,
+      typeof recMl === "number" && recMl >= 0 ? recMl.toFixed(0) : "—",
+      liveMl != null ? liveMl.toFixed(0) : "—",
+      row.moves_left.mask && typeof recMl === "number" && recMl >= 0 && liveMl != null
+        ? `${liveMl - recMl >= 0 ? "+" : ""}${(liveMl - recMl).toFixed(0)}` : "—"));
+  }
+  out.push(cols("policy surprise", num(row.policy_surprise), "", ""));
+  out.push(cols("search visits", String(row.search_visits), "", ""));
+  out.push(cols("pcr_full", row.pcr_full ? "yes" : "no (fast)", "", ""));
+  out.push(cols("frequency wt", num(row.frequency_weight), "", ""));
+  if (row.truncated) out.push(cols("truncated", "yes", "", ""));
+  if (row.opp_policy_source) out.push(cols("opp source", escapeText(row.opp_policy_source), "", ""));
+  const priorById = new Map(((a && a.policy) || []).map(p => [p.action_id, p.p]));
+  const tm = (row.policy || []).slice(0, 8).map((p, i) => {
+    const live = priorById.get(p.action_id);
+    const dp = live != null ? `${live - p.p >= 0 ? "+" : ""}${((live - p.p) * 100).toFixed(1)}` : "—";
+    return `<div class="dbg-target-row"><span>#${i + 1} ${p.q},${p.r}</span><span>${(p.p * 100).toFixed(1)}%</span><span class="dbg-muted">${live != null ? (live * 100).toFixed(1) + "%" : "—"}</span><span>${dp}</span></div>`;
+  }).join("");
+  body.innerHTML = out.join("")
+    + `<div class="dbg-subhead" style="margin-top:8px">Top target moves <span class="dbg-muted">(recorded · live prior · Δ)</span></div>` + tm;
+}
+
+// ---- Game Error Sweep (spec M9) -----------------------------------------------------
+
+function dbgSweepKey(nav) {
+  nav = nav || dbg.nav;
+  return `${nav.run}|${nav.path}|${nav.rec}|${nav.ckptA}`;
+}
+
+function dbgSweepData() {
+  const sweep = dbg.sweeps.get(dbgSweepKey());
+  return sweep && sweep.plies.length ? sweep : null;
+}
+
+function dbgBlunders(sweep) {
+  // Blunder = value_p0 sign flip or |Δ value_p0| > 0.5 between CONSECUTIVE swept
+  // plies; returns the ply AFTER the drop (where to look), ascending.
+  const out = [];
+  for (let i = 1; i < sweep.plies.length; i++) {
+    const a = sweep.plies[i - 1];
+    const b = sweep.plies[i];
+    if (b.ply !== a.ply + 1) continue;
+    if ((a.value_p0 >= 0) !== (b.value_p0 >= 0) || Math.abs(b.value_p0 - a.value_p0) > 0.5) out.push(b.ply);
+  }
+  return out;
+}
+
+async function dbgRunSweep() {
+  const nav = dbg.nav;
+  if (!nav.run || !nav.path || !nav.ckptA) {
+    debugSetStatus("Sweep needs a recorded game + checkpoint.", "error");
+    return;
+  }
+  const key = dbgSweepKey();
+  if (dbg.sweepRun && dbg.sweepRun.key === key) {
+    dbg.sweepRun.abort = true;  // the button toggles: click while running = stop
+    return;
+  }
+  if (dbg.sweepRun) dbg.sweepRun.abort = true;  // a sweep of another tuple yields
+  const runState = { key, abort: false };
+  dbg.sweepRun = runState;
+  let sweep = dbg.sweeps.get(key);
+  if (!sweep) {
+    sweep = { total: null, winner: null, plies: [], byPly: new Map(), version: 0 };
+    dbg.sweeps.set(key, sweep);
+  }
+  const progress = dbgEl("dbgSweepProgress");
+  const btns = [dbgEl("dbgSweepBtn"), dbgEl("dbgPlySweepBtn")].filter(Boolean);
+  btns.forEach(b => b.classList.add("active"));
+  try {
+    // Resume cheaply (service LRU caches chunks; the client keeps finished plies).
+    let start = 0;
+    while (sweep.byPly.has(start)) start++;
+    while (!runState.abort && (sweep.total == null || start < sweep.total)) {
+      const params = new URLSearchParams({
+        run: nav.run, path: nav.path, record: String(nav.rec), checkpoint: nav.ckptA,
+        start: String(start), count: "16",
+      });
+      const data = await debugFetchJson(`/api/debug/game_eval?${params.toString()}`);
+      sweep.total = data.total;
+      sweep.winner = data.winner;
+      for (const p of data.plies || []) if (!sweep.byPly.has(p.ply)) sweep.byPly.set(p.ply, p);
+      sweep.plies = [...sweep.byPly.values()].sort((x, y) => x.ply - y.ply);
+      sweep.version++;
+      start = Math.max(start + 1, data.start + (data.plies || []).length);
+      while (sweep.byPly.has(start)) start++;
+      if (progress) progress.textContent = `${sweep.plies.length}/${sweep.total} plies`;
+      if (key === dbgSweepKey()) {
+        dbgRenderPlyRail();
+        dbgRenderDockChart();
+      }
+    }
+    if (progress) {
+      progress.textContent = runState.abort
+        ? `stopped at ${sweep.plies.length}/${sweep.total != null ? sweep.total : "?"}`
+        : `${sweep.plies.length}/${sweep.total} plies`;
+    }
+  } catch (e) {
+    debugSetStatus(`Sweep: ${e.message}`, "error");
+  } finally {
+    if (dbg.sweepRun === runState) dbg.sweepRun = null;
+    btns.forEach(b => b.classList.remove("active"));
+    if (key === dbgSweepKey()) {
+      dbgRenderPlyRail();
+      dbgRenderDockChart();
+    }
+  }
+}
+
+function dbgStepBlunder(dir) {
+  const sweep = dbgSweepData();
+  if (!sweep) {
+    dbgStub("Run a game error sweep first (Sweep button).");
+    return;
+  }
+  const blunders = dbgBlunders(sweep);
+  if (!blunders.length) {
+    dbgStub("No blunder plies found by the sweep.");
+    return;
+  }
+  const cur = dbg.nav.ply != null ? dbg.nav.ply : 0;
+  let next = null;
+  if (dir > 0) next = blunders.find(p => p > cur);
+  else for (const p of blunders) if (p < cur) next = p;
+  if (next == null) {
+    dbgStub(dir > 0 ? "No later blunder." : "No earlier blunder.");
+    return;
+  }
+  dbgGotoPly(next);
+}
+
+// ---- MCTS Tree Explorer (spec M10/M11) ------------------------------------------
+
+function dbgTreeParams() {
+  const visitsEl = dbgEl("dbgSearchVisits");
+  const cpuctEl = dbgEl("dbgSearchCpuct");
+  const seedEl = dbgEl("dbgSearchSeed");
+  const visits = Math.max(1, Math.min(20000, parseInt(visitsEl && visitsEl.value, 10) || 512));
+  const cPuct = Number(cpuctEl && cpuctEl.value);
+  const seed = parseInt(seedEl && seedEl.value, 10);
+  return {
+    visits,
+    c_puct: Number.isFinite(cPuct) && cPuct > 0 ? cPuct : 1.5,
+    seed: Number.isFinite(seed) ? seed : 0,
+  };
+}
+
+async function dbgRunTree(opts) {
+  // opts: {checkpoint} = run for that checkpoint's cache slot (compare B trees);
+  // {rootActions, graftPath} = expand-on-demand — re-root the search at a deep
+  // node via root_actions and graft the children back onto the rendered tree.
+  const nav = dbg.nav;
+  const checkpoint = (opts && opts.checkpoint) || nav.ckptA;
+  if (!checkpoint || !dbg.position) {
+    debugSetStatus("Pick a checkpoint and position before searching.", "error");
+    return;
+  }
+  if (dbg.treeBusy) {
+    dbgStub("A debug tree is already running.");
+    return;
+  }
+  const body = Object.assign(dbgRequestBody(checkpoint), dbgTreeParams());
+  if (opts && opts.rootActions && opts.rootActions.length) body.root_actions = opts.rootActions;
+  const key = dbgCacheKey(nav, checkpoint);
+  dbg.treeBusy = true;
+  debugSetStatus(`Debug tree: ${body.visits} visits on CPU…`, "busy");
+  dbgRenderSearchPanel();
+  try {
+    const result = await debugFetchJson("/api/debug/search_tree", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    debugSetStatus("");
+    if (opts && opts.graftPath) {
+      const host = dbgFreshData("tree");
+      const node = host && dbgTreeNodeByPath(host.tree, opts.graftPath);
+      if (node) {
+        node.children = (result.tree && result.tree.children) || [];
+        node.pruned_children = result.tree ? result.tree.pruned_children : 0;
+        node.grafted = true;  // re-rooted deeper search — N not comparable to siblings
+        dbg.treeOpen.set(opts.graftPath, true);
+      }
+    } else {
+      const entry = dbgCacheEntry(key);
+      entry.tree = result;
+      if (key === dbgCurrentKey()) {
+        dbg.tree = result;
+        dbg.keys.tree = key;
+        dbg.treeOpen = new Map();
+        dbg.treePreview = null;
+      }
+    }
+  } catch (e) {
+    debugSetStatus(`Debug tree: ${e.message}`, "error");
+  } finally {
+    dbg.treeBusy = false;
+  }
+  dbgRenderAll();
+}
+
+function dbgTreeNodeByPath(root, pathStr) {
+  let node = root;
+  for (const part of String(pathStr).split("/")) {
+    if (!part) continue;
+    node = (node.children || []).find(ch => String(ch.action_id) === part) || null;
+    if (!node) return null;
+  }
+  return node;
+}
+
+function dbgTreePathIds(pathStr) {
+  return String(pathStr).split("/").map(s => parseInt(s, 10)).filter(n => Number.isFinite(n));
+}
+
+function dbgRenderTree() {
+  const el = dbgEl("dbgTree");
+  if (!el) return;
+  const tree = dbgFreshData("tree");
+  if (!tree || !tree.tree) {
+    el.innerHTML = `<div class="dbg-empty-note">${dbg.treeBusy ? "Debug tree running…" : "Debug tree (Python; may not match engine tie-breaking)"}</div>`;
+    return;
+  }
+  const pvSet = new Set();
+  let acc = "";
+  for (const id of tree.pv || []) {
+    acc = acc ? `${acc}/${id}` : String(id);
+    pvSet.add(acc);
+  }
+  const render = (node, pathStr, maxNSib) => {
+    const kids = node.children || [];
+    const isPv = pvSet.has(pathStr);
+    const open = dbg.treeOpen.has(pathStr) ? dbg.treeOpen.get(pathStr) : isPv;
+    const caret = kids.length ? (open ? "▾" : "▸") : "·";
+    const expand = node.pruned_children > 0
+      ? `<button type="button" class="dbg-tree-expand" data-tree-path="${pathStr}" title="Load pruned children (re-searches this subtree as a new root)">+${node.pruned_children}</button>`
+      : "";
+    let html = `<div class="dbg-tree-row${isPv ? " pv" : ""}" data-tree-path="${pathStr}" title="N ${node.n} · Q stm ${node.qm.toFixed(3)} · Q p0 ${node.qm_p0.toFixed(3)} · P ${(node.p * 100).toFixed(2)}%${node.u != null ? ` · U ${node.u.toFixed(3)}` : ""}${node.v != null ? ` · v@expand ${node.v.toFixed(3)}` : ""}${node.grafted ? " · grafted (re-rooted search)" : ""}">`
+      + `<span class="dbg-tree-caret">${caret}</span>`
+      + `<span class="dbg-tree-cell">${node.q},${node.r}</span>`
+      + `<span class="dbg-tree-bar"><span style="width:${Math.max(3, 100 * node.n / Math.max(1, maxNSib)).toFixed(0)}%"></span></span>`
+      + `<span class="dbg-tree-n">${node.n}</span>`
+      + `<span class="dbg-tree-q">${node.qm.toFixed(2)}/${node.qm_p0.toFixed(2)}</span>`
+      + `<span class="dbg-tree-p">${(node.p * 100).toFixed(1)}%</span>`
+      + `<span class="dbg-tree-u">${node.u != null ? node.u.toFixed(2) : "—"}</span>`
+      + `<span class="dbg-tree-v">${node.v != null ? node.v.toFixed(2) : "—"}</span>`
+      + `<button type="button" class="dbg-tree-step" data-tree-path="${pathStr}" title="Step into this line (re-bases via what-if injection)">⤓</button>`
+      + expand
+      + `</div>`;
+    if (open && kids.length) {
+      const m = Math.max(1, ...kids.map(k => k.n));
+      html += `<div class="dbg-tree-node">${kids.map(k => render(k, `${pathStr}/${k.action_id}`, m)).join("")}</div>`;
+    }
+    return html;
+  };
+  const roots = tree.tree.children || [];
+  const maxN = Math.max(1, ...roots.map(ch => ch.n));
+  const pvCells = (tree.pv || []).map(id => {
+    const c = dbgUnpackActionId(id);
+    return `${c.q},${c.r}`;
+  });
+  const head = `<div class="dbg-muted" title="debug search (Python; may not match engine tie-breaking)">`
+    + `${escapeText(tree.engine || "py_debug")} · ${tree.visits} visits · root ${tree.root_value.toFixed(3)} · ${tree.node_count} nodes${tree.truncated ? " · truncated" : ""}</div>`
+    + `<div class="dbg-muted">PV: ${pvCells.join(" → ") || "—"}</div>`
+    + `<div class="dbg-tree-cols dbg-move-head"><span></span><span>cell</span><span>N</span><span></span><span>Q stm/p0</span><span>P</span><span>U</span><span>v</span></div>`;
+  el.innerHTML = head + roots.map(ch => render(ch, String(ch.action_id), maxN)).join("");
+}
+
+function dbgTreeRowClick(pathStr) {
+  // Node click = expand/collapse + preview its line on the board (M10).
+  const tree = dbgFreshData("tree");
+  const node = tree && dbgTreeNodeByPath(tree.tree, pathStr);
+  if (!node) return;
+  if ((node.children || []).length) {
+    const pvSet = new Set();
+    let acc = "";
+    for (const id of tree.pv || []) {
+      acc = acc ? `${acc}/${id}` : String(id);
+      pvSet.add(acc);
+    }
+    const open = dbg.treeOpen.has(pathStr) ? dbg.treeOpen.get(pathStr) : pvSet.has(pathStr);
+    dbg.treeOpen.set(pathStr, !open);
+  }
+  dbg.treePreview = { key: dbgCurrentKey(), ids: dbgTreePathIds(pathStr) };
+  dbgRenderTree();
+  dbgRenderBoard();
+}
+
+function dbgRenderScatter() {
+  const el = dbgEl("dbgScatter");
+  if (!el) return;
+  const tree = dbgFreshData("tree");
+  const kids = tree && tree.tree ? (tree.tree.children || []) : [];
+  if (!kids.length) {
+    el.innerHTML = `<div class="dbg-empty-note">Q vs prior scatter after a tree run</div>`;
+    return;
+  }
+  const W = 340, H = 190, padL = 34, padR = 10, padT = 12, padB = 20;
+  const ps = kids.map(k => Math.max(k.p, 1e-4));
+  const lo = Math.log(Math.min(...ps));
+  const hi = Math.log(Math.max(Math.max(...ps), Math.min(...ps) * 1.0001));
+  const xOf = p => padL + (W - padL - padR) * ((Math.log(Math.max(p, 1e-4)) - lo) / Math.max(1e-9, hi - lo));
+  const yOf = q => padT + (H - padT - padB) * (1 - (q + 1) / 2);
+  const maxN = Math.max(1, ...kids.map(k => k.n));
+  const rootQ = tree.tree.qm;
+  const recorded = (!dbg.nav.acts.length && dbg.gameActs.length > dbg.nav.ply) ? dbg.gameActs[dbg.nav.ply] : null;
+  const midX = padL + (W - padL - padR) / 2;
+  let html = `<line x1="${padL}" y1="${yOf(rootQ).toFixed(1)}" x2="${W - padR}" y2="${yOf(rootQ).toFixed(1)}" stroke="#2c3d50" stroke-dasharray="3 3"></line>`
+    + `<line x1="${midX.toFixed(1)}" y1="${padT}" x2="${midX.toFixed(1)}" y2="${H - padB}" stroke="#2c3d50" stroke-dasharray="3 3"></line>`
+    + `<text x="${padL + 2}" y="${padT + 9}" fill="#5a6b7a" font-size="9">under-read</text>`
+    + `<text x="${W - padR - 2}" y="${padT + 9}" fill="#5a6b7a" font-size="9" text-anchor="end">trusted</text>`
+    + `<text x="${padL + 2}" y="${H - padB - 3}" fill="#5a6b7a" font-size="9">ignored</text>`
+    + `<text x="${W - padR - 2}" y="${H - padB - 3}" fill="#5a6b7a" font-size="9" text-anchor="end">over-read</text>`
+    + `<text x="4" y="${yOf(1) + 8}" fill="#5a6b7a" font-size="10">Q+1</text>`
+    + `<text x="4" y="${yOf(-1)}" fill="#5a6b7a" font-size="10">−1</text>`
+    + `<text x="${W / 2}" y="${H - 4}" fill="#5a6b7a" font-size="10" text-anchor="middle">prior (log)</text>`;
+  for (const k of kids) {
+    const r2 = 2 + 6 * Math.sqrt(k.n / maxN);
+    const isBest = tree.best_action_id === k.action_id;
+    const isRec = recorded != null && recorded === k.action_id;
+    html += `<circle cx="${xOf(k.p).toFixed(1)}" cy="${yOf(k.qm).toFixed(1)}" r="${r2.toFixed(1)}" fill="${isBest ? "var(--green)" : "var(--accent)"}" opacity="0.75"${isRec ? ` stroke="var(--yellow)" stroke-width="2"` : ""}><title>${k.q},${k.r} · N ${k.n} · Q ${k.qm.toFixed(3)} · P ${(k.p * 100).toFixed(2)}%${isBest ? " · best" : ""}${isRec ? " · recorded move" : ""}</title></circle>`;
+    if (isBest || isRec) {
+      html += `<text x="${(xOf(k.p) + r2 + 2).toFixed(1)}" y="${(yOf(k.qm) + 3).toFixed(1)}" fill="${isBest ? "var(--green)" : "var(--yellow)"}" font-size="9">${k.q},${k.r}</text>`;
+    }
+  }
+  el.innerHTML = `<svg viewBox="0 0 ${W} ${H}">${html}</svg>`;
+}
+
+// ---- visit ladder (spec S10) ---------------------------------------------------
+
+async function dbgRunLadder() {
+  const nav = dbg.nav;
+  if (!nav.ckptA || !dbg.position) {
+    debugSetStatus("Pick a checkpoint and position first.", "error");
+    return;
+  }
+  if (dbg.ladderBusy) return;
+  const key = dbgCurrentKey();
+  dbg.ladderBusy = true;
+  dbg.ladder = { key, rungs: [] };
+  dbgRenderLadder();
+  const params = dbgTreeParams();
+  try {
+    for (const visits of [64, 128, 256, 512, 1024]) {
+      if (dbgCurrentKey() !== key) break;  // user moved on — stop climbing
+      debugSetStatus(`Visit ladder: ${visits} visits…`, "busy");
+      const body = Object.assign(dbgRequestBody(nav.ckptA), { visits, c_puct: params.c_puct, seed: params.seed });
+      const s = await debugFetchJson("/api/debug/search", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      dbg.ladder.rungs.push({ visits, best: s.best, best_action_id: s.best_action_id, root_value: s.root_value });
+      dbgRenderLadder();
+    }
+    debugSetStatus("");
+  } catch (e) {
+    debugSetStatus(`Ladder: ${e.message}`, "error");
+  } finally {
+    dbg.ladderBusy = false;
+    dbgRenderLadder();
+  }
+}
+
+function dbgRenderLadder() {
+  const el = dbgEl("dbgLadder");
+  if (!el) return;
+  const l = dbg.ladder && dbg.ladder.key === dbgCurrentKey() ? dbg.ladder : null;
+  const btn = `<button type="button" id="dbgLadderRun" class="dbg-mini-btn"${dbg.ladderBusy ? " disabled" : ""}>${dbg.ladderBusy ? "Running…" : (l && l.rungs.length ? "Re-run" : "Run")}</button>`;
+  if (!l || !l.rungs.length) {
+    el.innerHTML = `<div class="dbg-flex-head"><span class="dbg-muted">Visit ladder (64 → 1024): best move per budget</span>${btn}</div>`;
+    return;
+  }
+  let flip = null;
+  for (let i = 1; i < l.rungs.length; i++) {
+    if (l.rungs[i].best_action_id !== l.rungs[i - 1].best_action_id) flip = l.rungs[i].visits;
+  }
+  const rows = l.rungs.map(r => `<div class="dbg-move-row${flip === r.visits ? " dbg-move-best" : ""}"><span></span><span>${r.visits}v</span><span>${r.best ? `${r.best.q},${r.best.r}` : "—"}</span><span>${r.root_value.toFixed(3)}</span><span>${flip === r.visits ? "flip" : ""}</span><span></span></div>`).join("");
+  el.innerHTML = `<div class="dbg-flex-head"><span class="dbg-muted">Visit ladder${flip != null ? ` · best flips at ${flip}v` : " · stable best"}</span>${btn}</div>`
+    + `<div class="dbg-move-row dbg-move-head"><span></span><span>visits</span><span>best</span><span>root v</span><span></span><span></span></div>` + rows;
+}
+
+// ---- pin tray (spec S2) ----------------------------------------------------------
+
+function dbgPinsStorageKey() {
+  return `hexoDbgPins:${dbg.nav.run}`;
+}
+
+function dbgLoadPins() {
+  if (!dbg.nav.run || dbg.pinsRun === dbg.nav.run) return;
+  dbg.pinsRun = dbg.nav.run;
+  try {
+    const raw = JSON.parse(window.localStorage.getItem(dbgPinsStorageKey()) || "[]");
+    dbg.pins = Array.isArray(raw) ? raw : [];
+  } catch (_e) {
+    dbg.pins = [];
+  }
+  dbgRenderPinTray();
+}
+
+function dbgSavePins() {
+  try {
+    window.localStorage.setItem(dbgPinsStorageKey(), JSON.stringify(dbg.pins));
+  } catch (e) {
+    debugSetStatus(`Pins: ${e.message}`, "error");
+  }
+  dbgRenderPinTray();
+}
+
+function dbgCapPins() {
+  // Soft cap 24 — drop oldest WITH a warning, never silently (spec §1.6).
+  let dropped = 0;
+  while (dbg.pins.length > 24) {
+    dbg.pins.shift();
+    dropped++;
+  }
+  if (dropped) debugSetStatus(`Pin tray over 24 — ${dropped} oldest pin${dropped > 1 ? "s" : ""} dropped.`, "info");
+}
+
+function dbgAddPin() {
+  const nav = dbg.nav;
+  if (!nav.run || !nav.path || nav.ply == null) {
+    debugSetStatus("No position to pin.", "error");
+    return;
+  }
+  dbgLoadPins();
+  const a = dbgFreshData("analysis");
+  const s = dbgFreshData("search");
+  const best = s && s.best
+    ? `${s.best.q},${s.best.r}`
+    : (a && a.policy && a.policy[0] ? `${a.policy[0].q},${a.policy[0].r}` : null);
+  dbg.pins.push({
+    ts: Date.now(),
+    note: "",
+    nav: Object.assign({}, nav, { acts: nav.acts.slice() }),
+    snap: {
+      value: a ? a.value : null,
+      best,
+      ckpt: dbgCkptShort(nav.ckptA),
+      thumb: debugCurrentPlacements().map(p => ({ q: p.q, r: p.r, player: p.player })),
+    },
+  });
+  dbgCapPins();
+  dbgSavePins();
+  diagTap("pinned");
+}
+
+function dbgPinThumbSvg(thumb) {
+  if (!thumb || !thumb.length) return `<svg viewBox="0 0 80 80"></svg>`;
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  const pts = thumb.map(p => ({ player: p.player, c: center(p.q, p.r) }));
+  for (const p of pts) {
+    minX = Math.min(minX, p.c.x - HEX);
+    maxX = Math.max(maxX, p.c.x + HEX);
+    minY = Math.min(minY, p.c.y - HEX);
+    maxY = Math.max(maxY, p.c.y + HEX);
+  }
+  const stones = pts.map(p => `<circle cx="${p.c.x.toFixed(1)}" cy="${p.c.y.toFixed(1)}" r="${(HEX * 0.62).toFixed(1)}" fill="${playerColor(p.player)}"></circle>`).join("");
+  return `<svg viewBox="${minX.toFixed(1)} ${minY.toFixed(1)} ${(maxX - minX).toFixed(1)} ${(maxY - minY).toFixed(1)}" preserveAspectRatio="xMidYMid meet">${stones}</svg>`;
+}
+
+function dbgRenderPinTray() {
+  const chips = document.querySelector("#dbgPinTray .dbg-pin-chips");
+  if (!chips) return;
+  if (!dbg.pins.length) {
+    chips.innerHTML = `<span class="dbg-empty-note">No pinned positions</span>`;
+    return;
+  }
+  chips.innerHTML = dbg.pins.map((pin, i) => {
+    const v = pin.snap && pin.snap.value != null ? pin.snap.value.toFixed(2) : "—";
+    const branch = pin.nav && pin.nav.acts && pin.nav.acts.length ? `+${pin.nav.acts.length}` : "";
+    const label = `ply ${pin.nav ? pin.nav.ply : "?"}${branch} · ${v} · ${(pin.snap && pin.snap.ckpt) || ""}`;
+    const tip = pin.note || (pin.snap && pin.snap.best ? `best ${pin.snap.best}` : "pinned position");
+    return `<div class="dbg-pin-chip" data-pin="${i}" title="${escapeAttr(tip)}">`
+      + dbgPinThumbSvg(pin.snap && pin.snap.thumb)
+      + `<span class="dbg-muted">${escapeText(label)}</span>`
+      + `<span class="dbg-pin-chip-actions"><button type="button" class="dbg-pin-note dbg-mini-btn" data-pin="${i}" title="Edit note">✎</button><button type="button" class="dbg-pin-x dbg-mini-btn" data-pin="${i}" title="Remove pin">✕</button></span>`
+      + `</div>`;
+  }).join("");
+}
+
+function dbgRestorePin(i) {
+  const pin = dbg.pins[i];
+  if (!pin || !pin.nav) return;
+  diagTap("pin restore");
+  dbgNavigate(Object.assign({}, pin.nav, { acts: (pin.nav.acts || []).slice() }));
+}
+
+function dbgNotePin(i) {
+  dbgLoadPins();
+  const pin = dbg.pins[i];
+  if (!pin) return;
+  const note = window.prompt("Pin note:", pin.note || "");
+  if (note == null) return;
+  pin.note = note;
+  dbgSavePins();
+}
+
+function dbgRemovePin(i) {
+  dbgLoadPins();
+  dbg.pins.splice(i, 1);
+  dbgSavePins();
+}
+
+function dbgExportPins() {
+  dbgLoadPins();
+  if (!dbg.pins.length) {
+    dbgStub("No pins to export.");
+    return;
+  }
+  const blob = new Blob([JSON.stringify(dbg.pins, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `hexo-debug-pins-${dbg.nav.run || "run"}.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
+function dbgImportPins(file) {
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const data = JSON.parse(String(reader.result || "[]"));
+      if (!Array.isArray(data)) throw new Error("not a pin array");
+      dbgLoadPins();
+      dbg.pins = dbg.pins.concat(data.filter(p => p && typeof p === "object"));
+      dbgCapPins();
+      dbgSavePins();
+      debugSetStatus(`Imported ${data.length} pin${data.length === 1 ? "" : "s"}.`, "info");
+    } catch (e) {
+      debugSetStatus(`Pin import: ${e.message}`, "error");
+    }
+  };
+  reader.readAsText(file);
+}
+
+// ---- session journal (spec S3) ------------------------------------------------------
+
+function dbgJournalStorageKey() {
+  return `hexoDbgJournal:${dbg.nav.run}`;
+}
+
+function dbgLoadJournal() {
+  if (!dbg.nav.run || dbg.journalRun === dbg.nav.run) return;
+  dbg.journalRun = dbg.nav.run;
+  try {
+    const raw = JSON.parse(window.localStorage.getItem(dbgJournalStorageKey()) || "[]");
+    dbg.journal = Array.isArray(raw) ? raw : [];
+  } catch (_e) {
+    dbg.journal = [];
+  }
+  dbgRenderJournal();
+}
+
+function dbgJournalLog(analysis, ckpt, nav) {
+  // Auto-log every completed analyze: {ts, ckpt, ply/branch, value, top move}.
+  if (!nav.run) return;
+  dbgLoadJournal();
+  const top = analysis.policy && analysis.policy[0];
+  dbg.journal.push({
+    ts: Date.now(),
+    ckpt: dbgCkptShort(ckpt),
+    ply: nav.ply,
+    branch: nav.acts.length,
+    value: analysis.value,
+    top: top ? `${top.q},${top.r}` : null,
+    nav: Object.assign({}, nav, { acts: nav.acts.slice() }),
+  });
+  while (dbg.journal.length > 200) dbg.journal.shift();  // FIFO cap (spec §1.6)
+  try {
+    window.localStorage.setItem(dbgJournalStorageKey(), JSON.stringify(dbg.journal));
+  } catch (_e) { /* storage full — journal degrades to in-memory */ }
+  dbgRenderJournal();
+}
+
+function dbgRenderJournal() {
+  const list = document.querySelector("#dbgJournal .dbg-journal-list");
+  if (!list) return;
+  if (!dbg.journal.length) {
+    list.className = "dbg-journal-list dbg-empty-note";
+    list.textContent = "No analyses logged yet";
+    return;
+  }
+  list.className = "dbg-journal-list";
+  list.innerHTML = dbg.journal.slice(-40).reverse().map((e, idx) => {
+    const i = dbg.journal.length - 1 - idx;
+    const t = new Date(e.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    return `<div class="dbg-palette-item" data-journal="${i}" title="Click to restore this position">${t} · ${escapeText(e.ckpt || "")} · ply ${e.ply}${e.branch ? `+${e.branch}` : ""} · v ${e.value != null ? e.value.toFixed(2) : "—"}${e.top ? ` · ${e.top}` : ""}</div>`;
+  }).join("");
+}
+
+function dbgClearJournal() {
+  dbg.journal = [];
+  try {
+    window.localStorage.removeItem(dbgJournalStorageKey());
+  } catch (_e) { /* ignore */ }
+  dbgRenderJournal();
+}
+
+// ---- command palette (spec S1) -------------------------------------------------------
+
+function dbgOpenPalette() {
+  const pal = dbgEl("dbgPalette");
+  const input = dbgEl("dbgPaletteInput");
+  if (!pal || !input) return;
+  dbg.paletteItems = dbgPaletteAllItems();
+  dbg.paletteIdx = 0;
+  pal.hidden = false;
+  input.value = "";
+  dbgRenderPaletteList("");
+  dbgEnsurePaletteGames();
+  window.setTimeout(() => input.focus(), 0);
+}
+
+async function dbgEnsurePaletteGames() {
+  // The palette searches BOTH sources (typing "eval" must surface evaluation
+  // files even while src=selfplay) — one lazy all-source listing per run.
+  if (!dbg.nav.run || dbg.paletteGamesRun === dbg.nav.run) return;
+  try {
+    const data = await debugFetchJson(`/api/debug/games?run=${encodeURIComponent(dbg.nav.run)}&source=all`);
+    dbg.paletteGames = data.games || [];
+    dbg.paletteGamesRun = dbg.nav.run;
+    dbg.paletteItems = dbgPaletteAllItems();
+    const input = dbgEl("dbgPaletteInput");
+    const pal = dbgEl("dbgPalette");
+    if (pal && !pal.hidden) dbgRenderPaletteList(input ? input.value : "");
+  } catch (_e) { /* palette degrades to the current-source game list */ }
+}
+
+function dbgPaletteAllItems() {
+  const items = [
+    { label: "Action: Analyze now (A)", run: () => dbgAnalyzeNow(true) },
+    { label: "Action: Run root search (S)", run: () => dbgRunSearch() },
+    { label: "Action: Run debug tree (T)", run: () => dbgRunTree() },
+    { label: "Action: Sweep game", run: () => dbgRunSweep() },
+    { label: "Action: Return to game (G)", run: () => dbgNavigate({ acts: [] }) },
+    { label: "Action: Pin current position (P)", run: () => dbgAddPin() },
+    { label: "Action: Export pins", run: () => dbgExportPins() },
+    { label: "Action: Run visit ladder", run: () => dbgRunLadder() },
+    { label: "Action: Checkpoint sweep", run: () => dbgRunCkptSweep() },
+  ];
+  const games = dbg.paletteGamesRun === dbg.nav.run && dbg.paletteGames.length ? dbg.paletteGames : dbg.games;
+  for (const g of games) {
+    items.push({
+      label: `Game file: ${g.path}`,
+      run: () => dbgNavigate({
+        src: String(g.path).startsWith("eval") ? "evaluation" : "selfplay",
+        path: g.path, rec: 0, ply: null, acts: [],
+      }),
+    });
+  }
+  for (const r of dbg.records) {
+    items.push({ label: `Record: ${dbgRecordLabel(r)}`, run: () => dbgNavigate({ rec: r.index, ply: null, acts: [] }) });
+  }
+  for (const c of dbg.checkpoints) {
+    items.push({ label: `Checkpoint: ${dbgCkptLabel(c)} (${c.name})`, run: () => dbgNavigate({ ckptA: c.name }) });
+  }
+  dbg.pins.forEach((pin, i) => {
+    items.push({
+      label: `Pin: ply ${pin.nav ? pin.nav.ply : "?"} · ${pin.note || (pin.snap && pin.snap.ckpt) || ""}`,
+      run: () => dbgRestorePin(i),
+    });
+  });
+  for (const e of dbg.journal.slice(-20)) {
+    items.push({
+      label: `Journal: ply ${e.ply}${e.branch ? `+${e.branch}` : ""} · ${e.ckpt} · v ${e.value != null ? e.value.toFixed(2) : "—"}`,
+      run: () => dbgNavigate(Object.assign({}, e.nav, { acts: ((e.nav && e.nav.acts) || []).slice() })),
+    });
+  }
+  return items;
+}
+
+function dbgPaletteFilter(qstr) {
+  const q = qstr.trim().toLowerCase();
+  const items = [];
+  const plyNum = /^(?:ply\s*)?(\d+)$/.exec(q);
+  if (plyNum) items.push({ label: `Go to ply ${plyNum[1]}`, run: () => dbgGotoPly(Number(plyNum[1])) });
+  if (!q) return items.concat(dbg.paletteItems.slice(0, 12));
+  const scored = [];
+  for (const it of dbg.paletteItems) {
+    const l = it.label.toLowerCase();
+    let score = null;
+    const sub = l.indexOf(q);
+    if (sub !== -1) score = 1000 - sub;       // substring beats subsequence
+    else {
+      let i = 0;
+      for (const ch of l) if (ch === q[i]) i++;
+      if (i >= q.length) score = 100 - l.length * 0.1;  // fuzzy subsequence
+    }
+    if (score != null) scored.push([score, it]);
+  }
+  scored.sort((x, y) => y[0] - x[0]);
+  return items.concat(scored.slice(0, 14).map(s => s[1]));
+}
+
+function dbgRenderPaletteList(qstr) {
+  const list = document.querySelector("#dbgPalette .dbg-palette-list");
+  if (!list) return;
+  dbg.paletteShown = dbgPaletteFilter(qstr);
+  dbg.paletteIdx = Math.max(0, Math.min(dbg.paletteIdx, dbg.paletteShown.length - 1));
+  list.innerHTML = dbg.paletteShown.length
+    ? dbg.paletteShown.map((it, i) => `<div class="dbg-palette-item${i === dbg.paletteIdx ? " active" : ""}" data-pal="${i}">${escapeText(it.label)}</div>`).join("")
+    : `<div class="dbg-empty-note">No matches</div>`;
+}
+
+function dbgPaletteExec(i) {
+  const it = dbg.paletteShown && dbg.paletteShown[i];
+  const pal = dbgEl("dbgPalette");
+  if (pal) pal.hidden = true;
+  if (!it) return;
+  try {
+    it.run();
+  } catch (e) {
+    reportError("palette: " + (e && (e.stack || e.message) || e));
+  }
+}
+
+// ---- checkpoint sweep dock tab (spec S4) ----------------------------------------------
+
+async function dbgRunCkptSweep() {
+  const nav0 = Object.assign({}, dbg.nav, { acts: dbg.nav.acts.slice() });
+  if (!nav0.run || !nav0.path || nav0.ply == null) {
+    debugSetStatus("No position for the checkpoint sweep.", "error");
+    return;
+  }
+  if (!dbg.checkpoints.length) {
+    debugSetStatus("No checkpoints in this run.", "error");
+    return;
+  }
+  if (dbg.ckptSweep && dbg.ckptSweep.running) {
+    dbgStub("Checkpoint sweep already running — Stop aborts it.");
+    return;
+  }
+  const sweep = { rows: [], running: true, abort: false, refTop: null, refTopCell: "" };
+  dbg.ckptSweep = sweep;
+  const aCur = dbgFreshData("analysis");
+  if (aCur && aCur.policy && aCur.policy[0]) {
+    sweep.refTop = aCur.policy[0].action_id;
+    sweep.refTopCell = `${aCur.policy[0].q},${aCur.policy[0].r}`;
+  }
+  const list = dbg.checkpoints.slice()
+    .sort((x, y) => (x.epoch != null ? x.epoch : 1e12) - (y.epoch != null ? y.epoch : 1e12));
+  const sameNav = () => dbg.nav.run === nav0.run && dbg.nav.path === nav0.path
+    && dbg.nav.rec === nav0.rec && dbg.nav.ply === nav0.ply
+    && dbg.nav.acts.join(",") === nav0.acts.join(",");
+  const bodyBase = nav0.acts.length
+    ? { run: nav0.run, action_ids: (dbgRecordedActs() || []).slice(0, nav0.ply).concat(nav0.acts) }
+    : { run: nav0.run, path: nav0.path, record: nav0.rec, ply: nav0.ply };
+  dbgRenderCkptSweep();
+  try {
+    for (const ck of list) {
+      if (sweep.abort || !sameNav()) break;
+      const key = dbgCacheKey(nav0, ck.name);
+      const entry = dbgCacheEntry(key);
+      let analysis = entry.analysis;
+      if (!analysis) {
+        debugSetStatus(`Checkpoint sweep: ${dbgCkptLabel(ck)}…`, "busy");
+        analysis = await debugFetchJson("/api/debug/analyze", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(Object.assign({ checkpoint: ck.name }, bodyBase)),
+        });
+        entry.analysis = analysis;  // lands in the M12 cache — flipping ckptA later is free
+      }
+      const top = analysis.policy && analysis.policy[0];
+      sweep.rows.push({
+        name: ck.name,
+        label: ck.epoch != null ? `e${ck.epoch}` : ck.name.replace(/\.pt$/, ""),
+        value: analysis.value,
+        top: top ? top.action_id : null,
+        topCell: top ? `${top.q},${top.r}` : "",
+      });
+      dbgRenderCkptSweep();
+    }
+    if (!sweep.refTop) {
+      const own = sweep.rows.find(r => r.name === nav0.ckptA);
+      if (own) {
+        sweep.refTop = own.top;
+        sweep.refTopCell = own.topCell;
+      }
+    }
+    debugSetStatus(sweep.abort ? "Checkpoint sweep stopped." : "");
+  } catch (e) {
+    debugSetStatus(`Checkpoint sweep: ${e.message}`, "error");
+  } finally {
+    sweep.running = false;
+    dbgRenderCkptSweep();
+  }
+}
+
+function dbgRenderCkptSweep() {
+  const el = document.querySelector("#dbgCkptSweep .dbg-ckpt-sweep-chart");
+  if (!el) return;
+  const cs = dbg.ckptSweep;
+  const btn = `<button type="button" id="dbgCkptSweepRun" class="dbg-mini-btn"${cs && cs.running ? " disabled" : ""}>${cs && cs.running ? "Running…" : (cs && cs.rows.length ? "Re-run on current position" : "Run on current position")}</button>`;
+  if (!cs || !cs.rows.length) {
+    el.innerHTML = `<div class="dbg-flex-head"><span class="dbg-empty-note">${cs && cs.running ? "Evaluating checkpoints…" : "Not run"}</span>${btn}</div>`;
+    return;
+  }
+  const rows = cs.rows;
+  const W = 1000, H = 200, padL = 36, padR = 12, padT = 12, padB = 26;
+  const xs = i => padL + (W - padL - padR) * (rows.length > 1 ? i / (rows.length - 1) : 0.5);
+  const y = v => padT + (H - padT - padB) * (1 - (v + 1) / 2);
+  let html = `<line x1="${padL}" y1="${y(0)}" x2="${W - padR}" y2="${y(0)}" stroke="#2c3d50"></line>`
+    + `<text x="4" y="${y(1) + 4}" fill="#5a6b7a" font-size="11">+1</text>`
+    + `<text x="4" y="${y(-1) + 2}" fill="#5a6b7a" font-size="11">−1</text>`
+    + `<path d="${rows.map((r, i) => `${i ? "L" : "M"}${xs(i).toFixed(1)},${y(r.value).toFixed(1)}`).join("")}" fill="none" stroke="var(--accent)" stroke-width="2"></path>`;
+  const labelEvery = Math.max(1, Math.ceil(rows.length / 12));
+  rows.forEach((r, i) => {
+    const agree = cs.refTop != null && r.top === cs.refTop;
+    html += `<circle cx="${xs(i).toFixed(1)}" cy="${y(r.value).toFixed(1)}" r="3.5" fill="${agree ? "var(--green)" : "var(--accent)"}"><title>${r.label} · v ${r.value.toFixed(3)} · top ${r.topCell || "—"}${agree ? " (= current top)" : ""}</title></circle>`;
+    if (agree) html += `<line x1="${xs(i).toFixed(1)}" y1="${H - padB + 3}" x2="${xs(i).toFixed(1)}" y2="${H - padB + 10}" stroke="var(--green)" stroke-width="2"></line>`;
+    if (i % labelEvery === 0) html += `<text x="${xs(i).toFixed(1)}" y="${H - 4}" fill="#5a6b7a" font-size="10" text-anchor="middle">${r.label}</text>`;
+  });
+  el.innerHTML = `<div class="dbg-flex-head"><span class="dbg-muted">value (stm) per checkpoint · green tick = top move matches current${cs.refTopCell ? ` (${cs.refTopCell})` : ""}</span>${btn}</div>`
+    + `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${html}</svg>`;
+}
+
+// ---- ply±1 prefetch (spec S7) ---------------------------------------------------------
+
+function dbgAbortPrefetch() {
+  if (dbg.prefetchAbort) {
+    dbg.prefetchAbort.abort();
+    dbg.prefetchAbort = null;
+  }
+}
+
+function dbgMaybePrefetch() {
+  // Client-side only, at most ONE low-priority in-flight request for ply±1,
+  // never for checkpoint B, only when the worker dot is green and the user has
+  // nothing pending. Aborted the instant the user acts (dbgNavigate).
+  const nav = dbg.nav;
+  if (dbg.prefetchAbort || dbg.loading || nav.acts.length || nav.ply == null) return;
+  if (!dbg.worker || !dbg.worker.alive || !nav.ckptA || !nav.path) return;
+  const total = dbgRecordedTotal();
+  let target = null;
+  for (const d of [1, -1]) {
+    const p = nav.ply + d;
+    if (p < 0 || (total != null && p > total)) continue;
+    const key = dbgCacheKey(Object.assign({}, nav, { ply: p }), nav.ckptA);
+    const entry = dbg.cache.get(key);
+    if (!entry || !entry.position || !entry.analysis) {
+      target = { ply: p, key };
+      break;
+    }
+  }
+  if (!target) return;
+  const ctl = new AbortController();
+  dbg.prefetchAbort = ctl;
+  (async () => {
+    try {
+      const entry = dbgCacheEntry(target.key);
+      if (!entry.position) {
+        const params = new URLSearchParams({ run: nav.run, path: nav.path, record: String(nav.rec), ply: String(target.ply) });
+        const res = await fetch(`/api/debug/position?${params.toString()}`, { signal: ctl.signal });
+        const data = await safeJson(res);
+        if (!res.ok || !data || data.error) return;
+        entry.position = data;
+      }
+      if (!entry.analysis && !entry.analysisPending) {
+        entry.analysisPending = true;
+        try {
+          const body = { run: nav.run, checkpoint: nav.ckptA, path: nav.path, record: nav.rec, ply: target.ply };
+          const res = await fetch("/api/debug/analyze", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+            signal: ctl.signal,
+          });
+          const data = await safeJson(res);
+          if (res.ok && data && !data.error) entry.analysis = data;
+        } finally {
+          entry.analysisPending = false;
+        }
+      }
+    } catch (_e) { /* aborted or failed — prefetch is best-effort */ }
+    finally {
+      if (dbg.prefetchAbort === ctl) dbg.prefetchAbort = null;
+    }
+  })();
+}
+
+// ---- INPUTS tab: featurizer planes (spec S9, dense lineage only) -----------------------
+
+async function dbgEnsureInputs(force) {
+  const nav = dbg.nav;
+  if (!nav.run || !nav.path || nav.ply == null || !nav.ckptA) return;
+  const key = dbgCurrentKey();
+  const entry = dbgCacheEntry(key);
+  if (force) delete entry.planes;
+  if (entry.planes !== undefined || entry.planesPending) {
+    dbgRenderInputs();
+    return;
+  }
+  entry.planesPending = true;
+  dbgRenderInputs();
+  try {
+    const body = Object.assign(dbgRequestBody(nav.ckptA), { planes: true });
+    const data = await debugFetchJson("/api/debug/analyze", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    entry.planes = data.input_planes || null;  // null = hexgt lineage (graph-featurized)
+    if (!entry.analysis) entry.analysis = data;  // a planes analyze is a full analyze
+  } catch (e) {
+    debugSetStatus(`Inputs: ${e.message}`, "error");
+  } finally {
+    entry.planesPending = false;
+  }
+  if (key === dbgCurrentKey()) {
+    dbgRenderInputs();
+    dbgSyncPlaneSelect();
+    if (dbg.nav.mode === "plane") dbgRenderBoard();
+  }
+}
+
+function dbgRenderInputs() {
+  const el = dbgEl("dbgPlanes");
+  if (!el) return;
+  const entry = dbg.cache.get(dbgCurrentKey());
+  if (entry && entry.planesPending) {
+    el.__dbgPlanesSig = "";
+    el.innerHTML = `<div class="dbg-empty-note">Loading input planes…</div>`;
+    return;
+  }
+  const planes = entry ? entry.planes : undefined;
+  if (planes === undefined) {
+    el.__dbgPlanesSig = "";
+    el.innerHTML = `<div class="dbg-empty-note">Featurizer input planes (dense lineage only) load on first open</div>`;
+    return;
+  }
+  if (planes === null) {
+    el.__dbgPlanesSig = "";
+    el.innerHTML = `<div class="dbg-empty-note">n/a for hexgt lineage (graph featurizer — no input planes)</div>`;
+    return;
+  }
+  const dimH = (planes.shape && planes.shape[1]) || 41;
+  const dimW = (planes.shape && planes.shape[2]) || 41;
+  const sig = `${dbgCurrentKey()}|${(planes.names || []).length}`;
+  if (el.__dbgPlanesSig === sig) return;  // canvases already drawn for this key
+  el.__dbgPlanesSig = sig;
+  el.innerHTML = (planes.names || []).map((name, i) =>
+    `<div class="dbg-plane-cell"><canvas data-plane="${i}" width="${dimW}" height="${dimH}"></canvas>${escapeText(name)}</div>`).join("");
+  el.querySelectorAll("canvas[data-plane]").forEach(cv => {
+    const i = Number(cv.dataset.plane);
+    const data = (planes.data && planes.data[i]) || [];
+    const ctx = cv.getContext("2d");
+    const img = ctx.createImageData(dimW, dimH);
+    let maxV = 0;
+    for (const v of data) maxV = Math.max(maxV, Math.abs(v));
+    maxV = maxV || 1;
+    for (let px = 0; px < data.length && px < dimW * dimH; px++) {
+      const t = Math.max(-1, Math.min(1, data[px] / maxV));
+      const o = px * 4;
+      img.data[o] = t < 0 ? 255 : 39;       // negative -> p1 red, positive -> accent
+      img.data[o + 1] = t < 0 ? 86 : 215;
+      img.data[o + 2] = t < 0 ? 80 : 230;
+      img.data[o + 3] = Math.round(255 * Math.abs(t));
+    }
+    ctx.putImageData(img, 0, 0);
+  });
+}
+
+function dbgSyncPlaneSelect() {
+  const sel = dbgEl("dbgPlaneSelect");
+  if (!sel) return;
+  const entry = dbg.cache.get(dbgCurrentKey());
+  const names = (entry && entry.planes && entry.planes.names) || [];
+  const html = names.map((nm, i) => `<option value="${i}">${escapeText(nm)}</option>`).join("");
+  if (sel.__dbgSig !== html) {
+    const prev = sel.value;
+    sel.__dbgSig = html;
+    sel.innerHTML = html || `<option value="0">plane 0</option>`;
+    sel.value = prev;
+    if (!sel.value) sel.value = "0";
+  }
+}
+
+// ---- COMPARE helpers (spec S5 + client Δ overlay) ---------------------------------------
+
+function dbgAnalysisBFresh() {
+  const nav = dbg.nav;
+  if (!nav.ckptB) return null;
+  return dbg.keys.analysisB === dbgCacheKey(nav, nav.ckptB) ? dbg.analysisB : null;
+}
+
+function dbgClearCmpHeat() {
+  if (!dbg.cmpHeat) return;
+  dbg.cmpHeat = false;
+  const btn = dbgEl("dbgCmpHeat");
+  if (btn) btn.classList.remove("active");
+}
+
+function dbgToggleCmpHeat() {
+  if (!dbg.nav.ckptB) {
+    dbgStub("Select checkpoint B in the context strip first.");
+    return;
+  }
+  dbg.cmpHeat = !dbg.cmpHeat;
+  const btn = dbgEl("dbgCmpHeat");
+  if (btn) btn.classList.toggle("active", dbg.cmpHeat);
+  dbgRenderBoard();
+}
+
+function dbgToggleSplit(on) {
+  if (on && !dbg.nav.ckptB) {
+    dbgStub("Select checkpoint B in the context strip first.");
+    const cb = dbgEl("dbgCmpSplit");
+    if (cb) cb.checked = false;
+    return;
+  }
+  dbg.split = on;
+  const wrap = document.querySelector(".dbg-board-wrap");
+  if (wrap) wrap.classList.toggle("dbg-split", on);
+  const svgB = dbgEl("dbgBoardSvgB");
+  if (svgB) svgB.hidden = !on;
+  const cb = dbgEl("dbgCmpSplit");
+  if (cb) cb.checked = on;
+  dbgRenderBoard();
+}
+
+function dbgRenderBoardB() {
+  // Half-size B board for the A/B split (S5): same cells (dbg.cellIndex carries
+  // the A render's geometry), heat = checkpoint B's prior, shared view/zoom.
+  const svgB = dbgEl("dbgBoardSvgB");
+  if (!svgB || !dbg.split) return;
+  const pos = dbg.position;
+  if (!pos) {
+    svgB.innerHTML = "";
+    return;
+  }
+  if (dbg.view) svgB.setAttribute("viewBox", `${dbg.view.x} ${dbg.view.y} ${dbg.view.width} ${dbg.view.height}`);
+  svgB.setAttribute("preserveAspectRatio", "xMidYMid meet");
+  const b = dbgAnalysisBFresh();
+  const heatB = new Map();
+  let maxP = 0;
+  if (b) {
+    for (const row of b.policy || []) {
+      heatB.set(`${row.q},${row.r}`, row.p);
+      maxP = Math.max(maxP, row.p);
+    }
+  }
+  let html = "";
+  for (const cell of dbg.cellIndex.values()) {
+    if (cell.x == null) continue;
+    const isStone = Boolean(cell.placement);
+    const fill = isStone ? playerColor(cell.placement.player) : "#101924";
+    html += `<path class="dbg-cell" d="${path(cell.x, cell.y, HEX - 1)}" fill="${fill}" stroke="${isStone ? "#708296" : "#2c3d50"}" stroke-width="1" opacity="${isStone ? "1" : "0.7"}" data-q="${cell.q}" data-r="${cell.r}"></path>`;
+    const p = heatB.get(cell.key);
+    if (!isStone && p != null && maxP > 0) {
+      let t = p / maxP;
+      if (dbg.logScale) t = Math.log1p(99 * t) / Math.log1p(99);
+      if (t > 0.015) html += `<path d="${path(cell.x, cell.y, HEX - 2)}" fill="var(--accent)" opacity="${(dbg.opacity * (0.10 + 0.90 * t)).toFixed(3)}" pointer-events="none"></path>`;
+    }
+  }
+  if (!b && dbg.view) {
+    html += `<text x="${(dbg.view.x + 8).toFixed(1)}" y="${(dbg.view.y + 18).toFixed(1)}" fill="#5a6b7a" font-size="12">B analysis pending…</text>`;
+  }
+  svgB.innerHTML = html;
+}
+
+// ---- rendering ---------------------------------------------------------------
+
+function dbgRenderAll() {
+  try {
+    dbgSyncControls();
+    dbgRenderCrumb();
+    dbgRenderPlyRail();
+    dbgRenderBoard();
+    dbgRenderBranchBar();
+    dbgRenderHeads();
+    dbgRenderSearchPanel();
+    dbgRenderTargets();
+    dbgRenderComparePanel();
+    dbgRenderCkptPanel();
+    if (dbg.nav.tab === "inputs") {
+      dbgRenderInputs();
+      dbgSyncPlaneSelect();
+    }
+    dbgRenderDockChart();
+    dbgUpdateStaleDots();
+  } catch (e) {
+    reportError("dbgRenderAll: " + (e && (e.stack || e.message) || e));
+  }
+}
+
+function dbgSyncSelect(id, html, value) {
+  const sel = dbgEl(id);
+  if (!sel) return;
+  if (sel.__dbgSig !== html) {
+    sel.__dbgSig = html;
+    sel.innerHTML = html;
+  }
+  sel.value = value;
+}
+
+function dbgCkptLabel(c) {
+  const label = c.epoch != null ? `epoch ${c.epoch}` : c.name.replace(/\.pt$/, "");
+  return c.graft ? `${label} · ${c.graft}` : label;
+}
+
+function dbgCkptShort(name) {
+  const ck = dbg.checkpoints.find(c => c.name === name);
+  return ck && ck.epoch != null ? `e${ck.epoch}` : String(name).replace(/\.pt$/, "");
+}
+
+function dbgRecordLabel(r) {
+  // Per-record metadata chips: "g3 · 142mv · P1 · running".
+  const win = r.winner ? ` · ${String(r.winner).replace("player", "P")}` : "";
+  const status = r.status && r.status !== "final" ? ` · ${r.status}` : "";
+  return `g${r.index} · ${r.actions}mv${win}${status}`;
+}
+
+function dbgSyncControls() {
+  const nav = dbg.nav;
+  const runHtml = trainingRuns.length
+    ? trainingRuns.map(r => `<option value="${escapeAttr(r.name)}">${escapeText(r.name)}</option>`).join("")
+    : `<option value="">No runs</option>`;
+  dbgSyncSelect("dbgCtxRun", runHtml, nav.run);
+  const srcSel = dbgEl("dbgCtxSource");
+  if (srcSel) srcSel.value = nav.src;
+  const fileHtml = dbg.games.length
+    ? dbg.games.map(g => `<option value="${escapeAttr(g.path)}">${escapeText(g.path)}</option>`).join("")
+    : `<option value="">No ${escapeText(nav.src)} games</option>`;
+  dbgSyncSelect("dbgCtxFile", fileHtml, nav.path);
+  const recHtml = dbg.records.length
+    ? dbg.records.map(r => `<option value="${r.index}">${escapeText(dbgRecordLabel(r))}</option>`).join("")
+    : `<option value="0">g0</option>`;
+  dbgSyncSelect("dbgCtxRecord", recHtml, String(nav.rec));
+  const ckptOptions = dbg.checkpoints.map(c => `<option value="${escapeAttr(c.name)}">${escapeText(dbgCkptLabel(c))}</option>`).join("");
+  dbgSyncSelect("dbgCtxCkptA", ckptOptions || `<option value="">—</option>`, nav.ckptA);
+  dbgSyncSelect("dbgCtxCkptB", `<option value="">—</option>` + ckptOptions, nav.ckptB);
+  document.querySelectorAll("#dbgTabs [data-tab]").forEach(b => b.classList.toggle("active", b.dataset.tab === nav.tab));
+  for (const tab of DBG_TABS) {
+    const panel = dbgEl(DBG_TAB_IDS[tab]);
+    if (panel) panel.classList.toggle("active", tab === nav.tab);
+  }
+  document.querySelectorAll("#dbgModeBar [data-mode]").forEach(b => b.classList.toggle("active", b.dataset.mode === nav.mode));
+  const plane = dbgEl("dbgPlaneSelect");
+  if (plane) plane.hidden = nav.mode !== "plane";
+}
+
+function dbgRenderCrumb() {
+  const el = dbgEl("dbgCtxCrumb");
+  if (!el) return;
+  const nav = dbg.nav;
+  if (!nav.run) {
+    el.textContent = "no position loaded";
+    return;
+  }
+  const parts = [nav.run];
+  if (nav.path) {
+    parts.push(String(nav.path).split("/").pop());
+    parts.push(`g${nav.rec}`);
+  }
+  const total = dbgRecordedTotal();
+  if (nav.ply != null) parts.push(`ply ${nav.ply}${total != null ? "/" + total : ""}`);
+  if (nav.acts.length) parts.push(`branch +${nav.acts.length}`);
+  if (nav.ckptA) parts.push(dbgCkptShort(nav.ckptA) + (nav.ckptB ? ` vs ${dbgCkptShort(nav.ckptB)}` : ""));
+  el.textContent = parts.join(" · ");
+}
+
+function dbgRenderWorkerDot(state2) {
+  const el = dbgEl("dbgCtxWorkerDot");
+  if (!el) return;
+  el.classList.toggle("ok", state2 === "ok");
+  el.classList.toggle("err", state2 === "err");
+  const w = dbg.worker;
+  el.title = w
+    ? `Debug worker: ${w.alive ? "alive" : "idle"} · ${w.cached_results} cached · ${w.mode}`
+    : (state2 === "err" ? "Debug worker: error" : "Debug worker: unknown");
+}
+
+function dbgRenderPlyRail() {
+  const pos = dbg.position;
+  const totalRec = dbgRecordedTotal();
+  const total = totalRec != null ? totalRec : (pos ? pos.debug.total : 0);
+  const ply = dbg.nav.ply != null ? Math.min(dbg.nav.ply, total || dbg.nav.ply) : (pos ? pos.debug.ply : 0);
+  const readout = dbgEl("dbgPlyReadout");
+  if (readout) readout.textContent = `${ply}/${total}`;
+  const slider = dbgEl("dbgPlySlider");
+  if (slider) {
+    slider.max = String(total);
+    slider.value = String(ply);
+    slider.disabled = !pos;
+  }
+  const sweep = dbgSweepData();
+  // The classic slider is the no-sweep fallback (spec §1.2); once the wrongness
+  // strip is colored it takes over as the scrubber.
+  const sliderWrap = document.querySelector(".dbg-ply-slider-wrap");
+  if (sliderWrap) sliderWrap.hidden = Boolean(sweep);
+  const strip = dbgEl("dbgPlyStrip");
+  if (!strip) return;
+  // Flat neutral rows until a game error sweep colors them (M9): background =
+  // policy KL, right 30% tinted by |value error|, blunder/top-1-miss markers.
+  const sig = `${total}|${sweep ? `${dbgSweepKey()}#${sweep.version}` : 0}`;
+  if (strip.__dbgSig !== sig) {
+    strip.__dbgSig = sig;
+    let maxKl = 0;
+    const blunders = sweep ? new Set(dbgBlunders(sweep)) : null;
+    if (sweep) for (const p of sweep.plies) if (p.kl != null) maxKl = Math.max(maxKl, p.kl);
+    let html = "";
+    for (let i = 1; i <= total; i++) {
+      const top = ((i - 1) / total) * 100;
+      const row = sweep ? sweep.byPly.get(i) : null;  // sweep row = position AT ply i
+      let cls = "dbg-ply-row";
+      let style = "";
+      let inner = "";
+      let title = `ply ${i}`;
+      if (row) {
+        if (row.kl != null && maxKl > 0) {
+          const t = Math.min(1, row.kl / maxKl);
+          style = `background:rgba(255,99,90,${(0.05 + 0.65 * t).toFixed(3)});`;
+          title += ` · KL ${row.kl.toFixed(3)}`;
+        }
+        const verr = row.value_err_z != null ? Math.abs(row.value_err_z)
+          : (row.value_err_soft != null ? Math.abs(row.value_err_soft) : null);
+        if (verr != null) {
+          inner = `<span class="dbg-ply-verr" style="background:rgba(245,197,66,${Math.min(0.85, verr / 2).toFixed(3)})"></span>`;
+          title += ` · |v err| ${verr.toFixed(2)}`;
+        }
+        if (blunders && blunders.has(i)) {
+          cls += " dbg-ply-blunder";
+          title += " · blunder";
+        }
+        if (row.top1_match === false) {
+          cls += " dbg-ply-miss";
+          title += " · top-1 miss";
+        }
+      }
+      html += `<div class="${cls}" data-ply="${i}" style="top:${top.toFixed(3)}%;height:${(100 / total).toFixed(3)}%;${style}" title="${title}">${inner}</div>`;
+    }
+    strip.innerHTML = html;
+  }
+  strip.querySelectorAll(".dbg-ply-cur").forEach(rowEl => rowEl.classList.remove("dbg-ply-cur"));
+  const cur = strip.querySelector(`[data-ply="${ply}"]`);
+  if (cur) cur.classList.add("dbg-ply-cur");
+}
+
+// ---- board heat (spec M3/M5) ---------------------------------------------------
+
+function dbgHeatForMode(mode) {
+  // One heat source per render: {values: Map("q,r" -> number), scale, min, max,
+  // note}. Modes without their data yet return an empty map + a legend note.
+  const out = { mode, values: new Map(), scale: "seq", min: 0, max: 0, note: "" };
+  const a = dbgFreshData("analysis");
+  const s = dbgFreshData("search");
+  const tree = dbgFreshData("tree");
+  if (dbg.cmpHeat) {
+    // COMPARE Δ overlay: client-computed per-cell prior Δ(A−B), not a server
+    // mode — it overrides the base mode while toggled (spec §1.4).
+    out.mode = "cmp";
+    out.scale = "div";
+    const b = dbgAnalysisBFresh();
+    if (!a || !b) out.note = "A/B analyses pending";
+    else {
+      const bPrior = new Map((b.policy || []).map(row => [`${row.q},${row.r}`, row.p]));
+      for (const row of a.policy || []) {
+        const key = `${row.q},${row.r}`;
+        out.values.set(key, row.p - (bPrior.get(key) || 0));
+      }
+      for (const [key, p] of bPrior) if (!out.values.has(key)) out.values.set(key, -p);
+      out.note = "prior Δ(A−B)";
+    }
+    return dbgHeatFinish(out);
+  }
+  if (mode === "none") return dbgHeatFinish(out);
+  if (mode === "prior") {
+    if (!a) out.note = "analyze pending";
+    else for (const row of a.policy || []) out.values.set(`${row.q},${row.r}`, row.p);
+  } else if (mode === "visits") {
+    if (!s) out.note = "no search yet";
+    else for (const row of s.visit_policy || []) out.values.set(`${row.q},${row.r}`, row.p);
+  } else if (mode === "delta") {
+    if (!s) out.note = "no search yet";
+    else {
+      out.scale = "div";  // promoted (visits > prior) vs demoted, diverging
+      const prior = new Map((s.root_prior || []).map(row => [`${row.q},${row.r}`, row.p]));
+      for (const row of s.visit_policy || []) {
+        const key = `${row.q},${row.r}`;
+        out.values.set(key, row.p - (prior.get(key) || 0));
+      }
+      for (const [key, p] of prior) if (!out.values.has(key)) out.values.set(key, -p);
+    }
+  } else if (mode === "opp") {
+    if (!a) out.note = "analyze pending";
+    else if (!a.opp_policy || !a.opp_policy.length) out.note = "no opp head";
+    else for (const row of a.opp_policy) out.values.set(`${row.q},${row.r}`, row.p);
+  } else if (mode === "target") {
+    const rr = dbgRecordRow();
+    if (!rr || !rr.found || !rr.row) out.note = "no training row";
+    else for (const row of rr.row.policy || []) out.values.set(`${row.q},${row.r}`, row.p);
+  } else if (mode === "mismatch") {
+    const rr = dbgRecordRow();
+    if (!a) out.note = "analyze pending";
+    else if (!rr || !rr.found || !rr.row) out.note = "no training row";
+    else {
+      out.scale = "div";
+      const target = new Map((rr.row.policy || []).map(row => [`${row.q},${row.r}`, row.p]));
+      for (const row of a.policy || []) {
+        const key = `${row.q},${row.r}`;
+        out.values.set(key, row.p - (target.get(key) || 0));
+      }
+      for (const [key, p] of target) if (!out.values.has(key)) out.values.set(key, -p);
+    }
+  } else if (mode === "childq") {
+    if (!tree || !tree.tree) out.note = "run a debug tree";
+    else {
+      out.scale = "div";
+      for (const ch of tree.tree.children || []) out.values.set(`${ch.q},${ch.r}`, ch.qm);
+    }
+  } else if (mode === "plane") {
+    const entry = dbg.cache.get(dbgCurrentKey());
+    const planes = entry ? entry.planes : undefined;
+    if (entry && entry.planesPending) out.note = "loading planes…";
+    else if (planes === undefined) out.note = "open INPUTS once to load planes";
+    else if (planes === null) out.note = "n/a for hexgt lineage";
+    else {
+      out.scale = "div";
+      const sel = dbgEl("dbgPlaneSelect");
+      const idx = sel ? Number(sel.value) || 0 : 0;
+      const data = (planes.data && planes.data[idx]) || [];
+      const dim = (planes.shape && planes.shape[1]) || 41;
+      const half = Math.floor(dim / 2);
+      const pos = dbg.position;
+      const coords = pos ? (pos.legal || []).concat(debugCurrentPlacements()) : [];
+      for (const c of coords) {
+        const qi = c.q + half;
+        const ri = c.r + half;
+        if (qi < 0 || ri < 0 || qi >= dim || ri >= dim) continue;
+        const v = data[ri * dim + qi];
+        if (v) out.values.set(`${c.q},${c.r}`, v);
+      }
+      out.note = (planes.names && planes.names[idx]) || "";
+    }
+  }
+  return dbgHeatFinish(out);
+}
+
+function dbgHeatFinish(out) {
+  let min = Infinity;
+  let max = -Infinity;
+  for (const v of out.values.values()) {
+    min = Math.min(min, v);
+    max = Math.max(max, v);
+  }
+  if (!out.values.size) {
+    min = 0;
+    max = 0;
+  }
+  out.min = min;
+  out.max = max;
+  return out;
+}
+
+function dbgHeatNorm(heat, v) {
+  // Log toggle (key L) compresses ~two decades so a 0.9-prior board and a
+  // near-flat board stay visually distinguishable.
+  if (heat.scale === "div") {
+    const m = Math.max(Math.abs(heat.min), Math.abs(heat.max)) || 1;
+    let t = Math.max(-1, Math.min(1, v / m));
+    if (dbg.logScale) t = Math.sign(t) * (Math.log1p(99 * Math.abs(t)) / Math.log1p(99));
+    return t;
+  }
+  const m = heat.max > 0 ? heat.max : 1;
+  let t = Math.max(0, Math.min(1, v / m));
+  if (dbg.logScale) t = Math.log1p(99 * t) / Math.log1p(99);
+  return t;
+}
+
+function dbgFormatHeatValue(mode, v) {
+  if (mode === "childq") return `${v >= 0 ? "+" : ""}${v.toFixed(2)}`;
+  if (mode === "plane") return `${v >= 0 ? "+" : ""}${v.toFixed(2)}`;
+  const pct = v * 100;
+  const sign = (mode === "delta" || mode === "mismatch" || mode === "cmp") && v >= 0 ? "+" : "";
+  return `${sign}${pct.toFixed(1)}%`;
+}
+
+function dbgRenderLegend(heat) {
+  const minEl = dbgEl("dbgLegendMin");
+  const maxEl = dbgEl("dbgLegendMax");
+  const scaleEl = document.querySelector("#dbgLegend .dbg-legend-scale");
+  if (!minEl || !maxEl) return;
+  if (!heat || !heat.values.size) {
+    minEl.textContent = "—";
+    maxEl.textContent = heat && heat.note ? heat.note : "—";
+    if (scaleEl) {
+      scaleEl.style.background = "";
+      scaleEl.title = heat && heat.note ? heat.note : "";
+    }
+    return;
+  }
+  minEl.textContent = dbgFormatHeatValue(heat.mode, heat.min);
+  maxEl.textContent = dbgFormatHeatValue(heat.mode, heat.max);
+  if (scaleEl) {
+    scaleEl.title = heat.note || "";  // cmp/plane keep their label even with data
+    scaleEl.style.background = heat.scale === "div"
+      ? "linear-gradient(90deg, var(--p1), rgba(16,25,36,0.9), var(--green))"
+      : "";  // default CSS gradient covers the sequential scale
+  }
+}
+
+function dbgBuildHudMetrics() {
+  // One Map per render feeds the hover HUD — no linear .find in mousemove (M3).
+  const metrics = new Map();
+  const get = (q, r) => {
+    const key = `${q},${r}`;
+    let m = metrics.get(key);
+    if (!m) {
+      m = {};
+      metrics.set(key, m);
+    }
+    return m;
+  };
+  const a = dbgFreshData("analysis");
+  const s = dbgFreshData("search");
+  const tree = dbgFreshData("tree");
+  if (a) {
+    for (const row of a.policy || []) get(row.q, row.r).prior = row.p;
+    for (const row of a.opp_policy || []) get(row.q, row.r).opp = row.p;
+  }
+  if (s) for (const row of s.visit_policy || []) get(row.q, row.r).visits = row.p;
+  if (tree && tree.tree) {
+    for (const ch of tree.tree.children || []) {
+      const m = get(ch.q, ch.r);
+      m.childQ = ch.qm;
+      m.childN = ch.n;
+    }
+  }
+  const rr = dbgRecordRow();
+  if (rr && rr.found && rr.row) for (const row of rr.row.policy || []) get(row.q, row.r).target = row.p;
+  const b = dbgAnalysisBFresh();  // split board / cmp overlay HUD column (S5)
+  if (b) for (const row of b.policy || []) get(row.q, row.r).priorB = row.p;
+  return metrics;
+}
+
+function dbgRenderBoard() {
+  if (!debugBoardSvg) return;
+  if (!dbg.nav.ckptB && (dbg.cmpHeat || dbg.split)) {
+    // Compare modes die with checkpoint B (no re-render here — we ARE rendering).
+    dbgClearCmpHeat();
+    dbg.split = false;
+    const wrap = document.querySelector(".dbg-board-wrap");
+    if (wrap) wrap.classList.remove("dbg-split");
+    const svgB = dbgEl("dbgBoardSvgB");
+    if (svgB) svgB.hidden = true;
+    const cb = dbgEl("dbgCmpSplit");
+    if (cb) cb.checked = false;
+  }
+  const heat = dbgHeatForMode(dbg.nav.mode);
+  dbgRenderLegend(heat);
+  dbg.hudMetrics = dbgBuildHudMetrics();
+  const pos = dbg.position;
+  if (!pos) {
+    debugBoardSvg.innerHTML = "";
+    dbg.cellIndex = new Map();
+    return;
+  }
+
   const cells = new Map();
   const addCell = (q, r, extra) => {
     const key = `${q},${r}`;
@@ -3755,26 +5742,39 @@ function debugRenderBoard() {
   for (const c of (pos.legal || [])) addCell(c.q, c.r, { legal: true });
   const placements = debugCurrentPlacements();
   for (const p of placements) addCell(p.q, p.r, { placement: p });
-  // Candidate cells from analysis (so heat shows even off the legal set).
-  if (dbg.analysis) for (const r of dbg.analysis.policy || []) addCell(r.q, r.r, { candidate: true });
-  for (const key of heat.policy.keys()) { const [q, r] = key.split(",").map(Number); addCell(q, r, {}); }
+  // Candidate cells from the CURRENT key's analysis (so heat shows even off the
+  // legal set); a stale analysis must not add phantom cells to a new position.
+  const freshA = dbgFreshData("analysis");
+  if (freshA) for (const row of freshA.policy || []) addCell(row.q, row.r, { candidate: true });
+  for (const key of heat.values.keys()) {
+    const [q, r] = key.split(",").map(Number);
+    addCell(q, r, {});
+  }
+  dbg.cellIndex = cells;
 
   let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
   const data = [];
   for (const cell of cells.values()) {
     const c = center(cell.q, cell.r);
-    minX = Math.min(minX, c.x - HEX * 1.6); maxX = Math.max(maxX, c.x + HEX * 1.6);
-    minY = Math.min(minY, c.y - HEX * 1.6); maxY = Math.max(maxY, c.y + HEX * 1.6);
+    minX = Math.min(minX, c.x - HEX * 1.6);
+    maxX = Math.max(maxX, c.x + HEX * 1.6);
+    minY = Math.min(minY, c.y - HEX * 1.6);
+    maxY = Math.max(maxY, c.y + HEX * 1.6);
     data.push(Object.assign(cell, { x: c.x, y: c.y }));
   }
-  if (!Number.isFinite(minX)) { debugBoardSvg.innerHTML = ""; return; }
-  debugBoardSvg.setAttribute("viewBox", `${minX} ${minY} ${maxX - minX} ${maxY - minY}`);
+  if (!Number.isFinite(minX)) {
+    debugBoardSvg.innerHTML = "";
+    return;
+  }
+  // Pan/zoom-aware viewBox: the bounds only reset the camera when the user
+  // hasn't zoomed (viewDirty), exactly like the Match board.
+  dbgSyncView({ x: minX, y: minY, width: maxX - minX, height: maxY - minY });
   debugBoardSvg.setAttribute("preserveAspectRatio", "xMidYMid meet");
 
-  // Last move = the highest-index stone shown at this ply (derived client-side so
-  // the highlight tracks instantly on step). `placements` is sorted ascending by
-  // index, so the final element is the last move; ply 0 has none. Falls back to
-  // the server's engine-unpacked coords if the cache isn't populated yet.
+  const ov = dbg.overlays;
+  const nav = dbg.nav;
+  // Last move = the highest-index stone shown at this ply (derived client-side
+  // so the highlight tracks instantly on step); server coords as fallback.
   const lastStone = placements.length ? placements[placements.length - 1] : null;
   const lastCoord = lastStone
     ? { q: lastStone.q, r: lastStone.r }
@@ -3783,294 +5783,762 @@ function debugRenderBoard() {
   let html = "";
 
   // Threat windows (count >= 4) drawn under the cells as colored connectors.
-  if (dbg.overlays.threats && pos.tactics && Array.isArray(pos.tactics.threats)) {
+  if (ov.threats && pos.tactics && Array.isArray(pos.tactics.threats)) {
     for (const w of pos.tactics.threats) {
-      const cells = (w.cells || []).map(c => center(c.q, c.r));
-      if (cells.length < 2) continue;
+      const pts = (w.cells || []).map(c => center(c.q, c.r));
+      if (pts.length < 2) continue;
       const owner = (w.threat_player || w.active_player || "");
       const color = owner.endsWith("1") ? "var(--p1)" : "var(--p0)";
-      const d = cells.map((c, i) => `${i ? "L" : "M"}${c.x.toFixed(1)},${c.y.toFixed(1)}`).join("");
+      const d = pts.map((c, i) => `${i ? "L" : "M"}${c.x.toFixed(1)},${c.y.toFixed(1)}`).join("");
       html += `<path d="${d}" fill="none" stroke="${color}" stroke-width="3" stroke-linecap="round" opacity="0.5" pointer-events="none"></path>`;
     }
   }
   for (const h of data) {
     const isStone = Boolean(h.placement);
-    const pol = heat.policy.get(h.key) || 0;
-    const vis = heat.visits.get(h.key) || 0;
-    const opp = heat.opp.get(h.key) || 0;
-    let fill = isStone ? playerColor(h.placement.player) : "#101924";
+    const fill = isStone ? playerColor(h.placement.player) : "#101924";
     const stroke = isStone ? "#708296" : "#2c3d50";
-    let opacity = isStone ? "1" : (h.legal || h.candidate ? "0.7" : "0.45");
+    const opacity = isStone ? "1" : (h.legal || h.candidate ? "0.7" : (ov.legalDim ? "0.18" : "0.45"));
     html += `<path class="dbg-cell" d="${path(h.x, h.y, HEX - 1)}" fill="${fill}" stroke="${stroke}" stroke-width="1" opacity="${opacity}" data-q="${h.q}" data-r="${h.r}"></path>`;
-    if (!isStone) {
-      if (pol > 0.02) html += `<path d="${path(h.x, h.y, HEX - 2)}" fill="var(--accent)" opacity="${(0.15 + 0.75 * pol).toFixed(3)}" pointer-events="none"></path>`;
-      if (vis > 0.02) html += `<path d="${path(h.x, h.y, (HEX - 2) * Math.sqrt(vis))}" fill="var(--yellow)" opacity="0.75" pointer-events="none"></path>`;
-      if (opp > 0.04) html += `<circle cx="${h.x}" cy="${h.y}" r="${(HEX * 0.28)}" fill="none" stroke="var(--p1)" stroke-width="1.4" opacity="${(0.3 + 0.6 * opp).toFixed(3)}" pointer-events="none"></circle>`;
+    if (!isStone && heat.values.has(h.key)) {
+      const t = dbgHeatNorm(heat, heat.values.get(h.key));
+      if (heat.scale === "div") {
+        if (Math.abs(t) > 0.015) {
+          html += `<path d="${path(h.x, h.y, HEX - 2)}" fill="${t >= 0 ? "var(--green)" : "var(--p1)"}" opacity="${(dbg.opacity * (0.10 + 0.90 * Math.abs(t))).toFixed(3)}" pointer-events="none"></path>`;
+        }
+      } else if (t > 0.015) {
+        html += `<path d="${path(h.x, h.y, HEX - 2)}" fill="var(--accent)" opacity="${(dbg.opacity * (0.10 + 0.90 * t)).toFixed(3)}" pointer-events="none"></path>`;
+      }
     }
-    if (lastCoord && h.q === lastCoord.q && h.r === lastCoord.r) {
+    if (ov.last && lastCoord && h.q === lastCoord.q && h.r === lastCoord.r) {
       html += `<path class="dbg-last" d="${path(h.x, h.y, HEX - 0.5)}" fill="none" stroke="var(--accent)" stroke-width="2.2" pointer-events="none"></path>`;
     }
-    if (isStone && dbg.overlays.numbers) {
+    if (isStone && nav.acts.length && h.placement.index > nav.ply) {
+      // Injected what-if stone — dashed accent ring matches its branch chip.
+      html += `<path d="${path(h.x, h.y, HEX - 3)}" fill="none" stroke="var(--accent)" stroke-width="1.6" stroke-dasharray="4 3" pointer-events="none"></path>`;
+    }
+    if (isStone && ov.numbers) {
       html += `<text class="dbg-stone-label" x="${h.x}" y="${h.y}" text-anchor="middle" dominant-baseline="central">${h.placement.index}</text>`;
     }
   }
-  debugBoardSvg.innerHTML = html;
-  debugBoardSvg.querySelectorAll(".dbg-cell").forEach(el => {
-    el.addEventListener("mousemove", () => debugHoverCell(Number(el.dataset.q), Number(el.dataset.r)));
+  // Tree PV (or a clicked node's preview line) as NUMBERED GHOST stones (M10).
+  // Neutral accent — future-move ownership would need engine turn logic, so no
+  // player-color guessing. style beats the .dbg-ghost-stone pointer-events:none
+  // so a ghost click is a no-op (it never reaches the .dbg-cell underneath).
+  const treeFresh = dbgFreshData("tree");
+  const preview = dbg.treePreview && dbg.treePreview.key === dbgCurrentKey() ? dbg.treePreview.ids : null;
+  const ghostLine = preview || (treeFresh && treeFresh.pv) || [];
+  ghostLine.forEach((id, i) => {
+    const g = dbgUnpackActionId(id);
+    const c = center(g.q, g.r);
+    html += `<g class="dbg-ghost-stone" style="pointer-events:all">`
+      + `<path d="${path(c.x, c.y, HEX - 2.5)}" fill="#101924" stroke="var(--accent)" stroke-width="1.6" opacity="0.85"></path>`
+      + `<text class="dbg-stone-label" x="${c.x}" y="${c.y}" text-anchor="middle" dominant-baseline="central" style="fill:var(--accent)">${i + 1}</text>`
+      + `</g>`;
   });
+  debugBoardSvg.innerHTML = html;
+  if (dbg.split) dbgRenderBoardB();  // A/B split keeps the B half in lockstep (S5)
+  // Hover + click are DELEGATED (bound once in debugBindEvents) — no per-cell
+  // listeners on a 1000+ cell board.
 }
 
-function debugHoverCell(q, r) {
+function dbgHoverCell(q, r) {
   const hud = dbgEl("debugBoardHud");
   if (!hud) return;
-  const key = `${q},${r}`;
-  const pol = dbg.analysis && (dbg.analysis.policy || []).find(x => x.q === q && x.r === r);
-  const vis = dbg.search && (dbg.search.visit_policy || []).find(x => x.q === q && x.r === r);
-  const parts = [`Q ${q} · R ${r}`];
-  if (pol) parts.push(`prior ${(pol.p * 100).toFixed(1)}%`);
-  if (vis) parts.push(`visits ${(vis.p * 100).toFixed(1)}%`);
-  hud.innerHTML = `<div>${escapeText(parts.join("  ·  "))}</div>`;
-}
-
-function debugRenderPlyBar() {
-  const pos = dbg.position;
-  const total = pos ? pos.debug.total : 0;
-  const ply = pos ? pos.debug.ply : 0;
-  const slider = dbgEl("debugPlySlider");
-  if (slider) { slider.max = String(total); slider.value = String(ply); slider.disabled = !pos; }
-  const label = dbgEl("debugPlyLabel");
-  if (label) label.textContent = `${ply} / ${total}`;
-  const sub = dbgEl("debugPlySub");
-  if (sub) {
-    if (!pos) sub.textContent = "No game";
-    else sub.textContent = ply === 0 ? "Opening" : `Move ${ply}`;
+  if (dbg.split) {
+    // Shared hover cursor (S5): highlight the cell on BOTH half-boards.
+    for (const svg of [debugBoardSvg, dbgEl("dbgBoardSvgB")]) {
+      if (!svg) continue;
+      svg.querySelectorAll(".dbg-hl").forEach(elx => elx.classList.remove("dbg-hl"));
+      const cell = svg.querySelector(`.dbg-cell[data-q="${q}"][data-r="${r}"]`);
+      if (cell) cell.classList.add("dbg-hl");
+    }
   }
+  const m = dbg.hudMetrics.get(`${q},${r}`) || {};
+  const pct = v => (v != null ? `${(v * 100).toFixed(1)}%` : "—");
+  const childQ = m.childQ != null ? `${m.childQ >= 0 ? "+" : ""}${m.childQ.toFixed(2)} (N=${m.childN})` : "—";
+  let line = `${q},${r} · prior ${pct(m.prior)} · visits ${pct(m.visits)} · childQ ${childQ} · target ${pct(m.target)}`;
+  if ((dbg.split || dbg.cmpHeat) && dbg.nav.ckptB) line += ` · B prior ${pct(m.priorB)}`;
+  hud.innerHTML = `<div>${escapeText(line)}</div>`;
 }
 
-function debugRenderPositionInfo() {
-  const el = dbgEl("debugPositionInfo");
-  if (!el) return;
-  const pos = dbg.position;
-  if (!pos) { el.innerHTML = `<div class="debug-empty">Pick a game or import a move list.</div>`; return; }
-  const d = pos.debug;
-  const a = dbg.analysis;
-  const rows = [
-    ["Game", pos.game_id ? escapeText(String(pos.game_id).split(":").pop()) : "—"],
-    ["Ply", `${d.ply} / ${d.total}`],
-    ["To play", a ? `P${a.current_player} (${escapeText(a.current_role || "")})` : "—"],
-    ["Winner", d.winner ? escapeText(d.winner) : (d.imported ? "imported" : "—")],
-    ["Candidates", a ? String(a.candidate_count) : "—"],
-    ["Legal cells", a ? String(a.legal_count) : "—"],
-  ];
-  el.innerHTML = rows.map(([k, v]) => `<div class="info-row"><span class="label">${k}</span><span class="value">${v}</span></div>`).join("");
-}
-
-function debugRenderValue() {
-  const el = dbgEl("debugValuePanel");
-  const chip = dbgEl("debugValueChip");
-  if (!el) return;
-  const a = dbg.analysis;
-  if (!a) { el.innerHTML = `<div class="debug-empty">${dbg.loading ? "Evaluating…" : "No analysis yet."}</div>`; if (chip) chip.textContent = ""; return; }
-  if (chip) { chip.textContent = a.value.toFixed(3); chip.className = `debug-chip ${a.value >= 0 ? "pos" : "neg"}`; }
-
-  const dist = a.value_dist || [];
-  const bins = a.value_bins || [];
-  const maxP = dist.reduce((m, x) => Math.max(m, x), 0) || 1;
-  const bars = dist.map((p, i) => {
-    const h = Math.max(1, (p / maxP) * 100);
-    const center = bins[i] != null ? bins[i] : 0;
-    const cls = center >= 0 ? "pos" : "neg";
-    return `<span class="dbg-vbar ${cls}" style="height:${h.toFixed(1)}%" title="v=${center.toFixed(3)} p=${(p * 100).toFixed(1)}%"></span>`;
-  }).join("");
-
-  const stvRows = Object.keys(a.stvalue || {}).sort((x, y) => Number(x) - Number(y)).map(h => {
-    const s = a.stvalue[h].scalar;
-    return `<div class="dbg-stv-row"><span class="label">STV+${h}</span><span class="dbg-bar-track"><span class="dbg-bar-fill ${s >= 0 ? "pos" : "neg"}" style="width:${(Math.abs(s) * 50).toFixed(1)}%;${s >= 0 ? "left:50%" : "right:50%"}"></span></span><span class="value">${s.toFixed(3)}</span></div>`;
-  }).join("");
-
-  // Both-perspectives / optimism probe: the same board scored from each side.
-  let optimismHtml = "";
-  if (typeof a.value_swapped === "number") {
-    const sum = a.optimism != null ? a.optimism : (a.value + a.value_swapped);
-    const cal = Math.abs(sum) < 0.1 ? "ok" : (sum > 0 ? "warn" : "warn");
-    optimismHtml = `
-      <div class="dbg-perspectives">
-        <div><span class="label">Side to move</span><span class="value ${a.value >= 0 ? "pos" : "neg"}">${a.value.toFixed(3)}</span></div>
-        <div><span class="label">Opponent view</span><span class="value ${a.value_swapped >= 0 ? "pos" : "neg"}">${a.value_swapped.toFixed(3)}</span></div>
-        <div title="v_self + v_opp; 0 = zero-sum consistent, >0 = both sides optimistic"><span class="label">Optimism Σ</span><span class="value dbg-opt-${cal}">${sum >= 0 ? "+" : ""}${sum.toFixed(3)}</span></div>
-      </div>`;
-  }
-
-  // Moves-left head (dense lineages): decoded value in [-1,1] maps the binned
-  // [0, 80]-decision support, so remaining ≈ (v+1)/2 * 80. hexgt has no such head.
-  let movesLeftHtml = "";
-  if (a.moves_left && typeof a.moves_left.scalar === "number") {
-    const remaining = Math.max(0, (a.moves_left.scalar + 1) / 2 * 80);
-    movesLeftHtml = `<div class="dbg-stv-row"><span class="label">moves left</span><span class="dbg-bar-track"><span class="dbg-bar-fill pos" style="width:${(Math.min(1, remaining / 80) * 100).toFixed(1)}%;left:0"></span></span><span class="value">~${remaining.toFixed(0)}</span></div>`;
-  }
-
-  el.innerHTML = `
-    <div class="dbg-value-scalar">value <strong class="${a.value >= 0 ? "pos" : "neg"}">${a.value.toFixed(4)}</strong> <span class="dbg-muted">(side to move)</span></div>
-    <div class="dbg-vdist" aria-label="65-bin value distribution">${bars}</div>
-    <div class="dbg-vdist-axis"><span>loss −1</span><span>0</span><span>+1 win</span></div>
-    ${optimismHtml}
-    ${(stvRows || movesLeftHtml) ? `<div class="dbg-stv">${stvRows}${movesLeftHtml}</div>` : ""}
-  `;
-}
-
-function debugRenderMoves() {
-  const el = dbgEl("debugMovesPanel");
-  if (!el) return;
-  const a = dbg.analysis;
-  if (!a) { el.innerHTML = `<div class="debug-empty">—</div>`; return; }
-  const visitsByKey = new Map();
-  if (dbg.search) for (const r of dbg.search.visit_policy || []) visitsByKey.set(`${r.q},${r.r}`, r.p);
-  const top = (a.policy || []).slice(0, 12);
-  const head = `<div class="dbg-move-row dbg-move-head"><span>#</span><span>cell</span><span>prior</span><span>visits</span></div>`;
-  const rows = top.map((r, i) => {
-    const key = `${r.q},${r.r}`;
-    const v = visitsByKey.has(key) ? `${(visitsByKey.get(key) * 100).toFixed(1)}%` : "—";
-    const best = dbg.search && dbg.search.best && dbg.search.best.q === r.q && dbg.search.best.r === r.r;
-    return `<div class="dbg-move-row${best ? " dbg-move-best" : ""}"><span>${i + 1}</span><span>${r.q},${r.r}</span><span>${(r.p * 100).toFixed(1)}%</span><span>${v}</span></div>`;
-  }).join("");
-  el.innerHTML = head + rows;
-}
-
-function debugRenderSearch() {
-  const el = dbgEl("debugSearchPanel");
-  if (!el) return;
-  const s = dbg.search;
-  if (!s) { el.innerHTML = `<div class="debug-empty">Run a search to compare visit distribution vs the raw prior.</div>`; return; }
-  const a = dbg.analysis;
-  const delta = a ? (s.root_value - a.value) : null;
-  const top = (s.visit_policy || []).slice(0, 8);
-  const priorByKey = new Map((s.root_prior || []).map(r => [`${r.q},${r.r}`, r.p]));
-  const rows = top.map(r => {
-    const pr = priorByKey.get(`${r.q},${r.r}`);
-    return `<div class="dbg-move-row"><span>${r.q},${r.r}</span><span>${(r.p * 100).toFixed(1)}%</span><span class="dbg-muted">${pr != null ? (pr * 100).toFixed(1) + "%" : "—"}</span></div>`;
-  }).join("");
-  el.innerHTML = `
-    <div class="dbg-search-summary">
-      <span>visits <strong>${s.visits}</strong></span>
-      <span>root value <strong class="${s.root_value >= 0 ? "pos" : "neg"}">${s.root_value.toFixed(3)}</strong></span>
-      ${delta != null ? `<span class="dbg-muted">Δ vs raw ${delta >= 0 ? "+" : ""}${delta.toFixed(3)}</span>` : ""}
-    </div>
-    <div class="dbg-move-row dbg-move-head"><span>cell</span><span>visits</span><span>prior</span></div>
-    ${rows}
-  `;
-}
-
-async function debugRunCompare() {
-  const body = debugRequestBody();
-  if (!body || !dbg.compareCheckpoint) { dbg.compare = null; debugRenderCompare(); return; }
-  const compareBody = Object.assign({}, body, { checkpoint: dbg.compareCheckpoint });
-  debugSetStatus("Evaluating comparison checkpoint…", "busy");
-  try {
-    const analysis = await debugFetchJson("/api/debug/analyze", {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(compareBody),
-    });
-    dbg.compare = { checkpoint: dbg.compareCheckpoint, analysis };
-    debugSetStatus("");
-  } catch (e) {
-    dbg.compare = null;
-    debugSetStatus(`Compare: ${e.message}`, "error");
-  }
-  debugRenderCompare();
-}
-
-function debugRenderCompare() {
-  const el = dbgEl("debugComparePanel");
-  if (!el) return;
-  if (!dbg.compareCheckpoint) { el.innerHTML = `<div class="debug-empty">Pick a second checkpoint to compare value &amp; top move.</div>`; return; }
-  const a = dbg.analysis, c = dbg.compare && dbg.compare.analysis;
-  if (!c) { el.innerHTML = `<div class="debug-empty">Evaluating…</div>`; return; }
-  const topA = a && a.policy && a.policy[0];
-  const topC = c.policy && c.policy[0];
-  const dv = a ? (c.value - a.value) : null;
-  const rows = [
-    ["Value A", a ? a.value.toFixed(3) : "—"],
-    ["Value B", c.value.toFixed(3)],
-    ["Δ (B−A)", dv != null ? `${dv >= 0 ? "+" : ""}${dv.toFixed(3)}` : "—"],
-    ["Top A", topA ? `${topA.q},${topA.r} (${(topA.p * 100).toFixed(0)}%)` : "—"],
-    ["Top B", topC ? `${topC.q},${topC.r} (${(topC.p * 100).toFixed(0)}%)` : "—"],
-    ["Agree", (topA && topC) ? (topA.q === topC.q && topA.r === topC.r ? "yes" : "no") : "—"],
-  ];
-  el.innerHTML = rows.map(([k, v]) => `<div class="info-row"><span class="label">${k}</span><span class="value">${v}</span></div>`).join("");
-}
-
-async function debugPlotTrajectory() {
-  if (!dbg.run || !dbg.gameFile || !dbg.checkpoint || (dbg.position && dbg.position.debug.imported)) {
-    debugSetStatus("Trajectory needs a recorded game + checkpoint.", "error");
+function dbgRenderBranchBar() {
+  const bar = dbgEl("dbgBranchBar");
+  if (!bar) return;
+  const acts = dbg.nav.acts;
+  bar.hidden = !acts.length;
+  const chips = bar.querySelector(".dbg-branch-chips");
+  if (!chips) return;
+  if (!acts.length) {
+    chips.innerHTML = "";
     return;
   }
-  debugSetStatus("Re-evaluating the whole game on CPU…", "busy");
-  const note = dbgEl("debugTrajectoryNote");
-  try {
-    const params = new URLSearchParams({ run: dbg.run, path: dbg.gameFile, record: String(dbg.record), checkpoint: dbg.checkpoint });
-    dbg.trajectory = await debugFetchJson(`/api/debug/trajectory?${params.toString()}`);
-    if (note) note.textContent = dbg.trajectory.stride > 1 ? `(every ${dbg.trajectory.stride} plies)` : "";
-    debugSetStatus("");
-  } catch (e) {
-    dbg.trajectory = null;
-    debugSetStatus(`Trajectory: ${e.message}`, "error");
-  }
-  debugRenderTrajectory();
+  let html = `<span class="dbg-chip dbg-chip-game" title="Recorded-game prefix">game @ ply ${dbg.nav.ply}</span>`;
+  acts.forEach((id, i) => {
+    const c = dbgUnpackActionId(id);
+    html += `<span class="dbg-chip dbg-chip-inj">+${c.q},${c.r}<button class="dbg-chip-x" type="button" data-act-cut="${i}" title="Undo to before this move">✕</button></span>`;
+  });
+  chips.innerHTML = html;
 }
 
-function debugRenderTrajectory() {
-  const svg = dbgEl("debugTrajectorySvg");
-  if (!svg) return;
-  const t = dbg.trajectory;
-  if (!t || !t.reeval || !t.reeval.length) { svg.innerHTML = `<text x="500" y="110" text-anchor="middle" fill="#5a6b7a">Plot to re-evaluate value across the game.</text>`; return; }
-  const W = 1000, H = 220, padL = 36, padR = 12, padT = 14, padB = 22;
-  const total = t.total || 1;
+// ---- HEADS panel ---------------------------------------------------------------
+
+function dbgRenderHeads() {
+  const panel = dbgEl("dbgTabHeads");
+  if (!panel) return;
+  const a = dbg.analysis;
+  const scalarEl = panel.querySelector(".dbg-value-scalar strong");
+  const chip = dbgEl("dbgValueChip");
+  const distEl = dbgEl("dbgValueDist");
+  const swapBlock = panel.querySelector(".dbg-ownerswap");
+  const swapEl = panel.querySelector(".dbg-ownerswap-body");
+  const stvEl = dbgEl("dbgStvRows");
+  const mlEl = dbgEl("dbgMovesLeft");
+  const movesEl = dbgEl("dbgTopMoves");
+  const oppEl = dbgEl("dbgOppList");
+  if (!a) {
+    const note = dbg.loading ? "Evaluating…" : "No analysis yet";
+    if (scalarEl) {
+      scalarEl.textContent = "—";
+      scalarEl.className = "";
+    }
+    if (chip) {
+      chip.textContent = "—";
+      chip.className = "dbg-chip";
+      chip.title = "";
+    }
+    if (distEl) distEl.innerHTML = `<div class="dbg-empty-note">${note}</div>`;
+    if (swapBlock) swapBlock.hidden = false;
+    if (swapEl) swapEl.innerHTML = `<span class="dbg-muted">—</span>`;
+    if (stvEl) stvEl.innerHTML = `<div class="dbg-empty-note">Short-term value horizons</div>`;
+    if (mlEl) {
+      mlEl.className = "dbg-moves-left dbg-empty-note";
+      mlEl.textContent = "Moves-left: —";
+    }
+    if (movesEl) movesEl.innerHTML = `<div class="dbg-empty-note">${note}</div>`;
+    if (oppEl) oppEl.innerHTML = `<div class="dbg-empty-note">Opponent policy top-k</div>`;
+    return;
+  }
+  if (scalarEl) {
+    scalarEl.textContent = a.value.toFixed(4);
+    scalarEl.className = a.value >= 0 ? "pos" : "neg";
+  }
+  if (chip) {
+    chip.textContent = `${a.value >= 0 ? "+" : ""}${a.value.toFixed(3)} stm`;
+    chip.className = `dbg-chip ${a.value >= 0 ? "pos" : "neg"}`;
+    chip.title = `to play P${a.current_player} (${a.current_role || ""}) · candidates ${a.candidate_count} · legal ${a.legal_count}`;
+  }
+  if (distEl) distEl.innerHTML = dbgValueDistHtml(a);
+  // B4: the owner-swap P0/P1 probe is off-distribution-confounded (FirstStone
+  // parity) and must NOT be presented as optimism — no ok/warn coloring.
+  if (swapBlock) swapBlock.hidden = typeof a.value_swapped !== "number";
+  if (swapEl) {
+    if (typeof a.value_swapped === "number") {
+      const sum = a.optimism != null ? a.optimism : (a.value + a.value_swapped);
+      swapEl.innerHTML = `
+        <div class="info-row"><span class="label">Side to move</span><span class="value">${a.value.toFixed(3)}</span></div>
+        <div class="info-row"><span class="label">Owner-swapped</span><span class="value">${a.value_swapped.toFixed(3)}</span></div>
+        <div class="info-row" title="v_self + v_swapped; off-distribution (FirstStone parity) — not an optimism metric"><span class="label">Σ</span><span class="value">${sum >= 0 ? "+" : ""}${sum.toFixed(3)}</span></div>`;
+    } else {
+      swapEl.innerHTML = `<span class="dbg-muted">n/a for this lineage</span>`;
+    }
+  }
+  if (stvEl) {
+    const stvRows = Object.keys(a.stvalue || {}).sort((x, y) => Number(x) - Number(y)).map(h => {
+      const s = a.stvalue[h].scalar;
+      return `<div class="dbg-stv-row"><span class="label">STV+${h}</span><span class="dbg-bar-track"><span class="dbg-bar-fill ${s >= 0 ? "pos" : "neg"}" style="width:${(Math.abs(s) * 50).toFixed(1)}%;${s >= 0 ? "left:50%" : "right:50%"}"></span></span><span class="value">${s.toFixed(3)}</span></div>`;
+    }).join("");
+    stvEl.innerHTML = stvRows || `<div class="dbg-empty-note">No STV heads</div>`;
+  }
+  if (mlEl) {
+    if (a.moves_left && typeof a.moves_left.scalar === "number") {
+      // B1 fix: decode with the REAL cap from analyze meta (512 for dense),
+      // not the old hardcoded *80.
+      const cap = a.meta && a.meta.moves_left_cap != null ? a.meta.moves_left_cap : 512;
+      const remaining = Math.max(0, (a.moves_left.scalar + 1) / 2 * cap);
+      const pos = dbg.position;
+      const actual = (pos && !dbg.nav.acts.length && !pos.debug.imported && pos.debug.winner)
+        ? ` · actual ${pos.debug.total - Math.min(dbg.nav.ply != null ? dbg.nav.ply : pos.debug.ply, pos.debug.total)}`
+        : "";
+      mlEl.className = "dbg-moves-left";
+      mlEl.textContent = `Moves-left: ~${remaining.toFixed(0)} (cap ${cap})${actual}`;
+    } else {
+      mlEl.className = "dbg-moves-left dbg-empty-note";
+      mlEl.textContent = "Moves-left: — (no head in this lineage)";
+    }
+  }
+  if (movesEl) movesEl.innerHTML = dbgTopMovesHtml(a);
+  if (oppEl) oppEl.innerHTML = dbgOppListHtml(a);
+}
+
+function dbgValueDistHtml(a) {
+  const dist = a.value_dist || [];
+  const bins = a.value_bins || [];
+  if (!dist.length) return `<div class="dbg-empty-note">No value distribution</div>`;
+  const maxP = dist.reduce((m, x) => Math.max(m, x), 0) || 1;
+  let entropy = 0;
+  const bars = dist.map((p, i) => {
+    if (p > 0) entropy -= p * Math.log(p);
+    const h = Math.max(1, (p / maxP) * 100);
+    const c = bins[i] != null ? bins[i] : 0;
+    return `<span class="dbg-vbar ${c >= 0 ? "pos" : "neg"}" style="height:${h.toFixed(1)}%" title="v=${c.toFixed(3)} p=${(p * 100).toFixed(1)}%"></span>`;
+  }).join("");
+  let markers = "";
+  const pos = dbg.position;
+  if (pos && !dbg.nav.acts.length && pos.debug.winner && pos.current_player) {
+    const z = pos.debug.winner === pos.current_player ? 1 : -1;
+    markers += `<span class="dbg-vdist-marker z" style="left:${(((z + 1) / 2) * 100).toFixed(1)}%" title="final z (stm) = ${z}"></span>`;
+  }
+  const rr = dbgRecordRow();  // soft-z target marker once TARGETS rows load (F3)
+  if (rr && rr.found && rr.row && typeof rr.row.value_target === "number") {
+    markers += `<span class="dbg-vdist-marker soft" style="left:${(((rr.row.value_target + 1) / 2) * 100).toFixed(1)}%" title="recorded soft-z target ${rr.row.value_target.toFixed(3)}"></span>`;
+  }
+  return `
+    <div class="dbg-vdist" aria-label="65-bin value distribution">${bars}${markers}</div>
+    <div class="dbg-vdist-axis"><span>loss −1</span><span>0</span><span>+1 win</span></div>
+    <div class="dbg-muted">dist entropy ${entropy.toFixed(2)} nats</div>`;
+}
+
+function dbgTopMovesHtml(a) {
+  // Search/tree columns are key-gated: a stale ply's visits/Q must never line
+  // up against this analysis' prior rows (the action ids would misalign).
+  const s = dbgFreshData("search");
+  const tree = dbgFreshData("tree");
+  const visitsById = new Map();
+  if (s) for (const row of s.visit_policy || []) visitsById.set(row.action_id, row.p);
+  const treeById = new Map();
+  let rootQ = null;
+  if (tree && tree.tree) {
+    rootQ = tree.tree.qm;
+    for (const ch of tree.tree.children || []) treeById.set(ch.action_id, ch);
+  }
+  const recorded = (!dbg.nav.acts.length && dbg.gameActs.length > dbg.nav.ply) ? dbg.gameActs[dbg.nav.ply] : null;
+  const rows = (a.policy || []).slice(0, 12).map(p => {
+    const visits = visitsById.has(p.action_id) ? visitsById.get(p.action_id) : null;
+    const node = treeById.get(p.action_id);
+    return {
+      action_id: p.action_id,
+      q: p.q,
+      r: p.r,
+      prior: p.p,
+      visits,
+      qm: node ? node.qm : null,  // Q column fills from the search_tree root layer (F3)
+      delta: visits != null ? visits - p.p : null,
+    };
+  });
+  const sortKey = dbg.sortKey;
+  const sortVal = row => {
+    const v = sortKey === "delta" ? (row.delta != null ? Math.abs(row.delta) : null) : row[sortKey];
+    return v == null ? -Infinity : v;
+  };
+  rows.sort((x, y) => sortVal(y) - sortVal(x));
+  const arrow = k => (sortKey === k ? " ▾" : "");
+  const head = `<div class="dbg-move-row dbg-move-head"><span>#</span><span>cell</span><span class="sortable" data-dbg-sort="prior">prior${arrow("prior")}</span><span class="sortable" data-dbg-sort="visits">visits${arrow("visits")}</span><span class="sortable" data-dbg-sort="qm">Q${arrow("qm")}</span><span class="sortable" data-dbg-sort="delta">Δ${arrow("delta")}</span></div>`;
+  const body = rows.map((row, i) => {
+    const isBest = s && s.best_action_id === row.action_id;
+    const isRec = recorded != null && recorded === row.action_id;
+    let badge = "";
+    if (row.qm != null && rootQ != null && row.prior > 0.15 && row.qm < rootQ - 0.15) {
+      badge = ` <span class="dbg-badge dbg-badge-over" title="high prior met low Q">over</span>`;
+    } else if (row.visits != null && row.prior < 0.03 && row.visits > 0.10) {
+      badge = ` <span class="dbg-badge dbg-badge-under" title="low prior earned high visits">under</span>`;
+    }
+    return `<div class="dbg-move-row${isBest ? " dbg-move-best" : ""}"${isRec ? ` title="recorded move"` : ""}><span>${i + 1}</span><span>${row.q},${row.r}${isRec ? " ●" : ""}${badge}</span><span>${(row.prior * 100).toFixed(1)}%</span><span>${row.visits != null ? (row.visits * 100).toFixed(1) + "%" : "—"}</span><span>${row.qm != null ? row.qm.toFixed(2) : "—"}</span><span>${row.delta != null ? (row.delta >= 0 ? "+" : "") + (row.delta * 100).toFixed(1) : "—"}</span></div>`;
+  }).join("");
+  return head + body;
+}
+
+function dbgRecordedReplyActionId() {
+  // The actual recorded reply by the OPPONENT (Hexo turns place two stones, so
+  // scan forward for the first recorded action by the other player).
+  const nav = dbg.nav;
+  if (nav.acts.length || !dbg.position || dbg.position.debug.imported) return null;
+  const acts = dbgRecordedActs();
+  const stm = dbg.position.current_player;
+  if (!acts || !stm) return null;
+  for (let j = nav.ply; j < acts.length && j < nav.ply + 4; j++) {
+    const pl = dbg.gamePlacements.find(p => p.index === j + 1);
+    if (pl && pl.player && pl.player !== stm) return acts[j];
+  }
+  return null;
+}
+
+function dbgOppListHtml(a) {
+  const opp = a.opp_policy;
+  if (!opp || !opp.length) return `<div class="dbg-empty-note">No opponent-policy head</div>`;
+  const reply = dbgRecordedReplyActionId();
+  const rows = opp.slice(0, 8).map(row => {
+    const hit = reply != null && row.action_id === reply;
+    return `<div class="dbg-move-row${hit ? " dbg-move-best" : ""}"${hit ? ` title="actual recorded reply"` : ""}><span></span><span>${row.q},${row.r}${hit ? " ●" : ""}</span><span>${(row.p * 100).toFixed(1)}%</span><span></span><span></span><span></span></div>`;
+  }).join("");
+  return `<div class="dbg-subhead">Opponent policy</div>${rows}`;
+}
+
+// ---- SEARCH / COMPARE / CKPT panels ---------------------------------------------
+
+function dbgRenderSearchPanel() {
+  const panel = dbgEl("dbgTabSearch");
+  if (!panel) return;
+  dbgRenderTree();
+  dbgRenderScatter();
+  dbgRenderLadder();
+  const sum = panel.querySelector(".dbg-search-summary");
+  if (!sum) return;
+  const s = dbg.search;
+  if (!s) {
+    sum.className = "dbg-search-summary dbg-empty-note";
+    sum.textContent = "No search yet";
+    return;
+  }
+  sum.className = "dbg-search-summary";
+  const a = dbg.analysis;
+  const priorTop = a && a.policy && a.policy[0];
+  const agree = priorTop && s.best && priorTop.q === s.best.q && priorTop.r === s.best.r;
+  const delta = a ? s.root_value - a.value : null;
+  sum.innerHTML = `
+    <span>visits <strong>${s.visits}</strong></span>
+    <span>root value <strong class="${s.root_value >= 0 ? "pos" : "neg"}">${s.root_value.toFixed(3)}</strong></span>
+    <span>best <strong>${s.best ? `${s.best.q},${s.best.r}` : "—"}</strong></span>
+    ${priorTop ? `<span class="dbg-muted">prior argmax ${priorTop.q},${priorTop.r} ${agree ? "=" : "≠"}</span>` : ""}
+    ${delta != null ? `<span class="dbg-muted">Δ vs raw ${delta >= 0 ? "+" : ""}${delta.toFixed(3)}</span>` : ""}`;
+}
+
+function dbgRenderComparePanel() {
+  const body = document.querySelector("#dbgTabCompare .dbg-cmp-body");
+  if (!body) return;
+  if (!dbg.nav.ckptB) {
+    body.innerHTML = `<div class="dbg-empty-note">Select checkpoint B in the context strip to compare</div>`;
+    return;
+  }
+  const a = dbg.analysis;
+  const b = dbg.analysisB;
+  if (!b) {
+    body.innerHTML = `<div class="dbg-empty-note">Evaluating checkpoint B…</div>`;
+    return;
+  }
+  const topA = a && a.policy && a.policy[0];
+  const topB = b.policy && b.policy[0];
+  const dv = a ? b.value - a.value : null;
+  const rows = [
+    ["Value A", a ? a.value.toFixed(3) : "—"],
+    ["Value B", b.value.toFixed(3)],
+    ["Δ (B−A)", dv != null ? `${dv >= 0 ? "+" : ""}${dv.toFixed(3)}` : "—"],
+  ];
+  if (a) {
+    for (const h of Object.keys(a.stvalue || {}).sort((x, y) => Number(x) - Number(y))) {
+      const sb = b.stvalue && b.stvalue[h];
+      if (!sb) continue;
+      const d = sb.scalar - a.stvalue[h].scalar;
+      rows.push([`STV+${h} Δ`, `${d >= 0 ? "+" : ""}${d.toFixed(3)}`]);
+    }
+  }
+  rows.push(["Top A", topA ? `${topA.q},${topA.r} (${(topA.p * 100).toFixed(0)}%)` : "—"]);
+  rows.push(["Top B", topB ? `${topB.q},${topB.r} (${(topB.p * 100).toFixed(0)}%)` : "—"]);
+  rows.push(["Agree", topA && topB ? (topA.action_id === topB.action_id ? "yes" : "no") : "—"]);
+  // PV divergence: first differing ply of the A vs B search_tree PVs (when both run).
+  const treeA = dbgFreshData("tree");
+  const entryB = dbg.cache.get(dbgCacheKey(dbg.nav, dbg.nav.ckptB));
+  const treeB = entryB && entryB.tree;
+  let pvRow;
+  if (treeA && treeB) {
+    const pa = treeA.pv || [];
+    const pb = treeB.pv || [];
+    let i = 0;
+    while (i < pa.length && i < pb.length && pa[i] === pb[i]) i++;
+    if (i >= pa.length && i >= pb.length) pvRow = "identical PVs";
+    else {
+      const ca = pa[i] != null ? dbgUnpackActionId(pa[i]) : null;
+      const cb = pb[i] != null ? dbgUnpackActionId(pb[i]) : null;
+      pvRow = `ply +${i + 1}: A ${ca ? `${ca.q},${ca.r}` : "(end)"} vs B ${cb ? `${cb.q},${cb.r}` : "(end)"}`;
+    }
+  } else {
+    pvRow = `needs debug trees (A ${treeA ? "✓" : "—"} · B ${treeB ? "✓" : "—"})`;
+  }
+  rows.push(["PV divergence", pvRow]);
+  body.innerHTML = rows.map(([k, v]) => `<div class="info-row"><span class="label">${k}</span><span class="value">${v}</span></div>`).join("")
+    + (treeB ? "" : `<button type="button" id="dbgCmpTreeB" class="dbg-mini-btn" style="margin-top:6px"${dbg.treeBusy ? " disabled" : ""}>Run B debug tree</button>`);
+}
+
+function dbgRenderCkptPanel() {
+  const el = dbgEl("dbgCkptInfo");
+  if (!el) return;
+  if (!dbg.nav.ckptA) {
+    el.innerHTML = `<div class="dbg-empty-note">No checkpoint selected</div>`;
+    return;
+  }
+  let html = dbgCkptInfoHtml(dbg.nav.ckptA);
+  if (dbg.nav.ckptB) {
+    html += `<div class="dbg-subhead" style="margin-top:10px">Checkpoint B</div>` + dbgCkptInfoHtml(dbg.nav.ckptB);
+  }
+  el.innerHTML = html;
+}
+
+function dbgCkptInfoHtml(name) {
+  const info = dbg.ckptInfo.get(`${dbg.nav.run}|${name}`);
+  const ck = dbg.checkpoints.find(c => c.name === name);
+  const rows = [["Checkpoint", escapeText(name)]];
+  if (ck && ck.epoch != null) rows.push(["Epoch", String(ck.epoch)]);
+  if (!info) {
+    rows.push(["Provenance", dbg.nav.tab === "ckpt" ? "loading…" : "open this tab to load"]);
+  } else if (info.error) {
+    rows.push(["Error", escapeText(info.error)]);
+  } else {
+    const m = info.meta || {};
+    if (m.lineage) rows.push(["Lineage", escapeText(m.lineage)]);
+    if (m.arch && m.arch.blocks_type) rows.push(["Trunk", escapeText(String(m.arch.blocks_type))]);
+    if (m.rl_epoch != null) rows.push(["RL epoch", String(m.rl_epoch)]);
+    if (m.step != null) rows.push(["Step", String(m.step)]);
+    if (m.graft) rows.push(["Graft", m.graft === "pre" ? "pre (≤e6, expanded)" : "post (≥e7)"]);
+    if (m.stv_horizons && m.stv_horizons.length) rows.push(["STV horizons", m.stv_horizons.join(", ")]);
+    rows.push(["Moves-left", m.has_moves_left ? `yes (cap ${m.moves_left_cap != null ? m.moves_left_cap : "?"})` : "no"]);
+    if (m.expanded_value) rows.push(["Expanded value", "yes"]);
+    if (m.expanded_stv && m.expanded_stv.length) rows.push(["Expanded STV", `${m.expanded_stv.length} heads`]);
+    if (m.zeroed_feature_cols && m.zeroed_feature_cols.length) rows.push(["Zeroed cols", m.zeroed_feature_cols.join(", ")]);
+    if (m.candidate_radius != null) rows.push(["Cand. radius", String(m.candidate_radius)]);
+    if (m.param_count != null) rows.push(["Params", `${(m.param_count / 1e6).toFixed(2)}M`]);
+    if (info.size != null) rows.push(["File", formatBytes(info.size)]);
+    if (info.mtime != null) rows.push(["Modified", new Date(info.mtime * 1000).toLocaleString()]);
+    if (m.load_warnings && m.load_warnings.length) rows.push(["Warnings", escapeText(m.load_warnings.join("; "))]);
+  }
+  return rows.map(([k, v]) => `<div class="info-row"><span class="label">${k}</span><span class="value">${v}</span></div>`).join("");
+}
+
+// ---- bottom dock ------------------------------------------------------------------
+
+function dbgSetDockTab(tab) {
+  dbg.dockTab = tab;
+  document.querySelectorAll("#dbgDockTabs [data-dock-tab]").forEach(b => b.classList.toggle("active", b.dataset.dockTab === tab));
+  const chart = dbgEl("dbgDockChart");
+  if (chart) chart.classList.toggle("active", tab === "trajectory");
+  const sweep = dbgEl("dbgCkptSweep");
+  if (sweep) sweep.classList.toggle("active", tab === "ckptsweep");
+}
+
+function dbgRenderDockChart() {
+  // Trajectory dock (M9/S11): sweep-fed when a Game Error Sweep exists for the
+  // current (game, ckptA) — value_p0 + KL second axis + mismatch ticks +
+  // clickable blunder markers; otherwise the legacy /trajectory plot.
+  const el = dbgEl("dbgDockChart");
+  if (!el) return;
+  const nav = dbg.nav;
+  const sweep = dbgSweepData();
+  const t = dbg.trajectoryKey === `${nav.run}|${nav.path}|${nav.rec}|${nav.ckptA}` ? dbg.trajectory : null;
+  const reeval = sweep ? sweep.plies : ((t && t.reeval) || []);
+  if (!reeval.length) {
+    el.innerHTML = `<div class="dbg-empty-note">Sweep the game (or Plot) to fill the per-ply value / KL chart</div>`;
+    el.__dbgChart = null;
+    return;
+  }
+  const W = 1000, H = 220, padL = 36, padR = 34, padT = 14, padB = 22;
+  const total = (sweep && sweep.total) || (t && t.total) || (reeval[reeval.length - 1].ply + 1) || 1;
   const x = ply => padL + (W - padL - padR) * (total ? ply / total : 0);
-  const y = v => padT + (H - padT - padB) * (1 - (v + 1) / 2); // v in [-1,1] -> top=+1
+  const y = v => padT + (H - padT - padB) * (1 - (v + 1) / 2);  // v in [-1,1] -> top=+1
   const linePath = (pts, key) => pts.map((p, i) => `${i ? "L" : "M"}${x(p.ply).toFixed(1)},${y(p[key]).toFixed(1)}`).join("");
 
   let html = "";
-  // grid: zero line + ±1
   html += `<line x1="${padL}" y1="${y(0)}" x2="${W - padR}" y2="${y(0)}" stroke="#2c3d50" stroke-width="1"></line>`;
   html += `<text x="4" y="${y(1) + 4}" fill="#5a6b7a" font-size="11">+1</text>`;
   html += `<text x="6" y="${y(0) + 4}" fill="#5a6b7a" font-size="11">0</text>`;
   html += `<text x="4" y="${y(-1) + 2}" fill="#5a6b7a" font-size="11">−1</text>`;
-  // current ply marker
-  if (dbg.position) {
-    const px = x(dbg.position.debug.ply);
+  if (nav.ply != null) {
+    const px = x(Math.min(nav.ply, total));
     html += `<line x1="${px}" y1="${padT}" x2="${px}" y2="${H - padB}" stroke="var(--accent)" stroke-width="1" opacity="0.4" stroke-dasharray="3 3"></line>`;
   }
-  if (t.recorded && t.recorded.length) {
+  if (t && t.recorded && t.recorded.length) {
     html += `<path d="${linePath(t.recorded, "root_value_p0")}" fill="none" stroke="var(--yellow)" stroke-width="1.6" opacity="0.85"></path>`;
   }
-  html += `<path d="${linePath(t.reeval, "value_p0")}" fill="none" stroke="var(--accent)" stroke-width="2"></path>`;
-  svg.innerHTML = html;
+  // Policy-KL series on a second (right) axis — sweep only (S11; hidden without).
+  let maxKl = 0;
+  const klPts = sweep ? sweep.plies.filter(p => p.kl != null) : [];
+  for (const p of klPts) maxKl = Math.max(maxKl, p.kl);
+  if (klPts.length && maxKl > 0) {
+    const yk = v => padT + (H - padT - padB) * (1 - v / maxKl);
+    html += `<path d="${klPts.map((p, i) => `${i ? "L" : "M"}${x(p.ply).toFixed(1)},${yk(p.kl).toFixed(1)}`).join("")}" fill="none" stroke="#b07ce8" stroke-width="1.4" opacity="0.8"></path>`;
+    html += `<text x="${W - padR + 3}" y="${padT + 8}" fill="#b07ce8" font-size="10">KL ${maxKl.toFixed(2)}</text>`;
+    html += `<text x="${W - padR + 3}" y="${H - padB}" fill="#b07ce8" font-size="10">0</text>`;
+  }
+  html += `<path d="${linePath(reeval, "value_p0")}" fill="none" stroke="var(--accent)" stroke-width="2"></path>`;
+  if (sweep) {
+    for (const p of sweep.plies) {
+      if (p.top1_match === false) {
+        html += `<line x1="${x(p.ply).toFixed(1)}" y1="${H - padB}" x2="${x(p.ply).toFixed(1)}" y2="${H - padB - 6}" stroke="var(--yellow)" stroke-width="1.5" opacity="0.8"></line>`;
+      }
+    }
+    for (const bp of dbgBlunders(sweep)) {
+      const row = sweep.byPly.get(bp);
+      if (!row) continue;
+      html += `<circle data-dbg-jump="${bp}" cx="${x(bp).toFixed(1)}" cy="${y(row.value_p0).toFixed(1)}" r="5" fill="var(--p1)" opacity="0.85" style="cursor:pointer"><title>blunder ply ${bp} — click to jump</title></circle>`;
+    }
+  }
+  html += `<line class="dbg-dock-cross" x1="0" y1="${padT}" x2="0" y2="${H - padB}" stroke="#dfe9f3" stroke-width="1" opacity="0" pointer-events="none"></line>`;
+  const legend = sweep
+    ? "value_p0 accent · KL purple (right axis) · top-1 miss ticks yellow · blunders red (click to jump)"
+    : (t && t.stride > 1 ? `(every ${t.stride} plies · re-eval accent, recorded yellow)` : "re-eval accent · recorded yellow");
+  el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${html}</svg>`
+    + `<div class="dbg-dock-readout dbg-muted">${legend}</div>`;
+  const byPly = new Map();
+  for (const p of reeval) byPly.set(p.ply, p);
+  el.__dbgChart = { W, padL, padR, total, byPly, legend };
 }
 
-function debugRenderCheckpointInfo() {
-  const el = dbgEl("debugCheckpointInfo");
-  if (!el) return;
-  const ck = dbg.checkpoints.find(c => c.name === dbg.checkpoint);
-  const meta = dbg.analysis && dbg.analysis.meta;
-  if (!ck && !meta) { el.innerHTML = `<div class="debug-empty">—</div>`; return; }
-  const rows = [];
-  if (ck) {
-    rows.push(["Checkpoint", escapeText(ck.name)]);
-    if (ck.epoch != null) rows.push(["Epoch", String(ck.epoch)]);
-    if (ck.graft) rows.push(["Graft", ck.graft === "pre" ? "pre (≤e6, expanded)" : "post (≥e7)"]);
-  }
-  if (meta) {
-    if (meta.lineage) rows.push(["Lineage", escapeText(meta.lineage)]);
-    if (meta.rl_epoch != null) rows.push(["RL epoch", String(meta.rl_epoch)]);
-    if (meta.arch && meta.arch.blocks_type) rows.push(["Trunk", escapeText(String(meta.arch.blocks_type))]);
-    if (meta.stv_horizons && meta.stv_horizons.length) rows.push(["STV", meta.stv_horizons.join(", ")]);
-    if (meta.has_moves_left) rows.push(["Moves-left", "yes"]);
-    if (meta.expanded_stv && meta.expanded_stv.length) rows.push(["STV expand", `${meta.expanded_stv.length} heads`]);
-    if (meta.load_warnings && meta.load_warnings.length) rows.push(["Warnings", escapeText(meta.load_warnings.join("; "))]);
-  }
-  el.innerHTML = rows.map(([k, v]) => `<div class="info-row"><span class="label">${k}</span><span class="value">${v}</span></div>`).join("");
+// ---- stale dots (spec M14) -----------------------------------------------------
+
+function dbgSetStale(panelId, stale) {
+  const panel = dbgEl(panelId);
+  if (!panel) return;
+  const dot = panel.querySelector(".dbg-stale");
+  if (dot) dot.hidden = !stale;
 }
 
-// ---- events ---------------------------------------------------------------
+function dbgUpdateStaleDots() {
+  const nav = dbg.nav;
+  const ready = nav.run && nav.path && nav.ply != null;
+  const cur = ready ? dbgCurrentKey() : "";
+  const curB = ready && nav.ckptB ? dbgCacheKey(nav, nav.ckptB) : "";
+  const posStale = Boolean(dbg.position) && dbg.keys.position !== cur;
+  dbgSetStale("dbgTabHeads", Boolean(dbg.analysis) && (dbg.keys.analysis !== cur || posStale));
+  dbgSetStale("dbgTabSearch", (Boolean(dbg.search) && dbg.keys.search !== cur) || (Boolean(dbg.tree) && dbg.keys.tree !== cur));
+  dbgSetStale("dbgTabTargets", posStale);  // targets render per-key, so only a stale position misleads
+  dbgSetStale("dbgTabCompare", Boolean(nav.ckptB) && Boolean(dbg.analysisB) && dbg.keys.analysisB !== curB);
+  dbgSetStale("dbgTabInputs", posStale);
+  dbgSetStale("dbgTabCkpt", false);     // checkpoint provenance is position-independent
+}
+
+function dbgRefreshPanel(panelId) {
+  if (panelId === "dbgTabHeads") dbgAnalyzeNow(true);
+  else if (panelId === "dbgTabSearch") dbgRunSearch();
+  else if (panelId === "dbgTabCompare") {
+    if (!dbg.nav.ckptB) {
+      dbgStub("Select checkpoint B in the context strip first.");
+      return;
+    }
+    delete dbgCacheEntry(dbgCacheKey(dbg.nav, dbg.nav.ckptB)).analysis;
+    dbgEnsureAnalysisB();
+  } else if (panelId === "dbgTabCkpt") dbgEnsureCkptInfo(true);
+  else if (panelId === "dbgTabTargets") dbgEnsureRecordRow(true);
+  else if (panelId === "dbgTabInputs") dbgEnsureInputs(true);
+}
+
+// ---- board view (pan/zoom, ported from the Match board on debug-local state) ----
+
+function dbgApplyView() {
+  if (dbg.view && debugBoardSvg) {
+    debugBoardSvg.setAttribute("viewBox", `${dbg.view.x} ${dbg.view.y} ${dbg.view.width} ${dbg.view.height}`);
+    const svgB = dbg.split ? dbgEl("dbgBoardSvgB") : null;
+    if (svgB) svgB.setAttribute("viewBox", `${dbg.view.x} ${dbg.view.y} ${dbg.view.width} ${dbg.view.height}`);
+  }
+}
+
+function dbgSyncView(base) {
+  dbg.baseView = base;
+  if (!dbg.view || !dbg.viewDirty) dbg.view = { ...base };
+  dbgApplyView();
+}
+
+function dbgZoom(factor, anchor) {
+  if (!dbg.view) return;
+  const base = dbg.baseView || dbg.view;
+  const nextWidth = clamp(dbg.view.width * factor, base.width * 0.14, base.width * 4.2);
+  const scale = nextWidth / dbg.view.width;
+  const nextHeight = dbg.view.height * scale;
+  const point = anchor || {
+    x: dbg.view.x + dbg.view.width / 2,
+    y: dbg.view.y + dbg.view.height / 2,
+  };
+  dbg.view = {
+    x: point.x - (point.x - dbg.view.x) * scale,
+    y: point.y - (point.y - dbg.view.y) * scale,
+    width: nextWidth,
+    height: nextHeight,
+  };
+  dbg.viewDirty = true;
+  dbgApplyView();
+}
+
+function dbgZoomAtCenter(factor) {
+  if (!dbg.view) return;
+  dbgZoom(factor, {
+    x: dbg.view.x + dbg.view.width / 2,
+    y: dbg.view.y + dbg.view.height / 2,
+  });
+}
+
+function dbgZoomReset() {
+  dbg.viewDirty = false;
+  if (dbg.baseView) dbg.view = { ...dbg.baseView };
+  dbgApplyView();
+}
+
+function dbgClientToBoard(clientX, clientY) {
+  const matrix = debugBoardSvg && debugBoardSvg.getScreenCTM();
+  if (!matrix || !dbg.view) {
+    return {
+      x: dbg.view ? dbg.view.x + dbg.view.width / 2 : 0,
+      y: dbg.view ? dbg.view.y + dbg.view.height / 2 : 0,
+    };
+  }
+  const point = debugBoardSvg.createSVGPoint();
+  point.x = clientX;
+  point.y = clientY;
+  return point.matrixTransform(matrix.inverse());
+}
+
+// ---- navigation helpers -------------------------------------------------------
+
+function dbgStepPly(delta) {
+  // If a press does nothing, say WHY (the usual cause is the selected game
+  // failing to load) instead of silently returning.
+  if (!dbg.position && dbg.nav.ply == null) {
+    debugSetStatus("No position loaded — pick a game with completed records.", "error");
+    return;
+  }
+  const total = dbgRecordedTotal();
+  const cur = dbg.nav.ply != null ? dbg.nav.ply : (total || 0);
+  dbgGotoPly(cur + delta);
+}
+
+function dbgGotoPly(ply, { replace = false } = {}) {
+  const total = dbgRecordedTotal();
+  const clamped = Math.max(0, total != null ? Math.min(ply, total) : ply);
+  if (clamped === dbg.nav.ply && !dbg.nav.acts.length) return;
+  // Explicit ply navigation returns to the RECORDED game: re-basing the injected
+  // tail onto a different prefix is never meaningful (the injected cells may be
+  // occupied/illegal there) — chips, U and G are the way back out of a branch.
+  dbgNavigate({ ply: clamped, acts: [] }, { replace });
+}
+
+function dbgStepRecord(delta) {
+  if (!dbg.records.length) return;
+  const next = Math.max(0, Math.min(dbg.nav.rec + delta, dbg.records.length - 1));
+  if (next !== dbg.nav.rec) dbgNavigate({ rec: next, ply: null, acts: [] });
+}
+
+function dbgStepFile(delta) {
+  if (!dbg.games.length) return;
+  const idx = dbg.games.findIndex(g => g.path === dbg.nav.path);
+  const next = Math.max(0, Math.min((idx === -1 ? 0 : idx) + delta, dbg.games.length - 1));
+  const g = dbg.games[next];
+  if (g && g.path !== dbg.nav.path) dbgNavigate({ path: g.path, rec: 0, ply: null, acts: [] });
+}
+
+function dbgInjectCell(q, r) {
+  // WHAT-IF INJECTION (spec M4): clicking an empty legal cell appends its action
+  // to the branch prefix; the server replays + re-analyzes the new position.
+  if (dbg.suppressClick) return;
+  const cell = dbg.cellIndex.get(`${q},${r}`);
+  if (!cell || cell.placement || !dbg.position) return;
+  if (!cell.legal) {
+    debugSetStatus(`${q},${r} is not a legal cell here.`, "error");
+    return;
+  }
+  diagTap(`inject ${q},${r}`);
+  dbgNavigate({ acts: dbg.nav.acts.concat([dbgPackActionId(q, r)]) });
+}
+
+function dbgClearToggles() {
+  dbg.overlays = { threats: false, numbers: false, last: false, legalDim: false };
+  for (const [id, key] of [["dbgTglThreats", "threats"], ["dbgTglNumbers", "numbers"], ["dbgTglLast", "last"], ["dbgTglLegalDim", "legalDim"]]) {
+    const el = dbgEl(id);
+    if (el) el.checked = dbg.overlays[key];
+  }
+}
+
+function dbgToggleLog() {
+  dbg.logScale = !dbg.logScale;
+  const el = dbgEl("dbgLegendLog");
+  if (el) el.checked = dbg.logScale;
+  dbgRenderBoard();
+}
+
+function dbgToggleCollapse(id) {
+  const el = dbgEl(id);
+  if (el) el.classList.toggle("dbg-collapsed");
+}
+
+// ---- keyboard layer (spec §1.7 / M13) -------------------------------------------
+
+function dbgHandleKey(e) {
+  if (activeScreen !== "debug") return;
+  const help = dbgEl("dbgHelp");
+  const palette = dbgEl("dbgPalette");
+  if (e.key === "Escape") {
+    if (palette && !palette.hidden) {
+      palette.hidden = true;
+      e.preventDefault();
+      return;
+    }
+    if (help && !help.hidden) {
+      help.hidden = true;
+      e.preventDefault();
+      return;
+    }
+    return;
+  }
+  if (palette && !palette.hidden) return;  // palette owns the keyboard while open
+  const ae = document.activeElement;
+  if (ae && /^(INPUT|SELECT|TEXTAREA)$/.test(ae.tagName)) return;  // M13: arrows edit the input, never the ply
+  const nav = dbg.nav;
+  const k = e.key;
+  // Never hijack browser/system chords (Ctrl+C copy, Ctrl+A select-all, …);
+  // Ctrl+K is the one modified shortcut the spec assigns (command palette).
+  if ((e.ctrlKey || e.metaKey || e.altKey) && k.toLowerCase() !== "k") return;
+  let handled = true;
+  if (k === "?") {
+    if (help) help.hidden = !help.hidden;
+  } else if (k.toLowerCase() === "k" && !e.altKey && !e.metaKey) {
+    dbgOpenPalette();
+  } else if (e.code && e.code.startsWith("Digit") && !e.ctrlKey && !e.altKey && !e.metaKey) {
+    const num = Number(e.code.slice(5));
+    if (num === 0) {
+      dbgClearToggles();  // 0 = mode none + clear additive toggles
+      dbgClearCmpHeat();
+      dbgNavigate({ mode: "none" }, { replace: true });
+    } else if (num >= 1 && num <= 8) {
+      if (e.shiftKey) dbgClearToggles();  // Shift+digit = solo
+      dbgClearCmpHeat();
+      dbgNavigate({ mode: DBG_MODE_ORDER[num - 1] }, { replace: true });
+    } else {
+      handled = false;
+    }
+  } else if (k === "ArrowLeft" || k === "ArrowRight") {
+    if (e.shiftKey) dbgStepBlunder(k === "ArrowLeft" ? -1 : 1);
+    else dbgStepPly(k === "ArrowLeft" ? -1 : 1);
+  } else if (k === "Home") {
+    dbgGotoPly(0);
+  } else if (k === "End") {
+    dbgGotoPly(1e9);
+  } else if (k === "[") {
+    dbgStepRecord(-1);
+  } else if (k === "]") {
+    dbgStepRecord(1);
+  } else if (k === "{") {
+    dbgStepFile(-1);
+  } else if (k === "}") {
+    dbgStepFile(1);
+  } else if (k === "a" || k === "A") {
+    dbgAnalyzeNow(true);
+  } else if (k === "s" || k === "S") {
+    dbgRunSearch();
+  } else if (k === "t" || k === "T") {
+    dbgRunTree();
+  } else if (k === "l" || k === "L") {
+    dbgToggleLog();
+  } else if (k === "u" || k === "U") {
+    if (nav.acts.length) dbgNavigate({ acts: nav.acts.slice(0, -1) });
+  } else if (k === "g" || k === "G") {
+    if (nav.acts.length) dbgNavigate({ acts: [] });
+  } else if (k === "p" || k === "P") {
+    dbgAddPin();
+  } else if (k === "c" || k === "C") {
+    dbgNavigate({ tab: "compare" }, { replace: true });
+  } else if (k === "i" || k === "I") {
+    dbgNavigate({ tab: "inputs" }, { replace: true });
+  } else {
+    handled = false;
+  }
+  if (handled) e.preventDefault();
+}
+
+// ---- events --------------------------------------------------------------------
 
 function debugBindEvents() {
   const root = dbgEl("debugScreen");
@@ -4078,114 +6546,457 @@ function debugBindEvents() {
   root.__dbgDelegated = true;
 
   // BUTTONS via event DELEGATION on #debugScreen (which is never rebuilt), plus a
-  // touchend fallback. The previous per-button click listeners failed on the
-  // owner's phone: the controls were trapped in a fixed-height overflow:hidden
-  // panel that micro-scrolled under the finger, so the browser classified the tap
-  // as a scroll and never promoted touchend -> click — the button focused but the
-  // handler never ran. Delegation + an explicit touchend handler guarantees the
+  // touchend fallback. Per-button click listeners failed on the owner's phone:
+  // controls trapped in a fixed-height overflow:hidden panel micro-scrolled under
+  // the finger, so the browser classified the tap as a scroll and never promoted
+  // touchend -> click. Delegation + an explicit touchend handler guarantees the
   // action fires on tap; everything routes through reportError so a throw is
-  // visible on the device.
+  // visible on-device.
   const ACTIONS = {
-    debugPlyStart:      { fn: () => debugStep(-1e9), tap: "|< start" },
-    debugPlyPrev:       { fn: () => debugStep(-1),   tap: "< prev" },
-    debugPlyNext:       { fn: () => debugStep(1),    tap: "> next" },
-    debugPlyEnd:        { fn: () => debugStep(1e9),  tap: ">| end" },
-    debugRefreshBtn:    { fn: () => debugLoadRun(),  tap: "refresh" },
-    debugAnalyzeBtn:    { fn: () => debugAnalyze(),  tap: "analyze" },
-    debugSearchBtn:     { fn: () => debugRunSearch(), tap: "search" },
-    debugImportBtn:     { fn: () => debugImport(),   tap: "import" },
-    debugTrajectoryBtn: { fn: () => debugPlotTrajectory(), tap: "plot" },
+    dbgPlyFirst: { fn: () => dbgGotoPly(0), tap: "|< first" },
+    dbgPlyPrev: { fn: () => dbgStepPly(-1), tap: "< prev" },
+    dbgPlyNext: { fn: () => dbgStepPly(1), tap: "> next" },
+    dbgPlyLast: { fn: () => dbgGotoPly(1e9), tap: ">| last" },
+    dbgPlySweepBtn: { fn: () => dbgRunSweep(), tap: "sweep" },
+    dbgSweepBtn: { fn: () => dbgRunSweep(), tap: "sweep" },
+    dbgTrajBtn: { fn: () => dbgPlotTrajectory(), tap: "plot" },
+    dbgSearchRun: { fn: () => dbgRunSearch(), tap: "search" },
+    dbgTreeRun: { fn: () => dbgRunTree(), tap: "tree" },
+    dbgLadderRun: { fn: () => dbgRunLadder(), tap: "ladder" },
+    dbgCmpTreeB: { fn: () => dbgRunTree({ checkpoint: dbg.nav.ckptB }), tap: "tree B" },
+    dbgCkptSweepRun: { fn: () => dbgRunCkptSweep(), tap: "ckpt sweep" },
+    dbgCtxRefresh: { fn: () => dbgRefreshSources(), tap: "refresh" },
+    dbgCtxCollapse: { fn: () => dbgToggleCollapse("dbgCtx"), tap: "ctx collapse" },
+    dbgDockToggle: { fn: () => dbgToggleCollapse("dbgDock"), tap: "dock collapse" },
+    dbgZoomIn: { fn: () => dbgZoomAtCenter(0.82), tap: "zoom in" },
+    dbgZoomOut: { fn: () => dbgZoomAtCenter(1.22), tap: "zoom out" },
+    dbgZoomReset: { fn: () => dbgZoomReset(), tap: "zoom reset" },
+    dbgBranchReturn: { fn: () => dbgNavigate({ acts: [] }), tap: "return to game" },
+    dbgPinAdd: { fn: () => dbgAddPin(), tap: "pin" },
+    dbgPinExport: { fn: () => dbgExportPins(), tap: "pin export" },
+    dbgCmpHeat: { fn: () => dbgToggleCmpHeat(), tap: "cmp heat" },
+    dbgCkptSweepStop: {
+      fn: () => {
+        if (dbg.ckptSweep && dbg.ckptSweep.running) dbg.ckptSweep.abort = true;
+        else dbgStub("No checkpoint sweep running.");
+      },
+      tap: "ckpt sweep stop",
+    },
+  };
+  const fire = ev => {
+    const t = ev.target;
+    if (!t || !t.closest) return;
+    const idBtn = t.closest("button[id]");
+    const act = idBtn && ACTIONS[idBtn.id];
+    if (act) {
+      ev.preventDefault();
+      diagTap(act.tap);
+      try {
+        act.fn();
+      } catch (e) {
+        reportError("dbg " + idBtn.id + ": " + (e && (e.stack || e.message) || e));
+      }
+      return;
+    }
+    const chipX = t.closest(".dbg-chip-x");
+    if (chipX) {
+      ev.preventDefault();
+      diagTap("undo chip");
+      dbgNavigate({ acts: dbg.nav.acts.slice(0, Number(chipX.dataset.actCut) || 0) });
+      return;
+    }
+    const treeStep = t.closest(".dbg-tree-step");
+    if (treeStep) {
+      ev.preventDefault();
+      diagTap("tree step-into");
+      // M11: re-base via injection — each line move becomes a branch chip.
+      dbgNavigate({ acts: dbg.nav.acts.concat(dbgTreePathIds(treeStep.dataset.treePath)) });
+      return;
+    }
+    const treeExpand = t.closest(".dbg-tree-expand");
+    if (treeExpand) {
+      ev.preventDefault();
+      diagTap("tree expand");
+      const p = treeExpand.dataset.treePath;
+      dbgRunTree({ rootActions: dbgTreePathIds(p), graftPath: p });
+      return;
+    }
+    const treeRow = t.closest(".dbg-tree-row");
+    if (treeRow) {
+      ev.preventDefault();
+      dbgTreeRowClick(treeRow.dataset.treePath);
+      return;
+    }
+    const jump = t.closest("[data-dbg-jump]");
+    if (jump) {
+      ev.preventDefault();
+      diagTap("jump ply " + jump.dataset.dbgJump);
+      dbgGotoPly(Number(jump.dataset.dbgJump));
+      return;
+    }
+    const pinX = t.closest(".dbg-pin-x");
+    if (pinX) {
+      ev.preventDefault();
+      dbgRemovePin(Number(pinX.dataset.pin));
+      return;
+    }
+    const pinNote = t.closest(".dbg-pin-note");
+    if (pinNote) {
+      ev.preventDefault();
+      dbgNotePin(Number(pinNote.dataset.pin));
+      return;
+    }
+    const pinChip = t.closest(".dbg-pin-chip");
+    if (pinChip) {
+      ev.preventDefault();
+      dbgRestorePin(Number(pinChip.dataset.pin));
+      return;
+    }
+    const journalRow = t.closest("[data-journal]");
+    if (journalRow) {
+      ev.preventDefault();
+      const e2 = dbg.journal[Number(journalRow.dataset.journal)];
+      if (e2 && e2.nav) dbgNavigate(Object.assign({}, e2.nav, { acts: ((e2.nav && e2.nav.acts) || []).slice() }));
+      return;
+    }
+    const palItem = t.closest("[data-pal]");
+    if (palItem) {
+      ev.preventDefault();
+      dbgPaletteExec(Number(palItem.dataset.pal));
+      return;
+    }
+    const refresh = t.closest(".dbg-panel-refresh");
+    if (refresh) {
+      ev.preventDefault();
+      const panel = refresh.closest(".dbg-tab-panel");
+      if (panel) dbgRefreshPanel(panel.id);
+      return;
+    }
+    const modeBtn = t.closest("#dbgModeBar [data-mode]");
+    if (modeBtn) {
+      ev.preventDefault();
+      diagTap("mode " + modeBtn.dataset.mode);
+      dbgClearCmpHeat();  // picking a base mode dismisses the cmp Δ overlay
+      dbgNavigate({ mode: modeBtn.dataset.mode }, { replace: true });
+      return;
+    }
+    const tabBtn = t.closest("#dbgTabs [data-tab]");
+    if (tabBtn) {
+      ev.preventDefault();
+      diagTap("tab " + tabBtn.dataset.tab);
+      dbgNavigate({ tab: tabBtn.dataset.tab }, { replace: true });
+      return;
+    }
+    const dockTab = t.closest("#dbgDockTabs [data-dock-tab]");
+    if (dockTab) {
+      ev.preventDefault();
+      dbgSetDockTab(dockTab.dataset.dockTab);
+      return;
+    }
+    const journalClear = t.closest(".dbg-journal-clear");
+    if (journalClear) {
+      ev.preventDefault();
+      diagTap("journal clear");
+      dbgClearJournal();
+      return;
+    }
+    const sortBtn = t.closest("[data-dbg-sort]");
+    if (sortBtn) {
+      ev.preventDefault();
+      dbg.sortKey = sortBtn.dataset.dbgSort;
+      dbgRenderHeads();
+      return;
+    }
+    const plyRow = t.closest(".dbg-ply-row");
+    if (plyRow) {
+      ev.preventDefault();
+      diagTap("strip ply " + plyRow.dataset.ply);
+      dbgGotoPly(Number(plyRow.dataset.ply));
+      return;
+    }
+    const cellEl = t.closest(".dbg-cell");
+    if (cellEl) {
+      ev.preventDefault();
+      dbgInjectCell(Number(cellEl.dataset.q), Number(cellEl.dataset.r));
+      return;
+    }
+    if (t.classList && t.classList.contains("dbg-overlay")) {
+      ev.preventDefault();
+      t.hidden = true;  // click outside the card closes help/palette
+    }
   };
   let lastTouchFire = 0;
-  const fire = (ev) => {
-    const hit = ev.target && ev.target.closest && ev.target.closest("button[id]");
-    if (!hit) return;
-    const act = ACTIONS[hit.id];
-    if (!act) return;
-    ev.preventDefault();
-    diagTap(act.tap);
-    try { act.fn(); } catch (e) { reportError("nav " + hit.id + ": " + (e && (e.stack || e.message) || e)); }
-  };
-  root.addEventListener("touchend", (ev) => { lastTouchFire = Date.now(); fire(ev); }, { passive: false });
-  root.addEventListener("click", (ev) => {
+  root.addEventListener("touchend", ev => {
+    lastTouchFire = Date.now();
+    fire(ev);
+  }, { passive: false });
+  root.addEventListener("click", ev => {
     if (Date.now() - lastTouchFire < 700) return;  // touchend already handled this tap
     fire(ev);
   });
 
-  // Selects / slider / checkboxes / text input keep direct change/input listeners.
-  const on = (id, ev, fn) => { const el = dbgEl(id); if (el) el.addEventListener(ev, fn); };
-  on("debugRunSelect", "change", async e => { dbg.run = e.target.value; dbg.gameFile = ""; dbg.checkpoint = ""; await debugLoadRun(); });
-  on("debugSourceSelect", "change", async e => { dbg.source = e.target.value; dbg.gameFile = ""; await debugLoadGames(); });
-  on("debugGameSelect", "change", async e => { dbg.gameFile = e.target.value; dbg.record = 0; dbg.imported = null; await debugLoadPosition({ resetPly: true }); });
-  on("debugRecordSelect", "change", async e => { dbg.record = Number(e.target.value) || 0; await debugLoadPosition({ resetPly: true }); });
-  on("debugCheckpointSelect", "change", async e => { dbg.checkpoint = e.target.value; dbg.search = null; debugRenderCheckpointInfo(); await debugAnalyze(); });
-  on("debugCompareSelect", "change", e => { dbg.compareCheckpoint = e.target.value; dbg.compare = null; debugRunCompare(); });
-  on("debugPlySlider", "input", e => { diagTap("slide " + e.target.value); debugGotoPly(Number(e.target.value)); });
-  on("debugMoveInput", "keydown", e => { if (e.key === "Enter") debugImport(); });
-  ["Policy", "Visits", "Opp", "Threats", "Numbers"].forEach(name => {
-    on(`debugOv${name}`, "change", e => { dbg.overlays[name.toLowerCase()] = e.target.checked; debugRenderBoard(); });
-  });
-}
-
-let debugPlyTimer = null;
-function debugGotoPly(ply) {
-  if (!dbg.position) return;
-  dbg.position.debug.ply = Math.max(0, Math.min(ply, dbg.position.debug.total));
-  dbg.position.debug.last_action_id = dbg.position.debug.ply > 0 ? dbg.position.debug.action_ids[dbg.position.debug.ply - 1] : null;
-  // INSTANT, analyze-independent step: update the ply bar AND the board right now
-  // from the client-side placement cache (stones with index <= ply). The board no
-  // longer waits on the server position fetch or the slow ResTNet analyze, so every
-  // press moves the move immediately. The previous ply's value/policy is cleared so
-  // those panels show "evaluating" instead of stale numbers until the async analyze
-  // for the new ply returns.
-  dbg.analysis = null;
-  dbg.search = null;
-  debugRenderPlyBar();
-  debugRenderBoard();
-  debugRenderPositionInfo();
-  debugRenderValue();
-  debugRenderMoves();
-  debugRenderSearch();
-  diagTap("ply " + dbg.position.debug.ply + "/" + dbg.position.debug.total);  // visible step feedback on-device
-  // Debounced, decoupled refresh: re-fetch the server position (legal cells /
-  // tactics) and run the analyze. These only fill in overlays/values when ready;
-  // they never gate the ply/board update above. A short debounce coalesces rapid
-  // presses and slider drags into a single fetch for the final ply.
-  window.clearTimeout(debugPlyTimer);
-  debugPlyTimer = window.setTimeout(() => debugLoadPosition({ ply: dbg.position.debug.ply }), 120);
-}
-
-function debugStep(delta) {
-  // If a press does nothing, say WHY: no position loaded (the usual cause is the
-  // selected game failing to load) instead of silently returning.
-  if (!dbg.position) { debugSetStatus("No position loaded — pick a game with completed records.", "error"); return; }
-  try {
-    const ply = Math.max(0, Math.min(dbg.position.debug.ply + delta, dbg.position.debug.total));
-    debugGotoPly(ply);
-  } catch (e) {
-    reportError("debugStep/debugGotoPly: " + (e && (e.stack || e.message) || e));
+  // Hover HUD: ONE delegated mousemove on the SVG + the per-render metrics Map.
+  if (debugBoardSvg) {
+    debugBoardSvg.addEventListener("mousemove", ev => {
+      const cellEl = ev.target && ev.target.closest && ev.target.closest(".dbg-cell");
+      if (cellEl) dbgHoverCell(Number(cellEl.dataset.q), Number(cellEl.dataset.r));
+    });
+    debugBoardSvg.addEventListener("mouseleave", () => {
+      const hud = dbgEl("debugBoardHud");
+      if (hud) hud.innerHTML = `<div>Hover a cell</div>`;
+    });
   }
+
+  // Pan / pinch / wheel on the debug board area (debug-local state only).
+  const area = debugBoardSvg && debugBoardSvg.closest(".board-area");
+  if (area && !area.__dbgViewBound) {
+    area.__dbgViewBound = true;
+    const pointers = new Map();
+    let drag = null;
+    let pinch = null;
+    const beginPan = ev => {
+      const rect = debugBoardSvg.getBoundingClientRect();
+      drag = {
+        pointerId: ev.pointerId,
+        clientX: ev.clientX,
+        clientY: ev.clientY,
+        scaleX: dbg.view.width / Math.max(1, rect.width),
+        scaleY: dbg.view.height / Math.max(1, rect.height),
+        view: { ...dbg.view },
+        moved: false,
+      };
+    };
+    area.addEventListener("wheel", ev => {
+      if (!dbg.view || ev.target.closest(".board-view-controls")) return;
+      ev.preventDefault();
+      dbgZoom(ev.deltaY < 0 ? 0.88 : 1.14, dbgClientToBoard(ev.clientX, ev.clientY));
+    }, { passive: false });
+    area.addEventListener("pointerdown", ev => {
+      if (!dbg.view || (ev.pointerType === "mouse" && ev.button !== 0)) return;
+      if (ev.target.closest(".board-view-controls")) return;
+      pointers.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
+      area.setPointerCapture(ev.pointerId);
+      if (pointers.size >= 2) {
+        drag = null;  // a second finger upgrades the gesture to pinch-zoom
+        const pts = [...pointers.values()].slice(0, 2);
+        const mid = { x: (pts[0].x + pts[1].x) / 2, y: (pts[0].y + pts[1].y) / 2 };
+        pinch = {
+          rect: debugBoardSvg.getBoundingClientRect(),
+          startDist: Math.max(1, Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y)),
+          startView: { ...dbg.view },
+          anchorBoard: dbgClientToBoard(mid.x, mid.y),
+        };
+        dbg.suppressClick = true;
+      } else {
+        beginPan(ev);
+      }
+    });
+    area.addEventListener("pointermove", ev => {
+      if (!pointers.has(ev.pointerId)) return;
+      ev.preventDefault();
+      pointers.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
+      if (pinch && pointers.size >= 2) {
+        const pts = [...pointers.values()].slice(0, 2);
+        const dist = Math.max(1, Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y));
+        const mid = { x: (pts[0].x + pts[1].x) / 2, y: (pts[0].y + pts[1].y) / 2 };
+        const base = dbg.baseView || pinch.startView;
+        const nextWidth = clamp(pinch.startView.width * (pinch.startDist / dist), base.width * 0.14, base.width * 4.2);
+        const nextHeight = pinch.startView.height * (nextWidth / pinch.startView.width);
+        const rect = pinch.rect;
+        dbg.view = {
+          width: nextWidth,
+          height: nextHeight,
+          x: pinch.anchorBoard.x - (mid.x - rect.left) * (nextWidth / Math.max(1, rect.width)),
+          y: pinch.anchorBoard.y - (mid.y - rect.top) * (nextHeight / Math.max(1, rect.height)),
+        };
+        dbg.viewDirty = true;
+        dbgApplyView();
+      } else if (drag && ev.pointerId === drag.pointerId) {
+        const dx = (ev.clientX - drag.clientX) * drag.scaleX;
+        const dy = (ev.clientY - drag.clientY) * drag.scaleY;
+        if (Math.hypot(ev.clientX - drag.clientX, ev.clientY - drag.clientY) > 4) drag.moved = true;
+        dbg.view = { ...drag.view, x: drag.view.x - dx, y: drag.view.y - dy };
+        dbg.viewDirty = true;
+        dbgApplyView();
+      }
+    }, { passive: false });
+    const endPointer = ev => {
+      if (!pointers.has(ev.pointerId)) return;
+      pointers.delete(ev.pointerId);
+      if (area.hasPointerCapture(ev.pointerId)) area.releasePointerCapture(ev.pointerId);
+      const moved = (drag && drag.moved) || Boolean(pinch);
+      if (pointers.size < 2) pinch = null;
+      if (pointers.size === 1) {
+        // Dropped from pinch to a single finger — resume panning from it.
+        const [pointerId, point] = [...pointers.entries()][0];
+        beginPan({ pointerId, clientX: point.x, clientY: point.y });
+        drag.moved = true;
+      } else if (pointers.size === 0) {
+        drag = null;
+        if (moved) {
+          dbg.suppressClick = true;
+          window.setTimeout(() => {
+            dbg.suppressClick = false;
+          }, 80);
+        } else {
+          dbg.suppressClick = false;
+        }
+      }
+    };
+    area.addEventListener("pointerup", endPointer);
+    area.addEventListener("pointercancel", endPointer);
+  }
+
+  // Selects / sliders / checkboxes keep direct change/input listeners.
+  const on = (id, ev, fn) => {
+    const el = dbgEl(id);
+    if (el) el.addEventListener(ev, fn);
+  };
+  on("dbgCtxRun", "change", e => dbgNavigate({ run: e.target.value, path: "", rec: 0, ply: null, acts: [], ckptA: "", ckptB: "" }));
+  on("dbgCtxSource", "change", e => dbgNavigate({ src: e.target.value, path: "", rec: 0, ply: null, acts: [] }));
+  on("dbgCtxFile", "change", e => dbgNavigate({ path: e.target.value, rec: 0, ply: null, acts: [] }));
+  on("dbgCtxRecord", "change", e => dbgNavigate({ rec: Number(e.target.value) || 0, ply: null, acts: [] }));
+  on("dbgCtxCkptA", "change", e => dbgNavigate({ ckptA: e.target.value }));
+  on("dbgCtxCkptB", "change", e => dbgNavigate({ ckptB: e.target.value }));
+  // Slider: first input of a drag PUSHES (so Back returns to the pre-drag ply),
+  // the rest REPLACE (no history spam); change ends the drag.
+  let sliderDragging = false;
+  on("dbgPlySlider", "input", e => {
+    diagTap("slide " + e.target.value);
+    dbgGotoPly(Number(e.target.value), { replace: sliderDragging });
+    sliderDragging = true;
+  });
+  on("dbgPlySlider", "change", e => {
+    sliderDragging = false;
+    dbgGotoPly(Number(e.target.value), { replace: true });
+  });
+  on("dbgTglThreats", "change", e => {
+    dbg.overlays.threats = e.target.checked;
+    dbgRenderBoard();
+  });
+  on("dbgTglNumbers", "change", e => {
+    dbg.overlays.numbers = e.target.checked;
+    dbgRenderBoard();
+  });
+  on("dbgTglLast", "change", e => {
+    dbg.overlays.last = e.target.checked;
+    dbgRenderBoard();
+  });
+  on("dbgTglLegalDim", "change", e => {
+    dbg.overlays.legalDim = e.target.checked;
+    dbgRenderBoard();
+  });
+  on("dbgLegendLog", "change", e => {
+    dbg.logScale = e.target.checked;
+    dbgRenderBoard();
+  });
+  on("dbgOpacity", "input", e => {
+    dbg.opacity = Number(e.target.value) || 0.9;
+    dbgRenderBoard();
+  });
+  on("dbgPlaneSelect", "change", () => dbgRenderBoard());
+  on("dbgCmpSplit", "change", e => dbgToggleSplit(e.target.checked));
+  on("dbgPinImport", "change", e => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = "";
+    dbgImportPins(file);
+  });
+
+  // Command palette (S1): the input owns the keyboard while open.
+  on("dbgPaletteInput", "input", e => dbgRenderPaletteList(e.target.value));
+  on("dbgPaletteInput", "keydown", e => {
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      const n = (dbg.paletteShown || []).length;
+      if (n) {
+        dbg.paletteIdx = (dbg.paletteIdx + (e.key === "ArrowDown" ? 1 : n - 1)) % n;
+        dbgRenderPaletteList(e.target.value);
+      }
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      dbgPaletteExec(dbg.paletteIdx);
+    }
+  });
+
+  // Split-board (S5) shared hover: the B half reuses the same delegated handler.
+  const svgB = dbgEl("dbgBoardSvgB");
+  if (svgB) {
+    svgB.addEventListener("mousemove", ev => {
+      const cellEl = ev.target && ev.target.closest && ev.target.closest(".dbg-cell");
+      if (cellEl) dbgHoverCell(Number(cellEl.dataset.q), Number(cellEl.dataset.r));
+    });
+  }
+
+  // Trajectory dock hover crosshair (S11): per-render chart state on the
+  // container; attribute updates only — no re-render in mousemove.
+  const dock = dbgEl("dbgDockChart");
+  if (dock) {
+    dock.addEventListener("mousemove", ev => {
+      const st = dock.__dbgChart;
+      const svg = dock.querySelector("svg");
+      if (!st || !svg) return;
+      const rect = svg.getBoundingClientRect();
+      const xv = (ev.clientX - rect.left) / Math.max(1, rect.width) * st.W;
+      const ply = Math.max(0, Math.min(st.total, Math.round((xv - st.padL) / Math.max(1, st.W - st.padL - st.padR) * st.total)));
+      const cross = svg.querySelector(".dbg-dock-cross");
+      if (cross) {
+        cross.setAttribute("x1", xv.toFixed(1));
+        cross.setAttribute("x2", xv.toFixed(1));
+        cross.setAttribute("opacity", "0.35");
+      }
+      const out = dock.querySelector(".dbg-dock-readout");
+      const row = st.byPly.get(ply);
+      if (out) {
+        out.textContent = row
+          ? `ply ${ply} · v_p0 ${row.value_p0 != null ? row.value_p0.toFixed(3) : "—"}`
+            + `${row.kl != null ? ` · KL ${row.kl.toFixed(3)}` : ""}`
+            + `${row.top1_match != null ? ` · top1 ${row.top1_match ? "✓" : "✗"}` : ""}`
+            + `${row.value_err_z != null ? ` · err_z ${row.value_err_z >= 0 ? "+" : ""}${row.value_err_z.toFixed(2)}` : ""}`
+          : `ply ${ply}`;
+      }
+    });
+    dock.addEventListener("mouseleave", () => {
+      const cross = dock.querySelector(".dbg-dock-cross");
+      if (cross) cross.setAttribute("opacity", "0");
+      const out = dock.querySelector(".dbg-dock-readout");
+      if (out && dock.__dbgChart) out.textContent = dock.__dbgChart.legend || "";
+    });
+  }
+
+  document.addEventListener("keydown", dbgHandleKey);
 }
 
-function debugImport() {
-  const input = dbgEl("debugMoveInput");
-  if (!input) return;
-  const ids = (input.value || "").split(/[\s,]+/).map(s => s.trim()).filter(Boolean).map(Number).filter(n => Number.isFinite(n));
-  if (!ids.length) { debugSetStatus("Paste a comma/space-separated action-id list.", "error"); return; }
-  dbg.imported = ids;
-  debugLoadImported(ids.length);
+// ---- screen entry ----------------------------------------------------------------
+
+async function enterDebugScreen() {
+  showVersionTag();
+  if (!dbg.inited) {
+    dbg.inited = true;
+    // Bind handlers in their OWN try so a later failure can never leave the nav
+    // buttons unwired, surfaced to the on-screen banner (the real-phone failure
+    // mode we otherwise can't see).
+    try {
+      debugBindEvents();
+    } catch (e) {
+      reportError("debugBindEvents: " + (e && (e.stack || e.message) || e));
+    }
+  }
+  if (dbg.pendingDeepLink) {
+    // navigateScreen() is mid-flight: when it is about to WRITE `#debug` the
+    // resulting hashchange routes through dbgApplyHash (which consumes the deep
+    // link); when the hash already IS `#debug...` no event will come — apply now.
+    if (String(window.location.hash || "").startsWith("#debug")) dbgApplyHash();
+    return;
+  }
+  dbgApplyHash();
 }
 
-function debugSyncRecordSelect() {
-  const sel = dbgEl("debugRecordSelect");
-  if (!sel) return;
-  if (!dbg.records.length) { sel.innerHTML = `<option value="0">0</option>`; sel.value = "0"; return; }
-  sel.innerHTML = dbg.records.map(r => {
-    const win = r.winner ? ` (${r.winner.replace("player", "P")})` : "";
-    return `<option value="${r.index}">#${r.index} · ${r.actions}mv${escapeText(win)}</option>`;
-  }).join("");
-  sel.value = String(dbg.record);
-}
+// Debug-internal hash navigation (ply steps, injections, checkpoint flips). The
+// global listener above (setScreen) handles screen routing; this one applies the
+// nav state. dbgApplyHash dedupes, so the double delivery is harmless.
+window.addEventListener("hashchange", () => {
+  if (screenFromHash() === "debug") dbgApplyHash();
+});
 
 async function init() {
   setScreen(activeScreen, { preserveHash: true });

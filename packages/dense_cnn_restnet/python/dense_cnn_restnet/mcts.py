@@ -70,6 +70,7 @@ class BatchedMctsSession:
         widening_min_children: int | None = None,
         forced_playout_k: float | None = None,
         move_temperatures: Sequence[float] | None = None,
+        root_policy_temperatures: Sequence[float] | None = None,
     ) -> list["SearchResult"]:
         """Search live root states through the native dense-cnn MCTS session.
 
@@ -102,6 +103,7 @@ class BatchedMctsSession:
             widening_min_children=widening_min_children,
             forced_playout_k=forced_playout_k,
             move_temperatures=move_temperatures,
+            root_policy_temperatures=root_policy_temperatures,
         )
         return [_result_from_payload(payload) for payload in payloads]
 
@@ -128,6 +130,14 @@ class BatchedMctsSession:
         widening_max_children: int | None = None,
         widening_min_children: int | None = None,
         forced_playout_k: float | None = None,
+        root_policy_temperature_early: float | None = None,
+        root_policy_temperature_halflife: float | None = None,
+        pcr_full_proportion: float | None = None,
+        pcr_fast_visits: int | None = None,
+        policy_init_fraction: float | None = None,
+        policy_init_avg_plies: float | None = None,
+        policy_init_max_plies: int | None = None,
+        policy_init_temperature: float | None = None,
     ) -> Mapping[str, Any]:
         if not root_states:
             return {
@@ -137,6 +147,9 @@ class BatchedMctsSession:
                 "mean_flush_states": 0.0,
                 "no_progress_flushes": 0,
                 "moves_decided": 0,
+                "full_moves": 0,
+                "fast_moves": 0,
+                "init_moves": 0,
                 "flush_size_histogram": {},
                 "on_move_seconds": 0.0,
                 "mcts_batch_diagnostics": {},
@@ -163,6 +176,14 @@ class BatchedMctsSession:
             widening_max_children=widening_max_children,
             widening_min_children=widening_min_children,
             forced_playout_k=forced_playout_k,
+            root_policy_temperature_early=root_policy_temperature_early,
+            root_policy_temperature_halflife=root_policy_temperature_halflife,
+            pcr_full_proportion=pcr_full_proportion,
+            pcr_fast_visits=pcr_fast_visits,
+            policy_init_fraction=policy_init_fraction,
+            policy_init_avg_plies=policy_init_avg_plies,
+            policy_init_max_plies=policy_init_max_plies,
+            policy_init_temperature=policy_init_temperature,
         )
 
 

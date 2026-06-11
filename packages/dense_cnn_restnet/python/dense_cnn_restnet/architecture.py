@@ -12,8 +12,12 @@ this training head surface:
 - `moves_left`: optional auxiliary head over remaining decisions, binned onto
   the same 65-bin support via `[0, MOVES_LEFT_CAP] -> [-1, 1]`.
 
-All value-style heads share one `ValueReduction` (conv1x1 -> Linear 1681->64);
-each head is a 64->65 Linear top.
+Value-bottleneck layout (heads_v3): the MAIN `value` head owns a private
+`ValueReduction` (conv1x1 -> Linear 1681->64); the auxiliary heads
+(`stvalue_<h>`, `moves_left`) share a second `ValueReduction`. Each head is a
+64->65 Linear top. (heads_v2 shared one reduction across all five heads; the
+split keeps the non-stationary auxiliary targets from competing with the main
+game-outcome head for the same 64-d embedding.)
 
 What differs from dense_cnn is the TRUNK. Instead of a homogeneous stack of
 gated residual blocks, the trunk interleaves Residual (R) and Transformer (T)
@@ -658,19 +662,16 @@ class PolicyHead(nn.Module):
 
 
 class ValueReduction(nn.Module):
-    """Shared spatial reduction for every value-style head.
+    """Spatial reduction for value-style heads.
 
     Conv1x1(C->1) -> ReLU -> flatten -> Linear(BOARD_AREA->64) -> ReLU, producing
-    one 64-d value embedding consumed by all the scalar-distribution tops (value,
-    stvalue_<h>, moves_left). This replaces the per-head copies of the same
-    reduction (4 x ~112k params -> 1 x ~108k + ~4k per top): the dominant
-    1681->64 Linear is supervised by every value-style target at once instead of
-    four private ones. Composition (conv+ReLU -> Linear -> ReLU -> top Linear) is
-    identical to the old per-head ValueBinnedHead, so old checkpoints migrate
-    function-preservingly for the main value head (see
-    scripts/_restnet_migrate_heads_v2.py). The spatial Linear (vs global pooling)
-    is deliberate: the crop is center-relative, so absolute crop position is
-    meaningful.
+    one 64-d value embedding consumed by scalar-distribution tops. heads_v3
+    instantiates two: a private one for the MAIN `value` head and a shared one
+    for the auxiliary heads (stvalue_<h>, moves_left), so the non-stationary
+    search-derived auxiliary targets do not compete with the game-outcome head
+    for a single bottleneck (heads_v2 shared one reduction across all five).
+    The spatial Linear (vs global pooling) is deliberate: the crop is
+    center-relative, so absolute crop position is meaningful.
     """
 
     def __init__(self, channels: int) -> None:
@@ -757,12 +758,20 @@ class RestnetNetwork(nn.Module):
 
         self.policy_head = PolicyHead(self.channels)
         self.opp_policy_head = PolicyHead(self.channels)
-        # All value-style heads share one spatial reduction; each head is a
+        # heads_v3 value-bottleneck split: the MAIN value head owns a private
+        # spatial reduction (its 64-d embedding is no longer shared), while the
+        # auxiliary heads (stvalue_<h>, moves_left) share a second reduction.
+        # Rationale: under heads_v2 all five value-style heads competed for one
+        # 64-d embedding, and the auxiliary targets are search-derived and
+        # non-stationary — the main game-outcome value head should not have to
+        # share its entire bottleneck with them. Each head remains a
         # 64 -> VALUE_BINS top. moves_left predicts remaining decisions binned
         # over [0, MOVES_LEFT_CAP] via the same [-1, 1] support (training-only
         # auxiliary; absent from forward_policy_value).
         self.value_reduction = ValueReduction(self.channels)
         self.value_head = nn.Linear(64, VALUE_BINS)
+        aux_value_heads = bool(self.short_term_value_horizons) or moves_left_head
+        self.aux_value_reduction = ValueReduction(self.channels) if aux_value_heads else None
         self.short_term_value_heads = nn.ModuleDict(
             {str(horizon): nn.Linear(64, VALUE_BINS) for horizon in self.short_term_value_horizons}
         )
@@ -832,16 +841,17 @@ class RestnetNetwork(nn.Module):
 
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
         features = self.trunk(x)
-        value_embedding = self.value_reduction(features)
         outputs = {
             "policy": self.policy_head(features),
-            "value": self.value_head(value_embedding),
+            "value": self.value_head(self.value_reduction(features)),
             "opp_policy": self.opp_policy_head(features),
         }
-        for horizon, head in self.short_term_value_heads.items():
-            outputs[f"stvalue_{horizon}"] = head(value_embedding)
-        if self.moves_left_head is not None:
-            outputs["moves_left"] = self.moves_left_head(value_embedding)
+        if self.aux_value_reduction is not None:
+            aux_embedding = self.aux_value_reduction(features)
+            for horizon, head in self.short_term_value_heads.items():
+                outputs[f"stvalue_{horizon}"] = head(aux_embedding)
+            if self.moves_left_head is not None:
+                outputs["moves_left"] = self.moves_left_head(aux_embedding)
         return outputs
 
     def forward_policy_value(self, x: torch.Tensor) -> dict[str, torch.Tensor]:

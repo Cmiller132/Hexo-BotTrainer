@@ -62,6 +62,7 @@ def model1_mcts_session_search(
     widening_min_children: int | None = None,
     forced_playout_k: float | None = None,
     move_temperatures: Sequence[float] | None = None,
+    root_policy_temperatures: Sequence[float] | None = None,
 ) -> tuple[Mapping[str, Any], ...]:
     """Search through a native MCTS session, preserving chosen subtrees.
 
@@ -91,6 +92,9 @@ def model1_mcts_session_search(
             widening_min_children,
             forced_playout_k,
             None if move_temperatures is None else [float(t) for t in move_temperatures],
+            None
+            if root_policy_temperatures is None
+            else [float(t) for t in root_policy_temperatures],
         )
     )
 
@@ -118,6 +122,14 @@ def model1_mcts_session_run_continuous(
     widening_max_children: int | None = None,
     widening_min_children: int | None = None,
     forced_playout_k: float | None = None,
+    root_policy_temperature_early: float | None = None,
+    root_policy_temperature_halflife: float | None = None,
+    pcr_full_proportion: float | None = None,
+    pcr_fast_visits: int | None = None,
+    policy_init_fraction: float | None = None,
+    policy_init_avg_plies: float | None = None,
+    policy_init_max_plies: int | None = None,
+    policy_init_temperature: float | None = None,
 ) -> Mapping[str, Any]:
     return session.run_continuous(
         tuple(int(item) for item in game_keys),
@@ -140,6 +152,14 @@ def model1_mcts_session_run_continuous(
         widening_max_children,
         widening_min_children,
         forced_playout_k,
+        root_policy_temperature_early,
+        root_policy_temperature_halflife,
+        pcr_full_proportion,
+        pcr_fast_visits,
+        policy_init_fraction,
+        policy_init_avg_plies,
+        policy_init_max_plies,
+        policy_init_temperature,
     )
 
 

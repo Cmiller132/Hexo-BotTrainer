@@ -53,10 +53,149 @@ enum ContinuousPhase {
 }
 
 // Deterministic per-(game, ply) RNG streams for the continuous scheduler: root
-// Dirichlet noise and played-move sampling must draw independently (the lockstep
-// path got this from separate seed bases; here one mixer with a stream tag).
+// Dirichlet noise, played-move sampling, the PCR full/fast coin, and the
+// policy-init draws must all be independent (the lockstep path got this from
+// separate seed bases; here one mixer with a stream tag).
 const SEED_STREAM_ROOT_NOISE: u64 = 0;
 const SEED_STREAM_MOVE_SELECT: u64 = 1;
+const SEED_STREAM_PCR: u64 = 2;
+const SEED_STREAM_POLICY_INIT_SELECT: u64 = 3;
+const SEED_STREAM_POLICY_INIT_COUNT: u64 = 4;
+const SEED_STREAM_POLICY_INIT_SAMPLE: u64 = 5;
+
+/// Per-move search class under KataGo Playout Cap Randomization + policy-init
+/// openings. FULL carries the exploration machinery and is recorded as a
+/// training row by the driver; FAST is a cheap noise-free greedy search (not
+/// recorded); INIT is a 1-visit probe whose played action is sampled directly
+/// from the raw root prior (KataGo initGamesWithPolicy; not recorded).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MoveClass {
+    Full,
+    Fast,
+    Init,
+}
+
+/// All per-move selfplay knobs for the continuous scheduler, resolved per
+/// (game_key, ply) move class. Defaults reproduce the pre-PCR behavior
+/// (every move Full at `full_visits`).
+#[derive(Clone, Copy)]
+struct ContinuousMovePolicy {
+    full_visits: u32,
+    fast_visits: u32,
+    /// >= 1.0 disables PCR (every non-init move is Full).
+    pcr_full_proportion: f32,
+    /// <= 0 disables policy-initialized openings.
+    policy_init_fraction: f32,
+    policy_init_avg_plies: f32,
+    policy_init_max_plies: u32,
+    policy_init_temperature: f32,
+    root_policy_temperature: f32,
+    /// <= 0 disables the early ramp.
+    root_policy_temperature_early: f32,
+    root_policy_temperature_halflife: f32,
+    fpu_reduction: f32,
+    forced_playout_k: f32,
+    noise: Option<RootNoiseConfig>,
+}
+
+impl ContinuousMovePolicy {
+    /// KataGo initGamesWithPolicy ply count for one game: with probability
+    /// `policy_init_fraction` draw from a truncated exponential with mean
+    /// `policy_init_avg_plies`, capped at `policy_init_max_plies` (0 possible,
+    /// as in KataGo). Deterministic per (base_seed, game_key).
+    fn policy_init_plies(&self, base_seed: u64, game_key: u64) -> u32 {
+        if self.policy_init_fraction <= 0.0
+            || self.policy_init_avg_plies <= 0.0
+            || self.policy_init_max_plies == 0
+        {
+            return 0;
+        }
+        if self.policy_init_fraction < 1.0 {
+            let select =
+                random_unit(mix_seed(base_seed, game_key, 0, SEED_STREAM_POLICY_INIT_SELECT));
+            if select >= self.policy_init_fraction as f64 {
+                return 0;
+            }
+        }
+        let unit = random_unit(mix_seed(base_seed, game_key, 1, SEED_STREAM_POLICY_INIT_COUNT));
+        let count =
+            (-(self.policy_init_avg_plies as f64) * (1.0 - unit).max(1.0e-12).ln()).floor();
+        (count.max(0.0) as u32).min(self.policy_init_max_plies)
+    }
+
+    /// KataGo PCR per-move coin, after policy-init plies are exhausted.
+    fn classify(
+        &self,
+        base_seed: u64,
+        game_key: u64,
+        ply: u32,
+        policy_init_remaining: u32,
+    ) -> MoveClass {
+        if policy_init_remaining > 0 {
+            return MoveClass::Init;
+        }
+        // run_continuous validates pcr_full_proportion into (0, 1], so >= 1.0
+        // is the single PCR off-switch; a (0, 1) value always reaches the coin.
+        if self.pcr_full_proportion >= 1.0 {
+            return MoveClass::Full;
+        }
+        let unit = random_unit(mix_seed(base_seed, game_key, ply, SEED_STREAM_PCR));
+        if unit < self.pcr_full_proportion as f64 {
+            MoveClass::Full
+        } else {
+            MoveClass::Fast
+        }
+    }
+
+    fn visits_for(&self, class: MoveClass) -> u32 {
+        match class {
+            MoveClass::Full => self.full_visits,
+            MoveClass::Fast => self.fast_visits,
+            MoveClass::Init => 1,
+        }
+    }
+
+    fn forced_k_for(&self, class: MoveClass) -> f32 {
+        match class {
+            MoveClass::Full => self.forced_playout_k,
+            _ => 0.0,
+        }
+    }
+
+    fn noise_for(&self, class: MoveClass) -> Option<RootNoiseConfig> {
+        match class {
+            MoveClass::Full => self.noise,
+            _ => None,
+        }
+    }
+
+    /// Root-only FPU: zero while root noise is on (KataGo rootFpuReductionMax=0);
+    /// noise-free fast/init searches keep the normal reduction.
+    fn root_fpu_for(&self, class: MoveClass) -> f32 {
+        if matches!(class, MoveClass::Full) && self.noise.is_some() {
+            0.0
+        } else {
+            self.fpu_reduction
+        }
+    }
+
+    /// KataGo root-policy temperature early ramp (interpolateEarly), Full moves
+    /// only; fast/init searches run the raw prior (temperature 1.0) so the
+    /// exported init prior is exactly the net prior.
+    fn root_temp_for(&self, class: MoveClass, ply: u32) -> f32 {
+        if !matches!(class, MoveClass::Full) {
+            return 1.0;
+        }
+        if self.root_policy_temperature_early <= 0.0
+            || self.root_policy_temperature_halflife <= 0.0
+        {
+            return self.root_policy_temperature;
+        }
+        self.root_policy_temperature
+            + (self.root_policy_temperature_early - self.root_policy_temperature)
+                * 0.5f32.powf(ply as f32 / self.root_policy_temperature_halflife)
+    }
+}
 
 struct ContinuousSlot {
     game_key: u64,
@@ -65,6 +204,11 @@ struct ContinuousSlot {
     phase: ContinuousPhase,
     in_flight: u32,
     baseline: HashMap<PackedCoord, u32>,
+    /// Remaining policy-initialized opening plies for this game (KataGo
+    /// initGamesWithPolicy); the upcoming move is Init while > 0.
+    policy_init_remaining: u32,
+    /// Class of the move currently being searched in this slot.
+    move_class: MoveClass,
 }
 
 enum ContinuousEvalItem {
@@ -95,6 +239,10 @@ struct ContinuousSchedulerStats {
     flush_size_histogram: HashMap<usize, u64>,
     on_move_seconds: f64,
     moves_decided: u64,
+    // Per-class move counts (PCR / policy-init telemetry).
+    full_moves: u64,
+    fast_moves: u64,
+    init_moves: u64,
 }
 
 fn continuous_flush_decision(
@@ -212,7 +360,7 @@ impl Model1MctsSession {
         self.searches.len()
     }
 
-    #[pyo3(signature = (game_keys, states, visits, c_puct, temperature, seed, evaluator, virtual_batch_size=None, active_root_limit=None, root_dirichlet_total_alpha=None, root_dirichlet_noise_fraction=None, root_policy_temperature=None, fpu_reduction=None, virtual_loss=None, widening_policy_mass=None, widening_max_children=None, widening_min_children=None, forced_playout_k=None, move_temperatures=None))]
+    #[pyo3(signature = (game_keys, states, visits, c_puct, temperature, seed, evaluator, virtual_batch_size=None, active_root_limit=None, root_dirichlet_total_alpha=None, root_dirichlet_noise_fraction=None, root_policy_temperature=None, fpu_reduction=None, virtual_loss=None, widening_policy_mass=None, widening_max_children=None, widening_min_children=None, forced_playout_k=None, move_temperatures=None, root_policy_temperatures=None))]
     fn search(
         &mut self,
         py: Python<'_>,
@@ -241,6 +389,11 @@ impl Model1MctsSession {
         // games that are each at a different move number. `temperature` remains the
         // validated fallback used when this is None.
         move_temperatures: Option<Vec<f32>>,
+        // Optional per-root root-policy softmax temperature (one entry per game
+        // key). Lets self-play run a KataGo-style early ramp (e.g. 1.25 at the
+        // opening decaying to 1.1) where each game sits at its own ply. The scalar
+        // `root_policy_temperature` is the fallback when this is None.
+        root_policy_temperatures: Option<Vec<f32>>,
     ) -> PyResult<Py<PyAny>> {
         // Validate true native-search boundaries here. The Python wrapper is a
         // transport layer and intentionally does not duplicate these checks.
@@ -301,6 +454,28 @@ impl Model1MctsSession {
             "root_policy_temperature",
             root_policy_temperature.unwrap_or(1.0),
         )?;
+        // Per-root root-policy temperatures (early-ramp support): an explicit
+        // vector aligned with `game_keys`, or the validated scalar broadcast.
+        let root_policy_temps: Vec<f32> = match root_policy_temperatures {
+            Some(values) => {
+                if values.len() != roots.len() {
+                    return Err(PyValueError::new_err(format!(
+                        "root_policy_temperatures has {} entries for {} roots",
+                        values.len(),
+                        roots.len()
+                    )));
+                }
+                for value in &values {
+                    if !value.is_finite() || *value <= 0.0 {
+                        return Err(PyValueError::new_err(
+                            "root_policy_temperatures entries must be finite and > 0",
+                        ));
+                    }
+                }
+                values
+            }
+            None => vec![root_policy_temperature; roots.len()],
+        };
         let fpu_reduction =
             validate_nonnegative_f32("fpu_reduction", fpu_reduction.unwrap_or(0.20))?;
         let virtual_loss = validate_nonnegative_f32("virtual_loss", virtual_loss.unwrap_or(1.0))?;
@@ -308,6 +483,15 @@ impl Model1MctsSession {
             validate_nonnegative_f32("forced_playout_k", forced_playout_k.unwrap_or(0.0))?;
         let root_noise_config =
             root_noise_config(root_dirichlet_total_alpha, root_dirichlet_noise_fraction)?;
+        // KataGo zeroes the root FPU reduction while Dirichlet root noise is on
+        // (`rootFpuReductionMax = 0`) so unvisited noise-boosted root children are
+        // not suppressed below `parent_value - fpu` before their first visit.
+        // Noise-free searches (eval/play, PCR fast searches) keep the normal FPU.
+        let root_fpu_reduction = if root_noise_config.is_some() {
+            0.0
+        } else {
+            fpu_reduction
+        };
 
         let widening_mass = widening_policy_mass.unwrap_or(0.95);
         if !widening_mass.is_finite() || widening_mass <= 0.0 || widening_mass > 1.0 {
@@ -344,6 +528,12 @@ impl Model1MctsSession {
                 if search.root_hash == root_hash {
                     search.set_additional_visits(target_visits);
                     search.set_forced_playout_k(forced_playout_k);
+                    search.set_root_fpu_reduction(root_fpu_reduction);
+                    // Reused roots carry raw eval priors; apply the root-policy
+                    // temperature here (before noise, matching the fresh-root
+                    // order) so it covers every searched position, not just each
+                    // game's first root.
+                    search.apply_root_policy_temperature(root_policy_temps[index]);
                     if let Some(noise) = root_noise(root_noise_config, seed, index) {
                         search.apply_root_dirichlet_noise(noise);
                     }
@@ -376,7 +566,8 @@ impl Model1MctsSession {
                     &**evaluation,
                     target_visits,
                     fpu_reduction,
-                    root_policy_temperature,
+                    root_fpu_reduction,
+                    root_policy_temps[index],
                     root_noise(root_noise_config, seed, index),
                     widening,
                     forced_playout_k,
@@ -467,7 +658,15 @@ impl Model1MctsSession {
         Ok(results)
     }
 
-    #[pyo3(signature = (game_keys, states, evaluator, on_move, visits, c_puct, base_seed, virtual_batch_size, flush_target, active_root_limit, temperature_by_ply, root_dirichlet_total_alpha=None, root_dirichlet_noise_fraction=None, root_policy_temperature=None, fpu_reduction=None, virtual_loss=None, widening_policy_mass=None, widening_max_children=None, widening_min_children=None, forced_playout_k=None))]
+    /// Per-ply state (policy-init opening draws, the early temperature ramp,
+    /// and the temperature_by_ply schedule) is keyed to the slot's WITHIN-CALL
+    /// ply, which starts at 0 for every state passed in. Callers must therefore
+    /// hand this fresh game-start states; a mid-game state would receive
+    /// policy-init "opening" plies and maximum early-ramp temperature at its
+    /// entry position. Both production drivers (restnet + dense_cnn) start
+    /// fresh games per epoch.
+    #[pyo3(signature = (game_keys, states, evaluator, on_move, visits, c_puct, base_seed, virtual_batch_size, flush_target, active_root_limit, temperature_by_ply, root_dirichlet_total_alpha=None, root_dirichlet_noise_fraction=None, root_policy_temperature=None, fpu_reduction=None, virtual_loss=None, widening_policy_mass=None, widening_max_children=None, widening_min_children=None, forced_playout_k=None, root_policy_temperature_early=None, root_policy_temperature_halflife=None, pcr_full_proportion=None, pcr_fast_visits=None, policy_init_fraction=None, policy_init_avg_plies=None, policy_init_max_plies=None, policy_init_temperature=None))]
+    #[allow(clippy::too_many_arguments)]
     fn run_continuous(
         &mut self,
         py: Python<'_>,
@@ -491,6 +690,27 @@ impl Model1MctsSession {
         widening_max_children: Option<u32>,
         widening_min_children: Option<u32>,
         forced_playout_k: Option<f32>,
+        // KataGo root-policy temperature early ramp (interpolateEarly): the
+        // per-ply Full-search root temperature is
+        // `base + (early - base) * 0.5 ** (ply / halflife)`. None/0 disables.
+        root_policy_temperature_early: Option<f32>,
+        root_policy_temperature_halflife: Option<f32>,
+        // KataGo Playout Cap Randomization: each non-init move is Full with this
+        // probability (full `visits`, noise + forced playouts + temperature,
+        // payload flag `pcr_full=true`) else Fast (`pcr_fast_visits`, no noise,
+        // no forced playouts, greedy, `pcr_full=false`). None/1.0 disables.
+        pcr_full_proportion: Option<f32>,
+        pcr_fast_visits: Option<u32>,
+        // KataGo policy-initialized openings: per game, with probability
+        // `policy_init_fraction`, the first N plies (N ~ truncated exponential,
+        // mean `policy_init_avg_plies`, cap `policy_init_max_plies`) run a
+        // 1-visit noise-free probe and the played action is sampled from the
+        // RAW root prior at `policy_init_temperature` (payload flag
+        // `policy_init=true`). None/0 disables.
+        policy_init_fraction: Option<f32>,
+        policy_init_avg_plies: Option<f32>,
+        policy_init_max_plies: Option<u32>,
+        policy_init_temperature: Option<f32>,
     ) -> PyResult<Py<PyAny>> {
         validate_search_inputs(visits, c_puct, 0.0)?;
         let roots = states_from_py_states(py, states)?;
@@ -522,6 +742,73 @@ impl Model1MctsSession {
             validate_nonnegative_f32("forced_playout_k", forced_playout_k.unwrap_or(0.0))?;
         let root_noise_config =
             root_noise_config(root_dirichlet_total_alpha, root_dirichlet_noise_fraction)?;
+        let root_policy_temperature_early = validate_nonnegative_f32(
+            "root_policy_temperature_early",
+            root_policy_temperature_early.unwrap_or(0.0),
+        )?;
+        let root_policy_temperature_halflife = validate_nonnegative_f32(
+            "root_policy_temperature_halflife",
+            root_policy_temperature_halflife.unwrap_or(0.0),
+        )?;
+        if root_policy_temperature_early > 0.0 && root_policy_temperature_halflife <= 0.0 {
+            return Err(PyValueError::new_err(
+                "root_policy_temperature_halflife must be > 0 when root_policy_temperature_early is set",
+            ));
+        }
+        let pcr_full_proportion = pcr_full_proportion.unwrap_or(1.0);
+        if !pcr_full_proportion.is_finite() || pcr_full_proportion <= 0.0 || pcr_full_proportion > 1.0
+        {
+            return Err(PyValueError::new_err(
+                "pcr_full_proportion must be in (0, 1]",
+            ));
+        }
+        let pcr_fast_visits = pcr_fast_visits.unwrap_or(visits);
+        if pcr_full_proportion < 1.0 && pcr_fast_visits == 0 {
+            return Err(PyValueError::new_err(
+                "pcr_fast_visits must be >= 1 when PCR is enabled",
+            ));
+        }
+        let policy_init_fraction = policy_init_fraction.unwrap_or(0.0);
+        if !policy_init_fraction.is_finite() || !(0.0..=1.0).contains(&policy_init_fraction) {
+            return Err(PyValueError::new_err(
+                "policy_init_fraction must be in [0, 1]",
+            ));
+        }
+        let policy_init_avg_plies = policy_init_avg_plies.unwrap_or(0.0);
+        let policy_init_max_plies = policy_init_max_plies.unwrap_or(0);
+        let policy_init_temperature = policy_init_temperature.unwrap_or(1.0);
+        if policy_init_fraction > 0.0 {
+            if !policy_init_avg_plies.is_finite() || policy_init_avg_plies <= 0.0 {
+                return Err(PyValueError::new_err(
+                    "policy_init_avg_plies must be > 0 when policy-init openings are enabled",
+                ));
+            }
+            if policy_init_max_plies == 0 {
+                return Err(PyValueError::new_err(
+                    "policy_init_max_plies must be >= 1 when policy-init openings are enabled",
+                ));
+            }
+            if !policy_init_temperature.is_finite() || policy_init_temperature <= 0.0 {
+                return Err(PyValueError::new_err(
+                    "policy_init_temperature must be > 0",
+                ));
+            }
+        }
+        let move_policy = ContinuousMovePolicy {
+            full_visits: visits,
+            fast_visits: pcr_fast_visits,
+            pcr_full_proportion,
+            policy_init_fraction,
+            policy_init_avg_plies,
+            policy_init_max_plies,
+            policy_init_temperature,
+            root_policy_temperature,
+            root_policy_temperature_early,
+            root_policy_temperature_halflife,
+            fpu_reduction,
+            forced_playout_k,
+            noise: root_noise_config,
+        };
         let widening_mass = widening_policy_mass.unwrap_or(0.95);
         if !widening_mass.is_finite() || widening_mass <= 0.0 || widening_mass > 1.0 {
             return Err(PyValueError::new_err(
@@ -565,6 +852,9 @@ impl Model1MctsSession {
             game_keys.into_iter().zip(roots.into_iter()).enumerate()
         {
             let root_hash = state_hash(&root);
+            let policy_init_remaining = move_policy.policy_init_plies(base_seed, game_key);
+            let move_class =
+                move_policy.classify(base_seed, game_key, 0, policy_init_remaining);
             let mut slot = ContinuousSlot {
                 game_key,
                 ply: 0,
@@ -572,13 +862,19 @@ impl Model1MctsSession {
                 phase: ContinuousPhase::AwaitRootEval,
                 in_flight: 0,
                 baseline: HashMap::new(),
+                policy_init_remaining,
+                move_class,
             };
             if let Some(mut search) = self.searches.remove(&game_key) {
                 if search.root_hash == root_hash {
-                    search.set_additional_visits(visits);
-                    search.set_forced_playout_k(forced_playout_k);
+                    search.set_additional_visits(move_policy.visits_for(move_class));
+                    search.set_forced_playout_k(move_policy.forced_k_for(move_class));
+                    search.set_root_fpu_reduction(move_policy.root_fpu_for(move_class));
+                    // Reused roots carry raw eval priors; apply the root-policy
+                    // temperature before noise (fresh-root order of operations).
+                    search.apply_root_policy_temperature(move_policy.root_temp_for(move_class, 0));
                     if let Some(noise) = root_noise_exact(
-                        root_noise_config,
+                        move_policy.noise_for(move_class),
                         mix_seed(base_seed, game_key, 0, SEED_STREAM_ROOT_NOISE),
                     ) {
                         search.apply_root_dirichlet_noise(noise);
@@ -698,12 +994,8 @@ impl Model1MctsSession {
                     &mut slots,
                     items,
                     &evaluations,
-                    visits,
-                    fpu_reduction,
-                    root_policy_temperature,
-                    root_noise_config,
+                    &move_policy,
                     widening,
-                    forced_playout_k,
                     base_seed,
                     virtual_loss,
                 )?;
@@ -720,12 +1012,10 @@ impl Model1MctsSession {
                 py,
                 on_move,
                 &mut slots,
-                visits,
                 c_puct,
-                forced_playout_k,
+                &move_policy,
                 &temperature_by_ply,
                 base_seed,
-                root_noise_config,
                 &mut queue,
                 &mut stats,
                 &mut tree_stats,
@@ -748,13 +1038,10 @@ impl Model1MctsSession {
             }
         }
 
-        for slot in slots {
-            if let Some(search) = slot.search {
-                if matches!(slot.phase, ContinuousPhase::Active) {
-                    self.searches.insert(slot.game_key, search);
-                }
-            }
-        }
+        // No end-of-epoch tree store: the scheduler loop above only exits once
+        // every slot is Empty (search already dropped), so cross-call reuse out
+        // of run_continuous is impossible by construction. The epoch-start
+        // reuse branch services trees stored by lockstep `search()` only.
 
         let dict = PyDict::new(py);
         dict.set_item("flush_count", stats.flush_count)?;
@@ -770,6 +1057,9 @@ impl Model1MctsSession {
         )?;
         dict.set_item("no_progress_flushes", stats.no_progress_flushes)?;
         dict.set_item("moves_decided", stats.moves_decided)?;
+        dict.set_item("full_moves", stats.full_moves)?;
+        dict.set_item("fast_moves", stats.fast_moves)?;
+        dict.set_item("init_moves", stats.init_moves)?;
         let hist = PyDict::new(py);
         let mut hist_items: Vec<_> = stats.flush_size_histogram.into_iter().collect();
         hist_items.sort_unstable_by_key(|(size, _)| *size);
@@ -1156,12 +1446,8 @@ fn backup_continuous_items(
     slots: &mut [ContinuousSlot],
     items: Vec<ContinuousEvalItem>,
     evaluations: &[Arc<RustEvaluation>],
-    visits: u32,
-    fpu_reduction: f32,
-    root_policy_temperature: f32,
-    root_noise_config: Option<RootNoiseConfig>,
+    move_policy: &ContinuousMovePolicy,
     widening: Widening,
-    forced_playout_k: f32,
     base_seed: u64,
     virtual_loss: f32,
 ) -> PyResult<()> {
@@ -1190,18 +1476,29 @@ fn backup_continuous_items(
                 slot_index, state, ..
             } => {
                 let slot = &mut slots[slot_index];
+                // The move class is a pure function of (game_key, ply,
+                // policy_init_remaining); recompute it here so every RootInit
+                // producer (epoch start, advance fallback, replace) agrees.
+                let move_class = move_policy.classify(
+                    base_seed,
+                    slot.game_key,
+                    slot.ply,
+                    slot.policy_init_remaining,
+                );
+                slot.move_class = move_class;
                 let search = RustSearch::new(
                     state,
                     &**evaluation,
-                    visits,
-                    fpu_reduction,
-                    root_policy_temperature,
+                    move_policy.visits_for(move_class),
+                    move_policy.fpu_reduction,
+                    move_policy.root_fpu_for(move_class),
+                    move_policy.root_temp_for(move_class, slot.ply),
                     root_noise_exact(
-                        root_noise_config,
+                        move_policy.noise_for(move_class),
                         mix_seed(base_seed, slot.game_key, slot.ply, SEED_STREAM_ROOT_NOISE),
                     ),
                     widening,
-                    forced_playout_k,
+                    move_policy.forced_k_for(move_class),
                 )?;
                 if search.root_edges_empty() {
                     return Err(PyValueError::new_err(
@@ -1230,12 +1527,10 @@ fn complete_continuous_slots(
     py: Python<'_>,
     on_move: &Bound<'_, PyAny>,
     slots: &mut [ContinuousSlot],
-    visits: u32,
     c_puct: f32,
-    forced_playout_k: f32,
+    move_policy: &ContinuousMovePolicy,
     temperature_by_ply: &[f32],
     base_seed: u64,
-    root_noise_config: Option<RootNoiseConfig>,
     queue: &mut Vec<ContinuousEvalItem>,
     stats: &mut ContinuousSchedulerStats,
     tree_stats: &mut ContinuousTreeStats,
@@ -1262,8 +1557,16 @@ fn complete_continuous_slots(
 
         let game_key = slots[slot_index].game_key;
         let ply = slots[slot_index].ply;
+        let move_class = slots[slot_index].move_class;
         let move_seed = mix_seed(base_seed, game_key, ply, SEED_STREAM_MOVE_SELECT);
-        let temperature = temperature_for_ply(temperature_by_ply, ply);
+        // Move-selection temperature by class: Full follows the per-ply
+        // schedule, Fast is greedy (KataGo cheap searches carry no exploration),
+        // Init is irrelevant (the action is overridden by raw-prior sampling).
+        let temperature = match move_class {
+            MoveClass::Full => temperature_for_ply(temperature_by_ply, ply),
+            MoveClass::Fast => 0.0,
+            MoveClass::Init => 0.0,
+        };
         let baseline = slots[slot_index].baseline.clone();
         let payloads = {
             let search = slots[slot_index]
@@ -1280,12 +1583,41 @@ fn complete_continuous_slots(
                 move_seed,
                 Some(&baselines),
                 c_puct,
-                forced_playout_k,
+                move_policy.forced_k_for(move_class),
             )?
         };
         let payloads = payloads.bind(py).downcast::<PyList>()?;
         let payload = payloads.get_item(0)?;
         let payload_dict = payload.downcast::<PyDict>()?;
+        // Class flags for the Python driver (recording / metadata decisions).
+        payload_dict.set_item("pcr_full", matches!(move_class, MoveClass::Full))?;
+        payload_dict.set_item("policy_init", matches!(move_class, MoveClass::Init))?;
+        if matches!(move_class, MoveClass::Init) {
+            // KataGo initGamesWithPolicy: override the searched action with one
+            // sampled from the RAW root prior (this slot ran a 1-visit probe
+            // with noise off and root temperature 1.0, so the exported prior is
+            // exactly the net prior). The override happens BEFORE action_id is
+            // read, so the advance below follows the sampled move; the sampled
+            // child is usually unmaterialized, advance_root then returns false
+            // and the slot falls back to a fresh RootInit — correct, just one
+            // extra (cached) root eval.
+            let search = slots[slot_index]
+                .search
+                .as_ref()
+                .expect("active continuous slot has search");
+            let (prior_ids, prior_weights) = root_prior_policy(search.root());
+            let sampled = select_action_from_policy(
+                &prior_ids,
+                &prior_weights,
+                move_policy.policy_init_temperature,
+                mix_seed(base_seed, game_key, ply, SEED_STREAM_POLICY_INIT_SAMPLE),
+            )?
+            .ok_or_else(|| {
+                PyValueError::new_err("policy-init sampling found no positive prior mass")
+            })?;
+            payload_dict.set_item("action_id", sampled)?;
+            payload_dict.set_item("action_selection", "policy_init_prior")?;
+        }
         let action_id: PackedCoord = payload_dict
             .get_item("action_id")?
             .ok_or_else(|| PyValueError::new_err("continuous payload missing action_id"))?
@@ -1293,6 +1625,11 @@ fn complete_continuous_slots(
 
         moves_decided += 1;
         stats.moves_decided += 1;
+        match move_class {
+            MoveClass::Full => stats.full_moves += 1,
+            MoveClass::Fast => stats.fast_moves += 1,
+            MoveClass::Init => stats.init_moves += 1,
+        }
         let started = std::time::Instant::now();
         let response = on_move.call1((game_key, payload_dict))?;
         stats.on_move_seconds += started.elapsed().as_secs_f64();
@@ -1317,14 +1654,34 @@ fn complete_continuous_slots(
                 }
                 let next_state = single_state_from_py(py, &tuple.get_item(1)?)?;
                 let next_hash = state_hash(&next_state);
+                // The decided move consumes one policy-init ply; the NEXT move's
+                // class is then a pure function of (game_key, ply+1, remaining).
+                if matches!(move_class, MoveClass::Init) {
+                    slots[slot_index].policy_init_remaining =
+                        slots[slot_index].policy_init_remaining.saturating_sub(1);
+                }
+                let next_ply = ply.saturating_add(1);
+                let next_class = move_policy.classify(
+                    base_seed,
+                    game_key,
+                    next_ply,
+                    slots[slot_index].policy_init_remaining,
+                );
+                slots[slot_index].move_class = next_class;
                 let mut keep_promoted = false;
                 if let Some(search) = slots[slot_index].search.as_mut() {
                     if search.advance_root(action_id)? && search.root_hash == next_hash {
-                        search.set_additional_visits(visits);
-                        search.set_forced_playout_k(forced_playout_k);
+                        search.set_additional_visits(move_policy.visits_for(next_class));
+                        search.set_forced_playout_k(move_policy.forced_k_for(next_class));
+                        search.set_root_fpu_reduction(move_policy.root_fpu_for(next_class));
+                        // Reused roots carry raw eval priors; apply the
+                        // root-policy temperature before noise.
+                        search.apply_root_policy_temperature(
+                            move_policy.root_temp_for(next_class, next_ply),
+                        );
                         if let Some(noise) = root_noise_exact(
-                            root_noise_config,
-                            mix_seed(base_seed, game_key, ply + 1, SEED_STREAM_ROOT_NOISE),
+                            move_policy.noise_for(next_class),
+                            mix_seed(base_seed, game_key, next_ply, SEED_STREAM_ROOT_NOISE),
                         ) {
                             search.apply_root_dirichlet_noise(noise);
                         }
@@ -1333,7 +1690,7 @@ fn complete_continuous_slots(
                         keep_promoted = true;
                     }
                 }
-                slots[slot_index].ply = slots[slot_index].ply.saturating_add(1);
+                slots[slot_index].ply = next_ply;
                 slots[slot_index].in_flight = 0;
                 if keep_promoted {
                     slots[slot_index].phase = ContinuousPhase::Active;
@@ -1362,6 +1719,16 @@ fn complete_continuous_slots(
                 slots[slot_index].baseline.clear();
                 slots[slot_index].in_flight = 0;
                 slots[slot_index].phase = ContinuousPhase::AwaitRootEval;
+                // Fresh game: draw its policy-init ply count; the move class is
+                // recomputed when the RootInit is backed up.
+                slots[slot_index].policy_init_remaining =
+                    move_policy.policy_init_plies(base_seed, new_key);
+                slots[slot_index].move_class = move_policy.classify(
+                    base_seed,
+                    new_key,
+                    0,
+                    slots[slot_index].policy_init_remaining,
+                );
                 queue.push(ContinuousEvalItem::RootInit {
                     slot_index,
                     state: next_state,

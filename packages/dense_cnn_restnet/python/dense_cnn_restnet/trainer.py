@@ -159,19 +159,6 @@ class DenseCNNTrainer:
         self._update_train_bucket(total_rows=total_rows, window_start=window_start)
 
         requested_rows = int(self.config.training.train_samples_per_epoch)
-        if self.train_state.train_bucket_level + 1.0e-9 < requested_rows:
-            window = self._empty_window(ctx, epoch, shuffle_dir, total_rows, shuffle_result)
-            components.shared.sample_index = window.index
-            components.shared.sample_window = window
-            return {
-                "status": "train_bucket_limited",
-                "epoch": epoch,
-                "reason": "train_bucket_limited",
-                "train_bucket_level": self.train_state.train_bucket_level,
-                "requested": requested_rows,
-                "metadata": dict(window.metadata),
-            }
-
         train_files = list(shuffle_train_files(shuffle_dir))
         if self.config.training.no_repeat_files:
             train_files = [
@@ -181,7 +168,7 @@ class DenseCNNTrainer:
             ]
         rng = np.random.default_rng(int(ctx.config.run.seed or 0) + epoch * 65_537)
         selected, selected_rows = _select_files_for_rows(train_files, requested_rows, rng=rng)
-        if selected_rows < requested_rows:
+        if selected_rows <= 0:
             window = self._empty_window(ctx, epoch, shuffle_dir, total_rows, shuffle_result)
             components.shared.sample_index = window.index
             components.shared.sample_window = window
@@ -193,19 +180,38 @@ class DenseCNNTrainer:
                 "requested": requested_rows,
                 "metadata": dict(window.metadata),
             }
+        # Train min(requested, available): early epochs have fewer shuffled rows
+        # than train_samples_per_epoch, and skipping them entirely (the old
+        # behavior) wasted the freshest data exactly when the net learns fastest.
+        # The pass trains on whatever is there, capped at the request; the bucket
+        # is consumed by the effective (not the requested) row count.
+        effective_rows = min(requested_rows, selected_rows)
+        if self.train_state.train_bucket_level + 1.0e-9 < effective_rows:
+            window = self._empty_window(ctx, epoch, shuffle_dir, total_rows, shuffle_result)
+            components.shared.sample_index = window.index
+            components.shared.sample_window = window
+            return {
+                "status": "train_bucket_limited",
+                "epoch": epoch,
+                "reason": "train_bucket_limited",
+                "train_bucket_level": self.train_state.train_bucket_level,
+                "requested": requested_rows,
+                "effective": effective_rows,
+                "metadata": dict(window.metadata),
+            }
 
         validation_files = shuffle_validation_files(shuffle_dir) if self.config.samples.validation_fraction > 0.0 else ()
         validation_rows = _validation_row_count(shuffle_dir) if validation_files else 0
         bucket_before = float(self.train_state.train_bucket_level)
-        self.train_state.train_bucket_level = max(0.0, self.train_state.train_bucket_level - requested_rows)
+        self.train_state.train_bucket_level = max(0.0, self.train_state.train_bucket_level - effective_rows)
         self.train_state.train_steps_since_last_reload += 1
         window = DenseNpzSampleWindow(
             files=tuple(selected),
             seed=int(ctx.config.run.seed or 0),
             epoch=epoch,
             index=SimpleNamespace(sample_count=total_rows, store=shuffle_dir),
-            window_size=requested_rows,
-            target_rows=requested_rows,
+            window_size=effective_rows,
+            target_rows=effective_rows,
             shuffle_dir=shuffle_dir,
             validation_files=tuple(validation_files),
             validation_rows=validation_rows,
@@ -217,6 +223,7 @@ class DenseCNNTrainer:
                 "train_bucket_level_before_consume": bucket_before,
                 "train_bucket_level": self.train_state.train_bucket_level,
                 "requested": requested_rows,
+                "effective": effective_rows,
                 "selected_rows": selected_rows,
                 "selected_files": [str(path) for path in selected],
                 "validation_files": [str(path) for path in validation_files],
@@ -229,8 +236,9 @@ class DenseCNNTrainer:
             "status": "completed",
             "epoch": epoch,
             "sample_count": total_rows,
-            "window_size": requested_rows,
+            "window_size": effective_rows,
             "requested": requested_rows,
+            "effective": effective_rows,
             "metadata": dict(window.metadata),
         }
 

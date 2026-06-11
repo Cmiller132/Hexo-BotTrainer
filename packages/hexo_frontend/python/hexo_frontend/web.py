@@ -714,6 +714,36 @@ class HexoPlayHandler(BaseHTTPRequestHandler):
                             _query_int(query.get("ply", [None])[0]) or 0,
                         )
                     )
+            elif path == "/api/debug/ckpt_info":
+                query = parse_qs(parsed.query)
+                self._send_json(
+                    _debug_ckpt_info(
+                        str(query.get("run", [""])[0]),
+                        str(query.get("checkpoint", [""])[0]),
+                    )
+                )
+            elif path == "/api/debug/record_row":
+                query = parse_qs(parsed.query)
+                self._send_json(
+                    _debug_record_row(
+                        str(query.get("run", [""])[0]),
+                        str(query.get("path", [""])[0]),
+                        _query_int(query.get("record", [None])[0]) or 0,
+                        _query_int(query.get("ply", [None])[0]) or 0,
+                    )
+                )
+            elif path == "/api/debug/game_eval":
+                query = parse_qs(parsed.query)
+                self._send_json(
+                    _debug_game_eval(
+                        str(query.get("run", [""])[0]),
+                        str(query.get("path", [""])[0]),
+                        _query_int(query.get("record", [None])[0]) or 0,
+                        str(query.get("checkpoint", [""])[0]),
+                        _query_int(query.get("start", [None])[0]) or 0,
+                        _query_int(query.get("count", [None])[0]) or 16,
+                    )
+                )
             elif path == "/" or path == "/index.html":
                 self._send_static("index.html")
             elif path.startswith("/static/"):
@@ -735,6 +765,8 @@ class HexoPlayHandler(BaseHTTPRequestHandler):
                 self._send_json(_debug_analyze(self._read_json()))
             elif path == "/api/debug/search":
                 self._send_json(_debug_search(self._read_json()))
+            elif path == "/api/debug/search_tree":
+                self._send_json(_debug_search_tree(self._read_json()))
             else:
                 self.send_error(HTTPStatus.NOT_FOUND)
         except MoveConflict as exc:
@@ -1389,9 +1421,10 @@ def _debug_analyze(body: dict[str, Any]) -> dict[str, object]:
     run, action_ids = _debug_action_prefix(body)
     ckpt_path = _debug_resolve_checkpoint(run, str(body.get("checkpoint", "")))
     n = body.get("n")
-    signature = _debug_signature("analyze", ckpt_path, action_ids, n)
+    planes = bool(body.get("planes", False))
+    signature = _debug_signature(f"analyze:planes={int(planes)}", ckpt_path, action_ids, n)
     return _debug_worker().cached(
-        signature, "analyze", checkpoint=str(ckpt_path), action_ids=action_ids, n=n
+        signature, "analyze", checkpoint=str(ckpt_path), action_ids=action_ids, n=n, planes=planes
     )
 
 
@@ -1401,8 +1434,9 @@ def _debug_search(body: dict[str, Any]) -> dict[str, object]:
     n = body.get("n")
     visits = int(body.get("visits", 512))
     c_puct = float(body.get("c_puct", 1.5))
+    seed = int(body.get("seed", 0) or 0)  # B2: forward to the worker (default keeps determinism tests)
     visits = max(1, min(visits, 20_000))  # bound CPU work per request
-    signature = _debug_signature(f"search:{visits}:{c_puct}", ckpt_path, action_ids, n)
+    signature = _debug_signature(f"search:{visits}:{c_puct}:{seed}", ckpt_path, action_ids, n)
     return _debug_worker().cached(
         signature,
         "search",
@@ -1411,8 +1445,203 @@ def _debug_search(body: dict[str, Any]) -> dict[str, object]:
         action_ids=action_ids,
         visits=visits,
         c_puct=c_puct,
+        seed=seed,
         n=n,
     )
+
+
+def _debug_search_tree(body: dict[str, Any]) -> dict[str, object]:
+    """Pure-Python deterministic PUCT tree for the Tree Explorer (§3.7).
+
+    ``root_actions`` (optional) are appended AFTER the resolved position prefix,
+    so a deep subtree can be re-rooted/expanded without re-basing the UI position."""
+
+    run, action_ids = _debug_action_prefix(body)
+    ckpt_path = _debug_resolve_checkpoint(run, str(body.get("checkpoint", "")))
+    n = body.get("n")
+    visits = max(1, min(int(body.get("visits", 512)), 20_000))
+    c_puct = float(body.get("c_puct", 1.5))
+    seed = int(body.get("seed", 0) or 0)
+    max_depth = max(1, min(int(body.get("max_depth", 12)), 40))
+    top_k = max(1, min(int(body.get("top_k", 8)), 32))
+    min_n = max(0, min(int(body.get("min_n", 2)), 1_000_000))
+    action_ids = action_ids + [int(a) for a in (body.get("root_actions") or [])]
+    signature = _debug_signature(
+        f"search_tree:{visits}:{c_puct}:{seed}:{max_depth}:{top_k}:{min_n}", ckpt_path, action_ids, n
+    )
+    return _debug_worker().cached(
+        signature,
+        "search_tree",
+        timeout=debug_service.DEFAULT_TIMEOUT,
+        checkpoint=str(ckpt_path),
+        action_ids=action_ids,
+        visits=visits,
+        c_puct=c_puct,
+        seed=seed,
+        max_depth=max_depth,
+        top_k=top_k,
+        min_n=min_n,
+        n=n,
+    )
+
+
+def _debug_ckpt_info(run_name: str, checkpoint: str) -> dict[str, object]:
+    """Checkpoint provenance WITHOUT paying an analyze (§3.8, fixes B3): the
+    worker ``info`` op (cached like any result) + a stat on the resolved file."""
+
+    ckpt_path = _debug_resolve_checkpoint(run_name, checkpoint)
+    signature = _debug_signature("info", ckpt_path, [], None)
+    meta = dict(_debug_worker().cached(signature, "info", checkpoint=str(ckpt_path)))
+    arch = meta.get("arch")
+    if isinstance(arch, dict):  # contract wants a display string, not the raw dict
+        meta["arch"] = ", ".join(f"{key}={arch[key]}" for key in sorted(arch)) or None
+    stat = _safe_stat(ckpt_path)
+    return {
+        "run": run_name,
+        "checkpoint": ckpt_path.name,
+        "size": int(stat.st_size) if stat else 0,
+        "mtime": float(stat.st_mtime) if stat else 0.0,
+        "meta": meta,
+    }
+
+
+_DEBUG_HXR_EPOCH_RE = re.compile(r"epoch_(\d+)\.hxr$")
+_DEBUG_GAME_INDEX_RE = re.compile(r"(\d+)$")  # trailing self-play game index in a game_id
+
+
+def _debug_resolve_record_npz(
+    run_name: str, artifact_path: str, record_index: int, game_id: object
+) -> Path | None:
+    """Locate the compact ``.npz`` training shard for one self-play .hxr record.
+
+    Shard candidates are ``selfplay/epoch_NNNNNN_game_*.npz`` for the .hxr's
+    epoch. Match order: a sidecar ``<shard>.json`` whose ``game_id`` equals the
+    record's; then the self-play game index parsed off the record's game_id
+    (shards are named ``..._game_{index}.npz`` by that index); then the record
+    index as a last resort. Returns None when nothing matches."""
+
+    match = _DEBUG_HXR_EPOCH_RE.search(Path(artifact_path).name)
+    if match is None:
+        return None
+    epoch = int(match.group(1))
+    hxr_path = _debug_resolve_run_path(run_name, artifact_path)
+    if hxr_path is None or not hxr_path.is_file():
+        return None
+    shard_dir = hxr_path.parent
+    prefix = f"epoch_{epoch:06d}_game_"
+    candidates = sorted(shard_dir.glob(f"{prefix}*.npz"))
+    if not candidates:
+        return None
+    for shard in candidates:
+        sidecar = shard.with_suffix(".json")
+        if sidecar.is_file():
+            try:
+                data = json.loads(sidecar.read_text(encoding="utf-8-sig"))
+            except (OSError, ValueError):
+                continue
+            if str(data.get("game_id")) == str(game_id):
+                return shard
+    index_match = _DEBUG_GAME_INDEX_RE.search(str(game_id or ""))
+    if index_match:
+        exact = shard_dir / f"{prefix}{int(index_match.group(1)):06d}.npz"
+        if exact.is_file():
+            return exact
+    fallback = shard_dir / f"{prefix}{record_index:06d}.npz"
+    return fallback if fallback.is_file() else None
+
+
+def _debug_current_player_at(action_ids: list[int], ply: int) -> int:
+    """Replay-derived 0/1 side-to-move at ``ply`` (the M8 misalignment guard's
+    expectation; parity is NOT assumed — phases can repeat a player)."""
+
+    state = engine.new_game()
+    for action_id in action_ids[:ply]:
+        engine.apply_action(state, engine.PlacementAction(unpack_coord_id(int(action_id))))
+    role = getattr(engine.current_player(state), "value", "")
+    return 1 if str(role).endswith("1") else 0
+
+
+_DEBUG_WINNER_INDEX = {"player0": 0, "player1": 1}
+
+
+def _debug_record_row(run_name: str, artifact_path: str, record_index: int, ply: int) -> dict[str, object]:
+    """Recorded .npz training row for one (game, ply) (§3.9). Self-play only."""
+
+    def miss(reason: str) -> dict[str, object]:
+        return {"found": False, "reason": reason, "npz": None, "turn_index": None, "row": None}
+
+    if not artifact_path.replace("\\", "/").startswith("selfplay/"):
+        return miss("not_selfplay")
+    record, _players, _records = _debug_open_record(run_name, artifact_path, record_index)
+    npz_path = _debug_resolve_record_npz(run_name, artifact_path, record_index, record.game_id)
+    if npz_path is None:
+        return miss("no_shard")
+    action_ids = [int(a) for a in record.action_ids]
+    ply = max(0, min(int(ply), len(action_ids)))
+    expect_player = _debug_current_player_at(action_ids, ply)
+
+    signature = _debug_signature(f"record_row:{ply}:{expect_player}", npz_path, [], None)
+    result = dict(
+        _debug_worker().cached(
+            signature, "record_row", npz=str(npz_path), turn_index=ply, expect_player=expect_player
+        )
+    )
+    if result.get("npz"):
+        result["npz"] = f"selfplay/{npz_path.name}"  # run-relative, like every other path
+    row = result.get("row")
+    if isinstance(row, dict):
+        # Overlay the .hxr-derived facts the compact shard does not persist.
+        row = dict(row)  # never mutate the cached copy
+        truncated = str(getattr(record, "status", "")) != "completed"
+        row["truncated"] = bool(truncated)
+        if truncated and not row.get("value_target_reason"):
+            row["value_target_reason"] = "max_actions_draw"
+        result["row"] = row
+    return result
+
+
+def _debug_game_eval(
+    run_name: str, artifact_path: str, record_index: int, checkpoint: str, start: int, count: int
+) -> dict[str, object]:
+    """Game Error Sweep chunk (§3.10): the .hxr record is opened once here, the
+    worker decodes the matching .npz shard once and joins per ply internally."""
+
+    record, _players, _records = _debug_open_record(run_name, artifact_path, record_index)
+    action_ids = [int(a) for a in record.action_ids]
+    total = len(action_ids)
+    ckpt_path = _debug_resolve_checkpoint(run_name, checkpoint)
+    start = max(0, min(int(start), total))
+    count = max(1, min(int(count), 32))
+    plies = list(range(start, min(start + count, total)))
+    winner = _DEBUG_WINNER_INDEX.get(str(record.winner)) if record.winner is not None else None
+    npz_path = None
+    if artifact_path.replace("\\", "/").startswith("selfplay/"):
+        npz_path = _debug_resolve_record_npz(run_name, artifact_path, record_index, record.game_id)
+
+    signature = _debug_signature(
+        f"game_eval:{start}:{count}:{winner}:{npz_path}", ckpt_path, action_ids, None
+    )
+    raw = _debug_worker().cached(
+        signature,
+        "game_eval",
+        timeout=debug_service.DEFAULT_TIMEOUT,
+        checkpoint=str(ckpt_path),
+        action_ids=action_ids,
+        plies=plies,
+        npz=str(npz_path) if npz_path else None,
+        winner=winner,
+    )
+    return {
+        "run": run_name,
+        "path": artifact_path,
+        "record": record_index,
+        "checkpoint": ckpt_path.name,
+        "total": total,
+        "start": start,
+        "count": count,
+        "winner": winner,
+        "plies": raw.get("plies", []),
+    }
 
 
 def _debug_recorded_trajectory(run_dir: Path, artifact_path: str, game_id: object) -> list[dict[str, object]]:
