@@ -750,6 +750,11 @@ class HexoPlayHandler(BaseHTTPRequestHandler):
                 self._send_static(unquote(path.removeprefix("/static/")))
             else:
                 self.send_error(HTTPStatus.NOT_FOUND)
+        except debug_service.DebugWorkerError as exc:
+            # Worker infra failure (timeout/dead process — covers DebugWorkerTimeout):
+            # 500 = "worker restarted, retry may succeed". DebugRequestError stays a
+            # plain RuntimeError below -> 400 = deterministic, do not retry.
+            self._send_json(self._error_payload(str(exc)), HTTPStatus.INTERNAL_SERVER_ERROR)
         except (TypeError, ValueError, RuntimeError) as exc:
             self._send_json(self._error_payload(str(exc)), HTTPStatus.BAD_REQUEST)
 
@@ -773,6 +778,9 @@ class HexoPlayHandler(BaseHTTPRequestHandler):
             self._send_json({"error": str(exc), "state": self.controller.state()}, HTTPStatus.CONFLICT)
         except (KeyError, TypeError, ValueError) as exc:
             self._send_json({"error": str(exc), "state": self.controller.state()}, HTTPStatus.BAD_REQUEST)
+        except debug_service.DebugWorkerError as exc:
+            # Same taxonomy split as do_GET: infra failure -> 500 (retryable).
+            self._send_json(self._error_payload(str(exc)), HTTPStatus.INTERNAL_SERVER_ERROR)
         except RuntimeError as exc:
             self._send_json(self._error_payload(str(exc)), HTTPStatus.BAD_REQUEST)
 
@@ -1466,13 +1474,30 @@ def _debug_search_tree(body: dict[str, Any]) -> dict[str, object]:
     top_k = max(1, min(int(body.get("top_k", 8)), 32))
     min_n = max(0, min(int(body.get("min_n", 2)), 1_000_000))
     action_ids = action_ids + [int(a) for a in (body.get("root_actions") or [])]
+    # Validate the position HERE so a routine UI request (e.g. the final ply of
+    # a finished game, or a stale root_actions path) becomes a plain 400 and
+    # never reaches the worker as an error: the worker stays warm.
+    state = engine.new_game()
+    for index, action_id in enumerate(action_ids):
+        try:
+            engine.apply_action(state, engine.PlacementAction(unpack_coord_id(int(action_id))))
+        except Exception as exc:
+            raise ValueError(f"illegal action id {action_id} at ply {index}: {exc}") from exc
+    if engine.terminal(state) is not None:
+        raise ValueError("position is terminal; nothing to search")
+    # py_debug runs one batch-of-1 CPU net forward per visit (~25ms each; spec
+    # §4.3 pegs 4096 visits near the 120s budget), so a fixed 120s deadline
+    # guarantees a mid-compute worker KILL for any legal >4000-visit request.
+    # search_tree alone scales its deadline with the spec'd 1..20000 visit
+    # range, capped at 300s so one request cannot hog the single worker lock.
+    timeout = min(300.0, max(debug_service.DEFAULT_TIMEOUT, visits * 0.03))
     signature = _debug_signature(
         f"search_tree:{visits}:{c_puct}:{seed}:{max_depth}:{top_k}:{min_n}", ckpt_path, action_ids, n
     )
     return _debug_worker().cached(
         signature,
         "search_tree",
-        timeout=debug_service.DEFAULT_TIMEOUT,
+        timeout=timeout,
         checkpoint=str(ckpt_path),
         action_ids=action_ids,
         visits=visits,
@@ -1509,16 +1534,17 @@ _DEBUG_HXR_EPOCH_RE = re.compile(r"epoch_(\d+)\.hxr$")
 _DEBUG_GAME_INDEX_RE = re.compile(r"(\d+)$")  # trailing self-play game index in a game_id
 
 
-def _debug_resolve_record_npz(
-    run_name: str, artifact_path: str, record_index: int, game_id: object
-) -> Path | None:
+def _debug_resolve_record_npz(run_name: str, artifact_path: str, game_id: object) -> Path | None:
     """Locate the compact ``.npz`` training shard for one self-play .hxr record.
 
     Shard candidates are ``selfplay/epoch_NNNNNN_game_*.npz`` for the .hxr's
     epoch. Match order: a sidecar ``<shard>.json`` whose ``game_id`` equals the
     record's; then the self-play game index parsed off the record's game_id
-    (shards are named ``..._game_{index}.npz`` by that index); then the record
-    index as a last resort. Returns None when nothing matches."""
+    (shards are named ``..._game_{index}.npz`` by that index). Returns None when
+    nothing matches. There is deliberately NO record-index fallback: .hxr
+    records are written in game FINISH order while shards are named by the
+    self-play game index, so ``record_index`` would silently attach a different
+    game's shard whenever the orders diverge (they routinely do)."""
 
     match = _DEBUG_HXR_EPOCH_RE.search(Path(artifact_path).name)
     if match is None:
@@ -1546,8 +1572,7 @@ def _debug_resolve_record_npz(
         exact = shard_dir / f"{prefix}{int(index_match.group(1)):06d}.npz"
         if exact.is_file():
             return exact
-    fallback = shard_dir / f"{prefix}{record_index:06d}.npz"
-    return fallback if fallback.is_file() else None
+    return None
 
 
 def _debug_current_player_at(action_ids: list[int], ply: int) -> int:
@@ -1573,7 +1598,7 @@ def _debug_record_row(run_name: str, artifact_path: str, record_index: int, ply:
     if not artifact_path.replace("\\", "/").startswith("selfplay/"):
         return miss("not_selfplay")
     record, _players, _records = _debug_open_record(run_name, artifact_path, record_index)
-    npz_path = _debug_resolve_record_npz(run_name, artifact_path, record_index, record.game_id)
+    npz_path = _debug_resolve_record_npz(run_name, artifact_path, record.game_id)
     if npz_path is None:
         return miss("no_shard")
     action_ids = [int(a) for a in record.action_ids]
@@ -1616,7 +1641,7 @@ def _debug_game_eval(
     winner = _DEBUG_WINNER_INDEX.get(str(record.winner)) if record.winner is not None else None
     npz_path = None
     if artifact_path.replace("\\", "/").startswith("selfplay/"):
-        npz_path = _debug_resolve_record_npz(run_name, artifact_path, record_index, record.game_id)
+        npz_path = _debug_resolve_record_npz(run_name, artifact_path, record.game_id)
 
     signature = _debug_signature(
         f"game_eval:{start}:{count}:{winner}:{npz_path}", ckpt_path, action_ids, None

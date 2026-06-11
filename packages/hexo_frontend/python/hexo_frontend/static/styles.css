@@ -2604,7 +2604,7 @@ body:not(.tactics-on) .tactic-legend {
   cursor: pointer; touch-action: manipulation; }
 .dbg-tabs button.active { color: var(--accent); border-color: rgba(39,215,230,0.44);
   background: rgba(39,215,230,0.10); box-shadow: none; }
-.dbg-tab-panels { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+.dbg-tab-panels { flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden; }
 .dbg-tab-panel { display: none; flex-direction: column; gap: 10px; font-size: 13px; }
 .dbg-tab-panel.active { display: flex; }
 
@@ -2772,6 +2772,15 @@ body:not(.tactics-on) .tactic-legend {
   border-color: rgba(39,215,230,0.44); background: rgba(39,215,230,0.10); }
 .dbg-pin-chip-actions .dbg-mini-btn { min-height: 22px; padding: 0 6px; }
 
+/* Narrow desktop, inspector at/near its 280px floor: the fixed .dbg-move-row
+   tracks (28+58+58+52+52 + five 6px gaps = 278px) exceed the ~256px of panel
+   content width — compress the tracks and let the cell column ellipsize so the
+   Q/Δ columns stay visible instead of forcing a horizontal scrollbar. */
+@media (min-width: 901px) and (max-width: 1280px) {
+  .dbg-move-row { grid-template-columns: 18px minmax(0, 1fr) 48px 48px 44px 44px; gap: 4px; font-size: 12px; }
+  .dbg-move-row > span:nth-child(2) { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; min-width: 0; }
+}
+
 /* ---- Mobile (<900px): single column Context -> Board -> Ply controls -> Inspector
    -> Pins (horizontal scroller) -> Dock; rail becomes a horizontal strip + slider. */
 @media (max-width: 900px) {
@@ -2787,15 +2796,31 @@ body:not(.tactics-on) .tactic-legend {
   .dbg-ply-sweep { min-height: 44px; padding: 0 10px; }
   .dbg-ply-slider-wrap { flex: 1 1 100%; }
   .dbg-ply-strip { flex: 1 1 100%; min-height: 22px; height: 22px; }
+  /* Horizontal strip: JS emits left/width inline (instead of top/height) when
+     the <=900px query matches; rows span the strip's full height and the
+     value-error tint / blunder / miss / cursor markers rotate with them. */
+  .dbg-ply-row { top: 0; bottom: 0; left: auto; right: auto; min-height: 0; min-width: 2px; }
+  .dbg-ply-row .dbg-ply-verr { left: 0; right: 0; top: auto; bottom: 0; width: auto; height: 30%; }
+  .dbg-ply-blunder { box-shadow: inset 0 3px 0 var(--red); }
+  .dbg-ply-miss { box-shadow: inset 0 -3px 0 var(--yellow); }
+  .dbg-ply-cur::before { content: "\25BE"; left: 50%; top: 1px;
+    transform: translateX(-50%); }
   .dbg-journal { text-align: left; }
   .dbg-journal summary { padding: 0 12px; min-height: 44px; line-height: 44px; }
   .dbg-journal-body { left: 0; right: auto; bottom: calc(100% + 8px); }
   .dbg-board-wrap { max-height: min(58vh, 520px); }
   .dbg-mode-seg button, .dbg-tabs button { min-height: 44px; }
   .dbg-toggles label, .dbg-legend label, .dbg-cmp-controls label { min-height: 44px; }
-  .dbg-panel-refresh { min-width: 36px; min-height: 36px; }
+  .dbg-panel-refresh { min-width: 44px; min-height: 44px; }
   .dbg-search-actions button, .dbg-dock-actions button, .dbg-pin-actions button,
   .dbg-file-btn, .dbg-ctx-controls button, #dbgBranchReturn { min-height: 44px; }
+  /* Small embedded controls (chip ✕, tree step/expand, mini buttons incl. the
+     pin-chip pair, whose base rule outspecifies bare .dbg-mini-btn). */
+  .dbg-chip-x, .dbg-mini-btn, .dbg-pin-chip-actions .dbg-mini-btn,
+  .dbg-tree-step, .dbg-tree-expand { min-width: 44px; min-height: 44px; touch-action: manipulation; }
+  /* Wins over .board-view-controls button (equal specificity, later source order). */
+  .dbg-zoom { grid-template-columns: repeat(3, 44px); }
+  .dbg-zoom button { width: 44px; min-height: 44px; touch-action: manipulation; }
   #dbgInspector { max-height: none; }
   .dbg-tab-panels { overflow-y: visible; }
   .dbg-pin-chips { flex-wrap: nowrap; }

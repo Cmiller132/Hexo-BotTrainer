@@ -3380,10 +3380,12 @@ const dbg = {
   analysis: null,      // ckptA analyze
   analysisB: null,     // ckptB analyze (COMPARE)
   search: null,        // /api/debug/search result
+  searchBusy: false,
   tree: null,          // /api/debug/search_tree result (childq/Q/scatter/PV read it)
   treeBusy: false,
   treeOpen: new Map(), // tree-node path -> explicit expand/collapse (default: PV open)
   treePreview: null,   // {key, ids} — clicked tree node's line, ghosted on the board
+  treeGhostsOff: false, // T with a fresh tree toggles its board ghosts (§1.7 "run / toggle")
   ladder: null,        // visit-ladder rows for ladderKey (spec S10)
   ladderBusy: false,
   // Game Error Sweeps (spec M9), keyed run|path|rec|ckptA so flipping checkpoints
@@ -3442,6 +3444,7 @@ const dbg = {
   gameKey: "",
   gameActs: [],
   gameActsKey: "",
+  placementsBackfill: "",  // gameKey already backfilled to the final ply (one-shot)
 };
 
 const dbgEl = id => document.getElementById(id);
@@ -3546,7 +3549,10 @@ function dbgNavigate(patch, { replace = false } = {}) {
   if (patch && patch.acts) nav.acts = patch.acts.slice();
   const hash = dbgNavToHash(nav);
   if (String(window.location.hash || "") === hash) {
-    dbgApplyHash();  // no-op unless a previous apply failed midway
+    // Explicit re-selection of the identical tuple: clear the dedupe so an apply
+    // that failed midway can be retried (re-apply on a cache hit is idempotent).
+    dbg.navApplied = "";
+    dbgApplyHash();
     return;
   }
   // Optimistic nav update: `location.hash =` fires hashchange ASYNCHRONOUSLY,
@@ -3584,6 +3590,7 @@ function dbgApplyHash() {
   dbg.nav = dbgHashToNav(hash);
   const seq = ++dbg.applySeq;
   dbgApplyNav(dbg.nav, seq).catch(e => {
+    if (seq === dbg.applySeq) dbg.navApplied = "";  // failed tuple stays re-appliable
     debugSetStatus(`Debug: ${(e && e.message) || e}`, "error");
     reportError("dbgApplyNav: " + (e && (e.stack || e.message) || e));
   });
@@ -3657,6 +3664,9 @@ async function dbgApplyNav(nav, seq) {
       return;
     }
   }
+  // Checkpoint provenance is position-independent — ensure it BEFORE the games/
+  // position early-returns so CKPT loads even when the source has no games (M7).
+  if (nav.tab === "ckpt") dbgEnsureCkptInfo(false);
   const gamesKey = `${nav.run}|${nav.src}`;
   if (dbg.loadedGamesKey !== gamesKey) {
     await dbgLoadGames(nav.run, nav.src);
@@ -3703,6 +3713,9 @@ async function dbgApplyNav(nav, seq) {
     debugSetStatus("");
     dbgRenderAll();
     if (!entry.analysis || (nav.ckptB && dbg.keys.analysisB !== dbgCacheKey(nav, nav.ckptB))) dbgScheduleFetch(0);
+    // Fully cached: dbgFetchCurrent (whose tail prefetches) never runs, so extend
+    // the S7 prefetch window here — else steady stepping prefetches alternate plies.
+    else dbgMaybePrefetch();
   } else {
     if (!nav.acts.length && recorded && dbg.gamePlacements.length) {
       // INSTANT, analyze-independent step off the client-side placement cache;
@@ -3714,7 +3727,6 @@ async function dbgApplyNav(nav, seq) {
     dbgRenderAll();
     dbgScheduleFetch(120);  // coalesce rapid steps/slider drags into one fetch
   }
-  if (nav.tab === "ckpt") dbgEnsureCkptInfo(false);
   if (nav.tab === "inputs" || nav.mode === "plane") dbgEnsureInputs(false);
   if (dbgWantRecordRow(nav)) dbgEnsureRecordRow(false);
 }
@@ -3887,7 +3899,31 @@ function dbgCommitPosition(data, key) {
     dbg.gameActs = d.action_ids;
     dbg.gameActsKey = `${dbg.nav.run}|${dbg.nav.path}|${dbg.nav.rec}`;
   }
-  if (!dbg.nav.acts.length) dbgCacheGamePlacements(data);
+  if (!dbg.nav.acts.length) {
+    dbgCacheGamePlacements(data);
+    // Position payloads carry placements for action_ids[:ply] only, so a deep
+    // link to a mid-game ply leaves later stone ownership unknown — and the
+    // HEADS recorded-reply highlight needs it. One-shot final-ply backfill.
+    if (!d.imported && d.total != null && dbg.gamePlacements.length < d.total) dbgBackfillPlacements(d.total);
+  }
+}
+
+function dbgBackfillPlacements(total) {
+  const nav = dbg.nav;
+  const gameKey = `${nav.run}|${nav.path}|${nav.rec}`;
+  if (dbg.placementsBackfill === gameKey) return;
+  dbg.placementsBackfill = gameKey;
+  const params = new URLSearchParams({ run: nav.run, path: nav.path, record: String(nav.rec), ply: String(total) });
+  debugFetchJson(`/api/debug/position?${params.toString()}`).then(data => {
+    if (gameKey !== `${dbg.nav.run}|${dbg.nav.path}|${dbg.nav.rec}`) return;  // game changed mid-flight
+    // Warm the M12 cache for the final-ply key while the payload is in hand.
+    const entry = dbgCacheEntry(dbgCacheKey(Object.assign({}, dbg.nav, { ply: total, acts: [] }), dbg.nav.ckptA));
+    if (!entry.position) entry.position = data;
+    dbgCacheGamePlacements(data);
+    if (dbg.nav.tab === "heads") dbgRenderHeads();
+  }).catch(() => {
+    if (dbg.placementsBackfill === gameKey) dbg.placementsBackfill = "";  // transient — retry on next commit
+  });
 }
 
 function dbgCacheGamePlacements(data) {
@@ -3951,6 +3987,15 @@ async function dbgFetchCurrent() {
   if (!nav.run || !nav.path || nav.ply == null) return;
   const key = dbgCurrentKey();
   const entry = dbgCacheEntry(key);
+  if (!entry.position && nav.ckptB) {
+    // The sibling (ckptB) entry holds the same checkpoint-independent position —
+    // after a ckptA↔ckptB flip reuse it instead of refetching (M12).
+    const sib = dbg.cache.get(dbgCacheKey(nav, nav.ckptB));
+    if (sib && sib.position) {
+      entry.position = sib.position;
+      if (!entry.record_row && sib.record_row) entry.record_row = sib.record_row;
+    }
+  }
   if (!entry.position) {
     const seq = ++dbg.posSeq;  // claim latest; a newer ply nav supersedes this fetch
     try {
@@ -4002,11 +4047,16 @@ async function dbgEnsureRecordedActs() {
   return dbg.gameActs;
 }
 
-function dbgRequestBody(checkpoint) {
+async function dbgRequestBody(checkpoint) {
   const nav = dbg.nav;
   const body = { run: nav.run, checkpoint };
   if (nav.acts.length) {
-    const recorded = dbgRecordedActs() || [];
+    // Branch prefix = recorded actions[0..ply] + injected tail. The recorded
+    // list may be missing (gameActsKey points at another game after the user
+    // browsed elsewhere and the branch came back via a cache hit) — NEVER fall
+    // back to an empty prefix: the server would silently analyze a near-empty
+    // board while the UI shows the full branch position. Re-fetch instead.
+    const recorded = await dbgEnsureRecordedActs();
     body.action_ids = recorded.slice(0, nav.ply).concat(nav.acts);
   } else {
     body.path = nav.path;
@@ -4036,15 +4086,26 @@ async function dbgEnsureAnalysis(key, entry) {
     const analysis = await debugFetchJson("/api/debug/analyze", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(dbgRequestBody(nav.ckptA)),
+      body: JSON.stringify(await dbgRequestBody(nav.ckptA)),
     });
-    if (seq !== dbg.anlSeq) return;  // a newer position/analyze superseded us — drop stale result
+    // Always cache the response — a superseded seq only skips the status/loading
+    // bookkeeping, never the data, or a revisited ply could sit permanently
+    // un-analyzed (analysisPending is false again and nothing re-triggers).
     entry.analysis = analysis;
     dbgJournalLog(analysis, nav.ckptA, nav);  // S3: auto-log every completed analyze
+    if (!dbg.worker || !dbg.worker.alive) {
+      // A successful analyze proves the lazily-spawned worker is up — re-read the
+      // live status so the dot turns green and the S7 prefetch gate opens.
+      debugFetchJson(`/api/debug/checkpoints?run=${encodeURIComponent(nav.run)}`).then(d => {
+        dbg.worker = d.worker || null;
+        dbgRenderWorkerDot(dbg.worker && dbg.worker.alive ? "ok" : "");
+      }).catch(() => {});
+    }
     if (key === dbgCurrentKey()) {
       dbg.analysis = analysis;
       dbg.keys.analysis = key;
-      debugSetStatus("");
+      if (seq === dbg.anlSeq) debugSetStatus("");
+      dbgRenderAll();  // the finally's render is seq-gated — cover the dropped-seq case
     }
   } catch (e) {
     if (seq === dbg.anlSeq) debugSetStatus(`Analyze: ${e.message}`, "error");
@@ -4062,6 +4123,13 @@ async function dbgEnsureAnalysisB() {
   if (!nav.ckptB || nav.ply == null) return;
   const keyB = dbgCacheKey(nav, nav.ckptB);
   const entryB = dbgCacheEntry(keyB);
+  // position/record_row are checkpoint-independent — share them with the A entry
+  // so a later ckptA↔ckptB flip re-renders with zero network requests (M12).
+  const entryA = dbg.cache.get(dbgCacheKey(nav, nav.ckptA));
+  if (entryA) {
+    if (!entryB.position && entryA.position) entryB.position = entryA.position;
+    if (!entryB.record_row && entryA.record_row) entryB.record_row = entryA.record_row;
+  }
   if (entryB.analysis) {
     dbg.analysisB = entryB.analysis;
     dbg.keys.analysisB = keyB;
@@ -4071,23 +4139,28 @@ async function dbgEnsureAnalysisB() {
   }
   if (entryB.analysisPending) return;
   entryB.analysisPending = true;
+  delete entryB.analysisError;  // a retry starts clean
   const seq = ++dbg.anlSeqB;
   debugSetStatus("Evaluating checkpoint B…", "busy");
   try {
     const analysis = await debugFetchJson("/api/debug/analyze", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(dbgRequestBody(nav.ckptB)),
+      body: JSON.stringify(await dbgRequestBody(nav.ckptB)),
     });
-    if (seq !== dbg.anlSeqB) return;
+    // Cache even when superseded (see dbgEnsureAnalysis) — only the commit is gated.
     entryB.analysis = analysis;
     dbgJournalLog(analysis, nav.ckptB, nav);
     if (keyB === dbgCacheKey(dbg.nav, dbg.nav.ckptB)) {
       dbg.analysisB = analysis;
       dbg.keys.analysisB = keyB;
-      debugSetStatus("");
+      if (seq === dbg.anlSeqB) debugSetStatus("");
     }
   } catch (e) {
+    // Record the failure on the entry so the COMPARE panel can show an error
+    // state instead of a perpetual "Evaluating checkpoint B…" (nothing retries
+    // automatically — only ↻ or the next nav apply).
+    entryB.analysisError = e.message;
     if (seq === dbg.anlSeqB) debugSetStatus(`Compare: ${e.message}`, "error");
   } finally {
     entryB.analysisPending = false;
@@ -4107,24 +4180,34 @@ function dbgAnalyzeNow(force) {
 }
 
 async function dbgRunSearch() {
+  dbgAbortPrefetch();  // S7: an explicit request preempts the speculative ply±1 fetch
   const nav = dbg.nav;
   if (!nav.ckptA || !dbg.position) {
     debugSetStatus("Pick a checkpoint and position before searching.", "error");
     return;
   }
-  const body = dbgRequestBody(nav.ckptA);
+  if (dbg.searchBusy) {
+    dbgStub("A search is already running.");
+    return;
+  }
   const visitsEl = dbgEl("dbgSearchVisits");
   const cpuctEl = dbgEl("dbgSearchCpuct");
   const seedEl = dbgEl("dbgSearchSeed");
-  body.visits = Math.max(1, Math.min(20000, parseInt(visitsEl && visitsEl.value, 10) || 512));
-  const cPuct = Number(cpuctEl && cpuctEl.value);
-  body.c_puct = Number.isFinite(cPuct) && cPuct > 0 ? cPuct : 1.5;
-  const seed = parseInt(seedEl && seedEl.value, 10);
-  body.seed = Number.isFinite(seed) ? seed : 0;  // B2/M6: the seed is forwarded server-side now
+  const visits = Math.max(1, Math.min(20000, parseInt(visitsEl && visitsEl.value, 10) || 512));
   const key = dbgCurrentKey();
   const entry = dbgCacheEntry(key);
-  debugSetStatus(`Running ${body.visits}-visit CPU search…`, "busy");
+  dbg.searchBusy = true;
+  // #dbgSearchRun is static HTML (not re-rendered from state) — toggle in place.
+  const runBtn = dbgEl("dbgSearchRun");
+  if (runBtn) runBtn.disabled = true;
+  debugSetStatus(`Running ${visits}-visit CPU search…`, "busy");
   try {
+    const body = await dbgRequestBody(nav.ckptA);
+    body.visits = visits;
+    const cPuct = Number(cpuctEl && cpuctEl.value);
+    body.c_puct = Number.isFinite(cPuct) && cPuct > 0 ? cPuct : 1.5;
+    const seed = parseInt(seedEl && seedEl.value, 10);
+    body.seed = Number.isFinite(seed) ? seed : 0;  // B2/M6: the seed is forwarded server-side now
     const result = await debugFetchJson("/api/debug/search", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -4138,8 +4221,11 @@ async function dbgRunSearch() {
     }
   } catch (e) {
     debugSetStatus(`Search: ${e.message}`, "error");
+  } finally {
+    dbg.searchBusy = false;
+    if (runBtn) runBtn.disabled = false;
+    dbgRenderAll();
   }
-  dbgRenderAll();
 }
 
 async function dbgEnsureCkptInfo(force) {
@@ -4197,6 +4283,12 @@ async function dbgEnsureRecordRow(force) {
   const key = dbgCurrentKey();
   const entry = dbgCacheEntry(key);
   if (force) delete entry.record_row;
+  if (!entry.record_row && nav.ckptB) {
+    // record_row is checkpoint-independent — reuse the sibling (ckptB) entry's
+    // copy after a ckptA↔ckptB flip instead of refetching (M12).
+    const sib = dbg.cache.get(dbgCacheKey(nav, nav.ckptB));
+    if (sib && sib.record_row) entry.record_row = sib.record_row;
+  }
   if (nav.acts.length || nav.src !== "selfplay") {
     // Branch positions / eval games never have training rows — synthesize the
     // graceful miss client-side instead of paying a server round-trip.
@@ -4253,16 +4345,19 @@ function dbgRenderTargets() {
   const a = dbgFreshData("analysis");
   note.textContent = `${rr.npz || ""}${rr.npz ? " · " : ""}turn ${rr.turn_index} · P${row.current_player}${row.phase ? ` · ${row.phase}` : ""}`;
   const num = v => (typeof v === "number" ? v.toFixed(3) : "—");
+  // The npz does not persist every field — the backend returns null for those,
+  // and null must read as "not recorded", never as a plausible 0.000/yes/"".
+  const NOT_REC = `<span class="dbg-muted">not recorded</span>`;
   const d = (recV, liveV) => (typeof recV === "number" && typeof liveV === "number")
     ? `${liveV - recV >= 0 ? "+" : ""}${(liveV - recV).toFixed(3)}` : "—";
   const cols = (label, rec, live, dlt) => `<div class="dbg-target-row"><span class="label">${label}</span><span>${rec}</span><span class="dbg-muted">${live}</span><span>${dlt}</span></div>`;
   const out = [`<div class="dbg-target-row dbg-move-head"><span>field</span><span>recorded</span><span>live ${escapeText(dbgCkptShort(dbg.nav.ckptA))}</span><span>Δ</span></div>`];
   out.push(cols("value target", num(row.value_target), num(a && a.value), d(row.value_target, a && a.value)));
-  out.push(cols("reason", escapeText(row.value_target_reason || "—"), "", ""));
+  out.push(cols("reason", row.value_target_reason == null ? NOT_REC : escapeText(row.value_target_reason || "—"), "", ""));
   for (const h of Object.keys(row.stvalue || {}).sort((x, y) => Number(x) - Number(y))) {
     const sv = row.stvalue[h];
     const live = a && a.stvalue && a.stvalue[h] ? a.stvalue[h].scalar : null;
-    out.push(cols(`STV+${h}${sv.mask ? "" : " (masked)"}`, num(sv.target), num(live), sv.mask ? d(sv.target, live) : "—"));
+    out.push(cols(`STV+${h}${sv.mask ? "" : " (masked)"}`, sv.target == null ? NOT_REC : num(sv.target), num(live), sv.mask ? d(sv.target, live) : "—"));
   }
   if (row.moves_left) {
     const liveMl = a && a.moves_left && typeof a.moves_left.scalar === "number"
@@ -4270,21 +4365,23 @@ function dbgRenderTargets() {
       : null;
     const recMl = row.moves_left.target;
     out.push(cols(`moves left${row.moves_left.mask ? "" : " (masked)"}`,
-      typeof recMl === "number" && recMl >= 0 ? recMl.toFixed(0) : "—",
+      typeof recMl === "number" && recMl >= 0 ? recMl.toFixed(0) : (recMl == null ? NOT_REC : "—"),
       liveMl != null ? liveMl.toFixed(0) : "—",
       row.moves_left.mask && typeof recMl === "number" && recMl >= 0 && liveMl != null
         ? `${liveMl - recMl >= 0 ? "+" : ""}${(liveMl - recMl).toFixed(0)}` : "—"));
   }
-  out.push(cols("policy surprise", num(row.policy_surprise), "", ""));
-  out.push(cols("search visits", String(row.search_visits), "", ""));
-  out.push(cols("pcr_full", row.pcr_full ? "yes" : "no (fast)", "", ""));
-  out.push(cols("frequency wt", num(row.frequency_weight), "", ""));
+  out.push(cols("policy surprise", row.policy_surprise == null ? NOT_REC : num(row.policy_surprise), "", ""));
+  // 0 is a sentinel: the shard stored a normalized visit policy, so the raw count is unknown.
+  out.push(cols("search visits", row.search_visits == null ? NOT_REC
+      : (row.search_visits > 0 ? String(row.search_visits) : "unknown (normalized weights)"), "", ""));
+  out.push(cols("pcr_full", row.pcr_full == null ? NOT_REC : (row.pcr_full ? "yes" : "no (fast)"), "", ""));
+  out.push(cols("frequency wt", row.frequency_weight == null ? NOT_REC : num(row.frequency_weight), "", ""));
   if (row.truncated) out.push(cols("truncated", "yes", "", ""));
   if (row.opp_policy_source) out.push(cols("opp source", escapeText(row.opp_policy_source), "", ""));
   const priorById = new Map(((a && a.policy) || []).map(p => [p.action_id, p.p]));
   const tm = (row.policy || []).slice(0, 8).map((p, i) => {
     const live = priorById.get(p.action_id);
-    const dp = live != null ? `${live - p.p >= 0 ? "+" : ""}${((live - p.p) * 100).toFixed(1)}` : "—";
+    const dp = live != null ? `${live - p.p >= 0 ? "+" : ""}${((live - p.p) * 100).toFixed(1)}%` : "—";
     return `<div class="dbg-target-row"><span>#${i + 1} ${p.q},${p.r}</span><span>${(p.p * 100).toFixed(1)}%</span><span class="dbg-muted">${live != null ? (live * 100).toFixed(1) + "%" : "—"}</span><span>${dp}</span></div>`;
   }).join("");
   body.innerHTML = out.join("")
@@ -4317,6 +4414,7 @@ function dbgBlunders(sweep) {
 }
 
 async function dbgRunSweep() {
+  dbgAbortPrefetch();  // S7: an explicit request preempts the speculative ply±1 fetch
   const nav = dbg.nav;
   if (!nav.run || !nav.path || !nav.ckptA) {
     debugSetStatus("Sweep needs a recorded game + checkpoint.", "error");
@@ -4420,6 +4518,7 @@ async function dbgRunTree(opts) {
   // opts: {checkpoint} = run for that checkpoint's cache slot (compare B trees);
   // {rootActions, graftPath} = expand-on-demand — re-root the search at a deep
   // node via root_actions and graft the children back onto the rendered tree.
+  dbgAbortPrefetch();  // S7: an explicit request preempts the speculative ply±1 fetch
   const nav = dbg.nav;
   const checkpoint = (opts && opts.checkpoint) || nav.ckptA;
   if (!checkpoint || !dbg.position) {
@@ -4430,13 +4529,13 @@ async function dbgRunTree(opts) {
     dbgStub("A debug tree is already running.");
     return;
   }
-  const body = Object.assign(dbgRequestBody(checkpoint), dbgTreeParams());
-  if (opts && opts.rootActions && opts.rootActions.length) body.root_actions = opts.rootActions;
   const key = dbgCacheKey(nav, checkpoint);
   dbg.treeBusy = true;
-  debugSetStatus(`Debug tree: ${body.visits} visits on CPU…`, "busy");
   dbgRenderSearchPanel();
   try {
+    const body = Object.assign(await dbgRequestBody(checkpoint), dbgTreeParams());
+    if (opts && opts.rootActions && opts.rootActions.length) body.root_actions = opts.rootActions;
+    debugSetStatus(`Debug tree: ${body.visits} visits on CPU…`, "busy");
     const result = await debugFetchJson("/api/debug/search_tree", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -4460,6 +4559,7 @@ async function dbgRunTree(opts) {
         dbg.keys.tree = key;
         dbg.treeOpen = new Map();
         dbg.treePreview = null;
+        dbg.treeGhostsOff = false;  // a fresh run always shows its ghosts
       }
     }
   } catch (e) {
@@ -4600,6 +4700,7 @@ function dbgRenderScatter() {
 // ---- visit ladder (spec S10) ---------------------------------------------------
 
 async function dbgRunLadder() {
+  dbgAbortPrefetch();  // S7: an explicit request preempts the speculative ply±1 fetch
   const nav = dbg.nav;
   if (!nav.ckptA || !dbg.position) {
     debugSetStatus("Pick a checkpoint and position first.", "error");
@@ -4615,7 +4716,7 @@ async function dbgRunLadder() {
     for (const visits of [64, 128, 256, 512, 1024]) {
       if (dbgCurrentKey() !== key) break;  // user moved on — stop climbing
       debugSetStatus(`Visit ladder: ${visits} visits…`, "busy");
-      const body = Object.assign(dbgRequestBody(nav.ckptA), { visits, c_puct: params.c_puct, seed: params.seed });
+      const body = Object.assign(await dbgRequestBody(nav.ckptA), { visits, c_puct: params.c_puct, seed: params.seed });
       const s = await debugFetchJson("/api/debug/search", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -4624,7 +4725,9 @@ async function dbgRunLadder() {
       dbg.ladder.rungs.push({ visits, best: s.best, best_action_id: s.best_action_id, root_value: s.root_value });
       dbgRenderLadder();
     }
-    debugSetStatus("");
+    // Only clear the shared status line while we still own the context — a nav
+    // mid-ladder hands it to the newer action's busy message.
+    if (dbgCurrentKey() === key) debugSetStatus("");
   } catch (e) {
     debugSetStatus(`Ladder: ${e.message}`, "error");
   } finally {
@@ -4642,12 +4745,14 @@ function dbgRenderLadder() {
     el.innerHTML = `<div class="dbg-flex-head"><span class="dbg-muted">Visit ladder (64 → 1024): best move per budget</span>${btn}</div>`;
     return;
   }
-  let flip = null;
+  // Flag EVERY rung where the best move flipped, not just the last one — the
+  // early prior-vs-search flips are usually the diagnostic ones.
+  const flips = new Set();
   for (let i = 1; i < l.rungs.length; i++) {
-    if (l.rungs[i].best_action_id !== l.rungs[i - 1].best_action_id) flip = l.rungs[i].visits;
+    if (l.rungs[i].best_action_id !== l.rungs[i - 1].best_action_id) flips.add(l.rungs[i].visits);
   }
-  const rows = l.rungs.map(r => `<div class="dbg-move-row${flip === r.visits ? " dbg-move-best" : ""}"><span></span><span>${r.visits}v</span><span>${r.best ? `${r.best.q},${r.best.r}` : "—"}</span><span>${r.root_value.toFixed(3)}</span><span>${flip === r.visits ? "flip" : ""}</span><span></span></div>`).join("");
-  el.innerHTML = `<div class="dbg-flex-head"><span class="dbg-muted">Visit ladder${flip != null ? ` · best flips at ${flip}v` : " · stable best"}</span>${btn}</div>`
+  const rows = l.rungs.map(r => `<div class="dbg-move-row${flips.has(r.visits) ? " dbg-move-best" : ""}"><span></span><span>${r.visits}v</span><span>${r.best ? `${r.best.q},${r.best.r}` : "—"}</span><span>${r.root_value.toFixed(3)}</span><span>${flips.has(r.visits) ? "flip" : ""}</span><span></span></div>`).join("");
+  el.innerHTML = `<div class="dbg-flex-head"><span class="dbg-muted">Visit ladder${flips.size ? ` · best flips at ${[...flips].join("/")}v` : " · stable best"}</span>${btn}</div>`
     + `<div class="dbg-move-row dbg-move-head"><span></span><span>visits</span><span>best</span><span>root v</span><span></span><span></span></div>` + rows;
 }
 
@@ -4993,6 +5098,7 @@ function dbgPaletteExec(i) {
 // ---- checkpoint sweep dock tab (spec S4) ----------------------------------------------
 
 async function dbgRunCkptSweep() {
+  dbgAbortPrefetch();  // S7: an explicit request preempts the speculative ply±1 fetch
   const nav0 = Object.assign({}, dbg.nav, { acts: dbg.nav.acts.slice() });
   if (!nav0.run || !nav0.path || nav0.ply == null) {
     debugSetStatus("No position for the checkpoint sweep.", "error");
@@ -5006,7 +5112,9 @@ async function dbgRunCkptSweep() {
     dbgStub("Checkpoint sweep already running — Stop aborts it.");
     return;
   }
-  const sweep = { rows: [], running: true, abort: false, refTop: null, refTopCell: "" };
+  // navKey ties the finished curve to the position it swept (ckpt slot empty —
+  // the sweep spans checkpoints); the renderer flags it stale after a nav away.
+  const sweep = { navKey: dbgCacheKey(nav0, ""), rows: [], running: true, abort: false, refTop: null, refTopCell: "" };
   dbg.ckptSweep = sweep;
   const aCur = dbgFreshData("analysis");
   if (aCur && aCur.policy && aCur.policy[0]) {
@@ -5018,11 +5126,13 @@ async function dbgRunCkptSweep() {
   const sameNav = () => dbg.nav.run === nav0.run && dbg.nav.path === nav0.path
     && dbg.nav.rec === nav0.rec && dbg.nav.ply === nav0.ply
     && dbg.nav.acts.join(",") === nav0.acts.join(",");
-  const bodyBase = nav0.acts.length
-    ? { run: nav0.run, action_ids: (dbgRecordedActs() || []).slice(0, nav0.ply).concat(nav0.acts) }
-    : { run: nav0.run, path: nav0.path, record: nav0.rec, ply: nav0.ply };
   dbgRenderCkptSweep();
   try {
+    // Branch prefix needs the recorded action list — await it (never fall back
+    // to an empty prefix, which would sweep the wrong, near-empty position).
+    const bodyBase = nav0.acts.length
+      ? { run: nav0.run, action_ids: (await dbgEnsureRecordedActs()).slice(0, nav0.ply).concat(nav0.acts) }
+      : { run: nav0.run, path: nav0.path, record: nav0.rec, ply: nav0.ply };
     for (const ck of list) {
       if (sweep.abort || !sameNav()) break;
       const key = dbgCacheKey(nav0, ck.name);
@@ -5054,7 +5164,10 @@ async function dbgRunCkptSweep() {
         sweep.refTopCell = own.topCell;
       }
     }
-    debugSetStatus(sweep.abort ? "Checkpoint sweep stopped." : "");
+    // Clear the shared status line only while we still own the context — a nav
+    // mid-sweep hands it to the newer action's busy message.
+    if (sweep.abort) debugSetStatus("Checkpoint sweep stopped.");
+    else if (sameNav()) debugSetStatus("");
   } catch (e) {
     debugSetStatus(`Checkpoint sweep: ${e.message}`, "error");
   } finally {
@@ -5067,6 +5180,14 @@ function dbgRenderCkptSweep() {
   const el = document.querySelector("#dbgCkptSweep .dbg-ckpt-sweep-chart");
   if (!el) return;
   const cs = dbg.ckptSweep;
+  // The curve belongs to the position it swept — once the user navigates away
+  // it must say so instead of posing as the current position's history.
+  const stale = Boolean(cs && cs.rows.length && cs.navKey !== dbgCacheKey(dbg.nav, ""));
+  // Called from dbgRenderAll on every render (the Run button only exists in this
+  // markup) — skip the innerHTML swap when nothing observable changed.
+  const sig = cs ? `${cs.rows.length}|${cs.running ? 1 : 0}|${cs.refTop}|${cs.refTopCell}|${stale ? 1 : 0}` : "none";
+  if (el.__dbgSig === sig) return;
+  el.__dbgSig = sig;
   const btn = `<button type="button" id="dbgCkptSweepRun" class="dbg-mini-btn"${cs && cs.running ? " disabled" : ""}>${cs && cs.running ? "Running…" : (cs && cs.rows.length ? "Re-run on current position" : "Run on current position")}</button>`;
   if (!cs || !cs.rows.length) {
     el.innerHTML = `<div class="dbg-flex-head"><span class="dbg-empty-note">${cs && cs.running ? "Evaluating checkpoints…" : "Not run"}</span>${btn}</div>`;
@@ -5079,15 +5200,18 @@ function dbgRenderCkptSweep() {
   let html = `<line x1="${padL}" y1="${y(0)}" x2="${W - padR}" y2="${y(0)}" stroke="#2c3d50"></line>`
     + `<text x="4" y="${y(1) + 4}" fill="#5a6b7a" font-size="11">+1</text>`
     + `<text x="4" y="${y(-1) + 2}" fill="#5a6b7a" font-size="11">−1</text>`
-    + `<path d="${rows.map((r, i) => `${i ? "L" : "M"}${xs(i).toFixed(1)},${y(r.value).toFixed(1)}`).join("")}" fill="none" stroke="var(--accent)" stroke-width="2"></path>`;
+    + `<path d="${rows.map((r, i) => `${i ? "L" : "M"}${xs(i).toFixed(1)},${y(r.value).toFixed(1)}`).join("")}" fill="none" stroke="${stale ? "#5a6b7a" : "var(--accent)"}" stroke-width="2"></path>`;
   const labelEvery = Math.max(1, Math.ceil(rows.length / 12));
   rows.forEach((r, i) => {
     const agree = cs.refTop != null && r.top === cs.refTop;
-    html += `<circle cx="${xs(i).toFixed(1)}" cy="${y(r.value).toFixed(1)}" r="3.5" fill="${agree ? "var(--green)" : "var(--accent)"}"><title>${r.label} · v ${r.value.toFixed(3)} · top ${r.topCell || "—"}${agree ? " (= current top)" : ""}</title></circle>`;
+    html += `<circle cx="${xs(i).toFixed(1)}" cy="${y(r.value).toFixed(1)}" r="3.5" fill="${agree ? "var(--green)" : (stale ? "#5a6b7a" : "var(--accent)")}"><title>${r.label} · v ${r.value.toFixed(3)} · top ${r.topCell || "—"}${agree ? " (= current top)" : ""}</title></circle>`;
     if (agree) html += `<line x1="${xs(i).toFixed(1)}" y1="${H - padB + 3}" x2="${xs(i).toFixed(1)}" y2="${H - padB + 10}" stroke="var(--green)" stroke-width="2"></line>`;
     if (i % labelEvery === 0) html += `<text x="${xs(i).toFixed(1)}" y="${H - 4}" fill="#5a6b7a" font-size="10" text-anchor="middle">${r.label}</text>`;
   });
-  el.innerHTML = `<div class="dbg-flex-head"><span class="dbg-muted">value (stm) per checkpoint · green tick = top move matches current${cs.refTopCell ? ` (${cs.refTopCell})` : ""}</span>${btn}</div>`
+  const headTxt = stale
+    ? `<span class="dbg-muted">stale — swept a different position; Re-run for current</span>`
+    : `<span class="dbg-muted">value (stm) per checkpoint · green tick = top move matches current${cs.refTopCell ? ` (${cs.refTopCell})` : ""}</span>`;
+  el.innerHTML = `<div class="dbg-flex-head">${headTxt}${btn}</div>`
     + `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${html}</svg>`;
 }
 
@@ -5170,7 +5294,7 @@ async function dbgEnsureInputs(force) {
   entry.planesPending = true;
   dbgRenderInputs();
   try {
-    const body = Object.assign(dbgRequestBody(nav.ckptA), { planes: true });
+    const body = Object.assign(await dbgRequestBody(nav.ckptA), { planes: true });
     const data = await debugFetchJson("/api/debug/analyze", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -5354,6 +5478,7 @@ function dbgRenderAll() {
       dbgSyncPlaneSelect();
     }
     dbgRenderDockChart();
+    dbgRenderCkptSweep();  // keeps the Run button present before any sweep ran
     dbgUpdateStaleDots();
   } catch (e) {
     reportError("dbgRenderAll: " + (e && (e.stack || e.message) || e));
@@ -5461,23 +5586,31 @@ function dbgRenderPlyRail() {
     slider.disabled = !pos;
   }
   const sweep = dbgSweepData();
+  // <=900px the rail is a horizontal 22px strip — rows must be laid out with
+  // left/width (a ~150-ply game packed vertically into 22px is ~0.15px/row:
+  // invisible and untappable).
+  const horiz = Boolean(window.matchMedia && window.matchMedia("(max-width: 900px)").matches);
   // The classic slider is the no-sweep fallback (spec §1.2); once the wrongness
-  // strip is colored it takes over as the scrubber.
+  // strip is colored it takes over as the scrubber — except on mobile, where the
+  // thin strip rows are too small to be the only scrubber, so keep the slider.
   const sliderWrap = document.querySelector(".dbg-ply-slider-wrap");
-  if (sliderWrap) sliderWrap.hidden = Boolean(sweep);
+  if (sliderWrap) sliderWrap.hidden = Boolean(sweep) && !horiz;
   const strip = dbgEl("dbgPlyStrip");
   if (!strip) return;
   // Flat neutral rows until a game error sweep colors them (M9): background =
   // policy KL, right 30% tinted by |value error|, blunder/top-1-miss markers.
-  const sig = `${total}|${sweep ? `${dbgSweepKey()}#${sweep.version}` : 0}`;
+  const sig = `${total}|${horiz ? "h" : "v"}|${sweep ? `${dbgSweepKey()}#${sweep.version}` : 0}`;
   if (strip.__dbgSig !== sig) {
     strip.__dbgSig = sig;
     let maxKl = 0;
     const blunders = sweep ? new Set(dbgBlunders(sweep)) : null;
     if (sweep) for (const p of sweep.plies) if (p.kl != null) maxKl = Math.max(maxKl, p.kl);
     let html = "";
-    for (let i = 1; i <= total; i++) {
-      const top = ((i - 1) / total) * 100;
+    // One row per navigable position 0..total (matches nav.ply); sweep rows
+    // exist for plies 0..total-1 only (the post-final position is never
+    // evaluated), so the bottom row stays neutral.
+    for (let i = 0; total > 0 && i <= total; i++) {
+      const off = (i / (total + 1)) * 100;
       const row = sweep ? sweep.byPly.get(i) : null;  // sweep row = position AT ply i
       let cls = "dbg-ply-row";
       let style = "";
@@ -5504,7 +5637,10 @@ function dbgRenderPlyRail() {
           title += " · top-1 miss";
         }
       }
-      html += `<div class="${cls}" data-ply="${i}" style="top:${top.toFixed(3)}%;height:${(100 / total).toFixed(3)}%;${style}" title="${title}">${inner}</div>`;
+      const geom = horiz
+        ? `left:${off.toFixed(3)}%;width:${(100 / (total + 1)).toFixed(3)}%;`
+        : `top:${off.toFixed(3)}%;height:${(100 / (total + 1)).toFixed(3)}%;`;
+      html += `<div class="${cls}" data-ply="${i}" style="${geom}${style}" title="${title}">${inner}</div>`;
     }
     strip.innerHTML = html;
   }
@@ -5598,11 +5734,16 @@ function dbgHeatForMode(mode) {
       const data = (planes.data && planes.data[idx]) || [];
       const dim = (planes.shape && planes.shape[1]) || 41;
       const half = Math.floor(dim / 2);
+      // The dense 41x41 crop is anchored on the ROUNDED MEAN of the placed
+      // stones (geometry.crop_center / encoding.rs model1_crop_center), NOT on
+      // axial (0,0) — projecting without the center shifts every cell by the
+      // centroid offset on any non-origin-centered position.
+      const center = dbgPlaneCropCenter(planes);
       const pos = dbg.position;
       const coords = pos ? (pos.legal || []).concat(debugCurrentPlacements()) : [];
       for (const c of coords) {
-        const qi = c.q + half;
-        const ri = c.r + half;
+        const qi = c.q - center.q + half;
+        const ri = c.r - center.r + half;
         if (qi < 0 || ri < 0 || qi >= dim || ri >= dim) continue;
         const v = data[ri * dim + qi];
         if (v) out.values.set(`${c.q},${c.r}`, v);
@@ -5611,6 +5752,33 @@ function dbgHeatForMode(mode) {
     }
   }
   return dbgHeatFinish(out);
+}
+
+function dbgRoundHalfEven(x) {
+  // Banker's rounding — matches Python round() (geometry.crop_center) and the
+  // Rust encoder's ties-to-even (encoding.rs model1_crop_center).
+  const f = Math.floor(x);
+  if (x - f !== 0.5) return Math.round(x);
+  return f % 2 === 0 ? f : f + 1;
+}
+
+function dbgPlaneCropCenter(planes) {
+  // Crop anchor for projecting board axial coords into the 41x41 input planes.
+  // Prefer the server-reported center (input_planes.center = [q, r], additive
+  // §3.6 field); fall back to recomputing the stone-centroid client-side so the
+  // overlay stays correct against older analyze payloads.
+  if (planes && Array.isArray(planes.center) && planes.center.length === 2) {
+    return { q: Math.trunc(Number(planes.center[0]) || 0), r: Math.trunc(Number(planes.center[1]) || 0) };
+  }
+  const stones = debugCurrentPlacements();
+  if (!stones.length) return { q: 0, r: 0 };
+  let sq = 0;
+  let sr = 0;
+  for (const s of stones) {
+    sq += s.q;
+    sr += s.r;
+  }
+  return { q: dbgRoundHalfEven(sq / stones.length), r: dbgRoundHalfEven(sr / stones.length) };
 }
 
 function dbgHeatFinish(out) {
@@ -5826,7 +5994,7 @@ function dbgRenderBoard() {
   // so a ghost click is a no-op (it never reaches the .dbg-cell underneath).
   const treeFresh = dbgFreshData("tree");
   const preview = dbg.treePreview && dbg.treePreview.key === dbgCurrentKey() ? dbg.treePreview.ids : null;
-  const ghostLine = preview || (treeFresh && treeFresh.pv) || [];
+  const ghostLine = dbg.treeGhostsOff ? [] : (preview || (treeFresh && treeFresh.pv) || []);
   ghostLine.forEach((id, i) => {
     const g = dbgUnpackActionId(id);
     const c = center(g.q, g.r);
@@ -5907,7 +6075,9 @@ function dbgRenderHeads() {
       chip.title = "";
     }
     if (distEl) distEl.innerHTML = `<div class="dbg-empty-note">${note}</div>`;
-    if (swapBlock) swapBlock.hidden = false;
+    // Default-hidden pre-analysis: the probe is hexgt-only (spec §1.4) and the
+    // analyze commit unhides it only when value_swapped is present.
+    if (swapBlock) swapBlock.hidden = true;
     if (swapEl) swapEl.innerHTML = `<span class="dbg-muted">—</span>`;
     if (stvEl) stvEl.innerHTML = `<div class="dbg-empty-note">Short-term value horizons</div>`;
     if (mlEl) {
@@ -6012,11 +6182,28 @@ function dbgTopMovesHtml(a) {
     for (const ch of tree.tree.children || []) treeById.set(ch.action_id, ch);
   }
   const recorded = (!dbg.nav.acts.length && dbg.gameActs.length > dbg.nav.ply) ? dbg.gameActs[dbg.nav.ply] : null;
-  const rows = (a.policy || []).slice(0, 12).map(p => {
-    const visits = visitsById.has(p.action_id) ? visitsById.get(p.action_id) : null;
-    const node = treeById.get(p.action_id);
+  // Row candidates = top-12 priors UNION search-promoted moves (fresh visit
+  // share > 3%) UNION fresh tree root children: a low-prior move the search
+  // promoted must get a row (the `under` badge and visits/Q/Δ sorts depend on
+  // it). a.policy is the complete legal set, so prior/coords always resolve.
+  const priorById = new Map((a.policy || []).map(p => [p.action_id, p]));
+  const ids = [];
+  const seen = new Set();
+  const add = id => {
+    if (priorById.has(id) && !seen.has(id)) {
+      seen.add(id);
+      ids.push(id);
+    }
+  };
+  for (const p of (a.policy || []).slice(0, 12)) add(p.action_id);
+  if (s) for (const row of s.visit_policy || []) if (row.p > 0.03) add(row.action_id);
+  for (const [id, node] of treeById) if (node.n > 0) add(id);
+  const rows = ids.map(id => {
+    const p = priorById.get(id);
+    const visits = visitsById.has(id) ? visitsById.get(id) : null;
+    const node = treeById.get(id);
     return {
-      action_id: p.action_id,
+      action_id: id,
       q: p.q,
       r: p.r,
       prior: p.p,
@@ -6031,6 +6218,7 @@ function dbgTopMovesHtml(a) {
     return v == null ? -Infinity : v;
   };
   rows.sort((x, y) => sortVal(y) - sortVal(x));
+  rows.length = Math.min(rows.length, 16);
   const arrow = k => (sortKey === k ? " ▾" : "");
   const head = `<div class="dbg-move-row dbg-move-head"><span>#</span><span>cell</span><span class="sortable" data-dbg-sort="prior">prior${arrow("prior")}</span><span class="sortable" data-dbg-sort="visits">visits${arrow("visits")}</span><span class="sortable" data-dbg-sort="qm">Q${arrow("qm")}</span><span class="sortable" data-dbg-sort="delta">Δ${arrow("delta")}</span></div>`;
   const body = rows.map((row, i) => {
@@ -6042,7 +6230,7 @@ function dbgTopMovesHtml(a) {
     } else if (row.visits != null && row.prior < 0.03 && row.visits > 0.10) {
       badge = ` <span class="dbg-badge dbg-badge-under" title="low prior earned high visits">under</span>`;
     }
-    return `<div class="dbg-move-row${isBest ? " dbg-move-best" : ""}"${isRec ? ` title="recorded move"` : ""}><span>${i + 1}</span><span>${row.q},${row.r}${isRec ? " ●" : ""}${badge}</span><span>${(row.prior * 100).toFixed(1)}%</span><span>${row.visits != null ? (row.visits * 100).toFixed(1) + "%" : "—"}</span><span>${row.qm != null ? row.qm.toFixed(2) : "—"}</span><span>${row.delta != null ? (row.delta >= 0 ? "+" : "") + (row.delta * 100).toFixed(1) : "—"}</span></div>`;
+    return `<div class="dbg-move-row${isBest ? " dbg-move-best" : ""}"${isRec ? ` title="recorded move"` : ""}><span>${i + 1}</span><span>${row.q},${row.r}${isRec ? " ●" : ""}${badge}</span><span>${(row.prior * 100).toFixed(1)}%</span><span>${row.visits != null ? (row.visits * 100).toFixed(1) + "%" : "—"}</span><span>${row.qm != null ? row.qm.toFixed(2) : "—"}</span><span>${row.delta != null ? (row.delta >= 0 ? "+" : "") + (row.delta * 100).toFixed(1) + "%" : "—"}</span></div>`;
   }).join("");
   return head + body;
 }
@@ -6090,7 +6278,10 @@ function dbgRenderSearchPanel() {
     return;
   }
   sum.className = "dbg-search-summary";
-  const a = dbg.analysis;
+  // Key AGREEMENT (not freshness): Δ-vs-raw and the argmax compare are only
+  // meaningful when search and analysis describe the same position. Both stale
+  // to the SAME key stays visible (the M14 dot already flags it).
+  const a = dbg.keys.analysis === dbg.keys.search ? dbg.analysis : null;
   const priorTop = a && a.policy && a.policy[0];
   const agree = priorTop && s.best && priorTop.q === s.best.q && priorTop.r === s.best.r;
   const delta = a ? s.root_value - a.value : null;
@@ -6112,7 +6303,16 @@ function dbgRenderComparePanel() {
   const a = dbg.analysis;
   const b = dbg.analysisB;
   if (!b) {
-    body.innerHTML = `<div class="dbg-empty-note">Evaluating checkpoint B…</div>`;
+    // Three-way: in flight / failed / not started — a failed B analyze must
+    // surface as an error, not sit on "Evaluating…" forever.
+    const entryB0 = dbg.cache.get(dbgCacheKey(dbg.nav, dbg.nav.ckptB));
+    if (entryB0 && entryB0.analysisPending) {
+      body.innerHTML = `<div class="dbg-empty-note">Evaluating checkpoint B…</div>`;
+    } else if (entryB0 && entryB0.analysisError) {
+      body.innerHTML = `<div class="dbg-empty-note">B analyze failed: ${escapeText(entryB0.analysisError)} — use ↻ to retry</div>`;
+    } else {
+      body.innerHTML = `<div class="dbg-empty-note">Checkpoint B not evaluated yet</div>`;
+    }
     return;
   }
   const topA = a && a.policy && a.policy[0];
@@ -6184,7 +6384,15 @@ function dbgCkptInfoHtml(name) {
   } else {
     const m = info.meta || {};
     if (m.lineage) rows.push(["Lineage", escapeText(m.lineage)]);
-    if (m.arch && m.arch.blocks_type) rows.push(["Trunk", escapeText(String(m.arch.blocks_type))]);
+    // §3.8 contract: meta.arch is a flattened "key=val, …" display STRING (web.py
+    // converts the worker's dict). Parse blocks_type out of it for the Trunk row;
+    // stay tolerant of a raw dict in case an older/other backend returns one.
+    const archStr = m.arch && typeof m.arch === "object"
+      ? Object.keys(m.arch).sort().map(k => `${k}=${m.arch[k]}`).join(", ")
+      : (m.arch ? String(m.arch) : "");
+    const trunkMatch = archStr.match(/(?:^|,\s*)blocks_type=([^,]+)/);
+    if (trunkMatch) rows.push(["Trunk", escapeText(trunkMatch[1].trim())]);
+    if (archStr) rows.push(["Arch", escapeText(archStr)]);
     if (m.rl_epoch != null) rows.push(["RL epoch", String(m.rl_epoch)]);
     if (m.step != null) rows.push(["Step", String(m.step)]);
     if (m.graft) rows.push(["Graft", m.graft === "pre" ? "pre (≤e6, expanded)" : "post (≥e7)"]);
@@ -6311,7 +6519,9 @@ function dbgRefreshPanel(panelId) {
       dbgStub("Select checkpoint B in the context strip first.");
       return;
     }
-    delete dbgCacheEntry(dbgCacheKey(dbg.nav, dbg.nav.ckptB)).analysis;
+    const entryB = dbgCacheEntry(dbgCacheKey(dbg.nav, dbg.nav.ckptB));
+    delete entryB.analysis;
+    delete entryB.analysisError;
     dbgEnsureAnalysisB();
   } else if (panelId === "dbgTabCkpt") dbgEnsureCkptInfo(true);
   else if (panelId === "dbgTabTargets") dbgEnsureRecordRow(true);
@@ -6440,6 +6650,9 @@ function dbgClearToggles() {
     const el = dbgEl(id);
     if (el) el.checked = dbg.overlays[key];
   }
+  // Repaint here: the follow-up dbgNavigate is a same-hash no-paint when the
+  // base mode is unchanged (Shift+digit solo / 0 with the mode already set).
+  dbgRenderBoard();
 }
 
 function dbgToggleLog() {
@@ -6519,7 +6732,15 @@ function dbgHandleKey(e) {
   } else if (k === "s" || k === "S") {
     dbgRunSearch();
   } else if (k === "t" || k === "T") {
-    dbgRunTree();
+    // §1.7 "T  run / toggle debug tree": with a fresh tree for this key, toggle
+    // its PV ghosts; otherwise run (dbgRunTree stubs while one is in flight).
+    if (!dbg.treeBusy && dbgFreshData("tree")) {
+      dbg.treeGhostsOff = !dbg.treeGhostsOff;
+      dbg.treePreview = null;
+      dbgRenderBoard();
+    } else {
+      dbgRunTree();
+    }
   } else if (k === "l" || k === "L") {
     dbgToggleLog();
   } else if (k === "u" || k === "U") {
@@ -6544,6 +6765,22 @@ function debugBindEvents() {
   const root = dbgEl("debugScreen");
   if (!root || root.__dbgDelegated) return;  // bind once on the stable ancestor
   root.__dbgDelegated = true;
+
+  // The ply strip renders row geometry for the current orientation (vertical
+  // rail on desktop, horizontal 22px strip <=900px) — rebuild it on breakpoint
+  // crossings so the inline top/height vs left/width styles stay correct.
+  if (window.matchMedia) {
+    const mq = window.matchMedia("(max-width: 900px)");
+    const onOrientation = () => {
+      try {
+        dbgRenderPlyRail();
+      } catch (e) {
+        reportError("dbgRenderPlyRail: " + (e && (e.stack || e.message) || e));
+      }
+    };
+    if (mq.addEventListener) mq.addEventListener("change", onOrientation);
+    else if (mq.addListener) mq.addListener(onOrientation);
+  }
 
   // BUTTONS via event DELEGATION on #debugScreen (which is never rebuilt), plus a
   // touchend fallback. Per-button click listeners failed on the owner's phone:
@@ -6574,6 +6811,10 @@ function debugBindEvents() {
     dbgBranchReturn: { fn: () => dbgNavigate({ acts: [] }), tap: "return to game" },
     dbgPinAdd: { fn: () => dbgAddPin(), tap: "pin" },
     dbgPinExport: { fn: () => dbgExportPins(), tap: "pin export" },
+    dbgPaletteBtn: { fn: () => dbgOpenPalette(), tap: "palette" },
+    dbgHelpBtn: { fn: () => { const h = dbgEl("dbgHelp"); if (h) h.hidden = !h.hidden; }, tap: "help" },
+    dbgBlunderPrev: { fn: () => dbgStepBlunder(-1), tap: "blunder prev" },
+    dbgBlunderNext: { fn: () => dbgStepBlunder(1), tap: "blunder next" },
     dbgCmpHeat: { fn: () => dbgToggleCmpHeat(), tap: "cmp heat" },
     dbgCkptSweepStop: {
       fn: () => {
@@ -6676,6 +6917,8 @@ function debugBindEvents() {
     if (modeBtn) {
       ev.preventDefault();
       diagTap("mode " + modeBtn.dataset.mode);
+      // Parity with the 0 key (§1.7): None = mode none + clear additive toggles.
+      if (modeBtn.dataset.mode === "none") dbgClearToggles();
       dbgClearCmpHeat();  // picking a base mode dismisses the cmp Δ overlay
       dbgNavigate({ mode: modeBtn.dataset.mode }, { replace: true });
       return;

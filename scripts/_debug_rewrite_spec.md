@@ -17,8 +17,11 @@ Hard environment constraints (do not violate):
 - No frameworks, no build step. Vanilla JS, hand-rolled SVG, one CSS file.
 - Worker process model is preserved exactly: lazy WSL spawn, NDJSON stdin/stdout,
   `CUDA_VISIBLE_DEVICES=""`, single `threading.Lock` (the lock IS the queue), 120s/request
-  timeout, one auto-restart, 256-entry result LRU in `debug_service.py`, 3-checkpoint LRU
-  in the worker. Env knobs `HEXO_DEBUG_WORKER_CMD / HEXO_DEBUG_USE_WSL /
+  timeout (ONE exception: `search_tree` runs ~25ms/visit on CPU, so a fixed 120s
+  guarantees a mid-compute worker kill — the timeout kills the worker — for any legal
+  >4000-visit request; `search_tree` alone scales its deadline with visits, capped at
+  300s, see §4.3), one auto-restart, 256-entry result LRU in `debug_service.py`,
+  3-checkpoint LRU in the worker. Env knobs `HEXO_DEBUG_WORKER_CMD / HEXO_DEBUG_USE_WSL /
   HEXO_DEBUG_WSL_PYTHON / HEXO_DEBUG_RUN_ROOT` keep working.
 - Everything pinned by `tests/test_debug_infer.py` keeps passing unchanged:
   `debug_service._to_wsl`, `debug_infer.load_checkpoint` contract,
@@ -74,11 +77,13 @@ Feasibility downgrades applied (silently dropped/changed vs the design draft):
 
 `<main id="debugScreen">` keeps its id (screen routing `#debug`, `setScreen`, body class
 `debug-screen-active`, and the `[data-debug-open]` delegation entry points are untouched).
-`#debugStatus` (status line) and `#debugDiag` top-anchored diag bar are kept.
+`#debugStatus` (status line) is kept. `#debugDiag` is retired: the live diag bar
+is the dynamically created global `#__diag` (reportError/diagTap write only to
+it), which supersedes the static div — keeping one would leave inert markup.
 
 Id scheme: every NEW element id starts with `dbg` + RegionAbbrev + Name, camelCase
 (e.g. `#dbgCtxRun`, `#dbgPlyStrip`, `#dbgTabHeads`). New CSS classes are `.dbg-*`.
-Legacy `debug*` ids are retired except: `#debugScreen`, `#debugStatus`, `#debugDiag`,
+Legacy `debug*` ids are retired except: `#debugScreen`, `#debugStatus`,
 `#debugBoardSvg` (the SVG node itself, so existing styles/tests/screenshots keep an
 anchor), `#debugBoardHud`.
 
@@ -390,8 +395,11 @@ S11. Trajectory hover crosshair + second KL axis (degenerate without sweep: hidd
 
 ## 3. API CONTRACT  (binding)
 
-Conventions: all responses are JSON; errors are `{"error": str}` with HTTP 400/500 as
-today. `run` is the run-dir name, `path` is the run-relative posix path of an .hxr,
+Conventions: all responses are JSON; errors are `{"error": str}` with HTTP 400/500.
+Status mapping is normative for debug routes: `DebugRequestError` (healthy worker,
+deterministic failure — do not retry) and request-validation errors → 400;
+`DebugWorkerTimeout` / any other `DebugWorkerError` (worker killed/restarted — a retry
+may succeed) → 500. Errors are never stored in the 256-entry service result LRU. `run` is the run-dir name, `path` is the run-relative posix path of an .hxr,
 `checkpoint` is the checkpoint file name (not path). Field types: int, float, str,
 bool, `T|null`, `[T]`. Worker-op signatures are listed with each new endpoint.
 
@@ -436,9 +444,12 @@ Body: current `{run, checkpoint, n?} + (action_ids | path,record,ply)` PLUS opti
 Response: current shape PLUS:
 - `meta.moves_left_cap:int|null` — NEW. 512 for dense (constants.MOVES_LEFT_CAP),
   null when the lineage has no moves_left head. Frontend uses this for B1.
-- `input_planes:{names:[str×13], shape:[13,41,41], data:[[float×1681]×13]}|null` —
-  present ONLY when `planes:true` AND dense lineage; null otherwise. Row-major per
-  plane. (Worker `analyze` op gains the same optional `planes` flag; cache signature
+- `input_planes:{names:[str×13], shape:[13,41,41], data:[[float×1681]×13],
+  center:[q,r]}|null` — present ONLY when `planes:true` AND dense lineage; null
+  otherwise. Row-major per plane. `center` is the exact crop center the Rust encoder
+  used (`model1_batch_inputs` `centers[0]`), never re-derived; the frontend overlay
+  anchors on it (with the client centroid fallback only for cached pre-field payloads).
+  (Worker `analyze` op gains the same optional `planes` flag; cache signature
   includes it.)
 All existing fields (value, value_swapped, optimism, value_bins, value_dist, policy,
 opp_policy, stvalue, moves_left, meta.*, ply) are byte-identical to today.
@@ -492,25 +503,42 @@ Resolution (web.py): only selfplay paths qualify (`found:false,
 reason:"not_selfplay"` otherwise). Shard candidates =
 `selfplay/epoch_NNNNNN_game_*.npz` for the .hxr's epoch; the right shard is matched by
 `game_id` (read sidecar `.json` `game_id` and compare to the .hxr record's game_id;
-fallback: game index == record index). Row within the shard: the row with
+fallback: the self-play game index parsed off the record's game_id — shards are named
+`..._game_{index}.npz` by that index). There is deliberately NO record-index fallback:
+.hxr records are written in game FINISH order while shards are named by the self-play
+game index, so `record_index` would silently attach a different game's shard whenever
+the orders diverge (they routinely do). Row within the shard: the row with
 `turn_index == ply`; the worker MUST verify `row.current_player` equals the
 replay-derived current player and return `found:false, reason:"row_mismatch"` on any
 disagreement (M8 misalignment guard).
 Response:
 ```
-{ found:bool, reason:str|null,            // "no_shard"|"no_row"|"row_mismatch"|"not_selfplay"|null
+{ found:bool, reason:str|null,            // "no_shard"|"no_row"|"row_mismatch"|"not_selfplay"|"bad_shard"|null
   npz:str|null, turn_index:int|null,
   row: null | {
     current_player:int, phase:str,
-    value_target:float, value_target_reason:str,
+    value_target:float, value_target_reason:str|null,
     policy:[{action_id:int,q:int,r:int,p:float}],        // recorded MCTS visit policy, p desc
     opp_policy:[{action_id,q,r,p}]|null,
     opp_policy_source:str|null,
     stvalue:{ "<h>":{target:float, mask:bool} },          // per horizon
     moves_left:{target:float, mask:bool}|null,            // raw decisions remaining; -1 = masked
-    policy_surprise:float, search_visits:int, pcr_full:bool,
+    policy_surprise:float|null, search_visits:int, pcr_full:bool|null,
     frequency_weight:float, truncated:bool } }
 ```
+`"bad_shard"` = a foreign/partially-written .npz missing expected arrays
+(`read_record_row` never raises; the frontend treats it like any other notice reason).
+Null semantics: the compact shard format intentionally drops some finalize-time facts,
+and the worker MUST NOT fabricate neutral stand-ins for them — `T|null` fields are null
+when the shard predates/omits the field, and the frontend renders null as
+"not recorded". Concretely: `policy_surprise` and `pcr_full` are NEVER persisted (always
+null); `value_target_reason` is null except the server-overlaid `"max_actions_draw"` on
+truncated games; `opp_policy_source` is never persisted (null); `moves_left` is the
+whole-sub-object-null on pre-restnet shards. `search_visits` stays an int (test-pinned):
+the raw visit mass when the shard stores count weights, 0 = unknown when it stores the
+normalized visit policy. `frequency_weight` is genuinely recovered from
+surprise-materialized row duplication (count of duplicate turn_index rows), not
+fabricated. `truncated` is always overlaid by the server from the .hxr record status.
 Worker op: `record_row {npz:str(wsl-translated abs path), turn_index:int,
 expect_player:int}` → `{found, reason, row}` (numpy + compact_io expand live in the
 WSL venv; web.py does path resolution + game_id matching using the sidecar .json,
@@ -600,9 +628,11 @@ the 3-checkpoint LRU are untouched.
 - No structural change. Ensure new ops' cache signatures include ALL params
   (e.g. search seed — fixing the latent staleness where seed wasn't part of the
   request before). Keep CACHE_MAX=256, timeouts as-is (chunk sizes in §3 are sized to
-  fit 120s on CPU; game_eval max count=32 ⇒ ≤32 forwards ≈ well under budget;
-  search_tree at 4096 visits is the slowest op — if profiling shows >100s, lower the
-  UI default, not the timeout).
+  fit 120s on CPU; game_eval max count=32 ⇒ ≤32 forwards ≈ well under budget) with ONE
+  exception: search_tree at ~25ms/visit exceeds 120s for any legal >4000-visit request,
+  and a timeout is a mid-compute worker KILL, so web.py scales the search_tree deadline
+  as `min(300, max(DEFAULT_TIMEOUT, visits * 0.03))` — capped at 300s to bound how long
+  one request can hog the single worker lock. The UI default stays 512 visits.
 - `_to_wsl` untouched (test-pinned).
 
 ### 4.4 web.py
@@ -612,7 +642,8 @@ the 3-checkpoint LRU are untouched.
   `GET /api/debug/ckpt_info` (resolve checkpoint path like analyze does, stat size/
   mtime, call worker `info`),
   `GET /api/debug/record_row` (selfplay-path guard, epoch parse, shard candidates
-  glob, sidecar-json game_id match with index fallback, then worker `record_row`),
+  glob, sidecar-json game_id match with game_id-parsed game-index fallback (no
+  record-index fallback — see §3.9), then worker `record_row`),
   `GET /api/debug/game_eval` (open .hxr record once, clamp start/count, resolve npz
   path via the same helper as record_row, call worker `game_eval`, splice run-level
   fields),
@@ -648,7 +679,7 @@ same commit). `node --check app.js` must pass after every stage.
   region structure. Every id from the SHARED ID LIST below must exist after F1, even
   if its panel body is an empty placeholder. Tabs/dock/context-collapse work with
   pure class toggling (no JS data dependencies yet). Keep `#debugStatus`,
-  `#debugDiag`, `#debugBoardSvg`, `#debugBoardHud`.
+  `#debugBoardSvg`, `#debugBoardHud` (`#debugDiag` retired per §1.0).
 - styles.css: retire the old `.dbgv` block (2435-2610) in place; add `.dbg-grid`
   (grid-template: auto / 56px minmax(0,1fr) minmax(280px,30%) with named areas),
   `.dbg-ply-row` strip styling, `.dbg-chip-*`, `.dbg-tab*`, `.dbg-stale`, dock/pin
@@ -694,7 +725,7 @@ same commit). `node --check app.js` must pass after every stage.
 
 ### SHARED ID LIST (created in F1, wired in F2/F3 — binding between stages)
 ```
-#debugScreen #debugStatus #debugDiag #debugBoardSvg #debugBoardHud        (legacy kept)
+#debugScreen #debugStatus #debugBoardSvg #debugBoardHud        (legacy kept; #debugDiag retired, see §1.0)
 F2 wires: #dbgCtx #dbgCtxRun #dbgCtxSource #dbgCtxFile #dbgCtxRecord #dbgCtxCkptA
   #dbgCtxCkptB #dbgCtxRefresh #dbgCtxWorkerDot #dbgCtxCrumb #dbgCtxCollapse
   #dbgPlyRail #dbgPlyReadout #dbgPlyFirst #dbgPlyPrev #dbgPlyNext #dbgPlyLast

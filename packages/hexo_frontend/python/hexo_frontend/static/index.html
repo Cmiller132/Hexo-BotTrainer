@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Hexo Match</title>
-<link rel="stylesheet" href="/static/styles.css?v=20260611-dbg2">
+<link rel="stylesheet" href="/static/styles.css?v=20260611-dbg3">
 </head>
 <body>
 <header>
@@ -256,7 +256,6 @@
   </section>
 </main>
 <main id="debugScreen" class="app-screen debug-screen" hidden>
-  <div id="debugDiag" class="dbg-diag" hidden></div>
   <div id="debugStatus" class="debug-status" hidden></div>
   <section class="dbg-grid">
 
@@ -279,6 +278,8 @@
       </div>
       <div class="dbg-ctx-side">
         <span id="dbgCtxCrumb" class="dbg-ctx-crumb">no position loaded</span>
+        <button id="dbgPaletteBtn" type="button" class="dbg-mini-btn" aria-label="Command palette" title="Command palette (K)">Go to&#8230;</button>
+        <button id="dbgHelpBtn" type="button" class="dbg-mini-btn" aria-label="Keyboard shortcuts" title="Keyboard shortcuts (?)">?</button>
         <button id="dbgCtxCollapse" type="button" aria-label="Collapse context strip" title="Collapse context strip">&#9662;</button>
       </div>
     </section>
@@ -291,6 +292,8 @@
         <button id="dbgPlyPrev" type="button" aria-label="Previous ply">&lt;</button>
         <button id="dbgPlyNext" type="button" aria-label="Next ply">&gt;</button>
         <button id="dbgPlyLast" type="button" aria-label="Last ply">&gt;|</button>
+        <button id="dbgBlunderPrev" type="button" aria-label="Previous blunder" title="Previous blunder (Shift+&#8592;)">&#171;!</button>
+        <button id="dbgBlunderNext" type="button" aria-label="Next blunder" title="Next blunder (Shift+&#8594;)">!&#187;</button>
       </div>
       <div class="dbg-ply-slider-wrap">
         <input id="dbgPlySlider" type="range" min="0" max="0" value="0" step="1" aria-label="Ply">
@@ -376,7 +379,7 @@
           </header>
           <div class="dbg-value-scalar">Value <strong>&#8212;</strong> <span id="dbgValueChip" class="dbg-chip">&#8212;</span></div>
           <div id="dbgValueDist" class="dbg-vdist-wrap"><div class="dbg-empty-note">Analyze to fill the value distribution</div></div>
-          <div class="dbg-ownerswap">
+          <div class="dbg-ownerswap" hidden>
             <div class="dbg-subhead">Owner-swap consistency probe <span class="dbg-muted">(off-distribution; not an optimism metric)</span></div>
             <div class="dbg-ownerswap-body dbg-empty-note">&#8212;</div>
           </div>
@@ -525,6 +528,6 @@
     </div>
   </div>
 </main>
-<script src="/static/app.js?v=20260611-dbg2"></script>
+<script src="/static/app.js?v=20260611-dbg3"></script>
 </body>
 </html>
