@@ -214,9 +214,10 @@ class Model1SelfPlayConfig:
     pcr_fast_visits: int = 0
     # KataGo policy-initialized openings (initGamesWithPolicy). A fraction of
     # self-play games begin with a few opening plies SAMPLED DIRECTLY FROM THE RAW
-    # NET PRIOR (no search): per selected game the ply count is drawn from a
-    # truncated exponential with mean `policy_init_avg_plies`, capped at
-    # `policy_init_max_plies`, and each such ply samples prior^(1/T) at
+    # NET PRIOR (no search): per selected game the ply count is
+    # floor(Exp(mean=`policy_init_avg_plies`)) capped at `policy_init_max_plies`
+    # (KataGo's construction — the floor+cap put the realized mean ~0.5-0.7 ply
+    # below the configured value), and each such ply samples prior^(1/T) at
     # T=`policy_init_temperature` over all legal moves. Policy-init plies are NOT
     # recorded as training rows (there is no search target); they advance the game
     # so the value net continuously trains on off-distribution openings — the

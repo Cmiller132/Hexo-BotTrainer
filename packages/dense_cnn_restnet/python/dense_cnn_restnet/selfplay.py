@@ -189,9 +189,10 @@ def _policy_init_plies(
 ) -> int:
     """Number of policy-initialized opening plies for one game (KataGo
     initGamesWithPolicy). With probability `fraction` the game is selected and
-    the ply count is drawn from a truncated exponential with mean `avg_plies`,
-    capped at `max_plies` (a draw of 0 is possible, as in KataGo). Deterministic
-    per (base_seed, epoch, game_key)."""
+    the ply count is `floor(Exp(mean=avg_plies))` capped at `max_plies` —
+    KataGo's construction; the floor+cap put the REALIZED mean ~0.5-0.7 ply
+    below `avg_plies` (measured 3.35 for avg 4, cap 12), and a draw of 0 is
+    possible. Deterministic per (base_seed, epoch, game_key)."""
 
     if fraction <= 0.0 or avg_plies <= 0.0 or max_plies <= 0:
         return 0

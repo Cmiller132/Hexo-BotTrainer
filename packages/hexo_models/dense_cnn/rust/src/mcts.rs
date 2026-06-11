@@ -134,11 +134,10 @@ impl ContinuousMovePolicy {
         if policy_init_remaining > 0 {
             return MoveClass::Init;
         }
+        // run_continuous validates pcr_full_proportion into (0, 1], so >= 1.0
+        // is the single PCR off-switch; a (0, 1) value always reaches the coin.
         if self.pcr_full_proportion >= 1.0 {
             return MoveClass::Full;
-        }
-        if self.pcr_full_proportion <= 0.0 {
-            return MoveClass::Fast;
         }
         let unit = random_unit(mix_seed(base_seed, game_key, ply, SEED_STREAM_PCR));
         if unit < self.pcr_full_proportion as f64 {
@@ -659,6 +658,13 @@ impl Model1MctsSession {
         Ok(results)
     }
 
+    /// Per-ply state (policy-init opening draws, the early temperature ramp,
+    /// and the temperature_by_ply schedule) is keyed to the slot's WITHIN-CALL
+    /// ply, which starts at 0 for every state passed in. Callers must therefore
+    /// hand this fresh game-start states; a mid-game state would receive
+    /// policy-init "opening" plies and maximum early-ramp temperature at its
+    /// entry position. Both production drivers (restnet + dense_cnn) start
+    /// fresh games per epoch.
     #[pyo3(signature = (game_keys, states, evaluator, on_move, visits, c_puct, base_seed, virtual_batch_size, flush_target, active_root_limit, temperature_by_ply, root_dirichlet_total_alpha=None, root_dirichlet_noise_fraction=None, root_policy_temperature=None, fpu_reduction=None, virtual_loss=None, widening_policy_mass=None, widening_max_children=None, widening_min_children=None, forced_playout_k=None, root_policy_temperature_early=None, root_policy_temperature_halflife=None, pcr_full_proportion=None, pcr_fast_visits=None, policy_init_fraction=None, policy_init_avg_plies=None, policy_init_max_plies=None, policy_init_temperature=None))]
     #[allow(clippy::too_many_arguments)]
     fn run_continuous(
@@ -1032,13 +1038,10 @@ impl Model1MctsSession {
             }
         }
 
-        for slot in slots {
-            if let Some(search) = slot.search {
-                if matches!(slot.phase, ContinuousPhase::Active) {
-                    self.searches.insert(slot.game_key, search);
-                }
-            }
-        }
+        // No end-of-epoch tree store: the scheduler loop above only exits once
+        // every slot is Empty (search already dropped), so cross-call reuse out
+        // of run_continuous is impossible by construction. The epoch-start
+        // reuse branch services trees stored by lockstep `search()` only.
 
         let dict = PyDict::new(py);
         dict.set_item("flush_count", stats.flush_count)?;
@@ -1438,7 +1441,6 @@ fn select_continuous_pass(
 // Attach one flush's evaluations back onto their trees: NN leaves expand and
 // back up; RootInit results construct the slot's new search. Exclusive
 // `&mut slots` access — called only after the eval/prefetch scope joins.
-#[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
 fn backup_continuous_items(
     slots: &mut [ContinuousSlot],

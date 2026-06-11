@@ -163,8 +163,9 @@ pcr_enabled = true
 pcr_full_proportion = 0.25
 pcr_fast_visits = 128
 # KataGo policy-initialized openings: 25% of games open with N plies sampled
-# straight from the raw net prior at temperature 1.4 (N ~ truncated exponential,
-# mean 4, cap 8; ply 0 is the forced origin and unaffected). These plies are
+# straight from the raw net prior at temperature 1.4 (N = floor(Exp(mean=4))
+# capped at 8 — realized mean ~3.2 after floor+cap; ply 0 is the forced origin
+# and unaffected). These plies are
 # never training rows; they exist so the value net keeps pricing
 # off-distribution openings (main1's opening collapsed because it never saw
 # any). KataGo applies this to ~every game — raise the fraction if opening
