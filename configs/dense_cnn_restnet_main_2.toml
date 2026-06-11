@@ -145,9 +145,13 @@ max_actions = 1024
 temperature = 1.0
 # Adaptive played-move temperature decay (main1 scheme): half-life = 25% of the
 # expected game length (EMA of measured decisions/game, seeded by the prior on
-# a fresh run; PCR fast and policy-init plies count as decisions).
+# a fresh run; PCR fast and policy-init plies count as decisions). Prior raised
+# 32 -> 150 to match measured main_2 games: at 32 the first epochs cooled with
+# an 8-ply halflife (near-greedy play) until the persisted EMA caught up
+# (~epoch 8). EMA file overrides the prior on resume, so this only affects
+# fresh runs.
 temperature_halflife_fraction = 0.25
-temperature_length_prior = 32.0
+temperature_length_prior = 150.0
 temperature_floor = 0.1
 # Opening played-move temperature anchor (main1, 2026-06-10): hold the first 5
 # plies at 1.4 before the adaptive decay takes over. Kept alongside policy-init:
