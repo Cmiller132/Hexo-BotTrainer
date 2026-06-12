@@ -173,7 +173,7 @@ attn_mask) and `materialized` (test oracle) — the restnet dual-impl pattern.
 | 217–224 | **on-win-axis** ring buckets, hex-dist 9–16 (offset collinear with a win axis: `dq==0 ∨ dr==0 ∨ dq+dr==0`) |
 | 225–232 | **off-axis** ring buckets, hex-dist 9–16 |
 | 233 | far bucket, hex-dist ≥ 17 |
-| 234 / 235 / 236 | cell→token / token→cell / token↔token |
+| 234 / 235 / 236 | (query=cell, key=token) / (query=token, key=cell) / (query=token, key=token) |
 
 Index function (query i, key j; `Δ = (q_j − q_i, r_j − r_i)`, `d = max(|dq|,|dr|,|dq+dr|)`):
 exact LUT for d ≤ 8; `217 + 8·(off_axis) + (d − 9)` for 9 ≤ d ≤ 16; 233 beyond; token rows/cols by
@@ -220,6 +220,9 @@ Loss reduction is always **mean over rows, never over nodes** (the variable-N bu
   any future value-target-family change requires a value-head LR ramp or fresh head (the
   relocation-shock procedure rule, encoded in config docs).
 - No spatial ownership/win-window head (owner-skipped).
+- moves_left's −1 sentinel/mask path exists almost solely for the Phase-B legacy adapter
+  (truncated games are never written and the BC corpus is decisive-only) — kept deliberately;
+  not dead code.
 - Total = `1.0·policy + 1.0·value + 0.25·opp + 0.1·Σstv + 0.1·moves_left`.
 
 ---
@@ -273,27 +276,38 @@ tree/subtree reuse; move selection by per-ply temperature; **continuous schedule
 on_move callback with the existing payload keys) plus the lockstep `search` driver; **PCR**
 (full/fast coin per ply, fast = pcr_fast_visits, no noise, not recorded); **policy-init openings**
 (truncated-exponential ply draw, raw-prior sampling at policy_init_temperature); forced playouts
-for Full roots; **the exact `mix_seed` hash and stream ids 0–5 adopted as a written contract**;
+for Full roots **including KataGo policy-target pruning of the exported visit-policy targets**
+(most-visited child never pruned; the played move comes from the un-pruned distribution — a
+production semantic the visit-count parity assertions alone would not catch);
+**the exact `mix_seed` hash and stream ids 0–5 adopted as a written contract**;
 **TSS toggleable** via the landed `tss_enabled` key at the three proven sites (expansion injection,
 leaf override, root guard) — with the call-site crop filter deleted: every tactical cell is always
-in-vocabulary, so injection is total by construction. main_4's frozen-win override (C3) and
-length-decay (C1) are **not ported** — the pathology they mitigate is unrepresentable here
-(`drop_truncated_rows` behavior IS adopted: truncated games' rows are never written).
+in-vocabulary, so injection is total by construction. main_4's frozen-win override (C3) is **not
+ported** — crop-frozen wins are unrepresentable here. The length-decay knees (C1) ride along with
+the 1:1-ported replay machinery and stay **dormant by default**: marathons driven by
+value/exploration dynamics remain possible even without the crop, and the dormant lever costs
+nothing. `drop_truncated_rows` behavior IS adopted: truncated games' rows are never written.
 
 **Internal seam:** the new crate structures its search around a one-trait evaluator boundary
 (`LeafEvaluator`: unique states → evaluations) with generic dedup/cache/order-restoration behind
 it — costless in a greenfield crate, and it makes the differential harness below trivial to wire.
 
 **Differential parity gate (the rewrite's safety net):** run hexfield search and dense_cnn search
-on the same ≥100-position corpus, same seeds, with a deterministic stub evaluator (priors/values =
-pure hash of state_hash/action_id). Identical PUCT constants + identical seed streams + identical
-priors ⇒ assert **identical visit counts and chosen moves**, for lockstep AND continuous, with
+on the same ≥100-position corpus — **constrained (and asserted) to positions whose full legal set
+lies inside dense_cnn's radius-20 crop**, since dense's candidate vocabulary is in-crop legal and
+any clipped position diverges by construction, not by bug — same seeds, hexfield in
+`search_parity_mode`, with a deterministic stub evaluator (priors/values = pure hash of
+state_hash/action_id). Identical PUCT constants + identical seed streams + identical priors ⇒
+assert **identical visit counts, chosen moves, and exported (forced-playout-pruned) visit-policy
+targets**, for lockstep AND continuous, with
 **trace-level assertions** (per-move noise draws, widening counts, move-class sequences) so a
 failure localizes the divergent semantic instead of forcing a blind bisect. TSS on/off coverage and
 the reused-root temperature regression are part of this gate.
 
 **Eval cache:** `HashMap<StateHash, Arc<Evaluation>>`, key = `hexo_utils::hash_state` (pure engine
-hash, encoder-independent), bounded (~1M default), Arc-shared, in-flight dedup of duplicate misses.
+hash, encoder-independent), bounded at **262,144 entries** (production main_4's value — full-legal
+priors cost ~4–12 KB/state, so the legacy 1M code-constant would mean 5–10 GB of host RAM here),
+Arc-shared, in-flight dedup of duplicate misses.
 Stored-prior truncation (a search-first proposal) is **deferred**: its tree-exactness proof fails at
 noised roots (Dirichlet alpha is drawn over the full candidate list), so it may not ship until that
 analysis is redone; host RAM is not currently scarce.
@@ -304,9 +318,12 @@ restnet's continuous scheduler (per-game slots, per-slot state machines, single 
 select↔eval overlap, games refilling as they finish) is the best measured throughput design in the
 repo and is retained as-is in semantics. hexfield's performance work layers **around** it, in the
 evaluator, where it cannot perturb scheduling semantics: the static-shape packer (§5.3), a
-**featurize↔forward overlap pipeline** (double-buffered: while the GPU runs flush k, Rust
-featurizes flush k+1 — featurization is O(N) per leaf here, not a fixed plane-stamp, so hiding it
-matters; the pattern is proven in-repo), per-shape persistent staging buffers (CUDA-graph static
+**featurize↔forward overlap pipeline** (within-call chunk pipelining, the in-repo-proven pattern:
+while the GPU forwards packed shape j, the CPU featurizes/packs/uploads shape j+1 of the same
+flush — featurization is O(N) per leaf here, not a fixed plane-stamp, so hiding it matters;
+cross-flush double-buffering would require future leaf sets to exist early, which is a scheduler
+property, and is at most an M8-measured option), per-shape persistent staging buffers (CUDA-graph
+static
 addresses), and the fp16 adopt-and-gate. Scheduler knob defaults (visits 512, c_puct 1.5,
 active_root_limit, virtual_batch_size, flush_target) mirror production main_4.
 
@@ -329,21 +346,25 @@ slot-map restores caller order on reply.
 ≈ 42 bytes/node. Rust keeps the per-row sorted `Vec<PackedCoord>` action ids; they never cross the
 boundary.
 
-Reply (Python → Rust) — **byte-identical ABI to dense_cnn**:
+Reply (Python → Rust) — **superset of dense_cnn's ABI** (the two base keys are byte-identical;
+one optional key added):
 
 ```
 { "values_bytes":  f32 × B,                    # binned-value expectation, clamped [−1, 1]
   "priors_bytes":  f32 × Σ L_g,                # per-legal softmax, positional over the prefix
-  "moves_left_bytes"?: f32 × B }               # ONLY when session flag request_moves_left is set
-                                               # (default off; aux trunk skipped when off)
+  "moves_left_bytes"?: f32 × B }               # present when request_moves_left is set —
+                                               # DEFAULT ON (§5.4.4 consumes it); off only in
+                                               # search_parity_mode or under ML auto-disable
 ```
 
 Rust zips positionally with retained action ids, validates (finite, non-negative, unique, positive
 mass, exact byte counts), descending-sorts, normalizes → `Evaluation{value, priors}`. Because the
 vocabulary is the full legal set, `legal_action_count == priors.len()` always. The PUCT tree
 consumes `(action_id, prior)` pairs opaquely — everything downstream of the evaluator is untouched
-by hexfield's representation. The optional moves-left field is zero-cost forward-compatibility with
-the active moves-left-utility track; not consumed by search in v1.
+by hexfield's representation. moves_left decode = median-of-bins mapped to decisions [0, 512],
+clamped (consumed by §5.4.4). Serve-forward surface, stated explicitly: policy + value always; the
+aux reduction + moves-left top when requested (~4% of per-node MACs); the **opp-policy head never
+executes at serve** (train-only), saving ~7% of conv MACs vs the train forward.
 
 ### 5.3 Python evaluator: sort-and-pack into static shapes
 
@@ -353,48 +374,67 @@ Kernel-shape stability is the **evaluator's** property, not the scheduler's. Per
 2. **Deterministic packing** (rows arrive size-sorted): greedily fill a fixed static shape table —
    approximately `(S_c, B)` ∈ {(384,64), (512,48), (768,32), (1024,24), (1536,16), (2048,8),
    (3072,4)} at a roughly uniform ~24.5k cells/forward — smaller rows fill tail slots of
-   larger-shape batches; the rare > 3072 tail falls back to ceil-to-256 (assert-logged). A 54-leaf
+   larger-shape batches; the rare > 3072 tail falls back to ceil-to-256 with B = the largest batch
+   under the pair budget (assert-logged). A 54-leaf
    staggered flush, a 256-leaf continuous flush, and a lockstep round all decompose into the same
    ≤ 7 shapes, so per-shape torch.compile / CUDA-graph economics survive variable N and the
    measured avg-batch-54 staggered-root pathology is absorbed here.
 3. Scatter CSR → padded per shape; neighbor globalization on GPU (`sentinel → zero-row`).
 4. Forward per shape (fp16 weights behind the restnet-style adopt-and-gate); pair-index built once,
-   bias gathered from the shared table; worst transient bias ≈ 305 MB (shape (3072,4)).
+   bias gathered from the shared table; worst transient bias ≈ 305 MB (shapes (1536,16) and
+   (3072,4) tie).
 5. Per-row prefix segment softmax (proven scatter pattern, fp32), values decoded + clamped.
 6. Single D2H sync; reorder to caller order; emit bytes.
 
 ### 5.4 Designed search divergences (default behavior; owner-approved 2026-06-12)
 
 hexfield's search diverges from the trusted lineage in exactly four documented ways. They are
-default behavior, not flags. The one switch that exists is test-only: `search_parity_mode`
-disables all four together so the §5.1 differential harness can pin the core rewrite; it is never
-a production configuration. M10 measures each divergence's contribution via lesion A/Bs (turn one
-off, arena at matched visits) — for understanding and tuning, not as a ship gate.
+default behavior, not production knobs. Internally each divergence has a test-only toggle (used by
+the M10 lesion A/Bs and the M6 property gates); `search_parity_mode` is the composite that forces
+all four off for the differential harness. None of these are production configuration surface.
 
-1. **LCB root move selection.** The played move is chosen by the lower confidence bound of Q
-   among sufficiently-visited children (`Q − z·σ/√n`, z ≈ 1.6; fallback to max-visits when no
-   child qualifies), instead of raw max-visits. The single largest validated search Elo gain in
-   KataGo's history. Touches only the final move choice — exploration and the visit-distribution
-   training targets are unchanged.
-2. **Early-stop overtake pruning.** A root stops searching when no remaining visit budget can
-   change the selected move; in the continuous scheduler the freed slot refills immediately. Pure
-   throughput at provably equal strength, compounding with the scheduler's slot-refill design.
-   (Recorded visit-distribution targets use the visits actually performed — same as PCR's
-   variable-effort precedent.)
-3. **Visit-scaled c_puct.** `c(n) = c_init + c_scale·log((n + c_base)/c_base)` with constants
-   chosen for the 512-visit regime (c_init 1.5 preserves current small-n behavior; c_base sized so
-   the log term is active within a 512-visit search, unlike AZ's 19,652 which would be a no-op
-   here). Rationale: fixed c_puct under-explores large subtrees and over-explores small ones, and
-   Hexo's 300–800 branching makes the imbalance worse than in Go. Constants tuned at M10.
-4. **Moves-left utility.** Root move utility blends a decisiveness preference — faster wins,
-   slower losses: `U = Q + w_ml · sign(Q) · g(E[moves_left])` with a modest w_ml — using the
-   moves-left head via the `moves_left_bytes` reply field. This is the owner's validated stage-3
-   mechanism (STAGE3_MOVES_LEFT_FEASIBILITY: mechanism sound; only blocker was the flood-damaged
-   legacy head). hexfield's head is trained from clean data starting at BC prefit (real
-   remaining-decision targets from decisive human games), so it is expected healthy from the
-   start; the stage-3 health metrics (conversion-zone Spearman, [0,5) MAE, end-vs-mid separation)
-   run as **per-epoch monitoring with an auto-disable threshold**, not as an enablement
-   ceremony. Directly attacks the in-crop game-lengthening that survived main_4's armor.
+1. **LCB move selection on greedy paths.** Production self-play temperature-samples its played
+   moves (halflife-decayed T with floor 0.1); "best move" selection only exists on greedy paths:
+   PCR fast moves (~75% of decisions), lockstep / eval-ladder / arena play, and plies where
+   effective T → 0. On those paths the move is chosen by lower-confidence-bound of Q —
+   `Q − z·σ/√n`, z = 1.6, σ² from a per-edge sum-of-squares accumulator (a tree-stat schema
+   addition, inert in parity mode), eligibility = visits ≥ max(8, 0.1·max_child_visits), fallback
+   to max-visits when no child qualifies. Temperature-sampled Full moves are unchanged — KataGo's
+   validated LCB Elo lives in greedy match play. Exploration and visit-distribution training
+   targets are untouched.
+2. **Early-stop overtake pruning, scoped by move class.** Unrestricted on greedy, *unrecorded*
+   searches — PCR fast moves and eval/arena play (~43% of search compute at production PCR
+   settings): stop when the remaining budget cannot change the selection **under the rule actually
+   in force** (visit-overtake, AND where LCB is active, LCB winner == visit winner); the freed
+   continuous-scheduler slot refills immediately. On recorded Full roots the targets are
+   temperature-sampled distributions, so stopping early changes the recorded target — there a
+   conservative visit floor applies instead (no stop before 75% of budget), which captures most
+   tail savings while protecting forced playouts and noise-driven exploration mass. Telemetry:
+   early-stop fraction and mean visits-at-stop, by move class.
+3. **Visit-scaled c_puct.** `c(n) = c_init + c_scale·log((n + c_base)/c_base)`, shipped at
+   c_init 1.5, c_scale 0.45, c_base 500 — +0.04 at n=50 (small-n behavior preserved, checkable
+   arithmetic), +0.32 at n=512. Rationale: fixed c_puct under-explores large subtrees and
+   over-explores small ones, and Hexo's 300–800 branching makes the imbalance worse than in Go.
+   Expectation note: static c_puct sweeps (1.1/1.5/2.0) measured as noise in this repo, and the
+   dynamic schedule stays within roughly that band — this is the divergence most likely to lesion
+   to ≈0 at M10; it ships with the deliberately small c_scale, and a null lesion result is not a
+   failure.
+4. **Moves-left utility — the stage-3 mechanism, adopted verbatim.** A selection-time per-edge
+   PUCT bonus, never value/backup shaping:
+   `U_ml(e) = − w_ml · g(Q_e) · tanh((M_e − M_node)/m_scale)`, shipped at w_ml = 0.03,
+   m_scale = 32, g = the |Q| > 0.6 win-side-only gate (the bonus is identically zero near Q = 0 —
+   no sign discontinuity exists). The delta-vs-sibling-baseline form is invariant to the head's
+   absolute bias by construction (the documented failure mode of absolute moves-left readings).
+   Tree mechanics: per-node `(ml_sum, ml_weight)` accumulated on real backups; terminals
+   contribute exact path distance (off-by-one fix); head decode = median-of-bins mapped to
+   decisions [0, 512]. PCR fast searches are steered identically. Source:
+   `docs/analysis/STAGE3_MOVES_LEFT_FEASIBILITY.md` — the mechanism was validated there; the only
+   blocker was the flood-damaged legacy head, and hexfield's head trains on clean targets from BC
+   prefit onward. Health: the stage-3 L0 metrics (conversion-zone within-game Spearman ≥ 0.6,
+   [0,5) median-decode MAE ≤ 15, end-vs-mid pairwise ≥ 0.85, correct-sign sibling decrements) run
+   as per-epoch monitoring with **auto-disable**; the stage-3 probe assets (64 squander + 39
+   control positions) are reused as the nightly control-flip probe. Directly attacks the in-crop
+   game-lengthening that survived main_4's armor.
 
 Considered and **not** pursued: DAG/transposition-sharing search (the eval cache already dedupes
 GPU work across transpositions and its measured hit rate is 1.2% at 512 visits — tree-stat sharing
@@ -403,7 +443,8 @@ raising visits (the evals/position budget is an owner-level call, not a search-c
 
 ### 5.5 Throughput & cost honesty
 
-Per-eval MACs ≈ `0.91M·N + 0.22M·S + 576·S²` vs the dense serve-reference ≈ 2.9 G-MAC fixed:
+Per-eval MACs at serve ≈ `0.85M·N + 0.22M·S + 576·S²` (the opp-policy head never runs at serve;
+the train forward is ≈ 0.91M·N) vs the dense serve-reference ≈ 2.9 G-MAC fixed:
 ≈ 0.3× at N=600, ≈ 0.5× at the N≈900 mid-game median, crossover ≈ N 1500, ≈ 2.9× at the 3k
 marathon tail (which the crop could not represent at all). Honest projection: **0.6–1.2× dense
 evaluator wall-clock at typical N** before packing/compile gains; the per-row bias materialization
@@ -446,7 +487,7 @@ crop-clipped) and read as-is.
 
 Per row, in Python DataLoader workers: draw symmetry → transform facts → build support + BFS
 distances → features → `nbr_idx` → targets, with strict fail-loud validation (finite, non-negative,
-positive policy mass, support ⊆ legal). **Python is the primary, debuggable train-time featurizer;
+positive policy mass, policy-target support ⊆ legal set). **Python is the primary, debuggable train-time featurizer;
 Rust is the serve-time featurizer; a fixture parity test (exact ints, ≤1e-6 floats, including node
 order) is the contract between them.** (A Rust-only featurizer was considered and rejected: it puts
 a WSL maturin rebuild into every feature-debug loop.)
@@ -455,7 +496,8 @@ a WSL maturin rebuild into every feature-debug loop.)
 
 Port restnet's machinery semantics 1:1: policy-surprise frequency weighting materialized as row
 duplication at finalize; mtime-ordered tapered shuffle window (keep 300k rows, taper 0.65,
-`cp -p`-compatible); keep-prob subsample → permute → batch-aligned shards; PCR row filtering at the
+md5-hash train/val split, `cp -p`-compatible); keep-prob subsample → permute → batch-aligned
+shards; PCR row filtering at the
 source (only Full-search rows written); truncated games never written. Optimizer identical: AdamW
 lr 1e-3, wd 1e-4 on matrix weights only (no decay: biases, LN params, token inits, bias table), AMP
 + GradScaler, grad-clip 1.0, EMA optional with restnet semantics, strict-load checkpoints (no
@@ -492,7 +534,12 @@ epoch for seconds of GPU):
 - **Fixed-probe drift telemetry:** freeze ~1024 rows with realized outcomes at run start; forward
   them every epoch (identity symmetry, eval mode); report `probe_policy_kl_prev` (policy-churn
   meter — ignition shows here epochs before Elo), probe entropy, `probe_value_ece` vs the frozen
-  real outcomes (longitudinally comparable), |ΔE[v]|, per-layer token-attention-mass (hub health).
+  real outcomes (longitudinally comparable), |ΔE[v]|, per-layer token-attention-mass (hub health),
+  and a **D6-consistency probe**: mean policy KL between `f(T_s·x)` and `T_s·f(x)` on the probe set
+  — for an augmentation-trained (non-equivariant) model, the direct meter of whether D6 training is
+  working; reuses the probe forward at near-zero cost.
+- **Search telemetry (per epoch):** LCB-override rate (LCB pick ≠ visit pick), early-stop fraction
+  and mean visits-at-stop by move class, moves-left flip rate and auto-disable status.
 - **Data panel:** legal-set / support-size distributions, window stats.
 
 ---
@@ -607,9 +654,9 @@ Python guards on the eval path by design).
 | M3 | BC prefit on HF corpus + probe harness | AMP run, no NaN; top-1 within 2 pts of restnet BC reference; `value_ece ≤ 0.08`; probe npz per epoch; **LN-vs-BN tripwire decision point** |
 | M4 | Rust support/features + sample facts | Rust↔Python parity fixtures exact |
 | M5 | payload + lockstep search | ABI goldens; stub-evaluator visit parity vs dense_cnn lockstep (≥100 positions, exact, with traces) |
-| M6 | continuous scheduler + PCR/policy-init/noise/TSS | stub parity for continuous (move classes, chosen moves, visit counts); seed-stream vectors; TSS toggle; reuse-root regression |
+| M6 | continuous scheduler + PCR/policy-init/noise/TSS + the §5.4 divergences | stub parity for continuous in parity mode (move classes, chosen moves, visit counts, exported targets); seed-stream vectors; TSS toggle; reuse-root regression; **divergence property gates**: all-divergences-off ≡ `search_parity_mode` bit-for-bit; early-stop on≡off chosen-moves at greedy selection over ≥1k searches; LCB vs closed-form on synthetic visit/Q/σ tables incl. fallback; ML-utility sign/monotonicity and gate-zero-below-\|Q\|=0.6 properties |
 | M7 | plugin + e2e | 4-game 64-visit epoch through hexo_train in the dev venv; artifacts/diagnostics/checkpoint round-trip; strict-load |
-| M8 | perf calibration | measured evals/s vs dense at matched settings (floor: ≥ 0.8× restnet's continuous-scheduler pos/s on a mid-game mix; target: parity+); featurize↔forward overlap pipeline measured on/off; packer shape histograms; fp16 gate; VRAM within §9; compile go/no-go |
+| M8 | perf calibration | measured evals/s vs dense at matched settings (floor: ≥ 0.8× restnet's continuous-scheduler pos/s on a mid-game mix; target: parity+); featurize↔forward overlap pipeline measured on/off; packer shape histograms + tail-occupancy / padded-cell fraction (documented fallback: half-B shape variants, only if measured to bite); fp16 gate; VRAM within §9; compile go/no-go |
 | M9 | self-play soak | 2–3 unattended epochs; sane entropy/length/calibration bands; prefit-seeded bot ≥ smoke-parity vs its own BC checkpoint over 100 games; handoff doc |
 | M10 | search-divergence lesion study (§5.4) | per-divergence lesion arena A/B at matched visits (turn one off, measure) — for attribution and constant tuning, not ship gates; moves-left auto-disable threshold calibrated here |
 
