@@ -1,0 +1,76 @@
+{
+ "summary": "MOVES_LEFT HEAD QUALITY AUDIT (CPU, read-only; 3 ckpts x 3 game sources x 60 games each; 33,940 positions total).\n\nPARAMETERIZATION (from architecture.py/losses.py/samples.py, verified against npz shards): the head is a Linear(64->65) on the SHARED auxiliary ValueReduction (heads_v3; shared with stvalue_2/6/16 \u2014 not the main value head's private reduction). It predicts a 65-bin distribution on [-1,1], trained with binned soft-CE (scalar_to_binned_target, adjacent-2-bin soft labels) at weight 0.1. Target = decisions remaining AFTER the current decision (0 at the final decision), stored RAW in npz key `moves_left` (-1 = masked: truncated games/old shards; ep5 shard: mean 74.9, 1.2% masked; ep9 shard: mean 164.3, max 860, 4.1% masked), normalized at batch expansion via 2*min(1, ml/MOVES_LEFT_CAP)-1. MOVES_LEFT_CAP = 512 (changed from 80 on 2026-06-10 15:23, commit f80009b; ALL audited checkpoints trained under 512 \u2014 main_3 ckpts written 06-11 14:47..00:07, main_4 later; main_4 initialize_from = main_3 ckpt5, so m3c5-vs-m4c12 on identical games is a clean before/after of main_4 ep6-12 incl. the ep8-10 flood). Bin width at cap 512 = 8 decisions. Inference: head is ABSENT from forward_policy_value; use the full training forward net(x)[\"moves_left\"]. Scalar decode: E[bins]->(v+1)/2*512 (mean decode); a median-of-bins decode is materially better near game end because the bin mass is right-skewed.\n\nVERDICT DETAIL \u2014 bar was conversion-zone (true ml<60) MAE < ~15 and within-game rank corr > ~0.7.\n\n(1) m4c12 (the checkpoint that would actually steer search): BROKEN \u2014 fails everywhere, including on healthy games. On its own m4ep12 games: conv(<60) within-game Spearman mean 0.174 (median 0.150, p10 ~0.0, n=60 games); median-decode MAE 36.9/63.4/43.8 in [0,5)/[5,20)/[20,60) (n=300/900/2346); full-game Spearman mean 0.005. On main_3 ep5 HEALTHY games it is still chance-level: conv rho 0.087, end(<20)-vs-mid([60,120)) pairwise accuracy 0.487 (chance=0.5, n=39 games) \u2014 versus 0.584 / 0.828 for m3c5, the exact weights main_4 started from. The flood damaged this head too: training loss_components.moves_left rose 3.19 (ep6) -> 3.65 (ep10 flood) and is only at 3.48 at ep12 vs the healthy 3.12-3.20 band; in the sibling probe its parent->child decrement has the WRONG SIGN at ml=30/-60 (-3.7/-19.1; children predicted LONGER than parent).\n\n(2) Healthy ckpts (m3c5, m3c7): FAIL THE STRICT BAR but carry a real, correctly-signed, COARSE end-proximity gradient. Best case m3c7 on m3ep5 healthy games: median-decode MAE 13.3 in [0,5) (meets <15), but 32.4 in [5,20) and 29.0 in [20,60) (fails); mean-decode adds a systematic +28..+58 overestimate near the end. Conv(<60) Spearman mean 0.609 / median 0.667 / p10 0.18 (just under the 0.7 bar); phase-stratified (Hexo period-4 ply structure) conv rho 0.636. The COARSE signal is solid: end(<20)-vs-mid([60,120)) within-game pairwise discrimination 0.872 (median 0.927), end-drop fraction 0.974; and m3c7 generalizes off-distribution (on m3ep9 marathons: pairwise 0.845, end-drop 1.000, [0,5) med-MAE 22.7; on m4ep12 games: pairwise 0.854, end-drop 1.000). Against oracle-fit nulls the head clearly beats constant and ply-linear baselines in all conv buckets (e.g. m3ep5 [0,5): 13.3 vs 82.6 const / 82.2 ply-lin), but in [60,120) the const null (14.5) BEATS the head (20.5-23.3, r~0.0) \u2014 there the head is just emitting the marginal mean.\n\n(3) STRUCTURAL FAILURE MODES (all ckpts): (a) severe range compression / regression-to-mean \u2014 predictions confined to ~[8,190] of the [0,512] support, per-bucket calibration slopes 0.0-0.25, overall slope 0.05-0.08; (b) [120+) is hopeless: bias -111..-194 (predicts ~90-110 when 200-850 remain) \u2014 the head CANNOT see marathons coming, so a moves-left utility would NOT have flagged dawdling early in marathon games via absolute predictions; (c) adjacent-ply monotonic-decrease rate is chance-level (0.51-0.61) \u2014 no per-ply resolution; the signal is a stride>=5 trend, oscillating with the period-4 phase structure; (d) systematic overestimate approaching the end (at true<5 the healthy head says ~30 mean / ~15 median).\n\n(4) Sibling-gradient probe (n=12 positions/cell, 12 candidate children each, healthy m3c7 on m3ep9): predicted-ml spread across siblings std ~5, range ~18-20 decisions \u2014 a usable relative gradient magnitude for a small utility term; parent->child decrement +14.2/+6.3/+3.7 at true_ml=10/30/60 (correct sign, inflated vs ideal 1.0). m4c12 shows wrong-sign decrements.\n\nIMPLICATION FOR THE STAGE-3 DESIGN: a KataGo-style moves-left utility is FEASIBLE-WITH-CONDITIONS: it must (i) NOT use m4c12's head as-is \u2014 the head must first be healed (retrain on quarantined-clean data) and gated by an audit like this one; (ii) use median/quantile decode, not mean decode; (iii) rely only on the coarse relative signal (sibling deltas / end-vs-mid contrast), with the utility scaled small and ideally confined to |v|-high (conversion-zone) nodes, since absolute accuracy is only ~13-30 MAE there and mid-game output is an uninformative constant; (iv) not expect it to discriminate marathon trajectories at [120+) absolute scale \u2014 though winning-side 'end sooner' pressure inside the <60 zone is exactly where the head is strongest. Re-audit gate suggestion for a healed head: conv(<60) within-game rho >= 0.6 and [0,5) median-decode MAE <= 15 on fresh games, plus end-vs-mid pairwise >= 0.85.",
+ "verdict": "QUALIFIED NO: the current m4c12 moves_left head is flood-damaged and unusable for steering search (chance-level within-game ordering, conv-zone rank corr 0.17, wrong-sign sibling decrements); healthy main_3 heads (c5/c7) miss the strict bar (conv MAE 13-32 median-decode vs <15; conv rank corr ~0.61-0.67 vs >0.7) but carry a real, correctly-signed coarse end-proximity gradient (end-vs-mid pairwise 0.85-0.87, end-drop 97-100%) \u2014 sufficient for a SMALL, conversion-zone-gated moves-left utility ONLY after the head is healed and re-audited, and only with median/quantile decode.",
+ "key_numbers": {
+  "design": "3 ckpts (m3c5, m3c7, m4c12) x 3 sources (m3ep5 healthy, m3ep9 marathon, m4ep12 current) x 60 games; positions per source: 6547 / 15717 / 11676; bucket n per cell: [0,5)=300, [5,20)=900, [20,60)=2054-2346, [60,120)=1796-3101, [120+)=1497-9174",
+  "parameterization": "65-bin CE on [-1,1], target=2*min(1,ml/512)-1, ml=decisions-remaining-after (0 at last), -1 mask for truncated, loss weight 0.1, bin width 8 decisions, head=Linear(64->65) on shared aux ValueReduction",
+  "cap": "MOVES_LEFT_CAP=512 since 2026-06-10 15:23 (was 80); all audited ckpts trained under 512; npz stores raw scalar (ep9 shard max 860, 2.4% >512 saturate top bin)",
+  "m3c7_on_m3ep5_median_decode_MAE_by_bucket": {
+   "[0,5)": 13.3,
+   "[5,20)": 32.4,
+   "[20,60)": 29,
+   "[60,120)": 23.3,
+   "[120+)": 138.5
+  },
+  "m3c7_on_m3ep5_mean_decode_bias_by_bucket": {
+   "[0,5)": 27.8,
+   "[5,20)": 52.3,
+   "[20,60)": 45.6,
+   "[60,120)": 4.2,
+   "[120+)": -118.2
+  },
+  "m3c7_within_game": {
+   "conv_lt60_spearman_mean/median/p10": "0.609/0.667/0.18",
+   "phase_stratified_conv_rho": 0.636,
+   "end_vs_mid_pairwise_acc": 0.872,
+   "end_drop_frac": 0.974,
+   "mono_adjacent_rate": 0.531,
+   "mono_stride5_rate": 0.611
+  },
+  "m4c12_on_m4ep12": {
+   "conv_lt60_spearman_mean": 0.174,
+   "median_decode_MAE_0_5": 36.9,
+   "median_decode_MAE_5_20": 63.4,
+   "end_vs_mid_pairwise_acc": 0.593,
+   "full_game_spearman_mean": 0.005
+  },
+  "flood_before_after_identical_m3ep5_games": {
+   "m3c5_conv_rho": 0.584,
+   "m4c12_conv_rho": 0.087,
+   "m3c5_end_vs_mid": 0.828,
+   "m4c12_end_vs_mid": 0.487
+  },
+  "train_loss_moves_left": {
+   "main_3": "3.33(ep1) 3.15(ep5) 3.20(ep7) 3.47(ep8) 3.89(ep9) 3.94(ep10)",
+   "main_4": "3.19(ep6) 3.39(ep8) 3.65(ep10) 3.48(ep12) 3.36(ep13)"
+  },
+  "range_compression": "predictions span ~[8,190] of [0,512]; per-bucket slopes 0.0-0.25; [60,120) const-null MAE 14.5 beats head 20.5-23.3",
+  "marathon_blindness": "[120+) bias -111..-194; head predicts ~90-110 when 200-850 decisions remain",
+  "sibling_probe_n12_per_cell": {
+   "m3c7_sib_std": "~5",
+   "m3c7_sib_range": "18-20",
+   "m3c7_parent_child_decrement_ml10/30/60": "+14.2/+6.3/+3.7 (ideal +1)",
+   "m4c12_decrement_ml30/60": "-3.7/-19.1 (wrong sign)"
+  }
+ },
+ "artifacts": [
+  "E:\\Hexo-BotTrainer-hexgt\\scripts\\_wf_s3_mlaudit.py",
+  "E:\\Hexo-BotTrainer-hexgt\\scripts\\_wf_s3_full_out.json",
+  "E:\\Hexo-BotTrainer-hexgt\\scripts\\_wf_s3_full_run.txt",
+  "E:\\Hexo-BotTrainer-hexgt\\scripts\\_wf_s3_post_full.txt",
+  "E:\\Hexo-BotTrainer-hexgt\\scripts\\_wf_s3_post3_out.txt",
+  "E:\\Hexo-BotTrainer-hexgt\\scripts\\_wf_s3_sibling.py",
+  "E:\\Hexo-BotTrainer-hexgt\\scripts\\_wf_s3_sibling_out.json",
+  "E:\\Hexo-BotTrainer-hexgt\\scripts\\_wf_s3_npzcheck_out.txt",
+  "E:\\Hexo-BotTrainer-hexgt\\scripts\\_wf_s3_losstraj_out.txt"
+ ],
+ "caveats": [
+  "Game sampling is length-stratified (evenly spaced over the sorted length distribution per source), not random \u2014 over-represents length extremes relative to a random draw; per-bucket metrics condition on true_ml so are largely unaffected, but overall/aggregate rows weight long games heavily.",
+  "Sibling-gradient probe is small (n=12 positions per ckpt x true_ml level) and uses RANDOM legal alternatives \u2014 spread among random moves likely overstates spread among plausible top-k moves, and there is no ground-truth ml for alternatives, so it measures gradient MAGNITUDE/sign, not gradient CORRECTNESS.",
+  "Within-game Spearman conflates the head's signal with the period-4 phase oscillation; phase-stratified values (reported) are the fairer ordering metric and only modestly higher (0.61->0.64 conv for m3c7).",
+  "Training-loss trajectories are CE on shifting selfplay data distributions, not a fixed eval set \u2014 directionally consistent with the matched-game behavioral evidence but not comparable epoch-to-epoch in isolation.",
+  "m4c12 was evaluated 1-2 epochs after the flood quarantine; loss is recovering (3.65->3.36 by ep13), so later main_4 ckpts may be partially healed \u2014 re-audit before any use.",
+  "True game lengths come from replaying .hxr action_ids; only decisive (winner is not None) games were used, matching the -1 truncation mask convention of training.",
+  "All evaluation used the full training forward on CPU with the exact 13-plane crop builder from samples.py/input.py of this repo (the same tree the live runs train from); checkpoints loaded strict=False with fail-loud checks on missing non-buffer keys and on presence of aux/moves_left head keys."
+ ]
+}
