@@ -4,6 +4,12 @@ Artifacts are the durable files that describe or hand off a run: manifests,
 placeholder checkpoints, self-play checkpoint pointers, and final summaries.
 This module keeps file-writing concerns out of `defaults.py` and `pipeline.py`
 so the pipeline can stay focused on ordering.
+
+External file-format contract (no Python import): `manifest.json` written by
+`write_run_manifest` is read by the dashboard
+(packages/hexo_frontend/python/hexo_frontend/web.py for run lineage/config and
+debug_infer.py for architecture detection). Changing its shape changes what
+the :8080 dashboard sees for every run.
 """
 
 from __future__ import annotations
@@ -23,7 +29,10 @@ class CheckpointStore:
 
     Real model packages can override checkpoint writing through their plugin.
     Until then, this tiny store gives the pipeline something deterministic to
-    write and test without pretending to serialize model weights.
+    write and test without pretending to serialize model weights. All four
+    registered plugins provide a real saver, so `write_placeholder` is reached
+    only by FakePlugin tests (tests/test_training_pipeline_simplification.py);
+    `path_for` remains generally useful.
     """
 
     checkpoint_dir: Path
@@ -46,7 +55,9 @@ def write_run_manifest(ctx: RunContext) -> Path:
 
     The manifest is a quick index for humans and tools: it says which model,
     loop settings, sample settings, and checkpoint settings produced this
-    output directory.
+    output directory. The dashboard (packages/hexo_frontend/python/
+    hexo_frontend/web.py and debug_infer.py) parses `model` for lineage and
+    architecture detection — keep the keys stable.
     """
 
     manifest = {
@@ -72,6 +83,11 @@ def publish_selfplay_checkpoint_pointer(
 
     The pointer is deliberately a small text file. It decouples future self-play
     processes from the exact checkpoint naming scheme inside the run directory.
+
+    Near-duplicate of checkpoints._publish_epoch_checkpoint_pointer (the
+    per-epoch variant); keep the two writers format-identical. Only legacy
+    dense_cnn/hexgt configs enable the pointer — all restnet main_* configs
+    set `update_checkpoint_pointer = false`.
     """
 
     _ = components

@@ -23,7 +23,7 @@ pub(crate) const HEXGT_ACTIVE_ROOT_LIMIT: usize = 1024;
 
 // --- Node/edge feature layout (MUST mirror python/.../constants.py + features.py).
 // Any change here is a model-weights + replay-schema change; the parity test
-// (test_hexgnn_featurize_parity) guards Rust<->Python equality.
+// (tests/test_hexgnn_featurizer_parity.py) guards Rust<->Python equality.
 pub(crate) const NODE_FEATURE_DIM: usize = 32;
 pub(crate) const NUM_NODE_TYPES: i64 = 4;
 // i64 sibling of `candidates::NUM_EDGE_TYPES` (usize), for edge-type clamp
@@ -66,7 +66,7 @@ pub(crate) const F_SIDE_STONES_OWN: usize = 19;
 pub(crate) const F_SIDE_STONES_OPP: usize = 20;
 pub(crate) const F_SIDE_MOVE_NUMBER: usize = 21;
 // Tactical feature-set v2 ([22:30) of the same 32-wide vector; D6-invariant).
-// MUST mirror python/.../constants.py (gated by test_hexgnn_feature_buffer).
+// MUST mirror python/.../constants.py (gated by tests/test_hexgnn_featurizer_parity.py).
 pub(crate) const F_CAND_OWN_WIN3: usize = 22; // own count-3 windows through cell (norm)
 pub(crate) const F_CAND_OWN_WIN4: usize = 23; // own count-4
 pub(crate) const F_CAND_OWN_WIN5: usize = 24; // own count-5
@@ -79,7 +79,7 @@ pub(crate) const F_SIDE_IS_SECOND: usize = 29; // side: 1 if current placement i
 // PHASE-AWARE win-now flags). Distinct from the v2 count-{3,4,5} window-count
 // SPLITS (F_CAND_*_WIN{3,4,5}, which only count windows) and from F_CAND_COMPLETE_*
 // (which fire only at count-5). MUST mirror python/.../constants.py (gated by
-// test_hexgnn_feature_buffer).
+// tests/test_hexgnn_featurizer_parity.py).
 pub(crate) const F_CAND_WIN_NOW_OWN: usize = 30; // placing here is (part of) an OWN win
                                                  // THIS turn: own count-5 (any B), or own
                                                  // count-4 only at FirstStone (B==2). NOT a

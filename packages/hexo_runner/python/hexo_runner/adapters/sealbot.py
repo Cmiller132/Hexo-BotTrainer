@@ -1,4 +1,18 @@
-"""SealBot adapter for the generic Hexo runner."""
+"""SealBot adapter for the generic Hexo runner.
+
+Bridges the external C++ minimax baseline bot (a repo-external checkout at
+$SEALBOT_PATH, typically E:\\SealBot / /mnt/e/SealBot) into the RunnerPlayer
+protocol. The bot runs in a dedicated subprocess (`_sealbot_worker.py` in
+this directory) speaking newline-delimited JSON over stdin/stdout, because
+the two SealBot variants ("current"/"best") export identical pybind module
+names and cannot coexist in one Python process.
+
+Consumers: every model package's SealBot evaluation harness
+(dense_cnn_restnet/evaluation.py, hexo_models/{dense_cnn,hexgt}/evaluation.py,
+hexgnn/evaluation.py) and packages/hexo_frontend/python/hexo_frontend/web.py
+(Arena opponent + the /api adapters endpoint via discover_sealbot_adapters).
+Covered by tests/test_sealbot_adapter.py.
+"""
 
 from __future__ import annotations
 
@@ -20,8 +34,11 @@ import hexo_engine as engine
 from ..player import DecisionResult, FinalSummary, GameContext, PlayerIdentity, TransitionEvent, WorkerContext
 
 
+# --- Configuration and availability discovery -------------------------------
+
 SEALBOT_VARIANTS = ("current", "best")
 DEFAULT_SEALBOT_VARIANT = "current"
+# Seconds of minimax think time per worker decide() call.
 DEFAULT_SEALBOT_TIME_LIMIT = 0.05
 
 
@@ -31,7 +48,13 @@ class SealBotUnavailableError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class SealBotConfig:
-    """Configuration for one SealBot runner player."""
+    """Configuration for one SealBot runner player.
+
+    `path` falls back to the SEALBOT_PATH env var. `time_limit` is the bot's
+    per-decision think budget in seconds; `startup_timeout`/`response_timeout`
+    are seconds the parent waits on the worker subprocess. `worker_script`
+    overrides the bundled _sealbot_worker.py (used by tests to fake the bot).
+    """
 
     path: str | Path | None = None
     variant: str = DEFAULT_SEALBOT_VARIANT
@@ -53,8 +76,18 @@ class SealBotConfig:
         _validate_variant_files(self.resolved_path, self.variant)
 
 
+# --- RunnerPlayer adapter ----------------------------------------------------
+
+
 class SealBotPlayer:
-    """RunnerPlayer wrapper around an external SealBot minimax variant."""
+    """RunnerPlayer wrapper around an external SealBot minimax variant.
+
+    SealBot answers with a full two-stone turn at once; the runner asks for
+    one action at a time, so the second stone is buffered in `_pending_moves`
+    and replayed on the next decide() (tagged diagnostics["buffered_move"]).
+    The worker subprocess is spawned lazily on the first decide(), not in
+    setup_worker.
+    """
 
     def __init__(self, config: SealBotConfig | None = None, *, player_id: str | None = None) -> None:
         self.config = config or SealBotConfig()
@@ -81,6 +114,11 @@ class SealBotPlayer:
         self._pending_diagnostics.clear()
 
     def decide(self, state: engine.HexoState) -> DecisionResult:
+        """Return the next stone, querying the worker only when the buffer is empty.
+
+        Raises ValueError if SealBot returns no moves or an illegal move (the
+        buffer is cleared so the game aborts cleanly via the runner loop).
+        """
         python_state = engine.to_python_state(state)
         if not self._pending_moves:
             response = self._worker_process().decide(_state_payload(python_state))
@@ -131,7 +169,12 @@ class SealBotPlayer:
 
 
 def discover_sealbot_adapters(path: str | Path | None = None) -> dict[str, Any]:
-    """Return frontend-friendly SealBot availability metadata."""
+    """Return frontend-friendly SealBot availability metadata.
+
+    Served by hexo_frontend/web.py at the /api adapters endpoint. Never
+    raises: configuration/installation problems are reported in the payload's
+    "error" fields and per-variant "available" flags.
+    """
 
     raw_path = path or os.environ.get("SEALBOT_PATH")
     payload: dict[str, Any] = {
@@ -160,7 +203,19 @@ def discover_sealbot_adapters(path: str | Path | None = None) -> dict[str, Any]:
     return payload
 
 
+# --- Worker subprocess manager -----------------------------------------------
+
+
 class _SealBotProcess:
+    """Manages one _sealbot_worker.py subprocess over JSON lines.
+
+    Protocol (strictly request-response, no request ids): parent writes one
+    {"type": "decide", "state": ...} line to stdin and blocks on the response
+    queue fed by a daemon stdout-reader thread; a second thread tails stderr
+    into a bounded deque for error reporting. Construction blocks until the
+    worker's ready handshake or raises SealBotUnavailableError.
+    """
+
     def __init__(self, config: SealBotConfig) -> None:
         self.config = config
         self.root = config.resolved_path
@@ -204,6 +259,7 @@ class _SealBotProcess:
         return response
 
     def close(self) -> None:
+        """Shut the worker down: polite close request, then terminate, then kill."""
         process = self._process
         if process.poll() is None:
             try:
@@ -278,7 +334,15 @@ class _SealBotProcess:
             return
 
 
+# --- Engine-state -> SealBot JSON payload helpers ----------------------------
+
+
 def _state_payload(state: engine.PythonHexoState) -> dict[str, Any]:
+    """Serialize the engine state mirror into the worker's JSON `state` shape.
+
+    Field names/values here are the contract with _sealbot_worker.py's
+    _Worker.decide (player0/player1 strings map to SealBot Player.A/B).
+    """
     return {
         "current_player": str(state.current_player),
         "phase": str(state.phase),
@@ -293,6 +357,9 @@ def _state_payload(state: engine.PythonHexoState) -> dict[str, Any]:
 
 
 def _moves_left_in_turn(phase: engine.TurnPhase) -> int:
+    # CAUTION: duplicates hexo_engine turn rules (opening stone and the
+    # second stone of a turn = 1 placement left, otherwise 2). A rules change
+    # in hexo_engine would silently desync the SealBot state payload.
     if phase == engine.TurnPhase.OPENING:
         return 1
     if phase == engine.TurnPhase.SECOND_STONE:
@@ -301,6 +368,7 @@ def _moves_left_in_turn(phase: engine.TurnPhase) -> int:
 
 
 def _parse_moves(value: object) -> list[tuple[int, int]]:
+    """Validate the worker's `moves` payload into [(q, r), ...] axial pairs."""
     if not isinstance(value, Iterable) or isinstance(value, (str, bytes, dict)):
         raise ValueError(f"SealBot returned malformed moves: {value!r}")
     moves: list[tuple[int, int]] = []
@@ -312,6 +380,9 @@ def _parse_moves(value: object) -> list[tuple[int, int]]:
             raise ValueError(f"SealBot returned malformed move: {item!r}")
         moves.append((int(pair[0]), int(pair[1])))
     return moves
+
+
+# --- Installation validation helpers ------------------------------------------
 
 
 def _variant_status(root: Path | None, variant: str) -> dict[str, Any]:

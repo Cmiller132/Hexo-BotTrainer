@@ -214,8 +214,13 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 /// Diagnostic: run the phase-aware threat analysis on a live engine state and
-/// return its facts (drives the TEST C/G/H/I regression fixtures from Python and
-/// lets self-play instrument how often the override/injection fire).
+/// return its facts.
+///
+/// UNUSED(2026-06-12): no Python caller found in packages/tests/scripts — the
+/// TSS regression fixtures and probes (tests/test_hexgt_tss*.py,
+/// scripts/_tss_*.py) drive the hexgt twin (`hexgt_threat_analysis`). The
+/// INTERNAL `analyze`/`tactical_cells` above ARE live (mcts.rs leaf override +
+/// mcts_tree.rs injection); only this Python-facing probe is uncalled.
 #[pyfunction]
 fn hexgnn_threat_analysis(py: Python<'_>, state: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
     let s = super::state::state_from_py_state(py, state)?;

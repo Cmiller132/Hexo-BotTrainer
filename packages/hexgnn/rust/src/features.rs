@@ -8,9 +8,9 @@
 //! mirrors dense_cnn's `PlaneBuffer`).
 //!
 //! MUST stay byte-identical to the Python featurizer+collator — guarded by
-//! `tests/test_hexgnn_feature_buffer.py` (a mismatch silently poisons the model,
-//! the dense_cnn D6-augmentation bug class). Any change to the feature layout
-//! updates constants.rs + python/.../constants.py + features.py together.
+//! `tests/test_hexgnn_featurizer_parity.py` (a mismatch silently poisons the
+//! model, the dense_cnn D6-augmentation bug class). Any change to the feature
+//! layout updates constants.rs + python/.../constants.py + features.py together.
 
 use pyo3::exceptions::PyBufferError;
 use pyo3::ffi;
@@ -256,7 +256,7 @@ fn carve<'a, T>(buf: &'a mut [T], lens: impl Iterator<Item = usize>) -> Vec<&'a 
 /// serial prefix-sum of per-graph counts, carve each buffer into disjoint
 /// per-graph destination slices, then scatter every graph's data into its own
 /// slice across the rayon pool. Output bytes are identical to the serial form
-/// (gated by `tests/test_hexgnn_feature_buffer.py`).
+/// (gated by `tests/test_hexgnn_featurizer_parity.py`).
 pub(crate) fn collate(feats: &[GraphFeat]) -> CollatedFeatures {
     let num_graphs = feats.len();
 

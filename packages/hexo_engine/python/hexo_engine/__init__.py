@@ -3,6 +3,13 @@
 The engine owns canonical rules, legal transitions, tactical state, and stable
 action identity. Python callers should come through this package instead of
 duplicating game logic.
+
+Re-exports the typed wrappers from `.api` (backed by the maturin-built
+`hexo_engine._rust` extension, rust/src/pybridge.rs), the transport types from
+`.types`, and the error hierarchy from `.errors`. Consumers: hexo_runner
+(engine adapter + sealbot adapter), hexo_frontend (board replay/rendering),
+and all model packages' selfplay/eval/player glue. See README.md in this
+package for the full contract map.
 """
 
 from .api import (

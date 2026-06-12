@@ -1,10 +1,13 @@
 """Thin Python import/call boundary for hexgt Rust acceleration.
 
 All native acceleration lives in `hexo_models._rust.hexgt`, registered from
-`hexgt/rust/src`. This module keeps the import error message readable and gives
-Python code named functions for native calls. Phase 0 exposes only
-`capabilities()`; the candidate/window/graph builders (Phase 1) and the MCTS
-session search (Phase 5) are added to this boundary as they land.
+`hexgt/rust/src` (compiled into the umbrella `packages/hexo_models` crate; see
+its rust/src/lib.rs). This module keeps the import error message readable and
+gives Python code named functions for every native call: `capabilities()`,
+the candidate/graph builders (`candidate_ids`, `graph_facts` -> candidates.rs),
+and the MCTS session (`new_mcts_session`, `mcts_session_search` -> mcts.rs).
+Consumed by `features`/`graph_build`/`expand` (graph facts), `mcts` (session),
+and the TSS/VCF probe scripts.
 """
 
 from __future__ import annotations
@@ -85,6 +88,9 @@ def mcts_session_search(
     widening_min_children: int | None = None,
     forced_playout_k: float | None = None,
     move_temperatures: Sequence[float] | None = None,
+    # UNUSED(2026-06-12): no production caller passes per_root_* (selfplay.py runs
+    # full/fast PCR subsets as two separate calls); only tests/test_hexgt_mcts_per_root.py
+    # and tests/test_hexgt_pcr.py exercise this transport. See mcts.py for detail.
     per_root_visits: Sequence[int] | None = None,
     per_root_forced_playout_k: Sequence[float] | None = None,
     per_root_noise: Sequence[bool] | None = None,

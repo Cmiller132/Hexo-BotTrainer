@@ -10,8 +10,10 @@
 //! This module does not call Python and does not encode tensors. It consumes
 //! validated `RustEvaluation` values from `mcts_eval`, stages every in-crop legal
 //! prior as a lazy candidate, and materializes an edge only when PUCT selects it.
-//! Every legal in-crop move is a candidate; there is no progressive widening or
-//! candidate cap.
+//! Every legal in-crop move is staged as a candidate, but the edges a node may
+//! ever MATERIALIZE are capped by policy-nucleus (top-p) widening: the smallest
+//! prior set covering `Widening::mass`, clamped to [min_children, max_children],
+//! additively widened for TSS tactical-cell injection (see `split_tactical`).
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -840,6 +842,8 @@ impl RustSearch {
     }
 }
 
+// === Node construction: subtree promotion, root/leaf builds, TSS injection ===
+
 fn clone_subtree_nodes(
     old_id: usize,
     old_nodes: &[RustNode],
@@ -1038,6 +1042,8 @@ fn owned_root_from_evaluation(
         max_eligible_children,
     })
 }
+
+// === Prior math: nucleus widening counts, temperature, Dirichlet noise ===
 
 fn nucleus_count(candidates: &[RustPriorCandidate], widening: Widening) -> usize {
     nucleus_count_values(

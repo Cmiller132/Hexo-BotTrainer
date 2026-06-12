@@ -1,4 +1,14 @@
-"""Local multiprocessing batch runner mode."""
+"""Local multiprocessing batch runner mode.
+
+Spawn-context worker pool; games are dealt round-robin in chunk_size blocks;
+each worker builds its players once via the pickleable PlayerFactory pair and
+writes one `{batch_id}-worker-{id}.hxr` file under BatchSpec.output_dir.
+
+Status: exercised only by tests/test_hexo_runner_match_mode.py — no
+production caller. Every model package reimplements its own multiprocessing
+self-play with batched GPU inference (e.g. packages/dense_cnn_restnet/python/
+dense_cnn_restnet/selfplay.py) and imports only hexo_runner.records.
+"""
 
 from __future__ import annotations
 
@@ -78,6 +88,8 @@ def run_batch(spec: BatchSpec) -> BatchResult:
 
 
 class _WorkerTask:
+    """Pickleable per-worker payload shipped into the spawn pool."""
+
     def __init__(
         self,
         *,
@@ -103,6 +115,12 @@ class _WorkerResult:
 
 
 def _run_worker_task(task: _WorkerTask) -> _WorkerResult:
+    """Worker-process body: build players once, then run every assigned game.
+
+    Players are reused across games (setup_players/close_players=False in the
+    loop call); the worker owns their setup_worker/close lifecycle and one
+    .hxr record file.
+    """
     adapter = HexoEngineAdapter()
     players = tuple(_create_player(factory) for factory in task.factories)
     worker_context = WorkerContext(
@@ -153,6 +171,7 @@ def _assign_games(
     worker_count: int,
     chunk_size: int,
 ) -> list[tuple[GameSpec, ...]]:
+    """Deal games to workers round-robin in chunk_size blocks (load balance)."""
     buckets: list[list[GameSpec]] = [[] for _ in range(worker_count)]
     for index, chunk in enumerate(_chunks(games, chunk_size)):
         buckets[index % worker_count].extend(chunk)

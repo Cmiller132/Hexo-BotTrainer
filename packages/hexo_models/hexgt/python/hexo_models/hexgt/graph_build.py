@@ -1,9 +1,14 @@
-"""Live-state -> packed-graph batch glue.
+"""Live-state -> packed-graph batch glue (the PYTHON featurize path).
 
 Ties the shared Rust builder (`rust_bridge.graph_facts`), the featurizer
 (`features.build_graph_tensors`), and the collator (`collate.collate_graphs`)
-into one path. Used by tests, the Phase-4 expand step, and (Phase 5) the MCTS
-inference payload — guaranteeing training inputs == search inputs.
+into one path. Used by `inference.HexgtInference.evaluate_states` (the
+Python-driven evaluation path) and the parity/contract tests. The PRODUCTION
+MCTS callback does NOT come through here — Rust featurizes + collates leaves
+natively (`rust/src/features.rs`) and calls `evaluate_featurized_batch`
+directly; both paths share the same Rust graph builder, so training inputs ==
+search inputs either way. (`expand.py` likewise calls `rust_bridge.graph_facts`
++ `build_graph_tensors` itself rather than importing this module.)
 """
 
 from __future__ import annotations

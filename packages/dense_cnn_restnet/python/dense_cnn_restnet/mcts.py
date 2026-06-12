@@ -139,6 +139,23 @@ class BatchedMctsSession:
         policy_init_max_plies: int | None = None,
         policy_init_temperature: float | None = None,
     ) -> Mapping[str, Any]:
+        """Drive every game to completion through the native continuous scheduler.
+
+        Unlike `run` (one move per call, epoch-batched rounds), this single call
+        owns the whole epoch: Rust schedules per-slot searches, flushes leaf
+        evaluations through `inference.evaluate_model1_payload`, and calls
+        `on_move(game_key, result_payload)` after each decided move. The
+        callback applies the move to the live engine state and returns
+        ("advance", state) to continue the game, ("replace", new_key, new_state)
+        to start a fresh game in the slot, or None to retire the slot. PCR /
+        policy-init / the root-temperature ramp run natively (per-slot move
+        classes are reported on each payload as `pcr_full` / `policy_init`).
+        Returns the scheduler diagnostics dict; an empty `root_states` returns a
+        zeroed summary of the same shape. Used by
+        `selfplay._generate_selfplay_epoch_continuous` and the continuous
+        calibration probe in `performance.py`.
+        """
+
         if not root_states:
             return {
                 "flush_count": 0,

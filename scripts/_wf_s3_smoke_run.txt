@@ -1,0 +1,719 @@
+[    0.2s] loaded m3c5 (dense_cnn_restnet_main_3 ep5)
+[    0.4s] loaded m3c7 (dense_cnn_restnet_main_3 ep7)
+[    0.6s] loaded m4c12 (dense_cnn_restnet_main_4 ep12)
+[    0.8s] m3ep5: 2 games, len min/med/max = 25/257/489
+[   51.5s] m3ep5 game 2/2 len=489
+[   51.7s] m3ep9: 2 games, len min/med/max = 27/441/855
+[  155.1s] m3ep9 game 2/2 len=855
+[  155.3s] m4ep12: 2 games, len min/med/max = 29/317/605
+[  228.5s] m4ep12 game 2/2 len=605
+[  228.5s] aggregated m3c5|m3ep5
+[  228.5s] aggregated m3c5|m3ep9
+[  228.5s] aggregated m3c5|m4ep12
+[  228.5s] aggregated m3c7|m3ep5
+[  228.5s] aggregated m3c7|m3ep9
+[  228.5s] aggregated m3c7|m4ep12
+[  228.5s] aggregated m4c12|m3ep5
+[  228.5s] aggregated m4c12|m3ep9
+[  228.5s] aggregated m4c12|m4ep12
+{
+ "moves_left_cap": 512,
+ "n_games_per_source": 2,
+ "by": {
+  "m3c5|m3ep5": {
+   "n_positions": 514,
+   "n_games": 2,
+   "overall": {
+    "mae": 178.95,
+    "bias": -147.11,
+    "slope": -0.076,
+    "intercept": 103.22,
+    "pearson_r": -0.433,
+    "pred_min": 21.9,
+    "pred_max": 160.2
+   },
+   "buckets": {
+    "[0,5)": {
+     "n": 10,
+     "mae": 76.48,
+     "bias": 76.48,
+     "bias_median": 69.3,
+     "pred_mean": 78.48,
+     "pred_std": 55.18,
+     "slope": 2.729,
+     "pearson_r": 0.07
+    },
+    "[5,20)": {
+     "n": 30,
+     "mae": 90.47,
+     "bias": 90.47,
+     "bias_median": 89.27,
+     "pred_mean": 102.47,
+     "pred_std": 35.18,
+     "slope": 1.624,
+     "pearson_r": 0.199
+    },
+    "[20,60)": {
+     "n": 45,
+     "mae": 77.71,
+     "bias": 77.71,
+     "bias_median": 76.5,
+     "pred_mean": 115.26,
+     "pred_std": 17.58,
+     "slope": -0.21,
+     "pearson_r": -0.145
+    },
+    "[60,120)": {
+     "n": 60,
+     "mae": 22.69,
+     "bias": 17.54,
+     "bias_median": 15.87,
+     "pred_mean": 107.04,
+     "pred_std": 8.65,
+     "slope": -0.171,
+     "pearson_r": -0.343
+    },
+    "[120+)": {
+     "n": 369,
+     "mae": 226.67,
+     "bias": -226.67,
+     "bias_median": -238.04,
+     "pred_mean": 77.33,
+     "pred_std": 20.16,
+     "slope": -0.017,
+     "pearson_r": -0.092
+    }
+   },
+   "within_game": {
+    "spearman_full_mean": 0.202,
+    "spearman_full_median": 0.202,
+    "spearman_full_p10": -0.395,
+    "spearman_conv_lt60_mean": 0.249,
+    "spearman_conv_lt60_median": 0.249,
+    "spearman_conv_lt60_p10": -0.311,
+    "n_games_conv": 2,
+    "mono_adj_rate_mean": 0.518,
+    "mono_stride5_rate_mean": 0.714,
+    "mono_adj_rate_conv_lt60": 0.449
+   }
+  },
+  "m3c5|m3ep9": {
+   "n_positions": 882,
+   "n_games": 2,
+   "overall": {
+    "mae": 309.3,
+    "bias": -289.65,
+    "slope": -0.038,
+    "intercept": 140.26,
+    "pearson_r": -0.291,
+    "pred_min": 12.4,
+    "pred_max": 206.9
+   },
+   "buckets": {
+    "[0,5)": {
+     "n": 10,
+     "mae": 62.53,
+     "bias": 62.53,
+     "bias_median": 55.29,
+     "pred_mean": 64.53,
+     "pred_std": 46.64,
+     "slope": 0.608,
+     "pearson_r": 0.018
+    },
+    "[5,20)": {
+     "n": 30,
+     "mae": 69.0,
+     "bias": 69.0,
+     "bias_median": 71.48,
+     "pred_mean": 81.0,
+     "pred_std": 33.45,
+     "slope": 2.306,
+     "pearson_r": 0.298
+    },
+    "[20,60)": {
+     "n": 47,
+     "mae": 78.62,
+     "bias": 78.62,
+     "bias_median": 76.71,
+     "pred_mean": 115.66,
+     "pred_std": 20.08,
+     "slope": 0.465,
+     "pearson_r": 0.282
+    },
+    "[60,120)": {
+     "n": 60,
+     "mae": 35.17,
+     "bias": 32.73,
+     "bias_median": 32.79,
+     "pred_mean": 122.23,
+     "pred_std": 22.57,
+     "slope": 0.123,
+     "pearson_r": 0.094
+    },
+    "[120+)": {
+     "n": 735,
+     "mae": 359.6,
+     "bias": -358.94,
+     "bias_median": -334.49,
+     "pred_mean": 128.06,
+     "pred_std": 31.55,
+     "slope": -0.1,
+     "pearson_r": -0.67
+    }
+   },
+   "within_game": {
+    "spearman_full_mean": 0.244,
+    "spearman_full_median": 0.244,
+    "spearman_full_p10": -0.319,
+    "spearman_conv_lt60_mean": 0.573,
+    "spearman_conv_lt60_median": 0.573,
+    "spearman_conv_lt60_p10": 0.274,
+    "n_games_conv": 2,
+    "mono_adj_rate_mean": 0.543,
+    "mono_stride5_rate_mean": 0.622,
+    "mono_adj_rate_conv_lt60": 0.435
+   }
+  },
+  "m3c5|m4ep12": {
+   "n_positions": 634,
+   "n_games": 2,
+   "overall": {
+    "mae": 208.35,
+    "bias": -170.24,
+    "slope": -0.073,
+    "intercept": 139.73,
+    "pearson_r": -0.486,
+    "pred_min": 15.1,
+    "pred_max": 178.2
+   },
+   "buckets": {
+    "[0,5)": {
+     "n": 10,
+     "mae": 60.41,
+     "bias": 60.41,
+     "bias_median": 52.25,
+     "pred_mean": 62.41,
+     "pred_std": 39.95,
+     "slope": 0.59,
+     "pearson_r": 0.021
+    },
+    "[5,20)": {
+     "n": 30,
+     "mae": 84.44,
+     "bias": 84.44,
+     "bias_median": 89.73,
+     "pred_mean": 96.44,
+     "pred_std": 34.07,
+     "slope": 2.44,
+     "pearson_r": 0.309
+    },
+    "[20,60)": {
+     "n": 49,
+     "mae": 96.96,
+     "bias": 96.96,
+     "bias_median": 92.58,
+     "pred_mean": 133.61,
+     "pred_std": 26.02,
+     "slope": 1.319,
+     "pearson_r": 0.612
+    },
+    "[60,120)": {
+     "n": 60,
+     "mae": 58.25,
+     "bias": 58.25,
+     "bias_median": 55.65,
+     "pred_mean": 147.75,
+     "pred_std": 18.66,
+     "slope": -0.006,
+     "pearson_r": -0.005
+    },
+    "[120+)": {
+     "n": 485,
+     "mae": 248.88,
+     "bias": -246.01,
+     "bias_median": -253.8,
+     "pred_mean": 115.99,
+     "pred_std": 22.91,
+     "slope": -0.131,
+     "pearson_r": -0.802
+    }
+   },
+   "within_game": {
+    "spearman_full_mean": 0.081,
+    "spearman_full_median": 0.081,
+    "spearman_full_p10": -0.596,
+    "spearman_conv_lt60_mean": 0.771,
+    "spearman_conv_lt60_median": 0.771,
+    "spearman_conv_lt60_p10": 0.646,
+    "n_games_conv": 2,
+    "mono_adj_rate_mean": 0.564,
+    "mono_stride5_rate_mean": 0.685,
+    "mono_adj_rate_conv_lt60": 0.55
+   }
+  },
+  "m3c7|m3ep5": {
+   "n_positions": 514,
+   "n_games": 2,
+   "overall": {
+    "mae": 176.31,
+    "bias": -160.88,
+    "slope": 0.027,
+    "intercept": 65.64,
+    "pearson_r": 0.179,
+    "pred_min": 17.6,
+    "pred_max": 127.9
+   },
+   "buckets": {
+    "[0,5)": {
+     "n": 10,
+     "mae": 42.92,
+     "bias": 42.92,
+     "bias_median": 37.65,
+     "pred_mean": 44.92,
+     "pred_std": 21.34,
+     "slope": -0.94,
+     "pearson_r": -0.062
+    },
+    "[5,20)": {
+     "n": 30,
+     "mae": 61.5,
+     "bias": 61.5,
+     "bias_median": 61.69,
+     "pred_mean": 73.5,
+     "pred_std": 19.48,
+     "slope": 1.894,
+     "pearson_r": 0.42
+    },
+    "[20,60)": {
+     "n": 45,
+     "mae": 36.23,
+     "bias": 35.19,
+     "bias_median": 33.58,
+     "pred_mean": 72.74,
+     "pred_std": 17.32,
+     "slope": -0.475,
+     "pearson_r": -0.335
+    },
+    "[60,120)": {
+     "n": 60,
+     "mae": 20.79,
+     "bias": -17.97,
+     "bias_median": -18.32,
+     "pred_mean": 71.53,
+     "pred_std": 7.71,
+     "slope": 0.09,
+     "pearson_r": 0.203
+    },
+    "[120+)": {
+     "n": 369,
+     "mae": 231.63,
+     "bias": -231.63,
+     "bias_median": -237.01,
+     "pred_mean": 72.37,
+     "pred_std": 23.56,
+     "slope": 0.056,
+     "pearson_r": 0.253
+    }
+   },
+   "within_game": {
+    "spearman_full_mean": 0.546,
+    "spearman_full_median": 0.546,
+    "spearman_full_p10": 0.276,
+    "spearman_conv_lt60_mean": 0.441,
+    "spearman_conv_lt60_median": 0.441,
+    "spearman_conv_lt60_p10": 0.085,
+    "n_games_conv": 2,
+    "mono_adj_rate_mean": 0.55,
+    "mono_stride5_rate_mean": 0.671,
+    "mono_adj_rate_conv_lt60": 0.563
+   }
+  },
+  "m3c7|m3ep9": {
+   "n_positions": 882,
+   "n_games": 2,
+   "overall": {
+    "mae": 354.67,
+    "bias": -350.4,
+    "slope": 0.089,
+    "intercept": 27.23,
+    "pearson_r": 0.818,
+    "pred_min": 8.7,
+    "pred_max": 132.1
+   },
+   "buckets": {
+    "[0,5)": {
+     "n": 10,
+     "mae": 24.32,
+     "bias": 24.32,
+     "bias_median": 25.56,
+     "pred_mean": 26.32,
+     "pred_std": 10.94,
+     "slope": 0.316,
+     "pearson_r": 0.041
+    },
+    "[5,20)": {
+     "n": 30,
+     "mae": 31.83,
+     "bias": 31.83,
+     "bias_median": 24.57,
+     "pred_mean": 43.83,
+     "pred_std": 26.16,
+     "slope": 3.163,
+     "pearson_r": 0.522
+    },
+    "[20,60)": {
+     "n": 47,
+     "mae": 23.28,
+     "bias": 5.91,
+     "bias_median": -4.99,
+     "pred_mean": 42.95,
+     "pred_std": 28.0,
+     "slope": -1.042,
+     "pearson_r": -0.453
+    },
+    "[60,120)": {
+     "n": 60,
+     "mae": 56.99,
+     "bias": -56.99,
+     "bias_median": -57.0,
+     "pred_mean": 32.51,
+     "pred_std": 8.16,
+     "slope": -0.006,
+     "pearson_r": -0.012
+    },
+    "[120+)": {
+     "n": 735,
+     "mae": 417.83,
+     "bias": -417.83,
+     "bias_median": -417.73,
+     "pred_mean": 69.17,
+     "pred_std": 25.4,
+     "slope": 0.101,
+     "pearson_r": 0.847
+    }
+   },
+   "within_game": {
+    "spearman_full_mean": 0.901,
+    "spearman_full_median": 0.901,
+    "spearman_full_p10": 0.882,
+    "spearman_conv_lt60_mean": 0.54,
+    "spearman_conv_lt60_median": 0.54,
+    "spearman_conv_lt60_p10": 0.231,
+    "n_games_conv": 2,
+    "mono_adj_rate_mean": 0.529,
+    "mono_stride5_rate_mean": 0.629,
+    "mono_adj_rate_conv_lt60": 0.517
+   }
+  },
+  "m3c7|m4ep12": {
+   "n_positions": 634,
+   "n_games": 2,
+   "overall": {
+    "mae": 223.14,
+    "bias": -214.77,
+    "slope": 0.115,
+    "intercept": 40.95,
+    "pearson_r": 0.797,
+    "pred_min": 13.3,
+    "pred_max": 131.3
+   },
+   "buckets": {
+    "[0,5)": {
+     "n": 10,
+     "mae": 27.07,
+     "bias": 27.07,
+     "bias_median": 28.0,
+     "pred_mean": 29.07,
+     "pred_std": 8.14,
+     "slope": 1.254,
+     "pearson_r": 0.218
+    },
+    "[5,20)": {
+     "n": 30,
+     "mae": 42.77,
+     "bias": 42.77,
+     "bias_median": 43.33,
+     "pred_mean": 54.77,
+     "pred_std": 21.83,
+     "slope": 2.711,
+     "pearson_r": 0.537
+    },
+    "[20,60)": {
+     "n": 49,
+     "mae": 25.09,
+     "bias": 19.52,
+     "bias_median": 12.35,
+     "pred_mean": 56.18,
+     "pred_std": 25.34,
+     "slope": -0.713,
+     "pearson_r": -0.34
+    },
+    "[60,120)": {
+     "n": 60,
+     "mae": 38.22,
+     "bias": -38.03,
+     "bias_median": -36.82,
+     "pred_mean": 51.47,
+     "pred_std": 12.52,
+     "slope": 0.032,
+     "pearson_r": 0.045
+    },
+    "[120+)": {
+     "n": 485,
+     "mae": 281.22,
+     "bias": -281.22,
+     "bias_median": -281.97,
+     "pred_mean": 80.78,
+     "pred_std": 23.73,
+     "slope": 0.143,
+     "pearson_r": 0.845
+    }
+   },
+   "within_game": {
+    "spearman_full_mean": 0.904,
+    "spearman_full_median": 0.904,
+    "spearman_full_p10": 0.879,
+    "spearman_conv_lt60_mean": 0.627,
+    "spearman_conv_lt60_median": 0.627,
+    "spearman_conv_lt60_p10": 0.382,
+    "n_games_conv": 2,
+    "mono_adj_rate_mean": 0.539,
+    "mono_stride5_rate_mean": 0.674,
+    "mono_adj_rate_conv_lt60": 0.524
+   }
+  },
+  "m4c12|m3ep5": {
+   "n_positions": 514,
+   "n_games": 2,
+   "overall": {
+    "mae": 150.09,
+    "bias": -121.23,
+    "slope": 0.033,
+    "intercept": 103.73,
+    "pearson_r": 0.158,
+    "pred_min": 20.0,
+    "pred_max": 190.2
+   },
+   "buckets": {
+    "[0,5)": {
+     "n": 10,
+     "mae": 73.56,
+     "bias": 73.56,
+     "bias_median": 77.03,
+     "pred_mean": 75.56,
+     "pred_std": 26.85,
+     "slope": 2.982,
+     "pearson_r": 0.157
+    },
+    "[5,20)": {
+     "n": 30,
+     "mae": 92.4,
+     "bias": 92.4,
+     "bias_median": 93.33,
+     "pred_mean": 104.4,
+     "pred_std": 16.76,
+     "slope": -0.299,
+     "pearson_r": -0.077
+    },
+    "[20,60)": {
+     "n": 45,
+     "mae": 63.14,
+     "bias": 63.14,
+     "bias_median": 59.91,
+     "pred_mean": 100.7,
+     "pred_std": 13.88,
+     "slope": 0.425,
+     "pearson_r": 0.374
+    },
+    "[60,120)": {
+     "n": 60,
+     "mae": 21.44,
+     "bias": 14.06,
+     "bias_median": 15.43,
+     "pred_mean": 103.56,
+     "pred_std": 14.63,
+     "slope": 0.023,
+     "pearson_r": 0.028
+    },
+    "[120+)": {
+     "n": 369,
+     "mae": 188.38,
+     "bias": -188.36,
+     "bias_median": -179.37,
+     "pred_mean": 115.64,
+     "pred_std": 33.97,
+     "slope": -0.009,
+     "pearson_r": -0.028
+    }
+   },
+   "within_game": {
+    "spearman_full_mean": 0.144,
+    "spearman_full_median": 0.144,
+    "spearman_full_p10": 0.07,
+    "spearman_conv_lt60_mean": 0.19,
+    "spearman_conv_lt60_median": 0.19,
+    "spearman_conv_lt60_p10": 0.153,
+    "n_games_conv": 2,
+    "mono_adj_rate_mean": 0.488,
+    "mono_stride5_rate_mean": 0.532,
+    "mono_adj_rate_conv_lt60": 0.534
+   }
+  },
+  "m4c12|m3ep9": {
+   "n_positions": 882,
+   "n_games": 2,
+   "overall": {
+    "mae": 335.34,
+    "bias": -324.25,
+    "slope": 0.045,
+    "intercept": 71.39,
+    "pearson_r": 0.493,
+    "pred_min": 21.2,
+    "pred_max": 187.8
+   },
+   "buckets": {
+    "[0,5)": {
+     "n": 10,
+     "mae": 64.96,
+     "bias": 64.96,
+     "bias_median": 64.35,
+     "pred_mean": 66.96,
+     "pred_std": 29.84,
+     "slope": 9.636,
+     "pearson_r": 0.457
+    },
+    "[5,20)": {
+     "n": 30,
+     "mae": 77.34,
+     "bias": 77.34,
+     "bias_median": 66.01,
+     "pred_mean": 89.34,
+     "pred_std": 25.96,
+     "slope": -0.175,
+     "pearson_r": -0.029
+    },
+    "[20,60)": {
+     "n": 47,
+     "mae": 38.31,
+     "bias": 38.31,
+     "bias_median": 34.08,
+     "pred_mean": 75.35,
+     "pred_std": 11.34,
+     "slope": -0.324,
+     "pearson_r": -0.348
+    },
+    "[60,120)": {
+     "n": 60,
+     "mae": 23.88,
+     "bias": -19.8,
+     "bias_median": -18.6,
+     "pred_mean": 69.7,
+     "pred_std": 9.49,
+     "slope": -0.177,
+     "pearson_r": -0.323
+    },
+    "[120+)": {
+     "n": 735,
+     "mae": 393.97,
+     "bias": -393.97,
+     "bias_median": -389.61,
+     "pred_mean": 93.03,
+     "pred_std": 22.93,
+     "slope": 0.049,
+     "pearson_r": 0.458
+    }
+   },
+   "within_game": {
+    "spearman_full_mean": 0.328,
+    "spearman_full_median": 0.328,
+    "spearman_full_p10": 0.137,
+    "spearman_conv_lt60_mean": 0.18,
+    "spearman_conv_lt60_median": 0.18,
+    "spearman_conv_lt60_p10": 0.107,
+    "n_games_conv": 2,
+    "mono_adj_rate_mean": 0.55,
+    "mono_stride5_rate_mean": 0.56,
+    "mono_adj_rate_conv_lt60": 0.5
+   }
+  },
+  "m4c12|m4ep12": {
+   "n_positions": 634,
+   "n_games": 2,
+   "overall": {
+    "mae": 208.48,
+    "bias": -190.45,
+    "slope": 0.043,
+    "intercept": 85.91,
+    "pearson_r": 0.304,
+    "pred_min": 15.9,
+    "pred_max": 176.4
+   },
+   "buckets": {
+    "[0,5)": {
+     "n": 10,
+     "mae": 57.69,
+     "bias": 57.69,
+     "bias_median": 54.71,
+     "pred_mean": 59.69,
+     "pred_std": 30.72,
+     "slope": 7.643,
+     "pearson_r": 0.352
+    },
+    "[5,20)": {
+     "n": 30,
+     "mae": 78.45,
+     "bias": 78.45,
+     "bias_median": 77.92,
+     "pred_mean": 90.45,
+     "pred_std": 31.83,
+     "slope": 0.441,
+     "pearson_r": 0.06
+    },
+    "[20,60)": {
+     "n": 49,
+     "mae": 45.91,
+     "bias": 45.8,
+     "bias_median": 44.74,
+     "pred_mean": 82.45,
+     "pred_std": 16.87,
+     "slope": 0.048,
+     "pearson_r": 0.034
+    },
+    "[60,120)": {
+     "n": 60,
+     "mae": 17.56,
+     "bias": 0.43,
+     "bias_median": -1.59,
+     "pred_mean": 89.93,
+     "pred_std": 15.7,
+     "slope": 0.135,
+     "pearson_r": 0.148
+    },
+    "[120+)": {
+     "n": 485,
+     "mae": 259.68,
+     "bias": -259.68,
+     "bias_median": -256.12,
+     "pred_mean": 102.32,
+     "pred_std": 25.27,
+     "slope": 0.029,
+     "pearson_r": 0.162
+    }
+   },
+   "within_game": {
+    "spearman_full_mean": 0.221,
+    "spearman_full_median": 0.221,
+    "spearman_full_p10": 0.175,
+    "spearman_conv_lt60_mean": 0.268,
+    "spearman_conv_lt60_median": 0.268,
+    "spearman_conv_lt60_p10": 0.184,
+    "n_games_conv": 2,
+    "mono_adj_rate_mean": 0.539,
+    "mono_stride5_rate_mean": 0.547,
+    "mono_adj_rate_conv_lt60": 0.497
+   }
+  }
+ }
+}
+DONE
+exit=0

@@ -1,4 +1,9 @@
-"""Centralized adapter for the public hexo_engine API."""
+"""Centralized adapter for the public hexo_engine API.
+
+The single point where the runner touches `hexo_engine`: `loop.py` and the
+modes call only through `HexoEngineAdapter`, never the engine module directly.
+scripts/goal_benchmark.py also constructs this adapter for benchmarking.
+"""
 
 from __future__ import annotations
 
@@ -16,6 +21,11 @@ class HexoEngineAdapter:
         return _jsonable(engine.engine_metadata())
 
     def new_game(self, *, seed: int | None = None, scenario: object | None = None) -> engine.HexoState:
+        # NOTE: hexo_engine currently discards both arguments
+        # (hexo_engine/rust/src/pybridge.rs new_game: `let _ = seed/scenario`).
+        # They are forwarded so the signature stays honest if the engine ever
+        # honors them; the seed that matters is the one persisted in the .hxr
+        # record header by loop.py.
         return engine.new_game(seed=seed, scenario=scenario)
 
     def clone_state(self, state: engine.HexoState) -> engine.HexoState:
@@ -44,6 +54,11 @@ class HexoEngineAdapter:
         return engine.action_id(action)
 
     def terminal_payload(self, terminal: object | None) -> Mapping[str, Any] | None:
+        """Convert a TerminalResult into a JSON-able dict for GameResult.terminal.
+
+        Shape: {"winner": str|None, "reason": str, "metadata": {...}} —
+        loop.py's _terminal_winner/_terminal_placements read this shape.
+        """
         if terminal is None:
             return None
         if isinstance(terminal, engine.TerminalResult):

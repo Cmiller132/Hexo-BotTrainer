@@ -11,6 +11,15 @@
 //! game key for each active game, and the session promotes the selected child
 //! subtree after every search. If the next call sends a root whose hash differs
 //! from the promoted tree, the old tree is discarded and a new one is evaluated.
+//!
+//! Region map (top to bottom): `HexgnnMctsSession` (pyclass: new/clear/discard/
+//! search) -> `run_searches_to_targets` (the select<->featurize<->forward
+//! software pipeline) -> select/prepare/backup helpers -> result-payload
+//! builders (`build_search_result_payloads`, `visit_policy`,
+//! `pruned_visit_policy` = KataGo policy-target pruning) -> input validators ->
+//! root-noise plumbing -> the 1-ply tactical-safety guard
+//! (`classify_root_move`/`tactical_guard_weights`) -> action sampling ->
+//! diagnostics dict builders -> `prune_forced_delta_counts` unit tests.
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;

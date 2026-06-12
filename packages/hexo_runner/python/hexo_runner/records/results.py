@@ -1,4 +1,9 @@
-"""Runner result summaries."""
+"""Runner result summaries.
+
+In-memory return values of hexo_runner/loop.py and the modes; not persisted
+themselves (the durable artifact is the .hxr record). hexo_frontend/web.py
+consumes GameResult for live Arena match status.
+"""
 
 from __future__ import annotations
 
@@ -18,7 +23,12 @@ class GameStatus(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class GameResult:
-    """Summary for one game."""
+    """Summary for one game.
+
+    `turns` counts recorded actions (stone placements), not two-stone turns;
+    `duration_ms` is wall-clock; `terminal`/`winner` are populated only for
+    COMPLETED games; `abort` only for ABORTED ones.
+    """
 
     game_id: str
     status: GameStatus

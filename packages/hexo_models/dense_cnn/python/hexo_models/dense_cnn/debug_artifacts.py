@@ -6,6 +6,12 @@ with small dependency fallbacks so diagnostics can still be rendered in minimal
 Python environments.
 """
 
+# UNUSED(2026-06-12): no production caller anywhere in packages/, scripts/
+# (excl. archive), or configs/; the only reference is its own test,
+# tests/test_dense_cnn_debug_artifacts.py. The dashboard renders boards
+# client-side (packages/hexo_frontend debug_infer.py + static/app.js), not via
+# this PNG path. The dense_cnn_restnet fork's copy is equally orphaned.
+
 from __future__ import annotations
 
 from dataclasses import dataclass

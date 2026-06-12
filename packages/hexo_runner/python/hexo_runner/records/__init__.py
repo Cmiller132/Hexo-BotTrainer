@@ -1,4 +1,10 @@
-"""Runner record and result contracts."""
+"""Runner record and result contracts.
+
+The most-imported path of this package: all four model lineages'
+selfplay/evaluation modules import AbortRecord/HexoRecordFile/HexoRecordPlayer
+from here (e.g. packages/dense_cnn_restnet/python/dense_cnn_restnet/
+selfplay.py), and hexo_frontend reads .hxr files through the same types.
+"""
 
 from .record import (
     AbortRecord,

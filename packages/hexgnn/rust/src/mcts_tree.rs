@@ -8,10 +8,20 @@
 //! memory-light and keeps move legality inside `hexo_engine`.
 //!
 //! This module does not call Python and does not encode tensors. It consumes
-//! validated `RustEvaluation` values from `mcts_eval`, stages every in-crop legal
-//! prior as a lazy candidate, and materializes an edge only when PUCT selects it.
-//! Every legal in-crop move is a candidate; there is no progressive widening or
-//! candidate cap.
+//! validated `RustEvaluation` values from `mcts_eval`, stages every evaluated
+//! candidate prior lazily, and materializes an edge only when PUCT selects it.
+//! NOTE on copied-comment drift: in hexgnn there is no crop — the move
+//! vocabulary is the n-radius candidate set — and the file DOES implement
+//! nucleus (top-p) widening with min/max child clamps (`Widening`,
+//! `nucleus_count*`), plus Phase-4 tactical edge INJECTION via `threats.rs`.
+//!
+//! Region map: edge/candidate types (`RustEdge`, `RustPriorCandidate`,
+//! `Widening`, `NodePriors` shared-vs-owned) -> `RustNode` (lazy edge
+//! materialization) -> `RustSearch` (selection, virtual loss, backup, root
+//! advance/subtree promotion, diagnostics) -> root construction with tactical
+//! injection (`split_tactical`, `owned_with_injection_from_eval`) -> nucleus
+//! widening + root-policy temperature + Dirichlet sampling -> small shared
+//! helpers (`terminal_value`, `random_unit`) -> in-crate unit tests.
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -169,7 +179,7 @@ impl RustNode {
         !self.edges.is_empty() || self.remaining_prior_count() > 0
     }
 
-    /// Count of in-crop legal priors not yet materialized into edges.
+    /// Count of evaluated candidate priors not yet materialized into edges.
     pub(crate) fn remaining_prior_count(&self) -> usize {
         match &self.priors {
             NodePriors::Shared(eval) => eval.priors.len().saturating_sub(self.edges.len()),
@@ -912,9 +922,10 @@ fn owned_root_from_evaluation(
     root_noise: Option<RootDirichletNoise>,
     widening: Widening,
 ) -> PyResult<RustNode> {
-    // The evaluator returns one prior per in-crop legal move, so every legal
-    // candidate is staged here. Root-policy temperature softens the prior at the
-    // root before Dirichlet noise; both are skipped for interior nodes.
+    // The evaluator returns one prior per legal candidate (the n-radius candidate
+    // set is the move vocabulary), so every legal candidate is staged here.
+    // Root-policy temperature softens the prior at the root before Dirichlet
+    // noise; both are skipped for interior nodes.
     let mut candidates: Vec<_> = evaluation
         .priors
         .iter()

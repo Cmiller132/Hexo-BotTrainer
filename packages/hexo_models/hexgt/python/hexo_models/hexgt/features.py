@@ -11,8 +11,10 @@ turns that into the model's per-graph tensors:
 - `candidate_index` (C,), `candidate_ids` (C,): candidate node rows in CSR/legal
   order (the priors order).
 
-This is the SINGLE featurizer shared by the model collation (`collate.py`) and
-the Phase-4 expand step, so training inputs == search inputs.
+This Python featurizer is shared by the model collation (`collate.py`) and the
+Phase-4 expand step. The production MCTS path uses its byte-identical PARITY
+TWIN in `rust/src/features.rs` (rayon, zero-copy) — any change here must land
+in both, gated by `tests/test_hexgt_feature_buffer.py`.
 """
 
 from __future__ import annotations

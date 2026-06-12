@@ -1,4 +1,28 @@
-"""KataGo-style NPZ replay, shuffling, and train-bucket helpers."""
+"""KataGo-style NPZ replay, shuffling, and train-bucket helpers.
+
+This module owns the on-disk replay pipeline between self-play and training:
+
+- `materialize_policy_surprise_rows` bakes KataGo frequency weighting into row
+  duplication before write, so the training loss stays unweighted.
+- `write_selfplay_npz` writes one game as a compact shard (`compact_io.py`)
+  plus a JSON sidecar with row counts and surprise/weight summaries.
+- `build_katago_shuffle` selects the recent mtime-ordered window over the
+  self-play shard tree, applies the KataGo window taper, optionally splits
+  train/val by file-path md5, and writes a shuffled generation directory
+  (`<ns>-epoch_NNNNNN/{train,val}/data*.npz` + `train.json`/`shuffle.json`).
+- `DenseTrainState` is the KataGo train-bucket bookkeeping persisted inside
+  checkpoints (`checkpoints.py`).
+
+Callers: `selfplay.py` writes shards, `trainer.py` builds/consumes shuffles and
+owns the train state, `plugin.py` threads `DenseNpzSampleWindow` through the
+generic `hexo_train` epoch loop. The compact shard format itself lives in
+`compact_io.py` and is also read cross-package by `packages/hexgnn` and the
+repo-root dashboard bridges; `NPZ_KEYS` names the dense-expanded schema that
+`samples.expand_sample` produces at train read time.
+
+The active `packages/dense_cnn_restnet` lineage carries a forked copy of this
+module; window/shard semantics must stay byte-compatible across the fork.
+"""
 
 from __future__ import annotations
 
@@ -39,8 +63,13 @@ NPZ_KEYS = (
 )
 
 
+# --- Result/record dataclasses -------------------------------------------------
+
+
 @dataclass(frozen=True, slots=True)
 class DenseSelfplayWriteResult:
+    """Summary of one written self-play shard (paths + row/weight telemetry)."""
+
     path: Path
     sidecar_path: Path
     game_id: str
@@ -52,6 +81,8 @@ class DenseSelfplayWriteResult:
 
 @dataclass(frozen=True, slots=True)
 class ShuffleFileInfo:
+    """One candidate shard for the shuffle window (mtime orders the stream)."""
+
     path: Path
     mtime: float
     rows: int
@@ -59,6 +90,12 @@ class ShuffleFileInfo:
 
 @dataclass(frozen=True, slots=True)
 class DenseShuffleResult:
+    """Outcome of `build_katago_shuffle`: `status` is "completed" or "skipped".
+
+    On skip, `reason` explains why and all path fields are None; row counters
+    still report what was scanned so callers can log window progress.
+    """
+
     status: str
     shuffle_dir: Path | None
     train_dir: Path | None
@@ -78,6 +115,13 @@ class DenseShuffleResult:
 
 @dataclass(slots=True)
 class DenseTrainState:
+    """KataGo train-bucket bookkeeping persisted inside dense_cnn checkpoints.
+
+    `trainer.py` mutates this across epochs (rows seen, bucket level, files
+    already trained on, retired shuffle dirs); `checkpoints.py` round-trips it
+    via `to_dict`/`from_mapping`. `from_mapping(None)` yields fresh state.
+    """
+
     global_step_samples: int = 0
     total_num_data_rows: int = 0
     window_start_data_row_idx: int = 0
@@ -90,6 +134,7 @@ class DenseTrainState:
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any] | None) -> "DenseTrainState":
+        """Rebuild state from a checkpoint dict; non-mapping input means fresh state."""
         if not isinstance(raw, Mapping):
             return cls()
         return cls(
@@ -107,6 +152,7 @@ class DenseTrainState:
         )
 
     def to_dict(self) -> dict[str, Any]:
+        """JSON/torch-save-friendly snapshot (sets become sorted lists)."""
         return {
             "global_step_samples": int(self.global_step_samples),
             "total_num_data_rows": int(self.total_num_data_rows),
@@ -122,6 +168,13 @@ class DenseTrainState:
 
 @dataclass(frozen=True, slots=True)
 class DenseNpzSampleWindow:
+    """Selected training window handed to the generic `hexo_train` epoch loop.
+
+    Built by `trainer.select_training_samples`; `files` are the shuffled compact
+    shards for this epoch and `index` is trainer-owned bookkeeping. The generic
+    pipeline treats this as opaque and passes it back to `trainer.train_passes`.
+    """
+
     files: tuple[Path, ...]
     seed: int
     epoch: int
@@ -144,6 +197,9 @@ class _SplitBuildResult:
     scratch_parts: int
     input_files: tuple[Path, ...]
     input_rows: int
+
+
+# --- Self-play write path (surprise weighting + shard write) --------------------
 
 
 def materialize_policy_surprise_rows(
@@ -244,6 +300,9 @@ def write_selfplay_npz(
         policy_surprise_mean=float(sidecar["policy_surprise_mean"]),
         frequency_weight_mean=float(sidecar["frequency_weight_mean"]),
     )
+
+
+# --- Shuffle build (window taper + md5 split + shuffled generation dir) ---------
 
 
 def build_katago_shuffle(
@@ -424,6 +483,9 @@ def build_katago_shuffle(
             shutil.rmtree(shuffle_dir)
         tmp_dir.rename(shuffle_dir)
     finally:
+        # Success and failure cleanup share this branch: after a successful
+        # rename, tmp_dir no longer exists, so this only deletes the staging
+        # dir on the error/early-return paths.
         if tmp_dir.exists():
             shutil.rmtree(tmp_dir)
 
@@ -451,7 +513,16 @@ def build_katago_shuffle(
     )
 
 
+# --- Discovery and read helpers (shared by trainer + selfplay) ------------------
+
+
 def scan_selfplay_npz_files(root: Path) -> list[ShuffleFileInfo]:
+    """Collect non-empty shards under ``root`` (recursively), oldest-mtime first.
+
+    Files inside ``*.tmp`` shuffle staging directories are skipped. mtime order
+    is the replay stream order, which is why window seeding scripts must copy
+    shards with timestamps preserved.
+    """
     files: list[ShuffleFileInfo] = []
     if not root.exists():
         return files
@@ -466,6 +537,7 @@ def scan_selfplay_npz_files(root: Path) -> list[ShuffleFileInfo]:
 
 
 def latest_shuffle_dir(shuffled_root: Path) -> Path | None:
+    """Return the newest completed shuffle generation dir, or None if none exist."""
     if not shuffled_root.exists():
         return None
     candidates = [
@@ -506,6 +578,7 @@ def load_split_json(shuffle_dir: Path, *, split: str) -> dict[str, Any]:
 
 
 def npz_row_count(path: Path) -> int:
+    """Row count from the JSON sidecar when readable, else from the shard itself."""
     sidecar = sidecar_for_npz(path)
     if sidecar.exists():
         try:
@@ -517,6 +590,7 @@ def npz_row_count(path: Path) -> int:
 
 
 def sidecar_for_npz(path: Path) -> Path:
+    """Path of the JSON sidecar written next to a shard (same stem, .json)."""
     return path.with_suffix(".json")
 
 
@@ -528,11 +602,20 @@ def compute_katago_window_rows(
     taper_window_exponent: float,
     taper_window_scale: float | None,
 ) -> int:
+    """KataGo replay-window size: sublinear growth in total rows generated.
+
+    Implements KataGo's tapered power-law window (`taper_window_exponent` < 1
+    shrinks the marginal window growth as data accumulates); the result is the
+    desired number of most-recent rows, never below `min_rows` at the caller.
+    """
     offset = float(taper_window_scale if taper_window_scale is not None else min_rows)
     power_law_x = float(usable_rows) - float(min_rows) + offset
     unscaled = power_law_x ** taper_window_exponent - offset ** taper_window_exponent
     scaled = unscaled / (taper_window_exponent * (offset ** (taper_window_exponent - 1.0)))
     return int(scaled * expand_window_per_row + float(min_rows))
+
+
+# --- Internal helpers ------------------------------------------------------------
 
 
 def _policy_kl(

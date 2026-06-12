@@ -4,8 +4,9 @@ Thin, like dense_cnn's `mcts.py`: Python owns the session object and decodes
 byte-backed native results into dataclasses, while Rust owns state cloning,
 validation, tree reuse, PUCT + nucleus widening, evaluator payload construction,
 and action selection. The only difference from dense_cnn is the evaluator
-callback (`HexgtInference.evaluate_graph_facts`, a graph payload + per-candidate
-priors) and the candidate-radius `n` threaded into the session.
+callback (`HexgtInference.evaluate_featurized_batch`, a zero-copy collated graph
+payload returning per-candidate priors) and the candidate-radius `n` threaded
+into the session.
 """
 
 from __future__ import annotations
@@ -71,6 +72,11 @@ class HexgtMctsSession:
         widening_min_children: int | None = None,
         forced_playout_k: float | None = None,
         move_temperatures: Sequence[float] | None = None,
+        # UNUSED(2026-06-12): no production caller passes per_root_* — selfplay.py
+        # PCR ended up shipping two separate run() calls per full/fast subset
+        # (selfplay.run_selfplay_games) instead of the single coalesced call this
+        # path was built for. Exercised only by tests/test_hexgt_mcts_per_root.py
+        # and tests/test_hexgt_pcr.py (and mirrored in the hexgnn fork).
         per_root_visits: Sequence[int] | None = None,
         per_root_forced_playout_k: Sequence[float] | None = None,
         per_root_noise: Sequence[bool] | None = None,
@@ -81,6 +87,7 @@ class HexgtMctsSession:
         call run roots with heterogeneous visit caps / forced-playouts / root noise —
         coalescing KataGo PCR's full+fast move mix into one full-width forward stream.
         Each None falls back to the scalar value broadcast to every root.
+        (Production self-play does NOT use them; see the UNUSED note above.)
         """
 
         if not root_states:

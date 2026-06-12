@@ -40,9 +40,11 @@ class BatchedMctsSession:
         self._session = rust_bridge.model1_new_mcts_session(max_states=max_states)
 
     def clear(self) -> None:
+        """Drop every retained subtree and the shared evaluation cache."""
         self._session.clear()
 
     def discard(self, game_key: int) -> None:
+        """Drop the retained subtree for one finished/aborted game."""
         self._session.discard(int(game_key))
 
     def __len__(self) -> int:

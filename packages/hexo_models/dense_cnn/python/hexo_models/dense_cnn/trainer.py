@@ -3,6 +3,15 @@
 Shards store compact sample facts; each row is expanded to dense tensors at read
 time under a fresh per-epoch D6 symmetry (``samples.expand_sample``), so board
 symmetry augmentation is exact and re-randomized every epoch.
+
+`DenseCNNTrainer` is the duck-typed trainer the generic pipeline consumes
+(`packages/hexo_train` epoch loop): `select_training_samples` builds/reads the
+shuffle via `replay.build_katago_shuffle` and reserves rows from the KataGo
+train bucket, `train_passes` runs the AMP optimizer steps (with a spawn-pool
+parallel shard expansion through `compact_io.expand_shard_to_arrays`), and
+`close()` is invoked by the pipeline teardown. Calibration (`performance.py`)
+writes the four measured batch sizes back onto this object; `checkpoints.py`
+round-trips `train_state` (`replay.DenseTrainState`).
 """
 
 from __future__ import annotations
@@ -73,6 +82,7 @@ class DenseCNNTrainer:
 
     @property
     def sample_count(self) -> int:
+        """Total self-play rows ever generated this run (KataGo data-row counter)."""
         return int(self.train_state.total_num_data_rows)
 
     def _get_expand_pool(self) -> Any | None:
@@ -369,6 +379,7 @@ class DenseCNNTrainer:
         }
 
     def load_train_state(self, state: Mapping[str, Any] | None) -> None:
+        """Restore train-bucket state from a checkpoint payload (None = fresh)."""
         self.train_state = DenseTrainState.from_mapping(state)
 
     def _optimizer_step(self, batch: dict[str, torch.Tensor]) -> dict[str, float]:

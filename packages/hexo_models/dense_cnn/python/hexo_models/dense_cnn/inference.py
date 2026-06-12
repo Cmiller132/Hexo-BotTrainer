@@ -147,10 +147,12 @@ class DenseCNNInference:
 
     @torch.no_grad()
     def infer_state(self, state: object) -> InferenceResult:
+        """Single live `hexo_engine.HexoState` convenience wrapper over `infer_states`."""
         return self.infer_states([state])[0]
 
     @torch.no_grad()
     def infer_states(self, states: Sequence[object]) -> list[InferenceResult]:
+        """Evaluate live engine states (Rust-encoded) into one `InferenceResult` each."""
         if not states:
             return []
         return self._infer_states_rust(states)

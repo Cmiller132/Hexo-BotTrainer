@@ -2,7 +2,16 @@
 
 This file is the boundary between user-authored YAML/TOML and the rest of the
 training code. Everything outside this module should read typed config objects
-instead of pulling values directly out of nested dictionaries.
+instead of pulling values directly out of nested dictionaries. In practice
+every config in configs/ is TOML (e.g. configs/dense_cnn_restnet_main_4.toml,
+the live run); the YAML path is advertised by the CLI but has no caller.
+
+The typed sections here cover only the orchestration skeleton. Model-owned
+settings ride through opaquely as `ModelConfig.config` ([model.config] in the
+TOML) and are parsed by the plugin's own config module (e.g.
+packages/dense_cnn_restnet/python/dense_cnn_restnet/config.py); model-neutral
+extras like [shared.game] stay reachable via `TrainingConfig.raw` /
+`RunContext.section()`.
 
 The normalized config mirrors the fixed self-play training path:
 
@@ -22,6 +31,9 @@ import tomllib
 
 
 ConfigMap = Mapping[str, Any]
+
+
+# --- Typed config sections (one frozen dataclass per top-level TOML table) ---
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,6 +140,9 @@ class TrainingConfig:
     checkpoint: CheckpointConfig = field(default_factory=CheckpointConfig)
     shared: ConfigMap = field(default_factory=dict)
     raw: ConfigMap = field(default_factory=dict)
+
+
+# --- Loading and normalization (file -> raw mapping -> TrainingConfig) ---
 
 
 def load_training_config(config_path: str | Path) -> TrainingConfig:
@@ -243,6 +258,10 @@ def _load_raw_config(path: Path) -> ConfigMap:
     if suffix == ".toml":
         with path.open("rb") as handle:
             return tomllib.load(handle)
+    # UNUSED(2026-06-12): no .yaml/.yml training config exists anywhere in
+    # configs/, tests/, or scripts/ (repo-wide grep); every launcher and
+    # generated smoke config emits TOML. Kept because the CLI advertises YAML
+    # support and PyYAML is declared in pyproject.toml for this branch.
     if suffix in {".yaml", ".yml"}:
         try:
             import yaml
@@ -254,6 +273,9 @@ def _load_raw_config(path: Path) -> ConfigMap:
             raise ValueError("YAML training config must load to a mapping.")
         return loaded
     raise ValueError(f"Unsupported training config format: {path.suffix}")
+
+
+# --- Scalar/section validation helpers ---
 
 
 def _require_mapping(raw: ConfigMap, key: str) -> ConfigMap:

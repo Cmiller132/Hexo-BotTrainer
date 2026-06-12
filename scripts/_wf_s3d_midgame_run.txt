@@ -1,0 +1,30 @@
+[    1.0s] midgame epoch-000005-selfplay-000054 len=81 done
+[    1.7s] midgame epoch-000005-selfplay-000155 len=81 done
+[    2.3s] midgame epoch-000005-selfplay-000125 len=81 done
+[    3.0s] midgame epoch-000005-selfplay-000272 len=81 done
+[    3.6s] midgame epoch-000005-selfplay-000303 len=81 done
+[    4.3s] midgame epoch-000005-selfplay-000086 len=83 done
+[    5.0s] midgame epoch-000005-selfplay-000048 len=83 done
+[    5.7s] midgame epoch-000005-selfplay-000184 len=83 done
+[    6.3s] midgame epoch-000005-selfplay-000156 len=83 done
+[    7.0s] midgame epoch-000005-selfplay-000064 len=83 done
+[    7.7s] midgame epoch-000005-selfplay-000291 len=83 done
+[    8.3s] midgame epoch-000005-selfplay-000325 len=83 done
+{
+ "n": 24,
+ "v_leader_base_absmedian": 0.0929793268442154,
+ "v_spread_median": 0.21318292617797852,
+ "n_near_v_median": 3.0,
+ "dawdle_spread_ml_median": 4.706367492675781,
+ "flip_rate_k0.05": 0.0,
+ "n_flips_k0.05": 0,
+ "flip_rate_k0.1": 0.0,
+ "n_flips_k0.1": 0,
+ "flip_rate_k0.2": 0.0,
+ "n_flips_k0.2": 0,
+ "flip_rate_k0.5": 0.0,
+ "n_flips_k0.5": 0,
+ "flip_rate_k1.0": 0.08333333333333333,
+ "n_flips_k1.0": 2
+}
+[    8.3s] DONE

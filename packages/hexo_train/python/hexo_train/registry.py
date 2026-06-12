@@ -9,6 +9,19 @@ Plugin lookup supports three development/deployment modes:
 1. explicit Python module path from config;
 2. explicit entry point name from config;
 3. model name lookup through the `hexo_train.models` entry point group.
+
+Registered plugins (entry-point group `hexo_train.models`):
+`dense_cnn_restnet` (packages/dense_cnn_restnet/pyproject.toml — the ACTIVE
+lineage), `dense_cnn` and `hexgt` (packages/hexo_models/pyproject.toml), and
+`hexgnn` (packages/hexgnn/pyproject.toml). The restnet configs use mode 1
+(`[model].module = "dense_cnn_restnet.plugin"` in
+configs/dense_cnn_restnet_main_*.toml), bypassing entry points entirely.
+
+Note: `ModelPlugin` covers only the two construction hooks. The full
+duck-typed contract a real plugin/trainer implements is wider — optional
+`generate_selfplay`, `evaluate_epoch`, `calibrate_performance` hooks plus the
+trainer's `select_training_samples`/`train_passes`/`close()` — dispatched by
+hasattr checks in pipeline.py and epoch/*.py rather than this Protocol.
 """
 
 from __future__ import annotations

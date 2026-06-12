@@ -198,6 +198,14 @@ def _state_dict_incompatibilities(
     return issues
 
 def _resolve_checkpoint_ref(path: Path) -> Path | None:
+    """Resolve a checkpoint ref, following one level of ``.txt`` pointer indirection.
+
+    A ``.txt`` ref holds the real checkpoint path (relative paths resolve against
+    the pointer's directory; legacy ``*_latest.txt`` pointer files are written by
+    hexo_train's pointer publishing). Returns None for a missing/empty pointer so
+    the loader reports "not published yet" instead of failing.
+    """
+
     resolved = path.expanduser()
     if resolved.suffix.lower() == ".txt" and not resolved.exists():
         return None

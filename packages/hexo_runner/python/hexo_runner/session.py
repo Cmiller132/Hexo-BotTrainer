@@ -1,4 +1,12 @@
-"""Runner game and batch specifications."""
+"""Runner game and batch specifications.
+
+`GameSpec` is the per-game request consumed by `hexo_runner/loop.py` and
+`hexo_runner/modes/match.py`; external constructors include
+packages/hexo_frontend/python/hexo_frontend/web.py (Match-v2 Arena) and the
+hexgt/hexgnn evaluation harnesses. `BatchSpec` feeds
+`hexo_runner/modes/batch.py` (exercised only by
+tests/test_hexo_runner_match_mode.py in practice).
+"""
 
 from __future__ import annotations
 
@@ -13,9 +21,13 @@ from .player import GameContext, PlayerFactory
 class GameSpec:
     """Inputs needed to create one engine-backed game.
 
-    The runner passes `seed` through to `hexo_engine.new_game`. Durable runner
-    records do not persist scenarios yet, so recorded runs require
-    `scenario=None`.
+    The runner passes `seed` through to `hexo_engine.new_game`, but note the
+    engine currently DISCARDS it (hexo_engine/rust/src/pybridge.rs new_game
+    ignores both seed and scenario); the seed's real effects are that it is
+    persisted in the .hxr record header and exposed to players via
+    `GameContext.seed`. Durable runner records do not persist scenarios yet,
+    so recorded runs require `scenario=None` (`run_match_loop` raises
+    otherwise).
     """
 
     game_id: str
@@ -31,13 +43,21 @@ class GameSpec:
             raise ValueError("GameSpec.max_actions must be positive.")
 
 
+# DEPRECATED(2026-06-12): legacy aliases from the pre-GameSpec naming; no
+# references outside this file in packages/tests/scripts (excl. scripts/archive).
+# Use GameSpec / player.GameContext directly.
 SessionSpec = GameSpec
 SessionContext = GameContext
 
 
 @dataclass(frozen=True, slots=True)
 class BatchSpec:
-    """Local multiprocessing batch request for this machine."""
+    """Local multiprocessing batch request for this machine.
+
+    `worker_count=None` lets `run_batch` pick min(28, len(games)); games are
+    dealt to workers round-robin in `chunk_size` blocks. Each worker writes
+    one `{batch_id}-worker-{id}.hxr` file under `output_dir`.
+    """
 
     batch_id: str
     games: Sequence[GameSpec]

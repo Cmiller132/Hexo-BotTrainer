@@ -11,6 +11,14 @@
 //!
 //! `lib.rs` only registers those pieces into the Python extension module and
 //! publishes capability metadata. It deliberately contains no model logic.
+//!
+//! ACTIVE-PRODUCTION NOTE: this Rust is shared by two Python lineages. The
+//! live training line, `packages/dense_cnn_restnet`, ships no Rust of its own
+//! and drives this crate read-only through its `rust_bridge.py` (it is the
+//! only production caller of `mcts.rs run_continuous`). Rebuilding this crate
+//! therefore changes search semantics for BOTH the legacy dense_cnn Python
+//! and the active restnet runs. Compiled into `hexo_models._rust.dense_cnn`
+//! via the `#[path]` include in `packages/hexo_models/rust/src/lib.rs`.
 
 mod constants;
 mod encoding;

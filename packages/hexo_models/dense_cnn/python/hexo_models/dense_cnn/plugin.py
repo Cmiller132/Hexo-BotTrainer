@@ -84,6 +84,7 @@ class DenseCNNPlugin:
         )
 
     def generate_selfplay(self, *, ctx: Any, components: Any, epoch: int, games_per_epoch: int) -> dict[str, Any]:
+        """Pipeline hook: delegate to `selfplay.generate_selfplay_epoch`."""
         return generate_selfplay_epoch(
             ctx=ctx,
             components=components,
@@ -92,6 +93,7 @@ class DenseCNNPlugin:
         )
 
     def evaluate_epoch(self, *, ctx: Any, components: Any, epoch: int) -> dict[str, Any]:
+        """Pipeline hook: delegate to `evaluation.evaluate_epoch` (SealBot games)."""
         return evaluate_epoch(ctx=ctx, components=components, epoch=epoch)
 
     def calibrate_performance(self, *, ctx: Any, components: Any) -> dict[str, Any]:
@@ -116,4 +118,5 @@ plugin = DenseCNNPlugin()
 
 
 def get_plugin() -> DenseCNNPlugin:
+    """Entry-point target for `hexo_train.models` name 'dense_cnn' (module-level singleton)."""
     return plugin

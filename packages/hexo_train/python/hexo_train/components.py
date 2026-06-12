@@ -62,6 +62,13 @@ class ComponentOverrides:
 
     The plugin returns only the pieces it owns or wants to replace. Missing
     fields fall back to shared defaults where a default exists.
+
+    This dataclass is the one symbol model packages import from hexo_train
+    (see packages/dense_cnn_restnet/python/dense_cnn_restnet/plugin.py and the
+    dense_cnn/hexgt/hexgnn plugin.py twins). All four set
+    `uses_shared_sample_store=False` and supply trainer + checkpoint
+    loader/saver, so the shared-store and placeholder-checkpoint defaults are
+    bypassed on every production run.
     """
 
     scalar_value_target: Any | None = None

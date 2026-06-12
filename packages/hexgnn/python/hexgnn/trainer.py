@@ -9,7 +9,12 @@ expand time from the compact raw-fact shards (`expand.py`).
 This Phase-4 trainer owns the optimizer step, the warmup LR schedule, and a
 shard-driven training pass sufficient for the CPU gate ("a CPU training pass
 decreases loss"). The full KataGo replay-window / train-bucket integration
-(reusing dense_cnn's model-agnostic replay/shuffle) is wired in the GPU phases.
+(reusing dense_cnn's model-agnostic replay/shuffle) was deferred and never
+landed before the lineage was parked — scripts/_rl_train_hexgnn.py works around
+it with its own bounded shard selection over `train_on_shards`.
+
+Constructed by plugin.training_component_overrides and by the driver scripts
+(scripts/_rl_train_hexgnn.py, _pretrain_hexgnn.py).
 """
 
 from __future__ import annotations
@@ -265,7 +270,13 @@ class HexgnnTrainer:
         return history
 
     def train_on_shards(self, shard_paths: Sequence[Path], **kwargs: Any) -> list[dict[str, float]]:
-        """Read compact shards and train over their rows (reuses dense_cnn IO)."""
+        """Read compact shards and train over their rows (reuses dense_cnn IO).
+
+        Loads EVERY shard's rows into one in-memory list before training — sized
+        for the driver's bounded per-epoch shard selection, NOT for a full
+        KataGo replay window (the deferred integration the module docstring
+        mentions). Records each shard path into ``train_state.data_files_used``.
+        """
 
         from hexo_models.dense_cnn.compact_io import read_compact_shard
 

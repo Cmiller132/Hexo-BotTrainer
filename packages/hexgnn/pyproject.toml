@@ -7,10 +7,15 @@ name = "hexgnn"
 version = "0.1.0"
 description = "hexgnn — a stripped-down hexgt: GNN trunk + policy/value/opp heads, no context transformer, no STV. Reuses hexo_models._rust.hexgt natively."
 requires-python = ">=3.11"
-# PURE-PYTHON and ADDITIVE: hexgnn carries NO Rust of its own. It reuses the
-# already-built native accelerator inside hexo_models (`hexo_models._rust.hexgt`)
-# read-only, so installing/uninstalling hexgnn never rebuilds or touches the
-# native module the live hexgt run imports.
+# STALE-CLAIM FIX (2026-06-12): the original "PURE-PYTHON, reuses _rust.hexgt"
+# story (still echoed in `description` above — a metadata string, left untouched)
+# no longer holds. hexgnn DOES carry its own Rust (rust/src), a fork of hexgt's
+# crate that is `#[path]`-included into packages/hexo_models/rust/src/lib.rs and
+# compiled into the hexo_models cdylib as the `hexo_models._rust.hexgnn`
+# submodule. What remains true: installing/uninstalling THIS package never
+# rebuilds the native module — only a maturin rebuild of hexo_models
+# (scripts/_rebuild_hexo_models_hexgt.sh) picks up rust/src changes.
+# STATUS: parked/legacy lineage (HANDOFF.md: "explored and set aside").
 dependencies = [
   "torch>=2.2",
   "numpy",

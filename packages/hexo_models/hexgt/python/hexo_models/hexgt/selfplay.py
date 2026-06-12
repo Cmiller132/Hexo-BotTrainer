@@ -445,6 +445,8 @@ def run_selfplay_games(
     record_path = output_dir / f"epoch_{epoch:06d}.hxr"
     record_file = HexoRecordFile.create(record_path, engine.engine_metadata(), _RECORD_PLAYERS)
 
+    # --- Main loop: top up active games -> one batched search round (full/fast
+    # --- PCR subsets) -> apply chosen moves -> finalize + write finished games.
     while next_game_index < num_games or active:
         while len(active) < active_limit and next_game_index < num_games:
             seed = base_seed + epoch * 1_000_000 + next_game_index
@@ -634,6 +636,8 @@ def run_selfplay_games(
                     game["actions"].append(search.action_id)
             search_round += 1
 
+        # --- Finalization: per finished game write the .hxr record, finalize the
+        # --- dense sample trajectory, drop tainted/fast rows, write one npz shard.
         finished = [
             game
             for game in active
@@ -738,6 +742,7 @@ def run_selfplay_games(
 
     record_file.close()
 
+    # --- Epoch summary: throughput + Q1-Q5 play-style/data-quality aggregates.
     elapsed = perf_counter() - started
     sp = max(1, searched_positions)
     # Play-style / data-quality means are accumulated over RECORDED (full-search)

@@ -3,6 +3,13 @@
 //! The authoritative board updates this store as stones are placed. Membership
 //! checks stay hash-based for validation, while enumeration uses a deterministic
 //! ordered set of compact packed coordinates.
+//!
+//! `pack_coord`/`unpack_coord` here are the CANONICAL action-ID encoding. It is
+//! deliberately duplicated in python/hexo_engine/types.py
+//! (`pack_coord_id`/`unpack_coord_id`) and in the frontend JS
+//! (hexo_frontend/static/app.js, offset 32768); the IDs are persisted in
+//! training .npz shards and .hxr records, so none of the three may diverge.
+//! tests/test_hexo_engine_rust_bridge.py is the cross-language check.
 
 use super::coord::{coords_within_radius, HexCoord};
 use ahash::AHashSet;
@@ -57,6 +64,10 @@ impl LegalMoveStore {
     }
 
     /// Monotonic mutation version for cache users.
+    // UNUSED(2026-06-12): no `.version()` caller exists anywhere in
+    // packages/tests/scripts — the advertised "cache users" never materialized.
+    // The underlying counter is still maintained (and restored by
+    // `restore_delta`), so only this accessor is dead.
     pub fn version(&self) -> u64 {
         self.version
     }

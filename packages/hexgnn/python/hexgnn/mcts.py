@@ -3,9 +3,11 @@
 Thin, like dense_cnn's `mcts.py`: Python owns the session object and decodes
 byte-backed native results into dataclasses, while Rust owns state cloning,
 validation, tree reuse, PUCT + nucleus widening, evaluator payload construction,
-and action selection. The only difference from dense_cnn is the evaluator
-callback (`HexgnnInference.evaluate_graph_facts`, a graph payload + per-candidate
-priors) and the candidate-radius `n` threaded into the session.
+and action selection (rust/src/mcts.rs). The only difference from dense_cnn is
+the evaluator callback (`HexgnnInference.evaluate_featurized_batch`, a zero-copy
+Rust-collated graph payload returning per-candidate priors) and the
+candidate-radius `n` threaded into the session. Used by selfplay.py, player.py,
+and evaluation.py.
 """
 
 from __future__ import annotations
@@ -81,6 +83,11 @@ class HexgnnMctsSession:
         call run roots with heterogeneous visit caps / forced-playouts / root noise —
         coalescing KataGo PCR's full+fast move mix into one full-width forward stream.
         Each None falls back to the scalar value broadcast to every root.
+
+        UNUSED(2026-06-12) — the per_root_* path specifically: no hexgnn caller
+        passes them (selfplay.py runs PCR as two separate full/fast run() calls;
+        tests/test_hexgt_mcts_per_root.py exercises the hexgt twin only). They are
+        plumbed through to rust/src/mcts.rs but always None here.
         """
 
         if not root_states:

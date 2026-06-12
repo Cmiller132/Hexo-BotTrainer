@@ -138,8 +138,12 @@ impl Board {
 
     /// Axis-aligned axial bounds around occupied cells.
     ///
-    /// This is not a playable board boundary; it is a convenience for encoding
-    /// and diagnostics.
+    /// This is not a playable board boundary; it was meant as a convenience
+    /// for encoding and diagnostics, but the actual encoders (e.g.
+    /// hexo_models/dense_cnn rust/src/encoding.rs) compute their own crop from
+    /// `occupied_cells()` instead.
+    // UNUSED(2026-06-12): no references found in packages/tests/scripts —
+    // grep for `.bounds()` across all crates returns zero callers.
     pub fn bounds(&self) -> Option<(HexCoord, HexCoord)> {
         let first = *self.occupied.first()?;
         let mut min_q = first.q;

@@ -1,4 +1,14 @@
-"""Core synchronous runner loop for one game."""
+"""Core synchronous runner loop for one game.
+
+Called by hexo_runner/modes/match.py (one game -> one .hxr file),
+hexo_runner/modes/batch.py (many games sharing players + one record file per
+worker), and scripts/goal_benchmark.py. All engine access goes through
+`engine.HexoEngineAdapter`; all per-game persistence goes through the
+Rust-backed `HexoRecordFile` writer (hexo_utils, re-exported via
+hexo_runner/records). Every player/engine/record call is staged through
+`_run_stage` so any failure becomes a structured `AbortRecord` instead of a
+raised exception — `run_match_loop` itself never raises for in-game errors.
+"""
 
 from __future__ import annotations
 
@@ -57,6 +67,7 @@ def run_match_loop(
     if spec.scenario is not None:
         raise ValueError("GameSpec.scenario is not supported by durable .hxr records; use scenario=None.")
 
+    # --- Setup: adapter, timing, worker context, abort bookkeeping ---------
     adapter = engine_adapter or HexoEngineAdapter()
     timer = Timer.start()
     engine_metadata = adapter.metadata()
@@ -66,8 +77,14 @@ def run_match_loop(
     status = GameStatus.ABORTED
     primary_state = None
     record_writer = None
+    # UNUSED(2026-06-12): dead assignment — `result` is never read before the
+    # unconditional reassignment after the try/except below; kept to avoid any
+    # behavior change while a live run imports this module.
     result = GameResult(game_id=spec.game_id, status=GameStatus.ABORTED)
 
+    # --- Game body: player setup, new game, decision loop ------------------
+    # Any RunnerAbort (or unexpected exception) lands in the handlers below;
+    # the game is then finalized as ABORTED rather than propagating.
     try:
         if setup_players:
             for player in players:
@@ -143,6 +160,9 @@ def run_match_loop(
             message=str(exc),
         )
 
+    # --- Record finalization ------------------------------------------------
+    # Always finish the .hxr game entry (completed or aborted), even when the
+    # abort happened before begin_game succeeded.
     duration_ms = timer.elapsed_ms()
     record_ref = None
     try:
@@ -171,6 +191,9 @@ def run_match_loop(
         )
         terminal_payload = None
 
+    # --- Result assembly and player teardown --------------------------------
+    # finish_game/close failures are swallowed: the result is already decided
+    # and teardown must not turn a completed game into an abort.
     result = GameResult(
         game_id=spec.game_id,
         status=status,
@@ -201,6 +224,12 @@ def run_match_loop(
 
 
 def _run_stage(stage: str, func: StageCall) -> object:
+    """Run one named player/engine/record call, converting failures to RunnerAbort.
+
+    The `stage` string (e.g. "player.decide:<player_id>") ends up verbatim in
+    AbortRecord.stage, which the .hxr writer persists — keep names stable for
+    downstream abort triage.
+    """
     try:
         return func()
     except RunnerAbort:
@@ -217,6 +246,11 @@ def _start_players(
     adapter: HexoEngineAdapter,
     engine_metadata: object,
 ) -> None:
+    """Send start_game to both players with their per-game GameContext.
+
+    Seat order is fixed: players[0] is "player0" (moves first), players[1] is
+    "player1" — matching HexoEngineAdapter.player_index.
+    """
     roles = ("player0", "player1")
     for index, player in enumerate(players):
         context = GameContext(

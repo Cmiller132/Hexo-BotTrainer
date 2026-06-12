@@ -11,11 +11,14 @@ opponent policy ONLY:
 - ``value``: a 65-bin scalar value distribution per graph (G, 65).
 - ``opp_policy``: per-candidate aux logits (Ctot,).
 
-Body (§6.3): typed RELATIONAL message passing (line/co-linearity already routed
-through window-hub nodes by the Rust builder — no same-axis cliques). All inputs
-are D6-INVARIANT (features.py) and all ops are permutation-equivariant, so the
-model stays D6-invariant by construction (the equivariance test passes exactly;
-no augmentation), exactly as in hexgt.
+Body (§6.3): typed RELATIONAL message passing over the sparse-rewrite graph
+(constants.py): only ADJACENCY (+ per-edge `edge_dir`) and RECENCY edges exist —
+the window-hub nodes/edges were removed and line/co-linearity information now
+rides on per-node window-count FEATURES (the F_CAND_*/F_STONE_* slots) built by
+the Rust candidates.rs builder. All inputs are D6-INVARIANT (features.py) and
+all ops are permutation-equivariant, so the model stays D6-invariant by
+construction (the equivariance test passes exactly; no augmentation), exactly
+as in hexgt.
 
 VALUE READOUT DECISION (transformer-free) — KEEP the PMA pool.
 Without the context transformer there is no attention mixing into the SIDE hub,
@@ -34,9 +37,18 @@ pool, for these reasons:
 The "simplicity" the owner wants is in the OVERALL architecture (no transformer,
 no STV) — the PMA is a single ~k·D-wide module, not a complexity burden, and
 swapping it for mean/max would under-power the ONLY global readout the value head
-has. The SIDE hub is still concatenated (``value_head_use_side`` default True):
-it is connected to every node via the EDGE_TYPE_CONTEXT hub, so the GNN message
-passing already mixes global board state into it — a complementary, cheap signal.
+has. The SIDE hub is still concatenated (``value_head_use_side`` default True),
+but NOTE (sparse rewrite): EDGE_TYPE_CONTEXT was RETIRED (constants.py) and the
+SIDE node is now EDGE-ISOLATED — message passing no longer mixes board state into
+it. Its embedding is just norm(node_in(side_features)), i.e. a learned projection
+of the global scalars (phase / move number / stone counts) riding on the SIDE
+node's own features; the original "connected to every node via the CONTEXT hub"
+rationale no longer holds, the global mixing now comes solely from the PMA pool.
+
+Callers: plugin.build_model, scripts/_rl_train_hexgnn.py / _pretrain_hexgnn.py
+(direct construction + the zero-init resume grafts at the bottom of this file),
+inference.py (forward_policy_value + precompute_side_rows), and the
+tests/test_hexgnn_{model,steerable,value_readout,compile}.py suite.
 """
 
 from __future__ import annotations

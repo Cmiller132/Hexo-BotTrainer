@@ -8,10 +8,22 @@ length per-candidate policy, packed-graph batch contract) and stays D6-invariant
 by construction.
 
 It is ADDITIVE and model-owned: shared packages (`hexo_engine`, `hexo_runner`,
-`hexo_train`) provide game truth and orchestration, and the native accelerator is
-REUSED read-only from `hexo_models._rust.hexgt` (same candidate/graph/featurizer/
-MCTS contract, so featurizer parity + all TSS coupling carry over unchanged). See
-this package's README.md.
+`hexo_train`) provide game truth and orchestration. The native accelerator is
+this package's OWN Rust crate (`packages/hexgnn/rust/src`, a fork of hexgt's),
+compiled into the hexo_models cdylib as `hexo_models._rust.hexgnn` via the
+`#[path]` include in `packages/hexo_models/rust/src/lib.rs` (the original
+"reuses _rust.hexgt read-only" plan was superseded). See this package's
+README.md.
+
+STATUS (2026-06-12): PARKED lineage — HANDOFF.md marks hexgnn "explored and set
+aside (not the active path)"; the active line is packages/dense_cnn_restnet.
+Kept buildable: its Rust still compiles into every hexo_models native build, the
+driver scripts (scripts/_rl_train_hexgnn.py, _pretrain_hexgnn.py) and the
+tests/test_hexgnn_*.py suite still import it.
+
+Entry points: the RL driver scripts above import modules directly (PYTHONPATH);
+the dormant config-CLI path goes through plugin.py (entry point "hexgnn" in the
+`hexo_train.models` group, configs/hexgnn_model.toml).
 """
 
 from .architecture import HexgnnNetwork

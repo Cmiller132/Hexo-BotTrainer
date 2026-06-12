@@ -216,6 +216,13 @@ class DebugWorker:
     # -- cached requests -------------------------------------------------------
 
     def cached(self, signature: str, op: str, *, timeout: float = DEFAULT_TIMEOUT, **fields: Any) -> Any:
+        """request() behind the LRU result cache.
+
+        ``signature`` is the caller-built cache key (web.py's _debug_signature:
+        a JSON of [prefix+params, checkpoint path, action ids, n]) and must
+        capture every input that changes the result — a stale hit is served
+        verbatim with no worker round-trip. Errors are never cached."""
+
         with self._lock:
             hit = self._cache.get(signature)
             if hit is not None:
@@ -269,6 +276,9 @@ _WORKER_LOCK = threading.Lock()
 
 
 def get_worker() -> DebugWorker:
+    """Lazily-created module singleton — the one worker every web.py debug
+    endpoint (and the Match Arena checkpoint bots) shares."""
+
     global _WORKER
     with _WORKER_LOCK:
         if _WORKER is None:

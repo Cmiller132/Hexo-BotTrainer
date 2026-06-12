@@ -187,6 +187,7 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
 
     with HexoRecordFile.create(record_path, engine.engine_metadata(), players) as record_file:
         while next_game_index < requested_games or active:
+            # Stage 1 -- refill: keep up to active_limit concurrent games in flight.
             while len(active) < active_limit and next_game_index < requested_games:
                 seed = base_seed + epoch * 1_000_000 + next_game_index
                 active.append(
@@ -202,6 +203,8 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
                 next_game_index += 1
                 games_started += 1
 
+            # Stage 2 -- search: one cross-game batched MCTS call over every
+            # nonterminal position, then record the sample and play the action.
             playable = [
                 game
                 for game in active
@@ -291,6 +294,9 @@ def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_
                     engine.apply_action(state, engine.PlacementAction(unpack_coord_id(search.action_id)))
                     game["actions"].append(search.action_id)
 
+            # Stage 3 -- finalize: write the .hxr game record, attach outcome
+            # targets, bake surprise weighting into rows, write the NPZ shard,
+            # and release the game's retained search subtree.
             finished = [
                 game
                 for game in active

@@ -1,14 +1,17 @@
 """Training plugin for the hexgnn (Model 2) dynamic-graph model family.
 
 `hexo_train` discovers this plugin (entry point `hexgnn` in the
-`hexo_train.models` group) and calls it to build model-specific components. The
-plugin is the composition boundary, mirroring `dense_cnn/plugin.py`.
+`hexo_train.models` group, registered in this package's pyproject.toml) and
+calls it to build model-specific components. The plugin is the composition
+boundary, mirroring `hexo_models/dense_cnn/plugin.py`: build_model, the
+trainer/optimizer/checkpoint ComponentOverrides, and the generate_selfplay /
+evaluate_epoch epoch hooks are all wired (the earlier "Phase 0 minimum" note is
+obsolete — selfplay.py, evaluation.py and trainer.py landed).
 
-Phase 0 wires the minimum the pipeline can start from: `name`, `build_model`,
-and `training_component_overrides` returning the checkpoint loader/saver and an
-optimizer. The self-play / evaluation / calibration / trainer hooks land in the
-GPU phases (5+) and Phase 4 (trainer); they are intentionally absent here so the
-package builds and resolves before those exist.
+NOTE: this config-CLI path (configs/hexgnn_model.toml) is DORMANT in practice.
+The lineage's actual runs were driven by scripts/_rl_train_hexgnn.py, which
+imports architecture/config/selfplay/trainer/evaluation directly and saves its
+own checkpoint format — it never touches this plugin or checkpoints.py.
 """
 
 from __future__ import annotations

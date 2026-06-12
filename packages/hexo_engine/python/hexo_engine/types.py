@@ -3,6 +3,17 @@
 These objects describe the data Python callers should exchange with
 `hexo_engine.api`. The actual rule interpretation stays in Rust; these types are
 only handles, identifiers, and transport shapes.
+
+Cross-language contract: `pack_coord_id`/`unpack_coord_id` deliberately
+duplicate the packing in rust/src/legal.rs (`pack_coord`/`unpack_coord`) and
+the JS re-implementation in hexo_frontend/static/app.js (DBG_COORD_OFFSET).
+Packed IDs are persisted in training .npz shards and .hxr game records, so the
+three implementations must never diverge; tests/test_hexo_engine_rust_bridge.py
+cross-checks this one against `engine.action_id`.
+
+The read-only `Python*` mirror dataclasses are the shape produced by
+`api.to_python_state` (consumed mainly by hexo_frontend/dashboard.py); hot
+paths bypass them via raw `legal_action_ids` tuples.
 """
 
 from __future__ import annotations
@@ -92,13 +103,22 @@ class LegalActions(Sequence[PlacementAction]):
 
 
 def pack_coord_id(coord: AxialCoord) -> LegalActionId:
-    """Pack a coordinate the same way the Rust legal move store does."""
+    """Pack a coordinate the same way the Rust legal move store does.
+
+    Encoding: `((q + 2^15) << 16) | (r + 2^15)`; raw integer order therefore
+    matches deterministic signed (q, r) order. Must stay byte-identical to
+    rust/src/legal.rs `pack_coord` (IDs are persisted in shards/records).
+    Raises ValueError if a component leaves the i16 range.
+    """
 
     q = _checked_coord_component(coord.q)
     r = _checked_coord_component(coord.r)
     return ((q + _COORD_OFFSET) << 16) | (r + _COORD_OFFSET)
 
 
+# UNUSED(2026-06-12): no references found in packages/tests/scripts (excl.
+# scripts/archive); not re-exported by __init__ either. Kept as a debugging
+# convenience only.
 def format_coord_id(action_id: ActionId) -> str:
     """Format a packed action ID for display only."""
 
@@ -122,6 +142,12 @@ def _checked_coord_component(value: int) -> int:
     return value
 
 
+# UNUSED(2026-06-12): never constructed anywhere in packages/tests/scripts —
+# api.to_python_state assigns a TerminalResult to PythonHexoState.terminal
+# instead, so the `PythonTerminal | None` annotation below is wrong at runtime
+# (the actual object has winner/reason/metadata, not winner/placements). Kept
+# only because it is re-exported by __init__; fixing means either constructing
+# this here or retyping the annotation and deleting this class.
 @dataclass(frozen=True, slots=True)
 class PythonTerminal:
     """Read-only Python mirror of Rust `GameOutcome`."""
@@ -192,12 +218,18 @@ class PythonBoard:
 
 @dataclass(frozen=True, slots=True)
 class PythonHexoState:
-    """Read-only Python mirror of Rust `HexoState`."""
+    """Read-only Python mirror of Rust `HexoState`.
+
+    Produced only by `api.to_python_state`. CAUTION: despite the annotation,
+    `terminal` actually holds a `TerminalResult` at runtime (see the note on
+    `PythonTerminal` above) — use `.winner`/`.reason`/`.metadata`.
+    """
 
     board: PythonBoard
     current_player: Player
     phase: TurnPhase
     placements_made: int
+    # Annotation is stale: runtime value is TerminalResult | None (api.py).
     terminal: PythonTerminal | None
     last_turn: PythonMoveRecord | None
     placement_history: tuple[PythonPlacementRecord, ...]

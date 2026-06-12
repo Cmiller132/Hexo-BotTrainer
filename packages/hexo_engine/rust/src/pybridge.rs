@@ -1,4 +1,15 @@
 //! PyO3 bridge for the Hexo rules engine.
+//!
+//! Compiled (behind the `python` feature) as the extension module
+//! `hexo_engine._rust`, wrapped by `python/hexo_engine/api.py`. Two distinct
+//! consumers:
+//! - Python callers go through the pyfunctions below; rule violations map to
+//!   `ValueError`, which api.py re-raises as `IllegalActionError`.
+//! - Model accelerator crates (hexo_models/dense_cnn, hexo_models/hexgt,
+//!   hexgnn — each rust/src/state.rs) fetch `state_api_capsule()` at batch-MCTS
+//!   time to clone live `PyHexoState` objects into owned Rust states via the
+//!   C-ABI fn pointers; they must check `version == STATE_API_VERSION` (2) and
+//!   fail loudly on mismatch.
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -48,6 +59,13 @@ impl PyHexoState {
     }
 }
 
+/// Create a fresh game state.
+///
+/// `seed` and `scenario` are accepted for API-shape stability but DISCARDED:
+/// the engine has no randomness and no scenario loader, so every game starts
+/// identically. Callers (hexo_runner session plumbing, hexo_frontend web.py)
+/// pass `seed` through anyway — do not read that as engine reproducibility
+/// control. `GameSpec.scenario` must be None and hexo_runner enforces that.
 #[pyfunction(signature = (seed=None, scenario=None))]
 pub fn new_game(seed: Option<u64>, scenario: Option<Py<PyAny>>) -> PyHexoState {
     let _ = seed;
@@ -122,6 +140,13 @@ pub fn terminal(py: Python<'_>, state: PyRef<'_, PyHexoState>) -> PyResult<Optio
     outcome_obj(py, state.state.terminal())
 }
 
+/// Materialize the full state as nested Python dicts (the `PythonHexoState`
+/// mirror shape parsed by api.py `to_python_state`).
+///
+/// Heavyweight by design: every stone, legal coordinate, and window entry
+/// becomes a dict — O(windows) ~ O(18 x placements) per call. Intended for the
+/// dashboard/replay layer (hexo_frontend), not for search/selfplay hot paths,
+/// which use `legal_action_ids` + the state capsule instead.
 #[pyfunction]
 pub fn to_python_state(py: Python<'_>, state: PyRef<'_, PyHexoState>) -> PyResult<Py<PyAny>> {
     let dict = PyDict::new(py);
@@ -144,6 +169,8 @@ pub fn action_id(q: i16, r: i16) -> u32 {
     pack_coord(HexCoord { q, r })
 }
 
+/// Identity dict (`backend`, `rules_version`, `state_api_version`) embedded in
+/// hexo_runner game records and asserted by tests/test_hexo_engine_rust_bridge.py.
 #[pyfunction]
 pub fn engine_metadata(py: Python<'_>) -> PyResult<Py<PyAny>> {
     let dict = PyDict::new(py);
@@ -157,6 +184,12 @@ pub fn engine_metadata(py: Python<'_>) -> PyResult<Py<PyAny>> {
     Ok(dict.into_any().unbind())
 }
 
+// --- C-ABI state capsule (FFI entry for the model accelerator crates) ---
+
+/// Expose the `HexoStateApi` fn-pointer table as a PyCapsule named
+/// `hexo_engine._rust.state_api` so model crates compiled into a DIFFERENT
+/// cdylib (hexo_models) can clone/free Rust states without linking this crate's
+/// Python types.
 #[pyfunction]
 pub fn state_api_capsule(py: Python<'_>) -> PyResult<Py<PyAny>> {
     let name = pyo3::ffi::c_str!("hexo_engine._rust.state_api");
@@ -186,6 +219,8 @@ pub fn _rust(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(state_api_capsule, module)?)?;
     Ok(())
 }
+
+// --- private helpers: error mapping, capsule fns, dict builders ---
 
 fn move_error(error: MoveError) -> PyErr {
     PyValueError::new_err(error.to_string())

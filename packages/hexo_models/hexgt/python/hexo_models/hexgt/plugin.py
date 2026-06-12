@@ -4,11 +4,15 @@
 `hexo_train.models` group) and calls it to build model-specific components. The
 plugin is the composition boundary, mirroring `dense_cnn/plugin.py`.
 
-Phase 0 wires the minimum the pipeline can start from: `name`, `build_model`,
-and `training_component_overrides` returning the checkpoint loader/saver and an
-optimizer. The self-play / evaluation / calibration / trainer hooks land in the
-GPU phases (5+) and Phase 4 (trainer); they are intentionally absent here so the
-package builds and resolves before those exist.
+All pipeline hooks are wired: `build_model`, `training_component_overrides`
+(trainer + optimizer + checkpoint loader/saver, shared sample store opted out),
+`generate_selfplay` (-> `selfplay.generate_selfplay_epoch`), and
+`evaluate_epoch` (-> `evaluation.evaluate_epoch`). There is no
+`calibrate_performance` hook for this model (no performance.py in the hexgt
+package). NOTE: this config-driven plugin path (configs/hexgt_model2/3.toml) is
+the DORMANT one — the actual hexgt_rl_main3 runs were driven by
+`scripts/_rl_train.py`, which imports the package modules directly and saves its
+own checkpoint format.
 """
 
 from __future__ import annotations

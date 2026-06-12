@@ -7,6 +7,15 @@ persists — model weights, optimizer state, and KataGo-style train-bucket state
 Loading is strict about model-weight compatibility and rejects legacy
 checkpoints that still carry the removed in-memory replay buffer, so hexgnn has
 only one supported training path. Supports `.txt` pointer indirection.
+
+FORMAT SPLIT-BRAIN (be aware when loading hexgnn checkpoints elsewhere): this
+plugin-path saver writes ``{"model": "hexgnn", "model_state": ..., ...}``, but
+the lineage's ACTUAL runs were driven by scripts/_rl_train_hexgnn.py, which
+saves its own ``{"model": <state_dict>, "arch": <meta>}`` shape. The frontend
+lineage sniffer (packages/hexo_frontend/python/hexo_frontend/debug_infer.py)
+maps only the driver format to the graph lineage — a checkpoint saved HERE would
+fall through its unknown-tag fallback. Only used via plugin.py (the dormant
+config-CLI path).
 """
 
 from __future__ import annotations

@@ -149,6 +149,11 @@ def calibrate_dense_cnn(
     return result
 
 
+# UNUSED(2026-06-12): no production caller. Repo-wide grep (packages/, tests/,
+# scripts/ excl. archive, configs/) finds only the __init__.py re-export and
+# tests/test_dense_cnn_performance.py; plugin.py calls calibrate_dense_cnn
+# directly. Kept for API symmetry with the dense_cnn_restnet fork (whose copy
+# is equally uncalled).
 def build_benchmark_report(
     *,
     config: Model1Config,
@@ -408,6 +413,9 @@ def _benchmark_selfplay_setting(
     }
 
 
+# NOTE: despite the leading underscore, `selfplay.py` imports this helper and
+# `_extend_mcts_diagnostic_batches` directly (cross-module private import);
+# treat their signatures as a shared contract within this package.
 def _summarize_mcts_diagnostic_batches(batches: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     summary: dict[str, Any] = {"batch_count": len(batches)}
     if not batches:

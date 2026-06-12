@@ -2,8 +2,11 @@
 
 Ties the shared Rust builder (`rust_bridge.graph_facts`), the featurizer
 (`features.build_graph_tensors`), and the collator (`collate.collate_graphs`)
-into one path. Used by tests, the Phase-4 expand step, and (Phase 5) the MCTS
-inference payload — guaranteeing training inputs == search inputs.
+into one path — guaranteeing training inputs == search inputs. Used by tests and
+`inference.evaluate_states` (the Python-driven eval path). Live MCTS does NOT
+come through here: it featurizes leaf states entirely in Rust
+(`rust/src/features.rs::featurize_collate_states`) and hands the collated
+payload straight to `inference.evaluate_featurized_batch`.
 """
 
 from __future__ import annotations

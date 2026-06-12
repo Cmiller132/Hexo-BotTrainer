@@ -24,6 +24,14 @@ def select_epoch_symmetries(
     The selected symmetries are stored on `components.shared` so model trainers
     can apply the same transform to inputs, masks, policy targets, and any
     model-owned payloads.
+
+    Caveat for the active lineage: the restnet trainer
+    (packages/dense_cnn_restnet/python/dense_cnn_restnet/trainer.py) consumes
+    only `selection.seed` and re-draws its own per-row D6 symmetries during
+    shard expansion, so the per-sample tuple built here (one blake2b per
+    visible sample, over windows of hundreds of thousands of rows) is computed
+    and discarded, and the `symmetry_count` diagnostic does not describe what
+    that trainer actually applied.
     """
 
     # Model packages may override the selector, but the default selector keeps
