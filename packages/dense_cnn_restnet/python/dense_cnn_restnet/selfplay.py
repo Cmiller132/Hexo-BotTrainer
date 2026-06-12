@@ -18,18 +18,22 @@ from __future__ import annotations
 import math
 import queue
 import threading
+from dataclasses import replace
 from time import perf_counter, time as wall_clock
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 import hexo_engine as engine
-from hexo_engine.types import unpack_coord_id
+from hexo_engine.types import AxialCoord, pack_coord_id, unpack_coord_id
 from hexo_runner.records import AbortRecord, HexoRecordFile, HexoRecordPlayer
 
+from .constants import BOARD_SIZE
+from .geometry import hex_distance
 from .inference import DenseCNNInference
 from .mcts import SearchResult, _result_from_payload, new_mcts_session
 from .performance import _extend_mcts_diagnostic_batches, _summarize_mcts_diagnostic_batches
 from .replay import materialize_policy_surprise_rows, write_selfplay_npz
 from .samples import SPILL_CATEGORIES, Model1SampleData, count_spill, finalize_game_samples, sample_from_state
+from .win_tracker import IncrementalWinTracker
 
 import os as _os
 
@@ -234,6 +238,78 @@ def _sample_policy_init_action(
     return pairs[-1][0]
 
 
+def _frozen_win_override_action(
+    state: object,
+    standing_cells: Iterable[tuple[int, int]],
+    *,
+    center: tuple[int, int],
+    mover: str,
+) -> tuple[int | None, bool]:
+    """Decide the frozen-win override for one decision.
+
+    `standing_cells` are the MOVER's standing win cells (empty cells completing
+    6-in-a-row, from `IncrementalWinTracker`) at the pre-move position `state`;
+    `center` is the decision's crop center (the Rust-encoded rounded stone
+    centroid carried on the sample). Returns ``(action_id, verify_failed)``:
+
+    - ``(None, False)`` — no override: no standing wins, or at least one
+      standing win is IN the radius-20 crop (the search can see and play it;
+      healthy games resolve in-crop standing wins within <= 2 plies).
+    - ``(action_id, False)`` — every standing win cell is out-of-crop (invisible
+      to both players: the frozen-game signature) and placing the min-packed-id
+      cell on a cloned engine state was VERIFIED terminal with the mover as
+      winner; play it instead of the search move.
+    - ``(None, True)`` — verification failed (cell illegal / not terminal /
+      wrong winner / engine error); the caller falls through to the search move
+      and counts the failure. Never raises.
+    """
+
+    cells = sorted(set((int(q), int(r)) for q, r in standing_cells))
+    if not cells:
+        return None, False
+    half = BOARD_SIZE // 2
+    if any(hex_distance(cell, center) <= half for cell in cells):
+        return None, False
+    try:
+        action_id = min(int(pack_coord_id(AxialCoord(q, r))) for q, r in cells)
+        clone = engine.clone_state(state)
+        engine.apply_action(clone, engine.PlacementAction(unpack_coord_id(action_id)))
+        terminal = engine.terminal(clone)
+        if terminal is None or _player_label(terminal.winner) != str(mover):
+            return None, True
+    except Exception:
+        return None, True
+    return action_id, False
+
+
+def _rows_to_write(
+    finalized: list[Model1SampleData],
+    *,
+    truncated: bool,
+    drop_truncated_rows: bool,
+) -> tuple[list[Model1SampleData], int, int]:
+    """Select the training rows for one finished game (both schedulers).
+
+    Returns ``(to_write, fast_rows_excluded, truncated_rows_dropped)``. Only
+    FULL-search positions are recorded (KataGo records full only): fast/init
+    moves and frozen-win-override decisions carry ``pcr_full=False`` and are
+    dropped here; the tag defaults True so a non-PCR run keeps every row.
+
+    `drop_truncated_rows` is the truncation-poison quarantine: a game cut off at
+    `max_actions` has ``winner=None`` and every row would get value target 0.0 —
+    a provably wrong "draw" label in a game with no draw rule — so the whole
+    game writes NO rows when the flag is on (record/.hxr bookkeeping unchanged).
+    """
+
+    to_write = [s for s in finalized if s.metadata.get("pcr_full", True)]
+    fast_rows_excluded = len(finalized) - len(to_write)
+    truncated_rows_dropped = 0
+    if truncated and drop_truncated_rows and to_write:
+        truncated_rows_dropped = len(to_write)
+        to_write = []
+    return to_write, fast_rows_excluded, truncated_rows_dropped
+
+
 def _validate_selfplay_levers(selfplay: Any) -> tuple[bool, bool, float, float]:
     """Validate the PCR / policy-init / root-temp-ramp knobs (both schedulers).
 
@@ -395,6 +471,7 @@ def _generate_selfplay_epoch_lockstep(*, ctx: Any, components: Any, epoch: int, 
     )
     pcr_full_proportion = float(selfplay.pcr_full_proportion)
     pcr_fast_visits = int(selfplay.pcr_fast_visits)
+    frozen_win_override_enabled = bool(selfplay.frozen_win_override)
 
     samples_added = 0
     raw_samples_added = 0
@@ -410,6 +487,9 @@ def _generate_selfplay_epoch_lockstep(*, ctx: Any, components: Any, epoch: int, 
     policy_init_moves = 0
     pcr_fast_rows_excluded = 0
     npz_skipped_empty = 0
+    truncated_rows_dropped = 0
+    frozen_win_overrides = 0
+    frozen_win_override_failures = 0
     # Observation-only spill telemetry: per-category facts beyond hex distance 20
     # from the crop center, which the fixed radius-20 disk crop cannot represent
     # (Spec A). Accumulated over every RECORDED (full-search) position's sample so
@@ -494,6 +574,9 @@ def _generate_selfplay_epoch_lockstep(*, ctx: Any, components: Any, epoch: int, 
                         )
                         if policy_init_enabled
                         else 0,
+                        # Frozen-win override: per-game incremental standing-win
+                        # tracker, fed every applied placement.
+                        "win_tracker": IncrementalWinTracker() if frozen_win_override_enabled else None,
                     }
                 )
                 next_game_index += 1
@@ -683,6 +766,13 @@ def _generate_selfplay_epoch_lockstep(*, ctx: Any, components: Any, epoch: int, 
                             game["pending"].append((sample.current_player, sample, search.root_value))
                             engine.apply_action(state, engine.PlacementAction(unpack_coord_id(action_id)))
                             game["actions"].append(action_id)
+                            if game["win_tracker"] is not None:
+                                # Policy-init plies are opening moves (a standing
+                                # win needs >= 9 plies and out-of-crop ones need a
+                                # marathon), so no override check here — but the
+                                # tracker must ingest EVERY placement regardless.
+                                coord = unpack_coord_id(action_id)
+                                game["win_tracker"].add_stone(int(coord.q), int(coord.r), sample.current_player)
                             # The 1-visit probe advanced its native root by ITS
                             # selected action, which is generally not the sampled
                             # one; drop the stale tree so the next round rebuilds
@@ -712,12 +802,48 @@ def _generate_selfplay_epoch_lockstep(*, ctx: Any, components: Any, epoch: int, 
                                 "pcr_full": is_full,
                             },
                         )
-                        if is_full:
+                        played_action_id = int(search.action_id)
+                        tracker = game["win_tracker"]
+                        if tracker is not None:
+                            # Frozen-win override: if the MOVER has standing wins
+                            # and ALL of them sit outside the radius-20 crop (the
+                            # search cannot see or play them), play the verified
+                            # win cell instead of the search move and exclude the
+                            # decision from training rows.
+                            override_id, verify_failed = _frozen_win_override_action(
+                                state,
+                                tracker.standing_win_cells(sample.current_player),
+                                center=(int(sample.center[0]), int(sample.center[1])),
+                                mover=sample.current_player,
+                            )
+                            if verify_failed:
+                                frozen_win_override_failures += 1
+                            if override_id is not None:
+                                frozen_win_overrides += 1
+                                played_action_id = override_id
+                                sample = replace(
+                                    sample,
+                                    metadata={
+                                        **dict(sample.metadata),
+                                        "pcr_full": False,
+                                        "win_override": True,
+                                    },
+                                )
+                        if sample.metadata.get("pcr_full", True):
                             for category, count in count_spill(sample).items():
                                 epoch_spill[category] += count
                         game["pending"].append((sample.current_player, sample, search.root_value))
-                        engine.apply_action(state, engine.PlacementAction(unpack_coord_id(search.action_id)))
-                        game["actions"].append(search.action_id)
+                        engine.apply_action(state, engine.PlacementAction(unpack_coord_id(played_action_id)))
+                        game["actions"].append(played_action_id)
+                        if tracker is not None:
+                            coord = unpack_coord_id(played_action_id)
+                            tracker.add_stone(int(coord.q), int(coord.r), sample.current_player)
+                        if played_action_id != int(search.action_id):
+                            # The native root advanced by ITS selected action, not
+                            # the override; drop the stale tree (mirrors the
+                            # policy-init path). The override is terminal, so this
+                            # only releases the finished game's subtree early.
+                            mcts_session.discard(int(game["search_key"]))
                 mcts_search_elapsed += perf_counter() - search_started
                 search_rounds += 1
 
@@ -762,23 +888,41 @@ def _generate_selfplay_epoch_lockstep(*, ctx: Any, components: Any, epoch: int, 
                     soft_z_lambda=config.samples.soft_z_lambda,
                     # Only train the opponent-policy head on full->full
                     # transitions (mask the target when the next opponent move
-                    # was a fast/policy-init row).
-                    mask_opp_from_fast=(pcr_enabled or policy_init_enabled),
+                    # was a fast/policy-init/win-override row).
+                    mask_opp_from_fast=(
+                        pcr_enabled or policy_init_enabled or frozen_win_override_enabled
+                    ),
                 )
                 total_decisions += len(finalized)
                 # Record ONLY full-search positions as training rows (KataGo
                 # records full only). Fast/init moves advanced the game and fed
                 # the dense target chain above, but never become policy/value
                 # targets. `pcr_full` defaults True so a non-PCR run keeps every
-                # row unchanged.
-                to_write = [s for s in finalized if s.metadata.get("pcr_full", True)]
-                pcr_fast_rows_excluded += len(finalized) - len(to_write)
+                # row unchanged. Truncated games optionally write nothing (the
+                # truncation-poison quarantine; see _rows_to_write).
+                to_write, fast_excluded, dropped_rows = _rows_to_write(
+                    finalized,
+                    truncated=truncated,
+                    drop_truncated_rows=config.samples.drop_truncated_rows,
+                )
+                pcr_fast_rows_excluded += fast_excluded
+                truncated_rows_dropped += dropped_rows
                 if to_write:
                     materialized, weight_stats = materialize_policy_surprise_rows(
                         to_write,
                         seed=base_seed + epoch * 1_000_000_003 + int(game["search_key"]),
                         uniform_fraction=config.samples.policy_surprise_uniform_fraction,
                         max_weight=config.samples.policy_surprise_max_weight,
+                        # turn_index IS the row's decision index in the dense
+                        # pending chain (one pending sample per decision with
+                        # turn_index=len(actions)), so the truncated-row
+                        # moves_left fallback game_decisions - turn_index - 1
+                        # is exact.
+                        game_decisions=len(finalized),
+                        moves_left_knee=config.samples.length_decay_moves_left_knee,
+                        moves_left_halflife=config.samples.length_decay_moves_left_halflife,
+                        game_length_knee=config.samples.length_decay_game_length_knee,
+                        game_length_halflife=config.samples.length_decay_game_length_halflife,
                     )
                     npz_path = record_dir / f"epoch_{epoch:06d}_game_{int(game['search_key']):06d}.npz"
                     write_result = write_selfplay_npz(
@@ -834,6 +978,13 @@ def _generate_selfplay_epoch_lockstep(*, ctx: Any, components: Any, epoch: int, 
         "completed_games": completed_games,
         "truncated_games": truncated_games,
         "games_finished": completed_games + truncated_games,
+        # Truncation-poison quarantine: recorded-quality rows dropped because
+        # their game hit max_actions (0 unless samples.drop_truncated_rows).
+        "truncated_rows_dropped": truncated_rows_dropped,
+        # Frozen-win override (selfplay.frozen_win_override): out-of-crop
+        # standing wins played directly / verify failures that fell through.
+        "frozen_win_overrides": frozen_win_overrides,
+        "frozen_win_override_failures": frozen_win_override_failures,
         "raw_samples": raw_samples_added,
         "effective_samples": samples_added,
         "total_decisions": total_decisions,
@@ -901,6 +1052,7 @@ def _generate_selfplay_epoch_continuous(*, ctx: Any, components: Any, epoch: int
     )
     pcr_full_proportion = float(selfplay.pcr_full_proportion)
     pcr_fast_visits = int(selfplay.pcr_fast_visits)
+    frozen_win_override_enabled = bool(selfplay.frozen_win_override)
 
     inference = DenseCNNInference(
         components.model.model,
@@ -960,6 +1112,9 @@ def _generate_selfplay_epoch_continuous(*, ctx: Any, components: Any, epoch: int
     policy_init_moves = 0
     pcr_fast_rows_excluded = 0
     npz_skipped_empty = 0
+    truncated_rows_dropped = 0
+    frozen_win_overrides = 0
+    frozen_win_override_failures = 0
     epoch_spill = {category: 0 for category in SPILL_CATEGORIES}
     npz_writes: list[Mapping[str, Any]] = []
     started = perf_counter()
@@ -1017,6 +1172,9 @@ def _generate_selfplay_epoch_continuous(*, ctx: Any, components: Any, epoch: int
             "state": engine.new_game(seed=seed),
             "pending": [],
             "actions": [],
+            # Frozen-win override: per-game incremental standing-win tracker,
+            # fed every applied placement (full, fast, and init moves alike).
+            "win_tracker": IncrementalWinTracker() if frozen_win_override_enabled else None,
         }
 
     def _writer(record_file: Any) -> None:
@@ -1054,15 +1212,31 @@ def _generate_selfplay_epoch_continuous(*, ctx: Any, components: Any, epoch: int
                         horizons,
                         truncated=truncated,
                         soft_z_lambda=config.samples.soft_z_lambda,
-                        mask_opp_from_fast=(pcr_enabled or policy_init_enabled),
+                        mask_opp_from_fast=(
+                            pcr_enabled or policy_init_enabled or frozen_win_override_enabled
+                        ),
                     )
-                    to_write = [s for s in finalized if s.metadata.get("pcr_full", True)]
+                    to_write, fast_excluded, dropped_rows = _rows_to_write(
+                        finalized,
+                        truncated=truncated,
+                        drop_truncated_rows=config.samples.drop_truncated_rows,
+                    )
                     if to_write:
                         materialized, weight_stats = materialize_policy_surprise_rows(
                             to_write,
                             seed=base_seed + epoch * 1_000_000_003 + int(game["search_key"]),
                             uniform_fraction=config.samples.policy_surprise_uniform_fraction,
                             max_weight=config.samples.policy_surprise_max_weight,
+                            # turn_index IS the row's decision index in the dense
+                            # pending chain (one pending sample per decision with
+                            # turn_index=len(actions)), so the truncated-row
+                            # moves_left fallback game_decisions - turn_index - 1
+                            # is exact.
+                            game_decisions=len(finalized),
+                            moves_left_knee=config.samples.length_decay_moves_left_knee,
+                            moves_left_halflife=config.samples.length_decay_moves_left_halflife,
+                            game_length_knee=config.samples.length_decay_game_length_knee,
+                            game_length_halflife=config.samples.length_decay_game_length_halflife,
                         )
                         npz_path = record_dir / f"epoch_{epoch:06d}_game_{int(game['search_key']):06d}.npz"
                         write_result = write_selfplay_npz(
@@ -1081,12 +1255,14 @@ def _generate_selfplay_epoch_continuous(*, ctx: Any, components: Any, epoch: int
                                 "policy_surprise_mean": weight_stats["policy_surprise_mean"],
                                 "frequency_weight_mean": weight_stats["frequency_weight_mean"],
                                 "decisions": len(finalized),
-                                "rows_excluded": len(finalized) - len(to_write),
+                                "rows_excluded": fast_excluded,
+                                "truncated_rows_dropped": dropped_rows,
                             }
                         )
                     else:
-                        # Possible under PCR: a short game whose every move drew
-                        # the fast coin. Nothing to train on; skip the shard.
+                        # Possible under PCR (a short game whose every move drew
+                        # the fast coin) or under the truncation-poison
+                        # quarantine. Nothing to train on; skip the shard.
                         writer_results.append(
                             {
                                 "path": None,
@@ -1095,7 +1271,8 @@ def _generate_selfplay_epoch_continuous(*, ctx: Any, components: Any, epoch: int
                                 "policy_surprise_mean": 0.0,
                                 "frequency_weight_mean": 0.0,
                                 "decisions": len(finalized),
-                                "rows_excluded": len(finalized),
+                                "rows_excluded": fast_excluded,
+                                "truncated_rows_dropped": dropped_rows,
                             }
                         )
                 except BaseException as exc:
@@ -1133,6 +1310,7 @@ def _generate_selfplay_epoch_continuous(*, ctx: Any, components: Any, epoch: int
             nonlocal searched_positions, mcts_simulations, completed_games, truncated_games
             nonlocal next_game_index, games_started, last_live_write
             nonlocal full_search_count, fast_search_count, policy_init_moves
+            nonlocal frozen_win_overrides, frozen_win_override_failures
             game = active.pop(int(game_key), None)
             if game is None:
                 raise RuntimeError(f"continuous MCTS callback received unknown game key {game_key}")
@@ -1181,14 +1359,41 @@ def _generate_selfplay_epoch_continuous(*, ctx: Any, components: Any, epoch: int
                 root_prior_policy=search.root_prior_policy,
                 metadata=metadata,
             )
-            if is_full:
+            played_action_id = int(search.action_id)
+            tracker = game["win_tracker"]
+            if tracker is not None:
+                # Frozen-win override: if the MOVER has standing wins and ALL of
+                # them sit outside the radius-20 crop (invisible/unplayable for
+                # the search), play the engine-verified win cell instead of the
+                # search move and exclude the decision from training rows. The
+                # override is terminal, so the Rust slot never sees a mismatched
+                # 'advance' (the game finishes via the None/'replace' path).
+                override_id, verify_failed = _frozen_win_override_action(
+                    state,
+                    tracker.standing_win_cells(sample.current_player),
+                    center=(int(sample.center[0]), int(sample.center[1])),
+                    mover=sample.current_player,
+                )
+                if verify_failed:
+                    frozen_win_override_failures += 1
+                if override_id is not None:
+                    frozen_win_overrides += 1
+                    played_action_id = override_id
+                    sample = replace(
+                        sample,
+                        metadata={**dict(sample.metadata), "pcr_full": False, "win_override": True},
+                    )
+            if sample.metadata.get("pcr_full", True):
                 # Spill telemetry describes RECORDED rows only (comparable to a
                 # non-PCR run).
                 for category, count in count_spill(sample).items():
                     epoch_spill[category] += count
             game["pending"].append((sample.current_player, sample, search.root_value))
-            engine.apply_action(state, engine.PlacementAction(unpack_coord_id(search.action_id)))
-            game["actions"].append(search.action_id)
+            engine.apply_action(state, engine.PlacementAction(unpack_coord_id(played_action_id)))
+            game["actions"].append(played_action_id)
+            if tracker is not None:
+                coord = unpack_coord_id(played_action_id)
+                tracker.add_stone(int(coord.q), int(coord.r), sample.current_player)
 
             terminal = engine.terminal(state)
             truncated = terminal is None and len(game["actions"]) >= selfplay.max_actions
@@ -1293,6 +1498,7 @@ def _generate_selfplay_epoch_continuous(*, ctx: Any, components: Any, epoch: int
     # having no recordable rows have path=None.
     total_decisions = sum(int(item.get("decisions", item["raw_rows"])) for item in writer_results)
     pcr_fast_rows_excluded = sum(int(item.get("rows_excluded", 0)) for item in writer_results)
+    truncated_rows_dropped = sum(int(item.get("truncated_rows_dropped", 0)) for item in writer_results)
     npz_skipped_empty = sum(1 for item in writer_results if item.get("path") is None)
     npz_writes.extend(item for item in writer_results if item.get("path") is not None)
     raw_samples_added = sum(int(item["raw_rows"]) for item in npz_writes)
@@ -1328,6 +1534,13 @@ def _generate_selfplay_epoch_continuous(*, ctx: Any, components: Any, epoch: int
         "completed_games": completed_games,
         "truncated_games": truncated_games,
         "games_finished": games_done,
+        # Truncation-poison quarantine: recorded-quality rows dropped because
+        # their game hit max_actions (0 unless samples.drop_truncated_rows).
+        "truncated_rows_dropped": truncated_rows_dropped,
+        # Frozen-win override (selfplay.frozen_win_override): out-of-crop
+        # standing wins played directly / verify failures that fell through.
+        "frozen_win_overrides": frozen_win_overrides,
+        "frozen_win_override_failures": frozen_win_override_failures,
         "raw_samples": raw_samples_added,
         "effective_samples": samples_added,
         "total_decisions": total_decisions,

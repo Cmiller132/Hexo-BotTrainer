@@ -119,6 +119,26 @@ class Model1SampleConfig:
     # a small lambda regularizes the value head against the bimodal +-1 labels of
     # an all-decisive game. See samples.finalize_game_samples.
     soft_z_lambda: float = 0.0
+    # Truncation-poison quarantine. A self-play game that hits max_actions has
+    # winner=None and every row gets value target 0.0 ("draw") — but Hexo has no
+    # draws; a truncated marathon is an arbitrary cutoff, not an outcome, so the
+    # 0.0 labels are provably wrong. When true, truncated games write NO training
+    # rows at all (the .hxr record and game bookkeeping are unchanged). Default
+    # false keeps the old behavior byte-identical.
+    drop_truncated_rows: bool = False
+    # Length-decay row weighting (ships dormant: knee 0 disables each term).
+    # Applied in replay.materialize_policy_surprise_rows AFTER the policy-surprise
+    # uniform floor and max_weight clamp: each row's frequency weight is
+    # multiplied by 0.5 ** ((ml - knee) / halflife) when its moves_left `ml`
+    # exceeds `length_decay_moves_left_knee`, and by
+    # 0.5 ** ((game_decisions - knee) / halflife) when the game's decision count
+    # exceeds `length_decay_game_length_knee`. Down-weights the coin-flip-labeled
+    # row flood from crop-frozen marathon games; weights < 1 act as probabilistic
+    # row drops in the floor+Bernoulli duplication loop.
+    length_decay_moves_left_knee: float = 0.0
+    length_decay_moves_left_halflife: float = 40.0
+    length_decay_game_length_knee: float = 0.0
+    length_decay_game_length_halflife: float = 60.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -229,6 +249,17 @@ class Model1SelfPlayConfig:
     policy_init_avg_plies: float = 0.0
     policy_init_max_plies: int = 0
     policy_init_temperature: float = 1.0
+    # Frozen-win override (crop-freeze surgical ending). In long games the stone
+    # blob outgrows the radius-20 input crop and a standing immediate win whose
+    # every completion cell lies OUT of the crop becomes invisible/unplayable for
+    # BOTH players (engine-verified on main_3 marathons: 47/47 standing wins
+    # unplayed for hundreds of plies). When true, self-play tracks standing win
+    # cells incrementally (win_tracker.IncrementalWinTracker); if the mover has
+    # standing wins and ALL of them are out-of-crop, the engine-verified
+    # min-packed-id win cell is played instead of the search move and the
+    # decision is excluded from training rows (pcr_full=False + win_override).
+    # In-crop standing wins are never overridden. Default false (off).
+    frozen_win_override: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -369,6 +400,11 @@ def parse_model1_config(raw: Mapping[str, Any] | None) -> Model1Config:
             policy_surprise_uniform_fraction=float(samples.get("policy_surprise_uniform_fraction", 0.5)),
             policy_surprise_max_weight=float(samples.get("policy_surprise_max_weight", 8.0)),
             soft_z_lambda=_soft_z_lambda(samples.get("soft_z_lambda", 0.0)),
+            drop_truncated_rows=bool(samples.get("drop_truncated_rows", False)),
+            length_decay_moves_left_knee=float(samples.get("length_decay_moves_left_knee", 0.0)),
+            length_decay_moves_left_halflife=float(samples.get("length_decay_moves_left_halflife", 40.0)),
+            length_decay_game_length_knee=float(samples.get("length_decay_game_length_knee", 0.0)),
+            length_decay_game_length_halflife=float(samples.get("length_decay_game_length_halflife", 60.0)),
         ),
         selfplay=Model1SelfPlayConfig(
             search_visits=int(selfplay.get("search_visits", 128)),
@@ -408,6 +444,7 @@ def parse_model1_config(raw: Mapping[str, Any] | None) -> Model1Config:
             policy_init_avg_plies=float(selfplay.get("policy_init_avg_plies", 0.0)),
             policy_init_max_plies=int(selfplay.get("policy_init_max_plies", 0)),
             policy_init_temperature=float(selfplay.get("policy_init_temperature", 1.0)),
+            frozen_win_override=bool(selfplay.get("frozen_win_override", False)),
         ),
         evaluation=Model1EvalConfig(
             games_per_epoch=int(evaluation.get("games_per_epoch", 64)),
