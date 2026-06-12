@@ -258,7 +258,21 @@ policy_init_temperature = 1.4
 frozen_win_override = true
 
 [model.config.evaluation]
-games_per_epoch = 128
+# Owner directive (2026-06-12): SealBot is measured-saturated as a strength
+# arbiter (a much stronger checkpoint scored identically), so the eval budget
+# moves to an ANCHORED RATING LADDER — current-vs-FIXED-anchor model games,
+# `reference_games` games PER anchor:
+#   ckpt5  = the healthy warm-start baseline anchor (this run initializes from
+#            it; epoch N vs ckpt5 is the direct "did we improve on the start"
+#            read);
+#   ckpt10 = the strongest measured anchor (beat ckpt5 72-24 h2h).
+# The cached anchor-vs-anchor edge (72-24) + each eval's per-anchor results
+# feed a Bradley-Terry rating in the monitoring tooling; at ~32 games/opponent
+# each eval's rating CI is ~±40 Elo, so single evals are noisy by design — the
+# TREND across evals is the significant signal.
+# Records: eval-* (SealBot), ref0-* (ckpt5), ref1-* (ckpt10); diagnostics get
+# `references` = per-anchor list (+ `reference` = first block, compat alias).
+games_per_epoch = 32
 eval_every = 5
 sealbot_variant = "best"
 sealbot_time_limit = 0.05
@@ -266,6 +280,11 @@ max_actions = 1024
 require_sealbot = true
 opening_temperature = 0.6
 opening_moves = 8
+reference_games = 32
+reference_checkpoints = [
+  "/mnt/e/Hexo-BotTrainer/runs/dense_cnn_restnet_main_3/checkpoints/epoch_000005.pt",
+  "/mnt/e/Hexo-BotTrainer/runs/dense_cnn_restnet_main_3/checkpoints/epoch_000010.pt",
+]
 
 [model.config.performance]
 calibrate = true
