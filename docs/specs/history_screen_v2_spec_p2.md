@@ -1,7 +1,7 @@
 # History Screen v2 — PHASE 2 Spec Addendum (Epoch Inspector + Game Panel + /api/training/epoch)
 
 Status: FINAL. Binding contract for the three phase-2 implementation agents.
-Builds ON TOP of the phase-1 spec (`scripts/_history_redesign_spec.md`) — every phase-1
+Builds ON TOP of the phase-1 spec (`docs/specs/history_screen_v2_spec.md`) — every phase-1
 rule (frozen helpers §3, ids, "--" conventions, node --check, no commits/restarts)
 still applies. All field names below were verified against `web.py`,
 `debug_worker.py`, app.js, and a real run dir
