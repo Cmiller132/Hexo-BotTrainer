@@ -8,17 +8,16 @@ stack, plugged into the generic `hexo_train` pipeline as the `hexgt` plugin.
 
 ## Status
 
-**Legacy / halted as a training lineage.** The `hexgt_rl_main3` run was
-permanently halted by the owner at epoch 40 (2026-06-05, see `HANDOFF.md`).
-The active lineage is `packages/dense_cnn_restnet`. The code is NOT dead,
-though -- it is still live infrastructure:
+Legacy as a training lineage: its RL run, `hexgt_rl_main3`, halted
+2026-06-05, and the active training lineage is `packages/dense_cnn_restnet`.
+The code remains live infrastructure:
 
-| Consumer | Why it still matters |
+| Consumer | Use |
 |---|---|
 | `packages/hexgnn` | A stripped-down fork of this package; mirrors its Python modules and compiles into the same native module. |
 | `packages/hexo_frontend/python/hexo_frontend/debug_infer.py` | Dashboard debug worker and Match Arena load hexgt checkpoints through this package. |
-| `packages/dense_cnn_restnet` | Copied this package's PCR (Playout Cap Randomization) design -- design lineage, no import. |
-| `tests/test_hexgt_*.py` (~30 files) | Contract gates: Rust/Python featurizer byte parity, D6 equivariance, MCTS/PCR/TSS regressions. Authoritative only in the WSL venv. |
+| `packages/dense_cnn_restnet` | Adopted this package's PCR (Playout Cap Randomization) design -- design lineage, no import. |
+| `tests/test_hexgt_*.py` (~30 files) | Contract gates: Rust/Python featurizer byte parity, D6 equivariance, MCTS/PCR/TSS regressions. Run in the WSL venv (the native module is Linux-only). |
 | `hexo_models` native build | The Rust crate here is `#[path]`-included into the single `hexo_models` cdylib; every rebuild compiles it. |
 
 Runs that used this lineage: the model2/model3 configs
@@ -68,7 +67,8 @@ reused from dense_cnn, segmented per-graph softmax CE for the dynamic policy).
 The crate is NOT standalone: `packages/hexo_models/rust/src/lib.rs`
 `#[path]`-includes `hexgt/rust/src/lib.rs`, exposing it to Python as
 `hexo_models._rust.hexgt`. Rebuild with
-`scripts/_rebuild_hexo_models_hexgt.sh` (maturin, WSL hexgt-build venv).
+`scripts/_rebuild_hexo_models_hexgt.sh` (maturin, WSL hexgt-build venv);
+Rust changes take effect on the next rebuild.
 
 | File | Role |
 |---|---|
@@ -76,17 +76,17 @@ The crate is NOT standalone: `packages/hexo_models/rust/src/lib.rs`
 | `mcts_tree.rs` | Model-agnostic PUCT tree: lazy edge materialization with nucleus (top-p) widening, FPU, virtual loss, tactical edge injection (forced visits for threat cells), subtree promotion. |
 | `mcts_eval.rs` | Evaluator boundary: hash/dedupe leaf states, Rust-side featurize (no Python re-clone), chunked callback into the Python evaluator, FIFO eval cache. |
 | `candidates.rs` | THE shared candidate set (active windows union n-radius minus dead cells, default n=3) + typed-graph builder used by both sample-gen and live search. |
-| `features.rs` | Rayon-parallel featurizer/collator emitting a zero-copy buffer-protocol batch; must stay byte-identical to `features.py`/`collate.py` (parity-tested). |
+| `features.rs` | Rayon-parallel featurizer/collator emitting a zero-copy buffer-protocol batch; byte-identical to `features.py`/`collate.py` by contract (parity-tested). |
 | `threats.rs` | Shim re-exporting `crate::threats_shared` (single TSS threat/win-now/forced-loss definition shared with dense_cnn) + a diagnostic pyfunction. |
-| `vcf.rs` | Exploratory depth-bounded forcing-move solver; explicitly NOT wired into live search (benchmark hook only). |
+| `vcf.rs` | Depth-bounded forcing-move solver exposed as a benchmark hook; not wired into live search. |
 | `state.rs` | Clones live `hexo_engine.HexoState` objects via the `hexo_engine._rust` PyCapsule state API (version 2). |
 
 Evaluator protocol: Rust calls
 `HexgtInference.evaluate_featurized_batch(batch)` (a collated-graph dict of
 buffer-protocol arrays) and parses back `{values_bytes, priors_bytes}` --
 float32 bytes, priors in the packed candidate CSR order. `inference.py`
-implements this with FP16, VRAM-budgeted sorted chunking, and audited
-sanitization of non-finite logits.
+implements this with FP16, VRAM-budgeted sorted chunking, and sanitization
+of non-finite logits.
 
 ## Python session API (python/hexo_models/hexgt/mcts.py)
 
@@ -113,9 +113,8 @@ results = session.run(
   byte-backed lazily-decoded `visit_policy` / `root_prior_policy`
   (`CompactVisitPolicy`), `root_value`, `visits`, `diagnostics`.
 - The `per_root_*` overrides allow heterogeneous visit caps / noise within
-  one batched call (built so PCR full+fast could share a forward stream),
-  but production selfplay instead issues two separate `run()` calls per
-  full/fast subset -- the per-root path is exercised only by tests.
+  one batched call (so PCR full+fast can share a forward stream); production
+  selfplay issues two separate `run()` calls for the full and fast subsets.
 
 ## Self-play and PCR (python/hexo_models/hexgt/selfplay.py)
 
@@ -137,9 +136,9 @@ session, batching all due decisions per round. Key mechanics:
   `hexo_models.dense_cnn.replay.materialize_policy_surprise_rows`.
 - **Soft-Z value targets** (`samples.soft_z_lambda`) through
   `hexo_models.dense_cnn.samples.finalize_game_samples`.
-- **Sanitization taint**: if the evaluator sanitized any non-finite logit in
-  a batched round, every position decided that round is excluded
-  (conservatively coarse; acknowledged in-code).
+- **Sanitization exclusion**: if the evaluator sanitized any non-finite
+  logit in a batched round, every position decided that round is excluded
+  from training data.
 - Outputs: `.hxr` game records (`hexo_runner.records.HexoRecordFile`) +
   dense_cnn-format compact `.npz` shards
   (`hexo_models.dense_cnn.compact_io`), and a rich `SelfPlayResult`
@@ -149,20 +148,13 @@ session, batching all due decisions per round. Key mechanics:
 
 | Boundary | Contract |
 |---|---|
-| `hexo_train` | Entry point `hexgt = hexo_models.hexgt.plugin:get_plugin` (`packages/hexo_models/pyproject.toml`); `plugin.py` wires build_model / trainer / checkpoints / selfplay / eval. The real RL run bypassed the plugin and used `scripts/_rl_train.py` directly. |
+| `hexo_train` | Entry point `hexgt = hexo_models.hexgt.plugin:get_plugin` (`packages/hexo_models/pyproject.toml`); `plugin.py` wires build_model / trainer / checkpoints / selfplay / eval. The `hexgt_rl_main3` run drove training through `scripts/_rl_train.py` directly rather than the plugin loop. |
 | `hexo_models.dense_cnn` | Reuses `compact_io` (shard format), `samples` (compact rows + finalization), `replay.materialize_policy_surprise_rows`. |
 | `hexo_engine` | Live states via the Python API; Rust side clones states through the v2 PyCapsule state API and reads the engine's incremental `WindowStore` for candidates/threats. |
 | `hexo_runner` | `player.py` implements the runner player protocol (greedy eval play); `evaluation.py` runs SealBot gating via `run_match` + `SealBotPlayer`; selfplay writes `.hxr` via `hexo_runner.records`. |
 | `hexo_utils` | `hash_state` (Rust) keys the evaluator/transposition caches. |
 | Checkpoints | `.pt` payload `{model: "hexo_models.hexgt", model_state, optimizer_state, train_state, epoch, metadata}` with optional `.txt` pointer indirection (`checkpoints.py`); read by `scripts/_rl_train.py` and the frontend. |
 
-## Gotchas for a cold reader
-
-- `constants.py` + `features.py` must stay byte-identical to
-  `rust/src/constants.rs` + `features.rs`; the parity tests are the only
-  guard. Any Rust edit is inert until the maturin rebuild script runs.
-- Some docstrings predate refactors: `mcts.py` names a nonexistent
-  `evaluate_graph_facts` (the real callback is `evaluate_featurized_batch`),
-  and `mcts_tree.rs`'s header denies the nucleus widening it implements.
-- `hexgnn` is a near-verbatim fork; greps surface both copies and fixes do
-  not propagate between them.
+Cross-language contract: `constants.py` + `features.py` and
+`rust/src/constants.rs` + `features.rs` define the same featurization and are
+held byte-identical by the parity tests.

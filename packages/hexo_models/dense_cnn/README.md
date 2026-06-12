@@ -5,22 +5,22 @@ hex-disk crop encoder, a gated-residual CNN with a 65-bin value head, a
 KataGo-style compact-sample/NPZ replay pipeline, and a Rust/PyO3 batched PUCT
 MCTS.
 
-## Status (read this first)
+## Status
 
 The package has a split active/legacy status:
 
-| Half | Status | Why |
+| Half | Status | Detail |
 |---|---|---|
-| Python (`python/hexo_models/dense_cnn/`) | **Legacy** | Superseded by `packages/dense_cnn_restnet`, a full Python fork (ResTNet trunk). Kept loadable for old checkpoints, the dashboard debug worker, ~14 test files, and `hexgnn`'s `compact_io` dependency. |
-| Rust (`rust/src/`) | **Active production** | `dense_cnn_restnet` ships no Rust of its own. The live `main_4` run (and `main_1`..`main_3` before it) drives this crate's encoder, MCTS sessions (including the restnet-only `run_continuous` scheduler), and sample-fact builder through `hexo_models._rust.dense_cnn`. |
+| Python (`python/hexo_models/dense_cnn/`) | Legacy | Superseded by `packages/dense_cnn_restnet`, a full Python fork (ResTNet trunk). Kept loadable for old checkpoints, the dashboard debug worker, ~14 test files, and `hexgnn`'s `compact_io` dependency. |
+| Rust (`rust/src/`) | Active production | `dense_cnn_restnet` ships no Rust of its own. The live `main_4` run (and `main_1`..`main_3` before it) drives this crate's encoder, MCTS sessions (including the restnet-only `run_continuous` scheduler), and sample-fact builder through `hexo_models._rust.dense_cnn`. |
 
 Runs that used this lineage directly (all retired): `configs/dense_cnn_model1*.toml`
 (Windows-native model1 era) and `configs/dense_cnn_rl_main1.toml`. The active
 restnet runs (`configs/dense_cnn_restnet_main_*.toml`) use only the Rust half.
 
-Consequence: **rebuilding the crate for restnet changes this lineage's search
-semantics too** (single shared `hexo_models._rust` module). Fixes to the Python
-half must usually be mirrored by hand into the restnet fork, and vice versa.
+There is a single shared `hexo_models._rust` native module, so one crate build
+serves both this lineage and the restnet fork; the two Python halves are
+maintained as parallel forks of the same modules.
 
 ## Architecture (`python/.../architecture.py`)
 
@@ -31,7 +31,7 @@ half must usually be mirrored by hand into the restnet fork, and vice versa.
 | Input | `(N, 13, 41, 41)` float32 crop tensor |
 | Stem | `HexConv2d` 13 -> C, ReLU |
 | Trunk | `blocks` x `GatedResBlock` (residual + sigmoid-gated main branch); defaults C=96, blocks=6 (`constants.DEFAULT_CHANNELS/_BLOCKS`) |
-| `policy` head | `PolicyHead`: fully-convolutional, one logit per crop cell, flattened to `(N, 1681)` ("P7" fix — replaced the old 5.6M-param FC head that echoed diffuse priors) |
+| `policy` head | `PolicyHead`: fully-convolutional, one logit per crop cell, flattened to `(N, 1681)`. Chosen to be translation-equivariant and parameter-light, and to produce the spatial `policyTargetsNCHW` target directly (rationale in the head docstring). |
 | `value` head | `ValueBinnedHead`: KataGo-style 65-bin distribution over `[-1, 1]` |
 | `opp_policy` head | Second `PolicyHead`; target = next opponent MCTS policy |
 | `stvalue_<h>` heads | Optional `ValueBinnedHead` per configured short-term-value horizon (EMA of future root values) |
@@ -44,14 +44,19 @@ into plain `nn.Conv2d` and conv+BN fused, used for CUDA inference.
 
 ## Encoding / features
 
-The board is projected into a fixed 41x41 square crop covering a **radius-20
-hex disk** around a crop center; cells outside the disk are dead. The
-contract exists in two languages and must be kept in sync by hand:
+The board is projected into a fixed 41x41 square crop covering a radius-20
+hex disk around a crop center; cells outside the disk are dead. The crop also
+defines the action space: MCTS acts on policy cells represented by the fixed
+crop, so the legal plane and the encoder's legal-action lists cover the legal
+engine moves that fall inside the disk (`encoding.rs`, `Model1EncodedState`).
 
-- Rust (production path): `rust/src/encoding.rs` + `rust/src/constants.rs` —
+The tensor contract is implemented in two languages that encode identical
+planes:
+
+- Rust (production path): `rust/src/encoding.rs` + `rust/src/constants.rs` --
   encodes live `HexoState` objects for inference and MCTS leaves.
-- Python (training/expand path): `constants.py`, `geometry.py`, `input.py` —
-  re-expands stored compact facts into identical tensors.
+- Python (training/expand path): `constants.py`, `geometry.py`, `input.py` --
+  re-expands stored compact facts into the same tensors.
 
 The 13 planes (`constants.py`):
 
@@ -65,13 +70,6 @@ The 13 planes (`constants.py`):
 | 5 | first stone of turn | 12 | opponent last turn |
 | 6 | player colour | | |
 
-Known design limitation: the encoder **intentionally excludes legal engine
-moves outside the radius-20 crop** from the policy and from MCTS
-(`encoding.rs`, `Model1EncodedState.all_legal_action_count` comment). This
-freeze-out of out-of-rim wins was the root cause of the restnet `main_3`
-collapse (see `docs/analysis/MAIN4_RECOMMENDATION.md`); every consumer of this
-Rust inherits it.
-
 ## Sample and shard formats
 
 Self-play stores compact *facts*, not tensors; tensors are rebuilt at train
@@ -81,11 +79,11 @@ time so D6 symmetry can be re-randomized per epoch.
 |---|---|---|
 | Per-position sample | `samples.py` (`Model1SampleData`, target schema v4) | Packed stones/history (int16 coords + 1-byte owners), compact visit policy, value/opp-policy/STV targets. Facts built by Rust `sample_gen.rs`; targets attached in Python by `finalize_game_samples` (z from winner, opp policy from next opponent decision, STV = EMA of future root values). |
 | Compact shard | `compact_io.py` (`COMPACT_SCHEMA_VERSION = 1`) | One columnar `.npz` per game: fixed per-row scalar arrays plus, for each variable-length field, a concatenated data array + `int64` offsets array of length N+1. Root prior, `policy_surprise`, `frequency_weight` are dropped at write (surprise weighting is pre-baked as row duplication by `replay.materialize_policy_surprise_rows`). |
-| Expanded training rows | `replay.py` `NPZ_KEYS` | `inputNCHW`, `policyTargetsNCHW`, `oppPolicyTargetsNCHW`, `rootPolicyNCHW`, `legalMaskNCHW`, `valueTargetsN`, `shortTermValueTargetsNC`, `shortTermValueMasksNC`, `metadataInputNC` — produced by the KataGo-style shuffle (`build_katago_shuffle`). |
+| Expanded training rows | `replay.py` `NPZ_KEYS` | `inputNCHW`, `policyTargetsNCHW`, `oppPolicyTargetsNCHW`, `rootPolicyNCHW`, `legalMaskNCHW`, `valueTargetsN`, `shortTermValueTargetsNC`, `shortTermValueMasksNC`, `metadataInputNC` -- produced by the KataGo-style shuffle (`build_katago_shuffle`). |
 
 The compact shard format is a cross-lineage contract: `packages/hexgnn`
-imports `compact_io` directly, and the restnet fork's copy must stay
-byte-compatible.
+imports `compact_io` directly, and the restnet fork's copy stays
+byte-compatible with it.
 
 ## Training approach
 
@@ -114,7 +112,7 @@ byte-compatible.
 
 ## Rust side (`rust/src/`)
 
-Not a standalone crate — `#[path]`-included by
+Not a standalone crate -- `#[path]`-included by
 `packages/hexo_models/rust/src/lib.rs` and exposed as the
 `hexo_models._rust.dense_cnn` submodule (rebuild via
 `scripts/_rebuild_hexo_models_hexgt.sh`, maturin, WSL venv).
@@ -127,7 +125,7 @@ Not a standalone crate — `#[path]`-included by
 | `mcts_eval.rs` | Evaluator boundary: state hash/dedup/cache, strict byte protocol to Python (`evaluate_model1_payload` returns exact-length `values_bytes`/`priors_bytes`) |
 | `sample_gen.rs` | `model1_sample_from_state`: compact per-position facts for self-play |
 | `state.rs` | Clones live Python `HexoState` via the `hexo_engine._rust` state-API capsule (v2) |
-| `constants.rs` | Rust mirror of the tensor contract (must match `constants.py`) |
+| `constants.rs` | Rust mirror of the tensor contract (matches `constants.py`) |
 
 TSS (threat-space search) semantics come from the shared
 `packages/hexo_models/rust/src/threats_shared.rs` (one definition shared with
@@ -149,6 +147,5 @@ the hexgt lineage).
 `tests/test_dense_cnn_*.py` (~14 files: pipeline, compact_io, replay schema,
 sample generation, TSS, inference bucketing, pool lifecycle, temperature
 schedule) plus `tests/test_hexo_models_architecture.py` /
-`test_hexo_models_samples.py`. Authoritative only in the WSL `hexgt-build`
-venv (the native `.so` is Linux-only). Note: `test_dense_cnn_compact_io.py`
-has 4 known-stale failures asserting pre-disk-crop semantics.
+`test_hexo_models_samples.py`. Run them in the WSL `hexgt-build` venv (the
+native `.so` is Linux-only).

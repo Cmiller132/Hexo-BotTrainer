@@ -15,9 +15,18 @@ accelerator (candidates / featurizer / MCTS / TSS threats).
 aside (not the active path)"; "GNN experiment (parked)"). The active training
 lineage is `packages/dense_cnn_restnet`. hexgnn remains buildable and
 referenced (driver scripts, `configs/hexgnn_model.toml`, 9 test files), and
-its Rust crate is still compiled into every `hexo_models` native build.
+its Rust crate is compiled into every `hexo_models` native build.
 
-## Module table — Python (`python/hexgnn/`)
+## Design lineage
+
+hexgnn was forked from hexgt so the sparse-graph featurizer and performance
+rewrite could evolve independently of the (halted) hexgt run. The
+evaluation / inference / mcts / player modules and the whole Rust tree are
+forks of their `hexo_models/hexgt` counterparts and keep identical public
+names; the two lineages evolve independently. The model is D6-invariant by
+construction, so training uses no symmetry augmentation.
+
+## Module table -- Python (`python/hexgnn/`)
 
 | File | Role |
 | --- | --- |
@@ -32,20 +41,20 @@ its Rust crate is still compiled into every `hexo_models` native build.
 | `losses.py` | 65-bin value loss (reused from dense_cnn) + segmented per-graph softmax CE for the dynamic candidate policy + `hexgnn_loss` aggregator. |
 | `trainer.py` | `HexgnnTrainer`: AdamW + AMP GradScaler + grad clip, warmup + resume-safe LR decay, transient-CUDA retry guard, `train_on_shards` via dense_cnn `compact_io`. |
 | `expand.py` | Recompute-at-expand: compact .npz rows -> engine replay -> Rust graph + policy/opp/value targets, with BC-dataset pruning by out-of-candidate visit mass. |
-| `checkpoints.py` | Plugin-path checkpoint loader/saver (`{"model": "hexgnn", "model_state": ...}` + `.txt` pointer indirection). NOTE: the actual RL driver uses a different format (see gotchas). |
-| `plugin.py` | `HexgnnPlugin` for the `hexo_train` registry (build_model, component overrides, generate_selfplay, evaluate_epoch) — the dormant config-CLI path. |
+| `checkpoints.py` | Checkpoint loader/saver for the plugin/config-CLI path (`{"model": "hexgnn", "model_state": ...}` + `.txt` pointer indirection). The RL driver uses its own format (see Checkpoint formats). |
+| `plugin.py` | `HexgnnPlugin` for the `hexo_train` registry (build_model, component overrides, generate_selfplay, evaluate_epoch) -- the dormant config-CLI path. |
 | `rust_bridge.py` | Thin boundary to `hexo_models._rust.hexgnn` (capabilities, candidate_ids, graph_facts, MCTS session). Readable error if the native module is absent. |
 | `mcts.py` | `HexgnnMctsSession` Python wrapper (subtree reuse keyed by game, per-root PCR overrides) + byte-backed `CompactVisitPolicy`/`SearchResult` decode. |
 | `inference.py` | `HexgnnInference` fp16 evaluator: pad-budget sorted chunking, pinned-memory H2D, int32 wire narrowing, nan/inf sanitization audit; `evaluate_featurized_batch` is the Rust MCTS callback. |
 | `player.py` | `hexo_runner` player adapter (deterministic greedy eval, optional opening temperature); used by `evaluation.make_hexgnn_factory`. |
-| `evaluation.py` | `run_head_to_head` (sequential; used by the RL driver and `evaluate_epoch` SealBot hook) plus `HexgnnBatchedSearcher`/`run_head_to_head_parallel` (no live callers found). |
+| `evaluation.py` | `run_head_to_head` (sequential; used by the RL driver and the `evaluate_epoch` SealBot hook) plus a batched variant, `HexgnnBatchedSearcher` / `run_head_to_head_parallel`, mirroring the hexgt API. |
 | `selfplay.py` | Game-driven self-play: batched MCTS over active games, KataGo PCR full/fast split, temperature schedules, policy-surprise row duplication, soft-Z targets, sanitization-taint exclusion, `.hxr` records + dense_cnn-format compact shards. |
 
-## Module table — Rust (`rust/src/`)
+## Module table -- Rust (`rust/src/`)
 
-The crate is NOT standalone (no Cargo.toml here). It is `#[path]`-included by
-`packages/hexo_models/rust/src/lib.rs` and compiled into the single native
-module as the submodule `hexo_models._rust.hexgnn`.
+The crate is not a standalone Cargo package (no Cargo.toml here). It is
+`#[path]`-included by `packages/hexo_models/rust/src/lib.rs` and compiled into
+the single native module as the submodule `hexo_models._rust.hexgnn`.
 
 | File | Role |
 | --- | --- |
@@ -57,31 +66,56 @@ module as the submodule `hexo_models._rust.hexgnn`.
 | `mcts.rs` | `HexgnnMctsSession` pyclass: batched PUCT search over many games, subtree promotion/reuse, per-root PCR overrides. |
 | `mcts_tree.rs` | Model-agnostic PUCT tree mechanics (nucleus widening, forced playouts, Dirichlet noise) + TSS tactical-candidate injection. |
 | `mcts_eval.rs` | Evaluator boundary: state hashing/transposition cache, in-Rust graph construction for leaves, calls the Python evaluator, parses the values/priors byte contract. |
-| `threats.rs` | Phase-aware Connect6 threat / hitting-set analysis used by the tree injection and leaf-value override. This is a fork, not the shared `crate::threats_shared` used by dense_cnn/hexgt. |
-| `vcf.rs` | Exploratory depth-bounded forcing-move (VCF) solver prototype; self-documented as a benchmark artifact, NOT wired into live MCTS. |
+| `threats.rs` | Phase-aware Connect6 threat / hitting-set analysis used by the tree injection and leaf-value override. A lineage-local fork; the dense_cnn/hexgt crates use the shared `crate::threats_shared` instead. |
+| `vcf.rs` | Exploratory depth-bounded forcing-move (VCF) solver prototype, kept as a benchmark artifact; not wired into the live MCTS. |
+
+## Packaging and build
+
+hexgnn's Python is a plain setuptools package (`pyproject.toml`, package dir
+`python/`). Its Rust lives in this package's `rust/src` but is compiled by the
+`hexo_models` maturin build: `hexo_models/rust/src/lib.rs` `#[path]`-includes
+`../../../hexgnn/rust/src/lib.rs`, and the `hexo_models` sdist bundles
+`../hexgnn/rust`. Installing hexgnn therefore never builds native code; Rust
+changes take effect after rebuilding `hexo_models`
+(`scripts/_rebuild_hexo_models_hexgt.sh`, WSL venv). The package's integration
+points outside its own directory are that `#[path]` include, the sdist glob in
+`hexo_models/pyproject.toml`, and the `hexo_train.models` entry point declared
+in this package's `pyproject.toml`.
+
+## Checkpoint formats
+
+Each entry path has its own checkpoint format:
+
+- The RL driver (`scripts/_rl_train_hexgnn.py`) saves and resumes
+  `{"model": <state_dict>, "arch": <meta>, "optimizer": ..., "train_state": ...}`.
+  This is the format `hexo_frontend/debug_infer.py` loads as the graph (HEXGT)
+  lineage for the dashboard debug screen.
+- The plugin/config-CLI path (`checkpoints.py`) saves
+  `{"model": "hexgnn", "model_state": ...}` behind a `.txt` pointer file.
 
 ## Connections to other packages
 
 Imports OUT (what hexgnn depends on):
 
-- `hexo_models._rust.hexgnn` — via `rust_bridge.py`. The native code lives in
-  this package's `rust/` tree but is compiled into the `hexo_models` wheel;
-  installing hexgnn never rebuilds the native module.
-- `hexo_models.dense_cnn` — `selfplay.py` writes and `trainer.py`/`expand.py`
+- `hexo_models._rust.hexgnn` -- via `rust_bridge.py`. The native code lives in
+  this package's `rust/` tree but is compiled into the `hexo_models` wheel
+  (see Packaging and build).
+- `hexo_models.dense_cnn` -- `selfplay.py` writes and `trainer.py`/`expand.py`
   read dense_cnn's compact .npz shard format (`compact_io.write_compact_shard`
   / `read_compact_shard`); sample finalization reuses `dense_cnn.samples`
   (`Model1SampleData`, `finalize_game_samples`, `sample_from_state`) and
   `dense_cnn.replay.materialize_policy_surprise_rows`.
-- `hexo_engine` — `expand.py` replays placement histories; selfplay/evaluation
+- `hexo_engine` -- `expand.py` replays placement histories; selfplay/evaluation
   drive live states; Rust `state.rs`/`candidates.rs` consume `HexoState` and
   the `WindowStore` directly.
-- `hexo_runner` — `player.py` implements the runner player lifecycle;
+- `hexo_runner` -- `player.py` implements the runner player lifecycle;
   `evaluation.py` uses `hexo_runner.adapters.sealbot.SealBotPlayer` and
   `hexo_runner.modes.match.run_match`; `selfplay.py` writes `.hxr` records via
   `hexo_runner.records.HexoRecordFile`.
-- `hexo_train` — `plugin.py` implements the plugin contract
+- `hexo_train` -- `plugin.py` implements the plugin contract
   (`hexo_train.components.ComponentOverrides`) and is registered under the
-  `hexo_train.models` entry-point group as `hexgnn` (pyproject.toml).
+  `hexo_train.models` entry-point group as `hexgnn` (this package's
+  pyproject.toml).
 
 Imports IN / consumers:
 
@@ -89,9 +123,8 @@ Imports IN / consumers:
   `../../../hexgnn/rust/src/lib.rs` (so every hexo_models native build
   compiles this crate), and the hexo_models sdist bundles `../hexgnn/rust`.
 - `hexo_frontend/web.py` special-cases hexgnn/hexgt self-play diagnostics
-  fields for the dashboard run-history views; `debug_infer.py` handles the
-  driver's `{'model': state_dict, 'arch': meta}` checkpoint format as the
-  graph (HEXGT) lineage.
+  fields for the dashboard run-history views; `debug_infer.py` loads the
+  driver-format checkpoints as the graph (HEXGT) lineage.
 - `_dashboard_bridge_hexgnn.py` (repo root) mirrors `runs/hexgnn_rl_main1`
   outputs into the :8080 dashboard layout.
 
@@ -100,8 +133,7 @@ Protocols:
 - Evaluator byte protocol: Rust `mcts_eval.rs` calls
   `HexgnnInference.evaluate_featurized_batch` with a zero-copy
   buffer-protocol collated batch and expects back `{values_bytes,
-  priors_bytes}` float32 in Rust's packed candidate order. (Some docstrings
-  still name a nonexistent `evaluate_graph_facts` — see gotchas.)
+  priors_bytes}` float32 in Rust's packed candidate order.
 - Engine state intake: `hexo_engine._rust.state_api_capsule()` C-ABI capsule,
   STATE_API_VERSION 2; version mismatch fails loudly at use time.
 
@@ -114,45 +146,4 @@ Protocols:
 | `scripts/_rl_launch_hexgnn.sh` / `scripts/_rl_supervise_hexgnn.sh` | WSL setsid launch + crash-restart supervisor (also starts the dashboard bridge). |
 | `_dashboard_bridge_hexgnn.py` | Read-only dashboard mirror loop for `runs/hexgnn_rl_main1`. |
 | `configs/hexgnn_model.toml` + the `hexo_train.models` entry point | Dormant config-CLI path: `python -m hexo_train.cli.train_model configs/hexgnn_model.toml`. |
-| `tests/test_hexgnn_*.py` (9 files) | model, losses, d6, selfplay, compile, steerable, value_readout, eval_identity, featurizer_parity. Authoritative only in the WSL venv. |
-
-## Gotchas
-
-- **Stale packaging story.** `pyproject.toml` claims hexgnn "carries NO Rust of
-  its own" and "reuses `hexo_models._rust.hexgt`". Both claims are outdated:
-  the package has its own `rust/` crate, compiled as `hexo_models._rust.hexgnn`.
-  The same stale claim appears in `configs/hexgnn_model.toml` and the
-  `_rl_train_hexgnn.py` docstring.
-- **Rust still builds even though the package is parked.** Retiring hexgnn
-  means removing the `#[path]` include in `hexo_models/rust/src/lib.rs`, the
-  sdist glob in `hexo_models/pyproject.toml`, and the entry point — not just
-  the package directory.
-- **Checkpoint-format split-brain.** The plugin path (`checkpoints.py`) saves
-  `{'model': 'hexgnn', 'model_state': ...}`; the actual RL driver saves
-  `{'model': state_dict, 'arch': meta}`. The frontend lineage sniffer only
-  recognizes the driver format as the graph lineage; a plugin-saved hexgnn
-  checkpoint would be misclassified as DENSE_RESTNET.
-- **Dangling docstrings.** `mcts.py` and `rust/src/mcts_eval.rs` reference
-  `HexgnnInference.evaluate_graph_facts` (does not exist; the real callback is
-  `evaluate_featurized_batch`); `rust/src/features.rs` cites a guard test
-  `tests/test_hexgnn_feature_buffer.py` that does not exist (the actual parity
-  test is `tests/test_hexgnn_featurizer_parity.py`); `rust_bridge.py` says the
-  graph builders "are added as they land" though they already exist.
-- **Stale architecture rationale.** `architecture.py`'s docstring justifies
-  `value_head_use_side` via the `EDGE_TYPE_CONTEXT` hub, but `constants.py`
-  marks that edge type RETIRED after the sparse rewrite; the SIDE node is now
-  edge-isolated.
-- **Copy divergence with hexgt.** evaluation/inference/mcts/player and the
-  whole Rust tree are copied-verbatim twins of `hexo_models/hexgt` with
-  identical public names. Fixes to one lineage do not propagate; if hexgnn is
-  ever revived, diff-audit against hexgt first.
-- **Known-uncalled surface** (kept as API mirrors of hexgt):
-  `evaluation.run_head_to_head_parallel` / `HexgnnBatchedSearcher`,
-  `rust_bridge.capabilities()` / `candidate_ids()`, the Python-facing
-  `hexgnn_threat_analysis` pyfunction, and `rust/src/vcf.rs`
-  (`hexgnn_vcf_solve`).
-- **Soft validation bound.** `constants.py` `MAX_CANDIDATE_RADIUS = 4` is
-  documented as soft/unused; only Rust enforces `candidate_radius >= 1`, and
-  `config.py` performs no range checks on it.
-- `_dashboard_bridge_hexgnn.py` comments still call `runs/hexgnn_rl_main1`
-  "the ACTIVE run" — it is not.
+| `tests/test_hexgnn_*.py` (9 files) | model, losses, d6, selfplay, compile, steerable, value_readout, eval_identity, featurizer_parity. Run in the WSL venv, where the native module is built. |
