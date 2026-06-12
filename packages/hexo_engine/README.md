@@ -1,0 +1,132 @@
+# hexo_engine
+
+Authoritative rules engine for Hexo, a Gomoku-like 6-in-a-line game on an
+unbounded hexagonal grid. Owns board occupancy, the turn/phase machine
+(opening stone at origin, then two-stone turns), move legality (radius-8 from
+any stone), incremental 6-cell win/threat windows, and the stable packed
+action-ID encoding.
+
+**Status: ACTIVE and load-bearing.** Every model lineage (the live
+`dense_cnn_restnet` run, legacy `hexo_models/dense_cnn`, halted
+`hexo_models/hexgt`, parked `hexgnn`), the runner, the frontend dashboard, and
+~60 test files drive it. Repo convention: Python callers must come through this
+package rather than re-implementing game logic.
+
+## Shape
+
+A Rust crate plus a thin typed Python wrapper, distributed via maturin:
+
+- The crate builds as an **rlib** consumed directly by the `hexo_models` and
+  `hexo_utils` Rust crates (Cargo workspace members; see root `Cargo.toml`).
+- With the `python` feature it also builds a **PyO3 extension module**
+  `hexo_engine._rust` (`pyproject.toml`: `module-name = "hexo_engine._rust"`,
+  `python-source = "python"`).
+- The Python package in `python/hexo_engine/` is a thin facade over `_rust`.
+
+The checked-out tree typically contains an untracked
+`_rust.cpython-312-x86_64-linux-gnu.so` built by the WSL venv -- the bridge is
+Linux-only in practice; importing under Windows Python raises
+`EngineUnavailableError` lazily.
+
+## Module table
+
+### Rust (`rust/src/`)
+
+| File | Role |
+| --- | --- |
+| `state.rs` | Heart of the engine: `HexoState`, `TurnPhase` machine (Opening/FirstStone/SecondStone), `apply_placement` / `apply_with_delta` + undo, `snapshot()`/`load_state` replay, large invariant test suite. |
+| `board.rs` | Sparse stone storage (AHashMap + insertion-ordered occupied list) with delta/undo; owns the `LegalMoveStore` and `WindowStore`. |
+| `tactics.rs` | Incremental 6-cell window tracking (3 axes x 6 offsets = 18 windows per placement), threat (>=4 single-colour) and win detection, plus an O(1) `live_threats` index for the TSS hot path in model crates. |
+| `legal.rs` | Incremental legal-move store (`LEGAL_RADIUS = 8` around any stone) and the canonical `pack_coord`/`unpack_coord` u32 action-ID encoding: `((q + 2^15) << 16) \| (r + 2^15)`. ID order is the deterministic legal-action order everywhere. |
+| `rules.rs` | `is_legal_placement`: phase validation (origin-only opening, no first-stone reuse, occupancy, radius store). |
+| `coord.rs` | Axial `HexCoord` (i16 q,r), `hex_distance`, `coords_within_radius`; re-exported to all downstream crates. |
+| `snapshot.rs` | `StateSnapshot` (rules_version = 1 + placement list) for replay via `load_state`; today used internally (engine_metadata + tests) only. |
+| `error.rs` | `MoveError` / `StateLoadError`; `MoveError` surfaces to Python as `IllegalActionError`. |
+| `pybridge.rs` | PyO3 module `hexo_engine._rust`: opaque `PyHexoState` handle plus `new_game`, `clone_state`, `current_player`, `legal_action_ids`, `legal_action_count`, `is_legal_action`, `apply_action`, `terminal`, `to_python_state`, `action_id`, `engine_metadata`, and the C-ABI `state_api_capsule` (version 2: clone_state/free_state fn pointers). |
+
+### Python (`python/hexo_engine/`)
+
+| File | Role |
+| --- | --- |
+| `__init__.py` | Public surface; re-exports `api`, `errors`, `types`. Consumers do `import hexo_engine`. |
+| `api.py` | Thin typed wrappers over the `_rust` functions; converts dict payloads into frozen dataclasses (`TransitionResult`, `TerminalResult`, `PythonHexoState` mirror); raises `EngineUnavailableError` if the extension is missing. |
+| `types.py` | Transport types: `Player`/`TurnPhase` StrEnums, `AxialCoord`, `PlacementAction`, lazy `LegalActions` view, `pack_coord_id`/`unpack_coord_id` (must mirror Rust `legal.rs` packing), read-only `Python*` state mirrors. |
+| `errors.py` | `HexoEngineError` base, `EngineUnavailableError`, `IllegalActionError`. |
+
+## Connections to other packages
+
+**Rust rlib consumers** (`hexo_engine.workspace = true` in their Cargo.toml):
+
+- `packages/hexo_models` (the dense_cnn and hexgt subcrates plus
+  `threats_shared.rs`) -- uses `HexoState`, `apply_with_delta`+undo,
+  `Board::occupied_cells`, `WindowStore` threat queries for MCTS, TSS, VCF,
+  candidate generation, and tensor encoding.
+- `packages/hexo_utils` -- `state_hash.rs` (MCTS eval-cache keys) and record
+  replay tests.
+- `packages/hexgnn/rust` (parked lineage, compiled into the `hexo_models`
+  cdylib via `#[path]` include) also imports it.
+
+**C-ABI capsule protocol:** model accelerator crates do
+`py.import("hexo_engine._rust").state_api_capsule()` at batch-MCTS time to
+clone live Python `HexoState` objects into owned Rust states
+(`STATE_API_VERSION = 2`, `pybridge.rs`). A version mismatch fails loudly at
+use time.
+
+**Python consumers:** `hexo_runner` (engine adapter + match loop),
+`hexo_frontend` (`web.py`, `debug_infer.py`, `dashboard.py` replay stored
+action-ID sequences and render boards from `to_python_state()`),
+`dense_cnn_restnet` and `hexo_models/*` and `hexgnn` (selfplay / evaluation /
+player / MCTS glue), plus many `scripts/_*.py` probes.
+
+**Shared/persisted contracts:**
+
+- The packed action-ID encoding is implemented **twice on purpose** -- Rust
+  `legal.rs` and Python `types.py` -- and those IDs are persisted in training
+  shards (.npz), `.hxr` game records, and frontend deep links (the JS side
+  re-implements the same packing with offset 32768). The two implementations
+  must never diverge; `tests/test_hexo_engine_rust_bridge.py` cross-checks
+  `pack_coord_id` against `engine.action_id`.
+- `engine_metadata()` (`backend=rust-pyo3`, `rules_version=1`,
+  `state_api_version=2`) is embedded in runner game records and asserted by
+  the bridge test.
+
+## Entry points / how it is exercised
+
+There is no CLI. The runtime entry is the maturin-built extension:
+
+- `import hexo_engine` from any Python consumer.
+- `hexo_engine = { workspace = true }` rlib dependency from `hexo_models` /
+  `hexo_utils`.
+- `state_api_capsule()` FFI entry from model accelerator crates.
+- Tests: `tests/test_hexo_engine_rust_bridge.py` (bridge contract; skips when
+  the .so is unavailable, e.g. Windows-native Python) and `cargo test -p
+  hexo_engine` for the Rust invariant suites. Indirectly, nearly every test
+  under `tests/` touches it.
+- Build: `maturin develop --release` driven by
+  `scripts/_rebuild_hexo_models_hexgt.sh`-style WSL tooling rebuilds the
+  workspace; Rust edits are inert until the .so is rebuilt in the WSL venv.
+
+## Gotchas
+
+- **`new_game(seed=..., scenario=...)` silently discards both arguments**
+  (`pybridge.rs` `let _ = seed; let _ = scenario;`). Callers (runner session,
+  frontend) pass `seed` through, implying reproducibility the engine does not
+  provide -- the game itself is deterministic, but the API shape misleads.
+- **Type annotation lie at the boundary:** `PythonHexoState.terminal` is
+  annotated `PythonTerminal | None` in `types.py`, but `api.py` actually
+  stores a `TerminalResult` there; `PythonTerminal` is never constructed.
+  Do not trust the annotation's field names.
+- **Stale .so hazard:** the prebuilt Linux extension sits untracked inside the
+  source tree; after editing `rust/src` the Python bridge keeps serving the
+  old binary until maturin is re-run in the WSL venv.
+- **`to_python_state()` is heavyweight:** it materializes every stone, legal
+  coord, and window entry as Python dicts per call (O(18 x placements) window
+  entries). Fine for dashboard volume; do not put it on a hot path -- selfplay
+  and MCTS bypass the mirror layer via raw `legal_action_ids` tuples and the
+  capsule.
+- **Snapshot machinery is public-but-dormant:** `StateSnapshot`/`load_state`
+  have no production consumer; they exist as the `rules_version` source and
+  the test oracle. Treat as reserved API, not dead.
+- **Action-ID packing duplication** (Rust vs Python vs frontend JS) is a
+  silent-divergence hazard if coordinates ever exceed i16 or the offset
+  changes; the bridge test is the only cross-check -- keep it load-bearing.
