@@ -11,8 +11,12 @@ turns that into the model's per-graph tensors:
 - `candidate_index` (C,), `candidate_ids` (C,): candidate node rows in CSR/legal
   order (the priors order).
 
-This is the SINGLE featurizer shared by the model collation (`collate.py`) and
-the Phase-4 expand step, so training inputs == search inputs.
+This is the Python featurizer shared by the model collation (`collate.py`) and
+the expand step (`expand.py`), so training inputs == search inputs. Live MCTS
+uses its Rust PARITY TWIN (`rust/src/features.rs::featurize_position_graph`),
+which must stay byte-identical to this module — guarded by
+tests/test_hexgnn_featurizer_parity.py. Any feature-layout change updates
+constants.py + features.py + rust constants.rs + features.rs together.
 """
 
 from __future__ import annotations

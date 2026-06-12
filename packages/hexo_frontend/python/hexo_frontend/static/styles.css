@@ -1,3 +1,25 @@
+/* ===========================================================================
+   hexo_frontend dashboard stylesheet — all three screens in one dark theme.
+
+   Loaded only by static/index.html with a ?v= cache-bust token (bump together
+   with the app.js ?v= and APP_VERSION). Class prefixes mirror app.js sections:
+   .mt-* = Match screen v2, .hist-* = History screen v2, .dbg-* = Debug
+   workbench v2; unprefixed classes are the shared shell + board + generic
+   controls that predate the v2 rewrites (some are also reused by them).
+
+   File map (banner comments mark the regions, in this order):
+     1. Theme variables + resets                 (:root ... body)
+     2. App shell: header, nav, status line
+     3. Layout grids + board panel: board area, turn overlay, view controls,
+        HUD, legend
+     4. Generic controls: panel cards, fields, buttons, .seg toggles
+     5. Move-history dock + replay bar + tooltip + board cell classes
+     6. History panel container + History v2 regions (status band, trends,
+        epoch table, epoch inspector, game rows, mobile)
+     7. Debug tab (Model Debug v2) — regions per scripts/_debug_rewrite_spec.md
+     8. Match tab (Arena v2) — regions per scripts/_match_rewrite_spec.md
+   =========================================================================== */
+
 :root {
   --bg: #070d13;
   --shell: #0d1721;
@@ -37,6 +59,8 @@ body {
   overflow-x: hidden;
   overflow-y: auto;
 }
+
+/* ===================== App shell: header, nav, status line ===================== */
 
 header {
   height: 52px;
@@ -130,6 +154,9 @@ main {
   min-width: 0;
   overflow-x: hidden;
 }
+
+/* ===================== Layout grids + board panel (shared board area,
+   turn overlay, view controls, HUD, legend) ===================== */
 
 .top-grid {
   min-height: 0;
@@ -293,6 +320,9 @@ main {
   border-radius: 50%;
   vertical-align: -2px;
 }
+
+/* ===================== Generic controls: side stack, panel cards, form
+   fields, buttons, .seg toggles (shared by all screens) ===================== */
 
 .side-stack {
   min-width: 0;
@@ -516,6 +546,9 @@ body.pending button:disabled {
   padding-top: 7px;
   padding-bottom: 6px;
 }
+
+/* ===================== Move-history dock + replay bar + tooltip +
+   board cell classes ===================== */
 
 /* Bounded box: chips wrap and the box scrolls vertically, so it is always
    exactly its container's width and never pushes the layout sideways no matter
@@ -900,6 +933,9 @@ body.bot-thinking .legal {
   color: var(--muted);
   font-size: 12px;
 }
+
+/* ===================== History screen container (v2 regions follow:
+   status band, trends, epoch table, inspector, game rows, mobile) ============ */
 
 .history-screen {
   display: block;

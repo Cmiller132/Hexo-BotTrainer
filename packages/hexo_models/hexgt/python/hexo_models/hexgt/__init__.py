@@ -10,6 +10,22 @@ per-candidate (variable-length) policy, a 65-bin value head, and a packed-graph
 batch contract. It slots into the existing training / MCTS / replay / eval
 pipeline (drop-in PIPELINE compatibility, not tensor-shape matching). See
 `docs/analysis/HEXFORMER_REWRITE_PLAN.md` and `HEXGT_DECISIONS.md`.
+
+STATUS (2026-06-12): the hexgt training lineage is HALTED — run `hexgt_rl_main3`
+was permanently stopped by the owner at epoch 40 (2026-06-05, see HANDOFF.md);
+the active lineage is `packages/dense_cnn_restnet`. The code remains live
+infrastructure, NOT dead: the parked `packages/hexgnn` package is a fork that
+compiles into the same `hexo_models._rust` native module, the dashboard debug
+worker (`packages/hexo_frontend/python/hexo_frontend/debug_infer.py`) loads
+hexgt checkpoints through this package, `dense_cnn_restnet` copied its PCR
+design, and ~30 `tests/test_hexgt_*.py` files gate the Rust/Python contracts.
+
+NOTE on doc citations: the design documents referenced throughout this package
+(HEXFORMER_REWRITE_PLAN.md, HEXGT_DECISIONS.md, HEXGT_PMA_VALUE_HEAD_PLAN.md,
+HEXGT_TSS_AND_SOFT_VALUE_DESIGN.md, HEXGT_PCR_KATAGO_MAPPING.md and the section
+numbers like §4/§6.3) were removed from the working tree by commit b50e92a
+("chore: wipe all documentation files"); they survive only in git history. The
+citations are kept because they identify WHICH decision a knob implements.
 """
 
 from .architecture import HexgtNetwork

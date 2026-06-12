@@ -3,6 +3,25 @@
 //! The `.hxr` format stores only durable replay-core data. In particular,
 //! scenarios are intentionally not encoded; scenario persistence needs a
 //! separate versioned contract before it becomes durable.
+//!
+//! Wire format (schema v1): magic `HEXOREC1`, then a varint-encoded header
+//! (schema version, engine rules_version, backend string, player list), then
+//! zero or more `G`-marked game payloads. Each payload is length-prefixed and
+//! self-contained: game_id, optional zigzag-varint seed, status byte, action
+//! ids as u32 LE (the engine's packed (q,r) coordinate ids from
+//! hexo_engine legal.rs), optional winner/placements, optional abort record.
+//! Appends are flush-per-game, so a crashed run leaves a readable prefix.
+//!
+//! Consumers: exposed to Python via `pybridge.rs` (`hexo_utils._rust`), then
+//! `python/hexo_utils/records.py`, then
+//! `packages/hexo_runner/python/hexo_runner/records/record.py` -- the path all
+//! model selfplay/evaluation writers and the hexo_frontend dashboard reader
+//! use. Bump `HEXO_RECORD_SCHEMA_VERSION` on any wire change: readers reject
+//! unknown versions (`RecordError::UnsupportedVersion`).
+//!
+//! File map: error enum -> header/record structs -> `HexoRecordFile`
+//! reader/writer -> `HexoRecordGameWriter` -> free encode/decode helpers ->
+//! `PayloadCursor` -> round-trip/corruption tests.
 
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
@@ -33,6 +52,10 @@ pub enum RecordError {
     InvalidStatus(u8),
     TrailingPayloadBytes { trailing: usize },
     ReadOnlyFile,
+    // UNUSED(2026-06-12): never constructed anywhere in the crate --
+    // iter_records() on a Write-mode file reopens the path for reading
+    // instead of returning this error. Kept only for the Display arm and the
+    // pybridge error-kind mapping.
     WriteOnlyFile,
     ClosedFile,
     FinishedWriter { game_id: String },
@@ -333,6 +356,11 @@ impl HexoRecordFile {
         &self.players
     }
 
+    /// Start an append-only writer for one game.
+    ///
+    /// The writer holds a cloned file handle, so it stays valid independently
+    /// of this `HexoRecordFile` and multiple games may be begun sequentially.
+    /// Nothing hits disk until the writer's `finish_*` call.
     pub fn begin_game(
         &mut self,
         game_id: impl Into<String>,
@@ -356,6 +384,7 @@ impl HexoRecordFile {
         })
     }
 
+    /// Append one already-finalized record and flush it to disk.
     pub fn append_record(&mut self, record: &HexoRecord) -> Result<(), RecordError> {
         if self.mode != HexoRecordFileMode::Write {
             return Err(RecordError::ReadOnlyFile);
@@ -368,6 +397,11 @@ impl HexoRecordFile {
         Ok(())
     }
 
+    /// Read every game record in the file (eager, not streaming).
+    ///
+    /// Works in both modes: a Write-mode file is flushed and the path is
+    /// reopened for reading, which is why `RecordError::WriteOnlyFile` is
+    /// never produced in practice.
     pub fn iter_records(&mut self) -> Result<Vec<HexoRecord>, RecordError> {
         match self.mode {
             HexoRecordFileMode::Read => {
@@ -396,6 +430,11 @@ impl HexoRecordFile {
 }
 
 /// Append-only writer for one game inside a `HexoRecordFile`.
+///
+/// Actions are buffered in memory; the whole game payload is written and
+/// flushed in one `finish_completed`/`finish_aborted` call, after which the
+/// writer is dead (further calls return `RecordError::FinishedWriter`). A
+/// game that never reaches `finish_*` leaves no bytes in the file.
 #[derive(Debug)]
 pub struct HexoRecordGameWriter {
     path: PathBuf,
@@ -473,6 +512,8 @@ impl HexoRecordGameWriter {
         })
     }
 }
+
+// --- Wire helpers: header/record encode-decode, varint + zigzag primitives --
 
 fn write_header(
     writer: &mut impl Write,
@@ -748,6 +789,11 @@ fn zigzag_decode(value: u64) -> i64 {
     ((value >> 1) as i64) ^ (-((value & 1) as i64))
 }
 
+/// Bounds-checked reader over one length-prefixed game payload.
+///
+/// `finish()` must be called after decoding; it rejects trailing bytes so a
+/// schema drift between writer and reader fails loudly instead of silently
+/// ignoring data.
 struct PayloadCursor<'a> {
     payload: &'a [u8],
     offset: usize,

@@ -1,3 +1,10 @@
+# UNUSED(2026-06-12): no references found in packages/tests/scripts (excl.
+# scripts/archive). Repo-wide grep finds zero references to
+# dense_cnn_restnet.debug_artifacts; the only renderer test
+# (tests/test_dense_cnn_debug_artifacts.py) imports the sibling lineage's copy,
+# hexo_models.dense_cnn.debug_artifacts, and the dashboard debug screen renders
+# boards client-side via hexo_frontend/debug_infer.py + app.js, not this PNG
+# path. Kept for fork symmetry with the parent dense_cnn package.
 """Optional PNG previews for dense CNN inspection tooling.
 
 This renderer is not part of the production self-play or training path. It is

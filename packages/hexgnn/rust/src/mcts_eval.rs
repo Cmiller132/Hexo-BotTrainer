@@ -8,7 +8,8 @@
 //! 2. Build the hexgnn typed-graph facts for each unique leaf **in Rust** from the
 //!    leaf `HexoState` (no Py->Rust reclone) via the shared `candidates` builder,
 //!    so search inputs == training inputs.
-//! 3. Call the Python evaluator (`HexgnnInference.evaluate_graph_facts`).
+//! 3. Call the Python evaluator (`HexgnnInference.evaluate_featurized_batch`,
+//!    handed the zero-copy collated payload from `features::collated_to_py_dict`).
 //! 4. Parse the per-candidate byte contract (values + CSR candidate ids + priors)
 //!    back into `RustEvaluation`, intersecting with engine legality and
 //!    DESCENDING-sorting + normalizing the priors (the contract the copied tree

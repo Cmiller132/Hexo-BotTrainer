@@ -7,9 +7,14 @@ immutable dataclasses with light type coercion and no per-scalar range checks.
 The pipeline knobs (training / samples / selfplay / evaluation / performance)
 stay close to dense_cnn because Model 2 slots into the same training / MCTS /
 replay / eval pipeline (drop-in PIPELINE compatibility, §2). Only the
-`architecture` section differs: it describes a dynamic GNN + transformer instead
-of a dense CNN, and carries `candidate_radius` (the single `n`, §4) which is
-threaded into BOTH sample-gen and live MCTS so the move vocabulary matches.
+`architecture` section differs: it describes the dynamic GNN trunk (NO
+transformer — hexgnn dropped hexgt's context transformer), and carries
+`candidate_radius` (the single `n`, §4) which is threaded into BOTH sample-gen
+and live MCTS so the move vocabulary matches.
+
+Consumed by plugin.py (the dormant config-CLI path), scripts/_rl_train_hexgnn.py
+and scripts/_pretrain_hexgnn.py (the actual drivers), and player/selfplay/
+evaluation/trainer via the parsed `HexgnnConfig`.
 """
 
 from __future__ import annotations

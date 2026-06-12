@@ -7,7 +7,8 @@ single missing cell of a 6-cell window holding 5 stones of that player and none
 of the opponent.
 
 The tracker mirrors the engine-verified window bookkeeping of
-``scripts/_wf_r4_structure.py`` (its missed-win classification was validated
+``scripts/archive/_wf_r4_structure.py`` (untracked local archive -- scripts/archive/
+is gitignored; its missed-win classification was validated
 47/47 against the real Rust engine on main_3 marathon games): per placement,
 only the 6 windows per axis that pass through the placed cell change (18 window
 updates per stone), so maintaining the standing-win sets is O(1) per placement.
@@ -26,7 +27,7 @@ from __future__ import annotations
 from collections import Counter
 
 # The three hex axes a 6-in-a-row can lie on (matches engine tactics.rs and
-# scripts/_wf_r4_structure.py).
+# the archived _wf_r4_structure.py probe).
 AXES: tuple[tuple[int, int], ...] = ((1, 0), (0, 1), (1, -1))
 
 _FULL = 0b111111
@@ -87,7 +88,8 @@ class IncrementalWinTracker:
         A window contributes one standing win cell for player ``p`` exactly when
         it holds 5 of ``p``'s stones and none of the opponent's; the cell is the
         window's single missing slot (necessarily empty: it holds no stone of
-        either player). Ported from ``scripts/_wf_r4_structure.WinTracker._contrib``.
+        either player). Ported from the archived probe's ``WinTracker._contrib``
+        (``scripts/archive/_wf_r4_structure.py``, untracked).
         """
 
         for player in (0, 1):

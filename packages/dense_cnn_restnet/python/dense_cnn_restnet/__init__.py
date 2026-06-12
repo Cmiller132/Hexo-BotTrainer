@@ -1,9 +1,20 @@
-"""Dense CNN Model 1 public Python surface.
+"""dense_cnn_restnet public Python surface -- the ACTIVE ResTNet model lineage.
 
-This package is intentionally model-owned. Shared packages such as
+This package is a pure-Python fork of `packages/hexo_models/dense_cnn` ("Model
+1") that swaps the gated-residual trunk for a faithful ResTNet (interleaved
+residual + transformer, arXiv:2410.05347). It carries no Rust of its own: the
+featurizer, MCTS session, and sample facts come read-only from
+`hexo_models._rust.dense_cnn` via `rust_bridge.py` (see pyproject.toml). Module
+names still say "Model 1" / `model1_*` because the tensor/search contracts are
+identical to the parent lineage.
+
+The package is intentionally model-owned. Shared packages such as
 `hexo_engine`, `hexo_runner`, and `hexo_train` provide game truth, game-loop
 contracts, and orchestration, but they do not know how Model 1 tensors, losses,
-MCTS payloads, or replay samples are represented.
+MCTS payloads, or replay samples are represented. `hexo_train` reaches this
+package only through `plugin.py` (entry point "dense_cnn_restnet"); the
+dashboard debug worker (`hexo_frontend/debug_infer.py`) imports architecture/
+inference/losses/mcts/rust_bridge directly for checkpoint forensics.
 
 Only stable user-facing building blocks are re-exported here. Lower-level
 production boundaries such as `mcts`, `rust_bridge`, `samples`, and

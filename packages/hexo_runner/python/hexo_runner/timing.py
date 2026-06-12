@@ -1,4 +1,8 @@
-"""Small timing helpers for runner records."""
+"""Small timing helpers for runner records.
+
+Used by `hexo_runner/loop.py` and `hexo_runner/modes/batch.py` to populate
+the `duration_ms` fields on GameResult/BatchResult.
+"""
 
 from __future__ import annotations
 
@@ -8,6 +12,8 @@ from time import perf_counter
 
 @dataclass(frozen=True, slots=True)
 class Timer:
+    """Monotonic wall-clock stopwatch; `elapsed_ms` returns milliseconds."""
+
     started: float
 
     @classmethod

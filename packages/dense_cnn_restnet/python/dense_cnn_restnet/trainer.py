@@ -3,6 +3,17 @@
 Shards store compact sample facts; each row is expanded to dense tensors at read
 time under a fresh per-epoch D6 symmetry (``samples.expand_sample``), so board
 symmetry augmentation is exact and re-randomized every epoch.
+
+``DenseCNNTrainer`` is constructed by ``plugin.training_component_overrides``
+and driven by the generic pipeline through duck-typed hooks:
+``hexo_train/epoch/samples.py`` calls ``select_training_samples`` (shuffle build
+via ``replay.build_katago_shuffle`` + train-bucket/no-repeat-files gating),
+``hexo_train/epoch/training.py`` calls ``train_passes`` (parallel spawn-pool
+shard expansion via ``compact_io.expand_shard_to_arrays`` + AMP optimizer
+steps), and ``hexo_train/pipeline.py`` teardown calls ``close``. Calibration
+(``performance.calibrate_dense_cnn``) writes the four measured batch sizes back
+onto the instance. scripts/bootstrap_dense_cnn_restnet_hf.py reuses the trainer
+directly for the HF prefit.
 """
 
 from __future__ import annotations

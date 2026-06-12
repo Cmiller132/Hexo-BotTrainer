@@ -4,6 +4,13 @@ The shared layer owns how a symmetry is identified and transported.
 `hexo_train` owns when a training sample receives a symmetry. Engine/model code
 owns how concrete coordinates, action ids, tensors, and custom targets are
 transformed under that symmetry.
+
+Consumers: `packages/hexo_train/python/hexo_train/symmetry.py` imports
+`D6_SIZE`/`D6Symmetry` for its deterministic per-sample selector, and
+`hexo_utils/samples/targets.py` uses the mapper protocol. The model packages
+never adopted this abstraction -- `packages/dense_cnn_restnet/.../d6.py` and
+`packages/hexo_models/dense_cnn/.../d6.py` each carry their own concrete
+`transform_action_ids` instead.
 """
 
 from __future__ import annotations

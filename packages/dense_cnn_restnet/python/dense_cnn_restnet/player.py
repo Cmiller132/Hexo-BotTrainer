@@ -1,3 +1,11 @@
+# UNUSED(2026-06-12): no references found in packages/tests/scripts (excl.
+# scripts/archive). Repo-wide grep shows zero imports of dense_cnn_restnet.player
+# and no intra-package `from .player` import; every live DenseCNNPlayer user
+# (scripts/_head_to_head.py, scripts/_rl_train.py, scripts/_rl_train_hexgnn.py,
+# tests/test_dense_cnn_pipeline.py) imports the SIBLING lineage's copy,
+# hexo_models.dense_cnn.player. Restnet eval/selfplay drive mcts.new_mcts_session
+# directly (evaluation.py, selfplay.py) and never construct this adapter. Kept
+# for fork symmetry with packages/hexo_models/dense_cnn/player.py.
 """`hexo_runner` player adapter for dense CNN inference and search.
 
 The runner speaks in generic player lifecycle methods and live engine states.

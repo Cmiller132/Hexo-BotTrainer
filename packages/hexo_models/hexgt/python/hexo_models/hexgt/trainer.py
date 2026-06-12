@@ -9,7 +9,11 @@ expand time from the compact raw-fact shards (`expand.py`).
 This Phase-4 trainer owns the optimizer step, the warmup LR schedule, and a
 shard-driven training pass sufficient for the CPU gate ("a CPU training pass
 decreases loss"). The full KataGo replay-window / train-bucket integration
-(reusing dense_cnn's model-agnostic replay/shuffle) is wired in the GPU phases.
+(reusing dense_cnn's model-agnostic replay/shuffle) was deferred to the GPU
+phases and never landed here — the production RL driver (scripts/_rl_train.py)
+implements its own replay-window selection around `train_on_shards`, and the
+lineage is now halted. Beware: `train_on_shards` loads every shard's rows into
+one Python list, fine for driver-sized selections but not a full replay window.
 """
 
 from __future__ import annotations

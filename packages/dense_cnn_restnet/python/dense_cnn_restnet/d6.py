@@ -111,6 +111,10 @@ def inverse_index(index: int) -> int:
     raise RuntimeError(f"no inverse found for D6 index {index}")
 
 
+# UNUSED(2026-06-12): no references found in packages/tests/scripts (excl.
+# scripts/archive) -- repo-wide grep finds only this definition and the sibling
+# copy in hexo_models/dense_cnn/d6.py (itself also uncalled). Kept for fork
+# symmetry; inverse_index above IS exercised.
 def compose_indices(left: int, right: int) -> int:
     """Return the transform index equivalent to applying `left`, then `right`."""
 

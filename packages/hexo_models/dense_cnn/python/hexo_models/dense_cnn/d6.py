@@ -55,6 +55,7 @@ def unpack_coord_id(action_id: int) -> Axial:
 
 
 def unpack_coord_pair(action_id: int) -> tuple[int, int]:
+    """Like `unpack_coord_id` but returns a bare `(q, r)` tuple (hot-path, no Axial)."""
     value = int(action_id)
     return (value >> 16) - _COORD_OFFSET, (value & 0xFFFF) - _COORD_OFFSET
 
@@ -111,6 +112,9 @@ def inverse_index(index: int) -> int:
     raise RuntimeError(f"no inverse found for D6 index {index}")
 
 
+# UNUSED(2026-06-12): no references found in packages/tests/scripts (excl.
+# archive); only the definitions here and in the dense_cnn_restnet fork exist.
+# inverse_index above IS exercised (tests/test_hexo_models_samples.py).
 def compose_indices(left: int, right: int) -> int:
     """Return the transform index equivalent to applying `left`, then `right`."""
 

@@ -49,6 +49,8 @@ def _parse_temperature_schedule(raw: Any) -> tuple[tuple[int, float], ...]:
 
 @dataclass(frozen=True, slots=True)
 class Model1ArchitectureConfig:
+    """`[model.config.architecture]`: trunk shape consumed by `architecture.Model1Network`."""
+
     input_channels: int = INPUT_CHANNELS
     channels: int = DEFAULT_CHANNELS
     residual_blocks: int = DEFAULT_BLOCKS
@@ -58,6 +60,9 @@ class Model1ArchitectureConfig:
 
 @dataclass(frozen=True, slots=True)
 class Model1TrainingConfig:
+    """`[model.config.training]`: optimizer, loss weights, and per-epoch sample
+    budget consumed by `trainer.DenseCNNTrainer` (KataGo train-bucket caps included)."""
+
     batch_size: int = 128
     learning_rate: float = 1.0e-3
     weight_decay: float = 1.0e-4
@@ -76,6 +81,9 @@ class Model1TrainingConfig:
 
 @dataclass(frozen=True, slots=True)
 class Model1SampleConfig:
+    """`[model.config.samples]`: replay window/shuffle knobs consumed by
+    `replay.build_katago_shuffle` plus the policy-surprise weighting levers."""
+
     shuffle_min_rows: int = 100_000
     shuffle_keep_target_rows: int = 600_000
     shuffle_taper_window_exponent: float = 0.65
@@ -90,6 +98,9 @@ class Model1SampleConfig:
 
 @dataclass(frozen=True, slots=True)
 class Model1SelfPlayConfig:
+    """`[model.config.selfplay]`: native MCTS search knobs (forwarded to
+    `rust/src/mcts.rs` via `selfplay.py`) and the move-temperature schemes."""
+
     search_visits: int = 128
     active_games: int = 1024
     c_puct: float = 1.5
@@ -132,6 +143,9 @@ class Model1SelfPlayConfig:
 
 @dataclass(frozen=True, slots=True)
 class Model1EvalConfig:
+    """`[model.config.evaluation]`: SealBot eval games per epoch, cadence, and
+    play-only search/diversity knobs consumed by `evaluation.evaluate_epoch`."""
+
     games_per_epoch: int = 64
     sealbot_variant: str = "best"
     sealbot_time_limit: float = 0.05
@@ -162,6 +176,9 @@ class Model1EvalConfig:
 
 @dataclass(frozen=True, slots=True)
 class Model1PerformanceConfig:
+    """`[model.config.performance]`: calibration probe candidates consumed by
+    `performance.calibrate_dense_cnn` plus inference-forward optimization gates."""
+
     calibrate: bool = True
     target_selfplay_positions_per_second: float = 128.0
     inference_batch_candidates: tuple[int, ...] = (128, 256, 512, 1024)
@@ -187,6 +204,9 @@ class Model1PerformanceConfig:
 
 @dataclass(frozen=True, slots=True)
 class Model1Config:
+    """Root config object produced by `parse_model1_config`, threaded by
+    `plugin.py` through every dense_cnn component (trainer/selfplay/eval/perf)."""
+
     architecture: Model1ArchitectureConfig = field(default_factory=Model1ArchitectureConfig)
     training: Model1TrainingConfig = field(default_factory=Model1TrainingConfig)
     samples: Model1SampleConfig = field(default_factory=Model1SampleConfig)

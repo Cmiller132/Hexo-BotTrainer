@@ -8,9 +8,14 @@ version = "0.1.0"
 description = "Shared config-driven training orchestration for Hexo models."
 requires-python = ">=3.11"
 dependencies = [
+  # hexo-engine and hexo-runner are declared for the plugin ecosystem but the
+  # package itself never imports them; game execution is reached only through
+  # plugin.generate_selfplay (see python/hexo_train/epoch/selfplay.py).
   "hexo-engine==0.1.0",
   "hexo-runner==0.1.0",
   "hexo-utils==0.1.0",
+  # PyYAML backs only the YAML branch of config._load_raw_config, which has no
+  # caller (every config in configs/ is TOML as of 2026-06-12).
   "PyYAML>=6.0",
 ]
 

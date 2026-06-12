@@ -1,4 +1,28 @@
 //! Narrow PyO3 bridge for Python access to stable Rust utilities.
+//!
+//! Compiled (behind the `python` feature) into the `hexo_utils._rust`
+//! extension module that maturin builds; `python/hexo_utils/records.py`
+//! re-exports these classes and
+//! `packages/hexo_runner/python/hexo_runner/records/record.py` wraps that for
+//! all production callers. Only the `.hxr` codec crosses the boundary --
+//! `state_hash` stays Rust-only.
+//!
+//! Duck-typed runtime contracts (no Python imports at build time):
+//! - `parse_players` accepts hexo_runner player objects via `.identity`
+//!   (`.player_id`/`.label`) or any object with those attributes directly.
+//! - `parse_abort` accepts anything with `.stage`/`.exception_type`/`.message`
+//!   -- both this module's `AbortRecord` and hexo_runner's same-named
+//!   dataclass satisfy it.
+//! - `parse_action_id` takes either a packed u32 action id (the
+//!   hexo_engine legal.rs (q,r) packing) or an action object with
+//!   `.coord.q`/`.coord.r`.
+//! - `PyHexoRecord.replay()` re-runs the stored action ids through the
+//!   `hexo_engine` Python module (`new_game`/`PlacementAction`/`apply_action`/
+//!   `terminal`).
+//!
+//! Error taxonomy (`record_error`): IO -> OSError; lifecycle misuse
+//! (read-only/closed/finished writer) -> RuntimeError; malformed data ->
+//! ValueError.
 
 use std::path::PathBuf;
 
@@ -178,6 +202,13 @@ impl PyHexoRecord {
         self.inner.placements
     }
 
+    /// Re-run the stored action ids through the live `hexo_engine` Python
+    /// module and return its `terminal(...)` result.
+    ///
+    /// The seed is forwarded to `new_game` for API symmetry, but the engine
+    /// currently ignores it (hexo_engine pybridge.rs `new_game`); replay is
+    /// deterministic from the action ids alone. Raises if the engine module
+    /// is unavailable or a stored action is illegal under current rules.
     fn replay(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let engine = py.import("hexo_engine")?;
         let engine_types = py.import("hexo_engine.types")?;
@@ -405,6 +436,10 @@ impl PyHexoRecordGameWriter {
 }
 
 /// Return a tiny capabilities object for smoke tests and packaging checks.
+// UNUSED(2026-06-12): no references found in packages/tests/scripts -- every
+// caller of a `capabilities()` resolves to a model package's own rust_bridge
+// (dense_cnn/hexgt/hexgnn/dense_cnn_restnet); nothing imports
+// hexo_utils._rust.capabilities despite the docstring's smoke-test claim.
 #[pyfunction]
 pub fn capabilities(py: Python<'_>) -> PyResult<Py<PyAny>> {
     let dict = pyo3::types::PyDict::new(py);
@@ -435,6 +470,8 @@ pub fn register_pybridge(module: &Bound<'_, PyModule>) -> PyResult<()> {
 pub fn _rust(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     register_pybridge(module)
 }
+
+// --- Duck-typed parsers + error mapping (Python -> Rust boundary helpers) ---
 
 fn py_path(path: &Bound<'_, PyAny>) -> PyResult<PathBuf> {
     let os = path.py().import("os")?;

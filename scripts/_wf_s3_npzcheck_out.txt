@@ -1,0 +1,9 @@
+dense_cnn_restnet_main_3 ep5 n_shards: 3
+ keys: ['center_q', 'center_r', 'current_player', 'first_present', 'first_q', 'first_r', 'hist_idx', 'hist_off', 'hist_owner', 'hist_qr', 'horizons', 'last_hot_off', 'last_hot_qr', 'legal_ids', 'legal_off', 'moves_left', 'num_rows', 'opp_act', 'opp_hot_off', 'opp_hot_qr', 'opp_off', 'opp_w', 'own_hot_off', 'own_hot_qr', 'phase', 'pol_act', 'pol_off', 'pol_w', 'schema_version', 'stones_off', 'stones_owner', 'stones_qr', 'stvalue', 'stvalue_mask', 'turn_index', 'value']
+ moves_left: shape (8000,) min -1.0 max 709.0 mean 74.9 frac_masked(<0) 0.0118 frac>512 0.0022
+ turn_index max: 1017
+dense_cnn_restnet_main_3 ep9 n_shards: 5
+ keys: ['center_q', 'center_r', 'current_player', 'first_present', 'first_q', 'first_r', 'hist_idx', 'hist_off', 'hist_owner', 'hist_qr', 'horizons', 'last_hot_off', 'last_hot_qr', 'legal_ids', 'legal_off', 'moves_left', 'num_rows', 'opp_act', 'opp_hot_off', 'opp_hot_qr', 'opp_off', 'opp_w', 'own_hot_off', 'own_hot_qr', 'phase', 'pol_act', 'pol_off', 'pol_w', 'schema_version', 'stones_off', 'stones_owner', 'stones_qr', 'stvalue', 'stvalue_mask', 'turn_index', 'value']
+ moves_left: shape (8000,) min -1.0 max 860.0 mean 164.3 frac_masked(<0) 0.0411 frac>512 0.0241
+ turn_index max: 1023
+exit=0

@@ -9,9 +9,11 @@ SHARED Rust builder produces the graph (so training inputs == search inputs).
 Targets reuse dense_cnn's finalized facts (value / opp_policy / short-term value
 were already constructed per per-placement turn). The only remapping is the
 policy/opp visit distribution from action-id space onto the candidate nodes
-(CSR order). At candidate_radius = 8 the candidate set is the full legal set, so
-dropped visit mass is ~0; at smaller n we drop out-of-candidate visits,
-renormalize, and report the dropped mass (open-q #4).
+(CSR order). Visits outside the n-radius candidate set are dropped and the rest
+renormalized, with the dropped mass reported; rows that lose too much mass are
+PRUNED (`should_prune` / HexgtSampleConfig.bc_prune_max_dropped_mass) — the
+chosen handling for the n=3 default (the "widen to n=8 ~= full legal set"
+alternative was rejected; see constants.py DEFAULT_CANDIDATE_RADIUS).
 
 D6 augmentation is intentionally NOT applied: the model is D6-INVARIANT by
 construction (features.py / the equivariance test), so rotating the data would

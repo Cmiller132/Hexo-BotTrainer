@@ -4,6 +4,17 @@ The sample layer stores model-owned training rows without interpreting model
 payloads. Records are written as compressed JSON chunks under a store
 directory, with a small manifest used to rebuild indexes and deterministic
 training windows.
+
+On-disk layout (spoken only by this module and its callers):
+    <store>/manifest.json          - schema + chunk table + sample_count
+    <store>/chunks/chunk-NNNNNN.*  - one compressed-JSON payload per append
+
+Status (2026-06): LEGACY scaffolding. Runtime callers are
+`packages/hexo_train/python/hexo_train/epoch/samples.py` (the shared-store
+path, skipped because every model plugin sets `uses_shared_sample_store=False`)
+and `tests/test_hexo_utils_sample_store.py` /
+`tests/test_training_pipeline_simplification.py`. Production replay storage is
+model-owned NPZ (see `packages/dense_cnn_restnet/.../replay.py`).
 """
 
 from __future__ import annotations
@@ -26,9 +37,14 @@ from .records import (
 )
 
 
+# --- Format constants -------------------------------------------------------
+
 MANIFEST_FILENAME = "manifest.json"
 CHUNKS_DIRNAME = "chunks"
 CHUNK_SUFFIX = ".json.zlib"
+# zlib is the default; "json" (uncompressed) is what the tests select. The
+# zstd/lz4 options are wired but never selected by any config or test in the
+# repo (grep 2026-06-12), even though pyproject.toml hard-requires both libs.
 _CHUNK_SUFFIXES = {
     "json": ".json",
     "zlib": ".json.zlib",
@@ -40,6 +56,9 @@ _TRAINING_SAMPLE_TYPE = "training_sample"
 _POLICY_OUTPUT_TYPE = "policy_output"
 _MODEL_PAYLOAD_TYPE = "model_payload"
 _MAPPING_TYPE = "mapping"
+
+
+# --- Frozen transport dataclasses (store / manifest / index / window) -------
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,6 +166,9 @@ class SampleBatch:
 
     records: Sequence[object]
     metadata: Mapping[str, Any] = field(default_factory=dict)
+
+
+# --- Public store API (open / append / index / window / sample / read) ------
 
 
 def open_sample_store(
@@ -366,14 +388,21 @@ def read_sample_records(source: object) -> tuple[object, ...]:
                 raise ValueError(
                     f"sample index entry {entry.sample_id} points past chunk {entry.chunk_id}"
                 ) from exc
+    # Vestigial: `store` is resolved by _source_entries for type dispatch but
+    # never consumed here (chunk paths in the entries are already absolute).
     _ = store
     return tuple(records)
 
 
+# UNUSED(2026-06-12): no references found in packages/tests/scripts (only the
+# __init__.py re-export); callers use read_sample_records directly.
 def iter_sample_records(source: object) -> Iterator[object]:
     """Iterate records addressed by a store, index, or window."""
 
     yield from read_sample_records(source)
+
+
+# --- Private helpers: manifest + chunk JSON IO -------------------------------
 
 
 def _coerce_store(store: SampleStore | str | Path) -> SampleStore:
@@ -473,6 +502,9 @@ def _read_chunk_records(path: Path, *, compression: str | None = None) -> tuple[
     return tuple(_record_from_json(row) for row in rows)
 
 
+# --- Private helpers: schema / chunk-table / compression bookkeeping --------
+
+
 def _schema_from_manifest_data(manifest_data: Mapping[str, Any]) -> SampleSchema:
     schema = manifest_data.get("schema", {})
     if not isinstance(schema, Mapping):
@@ -570,6 +602,9 @@ def _compression_from_path(path: Path, *, fallback: str | None = None) -> str:
     return "zlib"
 
 
+# --- Private helpers: deterministic selection + request filtering -----------
+
+
 def _select_entries(
     entries: Sequence[SampleIndexEntry],
     *,
@@ -662,6 +697,9 @@ def _record_value(record: object, key: str) -> object:
     if isinstance(record, Mapping):
         return record.get(key)
     return getattr(record, key, None)
+
+
+# --- Private helpers: record (de)serialization to/from chunk JSON -----------
 
 
 def _record_to_json(record: object) -> Mapping[str, Any]:

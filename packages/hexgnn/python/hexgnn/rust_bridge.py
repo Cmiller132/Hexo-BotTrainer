@@ -1,10 +1,15 @@
 """Thin Python import/call boundary for hexgnn Rust acceleration.
 
 All native acceleration lives in `hexo_models._rust.hexgnn`, registered from
-`hexgnn/rust/src`. This module keeps the import error message readable and gives
-Python code named functions for native calls. Phase 0 exposes only
-`capabilities()`; the candidate/window/graph builders (Phase 1) and the MCTS
-session search (Phase 5) are added to this boundary as they land.
+`hexgnn/rust/src` (built only by a maturin rebuild of hexo_models, never by
+installing this package). This module keeps the import error message readable
+and gives Python code named functions for native calls. The full surface is
+present: `graph_facts` (the bounded typed-graph builder consumed by
+`features.build_graph_tensors` via `graph_build.py`/`expand.py`) and
+`new_mcts_session`/`mcts_session_search` (the batched search wrapped by
+`mcts.HexgnnMctsSession`). The Rust featurizer (`hexgnn_featurize_states`) is
+called directly by tests/test_hexgnn_featurizer_parity.py rather than through a
+wrapper here.
 """
 
 from __future__ import annotations
@@ -20,12 +25,20 @@ else:
     _IMPORT_ERROR = None
 
 
+# UNUSED(2026-06-12): no references found in packages/tests/scripts — the only
+# `rust_bridge.capabilities()` callers (tests/test_hexgt_scaffold.py,
+# test_dense_cnn_performance.py) hit the hexgt/dense_cnn bridges. Kept as an
+# API-surface mirror of hexgt's bridge.
 def capabilities() -> Mapping[str, Any]:
     """Return the Rust accelerator capability payload."""
 
     return _hexgnn_module().capabilities()
 
 
+# UNUSED(2026-06-12): no references found in packages/tests/scripts — callers of
+# `rust_bridge.candidate_ids` (tests/test_hexgt_contract.py et al.,
+# scripts/_validate_hexgt_candidates.py) all use hexo_models.hexgt's bridge.
+# Consumers get candidate ids through `graph_facts` instead. API mirror of hexgt.
 def candidate_ids(state: object, n: int) -> list[int]:
     """Packed candidate action ids for a live engine state at radius `n` (§4)."""
 

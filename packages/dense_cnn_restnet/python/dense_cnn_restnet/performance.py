@@ -150,6 +150,12 @@ def calibrate_dense_cnn(
     return result
 
 
+# UNUSED(2026-06-12): no caller of THIS restnet copy found in
+# packages/tests/scripts/configs (excl. scripts/archive); it is re-exported via
+# __init__.py but the only test (tests/test_dense_cnn_performance.py:369)
+# exercises hexo_models.dense_cnn.build_benchmark_report. Kept for public-API
+# symmetry with the parent lineage. calibrate_dense_cnn above IS live via
+# plugin.calibrate_performance.
 def build_benchmark_report(
     *,
     config: Model1Config,
@@ -540,6 +546,13 @@ def _benchmark_selfplay_setting_continuous(
 
 
 def _summarize_mcts_diagnostic_batches(batches: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Aggregate per-batch {tree, evaluation} MCTS diagnostics into one summary.
+
+    Underscore-named but a de-facto shared API: selfplay.py imports this (and
+    _extend_mcts_diagnostic_batches below) for its epoch summaries -- keep the
+    output keys stable for the dashboard/health scripts reading the epoch JSON.
+    """
+
     summary: dict[str, Any] = {"batch_count": len(batches)}
     if not batches:
         return summary
@@ -594,6 +607,13 @@ def _summarize_mcts_diagnostic_batches(batches: Sequence[Mapping[str, Any]]) -> 
 
 
 def _extend_mcts_diagnostic_batches(destination: list[Mapping[str, Any]], searches: Sequence[Any]) -> None:
+    """Collect batch-diagnostics dicts off SearchResults, id-deduped.
+
+    Results from one run() round can share a single diagnostics["batch"]
+    mapping, hence the id() dedupe within each call. Also imported by
+    selfplay.py (see note on _summarize_mcts_diagnostic_batches).
+    """
+
     seen: set[int] = set()
     for search in searches:
         diagnostics = getattr(search, "diagnostics", {})

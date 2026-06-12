@@ -82,6 +82,7 @@ def _representative_inputs(n: int) -> "torch.Tensor | None":
 
 
 def trt_available() -> bool:
+    """True when tensorrt + onnx import cleanly and CUDA is up (no side effects)."""
     try:
         import tensorrt  # noqa: F401
         import onnx  # noqa: F401

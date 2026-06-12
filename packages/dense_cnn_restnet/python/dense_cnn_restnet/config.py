@@ -226,7 +226,8 @@ class Model1SelfPlayConfig:
     # FAST search (`pcr_fast_visits`, NOT recorded, no noise, no forced playouts,
     # played greedily). Full positions get clean policy targets; fast moves buy
     # cheap game progression so more distinct games are generated per GPU-hour.
-    # Mirrors the hexgt lineage implementation (HEXGT_PCR_KATAGO_MAPPING.md).
+    # Mirrors the hexgt lineage implementation (HEXGT_PCR_KATAGO_MAPPING.md --
+    # removed from docs/ in the documentation wipe; recoverable from git history).
     # Both schedulers: lockstep splits full/fast subsets per round; continuous
     # resolves the per-move coin natively in Rust (per-slot MoveClass).
     pcr_enabled: bool = False

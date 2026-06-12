@@ -4,11 +4,13 @@
 //! sample-gen and live MCTS:
 //!
 //! 1. Enumerate the dynamic candidate set + active-window tokens from a live
-//!    `hexo_engine` state (Phase 1, `candidates`).
-//! 2. Build the bounded, window-hub-routed typed graph (no same-axis cliques)
-//!    (Phase 1, `graph`).
-//! 3. Encode the packed-graph payload for the Python/Torch evaluator and run
-//!    batched tree search (Phase 5).
+//!    `hexo_engine` state (`candidates`).
+//! 2. Build the bounded typed graph (`candidates::build_graph`). SPARSE REWRITE:
+//!    the window-hub routing was removed — only adjacency + recency edges are
+//!    emitted, with window counts folded into per-node features (see
+//!    candidates.rs / features.rs).
+//! 3. Featurize + collate leaf batches (`features`, rayon, zero-copy buffers)
+//!    and run the batched tree search (`mcts` / `mcts_tree` / `mcts_eval`).
 //!
 //! Like dense_cnn, this crate is NOT a workspace member; it is `#[path]`-included
 //! into `hexo_models::_rust` (see `packages/hexo_models/rust/src/lib.rs`).
@@ -29,12 +31,17 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 /// Capability metadata for the hexgnn accelerator, surfaced to Python via
-/// `rust_bridge.capabilities()`. The generic pipeline (`hexo_runner` /
-/// `hexo_train`) reads these strings to confirm it is driving the expected model
-/// family + state/transport contract before wiring self-play and MCTS:
+/// `rust_bridge.capabilities()`:
 /// `status`/`model_family` identify the build, `state_source`/`coordinate_encoding`
 /// the engine-state intake, `candidate_set`/`edge_construction`/`policy` the graph
 /// + head contract, and `search`/`eval_transport` the MCTS + byte-payload path.
+///
+/// UNUSED(2026-06-12): no caller found in packages/tests/scripts — the
+/// `rust_bridge.capabilities()` wrapper is itself uncalled (the tests that probe
+/// capabilities use the hexgt/dense_cnn bridges). Kept as an API mirror of the
+/// sibling lineages. NOTE the `edge_construction` value string predates the
+/// sparse rewrite (window hubs removed); it is a frozen identifier, not a
+/// description of the current graph.
 #[pyfunction]
 pub fn capabilities(py: Python<'_>) -> PyResult<Py<PyAny>> {
     let dict = PyDict::new(py);

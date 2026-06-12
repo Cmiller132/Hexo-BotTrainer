@@ -3,6 +3,14 @@
 The two SealBot variants export the same pybind module and class names, so they
 cannot both be imported in one Python process. The parent adapter keeps variant
 selection safe by running exactly one variant inside this worker process.
+
+Spawned only by _SealBotProcess in hexo_runner/adapters/sealbot.py (never run
+by hand). Protocol: emits one ready/error JSON line on startup, then answers
+each stdin request line with exactly one stdout JSON line —
+{"type": "decide", "state": ...} -> {"ok": true, "moves": [[q, r], ...],
+"diagnostics": {...}}; {"type": "close"} ends the loop. stdout must carry
+protocol JSON only. Imports game.py + the compiled minimax_cpp extension from
+the SealBot checkout passed via --root/--variant.
 """
 
 from __future__ import annotations
@@ -45,6 +53,11 @@ def main(argv: list[str] | None = None) -> int:
 
 
 class _Worker:
+    """Holds the imported SealBot variant and one MinimaxBot instance.
+
+    `time_limit` is seconds of think time per get_move call.
+    """
+
     def __init__(self, root: Path, variant: str, time_limit: float) -> None:
         self.root = root.resolve()
         self.variant = variant
@@ -65,6 +78,12 @@ class _Worker:
         self._bot = minimax_cpp.MinimaxBot(float(time_limit))
 
     def decide(self, state: dict[str, Any]) -> dict[str, Any]:
+        """Rebuild a fresh HexGame from the JSON state and ask the bot for a turn.
+
+        The state shape is produced by sealbot.py _state_payload; runner
+        "player0"/"player1" map to SealBot Player.A/B. Returns the bot's full
+        turn (1-2 moves) — the parent adapter buffers the second stone.
+        """
         game = self._hex_game_type()
         player_a = self._player_type.A
         player_b = self._player_type.B

@@ -1,0 +1,30 @@
+MOVES_LEFT_CAP (hexgt tree, in effect for main_3 training) = 512
+
+npz ep9 game60: keys=['center_q', 'center_r', 'current_player', 'first_present', 'first_q', 'first_r', 'hist_idx', 'hist_off', 'hist_owner', 'hist_qr', 'horizons', 'last_hot_off', 'last_hot_qr', 'legal_ids', 'legal_off', 'moves_left', 'num_rows', 'opp_act', 'opp_hot_off', 'opp_hot_qr', 'opp_off', 'opp_w', 'own_hot_off', 'own_hot_qr', 'phase', 'pol_act', 'pol_off', 'pol_w', 'schema_version', 'stones_off', 'stones_owner', 'stones_qr', 'stvalue', 'stvalue_mask', 'turn_index', 'value']
+  moves_left: shape=(166,) dtype=float32 min=0.0000 max=685.0000 first5=[685. 674. 672. 670. 661.] last5=[27. 25. 13.  8.  0.]
+  turn_index: shape=(166,) dtype=int32 min=1.0000 max=686.0000 first5=[ 1 12 14 16 25] last5=[659 661 673 678 686]
+  rows=166; ml+turn_index: min=686.0 max=686.0 median=686.0
+  ml values at turn_index 0..4: [None, 685.0, None, None, None]
+
+npz ep9 game56: keys=['center_q', 'center_r', 'current_player', 'first_present', 'first_q', 'first_r', 'hist_idx', 'hist_off', 'hist_owner', 'hist_qr', 'horizons', 'last_hot_off', 'last_hot_qr', 'legal_ids', 'legal_off', 'moves_left', 'num_rows', 'opp_act', 'opp_hot_off', 'opp_hot_qr', 'opp_off', 'opp_w', 'own_hot_off', 'own_hot_qr', 'phase', 'pol_act', 'pol_off', 'pol_w', 'schema_version', 'stones_off', 'stones_owner', 'stones_qr', 'stvalue', 'stvalue_mask', 'turn_index', 'value']
+  moves_left: shape=(220,) dtype=float32 min=3.0000 max=853.0000 first5=[853. 844. 834. 831. 827.] last5=[16.  9.  6.  5.  3.]
+  turn_index: shape=(220,) dtype=int32 min=1.0000 max=851.0000 first5=[ 1 10 20 23 27] last5=[838 845 848 849 851]
+  rows=220; ml+turn_index: min=854.0 max=854.0 median=854.0
+  ml values at turn_index 0..4: [None, 853.0, None, None, None]
+
+npz ep5 game0: keys=['center_q', 'center_r', 'current_player', 'first_present', 'first_q', 'first_r', 'hist_idx', 'hist_off', 'hist_owner', 'hist_qr', 'horizons', 'last_hot_off', 'last_hot_qr', 'legal_ids', 'legal_off', 'moves_left', 'num_rows', 'opp_act', 'opp_hot_off', 'opp_hot_qr', 'opp_off', 'opp_w', 'own_hot_off', 'own_hot_qr', 'phase', 'pol_act', 'pol_off', 'pol_w', 'schema_version', 'stones_off', 'stones_owner', 'stones_qr', 'stvalue', 'stvalue_mask', 'turn_index', 'value']
+  moves_left: shape=(33,) dtype=float32 min=3.0000 max=138.0000 first5=[138. 136. 136. 135. 134.] last5=[22. 22. 11.  9.  3.]
+  turn_index: shape=(33,) dtype=int32 min=16.0000 max=151.0000 first5=[16 18 18 19 20] last5=[132 132 143 145 151]
+  rows=33; ml+turn_index: min=154.0 max=154.0 median=154.0
+  ml values at turn_index 0..4: [None, None, None, None, None]
+ckpt5 loaded; missing(non-buffer)=0 unexpected=0
+
+smoke game epoch-000009-selfplay-000060 len=687 winner=player1
+forward output keys: ['moves_left', 'opp_policy', 'policy', 'stvalue_16', 'stvalue_2', 'stvalue_6', 'value']
+  ply=  10 v_stm=+0.103 ml_norm=-0.6385 ml_pred_decisions=   92.5 true_remaining=677
+  ply= 100 v_stm=+0.279 ml_norm=-0.6184 ml_pred_decisions=   97.7 true_remaining=587
+  ply= 250 v_stm=+0.587 ml_norm=-0.5864 ml_pred_decisions=  105.9 true_remaining=437
+  ply= 336 v_stm=+0.606 ml_norm=-0.5175 ml_pred_decisions=  123.5 true_remaining=351
+  ply= 500 v_stm=+0.567 ml_norm=-0.3042 ml_pred_decisions=  178.1 true_remaining=187
+  ply= 667 v_stm=+0.447 ml_norm=-0.4829 ml_pred_decisions=  132.4 true_remaining=20
+DONE

@@ -1,4 +1,12 @@
-"""Direct match runner mode."""
+"""Direct match runner mode: one game -> one `{game_id}.hxr` file.
+
+Production callers: packages/hexo_frontend/python/hexo_frontend/web.py
+(Match-v2 Arena games), packages/hexo_models/hexgt/python/hexo_models/hexgt/
+evaluation.py and packages/hexgnn/python/hexgnn/evaluation.py (SealBot
+gating), plus tests/test_hexo_runner_match_mode.py. The dense_cnn lineages
+bypass this mode and drive their own batched-inference eval loops, writing
+.hxr via hexo_runner.records directly.
+"""
 
 from __future__ import annotations
 

@@ -126,10 +126,13 @@ impl HexgtMctsSession {
         move_temperatures: Option<Vec<f32>>,
         // Per-root overrides (one entry per game key, aligned with `game_keys`) that
         // let a SINGLE batched call run roots with heterogeneous search budgets +
-        // exploration. This is how KataGo PCR's full/fast move mix is coalesced into
-        // ONE forward stream (full-width leaf batching) instead of two half-width
-        // calls. Each None -> the scalar fallback is broadcast to every root, so the
-        // call stays byte-identical to the pre-existing scalar path:
+        // exploration. Built so KataGo PCR's full/fast move mix could be coalesced
+        // into ONE forward stream (full-width leaf batching) instead of two
+        // half-width calls. Each None -> the scalar fallback is broadcast to every
+        // root, so the call stays byte-identical to the pre-existing scalar path:
+        // UNUSED(2026-06-12) in production: selfplay.py ships PCR as two separate
+        // search() calls per full/fast subset and never passes per_root_*; the path
+        // is exercised only by tests/test_hexgt_mcts_per_root.py + test_hexgt_pcr.py.
         //   per_root_visits           -> per-root visit cap (else `visits`)
         //   per_root_forced_playout_k -> per-root forced-playout k, gating BOTH the
         //                                in-search forced playouts and the exported
@@ -782,7 +785,7 @@ fn build_search_result_payloads(
 }
 
 fn root_prior_policy(root: &RustNode) -> (Vec<PackedCoord>, Vec<f32>) {
-    // Every in-crop legal move is staged as either a materialized edge or an
+    // Every in-set legal candidate move is staged as either a materialized edge or an
     // unexpanded prior, so the root prior is exactly their union normalized. This
     // holds for both an owned root and a reused (shared) root: `remaining_priors`
     // returns the not-yet-materialized candidates for whichever variant the root

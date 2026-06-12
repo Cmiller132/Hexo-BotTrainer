@@ -19,6 +19,13 @@ class CompileAdoptError(RuntimeError):
 
 
 def bucket_sizes(max_batch: int) -> tuple[int, ...]:
+    """Power-of-two warmup/bucket batch sizes up to and including ``max_batch``.
+
+    Must agree with the evaluator's bucket padding (`inference._bucket_batch_size`
+    in its default power-of-two mode): each compiled static graph corresponds to
+    one of these shapes, and dynamo's recompile budget is sized from this count.
+    """
+
     max_batch = max(1, int(max_batch))
     sizes: list[int] = []
     size = 1
@@ -66,6 +73,18 @@ def build_compiled_forward(
     argmax_match_min: float = 0.90,
     allow_torch_fallback: bool = False,
 ) -> tuple[Callable[[torch.Tensor], Mapping[str, torch.Tensor]] | None, Mapping[str, Any]]:
+    """Compile `model.forward_policy_value` and gate adoption on correctness.
+
+    Compiles one static graph per bucket shape (fullgraph, reduce-overhead),
+    warms every bucket, then compares against the eager forward on
+    representative encoded positions (policy argmax match >= `argmax_match_min`
+    and decoded-scalar value error <= `value_tol`). FAIL-LOUD by default: any
+    failure raises `CompileAdoptError` unless `allow_torch_fallback`, in which
+    case it returns ``(None, info)`` so the caller (`DenseCNNInference.__init__`
+    under `inference_use_torch_compile`) keeps the eager path. On success
+    returns ``(CompiledForward, info)`` with the gate measurements in `info`.
+    """
+
     info: dict[str, Any] = {"adopted": False, "reason": None}
     banner = "!" * 72
 

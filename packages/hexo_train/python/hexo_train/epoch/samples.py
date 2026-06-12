@@ -7,6 +7,14 @@ the trainer will consume.
 
 The model still owns payload schemas and tensor decoding. The shared sample
 helpers only handle storage/index/window mechanics.
+
+Production reality: all four registered plugins set
+`uses_shared_sample_store=False` and own their replay storage (the restnet
+lineage writes NPZ shards from its own selfplay and selects windows through
+its trainer's `select_training_samples` — see
+packages/dense_cnn_restnet/python/dense_cnn_restnet/{replay,trainer}.py). The
+`hexo_utils.samples` JSON-chunk store path below is therefore exercised only
+by the FakePlugin tests in tests/test_training_pipeline_simplification.py.
 """
 
 from __future__ import annotations
@@ -87,6 +95,9 @@ def select_training_samples(
 
     trainer = components.model.trainer
     if trainer is not None and hasattr(trainer, "select_training_samples"):
+        # Production path: the restnet trainer builds a KataGo-style shuffle
+        # over its mtime-ordered NPZ shard window here; the shared-store code
+        # below never runs for it.
         return trainer.select_training_samples(ctx=ctx, components=components, epoch=epoch)
 
     from hexo_utils.samples import build_sample_window, refresh_sample_index

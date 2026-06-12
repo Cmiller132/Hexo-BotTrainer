@@ -180,6 +180,11 @@ use pyo3::types::PyDict;
 
 /// Benchmark hook: run the forcing solver on a live engine state and return
 /// {win, nodes, micros, hit_limit}. Exploratory only — not used by search.
+///
+/// UNUSED(2026-06-12): no Python caller found in packages/tests/scripts — the
+/// VCF bench/test (scripts/_vcf_bench.py, tests/test_hexgt_vcf.py) drive the
+/// hexgt twin (`hexgt_vcf_solve`). Registered into the pybridge but never
+/// invoked; the whole module is the self-described benchmark artifact above.
 #[pyfunction]
 #[pyo3(signature = (state, ply_budget=8, node_cap=2_000_000, time_limit_ms=200))]
 fn hexgnn_vcf_solve(

@@ -7,8 +7,11 @@ MCTS evaluator callback needs (the dense_cnn `{values_bytes, priors_bytes}`
 contract, but priors are per-candidate in CSR order — `candidate_ids`).
 
 `evaluate_states` is the Python-driven path (build graph from states → forward →
-per-graph softmax). The zero-copy Rust-payload transport is layered on top once
-the throughput gate (this module + `_profile_hexgt_forward.py`) says go.
+per-graph softmax); `evaluate_featurized_batch` is the production MCTS callback
+fed by the zero-copy Rust transport (`rust/src/features.rs::collated_to_py_dict`
+→ `rust/src/mcts_eval.rs`). The throughput gate that admitted that transport
+passed long ago; its probe script (`_profile_hexgt_forward.py`, once cited here)
+has since been removed from scripts/.
 """
 
 from __future__ import annotations

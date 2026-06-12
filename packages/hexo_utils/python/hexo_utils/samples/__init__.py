@@ -8,6 +8,15 @@ The package is intentionally small:
 
 Core game records stay in `hexo_runner.records`; models write sample records
 during self-play and decide how to turn them into tensors.
+
+Status (2026-06): LEGACY scaffolding from the generic hexo_train pipeline era.
+The only importers are `packages/hexo_train/python/hexo_train/defaults.py`,
+`hexo_train/epoch/samples.py` (a path gated behind
+`uses_shared_sample_store`, which every real model plugin sets to False), and
+`tests/test_hexo_utils_sample_store.py` /
+`tests/test_training_pipeline_simplification.py`. Production replay storage
+is the model-owned NPZ pipeline (e.g.
+`packages/dense_cnn_restnet/python/dense_cnn_restnet/replay.py`).
 """
 
 from .buffer import (

@@ -1,4 +1,37 @@
-"""Tiny stdlib web app for manually playing a Hexo match through the runner."""
+"""Stdlib HTTP server for the Hexo training dashboard (three SPA screens).
+
+This is the whole backend of the dashboard: a ``ThreadingHTTPServer`` (no
+framework) serving the static bundle in ``static/`` (index.html + app.js +
+styles.css) plus the JSON API behind its three screens:
+
+* **Match** (``#match``) — live Arena games through the production runner.
+  ``ManualMatchController`` bridges browser clicks to ``hexo_runner`` players
+  (manual / SealBot / checkpoint bots, the latter playing via the Debug CPU
+  worker) and runs ``hexo_runner.modes.match.run_match`` on a daemon thread.
+* **History** (``#history``) — training-run status read directly from run
+  directories under ``cwd/runs`` (production cwd is the run mount, NOT this
+  repo): ``manifest.json``, ``diagnostics/*.json`` + ``events.jsonl`` written
+  by ``hexo_train``/the model packages, ``.hxr`` game records via
+  ``hexo_runner.records.HexoRecordFile``, and ``checkpoints/*.pt`` stats.
+  Two poll tiers: the full scan (3s memo cache) and ``/api/training/live``
+  (~2.5s client poll, 1s micro-cache).
+* **Debug** (``#debug``) — single-position model forensics. This module only
+  resolves runs/records/checkpoints and shapes payloads; all torch work is
+  delegated to the out-of-process CPU worker via ``debug_service`` (this
+  process never imports torch, so the GPU and the live poll stay untouched).
+
+Layout (section banners below follow this order): response caches -> Match
+controller + player adapters -> HTTP handler/route table -> training-run scan
+-> Debug endpoint glue -> artifact/history paging -> per-epoch trends ->
+live status -> small file helpers -> server entry points.
+
+Callers: ``python -m hexo_frontend.web`` / the ``hexo-play`` console script
+(production: ``scripts/_dashboard_launch.sh``, WSL :8080, cwd at the run
+mount); tests call the module functions directly
+(tests/test_frontend_training_{artifacts,epoch,live}.py, test_debug_infer.py,
+test_hexo_runner_match_mode.py, test_sealbot_adapter.py). Board payload
+shaping lives in ``dashboard.py``; the client contract is ``static/app.js``.
+"""
 
 from __future__ import annotations
 
@@ -77,9 +110,10 @@ CHECKPOINT_C_PUCT_DEFAULT = 1.5
 # per-request connections are slow. Responses below this size aren't worth
 # gzipping (the ~20-byte gzip header/overhead dominates).
 GZIP_MIN_BYTES = 600
-# Browser cache window for static assets. index.html cache-busts app.js/styles.css
-# with a ?v= query, so a few minutes of caching is safe and makes reloads ~free;
-# the ETag still forces revalidation (304, no body) once it expires.
+# UNUSED(2026-06-12): no references found in packages/tests/scripts. This was
+# the static-asset max-age before the phone stale-JS incident; _send_static now
+# serves index.html with no-store and app.js/styles.css with no-cache (see the
+# cache-policy comment there), so this constant no longer feeds any header.
 STATIC_MAX_AGE_SECONDS = 300
 # The training-run/list scans walk the run tree and open many .hxr files. The
 # history screen re-polls every 15s, so memoize the built payload briefly to bound
@@ -199,6 +233,17 @@ def _training_live_cached(name: str) -> dict[str, object]:
     return payload
 
 
+# ---------------------------------------------------------------------------
+# Match screen: ManualMatchController + runner player adapters.
+#
+# One controller instance per server (bound onto the handler class). It owns a
+# daemon match thread running hexo_runner.modes.match.run_match and exposes a
+# version-counter long-poll (state) the browser drives. Generation bumping is
+# the cancellation mechanism: every player callback raises "manual match reset"
+# once the generation moves on, so an abandoned thread dies at its next call.
+# ---------------------------------------------------------------------------
+
+
 class MoveConflict(ValueError):
     """Raised when a browser move arrives while the human cannot act."""
 
@@ -254,6 +299,13 @@ class ManualMatchController:
         self.reset()
 
     def reset(self, config: dict[str, Any] | None = None) -> dict[str, object]:
+        """Start a new match/series from a ``POST /api/new`` body.
+
+        Tears down any running match (generation bump), parses + validates the
+        config (bad specs raise ValueError -> 400 BEFORE any thread starts),
+        spawns the series thread, blocks until the first state arrives, and
+        returns the full state payload (the same shape as ``state()``)."""
+
         match = self._parse_match_config(config or {})
         self.close()
         with self._condition:
@@ -330,6 +382,13 @@ class ManualMatchController:
         return {"sealbot": discover_sealbot_adapters(self._sealbot_path)}
 
     def state(self, *, since: int | None = None, timeout_ms: int = 0) -> dict[str, object]:
+        """Current match payload for ``GET /api/state``.
+
+        With ``since`` + ``timeout_ms`` this is a long-poll: it parks (up to
+        30s max) until the internal version counter passes ``since``, so the
+        browser sees bot moves the instant they land instead of on a poll
+        interval. Returns immediately when the state is already newer."""
+
         with self._condition:
             self._wait_for_state_locked()
             if since is not None and self._version <= since and timeout_ms > 0:
@@ -342,6 +401,13 @@ class ManualMatchController:
             return self._payload_locked()
 
     def submit_move(self, q: int, r: int) -> dict[str, object]:
+        """Apply a human click (``POST /api/move``) as the pending action.
+
+        Raises MoveConflict (-> 409) when it is not the human's turn and
+        ValueError (-> 400) for an illegal coordinate; otherwise hands the
+        action to the parked ``decide`` callback and blocks until the match
+        thread has advanced the state."""
+
         with self._condition:
             self._wait_for_state_locked()
             state = self._state
@@ -376,6 +442,10 @@ class ManualMatchController:
         self._thread = None
 
     def decide(self, player_index: int, state: engine.HexoState, generation: int) -> DecisionResult:
+        """Match-thread side of a manual turn (called by _ManualPlayer.decide):
+        publish the pre-move state, then park until submit_move provides the
+        pending action or the generation moves on (-> "manual match reset")."""
+
         with self._condition:
             if self._cancelled or generation != self._generation:
                 raise RuntimeError("manual match reset")
@@ -608,6 +678,9 @@ class ManualMatchController:
                 "player1": _normalize_player_spec(raw_players.get("player1", MANUAL_KIND)),
             }
 
+        # Legacy config shape (mode + human_player) from before the players{}
+        # spec dict. app.js no longer sends it, but tests/test_sealbot_adapter.py
+        # still exercises it; keep until those fixtures move to players{}.
         mode = str(config.get("mode") or "manual")
         if mode not in {"manual", "sealbot"}:
             raise ValueError(f"Unknown match mode: {mode}")
@@ -972,6 +1045,11 @@ def _player_payload(player_index: int, spec: dict[str, object]) -> dict[str, obj
     }
 
 
+# ---------------------------------------------------------------------------
+# HTTP handler: the route table for all three screens lives in do_GET/do_POST.
+# ---------------------------------------------------------------------------
+
+
 class HexoPlayHandler(BaseHTTPRequestHandler):
     server_version = "hexo-frontend-play/0.1"
     # HTTP/1.1 keep-alive: reuse one TCP connection for index.html + app.js +
@@ -983,6 +1061,36 @@ class HexoPlayHandler(BaseHTTPRequestHandler):
     controller: ClassVar[ManualMatchController]
 
     def do_GET(self) -> None:
+        """GET route table. All API responses are JSON; errors are
+        ``{"error": ...}`` with 400 (deterministic/bad request) or 500
+        (debug-worker transport failure, retryable — see the except clauses).
+
+        Match screen:
+          /api/state?since=&timeout_ms=     long-poll match payload (controller.state)
+          /api/adapters                     SealBot adapter discovery
+        History screen (training-run scans; run dirs under cwd/runs):
+          /api/training/runs                run list (3s cache)
+          /api/training/run?name=           full run overview (trends/health/pages, 3s cache)
+          /api/training/live?run=           fast status tier (~1s micro-cache)
+          /api/training/epoch?run=&epoch=   epoch-inspector detail (uncached by design)
+          /api/training/history-page?run=&limit=&cursor=&source=&winner=&sort=&query=&include_total=
+                                            paged .hxr game rows (opaque JSON cursor)
+          /api/training/history-count?...   filtered game count
+          /api/training/artifacts-page?run=&limit=&cursor=&kind=
+                                            paged artifact listing (tests-only client today)
+          /api/training/file?run=&path=     raw artifact download (manual use; no UI caller)
+          /api/training/history?run=&path=&record=
+                                            full replay payload for one recorded game
+        Debug screen (positions resolved here, model work in the CPU worker):
+          /api/debug/checkpoints?run=       checkpoint list + lineage + worker status
+          /api/debug/games?run=&source=     .hxr files available for inspection
+          /api/debug/position?run=&path=&record=&ply= (or ?actions=csv)
+                                            replayed board payload at a ply
+          /api/debug/ckpt_info, /record_row, /game_eval, /trajectory
+                                            worker-backed forensics payloads
+        Static: / and /index.html (no-store), /static/* (no-cache + ETag).
+        """
+
         try:
             parsed = urlparse(self.path)
             path = parsed.path
@@ -1051,6 +1159,9 @@ class HexoPlayHandler(BaseHTTPRequestHandler):
                         kind=str(query.get("kind", ["all"])[0] or "all"),
                     )
                 )
+            # UNUSED(2026-06-12): no app.js fetch and no test references found in
+            # packages/tests/scripts for /api/training/file; kept as a manual
+            # raw-artifact download URL (json/jsonl/png/hxr) for browser use.
             elif path == "/api/training/file":
                 query = parse_qs(parsed.query)
                 self._send_training_file(
@@ -1152,6 +1263,20 @@ class HexoPlayHandler(BaseHTTPRequestHandler):
             self._send_json(self._error_payload(str(exc)), HTTPStatus.BAD_REQUEST)
 
     def do_POST(self) -> None:
+        """POST route table (JSON bodies in, JSON out).
+
+        Match screen:
+          /api/new          start a match/series; body is the players{}/series
+                            spec parsed by _parse_match_config -> full state
+          /api/match/stop   halt the running series -> state payload
+          /api/move {q,r}   human placement -> 409 MoveConflict when not our turn
+        Debug screen (bodies carry run/path/record/ply or action_ids + checkpoint):
+          /api/debug/analyze      all model heads for one position (cached)
+          /api/debug/search       fresh CPU MCTS (visits/c_puct/seed)
+          /api/debug/search_tree  deterministic PUCT debug tree (validated here
+                                  so routine UI errors never restart the worker)
+        """
+
         path = urlparse(self.path).path
         try:
             if path == "/api/new":
@@ -1297,7 +1422,11 @@ class HexoPlayHandler(BaseHTTPRequestHandler):
             gzip_body=gz,
         )
 
+    # UNUSED(2026-06-12): only caller is the /api/training/file route above,
+    # which itself has no client/test references — see the note there.
     def _send_training_file(self, run_name: str, artifact_path: str) -> None:
+        """Stream one run artifact verbatim (Content-Type by suffix)."""
+
         path = _resolve_run_path(run_name, artifact_path)
         if path is None or not path.is_file():
             self.send_error(HTTPStatus.NOT_FOUND)
@@ -1311,6 +1440,14 @@ class HexoPlayHandler(BaseHTTPRequestHandler):
             ARTIFACT_TYPES.get(suffix, "application/octet-stream"),
             allow_gzip=suffix in {".json", ".jsonl"},
         )
+
+
+# ---------------------------------------------------------------------------
+# History screen: training-run discovery + run overview (the slow scan tier,
+# memoized for TRAINING_CACHE_TTL_SECONDS by the *_cached wrappers up top).
+# Everything reads run dirs under cwd/runs (production cwd = the run mount);
+# the file formats are produced by hexo_train + the model packages.
+# ---------------------------------------------------------------------------
 
 
 def _query_int(value: str | None) -> int | None:
@@ -1347,6 +1484,10 @@ def _training_roots() -> tuple[Path, ...]:
 
 
 def _training_runs() -> dict[str, object]:
+    """Run-list payload for ``GET /api/training/runs``: every dir under the
+    training roots that has a ``diagnostics/`` or ``selfplay/`` child, newest
+    mtime first, deduped by name across roots (newest wins)."""
+
     runs_by_name: dict[str, dict[str, object]] = {}
     for root in _training_roots():
         if not root.exists():
@@ -1378,6 +1519,14 @@ def _training_runs() -> dict[str, object]:
 
 
 def _training_run(name: str) -> dict[str, object]:
+    """Full run-overview payload for ``GET /api/training/run?name=`` (the
+    History screen's 15s refresh, behind the 3s memo cache).
+
+    Aggregates: per-epoch trend rows (``epoch_history``), SealBot results
+    (``evaluation_history``), ``learning_health``, the live ``status`` block,
+    plus first pages of artifacts and game history (the client pages further
+    via /history-page and /artifacts-page). Unknown run -> ValueError (400)."""
+
     run_dir = _resolve_run_dir(name)
     if run_dir is None:
         raise ValueError("Unknown training run")
@@ -1590,6 +1739,12 @@ def _epoch_checkpoint_stat(
 
 
 def _training_history(run_name: str, artifact_path: str, record_index: int = 0) -> dict[str, object]:
+    """Replay one recorded game (``GET /api/training/history``) into a full
+    board payload: the .hxr record's action ids are re-applied through the
+    engine and shaped by dashboard.dashboard_state, plus a ``history`` block
+    (winner/status/abort) and a ``record_games`` index of the file's games.
+    This is the History screen's "Load" view (read-only Match-board shape)."""
+
     path = _resolve_run_path(run_name, artifact_path)
     if path is None or not path.is_file() or path.suffix.lower() != ".hxr":
         raise ValueError("Unknown game history artifact")
@@ -2303,6 +2458,15 @@ def _debug_trajectory(run_name: str, artifact_path: str, record_index: int, chec
     }
 
 
+# ---------------------------------------------------------------------------
+# History screen: artifact listing + paged .hxr game history.
+#
+# Game rows are built from .hxr files via _hxr_base_rows (memoized by
+# mtime/size in _hxr_history_cache) and paged with an opaque JSON cursor so
+# the newest-first stream stays stable while new epochs roll in.
+# ---------------------------------------------------------------------------
+
+
 def _training_artifacts_page(
     *,
     run_name: str,
@@ -2448,6 +2612,15 @@ def _training_history_page(
     query_text: str = "",
     include_total: bool = True,
 ) -> dict[str, object]:
+    """Paged game-history rows for ``GET /api/training/history-page``.
+
+    ``run_name`` may be HISTORY_ALL_RUNS ("__all__") to merge every run.
+    Returns ``{items, next_cursor, complete, total_matches, scanned_files,
+    scanned_games, sort}``. newest/oldest stream file-by-file with a
+    row-identity cursor (_history_cursor_key); the complete sorts
+    (longest/shortest/winner) must materialize all rows first and use a plain
+    integer-offset cursor instead."""
+
     run_infos = _history_run_infos(run_name)
     if not run_infos:
         raise ValueError("Unknown training run")
@@ -2601,6 +2774,11 @@ def _training_history_streaming_page(
     diagnostics_cache: dict[str, dict[str, object]] | None,
     live_status_cache: dict[str, dict[str, object]] | None,
 ) -> dict[str, object]:
+    """Streaming page builder for the newest/oldest sorts: walks the epoch-
+    ordered .hxr file list, decoding rows only until the page fills, then
+    (when ``include_total`` and the filter is pass-all) counts the remaining
+    files by record count alone without building their rows."""
+
     reverse = sort != "oldest"
     cursor_key = _decode_history_cursor(cursor)
     passed_cursor = cursor_key is None
@@ -2811,6 +2989,12 @@ def _history_rows_for_file(
 
 
 def _hxr_base_rows(path: Path, run_dir: Path) -> list[dict[str, object]]:
+    """Decode one .hxr file into per-game summary rows (game_id, winner,
+    length, players, abort, ...), memoized by (mtime_ns, size) in
+    _hxr_history_cache. Returns row COPIES so callers can annotate freely.
+    This cache is what makes history paging and the .hxr stat backfills
+    (_selfplay_game_stats_from_records) cheap on re-poll."""
+
     stat = _safe_stat(path)
     if stat is None or stat.st_size <= 0:
         return []
@@ -2988,6 +3172,10 @@ def _record_player_payload(player: object) -> dict[str, object]:
     }
 
 
+# UNUSED(2026-06-12): no references found in packages/tests/scripts. This was
+# the pre-paging full-replay history builder; superseded by the streaming
+# pipeline (_history_files_for_runs + _history_rows_for_file + _hxr_base_rows)
+# which the history-page endpoints use.
 def _training_histories(
     run_dir: Path,
     diagnostics_by_epoch: dict[str, object],
@@ -3055,6 +3243,15 @@ def _history_diagnostics_brief(diagnostics: dict[str, object]) -> dict[str, obje
         for label in ("selfplay", "evaluation")
         if label in diagnostics
     }
+
+
+# ---------------------------------------------------------------------------
+# History screen: per-epoch trend rows. _epoch_history merges every diagnostics
+# JSON family (epoch_*.json pipeline results, dense_cnn.selfplay/evaluation
+# epoch files, checkpoint stats) into one ascending row list; the *_summary
+# helpers below each document their producer's real keys. Output key names are
+# the app.js contract and must not change.
+# ---------------------------------------------------------------------------
 
 
 def _iter_training_files(run_dir: Path, *, suffix: str | None = None) -> list[Path]:
@@ -3140,6 +3337,13 @@ def _evaluation_history(run_dir: Path) -> list[dict[str, object]]:
 
 
 def _epoch_history(run_dir: Path) -> list[dict[str, object]]:
+    """One merged row per epoch (ascending) for the trends charts + epoch
+    table: pipeline results from ``diagnostics/epoch_*.json``, self-play and
+    evaluation summaries from the ``dense_cnn.*.epoch_*.json`` files (with
+    .hxr-derived game-stat backfill), optional policy-target/progress
+    overlays, and checkpoint file stats. Rows without a finished pipeline
+    result get ``status: "partial"``."""
+
     rows: dict[int, dict[str, object]] = {}
     diagnostics_dir = run_dir / "diagnostics"
 
@@ -3292,6 +3496,13 @@ def _learning_health(
     evaluation_history: list[dict[str, object]],
     live_status: dict[str, object],
 ) -> dict[str, object]:
+    """Heuristic run-health verdict for the History status band: a coarse
+    ``status`` ladder (collecting -> ok -> improving / watch -> intervene)
+    plus human-readable ``messages``, derived from loss trend, SealBot
+    survival/wins, self-play speed, D6 previews, and replay composition.
+    Display-side triage only — thresholds here are owner judgment calls, not
+    training-side gates."""
+
     completed = [row for row in epoch_history if row.get("status") == "completed"]
     latest = completed[-1] if completed else (epoch_history[-1] if epoch_history else {})
     latest_epoch = int(latest.get("epoch") or 0)
@@ -3737,7 +3948,19 @@ def _abort_payload(abort: object | None) -> object | None:
     }
 
 
+# ---------------------------------------------------------------------------
+# History screen: live status (the fast ~2.5s poll tier behind
+# /api/training/live). Cheap reads only: the events.jsonl tail, the watchdog
+# jsonl tail, two small JSON files, and a few stat/glob probes.
+# ---------------------------------------------------------------------------
+
+
 def _training_live_status(run_dir: Path) -> dict[str, object]:
+    """Live ``status`` block: active stage/epoch from events.jsonl, watchdog +
+    calibration + self-play live summaries when their files exist, and the
+    derived within-epoch ``sub_phase`` (see _derive_sub_phase). Also embedded
+    in the full run payload so both poll tiers share one shape."""
+
     diagnostics = run_dir / "diagnostics"
     events = _stage_status_from_events(diagnostics / "events.jsonl")
     watchdog = _read_last_jsonl(diagnostics / "resource_watchdog.jsonl")
@@ -3991,6 +4214,11 @@ def _training_progress_summary(payload: dict[str, object]) -> dict[str, object]:
 
 
 def _stage_status_from_events(path: Path) -> dict[str, object]:
+    """Active stage/epoch from the run's ``diagnostics/events.jsonl`` (written
+    by hexo_train's DiagnosticsWriter): a stage_started without its matching
+    stage_finished means the stage is still running; otherwise fall back to
+    the last event's stage/status."""
+
     active_stage: str | None = None
     active_epoch: int | None = None
     last_event: dict[str, object] | None = None
@@ -4087,6 +4315,13 @@ def _selfplay_live_summary(payload: dict[str, object]) -> dict[str, object]:
         "active_games": payload.get("active_games"),
         "elapsed_seconds": payload.get("elapsed_seconds"),
     }
+
+
+# ---------------------------------------------------------------------------
+# Small filesystem/JSON helpers shared across the scan + live tiers. All are
+# fail-soft: a missing/corrupt/mid-write file degrades to None/[]/0 rather
+# than failing a request (run dirs are being written concurrently by training).
+# ---------------------------------------------------------------------------
 
 
 def _iter_jsonl(path: Path) -> list[object]:
@@ -4187,6 +4422,12 @@ def _resolve_run_path(run_name: str, artifact_path: str) -> Path | None:
     if run_dir.resolve() != path and run_dir.resolve() not in path.parents:
         return None
     return path
+
+
+# ---------------------------------------------------------------------------
+# Server entry points: run()/main() (python -m hexo_frontend.web, the
+# hexo-play console script, and scripts/_dashboard_launch.sh in production).
+# ---------------------------------------------------------------------------
 
 
 def make_handler(controller: ManualMatchController) -> type[HexoPlayHandler]:

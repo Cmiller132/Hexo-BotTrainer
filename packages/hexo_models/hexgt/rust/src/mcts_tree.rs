@@ -8,10 +8,15 @@
 //! memory-light and keeps move legality inside `hexo_engine`.
 //!
 //! This module does not call Python and does not encode tensors. It consumes
-//! validated `RustEvaluation` values from `mcts_eval`, stages every in-crop legal
-//! prior as a lazy candidate, and materializes an edge only when PUCT selects it.
-//! Every legal in-crop move is a candidate; there is no progressive widening or
-//! candidate cap.
+//! validated `RustEvaluation` values from `mcts_eval`, stages every in-set legal
+//! prior (the n-radius candidate set is the move vocabulary — hexgt has no crop)
+//! as a lazy candidate, and materializes an edge only when PUCT selects it,
+//! capped by policy-nucleus (top-p) widening: each node computes
+//! `max_eligible_children` once from its prior distribution (`Widening`,
+//! `nucleus_count*`), and Phase-4 tactical injection ADDITIVELY widens that cap
+//! for must-search threat cells (`split_tactical`). (An older revision of this
+//! header claimed "no progressive widening or candidate cap" — that predates the
+//! nucleus widening and was stale dense_cnn copy text.)
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -169,7 +174,7 @@ impl RustNode {
         !self.edges.is_empty() || self.remaining_prior_count() > 0
     }
 
-    /// Count of in-crop legal priors not yet materialized into edges.
+    /// Count of in-set legal priors not yet materialized into edges.
     pub(crate) fn remaining_prior_count(&self) -> usize {
         match &self.priors {
             NodePriors::Shared(eval) => eval.priors.len().saturating_sub(self.edges.len()),
@@ -912,9 +917,9 @@ fn owned_root_from_evaluation(
     root_noise: Option<RootDirichletNoise>,
     widening: Widening,
 ) -> PyResult<RustNode> {
-    // The evaluator returns one prior per in-crop legal move, so every legal
-    // candidate is staged here. Root-policy temperature softens the prior at the
-    // root before Dirichlet noise; both are skipped for interior nodes.
+    // The evaluator returns one prior per in-set legal candidate move, so every
+    // legal candidate is staged here. Root-policy temperature softens the prior at
+    // the root before Dirichlet noise; both are skipped for interior nodes.
     let mut candidates: Vec<_> = evaluation
         .priors
         .iter()

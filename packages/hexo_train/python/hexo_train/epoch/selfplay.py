@@ -1,9 +1,14 @@
 """Self-play generation for one training epoch.
 
-This file is the handoff from training orchestration to model/runner execution.
-For now, the runner is still a placeholder in this repo, so the default behavior
-returns a planned request. Once runner self-play is implemented, model plugins
-can expose `generate_selfplay()` to execute games directly.
+This file is the handoff from training orchestration to model-owned execution.
+All four registered plugins implement `generate_selfplay()` and run their own
+game loops (e.g. packages/dense_cnn_restnet/python/dense_cnn_restnet/selfplay.py
+for the active lineage, which drives the shared Rust MCTS and writes NPZ shards
+under the run dir), so the first dispatch branch below is the only one that
+executes in any configured run. The `build_selfplay_request` and placeholder
+branches are retained scaffolding from before plugins owned self-play.
+
+Called once per epoch by hexo_train/epoch/loop.py (`run_epoch`).
 """
 
 from __future__ import annotations
@@ -44,6 +49,11 @@ def generate_selfplay(
             epoch=epoch,
             games_per_epoch=games_per_epoch,
         )
+    # UNUSED(2026-06-12): no plugin implements build_selfplay_request — repo-wide
+    # grep (packages/, tests/, scripts/ excl. archive) finds only this dispatch.
+    # All four registered plugins implement generate_selfplay, so the branch
+    # above always wins; this and the placeholder branch below are unreachable
+    # for every configured model.
     elif hasattr(plugin, "build_selfplay_request"):
         # Transitional path: useful while runner wiring is not complete but a
         # plugin can already describe the self-play work it needs.

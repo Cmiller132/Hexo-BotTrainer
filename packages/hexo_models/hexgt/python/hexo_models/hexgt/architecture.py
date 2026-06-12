@@ -44,7 +44,7 @@ from .constants import (
 # Value readout = [SIDE hub | PMA_k pooled vectors], each token_dim wide, so the
 # value MLP first Linear reads (1 + value_pma_seeds) * token_dim. With the owner's
 # default k=2 this is 3*token_dim — identical width to the prior [SIDE|mean|max]
-# readout (VALUE_READOUT_DEFAULT_MULT below), so a same-k checkpoint round-trips
+# readout (VALUE_READOUT_MULT below), so a same-k checkpoint round-trips
 # at the same shape. (The fixed mean+max pool was REPLACED by the learnable PMA
 # pool — HEXGT_PMA_VALUE_HEAD_PLAN.md.)
 VALUE_READOUT_MULT = 1 + DEFAULT_VALUE_PMA_SEEDS  # == 3 for k=2 (back-compat alias)
@@ -517,11 +517,13 @@ def expand_value_readout_columns(
     """ZERO-INIT EXPANSION for the global-pooled value readout (Phase 2).
 
     A pre-expansion checkpoint's value-head first ``Linear`` read ONLY the SIDE
-    hub: weight shape ``(token_dim, token_dim)``. The new head reads
-    ``[side | mean | max]``: ``(token_dim, VALUE_READOUT_MULT * token_dim)``. This
-    rewrites the checkpoint tensor IN PLACE in ``state_dict`` into the wider shape
-    — the old weight in the leading SIDE block ``[:, :token_dim]`` and ZEROS in
-    the mean/max blocks — so the loaded head produces output IDENTICAL to the
+    hub: weight shape ``(token_dim, token_dim)``. The wide head reads the pooled
+    readout — originally ``[side | mean | max]``, now ``[SIDE | PMA_k]`` after
+    the PMA swap, both ``(token_dim, VALUE_READOUT_MULT * token_dim)`` at the
+    default k=2 so this expansion is layout-identical for either. This rewrites
+    the checkpoint tensor IN PLACE in ``state_dict`` into the wider shape — the
+    old weight in the leading SIDE block ``[:, :token_dim]`` and ZEROS in the
+    pooled blocks — so the loaded head produces output IDENTICAL to the
     pre-expansion checkpoint on the first step (the pooled features contribute 0),
     while training then learns the pooled signal from zero. Matching optimizer
     moments for the new columns are ~0, so no optimizer surgery is needed.
@@ -547,7 +549,7 @@ def expand_value_readout_columns(
             f"{tuple(target.shape)}"
         )
     new_w = w.new_zeros(tuple(target.shape))
-    new_w[:, :d] = w  # SIDE-hub block first; mean/max blocks stay zero
+    new_w[:, :d] = w  # SIDE-hub block first; pooled (PMA) blocks stay zero
     state_dict[key] = new_w
     return True
 

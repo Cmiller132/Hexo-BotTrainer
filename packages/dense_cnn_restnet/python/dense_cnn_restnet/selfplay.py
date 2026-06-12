@@ -44,6 +44,30 @@ _LIVE_PROGRESS_INTERVAL_SECONDS = 2.0
 _LIVE_PROGRESS_NAME = "dense_cnn.selfplay.live.json"
 
 
+# ---------------------------------------------------------------------------
+# Section map of this 1600-line module:
+#   1. Temperature schemes (_move_temperature / _scheduled_temperature /
+#      _root_policy_temperature) -- precedence rules documented per function.
+#   2. Deterministic per-move lever coins (_splitmix64_unit, _pcr_is_full,
+#      _policy_init_plies, _sample_policy_init_action) -- LOCKSTEP scheduler
+#      only; the continuous scheduler resolves these natively in Rust with its
+#      own mix_seed streams, so the two schedulers draw DIFFERENT (but each
+#      deterministic) full/fast/init schedules for the same seed.
+#   3. Frozen-win override + per-game row selection (_frozen_win_override_action,
+#      _rows_to_write) and lever validation (_validate_selfplay_levers) --
+#      shared by both schedulers.
+#   4. Game-length EMA persistence (selfplay/length_ema.json) for the adaptive
+#      temperature half-life, + the adaptive-vbatch env gate.
+#   5. generate_selfplay_epoch -- the plugin entry point, dispatching to:
+#   6. _generate_selfplay_epoch_lockstep -- round-based: split playable games
+#      into full/fast/init subsets, one batched run() per subset per round.
+#   7. _generate_selfplay_epoch_continuous -- one run_continuous call drives the
+#      whole epoch; Python reacts per move via the _on_move callback and a
+#      writer thread serializes finished games off the search hot path.
+#   8. Shared finalize/label helpers.
+# ---------------------------------------------------------------------------
+
+
 def _move_temperature(
     move_index: int,
     *,
@@ -394,6 +418,14 @@ def _adaptive_vbatch_enabled() -> bool:
 
 
 def generate_selfplay_epoch(*, ctx: Any, components: Any, epoch: int, games_per_epoch: int) -> dict[str, Any]:
+    """Plugin entry point (plugin.generate_selfplay): dispatch on the scheduler.
+
+    `config.selfplay.scheduler` selects "lockstep" (round-based batched runs) or
+    "continuous" (one native run_continuous call per epoch). Both write per-game
+    compact NPZ shards + the epoch .hxr under ctx.output_dir/selfplay and the
+    dense_cnn.selfplay.epoch_*.json diagnostic, and return the same summary shape.
+    """
+
     trainer = components.model.trainer
     scheduler = getattr(trainer.config.selfplay, "scheduler", "lockstep")
     if scheduler == "continuous":
@@ -463,7 +495,8 @@ def _generate_selfplay_epoch_lockstep(*, ctx: Any, components: Any, epoch: int, 
 
     # KataGo Playout Cap Randomization + policy-initialized openings + the
     # root-policy temperature early ramp (see _pcr_is_full / _policy_init_plies /
-    # _root_policy_temperature and the hexgt lineage's HEXGT_PCR_KATAGO_MAPPING.md).
+    # _root_policy_temperature and the hexgt lineage's HEXGT_PCR_KATAGO_MAPPING.md,
+    # removed from docs/ in the documentation wipe; in git history).
     # FULL searches carry the exploration machinery and become training rows;
     # FAST/INIT moves advance the game cheaply and are dropped at write time.
     pcr_enabled, policy_init_enabled, root_temp_early, root_temp_halflife = (
@@ -1035,6 +1068,16 @@ def _generate_selfplay_epoch_lockstep(*, ctx: Any, components: Any, epoch: int, 
 
 
 def _generate_selfplay_epoch_continuous(*, ctx: Any, components: Any, epoch: int, games_per_epoch: int) -> dict[str, Any]:
+    """Generate one epoch via the native continuous per-slot scheduler.
+
+    One `mcts_session.run_continuous` call owns the whole epoch: Rust schedules
+    searches per game slot and invokes `_on_move` after every decided move;
+    Python applies the move to the live engine state, runs the frozen-win
+    override, and hands finished games to a writer THREAD (record/.hxr +
+    finalize + NPZ shard) so serialization never stalls the search loop. Emits
+    the same summary/diagnostics shape as the lockstep generator.
+    """
+
     trainer = components.model.trainer
     config = trainer.config
     selfplay = config.selfplay

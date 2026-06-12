@@ -8,7 +8,9 @@
 //!   candidate_set = { empty cells in ANY active window of either player }      (A)
 //!                 ∪ { empty cells within hex-distance <= n of ANY stone that
 //!                     are NOT "dead" }                                          (B)
-//! with `n` the single tunable radius (default 2, range [2, 8]). A radius-n cell
+//! with `n` the single tunable radius (default 3, practical range [2, 4] — see
+//! python/.../constants.py DEFAULT_CANDIDATE_RADIUS; the early "up to 8" framing
+//! was dropped by the coverage-sweep decision). A radius-n cell
 //! is "dead" (and dropped) only when EVERY length-6 line through it is BLOCKED
 //! (contains both colors -> uncompletable); a cell on any active or open line is
 //! kept. Dead cells are useless moves; in practice they are rare (mostly dense
@@ -119,6 +121,11 @@ pub struct PositionGraph {
     pub node_owner: Vec<i8>, // 0 current, 1 opponent, -1 none/side
     pub node_recency: Vec<i32>, // stone placement_index, else -1
     pub node_wcount: Vec<u8>, // window count (3/4/5), else 0
+    // UNUSED(2026-06-12): no reader found in packages/tests/scripts — neither
+    // featurizer (features.py / features.rs) consumes node_waxis (axis labels are
+    // deliberately excluded for D6 invariance), and the hexgnn fork dropped the
+    // column entirely. Built + serialized into every graph_facts payload for
+    // nothing; kept to avoid changing the payload shape on the halted lineage.
     pub node_waxis: Vec<i8>, // window axis index, else -1
     pub node_wempty: Vec<u8>, // window empty-cell count, else 0
     // Candidate node indices, in deterministic (q, r) order == CSR/legal order.
@@ -458,6 +465,8 @@ pub(crate) fn position_graph_to_py_dict(
     nodes.set_item("node_owner", g.node_owner.clone())?;
     nodes.set_item("node_recency", g.node_recency.clone())?;
     nodes.set_item("node_wcount", g.node_wcount.clone())?;
+    // UNUSED(2026-06-12): no Python consumer reads "node_waxis" (see the field
+    // declaration above for the grep evidence).
     nodes.set_item("node_waxis", g.node_waxis.clone())?;
     nodes.set_item("node_wempty", g.node_wempty.clone())?;
     dict.set_item("nodes", nodes)?;

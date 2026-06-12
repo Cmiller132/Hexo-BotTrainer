@@ -3,6 +3,17 @@
 Players are opaque synchronous adapters. The runner owns game execution and
 authoritative state; players receive cloned mutable engine states and return
 actions for the runner to submit to the engine.
+
+This is THE cross-package player contract. Implementers:
+- packages/dense_cnn_restnet/python/dense_cnn_restnet/player.py
+- packages/hexo_models/dense_cnn/python/hexo_models/dense_cnn/player.py
+- packages/hexo_models/hexgt/python/hexo_models/hexgt/player.py
+- packages/hexgnn/python/hexgnn/player.py
+- hexo_runner/adapters/sealbot.py (SealBotPlayer)
+- packages/hexo_frontend/python/hexo_frontend/web.py (human/checkpoint bot
+  wrappers for the Match-v2 Arena)
+Consumed by hexo_runner/loop.py (lifecycle order: setup_worker -> start_game
+-> decide/observe_transition* -> finish_game -> close).
 """
 
 from __future__ import annotations

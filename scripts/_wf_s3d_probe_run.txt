@@ -1,0 +1,226 @@
+[    0.2s] ckpt5 loaded; 64 squander events across 8 games
+[    3.9s] squander game epoch-000009-selfplay-000060 len=687: 8 positions done
+[    7.3s] squander game epoch-000009-selfplay-000269 len=690: 8 positions done
+[   10.7s] squander game epoch-000009-selfplay-000250 len=740: 8 positions done
+[   14.2s] squander game epoch-000009-selfplay-000196 len=751: 8 positions done
+[   17.6s] squander game epoch-000009-selfplay-000205 len=806: 8 positions done
+[   21.2s] squander game epoch-000009-selfplay-000255 len=810: 8 positions done
+[   25.1s] squander game epoch-000009-selfplay-000124 len=849: 8 positions done
+[   28.9s] squander game epoch-000009-selfplay-000056 len=855: 8 positions done
+[   29.1s] ep5: 383 decisive games, median len=91; using 8 median games
+[   30.9s] control game epoch-000005-selfplay-000097 len=87: 2 positions (plies [82, 85], v_win [0.624, 0.64], thr=0.6)
+[   32.4s] control game epoch-000005-selfplay-000099 len=89: 1 positions (plies [87], v_win [0.611], thr=0.6)
+[   33.9s] control game epoch-000005-selfplay-000128 len=89: 1 positions (plies [87], v_win [0.622], thr=0.6)
+[   35.1s] control game epoch-000005-selfplay-000016 len=89: 1 positions (plies [87], v_win [0.628], thr=0.6)
+[   36.2s] control game epoch-000005-selfplay-000241 len=89: 1 positions (plies [87], v_win [0.623], thr=0.6)
+[   37.9s] control game epoch-000005-selfplay-000328 len=89: 2 positions (plies [84, 87], v_win [0.612, 0.634], thr=0.6)
+[   39.3s] control game epoch-000005-selfplay-000164 len=91: 2 positions (plies [86, 89], v_win [0.609, 0.622], thr=0.6)
+[   40.4s] control game epoch-000005-selfplay-000036 len=91: 1 positions (plies [89], v_win [0.64], thr=0.6)
+[   41.4s] control game epoch-000005-selfplay-000195 len=91: 1 positions (plies [89], v_win [0.605], thr=0.6)
+[   42.5s] control game epoch-000005-selfplay-000232 len=91: 1 positions (plies [89], v_win [0.625], thr=0.6)
+[   43.5s] control game epoch-000005-selfplay-000073 len=93: 1 positions (plies [91], v_win [0.614], thr=0.6)
+[   44.5s] control game epoch-000005-selfplay-000151 len=93: 1 positions (plies [91], v_win [0.638], thr=0.6)
+[   44.5s] raw positions dumped (79 positions)
+{
+ "ckpt_epoch": 5,
+ "moves_left_cap": 512,
+ "k_values": [
+  0.05,
+  0.1,
+  0.2,
+  0.5,
+  1.0
+ ],
+ "near_v_window": 0.05,
+ "k_top": 12,
+ "squander": {
+  "n": 64,
+  "n_games": 8,
+  "dawdle_spread_ml_median": 5.507637023925781,
+  "dawdle_spread_ml_iqr": [
+   4.218406677246094,
+   7.792072296142578
+  ],
+  "dawdle_spread_ml_max": 21.827255249023438,
+  "n_near_v_median": 12.0,
+  "played_rank_v_hist": {
+   "1": 16,
+   "7": 7,
+   "5": 7,
+   "11": 3,
+   "10": 5,
+   "4": 4,
+   "3": 3,
+   "6": 6,
+   "2": 5,
+   "9": 6,
+   "8": 1,
+   "12": 1
+  },
+  "played_is_v_argmax_rate": 0.25,
+  "corr_v_ml_median": 0.5708171222093785,
+  "spearman_mlbase_trueremaining": -0.34693223443223437,
+  "per_k": {
+   "0.05": {
+    "flip_rate": 0.046875,
+    "n_flips": 3,
+    "flips_reduce_ml": 3,
+    "median_ml_reduction_on_flip": 5.6836395263671875,
+    "median_v_cost_on_flip": 0.00044411420822143555,
+    "played_rank_u_mean": 5.078125,
+    "played_rank_v_mean": 5.125,
+    "played_demoted_from_top": 0,
+    "played_demoted_base": 16
+   },
+   "0.1": {
+    "flip_rate": 0.046875,
+    "n_flips": 3,
+    "flips_reduce_ml": 3,
+    "median_ml_reduction_on_flip": 5.6836395263671875,
+    "median_v_cost_on_flip": 0.00044411420822143555,
+    "played_rank_u_mean": 5.09375,
+    "played_rank_v_mean": 5.125,
+    "played_demoted_from_top": 0,
+    "played_demoted_base": 16
+   },
+   "0.2": {
+    "flip_rate": 0.125,
+    "n_flips": 8,
+    "flips_reduce_ml": 8,
+    "median_ml_reduction_on_flip": 1.9978256225585938,
+    "median_v_cost_on_flip": 0.00039702653884887695,
+    "played_rank_u_mean": 5.125,
+    "played_rank_v_mean": 5.125,
+    "played_demoted_from_top": 1,
+    "played_demoted_base": 16
+   },
+   "0.5": {
+    "flip_rate": 0.296875,
+    "n_flips": 19,
+    "flips_reduce_ml": 19,
+    "median_ml_reduction_on_flip": 2.55853271484375,
+    "median_v_cost_on_flip": 0.0009123086929321289,
+    "played_rank_u_mean": 5.265625,
+    "played_rank_v_mean": 5.125,
+    "played_demoted_from_top": 4,
+    "played_demoted_base": 16
+   },
+   "1.0": {
+    "flip_rate": 0.546875,
+    "n_flips": 35,
+    "flips_reduce_ml": 35,
+    "median_ml_reduction_on_flip": 2.9544677734375,
+    "median_v_cost_on_flip": 0.0028225183486938477,
+    "played_rank_u_mean": 5.515625,
+    "played_rank_v_mean": 5.125,
+    "played_demoted_from_top": 9,
+    "played_demoted_base": 16
+   }
+  }
+ },
+ "control": {
+  "n": 15,
+  "n_games": 12,
+  "dawdle_spread_ml_median": 0.0,
+  "dawdle_spread_ml_iqr": [
+   0.0,
+   1.4609603881835938
+  ],
+  "dawdle_spread_ml_max": 4.436676025390625,
+  "n_near_v_median": 1.0,
+  "played_rank_v_hist": {
+   "5": 1,
+   "3": 1,
+   "1": 10,
+   "2": 2,
+   "7": 1
+  },
+  "played_is_v_argmax_rate": 0.6666666666666666,
+  "corr_v_ml_median": -0.9289076665458725,
+  "spearman_mlbase_trueremaining": -0.16428571428571426,
+  "per_k": {
+   "0.05": {
+    "flip_rate": 0.0,
+    "n_flips": 0,
+    "flips_reduce_ml": 0,
+    "median_ml_reduction_on_flip": null,
+    "median_v_cost_on_flip": null,
+    "played_rank_u_mean": 1.9333333333333333,
+    "played_rank_v_mean": 1.9333333333333333,
+    "played_demoted_from_top": 0,
+    "played_demoted_base": 10
+   },
+   "0.1": {
+    "flip_rate": 0.0,
+    "n_flips": 0,
+    "flips_reduce_ml": 0,
+    "median_ml_reduction_on_flip": null,
+    "median_v_cost_on_flip": null,
+    "played_rank_u_mean": 1.9333333333333333,
+    "played_rank_v_mean": 1.9333333333333333,
+    "played_demoted_from_top": 0,
+    "played_demoted_base": 10
+   },
+   "0.2": {
+    "flip_rate": 0.0,
+    "n_flips": 0,
+    "flips_reduce_ml": 0,
+    "median_ml_reduction_on_flip": null,
+    "median_v_cost_on_flip": null,
+    "played_rank_u_mean": 1.9333333333333333,
+    "played_rank_v_mean": 1.9333333333333333,
+    "played_demoted_from_top": 0,
+    "played_demoted_base": 10
+   },
+   "0.5": {
+    "flip_rate": 0.0,
+    "n_flips": 0,
+    "flips_reduce_ml": 0,
+    "median_ml_reduction_on_flip": null,
+    "median_v_cost_on_flip": null,
+    "played_rank_u_mean": 1.9333333333333333,
+    "played_rank_v_mean": 1.9333333333333333,
+    "played_demoted_from_top": 0,
+    "played_demoted_base": 10
+   },
+   "1.0": {
+    "flip_rate": 0.0,
+    "n_flips": 0,
+    "flips_reduce_ml": 0,
+    "median_ml_reduction_on_flip": null,
+    "median_v_cost_on_flip": null,
+    "played_rank_u_mean": 1.9333333333333333,
+    "played_rank_v_mean": 1.9333333333333333,
+    "played_demoted_from_top": 0,
+    "played_demoted_base": 10
+   }
+  }
+ },
+ "squander_by_ply": {
+  "[200,260)": {
+   "n": 10,
+   "spread_median": 5.1652069091796875,
+   "flip_rate_k0.1": 0.0,
+   "flip_rate_k0.2": 0.3
+  },
+  "[260,300)": {
+   "n": 24,
+   "spread_median": 5.670356750488281,
+   "flip_rate_k0.1": 0.0,
+   "flip_rate_k0.2": 0.0
+  },
+  "[300,340)": {
+   "n": 15,
+   "spread_median": 4.807159423828125,
+   "flip_rate_k0.1": 0.0,
+   "flip_rate_k0.2": 0.06666666666666667
+  },
+  "[340,400)": {
+   "n": 15,
+   "spread_median": 7.755950927734375,
+   "flip_rate_k0.1": 0.2,
+   "flip_rate_k0.2": 0.26666666666666666
+  }
+ }
+}
+[   44.5s] DONE

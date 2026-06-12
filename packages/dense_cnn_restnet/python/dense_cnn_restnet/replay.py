@@ -1,4 +1,26 @@
-"""KataGo-style NPZ replay, shuffling, and train-bucket helpers."""
+"""KataGo-style NPZ replay, shuffling, and train-bucket helpers.
+
+Owns the replay-window side of the training loop, in three layers:
+
+- Row weighting at game finalization: ``materialize_policy_surprise_rows``
+  duplicates rows by KataGo policy-surprise frequency weight and applies the
+  dormant length-decay drop for crop-frozen marathon rows. Called by
+  ``selfplay.py`` (both schedulers) before each per-game shard write.
+- Per-game shard writes: ``write_selfplay_npz`` serializes compact rows via
+  ``compact_io.write_compact_shard`` plus a JSON sidecar (row counts /
+  surprise stats) under ``<run>/selfplay/``. The shuffle scan orders shards by
+  MTIME, which is why window-seeding scripts copy shards with ``cp -p``.
+- Window build: ``build_katago_shuffle`` selects the recent window
+  (``compute_katago_window_rows`` taper), keep-prob-subsamples, permutes, and
+  writes batch-aligned compact output shards + train/val/shuffle JSON under
+  ``<run>/shuffleddata/<generation>/``, which ``trainer.select_training_samples``
+  consumes (``DenseNpzSampleWindow`` / ``DenseTrainState`` are its bookkeeping
+  types, persisted inside checkpoints via ``checkpoints.py``).
+
+Also read by scripts/bootstrap_dense_cnn_restnet_hf.py (the HF prefit reuses the
+production writer/shuffle) and indirectly by the dashboard, which parses the
+sidecar JSONs. File layout must stay compatible with ``compact_io.py``.
+"""
 
 from __future__ import annotations
 
@@ -17,6 +39,13 @@ import numpy as np
 from . import compact_io
 from .samples import CURRENT_TARGET_SCHEMA_VERSION, Model1SampleData
 
+# DEPRECATED(2026-06-12): the dense-tensor NPZ schema below is superseded in
+# this package by the compact columnar shard format (compact_io.py -- restnet
+# shards store facts, not tensors, and use compact_io's own key names). Grep
+# (packages/tests/scripts excl. archive, analysis/) finds no consumer of THIS
+# restnet copy of these constants; all live users (scripts/_target_trend.py,
+# analysis/*_microbench.py) import hexo_models.dense_cnn.replay. Kept for fork
+# symmetry with the parent lineage.
 INPUT_KEY = "inputNCHW"
 POLICY_KEY = "policyTargetsNCHW"
 OPP_POLICY_KEY = "oppPolicyTargetsNCHW"

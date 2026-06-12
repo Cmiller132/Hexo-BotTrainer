@@ -11,6 +11,12 @@ Two pieces:
 - `evaluate_epoch` — the pipeline hook (mirrors `dense_cnn/evaluation.py`):
   turns the current hexgnn checkpoint into a `HexgnnPlayer`, pairs it against
   SealBot best-50ms when available, writes diagnostics, returns metadata.
+
+Live callers: scripts/_rl_train_hexgnn.py (run_head_to_head +
+make_hexgnn_factory) and plugin.evaluate_epoch. The batched-parallel pieces
+(`BatchedSearcher` / `HexgnnBatchedSearcher` / `run_head_to_head_parallel`) were
+copied from hexo_models/hexgt/evaluation.py but never picked up a hexgnn caller
+— see the UNUSED markers below.
 """
 
 from __future__ import annotations
@@ -124,6 +130,12 @@ def run_head_to_head(
     )
 
 
+# UNUSED(2026-06-12): no references found in packages/tests/scripts — every
+# caller of run_head_to_head_parallel/HexgtBatchedSearcher (scripts/_rl_ablate.py,
+# tests/test_hexgt_parallel_eval.py) uses the hexo_models.hexgt twins; the hexgnn
+# RL driver (scripts/_rl_train_hexgnn.py:392) imports only the sequential
+# run_head_to_head. Applies to BatchedSearcher, HexgnnBatchedSearcher, and
+# run_head_to_head_parallel below.
 class BatchedSearcher(Protocol):
     """A deterministic side that searches a BATCH of live states at once.
 
@@ -139,6 +151,8 @@ class BatchedSearcher(Protocol):
     def reset(self) -> None: ...
 
 
+# UNUSED(2026-06-12): see the marker on BatchedSearcher above (hexgt-twin copy,
+# no hexgnn caller anywhere in packages/tests/scripts).
 class HexgnnBatchedSearcher:
     """Batched hexgnn searcher backed by ONE persistent native session (subtree
     reuse across rounds). Greedy + NO Dirichlet by default, so a parallel match
@@ -189,6 +203,8 @@ class HexgnnBatchedSearcher:
         self.session.clear()
 
 
+# UNUSED(2026-06-12): see the marker on BatchedSearcher above (hexgt-twin copy,
+# no hexgnn caller anywhere in packages/tests/scripts).
 def run_head_to_head_parallel(
     searcher_a: BatchedSearcher,
     searcher_b: BatchedSearcher,

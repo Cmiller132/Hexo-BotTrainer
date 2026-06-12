@@ -341,8 +341,9 @@ def _future_opponent_policy(
     when the next opponent move was a FAST search (`pcr_full=False`): a fast move's
     170-visit, unpruned, noise-free distribution is a systematically different
     (sharper) target family, so we only train the opponent head on full->full
-    transitions (owner decision; see HEXGT_PCR_KATAGO_MAPPING.md). Default off keeps
-    the dense_cnn (non-PCR) behavior byte-identical.
+    transitions (owner decision; see HEXGT_PCR_KATAGO_MAPPING.md -- removed from
+    docs/ in the documentation wipe, recoverable from git history). Default off
+    keeps the dense_cnn (non-PCR) behavior byte-identical.
     """
 
     for future_player, future_sample, _root_value in decisions[index + 1 :]:
@@ -449,6 +450,8 @@ def _pack_history(history_facts: Sequence[tuple]) -> _PackedHistory:
     return _PackedHistory(coords=coords, owners=bytes(owners), indices=indices)
 
 
+# UNUSED(2026-06-12): no references found in packages/tests/scripts (excl.
+# scripts/archive) -- repo-wide grep finds only this definition.
 def _optional_int(value: object) -> int | None:
     return None if value is None else int(value)
 

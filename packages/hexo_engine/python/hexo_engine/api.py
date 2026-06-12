@@ -1,4 +1,21 @@
-"""Python API wrapper over the Rust Hexo engine bridge."""
+"""Python API wrapper over the Rust Hexo engine bridge.
+
+Thin typed facade over the maturin-built `hexo_engine._rust` extension
+(rust/src/pybridge.rs). Each function forwards to the matching pyfunction and
+converts its dict payloads into the frozen dataclasses from `.types`.
+
+Callers: hexo_runner/engine.py (HexoEngineAdapter, the match loop),
+hexo_frontend (web.py / debug_infer.py / dashboard.py board replays), and
+every model package's selfplay/evaluation/player glue (dense_cnn_restnet,
+hexo_models/dense_cnn, hexo_models/hexgt, hexgnn). Hot paths (MCTS, selfplay)
+use only the cheap handle functions (`new_game`/`clone_state`/`apply_action`/
+`legal_action_ids`); the `to_python_state` mirror is dashboard-volume only.
+
+Error contract: bridge `ValueError`s for rejected moves are re-raised as
+`IllegalActionError`; a missing extension surfaces lazily as
+`EngineUnavailableError` on the first call (import of `_rust` is allowed to
+fail so the package can be imported on hosts without the .so).
+"""
 
 from __future__ import annotations
 
@@ -39,7 +56,14 @@ HexoState = _rust.HexoState if _rust is not None else object
 
 
 def new_game(*, seed: int | None = None, scenario: object | None = None) -> HexoState:
-    """Create a new Rust-owned game state."""
+    """Create a new Rust-owned game state.
+
+    NOTE: `seed` and `scenario` are accepted for API-shape compatibility but
+    the bridge discards both (rust/src/pybridge.rs `new_game`): every game
+    starts from the same empty deterministic state. Callers such as
+    hexo_runner's session plumbing and hexo_frontend/web.py pass `seed`
+    through; do not read that as engine-side randomization.
+    """
 
     return _bridge().new_game(seed, scenario)
 
@@ -82,7 +106,12 @@ def is_legal_action(state: HexoState, action: Action) -> bool:
 
 
 def apply_action(state: HexoState, action: Action) -> TransitionResult:
-    """Apply an action through the Rust engine."""
+    """Apply an action through the Rust engine.
+
+    Mutates `state` in place (it is the authoritative Rust handle). Raises
+    `IllegalActionError` when the rules authority rejects the placement;
+    `TransitionResult.next_player` is None once the game is terminal.
+    """
 
     coord = _placement_coord(action)
     try:
@@ -104,7 +133,17 @@ def terminal(state: HexoState) -> TerminalResult | None:
 
 
 def to_python_state(state: HexoState) -> PythonHexoState:
-    """Return a read-only Python mirror of the Rust state."""
+    """Return a read-only Python mirror of the Rust state.
+
+    Heavyweight: materializes every stone, legal coordinate, and 6-cell window
+    entry as Python objects (O(18 x placements) windows). Intended for the
+    dashboard/replay layer (hexo_frontend, hexo_runner sealbot adapter); hot
+    paths should stick to `legal_action_ids` + `apply_action`.
+
+    KNOWN ANNOTATION MISMATCH: the `terminal` field is populated with a
+    `TerminalResult` (via `_terminal` below), not the `PythonTerminal` that
+    `types.PythonHexoState` declares. See the note on `types.PythonTerminal`.
+    """
 
     payload = _bridge().to_python_state(state)
     board = payload["board"]
@@ -143,6 +182,9 @@ def engine_metadata() -> dict[str, Any]:
     """Return engine and bridge metadata."""
 
     return dict(_bridge().engine_metadata())
+
+
+# --- private helpers: bridge access + payload converters (dict -> dataclass) ---
 
 
 def _bridge() -> Any:

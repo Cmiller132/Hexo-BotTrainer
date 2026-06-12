@@ -3,6 +3,14 @@
 This module handles only the shared case: a policy logit for each legal action
 plus an optional scalar value. Model-specific heads, pair targets, search
 traces, and auxiliary labels remain model-owned extensions.
+
+Status (2026-06): wired but functionally unused. The two helper dataclasses
+are instantiated into DefaultTrainingComponents by
+`packages/hexo_train/python/hexo_train/defaults.py` on every pipeline run,
+but no model package ever reads those handles back; the target builder is
+exercised only by `tests/test_training_pipeline_simplification.py`. Every
+real model builds its own targets (e.g.
+`packages/dense_cnn_restnet/python/dense_cnn_restnet/samples.py`).
 """
 
 from __future__ import annotations
@@ -60,6 +68,9 @@ class LegalPolicyTargetHelper:
         }
 
 
+# DEPRECATED(2026-06-12): only caller is tests/test_training_pipeline_simplification.py;
+# superseded in practice by model-owned target construction (each model package
+# builds dense tensors straight from its own sample rows).
 @dataclass(frozen=True, slots=True)
 class LegalPolicyValueTarget:
     """Default target for models trained on legal-action policy logits/value."""
@@ -73,6 +84,8 @@ class LegalPolicyValueTarget:
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
+# DEPRECATED(2026-06-12): only caller is tests/test_training_pipeline_simplification.py;
+# no production consumer (model packages build their own policy/value targets).
 def build_legal_policy_value_target(
     record: TrainingSampleRecord,
     *,

@@ -131,6 +131,18 @@ def model1_mcts_session_run_continuous(
     policy_init_max_plies: int | None = None,
     policy_init_temperature: float | None = None,
 ) -> Mapping[str, Any]:
+    """Run the native continuous per-slot scheduler to epoch completion.
+
+    Restnet-only entry point into `Model1MctsSession.run_continuous`
+    (rust/src/mcts.rs in hexo_models/dense_cnn): one call drives EVERY game to
+    its end, invoking the Python `on_move(game_key, payload)` callback per
+    decided move; the callback returns ("advance", state), ("replace", key,
+    state), or None to retire the slot. PCR coins, policy-init draws, and the
+    root-temperature ramp are resolved natively per slot. Arguments are
+    forwarded in the PyO3 signature order. Returns the scheduler's epoch-wide
+    diagnostics dict (flush counts, move-class tallies, mcts_batch_diagnostics).
+    """
+
     return session.run_continuous(
         tuple(int(item) for item in game_keys),
         tuple(states),

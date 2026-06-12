@@ -8,7 +8,10 @@
 //!   candidate_set = { empty cells in ANY active window of either player }      (A)
 //!                 ∪ { empty cells within hex-distance <= n of ANY stone that
 //!                     are NOT "dead" }                                          (B)
-//! with `n` the single tunable radius (default 2, range [2, 8]). A radius-n cell
+//! with `n` the single tunable radius (default 3 — see constants.rs
+//! `HEXGT_DEFAULT_CANDIDATE_RADIUS` / python DEFAULT_CANDIDATE_RADIUS; Rust
+//! supports up to 8, the Python config's practical range is [2, 4] and the live
+//! hexgnn_rl_main1 run used n=4). A radius-n cell
 //! is "dead" (and dropped) only when EVERY length-6 line through it is BLOCKED
 //! (contains both colors -> uncompletable); a cell on any active or open line is
 //! kept. Dead cells are useless moves; in practice they are rare (mostly dense
@@ -667,6 +670,10 @@ pub(crate) fn position_graph_to_py_dict(
 // --- PyO3 surface ------------------------------------------------------------
 
 /// Candidate packed action ids for `state` at radius `n` (deterministic order).
+///
+/// UNUSED(2026-06-12): its only Python wrapper (`rust_bridge.candidate_ids`) has
+/// no caller in packages/tests/scripts; consumers get candidate ids through
+/// `hexgnn_graph_facts`. Kept as an API mirror of hexgt's probe.
 #[pyfunction]
 #[pyo3(signature = (state, n))]
 pub fn hexgnn_candidate_ids(py: Python<'_>, state: &Bound<'_, PyAny>, n: i64) -> PyResult<Vec<u32>> {

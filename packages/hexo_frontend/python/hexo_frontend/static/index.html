@@ -1,4 +1,16 @@
 <!doctype html>
+<!--
+  Single page hosting all three dashboard screens (#matchScreen / #historyScreen
+  / #debugScreen), served by hexo_frontend/web.py; app.js switches them via the
+  URL hash (#match / #history / #debug?...). Full static DOM: app.js binds by
+  element id, so renaming/removing an id here breaks the matching app.js section
+  (its on() helper warns instead of throwing).
+
+  Cache-bust contract: the ?v= token on BOTH asset references below must be
+  bumped together with APP_VERSION in app.js on every static change. web.py
+  serves this file no-store and the assets no-cache+ETag, so the token mainly
+  defeats intermediary/SW caches and keeps the on-screen version tag honest.
+-->
 <html lang="en">
 <head>
 <meta charset="utf-8">

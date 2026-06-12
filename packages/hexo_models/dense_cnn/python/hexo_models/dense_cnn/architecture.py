@@ -200,6 +200,12 @@ class Model1Network(nn.Module):
         return self.blocks(self.activation(self.conv_in(x)))
 
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
+        """All training heads from one trunk pass.
+
+        Input: `(N, in_channels, 41, 41)` float planes. Output dict:
+        `policy`/`opp_policy` `(N, 1681)` crop-flat logits, `value` and each
+        `stvalue_<horizon>` `(N, 65)` bin logits (decoded by `losses.py`).
+        """
         features = self.trunk(x)
         outputs = {
             "policy": self.policy_head(features),

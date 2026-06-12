@@ -6,9 +6,18 @@ states into per-candidate priors + a scalar value, which is exactly what the
 MCTS evaluator callback needs (the dense_cnn `{values_bytes, priors_bytes}`
 contract, but priors are per-candidate in CSR order — `candidate_ids`).
 
-`evaluate_states` is the Python-driven path (build graph from states → forward →
-per-graph softmax). The zero-copy Rust-payload transport is layered on top once
-the throughput gate (this module + `_profile_hexgnn_forward.py`) says go.
+Two evaluation paths:
+
+- `evaluate_featurized_batch` — the PRODUCTION search callback: consumes the
+  zero-copy Rust-collated payload built by `rust/src/features.rs`
+  (`collated_to_py_dict`), called from `rust/src/mcts_eval.rs`; returns the
+  `{values_bytes, priors_bytes}` byte contract.
+- `evaluate_states` — the Python-driven path (graph_build.batch_from_states →
+  forward → per-graph softmax), used by tests and ad-hoc probes.
+
+Both share `forward_batch` (pad-budget sorted chunking, pinned-memory H2D,
+int32 wire-narrowing widened on GPU) and the audited non-finite sanitization.
+Constructed by selfplay.py, player.py, and evaluation.HexgnnBatchedSearcher.
 """
 
 from __future__ import annotations

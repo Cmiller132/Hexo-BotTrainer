@@ -38,6 +38,8 @@ use super::mcts_tree::{
 };
 use super::state::states_from_py_states;
 
+// === Scheduler state types: lockstep work units + continuous slots/policies ===
+
 struct RootSelectionWork {
     // Leaves selected by one root during one virtual batch.
     leaves: Vec<RustLeaf>,
@@ -360,6 +362,13 @@ impl Model1MctsSession {
         self.searches.len()
     }
 
+    /// Lockstep batched search: drive every (game_key, root state) pair to
+    /// exactly `visits` completed visits in one call, batching leaf
+    /// evaluations across roots through the shared cache, then return one
+    /// result payload per root (visit policy, selected action, diagnostics)
+    /// and promote each selected child subtree for reuse on the next call.
+    /// Python entry: `BatchedMctsSession.run` in this lineage's `mcts.py`
+    /// (selfplay + evaluation) and the dense_cnn_restnet fork's wrapper.
     #[pyo3(signature = (game_keys, states, visits, c_puct, temperature, seed, evaluator, virtual_batch_size=None, active_root_limit=None, root_dirichlet_total_alpha=None, root_dirichlet_noise_fraction=None, root_policy_temperature=None, fpu_reduction=None, virtual_loss=None, widening_policy_mass=None, widening_max_children=None, widening_min_children=None, forced_playout_k=None, move_temperatures=None, root_policy_temperatures=None))]
     fn search(
         &mut self,
@@ -658,6 +667,13 @@ impl Model1MctsSession {
         Ok(results)
     }
 
+    /// Continuous per-slot scheduler: one call owns whole games end-to-end,
+    /// invoking the Python `on_move` callback after every decision. The only
+    /// production caller is the dense_cnn_restnet fork's continuous selfplay
+    /// scheduler (`packages/dense_cnn_restnet/.../selfplay.py` via its
+    /// `rust_bridge.model1_mcts_session_run_continuous`); the parent dense_cnn
+    /// Python drives `search` only.
+    ///
     /// Per-ply state (policy-init opening draws, the early temperature ramp,
     /// and the temperature_by_ply schedule) is keyed to the slot's WITHIN-CALL
     /// ply, which starts at 0 for every state passed in. Callers must therefore
@@ -1090,6 +1106,8 @@ impl Model1MctsSession {
     }
 }
 
+// === Lockstep internals: select/eval pipeline driving roots to visit targets ===
+
 fn run_searches_to_targets(
     py: Python<'_>,
     evaluator: &Bound<'_, PyAny>,
@@ -1349,6 +1367,8 @@ fn apply_eval_backups(
     }
     Ok(())
 }
+
+// === Continuous internals: per-slot leaf selection, backup, move completion ===
 
 fn select_continuous_leaves(
     search: &mut RustSearch,
@@ -1755,6 +1775,8 @@ fn temperature_for_ply(values: &[f32], ply: u32) -> f32 {
     let index = (ply as usize).min(values.len().saturating_sub(1));
     values[index]
 }
+
+// === Shared helpers: payload building, validation, noise/seeding, selection ===
 
 fn single_state_from_py(py: Python<'_>, state: &Bound<'_, PyAny>) -> PyResult<RustHexoState> {
     let tuple = PyTuple::new(py, [state])?;
@@ -2340,6 +2362,8 @@ fn random_unit(seed: u64) -> f64 {
     value ^= value >> 31;
     ((value >> 11) as f64) * (1.0 / ((1u64 << 53) as f64))
 }
+
+// === Diagnostics payload builders (consumed by performance.py / selfplay.py) ===
 
 fn build_result_diagnostics<'py>(
     py: Python<'py>,

@@ -1,3 +1,36 @@
+// ===========================================================================
+// hexo_frontend dashboard SPA — single file, all three screens.
+//
+// Served by web.py (the stdlib HTTP server, packages/hexo_frontend/python/
+// hexo_frontend/web.py); loaded only by static/index.html with a ?v= cache-
+// bust token that MUST be bumped together with APP_VERSION below and the
+// styles.css ?v= reference. No build step, no modules: declaration order
+// matters, and the screens share this one global namespace.
+//
+// Architecture map (section banners mark the same regions, in file order):
+//   1. On-screen diag bar + error trap        (__diagBar/reportError/diagTap)
+//   2. Shared module state + constants + DOM  (const HEX ... PLAYER_KIND_LABELS)
+//   3. Global event bindings                  (on(), mtStartMatch, on(...) calls)
+//   4. Data fetchers                          (loadState/loadAdapters/loadTrainingRuns)
+//   5. History data layer                     (resetHistoryPage ... loadTrainingHistory;
+//      paged /api/training/history-page, counts, 2.5s /api/training/live poll)
+//   6. HTTP helpers + screen routing + match long-poll (post/safeJson/setScreen/pollState)
+//   7. Match screen v2 (mt*) rendering        (render/renderMtSetup ... setup strip)
+//   8. Board SVG + camera                     (buildBoardModel/renderBoard, pan/zoom/pinch;
+//      shared by the Match board and History replay; the Debug board has its own copies)
+//   9. Match panels                           (renderMtStatus ... mtHandleKey)
+//  10. Shared state/format helpers            (canSubmitMove ... placementStepLabel)
+//  11. History screen v2 (hist*) rendering    (clearHistPanels ... formatBytes:
+//      status band, trends charts, epoch table, epoch inspector, game list)
+//  12. Debug workbench v2 (dbg*)              (big banner below; self-contained,
+//      hash-based nav state, /api/debug/* via the CPU worker)
+//  13. Screen entry + init                    (enterDebugScreen, init)
+//
+// Cross-language contracts: dbgPackActionId mirrors hexo_engine.types
+// .pack_coord_id (DBG_COORD_OFFSET 32768); all payload field names come from
+// web.py's route handlers and the docs/specs/*_v2_spec.md documents.
+// ===========================================================================
+
 // ---------------------------------------------------------------------------
 // On-screen diagnostics, anchored at the TOP. The Debug tab failed only on the
 // owner's real phone (never in headless/desktop), and an earlier BOTTOM-anchored
@@ -47,6 +80,10 @@ if (document.readyState === "loading") {
 } else {
   showVersionTag();
 }
+
+// ===========================================================================
+// Shared module state + constants + DOM lookups (all three screens).
+// ===========================================================================
 
 const HEX = 19;
 const SQRT3 = Math.sqrt(3);
@@ -184,6 +221,10 @@ const histTrends = document.getElementById("histTrends");
 const histEpochTable = document.getElementById("histEpochTable");
 const histEpochInspector = document.getElementById("histEpochInspector");
 const histEpochChip = document.getElementById("histEpochChip");
+
+// ===========================================================================
+// Global event bindings (match setup strip, board, replay controls).
+// ===========================================================================
 
 // Null-guarded binding helper: one missing/renamed id should warn and skip,
 // not throw and brick the whole script before init() ever runs.
@@ -379,6 +420,12 @@ window.addEventListener("resize", () => { if (state) render(); });
 boardArea.addEventListener("click", handleBoardClick);
 bindBoardViewEvents();
 
+// ===========================================================================
+// Data fetchers: match state, SealBot adapters, training-run lists/details.
+// loadTrainingRuns/loadTrainingRun serve BOTH the History screen and the
+// Match checkpoint seats (mtEnsureCkptList).
+// ===========================================================================
+
 async function loadState() {
   historyView = false;
   try {
@@ -498,6 +545,13 @@ async function ensureHistorySelectionLoaded() {
     renderGameHistoryPage();
   }
 }
+
+// ===========================================================================
+// History data layer: paged game history (/api/training/history-page with the
+// server's opaque cursor), filtered counts, artifact paging, the 2.5s
+// /api/training/live status poll (histLive*), and the legacy full-game replay
+// load (loadTrainingHistory, still wired to the game "Load" button).
+// ===========================================================================
 
 function resetHistoryPage() {
   historyPage = {
@@ -687,6 +741,11 @@ async function loadHistoryCount(expectedKey = "") {
   }
 }
 
+// UNUSED(2026-06-12): no callers found anywhere in app.js/index.html — its
+// callers (renderTraining/trainingArtifactRow) were removed by the Match-v2
+// rewrite. Also the only client of GET /api/training/artifacts-page (now
+// exercised by tests only). docs/specs/history_screen_v2_spec.md still lists
+// it as load-bearing; that list is stale.
 async function loadMoreArtifacts() {
   if (!trainingRun || !trainingRun.artifacts_page || !trainingRun.artifacts_page.next_cursor) return;
   try {
@@ -876,6 +935,11 @@ async function loadTrainingHistory(runName, artifactPath, recordIndex = 0) {
     renderGameHistoryPage();
   }
 }
+
+// ===========================================================================
+// HTTP helpers + screen routing (#match/#history/#debug hash) + the match
+// long-poll loop (pollState drives /api/state?since=&timeout_ms=).
+// ===========================================================================
 
 async function post(url, payload, options = {}) {
   if (pendingRequest) return;
@@ -1098,6 +1162,11 @@ async function pollState() {
     }
   }
 }
+
+// ===========================================================================
+// Match screen v2 (mt*) rendering: top-level render() + the setup strip
+// (seat kind/variant/checkpoint pickers, series, start blockers).
+// ===========================================================================
 
 // F2.6 — top-level match render. Every step below is null-safe against a
 // missing state (first paint runs before /api/state answers): the board is
@@ -1430,6 +1499,13 @@ function syncDefaultVariant() {
     }
   }
 }
+
+// ===========================================================================
+// Board SVG + camera: model build, hex rendering, pan/zoom/pinch gestures.
+// Shared by the Match board and the History replay view; the Debug board
+// keeps its OWN view state (dbg.view) and only reuses the pure geometry
+// helpers (center/path/viewForBox/clamp).
+// ===========================================================================
 
 function buildBoardModel() {
   const shownPlacements = visiblePlacements();
@@ -1797,6 +1873,12 @@ function clientToBoardPoint(clientX, clientY) {
 function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
 }
+
+// ===========================================================================
+// Match panels: status card, turn banner, move history, replay controls,
+// players panel, insight chart, series panel, Open-in-Debug deep link,
+// match keyboard shortcuts (mtHandleKey).
+// ===========================================================================
 
 // F2.5 — the status card (turn banner + facts chips) plus the header
 // #statusText dot line (replaces renderStatus; the header chain is kept
@@ -2382,6 +2464,11 @@ function mtHandleKey(e) {
   if (handled) e.preventDefault();
 }
 
+// ===========================================================================
+// Shared state/format helpers: turn status, player metadata/labels, replay
+// position state, board tooltips/HUD, text escaping, value formatting.
+// ===========================================================================
+
 function canSubmitMove() {
   if (!state || pendingRequest || !isLiveView() || state.winner || state.stopped) return false;
   const status = turnStatus();
@@ -2657,6 +2744,13 @@ function placementStepLabel() {
   return state.phase === "second_stone" ? "Placement 2 of 2" : "Placement 1 of 2";
 }
 
+// ===========================================================================
+// History screen v2 (hist*) rendering: status band (+ live patching), trends
+// charts (histChartSvg + hover crosshair), epoch table, epoch inspector
+// (lazy /api/training/epoch + /api/debug/ckpt_info), paged game list with
+// thumbnails, and the per-game detail card.
+// ===========================================================================
+
 // Clears every v2 status/trend/epoch container (error + empty branches). The
 // drawer keeps its hidden attribute so an empty drawer never reserves layout.
 function clearHistPanels() {
@@ -2752,6 +2846,8 @@ function renderGameHistoryPage() {
     : `<div class="empty-list">No game selected</div>`;
 }
 
+// UNUSED(2026-06-12): no callers found in app.js/index.html (orphaned by the
+// Match-v2/History-v2 rewrites).
 function summaryMetric(key, value) {
   return `<div><span>${escapeText(key)}</span><strong>${escapeText(displayValue(value))}</strong></div>`;
 }
@@ -2906,6 +3002,8 @@ function historyItemKey(item) {
   return `${item && item.run ? item.run : ""}::${item && item.path ? item.path : ""}::${Number(item && item.record_index || 0)}`;
 }
 
+// UNUSED(2026-06-12): no callers found in app.js/index.html (orphaned by the
+// History-v2 rewrite; the epoch list now comes from histInspRunRows/epoch table).
 function historyEpochs(histories) {
   return [...new Set((histories || [])
     .map(item => Number(item.epoch))
@@ -2960,6 +3058,8 @@ function runStageLabel(status) {
   return `${stage}${epoch}${stageStatus}`;
 }
 
+// UNUSED(2026-06-12): no callers found in app.js/index.html (orphaned by the
+// History-v2 rewrite; game-length stats now come from the server's epoch rows).
 function averageHistoryLength(histories) {
   const lengths = (histories || [])
     .map(item => Number(item.length || item.actions || 0))
@@ -8448,7 +8548,10 @@ function debugBindEvents() {
   document.addEventListener("keydown", dbgHandleKey);
 }
 
-// ---- screen entry ----------------------------------------------------------------
+// ===========================================================================
+// Screen entry + app bootstrap (enterDebugScreen, the debug hashchange
+// listener, init).
+// ===========================================================================
 
 async function enterDebugScreen() {
   showVersionTag();

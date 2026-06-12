@@ -26,6 +26,14 @@ Candidate radius `n` is threaded into the session so training support == search
 expansion. Sample facts / value / opp-policy / short-term-value targets reuse
 dense_cnn's already-finalized `Model1SampleData` machinery (per per-placement
 turn), exactly as `expand.py` expects.
+
+Callers: scripts/_rl_train_hexgnn.py drives `run_selfplay_games` directly; the
+dormant config-CLI path reaches it through `generate_selfplay_epoch` (the
+plugin.py hook, which also writes hexgnn.selfplay.epoch_*.json diagnostics).
+
+Layout map: _move_temperature / _pcr_is_full (per-move knobs) -> entropy/metric
+helpers -> SelfPlayResult (the diagnostics surface) -> run_selfplay_games (the
+~470-line batched game loop) -> generate_selfplay_epoch (plugin hook).
 """
 
 from __future__ import annotations
