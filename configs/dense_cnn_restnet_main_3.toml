@@ -1,0 +1,221 @@
+# dense_cnn_restnet_main_3 — FRESH ResTNet run: main_2's structural levers kept
+# (PCR, policy-init openings, root-FPU-zero, fixed reused-root temperature,
+# heads_v3, 48k samples), exploration knobs re-balanced after the main_2
+# collapse forensics + the live-search knob grid (2026-06-11,
+# scripts/_explore_grid_probe.py over main_2 checkpoints ep2/ep5/ep11).
+#
+# WHY MAIN_2 COLLAPSED (measured, not theorized): with the value head dead in
+# the first ~15 epochs (true of main1 too), MCTS targets sharpen only via prior
+# concentration. main_2 removed both of main1's accidental sharpeners (root FPU
+# 0.20 at root; the reuse bug that skipped root temperature) AND added the
+# 1.25 early ramp + a 37.5-ply played-temp halflife. One-step probe on the ep2
+# checkpoint: main_2's settings give a training target FLATTER than the prior
+# (margin -0.008, top-move agreement 0.64, opening agreement 0.27) — the loop
+# flattens itself from epoch 1. Grid result: every flattening increment costs
+# monotonically; c_puct is a dead lever (1.1/1.5/2.0 within noise).
+#
+# THE COMPROMISE (this config) measured on the same ep2 checkpoint:
+#   T=1.05 flat + eps=0.20  ->  margin +0.020, agreement 0.82, exploration
+#   budget (target mass off the prior top-8) still ~0.40 vs 0.25 noiseless.
+#   Positive/flat margin in every ply bucket (worst: -0.010 at plies 8-20,
+#   vs -0.022..-0.054 for the main_2 settings).
+# Changes vs main_2, all config-only:
+#   1. root_policy_temperature 1.1 -> 1.05, EARLY RAMP REMOVED (the ramp drove
+#      opening-target agreement to 0.27 — openings trained toward noise picks,
+#      matching ep11's destroyed early prior, top1 0.017 at ply<5).
+#   2. root_dirichlet_noise_fraction 0.25 -> 0.20 (flips the contested
+#      plies-8-20 bucket from clearly negative to ~flat; keeps real noise).
+#   3. opening_temperature/opening_moves anchor REMOVED (redundant: measured
+#      play entropy at plies 0-8 is 2.7-3.8 nats with NO anchor — the target
+#      itself is diffuse there — and policy-init already diversifies openings).
+#   4. temperature_halflife_fraction 0.25 -> 0.12: at the current ~150-decision
+#      games the old setting kept play top1 at 0.38 through plies 8-20 and 0.62
+#      at 20-48 (midgame lottery -> z unlearnable -> value head starved).
+#      0.12 (halflife ~18 plies at L=150, tracking shorter as the EMA falls)
+#      restores 0.51/0.81 while leaving plies 0-8 hot.
+#   5. soft_z_lambda 0.1 -> 0 (owner directive + measured: the blended
+#      root_value had corr 0.109 with the outcome by ep11 — 10% noise in every
+#      label — and on the binned-CE head the blend relocates the target bin,
+#      which vaporized the warm start's calibration in one epoch, endpoint
+#      mass 0.9999 -> 0.28). Reconsider ~0.1 only once sign-acc > ~0.6.
+#   6. c_puct, alpha, widening, forced playouts, PCR, policy-init: UNCHANGED.
+#
+# Architecture is main_2's (96ch 8-block R3 interleave, disk attention, sdpa,
+# heads_v3). WARM START from the same heads_v3 HF prefit as main_2.
+
+[model]
+name = "dense_cnn_restnet"
+module = "dense_cnn_restnet.plugin"
+
+[model.config]
+device = "cuda"
+
+[model.config.architecture]
+input_channels = 13
+channels = 96
+blocks_type = "R_R_R_T_R_R_T_R"
+attention_heads = 4
+mlp_ratio = 2
+embed_kernel_size = 3
+residual_conv = "hex"
+attention_impl = "sdpa"
+dropout = 0.0
+# Turn-aligned lookahead horizons in DECISIONS (even, config-validated):
+# [2, 6, 16] = 1 / 3 / 8 turns. heads_v3: these + moves_left share an auxiliary
+# ValueReduction; the main value head has its own.
+short_term_value_horizons = [2, 6, 16]
+moves_left_head = true
+
+[model.config.training]
+# Measured on the 12 GB RTX 4070 Ti (main1): batch 32 fits, 64 OOMs.
+batch_size = 32
+learning_rate = 0.001
+weight_decay = 0.0001
+policy_weight = 1.0
+value_weight = 1.0
+opp_policy_weight = 0.25
+short_term_value_weight = 0.1
+moves_left_weight = 0.1
+amp = true
+max_grad_norm = 1.0
+# ~2.9x reuse at the measured ~14.4k recorded rows/epoch under PCR (see main_2
+# header for the derivation); the trainer clamps to available shuffled rows.
+train_samples_per_epoch = 48000
+max_train_bucket_per_new_data = 8.0
+max_train_bucket_size = 500000
+no_repeat_files = true
+max_validation_samples = 100000
+
+[model.config.samples]
+# First shuffle fires after epoch 1 even at the lower PCR row yield.
+shuffle_min_rows = 4000
+shuffle_keep_target_rows = 300000
+shuffle_taper_window_exponent = 0.65
+shuffle_expand_window_per_row = 0.4
+shuffle_taper_window_scale = 50000.0
+approx_rows_per_out_file = 8000
+shuffle_worker_group_size = 8000
+validation_fraction = 0.0
+policy_surprise_uniform_fraction = 0.5
+policy_surprise_max_weight = 8.0
+# HARD z targets (change 5 above). main_2's soft_z=0.1 blended a root_value
+# that was measurably uncorrelated noise (corr 0.109 with z by ep11) into
+# every label and destroyed the prefit's endpoint calibration in one epoch.
+soft_z_lambda = 0.0
+
+[model.config.selfplay]
+search_visits = 512
+# 192: PCR shrinks most slots' trees; 192 x vb4 = 768 in-flight vs 512 batch.
+active_games = 192
+c_puct = 1.5
+root_dirichlet_noise_enabled = true
+# 0.20 (was 0.25), change 2 above: grid-measured to flip the contested
+# plies-8-20 sharpening margin from negative to ~flat while keeping ~0.40 of
+# target mass off the prior top-8 as exploration budget. eps stays the
+# dominant root-exploration knob; raise it back toward 0.25 only after the
+# value head shows signal (sign-acc > ~0.6).
+root_dirichlet_noise_fraction = 0.20
+root_dirichlet_total_alpha = 10.83
+# 1.05 FLAT (was 1.1 + 1.25 early ramp), change 1 above. The ramp keys are
+# deliberately absent: with a dead early value head the 1.25 opening
+# temperature trained openings toward noise picks (target agreement 0.27 at
+# plies 0-3 on the ep2 checkpoint; ep11's opening prior top1 collapsed to
+# 0.017). Opening exploration is policy-init's job now. The reused-root fix
+# means 1.05 genuinely applies at every searched position.
+root_policy_temperature = 1.05
+# Interior-node FPU. At the ROOT this is automatically zeroed while Dirichlet
+# noise is on (KataGo rootFpuReductionMax=0; code behavior, not a config key).
+fpu_reduction = 0.20
+virtual_loss = 1.0
+widening_policy_mass = 0.95
+widening_max_children = 96
+widening_min_children = 2
+mcts_session_cache_max_states = 262144
+mcts_active_root_limit = 256
+# CONTINUOUS scheduler (per-slot move classes for PCR/policy-init). ROLLBACK:
+# scheduler = "lockstep" also supports all the levers.
+scheduler = "continuous"
+scheduler_flush_target = 0
+adaptive_virtual_batch = true
+max_actions = 1024
+temperature = 1.0
+# Adaptive played-move temperature decay, change 4 above: halflife = 12% of
+# the expected game length (EMA of measured decisions/game, seeded by the
+# prior on a fresh run; PCR fast and policy-init plies count as decisions).
+# main_2's 0.25 x ~150-ply games = 37.5-ply halflife kept the midgame a
+# temperature lottery (measured play top1 0.38 at plies 8-20); 0.12 restores
+# a decisive midgame (0.51 / 0.81 at plies 8-20 / 20-48) while plies 0-8 stay
+# hot (play H 2.7-3.8 nats) because the target there is intrinsically diffuse.
+# As play sharpens and games shorten, the EMA shrinks the halflife with them.
+temperature_halflife_fraction = 0.12
+temperature_length_prior = 150.0
+temperature_floor = 0.1
+# NO opening_temperature/opening_moves anchor (change 3 above): redundant with
+# policy-init openings + root noise; measured opening play entropy without it
+# is 2.7-3.8 nats over plies 0-8.
+# KataGo forced playouts + policy-target pruning (k=2 is KataGo's value).
+forced_playout_k = 2.0
+# KataGo Playout Cap Randomization: 25% of decisions run the full recorded
+# 512-visit search; 75% run a cheap 128-visit search (no noise, greedy, NOT
+# recorded). Only full positions become training rows.
+pcr_enabled = true
+pcr_full_proportion = 0.25
+pcr_fast_visits = 128
+# KataGo policy-initialized openings: 25% of games open with N plies sampled
+# straight from the raw net prior at temperature 1.4 (never training rows).
+# This is now the PRIMARY opening-diversity lever (anchor removed).
+policy_init_fraction = 0.25
+policy_init_avg_plies = 4.0
+policy_init_max_plies = 8
+policy_init_temperature = 1.4
+
+[model.config.evaluation]
+games_per_epoch = 128
+eval_every = 5
+sealbot_variant = "best"
+sealbot_time_limit = 0.05
+max_actions = 1024
+require_sealbot = true
+opening_temperature = 0.6
+opening_moves = 8
+
+[model.config.performance]
+calibrate = true
+target_selfplay_positions_per_second = 16.0
+inference_batch_candidates = [128, 256, 512]
+selfplay_batch_candidates = [192]   # = selfplay.active_games
+training_batch_candidates = [16, 32]
+mcts_virtual_batch_candidates = [4]
+selfplay_probe_positions = 2048
+probe_batches = 1
+inference_use_tensorrt = false
+inference_fp16_model = true
+inference_fp16_allow_fallback = false
+inference_use_torch_compile = true
+inference_compile_allow_torch_fallback = true
+attention_kv_gather = true
+inference_bucket_pad_multiple = 16
+
+[run]
+name = "dense_cnn_restnet_main_3"
+# OWNER: confirm the mount prefix matches your environment (mirrors main_2).
+output_dir = "/mnt/e/Hexo-BotTrainer/runs/dense_cnn_restnet_main_3"
+seed = 1
+
+[loop]
+epochs = 60
+
+[selfplay]
+# 384 games/epoch (rolling: 192 in flight, refilled): ~12.9M sims/epoch at the
+# measured ~150-ply games / 224 avg sims, ~14.4k recorded rows.
+games_per_epoch = 384
+update_checkpoint_pointer = false
+
+[train]
+passes_per_epoch = 1
+
+[checkpoint]
+# WEIGHTS-ONLY warm start: same heads_v3 BC prefit as main_2 (architecture
+# unchanged; strict-load verified for main_2 at write time).
+initialize_from = "/mnt/e/Hexo-BotTrainer-hexgt/runs/dense_cnn_restnet_main_2_prefit/restnet_hf_prefit.pt"
+save_name = "latest"

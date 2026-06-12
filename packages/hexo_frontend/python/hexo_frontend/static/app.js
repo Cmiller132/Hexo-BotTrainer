@@ -5,7 +5,7 @@
 // the version were invisible. This single top bar always shows the running
 // version, a live "last tap" echo (so a tap that registers is visible even if its
 // effect isn't), and any JS error (uncaught OR surfaced from the Debug code).
-const APP_VERSION = "20260611-dbg2";
+const APP_VERSION = "20260611-match1";
 function __diagBar() {
   let el = document.getElementById("__diag");
   if (!el) {
@@ -59,11 +59,6 @@ const HISTORY_REFRESH_INTERVAL_MS = 15000;
 const ARTIFACT_PAGE_SIZE = 50;
 
 let state = null;
-let tacticsOn = false;
-let selectedWindowId = null;
-let selectedCellKey = null;
-let tacticFilters = { mode: "windows", player: "both", axis: "all", inspect: false };
-let tacticsView = "overview";
 let pendingRequest = false;
 let requestSeq = 0;
 let replayIndex = null;
@@ -103,22 +98,67 @@ let historyPage = {
   countRequestKey: "",
 };
 let selectedHistoryKey = "";
+// History screen v2 presentation state. Lives in module vars (NOT the DOM)
+// because the 15s innerHTML refresh wipes all DOM state on every render.
+let histEpochFilter = null;          // int|null — client-side, display-only epoch filter
+let histHealthDrawerOpen = false;    // learning-health messages drawer toggle
+let histExpandedEpochs = new Set();  // "<run>::<epoch>" keys of expanded epoch-table rows (H6)
+let histTrendCharts = {};            // chartId -> {epochs, x0, dx, series} for hover lookup
+let histThumbCache = new Map();      // historyItemKey -> {status, placements} (H9), FIFO-capped
+let histTrendHoverSvg = null;        // svg element owning the visible crosshair
+let histTrendTipEl = null;           // the shared #histTrendTip div (appended to body once)
+// Epoch Inspector (P1). Identity is the (run, epoch) PAIR — All-runs mode mixes
+// runs in the epoch table, so a bare epoch number would be ambiguous.
+let histInspectEpoch = null;         // {run, epoch} | null — the open inspector
+let histEpochInfoCache = new Map();  // "<run>::<epoch>" -> {status, payload} from /api/training/epoch, FIFO-capped
+let histCkptInfoCache = new Map();   // "<run>::<ckptName>" -> {status, payload} from /api/debug/ckpt_info, FIFO-capped
+// Selected-game navigation (P2). The displayed-list key order, rebuilt every
+// render — nav buttons and the keydown handler always re-read it.
+let histDisplayedKeys = [];          // historyItemKey order of the filtered+sorted+epoch-chip list
+// Near-realtime tier (R3-R6): a fast /api/training/live poll that patches ONLY
+// the status band between the 15s full refreshes. Visibility-gated (history
+// screen active + tab visible) because a hidden tab polling every 2.5s is
+// pure waste on both ends.
+const HIST_LIVE_POLL_MS = 2500;
+const HIST_LIVE_POLL_IDLE_MS = 1000; // cheap no-op cadence while gated off
+const HIST_LIVE_POLL_MAX_MS = 30000; // error-backoff ceiling
+let histLivePollTimer = null;        // setTimeout id of the next tick (self-rescheduling chain)
+let histLivePollDelayMs = HIST_LIVE_POLL_MS; // doubles per fetch error, resets on success
+let histLivePollInFlight = false;    // single in-flight guard (a kick must never overlap a fetch)
+let histLiveLastRun = "";            // run the last applied live status belongs to
+let histLiveLastSig = "";            // JSON signature of the last applied status — unchanged => zero DOM churn
+let histLiveLastStatus = null;       // last poll's raw status, for epoch-boundary detection (R5)
+let histLiveLastTs = 0;              // Date.now() of the last successful poll (drives #histLiveTick)
+let histLiveRefreshAt = 0;           // 2s debounce stamp for the boundary-triggered full refresh
 let historyView = false;
 let polling = false;
 let pollTimer = null;
 let pollAbort = null;
 let pollFailures = 0;
 let lastStatusError = "";
-let matchConfig = {
-  players: { player0: "manual", player1: "sealbot-current" },
-  seed: null,
+// Match setup state (mt* = match screen v2). Each seat holds a normalized spec
+// dict that maps 1:1 onto the /api/new body (§3.1): {kind:"manual"} |
+// {kind:"sealbot", variant} | {kind:"checkpoint", run, checkpoint, visits, mode}.
+let mtSetup = {
+  seats: {
+    player0: { kind: "manual" },
+    player1: { kind: "sealbot", variant: "current" },
+  },
   time_limit: 0.05,
+  seed: null,
+  series: { games: 1, alternate: false },
 };
+const mtCkptLists = new Map();        // run name -> checkpoints array (/api/debug/checkpoints, newest-first)
+const mtCkptListsLoading = new Set(); // run names with a list fetch in flight
+let mtRunsRequested = false;          // a checkpoint seat lazily fired loadTrainingRuns() once
 
+// Kept: historyPlayerLabel (History screen) and playerMeta/playerKindLabel
+// still read this map.
 const PLAYER_KIND_LABELS = {
   manual: "Manual",
   "sealbot-current": "SealBot current",
   "sealbot-best": "SealBot best",
+  checkpoint: "Checkpoint",
   "dense-cnn": "Dense CNN",
   unknown: "Unknown",
 };
@@ -130,21 +170,20 @@ const cellHud = document.getElementById("cellHud");
 const matchScreen = document.getElementById("matchScreen");
 const historyScreen = document.getElementById("historyScreen");
 const debugScreen = document.getElementById("debugScreen");
-const trainingRunSelect = document.getElementById("trainingRunSelect");
-const trainingSummary = document.getElementById("trainingSummary");
-const trainingArtifacts = document.getElementById("trainingArtifacts");
 const historyRunSelect = document.getElementById("historyRunSelect");
 const historyRefreshBtn = document.getElementById("historyRefreshBtn");
-const historyOverview = document.getElementById("historyOverview");
+const histStatusBand = document.getElementById("histStatusBand");
 const historySearchInput = document.getElementById("historySearchInput");
 const historySourceSelect = document.getElementById("historySourceSelect");
 const historyWinnerSelect = document.getElementById("historyWinnerSelect");
 const historySortSelect = document.getElementById("historySortSelect");
 const gameHistoryList = document.getElementById("gameHistoryList");
 const gameHistoryDetail = document.getElementById("gameHistoryDetail");
-const historyLearningHealth = document.getElementById("historyLearningHealth");
-const historyEvalTrend = document.getElementById("historyEvalTrend");
-const historyEpochProgress = document.getElementById("historyEpochProgress");
+const histHealthDrawer = document.getElementById("histHealthDrawer");
+const histTrends = document.getElementById("histTrends");
+const histEpochTable = document.getElementById("histEpochTable");
+const histEpochInspector = document.getElementById("histEpochInspector");
+const histEpochChip = document.getElementById("histEpochChip");
 
 // Null-guarded binding helper: one missing/renamed id should warn and skip,
 // not throw and brick the whole script before init() ever runs.
@@ -158,15 +197,33 @@ function on(id, evt, fn, opts) {
   return el;
 }
 
-on("newBtn", "click", () => {
+// Start/rematch action — shared by #mtStartBtn and the `N` shortcut (F3.5).
+// The blocker guard matches the button's disabled condition so the keyboard
+// path can never start a match the button would refuse.
+function mtStartMatch() {
+  if (pendingRequest || mtStartBlockers().length) return;
   historyView = false;
   clearBoardView();
   resetReplay();
-  post("/api/new", buildNewMatchPayload(), { resetReplay: true, clearBoard: true });
+  post("/api/new", buildMtMatchPayload(), { resetReplay: true, clearBoard: true });
+}
+on("mtStartBtn", "click", mtStartMatch);
+on("mtStopBtn", "click", () => post("/api/match/stop", {}));
+on("mtOpenDebugBtn", "click", mtOpenDebug);
+// F3.2: one mousemove/mouseleave pair for the value sparkline; click scrubs.
+on("mtValueChart", "mousemove", mtChartHover);
+on("mtValueChart", "mouseleave", mtChartHoverEnd);
+on("mtValueChart", "click", mtChartClick);
+// F3.5: match-screen keyboard layer (guard shape mirrors histHandleKey).
+document.addEventListener("keydown", mtHandleKey);
+// F2.4: one delegated listener keeps mtSetup in sync with every setup control
+// (seat kind/run/ckpt/visits/mode + time/seed/series). No network call until
+// Start — renderMtSetup only does lazy LIST fetches (runs, checkpoints).
+on("mtSetup", "change", () => {
+  mtReadSetupFromDom();
+  renderMtSetup();
 });
-on("trainingRefreshBtn", "click", () => loadTrainingRuns());
 if (historyRefreshBtn) historyRefreshBtn.addEventListener("click", () => loadTrainingRuns({ preserveHistoryPage: true }));
-trainingRunSelect.addEventListener("change", () => loadTrainingRun(trainingRunSelect.value));
 if (historyRunSelect) historyRunSelect.addEventListener("change", async () => {
   historySelectedRun = historyRunSelect.value || HISTORY_ALL_RUNS;
   historySelectionTouched = true;
@@ -181,31 +238,94 @@ document.querySelectorAll("[data-screen]").forEach(button => {
     navigateScreen(button.dataset.screen || "match");
   });
 });
-trainingArtifacts.addEventListener("click", event => {
-  const moreButton = event.target.closest("[data-artifacts-more]");
-  if (moreButton) {
-    event.preventDefault();
-    loadMoreArtifacts();
-    return;
-  }
-  const debugButton = event.target.closest("[data-debug-open]");
-  if (debugButton) {
-    event.preventDefault();
-    debugOpenFromHistory({
-      run: debugButton.dataset.debugRun || (trainingRun && trainingRun.name) || "",
-      path: debugButton.dataset.debugPath,
-      record: Number(debugButton.dataset.debugRecord || 0),
-      ply: null,
-    });
-    return;
-  }
-  const button = event.target.closest("[data-history-path]");
-  if (!button) return;
-  event.preventDefault();
-  loadTrainingHistory(trainingRun && trainingRun.name, button.dataset.historyPath, Number(button.dataset.recordIndex || 0));
-});
 if (gameHistoryList) gameHistoryList.addEventListener("click", handleGameHistoryClick);
 if (gameHistoryDetail) gameHistoryDetail.addEventListener("click", handleGameHistoryClick);
+// History v2 status band: one delegated listener toggles the learning-health
+// messages drawer (state in histHealthDrawerOpen so the 15s re-render keeps it).
+if (histStatusBand) histStatusBand.addEventListener("click", event => {
+  const pill = event.target.closest("#histHealthPill");
+  if (!pill) return;
+  event.preventDefault();
+  histHealthDrawerOpen = !histHealthDrawerOpen;
+  renderGameHistoryPage();
+});
+// History v2 trends: one delegated hover/leave/click trio for every chart.
+if (histTrends) {
+  histTrends.addEventListener("mousemove", handleHistTrendsMove);
+  histTrends.addEventListener("mouseleave", hideHistTrendHover);
+  histTrends.addEventListener("click", handleHistTrendsClick);
+}
+// History v2 epoch table: one delegated listener for the chevron expanders
+// (histExpandedEpochs survives the 15s re-render) and the epoch-number
+// buttons that toggle the client-side epoch filter.
+if (histEpochTable) histEpochTable.addEventListener("click", event => {
+  const toggle = event.target.closest("[data-hist-epoch-toggle]");
+  if (toggle) {
+    event.preventDefault();
+    const key = toggle.dataset.histEpochToggle || "";
+    if (histExpandedEpochs.has(key)) histExpandedEpochs.delete(key);
+    else histExpandedEpochs.add(key);
+    renderGameHistoryPage();
+    return;
+  }
+  const epochButton = event.target.closest("[data-hist-epoch]");
+  if (epochButton) {
+    event.preventDefault();
+    const epoch = asFinite(epochButton.dataset.histEpoch);
+    if (epoch !== null) setHistEpochFilter(epoch);
+    return;
+  }
+  // P1.3: clicking the row body (not its chevron/epoch buttons, which return
+  // above) toggles the epoch inspector for that (run, epoch) pair.
+  const inspectRow = event.target.closest("[data-hist-epoch-inspect]");
+  if (inspectRow) {
+    event.preventDefault();
+    const key = String(inspectRow.dataset.histEpochInspect || "");
+    const sep = key.lastIndexOf("::");
+    if (sep < 0) return;
+    const run = key.slice(0, sep);
+    const epoch = asFinite(key.slice(sep + 2));
+    if (epoch === null) return;
+    histInspectEpoch = histInspectEpoch && histInspectEpoch.run === run && histInspectEpoch.epoch === epoch
+      ? null
+      : { run, epoch };
+    renderGameHistoryPage();
+  }
+});
+// P1.3: epoch inspector — one delegated listener for close / prev-next / the
+// "filter games" button (which reuses the shared setHistEpochFilter toggle).
+if (histEpochInspector) histEpochInspector.addEventListener("click", event => {
+  const close = event.target.closest("[data-hist-inspect-close]");
+  if (close) {
+    event.preventDefault();
+    histInspectEpoch = null;
+    renderGameHistoryPage();
+    return;
+  }
+  const step = event.target.closest("[data-hist-inspect-step]");
+  if (step) {
+    event.preventDefault();
+    histInspectStep(Number(step.dataset.histInspectStep || 0));
+    return;
+  }
+  const epochButton = event.target.closest("[data-hist-epoch]");
+  if (epochButton) {
+    event.preventDefault();
+    const epoch = asFinite(epochButton.dataset.histEpoch);
+    if (epoch !== null) setHistEpochFilter(epoch);
+  }
+});
+// History-screen keyboard layer (P1: Esc closes the inspector; P2 adds the
+// game-row arrows). Guard shape mirrors dbgHandleKey so they can never clash.
+document.addEventListener("keydown", histHandleKey);
+// History v2 epoch-filter chip: the × button clears the display-only filter.
+if (histEpochChip) histEpochChip.addEventListener("click", event => {
+  const clear = event.target.closest("[data-hist-epoch-clear]");
+  if (!clear) return;
+  event.preventDefault();
+  histEpochFilter = null;
+  renderGameHistoryPage();
+});
 if (historySearchInput) historySearchInput.addEventListener("input", event => {
   historyFilters.query = event.target.value || "";
   historyVisibleLimit = HISTORY_PAGE_SIZE;
@@ -237,46 +357,18 @@ if (historySortSelect) historySortSelect.addEventListener("change", event => {
 });
 window.addEventListener("hashchange", () => setScreen(screenFromHash(), { preserveHash: true }));
 window.setInterval(refreshHistoryIfVisible, HISTORY_REFRESH_INTERVAL_MS);
-on("fitBtn", "click", fitBoard);
+// Near-realtime tier (R3/R6). Registered AFTER the setScreen hashchange hook
+// above so activeScreen is already updated when the kick checks the gate; the
+// visibilitychange kick covers tab hide/show. The tick chain itself starts
+// once here and self-guards (see histLivePollTick) — screen entry via the
+// initial setScreen at startup needs no extra hook.
+document.addEventListener("visibilitychange", histLivePollKick);
+window.addEventListener("hashchange", histLivePollKick);
+histLiveSchedule(HIST_LIVE_POLL_MS);
+window.setInterval(histUpdateLiveTick, 1000);
+on("mtFitBtn", "click", fitBoard);
 on("zoomInBtn", "click", () => zoomBoardAtCenter(0.82));
 on("zoomOutBtn", "click", () => zoomBoardAtCenter(1.22));
-document.querySelectorAll("[data-player-select]").forEach(select => {
-  select.addEventListener("change", event => {
-    matchConfig.players[event.target.dataset.playerSelect] = event.target.value || "manual";
-    lastStatusError = "";
-    render();
-  });
-});
-on("timeLimitInput", "change", event => {
-  const value = Number(event.target.value);
-  matchConfig.time_limit = Number.isFinite(value) && value > 0 ? value : 0.05;
-  event.target.value = String(matchConfig.time_limit);
-});
-on("seedInput", "change", event => {
-  const value = event.target.value.trim();
-  matchConfig.seed = value === "" ? null : Number(value);
-});
-on("tacticsBtn", "click", () => {
-  tacticsOn = !tacticsOn;
-  if (tacticsOn) tacticsView = "overview";
-  if (!tacticsOn) clearTacticSelection();
-  render();
-});
-document.querySelectorAll("#modeSeg button").forEach(button => {
-  button.addEventListener("click", () => { tacticFilters.mode = button.dataset.mode; clearTacticSelection(); render(); });
-});
-document.querySelectorAll("#playerSeg button").forEach(button => {
-  button.addEventListener("click", () => { tacticFilters.player = button.dataset.player; clearTacticSelection(); render(); });
-});
-document.querySelectorAll("#axisSeg button").forEach(button => {
-  button.addEventListener("click", () => { tacticFilters.axis = button.dataset.axis; clearTacticSelection(); render(); });
-});
-on("inspectBtn", "click", () => {
-  tacticFilters.inspect = !tacticFilters.inspect;
-  if (!tacticFilters.inspect) clearTacticSelection();
-  if (tacticFilters.inspect) tacticsView = "cell";
-  render();
-});
 on("replayStartBtn", "click", () => setReplayIndex(0));
 on("replayPrevBtn", "click", () => setReplayIndex(viewedPlacementCount() - 1));
 on("replayPlayBtn", "click", toggleReplayPlay);
@@ -322,7 +414,7 @@ async function loadAdapters() {
 async function loadTrainingRuns(options = {}) {
   const preserveHistoryPage = Boolean(options.preserveHistoryPage);
   const previousHistoryPageKey = activeScreen === "history" ? currentHistoryPageKey() : "";
-  const preferred = (trainingRun && trainingRun.name) || trainingRunSelect.value || (historyRunSelect && historyRunSelect.value) || "";
+  const preferred = (trainingRun && trainingRun.name) || (historyRunSelect && historyRunSelect.value) || "";
   try {
     const res = await fetch("/api/training/runs");
     const data = await safeJson(res);
@@ -347,13 +439,13 @@ async function loadTrainingRuns(options = {}) {
     }
     else {
       trainingRun = null;
-      renderTraining();
+      renderGameHistoryPage();
     }
   } catch (error) {
     trainingLoadError = error && error.message ? error.message : "Training runs unavailable";
     trainingRuns = [];
     trainingRun = null;
-    renderTraining();
+    renderGameHistoryPage();
   }
 }
 
@@ -369,7 +461,7 @@ async function loadTrainingRun(name, options = {}) {
   if (!name) {
     trainingRun = null;
     syncTrainingRunSelect("");
-    renderTraining();
+    renderGameHistoryPage();
     return;
   }
   try {
@@ -384,7 +476,7 @@ async function loadTrainingRun(name, options = {}) {
     trainingRun = null;
     trainingLoadError = error && error.message ? error.message : "Training run unavailable";
   }
-  renderTraining();
+  renderGameHistoryPage();
 }
 
 async function ensureHistorySelectionLoaded() {
@@ -616,7 +708,7 @@ async function loadMoreArtifacts() {
   } catch (error) {
     trainingLoadError = error && error.message ? error.message : "Artifacts unavailable";
   }
-  renderTraining();
+  renderGameHistoryPage();
 }
 
 async function refreshHistoryIfVisible() {
@@ -627,6 +719,138 @@ async function refreshHistoryIfVisible() {
   } finally {
     historyRefreshInFlight = false;
   }
+}
+
+// --- Near-realtime status poll (R3-R5): /api/training/live every ~2.5s. ---
+// The loop is a permanent self-rescheduling setTimeout chain with a cheap
+// inactivity guard rather than an event-stopped interval: setScreen /
+// enterHistoryScreen are frozen shared helpers, so there is no seam to hook a
+// hard stop into — the guard no-ops (one timer/s, zero fetches) whenever the
+// History screen is hidden, and the visibilitychange/hashchange kicks below
+// only restore the fast cadence immediately instead of waiting out a backoff.
+
+function histLivePollActive() {
+  return activeScreen === "history" && document.visibilityState === "visible";
+}
+
+// Poll the same run the status band displays: the selected run, or under
+// All runs the newest-modified one (the histTrendRun pick, which is also the
+// run latestRunStatusForHistoryPage reports on).
+function histLiveRunName() {
+  if (historySelectedRun && historySelectedRun !== HISTORY_ALL_RUNS) return historySelectedRun;
+  const run = histTrendRun(historyRunsForPage());
+  return run && run.name ? String(run.name) : "";
+}
+
+function histLiveSchedule(delayMs) {
+  window.clearTimeout(histLivePollTimer);
+  histLivePollTimer = window.setTimeout(histLivePollTick, delayMs);
+}
+
+async function histLivePollTick() {
+  if (!histLivePollActive()) {
+    histLiveSchedule(HIST_LIVE_POLL_IDLE_MS);
+    return;
+  }
+  if (histLivePollInFlight) {
+    histLiveSchedule(histLivePollDelayMs);
+    return;
+  }
+  const runName = histLiveRunName();
+  if (!runName) {
+    histLiveSchedule(HIST_LIVE_POLL_MS);
+    return;
+  }
+  histLivePollInFlight = true;
+  try {
+    // Plain fetch on purpose: this tier must never touch pendingRequest or any
+    // of the match/history request machinery.
+    const res = await fetch(`/api/training/live?run=${encodeURIComponent(runName)}`);
+    const data = await safeJson(res);
+    if (!res.ok) throw new Error((data && data.error) || "Live status unavailable");
+    histLivePollDelayMs = HIST_LIVE_POLL_MS; // success resets the backoff
+    histLiveLastTs = Date.now();
+    histApplyLiveStatus(runName, data && data.status);
+  } catch (error) {
+    // Back off so a down/unreachable backend costs at most one request per 30s.
+    histLivePollDelayMs = Math.min(histLivePollDelayMs * 2, HIST_LIVE_POLL_MAX_MS);
+  } finally {
+    histLivePollInFlight = false;
+    histUpdateLiveTick();
+    histLiveSchedule(histLivePollDelayMs);
+  }
+}
+
+// Immediate wake on (re)activation — resets the backoff and polls now instead
+// of waiting out the idle/backoff delay. Never overlaps an in-flight fetch.
+function histLivePollKick() {
+  if (!histLivePollActive() || histLivePollInFlight) return;
+  histLivePollDelayMs = HIST_LIVE_POLL_MS;
+  histLiveSchedule(0);
+}
+
+// R4/R5: apply one poll result. Signature-compare first so an unchanged status
+// causes zero DOM churn; otherwise patch the run's cached status in place and
+// re-render ONLY the status band (drawer/inspector state lives in module vars
+// and the other regions re-render on the 15s full refresh).
+function histApplyLiveStatus(runName, status) {
+  if (!status || typeof status !== "object") return;
+  const sameRun = histLiveLastRun === runName;
+  const boundary = sameRun && histLiveEpochBoundary(histLiveLastStatus, status);
+  histLiveLastRun = runName;
+  histLiveLastStatus = status;
+  const sig = JSON.stringify(status);
+  if (sameRun && sig === histLiveLastSig) return;
+  histLiveLastSig = sig;
+  const detail = trainingRunDetails[runName];
+  if (detail && detail.status && typeof detail.status === "object") {
+    // The cached run.status is _training_run_status = live status + the
+    // synthesized "history"/"latest_selfplay_record" blocks. Keep those two
+    // from the old object (the band's run pick sorts on history.latest_modified)
+    // and take everything else fresh — a plain spread-merge would resurrect
+    // stale optional keys like a finished selfplay_live.
+    const merged = { ...status };
+    if ("history" in detail.status) merged.history = detail.status.history;
+    if ("latest_selfplay_record" in detail.status) {
+      merged.latest_selfplay_record = detail.status.latest_selfplay_record;
+    }
+    detail.status = merged;
+    renderHistStatusBand(historyRunsForPage());
+  }
+  if (boundary) histLiveTriggerFullRefresh();
+}
+
+// R5: an epoch/stage boundary means new epoch_history/eval rows exist that the
+// band patch cannot show — pull one full refresh forward instead of waiting
+// for the 15s floor.
+function histLiveEpochBoundary(prev, next) {
+  if (!prev || !next) return false;
+  if (asFinite(prev.current_epoch) !== asFinite(next.current_epoch)) return true;
+  const prevSp = prev.selfplay_live ? String(prev.selfplay_live.status || "") : "";
+  const nextSp = next.selfplay_live ? String(next.selfplay_live.status || "") : "";
+  if (nextSp === "completed" && prevSp && prevSp !== "completed") return true;
+  if (String(prev.stage || "") !== String(next.stage || "")) return true;
+  return false;
+}
+
+function histLiveTriggerFullRefresh() {
+  const now = Date.now();
+  if (now - histLiveRefreshAt < 2000) return; // debounce burst transitions
+  histLiveRefreshAt = now;
+  // The existing 15s path; its historyRefreshInFlight/pendingRequest guards
+  // make this a no-op when a refresh is already running.
+  refreshHistoryIfVisible();
+}
+
+// R6: "live · updated Ns ago" — textContent only, the band innerHTML is
+// otherwise untouched between renders.
+function histUpdateLiveTick() {
+  if (activeScreen !== "history") return;
+  const el = document.getElementById("histLiveTick");
+  if (!el) return;
+  el.textContent = histLiveLastTs
+    ? `live · updated ${Math.max(0, Math.round((Date.now() - histLiveLastTs) / 1000))}s ago`
+    : "";
 }
 
 async function loadTrainingHistory(runName, artifactPath, recordIndex = 0) {
@@ -649,7 +873,7 @@ async function loadTrainingHistory(runName, artifactPath, recordIndex = 0) {
     render();
   } finally {
     setPending(false);
-    renderTraining();
+    renderGameHistoryPage();
   }
 }
 
@@ -758,12 +982,10 @@ function setScreen(screen, options = {}) {
 }
 
 function syncTrainingRunSelect(selected = "") {
-  const options = trainingRuns.length
-    ? trainingRuns.map(run => `<option value="${escapeAttr(run.name)}">${escapeText(run.name)}</option>`).join("")
-    : `<option value="">No runs</option>`;
-  if (!trainingRunSelect) return;
-  trainingRunSelect.innerHTML = options;
-  trainingRunSelect.value = selected;
+  // The Match screen's Training Runs card is gone (the History screen owns run
+  // browsing). History code still calls this on run loads; keep it as a no-op
+  // so those call sites stay valid.
+  void selected;
 }
 
 function syncHistoryRunSelect(selected = historySelectedRun) {
@@ -877,121 +1099,296 @@ async function pollState() {
   }
 }
 
+// F2.6 — top-level match render. Every step below is null-safe against a
+// missing state (first paint runs before /api/state answers): the board is
+// simply skipped, and renderMtStatus/renderMoveHistory/renderReplay all
+// tolerate state === null.
 function render() {
-  if (!state) {
-    renderMatchControls();
-    return;
-  }
-  renderControls();
-  const board = buildBoardModel();
-  renderBoard(board);
-  renderStatus();
+  document.body.classList.toggle("pending", pendingRequest);
+  document.body.classList.toggle("replay-mode", Boolean(state) && !isLiveView());
+  document.body.classList.toggle("bot-thinking", isBotThinking());
+  document.body.classList.toggle("state-error", turnStatus() === "error" || Boolean((state && state.error) || lastStatusError));
+  if (state) renderBoard(buildBoardModel());
+  renderMtSetup();
+  renderMtStatus();
+  renderMtPlayers();
+  renderMtInsight();
+  renderMtSeries();
   renderMoveHistory();
-  renderTacticsPanel(board.tacticMaps);
-  renderBotPanel();
   renderTurnOverlay();
   renderReplay();
+  const replayDisabled = totalPlacements() === 0;
+  document.querySelectorAll(".replay-buttons button").forEach(button => { button.disabled = replayDisabled; });
+  const slider = document.getElementById("replaySlider");
+  if (slider) slider.disabled = replayDisabled;
 }
 
-function renderControls() {
-  document.body.classList.toggle("tactics-on", tacticsOn);
-  document.body.classList.toggle("pending", pendingRequest);
-  document.body.classList.toggle("replay-mode", !isLiveView());
-  document.body.classList.toggle("bot-thinking", isBotThinking());
-  document.body.classList.toggle("state-error", turnStatus() === "error" || Boolean(state.error || lastStatusError));
-  renderMatchControls();
-  document.getElementById("tacticsBtn").classList.toggle("active", tacticsOn);
-  document.querySelectorAll("#modeSeg button").forEach(button => button.classList.toggle("active", button.dataset.mode === tacticFilters.mode));
-  document.querySelectorAll("#playerSeg button").forEach(button => button.classList.toggle("active", button.dataset.player === tacticFilters.player));
-  document.querySelectorAll("#axisSeg button").forEach(button => button.classList.toggle("active", button.dataset.axis === tacticFilters.axis));
-  document.getElementById("inspectBtn").classList.toggle("active", tacticFilters.inspect);
-  document.getElementById("fitBtn").disabled = false;
-  document.getElementById("tacticsBtn").disabled = false;
-  document.querySelectorAll(".overlay-controls button").forEach(button => { button.disabled = pendingRequest; });
-  document.querySelectorAll(".replay-buttons button").forEach(button => { button.disabled = totalPlacements() === 0; });
-  document.getElementById("replaySlider").disabled = totalPlacements() === 0;
-}
-
-function renderMatchControls() {
-  document.querySelectorAll("[data-player-select]").forEach(select => {
-    const role = select.dataset.playerSelect;
-    const selected = matchConfig.players[role] || select.value || "manual";
-    if (select.value !== selected) select.value = selected;
-    select.disabled = pendingRequest;
-    for (const option of select.options) {
-      option.disabled = pendingRequest || !playerKindAvailable(option.value);
+// F2.2 — the setup strip. Idempotent and poll-safe: every write into a select
+// or input is skipped while that element is focused, so the 300ms poll
+// re-render never clobbers a user mid-edit (§8 focused-input guard).
+function renderMtSetup() {
+  const seats = [["player0", 0], ["player1", 1]];
+  const anyCheckpoint = seats.some(([seat]) => mtSeatCfg(seat).kind === "checkpoint");
+  for (const [seat, idx] of seats) {
+    const cfg = mtSeatCfg(seat);
+    const kindEl = document.getElementById(`mtKind${idx}`);
+    if (kindEl) {
+      for (const option of kindEl.options) {
+        if (!option.value.startsWith("sealbot-")) continue;
+        const variant = option.value.slice("sealbot-".length);
+        const available = mtSealbotVariantAvailable(variant);
+        option.disabled = !available;
+        option.title = available ? "" : mtSealbotVariantError(variant);
+      }
+      if (document.activeElement !== kindEl) kindEl.value = mtSeatKindValue(cfg);
     }
-  });
-  const timeLimit = document.getElementById("timeLimitInput");
-  if (document.activeElement !== timeLimit) timeLimit.value = String(matchConfig.time_limit || 0.05);
-  timeLimit.disabled = pendingRequest || !setupHasSealBot();
-  const seedInput = document.getElementById("seedInput");
-  seedInput.disabled = pendingRequest;
-  const newBtn = document.getElementById("newBtn");
-  newBtn.textContent = state && totalPlacements() ? "Rematch" : "New Match";
-  newBtn.disabled = pendingRequest || !selectedSetupAvailable();
-  renderAdapterStatus();
+    const cfgWrap = document.querySelector(`.mt-ckpt-cfg[data-seat="${seat}"]`);
+    if (cfgWrap) cfgWrap.hidden = cfg.kind !== "checkpoint";
+    if (cfg.kind !== "checkpoint") continue;
+
+    // Lazy data: the run list once, then per-run checkpoint lists (cached).
+    if (!trainingRuns.length && !mtRunsRequested) {
+      mtRunsRequested = true;
+      loadTrainingRuns().then(() => renderMtSetup());
+    }
+    if (trainingRuns.length && (!cfg.run || !trainingRuns.some(run => run.name === cfg.run))) {
+      cfg.run = trainingRuns[0].name;
+      cfg.checkpoint = "";
+    }
+    const runEl = document.getElementById(`mtRun${idx}`);
+    if (runEl && document.activeElement !== runEl) {
+      runEl.innerHTML = trainingRuns.length
+        ? trainingRuns.map(run => `<option value="${escapeAttr(run.name)}">${escapeText(run.name)}</option>`).join("")
+        : `<option value="">${trainingLoadError ? "runs unavailable" : "loading runs…"}</option>`;
+      runEl.value = cfg.run || "";
+    }
+    if (cfg.run) mtEnsureCkptList(cfg.run);
+    const list = cfg.run ? mtCkptLists.get(cfg.run) : null;
+    if (list && list.length && (!cfg.checkpoint || !list.some(item => item.name === cfg.checkpoint))) {
+      cfg.checkpoint = list[0].name; // newest-first per §1.2
+    }
+    const ckptEl = document.getElementById(`mtCkpt${idx}`);
+    if (ckptEl && document.activeElement !== ckptEl) {
+      if (!list) {
+        ckptEl.innerHTML = `<option value="">loading…</option>`;
+      } else if (!list.length) {
+        ckptEl.innerHTML = `<option value="">no checkpoints</option>`;
+      } else {
+        ckptEl.innerHTML = list.map(item => `<option value="${escapeAttr(item.name)}">${escapeText(mtCkptLabel(item))}</option>`).join("");
+        ckptEl.value = cfg.checkpoint;
+      }
+    }
+    const visitsEl = document.getElementById(`mtVisits${idx}`);
+    if (visitsEl && document.activeElement !== visitsEl) visitsEl.value = String(cfg.visits ?? 256);
+    const modeEl = document.getElementById(`mtSearchMode${idx}`);
+    if (modeEl && document.activeElement !== modeEl) modeEl.value = cfg.mode === "policy" ? "policy" : "search";
+  }
+
+  const timeEl = document.getElementById("mtTimeLimit");
+  if (timeEl && document.activeElement !== timeEl) timeEl.value = String(mtSetup.time_limit);
+  const seedEl = document.getElementById("mtSeed");
+  if (seedEl && document.activeElement !== seedEl) seedEl.value = mtSetup.seed === null ? "" : String(mtSetup.seed);
+  const gamesEl = document.getElementById("mtSeriesGames");
+  if (gamesEl && document.activeElement !== gamesEl) gamesEl.value = String(mtSetup.series.games);
+  const altEl = document.getElementById("mtAlternate");
+  if (altEl && document.activeElement !== altEl) altEl.checked = Boolean(mtSetup.series.alternate);
+
+  // Buttons + status note (F2.3).
+  const blockers = mtStartBlockers();
+  const startBtn = document.getElementById("mtStartBtn");
+  if (startBtn) {
+    startBtn.textContent = mtSetup.series.games > 1
+      ? "Start series"
+      : (state && totalPlacements() ? "Rematch" : "Start match");
+    startBtn.disabled = pendingRequest || blockers.length > 0;
+  }
+  const stopBtn = document.getElementById("mtStopBtn");
+  if (stopBtn) {
+    const seriesRemaining = Boolean(state && state.series && !state.series.finished);
+    stopBtn.disabled = pendingRequest || !state || Boolean(state.stopped)
+      || (turnStatus() === "terminal" && !seriesRemaining);
+  }
+  const note = document.getElementById("mtSetupNote");
+  if (note) {
+    const parts = [...blockers, mtAdapterStatusLine()];
+    if (anyCheckpoint) parts.push("Checkpoint bots run on the shared CPU debug worker; Debug analyses queue behind them.");
+    note.textContent = parts.filter(Boolean).join(" · ");
+  }
 }
 
-function renderAdapterStatus() {
-  const el = document.getElementById("adapterStatus");
+function mtSeatCfg(seat) {
+  return mtSetup.seats[seat] || (mtSetup.seats[seat] = { kind: "manual" });
+}
+
+// Seat spec dict -> the #mtKindX select value.
+function mtSeatKindValue(cfg) {
+  if (cfg.kind === "sealbot") return `sealbot-${cfg.variant || "current"}`;
+  return cfg.kind === "checkpoint" ? "checkpoint" : "manual";
+}
+
+function mtSealbotVariantAvailable(variant) {
+  return sealbotVariants().some(item => item.id === variant && item.available !== false);
+}
+
+function mtSealbotVariantError(variant) {
+  const known = sealbotVariants().find(item => item.id === variant);
+  const adapter = sealbotAdapter();
+  return (known && known.error) || (adapter && adapter.error) || adapterLoadError || "SealBot variant unavailable";
+}
+
+function mtCkptLabel(item) {
+  if (item.epoch !== null && item.epoch !== undefined) return `epoch ${item.epoch}${item.latest ? " (latest)" : ""}`;
+  return String(item.name || "").replace(/\.pt$/, "");
+}
+
+// Lazy, cached checkpoint-list fetch for one run. Failures cache an empty list
+// (surfaced as "run has no checkpoints" by mtStartBlockers) instead of retrying
+// on every poll tick.
+function mtEnsureCkptList(run) {
+  if (!run || mtCkptLists.has(run) || mtCkptListsLoading.has(run)) return;
+  mtCkptListsLoading.add(run);
+  fetch(`/api/debug/checkpoints?run=${encodeURIComponent(run)}`)
+    .then(async res => {
+      const data = await safeJson(res);
+      if (!res.ok) throw new Error((data && data.error) || "Checkpoint list unavailable");
+      mtCkptLists.set(run, (data && data.checkpoints) || []);
+    })
+    .catch(error => {
+      console.warn("mtEnsureCkptList: checkpoint list failed for " + run, error);
+      mtCkptLists.set(run, []);
+    })
+    .finally(() => {
+      mtCkptListsLoading.delete(run);
+      renderMtSetup();
+    });
+}
+
+// F2.3 — Start preconditions. Each blocker doubles as the user-facing reason in
+// #mtSetupNote, so a disabled Start button always carries an explanation (A1).
+function mtStartBlockers() {
+  const blockers = [];
+  for (const [seat, name] of [["player0", "P0"], ["player1", "P1"]]) {
+    const cfg = mtSeatCfg(seat);
+    if (cfg.kind === "sealbot" && !mtSealbotVariantAvailable(cfg.variant || "current")) {
+      blockers.push(`${name}: SealBot ${cfg.variant || "current"} unavailable`);
+    } else if (cfg.kind === "checkpoint") {
+      if (!cfg.run) {
+        blockers.push(trainingRuns.length ? `${name}: pick a training run` : `${name}: no training runs found`);
+      } else if (!cfg.checkpoint) {
+        const list = mtCkptLists.get(cfg.run);
+        blockers.push(list && !list.length ? `${name}: run has no checkpoints` : `${name}: checkpoint list loading`);
+      }
+    }
+  }
+  return blockers;
+}
+
+// Adapter availability line (the old adapter-status logic, now one part of
+// the setup note).
+function mtAdapterStatusLine() {
   const sealbot = sealbotAdapter();
-  if (!el) return;
-  if (adapterLoadError) {
-    el.className = "adapter-status error";
-    el.textContent = adapterLoadError;
-    return;
-  }
-  if (!sealbot) {
-    el.className = "adapter-status muted";
-    el.textContent = "Manual play available. SealBot API not detected.";
-    return;
-  }
-  if (!sealbot.configured && !hasAvailableSealBotVariant()) {
-    el.className = "adapter-status error";
-    el.textContent = sealbot.error || "SealBot path is not configured.";
-    return;
-  }
+  if (adapterLoadError) return adapterLoadError;
+  if (!sealbot) return "Manual play available. SealBot API not detected.";
+  if (!sealbot.configured && !hasAvailableSealBotVariant()) return sealbot.error || "SealBot path is not configured.";
   const available = sealbotVariants().filter(variant => variant.available !== false);
   if (!available.length) {
     const firstError = (sealbotVariants().find(variant => variant.error) || {}).error;
-    el.className = "adapter-status error";
-    el.textContent = firstError || sealbot.error || "No SealBot variants are available.";
-    return;
+    return firstError || sealbot.error || "No SealBot variants are available.";
   }
-  el.className = "adapter-status ok";
-  el.textContent = `SealBot ready: ${available.map(variant => variant.label || variant.id).join(", ")}`;
+  return `SealBot ready: ${available.map(variant => variant.label || variant.id).join(", ")}`;
 }
 
-function buildNewMatchPayload() {
-  const seedText = document.getElementById("seedInput").value.trim();
-  const seedValue = seedText === "" ? null : Number(seedText);
-  const timeValue = Number(document.getElementById("timeLimitInput").value);
-  matchConfig.seed = Number.isFinite(seedValue) ? seedValue : null;
-  matchConfig.time_limit = Number.isFinite(timeValue) && timeValue > 0 ? timeValue : 0.05;
-  matchConfig.players = {
-    player0: document.getElementById("player0Kind")?.value || "manual",
-    player1: document.getElementById("player1Kind")?.value || "sealbot-current",
+// F2.4 — DOM -> mtSetup. Pure reads, so it is always safe to call (the
+// focused-input guard only matters in the write direction, in renderMtSetup).
+function mtReadSetupFromDom() {
+  for (const [seat, idx] of [["player0", 0], ["player1", 1]]) {
+    const previous = mtSeatCfg(seat);
+    const kindEl = document.getElementById(`mtKind${idx}`);
+    const kindValue = kindEl ? kindEl.value : mtSeatKindValue(previous);
+    if (kindValue === "checkpoint") {
+      const cfg = previous.kind === "checkpoint"
+        ? previous
+        : { kind: "checkpoint", run: "", checkpoint: "", visits: 256, mode: "search" };
+      const runEl = document.getElementById(`mtRun${idx}`);
+      const runChanged = Boolean(runEl && runEl.value && runEl.value !== cfg.run);
+      if (runChanged) {
+        cfg.run = runEl.value;
+        cfg.checkpoint = ""; // re-default to the new run's newest checkpoint
+      }
+      const ckptEl = document.getElementById(`mtCkpt${idx}`);
+      // When the run JUST changed, the checkpoint select still holds the OLD
+      // run's options (and checkpoint filenames repeat across runs), so only
+      // trust its value when the run is unchanged; renderMtSetup repopulates
+      // it with the new run's list (newest first) on the next render.
+      if (!runChanged && ckptEl && ckptEl.value) cfg.checkpoint = ckptEl.value;
+      const visitsEl = document.getElementById(`mtVisits${idx}`);
+      const visitsRaw = visitsEl ? String(visitsEl.value).trim() : "";
+      if (visitsRaw !== "") {
+        const visits = Number(visitsRaw);
+        if (Number.isFinite(visits)) cfg.visits = clamp(Math.round(visits), 8, 2048);
+      }
+      const modeEl = document.getElementById(`mtSearchMode${idx}`);
+      if (modeEl) cfg.mode = modeEl.value === "policy" ? "policy" : "search";
+      mtSetup.seats[seat] = cfg;
+    } else if (kindValue.startsWith("sealbot-")) {
+      mtSetup.seats[seat] = { kind: "sealbot", variant: kindValue.slice("sealbot-".length) || "current" };
+    } else {
+      mtSetup.seats[seat] = { kind: "manual" };
+    }
+  }
+  // Scalar options: only update from elements that exist, so a missing
+  // control never silently resets a configured value.
+  const timeEl = document.getElementById("mtTimeLimit");
+  if (timeEl) {
+    const time = Number(timeEl.value);
+    mtSetup.time_limit = Number.isFinite(time) && time > 0 ? clamp(time, 0.01, 30) : 0.05;
+  }
+  const seedEl = document.getElementById("mtSeed");
+  if (seedEl) {
+    const seedText = String(seedEl.value).trim();
+    const seed = Number(seedText);
+    mtSetup.seed = seedText !== "" && Number.isFinite(seed) ? Math.trunc(seed) : null;
+  }
+  const gamesEl = document.getElementById("mtSeriesGames");
+  if (gamesEl) {
+    const games = Number(gamesEl.value);
+    mtSetup.series.games = Number.isFinite(games) && games > 0 ? clamp(Math.round(games), 1, 25) : 1;
+  }
+  const altEl = document.getElementById("mtAlternate");
+  if (altEl) mtSetup.series.alternate = Boolean(altEl.checked);
+}
+
+// F2.3 — the §3.1 /api/new body. Re-reads the DOM first so an uncommitted
+// input edit (change event not fired yet) is still captured at Start time.
+function buildMtMatchPayload() {
+  mtReadSetupFromDom();
+  const body = {
+    players: {
+      player0: mtSeatSpecBody("player0"),
+      player1: mtSeatSpecBody("player1"),
+    },
+    time_limit: mtSetup.time_limit,
+    seed: mtSetup.seed,
   };
-  return {
-    players: { ...matchConfig.players },
-    time_limit: matchConfig.time_limit,
-    seed: matchConfig.seed,
-  };
+  if (mtSetup.series.games > 1) {
+    body.series = { games: mtSetup.series.games, alternate: Boolean(mtSetup.series.alternate) };
+  }
+  return body;
 }
 
-function setupHasSealBot() {
-  return Object.values(matchConfig.players || {}).some(kind => String(kind).startsWith("sealbot-"));
-}
-
-function selectedSetupAvailable() {
-  return Object.values(matchConfig.players || {}).every(playerKindAvailable);
-}
-
-function playerKindAvailable(kind) {
-  if (!String(kind).startsWith("sealbot-")) return true;
-  const variant = String(kind).replace("sealbot-", "");
-  return sealbotVariants().some(item => item.id === variant && item.available !== false);
+function mtSeatSpecBody(seat) {
+  const cfg = mtSeatCfg(seat);
+  if (cfg.kind === "sealbot") return { kind: "sealbot", variant: cfg.variant || "current" };
+  if (cfg.kind === "checkpoint") {
+    return {
+      kind: "checkpoint",
+      run: cfg.run || "",
+      checkpoint: cfg.checkpoint || "",
+      visits: clamp(Math.round(Number(cfg.visits) || 256), 8, 2048),
+      mode: cfg.mode === "policy" ? "policy" : "search",
+    };
+  }
+  return { kind: "manual" };
 }
 
 function sealbotAdapter() {
@@ -1019,14 +1416,17 @@ function sealbotDefaultVariant() {
   return (sealbot && (sealbot.default_variant || sealbot.defaultVariant)) || (sealbotVariants()[0] && sealbotVariants()[0].id) || "current";
 }
 
+// Adapter refresh: a configured-but-unavailable sealbot seat snaps to the
+// preferred available variant so Start never silently targets a dead variant.
 function syncDefaultVariant() {
   const variants = sealbotVariants();
   const preferred = variants.find(variant => variant.id === sealbotDefaultVariant() && variant.available !== false)
     || variants.find(variant => variant.available !== false);
   if (!preferred) return;
-  for (const [role, kind] of Object.entries(matchConfig.players)) {
-    if (String(kind).startsWith("sealbot-") && !playerKindAvailable(kind)) {
-      matchConfig.players[role] = `sealbot-${preferred.id}`;
+  for (const seat of ["player0", "player1"]) {
+    const cfg = mtSeatCfg(seat);
+    if (cfg.kind === "sealbot" && !mtSealbotVariantAvailable(cfg.variant || "current")) {
+      cfg.variant = preferred.id;
     }
   }
 }
@@ -1036,7 +1436,6 @@ function buildBoardModel() {
   const occupied = new Map(shownPlacements.map(p => [`${p.q},${p.r}`, p]));
   const liveLegal = new Map((state.legal || []).map(c => [`${c.q},${c.r}`, c]));
   const legal = isLiveView() ? liveLegal : new Map();
-  const tacticMaps = buildTacticMaps();
   const cells = new Map();
   for (const [key, cell] of liveLegal) cells.set(key, cell);
   for (const placement of state.placements || []) cells.set(`${placement.q},${placement.r}`, placement);
@@ -1078,7 +1477,7 @@ function buildBoardModel() {
   const boardBounds = { minX, maxX, minY, maxY };
   const camera = buildCameraBox(shownPlacements, liveLegal, boardBounds);
 
-  return { data, minX, maxX, minY, maxY, focus, camera, tacticMaps };
+  return { data, minX, maxX, minY, maxY, focus, camera };
 }
 
 function renderBoard(board) {
@@ -1090,28 +1489,19 @@ function renderBoard(board) {
   board.data.sort((a, b) => (a.placement ? 1 : 0) - (b.placement ? 1 : 0));
 
   let html = "";
-  const drawTactics = tacticsOn && isLiveView();
   for (const h of board.data) {
     const isStone = Boolean(h.placement);
     const fill = isStone ? playerColor(h.placement.player) : "#101924";
     const stroke = isStone ? "#708296" : "#2c3d50";
     const opacity = isStone ? "1" : h.legal ? "0.86" : "0.62";
-    const roles = board.tacticMaps.cellRoles.get(h.key) || new Set();
-    const tacticClasses = drawTactics ? Array.from(roles).map(role => role + "-cell").join(" ") : "";
-    const selectedClass = selectedCellKey === h.key ? "selected-cell" : "";
     const recentRank = recentPlacementRank(h.placement);
     const recentClass = recentRank === 1 ? "last" : recentRank === 2 ? "previous" : "";
     const cls = (h.legal && !isStone ? "cell legal" : "cell")
-      + " " + tacticClasses
-      + " " + selectedClass
       + (recentRank ? ` recent-stone recent-${recentRank}` : "");
     html += `<path class="${cls}" d="${path(h.x, h.y, HEX - 1)}" fill="${fill}" stroke="${stroke}" stroke-width="1" opacity="${opacity}" data-q="${h.q}" data-r="${h.r}"></path>`;
     if (isStone && recentRank) {
       html += `<path class="last-move-outline ${recentClass}" d="${path(h.x, h.y, HEX - 0.5)}"></path>`;
     }
-    if (drawTactics && !isStone) html += renderHeatOverlay(h, board.tacticMaps);
-    if (drawTactics && !isStone) html += renderThreatOverlay(h, board.tacticMaps);
-    if (drawTactics) html += renderCellBadge(h, roles);
     if (isStone) html += `<text class="stone-label" x="${h.x}" y="${h.y}">${h.placement.index}</text>`;
   }
   svg.innerHTML = html;
@@ -1120,14 +1510,6 @@ function renderBoard(board) {
 
 function buildCameraBox(shownPlacements, liveLegal, boardBounds) {
   const coords = [];
-  const selectedWindow = selectedWindowId ? findWindow(selectedWindowId) : null;
-  if (selectedWindow) {
-    coords.push(...(selectedWindow.cells || []));
-  } else if (selectedCellKey) {
-    const selected = cellInfo(selectedCellKey);
-    if (Number.isFinite(selected.q) && Number.isFinite(selected.r)) coords.push(selected);
-  }
-
   const recent = shownPlacements.slice(-FIT_MOVE_COUNT);
   coords.push(...recent);
 
@@ -1186,15 +1568,10 @@ function handleBoardClick(event) {
   if (suppressBoardClick || pendingRequest || !isLiveView()) return;
   const el = cellElementFromClick(event);
   if (!el) return;
-  if (tacticsOn && tacticFilters.inspect) {
-    selectedCellKey = `${el.dataset.q},${el.dataset.r}`;
-    selectedWindowId = null;
-    tacticsView = "cell";
-    render();
-  } else if (el.classList.contains("legal")) {
+  if (el.classList.contains("legal")) {
     if (!canSubmitMove()) {
-      lastStatusError = isBotThinking() ? "SealBot is thinking" : "Move submission is locked";
-      renderStatus();
+      lastStatusError = isBotThinking() ? "Bot is thinking" : "Move submission is locked";
+      renderMtStatus();
       renderTurnOverlay();
       return;
     }
@@ -1421,66 +1798,129 @@ function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
 }
 
-function renderStatus() {
+// F2.5 — the status card (turn banner + facts chips) plus the header
+// #statusText dot line (replaces renderStatus; the header chain is kept
+// near-verbatim). Null-safe: the first render can run before /api/state has
+// ever answered.
+function renderMtStatus() {
+  const statusText = document.getElementById("statusText");
+  if (!state) {
+    document.body.classList.remove("player0-turn", "player1-turn");
+    renderMtTurnBanner(null);
+    const facts = document.getElementById("mtFacts");
+    if (facts) facts.innerHTML = "";
+    if (statusText) statusText.textContent = lastStatusError || "Connecting";
+    return;
+  }
   const total = totalPlacements();
   const viewed = viewedPlacementCount();
   const live = isLiveView();
-  const active = state.winner ? null : state.current_player;
-  const last = lastVisiblePlacement();
+  const status = turnStatus();
+  const active = state.winner || status === "terminal" || status === "stopped" ? null : state.current_player;
   document.body.classList.toggle("player0-turn", active === "player0");
   document.body.classList.toggle("player1-turn", active === "player1");
 
-  document.getElementById("matchVal").textContent = matchLabel();
-  document.getElementById("playerVal").textContent = state.winner ? playerLabel(state.winner) + " wins" : playerLabel(state.current_player);
-  document.getElementById("phaseVal").textContent = state.winner ? "Complete" : phaseLabel(state.phase);
-  document.getElementById("stonesVal").textContent = total;
-  document.getElementById("legalVal").textContent = state.legal_count ?? (state.legal || []).length;
-  document.getElementById("gameVal").textContent = `${state.game_id || "game"} v${state.version ?? "-"}`;
-  document.getElementById("viewVal").textContent = live ? "Live" : `${viewed} / ${total}`;
-  setText("turnVal", active ? `${playerShort(active)} - ${playerKindLabel(active)}` : "Complete");
-  setText("turnPlacementVal", state.winner ? "Complete" : placementStepLabel());
-  setText("lastMoveVal", last ? `#${last.index} ${playerShort(last.player)} (${last.q}, ${last.r})` : "None");
-  renderTurnBanner(active);
+  renderMtTurnBanner(active);
+  renderMtFacts();
 
+  if (!statusText) return;
   if (lastStatusError) {
-    document.getElementById("statusText").textContent = lastStatusError;
+    statusText.textContent = lastStatusError;
   } else if (!live) {
-    document.getElementById("statusText").textContent = `Reviewing move ${viewed} / ${total}`;
+    statusText.textContent = `Reviewing move ${viewed} / ${total}`;
   } else if (state.winner) {
-    document.getElementById("statusText").textContent = `${playerLabel(state.winner)} wins by six in line`;
+    statusText.textContent = `${playerLabel(state.winner)} wins by six in line`;
   } else if (state.mode === "history") {
     const history = state.history || {};
-    const status = history.status ? ` (${history.status})` : "";
-    document.getElementById("statusText").textContent = `Viewing ${state.game_id || "game history"}${status}`;
-  } else if (turnStatus() === "bot_thinking") {
-    document.getElementById("statusText").textContent = `${playerShort(active)} ${playerKindLabel(active)} thinking`;
-  } else if (turnStatus() === "starting") {
-    document.getElementById("statusText").textContent = "Starting match";
-  } else if (turnStatus() === "error" || state.error) {
-    document.getElementById("statusText").textContent = state.error || "Match error";
+    const suffix = history.status ? ` (${history.status})` : "";
+    statusText.textContent = `Viewing ${state.game_id || "game history"}${suffix}`;
+  } else if (status === "stopped") {
+    statusText.textContent = "Match stopped";
+  } else if (status === "bot_thinking") {
+    statusText.textContent = `${playerShort(active)} ${playerKindLabel(active)} thinking`;
+  } else if (status === "starting") {
+    statusText.textContent = "Starting match";
+  } else if (status === "error" || state.error) {
+    statusText.textContent = state.error || "Match error";
+  } else if (status === "terminal") {
+    statusText.textContent = "Game complete";
   } else {
-    document.getElementById("statusText").textContent =
-      `${playerShort(active)} ${playerKindLabel(active)} to place - ${placementStepLabel()}`;
+    statusText.textContent = `${playerShort(active)} ${playerKindLabel(active)} to place - ${placementStepLabel()}`;
   }
 }
 
-function renderTurnBanner(active) {
-  const banner = document.getElementById("turnBanner");
-  const title = document.getElementById("turnTitle");
-  const sub = document.getElementById("turnSub");
+// Turn banner: to-play / thinking / winner / draw / stopped / error / starting.
+// Unknown turn statuses fall through to the idle "to play" branch (§3.4: treat
+// unknown statuses as idle).
+function renderMtTurnBanner(active) {
+  const banner = document.getElementById("mtTurnBanner");
+  const title = document.getElementById("mtTurnTitle");
+  const sub = document.getElementById("mtTurnSub");
   if (!banner || !title || !sub) return;
 
-  banner.classList.toggle("p0", active === "player0");
-  banner.classList.toggle("p1", active === "player1");
+  const winner = state ? state.winner : null;
+  banner.classList.toggle("p0", active === "player0" || winner === "player0");
+  banner.classList.toggle("p1", active === "player1" || winner === "player1");
 
-  if (state.winner) {
-    title.textContent = `${playerLabel(state.winner)} wins`;
-    sub.textContent = "Game complete";
+  if (!state) {
+    title.textContent = "Loading";
+    sub.textContent = "Waiting for state";
     return;
   }
-
+  const status = turnStatus();
+  if (winner) {
+    title.textContent = `${playerLabel(winner)} wins`;
+    sub.textContent = state.terminal_reason || "Game complete";
+    return;
+  }
+  if (status === "stopped") {
+    title.textContent = "Match stopped";
+    sub.textContent = "Start a new match to continue";
+    return;
+  }
+  if (status === "error") {
+    title.textContent = "Match error";
+    sub.textContent = state.error || "See server logs";
+    return;
+  }
+  if (status === "terminal") {
+    title.textContent = "Draw";
+    sub.textContent = state.terminal_reason || "Game complete";
+    return;
+  }
+  if (status === "bot_thinking") {
+    const thinking = state.thinking_player || botPlayer();
+    title.textContent = `${playerShort(thinking)} thinking`;
+    sub.textContent = `${playerKindLabel(thinking)} is choosing the next placement`;
+    return;
+  }
+  if (status === "starting") {
+    title.textContent = "Starting match";
+    sub.textContent = "Preparing players";
+    return;
+  }
   title.textContent = `${playerShort(active)} to play`;
   sub.textContent = `${playerKindLabel(active)} - ${placementStepLabel()}`;
+}
+
+// Facts chips (§4 Region 3): move, phase, stones, legal count, game id, seed.
+function renderMtFacts() {
+  const facts = document.getElementById("mtFacts");
+  if (!facts) return;
+  const done = Boolean(state.winner) || turnStatus() === "terminal";
+  const config = state.match || {};
+  const seed = config.seed === null || config.seed === undefined ? "auto" : String(config.seed);
+  const chips = [
+    ["Move", done ? "Complete" : placementStepLabel()],
+    ["Phase", done ? "Complete" : phaseLabel(state.phase)],
+    ["Stones", String(totalPlacements())],
+    ["Legal", String(state.legal_count ?? (state.legal || []).length)],
+    ["Game", String(state.game_id || "game")],
+    ["Seed", seed],
+  ];
+  facts.innerHTML = chips.map(([label, value]) =>
+    `<span class="mt-chip"><span class="mt-chip-label">${escapeText(label)}</span>${escapeText(value)}</span>`
+  ).join("");
 }
 
 // The move list is a bounded, wrapping, vertically-scrolling box. Chips flow and
@@ -1495,7 +1935,7 @@ function renderMoveHistory() {
   const history = document.getElementById("moveHistory");
   if (!history) return;
   ensureMoveHistoryEvents(history);
-  const placements = state.placements || [];
+  const placements = (state && state.placements) || [];
   const selected = viewedPlacementCount();
 
   if (!placements.length) {
@@ -1506,7 +1946,9 @@ function renderMoveHistory() {
   }
 
   history.classList.add("has-moves");
-  const structSig = `${placements.length}:${placements[placements.length - 1].index}`;
+  // game_id is part of the rebuild signature (§8): a series can advance to a
+  // new game whose placement count momentarily matches the previous game's.
+  const structSig = `${(state && state.game_id) || ""}:${placements.length}:${placements[placements.length - 1].index}`;
   if (structSig !== moveHistoryStructSig) {
     moveHistoryStructSig = structSig;
     history.innerHTML = placements.map(p => {
@@ -1556,567 +1998,418 @@ function renderReplay() {
   document.getElementById("replayPlayBtn").textContent = replayTimer ? "Pause" : "Play";
 }
 
-function renderCellBadge(h, roles) {
-  if (!roles.size) return "";
-  const label = roles.has("win") ? "W" : roles.has("block") ? "B" : "";
-  return label ? `<text class="cell-badge" x="${h.x}" y="${h.y + 1}">${label}</text>` : "";
-}
-
-function renderHeatOverlay(h, tacticMaps) {
-  const heat = tacticMaps.cellHeat.get(h.key);
-  if (!heat) return "";
-  const shape = path(h.x, h.y, HEX - 3);
-  return ["player0", "player1"].map(player => {
-    const count = heat[player] || 0;
-    if (!count) return "";
-    const cls = player === "player1" ? "p1" : "p0";
-    const opacity = Math.min(0.74, 0.08 + count * 0.048);
-    return `<path class="heat-cell ${cls}" d="${shape}" opacity="${opacity.toFixed(3)}"></path>`;
-  }).join("");
-}
-
-function renderThreatOverlay(h, tacticMaps) {
-  const count = tacticMaps.threatHeat.get(h.key) || 0;
-  if (!count) return "";
-  const opacity = Math.min(0.74, 0.18 + count * 0.075);
-  return `<path class="threat-heat" d="${path(h.x, h.y, HEX - 5)}" opacity="${opacity.toFixed(3)}"></path>`;
-}
-
-function renderTacticsPanel(tacticMaps) {
-  const panel = document.getElementById("tacticsPanel");
-  const tactics = state.tactics || {};
-  const summary = tactics.summary || {};
-  const selectedWindow = tacticsOn && isLiveView() ? findWindow(selectedWindowId) : null;
-  const selectedCell = tacticsOn && isLiveView() && selectedCellKey ? cellDebug(selectedCellKey) : null;
-  panel.classList.toggle("has-selection", Boolean(selectedWindow || selectedCell));
-
-  let body = `<div class="fact-sub">Turn on tactics to inspect windows, threats, and blocks.</div>`;
-  let tabs = "";
-  if (tacticsOn && !isLiveView()) {
-    body = `<div class="fact-sub">Replay view</div>`;
-  } else if (tacticsOn) {
-    tabs = renderTacticsTabs();
-    if (tacticsView === "cell") {
-      body = selectedCell ? renderCellInspector(selectedCell) : renderCellEmptyState();
-    } else if (tacticsView === "windows") {
-      body = renderWindowsExplorer(tacticMaps, selectedWindow);
-    } else {
-      body = renderTacticsOverview(tacticMaps);
-    }
-  }
-
-  panel.innerHTML = `
-    <div class="tactics-head">
-      <div class="metric-row">
-        <span><strong>${tacticMaps.windows.length}</strong>Windows</span>
-        <span><strong>${tacticMaps.coverage}</strong>Coverage</span>
-        <span><strong>${(tactics.immediate_wins || []).length}</strong>Wins</span>
-        <span><strong>${(tactics.must_blocks || []).length}</strong>Blocks</span>
-      </div>
-    </div>
-    <div class="tactics-body">
-      ${tabs}
-      <div class="metric-grid stats-grid">
-        ${metric("P0 Max", tacticMaps.maxHeat.player0)}
-        ${metric("P1 Max", tacticMaps.maxHeat.player1)}
-        ${metric("Threats", summary.threats || 0)}
-        ${metric("Blocked", summary.blocked || 0)}
-      </div>
-      ${body}
-    </div>
-  `;
-  bindTacticsPanel();
-}
-
-function renderBotPanel() {
-  const card = document.getElementById("sealbotCard");
-  const panel = document.getElementById("botPanel");
-  const show = setupHasSealBot() || isSealBotMatch() || Boolean(state.last_bot_decision) || Boolean(state.adapter_errors);
-  card.hidden = !show;
-  if (!show) {
-    panel.innerHTML = "";
-    return;
-  }
-
-  const decision = normalizeBotDecision(state.last_bot_decision);
-  const errors = adapterErrors();
-  const thinking = isBotThinking();
-  const configuredOnly = setupHasSealBot() && !isSealBotMatch();
-  const statusLabel = configuredOnly ? "Ready for next match" : turnStatusLabel();
-  const rows = [
-    botMetric("Status", thinking ? "Thinking" : statusLabel),
-    botMetric("Variant", activeBotVariantLabel()),
-    botMetric("Last Move", decision.moveLabel || "-"),
-    botMetric("Duration", decision.durationLabel || "-"),
-  ];
-  if (decision.depth !== null) rows.push(botMetric("Depth", decision.depth));
-  if (decision.nodes !== null) rows.push(botMetric("Nodes", decision.nodes));
-  if (decision.score !== null) rows.push(botMetric("Score", decision.score));
-
-  panel.innerHTML = `
-    <div class="bot-status-line ${thinking ? "thinking" : ""}">
-      <span class="bot-status-dot"></span>
-      <span>${escapeText(thinking ? `${playerLabel(state.thinking_player || botPlayer())} is searching` : statusLabel)}</span>
-    </div>
-    <div class="bot-metrics">${rows.join("")}</div>
-    ${errors.length ? `<div class="adapter-error-list">${errors.map(error => `<div>${escapeText(error)}</div>`).join("")}</div>` : ""}
-    ${decision.raw ? `<details class="raw-details"><summary>Raw Diagnostics</summary><div class="detail">${escapeText(JSON.stringify(decision.raw, null, 2))}</div></details>` : ""}
-  `;
-}
-
+// F2.5 — board overlay for bot-thinking / starting, rewritten for the new
+// player model (checkpoint labels come from the payload via playerKindLabel).
+// Ids #turnOverlay* are kept (board subtree retained byte-for-byte).
 function renderTurnOverlay() {
   const overlay = document.getElementById("turnOverlay");
+  if (!overlay) return;
   const title = document.getElementById("turnOverlayTitle");
   const sub = document.getElementById("turnOverlaySub");
-  const show = isLiveView() && (isBotThinking() || turnStatus() === "starting");
+  const show = Boolean(state) && isLiveView() && (isBotThinking() || turnStatus() === "starting");
   overlay.hidden = !show;
-  if (!show) return;
-  title.textContent = isBotThinking() ? `${playerShort(state.thinking_player || botPlayer())} thinking` : "Starting match";
+  if (!show || !title || !sub) return;
+  const thinking = state.thinking_player || botPlayer();
+  title.textContent = isBotThinking() ? `${playerShort(thinking)} thinking` : "Starting match";
   sub.textContent = isBotThinking()
-    ? `${playerKindLabel(state.thinking_player || botPlayer())} is choosing the next placement`
+    ? `${playerKindLabel(thinking)} is choosing the next placement`
     : "Preparing players";
 }
 
-function botMetric(label, value) {
-  return `<div class="bot-metric"><span>${escapeText(label)}</span><strong>${escapeText(value)}</strong></div>`;
+// ---- F3.1 — players panel ---------------------------------------------------
+
+// The current game's server-side decision log (§3.5): entries are
+// {ply, player, q?, r?, duration_ms, value, visits, kind} on success,
+// {ply, player, error, kind} on failure. value is the searched/analyzed
+// root_value in SIDE-TO-MOVE perspective (the mover's own view).
+function mtBotDecisions() {
+  return state && Array.isArray(state.bot_decisions) ? state.bot_decisions : [];
 }
 
-function normalizeBotDecision(decision) {
-  if (!decision || typeof decision !== "object") {
-    return { raw: null, moveLabel: "", durationLabel: "", depth: null, nodes: null, score: null };
+// Number(null) is 0 — these guards keep absent fields (null root_value on
+// sealbot decisions, null ply) from rendering as fake zeros.
+function mtFiniteOrNull(raw) {
+  if (raw === null || raw === undefined || raw === "") return null;
+  const value = Number(raw);
+  return Number.isFinite(value) ? value : null;
+}
+
+function mtFormatDuration(ms) {
+  const value = mtFiniteOrNull(ms);
+  if (value === null) return "";
+  if (value >= 10000) return `${(value / 1000).toFixed(1)}s`;
+  if (value >= 1000) return `${(value / 1000).toFixed(2)}s`;
+  return `${Math.round(value)} ms`;
+}
+
+function mtFormatValue(value) {
+  const v = mtFiniteOrNull(value);
+  if (v === null) return "";
+  return `${v >= 0 ? "+" : ""}${v.toFixed(3)}`;
+}
+
+// Kind chip text: checkpoint seats carry their search config; payload meta
+// wins, the setup-strip config is the pre-state fallback (same precedence as
+// playerKind/playerKindLabel).
+function mtSeatKindChip(seat) {
+  const meta = playerMeta(seat) || {};
+  const kind = playerKind(seat);
+  if (kind === "checkpoint") {
+    const cfg = mtSeatCfg(seat);
+    const mode = meta.mode || cfg.mode || "search";
+    const visits = firstFinite(meta.visits, cfg.visits, 256);
+    return mode === "policy" ? "checkpoint · policy" : `checkpoint · ${mode} · ${visits}v`;
   }
-  const diagnostics = decision.diagnostics && typeof decision.diagnostics === "object" ? decision.diagnostics : {};
-  const move = decision.move || decision.action || decision.placement || decision;
-  const q = firstFinite(move.q, decision.q);
-  const r = firstFinite(move.r, decision.r);
-  const duration = firstFinite(decision.duration_ms, decision.elapsed_ms, diagnostics.duration_ms, diagnostics.elapsed_ms);
-  return {
-    raw: decision,
-    moveLabel: Number.isFinite(q) && Number.isFinite(r) ? `(${q}, ${r})` : "",
-    durationLabel: Number.isFinite(duration) ? `${duration.toFixed(duration >= 10 ? 0 : 1)} ms` : "",
-    depth: firstPresent(decision.depth, decision.last_depth, diagnostics.depth, diagnostics.last_depth),
-    nodes: firstPresent(decision.nodes, decision._nodes, diagnostics.nodes, diagnostics._nodes),
-    score: firstPresent(decision.score, decision.last_score, diagnostics.score, diagnostics.last_score),
-  };
+  if (kind.startsWith("sealbot-")) return `sealbot ${kind.slice("sealbot-".length)}`;
+  return kind;
 }
 
-function renderTacticsTabs() {
-  const tabs = [
-    ["overview", "Overview"],
-    ["cell", "Cell"],
-    ["windows", "Windows"],
+// Last finished decision for a seat (the log is append-ordered by ply).
+function mtSeatLastDecision(seat, decisions) {
+  for (let i = decisions.length - 1; i >= 0; i--) {
+    const entry = decisions[i];
+    if (entry && entry.player === seat && !entry.error) return entry;
+  }
+  return null;
+}
+
+// Seat error line: a failed decision logged for the seat, else the match-level
+// payload error when it names this seat.
+function mtSeatError(seat, decisions) {
+  for (let i = decisions.length - 1; i >= 0; i--) {
+    const entry = decisions[i];
+    if (entry && entry.player === seat && entry.error) return String(entry.error);
+  }
+  const err = state && state.error ? String(state.error) : "";
+  if (err && (err.includes(seat) || err.includes(playerShort(seat)))) return err;
+  return "";
+}
+
+function renderMtPlayers() {
+  const el = document.getElementById("mtPlayers");
+  if (!el) return;
+  const decisions = mtBotDecisions();
+  el.innerHTML = ["player0", "player1"].map(seat => {
+    const thinking = Boolean(state) && state.thinking_player === seat;
+    const yourTurn = playerKind(seat) === "manual"
+      && Boolean(state) && state.current_player === seat && canSubmitMove();
+    const last = mtSeatLastDecision(seat, decisions);
+    const error = mtSeatError(seat, decisions);
+    const parts = [
+      `<span class="mt-seat-dot" style="background:${playerColor(seat)}"></span>`,
+      `<span class="mt-player-name">${escapeText(`${playerShort(seat)} ${playerKindLabel(seat)}`)}</span>`,
+      `<span class="mt-chip mt-kind-chip">${escapeText(mtSeatKindChip(seat))}</span>`,
+    ];
+    if (thinking) parts.push(`<span class="mt-thinking-dot" title="thinking"></span>`);
+    if (yourTurn) parts.push(`<span class="mt-your-turn">your turn</span>`);
+    if (last) {
+      const q = mtFiniteOrNull(last.q);
+      const r = mtFiniteOrNull(last.r);
+      const move = q !== null && r !== null ? `(${q}, ${r})` : "—";
+      const bits = [`<span>last ${escapeText(move)}</span>`];
+      const duration = mtFormatDuration(last.duration_ms);
+      if (duration) bits.push(`<span>${escapeText(duration)}</span>`);
+      const value = mtFormatValue(last.value);
+      if (value) bits.push(`<span class="mt-chip mt-value-chip">${escapeText(value)}</span>`);
+      parts.push(`<div class="mt-player-last">${bits.join("")}</div>`);
+    }
+    if (error) parts.push(`<div class="mt-player-err">${escapeText(error)}</div>`);
+    return `<div class="mt-player-row" data-seat="${seat}">${parts.join("")}</div>`;
+  }).join("");
+}
+
+// ---- F3.2 — value sparkline over bot_decisions ------------------------------
+
+const MT_CHART_W = 300;
+const MT_CHART_H = 90;
+const MT_CHART_X0 = 30;
+const MT_CHART_X1 = 292;
+const MT_CHART_Y0 = 10;
+const MT_CHART_Y1 = 80;
+
+let mtChartSig = "";       // rebuild signature: innerHTML only when the data moved
+let mtChartGeom = null;    // {points:[{ply,seat,v,x,y}]} for hover/click hit-testing
+
+// Chart series: decision-log entries with a finite value, mapped to the P0
+// perspective (root_value is side-to-move, so P1 entries flip sign).
+function mtChartEntries() {
+  return mtBotDecisions()
+    .map(entry => ({
+      ply: mtFiniteOrNull(entry && entry.ply),
+      seat: entry && entry.player,
+      value: mtFiniteOrNull(entry && entry.value),
+    }))
+    .filter(entry => entry.ply !== null && entry.value !== null
+      && (entry.seat === "player0" || entry.seat === "player1"))
+    .map(entry => ({ ply: entry.ply, seat: entry.seat, v: entry.seat === "player0" ? entry.value : -entry.value }));
+}
+
+function mtChartSvg(entries) {
+  const plies = entries.map(entry => entry.ply);
+  const minPly = Math.min(...plies);
+  const span = Math.max(1, Math.max(...plies) - minPly);
+  const xAt = ply => MT_CHART_X0 + ((ply - minPly) / span) * (MT_CHART_X1 - MT_CHART_X0);
+  const yAt = v => {
+    const c = Math.max(-1, Math.min(1, v));
+    return MT_CHART_Y1 - ((c + 1) / 2) * (MT_CHART_Y1 - MT_CHART_Y0);
+  };
+  const points = entries
+    .map(entry => ({ ply: entry.ply, seat: entry.seat, v: entry.v, x: xAt(entry.ply), y: yAt(entry.v) }))
+    .sort((a, b) => a.x - b.x);
+  mtChartGeom = { points };
+  const zeroY = yAt(0).toFixed(1);
+  const parts = [
+    `<line class="mt-chart-zero" x1="${MT_CHART_X0}" x2="${MT_CHART_X1}" y1="${zeroY}" y2="${zeroY}"></line>`,
+    `<text class="mt-chart-axis" x="4" y="${MT_CHART_Y0 + 3}">+1</text>`,
+    `<text class="mt-chart-axis" x="4" y="${Number(zeroY) + 3}">0</text>`,
+    `<text class="mt-chart-axis" x="4" y="${MT_CHART_Y1 + 2}">−1</text>`,
   ];
-  return `<div class="tactics-tabs">${tabs.map(([mode, label]) => `
-    <button data-tactics-view="${mode}" class="${tacticsView === mode ? "active" : ""}">${label}</button>
-  `).join("")}</div>`;
-}
-
-function renderTacticsOverview(tacticMaps) {
-  const tactics = state.tactics || {};
-  return `
-    <div class="overview-grid">
-      ${windowCountMetric("P0 Windows", tacticMaps.windows.filter(w => (w.active_player || w.player) === "player0").length, "p0")}
-      ${windowCountMetric("P1 Windows", tacticMaps.windows.filter(w => (w.active_player || w.player) === "player1").length, "p1")}
-      ${windowCountMetric("Q Axis", tacticMaps.windows.filter(w => w.axis === "Q").length)}
-      ${windowCountMetric("R Axis", tacticMaps.windows.filter(w => w.axis === "R").length)}
-      ${windowCountMetric("QR Axis", tacticMaps.windows.filter(w => w.axis === "QR").length)}
-      ${windowCountMetric("Active", tacticMaps.windows.filter(w => w.is_active).length)}
-    </div>
-    <div class="tactics-section">
-      <div class="tactics-title">Forcing</div>
-      <div class="metric-grid">
-        ${metric("Forcing Wins", (tactics.immediate_wins || []).length)}
-        ${metric("Must Blocks", (tactics.must_blocks || []).length)}
-      </div>
-    </div>
-    ${renderFactSection("Immediate Wins", tactics.immediate_wins || [], "win")}
-    ${renderFactSection("Must Blocks", tactics.must_blocks || [], "block")}
-    <div class="tactics-section">
-      <div class="tactics-title">Browse</div>
-      <button class="wide-action" data-tactics-view="windows">Open Window Explorer</button>
-    </div>
-  `;
-}
-
-function renderCellEmptyState() {
-  return `
-    <div class="empty-panel">
-      <div class="fact-main">No cell selected</div>
-      <div class="fact-sub">Turn on Inspect, then click a board cell to see containing windows and playable tactical facts.</div>
-    </div>
-  `;
-}
-
-function renderCellInspector(info) {
-  return `
-    <div class="tactics-section">
-      <div class="fact-main"><span><span class="pill threat">cell</span> (${info.q}, ${info.r})</span><span>${info.legal ? "legal" : info.owner ? playerShort(info.owner) : "empty"}</span></div>
-      <div class="fact-sub">${info.owner ? `Stone ${info.index} by ${playerShort(info.owner)}` : info.legal ? "Legal move" : "Not currently playable"}</div>
-      ${info.legal ? `<button id="playSelectedBtn" data-q="${info.q}" data-r="${info.r}" ${canSubmitMove() ? "" : "disabled"}>Play selected</button>` : ""}
-    </div>
-    ${renderFactSection("Wins From This Cell", info.wins, "win")}
-    ${renderFactSection("Blocks From This Cell", info.blocks, "block")}
-    ${renderWindowGroups(info.windows, "Containing Windows")}
-  `;
-}
-
-function renderWindowInspector(w) {
-  const relatedWins = factsForWindow((state.tactics || {}).immediate_wins || [], w.id);
-  const relatedBlocks = factsForWindow((state.tactics || {}).must_blocks || [], w.id);
-  return `
-    <div class="selected-window-card">
-      <div class="fact-main">
-        <span>${playerPill(w.player || w.active_player)} ${escapeText(w.id)}</span>
-        <span>${w.own_count || 0}/6</span>
-      </div>
-      <div class="window-glyph large">${(w.cells || []).map(c => renderWindowSlot(c, w)).join("")}</div>
-      <div class="window-tags">
-        ${renderWindowTags(w)}
-      </div>
-      <div class="fact-sub">${escapeText(w.axis)} axis - ${escapeText(w.severity)} - ${w.is_blocked ? "blocked" : w.blockable_now ? "blockable now" : "not blockable now"}</div>
-    </div>
-    <div class="tactics-section">
-      <div class="tactics-title">Cells</div>
-      <div class="cell-strip">${(w.cells || []).map(c => renderSlot(c, w)).join("")}</div>
-    </div>
-    <div class="tactics-section">
-      <div class="tactics-title">Masks</div>
-      ${maskRow("P0", w.mask && w.mask.player0)}
-      ${maskRow("P1", w.mask && w.mask.player1)}
-      ${maskRow("Occupied", w.mask && w.mask.occupied)}
-      ${maskRow("Empty", w.mask && w.mask.empty)}
-    </div>
-    <div class="tactics-section">
-      <div class="tactics-title">Derived Facts</div>
-      <div class="detail-grid">
-        ${flag("active", w.is_active)}
-        ${flag("blocked", w.is_blocked)}
-        ${flag("threat", w.is_threat)}
-        ${flag("win", w.is_win)}
-        ${flag("blockable", w.blockable_now)}
-        ${flag("player", playerShort(w.player || w.active_player))}
-      </div>
-    </div>
-    ${renderFactSection("Related Wins", relatedWins, "win")}
-    ${renderFactSection("Related Blocks", relatedBlocks, "block")}
-    <details class="raw-details">
-      <summary>Raw Window</summary>
-      <div class="detail">${escapeText(JSON.stringify(w, null, 2))}</div>
-    </details>
-  `;
-}
-
-function metric(label, value) {
-  return `<div class="metric"><strong>${escapeText(value)}</strong>${label}</div>`;
-}
-
-function renderFactSection(title, facts, kind) {
-  const filtered = facts.filter(f => tacticFilters.player === "both" || f.player === tacticFilters.player);
-  return `
-    <div class="tactics-section">
-      <div class="tactics-title">${title}</div>
-      <div class="fact-list">
-        ${filtered.length ? filtered.map(f => `<div class="fact" data-cell-key="${f.q},${f.r}">
-          <div class="fact-main"><span><span class="pill ${kind}">${kind}</span> ${playerShort(f.player)} (${f.q}, ${f.r})</span><span>${(f.window_ids || []).length}w</span></div>
-          <div class="fact-sub">${idList(f.window_ids)}</div>
-        </div>`).join("") : `<div class="fact-sub">None</div>`}
-      </div>
-    </div>
-  `;
-}
-
-function renderWindowsExplorer(tacticMaps, selectedWindow) {
-  return `
-    ${selectedWindow ? renderWindowInspector(selectedWindow) : ""}
-    ${renderWindowGroups(tacticMaps.windows, "Window Explorer")}
-  `;
-}
-
-function renderWindowGroups(windows, title = "Windows") {
-  const sorted = [...windows].sort(windowPrioritySort);
-  const groups = groupedWindows(sorted);
-  return `
-    <div class="tactics-section">
-      <div class="tactics-title">${title}</div>
-      ${groups.length ? `<div class="window-groups">${groups.map(renderWindowGroup).join("")}</div>` : `<div class="fact-sub">No matching windows</div>`}
-    </div>
-  `;
-}
-
-function renderWindowGroup(group) {
-  return `
-    <div class="window-group">
-      <div class="window-group-head">
-        <span>${playerPill(group.player)} <strong>${escapeText(group.axis)}</strong></span>
-        <span>${group.windows.length} windows</span>
-      </div>
-      <div class="window-card-grid">${group.windows.map(renderWindowCard).join("")}</div>
-    </div>
-  `;
-}
-
-function renderWindowCard(w) {
-  const selected = selectedWindowId === w.id ? "selected" : "";
-  const emptyCount = (w.empty_cells || []).length;
-  const playableCount = (w.blockable_cells || []).length;
-  return `<div class="window-card ${selected}" data-window-id="${escapeAttr(w.id)}">
-    <div class="window-card-head">
-      <span>${playerPill(w.player || w.active_player)} ${escapeText(w.id)}</span>
-      <strong>${w.own_count || 0}/6</strong>
-    </div>
-    <div class="window-glyph">${(w.cells || []).map(c => renderWindowSlot(c, w)).join("")}</div>
-    <div class="window-tags">${renderWindowTags(w)}</div>
-    <div class="window-meta"><span>${emptyCount} empty</span><span>${playableCount} playable</span></div>
-  </div>`;
-}
-
-function renderWindowSlot(cell, w) {
-  const ownerClass = cell.owner === "player1" ? "p1" : cell.owner === "player0" ? "p0" : "empty";
-  const playable = (w.blockable_cells || []).some(c => c.q === cell.q && c.r === cell.r);
-  return `<span class="window-slot ${ownerClass} ${playable ? "playable" : ""}" title="(${cell.q}, ${cell.r})" data-cell-key="${cell.q},${cell.r}">
-    ${cell.owner ? playerSlotLabel(cell.owner) : ""}
-  </span>`;
-}
-
-function renderWindowTags(w) {
-  return [
-    w.is_win ? "win" : "",
-    w.is_threat ? "threat" : "",
-    w.is_active ? "active" : "",
-    w.blockable_now ? "blockable" : "",
-    w.is_blocked ? "blocked" : "",
-  ].filter(Boolean).map(tag => `<span class="tag ${tag}">${tag}</span>`).join("") || `<span class="tag quiet">${escapeText(w.severity || "window")}</span>`;
-}
-
-function groupedWindows(windows) {
-  const map = new Map();
-  for (const w of windows) {
-    const player = w.active_player || w.player || w.threat_player || "blocked";
-    const axis = w.axis || "Axis";
-    const key = `${player}:${axis}`;
-    if (!map.has(key)) map.set(key, { player, axis, windows: [] });
-    map.get(key).windows.push(w);
-  }
-  return [...map.values()].sort((a, b) => playerShort(a.player).localeCompare(playerShort(b.player)) || String(a.axis).localeCompare(String(b.axis)));
-}
-
-function windowPrioritySort(a, b) {
-  return windowScore(b) - windowScore(a) || String(a.id).localeCompare(String(b.id));
-}
-
-function windowScore(w) {
-  return (w.is_win ? 1000 : 0)
-    + (w.is_threat ? 500 : 0)
-    + (w.blockable_now ? 160 : 0)
-    + (w.is_active ? 80 : 0)
-    + Number(w.own_count || 0) * 20
-    - (w.is_blocked ? 50 : 0);
-}
-
-function windowCountMetric(label, value, cls = "") {
-  return `<div class="mini-metric ${cls}"><strong>${escapeText(value)}</strong><span>${label}</span></div>`;
-}
-
-function bindTacticsPanel() {
-  document.querySelectorAll("[data-tactics-view]").forEach(el => {
-    el.addEventListener("click", event => {
-      event.stopPropagation();
-      tacticsView = el.dataset.tacticsView;
-      render();
-    });
-  });
-  document.querySelectorAll("[data-window-id]").forEach(el => {
-    el.addEventListener("click", () => {
-      selectedWindowId = el.dataset.windowId;
-      selectedCellKey = null;
-      tacticsView = "windows";
-      render();
-    });
-  });
-  document.querySelectorAll("[data-cell-key]").forEach(el => {
-    el.addEventListener("click", event => {
-      event.stopPropagation();
-      selectedCellKey = el.dataset.cellKey;
-      selectedWindowId = null;
-      tacticsView = "cell";
-      render();
-    });
-  });
-  const play = document.getElementById("playSelectedBtn");
-  if (play) play.addEventListener("click", () => {
-    if (!canSubmitMove()) return;
-    post("/api/move", { q: Number(play.dataset.q), r: Number(play.dataset.r) });
-  });
-}
-
-function buildTacticMaps() {
-  const cellRoles = new Map();
-  const cellHeat = new Map();
-  const threatHeat = new Map();
-  if (!tacticsOn || !isLiveView()) return emptyTacticMaps(cellRoles, cellHeat, threatHeat);
-
-  const windows = visibleWindows();
-  const overlayWindows = windows.filter(w => w.is_active);
-  for (const w of overlayWindows) {
-    for (const cell of w.empty_cells || []) addHeat(cellHeat, cell, w.active_player || w.player);
-    if (w.is_threat) {
-      for (const cell of w.empty_cells || []) addThreatHeat(threatHeat, cell);
+  for (const seat of ["player0", "player1"]) {
+    const pts = points.filter(p => p.seat === seat);
+    if (!pts.length) continue;
+    const cls = seat === "player0" ? "p0" : "p1";
+    if (pts.length === 1) {
+      parts.push(`<circle class="mt-chart-dot ${cls}" cx="${pts[0].x.toFixed(1)}" cy="${pts[0].y.toFixed(1)}" r="2.4"></circle>`);
+    } else {
+      const coords = pts.map(p => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ");
+      parts.push(`<polyline class="mt-chart-line ${cls}" fill="none" points="${coords}"></polyline>`);
     }
   }
-  for (const fact of (state.tactics || {}).immediate_wins || []) addRole(cellRoles, fact, "win");
-  for (const fact of (state.tactics || {}).must_blocks || []) addRole(cellRoles, fact, "block");
-  for (const w of windows) {
-    if (w.id === selectedWindowId) {
-      for (const cell of w.cells || []) addRole(cellRoles, cell, "selected");
-    }
+  const latest = points[points.length - 1];
+  parts.push(`<circle class="mt-chart-dot ${latest.seat === "player0" ? "p0" : "p1"}" cx="${latest.x.toFixed(1)}" cy="${latest.y.toFixed(1)}" r="3"></circle>`);
+  // Hover layer — mousemove updates these two elements only (attribute/text
+  // writes), never re-rendering the svg.
+  parts.push(`<line id="mtChartCross" class="mt-chart-cross" x1="-10" x2="-10" y1="${MT_CHART_Y0}" y2="${MT_CHART_Y1}" visibility="hidden"></line>`);
+  parts.push(`<text id="mtChartHoverText" class="mt-chart-hover" x="${MT_CHART_X1}" y="${MT_CHART_Y0 + 3}" text-anchor="end" visibility="hidden"></text>`);
+  return `<svg viewBox="0 0 ${MT_CHART_W} ${MT_CHART_H}" role="img" aria-label="Bot value by ply (P0 perspective)">${parts.join("")}</svg>`;
+}
+
+function renderMtInsight() {
+  const el = document.getElementById("mtValueChart");
+  if (!el) return;
+  const button = document.getElementById("mtOpenDebugBtn");
+  if (button) {
+    // F3.4: disabled when there is no position to export or no run to open it in.
+    button.disabled = !state || viewedPlacementCount() === 0
+      || !(mtFirstCheckpointSeat() || trainingRuns.length);
   }
-  return { cellRoles, cellHeat, threatHeat, coverage: cellHeat.size, maxHeat: heatMax(cellHeat), windows };
-}
-
-function emptyTacticMaps(cellRoles = new Map(), cellHeat = new Map(), threatHeat = new Map()) {
-  return { cellRoles, cellHeat, threatHeat, coverage: 0, maxHeat: { player0: 0, player1: 0 }, windows: [] };
-}
-
-function visibleWindows() {
-  if (!tacticsOn || !isLiveView()) return [];
-  const tactics = state.tactics || {};
-  const windows = [];
-  for (const w of tactics.windows || []) {
-    if (!windowMatchesFilters(w)) continue;
-    if (tacticFilters.mode === "forcing" && !(w.is_win || Number(w.own_count || 0) >= 5)) continue;
-    if (tacticFilters.mode === "threats" && !w.is_threat) continue;
-    if (tacticFilters.mode === "windows" && !w.is_active) continue;
-    if (tacticFilters.mode === "all" && !(w.is_active || w.is_blocked || w.is_win)) continue;
-    windows.push(w);
+  const entries = mtChartEntries();
+  const sig = `${(state && state.game_id) || ""}:${entries.length}:${entries.length ? entries[entries.length - 1].ply : ""}`;
+  if (sig === mtChartSig) return;
+  mtChartSig = sig;
+  if (entries.length < 2) {
+    mtChartGeom = null;
+    el.innerHTML = `<div class="dbg-empty-note">No bot evaluations yet</div>`;
+    return;
   }
-  const selected = (tactics.windows || []).find(w => w.id === selectedWindowId);
-  if (selected && !windows.find(w => w.id === selected.id)) windows.push(selected);
-  return [...new Map(windows.map(w => [w.id, w])).values()];
+  el.innerHTML = mtChartSvg(entries);
 }
 
-function addRole(map, coord, role) {
-  const key = `${coord.q},${coord.r}`;
-  if (!map.has(key)) map.set(key, new Set());
-  map.get(key).add(role);
-}
-
-function addHeat(map, coord, player) {
-  if (!player) return;
-  const key = `${coord.q},${coord.r}`;
-  if (!map.has(key)) map.set(key, { player0: 0, player1: 0 });
-  map.get(key)[player] += 1;
-}
-
-function addThreatHeat(map, coord) {
-  const key = `${coord.q},${coord.r}`;
-  map.set(key, (map.get(key) || 0) + 1);
-}
-
-function heatMax(map) {
-  const max = { player0: 0, player1: 0 };
-  for (const heat of map.values()) {
-    max.player0 = Math.max(max.player0, heat.player0 || 0);
-    max.player1 = Math.max(max.player1, heat.player1 || 0);
+// Nearest-ply hit test in viewBox coordinates (the svg is width:100% scaled).
+function mtChartPointAt(event) {
+  if (!mtChartGeom || !mtChartGeom.points.length) return null;
+  const wrap = document.getElementById("mtValueChart");
+  const svgEl = wrap && wrap.querySelector("svg");
+  if (!svgEl) return null;
+  const rect = svgEl.getBoundingClientRect();
+  if (!rect.width) return null;
+  const fx = ((event.clientX - rect.left) / rect.width) * MT_CHART_W;
+  let best = null;
+  for (const p of mtChartGeom.points) {
+    if (!best || Math.abs(p.x - fx) < Math.abs(best.x - fx)) best = p;
   }
-  return max;
+  return best;
 }
 
-function windowMatchesFilters(w) {
-  if (tacticFilters.player !== "both" && w.player !== tacticFilters.player && w.active_player !== tacticFilters.player && w.threat_player !== tacticFilters.player) return false;
-  if (tacticFilters.axis !== "all" && w.axis !== tacticFilters.axis) return false;
-  return true;
+function mtChartHover(event) {
+  const cross = document.getElementById("mtChartCross");
+  const label = document.getElementById("mtChartHoverText");
+  if (!cross || !label) return;
+  const p = mtChartPointAt(event);
+  if (!p) return;
+  const x = p.x.toFixed(1);
+  cross.setAttribute("x1", x);
+  cross.setAttribute("x2", x);
+  cross.setAttribute("visibility", "visible");
+  label.textContent = `ply ${p.ply} · ${playerShort(p.seat)} ${mtFormatValue(p.v)}`;
+  label.setAttribute("visibility", "visible");
 }
 
-function findWindow(id) {
-  return (state.tactics && (state.tactics.windows || []).find(w => w.id === id)) || null;
+function mtChartHoverEnd() {
+  const cross = document.getElementById("mtChartCross");
+  const label = document.getElementById("mtChartHoverText");
+  if (cross) cross.setAttribute("visibility", "hidden");
+  if (label) label.setAttribute("visibility", "hidden");
 }
 
-function cellDebug(key) {
-  const info = cellInfo(key);
-  const tactics = state.tactics || {};
-  return {
-    ...info,
-    wins: (tactics.immediate_wins || []).filter(f => f.q === info.q && f.r === info.r),
-    blocks: (tactics.must_blocks || []).filter(f => f.q === info.q && f.r === info.r),
-    windows: (tactics.windows || []).filter(w => (w.cells || []).some(c => c.q === info.q && c.r === info.r)).filter(windowMatchesFilters),
-  };
+function mtChartClick(event) {
+  const p = mtChartPointAt(event);
+  if (p) setReplayIndex(p.ply);  // scrub the board to the position the bot evaluated
 }
 
-function factsForWindow(facts, windowId) {
-  return facts.filter(f => (f.window_ids || []).includes(windowId));
+// ---- F3.3 — series panel ----------------------------------------------------
+
+function renderMtSeries() {
+  const card = document.getElementById("mtSeriesCard");
+  const el = document.getElementById("mtSeries");
+  if (!card || !el) return;
+  const series = state && state.series;
+  card.hidden = !series;
+  if (!series) {
+    el.innerHTML = "";
+    return;
+  }
+  const tally = series.tally || {};
+  const slots = series.slots || {};
+  const slotLabel = slot => (slots[slot] && slots[slot].label) || slot;
+  const draws = Number(tally.draws) || 0;
+  const tallyHtml = `<div class="mt-series-tally">`
+    + `<span class="mt-slot0">${escapeText(slotLabel("slot0"))}</span>`
+    + ` ${escapeText(String(tally.slot0 ?? 0))} — ${escapeText(String(tally.slot1 ?? 0))} `
+    + `<span class="mt-slot1">${escapeText(slotLabel("slot1"))}</span>`
+    + (draws > 0 ? ` · ${escapeText(String(draws))} draw${draws === 1 ? "" : "s"}` : "")
+    + `</div>`;
+  const swapped = series.seats && series.seats.player0 === "slot1";
+  const progress = series.finished
+    ? `Series finished · ${series.played ?? series.games ?? "?"} games`
+    : `Game ${series.current_game ?? "?"} / ${series.games ?? "?"}${swapped ? " (seats swapped)" : ""}`;
+  const chips = (series.results || []).map(result => {
+    const winner = result.winner_slot === "slot0" || result.winner_slot === "slot1" ? result.winner_slot : null;
+    const title = `Game ${result.game}: ${winner ? `${slotLabel(winner)} wins` : "draw"} · ${result.length} moves`;
+    return `<span class="mt-series-chip ${winner || "draw"}" title="${escapeAttr(title)}">${winner ? "✓" : "="}</span>`;
+  }).join("");
+  el.innerHTML = tallyHtml
+    + `<div class="mt-series-progress">${escapeText(progress)}</div>`
+    + (chips ? `<div class="mt-series-games">${chips}</div>` : "");
 }
 
-function renderSlot(cell, w) {
-  const ownerClass = cell.owner === "player1" ? "p1" : cell.owner === "player0" ? "p0" : "empty";
-  const blockable = (w.blockable_cells || []).some(c => c.q === cell.q && c.r === cell.r);
-  return `<div class="slot ${ownerClass} ${blockable ? "blockable" : ""}" data-cell-key="${cell.q},${cell.r}">
-    <div>${cell.index}</div>
-    <div>${cell.owner ? playerShort(cell.owner) : "--"}</div>
-    <div>(${cell.q},${cell.r})</div>
-  </div>`;
+// ---- F3.4 — Open in Debug deep link -----------------------------------------
+
+// First checkpoint seat of the RUNNING match (payload meta carries run +
+// checkpoint per §3.1) — its model is preselected in the debug screen.
+function mtFirstCheckpointSeat() {
+  for (const seat of ["player0", "player1"]) {
+    const meta = playerMeta(seat);
+    if (meta && meta.kind === "checkpoint" && meta.run) return meta;
+  }
+  return null;
 }
 
-function maskRow(label, value) {
-  return `<div class="mask-row"><span class="label">${label}</span><span class="bits">${maskBits(value)}</span></div>`;
+// dbgApplyNav routes any nav whose path is empty (or not in the target run's
+// game list) through dbgAutoPickGame, which re-navigates with acts:[] and
+// would wipe the imported position. So resolve a concrete loadable game path
+// for the run BEFORE handing the nav to the debug module. The acts-branch
+// position fetch only uses the path for dbgEnsureRecordedActs (record=0,
+// ply=0 — the recorded prefix is sliced to length 0), so any record that
+// loads at ply 0 works.
+async function mtResolveDebugGame(run) {
+  if (dbg.nav.run === run && dbg.nav.path) {
+    // Warm same-run: keep the already-loaded game (and its src/record).
+    return { path: dbg.nav.path, src: dbg.nav.src, rec: dbg.nav.rec };
+  }
+  const fallback = { path: "", src: "selfplay", rec: 0 };
+  let games = [];
+  try {
+    const res = await fetch(`/api/debug/games?run=${encodeURIComponent(run)}&source=selfplay`);
+    if (!res.ok) return fallback;
+    const data = await safeJson(res);
+    games = (data && data.games) || [];
+  } catch (_e) {
+    return fallback;
+  }
+  // Newest-first probe, same reason as dbgAutoPickGame: the newest selfplay
+  // file is usually the in-progress epoch with no loadable record yet.
+  for (const g of games.slice(0, 6)) {
+    try {
+      const params = new URLSearchParams({ run, path: g.path, record: "0", ply: "0" });
+      const res = await fetch(`/api/debug/position?${params.toString()}`);
+      if (res.ok) return { path: g.path, src: "selfplay", rec: 0 };
+    } catch (_e) { /* probe the next (older) file */ }
+  }
+  return fallback;
 }
 
-function maskBits(value) {
-  const mask = Number(value || 0);
-  return Array.from({ length: 6 }, (_, i) => (mask & (1 << i)) ? "1" : "0").join(" ");
+let mtOpenDebugBusy = false;
+
+async function mtOpenDebug() {
+  if (!state || mtOpenDebugBusy) return;
+  const acts = (state.placements || [])
+    .slice(0, viewedPlacementCount())
+    .map(p => dbgPackActionId(p.q, p.r));
+  const ckptSeat = mtFirstCheckpointSeat();
+  const run = (ckptSeat && ckptSeat.run) || (trainingRuns[0] && trainingRuns[0].name) || "";
+  const ckpt = (ckptSeat && ckptSeat.checkpoint) || "";
+  if (!acts.length || !run) return;
+  mtOpenDebugBusy = true;
+  try {
+    // Switch screens FIRST (snappy, like debugOpenFromHistory). setScreen's
+    // replaceState strips any query off the hash, so the full nav hash must be
+    // written AFTER this — dbgNavigate below fires its own hashchange, which
+    // the global listener routes with preserveHash.
+    navigateScreen("debug");
+    const game = await mtResolveDebugGame(run);
+    // acts is the debug nav's branch-injection list; its position fetch sends
+    // recorded[0..ply] + acts, so ply MUST be 0 for the imported list to be
+    // the WHOLE position (ply=acts.length would prepend acts.length moves of
+    // whatever recorded game the path points at).
+    dbgNavigate({ run, src: game.src, path: game.path, rec: game.rec, ply: 0, acts, ckptA: ckpt || "" });
+  } finally {
+    mtOpenDebugBusy = false;
+  }
 }
 
-function flag(label, value) {
-  return `<div class="fact-sub"><span class="label">${label}</span> ${escapeText(value)}</div>`;
-}
+// ---- F3.5 — match-screen keyboard shortcuts ----------------------------------
 
-function playerPill(player) {
-  const cls = player === "player1" ? "p1" : player === "player0" ? "p0" : "blocked";
-  return `<span class="pill ${cls}">${playerShort(player)}</span>`;
-}
-
-function idList(ids) {
-  return (ids || []).map(escapeText).join(" ");
-}
-
-function matchLabel() {
-  return `P0 ${playerKindLabel("player0")} - P1 ${playerKindLabel("player1")}`;
-}
-
-function isSealBotMatch() {
-  return Boolean(state && (state.mode === "sealbot" || ["player0", "player1"].some(player => playerKind(player).startsWith("sealbot-"))));
+// Guard shape mirrors histHandleKey/dbgHandleKey: only on the match screen,
+// never while typing in a form control, never on modified chords. Every
+// shortcut has a button equivalent (replay bar / Start button).
+function mtHandleKey(e) {
+  if (activeScreen !== "match") return;
+  const ae = document.activeElement;
+  const tag = ae && ae.tagName;
+  if (tag && /^(INPUT|SELECT|TEXTAREA)$/.test(tag)) return;
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  const k = e.key;
+  if (k === " " && tag === "BUTTON") return;  // Space activates the focused button
+  let handled = true;
+  if (k === "ArrowLeft") setReplayIndex(viewedPlacementCount() - 1);
+  else if (k === "ArrowRight") setReplayIndex(viewedPlacementCount() + 1);
+  else if (k === "Home") setReplayIndex(0);
+  else if (k === "End") setReplayIndex(totalPlacements());
+  else if (k === " ") toggleReplayPlay();
+  else if (k === "n" || k === "N") mtStartMatch();
+  else handled = false;
+  if (handled) e.preventDefault();
 }
 
 function canSubmitMove() {
-  if (!state || pendingRequest || !isLiveView() || state.winner || turnStatus() === "terminal") return false;
+  if (!state || pendingRequest || !isLiveView() || state.winner || state.stopped) return false;
+  const status = turnStatus();
+  if (status === "terminal" || status === "stopped") return false;
   if (typeof state.can_submit === "boolean") return state.can_submit;
   return playerKind(state.current_player) === "manual";
 }
 
 function turnStatus() {
   if (!state) return "starting";
+  if (state.stopped || state.turn_status === "stopped") return "stopped";
   if (state.error) return "error";
   if (state.winner || state.turn_status === "terminal") return "terminal";
-  return state.turn_status || (isSealBotMatch() ? "human_turn" : "manual_turn");
-}
-
-function turnStatusLabel() {
-  const turn = turnStatus();
-  if (turn === "bot_thinking") return "Bot thinking";
-  if (turn === "human_turn") return "Manual turn";
-  if (turn === "manual_turn") return "Manual turn";
-  if (turn === "terminal") return "Complete";
-  if (turn === "error") return "Error";
-  if (turn === "starting") return "Starting";
-  return turn.replace(/_/g, " ");
+  // Fallback for payloads without turn_status: any non-manual seat means a bot
+  // match (was isSealBotMatch(); checkpoint seats count as bots too now).
+  const anyBot = state.mode !== "manual"
+    && ["player0", "player1"].some(player => playerKind(player) !== "manual");
+  return state.turn_status || (anyBot ? "human_turn" : "manual_turn");
 }
 
 function isBotThinking() {
   return turnStatus() === "bot_thinking";
 }
 
+// Any non-manual seat is a bot now (sealbot OR checkpoint).
 function botPlayer() {
   if (state && state.thinking_player) return state.thinking_player;
-  return ["player0", "player1"].find(player => playerKind(player).startsWith("sealbot-")) || null;
+  return ["player0", "player1"].find(player => playerKind(player) !== "manual") || null;
 }
 
 function playerMeta(player) {
@@ -2136,8 +2429,10 @@ function playerKind(player) {
     if (typeof meta.kind === "string") return normalizePlayerKind(meta.kind, meta.variant);
     if (typeof meta.variant === "string") return `sealbot-${meta.variant}`;
   }
-  const selectId = player === "player0" ? "player0Kind" : "player1Kind";
-  return document.getElementById(selectId)?.value || "manual";
+  // Pre-state fallback: the seat's configured kind from the setup strip state.
+  const cfg = mtSeatCfg(player === "player1" ? "player1" : "player0");
+  if (cfg.kind === "sealbot") return `sealbot-${cfg.variant || "current"}`;
+  return cfg.kind || "manual";
 }
 
 function normalizePlayerKind(kind, variant = "") {
@@ -2146,7 +2441,11 @@ function normalizePlayerKind(kind, variant = "") {
   return kind || "manual";
 }
 
+// Prefer the server-provided label (checkpoint seats get "<run> @ <ckpt>",
+// sealbot seats "SealBot <variant>"); fall back to the static kind map.
 function playerKindLabel(player) {
+  const meta = playerMeta(player);
+  if (meta && typeof meta.label === "string" && meta.label) return meta.label;
   const kind = playerKind(player);
   return PLAYER_KIND_LABELS[kind] || kind;
 }
@@ -2161,45 +2460,6 @@ function playerShort(player) {
   if (player === "player0") return "P0";
   if (player === "player1") return "P1";
   return "--";
-}
-
-function playerSlotLabel(player) {
-  const short = playerShort(player);
-  if (short === "P0") return "0";
-  if (short === "P1") return "1";
-  return short.slice(0, 1);
-}
-
-function activeBotVariantLabel() {
-  const bot = botPlayer();
-  const kind = bot ? playerKind(bot) : "sealbot-current";
-  const variant = kind.startsWith("sealbot-") ? kind.replace("sealbot-", "") : sealbotDefaultVariant();
-  const known = sealbotVariants().find(item => item.id === variant);
-  return (known && known.label) || variant || "current";
-}
-
-function adapterErrors() {
-  const values = [];
-  if (adapterLoadError) values.push(adapterLoadError);
-  if (state && state.error) values.push(state.error);
-  const raw = state && state.adapter_errors;
-  if (Array.isArray(raw)) values.push(...raw.map(String));
-  else if (raw && typeof raw === "object") {
-    for (const [key, value] of Object.entries(raw)) values.push(`${key}: ${value}`);
-  } else if (raw) values.push(String(raw));
-  for (const kind of Object.values(matchConfig.players || {})) {
-    if (!String(kind).startsWith("sealbot-")) continue;
-    const selected = sealbotVariants().find(variant => variant.id === String(kind).replace("sealbot-", ""));
-    if (selected && selected.available === false && selected.error) values.push(selected.error);
-  }
-  return [...new Set(values.filter(Boolean))];
-}
-
-function firstPresent(...values) {
-  for (const value of values) {
-    if (value !== undefined && value !== null && value !== "") return value;
-  }
-  return null;
 }
 
 function firstFinite(...values) {
@@ -2279,14 +2539,12 @@ function setReplayIndex(index) {
   const total = totalPlacements();
   replayIndex = Math.max(0, Math.min(index, total));
   if (replayIndex === total) replayIndex = null;
-  clearTacticSelection();
   render();
 }
 
 function resetReplay() {
   stopReplay();
   replayIndex = null;
-  clearTacticSelection();
 }
 
 function toggleReplayPlay() {
@@ -2305,7 +2563,6 @@ function toggleReplayPlay() {
     } else {
       replayIndex = next;
     }
-    clearTacticSelection();
     render();
   }, 520);
   render();
@@ -2324,11 +2581,6 @@ function replaySubtitle(viewed) {
   const placement = (state.placements || [])[viewed - 1];
   if (!placement) return "Live";
   return `${phaseLabel(placement.phase)} - ${playerShort(placement.player)} (${placement.q}, ${placement.r})`;
-}
-
-function clearTacticSelection() {
-  selectedWindowId = null;
-  selectedCellKey = null;
 }
 
 function cellInfo(key) {
@@ -2353,14 +2605,9 @@ function showTip(event) {
   tip.style.left = event.offsetX + 12 + "px";
   tip.style.top = event.offsetY + 12 + "px";
   const key = `${event.target.dataset.q},${event.target.dataset.r}`;
-  const info = tacticsOn && isLiveView() ? cellDebug(key) : cellInfo(key);
+  const info = cellInfo(key);
   updateHud(info);
-  const parts = [`(${info.q}, ${info.r})`, cellStateLabel(info)];
-  if (info.wins && info.wins.length) parts.push(`${info.wins.length} win`);
-  if (info.blocks && info.blocks.length) parts.push(`${info.blocks.length} block`);
-  const threats = info.windows ? info.windows.filter(w => w.is_threat).length : 0;
-  if (threats) parts.push(`${threats} threat windows`);
-  tip.textContent = parts.join(" - ");
+  tip.textContent = `(${info.q}, ${info.r}) - ${cellStateLabel(info)}`;
 }
 
 function hideTip() {
@@ -2410,86 +2657,37 @@ function placementStepLabel() {
   return state.phase === "second_stone" ? "Placement 2 of 2" : "Placement 1 of 2";
 }
 
-function setText(id, value) {
-  const el = document.getElementById(id);
-  if (el) el.textContent = value;
-}
-
-function renderTraining() {
-  if (!trainingSummary || !trainingArtifacts) return;
-  if (trainingLoadError) {
-    trainingSummary.textContent = trainingLoadError;
-    trainingArtifacts.innerHTML = "";
-    renderGameHistoryPage();
-    return;
+// Clears every v2 status/trend/epoch container (error + empty branches). The
+// drawer keeps its hidden attribute so an empty drawer never reserves layout.
+function clearHistPanels() {
+  if (histStatusBand) histStatusBand.innerHTML = "";
+  if (histHealthDrawer) {
+    histHealthDrawer.innerHTML = "";
+    histHealthDrawer.hidden = true;
   }
-  if (!trainingRun) {
-    trainingSummary.textContent = "No training run selected";
-    trainingArtifacts.innerHTML = "";
-    renderGameHistoryPage();
-    return;
+  if (histTrends) histTrends.innerHTML = "";
+  if (histEpochTable) histEpochTable.innerHTML = "";
+  // histInspectEpoch survives (the run may simply not be re-fetched yet);
+  // only the panel is hidden until data is back.
+  if (histEpochInspector) {
+    histEpochInspector.innerHTML = "";
+    histEpochInspector.hidden = true;
   }
-  const artifacts = trainingRun.artifacts || [];
-  const histories = trainingRun.histories || [];
-  const latest = artifacts.find(item => item.name.includes("performance_calibration")) ||
-    artifacts.find(item => item.name.startsWith("epoch_"));
-  const epochs = historyEpochs(histories);
-  const p0Wins = histories.filter(item => item.winner === "player0").length;
-  const p1Wins = histories.filter(item => item.winner === "player1").length;
-  const status = trainingRun.status || {};
-  const history = status.history || {};
-  const watchdog = status.watchdog || {};
-  const calibration = status.calibration || {};
-  const statusMetrics = [
-    summaryMetric("Stage", runStageLabel(status)),
-    summaryMetric("Recent Games", firstPresent(history.games, histories.length)),
-    summaryMetric("Epochs", epochs.length ? `${epochs[0]}-${epochs[epochs.length - 1]}` : "--"),
-    summaryMetric("P0 / P1", `${firstPresent(history.p0_wins, p0Wins)} / ${firstPresent(history.p1_wins, p1Wins)}`),
-    summaryMetric("Avg Len", formatDecimal(firstPresent(history.avg_length, averageHistoryLength(histories)), 1)),
-    summaryMetric("Selfplay", formatRate(calibration.selfplay_pos_s, "pos/s")),
-    summaryMetric("RAM Free", formatGib(watchdog.free_ram_gb)),
-    summaryMetric("GPU Free", formatGib(watchdog.gpu_free_gb)),
-  ];
-  const fallbackMetrics = latest && latest.summary
-    ? Object.entries(latest.summary).slice(0, 4).map(([key, value]) => summaryMetric(key, value))
-    : [summaryMetric("Artifacts", artifacts.length)];
-  trainingSummary.innerHTML = [...statusMetrics, ...fallbackMetrics].join("");
-  const shown = artifacts.slice(0, artifacts.length);
-  const moreArtifacts = trainingRun.artifacts_page && trainingRun.artifacts_page.next_cursor
-    ? `<button class="history-list-more" type="button" data-artifacts-more>Show more artifacts</button>`
-    : "";
-  trainingArtifacts.innerHTML = `${shown.map(item => trainingArtifactRow(trainingRun.name, item)).join("")}${moreArtifacts}`;
-  renderGameHistoryPage();
-}
-
-function trainingArtifactRow(runName, item) {
-  const href = `/api/training/file?run=${encodeURIComponent(runName)}&path=${encodeURIComponent(item.path)}`;
-  const summary = item.summary
-    ? Object.entries(item.summary).map(([key, value]) => `${key}: ${displayValue(value)}`).join(" | ")
-    : `${item.kind || "file"} | ${formatBytes(item.bytes)}`;
-  const preview = item.kind === "png" ? `<img src="${href}" alt="">` : "";
-  const loadButton = item.loadable_history
-    ? `<button class="artifact-load-btn" type="button" data-history-path="${escapeAttr(item.path)}" data-record-index="0">Load game</button>`
-      + `<button class="artifact-debug-btn" type="button" data-debug-open data-debug-run="${escapeAttr(runName || "")}" data-debug-path="${escapeAttr(item.path)}" data-debug-record="0">Debug</button>`
-    : "";
-  return `<div class="artifact-row">
-    <a class="artifact-link" href="${href}" target="_blank" rel="noreferrer" title="${escapeAttr(item.path || item.name || "")}">
-      ${preview}
-      <span>${escapeText(item.name)}</span>
-      <small>${escapeText(summary)}</small>
-    </a>
-    ${loadButton}
-  </div>`;
+  histTrendCharts = {};
+  histTrendHoverSvg = null;
+  if (histTrendTipEl) histTrendTipEl.hidden = true;
+  // No displayed list in the error/no-runs branches — game nav goes inert.
+  histDisplayedKeys = [];
 }
 
 function renderGameHistoryPage() {
-  if (!historyOverview || !gameHistoryList || !gameHistoryDetail) return;
+  if (!histStatusBand || !gameHistoryList || !gameHistoryDetail) return;
   syncHistoryRunSelect(historySelectedRun);
+  // The epoch chip lives in .history-filters (outside the cleared panels) so
+  // it stays clearable in every branch, including error/no-runs.
+  renderHistEpochChip();
   if (trainingLoadError) {
-    historyOverview.innerHTML = "";
-    if (historyLearningHealth) historyLearningHealth.innerHTML = "";
-    if (historyEvalTrend) historyEvalTrend.innerHTML = "";
-    if (historyEpochProgress) historyEpochProgress.innerHTML = "";
+    clearHistPanels();
     gameHistoryList.innerHTML = `<div class="empty-list">${escapeText(trainingLoadError)}</div>`;
     gameHistoryDetail.innerHTML = `<div class="empty-list">No game selected</div>`;
     return;
@@ -2497,10 +2695,7 @@ function renderGameHistoryPage() {
   const runs = historyRunsForPage();
   const histories = historyItemsForPage(runs);
   if (!runs.length) {
-    historyOverview.innerHTML = "";
-    if (historyLearningHealth) historyLearningHealth.innerHTML = "";
-    if (historyEvalTrend) historyEvalTrend.innerHTML = "";
-    if (historyEpochProgress) historyEpochProgress.innerHTML = "";
+    clearHistPanels();
     const pendingSelection = historyDetailsLoading || historySelectionPendingDetails();
     gameHistoryList.innerHTML = `<div class="empty-list">${pendingSelection ? "Loading game histories" : "No training run selected"}</div>`;
     gameHistoryDetail.innerHTML = `<div class="empty-list">No game selected</div>`;
@@ -2509,22 +2704,49 @@ function renderGameHistoryPage() {
 
   const usingServerPage = historyPage.loaded || historyPage.loading || historyPage.items.length > 0;
   const filtered = usingServerPage ? histories : sortedHistoryItems(filteredHistoryItems(histories));
-  const selected = selectedHistoryItem(histories, filtered);
-  const visible = usingServerPage ? filtered : filtered.slice(0, historyVisibleLimit);
-  historyOverview.innerHTML = renderHistoryOverview(histories, filtered);
-  if (historyLearningHealth) historyLearningHealth.innerHTML = renderLearningHealth(runs);
-  if (historyEvalTrend) historyEvalTrend.innerHTML = renderEvaluationTrend(runs);
-  if (historyEpochProgress) historyEpochProgress.innerHTML = renderEpochProgress(runs);
-  gameHistoryList.innerHTML = filtered.length
-    ? [
-      ...visible.map(item => gameHistoryListRow(item.run, item)),
-      usingServerPage && historyPage.nextCursor
-        ? `<button class="history-list-more" type="button" data-history-more>${historyPage.loading ? "Loading games" : `Load more games (${visible.length} loaded)`}</button>`
-        : !usingServerPage && filtered.length > visible.length
-        ? `<button class="history-list-more" type="button" data-history-more>Show ${Math.min(HISTORY_PAGE_SIZE, filtered.length - visible.length)} more games (${visible.length} of ${filtered.length})</button>`
-        : "",
-    ].join("")
-    : `<div class="empty-list">${historyPage.loading ? "Loading game histories" : "No games match the current filters"}</div>`;
+  // H7: client-side, display-only epoch filter (the server pager has no epoch
+  // param — newly loaded pages re-apply the filter on the next render).
+  const displayed = histEpochFilter === null
+    ? filtered
+    : filtered.filter(item => asFinite(item.epoch) === histEpochFilter);
+  // P2.1: prev/next + arrow keys walk exactly what the list shows. When the
+  // selection falls back to the unfiltered histories (displayed empty), the
+  // selected key is absent from this order and nav renders disabled.
+  histDisplayedKeys = displayed.map(item => historyItemKey(item));
+  const selected = selectedHistoryItem(histories, displayed);
+  const visible = usingServerPage ? displayed : displayed.slice(0, historyVisibleLimit);
+  renderHistStatusBand(runs);
+  renderHistTrends(runs);
+  renderHistEpochTable(runs);
+  renderHistEpochInspector(runs);
+  // Length micro-bars are relative to the longest currently displayed row.
+  const maxLen = visible.reduce((max, item) => Math.max(max, historyLength(item)), 0);
+  const listParts = [];
+  if (visible.length) {
+    listParts.push(...visible.map(item => gameHistoryListRow(item.run, item, maxLen)));
+  } else {
+    listParts.push(`<div class="empty-list">${historyPage.loading
+      ? "Loading game histories"
+      : histEpochFilter !== null
+        ? `No loaded games for epoch ${histEpochFilter} — clear the epoch chip or load more`
+        : "No games match the current filters"}</div>`);
+  }
+  // "Load more" keeps paging unfiltered while the epoch filter is on, so it
+  // stays visible even when the filter empties the displayed slice.
+  if (usingServerPage && historyPage.nextCursor && (visible.length || histEpochFilter !== null)) {
+    listParts.push(`<button class="history-list-more" type="button" data-history-more>${historyPage.loading ? "Loading games" : `Load more games (${filtered.length} loaded)`}</button>`);
+  } else if (!usingServerPage && displayed.length > visible.length) {
+    listParts.push(`<button class="history-list-more" type="button" data-history-more>Show ${Math.min(HISTORY_PAGE_SIZE, displayed.length - visible.length)} more games (${visible.length} of ${displayed.length})</button>`);
+  }
+  const countLine = histEpochFilter !== null
+    ? `${displayed.length} of ${filtered.length} loaded · epoch ${histEpochFilter}`
+    : historyPage.totalMatches !== null && historyPage.totalMatches !== undefined
+      ? `${filtered.length} of ${historyPage.totalMatches} games`
+      : historyPage.countLoading
+        ? `${filtered.length} loaded · counting`
+        : `${filtered.length} loaded`;
+  listParts.push(`<div class="hist-list-count">${escapeText(countLine)}</div>`);
+  gameHistoryList.innerHTML = listParts.join("");
   gameHistoryDetail.innerHTML = selected
     ? gameHistoryDetailHtml(selected.run, selected)
     : `<div class="empty-list">No game selected</div>`;
@@ -2594,6 +2816,13 @@ function handleGameHistoryClick(event) {
     });
     renderGameHistoryPage();
     loadTrainingHistory(runName, loadButton.dataset.historyPath, Number(loadButton.dataset.recordIndex || 0));
+    return;
+  }
+  // P2.1: detail-panel prev/next — the same state + render path as a row click.
+  const stepButton = event.target.closest("[data-hist-game-step]");
+  if (stepButton) {
+    event.preventDefault();
+    histStepGame(Number(stepButton.dataset.histGameStep || 0));
     return;
   }
   const row = event.target.closest("[data-history-key]");
@@ -2772,100 +3001,131 @@ function formatGib(value) {
   return `${number.toFixed(1)} GiB`;
 }
 
-function historyWinStats(items) {
-  const rows = (items || []).filter(item => item && item.status === "completed");
-  const p0Wins = rows.filter(item => item.winner === "player0").length;
-  const p1Wins = rows.filter(item => item.winner === "player1").length;
-  const games = rows.length;
-  return { games, p0Wins, p1Wins };
+// --- History v2 Region 1: status band (#histStatusBand + #histHealthDrawer). ---
+// One wrapping flex row: stage pill (+ live dot during fresh selfplay), an
+// optional inline progress bar, watchdog resource chips, learning-health stat
+// chips, and the health pill that toggles the messages drawer. Everything
+// degrades to "--" / omission when a field is absent (dense_cnn runs lack
+// training_progress; stopped runs lack selfplay_live; watchdog is optional).
+function histChip(label, value, title = "", extraClass = "") {
+  const titleAttr = title ? ` title="${escapeAttr(title)}"` : "";
+  const labelHtml = label ? `<i>${escapeText(label)}</i> ` : "";
+  return `<span class="hist-chip${extraClass ? ` ${extraClass}` : ""}"${titleAttr}>${labelHtml}${escapeText(value)}</span>`;
 }
 
-function historyWinRateText(stats) {
-  if (!stats || !stats.games) return "P0 -- | P1 --";
-  return `P0 ${formatPercent(stats.p0Wins / stats.games)} | P1 ${formatPercent(stats.p1Wins / stats.games)}`;
-}
+function renderHistStatusBand(runs) {
+  if (!histStatusBand) return;
+  const status = latestRunStatusForHistoryPage();
+  const health = latestLearningHealth(runs);
+  if (!status && !health) {
+    histStatusBand.innerHTML = `<div class="hist-band-empty">No run status yet</div>`;
+    if (histHealthDrawer) {
+      histHealthDrawer.innerHTML = "";
+      histHealthDrawer.hidden = true;
+    }
+    return;
+  }
+  const parts = [];
 
-function historyWinRateSubtext(stats, label) {
-  if (!stats || !stats.games) return `${label} | 0 completed`;
-  return `${label} | ${stats.p0Wins}-${stats.p1Wins} (${stats.games}g)`;
-}
+  // Stage pill, with pulsing live dot + games/pos-s while selfplay is fresh.
+  const live = status && status.selfplay_live && status.selfplay_live.live ? status.selfplay_live : null;
+  const liveDot = live ? `<span class="hist-live-dot" aria-hidden="true"></span>` : "";
+  const liveSuffix = live
+    ? ` · ${Number(live.games_finished || 0)}/${Number(live.requested_games || 0)} · ${formatRate(live.search_pos_s, "pos/s")}`
+    : "";
+  parts.push(`<span id="histStagePill" class="hist-pill">${liveDot}<span>${escapeText(`${runStageLabel(status)}${liveSuffix}`)}</span></span>`);
 
-function renderHistoryOverview(histories, filtered) {
-  const epochs = historyEpochs(filtered);
-  const runCount = new Set(histories.map(item => item.run).filter(Boolean)).size;
-  const filteredRunCount = new Set(filtered.map(item => item.run).filter(Boolean)).size;
-  const lengths = filtered.map(item => Number(item.length || item.actions || 0)).filter(value => Number.isFinite(value) && value > 0);
-  const avgLength = lengths.length ? (lengths.reduce((sum, value) => sum + value, 0) / lengths.length).toFixed(1) : "--";
-  const p0Wins = filtered.filter(item => item.winner === "player0").length;
-  const p1Wins = filtered.filter(item => item.winner === "player1").length;
-  const completed = filtered.filter(item => item.status === "completed").length;
-  const evalSummary = latestDiagnosticSummary(histories, "evaluation");
-  const selfplaySummary = latestDiagnosticSummary(histories, "selfplay");
-  const liveStatus = latestRunStatusForHistoryPage();
-  const targets = currentHistoryTargets();
-  const liveWatchdog = liveStatus && liveStatus.watchdog ? liveStatus.watchdog : {};
-  const liveCalibration = liveStatus && liveStatus.calibration ? liveStatus.calibration : {};
-  const liveSelfplay = liveStatus && liveStatus.selfplay_live ? liveStatus.selfplay_live : {};
-  const liveTraining = liveStatus && liveStatus.training_progress ? liveStatus.training_progress : {};
-  const currentSelfplayRows = targets.currentEpoch !== null
-    ? filtered.filter(item => item.source === "selfplay" && asFinite(item.epoch) === targets.currentEpoch)
-    : [];
-  const currentSelfplayStats = historyWinStats(currentSelfplayRows);
-  const currentLabel = targets.currentEpoch !== null ? `Current e${targets.currentEpoch}` : "Current epoch";
-  const evaluationRows = filtered.filter(item => item.source === "evaluation" && targets.evaluationEpochs.has(asFinite(item.epoch)));
-  const evaluationStats = historyWinStats(evaluationRows);
-  const evaluationEpoch = [...targets.evaluationEpochs][0];
-  const evaluationLabel = evaluationEpoch !== undefined ? `Eval e${evaluationEpoch}` : "Eval";
-  const totalMatches = historyPage.totalMatches !== null && historyPage.totalMatches !== undefined
-    ? historyPage.totalMatches
-    : null;
-  const gameCountText = totalMatches !== null
-    ? `${filtered.length} / ${totalMatches}`
-    : historyPage.countLoading
-      ? `${filtered.length} / counting`
-    : historyPage.loaded || historyPage.items.length
-      ? `${filtered.length} loaded`
-      : `${filtered.length} / ${histories.length}`;
-  const cards = [
-    ["Stage", runStageLabel(liveStatus), "Live trainer"],
-    ["Runs", filteredRunCount || runCount || "--", historySelectedRun === HISTORY_ALL_RUNS ? "Filtered / loaded runs" : "Selected run"],
-    ["Games", gameCountText, historyPage.loaded || historyPage.items.length ? "Paged result set" : "Filtered / recent"],
-    ["Epochs", epochs.length ? `${epochs[0]}-${epochs[epochs.length - 1]}` : "--", `${epochs.length} observed`],
-    ["Winners", historyWinRateText(currentSelfplayStats), historyWinRateSubtext(currentSelfplayStats, currentLabel)],
-    ["Avg Length", avgLength, "Moves per game"],
+  // Inline progress: live selfplay games are the primary signal; the
+  // training_progress file is normally absent (no current producer emits it),
+  // so it is only a fallback. No bar at all otherwise.
+  let barFrac = null;
+  let barLabel = "";
+  if (live && asFinite(live.requested_games) !== null && Number(live.requested_games) > 0) {
+    barFrac = Number(live.games_finished || 0) / Number(live.requested_games);
+    barLabel = `selfplay ${Number(live.games_finished || 0)}/${Number(live.requested_games)}`;
+  } else if (status && status.training_progress && typeof status.training_progress === "object") {
+    const tp = status.training_progress;
+    barFrac = asFinite(tp.progress);
+    if (barFrac === null) {
+      const steps = asFinite(tp.steps);
+      const total = asFinite(tp.total_steps);
+      barFrac = steps !== null && total !== null && total > 0 ? steps / total : null;
+    }
+    barLabel = `${formatTrainingProgress(tp)} · ${trainingProgressSubtext(tp)}`;
+  }
+  if (barFrac !== null) {
+    const pct = (Math.max(0, Math.min(1, barFrac)) * 100).toFixed(1);
+    parts.push(`<span id="histTrainBar" class="hist-bar" title="${escapeAttr(barLabel)}">`
+      + `<span class="hist-bar-fill" style="width:${pct}%"></span>`
+      + `<span class="hist-bar-label">${escapeText(barLabel)}</span></span>`);
+  }
+
+  // Watchdog resources as value chips (free values only — the watchdog exposes
+  // no totals, so percentage bars are impossible). Warn tint on any non-ok
+  // status or non-empty critical list.
+  const watchdog = status && status.watchdog && typeof status.watchdog === "object" ? status.watchdog : null;
+  if (watchdog) {
+    const critical = Array.isArray(watchdog.critical) ? watchdog.critical : [];
+    const warn = (watchdog.status && watchdog.status !== "ok") || critical.length > 0;
+    const warnClass = warn ? "hist-chip-warn" : "";
+    const warnTitle = warn ? `watchdog ${watchdog.status || "warn"}${critical.length ? `: ${critical.join(", ")}` : ""}` : "";
+    const chips = [];
+    if (asFinite(watchdog.free_ram_gb) !== null) {
+      chips.push(histChip("RAM", `${formatGib(watchdog.free_ram_gb)} free`, warnTitle, warnClass));
+    }
+    if (asFinite(watchdog.gpu_free_gb) !== null) {
+      const util = asFinite(watchdog.gpu_utilization_percent);
+      const gpuTitle = [util !== null ? `GPU util ${util}%` : "", warnTitle].filter(Boolean).join(" · ");
+      chips.push(histChip("GPU", `${formatGib(watchdog.gpu_free_gb)} free`, gpuTitle, warnClass));
+    }
+    if (chips.length) parts.push(`<span id="histResources" class="hist-resources">${chips.join("")}</span>`);
+  }
+
+  // Learning-health stat chips ("--" when null so a young run never throws).
+  const h = health || {};
+  const latestEpoch = asFinite(h.latest_epoch);
+  const evalTitle = [
+    asFinite(h.best_eval_mean_turns) !== null ? `best ${formatDecimal(h.best_eval_mean_turns, 1)}t` : "",
+    asFinite(h.latest_eval_games) !== null ? `${Number(h.latest_eval_wins || 0)}/${Number(h.latest_eval_games)} wins` : "",
+  ].filter(Boolean).join(" · ");
+  const statChips = [
+    histChip("epoch", latestEpoch !== null ? `e${latestEpoch}` : "--"),
+    histChip("loss", formatDecimal(h.latest_loss, 3)),
+    histChip("eval", asFinite(h.latest_eval_mean_turns) !== null ? `${formatDecimal(h.latest_eval_mean_turns, 1)}t` : "--", evalTitle),
+    histChip("speed", formatRate(h.latest_selfplay_pos_s, "pos/s")),
+    histChip("P@1", formatPercent(h.latest_policy_top1)),
+    histChip("C", formatPercent(h.latest_classical_fraction), "classical replay fraction"),
   ];
-  const liveSpeed = liveSelfplay && liveSelfplay.search_pos_s !== undefined && liveSelfplay.search_pos_s !== null;
-  const liveSelfplayEpoch = asFinite(liveSelfplay && liveSelfplay.epoch);
-  const liveSelfplayEpochLabel = liveSelfplayEpoch !== null ? `e${liveSelfplayEpoch}` : "selfplay";
-  if (liveSpeed && liveSelfplay.live) {
-    const games = liveSelfplay.requested_games
-      ? `${liveSelfplay.games_finished || 0}/${liveSelfplay.requested_games} games`
-      : "selfplay";
-    cards.push(["Speed", formatRate(liveSelfplay.search_pos_s, "pos/s"), `● LIVE · ${liveSelfplayEpochLabel} · ${games}`]);
-  } else if (liveSpeed && liveSelfplay.status === "completed") {
-    cards.push(["Speed", formatRate(liveSelfplay.search_pos_s, "pos/s"), `${liveSelfplayEpochLabel} selfplay (done)`]);
-  } else if (liveCalibration && liveCalibration.selfplay_pos_s !== undefined && liveCalibration.selfplay_pos_s !== null) {
-    cards.push(["Speed", formatRate(liveCalibration.selfplay_pos_s, "pos/s"), liveCalibration.exact_128 ? "Exact 128 sims" : "Calibration"]);
+  parts.push(`<span id="histStatChips" class="hist-stat-chips">${statChips.join("")}</span>`);
+
+  // Health pill: button toggling the messages drawer; open state survives the
+  // 15s re-render via the histHealthDrawerOpen module var.
+  const messages = health && Array.isArray(health.messages) ? health.messages : [];
+  if (health) {
+    const knownStatuses = ["collecting", "ok", "improving", "watch", "intervene"];
+    const hs = knownStatuses.includes(health.status) ? health.status : "ok";
+    parts.push(`<button id="histHealthPill" type="button" class="hist-pill hist-health-pill hist-health-${hs}"`
+      + ` aria-expanded="${histHealthDrawerOpen ? "true" : "false"}" aria-controls="histHealthDrawer"`
+      + ` title="Learning health — click for messages">${escapeText(learningHealthLabel(hs))}${messages.length ? ` · ${messages.length}` : ""}</button>`);
   }
-  if (liveWatchdog && (liveWatchdog.free_ram_gb !== undefined || liveWatchdog.gpu_free_gb !== undefined)) {
-    cards.push(["Resources", `${formatGib(liveWatchdog.free_ram_gb)} RAM | ${formatGib(liveWatchdog.gpu_free_gb)} GPU`, liveWatchdog.status || "watchdog"]);
+
+  // R6: freshness readout for the fast poll tier. Rendered empty here — the
+  // 1s histUpdateLiveTick interval owns its text (textContent only).
+  parts.push(`<span id="histLiveTick" class="hist-live-tick"></span>`);
+
+  histStatusBand.innerHTML = parts.join("");
+  histUpdateLiveTick();
+  if (histHealthDrawer) {
+    if (histHealthDrawerOpen && health) {
+      histHealthDrawer.innerHTML = messages.length
+        ? messages.map(message => `<div class="hist-health-msg">${escapeText(message)}</div>`).join("")
+        : `<div class="hist-health-msg">No health messages yet.</div>`;
+      histHealthDrawer.hidden = false;
+    } else {
+      histHealthDrawer.innerHTML = "";
+      histHealthDrawer.hidden = true;
+    }
   }
-  if (liveTraining && liveTraining.epoch !== undefined) {
-    cards.push(["Training", formatTrainingProgress(liveTraining), trainingProgressSubtext(liveTraining)]);
-  }
-  if (evaluationRows.length) {
-    cards.push(["Evaluation", historyWinRateText(evaluationStats), historyWinRateSubtext(evaluationStats, evaluationLabel)]);
-  } else if (evalSummary) {
-    cards.push(["Evaluation", historyDiagnosticsText({ evaluation: { summary: evalSummary } }), "Latest diagnostics"]);
-  }
-  if (selfplaySummary) cards.push(["Selfplay", historyDiagnosticsText({ selfplay: { summary: selfplaySummary } }), "Latest diagnostics"]);
-  return cards.map(([label, value, sub]) => `
-    <div class="history-metric-card">
-      <span>${escapeText(label)}</span>
-      <strong>${escapeText(value)}</strong>
-      <small>${escapeText(sub)}</small>
-    </div>
-  `).join("");
 }
 
 function formatTrainingProgress(progress) {
@@ -2882,36 +3142,6 @@ function trainingProgressSubtext(progress) {
     : "steps pending";
   const loss = progress.loss !== undefined && progress.loss !== null ? `loss ${formatDecimal(progress.loss, 3)}` : String(progress.status || "training");
   return `${steps} | ${loss}`;
-}
-
-function renderLearningHealth(runs) {
-  const health = latestLearningHealth(runs);
-  if (!health) return "";
-  const messages = Array.isArray(health.messages) ? health.messages : [];
-  const status = health.status || "collecting";
-  const metrics = [
-    ["Latest", health.latest_epoch ? `Epoch ${health.latest_epoch}` : "--"],
-    ["Loss", health.latest_loss !== null && health.latest_loss !== undefined ? formatDecimal(health.latest_loss, 3) : "--"],
-    ["Eval", health.latest_eval_mean_turns !== null && health.latest_eval_mean_turns !== undefined ? `${formatDecimal(health.latest_eval_mean_turns, 1)} turns` : "--"],
-    ["Best", health.best_eval_mean_turns !== null && health.best_eval_mean_turns !== undefined ? `${formatDecimal(health.best_eval_mean_turns, 1)} turns` : "--"],
-    ["Speed", formatRate(health.latest_selfplay_pos_s, "pos/s")],
-    ["Exact", health.latest_exact_128 ? "128 sims" : "--"],
-    ["Classical", formatPercent(health.latest_classical_fraction)],
-    ["Policy@1", formatPercent(health.latest_policy_top1)],
-    ["Target Mass", formatPercent(health.latest_policy_target_mass, 1)],
-  ];
-  return `<section class="learning-health-panel ${learningHealthClass(status)}" aria-label="Learning health">
-    <div class="learning-health-head">
-      <span>Learning Health</span>
-      <strong>${escapeText(learningHealthLabel(status))}</strong>
-    </div>
-    <div class="learning-health-metrics">
-      ${metrics.map(([label, value]) => `<div><span>${escapeText(label)}</span><strong>${escapeText(value)}</strong></div>`).join("")}
-    </div>
-    <div class="learning-health-messages">
-      ${messages.slice(0, 4).map(message => `<div>${escapeText(message)}</div>`).join("")}
-    </div>
-  </section>`;
 }
 
 function latestLearningHealth(runs) {
@@ -2936,77 +3166,552 @@ function learningHealthLabel(status) {
   return "OK";
 }
 
-function renderEvaluationTrend(runs) {
-  const rows = runs
-    .flatMap(run => (run.evaluation_history || []).map(item => ({ ...item, run: run.name })))
-    .filter(item => item.epoch !== undefined && item.epoch !== null)
-    .sort((a, b) => Number(a.epoch || 0) - Number(b.epoch || 0) || String(a.run || "").localeCompare(String(b.run || "")));
-  if (!rows.length) {
-    return `<div class="eval-trend-empty">No SealBot evaluation diagnostics yet.</div>`;
+// --- History v2 Region 2: per-epoch trends grid (#histTrends). ---
+// Hand-rolled SVG sparkline charts over run.epoch_history / evaluation_history.
+// One fixed viewBox per chart; hover/click are handled by a single delegated
+// listener trio on #histTrends using the geometry stored in histTrendCharts.
+const HIST_CHART_W = 280;
+const HIST_CHART_H = 110;
+const HIST_PLOT_X0 = 10;
+const HIST_PLOT_X1 = 272;
+const HIST_PLOT_Y0 = 22;
+const HIST_PLOT_Y1 = 92;
+
+function histSeriesCount(values) {
+  return (values || []).filter(value => value !== null && value !== undefined).length;
+}
+
+function histLatestNonNull(values) {
+  for (let i = (values || []).length - 1; i >= 0; i--) {
+    const value = values[i];
+    if (value !== null && value !== undefined) return value;
   }
-  const latest = rows[rows.length - 1];
-  const best = rows.reduce((current, item) => {
-    const currentTurns = Number(current.mean_turns || 0);
-    const itemTurns = Number(item.mean_turns || 0);
-    if (itemTurns !== currentTurns) return itemTurns > currentTurns ? item : current;
-    return Number(item.wins || 0) > Number(current.wins || 0) ? item : current;
-  }, rows[0]);
-  return `<section class="eval-trend-panel" aria-label="SealBot evaluation trend">
-    <div class="eval-trend-head">
-      <div>
-        <span>SealBot Evaluation Trend</span>
-        <strong>${escapeText(evalTrendSummary(latest))}</strong>
-      </div>
-      <small>Best survival: ${escapeText(evalTrendSummary(best))}</small>
-    </div>
-    <div class="eval-trend-list">
-      ${rows.slice(-12).map(evalTrendRow).join("")}
-    </div>
-  </section>`;
+  return null;
 }
 
-function evalTrendRow(item) {
-  const games = Number(item.games || 0);
-  const wins = Number(item.wins || 0);
-  const losses = Number(item.losses || 0);
-  const meanTurns = formatDecimal(item.mean_turns, 1);
-  const winRate = games > 0 ? `${((wins / games) * 100).toFixed(0)}%` : "--";
-  const cls = wins > 0 ? "has-win" : "no-win";
-  return `<div class="eval-trend-row ${cls}">
-    <strong>Epoch ${escapeText(item.epoch)}</strong>
-    <span>${escapeText(`${wins}-${losses}`)}</span>
-    <span>${escapeText(meanTurns)} turns</span>
-    <span>${escapeText(winRate)} win</span>
-  </div>`;
+// Path "d" for a line series; null points lift the pen so gaps stay gaps.
+function histPathD(values, xAt, yAt) {
+  let d = "";
+  let pen = false;
+  for (let i = 0; i < values.length; i++) {
+    const value = values[i];
+    if (value === null || value === undefined) {
+      pen = false;
+      continue;
+    }
+    d += `${pen ? "L" : "M"}${xAt(i).toFixed(1)} ${yAt(value).toFixed(1)}`;
+    pen = true;
+  }
+  return d;
 }
 
-function evalTrendSummary(item) {
-  if (!item) return "--";
-  return `E${item.epoch}: ${Number(item.wins || 0)}-${Number(item.losses || 0)}, ${formatDecimal(item.mean_turns, 1)} turns`;
+// Shaded band polygons (mean±σ); split into contiguous non-null segments.
+function histBandPolys(loVals, hiVals, xAt, yAt, color) {
+  const polys = [];
+  let seg = [];
+  const flush = () => {
+    if (seg.length >= 2) {
+      const top = seg.map(([i, , h]) => `${xAt(i).toFixed(1)},${yAt(h).toFixed(1)}`).join(" ");
+      const bottom = seg.slice().reverse().map(([i, l]) => `${xAt(i).toFixed(1)},${yAt(l).toFixed(1)}`).join(" ");
+      polys.push(`<polygon points="${top} ${bottom}" style="fill:${color}" stroke="none"></polygon>`);
+    }
+    seg = [];
+  };
+  for (let i = 0; i < loVals.length; i++) {
+    const lo = loVals[i];
+    const hi = hiVals[i];
+    if (lo === null || lo === undefined || hi === null || hi === undefined) {
+      flush();
+      continue;
+    }
+    seg.push([i, lo, hi]);
+  }
+  flush();
+  return polys.join("");
 }
 
-function renderEpochProgress(runs) {
-  const rows = runs
-    .flatMap(run => (run.epoch_history || []).map(item => ({ ...item, run: run.name })))
-    .sort((a, b) => Number(a.epoch || 0) - Number(b.epoch || 0) || String(a.run || "").localeCompare(String(b.run || "")));
-  if (!rows.length) return "";
-  return `<section class="epoch-progress-panel" aria-label="Epoch progress">
-    <div class="epoch-progress-head">
-      <span>Epoch Progress</span>
-      <strong>${escapeText(epochProgressSummary(rows[rows.length - 1]))}</strong>
-    </div>
-    <div class="epoch-progress-table">
-      <div class="epoch-progress-row epoch-progress-header">
-        <span>Epoch</span>
-        <span>Selfplay</span>
-        <span>Train</span>
-        <span>Eval</span>
-        <span>D6</span>
-        <span>Checkpoint</span>
-      </div>
-      ${rows.slice(-10).map(epochProgressRow).join("")}
-    </div>
-  </section>`;
+// Stacked 100% area layers (win balance). layers = [{color, values}] bottom-up;
+// values are pre-normalized fractions; null indices break the polygons.
+function histStackedPolys(layers, xAt, yAt) {
+  const n = layers.length ? layers[0].values.length : 0;
+  const cum = new Array(n).fill(0);
+  const out = [];
+  layers.forEach(layer => {
+    let seg = [];
+    const flush = () => {
+      if (seg.length >= 2) {
+        const top = seg.map(([i, , t]) => `${xAt(i).toFixed(1)},${yAt(t).toFixed(1)}`).join(" ");
+        const bottom = seg.slice().reverse().map(([i, b]) => `${xAt(i).toFixed(1)},${yAt(b).toFixed(1)}`).join(" ");
+        out.push(`<polygon points="${top} ${bottom}" style="fill:${layer.color}" stroke="none"></polygon>`);
+      }
+      seg = [];
+    };
+    for (let i = 0; i < n; i++) {
+      const value = layer.values[i];
+      if (value === null || value === undefined) {
+        flush();
+        continue;
+      }
+      seg.push([i, cum[i], cum[i] + value]);
+    }
+    flush();
+    for (let i = 0; i < n; i++) {
+      const value = layer.values[i];
+      if (value !== null && value !== undefined) cum[i] += value;
+    }
+  });
+  return out.join("");
+}
+
+// Generic chart card builder. def: {id, title, epochs, series, band?, stacked?,
+// domain?, format?, tip?, annotate?, latest?}. Registers hover geometry in
+// histTrendCharts and returns the card HTML ("" when unplottable).
+function histChartSvg(def) {
+  const epochs = def.epochs || [];
+  const n = epochs.length;
+  if (n < 2) return "";
+  const x0 = HIST_PLOT_X0;
+  const dx = (HIST_PLOT_X1 - HIST_PLOT_X0) / (n - 1);
+  const xAt = i => x0 + i * dx;
+  const fmt = def.format || (value => formatDecimal(value, 2));
+  let lo = Infinity;
+  let hi = -Infinity;
+  const scan = values => (values || []).forEach(value => {
+    if (value === null || value === undefined) return;
+    if (value < lo) lo = value;
+    if (value > hi) hi = value;
+  });
+  if (def.domain) {
+    lo = def.domain[0];
+    hi = def.domain[1];
+  } else {
+    (def.series || []).forEach(series => scan(series.values));
+    if (def.band) {
+      scan(def.band.lo);
+      scan(def.band.hi);
+    }
+  }
+  if (!Number.isFinite(lo) || !Number.isFinite(hi)) return "";
+  if (hi === lo) {
+    const pad = Math.abs(hi) > 1e-9 ? Math.abs(hi) * 0.05 : 1;
+    lo -= pad;
+    hi += pad;
+  }
+  const yAt = value => HIST_PLOT_Y1 - ((Math.min(Math.max(value, lo), hi) - lo) / (hi - lo)) * (HIST_PLOT_Y1 - HIST_PLOT_Y0);
+  const parts = [];
+  if (def.stacked) parts.push(histStackedPolys(def.stacked, xAt, yAt));
+  if (def.band) parts.push(histBandPolys(def.band.lo, def.band.hi, xAt, yAt, def.band.color || "rgba(39,215,230,0.12)"));
+  (def.series || []).forEach(series => {
+    const color = series.color || "var(--accent)";
+    if (series.dots) {
+      series.values.forEach((value, i) => {
+        if (value === null || value === undefined) return;
+        parts.push(`<circle cx="${xAt(i).toFixed(1)}" cy="${yAt(value).toFixed(1)}" r="2" style="fill:${color}"></circle>`);
+      });
+    } else {
+      const d = histPathD(series.values, xAt, yAt);
+      if (d) parts.push(`<path d="${d}" fill="none" style="stroke:${color}" stroke-width="${series.width || 1.6}" stroke-linejoin="round" stroke-linecap="round"></path>`);
+    }
+    if (series.markers) {
+      series.values.forEach((value, i) => {
+        if (!series.markers[i] || value === null || value === undefined) return;
+        parts.push(`<circle cx="${xAt(i).toFixed(1)}" cy="${yAt(value).toFixed(1)}" r="2.8" style="fill:${series.markerColor || "#36d399"}"></circle>`);
+      });
+    }
+  });
+  if (def.annotate && def.annotate.index >= 0 && def.annotate.index < n) {
+    const ax = xAt(def.annotate.index);
+    const av = def.annotate.value;
+    const ay = av === null || av === undefined
+      ? HIST_PLOT_Y0 + 8
+      : Math.max(HIST_PLOT_Y0 + 8, yAt(av) - 6);
+    const anchor = ax > HIST_CHART_W - 44 ? "end" : ax < 44 ? "start" : "middle";
+    parts.push(`<text class="hist-chart-axis" x="${ax.toFixed(1)}" y="${ay.toFixed(1)}" text-anchor="${anchor}">${escapeText(def.annotate.text)}</text>`);
+  }
+  // In-plot min/max y labels + latest-epoch tick.
+  parts.push(`<text class="hist-chart-axis" x="12" y="${HIST_PLOT_Y0 + 8}">${escapeText(fmt(hi))}</text>`);
+  parts.push(`<text class="hist-chart-axis" x="12" y="${HIST_PLOT_Y1 - 2}">${escapeText(fmt(lo))}</text>`);
+  const lastX = xAt(n - 1).toFixed(1);
+  parts.push(`<line class="hist-chart-tick" x1="${lastX}" x2="${lastX}" y1="${HIST_PLOT_Y1}" y2="${HIST_PLOT_Y1 + 4}"></line>`);
+  parts.push(`<text class="hist-chart-axis" x="${lastX}" y="${HIST_CHART_H - 3}" text-anchor="end">e${escapeText(epochs[n - 1])}</text>`);
+  parts.push(`<text class="hist-chart-title" x="10" y="13">${escapeText(def.title)}</text>`);
+  if (def.latest !== undefined && def.latest !== null && def.latest !== "") {
+    parts.push(`<text class="hist-chart-latest" x="${HIST_CHART_W - 8}" y="13" text-anchor="end">${escapeText(def.latest)}</text>`);
+  }
+  parts.push(`<line class="hist-trend-cross" x1="-10" x2="-10" y1="${HIST_PLOT_Y0}" y2="${HIST_PLOT_Y1}" visibility="hidden"></line>`);
+  const tipSeries = (def.tip || (def.series || []).map(series => ({ label: series.label, values: series.values })))
+    .map(series => ({ label: series.label, values: series.values, fmt: series.fmt || fmt }));
+  histTrendCharts[def.id] = { epochs, x0, dx, series: tipSeries };
+  return `<div class="hist-trend-card"><svg viewBox="0 0 ${HIST_CHART_W} ${HIST_CHART_H}" data-hist-chart="${escapeAttr(def.id)}" role="img" aria-label="${escapeAttr(def.title)}">${parts.join("")}</svg></div>`;
+}
+
+// Charts always come from a single run: merging epoch series across runs
+// interleaves epochs into sawtooth garbage. Under "All runs" pick the run
+// whose status.history.latest_modified is newest (the same run that
+// latestRunStatusForHistoryPage reports on).
+function histTrendRun(runs) {
+  const withStatus = (runs || []).filter(run => run && run.status);
+  if (!withStatus.length) return (runs && runs[0]) || null;
+  return withStatus.slice().sort((a, b) =>
+    Number(b.status.history && b.status.history.latest_modified || 0) -
+    Number(a.status.history && a.status.history.latest_modified || 0))[0];
+}
+
+function renderHistTrends(runs) {
+  if (!histTrends) return;
+  histTrendCharts = {};
+  histTrendHoverSvg = null;
+  if (histTrendTipEl) histTrendTipEl.hidden = true;
+  const run = histTrendRun(runs);
+  const rows = run && Array.isArray(run.epoch_history)
+    ? run.epoch_history.filter(row => row && asFinite(row.epoch) !== null).slice().sort((a, b) => Number(a.epoch) - Number(b.epoch))
+    : [];
+  const epochs = rows.map(row => Number(row.epoch));
+  const sp = row => row.selfplay || {};
+  const buf = row => (row.selfplay && row.selfplay.buffer) || {};
+  const charts = [];
+  if (rows.length >= 2) {
+    // T1 Loss: total from training.loss; per-head thin lines from the buffer
+    // block (uniform across hexgt bridge and the synthesized dense_cnn buffer).
+    const lossTotal = rows.map(row => asFinite(row.training && row.training.loss));
+    if (histSeriesCount(lossTotal) >= 2) {
+      const lossPolicy = rows.map(row => asFinite(buf(row).loss_policy));
+      const lossValue = rows.map(row => asFinite(buf(row).loss_value));
+      const series = [{ label: "total", color: "var(--accent)", values: lossTotal, width: 1.8 }];
+      if (histSeriesCount(lossPolicy) >= 2) series.push({ label: "policy", color: "var(--p0)", values: lossPolicy, width: 1 });
+      if (histSeriesCount(lossValue) >= 2) series.push({ label: "value", color: "#ffce56", values: lossValue, width: 1 });
+      charts.push(histChartSvg({
+        id: "t1",
+        title: "Loss",
+        epochs,
+        series,
+        format: value => formatDecimal(value, 3),
+        latest: formatDecimal(histLatestNonNull(lossTotal), 3),
+      }));
+    }
+    // T2 Game length: mean line, median dots, mean±σ band.
+    const lenMean = rows.map(row => asFinite(sp(row).game_length_mean));
+    if (histSeriesCount(lenMean) >= 2) {
+      const lenMedian = rows.map(row => asFinite(sp(row).game_length_median));
+      const lenStdev = rows.map(row => asFinite(sp(row).game_length_stdev));
+      const bandLo = lenMean.map((mean, i) => (mean !== null && lenStdev[i] !== null ? mean - lenStdev[i] : null));
+      const bandHi = lenMean.map((mean, i) => (mean !== null && lenStdev[i] !== null ? mean + lenStdev[i] : null));
+      const series = [{ label: "mean", color: "var(--accent)", values: lenMean, width: 1.8 }];
+      if (histSeriesCount(lenMedian) >= 1) series.push({ label: "median", color: "var(--p0)", values: lenMedian, dots: true });
+      charts.push(histChartSvg({
+        id: "t2",
+        title: "Game length",
+        epochs,
+        series,
+        band: histSeriesCount(bandLo) >= 2 ? { lo: bandLo, hi: bandHi, color: "rgba(39,215,230,0.12)" } : null,
+        tip: [
+          { label: "mean", values: lenMean, fmt: value => formatDecimal(value, 1) },
+          { label: "median", values: lenMedian, fmt: value => formatDecimal(value, 0) },
+          { label: "σ", values: lenStdev, fmt: value => formatDecimal(value, 1) },
+        ],
+        format: value => formatDecimal(value, 0),
+        latest: formatDecimal(histLatestNonNull(lenMean), 1),
+      }));
+    }
+    // T3 Win balance: stacked 100% P0 / draw / P1 area.
+    const winP0 = rows.map(row => asFinite(sp(row).win_p0_fraction));
+    const winP1 = rows.map(row => asFinite(sp(row).win_p1_fraction));
+    const drawF = rows.map(row => asFinite(sp(row).draw_fraction));
+    const balanced = winP0.map((value, i) => value !== null && winP1[i] !== null);
+    if (balanced.filter(Boolean).length >= 2) {
+      const norm = i => {
+        const total = winP0[i] + (drawF[i] !== null ? drawF[i] : 0) + winP1[i];
+        return total > 0 ? total : 1;
+      };
+      const layerP0 = winP0.map((value, i) => (balanced[i] ? value / norm(i) : null));
+      const layerDraw = drawF.map((value, i) => (balanced[i] ? (value !== null ? value : 0) / norm(i) : null));
+      const layerP1 = winP1.map((value, i) => (balanced[i] ? value / norm(i) : null));
+      charts.push(histChartSvg({
+        id: "t3",
+        title: "Win balance",
+        epochs,
+        domain: [0, 1],
+        stacked: [
+          { label: "P0", color: "var(--p0)", values: layerP0 },
+          { label: "draw", color: "rgba(143,155,170,0.45)", values: layerDraw },
+          { label: "P1", color: "var(--p1)", values: layerP1 },
+        ],
+        tip: [
+          { label: "P0", values: layerP0 },
+          { label: "draw", values: layerDraw },
+          { label: "P1", values: layerP1 },
+        ],
+        format: value => formatPercent(value),
+        latest: `P0 ${formatPercent(histLatestNonNull(layerP0))}`,
+      }));
+    }
+    // T5 Selfplay speed.
+    const speed = rows.map(row => asFinite(sp(row).search_positions_per_second));
+    if (histSeriesCount(speed) >= 2) {
+      charts.push(histChartSvg({
+        id: "t5",
+        title: "Selfplay speed",
+        epochs,
+        series: [{ label: "pos/s", color: "var(--accent)", values: speed, width: 1.8 }],
+        tip: [{ label: "pos/s", values: speed, fmt: value => formatRate(value, "pos/s") }],
+        format: value => formatDecimal(value, 0),
+        latest: formatRate(histLatestNonNull(speed), "pos/s"),
+      }));
+    }
+    // T6 Buffer pool: only when a real pool exists (hexgt bridge); the
+    // synthesized dense_cnn buffer carries only loss_* keys so each key is
+    // guarded individually.
+    const poolFill = rows.map(row => {
+      const samples = asFinite(buf(row).samples);
+      const cap = asFinite(buf(row).cap);
+      return samples !== null && cap !== null && cap > 0 ? samples / cap : null;
+    });
+    if (histSeriesCount(poolFill) >= 2) {
+      charts.push(histChartSvg({
+        id: "t6",
+        title: "Buffer fill",
+        epochs,
+        domain: [0, 1],
+        series: [{ label: "fill", color: "var(--accent)", values: poolFill, width: 1.8 }],
+        format: value => formatPercent(value),
+        latest: formatPercent(histLatestNonNull(poolFill)),
+      }));
+    }
+    const optimism = rows.map(row => asFinite(buf(row).optimism_sum_mean));
+    if (histSeriesCount(optimism) >= 2) {
+      charts.push(histChartSvg({
+        id: "t6b",
+        title: "Value optimism",
+        epochs,
+        series: [{ label: "optimism", color: "#ffce56", values: optimism, width: 1.6 }],
+        format: value => formatDecimal(value, 3),
+        latest: formatDecimal(histLatestNonNull(optimism), 3),
+      }));
+    }
+  }
+  // T4 SealBot eval rides evaluation_history (its own epoch axis).
+  const evals = run && Array.isArray(run.evaluation_history)
+    ? run.evaluation_history.filter(row => row && asFinite(row.epoch) !== null).slice().sort((a, b) => Number(a.epoch) - Number(b.epoch))
+    : [];
+  const evalTurns = evals.map(row => asFinite(row.mean_turns));
+  if (histSeriesCount(evalTurns) >= 2) {
+    const evalEpochs = evals.map(row => Number(row.epoch));
+    const evalWins = evals.map(row => asFinite(row.wins));
+    const markers = evals.map(row => Number(row.wins || 0) > 0);
+    // Best epoch: max mean_turns, ties broken by wins (renderEvaluationTrend's
+    // historical tie-break).
+    let bestIdx = 0;
+    evals.forEach((row, i) => {
+      const best = evals[bestIdx];
+      const bestTurns = Number(best.mean_turns || 0);
+      const turns = Number(row.mean_turns || 0);
+      if (turns > bestTurns || (turns === bestTurns && Number(row.wins || 0) > Number(best.wins || 0))) bestIdx = i;
+    });
+    const t4 = histChartSvg({
+      id: "t4",
+      title: "SealBot eval",
+      epochs: evalEpochs,
+      series: [{ label: "turns", color: "var(--accent)", values: evalTurns, width: 1.8, markers, markerColor: "#36d399" }],
+      tip: [
+        { label: "turns", values: evalTurns, fmt: value => formatDecimal(value, 1) },
+        { label: "wins", values: evalWins, fmt: value => formatDecimal(value, 0) },
+      ],
+      annotate: { index: bestIdx, value: evalTurns[bestIdx], text: `best e${evalEpochs[bestIdx]}` },
+      format: value => formatDecimal(value, 0),
+      latest: `${formatDecimal(histLatestNonNull(evalTurns), 1)}t`,
+    });
+    // Keep dashboard order T1..T6: insert T4 after T3 (or wherever balance ended).
+    if (t4) charts.splice(Math.min(3, charts.length), 0, t4);
+  }
+  const body = charts.filter(Boolean).join("");
+  const caption = body && run && (runs || []).length > 1
+    ? `<div class="hist-trends-caption">Charts: ${escapeText(run.name || "latest run")}</div>`
+    : "";
+  histTrends.innerHTML = body ? `${caption}${body}` : "";
+}
+
+// Toggle-semantics client-side epoch filter (chart click / epoch-table click /
+// chip clear all route through here). Display-only: the server pager has no
+// epoch parameter, so filtering happens on already-loaded items (H7).
+function setHistEpochFilter(epoch) {
+  histEpochFilter = histEpochFilter === epoch ? null : epoch;
+  renderGameHistoryPage();
+}
+
+// H7: removable "Epoch N ×" chip in .history-filters. Render-only — the state
+// lives in histEpochFilter; clicks are handled by the delegated chip listener.
+function renderHistEpochChip() {
+  if (!histEpochChip) return;
+  if (histEpochFilter === null) {
+    histEpochChip.innerHTML = "";
+    histEpochChip.hidden = true;
+    return;
+  }
+  histEpochChip.innerHTML = `Epoch ${escapeText(histEpochFilter)}`
+    + `<button type="button" data-hist-epoch-clear aria-label="Clear epoch filter">×</button>`;
+  histEpochChip.hidden = false;
+}
+
+function ensureHistTrendTip() {
+  if (histTrendTipEl) return histTrendTipEl;
+  histTrendTipEl = document.createElement("div");
+  histTrendTipEl.id = "histTrendTip";
+  histTrendTipEl.className = "hist-trend-tip";
+  histTrendTipEl.hidden = true;
+  document.body.appendChild(histTrendTipEl);
+  return histTrendTipEl;
+}
+
+// Pointer -> (chart, nearest epoch index) using the stored x0/dx geometry.
+function histChartFromEvent(event) {
+  const svgEl = event.target && event.target.closest ? event.target.closest("svg[data-hist-chart]") : null;
+  if (!svgEl) return null;
+  const chart = histTrendCharts[svgEl.dataset.histChart];
+  if (!chart || !chart.epochs.length) return null;
+  const rect = svgEl.getBoundingClientRect();
+  if (!rect.width) return null;
+  const xView = ((event.clientX - rect.left) / rect.width) * HIST_CHART_W;
+  const idx = chart.dx > 0
+    ? Math.max(0, Math.min(chart.epochs.length - 1, Math.round((xView - chart.x0) / chart.dx)))
+    : 0;
+  return { svgEl, chart, idx };
+}
+
+function hideHistTrendHover() {
+  if (histTrendHoverSvg) {
+    const cross = histTrendHoverSvg.querySelector(".hist-trend-cross");
+    if (cross) cross.setAttribute("visibility", "hidden");
+    histTrendHoverSvg = null;
+  }
+  if (histTrendTipEl) histTrendTipEl.hidden = true;
+}
+
+function handleHistTrendsMove(event) {
+  const hit = histChartFromEvent(event);
+  if (!hit) {
+    hideHistTrendHover();
+    return;
+  }
+  const { svgEl, chart, idx } = hit;
+  if (histTrendHoverSvg && histTrendHoverSvg !== svgEl) {
+    const prev = histTrendHoverSvg.querySelector(".hist-trend-cross");
+    if (prev) prev.setAttribute("visibility", "hidden");
+  }
+  histTrendHoverSvg = svgEl;
+  const x = (chart.x0 + idx * chart.dx).toFixed(1);
+  const cross = svgEl.querySelector(".hist-trend-cross");
+  if (cross) {
+    cross.setAttribute("x1", x);
+    cross.setAttribute("x2", x);
+    cross.setAttribute("visibility", "visible");
+  }
+  const tipEl = ensureHistTrendTip();
+  const lines = [`e${chart.epochs[idx]}`];
+  chart.series.forEach(series => {
+    const value = series.values[idx];
+    lines.push(`${series.label}: ${value === null || value === undefined ? "--" : series.fmt(value)}`);
+  });
+  tipEl.textContent = lines.join("\n");
+  tipEl.hidden = false;
+  const pad = 12;
+  let left = event.clientX + pad;
+  let top = event.clientY + pad;
+  if (left + tipEl.offsetWidth + 8 > window.innerWidth) left = Math.max(8, event.clientX - tipEl.offsetWidth - pad);
+  if (top + tipEl.offsetHeight + 8 > window.innerHeight) top = Math.max(8, event.clientY - tipEl.offsetHeight - pad);
+  tipEl.style.left = `${left}px`;
+  tipEl.style.top = `${top}px`;
+}
+
+function handleHistTrendsClick(event) {
+  const hit = histChartFromEvent(event);
+  if (!hit) return;
+  event.preventDefault();
+  const epoch = asFinite(hit.chart.epochs[hit.idx]);
+  if (epoch === null) return;
+  setHistEpochFilter(epoch);
+}
+
+// --- History v2 Region 3: dense epoch table (#histEpochTable). ---
+// Last 15 epochs across the loaded runs (newest first), one dense row each:
+// epoch button (filters the games list), selfplay summary, win-balance bar,
+// train loss, eval record, checkpoint tag, and a chevron that expands the
+// existing epochProgressDetail buffer/losses band. The row whose epoch the
+// newest run status is currently executing gets a live accent. Expansion
+// state lives in histExpandedEpochs ("<run>::<epoch>") across re-renders.
+function renderHistEpochTable(runs) {
+  if (!histEpochTable) return;
+  const entries = (runs || []).flatMap(run =>
+    (run && Array.isArray(run.epoch_history) ? run.epoch_history : [])
+      .filter(row => row && asFinite(row.epoch) !== null)
+      .map(row => ({ run: (run && run.name) || "", row })));
+  if (!entries.length) {
+    histEpochTable.innerHTML = "";
+    return;
+  }
+  entries.sort((a, b) =>
+    (Number(a.row.epoch) - Number(b.row.epoch)) || String(a.run).localeCompare(String(b.run)));
+  const recent = entries.slice(-15).reverse();
+  const multiRun = new Set(recent.map(entry => entry.run)).size > 1;
+  // Live accent: match the status object back to its run by identity (the
+  // run objects come from the same trainingRunDetails cache).
+  const liveStatus = latestRunStatusForHistoryPage();
+  const liveRunObj = liveStatus ? (runs || []).find(run => run && run.status === liveStatus) : null;
+  const liveRun = liveRunObj ? (liveRunObj.name || "") : null;
+  const liveEpoch = liveStatus ? asFinite(liveStatus.current_epoch) : null;
+  histEpochTable.innerHTML = recent.map(entry => {
+    const row = entry.row;
+    const epoch = Number(row.epoch);
+    const sp = row.selfplay || {};
+    const training = row.training || null;
+    const evaluation = row.evaluation || null;
+    const key = `${entry.run}::${epoch}`;
+    const live = liveRun !== null && entry.run === liveRun && liveEpoch === epoch;
+    const inspected = !!(histInspectEpoch && histInspectEpoch.run === entry.run && histInspectEpoch.epoch === epoch);
+    const expanded = histExpandedEpochs.has(key);
+    const smp = asFinite(sp.samples_added);
+    const spText = `${smp !== null ? smp : "--"} smp · len μ${formatDecimal(sp.game_length_mean, 1)}/${formatDecimal(sp.game_length_median, 0)} · ${formatRate(sp.search_positions_per_second, "pos/s")}`;
+    // Inline diverging win-balance bar: P0 left, draws middle, P1 right.
+    const p0 = asFinite(sp.win_p0_fraction);
+    const p1 = asFinite(sp.win_p1_fraction);
+    const draw = asFinite(sp.draw_fraction);
+    const total = (p0 || 0) + (draw || 0) + (p1 || 0);
+    let balance = `<span class="hist-balance-none">--</span>`;
+    if ((p0 !== null || draw !== null || p1 !== null) && total > 0) {
+      const widthOf = value => (((value || 0) / total) * 100).toFixed(1);
+      balance = `<span class="hist-balance-bar" title="${escapeAttr(`P0 ${formatPercent(p0)} · draw ${formatPercent(draw)} · P1 ${formatPercent(p1)}`)}">`
+        + `<span class="hist-bal-p0" style="width:${widthOf(p0)}%"></span>`
+        + `<span class="hist-bal-draw" style="width:${widthOf(draw)}%"></span>`
+        + `<span class="hist-bal-p1" style="width:${widthOf(p1)}%"></span></span>`;
+    }
+    const trainText = training && asFinite(training.loss) !== null
+      ? `loss ${formatDecimal(training.loss, 3)}`
+      : (training && training.status) || "pending";
+    const evalReady = evaluation && (asFinite(evaluation.wins) !== null ||
+      asFinite(evaluation.losses) !== null || asFinite(evaluation.mean_turns) !== null);
+    const evalText = evalReady
+      ? `${Number(evaluation.wins || 0)}-${Number(evaluation.losses || 0)} · ${formatDecimal(evaluation.mean_turns, 1)}t`
+      : (evaluation && evaluation.status) || "pending";
+    // §1.2: any truthy checkpoint path OR name counts as saved (the two
+    // producer shapes are {path,bytes,modified} and {path,name}).
+    const ckpt = row.checkpoint && (row.checkpoint.path || row.checkpoint.name) ? "saved" : "pending";
+    const buffer = sp.buffer && typeof sp.buffer === "object" ? sp.buffer : null;
+    const chevron = buffer
+      ? `<button class="hist-epoch-chevron" type="button" data-hist-epoch-toggle="${escapeAttr(key)}" aria-expanded="${expanded ? "true" : "false"}" title="${expanded ? "Hide" : "Show"} buffer and loss detail">${expanded ? "▴" : "▾"}</button>`
+      : `<span class="hist-epoch-chevron hist-epoch-chevron-none" aria-hidden="true"></span>`;
+    const runTag = multiRun
+      ? `<span class="hist-epoch-run" title="${escapeAttr(entry.run)}">${escapeText(entry.run)}</span>`
+      : "";
+    return `<div class="hist-epoch-row${live ? " hist-epoch-live" : ""}${inspected ? " hist-epoch-inspected" : ""}" data-hist-epoch-inspect="${escapeAttr(key)}" title="${escapeAttr(live ? `Currently running epoch — click to inspect` : `Inspect epoch ${epoch}`)}">
+      <button class="hist-epoch-num" type="button" data-hist-epoch="${epoch}" title="Filter the games list to epoch ${epoch}">e${epoch}</button>
+      ${runTag}
+      <span class="hist-epoch-cell hist-epoch-sp" title="${escapeAttr(spText)}">${escapeText(spText)}</span>
+      ${balance}
+      <span class="hist-epoch-cell hist-epoch-train" title="${escapeAttr(trainText)}">${escapeText(trainText)}</span>
+      <span class="hist-epoch-cell hist-epoch-eval" title="${escapeAttr(evalText)}">${escapeText(evalText)}</span>
+      <span class="hist-epoch-tag hist-epoch-tag-${ckpt}">${ckpt}</span>
+      ${chevron}
+    </div>${expanded && buffer ? epochProgressDetail(buffer) : ""}`;
+  }).join("");
 }
 
 function epochChip(label, value, extraClass = "") {
@@ -3060,179 +3765,713 @@ function epochProgressDetail(buf) {
   </div>`;
 }
 
-function epochProgressRow(item) {
-  const selfplay = item.selfplay || {};
-  const training = item.training || {};
-  const evaluation = item.evaluation || {};
-  const d6 = item.d6 || {};
-  const checkpoint = item.checkpoint || {};
-  const samplesAdded = asFinite(selfplay.samples_added);
-  const selfplayRate = formatRate(selfplay.search_positions_per_second, "pos/s");
-  let selfplayText = samplesAdded !== null
-    ? `${samplesAdded} samples | ${selfplayRate}`
-    : (selfplay.search_positions_per_second !== undefined && selfplay.search_positions_per_second !== null
-      ? selfplayRate
-      : "pending");
-  // Game-length stats (mean/median/max/stdev). hexgnn/hexgt emit these inline;
-  // dense_cnn's are backfilled server-side from the epoch .hxr (web.py). Each
-  // segment is appended only when its field is present, so a run with neither is
-  // unaffected and a run with partial data shows what it has.
-  const lenMean = asFinite(selfplay.game_length_mean);
-  const lenMed = asFinite(selfplay.game_length_median);
-  if (lenMean !== null || lenMed !== null) {
-    selfplayText += ` | len μ${formatDecimal(lenMean, 1)} med ${formatDecimal(lenMed, 0)}`
-      + ` max ${asFinite(selfplay.game_length_max) ?? "--"} σ${formatDecimal(selfplay.game_length_stdev, 1)}`;
+// --- History v2 P1: epoch inspector (#histEpochInspector). ---
+// Full-width card between the epoch table and the filters row. The core groups
+// (header/losses/game-stats/buffer/calibration/eval/train) render INSTANTLY
+// from the run payload already in trainingRunDetails; deltas compare the
+// previous epoch row OF THE SAME RUN (never mixed across runs). Two lazy
+// fetches (mirroring the loadHistThumb cache pattern) progressively fill the
+// DIAGNOSTICS + MODEL groups: /api/training/epoch (curated selfplay extras +
+// manifest config + checkpoint stat) and /api/debug/ckpt_info (deep model
+// card via the CPU debug worker). All state lives in module vars so the 15s
+// innerHTML refresh repaints fetched data with zero new requests.
+const HIST_EPOCH_INFO_CACHE_MAX = 20;
+const HIST_CKPT_INFO_CACHE_MAX = 12;
+
+function histInspRunPayload(runName, runs) {
+  const list = runs || historyRunsForPage();
+  return (list || []).find(run => run && run.name === runName) || trainingRunDetails[runName] || null;
+}
+
+// The inspected run's epoch_history rows, ascending by epoch (◀/▶ walk this).
+function histInspRunRows(runName, runs) {
+  const run = histInspRunPayload(runName, runs);
+  const history = run && Array.isArray(run.epoch_history) ? run.epoch_history : [];
+  return history
+    .filter(row => row && asFinite(row.epoch) !== null)
+    .slice()
+    .sort((a, b) => Number(a.epoch) - Number(b.epoch));
+}
+
+function histInspectStep(step) {
+  if (!histInspectEpoch || !step) return;
+  const rows = histInspRunRows(histInspectEpoch.run, null);
+  const idx = rows.findIndex(row => Number(row.epoch) === histInspectEpoch.epoch);
+  const next = idx >= 0 ? rows[idx + step] : null;
+  if (!next) return;
+  histInspectEpoch = { run: histInspectEpoch.run, epoch: Number(next.epoch) };
+  renderGameHistoryPage();
+}
+
+// P2.1/P2.3: step the selected game through histDisplayedKeys (the displayed-
+// list order). Shared by the detail-panel prev/next buttons and the arrow
+// keys; sets selectedHistoryKey + re-renders — the exact same state + path a
+// list-row click takes, so thumbnail/selection/detail behave identically.
+// Returns true when a step happened (the key handler preventDefaults on it).
+function histStepGame(step) {
+  if (!step || !histDisplayedKeys.length) return false;
+  const idx = histDisplayedKeys.indexOf(selectedHistoryKey);
+  if (idx < 0) return false;
+  const next = idx + step;
+  if (next < 0 || next >= histDisplayedKeys.length) return false;
+  selectedHistoryKey = histDisplayedKeys[next];
+  renderGameHistoryPage();
+  return true;
+}
+
+// History-screen keyboard layer. Mirrors dbgHandleKey's guard shape (screen
+// gate, input focus, modifiers) so the two document handlers can never both
+// fire. P1 owns the Esc branch; P2 adds the game-row arrows.
+function histHandleKey(e) {
+  if (activeScreen !== "history") return;
+  const ae = document.activeElement;
+  if (ae && /^(INPUT|SELECT|TEXTAREA)$/.test(ae.tagName)) return;
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  if (e.key === "Escape" && histInspectEpoch !== null) {
+    histInspectEpoch = null;
+    renderGameHistoryPage();
+    e.preventDefault();
+    return;
   }
-  // Outcome distribution (P0/P1 win + draw share). Same backfill story as lengths.
-  const winP0 = asFinite(selfplay.win_p0_fraction);
-  const winP1 = asFinite(selfplay.win_p1_fraction);
-  const drawFrac = asFinite(selfplay.draw_fraction);
-  if (winP0 !== null || winP1 !== null) {
-    selfplayText += ` | W ${formatPercent(winP0)}/${formatPercent(winP1)}`;
-    if (drawFrac !== null) selfplayText += ` d ${formatPercent(drawFrac)}`;
+  // Arrows step the selected game ONLY while the epoch inspector is closed —
+  // reserved for future inspector bindings when it is open (P2.3 guard).
+  if ((e.key === "ArrowLeft" || e.key === "ArrowRight") && histInspectEpoch === null) {
+    if (histStepGame(e.key === "ArrowLeft" ? -1 : 1)) e.preventDefault();
   }
-  const trainText = (training.loss !== undefined && training.loss !== null)
-    ? `loss ${formatDecimal(training.loss, 3)} | C ${formatPercent(classicalReplayFraction(training))} | P@1 ${formatPercent(policyTop1(training))}`
-    : training.progress
-      ? `${formatTrainingProgress({ ...training.progress, epoch: item.epoch })} | ${trainingProgressSubtext(training.progress)}`
-    : "pending";
-  const evalText = (evaluation.games !== undefined && evaluation.games !== null)
-    ? `${Number(evaluation.wins || 0)}-${Number(evaluation.losses || 0)} | ${formatDecimal(evaluation.mean_turns, 1)} turns`
-    : "pending";
-  const d6Text = d6.preview_symmetries && d6.preview_symmetries.length
-    ? `${d6.preview_symmetries.slice(0, 6).join(",")}${d6.preview_symmetries.length > 6 ? "..." : ""}`
-    : (d6.mode ? "random" : "pending");
-  const checkpointText = checkpoint.path || checkpoint.name ? "saved" : "pending";
-  const status = item.status || "partial";
-  const mainRow = `<div class="epoch-progress-row ${status === "completed" ? "completed" : "partial"}">
-    <strong>Epoch ${escapeText(item.epoch)}</strong>
-    <span>${escapeText(selfplayText)}</span>
-    <span>${escapeText(trainText)}</span>
-    <span>${escapeText(evalText)}</span>
-    <span>${escapeText(d6Text)}</span>
-    <span>${escapeText(checkpointText)}</span>
-  </div>`;
-  // The bridge attaches the replay-buffer + per-head-loss + calibration block to
-  // the selfplay payload, and web.py passes it through as selfplay.buffer.
-  const buf = selfplay.buffer || null;
-  return `<div class="epoch-progress-group">${mainRow}${epochProgressDetail(buf)}</div>`;
 }
 
-function classicalReplayFraction(training) {
-  const counts = training && training.source_summary && training.source_summary.source_counts;
-  if (!counts || typeof counts !== "object") return null;
-  let total = 0;
-  let classical = 0;
-  for (const [key, rawValue] of Object.entries(counts)) {
-    const value = Number(rawValue);
-    if (!Number.isFinite(value)) continue;
-    total += value;
-    if (String(key).toLowerCase().includes("classical")) classical += value;
-  }
-  return total > 0 ? classical / total : null;
-}
-
-function policyTop1(training) {
-  const overall = training && training.policy_imitation && training.policy_imitation.overall;
-  return overall ? overall.top1_accuracy : null;
-}
-
-function epochProgressSummary(item) {
-  if (!item) return "--";
-  const training = item.training || {};
-  const evaluation = item.evaluation || {};
-  const parts = [`E${item.epoch}`];
-  if (training.loss !== undefined && training.loss !== null) parts.push(`loss ${formatDecimal(training.loss, 3)}`);
-  if (evaluation.games !== undefined && evaluation.games !== null) parts.push(`eval ${Number(evaluation.wins || 0)}-${Number(evaluation.losses || 0)}`);
-  if (item.status && item.status !== "completed") parts.push(item.status);
-  return parts.join(" | ");
-}
-
-function latestDiagnosticSummary(histories, label) {
-  for (const item of histories || []) {
-    const diagnostic = item.diagnostics && item.diagnostics[label];
-    if (diagnostic && diagnostic.summary) return diagnostic.summary;
+// §0.2 checkpoint-name rule: endpoint checkpoint.name → row.checkpoint.name ||
+// basename(path) → canonical epoch_{N:06d}.pt. Returns null when NO checkpoint
+// exists anywhere (no row entry AND the endpoint said null) so the model card
+// is hidden and the ckpt_info fetch never fires.
+function histCkptNameForEpoch(row, epoch, infoPayload) {
+  const fromInfo = infoPayload && infoPayload.checkpoint && infoPayload.checkpoint.name;
+  if (fromInfo) return String(fromInfo);
+  const ckpt = row && row.checkpoint;
+  if (ckpt && (ckpt.name || ckpt.path)) {
+    if (ckpt.name) return String(ckpt.name);
+    const base = String(ckpt.path || "").split(/[\\/]/).pop();
+    if (base) return base;
+    return `epoch_${String(epoch).padStart(6, "0")}.pt`;
   }
   return null;
 }
 
-function gameHistoryListRow(runName, item) {
-  const winner = item.winner_label || winnerLabel(item.winner);
-  const status = item.status || "unknown";
-  const epoch = item.epoch ? `Epoch ${item.epoch}` : "No epoch";
-  const source = item.source || "history";
-  const p0 = historyPlayerLabel(item.players && item.players.player0);
-  const p1 = historyPlayerLabel(item.players && item.players.player1);
-  const diagnostics = historyDiagnosticsText(item.diagnostics);
+// Per-head loss carrier (§0.1): total/policy/value/opp + every stvalue head.
+function histLossHeads(buf) {
+  if (!buf || typeof buf !== "object") return [];
+  const heads = [];
+  const push = (key, label) => {
+    const value = asFinite(buf[key]);
+    if (value !== null) heads.push({ key, label, value });
+  };
+  push("loss_total", "total");
+  push("loss_policy", "policy");
+  push("loss_value", "value");
+  push("loss_opp", "opp");
+  Object.keys(buf)
+    .map(key => /^loss_stvalue_(\d+)$/.exec(key))
+    .filter(Boolean)
+    .sort((a, b) => Number(a[1]) - Number(b[1]))
+    .forEach(match => push(match[0], `stv${match[1]}`));
+  return heads;
+}
+
+// Green when the metric fell vs the previous same-run epoch, red when it rose
+// (losses and optimism both read "down is good"); no element without a prior.
+function histDeltaHtml(value, prevValue) {
+  if (value === null || prevValue === null) return "";
+  const d = value - prevValue;
+  if (d < 0) return `<span class="hist-delta hist-delta-down">▼${Math.abs(d).toFixed(3)}</span>`;
+  if (d > 0) return `<span class="hist-delta hist-delta-up">▲${d.toFixed(3)}</span>`;
+  return `<span class="hist-delta hist-delta-flat">±0.000</span>`;
+}
+
+function histInspLossGroup(buf, prevBuf) {
+  const heads = histLossHeads(buf);
+  if (!heads.length) return "";
+  const max = heads.reduce((m, head) => Math.max(m, head.value), 0);
+  const rows = heads.map(head => {
+    const pct = max > 0 ? Math.max(2, Math.round((head.value / max) * 100)) : 0;
+    return `<div class="hist-loss-row">
+      <span class="hist-loss-label">${escapeText(head.label)}</span>
+      <span class="hist-loss-bar"><span class="hist-loss-bar-fill" style="width:${pct}%"></span><span class="hist-loss-val">${head.value.toFixed(3)}</span></span>
+      ${histDeltaHtml(head.value, prevBuf ? asFinite(prevBuf[head.key]) : null)}
+    </div>`;
+  }).join("");
+  return `<div class="hist-insp-group"><span class="hist-insp-group-title">Losses</span>${rows}</div>`;
+}
+
+// Same diverging-bar markup as the epoch-table rows; "" when fractions absent.
+function histBalanceBarHtml(sp) {
+  const p0 = asFinite(sp.win_p0_fraction);
+  const p1 = asFinite(sp.win_p1_fraction);
+  const draw = asFinite(sp.draw_fraction);
+  const total = (p0 || 0) + (draw || 0) + (p1 || 0);
+  if ((p0 === null && draw === null && p1 === null) || total <= 0) return "";
+  const widthOf = value => (((value || 0) / total) * 100).toFixed(1);
+  return `<span class="hist-balance-bar" title="${escapeAttr(`P0 ${formatPercent(p0)} · draw ${formatPercent(draw)} · P1 ${formatPercent(p1)}`)}">`
+    + `<span class="hist-bal-p0" style="width:${widthOf(p0)}%"></span>`
+    + `<span class="hist-bal-draw" style="width:${widthOf(draw)}%"></span>`
+    + `<span class="hist-bal-p1" style="width:${widthOf(p1)}%"></span></span>`;
+}
+
+function histInspGameStatsGroup(sp) {
+  if (!sp || typeof sp !== "object") return "";
+  const chips = [];
+  if (asFinite(sp.game_length_mean) !== null) chips.push(epochChip("len μ", formatDecimal(sp.game_length_mean, 1)));
+  if (asFinite(sp.game_length_median) !== null) chips.push(epochChip("med", formatDecimal(sp.game_length_median, 0)));
+  if (asFinite(sp.game_length_max) !== null) chips.push(epochChip("max", formatDecimal(sp.game_length_max, 0)));
+  if (asFinite(sp.game_length_stdev) !== null) chips.push(epochChip("σ", formatDecimal(sp.game_length_stdev, 1)));
+  if (asFinite(sp.games) !== null) chips.push(epochChip("games", asFinite(sp.games)));
+  if (asFinite(sp.samples_added) !== null) chips.push(epochChip("smp", asFinite(sp.samples_added)));
+  if (asFinite(sp.search_positions_per_second) !== null) chips.push(epochChip("speed", formatRate(sp.search_positions_per_second, "pos/s")));
+  if (asFinite(sp.mcts_sims_per_searched_position) !== null) chips.push(epochChip("sims/pos", formatDecimal(sp.mcts_sims_per_searched_position, 1)));
+  if (asFinite(sp.elapsed_seconds) !== null) chips.push(epochChip("sp wall", `${formatDecimal(sp.elapsed_seconds, 0)}s`));
+  const balance = histBalanceBarHtml(sp);
+  if (!chips.length && !balance) return "";
+  return `<div class="hist-insp-group"><span class="hist-insp-group-title">Game stats</span>${balance}<div class="hist-insp-chips">${chips.join("")}</div></div>`;
+}
+
+// Only for runs with a REAL pool (hexgt): dense loss-only buffers hide this.
+function histInspBufferGroup(buf, rowSamples) {
+  if (!buf || (asFinite(buf.samples) === null && asFinite(buf.cap) === null)) return "";
+  const k = (n) => (asFinite(n) === null ? "--" : `${Math.round(Number(n) / 1000)}k`);
+  const windowSpan = buf.window_span ? ` [${buf.window_span}]` : "";
+  const chips = [
+    epochChip("pool", `${k(buf.samples)}/${k(buf.cap)}`),
+    epochChip("window", `${asFinite(buf.window_epochs) ?? "--"}ep${windowSpan}`),
+    epochChip("decay", formatDecimal(buf.decay, 2)),
+    epochChip("train", `${asFinite(buf.train_steps) ?? "--"}×${asFinite(buf.train_batch) ?? "--"} = ${k(buf.train_samples_per_epoch)}/ep`),
+  ];
+  if (rowSamples && typeof rowSamples === "object") {
+    if (asFinite(rowSamples.buffer_count) !== null) chips.push(epochChip("records", asFinite(rowSamples.buffer_count)));
+    if (asFinite(rowSamples.window_size) !== null) chips.push(epochChip("win size", asFinite(rowSamples.window_size)));
+    if (asFinite(rowSamples.compressed_bytes) !== null) chips.push(epochChip("compressed", formatBytes(rowSamples.compressed_bytes)));
+  }
+  return `<div class="hist-insp-group"><span class="hist-insp-group-title">Buffer</span><div class="hist-insp-chips">${chips.join("")}</div></div>`;
+}
+
+function histInspCalibrationGroup(buf, prevBuf) {
+  const value = buf ? asFinite(buf.optimism_sum_mean) : null;
+  if (value === null) return "";
+  const delta = histDeltaHtml(value, prevBuf ? asFinite(prevBuf.optimism_sum_mean) : null);
+  return `<div class="hist-insp-group"><span class="hist-insp-group-title">Calibration</span><div class="hist-insp-chips">${epochChip("optimism", formatDecimal(value, 3))}${delta}</div></div>`;
+}
+
+function histInspEvalGroup(row, run, epoch) {
+  let ev = row.evaluation || null;
+  if (!ev && run && Array.isArray(run.evaluation_history)) {
+    ev = run.evaluation_history.find(item => item && asFinite(item.epoch) === epoch) || null;
+  }
+  if (!ev || typeof ev !== "object") return "";
+  const wins = asFinite(ev.wins);
+  const losses = asFinite(ev.losses);
+  const games = asFinite(ev.games);
+  const chips = [];
+  if (wins !== null || losses !== null) chips.push(epochChip("W-L", `${wins ?? "--"}-${losses ?? "--"}`));
+  if (wins !== null && games !== null && games > 0) chips.push(epochChip("win", formatPercent(wins / games)));
+  if (asFinite(ev.mean_turns) !== null) chips.push(epochChip("mean turns", formatDecimal(ev.mean_turns, 1)));
+  if (asFinite(ev.completed) !== null || games !== null) chips.push(epochChip("done", `${asFinite(ev.completed) ?? "--"}/${games ?? "--"}`));
+  if (ev.status) chips.push(epochChip("status", String(ev.status)));
+  if (!chips.length) return "";
+  return `<div class="hist-insp-group"><span class="hist-insp-group-title">Evaluation</span><div class="hist-insp-chips">${chips.join("")}</div></div>`;
+}
+
+function histInspTrainGroup(training) {
+  if (!training || typeof training !== "object") return "";
+  const chips = [];
+  if (asFinite(training.loss) !== null) chips.push(epochChip("loss", formatDecimal(training.loss, 3)));
+  if (asFinite(training.steps) !== null || asFinite(training.batch_size) !== null) {
+    chips.push(epochChip("steps", `${asFinite(training.steps) ?? "--"}×${asFinite(training.batch_size) ?? "--"}`));
+  }
+  if (asFinite(training.samples) !== null) chips.push(epochChip("samples", asFinite(training.samples)));
+  if (asFinite(training.samples_per_second) !== null) chips.push(epochChip("speed", formatRate(training.samples_per_second, "smp/s")));
+  if (asFinite(training.elapsed_seconds) !== null) chips.push(epochChip("wall", `${formatDecimal(training.elapsed_seconds, 0)}s`));
+  if (!chips.length && training.status) chips.push(epochChip("status", String(training.status)));
+  if (!chips.length) return "";
+  return `<div class="hist-insp-group"><span class="hist-insp-group-title">Training</span><div class="hist-insp-chips">${chips.join("")}</div></div>`;
+}
+
+// DIAGNOSTICS group inner HTML (also the patch target of loadHistEpochInfo).
+// "" hides the group via the :empty rule — hexgt runs and still-running epochs
+// have no dense_cnn.selfplay file, so selfplay_extras comes back null.
+function histInspDiagInner(entry) {
+  if (!entry || entry.status === "loading") {
+    return `<span class="hist-insp-group-title">Diagnostics</span><div class="hist-insp-note">Loading epoch diagnostics</div>`;
+  }
+  if (entry.status === "error") {
+    return `<span class="hist-insp-group-title">Diagnostics</span><div class="hist-insp-note">Epoch diagnostics unavailable</div>`;
+  }
+  const extras = entry.payload && entry.payload.selfplay_extras;
+  if (!extras || typeof extras !== "object") return "";
+  const chips = [];
+  const tc = extras.temperature_control && typeof extras.temperature_control === "object" ? extras.temperature_control : {};
+  if (asFinite(tc.expected_game_length) !== null) chips.push(epochChip("EMA len", formatDecimal(tc.expected_game_length, 1)));
+  if (asFinite(tc.halflife_plies) !== null) chips.push(epochChip("halflife", `${formatDecimal(tc.halflife_plies, 1)} plies`));
+  const pcr = extras.pcr && typeof extras.pcr === "object" ? extras.pcr : {};
+  if (asFinite(pcr.full_search_count) !== null || asFinite(pcr.fast_search_count) !== null) {
+    chips.push(epochChip("full/fast", `${asFinite(pcr.full_search_count) ?? "--"}/${asFinite(pcr.fast_search_count) ?? "--"}`));
+  }
+  if (asFinite(pcr.full_proportion) !== null) chips.push(epochChip("full", formatPercent(pcr.full_proportion)));
+  const pi = extras.policy_init && typeof extras.policy_init === "object" ? extras.policy_init : {};
+  if (asFinite(pi.moves) !== null) chips.push(epochChip("PI moves", asFinite(pi.moves)));
+  if (asFinite(pi.fraction) !== null) chips.push(epochChip("PI frac", formatPercent(pi.fraction)));
+  const rt = extras.root_policy_temperature_control && typeof extras.root_policy_temperature_control === "object"
+    ? extras.root_policy_temperature_control
+    : {};
+  if (asFinite(rt.base) !== null || asFinite(rt.early) !== null) {
+    chips.push(epochChip("root T", `${formatDecimal(rt.base, 2)}/${formatDecimal(rt.early, 2)}`));
+  }
+  const wall = asFinite(extras.elapsed_seconds);
+  const search = asFinite(extras.mcts_search_elapsed_seconds);
+  if (wall !== null && wall > 0 && search !== null) chips.push(epochChip("search wall", formatPercent(search / wall)));
+  const raw = asFinite(extras.raw_samples);
+  const eff = asFinite(extras.effective_samples);
+  if (raw !== null || eff !== null) chips.push(epochChip("raw→eff", `${raw ?? "--"}→${eff ?? "--"}`));
+  if (asFinite(extras.mcts_virtual_batch_size) !== null) chips.push(epochChip("vbatch", asFinite(extras.mcts_virtual_batch_size)));
+  if (extras.scheduler !== undefined && extras.scheduler !== null && extras.scheduler !== "") {
+    chips.push(epochChip("sched", String(extras.scheduler)));
+  }
+  if (!chips.length) return "";
+  return `<span class="hist-insp-group-title">Diagnostics</span><div class="hist-insp-chips">${chips.join("")}</div>`;
+}
+
+// MODEL-config chips from the manifest subset in the SAME epoch payload.
+function histInspConfigInner(entry) {
+  if (!entry || entry.status !== "ready") return "";
+  const manifest = entry.payload && entry.payload.manifest;
+  if (!manifest || typeof manifest !== "object") return "";
+  const chips = [];
+  if (manifest.model_name) chips.push(epochChip("model", String(manifest.model_name)));
+  const arch = manifest.architecture && typeof manifest.architecture === "object" ? manifest.architecture : {};
+  if (asFinite(arch.channels) !== null || arch.blocks_type) {
+    chips.push(epochChip("arch", `${asFinite(arch.channels) ?? "--"}ch ${arch.blocks_type || ""}`.trim()));
+  }
+  if (asFinite(arch.attention_heads) !== null) chips.push(epochChip("attn", asFinite(arch.attention_heads)));
+  if (Array.isArray(arch.short_term_value_horizons) && arch.short_term_value_horizons.length) {
+    chips.push(epochChip("stv", arch.short_term_value_horizons.join(",")));
+  }
+  if (arch.moves_left_head !== undefined && arch.moves_left_head !== null) {
+    chips.push(epochChip("moves-left", arch.moves_left_head ? "on" : "off"));
+  }
+  const spc = manifest.selfplay && typeof manifest.selfplay === "object" ? manifest.selfplay : {};
+  if (asFinite(spc.search_visits) !== null) chips.push(epochChip("visits", asFinite(spc.search_visits)));
+  if (asFinite(spc.active_games) !== null) chips.push(epochChip("games", asFinite(spc.active_games)));
+  if (asFinite(spc.root_dirichlet_noise_fraction) !== null || asFinite(spc.root_dirichlet_total_alpha) !== null) {
+    chips.push(epochChip("dirichlet", `${formatDecimal(spc.root_dirichlet_noise_fraction, 2)}@${formatDecimal(spc.root_dirichlet_total_alpha, 2)}`));
+  }
+  if (asFinite(spc.root_policy_temperature) !== null) chips.push(epochChip("root temp", formatDecimal(spc.root_policy_temperature, 2)));
+  if (asFinite(spc.fpu_reduction) !== null) chips.push(epochChip("fpu", formatDecimal(spc.fpu_reduction, 2)));
+  const ev = manifest.evaluation && typeof manifest.evaluation === "object" ? manifest.evaluation : {};
+  if (asFinite(ev.games_per_epoch) !== null) {
+    chips.push(epochChip("eval", `${asFinite(ev.games_per_epoch)}g every ${asFinite(ev.eval_every) ?? "--"}`));
+  }
+  if (!chips.length) return "";
+  return `<div class="hist-insp-chips">${chips.join("")}</div>`;
+}
+
+// Deep model card (lazy ckpt_info). The "CPU debug worker" pending hint is
+// mandatory: the first call loads the checkpoint into the single worker.
+function histInspCkptInner(entry, ckptName) {
+  if (!ckptName) return "";
+  if (!entry || entry.status === "loading") {
+    return `<div class="hist-insp-note">Loading model card (CPU debug worker)…</div>`;
+  }
+  if (entry.status === "error") return `<div class="hist-insp-note">Model card unavailable</div>`;
+  const payload = entry.payload || {};
+  const meta = payload.meta && typeof payload.meta === "object" ? payload.meta : {};
+  const chips = [];
+  const params = asFinite(meta.param_count);
+  if (params !== null) chips.push(epochChip("params", params >= 1e6 ? `${(params / 1e6).toFixed(2)}M` : String(params)));
+  if (meta.lineage) chips.push(epochChip("lineage", String(meta.lineage)));
+  if (asFinite(meta.rl_epoch) !== null) chips.push(epochChip("rl epoch", asFinite(meta.rl_epoch)));
+  if (asFinite(meta.step) !== null) chips.push(epochChip("step", asFinite(meta.step)));
+  if (meta.graft) chips.push(epochChip("graft", String(meta.graft)));
+  if (Array.isArray(meta.stv_horizons) && meta.stv_horizons.length) chips.push(epochChip("stv", meta.stv_horizons.join(",")));
+  if (asFinite(meta.moves_left_cap) !== null) chips.push(epochChip("ml cap", asFinite(meta.moves_left_cap)));
+  if (asFinite(payload.size) !== null) chips.push(epochChip("file", formatBytes(payload.size)));
+  if (payload.mtime) chips.push(epochChip("saved", formatHistoryDate(payload.mtime)));
+  const warnings = Array.isArray(meta.load_warnings) ? meta.load_warnings.filter(Boolean) : [];
+  const warnHtml = warnings.length
+    ? `<div class="hist-insp-warnings">${warnings.map(w => `<div class="hist-insp-warning">${escapeText(String(w))}</div>`).join("")}</div>`
+    : "";
+  if (!chips.length && !warnHtml) return "";
+  const archTitle = meta.arch ? ` title="${escapeAttr(String(meta.arch))}"` : "";
+  return `<div class="hist-insp-chips"${archTitle}>${chips.join("")}</div>${warnHtml}`;
+}
+
+// Header checkpoint stat line: endpoint {name,size,mtime} when it has landed,
+// else the epoch_history row's own {bytes,modified} shape.
+function histInspCkptLineInner(row, infoEntry) {
+  const fromInfo = infoEntry && infoEntry.status === "ready" && infoEntry.payload && infoEntry.payload.checkpoint;
+  if (fromInfo && typeof fromInfo === "object") {
+    const bits = [
+      fromInfo.name ? String(fromInfo.name) : null,
+      asFinite(fromInfo.size) !== null ? formatBytes(fromInfo.size) : null,
+      fromInfo.mtime ? formatHistoryDate(fromInfo.mtime) : null,
+    ].filter(Boolean);
+    if (bits.length) return escapeText(bits.join(" · "));
+  }
+  const ckpt = row && row.checkpoint;
+  if (ckpt && (ckpt.path || ckpt.name)) {
+    const bits = [
+      ckpt.name ? String(ckpt.name) : String(ckpt.path || "").split(/[\\/]/).pop(),
+      asFinite(ckpt.bytes) !== null ? formatBytes(ckpt.bytes) : null,
+      ckpt.modified ? formatHistoryDate(ckpt.modified) : null,
+    ].filter(Boolean);
+    return escapeText(bits.join(" · "));
+  }
+  return "";
+}
+
+function renderHistEpochInspector(runs) {
+  if (!histEpochInspector) return;
+  if (!histInspectEpoch) {
+    histEpochInspector.innerHTML = "";
+    histEpochInspector.hidden = true;
+    return;
+  }
+  const runName = histInspectEpoch.run;
+  const epoch = histInspectEpoch.epoch;
+  const run = histInspRunPayload(runName, runs);
+  const rows = histInspRunRows(runName, runs);
+  const idx = rows.findIndex(row => Number(row.epoch) === epoch);
+  const row = idx >= 0 ? rows[idx] : null;
+  const prev = idx > 0 ? rows[idx - 1] : null;
+
+  // Lazy epoch payload: fired once per (run, epoch); re-renders read the cache
+  // synchronously. Never fetch for a row the run payload doesn't know (stale).
+  let info = null;
+  if (row) {
+    info = histEpochInfoCache.get(`${runName}::${epoch}`) || null;
+    if (!info) {
+      loadHistEpochInfo(runName, epoch);
+      info = histEpochInfoCache.get(`${runName}::${epoch}`) || { status: "loading", payload: null };
+    }
+  }
+  const infoPayload = info && info.status === "ready" ? info.payload : null;
+
+  const ckptSaved = !!(row && row.checkpoint && (row.checkpoint.path || row.checkpoint.name));
+  const head = `<div class="hist-insp-head">
+    <span class="hist-insp-title">Epoch ${escapeText(epoch)}</span>
+    ${(runs || []).length > 1 || !row ? `<span class="hist-insp-run" title="${escapeAttr(runName)}">${escapeText(runName)}</span>` : ""}
+    <span class="hist-epoch-tag hist-epoch-tag-${ckptSaved ? "saved" : "pending"}">${ckptSaved ? "saved" : "pending"}</span>
+    <span class="hist-insp-ckpt-line" data-hist-insp-ckptline>${histInspCkptLineInner(row, info)}</span>
+    <span class="hist-insp-spacer"></span>
+    <button class="hist-insp-btn" type="button" data-hist-inspect-step="-1" title="Previous epoch"${prev ? "" : " disabled"}>◀</button>
+    <button class="hist-insp-btn" type="button" data-hist-inspect-step="1" title="Next epoch"${idx >= 0 && idx < rows.length - 1 ? "" : " disabled"}>▶</button>
+    <button class="hist-insp-btn" type="button" data-hist-epoch="${epoch}" title="Filter the games list to epoch ${epoch}">filter games to e${epoch}</button>
+    <button class="hist-insp-btn" type="button" data-hist-inspect-close title="Close inspector (Esc)" aria-label="Close epoch inspector">✕</button>
+  </div>`;
+
+  // Stale-state guard: keep the inspector open (the run may simply not be
+  // re-fetched yet mid-refresh) but render only the header + a muted line.
+  if (!row) {
+    histEpochInspector.innerHTML = `${head}<div class="hist-insp-note">Epoch data not loaded for this run yet.</div>`;
+    histEpochInspector.hidden = false;
+    return;
+  }
+
+  const sp = row.selfplay && typeof row.selfplay === "object" ? row.selfplay : {};
+  const buf = sp.buffer && typeof sp.buffer === "object" ? sp.buffer : null;
+  const prevSp = prev && prev.selfplay && typeof prev.selfplay === "object" ? prev.selfplay : {};
+  const prevBuf = prevSp.buffer && typeof prevSp.buffer === "object" ? prevSp.buffer : null;
+
+  const ckptName = histCkptNameForEpoch(row, epoch, infoPayload);
+  if (ckptName && !histCkptInfoCache.get(`${runName}::${ckptName}`)) loadHistCkptInfo(runName, ckptName);
+  const ckptEntry = ckptName ? histCkptInfoCache.get(`${runName}::${ckptName}`) : null;
+
+  const configInner = histInspConfigInner(info);
+  const ckptInner = histInspCkptInner(ckptEntry, ckptName);
+  // The model group stays present while the epoch fetch is pending (its config
+  // holder fills via patch-in-place); it disappears only once both sources are
+  // known-empty.
+  const modelGroup = configInner || ckptInner || !info || info.status === "loading"
+    ? `<div class="hist-insp-group hist-insp-model"><span class="hist-insp-group-title">Model</span><div data-hist-insp-config>${configInner}</div><div class="hist-insp-ckpt" data-hist-insp-ckpt data-ckpt-name="${escapeAttr(ckptName || "")}">${ckptInner}</div></div>`
+    : "";
+
+  const groups = [
+    histInspLossGroup(buf, prevBuf),
+    histInspGameStatsGroup(sp),
+    histInspBufferGroup(buf, row.samples),
+    histInspCalibrationGroup(buf, prevBuf),
+    histInspEvalGroup(row, run, epoch),
+    histInspTrainGroup(row.training),
+    `<div class="hist-insp-group hist-insp-diag" data-hist-insp-diag>${histInspDiagInner(info)}</div>`,
+    modelGroup,
+  ].filter(Boolean).join("");
+
+  histEpochInspector.innerHTML = `${head}<div class="hist-insp-groups">${groups}</div>`;
+  histEpochInspector.hidden = false;
+}
+
+// Patch-in-place after the epoch fetch resolves (no full re-render — a full
+// render mid-async races the 15s refresh, same rationale as loadHistThumb).
+function histInspPatchLazy(runName, epoch) {
+  if (!histInspectEpoch || histInspectEpoch.run !== runName || histInspectEpoch.epoch !== epoch) return;
+  if (!histEpochInspector || histEpochInspector.hidden) return;
+  const info = histEpochInfoCache.get(`${runName}::${epoch}`) || null;
+  const infoPayload = info && info.status === "ready" ? info.payload : null;
+  const row = histInspRunRows(runName, null).find(r => Number(r.epoch) === epoch) || null;
+  const diag = histEpochInspector.querySelector("[data-hist-insp-diag]");
+  if (diag) diag.innerHTML = histInspDiagInner(info);
+  const config = histEpochInspector.querySelector("[data-hist-insp-config]");
+  if (config) config.innerHTML = histInspConfigInner(info);
+  const line = histEpochInspector.querySelector("[data-hist-insp-ckptline]");
+  if (line) line.innerHTML = histInspCkptLineInner(row, info);
+  const holder = histEpochInspector.querySelector("[data-hist-insp-ckpt]");
+  if (holder) {
+    // The checkpoint may only now be derivable (row had no checkpoint entry
+    // but the endpoint stat-confirmed the canonical file).
+    const ckptName = histCkptNameForEpoch(row, epoch, infoPayload);
+    holder.dataset.ckptName = ckptName || "";
+    if (ckptName && !histCkptInfoCache.get(`${runName}::${ckptName}`)) loadHistCkptInfo(runName, ckptName);
+    holder.innerHTML = histInspCkptInner(ckptName ? histCkptInfoCache.get(`${runName}::${ckptName}`) : null, ckptName);
+    const model = histEpochInspector.querySelector(".hist-insp-model");
+    if (model && info && info.status !== "loading" && !holder.innerHTML && !(config && config.innerHTML)) {
+      model.innerHTML = "";  // both sources known-empty -> :empty hides the card
+    }
+  }
+}
+
+// The two lazy fetchers (P1.5) mirror loadHistThumb exactly: dedupe via the
+// "loading" cache state, FIFO-evict, plain fetch + safeJson (NEVER
+// pendingRequest), patch in place only while still relevant. Error entries
+// stay cached so a re-render never retries a failed fetch in a loop.
+async function loadHistEpochInfo(runName, epoch) {
+  const key = `${runName}::${epoch}`;
+  const cached = histEpochInfoCache.get(key);
+  if (cached && (cached.status === "loading" || cached.status === "ready")) return;
+  histEpochInfoCache.set(key, { status: "loading", payload: null });
+  while (histEpochInfoCache.size > HIST_EPOCH_INFO_CACHE_MAX) {
+    histEpochInfoCache.delete(histEpochInfoCache.keys().next().value);
+  }
+  let entry;
+  try {
+    const params = new URLSearchParams({ run: runName, epoch: String(epoch) });
+    const res = await fetch(`/api/training/epoch?${params.toString()}`);
+    const data = await safeJson(res);
+    if (!res.ok) throw new Error((data && data.error) || "epoch info unavailable");
+    entry = { status: "ready", payload: data && typeof data === "object" ? data : {} };
+  } catch (error) {
+    console.warn("loadHistEpochInfo failed", error);
+    entry = { status: "error", payload: null };
+  }
+  histEpochInfoCache.set(key, entry);
+  histInspPatchLazy(runName, epoch);
+}
+
+async function loadHistCkptInfo(runName, ckptName) {
+  const key = `${runName}::${ckptName}`;
+  const cached = histCkptInfoCache.get(key);
+  if (cached && (cached.status === "loading" || cached.status === "ready")) return;
+  histCkptInfoCache.set(key, { status: "loading", payload: null });
+  while (histCkptInfoCache.size > HIST_CKPT_INFO_CACHE_MAX) {
+    histCkptInfoCache.delete(histCkptInfoCache.keys().next().value);
+  }
+  let entry;
+  try {
+    const params = new URLSearchParams({ run: runName, checkpoint: ckptName });
+    const res = await fetch(`/api/debug/ckpt_info?${params.toString()}`);
+    const data = await safeJson(res);
+    if (!res.ok) throw new Error((data && data.error) || "ckpt info unavailable");
+    entry = { status: "ready", payload: data && typeof data === "object" ? data : {} };
+  } catch (error) {
+    console.warn("loadHistCkptInfo failed", error);
+    entry = { status: "error", payload: null };
+  }
+  histCkptInfoCache.set(key, entry);
+  // Patch only while still inspected AND the derived name is unchanged.
+  if (!histInspectEpoch || histInspectEpoch.run !== runName) return;
+  if (!histEpochInspector || histEpochInspector.hidden) return;
+  const holder = histEpochInspector.querySelector("[data-hist-insp-ckpt]");
+  if (holder && holder.dataset.ckptName === ckptName) holder.innerHTML = histInspCkptInner(entry, ckptName);
+}
+
+// H8: one-line game row — winner dot, "g<rec> e<epoch>" label, source badge,
+// length with a micro-bar relative to the longest displayed row, truncated
+// player labels, modified date, compact Replay. The whole row body is one
+// full-width selection button (data-history-key, handled by the existing
+// handleGameHistoryClick delegation).
+function gameHistoryListRow(runName, item, maxLen) {
   const key = historyItemKey(item);
   const selected = key === selectedHistoryKey;
-  return `<div class="game-history-row ${selected ? "selected" : ""}" data-history-key="${escapeAttr(key)}">
-    <button class="game-history-select" type="button" data-history-key="${escapeAttr(key)}">
-      <span class="history-game-title" title="${escapeAttr(item.game_id || item.path || "")}">${escapeText(item.game_id || item.path || "—")}</span>
-      <span class="history-game-meta" title="${escapeAttr(`${runName || "run"} | ${item.path || ""}`)}">${escapeText(runName || "run")} | ${escapeText(item.path || "—")}</span>
+  const len = historyLength(item);
+  const barPct = maxLen > 0 ? Math.max(2, Math.round((len / maxLen) * 100)) : 0;
+  const epochNum = asFinite(item.epoch);
+  const source = String(item.source || "history");
+  const srcClass = source === "selfplay" ? "hist-src-selfplay" : source === "evaluation" ? "hist-src-evaluation" : "hist-src-other";
+  const srcText = source === "selfplay" ? "SP" : source === "evaluation" ? "EV" : "H";
+  const p0 = historyPlayerLabel(item.players && item.players.player0);
+  const p1 = historyPlayerLabel(item.players && item.players.player1);
+  const winnerDot = item.winner
+    ? `<span class="hist-win-dot" style="background:${playerColor(item.winner)}" title="${escapeAttr(item.winner_label || winnerLabel(item.winner))}"></span>`
+    : `<span class="hist-win-dot hist-win-none" title="No winner"></span>`;
+  const rowTitle = `${item.game_id || item.path || ""} · ${runName || "run"} · ${historyDiagnosticsText(item.diagnostics)}`;
+  return `<div class="hist-game-row${selected ? " selected" : ""}" data-history-key="${escapeAttr(key)}">
+    <button class="hist-game-main" type="button" data-history-key="${escapeAttr(key)}" title="${escapeAttr(rowTitle)}">
+      ${winnerDot}
+      <span class="hist-game-label">g${escapeText(Number(item.record_index || 0))} e${epochNum !== null ? escapeText(epochNum) : "--"}</span>
+      <span class="hist-src-badge ${srcClass}" title="${escapeAttr(source)}">${srcText}</span>
+      <span class="hist-game-len"><b>${escapeText(len)}</b><span class="hist-len-bar"><span style="width:${barPct}%"></span></span></span>
+      <span class="hist-game-players">${escapeText(p0)} v ${escapeText(p1)}</span>
+      <span class="hist-game-date">${escapeText(formatHistoryDate(item.modified))}</span>
     </button>
-    <div><strong>${escapeText(epoch)}</strong><span>${escapeText(source)} | ${escapeText(status)}</span></div>
-    <div><span class="winner-pill ${winnerClass(item.winner)}">${escapeText(winner)}</span></div>
-    <div><strong>${escapeText(item.length || item.actions || 0)}</strong><span>moves</span></div>
-    <div><strong>P0 ${escapeText(p0)}</strong><span>P1 ${escapeText(p1)}</span></div>
-    <div class="history-row-actions">
-      <strong>${escapeText(diagnostics)}</strong>
-      <span>${escapeText(formatHistoryDate(item.modified))}</span>
-      <button class="history-row-load" type="button" data-history-load data-history-run="${escapeAttr(runName || "")}" data-history-path="${escapeAttr(item.path)}" data-record-index="${escapeAttr(item.record_index || 0)}">Replay</button>
-    </div>
+    <button class="hist-game-replay" type="button" data-history-load data-history-run="${escapeAttr(runName || "")}" data-history-path="${escapeAttr(item.path)}" data-record-index="${escapeAttr(item.record_index || 0)}" title="Load replay on the Match board">Replay</button>
   </div>`;
 }
 
+// P2.2: Selected Game panel — nav row / outcome line / thumbnail / actions /
+// collapsed details disclosure. The disclosure's open state is intentionally
+// NOT persisted: the 15s innerHTML refresh collapses it again.
 function gameHistoryDetailHtml(runName, item) {
   const winner = item.winner_label || winnerLabel(item.winner);
   const diagnostics = item.diagnostics || {};
   const p0 = item.players && item.players.player0;
   const p1 = item.players && item.players.player1;
+  // P2.1 nav row: position within the displayed-list order; the selected key
+  // is absent when selection fell back outside the epoch filter — nav disables.
+  const navIdx = histDisplayedKeys.indexOf(selectedHistoryKey);
+  const navTotal = histDisplayedKeys.length;
+  // H9: final-position thumbnail, .hxr records only (page items carry no
+  // placements — they come from one lazy replay fetch, cached per item key).
+  let thumb = "";
+  if (String(item.path || "").endsWith(".hxr")) {
+    const key = historyItemKey(item);
+    let entry = histThumbCache.get(key);
+    if (!entry) {
+      loadHistThumb(item);
+      entry = histThumbCache.get(key) || { status: "loading", placements: null };
+    }
+    thumb = `<div class="hist-thumb">${histThumbInner(entry)}</div>`;
+  }
+  // item.abort is an object ({stage, exception_type, message}), not a string.
+  const abort = item.abort && typeof item.abort === "object" ? item.abort : null;
+  const abortText = abort
+    ? [abort.stage, abort.exception_type, abort.message].filter(Boolean).map(String).join(": ") || "aborted"
+    : (item.abort ? String(item.abort) : "");
+  const epochNum = asFinite(item.epoch);
+  const winnerDot = item.winner
+    ? `<span class="hist-win-dot" style="background:${playerColor(item.winner)}"></span>`
+    : `<span class="hist-win-dot hist-win-none"></span>`;
   return `<div class="history-detail-body">
-    <div class="history-detail-hero">
-      <div>
-        <span>Winner</span>
-        <strong class="${winnerClass(item.winner)}">${escapeText(winner)}</strong>
-      </div>
-      <div>
-        <span>Length</span>
-        <strong>${escapeText(item.length || item.actions || 0)}</strong>
-      </div>
-      <div>
-        <span>Epoch</span>
-        <strong>${escapeText(item.epoch || "--")}</strong>
-      </div>
-      <div>
-        <span>Source</span>
-        <strong>${escapeText(item.source || "history")}</strong>
-      </div>
+    <div class="hist-game-nav">
+      <button id="histGamePrev" class="hist-insp-btn" type="button" data-hist-game-step="-1" title="Previous game (Left arrow)"${navIdx > 0 ? "" : " disabled"}>◀</button>
+      <span class="hist-game-nav-pos">${navIdx >= 0 ? navIdx + 1 : "--"} / ${navTotal}</span>
+      <button id="histGameNext" class="hist-insp-btn" type="button" data-hist-game-step="1" title="Next game (Right arrow)"${navIdx >= 0 && navIdx < navTotal - 1 ? "" : " disabled"}>▶</button>
     </div>
-    <div class="detail-stack">
-      ${detailRow("Run", runName || "Unknown")}
-      ${detailRow("Game", item.game_id || "Unknown")}
-      ${detailRow("Status", item.status || "unknown")}
-      ${detailRow("Seed", item.seed === null || item.seed === undefined ? "--" : item.seed)}
-      ${detailRow("Record", Number(item.record_index || 0))}
-      ${detailRow("Path", item.path || "—", item.path || "")}
-      ${detailRow("Modified", formatHistoryDate(item.modified))}
+    <div class="hist-outcome-line">
+      ${winnerDot}
+      <strong class="${winnerClass(item.winner)}">${escapeText(winner)}</strong>
+      <span class="hist-outcome-bit">${escapeText(item.length || item.actions || 0)} moves</span>
+      <span class="hist-outcome-bit">${escapeText(item.source || "history")}</span>
+      <span class="hist-outcome-bit">e${epochNum !== null ? escapeText(epochNum) : "--"}</span>
+      <span class="hist-outcome-bit">${escapeText(item.status || "unknown")}</span>
     </div>
-    <div class="history-detail-section">
-      <div class="detail-section-title">Players</div>
-      <div class="player-detail-grid">
-        ${playerDetail("P0", p0)}
-        ${playerDetail("P1", p1)}
-      </div>
-    </div>
-    <div class="history-detail-section">
-      <div class="detail-section-title">Diagnostics</div>
-      ${diagnosticDetailsHtml(diagnostics)}
-    </div>
-    ${item.abort ? `<div class="history-detail-section"><div class="detail-section-title">Abort</div><div class="detail-note">${escapeText(item.abort)}</div></div>` : ""}
+    ${thumb}
     <div class="history-detail-actions">
       <button class="primary-action history-replay-btn" type="button" data-history-load data-history-run="${escapeAttr(runName || "")}" data-history-path="${escapeAttr(item.path)}" data-record-index="${escapeAttr(item.record_index || 0)}">Load Replay</button>
       ${String(item.path || "").endsWith(".hxr") ? `<button class="history-debug-btn" type="button" data-debug-open data-debug-run="${escapeAttr(runName || "")}" data-debug-path="${escapeAttr(item.path)}" data-debug-record="${escapeAttr(item.record_index || 0)}">Open in Debug</button>` : ""}
     </div>
+    <details class="hist-detail-more">
+      <summary>Details</summary>
+      <div class="hist-detail-more-body">
+        <div class="detail-stack">
+          ${detailRow("Run", runName || "Unknown")}
+          ${detailRow("Game", item.game_id || "Unknown")}
+          ${detailRow("Status", item.status || "unknown")}
+          ${detailRow("Seed", item.seed === null || item.seed === undefined ? "--" : item.seed)}
+          ${detailRow("Record", Number(item.record_index || 0))}
+          ${detailRow("Path", item.path || "—", item.path || "")}
+          ${detailRow("Modified", formatHistoryDate(item.modified))}
+        </div>
+        <div class="history-detail-section">
+          <div class="detail-section-title">Players</div>
+          <div class="player-detail-grid">
+            ${playerDetail("P0", p0)}
+            ${playerDetail("P1", p1)}
+          </div>
+        </div>
+        <div class="history-detail-section">
+          <div class="detail-section-title">Diagnostics</div>
+          ${diagnosticDetailsHtml(diagnostics)}
+        </div>
+        ${abortText ? `<div class="history-detail-section"><div class="detail-section-title">Abort</div><div class="detail-note">${escapeText(abortText)}</div></div>` : ""}
+      </div>
+    </details>
   </div>`;
+}
+
+// --- H9: final-position thumbnail (lazy, cached, .hxr detail only). ---
+const HIST_THUMB_CACHE_MAX = 40;
+
+function histThumbInner(entry) {
+  if (entry && entry.status === "ready") return histThumbSvg(entry.placements);
+  if (entry && entry.status === "error") return `<div class="hist-thumb-loading">Final position unavailable</div>`;
+  return `<div class="hist-thumb-loading">Loading final position</div>`;
+}
+
+// Pure-presentation SVG: one circle per placement at the shared hex geometry,
+// final move ringed, viewBox = stone bounding box padded by 2*HEX.
+function histThumbSvg(placements) {
+  const stones = (placements || []).filter(p => p && asFinite(p.q) !== null && asFinite(p.r) !== null);
+  if (!stones.length) return "";
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  const pts = stones.map(p => {
+    const c = center(Number(p.q), Number(p.r));
+    if (c.x < minX) minX = c.x;
+    if (c.x > maxX) maxX = c.x;
+    if (c.y < minY) minY = c.y;
+    if (c.y > maxY) maxY = c.y;
+    return { x: c.x, y: c.y, player: p.player };
+  });
+  const pad = 2 * HEX;
+  const radius = HEX * 0.62;
+  const body = pts.map((pt, i) => {
+    const stone = `<circle cx="${pt.x.toFixed(1)}" cy="${pt.y.toFixed(1)}" r="${radius.toFixed(1)}" style="fill:${playerColor(pt.player)}"></circle>`;
+    return i === pts.length - 1
+      ? `${stone}<circle cx="${pt.x.toFixed(1)}" cy="${pt.y.toFixed(1)}" r="${(radius + 3).toFixed(1)}" fill="none" style="stroke:var(--accent)" stroke-width="2"></circle>`
+      : stone;
+  }).join("");
+  const viewBox = `${(minX - pad).toFixed(1)} ${(minY - pad).toFixed(1)} ${(maxX - minX + 2 * pad).toFixed(1)} ${(maxY - minY + 2 * pad).toFixed(1)}`;
+  return `<svg viewBox="${viewBox}" role="img" aria-label="Final position">${body}</svg>`;
+}
+
+// One lazy replay fetch per selected .hxr item (the endpoint replays the game
+// server-side, so: never for list rows, deduped via the "loading" cache state,
+// FIFO-capped, and patched in place only if the item is still selected).
+async function loadHistThumb(item) {
+  const key = historyItemKey(item);
+  const cached = histThumbCache.get(key);
+  if (cached && (cached.status === "loading" || cached.status === "ready")) return;
+  histThumbCache.set(key, { status: "loading", placements: null });
+  while (histThumbCache.size > HIST_THUMB_CACHE_MAX) {
+    histThumbCache.delete(histThumbCache.keys().next().value);
+  }
+  let entry;
+  try {
+    const params = new URLSearchParams({
+      run: item.run || "",
+      path: item.path || "",
+      record: String(Number(item.record_index || 0)),
+    });
+    const res = await fetch(`/api/training/history?${params.toString()}`);
+    const data = await safeJson(res);
+    if (!res.ok) throw new Error((data && data.error) || "history unavailable");
+    entry = { status: "ready", placements: Array.isArray(data && data.placements) ? data.placements : [] };
+  } catch (error) {
+    console.warn("loadHistThumb failed", error);
+    entry = { status: "error", placements: null };
+  }
+  histThumbCache.set(key, entry);
+  if (selectedHistoryKey === key && gameHistoryDetail) {
+    const holder = gameHistoryDetail.querySelector(".hist-thumb");
+    if (holder) holder.innerHTML = histThumbInner(entry);
+  }
 }
 
 function detailRow(label, value, titleValue) {
@@ -3380,10 +4619,12 @@ const dbg = {
   analysis: null,      // ckptA analyze
   analysisB: null,     // ckptB analyze (COMPARE)
   search: null,        // /api/debug/search result
+  searchBusy: false,
   tree: null,          // /api/debug/search_tree result (childq/Q/scatter/PV read it)
   treeBusy: false,
   treeOpen: new Map(), // tree-node path -> explicit expand/collapse (default: PV open)
   treePreview: null,   // {key, ids} — clicked tree node's line, ghosted on the board
+  treeGhostsOff: false, // T with a fresh tree toggles its board ghosts (§1.7 "run / toggle")
   ladder: null,        // visit-ladder rows for ladderKey (spec S10)
   ladderBusy: false,
   // Game Error Sweeps (spec M9), keyed run|path|rec|ckptA so flipping checkpoints
@@ -3442,6 +4683,7 @@ const dbg = {
   gameKey: "",
   gameActs: [],
   gameActsKey: "",
+  placementsBackfill: "",  // gameKey already backfilled to the final ply (one-shot)
 };
 
 const dbgEl = id => document.getElementById(id);
@@ -3546,7 +4788,10 @@ function dbgNavigate(patch, { replace = false } = {}) {
   if (patch && patch.acts) nav.acts = patch.acts.slice();
   const hash = dbgNavToHash(nav);
   if (String(window.location.hash || "") === hash) {
-    dbgApplyHash();  // no-op unless a previous apply failed midway
+    // Explicit re-selection of the identical tuple: clear the dedupe so an apply
+    // that failed midway can be retried (re-apply on a cache hit is idempotent).
+    dbg.navApplied = "";
+    dbgApplyHash();
     return;
   }
   // Optimistic nav update: `location.hash =` fires hashchange ASYNCHRONOUSLY,
@@ -3584,6 +4829,7 @@ function dbgApplyHash() {
   dbg.nav = dbgHashToNav(hash);
   const seq = ++dbg.applySeq;
   dbgApplyNav(dbg.nav, seq).catch(e => {
+    if (seq === dbg.applySeq) dbg.navApplied = "";  // failed tuple stays re-appliable
     debugSetStatus(`Debug: ${(e && e.message) || e}`, "error");
     reportError("dbgApplyNav: " + (e && (e.stack || e.message) || e));
   });
@@ -3657,6 +4903,9 @@ async function dbgApplyNav(nav, seq) {
       return;
     }
   }
+  // Checkpoint provenance is position-independent — ensure it BEFORE the games/
+  // position early-returns so CKPT loads even when the source has no games (M7).
+  if (nav.tab === "ckpt") dbgEnsureCkptInfo(false);
   const gamesKey = `${nav.run}|${nav.src}`;
   if (dbg.loadedGamesKey !== gamesKey) {
     await dbgLoadGames(nav.run, nav.src);
@@ -3703,6 +4952,9 @@ async function dbgApplyNav(nav, seq) {
     debugSetStatus("");
     dbgRenderAll();
     if (!entry.analysis || (nav.ckptB && dbg.keys.analysisB !== dbgCacheKey(nav, nav.ckptB))) dbgScheduleFetch(0);
+    // Fully cached: dbgFetchCurrent (whose tail prefetches) never runs, so extend
+    // the S7 prefetch window here — else steady stepping prefetches alternate plies.
+    else dbgMaybePrefetch();
   } else {
     if (!nav.acts.length && recorded && dbg.gamePlacements.length) {
       // INSTANT, analyze-independent step off the client-side placement cache;
@@ -3714,7 +4966,6 @@ async function dbgApplyNav(nav, seq) {
     dbgRenderAll();
     dbgScheduleFetch(120);  // coalesce rapid steps/slider drags into one fetch
   }
-  if (nav.tab === "ckpt") dbgEnsureCkptInfo(false);
   if (nav.tab === "inputs" || nav.mode === "plane") dbgEnsureInputs(false);
   if (dbgWantRecordRow(nav)) dbgEnsureRecordRow(false);
 }
@@ -3887,7 +5138,31 @@ function dbgCommitPosition(data, key) {
     dbg.gameActs = d.action_ids;
     dbg.gameActsKey = `${dbg.nav.run}|${dbg.nav.path}|${dbg.nav.rec}`;
   }
-  if (!dbg.nav.acts.length) dbgCacheGamePlacements(data);
+  if (!dbg.nav.acts.length) {
+    dbgCacheGamePlacements(data);
+    // Position payloads carry placements for action_ids[:ply] only, so a deep
+    // link to a mid-game ply leaves later stone ownership unknown — and the
+    // HEADS recorded-reply highlight needs it. One-shot final-ply backfill.
+    if (!d.imported && d.total != null && dbg.gamePlacements.length < d.total) dbgBackfillPlacements(d.total);
+  }
+}
+
+function dbgBackfillPlacements(total) {
+  const nav = dbg.nav;
+  const gameKey = `${nav.run}|${nav.path}|${nav.rec}`;
+  if (dbg.placementsBackfill === gameKey) return;
+  dbg.placementsBackfill = gameKey;
+  const params = new URLSearchParams({ run: nav.run, path: nav.path, record: String(nav.rec), ply: String(total) });
+  debugFetchJson(`/api/debug/position?${params.toString()}`).then(data => {
+    if (gameKey !== `${dbg.nav.run}|${dbg.nav.path}|${dbg.nav.rec}`) return;  // game changed mid-flight
+    // Warm the M12 cache for the final-ply key while the payload is in hand.
+    const entry = dbgCacheEntry(dbgCacheKey(Object.assign({}, dbg.nav, { ply: total, acts: [] }), dbg.nav.ckptA));
+    if (!entry.position) entry.position = data;
+    dbgCacheGamePlacements(data);
+    if (dbg.nav.tab === "heads") dbgRenderHeads();
+  }).catch(() => {
+    if (dbg.placementsBackfill === gameKey) dbg.placementsBackfill = "";  // transient — retry on next commit
+  });
 }
 
 function dbgCacheGamePlacements(data) {
@@ -3951,6 +5226,15 @@ async function dbgFetchCurrent() {
   if (!nav.run || !nav.path || nav.ply == null) return;
   const key = dbgCurrentKey();
   const entry = dbgCacheEntry(key);
+  if (!entry.position && nav.ckptB) {
+    // The sibling (ckptB) entry holds the same checkpoint-independent position —
+    // after a ckptA↔ckptB flip reuse it instead of refetching (M12).
+    const sib = dbg.cache.get(dbgCacheKey(nav, nav.ckptB));
+    if (sib && sib.position) {
+      entry.position = sib.position;
+      if (!entry.record_row && sib.record_row) entry.record_row = sib.record_row;
+    }
+  }
   if (!entry.position) {
     const seq = ++dbg.posSeq;  // claim latest; a newer ply nav supersedes this fetch
     try {
@@ -4002,11 +5286,16 @@ async function dbgEnsureRecordedActs() {
   return dbg.gameActs;
 }
 
-function dbgRequestBody(checkpoint) {
+async function dbgRequestBody(checkpoint) {
   const nav = dbg.nav;
   const body = { run: nav.run, checkpoint };
   if (nav.acts.length) {
-    const recorded = dbgRecordedActs() || [];
+    // Branch prefix = recorded actions[0..ply] + injected tail. The recorded
+    // list may be missing (gameActsKey points at another game after the user
+    // browsed elsewhere and the branch came back via a cache hit) — NEVER fall
+    // back to an empty prefix: the server would silently analyze a near-empty
+    // board while the UI shows the full branch position. Re-fetch instead.
+    const recorded = await dbgEnsureRecordedActs();
     body.action_ids = recorded.slice(0, nav.ply).concat(nav.acts);
   } else {
     body.path = nav.path;
@@ -4036,15 +5325,26 @@ async function dbgEnsureAnalysis(key, entry) {
     const analysis = await debugFetchJson("/api/debug/analyze", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(dbgRequestBody(nav.ckptA)),
+      body: JSON.stringify(await dbgRequestBody(nav.ckptA)),
     });
-    if (seq !== dbg.anlSeq) return;  // a newer position/analyze superseded us — drop stale result
+    // Always cache the response — a superseded seq only skips the status/loading
+    // bookkeeping, never the data, or a revisited ply could sit permanently
+    // un-analyzed (analysisPending is false again and nothing re-triggers).
     entry.analysis = analysis;
     dbgJournalLog(analysis, nav.ckptA, nav);  // S3: auto-log every completed analyze
+    if (!dbg.worker || !dbg.worker.alive) {
+      // A successful analyze proves the lazily-spawned worker is up — re-read the
+      // live status so the dot turns green and the S7 prefetch gate opens.
+      debugFetchJson(`/api/debug/checkpoints?run=${encodeURIComponent(nav.run)}`).then(d => {
+        dbg.worker = d.worker || null;
+        dbgRenderWorkerDot(dbg.worker && dbg.worker.alive ? "ok" : "");
+      }).catch(() => {});
+    }
     if (key === dbgCurrentKey()) {
       dbg.analysis = analysis;
       dbg.keys.analysis = key;
-      debugSetStatus("");
+      if (seq === dbg.anlSeq) debugSetStatus("");
+      dbgRenderAll();  // the finally's render is seq-gated — cover the dropped-seq case
     }
   } catch (e) {
     if (seq === dbg.anlSeq) debugSetStatus(`Analyze: ${e.message}`, "error");
@@ -4062,6 +5362,13 @@ async function dbgEnsureAnalysisB() {
   if (!nav.ckptB || nav.ply == null) return;
   const keyB = dbgCacheKey(nav, nav.ckptB);
   const entryB = dbgCacheEntry(keyB);
+  // position/record_row are checkpoint-independent — share them with the A entry
+  // so a later ckptA↔ckptB flip re-renders with zero network requests (M12).
+  const entryA = dbg.cache.get(dbgCacheKey(nav, nav.ckptA));
+  if (entryA) {
+    if (!entryB.position && entryA.position) entryB.position = entryA.position;
+    if (!entryB.record_row && entryA.record_row) entryB.record_row = entryA.record_row;
+  }
   if (entryB.analysis) {
     dbg.analysisB = entryB.analysis;
     dbg.keys.analysisB = keyB;
@@ -4071,23 +5378,28 @@ async function dbgEnsureAnalysisB() {
   }
   if (entryB.analysisPending) return;
   entryB.analysisPending = true;
+  delete entryB.analysisError;  // a retry starts clean
   const seq = ++dbg.anlSeqB;
   debugSetStatus("Evaluating checkpoint B…", "busy");
   try {
     const analysis = await debugFetchJson("/api/debug/analyze", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(dbgRequestBody(nav.ckptB)),
+      body: JSON.stringify(await dbgRequestBody(nav.ckptB)),
     });
-    if (seq !== dbg.anlSeqB) return;
+    // Cache even when superseded (see dbgEnsureAnalysis) — only the commit is gated.
     entryB.analysis = analysis;
     dbgJournalLog(analysis, nav.ckptB, nav);
     if (keyB === dbgCacheKey(dbg.nav, dbg.nav.ckptB)) {
       dbg.analysisB = analysis;
       dbg.keys.analysisB = keyB;
-      debugSetStatus("");
+      if (seq === dbg.anlSeqB) debugSetStatus("");
     }
   } catch (e) {
+    // Record the failure on the entry so the COMPARE panel can show an error
+    // state instead of a perpetual "Evaluating checkpoint B…" (nothing retries
+    // automatically — only ↻ or the next nav apply).
+    entryB.analysisError = e.message;
     if (seq === dbg.anlSeqB) debugSetStatus(`Compare: ${e.message}`, "error");
   } finally {
     entryB.analysisPending = false;
@@ -4107,24 +5419,34 @@ function dbgAnalyzeNow(force) {
 }
 
 async function dbgRunSearch() {
+  dbgAbortPrefetch();  // S7: an explicit request preempts the speculative ply±1 fetch
   const nav = dbg.nav;
   if (!nav.ckptA || !dbg.position) {
     debugSetStatus("Pick a checkpoint and position before searching.", "error");
     return;
   }
-  const body = dbgRequestBody(nav.ckptA);
+  if (dbg.searchBusy) {
+    dbgStub("A search is already running.");
+    return;
+  }
   const visitsEl = dbgEl("dbgSearchVisits");
   const cpuctEl = dbgEl("dbgSearchCpuct");
   const seedEl = dbgEl("dbgSearchSeed");
-  body.visits = Math.max(1, Math.min(20000, parseInt(visitsEl && visitsEl.value, 10) || 512));
-  const cPuct = Number(cpuctEl && cpuctEl.value);
-  body.c_puct = Number.isFinite(cPuct) && cPuct > 0 ? cPuct : 1.5;
-  const seed = parseInt(seedEl && seedEl.value, 10);
-  body.seed = Number.isFinite(seed) ? seed : 0;  // B2/M6: the seed is forwarded server-side now
+  const visits = Math.max(1, Math.min(20000, parseInt(visitsEl && visitsEl.value, 10) || 512));
   const key = dbgCurrentKey();
   const entry = dbgCacheEntry(key);
-  debugSetStatus(`Running ${body.visits}-visit CPU search…`, "busy");
+  dbg.searchBusy = true;
+  // #dbgSearchRun is static HTML (not re-rendered from state) — toggle in place.
+  const runBtn = dbgEl("dbgSearchRun");
+  if (runBtn) runBtn.disabled = true;
+  debugSetStatus(`Running ${visits}-visit CPU search…`, "busy");
   try {
+    const body = await dbgRequestBody(nav.ckptA);
+    body.visits = visits;
+    const cPuct = Number(cpuctEl && cpuctEl.value);
+    body.c_puct = Number.isFinite(cPuct) && cPuct > 0 ? cPuct : 1.5;
+    const seed = parseInt(seedEl && seedEl.value, 10);
+    body.seed = Number.isFinite(seed) ? seed : 0;  // B2/M6: the seed is forwarded server-side now
     const result = await debugFetchJson("/api/debug/search", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -4138,8 +5460,11 @@ async function dbgRunSearch() {
     }
   } catch (e) {
     debugSetStatus(`Search: ${e.message}`, "error");
+  } finally {
+    dbg.searchBusy = false;
+    if (runBtn) runBtn.disabled = false;
+    dbgRenderAll();
   }
-  dbgRenderAll();
 }
 
 async function dbgEnsureCkptInfo(force) {
@@ -4197,6 +5522,12 @@ async function dbgEnsureRecordRow(force) {
   const key = dbgCurrentKey();
   const entry = dbgCacheEntry(key);
   if (force) delete entry.record_row;
+  if (!entry.record_row && nav.ckptB) {
+    // record_row is checkpoint-independent — reuse the sibling (ckptB) entry's
+    // copy after a ckptA↔ckptB flip instead of refetching (M12).
+    const sib = dbg.cache.get(dbgCacheKey(nav, nav.ckptB));
+    if (sib && sib.record_row) entry.record_row = sib.record_row;
+  }
   if (nav.acts.length || nav.src !== "selfplay") {
     // Branch positions / eval games never have training rows — synthesize the
     // graceful miss client-side instead of paying a server round-trip.
@@ -4253,16 +5584,19 @@ function dbgRenderTargets() {
   const a = dbgFreshData("analysis");
   note.textContent = `${rr.npz || ""}${rr.npz ? " · " : ""}turn ${rr.turn_index} · P${row.current_player}${row.phase ? ` · ${row.phase}` : ""}`;
   const num = v => (typeof v === "number" ? v.toFixed(3) : "—");
+  // The npz does not persist every field — the backend returns null for those,
+  // and null must read as "not recorded", never as a plausible 0.000/yes/"".
+  const NOT_REC = `<span class="dbg-muted">not recorded</span>`;
   const d = (recV, liveV) => (typeof recV === "number" && typeof liveV === "number")
     ? `${liveV - recV >= 0 ? "+" : ""}${(liveV - recV).toFixed(3)}` : "—";
   const cols = (label, rec, live, dlt) => `<div class="dbg-target-row"><span class="label">${label}</span><span>${rec}</span><span class="dbg-muted">${live}</span><span>${dlt}</span></div>`;
   const out = [`<div class="dbg-target-row dbg-move-head"><span>field</span><span>recorded</span><span>live ${escapeText(dbgCkptShort(dbg.nav.ckptA))}</span><span>Δ</span></div>`];
   out.push(cols("value target", num(row.value_target), num(a && a.value), d(row.value_target, a && a.value)));
-  out.push(cols("reason", escapeText(row.value_target_reason || "—"), "", ""));
+  out.push(cols("reason", row.value_target_reason == null ? NOT_REC : escapeText(row.value_target_reason || "—"), "", ""));
   for (const h of Object.keys(row.stvalue || {}).sort((x, y) => Number(x) - Number(y))) {
     const sv = row.stvalue[h];
     const live = a && a.stvalue && a.stvalue[h] ? a.stvalue[h].scalar : null;
-    out.push(cols(`STV+${h}${sv.mask ? "" : " (masked)"}`, num(sv.target), num(live), sv.mask ? d(sv.target, live) : "—"));
+    out.push(cols(`STV+${h}${sv.mask ? "" : " (masked)"}`, sv.target == null ? NOT_REC : num(sv.target), num(live), sv.mask ? d(sv.target, live) : "—"));
   }
   if (row.moves_left) {
     const liveMl = a && a.moves_left && typeof a.moves_left.scalar === "number"
@@ -4270,21 +5604,23 @@ function dbgRenderTargets() {
       : null;
     const recMl = row.moves_left.target;
     out.push(cols(`moves left${row.moves_left.mask ? "" : " (masked)"}`,
-      typeof recMl === "number" && recMl >= 0 ? recMl.toFixed(0) : "—",
+      typeof recMl === "number" && recMl >= 0 ? recMl.toFixed(0) : (recMl == null ? NOT_REC : "—"),
       liveMl != null ? liveMl.toFixed(0) : "—",
       row.moves_left.mask && typeof recMl === "number" && recMl >= 0 && liveMl != null
         ? `${liveMl - recMl >= 0 ? "+" : ""}${(liveMl - recMl).toFixed(0)}` : "—"));
   }
-  out.push(cols("policy surprise", num(row.policy_surprise), "", ""));
-  out.push(cols("search visits", String(row.search_visits), "", ""));
-  out.push(cols("pcr_full", row.pcr_full ? "yes" : "no (fast)", "", ""));
-  out.push(cols("frequency wt", num(row.frequency_weight), "", ""));
+  out.push(cols("policy surprise", row.policy_surprise == null ? NOT_REC : num(row.policy_surprise), "", ""));
+  // 0 is a sentinel: the shard stored a normalized visit policy, so the raw count is unknown.
+  out.push(cols("search visits", row.search_visits == null ? NOT_REC
+      : (row.search_visits > 0 ? String(row.search_visits) : "unknown (normalized weights)"), "", ""));
+  out.push(cols("pcr_full", row.pcr_full == null ? NOT_REC : (row.pcr_full ? "yes" : "no (fast)"), "", ""));
+  out.push(cols("frequency wt", row.frequency_weight == null ? NOT_REC : num(row.frequency_weight), "", ""));
   if (row.truncated) out.push(cols("truncated", "yes", "", ""));
   if (row.opp_policy_source) out.push(cols("opp source", escapeText(row.opp_policy_source), "", ""));
   const priorById = new Map(((a && a.policy) || []).map(p => [p.action_id, p.p]));
   const tm = (row.policy || []).slice(0, 8).map((p, i) => {
     const live = priorById.get(p.action_id);
-    const dp = live != null ? `${live - p.p >= 0 ? "+" : ""}${((live - p.p) * 100).toFixed(1)}` : "—";
+    const dp = live != null ? `${live - p.p >= 0 ? "+" : ""}${((live - p.p) * 100).toFixed(1)}%` : "—";
     return `<div class="dbg-target-row"><span>#${i + 1} ${p.q},${p.r}</span><span>${(p.p * 100).toFixed(1)}%</span><span class="dbg-muted">${live != null ? (live * 100).toFixed(1) + "%" : "—"}</span><span>${dp}</span></div>`;
   }).join("");
   body.innerHTML = out.join("")
@@ -4317,6 +5653,7 @@ function dbgBlunders(sweep) {
 }
 
 async function dbgRunSweep() {
+  dbgAbortPrefetch();  // S7: an explicit request preempts the speculative ply±1 fetch
   const nav = dbg.nav;
   if (!nav.run || !nav.path || !nav.ckptA) {
     debugSetStatus("Sweep needs a recorded game + checkpoint.", "error");
@@ -4420,6 +5757,7 @@ async function dbgRunTree(opts) {
   // opts: {checkpoint} = run for that checkpoint's cache slot (compare B trees);
   // {rootActions, graftPath} = expand-on-demand — re-root the search at a deep
   // node via root_actions and graft the children back onto the rendered tree.
+  dbgAbortPrefetch();  // S7: an explicit request preempts the speculative ply±1 fetch
   const nav = dbg.nav;
   const checkpoint = (opts && opts.checkpoint) || nav.ckptA;
   if (!checkpoint || !dbg.position) {
@@ -4430,13 +5768,13 @@ async function dbgRunTree(opts) {
     dbgStub("A debug tree is already running.");
     return;
   }
-  const body = Object.assign(dbgRequestBody(checkpoint), dbgTreeParams());
-  if (opts && opts.rootActions && opts.rootActions.length) body.root_actions = opts.rootActions;
   const key = dbgCacheKey(nav, checkpoint);
   dbg.treeBusy = true;
-  debugSetStatus(`Debug tree: ${body.visits} visits on CPU…`, "busy");
   dbgRenderSearchPanel();
   try {
+    const body = Object.assign(await dbgRequestBody(checkpoint), dbgTreeParams());
+    if (opts && opts.rootActions && opts.rootActions.length) body.root_actions = opts.rootActions;
+    debugSetStatus(`Debug tree: ${body.visits} visits on CPU…`, "busy");
     const result = await debugFetchJson("/api/debug/search_tree", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -4460,6 +5798,7 @@ async function dbgRunTree(opts) {
         dbg.keys.tree = key;
         dbg.treeOpen = new Map();
         dbg.treePreview = null;
+        dbg.treeGhostsOff = false;  // a fresh run always shows its ghosts
       }
     }
   } catch (e) {
@@ -4600,6 +5939,7 @@ function dbgRenderScatter() {
 // ---- visit ladder (spec S10) ---------------------------------------------------
 
 async function dbgRunLadder() {
+  dbgAbortPrefetch();  // S7: an explicit request preempts the speculative ply±1 fetch
   const nav = dbg.nav;
   if (!nav.ckptA || !dbg.position) {
     debugSetStatus("Pick a checkpoint and position first.", "error");
@@ -4615,7 +5955,7 @@ async function dbgRunLadder() {
     for (const visits of [64, 128, 256, 512, 1024]) {
       if (dbgCurrentKey() !== key) break;  // user moved on — stop climbing
       debugSetStatus(`Visit ladder: ${visits} visits…`, "busy");
-      const body = Object.assign(dbgRequestBody(nav.ckptA), { visits, c_puct: params.c_puct, seed: params.seed });
+      const body = Object.assign(await dbgRequestBody(nav.ckptA), { visits, c_puct: params.c_puct, seed: params.seed });
       const s = await debugFetchJson("/api/debug/search", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -4624,7 +5964,9 @@ async function dbgRunLadder() {
       dbg.ladder.rungs.push({ visits, best: s.best, best_action_id: s.best_action_id, root_value: s.root_value });
       dbgRenderLadder();
     }
-    debugSetStatus("");
+    // Only clear the shared status line while we still own the context — a nav
+    // mid-ladder hands it to the newer action's busy message.
+    if (dbgCurrentKey() === key) debugSetStatus("");
   } catch (e) {
     debugSetStatus(`Ladder: ${e.message}`, "error");
   } finally {
@@ -4642,12 +5984,14 @@ function dbgRenderLadder() {
     el.innerHTML = `<div class="dbg-flex-head"><span class="dbg-muted">Visit ladder (64 → 1024): best move per budget</span>${btn}</div>`;
     return;
   }
-  let flip = null;
+  // Flag EVERY rung where the best move flipped, not just the last one — the
+  // early prior-vs-search flips are usually the diagnostic ones.
+  const flips = new Set();
   for (let i = 1; i < l.rungs.length; i++) {
-    if (l.rungs[i].best_action_id !== l.rungs[i - 1].best_action_id) flip = l.rungs[i].visits;
+    if (l.rungs[i].best_action_id !== l.rungs[i - 1].best_action_id) flips.add(l.rungs[i].visits);
   }
-  const rows = l.rungs.map(r => `<div class="dbg-move-row${flip === r.visits ? " dbg-move-best" : ""}"><span></span><span>${r.visits}v</span><span>${r.best ? `${r.best.q},${r.best.r}` : "—"}</span><span>${r.root_value.toFixed(3)}</span><span>${flip === r.visits ? "flip" : ""}</span><span></span></div>`).join("");
-  el.innerHTML = `<div class="dbg-flex-head"><span class="dbg-muted">Visit ladder${flip != null ? ` · best flips at ${flip}v` : " · stable best"}</span>${btn}</div>`
+  const rows = l.rungs.map(r => `<div class="dbg-move-row${flips.has(r.visits) ? " dbg-move-best" : ""}"><span></span><span>${r.visits}v</span><span>${r.best ? `${r.best.q},${r.best.r}` : "—"}</span><span>${r.root_value.toFixed(3)}</span><span>${flips.has(r.visits) ? "flip" : ""}</span><span></span></div>`).join("");
+  el.innerHTML = `<div class="dbg-flex-head"><span class="dbg-muted">Visit ladder${flips.size ? ` · best flips at ${[...flips].join("/")}v` : " · stable best"}</span>${btn}</div>`
     + `<div class="dbg-move-row dbg-move-head"><span></span><span>visits</span><span>best</span><span>root v</span><span></span><span></span></div>` + rows;
 }
 
@@ -4993,6 +6337,7 @@ function dbgPaletteExec(i) {
 // ---- checkpoint sweep dock tab (spec S4) ----------------------------------------------
 
 async function dbgRunCkptSweep() {
+  dbgAbortPrefetch();  // S7: an explicit request preempts the speculative ply±1 fetch
   const nav0 = Object.assign({}, dbg.nav, { acts: dbg.nav.acts.slice() });
   if (!nav0.run || !nav0.path || nav0.ply == null) {
     debugSetStatus("No position for the checkpoint sweep.", "error");
@@ -5006,7 +6351,9 @@ async function dbgRunCkptSweep() {
     dbgStub("Checkpoint sweep already running — Stop aborts it.");
     return;
   }
-  const sweep = { rows: [], running: true, abort: false, refTop: null, refTopCell: "" };
+  // navKey ties the finished curve to the position it swept (ckpt slot empty —
+  // the sweep spans checkpoints); the renderer flags it stale after a nav away.
+  const sweep = { navKey: dbgCacheKey(nav0, ""), rows: [], running: true, abort: false, refTop: null, refTopCell: "" };
   dbg.ckptSweep = sweep;
   const aCur = dbgFreshData("analysis");
   if (aCur && aCur.policy && aCur.policy[0]) {
@@ -5018,11 +6365,13 @@ async function dbgRunCkptSweep() {
   const sameNav = () => dbg.nav.run === nav0.run && dbg.nav.path === nav0.path
     && dbg.nav.rec === nav0.rec && dbg.nav.ply === nav0.ply
     && dbg.nav.acts.join(",") === nav0.acts.join(",");
-  const bodyBase = nav0.acts.length
-    ? { run: nav0.run, action_ids: (dbgRecordedActs() || []).slice(0, nav0.ply).concat(nav0.acts) }
-    : { run: nav0.run, path: nav0.path, record: nav0.rec, ply: nav0.ply };
   dbgRenderCkptSweep();
   try {
+    // Branch prefix needs the recorded action list — await it (never fall back
+    // to an empty prefix, which would sweep the wrong, near-empty position).
+    const bodyBase = nav0.acts.length
+      ? { run: nav0.run, action_ids: (await dbgEnsureRecordedActs()).slice(0, nav0.ply).concat(nav0.acts) }
+      : { run: nav0.run, path: nav0.path, record: nav0.rec, ply: nav0.ply };
     for (const ck of list) {
       if (sweep.abort || !sameNav()) break;
       const key = dbgCacheKey(nav0, ck.name);
@@ -5054,7 +6403,10 @@ async function dbgRunCkptSweep() {
         sweep.refTopCell = own.topCell;
       }
     }
-    debugSetStatus(sweep.abort ? "Checkpoint sweep stopped." : "");
+    // Clear the shared status line only while we still own the context — a nav
+    // mid-sweep hands it to the newer action's busy message.
+    if (sweep.abort) debugSetStatus("Checkpoint sweep stopped.");
+    else if (sameNav()) debugSetStatus("");
   } catch (e) {
     debugSetStatus(`Checkpoint sweep: ${e.message}`, "error");
   } finally {
@@ -5067,6 +6419,14 @@ function dbgRenderCkptSweep() {
   const el = document.querySelector("#dbgCkptSweep .dbg-ckpt-sweep-chart");
   if (!el) return;
   const cs = dbg.ckptSweep;
+  // The curve belongs to the position it swept — once the user navigates away
+  // it must say so instead of posing as the current position's history.
+  const stale = Boolean(cs && cs.rows.length && cs.navKey !== dbgCacheKey(dbg.nav, ""));
+  // Called from dbgRenderAll on every render (the Run button only exists in this
+  // markup) — skip the innerHTML swap when nothing observable changed.
+  const sig = cs ? `${cs.rows.length}|${cs.running ? 1 : 0}|${cs.refTop}|${cs.refTopCell}|${stale ? 1 : 0}` : "none";
+  if (el.__dbgSig === sig) return;
+  el.__dbgSig = sig;
   const btn = `<button type="button" id="dbgCkptSweepRun" class="dbg-mini-btn"${cs && cs.running ? " disabled" : ""}>${cs && cs.running ? "Running…" : (cs && cs.rows.length ? "Re-run on current position" : "Run on current position")}</button>`;
   if (!cs || !cs.rows.length) {
     el.innerHTML = `<div class="dbg-flex-head"><span class="dbg-empty-note">${cs && cs.running ? "Evaluating checkpoints…" : "Not run"}</span>${btn}</div>`;
@@ -5079,15 +6439,18 @@ function dbgRenderCkptSweep() {
   let html = `<line x1="${padL}" y1="${y(0)}" x2="${W - padR}" y2="${y(0)}" stroke="#2c3d50"></line>`
     + `<text x="4" y="${y(1) + 4}" fill="#5a6b7a" font-size="11">+1</text>`
     + `<text x="4" y="${y(-1) + 2}" fill="#5a6b7a" font-size="11">−1</text>`
-    + `<path d="${rows.map((r, i) => `${i ? "L" : "M"}${xs(i).toFixed(1)},${y(r.value).toFixed(1)}`).join("")}" fill="none" stroke="var(--accent)" stroke-width="2"></path>`;
+    + `<path d="${rows.map((r, i) => `${i ? "L" : "M"}${xs(i).toFixed(1)},${y(r.value).toFixed(1)}`).join("")}" fill="none" stroke="${stale ? "#5a6b7a" : "var(--accent)"}" stroke-width="2"></path>`;
   const labelEvery = Math.max(1, Math.ceil(rows.length / 12));
   rows.forEach((r, i) => {
     const agree = cs.refTop != null && r.top === cs.refTop;
-    html += `<circle cx="${xs(i).toFixed(1)}" cy="${y(r.value).toFixed(1)}" r="3.5" fill="${agree ? "var(--green)" : "var(--accent)"}"><title>${r.label} · v ${r.value.toFixed(3)} · top ${r.topCell || "—"}${agree ? " (= current top)" : ""}</title></circle>`;
+    html += `<circle cx="${xs(i).toFixed(1)}" cy="${y(r.value).toFixed(1)}" r="3.5" fill="${agree ? "var(--green)" : (stale ? "#5a6b7a" : "var(--accent)")}"><title>${r.label} · v ${r.value.toFixed(3)} · top ${r.topCell || "—"}${agree ? " (= current top)" : ""}</title></circle>`;
     if (agree) html += `<line x1="${xs(i).toFixed(1)}" y1="${H - padB + 3}" x2="${xs(i).toFixed(1)}" y2="${H - padB + 10}" stroke="var(--green)" stroke-width="2"></line>`;
     if (i % labelEvery === 0) html += `<text x="${xs(i).toFixed(1)}" y="${H - 4}" fill="#5a6b7a" font-size="10" text-anchor="middle">${r.label}</text>`;
   });
-  el.innerHTML = `<div class="dbg-flex-head"><span class="dbg-muted">value (stm) per checkpoint · green tick = top move matches current${cs.refTopCell ? ` (${cs.refTopCell})` : ""}</span>${btn}</div>`
+  const headTxt = stale
+    ? `<span class="dbg-muted">stale — swept a different position; Re-run for current</span>`
+    : `<span class="dbg-muted">value (stm) per checkpoint · green tick = top move matches current${cs.refTopCell ? ` (${cs.refTopCell})` : ""}</span>`;
+  el.innerHTML = `<div class="dbg-flex-head">${headTxt}${btn}</div>`
     + `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${html}</svg>`;
 }
 
@@ -5170,7 +6533,7 @@ async function dbgEnsureInputs(force) {
   entry.planesPending = true;
   dbgRenderInputs();
   try {
-    const body = Object.assign(dbgRequestBody(nav.ckptA), { planes: true });
+    const body = Object.assign(await dbgRequestBody(nav.ckptA), { planes: true });
     const data = await debugFetchJson("/api/debug/analyze", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -5354,6 +6717,7 @@ function dbgRenderAll() {
       dbgSyncPlaneSelect();
     }
     dbgRenderDockChart();
+    dbgRenderCkptSweep();  // keeps the Run button present before any sweep ran
     dbgUpdateStaleDots();
   } catch (e) {
     reportError("dbgRenderAll: " + (e && (e.stack || e.message) || e));
@@ -5461,23 +6825,31 @@ function dbgRenderPlyRail() {
     slider.disabled = !pos;
   }
   const sweep = dbgSweepData();
+  // <=900px the rail is a horizontal 22px strip — rows must be laid out with
+  // left/width (a ~150-ply game packed vertically into 22px is ~0.15px/row:
+  // invisible and untappable).
+  const horiz = Boolean(window.matchMedia && window.matchMedia("(max-width: 900px)").matches);
   // The classic slider is the no-sweep fallback (spec §1.2); once the wrongness
-  // strip is colored it takes over as the scrubber.
+  // strip is colored it takes over as the scrubber — except on mobile, where the
+  // thin strip rows are too small to be the only scrubber, so keep the slider.
   const sliderWrap = document.querySelector(".dbg-ply-slider-wrap");
-  if (sliderWrap) sliderWrap.hidden = Boolean(sweep);
+  if (sliderWrap) sliderWrap.hidden = Boolean(sweep) && !horiz;
   const strip = dbgEl("dbgPlyStrip");
   if (!strip) return;
   // Flat neutral rows until a game error sweep colors them (M9): background =
   // policy KL, right 30% tinted by |value error|, blunder/top-1-miss markers.
-  const sig = `${total}|${sweep ? `${dbgSweepKey()}#${sweep.version}` : 0}`;
+  const sig = `${total}|${horiz ? "h" : "v"}|${sweep ? `${dbgSweepKey()}#${sweep.version}` : 0}`;
   if (strip.__dbgSig !== sig) {
     strip.__dbgSig = sig;
     let maxKl = 0;
     const blunders = sweep ? new Set(dbgBlunders(sweep)) : null;
     if (sweep) for (const p of sweep.plies) if (p.kl != null) maxKl = Math.max(maxKl, p.kl);
     let html = "";
-    for (let i = 1; i <= total; i++) {
-      const top = ((i - 1) / total) * 100;
+    // One row per navigable position 0..total (matches nav.ply); sweep rows
+    // exist for plies 0..total-1 only (the post-final position is never
+    // evaluated), so the bottom row stays neutral.
+    for (let i = 0; total > 0 && i <= total; i++) {
+      const off = (i / (total + 1)) * 100;
       const row = sweep ? sweep.byPly.get(i) : null;  // sweep row = position AT ply i
       let cls = "dbg-ply-row";
       let style = "";
@@ -5504,7 +6876,10 @@ function dbgRenderPlyRail() {
           title += " · top-1 miss";
         }
       }
-      html += `<div class="${cls}" data-ply="${i}" style="top:${top.toFixed(3)}%;height:${(100 / total).toFixed(3)}%;${style}" title="${title}">${inner}</div>`;
+      const geom = horiz
+        ? `left:${off.toFixed(3)}%;width:${(100 / (total + 1)).toFixed(3)}%;`
+        : `top:${off.toFixed(3)}%;height:${(100 / (total + 1)).toFixed(3)}%;`;
+      html += `<div class="${cls}" data-ply="${i}" style="${geom}${style}" title="${title}">${inner}</div>`;
     }
     strip.innerHTML = html;
   }
@@ -5598,11 +6973,16 @@ function dbgHeatForMode(mode) {
       const data = (planes.data && planes.data[idx]) || [];
       const dim = (planes.shape && planes.shape[1]) || 41;
       const half = Math.floor(dim / 2);
+      // The dense 41x41 crop is anchored on the ROUNDED MEAN of the placed
+      // stones (geometry.crop_center / encoding.rs model1_crop_center), NOT on
+      // axial (0,0) — projecting without the center shifts every cell by the
+      // centroid offset on any non-origin-centered position.
+      const center = dbgPlaneCropCenter(planes);
       const pos = dbg.position;
       const coords = pos ? (pos.legal || []).concat(debugCurrentPlacements()) : [];
       for (const c of coords) {
-        const qi = c.q + half;
-        const ri = c.r + half;
+        const qi = c.q - center.q + half;
+        const ri = c.r - center.r + half;
         if (qi < 0 || ri < 0 || qi >= dim || ri >= dim) continue;
         const v = data[ri * dim + qi];
         if (v) out.values.set(`${c.q},${c.r}`, v);
@@ -5611,6 +6991,33 @@ function dbgHeatForMode(mode) {
     }
   }
   return dbgHeatFinish(out);
+}
+
+function dbgRoundHalfEven(x) {
+  // Banker's rounding — matches Python round() (geometry.crop_center) and the
+  // Rust encoder's ties-to-even (encoding.rs model1_crop_center).
+  const f = Math.floor(x);
+  if (x - f !== 0.5) return Math.round(x);
+  return f % 2 === 0 ? f : f + 1;
+}
+
+function dbgPlaneCropCenter(planes) {
+  // Crop anchor for projecting board axial coords into the 41x41 input planes.
+  // Prefer the server-reported center (input_planes.center = [q, r], additive
+  // §3.6 field); fall back to recomputing the stone-centroid client-side so the
+  // overlay stays correct against older analyze payloads.
+  if (planes && Array.isArray(planes.center) && planes.center.length === 2) {
+    return { q: Math.trunc(Number(planes.center[0]) || 0), r: Math.trunc(Number(planes.center[1]) || 0) };
+  }
+  const stones = debugCurrentPlacements();
+  if (!stones.length) return { q: 0, r: 0 };
+  let sq = 0;
+  let sr = 0;
+  for (const s of stones) {
+    sq += s.q;
+    sr += s.r;
+  }
+  return { q: dbgRoundHalfEven(sq / stones.length), r: dbgRoundHalfEven(sr / stones.length) };
 }
 
 function dbgHeatFinish(out) {
@@ -5826,7 +7233,7 @@ function dbgRenderBoard() {
   // so a ghost click is a no-op (it never reaches the .dbg-cell underneath).
   const treeFresh = dbgFreshData("tree");
   const preview = dbg.treePreview && dbg.treePreview.key === dbgCurrentKey() ? dbg.treePreview.ids : null;
-  const ghostLine = preview || (treeFresh && treeFresh.pv) || [];
+  const ghostLine = dbg.treeGhostsOff ? [] : (preview || (treeFresh && treeFresh.pv) || []);
   ghostLine.forEach((id, i) => {
     const g = dbgUnpackActionId(id);
     const c = center(g.q, g.r);
@@ -5907,7 +7314,9 @@ function dbgRenderHeads() {
       chip.title = "";
     }
     if (distEl) distEl.innerHTML = `<div class="dbg-empty-note">${note}</div>`;
-    if (swapBlock) swapBlock.hidden = false;
+    // Default-hidden pre-analysis: the probe is hexgt-only (spec §1.4) and the
+    // analyze commit unhides it only when value_swapped is present.
+    if (swapBlock) swapBlock.hidden = true;
     if (swapEl) swapEl.innerHTML = `<span class="dbg-muted">—</span>`;
     if (stvEl) stvEl.innerHTML = `<div class="dbg-empty-note">Short-term value horizons</div>`;
     if (mlEl) {
@@ -6012,11 +7421,28 @@ function dbgTopMovesHtml(a) {
     for (const ch of tree.tree.children || []) treeById.set(ch.action_id, ch);
   }
   const recorded = (!dbg.nav.acts.length && dbg.gameActs.length > dbg.nav.ply) ? dbg.gameActs[dbg.nav.ply] : null;
-  const rows = (a.policy || []).slice(0, 12).map(p => {
-    const visits = visitsById.has(p.action_id) ? visitsById.get(p.action_id) : null;
-    const node = treeById.get(p.action_id);
+  // Row candidates = top-12 priors UNION search-promoted moves (fresh visit
+  // share > 3%) UNION fresh tree root children: a low-prior move the search
+  // promoted must get a row (the `under` badge and visits/Q/Δ sorts depend on
+  // it). a.policy is the complete legal set, so prior/coords always resolve.
+  const priorById = new Map((a.policy || []).map(p => [p.action_id, p]));
+  const ids = [];
+  const seen = new Set();
+  const add = id => {
+    if (priorById.has(id) && !seen.has(id)) {
+      seen.add(id);
+      ids.push(id);
+    }
+  };
+  for (const p of (a.policy || []).slice(0, 12)) add(p.action_id);
+  if (s) for (const row of s.visit_policy || []) if (row.p > 0.03) add(row.action_id);
+  for (const [id, node] of treeById) if (node.n > 0) add(id);
+  const rows = ids.map(id => {
+    const p = priorById.get(id);
+    const visits = visitsById.has(id) ? visitsById.get(id) : null;
+    const node = treeById.get(id);
     return {
-      action_id: p.action_id,
+      action_id: id,
       q: p.q,
       r: p.r,
       prior: p.p,
@@ -6031,6 +7457,7 @@ function dbgTopMovesHtml(a) {
     return v == null ? -Infinity : v;
   };
   rows.sort((x, y) => sortVal(y) - sortVal(x));
+  rows.length = Math.min(rows.length, 16);
   const arrow = k => (sortKey === k ? " ▾" : "");
   const head = `<div class="dbg-move-row dbg-move-head"><span>#</span><span>cell</span><span class="sortable" data-dbg-sort="prior">prior${arrow("prior")}</span><span class="sortable" data-dbg-sort="visits">visits${arrow("visits")}</span><span class="sortable" data-dbg-sort="qm">Q${arrow("qm")}</span><span class="sortable" data-dbg-sort="delta">Δ${arrow("delta")}</span></div>`;
   const body = rows.map((row, i) => {
@@ -6042,7 +7469,7 @@ function dbgTopMovesHtml(a) {
     } else if (row.visits != null && row.prior < 0.03 && row.visits > 0.10) {
       badge = ` <span class="dbg-badge dbg-badge-under" title="low prior earned high visits">under</span>`;
     }
-    return `<div class="dbg-move-row${isBest ? " dbg-move-best" : ""}"${isRec ? ` title="recorded move"` : ""}><span>${i + 1}</span><span>${row.q},${row.r}${isRec ? " ●" : ""}${badge}</span><span>${(row.prior * 100).toFixed(1)}%</span><span>${row.visits != null ? (row.visits * 100).toFixed(1) + "%" : "—"}</span><span>${row.qm != null ? row.qm.toFixed(2) : "—"}</span><span>${row.delta != null ? (row.delta >= 0 ? "+" : "") + (row.delta * 100).toFixed(1) : "—"}</span></div>`;
+    return `<div class="dbg-move-row${isBest ? " dbg-move-best" : ""}"${isRec ? ` title="recorded move"` : ""}><span>${i + 1}</span><span>${row.q},${row.r}${isRec ? " ●" : ""}${badge}</span><span>${(row.prior * 100).toFixed(1)}%</span><span>${row.visits != null ? (row.visits * 100).toFixed(1) + "%" : "—"}</span><span>${row.qm != null ? row.qm.toFixed(2) : "—"}</span><span>${row.delta != null ? (row.delta >= 0 ? "+" : "") + (row.delta * 100).toFixed(1) + "%" : "—"}</span></div>`;
   }).join("");
   return head + body;
 }
@@ -6090,7 +7517,10 @@ function dbgRenderSearchPanel() {
     return;
   }
   sum.className = "dbg-search-summary";
-  const a = dbg.analysis;
+  // Key AGREEMENT (not freshness): Δ-vs-raw and the argmax compare are only
+  // meaningful when search and analysis describe the same position. Both stale
+  // to the SAME key stays visible (the M14 dot already flags it).
+  const a = dbg.keys.analysis === dbg.keys.search ? dbg.analysis : null;
   const priorTop = a && a.policy && a.policy[0];
   const agree = priorTop && s.best && priorTop.q === s.best.q && priorTop.r === s.best.r;
   const delta = a ? s.root_value - a.value : null;
@@ -6112,7 +7542,16 @@ function dbgRenderComparePanel() {
   const a = dbg.analysis;
   const b = dbg.analysisB;
   if (!b) {
-    body.innerHTML = `<div class="dbg-empty-note">Evaluating checkpoint B…</div>`;
+    // Three-way: in flight / failed / not started — a failed B analyze must
+    // surface as an error, not sit on "Evaluating…" forever.
+    const entryB0 = dbg.cache.get(dbgCacheKey(dbg.nav, dbg.nav.ckptB));
+    if (entryB0 && entryB0.analysisPending) {
+      body.innerHTML = `<div class="dbg-empty-note">Evaluating checkpoint B…</div>`;
+    } else if (entryB0 && entryB0.analysisError) {
+      body.innerHTML = `<div class="dbg-empty-note">B analyze failed: ${escapeText(entryB0.analysisError)} — use ↻ to retry</div>`;
+    } else {
+      body.innerHTML = `<div class="dbg-empty-note">Checkpoint B not evaluated yet</div>`;
+    }
     return;
   }
   const topA = a && a.policy && a.policy[0];
@@ -6184,7 +7623,15 @@ function dbgCkptInfoHtml(name) {
   } else {
     const m = info.meta || {};
     if (m.lineage) rows.push(["Lineage", escapeText(m.lineage)]);
-    if (m.arch && m.arch.blocks_type) rows.push(["Trunk", escapeText(String(m.arch.blocks_type))]);
+    // §3.8 contract: meta.arch is a flattened "key=val, …" display STRING (web.py
+    // converts the worker's dict). Parse blocks_type out of it for the Trunk row;
+    // stay tolerant of a raw dict in case an older/other backend returns one.
+    const archStr = m.arch && typeof m.arch === "object"
+      ? Object.keys(m.arch).sort().map(k => `${k}=${m.arch[k]}`).join(", ")
+      : (m.arch ? String(m.arch) : "");
+    const trunkMatch = archStr.match(/(?:^|,\s*)blocks_type=([^,]+)/);
+    if (trunkMatch) rows.push(["Trunk", escapeText(trunkMatch[1].trim())]);
+    if (archStr) rows.push(["Arch", escapeText(archStr)]);
     if (m.rl_epoch != null) rows.push(["RL epoch", String(m.rl_epoch)]);
     if (m.step != null) rows.push(["Step", String(m.step)]);
     if (m.graft) rows.push(["Graft", m.graft === "pre" ? "pre (≤e6, expanded)" : "post (≥e7)"]);
@@ -6311,7 +7758,9 @@ function dbgRefreshPanel(panelId) {
       dbgStub("Select checkpoint B in the context strip first.");
       return;
     }
-    delete dbgCacheEntry(dbgCacheKey(dbg.nav, dbg.nav.ckptB)).analysis;
+    const entryB = dbgCacheEntry(dbgCacheKey(dbg.nav, dbg.nav.ckptB));
+    delete entryB.analysis;
+    delete entryB.analysisError;
     dbgEnsureAnalysisB();
   } else if (panelId === "dbgTabCkpt") dbgEnsureCkptInfo(true);
   else if (panelId === "dbgTabTargets") dbgEnsureRecordRow(true);
@@ -6440,6 +7889,9 @@ function dbgClearToggles() {
     const el = dbgEl(id);
     if (el) el.checked = dbg.overlays[key];
   }
+  // Repaint here: the follow-up dbgNavigate is a same-hash no-paint when the
+  // base mode is unchanged (Shift+digit solo / 0 with the mode already set).
+  dbgRenderBoard();
 }
 
 function dbgToggleLog() {
@@ -6519,7 +7971,15 @@ function dbgHandleKey(e) {
   } else if (k === "s" || k === "S") {
     dbgRunSearch();
   } else if (k === "t" || k === "T") {
-    dbgRunTree();
+    // §1.7 "T  run / toggle debug tree": with a fresh tree for this key, toggle
+    // its PV ghosts; otherwise run (dbgRunTree stubs while one is in flight).
+    if (!dbg.treeBusy && dbgFreshData("tree")) {
+      dbg.treeGhostsOff = !dbg.treeGhostsOff;
+      dbg.treePreview = null;
+      dbgRenderBoard();
+    } else {
+      dbgRunTree();
+    }
   } else if (k === "l" || k === "L") {
     dbgToggleLog();
   } else if (k === "u" || k === "U") {
@@ -6544,6 +8004,22 @@ function debugBindEvents() {
   const root = dbgEl("debugScreen");
   if (!root || root.__dbgDelegated) return;  // bind once on the stable ancestor
   root.__dbgDelegated = true;
+
+  // The ply strip renders row geometry for the current orientation (vertical
+  // rail on desktop, horizontal 22px strip <=900px) — rebuild it on breakpoint
+  // crossings so the inline top/height vs left/width styles stay correct.
+  if (window.matchMedia) {
+    const mq = window.matchMedia("(max-width: 900px)");
+    const onOrientation = () => {
+      try {
+        dbgRenderPlyRail();
+      } catch (e) {
+        reportError("dbgRenderPlyRail: " + (e && (e.stack || e.message) || e));
+      }
+    };
+    if (mq.addEventListener) mq.addEventListener("change", onOrientation);
+    else if (mq.addListener) mq.addListener(onOrientation);
+  }
 
   // BUTTONS via event DELEGATION on #debugScreen (which is never rebuilt), plus a
   // touchend fallback. Per-button click listeners failed on the owner's phone:
@@ -6574,6 +8050,10 @@ function debugBindEvents() {
     dbgBranchReturn: { fn: () => dbgNavigate({ acts: [] }), tap: "return to game" },
     dbgPinAdd: { fn: () => dbgAddPin(), tap: "pin" },
     dbgPinExport: { fn: () => dbgExportPins(), tap: "pin export" },
+    dbgPaletteBtn: { fn: () => dbgOpenPalette(), tap: "palette" },
+    dbgHelpBtn: { fn: () => { const h = dbgEl("dbgHelp"); if (h) h.hidden = !h.hidden; }, tap: "help" },
+    dbgBlunderPrev: { fn: () => dbgStepBlunder(-1), tap: "blunder prev" },
+    dbgBlunderNext: { fn: () => dbgStepBlunder(1), tap: "blunder next" },
     dbgCmpHeat: { fn: () => dbgToggleCmpHeat(), tap: "cmp heat" },
     dbgCkptSweepStop: {
       fn: () => {
@@ -6676,6 +8156,8 @@ function debugBindEvents() {
     if (modeBtn) {
       ev.preventDefault();
       diagTap("mode " + modeBtn.dataset.mode);
+      // Parity with the 0 key (§1.7): None = mode none + clear additive toggles.
+      if (modeBtn.dataset.mode === "none") dbgClearToggles();
       dbgClearCmpHeat();  // picking a base mode dismisses the cmp Δ overlay
       dbgNavigate({ mode: modeBtn.dataset.mode }, { replace: true });
       return;

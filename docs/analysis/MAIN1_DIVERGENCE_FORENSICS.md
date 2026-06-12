@@ -1,0 +1,32 @@
+# Why did main1 "stay stable" while main_2/main_3 diverged? — commit + data forensics
+
+**Date:** 2026-06-12. **Method:** 11-agent workflow — commit forensics over `4adde71..HEAD` (29 commits), 4-way config archaeology, code deep-dives (search / training pipeline / crop contract), full-population empirical scans of main1's actual games (ep5/15/24–36), synthesis, 3-verifier adversarial panel (all sustained, minor notes only; zero revisions). Machine-readable package: `scripts/_wf_gd_RESULT_*.json`.
+
+## The short answer
+
+**The premise is half wrong: main1 was not stable.** It had three regimes — ep1–3 (barely trained; 100k train gate unmet), **ep4–23: its own degeneracy** (games *shortened* to 30–37 dec/game, sealbot eval crashed 42/22 → **7/57** at ep21), and ep24–35 after a **manual rescue resume** (06-10 00:00Z: visits 256→512, heads_v2 + moves_left head, adaptive EMA temperature, train_samples 32k) from which eval recovered monotonically (→51/13) while game lengths climbed 45→159, *still rising* when the run was manually halted mid-ep36 for main_2 prep.
+
+**Spatial compactness is refuted.** main1's mature play was NOT inside the crop: ep35 had 14.1% of games placing stones out-of-crop, and main1 generated **frozen-win doses at or above main_3's ignition dose for ten consecutive epochs** (14/25/5/19/20/10/8/19/25 frozen games per 256, frozen-ply fraction up to 2.81% vs main_3 ep8's 2.55%). The crop/encoding contract is byte-identical across all runs (engine diff empty; TSS out-of-crop skip predates main1's launch).
+
+**The decisive empirical fact: frozen-win dose is necessary but not sufficient.** main1 *absorbed* every dose — each high-dose epoch was followed by a sharply lower one (ep28 2.01% → ep29 0.20%) while eval improved and value CE held below the 0.693 hedge. main_3 compounded instead (dose 2.55%→6.85%, dec/game 108→170→267 in two epochs). **Ignition requires the dose to land on a vulnerable training state.**
+
+## Why main1 absorbed what main_3 could not (ranked enablers of the divergence)
+
+1. **One watershed commit removed both of main1's accidental target sharpeners: `18bcad0` (06-10 21:32Z)** — root FPU 0.20 was applied AT the root for all of main1 (starving noise children; now auto-zeroed under noise, KataGo-style), and the tree-reuse bug suppressed `root_policy_temperature` on every root after a game's first (effective T≈1.0; now genuinely applied). main1's recorded visit targets were structurally sharp (top1 0.569 at ep11, 0.689 at ep35) — sharp targets → strong priors → decisive conversion. main1 provably never ran this commit (last relaunch 3h45m earlier + rust rebuild required). [code-verified]
+2. **PCR (same commit + `bced68b`)**: main1 recorded EVERY decision as a full noisy 512-visit search → **~4.6× the absolute early/midgame rows per game** (75 vs 16 ply<80 rows/game), diluting endgame floods, with every conversion position a training row; main_3 plays 75% of moves as unrecorded 128-visit greedy probes (avg 224 sims/decision in the conversion phase). Operates through *data composition compounding*, not per-move depth (the H-B refutation stands). [code-verified + measured]
+3. **Run-age/window asymmetry + the new trainer clamp**: main_3's flood hit 30–43k-row windows at **68–100% training share** (and `18bcad0`'s `min(requested, available)` clamp trains 100% of window rows at 48k requested); main1's equal floods hit mature 94–138k windows at 30–38% share, subsampled to 44–46%. Same taper config (predates main1 — briefing assumption corrected). [measured + code-verified]
+4. **Value-head maturity at marathon onset** (timing, not a knob): main1's marathons arrived ep26+, after its head matured (CE < hedge from ep5–7); main_3's arrived at ep8 on an immature head — amplitude collapsed 0.486→0.273 in one epoch. [measured; causal direction inferred from contrast]
+5. **main_2 was a different disease**: flattener stack (ramp 1.25, eps 0.25 under zero FPU, 37.5-ply halflife, soft_z×binned-CE) on top of the sharpener removal — target flatter than the prior from epoch 1. main_3 fixed all of that config-only (zero training-code diff main_2→main_3) but inherited PCR + clamp + fresh-small-window + epoch-8 lengthening pressure.
+6–7. EMA temperature feedback (bounded small for main_3; its deep play was *sharper* than late main1's) and policy-init openings (measured minor: matched-epoch opening footprints identical).
+
+**Bottom line:** the crop cliff never moved; what changed is how fast the lineage walks toward it (lengthening pressure appears at ~ep8 in every 512-visit run: main1 ep24+, main_2 ep7+, main_3 ep8, main_4 ep8) and what training state absorbs the fall. main1's record also includes one human rescue and a manual halt while its flood share (0.510) was entering the sick band — partial survivorship.
+
+## Implications adopted for main_4 (staged; full list in the JSON)
+
+- **Now (monitoring-only):** flood-share gate = epoch effective inflow / window rows (trip >0.5; main_3 ignited at 0.68–1.0, main1 absorbed at 0.30–0.38); per-epoch recorded visit-target top1 by ply bucket (main1 healthy 0.57–0.69, main_2 collapse 0.27).
+- **Stage 2 (trigger-gated, config-only):** *length-conditioned* PCR — raise full-search probability only late-game (restores main1's conversion-row density at ~15–20% cost, not 4×); A/B one epoch first. H-B refuted per-position depth on a sick net; it did not test composition-over-epochs on a healthy one.
+- **Stage 2b (last-resort knob, explicitly un-does a KataGo alignment):** partial root-FPU (0.05–0.10) only on a two-epoch visit-top1 downtrend; prefer eps 0.20→0.15 first per main_2 forensics.
+- **Stage 3 (owner + engine team):** moves-left search utility — the principled replacement for main1's accidental conversion sharpness, and the only lever addressing the in-crop lengthening residual that no current armor touches. Prototype offline against the ep8–10 golden corpora first.
+- **Permanent:** C2 quarantine; amplitude probe on any yellow gate (CE is maskable — proven twice); restart hygiene (seed windows; expect danger at ep6–12 of any fresh run; pre-arm C1).
+
+**Open questions** (full list in JSON): which component of main1's ep24 rescue bundle drove its length inflection (unablated); whether main1 would have survived ep40+ (flood share was rising at halt); what drives main_4's in-crop lengthening (the stage-3 design question); whether length-conditioned PCR generalizes to a healthy net.

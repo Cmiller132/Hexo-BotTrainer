@@ -49,7 +49,20 @@ def _to_wsl(path: Path | str) -> str:
 
 
 class DebugWorkerError(RuntimeError):
-    pass
+    """Transport/process-level failure: the worker died, wedged, or never started."""
+
+
+class DebugWorkerTimeout(DebugWorkerError):
+    """The worker blew its request deadline (likely mid-compute; must be killed)."""
+
+
+class DebugRequestError(RuntimeError):
+    """Per-request failure reported by a HEALTHY worker (an ``ok:false`` reply).
+
+    The child catches its own request exceptions and keeps serving
+    (``debug_worker.main``), so this must never restart the process: restarting
+    would drop the worker's checkpoint LRU and re-pay the torch import only to
+    hit the same deterministic error again."""
 
 
 class DebugWorker:
@@ -156,7 +169,7 @@ class DebugWorker:
             try:
                 line = self._lines.get(timeout=timeout)
             except queue.Empty as exc:
-                raise DebugWorkerError(f"worker timed out after {timeout:.0f}s") from exc
+                raise DebugWorkerTimeout(f"worker timed out after {timeout:.0f}s") from exc
             if line is None:
                 raise DebugWorkerError(f"worker exited; stderr tail:\n{self._err_tail()}")
             line = line.strip()
@@ -169,16 +182,31 @@ class DebugWorker:
             if resp.get("id") != req_id:
                 continue  # stale/mismatched; keep reading
             if not resp.get("ok"):
-                raise DebugWorkerError(str(resp.get("error", "unknown worker error")))
+                # The worker replied, so the process is healthy: this is an
+                # application-level error (bad request), not a transport one.
+                raise DebugRequestError(str(resp.get("error", "unknown worker error")))
             return resp.get("result")
 
     def request(self, op: str, *, timeout: float = DEFAULT_TIMEOUT, **fields: Any) -> Any:
-        """Serialized request to the worker, restarting it once on failure."""
+        """Serialized request to the worker.
+
+        Failure handling, by class:
+        * ``DebugRequestError`` (worker answered ``ok:false``) propagates without
+          touching the process — the worker is healthy and a retry of the same
+          request would deterministically fail again.
+        * ``DebugWorkerTimeout`` kills the (likely mid-compute) worker so the
+          next request gets a fresh process, but is NOT retried: resending the
+          identical request would just burn the full budget a second time.
+        * Any other ``DebugWorkerError`` (dead process, broken pipe) restarts
+          the worker once and resends — that path self-heals."""
 
         with self._lock:
             try:
                 self._ensure_started()
                 return self._exchange({"op": op, **fields}, timeout=timeout)
+            except DebugWorkerTimeout:
+                self.shutdown_locked()
+                raise
             except DebugWorkerError:
                 self.shutdown_locked()
                 # One restart attempt: a wedged/crashed worker should self-heal.

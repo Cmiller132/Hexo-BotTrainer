@@ -322,6 +322,47 @@ def test_record_row_round_trips_a_real_shard(cpu_only):
     assert mismatch["found"] is False and mismatch["reason"] == "row_mismatch"
 
 
+def test_record_row_bad_shard_reports_found_false(tmp_path):
+    """Never-raises contract (§3.9): a foreign/partially-written .npz missing
+    expected arrays yields found:false reason "bad_shard", not a KeyError."""
+    np = pytest.importorskip("numpy")
+
+    no_index = tmp_path / "no_index.npz"
+    np.savez(no_index, num_rows=np.asarray(1, dtype=np.int64))  # no turn_index at all
+    result = di.read_record_row(str(no_index), 0, None)
+    assert result["found"] is False and result["reason"] == "bad_shard"
+    assert result["row"] is None
+
+    partial = tmp_path / "partial.npz"  # row indexable, but the decode arrays are absent
+    np.savez(
+        partial,
+        num_rows=np.asarray(1, dtype=np.int64),
+        turn_index=np.asarray([0], dtype=np.int32),
+    )
+    result = di.read_record_row(str(partial), 0, None)
+    assert result["found"] is False and result["reason"] == "bad_shard"
+    assert result["row"] is None
+    # An unmatched turn on the same shard is still the plain no_row notice.
+    assert di.read_record_row(str(partial), 5, None)["reason"] == "no_row"
+
+
+def test_record_row_does_not_fabricate_unpersisted_fields():
+    """Compact shards drop policy_surprise / pcr_full / value_target_reason /
+    opp_policy_source at write; the row must report null for them (frontend
+    renders "not recorded"), never a neutral stand-in (§3.9)."""
+    np = pytest.importorskip("numpy")
+    shard = _sample_shard()
+    with np.load(shard, allow_pickle=True) as data:
+        turn = int(data["turn_index"][0])
+        player = int(data["current_player"][0])
+
+    row = di.read_record_row(str(shard), turn, player)["row"]
+    assert row["policy_surprise"] is None
+    assert row["pcr_full"] is None
+    assert row["value_target_reason"] is None
+    assert row["opp_policy_source"] is None
+
+
 def test_game_eval_aligns_plies_and_kl_is_nonnegative(cpu_only):
     loaded = di.load_checkpoint(_checkpoint("hexgt_rl_latest.pt"))
     actions = _sample_actions(16)

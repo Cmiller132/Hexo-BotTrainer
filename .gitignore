@@ -8,6 +8,10 @@ __pycache__/
 .venv/
 *.egg-info/
 
+# One-off analysis probes and their outputs from completed investigations
+# (kept locally for reference, not versioned).
+scripts/archive/
+
 # Local runtime artifacts.
 runs/
 *.log

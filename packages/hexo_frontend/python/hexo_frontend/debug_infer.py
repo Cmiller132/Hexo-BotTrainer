@@ -399,12 +399,15 @@ def _load_dense_checkpoint(ckpt_path: Path, payload: dict[str, Any], lineage: st
     )
 
 
-def _dense_inputs(pkg: SimpleNamespace, state: Any) -> tuple[torch.Tensor, list[int], list[int]]:
+def _dense_inputs(
+    pkg: SimpleNamespace, state: Any
+) -> tuple[torch.Tensor, list[int], list[int], tuple[int, int]]:
     """Encode one engine state into the dense 41x41 crop via the Rust accelerator.
 
-    Returns the input planes ``(1, C, 41, 41)`` plus the per-row legal action ids
-    and their flat crop indices (used to softmax the policy over the legal set,
-    exactly as production inference does)."""
+    Returns the input planes ``(1, C, 41, 41)`` plus the per-row legal action ids,
+    their flat crop indices (used to softmax the policy over the legal set,
+    exactly as production inference does), and the ``(q, r)`` crop center the
+    encoder used (the Rust value, never re-derived client- or Python-side)."""
 
     payload = pkg.rust_bridge.model1_batch_inputs([state])
     shape = tuple(int(x) for x in payload["shape"])
@@ -412,7 +415,8 @@ def _dense_inputs(pkg: SimpleNamespace, state: Any) -> tuple[torch.Tensor, list[
     inputs = torch.frombuffer(bytearray(payload["inputs"]), dtype=torch.float32).reshape(shape)
     legal_action_ids = [int(a) for a in payload["legal_action_ids"][0]]
     legal_flat = [int(x) for x in payload["legal_flat_indices"][0]]
-    return inputs, legal_action_ids, legal_flat
+    center_q, center_r = payload["centers"][0]
+    return inputs, legal_action_ids, legal_flat, (int(center_q), int(center_r))
 
 
 def _dense_legal_rows(logits: torch.Tensor, legal_action_ids: list[int], legal_flat: list[int]) -> list[dict[str, Any]]:
@@ -443,7 +447,7 @@ def _decode_dist(losses_mod: Any, logits: torch.Tensor) -> dict[str, Any]:
 def _analyze_dense(loaded: LoadedModel, action_ids: Sequence[int], *, planes: bool = False) -> dict[str, Any]:
     pkg = _dense_pkg(loaded.lineage)
     state = state_from_actions(action_ids)
-    inputs, legal_action_ids, legal_flat = _dense_inputs(pkg, state)
+    inputs, legal_action_ids, legal_flat, crop_center = _dense_inputs(pkg, state)
     out = loaded.model.forward(inputs)
 
     policy = _dense_legal_rows(out["policy"][0].float(), legal_action_ids, legal_flat)
@@ -468,6 +472,9 @@ def _analyze_dense(loaded: LoadedModel, action_ids: Sequence[int], *, planes: bo
             "names": _plane_names(loaded.lineage),
             "shape": [int(x) for x in plane_data.shape],
             "data": [[round(float(v), 4) for v in plane.reshape(-1)] for plane in plane_data],
+            # The exact crop center the encoder used (§3.6) — the board overlay
+            # must anchor on this, not a re-derived centroid.
+            "center": [crop_center[0], crop_center[1]],
         }
 
     current = engine.current_player(state)
@@ -859,7 +866,7 @@ def _tree_evaluator(loaded: LoadedModel, n: int | None):
         pkg = _dense_pkg(loaded.lineage)
 
         def evaluate(state: Any) -> tuple[list[tuple[int, float]], float]:
-            inputs, legal_action_ids, legal_flat = _dense_inputs(pkg, state)
+            inputs, legal_action_ids, legal_flat, _center = _dense_inputs(pkg, state)
             out = loaded.model.forward(inputs)
             value = float(
                 pkg.losses.decode_binned_value(out["value"][0].float().reshape(1, -1)).reshape(()).item()
@@ -1120,11 +1127,13 @@ def _npz_policy_rows(
 def read_record_row(npz_path: str | Path, turn_index: int, expect_player: int | None) -> dict[str, Any]:
     """Decode one recorded training row from a compact self-play shard (§3.9).
 
-    Never raises on mismatch — returns ``found:false`` with a reason instead.
+    Never raises — returns ``found:false`` with a reason instead, including
+    ``"bad_shard"`` for foreign/partial .npz files missing expected arrays.
     The compact shard format intentionally drops some finalize-time facts
-    (``value_target_reason`` / ``policy_surprise`` / ``opp_policy_source`` /
-    ``truncated`` — see compact_io's docstring), so those come back at neutral
-    defaults here; ``search_visits`` is recovered from the raw visit mass and
+    (``value_target_reason`` / ``policy_surprise`` / ``pcr_full`` /
+    ``opp_policy_source`` — see compact_io's docstring), so those come back as
+    null (never a fabricated neutral); ``search_visits`` is recovered from the
+    raw visit mass (0 = unknown, normalized-weight shards) and
     ``frequency_weight`` from surprise-materialized row duplication. The server
     overlays ``truncated``/``value_target_reason`` from the .hxr record."""
 
@@ -1139,58 +1148,65 @@ def read_record_row(npz_path: str | Path, turn_index: int, expect_player: int | 
 
     miss = {"found": False, "reason": "no_row", "npz": str(npz_path), "turn_index": int(turn_index), "row": None}
     if "num_rows" not in arrays or "turn_index" not in arrays:
-        return miss
-    n_rows = int(arrays["num_rows"])
-    turns = arrays["turn_index"]
-    matches = [i for i in range(n_rows) if int(turns[i]) == int(turn_index)]
-    if not matches:
-        return miss
-    i = matches[0]
+        return {**miss, "reason": "bad_shard"}
+    try:
+        n_rows = int(arrays["num_rows"])
+        turns = arrays["turn_index"]
+        matches = [i for i in range(n_rows) if int(turns[i]) == int(turn_index)]
+        if not matches:
+            return miss
+        i = matches[0]
 
-    player = int(arrays["current_player"][i])
-    if expect_player is not None and player != int(expect_player):
-        # M8 misalignment guard: a row whose stored side-to-move disagrees with
-        # the replay-derived one must be refused, never silently shown.
-        return {**miss, "reason": "row_mismatch"}
+        player = int(arrays["current_player"][i])
+        if expect_player is not None and player != int(expect_player):
+            # M8 misalignment guard: a row whose stored side-to-move disagrees with
+            # the replay-derived one must be refused, never silently shown.
+            return {**miss, "reason": "row_mismatch"}
 
-    horizons = [int(h) for h in arrays["horizons"]]
-    policy, policy_total = _npz_policy_rows(arrays, "pol_act", "pol_w", "pol_off", i)
-    opp_policy, _opp_total = _npz_policy_rows(arrays, "opp_act", "opp_w", "opp_off", i)
-    stvalue = {
-        str(h): {
-            "target": round(float(arrays["stvalue"][i, c]), 5),
-            "mask": bool(arrays["stvalue_mask"][i, c] > 0.0),
+        horizons = [int(h) for h in arrays["horizons"]]
+        policy, policy_total = _npz_policy_rows(arrays, "pol_act", "pol_w", "pol_off", i)
+        opp_policy, _opp_total = _npz_policy_rows(arrays, "opp_act", "opp_w", "opp_off", i)
+        stvalue = {
+            str(h): {
+                "target": round(float(arrays["stvalue"][i, c]), 5),
+                "mask": bool(arrays["stvalue_mask"][i, c] > 0.0),
+            }
+            for c, h in enumerate(horizons)
         }
-        for c, h in enumerate(horizons)
-    }
-    moves_left = None
-    if "moves_left" in arrays:  # restnet-era shards only; raw decisions remaining, -1 = masked
-        raw = float(arrays["moves_left"][i])
-        moves_left = {"target": round(raw, 3), "mask": bool(raw >= 0.0)}
+        moves_left = None
+        if "moves_left" in arrays:  # restnet-era shards only; raw decisions remaining, -1 = masked
+            raw = float(arrays["moves_left"][i])
+            moves_left = {"target": round(raw, 3), "mask": bool(raw >= 0.0)}
 
-    row = {
-        "current_player": player,
-        "phase": str(arrays["phase"][i]),
-        "value_target": round(float(arrays["value"][i]), 5),
-        "value_target_reason": "",  # not persisted in compact shards (server overlays)
-        "policy": policy,
-        "opp_policy": opp_policy or None,
-        "opp_policy_source": None,  # not persisted in compact shards
-        "stvalue": stvalue,
-        "moves_left": moves_left,
-        "policy_surprise": 0.0,  # not persisted (baked into row duplication at write)
-        # Raw visit mass when the stored weights are counts; runs that store the
-        # NORMALIZED visit policy (sum ~1) can't recover it -> 0 means unknown.
-        "search_visits": int(round(policy_total)) if policy_total > 1.5 else 0,
-        "pcr_full": True,  # only full-search rows are ever written (PCR records full only)
-        "frequency_weight": float(len(matches)),  # surprise weighting = in-place duplication
-        "truncated": False,  # not persisted (server overlays from the .hxr record)
-    }
+        row = {
+            "current_player": player,
+            "phase": str(arrays["phase"][i]),
+            "value_target": round(float(arrays["value"][i]), 5),
+            "value_target_reason": None,  # not persisted in compact shards (server overlays)
+            "policy": policy,
+            "opp_policy": opp_policy or None,
+            "opp_policy_source": None,  # not persisted in compact shards
+            "stvalue": stvalue,
+            "moves_left": moves_left,
+            "policy_surprise": None,  # not persisted (baked into row duplication at write)
+            # Raw visit mass when the stored weights are counts; runs that store the
+            # NORMALIZED visit policy (sum ~1) can't recover it -> 0 means unknown.
+            "search_visits": int(round(policy_total)) if policy_total > 1.5 else 0,
+            "pcr_full": None,  # not persisted (row existence implies a full search today)
+            "frequency_weight": float(len(matches)),  # surprise weighting = in-place duplication
+            "truncated": False,  # not persisted (server overlays from the .hxr record)
+        }
+    except (KeyError, IndexError, ValueError, TypeError):
+        # Never-raises contract (§4.1): a shard carrying num_rows/turn_index but
+        # missing/garbling other expected arrays is foreign or partially written.
+        return {**miss, "reason": "bad_shard"}
     return {"found": True, "reason": None, "npz": str(npz_path), "turn_index": int(turn_index), "row": row}
 
 
 def _npz_rows_by_turn(npz_path: str | Path) -> dict[int, dict[str, Any]]:
-    """turn_index -> {policy pairs, value_target} for one shard (first row wins)."""
+    """turn_index -> {policy pairs, value_target, current_player} for one shard
+    (first row wins). ``current_player`` feeds the per-ply M8 misalignment guard
+    in ``game_eval_positions``."""
 
     try:
         with np.load(Path(npz_path), allow_pickle=True) as data:
@@ -1210,7 +1226,11 @@ def _npz_rows_by_turn(npz_path: str | Path) -> dict[int, dict[str, Any]]:
             (int(aid), float(w))
             for aid, w in zip(arrays["pol_act"][a:b].tolist(), arrays["pol_w"][a:b].tolist())
         ]
-        out[turn] = {"policy": pairs, "value_target": float(arrays["value"][i])}
+        out[turn] = {
+            "policy": pairs,
+            "value_target": float(arrays["value"][i]),
+            "current_player": int(arrays["current_player"][i]),
+        }
     return out
 
 
@@ -1276,6 +1296,12 @@ def game_eval_positions(
         kl = None
         value_err_soft = None
         row = rows.get(ply)
+        if row is not None and int(row["current_player"]) != current:
+            # M8 misalignment guard (mirrors read_record_row's expect_player):
+            # a row whose stored side-to-move disagrees with the replay-derived
+            # one is a misjoin (wrong game's shard) and must not contribute
+            # kl/value_err_soft against the wrong targets.
+            row = None
         if row is not None:
             kl = _policy_kl(row["policy"], pairs)
             value_err_soft = round(value - float(row["value_target"]), 5)

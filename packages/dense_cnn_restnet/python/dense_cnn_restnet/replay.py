@@ -152,12 +152,30 @@ def materialize_policy_surprise_rows(
     seed: int,
     uniform_fraction: float = 0.5,
     max_weight: float = 8.0,
+    game_decisions: int | None = None,
+    moves_left_knee: float = 0.0,
+    moves_left_halflife: float = 40.0,
+    game_length_knee: float = 0.0,
+    game_length_halflife: float = 60.0,
 ) -> tuple[list[Model1SampleData], dict[str, float]]:
     """Return samples repeated by KataGo policy-surprise frequency weights.
 
     Each sample's frequency weight mixes a uniform floor with a term proportional
     to its policy surprise `KL(target || prior)`, so surprising positions are seen
     more often. Weights sum to the game length before the `max_weight` clamp.
+
+    Length-decay (dormant by default, knee 0 disables each term): AFTER the
+    uniform floor and `max_weight` clamp, each row's weight is multiplied by an
+    exponential decay factor keyed on how deep into a marathon the row sits —
+    `0.5 ** ((ml - moves_left_knee) / moves_left_halflife)` when the row's
+    moves-left `ml` exceeds the knee (for truncated rows, whose stored
+    `moves_left` is the -1 mask, `ml` falls back to
+    `game_decisions - turn_index - 1` when `game_decisions` is given), and
+    `0.5 ** ((game_decisions - game_length_knee) / game_length_halflife)` when
+    the game's decision count exceeds that knee. The decay factors are <= 1, so
+    the `max_weight` cap stays respected; weights that fall below 1 act as
+    probabilistic row DROPS in the floor+Bernoulli duplication loop below,
+    capping the row flood from coin-flip-labeled marathon games.
     """
 
     if not samples:
@@ -178,6 +196,22 @@ def materialize_policy_surprise_rows(
         ]
     else:
         weights = [1.0 for _sample in samples]
+
+    if (moves_left_knee > 0.0 and moves_left_halflife > 0.0) or (
+        game_length_knee > 0.0 and game_length_halflife > 0.0
+    ):
+        weights = [
+            weight
+            * _length_decay_factor(
+                sample,
+                game_decisions=game_decisions,
+                moves_left_knee=moves_left_knee,
+                moves_left_halflife=moves_left_halflife,
+                game_length_knee=game_length_knee,
+                game_length_halflife=game_length_halflife,
+            )
+            for sample, weight in zip(samples, weights)
+        ]
 
     rng = Random(int(seed))
     materialized: list[Model1SampleData] = []
@@ -205,6 +239,40 @@ def materialize_policy_surprise_rows(
         "policy_surprise_mean": float(sum(surprises) / len(samples)),
         "frequency_weight_mean": float(sum(weights) / len(weights)),
     }
+
+
+def _length_decay_factor(
+    sample: Model1SampleData,
+    *,
+    game_decisions: int | None,
+    moves_left_knee: float,
+    moves_left_halflife: float,
+    game_length_knee: float,
+    game_length_halflife: float,
+) -> float:
+    """Length-decay multiplier in (0, 1] for one row (1.0 below both knees).
+
+    `ml` is the row's finalized `moves_left` (decisions remaining after this
+    one); a negative value is the absent/masked marker (truncated games), so it
+    falls back to `game_decisions - turn_index - 1` — exact because both
+    schedulers append exactly one pending sample per decision with
+    `turn_index = len(actions)`, making `turn_index` the row's decision index.
+    """
+
+    factor = 1.0
+    ml = float(sample.moves_left)
+    if ml < 0.0 and game_decisions is not None and int(game_decisions) > 0:
+        ml = float(int(game_decisions) - int(sample.turn_index) - 1)
+    if moves_left_knee > 0.0 and moves_left_halflife > 0.0 and ml > moves_left_knee:
+        factor *= 0.5 ** ((ml - moves_left_knee) / moves_left_halflife)
+    if (
+        game_length_knee > 0.0
+        and game_length_halflife > 0.0
+        and game_decisions
+        and float(game_decisions) > game_length_knee
+    ):
+        factor *= 0.5 ** ((float(game_decisions) - game_length_knee) / game_length_halflife)
+    return factor
 
 
 def write_selfplay_npz(
