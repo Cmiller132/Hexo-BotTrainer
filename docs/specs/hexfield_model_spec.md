@@ -28,10 +28,11 @@ structurally impossible. All code is greenfield — this is not a fork; existing
 semantic references and test oracles only.
 
 Search stance (owner directive 2026-06-12): the proven dense_cnn/restnet search semantics —
-including the continuous scheduler, the performance backbone — are the **verified baseline**, not a
-ceiling. Genuine improvements ship as defaults-off levers (§5.5): with every lever off, the search
-is differential-test-equivalent to the trusted implementation; levers are then enabled one at a
-time behind measured arena gates.
+including the continuous scheduler, the performance backbone — are the inherited foundation, but
+hexfield is **allowed to diverge where the divergence is well-reasoned and documented**. Four
+designed search improvements (§5.4) are default behavior, not optional knobs. A single test-only
+`search_parity_mode` switch disables all four at once so the differential harness can still pin the
+core rewrite against the trusted implementation; it is not a production configuration.
 
 ---
 
@@ -362,19 +363,38 @@ Kernel-shape stability is the **evaluator's** property, not the scheduler's. Per
 5. Per-row prefix segment softmax (proven scatter pattern, fp32), values decoded + clamped.
 6. Single D2H sync; reorder to caller order; emit bytes.
 
-### 5.4 Search improvement levers (each defaults-OFF; baseline mode = trusted semantics)
+### 5.4 Designed search divergences (default behavior; owner-approved 2026-06-12)
 
-Genuine improvements, each behind its own config flag, each enabled only after a head-to-head
-arena A/B at matched visits (≥ 200 games, anchored ladder) shows it non-regressing or winning.
-Levers are evaluated one at a time, never bundled. The stub-evaluator differential (§5.1) always
-runs in all-levers-off mode and stays green forever.
+hexfield's search diverges from the trusted lineage in exactly four documented ways. They are
+default behavior, not flags. The one switch that exists is test-only: `search_parity_mode`
+disables all four together so the §5.1 differential harness can pin the core rewrite; it is never
+a production configuration. M10 measures each divergence's contribution via lesion A/Bs (turn one
+off, arena at matched visits) — for understanding and tuning, not as a ship gate.
 
-| lever | flag | what it does | why it's a genuine improvement | gate |
-|---|---|---|---|---|
-| LCB root selection | `root_select_lcb` | choose the played move by lower-confidence-bound of Q (visit-count tie-broken) instead of max visits | the single largest validated search Elo gain in KataGo's history; touches only final move choice, not exploration or training targets (visit-distribution targets unchanged) | arena A/B at 512 visits |
-| Early-stop overtake pruning | `search_early_stop` | stop a root's search when no remaining budget can change the selected move; in the continuous scheduler the freed slot refills immediately | pure throughput at equal strength — saved visits are visits the leader provably didn't need; compounds with the scheduler's slot-refill design | equal-strength arena + measured pos/s gain |
-| Dynamic c_puct | `cpuct_log_growth` | `c(n) = c_init + k·log((n + n_base)/n_base)` instead of fixed 1.5 | KataGo/AZ-validated: fixed c_puct under-explores large subtrees and over-explores small ones; matters more here because branching (300–800) is far above Go's | arena A/B; entropy/length diagnostics sane |
-| Moves-left utility | `moves_left_utility_*` | blend a decisiveness preference (faster wins, slower losses) into root move utility using the moves-left head via the reserved `moves_left_bytes` reply field | the owner's own validated stage-3 mechanism (STAGE3_MOVES_LEFT_FEASIBILITY: mechanism sound, blocked only by the flood-damaged legacy head); hexfield trains a fresh head on clean data, removing the blocker; directly attacks the in-crop game-lengthening that survived main_4's armor | the stage-3 doc's own enablement gates (conversion-zone Spearman ≥ 0.6, [0,5) MAE ≤ 15, end-vs-mid ≥ 0.85) then arena A/B |
+1. **LCB root move selection.** The played move is chosen by the lower confidence bound of Q
+   among sufficiently-visited children (`Q − z·σ/√n`, z ≈ 1.6; fallback to max-visits when no
+   child qualifies), instead of raw max-visits. The single largest validated search Elo gain in
+   KataGo's history. Touches only the final move choice — exploration and the visit-distribution
+   training targets are unchanged.
+2. **Early-stop overtake pruning.** A root stops searching when no remaining visit budget can
+   change the selected move; in the continuous scheduler the freed slot refills immediately. Pure
+   throughput at provably equal strength, compounding with the scheduler's slot-refill design.
+   (Recorded visit-distribution targets use the visits actually performed — same as PCR's
+   variable-effort precedent.)
+3. **Visit-scaled c_puct.** `c(n) = c_init + c_scale·log((n + c_base)/c_base)` with constants
+   chosen for the 512-visit regime (c_init 1.5 preserves current small-n behavior; c_base sized so
+   the log term is active within a 512-visit search, unlike AZ's 19,652 which would be a no-op
+   here). Rationale: fixed c_puct under-explores large subtrees and over-explores small ones, and
+   Hexo's 300–800 branching makes the imbalance worse than in Go. Constants tuned at M10.
+4. **Moves-left utility.** Root move utility blends a decisiveness preference — faster wins,
+   slower losses: `U = Q + w_ml · sign(Q) · g(E[moves_left])` with a modest w_ml — using the
+   moves-left head via the `moves_left_bytes` reply field. This is the owner's validated stage-3
+   mechanism (STAGE3_MOVES_LEFT_FEASIBILITY: mechanism sound; only blocker was the flood-damaged
+   legacy head). hexfield's head is trained from clean data starting at BC prefit (real
+   remaining-decision targets from decisive human games), so it is expected healthy from the
+   start; the stage-3 health metrics (conversion-zone Spearman, [0,5) MAE, end-vs-mid separation)
+   run as **per-epoch monitoring with an auto-disable threshold**, not as an enablement
+   ceremony. Directly attacks the in-crop game-lengthening that survived main_4's armor.
 
 Considered and **not** pursued: DAG/transposition-sharing search (the eval cache already dedupes
 GPU work across transpositions and its measured hit rate is 1.2% at 512 visits — tree-stat sharing
@@ -591,7 +611,7 @@ Python guards on the eval path by design).
 | M7 | plugin + e2e | 4-game 64-visit epoch through hexo_train in the dev venv; artifacts/diagnostics/checkpoint round-trip; strict-load |
 | M8 | perf calibration | measured evals/s vs dense at matched settings (floor: ≥ 0.8× restnet's continuous-scheduler pos/s on a mid-game mix; target: parity+); featurize↔forward overlap pipeline measured on/off; packer shape histograms; fp16 gate; VRAM within §9; compile go/no-go |
 | M9 | self-play soak | 2–3 unattended epochs; sane entropy/length/calibration bands; prefit-seeded bot ≥ smoke-parity vs its own BC checkpoint over 100 games; handoff doc |
-| M10 | search levers (§5.4), one at a time | per-lever arena A/B at matched visits vs the all-off baseline; a lever ships enabled only on a non-regressing result (moves-left utility additionally behind the stage-3 head-health gates) |
+| M10 | search-divergence lesion study (§5.4) | per-divergence lesion arena A/B at matched visits (turn one off, measure) — for attribution and constant tuning, not ship gates; moves-left auto-disable threshold calibrated here |
 
 ---
 
