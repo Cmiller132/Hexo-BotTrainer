@@ -10,15 +10,12 @@ and the frontend Match/Arena screen.
 
 ## Status
 
-| Part | Status |
+| Part | Usage |
 | --- | --- |
-| Player contracts (`player.py`), game loop (`loop.py`), match mode, records facade, SealBot adapter | **Active** -- used by all four model packages, the frontend dashboard, and tests |
-| Batch mode (`modes/batch.py`) | Legacy-but-referenced: exercised only by `tests/test_hexo_runner_match_mode.py`; every model package reimplements its own multiprocessing self-play with batched GPU inference |
-| Evaluation mode (`modes/evaluation.py`) | Stub -- `run_evaluation` unconditionally raises `NotImplementedError`; each model package built its own SealBot eval harness instead |
-| CLI (`cli.py`, `hexo-rl` script) | Placeholder -- `main()` raises `SystemExit` directing callers to the programmatic API |
-
-Note: `pyproject.toml` still describes the package as a "Placeholder" -- it is
-in fact load-bearing across the repo.
+| Player contracts (`player.py`), game loop (`loop.py`), match mode, records facade, SealBot adapter | Used by all four model packages, the frontend dashboard, and tests |
+| Batch mode (`modes/batch.py`) | Exercised by `tests/test_hexo_runner_match_mode.py`; the model packages run their own multiprocessing self-play with batched GPU inference and import only the records facade |
+| Evaluation mode (`modes/evaluation.py`) | Not implemented (`run_evaluation` raises `NotImplementedError`); each model package provides its own SealBot eval harness |
+| CLI (`cli.py`, `hexo-rl` script) | `main()` exits with guidance to use the programmatic API; the package surface is Python-first by design |
 
 ## Modules
 
@@ -27,21 +24,52 @@ All paths relative to `packages/hexo_runner/python/hexo_runner/`.
 | File | Role |
 | --- | --- |
 | `__init__.py` | Package facade re-exporting player contracts, record types, and specs |
-| `player.py` | Core contracts: `PlayerIdentity`, `WorkerContext`, `GameContext`, `DecisionResult`, `TransitionEvent`, `FinalSummary`, and the `RunnerPlayer` / `PlayerFactory` protocols. Implemented by every model package's player adapter and by the frontend's bot wrappers |
+| `player.py` | Core contracts: `PlayerIdentity`, `WorkerContext`, `GameContext`, `DecisionResult`, `TransitionEvent`, `FinalSummary`, and the `RunnerPlayer` / `PlayerFactory` protocols. Implemented by every model package's player adapter and by the frontend's bot wrappers. Lifecycle: `setup_worker -> start_game -> decide / observe_transition* -> finish_game -> close` |
 | `loop.py` | `run_match_loop`: single-game synchronous loop. Owns the one authoritative `HexoState`, hands players cloned states, applies actions, writes `.hxr` actions, and stages every player/engine call through `_run_stage` so failures become structured `AbortRecord`s |
-| `engine.py` | `HexoEngineAdapter`: thin centralizing wrapper over the `hexo_engine` public API (`new_game`, `clone_state`, `apply_action`, `terminal`, JSON-able terminal payloads) |
-| `session.py` | `GameSpec` (game_id/seed/mode/max_actions; `scenario` must be `None`) and `BatchSpec` dataclasses; `SessionSpec`/`SessionContext` are unused legacy aliases |
+| `engine.py` | `HexoEngineAdapter`: the single point where the runner touches the `hexo_engine` public API (`new_game`, `clone_state`, `apply_action`, `terminal`, JSON-able terminal payloads) |
+| `session.py` | `GameSpec` (game_id / seed / mode / max_actions; `seed` is persisted in the `.hxr` header and exposed via `GameContext.seed` -- the engine's `new_game` does not consume it; recorded games require `scenario=None`, validated by the loop) and `BatchSpec` dataclasses; `SessionSpec` / `SessionContext` are compatibility aliases |
 | `modes/match.py` | `run_match`: one game -> one `{game_id}.hxr` file via `run_match_loop` |
-| `modes/batch.py` | `run_batch`: local multiprocessing (spawn pool, round-robin chunk assignment, per-worker `.hxr` file, reusable players via `PlayerFactory`). Test-only in practice |
-| `modes/evaluation.py` | `run_evaluation` stub (raises `NotImplementedError`) |
+| `modes/batch.py` | `run_batch`: local multiprocessing (spawn pool, round-robin chunk assignment, per-worker `.hxr` file, reusable players via `PlayerFactory`) |
+| `modes/evaluation.py` | `run_evaluation` placeholder (raises `NotImplementedError`) |
 | `records/record.py` | Re-exports the Rust-backed `.hxr` record types from `hexo_utils.records`; defines the Python `AbortRecord` dataclass for runner abort metadata |
 | `records/results.py` | `GameStatus` enum, `GameResult` and `BatchResult` summary dataclasses |
 | `records/__init__.py` | Records facade -- the most-imported path of the package; all model self-play/eval imports `AbortRecord` / `HexoRecordFile` / `HexoRecordPlayer` from here |
-| `adapters/sealbot.py` | `SealBotPlayer` (a `RunnerPlayer` over the external SealBot minimax), `SealBotConfig` (path via `SEALBOT_PATH` env or `--sealbot-path`, variant, time limit), `_SealBotProcess` (JSON-line subprocess manager with reader threads and timeouts), `discover_sealbot_adapters` (availability metadata for the frontend). Handles move buffering for two-stone turns and illegal-move validation |
-| `adapters/_sealbot_worker.py` | Standalone subprocess script spawned by `sealbot.py` (overridable via `SealBotConfig.worker_script` for tests): imports one SealBot variant's `game.py` + compiled `minimax_cpp` pybind extension (the variants share module names, so they cannot coexist in one process), rebuilds the game from the JSON state payload, returns moves + diagnostics over stdout JSON lines |
+| `adapters/sealbot.py` | `SealBotPlayer` (a `RunnerPlayer` over the external SealBot minimax), `SealBotConfig` (path via `SEALBOT_PATH` env or `--sealbot-path`, variant, time limit), `_SealBotProcess` (JSON-line subprocess manager with reader threads and timeouts), `discover_sealbot_adapters` (availability metadata for the frontend) |
+| `adapters/_sealbot_worker.py` | Standalone subprocess script spawned by `sealbot.py` (overridable via `SealBotConfig.worker_script` for tests): imports the SealBot checkout's `game.py` + one variant's compiled `minimax_cpp` pybind extension, rebuilds the game from the JSON state payload, returns moves + diagnostics over stdout JSON lines |
 | `timing.py` | `Timer` (perf_counter ms helper) used by loop and batch mode |
-| `cli.py` | Placeholder `hexo-rl` console entry point |
-| `config.py` | `RunnerConfig = BatchSpec` alias shim; no external importers |
+| `cli.py` | `hexo-rl` console entry point; exits with guidance to use the programmatic API |
+| `config.py` | Compatibility re-export of the spec dataclasses (`RunnerConfig = BatchSpec`) |
+
+## Design notes
+
+- **One authoritative state.** `run_match_loop` owns the only mutable
+  `HexoState`. Players receive a fresh clone for every `decide` and
+  `observe_transition`, so player code cannot mutate the official game. Seat
+  order is fixed: `players[0]` is `player0` and moves first.
+- **Staged failure handling.** Every player/engine/record call runs through
+  `_run_stage(name, fn)`; any exception becomes an `AbortRecord` (stage,
+  exception type, message) persisted in the `.hxr` record and the game ends
+  ABORTED instead of raising. The record entry is always finalized;
+  `finish_game`/`close` errors never change a decided result. Stage names
+  persist verbatim in records, so keep them stable for abort triage.
+- **One subprocess per SealBot variant.** The two variants (`current`/`best`)
+  export identical pybind module names, so each `SealBotPlayer` lazily spawns
+  a dedicated `_sealbot_worker.py` subprocess on the first `decide`. The
+  protocol is strictly request-response JSON lines over stdin/stdout: a ready
+  handshake at startup, then one `{"type": "decide", "state": ...}` request
+  in flight at a time, answered by exactly one `{ok, moves, diagnostics}`
+  line; `{"type": "close"}` ends the loop. Worker stdout carries protocol
+  JSON only; stderr is tailed into a bounded buffer for error reporting.
+  Timeouts/worker exits surface as `SealBotUnavailableError`/`TimeoutError`.
+- **Two-stone turn buffering.** SealBot answers with its full turn (1-2
+  moves) while the runner requests one action at a time, so `SealBotPlayer`
+  buffers the second stone and replays it on the next `decide` (tagged
+  `diagnostics["buffered_move"]`). Moves are legality-checked before being
+  returned; an empty or illegal response raises, aborting via the loop.
+- **State payload contract.** `_state_payload` sends the worker the current
+  player, phase, `moves_left_in_turn` (from `TurnPhase`: opening or second
+  stone -> 1, otherwise 2), placements made, terminal winner, and the stone
+  list; runner `player0`/`player1` map to SealBot `Player.A`/`B`.
 
 ## Connections to other packages
 
@@ -59,30 +87,25 @@ Imports out:
 Imports in (who depends on hexo_runner):
 
 - **dense_cnn_restnet** (active lineage): `selfplay.py` and `evaluation.py`
-  write `.hxr` records via `hexo_runner.records` and use `SealBotPlayer` as
-  the per-epoch eval opponent (driving games with their own batched-inference
-  loop rather than `run_match`).
+  write `.hxr` via `hexo_runner.records` and use `SealBotPlayer` as the
+  per-epoch eval opponent, driving games with their own batched loop.
 - **hexo_models/dense_cnn**, **hexo_models/hexgt**, **hexgnn** (legacy/parked
   lineages): same pattern; hexgt and hexgnn evaluation additionally call
   `run_match` + `GameSpec` for SealBot gating. Each package's `player.py`
   implements the `RunnerPlayer` protocol.
 - **hexo_frontend**: `web.py` imports the SealBot adapter, `run_match`, the
-  player contracts, `GameResult` / `HexoRecordFile`, and `GameSpec` -- the
-  Match-v2 Arena screen plays live games through this runner, and the
-  `/api` adapters endpoint serves `discover_sealbot_adapters` output.
-- **scripts/goal_benchmark.py** imports `HexoEngineAdapter` and
-  `run_match_loop` directly.
+  player contracts, `GameResult`/`HexoRecordFile`, and `GameSpec` -- Match-v2
+  Arena games run through this runner; `/api` serves adapter discovery.
+- **scripts/goal_benchmark.py** imports `HexoEngineAdapter` and `run_match_loop`.
 
 Protocols / shared formats owned or relayed here:
 
 - `RunnerPlayer` protocol (`player.py`) -- the cross-package player contract.
 - `.hxr` game-record format (defined in `hexo_utils`, consumed through
   `hexo_runner.records` by every writer and the dashboard reader).
-- SealBot subprocess protocol: JSON lines over stdin/stdout between
-  `_SealBotProcess` and `_sealbot_worker.py` (`{type: "decide", state}` ->
-  `{ok, moves, diagnostics}`; ready handshake; close). The worker imports the
-  external SealBot checkout at `$SEALBOT_PATH` (repo-external, typically
-  `E:\SealBot` / `/mnt/e/SealBot`), with per-variant dirs `current`/`best`.
+- SealBot subprocess protocol (see Design notes); the worker imports the
+  external checkout at `$SEALBOT_PATH` (repo-external, typically `E:\SealBot`
+  / `/mnt/e/SealBot`) with per-variant dirs `current`/`best`.
 
 ## Entry points / how it gets exercised
 
@@ -91,30 +114,8 @@ Protocols / shared formats owned or relayed here:
 - Frontend HTTP, indirectly: `hexo_frontend` Arena/match endpoints construct
   `GameSpec` + players and call `run_match`.
 - Subprocess: `python _sealbot_worker.py --root --variant --time-limit`,
-  spawned by `_SealBotProcess` (never run by hand).
-- `hexo-rl` console script -- registered but a pure error-message placeholder.
-- Tests: `tests/test_hexo_runner_match_mode.py` (loop, match, batch, abort
-  paths) and `tests/test_sealbot_adapter.py` (discovery, move buffering,
-  worker-script override). Tests are authoritative in the WSL venv.
-
-## Gotchas
-
-- **Batch/evaluation modes never became the shared orchestration layer** their
-  docstrings describe. Four near-identical SealBot eval harnesses exist
-  downstream (one per model package); only `records/` and the player protocol
-  are the truly shared surface.
-- `adapters/sealbot.py` `_moves_left_in_turn` hardcodes turn-phase semantics
-  (OPENING/SECOND_STONE -> 1 move, else 2), duplicating engine rules in the
-  adapter; a rules change in `hexo_engine` would silently desync the SealBot
-  state payload.
-- `GameSpec.scenario` is vestigial: `run_match_loop` raises if it is non-None.
-- The two SealBot variants cannot be imported into one process (shared module
-  names) -- hence the one-subprocess-per-variant design.
-- `_SealBotProcess` has no request-id correlation on its response queue; the
-  strictly request-response protocol makes this safe today, but a stray extra
-  stdout line from the worker would mis-pair responses silently.
-- `loop.py` contains a dead `result = GameResult(...)` assignment that is
-  unconditionally overwritten later in the function.
-- `tests/test_hexo_runner_match_mode.py` and `tests/test_sealbot_adapter.py`
-  currently carry uncommitted modifications alongside the frontend
-  Match-screen-v2 work; keep them in sync when touching the adapter.
+  spawned by `_SealBotProcess` (not run by hand).
+- `hexo-rl` console script -- exits with guidance to use the programmatic API.
+- Tests: `tests/test_hexo_runner_match_mode.py` (loop, match, batch, abort)
+  and `tests/test_sealbot_adapter.py` (discovery, buffering, worker-script
+  override), run under the WSL venv.

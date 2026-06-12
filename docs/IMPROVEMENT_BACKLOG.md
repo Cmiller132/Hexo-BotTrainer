@@ -184,7 +184,7 @@ Root cause of the main_3 collapse (memory: restnet-crop-frozen-win-zugzwang): th
 - Repeated mtime-sort idiom (6+ sites) — add `_mtime_or_zero(path)`.
 - `debug_service.py` hardcodes `DEFAULT_WSL_PYTHON`; env overrides documented only in code — log the resolved worker command at startup.
 - `_send_json` sha1-ETags every response incl. multi-hundred-KB payloads behind the 3s cache — memoize the hash alongside the cached payload if poll rates rise.
-- Note: the whole unit carries substantial uncommitted Match-v2/History-v2 modifications; the :8080 instance may still serve the pre-rewrite build until restarted.
+- Note: the live :8080 WSL instance may still serve the pre-Match-v2/History-v2 build until restarted via `scripts/_dashboard_launch.sh`.
 
 ### hexo_models (dense_cnn / hexgt / shared)
 - `replay.py npz_row_count` silently swallows a corrupt JSON sidecar and reopens the shard — add a counter or one-time log.
