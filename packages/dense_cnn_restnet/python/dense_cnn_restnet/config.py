@@ -291,6 +291,27 @@ class Model1EvalConfig:
     # This is the measured single-game latency lever — root parallelism and
     # shared-tree atomics were both benchmarked and found inferior.
     virtual_batch_size: int = 0
+    # Reference-checkpoint ladder (owner directive: SealBot is measured-
+    # saturated as a strength arbiter, so model-vs-model games against FIXED
+    # anchor checkpoints are the real progress signal). The CANONICAL key is
+    # `reference_checkpoints` (array of checkpoint path strings, validated
+    # non-empty, de-duplicated order-preserving). When reference_games > 0 the
+    # eval stage plays `reference_games` current-net games PER anchor AFTER the
+    # SealBot phase, with the same eval-style search settings, and reports a
+    # `references` LIST of per-anchor blocks in the eval diagnostics (plus a
+    # `reference` alias = the first block, for single-anchor shape-compat).
+    # Each anchor net is built with the CURRENT architecture config (must be
+    # architecture-identical). Defaults keep the feature fully off and the
+    # diagnostics byte-identical. The phase is fail-open PER ANCHOR: any error
+    # is logged as that anchor's status="failed" block and never crashes the
+    # epoch's SealBot results or the remaining anchors.
+    reference_checkpoints: tuple[str, ...] = ()
+    # DEPRECATED alias: the pre-ladder scalar key. Still parsed — a non-empty
+    # value is appended to `reference_checkpoints` (de-duplicated) — but
+    # consumers must read `reference_checkpoints`; this field only preserves
+    # the raw scalar for back-compat parsing.
+    reference_checkpoint: str = ""
+    reference_games: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -457,6 +478,9 @@ def parse_model1_config(raw: Mapping[str, Any] | None) -> Model1Config:
             opening_temperature=float(evaluation.get("opening_temperature", 0.0)),
             opening_moves=int(evaluation.get("opening_moves", 0)),
             virtual_batch_size=int(evaluation.get("virtual_batch_size", 0)),
+            reference_checkpoints=_reference_checkpoints(evaluation),
+            reference_checkpoint=str(evaluation.get("reference_checkpoint", "")),
+            reference_games=int(evaluation.get("reference_games", 0)),
         ),
         performance=Model1PerformanceConfig(
             calibrate=bool(performance.get("calibrate", True)),
@@ -495,6 +519,30 @@ def _reject_unknown(raw: Mapping[str, Any], label: str, allowed: set[str]) -> No
     unknown = sorted(str(key) for key in raw if str(key) not in allowed)
     if unknown:
         raise ValueError(f"{label} contains unsupported key(s): {', '.join(unknown)}")
+
+
+def _reference_checkpoints(evaluation: Mapping[str, Any]) -> tuple[str, ...]:
+    """Merge the canonical `reference_checkpoints` array with the deprecated
+    `reference_checkpoint` scalar alias (appended last), validating that every
+    entry is a non-empty string and de-duplicating order-preserving."""
+
+    raw = evaluation.get("reference_checkpoints", ())
+    if isinstance(raw, (str, bytes, bytearray)) or not isinstance(raw, (tuple, list)):
+        raise ValueError(
+            f"evaluation.reference_checkpoints must be an array of checkpoint path strings, got {raw!r}"
+        )
+    merged: list[str] = []
+    for entry in raw:
+        if not isinstance(entry, str) or not entry.strip():
+            raise ValueError(
+                f"evaluation.reference_checkpoints entries must be non-empty strings, got {entry!r}"
+            )
+        if entry not in merged:
+            merged.append(entry)
+    legacy = evaluation.get("reference_checkpoint", "")
+    if legacy is not None and str(legacy) and str(legacy) not in merged:
+        merged.append(str(legacy))
+    return tuple(merged)
 
 
 def _int_tuple(value: Sequence[int] | Any) -> tuple[int, ...]:
