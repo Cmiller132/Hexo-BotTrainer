@@ -27,6 +27,12 @@ consumes dense_cnn's. Every engine-legal cell carries a policy logit, so coverag
 structurally impossible. All code is greenfield — this is not a fork; existing lineages are
 semantic references and test oracles only.
 
+Search stance (owner directive 2026-06-12): the proven dense_cnn/restnet search semantics —
+including the continuous scheduler, the performance backbone — are the **verified baseline**, not a
+ceiling. Genuine improvements ship as defaults-off levers (§5.5): with every lever off, the search
+is differential-test-equivalent to the trusted implementation; levers are then enabled one at a
+time behind measured arena gates.
+
 ---
 
 ## 1. Input representation
@@ -255,7 +261,8 @@ later, owner-scheduled option. All verification builds run in a separate dev ven
 (`/root/.venvs/hexfield-dev`), never the live `hexgt-build` venv — the live supervisor relaunches
 processes between epochs and would pick up a replaced `.so` from disk.
 
-**Preserved search semantics (the contract list, dense_cnn as semantic reference):** batched PUCT
+**Baseline search semantics (the verified contract, dense_cnn as semantic reference; all §5.5
+levers off reproduces exactly this):** batched PUCT
 with virtual loss; prior-sorted lazy edge materialization; nucleus widening
 `policy_mass 0.95 / max_children 96 / min_children 2`; FPU + `root_fpu_zero_under_noise`;
 Dirichlet root noise (total_alpha / fraction); root policy temperature incl. the early/halflife
@@ -289,6 +296,18 @@ hash, encoder-independent), bounded (~1M default), Arc-shared, in-flight dedup o
 Stored-prior truncation (a search-first proposal) is **deferred**: its tree-exactness proof fails at
 noised roots (Dirichlet alpha is drawn over the full candidate list), so it may not ship until that
 analysis is redone; host RAM is not currently scarce.
+
+### 5.1b The continuous scheduler is the performance backbone
+
+restnet's continuous scheduler (per-game slots, per-slot state machines, single flush queue,
+select↔eval overlap, games refilling as they finish) is the best measured throughput design in the
+repo and is retained as-is in semantics. hexfield's performance work layers **around** it, in the
+evaluator, where it cannot perturb scheduling semantics: the static-shape packer (§5.3), a
+**featurize↔forward overlap pipeline** (double-buffered: while the GPU runs flush k, Rust
+featurizes flush k+1 — featurization is O(N) per leaf here, not a fixed plane-stamp, so hiding it
+matters; the pattern is proven in-repo), per-shape persistent staging buffers (CUDA-graph static
+addresses), and the fp16 adopt-and-gate. Scheduler knob defaults (visits 512, c_puct 1.5,
+active_root_limit, virtual_batch_size, flush_target) mirror production main_4.
 
 ### 5.2 Evaluator payload ABI
 
@@ -343,7 +362,26 @@ Kernel-shape stability is the **evaluator's** property, not the scheduler's. Per
 5. Per-row prefix segment softmax (proven scatter pattern, fp32), values decoded + clamped.
 6. Single D2H sync; reorder to caller order; emit bytes.
 
-### 5.4 Throughput & cost honesty
+### 5.4 Search improvement levers (each defaults-OFF; baseline mode = trusted semantics)
+
+Genuine improvements, each behind its own config flag, each enabled only after a head-to-head
+arena A/B at matched visits (≥ 200 games, anchored ladder) shows it non-regressing or winning.
+Levers are evaluated one at a time, never bundled. The stub-evaluator differential (§5.1) always
+runs in all-levers-off mode and stays green forever.
+
+| lever | flag | what it does | why it's a genuine improvement | gate |
+|---|---|---|---|---|
+| LCB root selection | `root_select_lcb` | choose the played move by lower-confidence-bound of Q (visit-count tie-broken) instead of max visits | the single largest validated search Elo gain in KataGo's history; touches only final move choice, not exploration or training targets (visit-distribution targets unchanged) | arena A/B at 512 visits |
+| Early-stop overtake pruning | `search_early_stop` | stop a root's search when no remaining budget can change the selected move; in the continuous scheduler the freed slot refills immediately | pure throughput at equal strength — saved visits are visits the leader provably didn't need; compounds with the scheduler's slot-refill design | equal-strength arena + measured pos/s gain |
+| Dynamic c_puct | `cpuct_log_growth` | `c(n) = c_init + k·log((n + n_base)/n_base)` instead of fixed 1.5 | KataGo/AZ-validated: fixed c_puct under-explores large subtrees and over-explores small ones; matters more here because branching (300–800) is far above Go's | arena A/B; entropy/length diagnostics sane |
+| Moves-left utility | `moves_left_utility_*` | blend a decisiveness preference (faster wins, slower losses) into root move utility using the moves-left head via the reserved `moves_left_bytes` reply field | the owner's own validated stage-3 mechanism (STAGE3_MOVES_LEFT_FEASIBILITY: mechanism sound, blocked only by the flood-damaged legacy head); hexfield trains a fresh head on clean data, removing the blocker; directly attacks the in-crop game-lengthening that survived main_4's armor | the stage-3 doc's own enablement gates (conversion-zone Spearman ≥ 0.6, [0,5) MAE ≤ 15, end-vs-mid ≥ 0.85) then arena A/B |
+
+Considered and **not** pursued: DAG/transposition-sharing search (the eval cache already dedupes
+GPU work across transpositions and its measured hit rate is 1.2% at 512 visits — tree-stat sharing
+buys little and carries known correctness hazards); stored-prior truncation (§11, refuted proof);
+raising visits (the evals/position budget is an owner-level call, not a search-code lever).
+
+### 5.5 Throughput & cost honesty
 
 Per-eval MACs ≈ `0.91M·N + 0.22M·S + 576·S²` vs the dense serve-reference ≈ 2.9 G-MAC fixed:
 ≈ 0.3× at N=600, ≈ 0.5× at the N≈900 mid-game median, crossover ≈ N 1500, ≈ 2.9× at the 3k
@@ -551,8 +589,9 @@ Python guards on the eval path by design).
 | M5 | payload + lockstep search | ABI goldens; stub-evaluator visit parity vs dense_cnn lockstep (≥100 positions, exact, with traces) |
 | M6 | continuous scheduler + PCR/policy-init/noise/TSS | stub parity for continuous (move classes, chosen moves, visit counts); seed-stream vectors; TSS toggle; reuse-root regression |
 | M7 | plugin + e2e | 4-game 64-visit epoch through hexo_train in the dev venv; artifacts/diagnostics/checkpoint round-trip; strict-load |
-| M8 | perf calibration | measured evals/s vs dense at matched settings; packer shape histograms; fp16 gate; VRAM within §9; compile go/no-go |
+| M8 | perf calibration | measured evals/s vs dense at matched settings (floor: ≥ 0.8× restnet's continuous-scheduler pos/s on a mid-game mix; target: parity+); featurize↔forward overlap pipeline measured on/off; packer shape histograms; fp16 gate; VRAM within §9; compile go/no-go |
 | M9 | self-play soak | 2–3 unattended epochs; sane entropy/length/calibration bands; prefit-seeded bot ≥ smoke-parity vs its own BC checkpoint over 100 games; handoff doc |
+| M10 | search levers (§5.4), one at a time | per-lever arena A/B at matched visits vs the all-off baseline; a lever ships enabled only on a non-regressing result (moves-left utility additionally behind the stage-3 head-health gates) |
 
 ---
 
@@ -576,5 +615,6 @@ Python guards on the eval path by design).
    masked-BN contingency. Ratify or veto.
 3. **Hot threshold count ≥ 4** (trusted semantics, = TSS threat definition) vs the brief's "≥ 3"
    wording. Spec says ≥ 4.
-4. **Optional `moves_left_bytes` reply field** (default off, zero cost when off) — keep as
-   forward-compat with the moves-left-utility track, or delete as YAGNI.
+4. ~~Optional `moves_left_bytes` reply field — keep or delete?~~ RESOLVED 2026-06-12: kept; it is
+   load-bearing for the moves-left-utility search lever (§5.4), which the owner directed the design
+   to pursue as a gated improvement.
