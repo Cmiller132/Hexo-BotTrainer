@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Hexo Match</title>
-<link rel="stylesheet" href="/static/styles.css?v=20260611-dbg3">
+<link rel="stylesheet" href="/static/styles.css?v=20260611-match1">
 </head>
 <body>
 <header>
@@ -17,8 +17,69 @@
   <div class="status"><span class="dot"></span><span id="statusText">Ready</span></div>
 </header>
 <main id="matchScreen" class="app-screen match-screen">
-  <section class="top-grid">
-    <section class="board-panel" aria-label="Game board">
+  <section class="mt-grid">
+
+    <!-- Region 1: setup strip (mirrors .dbg-ctx) -->
+    <section id="mtSetup" class="mt-setup" aria-label="Match setup">
+      <div class="mt-seat" data-seat="player0">
+        <div class="mt-seat-head"><span class="mt-seat-dot" style="background:var(--p0)"></span>P0</div>
+        <select id="mtKind0" aria-label="Player 0 kind">
+          <option value="manual">Manual</option>
+          <option value="sealbot-current">SealBot current</option>
+          <option value="sealbot-best">SealBot best</option>
+          <option value="checkpoint">Checkpoint</option>
+        </select>
+        <div class="mt-ckpt-cfg" data-seat="player0" hidden>
+          <select id="mtRun0" aria-label="Player 0 checkpoint run"></select>
+          <select id="mtCkpt0" aria-label="Player 0 checkpoint"></select>
+          <input id="mtVisits0" type="number" min="8" max="2048" step="1" value="256" aria-label="Player 0 search visits">
+          <select id="mtSearchMode0" aria-label="Player 0 search mode">
+            <option value="search">search</option>
+            <option value="policy">policy</option>
+          </select>
+        </div>
+      </div>
+      <div class="mt-vs" aria-hidden="true">vs</div>
+      <div class="mt-seat" data-seat="player1">
+        <div class="mt-seat-head"><span class="mt-seat-dot" style="background:var(--p1)"></span>P1</div>
+        <select id="mtKind1" aria-label="Player 1 kind">
+          <option value="manual">Manual</option>
+          <option value="sealbot-current" selected>SealBot current</option>
+          <option value="sealbot-best">SealBot best</option>
+          <option value="checkpoint">Checkpoint</option>
+        </select>
+        <div class="mt-ckpt-cfg" data-seat="player1" hidden>
+          <select id="mtRun1" aria-label="Player 1 checkpoint run"></select>
+          <select id="mtCkpt1" aria-label="Player 1 checkpoint"></select>
+          <input id="mtVisits1" type="number" min="8" max="2048" step="1" value="256" aria-label="Player 1 search visits">
+          <select id="mtSearchMode1" aria-label="Player 1 search mode">
+            <option value="search">search</option>
+            <option value="policy">policy</option>
+          </select>
+        </div>
+      </div>
+      <div class="mt-opts">
+        <label>Time <input id="mtTimeLimit" type="number" min="0.01" max="30" step="0.01" value="0.05"></label>
+        <label>Seed <input id="mtSeed" type="number" step="1" placeholder="Auto"></label>
+        <label>Series <select id="mtSeriesGames">
+          <option value="1">1 game</option>
+          <option value="3">3</option>
+          <option value="5">5</option>
+          <option value="9">9</option>
+          <option value="15">15</option>
+          <option value="25">25</option>
+        </select></label>
+        <label class="mt-check"><input id="mtAlternate" type="checkbox"> alternate seats</label>
+      </div>
+      <div class="mt-actions">
+        <button id="mtStartBtn" class="primary-action" type="button">Start match</button>
+        <button id="mtStopBtn" type="button">Stop</button>
+        <span id="mtSetupNote" class="mt-muted"></span>
+      </div>
+    </section>
+
+    <!-- Region 2: board stage -->
+    <section id="mtBoardStage" class="mt-board-stage" aria-label="Game board">
       <div class="board-area" id="boardArea">
         <svg id="boardSvg"></svg>
         <div class="turn-overlay" id="turnOverlay" hidden>
@@ -33,6 +94,7 @@
         <div class="board-view-controls" aria-label="Board view controls">
           <button id="zoomInBtn" type="button" aria-label="Zoom in">+</button>
           <button id="zoomOutBtn" type="button" aria-label="Zoom out">-</button>
+          <button id="mtFitBtn" type="button" aria-label="Fit board">Fit</button>
         </div>
         <div class="board-hud" id="cellHud">
           <div><span>Q:</span> <strong>0</strong> <span>R:</span> <strong>0</strong></div>
@@ -43,8 +105,6 @@
           <span><span class="ldot" style="background:var(--p0)"></span>P0</span>
           <span><span class="ldot" style="background:var(--p1)"></span>P1</span>
           <span><span class="ldot" style="background:#101924;border:1px solid var(--border)"></span>Legal</span>
-          <span class="tactic-legend"><span class="ldot" style="background:var(--green)"></span>Win</span>
-          <span class="tactic-legend"><span class="ldot" style="background:var(--red)"></span>Block</span>
         </div>
       </div>
       <div class="replay-bar" aria-label="Replay controls">
@@ -68,121 +128,27 @@
       </div>
     </section>
 
-    <aside class="side-stack" aria-label="Match controls">
-      <section class="panel-card match-card">
-        <div class="section-title">Match Setup</div>
-        <div class="match-form">
-          <div class="setup-grid">
-            <label class="select-field">
-              <span>Player 1 / P0</span>
-              <select id="player0Kind" data-player-select="player0">
-                <option value="manual">Manual</option>
-                <option value="sealbot-current">SealBot current</option>
-                <option value="sealbot-best">SealBot best</option>
-              </select>
-            </label>
-            <label class="select-field">
-              <span>Player 2 / P1</span>
-              <select id="player1Kind" data-player-select="player1">
-                <option value="manual">Manual</option>
-                <option value="sealbot-current" selected>SealBot current</option>
-                <option value="sealbot-best">SealBot best</option>
-              </select>
-            </label>
-          </div>
-          <div class="match-grid">
-            <div class="field-block">
-              <label for="timeLimitInput">Time Limit</label>
-              <input id="timeLimitInput" type="number" min="0.01" max="30" step="0.01" value="0.05">
-            </div>
-            <div class="field-block">
-              <label for="seedInput">Seed</label>
-              <input id="seedInput" type="number" step="1" placeholder="Auto">
-            </div>
-          </div>
-          <div class="adapter-status" id="adapterStatus">Checking SealBot adapters</div>
-          <div class="toolbar setup-toolbar">
-            <button id="newBtn" class="primary-action" type="button">Rematch</button>
-          </div>
+    <!-- Region 3: side rail -->
+    <aside id="mtSide" class="mt-side" aria-label="Match status">
+      <section class="panel-card" id="mtStatusCard">
+        <div class="mt-turn-banner" id="mtTurnBanner">
+          <span id="mtTurnDot"></span>
+          <strong id="mtTurnTitle">Loading</strong>
+          <span id="mtTurnSub">Waiting for state</span>
         </div>
+        <div class="mt-facts" id="mtFacts"></div>
       </section>
-
-      <section class="panel-card">
-        <div class="section-title">State Summary</div>
-        <div class="turn-banner" id="turnBanner">
-          <span class="turn-dot" id="turnDot"></span>
-          <div>
-            <strong id="turnTitle">Loading</strong>
-            <span id="turnSub">Waiting for state</span>
-          </div>
-        </div>
-        <div class="info">
-          <div class="info-row turn-row"><span class="label">To Play</span><span class="value" id="turnVal"></span></div>
-          <div class="info-row"><span class="label">Placement</span><span class="value" id="turnPlacementVal"></span></div>
-          <div class="info-row"><span class="label">Last Move</span><span class="value" id="lastMoveVal"></span></div>
-          <div class="info-row"><span class="label">Match</span><span class="value" id="matchVal"></span></div>
-          <div class="info-row"><span class="label">Player</span><span class="value" id="playerVal"></span></div>
-          <div class="info-row"><span class="label">Phase</span><span class="value" id="phaseVal"></span></div>
-          <div class="info-row"><span class="label">Stones</span><span class="value" id="stonesVal"></span></div>
-          <div class="info-row"><span class="label">Legal Cells</span><span class="value" id="legalVal"></span></div>
-          <div class="info-row"><span class="label">Game</span><span class="value" id="gameVal"></span></div>
-          <div class="info-row"><span class="label">View</span><span class="value" id="viewVal"></span></div>
-        </div>
+      <section class="panel-card" id="mtPlayersCard">
+        <div class="section-title">Players</div>
+        <div id="mtPlayers"></div>
       </section>
-
-      <section class="panel-card">
-        <div class="section-title">Controls</div>
-        <div class="toolbar">
-          <button id="fitBtn" type="button">Fit</button>
-          <button id="tacticsBtn" type="button">Tactics</button>
-        </div>
+      <section class="panel-card" id="mtInsightCard">
+        <div class="mt-insight-head"><span>Insight</span><button id="mtOpenDebugBtn" type="button">Open in Debug</button></div>
+        <div id="mtValueChart" class="mt-value-chart"></div>
       </section>
-
-      <section class="panel-card sealbot-card" id="sealbotCard" hidden>
-        <div class="section-title">SealBot Insight</div>
-        <div class="bot-panel" id="botPanel"></div>
-      </section>
-
-      <section class="panel-card tactics-card">
-        <div class="section-title">Tactical Filters</div>
-        <div class="overlay-controls">
-          <div class="seg" id="modeSeg">
-            <button type="button" data-mode="forcing">Forcing</button>
-            <button type="button" data-mode="threats">Threats</button>
-            <button type="button" data-mode="windows">Active</button>
-            <button type="button" data-mode="all">All</button>
-          </div>
-          <div class="seg" id="playerSeg">
-            <button type="button" data-player="both">Both</button>
-            <button type="button" data-player="player0">P0</button>
-            <button type="button" data-player="player1">P1</button>
-          </div>
-          <div class="seg" id="axisSeg">
-            <button type="button" data-axis="all">Axis</button>
-            <button type="button" data-axis="Q">Q</button>
-            <button type="button" data-axis="R">R</button>
-            <button type="button" data-axis="QR">QR</button>
-          </div>
-          <button id="inspectBtn" type="button">Inspect</button>
-        </div>
-      </section>
-
-      <section class="panel-card tactical-stats-card">
-        <div class="section-title">Tactical Stats</div>
-        <div class="tactics-panel" id="tacticsPanel"></div>
-      </section>
-
-      <section class="panel-card training-card">
-        <div class="section-title">Training Runs</div>
-        <div class="training-panel">
-          <select id="trainingRunSelect" aria-label="Training run"></select>
-          <div class="toolbar training-toolbar">
-            <button id="trainingRefreshBtn" type="button">Refresh</button>
-            <button type="button" data-screen="history">Open History</button>
-          </div>
-          <div id="trainingSummary" class="training-summary"></div>
-          <div id="trainingArtifacts" class="training-artifacts"></div>
-        </div>
+      <section class="panel-card" id="mtSeriesCard" hidden>
+        <div class="section-title">Series</div>
+        <div id="mtSeries"></div>
       </section>
     </aside>
   </section>
@@ -207,10 +173,11 @@
       </div>
     </div>
 
-    <div id="historyOverview" class="history-overview"></div>
-    <div id="historyLearningHealth" class="history-learning-health"></div>
-    <div id="historyEvalTrend" class="history-eval-trend"></div>
-    <div id="historyEpochProgress" class="history-epoch-progress"></div>
+    <div id="histStatusBand" class="hist-status-band"></div>
+    <div id="histHealthDrawer" class="hist-health-drawer" hidden></div>
+    <div id="histTrends" class="hist-trends"></div>
+    <div id="histEpochTable" class="hist-epoch-table"></div>
+    <div id="histEpochInspector" class="hist-epoch-inspector" hidden></div>
 
     <div class="history-filters" aria-label="Game history filters">
       <input id="historySearchInput" type="search" placeholder="Filter by game, path, player, epoch, source">
@@ -233,17 +200,18 @@
         <option value="oldest">Oldest first</option>
         <option value="winner">Winner</option>
       </select>
+      <span id="histEpochChip" class="hist-epoch-chip" hidden></span>
     </div>
 
     <div class="history-layout">
       <section class="history-table-panel" aria-label="Game history list">
-        <div class="history-table-head">
-          <span>Game</span>
-          <span>Epoch</span>
-          <span>Winner</span>
-          <span>Length</span>
-          <span>Players</span>
-          <span>Diagnostics</span>
+        <div class="hist-list-head" aria-hidden="true">
+          <span class="hist-h-game">Game</span>
+          <span class="hist-h-src">Src</span>
+          <span class="hist-h-len">Len</span>
+          <span class="hist-h-players">Players</span>
+          <span class="hist-h-date">Modified</span>
+          <span class="hist-h-act"></span>
         </div>
         <div id="gameHistoryList" class="game-history-list"></div>
       </section>
@@ -528,6 +496,6 @@
     </div>
   </div>
 </main>
-<script src="/static/app.js?v=20260611-dbg3"></script>
+<script src="/static/app.js?v=20260611-match1"></script>
 </body>
 </html>

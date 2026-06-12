@@ -124,7 +124,8 @@ class FrontendSealBotControllerTests(unittest.TestCase):
         try:
             state = controller.reset(_slot_config("manual", "sealbot-current"))
             self.assertEqual(state["players"]["player0"]["kind"], "manual")
-            self.assertEqual(state["players"]["player1"]["kind"], "sealbot-current")
+            self.assertEqual(state["players"]["player1"]["kind"], "sealbot")
+            self.assertEqual(state["players"]["player1"]["variant"], "current")
             self.assertEqual(state["turn_status"], "human_turn")
 
             state = controller.submit_move(0, 0)
@@ -153,7 +154,8 @@ class FrontendSealBotControllerTests(unittest.TestCase):
         try:
             state = controller.reset(_slot_config("sealbot-current", "manual"))
             state = _wait_for_state(controller, state, lambda item: item["turn_status"] == "human_turn")
-            self.assertEqual(state["players"]["player0"]["kind"], "sealbot-current")
+            self.assertEqual(state["players"]["player0"]["kind"], "sealbot")
+            self.assertEqual(state["players"]["player0"]["variant"], "current")
             self.assertEqual(state["players"]["player1"]["kind"], "manual")
             self.assertEqual(state["current_player"], "player1")
             self.assertEqual(len(state["placements"]), 1)

@@ -32,7 +32,7 @@ from hexo_runner.modes.match import run_match
 from hexo_runner.player import DecisionResult, FinalSummary, PlayerIdentity, TransitionEvent, WorkerContext, GameContext
 from hexo_runner.records import GameResult, HexoRecordFile
 from hexo_runner.session import GameSpec
-from hexo_engine.types import unpack_coord_id
+from hexo_engine.types import pack_coord_id, unpack_coord_id
 
 from .dashboard import dashboard_state
 from . import debug_service
@@ -60,9 +60,17 @@ HISTORY_PAGE_MAX_LIMIT = 500
 ARTIFACT_PAGE_DEFAULT_LIMIT = 50
 ARTIFACT_PAGE_MAX_LIMIT = 200
 BotFactory = Callable[[str, float], object]
+CheckpointFactory = Callable[[dict], object]
 PLAYER_ROLES = ("player0", "player1")
 MANUAL_KIND = "manual"
 SEALBOT_PREFIX = "sealbot-"
+SERIES_MAX_GAMES = 25
+CHECKPOINT_VISITS_MIN = 8
+CHECKPOINT_VISITS_MAX = 2048
+CHECKPOINT_VISITS_DEFAULT = 256
+CHECKPOINT_C_PUCT_MIN = 0.1
+CHECKPOINT_C_PUCT_MAX = 10.0
+CHECKPOINT_C_PUCT_DEFAULT = 1.5
 
 # --- Transfer efficiency (gzip + caching) -----------------------------------
 # The dashboard is often viewed over LAN/VPN, where uncompressed payloads and
@@ -77,6 +85,11 @@ STATIC_MAX_AGE_SECONDS = 300
 # history screen re-polls every 15s, so memoize the built payload briefly to bound
 # that work to at most once per interval regardless of poll/client count.
 TRAINING_CACHE_TTL_SECONDS = 3.0
+# /api/training/live is the History screen's fast poll tier (~2.5s per client).
+# Its payload is only a handful of json/stat reads, but multiple open tabs would
+# multiply them; a ~1s micro-cache bounds the disk work to once per second per
+# run while staying far fresher than the 3s full-payload cache.
+TRAINING_LIVE_CACHE_TTL_SECONDS = 1.0
 
 _static_lock = Lock()
 # name -> (mtime, (raw_bytes, gzipped_bytes, etag, last_modified, content_type))
@@ -84,6 +97,8 @@ _static_cache: dict[str, tuple[float, tuple[bytes, bytes, str, str, str]]] = {}
 _training_cache_lock = Lock()
 _training_run_cache: dict[str, tuple[float, dict[str, object]]] = {}
 _training_runs_cache: list[tuple[float, dict[str, object]]] = []
+# run name -> (monotonic, payload) for /api/training/live (micro-cache, ~1s TTL)
+_training_live_cache: dict[str, tuple[float, dict[str, object]]] = {}
 _hxr_history_cache: dict[str, tuple[int, int, list[dict[str, object]]]] = {}
 _hxr_count_cache: dict[str, tuple[int, int, int]] = {}
 
@@ -153,6 +168,37 @@ def _training_runs_cached() -> dict[str, object]:
     return payload
 
 
+def _training_live_cached(name: str) -> dict[str, object]:
+    """Near-realtime live-status payload for ``GET /api/training/live?run=``.
+
+    Returns ``{"run", "status" (= _training_live_status(run_dir)), "ts"}``.
+    _training_live_status only does cheap reads (events.jsonl tail, the watchdog
+    jsonl tail, two small json files, and a couple of stat/glob probes) with no
+    side effects, but every open History tab polls this every ~2.5s — so the
+    built payload is micro-cached per run name for ~1s (module-level
+    ``_training_live_cache``, same (monotonic, payload) shape as
+    ``_training_runs_cached``) so N clients cost one disk pass per second, not N.
+    Unknown runs raise ValueError (-> 400 ``{"error": ...}``) and are never
+    cached."""
+
+    now = monotonic()
+    with _training_cache_lock:
+        hit = _training_live_cache.get(name)
+        if hit is not None and now - hit[0] < TRAINING_LIVE_CACHE_TTL_SECONDS:
+            return hit[1]
+    run_dir = _resolve_run_dir(name)
+    if run_dir is None:
+        raise ValueError("Unknown training run")
+    payload: dict[str, object] = {
+        "run": run_dir.name,
+        "status": _training_live_status(run_dir),
+        "ts": wall_clock(),
+    }
+    with _training_cache_lock:
+        _training_live_cache[name] = (monotonic(), payload)
+    return payload
+
+
 class MoveConflict(ValueError):
     """Raised when a browser move arrives while the human cannot act."""
 
@@ -160,13 +206,22 @@ class MoveConflict(ValueError):
 class ManualMatchController:
     """Frontend-owned bridge between HTTP clicks and generic runner players."""
 
-    def __init__(self, *, sealbot_path: str | Path | None = None, bot_factory: BotFactory | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        sealbot_path: str | Path | None = None,
+        bot_factory: BotFactory | None = None,
+        checkpoint_factory: CheckpointFactory | None = None,
+    ) -> None:
         self._condition = Condition(RLock())
         self._sealbot_path = Path(sealbot_path).expanduser().resolve() if sealbot_path else None
         self._bot_factory = bot_factory
+        self._checkpoint_factory = checkpoint_factory
         self._thread: Thread | None = None
         self._game_number = 0
+        self._generation = 0
         self._cancelled = False
+        self._stopped = False
         self._state: engine.HexoState | None = None
         self._python_state: engine.PythonHexoState | None = None
         self._pending_action: engine.Action | None = None
@@ -174,11 +229,27 @@ class ManualMatchController:
         self._result: GameResult | None = None
         self._error: BaseException | None = None
         self._mode = "manual"
-        self._player_setup: dict[str, str] = {"player0": MANUAL_KIND, "player1": MANUAL_KIND}
+        self._game_id = "manual-0-g1"
+        self._player_setup: dict[str, dict[str, object]] = {
+            "player0": {"kind": MANUAL_KIND},
+            "player1": {"kind": MANUAL_KIND},
+        }
+        self._slot_specs: dict[str, dict[str, object]] = {
+            "slot0": {"kind": MANUAL_KIND},
+            "slot1": {"kind": MANUAL_KIND},
+        }
+        self._seat_slots: dict[str, str] = {"player0": "slot0", "player1": "slot1"}
+        self._series_games = 1
+        self._series_alternate = False
+        self._series_current_game = 1
+        self._series_finished = False
+        self._series_tally: dict[str, int] = {"slot0": 0, "slot1": 0, "draws": 0}
+        self._series_results: list[dict[str, object]] = []
         self._bot_time_limit = DEFAULT_SEALBOT_TIME_LIMIT
         self._seed: int | None = None
         self._thinking_player: str | None = None
         self._last_bot_decision: dict[str, object] | None = None
+        self._decision_log: list[dict[str, object]] = []
         self._observed_transition: tuple[str, int] | None = None
         self.reset()
 
@@ -186,13 +257,29 @@ class ManualMatchController:
         match = self._parse_match_config(config or {})
         self.close()
         with self._condition:
+            self._generation += 1
             self._game_number += 1
             self._mode = match["mode"]
-            self._player_setup = dict(match["players"])
+            self._slot_specs = {
+                "slot0": dict(match["players"]["player0"]),
+                "slot1": dict(match["players"]["player1"]),
+            }
+            self._player_setup = {
+                "player0": dict(match["players"]["player0"]),
+                "player1": dict(match["players"]["player1"]),
+            }
+            self._seat_slots = {"player0": "slot0", "player1": "slot1"}
+            self._series_games = match["series_games"]
+            self._series_alternate = match["series_alternate"]
+            self._series_current_game = 1
+            self._series_finished = False
+            self._series_tally = {"slot0": 0, "slot1": 0, "draws": 0}
+            self._series_results = []
             self._bot_time_limit = match["time_limit"]
             self._seed = match["seed"]
-            game_id = f"{self._mode}-{self._game_number}"
+            self._game_id = f"{self._mode}-{self._game_number}-g1"
             self._cancelled = False
+            self._stopped = False
             self._state = None
             self._python_state = None
             self._pending_action = None
@@ -201,12 +288,42 @@ class ManualMatchController:
             self._error = None
             self._thinking_player = None
             self._last_bot_decision = None
+            self._decision_log = []
             self._observed_transition = None
-            players = self._players_for_match()
-            spec = GameSpec(game_id=game_id, seed=self._seed, mode=self._mode)
-            self._thread = Thread(target=self._run_match, args=(spec, players), daemon=True)
+            self._thread = Thread(target=self._run_series, args=(self._generation,), daemon=True)
             self._thread.start()
             self._wait_for_state_locked()
+            return self._payload_locked()
+
+    def stop(self) -> dict[str, object]:
+        """Halt the running match/series without joining the match thread.
+
+        A checkpoint search may sit inside the worker for minutes; the thread is a
+        daemon and exits at its next controller callback (the generation bump turns
+        every later callback into a "manual match reset" error it swallows)."""
+
+        with self._condition:
+            try:
+                self._wait_for_state_locked()
+            except RuntimeError:
+                # Stop must succeed even when startup never produced a state
+                # (errored/timed-out launch is exactly when a user hits Stop).
+                pass
+            self._cancelled = True
+            self._stopped = True
+            self._generation += 1
+            # The orphaned thread's finished/failed callbacks raise before they
+            # could clear this, so clear it here or it pulses forever.
+            self._thinking_player = None
+            self._version += 1
+            self._condition.notify_all()
+            if self._python_state is None:
+                return {
+                    "stopped": True,
+                    "version": self._version,
+                    "turn_status": "stopped",
+                    "error": self._error_message_locked(),
+                }
             return self._payload_locked()
 
     def adapters(self) -> dict[str, object]:
@@ -253,64 +370,99 @@ class ManualMatchController:
             self._cancelled = True
             self._condition.notify_all()
         thread.join(timeout=5.0)
-        if thread.is_alive():
-            raise RuntimeError("Timed out waiting for the current match to stop.")
+        # On timeout the thread is most likely blocked inside a long checkpoint
+        # search on the worker. Abandon it: it is a daemon, and the generation
+        # guard makes every later callback from it a harmless no-op error.
         self._thread = None
 
-    def decide(self, player_index: int, state: engine.HexoState) -> DecisionResult:
+    def decide(self, player_index: int, state: engine.HexoState, generation: int) -> DecisionResult:
         with self._condition:
-            if self._cancelled:
+            if self._cancelled or generation != self._generation:
                 raise RuntimeError("manual match reset")
             self._set_state_locked(state)
             self._version += 1
             self._condition.notify_all()
 
-            while self._pending_action is None and not self._cancelled:
+            while self._pending_action is None and not self._cancelled and generation == self._generation:
                 self._condition.wait()
-            if self._cancelled:
+            if self._cancelled or generation != self._generation:
                 raise RuntimeError("manual match reset")
 
             action = self._pending_action
             self._pending_action = None
             return DecisionResult(action=action, diagnostics={"manual_player": player_index})
 
-    def bot_decision_started(self, player_index: int, state: engine.HexoState) -> None:
+    def bot_decision_started(self, player_index: int, state: engine.HexoState, generation: int) -> None:
         with self._condition:
-            if self._cancelled:
+            if self._cancelled or generation != self._generation:
                 raise RuntimeError("manual match reset")
             self._set_state_locked(state)
             self._thinking_player = _player_role(player_index)
             self._version += 1
             self._condition.notify_all()
 
-    def bot_decision_finished(self, player_index: int, result: DecisionResult, duration_ms: float) -> None:
+    def bot_decision_finished(
+        self, player_index: int, result: DecisionResult, duration_ms: float, generation: int
+    ) -> None:
         action = result.action
+        role = _player_role(player_index)
+        diagnostics = dict(result.diagnostics)
         payload: dict[str, object] = {
-            "player": _player_role(player_index),
+            "player": role,
             "duration_ms": round(duration_ms, 3),
-            "diagnostics": dict(result.diagnostics),
+            "diagnostics": diagnostics,
         }
         if isinstance(action, engine.PlacementAction):
             payload.update({"q": action.coord.q, "r": action.coord.r})
         with self._condition:
+            if generation != self._generation:
+                raise RuntimeError("manual match reset")
+            # ply = placements BEFORE the move (the state was last set by
+            # bot_decision_started, i.e. pre-move), so this is the move index.
+            entry: dict[str, object] = {
+                "ply": len(self._python_state.placement_history) if self._python_state is not None else None,
+                "player": role,
+                "duration_ms": round(duration_ms, 3),
+                "value": diagnostics.get("root_value"),
+                "visits": diagnostics.get("visits"),
+                "kind": (self._player_setup.get(role) or {}).get("kind"),
+            }
+            if isinstance(action, engine.PlacementAction):
+                entry.update({"q": action.coord.q, "r": action.coord.r})
+            self._decision_log.append(entry)
             self._thinking_player = None
             self._last_bot_decision = payload
             self._version += 1
             self._condition.notify_all()
 
-    def bot_decision_failed(self, player_index: int, exc: BaseException, duration_ms: float) -> None:
+    def bot_decision_failed(
+        self, player_index: int, exc: BaseException, duration_ms: float, generation: int
+    ) -> None:
+        role = _player_role(player_index)
         with self._condition:
+            if generation != self._generation:
+                raise RuntimeError("manual match reset")
+            self._decision_log.append(
+                {
+                    "ply": len(self._python_state.placement_history) if self._python_state is not None else None,
+                    "player": role,
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "kind": (self._player_setup.get(role) or {}).get("kind"),
+                }
+            )
             self._thinking_player = None
             self._last_bot_decision = {
-                "player": _player_role(player_index),
+                "player": role,
                 "duration_ms": round(duration_ms, 3),
                 "error": f"{type(exc).__name__}: {exc}",
             }
             self._version += 1
             self._condition.notify_all()
 
-    def observe_transition(self, transition: TransitionEvent) -> None:
+    def observe_transition(self, transition: TransitionEvent, generation: int) -> None:
         with self._condition:
+            if generation != self._generation:
+                raise RuntimeError("manual match reset")
             key = (transition.game_id, transition.action_index)
             if self._observed_transition == key:
                 return
@@ -319,34 +471,96 @@ class ManualMatchController:
             self._version += 1
             self._condition.notify_all()
 
-    def _run_match(self, spec: GameSpec, players: tuple[object, object]) -> None:
+    def _run_series(self, generation: int) -> None:
         try:
-            with tempfile.TemporaryDirectory(prefix="hexo_manual_records_") as tmp:
-                result = run_match(spec, players, tmp)
+            for game_index in range(self._series_games):
+                swapped = self._series_alternate and game_index % 2 == 1
+                seat_slots = {
+                    "player0": "slot1" if swapped else "slot0",
+                    "player1": "slot0" if swapped else "slot1",
+                }
+                with self._condition:
+                    if self._generation != generation:
+                        return
+                    self._seat_slots = dict(seat_slots)
+                    self._player_setup = {
+                        role: dict(self._slot_specs[slot]) for role, slot in seat_slots.items()
+                    }
+                    self._series_current_game = game_index + 1
+                    self._game_id = f"{self._mode}-{self._game_number}-g{game_index + 1}"
+                    # Per-game fields only; the finished board state stays visible
+                    # until the next game's first decide/observe replaces it.
+                    self._result = None
+                    self._pending_action = None
+                    self._thinking_player = None
+                    self._last_bot_decision = None
+                    self._decision_log = []
+                    self._observed_transition = None
+                    players = self._players_for_match(generation)
+                    spec = GameSpec(
+                        game_id=self._game_id,
+                        seed=(self._seed + game_index) if self._seed is not None else None,
+                        mode=self._mode,
+                    )
+                    self._version += 1
+                    self._condition.notify_all()
+                with tempfile.TemporaryDirectory(prefix="hexo_manual_records_") as tmp:
+                    result = run_match(spec, players, tmp)
+                with self._condition:
+                    if self._generation != generation:
+                        return
+                    self._result = result
+                    self._thinking_player = None
+                    winner = str(result.winner) if result.winner is not None else None
+                    winner_slot = seat_slots.get(winner) if winner is not None else None
+                    if winner_slot is not None:
+                        self._series_tally[winner_slot] += 1
+                    else:
+                        self._series_tally["draws"] += 1
+                    self._series_results.append(
+                        {
+                            "game": game_index + 1,
+                            "winner_seat": winner,
+                            "winner_slot": winner_slot,
+                            "length": int(result.turns),
+                        }
+                    )
+                    aborted = result.abort is not None
+                    if not aborted and len(self._series_results) >= self._series_games:
+                        self._series_finished = True
+                    self._version += 1
+                    self._condition.notify_all()
+                    if self._cancelled or aborted:
+                        return
         except BaseException as exc:
             with self._condition:
+                if self._generation != generation:
+                    return
                 self._error = exc
                 self._thinking_player = None
+                self._version += 1
                 self._condition.notify_all()
-            return
-        with self._condition:
-            self._result = result
-            self._thinking_player = None
-            self._version += 1
-            self._condition.notify_all()
 
-    def _players_for_match(self) -> tuple[object, object]:
+    def _players_for_match(self, generation: int) -> tuple[object, object]:
         return (
-            self._make_player(0, self._player_setup["player0"]),
-            self._make_player(1, self._player_setup["player1"]),
+            self._make_player(0, self._player_setup["player0"], generation),
+            self._make_player(1, self._player_setup["player1"], generation),
         )
 
-    def _make_player(self, player_index: int, kind: str) -> object:
+    def _make_player(self, player_index: int, spec: dict[str, object], generation: int) -> object:
         role = _player_role(player_index)
+        kind = str(spec.get("kind") or MANUAL_KIND)
         if kind == MANUAL_KIND:
-            return _ManualPlayer(self, player_index, label=f"{_player_label(role)} Manual")
+            return _ManualPlayer(self, player_index, generation, label=f"{_player_label(role)} Manual")
 
-        variant = _sealbot_variant(kind)
+        if kind == "checkpoint":
+            if self._checkpoint_factory is not None:
+                bot = self._checkpoint_factory(dict(spec))
+            else:
+                bot = _CheckpointBotPlayer(spec)
+            return _ObservedBotPlayer(self, player_index, generation, bot)
+
+        variant = str(spec.get("variant") or "current")
         if self._bot_factory is not None:
             bot = self._bot_factory(variant, self._bot_time_limit)
         else:
@@ -357,7 +571,7 @@ class ManualMatchController:
                     time_limit=self._bot_time_limit,
                 )
             )
-        return _ObservedBotPlayer(self, player_index, bot)
+        return _ObservedBotPlayer(self, player_index, generation, bot)
 
     def _parse_match_config(self, config: dict[str, Any]) -> dict[str, Any]:
         bot = config.get("bot") if isinstance(config.get("bot"), dict) else {}
@@ -368,37 +582,47 @@ class ManualMatchController:
             raise ValueError("SealBot time_limit must be positive.")
         seed = config.get("seed")
         players = self._normalize_player_setup(config)
-        mode = "sealbot" if any(_is_sealbot_kind(kind) for kind in players.values()) else "manual"
+        kinds = {str(spec.get("kind")) for spec in players.values()}
+        if kinds == {MANUAL_KIND}:
+            mode = "manual"
+        elif "checkpoint" in kinds:
+            mode = "checkpoint"
+        else:
+            mode = "sealbot"
+        series = config.get("series") if isinstance(config.get("series"), dict) else {}
+        games = max(1, min(int(series.get("games") or 1), SERIES_MAX_GAMES))
         return {
             "mode": mode,
             "players": players,
             "time_limit": time_limit,
             "seed": None if seed in {"", None} else int(seed),
+            "series_games": games,
+            "series_alternate": bool(series.get("alternate") or False),
         }
 
-    def _normalize_player_setup(self, config: dict[str, Any]) -> dict[str, str]:
+    def _normalize_player_setup(self, config: dict[str, Any]) -> dict[str, dict[str, object]]:
         raw_players = config.get("players")
         if isinstance(raw_players, dict):
             return {
-                "player0": _normalize_player_kind(raw_players.get("player0", MANUAL_KIND)),
-                "player1": _normalize_player_kind(raw_players.get("player1", MANUAL_KIND)),
+                "player0": _normalize_player_spec(raw_players.get("player0", MANUAL_KIND)),
+                "player1": _normalize_player_spec(raw_players.get("player1", MANUAL_KIND)),
             }
 
         mode = str(config.get("mode") or "manual")
         if mode not in {"manual", "sealbot"}:
             raise ValueError(f"Unknown match mode: {mode}")
         if mode == "manual":
-            return {"player0": MANUAL_KIND, "player1": MANUAL_KIND}
+            return {"player0": {"kind": MANUAL_KIND}, "player1": {"kind": MANUAL_KIND}}
 
         human_player = str(config.get("human_player") or "player0")
         if human_player not in PLAYER_ROLES:
             raise ValueError("human_player must be player0 or player1.")
         bot = config.get("bot") if isinstance(config.get("bot"), dict) else {}
         variant = str(bot.get("variant") or "current")
-        bot_kind = _normalize_player_kind({"kind": "sealbot", "variant": variant})
+        bot_spec = _normalize_player_spec({"kind": "sealbot", "variant": variant})
         return {
-            "player0": MANUAL_KIND if human_player == "player0" else bot_kind,
-            "player1": MANUAL_KIND if human_player == "player1" else bot_kind,
+            "player0": {"kind": MANUAL_KIND} if human_player == "player0" else bot_spec,
+            "player1": {"kind": MANUAL_KIND} if human_player == "player1" else dict(bot_spec),
         }
 
     def _wait_for_state_locked(self, timeout: float = 5.0) -> None:
@@ -416,16 +640,22 @@ class ManualMatchController:
         payload.update(
             {
                 "version": self._version,
-                "game_id": f"{self._mode}-{self._game_number}",
+                "game_id": self._game_id,
                 "mode": self._mode,
                 "players": self._players_payload_locked(),
                 "turn_status": self._turn_status_locked(payload),
                 "can_submit": self._can_submit_locked(),
                 "thinking_player": self._thinking_player,
                 "last_bot_decision": self._last_bot_decision,
+                "bot_decisions": list(self._decision_log),
+                "stopped": self._stopped,
+                "series": self._series_payload_locked(),
                 "error": self._error_message_locked(),
                 "match": {
-                    "players": dict(self._player_setup),
+                    "players": {
+                        "player0": dict(self._slot_specs["slot0"]),
+                        "player1": dict(self._slot_specs["slot1"]),
+                    },
                     "time_limit": self._bot_time_limit,
                     "seed": self._seed,
                 },
@@ -439,7 +669,27 @@ class ManualMatchController:
             for index, role in enumerate(PLAYER_ROLES)
         }
 
+    def _series_payload_locked(self) -> dict[str, object] | None:
+        if self._series_games <= 1:
+            return None
+        return {
+            "games": self._series_games,
+            "played": len(self._series_results),
+            "current_game": self._series_current_game,
+            "alternate": self._series_alternate,
+            "finished": self._series_finished,
+            "tally": dict(self._series_tally),
+            "slots": {
+                "slot0": _player_payload(0, self._slot_specs["slot0"]),
+                "slot1": _player_payload(1, self._slot_specs["slot1"]),
+            },
+            "seats": dict(self._seat_slots),
+            "results": [dict(row) for row in self._series_results],
+        }
+
     def _turn_status_locked(self, payload: dict[str, object]) -> str:
+        if self._stopped:
+            return "stopped"
         if self._error is not None or (self._result is not None and self._result.abort is not None):
             return "error"
         if self._result is not None or payload.get("winner") is not None:
@@ -447,9 +697,11 @@ class ManualMatchController:
         if self._thinking_player is not None:
             return "bot_thinking"
         current = str(payload.get("current_player") or "")
-        return "bot_thinking" if _is_sealbot_kind(self._player_setup.get(current, MANUAL_KIND)) else "human_turn"
+        return "bot_thinking" if _spec_is_bot(self._player_setup.get(current)) else "human_turn"
 
     def _can_submit_locked(self) -> bool:
+        if self._stopped:
+            return False
         if self._state is None or self._result is not None or self._pending_action is not None:
             return False
         if self._thinking_player is not None:
@@ -457,7 +709,7 @@ class ManualMatchController:
         if self._python_state is not None and self._python_state.terminal is not None:
             return False
         current = str(engine.current_player(self._state))
-        if _is_sealbot_kind(self._player_setup.get(current, MANUAL_KIND)):
+        if _spec_is_bot(self._player_setup.get(current)):
             return False
         return True
 
@@ -479,9 +731,10 @@ class ManualMatchController:
 
 
 class _ManualPlayer:
-    def __init__(self, controller: ManualMatchController, player_index: int, *, label: str) -> None:
+    def __init__(self, controller: ManualMatchController, player_index: int, generation: int, *, label: str) -> None:
         self._controller = controller
         self._player_index = player_index
+        self._generation = generation
         self.identity = PlayerIdentity(player_id=f"manual-player-{player_index}", label=label)
 
     def setup_worker(self, context: WorkerContext) -> None:
@@ -491,10 +744,95 @@ class _ManualPlayer:
         return
 
     def decide(self, state: engine.HexoState) -> DecisionResult:
-        return self._controller.decide(self._player_index, state)
+        return self._controller.decide(self._player_index, state, self._generation)
 
     def observe_transition(self, transition: TransitionEvent) -> None:
-        self._controller.observe_transition(transition)
+        self._controller.observe_transition(transition, self._generation)
+
+    def finish_game(self, final_summary: FinalSummary) -> None:
+        return
+
+    def close(self) -> None:
+        return
+
+
+class _CheckpointBotPlayer:
+    """Model player backed by the shared CPU debug worker (debug_service).
+
+    ``search`` mode runs the worker's fresh reproducible MCTS (no root noise);
+    ``policy`` mode takes the prior argmax from one forward pass."""
+
+    def __init__(self, spec: dict[str, object]) -> None:
+        self._run = str(spec.get("run") or "")
+        self._checkpoint = str(spec.get("checkpoint") or "")
+        self._visits = int(spec.get("visits") or CHECKPOINT_VISITS_DEFAULT)
+        self._mode = str(spec.get("mode") or "search")
+        self._c_puct = float(spec.get("c_puct") or CHECKPOINT_C_PUCT_DEFAULT)
+        self._ckpt_path = _debug_resolve_checkpoint(self._run, self._checkpoint)
+        self.identity = PlayerIdentity(
+            player_id=f"ckpt-{self._run}-{Path(self._checkpoint).stem}",
+            label=_checkpoint_label(self._run, self._checkpoint),
+        )
+
+    def setup_worker(self, context: WorkerContext) -> None:
+        return
+
+    def start_game(self, context: GameContext) -> None:
+        return
+
+    def decide(self, state: engine.HexoState) -> DecisionResult:
+        acts = [pack_coord_id(rec.coord) for rec in engine.to_python_state(state).placement_history]
+        # The first move also pays the worker's torch import + model load.
+        timeout = min(300.0, max(60.0, self._visits * 0.15))
+        if self._mode == "policy":
+            signature = _debug_signature("match-policy", self._ckpt_path, acts, None)
+            result = _debug_worker().cached(
+                signature,
+                "analyze",
+                timeout=timeout,
+                checkpoint=str(self._ckpt_path),
+                action_ids=acts,
+            )
+            policy = result.get("policy") or []
+            if not policy:
+                raise RuntimeError(f"checkpoint policy returned no legal moves ({self._run}/{self._checkpoint})")
+            action_id = int(policy[0]["action_id"])  # rows are sorted p-desc, legal-only
+            diagnostics: dict[str, object] = {
+                "root_value": result.get("value"),
+                "mode": self._mode,
+                "run": self._run,
+                "checkpoint": self._checkpoint,
+                "top_p": policy[0].get("p"),
+            }
+        else:
+            signature = _debug_signature(
+                f"match-search:{self._visits}:{self._c_puct}", self._ckpt_path, acts, None
+            )
+            result = _debug_worker().cached(
+                signature,
+                "search",
+                timeout=timeout,
+                checkpoint=str(self._ckpt_path),
+                action_ids=acts,
+                visits=self._visits,
+                c_puct=self._c_puct,
+                seed=0,
+            )
+            action_id = int(result["best_action_id"])
+            diagnostics = {
+                "root_value": result.get("root_value"),
+                "visits": result.get("visits"),
+                "mode": self._mode,
+                "run": self._run,
+                "checkpoint": self._checkpoint,
+            }
+        return DecisionResult(
+            action=engine.PlacementAction(unpack_coord_id(action_id)),
+            diagnostics=diagnostics,
+        )
+
+    def observe_transition(self, transition: TransitionEvent) -> None:
+        return
 
     def finish_game(self, final_summary: FinalSummary) -> None:
         return
@@ -504,9 +842,10 @@ class _ManualPlayer:
 
 
 class _ObservedBotPlayer:
-    def __init__(self, controller: ManualMatchController, player_index: int, delegate: object) -> None:
+    def __init__(self, controller: ManualMatchController, player_index: int, generation: int, delegate: object) -> None:
         self._controller = controller
         self._player_index = player_index
+        self._generation = generation
         self._delegate = delegate
         self.identity = delegate.identity
 
@@ -517,19 +856,23 @@ class _ObservedBotPlayer:
         self._delegate.start_game(context)
 
     def decide(self, state: engine.HexoState) -> DecisionResult:
-        self._controller.bot_decision_started(self._player_index, state)
+        self._controller.bot_decision_started(self._player_index, state, self._generation)
         started = perf_counter()
         try:
             result = self._delegate.decide(state)
         except BaseException as exc:
-            self._controller.bot_decision_failed(self._player_index, exc, (perf_counter() - started) * 1000.0)
+            self._controller.bot_decision_failed(
+                self._player_index, exc, (perf_counter() - started) * 1000.0, self._generation
+            )
             raise
-        self._controller.bot_decision_finished(self._player_index, result, (perf_counter() - started) * 1000.0)
+        self._controller.bot_decision_finished(
+            self._player_index, result, (perf_counter() - started) * 1000.0, self._generation
+        )
         return result
 
     def observe_transition(self, transition: TransitionEvent) -> None:
         self._delegate.observe_transition(transition)
-        self._controller.observe_transition(transition)
+        self._controller.observe_transition(transition, self._generation)
 
     def finish_game(self, final_summary: FinalSummary) -> None:
         self._delegate.finish_game(final_summary)
@@ -546,44 +889,83 @@ def _player_label(role: str) -> str:
     return "P0" if role == "player0" else "P1"
 
 
-def _is_sealbot_kind(kind: str) -> bool:
-    return kind.startswith(SEALBOT_PREFIX)
+def _spec_is_bot(spec: dict[str, object] | None) -> bool:
+    return spec is not None and spec.get("kind") != MANUAL_KIND
 
 
-def _sealbot_variant(kind: str) -> str:
-    if not _is_sealbot_kind(kind):
-        raise ValueError(f"Player kind is not SealBot: {kind}")
-    return kind.removeprefix(SEALBOT_PREFIX)
-
-
-def _normalize_player_kind(value: object) -> str:
+def _normalize_player_spec(value: object) -> dict[str, object]:
     if isinstance(value, dict):
-        kind = str(value.get("kind") or value.get("adapter") or value.get("id") or MANUAL_KIND)
-        variant = str(value.get("variant") or "current")
+        kind = str(value.get("kind") or value.get("adapter") or value.get("id") or MANUAL_KIND).strip().lower()
         if kind in {"manual", "human"}:
-            return MANUAL_KIND
+            return {"kind": MANUAL_KIND}
         if kind in {"bot", "sealbot"}:
-            return _normalize_player_kind(f"sealbot-{variant}")
-        return _normalize_player_kind(kind)
+            variant = str(value.get("variant") or "current")
+            if variant not in {"current", "best"}:
+                raise ValueError(f"Unknown player kind: sealbot-{variant}")
+            return {"kind": "sealbot", "variant": variant}
+        if kind == "checkpoint":
+            run = str(value.get("run") or "")
+            checkpoint = str(value.get("checkpoint") or "")
+            # Resolve at parse time so a bad config 400s before any thread starts.
+            ckpt_path = _debug_resolve_checkpoint(run, checkpoint)
+            # Explicit None/"" checks: `or` would turn a literal 0 into the
+            # default instead of clamping it to the spec floor.
+            raw_visits = value.get("visits")
+            visits = CHECKPOINT_VISITS_DEFAULT if raw_visits in (None, "") else int(raw_visits)
+            visits = max(CHECKPOINT_VISITS_MIN, min(visits, CHECKPOINT_VISITS_MAX))
+            mode = str(value.get("mode") or "search")
+            if mode not in {"search", "policy"}:
+                raise ValueError(f"Unknown checkpoint mode: {mode}")
+            raw_c_puct = value.get("c_puct")
+            c_puct = CHECKPOINT_C_PUCT_DEFAULT if raw_c_puct in (None, "") else float(raw_c_puct)
+            c_puct = max(CHECKPOINT_C_PUCT_MIN, min(c_puct, CHECKPOINT_C_PUCT_MAX))
+            return {
+                "kind": "checkpoint",
+                "run": run,
+                "checkpoint": ckpt_path.name,
+                "visits": visits,
+                "mode": mode,
+                "c_puct": c_puct,
+            }
+        return _normalize_player_spec(kind)
 
     kind = str(value or MANUAL_KIND).strip().lower()
     if kind in {"manual", "human"}:
-        return MANUAL_KIND
+        return {"kind": MANUAL_KIND}
     if kind in {"bot", "sealbot"}:
-        return "sealbot-current"
+        return {"kind": "sealbot", "variant": "current"}
     if kind in {"sealbot-current", "sealbot-best"}:
-        return kind
+        return {"kind": "sealbot", "variant": kind.removeprefix(SEALBOT_PREFIX)}
     raise ValueError(f"Unknown player kind: {kind}")
 
 
-def _player_payload(player_index: int, kind: str) -> dict[str, object]:
+def _checkpoint_label(run: str, checkpoint: str) -> str:
+    match = _DEBUG_CKPT_EPOCH_RE.search(checkpoint)
+    short = f"e{int(match.group(1))}" if match else Path(checkpoint).stem
+    return f"{run} @ {short}"
+
+
+def _player_payload(player_index: int, spec: dict[str, object]) -> dict[str, object]:
     role = _player_role(player_index)
+    kind = str(spec.get("kind") or MANUAL_KIND)
     if kind == MANUAL_KIND:
-        return {"role": role, "kind": kind, "label": "Manual"}
-    variant = _sealbot_variant(kind)
+        return {"role": role, "kind": MANUAL_KIND, "label": "Manual"}
+    if kind == "checkpoint":
+        run = str(spec.get("run") or "")
+        checkpoint = str(spec.get("checkpoint") or "")
+        return {
+            "role": role,
+            "kind": "checkpoint",
+            "run": run,
+            "checkpoint": checkpoint,
+            "visits": spec.get("visits"),
+            "mode": spec.get("mode"),
+            "label": _checkpoint_label(run, checkpoint),
+        }
+    variant = str(spec.get("variant") or "current")
     return {
         "role": role,
-        "kind": kind,
+        "kind": "sealbot",
         "label": f"SealBot {variant}",
         "adapter_id": "sealbot",
         "variant": variant,
@@ -616,6 +998,17 @@ class HexoPlayHandler(BaseHTTPRequestHandler):
             elif path == "/api/training/run":
                 query = parse_qs(parsed.query)
                 self._send_json(_training_run_cached(str(query.get("name", [""])[0])))
+            elif path == "/api/training/live":
+                query = parse_qs(parsed.query)
+                self._send_json(_training_live_cached(str(query.get("run", [""])[0])))
+            elif path == "/api/training/epoch":
+                query = parse_qs(parsed.query)
+                self._send_json(
+                    _training_epoch(
+                        str(query.get("run", [""])[0]),
+                        _query_int(query.get("epoch", [None])[0]),
+                    )
+                )
             elif path == "/api/training/history-page":
                 query = parse_qs(parsed.query)
                 self._send_json(
@@ -763,6 +1156,8 @@ class HexoPlayHandler(BaseHTTPRequestHandler):
         try:
             if path == "/api/new":
                 self._send_json(self.controller.reset(self._read_json()))
+            elif path == "/api/match/stop":
+                self._send_json(self.controller.stop())
             elif path == "/api/move":
                 body = self._read_json()
                 self._send_json(self.controller.submit_move(int(body["q"]), int(body["r"])))
@@ -1030,6 +1425,168 @@ def _training_run(name: str) -> dict[str, object]:
         "learning_health": _learning_health(epoch_history, evaluation_history, live_status),
         "status": _training_run_status(run_dir, histories, live_status),
     }
+
+
+def _training_epoch(name: str, epoch: int | None) -> dict[str, object]:
+    """Single-epoch detail payload for the History screen's epoch inspector.
+
+    Deliberately uncached: the client fetches once per inspector open and caches
+    per (run, epoch), and the expensive part (_epoch_history's .hxr backfill) is
+    already memoized by mtime/size via _hxr_base_rows. Do not wire this into a
+    polling loop. A known run with no data at ``epoch`` is NOT an error -- the
+    envelope comes back with all data fields None."""
+
+    if epoch is None:
+        raise ValueError("epoch is required")
+    run_dir = _resolve_run_dir(name)
+    if run_dir is None:
+        raise ValueError("Unknown training run")
+    epoch = int(epoch)
+    history_row: dict[str, object] | None = None
+    prev_row: dict[str, object] | None = None
+    for row in _epoch_history(run_dir):  # ascending by epoch
+        row_epoch = row.get("epoch")
+        if not isinstance(row_epoch, int):
+            continue
+        if row_epoch == epoch:
+            history_row = row
+        elif row_epoch < epoch:
+            prev_row = row
+    evaluation_row = next(
+        (row for row in _evaluation_history(run_dir) if row.get("epoch") == epoch),
+        None,
+    )
+    return {
+        "run": run_dir.name,
+        "epoch": epoch,
+        "history": history_row,
+        "prev_epoch": prev_row,
+        "evaluation": evaluation_row,
+        "diagnostics": _diagnostics_by_epoch(run_dir).get(str(epoch)),
+        "selfplay_extras": _selfplay_epoch_extras(run_dir, epoch),
+        "manifest": _manifest_model_summary(run_dir),
+        "checkpoint": _epoch_checkpoint_stat(run_dir, history_row, epoch),
+    }
+
+
+def _selfplay_epoch_extras(run_dir: Path, epoch: int) -> dict[str, object] | None:
+    """Curated subset of ``diagnostics/dense_cnn.selfplay.epoch_*.json`` for the
+    epoch inspector. Curation IS the size cap: the raw file is ~120KB and carries
+    memory-internals (``mcts_diagnostics``, ``scheduler_diagnostics``, the
+    384-entry ``npz_writes`` list, ``spill``, ``selfplay_npz_files``) that must
+    never pass through. hexgt/hexgnn runs do not produce this file -> None."""
+
+    payload = _read_json_file(run_dir / "diagnostics" / f"dense_cnn.selfplay.epoch_{epoch:06d}.json")
+    if not isinstance(payload, dict):
+        return None
+    passthrough = (
+        "scheduler",
+        "raw_samples",
+        "effective_samples",
+        "total_decisions",
+        "active_games",
+        "mcts_virtual_batch_size",
+        "elapsed_seconds",
+        "mcts_search_elapsed_seconds",
+    )
+    nested = {
+        "temperature_control": ("expected_game_length", "halflife_plies", "halflife_fraction"),
+        "pcr": (
+            "enabled",
+            "full_proportion",
+            "fast_visits",
+            "full_search_count",
+            "fast_search_count",
+            "fast_rows_excluded",
+        ),
+        "policy_init": ("enabled", "fraction", "avg_plies", "max_plies", "temperature", "moves"),
+        "root_policy_temperature_control": ("base", "early", "halflife_plies"),
+    }
+    extras: dict[str, object] = {key: payload[key] for key in passthrough if key in payload}
+    for group, keys in nested.items():
+        value = payload.get(group)
+        if isinstance(value, dict):
+            extras[group] = {key: value[key] for key in keys if key in value}
+    return extras
+
+
+def _manifest_model_summary(run_dir: Path) -> dict[str, object] | None:
+    """Curated ``model.config`` subset from the run's ``manifest.json`` (arch +
+    the exploration knobs under active study). hexgt/hexgnn/dense manifests
+    differ in shape, so every level is dict-guarded and missing keys are simply
+    omitted -- never KeyError."""
+
+    manifest_path = run_dir / "manifest.json"
+    if not manifest_path.is_file():
+        return None
+    try:
+        data = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return None
+    model = data.get("model") if isinstance(data, dict) else None
+    if not isinstance(model, dict):
+        return None
+    config = model.get("config") if isinstance(model.get("config"), dict) else {}
+    groups = {
+        "architecture": (
+            "input_channels",
+            "channels",
+            "blocks_type",
+            "attention_heads",
+            "short_term_value_horizons",
+            "moves_left_head",
+        ),
+        "selfplay": (
+            "search_visits",
+            "active_games",
+            "c_puct",
+            "root_dirichlet_noise_fraction",
+            "root_dirichlet_total_alpha",
+            "root_policy_temperature",
+            "fpu_reduction",
+            "temperature",
+            "forced_playout_k",
+        ),
+        "evaluation": ("games_per_epoch", "eval_every", "sealbot_variant"),
+        "training": ("batch_size", "learning_rate", "train_samples_per_epoch"),
+    }
+    summary: dict[str, object] = {"model_name": model.get("name")}
+    for group, keys in groups.items():
+        value = config.get(group)
+        if isinstance(value, dict):
+            summary[group] = {key: value[key] for key in keys if key in value}
+    return summary
+
+
+def _epoch_checkpoint_stat(
+    run_dir: Path,
+    history_row: dict[str, object] | None,
+    epoch: int,
+) -> dict[str, object] | None:
+    """Stat the epoch's checkpoint by its history-row name, falling back to the
+    canonical ``epoch_{N:06d}.pt``. Tries the run dir first, then the Debug roots
+    via _debug_resolve_run_path (CALL only -- covers the HEXO_DEBUG_RUN_ROOT
+    worktree/mirror split where the history cwd lacks checkpoints)."""
+
+    ckpt_name = ""
+    checkpoint = history_row.get("checkpoint") if isinstance(history_row, dict) else None
+    if isinstance(checkpoint, dict):
+        raw_name = checkpoint.get("name") or ""
+        if not raw_name and checkpoint.get("path"):
+            raw_name = Path(str(checkpoint["path"])).name
+        ckpt_name = str(raw_name)
+    if not ckpt_name:
+        ckpt_name = f"epoch_{epoch:06d}.pt"
+    path = run_dir / "checkpoints" / ckpt_name
+    if not path.is_file():
+        resolved = _debug_resolve_run_path(run_dir.name, f"checkpoints/{ckpt_name}")
+        if resolved is None or not resolved.is_file():
+            return None
+        path = resolved
+    stat = _safe_stat(path)
+    if stat is None:
+        return None
+    return {"name": ckpt_name, "size": int(stat.st_size), "mtime": stat.st_mtime}
 
 
 def _training_history(run_name: str, artifact_path: str, record_index: int = 0) -> dict[str, object]:

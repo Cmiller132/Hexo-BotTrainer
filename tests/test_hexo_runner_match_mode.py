@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import os
 import sys
 import tempfile
 import unittest
@@ -425,6 +427,257 @@ class RunnerRewriteTests(unittest.TestCase):
 
             with self.assertRaises(ValueError):
                 controller.submit_move(42, 42)
+        finally:
+            controller.close()
+
+
+@contextlib.contextmanager
+def checkpoint_run(run_name: str = "ckpt_run", checkpoints: tuple[str, ...] = ("epoch_000001.pt", "epoch_000002.pt")):
+    """Temp run dir with stub checkpoint files, exposed via HEXO_DEBUG_RUN_ROOT."""
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ckpt_dir = Path(tmp) / "runs" / run_name / "checkpoints"
+        ckpt_dir.mkdir(parents=True)
+        for name in checkpoints:
+            (ckpt_dir / name).write_bytes(b"stub")
+        previous = os.environ.get("HEXO_DEBUG_RUN_ROOT")
+        os.environ["HEXO_DEBUG_RUN_ROOT"] = tmp
+        try:
+            yield run_name
+        finally:
+            if previous is None:
+                os.environ.pop("HEXO_DEBUG_RUN_ROOT", None)
+            else:
+                os.environ["HEXO_DEBUG_RUN_ROOT"] = previous
+
+
+class SeatAwareBot:
+    """Scripted stand-in for a checkpoint player: whoever is seated player0 plays
+    the winning line, the player1 seat plays filler — so the P0 seat always wins
+    and a slot-vs-seat tally mix-up is detectable under seat alternation."""
+
+    def __init__(self, spec: dict) -> None:
+        from hexo_runner import PlayerIdentity
+
+        self.spec = dict(spec)
+        self.identity = PlayerIdentity(player_id=f"test-ckpt-{spec.get('checkpoint')}")
+        self.moves: list[tuple[int, int]] | None = None
+
+    def setup_worker(self, context: object) -> None:
+        return
+
+    def start_game(self, context: object) -> None:
+        self.moves = None
+
+    def decide(self, state: object) -> object:
+        from hexo_engine import AxialCoord, PlacementAction, to_python_state
+        from hexo_runner import DecisionResult
+
+        if self.moves is None:
+            seated_first = to_python_state(state).placements_made == 0
+            self.moves = list(WINNING_P0 if seated_first else FILLER_P1)
+        q, r = self.moves.pop(0)
+        return DecisionResult(
+            action=PlacementAction(AxialCoord(q, r)),
+            diagnostics={"root_value": 0.25, "visits": int(self.spec.get("visits") or 0)},
+        )
+
+    def observe_transition(self, transition: object) -> None:
+        return
+
+    def finish_game(self, final_summary: object) -> None:
+        return
+
+    def close(self) -> None:
+        return
+
+
+class MatchBackendTests(unittest.TestCase):
+    def test_checkpoint_spec_normalization_defaults_and_clamps(self) -> None:
+        from hexo_frontend.web import _normalize_player_spec
+
+        with checkpoint_run() as run:
+            spec = _normalize_player_spec({"kind": "checkpoint", "run": run, "checkpoint": "epoch_000001.pt"})
+            self.assertEqual(
+                spec,
+                {
+                    "kind": "checkpoint",
+                    "run": run,
+                    "checkpoint": "epoch_000001.pt",
+                    "visits": 256,
+                    "mode": "search",
+                    "c_puct": 1.5,
+                },
+            )
+
+            clamped = _normalize_player_spec(
+                {
+                    "kind": "checkpoint",
+                    "run": run,
+                    "checkpoint": "epoch_000002.pt",
+                    "visits": 99999,
+                    "mode": "policy",
+                    "c_puct": 99.0,
+                }
+            )
+            self.assertEqual(clamped["visits"], 2048)
+            self.assertEqual(clamped["mode"], "policy")
+            self.assertEqual(clamped["c_puct"], 10.0)
+
+            low = _normalize_player_spec(
+                {"kind": "checkpoint", "run": run, "checkpoint": "epoch_000001.pt", "visits": 1, "c_puct": 0.001}
+            )
+            self.assertEqual(low["visits"], 8)
+            self.assertEqual(low["c_puct"], 0.1)
+
+            with self.assertRaises(ValueError):
+                _normalize_player_spec({"kind": "checkpoint", "run": run, "checkpoint": "missing.pt"})
+            with self.assertRaises(ValueError):
+                _normalize_player_spec(
+                    {"kind": "checkpoint", "run": run, "checkpoint": "epoch_000001.pt", "mode": "tree"}
+                )
+
+    def test_legacy_player_forms_still_normalize(self) -> None:
+        from hexo_frontend.web import _normalize_player_spec
+
+        self.assertEqual(_normalize_player_spec("manual"), {"kind": "manual"})
+        self.assertEqual(_normalize_player_spec("human"), {"kind": "manual"})
+        self.assertEqual(_normalize_player_spec("bot"), {"kind": "sealbot", "variant": "current"})
+        self.assertEqual(_normalize_player_spec("sealbot"), {"kind": "sealbot", "variant": "current"})
+        self.assertEqual(_normalize_player_spec("sealbot-best"), {"kind": "sealbot", "variant": "best"})
+        self.assertEqual(_normalize_player_spec({"kind": "manual"}), {"kind": "manual"})
+        self.assertEqual(
+            _normalize_player_spec({"kind": "sealbot", "variant": "best"}),
+            {"kind": "sealbot", "variant": "best"},
+        )
+        self.assertEqual(_normalize_player_spec(None), {"kind": "manual"})
+        with self.assertRaises(ValueError):
+            _normalize_player_spec("nonsense")
+        with self.assertRaises(ValueError):
+            _normalize_player_spec({"kind": "sealbot", "variant": "weird"})
+
+    def test_legacy_body_shape_keeps_working(self) -> None:
+        from hexo_frontend.web import ManualMatchController
+
+        controller = ManualMatchController(bot_factory=lambda variant, time_limit: SeatAwareBot({"checkpoint": variant}))
+        try:
+            state = controller.reset(
+                {"mode": "sealbot", "human_player": "player1", "bot": {"variant": "best", "time_limit": 0.01}}
+            )
+            self.assertEqual(state["mode"], "sealbot")
+            self.assertEqual(state["players"]["player0"]["kind"], "sealbot")
+            self.assertEqual(state["players"]["player0"]["variant"], "best")
+            self.assertEqual(state["players"]["player1"]["kind"], "manual")
+            self.assertIsNone(state["series"])
+        finally:
+            controller.close()
+
+    def test_unknown_checkpoint_fails_reset_before_starting(self) -> None:
+        from hexo_frontend.web import ManualMatchController
+
+        with checkpoint_run() as run:
+            controller = ManualMatchController()
+            try:
+                with self.assertRaises(ValueError):
+                    controller.reset(
+                        {
+                            "players": {
+                                "player0": {"kind": "checkpoint", "run": run, "checkpoint": "missing.pt"},
+                                "player1": "manual",
+                            }
+                        }
+                    )
+                # The previous (manual) game survives a rejected config.
+                state = controller.state()
+                self.assertEqual(state["players"]["player0"]["kind"], "manual")
+            finally:
+                controller.close()
+
+    def test_checkpoint_series_alternates_seats_and_tallies_by_slot(self) -> None:
+        from hexo_frontend.web import ManualMatchController
+
+        created_specs: list[dict] = []
+
+        def factory(spec: dict) -> SeatAwareBot:
+            created_specs.append(spec)
+            return SeatAwareBot(spec)
+
+        with checkpoint_run() as run:
+            controller = ManualMatchController(checkpoint_factory=factory)
+            try:
+                state = controller.reset(
+                    {
+                        "players": {
+                            "player0": {"kind": "checkpoint", "run": run, "checkpoint": "epoch_000001.pt", "visits": 16},
+                            "player1": {
+                                "kind": "checkpoint",
+                                "run": run,
+                                "checkpoint": "epoch_000002.pt",
+                                "visits": 16,
+                                "mode": "policy",
+                            },
+                        },
+                        "series": {"games": 3, "alternate": True},
+                    }
+                )
+                self.assertEqual(state["mode"], "checkpoint")
+                player0 = state["players"]["player0"]
+                self.assertEqual(player0["kind"], "checkpoint")
+                self.assertEqual(player0["run"], run)
+                self.assertEqual(player0["checkpoint"], "epoch_000001.pt")
+                self.assertEqual(player0["visits"], 16)
+                self.assertEqual(player0["label"], f"{run} @ e1")
+
+                controller._thread.join(timeout=20.0)
+                self.assertFalse(controller._thread.is_alive())
+                state = controller.state()
+                self.assertIsNone(state["error"])
+
+                series = state["series"]
+                self.assertTrue(series["finished"])
+                self.assertEqual(series["games"], 3)
+                self.assertEqual(series["played"], 3)
+                self.assertTrue(series["alternate"])
+                self.assertEqual(len(series["results"]), 3)
+                # The player0 SEAT wins every game; alternation moves slot1 into
+                # that seat for game 2, so the tally must count by slot.
+                self.assertEqual([row["winner_seat"] for row in series["results"]], ["player0"] * 3)
+                self.assertEqual([row["winner_slot"] for row in series["results"]], ["slot0", "slot1", "slot0"])
+                self.assertEqual(series["tally"], {"slot0": 2, "slot1": 1, "draws": 0})
+                self.assertEqual([row["length"] for row in series["results"]], [12, 12, 12])
+                self.assertEqual(series["seats"], {"player0": "slot0", "player1": "slot1"})
+                self.assertEqual(series["slots"]["slot0"]["checkpoint"], "epoch_000001.pt")
+                self.assertEqual(series["slots"]["slot1"]["mode"], "policy")
+
+                decisions = state["bot_decisions"]
+                self.assertEqual(len(decisions), 12)  # the final game's log
+                self.assertEqual(decisions[0]["ply"], 0)
+                self.assertTrue(all(item["value"] == 0.25 for item in decisions))
+                self.assertTrue(all(item["kind"] == "checkpoint" for item in decisions))
+
+                self.assertEqual(len(created_specs), 6)  # fresh players per game
+                self.assertEqual(created_specs[0]["checkpoint"], "epoch_000001.pt")
+            finally:
+                controller.close()
+
+    def test_stop_blocks_moves_and_reset_recovers(self) -> None:
+        from hexo_frontend.web import ManualMatchController, MoveConflict
+
+        controller = ManualMatchController()
+        try:
+            controller.submit_move(0, 0)
+            state = controller.stop()
+            self.assertTrue(state["stopped"])
+            self.assertEqual(state["turn_status"], "stopped")
+            self.assertFalse(state["can_submit"])
+            with self.assertRaises(MoveConflict):
+                controller.submit_move(0, 1)
+
+            state = controller.reset()
+            self.assertFalse(state["stopped"])
+            self.assertEqual(state["placements"], [])
+            state = controller.submit_move(0, 0)
+            self.assertEqual(len(state["placements"]), 1)
         finally:
             controller.close()
 
