@@ -295,17 +295,24 @@ class HexfieldNet(nn.Module):
         pair[:, NUM_TOKENS:, :NUM_TOKENS] = BIAS_CELL_TOKEN_ROW
         pair[:, NUM_TOKENS:, NUM_TOKENS:] = cell_idx
 
-        # Gather in FP32 — ALWAYS, even under autocast. Casting the table to the
-        # autocast fp16 dtype before _BiasGather made its backward accumulate and
-        # return fp16 gradients; the hot far/ring rows receive ~19M scatter-adds
-        # and overflow to inf under AMP+GradScaler (HIGH audit fix). With an fp32
-        # table the bincount backward stays fp32, so the master-table gradient is
-        # finite. The fp16 perf path is PRESERVED downstream: RelPosAttention.
-        # forward does `attn_bias = attn_bias.to(q.dtype)`, and .to() on this
-        # contiguous tensor stays contiguous, so the fused fp16 SDPA kernel still
-        # fires — only the (B,4,S,S) transient up to that cast is fp32.
-        table = self.bias_table
-        bias = _BiasGather.apply(table, pair)  # (B, Sq, Sk, heads), fp32
+        # TRAINING (grad enabled): gather in FP32 via _BiasGather. Casting the
+        # table to fp16 before _BiasGather made its backward accumulate fp16
+        # gradients; the hot far/ring rows receive ~19M scatter-adds and overflow
+        # to inf under AMP+GradScaler (HIGH audit fix). The fp32 master-table
+        # bincount backward keeps the gradient finite.
+        #
+        # INFERENCE (no grad — self-play/eval, the throughput path): no backward
+        # exists, so build the ENTIRE (B,heads,S,S) bias in fp16 — a plain fp16
+        # gather (no autograd transient) + fp16 add + fp16 contiguous — instead
+        # of the fp32 pipeline + a fp32->fp16 cast. The profiled bias machinery
+        # (gather + materialize + contiguous, ~70% of the forward) was running in
+        # fp32 then cast to fp16; doing it in fp16 halves that traffic. The SDPA
+        # input bias is fp16 EITHER WAY, so this is within fp16 rounding of the
+        # training path (guarded by test_sdpa_equals_materialized_fp16_cuda).
+        if torch.is_grad_enabled():
+            bias = _BiasGather.apply(self.bias_table, pair)  # (B, Sq, Sk, heads) fp32
+        else:
+            bias = self.bias_table.to(torch.float16)[pair]   # (B, Sq, Sk, heads) fp16
 
         # Pad-cell KEY columns: additive, finite in fp16. Token keys untouched.
         # PERF (M8, workflow-found): add the mask in the head-LAST layout (key =
