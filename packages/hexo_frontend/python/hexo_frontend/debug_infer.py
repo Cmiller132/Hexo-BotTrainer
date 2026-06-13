@@ -842,6 +842,17 @@ def _hexfield() -> SimpleNamespace:
     """Lazily import the hexfield package modules (kept out of import-time so a
     venv missing hexfield still debugs the other lineages, mirroring _hexgt)."""
 
+    # hexfield is NEVER installed into a shared venv (spec §5.1) — it is imported
+    # via a source-path shim. The debug worker is spawned with a minimal
+    # PYTHONPATH that does not include it, so add packages/hexfield/python here
+    # (derived from this file's location) before importing. Without this the
+    # worker fails with ModuleNotFoundError: No module named 'hexfield'.
+    import sys
+
+    _hf_src = Path(__file__).resolve().parents[3] / "hexfield" / "python"
+    if _hf_src.is_dir() and str(_hf_src) not in sys.path:
+        sys.path.insert(0, str(_hf_src))
+
     from hexfield import _rust
     from hexfield.batching import collate_rows
     from hexfield.constants import VALUE_BINS
