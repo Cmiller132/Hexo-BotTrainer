@@ -36,6 +36,18 @@ def load_into(model: HexfieldNet, payload: dict, *, optimizer=None) -> dict:
     model.load_state_dict(state, strict=True)
     if optimizer is not None and payload.get("optimizer"):
         optimizer.load_state_dict(payload["optimizer"])
+        # Checkpoints are loaded with map_location="cpu", so the optimizer's
+        # per-parameter state (exp_avg/exp_avg_sq/...) lands on CPU while the
+        # model params are on the run device (cuda). AdamW.step() then mixes
+        # devices -> "Expected all tensors to be on the same device, cuda:0 and
+        # cpu" and the FIRST post-resume training epoch crashes (self-play is
+        # inference so it survives; only the optimizer step fails). Move every
+        # optimizer state tensor onto the model's device after the load.
+        dev = next(model.parameters()).device
+        for st in optimizer.state.values():
+            for key, val in st.items():
+                if isinstance(val, torch.Tensor):
+                    st[key] = val.to(dev)
     return payload.get("meta", {})
 
 
