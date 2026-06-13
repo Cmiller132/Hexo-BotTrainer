@@ -131,21 +131,28 @@ class HexfieldEvaluator:
         request_ml, gpu_values, gpu_ml, gpu_priors,
     ) -> None:
         g = end - start
-        batch_feats = torch.zeros(g, pad_to, NUM_FEATURES, dtype=torch.float32)
-        batch_nbr = torch.full((g, pad_to, 6), pad_to, dtype=torch.long)
-        batch_mask = torch.zeros(g, pad_to, dtype=torch.bool)
-        batch_coords = torch.zeros(g, pad_to, 2, dtype=torch.long)
+        # Vectorized host pack: build the padded (g, pad_to, *) numpy buffers in
+        # one pass per field, then a single from_numpy + .to(device) per field.
+        # Byte-for-byte identical to the prior per-row from_numpy/torch.where
+        # loop (same fp32 feats, same sentinel->pad_to neighbor remap, same
+        # int64 coords, same bool mask), only without g separate host copies.
+        np_feats = np.zeros((g, pad_to, NUM_FEATURES), dtype=np.float32)
+        np_nbr = np.full((g, pad_to, 6), pad_to, dtype=np.int64)
+        np_mask = np.zeros((g, pad_to), dtype=np.bool_)
+        np_coords = np.zeros((g, pad_to, 2), dtype=np.int64)
         for k in range(g):
             row = start + k
             n = int(sizes[row])
             o = int(offsets[row])
-            batch_feats[k, :n] = torch.from_numpy(feats[o : o + n])
-            row_nbr = torch.from_numpy(nbr[o : o + n].astype(np.int64))
-            batch_nbr[k, :n] = torch.where(
-                row_nbr == NBR_SENTINEL, torch.full_like(row_nbr, pad_to), row_nbr
-            )
-            batch_mask[k, :n] = True
-            batch_coords[k, :n] = torch.from_numpy(qr[o : o + n].astype(np.int64))
+            np_feats[k, :n] = feats[o : o + n]
+            row_nbr = nbr[o : o + n].astype(np.int64)
+            np_nbr[k, :n] = np.where(row_nbr == NBR_SENTINEL, pad_to, row_nbr)
+            np_mask[k, :n] = True
+            np_coords[k, :n] = qr[o : o + n].astype(np.int64)
+        batch_feats = torch.from_numpy(np_feats)
+        batch_nbr = torch.from_numpy(np_nbr)
+        batch_mask = torch.from_numpy(np_mask)
+        batch_coords = torch.from_numpy(np_coords)
 
         device = self.device
         use_fp16 = device.type == "cuda"
@@ -164,7 +171,25 @@ class HexfieldEvaluator:
         if request_ml:
             gpu_ml.append(decode_moves_left(out["moves_left"].float()))
         logits = out["policy"].float()
+        # Batched legal-prefix softmax. Each row's prior is softmax over its
+        # first legal_counts[row] columns. Policy logits are mask-zeroed in the
+        # model (illegal columns are 0.0, NOT -inf), so a bare softmax over a
+        # fixed slice would let those zeros pollute the denominator; instead we
+        # set every column at index >= the row's legal count to -inf before one
+        # batched softmax. softmax subtracts the per-row max over the *legal*
+        # prefix in both forms (the -inf columns contribute exp(-inf)=0 to
+        # numerator and denominator), so each [:l] slice is numerically
+        # identical to the prior per-row torch.softmax(logits[k, :l]).
+        group_counts = torch.from_numpy(
+            np.ascontiguousarray(legal_counts[start:end])
+        ).to(logits.device, dtype=torch.long)
+        col_idx = torch.arange(logits.shape[1], device=logits.device)
+        legal = col_idx.unsqueeze(0) < group_counts.unsqueeze(1)  # (g, Npad)
+        masked = logits.masked_fill(~legal, float("-inf"))
+        priors = torch.softmax(masked, dim=1)  # fp32, GPU; rows with l==0 -> NaN
         for k in range(g):
             row = start + k
             l = int(legal_counts[row])
-            gpu_priors[row] = torch.softmax(logits[k, :l], dim=0)  # fp32, GPU
+            # Slice the legal prefix; rows with l == 0 yield an empty tensor, so
+            # any all-(-inf)-row NaNs are never read (matches the old behavior).
+            gpu_priors[row] = priors[k, :l]

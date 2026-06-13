@@ -282,15 +282,20 @@ fn early_stop_ready(
         }
     }
     let root = search.root();
+    // Build the per-edge stats vec ONCE (delta + LCB inputs) and derive
+    // best/second/best_id from it, instead of scanning root.edges here and
+    // then re-scanning it inside lcb_pick. The derivation below preserves the
+    // original `delta > best` (strictly-greater) tie-break — the first edge at
+    // the max delta stays best_id — so this is bit-identical to the prior code.
+    let stats = lcb_stats(root, baseline);
     let mut best = 0u32;
     let mut second = 0u32;
     let mut best_id: Option<PackedCoord> = None;
-    for edge in &root.edges {
-        let delta = edge_delta_visits(edge, baseline);
+    for &(action_id, delta, _visits, _value_sum, _value_sq_sum) in &stats {
         if delta > best {
             second = best;
             best = delta;
-            best_id = Some(edge.action_id);
+            best_id = Some(action_id as PackedCoord);
         } else if delta > second {
             second = delta;
         }
@@ -302,13 +307,37 @@ fn early_stop_ready(
         return false;
     }
     if dv.lcb_move_selection && !recorded_full {
-        if let Some(lcb_id) = lcb_pick(root, baseline, &dv) {
+        if let Some(lcb_id) =
+            debug_lcb_from_stats(&stats, dv.lcb_z, dv.lcb_min_visits, dv.lcb_visit_fraction)
+                .map(|id| id as PackedCoord)
+        {
             if lcb_id != best_id {
                 return false;
             }
         }
     }
     true
+}
+
+/// Per-edge LCB inputs over root edges: (action_id, delta_visits, visits,
+/// value_sum, value_sq_sum), in edge order. Shared by lcb_pick and
+/// early_stop_ready so the edge scan happens once per decision.
+fn lcb_stats(
+    root: &RustNode,
+    baseline: Option<&HashMap<PackedCoord, u32>>,
+) -> Vec<(u64, u32, u32, f32, f32)> {
+    root.edges
+        .iter()
+        .map(|edge| {
+            (
+                edge.action_id as u64,
+                edge_delta_visits(edge, baseline),
+                edge.visits,
+                edge.value_sum,
+                edge.value_sq_sum,
+            )
+        })
+        .collect()
 }
 
 /// LCB pick among eligible root edges: Q - z * sigma / sqrt(n), eligibility
@@ -320,19 +349,7 @@ fn lcb_pick(
     baseline: Option<&HashMap<PackedCoord, u32>>,
     dv: &Divergences,
 ) -> Option<PackedCoord> {
-    let stats: Vec<(u64, u32, u32, f32, f32)> = root
-        .edges
-        .iter()
-        .map(|edge| {
-            (
-                edge.action_id as u64,
-                edge_delta_visits(edge, baseline),
-                edge.visits,
-                edge.value_sum,
-                edge.value_sq_sum,
-            )
-        })
-        .collect();
+    let stats = lcb_stats(root, baseline);
     debug_lcb_from_stats(&stats, dv.lcb_z, dv.lcb_min_visits, dv.lcb_visit_fraction)
         .map(|id| id as PackedCoord)
 }
@@ -2126,15 +2143,19 @@ fn visit_policy(
     root: &RustNode,
     baseline: Option<&HashMap<PackedCoord, u32>>,
 ) -> (Vec<PackedCoord>, Vec<f32>, u32) {
-    let policy_total: u32 = root
+    // Compute each edge's delta visits ONCE (edge_delta_visits is a HashMap
+    // lookup when baseline is Some) and reuse the cached deltas for both the
+    // total and the per-edge weights. Value-identical to the prior two-pass
+    // form: same sum, same per-edge weight numerators.
+    let deltas: Vec<u32> = root
         .edges
         .iter()
         .map(|edge| edge_delta_visits(edge, baseline))
-        .sum();
+        .collect();
+    let policy_total: u32 = deltas.iter().copied().sum();
     let mut policy_action_ids = Vec::with_capacity(root.edges.len());
     let mut policy_weights = Vec::with_capacity(root.edges.len());
-    for edge in &root.edges {
-        let visits = edge_delta_visits(edge, baseline);
+    for (edge, &visits) in root.edges.iter().zip(deltas.iter()) {
         if baseline.is_some() && visits == 0 {
             continue;
         }
