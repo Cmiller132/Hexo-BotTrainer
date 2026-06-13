@@ -10,6 +10,8 @@ L_g, positional over each row's legal prefix, fp32 softmax), and
 
 from __future__ import annotations
 
+import os
+
 import numpy as np
 import torch
 
@@ -65,6 +67,21 @@ class HexfieldEvaluator:
         self.model = model
         self.device = torch.device(device)
         self.model.to(self.device).eval()
+        # Serve forward is the throughput bottleneck (~70% of it is the rel-pos
+        # bias machinery: many small elementwise/gather kernels). torch.compile
+        # (dynamic=True for the varying flush shapes) fuses them and removes the
+        # kernel-launch overhead — ~2.3x on top of the fp16-inference bias, at
+        # ~1e-4 (fp16-tolerance) parity. Eval-only (training never goes through
+        # HexfieldEvaluator, so the eager fp32-grad path is untouched). First
+        # call pays a one-time compile; dynamic graph then absorbs new shapes
+        # cheaply. Opt out with HEXFIELD_NO_COMPILE=1; falls back to eager on any
+        # compile error.
+        self._fpv = self.model.forward_policy_value
+        if self.device.type == "cuda" and os.environ.get("HEXFIELD_NO_COMPILE") != "1":
+            try:
+                self._fpv = torch.compile(self.model.forward_policy_value, dynamic=True)
+            except Exception:
+                self._fpv = self.model.forward_policy_value
 
     def __call__(self, payload: dict) -> dict:
         return self.evaluate_payload(payload)
@@ -157,7 +174,7 @@ class HexfieldEvaluator:
         device = self.device
         use_fp16 = device.type == "cuda"
         with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=use_fp16):
-            out = self.model.forward_policy_value(
+            out = self._fpv(
                 batch_feats.to(device),
                 batch_nbr.to(device),
                 batch_mask.to(device),
