@@ -81,6 +81,18 @@ class HexfieldTrainer:
             return {"status": "skipped", "epoch": epoch, "reason": "empty sample window"}
         rng = random.Random(epoch * 7919 + 13)
         self.model.train().to(self.device)
+        # RESUME SAFETY (the effective fix for the epoch-11 crash loop): the
+        # checkpoint is loaded with map_location="cpu" while the model is still
+        # on CPU at load time, so AdamW's per-parameter state (exp_avg/
+        # exp_avg_sq) lands on CPU. The model is moved to self.device only on the
+        # line above — so by the FIRST optimizer.step() the model params are on
+        # cuda but the optimizer state is still on CPU, giving "Expected all
+        # tensors on the same device, cuda:0 and cpu" (_foreach_lerp_). Move the
+        # optimizer state to the model's device now (no-op after epoch 1).
+        for _st in self.optimizer.state.values():
+            for _k, _v in _st.items():
+                if isinstance(_v, torch.Tensor) and _v.device != self.device:
+                    _st[_k] = _v.to(self.device)
         batch_rows = self.config.training.batch_rows
         comp_totals: dict[str, float] = {}
         grad_norms: list[float] = []
