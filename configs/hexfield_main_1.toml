@@ -1,0 +1,75 @@
+# hexfield production run 1 (owner directive 2026-06-12): 512 visits,
+# PCR fast=128 at 33% full. Quarantined knobs OFF (spec §5.1), §5.4
+# divergences ON (defaults). Run dir on the dashboard mount so the :8080
+# History screen renders it natively. Warm-start: the BC prefit (spec §7).
+
+[model]
+name = "hexfield"
+module = "hexfield.plugin"
+
+[model.config]
+device = "cuda"
+
+[model.config.selfplay]
+search_visits = 512
+pcr_full_proportion = 0.33
+pcr_fast_visits = 128
+active_games = 64
+c_puct = 1.5
+virtual_batch_size = 4
+# flush_target must be ABOVE max in-flight (active_games*virtual_batch_size) so
+# the flush is select-exhaustion-driven, not a stall waiting for an unreachable
+# full batch (flush_target==in-flight HANGS; <in-flight caps the batch small).
+# Empirically (probe sweep): batch size scales with active_games, throughput
+# plateaus ~64 games (evals/s GPU-saturated ~772). 0 is rejected by validation.
+flush_target = 1024
+active_root_limit = 128
+root_dirichlet_total_alpha = 10.83
+root_dirichlet_noise_fraction = 0.25
+fpu_reduction = 0.2
+widening_policy_mass = 0.95
+widening_max_children = 96
+widening_min_children = 2
+forced_playout_k = 2.0
+policy_init_fraction = 0.25
+policy_init_avg_plies = 4.0
+policy_init_max_plies = 8
+policy_init_temperature = 1.4
+temperature = 1.0
+temperature_floor = 0.1
+temperature_halflife_plies = 30.0
+max_game_plies = 256
+tss_enabled = true
+cache_max_states = 262144
+
+[model.config.training]
+batch_rows = 32
+learning_rate = 1e-3
+weight_decay = 1e-4
+shuffle_keep_target_rows = 300000
+
+[model.config.evaluation]
+games_per_epoch = 16
+eval_visits = 128
+# The lockstep arena is single-game/slow; over a long run evaluate periodically
+# (the eval ladder is for tracking strength, not a per-epoch gate).
+eval_every = 5
+
+[run]
+name = "hexfield_main_1"
+output_dir = "/mnt/e/Hexo-BotTrainer/runs/hexfield_main_1"
+seed = 1
+
+[loop]
+epochs = 200
+
+[selfplay]
+games_per_epoch = 64
+update_checkpoint_pointer = false
+
+[train]
+passes_per_epoch = 1
+
+[checkpoint]
+initialize_from = "/mnt/e/Hexo-BotTrainer-hexgt/runs/hexfield_bc_1/checkpoint_epoch2.pt"
+save_name = "latest"

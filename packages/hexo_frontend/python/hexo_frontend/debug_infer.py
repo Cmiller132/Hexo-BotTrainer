@@ -520,14 +520,17 @@ def _search_dense(
     # A DEBUG search must be a clean, reproducible read of the model's own
     # judgement: no root exploration noise, neutral root-policy temperature, fixed
     # seed. So the reported root prior is exactly the network prior and re-running
-    # the same position yields the same tree.
+    # the same position yields the same tree. Move-selection temperature 0 makes
+    # the reported best action the strict visit ARGMAX (a positive temperature
+    # would make it a visit-weighted sample — softer than the eval protocol and
+    # the match-mode checkpoint bots, which both play the argmax).
     result = session.run(
         [0],
         [state],
         inference,
         visits=int(visits),
         c_puct=float(c_puct),
-        temperature=1.0,
+        temperature=0.0,
         seed=int(seed),
         root_dirichlet_total_alpha=1.0,
         root_dirichlet_noise_fraction=0.0,
@@ -786,13 +789,15 @@ def _search_hexgt(
     state = state_from_actions(action_ids)
     inference = hx.HexgtInference(loaded.model, device="cpu", fp16=False)
     session = hx.new_mcts_session(n=radius)
+    # Same clean-search contract as _search_dense: no noise, raw prior, and
+    # move-selection temperature 0 so the reported best is the visit argmax.
     result = session.run(
         [0],
         [state],
         inference,
         visits=int(visits),
         c_puct=float(c_puct),
-        temperature=1.0,
+        temperature=0.0,
         seed=int(seed),
         root_dirichlet_total_alpha=1.0,
         root_dirichlet_noise_fraction=0.0,

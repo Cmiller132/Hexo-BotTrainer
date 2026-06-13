@@ -395,6 +395,12 @@ def _benchmark_selfplay_setting(
             widening_policy_mass=config.selfplay.widening_policy_mass,
             widening_max_children=config.selfplay.widening_max_children,
             widening_min_children=config.selfplay.widening_min_children,
+            # Calibrate against the same search the run will use
+            # (None = on + old-.so compatible).
+            tss_enabled=(None if config.selfplay.tss_enabled else False),
+            root_fpu_zero_under_noise=(
+                None if config.selfplay.root_fpu_zero_under_noise else False
+            ),
         )
         if searches:
             _extend_mcts_diagnostic_batches(mcts_diagnostic_batches, searches)
@@ -516,6 +522,12 @@ def _benchmark_selfplay_setting_continuous(
         widening_max_children=selfplay.widening_max_children,
         widening_min_children=selfplay.widening_min_children,
         forced_playout_k=selfplay.forced_playout_k,
+        # Calibrate against the same search the run will use
+        # (None = on + old-.so compatible).
+        tss_enabled=(None if selfplay.tss_enabled else False),
+        root_fpu_zero_under_noise=(
+            None if selfplay.root_fpu_zero_under_noise else False
+        ),
     )
     elapsed = perf_counter() - started
     scheduler = dict(scheduler)

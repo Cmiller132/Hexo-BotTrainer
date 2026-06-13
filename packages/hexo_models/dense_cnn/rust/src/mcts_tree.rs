@@ -251,6 +251,12 @@ pub(crate) struct RustSearch {
     /// materialized ROOT child at least `sqrt(k * prior * root_visits)` visits so
     /// Dirichlet root noise survives PUCT exploitation into the visit counts.
     forced_playout_k: f32,
+    /// Threat-Space Search master switch (default true). When false the search
+    /// runs pure prior-driven PUCT: no tactical-cell injection at expansion, no
+    /// hitting-set leaf value override, and no root move-selection guard (the
+    /// mcts.rs call sites read this flag). Exists so a run can reproduce the
+    /// pre-TSS (pre-2026-06-09) search semantics by config.
+    pub(crate) tss_enabled: bool,
     active_edge_count: usize,
     max_active_edges_per_node: usize,
 }
@@ -286,6 +292,7 @@ impl RustSearch {
         root_noise: Option<RootDirichletNoise>,
         widening: Widening,
         forced_playout_k: f32,
+        tss_enabled: bool,
     ) -> PyResult<Self> {
         // The root node starts with priors staged but no active edges. Edges are
         // materialized lazily by `select_or_materialize_edge` according to PUCT
@@ -298,6 +305,7 @@ impl RustSearch {
             Some(root_policy_temperature),
             root_noise,
             widening,
+            tss_enabled,
         )?;
         let mut node_table = HashMap::new();
         node_table.insert(root_hash, 0);
@@ -312,6 +320,7 @@ impl RustSearch {
             root_fpu_reduction,
             widening,
             forced_playout_k,
+            tss_enabled,
             active_edge_count: 0,
             max_active_edges_per_node: 0,
         })
@@ -321,6 +330,13 @@ impl RustSearch {
     /// caller passes a different value across calls; default 0 disables forcing).
     pub(crate) fn set_forced_playout_k(&mut self, k: f32) {
         self.forced_playout_k = k;
+    }
+
+    /// Set the TSS master switch for a reused search (see the field doc). Edges a
+    /// previous TSS-on expansion already force-materialized keep their visit
+    /// stats — only future expansions/overrides/guards follow the new value.
+    pub(crate) fn set_tss_enabled(&mut self, enabled: bool) {
+        self.tss_enabled = enabled;
     }
 
     /// Set the root-only FPU reduction for a reused search (see the field doc).
@@ -481,7 +497,13 @@ impl RustSearch {
         // outside dense_cnn's fixed crop are not in the candidate set and are
         // silently skipped by `split_tactical` (graceful crop degradation — the
         // leaf override + guard still recognize the out-of-crop case by occupancy).
-        let tactical = threats::tactical_cells(state);
+        // With TSS disabled no cells are computed and every node takes the shared
+        // path, exactly as before the TSS port.
+        let tactical = if self.tss_enabled {
+            threats::tactical_cells(state)
+        } else {
+            Vec::new()
+        };
         let node = if tactical.is_empty() {
             shared_from_cache(hash, state, evaluation, self.widening)
         } else {
@@ -995,6 +1017,7 @@ fn owned_root_from_evaluation(
     root_policy_temperature: Option<f32>,
     root_noise: Option<RootDirichletNoise>,
     widening: Widening,
+    tss_enabled: bool,
 ) -> PyResult<RustNode> {
     // The evaluator returns one prior per in-crop legal move, so every legal
     // candidate is staged here. Root-policy temperature softens the prior at the
@@ -1027,7 +1050,12 @@ fn owned_root_from_evaluation(
     // (the load-bearing fix — a leaf override can't fire on a child the nucleus cap
     // never materializes). Crop handling is the same as interior nodes: only
     // tactical cells present in the candidate set (in-crop legal) are forced.
-    let tactical = threats::tactical_cells(state);
+    // TSS off -> empty set -> split_tactical is a pass-through (pre-TSS root).
+    let tactical = if tss_enabled {
+        threats::tactical_cells(state)
+    } else {
+        Vec::new()
+    };
     let (edges, mut candidates, max_eligible_children) =
         split_tactical(candidates, &tactical, nucleus);
     candidates.shrink_to_fit();
@@ -1345,7 +1373,7 @@ mod tests {
     fn widening_caps_materialized_edges_under_many_visits() {
         let state = RustHexoState::new();
         let mut search =
-            RustSearch::new(state, &uniform_evaluation(16), 128, 0.20, 0.20, 1.0, None, wide(0.95, 2, 4), 0.0)
+            RustSearch::new(state, &uniform_evaluation(16), 128, 0.20, 0.20, 1.0, None, wide(0.95, 2, 4), 0.0, true)
                 .unwrap();
         assert_eq!(search.nodes[0].max_eligible_children, 4);
         let mut materialized = 0;
@@ -1367,7 +1395,7 @@ mod tests {
     fn edges_materialize_lazily_in_prior_order() {
         let state = RustHexoState::new();
         let mut search =
-            RustSearch::new(state, &evaluation_with_priors(8), 128, 0.20, 0.20, 1.0, None, wide_open(), 0.0)
+            RustSearch::new(state, &evaluation_with_priors(8), 128, 0.20, 0.20, 1.0, None, wide_open(), 0.0, true)
                 .unwrap();
         for _ in 0..8 {
             let edge_index = search.select_or_materialize_edge(0, 1.5).unwrap();
@@ -1392,6 +1420,7 @@ mod tests {
             Some(1.0),
             None,
             wide_open(),
+            true,
         )
         .unwrap();
         let flat = owned_root_from_evaluation(
@@ -1401,6 +1430,7 @@ mod tests {
             Some(2.0),
             None,
             wide_open(),
+            true,
         )
         .unwrap();
         let sharp_top = sharp.peek_next_candidate().unwrap().1;
@@ -1418,7 +1448,7 @@ mod tests {
         let widening = wide_open();
 
         let mut owned_search =
-            RustSearch::new(state.clone(), &eval, 128, 0.20, 0.20, 1.0, None, widening, 0.0).unwrap();
+            RustSearch::new(state.clone(), &eval, 128, 0.20, 0.20, 1.0, None, widening, 0.0, true).unwrap();
         let mut owned_order = Vec::new();
         for _ in 0..8 {
             let edge_index = owned_search.select_or_materialize_edge(0, 1.5).unwrap();
@@ -1427,7 +1457,7 @@ mod tests {
         }
 
         let mut shared_search =
-            RustSearch::new(state.clone(), &uniform_evaluation(1), 128, 0.20, 0.20, 1.0, None, widening, 0.0)
+            RustSearch::new(state.clone(), &uniform_evaluation(1), 128, 0.20, 0.20, 1.0, None, widening, 0.0, true)
                 .unwrap();
         shared_search
             .nodes
@@ -1449,7 +1479,7 @@ mod tests {
         let state = RustHexoState::new();
         let widening = wide(0.95, 2, 4);
         let mut search =
-            RustSearch::new(state.clone(), &uniform_evaluation(1), 128, 0.20, 0.20, 1.0, None, widening, 0.0)
+            RustSearch::new(state.clone(), &uniform_evaluation(1), 128, 0.20, 0.20, 1.0, None, widening, 0.0, true)
                 .unwrap();
         search.nodes.push(shared_from_cache(
             7,
@@ -1480,7 +1510,7 @@ mod tests {
         let eval = evaluation_with_priors(8);
         let widening = wide_open();
         let mut search =
-            RustSearch::new(state.clone(), &uniform_evaluation(1), 128, 0.20, 0.20, 1.0, None, widening, 0.0)
+            RustSearch::new(state.clone(), &uniform_evaluation(1), 128, 0.20, 0.20, 1.0, None, widening, 0.0, true)
                 .unwrap();
         search.nodes[0] = shared_from_cache(search.root_hash, &state, Arc::new(cache_ready(eval)), widening);
         for _ in 0..3 {
@@ -1581,7 +1611,7 @@ mod tests {
         // its guaranteed first visit ahead of every high-prior candidate.
         let state = RustHexoState::new();
         let mut search =
-            RustSearch::new(state, &evaluation_with_priors(8), 128, 0.20, 0.20, 1.0, None, wide_open(), 0.0)
+            RustSearch::new(state, &evaluation_with_priors(8), 128, 0.20, 0.20, 1.0, None, wide_open(), 0.0, true)
                 .unwrap();
         let coord = HexCoord { q: 99, r: 0 };
         search.nodes[0].edges.push(RustEdge {

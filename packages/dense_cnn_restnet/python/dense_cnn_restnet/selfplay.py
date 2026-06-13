@@ -755,6 +755,12 @@ def _generate_selfplay_epoch_lockstep(*, ctx: Any, components: Any, epoch: int, 
                         forced_playout_k=spec_forced_k,
                         move_temperatures=move_temperatures,
                         root_policy_temperatures=root_policy_temperatures,
+                        # None = native default (on) AND old-.so compatible; the
+                        # kwargs only reach Rust when a config opts out.
+                        tss_enabled=(None if selfplay.tss_enabled else False),
+                        root_fpu_zero_under_noise=(
+                            None if selfplay.root_fpu_zero_under_noise else False
+                        ),
                     )
                     if len(searches) != len(spec_games):
                         raise RuntimeError(
@@ -1518,6 +1524,12 @@ def _generate_selfplay_epoch_continuous(*, ctx: Any, components: Any, epoch: int
                     ),
                     policy_init_temperature=(
                         float(selfplay.policy_init_temperature) if policy_init_enabled else None
+                    ),
+                    # None = native default (on) AND old-.so compatible; the
+                    # kwargs only reach Rust when a config opts out.
+                    tss_enabled=(None if selfplay.tss_enabled else False),
+                    root_fpu_zero_under_noise=(
+                        None if selfplay.root_fpu_zero_under_noise else False
                     ),
                 )
                 mcts_search_elapsed += perf_counter() - search_started

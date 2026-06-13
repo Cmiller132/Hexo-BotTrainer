@@ -98,6 +98,11 @@ struct ContinuousMovePolicy {
     fpu_reduction: f32,
     forced_playout_k: f32,
     noise: Option<RootNoiseConfig>,
+    /// TSS master switch (see the lockstep `search` param of the same name).
+    tss_enabled: bool,
+    /// False keeps `fpu_reduction` at noisy Full-search roots (KataGo
+    /// rootFpuReductionMax=0 opt-out; pre-2026-06-10 semantics).
+    root_fpu_zero_under_noise: bool,
 }
 
 impl ContinuousMovePolicy {
@@ -173,8 +178,10 @@ impl ContinuousMovePolicy {
 
     /// Root-only FPU: zero while root noise is on (KataGo rootFpuReductionMax=0);
     /// noise-free fast/init searches keep the normal reduction.
+    /// `root_fpu_zero_under_noise = false` opts out of the zeroing entirely.
     fn root_fpu_for(&self, class: MoveClass) -> f32 {
-        if matches!(class, MoveClass::Full) && self.noise.is_some() {
+        if matches!(class, MoveClass::Full) && self.noise.is_some() && self.root_fpu_zero_under_noise
+        {
             0.0
         } else {
             self.fpu_reduction
@@ -369,7 +376,7 @@ impl Model1MctsSession {
     /// and promote each selected child subtree for reuse on the next call.
     /// Python entry: `BatchedMctsSession.run` in this lineage's `mcts.py`
     /// (selfplay + evaluation) and the dense_cnn_restnet fork's wrapper.
-    #[pyo3(signature = (game_keys, states, visits, c_puct, temperature, seed, evaluator, virtual_batch_size=None, active_root_limit=None, root_dirichlet_total_alpha=None, root_dirichlet_noise_fraction=None, root_policy_temperature=None, fpu_reduction=None, virtual_loss=None, widening_policy_mass=None, widening_max_children=None, widening_min_children=None, forced_playout_k=None, move_temperatures=None, root_policy_temperatures=None))]
+    #[pyo3(signature = (game_keys, states, visits, c_puct, temperature, seed, evaluator, virtual_batch_size=None, active_root_limit=None, root_dirichlet_total_alpha=None, root_dirichlet_noise_fraction=None, root_policy_temperature=None, fpu_reduction=None, virtual_loss=None, widening_policy_mass=None, widening_max_children=None, widening_min_children=None, forced_playout_k=None, move_temperatures=None, root_policy_temperatures=None, tss_enabled=None, root_fpu_zero_under_noise=None))]
     fn search(
         &mut self,
         py: Python<'_>,
@@ -403,6 +410,14 @@ impl Model1MctsSession {
         // opening decaying to 1.1) where each game sits at its own ply. The scalar
         // `root_policy_temperature` is the fallback when this is None.
         root_policy_temperatures: Option<Vec<f32>>,
+        // Threat-Space Search master switch (default true = current behavior).
+        // False runs pure prior-driven PUCT: no tactical injection, no hitting-set
+        // leaf override, no root move-selection guard — the pre-TSS search.
+        tss_enabled: Option<bool>,
+        // KataGo rootFpuReductionMax=0 switch (default true = current behavior).
+        // False keeps `fpu_reduction` at the root even while Dirichlet noise is
+        // on — the pre-2026-06-10 semantics the early stable runs trained under.
+        root_fpu_zero_under_noise: Option<bool>,
     ) -> PyResult<Py<PyAny>> {
         // Validate true native-search boundaries here. The Python wrapper is a
         // transport layer and intentionally does not duplicate these checks.
@@ -492,15 +507,18 @@ impl Model1MctsSession {
             validate_nonnegative_f32("forced_playout_k", forced_playout_k.unwrap_or(0.0))?;
         let root_noise_config =
             root_noise_config(root_dirichlet_total_alpha, root_dirichlet_noise_fraction)?;
+        let tss_enabled = tss_enabled.unwrap_or(true);
         // KataGo zeroes the root FPU reduction while Dirichlet root noise is on
         // (`rootFpuReductionMax = 0`) so unvisited noise-boosted root children are
         // not suppressed below `parent_value - fpu` before their first visit.
         // Noise-free searches (eval/play, PCR fast searches) keep the normal FPU.
-        let root_fpu_reduction = if root_noise_config.is_some() {
-            0.0
-        } else {
-            fpu_reduction
-        };
+        // `root_fpu_zero_under_noise = false` opts out (pre-2026-06-10 semantics).
+        let root_fpu_reduction =
+            if root_noise_config.is_some() && root_fpu_zero_under_noise.unwrap_or(true) {
+                0.0
+            } else {
+                fpu_reduction
+            };
 
         let widening_mass = widening_policy_mass.unwrap_or(0.95);
         if !widening_mass.is_finite() || widening_mass <= 0.0 || widening_mass > 1.0 {
@@ -538,6 +556,7 @@ impl Model1MctsSession {
                     search.set_additional_visits(target_visits);
                     search.set_forced_playout_k(forced_playout_k);
                     search.set_root_fpu_reduction(root_fpu_reduction);
+                    search.set_tss_enabled(tss_enabled);
                     // Reused roots carry raw eval priors; apply the root-policy
                     // temperature here (before noise, matching the fresh-root
                     // order) so it covers every searched position, not just each
@@ -580,6 +599,7 @@ impl Model1MctsSession {
                     root_noise(root_noise_config, seed, index),
                     widening,
                     forced_playout_k,
+                    tss_enabled,
                 )?);
             }
         }
@@ -681,7 +701,7 @@ impl Model1MctsSession {
     /// policy-init "opening" plies and maximum early-ramp temperature at its
     /// entry position. Both production drivers (restnet + dense_cnn) start
     /// fresh games per epoch.
-    #[pyo3(signature = (game_keys, states, evaluator, on_move, visits, c_puct, base_seed, virtual_batch_size, flush_target, active_root_limit, temperature_by_ply, root_dirichlet_total_alpha=None, root_dirichlet_noise_fraction=None, root_policy_temperature=None, fpu_reduction=None, virtual_loss=None, widening_policy_mass=None, widening_max_children=None, widening_min_children=None, forced_playout_k=None, root_policy_temperature_early=None, root_policy_temperature_halflife=None, pcr_full_proportion=None, pcr_fast_visits=None, policy_init_fraction=None, policy_init_avg_plies=None, policy_init_max_plies=None, policy_init_temperature=None))]
+    #[pyo3(signature = (game_keys, states, evaluator, on_move, visits, c_puct, base_seed, virtual_batch_size, flush_target, active_root_limit, temperature_by_ply, root_dirichlet_total_alpha=None, root_dirichlet_noise_fraction=None, root_policy_temperature=None, fpu_reduction=None, virtual_loss=None, widening_policy_mass=None, widening_max_children=None, widening_min_children=None, forced_playout_k=None, root_policy_temperature_early=None, root_policy_temperature_halflife=None, pcr_full_proportion=None, pcr_fast_visits=None, policy_init_fraction=None, policy_init_avg_plies=None, policy_init_max_plies=None, policy_init_temperature=None, tss_enabled=None, root_fpu_zero_under_noise=None))]
     #[allow(clippy::too_many_arguments)]
     fn run_continuous(
         &mut self,
@@ -727,6 +747,10 @@ impl Model1MctsSession {
         policy_init_avg_plies: Option<f32>,
         policy_init_max_plies: Option<u32>,
         policy_init_temperature: Option<f32>,
+        // Threat-Space Search master switch and the KataGo root-FPU-zeroing
+        // opt-out — same semantics as the lockstep `search` params.
+        tss_enabled: Option<bool>,
+        root_fpu_zero_under_noise: Option<bool>,
     ) -> PyResult<Py<PyAny>> {
         validate_search_inputs(visits, c_puct, 0.0)?;
         let roots = states_from_py_states(py, states)?;
@@ -824,6 +848,8 @@ impl Model1MctsSession {
             fpu_reduction,
             forced_playout_k,
             noise: root_noise_config,
+            tss_enabled: tss_enabled.unwrap_or(true),
+            root_fpu_zero_under_noise: root_fpu_zero_under_noise.unwrap_or(true),
         };
         let widening_mass = widening_policy_mass.unwrap_or(0.95);
         if !widening_mass.is_finite() || widening_mass <= 0.0 || widening_mass > 1.0 {
@@ -886,6 +912,7 @@ impl Model1MctsSession {
                     search.set_additional_visits(move_policy.visits_for(move_class));
                     search.set_forced_playout_k(move_policy.forced_k_for(move_class));
                     search.set_root_fpu_reduction(move_policy.root_fpu_for(move_class));
+                    search.set_tss_enabled(move_policy.tss_enabled);
                     // Reused roots carry raw eval priors; apply the root-policy
                     // temperature before noise (fresh-root order of operations).
                     search.apply_root_policy_temperature(move_policy.root_temp_for(move_class, 0));
@@ -1305,7 +1332,11 @@ fn select_leaf_batch(
                 } else if let Some(node_id) = selected.existing_node {
                     let node = &search.nodes[node_id];
                     search.backup_virtual(&selected.path, node.player, node.value(), virtual_loss);
-                } else if let Some(verdict) = threats::analyze(&selected.state).verdict() {
+                } else if let Some(verdict) = search
+                    .tss_enabled
+                    .then(|| threats::analyze(&selected.state).verdict())
+                    .flatten()
+                {
                     // TSS phase-aware hitting-set leaf value OVERRIDE. This fresh
                     // leaf is a proven 1-ply forced win/loss for the side to move
                     // (own win completable with B placements, or opponent threats
@@ -1395,7 +1426,11 @@ fn select_continuous_leaves(
         } else if let Some(node_id) = selected.existing_node {
             let node = &search.nodes[node_id];
             search.backup_virtual(&selected.path, node.player, node.value(), virtual_loss);
-        } else if let Some(verdict) = threats::analyze(&selected.state).verdict() {
+        } else if let Some(verdict) = search
+            .tss_enabled
+            .then(|| threats::analyze(&selected.state).verdict())
+            .flatten()
+        {
             let leaf_player = selected.state.current_player();
             search.backup_virtual(&selected.path, leaf_player, verdict, virtual_loss);
         } else {
@@ -1519,6 +1554,7 @@ fn backup_continuous_items(
                     ),
                     widening,
                     move_policy.forced_k_for(move_class),
+                    move_policy.tss_enabled,
                 )?;
                 if search.root_edges_empty() {
                     return Err(PyValueError::new_err(
@@ -1694,6 +1730,7 @@ fn complete_continuous_slots(
                         search.set_additional_visits(move_policy.visits_for(next_class));
                         search.set_forced_playout_k(move_policy.forced_k_for(next_class));
                         search.set_root_fpu_reduction(move_policy.root_fpu_for(next_class));
+                        search.set_tss_enabled(move_policy.tss_enabled);
                         // Reused roots carry raw eval priors; apply the
                         // root-policy temperature before noise.
                         search.apply_root_policy_temperature(
@@ -1821,9 +1858,13 @@ fn build_search_result_payloads(
         // TSS move-selection guard: identical inputs + determinism as
         // `select_search_action`, so the reported action matches the one used to
         // advance the native root. Masks the RAW selection weights only; the
-        // exported training policy below is left untouched.
-        let guarded_weights =
-            tactical_guard_weights(&search.root_state, &policy_action_ids, &policy_weights);
+        // exported training policy below is left untouched. Skipped entirely
+        // (raw weights) when the search runs TSS-disabled.
+        let guarded_weights = if search.tss_enabled {
+            tactical_guard_weights(&search.root_state, &policy_action_ids, &policy_weights)
+        } else {
+            policy_weights.clone()
+        };
         let selected = select_action_from_policy(
             &policy_action_ids,
             &guarded_weights,
@@ -2125,7 +2166,11 @@ fn select_search_action(
     seed: u64,
 ) -> PyResult<Option<PackedCoord>> {
     let (action_ids, weights, _total) = visit_policy(search.root(), baseline);
-    let guarded = tactical_guard_weights(&search.root_state, &action_ids, &weights);
+    let guarded = if search.tss_enabled {
+        tactical_guard_weights(&search.root_state, &action_ids, &weights)
+    } else {
+        weights.clone()
+    };
     select_action_from_policy(&action_ids, &guarded, temperature, seed)
 }
 

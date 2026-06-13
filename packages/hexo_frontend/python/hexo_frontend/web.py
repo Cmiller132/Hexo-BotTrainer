@@ -40,6 +40,7 @@ import gzip
 import hashlib
 import json
 import os
+import random
 import re
 import statistics
 import tempfile
@@ -104,6 +105,12 @@ CHECKPOINT_VISITS_DEFAULT = 256
 CHECKPOINT_C_PUCT_MIN = 0.1
 CHECKPOINT_C_PUCT_MAX = 10.0
 CHECKPOINT_C_PUCT_DEFAULT = 1.5
+# Eval-protocol move selection for checkpoint bots (mirrors the trainer's
+# [model.config.evaluation] opening_temperature/opening_moves arena defaults):
+# the first N plies are sampled from the visit distribution at this temperature
+# so repeated games diverge; afterwards play is the strict visit argmax.
+CHECKPOINT_OPENING_MOVES = 8
+CHECKPOINT_OPENING_TEMPERATURE = 0.6
 
 # --- Transfer efficiency (gzip + caching) -----------------------------------
 # The dashboard is often viewed over LAN/VPN, where uncompressed payloads and
@@ -829,11 +836,36 @@ class _ManualPlayer:
         return
 
 
+def _select_visit_action(visit_policy: list[dict[str, object]], ply: int, game_token: str) -> int | None:
+    """Eval-protocol move selection from a search's visit rows.
+
+    Mirrors the trainer's SealBot-eval/arena protocol: the first
+    ``CHECKPOINT_OPENING_MOVES`` plies are sampled from the visit distribution
+    at ``CHECKPOINT_OPENING_TEMPERATURE`` (seeded per game+ply, so repeated
+    games diverge while each stays reproducible); afterwards play is the
+    strict visit argmax. Returns None when no row carries positive weight."""
+
+    rows = [row for row in visit_policy if float(row.get("w") or 0.0) > 0.0]
+    if not rows:
+        return None
+    if ply >= CHECKPOINT_OPENING_MOVES:
+        return int(max(rows, key=lambda row: float(row["w"]))["action_id"])
+    inverse = 1.0 / CHECKPOINT_OPENING_TEMPERATURE
+    weights = [float(row["w"]) ** inverse for row in rows]
+    # str-seeded Random is process-stable (seeded from a hash of the bytes),
+    # unlike hash() on strings, so a replayed game samples the same opening.
+    rng = random.Random(f"{game_token}|{ply}")
+    return int(rng.choices([int(row["action_id"]) for row in rows], weights=weights, k=1)[0])
+
+
 class _CheckpointBotPlayer:
     """Model player backed by the shared CPU debug worker (debug_service).
 
-    ``search`` mode runs the worker's fresh reproducible MCTS (no root noise);
-    ``policy`` mode takes the prior argmax from one forward pass."""
+    ``search`` mode runs the worker's fresh reproducible MCTS (no root noise)
+    and selects the move with the trainer's eval protocol — visit argmax after
+    a sampled `CHECKPOINT_OPENING_MOVES`-ply opening (`_select_visit_action`),
+    so a match-mode model plays like its SealBot-eval/arena self. ``policy``
+    mode takes the prior argmax from one forward pass."""
 
     def __init__(self, spec: dict[str, object]) -> None:
         self._run = str(spec.get("run") or "")
@@ -842,6 +874,7 @@ class _CheckpointBotPlayer:
         self._mode = str(spec.get("mode") or "search")
         self._c_puct = float(spec.get("c_puct") or CHECKPOINT_C_PUCT_DEFAULT)
         self._ckpt_path = _debug_resolve_checkpoint(self._run, self._checkpoint)
+        self._game_token = f"ckpt|{self._run}|{self._checkpoint}"
         self.identity = PlayerIdentity(
             player_id=f"ckpt-{self._run}-{Path(self._checkpoint).stem}",
             label=_checkpoint_label(self._run, self._checkpoint),
@@ -851,7 +884,10 @@ class _CheckpointBotPlayer:
         return
 
     def start_game(self, context: GameContext) -> None:
-        return
+        # Per-game token for the opening-sampling RNG: distinct games (and the
+        # two seats of one game) draw decorrelated openings, exactly like the
+        # eval path's per-(game, move) seeds.
+        self._game_token = f"{context.game_id}|{context.seed}|{context.player_index}"
 
     def decide(self, state: engine.HexoState) -> DecisionResult:
         acts = [pack_coord_id(rec.coord) for rec in engine.to_python_state(state).placement_history]
@@ -891,13 +927,19 @@ class _CheckpointBotPlayer:
                 c_puct=self._c_puct,
                 seed=0,
             )
-            action_id = int(result["best_action_id"])
+            # Eval-protocol selection (visit argmax after a sampled opening).
+            # `best_action_id` (also the visit argmax since the debug search
+            # moved to temperature 0) stays as the degenerate-rows fallback.
+            ply = len(acts)
+            selected = _select_visit_action(result.get("visit_policy") or [], ply, self._game_token)
+            action_id = int(result["best_action_id"]) if selected is None else selected
             diagnostics = {
                 "root_value": result.get("root_value"),
                 "visits": result.get("visits"),
                 "mode": self._mode,
                 "run": self._run,
                 "checkpoint": self._checkpoint,
+                "selection": "opening-sample" if ply < CHECKPOINT_OPENING_MOVES else "argmax",
             }
         return DecisionResult(
             action=engine.PlacementAction(unpack_coord_id(action_id)),
@@ -1625,7 +1667,8 @@ def _selfplay_epoch_extras(run_dir: Path, epoch: int) -> dict[str, object] | Non
     384-entry ``npz_writes`` list, ``spill``, ``selfplay_npz_files``) that must
     never pass through. hexgt/hexgnn runs do not produce this file -> None."""
 
-    payload = _read_json_file(run_dir / "diagnostics" / f"dense_cnn.selfplay.epoch_{epoch:06d}.json")
+    prefix = _diag_prefix(run_dir)
+    payload = _read_json_file(run_dir / "diagnostics" / f"{prefix}.selfplay.epoch_{epoch:06d}.json")
     if not isinstance(payload, dict):
         return None
     passthrough = (
@@ -1637,6 +1680,19 @@ def _selfplay_epoch_extras(run_dir: Path, epoch: int) -> dict[str, object] | Non
         "mcts_virtual_batch_size",
         "elapsed_seconds",
         "mcts_search_elapsed_seconds",
+        # hexfield self-play diagnostics carry these inline (dense_cnn omits them);
+        # listed here so the epoch inspector surfaces them when present and stays a
+        # no-op for dense_cnn (missing keys are simply skipped below).
+        "search_visits",
+        "games_started",
+        "games_finished",
+        "truncated_games",
+        "rows_written",
+        "full_decisions",
+        "mean_game_length",
+        "p90_game_length",
+        "root_policy_entropy_mean",
+        "root_value_mean",
     )
     nested = {
         "temperature_control": ("expected_game_length", "halflife_plies", "halflife_fraction"),
@@ -1927,6 +1983,23 @@ def _debug_run_lineage(run_dir: Path) -> str | None:
         return None
     name = data.get("model", {}).get("name")
     return str(name) if name else None
+
+
+def _diag_prefix(run_dir: Path) -> str:
+    """Diagnostic-file basename prefix for a run's per-epoch self-play / training /
+    evaluation JSON (``<prefix>.selfplay.epoch_*.json`` etc.).
+
+    Both dense_cnn and dense_cnn_restnet lineages write ``dense_cnn.*`` files (the
+    restnet lineage reuses the prefix); the hexfield lineage writes ``hexfield.*``.
+    Derived from the run's manifest lineage so the dashboard reads the right files
+    without hard-coding ``dense_cnn.`` everywhere. Anything that is not the hexfield
+    lineage (including an unknown/absent manifest) keeps the historical
+    ``dense_cnn`` prefix, so existing dense/restnet runs are unaffected."""
+
+    lineage = _debug_run_lineage(run_dir)
+    if lineage and "hexfield" in lineage.lower():
+        return "hexfield"
+    return "dense_cnn"
 
 
 def _debug_checkpoints(run_name: str) -> dict[str, object]:
@@ -3305,7 +3378,8 @@ def _evaluation_history(run_dir: Path) -> list[dict[str, object]]:
     if not diagnostics_dir.exists():
         return []
     rows: list[dict[str, object]] = []
-    for path in sorted(diagnostics_dir.glob("dense_cnn.evaluation.epoch_*.json")):
+    prefix = _diag_prefix(run_dir)
+    for path in sorted(diagnostics_dir.glob(f"{prefix}.evaluation.epoch_*.json")):
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError, UnicodeDecodeError):
@@ -3324,10 +3398,17 @@ def _evaluation_history(run_dir: Path) -> list[dict[str, object]]:
                 "epoch": epoch,
                 "status": payload.get("status"),
                 "games": payload.get("games"),
-                "completed": payload.get("completed"),
+                # hexfield omits `completed`; fall back to total games when it has
+                # finished so the eval row still reads as complete.
+                "completed": payload.get("completed")
+                if payload.get("completed") is not None
+                else (payload.get("games") if payload.get("status") == "completed" else None),
                 "wins": payload.get("wins"),
                 "losses": payload.get("losses"),
-                "mean_turns": payload.get("mean_turns"),
+                # dense_cnn emits `mean_turns`; hexfield emits `mean_game_length`.
+                "mean_turns": payload.get("mean_turns")
+                if payload.get("mean_turns") is not None
+                else payload.get("mean_game_length"),
                 "path": f"diagnostics/{path.name}",
                 "modified": stat.st_mtime if stat is not None else 0,
             }
@@ -3346,6 +3427,7 @@ def _epoch_history(run_dir: Path) -> list[dict[str, object]]:
 
     rows: dict[int, dict[str, object]] = {}
     diagnostics_dir = run_dir / "diagnostics"
+    prefix = _diag_prefix(run_dir)
 
     if diagnostics_dir.exists():
         for path in sorted(diagnostics_dir.glob("epoch_*.json")):
@@ -3363,7 +3445,7 @@ def _epoch_history(run_dir: Path) -> list[dict[str, object]]:
             row["elapsed_seconds"] = payload.get("elapsed_seconds")
             _merge_epoch_result(row, result)
 
-        for path in sorted(diagnostics_dir.glob("dense_cnn.selfplay.epoch_*.json")):
+        for path in sorted(diagnostics_dir.glob(f"{prefix}.selfplay.epoch_*.json")):
             payload = _read_json_file(path)
             if not isinstance(payload, dict):
                 continue
@@ -3377,7 +3459,7 @@ def _epoch_history(run_dir: Path) -> list[dict[str, object]]:
             _backfill_selfplay_game_stats(run_dir, epoch, selfplay_summary)
             row["selfplay"] = selfplay_summary
 
-        for path in sorted(diagnostics_dir.glob("dense_cnn.evaluation.epoch_*.json")):
+        for path in sorted(diagnostics_dir.glob(f"{prefix}.evaluation.epoch_*.json")):
             payload = _read_json_file(path)
             if not isinstance(payload, dict):
                 continue
@@ -3479,7 +3561,16 @@ def _loss_buffer_from_training(training: dict[str, object]) -> dict[str, object]
     out: dict[str, object] = {"loss_total": total}
     components = training.get("loss_components")
     if isinstance(components, dict):
-        for src, dst in (("policy", "loss_policy"), ("value", "loss_value"), ("opp_policy", "loss_opp")):
+        # hexfield's per-head components are normalized into this same dict shape by
+        # _training_epoch_summary, so the mapping below covers both lineages. The
+        # moves_left head is hexfield-only (app.js does not yet render it, but it is
+        # carried for forward-compat).
+        for src, dst in (
+            ("policy", "loss_policy"),
+            ("value", "loss_value"),
+            ("opp_policy", "loss_opp"),
+            ("moves_left", "loss_moves_left"),
+        ):
             value = _optional_float(components.get(src))
             if value is not None:
                 out[dst] = value
@@ -3678,14 +3769,21 @@ def _selfplay_epoch_summary(payload: dict[str, object]) -> dict[str, object]:
         else:
             games = payload.get("games_started")
 
-    # app.js reads selfplay.samples_added; producer emits effective_samples.
+    # app.js reads selfplay.samples_added; dense_cnn emits effective_samples,
+    # hexfield emits rows_written (samples added to the replay buffer).
     samples_added = payload.get("effective_samples")
     if samples_added is None:
         samples_added = payload.get("raw_samples")
+    if samples_added is None:
+        samples_added = payload.get("rows_written")
 
     # No producer key for per-searched-position sims; derive when both present.
+    # dense_cnn emits searched_positions; hexfield emits total_decisions (decision
+    # points evaluated) — the same quantity for this display.
     mcts_simulations = payload.get("mcts_simulations")
     searched_positions = payload.get("searched_positions")
+    if searched_positions is None:
+        searched_positions = payload.get("total_decisions")
     mcts_sims_per_searched_position: float | None = None
     sims = _optional_float(mcts_simulations)
     searched = _optional_float(searched_positions)
@@ -3709,11 +3807,18 @@ def _selfplay_epoch_summary(payload: dict[str, object]) -> dict[str, object]:
         # _epoch_history backfills any None from the epoch's .hxr records (display
         # side). Producer-emitted values pass through unchanged. None values are
         # omitted client-side, so a run with neither stays unaffected.
-        "game_length_mean": payload.get("game_length_mean"),
+        # hexfield emits mean_game_length / p90_game_length inline (different names,
+        # and p90 rather than p95); fall back to them so its self-play row carries
+        # length stats without the .hxr backfill. dense_cnn keys win when present.
+        "game_length_mean": payload.get("game_length_mean")
+        if payload.get("game_length_mean") is not None
+        else payload.get("mean_game_length"),
         "game_length_median": payload.get("game_length_median"),
         "game_length_max": payload.get("game_length_max"),
         "game_length_stdev": payload.get("game_length_stdev"),
-        "game_length_p95": payload.get("game_length_p95"),
+        "game_length_p95": payload.get("game_length_p95")
+        if payload.get("game_length_p95") is not None
+        else payload.get("p90_game_length"),
         # Outcome distribution. Same backfill story as the lengths above — derived
         # from finished .hxr games when the producer omits them.
         "win_p0_fraction": payload.get("win_p0_fraction"),
@@ -3820,17 +3925,44 @@ def _training_epoch_summary(payload: dict[str, object]) -> dict[str, object]:
     # unweighted per-head `loss_components` (policy/value/opp_policy/stvalue_*) — pass
     # it through so the per-head Loss band renders (the optional policy_targets overlay
     # still augments source_summary/policy_imitation later in _epoch_history).
+    # hexfield's trainer emits the weighted total as `loss_total` and the per-head
+    # losses FLAT at top level (loss_policy/loss_value/loss_opp_policy/loss_stvalue_*/
+    # loss_moves_left) rather than dense_cnn's `loss` + nested `loss_components`.
+    # Normalize to the dense_cnn shape here so every downstream reader (the loss band
+    # via _loss_buffer_from_training, _learning_health, app.js) stays unchanged.
+    loss = payload.get("loss")
+    if loss is None:
+        loss = payload.get("loss_total")
+    loss_components = payload.get("loss_components")
+    if not isinstance(loss_components, dict):
+        flat = {
+            "policy": payload.get("loss_policy"),
+            "value": payload.get("loss_value"),
+            "opp_policy": payload.get("loss_opp_policy"),
+            "moves_left": payload.get("loss_moves_left"),
+        }
+        for key, value in payload.items():
+            if isinstance(key, str) and key.startswith("loss_stvalue_"):
+                flat[key[len("loss_") :]] = value  # loss_stvalue_2 -> stvalue_2
+        flat = {key: value for key, value in flat.items() if value is not None}
+        loss_components = flat or None
     return {
         "status": payload.get("status"),
-        "loss": payload.get("loss"),
-        "loss_components": payload.get("loss_components"),  # per-head from dense_cnn trainer
+        "loss": loss,
+        "loss_components": loss_components,  # per-head (dense_cnn nested / hexfield flat)
         "source_summary": None,  # no producer key (overlaid from policy_targets file)
         "policy_imitation": None,  # no producer key (overlaid from policy_targets file)
         "steps": payload.get("steps"),
-        "samples": payload.get("samples"),
+        # dense_cnn emits `samples`; hexfield emits `window_rows` (training window size).
+        "samples": payload.get("samples")
+        if payload.get("samples") is not None
+        else payload.get("window_rows"),
         "batch_size": payload.get("batch_size"),
         "samples_per_second": payload.get("samples_per_second"),
-        "elapsed_seconds": payload.get("elapsed_seconds"),
+        # dense_cnn emits `elapsed_seconds`; hexfield emits `seconds`.
+        "elapsed_seconds": payload.get("elapsed_seconds")
+        if payload.get("elapsed_seconds") is not None
+        else payload.get("seconds"),
     }
 
 
@@ -3838,10 +3970,17 @@ def _evaluation_epoch_summary(payload: dict[str, object]) -> dict[str, object]:
     return {
         "status": payload.get("status"),
         "games": payload.get("games"),
-        "completed": payload.get("completed"),
+        # hexfield omits `completed`; treat all games as completed once the eval is
+        # done so the row reads as finished.
+        "completed": payload.get("completed")
+        if payload.get("completed") is not None
+        else (payload.get("games") if payload.get("status") == "completed" else None),
         "wins": payload.get("wins"),
         "losses": payload.get("losses"),
-        "mean_turns": payload.get("mean_turns"),
+        # dense_cnn emits `mean_turns`; hexfield emits `mean_game_length`.
+        "mean_turns": payload.get("mean_turns")
+        if payload.get("mean_turns") is not None
+        else payload.get("mean_game_length"),
     }
 
 
@@ -3962,10 +4101,17 @@ def _training_live_status(run_dir: Path) -> dict[str, object]:
     in the full run payload so both poll tiers share one shape."""
 
     diagnostics = run_dir / "diagnostics"
+    prefix = _diag_prefix(run_dir)
     events = _stage_status_from_events(diagnostics / "events.jsonl")
     watchdog = _read_last_jsonl(diagnostics / "resource_watchdog.jsonl")
-    calibration = _read_json_file(diagnostics / "dense_cnn.performance_calibration.json")
-    selfplay_live = _read_json_file(diagnostics / "dense_cnn.selfplay.live.json")
+    # FOLLOW-UP (hexfield gap): hexfield does not emit a `<prefix>.performance_calibration.json`
+    # (it writes a differently-shaped `calibrate_performance.json`) nor a live
+    # `<prefix>.selfplay.live.json`. Both reads return None for hexfield runs -> the
+    # calibration / live-progress / sub-phase blocks are simply omitted (honest gap,
+    # not faked). The prefix is lineage-aware so this works automatically once
+    # hexfield emits these files.
+    calibration = _read_json_file(diagnostics / f"{prefix}.performance_calibration.json")
+    selfplay_live = _read_json_file(diagnostics / f"{prefix}.selfplay.live.json")
     training_progress = _latest_training_progress(diagnostics)
     bootstrap_progress = _latest_bootstrap_training_progress(run_dir)
     trainer_command = ""
@@ -4041,7 +4187,7 @@ def _derive_sub_phase(
 
     sp_status = str((selfplay_live or {}).get("status") or "")
     sp_epoch = (selfplay_live or {}).get("epoch")
-    sp_age = _file_age_seconds(diagnostics / "dense_cnn.selfplay.live.json")
+    sp_age = _file_age_seconds(diagnostics / f"{_diag_prefix(run_dir)}.selfplay.live.json")
 
     # SELF-PLAY: live writer still running for this epoch and the file is fresh.
     if (

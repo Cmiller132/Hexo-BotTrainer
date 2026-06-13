@@ -38,7 +38,7 @@
 // the version were invisible. This single top bar always shows the running
 // version, a live "last tap" echo (so a tap that registers is visible even if its
 // effect isn't), and any JS error (uncaught OR surfaced from the Debug code).
-const APP_VERSION = "20260611-match1";
+const APP_VERSION = "20260612-match2";
 function __diagBar() {
   let el = document.getElementById("__diag");
   if (!el) {

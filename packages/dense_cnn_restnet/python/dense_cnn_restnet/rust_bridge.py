@@ -63,40 +63,49 @@ def model1_mcts_session_search(
     forced_playout_k: float | None = None,
     move_temperatures: Sequence[float] | None = None,
     root_policy_temperatures: Sequence[float] | None = None,
+    tss_enabled: bool | None = None,
+    root_fpu_zero_under_noise: bool | None = None,
 ) -> tuple[Mapping[str, Any], ...]:
     """Search through a native MCTS session, preserving chosen subtrees.
 
     Arguments are forwarded in the PyO3 signature order expected by
     `rust/src/mcts.rs`. Each node materializes at most a policy-nucleus subset of
     its legal moves (top-p widening).
+
+    `tss_enabled` / `root_fpu_zero_under_noise` (None = native default, true)
+    are appended ONLY when explicitly set: a native module predating them
+    (< 2026-06-12) rejects unknown trailing arguments, and the live-run hot
+    tree must keep working against its in-memory .so until the next rebuild.
     """
 
-    return tuple(
-        session.search(
-            tuple(int(item) for item in game_keys),
-            tuple(states),
-            visits,
-            c_puct,
-            temperature,
-            int(seed),
-            evaluator,
-            virtual_batch_size,
-            active_root_limit,
-            root_dirichlet_total_alpha,
-            root_dirichlet_noise_fraction,
-            root_policy_temperature,
-            fpu_reduction,
-            virtual_loss,
-            widening_policy_mass,
-            widening_max_children,
-            widening_min_children,
-            forced_playout_k,
-            None if move_temperatures is None else [float(t) for t in move_temperatures],
-            None
-            if root_policy_temperatures is None
-            else [float(t) for t in root_policy_temperatures],
-        )
-    )
+    args: list[Any] = [
+        tuple(int(item) for item in game_keys),
+        tuple(states),
+        visits,
+        c_puct,
+        temperature,
+        int(seed),
+        evaluator,
+        virtual_batch_size,
+        active_root_limit,
+        root_dirichlet_total_alpha,
+        root_dirichlet_noise_fraction,
+        root_policy_temperature,
+        fpu_reduction,
+        virtual_loss,
+        widening_policy_mass,
+        widening_max_children,
+        widening_min_children,
+        forced_playout_k,
+        None if move_temperatures is None else [float(t) for t in move_temperatures],
+        None
+        if root_policy_temperatures is None
+        else [float(t) for t in root_policy_temperatures],
+    ]
+    if tss_enabled is not None or root_fpu_zero_under_noise is not None:
+        args.append(tss_enabled)
+        args.append(root_fpu_zero_under_noise)
+    return tuple(session.search(*args))
 
 
 def model1_mcts_session_run_continuous(
@@ -130,6 +139,8 @@ def model1_mcts_session_run_continuous(
     policy_init_avg_plies: float | None = None,
     policy_init_max_plies: int | None = None,
     policy_init_temperature: float | None = None,
+    tss_enabled: bool | None = None,
+    root_fpu_zero_under_noise: bool | None = None,
 ) -> Mapping[str, Any]:
     """Run the native continuous per-slot scheduler to epoch completion.
 
@@ -141,9 +152,13 @@ def model1_mcts_session_run_continuous(
     root-temperature ramp are resolved natively per slot. Arguments are
     forwarded in the PyO3 signature order. Returns the scheduler's epoch-wide
     diagnostics dict (flush counts, move-class tallies, mcts_batch_diagnostics).
+
+    `tss_enabled` / `root_fpu_zero_under_noise` are appended only when
+    explicitly set (same old-.so compatibility contract as
+    `model1_mcts_session_search`).
     """
 
-    return session.run_continuous(
+    args: list[Any] = [
         tuple(int(item) for item in game_keys),
         tuple(states),
         evaluator,
@@ -172,7 +187,11 @@ def model1_mcts_session_run_continuous(
         policy_init_avg_plies,
         policy_init_max_plies,
         policy_init_temperature,
-    )
+    ]
+    if tss_enabled is not None or root_fpu_zero_under_noise is not None:
+        args.append(tss_enabled)
+        args.append(root_fpu_zero_under_noise)
+    return session.run_continuous(*args)
 
 
 def model1_sample_from_state(

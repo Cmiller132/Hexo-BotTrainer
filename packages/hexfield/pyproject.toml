@@ -1,0 +1,21 @@
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[project]
+name = "hexfield"
+version = "0.1.0"
+description = "hexfield — variable-geometry hex lattice model lineage (spec: docs/specs/hexfield_model_spec.md)"
+requires-python = ">=3.11"
+# Runtime deps (torch, hexo_engine, hexo_train, ...) are ambient via the dev
+# environment / PYTHONPATH — NOT pip-resolved here, so `maturin develop` in the
+# isolated hexfield-dev venv never tries to fetch them. Build with
+# scripts/_rebuild_hexfield.sh (hexfield-dev venv, never the live hexgt-build).
+dependencies = [
+    "numpy",
+]
+
+[tool.maturin]
+python-source = "python"
+module-name = "hexfield._rust"
+features = ["python"]
