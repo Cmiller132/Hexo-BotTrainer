@@ -45,7 +45,7 @@ class _GameTape:
 
 class ContinuousDriver:
     def __init__(self, *, epoch: int, games_target: int, max_plies: int, out_dir,
-                 horizons=STV_HORIZONS, record_file=None):
+                 horizons=STV_HORIZONS, record_file=None, diag_dir=None, active_limit=0):
         self.epoch = epoch
         self.games_target = games_target
         self.max_plies = max_plies
@@ -54,6 +54,14 @@ class ContinuousDriver:
         # Open .hxr game-record file for the epoch (dashboard-viewable replays);
         # None disables recording. Set by generate_selfplay_epoch.
         self.record_file = record_file
+        # Live within-epoch progress for the :8080 dashboard (progress bar +
+        # positions/second). Written to <diag_dir>/hexfield.selfplay.live.json
+        # every LIVE_INTERVAL_S during the epoch; the dashboard reads it
+        # lineage-aware. None disables the live file.
+        self.diag_dir = diag_dir
+        self.active_limit = int(active_limit)
+        self._t0 = time.time()
+        self._last_live = 0.0
         self.games: dict[int, _GameTape] = {}
         self.games_started = 0
         self.games_finished = 0
@@ -65,6 +73,49 @@ class ContinuousDriver:
         self.policy_entropies: list[float] = []
         self.root_values: list[float] = []
         self.next_key = epoch * 1_000_000
+
+    LIVE_INTERVAL_S = 3.0
+
+    def _write_live(self, status: str) -> None:
+        """Emit hexfield.selfplay.live.json for the dashboard (progress bar +
+        pos/s). Throttled to LIVE_INTERVAL_S while running; forced on
+        start/completed. Mirrors the dense_cnn.selfplay.live.json field contract
+        the dashboard's live-status panel + sub-phase derivation read."""
+
+        if self.diag_dir is None:
+            return
+        now = time.time()
+        if status == "running" and (now - self._last_live) < self.LIVE_INTERVAL_S:
+            return
+        self._last_live = now
+        elapsed = max(now - self._t0, 1e-9)
+        pps = self.decisions / elapsed
+        payload = {
+            "status": status,
+            "epoch": self.epoch,
+            "timestamp": now,
+            "requested_games": self.games_target,
+            "games_started": self.games_started,
+            "completed_games": self.games_finished - self.games_truncated,
+            "truncated_games": self.games_truncated,
+            "games_finished": self.games_finished,
+            "active_games": len(self.games),
+            "active_limit": self.active_limit,
+            "searched_positions": self.decisions,
+            "elapsed_seconds": elapsed,
+            "search_positions_per_second": pps,
+            "positions_per_second": pps,
+            "full_decisions": self.full_decisions,
+            "scheduler": "continuous",
+        }
+        # Cosmetic dashboard file: a write failure must NEVER crash self-play.
+        try:
+            path = self.diag_dir / "hexfield.selfplay.live.json"
+            tmp = self.diag_dir / "hexfield.selfplay.live.json.tmp"
+            tmp.write_text(json.dumps(payload), encoding="utf-8")
+            tmp.replace(path)  # atomic: dashboard never reads a half-written file
+        except Exception:
+            pass
 
     def start_games(self, count: int) -> list[_GameTape]:
         tapes = []
@@ -82,6 +133,7 @@ class ContinuousDriver:
         full = bool(payload["pcr_full"])
         init = bool(payload["policy_init"])
         self.decisions += 1
+        self._write_live("running")  # throttled live progress for the dashboard
 
         current = record_player(tape.ply)
         if full and not init:
@@ -228,10 +280,11 @@ def generate_selfplay_epoch(*, ctx, components, epoch: int, games_per_epoch: int
     out_dir = ctx.samples_dir / f"epoch_{epoch:06d}"
     out_dir.mkdir(parents=True, exist_ok=True)
     games_target = max(int(games_per_epoch), 1)
-    driver = ContinuousDriver(
-        epoch=epoch, games_target=games_target, max_plies=sp.max_game_plies, out_dir=out_dir
-    )
     slots = min(sp.active_games, games_target)
+    driver = ContinuousDriver(
+        epoch=epoch, games_target=games_target, max_plies=sp.max_game_plies, out_dir=out_dir,
+        diag_dir=ctx.diagnostics_dir, active_limit=slots,
+    )
     tapes = driver.start_games(slots)
 
     # Per-epoch .hxr game records under <run>/selfplay (the layout the dashboard
@@ -246,6 +299,8 @@ def generate_selfplay_epoch(*, ctx, components, epoch: int, games_per_epoch: int
 
     session = _rust.HexfieldMctsSession(max_states=sp.cache_max_states)
     started = time.time()
+    driver._t0 = started  # anchor live pos/s to actual self-play start
+    driver._write_live("running")  # initial 0% progress bar before the first move
     noise_kwargs = {}
     if sp.root_dirichlet_noise_fraction > 0:
         noise_kwargs = dict(
@@ -289,6 +344,7 @@ def generate_selfplay_epoch(*, ctx, components, epoch: int, games_per_epoch: int
             **noise_kwargs,
         )
     driver.record_file = None
+    driver._write_live("completed")  # final 100% so the dashboard marks the epoch done
 
     elapsed = time.time() - started
     result = {
