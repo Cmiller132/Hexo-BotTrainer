@@ -79,6 +79,13 @@ class HexfieldEvaluator:
         self._fpv = self.model.forward_policy_value
         if self.device.type == "cuda" and os.environ.get("HEXFIELD_NO_COMPILE") != "1":
             try:
+                # suppress_errors: on a per-graph compile failure (e.g. an
+                # Inductor dynamic-shape CantSplit on an edge flush shape),
+                # dynamo logs and FALLS BACK TO EAGER for that graph instead of
+                # raising — so a compile bug can never crash the self-play run;
+                # shapes that compile cleanly still get the fused speedup.
+                import torch._dynamo as _dynamo
+                _dynamo.config.suppress_errors = True
                 self._fpv = torch.compile(self.model.forward_policy_value, dynamic=True)
             except Exception:
                 self._fpv = self.model.forward_policy_value

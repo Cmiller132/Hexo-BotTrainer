@@ -35,3 +35,9 @@ data/checkpoints/*
 !data/replay/.gitkeep
 !data/checkpoints/.gitkeep
 
+
+# hexfield bootstrap corpora (regenerable data, not code)
+/data/hexfield_bootstrap/
+/data/hexfield_bootstrap_smoke/
+/data/hexfield_bootstrap_smoke2/
+/data/hexo-bootstrap-corpus/

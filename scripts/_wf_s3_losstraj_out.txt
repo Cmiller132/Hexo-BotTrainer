@@ -1,0 +1,21 @@
+== dense_cnn_restnet_main_3
+000001 [('/metadata/result/training/loss_components/moves_left', 3.3253120893687873)]
+000002 [('/metadata/result/training/loss_components/moves_left', 3.1159155429714787)]
+000003 [('/metadata/result/training/loss_components/moves_left', 3.31487238407135)]
+000004 [('/metadata/result/training/loss_components/moves_left', 3.294710419921257)]
+000005 [('/metadata/result/training/loss_components/moves_left', 3.153396189810839)]
+000006 [('/metadata/result/training/loss_components/moves_left', 3.1794414108728035)]
+000007 [('/metadata/result/training/loss_components/moves_left', 3.2034586046572615)]
+000008 [('/metadata/result/training/loss_components/moves_left', 3.4677398559787833)]
+000009 [('/metadata/result/training/loss_components/moves_left', 3.887045632885296)]
+000010 [('/metadata/result/training/loss_components/moves_left', 3.9428909185361722)]
+== dense_cnn_restnet_main_4
+000006 [('/metadata/result/training/loss_components/moves_left', 3.1850936006338344)]
+000007 [('/metadata/result/training/loss_components/moves_left', 3.2236018046904147)]
+000008 [('/metadata/result/training/loss_components/moves_left', 3.386039898607581)]
+000009 [('/metadata/result/training/loss_components/moves_left', 3.557126166124857)]
+000010 [('/metadata/result/training/loss_components/moves_left', 3.6500735628345304)]
+000011 [('/metadata/result/training/loss_components/moves_left', 3.5261371491863263)]
+000012 [('/metadata/result/training/loss_components/moves_left', 3.4832180227308336)]
+000013 [('/metadata/result/training/loss_components/moves_left', 3.3564843794054915)]
+exit=0

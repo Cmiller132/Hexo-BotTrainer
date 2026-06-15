@@ -1576,6 +1576,8 @@ def _training_run(name: str) -> dict[str, object]:
     live_status = _training_live_status(run_dir)
     epoch_history = _epoch_history(run_dir)
     evaluation_history = _evaluation_history(run_dir)
+    multistage_eval_history = _multistage_eval_history(run_dir)
+    eval_pool = _eval_pool_summary(run_dir)
     artifacts_page = _training_artifacts_overview_page(
         run_dir,
         limit=TRAINING_OVERVIEW_ARTIFACT_LIMIT,
@@ -1613,6 +1615,10 @@ def _training_run(name: str) -> dict[str, object]:
         "diagnostics_by_epoch": diagnostics_by_epoch,
         "epoch_history": epoch_history,
         "evaluation_history": evaluation_history,
+        # Standalone hexfield multi-stage eval (opt-in). [] / None for runs
+        # without the new artifacts (non-hexfield lineages, older runs).
+        "multistage_eval_history": multistage_eval_history,
+        "eval_pool": eval_pool,
         "learning_health": _learning_health(epoch_history, evaluation_history, live_status),
         "status": _training_run_status(run_dir, histories, live_status),
     }
@@ -1653,6 +1659,12 @@ def _training_epoch(name: str, epoch: int | None) -> dict[str, object]:
         "history": history_row,
         "prev_epoch": prev_row,
         "evaluation": evaluation_row,
+        # Per-epoch multi-stage eval row (verdict + headline edges + rating
+        # table), or None when this run/epoch has no standalone-eval report.
+        "multistage_eval": next(
+            (row for row in _multistage_eval_history(run_dir) if row.get("epoch") == epoch),
+            None,
+        ),
         "diagnostics": _diagnostics_by_epoch(run_dir).get(str(epoch)),
         "selfplay_extras": _selfplay_epoch_extras(run_dir, epoch),
         "manifest": _manifest_model_summary(run_dir),
@@ -3415,6 +3427,128 @@ def _evaluation_history(run_dir: Path) -> list[dict[str, object]]:
         )
     rows.sort(key=lambda item: int(item.get("epoch") or 0))
     return rows
+
+
+# Headline edge selector: which descriptive edges to surface as chips. The
+# verdict's PRIMARY edge (vs prior champion) plus the two fixed anchors the
+# standalone eval always reports against -- SealBot and the BC-prefit base.
+_MULTISTAGE_HEADLINE_OPPONENTS = ("sealbot", "bc_prefit", "ep5")
+
+
+def _multistage_headline_edge(edge: dict[str, object]) -> bool:
+    """True for the edges worth promoting to the dashboard headline: the verdict's
+    primary edge (vs champion) and the fixed-anchor edges (vs SealBot / BC-prefit)."""
+
+    if edge.get("primary"):
+        return True
+    opponent = edge.get("opponent")
+    return isinstance(opponent, str) and opponent.lower() in _MULTISTAGE_HEADLINE_OPPONENTS
+
+
+def _multistage_eval_history(run_dir: Path) -> list[dict[str, object]]:
+    """Per-epoch rows from the standalone hexfield multi-stage eval reports
+    (``diagnostics/hexfield.multistage_eval.epoch_*.json``), ascending by epoch.
+
+    Mirrors ``_evaluation_history``: lineage-gated on the hexfield prefix, reads
+    each report via ``_read_json_file`` (graceful on missing/corrupt -> skipped),
+    and emits a flat row per epoch carrying the verdict label/block, the
+    SealBot-pinned rating table (``ratings.players`` + ``ratings.fit``), the
+    headline edges (primary + SealBot/BC-prefit, winrate + CI), and the
+    ``sealbot_winrate_ci95`` headline. The newest row is the latest verdict +
+    rating table; the full list (each report's ``ratings.players``) is the
+    Elo-over-epochs trajectory. Returns ``[]`` for non-hexfield lineages, a
+    missing ``diagnostics/`` dir, or when no report files exist (opt-in eval)."""
+
+    if _diag_prefix(run_dir) != "hexfield":
+        return []
+    diagnostics_dir = run_dir / "diagnostics"
+    if not diagnostics_dir.exists():
+        return []
+    rows: list[dict[str, object]] = []
+    for path in sorted(diagnostics_dir.glob("hexfield.multistage_eval.epoch_*.json")):
+        payload = _read_json_file(path)
+        if not isinstance(payload, dict):
+            continue
+        meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+        epoch = _coerce_epoch(meta.get("candidate_epoch"), path.name)
+        ratings = payload.get("ratings") if isinstance(payload.get("ratings"), dict) else {}
+        verdict = payload.get("verdict") if isinstance(payload.get("verdict"), dict) else {}
+        edges = payload.get("edges") if isinstance(payload.get("edges"), list) else []
+        headline_edges = [
+            {
+                "opponent": edge.get("opponent"),
+                "role": edge.get("role"),
+                "primary": bool(edge.get("primary")),
+                "decided": edge.get("decided"),
+                "winrate": edge.get("winrate"),
+                "winrate_ci95": edge.get("winrate_ci95"),
+            }
+            for edge in edges
+            if isinstance(edge, dict) and _multistage_headline_edge(edge)
+        ]
+        players = ratings.get("players") if isinstance(ratings.get("players"), list) else []
+        stat = _safe_stat(path)
+        rows.append(
+            {
+                "epoch": epoch,
+                "candidate_label": meta.get("candidate_label"),
+                "anchor": meta.get("anchor") or ratings.get("anchor"),
+                "verdict_label": verdict.get("label"),
+                "verdict": verdict,
+                "ratings": {
+                    "anchor": ratings.get("anchor"),
+                    "players": [p for p in players if isinstance(p, dict)],
+                    "fit": ratings.get("fit") if isinstance(ratings.get("fit"), dict) else {},
+                },
+                "edges": headline_edges,
+                "sealbot_winrate_ci95": payload.get("sealbot_winrate_ci95"),
+                "path": f"diagnostics/{path.name}",
+                "modified": stat.st_mtime if stat is not None else 0,
+            }
+        )
+    rows.sort(key=lambda item: int(item.get("epoch") or 0))
+    return rows
+
+
+def _eval_pool_summary(run_dir: Path) -> dict[str, object] | None:
+    """Compact view of the rolling SealBot-pinned Bradley-Terry pool
+    (``diagnostics/eval_pool.json``) for the Elo-trajectory chart.
+
+    The pool is a single append-only file (not per-epoch), so its edges carry an
+    ``epoch`` column spanning every candidate checkpoint. Lineage-gated like the
+    other hexfield readers; returns ``None`` for non-hexfield runs and when the
+    file is absent/corrupt (``_read_json_file`` -> ``None``). The heavy ``raw``
+    block on each edge is dropped to keep the run payload small -- the chart only
+    needs epoch + the head-to-head counts."""
+
+    if _diag_prefix(run_dir) != "hexfield":
+        return None
+    payload = _read_json_file(run_dir / "diagnostics" / "eval_pool.json")
+    if not isinstance(payload, dict):
+        return None
+    raw_edges = payload.get("edges") if isinstance(payload.get("edges"), list) else []
+    edges: list[dict[str, object]] = []
+    for edge in raw_edges:
+        if not isinstance(edge, dict):
+            continue
+        edges.append(
+            {
+                "epoch": edge.get("epoch"),
+                "a": edge.get("a"),
+                "b": edge.get("b"),
+                "wins_a": edge.get("wins_a"),
+                "wins_b": edge.get("wins_b"),
+                "weight": edge.get("weight"),
+                "kind": edge.get("kind"),
+            }
+        )
+    return {
+        "format": payload.get("format"),
+        "version": payload.get("version"),
+        "anchor": payload.get("anchor"),
+        "edges_total": len(edges),
+        "edges": edges,
+    }
 
 
 def _epoch_history(run_dir: Path) -> list[dict[str, object]]:

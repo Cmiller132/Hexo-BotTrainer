@@ -20,6 +20,51 @@ run artifacts. This doc is the merged, decision-ready conclusion.
 
 ---
 
+## REVIEW VERDICT (2026-06-13, 30-agent code-grounded review)
+
+A follow-up 30-agent review read the **actual repo code** (not this doc's claims) and corroborated
+the run diagnostics end-to-end. Net finding: **as packaged, these grafts are NOT yet a proven
+improvement over the live run.** Only three *near-free correctness fixes* are near-certain wins —
+and none is a headline architectural graft. Everything that touches play strength genuinely
+requires a runtime A/B to know, and several grafts are redundant with the engine verdict / existing
+planes / augmentation, or target a crop-era disease the architecture deletes by construction.
+
+**Corrections to this doc (verified against code/diagnostics):**
+- **Worst-calibrated epoch is ep1 (ece 0.340), not ep2 (0.299).** The min-ECE argument survives
+  (it would pick ep0 at 0.108 over the live ep2 warm-start), but the "ep2 = worst" label is wrong.
+- **`w_value` is not a real knob.** Value weight is `VALUE_WEIGHT=1.0` hardcoded (`losses.py:27`)
+  with no TOML/CLI path; "down-weight value during BC" is an *unbuilt code change*, not a flip, and
+  is confounded — park it (it is NOT a clear win).
+- **The throughput floor is uncorroborated in-repo.** No committed hexfield artifact backs "5.82
+  pos/s @512v ≈ 1.2× dense, above the 0.8× floor"; the only perf logs are a stale hexgt-lineage
+  256v profile, and the throughput script compares against `restnet ~9.7 pos/s @256v` (0.8× =
+  7.8) — at which 5.82 is *below* floor. Every systems verdict (B/D cost, X, P, Cap) hangs on this.
+- **The "NaN/Inf grad-norm storm" is a logging artifact**, not instability: `prefit.py:139` appends
+  `float(grad_norm)` unconditionally on AMP-skip steps while `trainer.py:126` is already guarded;
+  `grad_norm_p95` is a healthy 4.0–4.2 and `amp_scale` climbs. So "harden GradScaler" is cosmetic;
+  the value collapse is label-correlation overfit, not a NaN pathology.
+- **`K-lengthknees` is not "config-only"** — hexfield has no policy-surprise row-weighting layer to
+  attach the knees to; promotion requires porting machinery. **`P-packeranchor` is ~90% already
+  shipped** and redundant with the live `torch.compile(dynamic=True)`. Both were adversarially
+  overturned from `gate_ab` → `park`.
+
+**Reconciled per-graft verdict (3 independent arbiters, unanimous tiers):**
+
+| Tier | Grafts | Note |
+|---|---|---|
+| **IMPLEMENT NOW** (near-certain) | STEP0 **min-ECE checkpoint selection** (switch RL warm-start ep2→ep0); STEP0 **`prefit.py:139` isfinite one-liner**; STEP0 **port the 500-step LR warmup into the RL trainer** (drop the bundled head-LR re-warm + value-only pass) | correctness/curriculum only; the min-ECE switch is the single highest-value item. **Not** the headline grafts |
+| **GATE A/B** (improvement unknown; isolate; measure premises first) | **M-movesleft** (first reconcile to spec: demote default-ON→OFF behind the L0 heal-gate); **at most ONE** of {A1-maxpool, A2-tokens, B-axisconv} in isolation (B needs its own M8 throughput re-measure of the un-budgeted on-axis index); **X-flexattn** (measure vs the *already-live* torch.compile/fused-SDPA baseline, not eager) | all `low` actual-improvement-likelihood; deltas likely below the current ~2000-row noise floor |
+| **PARK / DROP** | D-gradedplanes (park — owner already parked; breaks byte-exact ABI), E-antilength (park — value-target-family distortion vs a deleted disease; myopia risk), K-lengthknees (park), P-packeranchor (park), C-gradedaux (drop — tautological/redundant with D), F-tiedtap (park/drop — dead gate, probe falling), Bias-D6 (park/drop — dead gate), Cap-contingency (park — demote the GatedResBlock arm below plain-block) | redundant, premature, mis-specified, or fighting a crop-era disease the support set removes |
+
+**Gate before spending ANY A/B slot:** (1) commit a real hexfield median-N throughput artifact at
+production 512v vs a 512v dense reference; (2) measure whether the in-crop lengthening residual even
+reproduces on the unbounded board. **Dominant hazard:** attribution collapse — the roadmap touches
+the fragile BC→RL value head from four directions and the axis representation from five, on a signal
+within ~1.3σ of 50%, which would make the project's own M3 `value_ece≤0.08` steering gate (itself
+possibly unreachable — best ever 0.108 at ep0) unattributable. **Serialize and isolate.**
+
+---
+
 ## 0. The one organizing principle (resolves every cross-dimension conflict)
 
 The engine — `packages/hexo_models/rust/src/threats_shared.rs` — **already computes the exact

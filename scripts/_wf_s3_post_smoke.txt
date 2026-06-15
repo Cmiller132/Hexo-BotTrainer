@@ -1,0 +1,38 @@
+== source m3ep5: 2 games, 514 positions, len p10/p50/p90 = 25/489/489
+   nulls: const=232.7; ply-lin slope=-0.768 icpt=411.4
+   bucket         n   null_const  null_plylin         m3c5         m3c7        m4c12   (MAE per bucket)
+   [0,5)         10        230.7        214.4         76.5         42.9         73.6
+   [5,20)        30        220.7        212.1         90.5         61.5         92.4
+   [20,60)       45        195.2         67.6         77.7         36.2         63.1
+   [60,120)      60        143.2         15.9         22.7         20.8         21.4
+   [120+)       369        106.0         34.8        226.7        231.6        188.4
+   bias                     -0.0         -0.0       -147.1       -160.9       -121.2   (overall bias)
+   phase-aware m3c5: mono_stride4=0.648 rho_phase_full=-0.554 rho_phase_conv<60=0.069 (n_seq=4/8)
+   phase-aware m3c7: mono_stride4=0.647 rho_phase_full=0.186 rho_phase_conv<60=0.539 (n_seq=4/8)
+   phase-aware m4c12: mono_stride4=0.476 rho_phase_full=0.189 rho_phase_conv<60=0.284 (n_seq=4/8)
+
+== source m3ep9: 2 games, 882 positions, len p10/p50/p90 = 27/855/855
+   nulls: const=414.3; ply-lin slope=-0.841 icpt=762.9
+   bucket         n   null_const  null_plylin         m3c5         m3c7        m4c12   (MAE per bucket)
+   [0,5)         10        412.3        392.4         62.5         24.3         65.0
+   [5,20)        30        402.3        390.8         69.0         31.8         77.3
+   [20,60)       47        377.3        142.3         78.6         23.3         38.3
+   [60,120)      60        324.8         30.2         35.2         57.0         23.9
+   [120+)       735        190.9         38.4        359.6        417.8        394.0
+   bias                      0.0          0.0       -289.6       -350.4       -324.3   (overall bias)
+   phase-aware m3c5: mono_stride4=0.675 rho_phase_full=-0.427 rho_phase_conv<60=0.872 (n_seq=4/8)
+   phase-aware m3c7: mono_stride4=0.677 rho_phase_full=0.933 rho_phase_conv<60=0.817 (n_seq=4/8)
+   phase-aware m4c12: mono_stride4=0.472 rho_phase_full=0.615 rho_phase_conv<60=0.182 (n_seq=4/8)
+
+== source m4ep12: 2 games, 634 positions, len p10/p50/p90 = 29/605/605
+   nulls: const=288.8; ply-lin slope=-0.779 icpt=513.8
+   bucket         n   null_const  null_plylin         m3c5         m3c7        m4c12   (MAE per bucket)
+   [0,5)         10        286.8        267.2         60.4         27.1         57.7
+   [5,20)        30        276.8        265.0         84.4         42.8         78.5
+   [20,60)       49        252.2        117.7         97.0         25.1         45.9
+   [60,120)      60        199.3         23.6         58.3         38.2         17.6
+   [120+)       485        132.3         39.4        248.9        281.2        259.7
+   bias                      0.0         -0.0       -170.2       -214.8       -190.4   (overall bias)
+   phase-aware m3c5: mono_stride4=0.673 rho_phase_full=-0.399 rho_phase_conv<60=0.849 (n_seq=5/8)
+   phase-aware m3c7: mono_stride4=0.716 rho_phase_full=0.931 rho_phase_conv<60=0.814 (n_seq=5/8)
+   phase-aware m4c12: mono_stride4=0.506 rho_phase_full=0.240 rho_phase_conv<60=0.327 (n_seq=5/8)

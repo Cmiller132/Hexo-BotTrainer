@@ -51,6 +51,13 @@ pub struct Divergences {
     pub ml_weight: f32,
     pub ml_scale: f32,
     pub ml_q_gate: f32,
+    /// Two-sided (§5.4.4): when on, the bonus also fires on the losing side
+    /// (Q < -gate), preferring SLOWER losses; when off, win-side only.
+    pub ml_two_sided: bool,
+    /// Final root-move decisiveness tie-break among near-LCB-tied moves.
+    pub ml_final_pick: bool,
+    /// LCB band (in value units) defining "near-tied" for the final pick.
+    pub ml_final_pick_band: f32,
 }
 
 impl Divergences {
@@ -69,6 +76,9 @@ impl Divergences {
             ml_weight: 0.03,
             ml_scale: 32.0,
             ml_q_gate: 0.6,
+            ml_two_sided: false,
+            ml_final_pick: false,
+            ml_final_pick_band: 0.05,
         }
     }
 
@@ -78,6 +88,8 @@ impl Divergences {
             early_stop: true,
             visit_scaled_c_puct: true,
             moves_left_utility: true,
+            ml_two_sided: true,
+            ml_final_pick: true,
             ..Self::parity()
         }
     }
@@ -529,9 +541,11 @@ impl RustSearch {
     }
 
     /// §5.4.4 moves-left selection bonus for one edge (0 when off / ungated /
-    /// no stats): -w * g(Q_e) * tanh((M_e - M_node) / m_scale), win-side gate
-    /// g = 1 iff Q_e > ml_q_gate. Delegates to the same core the M6 property
-    /// tests exercise.
+    /// no stats): -w * s(Q_e) * tanh((M_e - M_node) / m_scale). s = +1 when
+    /// Q_e > ml_q_gate (winning -> prefer faster wins); s = -1 when two-sided
+    /// and Q_e < -ml_q_gate (losing -> prefer slower losses); s = 0 in the
+    /// |Q_e| <= gate dead-zone (no sign discontinuity). Delegates to the same
+    /// core the M6 property tests exercise.
     fn ml_bonus(&self, node: &RustNode, edge: &RustEdge) -> f32 {
         if !self.divergences.moves_left_utility {
             return 0.0;
@@ -549,6 +563,7 @@ impl RustSearch {
             self.divergences.ml_weight,
             self.divergences.ml_scale,
             self.divergences.ml_q_gate,
+            self.divergences.ml_two_sided,
         )
     }
 

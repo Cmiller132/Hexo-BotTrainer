@@ -23,7 +23,7 @@ from hexo_engine.types import AxialCoord, PlacementAction
 from hexo_runner.records import AbortRecord, HexoRecordFile, HexoRecordPlayer
 
 from . import _rust
-from .config import parse_hexfield_config
+from .config import ML_AUTO_DISABLED_FLAG, build_divergence_overrides, parse_hexfield_config
 from .engine_facts import player_int
 from .features import record_phase, record_player, window_scan
 from .geometry import pack_action_id, unpack_action_id
@@ -341,6 +341,9 @@ def generate_selfplay_epoch(*, ctx, components, epoch: int, games_per_epoch: int
             tss_enabled=sp.tss_enabled,
             root_fpu_zero_under_noise=sp.root_fpu_zero_under_noise,
             search_parity_mode=sp.search_parity_mode,
+            divergence_overrides=build_divergence_overrides(
+                sp, disabled=(ctx.diagnostics_dir / ML_AUTO_DISABLED_FLAG).exists()
+            ),
             **noise_kwargs,
         )
     driver.record_file = None

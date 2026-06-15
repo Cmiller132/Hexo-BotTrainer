@@ -55,6 +55,38 @@ eval_visits = 128
 # (the eval ladder is for tracking strength, not a per-epoch gate).
 eval_every = 5
 
+# In-run COMPARABLE strength eval (eval-v2), wired into evaluate_epoch. Replaces
+# the 16-game vs-prior arena with 72 paired games vs a FIXED roster (permanent
+# anchors bc_prefit + ep5, sliding bracket, L-lag champion), pooled into a
+# persisted Bradley-Terry ladder so epochs compound into an apples-to-apples
+# learning curve. LOCKED + UNIFORM for comparability: 512 sims, eval-vbs 16.
+# PURE EVAL (reports a label; never gates/halts/promotes). Runs every epoch.
+[model.config.multi_stage_eval]
+enabled = true
+# Eval only every 5th epoch (was 1) and with fewer games (was 72) so it stops
+# dominating wall-clock. 40 games / 5 opponents = ~8 games (4 CRN pairs) each;
+# the champion edge (contested long games) is the slow tail, so fewer games
+# roughly halves per-eval time. 512 visits + vbs16 are KEPT so every point stays
+# comparable with the ep10-30 pool (the learning curve would break at mixed
+# visits). The pool compounds, so the 5-epoch cadence still grows a clean curve.
+games_budget = 40
+every_n_epochs = 5
+full_search_visits = 512
+eval_virtual_batch_size = 16
+verdict_reference_lag = 5
+pool_path = "diagnostics/eval_pool.json"
+
+[model.config.multi_stage_eval.sprt]
+# SPRT OFF: the --parts path skips Stage B anyway; off keeps the champion edge at
+# the uniform per-opponent game count (no SPRT-dependent variation) for comparable graphs.
+enabled = false
+
+[model.config.multi_stage_eval.opponents]
+# SealBot unavailable in this env (no SEALBOT_PATH/binary) -> BT pool anchors on
+# bc_prefit. permanent_anchors / log_grid / bracket_size left at dataclass defaults
+# so backfilled and live edges share identical roster rules.
+sealbot_enabled = false
+
 [run]
 name = "hexfield_main_1"
 output_dir = "/mnt/e/Hexo-BotTrainer/runs/hexfield_main_1"

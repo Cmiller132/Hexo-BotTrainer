@@ -123,8 +123,17 @@ fn debug_lcb_pick(
 
 #[cfg(feature = "python")]
 #[pyfunction]
-fn debug_ml_bonus(q: f32, m_edge: f32, m_node: f32, weight: f32, scale: f32, gate: f32) -> f32 {
-    search::debug_ml_bonus(q, m_edge, m_node, weight, scale, gate)
+#[pyo3(signature = (q, m_edge, m_node, weight, scale, gate, two_sided=false))]
+fn debug_ml_bonus(
+    q: f32,
+    m_edge: f32,
+    m_node: f32,
+    weight: f32,
+    scale: f32,
+    gate: f32,
+    two_sided: bool,
+) -> f32 {
+    search::debug_ml_bonus(q, m_edge, m_node, weight, scale, gate, two_sided)
 }
 
 #[cfg(feature = "python")]

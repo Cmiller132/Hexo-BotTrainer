@@ -1184,6 +1184,88 @@ body.bot-thinking .legal {
   text-transform: uppercase;
 }
 
+/* ============ History v2 — Multi-stage eval (hexfield opt-in) ============ */
+/* Standalone rating-table region: hidden via [hidden] when the run carries no
+   multistage_eval_history, and self-collapses if it ever renders empty. */
+.hist-rating-table {
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(7, 13, 19, 0.44);
+}
+
+.hist-rating-table[hidden] {
+  display: none;
+}
+
+.hist-rating-table:empty {
+  display: none;
+}
+
+.hist-rating-table .hist-trends-caption {
+  margin-bottom: 0;
+}
+
+.hist-rating-groups {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 8px;
+  align-items: start;
+}
+
+.hist-rating-head {
+  display: grid;
+  gap: 5px;
+}
+
+.hist-rating-verdict-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Verdict pill: tinted via the shared status palette (improving / watch /
+   intervene) attached alongside this base class. */
+.hist-rating-verdict {
+  padding: 2px 9px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+}
+
+.hist-rating-tag {
+  padding: 2px 7px;
+  border: 1px solid rgba(39, 215, 230, 0.4);
+  border-radius: 10px;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: #9fe1e8;
+}
+
+.hist-rating-tag-muted {
+  border-color: rgba(143, 155, 170, 0.3);
+  color: var(--muted);
+}
+
+/* Reuse the loss-bar grid; the rating rows have no third (delta) column. */
+.hist-rating-row {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr);
+}
+
+.hist-rating-anchor {
+  margin-left: 4px;
+  color: #9fe1e8;
+}
+
 .hist-trend-card {
   min-width: 0;
   padding: 4px;

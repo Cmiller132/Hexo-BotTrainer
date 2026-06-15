@@ -354,6 +354,87 @@ fn lcb_pick(
         .map(|id| id as PackedCoord)
 }
 
+/// §5.4.4 final-move decisiveness tie-break. Among root moves whose LCB is
+/// within `ml_final_pick_band` of the LCB leader AND are guard-positive, prefer
+/// the most decisive one: fewest moves-left when the root is clearly winning
+/// (root value > ml_q_gate), most moves-left when clearly losing (< -ml_q_gate).
+/// Returns None in the |value| <= gate dead-zone or when no candidate carries a
+/// moves-left mean (head inert) — the caller then keeps the plain LCB pick. By
+/// construction it only ever re-picks among value-equivalent moves, so a
+/// miscalibrated head costs at most `ml_final_pick_band` of value.
+fn ml_final_pick(
+    root: &RustNode,
+    baseline: Option<&HashMap<PackedCoord, u32>>,
+    dv: &Divergences,
+    action_ids: &[PackedCoord],
+    guarded_weights: &[f32],
+) -> Option<PackedCoord> {
+    let root_v = root.value();
+    let dir: i32 = if root_v > dv.ml_q_gate {
+        1
+    } else if root_v < -dv.ml_q_gate {
+        -1
+    } else {
+        return None;
+    };
+    let stats = lcb_stats(root, baseline);
+    let max_delta = stats.iter().map(|s| s.1).max().unwrap_or(0);
+    if max_delta == 0 {
+        return None;
+    }
+    let threshold = (dv.lcb_min_visits as f32).max(dv.lcb_visit_fraction * max_delta as f32);
+    let mut best_lcb = f32::NEG_INFINITY;
+    let mut eligible: Vec<(PackedCoord, f32)> = Vec::new();
+    for &(action_id, delta, visits, value_sum, value_sq_sum) in &stats {
+        if (delta as f32) < threshold || visits == 0 {
+            continue;
+        }
+        let n = visits as f32;
+        let q = value_sum / n;
+        let variance = (value_sq_sum / n - q * q).max(0.0);
+        let lcb = q - dv.lcb_z * variance.sqrt() / n.sqrt();
+        eligible.push((action_id as PackedCoord, lcb));
+        if lcb > best_lcb {
+            best_lcb = lcb;
+        }
+    }
+    let mut pick: Option<(PackedCoord, f32)> = None;
+    for &(id, lcb) in &eligible {
+        if lcb < best_lcb - dv.ml_final_pick_band {
+            continue;
+        }
+        let guard_positive = action_ids
+            .iter()
+            .zip(guarded_weights.iter())
+            .any(|(&aid, &w)| aid == id && w > 0.0);
+        if !guard_positive {
+            continue;
+        }
+        let Some(m) = root
+            .edges
+            .iter()
+            .find(|e| e.action_id == id)
+            .and_then(|e| e.ml_mean())
+        else {
+            continue;
+        };
+        let better = match pick {
+            None => true,
+            Some((_, bm)) => {
+                if dir == 1 {
+                    m < bm
+                } else {
+                    m > bm
+                }
+            }
+        };
+        if better {
+            pick = Some((id, m));
+        }
+    }
+    pick.map(|(id, _)| id)
+}
+
 #[pyclass(unsendable)]
 pub struct HexfieldMctsSession {
     searches: HashMap<u64, RustSearch>,
@@ -1690,6 +1771,15 @@ fn resolve_divergences(
         if let Some(v) = overrides.get_item("ml_q_gate")? {
             dv.ml_q_gate = v.extract()?;
         }
+        if let Some(v) = overrides.get_item("ml_two_sided")? {
+            dv.ml_two_sided = v.extract()?;
+        }
+        if let Some(v) = overrides.get_item("ml_final_pick")? {
+            dv.ml_final_pick = v.extract()?;
+        }
+        if let Some(v) = overrides.get_item("ml_final_pick_band")? {
+            dv.ml_final_pick_band = v.extract()?;
+        }
         if let Some(v) = overrides.get_item("lcb_z")? {
             dv.lcb_z = v.extract()?;
         }
@@ -2009,11 +2099,21 @@ pub fn debug_ml_bonus(
     weight: f32,
     scale: f32,
     gate: f32,
+    two_sided: bool,
 ) -> f32 {
-    if q <= gate {
+    // s gates by the CHOOSER's perspective Q: +1 clearly winning (prefer fewer
+    // moves left = faster win), -1 clearly losing when two-sided (prefer more
+    // moves left = slower loss), 0 in the |Q| <= gate dead-zone (no sign
+    // discontinuity at Q=0). Both signs add a POSITIVE bonus to the desired
+    // child because tanh flips with (m_edge - m_node). Bounded by `weight`.
+    let s = if q > gate {
+        1.0
+    } else if two_sided && q < -gate {
+        -1.0
+    } else {
         return 0.0;
-    }
-    -weight * ((m_edge - m_node) / scale).tanh()
+    };
+    -weight * s * ((m_edge - m_node) / scale).tanh()
 }
 
 pub fn mix_seed(base_seed: u64, game_key: u64, ply: u32, stream: u64) -> u64 {
@@ -2127,8 +2227,18 @@ fn select_action_with_lcb(
                 .zip(guarded_weights.iter())
                 .any(|(&id, &w)| id == lcb_id && w > 0.0);
             if allowed {
-                let overrode = visit_pick.map(|v| v != lcb_id).unwrap_or(false);
-                return Ok((Some(lcb_id), overrode));
+                // §5.4.4 decisiveness tie-break on the PLAYED move: among moves
+                // value-tied with the LCB leader, prefer the decisive one. Needs
+                // the moves-left head (gated on moves_left_utility); inert + safe
+                // (returns lcb_id) in the dead-zone or with no ml stats.
+                let final_id = if dv.ml_final_pick && dv.moves_left_utility {
+                    ml_final_pick(root, baseline, &dv, action_ids, guarded_weights)
+                        .unwrap_or(lcb_id)
+                } else {
+                    lcb_id
+                };
+                let overrode = visit_pick.map(|v| v != final_id).unwrap_or(false);
+                return Ok((Some(final_id), overrode));
             }
         }
         return Ok((visit_pick, false));

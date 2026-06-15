@@ -102,6 +102,51 @@ def test_ml_bonus_properties() -> None:
 
 
 @needs_native
+def test_ml_bonus_two_sided() -> None:
+    w, scale, gate = 0.03, 32.0, 0.6
+    one = lambda q, me, mn: hexfield_rust.debug_ml_bonus(q, me, mn, w, scale, gate, False)
+    two = lambda q, me, mn: hexfield_rust.debug_ml_bonus(q, me, mn, w, scale, gate, True)
+    # Dead-zone is identical either way: zero for |q| <= gate (no discontinuity).
+    for q in (-0.6, -0.3, 0.0, 0.3, 0.6):
+        assert one(q, 10.0, 50.0) == 0.0
+        assert two(q, 10.0, 50.0) == 0.0
+    # One-sided: the losing side never fires.
+    assert one(-0.9, 60.0, 40.0) == 0.0
+    assert one(-0.9, 20.0, 40.0) == 0.0
+    # Two-sided losing side prefers the SLOWER loss: more moves left -> positive
+    # bonus (drag it out), fewer moves left -> negative (avoid the quick loss).
+    assert two(-0.9, 60.0, 40.0) > 0.0
+    assert two(-0.9, 20.0, 40.0) < 0.0
+    # Symmetric with the winning side at equal |q| and mirrored delta.
+    assert two(-0.9, 60.0, 40.0) == pytest.approx(two(0.9, 20.0, 40.0), abs=1e-7)
+    # Still bounded by w on the losing side.
+    assert abs(two(-0.95, 500.0, 0.0)) <= w + 1e-9
+
+
+def test_build_divergence_overrides() -> None:
+    from hexfield.config import SelfplayConfig, build_divergence_overrides
+
+    sp = SelfplayConfig()  # production defaults: MLH on, two-sided, final-pick
+    on = build_divergence_overrides(sp)
+    assert on["moves_left_utility"] is True
+    assert on["ml_two_sided"] is True
+    assert on["ml_final_pick"] is True
+    assert on["ml_weight"] == pytest.approx(0.03)
+    assert on["ml_scale"] == pytest.approx(32.0)
+    assert on["ml_q_gate"] == pytest.approx(0.6)
+    # The heal-gate / manual disable forces the lever off but keeps the constants
+    # (so a later re-enable uses the validated values).
+    off = build_divergence_overrides(sp, disabled=True)
+    assert off["moves_left_utility"] is False
+    assert off["ml_two_sided"] is False
+    assert off["ml_final_pick"] is False
+    assert off["ml_weight"] == pytest.approx(0.03)
+    # Concrete bool/float only — resolve_divergences calls v.extract().
+    for value in on.values():
+        assert isinstance(value, (bool, float))
+
+
+@needs_native
 def test_early_stop_without_lcb_is_exact() -> None:
     """Pure visit-overtake early-stop is provably selection-invariant for the
     raw greedy argmax, so this gate runs TSS-OFF: the tactical guard is an

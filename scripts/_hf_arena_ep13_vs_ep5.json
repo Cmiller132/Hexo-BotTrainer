@@ -1,0 +1,11 @@
+{
+  "ckpt_a": "epoch_000013.pt",
+  "ckpt_b": "epoch_000005.pt",
+  "games": 24,
+  "wins_a": 18,
+  "wins_b": 5,
+  "draws": 1,
+  "win_rate_a": 0.75,
+  "mean_game_length": 92.125,
+  "visits": 128
+}
