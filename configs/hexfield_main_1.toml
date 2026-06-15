@@ -14,16 +14,19 @@ device = "cuda"
 search_visits = 512
 pcr_full_proportion = 0.33
 pcr_fast_visits = 128
-active_games = 64
+active_games = 192
 c_puct = 1.5
 virtual_batch_size = 4
 # flush_target must be ABOVE max in-flight (active_games*virtual_batch_size) so
 # the flush is select-exhaustion-driven, not a stall waiting for an unreachable
 # full batch (flush_target==in-flight HANGS; <in-flight caps the batch small).
-# Empirically (probe sweep): batch size scales with active_games, throughput
-# plateaus ~64 games (evals/s GPU-saturated ~772). 0 is rejected by validation.
+# 2026-06-15 pure-efficiency sweep (_hexfield_batch_sweep.py): evals/s 416->699
+# raising active_games 64->192 at a flat ~3.4 GiB VRAM (per-group PAIR_CEILING
+# caps the transient, so concurrency doesn't blow memory). evals/s PLATEAUS at
+# 192 (256 only added ~1.7% and is capped anyway by games_per_epoch=192);
+# flush_target/cache_max_states made <2% difference. In-flight 192*4=768 < 1024.
 flush_target = 1024
-active_root_limit = 128
+active_root_limit = 192
 root_dirichlet_total_alpha = 10.83
 root_dirichlet_noise_fraction = 0.25
 fpu_reduction = 0.2

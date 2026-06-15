@@ -183,21 +183,19 @@ class HexfieldEvaluator:
         legal_counts = handle["legal_counts"]
 
         values_out = handle["values_gpu"].cpu().numpy().astype(np.float32, copy=False)
-        flat_priors = handle["priors_gpu"].cpu().numpy().astype(np.float32, copy=False)
-        prior_chunks: list[np.ndarray] = []
-        pos = 0
-        for i in range(b):
-            l = int(legal_counts[i])
-            prior_chunks.append(flat_priors[pos : pos + l])
-            pos += l
+        # priors_gpu is already torch.cat over the per-row legal-prefix priors in
+        # row order, so flat_priors IS the sum(legal_counts) positional layout the
+        # Rust parser walks — the old per-row slice + np.concatenate rebuilt the
+        # identical array. Emit it directly (one contiguous f32 buffer). legal_counts
+        # is unused here now but kept in the handle for the parser's row split.
+        flat_priors = np.ascontiguousarray(
+            handle["priors_gpu"].cpu().numpy(), dtype=np.float32
+        )
+        _ = legal_counts  # row split happens Rust-side from legal_counts on the wire
 
         reply = {
             "values_bytes": values_out.tobytes(),
-            "priors_bytes": (
-                np.concatenate(prior_chunks).astype(np.float32).tobytes()
-                if prior_chunks
-                else b""
-            ),
+            "priors_bytes": flat_priors.tobytes(),
         }
         if request_ml:
             reply["moves_left_bytes"] = (
@@ -235,10 +233,20 @@ class HexfieldEvaluator:
 
         device = self.device
         use_fp16 = device.type == "cuda"
-        d_feats = batch_feats.to(device)
-        d_nbr = batch_nbr.to(device)
-        d_mask = batch_mask.to(device)
-        d_coords = batch_coords.to(device)
+        # Pinned + non_blocking H2D (CUDA): page-lock each freshly-allocated host
+        # buffer so the driver can DMA it asynchronously and overlap the copies
+        # with queued GPU work, instead of a synchronous pageable bounce copy.
+        # Bit-identical — pinning changes only the host allocator and non_blocking
+        # only the copy timing; the consuming forward runs on the same stream so
+        # ordering holds. CPU device keeps the plain blocking copy.
+
+        def _h2d(t):
+            return t.pin_memory().to(device, non_blocking=True) if use_fp16 else t.to(device)
+
+        d_feats = _h2d(batch_feats)
+        d_nbr = _h2d(batch_nbr)
+        d_mask = _h2d(batch_mask)
+        d_coords = _h2d(batch_coords)
         # Use the compiled graph only for small support sizes (see __init__):
         # bounded distinct Npad => no recompile-limit blowup. Force the batch
         # (dim 0) dynamic so each Npad bucket compiles once and is reused across
