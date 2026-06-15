@@ -280,18 +280,59 @@ def generate_selfplay_epoch(*, ctx, components, epoch: int, games_per_epoch: int
     out_dir = ctx.samples_dir / f"epoch_{epoch:06d}"
     out_dir.mkdir(parents=True, exist_ok=True)
     games_target = max(int(games_per_epoch), 1)
-    slots = min(sp.active_games, games_target)
+    # Resume support: completed games already wrote their shards, and training
+    # reads a rolling mtime window over all epoch_*/game_*.npz, so finished games
+    # are already usable. On a mid-epoch restart, KEEP them and generate only the
+    # remainder (with keys past any the interrupted run assigned, so nothing is
+    # overwritten) instead of recomputing finished play. In-flight (unfinished)
+    # games can't be recovered — the remainder replaces them with fresh games.
+    existing = sorted(out_dir.glob("game_*.npz"))
+    already_done = len(existing)
+    remaining = max(games_target - already_done, 0)
+    resuming = already_done > 0
+
+    if remaining == 0:
+        # Epoch's self-play already on disk (crashed after self-play, before the
+        # checkpoint). Skip regeneration entirely.
+        driver = ContinuousDriver(
+            epoch=epoch, games_target=0, max_plies=sp.max_game_plies, out_dir=out_dir,
+            diag_dir=ctx.diagnostics_dir, active_limit=0,
+        )
+        result = {
+            "status": "completed", "epoch": epoch, "elapsed_seconds": 0.0,
+            "search_visits": sp.search_visits, "scheduler": {},
+            "resumed_existing_games": already_done, **driver.stats(),
+        }
+        diag_path = ctx.diagnostics_dir / f"hexfield.selfplay.epoch_{epoch:06d}.json"
+        diag_path.write_text(json.dumps(result, indent=2, default=str), encoding="utf-8")
+        return result
+
+    slots = min(sp.active_games, remaining)
     driver = ContinuousDriver(
-        epoch=epoch, games_target=games_target, max_plies=sp.max_game_plies, out_dir=out_dir,
+        epoch=epoch, games_target=remaining, max_plies=sp.max_game_plies, out_dir=out_dir,
         diag_dir=ctx.diagnostics_dir, active_limit=slots,
     )
+    if resuming:
+        existing_keys = []
+        for p in existing:
+            try:
+                existing_keys.append(int(p.stem.split("_", 1)[1]))
+            except (IndexError, ValueError):
+                pass
+        driver.next_key = (max(existing_keys) + 1) if existing_keys else epoch * 1_000_000
     tapes = driver.start_games(slots)
 
     # Per-epoch .hxr game records under <run>/selfplay (the layout the dashboard
     # scans), so every self-play game is replayable on the History screen.
     record_dir = ctx.output_dir / "selfplay"
     record_dir.mkdir(parents=True, exist_ok=True)
-    record_path = record_dir / f"epoch_{epoch:06d}.hxr"
+    # On resume use a separate .hxr so the interrupted run's replays aren't
+    # truncated (HexoRecordFile.create clobbers); the topup games are recorded
+    # alongside. Fresh epochs keep the canonical path the dashboard scans.
+    record_path = record_dir / (
+        f"epoch_{epoch:06d}_resume{already_done:03d}.hxr" if resuming
+        else f"epoch_{epoch:06d}.hxr"
+    )
     players = (
         HexoRecordPlayer("hexfield-a", "player0", "Hexfield A"),
         HexoRecordPlayer("hexfield-b", "player1", "Hexfield B"),

@@ -45,17 +45,30 @@ THE STAGE FLOW (``run_multistage_eval``):
     DOWN-WEIGHTED so its non-deterministic depth cannot enter difference
     inference at full weight; paired edges pre-deflated to EFFECTIVE counts via
     :func:`eval_stats.effective_counts`). The fit must CONVERGE (asserted
-    ``max|grad| < bt_grad_tol``) before any covariance is computed. The pool is
-    persisted so the 128 games/epoch COMPOUND — the only way the tight
-    multi-epoch resolution (~15-20 Elo) is ever reached; a single epoch resolves
-    only ~100-120 Elo (single-epoch ``SE(r_L - r_B) ~= 40-55 Elo``).
+    ``max|grad| < bt_grad_tol``) before any covariance is computed.
+
+    HONEST RESOLUTION — what compounds and what does NOT. The PRIMARY
+    candidate-vs-champion verdict is PERMANENTLY single-epoch-limited: a FRESH
+    candidate node enters the pool each epoch (``cand_epN``), so its rating never
+    accumulates information across epochs the way a fixed anchor does. At the
+    in-run per-epoch champion-game count the single-epoch ``SE(r_L - r_B)`` is
+    ~120-140 Elo (paired -> effective N well below decided, plus the two-rating
+    sqrt(2)), resolving only ~250-300 Elo — it catches a GROSS regression, not a
+    fine edge, and that does not improve with more epochs. What DOES compound is
+    the FIXED-anchor DESCRIPTIVE curve: the bc_prefit / ep5 / SealBot anchors are
+    the SAME labels every epoch, so their edges pool and their ratings tighten
+    toward ~15-20 Elo over many epochs — that asymptote describes the LINEAGE
+    progress curve, never the single-epoch verdict. SealBot is a DOWN-WEIGHTED
+    (0.5, a judgment constant) DESCRIPTIVE zero-point that pins the rating scale at
+    0 Elo; it is never the verdict.
 
 VERDICT — exactly ONE pre-registered PRIMARY hypothesis (fix #3): candidate ``L``
 vs prior champion ``B``, via the BT difference-CI ``r_L - r_B`` (which carries
-the shared-anchor ``-2 Cov_LB`` term). Every other opponent edge is DESCRIPTIVE:
-its Wilson/Elo CI is reported with NO significance verdict. If a caller opts
-several edges into gating (``bonferroni_correction``), the per-edge alpha is
-Bonferroni-split — but nothing gates by default.
+the shared-anchor ``-2 Cov_LB`` term). It is single-epoch-limited (see above) —
+a gross-regression tripwire, NOT a fine-edge test. Every other opponent edge is
+DESCRIPTIVE: its Wilson/Elo CI is reported with NO significance verdict. If a
+caller opts several edges into gating (``bonferroni_correction``), the per-edge
+alpha is Bonferroni-split — but nothing gates by default.
 
 POOL PERSISTENCE FORMAT (``diagnostics/eval_pool.json``) — see
 :func:`_load_pool` / :func:`_save_pool`. A versioned JSON document:
@@ -1021,6 +1034,115 @@ def _stage_b_sprt(
 # resumable PARTS path (:func:`run_eval_part`) call these, so the two paths are
 # behaviour-identical: a pure extraction, same edge dicts, same provenance.
 # --------------------------------------------------------------------------- #
+def _build_sealbot_edge_from_match(
+    cfg: MultiStageEvalSection,
+    roster: Roster,
+    sb_match: dict[str, Any],
+    sb_games: int,
+) -> tuple[dict[str, Any], list[float]]:
+    """Build the SealBot (down-weighted) edge dict + win-rate Wilson CI from an
+    ALREADY-PLAYED SealBot match.
+
+    The SINGLE source of truth for the SealBot edge shape, so the
+    play-and-build helper (:func:`_play_sealbot_opponent`) and the concurrent
+    one-pass path (:func:`run_multistage_eval_concurrent`) emit byte-identical
+    edges with ZERO duplicated stats logic. Returns ``(edge, sealbot_winrate_ci)``.
+    """
+
+    wa, wb, n_eff, prov = _sealbot_edge(sb_match, cfg.sealbot_overdispersion)
+    decided = int((sb_match.get("score") or {}).get("decided", 0) or 0)
+    wins = int((sb_match.get("score") or {}).get("a_wins", 0) or 0)
+    lo, hi = eval_stats.wilson_ci(wins, decided) if decided else (0.0, 1.0)
+    sealbot_ci = [round(lo, 4), round(hi, 4)]
+    edge = {
+        "role": "sealbot",
+        "opponent": SEALBOT_LABEL,
+        "bt": eval_stats.BTEdge(
+            a=roster.candidate_label, b=SEALBOT_LABEL,
+            wins_a=wa, wins_b=wb, weight=max(0.0, min(cfg.sealbot_overdispersion, 1.0)),
+        ),
+        "descriptive": {
+            "opponent": SEALBOT_LABEL,
+            "role": "sealbot",
+            "kind": "sealbot",
+            "primary": False,
+            "paired": False,
+            "games_requested": sb_games,
+            "decided": decided,
+            "winrate": round(wins / decided, 4) if decided else None,
+            "winrate_ci95": sealbot_ci,
+            "elo_point": _safe_elo(wins / decided) if decided else None,
+            "down_weight": round(max(0.0, min(cfg.sealbot_overdispersion, 1.0)), 4),
+            "note": (
+                "DESCRIPTIVE zero-point. SealBot depth varies under load; "
+                "this edge is down-weighted out of difference inference and "
+                "only pins the rating scale at 0 Elo."
+            ),
+            "provenance": prov,
+        },
+    }
+    return edge, sealbot_ci
+
+
+def _build_checkpoint_edge_from_match(
+    roster: Roster,
+    opp: Opponent,
+    match: dict[str, Any],
+    *,
+    reused: int = 0,
+) -> dict[str, Any]:
+    """Build ONE checkpoint opponent's descriptive + BT edge dict from an
+    ALREADY-PLAYED paired match (candidate is net A).
+
+    The SINGLE source of truth for the checkpoint edge shape, shared by
+    :func:`_play_checkpoint_opponent` and :func:`run_multistage_eval_concurrent`
+    so the serial-per-opponent path and the one-pass concurrent path emit
+    byte-identical edges with ZERO duplicated stats logic.
+    """
+
+    is_champ = opp.role == "champion"
+    wa, wb, n_eff, prov = _checkpoint_edge_counts(match)
+    score = match.get("score") or {}
+    decided = int(score.get("decided", 0) or 0)
+    wins = int(score.get("a_wins", 0) or 0)
+    paired = _pentanomial_to_paired_result(match.get("pentanomial") or {})
+    if paired is not None and paired.n_pairs > 0 and math.isfinite(paired.se):
+        wr_lo, wr_hi = paired.ci()
+        elo_lo, elo_hi = eval_stats.elo_ci_from_winrate(paired.win_rate, paired.se)
+        winrate = round(paired.win_rate, 4)
+    else:
+        wr_lo, wr_hi = (eval_stats.wilson_ci(wins, decided) if decided else (0.0, 1.0))
+        elo_lo, elo_hi = (_safe_elo(wr_lo), _safe_elo(wr_hi))
+        winrate = round(wins / decided, 4) if decided else None
+    return {
+        "role": opp.role,
+        "opponent": opp.label,
+        "bt": eval_stats.BTEdge(
+            a=roster.candidate_label, b=opp.label, wins_a=wa, wins_b=wb, weight=1.0
+        ),
+        "descriptive": {
+            "opponent": opp.label,
+            "role": opp.role,
+            "kind": "checkpoint",
+            "primary": is_champ,
+            "paired": True,
+            "decided": decided,
+            "winrate": winrate,
+            "winrate_ci95": [round(wr_lo, 4), round(wr_hi, 4)],
+            "elo_point": _safe_elo(winrate) if winrate is not None else None,
+            "elo_ci95_pairlevel": [_round_elo(elo_lo), _round_elo(elo_hi)],
+            "reused_sprt_games": reused if is_champ else 0,
+            "provenance": prov,
+            "note": (
+                "PRIMARY edge — verdict via the pooled BT difference-CI in "
+                "Stage D (carries the Cov_LB term)."
+                if is_champ
+                else "DESCRIPTIVE edge — Wilson/Elo CIs only, no significance verdict."
+            ),
+        },
+    }
+
+
 def _play_sealbot_opponent(
     cfg: MultiStageEvalSection,
     roster: Roster,
@@ -1067,38 +1189,7 @@ def _play_sealbot_opponent(
     if sb_match is None:
         return None, None, None
 
-    wa, wb, n_eff, prov = _sealbot_edge(sb_match, cfg.sealbot_overdispersion)
-    decided = int((sb_match.get("score") or {}).get("decided", 0) or 0)
-    wins = int((sb_match.get("score") or {}).get("a_wins", 0) or 0)
-    lo, hi = eval_stats.wilson_ci(wins, decided) if decided else (0.0, 1.0)
-    sealbot_ci = [round(lo, 4), round(hi, 4)]
-    edge = {
-        "role": "sealbot",
-        "opponent": SEALBOT_LABEL,
-        "bt": eval_stats.BTEdge(
-            a=roster.candidate_label, b=SEALBOT_LABEL,
-            wins_a=wa, wins_b=wb, weight=max(0.0, min(cfg.sealbot_overdispersion, 1.0)),
-        ),
-        "descriptive": {
-            "opponent": SEALBOT_LABEL,
-            "role": "sealbot",
-            "kind": "sealbot",
-            "primary": False,
-            "paired": False,
-            "games_requested": sb_games,
-            "decided": decided,
-            "winrate": round(wins / decided, 4) if decided else None,
-            "winrate_ci95": sealbot_ci,
-            "elo_point": _safe_elo(wins / decided) if decided else None,
-            "down_weight": round(max(0.0, min(cfg.sealbot_overdispersion, 1.0)), 4),
-            "note": (
-                "DESCRIPTIVE zero-point. SealBot depth varies under load; "
-                "this edge is down-weighted out of difference inference and "
-                "only pins the rating scale at 0 Elo."
-            ),
-            "provenance": prov,
-        },
-    }
+    edge, sealbot_ci = _build_sealbot_edge_from_match(cfg, roster, sb_match, sb_games)
     return edge, sealbot_ci, None
 
 
@@ -1154,50 +1245,9 @@ def _play_checkpoint_opponent(
         match = _merge_matches(match, fresh) if match is not None else fresh
     if match is None:
         return None
-    wa, wb, n_eff, prov = _checkpoint_edge_counts(match)
-    score = match.get("score") or {}
-    decided = int(score.get("decided", 0) or 0)
-    wins = int(score.get("a_wins", 0) or 0)
-    # Pair-level CI (the corrected, non-anti-conservative one) when paired.
-    paired = _pentanomial_to_paired_result(match.get("pentanomial") or {})
-    if paired is not None and paired.n_pairs > 0 and math.isfinite(paired.se):
-        wr_lo, wr_hi = paired.ci()
-        elo_lo, elo_hi = eval_stats.elo_ci_from_winrate(paired.win_rate, paired.se)
-        winrate = round(paired.win_rate, 4)
-    else:
-        wr_lo, wr_hi = (eval_stats.wilson_ci(wins, decided) if decided else (0.0, 1.0))
-        elo_lo, elo_hi = (_safe_elo(wr_lo), _safe_elo(wr_hi))
-        winrate = round(wins / decided, 4) if decided else None
-    return {
-        "role": opp.role,
-        "opponent": opp.label,
-        "bt": eval_stats.BTEdge(
-            a=roster.candidate_label, b=opp.label, wins_a=wa, wins_b=wb, weight=1.0
-        ),
-        "descriptive": {
-            "opponent": opp.label,
-            "role": opp.role,
-            "kind": "checkpoint",
-            # The PRIMARY flag marks which edge the verdict rests on; its
-            # significance comes from the POOLED BT difference-CI (Stage
-            # D), not from this per-edge CI, which stays descriptive.
-            "primary": is_champ,
-            "paired": True,
-            "decided": decided,
-            "winrate": winrate,
-            "winrate_ci95": [round(wr_lo, 4), round(wr_hi, 4)],
-            "elo_point": _safe_elo(winrate) if winrate is not None else None,
-            "elo_ci95_pairlevel": [_round_elo(elo_lo), _round_elo(elo_hi)],
-            "reused_sprt_games": reused if is_champ else 0,
-            "provenance": prov,
-            "note": (
-                "PRIMARY edge — verdict via the pooled BT difference-CI in "
-                "Stage D (carries the Cov_LB term)."
-                if is_champ
-                else "DESCRIPTIVE edge — Wilson/Elo CIs only, no significance verdict."
-            ),
-        },
-    }
+    # Edge building (effective counts + pair-level CIs) is shared with the
+    # one-pass concurrent path — see _build_checkpoint_edge_from_match.
+    return _build_checkpoint_edge_from_match(roster, opp, match, reused=reused)
 
 
 # --------------------------------------------------------------------------- #
@@ -1234,7 +1284,8 @@ def _stage_c_deep(
     n_ckpt = len(roster.opponents)
     has_sealbot = roster.sealbot is not None
     alloc = allocate_budget(
-        cfg.games_budget, n_checkpoint_opponents=n_ckpt, has_sealbot=has_sealbot
+        cfg.games_budget, n_checkpoint_opponents=n_ckpt, has_sealbot=has_sealbot,
+        sealbot_share=cfg.sealbot_share,
     )
 
     edges: list[dict[str, Any]] = []
@@ -1460,9 +1511,13 @@ def _stage_d_pool(
                     "hypothesis": "r_candidate - r_champion (pooled BT difference, incl. Cov_LB)",
                 },
                 "note": (
-                    "PURE EVAL: this label is reported only and gates nothing. A "
-                    "single epoch resolves ~100-120 Elo (SE(r_L-r_B) ~40-55 Elo); "
-                    "tight resolution accrues only as the rolling pool compounds."
+                    "PURE EVAL: this label is reported only and gates nothing. The "
+                    "candidate-vs-champion verdict is PERMANENTLY single-epoch-limited "
+                    "(a fresh candidate node each epoch never compounds): SE(r_L-r_B) "
+                    "~120-140 Elo, resolving ~250-300 Elo — a gross-regression "
+                    "tripwire, NOT a fine-edge test, and it does not tighten with more "
+                    "epochs. Only the FIXED-anchor DESCRIPTIVE curve (bc_prefit/ep5/"
+                    "SealBot) compounds toward ~15-20 Elo over many epochs."
                 ),
             }
         else:
@@ -1662,6 +1717,7 @@ def run_eval_part(
         cfg.games_budget,
         n_checkpoint_opponents=len(roster.opponents),
         has_sealbot=roster.sealbot is not None,
+        sealbot_share=cfg.sealbot_share,
     )
 
     # ----- Play the one opponent (the SAME helpers Stage C uses). -----
@@ -2021,6 +2077,191 @@ def run_multistage_eval_in_parts(
 
 
 # --------------------------------------------------------------------------- #
+# CONCURRENT ONE-PASS PATH — the FAST in-run eval.
+#
+# Plays the WHOLE roster in ONE concurrent pass: SealBot via play_sealbot_match
+# (its own concurrent loop) + ALL checkpoint opponents via the multi-opponent
+# runner play_multi_checkpoint_match (one shared candidate forward across every
+# opponent). Wall-clock is MAX over matches, not SUM (the --parts path runs
+# opponents serially -> sum-of-matches; this runs them concurrently). Then the
+# SAME Stage D (_stage_d_pool / pool append / BT fit / verdict) runs over the
+# pool — statistics UNCHANGED. PURE EVAL, FAIL-SOFT, no run-state writes.
+# --------------------------------------------------------------------------- #
+def run_multistage_eval_concurrent(
+    run_dir: str | Path,
+    candidate_ckpt: str | Path,
+    config: HexfieldConfig | MultiStageEvalSection | None = None,
+    *,
+    candidate_epoch: int | None = None,
+    candidate_label: str | None = None,
+    checkpoints_dir: str | Path | None = None,
+    diagnostics_dir: str | Path | None = None,
+    write_diagnostics: bool = True,
+    play_multi_checkpoint_match: Callable[..., dict[str, Any]] | None = None,
+    play_sealbot_match: Callable[..., dict[str, Any]] | None = None,
+    now: Callable[[], float] = time.time,
+) -> dict[str, Any]:
+    """Run the deep eval (Stage C) as ONE CONCURRENT PASS, then Stage D.
+
+    Resolves the roster + the SAME :func:`allocate_budget` split (threaded
+    ``cfg.sealbot_share``) the other paths use, then plays:
+      * SealBot via ``play_sealbot_match`` (its own concurrent, unpaired loop) —
+        FAIL-OPEN: if it raises, the edge is dropped and the pool anchors on a
+        checkpoint, exactly like the other paths.
+      * EVERY checkpoint opponent via ``play_multi_checkpoint_match`` in ONE
+        batched pass (one shared candidate forward across all opponents) —
+        FAIL-SOFT at the whole-batch boundary.
+    The pre-played match dicts are turned into edges by the SAME shared edge
+    builders (:func:`_build_sealbot_edge_from_match` /
+    :func:`_build_checkpoint_edge_from_match`) the serial path uses — ZERO
+    duplicated stats logic — then Stage D appends + fits + verdicts over the pool
+    (statistics UNCHANGED). Same diagnostics JSON + ``eval_pool.json`` rows as
+    :func:`run_multistage_eval`.
+
+    SCOPE: Stage C (concurrent) + Stage D. NO Stage B SPRT triage (the advisory
+    screen never short-circuits the deep eval anyway), so every opponent plays its
+    full ``per`` budget — matching :func:`run_multistage_eval_in_parts`.
+
+    PURE EVAL — gating/promotion stay False; writes ONLY the pool JSON + the
+    per-epoch diagnostics under the diagnostics tree; nothing the trainer reads.
+    """
+
+    run_dir = Path(run_dir)
+    candidate_ckpt = Path(candidate_ckpt)
+    cfg = _coerce_section(config)
+    _assert_no_run_mutation(cfg)
+    full_cfg = config if isinstance(config, HexfieldConfig) else parse_hexfield_config({})
+    diag_dir = Path(diagnostics_dir) if diagnostics_dir is not None else (run_dir / "diagnostics")
+    started = now()
+
+    if play_multi_checkpoint_match is None or play_sealbot_match is None:
+        from . import eval_arena as _arena
+
+        if play_multi_checkpoint_match is None:
+            play_multi_checkpoint_match = _arena.play_multi_checkpoint_match
+        if play_sealbot_match is None:
+            play_sealbot_match = _arena.play_sealbot_match
+
+    roster = select_opponents(
+        run_dir, candidate_ckpt, cfg,
+        candidate_epoch=candidate_epoch, candidate_label=candidate_label,
+        checkpoints_dir=checkpoints_dir,
+    )
+    cand_label = roster.candidate_label
+    epoch_tag = roster.candidate_epoch if roster.candidate_epoch is not None else 0
+
+    alloc = allocate_budget(
+        cfg.games_budget,
+        n_checkpoint_opponents=len(roster.opponents),
+        has_sealbot=roster.sealbot is not None,
+        sealbot_share=cfg.sealbot_share,
+    )
+
+    edges: list[dict[str, Any]] = []
+    played: list[str] = []
+    sealbot_ci: list[float] | None = None
+    sealbot_unavailable: str | None = None
+    multi_error: str | None = None
+
+    # ----- SealBot zero-point (separate concurrent runner; fail-open). -----
+    if roster.sealbot is not None and alloc.get(SEALBOT_LABEL, 0) > 0:
+        sb_games = alloc[SEALBOT_LABEL]
+        sb_edge, sb_ci, sb_unavail = _play_sealbot_opponent(
+            cfg, roster, candidate_ckpt, full_cfg, sb_games,
+            play_sealbot_match=play_sealbot_match,
+            diagnostics_dir=diag_dir,
+        )
+        if sb_unavail is not None:
+            sealbot_unavailable = sb_unavail
+        if sb_edge is not None:
+            sealbot_ci = sb_ci
+            edges.append(sb_edge)
+            played.append(SEALBOT_LABEL)
+
+    # ----- ALL checkpoint opponents in ONE concurrent multi-opponent pass. -----
+    per = alloc.get("per_checkpoint", 0)
+    ckpt_opps = [o for o in roster.opponents if o.ckpt is not None]
+    if per > 0 and ckpt_opps:
+        try:
+            matches = play_multi_checkpoint_match(
+                str(candidate_ckpt),
+                [(o.label, str(o.ckpt)) for o in ckpt_opps],
+                per,
+                config=full_cfg,
+                candidate_label=cand_label,
+                visits=_eval_visits(cfg, full_cfg),
+                virtual_batch_size=_eval_virtual_batch_size(cfg, full_cfg),
+                opening_plies=cfg.opening_plies,
+                opening_temperature=cfg.opening_temperature,
+                diagnostics_dir=str(diag_dir),
+            )
+        except Exception as exc:  # noqa: BLE001 — fail-soft at the batch boundary.
+            multi_error = f"{type(exc).__name__}: {exc}"
+            matches = {}
+        for opp in ckpt_opps:
+            match = matches.get(opp.label)
+            if match is None:
+                continue
+            edges.append(_build_checkpoint_edge_from_match(roster, opp, match))
+            played.append(opp.label)
+
+    stage_c_status = "completed" if edges else "empty"
+    stage_c_detail: dict[str, Any] = {
+        "budget": cfg.games_budget,
+        "allocation": alloc,
+        "n_edges": len(edges),
+        "opponents_played": played,
+        "concurrent_one_pass": True,
+    }
+    if sealbot_unavailable is not None:
+        stage_c_detail["sealbot_unavailable"] = sealbot_unavailable
+    if multi_error is not None:
+        stage_c_detail["multi_checkpoint_error"] = multi_error
+    stage_c = StageResult(stage="C_deep", status=stage_c_status, detail=stage_c_detail)
+
+    # ----- Stage D — the SAME pool append / BT fit / verdict (unchanged). -----
+    stage_d, ratings, verdict_block, pool_doc = _stage_d_pool(
+        cfg, roster, edges, run_dir,
+    )
+
+    report: dict[str, Any] = {
+        "meta": {
+            "kind": "hexfield.multistage_eval",
+            "mode": "run_concurrent",
+            "run_dir": str(run_dir),
+            "candidate_ckpt": str(candidate_ckpt),
+            "candidate_label": cand_label,
+            "candidate_epoch": roster.candidate_epoch,
+            "anchor": SEALBOT_LABEL,
+            "config": _config_summary(cfg),
+            "elapsed_seconds": round(now() - started, 2),
+            "single_epoch_se_elo_note": _resolution_note(cfg, edges, roster),
+            "pure_eval": True,
+            "gating_enabled": cfg.eval_gating_enabled,
+            "promotion_enabled": cfg.eval_promotion_enabled,
+        },
+        "roster": _roster_summary(roster),
+        "stages": [
+            {"stage": stage_c.stage, "status": stage_c.status, **stage_c.detail},
+            {"stage": stage_d.stage, "status": stage_d.status, **stage_d.detail},
+        ],
+        "ratings": ratings,
+        "edges": [e["descriptive"] for e in edges],
+        "sealbot_winrate_ci95": sealbot_ci,
+        "verdict": verdict_block,
+    }
+
+    if write_diagnostics:
+        _save_pool(_pool_path(run_dir, cfg), pool_doc)
+        diag_dir.mkdir(parents=True, exist_ok=True)
+        diag_path = diag_dir / f"{DIAG_PREFIX}{epoch_tag:06d}.json"
+        diag_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        report["meta"]["diagnostics_path"] = str(diag_path)
+
+    return report
+
+
+# --------------------------------------------------------------------------- #
 # Small helpers.
 # --------------------------------------------------------------------------- #
 def _coerce_section(config: HexfieldConfig | MultiStageEvalSection | None) -> MultiStageEvalSection:
@@ -2182,9 +2423,14 @@ def _resolution_note(
     se_txt = f"{se:.0f}" if math.isfinite(se) else "inf"
     return (
         f"Single-epoch SE(win rate) over {champ_decided} champion games is ~{se_txt} Elo "
-        f"(independent-game approx); the PRIMARY difference SE is larger (paired -> "
-        f"effective N below decided, plus the two-rating sqrt(2)). The ~15-20 Elo "
-        f"resolution is the MULTI-EPOCH rolling-pool asymptote, never a single epoch."
+        f"(independent-game approx); the PRIMARY difference SE is LARGER still (paired -> "
+        f"effective N well below decided, plus the two-rating sqrt(2)) — order ~120-140 "
+        f"Elo, resolving ~250-300 Elo. This candidate-vs-champion verdict is PERMANENTLY "
+        f"single-epoch-limited (a fresh candidate node each epoch never compounds): it is "
+        f"a gross-regression tripwire, not a fine-edge test. Only the FIXED-anchor "
+        f"DESCRIPTIVE curve (bc_prefit/ep5/SealBot — same labels every epoch) compounds "
+        f"toward the ~15-20 Elo multi-epoch asymptote, which describes the lineage "
+        f"progress curve, never the single-epoch verdict."
     )
 
 

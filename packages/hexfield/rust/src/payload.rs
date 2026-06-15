@@ -32,25 +32,22 @@ pub const NBR_SENTINEL: u16 = 0xFFFF;
 /// Keep evaluator batches bounded (same intent as dense's chunking).
 pub const EVAL_CHUNK_STATES: usize = 1024;
 
-fn evaluate_states_chunk(
-    py: Python<'_>,
-    evaluator: &Bound<'_, PyAny>,
-    states: &[&RustHexoState],
-    request_moves_left: bool,
-    stats: Option<&SharedEvaluationStats>,
-) -> PyResult<Vec<RustEvaluation>> {
-    let encoding_started = Instant::now();
-    // Featurize each row, then order rows by support size DESCENDING (stable
-    // by request index). Rust keeps the per-row sorted legal action ids; they
-    // never cross the boundary — priors return positionally over the prefix.
-    struct Row {
-        request_index: usize,
-        legal_ids: Vec<PackedCoord>,
-        coords_qr: Vec<i16>,
-        nbr_local: Vec<u16>,
-        feats: Vec<f16>,
-        num_nodes: usize,
-    }
+/// One featurized request row. Owns all its data (no borrow of the source
+/// state), so a built row set can outlive `states` — required for the async
+/// submit/finish split, where parsing happens after the borrowing scope ends.
+struct Row {
+    request_index: usize,
+    legal_ids: Vec<PackedCoord>,
+    coords_qr: Vec<i16>,
+    nbr_local: Vec<u16>,
+    feats: Vec<f16>,
+    num_nodes: usize,
+}
+
+/// Featurize each row, then order rows by support size DESCENDING (stable by
+/// request index). Rust keeps the per-row sorted legal action ids; they never
+/// cross the boundary — priors return positionally over the prefix.
+fn featurize_and_sort(states: &[&RustHexoState]) -> PyResult<Vec<Row>> {
     let mut rows: Vec<Row> = states
         .iter()
         .enumerate()
@@ -97,7 +94,18 @@ fn evaluate_states_chunk(
             .cmp(&a.num_nodes)
             .then_with(|| a.request_index.cmp(&b.request_index))
     });
+    Ok(rows)
+}
 
+/// Pack featurized rows into the §5.2 wire payload dict (also folds the encode
+/// stats). Identical bytes for the sync and async paths.
+fn build_chunk_payload<'py>(
+    py: Python<'py>,
+    rows: &[Row],
+    request_moves_left: bool,
+    encoding_started: Instant,
+    stats: Option<&SharedEvaluationStats>,
+) -> PyResult<Bound<'py, PyDict>> {
     let total_nodes: usize = rows.iter().map(|r| r.num_nodes).sum();
     let b = rows.len();
     let mut node_feats: Vec<f16> = Vec::with_capacity(total_nodes * NUM_FEATURES);
@@ -106,7 +114,7 @@ fn evaluate_states_chunk(
     let mut node_row_offsets: Vec<i64> = Vec::with_capacity(b + 1);
     let mut legal_counts: Vec<i32> = Vec::with_capacity(b);
     node_row_offsets.push(0);
-    for row in &rows {
+    for row in rows {
         node_feats.extend_from_slice(&row.feats);
         node_qr.extend_from_slice(&row.coords_qr);
         nbr.extend_from_slice(&row.nbr_local);
@@ -125,7 +133,7 @@ fn evaluate_states_chunk(
     payload.set_item("shape", (b, total_nodes))?;
     payload.set_item("node_feats", bytes_of(py, &node_feats))?;
     payload.set_item("node_qr", bytes_of(py, &node_qr))?;
-    payload.set_item("node_row_offsets", node_row_offsets.clone())?;
+    payload.set_item("node_row_offsets", node_row_offsets)?;
     payload.set_item("nbr", bytes_of(py, &nbr))?;
     payload.set_item("legal_counts", bytes_of(py, &legal_counts))?;
     payload.set_item("request_moves_left", request_moves_left)?;
@@ -138,14 +146,20 @@ fn evaluate_states_chunk(
         stats.input_bytes += node_feats.len() * 2 + node_qr.len() * 2 + nbr.len() * 2;
         stats.encoding_seconds += encoding_started.elapsed().as_secs_f64();
     }
+    Ok(payload)
+}
 
-    let evaluator_started = Instant::now();
-    let output = evaluator.call1((payload,))?;
-    if let Some(stats) = stats {
-        lock_stats(stats).evaluator_seconds += evaluator_started.elapsed().as_secs_f64();
-    }
-
+/// Parse one evaluator reply (the dict returned by `evaluate_payload`/`result`)
+/// against the sorted rows it was built from, restoring caller order.
+fn parse_chunk_reply(
+    output: &Bound<'_, PyAny>,
+    rows: &[Row],
+    states_len: usize,
+    request_moves_left: bool,
+    stats: Option<&SharedEvaluationStats>,
+) -> PyResult<Vec<RustEvaluation>> {
     let parse_started = Instant::now();
+    let b = rows.len();
     let values_obj = output
         .get_item("values_bytes")
         .map_err(|_| PyValueError::new_err("hexfield evaluator output missing values_bytes"))?;
@@ -176,7 +190,7 @@ fn evaluate_states_chunk(
     }
 
     // Parse per (sorted) row, then restore caller order.
-    let mut by_request: Vec<Option<RustEvaluation>> = (0..states.len()).map(|_| None).collect();
+    let mut by_request: Vec<Option<RustEvaluation>> = (0..states_len).map(|_| None).collect();
     let mut offset = 0usize;
     for (sorted_index, row) in rows.iter().enumerate() {
         let value = read_value(value_bytes, sorted_index)?;
@@ -213,6 +227,62 @@ fn evaluate_states_chunk(
         .into_iter()
         .map(|item| item.expect("every payload row parsed"))
         .collect())
+}
+
+fn evaluate_states_chunk(
+    py: Python<'_>,
+    evaluator: &Bound<'_, PyAny>,
+    states: &[&RustHexoState],
+    request_moves_left: bool,
+    stats: Option<&SharedEvaluationStats>,
+) -> PyResult<Vec<RustEvaluation>> {
+    let encoding_started = Instant::now();
+    let rows = featurize_and_sort(states)?;
+    let payload = build_chunk_payload(py, &rows, request_moves_left, encoding_started, stats)?;
+
+    let evaluator_started = Instant::now();
+    let output = evaluator.call1((payload,))?;
+    if let Some(stats) = stats {
+        lock_stats(stats).evaluator_seconds += evaluator_started.elapsed().as_secs_f64();
+    }
+    parse_chunk_reply(&output, &rows, states.len(), request_moves_left, stats)
+}
+
+/// Async phase 1: featurize + ENQUEUE the forward via `evaluator.submit_payload`
+/// (no device sync). Returns the GIL-independent handle plus the row metadata
+/// needed to parse the reply later. The GPU work runs while the caller does the
+/// pre-backup select pass; `finish_states_chunk` drains it.
+fn submit_states_chunk(
+    py: Python<'_>,
+    evaluator: &Bound<'_, PyAny>,
+    states: &[&RustHexoState],
+    request_moves_left: bool,
+    stats: Option<&SharedEvaluationStats>,
+) -> PyResult<(Py<PyAny>, Vec<Row>, usize)> {
+    let encoding_started = Instant::now();
+    let rows = featurize_and_sort(states)?;
+    let payload = build_chunk_payload(py, &rows, request_moves_left, encoding_started, stats)?;
+    let handle = evaluator.call_method1("submit_payload", (payload,))?;
+    Ok((handle.unbind(), rows, states.len()))
+}
+
+/// Async phase 2: drain a `submit_states_chunk` handle via `evaluator.result`
+/// (the single device->host sync) and parse it. Byte-identical to the sync path.
+fn finish_states_chunk(
+    _py: Python<'_>,
+    evaluator: &Bound<'_, PyAny>,
+    handle: Py<PyAny>,
+    rows: &[Row],
+    states_len: usize,
+    request_moves_left: bool,
+    stats: Option<&SharedEvaluationStats>,
+) -> PyResult<Vec<RustEvaluation>> {
+    let evaluator_started = Instant::now();
+    let output = evaluator.call_method1("result", (handle,))?;
+    if let Some(stats) = stats {
+        lock_stats(stats).evaluator_seconds += evaluator_started.elapsed().as_secs_f64();
+    }
+    parse_chunk_reply(&output, rows, states_len, request_moves_left, stats)
 }
 
 fn evaluate_state_refs(
@@ -325,6 +395,218 @@ pub fn evaluate_state_refs_cached(
                 result_slots[index] = Some(Arc::clone(&unique_evals[unique_index]));
             }
         }
+    }
+
+    Ok(result_slots
+        .into_iter()
+        .map(|item| item.expect("every hexfield evaluation slot must be populated"))
+        .collect())
+}
+
+/// Insert freshly-evaluated unique evals into the cache and fan them out to the
+/// still-empty result slots. Shared by the sync and async cached paths so both
+/// produce identical cache state and ordering.
+fn integrate_unique_evals(
+    unique_evals: Vec<RustEvaluation>,
+    unique_keys: &[StateHash],
+    slot_to_unique: Vec<Option<usize>>,
+    result_slots: &mut [Option<Arc<RustEvaluation>>],
+    cache: &SharedEvaluationCache,
+    cache_max_states: usize,
+    stats: Option<&SharedEvaluationStats>,
+) {
+    let unique_evals: Vec<Arc<RustEvaluation>> = unique_evals
+        .into_iter()
+        .map(|mut eval| {
+            eval.priors.shrink_to_fit();
+            Arc::new(eval)
+        })
+        .collect();
+    {
+        let mut cached = lock_cache(cache);
+        let mut inserted = 0usize;
+        for (key, evaluation) in unique_keys.iter().copied().zip(unique_evals.iter()) {
+            cached.insert_bounded(key, Arc::clone(evaluation), cache_max_states);
+            inserted += 1;
+        }
+        if let Some(stats) = stats {
+            let mut stats = lock_stats(stats);
+            stats.cache_inserts += inserted;
+            stats.cache_size_peak = stats.cache_size_peak.max(cached.len());
+        }
+    }
+    for (index, unique_index) in slot_to_unique.into_iter().enumerate() {
+        if result_slots[index].is_some() {
+            continue;
+        }
+        if let Some(unique_index) = unique_index {
+            result_slots[index] = Some(Arc::clone(&unique_evals[unique_index]));
+        }
+    }
+}
+
+/// GPU work staged by `submit_eval_cached`, completed by `finish_eval_cached`.
+enum PendingKind {
+    /// Every request was a cache/duplicate hit — no forward to drain.
+    None,
+    /// One async chunk in flight: drain via `evaluator.result(handle)`.
+    Async {
+        handle: Py<PyAny>,
+        rows: Vec<Row>,
+        states_len: usize,
+    },
+    /// Rare multi-chunk flush (> EVAL_CHUNK_STATES uniques): evaluated
+    /// synchronously at submit time (no overlap), already parsed.
+    Ready(Vec<RustEvaluation>),
+}
+
+/// Cache-checked evaluation split across the pre-backup select pass. Holds the
+/// fully-resolved cache hits plus the in-flight GPU work; `finish_eval_cached`
+/// drains it. All fields are owned (no borrow of the requests/slots), so the
+/// caller may run the select pass between submit and finish.
+pub struct PendingEval {
+    result_slots: Vec<Option<Arc<RustEvaluation>>>,
+    slot_to_unique: Vec<Option<usize>>,
+    unique_keys: Vec<StateHash>,
+    request_moves_left: bool,
+    pending: PendingKind,
+}
+
+/// Async phase 1 of `evaluate_state_refs_cached`: resolve cache/duplicate hits
+/// and ENQUEUE the unique forward (no device sync), returning a `PendingEval`.
+/// The GPU runs while the caller does the pre-backup select; then call
+/// `finish_eval_cached` with the SAME cache/stats to drain and integrate.
+pub fn submit_eval_cached(
+    py: Python<'_>,
+    evaluator: &Bound<'_, PyAny>,
+    requests: &[RustEvaluationRequest<'_>],
+    cache: &SharedEvaluationCache,
+    stats: Option<&SharedEvaluationStats>,
+    request_moves_left: bool,
+) -> PyResult<PendingEval> {
+    let mut result_slots: Vec<Option<Arc<RustEvaluation>>> = vec![None; requests.len()];
+    let mut unique_states: Vec<&RustHexoState> = Vec::new();
+    let mut unique_keys: Vec<StateHash> = Vec::new();
+    let mut unique_index_by_key: HashMap<StateHash, usize> = HashMap::new();
+    let mut slot_to_unique: Vec<Option<usize>> = vec![None; requests.len()];
+    if let Some(stats) = stats {
+        lock_stats(stats).requested_states += requests.len();
+    }
+
+    {
+        let cached = lock_cache(cache);
+        if let Some(stats) = stats {
+            let mut stats = lock_stats(stats);
+            stats.cache_size_peak = stats.cache_size_peak.max(cached.len());
+        }
+        for (index, request) in requests.iter().enumerate() {
+            let key = request.state_hash;
+            if let Some(cached_eval) = cached.get(&key) {
+                if !request_moves_left || cached_eval.moves_left.is_some() {
+                    result_slots[index] = Some(cached_eval);
+                    if let Some(stats) = stats {
+                        lock_stats(stats).cache_hits += 1;
+                    }
+                    continue;
+                }
+            }
+            if unique_index_by_key.contains_key(&key) {
+                slot_to_unique[index] = unique_index_by_key.get(&key).copied();
+                if let Some(stats) = stats {
+                    lock_stats(stats).duplicate_hits += 1;
+                }
+                continue;
+            }
+            unique_index_by_key.insert(key, unique_states.len());
+            unique_keys.push(key);
+            slot_to_unique[index] = Some(unique_states.len());
+            unique_states.push(request.state);
+        }
+    }
+
+    let pending = if unique_states.is_empty() {
+        PendingKind::None
+    } else {
+        if let Some(stats) = stats {
+            lock_stats(stats).unique_states += unique_states.len();
+        }
+        if unique_states.len() > EVAL_CHUNK_STATES {
+            // Multi-chunk flushes are rare (flush ~144 << 1024); evaluate them
+            // synchronously here rather than juggle multiple in-flight handles.
+            PendingKind::Ready(evaluate_state_refs(
+                py,
+                evaluator,
+                &unique_states,
+                request_moves_left,
+                stats,
+            )?)
+        } else {
+            let (handle, rows, states_len) =
+                submit_states_chunk(py, evaluator, &unique_states, request_moves_left, stats)?;
+            PendingKind::Async {
+                handle,
+                rows,
+                states_len,
+            }
+        }
+    };
+
+    Ok(PendingEval {
+        result_slots,
+        slot_to_unique,
+        unique_keys,
+        request_moves_left,
+        pending,
+    })
+}
+
+/// Async phase 2: drain the in-flight forward (the single device->host sync),
+/// insert into the cache, and fan out to the result slots. Byte-identical
+/// result to `evaluate_state_refs_cached`.
+pub fn finish_eval_cached(
+    py: Python<'_>,
+    evaluator: &Bound<'_, PyAny>,
+    pending: PendingEval,
+    cache: &SharedEvaluationCache,
+    stats: Option<&SharedEvaluationStats>,
+    cache_max_states: usize,
+) -> PyResult<Vec<Arc<RustEvaluation>>> {
+    let PendingEval {
+        mut result_slots,
+        slot_to_unique,
+        unique_keys,
+        request_moves_left,
+        pending,
+    } = pending;
+
+    let unique_evals: Option<Vec<RustEvaluation>> = match pending {
+        PendingKind::None => None,
+        PendingKind::Ready(evals) => Some(evals),
+        PendingKind::Async {
+            handle,
+            rows,
+            states_len,
+        } => Some(finish_states_chunk(
+            py,
+            evaluator,
+            handle,
+            &rows,
+            states_len,
+            request_moves_left,
+            stats,
+        )?),
+    };
+
+    if let Some(unique_evals) = unique_evals {
+        integrate_unique_evals(
+            unique_evals,
+            &unique_keys,
+            slot_to_unique,
+            &mut result_slots,
+            cache,
+            cache_max_states,
+            stats,
+        );
     }
 
     Ok(result_slots

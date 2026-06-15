@@ -56,36 +56,49 @@ eval_visits = 128
 eval_every = 5
 
 # In-run COMPARABLE strength eval (eval-v2), wired into evaluate_epoch. Replaces
-# the 16-game vs-prior arena with 72 paired games vs a FIXED roster (permanent
+# the 16-game vs-prior arena with paired games vs a FIXED roster (permanent
 # anchors bc_prefit + ep5, sliding bracket, L-lag champion), pooled into a
 # persisted Bradley-Terry ladder so epochs compound into an apples-to-apples
-# learning curve. LOCKED + UNIFORM for comparability: 512 sims, eval-vbs 16.
-# PURE EVAL (reports a label; never gates/halts/promotes). Runs every epoch.
+# learning curve. LOCKED + UNIFORM for comparability: 512 sims, eval-vbs 32.
+# PURE EVAL (reports a label; never gates/halts/promotes).
+#
+# CONCURRENT ONE-PASS (eval-v2 fast redesign): every 5 epochs the eval plays the
+# WHOLE roster in ONE batched pass (SealBot via play_sealbot_match + ALL checkpoint
+# opponents via play_multi_checkpoint_match, one shared candidate forward across
+# opponents), so wall-clock is MAX over matches, not SUM — a few minutes, not the
+# serial per-opponent sum. With sealbot_share=0.5 + bracket_size=1 the roster is
+# 4 checkpoint opponents (bc_prefit, ep5, the bracket rung, the L-lag champion);
+# at games_budget=64 -> 32 SealBot + 32 checkpoint = 64 games (8 games = 4 CRN
+# pairs per checkpoint opponent; the stats review verified 4 pairs beats 3).
 [model.config.multi_stage_eval]
 enabled = true
-# Eval only every 5th epoch (was 1) and with fewer games (was 72) so it stops
-# dominating wall-clock. 40 games / 5 opponents = ~8 games (4 CRN pairs) each;
-# the champion edge (contested long games) is the slow tail, so fewer games
-# roughly halves per-eval time. 512 visits + vbs16 are KEPT so every point stays
-# comparable with the ep10-30 pool (the learning curve would break at mixed
-# visits). The pool compounds, so the 5-epoch cadence still grows a clean curve.
-games_budget = 40
+# 32 SealBot + 32 checkpoint = 64 games/epoch. eval-vbs 32 (was 16) halves the
+# rounds/ply at the fixed 512 visits (uniform across epochs+opponents, so
+# comparability-safe). 512 visits KEPT so every point stays comparable with the
+# ep10-30 pool (the learning curve would break at mixed visits). The pool
+# compounds, so the 5-epoch cadence still grows a clean curve.
+games_budget = 64
 every_n_epochs = 5
 full_search_visits = 512
-eval_virtual_batch_size = 16
+eval_virtual_batch_size = 32
+# 1:1 SealBot-vs-checkpoint split (0.5 of the 64-game budget -> 32 SealBot).
+sealbot_share = 0.5
 verdict_reference_lag = 5
 pool_path = "diagnostics/eval_pool.json"
 
 [model.config.multi_stage_eval.sprt]
-# SPRT OFF: the --parts path skips Stage B anyway; off keeps the champion edge at
+# SPRT OFF: the concurrent path skips Stage B anyway; off keeps the champion edge at
 # the uniform per-opponent game count (no SPRT-dependent variation) for comparable graphs.
 enabled = false
 
 [model.config.multi_stage_eval.opponents]
-# SealBot unavailable in this env (no SEALBOT_PATH/binary) -> BT pool anchors on
-# bc_prefit. permanent_anchors / log_grid / bracket_size left at dataclass defaults
-# so backfilled and live edges share identical roster rules.
-sealbot_enabled = false
+# SealBot is reachable in the WSL trainer (SEALBOT_PATH=/mnt/e/SealBot exported by
+# _hexfield_supervise_main1.sh), so the down-weighted cross-lineage zero-point is
+# played and the BT pool pins on SealBot at 0 Elo. bracket_size=1 -> 4 checkpoint
+# opponents (bc_prefit, ep5, the single bracket rung, the L-lag champion); at
+# budget 64 with sealbot_share=0.5 that is 32//4 = 8 games (4 CRN pairs) each.
+sealbot_enabled = true
+bracket_size = 1
 
 [run]
 name = "hexfield_main_1"

@@ -26,8 +26,19 @@ export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 # GPU-memory pressure this run shows (~11.9/12.3 GiB).
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
+# SealBot zero-point reachability: the in-run eval (multi_stage_eval, sealbot_enabled
+# =true) resolves the SealBot binary via $SEALBOT_PATH (hexo_runner SealBotConfig).
+# The Windows SEALBOT_PATH is invisible to the WSL trainer, so without this the eval
+# FAIL-OPENS and silently drops the down-weighted zero-point edge. Binary lives at
+# /mnt/e/SealBot/{current,best} (variant 'current').
+export SEALBOT_PATH="${SEALBOT_PATH:-/mnt/e/SealBot}"
 # Minimal PYTHONPATH proven by the original launch (hexo_* resolve from the venv).
 export PYTHONPATH="$ROOT/packages/hexfield/python:$ROOT/packages/dense_cnn_restnet/python"
+# GPU/host overlap in the self-play serve loop (2026-06-15): the forward is
+# submitted (no device sync), the pre-backup prefetch select runs GIL-released
+# while those kernels execute, then the forward is drained. Bit-identical to the
+# sync path on identical inputs (parity-gated). Set to 0 to fall back to sync.
+export HEXFIELD_ASYNC_EVAL="${HEXFIELD_ASYNC_EVAL:-1}"
 
 mkdir -p "$RUNDIR" "$CKPTS"
 log(){ echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" | tee -a "$SUPLOG" >&2; }

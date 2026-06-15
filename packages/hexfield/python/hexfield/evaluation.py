@@ -100,7 +100,11 @@ def evaluate_epoch(*, ctx, components, epoch: int) -> dict[str, Any]:
         try:
             from . import multistage_eval as mse  # lazy: pulls torch/GPU only here
 
-            report = mse.run_multistage_eval_in_parts(
+            # CONCURRENT ONE-PASS eval: play SealBot + ALL checkpoint opponents in
+            # ONE batched pass (one shared candidate forward across opponents), so
+            # wall-clock is MAX over matches, not SUM (the old --parts path ran
+            # opponents serially). Stage D statistics are UNCHANGED. PURE EVAL.
+            report = mse.run_multistage_eval_concurrent(
                 ctx.output_dir,
                 cand_path,
                 cfg,
@@ -108,7 +112,6 @@ def evaluate_epoch(*, ctx, components, epoch: int) -> dict[str, Any]:
                 checkpoints_dir=ctx.checkpoint_dir,
                 diagnostics_dir=ctx.diagnostics_dir,
                 write_diagnostics=True,
-                resume=True,
             )
             meta = report.get("meta") or {}
             verdict = report.get("verdict") or {}

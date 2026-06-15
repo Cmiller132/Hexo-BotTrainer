@@ -234,6 +234,13 @@ class MultiStageEvalSection:
     # full weight: scale its edge's effective count by this over-dispersion
     # factor (< 1 down-weights). It stays the pinned zero-point regardless.
     sealbot_overdispersion: float = 0.5
+    # Fraction of ``games_budget`` allocated to the SealBot zero-point pairing
+    # (the rest is split evenly across the checkpoint opponents). Threaded into
+    # ``allocate_budget`` by the orchestrator so the in-run split is config-driven.
+    # Default 0.25 matches the historical allocate_budget default (the existing
+    # 0.25-split tests stay green); the production config raises this to 0.5 for a
+    # 1:1 SealBot-vs-checkpoint split (32 SealBot + 32 checkpoint at budget 64).
+    sealbot_share: float = 0.25
     # Bradley-Terry convergence guard: ASSERT max|grad| < this before computing
     # covariance. The legacy fixed-step GD does NOT meet this (max|grad| ~0.30);
     # the corrected fit (Newton / scipy.optimize.minimize) must.

@@ -879,6 +879,573 @@ def play_checkpoint_match(
 
 
 # --------------------------------------------------------------------------- #
+# (1b) CONCURRENT MULTI-OPPONENT checkpoint match — ONE candidate forward across
+#      EVERY opponent's candidate-to-move games per round (the shared-candidate
+#      batch is the speed win), each opponent searched in its OWN session.
+# --------------------------------------------------------------------------- #
+
+
+def play_multi_checkpoint_match(
+    candidate_ckpt: str | Path,
+    opponents: list[tuple[str, str | Path]],
+    n_games_per_opponent: int,
+    *,
+    config: Any = None,
+    candidate_label: str = "cand",
+    visits: int | None = None,
+    virtual_batch_size: int | None = None,
+    opening_plies: int = DEFAULT_OPENING_PLIES,
+    opening_temperature: float = DEFAULT_OPENING_TEMPERATURE,
+    divergence_overrides_candidate: dict | None = None,
+    divergence_overrides_opponent: dict | None = None,
+    diagnostics_dir: str | Path | None = None,
+    max_states: int = 65_536,
+    game_seed_base: int = 0,
+    max_wall_seconds: float = 0.0,
+    active_root_limit: int | None = None,
+    build_candidate_evaluator: Callable[..., Any] | None = None,
+    build_opponent_evaluator: Callable[..., Any] | None = None,
+    make_session: Callable[..., Any] | None = None,
+) -> dict[str, Any]:
+    """Play the candidate (always net A) vs MANY checkpoint opponents in ONE
+    batched concurrent pass and return ``{opponent_label: match_result_dict}``.
+
+    Each opponent's ``match_result_dict`` is BYTE-FOR-BYTE the shape
+    :func:`play_checkpoint_match` returns (``meta`` / ``score`` /
+    ``pentanomial`` / ``game_lengths`` / ``opening_dedup`` / ``games``), so the
+    existing downstream (``multistage_eval._checkpoint_edge_counts`` ->
+    ``eval_stats.effective_counts`` -> ``BTEdge``) consumes it UNCHANGED.
+
+    THE SPEED WIN — SHARED CANDIDATE FORWARD. The candidate is net A in EVERY
+    game across EVERY opponent. The candidate keeps ONE persistent session and
+    ONE evaluator; each round, the GREEDY candidate-to-move games across ALL
+    opponents are gathered and searched in ONE multi-root candidate-session call
+    (the candidate net runs a single fat forward instead of one-per-opponent).
+    Each opponent keeps its OWN session+evaluator and searches only its own
+    games. Wall-clock is then MAX over opponents, not SUM.
+
+    EXACT EQUIVALENCE TO N SERIAL ``play_checkpoint_match`` CALLS (the safety
+    net the equivalence test pins). Each opponent group is constructed IDENTICALLY
+    to a standalone ``play_checkpoint_match(candidate, opponent_b, n_games,
+    paired_openings=True, game_seed_base=game_seed_base, ...)`` — same CRN pairs,
+    same per-pair ``pair_seed = game_seed_base + pair_index``, same
+    ``a_is_p0`` seat pattern, same leader/follower forced-opening replay. The
+    ONLY thing that changes is WHEN the candidate's searches fire:
+
+      * GREEDY plies (temperature 0): the native per-root selection seed is
+        ``seed.wrapping_add(root_index)`` but at temperature 0 move selection is a
+        pure deterministic argmax / LCB-of-Q (search.rs select_search_action), so
+        the chosen move is SEED- AND BATCH-POSITION-INDEPENDENT. Therefore
+        merging every opponent's greedy candidate games into one multi-root call
+        yields the bit-identical per-game move a serial run would — greedy plies
+        batch FREELY across opponents. This is the bulk of plies (the long tail).
+
+      * OPENING-LEADER plies (temperature > 0): the per-root seed
+        ``open_seed.wrapping_add(root_index)`` DOES matter, so to stay
+        bit-identical to the serial run each opponent's candidate opening leaders
+        are searched in their OWN per-opponent multi-root call with that
+        opponent's own ``open_seed`` (= ``game_seed_base + 13_000_003 +
+        rounds*1_000_003``, the SAME stream the serial run uses) and per-GROUP
+        root_index. (Followers replay their leader's recorded line — no search.)
+        The opening is a handful of plies; the per-opponent split here costs
+        almost nothing while keeping the equivalence exact.
+
+    GAME-KEY NAMESPACING. ``HexfieldMctsSession.search`` keys trees by game_key in
+    a HashMap. The candidate session holds trees for games from ALL opponents at
+    once, so each game's candidate-side key is a GLOBAL ``opp_index * KEY_STRIDE +
+    local_index`` (KEY_STRIDE >> any plausible per-opponent game count), and is
+    ``discard``-ed at game end so candidate trees never collide or leak across
+    opponent groups. Each opponent session uses the local per-group index (its own
+    games only), discarded at game end exactly like ``play_checkpoint_match``.
+
+    Also writes one ``.hxr`` eval-game record per opponent under
+    ``<run>/evaluation/epoch_N/`` via the existing ``_write_eval_hxr`` helper.
+
+    ``build_candidate_evaluator`` / ``build_opponent_evaluator`` / ``make_session``
+    are CPU-test injection seams (no torch/CUDA). ``build_candidate_evaluator()``
+    -> candidate evaluator; ``build_opponent_evaluator(label, ckpt_path)`` ->
+    that opponent's evaluator; ``make_session()`` -> a fresh session.
+
+    Does NOT execute on the GPU here under the live constraint; callers run it.
+    """
+
+    cfg = config if config is not None else parse_hexfield_config({})
+    sp = cfg.selfplay
+    eval_visits = int(visits) if visits is not None else int(sp.search_visits)
+    vbs = int(virtual_batch_size) if virtual_batch_size is not None else int(sp.virtual_batch_size)
+    root_limit = int(active_root_limit) if active_root_limit is not None else int(sp.active_root_limit)
+    new_session = make_session if make_session is not None else (
+        lambda: _new_rust_session(max_states)
+    )
+
+    started = time.perf_counter()
+
+    # ----- Evaluators: ONE candidate (net A everywhere) + ONE per opponent. -----
+    if build_candidate_evaluator is not None:
+        cand_eval = build_candidate_evaluator()
+    else:
+        from .inference import HexfieldEvaluator  # lazy: torch only on the GPU path
+
+        cand_eval = HexfieldEvaluator(_load_hexfield_net(candidate_ckpt), device=cfg.device)
+
+    # ov follows the SEARCHING net, exactly as in play_checkpoint_match: the
+    # candidate (net A) always searches with ``ov_cand`` (its self-play override);
+    # an opponent searches with ``ov_opp``. Symmetric by default (unbiased winrate).
+    ov_cand = _resolve_eval_overrides(
+        sp, diagnostics_dir=diagnostics_dir, divergence_overrides=divergence_overrides_candidate
+    )
+    ov_opp = (
+        ov_cand
+        if divergence_overrides_opponent is None
+        else _resolve_eval_overrides(
+            sp, diagnostics_dir=diagnostics_dir, divergence_overrides=divergence_overrides_opponent
+        )
+    )
+
+    common = dict(
+        visits=eval_visits,
+        c_puct=sp.c_puct,
+        temperature=0.0,
+        virtual_batch_size=vbs,
+        active_root_limit=root_limit,
+        widening_policy_mass=sp.widening_policy_mass,
+        widening_max_children=sp.widening_max_children,
+        widening_min_children=sp.widening_min_children,
+        fpu_reduction=sp.fpu_reduction,
+        tss_enabled=sp.tss_enabled,
+        search_parity_mode=sp.search_parity_mode,
+    )
+
+    # Per-game state. Mirrors play_checkpoint_match._Game but tracks the OPPONENT
+    # group + a GLOBAL candidate-session key so candidate trees never collide.
+    class _Game:
+        __slots__ = (
+            "opp_index", "local_index", "cand_key", "pair_index", "a_is_p0",
+            "seed", "state", "plies", "done", "status", "winner", "opening",
+            "actions", "is_leader", "leader",
+        )
+
+        def __init__(self, opp_index: int, local_index: int, cand_key: int,
+                     pair_index: int, a_is_p0: bool, seed: int) -> None:
+            self.opp_index = opp_index
+            self.local_index = local_index  # key in THIS opponent's session
+            self.cand_key = cand_key        # GLOBAL key in the candidate session
+            self.pair_index = pair_index
+            self.a_is_p0 = a_is_p0
+            self.seed = seed
+            self.state = api.new_game()
+            self.plies = 0
+            self.done = False
+            self.status = "truncated"
+            self.winner: str | None = None  # "A" | "B" | None (candidate-centric)
+            self.opening: list[int] = []
+            self.actions: list[int] = []
+            self.is_leader = True
+            self.leader: _Game = self
+
+        @property
+        def a_role(self) -> Any:
+            return api.Player.PLAYER_0 if self.a_is_p0 else api.Player.PLAYER_1
+
+        @property
+        def a_role_label(self) -> str:
+            return "player0" if self.a_is_p0 else "player1"
+
+        def a_to_move(self) -> bool:
+            return api.current_player(self.state) == self.a_role
+
+    # KEY_STRIDE namespaces candidate-session game keys per opponent so two
+    # opponents' games never share a candidate tree (n_games_per_opponent is tiny
+    # vs this stride).
+    KEY_STRIDE = 1_000_000
+
+    # One opponent group per (label, ckpt). Each group is the EXACT game layout a
+    # standalone play_checkpoint_match would build for that opponent.
+    class _Group:
+        __slots__ = ("opp_index", "label", "ckpt", "session", "evaluator",
+                     "games", "pair_members")
+
+        def __init__(self, opp_index, label, ckpt, session, evaluator):
+            self.opp_index = opp_index
+            self.label = label
+            self.ckpt = ckpt
+            self.session = session
+            self.evaluator = evaluator
+            self.games: list[_Game] = []
+            self.pair_members: dict[int, list[_Game]] = {}
+
+    groups: list[_Group] = []
+    cand_session = new_session()
+    for opp_index, (label, ckpt) in enumerate(opponents):
+        if build_opponent_evaluator is not None:
+            opp_eval = build_opponent_evaluator(label, ckpt)
+        else:
+            from .inference import HexfieldEvaluator  # lazy: torch only on GPU path
+
+            opp_eval = HexfieldEvaluator(_load_hexfield_net(ckpt), device=cfg.device)
+        grp = _Group(opp_index, label, ckpt, new_session(), opp_eval)
+        # Build CRN pairs identically to play_checkpoint_match (paired_openings).
+        n_pairs = (n_games_per_opponent + 1) // 2
+        base = opp_index * KEY_STRIDE
+        for pair_index in range(n_pairs):
+            pair_seed = game_seed_base + pair_index  # shared CRN seed (both seats)
+            idx0 = pair_index * 2
+            g0 = _Game(opp_index, idx0, base + idx0, pair_index, a_is_p0=True, seed=pair_seed)
+            grp.games.append(g0)
+            grp.pair_members.setdefault(pair_index, []).append(g0)
+            if idx0 + 1 < n_games_per_opponent:
+                g1 = _Game(opp_index, idx0 + 1, base + idx0 + 1, pair_index,
+                           a_is_p0=False, seed=pair_seed)
+                g1.is_leader = False
+                g1.leader = g0
+                grp.games.append(g1)
+                grp.pair_members[pair_index].append(g1)
+        groups.append(grp)
+
+    all_games: list[_Game] = [g for grp in groups for g in grp.games]
+
+    budget_hit = False
+    rounds = 0
+    forward_batches = 0
+    cand_forward_batches = 0
+    mcts_search_elapsed = 0.0
+
+    def _opp_session(g: _Game) -> Any:
+        return groups[g.opp_index].session
+
+    def _finalize(g: _Game) -> None:
+        terminal = api.terminal(g.state)
+        if terminal is not None:
+            g.status = "completed"
+            if terminal.winner is None:
+                g.winner = None
+            else:
+                won_label = str(terminal.winner)  # "player0" / "player1"
+                g.winner = "A" if won_label == g.a_role_label else "B"
+        elif budget_hit:
+            g.status = "aborted_budget"
+            g.winner = None
+        else:
+            g.status = "truncated"
+            g.winner = None
+        g.done = True
+        cand_session.discard(g.cand_key)
+        _opp_session(g).discard(g.local_index)
+
+    def _settle(g: _Game) -> None:
+        if api.terminal(g.state) is not None or g.plies >= sp.max_game_plies:
+            _finalize(g)
+
+    def _temp(g: _Game) -> float:
+        return opening_temperature if (g.plies < opening_plies and opening_temperature > 0.0) else 0.0
+
+    def _apply_search(g: _Game, search: dict[str, Any]) -> None:
+        q, r = unpack_action_id(int(search["action_id"]))
+        api.apply_action(g.state, PlacementAction(AxialCoord(q=q, r=r)))
+        g.plies += 1
+        g.actions.append(int(search["action_id"]))
+        if len(g.opening) < opening_plies:
+            g.opening.append(int(search["action_id"]))
+        _settle(g)
+
+    def _replay_action(g: _Game, action_id: int) -> None:
+        q, r = unpack_action_id(int(action_id))
+        api.apply_action(g.state, PlacementAction(AxialCoord(q=q, r=r)))
+        g.plies += 1
+        g.actions.append(int(action_id))
+        if len(g.opening) < opening_plies:
+            g.opening.append(int(action_id))
+        _settle(g)
+
+    def _follower_opening_action(g: _Game) -> int | None:
+        line = g.leader.opening
+        return line[g.plies] if g.plies < len(line) else None
+
+    def _candidate_key(g: _Game) -> int:
+        return g.cand_key
+
+    def _run_candidate_greedy(batch: list[_Game], seed: int) -> int:
+        """ONE shared candidate-session multi-root search over the GREEDY
+        candidate-to-move games across ALL opponents (chunked at root_limit). At
+        temperature 0 the move is a deterministic seed-independent argmax, so this
+        cross-opponent merge is bit-identical to per-opponent serial searches."""
+        nonlocal mcts_search_elapsed, forward_batches, cand_forward_batches
+        applied = 0
+        for start in range(0, len(batch), root_limit):
+            chunk = batch[start : start + root_limit]
+            t0 = time.perf_counter()
+            searches = cand_session.search(
+                [_candidate_key(g) for g in chunk],
+                tuple(g.state for g in chunk),
+                seed=seed,
+                evaluator=cand_eval,
+                move_temperatures=[0.0] * len(chunk),
+                divergence_overrides=ov_cand,
+                **common,
+            )
+            mcts_search_elapsed += time.perf_counter() - t0
+            forward_batches += 1
+            cand_forward_batches += 1
+            if len(searches) != len(chunk):
+                raise RuntimeError(
+                    f"hexfield multi-checkpoint candidate greedy search returned "
+                    f"{len(searches)} results for {len(chunk)} games"
+                )
+            for g, search in zip(chunk, searches):
+                _apply_search(g, search)
+                applied += 1
+        return applied
+
+    def _run_candidate_opening(grp: "_Group", openers: list[_Game], seed: int) -> int:
+        """Per-OPPONENT candidate opening-leader batch. Uses the candidate session
+        + candidate evaluator but THIS opponent's own ``open_seed`` and per-group
+        root_index, so the native ``seed+root_index`` per-root sampling stream is
+        bit-identical to a serial play_checkpoint_match for this opponent."""
+        nonlocal mcts_search_elapsed, forward_batches, cand_forward_batches
+        applied = 0
+        for start in range(0, len(openers), root_limit):
+            chunk = openers[start : start + root_limit]
+            t0 = time.perf_counter()
+            searches = cand_session.search(
+                [_candidate_key(g) for g in chunk],
+                tuple(g.state for g in chunk),
+                seed=seed,
+                evaluator=cand_eval,
+                move_temperatures=[opening_temperature] * len(chunk),
+                divergence_overrides=ov_cand,
+                **common,
+            )
+            mcts_search_elapsed += time.perf_counter() - t0
+            forward_batches += 1
+            cand_forward_batches += 1
+            if len(searches) != len(chunk):
+                raise RuntimeError(
+                    f"hexfield multi-checkpoint candidate opening search returned "
+                    f"{len(searches)} results for {len(chunk)} games"
+                )
+            for g, search in zip(chunk, searches):
+                _apply_search(g, search)
+                applied += 1
+        return applied
+
+    def _run_opponent_batch(grp: "_Group", batch: list[_Game], seed: int,
+                            *, temperature: float | None) -> int:
+        """One multi-root search for the opponent (net B) to-move games in THIS
+        opponent's session (chunked at root_limit). ``temperature`` None -> per-game
+        greedy/opening temperature via ``_temp``; a float pins it (opening leaders).
+        Bit-identical to play_checkpoint_match's per-net batch for this opponent."""
+        nonlocal mcts_search_elapsed, forward_batches
+        applied = 0
+        for start in range(0, len(batch), root_limit):
+            chunk = batch[start : start + root_limit]
+            temps = (
+                [temperature] * len(chunk)
+                if temperature is not None
+                else [_temp(g) for g in chunk]
+            )
+            t0 = time.perf_counter()
+            searches = grp.session.search(
+                [g.local_index for g in chunk],
+                tuple(g.state for g in chunk),
+                seed=seed,
+                evaluator=grp.evaluator,
+                move_temperatures=temps,
+                divergence_overrides=ov_opp,
+                **common,
+            )
+            mcts_search_elapsed += time.perf_counter() - t0
+            forward_batches += 1
+            if len(searches) != len(chunk):
+                raise RuntimeError(
+                    f"hexfield multi-checkpoint opponent search returned "
+                    f"{len(searches)} results for {len(chunk)} games"
+                )
+            for g, search in zip(chunk, searches):
+                _apply_search(g, search)
+                applied += 1
+        return applied
+
+    def _run_single(g: _Game, net: str) -> None:
+        """Single-root follower fallback (leader ended mid-opening). Uses the
+        serial RNG ``g.seed * 5003 + g.plies`` and the right session per net —
+        exactly play_checkpoint_match's _run_single."""
+        nonlocal mcts_search_elapsed, forward_batches, cand_forward_batches
+        if net == "A":
+            session, evaluator, key, ov = cand_session, cand_eval, g.cand_key, ov_cand
+        else:
+            grp = groups[g.opp_index]
+            session, evaluator, key, ov = grp.session, grp.evaluator, g.local_index, ov_opp
+        t0 = time.perf_counter()
+        searches = session.search(
+            [key],
+            (g.state,),
+            seed=g.seed * 5003 + g.plies,
+            evaluator=evaluator,
+            move_temperatures=[_temp(g)],
+            divergence_overrides=ov,
+            **common,
+        )
+        mcts_search_elapsed += time.perf_counter() - t0
+        forward_batches += 1
+        if net == "A":
+            cand_forward_batches += 1
+        _apply_search(g, searches[0])
+
+    # ----- Round loop. Per round: (1) CANDIDATE pass — gather every opponent's
+    # candidate-to-move games; search the OPENING leaders per-opponent (own
+    # open_seed) and the GREEDY games in ONE shared cross-opponent call; followers
+    # replay. (2) OPPONENT pass — each opponent searches its own to-move games in
+    # its own session (openers per-opponent open_seed; greedy in one batch). This
+    # ordering (candidate first, then each opponent) matches play_checkpoint_match's
+    # net-A-then-net-B ordering per opponent group, so the leader is always strictly
+    # ahead of its follower when the follower replays.
+    while True:
+        active = [g for g in all_games if not g.done]
+        if not active:
+            break
+        if max_wall_seconds and (time.perf_counter() - started) > max_wall_seconds:
+            budget_hit = True
+            for g in active:
+                _finalize(g)
+            break
+        rounds += 1
+        plies_this_round = 0
+
+        # ---- (1) CANDIDATE pass (net A), shared forward for the greedy tail. ----
+        cand_to_move = [g for g in active if not g.done and g.a_to_move()]
+        cand_openers_by_opp: dict[int, list[_Game]] = {}
+        cand_followers: list[_Game] = []
+        cand_greedy: list[_Game] = []
+        for g in cand_to_move:
+            if g.plies < opening_plies and g.is_leader:
+                cand_openers_by_opp.setdefault(g.opp_index, []).append(g)
+            elif g.plies < opening_plies and not g.is_leader:
+                cand_followers.append(g)
+            else:
+                cand_greedy.append(g)
+        # Opening leaders: per-opponent with that opponent's own open_seed (net A
+        # offset 13_000_003, == play_checkpoint_match), so each leader's per-root
+        # seed (open_seed+root_index) is bit-identical to the serial run.
+        for opp_index, openers in cand_openers_by_opp.items():
+            open_seed = game_seed_base + 13_000_003 + rounds * 1_000_003
+            plies_this_round += _run_candidate_opening(groups[opp_index], openers, open_seed)
+        # Followers replay their leader's recorded opening line (no search).
+        for g in cand_followers:
+            replay = _follower_opening_action(g)
+            if replay is not None:
+                _replay_action(g, replay)
+            else:
+                _run_single(g, "A")
+            plies_this_round += 1
+        # Greedy: ONE shared candidate forward across ALL opponents (temp 0 ->
+        # seed-independent argmax, so the cross-opponent merge is exact).
+        if cand_greedy:
+            cand_seed = game_seed_base + rounds * 1_000_003
+            plies_this_round += _run_candidate_greedy(cand_greedy, cand_seed)
+
+        # ---- (2) OPPONENT pass (net B), each in its own session. ----
+        active2 = [g for g in all_games if not g.done]
+        for grp in groups:
+            to_move = [g for g in active2 if g.opp_index == grp.opp_index and not g.done and not g.a_to_move()]
+            if not to_move:
+                continue
+            openers = [g for g in to_move if g.plies < opening_plies and g.is_leader]
+            followers = [g for g in to_move if g.plies < opening_plies and not g.is_leader]
+            greedy = [g for g in to_move if g.plies >= opening_plies]
+            if openers:
+                # Net B opening offset 19_000_003 == play_checkpoint_match.
+                open_seed = game_seed_base + 19_000_003 + rounds * 1_000_003
+                plies_this_round += _run_opponent_batch(
+                    grp, openers, open_seed, temperature=opening_temperature
+                )
+            for g in followers:
+                replay = _follower_opening_action(g)
+                if replay is not None:
+                    _replay_action(g, replay)
+                else:
+                    _run_single(g, "B")
+                plies_this_round += 1
+            if greedy:
+                # Net B greedy offset 7_000_003 == play_checkpoint_match.
+                batch_seed = game_seed_base + 7_000_003 + rounds * 1_000_003
+                plies_this_round += _run_opponent_batch(grp, greedy, batch_seed, temperature=None)
+
+        if plies_this_round == 0:
+            raise RuntimeError(
+                "hexfield multi-checkpoint eval made no progress in a round; "
+                "aborting to avoid a hang"
+            )
+
+    # ----- Build ONE result dict PER opponent, in play_checkpoint_match's shape. -
+    elapsed = round(time.perf_counter() - started, 2)
+    results: dict[str, Any] = {}
+    for grp in groups:
+        game_rows = [
+            {
+                "index": g.local_index,
+                "seed": g.seed,
+                "a_seat": "P0" if g.a_is_p0 else "P1",
+                "status": g.status,
+                "winner": g.winner,
+                "plies": g.plies,
+                "opening": list(g.opening),
+            }
+            for g in grp.games
+        ]
+        pairs: list[dict[str, Any]] = []
+        for pair_index in sorted(grp.pair_members):
+            members = grp.pair_members[pair_index]
+            decided = [g for g in members if g.status == "completed"]
+            a_wins_in_pair = sum(1 for g in decided if g.winner == "A")
+            pairs.append(
+                {
+                    "pair_index": pair_index,
+                    "seed": game_seed_base + pair_index,
+                    "game_indices": [g.local_index for g in members],
+                    "n_games": len(members),
+                    "n_decided": len(decided),
+                    "a_wins": a_wins_in_pair,
+                    "b_wins": len(decided) - a_wins_in_pair,
+                    "pentanomial_a_score": a_wins_in_pair,
+                }
+            )
+        hxr_path = _write_eval_hxr(grp.games, diagnostics_dir, candidate_label, grp.label)
+        results[grp.label] = _build_match_result(
+            games=game_rows,
+            pairs=pairs,
+            label_a=candidate_label,
+            label_b=grp.label,
+            meta_extra={
+                "kind": "hexfield_vs_hexfield",
+                "hxr_record": hxr_path,
+                "ckpt_a": {"label": candidate_label, "path": str(candidate_ckpt)},
+                "ckpt_b": {"label": grp.label, "path": str(grp.ckpt)},
+                "games_requested": n_games_per_opponent,
+                "visits": eval_visits,
+                "virtual_batch_size": vbs,
+                "device": cfg.device,
+                "paired_openings": True,
+                "opening_plies": opening_plies,
+                "opening_temperature": opening_temperature,
+                "game_seed_base": game_seed_base,
+                "divergence_overrides_a": ov_cand,
+                "divergence_overrides_b": ov_opp,
+                "budget_hit": budget_hit,
+                # Concurrency telemetry (additive — downstream consumers ignore).
+                "concurrent": True,
+                "multi_opponent": True,
+                "n_opponents": len(groups),
+                "rounds": rounds,
+                "forward_batches": forward_batches,
+                "candidate_forward_batches": cand_forward_batches,
+                "elapsed_seconds": elapsed,
+                "mcts_search_elapsed_seconds": round(mcts_search_elapsed, 2),
+            },
+        )
+    return results
+
+
+# --------------------------------------------------------------------------- #
 # (2) Hexfield checkpoint vs SealBot — concurrent, UNPAIRED
 # --------------------------------------------------------------------------- #
 

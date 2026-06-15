@@ -85,7 +85,7 @@ def test_fail_soft_does_not_propagate_and_head_audit_still_runs(tmp_path, monkey
         raise RuntimeError("eval blew up")
 
     monkeypatch.setattr(
-        "hexfield.multistage_eval.run_multistage_eval_in_parts", _boom
+        "hexfield.multistage_eval.run_multistage_eval_concurrent", _boom
     )
     result = evaluation.evaluate_epoch(ctx=ctx, components=components, epoch=5)
     assert result["multistage"]["status"] == "error"
@@ -106,7 +106,7 @@ def test_passes_candidate_path_and_run_dir(tmp_path, monkeypatch):
         captured["kw"] = kw
         return {"meta": {"anchor": "bc_prefit", "elapsed_seconds": 1.0}, "verdict": {"label": "INCONCLUSIVE"}}
 
-    monkeypatch.setattr("hexfield.multistage_eval.run_multistage_eval_in_parts", _fake)
+    monkeypatch.setattr("hexfield.multistage_eval.run_multistage_eval_concurrent", _fake)
     result = evaluation.evaluate_epoch(ctx=ctx, components=components, epoch=7)
     assert result["multistage"]["status"] == "completed"
     assert result["multistage"]["verdict"] == "INCONCLUSIVE"
@@ -128,7 +128,7 @@ def test_gating_every_n_epochs(tmp_path, monkeypatch):
     (ctx.checkpoint_dir / "epoch_000007.pt").write_bytes(b"x")
     called = {"n": 0}
     monkeypatch.setattr(
-        "hexfield.multistage_eval.run_multistage_eval_in_parts",
+        "hexfield.multistage_eval.run_multistage_eval_concurrent",
         lambda *a, **k: called.__setitem__("n", called["n"] + 1) or {"meta": {}, "verdict": {}},
     )
     result = evaluation.evaluate_epoch(ctx=ctx, components=components, epoch=7)  # 7 % 5 != 0

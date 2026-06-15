@@ -28,7 +28,7 @@ use crate::cache::{
     RustEvaluation, RustEvaluationRequest, SharedEvaluationCache, SharedEvaluationStats,
     EVAL_CACHE_MAX_STATES,
 };
-use crate::payload::evaluate_state_refs_cached;
+use crate::payload::{evaluate_state_refs_cached, finish_eval_cached, submit_eval_cached};
 use crate::state::states_from_py_states;
 use crate::threats_shared as threats;
 use crate::tree::{
@@ -995,6 +995,15 @@ impl HexfieldMctsSession {
         // state); a no-progress prefetch is stale advice and is discarded so
         // the next iteration re-selects after the backup freed the paths.
         let mut prefetched: Option<(Vec<RustLeaf>, bool)> = None;
+        // HEXFIELD_ASYNC_EVAL: real GPU/host overlap. The forward is ENQUEUED
+        // (submit, no device sync), the pre-backup select runs with the GIL
+        // released while those kernels execute, then the forward is drained
+        // (finish). Off => the original synchronous eval-then-select. Results
+        // are identical either way (only the sync point moves); the flag exists
+        // so the path can be parity-gated before it owns the live run.
+        // HEXFIELD_NO_PREFETCH is a parity-debugging lever only.
+        let async_eval = std::env::var("HEXFIELD_ASYNC_EVAL").is_ok();
+        let no_prefetch = std::env::var("HEXFIELD_NO_PREFETCH").is_ok();
         while continuous_has_work(&slots) || !queue.is_empty() {
             let (new_leaves, made_progress) = match prefetched.take() {
                 Some(result) => result,
@@ -1031,21 +1040,60 @@ impl HexfieldMctsSession {
                         },
                     })
                     .collect();
-                let evaluations = evaluate_state_refs_cached(
-                    py,
-                    evaluator,
-                    &requests,
-                    &self.evaluation_cache,
-                    Some(&evaluation_stats),
-                    self.cache_max_states,
-                    move_policy.request_moves_left(),
-                )?;
-                // Prefetch select BEFORE backup (pre-backup tree state).
-                // HEXFIELD_NO_PREFETCH is a parity-debugging lever only.
-                let prefetch_result = if std::env::var("HEXFIELD_NO_PREFETCH").is_ok() {
-                    (Vec::new(), false)
+                // Eval the flush and run the pre-backup select (on pre-backup
+                // tree state). Async: submit -> select (overlaps GPU) -> finish.
+                // Sync: eval -> select. Both yield (prefetch_result, evaluations).
+                let (prefetch_result, evaluations) = if async_eval {
+                    let pending = submit_eval_cached(
+                        py,
+                        evaluator,
+                        &requests,
+                        &self.evaluation_cache,
+                        Some(&evaluation_stats),
+                        move_policy.request_moves_left(),
+                    )?;
+                    let prefetch_result = if no_prefetch {
+                        (Vec::new(), false)
+                    } else {
+                        py.detach(|| {
+                            select_continuous_pass(
+                                &mut slots,
+                                c_puct,
+                                leaf_batch_per_root,
+                                virtual_loss,
+                            )
+                        })?
+                    };
+                    let evaluations = finish_eval_cached(
+                        py,
+                        evaluator,
+                        pending,
+                        &self.evaluation_cache,
+                        Some(&evaluation_stats),
+                        self.cache_max_states,
+                    )?;
+                    (prefetch_result, evaluations)
                 } else {
-                    select_continuous_pass(&mut slots, c_puct, leaf_batch_per_root, virtual_loss)?
+                    let evaluations = evaluate_state_refs_cached(
+                        py,
+                        evaluator,
+                        &requests,
+                        &self.evaluation_cache,
+                        Some(&evaluation_stats),
+                        self.cache_max_states,
+                        move_policy.request_moves_left(),
+                    )?;
+                    let prefetch_result = if no_prefetch {
+                        (Vec::new(), false)
+                    } else {
+                        select_continuous_pass(
+                            &mut slots,
+                            c_puct,
+                            leaf_batch_per_root,
+                            virtual_loss,
+                        )?
+                    };
+                    (prefetch_result, evaluations)
                 };
                 let unique_after = evaluation_stats
                     .lock()

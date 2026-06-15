@@ -48,8 +48,15 @@ persistent, SealBot-pinned scale. It is a **standalone runner** that never runs 
 training pipeline, so training is never interrupted.
 
 The single most important discipline in this doc is **not overclaiming significance** (§5).
-Per-epoch (128 games) resolves ~100–120 Elo moves; the ~15–20 Elo resolution everyone wants is a
-**multi-epoch rolling asymptote**, not a per-epoch property. The code and this doc say so plainly.
+The PRIMARY candidate-vs-champion verdict is **permanently single-epoch-limited** — a fresh
+candidate node enters the pool each epoch, so its rating never compounds — with a single-epoch
+**`SE(r_L − r_B) ≈ 120–140 Elo`** (paired → effective N well below decided, plus the two-rating
+√2), resolving only ~250–300 Elo: a **gross-regression tripwire, not a fine-edge test**, and it
+does NOT tighten with more epochs. The ~15–20 Elo resolution everyone wants is the
+**multi-epoch rolling asymptote of the FIXED-anchor DESCRIPTIVE curve** (bc_prefit/ep5/SealBot —
+the same labels every epoch, so those edges pool and tighten); it describes the lineage progress
+curve, never the single-epoch verdict. SealBot is a down-weighted (0.5) descriptive zero-point,
+never the verdict. The code and this doc say so plainly.
 
 ---
 
@@ -325,16 +332,22 @@ discipline the whole feature turns on.
    not attach "significant" to any of them. If a future requirement forces several edges to gate,
    apply **Bonferroni** (per-edge `alpha = 0.05 / k`) — but the default is the single primary test.
 
-3. **Per-epoch resolution is ~100–120 Elo, NOT ~15–20.** With 128 games (64 pairs), the
-   single-epoch standard error of the rating difference is **`SE(r_L − r_B) ≈ 40–55 Elo`**, so a
-   95% CI half-width is ~80–110 Elo and the smallest move a single epoch can call significant is
-   **~100–120 Elo**. A single epoch **cannot** resolve a 20-Elo improvement.
+3. **The candidate-vs-champion verdict is PERMANENTLY single-epoch-limited (~250–300 Elo
+   resolution), not ~100–120 and never ~15–20.** A FRESH candidate node (`cand_epN`) enters the
+   pool each epoch, so its rating carries only THIS epoch's games — it never accumulates across
+   epochs the way a fixed anchor does. The single-epoch standard error of the rating difference is
+   **`SE(r_L − r_B) ≈ 120–140 Elo`** (paired → effective N well below decided, plus the two-rating
+   √2), so a 95% CI half-width is ~240–270 Elo and the smallest move a single epoch can call
+   significant is **~250–300 Elo**. The PRIMARY verdict is a **gross-regression tripwire, not a
+   fine-edge test**, and this does **not** improve with more epochs.
 
-4. **~15–20 Elo is a MULTI-EPOCH ROLLING ASYMPTOTE, not a per-epoch property.** Because Stage D
-   pools games across epochs, the difference-CI tightens roughly as `1/√(epochs)`; after enough
-   epochs the rolling estimate approaches ~15–20 Elo resolution. This is a property of the
-   *accumulated pool*, never of one epoch's 128 games. The code comment and this doc both say so;
-   **do not report a single epoch as if it resolved 15–20 Elo.**
+4. **~15–20 Elo is the MULTI-EPOCH asymptote of the FIXED-ANCHOR DESCRIPTIVE curve — NOT of the
+   verdict.** The bc_prefit / ep5 / SealBot anchors are the SAME labels every epoch, so THEIR edges
+   pool across epochs and THEIR ratings tighten roughly as `1/√(epochs)` toward ~15–20 Elo. That
+   asymptote describes the LINEAGE progress curve (where each candidate sits on a stable scale),
+   **never** the single-epoch candidate-vs-champion verdict (which cannot compound — item 3). **Do
+   not report a single epoch's verdict as if it resolved 15–20 Elo, and do not claim the verdict CI
+   tightens with epochs — only the descriptive anchor curve does.**
 
 5. **Never write "statistically significant" without the test that licenses it.** Only the primary
    difference-CI excluding 0 licenses a significance claim, and only about L-vs-B. Descriptive
@@ -363,11 +376,13 @@ are coupled through their shared opponents in the pool, so `Var(Δ)` is **not** 
 
 ### 5.4 Why a single epoch is usually INCONCLUSIVE (and that is correct)
 
-A genuine 30–50 Elo per-epoch improvement is **below** the single-epoch ~100–120 Elo resolution, so
-the honest single-epoch label is `INCONCLUSIVE` — and that is the *correct* answer, not a failure
-of the harness. The progress signal is the **rolling** rating curve and the **multi-epoch**
-difference-CI, which is exactly why Stage D persists and pools. Reporting a noisy per-epoch
-`PROMOTE`/`REGRESS` off 128 games would be the overclaiming this design exists to prevent.
+A genuine 30–50 Elo per-epoch improvement is **far below** the single-epoch ~250–300 Elo verdict
+resolution (item 3), so the honest single-epoch label is `INCONCLUSIVE` — and that is the *correct*
+answer, not a failure of the harness, nor something more epochs fix (the candidate node never
+compounds). The progress signal is the **rolling FIXED-ANCHOR DESCRIPTIVE curve** — where each
+candidate sits on the stable bc_prefit/ep5/SealBot scale — which is exactly why Stage D persists
+and pools those anchor edges. Reporting a noisy per-epoch `PROMOTE`/`REGRESS` off one epoch's games
+would be the overclaiming this design exists to prevent.
 
 ---
 
@@ -556,7 +571,7 @@ the statistics — the part that was wrong before — are fully unit-tested on C
 | 3 | BT by fixed-step GD (no convergence, `max|grad|~0.3`) | Newton/scipy to `max|grad|<1e-6`, assert before covariance, full-Hessian `H⁻¹` (§4.1) |
 | 4 | 128 independent `(w,l)` into the likelihood/CI | pair-level SE + pentanomial + effective/sandwich counts; never 128 independent (§4.3) |
 | 5 | implicit multiple comparisons | one pre-registered primary hypothesis (L vs B, `Cov_LB` difference-CI); all else descriptive; Bonferroni if forced (§5 items 1-2) |
-| 6 | "resolves ~15-20 Elo per epoch" | per-epoch ~100-120 Elo (`SE(r_L−r_B)≈40-55 Elo`); 15-20 Elo only as a multi-epoch rolling asymptote (§5 items 3-4) |
+| 6 | "resolves ~15-20 Elo per epoch" | verdict PERMANENTLY single-epoch-limited ~250-300 Elo (`SE(r_L−r_B)≈120-140 Elo`, candidate node never compounds); ~15-20 Elo is the multi-epoch asymptote of the FIXED-ANCHOR DESCRIPTIVE curve only, never the verdict (§5 items 3-4) |
 | 7 | SealBot as a yardstick | SealBot zero-point only, down-weighted (depth varies under load); no draws (binomial base) (§1.1, §5 items 5-6) |
 | 8 | eval blocks/gates the run | PURELY EVAL: label only; gating/promotion present-but-OFF, wired to nothing (§8) |
 | 9 | eval inside the training epoch | standalone runner, concurrent multi-root (no Rust change), never interrupts training (§6) |

@@ -14,6 +14,7 @@ import os
 
 import numpy as np
 import torch
+import torch._dynamo  # noqa: F401  (mark_dynamic / config used in the serve path)
 
 from .constants import NUM_FEATURES, NUM_TOKENS
 from .losses import decode_binned_value, decode_moves_left
@@ -67,34 +68,69 @@ class HexfieldEvaluator:
         self.model = model
         self.device = torch.device(device)
         self.model.to(self.device).eval()
-        # Serve forward is the throughput bottleneck (~70% of it is the rel-pos
-        # bias machinery: many small elementwise/gather kernels). torch.compile
-        # (dynamic=True for the varying flush shapes) fuses them and removes the
-        # kernel-launch overhead — ~2.3x on top of the fp16-inference bias, at
-        # ~1e-4 (fp16-tolerance) parity. Eval-only (training never goes through
-        # HexfieldEvaluator, so the eager fp32-grad path is untouched). First
-        # call pays a one-time compile; dynamic graph then absorbs new shapes
-        # cheaply. Opt out with HEXFIELD_NO_COMPILE=1; falls back to eager on any
-        # compile error.
-        self._fpv = self.model.forward_policy_value
-        if self.device.type == "cuda" and os.environ.get("HEXFIELD_NO_COMPILE") != "1":
+        # Serve forward compile (spec §5.3). It is the throughput bottleneck
+        # (~70% is the rel-pos bias machinery: many small elementwise/gather
+        # kernels); torch.compile fuses them for ~2.4x at fp16-tolerance parity.
+        # Eval/self-play only — training never goes through HexfieldEvaluator.
+        #
+        # The shapes MUST be compiled STATIC per cell-count (Npad) with the BATCH
+        # dim explicitly dynamic. The old dynamic=True (and a naive per-wrapper
+        # bucket dict) always fell back to eager: dynamo's compile cache is keyed
+        # by the function CODE, so the 2nd distinct flush shape triggers
+        # automatic-dynamic, which makes Npad a free symbol; Inductor then cannot
+        # prove the attention reshape's element count CHANNELS*(Npad+8) is
+        # divisible by the symbolic seq-len Npad+8 and raises
+        # `CantSplit: 96*s+768 not divisible by s+8`, falling (suppress_errors)
+        # back to eager. Disabling automatic-dynamic keeps each Npad a concrete
+        # int (divisibility constant-folds → no CantSplit); mark_dynamic on the
+        # batch dim (in _forward_group) keeps the one varying dim dynamic so each
+        # Npad bucket compiles ONCE and absorbs every group size. The few buckets
+        # (§5.3's <=7 quantized Npad) fit well under the raised cache limit.
+        # Opt out with HEXFIELD_NO_COMPILE=1; falls back to eager on any error.
+        self._raw_fpv = self.model.forward_policy_value
+        self._compiled_fpv = self._raw_fpv
+        self._use_compile = (
+            self.device.type == "cuda"
+            and os.environ.get("HEXFIELD_NO_COMPILE") != "1"
+        )
+        # Compile ONLY small support sizes. Static-Npad compile needs few distinct
+        # shapes, but real self-play Npad spans ~64..3000+ nodes (late game / big
+        # boards) — 60+ buckets blows the dynamo recompile limit and reverts the
+        # WHOLE function to eager. Small Npad is launch-overhead-bound (where the
+        # ~2.4x fusion win lives) and yields few buckets (<=512 / 64 = 8); large
+        # Npad is matmul-compute-bound (eager ~= compiled) and is left eager — no
+        # bucket explosion, no padding waste. Tune the cutover with
+        # HEXFIELD_COMPILE_MAX_NPAD.
+        self._compile_max_npad = int(os.environ.get("HEXFIELD_COMPILE_MAX_NPAD", "512"))
+        if self._use_compile:
+            torch._dynamo.config.suppress_errors = True
+            torch._dynamo.config.automatic_dynamic_shapes = False
+            torch._dynamo.config.cache_size_limit = max(
+                64, torch._dynamo.config.cache_size_limit
+            )
             try:
-                # suppress_errors: on a per-graph compile failure (e.g. an
-                # Inductor dynamic-shape CantSplit on an edge flush shape),
-                # dynamo logs and FALLS BACK TO EAGER for that graph instead of
-                # raising — so a compile bug can never crash the self-play run;
-                # shapes that compile cleanly still get the fused speedup.
-                import torch._dynamo as _dynamo
-                _dynamo.config.suppress_errors = True
-                self._fpv = torch.compile(self.model.forward_policy_value, dynamic=True)
+                self._compiled_fpv = torch.compile(self._raw_fpv)
             except Exception:
-                self._fpv = self.model.forward_policy_value
+                self._compiled_fpv = self._raw_fpv
 
     def __call__(self, payload: dict) -> dict:
         return self.evaluate_payload(payload)
 
     @torch.no_grad()
     def evaluate_payload(self, payload: dict) -> dict:
+        """Synchronous serve (eval arena + the non-overlapped self-play path):
+        enqueue the forward and immediately read it back."""
+        return self.result(self.submit_payload(payload))
+
+    @torch.no_grad()
+    def submit_payload(self, payload: dict) -> dict:
+        """Phase 1 of the async serve split (§5.3 overlap): parse the request and
+        ENQUEUE every forward group on the GPU, but do NOT synchronize — the
+        decoded outputs stay on-device and no .cpu() runs here. Returns an opaque
+        handle. The caller (Rust) can then run the pre-backup select pass with the
+        GIL released while these kernels execute, and only afterwards call
+        result(handle) to drain them. The math is identical to evaluate_payload;
+        only the host/GPU sync point moves."""
         if int(payload["abi"]) != 1:
             raise ValueError(f"unsupported hexfield ABI {payload['abi']}")
         b, total_nodes = (int(x) for x in payload["shape"])
@@ -113,11 +149,8 @@ class HexfieldEvaluator:
         request_ml = bool(payload.get("request_moves_left", False))
 
         sizes = (offsets[1:] - offsets[:-1]).astype(np.int64)
-        values_out = np.empty(b, dtype=np.float32)
-        ml_out = np.empty(b, dtype=np.float32) if request_ml else None
-        prior_chunks: list[np.ndarray] = [np.empty(0, dtype=np.float32)] * b
         # Single-D2H discipline (§5.3): every group appends GPU tensors to these
-        # buffers; ONE .cpu() sync happens at the very end, not per row/group.
+        # buffers; the ONE .cpu() sync happens later, in result().
         gpu_priors: list[torch.Tensor] = [None] * b  # type: ignore[list-item]
         gpu_values: list[torch.Tensor] = []
         gpu_ml: list[torch.Tensor] = []
@@ -130,24 +163,46 @@ class HexfieldEvaluator:
                 request_ml, gpu_values, gpu_ml, gpu_priors,
             )
 
-        # ONE device->host sync for the whole flush.
-        values_out[:] = torch.cat(gpu_values).cpu().numpy()
-        if request_ml:
-            ml_out[:] = torch.cat(gpu_ml).cpu().numpy()
-        # Concatenate all per-row priors on-GPU (variable length), one D2H.
-        flat_priors = torch.cat([gpu_priors[i] for i in range(b)]).cpu().numpy()
+        # Concatenate on-GPU (still no D2H); the syncs happen in result().
+        return {
+            "b": b,
+            "request_ml": request_ml,
+            "legal_counts": legal_counts,
+            "values_gpu": torch.cat(gpu_values),
+            "ml_gpu": torch.cat(gpu_ml) if request_ml else None,
+            "priors_gpu": torch.cat([gpu_priors[i] for i in range(b)]),
+        }
+
+    @torch.no_grad()
+    def result(self, handle: dict) -> dict:
+        """Phase 2: drain a submit_payload() handle. The .cpu() calls here are the
+        single device->host sync for the whole flush; bytes are identical to the
+        synchronous path."""
+        b = handle["b"]
+        request_ml = handle["request_ml"]
+        legal_counts = handle["legal_counts"]
+
+        values_out = handle["values_gpu"].cpu().numpy().astype(np.float32, copy=False)
+        flat_priors = handle["priors_gpu"].cpu().numpy().astype(np.float32, copy=False)
+        prior_chunks: list[np.ndarray] = []
         pos = 0
         for i in range(b):
             l = int(legal_counts[i])
-            prior_chunks[i] = flat_priors[pos : pos + l].astype(np.float32, copy=False)
+            prior_chunks.append(flat_priors[pos : pos + l])
             pos += l
 
         reply = {
             "values_bytes": values_out.tobytes(),
-            "priors_bytes": np.concatenate(prior_chunks).astype(np.float32).tobytes(),
+            "priors_bytes": (
+                np.concatenate(prior_chunks).astype(np.float32).tobytes()
+                if prior_chunks
+                else b""
+            ),
         }
         if request_ml:
-            reply["moves_left_bytes"] = ml_out.tobytes()
+            reply["moves_left_bytes"] = (
+                handle["ml_gpu"].cpu().numpy().astype(np.float32, copy=False).tobytes()
+            )
         return reply
 
     def _forward_group(
@@ -180,12 +235,33 @@ class HexfieldEvaluator:
 
         device = self.device
         use_fp16 = device.type == "cuda"
+        d_feats = batch_feats.to(device)
+        d_nbr = batch_nbr.to(device)
+        d_mask = batch_mask.to(device)
+        d_coords = batch_coords.to(device)
+        # Use the compiled graph only for small support sizes (see __init__):
+        # bounded distinct Npad => no recompile-limit blowup. Force the batch
+        # (dim 0) dynamic so each Npad bucket compiles once and is reused across
+        # group sizes; pin the cell dim (dim 1 == Npad) static so the seq-len
+        # stays concrete and Inductor never hits the symbolic-split CantSplit.
+        # Skip mark_dynamic on size-1 groups (a 0/1 dim is specialized away).
+        use_compiled = (
+            self._use_compile
+            and self._compiled_fpv is not self._raw_fpv
+            and pad_to <= self._compile_max_npad
+        )
+        fpv = self._compiled_fpv if use_compiled else self._raw_fpv
+        if use_compiled:
+            for t in (d_feats, d_nbr, d_mask, d_coords):
+                if g > 1:
+                    torch._dynamo.mark_dynamic(t, 0)
+                torch._dynamo.mark_static(t, 1)
         with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=use_fp16):
-            out = self._fpv(
-                batch_feats.to(device),
-                batch_nbr.to(device),
-                batch_mask.to(device),
-                batch_coords.to(device),
+            out = fpv(
+                d_feats,
+                d_nbr,
+                d_mask,
+                d_coords,
                 request_moves_left=request_ml,
             )
         # Stay on-GPU: no .cpu() here. Decoded values/ml are (g,) GPU tensors;
