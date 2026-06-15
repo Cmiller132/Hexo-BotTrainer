@@ -1,5 +1,23 @@
 # Handoff — hexfield inference / self-play throughput work (2026-06-15)
 
+> **CORRECTION (2026-06-15, later session — supersedes §0/§4/§5 below).** The
+> "matmul-bound, ceiling ~5–6 pos/s, no packing change helps" premise is WRONG.
+> Live nvidia-smi in late game (97% util, 147W/270W, 100% mem-controller) is the
+> MEMORY-BANDWIDTH-bound signature, and profiling a real Npad=3328 forward shows
+> SDPA is only ~5% — ~80% is `build_attn_bias` (~15 full O(B·S²)
+> elementwise/gather/select kernels). Rewrote `build_attn_bias` (single
+> precomputed-LUT cell-index gather + head-first inference layout, BIT-IDENTICAL,
+> tests/parity all pass): late-game forward 48→22 ms (2.2×), peak serve VRAM
+> ~3.4→2.3 GiB. Separately, the 64→192 `active_games` "win" was a REGRESSION: at
+> active_games==games_per_epoch (both 192) the continuous scheduler can't REFILL,
+> so all games drain into the slow late game as one cohort (live full-epoch fell
+> 3.7→2.2 pos/s); the 60s early-game sweep was unrepresentative. Reverted
+> `active_games`→96 (steady-state refill bench: 64→6.9, 96→8.3, 128→10.0,
+> 192→10.7 pos/s). Details: agent memory `hexfield-throughput-real-rootcause`;
+> tools `scripts/_hexfield_bias_check.py`, `_hexfield_lategame_bench.py`. The
+> staged `hexflash` rewrite (§5) is now largely unnecessary — the cheap
+> bit-exact bias rewrite already captures the memory-traffic win it targeted.
+
 Goal of the session: figure out why `hexfield_main_1` self-play was only ~3 pos/s and
 make inference as fast as possible **without changing search behaviour or model quality**.
 

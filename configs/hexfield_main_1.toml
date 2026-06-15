@@ -14,17 +14,27 @@ device = "cuda"
 search_visits = 512
 pcr_full_proportion = 0.33
 pcr_fast_visits = 128
-active_games = 192
+active_games = 64
 c_puct = 1.5
 virtual_batch_size = 4
 # flush_target must be ABOVE max in-flight (active_games*virtual_batch_size) so
 # the flush is select-exhaustion-driven, not a stall waiting for an unreachable
 # full batch (flush_target==in-flight HANGS; <in-flight caps the batch small).
-# 2026-06-15 pure-efficiency sweep (_hexfield_batch_sweep.py): evals/s 416->699
-# raising active_games 64->192 at a flat ~3.4 GiB VRAM (per-group PAIR_CEILING
-# caps the transient, so concurrency doesn't blow memory). evals/s PLATEAUS at
-# 192 (256 only added ~1.7% and is capped anyway by games_per_epoch=192);
-# flush_target/cache_max_states made <2% difference. In-flight 192*4=768 < 1024.
+#
+# 2026-06-15 (forward-rewrite session): active_games REVERTED 192->64.
+# The prior 64->192 bump set active_games == games_per_epoch (192), which kills
+# the continuous REFILL: with no fresh games replacing finished ones, all games
+# drain into the slow large-support late game TOGETHER (a "cohort"), and live
+# full-epoch throughput fell to ~2.2 pos/s (the 60s early-game sweep that
+# motivated 192 measured ply-~7 positions, not the late game that dominates an
+# epoch). Keeping active_games (64) < games_per_epoch (192) restores the refill
+# MIX (192-64 refills => early/mid/late games co-resident, so the cheap early
+# positions keep throughput up). 64 is the historically PROVEN value: epochs
+# 11-30 averaged ~3.7 pos/s at ac64 (vs 2.2 at ac192). With the bias-build
+# forward rewrite (~2.2x late-game forward, ~1.5x end-to-end) on top, the epoch
+# average should land materially above 3.7. (NOTE: the lategame_bench refill
+# numbers were early-game-biased and over-stated; 64 is chosen on the proven
+# full-epoch data, not that bench.) In-flight 64*4=256 < 1024.
 flush_target = 1024
 active_root_limit = 192
 root_dirichlet_total_alpha = 10.83

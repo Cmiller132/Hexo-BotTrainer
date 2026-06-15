@@ -150,8 +150,11 @@ class HexfieldEvaluator:
 
         sizes = (offsets[1:] - offsets[:-1]).astype(np.int64)
         # Single-D2H discipline (§5.3): every group appends GPU tensors to these
-        # buffers; the ONE .cpu() sync happens later, in result().
-        gpu_priors: list[torch.Tensor] = [None] * b  # type: ignore[list-item]
+        # buffers; the ONE .cpu() sync happens later, in result(). gpu_priors holds
+        # ONE flat tensor PER GROUP (the group's rows' legal-prefix priors already
+        # concatenated row-major); plan_groups emits groups in ascending row order,
+        # so concatenating them is the full row-order flat-priors layout.
+        gpu_priors: list[torch.Tensor] = []
         gpu_values: list[torch.Tensor] = []
         gpu_ml: list[torch.Tensor] = []
 
@@ -170,7 +173,7 @@ class HexfieldEvaluator:
             "legal_counts": legal_counts,
             "values_gpu": torch.cat(gpu_values),
             "ml_gpu": torch.cat(gpu_ml) if request_ml else None,
-            "priors_gpu": torch.cat([gpu_priors[i] for i in range(b)]),
+            "priors_gpu": torch.cat(gpu_priors),
         }
 
     @torch.no_grad()
@@ -295,9 +298,11 @@ class HexfieldEvaluator:
         legal = col_idx.unsqueeze(0) < group_counts.unsqueeze(1)  # (g, Npad)
         masked = logits.masked_fill(~legal, float("-inf"))
         priors = torch.softmax(masked, dim=1)  # fp32, GPU; rows with l==0 -> NaN
-        for k in range(g):
-            row = start + k
-            l = int(legal_counts[row])
-            # Slice the legal prefix; rows with l == 0 yield an empty tensor, so
-            # any all-(-inf)-row NaNs are never read (matches the old behavior).
-            gpu_priors[row] = priors[k, :l]
+        # Flatten the legal-prefix priors in ONE boolean gather instead of a
+        # per-row Python slice loop (g tiny GPU ops + host dispatch per flush —
+        # the profiled early/mid-game host bottleneck). `legal` is row-major, so
+        # priors[legal] yields each row's first legal_counts[row] entries in row
+        # order == concat([priors[k, :legal_counts[start+k]] for k]); rows with
+        # l == 0 contribute nothing (their mask row is all False), so the
+        # all-(-inf)-row NaNs are never selected — bit-identical to the old loop.
+        gpu_priors.append(priors[legal])

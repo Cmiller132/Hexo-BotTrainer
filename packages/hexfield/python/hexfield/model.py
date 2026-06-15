@@ -230,6 +230,28 @@ class HexfieldNet(nn.Module):
             lut[(dq + BIAS_DISK_RADIUS) * 17 + (dr + BIAS_DISK_RADIUS)] = rel_bias_index(dq, dr)
         self.register_buffer("_exact_lut", lut, persistent=False)
 
+        # FULL cell-bias LUT over the entire (dq, dr) offset domain — the single
+        # gather that replaces the per-forward abs/maximum/clamp/where/where bias
+        # machinery (profiled ~70% of the serve forward, all memory-bound O(B*S^2)
+        # elementwise over the cell-cell pair grid). row = _cell_bias_lut[
+        # (clamp(dq,-M,M)+M)*W + (clamp(dr,-M,M)+M)], M = BIAS_RING_MAX+1 = 17,
+        # W = 2M+1 = 35. BIT-IDENTICAL to the old machinery, not just fp16-close:
+        # for |dq|,|dr| <= M the table IS rel_bias_index(dq,dr); when either coord
+        # is clamped the true offset has hex-dist >= M+ (so the old path's far row)
+        # AND the clamped offset lands on a |coord|==M cell whose hex-dist >= M >
+        # BIAS_RING_MAX, so the table also yields the far row — the clamp only ever
+        # fires on offsets that were already far. (Verified exhaustively over
+        # [-40,40]^2 and on random tensors by scripts/_hexfield_bias_check.py.)
+        self._cell_bias_M = BIAS_RING_MAX + 1
+        cw = 2 * self._cell_bias_M + 1
+        cell_lut = torch.empty(cw * cw, dtype=torch.long)
+        for dq in range(-self._cell_bias_M, self._cell_bias_M + 1):
+            for dr in range(-self._cell_bias_M, self._cell_bias_M + 1):
+                cell_lut[(dq + self._cell_bias_M) * cw + (dr + self._cell_bias_M)] = (
+                    rel_bias_index(dq, dr)
+                )
+        self.register_buffer("_cell_bias_lut", cell_lut, persistent=False)
+
         self._init_weights()
 
     def _init_weights(self) -> None:
@@ -271,23 +293,15 @@ class HexfieldNet(nn.Module):
         b, n, _ = coords.shape
         dq = coords[:, None, :, 0] - coords[:, :, None, 0]  # (B, N, N) key - query
         dr = coords[:, None, :, 1] - coords[:, :, None, 1]
-        d = torch.maximum(torch.maximum(dq.abs(), dr.abs()), (dq + dr).abs())
-
-        clamped_q = dq.clamp(-BIAS_DISK_RADIUS, BIAS_DISK_RADIUS) + BIAS_DISK_RADIUS
-        clamped_r = dr.clamp(-BIAS_DISK_RADIUS, BIAS_DISK_RADIUS) + BIAS_DISK_RADIUS
-        exact = self._exact_lut[(clamped_q * 17 + clamped_r).reshape(-1)].reshape(b, n, n)
-        on_axis = (dq == 0) | (dr == 0) | (dq + dr == 0)
-        ring_base = torch.where(
-            on_axis,
-            torch.full_like(d, BIAS_ON_AXIS_BASE),
-            torch.full_like(d, BIAS_OFF_AXIS_BASE),
-        )
-        ring = ring_base + (d - BIAS_RING_MIN)
-        cell_idx = torch.where(
-            d <= BIAS_DISK_RADIUS,
-            exact,
-            torch.where(d <= BIAS_RING_MAX, ring, torch.full_like(d, BIAS_FAR_ROW)),
-        )
+        # Single precomputed-LUT gather over the whole offset domain — bit-exact
+        # replacement for the old abs/maximum/clamp/where/where pipeline (see the
+        # _cell_bias_lut construction note in __init__). One clamp + one mul-add +
+        # one gather instead of ~10 full (B, N, N) elementwise/select kernels.
+        m = self._cell_bias_M
+        w = 2 * m + 1
+        qi = dq.clamp(-m, m) + m
+        ri = dr.clamp(-m, m) + m
+        cell_idx = self._cell_bias_lut[(qi * w + ri).reshape(-1)].reshape(b, n, n)
 
         s = NUM_TOKENS + n
         pair = coords.new_full((b, s, s), BIAS_TOKEN_TOKEN_ROW)
@@ -295,40 +309,43 @@ class HexfieldNet(nn.Module):
         pair[:, NUM_TOKENS:, :NUM_TOKENS] = BIAS_CELL_TOKEN_ROW
         pair[:, NUM_TOKENS:, NUM_TOKENS:] = cell_idx
 
-        # TRAINING (grad enabled): gather in FP32 via _BiasGather. Casting the
-        # table to fp16 before _BiasGather made its backward accumulate fp16
-        # gradients; the hot far/ring rows receive ~19M scatter-adds and overflow
-        # to inf under AMP+GradScaler (HIGH audit fix). The fp32 master-table
-        # bincount backward keeps the gradient finite.
-        #
-        # INFERENCE (no grad — self-play/eval, the throughput path): no backward
-        # exists, so build the ENTIRE (B,heads,S,S) bias in fp16 — a plain fp16
-        # gather (no autograd transient) + fp16 add + fp16 contiguous — instead
-        # of the fp32 pipeline + a fp32->fp16 cast. The profiled bias machinery
-        # (gather + materialize + contiguous, ~70% of the forward) was running in
-        # fp32 then cast to fp16; doing it in fp16 halves that traffic. The SDPA
-        # input bias is fp16 EITHER WAY, so this is within fp16 rounding of the
-        # training path (guarded by test_sdpa_equals_materialized_fp16_cuda).
-        if torch.is_grad_enabled():
-            bias = _BiasGather.apply(self.bias_table, pair)  # (B, Sq, Sk, heads) fp32
-        else:
-            bias = self.bias_table.to(torch.float16)[pair]   # (B, Sq, Sk, heads) fp16
-
         # Pad-cell KEY columns: additive, finite in fp16. Token keys untouched.
-        # PERF (M8, workflow-found): add the mask in the head-LAST layout (key =
-        # dim 2) and do ONE permute+contiguous to (B, heads, Sq, Sk). The mask
-        # MUST be added before the final contiguous so the returned attn_mask
-        # has stride(-1) == 1 on the key axis: a non-stride-1 attn_mask silently
-        # forces F.scaled_dot_product_attention onto the FP32 MATH backend
-        # (the profiled ampere_sgemm + fp32 softmax) instead of the fused fp16
-        # mem-efficient kernel. The .contiguous() here is the single full-tensor
-        # write SDPA was otherwise forcing internally — net cheaper.
+        # The mask MUST be added before the returned attn_mask is materialized so
+        # it has stride(-1) == 1 on the key axis: a non-stride-1 attn_mask silently
+        # forces F.scaled_dot_product_attention onto the FP32 MATH backend (the
+        # profiled ampere_sgemm + fp32 softmax) instead of the fused fp16
+        # mem-efficient kernel.
         key_pad = torch.cat(
             [mask.new_ones(b, NUM_TOKENS), mask], dim=1
         )  # (B, S) True = live key
+
+        if torch.is_grad_enabled():
+            # TRAINING: gather in FP32 via _BiasGather. Casting the table to fp16
+            # before _BiasGather made its backward accumulate fp16 gradients; the
+            # hot far/ring rows receive ~19M scatter-adds and overflow to inf under
+            # AMP+GradScaler (HIGH audit fix). The fp32 master-table bincount
+            # backward keeps the gradient finite. Add the mask in head-LAST layout
+            # (key = dim 2), then ONE permute+contiguous to (B, heads, Sq, Sk).
+            bias = _BiasGather.apply(self.bias_table, pair)  # (B, Sq, Sk, heads) fp32
+            fill = torch.where(key_pad, 0.0, PAD_KEY_MASK_VALUE).to(bias.dtype)
+            bias = bias + fill[:, None, :, None]  # broadcast over key axis (dim 2)
+            return bias.permute(0, 3, 1, 2).contiguous()  # (B, heads, Sq, Sk)
+
+        # INFERENCE (no grad — self-play/eval, the throughput path): no backward
+        # exists, so build the ENTIRE (B,heads,S,S) bias in fp16 directly in the
+        # head-FIRST layout. Indexing the TRANSPOSED table (heads, ROWS) yields a
+        # contiguous (heads, B, Sq, Sk); permute(1,0,2,3) to (B, heads, Sq, Sk) is
+        # then a stride(-1)==1 VIEW, and the pad-mask add is the SINGLE full-tensor
+        # materialization — eliminating the separate permute+contiguous() copy the
+        # head-last path needed (one fewer (B,heads,S,S) write per forward). The
+        # arithmetic (table[pair] + fill broadcast over keys) is bit-identical to
+        # the head-last fp16 inference path (guarded by
+        # test_sdpa_equals_materialized_fp16_cuda + scripts/_hexfield_bias_check.py).
+        bias_t = self.bias_table.to(torch.float16).t().contiguous()  # (heads, ROWS)
+        bias = bias_t[:, pair]                       # (heads, B, Sq, Sk) contiguous
+        bias = bias.permute(1, 0, 2, 3)              # (B, heads, Sq, Sk) view, stride(-1)=1
         fill = torch.where(key_pad, 0.0, PAD_KEY_MASK_VALUE).to(bias.dtype)
-        bias = bias + fill[:, None, :, None]  # broadcast over key axis (dim 2)
-        return bias.permute(0, 3, 1, 2).contiguous()  # (B, heads, Sq, Sk), stride(-1)=1
+        return bias + fill[:, None, None, :]         # broadcast over key axis (dim 3)
 
     # --- forward ---------------------------------------------------------------
 
