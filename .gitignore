@@ -19,6 +19,7 @@ runs/
 *.err
 *.tmp
 *.bak
+_tmp_*
 
 # Model/data outputs.
 *.pt
