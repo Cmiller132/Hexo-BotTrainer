@@ -100,6 +100,10 @@ class HexfieldEvaluator:
             self.device.type == "cuda"
             and os.environ.get("HEXFIELD_NO_COMPILE") != "1"
         )
+        # Defer the per-group decode/softmax/gather (the two device syncs) from
+        # submit_payload to result(), so submit only enqueues forwards and the
+        # pre-backup select pass overlaps them. Opt-in A/B knob; default OFF.
+        self._defer_decode = os.environ.get("HEXFIELD_DEFER_DECODE") == "1"
         if self._use_compile:
             # Keep the eager fallback (suppress_errors) as an unattended-run
             # safety net: if some never-before-seen shape ever fails to compile,
@@ -161,15 +165,26 @@ class HexfieldEvaluator:
         gpu_priors: list[torch.Tensor] = []
         gpu_values: list[torch.Tensor] = []
         gpu_ml: list[torch.Tensor] = []
+        # DEFER mode: collect raw per-group outputs; decode in result() (see
+        # _forward_group) so submit only enqueues forwards and select can overlap.
+        deferred: list | None = [] if self._defer_decode else None
 
         # Padding-aware grouping (rows arrive size-descending): 64-quantized
         # Npad, batch under the pair ceiling, split to bound padding waste.
         for start, end, pad_to in plan_groups(sizes):
             self._forward_group(
                 feats, qr, nbr, offsets, sizes, legal_counts, start, end, pad_to,
-                request_ml, gpu_values, gpu_ml, gpu_priors,
+                request_ml, gpu_values, gpu_ml, gpu_priors, deferred,
             )
 
+        if self._defer_decode:
+            # Raw forwards enqueued; the syncing decode happens in result().
+            return {
+                "b": b,
+                "request_ml": request_ml,
+                "legal_counts": legal_counts,
+                "deferred": deferred,
+            }
         # Concatenate on-GPU (still no D2H); the syncs happen in result().
         return {
             "b": b,
@@ -188,6 +203,23 @@ class HexfieldEvaluator:
         b = handle["b"]
         request_ml = handle["request_ml"]
         legal_counts = handle["legal_counts"]
+
+        # DEFER mode: the per-group decode/softmax/gather was held out of submit so
+        # the forwards could overlap the select pass. Do it now (still BEFORE the one
+        # D2H below), then fall through to the identical concat+.cpu() path.
+        if "deferred" in handle:
+            gpu_values, gpu_ml, gpu_priors = [], [], []
+            for out, start, end in handle["deferred"]:
+                value, ml, priors_flat = self._decode_group(
+                    out, legal_counts, start, end, request_ml
+                )
+                gpu_values.append(value)
+                if request_ml:
+                    gpu_ml.append(ml)
+                gpu_priors.append(priors_flat)
+            handle["values_gpu"] = torch.cat(gpu_values)
+            handle["priors_gpu"] = torch.cat(gpu_priors)
+            handle["ml_gpu"] = torch.cat(gpu_ml) if request_ml else None
 
         values_out = handle["values_gpu"].cpu().numpy().astype(np.float32, copy=False)
         # priors_gpu is already torch.cat over the per-row legal-prefix priors in
@@ -212,7 +244,7 @@ class HexfieldEvaluator:
 
     def _forward_group(
         self, feats, qr, nbr, offsets, sizes, legal_counts, start, end, pad_to,
-        request_ml, gpu_values, gpu_ml, gpu_priors,
+        request_ml, gpu_values, gpu_ml, gpu_priors, deferred=None,
     ) -> None:
         g = end - start
         # Vectorized host pack: build the padded (g, pad_to, *) numpy buffers in
@@ -291,22 +323,37 @@ class HexfieldEvaluator:
             )
         if pad_batch:  # drop the duplicated twin row -> back to the true g == 1
             out = {k: v[:g] for k, v in out.items()}
-        # Stay on-GPU: no .cpu() here. Decoded values/ml are (g,) GPU tensors;
-        # per-row legal-prefix softmaxes are concatenated on-GPU. The single
-        # D2H sync happens once in evaluate_payload (§5.3).
-        gpu_values.append(decode_binned_value(out["value"].float()))
+        # DEFER mode (HEXFIELD_DEFER_DECODE): stash the RAW forward outputs and do
+        # the per-group decode/softmax/gather later, in result(). The decode has two
+        # device syncs — the group_counts H2D and the priors[legal] boolean gather's
+        # nonzero — so doing it HERE makes submit_payload block on each group's
+        # forward, defeating the submit->select overlap (submit can't return until
+        # the GPU is done). Deferring to result() lets submit only ENQUEUE the
+        # forwards (truly async); the pre-backup select pass then overlaps them.
+        # Math is identical (same ops/order) -> bit-identical outputs.
+        if deferred is not None:
+            deferred.append((out, start, end))
+            return
+        value, ml, priors_flat = self._decode_group(out, legal_counts, start, end, request_ml)
+        gpu_values.append(value)
         if request_ml:
-            gpu_ml.append(decode_moves_left(out["moves_left"].float()))
+            gpu_ml.append(ml)
+        gpu_priors.append(priors_flat)
+
+    def _decode_group(self, out, legal_counts, start, end, request_ml):
+        """Per-group serve decode: binned value, moves-left, and the flattened
+        legal-prefix prior gather. Holds the two device syncs (group_counts H2D +
+        the priors[legal] nonzero); invoked from submit (immediate) or result
+        (deferred). Decoded values/ml are (g,) GPU tensors; priors[legal] flattens
+        each row's first legal_counts[row] entries in row order (== the old per-row
+        slice loop, since `legal` is row-major and l==0 rows select nothing)."""
+        value = decode_binned_value(out["value"].float())
+        ml = decode_moves_left(out["moves_left"].float()) if request_ml else None
         logits = out["policy"].float()
-        # Batched legal-prefix softmax. Each row's prior is softmax over its
-        # first legal_counts[row] columns. Policy logits are mask-zeroed in the
-        # model (illegal columns are 0.0, NOT -inf), so a bare softmax over a
-        # fixed slice would let those zeros pollute the denominator; instead we
-        # set every column at index >= the row's legal count to -inf before one
-        # batched softmax. softmax subtracts the per-row max over the *legal*
-        # prefix in both forms (the -inf columns contribute exp(-inf)=0 to
-        # numerator and denominator), so each [:l] slice is numerically
-        # identical to the prior per-row torch.softmax(logits[k, :l]).
+        # Set columns at index >= the row's legal count to -inf before one batched
+        # softmax (logits are mask-ZEROED, not -inf, in the model, so a bare slice
+        # softmax would let the zeros pollute the denominator). The -inf columns add
+        # exp(-inf)=0 to num+denom, so each [:l] slice equals torch.softmax(logits[k, :l]).
         group_counts = torch.from_numpy(
             np.ascontiguousarray(legal_counts[start:end])
         ).to(logits.device, dtype=torch.long)
@@ -314,11 +361,4 @@ class HexfieldEvaluator:
         legal = col_idx.unsqueeze(0) < group_counts.unsqueeze(1)  # (g, Npad)
         masked = logits.masked_fill(~legal, float("-inf"))
         priors = torch.softmax(masked, dim=1)  # fp32, GPU; rows with l==0 -> NaN
-        # Flatten the legal-prefix priors in ONE boolean gather instead of a
-        # per-row Python slice loop (g tiny GPU ops + host dispatch per flush —
-        # the profiled early/mid-game host bottleneck). `legal` is row-major, so
-        # priors[legal] yields each row's first legal_counts[row] entries in row
-        # order == concat([priors[k, :legal_counts[start+k]] for k]); rows with
-        # l == 0 contribute nothing (their mask row is all False), so the
-        # all-(-inf)-row NaNs are never selected — bit-identical to the old loop.
-        gpu_priors.append(priors[legal])
+        return value, ml, priors[legal]

@@ -48,6 +48,12 @@ export HEXFIELD_ASYNC_EVAL="${HEXFIELD_ASYNC_EVAL:-1}"
 # One-time ~10s flex compile on the first serve forward. Training/grad path
 # untouched (fires only under no_grad). Set to 0 to revert to the materialized bias.
 export HEXFIELD_SERVE_FLEX="${HEXFIELD_SERVE_FLEX:-1}"
+# Deferred-decode (2026-06-16): hold the per-group decode/softmax/gather (its two
+# device syncs) out of submit_payload and do it in result(), so submit only
+# enqueues the forwards and the pre-backup select pass overlaps them. Bit-identical
+# outputs (parity max|d|=0.0); +~8% pos/s once flex makes the run host-bound (it was
+# NULL while GPU-bound). Set to 0 to keep the syncs inside submit.
+export HEXFIELD_DEFER_DECODE="${HEXFIELD_DEFER_DECODE:-1}"
 
 mkdir -p "$RUNDIR" "$CKPTS"
 log(){ echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" | tee -a "$SUPLOG" >&2; }
