@@ -25,6 +25,7 @@ trio, §6.3).
 from __future__ import annotations
 
 import math
+import os
 
 import torch
 from torch import nn
@@ -55,6 +56,110 @@ from .geometry import disk_offsets, rel_bias_index
 PAD_KEY_MASK_VALUE = -3.0e4
 
 STV_HORIZONS = (2, 6, 16)
+
+# FlexAttention serve path (opt-in, default OFF). When HEXFIELD_SERVE_FLEX=1 the
+# NO-GRAD serve forward computes the rel-pos bias INSIDE the attention kernel via
+# a score_mod (coords + _cell_bias_lut + bias_table gather) and folds the pad-key
+# mask into the score (PAD_KEY_MASK_VALUE additive fill) instead of materializing
+# the (B, heads, S, S) bias — the profiled ~65-69% serve cost. The TRAINING (grad)
+# path is untouched (stays on build_attn_bias + _BiasGather). flag-gated + read
+# once at import; the import is guarded so a torch without flex still loads.
+_SERVE_FLEX = os.environ.get("HEXFIELD_SERVE_FLEX") == "1"
+try:
+    from torch.nn.attention.flex_attention import flex_attention as _flex_attention
+
+    # Inner-compiled flex_attention (dynamic=True so ONE flex kernel serves every
+    # Npad). The serve forward_policy_value is itself torch.compile(dynamic=True);
+    # tracing the flex_attention HOP *into* that outer graph trips the flex
+    # subgraph tracer when the score_mod captures graph-internal tensors that flow
+    # through several frames + a method ('lift_tracked_freevar_to_input should not
+    # be called on root SubgraphTracer'). So we DECOUPLE: _flex_call is
+    # torch.compiler.disable'd — the outer graph BREAKS at the attention, and the
+    # flex op compiles through its OWN inner graph (the probe's proven-working
+    # standalone form). The conv trunk / projections / heads stay in the outer
+    # compiled graph; only the flex sub-op runs in its own. (§7 item 8 — the
+    # nested lowering does recompile/assert, so the inner compile is required.)
+    _flex_compiled = torch.compile(_flex_attention, dynamic=False)
+
+    @torch.compiler.disable(recursive=False)
+    def _flex_call(q, k, v, score_mod):
+        return _flex_compiled(q, k, v, score_mod=score_mod)
+
+except Exception:  # pragma: no cover - older torch without flex
+    _flex_attention = None
+    _flex_call = None
+
+
+class _FlexBias:
+    """Carrier for the serve-flex attention path. Built ONCE per forward in
+    trunk() and passed in place of the materialized attn_bias tensor;
+    RelPosAttention.forward detects it and routes to flex_attention.
+
+    It holds the RAW inputs the score_mod needs (coords, mask, the fp16 bias
+    table, the cell LUT) — NOT a pre-built closure. The score_mod closure is
+    constructed locally in RelPosAttention.forward (same frame as the flex call)
+    and invoked through the torch.compiler.disable'd _flex_call, which graph-breaks
+    the outer dynamic compile so the flex HOP lowers in its OWN inner graph
+    (see _flex_call) rather than being inlined into the parent graph — where the
+    score_mod's captured graph tensors tripped the flex subgraph tracer
+    ('lift_tracked_freevar_to_input should not be called on root SubgraphTracer').
+    No (B, heads, S, S) tensor is ever materialized."""
+
+    __slots__ = ("coords", "mask", "table", "lut", "m", "w")
+
+    def __init__(self, coords, mask, table, lut, m) -> None:
+        self.coords = coords
+        self.mask = mask
+        self.table = table
+        self.lut = lut
+        self.m = m
+        self.w = 2 * m + 1
+
+    def make_score_mod(self):
+        """Build the flex score_mod closure (called inside RelPosAttention.forward,
+        the same frame as the flex_attention call). Computes the SAME additive bias
+        the materialized build_attn_bias adds to the scores — coords + _cell_bias_lut
+        + the fp16 bias_table gather — plus the pad-KEY additive fill
+        (PAD_KEY_MASK_VALUE) folded in via the bool mask (no reduction)."""
+
+        nt = NUM_TOKENS
+        coords = self.coords
+        mask = self.mask
+        table = self.table
+        lut = self.lut
+        m = self.m
+        w = self.w
+        pad_fill = PAD_KEY_MASK_VALUE
+
+        def score_mod(score, b, h, q_idx, kv_idx):
+            qc = torch.clamp(q_idx - nt, min=0)
+            kc = torch.clamp(kv_idx - nt, min=0)
+            dq = coords[b, kc, 0] - coords[b, qc, 0]
+            dr = coords[b, kc, 1] - coords[b, qc, 1]
+            qi = torch.clamp(dq, -m, m) + m
+            ri = torch.clamp(dr, -m, m) + m
+            cell_idx = lut[qi * w + ri]
+            q_tok = q_idx < nt
+            k_tok = kv_idx < nt
+            row = torch.where(
+                q_tok & k_tok,
+                torch.full_like(cell_idx, BIAS_TOKEN_TOKEN_ROW),
+                torch.where(
+                    q_tok & ~k_tok,
+                    torch.full_like(cell_idx, BIAS_TOKEN_CELL_ROW),
+                    torch.where(
+                        ~q_tok & k_tok,
+                        torch.full_like(cell_idx, BIAS_CELL_TOKEN_ROW),
+                        cell_idx,
+                    ),
+                ),
+            )
+            biased = score + table[row, h].to(score.dtype)
+            # pad-KEY columns: a cell key (kv_idx >= nt) whose row's mask is False.
+            is_pad_key = (kv_idx >= nt) & ~mask[b, kc]
+            return torch.where(is_pad_key, biased + pad_fill, biased)
+
+        return score_mod
 
 
 class _BiasGather(torch.autograd.Function):
@@ -155,12 +260,23 @@ class RelPosAttention(nn.Module):
         self.out_proj = nn.Linear(channels, channels)
         self.impl = "sdpa"
 
-    def forward(self, seq: torch.Tensor, attn_bias: torch.Tensor) -> torch.Tensor:
+    def forward(self, seq: torch.Tensor, attn_bias) -> torch.Tensor:
         b, s, c = seq.shape
         h, d = self.heads, self.head_dim
         q = self.q_proj(seq).reshape(b, s, h, d).transpose(1, 2)
         k = self.k_proj(seq).reshape(b, s, h, d).transpose(1, 2)
         v = self.v_proj(seq).reshape(b, s, h, d).transpose(1, 2)
+        # Serve-flex: the rel-pos bias + pad mask live INSIDE the kernel via a
+        # score_mod (no materialized (B,heads,S,S) tensor). block_mask is
+        # deliberately None (score_mod-only, §7 item 1) so no per-shape BlockMask
+        # object enters the dynamic-Npad compile. The head-merge reshape below is
+        # the SAME one the batch-2 dup guards against CantSplit on — unchanged.
+        # The score_mod is built HERE (same frame as the flex call) — see _FlexBias.
+        if isinstance(attn_bias, _FlexBias):
+            score_mod = attn_bias.make_score_mod()
+            out = _flex_call(q, k, v, score_mod)
+            out = out.transpose(1, 2).reshape(b, s, c)
+            return self.out_proj(out)
         # Match the bias dtype to q under autocast: a dtype mismatch silently
         # drops sdpa to the slow math fallback. -3.0e4 stays finite in fp16.
         attn_bias = attn_bias.to(q.dtype)
@@ -251,6 +367,11 @@ class HexfieldNet(nn.Module):
                     rel_bias_index(dq, dr)
                 )
         self.register_buffer("_cell_bias_lut", cell_lut, persistent=False)
+
+        # Serve-flex flag, read ONCE (compile-time constant for the dynamo graph).
+        # Only ever used on the no-grad serve path; training always uses the
+        # materialized build_attn_bias + _BiasGather regardless of this flag.
+        self._serve_flex = _SERVE_FLEX and _flex_attention is not None
 
         self._init_weights()
 
@@ -347,6 +468,26 @@ class HexfieldNet(nn.Module):
         fill = torch.where(key_pad, 0.0, PAD_KEY_MASK_VALUE).to(bias.dtype)
         return bias + fill[:, None, None, :]         # broadcast over key axis (dim 3)
 
+    def _build_flex_bias(
+        self, coords: torch.Tensor, mask: torch.Tensor
+    ) -> "_FlexBias":
+        """Serve-flex (no-grad) equivalent of build_attn_bias. Packages the RAW
+        tensors the score_mod needs (coords, mask, fp16 bias table, cell LUT) into
+        a _FlexBias carrier; the actual score_mod closure is built downstream in
+        RelPosAttention.forward (same frame as the flex call — see _FlexBias). No
+        (B, heads, S, S) tensor is materialized; block_mask is None (the pad mask
+        is folded into the score, §7 item 1). Validated to <=3e-4 parity vs
+        build_attn_bias by scripts/_hexfield_flex_probe.py (score_mod_pad variant).
+
+        Pad-key boundary is read DIRECTLY from the bool mask (an input tensor,
+        fully static shape), NOT mask.sum(): a reduction inside the score_mod
+        produces a data-dependent (unbacked) symint the dynamic-Npad Inductor
+        lowering cannot bind. (ROWS, heads) fp16 table, NO transpose — the score_mod
+        indexes table[row, h] (per-element row gather, scalar h)."""
+
+        table = self.bias_table.to(torch.float16)
+        return _FlexBias(coords, mask, table, self._cell_bias_lut, self._cell_bias_M)
+
     # --- forward ---------------------------------------------------------------
 
     def trunk(
@@ -364,7 +505,12 @@ class HexfieldNet(nn.Module):
         gather_idx = torch.cat([self_idx, nbr], dim=2)  # (B, Npad, 7), tap 0 = self
 
         x = F.relu(self.stem_ln(self.stem(feats, gather_idx, mask))) * mask.unsqueeze(-1)
-        attn_bias = self.build_attn_bias(coords, mask)
+        # Serve-flex only on the no-grad serve path; training (grad enabled) always
+        # takes the materialized build_attn_bias (+ _BiasGather) branch untouched.
+        if self._serve_flex and not torch.is_grad_enabled():
+            attn_bias = self._build_flex_bias(coords, mask)
+        else:
+            attn_bias = self.build_attn_bias(coords, mask)
         seq_mask = torch.cat([mask.new_ones(b, NUM_TOKENS), mask], dim=1)
 
         tokens = self.tokens.unsqueeze(0).expand(b, -1, -1)

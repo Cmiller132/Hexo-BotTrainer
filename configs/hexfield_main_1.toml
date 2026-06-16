@@ -14,7 +14,7 @@ device = "cuda"
 search_visits = 512
 pcr_full_proportion = 0.33
 pcr_fast_visits = 128
-active_games = 64
+active_games = 96
 c_puct = 1.5
 virtual_batch_size = 4
 # flush_target must be ABOVE max in-flight (active_games*virtual_batch_size) so

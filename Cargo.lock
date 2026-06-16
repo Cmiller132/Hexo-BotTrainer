@@ -108,6 +108,7 @@ dependencies = [
  "hexo_utils",
  "pyo3",
  "rand",
+ "rayon",
 ]
 
 [[package]]

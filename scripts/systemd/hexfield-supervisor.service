@@ -1,0 +1,36 @@
+[Unit]
+Description=hexfield_main_1 self-play training supervisor (auto-relaunch + circuit breaker)
+After=network.target
+# Backstop against runaway restart loops: stop after 5 starts in 200s and leave
+# the unit failed for inspection.
+StartLimitIntervalSec=200
+StartLimitBurst=5
+
+[Service]
+Type=simple
+KillMode=control-group
+# Self-heal if the /mnt/e DrvFs mount is briefly late at WSL boot: a failed
+# pre-check fails the unit, and Restart=on-failure retries after RestartSec.
+ExecStartPre=/usr/bin/test -f /mnt/e/Hexo-BotTrainer-hexgt/scripts/_hexfield_supervise_main1.sh
+# systemd is the single-instance authority (one unit instance; a restart kills
+# the old cgroup first). The script's own file-lock is redundant under systemd
+# and, if left stale by an abrupt kill, makes every restart self-abort (exit 1)
+# -> restart loop. Clear it before each start ('-' ignores a missing file).
+ExecStartPre=-/usr/bin/rm -f /mnt/e/Hexo-BotTrainer/runs/hexfield_main_1/supervisor.lock
+# The supervisor script sets ALL its own env (SEALBOT_PATH, HEXFIELD_ASYNC_EVAL,
+# PYTHONPATH, CUDA_VISIBLE_DEVICES, PYTORCH_CUDA_ALLOC_CONF, OMP_NUM_THREADS) and
+# manages trainer relaunch + the 3-fast-crash / >8-per-hour circuit breaker itself.
+ExecStart=/usr/bin/bash /mnt/e/Hexo-BotTrainer-hexgt/scripts/_hexfield_supervise_main1.sh
+# Clean exit 0 = training complete OR breaker halt -> do NOT fight it. Only an
+# abnormal death (signal/abrupt kill) is restarted. KillMode default (control-group)
+# tears down the trainer child with the unit on stop.
+Restart=on-failure
+RestartSec=15
+TimeoutStopSec=45
+# Exit 1 = deliberate refusal (halt flag present / breaker tripped) -> a "human,
+# look" state; do NOT auto-restart it. Clean finish + breaker-halt are exit 0
+# (no restart); only an unexpected death (signal/OOM -> 128+n) brings it back.
+RestartPreventExitStatus=1
+
+[Install]
+WantedBy=multi-user.target

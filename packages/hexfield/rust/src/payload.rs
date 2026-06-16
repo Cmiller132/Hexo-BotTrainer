@@ -16,6 +16,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use half::f16;
+use half::slice::HalfFloatSliceExt;
+use rayon::prelude::*;
 use hexo_engine::{pack_coord, HexoState as RustHexoState, PackedCoord};
 use hexo_utils::StateHash;
 
@@ -48,16 +50,22 @@ struct Row {
 /// request index). Rust keeps the per-row sorted legal action ids; they never
 /// cross the boundary — priors return positionally over the prefix.
 fn featurize_and_sort(states: &[&RustHexoState]) -> PyResult<Vec<Row>> {
+    // Featurize rows across rayon workers: build_support (the depth-9 BFS) and
+    // build_features are pure functions of &state, so per-row work is
+    // independent. par_iter collect preserves request order, and the sort below
+    // is deterministic, so the wire bytes are byte-identical to the serial form
+    // (dense_cnn mcts_eval.rs:248 port). This runs GIL-free Rust on the one
+    // critical thread, so it directly cuts the host encode cost.
     let mut rows: Vec<Row> = states
-        .iter()
+        .par_iter()
         .enumerate()
         .map(|(request_index, state)| {
             let sup = build_support(state);
             let feats32 = build_features(state, &sup);
             let mut feats = vec![f16::ZERO; feats32.len()];
-            for (dst, src) in feats.iter_mut().zip(feats32.iter()) {
-                *dst = f16::from_f32(*src);
-            }
+            // SIMD f32->f16 (round-to-nearest, element-wise identical to the
+            // scalar f16::from_f32 loop it replaces).
+            feats.convert_from_f32_slice(&feats32);
             let mut coords_qr = Vec::with_capacity(sup.num_nodes() * 2);
             for c in &sup.coords {
                 coords_qr.push(c.q);
@@ -189,36 +197,56 @@ fn parse_chunk_reply(
         stats.prior_bytes += prior_bytes.len();
     }
 
-    // Parse per (sorted) row, then restore caller order.
-    let mut by_request: Vec<Option<RustEvaluation>> = (0..states_len).map(|_| None).collect();
-    let mut offset = 0usize;
-    for (sorted_index, row) in rows.iter().enumerate() {
-        let value = read_value(value_bytes, sorted_index)?;
-        let mut priors = Vec::with_capacity(row.legal_ids.len());
-        for (k, &action_id) in row.legal_ids.iter().enumerate() {
-            let prior = read_prior(prior_bytes, offset + k, sorted_index)?;
-            priors.push((action_id, prior));
-        }
-        offset += row.legal_ids.len();
-        finalize_priors(&mut priors, row.legal_ids.len(), sorted_index)?;
-        let moves_left = match &moves_left_bytes {
-            Some(bytes) => {
-                let ml = read_f32_required("moves_left_bytes", bytes, sorted_index)?;
-                if !ml.is_finite() || !(0.0..=512.0).contains(&ml) {
-                    return Err(PyValueError::new_err(format!(
-                        "moves_left_bytes row {sorted_index} must be in [0, 512], got {ml}"
-                    )));
-                }
-                Some(ml)
+    // Parse per (sorted) row across rayon workers, then restore caller order.
+    // Each row reads a DISJOINT prior slice (precomputed prior_offsets) plus one
+    // value/moves_left, and finalize_priors is deterministic, so the output is
+    // byte-identical to the sequential parse (dense_cnn mcts_eval.rs:358 port).
+    // The per-row prior decode+sort was the dominant host parse cost.
+    let mut prior_offsets = Vec::with_capacity(rows.len() + 1);
+    let mut running = 0usize;
+    prior_offsets.push(0usize);
+    for row in rows {
+        running += row.legal_ids.len();
+        prior_offsets.push(running);
+    }
+    let parsed: PyResult<Vec<(usize, RustEvaluation)>> = rows
+        .par_iter()
+        .enumerate()
+        .map(|(sorted_index, row)| {
+            let value = read_value(value_bytes, sorted_index)?;
+            let base = prior_offsets[sorted_index];
+            let mut priors = Vec::with_capacity(row.legal_ids.len());
+            for (k, &action_id) in row.legal_ids.iter().enumerate() {
+                let prior = read_prior(prior_bytes, base + k, sorted_index)?;
+                priors.push((action_id, prior));
             }
-            None => None,
-        };
-        by_request[row.request_index] = Some(RustEvaluation {
-            value,
-            legal_action_count: row.legal_ids.len(),
-            priors,
-            moves_left,
-        });
+            finalize_priors(&mut priors, row.legal_ids.len(), sorted_index)?;
+            let moves_left = match &moves_left_bytes {
+                Some(bytes) => {
+                    let ml = read_f32_required("moves_left_bytes", bytes, sorted_index)?;
+                    if !ml.is_finite() || !(0.0..=512.0).contains(&ml) {
+                        return Err(PyValueError::new_err(format!(
+                            "moves_left_bytes row {sorted_index} must be in [0, 512], got {ml}"
+                        )));
+                    }
+                    Some(ml)
+                }
+                None => None,
+            };
+            Ok((
+                row.request_index,
+                RustEvaluation {
+                    value,
+                    legal_action_count: row.legal_ids.len(),
+                    priors,
+                    moves_left,
+                },
+            ))
+        })
+        .collect();
+    let mut by_request: Vec<Option<RustEvaluation>> = (0..states_len).map(|_| None).collect();
+    for (request_index, eval) in parsed? {
+        by_request[request_index] = Some(eval);
     }
     if let Some(stats) = stats {
         lock_stats(stats).parse_seconds += parse_started.elapsed().as_secs_f64();

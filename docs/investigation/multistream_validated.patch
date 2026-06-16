@@ -1,0 +1,85 @@
+diff --git a/packages/hexfield/python/hexfield/inference.py b/packages/hexfield/python/hexfield/inference.py
+index 55b6ca1..d694408 100644
+--- a/packages/hexfield/python/hexfield/inference.py
++++ b/packages/hexfield/python/hexfield/inference.py
+@@ -113,6 +113,15 @@ class HexfieldEvaluator:
+             except Exception:
+                 self._compiled_fpv = self._raw_fpv
+ 
++        # Option 4 — multi-CUDA-stream group forwards (env-gated; default 1 =
++        # byte-identical to today's single-default-stream path).
++        self._nstreams = int(os.environ.get("HEXFIELD_NSTREAMS", "1"))
++        self._streams = (
++            [torch.cuda.Stream() for _ in range(self._nstreams)]
++            if (self.device.type == "cuda" and self._nstreams > 1)
++            else None
++        )
++
+     def __call__(self, payload: dict) -> dict:
+         return self.evaluate_payload(payload)
+ 
+@@ -160,11 +169,36 @@ class HexfieldEvaluator:
+ 
+         # Padding-aware grouping (rows arrive size-descending): 64-quantized
+         # Npad, batch under the pair ceiling, split to bound padding waste.
+-        for start, end, pad_to in plan_groups(sizes):
+-            self._forward_group(
+-                feats, qr, nbr, offsets, sizes, legal_counts, start, end, pad_to,
+-                request_ml, gpu_values, gpu_ml, gpu_priors,
+-            )
++        groups = plan_groups(sizes)
++        if self._streams is None:
++            for start, end, pad_to in groups:
++                self._forward_group(
++                    feats, qr, nbr, offsets, sizes, legal_counts, start, end, pad_to,
++                    request_ml, gpu_values, gpu_ml, gpu_priors,
++                )
++        else:
++            # Multi-stream branch: each group's H2D + forward + decode runs on a
++            # round-robin CUDA stream. The Python append loop stays serial, so
++            # gpu_values/gpu_priors keep exact group/row order (the row-major
++            # flat-priors layout the Rust parser depends on). The default stream
++            # waits on every used stream BEFORE the torch.cat below, so result()'s
++            # single D2H reads fully-produced tensors. CRITICAL: force a blocking
++            # H2D in this branch — the pinned host buffer is a _forward_group local
++            # that dies at return, and a non_blocking copy on a non-default stream
++            # could outlive it (torn read). H2D is ~negligible per profiling.
++            default = torch.cuda.current_stream()
++            used = []
++            for i, (start, end, pad_to) in enumerate(groups):
++                s = self._streams[i % self._nstreams]
++                with torch.cuda.stream(s):
++                    self._forward_group(
++                        feats, qr, nbr, offsets, sizes, legal_counts, start, end,
++                        pad_to, request_ml, gpu_values, gpu_ml, gpu_priors,
++                        blocking_h2d=True,
++                    )
++                used.append(s)
++            for s in set(used):
++                default.wait_stream(s)
+ 
+         # Concatenate on-GPU (still no D2H); the syncs happen in result().
+         return {
+@@ -208,7 +242,7 @@ class HexfieldEvaluator:
+ 
+     def _forward_group(
+         self, feats, qr, nbr, offsets, sizes, legal_counts, start, end, pad_to,
+-        request_ml, gpu_values, gpu_ml, gpu_priors,
++        request_ml, gpu_values, gpu_ml, gpu_priors, blocking_h2d: bool = False,
+     ) -> None:
+         g = end - start
+         # Vectorized host pack: build the padded (g, pad_to, *) numpy buffers in
+@@ -244,7 +278,12 @@ class HexfieldEvaluator:
+         # ordering holds. CPU device keeps the plain blocking copy.
+ 
+         def _h2d(t):
+-            return t.pin_memory().to(device, non_blocking=True) if use_fp16 else t.to(device)
++            if not use_fp16:
++                return t.to(device)
++            # Multi-stream path forces blocking H2D: the pinned host buffer is a
++            # local that dies at return; a non_blocking copy on a non-default
++            # stream could outlive it → torn read. Negligible cost per profiling.
++            return t.pin_memory().to(device, non_blocking=not blocking_h2d)
+ 
+         d_feats = _h2d(batch_feats)
+         d_nbr = _h2d(batch_nbr)

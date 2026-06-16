@@ -19,6 +19,8 @@ use pyo3::types::{PyBytes, PyDict, PyList, PyTuple};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use rayon::prelude::*;
+
 use hexo_engine::{
     apply_placement, unpack_coord, HexoState as RustHexoState, PackedCoord, Placement,
 };
@@ -1431,25 +1433,37 @@ fn select_continuous_pass(
     leaf_batch_per_root: u32,
     virtual_loss: f32,
 ) -> PyResult<(Vec<RustLeaf>, bool)> {
+    // Per-slot selection is independent (each closure owns one slot's tree via
+    // &mut; the RNG is seeded by slot_index, not execution order), so fan it
+    // across cores with rayon. Results fold in slot order, so the leaf sweep is
+    // byte-identical to the serial form (dense_cnn mcts.rs:1458 port — the layer
+    // the hexfield port had dropped).
+    let per_slot: PyResult<Vec<(Vec<RustLeaf>, bool)>> = slots
+        .par_iter_mut()
+        .enumerate()
+        .map(|(slot_index, slot)| {
+            if !matches!(slot.phase, ContinuousPhase::Active) {
+                return Ok((Vec::new(), false));
+            }
+            let cap = leaf_batch_per_root.saturating_sub(slot.in_flight);
+            if cap == 0 {
+                return Ok((Vec::new(), false));
+            }
+            let Some(search) = slot.search.as_mut() else {
+                return Ok((Vec::new(), false));
+            };
+            if !search.needs_visits() {
+                return Ok((Vec::new(), false));
+            }
+            let (leaves, progressed, added_in_flight) =
+                select_continuous_leaves(search, slot_index, c_puct, cap, virtual_loss)?;
+            slot.in_flight = slot.in_flight.saturating_add(added_in_flight);
+            Ok((leaves, progressed))
+        })
+        .collect();
     let mut leaves = Vec::new();
     let mut made_progress = false;
-    for (slot_index, slot) in slots.iter_mut().enumerate() {
-        if !matches!(slot.phase, ContinuousPhase::Active) {
-            continue;
-        }
-        let cap = leaf_batch_per_root.saturating_sub(slot.in_flight);
-        if cap == 0 {
-            continue;
-        }
-        let Some(search) = slot.search.as_mut() else {
-            continue;
-        };
-        if !search.needs_visits() {
-            continue;
-        }
-        let (slot_leaves, progressed, added_in_flight) =
-            select_continuous_leaves(search, slot_index, c_puct, cap, virtual_loss)?;
-        slot.in_flight = slot.in_flight.saturating_add(added_in_flight);
+    for (slot_leaves, progressed) in per_slot? {
         made_progress |= progressed;
         leaves.extend(slot_leaves);
     }

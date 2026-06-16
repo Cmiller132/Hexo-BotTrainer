@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import json
 import math
+import queue
+import threading
 import time
 from typing import Any
 
@@ -73,6 +75,13 @@ class ContinuousDriver:
         self.policy_entropies: list[float] = []
         self.root_values: list[float] = []
         self.next_key = epoch * 1_000_000
+        # Background shard writer (dense_cnn_restnet selfplay.py:1229 port): the
+        # heavy per-game finalize + .hxr record + zlib npz write runs off the Rust
+        # on_move callback thread so game completions never stall the search loop.
+        self._write_queue: queue.Queue = queue.Queue()
+        self._writer_errors: list[BaseException] = []
+        self._writer_failed = threading.Event()
+        self._writer_thread: threading.Thread | None = None
 
     LIVE_INTERVAL_S = 3.0
 
@@ -233,27 +242,75 @@ class ContinuousDriver:
     def _finish(self, tape: _GameTape, *, winner, truncated: bool) -> None:
         self.games_finished += 1
         self.game_lengths.append(tape.ply)
-        # Record the game for dashboard replay BEFORE the truncated early-return,
-        # so truncated games are still viewable (their training rows are dropped).
-        self._write_record(tape, winner=winner, truncated=truncated)
         if truncated:
             self.games_truncated += 1
-            return  # truncated games' rows are never written (spec §5.1)
-        # Contract: a written (non-truncated) game has a concrete engine winner.
-        # `_winner_value(None, ...)` silently codes a draw (z = 0), so a missing
-        # winner here would poison every row's value target instead of raising —
-        # the truncated path is the ONLY place `winner is None` is legitimate.
-        assert winner is not None, "non-truncated finish requires an engine winner"
-        finalized = finalize_game_samples(
-            tape.pending, winner, self.horizons, mask_opp_from_fast=True
+        else:
+            # Contract: a written (non-truncated) game has a concrete engine
+            # winner. `_winner_value(None, ...)` silently codes a draw (z = 0),
+            # so a missing winner would poison every row's value target instead
+            # of raising — the truncated path is the ONLY legitimate `None`.
+            assert winner is not None, "non-truncated finish requires an engine winner"
+        # A prior writer-thread failure aborts the epoch here rather than letting
+        # the run silently drop shards while the queue backs up.
+        if self._writer_failed.is_set():
+            raise self._writer_errors[0]
+        # Hand the finished (about-to-be-detached) tape to the background writer.
+        # The tape is immutable after the game ends, so the handoff is race-free;
+        # __call__ deletes it from self.games immediately after this returns.
+        self._write_queue.put((tape, winner, truncated))
+
+    def _writer_loop(self) -> None:
+        """Background shard writer (dense_cnn_restnet selfplay.py:1229 port).
+        Drains finished games and does the heavy I/O — .hxr record, finalize,
+        and the zlib `write_compact_shard` — off the search-callback thread.
+        Bytes are byte-identical to the inline path; only the writing thread
+        moves. A write failure is captured and surfaced, never swallowed."""
+
+        while True:
+            item = self._write_queue.get()
+            try:
+                if item is None:
+                    return
+                tape, winner, truncated = item
+                # Record the game for dashboard replay (completed AND truncated),
+                # mirroring the old inline order.
+                self._write_record(tape, winner=winner, truncated=truncated)
+                if truncated:
+                    continue  # truncated games' rows are never written (spec §5.1)
+                finalized = finalize_game_samples(
+                    tape.pending, winner, self.horizons, mask_opp_from_fast=True
+                )
+                rows = [s for s in finalized if s.metadata.get("pcr_full", False)]
+                if rows:
+                    path = self.out_dir / f"game_{tape.key}.npz"
+                    self.rows_written += write_compact_shard(
+                        path, rows, short_term_value_horizons=self.horizons,
+                        sidecar={"epoch": self.epoch, "game_key": tape.key, "winner": winner},
+                    )
+            except BaseException as exc:  # noqa: BLE001 — surface, don't swallow
+                self._writer_errors.append(exc)
+                self._writer_failed.set()
+            finally:
+                self._write_queue.task_done()
+
+    def _start_writer(self) -> None:
+        self._writer_thread = threading.Thread(
+            target=self._writer_loop, name="hexfield-selfplay-writer", daemon=True
         )
-        rows = [s for s in finalized if s.metadata.get("pcr_full", False)]
-        if rows:
-            path = self.out_dir / f"game_{tape.key}.npz"
-            self.rows_written += write_compact_shard(
-                path, rows, short_term_value_horizons=self.horizons,
-                sidecar={"epoch": self.epoch, "game_key": tape.key, "winner": winner},
-            )
+        self._writer_thread.start()
+
+    def _stop_writer(self) -> None:
+        """Drain queued games and join the writer while the .hxr file is still
+        open, then re-raise any writer error so a write failure fails the epoch
+        instead of silently dropping shards."""
+
+        if self._writer_thread is None:
+            return
+        self._write_queue.put(None)
+        self._writer_thread.join()
+        self._writer_thread = None
+        if self._writer_errors:
+            raise self._writer_errors[0]
 
     def stats(self) -> dict[str, Any]:
         lengths = np.asarray(self.game_lengths or [0], dtype=np.float64)
@@ -352,6 +409,7 @@ def generate_selfplay_epoch(*, ctx, components, epoch: int, games_per_epoch: int
     # games) even if run_continuous raises.
     with HexoRecordFile.create(record_path, api.engine_metadata(), players) as record_file:
         driver.record_file = record_file
+        driver._start_writer()
         scheduler_stats = session.run_continuous(
             [tape.key for tape in tapes],
             tuple(tape.state for tape in tapes),
@@ -387,6 +445,9 @@ def generate_selfplay_epoch(*, ctx, components, epoch: int, games_per_epoch: int
             ),
             **noise_kwargs,
         )
+        # Drain + join the writer while the .hxr file is still open (re-raises any
+        # write error), so every finished game is on disk before the epoch closes.
+        driver._stop_writer()
     driver.record_file = None
     driver._write_live("completed")  # final 100% so the dashboard marks the epoch done
 

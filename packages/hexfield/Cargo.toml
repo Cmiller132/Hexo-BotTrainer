@@ -23,3 +23,4 @@ hexo_utils.workspace = true
 half = "2"
 pyo3 = { workspace = true, optional = true }
 rand.workspace = true
+rayon.workspace = true

@@ -39,6 +39,15 @@ export PYTHONPATH="$ROOT/packages/hexfield/python:$ROOT/packages/dense_cnn_restn
 # while those kernels execute, then the forward is drained. Bit-identical to the
 # sync path on identical inputs (parity-gated). Set to 0 to fall back to sync.
 export HEXFIELD_ASYNC_EVAL="${HEXFIELD_ASYNC_EVAL:-1}"
+# Serve-only FlexAttention (2026-06-16): the no-grad serve forward computes the
+# rel-pos bias INSIDE the attention kernel (score_mod) instead of materializing the
+# (B,heads,S,S) bias — the profiled ~68% of the serve forward. Parity-gated
+# (flex-OFF bit-exact; flex-ON max|dvalue| 1.24e-3 within the shipped 3e-3 fp16
+# tolerance), dynamic-shape clean (1 compile, 0 CantSplit/recompiles). Halves the
+# forward + ~20x less serve VRAM; ~1.2-1.26x end-to-end pos/s (host-bound after).
+# One-time ~10s flex compile on the first serve forward. Training/grad path
+# untouched (fires only under no_grad). Set to 0 to revert to the materialized bias.
+export HEXFIELD_SERVE_FLEX="${HEXFIELD_SERVE_FLEX:-1}"
 
 mkdir -p "$RUNDIR" "$CKPTS"
 log(){ echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" | tee -a "$SUPLOG" >&2; }

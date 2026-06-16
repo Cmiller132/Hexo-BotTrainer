@@ -73,19 +73,26 @@ class HexfieldEvaluator:
         # kernels); torch.compile fuses them for ~2.4x at fp16-tolerance parity.
         # Eval/self-play only — training never goes through HexfieldEvaluator.
         #
-        # The shapes MUST be compiled STATIC per cell-count (Npad) with the BATCH
-        # dim explicitly dynamic. The old dynamic=True (and a naive per-wrapper
-        # bucket dict) always fell back to eager: dynamo's compile cache is keyed
-        # by the function CODE, so the 2nd distinct flush shape triggers
-        # automatic-dynamic, which makes Npad a free symbol; Inductor then cannot
-        # prove the attention reshape's element count CHANNELS*(Npad+8) is
-        # divisible by the symbolic seq-len Npad+8 and raises
-        # `CantSplit: 96*s+768 not divisible by s+8`, falling (suppress_errors)
-        # back to eager. Disabling automatic-dynamic keeps each Npad a concrete
-        # int (divisibility constant-folds → no CantSplit); mark_dynamic on the
-        # batch dim (in _forward_group) keeps the one varying dim dynamic so each
-        # Npad bucket compiles ONCE and absorbs every group size. The few buckets
-        # (§5.3's <=7 quantized Npad) fit well under the raised cache limit.
+        # ONE dynamic compile serves EVERY shape. Both varying dims — batch (dim 0)
+        # and cell-count Npad (dim 1) — are marked dynamic (in _forward_group) and
+        # compile() is invoked with dynamic=True, so Inductor builds a single graph
+        # parameterized by symbolic (B, Npad) on the first (small) flush and reuses
+        # it for all later shapes, deep late-game included. This REPLACES the old
+        # static-per-Npad scheme and its `HEXFIELD_COMPILE_MAX_NPAD<=1024` cutoff.
+        #
+        # Why the old scheme existed, and why it was wrong: a prior note claimed
+        # dynamic Npad raises `CantSplit: 96*s+768 not divisible by s+8` (the
+        # attention out-reshape CHANNELS*(Npad+8) over seq-len Npad+8) and forces a
+        # silent eager fallback, so it pinned Npad static and compiled ~48 buckets —
+        # which then HUNG the single self-play thread the first time a deep shape
+        # compiled. MEASURED FALSE on torch 2.12 (scripts/_hexfield_compile_diag.py,
+        # 2026-06-16, epoch-34 ckpt): `compile(dynamic=True)` + mark_dynamic on the
+        # Npad dim compiles ONCE (~27 s on Npad=256) and serves Npad 512..2560 with
+        # NO recompile and NO CantSplit (4–13 ms reuse). It is also numerically the
+        # SAME path as the shipped static compile: dyn-vs-static == static-vs-eager
+        # == one fp16 ulp (the compile noise floor, not added error). Because there
+        # is now exactly ONE compile — on the first small shape — the deep-shape
+        # compile that hung can never occur; the cutoff is gone.
         # Opt out with HEXFIELD_NO_COMPILE=1; falls back to eager on any error.
         self._raw_fpv = self.model.forward_policy_value
         self._compiled_fpv = self._raw_fpv
@@ -93,23 +100,20 @@ class HexfieldEvaluator:
             self.device.type == "cuda"
             and os.environ.get("HEXFIELD_NO_COMPILE") != "1"
         )
-        # Compile ONLY small support sizes. Static-Npad compile needs few distinct
-        # shapes, but real self-play Npad spans ~64..3000+ nodes (late game / big
-        # boards) — 60+ buckets blows the dynamo recompile limit and reverts the
-        # WHOLE function to eager. Small Npad is launch-overhead-bound (where the
-        # ~2.4x fusion win lives) and yields few buckets (<=512 / 64 = 8); large
-        # Npad is matmul-compute-bound (eager ~= compiled) and is left eager — no
-        # bucket explosion, no padding waste. Tune the cutover with
-        # HEXFIELD_COMPILE_MAX_NPAD.
-        self._compile_max_npad = int(os.environ.get("HEXFIELD_COMPILE_MAX_NPAD", "512"))
         if self._use_compile:
+            # Keep the eager fallback (suppress_errors) as an unattended-run
+            # safety net: if some never-before-seen shape ever fails to compile,
+            # the run drops to eager for it instead of dying. automatic_dynamic
+            # stays ON (it cannot hurt once dynamic=True already generalizes Npad).
+            # cache_size_limit covers the handful of real specializations
+            # (request_moves_left True/False, and a batch-size-1 guard).
             torch._dynamo.config.suppress_errors = True
-            torch._dynamo.config.automatic_dynamic_shapes = False
+            torch._dynamo.config.automatic_dynamic_shapes = True
             torch._dynamo.config.cache_size_limit = max(
                 64, torch._dynamo.config.cache_size_limit
             )
             try:
-                self._compiled_fpv = torch.compile(self._raw_fpv)
+                self._compiled_fpv = torch.compile(self._raw_fpv, dynamic=True)
             except Exception:
                 self._compiled_fpv = self._raw_fpv
 
@@ -250,23 +254,33 @@ class HexfieldEvaluator:
         d_nbr = _h2d(batch_nbr)
         d_mask = _h2d(batch_mask)
         d_coords = _h2d(batch_coords)
-        # Use the compiled graph only for small support sizes (see __init__):
-        # bounded distinct Npad => no recompile-limit blowup. Force the batch
-        # (dim 0) dynamic so each Npad bucket compiles once and is reused across
-        # group sizes; pin the cell dim (dim 1 == Npad) static so the seq-len
-        # stays concrete and Inductor never hits the symbolic-split CantSplit.
-        # Skip mark_dynamic on size-1 groups (a 0/1 dim is specialized away).
-        use_compiled = (
-            self._use_compile
-            and self._compiled_fpv is not self._raw_fpv
-            and pad_to <= self._compile_max_npad
-        )
+        # One dynamic graph for every shape (see __init__): mark BOTH varying dims
+        # dynamic — batch (dim 0) and cell-count Npad (dim 1) — so the single
+        # compiled graph absorbs all (B, Npad) without recompiling.
+        #
+        # A CONCRETE batch of 1 is the one shape dynamo refuses to keep symbolic
+        # (it always specializes a size-1 dim away). That leaves Npad the sole free
+        # symbol, and Inductor then trips on the attention head-merge transpose-copy
+        # — domain CHANNELS*(Npad+NUM_TOKENS), which it tiles as (S, CHANNELS) and
+        # cannot split by the compound seq-len S = Npad+NUM_TOKENS:
+        # `CantSplit: 96*s+768 not divisible by s+8` (REPRODUCED on torch 2.12,
+        # scripts/_hexfield_compile_diag.py). With batch >= 2 the batch dim stays a
+        # free symbol and the very same graph compiles cleanly for every Npad. So
+        # duplicate a size-1 compiled group to batch 2 (the model is pad-/batch-
+        # inert per row, §6.3, so row 0's outputs are unchanged by a twin) and slice
+        # the twin off after. Cost is one extra row on the rare singleton group.
+        use_compiled = self._use_compile and self._compiled_fpv is not self._raw_fpv
         fpv = self._compiled_fpv if use_compiled else self._raw_fpv
+        pad_batch = use_compiled and g == 1
+        if pad_batch:
+            d_feats = d_feats.repeat(2, 1, 1)
+            d_nbr = d_nbr.repeat(2, 1, 1)
+            d_mask = d_mask.repeat(2, 1)
+            d_coords = d_coords.repeat(2, 1, 1)
         if use_compiled:
             for t in (d_feats, d_nbr, d_mask, d_coords):
-                if g > 1:
-                    torch._dynamo.mark_dynamic(t, 0)
-                torch._dynamo.mark_static(t, 1)
+                torch._dynamo.mark_dynamic(t, 0)  # batch (>= 2 here) dynamic
+                torch._dynamo.mark_dynamic(t, 1)  # Npad dynamic
         with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=use_fp16):
             out = fpv(
                 d_feats,
@@ -275,6 +289,8 @@ class HexfieldEvaluator:
                 d_coords,
                 request_moves_left=request_ml,
             )
+        if pad_batch:  # drop the duplicated twin row -> back to the true g == 1
+            out = {k: v[:g] for k, v in out.items()}
         # Stay on-GPU: no .cpu() here. Decoded values/ml are (g,) GPU tensors;
         # per-row legal-prefix softmaxes are concatenated on-GPU. The single
         # D2H sync happens once in evaluate_payload (§5.3).
