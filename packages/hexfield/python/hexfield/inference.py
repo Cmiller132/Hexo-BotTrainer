@@ -104,6 +104,12 @@ class HexfieldEvaluator:
         # submit_payload to result(), so submit only enqueues forwards and the
         # pre-backup select pass overlaps them. Opt-in A/B knob; default OFF.
         self._defer_decode = os.environ.get("HEXFIELD_DEFER_DECODE") == "1"
+        # Keep feats f16 through pack+H2D (cuda) — half the feats H2D + no astype
+        # copy. HEXFIELD_F32_FEATS=1 forces the old f32 path (A/B only).
+        self._f16_feats = (
+            self.device.type == "cuda"
+            and os.environ.get("HEXFIELD_F32_FEATS") != "1"
+        )
         if self._use_compile:
             # Keep the eager fallback (suppress_errors) as an unattended-run
             # safety net: if some never-before-seen shape ever fails to compile,
@@ -148,7 +154,16 @@ class HexfieldEvaluator:
         feats16 = np.frombuffer(payload["node_feats"], dtype=np.float16)
         if feats16.shape[0] != total_nodes * NUM_FEATURES:
             raise ValueError("node_feats byte count mismatch")
-        feats = feats16.astype(np.float32).reshape(total_nodes, NUM_FEATURES)
+        # Keep feats f16 (dense_cnn-style): the wire is already f16 and the serve
+        # forward runs f16 under autocast, so the old astype(float32) was a wasteful
+        # host copy that doubled the feats H2D — autocast downcasts the upcast back
+        # to the identical f16 value. Pack/H2D below build f16 on cuda (half size,
+        # no astype), f32 only on the rare CPU path / the F32_FEATS A/B toggle.
+        feats = (
+            feats16.reshape(total_nodes, NUM_FEATURES)
+            if self._f16_feats
+            else feats16.astype(np.float32).reshape(total_nodes, NUM_FEATURES)
+        )
         qr = np.frombuffer(payload["node_qr"], dtype=np.int16).reshape(total_nodes, 2)
         nbr = np.frombuffer(payload["nbr"], dtype=np.uint16).reshape(total_nodes, 6)
         legal_counts = np.frombuffer(payload["legal_counts"], dtype=np.int32)
@@ -252,7 +267,10 @@ class HexfieldEvaluator:
         # Byte-for-byte identical to the prior per-row from_numpy/torch.where
         # loop (same fp32 feats, same sentinel->pad_to neighbor remap, same
         # int64 coords, same bool mask), only without g separate host copies.
-        np_feats = np.zeros((g, pad_to, NUM_FEATURES), dtype=np.float32)
+        # f16 feats on cuda -> half the H2D bytes + no astype copy (CPU path stays
+        # f32; numpy upcasts the f16 source on assignment there).
+        feat_dtype = np.float16 if self._f16_feats else np.float32
+        np_feats = np.zeros((g, pad_to, NUM_FEATURES), dtype=feat_dtype)
         np_nbr = np.full((g, pad_to, 6), pad_to, dtype=np.int64)
         np_mask = np.zeros((g, pad_to), dtype=np.bool_)
         np_coords = np.zeros((g, pad_to, 2), dtype=np.int64)
