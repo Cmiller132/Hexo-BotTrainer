@@ -14,7 +14,7 @@ device = "cuda"
 search_visits = 512
 pcr_full_proportion = 0.33
 pcr_fast_visits = 128
-active_games = 96
+active_games = 128
 c_puct = 1.5
 virtual_batch_size = 4
 # flush_target must be ABOVE max in-flight (active_games*virtual_batch_size) so
@@ -114,20 +114,20 @@ sealbot_enabled = true
 bracket_size = 1
 
 [run]
-name = "hexfield_main_1"
-output_dir = "/mnt/e/Hexo-BotTrainer/runs/hexfield_main_1"
+name = "hexfield_main_2"
+output_dir = "/mnt/e/Hexo-BotTrainer/runs/hexfield_main_2"
 seed = 1
 
 [loop]
 epochs = 200
 
 [selfplay]
-games_per_epoch = 192
+games_per_epoch = 256
 update_checkpoint_pointer = false
 
 [train]
 passes_per_epoch = 1
 
 [checkpoint]
-initialize_from = "/mnt/e/Hexo-BotTrainer-hexgt/runs/hexfield_bc_1/checkpoint_epoch2.pt"
+initialize_from = "/mnt/e/Hexo-BotTrainer/runs/hexfield_main_1/checkpoints/epoch_000034.pt"
 save_name = "latest"

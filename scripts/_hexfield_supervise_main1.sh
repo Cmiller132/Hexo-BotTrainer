@@ -54,15 +54,11 @@ export HEXFIELD_SERVE_FLEX="${HEXFIELD_SERVE_FLEX:-1}"
 # outputs (parity max|d|=0.0); +~8% pos/s once flex makes the run host-bound (it was
 # NULL while GPU-bound). Set to 0 to keep the syncs inside submit.
 export HEXFIELD_DEFER_DECODE="${HEXFIELD_DEFER_DECODE:-1}"
-# Model-side legal-move radius (2026-06-16, OWNER EXPERIMENT). Restricts the MODEL
-# + MCTS to legal cells within hex-dist <= 4 of a stone (the game ENGINE still
-# allows radius 8; this is a model-side filter in hexfield/support.{py,rs}, NOT a
-# rules change). Shrinks the O(support^2) forward -> ~1.6-1.7x pos/s (verified). The
-# BIAS table + DIST_SCALE stay at 8 so the network/checkpoint are unchanged.
-# CAVEAT: the epoch-34 ckpt was trained at radius 8, so radius-4 input is initially
-# OUT-OF-DISTRIBUTION (weak play until it re-adapts), and the eval vs radius-8
-# opponents/ladder is not comparable. Revert: set =8 (or remove this line) + restart.
-export HEXFIELD_SUPPORT_RADIUS="${HEXFIELD_SUPPORT_RADIUS:-4}"
+# Model-side legal-move radius (hexfield/support.{py,rs} filter, NOT the engine).
+# Left to the ENV / systemd unit per run: unset -> featurizer default 8 (this run,
+# hexfield_main_1, is radius-8). The hexfield_main_2 unit sets HEXFIELD_SUPPORT_RADIUS=4
+# (the radius-4 experiment). This shared supervisor honours RUNDIR/CONFIG overrides
+# so both runs use the same launch/breaker logic.
 
 mkdir -p "$RUNDIR" "$CKPTS"
 log(){ echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" | tee -a "$SUPLOG" >&2; }
