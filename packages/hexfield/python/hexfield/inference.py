@@ -110,6 +110,18 @@ class HexfieldEvaluator:
             self.device.type == "cuda"
             and os.environ.get("HEXFIELD_F32_FEATS") != "1"
         )
+        # Rust parallel serve-pack with zero-copy buffers (HEXFIELD_RUST_PACK):
+        # do the grouping + per-group padding + f16/int buffer assembly in
+        # PARALLEL Rust, expose ZERO-COPY buffers, and consume them via
+        # torch.frombuffer + .to(device) — NO Python pack loop, NO astype.
+        # Gated on _f16_feats: the Rust pack emits f16 feats ONLY, so if the
+        # F32 toggle is on we MUST fall back to the CSR/Python pack (cannot honor
+        # the f32 request from the f16-only pack path).
+        self._rust_pack = (
+            self.device.type == "cuda"
+            and self._f16_feats
+            and os.environ.get("HEXFIELD_RUST_PACK") == "1"
+        )
         if self._use_compile:
             # Keep the eager fallback (suppress_errors) as an unattended-run
             # safety net: if some never-before-seen shape ever fails to compile,
@@ -151,6 +163,18 @@ class HexfieldEvaluator:
         offsets = np.asarray(payload["node_row_offsets"], dtype=np.int64)
         if offsets.shape[0] != b + 1 or int(offsets[-1]) != total_nodes:
             raise ValueError("node_row_offsets inconsistent with shape")
+        legal_counts = np.frombuffer(payload["legal_counts"], dtype=np.int32)
+        if legal_counts.shape[0] != b:
+            raise ValueError("legal_counts byte count mismatch")
+        request_ml = bool(payload.get("request_moves_left", False))
+
+        if self._rust_pack:
+            # Rust parallel serve-pack: grouping + per-group padding + f16/int
+            # buffer assembly happen GIL-free in parallel Rust; consume the
+            # zero-copy buffers via torch.frombuffer + .to(device). NO Python
+            # plan_groups, NO np_* pad loop, NO astype.
+            return self._submit_rust_pack(payload, b, offsets, legal_counts, request_ml)
+
         feats16 = np.frombuffer(payload["node_feats"], dtype=np.float16)
         if feats16.shape[0] != total_nodes * NUM_FEATURES:
             raise ValueError("node_feats byte count mismatch")
@@ -166,10 +190,6 @@ class HexfieldEvaluator:
         )
         qr = np.frombuffer(payload["node_qr"], dtype=np.int16).reshape(total_nodes, 2)
         nbr = np.frombuffer(payload["nbr"], dtype=np.uint16).reshape(total_nodes, 6)
-        legal_counts = np.frombuffer(payload["legal_counts"], dtype=np.int32)
-        if legal_counts.shape[0] != b:
-            raise ValueError("legal_counts byte count mismatch")
-        request_ml = bool(payload.get("request_moves_left", False))
 
         sizes = (offsets[1:] - offsets[:-1]).astype(np.int64)
         # Single-D2H discipline (§5.3): every group appends GPU tensors to these
@@ -201,6 +221,86 @@ class HexfieldEvaluator:
                 "deferred": deferred,
             }
         # Concatenate on-GPU (still no D2H); the syncs happen in result().
+        return {
+            "b": b,
+            "request_ml": request_ml,
+            "legal_counts": legal_counts,
+            "values_gpu": torch.cat(gpu_values),
+            "ml_gpu": torch.cat(gpu_ml) if request_ml else None,
+            "priors_gpu": torch.cat(gpu_priors),
+        }
+
+    @torch.no_grad()
+    def _submit_rust_pack(self, payload, b, offsets, legal_counts, request_ml) -> dict:
+        """Rust parallel serve-pack consumption (HEXFIELD_RUST_PACK).
+
+        Hands the CSR-flat wire bytes (f16 feats, i16 coords, u16 nbr) + the i64
+        row offsets to `_rust.build_serve_groups`, which runs the IDENTICAL
+        plan_groups planner and assembles every group's padded buffers in
+        PARALLEL (GIL-free): feats (f16, pad=0), nbr (i32, fill=pad_to,
+        sentinel->pad_to), mask (u8, 1 at real nodes), coords (i32, pad=0). Each
+        group's four buffers come back as read-only zero-copy #[pyclass] buffers;
+        torch.frombuffer views them in place and .to(device) copies straight to
+        the GPU — NO Python pad loop, NO astype. The int32 nbr/coords are cast to
+        int64 ON-DEVICE (value-preserving; the model's gather needs int64). The
+        forward tail is the SHARED _run_forward, byte-identical to the CSR path."""
+        from hexfield import _rust  # local import: only the rust-pack path needs it
+
+        dev = self.device
+        groups = _rust.build_serve_groups(
+            payload["node_feats"],
+            payload["node_qr"],
+            payload["nbr"],
+            offsets.tolist(),
+        )
+
+        gpu_priors: list[torch.Tensor] = []
+        gpu_values: list[torch.Tensor] = []
+        gpu_ml: list[torch.Tensor] = []
+        deferred: list | None = [] if self._defer_decode else None
+
+        for grp in groups:
+            start = grp["start"]
+            end = grp["end"]
+            gn = grp["g"]
+            p = grp["pad_to"]
+            # frombuffer views the zero-copy Rust buffer; .to(dev) copies it
+            # straight to the GPU (pageable -> synchronous H2D; matches dense_cnn).
+            d_feats = (
+                torch.frombuffer(grp["feats"], dtype=torch.float16)
+                .reshape(gn, p, NUM_FEATURES)
+                .to(dev, non_blocking=True)
+            )
+            d_nbr = (
+                torch.frombuffer(grp["nbr"], dtype=torch.int32)
+                .reshape(gn, p, 6)
+                .to(dev, non_blocking=True)
+                .to(torch.int64)
+            )
+            d_mask = (
+                torch.frombuffer(grp["mask"], dtype=torch.uint8)
+                .reshape(gn, p)
+                .to(dev, non_blocking=True)
+                .to(torch.bool)
+            )
+            d_coords = (
+                torch.frombuffer(grp["coords"], dtype=torch.int32)
+                .reshape(gn, p, 2)
+                .to(dev, non_blocking=True)
+                .to(torch.int64)
+            )
+            self._run_forward(
+                d_feats, d_nbr, d_mask, d_coords, gn, request_ml, legal_counts,
+                start, end, gpu_values, gpu_ml, gpu_priors, deferred,
+            )
+
+        if self._defer_decode:
+            return {
+                "b": b,
+                "request_ml": request_ml,
+                "legal_counts": legal_counts,
+                "deferred": deferred,
+            }
         return {
             "b": b,
             "request_ml": request_ml,
@@ -304,6 +404,25 @@ class HexfieldEvaluator:
         d_nbr = _h2d(batch_nbr)
         d_mask = _h2d(batch_mask)
         d_coords = _h2d(batch_coords)
+        self._run_forward(
+            d_feats, d_nbr, d_mask, d_coords, g, request_ml, legal_counts,
+            start, end, gpu_values, gpu_ml, gpu_priors, deferred,
+        )
+
+    def _run_forward(
+        self, d_feats, d_nbr, d_mask, d_coords, g, request_ml, legal_counts,
+        start, end, gpu_values, gpu_ml, gpu_priors, deferred,
+    ) -> None:
+        """Shared forward tail for BOTH the CSR (_forward_group) and Rust-pack
+        (_submit_rust_pack) packers. Takes the four DEVICE tensors already in
+        their final dtypes (feats f16/f32, nbr int64, mask bool, coords int64)
+        and runs the IDENTICAL compiled/eager forward + the singleton-batch-2
+        dup + mark_dynamic + autocast + FlexAttention + defer-or-decode path.
+        The ONLY difference between the two packers is how these four device
+        tensors are produced; folding the tail here guarantees byte-identical
+        downstream behaviour (the parity-confidence linchpin)."""
+        device = self.device
+        use_fp16 = device.type == "cuda"
         # One dynamic graph for every shape (see __init__): mark BOTH varying dims
         # dynamic — batch (dim 0) and cell-count Npad (dim 1) — so the single
         # compiled graph absorbs all (B, Npad) without recompiling.
