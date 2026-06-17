@@ -14,7 +14,7 @@ device = "cuda"
 search_visits = 512
 pcr_full_proportion = 0.33
 pcr_fast_visits = 128
-active_games = 96
+active_games = 128
 c_puct = 1.5
 virtual_batch_size = 4
 # flush_target must be ABOVE max in-flight (active_games*virtual_batch_size) so
@@ -122,7 +122,7 @@ seed = 1
 epochs = 200
 
 [selfplay]
-games_per_epoch = 192
+games_per_epoch = 256
 update_checkpoint_pointer = false
 
 [train]
