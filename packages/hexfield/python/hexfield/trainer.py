@@ -6,7 +6,7 @@ power-law taper → recent-window cut → md5 split → keep_prob subsample →
 overshoot-skip file selection → train-bucket reuse governor → an in-RAM packed
 columnar :class:`~hexfield.window.PackedWindow`.
 
-The consumer (``train_passes``, PLAN §3.4/§4.4/§4.5/§6 — Phase 5) drains that
+The consumer (``train_passes``, PLAN §3.4/§4.4/§4.5/§6 — Phase 5/6) drains that
 PackedWindow with a SINGLE pass and no within-epoch repeat:
 
 1. **Pre-draw** (on the main thread, before any expansion) a per-row D6 vector
@@ -14,13 +14,24 @@ PackedWindow with a SINGLE pass and no within-epoch repeat:
    a survivor permutation from ``np.random.default_rng(_perm_seed(run_seed,
    epoch))`` — replacing the v1 in-loop ``random.Random.shuffle`` /
    ``rng.randrange(12)`` (the two MUST-FIX determinism violations, PLAN §4.4).
-2. **Expand** each row via ``window.row_view(i)`` → a ``PackedRowView`` →
-   ``HexfieldSampleData`` shim → the unchanged ``expand_sample``, keeping the
-   off-legal try/except skip and recording a per-row validity mask (PLAN §4.5).
-3. **Filter** survivors, **permute** the survivor index, **truncate** to
-   ``effective_rows`` (the load-bearing fidelity point — PLAN §3.4/M3).
+2. **Expand** all rows through ``expand_backends.expand_rows`` under the
+   configured backend (Phase 6: ``serial`` | ``pool`` — the spawn ProcessPool —
+   with a ``rust`` Phase-7 hook). Each backend maps ``window.row_view(i)`` → a
+   ``PackedRowView`` → ``HexfieldSampleData`` shim → the unchanged
+   ``expand_sample``, returning a per-row validity mask (off-legal rows flagged
+   invalid, NOT dropped in-worker, PLAN §4.5 step 1). ``pool == serial``
+   element-wise because all randomness is pre-drawn and results are reassembled
+   in original row order (PLAN §4.4).
+3. **Filter** survivors (validity mask), **permute** the survivor index,
+   **truncate** to ``effective_rows`` (the load-bearing fidelity point — §3.4/M3).
 4. **Micro-bucket** (``pair_budget_microbuckets``) — UNCHANGED.
 5. loss / optimizer / AMP / grad-clip block — UNCHANGED.
+
+The backend is ``config.training.expand_backend`` (env ``HEXFIELD_EXPAND``
+overrides) and the pool worker count is ``config.training.expand_workers`` (env
+``HEXFIELD_EXPAND_WORKERS`` overrides; ``0`` ⇒ auto ``min(8, cpu//4)``). The
+persistent spawn pool is owned by the trainer (``_get_expand_pool``) and torn
+down by ``close()`` at run end.
 
 ``effective_rows`` is threaded from ``select_training_samples`` via
 ``self._last_select`` (the trainer instance backs both dispatch calls); a direct
@@ -47,12 +58,15 @@ from .batching import (
 )
 from .buffer_manifest import scan_or_update_manifest
 from .config import HexfieldConfig
+from .expand_backends import (
+    _row_view_to_sample,  # re-exported for back-compat (tests import it here)
+    expand_rows,
+    resolve_expand_workers,
+)
 from .losses import hexfield_loss
-from .samples import STV_HORIZONS, HexfieldSampleData, expand_sample
-from .shards import _PHASES
+from .samples import STV_HORIZONS
 from .train_state import HexfieldTrainState
 from .window import (
-    PackedRowView,
     PackedWindow,
     _select_files_for_rows,
     _split_by_md5,
@@ -88,41 +102,6 @@ def _perm_seed(run_seed: int, epoch: int) -> int:
     return (int(run_seed) * 2_654_435_761 + int(epoch) * 40_503 + 7) & 0x7FFFFFFF
 
 
-def _row_view_to_sample(view: PackedRowView) -> HexfieldSampleData:
-    """Adapt a zero-copy :class:`~hexfield.window.PackedRowView` into the
-    :class:`~hexfield.samples.HexfieldSampleData` that ``expand_sample`` consumes
-    (the serial-phase shim, PLAN §6/Phase-5).
-
-    The ``PackedRowView`` already exposes every field as an accessor whose return
-    shape matches the dataclass (``records()`` → ``(q,r,owner,idx)`` tuples,
-    ``policy()`` / ``opp_policy()`` → ``(action_id, weight)`` tuples,
-    ``own_hot()`` / ``own_win()`` / … → ``(q,r)`` tuples, ``first_stone()`` →
-    ``(q,r)|None``, ``short_term_value()`` → ``(horizon, value)`` tuples). The one
-    representation gap is ``phase``: the packed column stores the u8 enum index
-    while ``HexfieldSampleData.phase`` (and ``build_features``) want the STRING
-    name — so it is mapped through ``shards._PHASES`` here exactly as
-    ``read_compact_shard`` does (``shards.py:238``). ``game_id`` is unused by
-    expansion and left empty; ``metadata`` defaults empty (the opp-policy source
-    was already resolved at write time)."""
-    return HexfieldSampleData(
-        game_id="",
-        turn_index=view.turn_index,
-        current_player=view.current_player,
-        phase=_PHASES[view.phase],
-        records=view.records(),
-        first_stone=view.first_stone(),
-        own_hot=view.own_hot(),
-        opp_hot=view.opp_hot(),
-        own_win=view.own_win(),
-        opp_win=view.opp_win(),
-        policy=view.policy(),
-        opp_policy=view.opp_policy(),
-        value=view.value,
-        short_term_value=view.short_term_value(),
-        moves_left=view.moves_left,
-    )
-
-
 class HexfieldTrainer:
     def __init__(self, *, model, config: HexfieldConfig, optimizer):
         self.model = model
@@ -141,6 +120,55 @@ class HexfieldTrainer:
         # train_bucket_level into the consumer without touching the slotted
         # SharedComponents (PLAN §6: effective_rows comes from selection).
         self._last_select: dict[int, dict[str, Any]] = {}
+        # Persistent spawn process-pool for the parallel ("pool") expand backend
+        # (PLAN §4.3 rung 2). Created lazily on first pool-eligible epoch, reused
+        # across epochs, and torn down by close() (the pipeline run-end teardown,
+        # pipeline.py:104). None until needed; stays None for the serial backend.
+        self._expand_pool: Any | None = None
+
+    def _get_expand_pool(self):
+        """Lazily build the persistent spawn pool for ``expand_backend="pool"``.
+
+        Mirrors ``dense_cnn_restnet.trainer._get_expand_pool``: one
+        ``ProcessPoolExecutor(mp_context="spawn")`` reused across epochs. Returns
+        ``None`` when only one worker is resolved (no benefit to a pool — the
+        backend then runs the serial in-process path). ``spawn`` is mandatory on
+        WSL/Windows (no fork); the pool inherits the parent environment, so each
+        worker re-reads the same ``HEXFIELD_SUPPORT_RADIUS`` at ``support`` import
+        time and stays consistent with the main thread.
+        """
+        n_workers = resolve_expand_workers(self.config.training.expand_workers)
+        if n_workers <= 1:
+            return None
+        if self._expand_pool is None:
+            import multiprocessing as mp
+            from concurrent.futures import ProcessPoolExecutor
+
+            self._expand_pool = ProcessPoolExecutor(
+                max_workers=n_workers, mp_context=mp.get_context("spawn")
+            )
+        return self._expand_pool
+
+    def close(self) -> None:
+        """Shut down the expansion pool, if any (PLAN §4.3).
+
+        Called by the generic pipeline's run-end teardown (``pipeline.py:104``,
+        best-effort ``getattr(trainer, "close")``) so the spawn workers are
+        reclaimed when the run finishes instead of lingering until interpreter
+        exit. Safe to call when no pool was ever created (serial backend).
+        """
+        if self._expand_pool is not None:
+            self._expand_pool.shutdown(wait=False, cancel_futures=True)
+            self._expand_pool = None
+
+    def __del__(self) -> None:
+        # Best-effort backstop if the trainer is GC'd without an explicit close().
+        # The reliable teardown is the pipeline finally; a finalizer cannot rely
+        # on ProcessPoolExecutor.shutdown at interpreter exit.
+        try:
+            self.close()
+        except Exception:  # noqa: BLE001 - finalizer must never raise
+            pass
 
     def _update_train_bucket(self, total_rows: int, window_start: int) -> None:
         """Accrue / clamp the train-bucket reuse governor (PLAN §3.5).
@@ -409,25 +437,42 @@ class HexfieldTrainer:
         # below). The hard-error wire stays armed at the default radius.
         tolerate_off_legal = int(os.environ.get("HEXFIELD_SUPPORT_RADIUS", "8")) < 8
 
-        # (1) EXPAND ALL selected rows under their pre-drawn D6 (serial backend,
-        # PLAN §4.3 ladder rung 1). Off-legal rows are flagged invalid via the
-        # try/except skip (NOT silently reordered) — the per-row validity mask of
-        # PLAN §4.5 realized as the survivor list. The PackedRowView -> shim ->
-        # expand_sample path keeps the expansion math frozen (samples.py).
-        survivors: list = []  # list[ExpandedRow], post-skip survivors
-        rows_skipped_off_legal = 0
-        for i in range(int(window.n)):
-            sample = _row_view_to_sample(window.row_view(i))
-            try:
-                survivors.append(expand_sample(sample, symmetry=int(d6[i])))
-            except ValueError as e:
-                if tolerate_off_legal and "off the legal set" in str(e):
-                    rows_skipped_off_legal += 1
-                    continue
-                raise
+        # (1) EXPAND ALL window rows under their pre-drawn D6 via the configured
+        # backend (PLAN §4.3 ladder: serial | pool | rust). The backend returns a
+        # per-row ExpandedRow list aligned to range(window.n) plus a `valid` mask;
+        # an off-legal row is flagged invalid (NOT dropped in-worker, PLAN §4.5
+        # step 1). The PackedRowView -> shim -> expand_sample path keeps the
+        # expansion math frozen (samples.py), so pool == serial element-wise.
+        backend = str(os.environ.get("HEXFIELD_EXPAND", self.config.training.expand_backend))
+        expand_pool = None
+        if backend == "pool":
+            # Reuse the trainer's persistent spawn pool. When the resolved worker
+            # count is <= 1 (degenerate / 1-2 CPU host, or HEXFIELD_EXPAND_WORKERS=1)
+            # _get_expand_pool returns None and there is no benefit to a pool, so we
+            # fall back to the in-process serial path (matches dense, trainer.py:321).
+            expand_pool = self._get_expand_pool()
+            if expand_pool is None:
+                backend = "serial"
+        expanded_rows, valid = expand_rows(
+            window,
+            None,  # expand ALL rows; the survivor filter + truncation happen below
+            d6,
+            STV_HORIZONS,
+            tolerate_off_legal=tolerate_off_legal,
+            backend=backend,
+            workers=self.config.training.expand_workers,
+            pool=expand_pool,
+        )
 
-        # (2) PERMUTE the SURVIVOR index (drawn over the POST-skip set, PLAN §4.5
-        # step 3), then (3) TRUNCATE to effective_rows (PLAN §3.4/M3 — the
+        # (2) FILTER survivors on the main thread using the validity mask (PLAN
+        # §4.5 step 2). This compacted list is element-identical to the v1 inline
+        # loop's survivors (same expansion, same off-legal drops, same order),
+        # independent of which backend produced it.
+        survivors: list = [row for row, ok in zip(expanded_rows, valid) if ok]
+        rows_skipped_off_legal = int((~np.asarray(valid, dtype=bool)).sum())
+
+        # (3) PERMUTE the SURVIVOR index (drawn over the POST-skip set, PLAN §4.5
+        # step 3), then (4) TRUNCATE to effective_rows (PLAN §3.4/M3 — the
         # load-bearing fidelity point: single pass, no within-epoch repeat, capped
         # at exactly the bucket-debited effective_rows).
         n_surv = len(survivors)
@@ -436,9 +481,9 @@ class HexfieldTrainer:
         keep = perm[: max(0, int(effective_rows))]
         ordered_rows = [survivors[int(j)] for j in keep]
 
-        # (4) MICRO-BUCKET (pair_budget_microbuckets) — UNCHANGED. One optimizer
+        # (5) MICRO-BUCKET (pair_budget_microbuckets) — UNCHANGED. One optimizer
         # step per nominal batch of ``batch_rows`` survivors; the VRAM split +
-        # (5) loss/optimizer/AMP/grad-clip block below are byte-for-byte the v1
+        # (6) loss/optimizer/AMP/grad-clip block below are byte-for-byte the v1
         # path (PLAN §6: do not change the loss block or the micro-bucketing).
         for start in range(0, len(ordered_rows), batch_rows):
             expanded = ordered_rows[start : start + batch_rows]
