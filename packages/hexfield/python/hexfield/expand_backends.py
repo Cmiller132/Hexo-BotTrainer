@@ -18,7 +18,12 @@ Backends (``backend=`` argument / ``config.training.expand_backend`` /
   :func:`expand_chunk_to_arrays`; ``workers+2`` inflight; ``wait(FIRST_COMPLETED)``;
   serial below :data:`_PARALLEL_MIN_ROWS`. Strictly inferior to the eventual Rust
   kernel on this host (spawn is mandatory on WSL/Windows) but proven and low-risk.
-* ``"rust"`` — Phase-7 hook; raises :class:`NotImplementedError` here.
+* ``"rust"`` — the Phase-7 production path: the GIL-free rayon kernel
+  (``replay_expand.rs::expand_shard_train``). One parallel call expands the whole
+  window under the pre-drawn D6, returning zero-copy buffers reassembled here into
+  the SAME ``(rows, valid)`` shape as serial/pool (Rust↔serial element-wise parity
+  is gated by ``tests/katago_buffer/test_p7_rust_parity.py``). ``workers``/``pool``
+  are ignored (rayon owns its thread pool).
 
 DETERMINISM (the load-bearing contract, PLAN §4.4/§4.5): **all randomness is
 pre-drawn on the main thread** (the per-row ``d6`` vector) and passed positionally
@@ -49,9 +54,47 @@ from typing import Any, Sequence
 
 import numpy as np
 
+from .constants import LEGAL_RADIUS, NUM_FEATURES
 from .samples import STV_HORIZONS, ExpandedRow, HexfieldSampleData, expand_sample
 from .shards import _PHASES
+from .support import Support
 from .window import PackedRowView, PackedWindow
+
+# Columns the Rust kernel reads off the PackedWindow (PLAN §4.2). The scalar /
+# block / CSR-data / CSR-offset arrays of hexfield_compact_v1 — passed as raw
+# bytes (LE/native; build+train share the host) plus the explicit row count.
+_RUST_SCALAR_COLS = (
+    "current_player",
+    "phase",
+    "value",
+    "moves_left",
+    "first_q",
+    "first_r",
+    "first_present",
+)
+_RUST_BLOCK_COLS = ("stvalue", "stvalue_mask")
+_RUST_CSR_DATA = (
+    "hist_qr",
+    "hist_owner",
+    "hist_pidx",
+    "pol_act",
+    "pol_w",
+    "opp_act",
+    "opp_w",
+    "own_hot_qr",
+    "opp_hot_qr",
+    "own_win_qr",
+    "opp_win_qr",
+)
+_RUST_OFF_COLS = (
+    "hist_off",
+    "pol_off",
+    "opp_off",
+    "own_hot_off",
+    "opp_hot_off",
+    "own_win_off",
+    "opp_win_off",
+)
 
 # Off-legal sentinel substring raised by ``expand_sample`` (``samples.py:206``).
 # Mirrors the predicate the Phase-5 ``train_passes`` loop used to gate the skip.
@@ -197,6 +240,167 @@ def _chunk_bounds(n: int, chunk_rows: int) -> list[tuple[int, int]]:
 
 
 # ---------------------------------------------------------------------------
+# Rust backend (PLAN §4.2/§4.5): the GIL-free rayon kernel + zero-copy reassembly.
+# ---------------------------------------------------------------------------
+def _resolve_support_radius() -> int:
+    """The model support radius (``HEXFIELD_SUPPORT_RADIUS``), passed explicitly
+    to the Rust kernel. Mirrors ``support.py``'s import-time read EXACTLY so the
+    Rust twin and the serial Python oracle build the same support: a value in
+    ``[1, HALO_DIST]`` wins, anything else falls back to ``LEGAL_RADIUS`` (==8).
+    """
+    raw = os.environ.get("HEXFIELD_SUPPORT_RADIUS")
+    if raw is None:
+        return LEGAL_RADIUS
+    try:
+        r = int(raw)
+    except ValueError:
+        return LEGAL_RADIUS
+    # support.py uses int(os.environ.get(..., LEGAL_RADIUS)) with no clamp; the
+    # Rust support_radius() clamps to [1, HALO_DIST]. Match support.py (Python is
+    # the oracle): pass the raw int through; out-of-range values would diverge,
+    # but production only ever sets 4 or 8.
+    return r
+
+
+def _window_columns_as_bytes(window: PackedWindow) -> dict[str, bytes]:
+    """Pack the PackedWindow columns the Rust kernel needs into a ``{name: bytes}``
+    dict (PLAN §4.2). Each array is forced C-contiguous + its writer dtype, then
+    ``.tobytes()`` (a single bulk copy per column — the BFS/feature cost the kernel
+    parallelizes dwarfs it). Offsets stay ``int64``; the kernel reinterprets bytes.
+    """
+    c = window.cols
+    out: dict[str, bytes] = {}
+    for name in _RUST_SCALAR_COLS + _RUST_BLOCK_COLS + _RUST_CSR_DATA + _RUST_OFF_COLS:
+        arr = np.ascontiguousarray(c[name])
+        out[name] = arr.tobytes()
+    return out
+
+
+def _reassemble_rust_rows(
+    result: dict, horizons_len: int
+) -> tuple[list[ExpandedRow | None], np.ndarray]:
+    """Turn the kernel's zero-copy buffers back into the ``(rows, valid)`` shape the
+    serial/pool backends return (PLAN §4.2/§4.5).
+
+    Each per-row segment is sliced out of the flat ``coords``/``dist``/``nbr``/
+    ``feats``/``policy``/``opp_policy`` buffers via the returned CSR offsets
+    (``node_off`` over support nodes, ``pol_off`` over the legal prefix). An invalid
+    (off-legal-flagged) row has a zero-length segment and maps to ``None`` — the
+    caller's survivor filter then drops it, so the survivor SET is backend-invariant.
+
+    The reassembled ``Support`` carries an EMPTY ``index`` dict: it is consumed only
+    by ``collate_rows`` (reads ``coords``/``nbr``/``legal_count``/``num_nodes``) and
+    the parity test (reads ``coords``/``nbr``/``dist``/counts) — neither touches
+    ``index``, which the serial path needs only DURING expansion (already done here).
+    """
+    r = int(result["num_rows"])
+    valid_bytes = bytes(result["valid"])
+    valid = np.frombuffer(valid_bytes, dtype=np.uint8, count=r).astype(bool)
+
+    legal_count = np.frombuffer(bytes(result["legal_count"]), dtype=np.int32, count=r)
+    stone_count = np.frombuffer(bytes(result["stone_count"]), dtype=np.int32, count=r)
+    halo_count = np.frombuffer(bytes(result["halo_count"]), dtype=np.int32, count=r)
+    node_off = np.frombuffer(bytes(result["node_off"]), dtype=np.int64, count=r + 1)
+    pol_off = np.frombuffer(bytes(result["pol_off"]), dtype=np.int64, count=r + 1)
+
+    total_nodes = int(node_off[r])
+    total_legal = int(pol_off[r])
+    coords = np.frombuffer(bytes(result["coords"]), dtype=np.int32, count=2 * total_nodes).reshape(-1, 2)
+    dist = np.frombuffer(bytes(result["dist"]), dtype=np.int32, count=total_nodes)
+    nbr = np.frombuffer(bytes(result["nbr"]), dtype=np.int32, count=6 * total_nodes).reshape(-1, 6)
+    feats = np.frombuffer(bytes(result["feats"]), dtype=np.float32, count=NUM_FEATURES * total_nodes).reshape(-1, NUM_FEATURES)
+    policy = np.frombuffer(bytes(result["policy"]), dtype=np.float32, count=total_legal)
+    opp_policy = np.frombuffer(bytes(result["opp_policy"]), dtype=np.float32, count=total_legal)
+    # opp_coverage is f64 (matches the serial oracle's Python-float coverage exactly,
+    # so a strict 1e-12 parity check holds — see replay_expand.rs RowOut::opp_coverage).
+    opp_coverage = np.frombuffer(bytes(result["opp_coverage"]), dtype=np.float64, count=r)
+    value = np.frombuffer(bytes(result["value"]), dtype=np.float32, count=r)
+    moves_left = np.frombuffer(bytes(result["moves_left"]), dtype=np.float32, count=r)
+    moves_left_mask = np.frombuffer(bytes(result["moves_left_mask"]), dtype=np.float32, count=r)
+    stvalue = np.frombuffer(bytes(result["stvalue"]), dtype=np.float32, count=r * horizons_len).reshape(r, horizons_len)
+    stvalue_mask = np.frombuffer(bytes(result["stvalue_mask"]), dtype=np.float32, count=r * horizons_len).reshape(r, horizons_len)
+
+    # Per-row slices are COPIED (`.copy()`) so each ExpandedRow owns independent,
+    # WRITABLE memory — matching the serial path (fresh per-row arrays) and avoiding
+    # torch.from_numpy's read-only-tensor warning. `np.frombuffer` arrays are
+    # read-only views over the bytes copies; a contiguous slice of them stays a
+    # read-only view, so the explicit copy is required, not np.ascontiguousarray.
+    rows: list[ExpandedRow | None] = []
+    for k in range(r):
+        if not valid[k]:
+            rows.append(None)
+            continue
+        a, b = int(node_off[k]), int(node_off[k + 1])
+        pa, pb = int(pol_off[k]), int(pol_off[k + 1])
+        lc = int(legal_count[k])
+        sup = Support(
+            coords=coords[a:b].copy(),
+            legal_count=lc,
+            stone_count=int(stone_count[k]),
+            halo_count=int(halo_count[k]),
+            dist=dist[a:b].copy(),
+            nbr=nbr[a:b].copy(),
+            index={},  # see docstring — never read on the assembled (post-expand) row
+        )
+        rows.append(
+            ExpandedRow(
+                support=sup,
+                feats=feats[a:b].copy(),
+                policy=policy[pa:pb].copy(),
+                opp_policy=opp_policy[pa:pb].copy(),
+                opp_coverage=float(opp_coverage[k]),
+                value=float(value[k]),
+                stvalue=stvalue[k].copy(),
+                stvalue_mask=stvalue_mask[k].copy(),
+                moves_left=float(moves_left[k]),
+                moves_left_mask=float(moves_left_mask[k]),
+            )
+        )
+    return rows, valid
+
+
+def _expand_rows_rust(
+    window: PackedWindow,
+    index: list[int],
+    d6: np.ndarray,
+    horizons: tuple[int, ...],
+    tolerate_off_legal: bool,
+) -> tuple[list[ExpandedRow | None], np.ndarray]:
+    """Dispatch ``index`` of ``window`` to the Rust rayon kernel and reassemble.
+
+    The per-row D6 vector is pre-drawn (passed positionally — no rng in the kernel,
+    PLAN §4.4). ``horizons`` is the CONFIG horizon set (S4); the kernel copies the
+    stored ``stvalue`` columns and only uses ``len(horizons)`` to slice the block.
+    """
+    from . import _rust  # local import: the package imports fine without the .so
+
+    horizons_len = len(horizons)
+    if window.cols["stvalue"].shape[1] != horizons_len:
+        # The stored block width must equal the requested horizon count; the kernel
+        # slices [:horizons_len] from each row's block. A mismatch would silently
+        # misalign the STV target, so fail loudly (matches concat_packed's S4 guard).
+        raise ValueError(
+            f"rust backend: stvalue block width {window.cols['stvalue'].shape[1]} "
+            f"!= len(horizons) {horizons_len}"
+        )
+    columns = _window_columns_as_bytes(window)
+    row_index = np.asarray(index, dtype=np.int64)
+    # d6 may be longer than the expanded set (contract: len(d6) >= len(index));
+    # the kernel requires len(d6) == len(row_index), so slice to the aligned head.
+    d6_i32 = np.asarray(d6, dtype=np.int32)[: row_index.shape[0]]
+    result = _rust.expand_shard_train(
+        columns,
+        int(window.n),
+        row_index.tolist(),
+        d6_i32.tolist(),
+        horizons_len,
+        int(_resolve_support_radius()),
+        bool(tolerate_off_legal),
+    )
+    return _reassemble_rust_rows(result, horizons_len)
+
+
+# ---------------------------------------------------------------------------
 # Public dispatch entry point.
 # ---------------------------------------------------------------------------
 def expand_rows(
@@ -239,7 +443,7 @@ def expand_rows(
         When True, an off-legal row is flagged invalid (mask ``False``) instead of
         raising — the radius-transition behavior (PLAN §4.5).
     backend
-        ``"serial"`` | ``"pool"`` | ``"rust"`` (rust raises NotImplementedError).
+        ``"serial"`` | ``"pool"`` | ``"rust"`` (the implemented Phase-7 rayon kernel).
     workers
         Pool worker count (``0`` ⇒ auto via :func:`resolve_expand_workers`); only
         consulted for ``backend="pool"`` when no ``pool`` is supplied.
@@ -276,13 +480,13 @@ def expand_rows(
         return [], np.zeros(0, dtype=bool)
 
     if backend == "rust":
-        # Phase-7 hook — the production GIL-free rayon kernel (PLAN §4.2). Until
-        # then the backend is explicitly unimplemented so a misconfigured run
-        # fails loudly rather than silently falling back.
-        raise NotImplementedError(
-            "expand_backend='rust' lands in Phase 7 (replay_expand.rs); "
-            "use 'serial' or 'pool' for now"
-        )
+        # The production GIL-free rayon kernel (PLAN §4.2): one parallel
+        # expand_shard_train call, zero-copy buffers reassembled into the same
+        # (rows, valid) shape the serial/pool paths return. Off-legal rows are
+        # flagged invalid in the mask (NOT dropped in-worker, PLAN §4.5 step 1);
+        # the caller does the survivor filter / permute / truncate. `workers` /
+        # `pool` are ignored (rayon manages its own thread pool internally).
+        return _expand_rows_rust(window, index, d6, horizons, tolerate_off_legal)
     if backend not in ("serial", "pool"):
         raise ValueError(f"unknown expand_backend {backend!r} (serial|pool|rust)")
 

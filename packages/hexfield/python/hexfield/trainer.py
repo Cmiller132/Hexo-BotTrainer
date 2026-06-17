@@ -15,12 +15,14 @@ PackedWindow with a SINGLE pass and no within-epoch repeat:
    epoch))`` — replacing the v1 in-loop ``random.Random.shuffle`` /
    ``rng.randrange(12)`` (the two MUST-FIX determinism violations, PLAN §4.4).
 2. **Expand** all rows through ``expand_backends.expand_rows`` under the
-   configured backend (Phase 6: ``serial`` | ``pool`` — the spawn ProcessPool —
-   with a ``rust`` Phase-7 hook). Each backend maps ``window.row_view(i)`` → a
-   ``PackedRowView`` → ``HexfieldSampleData`` shim → the unchanged
-   ``expand_sample``, returning a per-row validity mask (off-legal rows flagged
-   invalid, NOT dropped in-worker, PLAN §4.5 step 1). ``pool == serial``
-   element-wise because all randomness is pre-drawn and results are reassembled
+   configured backend (``serial`` | ``pool`` — the spawn ProcessPool — | ``rust``
+   — the Phase-7 GIL-free rayon kernel ``replay_expand.rs``). The ``serial``/``pool``
+   backends map ``window.row_view(i)`` → a ``PackedRowView`` → ``HexfieldSampleData``
+   shim → the unchanged ``expand_sample``; the ``rust`` backend runs the native twin
+   of that chain across rayon workers and reassembles zero-copy buffers. All return a
+   per-row validity mask (off-legal rows flagged invalid, NOT dropped in-worker, PLAN
+   §4.5 step 1). ``rust``/``pool`` == ``serial`` element-wise because all randomness
+   is pre-drawn and results are reassembled
    in original row order (PLAN §4.4).
 3. **Filter** survivors (validity mask), **permute** the survivor index,
    **truncate** to ``effective_rows`` (the load-bearing fidelity point — §3.4/M3).

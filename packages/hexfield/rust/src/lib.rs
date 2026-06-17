@@ -34,6 +34,8 @@ mod cache;
 #[cfg(feature = "python")]
 mod payload;
 #[cfg(feature = "python")]
+mod replay_expand;
+#[cfg(feature = "python")]
 mod search;
 #[cfg(feature = "python")]
 mod serve_pack;
@@ -153,5 +155,12 @@ pub fn _rust(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<serve_pack::F16Buf>()?;
     module.add_class::<serve_pack::I32Buf>()?;
     module.add_class::<serve_pack::U8Buf>()?;
+    // Rust rayon GIL-free train-read expand kernel (expand_backend="rust", P7).
+    module.add_function(wrap_pyfunction!(replay_expand::expand_shard_train, module)?)?;
+    module.add_class::<replay_expand::RxF32Buf>()?;
+    module.add_class::<replay_expand::RxF64Buf>()?;
+    module.add_class::<replay_expand::RxI32Buf>()?;
+    module.add_class::<replay_expand::RxI64Buf>()?;
+    module.add_class::<replay_expand::RxU8Buf>()?;
     Ok(())
 }

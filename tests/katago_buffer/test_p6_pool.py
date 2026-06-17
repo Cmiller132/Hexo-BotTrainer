@@ -381,17 +381,22 @@ def test_train_passes_pool_eq_serial() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 5. rust hook + unknown backend
+# 5. rust backend now LANDED (P7) + unknown backend
 # ---------------------------------------------------------------------------
 def test_backend_guards() -> None:
     window = _load_window()
-    d6 = np.zeros(window.n, dtype=np.int64)
-    try:
-        expand_rows(window, None, d6, backend="rust")
-        raised = False
-    except NotImplementedError:
-        raised = True
-    assert raised, "backend='rust' must raise NotImplementedError (Phase-7 hook)"
+    # The Phase-7 Rust kernel is now implemented (replay_expand.rs); backend="rust"
+    # no longer raises NotImplementedError — it returns the same (rows, valid) shape
+    # as serial. (Full Rust<->serial element-wise parity is gated by
+    # tests/katago_buffer/test_p7_rust_parity.py; here we just assert it RUNS and
+    # matches serial on a tiny sweep, so this guard test stays self-contained.)
+    d6 = (np.arange(window.n) % 12).astype(np.int64)
+    rows_r, valid_r = expand_rows(window, None, d6, backend="rust")
+    rows_s, valid_s = expand_rows(window, None, d6, backend="serial")
+    assert len(rows_r) == window.n and valid_r.dtype == bool
+    assert np.array_equal(valid_r, valid_s), "rust valid mask differs from serial"
+    assert all(_rows_equal(a, b) for a, b in zip(rows_r, rows_s)), "rust rows differ from serial"
+
     try:
         expand_rows(window, None, d6, backend="bogus")
         bad_raised = False
@@ -401,7 +406,8 @@ def test_backend_guards() -> None:
     # resolve_expand_workers precedence + bounds.
     assert resolve_expand_workers(0) >= 1
     assert resolve_expand_workers(3) == 3  # explicit config wins (no env override set below)
-    print("  5. backend='rust' -> NotImplementedError; unknown backend -> ValueError; "
+    print("  5. backend='rust' now implemented (P7) -> runs + matches serial; "
+          "unknown backend -> ValueError; "
           f"resolve_expand_workers(0)={resolve_expand_workers(0)} (auto), (3)=3 (explicit)")
 
 
