@@ -91,6 +91,7 @@ one.)
 
 from __future__ import annotations
 
+import logging
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
@@ -104,6 +105,11 @@ from .config import (
     parse_hexfield_config,
 )
 from .geometry import pack_action_id, unpack_action_id
+
+# Surfaces 0-record eval .hxr writes loudly so a future regression that empties
+# ``_Game.actions`` is machine-visible (see E1) instead of being silently
+# swallowed by the best-effort writer.
+_EVAL_LOG = logging.getLogger("hexfield.eval")
 
 # torch / HexfieldEvaluator / HexfieldNet are imported LAZILY inside the
 # checkpoint-loading paths so this module is IMPORTABLE on a CPU-only host
@@ -242,7 +248,15 @@ def _resolve_eval_overrides(
     return build_divergence_overrides(sp, disabled=disabled)
 
 
-def _write_eval_hxr(games, diagnostics_dir, label_a, label_b, *, kind="checkpoint") -> str | None:
+def _write_eval_hxr(
+    games,
+    diagnostics_dir,
+    label_a,
+    label_b,
+    *,
+    kind="checkpoint",
+    stats: dict | None = None,
+) -> str | None:
     """Write the eval games as a ``.hxr`` record so the dashboard can REPLAY them
     (the History screen's "evaluation" source scans ``<run>/evaluation/*.hxr``).
 
@@ -252,8 +266,17 @@ def _write_eval_hxr(games, diagnostics_dir, label_a, label_b, *, kind="checkpoin
     (player0/player1); each game id encodes the matchup + which seat the candidate
     held (seats swap per CRN pair), so the viewer shows the real board + winner.
     Returns the written path (str) or None.
+
+    E1 hardening: a 0-record write (every game had falsy ``.actions``) is no
+    longer silent — it emits a LOUD WARNING and the write exception (if any) is
+    logged instead of being blanket-swallowed. If ``stats`` is passed, it is
+    populated with ``games_written`` / ``games_skipped`` so the caller can thread
+    the count into match meta (machine-visible 0-record detection).
     """
 
+    if stats is not None:
+        stats["games_written"] = 0
+        stats["games_skipped"] = 0
     if diagnostics_dir is None:
         return None
     try:
@@ -274,9 +297,11 @@ def _write_eval_hxr(games, diagnostics_dir, label_a, label_b, *, kind="checkpoin
             HexoRecordPlayer("seat1", "player1", f"{label_a}/{label_b} · seat 1"),
         )
         n = 0
+        skipped = 0
         with HexoRecordFile.create(path, api.engine_metadata(), players) as rf:
             for g in games:
                 if not getattr(g, "actions", None):
+                    skipped += 1
                     continue
                 cand_seat = "candP0" if g.a_is_p0 else "candP1"
                 writer = rf.begin_game(
@@ -297,9 +322,23 @@ def _write_eval_hxr(games, diagnostics_dir, label_a, label_b, *, kind="checkpoin
                     seat_w = 0 if ((g.winner == "A") == g.a_is_p0) else 1
                     writer.finish_completed(f"player{seat_w}", g.plies)
                 n += 1
+        if stats is not None:
+            stats["games_written"] = n
+            stats["games_skipped"] = skipped
+        total = len(games) if hasattr(games, "__len__") else (n + skipped)
+        if n == 0 and total > 0:
+            # A 0-record file is produced when EVERY game had falsy .actions
+            # (the regression that emptied live eval .hxr). Make it LOUD so it is
+            # never silently swallowed again.
+            _EVAL_LOG.warning(
+                "eval .hxr wrote 0 of %d games (all .actions empty) -> %s",
+                total,
+                path,
+            )
         return str(path) if n else None
-    except Exception:
-        return None  # recording is best-effort; never break the eval
+    except Exception as exc:  # recording is best-effort; never break the eval
+        _EVAL_LOG.warning("eval .hxr write failed: %r", exc)
+        return None
 
 
 # --------------------------------------------------------------------------- #
@@ -843,7 +882,8 @@ def play_checkpoint_match(
 
     # Persist the games as a replayable .hxr (dashboard "evaluation" source).
     # Best-effort: _write_eval_hxr is fully fail-soft.
-    hxr_path = _write_eval_hxr(games, diagnostics_dir, label_a, label_b)
+    _hxr_stats: dict[str, int] = {}
+    hxr_path = _write_eval_hxr(games, diagnostics_dir, label_a, label_b, stats=_hxr_stats)
 
     result = _build_match_result(
         games=game_rows,
@@ -853,6 +893,7 @@ def play_checkpoint_match(
         meta_extra={
             "kind": "hexfield_vs_hexfield",
             "hxr_record": hxr_path,
+            "hxr_games_written": _hxr_stats.get("games_written", 0),
             "ckpt_a": {"label": label_a, "path": str(model_a_ckpt)},
             "ckpt_b": {"label": label_b, "path": str(model_b_ckpt)},
             "games_requested": n_games,
@@ -1409,7 +1450,10 @@ def play_multi_checkpoint_match(
                     "pentanomial_a_score": a_wins_in_pair,
                 }
             )
-        hxr_path = _write_eval_hxr(grp.games, diagnostics_dir, candidate_label, grp.label)
+        _hxr_stats: dict[str, int] = {}
+        hxr_path = _write_eval_hxr(
+            grp.games, diagnostics_dir, candidate_label, grp.label, stats=_hxr_stats
+        )
         results[grp.label] = _build_match_result(
             games=game_rows,
             pairs=pairs,
@@ -1418,6 +1462,7 @@ def play_multi_checkpoint_match(
             meta_extra={
                 "kind": "hexfield_vs_hexfield",
                 "hxr_record": hxr_path,
+                "hxr_games_written": _hxr_stats.get("games_written", 0),
                 "ckpt_a": {"label": candidate_label, "path": str(candidate_ckpt)},
                 "ckpt_b": {"label": grp.label, "path": str(grp.ckpt)},
                 "games_requested": n_games_per_opponent,

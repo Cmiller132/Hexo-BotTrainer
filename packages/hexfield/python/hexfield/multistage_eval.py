@@ -102,7 +102,9 @@ it is NOT auto-run inside the training pipeline — only the standalone runner
 from __future__ import annotations
 
 import json
+import logging
 import math
+import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -110,6 +112,10 @@ from typing import Any, Callable
 
 from . import eval_stats
 from .config import HexfieldConfig, MultiStageEvalSection, parse_hexfield_config
+
+# Surfaces silent roster/anchor/SealBot degradations loudly (E2/E3) instead of
+# the historical bare ``continue`` / fail-open swallow.
+_EVAL_LOG = logging.getLogger("hexfield.eval")
 
 # Label of the cross-lineage zero-point in the pool / BT fit. The BT anchor is
 # pinned at exactly 0 Elo (eval_stats.bradley_terry(anchor=...)).
@@ -120,6 +126,41 @@ POOL_VERSION = 1
 
 # Diagnostics filename for one epoch's full result (ratings + CIs + verdict).
 DIAG_PREFIX = "hexfield.multistage_eval.epoch_"
+
+# E4: the radius the in-process featurizer was trained-at era for radius-8 anchors.
+# An opponent labelled in ``cfg.opponents.radius8_opponents`` is "native radius 8".
+_RADIUS8_NATIVE = 8
+
+
+def _live_featurize_radius() -> int:
+    """The LIVE process featurizer/support radius (read-only).
+
+    The support radius is a process-global read ONCE at import from
+    ``HEXFIELD_SUPPORT_RADIUS`` (support._SUPPORT_RADIUS); the whole in-process
+    eval featurizes EVERY opponent at this radius. We read it descriptively to
+    detect a radius-8-era opponent forced OOD — we NEVER mutate it.
+    """
+
+    try:
+        from . import support
+
+        return int(support._SUPPORT_RADIUS)
+    except Exception:  # pragma: no cover - support import is normally present
+        from .constants import LEGAL_RADIUS
+
+        return int(LEGAL_RADIUS)
+
+
+def _opponent_featurized_ood(opp_label: str, cfg: MultiStageEvalSection, live_radius: int) -> bool:
+    """E4: True when a radius-8-era opponent is featurized at a NON-8 radius.
+
+    The candidate (native to the live radius) is never OOD; only the listed
+    radius-8-era anchors (e.g. bc_prefit) are, and only when the live featurizer
+    radius differs from their native 8.
+    """
+
+    radius8 = set(getattr(cfg.opponents, "radius8_opponents", ()) or ())
+    return opp_label in radius8 and live_radius != _RADIUS8_NATIVE
 
 
 def _eval_visits(cfg: MultiStageEvalSection, full_cfg: HexfieldConfig) -> int:
@@ -198,6 +239,11 @@ class Roster:
     sealbot: Opponent | None
     champion: Opponent | None
     opponents: tuple[Opponent, ...]
+    # E2: PERMANENT anchors that failed to resolve on disk and were dropped from
+    # the roster. Each entry: {"label", "raw", "resolved"}. Empty by default so a
+    # fully-resolved roster is unchanged. Surfaced in _roster_summary so the
+    # per-epoch JSON records a silent drop machine-visibly (it is also logged).
+    dropped_anchors: tuple[dict, ...] = ()
 
     def all_labels(self) -> list[str]:
         labels = [self.candidate_label]
@@ -241,6 +287,18 @@ def _resolve_anchor_path(run_dir: Path, checkpoints_dir: Path, raw: str) -> Path
         # catches the BC prefit when it does not.
         head = raw.split("/", 1)[0]
         roots: list[Path] = []
+        # (0) Env-overridable extra search roots (E2): the live importing tree may
+        #     differ from where the anchor checkpoint lives (the bc prefit is only
+        #     in the canonical repo, not the run-data or katago trees). Pointing
+        #     HEXFIELD_ANCHOR_ROOTS (os.pathsep-separated absolute dirs) at the
+        #     canonical tree resolves the anchor WITHOUT a code change and is not
+        #     coupled to which worktree imports the package. Tried FIRST so an
+        #     operator override always wins.
+        env_roots = os.environ.get("HEXFIELD_ANCHOR_ROOTS", "")
+        for r in env_roots.split(os.pathsep):
+            r = r.strip()
+            if r:
+                roots.append(Path(r))
         # (a) Walk up from run_dir to each ancestor that holds the leading
         #     component (run-DATA tree — where epoch_*.pt live).
         anchor_root = run_dir
@@ -350,9 +408,21 @@ def select_opponents(
     collected: dict[str, Opponent] = {}
 
     # PERMANENT anchors (never slide).
+    dropped_anchors: list[dict] = []
     for label, raw in opp_cfg.permanent_anchors:
         path = _resolve_anchor_path(run_dir, ckpt_dir, raw)
         if not path.is_file():
+            # E2: a PERMANENT anchor failing to resolve used to be dropped with a
+            # bare `continue` (silent) — that is how bc_prefit vanished mid-run.
+            # Make it LOUD + recorded so a future miss is machine-visible.
+            dropped_anchors.append(
+                {"label": str(label), "raw": str(raw), "resolved": str(path)}
+            )
+            _EVAL_LOG.warning(
+                "permanent anchor %r unresolved (%s); dropping from roster",
+                label,
+                path,
+            )
             continue
         collected.setdefault(
             label, Opponent(label=label, role="anchor", ckpt=path, epoch=_infer_epoch(path))
@@ -403,6 +473,7 @@ def select_opponents(
         sealbot=sealbot,
         champion=champion,
         opponents=tuple(collected.values()),
+        dropped_anchors=tuple(dropped_anchors),
     )
 
 
@@ -831,8 +902,13 @@ def run_multistage_eval(
     stages.append(stage_c)
 
     # ===== Stage D — rolling Bradley-Terry pool ===============================
+    # E3: thread the SealBot-death flag (gated on a config-ENABLED SealBot).
+    sealbot_expected_but_unavailable = (
+        stage_c.detail.get("sealbot_unavailable") if roster.sealbot is not None else None
+    )
     stage_d, ratings, verdict_block, pool_doc = _stage_d_pool(
         cfg, roster, edges, run_dir,
+        sealbot_expected_but_unavailable=sealbot_expected_but_unavailable,
     )
     stages.append(stage_d)
 
@@ -893,6 +969,13 @@ def _stage_a_bridge(roster: Roster, candidate_ckpt: Path) -> StageResult:
         problems.append("no opponents resolved (no SealBot, no anchors, no bracket)")
     if roster.champion is None:
         problems.append("no prior champion (first eligible epoch) -> no primary hypothesis")
+    # E2: a dropped PERMANENT anchor is a degradation of the compounding curve —
+    # surface it in the serial path's problems too (the concurrent path records
+    # it via _roster_summary).
+    for d in roster.dropped_anchors:
+        problems.append(
+            f"permanent anchor dropped (unresolved): {d.get('label')} -> {d.get('resolved')}"
+        )
 
     status = "ok" if not problems or (roster.champion is None and len(problems) == 1) else "degraded"
     if not candidate_ckpt.is_file():
@@ -906,6 +989,7 @@ def _stage_a_bridge(roster: Roster, candidate_ckpt: Path) -> StageResult:
             "champion": roster.champion.label if roster.champion else None,
             "n_checkpoint_opponents": len(roster.opponents),
             "opponents": [{"label": o.label, "role": o.role, "epoch": o.epoch} for o in roster.opponents],
+            "dropped_anchors": [dict(d) for d in roster.dropped_anchors],
             "notes": problems,
         },
     )
@@ -1090,6 +1174,7 @@ def _build_checkpoint_edge_from_match(
     match: dict[str, Any],
     *,
     reused: int = 0,
+    cfg: MultiStageEvalSection | None = None,
 ) -> dict[str, Any]:
     """Build ONE checkpoint opponent's descriptive + BT edge dict from an
     ALREADY-PLAYED paired match (candidate is net A).
@@ -1101,7 +1186,18 @@ def _build_checkpoint_edge_from_match(
     """
 
     is_champ = opp.role == "champion"
+    # E4: tag whether this opponent was featurized OUT-OF-DISTRIBUTION (a radius-8
+    # era anchor forced to the live radius). Descriptive only — the PRIMARY
+    # champion edge is same-lineage radius-4 and is never OOD-tagged into the fit.
+    live_radius = _live_featurize_radius()
+    featurized_ood = (
+        _opponent_featurized_ood(opp.label, cfg, live_radius) if cfg is not None else False
+    )
     wa, wb, n_eff, prov = _checkpoint_edge_counts(match)
+    # Carry the radius annotation into provenance too so it lands in the persisted
+    # pool row (_edge_pool_row copies descriptive["provenance"] into raw).
+    if isinstance(prov, dict):
+        prov = {**prov, "featurized_ood": featurized_ood, "featurize_radius": live_radius}
     score = match.get("score") or {}
     decided = int(score.get("decided", 0) or 0)
     wins = int(score.get("a_wins", 0) or 0)
@@ -1132,6 +1228,11 @@ def _build_checkpoint_edge_from_match(
             "elo_point": _safe_elo(winrate) if winrate is not None else None,
             "elo_ci95_pairlevel": [_round_elo(elo_lo), _round_elo(elo_hi)],
             "reused_sprt_games": reused if is_champ else 0,
+            # E4: radius-confound annotation — flows into eval_pool.json rows
+            # (via provenance copy) + per-epoch edges so a reader/dashboard can
+            # grey-out OOD-inflated edges instead of reading them as strength.
+            "featurized_ood": featurized_ood,
+            "featurize_radius": live_radius,
             "provenance": prov,
             "note": (
                 "PRIMARY edge — verdict via the pooled BT difference-CI in "
@@ -1247,7 +1348,7 @@ def _play_checkpoint_opponent(
         return None
     # Edge building (effective counts + pair-level CIs) is shared with the
     # one-pass concurrent path — see _build_checkpoint_edge_from_match.
-    return _build_checkpoint_edge_from_match(roster, opp, match, reused=reused)
+    return _build_checkpoint_edge_from_match(roster, opp, match, reused=reused, cfg=cfg)
 
 
 # --------------------------------------------------------------------------- #
@@ -1387,6 +1488,7 @@ def _stage_d_pool(
     *,
     pool_doc: dict[str, Any] | None = None,
     append: bool = True,
+    sealbot_expected_but_unavailable: str | None = None,
 ) -> tuple[StageResult, dict[str, Any], dict[str, Any], dict[str, Any]]:
     """Append this epoch's edges to the pool, refit BT, derive the verdict.
 
@@ -1429,7 +1531,30 @@ def _stage_d_pool(
     # SealBot is disabled/never played, anchor on the lowest permanent anchor
     # instead so the pool still has a fixed zero-point (it then floats relative
     # to that anchor rather than to SealBot — documented in the fit block).
-    anchor_label = _choose_anchor(bt_edges, roster)
+    # E4: radius-confound — opponents featurized OUT-OF-DISTRIBUTION (a radius-8
+    # era anchor under a non-8 live radius). They are excluded from the pinned BT
+    # zero-point (but stay descriptive) so the absolute scale is never anchored on
+    # an OOD-inflated edge. Restricted to labels that actually appear in an edge.
+    live_radius = _live_featurize_radius()
+    edge_labels = {lbl for e in bt_edges for lbl in (e.a, e.b)}
+    ood_labels = {
+        o.label
+        for o in roster.opponents
+        if o.label in edge_labels and _opponent_featurized_ood(o.label, cfg, live_radius)
+    }
+    anchor_label = _choose_anchor(bt_edges, roster, ood_labels=ood_labels)
+
+    # E3: SealBot is the cross-lineage zero-point. If it was EXPECTED (config-
+    # enabled) but DIED mid-match, the anchor silently re-pins to bc_prefit / the
+    # lowest checkpoint — shifting EVERY absolute Elo while still emitting an
+    # authoritative PROMOTE/REGRESS label. Detect that substitution and mark the
+    # whole Stage-D block DEGRADED + machine-flagged. A merely config-DISABLED
+    # SealBot is NOT flagged (sealbot_expected_but_unavailable is None then).
+    sealbot_substituted = bool(
+        sealbot_expected_but_unavailable is not None
+        and anchor_label is not None
+        and anchor_label != SEALBOT_LABEL
+    )
 
     fit = None
     fit_error: str | None = None
@@ -1464,6 +1589,12 @@ def _stage_d_pool(
             "converged": fit.converged,
             "n_edges": len(bt_edges),
             "n_players": len(fit.players),
+            # E4: radius-8-era opponents featurized OOD at the live radius. They
+            # are kept OUT of the pinned anchor and must NOT be read as a clean
+            # cross-lineage strength signal (they play weaker than their true
+            # strength, inflating the candidate's relative Elo against them).
+            "ood_opponents": sorted(ood_labels),
+            "featurize_radius": live_radius,
             "note": (
                 "SealBot pinned at 0 Elo (zero-point); its edges are down-weighted "
                 "out of difference inference."
@@ -1536,7 +1667,45 @@ def _stage_d_pool(
             "BT fit unavailable (" + (fit_error or "no anchor edge") + "); verdict INCONCLUSIVE."
         )
 
-    status = "completed" if fit is not None else "degraded"
+    # E4: when any OOD-featurized opponent is in the pool, flag it on the verdict
+    # so the cross-lineage curve is NOT read as a clean strength signal. This is
+    # descriptive only — it never changes the same-lineage primary verdict.
+    if ood_labels:
+        verdict_block["ood_opponents"] = sorted(ood_labels)
+        verdict_block["ood_note"] = (
+            "Radius-8-era opponents %s are featurized at radius %d (OOD): they play "
+            "weaker than their true strength, inflating the candidate's relative Elo "
+            "against them. They are EXCLUDED from the pinned anchor and the cross-"
+            "lineage curve is NOT a clean strength signal."
+            % (sorted(ood_labels), live_radius)
+        )
+
+    # E3: surface a SealBot death as a DEGRADED verdict with machine flags, even
+    # when the BT fit converged on the substituted anchor. This keeps the absolute
+    # Elo scale from being silently re-anchored without any caller-visible signal.
+    if sealbot_substituted:
+        verdict_block["anchor_substituted"] = True
+        verdict_block["substituted_from"] = SEALBOT_LABEL
+        verdict_block["substituted_to"] = anchor_label
+        verdict_block["sealbot_unavailable_reason"] = sealbot_expected_but_unavailable
+        verdict_block["degraded"] = True
+        verdict_block["degraded_note"] = (
+            "SealBot was expected but unavailable (%s); the BT zero-point re-pinned "
+            "to %r, shifting every ABSOLUTE Elo. Difference verdicts between same-"
+            "lineage nets are unaffected, but absolute placements are NOT calibrated."
+            % (sealbot_expected_but_unavailable, anchor_label)
+        )
+        _EVAL_LOG.warning(
+            "SealBot expected but unavailable (%s); anchor substituted to %r — "
+            "Stage-D marked degraded",
+            sealbot_expected_but_unavailable,
+            anchor_label,
+        )
+
+    if fit is not None:
+        status = "degraded" if sealbot_substituted else "completed"
+    else:
+        status = "degraded"
     return (
         StageResult(
             stage="D_pool",
@@ -1547,6 +1716,8 @@ def _stage_d_pool(
                 "bt_edges_aggregated": len(bt_edges),
                 "anchor": anchor_label,
                 "converged": bool(fit is not None),
+                "sealbot_substituted": sealbot_substituted,
+                "sealbot_unavailable_reason": sealbot_expected_but_unavailable,
             },
         ),
         ratings,
@@ -1814,8 +1985,19 @@ def aggregate_pool(
     # one — with NO re-append (the parts already appended their rows).
     if pool_doc is None:
         pool_doc = _load_pool(_pool_path(run_dir, cfg))
+    # E3: in the parts/aggregate path there is no live stage_c_detail, so a SealBot
+    # death is inferred from the pool — SealBot config-ENABLED but NO SealBot edge
+    # was appended for THIS epoch means the SealBot part did not complete.
+    sealbot_expected_but_unavailable = None
+    if roster.sealbot is not None and not _epoch_has_sealbot_edge(
+        pool_doc, epoch_tag, cand_label
+    ):
+        sealbot_expected_but_unavailable = (
+            "SealBot edge absent from pool for this epoch (part did not complete)"
+        )
     stage_d, ratings, verdict_block, pool_doc = _stage_d_pool(
         cfg, roster, [], run_dir, pool_doc=pool_doc, append=False,
+        sealbot_expected_but_unavailable=sealbot_expected_but_unavailable,
     )
 
     # The SealBot win-rate read, recovered from the pooled SealBot edge (if any)
@@ -1855,6 +2037,29 @@ def aggregate_pool(
         report["meta"]["diagnostics_path"] = str(diag_path)
 
     return report
+
+
+def _epoch_has_sealbot_edge(
+    pool_doc: dict[str, Any], epoch_tag: int, cand_label: str
+) -> bool:
+    """True if a SealBot edge for THIS candidate epoch is present in the pool.
+
+    Used by the parts/aggregate path (E3) to infer a SealBot death: a config-
+    enabled SealBot with no edge appended this epoch means its part did not
+    complete, so the substituted anchor degrades the verdict.
+    """
+
+    for row in pool_doc.get("edges", []):
+        try:
+            if int(row.get("epoch")) != int(epoch_tag):
+                continue
+        except (TypeError, ValueError):
+            continue
+        if row.get("kind") != "sealbot":
+            continue
+        if str(row.get("a")) == cand_label or str(row.get("b")) == cand_label:
+            return True
+    return False
 
 
 def _sealbot_ci_from_pool(
@@ -2202,7 +2407,7 @@ def run_multistage_eval_concurrent(
             match = matches.get(opp.label)
             if match is None:
                 continue
-            edges.append(_build_checkpoint_edge_from_match(roster, opp, match))
+            edges.append(_build_checkpoint_edge_from_match(roster, opp, match, cfg=cfg))
             played.append(opp.label)
 
     stage_c_status = "completed" if edges else "empty"
@@ -2220,8 +2425,15 @@ def run_multistage_eval_concurrent(
     stage_c = StageResult(stage="C_deep", status=stage_c_status, detail=stage_c_detail)
 
     # ----- Stage D — the SAME pool append / BT fit / verdict (unchanged). -----
+    # E3: flag a SealBot DEATH (expected-but-unavailable) so the substituted
+    # anchor degrades the verdict. Gated on roster.sealbot so a config-DISABLED
+    # SealBot is NOT treated as a degradation.
+    sealbot_expected_but_unavailable = (
+        stage_c_detail.get("sealbot_unavailable") if roster.sealbot is not None else None
+    )
     stage_d, ratings, verdict_block, pool_doc = _stage_d_pool(
         cfg, roster, edges, run_dir,
+        sealbot_expected_but_unavailable=sealbot_expected_but_unavailable,
     )
 
     report: dict[str, Any] = {
@@ -2274,7 +2486,12 @@ def _coerce_section(config: HexfieldConfig | MultiStageEvalSection | None) -> Mu
     raise TypeError(f"config must be HexfieldConfig | MultiStageEvalSection | None, got {type(config)}")
 
 
-def _choose_anchor(bt_edges: list[eval_stats.BTEdge], roster: Roster) -> str | None:
+def _choose_anchor(
+    bt_edges: list[eval_stats.BTEdge],
+    roster: Roster,
+    *,
+    ood_labels: set[str] | None = None,
+) -> str | None:
     """Pick the BT zero-point anchor for the pool — ALWAYS a usable one (fix #2).
 
     The pool must NEVER free-float when any checkpoint edge exists: a missing
@@ -2295,29 +2512,41 @@ def _choose_anchor(bt_edges: list[eval_stats.BTEdge], roster: Roster) -> str | N
          pool instead of leaving it free-floating.
       4. Last resort: any non-candidate player with an edge, so the fit still has
          a fixed point rather than free-floating.
+
+    E4: ``ood_labels`` are radius-mismatched (featurized-OOD) opponents — they are
+    NOT eligible as the pinned BT zero-point (tiers 2/3 skip them) so the pinned
+    scale is never anchored on an OOD-inflated edge. They still participate as
+    DESCRIPTIVE edges in the fit. Tier 4 may still fall back to one only when
+    there is literally no non-OOD non-candidate edge (better a fixed point than a
+    free-floating fit).
     """
 
+    ood = ood_labels or set()
     labels = {lbl for e in bt_edges for lbl in (e.a, e.b)}
     # 1. SealBot zero-point (when it actually produced an edge).
     if SEALBOT_LABEL in labels:
         return SEALBOT_LABEL
     # 2. bc_prefit first (canonical base), then any other anchor-role opponent,
-    #    in configured order.
+    #    in configured order — EXCLUDING featurized-OOD anchors.
     for o in roster.opponents:
-        if o.role == "anchor" and o.label == "bc_prefit" and o.label in labels:
+        if o.role == "anchor" and o.label == "bc_prefit" and o.label in labels and o.label not in ood:
             return o.label
     for o in roster.opponents:
-        if o.role == "anchor" and o.label in labels:
+        if o.role == "anchor" and o.label in labels and o.label not in ood:
             return o.label
     # 3. LOWEST available checkpoint opponent by epoch — never leave the pool
-    #    free-floating when ANY checkpoint edge exists.
+    #    free-floating when ANY checkpoint edge exists. Skip OOD opponents.
     ckpt_opps = sorted(
-        (o for o in roster.opponents if o.label in labels and o.epoch is not None),
+        (o for o in roster.opponents if o.label in labels and o.epoch is not None and o.label not in ood),
         key=lambda o: o.epoch,
     )
     if ckpt_opps:
         return ckpt_opps[0].label
-    # 4. Last resort: any player with an edge that is not the candidate.
+    # 4. Last resort: any player with an edge that is not the candidate (prefer a
+    #    non-OOD one, but accept an OOD anchor over a free-floating fit).
+    for lbl in sorted(labels):
+        if lbl != roster.candidate_label and lbl not in ood:
+            return lbl
     for lbl in sorted(labels):
         if lbl != roster.candidate_label:
             return lbl
@@ -2478,4 +2707,8 @@ def _roster_summary(roster: Roster) -> dict[str, Any]:
             {"label": o.label, "role": o.role, "epoch": o.epoch, "ckpt": str(o.ckpt) if o.ckpt else None}
             for o in roster.opponents
         ],
+        # E2: PERMANENT anchors dropped because they did not resolve on disk.
+        # Recorded in EVERY pipeline's per-epoch JSON (all paths go through here),
+        # so a silent anchor drop is now machine-visible, not just a log line.
+        "dropped_anchors": [dict(a) for a in roster.dropped_anchors],
     }

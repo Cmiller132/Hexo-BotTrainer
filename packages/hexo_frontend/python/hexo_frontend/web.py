@@ -1619,7 +1619,9 @@ def _training_run(name: str) -> dict[str, object]:
         # without the new artifacts (non-hexfield lineages, older runs).
         "multistage_eval_history": multistage_eval_history,
         "eval_pool": eval_pool,
-        "learning_health": _learning_health(epoch_history, evaluation_history, live_status),
+        "learning_health": _learning_health(
+            epoch_history, evaluation_history, live_status, multistage_eval_history
+        ),
         "status": _training_run_status(run_dir, histories, live_status),
     }
 
@@ -3474,6 +3476,7 @@ def _multistage_eval_history(run_dir: Path) -> list[dict[str, object]]:
         ratings = payload.get("ratings") if isinstance(payload.get("ratings"), dict) else {}
         verdict = payload.get("verdict") if isinstance(payload.get("verdict"), dict) else {}
         edges = payload.get("edges") if isinstance(payload.get("edges"), list) else []
+        roster = payload.get("roster") if isinstance(payload.get("roster"), dict) else {}
         headline_edges = [
             {
                 "opponent": edge.get("opponent"),
@@ -3487,6 +3490,25 @@ def _multistage_eval_history(run_dir: Path) -> list[dict[str, object]]:
             if isinstance(edge, dict) and _multistage_headline_edge(edge)
         ]
         players = ratings.get("players") if isinstance(ratings.get("players"), list) else []
+        # Compact roster: the opponent labels/roles actually evaluated this epoch
+        # plus the configured permanent anchors, so the frontend can surface a
+        # dropped PERMANENT anchor (e.g. bc_prefit gone at ep35) as a muted "not in
+        # roster" pill instead of silently dropping it (SEV-2). The anchor allowlist
+        # is read from the report's own config -> no hard-coded duplicate.
+        opp_list = roster.get("opponents") if isinstance(roster.get("opponents"), list) else []
+        roster_opponents = [
+            {"label": o.get("label"), "role": o.get("role"), "epoch": o.get("epoch")}
+            for o in opp_list
+            if isinstance(o, dict)
+        ]
+        config = meta.get("config") if isinstance(meta.get("config"), dict) else {}
+        opp_cfg = config.get("opponents") if isinstance(config.get("opponents"), dict) else {}
+        perm = opp_cfg.get("permanent_anchors") if isinstance(opp_cfg.get("permanent_anchors"), list) else []
+        permanent_anchors = [
+            str(entry[0])
+            for entry in perm
+            if isinstance(entry, (list, tuple)) and entry
+        ]
         stat = _safe_stat(path)
         rows.append(
             {
@@ -3495,6 +3517,13 @@ def _multistage_eval_history(run_dir: Path) -> list[dict[str, object]]:
                 "anchor": meta.get("anchor") or ratings.get("anchor"),
                 "verdict_label": verdict.get("label"),
                 "verdict": verdict,
+                "roster": {
+                    "candidate": roster.get("candidate") if isinstance(roster.get("candidate"), dict) else {},
+                    "champion": roster.get("champion") if isinstance(roster.get("champion"), dict) else {},
+                    "sealbot": roster.get("sealbot"),
+                    "opponents": roster_opponents,
+                    "permanent_anchors": permanent_anchors,
+                },
                 "ratings": {
                     "anchor": ratings.get("anchor"),
                     "players": [p for p in players if isinstance(p, dict)],
@@ -3518,8 +3547,9 @@ def _eval_pool_summary(run_dir: Path) -> dict[str, object] | None:
     ``epoch`` column spanning every candidate checkpoint. Lineage-gated like the
     other hexfield readers; returns ``None`` for non-hexfield runs and when the
     file is absent/corrupt (``_read_json_file`` -> ``None``). The heavy ``raw``
-    block on each edge is dropped to keep the run payload small -- the chart only
-    needs epoch + the head-to-head counts."""
+    block on each edge is dropped to keep the run payload small, EXCEPT the few
+    integer ``physical_wins_*`` counts the W-L matrix needs (the top-level
+    ``wins_a/wins_b`` are n_eff-weighted, so the true head-to-head must survive)."""
 
     if _diag_prefix(run_dir) != "hexfield":
         return None
@@ -3531,17 +3561,30 @@ def _eval_pool_summary(run_dir: Path) -> dict[str, object] | None:
     for edge in raw_edges:
         if not isinstance(edge, dict):
             continue
-        edges.append(
-            {
-                "epoch": edge.get("epoch"),
-                "a": edge.get("a"),
-                "b": edge.get("b"),
-                "wins_a": edge.get("wins_a"),
-                "wins_b": edge.get("wins_b"),
-                "weight": edge.get("weight"),
-                "kind": edge.get("kind"),
-            }
-        )
+        # The heavy raw block (pentanomial, n_eff, virtual_batch_size, ...) is
+        # dropped, but the TRUE physical head-to-head counts MUST survive: the
+        # top-level wins_a/wins_b can be n_eff-weighted / overdispersion-reweighted
+        # (fractional), so the W-L matrix in app.js prefers raw.physical_wins_* to
+        # avoid rendering a distorted record (e.g. 3-3 instead of the real 5-5).
+        # Keep only those few integer counts as a slim raw block.
+        raw = edge.get("raw") if isinstance(edge.get("raw"), dict) else {}
+        slim_raw: dict[str, object] = {}
+        for key in ("physical_wins_a", "physical_wins_b",
+                    "physical_wins_cand", "physical_wins_sealbot"):
+            if key in raw:
+                slim_raw[key] = raw.get(key)
+        compact: dict[str, object] = {
+            "epoch": edge.get("epoch"),
+            "a": edge.get("a"),
+            "b": edge.get("b"),
+            "wins_a": edge.get("wins_a"),
+            "wins_b": edge.get("wins_b"),
+            "weight": edge.get("weight"),
+            "kind": edge.get("kind"),
+        }
+        if slim_raw:
+            compact["raw"] = slim_raw
+        edges.append(compact)
     return {
         "format": payload.get("format"),
         "version": payload.get("version"),
@@ -3716,17 +3759,83 @@ def _loss_buffer_from_training(training: dict[str, object]) -> dict[str, object]
     return out
 
 
+def _ms_candidate_elo(row: dict[str, object]) -> float | None:
+    """The candidate checkpoint's pooled Elo from one multi-stage report row.
+
+    Prefers the verdict's named candidate (``verdict.primary.candidate``); else
+    the highest-Elo non-anchor node. Mirrors the frontend ``msCandidatePlayer``
+    selection so the health chip and the rating table agree. ``None`` when the
+    rating table is absent/degraded."""
+
+    ratings = row.get("ratings") if isinstance(row.get("ratings"), dict) else {}
+    players = ratings.get("players") if isinstance(ratings.get("players"), list) else []
+    players = [p for p in players if isinstance(p, dict)]
+    if not players:
+        return None
+    verdict = row.get("verdict") if isinstance(row.get("verdict"), dict) else {}
+    primary = verdict.get("primary") if isinstance(verdict.get("primary"), dict) else {}
+    want = primary.get("candidate")
+    if want:
+        named = next((p for p in players if p.get("label") == want), None)
+        if named is not None:
+            return _optional_float(named.get("elo"))
+    non_anchor = [p for p in players if not p.get("is_anchor")]
+    pool = non_anchor or players
+    best = max(pool, key=lambda p: (_optional_float(p.get("elo")) or float("-inf")))
+    return _optional_float(best.get("elo"))
+
+
+def _ms_sealbot_winrate(row: dict[str, object]) -> float | None:
+    """The descriptive SealBot zero-point winrate for one report row.
+
+    Prefers the SealBot headline edge's ``winrate``; falls back to the midpoint
+    of the report's ``sealbot_winrate_ci95`` headline. ``None`` when SealBot did
+    not run (the edge/CI is absent)."""
+
+    edges = row.get("edges") if isinstance(row.get("edges"), list) else []
+    for edge in edges:
+        if not isinstance(edge, dict):
+            continue
+        opp = str(edge.get("opponent") or edge.get("role") or "").lower()
+        if opp == "sealbot":
+            wr = _optional_float(edge.get("winrate"))
+            if wr is not None:
+                return wr
+    ci = row.get("sealbot_winrate_ci95")
+    if isinstance(ci, (list, tuple)) and len(ci) == 2:
+        lo = _optional_float(ci[0])
+        hi = _optional_float(ci[1])
+        if lo is not None and hi is not None:
+            return (lo + hi) / 2.0
+    return None
+
+
 def _learning_health(
     epoch_history: list[dict[str, object]],
     evaluation_history: list[dict[str, object]],
     live_status: dict[str, object],
+    multistage_eval_history: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
     """Heuristic run-health verdict for the History status band: a coarse
     ``status`` ladder (collecting -> ok -> improving / watch -> intervene)
     plus human-readable ``messages``, derived from loss trend, SealBot
     survival/wins, self-play speed, D6 previews, and replay composition.
     Display-side triage only — thresholds here are owner judgment calls, not
-    training-side gates."""
+    training-side gates.
+
+    For hexfield runs the eval signal is the standalone multi-stage report
+    (``multistage_eval_history``: pooled Bradley-Terry verdict + candidate Elo +
+    descriptive SealBot zero-point winrate), NOT the all-null wrapper
+    ``evaluation_history`` (which only the dense_cnn lineage populates with
+    ``mean_turns``/``wins``). When ``multistage_eval_history`` is non-empty the
+    eval-health branch is driven from it and the legacy turns-based "no SealBot
+    eval yet" / "D6 missing" messages are suppressed."""
+
+    ms_history = [
+        row for row in (multistage_eval_history or [])
+        if isinstance(row, dict)
+    ]
+    has_multistage = bool(ms_history)
 
     completed = [row for row in epoch_history if row.get("status") == "completed"]
     latest = completed[-1] if completed else (epoch_history[-1] if epoch_history else {})
@@ -3784,7 +3893,77 @@ def _learning_health(
     elif latest_loss is not None:
         messages.append(f"Latest training loss is {latest_loss:.3f}.")
 
-    if latest_turns is None:
+    # Multi-stage eval fields, populated from the standalone hexfield report when
+    # present (so the status-band eval chip renders a real value, not "--").
+    latest_verdict: str | None = None
+    latest_cand_elo: float | None = None
+    latest_sealbot_winrate: float | None = None
+    latest_eval_epoch: int | None = None
+
+    if has_multistage:
+        # Hexfield lineage: drive eval-health off the multi-stage Bradley-Terry
+        # report. NEVER emit the legacy turns-based "no SealBot eval yet" line —
+        # the eval has run (one report per evaluated epoch).
+        latest_ms = ms_history[-1]
+        first_ms = ms_history[0]
+        _ep = _optional_float(latest_ms.get("epoch"))
+        latest_eval_epoch = int(_ep) if _ep is not None else None
+        verdict_block = latest_ms.get("verdict") if isinstance(latest_ms.get("verdict"), dict) else {}
+        latest_verdict = (
+            latest_ms.get("verdict_label")
+            or (verdict_block.get("label") if isinstance(verdict_block, dict) else None)
+        )
+        latest_verdict = str(latest_verdict).upper() if latest_verdict else None
+        latest_cand_elo = _ms_candidate_elo(latest_ms)
+        latest_sealbot_winrate = _ms_sealbot_winrate(latest_ms)
+        first_sealbot_winrate = _ms_sealbot_winrate(first_ms)
+
+        wr_txt = (
+            f" — SealBot winrate {latest_sealbot_winrate * 100.0:.0f}%"
+            if latest_sealbot_winrate is not None
+            else ""
+        )
+        elo_txt = (
+            f", candidate {latest_cand_elo:+.0f} Elo"
+            if latest_cand_elo is not None
+            else ""
+        )
+        ep_txt = f" (epoch {latest_eval_epoch})" if latest_eval_epoch else ""
+
+        if latest_verdict == "PROMOTE":
+            status = "improving"
+            messages.append(f"Eval verdict PROMOTE{ep_txt}{elo_txt}{wr_txt}.")
+        elif latest_verdict == "REGRESS":
+            # The ep5 startup REGRESS is a known artifact (weakest net); only the
+            # very first eval is treated as a watch rather than an intervene.
+            status = "watch" if len(ms_history) <= 1 else "intervene"
+            messages.append(f"Eval verdict REGRESS{ep_txt}{elo_txt}{wr_txt}.")
+        else:
+            # INCONCLUSIVE (the steady state for this resolution floor): read the
+            # descriptive SealBot zero-point winrate as the real progress signal.
+            if (
+                latest_sealbot_winrate is not None
+                and first_sealbot_winrate is not None
+                and len(ms_history) >= 2
+                and latest_sealbot_winrate - first_sealbot_winrate > 0.05
+            ):
+                status = "improving"
+                messages.append(
+                    f"Eval INCONCLUSIVE{ep_txt} but SealBot winrate is rising "
+                    f"({first_sealbot_winrate * 100.0:.0f}% → {latest_sealbot_winrate * 100.0:.0f}%)"
+                    f"{elo_txt}."
+                )
+            elif latest_sealbot_winrate is not None and latest_sealbot_winrate >= 0.5:
+                status = "ok"
+                messages.append(
+                    f"Eval INCONCLUSIVE{ep_txt}{elo_txt}{wr_txt} (tripwire only, not a fine-edge test)."
+                )
+            else:
+                status = "watch"
+                messages.append(
+                    f"Eval INCONCLUSIVE{ep_txt}{elo_txt}{wr_txt}; SealBot winrate flat/low."
+                )
+    elif latest_turns is None:
         status = "collecting"
         messages.append("No SealBot evaluation result yet for the completed epochs.")
     else:
@@ -3818,7 +3997,9 @@ def _learning_health(
     d6_preview = latest_d6.get("preview_symmetries") if isinstance(latest_d6.get("preview_symmetries"), list) else []
     if "random_per_training_expansion" in d6_mode or d6_preview:
         messages.append("D6 training augmentation previews are present.")
-    elif latest_epoch > 0:
+    elif latest_epoch > 0 and not has_multistage:
+        # D6 preview is a dense_cnn-lineage concern; on hexfield runs the absent
+        # preview is irrelevant noise, so only flag it for non-multistage runs.
         status = "watch" if status != "intervene" else status
         messages.append("D6 augmentation preview is missing for the latest epoch.")
 
@@ -3841,6 +4022,12 @@ def _learning_health(
         "eval_delta_from_first": (latest_turns - first_turns) if latest_turns is not None and first_turns is not None else None,
         "latest_eval_wins": latest_wins,
         "latest_eval_games": latest_games,
+        # Multi-stage eval (hexfield) — None for dense_cnn lineages. These let the
+        # status-band eval chip render a real value instead of "--".
+        "latest_verdict": latest_verdict,
+        "latest_cand_elo": latest_cand_elo,
+        "latest_sealbot_winrate": latest_sealbot_winrate,
+        "latest_eval_epoch": latest_eval_epoch,
         "latest_selfplay_pos_s": speed,
         "latest_exact_128": exact_128,
         "latest_classical_fraction": latest_classical_fraction,
