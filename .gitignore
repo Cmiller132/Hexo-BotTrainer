@@ -21,6 +21,11 @@ runs/
 *.bak
 _tmp_*
 
+# KataGo replay-buffer port: per-phase test scratch holds COPIES of real
+# self-play shards (regenerable, never source) + manifests/diags the tests
+# write. Never version it.
+tests/katago_buffer/_scratch/
+
 # Model/data outputs.
 *.pt
 *.pth
