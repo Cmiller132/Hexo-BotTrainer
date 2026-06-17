@@ -10,6 +10,7 @@ tracked there.
 from __future__ import annotations
 
 import json
+import os
 import random
 import time
 from typing import Any
@@ -98,12 +99,28 @@ class HexfieldTrainer:
         grad_norms: list[float] = []
         steps = 0
         started = time.time()
+        # Radius transition: tolerate (skip) replay-buffer samples whose policy
+        # targets are off the now-smaller legal set (see the per-chunk skip below).
+        tolerate_off_legal = int(os.environ.get("HEXFIELD_SUPPORT_RADIUS", "8")) < 8
         for _pass in range(max(int(passes), 1)):
             order = list(range(len(rows)))
             rng.shuffle(order)
             for start in range(0, len(order), batch_rows):
                 chunk = [rows[i] for i in order[start : start + batch_rows]]
-                expanded = [expand_sample(s, symmetry=rng.randrange(12)) for s in chunk]
+                # When HEXFIELD_SUPPORT_RADIUS<8 the replay window still holds
+                # radius-8 samples whose policy targets fall outside the radius-4
+                # legal set; skip those (they age out of the window) rather than
+                # tripping the hard-error wire, which stays armed at the default.
+                expanded = []
+                for s in chunk:
+                    try:
+                        expanded.append(expand_sample(s, symmetry=rng.randrange(12)))
+                    except ValueError as e:
+                        if tolerate_off_legal and "off the legal set" in str(e):
+                            continue
+                        raise
+                if not expanded:
+                    continue
                 denoms = step_global_denominators(expanded, STV_HORIZONS)
                 self.optimizer.zero_grad(set_to_none=True)
                 for bucket in pair_budget_microbuckets(expanded, quantize=PAD_QUANTUM):
