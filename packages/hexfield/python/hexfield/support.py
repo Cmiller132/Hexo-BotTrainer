@@ -20,6 +20,7 @@ property: the legal nodes of a row are exactly slots [0, legal_count).
 
 from __future__ import annotations
 
+import os
 from collections import deque
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -27,6 +28,17 @@ from dataclasses import dataclass
 import numpy as np
 
 from .constants import DIRECTIONS, HALO_DIST, LEGAL_RADIUS
+
+# Model-side legal-move radius (NOT the game engine's). HEXFIELD_SUPPORT_RADIUS
+# restricts the support to legal cells within hex-dist <= R of a stone (default
+# 8 == the engine's legality, i.e. unchanged). Setting R=4 makes the model + MCTS
+# consider only the radius-4 candidate moves (a smaller support -> a cheaper
+# O(support^2) forward) while the engine still allows radius-8. The bias table
+# (BIAS_DISK_RADIUS) and DIST_SCALE stay at 8, so the network architecture and the
+# feature scaling are UNCHANGED (the checkpoint loads); only the support shrinks.
+# Serve (Rust featurizer) reads the same env var, so train/serve stay consistent.
+_SUPPORT_RADIUS = int(os.environ.get("HEXFIELD_SUPPORT_RADIUS", LEGAL_RADIUS))
+_SUPPORT_HALO = _SUPPORT_RADIUS + 1
 
 
 class SupportContractError(ValueError):
@@ -169,7 +181,7 @@ def _build_support(stones: list[tuple[int, int]]) -> Support:
     while frontier:
         cell = frontier.popleft()
         d = dist[cell]
-        if d == HALO_DIST:
+        if d == _SUPPORT_HALO:
             continue
         q, r = cell
         for dq, dr in DIRECTIONS:
@@ -178,9 +190,9 @@ def _build_support(stones: list[tuple[int, int]]) -> Support:
                 dist[nxt] = d + 1
                 frontier.append(nxt)
 
-    legal = sorted(c for c, d in dist.items() if d <= LEGAL_RADIUS and c not in stone_set)
+    legal = sorted(c for c, d in dist.items() if d <= _SUPPORT_RADIUS and c not in stone_set)
     stones_sorted = sorted(stone_set)
-    halo = sorted(c for c, d in dist.items() if d == HALO_DIST)
+    halo = sorted(c for c, d in dist.items() if d == _SUPPORT_HALO)
 
     ordered = legal + stones_sorted + halo
     index = {coord: i for i, coord in enumerate(ordered)}
