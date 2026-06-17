@@ -70,6 +70,22 @@ class TrainingSection:
     grad_clip: float = 1.0
     warmup_steps: int = 0  # fresh-init runs warm-start from the BC prefit
     shuffle_keep_target_rows: int = 300_000
+    # KataGo / dense_cnn_restnet replay-buffer port (PLAN §6/§7). Defaults are
+    # hexfield-tuned (NOT dense's literals): the dimensionless KataGo knobs
+    # (exponent=0.65, expand=0.4) are unchanged, but min_rows/scale/targets are
+    # scaled to hexfield's ~7k Full-rows/epoch stream (PLAN §3.1/§8/S1). _merge
+    # is a strict flat merge that already tolerates new scalar fields.
+    shuffle_min_rows: int = 20_000
+    shuffle_taper_window_exponent: float = 0.65
+    shuffle_expand_window_per_row: float = 0.4
+    shuffle_taper_window_scale: float = 20_000.0
+    validation_fraction: float = 0.0
+    train_samples_per_epoch: int = 100_000
+    max_train_bucket_per_new_data: float = 8.0
+    max_train_bucket_size: float = 500_000.0
+    no_repeat_files: bool = False
+    expand_backend: str = "serial"
+    expand_workers: int = 0
 
 
 @dataclass(frozen=True)

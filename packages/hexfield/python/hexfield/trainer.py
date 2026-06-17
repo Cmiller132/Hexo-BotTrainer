@@ -29,6 +29,7 @@ from .config import HexfieldConfig
 from .losses import hexfield_loss
 from .samples import STV_HORIZONS, expand_sample
 from .shards import read_compact_shard
+from .train_state import HexfieldTrainState
 
 
 class HexfieldTrainer:
@@ -39,6 +40,11 @@ class HexfieldTrainer:
         self.device = torch.device(config.device)
         self.scaler = torch.amp.GradScaler(enabled=self.device.type == "cuda")
         self.global_step = 0
+        # Persisted KataGo-style train-bucket governor + window bookkeeping
+        # (PLAN §6/M1). Serialized into the checkpoint meta by the saver and
+        # restored by the loader on the RESUME branch only. Starts fresh here;
+        # the window/governor mechanism that drives it lands in a later phase.
+        self.train_state = HexfieldTrainState()
 
     def _window_paths(self, ctx) -> list:
         return sorted(
