@@ -1130,6 +1130,209 @@ def _search_hexfield(
     }
 
 
+# ---------------------------------------------------------------------------
+# hexfield attention map (Model Debug interactive attention view)
+# ---------------------------------------------------------------------------
+
+# Constants the response echoes so the UI never hardcodes them (model constants).
+_ATTN_NUM_TOKENS = 8
+_ATTN_NUM_BLOCKS = 3
+_ATTN_NUM_HEADS = 4
+
+
+def _attention_na_skeleton(loaded: "LoadedModel", block: int, head: int | None, action_ids: Sequence[int]) -> dict[str, Any]:
+    """Empty attention payload for a non-hexfield lineage (mirrors the INPUTS
+    tab's ``input_planes: null`` n/a contract — a 200 with ``found: False``)."""
+
+    return {
+        "found": False,
+        "reason": "lineage_na",
+        "lineage": loaded.lineage,
+        "block": int(block),
+        "head": (None if head is None else (head if head == "max" else int(head))),
+        "num_blocks": 0,
+        "num_heads": 0,
+        "num_tokens": _ATTN_NUM_TOKENS,
+        "num_cells": 0,
+        "cells": [],
+        "token_queries": [],
+        "cell_query": None,
+        "incoming_token_to_cell": None,
+        "ply": len(action_ids),
+    }
+
+
+def attention_position(
+    loaded: "LoadedModel",
+    action_ids: Sequence[int],
+    *,
+    block: int = 0,
+    head: int | None = None,
+    query: dict[str, Any],
+    n: int | None = None,
+) -> dict[str, Any]:
+    """Per-query attention distribution for the hexfield set-transformer.
+
+    Registers a forward hook on ``model.attn_blocks[block].attn`` (a
+    ``RelPosAttention``) and recomputes the per-head softmax attention over the
+    joint sequence ``[8 tokens ; N cells]`` from the hook's ``(post-LN1 seq,
+    attn_bias)`` inputs. Returns ALL 8 token-query rows plus the ONE requested
+    cell-query row (when ``query.type == "cell"``), each sliced into its
+    token-part (``[:8]``) and cell-part (``[8:]``); never serializes the full
+    ``(8+N)^2`` matrix. Floats rounded to 6 dp.
+
+    ``n`` is an opaque passthrough for signature parity with analyze/search and
+    is unused here. Non-hexfield lineages return the n/a skeleton (found False).
+    """
+
+    block = max(0, min(int(block), _ATTN_NUM_BLOCKS - 1))
+    head = None if head is None else ("max" if head == "max" else max(0, min(int(head), _ATTN_NUM_HEADS - 1)))
+
+    if loaded.lineage != HEXFIELD:
+        return _attention_na_skeleton(loaded, block, head, action_ids)
+
+    hf = _hexfield()
+    state = state_from_actions(action_ids)
+    batch, legal_action_ids = _hexfield_inputs(hf, state)
+    model = loaded.model
+
+    target = model.attn_blocks[block].attn  # RelPosAttention
+    captured: dict[str, torch.Tensor] = {}
+
+    def _hook(module, inputs):
+        # Pre-hook: inputs == (seq, attn_bias). seq is the post-LN1 joint
+        # sequence (1, S, C); attn_bias is the materialized (1, heads, S, S)
+        # additive bias. Recompute q/k -> scores*scale + bias -> softmax exactly
+        # as the 'materialized' impl does (numerically identical to sdpa).
+        seq, attn_bias = inputs[0], inputs[1]
+        b, s, c = seq.shape
+        h, d = module.heads, module.head_dim
+        q = module.q_proj(seq).reshape(b, s, h, d).transpose(1, 2)
+        k = module.k_proj(seq).reshape(b, s, h, d).transpose(1, 2)
+        scores = (q @ k.transpose(-2, -1)) * module.scale + attn_bias  # (1, h, S, S)
+        attn = torch.softmax(scores, dim=-1)
+        captured["attn"] = attn[0].detach()  # (heads, S, S)
+
+    # Force the materialized fp32 bias path: serve-flex must be OFF so the hook's
+    # attn_bias is a real (1, heads, S, S) tensor, never a _FlexBias carrier. We
+    # run the forward under enable_grad() (same trick as _hexfield_forward) so
+    # build_attn_bias takes the master fp32 _BiasGather branch, and temporarily
+    # disable any leaked serve-flag, restoring it in finally.
+    prev_flex = getattr(model, "_serve_flex", False)
+    handle = target.register_forward_pre_hook(_hook)
+    try:
+        if prev_flex:
+            model._serve_flex = False
+        with torch.enable_grad():
+            model.forward(batch["feats"], batch["nbr"], batch["mask"], batch["coords"])
+    finally:
+        handle.remove()
+        if prev_flex:
+            model._serve_flex = prev_flex
+
+    attn = captured.get("attn")
+    if attn is None:  # pragma: no cover - hook always fires for a valid block
+        raise RuntimeError("attention hook did not fire")
+    # Guard against a leaked _FlexBias slipping through (no materialized bias):
+    if attn.dim() != 3:  # pragma: no cover - defensive
+        raise RuntimeError("attention hook captured an unexpected tensor shape")
+
+    # Reduce heads -> (S, S). None: mean over heads (rows sum to 1). "max":
+    # per-(query,key) max over heads (surfaces a key any single head attends to
+    # strongly; rows no longer sum to 1). int: that single head.
+    if head is None:
+        A = attn.mean(0)
+    elif head == "max":
+        A = attn.amax(0)
+    else:
+        A = attn[head]
+
+    coords = batch["coords"][0]  # (N, 2) axial (q, r), model node order
+    n_cells = int(coords.shape[0])
+    nt = _ATTN_NUM_TOKENS
+    legal_count = len(legal_action_ids)
+
+    def _row(i: int) -> tuple[list[float], list[float]]:
+        r = A[i]
+        over_tokens = [round(float(x), 6) for x in r[:nt].tolist()]
+        over_cells = [round(float(x), 6) for x in r[nt:].tolist()]
+        return over_cells, over_tokens
+
+    # Stable cell axis: cells[j] describes sequence index (8 + j). Only the legal
+    # prefix [0, legal_count) carries a packed action_id; stones/halo -> None.
+    coords_list = coords.tolist()
+    cells: list[dict[str, Any]] = []
+    for j in range(n_cells):
+        q_j, r_j = int(coords_list[j][0]), int(coords_list[j][1])
+        aid = hf.pack_action_id(q_j, r_j) if j < legal_count else None
+        cells.append({"i": nt + j, "q": q_j, "r": r_j, "action_id": aid})
+
+    token_queries: list[dict[str, Any]] = []
+    for t in range(nt):
+        over_cells, over_tokens = _row(t)
+        token_queries.append(
+            {"token": t, "attn_over_cells": over_cells, "attn_over_tokens": over_tokens}
+        )
+
+    qtype = str(query.get("type", "cell"))
+    qid = int(query.get("id", 0))
+
+    cell_query: dict[str, Any] | None = None
+    incoming: list[float] | None = None
+    if qtype == "cell":
+        # Resolve the clicked cell to a support-node index by matching its packed id
+        # against EVERY support cell (legal moves AND placed stones AND halo), not
+        # just the legal prefix — a stone/halo cell has no legal action_id, so the
+        # old legal-only match silently failed (bad_query) on every stone click.
+        j = None
+        for k in range(n_cells):
+            if hf.pack_action_id(int(coords_list[k][0]), int(coords_list[k][1])) == qid:
+                j = k
+                break
+        if j is None:
+            out = _attention_na_skeleton(loaded, block, head, action_ids)
+            out["reason"] = "bad_query"
+            # still echo the real lineage/structural constants for a hexfield miss
+            out["lineage"] = loaded.lineage
+            out["num_blocks"] = _ATTN_NUM_BLOCKS
+            out["num_heads"] = _ATTN_NUM_HEADS
+            out["num_cells"] = n_cells
+            out["cells"] = cells
+            out["token_queries"] = token_queries
+            return out
+        i = nt + j
+        over_cells, over_tokens = _row(i)
+        cq = cells[j]
+        cell_query = {
+            "action_id": qid,
+            "i": i,
+            "q": cq["q"],
+            "r": cq["r"],
+            "attn_over_cells": over_cells,
+            "attn_over_tokens": over_tokens,
+        }
+        # Incoming: how much each of the 8 tokens attends TO this cell (one column
+        # of the token rows) — pre-sliced so the UI needs no second request.
+        incoming = [token_queries[t]["attn_over_cells"][j] for t in range(nt)]
+
+    return {
+        "found": True,
+        "reason": None,
+        "lineage": loaded.lineage,
+        "block": int(block),
+        "head": (None if head is None else (head if head == "max" else int(head))),
+        "num_blocks": _ATTN_NUM_BLOCKS,
+        "num_heads": _ATTN_NUM_HEADS,
+        "num_tokens": nt,
+        "num_cells": n_cells,
+        "cells": cells,
+        "token_queries": token_queries,
+        "cell_query": cell_query,
+        "incoming_token_to_cell": incoming,
+        "ply": len(action_ids),
+    }
+
+
 # ===========================================================================
 # Model Debug v2 additions: checkpoint meta plumb-through, pure-Python PUCT
 # tree (the "debug search"), recorded .npz row reader, whole-game error sweep.

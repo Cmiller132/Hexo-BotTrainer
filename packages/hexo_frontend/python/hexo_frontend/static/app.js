@@ -38,7 +38,7 @@
 // the version were invisible. This single top bar always shows the running
 // version, a live "last tap" echo (so a tap that registers is visible even if its
 // effect isn't), and any JS error (uncaught OR surfaced from the Debug code).
-const APP_VERSION = "20260615-evalcurve2";
+const APP_VERSION = "20260617-dbgattn";
 function __diagBar() {
   let el = document.getElementById("__diag");
   if (!el) {
@@ -4975,7 +4975,7 @@ function formatBytes(value) {
 // position including injected what-if moves and checkpoint B.
 // ===========================================================================
 
-const DBG_TABS = ["heads", "search", "targets", "compare", "inputs", "ckpt"];
+const DBG_TABS = ["heads", "search", "targets", "compare", "inputs", "ckpt", "attn"];
 const DBG_TAB_IDS = {
   heads: "dbgTabHeads",
   search: "dbgTabSearch",
@@ -4983,9 +4983,11 @@ const DBG_TAB_IDS = {
   compare: "dbgTabCompare",
   inputs: "dbgTabInputs",
   ckpt: "dbgTabCkpt",
+  attn: "dbgTabAttn",
 };
-// Base heat modes — index in DBG_MODE_ORDER is the 1..8 keyboard digit.
-const DBG_MODE_ORDER = ["prior", "visits", "delta", "opp", "target", "mismatch", "childq", "plane"];
+// Base heat modes — index in DBG_MODE_ORDER is the 1..9 keyboard digit.
+// "attn" sits at index 7 (digit 8); inserting it shifts "plane" to digit 9.
+const DBG_MODE_ORDER = ["prior", "visits", "delta", "opp", "target", "mismatch", "childq", "attn", "plane"];
 const DBG_MODES = ["none"].concat(DBG_MODE_ORDER);
 const DBG_CACHE_MAX = 300;  // spec M12: client analysis cache LRU cap
 // Action ids are packed exactly like hexo_engine.types.pack_coord_id (which
@@ -5017,6 +5019,11 @@ const dbg = {
   searchBusy: false,
   tree: null,          // /api/debug/search_tree result (childq/Q/scatter/PV read it)
   treeBusy: false,
+  attn: null,          // /api/debug/attention payload for the current attn cache slot
+  attnQuery: null,     // {type:"cell"|"token", id:int} | null — active attention query
+  attnBlock: 0,        // attn block 0..2 (mirrors nav.attnblk)
+  attnHead: null,      // attn head 0..3 or null=mean (mirrors nav.attnhead)
+  attnPending: false,  // an attention fetch is in flight for the current slot
   treeOpen: new Map(), // tree-node path -> explicit expand/collapse (default: PV open)
   treePreview: null,   // {key, ids} — clicked tree node's line, ghosted on the board
   treeGhostsOff: false, // T with a fresh tree toggles its board ghosts (§1.7 "run / toggle")
@@ -5041,7 +5048,7 @@ const dbg = {
   paletteGamesRun: "",
   ckptSweep: null,     // checkpoint sweep dock tab (spec S4)
   prefetchAbort: null, // the ONE in-flight ply±1 prefetch (spec S7)
-  keys: { position: "", analysis: "", analysisB: "", search: "", tree: "" },
+  keys: { position: "", analysis: "", analysisB: "", search: "", tree: "", attn: "" },
   // Board UI state that intentionally does NOT live in the hash.
   overlays: { threats: false, numbers: true, last: true, legalDim: false },
   logScale: false,
@@ -5064,6 +5071,7 @@ const dbg = {
   posSeq: 0,
   anlSeq: 0,
   anlSeqB: 0,
+  attnSeq: 0,
   applySeq: 0,
   // Client caches (spec M12): one LRU keyed run|path|rec|ply|ckpt|acts holding
   // {position, analysis, search, tree, record_row}; revisiting a ply, undoing a
@@ -5135,7 +5143,7 @@ function dbgUnpackActionId(actionId) {
 // ---- nav state + URL hash (spec M1) ----------------------------------------
 
 function dbgDefaultNav() {
-  return { run: "", src: "selfplay", path: "", rec: 0, ply: null, ckptA: "", ckptB: "", acts: [], tab: "heads", mode: "prior" };
+  return { run: "", src: "selfplay", path: "", rec: 0, ply: null, ckptA: "", ckptB: "", acts: [], tab: "heads", mode: "prior", attnq: "", attnblk: 0, attnhead: "" };
 }
 
 function dbgNavToHash(nav) {
@@ -5153,6 +5161,10 @@ function dbgNavToHash(nav) {
   if (nav.acts && nav.acts.length) parts.push("acts=" + nav.acts.join(","));
   if (nav.tab && nav.tab !== "heads") parts.push("tab=" + enc(nav.tab));
   if (nav.mode && nav.mode !== "prior") parts.push("mode=" + enc(nav.mode));
+  // Attention query/block/head (additive; only when a query has been made).
+  if (nav.attnq) parts.push("attnq=" + enc(nav.attnq));
+  if (nav.attnblk) parts.push("attnblk=" + String(nav.attnblk));
+  if (nav.attnhead !== "" && nav.attnhead != null) parts.push("attnhead=" + enc(String(nav.attnhead)));
   return "#debug" + (parts.length ? "?" + parts.join("&") : "");
 }
 
@@ -5174,7 +5186,26 @@ function dbgHashToNav(hash) {
   nav.tab = DBG_TABS.includes(tab) ? tab : "heads";
   const mode = params.get("mode");
   nav.mode = DBG_MODES.includes(mode) ? mode : "prior";
+  // Attention query/block/head — validated lightly (worker clamps authoritatively).
+  const aq = params.get("attnq") || "";
+  nav.attnq = /^(cell|token):-?\d+$/.test(aq) ? aq : "";
+  const ablk = parseInt(params.get("attnblk"), 10);
+  nav.attnblk = Number.isFinite(ablk) ? Math.max(0, Math.min(ablk, 2)) : 0;
+  const ah = params.get("attnhead");
+  if (ah == null || ah === "" || ah === "mean") nav.attnhead = "";
+  else if (ah === "max") nav.attnhead = "max";
+  else {
+    const ahn = parseInt(ah, 10);
+    nav.attnhead = Number.isFinite(ahn) ? Math.max(0, Math.min(ahn, 3)) : "";
+  }
   return nav;
+}
+
+// Parse an attnq string ("cell:33152" | "token:3") into {type, id} | null.
+function dbgParseAttnQuery(attnq) {
+  const m = /^(cell|token):(-?\d+)$/.exec(String(attnq || ""));
+  if (!m) return null;
+  return { type: m[1], id: Number(m[2]) };
 }
 
 function dbgNavigate(patch, { replace = false } = {}) {
@@ -5259,6 +5290,12 @@ function debugOpenFromHistory(detail) {
 // ---- apply: nav -> sources -> position -> panels ----------------------------
 
 async function dbgApplyNav(nav, seq) {
+  // Mirror the attention nav keys into the working state (read by the board heat,
+  // the Attention panel, and the fetch trigger). Block/head clamps live in
+  // dbgHashToNav; attnhead "" == mean-over-heads.
+  dbg.attnQuery = dbgParseAttnQuery(nav.attnq);
+  dbg.attnBlock = nav.attnblk || 0;
+  dbg.attnHead = nav.attnhead === "" || nav.attnhead == null ? null : (nav.attnhead === "max" ? "max" : Number(nav.attnhead));
   dbgSyncControls();
   dbgRenderCrumb();
   if (!trainingRuns.length) {
@@ -5362,6 +5399,7 @@ async function dbgApplyNav(nav, seq) {
     dbgScheduleFetch(120);  // coalesce rapid steps/slider drags into one fetch
   }
   if (nav.tab === "inputs" || nav.mode === "plane") dbgEnsureInputs(false);
+  if (nav.tab === "attn" || nav.mode === "attn") dbgEnsureAttn(false);
   if (dbgWantRecordRow(nav)) dbgEnsureRecordRow(false);
 }
 
@@ -5493,7 +5531,25 @@ function dbgFreshData(kind) {
   // Data gated to the CURRENT nav key: the board heat/HUD/Q columns must never
   // paint a previous position's outputs. Panels instead keep their stale data
   // visible with a stale dot until the refill lands (M14).
+  // Attention is keyed by the full slot (position + query + block + head) so a
+  // stale token/cell/block/head row can never be served (see dbgAttnSlotKey).
+  if (kind === "attn") return dbg.keys.attn === dbgAttnSlotKey() ? dbg.attn : null;
   return dbg.keys[kind] === dbgCurrentKey() ? dbg[kind] : null;
+}
+
+// Attention cache slot = base position key + query tag + block + head, so
+// switching token/cell/block/head/position each maps to a distinct slot. The
+// active token switch reuses a slot (all 8 token rows ride in one payload), so
+// the qtag for token queries is fixed to "token" — only cell queries vary by id.
+function dbgAttnQtag() {
+  const q = dbg.attnQuery;
+  if (!q) return "none";
+  return q.type === "cell" ? `cell:${q.id}` : "token";
+}
+
+function dbgAttnSlotKey() {
+  const head = dbg.attnHead == null ? "mean" : String(dbg.attnHead);
+  return `${dbgCurrentKey()}::attn::${dbgAttnQtag()}::${dbg.attnBlock}::${head}`;
 }
 
 function dbgResetPosition() {
@@ -5502,12 +5558,13 @@ function dbgResetPosition() {
   dbg.analysisB = null;
   dbg.search = null;
   dbg.tree = null;
+  dbg.attn = null;
   dbg.records = [];
   dbg.gameActs = [];
   dbg.gameActsKey = "";
   dbg.gamePlacements = [];
   dbg.gameKey = "";
-  dbg.keys = { position: "", analysis: "", analysisB: "", search: "", tree: "" };
+  dbg.keys = { position: "", analysis: "", analysisB: "", search: "", tree: "", attn: "" };
 }
 
 function dbgCommitEntry(key, entry) {
@@ -7010,6 +7067,217 @@ function dbgSyncPlaneSelect() {
   }
 }
 
+// ---- ATTENTION tab + board mode (hexfield lineage only) ----------------------
+
+// Best-known lineage for the loaded ckptA. Prefer the analyze meta (present after
+// any analyze), then the CKPT-tab provenance (loaded independently). Used ONLY to
+// disable the Attn mode/tab for dense/hexgt — the worker is the authority and
+// still returns found:false for non-hexfield, so a wrong guess only delays a note.
+function dbgAttnLineage() {
+  const a = dbgFreshData("analysis");
+  if (a && a.meta && a.meta.lineage) return String(a.meta.lineage);
+  const info = dbg.ckptInfo.get(`${dbg.nav.run}|${dbg.nav.ckptA}`);
+  if (info && info.meta && info.meta.lineage) return String(info.meta.lineage);
+  return "";
+}
+
+function dbgAttnLineageOk() {
+  const lin = dbgAttnLineage();
+  // Empty (unknown) is allowed — let the worker decide; only KNOWN non-hexfield
+  // lineages are inert so we never fetch for dense/hexgt.
+  return lin === "" || lin === "hexfield";
+}
+
+// The attn slot tail (everything after the position key) — used to key the
+// per-entry attn payload cache so revisiting a query/block/head is free.
+function dbgAttnSlotTail() {
+  const head = dbg.attnHead == null ? "mean" : String(dbg.attnHead);
+  return `${dbgAttnQtag()}::${dbg.attnBlock}::${head}`;
+}
+
+async function dbgEnsureAttn(force) {
+  const nav = dbg.nav;
+  if (nav.tab !== "attn" && nav.mode !== "attn") return;  // only when relevant
+  if (!dbg.attnQuery) {
+    dbgRenderAttn();
+    return;
+  }
+  if (!dbgAttnLineageOk()) {
+    dbgRenderAttn();  // inert for known dense/hexgt — render the n/a note, no fetch
+    return;
+  }
+  if (!nav.run || !nav.path || nav.ply == null || !nav.ckptA) {
+    dbgRenderAttn();
+    return;
+  }
+  const slotKey = dbgAttnSlotKey();
+  const entry = dbgCacheEntry(dbgCurrentKey());
+  if (!entry.attnSlots) entry.attnSlots = new Map();
+  const tail = dbgAttnSlotTail();
+  if (force) entry.attnSlots.delete(tail);
+  const cached = entry.attnSlots.get(tail);
+  if (cached !== undefined) {
+    // Cache hit — commit to the live slot and paint.
+    dbg.attn = cached;
+    dbg.keys.attn = slotKey;
+    dbgRenderAttn();
+    if (nav.mode === "attn") dbgRenderBoard();
+    return;
+  }
+  dbgFetchAttn(slotKey, tail, entry);
+}
+
+async function dbgFetchAttn(slotKey, tail, entry) {
+  const seq = ++dbg.attnSeq;  // latest-wins (sibling to anlSeq/posSeq)
+  dbg.attnPending = true;
+  dbgRenderAttn();
+  try {
+    const nav = dbg.nav;
+    const body = Object.assign(await dbgRequestBody(nav.ckptA), {
+      block: dbg.attnBlock,
+      head: dbg.attnHead,  // null = mean over heads
+      query: dbg.attnQuery,
+      n: null,
+    });
+    const data = await debugFetchJson("/api/debug/attention", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (seq !== dbg.attnSeq) return;  // superseded by a newer selection — drop
+    entry.attnSlots.set(tail, data);
+    dbg.attn = data;
+    dbg.keys.attn = slotKey;
+  } catch (e) {
+    if (seq === dbg.attnSeq) debugSetStatus(`Attention: ${e.message}`, "error");
+  } finally {
+    if (seq === dbg.attnSeq) dbg.attnPending = false;
+  }
+  if (slotKey === dbgAttnSlotKey()) {
+    dbgRenderAttn();
+    if (dbg.nav.mode === "attn") dbgRenderBoard();
+  }
+}
+
+function dbgAttnFmtPct(v) {
+  return `${((Number(v) || 0) * 100).toFixed(1)}%`;
+}
+
+// Resolve the active query's row from the cached payload (no refetch when
+// switching among the 8 token chips — all rows ride in token_queries).
+function dbgAttnActiveRow(attn) {
+  if (!attn || !attn.found || !dbg.attnQuery) return null;
+  if (dbg.attnQuery.type === "token") {
+    const id = Math.max(0, Math.min(dbg.attnQuery.id, (attn.token_queries || []).length - 1));
+    return (attn.token_queries || [])[id] || null;
+  }
+  return attn.cell_query || null;  // null until the cell-query payload lands
+}
+
+function dbgRenderAttn() {
+  const body = dbgEl("dbgAttnBody");
+  if (!body) return;
+  const blockSel = dbgEl("dbgAttnBlockSel");
+  const headSel = dbgEl("dbgAttnHeadSel");
+  if (blockSel) blockSel.value = String(dbg.attnBlock);
+  if (headSel) headSel.value = dbg.attnHead == null ? "" : String(dbg.attnHead);
+  const tokensEl = dbgEl("dbgAttnTokens");
+  const barsEl = dbgEl("dbgAttnTokenBars");
+  const incomingEl = dbgEl("dbgAttnIncoming");
+  const readoutEl = dbgEl("dbgAttnQueryReadout");
+  const noteEl = dbgEl("dbgAttnNote");
+  const hide = el => { if (el) el.hidden = true; };
+
+  // Known non-hexfield lineage — inert n/a state, hide the interactive blocks.
+  if (!dbgAttnLineageOk()) {
+    hide(tokensEl); hide(barsEl); hide(incomingEl); hide(readoutEl);
+    if (noteEl) {
+      noteEl.hidden = false;
+      noteEl.textContent = "Attention map is available for the hexfield lineage only (n/a here).";
+    }
+    return;
+  }
+
+  const attn = dbgFreshData("attn");
+
+  // Always render the 8 token chips when we have a payload (cheap; lets the user
+  // switch tokens with no refetch). Active chip reflects dbg.attnQuery.
+  if (tokensEl) {
+    const numTokens = attn && attn.found ? attn.num_tokens : 8;
+    const activeTok = dbg.attnQuery && dbg.attnQuery.type === "token" ? dbg.attnQuery.id : -1;
+    let html = "";
+    for (let t = 0; t < numTokens; t++) {
+      const cls = "dbg-attn-chip" + (t === activeTok ? " active" : "");
+      html += `<button type="button" class="${cls}" data-attn-token="${t}">T${t}</button>`;
+    }
+    if (tokensEl.__dbgSig !== html) {
+      tokensEl.__dbgSig = html;
+      tokensEl.innerHTML = html;
+    }
+    tokensEl.hidden = false;
+  }
+
+  if (readoutEl) {
+    readoutEl.hidden = false;
+    const blk = attn && attn.found ? attn.block : dbg.attnBlock;
+    const hd = attn && attn.found ? attn.head : dbg.attnHead;
+    const where = `block ${blk}${hd == null ? " · mean heads" : (hd === "max" ? " · max heads" : " · head " + hd)}`;
+    if (!dbg.attnQuery) readoutEl.textContent = `No query — ${where}`;
+    else if (dbg.attnQuery.type === "token") readoutEl.textContent = `Query: token T${dbg.attnQuery.id} — ${where}`;
+    else readoutEl.textContent = `Query: cell #${dbg.attnQuery.id} — ${where}`;
+  }
+
+  const row = dbgAttnActiveRow(attn);
+
+  // Token bars: the active query's attention onto the 8 summary tokens.
+  if (barsEl) {
+    if (row && row.attn_over_tokens) {
+      const maxV = Math.max(1e-9, ...row.attn_over_tokens);
+      let html = `<div class="dbg-attn-bars-title">onto tokens</div>`;
+      row.attn_over_tokens.forEach((v, t) => {
+        const w = Math.max(0, Math.min(100, (v / maxV) * 100));
+        html += `<div class="dbg-attn-bar-row"><span class="dbg-attn-bar-lab">T${t}</span>`
+          + `<span class="dbg-attn-bar-track"><span class="dbg-attn-bar-fill" style="width:${w.toFixed(1)}%"></span></span>`
+          + `<span class="dbg-attn-bar-val">${dbgAttnFmtPct(v)}</span></div>`;
+      });
+      barsEl.innerHTML = html;
+      barsEl.hidden = false;
+    } else {
+      barsEl.innerHTML = "";
+      barsEl.hidden = true;
+    }
+  }
+
+  // Incoming readout: for a cell query, how much each token attends TO this cell.
+  if (incomingEl) {
+    const inc = attn && attn.found ? attn.incoming_token_to_cell : null;
+    if (dbg.attnQuery && dbg.attnQuery.type === "cell" && inc) {
+      let html = `<div class="dbg-attn-bars-title">incoming (tokens &#8594; this cell)</div>`;
+      inc.forEach((v, t) => {
+        html += `<span class="dbg-attn-inc-chip">T${t} ${dbgAttnFmtPct(v)}</span>`;
+      });
+      incomingEl.innerHTML = html;
+      incomingEl.hidden = false;
+    } else {
+      incomingEl.innerHTML = "";
+      incomingEl.hidden = true;
+    }
+  }
+
+  if (noteEl) {
+    let msg = "";
+    if (dbg.attnPending) msg = "Loading attention…";
+    else if (!dbg.attnQuery) msg = "Select a board cell (in Attn mode) or a token chip above.";
+    else if (!attn) msg = "Loading attention…";
+    else if (!attn.found) msg = attn.reason === "lineage_na"
+      ? "Attention map is available for the hexfield lineage only (n/a here)."
+      : (attn.reason === "bad_query" ? "That cell is not a support cell here — pick another." : "No attention data.");
+    else if (dbg.attnQuery.type === "cell" && !attn.cell_query) msg = "Loading cell attention…";
+    noteEl.hidden = !msg;
+    noteEl.textContent = msg;
+  }
+}
+
 // ---- COMPARE helpers (spec S5 + client Δ overlay) ---------------------------------------
 
 function dbgAnalysisBFresh() {
@@ -7111,6 +7379,7 @@ function dbgRenderAll() {
       dbgRenderInputs();
       dbgSyncPlaneSelect();
     }
+    dbgRenderAttn();
     dbgRenderDockChart();
     dbgRenderCkptSweep();  // keeps the Run button present before any sweep ran
     dbgUpdateStaleDots();
@@ -7173,6 +7442,19 @@ function dbgSyncControls() {
   document.querySelectorAll("#dbgModeBar [data-mode]").forEach(b => b.classList.toggle("active", b.dataset.mode === nav.mode));
   const plane = dbgEl("dbgPlaneSelect");
   if (plane) plane.hidden = nav.mode !== "plane";
+  // Attention is hexfield-only: disable the Attn MODE button + the Attention TAB
+  // button for known dense/hexgt lineages (re-enable for hexfield/unknown).
+  const attnOk = dbgAttnLineageOk();
+  const attnModeBtn = document.querySelector('#dbgModeBar [data-mode="attn"]');
+  if (attnModeBtn) {
+    attnModeBtn.disabled = !attnOk;
+    attnModeBtn.classList.toggle("dbg-disabled", !attnOk);
+  }
+  const attnTabBtn = dbgEl("dbgTabAttnBtn");
+  if (attnTabBtn) {
+    attnTabBtn.disabled = !attnOk;
+    attnTabBtn.classList.toggle("dbg-disabled", !attnOk);
+  }
 }
 
 function dbgRenderCrumb() {
@@ -7355,6 +7637,34 @@ function dbgHeatForMode(mode) {
       out.scale = "div";
       for (const ch of tree.tree.children || []) out.values.set(`${ch.q},${ch.r}`, ch.qm);
     }
+  } else if (mode === "attn") {
+    if (!dbgAttnLineageOk()) {
+      out.note = "n/a for this lineage";
+      return dbgHeatFinish(out);
+    }
+    const attn = dbgFreshData("attn");
+    if (!attn || !attn.found) {
+      out.note = attn && attn.reason === "lineage_na"
+        ? "n/a for this lineage"
+        : (dbg.attnQuery ? "loading attention…" : "click a board cell or a token chip");
+      return dbgHeatFinish(out);
+    }
+    const row = dbgAttnActiveRow(attn);
+    if (!row) {
+      out.note = "loading attention…";
+      return dbgHeatFinish(out);
+    }
+    out.scale = "seq";  // attention is a [0,1] distribution — sequential scale
+    const cells = attn.cells || [];
+    for (let j = 0; j < cells.length; j++) {
+      const c = cells[j];
+      const v = row.attn_over_cells[j];
+      if (v) out.values.set(`${c.q},${c.r}`, v);  // same "q,r" Map key contract as every mode
+    }
+    const headLabel = attn.head == null ? "mean" : (attn.head === "max" ? "max" : "h" + attn.head);
+    out.note = dbg.attnQuery && dbg.attnQuery.type === "token"
+      ? `T${dbg.attnQuery.id} attends (block ${attn.block} ${headLabel})`
+      : `cell ${row.q},${row.r} attends (block ${attn.block} ${headLabel})`;
   } else if (mode === "plane") {
     const entry = dbg.cache.get(dbgCurrentKey());
     const planes = entry ? entry.planes : undefined;
@@ -7509,8 +7819,24 @@ function dbgBuildHudMetrics() {
   if (rr && rr.found && rr.row) for (const row of rr.row.policy || []) get(row.q, row.r).target = row.p;
   const b = dbgAnalysisBFresh();  // split board / cmp overlay HUD column (S5)
   if (b) for (const row of b.policy || []) get(row.q, row.r).priorB = row.p;
+  // Attention overlay value per cell (incl. stones) so the hover HUD reads them.
+  const attn = dbgFreshData("attn");
+  if (attn && attn.found) {
+    const arow = dbgAttnActiveRow(attn);
+    if (arow) {
+      const acells = attn.cells || [];
+      for (let j = 0; j < acells.length; j++) {
+        const av = arow.attn_over_cells[j];
+        if (av != null) get(acells[j].q, acells[j].r).attn = av;
+      }
+    }
+  }
   return metrics;
 }
+
+// Modes whose heat map carries values for OCCUPIED cells (every support node has a
+// value), not just legal/empty cells — their overlay must render ON stones too.
+const DBG_NODE_LEVEL_MODES = new Set(["attn", "plane"]);
 
 function dbgRenderBoard() {
   if (!debugBoardSvg) return;
@@ -7581,6 +7907,13 @@ function dbgRenderBoard() {
   const lastCoord = lastStone
     ? { q: lastStone.q, r: lastStone.r }
     : ((pos.debug.last_q != null && pos.debug.last_r != null) ? { q: pos.debug.last_q, r: pos.debug.last_r } : null);
+  // Highlight the cell/stone currently chosen as the ATTENTION query so you can
+  // see which node you are inspecting (works on stones, which the heat now shows).
+  let attnQueryKey = null;
+  if (dbg.nav.mode === "attn") {
+    const attnD = dbgFreshData("attn");
+    if (attnD && attnD.found && attnD.cell_query) attnQueryKey = `${attnD.cell_query.q},${attnD.cell_query.r}`;
+  }
   data.sort((a, b) => (a.placement ? 1 : 0) - (b.placement ? 1 : 0));
   let html = "";
 
@@ -7597,19 +7930,40 @@ function dbgRenderBoard() {
   }
   for (const h of data) {
     const isStone = Boolean(h.placement);
-    const fill = isStone ? playerColor(h.placement.player) : "#101924";
-    const stroke = isStone ? "#708296" : "#2c3d50";
+    const attnStone = isStone && heat.mode === "attn";
+    // In attention mode a stone is TRANSPARENT with a player-coloured OUTLINE (P0 blue
+    // / P1 red) so you can still see whose stone it is; the attention overlay below
+    // fills it with the player colour at opacity == attention, so zero attention shows
+    // just the outline (no fill) and tint grows in only where the query attends.
+    const stoneTint = attnStone ? (h.placement.player === "player0" ? "var(--p0)" : "var(--p1)") : null;
+    const fill = isStone ? (attnStone ? "transparent" : playerColor(h.placement.player)) : "#101924";
+    const stroke = attnStone ? stoneTint : (isStone ? "#708296" : "#2c3d50");
     const opacity = isStone ? "1" : (h.legal || h.candidate ? "0.7" : (ov.legalDim ? "0.18" : "0.45"));
-    html += `<path class="dbg-cell" d="${path(h.x, h.y, HEX - 1)}" fill="${fill}" stroke="${stroke}" stroke-width="1" opacity="${opacity}" data-q="${h.q}" data-r="${h.r}"></path>`;
-    if (!isStone && heat.values.has(h.key)) {
+    html += `<path class="dbg-cell" d="${path(h.x, h.y, HEX - 1)}" fill="${fill}" stroke="${stroke}" stroke-width="${attnStone ? "1.6" : "1"}" opacity="${opacity}" data-q="${h.q}" data-r="${h.r}"></path>`;
+    // Node-level modes (attn/plane) carry values on stones too. Stones get an
+    // opacity-scaled FILL tinted by player (P0 blue / P1 red); legal/empty cells
+    // get GREEN so the three are distinct at a glance. At very low values a stone
+    // shows a thin player-coloured OUTLINE (no fill) so it never fades out.
+    // Policy modes never key a stone and keep their accent (seq) / signed (div) colours.
+    if ((!isStone || DBG_NODE_LEVEL_MODES.has(heat.mode)) && heat.values.has(h.key)) {
       const t = dbgHeatNorm(heat, heat.values.get(h.key));
-      if (heat.scale === "div") {
-        if (Math.abs(t) > 0.015) {
-          html += `<path d="${path(h.x, h.y, HEX - 2)}" fill="${t >= 0 ? "var(--green)" : "var(--p1)"}" opacity="${(dbg.opacity * (0.10 + 0.90 * Math.abs(t))).toFixed(3)}" pointer-events="none"></path>`;
+      const mag = Math.abs(t);
+      if (mag > 0.015) {
+        const nodeLevel = DBG_NODE_LEVEL_MODES.has(heat.mode);
+        // Node-level (attn): opacity scales straight from 0 (no min floor) so an
+        // un-attended cell shows NO colour; policy modes keep the original 0.10 floor.
+        const hop = (dbg.opacity * (nodeLevel ? mag : (0.10 + 0.90 * mag))).toFixed(3);
+        if (isStone) {
+          const tint = h.placement.player === "player0" ? "var(--p0)" : "var(--p1)";
+          html += `<path d="${path(h.x, h.y, HEX - 2)}" fill="${tint}" opacity="${hop}" pointer-events="none"></path>`;
+        } else {
+          const hcolor = nodeLevel ? "var(--green)" : (heat.scale === "div" ? (t >= 0 ? "var(--green)" : "var(--p1)") : "var(--accent)");
+          html += `<path d="${path(h.x, h.y, HEX - 2)}" fill="${hcolor}" opacity="${hop}" pointer-events="none"></path>`;
         }
-      } else if (t > 0.015) {
-        html += `<path d="${path(h.x, h.y, HEX - 2)}" fill="var(--accent)" opacity="${(dbg.opacity * (0.10 + 0.90 * t)).toFixed(3)}" pointer-events="none"></path>`;
       }
+    }
+    if (attnQueryKey && h.key === attnQueryKey) {
+      html += `<path d="${path(h.x, h.y, HEX - 1)}" fill="none" stroke="#fff" stroke-width="2.4" opacity="0.95" pointer-events="none"></path>`;
     }
     if (ov.last && lastCoord && h.q === lastCoord.q && h.r === lastCoord.r) {
       html += `<path class="dbg-last" d="${path(h.x, h.y, HEX - 0.5)}" fill="none" stroke="var(--accent)" stroke-width="2.2" pointer-events="none"></path>`;
@@ -7659,6 +8013,7 @@ function dbgHoverCell(q, r) {
   const pct = v => (v != null ? `${(v * 100).toFixed(1)}%` : "—");
   const childQ = m.childQ != null ? `${m.childQ >= 0 ? "+" : ""}${m.childQ.toFixed(2)} (N=${m.childN})` : "—";
   let line = `${q},${r} · prior ${pct(m.prior)} · visits ${pct(m.visits)} · childQ ${childQ} · target ${pct(m.target)}`;
+  if (m.attn != null) line += ` · attn ${pct(m.attn)}`;
   if ((dbg.split || dbg.cmpHeat) && dbg.nav.ckptB) line += ` · B prior ${pct(m.priorB)}`;
   hud.innerHTML = `<div>${escapeText(line)}</div>`;
 }
@@ -8143,6 +8498,7 @@ function dbgUpdateStaleDots() {
   dbgSetStale("dbgTabCompare", Boolean(nav.ckptB) && Boolean(dbg.analysisB) && dbg.keys.analysisB !== curB);
   dbgSetStale("dbgTabInputs", posStale);
   dbgSetStale("dbgTabCkpt", false);     // checkpoint provenance is position-independent
+  dbgSetStale("dbgTabAttn", Boolean(dbg.attn) && dbg.keys.attn !== dbgAttnSlotKey());
 }
 
 function dbgRefreshPanel(panelId) {
@@ -8160,6 +8516,7 @@ function dbgRefreshPanel(panelId) {
   } else if (panelId === "dbgTabCkpt") dbgEnsureCkptInfo(true);
   else if (panelId === "dbgTabTargets") dbgEnsureRecordRow(true);
   else if (panelId === "dbgTabInputs") dbgEnsureInputs(true);
+  else if (panelId === "dbgTabAttn") dbgEnsureAttn(true);
 }
 
 // ---- board view (pan/zoom, ported from the Match board on debug-local state) ----
@@ -8339,7 +8696,7 @@ function dbgHandleKey(e) {
       dbgClearToggles();  // 0 = mode none + clear additive toggles
       dbgClearCmpHeat();
       dbgNavigate({ mode: "none" }, { replace: true });
-    } else if (num >= 1 && num <= 8) {
+    } else if (num >= 1 && num <= DBG_MODE_ORDER.length) {
       if (e.shiftKey) dbgClearToggles();  // Shift+digit = solo
       dbgClearCmpHeat();
       dbgNavigate({ mode: DBG_MODE_ORDER[num - 1] }, { replace: true });
@@ -8591,10 +8948,36 @@ function debugBindEvents() {
       dbgGotoPly(Number(plyRow.dataset.ply));
       return;
     }
-    const cellEl = t.closest(".dbg-cell");
+    const attnChip = t.closest("#dbgAttnTokens [data-attn-token]");
+    if (attnChip) {
+      ev.preventDefault();
+      const id = Number(attnChip.dataset.attnToken) || 0;
+      diagTap("attn token T" + id);
+      // Switching tokens reuses the cached payload (all 8 rows ride in it) — no refetch.
+      dbgNavigate({ attnq: `token:${id}` }, { replace: true });
+      return;
+    }
+    let cellEl = t.closest(".dbg-cell");
+    if (!cellEl && ev.clientX != null) {
+      // Desktop (Firefox esp.): the pan/zoom pointer-capture retargets the click
+      // off the cell onto the board container, so ev.target is not a .dbg-cell.
+      // Recover the cell by hit-testing the pointer position (heat overlays are
+      // pointer-events:none, so this lands on the underlying .dbg-cell).
+      const hit = document.elementFromPoint(ev.clientX, ev.clientY);
+      cellEl = hit && hit.closest ? hit.closest(".dbg-cell") : null;
+    }
     if (cellEl) {
       ev.preventDefault();
-      dbgInjectCell(Number(cellEl.dataset.q), Number(cellEl.dataset.r));
+      const cq = Number(cellEl.dataset.q);
+      const cr = Number(cellEl.dataset.r);
+      if (dbg.nav.mode === "attn") {
+        // ATTN MODE: a board click sets the cell query (no what-if injection).
+        const id = dbgPackActionId(cq, cr);
+        diagTap("attn cell " + cq + "," + cr);
+        dbgNavigate({ attnq: `cell:${id}` }, { replace: true });
+        return;
+      }
+      dbgInjectCell(cq, cr);
       return;
     }
     if (t.classList && t.classList.contains("dbg-overlay")) {
@@ -8772,6 +9155,17 @@ function debugBindEvents() {
     dbgRenderBoard();
   });
   on("dbgPlaneSelect", "change", () => dbgRenderBoard());
+  // Attention block/head selectors — a new block/head changes the cache signature
+  // and refetches (the worker recomputes that block's/head's row).
+  on("dbgAttnBlockSel", "change", e => {
+    const blk = Math.max(0, Math.min(Number(e.target.value) || 0, 2));
+    dbgNavigate({ attnblk: blk }, { replace: true });
+  });
+  on("dbgAttnHeadSel", "change", e => {
+    const v = e.target.value;
+    const next = v === "" ? "" : (v === "max" ? "max" : Math.max(0, Math.min(Number(v) || 0, 3)));
+    dbgNavigate({ attnhead: next }, { replace: true });
+  });
   on("dbgCmpSplit", "change", e => dbgToggleSplit(e.target.checked));
   on("dbgPinImport", "change", e => {
     const file = e.target.files && e.target.files[0];

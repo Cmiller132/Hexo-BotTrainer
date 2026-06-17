@@ -16,7 +16,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Hexo Match</title>
-<link rel="stylesheet" href="/static/styles.css?v=20260615-evalcurve2">
+<link rel="stylesheet" href="/static/styles.css?v=20260617-dbgattn8">
 </head>
 <body>
 <header>
@@ -302,7 +302,8 @@
           <button type="button" data-mode="target" title="Recorded visit-policy target (5)">Target</button>
           <button type="button" data-mode="mismatch" title="Prior&#8722;target mismatch (6)">Mismatch</button>
           <button type="button" data-mode="childq" title="Root-child Q from last debug tree (7)">Child Q</button>
-          <button type="button" data-mode="plane" title="Input plane, dense lineage only (8)">Plane</button>
+          <button type="button" data-mode="attn" title="Attention (8) — hexfield lineage only">Attn</button>
+          <button type="button" data-mode="plane" title="Input plane, dense lineage only (9)">Plane</button>
         </div>
         <select id="dbgPlaneSelect" aria-label="Input plane" hidden></select>
         <div class="dbg-toggles" aria-label="Additive overlays">
@@ -349,6 +350,7 @@
         <button type="button" data-tab="compare">Compare</button>
         <button type="button" data-tab="inputs">Inputs</button>
         <button type="button" data-tab="ckpt">Ckpt</button>
+        <button type="button" data-tab="attn" id="dbgTabAttnBtn">Attention</button>
       </div>
       <div class="dbg-tab-panels">
 
@@ -431,6 +433,25 @@
           </header>
           <div id="dbgCkptInfo" class="dbg-ckpt-info"><div class="dbg-empty-note">Checkpoint provenance loads here without an analyze</div></div>
         </section>
+
+        <section id="dbgTabAttn" class="dbg-tab-panel" aria-label="Attention">
+          <header class="dbg-panel-head">
+            <span class="dbg-panel-title">Attention</span>
+            <span class="dbg-stale" hidden title="Stale &#8212; previous position"></span>
+            <button type="button" class="dbg-panel-refresh" aria-label="Refresh">&#8635;</button>
+          </header>
+          <div id="dbgAttnBody" class="dbg-attn-body">
+            <div class="dbg-attn-ctrls">
+              <label>Block <select id="dbgAttnBlockSel"><option>0</option><option>1</option><option>2</option></select></label>
+              <label>Head <select id="dbgAttnHeadSel"><option value="">mean</option><option value="max">max</option><option>0</option><option>1</option><option>2</option><option>3</option></select></label>
+            </div>
+            <div id="dbgAttnQueryReadout" class="dbg-attn-readout"></div>
+            <div id="dbgAttnTokens" class="dbg-attn-tokens" role="group" aria-label="Token queries"></div>
+            <div id="dbgAttnTokenBars" class="dbg-attn-bars"></div>
+            <div id="dbgAttnIncoming" class="dbg-attn-incoming"></div>
+            <div id="dbgAttnNote" class="dbg-empty-note">Select board cell or token (Attn mode)</div>
+          </div>
+        </section>
       </div>
     </section>
 
@@ -484,9 +505,9 @@
         <kbd>A</kbd><span>analyze now</span>
         <kbd>S</kbd><span>run root search</span>
         <kbd>T</kbd><span>run / toggle debug tree</span>
-        <kbd>1..8</kbd><span>heat base modes</span>
+        <kbd>1..9</kbd><span>heat base modes (8=Attn, 9=Plane)</span>
         <kbd>0</kbd><span>mode none + clear toggles</span>
-        <kbd>Shift+1..8</kbd><span>solo (mode + clear additive toggles)</span>
+        <kbd>Shift+1..9</kbd><span>solo (mode + clear additive toggles)</span>
         <kbd>L</kbd><span>log color scale</span>
         <kbd>U</kbd><span>undo last injected move</span>
         <kbd>G</kbd><span>return to recorded game</span>
@@ -509,6 +530,6 @@
     </div>
   </div>
 </main>
-<script src="/static/app.js?v=20260615-evalcurve2"></script>
+<script src="/static/app.js?v=20260617-dbgattn8"></script>
 </body>
 </html>

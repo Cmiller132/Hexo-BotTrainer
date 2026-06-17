@@ -1334,6 +1334,8 @@ class HexoPlayHandler(BaseHTTPRequestHandler):
                 self._send_json(_debug_search(self._read_json()))
             elif path == "/api/debug/search_tree":
                 self._send_json(_debug_search_tree(self._read_json()))
+            elif path == "/api/debug/attention":
+                self._send_json(_debug_attention(self._read_json()))
             else:
                 self.send_error(HTTPStatus.NOT_FOUND)
         except MoveConflict as exc:
@@ -2303,6 +2305,68 @@ def _debug_search_tree(body: dict[str, Any]) -> dict[str, object]:
         max_depth=max_depth,
         top_k=top_k,
         min_n=min_n,
+        n=n,
+    )
+
+
+def _debug_attention(body: dict[str, Any]) -> dict[str, object]:
+    """hexfield interactive attention map for one position (§Model Debug attn).
+
+    Additive route: never alters analyze/search/etc. Resolves the position +
+    checkpoint exactly like search/search_tree, clamps block/head/query in the
+    server (so bad UI input is a deterministic 400, never a worker kill), and
+    validates the position by replay (terminal -> 400). One CPU forward computes
+    the full attention internally; the worker slices it to O(N)."""
+
+    run, action_ids = _debug_action_prefix(body)
+    ckpt_path = _debug_resolve_checkpoint(run, str(body.get("checkpoint", "")))
+    n = body.get("n")
+
+    block = max(0, min(int(body.get("block", 0)), 2))
+    raw_head = body.get("head")
+    if raw_head in (None, ""):
+        head = None
+    elif raw_head == "max":
+        head = "max"
+    else:
+        head = max(0, min(int(raw_head), 3))
+
+    q = body.get("query") or {}
+    qtype = str(q.get("type", "cell"))
+    if qtype not in ("token", "cell"):
+        raise ValueError(f"query.type must be 'token' or 'cell', got {qtype!r}")
+    qid = int(q.get("id", 0))
+    if qtype == "token":
+        qid = max(0, min(qid, 7))  # 8 summary tokens; cell ids validated in worker
+
+    # Validate the position HERE (mirror search_tree): a routine UI request on a
+    # terminal/illegal position becomes a plain 400 and never reaches the worker.
+    state = engine.new_game()
+    for index, action_id in enumerate(action_ids):
+        try:
+            engine.apply_action(state, engine.PlacementAction(unpack_coord_id(int(action_id))))
+        except Exception as exc:
+            raise ValueError(f"illegal action id {action_id} at ply {index}: {exc}") from exc
+    if engine.terminal(state) is not None:
+        raise ValueError("position is terminal; no attention to inspect")
+
+    # One forward is ~ms even at N~3000, so no visit-style timeout scaling.
+    qtag = f"{qtype}:{qid}"
+    signature = _debug_signature(
+        f"attention:{block}:{('mean' if head is None else head)}:{qtag}",
+        ckpt_path,
+        action_ids,
+        n,
+    )
+    return _debug_worker().cached(
+        signature,
+        "attention",
+        timeout=debug_service.DEFAULT_TIMEOUT,
+        checkpoint=str(ckpt_path),
+        action_ids=action_ids,
+        block=block,
+        head=head,
+        query={"type": qtype, "id": qid},
         n=n,
     )
 

@@ -380,3 +380,164 @@ def test_game_eval_aligns_plies_and_kl_is_nonnegative(cpu_only):
             assert row["kl"] >= -1e-6
         assert row["value_err_z"] == pytest.approx(row["value_p0"] - 1.0, abs=1e-4)
         assert row["top1_match"] in (True, False)
+
+
+# ---------------------------------------------------------------------------
+# hexfield interactive attention map (additive; gated on a hexfield checkpoint)
+# ---------------------------------------------------------------------------
+
+
+def _hexfield_checkpoint() -> Path:
+    """First available hexfield checkpoint, else skip. hexfield checkpoints live
+    flat under ``runs/hexfield_*/checkpoint_epoch*.pt`` (no ``checkpoints/``)."""
+
+    root = Path.cwd() / "runs"
+    if not root.is_dir():
+        pytest.skip("runs/ not present")
+    for run in sorted(root.glob("hexfield_*")):
+        for ckpt in sorted(run.glob("checkpoint_epoch*.pt")):
+            if ckpt.is_file():
+                return ckpt
+    pytest.skip("no hexfield checkpoint present")
+
+
+def _hexfield_loaded():
+    loaded = di.load_checkpoint(_hexfield_checkpoint())
+    if loaded.lineage != di.HEXFIELD:
+        pytest.skip("discovered checkpoint is not the hexfield lineage")
+    return loaded
+
+
+def _attn_actions(n: int = 6) -> list[int]:
+    """A short legal action prefix that does not depend on a recorded game (the
+    hexfield runs may not ship .hxr); a few legal placements suffice. Uses the
+    engine's packed legal action ids directly (same id space as analyze)."""
+
+    from hexo_engine.types import unpack_coord_id
+
+    state = di.engine.new_game()
+    actions: list[int] = []
+    for _ in range(n):
+        legal = list(di.engine.legal_action_ids(state))
+        if not legal:
+            break
+        aid = int(legal[0])
+        actions.append(aid)
+        di.engine.apply_action(state, di.engine.PlacementAction(unpack_coord_id(aid)))
+    return actions
+
+
+def test_attention_hexfield_token_rows(cpu_only):
+    loaded = _hexfield_loaded()
+    actions = _attn_actions(6)
+    res = di.attention_position(loaded, actions, block=0, head=None, query={"type": "token", "id": 0})
+
+    assert res["found"] is True
+    assert res["lineage"] == di.HEXFIELD
+    assert res["num_blocks"] == 3 and res["num_heads"] == 4 and res["num_tokens"] == 8
+    n_cells = res["num_cells"]
+    assert n_cells == len(res["cells"]) > 0
+    # cells[j] describes sequence index 8+j; legal prefix has packed ids.
+    for j, cell in enumerate(res["cells"]):
+        assert cell["i"] == 8 + j
+    assert any(c["action_id"] is not None for c in res["cells"])
+
+    assert len(res["token_queries"]) == 8
+    for t, row in enumerate(res["token_queries"]):
+        assert row["token"] == t
+        assert len(row["attn_over_cells"]) == n_cells
+        assert len(row["attn_over_tokens"]) == 8
+        total = sum(row["attn_over_cells"]) + sum(row["attn_over_tokens"])
+        assert abs(total - 1.0) < 1e-3
+    # token query -> no cell_query / incoming payload.
+    assert res["cell_query"] is None
+    assert res["incoming_token_to_cell"] is None
+    assert res["ply"] == len(actions)
+
+
+def test_attention_hexfield_cell_query(cpu_only):
+    loaded = _hexfield_loaded()
+    actions = _attn_actions(6)
+    base = di.attention_position(loaded, actions, block=1, head=None, query={"type": "token", "id": 0})
+    # Pick a legal cell (has a packed action_id) for the cell query.
+    legal_cell = next(c for c in base["cells"] if c["action_id"] is not None)
+    aid = legal_cell["action_id"]
+
+    res = di.attention_position(loaded, actions, block=1, head=None, query={"type": "cell", "id": aid})
+    assert res["found"] is True
+    cq = res["cell_query"]
+    assert cq is not None
+    assert cq["action_id"] == aid
+    assert cq["i"] == legal_cell["i"]
+    assert len(cq["attn_over_cells"]) == res["num_cells"]
+    assert len(cq["attn_over_tokens"]) == 8
+    assert abs(sum(cq["attn_over_cells"]) + sum(cq["attn_over_tokens"]) - 1.0) < 1e-3
+
+    inc = res["incoming_token_to_cell"]
+    assert inc is not None and len(inc) == 8
+    slot = cq["i"] - 8
+    expected = [res["token_queries"][t]["attn_over_cells"][slot] for t in range(8)]
+    assert inc == expected
+
+
+def test_attention_hexfield_bad_cell_query(cpu_only):
+    loaded = _hexfield_loaded()
+    actions = _attn_actions(6)
+    # An action_id that is not in the legal prefix -> found False, reason bad_query.
+    res = di.attention_position(loaded, actions, block=0, head=None, query={"type": "cell", "id": -1})
+    assert res["found"] is False
+    assert res["reason"] == "bad_query"
+    assert res["lineage"] == di.HEXFIELD
+    assert res["cell_query"] is None
+
+
+def test_attention_block_head_bounds(cpu_only):
+    loaded = _hexfield_loaded()
+    actions = _attn_actions(6)
+    for block in (0, 1, 2):
+        for head in (None, 0, 1, 2, 3):
+            res = di.attention_position(loaded, actions, block=block, head=head, query={"type": "token", "id": 0})
+            assert res["found"] is True
+            assert res["block"] == block
+            assert res["head"] == head
+
+    # head None == mean over the 4 single-head rows (same block/position).
+    mean = di.attention_position(loaded, actions, block=2, head=None, query={"type": "token", "id": 3})
+    heads = [
+        di.attention_position(loaded, actions, block=2, head=h, query={"type": "token", "id": 3})
+        for h in range(4)
+    ]
+    mean_cells = mean["token_queries"][3]["attn_over_cells"]
+    for j in range(len(mean_cells)):
+        avg = sum(heads[h]["token_queries"][3]["attn_over_cells"][j] for h in range(4)) / 4.0
+        assert abs(mean_cells[j] - avg) < 1e-5
+
+    # out-of-range block/head are clamped, not errors.
+    clamped = di.attention_position(loaded, actions, block=99, head=99, query={"type": "token", "id": 0})
+    assert clamped["block"] == 2 and clamped["head"] == 3
+
+
+def test_attention_determinism(cpu_only):
+    loaded = _hexfield_loaded()
+    actions = _attn_actions(6)
+    a = di.attention_position(loaded, actions, block=0, head=None, query={"type": "token", "id": 0})
+    b = di.attention_position(loaded, actions, block=0, head=None, query={"type": "token", "id": 0})
+    import json as _json
+
+    assert _json.dumps(a, sort_keys=True) == _json.dumps(b, sort_keys=True)
+
+
+def test_attention_dense_na(cpu_only):
+    """A non-hexfield (dense/hexgt) checkpoint -> found False, reason lineage_na,
+    empty skeleton (mirrors the INPUTS tab n/a contract)."""
+
+    loaded = di.load_checkpoint(_checkpoint("hexgt_rl_latest.pt"))
+    if loaded.lineage == di.HEXFIELD:  # pragma: no cover - defensive
+        pytest.skip("expected a non-hexfield checkpoint here")
+    res = di.attention_position(loaded, [], block=0, head=None, query={"type": "cell", "id": 0})
+    assert res["found"] is False
+    assert res["reason"] == "lineage_na"
+    assert res["lineage"] == loaded.lineage
+    assert res["num_blocks"] == 0 and res["num_cells"] == 0
+    assert res["cells"] == [] and res["token_queries"] == []
+    assert res["cell_query"] is None and res["incoming_token_to_cell"] is None

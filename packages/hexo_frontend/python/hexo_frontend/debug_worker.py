@@ -11,7 +11,7 @@ object per line and reads exactly one response object per line. **stdout carries
 ONLY protocol JSON** — every diagnostic/warning goes to stderr — so the parent can
 parse it unambiguously.
 
-Request:  {"id": int, "op": "ping|info|analyze|search|reeval|search_tree|record_row|game_eval", ...}
+Request:  {"id": int, "op": "ping|info|analyze|search|reeval|search_tree|attention|record_row|game_eval", ...}
 Response: {"id": int, "ok": true, "result": {...}}  |  {"id": int, "ok": false, "error": str}
 
 Ops:
@@ -23,6 +23,9 @@ Ops:
                                           (value-trajectory chart; one forward each)
   search_tree {checkpoint, action_ids, visits?, c_puct?, seed?, max_depth?, top_k?,
                min_n?, n?} -> pure-Python deterministic PUCT tree ("py_debug")
+  attention   {checkpoint, action_ids, block?, head?, query{type,id}, n?} ->
+                                          hexfield per-query attention map (n/a for
+                                          non-attention lineages: found=False)
   record_row  {npz, turn_index, expect_player} -> recorded .npz training row
                                           (no checkpoint; skips the model load)
   game_eval   {checkpoint, action_ids, plies:[int], npz?, winner?, n?} ->
@@ -151,6 +154,18 @@ def _handle(req: dict[str, Any]) -> dict[str, Any]:
             max_depth=int(req.get("max_depth", 12)),
             top_k=int(req.get("top_k", 8)),
             min_n=int(req.get("min_n", 2)),
+            n=req.get("n"),
+        )
+
+    if op == "attention":
+        loaded = _get_model(str(req["checkpoint"]))
+        action_ids = [int(a) for a in req.get("action_ids", [])]
+        return di.attention_position(
+            loaded,
+            action_ids,
+            block=int(req.get("block", 0)),
+            head=(None if req.get("head") is None else ("max" if req.get("head") == "max" else int(req["head"]))),
+            query=dict(req.get("query") or {"type": "cell", "id": 0}),
             n=req.get("n"),
         )
 
