@@ -304,8 +304,17 @@ def _write_eval_hxr(
                     skipped += 1
                     continue
                 cand_seat = "candP0" if g.a_is_p0 else "candP1"
+                # serial play_checkpoint_match's _Game exposes ``.index``; the
+                # concurrent play_multi_checkpoint_match's _Game exposes
+                # ``.local_index`` (no ``.index``). The shared writer must accept
+                # BOTH — referencing ``g.index`` directly raised AttributeError on
+                # every concurrent eval game, aborting the write after the header
+                # and leaving a 0-record .hxr (the empty-replay bug).
+                g_index = getattr(g, "index", None)
+                if g_index is None:
+                    g_index = getattr(g, "local_index", 0)
                 writer = rf.begin_game(
-                    f"ep{ep}-{label_a}-vs-{label_b}-g{g.index}-{cand_seat}", seed=g.seed
+                    f"ep{ep}-{label_a}-vs-{label_b}-g{g_index}-{cand_seat}", seed=g.seed
                 )
                 for aid in g.actions:
                     q, r = unpack_action_id(int(aid))
