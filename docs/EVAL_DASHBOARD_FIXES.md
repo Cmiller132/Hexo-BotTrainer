@@ -9,14 +9,41 @@ touched). `file:line` below are in this worktree.
 
 ### Eval (hexfield)
 
-- **E1 — empty eval `.hxr` is silent (§5).**
-  `eval_arena.py:251-341 _write_eval_hxr` — a 0-record write (every game had falsy
-  `.actions`) now emits a LOUD `logging.WARNING` and the write exception is logged
-  instead of blanket-swallowed; a `games_written`/`games_skipped` counter is filled
-  via the new `stats=` kwarg and threaded into match meta as `hxr_games_written`
-  (`eval_arena.py:882-896, 1453-1465`). NOTE: this makes a future regression
-  machine-visible; the *actual* records appear once the corrected `eval_arena.py`
-  (whose `_Game.actions` populate) is the running build.
+- **E1 — empty eval `.hxr` (every record `num_records=0`) — REAL ROOT CAUSE + FIX.**
+  The in-run eval uses the CONCURRENT runner `play_multi_checkpoint_match`
+  (`eval_arena.py:938`), which feeds its own `_Game` objects to the shared writer
+  `_write_eval_hxr` (call site `eval_arena.py:1453-1455`). That concurrent `_Game`
+  is `__slots__`-defined (`eval_arena.py:1071-1075`) with `local_index` and **NO
+  `index`**. The writer's `begin_game` game-id f-string referenced `g.index`
+  directly, so on the FIRST concurrent eval game it raised
+  `AttributeError: 'g' object has no attribute 'index'` — *after*
+  `HexoRecordFile.create` wrote the header but *before* any `record_action` — and
+  the function's `except Exception: return None` swallowed it, leaving a header-only
+  `num_records=0` file. (The candidate's moves *were* recorded into `g.actions` at
+  `_apply_search`/`_replay_action`, `eval_arena.py:624-643`; the data was fine — the
+  WRITER threw.) The serial `play_checkpoint_match._Game` happens to expose `.index`
+  (`eval_arena.py:495-516`), which is why the bug only ever bit the concurrent
+  (live) path.
+  **Fix** (`eval_arena.py:313-317`): take the game index as
+  `g_index = getattr(g, "index", None)` falling back to
+  `getattr(g, "local_index", 0)`, so the writer accepts BOTH `_Game` shapes and
+  never throws on the index reference. The E1 hardening (LOUD `logging.WARNING` on a
+  0-of-N write + `stats={'games_written','games_skipped'}` threaded to match meta,
+  `eval_arena.py:336-345`) is KEPT as a machine-visible guard against future
+  0-record regressions, but it is NOT the fix — the writer-path change above is.
+  **Proven empirically.** (1) Decoding the live run's `evaluation/epoch_000040/*.hxr`
+  (written today by the un-fixed build) confirms `num_records=0` on every file.
+  (2) A direct A/B over the concurrent `_Game` shape: the OLD `g.index` reference
+  raises `AttributeError` and yields a `num_records=0` header-only file, while the
+  FIXED `_write_eval_hxr` writes `num_records=1` with the real action list. (3) The
+  REAL end-to-end GPU harness `tests/eval_dashboard/_e1_live_harness.py` runs the
+  actual `play_multi_checkpoint_match` (2 games, 16 visits, candidate epoch_000040
+  vs opponent epoch_000005, written to scratch) and the produced
+  `evaluation/epoch_000040/cand_ep40_vs_ep5.hxr` decodes to **`num_records=2`** with
+  real replays (game0 = 169 actions, winner player0; game1 = 87 actions, winner
+  player1) — the load-bearing proof that eval games WILL populate the dashboard
+  History once this build is deployed. The synthetic-stub regression lock is
+  `tests/eval_dashboard/test_e1_eval_hxr.py::test_concurrent_path_game_writes_records`.
 
 - **E2 — permanent anchor (bc_prefit) silently dropped (SEV-2).**
   `multistage_eval.py:408-428 select_opponents` records each unresolved permanent
@@ -102,9 +129,13 @@ Nothing here mutates the live run.
 
 ## How to VERIFY after deploy
 
-- **Eval:** after the next eval epoch, decode `<run>/evaluation/epoch_NNNNNN/*.hxr`
-  and assert `num_records > 0`; the detail JSON gains `hxr_games_written > 0` per
-  match. If bc_prefit was unresolvable, `roster.dropped_anchors` records it loudly;
+- **Eval (E1):** after the next eval epoch, decode
+  `<run>/evaluation/epoch_NNNNNN/*.hxr` and assert `num_records > 0` (each match
+  file should hold `per_checkpoint` games with non-empty `action_ids`); the detail
+  JSON gains `hxr_games_written > 0` per match. Before deploy you can reproduce the
+  fix end-to-end against the live checkpoints (tiny GPU budget, scratch output) with
+  `tests/eval_dashboard/_e1_live_harness.py` — it runs the real
+  `play_multi_checkpoint_match` and prints `E1_LIVE_RECORDS=2`. If bc_prefit was unresolvable, `roster.dropped_anchors` records it loudly;
   once the anchor root is fixed, bc_prefit reappears in the roster. A SealBot death
   now shows `verdict.degraded == true`. Radius-8 opponents show
   `verdict.ood_opponents`.
