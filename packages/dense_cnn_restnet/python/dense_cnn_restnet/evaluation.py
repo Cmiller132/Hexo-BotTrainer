@@ -354,6 +354,9 @@ def _run_games_concurrent(
                     widening_max_children=selfplay.widening_max_children,
                     widening_min_children=selfplay.widening_min_children,
                     move_temperatures=move_temperatures,
+                    # Match self-play's TSS setting so eval measures the same
+                    # search the run trains with (None = on + old-.so compatible).
+                    tss_enabled=(None if selfplay.tss_enabled else False),
                 )
                 mcts_search_elapsed += perf_counter() - started
                 dense_forward_batches += 1
@@ -777,6 +780,9 @@ def _run_reference_games(
                     widening_max_children=selfplay.widening_max_children,
                     widening_min_children=selfplay.widening_min_children,
                     move_temperatures=move_temperatures,
+                    # Both ladder sides search under the run's TSS setting
+                    # (None = on + old-.so compatible).
+                    tss_enabled=(None if selfplay.tss_enabled else False),
                 )
                 if len(searches) != len(batch):
                     raise RuntimeError(

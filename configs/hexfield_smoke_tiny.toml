@@ -1,0 +1,48 @@
+# Fast plumbing check for the M7 pipeline fix (not the spec gate — that's
+# hexfield_smoke.toml at 4 games / 64 visits). Tiny so the full epoch
+# (selfplay -> finalize -> select -> train -> checkpoint -> eval-skip) runs
+# in a couple of minutes on CPU.
+
+[model]
+name = "hexfield"
+module = "hexfield.plugin"
+
+[model.config]
+device = "cpu"
+
+[model.config.selfplay]
+search_visits = 12
+pcr_full_proportion = 0.6
+pcr_fast_visits = 4
+active_games = 2
+virtual_batch_size = 2
+flush_target = 6
+active_root_limit = 4
+max_game_plies = 16
+forced_playout_k = 2.0
+policy_init_fraction = 0.0
+
+[model.config.training]
+batch_rows = 8
+shuffle_keep_target_rows = 2048
+
+[model.config.evaluation]
+games_per_epoch = 0
+
+[run]
+name = "hexfield_smoke_tiny"
+output_dir = "runs/hexfield_smoke_tiny"
+seed = 1
+
+[loop]
+epochs = 1
+
+[selfplay]
+games_per_epoch = 2
+update_checkpoint_pointer = false
+
+[train]
+passes_per_epoch = 1
+
+[checkpoint]
+save_name = "latest"

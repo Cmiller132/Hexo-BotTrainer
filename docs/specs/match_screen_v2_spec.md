@@ -177,12 +177,25 @@ mode?, c_puct?}`; `_player_setup` becomes `dict[str, dict]`. Update every
 
 ### 3.2 `_CheckpointBotPlayer`
 New class implementing the runner player protocol (mirror `_ManualPlayer`'s
-methods; `setup_worker/start_game/observe_transition/finish_game/close` are no-ops):
+methods; `setup_worker/observe_transition/finish_game/close` are no-ops;
+`start_game` captures a per-game token from `GameContext`
+`{game_id, seed, player_index}` for the opening-sampling RNG):
 - `identity = PlayerIdentity(player_id=f"ckpt-{run}-{ckpt-stem}", label=<§3.1 label>)`.
 - `decide(state)`:
   `acts = [pack_coord_id(rec.coord) for rec in engine.to_python_state(state).placement_history]`;
   mode `"search"` → `_debug_worker().cached(_debug_signature(f"match-search:{visits}:{c_puct}", ckpt_path, acts, None), "search", timeout=<below>, checkpoint=str(ckpt_path), action_ids=acts, visits=visits, c_puct=c_puct, seed=0)`,
-  take `best_action_id`, diagnostics `{root_value, visits, mode, run, checkpoint}`;
+  then EVAL-PROTOCOL selection via `_select_visit_action(visit_policy, ply, game_token)`
+  (AMENDED 2026-06-12 — the worker's `best_action_id` was a temperature-1.0
+  visit SAMPLE, softer than eval play; the debug search now reports the visit
+  argmax (debug_infer `temperature=0.0`), and `best_action_id` is kept only as
+  a fallback when no visit row has positive weight): plies <
+  `CHECKPOINT_OPENING_MOVES` (8) sample
+  the visit rows at `CHECKPOINT_OPENING_TEMPERATURE` (0.6) with a str-seeded
+  `random.Random(f"{game_token}|{ply}")` (process-stable, decorrelates series
+  games like eval's per-(game, move) seeds); later plies play the strict visit
+  argmax — mirroring the trainer's `[model.config.evaluation]` arena protocol.
+  Diagnostics `{root_value, visits, mode, run, checkpoint,
+  selection: "opening-sample"|"argmax"}`;
   mode `"policy"` → worker `analyze` (signature prefix `"match-policy"`), take
   `policy[0]["action_id"]` (rows verified sorted p-desc, legal-only), diagnostics
   `{root_value: <analyze value>, mode, run, checkpoint, top_p: policy[0].p}`.

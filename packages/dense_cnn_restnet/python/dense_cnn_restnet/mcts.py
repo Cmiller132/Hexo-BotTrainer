@@ -71,6 +71,8 @@ class BatchedMctsSession:
         forced_playout_k: float | None = None,
         move_temperatures: Sequence[float] | None = None,
         root_policy_temperatures: Sequence[float] | None = None,
+        tss_enabled: bool | None = None,
+        root_fpu_zero_under_noise: bool | None = None,
     ) -> list["SearchResult"]:
         """Search live root states through the native dense-cnn MCTS session.
 
@@ -78,6 +80,10 @@ class BatchedMctsSession:
         search detail, including cloning engine states, batching leaves over all
         legal moves, parsing evaluator bytes, and selecting the returned action,
         belongs to Rust.
+
+        `tss_enabled` / `root_fpu_zero_under_noise`: None keeps the native
+        defaults (both true) AND keeps the call compatible with a pre-flag
+        native module — callers pass False only to opt out (see rust_bridge).
         """
 
         if not root_states:
@@ -104,6 +110,8 @@ class BatchedMctsSession:
             forced_playout_k=forced_playout_k,
             move_temperatures=move_temperatures,
             root_policy_temperatures=root_policy_temperatures,
+            tss_enabled=tss_enabled,
+            root_fpu_zero_under_noise=root_fpu_zero_under_noise,
         )
         return [_result_from_payload(payload) for payload in payloads]
 
@@ -138,6 +146,8 @@ class BatchedMctsSession:
         policy_init_avg_plies: float | None = None,
         policy_init_max_plies: int | None = None,
         policy_init_temperature: float | None = None,
+        tss_enabled: bool | None = None,
+        root_fpu_zero_under_noise: bool | None = None,
     ) -> Mapping[str, Any]:
         """Drive every game to completion through the native continuous scheduler.
 
@@ -201,6 +211,8 @@ class BatchedMctsSession:
             policy_init_avg_plies=policy_init_avg_plies,
             policy_init_max_plies=policy_init_max_plies,
             policy_init_temperature=policy_init_temperature,
+            tss_enabled=tss_enabled,
+            root_fpu_zero_under_noise=root_fpu_zero_under_noise,
         )
 
 

@@ -681,6 +681,42 @@ class MatchBackendTests(unittest.TestCase):
         finally:
             controller.close()
 
+    def test_checkpoint_visit_selection_mimics_eval_protocol(self) -> None:
+        from hexo_frontend.web import (
+            CHECKPOINT_OPENING_MOVES,
+            _select_visit_action,
+        )
+
+        rows = [
+            {"action_id": 11, "w": 400.0},
+            {"action_id": 22, "w": 80.0},
+            {"action_id": 33, "w": 20.0},
+            {"action_id": 44, "w": 0.0},  # zero-weight: never selectable
+        ]
+
+        # Past the opening: strict visit argmax, regardless of row order.
+        self.assertEqual(_select_visit_action(list(reversed(rows)), CHECKPOINT_OPENING_MOVES, "g"), 11)
+        self.assertEqual(_select_visit_action(rows, CHECKPOINT_OPENING_MOVES + 40, "g"), 11)
+
+        # Opening plies: sampled, reproducible per (game token, ply), always a
+        # positive-weight action.
+        valid = {11, 22, 33}
+        for ply in range(CHECKPOINT_OPENING_MOVES):
+            first = _select_visit_action(rows, ply, "game-A|7|0")
+            self.assertIn(first, valid)
+            self.assertEqual(first, _select_visit_action(rows, ply, "game-A|7|0"))
+
+        # Distinct game tokens decorrelate the opening: across many games the
+        # sampled ply-0 move is not always the same action.
+        picks = {_select_visit_action(rows, 0, f"game-{i}|7|0") for i in range(64)}
+        self.assertGreater(len(picks), 1)
+
+        # A single positive-weight row is always chosen; no rows -> None.
+        only = [{"action_id": 5, "w": 3.0}, {"action_id": 6, "w": 0.0}]
+        self.assertEqual(_select_visit_action(only, 0, "g"), 5)
+        self.assertIsNone(_select_visit_action([], 0, "g"))
+        self.assertIsNone(_select_visit_action([{"action_id": 9, "w": 0.0}], 3, "g"))
+
 
 if __name__ == "__main__":
     unittest.main()

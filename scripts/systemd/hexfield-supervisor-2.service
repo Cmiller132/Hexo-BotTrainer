@@ -1,0 +1,25 @@
+[Unit]
+Description=hexfield_main_2 self-play training supervisor (radius-4 experiment, init from main_1 ep34)
+After=network.target
+StartLimitIntervalSec=200
+StartLimitBurst=5
+
+[Service]
+Type=simple
+KillMode=control-group
+# Run-2 overrides for the SHARED supervisor script (RUNDIR/CONFIG are env-driven;
+# HEXFIELD_SUPPORT_RADIUS=4 is the model-side legal-radius experiment — main_1 leaves
+# it unset == radius 8). The trainer child inherits these.
+Environment=RUNDIR=/mnt/e/Hexo-BotTrainer/runs/hexfield_main_2
+Environment=CONFIG=/mnt/e/Hexo-BotTrainer-hexgt/configs/hexfield_main_2.toml
+Environment=HEXFIELD_SUPPORT_RADIUS=4
+ExecStartPre=/usr/bin/test -f /mnt/e/Hexo-BotTrainer-hexgt/scripts/_hexfield_supervise_main1.sh
+ExecStartPre=-/usr/bin/rm -f /mnt/e/Hexo-BotTrainer/runs/hexfield_main_2/supervisor.lock
+ExecStart=/usr/bin/bash /mnt/e/Hexo-BotTrainer-hexgt/scripts/_hexfield_supervise_main1.sh
+Restart=on-failure
+RestartSec=15
+TimeoutStopSec=45
+RestartPreventExitStatus=1
+
+[Install]
+WantedBy=multi-user.target

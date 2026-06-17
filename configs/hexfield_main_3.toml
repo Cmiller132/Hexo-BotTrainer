@@ -1,0 +1,174 @@
+# hexfield production run 3 (KataGo replay-buffer port, PLAN §7/§10): a FRESH
+# run that ships the dense_cnn_restnet-style replay buffer (power-law taper
+# window + recent-window cut + keep_prob Bernoulli + train-bucket reuse governor
+# + md5 split + persisted train_state + packed columnar in-RAM window +
+# multithreaded Rust expand). Copied from hexfield_main_1.toml; only run.name,
+# output_dir, the [model.config.training] block (the new KataGo knobs), and
+# expand_backend differ. The live hexfield_main_2 run is NOT touched — it finishes
+# undisturbed (PLAN §1 non-goal, §10 rollout). Owner directive 2026-06-12 search
+# knobs preserved verbatim: 512 visits, PCR fast=128 at 33% full. Warm-start: the
+# BC prefit (same as main_1, spec §7) — a fresh-governor warm start, NOT a resume.
+
+[model]
+name = "hexfield"
+module = "hexfield.plugin"
+
+[model.config]
+device = "cuda"
+
+[model.config.selfplay]
+search_visits = 512
+pcr_full_proportion = 0.33
+pcr_fast_visits = 128
+active_games = 96
+c_puct = 1.5
+virtual_batch_size = 4
+# flush_target must be ABOVE max in-flight (active_games*virtual_batch_size) so
+# the flush is select-exhaustion-driven, not a stall waiting for an unreachable
+# full batch (flush_target==in-flight HANGS; <in-flight caps the batch small).
+#
+# 2026-06-15 (forward-rewrite session): active_games REVERTED 192->64.
+# The prior 64->192 bump set active_games == games_per_epoch (192), which kills
+# the continuous REFILL: with no fresh games replacing finished ones, all games
+# drain into the slow large-support late game TOGETHER (a "cohort"), and live
+# full-epoch throughput fell to ~2.2 pos/s (the 60s early-game sweep that
+# motivated 192 measured ply-~7 positions, not the late game that dominates an
+# epoch). Keeping active_games (64) < games_per_epoch (192) restores the refill
+# MIX (192-64 refills => early/mid/late games co-resident, so the cheap early
+# positions keep throughput up). 64 is the historically PROVEN value: epochs
+# 11-30 averaged ~3.7 pos/s at ac64 (vs 2.2 at ac192). With the bias-build
+# forward rewrite (~2.2x late-game forward, ~1.5x end-to-end) on top, the epoch
+# average should land materially above 3.7. (NOTE: the lategame_bench refill
+# numbers were early-game-biased and over-stated; 64 is chosen on the proven
+# full-epoch data, not that bench.) In-flight 64*4=256 < 1024.
+flush_target = 1024
+active_root_limit = 192
+root_dirichlet_total_alpha = 10.83
+root_dirichlet_noise_fraction = 0.25
+fpu_reduction = 0.2
+widening_policy_mass = 0.95
+widening_max_children = 96
+widening_min_children = 2
+forced_playout_k = 2.0
+policy_init_fraction = 0.25
+policy_init_avg_plies = 4.0
+policy_init_max_plies = 8
+policy_init_temperature = 1.4
+temperature = 1.0
+temperature_floor = 0.1
+temperature_halflife_plies = 30.0
+max_game_plies = 256
+tss_enabled = true
+cache_max_states = 262144
+
+# KataGo / dense_cnn_restnet replay-buffer port (PLAN §6/§7). The old v1 window
+# used a single hard `shuffle_keep_target_rows` cutoff (32000 live); this block
+# adds the full dense mechanism. Defaults are hexfield-tuned (NOT dense's
+# literals): the dimensionless KataGo constants (exponent=0.65, expand=0.4) are
+# unchanged, but min_rows/scale/keep_target are scaled to hexfield's ~7k Full
+# rows/epoch stream (PLAN §3.1/§8/S1; dense's 100k min_rows would stall ~14
+# epochs at that rate). All 12 new knobs match the TrainingSection defaults; they
+# are written explicitly here so the fresh run is self-documenting.
+[model.config.training]
+batch_rows = 32
+learning_rate = 1e-3
+weight_decay = 1e-4
+grad_clip = 1.0
+warmup_steps = 0
+shuffle_min_rows = 20000
+shuffle_keep_target_rows = 300000
+shuffle_taper_window_exponent = 0.65
+shuffle_expand_window_per_row = 0.4
+shuffle_taper_window_scale = 20000.0
+validation_fraction = 0.0
+train_samples_per_epoch = 100000
+max_train_bucket_per_new_data = 8.0
+max_train_bucket_size = 500000.0
+no_repeat_files = false
+# expand_backend = "rust": Phase 7 parity PASSED — the Rust+rayon GIL-free
+# train-read kernel (replay_expand.rs::expand_shard_train) is element-identical to
+# the serial-Python `expand_sample` oracle across all 12 D6 symmetries, the
+# off-legal validity mask is backend-invariant, and the result is deterministic
+# (workers=1 == workers=N under order-preserving collect). It is ~7x faster than
+# serial on this 32-core host (~4.3-4.7k rows/s vs ~0.57k). The "serial" and
+# "pool" backends remain available via this knob (and the HEXFIELD_EXPAND env) as
+# the parity oracle / spawn-ProcessPool fallback (PLAN §4.3/§10 step 8).
+expand_backend = "rust"
+expand_workers = 0
+
+[model.config.evaluation]
+games_per_epoch = 16
+eval_visits = 128
+# The lockstep arena is single-game/slow; over a long run evaluate periodically
+# (the eval ladder is for tracking strength, not a per-epoch gate).
+eval_every = 5
+
+# In-run COMPARABLE strength eval (eval-v2), wired into evaluate_epoch. Replaces
+# the 16-game vs-prior arena with paired games vs a FIXED roster (permanent
+# anchors bc_prefit + ep5, sliding bracket, L-lag champion), pooled into a
+# persisted Bradley-Terry ladder so epochs compound into an apples-to-apples
+# learning curve. LOCKED + UNIFORM for comparability: 512 sims, eval-vbs 32.
+# PURE EVAL (reports a label; never gates/halts/promotes).
+#
+# CONCURRENT ONE-PASS (eval-v2 fast redesign): every 5 epochs the eval plays the
+# WHOLE roster in ONE batched pass (SealBot via play_sealbot_match + ALL checkpoint
+# opponents via play_multi_checkpoint_match, one shared candidate forward across
+# opponents), so wall-clock is MAX over matches, not SUM — a few minutes, not the
+# serial per-opponent sum. With sealbot_share=0.5 + bracket_size=1 the roster is
+# 4 checkpoint opponents (bc_prefit, ep5, the bracket rung, the L-lag champion);
+# at games_budget=64 -> 32 SealBot + 32 checkpoint = 64 games (8 games = 4 CRN
+# pairs per checkpoint opponent; the stats review verified 4 pairs beats 3).
+[model.config.multi_stage_eval]
+enabled = true
+# 32 SealBot + 32 checkpoint = 64 games/epoch. eval-vbs 32 (was 16) halves the
+# rounds/ply at the fixed 512 visits (uniform across epochs+opponents, so
+# comparability-safe). 512 visits KEPT so every point stays comparable with the
+# ep10-30 pool (the learning curve would break at mixed visits). The pool
+# compounds, so the 5-epoch cadence still grows a clean curve.
+games_budget = 64
+every_n_epochs = 5
+full_search_visits = 512
+eval_virtual_batch_size = 32
+# 1:1 SealBot-vs-checkpoint split (0.5 of the 64-game budget -> 32 SealBot).
+sealbot_share = 0.5
+verdict_reference_lag = 5
+pool_path = "diagnostics/eval_pool.json"
+
+[model.config.multi_stage_eval.sprt]
+# SPRT OFF: the concurrent path skips Stage B anyway; off keeps the champion edge at
+# the uniform per-opponent game count (no SPRT-dependent variation) for comparable graphs.
+enabled = false
+
+[model.config.multi_stage_eval.opponents]
+# SealBot is reachable in the WSL trainer (SEALBOT_PATH=/mnt/e/SealBot exported by
+# _hexfield_supervise_main1.sh), so the down-weighted cross-lineage zero-point is
+# played and the BT pool pins on SealBot at 0 Elo. bracket_size=1 -> 4 checkpoint
+# opponents (bc_prefit, ep5, the single bracket rung, the L-lag champion); at
+# budget 64 with sealbot_share=0.5 that is 32//4 = 8 games (4 CRN pairs) each.
+sealbot_enabled = true
+bracket_size = 1
+
+[run]
+name = "hexfield_main_3"
+output_dir = "/mnt/e/Hexo-BotTrainer/runs/hexfield_main_3"
+seed = 1
+
+[loop]
+epochs = 200
+
+[selfplay]
+games_per_epoch = 192
+update_checkpoint_pointer = false
+
+[train]
+passes_per_epoch = 1
+
+[checkpoint]
+# Warm-start from the BC prefit, the SAME checkpoint main_1 used (PLAN §7,
+# non-goals). This is a fresh-init warm start, NOT a resume: the checkpoint
+# loader's `initialize_from` branch loads weights only and starts a FRESH train
+# bucket / governor (it never inherits a stale train_state — only the `resume`
+# branch restores train_state, PLAN §6 checkpoints.py / M1). It does NOT point at
+# any live run, so launching main_3 cannot disturb hexfield_main_2.
+initialize_from = "/mnt/e/Hexo-BotTrainer-hexgt/runs/hexfield_bc_1/checkpoint_epoch2.pt"
+save_name = "latest"

@@ -119,6 +119,8 @@ def test_mcts_run_continuous_delegates_to_rust(monkeypatch: pytest.MonkeyPatch) 
             "policy_init_avg_plies": None,
             "policy_init_max_plies": None,
             "policy_init_temperature": None,
+            "tss_enabled": None,
+            "root_fpu_zero_under_noise": None,
         }
     ]
 

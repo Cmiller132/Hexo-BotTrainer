@@ -1,0 +1,158 @@
+"""CUDA Graph capture/replay prototype for the launch-bound serve forward.
+
+Captures HexfieldNet.forward_policy_value at a fixed (B_cap, Npad) under the EXACT
+serve call context (no_grad + autocast fp16) and replays it with one host launch.
+Compares eager-direct, compiled-direct, and graph-replay ms at the launch-bound
+shapes, with an in-script fp16 parity gate (replay[:g] vs a true (g,Npad) forward).
+
+NO packages/ changes — the model is imported, not modified.
+"""
+import sys, time
+from pathlib import Path
+REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO / "packages" / "hexfield" / "python"))
+import numpy as np
+import torch
+import torch._dynamo
+import hexfield.constants as C
+from hexfield.model import HexfieldNet
+
+assert torch.cuda.is_available()
+torch.manual_seed(0)
+dev = torch.device("cuda")
+model = HexfieldNet().eval().to(dev)
+RML = False  # the run's divergences.moves_left_utility default
+F = C.NUM_FEATURES
+TOL = 3e-3
+
+# Build a compiled forward EXACTLY like HexfieldEvaluator.__init__ does.
+torch._dynamo.config.suppress_errors = True
+torch._dynamo.config.automatic_dynamic_shapes = False
+torch._dynamo.config.cache_size_limit = max(64, torch._dynamo.config.cache_size_limit)
+compiled_fpv = torch.compile(model.forward_policy_value)
+
+
+def make_static(Bc, Np):
+    return dict(
+        feats=torch.zeros(Bc, Np, F, device=dev),
+        nbr=torch.full((Bc, Np, 6), Np, dtype=torch.long, device=dev),
+        mask=torch.zeros(Bc, Np, dtype=torch.bool, device=dev),
+        coords=torch.zeros(Bc, Np, 2, dtype=torch.long, device=dev),
+    )
+
+
+def eager_call(feats, nbr, mask, coords):
+    with torch.no_grad(), torch.autocast("cuda", dtype=torch.float16):
+        return model.forward_policy_value(feats, nbr, mask, coords,
+                                          request_moves_left=RML)
+
+
+def compiled_call(feats, nbr, mask, coords):
+    with torch.no_grad(), torch.autocast("cuda", dtype=torch.float16):
+        return compiled_fpv(feats, nbr, mask, coords, request_moves_left=RML)
+
+
+def rand_inputs(g_real, Np):
+    feats = torch.randn(g_real, Np, F, device=dev)
+    nbr = torch.randint(0, Np, (g_real, Np, 6), dtype=torch.long, device=dev)
+    mask = torch.ones(g_real, Np, dtype=torch.bool, device=dev)
+    coords = torch.randint(-20, 21, (g_real, Np, 2), dtype=torch.long, device=dev)
+    return feats, nbr, mask, coords
+
+
+def load_static(s, feats, nbr, mask, coords, g_real, Np):
+    # real rows into the first g_real rows, neutralize the pad tail
+    s["feats"].zero_();   s["feats"][:g_real].copy_(feats)
+    s["nbr"].fill_(Np);   s["nbr"][:g_real].copy_(nbr)
+    s["mask"].zero_();    s["mask"][:g_real].copy_(mask)
+    s["coords"].zero_();  s["coords"][:g_real].copy_(coords)
+
+
+def capture(call_fn, s):
+    def fwd():
+        return call_fn(s["feats"], s["nbr"], s["mask"], s["coords"])
+    side = torch.cuda.Stream()
+    side.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(side):
+        for _ in range(5):
+            fwd()
+    torch.cuda.current_stream().wait_stream(side)
+    torch.cuda.synchronize()
+    gr = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(gr):
+        out = fwd()
+    return gr, out
+
+
+def bench(fn, reps=100):
+    for _ in range(10): fn()
+    torch.cuda.synchronize(); t0 = time.time()
+    for _ in range(reps): fn()
+    torch.cuda.synchronize()
+    return (time.time() - t0) / reps * 1000
+
+
+all_pass = True
+for Bc, Np in [(64, 256), (64, 512)]:
+    print(f"\n=== B_cap={Bc} Npad={Np} ===")
+    # --- capture the EAGER forward (control) ---
+    s_e = make_static(Bc, Np)
+    try:
+        g_eager, out_eager = capture(eager_call, s_e)
+        eager_captured = True
+    except Exception as exc:
+        print(f"  EAGER capture FAILED: {exc!r}")
+        eager_captured = False
+
+    # --- capture the COMPILED forward (the strongest result) ---
+    s_c = make_static(Bc, Np)
+    try:
+        g_comp, out_comp = capture(compiled_call, s_c)
+        comp_captured = True
+    except Exception as exc:
+        print(f"  COMPILED capture FAILED: {exc!r} -> falling back to eager-only")
+        comp_captured = False
+
+    # --- PARITY: replay[:g] vs a true (g,Np) eager forward ---
+    for g_real in (Bc, 40):
+        feats, nbr, mask, coords = rand_inputs(g_real, Np)
+        ref = eager_call(feats, nbr, mask, coords)
+        rv = {k: v.float() for k, v in ref.items()}
+        # eager-captured replay
+        if eager_captured:
+            load_static(s_e, feats, nbr, mask, coords, g_real, Np)
+            g_eager.replay(); torch.cuda.synchronize()
+            dv = float((out_eager["value"][:g_real].float() - rv["value"]).abs().max())
+            dp = float((out_eager["policy"][:g_real].float() - rv["policy"]).abs().max())
+            ok = max(dv, dp) <= TOL
+            all_pass = all_pass and ok
+            print(f"  PARITY eager   g={g_real}: value={dv:.5f} policy={dp:.5f} {'PASS' if ok else 'FAIL'}")
+        # compiled-captured replay
+        if comp_captured:
+            load_static(s_c, feats, nbr, mask, coords, g_real, Np)
+            g_comp.replay(); torch.cuda.synchronize()
+            dv = float((out_comp["value"][:g_real].float() - rv["value"]).abs().max())
+            dp = float((out_comp["policy"][:g_real].float() - rv["policy"]).abs().max())
+            ok = max(dv, dp) <= TOL
+            all_pass = all_pass and ok
+            print(f"  PARITY compiled g={g_real}: value={dv:.5f} policy={dp:.5f} {'PASS' if ok else 'FAIL'}")
+
+    # --- BENCH at full B_cap ---
+    feats, nbr, mask, coords = rand_inputs(Bc, Np)
+    e_ms = bench(lambda: eager_call(feats, nbr, mask, coords))
+    c_ms = bench(lambda: compiled_call(feats, nbr, mask, coords))
+    line = f"  BENCH  eager-direct={e_ms:.3f}ms compiled-direct={c_ms:.3f}ms"
+    if eager_captured:
+        load_static(s_e, feats, nbr, mask, coords, Bc, Np)
+        re_ms = bench(lambda: g_eager.replay())
+        line += f" eager-replay={re_ms:.3f}ms"
+    if comp_captured:
+        load_static(s_c, feats, nbr, mask, coords, Bc, Np)
+        rc_ms = bench(lambda: g_comp.replay())
+        line += f" compiled-replay={rc_ms:.3f}ms"
+    print(line)
+    if comp_captured:
+        best_replay = min([m for m in [re_ms if eager_captured else None, rc_ms] if m is not None])
+        print(f"  SPEEDUP best-replay vs compiled-direct: {c_ms/best_replay:.2f}x  vs eager-direct: {e_ms/best_replay:.2f}x")
+
+print(f"\nRESULT: {'PASS' if all_pass else 'FAIL'} (prototype run complete)")

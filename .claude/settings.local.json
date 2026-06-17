@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(Get-ChildItem -Path \"E:\\\\Hexo-BotTrainer-hexgt\" -Directory)",
+      "Bash(Select-Object Name)",
+      "Bash(node --check \"E:/Hexo-BotTrainer-hexgt/packages/hexo_frontend/python/hexo_frontend/static/app.js\")"
+    ]
+  }
+}

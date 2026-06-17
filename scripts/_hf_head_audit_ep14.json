@@ -1,0 +1,38 @@
+{
+  "passed": true,
+  "n_games": 47,
+  "n_positions": 1901,
+  "conv_spearman_mean": 0.68,
+  "full_spearman_mean": 0.755,
+  "overall_mae": 34.37,
+  "near_end_mae_0_5": 2.91,
+  "conv_mono_rate_diagnostic": 0.416,
+  "mono_adj_rate_diagnostic": 0.4,
+  "buckets": {
+    "[0,5)": {
+      "n": 75,
+      "mae": 2.91
+    },
+    "[5,20)": {
+      "n": 241,
+      "mae": 15.42
+    },
+    "[20,60)": {
+      "n": 586,
+      "mae": 14.95
+    },
+    "[60,120)": {
+      "n": 618,
+      "mae": 29.13
+    },
+    "[120+)": {
+      "n": 381,
+      "mae": 90.9
+    }
+  },
+  "gates": {
+    "conv_spearman_gate": 0.5,
+    "full_spearman_gate": 0.4,
+    "near_end_mae_gate": 25.0
+  }
+}

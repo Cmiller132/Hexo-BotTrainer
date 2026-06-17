@@ -250,6 +250,23 @@ class Model1SelfPlayConfig:
     policy_init_avg_plies: float = 0.0
     policy_init_max_plies: int = 0
     policy_init_temperature: float = 1.0
+    # Threat-Space Search master switch (Rust search; default true = current
+    # behavior). False disables ALL THREE TSS mechanisms — tactical-cell
+    # injection at expansion, the hitting-set leaf value override, and the root
+    # move-selection guard — restoring the pure prior-driven PUCT search that
+    # predates the 2026-06-09 TSS port (the regime the parent dense_cnn's
+    # stable runs trained under). Applies to every search this config drives
+    # (self-play both schedulers, evaluation, runner play). Requires a native
+    # module built >= 2026-06-12; with the flag at default the new kwargs are
+    # never passed, so older .so files keep working.
+    tss_enabled: bool = True
+    # KataGo rootFpuReductionMax=0 opt-out (Rust search; default true = current
+    # behavior: root FPU is zeroed while Dirichlet root noise is on). False
+    # keeps `fpu_reduction` active at noisy roots — the pre-2026-06-10
+    # semantics ("accidental sharpener") the early stable runs trained under.
+    # No effect on noise-free searches (eval/play, PCR fast). Same native-module
+    # requirement as tss_enabled.
+    root_fpu_zero_under_noise: bool = True
     # Frozen-win override (crop-freeze surgical ending). In long games the stone
     # blob outgrows the radius-20 input crop and a standing immediate win whose
     # every completion cell lies OUT of the crop becomes invisible/unplayable for
@@ -466,6 +483,8 @@ def parse_model1_config(raw: Mapping[str, Any] | None) -> Model1Config:
             policy_init_avg_plies=float(selfplay.get("policy_init_avg_plies", 0.0)),
             policy_init_max_plies=int(selfplay.get("policy_init_max_plies", 0)),
             policy_init_temperature=float(selfplay.get("policy_init_temperature", 1.0)),
+            tss_enabled=bool(selfplay.get("tss_enabled", True)),
+            root_fpu_zero_under_noise=bool(selfplay.get("root_fpu_zero_under_noise", True)),
             frozen_win_override=bool(selfplay.get("frozen_win_override", False)),
         ),
         evaluation=Model1EvalConfig(

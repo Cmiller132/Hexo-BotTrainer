@@ -19,6 +19,17 @@ runs/
 *.err
 *.tmp
 *.bak
+_tmp_*
+
+# KataGo replay-buffer port: per-phase test scratch holds COPIES of real
+# self-play shards (regenerable, never source) + manifests/diags the tests
+# write. Never version it.
+tests/katago_buffer/_scratch/
+
+# Migration converter (scripts/_hexfield_buffer_convert.py) validation scratch:
+# a CPU-only COPY of a few real shards + the manifest/diags it writes during the
+# resume+select dry-run. Regenerable, never source.
+scratch/
 
 # Model/data outputs.
 *.pt
@@ -35,3 +46,9 @@ data/checkpoints/*
 !data/replay/.gitkeep
 !data/checkpoints/.gitkeep
 
+
+# hexfield bootstrap corpora (regenerable data, not code)
+/data/hexfield_bootstrap/
+/data/hexfield_bootstrap_smoke/
+/data/hexfield_bootstrap_smoke2/
+/data/hexo-bootstrap-corpus/

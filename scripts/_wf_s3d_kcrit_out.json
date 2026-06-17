@@ -1,0 +1,270 @@
+{
+ "squander": {
+  "n": 64,
+  "n_games": 8,
+  "kcrit_pcts_[10,25,50,75,90]": [
+   0.1844,
+   0.419,
+   0.8319,
+   2.6126,
+   4.264
+  ],
+  "kcrit_finite_frac": 0.938,
+  "flip_frac_at_k": {
+   "0.05": 0.047,
+   "0.1": 0.047,
+   "0.15": 0.078,
+   "0.2": 0.125,
+   "0.3": 0.156,
+   "0.5": 0.297,
+   "1.0": 0.547
+  },
+  "vgap_best_minus_2nd_median": 0.00211,
+  "vgap_best_minus_median_median": 0.00951,
+  "spread_ml_w005_median": 5.51,
+  "spread_ml_w001_median": 3.11,
+  "n_near_w001_median": 6.0,
+  "played_above_median_ml_near": "42/64",
+  "terminal_cand_positions": 0
+ },
+ "control": {
+  "n": 15,
+  "n_games": 12,
+  "kcrit_pcts_[10,25,50,75,90]": [
+   17.1366,
+   69.4035,
+   null,
+   null,
+   null
+  ],
+  "kcrit_finite_frac": 0.333,
+  "flip_frac_at_k": {
+   "0.05": 0.0,
+   "0.1": 0.0,
+   "0.15": 0.0,
+   "0.2": 0.0,
+   "0.3": 0.0,
+   "0.5": 0.0,
+   "1.0": 0.0
+  },
+  "vgap_best_minus_2nd_median": 0.0646,
+  "vgap_best_minus_median_median": 0.38293,
+  "spread_ml_w005_median": 0.0,
+  "spread_ml_w001_median": 0.0,
+  "n_near_w001_median": 1.0,
+  "played_above_median_ml_near": "1/3",
+  "terminal_cand_positions": 0
+ },
+ "midgame": {
+  "n": 24,
+  "n_games": 12,
+  "kcrit_pcts_[10,25,50,75,90]": [
+   1.2318,
+   2.4822,
+   21.844,
+   null,
+   null
+  ],
+  "kcrit_finite_frac": 0.542,
+  "flip_frac_at_k": {
+   "0.05": 0.0,
+   "0.1": 0.0,
+   "0.15": 0.0,
+   "0.2": 0.0,
+   "0.3": 0.0,
+   "0.5": 0.0,
+   "1.0": 0.083
+  },
+  "vgap_best_minus_2nd_median": 0.02321,
+  "vgap_best_minus_median_median": 0.10339,
+  "spread_ml_w005_median": 4.71,
+  "spread_ml_w001_median": 0.0,
+  "n_near_w001_median": 1.0,
+  "played_above_median_ml_near": "2/8",
+  "terminal_cand_positions": 0
+ },
+ "squander_by_ply": {
+  "[200,260)": {
+   "n": 10,
+   "kcrit_median": 0.735,
+   "flip_frac_k02": 0.3
+  },
+  "[260,300)": {
+   "n": 24,
+   "kcrit_median": 1.0499,
+   "flip_frac_k02": 0.0
+  },
+  "[300,340)": {
+   "n": 15,
+   "kcrit_median": 1.0245,
+   "flip_frac_k02": 0.067
+  },
+  "[340,400)": {
+   "n": 15,
+   "kcrit_median": 0.5921,
+   "flip_frac_k02": 0.267
+  }
+ },
+ "squander_played_rank": {
+  "rank_v_mean": 5.12,
+  "rank_u_k02_mean": 5.12,
+  "n": 64,
+  "rank_worsens_under_u_k02": 10,
+  "rank_improves_under_u_k02": 9
+ },
+ "spot_checks": [
+  {
+   "tag": "squander",
+   "game": "epoch-000009-selfplay-000060",
+   "ply": 341,
+   "v_base": 0.639,
+   "ml_base": 133.6,
+   "top6": [
+    {
+     "v": 0.6408,
+     "ml": 131.9,
+     "prior": 0.016,
+     "played": false,
+     "term": false
+    },
+    {
+     "v": 0.6408,
+     "ml": 130.6,
+     "prior": 0.114,
+     "played": false,
+     "term": false
+    },
+    {
+     "v": 0.6408,
+     "ml": 130.5,
+     "prior": 0.038,
+     "played": false,
+     "term": false
+    },
+    {
+     "v": 0.64,
+     "ml": 130.5,
+     "prior": 0.013,
+     "played": false,
+     "term": false
+    },
+    {
+     "v": 0.6398,
+     "ml": 132.7,
+     "prior": 0.133,
+     "played": false,
+     "term": false
+    },
+    {
+     "v": 0.6396,
+     "ml": 132.6,
+     "prior": 0.05,
+     "played": false,
+     "term": false
+    }
+   ]
+  },
+  {
+   "tag": "squander",
+   "game": "epoch-000009-selfplay-000060",
+   "ply": 352,
+   "v_base": 0.617,
+   "ml_base": 128.5,
+   "top6": [
+    {
+     "v": -0.6383,
+     "ml": 133.0,
+     "prior": 0.236,
+     "played": false,
+     "term": false
+    },
+    {
+     "v": -0.6387,
+     "ml": 133.4,
+     "prior": 0.013,
+     "played": false,
+     "term": false
+    },
+    {
+     "v": -0.6387,
+     "ml": 127.3,
+     "prior": 0.007,
+     "played": false,
+     "term": false
+    },
+    {
+     "v": -0.6394,
+     "ml": 132.6,
+     "prior": 0.312,
+     "played": false,
+     "term": false
+    },
+    {
+     "v": -0.6394,
+     "ml": 134.1,
+     "prior": 0.013,
+     "played": false,
+     "term": false
+    },
+    {
+     "v": -0.6398,
+     "ml": 133.5,
+     "prior": 0.004,
+     "played": false,
+     "term": false
+    }
+   ]
+  },
+  {
+   "tag": "control",
+   "game": "epoch-000005-selfplay-000097",
+   "ply": 82,
+   "v_base": 0.624,
+   "ml_base": 9.8,
+   "top6": [
+    {
+     "v": 0.9316,
+     "ml": 20.7,
+     "prior": 0.216,
+     "played": false,
+     "term": false
+    },
+    {
+     "v": 0.9251,
+     "ml": 20.5,
+     "prior": 0.013,
+     "played": false,
+     "term": false
+    },
+    {
+     "v": 0.9155,
+     "ml": 20.4,
+     "prior": 0.008,
+     "played": false,
+     "term": false
+    },
+    {
+     "v": 0.9083,
+     "ml": 20.6,
+     "prior": 0.011,
+     "played": false,
+     "term": false
+    },
+    {
+     "v": 0.9047,
+     "ml": 21.5,
+     "prior": 0.373,
+     "played": true,
+     "term": false
+    },
+    {
+     "v": 0.8798,
+     "ml": 22.0,
+     "prior": 0.025,
+     "played": false,
+     "term": false
+    }
+   ]
+  }
+ ]
+}

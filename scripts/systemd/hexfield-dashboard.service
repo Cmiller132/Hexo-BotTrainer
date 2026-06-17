@@ -1,0 +1,16 @@
+[Unit]
+Description=hexo_frontend :8080 run dashboard
+After=network.target
+
+[Service]
+Type=simple
+ExecStartPre=/usr/bin/test -d /mnt/e/Hexo-BotTrainer-hexgt/packages/hexo_frontend/python
+WorkingDirectory=/mnt/e/Hexo-BotTrainer
+Environment=HEXO_DEBUG_RUN_ROOT=/mnt/e/Hexo-BotTrainer
+Environment=PYTHONPATH=/mnt/e/Hexo-BotTrainer-hexgt/packages/hexo_engine/python:/mnt/e/Hexo-BotTrainer-hexgt/packages/hexo_utils/python:/mnt/e/Hexo-BotTrainer-hexgt/packages/hexo_runner/python:/mnt/e/Hexo-BotTrainer-hexgt/packages/hexo_train/python:/mnt/e/Hexo-BotTrainer-hexgt/packages/hexo_models/python:/mnt/e/Hexo-BotTrainer-hexgt/packages/hexo_frontend/python:/mnt/e/Hexo-BotTrainer-hexgt/packages/dense_cnn_restnet/python
+ExecStart=/root/.venvs/hexgt-build/bin/python -u -m hexo_frontend.web --host 0.0.0.0 --port 8080 --sealbot-path /mnt/e/SealBot
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

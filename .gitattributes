@@ -1,0 +1,14 @@
+# Normalize all text to LF (this repo builds/runs under WSL/Linux). Prevents the
+# CRLF<->LF churn that polluted the working tree. Binary files are auto-detected
+# by `text=auto` and left untouched.
+* text=auto eol=lf
+
+# Be explicit about common binary types so they are never line-ending-mangled.
+*.pt   binary
+*.so   binary
+*.npz  binary
+*.hxr  binary
+*.png  binary
+*.jpg  binary
+*.gz   binary
+*.bin  binary

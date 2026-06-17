@@ -1,0 +1,49 @@
+# hexfield M7 e2e gate: 4-game epoch through the real plugin on CPU,
+# warm-started from the BC prefit so games finish decisively and the
+# self-play -> shard -> train-on-rows -> checkpoint path is fully exercised
+# (an untrained model truncates every game, writing 0 rows). Spec §10 M7.
+
+[model]
+name = "hexfield"
+module = "hexfield.plugin"
+
+[model.config]
+device = "cpu"
+
+[model.config.selfplay]
+search_visits = 32
+pcr_full_proportion = 0.6
+pcr_fast_visits = 8
+active_games = 4
+virtual_batch_size = 4
+flush_target = 16
+active_root_limit = 8
+max_game_plies = 120
+forced_playout_k = 2.0
+policy_init_fraction = 0.25
+
+[model.config.training]
+batch_rows = 16
+shuffle_keep_target_rows = 8192
+
+[model.config.evaluation]
+games_per_epoch = 0
+
+[run]
+name = "hexfield_smoke"
+output_dir = "runs/hexfield_smoke"
+seed = 1
+
+[loop]
+epochs = 1
+
+[selfplay]
+games_per_epoch = 4
+update_checkpoint_pointer = false
+
+[train]
+passes_per_epoch = 1
+
+[checkpoint]
+initialize_from = "/mnt/e/Hexo-BotTrainer-hexgt/runs/hexfield_bc_1/checkpoint_epoch1.pt"
+save_name = "latest"

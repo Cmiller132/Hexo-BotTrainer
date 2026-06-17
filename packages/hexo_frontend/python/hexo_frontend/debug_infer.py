@@ -59,6 +59,7 @@ STV_HORIZONS: tuple[int, ...] = (4, 12, 24)
 HEXGT = "hexgt"
 DENSE_RESTNET = "dense_cnn_restnet"
 DENSE_PLAIN = "dense_cnn"
+HEXFIELD = "hexfield"
 
 
 # ---------------------------------------------------------------------------
@@ -101,6 +102,16 @@ def _detect_lineage(payload: Any) -> str:
 
     if not isinstance(payload, dict):
         raise ValueError("checkpoint payload is not a dict")
+    # hexfield FIRST: it stores the state dict (not a string tag) under
+    # ``payload["model"]`` with NO ``arch``, and carries a ``meta`` block whose
+    # ``lineage`` is the authoritative marker. It must be matched before the
+    # dense (string-tag) and hexgt (model+arch) branches — the hexgt branch
+    # matches any ``model``+``arch`` pair, and hexfield has ``model`` but no
+    # ``arch``, so without this early return it would fall through to the
+    # final raise.
+    meta = payload.get("meta")
+    if isinstance(meta, dict) and meta.get("lineage") == "hexfield" and isinstance(payload.get("model"), dict):
+        return HEXFIELD
     tag = payload.get("model")
     if isinstance(tag, str):
         lowered = tag.lower()
@@ -130,6 +141,8 @@ def load_checkpoint(path: str | Path) -> LoadedModel:
     lineage = _detect_lineage(payload)
     if lineage in (DENSE_RESTNET, DENSE_PLAIN):
         return _load_dense_checkpoint(ckpt_path, payload, lineage)
+    if lineage == HEXFIELD:
+        return _load_hexfield_checkpoint(ckpt_path, payload)
     return _load_hexgt_checkpoint(ckpt_path, payload)
 
 
@@ -192,6 +205,8 @@ def analyze_position(
 
     if loaded.lineage in (DENSE_RESTNET, DENSE_PLAIN):
         return _analyze_dense(loaded, action_ids, planes=planes)
+    if loaded.lineage == HEXFIELD:
+        return _analyze_hexfield(loaded, action_ids)
     return _analyze_hexgt(loaded, action_ids, n=n)
 
 
@@ -209,6 +224,8 @@ def search_position(
 
     if loaded.lineage in (DENSE_RESTNET, DENSE_PLAIN):
         return _search_dense(loaded, action_ids, visits=visits, c_puct=c_puct, seed=seed)
+    if loaded.lineage == HEXFIELD:
+        return _search_hexfield(loaded, action_ids, visits=visits, c_puct=c_puct, seed=seed)
     return _search_hexgt(loaded, action_ids, visits=visits, c_puct=c_puct, n=n, seed=seed)
 
 
@@ -520,14 +537,17 @@ def _search_dense(
     # A DEBUG search must be a clean, reproducible read of the model's own
     # judgement: no root exploration noise, neutral root-policy temperature, fixed
     # seed. So the reported root prior is exactly the network prior and re-running
-    # the same position yields the same tree.
+    # the same position yields the same tree. Move-selection temperature 0 makes
+    # the reported best action the strict visit ARGMAX (a positive temperature
+    # would make it a visit-weighted sample — softer than the eval protocol and
+    # the match-mode checkpoint bots, which both play the argmax).
     result = session.run(
         [0],
         [state],
         inference,
         visits=int(visits),
         c_puct=float(c_puct),
-        temperature=1.0,
+        temperature=0.0,
         seed=int(seed),
         root_dirichlet_total_alpha=1.0,
         root_dirichlet_noise_fraction=0.0,
@@ -786,13 +806,15 @@ def _search_hexgt(
     state = state_from_actions(action_ids)
     inference = hx.HexgtInference(loaded.model, device="cpu", fp16=False)
     session = hx.new_mcts_session(n=radius)
+    # Same clean-search contract as _search_dense: no noise, raw prior, and
+    # move-selection temperature 0 so the reported best is the visit argmax.
     result = session.run(
         [0],
         [state],
         inference,
         visits=int(visits),
         c_puct=float(c_puct),
-        temperature=1.0,
+        temperature=0.0,
         seed=int(seed),
         root_dirichlet_total_alpha=1.0,
         root_dirichlet_noise_fraction=0.0,
@@ -807,6 +829,304 @@ def _search_hexgt(
         "best": _coord_of(int(result.action_id)),
         "visit_policy": _policy_pairs_to_rows(result.visit_policy, normalize=True),
         "root_prior": _policy_pairs_to_rows(result.root_prior_policy, normalize=False),
+    }
+
+
+# ===========================================================================
+# hexfield lineage — support-set (variable-N) graph featurizer + node tokens
+# ===========================================================================
+
+
+@lru_cache(maxsize=1)
+def _hexfield() -> SimpleNamespace:
+    """Lazily import the hexfield package modules (kept out of import-time so a
+    venv missing hexfield still debugs the other lineages, mirroring _hexgt)."""
+
+    # hexfield is NEVER installed into a shared venv (spec §5.1) — it is imported
+    # via a source-path shim. The debug worker is spawned with a minimal
+    # PYTHONPATH that does not include it, so add packages/hexfield/python here
+    # (derived from this file's location) before importing. Without this the
+    # worker fails with ModuleNotFoundError: No module named 'hexfield'.
+    import sys
+
+    _hf_src = Path(__file__).resolve().parents[3] / "hexfield" / "python"
+    if _hf_src.is_dir() and str(_hf_src) not in sys.path:
+        sys.path.insert(0, str(_hf_src))
+
+    from hexfield import _rust
+    from hexfield.batching import collate_rows
+    from hexfield.constants import VALUE_BINS
+    from hexfield.engine_facts import facts_from_state
+    from hexfield.features import build_features
+    from hexfield.geometry import pack_action_id
+    from hexfield.losses import decode_binned_value, decode_moves_left, value_bins
+    from hexfield.model import STV_HORIZONS, HexfieldNet
+    from hexfield.support import build_support
+
+    return SimpleNamespace(
+        _rust=_rust,
+        collate_rows=collate_rows,
+        VALUE_BINS=VALUE_BINS,
+        facts_from_state=facts_from_state,
+        build_features=build_features,
+        pack_action_id=pack_action_id,
+        decode_binned_value=decode_binned_value,
+        decode_moves_left=decode_moves_left,
+        value_bins=value_bins,
+        STV_HORIZONS=STV_HORIZONS,
+        HexfieldNet=HexfieldNet,
+        build_support=build_support,
+    )
+
+
+def _load_hexfield_checkpoint(ckpt_path: Path, payload: dict[str, Any]) -> LoadedModel:
+    """Load a hexfield checkpoint onto CPU.
+
+    The payload is ``{meta, model (state dict), optimizer}``; the architecture
+    is fixed (no per-checkpoint structural drift like the dense/hexgt lineages),
+    so the network is built bare and the weights load strict. The state dict is
+    the authoritative head set, so a strict mismatch is surfaced as a warning
+    rather than 500-ing (same defensive contract as the other loaders)."""
+
+    hf = _hexfield()
+    meta = dict(payload.get("meta", {}))
+    state_dict = payload["model"]
+    if not isinstance(state_dict, dict):
+        raise ValueError(f"{ckpt_path.name}: hexfield checkpoint 'model' is not a state dict")
+
+    model = hf.HexfieldNet()
+    warnings: list[str] = []
+    try:
+        model.load_state_dict(state_dict, strict=True)
+    except RuntimeError as exc:
+        result = model.load_state_dict(state_dict, strict=False)
+        if result.missing_keys:
+            warnings.append(f"missing keys: {list(result.missing_keys)[:8]}")
+        if result.unexpected_keys:
+            warnings.append(f"unexpected keys: {list(result.unexpected_keys)[:8]}")
+        if not result.missing_keys and not result.unexpected_keys:
+            warnings.append(f"load mismatch: {exc}")
+
+    model.eval()
+    # arch carries the run/lineage meta for the provenance panel (only jsonable
+    # scalars survive the worker's _model_meta filter, which is exactly meta's
+    # shape). The structural fields are constants, so nothing is inferred.
+    arch: dict[str, Any] = {str(k): v for k, v in meta.items()}
+    arch["moves_left_head"] = True
+    return LoadedModel(
+        lineage=HEXFIELD,
+        model=model,
+        arch=arch,
+        rl_epoch=_maybe_int(meta.get("epoch")),
+        step=_maybe_int(payload.get("step")),
+        candidate_radius=None,  # hexfield has no candidate radius (full legal set)
+        graft=None,
+        load_warnings=warnings,
+        # The network always carries the STV + moves-left heads; expose them so
+        # the Debug tab renders the full readout (same panels as the dense
+        # lineage). Horizons come from the model constant, not the checkpoint.
+        stv_horizons=tuple(int(h) for h in hf.STV_HORIZONS),
+        has_moves_left=True,
+    )
+
+
+def _hexfield_inputs(hf: SimpleNamespace, state: Any):
+    """Featurize one engine decision state into the model's (1, N, *) batch.
+
+    Returns ``(batch, legal_action_ids)`` where ``batch`` is the collate dict
+    (feats/nbr/mask/coords/legal_counts) and ``legal_action_ids`` are the packed
+    action ids of the legal prefix in support node order — the policy logits are
+    positional over exactly this prefix (support layout ``[legal|stones|halo]``,
+    legal nodes are slots ``[0, legal_count)``)."""
+
+    facts = hf.facts_from_state(state)
+    sup = hf.build_support(facts.stones())
+    feats = hf.build_features(facts, sup)
+    batch = hf.collate_rows([(sup, feats)])
+    legal = sup.legal_coords()  # (legal_count, 2) axial (q, r)
+    legal_action_ids = [hf.pack_action_id(int(q), int(r)) for q, r in legal.tolist()]
+    return batch, legal_action_ids
+
+
+def _hexfield_forward(model: Any, batch: dict[str, Any]) -> dict[str, Any]:
+    """Run the full forward on CPU, forcing the fp32 relative-position-bias path.
+
+    ``HexfieldNet.build_attn_bias`` branches on ``torch.is_grad_enabled()``: in
+    no-grad it gathers the bias DIRECTLY in fp16 (``bias_table.to(fp16)[pair]``)
+    for the GPU serve path. On CPU a bare fp16 gather + add is supported, but to
+    be unconditionally safe (the caveat: a CPU fp16 op could error) we run the
+    forward under ``torch.enable_grad()`` so the fp32 ``_BiasGather`` master path
+    is taken — every op stays fp32 — then immediately detach. This is the
+    caveat's recommended fp32-bias fallback; the cost is negligible for a single
+    position on CPU. ``analyze_position``/``search_position`` are decorated
+    ``@torch.no_grad()``; ``enable_grad`` overrides that enclosing context."""
+
+    with torch.enable_grad():
+        out = model.forward(
+            batch["feats"], batch["nbr"], batch["mask"], batch["coords"]
+        )
+    return {k: v.detach() for k, v in out.items()}
+
+
+def _hexfield_policy_rows(
+    logits_row: torch.Tensor, legal_action_ids: list[int]
+) -> list[dict[str, Any]]:
+    """Softmax the policy over the legal prefix -> per-candidate rows.
+
+    ``logits_row`` is the (Npad,) policy logit row; only the first
+    ``len(legal_action_ids)`` slots are legal (the rest are pad/halo, mask-zeroed
+    in the model). Softmax over exactly the legal prefix, then map each slot back
+    to its packed action id."""
+
+    legal_count = len(legal_action_ids)
+    if legal_count == 0:
+        return []
+    priors = torch.softmax(logits_row[:legal_count].float(), dim=0).cpu().numpy()
+    rows = []
+    for aid, prob in zip(legal_action_ids, priors.tolist()):
+        coord = _coord_of(aid)
+        rows.append({"action_id": int(aid), "q": coord["q"], "r": coord["r"], "p": round(float(prob), 6)})
+    rows.sort(key=lambda r: r["p"], reverse=True)
+    return rows
+
+
+def _hexfield_dist(hf: SimpleNamespace, logits: torch.Tensor) -> dict[str, Any]:
+    """Scalar + 65-bin distribution for one value-style head's (65,) logits."""
+
+    flat = logits.float().reshape(-1)
+    scalar = float(hf.decode_binned_value(flat.reshape(1, -1)).reshape(()).item())
+    dist = [round(float(x), 5) for x in torch.softmax(flat, dim=0).cpu().numpy()]
+    return {"scalar": scalar, "dist": dist}
+
+
+@torch.no_grad()
+def _analyze_hexfield(loaded: LoadedModel, action_ids: Sequence[int]) -> dict[str, Any]:
+    hf = _hexfield()
+    state = state_from_actions(action_ids)
+    batch, legal_action_ids = _hexfield_inputs(hf, state)
+    out = _hexfield_forward(loaded.model, batch)
+
+    policy = _hexfield_policy_rows(out["policy"][0], legal_action_ids)
+    opp = None
+    if "opp_policy" in out:
+        opp = _hexfield_policy_rows(out["opp_policy"][0], legal_action_ids)
+
+    value = _hexfield_dist(hf, out["value"][0])
+
+    stv: dict[str, Any] = {}
+    for horizon in loaded.stv_horizons:
+        key = f"stvalue_{horizon}"
+        if key in out:
+            stv[str(horizon)] = _hexfield_dist(hf, out[key][0])
+
+    # moves_left: the head emits 65-bin logits decoded the SAME way the dense
+    # lineage's is (decode_binned_value -> scalar in [-1, 1]); the UI undoes the
+    # affine map to remaining decisions with moves_left_cap (512). NOT
+    # decode_moves_left (that returns a raw decisions count the UI would
+    # double-scale).
+    moves_left = _hexfield_dist(hf, out["moves_left"][0]) if "moves_left" in out else None
+
+    current = engine.current_player(state)
+    current_role = getattr(current, "value", str(current))
+    current_index = 1 if str(current_role).endswith("1") else 0
+
+    return {
+        "current_player": current_index,
+        "current_role": str(current_role),
+        "candidate_count": len(legal_action_ids),
+        "legal_count": int(engine.legal_action_count(state)),
+        "value": value["scalar"],
+        # The owner-swap "optimism" probe is a hexgt-graph-specific calibration
+        # check; hexfield encodes side-to-move ownership in its features (own/opp
+        # planes), so it is marked N/A (UI hides the panel when null).
+        "value_swapped": None,
+        "optimism": None,
+        "value_bins": [round(float(x), 5) for x in hf.value_bins().cpu().numpy()],
+        "value_dist": value["dist"],
+        "policy": policy,
+        "opp_policy": opp,
+        "stvalue": stv,
+        "moves_left": moves_left,
+        "input_planes": None,  # support-graph featurized lineage: no dense planes
+    }
+
+
+def _decode_id_weight_pairs(ids_bytes: Any, weights_bytes: Any) -> list[tuple[int, float]]:
+    """Decode a Rust search result's (uint32 action ids, float32 weights) byte
+    buffers into ``(action_id, weight)`` pairs for ``_policy_pairs_to_rows``."""
+
+    ids = np.frombuffer(bytes(ids_bytes), dtype=np.uint32)
+    weights = np.frombuffer(bytes(weights_bytes), dtype=np.float32)
+    return [(int(a), float(w)) for a, w in zip(ids.tolist(), weights.tolist())]
+
+
+@torch.no_grad()
+def _search_hexfield(
+    loaded: LoadedModel,
+    action_ids: Sequence[int],
+    *,
+    visits: int,
+    c_puct: float,
+    seed: int,
+) -> dict[str, Any]:
+    """Real CPU MCTS via the Rust HexfieldMctsSession (single-position search).
+
+    Mirrors evaluation.py / selfplay.py: the session takes the engine state and
+    drives featurization through a CPU ``HexfieldEvaluator``. Clean-search debug
+    contract (same as _search_dense/_search_hexgt): no Dirichlet root noise,
+    move-selection temperature 0 (reported best == visit argmax), neutral root
+    policy temperature, fixed seed. Production search divergences (widening, FPU,
+    forced playouts, TSS) are left at the SelfplayConfig production defaults so
+    the tree matches how the model actually plays; ``search_parity_mode`` stays
+    off (the production path, not the dense-lockstep parity path)."""
+
+    from hexfield.config import SelfplayConfig
+    from hexfield.inference import HexfieldEvaluator
+
+    hf = _hexfield()
+    sp = SelfplayConfig()  # production search knobs (defaults)
+    state = state_from_actions(action_ids)
+    evaluator = HexfieldEvaluator(loaded.model, device="cpu")
+    session = hf._rust.HexfieldMctsSession(max_states=65536)
+
+    result = session.search(
+        [int(seed)],
+        (state,),
+        evaluator=evaluator,
+        visits=int(visits),
+        c_puct=float(c_puct),
+        temperature=0.0,
+        seed=int(seed),
+        virtual_batch_size=sp.virtual_batch_size,
+        fpu_reduction=sp.fpu_reduction,
+        virtual_loss=sp.virtual_loss,
+        widening_policy_mass=sp.widening_policy_mass,
+        widening_max_children=sp.widening_max_children,
+        widening_min_children=sp.widening_min_children,
+        forced_playout_k=sp.forced_playout_k,
+        root_policy_temperature=sp.root_policy_temperature,
+        tss_enabled=sp.tss_enabled,
+        root_fpu_zero_under_noise=sp.root_fpu_zero_under_noise,
+        search_parity_mode=sp.search_parity_mode,
+    )[0]
+
+    visit_pairs = _decode_id_weight_pairs(
+        result["visit_policy_action_ids_bytes"], result["visit_policy_weights_bytes"]
+    )
+    root_prior_pairs = _decode_id_weight_pairs(
+        result["root_prior_policy_action_ids_bytes"],
+        result["root_prior_policy_weights_bytes"],
+    )
+    best_action_id = int(result["action_id"])
+
+    return {
+        "visits_requested": int(visits),
+        "visits": int(result["visits"]),
+        "root_value": float(result["root_value"]),
+        "best_action_id": best_action_id,
+        "best": _coord_of(best_action_id),
+        "visit_policy": _policy_pairs_to_rows(visit_pairs, normalize=True),
+        "root_prior": _policy_pairs_to_rows(root_prior_pairs, normalize=False),
     }
 
 
@@ -827,6 +1147,10 @@ def moves_left_cap(loaded: LoadedModel) -> int | None:
         return None
     if loaded.lineage == DENSE_RESTNET:
         from dense_cnn_restnet.constants import MOVES_LEFT_CAP
+
+        return int(MOVES_LEFT_CAP)
+    if loaded.lineage == HEXFIELD:
+        from hexfield.constants import MOVES_LEFT_CAP
 
         return int(MOVES_LEFT_CAP)
     return None
@@ -875,6 +1199,23 @@ def _tree_evaluator(loaded: LoadedModel, n: int | None):
                 return [], value
             idx = torch.as_tensor(legal_flat, dtype=torch.long)
             priors = torch.softmax(out["policy"][0].float().index_select(0, idx), dim=0)
+            return list(zip(legal_action_ids, priors.tolist())), value
+
+        return evaluate
+
+    if loaded.lineage == HEXFIELD:
+        hf = _hexfield()
+
+        def evaluate(state: Any) -> tuple[list[tuple[int, float]], float]:
+            batch, legal_action_ids = _hexfield_inputs(hf, state)
+            out = _hexfield_forward(loaded.model, batch)
+            value = float(
+                hf.decode_binned_value(out["value"][0].float().reshape(1, -1)).reshape(()).item()
+            )
+            legal_count = len(legal_action_ids)
+            if legal_count == 0:
+                return [], value
+            priors = torch.softmax(out["policy"][0][:legal_count].float(), dim=0)
             return list(zip(legal_action_ids, priors.tolist())), value
 
         return evaluate

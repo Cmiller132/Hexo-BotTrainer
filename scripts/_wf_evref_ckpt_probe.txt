@@ -1,0 +1,4 @@
+reference_checkpoint = /mnt/e/Hexo-BotTrainer/runs/dense_cnn_restnet_main_3/checkpoints/epoch_000010.pt
+reference_games      = 50
+games_per_epoch      = 50
+strict load OK: RestnetNetwork params=1,614,001 training=False

@@ -1,0 +1,64 @@
+# hexfield M9 soak (spec §10 M9): 3 unattended epochs of the real RL loop
+# (continuous self-play at production search settings + training), warm-started
+# from the BC prefit. Fewer games than production for a faster stability/band
+# check; run dir on the dashboard mount. Exploration bands judged vs the
+# dense main_4 reference (scripts/_hexfield_band_check.py).
+
+[model]
+name = "hexfield"
+module = "hexfield.plugin"
+
+[model.config]
+device = "cuda"
+
+[model.config.selfplay]
+search_visits = 512
+pcr_full_proportion = 0.33
+pcr_fast_visits = 128
+active_games = 32
+c_puct = 1.5
+virtual_batch_size = 4
+flush_target = 256
+active_root_limit = 64
+root_dirichlet_total_alpha = 10.83
+root_dirichlet_noise_fraction = 0.25
+forced_playout_k = 2.0
+policy_init_fraction = 0.25
+policy_init_avg_plies = 4.0
+policy_init_max_plies = 8
+policy_init_temperature = 1.4
+temperature = 1.0
+temperature_floor = 0.1
+temperature_halflife_plies = 30.0
+max_game_plies = 512
+tss_enabled = true
+cache_max_states = 262144
+
+[model.config.training]
+batch_rows = 32
+learning_rate = 1e-3
+weight_decay = 1e-4
+shuffle_keep_target_rows = 120000
+
+[model.config.evaluation]
+games_per_epoch = 16
+eval_visits = 128
+
+[run]
+name = "hexfield_soak"
+output_dir = "/mnt/e/Hexo-BotTrainer/runs/hexfield_soak"
+seed = 2
+
+[loop]
+epochs = 3
+
+[selfplay]
+games_per_epoch = 32
+update_checkpoint_pointer = false
+
+[train]
+passes_per_epoch = 1
+
+[checkpoint]
+initialize_from = "/mnt/e/Hexo-BotTrainer-hexgt/runs/hexfield_bc_1/checkpoint_epoch2.pt"
+save_name = "latest"

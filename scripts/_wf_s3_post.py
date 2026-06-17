@@ -54,7 +54,8 @@ def main():
         preds = {"null_const": base_const, "null_plylin": base_ply}
         for cname in CKPTS:
             preds[cname] = np.concatenate([np.asarray(g[cname], dtype=np.float64) for g in gs])
-            preds[cname + "_med"] = np.concatenate([np.asarray(g[cname + "_med"], dtype=np.float64) for g in gs])
+            if cname + "_med" in gs[0]:
+                preds[cname + "_med"] = np.concatenate([np.asarray(g[cname + "_med"], dtype=np.float64) for g in gs])
 
         hdr = f"   {'bucket':9s} {'n':>6s} " + " ".join(f"{k:>12s}" for k in preds)
         P(hdr + "   (MAE per bucket)")

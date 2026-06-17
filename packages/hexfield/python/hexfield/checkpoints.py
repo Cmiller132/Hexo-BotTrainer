@@ -1,0 +1,118 @@
+"""Strict checkpoint IO for the hexo_train pipeline (spec: no silent partial
+loads — bidirectional key equality, mismatch raises)."""
+
+from __future__ import annotations
+
+import re
+from pathlib import Path
+from typing import Any
+
+import torch
+
+from .model import HexfieldNet
+from .train_state import HexfieldTrainState
+
+
+def save_checkpoint(path: Path, *, model: HexfieldNet, optimizer, epoch: int, extra: dict | None = None) -> Path:
+    payload = {
+        "meta": {"lineage": "hexfield", "epoch": int(epoch), **(extra or {})},
+        "model": model.state_dict(),
+        "optimizer": optimizer.state_dict() if optimizer is not None else None,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(payload, path)
+    return path
+
+
+def load_into(model: HexfieldNet, payload: dict, *, optimizer=None) -> dict:
+    state = payload["model"]
+    expected = set(model.state_dict().keys())
+    got = set(state.keys())
+    if expected != got:
+        missing = sorted(expected - got)[:5]
+        unexpected = sorted(got - expected)[:5]
+        raise ValueError(
+            f"hexfield checkpoint key mismatch: missing={missing} unexpected={unexpected}"
+        )
+    model.load_state_dict(state, strict=True)
+    if optimizer is not None and payload.get("optimizer"):
+        optimizer.load_state_dict(payload["optimizer"])
+        # Checkpoints are loaded with map_location="cpu", so the optimizer's
+        # per-parameter state (exp_avg/exp_avg_sq/...) lands on CPU while the
+        # model params are on the run device (cuda). AdamW.step() then mixes
+        # devices -> "Expected all tensors to be on the same device, cuda:0 and
+        # cpu" and the FIRST post-resume training epoch crashes (self-play is
+        # inference so it survives; only the optimizer step fails). Move every
+        # optimizer state tensor onto the model's device after the load.
+        dev = next(model.parameters()).device
+        for st in optimizer.state.values():
+            for key, val in st.items():
+                if isinstance(val, torch.Tensor):
+                    st[key] = val.to(dev)
+    return payload.get("meta", {})
+
+
+class HexfieldCheckpointLoader:
+    """hexo_train contract: load(ref, ctx, components) -> state dict.
+
+    resume_from -> {"status": "loaded", "epoch": N} (epoch fast-forward);
+    initialize_from -> weights-only warm start (e.g. the BC prefit);
+    None -> fresh random init.
+    """
+
+    def load(self, checkpoint_ref, *, ctx, components) -> dict[str, Any]:
+        model = components.model.model
+        optimizer = components.model.optimizer
+        if checkpoint_ref is None:
+            return {"status": "initialized", "note": "fresh init"}
+        path = Path(checkpoint_ref)
+        payload = torch.load(path, map_location="cpu", weights_only=False)
+        # BC prefit checkpoints store the raw prefit dict; pipeline epochs
+        # store the {meta, model, optimizer} shape.
+        if "meta" in payload:
+            resume = ctx.config.checkpoint.resume_from is not None
+            meta = load_into(model, payload, optimizer=optimizer if resume else None)
+            if resume:
+                # Restore the KataGo-style train-bucket governor ONLY on a true
+                # resume (PLAN §6/M1). A missing key -> from_dict(None) -> fresh
+                # state, so old-format checkpoints resume cleanly. Never restore
+                # on the initialize_from warm-start branch below: a BC-prefit
+                # warm start must begin with a fresh governor, not inherit a
+                # stale bucket from an unrelated run.
+                trainer = getattr(components.model, "trainer", None)
+                if trainer is not None:
+                    trainer.train_state = HexfieldTrainState.from_dict(meta.get("train_state"))
+                return {"status": "loaded", "epoch": int(meta.get("epoch", 0)), "path": str(path)}
+            return {"status": "initialized_from", "path": str(path)}
+        # prefit shape
+        model.load_state_dict(payload["model"], strict=True)
+        return {"status": "initialized_from", "path": str(path), "source": "bc_prefit"}
+
+
+class HexfieldCheckpointSaver:
+    """hexo_train contract: save(name, ctx, components) -> path."""
+
+    def save(self, *, name: str, ctx, components) -> Path:
+        epoch = 0
+        match = re.search(r"epoch_(\d+)", name)
+        if match:
+            epoch = int(match.group(1))
+        # Persist the KataGo-style train-bucket governor state inside the
+        # checkpoint meta (PLAN §6/M1). Guard with getattr so a trainer without
+        # a train_state (e.g. tests) does not crash the save.
+        trainer = getattr(components.model, "trainer", None)
+        extra = {
+            "run": ctx.config.run.name,
+            **(
+                {"train_state": trainer.train_state.to_dict()}
+                if getattr(trainer, "train_state", None) is not None
+                else {}
+            ),
+        }
+        return save_checkpoint(
+            ctx.checkpoint_dir / f"{name}.pt",
+            model=components.model.model,
+            optimizer=components.model.optimizer,
+            epoch=epoch,
+            extra=extra,
+        )

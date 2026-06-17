@@ -115,6 +115,8 @@ class DenseCNNPlayer:
             widening_policy_mass=selfplay.widening_policy_mass,
             widening_max_children=selfplay.widening_max_children,
             widening_min_children=selfplay.widening_min_children,
+            # Play under the run's TSS setting (None = on + old-.so compatible).
+            tss_enabled=(None if selfplay.tss_enabled else False),
         )[0]
         action = engine.PlacementAction(unpack_coord_id(search.action_id))
         return DecisionResult(
