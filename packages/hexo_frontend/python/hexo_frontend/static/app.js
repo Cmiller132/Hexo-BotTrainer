@@ -219,6 +219,7 @@ const gameHistoryDetail = document.getElementById("gameHistoryDetail");
 const histHealthDrawer = document.getElementById("histHealthDrawer");
 const histTrends = document.getElementById("histTrends");
 const histRatingTable = document.getElementById("histRatingTable");
+const histEvalPool = document.getElementById("histEvalPool");
 const histEpochTable = document.getElementById("histEpochTable");
 const histEpochInspector = document.getElementById("histEpochInspector");
 const histEpochChip = document.getElementById("histEpochChip");
@@ -366,6 +367,26 @@ if (histEpochChip) histEpochChip.addEventListener("click", event => {
   if (!clear) return;
   event.preventDefault();
   histEpochFilter = null;
+  renderGameHistoryPage();
+});
+// Evaluation-region deep links: a ladder/W-L "replays" button filters the game
+// history list to source=evaluation + that epoch (reuses the source select + the
+// shared epoch filter). Lands on real eval replays once the .hxr carry records.
+if (histEvalPool) histEvalPool.addEventListener("click", event => {
+  const link = event.target.closest("[data-hist-eval-epoch]");
+  if (!link) return;
+  event.preventDefault();
+  const epoch = asFinite(link.dataset.histEvalEpoch);
+  if (epoch === null) return;
+  if (historyFilters.source !== "evaluation") {
+    historyFilters.source = "evaluation";
+    if (historySourceSelect) historySourceSelect.value = "evaluation";
+    historyVisibleLimit = HISTORY_PAGE_SIZE;
+    resetHistoryPage();
+    loadHistoryPage({ reset: true });
+  }
+  // Force-set (not toggle) the epoch filter so repeated clicks keep it active.
+  histEpochFilter = epoch;
   renderGameHistoryPage();
 });
 if (historySearchInput) historySearchInput.addEventListener("input", event => {
@@ -2817,6 +2838,7 @@ function renderGameHistoryPage() {
   renderHistStatusBand(runs);
   renderHistTrends(runs);
   renderHistRatingTable(runs);
+  renderHistEvalPool(runs);
   renderHistEpochTable(runs);
   renderHistEpochInspector(runs);
   // Length micro-bars are relative to the longest currently displayed row.
@@ -3190,14 +3212,35 @@ function renderHistStatusBand(runs) {
   // Learning-health stat chips ("--" when null so a young run never throws).
   const h = health || {};
   const latestEpoch = asFinite(h.latest_epoch);
-  const evalTitle = [
-    asFinite(h.best_eval_mean_turns) !== null ? `best ${formatDecimal(h.best_eval_mean_turns, 1)}t` : "",
-    asFinite(h.latest_eval_games) !== null ? `${Number(h.latest_eval_wins || 0)}/${Number(h.latest_eval_games)} wins` : "",
-  ].filter(Boolean).join(" · ");
+  // Eval chip: hexfield runs carry a multi-stage verdict + candidate Elo (the
+  // dead `mean_turns` path is all-null), so render the real signal — e.g.
+  // "+37 Elo · INCONCLUSIVE" with the SealBot winrate + epoch as the title —
+  // instead of "--". dense_cnn lineages still get the legacy turns chip.
+  const candElo = asFinite(h.latest_cand_elo);
+  const verdictShort = h.latest_verdict ? String(h.latest_verdict).slice(0, 5) : null;  // PROMO/REGRE/INCON
+  let evalValue;
+  let evalTitle;
+  if (candElo !== null || verdictShort) {
+    const eloTxt = candElo !== null ? `${candElo > 0 ? "+" : ""}${Math.round(candElo)} Elo` : null;
+    evalValue = [eloTxt, verdictShort].filter(Boolean).join(" · ") || "--";
+    const sbWr = asFinite(h.latest_sealbot_winrate);
+    const evalEp = asFinite(h.latest_eval_epoch);
+    evalTitle = [
+      h.latest_verdict ? `verdict ${h.latest_verdict}` : "",
+      sbWr !== null ? `SealBot ${formatPercent(sbWr)}` : "",
+      evalEp !== null ? `eval epoch ${evalEp}` : "",
+    ].filter(Boolean).join(" · ");
+  } else {
+    evalValue = asFinite(h.latest_eval_mean_turns) !== null ? `${formatDecimal(h.latest_eval_mean_turns, 1)}t` : "--";
+    evalTitle = [
+      asFinite(h.best_eval_mean_turns) !== null ? `best ${formatDecimal(h.best_eval_mean_turns, 1)}t` : "",
+      asFinite(h.latest_eval_games) !== null ? `${Number(h.latest_eval_wins || 0)}/${Number(h.latest_eval_games)} wins` : "",
+    ].filter(Boolean).join(" · ");
+  }
   const statChips = [
     histChip("epoch", latestEpoch !== null ? `e${latestEpoch}` : "--"),
     histChip("loss", formatDecimal(h.latest_loss, 3)),
-    histChip("eval", asFinite(h.latest_eval_mean_turns) !== null ? `${formatDecimal(h.latest_eval_mean_turns, 1)}t` : "--", evalTitle),
+    histChip("eval", evalValue, evalTitle),
     histChip("speed", formatRate(h.latest_selfplay_pos_s, "pos/s")),
     histChip("P@1", formatPercent(h.latest_policy_top1)),
     histChip("C", formatPercent(h.latest_classical_fraction), "classical replay fraction"),
@@ -3418,6 +3461,14 @@ function histChartSvg(def) {
       const d = histPathD(series.values, xAt, yAt);
       if (d) parts.push(`<path d="${d}" fill="none" style="stroke:${color}" stroke-width="${series.width || 1.6}" stroke-linejoin="round" stroke-linecap="round"></path>`);
     }
+    // Visible per-point dots (cadence signposting): so a sparse every-5-epoch
+    // series isn't mistaken for missing data on the dense per-epoch x-axis.
+    if (series.points) {
+      series.values.forEach((value, i) => {
+        if (value === null || value === undefined) return;
+        parts.push(`<circle cx="${xAt(i).toFixed(1)}" cy="${yAt(value).toFixed(1)}" r="1.9" style="fill:${color}"></circle>`);
+      });
+    }
     if (series.markers) {
       series.values.forEach((value, i) => {
         if (!series.markers[i] || value === null || value === undefined) return;
@@ -3441,6 +3492,9 @@ function histChartSvg(def) {
   parts.push(`<line class="hist-chart-tick" x1="${lastX}" x2="${lastX}" y1="${HIST_PLOT_Y1}" y2="${HIST_PLOT_Y1 + 4}"></line>`);
   parts.push(`<text class="hist-chart-axis" x="${lastX}" y="${HIST_CHART_H - 3}" text-anchor="end">e${escapeText(epochs[n - 1])}</text>`);
   parts.push(`<text class="hist-chart-title" x="10" y="13">${escapeText(def.title)}</text>`);
+  if (def.subtitle) {
+    parts.push(`<text class="hist-chart-axis" x="10" y="20">${escapeText(def.subtitle)}</text>`);
+  }
   if (def.latest !== undefined && def.latest !== null && def.latest !== "") {
     parts.push(`<text class="hist-chart-latest" x="${HIST_CHART_W - 8}" y="13" text-anchor="end">${escapeText(def.latest)}</text>`);
   }
@@ -3519,6 +3573,51 @@ function msEdgeLabel(edge) {
   const opp = edge && (edge.opponent || edge.role);
   if (!opp) return edge && edge.primary ? "vs champion" : "edge";
   return `vs ${opp}`;
+}
+
+// Descriptive SealBot zero-point winrate for one report row: the sealbot edge's
+// winrate, else the midpoint of sealbot_winrate_ci95. null when SealBot absent.
+function msSealbotWinrate(row) {
+  const edges = row && Array.isArray(row.edges) ? row.edges : [];
+  const edge = edges.find(e => e && String(e.opponent || e.role || "").toLowerCase() === "sealbot");
+  if (edge) {
+    const wr = asFinite(edge.winrate);
+    if (wr !== null) return wr;
+  }
+  const ci = Array.isArray(row && row.sealbot_winrate_ci95) ? row.sealbot_winrate_ci95 : null;
+  if (ci) {
+    const lo = asFinite(ci[0]);
+    const hi = asFinite(ci[1]);
+    if (lo !== null && hi !== null) return (lo + hi) / 2;
+  }
+  return null;
+}
+
+// Configured permanent anchors that are NOT in this report's roster (SEV-2: the
+// bc_prefit drop). Returns the dropped anchor labels, [] when none/absent.
+function msDroppedAnchors(row) {
+  const roster = row && typeof row.roster === "object" && row.roster ? row.roster : {};
+  const perms = Array.isArray(roster.permanent_anchors) ? roster.permanent_anchors : [];
+  if (!perms.length) return [];
+  const present = new Set(
+    (Array.isArray(roster.opponents) ? roster.opponents : [])
+      .map(o => o && o.label)
+      .filter(Boolean)
+  );
+  return perms.filter(name => name && !present.has(name));
+}
+
+// Cadence subtitle for the eval charts: the multistage eval runs every N epochs
+// (inferred from the report spacing) while the x-axis is per-epoch, so signpost
+// "evaluated every 5 epochs (7 points)" rather than letting the sparse points
+// read as missing data.
+function msEvalCadenceSubtitle(msRows) {
+  const epochs = (msRows || []).map(r => Number(r.epoch)).filter(e => Number.isFinite(e)).sort((a, b) => a - b);
+  if (epochs.length < 2) return "";
+  let step = Infinity;
+  for (let i = 1; i < epochs.length; i++) step = Math.min(step, epochs[i] - epochs[i - 1]);
+  if (!Number.isFinite(step) || step < 1) step = 1;
+  return `evaluated every ${step} epoch${step === 1 ? "" : "s"} (${epochs.length} points)`;
 }
 
 // "62% [48–74%]" winrate + CI; "--" when the winrate is missing.
@@ -3692,17 +3791,21 @@ function renderHistTrends(runs) {
       }));
     }
   }
-  // T4 SealBot eval rides evaluation_history (its own epoch axis).
+  // T4 "SealBot eval" (legacy dense_cnn turns chart) rides evaluation_history,
+  // which is ALL-NULL for hexfield (the wrapper JSON only points to the
+  // multistage report). Kept ONLY for the dense_cnn lineage that still populates
+  // mean_turns; for hexfield the real eval lives in T7/T8 + the Evaluation region
+  // (renderHistEvalPool) below, so this never draws (histSeriesCount<2 -> skipped).
   const evals = run && Array.isArray(run.evaluation_history)
     ? run.evaluation_history.filter(row => row && asFinite(row.epoch) !== null).slice().sort((a, b) => Number(a.epoch) - Number(b.epoch))
     : [];
   const evalTurns = evals.map(row => asFinite(row.mean_turns));
-  if (histSeriesCount(evalTurns) >= 2) {
+  // Only draw for the dense_cnn lineage (no multistage history); on hexfield runs
+  // the multistage region owns the eval surface, so suppress the dead chart.
+  if (histSeriesCount(evalTurns) >= 2 && !msHistoryRows(run).length) {
     const evalEpochs = evals.map(row => Number(row.epoch));
     const evalWins = evals.map(row => asFinite(row.wins));
     const markers = evals.map(row => Number(row.wins || 0) > 0);
-    // Best epoch: max mean_turns, ties broken by wins (renderEvaluationTrend's
-    // historical tie-break).
     let bestIdx = 0;
     evals.forEach((row, i) => {
       const best = evals[bestIdx];
@@ -3723,7 +3826,6 @@ function renderHistTrends(runs) {
       format: value => formatDecimal(value, 0),
       latest: `${formatDecimal(histLatestNonNull(evalTurns), 1)}t`,
     });
-    // Keep dashboard order T1..T6: insert T4 after T3 (or wherever balance ended).
     if (t4) charts.splice(Math.min(3, charts.length), 0, t4);
   }
   // T7 Elo trajectory (hexfield multi-stage eval only). Candidate SealBot-pinned
@@ -3740,7 +3842,7 @@ function renderHistTrends(runs) {
     const bandLo = ci.map(c => (c ? asFinite(c[0]) : null));
     const bandHi = ci.map(c => (c ? asFinite(c[1]) : null));
     const anchorElo = msRows.map(row => asFinite((msAnchorPlayer(row) || {}).elo));
-    const series = [{ label: "candidate", color: "var(--accent)", values: msElo, width: 1.8 }];
+    const series = [{ label: "candidate", color: "var(--accent)", values: msElo, width: 1.8, points: true }];
     // SealBot anchor is normally pinned at a constant Elo; draw it only if it varies.
     if (histSeriesCount(anchorElo) >= 2 && Math.max(...anchorElo.filter(v => v !== null)) !== Math.min(...anchorElo.filter(v => v !== null))) {
       series.push({ label: "anchor", color: "var(--p1)", values: anchorElo, width: 1 });
@@ -3750,6 +3852,7 @@ function renderHistTrends(runs) {
     const t7 = histChartSvg({
       id: "t7",
       title: `Eval Elo (${anchorLabel}-pinned)`,
+      subtitle: msEvalCadenceSubtitle(msRows),
       epochs: msEpochs,
       series,
       band: histSeriesCount(bandLo) >= 2 ? { lo: bandLo, hi: bandHi, color: "rgba(39,215,230,0.12)" } : null,
@@ -3783,10 +3886,11 @@ function renderHistTrends(runs) {
     const tb = histChartSvg({
       id: "t8_" + anchorName,
       title: `Win-rate vs ${anchorName}`,
+      subtitle: msEvalCadenceSubtitle(msRows),
       epochs: msEpochs,
       domain: [0, 1],
       series: [
-        { label: "win rate", color, values: wr, width: 1.8 },
+        { label: "win rate", color, values: wr, width: 1.8, points: true },
         { label: "50%", color: "var(--muted)", values: half, width: 1 },
       ],
       band: histSeriesCount(bandLo) >= 2 ? { lo: bandLo, hi: bandHi, color: "rgba(39,215,230,0.12)" } : null,
@@ -3800,6 +3904,42 @@ function renderHistTrends(runs) {
     });
     if (tb) charts.push(tb);
   });
+  // T9 SealBot zero-point winrate over epochs — the descriptive cross-lineage
+  // progress signal the eval actually claims compounds (0.28 -> ~0.55). Built
+  // from each report's sealbot edge winrate (else the sealbot_winrate_ci95
+  // midpoint), with the CI band where present.
+  const sbWr = msRows.map(row => msSealbotWinrate(row));
+  if (histSeriesCount(sbWr) >= 2) {
+    const sbCi = msRows.map(row => {
+      const e = (Array.isArray(row.edges) ? row.edges : []).find(
+        x => x && String(x.opponent || x.role || "").toLowerCase() === "sealbot");
+      if (e && Array.isArray(e.winrate_ci95)) return e.winrate_ci95;
+      return Array.isArray(row.sealbot_winrate_ci95) ? row.sealbot_winrate_ci95 : null;
+    });
+    const sbLo = sbCi.map(c => (c ? asFinite(c[0]) : null));
+    const sbHi = sbCi.map(c => (c ? asFinite(c[1]) : null));
+    const sbHalf = msEpochs.map(() => 0.5);
+    const t9 = histChartSvg({
+      id: "t9_sealbot",
+      title: "SealBot win-rate (zero-point)",
+      subtitle: msEvalCadenceSubtitle(msRows),
+      epochs: msEpochs,
+      domain: [0, 1],
+      series: [
+        { label: "win rate", color: "#36d399", values: sbWr, width: 1.8, points: true },
+        { label: "50%", color: "var(--muted)", values: sbHalf, width: 1 },
+      ],
+      band: histSeriesCount(sbLo) >= 2 ? { lo: sbLo, hi: sbHi, color: "rgba(54,211,153,0.12)" } : null,
+      tip: [
+        { label: "win%", values: sbWr, fmt: value => formatPercent(value) },
+        { label: "lo", values: sbLo, fmt: value => formatPercent(value) },
+        { label: "hi", values: sbHi, fmt: value => formatPercent(value) },
+      ],
+      format: value => formatPercent(value),
+      latest: formatPercent(histLatestNonNull(sbWr)),
+    });
+    if (t9) charts.push(t9);
+  }
   const body = charts.filter(Boolean).join("");
   const caption = body && run && (runs || []).length > 1
     ? `<div class="hist-trends-caption">Charts: ${escapeText(run.name || "latest run")}</div>`
@@ -3839,6 +3979,22 @@ function renderHistRatingTable(runs) {
   if (verdictLabel) {
     verdictChips.push(`<span class="hist-rating-verdict ${msVerdictClass(verdictLabel)}">${escapeText(String(verdictLabel).toUpperCase())}</span>`);
   }
+  // E3: SealBot died mid-eval and the BT zero-point silently re-pinned — surface
+  // it as a DEGRADED chip so the (still-emitted) verdict is not over-read; every
+  // absolute Elo shifted under it.
+  if (verdict.anchor_substituted === true || verdict.degraded === true) {
+    const to = verdict.substituted_to ? ` → ${escapeText(String(verdict.substituted_to))}` : "";
+    const note = verdict.degraded_note || verdict.sealbot_unavailable_reason || "anchor substituted; absolute Elo not calibrated";
+    verdictChips.push(`<span class="hist-rating-verdict hist-health-intervene" title="${escapeAttr(String(note))}">DEGRADED · anchor sub${to}</span>`);
+  }
+  // E4: radius-8-era opponents featurized OOD at the live radius inflate the
+  // candidate's cross-lineage Elo — flag it so the ladder is not read as a clean
+  // strength signal.
+  const oodOpps = Array.isArray(verdict.ood_opponents) ? verdict.ood_opponents.filter(Boolean) : [];
+  if (oodOpps.length) {
+    const note = verdict.ood_note || `Opponents ${oodOpps.join(", ")} featurized out-of-distribution (radius mismatch); excluded from the pinned anchor.`;
+    verdictChips.push(`<span class="hist-rating-tag hist-rating-tag-muted" title="${escapeAttr(String(note))}">OOD: ${escapeText(oodOpps.join(", "))}</span>`);
+  }
   // pure_eval lives on the per-epoch report meta; tolerate it on the row or its meta.
   const meta = latest && typeof latest.meta === "object" && latest.meta ? latest.meta : {};
   const pureEval = latest.pure_eval !== undefined ? latest.pure_eval : meta.pure_eval;
@@ -3850,9 +4006,29 @@ function renderHistRatingTable(runs) {
     const sign = eloDiff > 0 ? "+" : "";
     verdictChips.push(epochChip("Δ Elo", `${sign}${Math.round(eloDiff)}`));
   }
+  // D3-A: render the Δ-Elo CI as a horizontal error bar so a single wide-CI
+  // INCONCLUSIVE (e.g. [-270, +269]) reads as "low resolution", not a real
+  // regression. The bar spans a symmetric [-max,+max] window with a 0 reference.
+  const ci = primary && Array.isArray(primary.elo_diff_ci95) ? primary.elo_diff_ci95 : null;
+  const ciLo = ci ? asFinite(ci[0]) : null;
+  const ciHi = ci ? asFinite(ci[1]) : null;
+  let ciBar = "";
+  if (ciLo !== null && ciHi !== null) {
+    const reach = Math.max(Math.abs(ciLo), Math.abs(ciHi), eloDiff !== null ? Math.abs(eloDiff) : 0, 1);
+    const toPct = v => 50 + (Math.max(Math.min(v, reach), -reach) / reach) * 50;
+    const left = toPct(ciLo);
+    const right = toPct(ciHi);
+    const pointPct = eloDiff !== null ? toPct(eloDiff) : 50;
+    ciBar = `<div class="hist-ci-bar" title="Δ Elo 95% CI [${Math.round(ciLo)}, ${Math.round(ciHi)}]">`
+      + `<span class="hist-ci-track"></span>`
+      + `<span class="hist-ci-zero" style="left:50%"></span>`
+      + `<span class="hist-ci-range" style="left:${left.toFixed(1)}%;width:${Math.max(0, right - left).toFixed(1)}%"></span>`
+      + `<span class="hist-ci-point" style="left:${pointPct.toFixed(1)}%"></span>`
+      + `</div><div class="hist-ci-caption">Δ Elo 95% CI [${Math.round(ciLo)}, ${Math.round(ciHi)}] — gross-regression tripwire, not a fine-edge test</div>`;
+  }
   const verdictNote = verdict && verdict.note ? `<div class="hist-insp-note">${escapeText(String(verdict.note))}</div>` : "";
-  const verdictBlock = verdictChips.length || verdictNote
-    ? `<div class="hist-rating-head"><span class="hist-insp-group-title">Latest verdict · epoch ${escapeText(latest.epoch)}</span><div class="hist-rating-verdict-row">${verdictChips.join("")}</div>${verdictNote}</div>`
+  const verdictBlock = verdictChips.length || verdictNote || ciBar
+    ? `<div class="hist-rating-head"><span class="hist-insp-group-title">Latest verdict · epoch ${escapeText(latest.epoch)}</span><div class="hist-rating-verdict-row">${verdictChips.join("")}</div>${ciBar}${verdictNote}</div>`
     : "";
 
   // --- Rating table (one row per checkpoint, Elo-descending, anchor marked) ---
@@ -3884,14 +4060,20 @@ function renderHistRatingTable(runs) {
   }
 
   // --- Headline edges (vs SealBot / vs BC-prefit / vs champion) ---
+  // D3-B: roster-driven. A configured PERMANENT anchor that is absent from this
+  // epoch's roster (the live bc_prefit drop, SEV-2) renders a muted "not in
+  // roster" pill instead of silently vanishing.
   let edgesBlock = "";
   const headlineEdges = msHeadlineEdges(latest);
-  if (headlineEdges.length) {
-    const edgeChips = headlineEdges.map(edge => {
-      const decided = asFinite(edge.decided);
-      const suffix = decided !== null ? ` (${decided})` : "";
-      return epochChip(msEdgeLabel(edge), `${msWinrateText(edge)}${suffix}`);
-    });
+  const edgeChips = headlineEdges.map(edge => {
+    const decided = asFinite(edge.decided);
+    const suffix = decided !== null ? ` (${decided})` : "";
+    return epochChip(msEdgeLabel(edge), `${msWinrateText(edge)}${suffix}`);
+  });
+  msDroppedAnchors(latest).forEach(name => {
+    edgeChips.push(`<span class="hist-epoch-chip-stat hist-epoch-chip-muted" title="permanent anchor missing from this epoch's roster">vs ${escapeText(name)} — not in roster</span>`);
+  });
+  if (edgeChips.length) {
     edgesBlock = `<div class="hist-insp-group"><span class="hist-insp-group-title">Headline edges</span><div class="hist-insp-chips">${edgeChips.join("")}</div></div>`;
   }
 
@@ -3901,6 +4083,166 @@ function renderHistRatingTable(runs) {
   const groups = [verdictBlock, ratingBlock, edgesBlock].filter(Boolean).join("");
   histRatingTable.innerHTML = `${caption}<div class="hist-rating-groups">${groups}</div>`;
   histRatingTable.hidden = false;
+}
+
+// Deep-link a ladder/W-L row into the History list filtered to source=evaluation
+// + the row's epoch, reusing the existing source select + epoch chip. Eval
+// replays (once the .hxr carry records) are then one click away. data-* driven
+// via the delegated #histEvalPool listener below.
+function histEvalReplayLink(epoch, label) {
+  const ep = asFinite(epoch);
+  if (ep === null) return "";
+  return `<button type="button" class="hist-eval-replay" data-hist-eval-epoch="${escapeAttr(ep)}"`
+    + ` title="Show evaluation replays for epoch ${escapeAttr(ep)}">${escapeText(label || "replays")}</button>`;
+}
+
+// D2 + D3-C/E/F: the "Evaluation" region consuming the append-only Bradley-Terry
+// pool (run.eval_pool, 29 edges with raw head-to-head wins) + the latest report's
+// fitted ratings. Three blocks: a BT ladder UNIFIED by checkpoint identity (the
+// cand_epN / epN split surfaced as a delta, not two bots), a per-opponent W-L
+// matrix from the pool edges, and a per-epoch verdict-history strip. Each row
+// deep-links into the History list filtered to source=evaluation + that epoch.
+// Hidden when run.eval_pool is null/empty (non-hexfield / older runs).
+function renderHistEvalPool(runs) {
+  if (!histEvalPool) return;
+  const run = histTrendRun(runs);
+  const pool = run && typeof run.eval_pool === "object" && run.eval_pool ? run.eval_pool : null;
+  const edges = pool && Array.isArray(pool.edges) ? pool.edges.filter(e => e && typeof e === "object") : [];
+  const msRows = msHistoryRows(run);
+  if (!edges.length || !msRows.length) {
+    histEvalPool.innerHTML = "";
+    histEvalPool.hidden = true;
+    return;
+  }
+  const latest = msRows[msRows.length - 1];
+  const players = msPlayers(latest);
+  const anchorName = String(pool.anchor || latest.anchor || "sealbot");
+
+  // --- Block C: BT ladder unified by checkpoint identity ---------------------
+  // Each report rates a checkpoint TWICE (cand_epN as the live candidate, epN as
+  // a replayed opponent). Collapse them to one "epoch N" row carrying both Elo
+  // readings; show the split delta so the ~69-Elo artifact is explained, not
+  // read as two distinct bots. Non-checkpoint nodes (sealbot, bc_prefit) keep
+  // their own row.
+  const eloOf = label => {
+    const p = players.find(x => x && x.label === label);
+    return p ? asFinite(p.elo) : null;
+  };
+  const ciOf = label => {
+    const p = players.find(x => x && x.label === label);
+    return p && Array.isArray(p.elo_ci95) ? p.elo_ci95 : null;
+  };
+  const epOfLabel = label => {
+    const m = /^(?:cand_)?ep(\d+)$/.exec(String(label || ""));
+    return m ? Number(m[1]) : null;
+  };
+  // Gather the distinct checkpoint epochs present in the ladder.
+  const ckptEpochs = new Set();
+  players.forEach(p => { const e = epOfLabel(p.label); if (e !== null) ckptEpochs.add(e); });
+  const unified = [];
+  ckptEpochs.forEach(ep => {
+    const candElo = eloOf(`cand_ep${ep}`);
+    const oppElo = eloOf(`ep${ep}`);
+    const elos = [candElo, oppElo].filter(v => v !== null);
+    if (!elos.length) return;
+    const shown = candElo !== null ? candElo : oppElo;  // prefer the live-candidate reading
+    const split = candElo !== null && oppElo !== null ? candElo - oppElo : null;
+    unified.push({ epoch: ep, elo: shown, ci: ciOf(`cand_ep${ep}`) || ciOf(`ep${ep}`), split });
+  });
+  // Non-checkpoint anchors (sealbot pinned 0, bc_prefit, etc.).
+  const anchors = players
+    .filter(p => epOfLabel(p.label) === null)
+    .map(p => ({ label: p.label, elo: asFinite(p.elo), ci: Array.isArray(p.elo_ci95) ? p.elo_ci95 : null, isAnchor: !!p.is_anchor }));
+  const ladderItems = unified
+    .map(u => ({ key: `ep${u.epoch}`, label: `epoch ${u.epoch}`, elo: u.elo, ci: u.ci, split: u.split, epoch: u.epoch, isAnchor: false }))
+    .concat(anchors.map(a => ({ key: a.label, label: a.label, elo: a.elo, ci: a.ci, split: null, epoch: epOfLabel(a.label), isAnchor: a.isAnchor })))
+    .filter(it => it.elo !== null)
+    .sort((a, b) => b.elo - a.elo);
+  let ladderBlock = "";
+  if (ladderItems.length) {
+    const elos = ladderItems.map(it => it.elo);
+    const maxElo = Math.max(...elos);
+    const minElo = Math.min(...elos);
+    const span = maxElo - minElo;
+    const rows = ladderItems.map(it => {
+      const pct = span > 0 ? Math.max(4, Math.round(((it.elo - minElo) / span) * 100)) : 50;
+      const anchorTag = it.isAnchor ? `<span class="hist-rating-anchor" title="${escapeAttr(anchorName)} anchor (pinned 0 Elo)">⚓</span>` : "";
+      const ciTxt = Array.isArray(it.ci) && asFinite(it.ci[0]) !== null && asFinite(it.ci[1]) !== null
+        ? ` [${Math.round(asFinite(it.ci[0]))}–${Math.round(asFinite(it.ci[1]))}]` : "";
+      const splitTxt = it.split !== null && Math.abs(it.split) >= 1
+        ? `<span class="hist-eval-split" title="cand-vs-replay Elo split for the SAME checkpoint (BT single-node artifact)">Δ${it.split > 0 ? "+" : ""}${Math.round(it.split)}</span>` : "";
+      const replay = it.epoch !== null ? histEvalReplayLink(it.epoch, "replays") : "";
+      return `<div class="hist-loss-row hist-eval-ladder-row">
+        <span class="hist-loss-label" title="${escapeAttr(it.label)}">${escapeText(it.label)}${anchorTag}${splitTxt}</span>
+        <span class="hist-loss-bar"><span class="hist-loss-bar-fill" style="width:${pct}%"></span><span class="hist-loss-val">${Math.round(it.elo)}${escapeText(ciTxt)}</span></span>
+        ${replay || "<span></span>"}
+      </div>`;
+    }).join("");
+    ladderBlock = `<div class="hist-insp-group"><span class="hist-insp-group-title">BT ladder · anchor ${escapeText(anchorName)} = 0 (checkpoints unified)</span>${rows}</div>`;
+  }
+
+  // --- Block: per-opponent W-L matrix from the pool's raw head-to-head --------
+  // Group edges by the unordered pair (a,b), summing the PHYSICAL win counts from
+  // each edge's raw block (the top-level wins_a/wins_b are n_eff-weighted). Latest
+  // epoch first; sealbot edges badged + weight shown for the down-weighted ones.
+  const pairs = new Map();
+  edges.forEach(e => {
+    const a = String(e.a || ""); const b = String(e.b || "");
+    if (!a || !b) return;
+    const key = [a, b].join(" ↔ ");
+    let rec = pairs.get(key);
+    if (!rec) { rec = { a, b, wa: 0, wb: 0, epochs: [], kind: e.kind, weight: e.weight }; pairs.set(key, rec); }
+    const raw = e.raw && typeof e.raw === "object" ? e.raw : {};
+    const wa = asFinite(raw.physical_wins_a);
+    const wb = asFinite(raw.physical_wins_b);
+    const wcand = asFinite(raw.physical_wins_cand);
+    const wsb = asFinite(raw.physical_wins_sealbot);
+    if (wa !== null && wb !== null) { rec.wa += wa; rec.wb += wb; }
+    else if (wcand !== null && wsb !== null) { rec.wa += wcand; rec.wb += wsb; }
+    else { rec.wa += asFinite(e.wins_a) || 0; rec.wb += asFinite(e.wins_b) || 0; }
+    const ep = asFinite(e.epoch);
+    if (ep !== null) rec.epochs.push(ep);
+  });
+  const pairRows = Array.from(pairs.values())
+    .sort((x, y) => Math.max(...y.epochs, 0) - Math.max(...x.epochs, 0))
+    .map(rec => {
+      const wa = Math.round(rec.wa); const wb = Math.round(rec.wb);
+      const lead = wa > wb ? "hist-eval-win" : wa < wb ? "hist-eval-loss" : "hist-eval-draw";
+      const kindBadge = rec.kind === "sealbot" ? `<span class="hist-rating-tag hist-rating-tag-muted">SealBot ×${formatDecimal(rec.weight, 1)}</span>` : "";
+      const epLast = rec.epochs.length ? Math.max(...rec.epochs) : null;
+      const epTxt = epLast !== null ? ` <span class="hist-eval-ep">e${epLast}</span>` : "";
+      const replay = epLast !== null ? histEvalReplayLink(epLast, "↪") : "";
+      return `<div class="hist-loss-row hist-eval-pair">
+        <span class="hist-loss-label" title="${escapeAttr(rec.a + " vs " + rec.b)}">${escapeText(rec.a)} vs ${escapeText(rec.b)}${epTxt}</span>
+        <span class="hist-eval-record ${lead}">${wa}–${wb}</span>${kindBadge}${replay}
+      </div>`;
+    }).join("");
+  const matrixBlock = pairRows
+    ? `<div class="hist-insp-group"><span class="hist-insp-group-title">Per-opponent W–L (pooled head-to-head)</span>${pairRows}</div>`
+    : "";
+
+  // --- Block E: verdict-history strip (ep5 REGRESS, ep10..35 INCONCLUSIVE) ----
+  const stripChips = msRows.map(row => {
+    const lbl = String(row.verdict_label || (row.verdict || {}).label || "").toUpperCase();
+    if (!lbl) return "";
+    return `<span class="hist-eval-verdict ${msVerdictClass(lbl)}" title="epoch ${escapeAttr(row.epoch)}: ${escapeText(lbl)}">`
+      + `e${escapeText(row.epoch)} ${escapeText(lbl.slice(0, 5))}</span>`;
+  }).filter(Boolean).join("");
+  const stripBlock = stripChips
+    ? `<div class="hist-insp-group"><span class="hist-insp-group-title">Verdict history</span><div class="hist-eval-strip">${stripChips}</div></div>`
+    : "";
+
+  const caption = (runs || []).length > 1
+    ? `<div class="hist-trends-caption">Evaluation pool: ${escapeText(run && run.name || "latest run")}</div>`
+    : `<div class="hist-trends-caption">Evaluation</div>`;
+  const blocks = [ladderBlock, matrixBlock, stripBlock].filter(Boolean).join("");
+  if (!blocks) {
+    histEvalPool.innerHTML = "";
+    histEvalPool.hidden = true;
+    return;
+  }
+  histEvalPool.innerHTML = `${caption}<div class="hist-rating-groups">${blocks}</div>`;
+  histEvalPool.hidden = false;
 }
 
 // Toggle-semantics client-side epoch filter (chart click / epoch-table click /

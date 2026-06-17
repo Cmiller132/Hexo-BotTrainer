@@ -2862,6 +2862,155 @@ body.bot-thinking .legal {
   width: 96px;
 }
 
+/* ---- Evaluation region (D2/D3): BT pool ladder + W-L matrix + verdict strip,
+   verdict-CI error bar, dropped-anchor pills, eval-replay deep links. ---- */
+.hist-eval-pool {
+  margin: 8px 0 4px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(7, 13, 19, 0.4);
+}
+
+.hist-eval-pool[hidden] {
+  display: none;
+}
+
+.hist-eval-pool .hist-trends-caption {
+  margin-bottom: 6px;
+}
+
+/* Δ-Elo 95% CI error bar: a centered 0 reference with the CI range overlaid so a
+   wide INCONCLUSIVE reads as "low resolution", not a real regression. */
+.hist-ci-bar {
+  position: relative;
+  height: 14px;
+  margin: 2px 0;
+}
+
+.hist-ci-track {
+  position: absolute;
+  top: 6px;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: rgba(143, 155, 170, 0.22);
+  border-radius: 2px;
+}
+
+.hist-ci-zero {
+  position: absolute;
+  top: 1px;
+  width: 1px;
+  height: 12px;
+  background: rgba(143, 155, 170, 0.7);
+  transform: translateX(-0.5px);
+}
+
+.hist-ci-range {
+  position: absolute;
+  top: 4px;
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(39, 215, 230, 0.32);
+  border: 1px solid rgba(39, 215, 230, 0.5);
+}
+
+.hist-ci-point {
+  position: absolute;
+  top: 2px;
+  width: 8px;
+  height: 8px;
+  margin-left: -4px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 1px rgba(7, 13, 19, 0.8);
+}
+
+.hist-ci-caption {
+  margin-top: 2px;
+  font-size: 9px;
+  color: var(--muted);
+}
+
+/* cand-vs-replay Elo split badge on a unified ladder row (the 69-Elo artifact). */
+.hist-eval-split {
+  margin-left: 6px;
+  padding: 0 4px;
+  border-radius: 6px;
+  font-size: 9px;
+  font-weight: 700;
+  color: var(--muted);
+  background: rgba(143, 155, 170, 0.16);
+}
+
+/* BT ladder rows: label / Elo bar / replay deep-link. */
+.hist-eval-ladder-row {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) auto;
+}
+
+/* Per-opponent W-L matrix rows. */
+.hist-eval-pair {
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
+  gap: 6px;
+}
+
+.hist-eval-record {
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.4px;
+  white-space: nowrap;
+}
+
+.hist-eval-win { color: #36d399; }
+.hist-eval-loss { color: #ff7a7a; }
+.hist-eval-draw { color: var(--muted); }
+
+.hist-eval-ep {
+  font-size: 9px;
+  color: var(--muted);
+}
+
+/* Verdict-history strip. */
+.hist-eval-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.hist-eval-verdict {
+  padding: 1px 6px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.4px;
+  white-space: nowrap;
+}
+
+/* Eval-replay deep-link button (ladder / W-L rows). */
+.hist-eval-replay {
+  padding: 1px 7px;
+  border: 1px solid rgba(39, 215, 230, 0.4);
+  border-radius: 8px;
+  background: transparent;
+  color: #9fe1e8;
+  font-size: 9px;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.hist-eval-replay:hover {
+  background: rgba(39, 215, 230, 0.14);
+}
+
+/* Muted "not in roster" headline pill for a dropped permanent anchor. */
+.hist-epoch-chip-muted {
+  opacity: 0.7;
+  border-style: dashed;
+}
+
 .mt-opts label.mt-check {
   display: inline-flex;
   align-items: center;

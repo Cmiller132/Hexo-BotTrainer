@@ -70,6 +70,22 @@ class TrainingSection:
     grad_clip: float = 1.0
     warmup_steps: int = 0  # fresh-init runs warm-start from the BC prefit
     shuffle_keep_target_rows: int = 300_000
+    # KataGo / dense_cnn_restnet replay-buffer port (PLAN §6/§7). Defaults are
+    # hexfield-tuned (NOT dense's literals): the dimensionless KataGo knobs
+    # (exponent=0.65, expand=0.4) are unchanged, but min_rows/scale/targets are
+    # scaled to hexfield's ~7k Full-rows/epoch stream (PLAN §3.1/§8/S1). _merge
+    # is a strict flat merge that already tolerates new scalar fields.
+    shuffle_min_rows: int = 20_000
+    shuffle_taper_window_exponent: float = 0.65
+    shuffle_expand_window_per_row: float = 0.4
+    shuffle_taper_window_scale: float = 20_000.0
+    validation_fraction: float = 0.0
+    train_samples_per_epoch: int = 100_000
+    max_train_bucket_per_new_data: float = 8.0
+    max_train_bucket_size: float = 500_000.0
+    no_repeat_files: bool = False
+    expand_backend: str = "serial"
+    expand_workers: int = 0
 
 
 @dataclass(frozen=True)
@@ -130,6 +146,12 @@ class MultiStageEvalOpponents:
     # PERMANENT anchors, as (label, checkpoint-path) pairs relative to the run
     # tree. These never slide. Paths use forward slashes (resolved by the runner
     # against the repo/run root). Defaults: the BC prefit and ep5.
+    # E2: a path may also be ABSOLUTE (``_resolve_anchor_path`` short-circuits an
+    # absolute path), and the env var ``HEXFIELD_ANCHOR_ROOTS`` (os.pathsep-
+    # separated dirs) prepends extra search roots — either lets the live importing
+    # tree reach a checkpoint that is only in the canonical tree WITHOUT a code
+    # change, and a still-unresolved anchor is now LOUD + recorded (not a silent
+    # drop) in roster.dropped_anchors.
     permanent_anchors: tuple[tuple[str, str], ...] = (
         ("bc_prefit", "runs/hexfield_bc_1/checkpoint_epoch2.pt"),
         ("ep5", "epoch_000005.pt"),
@@ -138,6 +160,16 @@ class MultiStageEvalOpponents:
     # the nearest ``bracket_size`` rungs strictly below the current epoch.
     log_grid: tuple[int, ...] = (5, 10, 20, 40, 80, 160)
     bracket_size: int = 2
+    # E4 radius-confound annotation: labels of opponents TRAINED at the radius-8
+    # legality era (the BC prefit, and any pre-shrink anchor). The support radius
+    # is a process-global OnceLock/module-global read once per process, so EVERY
+    # opponent is featurized at the LIVE HEXFIELD_SUPPORT_RADIUS. A radius-8-era
+    # net forced to radius-4 plays OOD -> weaker -> inflates the candidate's Elo
+    # against it. We cannot vary the radius per net (and the frozen checkpoints
+    # carry no training radius), so we ANNOTATE such edges ``featurized_ood`` and
+    # EXCLUDE them from the pinned BT zero-point — never read the cross-lineage
+    # curve as a clean strength signal. Edges still participate descriptively.
+    radius8_opponents: tuple[str, ...] = ("bc_prefit",)
 
 
 @dataclass(frozen=True)

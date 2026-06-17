@@ -10,6 +10,7 @@ from typing import Any
 import torch
 
 from .model import HexfieldNet
+from .train_state import HexfieldTrainState
 
 
 def save_checkpoint(path: Path, *, model: HexfieldNet, optimizer, epoch: int, extra: dict | None = None) -> Path:
@@ -72,6 +73,15 @@ class HexfieldCheckpointLoader:
             resume = ctx.config.checkpoint.resume_from is not None
             meta = load_into(model, payload, optimizer=optimizer if resume else None)
             if resume:
+                # Restore the KataGo-style train-bucket governor ONLY on a true
+                # resume (PLAN §6/M1). A missing key -> from_dict(None) -> fresh
+                # state, so old-format checkpoints resume cleanly. Never restore
+                # on the initialize_from warm-start branch below: a BC-prefit
+                # warm start must begin with a fresh governor, not inherit a
+                # stale bucket from an unrelated run.
+                trainer = getattr(components.model, "trainer", None)
+                if trainer is not None:
+                    trainer.train_state = HexfieldTrainState.from_dict(meta.get("train_state"))
                 return {"status": "loaded", "epoch": int(meta.get("epoch", 0)), "path": str(path)}
             return {"status": "initialized_from", "path": str(path)}
         # prefit shape
@@ -87,10 +97,22 @@ class HexfieldCheckpointSaver:
         match = re.search(r"epoch_(\d+)", name)
         if match:
             epoch = int(match.group(1))
+        # Persist the KataGo-style train-bucket governor state inside the
+        # checkpoint meta (PLAN §6/M1). Guard with getattr so a trainer without
+        # a train_state (e.g. tests) does not crash the save.
+        trainer = getattr(components.model, "trainer", None)
+        extra = {
+            "run": ctx.config.run.name,
+            **(
+                {"train_state": trainer.train_state.to_dict()}
+                if getattr(trainer, "train_state", None) is not None
+                else {}
+            ),
+        }
         return save_checkpoint(
             ctx.checkpoint_dir / f"{name}.pt",
             model=components.model.model,
             optimizer=components.model.optimizer,
             epoch=epoch,
-            extra={"run": ctx.config.run.name},
+            extra=extra,
         )
