@@ -1,17 +1,37 @@
-"""hexo_train trainer: per-epoch passes over the recent-shard window.
+"""hexo_train trainer: per-epoch KataGo / dense_cnn_restnet replay window.
 
-Window v1: mtime-ordered most-recent shards up to
-`shuffle_keep_target_rows` rows (PCR filtering already happened at the
-source — only Full rows are written; truncated games never written). The
-1:1 restnet policy-surprise/taper port is the scheduled M9 upgrade and is
-tracked there.
+Window selection (``select_training_samples``) is the KataGo / dense port
+(PLAN §3.1-3.8, §5, §6): a mtime-free ``(generation, game_key)`` manifest →
+power-law taper → recent-window cut → md5 split → keep_prob subsample →
+overshoot-skip file selection → train-bucket reuse governor → an in-RAM packed
+columnar :class:`~hexfield.window.PackedWindow`.
+
+The consumer (``train_passes``, PLAN §3.4/§4.4/§4.5/§6 — Phase 5) drains that
+PackedWindow with a SINGLE pass and no within-epoch repeat:
+
+1. **Pre-draw** (on the main thread, before any expansion) a per-row D6 vector
+   ``d6: int[n]`` from ``np.random.default_rng(_aug_seed(run_seed, epoch))`` and
+   a survivor permutation from ``np.random.default_rng(_perm_seed(run_seed,
+   epoch))`` — replacing the v1 in-loop ``random.Random.shuffle`` /
+   ``rng.randrange(12)`` (the two MUST-FIX determinism violations, PLAN §4.4).
+2. **Expand** each row via ``window.row_view(i)`` → a ``PackedRowView`` →
+   ``HexfieldSampleData`` shim → the unchanged ``expand_sample``, keeping the
+   off-legal try/except skip and recording a per-row validity mask (PLAN §4.5).
+3. **Filter** survivors, **permute** the survivor index, **truncate** to
+   ``effective_rows`` (the load-bearing fidelity point — PLAN §3.4/M3).
+4. **Micro-bucket** (``pair_budget_microbuckets``) — UNCHANGED.
+5. loss / optimizer / AMP / grad-clip block — UNCHANGED.
+
+``effective_rows`` is threaded from ``select_training_samples`` via
+``self._last_select`` (the trainer instance backs both dispatch calls); a direct
+``train_passes`` call without a prior selection recomputes it from the window +
+config.
 """
 
 from __future__ import annotations
 
 import json
 import os
-import random
 import time
 from typing import Any
 
@@ -28,10 +48,11 @@ from .batching import (
 from .buffer_manifest import scan_or_update_manifest
 from .config import HexfieldConfig
 from .losses import hexfield_loss
-from .samples import STV_HORIZONS, expand_sample
-from .shards import read_compact_shard
+from .samples import STV_HORIZONS, HexfieldSampleData, expand_sample
+from .shards import _PHASES
 from .train_state import HexfieldTrainState
 from .window import (
+    PackedRowView,
     PackedWindow,
     _select_files_for_rows,
     _split_by_md5,
@@ -40,6 +61,66 @@ from .window import (
     keep_prob as _keep_prob,
     select_recent_window,
 )
+
+# D6 augmentation cardinality (geometry.apply_d6 accepts 0-11). Verified 12 in
+# PLAN §4.2, matching the v1 ``rng.randrange(12)`` this phase replaces.
+D6_SIZE = 12
+
+
+def _aug_seed(run_seed: int, epoch: int) -> int:
+    """Deterministic per-(run, epoch) seed for the D6 augmentation draw.
+
+    Mirrors ``dense_cnn_restnet.trainer._aug_seed`` (``trainer.py:545-559``): a
+    stable fold of ``(run_seed, epoch)`` so each row's orientation re-randomizes
+    every epoch while staying reproducible. ALL D6 randomness is drawn from this
+    seed on the main thread BEFORE expansion (PLAN §3.8/§4.4) — no ``rng`` call
+    ever happens per-row inside the loop.
+    """
+    return (int(run_seed) * 1_000_003 + int(epoch) * 9_176 + 1) & 0x7FFFFFFF
+
+
+def _perm_seed(run_seed: int, epoch: int) -> int:
+    """Deterministic per-(run, epoch) seed for the SURVIVOR permutation (PLAN
+    §4.5 step 3). A distinct fold from :func:`_aug_seed` so the permutation
+    stream is independent of the D6 stream; both are pure functions of
+    ``(run_seed, epoch)`` so the same seed yields an identical survivor index and
+    D6 vector (the Phase-5 determinism gate)."""
+    return (int(run_seed) * 2_654_435_761 + int(epoch) * 40_503 + 7) & 0x7FFFFFFF
+
+
+def _row_view_to_sample(view: PackedRowView) -> HexfieldSampleData:
+    """Adapt a zero-copy :class:`~hexfield.window.PackedRowView` into the
+    :class:`~hexfield.samples.HexfieldSampleData` that ``expand_sample`` consumes
+    (the serial-phase shim, PLAN §6/Phase-5).
+
+    The ``PackedRowView`` already exposes every field as an accessor whose return
+    shape matches the dataclass (``records()`` → ``(q,r,owner,idx)`` tuples,
+    ``policy()`` / ``opp_policy()`` → ``(action_id, weight)`` tuples,
+    ``own_hot()`` / ``own_win()`` / … → ``(q,r)`` tuples, ``first_stone()`` →
+    ``(q,r)|None``, ``short_term_value()`` → ``(horizon, value)`` tuples). The one
+    representation gap is ``phase``: the packed column stores the u8 enum index
+    while ``HexfieldSampleData.phase`` (and ``build_features``) want the STRING
+    name — so it is mapped through ``shards._PHASES`` here exactly as
+    ``read_compact_shard`` does (``shards.py:238``). ``game_id`` is unused by
+    expansion and left empty; ``metadata`` defaults empty (the opp-policy source
+    was already resolved at write time)."""
+    return HexfieldSampleData(
+        game_id="",
+        turn_index=view.turn_index,
+        current_player=view.current_player,
+        phase=_PHASES[view.phase],
+        records=view.records(),
+        first_stone=view.first_stone(),
+        own_hot=view.own_hot(),
+        opp_hot=view.opp_hot(),
+        own_win=view.own_win(),
+        opp_win=view.opp_win(),
+        policy=view.policy(),
+        opp_policy=view.opp_policy(),
+        value=view.value,
+        short_term_value=view.short_term_value(),
+        moves_left=view.moves_left,
+    )
 
 
 class HexfieldTrainer:
@@ -52,16 +133,14 @@ class HexfieldTrainer:
         self.global_step = 0
         # Persisted KataGo-style train-bucket governor + window bookkeeping
         # (PLAN §6/M1). Serialized into the checkpoint meta by the saver and
-        # restored by the loader on the RESUME branch only. Starts fresh here;
-        # the window/governor mechanism that drives it lands in a later phase.
+        # restored by the loader on the RESUME branch only. Starts fresh here.
         self.train_state = HexfieldTrainState()
-
-    def _window_paths(self, ctx) -> list:
-        return sorted(
-            ctx.samples_dir.glob("epoch_*/game_*.npz"),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        )
+        # Per-epoch selection bookkeeping stashed by select_training_samples and
+        # read back by train_passes (the same trainer instance backs both
+        # dispatch calls). Threads effective_rows / window_start / reuse_ratio /
+        # train_bucket_level into the consumer without touching the slotted
+        # SharedComponents (PLAN §6: effective_rows comes from selection).
+        self._last_select: dict[int, dict[str, Any]] = {}
 
     def _update_train_bucket(self, total_rows: int, window_start: int) -> None:
         """Accrue / clamp the train-bucket reuse governor (PLAN §3.5).
@@ -169,6 +248,14 @@ class HexfieldTrainer:
                 "train_bucket_level": float(self.train_state.train_bucket_level),
             }
             base.update(extra)
+            # Stash for the consumer: an empty/limited selection trains nothing,
+            # so effective_rows is 0 and the reuse_ratio is carried through.
+            self._last_select[epoch] = {
+                "effective_rows": int(base.get("effective_rows", 0) or 0),
+                "window_start": int(window_start),
+                "reuse_ratio": float(base.get("reuse_ratio", 0.0) or 0.0),
+                "train_bucket_level": float(self.train_state.train_bucket_level),
+            }
             self._write_select_diag(ctx, epoch, base)
             return base
 
@@ -242,6 +329,15 @@ class HexfieldTrainer:
             "selected_files": len(selected_files),
             "selected_rows": int(selected_rows),
         }
+        # Stash effective_rows / window_start / reuse_ratio / train_bucket_level
+        # for train_passes (threaded via the trainer instance — the slotted
+        # SharedComponents only carries the opaque PackedWindow, PLAN §6).
+        self._last_select[epoch] = {
+            "effective_rows": int(effective_rows),
+            "window_start": int(window_start),
+            "reuse_ratio": float(result["reuse_ratio"]),
+            "train_bucket_level": float(self.train_state.train_bucket_level),
+        }
         self._write_select_diag(ctx, epoch, result)
         return result
 
@@ -257,25 +353,39 @@ class HexfieldTrainer:
         except OSError:
             pass
 
-    def _window(self, ctx, paths=None) -> list:
-        shard_paths = paths if paths is not None else self._window_paths(ctx)
-        rows = []
-        target = self.config.training.shuffle_keep_target_rows
-        for path in shard_paths:
-            rows.extend(read_compact_shard(path))
-            if len(rows) >= target:
-                break
-        return rows
+    def _effective_rows_for(self, window: PackedWindow, epoch: int) -> int:
+        """Row cap for this epoch's single pass (PLAN §3.4/M3).
+
+        Prefers the ``effective_rows`` ``select_training_samples`` stashed for
+        ``epoch`` (the bucket-debited count the governor honored). When
+        ``train_passes`` is called WITHOUT a prior selection (a direct test call),
+        recompute the faithful equivalent ``min(window.n,
+        train_samples_per_epoch)`` so the truncation contract still holds.
+        """
+        stashed = self._last_select.get(epoch)
+        if stashed is not None:
+            return int(stashed["effective_rows"])
+        return min(int(window.n), int(self.config.training.train_samples_per_epoch))
 
     def train_passes(self, *, passes, sample_window, sample_symmetries, ctx, components, epoch) -> dict[str, Any]:
+        # The opaque PackedWindow is self-drawn for D6 (PLAN §6 opaque-window
+        # guard); the framework's sample_symmetries selection is intentionally
+        # ignored (the v1 ``_ = sample_symmetries`` contract is preserved).
         _ = sample_symmetries
-        # sample_window is the path list from select_training_samples (or None
-        # if called directly, e.g. in tests).
-        paths = sample_window if isinstance(sample_window, list) else None
-        rows = self._window(ctx, paths)
-        if not rows:
+        window = sample_window if isinstance(sample_window, PackedWindow) else None
+        if window is None or window.n <= 0:
             return {"status": "skipped", "epoch": epoch, "reason": "empty sample window"}
-        rng = random.Random(epoch * 7919 + 13)
+
+        seed = int(ctx.config.run.seed or 0)
+        # --- PRE-DRAW all randomness on the main thread (PLAN §3.8/§4.4) -------
+        # (a) a per-row D6 vector in WINDOW row order, and (b) the survivor
+        # permutation; both pure functions of (seed, epoch). This replaces the v1
+        # in-loop ``random.Random.shuffle`` + ``rng.randrange(12)`` — the two
+        # MUST-FIX determinism violations. Drawn here, consumed positionally.
+        d6 = np.random.default_rng(_aug_seed(seed, epoch)).integers(
+            0, D6_SIZE, size=int(window.n), dtype=np.int64
+        )
+
         self.model.train().to(self.device)
         # RESUME SAFETY (the effective fix for the epoch-11 crash loop): the
         # checkpoint is loaded with map_location="cpu" while the model is still
@@ -295,71 +405,107 @@ class HexfieldTrainer:
         steps = 0
         started = time.time()
         # Radius transition: tolerate (skip) replay-buffer samples whose policy
-        # targets are off the now-smaller legal set (see the per-chunk skip below).
+        # targets are off the now-smaller legal set (the off-legal validity mask
+        # below). The hard-error wire stays armed at the default radius.
         tolerate_off_legal = int(os.environ.get("HEXFIELD_SUPPORT_RADIUS", "8")) < 8
-        for _pass in range(max(int(passes), 1)):
-            order = list(range(len(rows)))
-            rng.shuffle(order)
-            for start in range(0, len(order), batch_rows):
-                chunk = [rows[i] for i in order[start : start + batch_rows]]
-                # When HEXFIELD_SUPPORT_RADIUS<8 the replay window still holds
-                # radius-8 samples whose policy targets fall outside the radius-4
-                # legal set; skip those (they age out of the window) rather than
-                # tripping the hard-error wire, which stays armed at the default.
-                expanded = []
-                for s in chunk:
-                    try:
-                        expanded.append(expand_sample(s, symmetry=rng.randrange(12)))
-                    except ValueError as e:
-                        if tolerate_off_legal and "off the legal set" in str(e):
-                            continue
-                        raise
-                if not expanded:
-                    continue
-                denoms = step_global_denominators(expanded, STV_HORIZONS)
-                self.optimizer.zero_grad(set_to_none=True)
-                for bucket in pair_budget_microbuckets(expanded, quantize=PAD_QUANTUM):
-                    # Same quantum the budget split assumed (PAD_QUANTUM), so the
-                    # live (B,4,S,S) transient honours PAIR_BUDGET — see §6.3.
-                    pad_to = -(-max(r.support.num_nodes for r in bucket) // PAD_QUANTUM) * PAD_QUANTUM
-                    batch = split_stvalue_columns(
-                        collate_training(bucket, pad_to=pad_to), STV_HORIZONS
-                    )
-                    batch = {
-                        k: v.to(self.device, non_blocking=True) if isinstance(v, torch.Tensor) else v
-                        for k, v in batch.items()
-                    }
-                    with torch.autocast(
-                        device_type=self.device.type, dtype=torch.float16,
-                        enabled=self.device.type == "cuda",
-                    ):
-                        out = self.model(batch["feats"], batch["nbr"], batch["mask"], batch["coords"])
-                    loss, comps = hexfield_loss(out, batch, denominators=denoms)
-                    if not torch.isfinite(loss):
-                        raise RuntimeError(
-                            f"non-finite loss at epoch {epoch} step {steps}: "
-                            f"{ {k: float(v) for k, v in comps.items()} }"
-                        )
-                    self.scaler.scale(loss).backward()
-                    for key, val in comps.items():
-                        comp_totals[key] = comp_totals.get(key, 0.0) + float(val.detach())
-                self.scaler.unscale_(self.optimizer)
-                norm = torch.nn.utils.clip_grad_norm_(
-                    self.model.parameters(), self.config.training.grad_clip
-                )
-                if torch.isfinite(norm):
-                    grad_norms.append(float(norm))
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
-                steps += 1
-                self.global_step += 1
 
+        # (1) EXPAND ALL selected rows under their pre-drawn D6 (serial backend,
+        # PLAN §4.3 ladder rung 1). Off-legal rows are flagged invalid via the
+        # try/except skip (NOT silently reordered) — the per-row validity mask of
+        # PLAN §4.5 realized as the survivor list. The PackedRowView -> shim ->
+        # expand_sample path keeps the expansion math frozen (samples.py).
+        survivors: list = []  # list[ExpandedRow], post-skip survivors
+        rows_skipped_off_legal = 0
+        for i in range(int(window.n)):
+            sample = _row_view_to_sample(window.row_view(i))
+            try:
+                survivors.append(expand_sample(sample, symmetry=int(d6[i])))
+            except ValueError as e:
+                if tolerate_off_legal and "off the legal set" in str(e):
+                    rows_skipped_off_legal += 1
+                    continue
+                raise
+
+        # (2) PERMUTE the SURVIVOR index (drawn over the POST-skip set, PLAN §4.5
+        # step 3), then (3) TRUNCATE to effective_rows (PLAN §3.4/M3 — the
+        # load-bearing fidelity point: single pass, no within-epoch repeat, capped
+        # at exactly the bucket-debited effective_rows).
+        n_surv = len(survivors)
+        perm = np.random.default_rng(_perm_seed(seed, epoch)).permutation(n_surv)
+        effective_rows = self._effective_rows_for(window, epoch)
+        keep = perm[: max(0, int(effective_rows))]
+        ordered_rows = [survivors[int(j)] for j in keep]
+
+        # (4) MICRO-BUCKET (pair_budget_microbuckets) — UNCHANGED. One optimizer
+        # step per nominal batch of ``batch_rows`` survivors; the VRAM split +
+        # (5) loss/optimizer/AMP/grad-clip block below are byte-for-byte the v1
+        # path (PLAN §6: do not change the loss block or the micro-bucketing).
+        for start in range(0, len(ordered_rows), batch_rows):
+            expanded = ordered_rows[start : start + batch_rows]
+            if not expanded:
+                continue
+            denoms = step_global_denominators(expanded, STV_HORIZONS)
+            self.optimizer.zero_grad(set_to_none=True)
+            for bucket in pair_budget_microbuckets(expanded, quantize=PAD_QUANTUM):
+                # Same quantum the budget split assumed (PAD_QUANTUM), so the
+                # live (B,4,S,S) transient honours PAIR_BUDGET — see §6.3.
+                pad_to = -(-max(r.support.num_nodes for r in bucket) // PAD_QUANTUM) * PAD_QUANTUM
+                batch = split_stvalue_columns(
+                    collate_training(bucket, pad_to=pad_to), STV_HORIZONS
+                )
+                batch = {
+                    k: v.to(self.device, non_blocking=True) if isinstance(v, torch.Tensor) else v
+                    for k, v in batch.items()
+                }
+                with torch.autocast(
+                    device_type=self.device.type, dtype=torch.float16,
+                    enabled=self.device.type == "cuda",
+                ):
+                    out = self.model(batch["feats"], batch["nbr"], batch["mask"], batch["coords"])
+                loss, comps = hexfield_loss(out, batch, denominators=denoms)
+                if not torch.isfinite(loss):
+                    raise RuntimeError(
+                        f"non-finite loss at epoch {epoch} step {steps}: "
+                        f"{ {k: float(v) for k, v in comps.items()} }"
+                    )
+                self.scaler.scale(loss).backward()
+                for key, val in comps.items():
+                    comp_totals[key] = comp_totals.get(key, 0.0) + float(val.detach())
+            self.scaler.unscale_(self.optimizer)
+            norm = torch.nn.utils.clip_grad_norm_(
+                self.model.parameters(), self.config.training.grad_clip
+            )
+            if torch.isfinite(norm):
+                grad_norms.append(float(norm))
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+            steps += 1
+            self.global_step += 1
+
+        trained_rows = len(ordered_rows)
+        self.train_state.global_step_samples += trained_rows
+
+        if steps <= 0:
+            return {
+                "status": "skipped",
+                "epoch": epoch,
+                "reason": "no optimizer steps (all rows skipped off-legal or empty)",
+                "window_rows": int(window.n),
+                "rows_skipped_off_legal": int(rows_skipped_off_legal),
+            }
+
+        stashed = self._last_select.get(epoch, {})
         grads = np.asarray(grad_norms or [0.0])
         result = {
             "status": "completed",
             "epoch": epoch,
-            "passes": passes,
-            "window_rows": len(rows),
+            # Single pass, no within-epoch repeat (KataGo / dense semantics,
+            # PLAN §2/§3.4); the generic ``passes`` request is reported but not
+            # multiplied (mirrors dense trainer.py:371-374).
+            "passes": 1,
+            "generic_passes_requested": passes,
+            "window_rows": int(window.n),
+            "trained_rows": int(trained_rows),
             "steps": steps,
             "seconds": round(time.time() - started, 1),
             **{f"loss_{k}": v / max(steps, 1) for k, v in comp_totals.items()},
@@ -367,6 +513,13 @@ class HexfieldTrainer:
             "grad_norm_p95": float(np.percentile(grads, 95)),
             "clip_fraction": float((grads > self.config.training.grad_clip).mean()),
             "amp_scale": float(self.scaler.get_scale()) if self.device.type == "cuda" else None,
+            # New Phase-5 diagnostics (PLAN §6/§7/§9/S2).
+            "reuse_ratio": float(stashed.get("reuse_ratio", 0.0)),
+            "train_bucket_level": float(
+                stashed.get("train_bucket_level", self.train_state.train_bucket_level)
+            ),
+            "train_steps_since_last_reload": int(self.train_state.train_steps_since_last_reload),
+            "rows_skipped_off_legal": int(rows_skipped_off_legal),
         }
         diag_path = ctx.diagnostics_dir / f"hexfield.training.epoch_{epoch:06d}.json"
         diag_path.write_text(json.dumps(result, indent=2, default=str), encoding="utf-8")
