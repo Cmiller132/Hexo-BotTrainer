@@ -52,8 +52,11 @@ use crate::constants::{
 
 // hexfield_compact_v1: phase enum (shards.py:35) — index 2 == "SecondStone".
 const PHASE_SECOND_STONE: u8 = 2;
-// MOVES_LEFT_CAP (constants.py:75): moves_left normalized to [-1, 1] over [0, 512].
-const MOVES_LEFT_CAP: f32 = 512.0;
+// MOVES_LEFT_CAP (constants.py:75): moves_left normalized to [-1, 1] over
+// [0, CAP]. v3 bumped this to 209 (p99.5 of main_2 recorded moves_left); this
+// Rust twin MUST track the Python constant or the moves_left target diverges
+// from the serial oracle (parity gate).
+const MOVES_LEFT_CAP: f32 = 209.0;
 // COORD_OFFSET (constants.py:31): packed action id = ((q+2^15)<<16) | (r+2^15).
 const COORD_OFFSET: i32 = 1 << 15;
 
@@ -118,7 +121,9 @@ struct RowFacts {
     opp_win: Vec<(i32, i32)>,
     // (action_id, weight)
     policy: Vec<(u32, f32)>,
+    q_policy: Vec<(u32, f32)>,
     opp_policy: Vec<(u32, f32)>,
+    policy_surprise: f32,
     value: f32,
     // (H,) stvalue + mask blocks
     stvalue: Vec<f32>,
@@ -141,12 +146,17 @@ struct RowOut {
     // legal-prefix targets (legal_count each)
     policy: Vec<f32>,
     opp_policy: Vec<f32>,
+    cell_q: Vec<f32>,
+    cell_q_mask: Vec<f32>,
+    policy_surprise: f32,
     // f64: the serial oracle's opp_coverage is a PYTHON float (f64 ratio of f64-
     // accumulated sums, samples.py:225). Emitting it as f64 makes it bit-identical
     // to the oracle (a strict ``abs(serial - rust) <= 1e-12`` parity check then
-    // holds, not just an f32-cast equivalence). All other scalars are exactly
-    // representable in f32 (value widens losslessly; moves_left = 2*(ml/512)-1 is
-    // dyadic for integer ml), so they stay f32.
+    // holds, not just an f32-cast equivalence). All other scalars stay f32: value
+    // widens losslessly; moves_left = 2*min(1,ml/CAP)-1 is emitted as f32 — equal to
+    // the serial f64 form AFTER the f32 cast that batching.py applies to the training
+    // tensor (with the v3 CAP=209, non-power-of-2, the f64 and f32 forms differ only
+    // in the last bit, so the parity check compares moves_left at f32 precision).
     opp_coverage: f64,
     value: f32,
     stvalue: Vec<f32>,
@@ -578,6 +588,22 @@ fn expand_one(
     }
     let opp_coverage: f64 = if opp_total > 0.0 { opp_kept / opp_total } else { 1.0 };
 
+    // (5b) Per-cell Q projection (samples.py:254-266): scalar assign + presence
+    // mask; off-legal dropped (never raises on off-legal); q finite & in [-1,1].
+    let mut cell_q = vec![0f32; legal_count];
+    let mut cell_q_mask = vec![0f32; legal_count];
+    for &(action_id, q) in &facts.q_policy {
+        if !q.is_finite() || q < -1.0 || q > 1.0 {
+            return Err(ExpandErr::Hard(
+                "cell_q targets must be finite and in [-1, 1]".to_string(),
+            ));
+        }
+        if let Some(slot) = legal_slot(&sup, sym, action_id) {
+            cell_q[slot] = q;        // SCALAR assign (one action -> one distinct cell)
+            cell_q_mask[slot] = 1.0;
+        }
+    }
+
     // (6) STV + moves_left (samples.py:227-242) — D6-invariant. The serial oracle
     // rebuilds stvalue from `short_term_value()` (window.py:186-193), which keeps
     // ONLY masked columns; unmasked columns stay 0.0. The writer already stores
@@ -620,6 +646,9 @@ fn expand_one(
         feats,
         policy,
         opp_policy: opp,
+        cell_q,
+        cell_q_mask,
+        policy_surprise: facts.policy_surprise,
         opp_coverage,
         value: facts.value,
         stvalue,
@@ -801,6 +830,7 @@ pub fn expand_shard_train<'py>(
     let current_player = col_typed::<u8>(columns, "current_player", n)?;
     let phase = col_typed::<u8>(columns, "phase", n)?;
     let value = col_typed::<f32>(columns, "value", n)?;
+    let policy_surprise = col_typed::<f32>(columns, "policy_surprise", n)?;
     let moves_left = col_typed::<f32>(columns, "moves_left", n)?;
     let first_q = col_typed::<i16>(columns, "first_q", n)?;
     let first_r = col_typed::<i16>(columns, "first_r", n)?;
@@ -826,6 +856,7 @@ pub fn expand_shard_train<'py>(
     let hist_pidx = col_typed::<u16>(columns, "hist_pidx", hist_total)?;
     let pol_act = col_typed::<u32>(columns, "pol_act", pol_total)?;
     let pol_w = col_typed::<f32>(columns, "pol_w", pol_total)?;
+    let q_pol_q = col_typed::<f32>(columns, "q_pol_q", pol_total)?;
     let opp_act = col_typed::<u32>(columns, "opp_act", opp_total)?;
     let opp_w = col_typed::<f32>(columns, "opp_w", opp_total)?;
     let own_hot_qr = col_typed::<i16>(columns, "own_hot_qr", 2 * *own_hot_off.last().unwrap() as usize)?;
@@ -864,6 +895,7 @@ pub fn expand_shard_train<'py>(
         let p0 = pol_off[i] as usize;
         let p1 = pol_off[i + 1] as usize;
         let policy: Vec<(u32, f32)> = (p0..p1).map(|k| (pol_act[k], pol_w[k])).collect();
+        let q_policy: Vec<(u32, f32)> = (p0..p1).map(|k| (pol_act[k], q_pol_q[k])).collect();
         let o0 = opp_off[i] as usize;
         let o1 = opp_off[i + 1] as usize;
         let opp_policy: Vec<(u32, f32)> = (o0..o1).map(|k| (opp_act[k], opp_w[k])).collect();
@@ -884,7 +916,9 @@ pub fn expand_shard_train<'py>(
             own_win: qr_pairs(own_win_qr, own_win_off[i] as usize, own_win_off[i + 1] as usize),
             opp_win: qr_pairs(opp_win_qr, opp_win_off[i] as usize, opp_win_off[i + 1] as usize),
             policy,
+            q_policy,
             opp_policy,
+            policy_surprise: policy_surprise[i],
             value: value[i],
             stvalue: stv,
             stvalue_mask: stv_mask,
@@ -921,6 +955,9 @@ pub fn expand_shard_train<'py>(
                 feats: Vec::new(),
                 policy: Vec::new(),
                 opp_policy: Vec::new(),
+                cell_q: Vec::new(),
+                cell_q_mask: Vec::new(),
+                policy_surprise: 0.0,
                 opp_coverage: 1.0,
                 value: 0.0,
                 stvalue: vec![0.0; horizons_len],
@@ -948,6 +985,9 @@ pub fn expand_shard_train<'py>(
     let mut feats = Vec::with_capacity(total_nodes * NUM_FEATURES);
     let mut policy = Vec::with_capacity(total_legal);
     let mut opp_policy = Vec::with_capacity(total_legal);
+    let mut cell_q = Vec::with_capacity(total_legal);
+    let mut cell_q_mask = Vec::with_capacity(total_legal);
+    let mut policy_surprise_out = Vec::with_capacity(r);
     let mut opp_coverage: Vec<f64> = Vec::with_capacity(r);
     let mut value_out = Vec::with_capacity(r);
     let mut moves_left_out = Vec::with_capacity(r);
@@ -968,6 +1008,9 @@ pub fn expand_shard_train<'py>(
         feats.extend_from_slice(&row.feats);
         policy.extend_from_slice(&row.policy);
         opp_policy.extend_from_slice(&row.opp_policy);
+        cell_q.extend_from_slice(&row.cell_q);
+        cell_q_mask.extend_from_slice(&row.cell_q_mask);
+        policy_surprise_out.push(row.policy_surprise);
         opp_coverage.push(row.opp_coverage);
         value_out.push(row.value);
         moves_left_out.push(row.moves_left);
@@ -997,6 +1040,9 @@ pub fn expand_shard_train<'py>(
     out.set_item("moves_left_mask", Py::new(py, RxF32Buf { data: moves_left_mask })?)?;
     out.set_item("stvalue", Py::new(py, RxF32Buf { data: stvalue_out })?)?;
     out.set_item("stvalue_mask", Py::new(py, RxF32Buf { data: stvalue_mask_out })?)?;
+    out.set_item("cell_q", Py::new(py, RxF32Buf { data: cell_q })?)?;
+    out.set_item("cell_q_mask", Py::new(py, RxF32Buf { data: cell_q_mask })?)?;
+    out.set_item("policy_surprise", Py::new(py, RxF32Buf { data: policy_surprise_out })?)?;
     out.set_item("num_rows", r)?;
     out.set_item("num_features", NUM_FEATURES)?;
     Ok(out)
