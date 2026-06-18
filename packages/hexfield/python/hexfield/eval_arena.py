@@ -222,10 +222,31 @@ def _load_hexfield_net(checkpoint: str | Path) -> HexfieldNet:
     if not isinstance(payload, dict) or "model" not in payload:
         raise RuntimeError(f"hexfield checkpoint payload has no 'model' state: {path}")
     model = HexfieldNet()
+    sd = payload["model"]
     try:
-        model.load_state_dict(payload["model"], strict=True)
+        model.load_state_dict(sd, strict=True)
     except RuntimeError:
-        # Legacy (pre-v3) checkpoint: a different architecture (6 conv blocks,
+        # (a) Older v3 checkpoint with the SHARED relative-position ``bias_table``,
+        # saved BEFORE the per-block-bias deploy (main_3 ep31). The current model
+        # expects one ``bias_tables.{i}`` per attention block; expand the shared
+        # table into per-block copies (bit-identical — exactly the per-block
+        # migration) so ep5..ep30-era opponents stay loadable in the eval. Without
+        # this, these v3-but-shared-bias checkpoints fall through to the legacy v2
+        # branch below and FAIL (they carry cell_q/conv6-7/LayerScale keys v2 lacks),
+        # which silently drops the entire multi-checkpoint match to SealBot-only.
+        remapped = None
+        if "bias_table" in sd and any(k.startswith("bias_tables.") for k in model.state_dict()):
+            remapped = {k: v for k, v in sd.items() if k != "bias_table"}
+            for i in range(len(model.bias_tables)):
+                remapped[f"bias_tables.{i}"] = sd["bias_table"].clone()
+        if remapped is not None:
+            try:
+                model.load_state_dict(remapped, strict=True)
+                model.eval()
+                return model
+            except RuntimeError:
+                pass
+        # (b) Legacy (pre-v3) checkpoint: a different architecture (6 conv blocks,
         # shared aux reduction, no cell_q / ml_reduction / LayerScale). Load it
         # into the FROZEN eval-only v2 snapshot so radius-4-native anchors trained
         # before the v3 arch change (e.g. main_2 epoch_000045.pt) stay playable.
@@ -1611,6 +1632,7 @@ def play_sealbot_match(
         __slots__ = (
             "index", "seed", "hex_is_p0", "state", "opponent",
             "plies", "hex_decisions", "done", "status", "winner", "opening",
+            "actions",
         )
 
         def __init__(self, index: int) -> None:
@@ -1625,6 +1647,8 @@ def play_sealbot_match(
             self.status = "truncated"
             self.winner: str | None = None  # "hex" | "sealbot" | None
             self.opening: list[int] = []
+            # Full move stream (BOTH players) for the replayable .hxr record.
+            self.actions: list[int] = []
 
         @property
         def hex_role(self) -> Any:
@@ -1730,6 +1754,7 @@ def play_sealbot_match(
                         api.apply_action(g.state, PlacementAction(AxialCoord(q=q, r=r)))
                         g.plies += 1
                         g.hex_decisions += 1
+                        g.actions.append(int(search["action_id"]))
                         if len(g.opening) < opening_plies:
                             g.opening.append(int(search["action_id"]))
                         plies_this_round += 1
@@ -1745,8 +1770,9 @@ def play_sealbot_match(
                     opponent_elapsed += time.perf_counter() - t0
                     api.apply_action(g.state, decision.action)
                     g.plies += 1
+                    coord = decision.action.coord
+                    g.actions.append(pack_action_id(coord.q, coord.r))
                     if len(g.opening) < opening_plies:
-                        coord = decision.action.coord
                         g.opening.append(pack_action_id(coord.q, coord.r))
                     plies_this_round += 1
                     _settle(g)
@@ -1761,6 +1787,29 @@ def play_sealbot_match(
                 g.opponent.close()
             except Exception:
                 pass
+
+    # Persist the SealBot games as a replayable .hxr (dashboard "evaluation"
+    # source), mirroring the checkpoint runners. Best-effort / fail-soft. The
+    # writer is net-A-centric (expects .a_is_p0 and .winner in {"A","B",None});
+    # adapt the SealBot _Game (hexfield IS the candidate = net A, winner is
+    # "hex"/"sealbot") onto that shape without disturbing the result mapping below.
+    from types import SimpleNamespace
+
+    _hxr_stats: dict[str, int] = {}
+    _hxr_games = [
+        SimpleNamespace(
+            actions=g.actions,
+            a_is_p0=g.hex_is_p0,
+            seed=g.seed,
+            index=g.index,
+            plies=g.plies,
+            winner=("A" if g.winner == "hex" else ("B" if g.winner == "sealbot" else None)),
+        )
+        for g in games
+    ]
+    hxr_path = _write_eval_hxr(
+        _hxr_games, diagnostics_dir, label, f"SealBot {sealbot_variant}", stats=_hxr_stats
+    )
 
     # Re-key game rows to the hexfield-vs-X result shape (winner relative to the
     # FIRST label = hexfield). _build_match_result is net-A-centric, so map
@@ -1802,6 +1851,8 @@ def play_sealbot_match(
             "elapsed_seconds": round(time.perf_counter() - started, 2),
             "mcts_search_elapsed_seconds": round(mcts_search_elapsed, 2),
             "opponent_elapsed_seconds": round(opponent_elapsed, 2),
+            "hxr_record": hxr_path,
+            "hxr_games_written": _hxr_stats.get("games_written", 0),
         },
     )
     return result
