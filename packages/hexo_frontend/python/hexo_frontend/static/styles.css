@@ -3011,6 +3011,166 @@ body.bot-thinking .legal {
   border-style: dashed;
 }
 
+/* ============ History v2 — #histStrength (redesigned eval cluster) ============ */
+/* One compact panel: a "current strength" hero KPI row, ONE learning curve, and
+   ONE opponent panel — collapsing the old trends-eval + rating-table + big BT
+   ladder + W-L table stack. Hidden via [hidden]; self-collapses when empty. */
+.hist-strength {
+  display: grid;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(7, 13, 19, 0.44);
+}
+
+.hist-strength[hidden],
+.hist-strength:empty {
+  display: none;
+}
+
+.hist-strength .hist-trends-caption {
+  margin-bottom: 0;
+}
+
+/* Row 1: hero — KPIs in a single wrapping row, not a tile wall. */
+.hist-hero {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.hist-hero-verdict,
+.hist-hero-kpi,
+.hist-hero-ci {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  justify-content: center;
+  min-width: 92px;
+  padding: 6px 10px;
+  border: 1px solid rgba(143, 155, 170, 0.16);
+  border-radius: 8px;
+  background: rgba(7, 13, 19, 0.34);
+}
+
+.hist-hero-ci {
+  flex: 1 1 180px;
+  min-width: 160px;
+}
+
+.hist-hero-k {
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.hist-hero-k small {
+  font-weight: 700;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.hist-hero-v {
+  font-size: 14px;
+  font-weight: 800;
+  color: var(--text);
+  line-height: 1.05;
+}
+
+.hist-hero-big {
+  font-size: 20px;
+  font-weight: 900;
+  letter-spacing: 0.3px;
+}
+
+.hist-hero-sub {
+  font-size: 9px;
+  color: var(--muted);
+}
+
+/* Verdict KPI gets a status tint from the shared improving/watch/intervene
+   palette attached alongside .hist-hero-verdict. */
+.hist-hero-verdict.hist-health-improving {
+  border-color: rgba(54, 211, 153, 0.5);
+  background: rgba(54, 211, 153, 0.12);
+}
+.hist-hero-verdict.hist-health-watch {
+  border-color: rgba(255, 206, 86, 0.45);
+  background: rgba(255, 206, 86, 0.1);
+}
+.hist-hero-verdict.hist-health-intervene {
+  border-color: rgba(255, 122, 122, 0.5);
+  background: rgba(255, 122, 122, 0.12);
+}
+
+.hist-hero-ci .hist-ci-bar {
+  margin-top: 4px;
+}
+
+.hist-hero-flags {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.hist-hero-note {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+/* One responsive grid: full-width hero banner + equal-weight content cards
+   (Elo curve | SealBot curve | BT ladder | latest W-L) that auto-fit columns. */
+.hist-strength-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 8px;
+  align-items: start;
+}
+
+/* Hero spans the full width as a banner above the content cards. */
+.hist-strength-hero {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 8px;
+}
+
+.hist-strength-card {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(7, 13, 19, 0.44);
+}
+
+.hist-strength-card-title {
+  font-size: 9px;
+  font-weight: 900;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+/* Cap curve height so two side-by-side curves don't dominate the panel. */
+.hist-strength-card svg {
+  max-height: 150px;
+  width: 100%;
+  height: auto;
+}
+
+.hist-strength-more {
+  font-size: 9px;
+  color: var(--muted);
+  font-style: italic;
+}
+
 .mt-opts label.mt-check {
   display: inline-flex;
   align-items: center;
