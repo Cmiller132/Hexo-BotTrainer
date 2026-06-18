@@ -202,18 +202,23 @@ class HexfieldTrainer:
                 groups["heads"].append(p)
         return groups
 
-    def _accumulate_group_grad_norms(self, totals: dict[str, float]) -> None:
-        """Add this step's per-group L2 grad-norm into ``totals`` (PRE-clip).
+    def _group_grad_norms(self) -> dict[str, float]:
+        """This step's per-group L2 grad-norm (PRE-clip).
 
-        Called after ``unscale_`` and BEFORE ``clip_grad_norm_`` so each group's
-        true pre-clip norm is captured; averaged over optimizer steps at report.
+        Computed after ``unscale_`` and BEFORE ``clip_grad_norm_`` so each group's
+        true pre-clip norm is captured. The caller merges the result into the
+        running totals ONLY on finite steps (mirroring ``grad_norm_mean``'s isfinite
+        filter), so an AMP-overflow step never poisons the reported group averages
+        with inf/nan.
         """
+        out: dict[str, float] = {}
         for gname, params in self._grad_norm_groups.items():
             sq = 0.0
             for p in params:
                 if p.grad is not None:
                     sq += float(p.grad.detach().norm(2).item()) ** 2
-            totals[gname] = totals.get(gname, 0.0) + (sq ** 0.5)
+            out[gname] = sq ** 0.5
+        return out
 
     def _update_train_bucket(self, total_rows: int, window_start: int) -> None:
         """Accrue / clamp the train-bucket reuse governor (PLAN §3.5).
@@ -477,6 +482,7 @@ class HexfieldTrainer:
         grad_norms: list[float] = []
         clip_values: list[float] = []
         group_norm_totals: dict[str, float] = {}
+        group_norm_steps = 0
         steps = 0
         started = time.time()
         # Radius transition: tolerate (skip) replay-buffer samples whose policy
@@ -607,11 +613,14 @@ class HexfieldTrainer:
                 clip_value = float(tcfg.grad_clip)
             else:
                 clip_value = float(tcfg.clip_c) * float(self._grad_norm_ema)
-            self._accumulate_group_grad_norms(group_norm_totals)
+            step_group_norms = self._group_grad_norms()
             norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), clip_value)
             if torch.isfinite(norm):
                 grad_norms.append(float(norm))
                 clip_values.append(clip_value)
+                group_norm_steps += 1
+                for _g, _v in step_group_norms.items():
+                    group_norm_totals[_g] = group_norm_totals.get(_g, 0.0) + _v
                 # Update the pre-clip-norm EMA every step (warmup included) so the
                 # post-warmup adaptive threshold is seeded.
                 d = float(tcfg.clip_ema_decay)
@@ -663,7 +672,7 @@ class HexfieldTrainer:
             "clip_value_mean": float(clips.mean()),
             "grad_norm_ema": float(self._grad_norm_ema) if self._grad_norm_ema is not None else 0.0,
             **{
-                f"grad_norm_{g}": float(group_norm_totals.get(g, 0.0) / max(steps, 1))
+                f"grad_norm_{g}": float(group_norm_totals.get(g, 0.0) / max(group_norm_steps, 1))
                 for g in ("trunk_conv", "trunk_attn", "heads")
             },
             "amp_scale": float(self.scaler.get_scale()) if self.device.type == "cuda" else None,

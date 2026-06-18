@@ -56,12 +56,13 @@ def decode_binned_value(logits: torch.Tensor) -> torch.Tensor:
 
 
 def decode_moves_left(logits: torch.Tensor) -> torch.Tensor:
-    """Median-of-bins decode mapped to decisions [0, MOVES_LEFT_CAP] (§5.2)."""
+    """Softmax-EXPECTATION decode mapped to decisions [0, MOVES_LEFT_CAP] (v3).
 
-    probs = torch.softmax(logits, dim=-1)
-    cdf = probs.cumsum(dim=-1)
-    median_bin = (cdf >= 0.5).int().argmax(dim=-1).to(logits.dtype)
-    scalar = median_bin / (VALUE_BINS - 1) * 2.0 - 1.0  # bin -> [-1, 1]
+    Replaces the median-of-bins decode, whose ~8-decision quantization drove the
+    full-horizon Spearman drift; expectation mirrors ``decode_binned_value``."""
+
+    bins = value_bins(device=logits.device, dtype=logits.dtype)
+    scalar = (torch.softmax(logits, dim=-1) * bins).sum(dim=-1).clamp(-1.0, 1.0)
     return (scalar + 1.0) * 0.5 * MOVES_LEFT_CAP
 
 

@@ -76,6 +76,7 @@ def write_compact_shard(
     phase = np.empty(n, dtype=np.uint8)
     value = np.empty(n, dtype=np.float32)
     moves_left = np.full(n, -1.0, dtype=np.float32)
+    policy_surprise = np.zeros(n, dtype=np.float32)
     first_q = np.zeros(n, dtype=np.int16)
     first_r = np.zeros(n, dtype=np.int16)
     first_present = np.zeros(n, dtype=np.uint8)
@@ -91,6 +92,7 @@ def write_compact_shard(
     }
     pol_act: list[np.ndarray] = []
     pol_w: list[np.ndarray] = []
+    pol_q: list[np.ndarray] = []  # child Q parallel to pol_act (cell_q head target)
     pol_len: list[int] = []
     opp_act: list[np.ndarray] = []
     opp_w: list[np.ndarray] = []
@@ -102,6 +104,7 @@ def write_compact_shard(
         phase[i] = _PHASE_INDEX[str(sample.phase)]
         value[i] = float(sample.value)
         moves_left[i] = float(sample.moves_left)
+        policy_surprise[i] = float(sample.policy_surprise)
         if sample.first_stone is not None:
             first_q[i] = int(sample.first_stone[0])
             first_r[i] = int(sample.first_stone[1])
@@ -130,8 +133,13 @@ def write_compact_shard(
 
         pa = np.fromiter((int(a) for a, _ in sample.policy), dtype=np.uint32, count=len(sample.policy))
         pw = np.fromiter((float(w) for _, w in sample.policy), dtype=np.float32, count=len(sample.policy))
+        # Child Q for the cell_q head, aligned to the recorded policy action order
+        # (q_policy is parallel to policy; the dict guards length == pol_act).
+        qmap = {int(a): float(q) for a, q in sample.q_policy}
+        pq = np.fromiter((qmap.get(int(a), 0.0) for a in pa.tolist()), dtype=np.float32, count=pa.shape[0])
         pol_act.append(pa)
         pol_w.append(pw)
+        pol_q.append(pq)
         pol_len.append(int(pa.shape[0]))
         oa = np.fromiter((int(a) for a, _ in sample.opp_policy), dtype=np.uint32, count=len(sample.opp_policy))
         ow = np.fromiter((float(w) for _, w in sample.opp_policy), dtype=np.float32, count=len(sample.opp_policy))
@@ -164,7 +172,9 @@ def write_compact_shard(
         "hist_off": _concat_offsets(hist_len),
         "pol_act": _cat(pol_act, np.uint32),
         "pol_w": _cat(pol_w, np.float32),
+        "q_pol_q": _cat(pol_q, np.float32),
         "pol_off": _concat_offsets(pol_len),
+        "policy_surprise": policy_surprise,
         "opp_act": _cat(opp_act, np.uint32),
         "opp_w": _cat(opp_w, np.float32),
         "opp_off": _concat_offsets(opp_len),

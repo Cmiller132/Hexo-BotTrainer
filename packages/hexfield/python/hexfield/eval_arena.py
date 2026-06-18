@@ -218,11 +218,22 @@ def _load_hexfield_net(checkpoint: str | Path) -> HexfieldNet:
     path = Path(checkpoint).expanduser()
     if not path.is_file():
         raise FileNotFoundError(f"hexfield checkpoint is not a readable file: {path}")
-    model = HexfieldNet()
     payload = torch.load(path, map_location="cpu", weights_only=False)
     if not isinstance(payload, dict) or "model" not in payload:
         raise RuntimeError(f"hexfield checkpoint payload has no 'model' state: {path}")
-    model.load_state_dict(payload["model"], strict=True)
+    model = HexfieldNet()
+    try:
+        model.load_state_dict(payload["model"], strict=True)
+    except RuntimeError:
+        # Legacy (pre-v3) checkpoint: a different architecture (6 conv blocks,
+        # shared aux reduction, no cell_q / ml_reduction / LayerScale). Load it
+        # into the FROZEN eval-only v2 snapshot so radius-4-native anchors trained
+        # before the v3 arch change (e.g. main_2 epoch_000045.pt) stay playable.
+        # Still strict — a genuine corruption must surface, not keep random heads.
+        from .legacy_model_v2 import HexfieldNet as HexfieldNetV2
+
+        model = HexfieldNetV2()
+        model.load_state_dict(payload["model"], strict=True)
     model.eval()
     return model
 

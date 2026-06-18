@@ -101,7 +101,7 @@ shuffle_taper_window_exponent = 0.65
 shuffle_expand_window_per_row = 0.4
 shuffle_taper_window_scale = 20000.0
 validation_fraction = 0.0
-train_samples_per_epoch = 100000
+train_samples_per_epoch = 48000
 max_train_bucket_per_new_data = 8.0
 max_train_bucket_size = 500000.0
 no_repeat_files = false
@@ -113,7 +113,14 @@ no_repeat_files = false
 # serial on this 32-core host (~4.3-4.7k rows/s vs ~0.57k). The "serial" and
 # "pool" backends remain available via this knob (and the HEXFIELD_EXPAND env) as
 # the parity oracle / spawn-ProcessPool fallback (PLAN §4.3/§10 step 8).
-expand_backend = "rust"
+# v3: expand_backend forced to "serial" — the Rust expand kernel
+# (replay_expand.rs::expand_shard_train) does NOT yet project the new per-cell Q
+# target (cell_q/cell_q_mask), so the rust path raises KeyError('cell_q'). The
+# serial Python oracle (samples.expand_sample) DOES build cell_q and is correct;
+# at ~0.57k rows/s it adds ~84s/epoch vs ~11s — negligible against the ~1000s+
+# self-play. TODO(perf): add cell_q projection to replay_expand.rs to restore the
+# ~7x rust expand, then flip this back to "rust".
+expand_backend = "serial"
 expand_workers = 0
 
 [model.config.evaluation]
@@ -167,6 +174,13 @@ enabled = false
 # budget 64 with sealbot_share=0.5 that is 32//4 = 8 games (4 CRN pairs) each.
 sealbot_enabled = true
 bracket_size = 1
+# v3 anchor: main_2 epoch_000045 (radius-4-NATIVE, strongest prior-lineage net) is
+# the fixed external anchor, replacing the radius-8 bc_prefit. It is an OLD-arch
+# checkpoint; eval_arena._load_hexfield_net falls back to the frozen legacy_model_v2
+# snapshot to load it (strict). NOT in radius8_opponents (it is radius-4-native, so
+# its edges are in-distribution and DO count toward the BT zero-point alongside SealBot).
+permanent_anchors = [["main2_ep45", "/mnt/e/Hexo-BotTrainer/runs/hexfield_main_2/checkpoints/epoch_000045.pt"], ["ep5", "epoch_000005.pt"]]
+radius8_opponents = []
 
 [run]
 name = "hexfield_main_3"
@@ -177,7 +191,7 @@ seed = 1
 epochs = 200
 
 [selfplay]
-games_per_epoch = 192
+games_per_epoch = 256
 update_checkpoint_pointer = false
 
 [train]
@@ -190,5 +204,9 @@ passes_per_epoch = 1
 # bucket / governor (it never inherits a stale train_state — only the `resume`
 # branch restores train_state, PLAN §6 checkpoints.py / M1). It does NOT point at
 # any live run, so launching main_3 cannot disturb hexfield_main_2.
-initialize_from = "/mnt/e/Hexo-BotTrainer-hexgt/runs/hexfield_bc_1/checkpoint_epoch2.pt"
+# v3 warm-start: a fresh BC prefit trained against the v3 architecture (the old
+# bc_1 prefit is pre-v3 arch and will NOT strict-load). Regenerated via
+# scripts/_hexfield_prefit.py --out runs/hexfield_bc_v3 (5k-sample minimal warm
+# start; rerun with more steps for a stronger prefit before a serious run).
+initialize_from = "/mnt/e/Hexo-BotTrainer-hexgt/runs/hexfield_bc_v3/checkpoint_epoch0.pt"
 save_name = "latest"

@@ -72,7 +72,7 @@ HALO_DIST_FEATURE = HALO_DIST / DIST_SCALE  # 1.125
 
 # --- heads / targets ------------------------------------------------------------
 VALUE_BINS = 65
-MOVES_LEFT_CAP = 512
+MOVES_LEFT_CAP = 209  # v3: measured p99.5 of main_2 recorded moves_left (max 254)
 
 # --- trunk ----------------------------------------------------------------------
 CHANNELS = 96
