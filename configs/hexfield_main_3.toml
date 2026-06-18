@@ -76,7 +76,7 @@ cache_max_states = 262144
 # are written explicitly here so the fresh run is self-documenting.
 [model.config.training]
 batch_rows = 32
-learning_rate = 5e-4
+learning_rate = 6e-4
 weight_decay = 1e-4
 grad_clip = 5.0
 # Adaptive grad clip (#1): after clip_warmup_steps, clip at clip_c*EMA(pre-clip norm).
