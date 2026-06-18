@@ -3804,13 +3804,14 @@ def _loss_buffer_from_training(training: dict[str, object]) -> dict[str, object]
     if isinstance(components, dict):
         # hexfield's per-head components are normalized into this same dict shape by
         # _training_epoch_summary, so the mapping below covers both lineages. The
-        # moves_left head is hexfield-only (app.js does not yet render it, but it is
-        # carried for forward-compat).
+        # moves_left and cell_q (per-cell action-value) heads are hexfield-only; the
+        # epoch card renders both as chips when present.
         for src, dst in (
             ("policy", "loss_policy"),
             ("value", "loss_value"),
             ("opp_policy", "loss_opp"),
             ("moves_left", "loss_moves_left"),
+            ("cell_q", "loss_cell_q"),
         ):
             value = _optional_float(components.get(src))
             if value is not None:
@@ -4325,6 +4326,7 @@ def _training_epoch_summary(payload: dict[str, object]) -> dict[str, object]:
             "value": payload.get("loss_value"),
             "opp_policy": payload.get("loss_opp_policy"),
             "moves_left": payload.get("loss_moves_left"),
+            "cell_q": payload.get("loss_cell_q"),
         }
         for key, value in payload.items():
             if isinstance(key, str) and key.startswith("loss_stvalue_"):

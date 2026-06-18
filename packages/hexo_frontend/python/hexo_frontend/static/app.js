@@ -4663,6 +4663,9 @@ function epochProgressDetail(buf) {
     .forEach(match => {
       if (asFinite(buf[match[0]]) !== null) lossChips.push(epochChip(`stv${match[1]}`, formatDecimal(buf[match[0]], 3)));
     });
+  // Auxiliary hexfield-only heads (emitted only when present).
+  if (asFinite(buf.loss_moves_left) !== null) lossChips.push(epochChip("moves", formatDecimal(buf.loss_moves_left, 3)));
+  if (asFinite(buf.loss_cell_q) !== null) lossChips.push(epochChip("cellQ", formatDecimal(buf.loss_cell_q, 3)));
 
   const lossGroup = lossChips.length
     ? `<div class="epoch-detail-group"><span class="epoch-detail-label">Losses</span>${lossChips.join("")}</div>`
@@ -4788,6 +4791,8 @@ function histLossHeads(buf) {
     .filter(Boolean)
     .sort((a, b) => Number(a[1]) - Number(b[1]))
     .forEach(match => push(match[0], `stv${match[1]}`));
+  push("loss_moves_left", "moves");
+  push("loss_cell_q", "cellQ");
   return heads;
 }
 
