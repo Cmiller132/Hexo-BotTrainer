@@ -73,6 +73,15 @@ class HexfieldCheckpointLoader:
             resume = ctx.config.checkpoint.resume_from is not None
             meta = load_into(model, payload, optimizer=optimizer if resume else None)
             if resume:
+                # Config is the source of truth for the LR: load_into's
+                # optimizer.load_state_dict restored the checkpoint's saved lr into
+                # the param groups, which would silently override a changed config
+                # lr on resume. Re-apply the live config lr (Adam moment buffers are
+                # kept; only the step size changes) so an lr edit takes effect on
+                # the next relaunch.
+                lr = float(ctx.config.training.learning_rate)
+                for group in optimizer.param_groups:
+                    group["lr"] = lr
                 # Restore the KataGo-style train-bucket governor ONLY on a true
                 # resume (PLAN §6/M1). A missing key -> from_dict(None) -> fresh
                 # state, so old-format checkpoints resume cleanly. Never restore
