@@ -73,9 +73,14 @@ def _rows_equal(a: ExpandedRow | None, b: ExpandedRow | None) -> bool:
     rounding). opp_coverage is compared STRICTLY (<= 1e-12): the kernel emits it as
     f64 (RowOut::opp_coverage) accumulated in the SAME order as the serial oracle's
     Python-float coverage, so the ratios are bit-identical, not merely close.
-    value/moves_left/moves_left_mask are exactly representable in f32 (value widens
-    losslessly; moves_left = 2*(ml/512)-1 is dyadic for integer ml), so exact
-    ``float() == float()`` holds.
+    value/moves_left_mask are exactly representable in f32 (value widens
+    losslessly), so exact ``float() == float()`` holds. moves_left is compared at
+    f32 precision: the serial oracle keeps it as a Python f64 (``2*min(1,ml/CAP)-1``)
+    while the Rust kernel emits f32, and with the v3 cap (CAP=209, NOT a power of 2)
+    the normalization is no longer dyadic, so the f64 and f32 forms differ in the
+    last bit. Both backends feed an identical f32 training tensor
+    (``batching.py`` casts ``moves_left`` to ``torch.float32``), so the load-bearing
+    value is identical — the test compares ``np.float32(a) == np.float32(b)``.
     """
     if a is None or b is None:
         return a is None and b is None
@@ -95,8 +100,19 @@ def _rows_equal(a: ExpandedRow | None, b: ExpandedRow | None) -> bool:
         and float(a.value) == float(b.value)
         and np.array_equal(a.stvalue, b.stvalue)
         and np.array_equal(a.stvalue_mask, b.stvalue_mask)
-        and float(a.moves_left) == float(b.moves_left)
+        # f32 precision: serial keeps moves_left as f64, rust emits f32; with the v3
+        # non-power-of-2 cap the two differ in the last bit, but both feed the same
+        # f32 training tensor (batching.py casts to float32), so compare at f32.
+        and np.float32(a.moves_left) == np.float32(b.moves_left)
         and float(a.moves_left_mask) == float(b.moves_left_mask)
+        # cell_q / cell_q_mask are scalar-assigned over the legal prefix (one action
+        # -> one cell, no accumulation), so the Rust kernel and the serial oracle must
+        # be BIT-identical — exact array_equal, not a tolerance. policy_surprise is a
+        # passed-through stored f32 scalar, so exact float() == float() holds too.
+        and a.cell_q.shape == b.cell_q.shape
+        and np.array_equal(a.cell_q, b.cell_q)
+        and np.array_equal(a.cell_q_mask, b.cell_q_mask)
+        and float(a.policy_surprise) == float(b.policy_surprise)
     )
 
 
@@ -116,6 +132,16 @@ def _describe_mismatch(i: int, sym: int, a: ExpandedRow, b: ExpandedRow) -> str:
     parts.append(f"pol={np.array_equal(a.policy, b.policy)}")
     parts.append(f"opp={np.array_equal(a.opp_policy, b.opp_policy)}")
     parts.append(f"cov s/r={a.opp_coverage}/{b.opp_coverage}")
+    parts.append(f"cell_q={np.array_equal(a.cell_q, b.cell_q)}")
+    parts.append(f"cell_q_mask={np.array_equal(a.cell_q_mask, b.cell_q_mask)}")
+    if not np.array_equal(a.cell_q, b.cell_q):
+        d = np.abs(a.cell_q.astype(np.float64) - b.cell_q.astype(np.float64))
+        idx = int(np.argmax(d))
+        parts.append(f"maxcellqΔ={float(d.max()):.3e}@{idx} s={a.cell_q[idx]} r={b.cell_q[idx]}")
+    if not np.array_equal(a.cell_q_mask, b.cell_q_mask):
+        diff = np.nonzero(a.cell_q_mask != b.cell_q_mask)[0]
+        parts.append(f"cellqmaskΔ@{diff[:8].tolist()}")
+    parts.append(f"ps s/r={a.policy_surprise}/{b.policy_surprise}")
     return " ".join(parts)
 
 
@@ -186,7 +212,10 @@ for a, b in zip(rows_s, rows_r):
             and np.array_equal(a.support.nbr, b.support.nbr)
             and np.array_equal(a.feats, b.feats)
             and np.array_equal(a.policy, b.policy)
-            and np.array_equal(a.opp_policy, b.opp_policy)):
+            and np.array_equal(a.opp_policy, b.opp_policy)
+            and np.array_equal(a.cell_q, b.cell_q)
+            and np.array_equal(a.cell_q_mask, b.cell_q_mask)
+            and float(a.policy_surprise) == float(b.policy_surprise)):
         ok = False; break
 print(f"RADIUS4 n={window.n} n_skip={n_skip} mask_equal={mask_equal} rows_equal={ok}")
 """
@@ -228,16 +257,22 @@ def test_offlegal_radius4_subprocess() -> None:
     probe = _RADIUS_PROBE.replace("__SAMPLES__", str(OFFLEGAL_SAMPLES))
     env = dict(os.environ)
     env["HEXFIELD_SUPPORT_RADIUS"] = "4"
+    # Run from THIS checkout's root (the repo containing this test) so the relative
+    # package paths resolve to the SAME hexfield kernel the parent imports — i.e. a
+    # git worktree exercises ITS OWN _rust.so, not whatever lives at a hard-coded
+    # build tree. (Previously cwd was pinned to /mnt/e/hexgt-katago, which silently
+    # tested a different checkout.)
+    repo_root = Path(__file__).resolve().parents[2]
     env["PYTHONPATH"] = os.pathsep.join(
         [
-            "packages/hexfield/python",
-            "packages/dense_cnn_restnet/python",
+            str(repo_root / "packages" / "hexfield" / "python"),
+            str(repo_root / "packages" / "dense_cnn_restnet" / "python"),
             env.get("PYTHONPATH", ""),
         ]
     )
     proc = subprocess.run(
         [sys.executable, "-c", probe],
-        cwd="/mnt/e/hexgt-katago",
+        cwd=str(repo_root),
         env=env,
         capture_output=True,
         text=True,

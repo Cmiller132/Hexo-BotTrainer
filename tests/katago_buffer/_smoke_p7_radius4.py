@@ -31,6 +31,9 @@ def rows_equal(a, b):
         and np.array_equal(a.policy, b.policy)
         and np.array_equal(a.opp_policy, b.opp_policy)
         and abs(float(a.opp_coverage) - float(b.opp_coverage)) <= 1e-12
+        and np.array_equal(a.cell_q, b.cell_q)
+        and np.array_equal(a.cell_q_mask, b.cell_q_mask)
+        and float(a.policy_surprise) == float(b.policy_surprise)
     )
 
 
