@@ -20,7 +20,7 @@ device = "cuda"
 search_visits = 512
 pcr_full_proportion = 0.33
 pcr_fast_visits = 128
-active_games = 96
+active_games = 128
 # c_puct sweep candidates to try: {1.0, 1.5, 2.0, 2.5} (knob only, no code change).
 c_puct = 1.5
 virtual_batch_size = 4
@@ -62,7 +62,7 @@ temperature_halflife_plies = 30.0
 root_policy_temperature = 1.05
 root_policy_temperature_early = 0.0
 root_policy_temperature_halflife = 0.0
-max_game_plies = 300
+max_game_plies = 256
 tss_enabled = true
 cache_max_states = 262144
 
