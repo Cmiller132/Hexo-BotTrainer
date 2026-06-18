@@ -54,6 +54,7 @@ SCALAR_COLS: tuple[str, ...] = (
     "phase",
     "value",
     "moves_left",
+    "policy_surprise",
     "first_q",
     "first_r",
     "first_present",
@@ -77,7 +78,7 @@ BLOCK_COLS: tuple[str, ...] = ("stvalue", "stvalue_mask")
 CSR_GROUPS: tuple[tuple[str, tuple[str, ...], bool], ...] = (
     ("hist_off", ("hist_qr",), True),
     ("hist_off", ("hist_owner", "hist_pidx"), False),
-    ("pol_off", ("pol_act", "pol_w"), False),
+    ("pol_off", ("pol_act", "pol_w", "q_pol_q"), False),
     ("opp_off", ("opp_act", "opp_w"), False),
     ("own_hot_off", ("own_hot_qr",), True),
     ("opp_hot_off", ("opp_hot_qr",), True),
@@ -122,6 +123,7 @@ class PackedRowView:
     phase: int
     value: float
     moves_left: float
+    policy_surprise: float
     first_q: int
     first_r: int
     first_present: int
@@ -135,6 +137,7 @@ class PackedRowView:
     # policy / opp-policy CSR
     pol_act: np.ndarray  # (P,) u32 view
     pol_w: np.ndarray  # (P,) f32 view
+    q_pol_q: np.ndarray  # (P,) f32 view; one child Q per recorded action (== pol_act)
     opp_act: np.ndarray  # (O,) u32 view
     opp_w: np.ndarray  # (O,) f32 view
     # standing-cell qr CSR (flat pair-packed i16 views)
@@ -176,6 +179,9 @@ class PackedRowView:
 
     def policy(self) -> tuple[tuple[int, float], ...]:
         return tuple((int(self.pol_act[k]), float(self.pol_w[k])) for k in range(self.pol_act.shape[0]))
+
+    def q_policy(self) -> tuple[tuple[int, float], ...]:
+        return tuple((int(self.pol_act[k]), float(self.q_pol_q[k])) for k in range(self.pol_act.shape[0]))
 
     def opp_policy(self) -> tuple[tuple[int, float], ...]:
         return tuple((int(self.opp_act[k]), float(self.opp_w[k])) for k in range(self.opp_act.shape[0]))
@@ -256,6 +262,7 @@ class PackedWindow:
             phase=int(c["phase"][i]),
             value=float(c["value"][i]),
             moves_left=float(c["moves_left"][i]),
+            policy_surprise=float(c["policy_surprise"][i]),
             first_q=int(c["first_q"][i]),
             first_r=int(c["first_r"][i]),
             first_present=int(c["first_present"][i]),
@@ -266,6 +273,7 @@ class PackedWindow:
             hist_pidx=c["hist_pidx"][h0:h1],
             pol_act=c["pol_act"][p0:p1],
             pol_w=c["pol_w"][p0:p1],
+            q_pol_q=c["q_pol_q"][p0:p1],
             opp_act=c["opp_act"][o0:o1],
             opp_w=c["opp_w"][o0:o1],
             own_hot_qr=qr_slice("own_hot"),
@@ -286,6 +294,7 @@ _SCALAR_DTYPES: dict[str, np.dtype] = {
     "phase": np.dtype(np.uint8),
     "value": np.dtype(np.float32),
     "moves_left": np.dtype(np.float32),
+    "policy_surprise": np.dtype(np.float32),
     "first_q": np.dtype(np.int16),
     "first_r": np.dtype(np.int16),
     "first_present": np.dtype(np.uint8),
@@ -296,6 +305,7 @@ _CSR_DTYPES: dict[str, np.dtype] = {
     "hist_pidx": np.dtype(np.uint16),
     "pol_act": np.dtype(np.uint32),
     "pol_w": np.dtype(np.float32),
+    "q_pol_q": np.dtype(np.float32),
     "opp_act": np.dtype(np.uint32),
     "opp_w": np.dtype(np.float32),
     "own_hot_qr": np.dtype(np.int16),

@@ -21,6 +21,7 @@ search_visits = 512
 pcr_full_proportion = 0.33
 pcr_fast_visits = 128
 active_games = 96
+# c_puct sweep candidates to try: {1.0, 1.5, 2.0, 2.5} (knob only, no code change).
 c_puct = 1.5
 virtual_batch_size = 4
 # flush_target must be ABOVE max in-flight (active_games*virtual_batch_size) so
@@ -57,6 +58,10 @@ policy_init_temperature = 1.4
 temperature = 1.0
 temperature_floor = 0.1
 temperature_halflife_plies = 30.0
+# Root-policy temperature: FLAT 1.05, no ramp (early=0/halflife=0 => scheduler holds 1.05 every ply).
+root_policy_temperature = 1.05
+root_policy_temperature_early = 0.0
+root_policy_temperature_halflife = 0.0
 max_game_plies = 256
 tss_enabled = true
 cache_max_states = 262144
@@ -71,9 +76,24 @@ cache_max_states = 262144
 # are written explicitly here so the fresh run is self-documenting.
 [model.config.training]
 batch_rows = 32
-learning_rate = 1e-3
+learning_rate = 3e-4
 weight_decay = 1e-4
-grad_clip = 1.0
+grad_clip = 5.0
+# Adaptive grad clip (#1): after clip_warmup_steps, clip at clip_c*EMA(pre-clip norm).
+adaptive_clip = true
+clip_c = 1.75
+clip_ema_decay = 0.99
+clip_warmup_steps = 50
+# Config-driven loss weights (#2); defaults mirror losses.py constants.
+policy_weight = 1.0
+value_weight = 1.0
+opp_policy_weight = 0.25
+short_term_value_weight = 0.1
+moves_left_weight = 0.1
+q_head_weight = 0.1
+# Policy-surprise self-CE reweight (#5).
+policy_surprise_uniform_fraction = 0.5
+policy_surprise_max_weight = 8.0
 warmup_steps = 0
 shuffle_min_rows = 20000
 shuffle_keep_target_rows = 300000

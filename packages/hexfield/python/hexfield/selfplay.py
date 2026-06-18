@@ -30,7 +30,12 @@ from .engine_facts import player_int
 from .features import record_phase, record_player, window_scan
 from .geometry import pack_action_id, unpack_action_id
 from .inference import HexfieldEvaluator
-from .samples import STV_HORIZONS, HexfieldSampleData, finalize_game_samples
+from .samples import (
+    STV_HORIZONS,
+    HexfieldSampleData,
+    _policy_surprise_kl,
+    finalize_game_samples,
+)
 from .shards import write_compact_shard
 
 
@@ -149,6 +154,17 @@ class ContinuousDriver:
             self.full_decisions += 1
             ids = np.frombuffer(bytes(payload["visit_policy_action_ids_bytes"]), dtype=np.uint32)
             weights = np.frombuffer(bytes(payload["visit_policy_weights_bytes"]), dtype=np.float32)
+            # Per-cell Q (one Q per recorded action, SAME set+order as the visit
+            # policy — Rust contract §3) feeds the train-only cell_q head.
+            qs = np.frombuffer(bytes(payload["visit_policy_q_bytes"]), dtype=np.float32)
+            # Policy-surprise = KL(visit ‖ root prior); reweights the self CE.
+            prior_ids = np.frombuffer(
+                bytes(payload["root_prior_policy_action_ids_bytes"]), dtype=np.uint32
+            )
+            prior_weights = np.frombuffer(
+                bytes(payload["root_prior_policy_weights_bytes"]), dtype=np.float32
+            )
+            surprise = _policy_surprise_kl(ids, weights, prior_ids, prior_weights)
             phase = record_phase(tape.ply)
             first_stone = (
                 (tape.records[-1][0], tape.records[-1][1]) if phase == "SecondStone" else None
@@ -168,6 +184,8 @@ class ContinuousDriver:
                 own_win=own_win,
                 opp_win=opp_win,
                 policy=tuple(zip((int(a) for a in ids), (float(w) for w in weights))),
+                q_policy=tuple(zip((int(a) for a in ids), (float(q) for q in qs))),
+                policy_surprise=float(surprise),
                 metadata={"pcr_full": True},
             )
             tape.pending.append((current, sample, float(payload["root_value"])))

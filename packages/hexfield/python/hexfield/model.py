@@ -225,6 +225,17 @@ class HexNodeConv(nn.Module):
         return out * mask.unsqueeze(-1)
 
 
+class LayerScale(nn.Module):
+    """Per-channel learned residual-branch scale (gamma), init 1e-4."""
+
+    def __init__(self, channels: int, init: float = 1e-4) -> None:
+        super().__init__()
+        self.gamma = nn.Parameter(torch.full((channels,), init))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x * self.gamma
+
+
 class ConvBlock(nn.Module):
     """Post-activation residual block (restnet `ResidualBlock` form, LN)."""
 
@@ -234,6 +245,7 @@ class ConvBlock(nn.Module):
         self.ln1 = nn.LayerNorm(channels)
         self.conv2 = HexNodeConv(channels, channels)
         self.ln2 = nn.LayerNorm(channels)
+        self.ls = LayerScale(channels)
 
     def forward(
         self, x: torch.Tensor, gather_idx: torch.Tensor, mask: torch.Tensor
@@ -241,7 +253,7 @@ class ConvBlock(nn.Module):
         m = mask.unsqueeze(-1)
         y = F.relu(self.ln1(self.conv1(x, gather_idx, mask))) * m
         y = self.ln2(self.conv2(y, gather_idx, mask)) * m
-        return F.relu(x + y)
+        return F.relu(x + self.ls(y))
 
 
 class RelPosAttention(nn.Module):
@@ -301,25 +313,27 @@ class AttnBlock(nn.Module):
         self.ln2 = nn.LayerNorm(channels)
         self.fc1 = nn.Linear(channels, MLP_RATIO * channels)
         self.fc2 = nn.Linear(MLP_RATIO * channels, channels)
+        self.ls_attn = LayerScale(channels)
+        self.ls_mlp = LayerScale(channels)
 
     def forward(
         self, seq: torch.Tensor, attn_bias: torch.Tensor, seq_mask: torch.Tensor
     ) -> torch.Tensor:
         m = seq_mask.unsqueeze(-1)
-        seq = seq + self.attn(self.ln1(seq), attn_bias) * m
-        seq = seq + self.fc2(F.gelu(self.fc1(self.ln2(seq)))) * m
+        seq = seq + self.ls_attn(self.attn(self.ln1(seq), attn_bias) * m)
+        seq = seq + self.ls_mlp(self.fc2(F.gelu(self.fc1(self.ln2(seq)))) * m)
         return seq
 
 
 class HexfieldNet(nn.Module):
-    """The full network: stem, C C C A C C A C A, LN_final, heads."""
+    """The full network: stem, C C C A C C C A C C A, LN_final, heads."""
 
     def __init__(self) -> None:
         super().__init__()
         c = CHANNELS
         self.stem = HexNodeConv(NUM_FEATURES, c)
         self.stem_ln = nn.LayerNorm(c)
-        self.conv_blocks = nn.ModuleList([ConvBlock(c) for _ in range(6)])
+        self.conv_blocks = nn.ModuleList([ConvBlock(c) for _ in range(8)])
         self.attn_blocks = nn.ModuleList([AttnBlock(c) for _ in range(3)])
         self.tokens = nn.Parameter(torch.empty(NUM_TOKENS, c))
         self.bias_table = nn.Parameter(torch.zeros(BIAS_ROWS, ATTENTION_HEADS))
@@ -331,12 +345,16 @@ class HexfieldNet(nn.Module):
         self.policy_head = nn.Linear(c, 1)
         self.opp_policy_conv = HexNodeConv(c, c)
         self.opp_policy_head = nn.Linear(c, 1)
+        # Train-only per-cell Q head (#4): emitted in forward() only, never serve.
+        self.cell_q_conv = HexNodeConv(c, c)
+        self.cell_q_head = nn.Linear(c, VALUE_BINS)
         self.value_reduction = nn.Linear(3 * c, c)
         self.value_head = nn.Linear(c, VALUE_BINS)
         self.aux_reduction = nn.Linear(3 * c, c)
         self.stv_heads = nn.ModuleDict(
             {str(h): nn.Linear(c, VALUE_BINS) for h in STV_HORIZONS}
         )
+        self.ml_reduction = nn.Linear(3 * c, c)  # moves_left's own reduction (tokens 4,5)
         self.moves_left_head = nn.Linear(c, VALUE_BINS)
 
         # Exact-offset LUT for the on-GPU pair-index build: (17*17,) long,
@@ -377,10 +395,12 @@ class HexfieldNet(nn.Module):
 
     def _init_weights(self) -> None:
         """trunc_normal(0.02) Linears; LN (1, 0); convs PyTorch default
-        (done in HexNodeConv); zero-init every residual-closing parameter
-        (each ConvBlock's ln2 gain; each AttnBlock's out_proj and fc2
-        weights) so every residual branch is the identity at step 0;
-        bias table zero (already); tokens trunc_normal(0.02)."""
+        (done in HexNodeConv); bias table zero (already); tokens
+        trunc_normal(0.02). Residual-branch identity at step 0 now comes from
+        LayerScale(init=1e-4) on every branch (ConvBlock.ls; AttnBlock
+        ls_attn/ls_mlp), so the explicit residual-closing zero-inits are gone.
+        LayerScale.gamma is neither Linear nor LayerNorm, so the generic loops
+        leave its 1e-4 fill untouched."""
 
         for module in self.modules():
             if isinstance(module, nn.Linear):
@@ -390,11 +410,6 @@ class HexfieldNet(nn.Module):
                 nn.init.ones_(module.weight)
                 nn.init.zeros_(module.bias)
         nn.init.trunc_normal_(self.tokens, std=0.02)
-        for block in self.conv_blocks:
-            nn.init.zeros_(block.ln2.weight)
-        for block in self.attn_blocks:
-            nn.init.zeros_(block.attn.out_proj.weight)
-            nn.init.zeros_(block.fc2.weight)
 
     def set_attention_impl(self, impl: str) -> None:
         for block in self.attn_blocks:
@@ -521,9 +536,11 @@ class HexfieldNet(nn.Module):
         tokens, x = seq[:, :NUM_TOKENS], seq[:, NUM_TOKENS:]
         x = self.conv_blocks[3](x, gather_idx, mask)
         x = self.conv_blocks[4](x, gather_idx, mask)
+        x = self.conv_blocks[5](x, gather_idx, mask)
         seq = self.attn_blocks[1](torch.cat([tokens, x], dim=1), attn_bias, seq_mask)
         tokens, x = seq[:, :NUM_TOKENS], seq[:, NUM_TOKENS:]
-        x = self.conv_blocks[5](x, gather_idx, mask)
+        x = self.conv_blocks[6](x, gather_idx, mask)
+        x = self.conv_blocks[7](x, gather_idx, mask)
         seq = self.attn_blocks[2](torch.cat([tokens, x], dim=1), attn_bias, seq_mask)
         seq = self.ln_final(seq)
         tokens, x = seq[:, :NUM_TOKENS], seq[:, NUM_TOKENS:]
@@ -555,10 +572,14 @@ class HexfieldNet(nn.Module):
                 F.relu(self.value_reduction(self._value_input(tokens, 0, 1, pooled)))
             ),
         }
+        out["cell_q"] = self._cell_q_logits(
+            self.cell_q_conv, self.cell_q_head, cells, gather_idx, mask
+        )
         aux = F.relu(self.aux_reduction(self._value_input(tokens, 2, 3, pooled)))
         for horizon, head in self.stv_heads.items():
             out[f"stvalue_{horizon}"] = head(aux)
-        out["moves_left"] = self.moves_left_head(aux)
+        ml = F.relu(self.ml_reduction(self._value_input(tokens, 4, 5, pooled)))
+        out["moves_left"] = self.moves_left_head(ml)
         return out
 
     def forward_policy_value(
@@ -584,8 +605,8 @@ class HexfieldNet(nn.Module):
             ),
         }
         if request_moves_left:
-            aux = F.relu(self.aux_reduction(self._value_input(tokens, 2, 3, pooled)))
-            out["moves_left"] = self.moves_left_head(aux)
+            ml = F.relu(self.ml_reduction(self._value_input(tokens, 4, 5, pooled)))
+            out["moves_left"] = self.moves_left_head(ml)
         return out
 
     @staticmethod
@@ -604,3 +625,14 @@ class HexfieldNet(nn.Module):
     ) -> torch.Tensor:
         y = F.relu(conv(cells, gather_idx, mask))
         return head(y).squeeze(-1) * mask  # (B, Npad); legality is structural
+
+    @staticmethod
+    def _cell_q_logits(
+        conv: HexNodeConv,
+        head: nn.Linear,
+        cells: torch.Tensor,
+        gather_idx: torch.Tensor,
+        mask: torch.Tensor,
+    ) -> torch.Tensor:
+        y = F.relu(conv(cells, gather_idx, mask))
+        return head(y) * mask.unsqueeze(-1)  # (B, Npad, VALUE_BINS); pad rows zeroed

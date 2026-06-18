@@ -39,9 +39,11 @@ class HexfieldSampleData:
     opp_win: tuple[tuple[int, int], ...]
     policy: tuple[tuple[int, float], ...]
     opp_policy: tuple[tuple[int, float], ...] = ()
+    q_policy: tuple[tuple[int, float], ...] = ()  # (action_id, child Q); parallel to policy
     value: float = 0.0
     short_term_value: tuple[tuple[int, float], ...] = ()
     moves_left: float = -1.0
+    policy_surprise: float = 0.0  # KL(visit ‖ root prior); reweights the self policy CE
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def facts(self) -> PositionFacts:
@@ -61,6 +63,28 @@ def _winner_value(winner: int | None, player: int) -> float:
     if winner is None:
         return 0.0
     return 1.0 if winner == player else -1.0
+
+
+def _policy_surprise_kl(action_ids, weights, prior_ids, prior_weights, *, eps: float = 1e-8) -> float:
+    """KL(visit ‖ prior); visit normalized to sum 1; prior already ~sum 1.
+
+    Returns ``max(0, kl)``, or ``0.0`` if non-finite. Mirrors restnet
+    ``replay._policy_kl`` (self-policy only). Imported by ``selfplay.py`` to
+    record the per-row policy-surprise scalar at decision time; the in-loss
+    weight is recomputed at collate from the recorded scalar.
+    """
+    w = np.asarray(weights, dtype=np.float64)
+    s = float(w.sum())
+    if s <= 0.0:
+        return 0.0
+    prior_map = {int(a): float(p) for a, p in zip(prior_ids, prior_weights)}
+    kl = 0.0
+    for a, tw in zip((int(x) for x in action_ids), (w / s).tolist()):
+        if tw <= 0.0:
+            continue
+        pw = max(prior_map.get(a, 0.0), eps)
+        kl += tw * float(np.log((tw + eps) / pw))
+    return max(0.0, kl) if np.isfinite(kl) else 0.0
 
 
 def _future_opponent_policy(
@@ -174,6 +198,9 @@ class ExpandedRow:
     stvalue_mask: np.ndarray  # (H,) f32
     moves_left: float  # normalized to [-1, 1]; 0 when masked
     moves_left_mask: float
+    cell_q: np.ndarray  # (L,) f32 per-cell Q target over the legal prefix; 0 where absent
+    cell_q_mask: np.ndarray  # (L,) f32 presence mask (Q=0.0 is a valid target)
+    policy_surprise: float  # KL(visit ‖ prior); collate turns it into the self-CE weight
 
 
 def expand_sample(
@@ -224,6 +251,20 @@ def expand_sample(
             opp_kept += w
     opp_coverage = (opp_kept / opp_total) if opp_total > 0.0 else 1.0
 
+    # Per-cell Q target: scalar child Q projected onto THIS row's legal set + a
+    # presence mask (mirrors the opp_policy projection but as scalar value+mask
+    # rather than a probability distribution). Off-legal Q is dropped, like opp.
+    cell_q = np.zeros(legal_count, dtype=np.float32)
+    cell_q_mask = np.zeros(legal_count, dtype=np.float32)
+    for action_id, q in sample.q_policy:
+        qv = float(q)
+        if not np.isfinite(qv) or qv < -1.0 or qv > 1.0:
+            raise ValueError("cell_q targets must be finite and in [-1, 1]")
+        slot = _legal_slot(sup, symmetry, int(action_id))
+        if slot is not None:
+            cell_q[slot] = qv  # SCALAR assign (one action -> one distinct cell)
+            cell_q_mask[slot] = 1.0
+
     horizons = tuple(int(h) for h in horizons)
     stvalue = np.zeros(len(horizons), dtype=np.float32)
     stvalue_mask = np.zeros(len(horizons), dtype=np.float32)
@@ -252,6 +293,9 @@ def expand_sample(
         stvalue_mask=stvalue_mask,
         moves_left=moves_left,
         moves_left_mask=moves_left_mask,
+        cell_q=cell_q,
+        cell_q_mask=cell_q_mask,
+        policy_surprise=float(sample.policy_surprise),
     )
 
 

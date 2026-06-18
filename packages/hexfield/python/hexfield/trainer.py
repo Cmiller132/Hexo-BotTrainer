@@ -55,6 +55,7 @@ from .batching import (
     PAD_QUANTUM,
     collate_training,
     pair_budget_microbuckets,
+    policy_surprise_weights,
     split_stvalue_columns,
     step_global_denominators,
 )
@@ -112,6 +113,12 @@ class HexfieldTrainer:
         self.device = torch.device(config.device)
         self.scaler = torch.amp.GradScaler(enabled=self.device.type == "cuda")
         self.global_step = 0
+        # Adaptive grad-clip EMA of the pre-clip grad-norm (v3 #1). Cross-epoch,
+        # NOT checkpointed — seeded from the first observed norm and updated every
+        # step (including warmup) so the post-warmup threshold has a value to use.
+        self._grad_norm_ema: float | None = None
+        # Static param-group partition for per-group grad-norm logging (v3 #1).
+        self._grad_norm_groups = self._build_grad_norm_groups()
         # Persisted KataGo-style train-bucket governor + window bookkeeping
         # (PLAN §6/M1). Serialized into the checkpoint meta by the saver and
         # restored by the loader on the RESUME branch only. Starts fresh here.
@@ -171,6 +178,42 @@ class HexfieldTrainer:
             self.close()
         except Exception:  # noqa: BLE001 - finalizer must never raise
             pass
+
+    def _build_grad_norm_groups(self) -> dict[str, list[torch.nn.Parameter]]:
+        """Partition model params into trunk-conv / trunk-attn / heads (v3 #1).
+
+        Used for per-group pre-clip grad-norm logging. ``stem*`` / ``conv_blocks*``
+        (incl. the +2 conv blocks and their LayerScale ``ls.gamma``) -> trunk_conv;
+        ``attn_blocks*`` + the trunk ``tokens`` / relative-position ``bias_table``
+        -> trunk_attn; everything else (reductions + heads, incl. ml_reduction /
+        cell_q_*) -> heads.
+        """
+        groups: dict[str, list[torch.nn.Parameter]] = {
+            "trunk_conv": [],
+            "trunk_attn": [],
+            "heads": [],
+        }
+        for name, p in self.model.named_parameters():
+            if name.startswith("stem") or name.startswith("conv_blocks"):
+                groups["trunk_conv"].append(p)
+            elif name.startswith("attn_blocks") or name in ("tokens", "bias_table"):
+                groups["trunk_attn"].append(p)
+            else:
+                groups["heads"].append(p)
+        return groups
+
+    def _accumulate_group_grad_norms(self, totals: dict[str, float]) -> None:
+        """Add this step's per-group L2 grad-norm into ``totals`` (PRE-clip).
+
+        Called after ``unscale_`` and BEFORE ``clip_grad_norm_`` so each group's
+        true pre-clip norm is captured; averaged over optimizer steps at report.
+        """
+        for gname, params in self._grad_norm_groups.items():
+            sq = 0.0
+            for p in params:
+                if p.grad is not None:
+                    sq += float(p.grad.detach().norm(2).item()) ** 2
+            totals[gname] = totals.get(gname, 0.0) + (sq ** 0.5)
 
     def _update_train_bucket(self, total_rows: int, window_start: int) -> None:
         """Accrue / clamp the train-bucket reuse governor (PLAN §3.5).
@@ -432,6 +475,8 @@ class HexfieldTrainer:
         batch_rows = self.config.training.batch_rows
         comp_totals: dict[str, float] = {}
         grad_norms: list[float] = []
+        clip_values: list[float] = []
+        group_norm_totals: dict[str, float] = {}
         steps = 0
         started = time.time()
         # Radius transition: tolerate (skip) replay-buffer samples whose policy
@@ -491,14 +536,35 @@ class HexfieldTrainer:
             expanded = ordered_rows[start : start + batch_rows]
             if not expanded:
                 continue
-            denoms = step_global_denominators(expanded, STV_HORIZONS)
+            tcfg = self.config.training
+            # Step-global denominators (mean-over-rows / -cells over the nominal
+            # batch, incl. cell_q + the policy-surprise self-CE weight sum, v3
+            # #4/#5). The matching per-row self-CE weights are computed ONCE here
+            # over the SAME nominal batch and keyed by id(row), so collate packs
+            # the correct value even though pair_budget_microbuckets may reorder
+            # the rows within the batch (mean-over-rows preserved at step scope).
+            denoms = step_global_denominators(
+                expanded, STV_HORIZONS,
+                policy_surprise_uniform_fraction=tcfg.policy_surprise_uniform_fraction,
+                policy_surprise_max_weight=tcfg.policy_surprise_max_weight,
+            )
+            surprise_weights, _ = policy_surprise_weights(
+                [row.policy_surprise for row in expanded],
+                tcfg.policy_surprise_uniform_fraction,
+                tcfg.policy_surprise_max_weight,
+            )
+            weight_by_row = {id(r): w for r, w in zip(expanded, surprise_weights)}
             self.optimizer.zero_grad(set_to_none=True)
             for bucket in pair_budget_microbuckets(expanded, quantize=PAD_QUANTUM):
                 # Same quantum the budget split assumed (PAD_QUANTUM), so the
                 # live (B,4,S,S) transient honours PAIR_BUDGET — see §6.3.
                 pad_to = -(-max(r.support.num_nodes for r in bucket) // PAD_QUANTUM) * PAD_QUANTUM
                 batch = split_stvalue_columns(
-                    collate_training(bucket, pad_to=pad_to), STV_HORIZONS
+                    collate_training(
+                        bucket, pad_to=pad_to,
+                        row_weights=[weight_by_row[id(r)] for r in bucket],
+                    ),
+                    STV_HORIZONS,
                 )
                 batch = {
                     k: v.to(self.device, non_blocking=True) if isinstance(v, torch.Tensor) else v
@@ -509,7 +575,16 @@ class HexfieldTrainer:
                     enabled=self.device.type == "cuda",
                 ):
                     out = self.model(batch["feats"], batch["nbr"], batch["mask"], batch["coords"])
-                loss, comps = hexfield_loss(out, batch, denominators=denoms)
+                loss, comps = hexfield_loss(
+                    out, batch,
+                    policy_weight=tcfg.policy_weight,
+                    value_weight=tcfg.value_weight,
+                    opp_policy_weight=tcfg.opp_policy_weight,
+                    short_term_value_weight=tcfg.short_term_value_weight,
+                    moves_left_weight=tcfg.moves_left_weight,
+                    q_head_weight=tcfg.q_head_weight,
+                    denominators=denoms,
+                )
                 if not torch.isfinite(loss):
                     raise RuntimeError(
                         f"non-finite loss at epoch {epoch} step {steps}: "
@@ -519,11 +594,32 @@ class HexfieldTrainer:
                 for key, val in comps.items():
                     comp_totals[key] = comp_totals.get(key, 0.0) + float(val.detach())
             self.scaler.unscale_(self.optimizer)
-            norm = torch.nn.utils.clip_grad_norm_(
-                self.model.parameters(), self.config.training.grad_clip
-            )
+            # Adaptive grad-clip (v3 #1): during warmup (or adaptive_clip off, or
+            # before any EMA exists) use the static grad_clip; after warmup clip at
+            # clip_c * EMA(pre-clip grad-norm). The per-group norms are accumulated
+            # BEFORE clipping so they reflect the true pre-clip magnitudes.
+            tcfg = self.config.training
+            if (
+                not tcfg.adaptive_clip
+                or self.global_step < tcfg.clip_warmup_steps
+                or self._grad_norm_ema is None
+            ):
+                clip_value = float(tcfg.grad_clip)
+            else:
+                clip_value = float(tcfg.clip_c) * float(self._grad_norm_ema)
+            self._accumulate_group_grad_norms(group_norm_totals)
+            norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), clip_value)
             if torch.isfinite(norm):
                 grad_norms.append(float(norm))
+                clip_values.append(clip_value)
+                # Update the pre-clip-norm EMA every step (warmup included) so the
+                # post-warmup adaptive threshold is seeded.
+                d = float(tcfg.clip_ema_decay)
+                self._grad_norm_ema = (
+                    float(norm)
+                    if self._grad_norm_ema is None
+                    else d * self._grad_norm_ema + (1.0 - d) * float(norm)
+                )
             self.scaler.step(self.optimizer)
             self.scaler.update()
             steps += 1
@@ -543,6 +639,11 @@ class HexfieldTrainer:
 
         stashed = self._last_select.get(epoch, {})
         grads = np.asarray(grad_norms or [0.0])
+        # clip_fraction vs the EFFECTIVE per-step clip threshold (static during
+        # warmup, adaptive after); aligned positionally to the recorded norms.
+        clips = np.asarray(clip_values or [self.config.training.grad_clip])
+        n_clip = min(len(grads), len(clips))
+        clip_fraction = float((grads[:n_clip] > clips[:n_clip]).mean()) if n_clip else 0.0
         result = {
             "status": "completed",
             "epoch": epoch,
@@ -558,7 +659,13 @@ class HexfieldTrainer:
             **{f"loss_{k}": v / max(steps, 1) for k, v in comp_totals.items()},
             "grad_norm_mean": float(grads.mean()),
             "grad_norm_p95": float(np.percentile(grads, 95)),
-            "clip_fraction": float((grads > self.config.training.grad_clip).mean()),
+            "clip_fraction": clip_fraction,
+            "clip_value_mean": float(clips.mean()),
+            "grad_norm_ema": float(self._grad_norm_ema) if self._grad_norm_ema is not None else 0.0,
+            **{
+                f"grad_norm_{g}": float(group_norm_totals.get(g, 0.0) / max(steps, 1))
+                for g in ("trunk_conv", "trunk_attn", "heads")
+            },
             "amp_scale": float(self.scaler.get_scale()) if self.device.type == "cuda" else None,
             # New Phase-5 diagnostics (PLAN §6/§7/§9/S2).
             "reuse_ratio": float(stashed.get("reuse_ratio", 0.0)),

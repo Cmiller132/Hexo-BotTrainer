@@ -68,6 +68,7 @@ _RUST_SCALAR_COLS = (
     "phase",
     "value",
     "moves_left",
+    "policy_surprise",
     "first_q",
     "first_r",
     "first_present",
@@ -79,6 +80,7 @@ _RUST_CSR_DATA = (
     "hist_pidx",
     "pol_act",
     "pol_w",
+    "q_pol_q",
     "opp_act",
     "opp_w",
     "own_hot_qr",
@@ -146,9 +148,11 @@ def _row_view_to_sample(view: PackedRowView) -> HexfieldSampleData:
         opp_win=view.opp_win(),
         policy=view.policy(),
         opp_policy=view.opp_policy(),
+        q_policy=view.q_policy(),
         value=view.value,
         short_term_value=view.short_term_value(),
         moves_left=view.moves_left,
+        policy_surprise=view.policy_surprise,
     )
 
 
@@ -311,6 +315,10 @@ def _reassemble_rust_rows(
     feats = np.frombuffer(bytes(result["feats"]), dtype=np.float32, count=NUM_FEATURES * total_nodes).reshape(-1, NUM_FEATURES)
     policy = np.frombuffer(bytes(result["policy"]), dtype=np.float32, count=total_legal)
     opp_policy = np.frombuffer(bytes(result["opp_policy"]), dtype=np.float32, count=total_legal)
+    # Per-cell Q target + presence mask follow the SAME pol_off slices as policy.
+    cell_q = np.frombuffer(bytes(result["cell_q"]), dtype=np.float32, count=total_legal)
+    cell_q_mask = np.frombuffer(bytes(result["cell_q_mask"]), dtype=np.float32, count=total_legal)
+    policy_surprise = np.frombuffer(bytes(result["policy_surprise"]), dtype=np.float32, count=r)
     # opp_coverage is f64 (matches the serial oracle's Python-float coverage exactly,
     # so a strict 1e-12 parity check holds — see replay_expand.rs RowOut::opp_coverage).
     opp_coverage = np.frombuffer(bytes(result["opp_coverage"]), dtype=np.float64, count=r)
@@ -354,6 +362,9 @@ def _reassemble_rust_rows(
                 stvalue_mask=stvalue_mask[k].copy(),
                 moves_left=float(moves_left[k]),
                 moves_left_mask=float(moves_left_mask[k]),
+                cell_q=cell_q[pa:pb].copy(),
+                cell_q_mask=cell_q_mask[pa:pb].copy(),
+                policy_surprise=float(policy_surprise[k]),
             )
         )
     return rows, valid

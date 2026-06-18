@@ -68,6 +68,21 @@ class TrainingSection:
     learning_rate: float = 1e-3
     weight_decay: float = 1e-4
     grad_clip: float = 1.0
+    # --- Adaptive grad-clip (v3 #1) ------------------------------------------
+    adaptive_clip: bool = True
+    clip_c: float = 1.75
+    clip_ema_decay: float = 0.99
+    clip_warmup_steps: int = 50
+    # --- Config-driven loss weights (v3 #2); defaults = losses.py constants ---
+    policy_weight: float = 1.0
+    value_weight: float = 1.0
+    opp_policy_weight: float = 0.25
+    short_term_value_weight: float = 0.1
+    moves_left_weight: float = 0.1
+    q_head_weight: float = 0.1
+    # --- Policy-surprise self-CE reweight (v3 #5) ----------------------------
+    policy_surprise_uniform_fraction: float = 0.5
+    policy_surprise_max_weight: float = 8.0
     warmup_steps: int = 0  # fresh-init runs warm-start from the BC prefit
     shuffle_keep_target_rows: int = 300_000
     # KataGo / dense_cnn_restnet replay-buffer port (PLAN §6/§7). Defaults are

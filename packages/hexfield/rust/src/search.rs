@@ -1896,11 +1896,13 @@ fn build_search_result_payloads(
         let result = PyDict::new(py);
         let root = search.root();
         let baseline = baselines.and_then(|items| items.get(index));
-        let (policy_action_ids, policy_weights, policy_total) = visit_policy(root, baseline);
-        let (export_action_ids, export_weights) = if forced_playout_k > 0.0 {
+        let (policy_action_ids, policy_weights, _policy_q, policy_total) =
+            visit_policy(root, baseline);
+        let (export_action_ids, export_weights, export_q) = if forced_playout_k > 0.0 {
             pruned_visit_policy(root, baseline, forced_playout_k, c_puct)
         } else {
-            (policy_action_ids.clone(), policy_weights.clone())
+            let (ids, w, q, _t) = visit_policy(root, baseline);
+            (ids, w, q)
         };
         let (root_prior_action_ids, root_prior_weights) = root_prior_policy(root);
         let guarded_weights = if search.tss_enabled {
@@ -1939,6 +1941,7 @@ fn build_search_result_payloads(
         };
         result.set_item("visit_policy_action_ids_bytes", to_bytes(&export_action_ids))?;
         result.set_item("visit_policy_weights_bytes", to_bytes_f32(&export_weights))?;
+        result.set_item("visit_policy_q_bytes", to_bytes_f32(&export_q))?;
         result.set_item("visit_policy_count", export_action_ids.len())?;
         result.set_item(
             "root_prior_policy_action_ids_bytes",
@@ -2254,7 +2257,7 @@ fn select_search_action(
     temperature: f32,
     seed: u64,
 ) -> PyResult<Option<PackedCoord>> {
-    let (action_ids, weights, _total) = visit_policy(search.root(), baseline);
+    let (action_ids, weights, _q, _total) = visit_policy(search.root(), baseline);
     let guarded = if search.tss_enabled {
         tactical_guard_weights(&search.root_state, &action_ids, &weights)
     } else {
@@ -2314,7 +2317,7 @@ fn select_action_with_lcb(
 fn visit_policy(
     root: &RustNode,
     baseline: Option<&HashMap<PackedCoord, u32>>,
-) -> (Vec<PackedCoord>, Vec<f32>, u32) {
+) -> (Vec<PackedCoord>, Vec<f32>, Vec<f32>, u32) {
     // Compute each edge's delta visits ONCE (edge_delta_visits is a HashMap
     // lookup when baseline is Some) and reuse the cached deltas for both the
     // total and the per-edge weights. Value-identical to the prior two-pass
@@ -2327,6 +2330,7 @@ fn visit_policy(
     let policy_total: u32 = deltas.iter().copied().sum();
     let mut policy_action_ids = Vec::with_capacity(root.edges.len());
     let mut policy_weights = Vec::with_capacity(root.edges.len());
+    let mut policy_q = Vec::with_capacity(root.edges.len());
     for (edge, &visits) in root.edges.iter().zip(deltas.iter()) {
         if baseline.is_some() && visits == 0 {
             continue;
@@ -2338,8 +2342,9 @@ fn visit_policy(
         };
         policy_action_ids.push(edge.action_id);
         policy_weights.push(weight);
+        policy_q.push(edge.value());
     }
-    (policy_action_ids, policy_weights, policy_total)
+    (policy_action_ids, policy_weights, policy_q, policy_total)
 }
 
 fn edge_delta_visits(edge: &RustEdge, baseline: Option<&HashMap<PackedCoord, u32>>) -> u32 {
@@ -2354,7 +2359,7 @@ fn pruned_visit_policy(
     baseline: Option<&HashMap<PackedCoord, u32>>,
     forced_playout_k: f32,
     c_puct: f32,
-) -> (Vec<PackedCoord>, Vec<f32>) {
+) -> (Vec<PackedCoord>, Vec<f32>, Vec<f32>) {
     let edges = &root.edges;
     let deltas: Vec<u32> = edges
         .iter()
@@ -2374,19 +2379,21 @@ fn pruned_visit_policy(
     );
     let total: u32 = pruned.iter().sum();
     if total == 0 {
-        let (ids, weights, _total) = visit_policy(root, baseline);
-        return (ids, weights);
+        let (ids, weights, q, _total) = visit_policy(root, baseline);
+        return (ids, weights, q);
     }
     let mut out_ids = Vec::with_capacity(edges.len());
     let mut weights = Vec::with_capacity(edges.len());
+    let mut out_q = Vec::with_capacity(edges.len());
     for (index, edge) in edges.iter().enumerate() {
         if pruned[index] == 0 {
             continue;
         }
         out_ids.push(edge.action_id);
         weights.push(pruned[index] as f32 / total as f32);
+        out_q.push(edge.value());
     }
-    (out_ids, weights)
+    (out_ids, weights, out_q)
 }
 
 fn prune_forced_delta_counts(

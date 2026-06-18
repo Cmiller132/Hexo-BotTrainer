@@ -87,25 +87,67 @@ def collate_rows(
     }
 
 
+def policy_surprise_weights(
+    surprises: list[float], uniform_fraction: float, max_weight: float
+) -> tuple[list[float], float]:
+    """Per-row self-policy CE weights from KataGo policy-surprise (spec §5/§10.1).
+
+    ``weight_g = uniform_fraction + (1 - uniform_fraction) * n * surprise_g / Σsurprise``
+    clamped to ``max_weight``. Mean-1 by construction when no clamp fires (the
+    normalization preserves mean-over-ROWS). All-zero surprise ⇒ every weight 1.0.
+    Returns ``(weights, Σweights)``; the sum is the step-global self-CE denominator.
+    """
+    n = float(len(surprises))
+    s = [max(0.0, float(x)) for x in surprises]
+    total = sum(s)
+    if total > 0.0:
+        kl_frac = 1.0 - uniform_fraction
+        w = [min(max_weight, uniform_fraction + kl_frac * n * x / total) for x in s]
+    else:
+        w = [1.0] * len(s)
+    return w, float(sum(w))
+
+
 def collate_training(
-    rows: list[ExpandedRow], pad_to: int | None = None
+    rows: list[ExpandedRow],
+    pad_to: int | None = None,
+    *,
+    row_weights: list[float] | None = None,
 ) -> dict[str, torch.Tensor]:
-    """Model batch + legal-prefix targets for one (micro-)batch of rows."""
+    """Model batch + legal-prefix targets for one (micro-)batch of rows.
+
+    ``row_weights`` (when given) is the precomputed per-row self-policy CE weight
+    for THIS bucket's rows, sliced from the whole-nominal-batch weight vector by
+    the caller (the weight is a function of the whole batch's surprise total, so
+    it cannot be recomputed from the bucket alone — spec §10.4). ``None`` packs
+    all-ones (legacy/standalone callers stay byte-identical).
+    """
 
     batch = collate_rows([(row.support, row.feats) for row in rows], pad_to=pad_to)
     npad = batch["feats"].shape[1]
     b = len(rows)
     policy = torch.zeros(b, npad, dtype=torch.float32)
     opp = torch.zeros(b, npad, dtype=torch.float32)
+    cell_q = torch.zeros(b, npad, dtype=torch.float32)
+    cell_q_mask = torch.zeros(b, npad, dtype=torch.float32)
     for g, row in enumerate(rows):
         n = row.policy.shape[0]
         policy[g, :n] = torch.from_numpy(row.policy)
         opp[g, :n] = torch.from_numpy(row.opp_policy)
+        cell_q[g, :n] = torch.from_numpy(row.cell_q)  # n == row.cell_q.shape[0]
+        cell_q_mask[g, :n] = torch.from_numpy(row.cell_q_mask)
+    if row_weights is None:
+        weights = [1.0] * b
+    else:
+        weights = list(row_weights)
     h = rows[0].stvalue.shape[0]
     batch.update(
         {
             "policy": policy,
             "opp_policy": opp,
+            "cell_q": cell_q,
+            "cell_q_mask": cell_q_mask,
+            "policy_ce_weight": torch.tensor(weights, dtype=torch.float32),
             "opp_coverage": torch.tensor([row.opp_coverage for row in rows]),
             "value": torch.tensor([row.value for row in rows], dtype=torch.float32),
             "stvalue": torch.stack(
@@ -138,7 +180,11 @@ def split_stvalue_columns(
 
 
 def step_global_denominators(
-    rows: list[ExpandedRow], horizons: tuple[int, ...]
+    rows: list[ExpandedRow],
+    horizons: tuple[int, ...],
+    *,
+    policy_surprise_uniform_fraction: float = 0.5,
+    policy_surprise_max_weight: float = 8.0,
 ) -> dict[str, float]:
     """Per-head denominators over the WHOLE nominal batch (spec §6.3)."""
 
@@ -148,6 +194,16 @@ def step_global_denominators(
             sum(1.0 for row in rows if row.stvalue_mask[col] > 0)
         )
     denoms["moves_left"] = float(sum(row.moves_left_mask for row in rows))
+    # cell_q: total masked-cell count (mean-over-contributing-cells, spec §10.3).
+    denoms["cell_q"] = float(sum(float(row.cell_q_mask.sum()) for row in rows))
+    # Self-policy CE weight sum over the whole nominal batch (mean-over-ROWS
+    # denominator for the surprise-weighted CE, spec §10.3/§12.2).
+    _w, wsum = policy_surprise_weights(
+        [row.policy_surprise for row in rows],
+        policy_surprise_uniform_fraction,
+        policy_surprise_max_weight,
+    )
+    denoms["policy_ce_weight_sum"] = wsum
     return denoms
 
 

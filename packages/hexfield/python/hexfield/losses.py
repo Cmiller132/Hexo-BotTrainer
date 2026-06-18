@@ -28,6 +28,7 @@ VALUE_WEIGHT = 1.0
 OPP_POLICY_WEIGHT = 0.25
 SHORT_TERM_VALUE_WEIGHT = 0.1
 MOVES_LEFT_WEIGHT = 0.1
+Q_HEAD_WEIGHT = 0.1
 
 
 def _at_least_fp32(x: torch.Tensor) -> torch.Tensor:
@@ -93,6 +94,8 @@ def segment_policy_ce(
     *,
     allow_zero_rows: bool = False,
     denominator: float | None = None,
+    row_weight: torch.Tensor | None = None,
+    weight_denominator: float | None = None,
 ) -> torch.Tensor:
     """Soft CE over each row's legal prefix; mean over rows.
 
@@ -142,7 +145,11 @@ def segment_policy_ce(
     per_row = torch.zeros(b, device=logits.device, dtype=flat_logits.dtype)
     per_row = per_row.index_add(0, row_ids, weighted).neg()
 
-    denom = float(b) if denominator is None else float(denominator)
+    if row_weight is not None:
+        per_row = per_row * row_weight.to(device=per_row.device, dtype=per_row.dtype)
+        denom = float(b) if weight_denominator is None else float(weight_denominator)
+    else:
+        denom = float(b) if denominator is None else float(denominator)
     return per_row.sum() / denom
 
 
@@ -197,6 +204,7 @@ def hexfield_loss(
     opp_policy_weight: float = OPP_POLICY_WEIGHT,
     short_term_value_weight: float = SHORT_TERM_VALUE_WEIGHT,
     moves_left_weight: float = MOVES_LEFT_WEIGHT,
+    q_head_weight: float = Q_HEAD_WEIGHT,
     denominators: Mapping[str, float] | None = None,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """Total = 1.0*policy + 1.0*value + 0.25*opp + 0.1*sum(stv) + 0.1*ml.
@@ -212,7 +220,12 @@ def hexfield_loss(
     components: dict[str, torch.Tensor] = {}
 
     components["policy"] = segment_policy_ce(
-        outputs["policy"], batch["legal_counts"], batch["policy"], denominator=rows
+        outputs["policy"],
+        batch["legal_counts"],
+        batch["policy"],
+        row_weight=batch.get("policy_ce_weight"),
+        weight_denominator=denoms.get("policy_ce_weight_sum"),
+        denominator=rows,
     )
     components["value"] = binned_value_loss(
         outputs["value"], batch["value"], denominator=rows
@@ -250,6 +263,15 @@ def hexfield_loss(
             denominator=denoms.get("moves_left"),
         )
         total = total + moves_left_weight * components["moves_left"]
+
+    if "cell_q" in outputs and "cell_q" in batch:
+        components["cell_q"] = binned_value_loss(
+            outputs["cell_q"],
+            batch["cell_q"],
+            mask=batch["cell_q_mask"],
+            denominator=denoms.get("cell_q"),
+        )
+        total = total + q_head_weight * components["cell_q"]
 
     components["total"] = total
     return total, components
