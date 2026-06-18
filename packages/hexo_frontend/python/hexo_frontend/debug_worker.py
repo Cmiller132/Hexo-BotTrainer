@@ -17,7 +17,10 @@ Response: {"id": int, "ok": true, "result": {...}}  |  {"id": int, "ok": false, 
 Ops:
   ping        -> {"pong": true}
   info        {checkpoint}            -> checkpoint provenance (graft, epoch, ...)
+                                          (meta.has_cell_q flags the v3 cell_q head)
   analyze     {checkpoint, action_ids, n?, planes?} -> all model heads for the position
+                                          (+ cell_q: per-legal-cell decoded Q rows
+                                           sorted qv desc, or null; meta.has_cell_q)
   search      {checkpoint, action_ids, visits?, c_puct?, n?, seed?} -> fresh CPU MCTS
   reeval      {checkpoint, sequences:[[aid,...],...], n?} -> scalar value per sequence
                                           (value-trajectory chart; one forward each)
@@ -30,6 +33,10 @@ Ops:
                                           (no checkpoint; skips the model load)
   game_eval   {checkpoint, action_ids, plies:[int], npz?, winner?, n?} ->
                                           per-ply reeval/KL/top-1 sweep chunk
+                                          (+ per-ply played_q/best_q/regret/
+                                           q_best_aid/q_best_match/missed_near_win
+                                           for v3 cell_q lineages, else null; plus
+                                           top-level regret_blunder_threshold)
 
 Models are cached LRU by checkpoint path so repeat views skip the load.
 """
@@ -99,6 +106,7 @@ def _model_meta(loaded: di.LoadedModel) -> dict[str, Any]:
         "load_warnings": loaded.load_warnings,
         "stv_horizons": list(loaded.stv_horizons),
         "has_moves_left": loaded.has_moves_left,
+        "has_cell_q": loaded.has_cell_q,
         "moves_left_cap": di.moves_left_cap(loaded),
         "param_count": di.param_count(loaded),
         "arch": {k: loaded.arch[k] for k in sorted(loaded.arch) if _jsonable(loaded.arch[k])},

@@ -89,6 +89,12 @@ class LoadedModel:
     load_warnings: list[str] = field(default_factory=list)
     stv_horizons: tuple[int, ...] = ()
     has_moves_left: bool = False
+    # True when the checkpoint's state dict carries the train-only per-cell Q
+    # head (``cell_q_head.weight``). Detected from the state dict, NOT from the
+    # forward output: a bare ``HexfieldNet()`` ALWAYS has the head module, so
+    # output presence is not a valid lineage-level detector. Only the hexfield
+    # loader ever sets this True; every other lineage keeps the default False.
+    has_cell_q: bool = False
 
 
 def _detect_lineage(payload: Any) -> str:
@@ -516,6 +522,7 @@ def _analyze_dense(loaded: LoadedModel, action_ids: Sequence[int], *, planes: bo
         "stvalue": stv,
         "moves_left": moves_left,
         "input_planes": input_planes,
+        "cell_q": None,  # per-cell Q head is hexfield-only (uniform payload shape)
     }
 
 
@@ -775,6 +782,7 @@ def _analyze_hexgt(loaded: LoadedModel, action_ids: Sequence[int], *, n: int | N
         "stvalue": stv,
         "moves_left": None,
         "input_planes": None,  # graph-featurized lineage: no dense planes (spec §3.6)
+        "cell_q": None,  # per-cell Q head is hexfield-only (uniform payload shape)
     }
 
 
@@ -927,6 +935,9 @@ def _load_hexfield_checkpoint(ckpt_path: Path, payload: dict[str, Any]) -> Loade
         # lineage). Horizons come from the model constant, not the checkpoint.
         stv_horizons=tuple(int(h) for h in hf.STV_HORIZONS),
         has_moves_left=True,
+        # The per-cell Q head is train-only (v3+). Older hexfield lineages lack
+        # it; gate the debug Q heatmap / regret UI on this from the state dict.
+        has_cell_q=("cell_q_head.weight" in state_dict),
     )
 
 
@@ -990,6 +1001,49 @@ def _hexfield_policy_rows(
     return rows
 
 
+def _hexfield_cell_q_scalars(
+    hf: SimpleNamespace, out: dict[str, Any], legal_count: int
+) -> torch.Tensor | None:
+    """Decode the per-cell Q head to a (legal_count,) scalar tensor in [-1, 1].
+
+    The ``cell_q`` logits are (Npad, 65) per the support layout; only the first
+    ``legal_count`` rows are legal placements (the rest are stones/halo, mask-
+    zeroed in the model and would decode to a spurious 0.0). MUST slice the legal
+    prefix BEFORE decoding. ``decode_binned_value`` is the same softmax-
+    expectation·linspace(-1,1,65)·clamp[-1,1] used for ``value``; Q is from the
+    side-to-move's perspective (+1 good for the mover). Returns ``None`` when the
+    head is absent (older checkpoint) or there are no legal cells (terminal)."""
+
+    if "cell_q" not in out or legal_count <= 0:
+        return None
+    cq_logits = out["cell_q"][0][:legal_count].float()  # (legal_count, 65) — PREFIX SLICE FIRST
+    return hf.decode_binned_value(cq_logits)  # (legal_count,) in [-1, 1], mover POV
+
+
+def _hexfield_cell_q_rows(
+    hf: SimpleNamespace, out: dict[str, Any], legal_action_ids: list[int]
+) -> list[dict[str, Any]] | None:
+    """Per-cell decoded-Q rows for the analyze payload, sorted by Q desc.
+
+    Each row is ``{action_id, q, r, qv}`` where ``qv`` is the decoded scalar in
+    [-1, 1] (mover POV). ``cell_q[0]`` is therefore the Q-best legal cell. Played
+    / Q-best marking is left to the frontend (analyze knows the legal prefix but
+    not the move recorded at the swept ply)."""
+
+    legal_count = len(legal_action_ids)
+    q_scalar = _hexfield_cell_q_scalars(hf, out, legal_count)
+    if q_scalar is None:
+        return None
+    rows = []
+    for aid, qv in zip(legal_action_ids, q_scalar.tolist()):
+        coord = _coord_of(aid)
+        rows.append(
+            {"action_id": int(aid), "q": coord["q"], "r": coord["r"], "qv": round(float(qv), 5)}
+        )
+    rows.sort(key=lambda r: r["qv"], reverse=True)
+    return rows
+
+
 def _hexfield_dist(hf: SimpleNamespace, logits: torch.Tensor) -> dict[str, Any]:
     """Scalar + 65-bin distribution for one value-style head's (65,) logits."""
 
@@ -1026,6 +1080,14 @@ def _analyze_hexfield(loaded: LoadedModel, action_ids: Sequence[int]) -> dict[st
     # double-scale).
     moves_left = _hexfield_dist(hf, out["moves_left"][0]) if "moves_left" in out else None
 
+    # Per-cell Q head (v3+): decoded scalar per legal cell, mover POV. None for
+    # older lineages lacking the head OR terminal/no-legal positions. The bare
+    # net always emits ``out["cell_q"]``, so gate on the checkpoint's state dict
+    # (``loaded.has_cell_q``) — not on output presence — for the lineage check.
+    cell_q = (
+        _hexfield_cell_q_rows(hf, out, legal_action_ids) if loaded.has_cell_q else None
+    )
+
     current = engine.current_player(state)
     current_role = getattr(current, "value", str(current))
     current_index = 1 if str(current_role).endswith("1") else 0
@@ -1036,6 +1098,7 @@ def _analyze_hexfield(loaded: LoadedModel, action_ids: Sequence[int]) -> dict[st
         "candidate_count": len(legal_action_ids),
         "legal_count": int(engine.legal_action_count(state)),
         "value": value["scalar"],
+        "cell_q": cell_q,
         # The owner-swap "optimism" probe is a hexgt-graph-specific calibration
         # check; hexfield encodes side-to-move ownership in its features (own/opp
         # planes), so it is marked N/A (UI hides the panel when null).
@@ -1819,6 +1882,63 @@ def game_eval_positions(
     wanted = sorted({int(p) for p in plies if 0 <= int(p) <= len(action_ids)})
     rows = _npz_rows_by_turn(npz_path) if npz_path else {}
 
+    # Per-ply Q-regret (hexfield v3+ only): one extra hexfield forward per ply to
+    # decode the per-cell Q head, then regret = bestQ - playedQ (mover POV, >=0).
+    # Gated on the checkpoint actually carrying cell_q; every other lineage / an
+    # older hexfield checkpoint leaves all regret keys None (additive, backward-
+    # compatible). Built once; ``_regret_for_ply`` returns the 6-key dict.
+    want_regret = loaded.lineage == HEXFIELD and loaded.has_cell_q
+    hf_regret = _hexfield() if want_regret else None
+    _NULL_REGRET = {
+        "played_q": None,
+        "best_q": None,
+        "regret": None,
+        "q_best_aid": None,
+        "q_best_match": None,
+        "missed_near_win": None,
+    }
+
+    def _regret_for_ply(state: Any, ply: int) -> dict[str, Any]:
+        # No played move at the final position (ply == total) -> no regret.
+        if not want_regret or ply >= len(action_ids):
+            return dict(_NULL_REGRET)
+        batch, legal_action_ids = _hexfield_inputs(hf_regret, state)
+        legal_count = len(legal_action_ids)
+        if legal_count == 0:  # terminal / no legal cell
+            return dict(_NULL_REGRET)
+        out = _hexfield_forward(loaded.model, batch)
+        q_scalar = _hexfield_cell_q_scalars(hf_regret, out, legal_count)
+        if q_scalar is None:
+            return dict(_NULL_REGRET)
+        played_aid = action_ids[ply]
+        try:
+            slot = legal_action_ids.index(played_aid)
+        except ValueError:
+            slot = None  # played move not in legal set (shouldn't happen) -> None
+        best_idx = int(torch.argmax(q_scalar))
+        best_q = float(q_scalar[best_idx])
+        q_best_aid = int(legal_action_ids[best_idx])
+        if slot is None:
+            return {
+                "played_q": None,
+                "best_q": round(best_q, 5),
+                "regret": None,
+                "q_best_aid": q_best_aid,
+                "q_best_match": None,
+                "missed_near_win": None,
+            }
+        played_q = float(q_scalar[slot])
+        return {
+            "played_q": round(played_q, 5),
+            "best_q": round(best_q, 5),
+            "regret": round(best_q - played_q, 5),  # >= 0 (best is the argmax)
+            "q_best_aid": q_best_aid,
+            "q_best_match": bool(q_best_aid == played_aid),
+            "missed_near_win": bool(
+                best_q >= 0.90 and q_best_aid != played_aid and played_q < 0.5
+            ),
+        }
+
     out: list[dict[str, Any]] = []
     state = engine.new_game()
     next_action = 0
@@ -1855,6 +1975,8 @@ def game_eval_positions(
             z_p0 = 1.0 if int(winner) == 0 else -1.0
             value_err_z = round(value_p0 - z_p0, 5)
 
+        regret_row = _regret_for_ply(state, ply)
+
         out.append(
             {
                 "ply": int(ply),
@@ -1865,6 +1987,9 @@ def game_eval_positions(
                 "top1_match": top1_match,
                 "value_err_z": value_err_z,
                 "value_err_soft": value_err_soft,
+                **regret_row,
             }
         )
-    return {"plies": out}
+    # regret_blunder_threshold is echoed every chunk so the frontend can drive the
+    # absolute-mode blunder rule without a separate config round-trip.
+    return {"plies": out, "regret_blunder_threshold": 0.3}

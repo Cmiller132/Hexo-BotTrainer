@@ -5533,9 +5533,14 @@ const DBG_TAB_IDS = {
 };
 // Base heat modes — index in DBG_MODE_ORDER is the 1..9 keyboard digit.
 // "attn" sits at index 7 (digit 8); inserting it shifts "plane" to digit 9.
-const DBG_MODE_ORDER = ["prior", "visits", "delta", "opp", "target", "mismatch", "childq", "attn", "plane"];
+// "cellq" is the 10th entry — it gets a mode button (click keys off data-mode)
+// but NO 1..9 digit hotkey (only the first 9 modes are reachable by digit).
+const DBG_MODE_ORDER = ["prior", "visits", "delta", "opp", "target", "mismatch", "childq", "attn", "plane", "cellq"];
 const DBG_MODES = ["none"].concat(DBG_MODE_ORDER);
 const DBG_CACHE_MAX = 300;  // spec M12: client analysis cache LRU cap
+// cell_q regret blunder default (mover POV, regret = bestQ - playedQ). Tiers for
+// UI coloring: minor >=0.15 / blunder >=0.30 / catastrophic >=0.60.
+const DBG_REGRET_BLUNDER = 0.3;
 // Action ids are packed exactly like hexo_engine.types.pack_coord_id (which
 // mirrors the Rust legal-move store, so the packing is pinned): the board's
 // click-to-inject needs an id for ANY empty legal cell, and the position
@@ -5601,6 +5606,10 @@ const dbg = {
   opacity: 0.9,
   sortKey: "prior",    // top-moves table sort column
   dockTab: "trajectory",
+  // cell_q regret blunder marking (M9 augment): "absolute" thresholds the raw
+  // regret; "relative" flags the top decile of THIS game's nonzero regrets.
+  regretThreshold: 0.3,
+  regretMode: "absolute",
   hudMetrics: new Map(),  // per-render `q,r` -> metrics, so the hover HUD never does a linear .find (M3)
   cellIndex: new Map(),   // per-render `q,r` -> cell info for click routing
   // Debug-board pan/zoom (own copies — the Match board owns the globals).
@@ -6638,9 +6647,27 @@ function dbgSweepData() {
 }
 
 function dbgBlunders(sweep) {
-  // Blunder = value_p0 sign flip or |Δ value_p0| > 0.5 between CONSECUTIVE swept
-  // plies; returns the ply AFTER the drop (where to look), ascending.
+  // Q-regret blunders (v3 cell_q) when the sweep carries per-ply regret: marks
+  // p.ply — the move WHERE the blunder was committed (sharper than the legacy
+  // value-swing marker, which flags the ply AFTER the drop). Falls back to the
+  // value-swing rule for older checkpoints with no cell_q (regret all null).
   const out = [];
+  const hasRegret = sweep.plies.some(p => p.regret != null);
+  if (hasRegret) {
+    if (dbg.regretMode === "relative") {
+      // Top decile of THIS game's nonzero regrets, floored at 0.10 to suppress
+      // clean-game noise.
+      const rs = sweep.plies.map(p => p.regret).filter(v => v != null && v > 0).sort((a, b) => a - b);
+      const dec = rs.length ? rs[Math.floor(rs.length * 0.9)] : Infinity;
+      for (const p of sweep.plies) if (p.regret != null && p.regret >= Math.max(dec, 0.10)) out.push(p.ply);
+    } else {
+      const thr = dbg.regretThreshold != null ? dbg.regretThreshold : DBG_REGRET_BLUNDER;
+      for (const p of sweep.plies) if (p.regret != null && p.regret >= thr) out.push(p.ply);
+    }
+    return out;
+  }
+  // Legacy value-swing fallback: value_p0 sign flip or |Δ value_p0| > 0.5 between
+  // CONSECUTIVE swept plies; returns the ply AFTER the drop (where to look).
   for (let i = 1; i < sweep.plies.length; i++) {
     const a = sweep.plies[i - 1];
     const b = sweep.plies[i];
@@ -6694,6 +6721,7 @@ async function dbgRunSweep() {
       if (key === dbgSweepKey()) {
         dbgRenderPlyRail();
         dbgRenderDockChart();
+        dbgRenderRegretList();
       }
     }
     if (progress) {
@@ -6709,6 +6737,7 @@ async function dbgRunSweep() {
     if (key === dbgSweepKey()) {
       dbgRenderPlyRail();
       dbgRenderDockChart();
+      dbgRenderRegretList();
     }
   }
 }
@@ -7634,6 +7663,18 @@ function dbgAttnLineageOk() {
   return lin === "" || lin === "hexfield";
 }
 
+function dbgHasCellQ() {
+  // Lineage-level feature gate for the per-cell Q head (v3). Detected from the
+  // model meta (state-dict presence of cell_q_head), surfaced as meta.has_cell_q
+  // on the committed analyze payload first, then the cached ckpt_info. Unknown
+  // (no meta yet) stays false so the Q button is disabled until we know.
+  const a = dbgFreshData("analysis");
+  if (a && a.meta && typeof a.meta.has_cell_q === "boolean") return a.meta.has_cell_q;
+  const info = dbg.ckptInfo.get(`${dbg.nav.run}|${dbg.nav.ckptA}`);
+  if (info && info.meta && typeof info.meta.has_cell_q === "boolean") return info.meta.has_cell_q;
+  return false;
+}
+
 // The attn slot tail (everything after the position key) — used to key the
 // per-entry attn payload cache so revisiting a query/block/head is free.
 function dbgAttnSlotTail() {
@@ -7927,6 +7968,7 @@ function dbgRenderAll() {
     }
     dbgRenderAttn();
     dbgRenderDockChart();
+    dbgRenderRegretList();  // worst-plies-by-regret tab + its visibility gate
     dbgRenderCkptSweep();  // keeps the Run button present before any sweep ran
     dbgUpdateStaleDots();
   } catch (e) {
@@ -8000,6 +8042,16 @@ function dbgSyncControls() {
   if (attnTabBtn) {
     attnTabBtn.disabled = !attnOk;
     attnTabBtn.classList.toggle("dbg-disabled", !attnOk);
+  }
+  // Per-cell Q head is v3-hexfield-only: disable the Q MODE button for lineages
+  // / checkpoints without a cell_q head (meta.has_cell_q false). A position with
+  // no legal cells (terminal) keeps the button enabled — dbgHeatForMode's note
+  // covers it without a hard disable.
+  const cellqOk = dbgHasCellQ();
+  const cellqModeBtn = document.querySelector('#dbgModeBar [data-mode="cellq"]');
+  if (cellqModeBtn) {
+    cellqModeBtn.disabled = !cellqOk;
+    cellqModeBtn.classList.toggle("dbg-disabled", !cellqOk);
   }
 }
 
@@ -8098,6 +8150,14 @@ function dbgRenderPlyRail() {
           cls += " dbg-ply-miss";
           title += " · top-1 miss";
         }
+        // Per-cell Q regret (v3): a left-edge magnitude bar, tinted red, so the
+        // rail shows where the mover left value on the table even below the
+        // blunder threshold. No-op on older checkpoints (regret null).
+        if (row.regret != null && row.regret > 0.02) {
+          inner += `<span class="dbg-ply-regret" style="background:rgba(255,99,90,${Math.min(0.9, row.regret).toFixed(3)})"></span>`;
+          title += ` · regret ${row.regret.toFixed(2)}`;
+        }
+        if (row.missed_near_win === true) title += " · missed near-win";
       }
       const geom = horiz
         ? `left:${off.toFixed(3)}%;width:${(100 / (total + 1)).toFixed(3)}%;`
@@ -8240,6 +8300,18 @@ function dbgHeatForMode(mode) {
       }
       out.note = (planes.names && planes.names[idx]) || "";
     }
+  } else if (mode === "cellq") {
+    // Per-cell Q head (v3): decoded scalar Q ∈ [-1,1] from the mover's POV, fed
+    // from the analyze payload (cell_q rows {action_id,q,r,qv}, sorted qv desc).
+    // Diverging scale: +green good for the mover, −red bad. Older checkpoints
+    // (no cell_q head) leave cell_q null — note, no paint.
+    if (!a) out.note = "analyze pending";
+    else if (!a.cell_q) out.note = "no Q head (older checkpoint)";
+    else {
+      out.scale = "div";
+      for (const r of a.cell_q) out.values.set(`${r.q},${r.r}`, r.qv);
+      out.note = "per-cell Q (mover POV)";
+    }
   }
   return dbgHeatFinish(out);
 }
@@ -8304,6 +8376,7 @@ function dbgHeatNorm(heat, v) {
 
 function dbgFormatHeatValue(mode, v) {
   if (mode === "childq") return `${v >= 0 ? "+" : ""}${v.toFixed(2)}`;
+  if (mode === "cellq") return `${v >= 0 ? "+" : ""}${v.toFixed(2)}`;
   if (mode === "plane") return `${v >= 0 ? "+" : ""}${v.toFixed(2)}`;
   const pct = v * 100;
   const sign = (mode === "delta" || mode === "mismatch" || mode === "cmp") && v >= 0 ? "+" : "";
@@ -8352,6 +8425,7 @@ function dbgBuildHudMetrics() {
   if (a) {
     for (const row of a.policy || []) get(row.q, row.r).prior = row.p;
     for (const row of a.opp_policy || []) get(row.q, row.r).opp = row.p;
+    for (const row of a.cell_q || []) get(row.q, row.r).cellQ = row.qv;  // per-cell Q head
   }
   if (s) for (const row of s.visit_policy || []) get(row.q, row.r).visits = row.p;
   if (tree && tree.tree) {
@@ -8460,6 +8534,14 @@ function dbgRenderBoard() {
     const attnD = dbgFreshData("attn");
     if (attnD && attnD.found && attnD.cell_query) attnQueryKey = `${attnD.cell_query.q},${attnD.cell_query.r}`;
   }
+  // Q-head mode: ring the Q-best legal cell (cell_q is sorted qv desc, so [0] is
+  // the best). The played move keeps its own accent "last" ring (below) — the
+  // two rings together show played-vs-best at a glance.
+  let qBestKey = null;
+  if (dbg.nav.mode === "cellq") {
+    const aQ = dbgFreshData("analysis");
+    if (aQ && aQ.cell_q && aQ.cell_q.length) qBestKey = `${aQ.cell_q[0].q},${aQ.cell_q[0].r}`;
+  }
   data.sort((a, b) => (a.placement ? 1 : 0) - (b.placement ? 1 : 0));
   let html = "";
 
@@ -8511,6 +8593,9 @@ function dbgRenderBoard() {
     if (attnQueryKey && h.key === attnQueryKey) {
       html += `<path d="${path(h.x, h.y, HEX - 1)}" fill="none" stroke="#fff" stroke-width="2.4" opacity="0.95" pointer-events="none"></path>`;
     }
+    if (qBestKey && h.key === qBestKey) {
+      html += `<path d="${path(h.x, h.y, HEX - 1)}" fill="none" stroke="var(--green)" stroke-width="2.4" opacity="0.95" pointer-events="none"></path>`;
+    }
     if (ov.last && lastCoord && h.q === lastCoord.q && h.r === lastCoord.r) {
       html += `<path class="dbg-last" d="${path(h.x, h.y, HEX - 0.5)}" fill="none" stroke="var(--accent)" stroke-width="2.2" pointer-events="none"></path>`;
     }
@@ -8559,6 +8644,7 @@ function dbgHoverCell(q, r) {
   const pct = v => (v != null ? `${(v * 100).toFixed(1)}%` : "—");
   const childQ = m.childQ != null ? `${m.childQ >= 0 ? "+" : ""}${m.childQ.toFixed(2)} (N=${m.childN})` : "—";
   let line = `${q},${r} · prior ${pct(m.prior)} · visits ${pct(m.visits)} · childQ ${childQ} · target ${pct(m.target)}`;
+  if (m.cellQ != null) line += ` · Q ${m.cellQ >= 0 ? "+" : ""}${m.cellQ.toFixed(2)}`;
   if (m.attn != null) line += ` · attn ${pct(m.attn)}`;
   if ((dbg.split || dbg.cmpHeat) && dbg.nav.ckptB) line += ` · B prior ${pct(m.priorB)}`;
   hud.innerHTML = `<div>${escapeText(line)}</div>`;
@@ -8954,6 +9040,9 @@ function dbgSetDockTab(tab) {
   if (chart) chart.classList.toggle("active", tab === "trajectory");
   const sweep = dbgEl("dbgCkptSweep");
   if (sweep) sweep.classList.toggle("active", tab === "ckptsweep");
+  const regret = dbgEl("dbgRegretList");
+  if (regret) regret.classList.toggle("active", tab === "regret");
+  if (tab === "regret") dbgRenderRegretList();
 }
 
 function dbgRenderDockChart() {
@@ -8999,28 +9088,119 @@ function dbgRenderDockChart() {
     html += `<text x="${W - padR + 3}" y="${padT + 8}" fill="#b07ce8" font-size="10">KL ${maxKl.toFixed(2)}</text>`;
     html += `<text x="${W - padR + 3}" y="${H - padB}" fill="#b07ce8" font-size="10">0</text>`;
   }
+  // Per-ply Q-regret series on the right axis (v3 cell_q; hidden without it).
+  // regret >= 0; scaled against the game's max regret so the curve fills the
+  // panel. The KL series already owns the right-axis label slot, so the regret
+  // label sits just below it.
+  let maxRegret = 0;
+  const regretPts = sweep ? sweep.plies.filter(p => p.regret != null) : [];
+  const hasRegret = regretPts.length > 0;
+  for (const p of regretPts) maxRegret = Math.max(maxRegret, p.regret);
+  if (hasRegret && maxRegret > 0) {
+    const yr = v => padT + (H - padT - padB) * (1 - v / maxRegret);
+    html += `<path d="${regretPts.map((p, i) => `${i ? "L" : "M"}${x(p.ply).toFixed(1)},${yr(p.regret).toFixed(1)}`).join("")}" fill="none" stroke="var(--p1)" stroke-width="1.4" opacity="0.7"></path>`;
+    html += `<text x="${W - padR + 3}" y="${padT + 20}" fill="var(--p1)" font-size="10">reg ${maxRegret.toFixed(2)}</text>`;
+  }
   html += `<path d="${linePath(reeval, "value_p0")}" fill="none" stroke="var(--accent)" stroke-width="2"></path>`;
   if (sweep) {
     for (const p of sweep.plies) {
       if (p.top1_match === false) {
         html += `<line x1="${x(p.ply).toFixed(1)}" y1="${H - padB}" x2="${x(p.ply).toFixed(1)}" y2="${H - padB - 6}" stroke="var(--yellow)" stroke-width="1.5" opacity="0.8"></line>`;
       }
+      // Diagnostic 2: policy↔Q disagreement — Q-best cell differs from the played
+      // move, gated on regret>=0.10 so pure Q-ties don't tick. Distinct color
+      // (purple) from the yellow top-1-miss tick, drawn just above it.
+      if (p.q_best_match === false && p.regret != null && p.regret >= 0.10) {
+        html += `<line x1="${x(p.ply).toFixed(1)}" y1="${H - padB - 7}" x2="${x(p.ply).toFixed(1)}" y2="${H - padB - 13}" stroke="#b07ce8" stroke-width="1.5" opacity="0.85"></line>`;
+      }
+      // Diagnostic 3: missed near-win — a legal Q≈+1 cell the mover passed up.
+      if (p.missed_near_win === true) {
+        const sx = x(p.ply);
+        const sy = y(p.value_p0) - 11;
+        html += `<text data-dbg-jump="${p.ply}" x="${sx.toFixed(1)}" y="${sy.toFixed(1)}" text-anchor="middle" font-size="13" fill="var(--green)" style="cursor:pointer"><title>missed near-win ply ${p.ply} — click to jump</title>★</text>`;
+      }
     }
     for (const bp of dbgBlunders(sweep)) {
       const row = sweep.byPly.get(bp);
       if (!row) continue;
-      html += `<circle data-dbg-jump="${bp}" cx="${x(bp).toFixed(1)}" cy="${y(row.value_p0).toFixed(1)}" r="5" fill="var(--p1)" opacity="0.85" style="cursor:pointer"><title>blunder ply ${bp} — click to jump</title></circle>`;
+      html += `<circle data-dbg-jump="${bp}" cx="${x(bp).toFixed(1)}" cy="${y(row.value_p0).toFixed(1)}" r="5" fill="var(--p1)" opacity="0.85" style="cursor:pointer"><title>blunder ply ${bp}${row.regret != null ? ` · regret ${row.regret.toFixed(2)}` : ""} — click to jump</title></circle>`;
     }
   }
   html += `<line class="dbg-dock-cross" x1="0" y1="${padT}" x2="0" y2="${H - padB}" stroke="#dfe9f3" stroke-width="1" opacity="0" pointer-events="none"></line>`;
   const legend = sweep
-    ? "value_p0 accent · KL purple (right axis) · top-1 miss ticks yellow · blunders red (click to jump)"
+    ? (hasRegret
+        ? "value_p0 accent · regret red (right) · KL purple · blunder=regret ply red dot · P↔Q tick purple · ★missed win · click to jump"
+        : "value_p0 accent · KL purple (right axis) · top-1 miss ticks yellow · blunders red (click to jump)")
     : (t && t.stride > 1 ? `(every ${t.stride} plies · re-eval accent, recorded yellow)` : "re-eval accent · recorded yellow");
   el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${html}</svg>`
     + `<div class="dbg-dock-readout dbg-muted">${legend}</div>`;
   const byPly = new Map();
   for (const p of reeval) byPly.set(p.ply, p);
   el.__dbgChart = { W, padL, padR, total, byPly, legend };
+}
+
+function dbgRegretAvailable() {
+  // The regret tab/list (and missed-win badge) only make sense once a sweep of
+  // the current (game, ckptA) carries per-ply regret (v3 cell_q). Older
+  // checkpoints leave every regret null — the tab/panel stay hidden.
+  const sweep = dbgSweepData();
+  return Boolean(sweep && sweep.plies.some(p => p.regret != null));
+}
+
+function dbgRenderRegretList() {
+  // Diagnostic 1: worst plies by Q-regret — client-side over the sweep rows
+  // (filter regret!=null, sort desc, top 8). Each row jumps to that ply via the
+  // global [data-dbg-jump] handler. Also surfaces a missed-near-win count badge.
+  const el = dbgEl("dbgRegretList");
+  if (!el) return;
+  // Toggle the dock tab button + this panel's visibility on data availability.
+  const avail = dbgRegretAvailable();
+  const tabBtn = document.querySelector('#dbgDockTabs [data-dock-tab="regret"]');
+  if (tabBtn) tabBtn.hidden = !avail;
+  if (!avail) {
+    // A non-regret lineage that had the tab open falls back to the trajectory
+    // dock so the user never stares at an empty regret panel.
+    if (dbg.dockTab === "regret") dbgSetDockTab("trajectory");
+    el.innerHTML = "";
+    return;
+  }
+  const sweep = dbgSweepData();
+  const nav = dbg.nav;
+  const actsOk = dbg.gameActsKey === `${nav.run}|${nav.path}|${nav.rec}` && dbg.gameActs.length;
+  const coordStr = aid => {
+    if (aid == null) return "—";
+    const c = dbgUnpackActionId(aid);
+    return `${c.q},${c.r}`;
+  };
+  const missed = sweep.plies.filter(p => p.missed_near_win === true);
+  const rows = sweep.plies
+    .filter(p => p.regret != null)
+    .sort((a, b) => b.regret - a.regret)
+    .slice(0, 8);
+  let html = `<div class="dbg-subhead">Worst plies by Q-regret`
+    + (missed.length ? ` <span class="dbg-chip dbg-chip-game" title="legal Q≈+1 cells the mover passed up">${missed.length} missed win${missed.length > 1 ? "s" : ""}</span>` : "")
+    + `</div>`;
+  if (!rows.length || rows[0].regret <= 0) {
+    html += `<div class="dbg-empty-note">No regret recorded yet — sweep the game.</div>`;
+    el.innerHTML = html;
+    return;
+  }
+  for (const p of rows) {
+    const playedAid = actsOk && dbg.gameActs.length > p.ply ? dbg.gameActs[p.ply] : null;
+    const playedCoord = coordStr(playedAid);
+    const bestCoord = coordStr(p.q_best_aid);
+    const pq = p.played_q != null ? `${p.played_q >= 0 ? "+" : ""}${p.played_q.toFixed(2)}` : "—";
+    const bq = p.best_q != null ? `${p.best_q >= 0 ? "+" : ""}${p.best_q.toFixed(2)}` : "—";
+    const flags = (p.missed_near_win === true ? " ★" : "")
+      + (p.q_best_match === false ? " ⚐" : "");
+    html += `<div class="dbg-target-row" data-dbg-jump="${p.ply}" style="cursor:pointer" title="jump to ply ${p.ply}">`
+      + `<span>ply ${p.ply}${flags}</span>`
+      + `<span class="dbg-ply-regret-val">regret ${p.regret.toFixed(2)}</span>`
+      + `<span class="dbg-muted">Q ${pq}→${bq}</span>`
+      + `<span class="dbg-muted">${playedCoord} → ${bestCoord}</span>`
+      + `</div>`;
+  }
+  el.innerHTML = html;
 }
 
 // ---- stale dots (spec M14) -----------------------------------------------------
@@ -9769,6 +9949,7 @@ function debugBindEvents() {
             + `${row.kl != null ? ` · KL ${row.kl.toFixed(3)}` : ""}`
             + `${row.top1_match != null ? ` · top1 ${row.top1_match ? "✓" : "✗"}` : ""}`
             + `${row.value_err_z != null ? ` · err_z ${row.value_err_z >= 0 ? "+" : ""}${row.value_err_z.toFixed(2)}` : ""}`
+            + `${row.regret != null ? ` · regret ${row.regret.toFixed(2)} (Q ${row.played_q != null ? row.played_q.toFixed(2) : "—"}→${row.best_q != null ? row.best_q.toFixed(2) : "—"})` : ""}`
           : `ply ${ply}`;
       }
     });

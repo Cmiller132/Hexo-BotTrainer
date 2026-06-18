@@ -304,6 +304,7 @@
           <button type="button" data-mode="target" title="Recorded visit-policy target (5)">Target</button>
           <button type="button" data-mode="mismatch" title="Prior&#8722;target mismatch (6)">Mismatch</button>
           <button type="button" data-mode="childq" title="Root-child Q from last debug tree (7)">Child Q</button>
+          <button type="button" data-mode="cellq" title="Per-cell Q (action-value head) — hexfield v3 lineage only">Q</button>
           <button type="button" data-mode="attn" title="Attention (8) — hexfield lineage only">Attn</button>
           <button type="button" data-mode="plane" title="Input plane, dense lineage only (9)">Plane</button>
         </div>
@@ -473,6 +474,7 @@
         <div id="dbgDockTabs" class="dbg-tabs dbg-dock-tabs" aria-label="Dock tabs">
           <button type="button" data-dock-tab="trajectory" class="active">Trajectory</button>
           <button type="button" data-dock-tab="ckptsweep">Checkpoint sweep</button>
+          <button type="button" data-dock-tab="regret" hidden>Worst plies</button>
         </div>
         <div class="dbg-dock-actions">
           <button id="dbgSweepBtn" type="button" title="Game error sweep (chunked, abortable)">Sweep game</button>
@@ -489,6 +491,13 @@
             <button id="dbgCkptSweepStop" type="button">Stop</button>
           </div>
           <div class="dbg-ckpt-sweep-chart"><div class="dbg-empty-note">Not run</div></div>
+        </div>
+        <div id="dbgRegretList" class="dbg-dock-panel">
+          <div class="dbg-regret-head">
+            <span class="dbg-muted">Worst plies by Q-regret (best legal Q &#8722; played Q, mover POV). Click a row to jump to that ply.</span>
+            <span id="dbgMissedWinBadge" class="dbg-missed-win-badge" hidden></span>
+          </div>
+          <div class="dbg-regret-rows"><div class="dbg-empty-note">Sweep the game to compute per-ply regret</div></div>
         </div>
       </div>
     </section>

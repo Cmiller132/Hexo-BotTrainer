@@ -2529,6 +2529,9 @@ def _debug_game_eval(
         "count": count,
         "winner": winner,
         "plies": raw.get("plies", []),
+        # v3 cell_q lineages echo the absolute regret blunder threshold so the UI
+        # can mark Q-based blunders; null/absent for older (no cell_q) checkpoints.
+        "regret_blunder_threshold": raw.get("regret_blunder_threshold"),
     }
 
 
