@@ -218,6 +218,7 @@ const gameHistoryList = document.getElementById("gameHistoryList");
 const gameHistoryDetail = document.getElementById("gameHistoryDetail");
 const histHealthDrawer = document.getElementById("histHealthDrawer");
 const histTrends = document.getElementById("histTrends");
+const histStrength = document.getElementById("histStrength");
 const histRatingTable = document.getElementById("histRatingTable");
 const histEvalPool = document.getElementById("histEvalPool");
 const histEpochTable = document.getElementById("histEpochTable");
@@ -372,7 +373,7 @@ if (histEpochChip) histEpochChip.addEventListener("click", event => {
 // Evaluation-region deep links: a ladder/W-L "replays" button filters the game
 // history list to source=evaluation + that epoch (reuses the source select + the
 // shared epoch filter). Lands on real eval replays once the .hxr carry records.
-if (histEvalPool) histEvalPool.addEventListener("click", event => {
+function handleHistEvalReplayClick(event) {
   const link = event.target.closest("[data-hist-eval-epoch]");
   if (!link) return;
   event.preventDefault();
@@ -388,7 +389,15 @@ if (histEvalPool) histEvalPool.addEventListener("click", event => {
   // Force-set (not toggle) the epoch filter so repeated clicks keep it active.
   histEpochFilter = epoch;
   renderGameHistoryPage();
-});
+}
+if (histEvalPool) histEvalPool.addEventListener("click", handleHistEvalReplayClick);
+// The redesigned #histStrength panel reuses the same eval-replay deep links and
+// hosts a single learning-curve chart, so it shares the trends hover trio too.
+if (histStrength) {
+  histStrength.addEventListener("click", handleHistEvalReplayClick);
+  histStrength.addEventListener("mousemove", handleHistTrendsMove);
+  histStrength.addEventListener("mouseleave", hideHistTrendHover);
+}
 if (historySearchInput) historySearchInput.addEventListener("input", event => {
   historyFilters.query = event.target.value || "";
   historyVisibleLimit = HISTORY_PAGE_SIZE;
@@ -2782,6 +2791,10 @@ function clearHistPanels() {
     histHealthDrawer.hidden = true;
   }
   if (histTrends) histTrends.innerHTML = "";
+  if (histStrength) {
+    histStrength.innerHTML = "";
+    histStrength.hidden = true;
+  }
   if (histRatingTable) {
     histRatingTable.innerHTML = "";
     histRatingTable.hidden = true;
@@ -2836,9 +2849,11 @@ function renderGameHistoryPage() {
   const selected = selectedHistoryItem(histories, displayed);
   const visible = usingServerPage ? displayed : displayed.slice(0, historyVisibleLimit);
   renderHistStatusBand(runs);
+  // NOTE: renderHistTrends() resets histTrendCharts {} at its start, so the
+  // strength panel (which also registers chart geometry there for hover) MUST
+  // render AFTER trends, or its registrations get wiped.
   renderHistTrends(runs);
-  renderHistRatingTable(runs);
-  renderHistEvalPool(runs);
+  renderHistStrength(runs);
   renderHistEpochTable(runs);
   renderHistEpochInspector(runs);
   // Length micro-bars are relative to the longest currently displayed row.
@@ -3828,33 +3843,138 @@ function renderHistTrends(runs) {
     });
     if (t4) charts.splice(Math.min(3, charts.length), 0, t4);
   }
-  // T7 Elo trajectory (hexfield multi-stage eval only). Candidate SealBot-pinned
-  // Elo per evaluated epoch + its 95% CI band; absent for every other lineage so
-  // the chart simply never appears (msRows is [] -> < 2 points -> "").
+  // NOTE: the multi-stage eval Elo / win-rate trajectories (formerly T7/T8/T9)
+  // now live in the dedicated, compact #histStrength panel (renderHistStrength).
+  // The trends grid keeps ONLY the per-epoch selfplay/training charts so the eval
+  // surface is not duplicated across two regions.
+  const body = charts.filter(Boolean).join("");
+  const caption = body && run && (runs || []).length > 1
+    ? `<div class="hist-trends-caption">Charts: ${escapeText(run.name || "latest run")}</div>`
+    : "";
+  histTrends.innerHTML = body ? `${caption}${body}` : "";
+}
+
+// ===========================================================================
+// #histStrength — the redesigned EVAL / STRENGTH cluster (hexfield opt-in).
+// Replaces the old four-part stack (trends eval charts + rating table + giant
+// BT-ladder eval pool) with ONE compact, scannable panel in three rows:
+//   1. a single "current strength" hero (verdict + candidate Elo vs anchor +
+//      SealBot zero-point winrate + eval epoch + Δ-Elo CI tripwire + flags),
+//   2. ONE learning curve (candidate Elo vs epoch with its CI band; SealBot
+//      winrate overlaid on a right scale via a second descriptive chart),
+//   3. ONE opponent panel (top BT-ladder rungs + per-opponent pooled W-L).
+// All data comes from the SAME readers the old regions used (multistage_eval_
+// history + eval_pool + learning_health); only the presentation is rebuilt.
+// Hidden whenever the run carries no multistage_eval_history.
+// ---------------------------------------------------------------------------
+function renderHistStrength(runs) {
+  if (!histStrength) return;
+  const run = histTrendRun(runs);
   const msRows = msHistoryRows(run);
+  if (!msRows.length) {
+    histStrength.innerHTML = "";
+    histStrength.hidden = true;
+    return;
+  }
+  const latest = msRows[msRows.length - 1];
+  const candPlayer = msCandidatePlayer(latest);
+  const anchorPlayer = msAnchorPlayer(latest);
+  const anchorLabel = (anchorPlayer && anchorPlayer.label) || latest.anchor || "anchor";
+  const verdict = latest && typeof latest.verdict === "object" && latest.verdict ? latest.verdict : {};
+  const verdictLabel = latest.verdict_label || verdict.label || null;
+
+  // ---- Row 1: current-strength hero --------------------------------------
+  const heroItems = [];
+  // Verdict pill leads (PROMOTE / REGRESS / INCONCLUSIVE), status-tinted.
+  if (verdictLabel) {
+    heroItems.push(`<div class="hist-hero-verdict ${msVerdictClass(verdictLabel)}">`
+      + `<span class="hist-hero-k">verdict</span>`
+      + `<span class="hist-hero-v">${escapeText(String(verdictLabel).toUpperCase())}</span></div>`);
+  }
+  // Candidate Elo vs the (named) zero-point anchor — the headline strength number.
+  const candElo = candPlayer ? asFinite(candPlayer.elo) : null;
+  if (candElo !== null) {
+    const sign = candElo > 0 ? "+" : "";
+    heroItems.push(`<div class="hist-hero-kpi">`
+      + `<span class="hist-hero-k">Elo vs ${escapeText(anchorLabel)}</span>`
+      + `<span class="hist-hero-v hist-hero-big">${sign}${Math.round(candElo)}</span>`
+      + `<span class="hist-hero-sub">${escapeText(msEloText(candPlayer))}</span></div>`);
+  }
+  // SealBot zero-point winrate — the descriptive cross-lineage progress signal.
+  const sbWr = msSealbotWinrate(latest);
+  if (sbWr !== null) {
+    heroItems.push(`<div class="hist-hero-kpi">`
+      + `<span class="hist-hero-k">SealBot win%</span>`
+      + `<span class="hist-hero-v hist-hero-big">${formatPercent(sbWr)}</span>`
+      + `<span class="hist-hero-sub">zero-point</span></div>`);
+  }
+  // Latest eval epoch + cadence.
+  heroItems.push(`<div class="hist-hero-kpi">`
+    + `<span class="hist-hero-k">eval epoch</span>`
+    + `<span class="hist-hero-v hist-hero-big">e${escapeText(latest.epoch)}</span>`
+    + `<span class="hist-hero-sub">${escapeText(msEvalCadenceSubtitle(msRows) || `${msRows.length} reports`)}</span></div>`);
+  // Δ-Elo 95% CI tripwire (compact horizontal error bar) — keeps a wide
+  // INCONCLUSIVE reading as "low resolution", not a regression.
+  const primary = verdict && typeof verdict.primary === "object" && verdict.primary ? verdict.primary : null;
+  const eloDiff = primary ? asFinite(primary.elo_diff) : null;
+  const ci = primary && Array.isArray(primary.elo_diff_ci95) ? primary.elo_diff_ci95 : null;
+  const ciLo = ci ? asFinite(ci[0]) : null;
+  const ciHi = ci ? asFinite(ci[1]) : null;
+  if (ciLo !== null && ciHi !== null) {
+    const reach = Math.max(Math.abs(ciLo), Math.abs(ciHi), eloDiff !== null ? Math.abs(eloDiff) : 0, 1);
+    const toPct = v => 50 + (Math.max(Math.min(v, reach), -reach) / reach) * 50;
+    const left = toPct(ciLo);
+    const right = toPct(ciHi);
+    const pointPct = eloDiff !== null ? toPct(eloDiff) : 50;
+    const diffTxt = eloDiff !== null ? `${eloDiff > 0 ? "+" : ""}${Math.round(eloDiff)}` : "0";
+    heroItems.push(`<div class="hist-hero-ci" title="Δ Elo 95% CI [${Math.round(ciLo)}, ${Math.round(ciHi)}] — gross-regression tripwire, not a fine-edge test">`
+      + `<span class="hist-hero-k">Δ Elo ${escapeText(diffTxt)} <small>[${Math.round(ciLo)}, ${Math.round(ciHi)}]</small></span>`
+      + `<span class="hist-ci-bar"><span class="hist-ci-track"></span>`
+      + `<span class="hist-ci-zero" style="left:50%"></span>`
+      + `<span class="hist-ci-range" style="left:${left.toFixed(1)}%;width:${Math.max(0, right - left).toFixed(1)}%"></span>`
+      + `<span class="hist-ci-point" style="left:${pointPct.toFixed(1)}%"></span></span></div>`);
+  }
+  // Flags: DEGRADED anchor substitution + OOD opponents + pure-eval / gating.
+  const flags = [];
+  if (verdict.anchor_substituted === true || verdict.degraded === true) {
+    const to = verdict.substituted_to ? ` → ${escapeText(String(verdict.substituted_to))}` : "";
+    const note = verdict.degraded_note || verdict.sealbot_unavailable_reason || "anchor substituted; absolute Elo not calibrated";
+    flags.push(`<span class="hist-rating-verdict hist-health-intervene" title="${escapeAttr(String(note))}">DEGRADED${to}</span>`);
+  }
+  const oodOpps = Array.isArray(verdict.ood_opponents) ? verdict.ood_opponents.filter(Boolean) : [];
+  if (oodOpps.length) {
+    const note = verdict.ood_note || `Opponents ${oodOpps.join(", ")} featurized out-of-distribution (radius mismatch); excluded from the pinned anchor.`;
+    flags.push(`<span class="hist-rating-tag hist-rating-tag-muted" title="${escapeAttr(String(note))}">OOD: ${escapeText(oodOpps.join(", "))}</span>`);
+  }
+  const meta = latest && typeof latest.meta === "object" && latest.meta ? latest.meta : {};
+  const pureEval = latest.pure_eval !== undefined ? latest.pure_eval : meta.pure_eval;
+  if (pureEval === true) flags.push(`<span class="hist-rating-tag">pure eval</span>`);
+  else if (pureEval === false) flags.push(`<span class="hist-rating-tag hist-rating-tag-muted">gating on</span>`);
+  msDroppedAnchors(latest).forEach(name => {
+    flags.push(`<span class="hist-rating-tag hist-rating-tag-muted" title="permanent anchor missing from this epoch's roster">${escapeText(name)} dropped</span>`);
+  });
+  if (flags.length) heroItems.push(`<div class="hist-hero-flags">${flags.join("")}</div>`);
+  const verdictNote = verdict && verdict.note ? `<div class="hist-hero-note">${escapeText(String(verdict.note))}</div>` : "";
+  // Hero is a full-width banner spanning the whole grid (grid-column:1/-1).
+  const heroBlock = `<div class="hist-strength-hero"><div class="hist-hero">${heroItems.join("")}</div>${verdictNote}</div>`;
+
+  // ---- Row 2: ONE learning curve (candidate Elo vs epoch + CI band) -------
   const msEpochs = msRows.map(row => Number(row.epoch));
   const msElo = msRows.map(row => asFinite((msCandidatePlayer(row) || {}).elo));
+  const charts = [];
   if (histSeriesCount(msElo) >= 2) {
-    const ci = msRows.map(row => {
+    const ciRows = msRows.map(row => {
       const c = msCandidatePlayer(row);
       return Array.isArray(c && c.elo_ci95) ? c.elo_ci95 : null;
     });
-    const bandLo = ci.map(c => (c ? asFinite(c[0]) : null));
-    const bandHi = ci.map(c => (c ? asFinite(c[1]) : null));
-    const anchorElo = msRows.map(row => asFinite((msAnchorPlayer(row) || {}).elo));
-    const series = [{ label: "candidate", color: "var(--accent)", values: msElo, width: 1.8, points: true }];
-    // SealBot anchor is normally pinned at a constant Elo; draw it only if it varies.
-    if (histSeriesCount(anchorElo) >= 2 && Math.max(...anchorElo.filter(v => v !== null)) !== Math.min(...anchorElo.filter(v => v !== null))) {
-      series.push({ label: "anchor", color: "var(--p1)", values: anchorElo, width: 1 });
-    }
-    // Title names the ACTUAL anchor (bc_prefit when SealBot is unavailable).
-    const anchorLabel = (msAnchorPlayer(msRows[msRows.length - 1]) || {}).label || "anchor";
-    const t7 = histChartSvg({
-      id: "t7",
-      title: `Eval Elo (${anchorLabel}-pinned)`,
+    const bandLo = ciRows.map(c => (c ? asFinite(c[0]) : null));
+    const bandHi = ciRows.map(c => (c ? asFinite(c[1]) : null));
+    const t = histChartSvg({
+      id: "strengthElo",
+      title: `Eval Elo (${anchorLabel}=0)`,
       subtitle: msEvalCadenceSubtitle(msRows),
       epochs: msEpochs,
-      series,
+      series: [{ label: "candidate", color: "var(--accent)", values: msElo, width: 1.8, points: true }],
       band: histSeriesCount(bandLo) >= 2 ? { lo: bandLo, hi: bandHi, color: "rgba(39,215,230,0.12)" } : null,
       tip: [
         { label: "Elo", values: msElo, fmt: value => formatDecimal(value, 0) },
@@ -3864,52 +3984,11 @@ function renderHistTrends(runs) {
       format: value => formatDecimal(value, 0),
       latest: `${formatDecimal(histLatestNonNull(msElo), 0)} Elo`,
     });
-    if (t7) charts.push(t7);
+    if (t) charts.push(t);
   }
-  // T8 win-rate vs each FIXED anchor (bc_prefit, ep5) over epochs — the drift-
-  // immune companion to T7's pooled Elo. Frozen-opponent pair-level win rate +
-  // 95% CI per evaluated epoch, with a 50% reference line. Built from the same
-  // multistage rows' headline edges (winrate + winrate_ci95). Absent unless the
-  // anchor edge appears for >=2 epochs, so non-hexfield runs render nothing.
-  [["bc_prefit", "var(--accent)"], ["ep5", "#ff9f43"]].forEach(([anchorName, color]) => {
-    const edgeFor = row => (Array.isArray(row.edges) ? row.edges : []).find(
-      e => e && String(e.opponent || "").toLowerCase() === anchorName);
-    const wr = msRows.map(row => { const e = edgeFor(row); return e ? asFinite(e.winrate) : null; });
-    if (histSeriesCount(wr) < 2) return;
-    const ciArr = msRows.map(row => {
-      const e = edgeFor(row);
-      return e && Array.isArray(e.winrate_ci95) ? e.winrate_ci95 : null;
-    });
-    const bandLo = ciArr.map(c => (c ? asFinite(c[0]) : null));
-    const bandHi = ciArr.map(c => (c ? asFinite(c[1]) : null));
-    const half = msEpochs.map(() => 0.5);  // 50% reference
-    const tb = histChartSvg({
-      id: "t8_" + anchorName,
-      title: `Win-rate vs ${anchorName}`,
-      subtitle: msEvalCadenceSubtitle(msRows),
-      epochs: msEpochs,
-      domain: [0, 1],
-      series: [
-        { label: "win rate", color, values: wr, width: 1.8, points: true },
-        { label: "50%", color: "var(--muted)", values: half, width: 1 },
-      ],
-      band: histSeriesCount(bandLo) >= 2 ? { lo: bandLo, hi: bandHi, color: "rgba(39,215,230,0.12)" } : null,
-      tip: [
-        { label: "win%", values: wr, fmt: value => formatPercent(value) },
-        { label: "lo", values: bandLo, fmt: value => formatPercent(value) },
-        { label: "hi", values: bandHi, fmt: value => formatPercent(value) },
-      ],
-      format: value => formatPercent(value),
-      latest: formatPercent(histLatestNonNull(wr)),
-    });
-    if (tb) charts.push(tb);
-  });
-  // T9 SealBot zero-point winrate over epochs — the descriptive cross-lineage
-  // progress signal the eval actually claims compounds (0.28 -> ~0.55). Built
-  // from each report's sealbot edge winrate (else the sealbot_winrate_ci95
-  // midpoint), with the CI band where present.
-  const sbWr = msRows.map(row => msSealbotWinrate(row));
-  if (histSeriesCount(sbWr) >= 2) {
+  // SealBot zero-point winrate companion — the drift-immune progress signal.
+  const sbWrSeries = msRows.map(row => msSealbotWinrate(row));
+  if (histSeriesCount(sbWrSeries) >= 2) {
     const sbCi = msRows.map(row => {
       const e = (Array.isArray(row.edges) ? row.edges : []).find(
         x => x && String(x.opponent || x.role || "").toLowerCase() === "sealbot");
@@ -3919,34 +3998,151 @@ function renderHistTrends(runs) {
     const sbLo = sbCi.map(c => (c ? asFinite(c[0]) : null));
     const sbHi = sbCi.map(c => (c ? asFinite(c[1]) : null));
     const sbHalf = msEpochs.map(() => 0.5);
-    const t9 = histChartSvg({
-      id: "t9_sealbot",
-      title: "SealBot win-rate (zero-point)",
+    const t = histChartSvg({
+      id: "strengthSealbot",
+      title: "SealBot win%",
       subtitle: msEvalCadenceSubtitle(msRows),
       epochs: msEpochs,
       domain: [0, 1],
       series: [
-        { label: "win rate", color: "#36d399", values: sbWr, width: 1.8, points: true },
+        { label: "win rate", color: "#36d399", values: sbWrSeries, width: 1.8, points: true },
         { label: "50%", color: "var(--muted)", values: sbHalf, width: 1 },
       ],
       band: histSeriesCount(sbLo) >= 2 ? { lo: sbLo, hi: sbHi, color: "rgba(54,211,153,0.12)" } : null,
       tip: [
-        { label: "win%", values: sbWr, fmt: value => formatPercent(value) },
+        { label: "win%", values: sbWrSeries, fmt: value => formatPercent(value) },
         { label: "lo", values: sbLo, fmt: value => formatPercent(value) },
         { label: "hi", values: sbHi, fmt: value => formatPercent(value) },
       ],
       format: value => formatPercent(value),
-      latest: formatPercent(histLatestNonNull(sbWr)),
+      latest: formatPercent(histLatestNonNull(sbWrSeries)),
     });
-    if (t9) charts.push(t9);
+    if (t) charts.push(t);
   }
-  const body = charts.filter(Boolean).join("");
-  const caption = body && run && (runs || []).length > 1
-    ? `<div class="hist-trends-caption">Charts: ${escapeText(run.name || "latest run")}</div>`
-    : "";
-  histTrends.innerHTML = body ? `${caption}${body}` : "";
+  // Each curve becomes a peer card in the grid (not a stacked two-row block).
+  const curveCards = charts.map(c => `<div class="hist-strength-card">${c}</div>`).join("");
+
+  // ---- Opponent cards: top BT rungs + per-opponent W-L (each its own card) -
+  const opponentCards = msStrengthOpponentPanel(run, latest);
+
+  const caption = (runs || []).length > 1
+    ? `<div class="hist-trends-caption">Strength &amp; eval: ${escapeText((run && run.name) || "latest run")}</div>`
+    : `<div class="hist-trends-caption">Strength &amp; eval</div>`;
+  // Single responsive grid: full-width hero banner + four equal-weight cards
+  // (Elo curve | SealBot curve | BT ladder | latest W-L) that auto-fit columns.
+  histStrength.innerHTML = `${caption}<div class="hist-strength-grid">${heroBlock}${curveCards}${opponentCards}</div>`;
+  histStrength.hidden = false;
 }
 
+// The compact opponent panel for #histStrength: the TOP rungs of the unified BT
+// ladder (checkpoints collapsed to one row each, anchors kept) beside the latest
+// per-opponent pooled W-L — replacing the old giant full-ladder bar chart + the
+// separate W-L table. Pulls from the same run.eval_pool + latest report ratings.
+function msStrengthOpponentPanel(run, latest) {
+  const pool = run && typeof run.eval_pool === "object" && run.eval_pool ? run.eval_pool : null;
+  const edges = pool && Array.isArray(pool.edges) ? pool.edges.filter(e => e && typeof e === "object") : [];
+  const players = msPlayers(latest);
+  const anchorName = String((pool && pool.anchor) || latest.anchor || "sealbot");
+
+  // --- Unified BT ladder (top rungs) -------------------------------------
+  const eloOf = label => { const p = players.find(x => x && x.label === label); return p ? asFinite(p.elo) : null; };
+  const ciOf = label => { const p = players.find(x => x && x.label === label); return p && Array.isArray(p.elo_ci95) ? p.elo_ci95 : null; };
+  const epOfLabel = label => { const m = /^(?:cand_)?ep(\d+)$/.exec(String(label || "")); return m ? Number(m[1]) : null; };
+  const ckptEpochs = new Set();
+  players.forEach(p => { const e = epOfLabel(p.label); if (e !== null) ckptEpochs.add(e); });
+  const unified = [];
+  ckptEpochs.forEach(ep => {
+    const candElo = eloOf(`cand_ep${ep}`);
+    const oppElo = eloOf(`ep${ep}`);
+    const shown = candElo !== null ? candElo : oppElo;
+    if (shown === null) return;
+    const split = candElo !== null && oppElo !== null ? candElo - oppElo : null;
+    unified.push({ key: `ep${ep}`, label: `epoch ${ep}`, elo: shown, ci: ciOf(`cand_ep${ep}`) || ciOf(`ep${ep}`), split, epoch: ep, isAnchor: false });
+  });
+  const anchors = players
+    .filter(p => epOfLabel(p.label) === null)
+    .map(p => ({ key: p.label, label: p.label, elo: asFinite(p.elo), ci: Array.isArray(p.elo_ci95) ? p.elo_ci95 : null, split: null, epoch: null, isAnchor: !!p.is_anchor }));
+  const ladderItems = unified.concat(anchors)
+    .filter(it => it.elo !== null)
+    .sort((a, b) => b.elo - a.elo);
+  // Compact: top 5 rungs, but always keep the anchor row visible for the 0-point.
+  let shown = ladderItems.slice(0, 5);
+  const anchorItem = ladderItems.find(it => it.isAnchor);
+  if (anchorItem && !shown.includes(anchorItem)) shown = shown.concat(anchorItem);
+  let ladderBlock = "";
+  if (shown.length) {
+    const elos = ladderItems.map(it => it.elo);
+    const maxElo = Math.max(...elos);
+    const minElo = Math.min(...elos);
+    const span = maxElo - minElo;
+    const rows = shown.map(it => {
+      const pct = span > 0 ? Math.max(4, Math.round(((it.elo - minElo) / span) * 100)) : 50;
+      const anchorTag = it.isAnchor ? `<span class="hist-rating-anchor" title="${escapeAttr(anchorName)} anchor (pinned 0 Elo)">⚓</span>` : "";
+      const ciTxt = Array.isArray(it.ci) && asFinite(it.ci[0]) !== null && asFinite(it.ci[1]) !== null
+        ? ` [${Math.round(asFinite(it.ci[0]))}–${Math.round(asFinite(it.ci[1]))}]` : "";
+      const splitTxt = it.split !== null && Math.abs(it.split) >= 1
+        ? `<span class="hist-eval-split" title="cand-vs-replay Elo split for the SAME checkpoint (BT single-node artifact)">Δ${it.split > 0 ? "+" : ""}${Math.round(it.split)}</span>` : "";
+      const replay = it.epoch !== null ? histEvalReplayLink(it.epoch, "↪") : "<span></span>";
+      return `<div class="hist-loss-row hist-eval-ladder-row">`
+        + `<span class="hist-loss-label" title="${escapeAttr(it.label)}">${escapeText(it.label)}${anchorTag}${splitTxt}</span>`
+        + `<span class="hist-loss-bar"><span class="hist-loss-bar-fill" style="width:${pct}%"></span><span class="hist-loss-val">${Math.round(it.elo)}${escapeText(ciTxt)}</span></span>`
+        + `${replay}</div>`;
+    }).join("");
+    const more = ladderItems.length > shown.length ? `<span class="hist-strength-more">+${ladderItems.length - shown.length} more rungs</span>` : "";
+    ladderBlock = `<div class="hist-strength-card"><div class="hist-insp-group"><span class="hist-insp-group-title">BT ladder (top) · anchor ${escapeText(anchorName)} = 0</span>${rows}${more}</div></div>`;
+  }
+
+  // --- Per-opponent pooled W-L (latest epoch's matchups) ------------------
+  // Group raw head-to-head by unordered pair; show only the LATEST epoch's
+  // matchups (the most recent candidate) so the panel stays short.
+  let matrixBlock = "";
+  if (edges.length) {
+    const pairs = new Map();
+    edges.forEach(e => {
+      const a = String(e.a || ""); const b = String(e.b || "");
+      if (!a || !b) return;
+      const key = [a, b].join(" ↔ ");
+      let rec = pairs.get(key);
+      if (!rec) { rec = { a, b, wa: 0, wb: 0, epochs: [], kind: e.kind, weight: e.weight }; pairs.set(key, rec); }
+      const raw = e.raw && typeof e.raw === "object" ? e.raw : {};
+      const wa = asFinite(raw.physical_wins_a);
+      const wb = asFinite(raw.physical_wins_b);
+      const wcand = asFinite(raw.physical_wins_cand);
+      const wsb = asFinite(raw.physical_wins_sealbot);
+      if (wa !== null && wb !== null) { rec.wa += wa; rec.wb += wb; }
+      else if (wcand !== null && wsb !== null) { rec.wa += wcand; rec.wb += wsb; }
+      else { rec.wa += asFinite(e.wins_a) || 0; rec.wb += asFinite(e.wins_b) || 0; }
+      const ep = asFinite(e.epoch);
+      if (ep !== null) rec.epochs.push(ep);
+    });
+    const recs = Array.from(pairs.values());
+    const latestEp = recs.reduce((m, r) => Math.max(m, r.epochs.length ? Math.max(...r.epochs) : -Infinity), -Infinity);
+    const pairRows = recs
+      .filter(rec => Number.isFinite(latestEp) ? (rec.epochs.length && Math.max(...rec.epochs) === latestEp) : true)
+      .sort((x, y) => Math.max(...y.epochs, 0) - Math.max(...x.epochs, 0))
+      .map(rec => {
+        const wa = Math.round(rec.wa); const wb = Math.round(rec.wb);
+        const lead = wa > wb ? "hist-eval-win" : wa < wb ? "hist-eval-loss" : "hist-eval-draw";
+        const kindBadge = rec.kind === "sealbot" ? `<span class="hist-rating-tag hist-rating-tag-muted">SealBot ×${formatDecimal(rec.weight, 1)}</span>` : "";
+        const epLast = rec.epochs.length ? Math.max(...rec.epochs) : null;
+        const replay = epLast !== null ? histEvalReplayLink(epLast, "↪") : "";
+        return `<div class="hist-loss-row hist-eval-pair">`
+          + `<span class="hist-loss-label" title="${escapeAttr(rec.a + " vs " + rec.b)}">${escapeText(rec.a)} vs ${escapeText(rec.b)}</span>`
+          + `<span class="hist-eval-record ${lead}">${wa}–${wb}</span>${kindBadge}${replay}</div>`;
+      }).join("");
+    if (pairRows) {
+      const epTxt = Number.isFinite(latestEp) ? ` · e${latestEp}` : "";
+      matrixBlock = `<div class="hist-strength-card"><div class="hist-insp-group"><span class="hist-insp-group-title">Latest W–L (pooled head-to-head${epTxt})</span>${pairRows}</div></div>`;
+    }
+  }
+
+  // Each block is already wrapped as a peer card; the parent grid lays them out.
+  return [ladderBlock, matrixBlock].filter(Boolean).join("");
+}
+
+// SUPERSEDED by renderHistStrength (the compact #histStrength panel). No longer
+// dispatched; #histRatingTable stays hidden/empty. Kept only as reference for the
+// verdict-chip / Δ-Elo-CI / rating-row logic now folded into the hero + ladder.
 // Standalone "Multi-stage eval" region (hexfield opt-in): the SealBot-pinned Elo
 // RATING TABLE from the newest report's ratings.players, the latest PROMOTE/
 // REGRESS/INCONCLUSIVE VERDICT (+ note + pure-eval indicator), and the headline
@@ -4096,6 +4292,9 @@ function histEvalReplayLink(epoch, label) {
     + ` title="Show evaluation replays for epoch ${escapeAttr(ep)}">${escapeText(label || "replays")}</button>`;
 }
 
+// SUPERSEDED by msStrengthOpponentPanel (folded into #histStrength). No longer
+// dispatched; #histEvalPool stays hidden/empty. The compact panel reuses the same
+// unified-ladder + pooled-W-L logic, trimmed to the top rungs / latest matchups.
 // D2 + D3-C/E/F: the "Evaluation" region consuming the append-only Bradley-Terry
 // pool (run.eval_pool, 29 edges with raw head-to-head wins) + the latest report's
 // fitted ratings. Three blocks: a BT ladder UNIFIED by checkpoint identity (the
