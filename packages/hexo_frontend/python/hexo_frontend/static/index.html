@@ -256,6 +256,13 @@
         <label class="select-field"><span>Game #</span><select id="dbgCtxRecord" aria-label="Game record"></select></label>
         <label class="select-field"><span>Checkpoint A</span><select id="dbgCtxCkptA" aria-label="Checkpoint A"></select></label>
         <label class="select-field"><span>Checkpoint B</span><select id="dbgCtxCkptB" aria-label="Checkpoint B (compare)"><option value="">—</option></select></label>
+        <label class="select-field" id="dbgCtxRadiusField"><span>Radius</span>
+          <select id="dbgCtxRadius" aria-label="Model support radius" title="Support radius the model runs at — Auto detects from the run's eval (hexfield only)">
+            <option value="0">Auto</option>
+            <option value="4">R=4</option>
+            <option value="8">R=8</option>
+          </select>
+        </label>
         <button id="dbgCtxRefresh" type="button">Refresh</button>
         <span id="dbgCtxWorkerDot" class="dbg-worker-dot" role="img" aria-label="Worker status" title="Debug worker: unknown"></span>
       </div>
@@ -314,6 +321,7 @@
           <label><input type="checkbox" id="dbgTglNumbers" checked> Move #</label>
           <label><input type="checkbox" id="dbgTglLast" checked> Last move</label>
           <label><input type="checkbox" id="dbgTglLegalDim"> Dim illegal</label>
+          <label title="Shade engine-legal cells outside the model's support radius (hidden from the model)"><input type="checkbox" id="dbgTglBlind" checked> Model-blind</label>
         </div>
       </div>
 

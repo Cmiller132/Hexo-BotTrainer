@@ -1266,6 +1266,7 @@ class HexoPlayHandler(BaseHTTPRequestHandler):
                     _debug_ckpt_info(
                         str(query.get("run", [""])[0]),
                         str(query.get("checkpoint", [""])[0]),
+                        _query_int(query.get("radius", [None])[0]),
                     )
                 )
             elif path == "/api/debug/record_row":
@@ -1288,6 +1289,7 @@ class HexoPlayHandler(BaseHTTPRequestHandler):
                         str(query.get("checkpoint", [""])[0]),
                         _query_int(query.get("start", [None])[0]) or 0,
                         _query_int(query.get("count", [None])[0]) or 16,
+                        _query_int(query.get("radius", [None])[0]),
                     )
                 )
             elif path == "/" or path == "/index.html":
@@ -2018,6 +2020,72 @@ def _diag_prefix(run_dir: Path) -> str:
     return "dense_cnn"
 
 
+def _debug_detect_radius(run_dir: Path) -> int | None:
+    """Detected ``HEXFIELD_SUPPORT_RADIUS`` for a run, or ``None`` when it does
+    not apply or cannot be read. Source: the latest
+    ``hexfield.multistage_eval.epoch_*.json``'s ``featurize_radius`` (the one
+    structured on-disk record of the eval process's support radius). ``None`` for
+    non-hexfield lineages (dense_cnn/hexgt have no support radius). Hexfield with
+    no/old eval -> ``None``; the caller defaults to 8 and the UI override corrects
+    the rest (e.g. main_2, whose evals predate the ``featurize_radius``
+    annotation)."""
+
+    lineage = _debug_run_lineage(run_dir)
+    if not (lineage and "hexfield" in lineage.lower()):
+        return None
+    diag = run_dir / "diagnostics"
+    if not diag.is_dir():
+        return None
+    try:
+        names = sorted(
+            (
+                e.name
+                for e in os.scandir(diag)
+                if e.is_file()
+                and e.name.startswith("hexfield.multistage_eval.epoch_")
+                and e.name.endswith(".json")
+            ),
+            reverse=True,  # zero-padded epoch -> lexical desc == newest first
+        )
+    except OSError:
+        return None
+    for name in names:
+        try:
+            data = json.loads((diag / name).read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError):
+            continue
+        fit = data.get("ratings", {}).get("fit", {})
+        if isinstance(fit, dict) and "featurize_radius" in fit:
+            return int(fit["featurize_radius"])
+        for edge in data.get("edges", []):
+            if isinstance(edge, dict) and "featurize_radius" in edge:
+                return int(edge["featurize_radius"])
+    return None
+
+
+def _debug_resolve_radius(run_dir: Path | None, body: dict[str, Any]) -> int | None:
+    """The ``HEXFIELD_SUPPORT_RADIUS`` to run the worker at for this request, or
+    ``None`` when radius does not apply (non-hexfield lineage) so the worker is
+    not keyed on it. Manual override (body ``radius`` in {4,8}) wins; else
+    detected; else 8. Returns ``None`` when the run is not hexfield (detection
+    returned ``None`` AND no override) so dense/hexgt stay byte-identical."""
+
+    if run_dir is None:
+        return None
+    lineage = _debug_run_lineage(run_dir)
+    is_hexfield = bool(lineage and "hexfield" in lineage.lower())
+    override = body.get("radius")
+    if override in (4, 8, "4", "8"):
+        ov = int(override)
+        # Honor an explicit override only for hexfield runs (the UI shows the
+        # control only for hexfield); for non-hexfield, ignore it -> None.
+        return ov if is_hexfield else None
+    if not is_hexfield:
+        return None
+    detected = _debug_detect_radius(run_dir)
+    return detected if detected is not None else 8
+
+
 def _debug_checkpoints(run_name: str) -> dict[str, object]:
     run_dir = _debug_resolve_run_dir(run_name)
     if run_dir is None:
@@ -2054,7 +2122,13 @@ def _debug_checkpoints(run_name: str) -> dict[str, object]:
                 }
             )
     items.sort(key=lambda x: (not x["latest"], -(x["epoch"] if x["epoch"] is not None else -1), str(x["name"])))
-    return {"run": run_name, "checkpoints": items, "lineage": lineage, "worker": _debug_worker().status()}
+    return {
+        "run": run_name,
+        "checkpoints": items,
+        "lineage": lineage,
+        "support_radius_detected": _debug_detect_radius(run_dir),  # int | None
+        "worker": _debug_worker().status(),
+    }
 
 
 def _debug_games(run_name: str, source: str) -> dict[str, object]:
@@ -2222,8 +2296,10 @@ def _debug_action_prefix(body: dict[str, Any]) -> tuple[str, list[int]]:
     return run, full[:ply]
 
 
-def _debug_signature(prefix: str, ckpt_path: Path, action_ids: list[int], n: object) -> str:
-    return json.dumps([prefix, str(ckpt_path), action_ids, n], separators=(",", ":"))
+def _debug_signature(
+    prefix: str, ckpt_path: Path, action_ids: list[int], n: object, radius: int | None = None
+) -> str:
+    return json.dumps([prefix, str(ckpt_path), action_ids, n, radius], separators=(",", ":"))
 
 
 def _debug_analyze(body: dict[str, Any]) -> dict[str, object]:
@@ -2231,9 +2307,10 @@ def _debug_analyze(body: dict[str, Any]) -> dict[str, object]:
     ckpt_path = _debug_resolve_checkpoint(run, str(body.get("checkpoint", "")))
     n = body.get("n")
     planes = bool(body.get("planes", False))
-    signature = _debug_signature(f"analyze:planes={int(planes)}", ckpt_path, action_ids, n)
+    radius = _debug_resolve_radius(_debug_resolve_run_dir(run), body)
+    signature = _debug_signature(f"analyze:planes={int(planes)}", ckpt_path, action_ids, n, radius)
     return _debug_worker().cached(
-        signature, "analyze", checkpoint=str(ckpt_path), action_ids=action_ids, n=n, planes=planes
+        signature, "analyze", radius=radius, checkpoint=str(ckpt_path), action_ids=action_ids, n=n, planes=planes
     )
 
 
@@ -2245,11 +2322,13 @@ def _debug_search(body: dict[str, Any]) -> dict[str, object]:
     c_puct = float(body.get("c_puct", 1.5))
     seed = int(body.get("seed", 0) or 0)  # B2: forward to the worker (default keeps determinism tests)
     visits = max(1, min(visits, 20_000))  # bound CPU work per request
-    signature = _debug_signature(f"search:{visits}:{c_puct}:{seed}", ckpt_path, action_ids, n)
+    radius = _debug_resolve_radius(_debug_resolve_run_dir(run), body)
+    signature = _debug_signature(f"search:{visits}:{c_puct}:{seed}", ckpt_path, action_ids, n, radius)
     return _debug_worker().cached(
         signature,
         "search",
         timeout=debug_service.DEFAULT_TIMEOUT,
+        radius=radius,
         checkpoint=str(ckpt_path),
         action_ids=action_ids,
         visits=visits,
@@ -2268,6 +2347,7 @@ def _debug_search_tree(body: dict[str, Any]) -> dict[str, object]:
     run, action_ids = _debug_action_prefix(body)
     ckpt_path = _debug_resolve_checkpoint(run, str(body.get("checkpoint", "")))
     n = body.get("n")
+    radius = _debug_resolve_radius(_debug_resolve_run_dir(run), body)
     visits = max(1, min(int(body.get("visits", 512)), 20_000))
     c_puct = float(body.get("c_puct", 1.5))
     seed = int(body.get("seed", 0) or 0)
@@ -2293,12 +2373,13 @@ def _debug_search_tree(body: dict[str, Any]) -> dict[str, object]:
     # range, capped at 300s so one request cannot hog the single worker lock.
     timeout = min(300.0, max(debug_service.DEFAULT_TIMEOUT, visits * 0.03))
     signature = _debug_signature(
-        f"search_tree:{visits}:{c_puct}:{seed}:{max_depth}:{top_k}:{min_n}", ckpt_path, action_ids, n
+        f"search_tree:{visits}:{c_puct}:{seed}:{max_depth}:{top_k}:{min_n}", ckpt_path, action_ids, n, radius
     )
     return _debug_worker().cached(
         signature,
         "search_tree",
         timeout=timeout,
+        radius=radius,
         checkpoint=str(ckpt_path),
         action_ids=action_ids,
         visits=visits,
@@ -2323,6 +2404,7 @@ def _debug_attention(body: dict[str, Any]) -> dict[str, object]:
     run, action_ids = _debug_action_prefix(body)
     ckpt_path = _debug_resolve_checkpoint(run, str(body.get("checkpoint", "")))
     n = body.get("n")
+    radius = _debug_resolve_radius(_debug_resolve_run_dir(run), body)
 
     block = max(0, min(int(body.get("block", 0)), 2))
     raw_head = body.get("head")
@@ -2359,11 +2441,13 @@ def _debug_attention(body: dict[str, Any]) -> dict[str, object]:
         ckpt_path,
         action_ids,
         n,
+        radius,
     )
     return _debug_worker().cached(
         signature,
         "attention",
         timeout=debug_service.DEFAULT_TIMEOUT,
+        radius=radius,
         checkpoint=str(ckpt_path),
         action_ids=action_ids,
         block=block,
@@ -2373,13 +2457,23 @@ def _debug_attention(body: dict[str, Any]) -> dict[str, object]:
     )
 
 
-def _debug_ckpt_info(run_name: str, checkpoint: str) -> dict[str, object]:
+def _debug_ckpt_info(run_name: str, checkpoint: str, radius: int | None = None) -> dict[str, object]:
     """Checkpoint provenance WITHOUT paying an analyze (§3.8, fixes B3): the
-    worker ``info`` op (cached like any result) + a stat on the resolved file."""
+    worker ``info`` op (cached like any result) + a stat on the resolved file.
+
+    ``radius`` (optional UI override, 4|8) selects the worker's support radius so
+    ``meta.support_radius`` reflects the toggle; ``None`` -> detected-else-8 for
+    hexfield, no radius for other lineages."""
 
     ckpt_path = _debug_resolve_checkpoint(run_name, checkpoint)
-    signature = _debug_signature("info", ckpt_path, [], None)
-    meta = dict(_debug_worker().cached(signature, "info", checkpoint=str(ckpt_path)))
+    # info is radius-independent (reads checkpoint meta) BUT it now also surfaces
+    # the worker's ACTIVE support radius (meta.support_radius), so run the op in a
+    # worker spawned at the run's radius. An explicit query override (radius=4|8)
+    # lets the UI's info chip follow the toggle; else detected-else-8 for hexfield.
+    override = {"radius": radius} if radius in (4, 8) else {}
+    radius = _debug_resolve_radius(_debug_resolve_run_dir(run_name), override)
+    signature = _debug_signature("info", ckpt_path, [], None, radius)
+    meta = dict(_debug_worker().cached(signature, "info", radius=radius, checkpoint=str(ckpt_path)))
     arch = meta.get("arch")
     if isinstance(arch, dict):  # contract wants a display string, not the raw dict
         meta["arch"] = ", ".join(f"{key}={arch[key]}" for key in sorted(arch)) or None
@@ -2489,15 +2583,27 @@ def _debug_record_row(run_name: str, artifact_path: str, record_index: int, ply:
 
 
 def _debug_game_eval(
-    run_name: str, artifact_path: str, record_index: int, checkpoint: str, start: int, count: int
+    run_name: str,
+    artifact_path: str,
+    record_index: int,
+    checkpoint: str,
+    start: int,
+    count: int,
+    radius: int | None = None,
 ) -> dict[str, object]:
     """Game Error Sweep chunk (§3.10): the .hxr record is opened once here, the
-    worker decodes the matching .npz shard once and joins per ply internally."""
+    worker decodes the matching .npz shard once and joins per ply internally.
+
+    ``radius`` (optional UI override, 4|8) keys the worker's support radius so the
+    sweep evaluates at the run's trained radius; ``None`` -> detected-else-8 for
+    hexfield, no radius for other lineages."""
 
     record, _players, _records = _debug_open_record(run_name, artifact_path, record_index)
     action_ids = [int(a) for a in record.action_ids]
     total = len(action_ids)
     ckpt_path = _debug_resolve_checkpoint(run_name, checkpoint)
+    override = {"radius": radius} if radius in (4, 8) else {}
+    eval_radius = _debug_resolve_radius(_debug_resolve_run_dir(run_name), override)
     start = max(0, min(int(start), total))
     count = max(1, min(int(count), 32))
     plies = list(range(start, min(start + count, total)))
@@ -2507,12 +2613,13 @@ def _debug_game_eval(
         npz_path = _debug_resolve_record_npz(run_name, artifact_path, record.game_id)
 
     signature = _debug_signature(
-        f"game_eval:{start}:{count}:{winner}:{npz_path}", ckpt_path, action_ids, None
+        f"game_eval:{start}:{count}:{winner}:{npz_path}", ckpt_path, action_ids, None, eval_radius
     )
     raw = _debug_worker().cached(
         signature,
         "game_eval",
         timeout=debug_service.DEFAULT_TIMEOUT,
+        radius=eval_radius,
         checkpoint=str(ckpt_path),
         action_ids=action_ids,
         plies=plies,

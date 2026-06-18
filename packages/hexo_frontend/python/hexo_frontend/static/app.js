@@ -5561,6 +5561,8 @@ const dbg = {
   games: [],
   checkpoints: [],
   worker: null,        // worker status from /api/debug/checkpoints
+  lineage: "",         // run lineage from /api/debug/checkpoints (hexfield|dense_cnn|hexgt|"")
+  radiusDetected: null, // support_radius_detected from /api/debug/checkpoints (int|null) — Auto seed
   records: [],         // record_games from the last recorded position payload
   // Current data + the cache key each piece was rendered for (stale dots, M14).
   position: null,
@@ -5632,7 +5634,7 @@ const dbg = {
   // {position, analysis, search, tree, record_row}; revisiting a ply, undoing a
   // chip, or flipping ckptA<->ckptB re-renders with zero network requests.
   cache: new Map(),
-  ckptInfo: new Map(),    // `${run}|${ckpt}` -> /api/debug/ckpt_info payload (B3/M7)
+  ckptInfo: new Map(),    // dbgCkptInfoKey() `${run}|${ckpt}|${radius}` -> /api/debug/ckpt_info payload (B3/M7)
   // Full ordered stone list + action ids for the current RECORDED game, captured
   // from any loaded position. Lets prev/next/slider re-render the board for any
   // ply INSTANTLY client-side (stones with index <= ply) without waiting on the
@@ -5698,7 +5700,7 @@ function dbgUnpackActionId(actionId) {
 // ---- nav state + URL hash (spec M1) ----------------------------------------
 
 function dbgDefaultNav() {
-  return { run: "", src: "selfplay", path: "", rec: 0, ply: null, ckptA: "", ckptB: "", acts: [], tab: "heads", mode: "prior", attnq: "", attnblk: 0, attnhead: "" };
+  return { run: "", src: "selfplay", path: "", rec: 0, ply: null, ckptA: "", ckptB: "", acts: [], tab: "heads", mode: "prior", attnq: "", attnblk: 0, attnhead: "", radius: 0 };
 }
 
 function dbgNavToHash(nav) {
@@ -5720,6 +5722,9 @@ function dbgNavToHash(nav) {
   if (nav.attnq) parts.push("attnq=" + enc(nav.attnq));
   if (nav.attnblk) parts.push("attnblk=" + String(nav.attnblk));
   if (nav.attnhead !== "" && nav.attnhead != null) parts.push("attnhead=" + enc(String(nav.attnhead)));
+  // Manual support-radius override (4|8); omit on Auto (0) so existing deep links
+  // are unchanged and the backend default/detection path is exercised.
+  if (nav.radius) parts.push("radius=" + String(nav.radius));
   return "#debug" + (parts.length ? "?" + parts.join("&") : "");
 }
 
@@ -5753,6 +5758,9 @@ function dbgHashToNav(hash) {
     const ahn = parseInt(ah, 10);
     nav.attnhead = Number.isFinite(ahn) ? Math.max(0, Math.min(ahn, 3)) : "";
   }
+  // Support-radius override: only 4 or 8 are valid; anything else is Auto (0).
+  const rad = parseInt(params.get("radius"), 10);
+  nav.radius = (rad === 4 || rad === 8) ? rad : 0;
   return nav;
 }
 
@@ -5965,10 +5973,15 @@ async function dbgLoadCheckpoints(run) {
     const data = await debugFetchJson(`/api/debug/checkpoints?run=${encodeURIComponent(run)}`);
     dbg.checkpoints = data.checkpoints || [];
     dbg.worker = data.worker || null;
+    dbg.lineage = data.lineage || "";
+    // int|null detected support radius (hexfield only); seeds the Auto display.
+    dbg.radiusDetected = (typeof data.support_radius_detected === "number") ? data.support_radius_detected : null;
     dbgRenderWorkerDot(dbg.worker && dbg.worker.alive ? "ok" : "");
   } catch (e) {
     dbg.checkpoints = [];
     dbg.worker = null;
+    dbg.lineage = "";
+    dbg.radiusDetected = null;
     dbgRenderWorkerDot("err");
     debugSetStatus(`Checkpoints: ${e.message}`, "error");
   }
@@ -5995,10 +6008,11 @@ async function dbgAutoPickGame(seq) {
   for (const g of dbg.games) {
     try {
       const params = new URLSearchParams({ run: dbg.nav.run, path: g.path, record: "0", ply: "999999" });
+      dbgRadiusParam(params);
       const data = await debugFetchJson(`/api/debug/position?${params.toString()}`);
       if (seq !== dbg.applySeq) return;
       const total = data.debug.total;
-      const entry = dbgCacheEntry([dbg.nav.run, g.path, 0, total, dbg.nav.ckptA, ""].join("|"));
+      const entry = dbgCacheEntry(dbgCacheKey(Object.assign({}, dbg.nav, { path: g.path, rec: 0, ply: total, acts: [] }), dbg.nav.ckptA));
       entry.position = data;
       debugSetStatus("");
       dbgNavigate({ path: g.path, rec: 0, ply: total, acts: [] }, { replace: true });
@@ -6018,10 +6032,11 @@ async function dbgResolveEndPly(seq) {
   debugSetStatus("Loading position…", "busy");
   try {
     const params = new URLSearchParams({ run: nav.run, path: nav.path, record: String(nav.rec), ply: "999999" });
+    dbgRadiusParam(params);
     const data = await debugFetchJson(`/api/debug/position?${params.toString()}`);
     if (seq !== dbg.applySeq) return;
     const total = data.debug.total;
-    const entry = dbgCacheEntry([nav.run, nav.path, nav.rec, total, nav.ckptA, ""].join("|"));
+    const entry = dbgCacheEntry(dbgCacheKey(Object.assign({}, nav, { ply: total, acts: [] }), nav.ckptA));
     entry.position = data;
     debugSetStatus("");
     dbgNavigate({ ply: total }, { replace: true });
@@ -6040,7 +6055,9 @@ function dbgRefreshSources() {
 // ---- cache + keys (spec M12) ------------------------------------------------
 
 function dbgCacheKey(nav, ckpt) {
-  return [nav.run, nav.path, nav.rec, nav.ply, ckpt || "", (nav.acts || []).join(",")].join("|");
+  // Include the support-radius override so R=4 and R=8 results never collide in
+  // the M12 client cache (a 4<->8 toggle must refetch, not serve the wrong set).
+  return [nav.run, nav.path, nav.rec, nav.ply, ckpt || "", (nav.acts || []).join(","), nav.radius || 0].join("|");
 }
 
 function dbgCurrentKey() {
@@ -6160,6 +6177,7 @@ function dbgBackfillPlacements(total) {
   if (dbg.placementsBackfill === gameKey) return;
   dbg.placementsBackfill = gameKey;
   const params = new URLSearchParams({ run: nav.run, path: nav.path, record: String(nav.rec), ply: String(total) });
+  dbgRadiusParam(params);
   debugFetchJson(`/api/debug/position?${params.toString()}`).then(data => {
     if (gameKey !== `${dbg.nav.run}|${dbg.nav.path}|${dbg.nav.rec}`) return;  // game changed mid-flight
     // Warm the M12 cache for the final-ply key while the payload is in hand.
@@ -6254,9 +6272,11 @@ async function dbgFetchCurrent() {
         if (seq !== dbg.posSeq) return;
         const prefix = recorded.slice(0, nav.ply).concat(nav.acts);
         const params = new URLSearchParams({ run: nav.run, actions: prefix.join(","), ply: String(prefix.length) });
+        dbgRadiusParam(params);
         data = await debugFetchJson(`/api/debug/position?${params.toString()}`);
       } else {
         const params = new URLSearchParams({ run: nav.run, path: nav.path, record: String(nav.rec), ply: String(nav.ply) });
+        dbgRadiusParam(params);
         data = await debugFetchJson(`/api/debug/position?${params.toString()}`);
       }
       if (seq !== dbg.posSeq) return;  // superseded by a newer nav — drop stale fetch
@@ -6283,12 +6303,13 @@ async function dbgEnsureRecordedActs() {
   // Deep link straight into a branch: one recorded-position fetch supplies the
   // full action-id list (and lands in the cache for the plain-ply key).
   const params = new URLSearchParams({ run: nav.run, path: nav.path, record: String(nav.rec), ply: String(Math.max(0, nav.ply || 0)) });
+  dbgRadiusParam(params);
   const data = await debugFetchJson(`/api/debug/position?${params.toString()}`);
   const d = data.debug || {};
   dbg.gameActs = d.action_ids || [];
   dbg.gameActsKey = `${nav.run}|${nav.path}|${nav.rec}`;
   if (Array.isArray(data.record_games) && data.record_games.length) dbg.records = data.record_games;
-  const entry = dbgCacheEntry([nav.run, nav.path, nav.rec, d.ply, nav.ckptA, ""].join("|"));
+  const entry = dbgCacheEntry(dbgCacheKey(Object.assign({}, nav, { ply: d.ply, acts: [] }), nav.ckptA));
   if (!entry.position) entry.position = data;
   return dbg.gameActs;
 }
@@ -6296,6 +6317,9 @@ async function dbgEnsureRecordedActs() {
 async function dbgRequestBody(checkpoint) {
   const nav = dbg.nav;
   const body = { run: nav.run, checkpoint };
+  // Manual support-radius override (hexfield only); absent => backend detects/
+  // defaults. Covers analyze/search/search_tree/attention bodies built here.
+  if (nav.radius) body.radius = nav.radius;
   if (nav.acts.length) {
     // Branch prefix = recorded actions[0..ply] + injected tail. The recorded
     // list may be missing (gameActsKey points at another game after the user
@@ -6310,6 +6334,62 @@ async function dbgRequestBody(checkpoint) {
     body.ply = nav.ply;
   }
   return body;
+}
+
+// Append the manual support-radius override (4|8) to a URLSearchParams for the
+// GET endpoints (game_eval / trajectory / ckpt_info / prefetch position+analyze).
+// No-op on Auto (0) so the backend detection/default path stays the source of
+// truth and non-hexfield runs (radius never set) are byte-identical to today.
+function dbgRadiusParam(params) {
+  if (dbg.nav.radius) params.set("radius", String(dbg.nav.radius));
+  return params;
+}
+
+// Detected support radius for the current run when on Auto: prefer the checkpoints
+// payload's support_radius_detected (backend-detected from the latest eval), else
+// the in-memory eval rows' latest ratings.fit.featurize_radius, else null. Display
+// seed only — it never writes nav.radius (Auto must exercise the backend default).
+function dbgDetectedRadius() {
+  if (typeof dbg.radiusDetected === "number") return dbg.radiusDetected;
+  const run = (trainingRuns || []).find(r => r && r.name === dbg.nav.run);
+  const rows = run ? msHistoryRows(run) : [];
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const fit = rows[i] && rows[i].ratings && rows[i].ratings.fit;
+    const fr = fit && fit.featurize_radius;
+    if (typeof fr === "number") return fr;
+  }
+  return null;
+}
+
+// The support radius to DISPLAY. Truth order: the analyze meta (what the worker
+// actually ran at) > the manual override > detection > 8. Lineage-gated: returns
+// null for KNOWN non-hexfield runs (no support radius applies) so the UI hides it.
+function dbgEffectiveRadius() {
+  const lin = dbgAttnLineage();  // "" unknown | hexfield | dense_cnn | hexgt
+  if (lin && lin !== "hexfield") return null;
+  const a = dbgFreshData("analysis");
+  if (a && a.meta && typeof a.meta.support_radius === "number") return a.meta.support_radius;
+  if (dbg.nav.radius) return dbg.nav.radius;
+  const det = dbgDetectedRadius();
+  if (typeof det === "number") return det;
+  return 8;
+}
+
+// ckpt_info cache key: include the radius override so a 4<->8 toggle refetches
+// (its meta.support_radius is radius-dependent). Lineage / has_cell_q are NOT
+// radius-dependent, so their readers fall back across radii (see dbgCkptInfoAny).
+function dbgCkptInfoKey(name) {
+  return `${dbg.nav.run}|${name}|${dbg.nav.radius || 0}`;
+}
+
+// Radius-agnostic ckpt_info lookup for the radius-INDEPENDENT fields (lineage,
+// has_cell_q): try the active-radius slot first, else any slot for run|name.
+function dbgCkptInfoAny(name) {
+  const exact = dbg.ckptInfo.get(dbgCkptInfoKey(name));
+  if (exact) return exact;
+  const pfx = `${dbg.nav.run}|${name}|`;
+  for (const [k, v] of dbg.ckptInfo) if (k.startsWith(pfx)) return v;
+  return null;
 }
 
 async function dbgEnsureAnalysis(key, entry) {
@@ -6479,12 +6559,13 @@ async function dbgEnsureCkptInfo(force) {
   // readable WITHOUT paying an analyze.
   const nav = dbg.nav;
   for (const name of [nav.ckptA, nav.ckptB].filter(Boolean)) {
-    const key = `${nav.run}|${name}`;
+    const key = dbgCkptInfoKey(name);
     if (force) dbg.ckptInfo.delete(key);
     if (dbg.ckptInfo.has(key)) continue;
     dbgRenderCkptPanel();  // show "loading…" while the worker round-trips
     try {
       const params = new URLSearchParams({ run: nav.run, checkpoint: name });
+      dbgRadiusParam(params);
       dbg.ckptInfo.set(key, await debugFetchJson(`/api/debug/ckpt_info?${params.toString()}`));
     } catch (e) {
       dbg.ckptInfo.set(key, { error: e.message });
@@ -6503,6 +6584,7 @@ async function dbgPlotTrajectory() {
   debugSetStatus("Re-evaluating the whole game on CPU…", "busy");
   try {
     const params = new URLSearchParams({ run: nav.run, path: nav.path, record: String(nav.rec), checkpoint: nav.ckptA });
+    dbgRadiusParam(params);
     dbg.trajectory = await debugFetchJson(`/api/debug/trajectory?${params.toString()}`);
     dbg.trajectoryKey = `${nav.run}|${nav.path}|${nav.rec}|${nav.ckptA}`;
     debugSetStatus("");
@@ -6709,6 +6791,7 @@ async function dbgRunSweep() {
         run: nav.run, path: nav.path, record: String(nav.rec), checkpoint: nav.ckptA,
         start: String(start), count: "16",
       });
+      dbgRadiusParam(params);
       const data = await debugFetchJson(`/api/debug/game_eval?${params.toString()}`);
       sweep.total = data.total;
       sweep.winner = data.winner;
@@ -7399,6 +7482,7 @@ async function dbgRunCkptSweep() {
     const bodyBase = nav0.acts.length
       ? { run: nav0.run, action_ids: (await dbgEnsureRecordedActs()).slice(0, nav0.ply).concat(nav0.acts) }
       : { run: nav0.run, path: nav0.path, record: nav0.rec, ply: nav0.ply };
+    if (nav0.radius) bodyBase.radius = nav0.radius;  // run the sweep at the active radius
     for (const ck of list) {
       if (sweep.abort || !sameNav()) break;
       const key = dbgCacheKey(nav0, ck.name);
@@ -7517,6 +7601,7 @@ function dbgMaybePrefetch() {
       const entry = dbgCacheEntry(target.key);
       if (!entry.position) {
         const params = new URLSearchParams({ run: nav.run, path: nav.path, record: String(nav.rec), ply: String(target.ply) });
+        dbgRadiusParam(params);
         const res = await fetch(`/api/debug/position?${params.toString()}`, { signal: ctl.signal });
         const data = await safeJson(res);
         if (!res.ok || !data || data.error) return;
@@ -7526,6 +7611,7 @@ function dbgMaybePrefetch() {
         entry.analysisPending = true;
         try {
           const body = { run: nav.run, checkpoint: nav.ckptA, path: nav.path, record: nav.rec, ply: target.ply };
+          if (nav.radius) body.radius = nav.radius;
           const res = await fetch("/api/debug/analyze", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -7651,7 +7737,7 @@ function dbgSyncPlaneSelect() {
 function dbgAttnLineage() {
   const a = dbgFreshData("analysis");
   if (a && a.meta && a.meta.lineage) return String(a.meta.lineage);
-  const info = dbg.ckptInfo.get(`${dbg.nav.run}|${dbg.nav.ckptA}`);
+  const info = dbgCkptInfoAny(dbg.nav.ckptA);
   if (info && info.meta && info.meta.lineage) return String(info.meta.lineage);
   return "";
 }
@@ -7670,7 +7756,7 @@ function dbgHasCellQ() {
   // (no meta yet) stays false so the Q button is disabled until we know.
   const a = dbgFreshData("analysis");
   if (a && a.meta && typeof a.meta.has_cell_q === "boolean") return a.meta.has_cell_q;
-  const info = dbg.ckptInfo.get(`${dbg.nav.run}|${dbg.nav.ckptA}`);
+  const info = dbgCkptInfoAny(dbg.nav.ckptA);
   if (info && info.meta && typeof info.meta.has_cell_q === "boolean") return info.meta.has_cell_q;
   return false;
 }
@@ -8022,6 +8108,16 @@ function dbgSyncControls() {
   const ckptOptions = dbg.checkpoints.map(c => `<option value="${escapeAttr(c.name)}">${escapeText(dbgCkptLabel(c))}</option>`).join("");
   dbgSyncSelect("dbgCtxCkptA", ckptOptions || `<option value="">—</option>`, nav.ckptA);
   dbgSyncSelect("dbgCtxCkptB", `<option value="">—</option>` + ckptOptions, nav.ckptB);
+  // Support-radius override (hexfield only). The control is hidden for KNOWN
+  // dense/hexgt lineages (no support radius); unknown stays visible until the
+  // analyze/ckpt_info meta resolves the lineage.
+  const radSel = dbgEl("dbgCtxRadius");
+  if (radSel) radSel.value = String(nav.radius || 0);
+  const radField = dbgEl("dbgCtxRadiusField");
+  if (radField) {
+    const lin = dbgAttnLineage();
+    radField.hidden = Boolean(lin) && lin !== "hexfield";
+  }
   document.querySelectorAll("#dbgTabs [data-tab]").forEach(b => b.classList.toggle("active", b.dataset.tab === nav.tab));
   for (const tab of DBG_TABS) {
     const panel = dbgEl(DBG_TAB_IDS[tab]);
@@ -8072,6 +8168,15 @@ function dbgRenderCrumb() {
   if (nav.ply != null) parts.push(`ply ${nav.ply}${total != null ? "/" + total : ""}`);
   if (nav.acts.length) parts.push(`branch +${nav.acts.length}`);
   if (nav.ckptA) parts.push(dbgCkptShort(nav.ckptA) + (nav.ckptB ? ` vs ${dbgCkptShort(nav.ckptB)}` : ""));
+  // Active support radius (hexfield only). Prefer the analyze meta (what the
+  // worker actually ran at); annotate "(auto)" when no manual override is set.
+  const effR = dbgEffectiveRadius();
+  if (effR != null) parts.push(`R=${effR}${nav.radius ? "" : " (auto)"}`);
+  // Candidate vs engine-legal counts: the R-restriction is obvious when they diverge.
+  const a = dbgFreshData("analysis");
+  if (a && typeof a.candidate_count === "number" && typeof a.legal_count === "number") {
+    parts.push(`cand ${a.candidate_count}/legal ${a.legal_count}`);
+  }
   el.textContent = parts.join(" · ");
 }
 
@@ -8564,10 +8669,16 @@ function dbgRenderBoard() {
     // fills it with the player colour at opacity == attention, so zero attention shows
     // just the outline (no fill) and tint grows in only where the query attends.
     const stoneTint = attnStone ? (h.placement.player === "player0" ? "var(--p0)" : "var(--p1)") : null;
+    // MODEL-BLIND cells: engine-legal (R=8) yet OUTSIDE the model's restricted
+    // candidate set (radius < d <= 8) — moves the model was never trained to see.
+    // Gate on freshA so a cell is never mislabeled before the current analyze lands;
+    // at R=8 candidate==legal so `hidden` is always false (main_1/dense/hexgt unchanged).
+    const hidden = Boolean(freshA) && h.legal && !h.candidate && !isStone;
     const fill = isStone ? (attnStone ? "transparent" : playerColor(h.placement.player)) : "#101924";
-    const stroke = attnStone ? stoneTint : (isStone ? "#708296" : "#2c3d50");
-    const opacity = isStone ? "1" : (h.legal || h.candidate ? "0.7" : (ov.legalDim ? "0.18" : "0.45"));
-    html += `<path class="dbg-cell" d="${path(h.x, h.y, HEX - 1)}" fill="${fill}" stroke="${stroke}" stroke-width="${attnStone ? "1.6" : "1"}" opacity="${opacity}" data-q="${h.q}" data-r="${h.r}"></path>`;
+    const stroke = attnStone ? stoneTint : (isStone ? "#708296" : (hidden ? "var(--warn, #d9a23b)" : "#2c3d50"));
+    const opacity = isStone ? "1" : (hidden ? "0.3" : (h.legal || h.candidate ? "0.7" : (ov.legalDim ? "0.18" : "0.45")));
+    const dash = hidden ? ` stroke-dasharray="3 2"` : "";
+    html += `<path class="dbg-cell${hidden ? " dbg-cell-hidden" : ""}" d="${path(h.x, h.y, HEX - 1)}" fill="${fill}" stroke="${stroke}" stroke-width="${attnStone ? "1.6" : "1"}"${dash} opacity="${opacity}" data-q="${h.q}" data-r="${h.r}"></path>`;
     // Node-level modes (attn/plane) carry values on stones too. Stones get an
     // opacity-scaled FILL tinted by player (P0 blue / P1 red); legal/empty cells
     // get GREEN so the three are distinct at a glance. At very low values a stone
@@ -8994,7 +9105,7 @@ function dbgRenderCkptPanel() {
 }
 
 function dbgCkptInfoHtml(name) {
-  const info = dbg.ckptInfo.get(`${dbg.nav.run}|${name}`);
+  const info = dbg.ckptInfo.get(dbgCkptInfoKey(name));
   const ck = dbg.checkpoints.find(c => c.name === name);
   const rows = [["Checkpoint", escapeText(name)]];
   if (ck && ck.epoch != null) rows.push(["Epoch", String(ck.epoch)]);
@@ -9023,6 +9134,9 @@ function dbgCkptInfoHtml(name) {
     if (m.expanded_stv && m.expanded_stv.length) rows.push(["Expanded STV", `${m.expanded_stv.length} heads`]);
     if (m.zeroed_feature_cols && m.zeroed_feature_cols.length) rows.push(["Zeroed cols", m.zeroed_feature_cols.join(", ")]);
     if (m.candidate_radius != null) rows.push(["Cand. radius", String(m.candidate_radius)]);
+    // Active HEXFIELD support radius the worker process actually ran this info op
+    // at (OWNER C meta.support_radius); null for non-hexfield lineages.
+    if (m.support_radius != null) rows.push(["Support radius", String(m.support_radius)]);
     if (m.param_count != null) rows.push(["Params", `${(m.param_count / 1e6).toFixed(2)}M`]);
     if (info.size != null) rows.push(["File", formatBytes(info.size)]);
     if (info.mtime != null) rows.push(["Modified", new Date(info.mtime * 1000).toLocaleString()]);
@@ -9844,6 +9958,9 @@ function debugBindEvents() {
   on("dbgCtxRecord", "change", e => dbgNavigate({ rec: Number(e.target.value) || 0, ply: null, acts: [] }));
   on("dbgCtxCkptA", "change", e => dbgNavigate({ ckptA: e.target.value }));
   on("dbgCtxCkptB", "change", e => dbgNavigate({ ckptB: e.target.value }));
+  // Support-radius override: 0=Auto (backend detects/defaults), 4|8 force a worker
+  // respawn at that radius. Pushed (not replace) so Back undoes the toggle.
+  on("dbgCtxRadius", "change", e => dbgNavigate({ radius: Number(e.target.value) || 0 }));
   // Slider: first input of a drag PUSHES (so Back returns to the pre-drag ply),
   // the rest REPLACE (no history spam); change ends the drag.
   let sliderDragging = false;

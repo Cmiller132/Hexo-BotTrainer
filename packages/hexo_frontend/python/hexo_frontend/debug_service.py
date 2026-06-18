@@ -76,12 +76,22 @@ class DebugWorker:
         self._next_id = 0
         self._err_path = Path(tempfile.gettempdir()) / "hexo_debug_worker.err"
         self._cache: "OrderedDict[str, Any]" = OrderedDict()
+        # The HEXFIELD_SUPPORT_RADIUS the live worker process was spawned at
+        # (None = not keyed on radius, e.g. dense/hexgt or a cold/legacy spawn).
+        # support._SUPPORT_RADIUS is read-once at import, so a radius change can
+        # only take effect by respawning the worker with a new spawn env.
+        self._radius: int | None = None
 
     # -- process lifecycle -----------------------------------------------------
 
-    def _argv_and_env(self) -> tuple[list[str], dict[str, str]]:
+    def _argv_and_env(self, radius: int | None) -> tuple[list[str], dict[str, str]]:
         env = dict(os.environ)
         env["CUDA_VISIBLE_DEVICES"] = ""  # belt-and-suspenders; worker also forces CPU
+        if radius is not None:
+            # Hexfield support radius is read-once at import in support.py / the
+            # Rust featurizer, so it must be in the spawn env. Only set for
+            # hexfield requests; dense/hexgt pass None -> env untouched.
+            env["HEXFIELD_SUPPORT_RADIUS"] = str(radius)
         pkg_python_dir = Path(__file__).resolve().parent.parent  # .../hexo_frontend/python
 
         override = os.environ.get("HEXO_DEBUG_WORKER_CMD")
@@ -93,8 +103,11 @@ class DebugWorker:
             venv = os.environ.get("HEXO_DEBUG_WSL_PYTHON", DEFAULT_WSL_PYTHON)
             worktree = _to_wsl(Path.cwd())
             pp = _to_wsl(pkg_python_dir)
+            # The env dict does NOT cross `wsl.exe -e bash -lc`, so HEXFIELD_SUPPORT_RADIUS
+            # must be inlined into the command like CUDA_VISIBLE_DEVICES=/PYTHONPATH=.
+            rad_inline = f"HEXFIELD_SUPPORT_RADIUS={radius} " if radius is not None else ""
             inner = (
-                f"cd {shlex.quote(worktree)} && CUDA_VISIBLE_DEVICES= "
+                f"cd {shlex.quote(worktree)} && CUDA_VISIBLE_DEVICES= {rad_inline}"
                 f"PYTHONPATH={shlex.quote(pp)} {shlex.quote(venv)} -u -m hexo_frontend.debug_worker"
             )
             return ["wsl.exe", "-e", "bash", "-lc", inner], env
@@ -104,8 +117,8 @@ class DebugWorker:
         env["PYTHONPATH"] = str(pkg_python_dir) + (os.pathsep + existing if existing else "")
         return [sys.executable, "-u", "-m", "hexo_frontend.debug_worker"], env
 
-    def _spawn(self) -> None:
-        argv, env = self._argv_and_env()
+    def _spawn(self, radius: int | None) -> None:
+        argv, env = self._argv_and_env(radius)
         err = open(self._err_path, "w", encoding="utf-8")
         self._proc = subprocess.Popen(
             argv,
@@ -116,6 +129,7 @@ class DebugWorker:
             text=True,
             bufsize=1,
         )
+        self._radius = radius  # record the radius the live process was spawned at
         self._lines = queue.Queue()
         self._reader = threading.Thread(target=self._read_loop, args=(self._proc,), daemon=True)
         self._reader.start()
@@ -131,10 +145,10 @@ class DebugWorker:
     def _alive(self) -> bool:
         return self._proc is not None and self._proc.poll() is None
 
-    def _ensure_started(self) -> None:
+    def _ensure_started(self, radius: int | None) -> None:
         if self._alive():
             return
-        self._spawn()
+        self._spawn(radius)
         self._ping()
 
     def _err_tail(self) -> str:
@@ -187,8 +201,16 @@ class DebugWorker:
                 raise DebugRequestError(str(resp.get("error", "unknown worker error")))
             return resp.get("result")
 
-    def request(self, op: str, *, timeout: float = DEFAULT_TIMEOUT, **fields: Any) -> Any:
+    def request(self, op: str, *, timeout: float = DEFAULT_TIMEOUT,
+                radius: int | None = None, **fields: Any) -> Any:
         """Serialized request to the worker.
+
+        ``radius`` is a worker-lifecycle param (the target HEXFIELD_SUPPORT_RADIUS),
+        NOT a request field: it is never forwarded into ``_exchange``. ``None``
+        means "don't care — reuse whatever is running, spawn at None if cold", so
+        dense/hexgt/record_row requests never trigger a respawn. A hexfield request
+        passes a concrete int and respawns the worker iff it differs from the live
+        process radius (support._SUPPORT_RADIUS is read-once at import).
 
         Failure handling, by class:
         * ``DebugRequestError`` (worker answered ``ok:false``) propagates without
@@ -201,8 +223,11 @@ class DebugWorker:
           the worker once and resends — that path self-heals."""
 
         with self._lock:
+            if radius is not None and self._alive() and self._radius != radius:
+                # Live worker is at the wrong radius for this request; respawn it.
+                self.shutdown_locked()
             try:
-                self._ensure_started()
+                self._ensure_started(radius)
                 return self._exchange({"op": op, **fields}, timeout=timeout)
             except DebugWorkerTimeout:
                 self.shutdown_locked()
@@ -210,25 +235,28 @@ class DebugWorker:
             except DebugWorkerError:
                 self.shutdown_locked()
                 # One restart attempt: a wedged/crashed worker should self-heal.
-                self._ensure_started()
+                self._ensure_started(radius)
                 return self._exchange({"op": op, **fields}, timeout=timeout)
 
     # -- cached requests -------------------------------------------------------
 
-    def cached(self, signature: str, op: str, *, timeout: float = DEFAULT_TIMEOUT, **fields: Any) -> Any:
+    def cached(self, signature: str, op: str, *, timeout: float = DEFAULT_TIMEOUT,
+               radius: int | None = None, **fields: Any) -> Any:
         """request() behind the LRU result cache.
 
         ``signature`` is the caller-built cache key (web.py's _debug_signature:
-        a JSON of [prefix+params, checkpoint path, action ids, n]) and must
-        capture every input that changes the result — a stale hit is served
-        verbatim with no worker round-trip. Errors are never cached."""
+        a JSON of [prefix+params, checkpoint path, action ids, n, radius]) and
+        must capture every input that changes the result — a stale hit is served
+        verbatim with no worker round-trip. Errors are never cached. ``radius``
+        is forwarded to request() as a lifecycle param; it enters the cache via
+        the signature (the caller folds it in), not the lookup here."""
 
         with self._lock:
             hit = self._cache.get(signature)
             if hit is not None:
                 self._cache.move_to_end(signature)
                 return hit
-        result = self.request(op, timeout=timeout, **fields)
+        result = self.request(op, timeout=timeout, radius=radius, **fields)
         with self._lock:
             self._cache[signature] = result
             self._cache.move_to_end(signature)
@@ -239,6 +267,7 @@ class DebugWorker:
     def status(self) -> dict[str, Any]:
         return {
             "alive": self._alive(),
+            "radius": self._radius,
             "cached_results": len(self._cache),
             "mode": "wsl" if (sys.platform == "win32" and os.environ.get("HEXO_DEBUG_USE_WSL", "1") != "0"
                               and not os.environ.get("HEXO_DEBUG_WORKER_CMD")) else "native",

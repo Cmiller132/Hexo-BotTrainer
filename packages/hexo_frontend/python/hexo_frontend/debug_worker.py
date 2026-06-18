@@ -94,7 +94,7 @@ def _get_model(checkpoint: str) -> di.LoadedModel:
 
 
 def _model_meta(loaded: di.LoadedModel) -> dict[str, Any]:
-    return {
+    meta = {
         "lineage": loaded.lineage,
         "rl_epoch": loaded.rl_epoch,
         "step": loaded.step,
@@ -111,6 +111,21 @@ def _model_meta(loaded: di.LoadedModel) -> dict[str, Any]:
         "param_count": di.param_count(loaded),
         "arch": {k: loaded.arch[k] for k in sorted(loaded.arch) if _jsonable(loaded.arch[k])},
     }
+    # Active HEXFIELD_SUPPORT_RADIUS of THIS worker process (read-once module-
+    # global, fixed at spawn by the env the parent set). This is the truth the UI
+    # surfaces — what the worker ACTUALLY ran at, not merely what was requested —
+    # so the candidate set / policy / cell_q / attention heatmaps are known to be
+    # over the radius-restricted support. None for non-hexfield lineages
+    # (dense_cnn/hexgt have no support radius) and if the import ever fails.
+    if loaded.lineage and "hexfield" in str(loaded.lineage).lower():
+        try:
+            from hexfield.support import _SUPPORT_RADIUS
+            meta["support_radius"] = int(_SUPPORT_RADIUS)
+        except Exception:
+            meta["support_radius"] = None
+    else:
+        meta["support_radius"] = None
+    return meta
 
 
 def _jsonable(value: Any) -> bool:
