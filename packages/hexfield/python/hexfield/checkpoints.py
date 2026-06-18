@@ -71,17 +71,23 @@ class HexfieldCheckpointLoader:
         # store the {meta, model, optimizer} shape.
         if "meta" in payload:
             resume = ctx.config.checkpoint.resume_from is not None
+            # The optimizer was just built (plugin.py) with the LIVE config lr, but
+            # load_into's optimizer.load_state_dict restores the checkpoint's SAVED
+            # lr into the param groups, silently overriding an lr config change on
+            # resume. Capture the config lr BEFORE the load and re-apply it after,
+            # so an lr edit takes effect on the next relaunch (Adam moment buffers
+            # are kept; only the step size changes). Captured from the optimizer
+            # itself — ctx.config here is hexo_train's TrainingConfig (no .training).
+            config_lr = (
+                [g["lr"] for g in optimizer.param_groups]
+                if (resume and optimizer is not None)
+                else None
+            )
             meta = load_into(model, payload, optimizer=optimizer if resume else None)
             if resume:
-                # Config is the source of truth for the LR: load_into's
-                # optimizer.load_state_dict restored the checkpoint's saved lr into
-                # the param groups, which would silently override a changed config
-                # lr on resume. Re-apply the live config lr (Adam moment buffers are
-                # kept; only the step size changes) so an lr edit takes effect on
-                # the next relaunch.
-                lr = float(ctx.config.training.learning_rate)
-                for group in optimizer.param_groups:
-                    group["lr"] = lr
+                if config_lr is not None:
+                    for group, lr in zip(optimizer.param_groups, config_lr):
+                        group["lr"] = lr
                 # Restore the KataGo-style train-bucket governor ONLY on a true
                 # resume (PLAN §6/M1). A missing key -> from_dict(None) -> fresh
                 # state, so old-format checkpoints resume cleanly. Never restore
