@@ -15,28 +15,18 @@ from __future__ import annotations
 
 import os
 
-# Production training fast path (spec §6.4 perf): route grad-enabled attention
-# through the in-kernel FlexAttention score_mod instead of materializing the
-# (B, heads, S, S) relative-position bias (a memory-bound transient that is
-# ~68% of the eager forward). This is EXACTLY how the deployed trainer reaches
-# production speed (scripts/systemd/hexfield-supervisor-3.service sets
-# HEXFIELD_TRAIN_FLEX=1); there is no whole-model torch.compile — the only
-# compile is the inner flex op, compiled in its own graph inside model.py.
-#
-# model.py reads HEXFIELD_TRAIN_FLEX ONCE at import (its _TRAIN_FLEX), so this
-# MUST run before the `from .model import HexfieldNet` below or it is a silent
-# no-op. setdefault (not hard-set) leaves the door open for a user to force the
-# plain eager materialized path for parity/debug via HEXFIELD_TRAIN_FLEX=0.
-#
-# Safety/fallback: the train-flex path is backward-capable (gradients flow into
-# all per-block FP32-master bias_tables and downstream weights) and numerically
-# equivalent to the eager bias within fp16-autocast tolerance, so the loss is
-# unchanged. If the installed torch lacks flex_attention, model.py's import
-# guard sets _flex_attention=None and self._train_flex resolves to False, i.e.
-# this flag transparently degrades to the eager materialized forward (no crash).
-# The grad path requires no fixed Npad; the existing PAD_QUANTUM padding (below)
-# already gives flex a small, stable, repeating shape set.
-os.environ.setdefault("HEXFIELD_TRAIN_FLEX", "1")
+# PERF NOTE — HEXFIELD_TRAIN_FLEX is deliberately NOT defaulted on for the prefit.
+# Production self-play/training (systemd HEXFIELD_TRAIN_FLEX=1) gets a big win from
+# the in-kernel FlexAttention score_mod because its forward runs on a SMALL, STABLE
+# set of shapes. The prefit is different: its pair-budget micro-buckets pack a
+# VARIABLE number of rows per step (the batch/seq dim swings, e.g. 11 vs 3), which
+# the inner flex compile (torch.compile(dynamic=False) in model.py) cannot cache —
+# it recompiles per shape and then falls back to the UNFUSED flex path that
+# materializes the full scores matrix. MEASURED: enabling train-flex here made the
+# prefit ~1.85 s/step vs ~0.33 s/step eager (5.6x SLOWER). So the prefit stays on
+# the eager materialized-bias path. (A user can still force flex for experiments via
+# HEXFIELD_TRAIN_FLEX=1 in the env; matching production flex speed would instead
+# require stabilizing the prefit's batch shapes — a separate, larger change.)
 
 import argparse
 import json
@@ -336,6 +326,21 @@ def main(argv=None) -> None:
         start_epoch = int(payload["epoch"]) + 1
         print(f"resumed from {args.resume} at epoch {start_epoch}", flush=True)
 
+    # torch.compile the FORWARD (dynamic=True). Measured ~1.45x on this prefit
+    # (0.278 -> 0.192 s/step steady) after a ~12s one-time warmup. dynamic=True is
+    # essential: the pair-budget micro-buckets vary the batch/seq dim, so a static
+    # compile would recompile per shape (that is exactly why HEXFIELD_TRAIN_FLEX,
+    # whose inner flex op is dynamic=False, was ~5.6x SLOWER here). Keep `model`
+    # (the eager module) for make_optimizer and save_checkpoint — the compiled
+    # wrapper prefixes state_dict keys with "_orig_mod." which would break the
+    # checkpoint loader. Set HEXFIELD_PREFIT_COMPILE=0 to force plain eager.
+    fwd = model
+    if os.environ.get("HEXFIELD_PREFIT_COMPILE", "1") == "1":
+        try:
+            fwd = torch.compile(model, dynamic=True)
+        except Exception as exc:  # pragma: no cover - older torch / compile unavailable
+            print(f"torch.compile unavailable ({exc}); using eager forward", flush=True)
+
     # Frozen probe rows: first PROBE_ROWS rows of the (fixed-order) val shards.
     probe_samples = []
     for path in val_shards:
@@ -363,7 +368,7 @@ def main(argv=None) -> None:
                 lr = LR * (global_step + 1) / WARMUP_STEPS
                 for group in optimizer.param_groups:
                     group["lr"] = lr
-            comps = run_step(model, buckets, denoms, device, scaler, optimizer, grad_stats)
+            comps = run_step(fwd, buckets, denoms, device, scaler, optimizer, grad_stats)
             for key, val in comps.items():
                 comp_totals[key] = comp_totals.get(key, 0.0) + val
             steps += 1
@@ -375,8 +380,8 @@ def main(argv=None) -> None:
                 break
 
         grads = np.asarray(grad_stats)
-        val_metrics = evaluate(model, val_shards, device)
-        prev_probs, probe_metrics = run_probe(model, probe_samples, device, prev_probs)
+        val_metrics = evaluate(fwd, val_shards, device)
+        prev_probs, probe_metrics = run_probe(fwd, probe_samples, device, prev_probs)
         record = {
             "epoch": epoch,
             "steps": steps,
