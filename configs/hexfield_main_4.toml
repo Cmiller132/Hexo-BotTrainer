@@ -20,11 +20,17 @@
 #   flags that resolve to Divergences::production() in production self-play;
 #   the M5/M6 golden-vector parity tests run Divergences::parity() and stay
 #   byte-identical):
-#   - visit_scaled_c_puct=true, c_scale=0.45, c_base=500.0, lcb_z=1.6: the
-#     dynamic-c_puct + LCB knobs are now FIRST-CLASS / config-auditable. These
-#     VALUES EQUAL the prior baked-in production() defaults, so search behavior
-#     is UNCHANGED — this only closes the wiring gap (Python never emitted them
-#     before, though Rust resolve_divergences already read them).
+#   - Dynamic c_puct + LCB knobs now FIRST-CLASS / config-auditable
+#     (c_base=500.0, lcb_z=1.6 unchanged; the wiring gap is closed — Python
+#     never emitted these before though Rust read them).
+#   - c_scale=0.0 (CHANGED from 0.45): KataGo SELF-PLAY uses cpuctExplorationLog
+#     =0.0; 0.45 is the analysis/strength tunable. The log/visit-scaled c_puct
+#     term is now inert, so c_puct is constant. c_puct itself kept at 1.5 (strict
+#     self-play faithful = 1.1; pending owner decision — see the selfplay block).
+#   - root_policy_temperature: 1.1 with early=1.25, halflife=19 (CHANGED from
+#     flat 1.07) to match KataGo self-play (rootPolicyTemperature=1.1,
+#     rootPolicyTemperatureEarly=1.25); flattens the opening prior more, decaying
+#     to 1.1.
 #   - root_fpu_reduction=0.0 (SPEC CORRECTION, ledger [6]): modern KataGo has
 #     NO "zero FPU under noise" branch; self-play uses rootFpuReductionMax=0.0.
 #     This first-class root FPU replaces the noise-conditioned mechanism.
@@ -55,7 +61,7 @@
 #   (still passed but with lazy_widening ON the live can_widen check is the
 #   real gate — kept for the parity path / for flipping lazy_widening off),
 #   widening_min_children=2, temperature=1.0/floor=0.15/halflife=60.0,
-#   root_policy_temperature=1.07 (flat, early=0/halflife=0), max_game_plies=256,
+#   max_game_plies=256,
 #   ml_two_sided=false, ml_final_pick_band=0.08, the full replay-buffer block,
 #   learning_rate=3e-4, train_samples_per_epoch=48000.
 #   expand_backend="rust" KEPT: the soft target is derived in collate (not in
@@ -63,9 +69,10 @@
 #
 # Owner decisions baked in (per ledger open_decisions): own-conv soft head
 #   (Hexfield per-head-conv adaptation), player-only soft policy (no opp-soft),
-#   lazy_widening + new_child_fpu both ON, c_scale kept at 0.45 (production
-#   value, now auditable), tolerant-load of the existing v3 prefit, no
-#   cpuctUtilityStdevScale per-node variance state.
+#   lazy_widening + new_child_fpu both ON, tolerant-load of the existing v3
+#   prefit, no cpuctUtilityStdevScale per-node variance state. c_puct kept at 1.5
+#   (strict self-play faithful = 1.1) pending an explicit exploration-vs-
+#   faithfulness decision.
 
 [model]
 name = "hexfield"
@@ -92,10 +99,21 @@ fpu_reduction = 0.2
 # path only).
 root_fpu_reduction = 0.0
 root_fpu_zero_under_noise = false
-# Dynamic c_puct + LCB, now first-class / config-auditable. Values == prior
-# baked-in production() defaults (behavior unchanged; only wiring is new).
+# Dynamic c_puct + LCB, now first-class / config-auditable.
+# c_scale=0.0 (KataGo self-play faithfulness): KataGo's SELF-PLAY config
+# (selfplay8b20.cfg) sets cpuctExplorationLog=0.0 — the log/visit-scaled term is
+# a STRONGER-PLAY *analysis* tunable (0.45 in gtp/analysis), NOT used in training
+# self-play. With c_scale=0.0 the c_for(N) log term is inert, so c_puct is a
+# constant (visit_scaled_c_puct left true is a no-op at c_scale=0). This REPLACES
+# the prior 0.45 (which was the analysis value, kept earlier only for behavioral
+# continuity). c_base/lcb_z unchanged.
+# NOTE on c_puct: kept at 1.5 (above). Strict self-play faithfulness would use
+# cpuctExploration=1.1; since Hexo is pure win/loss its Q is exactly KataGo's
+# winLoss utility scale ([-1,1]) so no radius rescale applies and 1.1 is the
+# literal value. 1.5 is retained pending an explicit c_puct decision (it favors
+# more exploration, which compounds with the other main_4 exploration changes).
 visit_scaled_c_puct = true
-c_scale = 0.45
+c_scale = 0.0
 c_base = 500.0
 lcb_z = 1.6
 # Six KataGo-faithful search divergences, ON (== production()). Audit + per-knob
@@ -121,10 +139,18 @@ temperature = 1.0
 # mid/endgame isn't played near-greedy at 170+ ply games. halflife 60, floor 0.15.
 temperature_floor = 0.15
 temperature_halflife_plies = 60.0
-# Root-policy temperature: FLAT 1.07, no ramp (early=0/halflife=0).
-root_policy_temperature = 1.07
-root_policy_temperature_early = 0.0
-root_policy_temperature_halflife = 0.0
+# Root-policy temperature (KataGo self-play faithfulness, selfplay8b20.cfg):
+# rootPolicyTemperature=1.1, rootPolicyTemperatureEarly=1.25, with the early->
+# steady decay over chosenMoveTemperatureHalflife=19 moves. Hexfield interp is
+# temp(ply)=steady+(early-steady)*0.5^(ply/halflife) (== KataGo interpolateEarly),
+# so early=1.25 at ply 0 flattens the opening prior more, decaying to 1.1. The
+# halflife is in plies (Hexo ply ~= KataGo move; KataGo's 19 is board-scaled and
+# Hexo has no fixed board, so 19 is the literal transfer — tunable; note Hexo's
+# move-selection halflife is 60, so 19 is on the shorter/earlier side).
+# REPLACES main_3's flat 1.07.
+root_policy_temperature = 1.1
+root_policy_temperature_early = 1.25
+root_policy_temperature_halflife = 19.0
 # Moves-left (decisiveness) utility (inherited from main_3 Stage-1 retune):
 # ml_two_sided=false (favor fast wins, do not reward dragging out losses);
 # ml_final_pick_band 0.08 (broader decisive root tie-break). ml_weight/ml_scale/

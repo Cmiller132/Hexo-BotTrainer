@@ -463,6 +463,54 @@ Unit tests pinning the strategy: `parity_disables_all_main4_divergences`,
    run needed). Alternative: regenerate a prefit with the soft head.
 6. **`cpuctUtilityStdevScale`** (per-node variance c_puct factor) — **left out**
    (KataGo default 0.0 = no-op).
-7. **`c_scale = 0.45` vs `0.0`** — kept **0.45** (current production value, now
-   auditable). KataGo *self-play* uses `cpuctExplorationLog=0.0`; this is a real
-   behavioral knob, not just wiring.
+7. **`c_scale`** — **RESOLVED → 0.0** (see §10). KataGo *self-play* uses
+   `cpuctExplorationLog=0.0`; the 0.45 was the analysis/strength value.
+8. **`root_policy_temperature`** — **RESOLVED → 1.1 / early 1.25 / halflife 19**
+   (see §10), matching KataGo self-play (was flat 1.07).
+9. **`c_puct` value** — **STILL OPEN**: kept **1.5**. Strict KataGo self-play =
+   **1.1** (Hexo is pure win/loss, so its `[-1,1]` Q equals KataGo's winLoss
+   utility scale — no radius rescale applies, contra the earlier "1.5 ≈ rescaled"
+   note, which assumed a Go score-utility radius that does not exist here). 1.1
+   cuts exploration ~27% vs 1.5 and compounds with the other exploration-raising
+   main_4 changes, so it is left at 1.5 pending an explicit owner call.
+
+## 10. Follow-up faithfulness changes (post-review, config-only)
+
+Two KataGo self-play divergences that the initial build left as owner decisions
+were applied. Both are `configs/hexfield_main_4.toml`-only (no Rust/Python; the
+interpolation and the c_scale wiring already existed). Sourced from KataGo
+`cpp/configs/training/selfplay8b20.cfg` + `cpp/search/searchparams.{h,cpp}`.
+
+### 10.1 `c_scale` 0.45 → 0.0  (dynamic-c_puct log term)
+- KataGo self-play sets `cpuctExplorationLog = 0.0`. The `0.45` value is the
+  gtp/analysis strength preset, not the training value. Library default is also
+  `0.0` (`searchparams.cpp`).
+- Effect: `c_for(N) = c_puct + c_scale·ln((N+c_base)/c_base)` loses its log term →
+  `c` is constant `= c_puct` for the whole search (previously it ramped
+  ~1.5→~1.82 over a 512-visit search). `visit_scaled_c_puct=true` is now a no-op.
+- Open: `c_puct` itself kept at **1.5**; strict self-play faithful is **1.1**
+  (§9.9). No rescale applies because Hexo has no score utility, so its `[-1,1]` Q
+  is exactly KataGo's winLoss utility scale.
+
+### 10.2 `root_policy_temperature` flat 1.07 → 1.1 / early 1.25 / halflife 19
+- KataGo self-play: `rootPolicyTemperature=1.1`, `rootPolicyTemperatureEarly=1.25`,
+  early→steady decay over `chosenMoveTemperatureHalflife=19` moves.
+- Hexfield `root_temp_for` already implements the identical interpolation
+  `temp(ply)=steady+(early−steady)·0.5^(ply/halflife)` (KataGo `interpolateEarly`),
+  gated off when early/halflife ≤ 0. Setting early=1.25, steady=1.1, halflife=19
+  enables it: the opening prior is flattened more (1.25), decaying to 1.1.
+- Adaptation: halflife is in plies. KataGo's 19 is board-size-scaled; Hexo has no
+  fixed board, so 19 is the literal transfer (tunable; Hexo's move-selection
+  halflife is 60, so 19 is on the shorter/earlier side). Flagged as adaptable.
+
+### 10.3 NOT changed — FPU `√(policyProbMassVisited)` scaling (faithfulness item #4)
+KataGo's FPU reduction is `fpuReductionMax · √(policyProbMassVisited)` (weaker at
+lightly-explored nodes, growing toward the max as visited mass accumulates);
+Hexfield uses a flat `fpuReductionMax` (0.2). Left unchanged because its impact is
+**low here**: (a) main_4 sets `rootFpuReductionMax=0`, so the ROOT — where FPU
+most affects opening breadth and the recorded target — has no FPU penalty at all,
+making the scaling irrelevant there; (b) it therefore only alters INTERIOR-node
+breadth, which does not directly shape the trained policy target; (c) flat-0.2 vs
+√-scaled-0.2 differ only in how quickly a node transitions from broad to focused,
+a second-order effect. It is a real but low-priority faithfulness gap (interior
+search breadth only) and a small `tree.rs` follow-up if desired.
