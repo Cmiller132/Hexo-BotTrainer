@@ -6,7 +6,10 @@ tested derivations the BC writer uses: ordinal phase/player, window_scan hot/
 standing-win cells), records FULL-search decisions as pending samples, applies
 the chosen action through hexo_engine, and at game end finalizes targets
 (hard z, opp policy with fast-masking, STV, moves_left) and writes one
-hexfield_compact_v1 shard. Truncated games are never written (unconditional).
+hexfield_compact_v1 shard. Truncated games (max_game_plies reached, no engine
+winner) ARE written too: their outcome-INDEPENDENT heads (policy, opp_policy)
+train normally while the value/stvalue/cell_q/moves_left heads are masked via
+the truncated flag (outcome_valid=0 column → value_mask=0 at expand).
 """
 
 from __future__ import annotations
@@ -293,17 +296,27 @@ class ContinuousDriver:
                 # Record the game for dashboard replay (completed AND truncated),
                 # mirroring the old inline order.
                 self._write_record(tape, winner=winner, truncated=truncated)
-                if truncated:
-                    continue  # truncated games' rows are never written (spec §5.1)
+                # Truncated games (max_game_plies hit, no engine winner) are NO
+                # LONGER dropped: their rows ARE written so the outcome-INDEPENDENT
+                # heads (policy, opp_policy) train on them, while the value /
+                # stvalue / cell_q / moves_left heads are masked downstream (the
+                # truncated metadata flag → outcome_valid=0 shard column →
+                # value_mask=0 + zeroed stvalue/cell_q masks at expand). Completed
+                # games are finalized exactly as before (truncated=False), so their
+                # training stays byte-identical.
                 finalized = finalize_game_samples(
-                    tape.pending, winner, self.horizons, mask_opp_from_fast=True
+                    tape.pending, winner, self.horizons,
+                    truncated=truncated, mask_opp_from_fast=True,
                 )
                 rows = [s for s in finalized if s.metadata.get("pcr_full", False)]
                 if rows:
                     path = self.out_dir / f"game_{tape.key}.npz"
                     self.rows_written += write_compact_shard(
                         path, rows, short_term_value_horizons=self.horizons,
-                        sidecar={"epoch": self.epoch, "game_key": tape.key, "winner": winner},
+                        sidecar={
+                            "epoch": self.epoch, "game_key": tape.key,
+                            "winner": winner, "truncated": bool(truncated),
+                        },
                     )
             except BaseException as exc:  # noqa: BLE001 — surface, don't swallow
                 self._writer_errors.append(exc)

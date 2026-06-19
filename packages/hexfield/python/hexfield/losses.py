@@ -211,9 +211,11 @@ def hexfield_loss(
     """Total = 1.0*policy + 1.0*value + 0.25*opp + 0.1*sum(stv) + 0.1*ml.
 
     ``denominators`` (step-global, computed at collate over the whole nominal
-    batch) keys: ``rows`` plus per-masked-head row counts (``stvalue_<h>``,
-    ``moves_left``). When absent, this micro-bucket's own counts are used —
-    correct for monolithic batches only.
+    batch) keys: ``rows`` plus per-masked-head row counts (``value``,
+    ``stvalue_<h>``, ``moves_left``, ``cell_q``). When absent, this micro-bucket's
+    own counts are used — correct for monolithic batches only. The ``value``
+    count excludes truncated-game rows (value_mask==0) so they contribute zero to
+    both numerator and denominator; with no truncated rows it equals ``rows``.
     """
 
     denoms = dict(denominators or {})
@@ -228,8 +230,19 @@ def hexfield_loss(
         weight_denominator=denoms.get("policy_ce_weight_sum"),
         denominator=rows,
     )
+    # Value head masks truncated-game rows (value_mask==0): they carry no real
+    # winner, so the hard-z target is undefined and must not pollute the head.
+    # When no truncated rows are present, value_mask is all-1 and denoms['value']
+    # == rows, so (per_item * 1).sum() / rows reproduces the unmasked path exactly
+    # — completed-only batches are byte-identical. The denominator prefers the
+    # step-global value count; absent that it falls back to `rows` (then to B
+    # inside binned_value_loss), exactly as before. Callers that omit value_mask
+    # entirely (mask=None) keep the original unmasked behavior byte-for-byte.
     components["value"] = binned_value_loss(
-        outputs["value"], batch["value"], denominator=rows
+        outputs["value"],
+        batch["value"],
+        mask=batch.get("value_mask"),
+        denominator=denoms.get("value", rows),
     )
     total = policy_weight * components["policy"] + value_weight * components["value"]
 

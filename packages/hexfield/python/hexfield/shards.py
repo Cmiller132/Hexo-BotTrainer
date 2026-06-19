@@ -76,6 +76,12 @@ def write_compact_shard(
     phase = np.empty(n, dtype=np.uint8)
     value = np.empty(n, dtype=np.float32)
     moves_left = np.full(n, -1.0, dtype=np.float32)
+    # outcome_valid[i] == 0 marks a TRUNCATED-game row (no engine winner): the
+    # value/stvalue/cell_q heads are masked to zero loss at expand time. Defaults
+    # to 1 (completed). Legacy shards lacking this column read back as all-1 (see
+    # read_compact_shard), so the addition is backward-compatible and needs NO
+    # schema bump. Derived from metadata['truncated'] (set by finalize).
+    outcome_valid = np.ones(n, dtype=np.uint8)
     policy_surprise = np.zeros(n, dtype=np.float32)
     first_q = np.zeros(n, dtype=np.int16)
     first_r = np.zeros(n, dtype=np.int16)
@@ -104,6 +110,7 @@ def write_compact_shard(
         phase[i] = _PHASE_INDEX[str(sample.phase)]
         value[i] = float(sample.value)
         moves_left[i] = float(sample.moves_left)
+        outcome_valid[i] = 0 if bool(sample.metadata.get("truncated", False)) else 1
         policy_surprise[i] = float(sample.policy_surprise)
         if sample.first_stone is not None:
             first_q[i] = int(sample.first_stone[0])
@@ -161,6 +168,7 @@ def write_compact_shard(
         "phase": phase,
         "value": value,
         "moves_left": moves_left,
+        "outcome_valid": outcome_valid,
         "first_q": first_q,
         "first_r": first_r,
         "first_present": first_present,
@@ -209,6 +217,8 @@ def read_compact_shard(path: Path) -> list[HexfieldSampleData]:
 
     n = int(arrays["num_rows"])
     horizons = [int(h) for h in arrays["horizons"]]
+    # Backward-compatible: legacy shards predate outcome_valid → all-completed.
+    outcome_valid = arrays.get("outcome_valid")
     out: list[HexfieldSampleData] = []
     for i in range(n):
         h0, h1 = int(arrays["hist_off"][i]), int(arrays["hist_off"][i + 1])
@@ -257,6 +267,11 @@ def read_compact_shard(path: Path) -> list[HexfieldSampleData]:
                 value=float(arrays["value"][i]),
                 short_term_value=stval,
                 moves_left=float(arrays["moves_left"][i]),
+                metadata=(
+                    {"truncated": True}
+                    if outcome_valid is not None and int(outcome_valid[i]) == 0
+                    else {}
+                ),
             )
         )
     return out

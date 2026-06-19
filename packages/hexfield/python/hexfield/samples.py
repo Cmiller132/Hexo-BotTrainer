@@ -148,10 +148,16 @@ def finalize_game_samples(
     """Assign outcome targets to a finished game's pre-decision samples.
 
     Hard z is the v1 value target (soft_z_lambda stays 0 in production; the
-    parameter is ported for parity with the restnet oracle). Truncated games'
-    rows are never written by the caller (`drop_truncated` is unconditional in
-    hexfield, spec §5.1) — the moves_left -1 sentinel path survives almost
-    solely for the Phase-B legacy adapter.
+    parameter is ported for parity with the restnet oracle).
+
+    Truncated games (``truncated=True``, ``winner=None``) ARE now written (with
+    their outcome-dependent heads masked downstream): ``metadata['truncated']``
+    is set, ``moves_left`` is the -1 sentinel (→ moves_left_mask=0 at expand),
+    and the same flag zeroes the value/stvalue/cell_q masks in ``expand_sample``.
+    The outcome-INDEPENDENT heads (policy, opp_policy) train normally on
+    truncated rows. The hard-z value target stays 0.0 for truncated rows but is
+    NEVER used because value_mask gates it to zero loss. Completed games are
+    untouched (truncated=False path is byte-identical to before).
     """
 
     decisions = list(pending)
@@ -194,6 +200,7 @@ class ExpandedRow:
     opp_policy: np.ndarray  # (L,) f32; zero row when absent/masked/uncovered
     opp_coverage: float  # kept mass / total mass (1.0 when no target existed)
     value: float
+    value_mask: float  # 1.0 for completed games; 0.0 for truncated (no winner)
     stvalue: np.ndarray  # (H,) f32
     stvalue_mask: np.ndarray  # (H,) f32
     moves_left: float  # normalized to [-1, 1]; 0 when masked
@@ -282,6 +289,22 @@ def expand_sample(
         moves_left = 0.0
         moves_left_mask = 0.0
 
+    # Truncated games (max_game_plies hit, no engine winner) have no grounded
+    # terminal outcome: the value head's hard-z target, the bootstrapped STV
+    # targets, and the value/Q-derived cell_q target are all undefined. Mask the
+    # whole outcome/terminal-dependent family to ZERO loss for these rows while
+    # leaving policy / opp_policy (visit-count distributions, outcome-INDEPENDENT)
+    # to train normally. moves_left is ALREADY masked via its -1 sentinel above.
+    # Completed rows (truncated absent/False) keep value_mask=1.0 and the
+    # presence masks exactly as built → byte-identical to before.
+    truncated = bool(sample.metadata.get("truncated", False))
+    if truncated:
+        value_mask = 0.0
+        stvalue_mask = np.zeros_like(stvalue_mask)
+        cell_q_mask = np.zeros_like(cell_q_mask)
+    else:
+        value_mask = 1.0
+
     return ExpandedRow(
         support=sup,
         feats=feats,
@@ -289,6 +312,7 @@ def expand_sample(
         opp_policy=opp,
         opp_coverage=opp_coverage,
         value=float(sample.value),
+        value_mask=value_mask,
         stvalue=stvalue,
         stvalue_mask=stvalue_mask,
         moves_left=moves_left,

@@ -150,6 +150,12 @@ def collate_training(
             "policy_ce_weight": torch.tensor(weights, dtype=torch.float32),
             "opp_coverage": torch.tensor([row.opp_coverage for row in rows]),
             "value": torch.tensor([row.value for row in rows], dtype=torch.float32),
+            # Per-row value-head mask: 0.0 for truncated-game rows (no winner),
+            # 1.0 for completed games. Gates the value loss to zero contribution
+            # for truncated rows (parallel to moves_left_mask).
+            "value_mask": torch.tensor(
+                [row.value_mask for row in rows], dtype=torch.float32
+            ),
             "stvalue": torch.stack(
                 [torch.from_numpy(row.stvalue) for row in rows]
             ).reshape(b, h),
@@ -193,6 +199,11 @@ def step_global_denominators(
         denoms[f"stvalue_{horizon}"] = float(
             sum(1.0 for row in rows if row.stvalue_mask[col] > 0)
         )
+    # Value head: count only completed-game (unmasked) rows so truncated rows
+    # neither contribute to the numerator nor inflate the denominator. With no
+    # truncated rows this equals len(rows) (== the old `rows` denominator), so
+    # completed-only batches are byte-identical.
+    denoms["value"] = float(sum(row.value_mask for row in rows))
     denoms["moves_left"] = float(sum(row.moves_left_mask for row in rows))
     # cell_q: total masked-cell count (mean-over-contributing-cells, spec §10.3).
     denoms["cell_q"] = float(sum(float(row.cell_q_mask.sum()) for row in rows))

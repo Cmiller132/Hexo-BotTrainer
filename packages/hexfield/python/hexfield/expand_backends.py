@@ -153,6 +153,11 @@ def _row_view_to_sample(view: PackedRowView) -> HexfieldSampleData:
         short_term_value=view.short_term_value(),
         moves_left=view.moves_left,
         policy_surprise=view.policy_surprise,
+        # Truncated-game flag (outcome_valid==0) carried as metadata so the
+        # serial expand path masks the value/stvalue/cell_q heads. Only set when
+        # truncated so completed-game rows keep an empty metadata dict (matching
+        # the pre-truncated-support shim exactly → byte-identical expansion).
+        metadata=({"truncated": True} if int(view.outcome_valid) == 0 else {}),
     )
 
 
@@ -325,6 +330,17 @@ def _reassemble_rust_rows(
     value = np.frombuffer(bytes(result["value"]), dtype=np.float32, count=r)
     moves_left = np.frombuffer(bytes(result["moves_left"]), dtype=np.float32, count=r)
     moves_left_mask = np.frombuffer(bytes(result["moves_left_mask"]), dtype=np.float32, count=r)
+    # value_mask gates the value/stvalue/cell_q heads for truncated-game rows
+    # (outcome_valid==0). The serial oracle (samples.expand_sample) derives it
+    # from metadata['truncated']; the Rust kernel does NOT yet project it (TODO:
+    # replay_expand.rs must read the outcome_valid column and emit value_mask +
+    # zero the stvalue_mask/cell_q_mask for truncated rows BEFORE expand_backend
+    # is flipped to "rust" on a buffer that contains truncated rows). Until then
+    # the kernel omits the buffer and every Rust row is treated as completed.
+    if "value_mask" in result:
+        value_mask = np.frombuffer(bytes(result["value_mask"]), dtype=np.float32, count=r)
+    else:
+        value_mask = np.ones(r, dtype=np.float32)
     stvalue = np.frombuffer(bytes(result["stvalue"]), dtype=np.float32, count=r * horizons_len).reshape(r, horizons_len)
     stvalue_mask = np.frombuffer(bytes(result["stvalue_mask"]), dtype=np.float32, count=r * horizons_len).reshape(r, horizons_len)
 
@@ -358,6 +374,7 @@ def _reassemble_rust_rows(
                 opp_policy=opp_policy[pa:pb].copy(),
                 opp_coverage=float(opp_coverage[k]),
                 value=float(value[k]),
+                value_mask=float(value_mask[k]),
                 stvalue=stvalue[k].copy(),
                 stvalue_mask=stvalue_mask[k].copy(),
                 moves_left=float(moves_left[k]),
