@@ -42,13 +42,6 @@ pub(crate) fn states_from_py_states(
     Ok(roots)
 }
 
-pub(crate) fn state_from_py_state(
-    py: Python<'_>,
-    state: &Bound<'_, PyAny>,
-) -> PyResult<RustHexoState> {
-    state_from_py_state_with_api(engine_state_api(py)?, state)
-}
-
 fn engine_state_api(py: Python<'_>) -> PyResult<&'static HexoStateApi> {
     // `hexo_engine._rust` owns the capsule. Dense_cnn reads only the stable C
     // ABI pointers exposed by that capsule, keeping engine internals generic.

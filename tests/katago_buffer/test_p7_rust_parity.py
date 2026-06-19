@@ -98,6 +98,10 @@ def _rows_equal(a: ExpandedRow | None, b: ExpandedRow | None) -> bool:
         and np.array_equal(a.opp_policy, b.opp_policy)
         and abs(float(a.opp_coverage) - float(b.opp_coverage)) <= 1e-12
         and float(a.value) == float(b.value)
+        # value_mask gates the outcome heads (1.0 completed / 0.0 truncated); the
+        # Rust kernel derives it from outcome_valid byte-for-byte with the oracle's
+        # metadata['truncated'] branch — exact float() == float() (both in {0,1}).
+        and float(a.value_mask) == float(b.value_mask)
         and np.array_equal(a.stvalue, b.stvalue)
         and np.array_equal(a.stvalue_mask, b.stvalue_mask)
         # f32 precision: serial keeps moves_left as f64, rust emits f32; with the v3
@@ -338,6 +342,105 @@ def test_determinism_and_order_invariance() -> None:
 
 
 # ---------------------------------------------------------------------------
+# 3b. truncated-row outcome masking parity (outcome_valid==0 → value_mask=0,
+#     stvalue_mask/cell_q_mask zeroed) — Rust kernel == serial oracle.
+# ---------------------------------------------------------------------------
+TRUNC_SAMPLES = SCRATCH / "p7_trunc" / "samples"
+
+
+def _make_truncated_samples() -> tuple[int, int]:
+    """Copy a handful of scratch shards into ``p7_trunc`` and force EVERY row's
+    ``outcome_valid`` to 0 in EACH copied shard, marking them all truncated. This
+    drives the serial oracle's ``metadata['truncated']`` masking branch (via the
+    ``outcome_valid==0`` → ``{"truncated": True}`` shim) and the Rust kernel's new
+    outcome-masking branch. Returns ``(n_rows, n_truncated)``.
+    """
+    import shutil
+
+    if TRUNC_SAMPLES.exists():
+        shutil.rmtree(TRUNC_SAMPLES)
+    srcs = sorted(SAMPLES.glob("epoch_*/game_*.npz"))[:6]
+    assert srcs, "no scratch shards to truncate"
+    n_rows = 0
+    n_trunc = 0
+    for src in srcs:
+        side = src.with_suffix(".json")
+        dst_dir = TRUNC_SAMPLES / src.parent.name
+        dst_dir.mkdir(parents=True, exist_ok=True)
+        dst = dst_dir / src.name
+        with np.load(src) as z:
+            arrays = {k: z[k] for k in z.files}
+        # outcome_valid may be absent in legacy shards; the scratch corpus is the
+        # current writer, so it exists — but build it from the row count to be safe.
+        n = int(arrays["current_player"].shape[0])
+        arrays["outcome_valid"] = np.zeros(n, dtype=np.uint8)  # ALL truncated
+        np.savez_compressed(dst, **arrays)
+        dst.with_suffix(".json").write_text(side.read_text(), encoding="utf-8")
+        n_rows += n
+        n_trunc += n
+    assert n_trunc > 0, "no truncated rows produced"
+    return n_rows, n_trunc
+
+
+def _load_trunc_window():
+    npzs = sorted(TRUNC_SAMPLES.glob("epoch_*/game_*.npz"))
+    assert npzs, f"no truncated shards under {TRUNC_SAMPLES}"
+    return concat_packed([load_packed_shard(p) for p in npzs])
+
+
+def test_truncated_rows_rust_eq_serial() -> None:
+    n_rows, n_trunc = _make_truncated_samples()
+    window = _load_trunc_window()
+    n = window.n
+    assert n > 0
+
+    # Sanity: the window really carries truncated rows (outcome_valid==0) — the
+    # masking branch under test would be a no-op otherwise.
+    ov = np.asarray(window.cols["outcome_valid"])
+    assert int((ov == 0).sum()) == n, f"expected all {n} rows truncated, got {int((ov==0).sum())}"
+
+    # Exercise across all 12 syms (masking is D6-invariant but the rest of the row
+    # is not, so confirm the masking holds under every orientation).
+    for sym in range(12):
+        d6 = np.full(n, sym, dtype=np.int64)
+        rows_s, valid_s = expand_rows(window, None, d6, backend="serial")
+        rows_r, valid_r = expand_rows(window, None, d6, backend="rust")
+        assert np.array_equal(valid_s, valid_r), f"valid mask differs at sym {sym}"
+        for k, (a, b) in enumerate(zip(rows_s, rows_r)):
+            if a is None or b is None:
+                assert a is None and b is None, f"None mismatch row {k} sym {sym}"
+                continue
+            # The oracle masks the WHOLE outcome family for truncated rows.
+            assert float(a.value_mask) == 0.0, f"serial value_mask not zeroed (row {k} sym {sym})"
+            assert float(b.value_mask) == 0.0, f"rust value_mask not zeroed (row {k} sym {sym})"
+            assert float(a.value_mask) == float(b.value_mask), (
+                f"value_mask differs row {k} sym {sym}: s={a.value_mask} r={b.value_mask}"
+            )
+            assert not np.any(a.stvalue_mask), f"serial stvalue_mask not zeroed row {k} sym {sym}"
+            assert not np.any(b.stvalue_mask), f"rust stvalue_mask not zeroed row {k} sym {sym}"
+            assert np.array_equal(a.stvalue_mask, b.stvalue_mask), (
+                f"stvalue_mask differs row {k} sym {sym}"
+            )
+            assert not np.any(a.cell_q_mask), f"serial cell_q_mask not zeroed row {k} sym {sym}"
+            assert not np.any(b.cell_q_mask), f"rust cell_q_mask not zeroed row {k} sym {sym}"
+            assert np.array_equal(a.cell_q_mask, b.cell_q_mask), (
+                f"cell_q_mask differs row {k} sym {sym}"
+            )
+            # The TARGET arrays (value / stvalue) are left as built by both paths.
+            assert float(a.value) == float(b.value), f"value differs row {k} sym {sym}"
+            assert np.array_equal(a.stvalue, b.stvalue), f"stvalue differs row {k} sym {sym}"
+            # And the full row is otherwise element-identical (this also re-checks the
+            # masks via _rows_equal once value_mask is added to it).
+            assert _rows_equal(a, b), _describe_mismatch(k, sym, a, b)
+
+    print(
+        f"  3b. TRUNCATED parity: {n} rows (all outcome_valid==0) x 12 syms — Rust kernel "
+        f"== serial oracle on value_mask/stvalue_mask/cell_q_mask AND value/stvalue targets "
+        f"(outcome heads masked, policy/opp_policy intact); injected {n_trunc} truncated rows"
+    )
+
+
+# ---------------------------------------------------------------------------
 # 4. train_passes integration: rust vs serial bit-identical downstream
 # ---------------------------------------------------------------------------
 def _build_trainer(backend: str) -> HexfieldTrainer:
@@ -447,6 +550,7 @@ def main() -> int:
     test_rust_equals_serial_all_d6()
     test_offlegal_radius4_subprocess()
     test_determinism_and_order_invariance()
+    test_truncated_rows_rust_eq_serial()
     test_train_passes_rust_eq_serial()
     print("PASS")
     return 0

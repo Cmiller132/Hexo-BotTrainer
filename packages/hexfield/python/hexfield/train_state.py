@@ -1,13 +1,11 @@
 """Persisted trainer state for the KataGo-style replay buffer (the train-bucket
 reuse governor + window bookkeeping).
 
-This mirrors ``dense_cnn_restnet.replay.DenseTrainState`` (replay.py:108-149) but
-drops the dense on-disk shuffle-output bookkeeping (``old_train_data_dirs`` /
-``latest_shuffle_dir``) because hexfield shuffles the window IN RAM and never
-materializes ``shuffleddata/<gen>/`` dirs (PLAN §8/M2). It is serialized into the
+hexfield shuffles the window IN RAM and never materializes on-disk shuffle dirs,
+so this carries no shuffle-output bookkeeping. It is serialized into the
 checkpoint ``meta`` by the saver and restored by the loader on the RESUME branch
 only — never on an ``initialize_from`` warm start, which must begin with a fresh
-governor (PLAN §6 / checkpoints.py).
+governor.
 
 Versioned with a missing-key/version-mismatch -> fresh-state fallback so old
 checkpoints (which carry no ``train_state``) resume cleanly instead of raising.
@@ -25,24 +23,23 @@ TRAIN_STATE_VERSION = 1
 @dataclass
 class HexfieldTrainState:
     # Monotone count of self-play rows ever seen by the governor. NEVER
-    # decremented (PLAN §3.5/M2): window selection uses the live manifest total,
-    # but the bucket accrual is driven by this cumulative counter so a pruned /
-    # regenerated window can't spuriously trip the reload branch.
+    # decremented: window selection uses the live manifest total, but the bucket
+    # accrual is driven by this cumulative counter so a pruned / regenerated
+    # window can't spuriously trip the reload branch.
     total_num_data_rows: int = 0
     # Cumulative gradient samples consumed (diagnostics / reuse accounting).
     global_step_samples: int = 0
-    # First global row index still inside the current window (PLAN §3.2/S5).
+    # First global row index still inside the current window.
     window_start_data_row_idx: int = 0
-    # Train-bucket reuse governor (PLAN §3.5). ``level`` is credited by each new
-    # self-play row * max_train_bucket_per_new_data and debited by effective_rows
-    # at selection time; ``level_at_row`` is the cumulative-row watermark the
-    # last accrual was computed against.
+    # Train-bucket reuse governor. ``level`` is credited by each new self-play row
+    # * max_train_bucket_per_new_data and debited by effective_rows at selection
+    # time; ``level_at_row`` is the cumulative-row watermark the last accrual was
+    # computed against.
     train_bucket_level: float = 0.0
     train_bucket_level_at_row: int = 0
     train_steps_since_last_reload: int = 0
-    # Optional no-repeat-files set (PLAN §8/M2: defaults OFF for hexfield's
-    # single-game shards, so this normally stays empty; kept for completeness so
-    # a run that opts in survives resume).
+    # Optional no-repeat-files set (defaults OFF for hexfield's single-game shards,
+    # so this normally stays empty; kept so a run that opts in survives resume).
     data_files_used: set[str] = field(default_factory=set)
     version: int = TRAIN_STATE_VERSION
 

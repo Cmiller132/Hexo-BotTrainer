@@ -160,29 +160,6 @@ def window_scan(
     )
 
 
-def facts_from_records(
-    records: tuple[tuple[int, int, int, int], ...],
-    current_player: int,
-    phase: str,
-    first_stone: tuple[int, int] | None,
-) -> PositionFacts:
-    """Build full facts from the unified history column (shard expand path)."""
-
-    own_hot, opp_hot, own_win, opp_win = window_scan(
-        records, current_player, len(records)
-    )
-    return PositionFacts(
-        records=records,
-        current_player=current_player,
-        phase=phase,
-        first_stone=first_stone,
-        own_hot=own_hot,
-        opp_hot=opp_hot,
-        own_win=own_win,
-        opp_win=opp_win,
-    )
-
-
 # --- feature build ----------------------------------------------------------------
 
 

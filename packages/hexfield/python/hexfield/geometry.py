@@ -16,7 +16,6 @@ from .constants import (
     BIAS_RING_MAX,
     BIAS_RING_MIN,
     COORD_OFFSET,
-    DIRECTIONS,
 )
 
 _COORD_MIN = -(1 << 15)
@@ -131,10 +130,3 @@ def rel_bias_index(dq: int, dr: int) -> int:
         base = BIAS_ON_AXIS_BASE if on_win_axis(dq, dr) else BIAS_OFF_AXIS_BASE
         return base + (d - BIAS_RING_MIN)
     return BIAS_FAR_ROW
-
-
-def neighbor(q: int, r: int, direction: int) -> tuple[int, int]:
-    """Cell adjacent to (q, r) along DIRECTIONS[direction]."""
-
-    dq, dr = DIRECTIONS[direction]
-    return q + dq, r + dr

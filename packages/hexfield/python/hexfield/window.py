@@ -1,11 +1,12 @@
-"""Packed columnar in-RAM replay window (PLAN §5.1, §5.5, §6).
+"""Packed columnar in-RAM replay window.
 
-The on-disk ``hexfield_compact_v1`` shard (``shards.py:147-174``) is already a flat
-columnar layout: per-row scalar arrays + ``(n,H)`` blocks + a handful of CSR
-``data``/``off`` group pairs. ``shards.read_compact_shard`` is correct but eagerly
-explodes every row into a frozen :class:`~hexfield.samples.HexfieldSampleData`
-(tuples of boxed Python scalars; ~1-2 GB heap at 500k rows). This module keeps
-every column **packed** — it never materializes the boxed-tuple representation.
+The on-disk ``hexfield_compact_v1`` shard (see ``shards.write_compact_shard``) is
+already a flat columnar layout: per-row scalar arrays + ``(n,H)`` blocks + a
+handful of CSR ``data``/``off`` group pairs. ``shards.read_compact_shard`` is
+correct but eagerly explodes every row into a frozen
+:class:`~hexfield.samples.HexfieldSampleData` (tuples of boxed Python scalars;
+~1-2 GB heap at 500k rows). This module keeps every column **packed** — it never
+materializes the boxed-tuple representation.
 
 :class:`PackedWindow` holds the exact compact column set concatenated across
 shards (with CSR offsets rebased to one global index) plus a per-row
@@ -13,22 +14,21 @@ shards (with CSR offsets rebased to one global index) plus a per-row
 zero-copy slices for ONE row in precisely the shape one
 :func:`~hexfield.samples.expand_sample` call consumes.
 
-``shards.read_compact_shard`` is **demoted to a parity/CI oracle** (no longer on
-the hot path) but is kept byte-for-byte intact so this packed path can be
-validated row-for-row against it.
+``shards.read_compact_shard`` is no longer on the hot path but is kept intact as
+the parity oracle this packed path is validated row-for-row against.
 
 Design notes:
 - ``horizons`` on a :class:`PackedWindow` is the **union** across concatenated
-  shards (PLAN §5.1/S4). Expansion passes the CONFIG horizons; the stored
+  shards. Expansion passes the CONFIG horizons; the stored
   ``stvalue``/``stvalue_mask`` columns are preserved verbatim. In practice every
   hexfield shard is written with the same ``STV_HORIZONS=(2,6,16)`` so the union
   is a no-op, but :func:`concat_packed` asserts identical horizons rather than
   silently merging mismatched blocks (a mismatch would mean ``stvalue`` columns
   are not comparable and must not be concatenated).
-- :func:`concat_packed` is **streaming** (PLAN §5.5): it pre-sizes every output
-  array from the per-shard counts, fills in place, rebases CSR offsets to
-  ``int64``, and frees each part right after its copy — so the transient peak is
-  ~1x the final window plus one shard, not the ~2x of ``np.concatenate(parts)``.
+- :func:`concat_packed` is **streaming**: it pre-sizes every output array from
+  the per-shard counts, fills in place, rebases CSR offsets to ``int64``, and
+  frees each part right after its copy — so the transient peak is ~1x the final
+  window plus one shard, not the ~2x of ``np.concatenate(parts)``.
 """
 
 from __future__ import annotations
@@ -45,7 +45,7 @@ from .shards import SCHEMA_VERSION
 if TYPE_CHECKING:
     from .buffer_manifest import ShardEntry
 
-# --- column taxonomy (mirrors shards.write_compact_shard:147-174 exactly) ----
+# --- column taxonomy (mirrors shards.write_compact_shard exactly) ------------
 
 # Per-row scalar columns: indexed directly by the row index ``i``.
 SCALAR_COLS: tuple[str, ...] = (
@@ -203,16 +203,16 @@ class PackedRowView:
 
 @dataclass
 class PackedWindow:
-    """Concatenated packed columns for a whole replay window (PLAN §5.1).
+    """Concatenated packed columns for a whole replay window.
 
     ``cols`` holds every ``hexfield_compact_v1`` column kept PACKED: the per-row
     scalar arrays, the ``(n,H)`` blocks, the flat CSR data arrays, and the
     ``int64[n+1]`` CSR offsets (one global offsets array per group, rebased by
     :func:`concat_packed`). ``generation`` and ``row_shard_id`` are ``int32[n]``
-    per-row tags (PLAN §5.4).
+    per-row tags.
 
     The window deliberately exposes neither ``window_size`` nor an ``index`` with
-    ``sample_count`` (PLAN §6 opaque-window guard) so the framework's
+    ``sample_count`` (the opaque-window guard) so the framework's
     ``D6SymmetrySelector`` treats it as opaque (``_sample_count`` -> 0) and does
     NOT blake2b-hash every row each epoch.
     """
@@ -225,7 +225,7 @@ class PackedWindow:
 
     @classmethod
     def empty(cls) -> "PackedWindow":
-        """A zero-row window. ``train_passes`` already handles n==0 (trainer.py:81)."""
+        """A zero-row window. ``train_passes`` already handles n==0."""
         cols: dict[str, np.ndarray] = {}
         for name in SCALAR_COLS:
             cols[name] = np.empty(0, dtype=_SCALAR_DTYPES[name])
@@ -245,7 +245,7 @@ class PackedWindow:
         )
 
     def row_view(self, i: int) -> PackedRowView:
-        """Zero-copy slices for row ``i`` (PLAN §5.1). Feeds one ``expand_sample``."""
+        """Zero-copy slices for row ``i``. Feeds one ``expand_sample``."""
         if i < 0 or i >= self.n:
             raise IndexError(f"row {i} out of range for PackedWindow(n={self.n})")
         c = self.cols
@@ -290,7 +290,7 @@ class PackedWindow:
 
 
 # Expected dtypes per column, used by empty() and as a load-time sanity guard.
-# These mirror the writer (shards.py:74-83, 147-174).
+# These mirror the writer (shards.write_compact_shard).
 _SCALAR_DTYPES: dict[str, np.dtype] = {
     "turn_index": np.dtype(np.int32),
     "current_player": np.dtype(np.uint8),
@@ -320,10 +320,10 @@ _CSR_DTYPES: dict[str, np.dtype] = {
 
 
 def _shard_generation(path: Path, num_rows: int) -> int:
-    """Producing epoch for the shard (PLAN §5.4). Key-derived epoch is
-    authoritative (``game_key // 1_000_000``, structurally guaranteed by
-    selfplay.py:77); the sidecar ``epoch`` only cross-checks (warns on mismatch);
-    the directory name is the last-resort fallback. Never uses mtime.
+    """Producing epoch for the shard. Key-derived epoch is authoritative
+    (``game_key // 1_000_000``, structurally guaranteed by the selfplay shard
+    writer); the sidecar ``epoch`` only cross-checks (warns on mismatch); the
+    directory name is the last-resort fallback. Never uses mtime.
     """
     stem = path.stem  # e.g. "game_1000000"
     key_epoch: int | None = None
@@ -421,7 +421,7 @@ def load_packed_shard(path: Path) -> PackedWindow:
 
 
 def concat_packed(parts: Sequence[PackedWindow]) -> PackedWindow:
-    """Streaming concat of packed shards into one window (PLAN §5.5).
+    """Streaming concat of packed shards into one window.
 
     Pre-sizes every output array from the per-shard counts (no list-of-parts +
     ``np.concatenate``, which peaks ~2x), fills in place, rebases each CSR
@@ -429,7 +429,7 @@ def concat_packed(parts: Sequence[PackedWindow]) -> PackedWindow:
     after its copy** so the transient stays ~1x the final window plus one shard.
 
     Empty parts (n==0) are tolerated and skipped. ``horizons`` is the union and
-    must be identical across non-empty parts (PLAN §5.1/S4) — a mismatch means
+    must be identical across non-empty parts — a mismatch means
     the ``stvalue`` block columns are not comparable and must not be glued.
     """
     parts = [p for p in parts]
@@ -505,7 +505,7 @@ def concat_packed(parts: Sequence[PackedWindow]) -> PackedWindow:
                 data_cursor[d] = dc + m
 
         row_cursor = r1
-        # Free the part's columns now (PLAN §5.5: free each part after copy).
+        # Free the part's columns now (free each part right after its copy).
         part.cols.clear()
         part.generation = np.empty(0, dtype=np.int32)
         part.row_shard_id = np.empty(0, dtype=np.int32)
@@ -528,13 +528,13 @@ def concat_packed(parts: Sequence[PackedWindow]) -> PackedWindow:
 
 
 # =============================================================================
-# Phase 4 — KataGo / dense_cnn_restnet window mathematics, md5 split, and the
-# overshoot-skip file selection (PLAN §3.1-3.8, §5, §6). Each function below is a
-# faithful port of its dense twin (citations inline); the divergences are only
-# the hexfield row container (``ShardEntry`` carries ``.rows`` / ``.generation``
-# / ``.game_key`` / ``.rel_path`` where dense's ``ShuffleFileInfo`` carries
-# ``.rows`` / ``.mtime`` / ``.path``) and the in-RAM ``PackedWindow`` build
-# (hexfield shuffles the window in RAM; dense re-shards to disk — PLAN §8/M3).
+# KataGo / dense_cnn_restnet window mathematics, md5 split, and the overshoot-skip
+# file selection. Each function below is a faithful port of its dense twin (named
+# inline); the divergences are only the hexfield row container (``ShardEntry``
+# carries ``.rows`` / ``.generation`` / ``.game_key`` / ``.rel_path`` where
+# dense's ``ShuffleFileInfo`` carries ``.rows`` / ``.mtime`` / ``.path``) and the
+# in-RAM ``PackedWindow`` build (hexfield shuffles the window in RAM; dense
+# re-shards to disk).
 # =============================================================================
 
 
@@ -546,14 +546,13 @@ def compute_katago_window_rows(
     taper_window_exponent: float,
     taper_window_scale: float | None,
 ) -> int:
-    """Power-law taper window size (PLAN §3.1).
+    """Power-law taper window size.
 
-    Ported **verbatim** from ``dense_cnn_restnet.replay.compute_katago_window_rows``
-    (``replay.py:620-632``): same float operation order, same ``int()``
-    truncation (NOT ``round``). As ``usable_rows -> min_rows`` the window
-    collapses to ``min_rows``; ``taper_window_exponent < 1`` gives the sublinear
-    KataGo taper. The caller clamps ``max(window, min_rows)`` (mirrors
-    ``replay.py:396``).
+    Ported **verbatim** from
+    ``dense_cnn_restnet.replay.compute_katago_window_rows``: same float operation
+    order, same ``int()`` truncation (NOT ``round``). As ``usable_rows ->
+    min_rows`` the window collapses to ``min_rows``; ``taper_window_exponent < 1``
+    gives the sublinear KataGo taper. The caller clamps ``max(window, min_rows)``.
     """
     offset = float(taper_window_scale if taper_window_scale is not None else min_rows)
     power_law_x = float(usable_rows) - float(min_rows) + offset
@@ -563,9 +562,9 @@ def compute_katago_window_rows(
 
 
 def keep_prob(used_rows: int, keep_target_rows: int) -> float:
-    """Uniform-subsample probability toward ``keep_target_rows`` (PLAN §3.3).
+    """Uniform-subsample probability toward ``keep_target_rows``.
 
-    Ported verbatim from ``replay.py:404``:
+    Ported verbatim from ``replay.keep_prob``:
     ``min(keep_target_rows, used_rows) / used_rows``. ``1.0`` when the window is
     already at or below the target (no subsample); else the down-sample ratio.
     ``used_rows`` is always > 0 at the call site (an empty window is rejected
@@ -579,11 +578,10 @@ def keep_prob(used_rows: int, keep_target_rows: int) -> float:
 def select_recent_window(
     entries: Sequence["ShardEntry"], desired_rows: int
 ) -> tuple[list["ShardEntry"], int]:
-    """Newest->oldest whole-shard accumulation until ``used_rows >= desired_rows``
-    (PLAN §3.2).
+    """Newest->oldest whole-shard accumulation until ``used_rows >= desired_rows``.
 
-    Ported from ``replay._select_recent_window`` (``replay.py:681-690``). dense's
-    ``files`` are mtime-ascending, so ``reversed`` walks newest-first; hexfield's
+    Ported from ``replay._select_recent_window``. dense's ``files`` are
+    mtime-ascending, so ``reversed`` walks newest-first; hexfield's
     ``entries`` arrive **(generation, game_key)-ascending** from the manifest, so
     ``reversed`` likewise walks newest-first (mtime-free — that is the whole point
     of the port). Whole-shard granularity overshoots ``desired_rows`` by < one
@@ -601,10 +599,10 @@ def select_recent_window(
 
 
 def _md5_path_fraction(value: str) -> float:
-    """Stable [0, 1) fraction from the md5 of a path (PLAN §3.6).
+    """Stable [0, 1) fraction from the md5 of a path.
 
-    Ported verbatim from ``replay._md5_path_fraction`` (``replay.py:908-910``):
-    the first 13 hex digits of ``md5(value)`` as an int over ``2**52``. Seed-
+    Ported verbatim from ``replay._md5_path_fraction``: the first 13 hex digits
+    of ``md5(value)`` as an int over ``2**52``. Seed-
     independent (a pure function of the path string), so the train/val partition
     and any md5 sub-range filter are stable across epochs and runs.
     """
@@ -617,11 +615,11 @@ def _split_by_md5(
     *,
     validation_fraction: float,
 ) -> tuple[list["ShardEntry"], list["ShardEntry"]]:
-    """Per-file md5 train/val split (PLAN §3.6).
+    """Per-file md5 train/val split.
 
-    Ported from ``replay._split_by_md5`` (``replay.py:693-709``), keyed on
-    ``str(entry.rel_path)`` (the portable, stable shard key — PLAN §3.6) where
-    dense keys on ``str(info.path)``. ``validation_fraction <= 0`` ⇒ all-train,
+    Ported from ``replay._split_by_md5``, keyed on ``str(entry.rel_path)`` (the
+    portable, stable shard key) where dense keys on ``str(info.path)``.
+    ``validation_fraction <= 0`` ⇒ all-train,
     empty val (the hexfield default). Otherwise a file goes to val iff its md5
     fraction is ``>= 1 - validation_fraction`` (a fixed, path-stable cut).
     """
@@ -644,21 +642,18 @@ def _select_files_for_rows(
     requested_rows: int,
     rng: np.random.Generator,
 ) -> tuple[list["ShardEntry"], int]:
-    """Overshoot-skip single-pass file selection capped near ``requested_rows``
-    (PLAN §3.7).
+    """Overshoot-skip single-pass file selection capped near ``requested_rows``.
 
-    Ported from ``trainer._select_files_for_rows`` (``trainer.py:604-631``). dense
-    reads each candidate's row count via ``npz_row_count(path)``; hexfield reads it
-    straight off ``ShardEntry.rows`` (already in the manifest — no re-stat). The
-    overshoot-skip logic is byte-identical: shuffle the candidates, greedily
-    accumulate, and a shard that would overshoot is *probabilistically* skipped
-    (``skip_prob = overshoot / row_count``) and deferred; deferred shards are
-    added back if still short. Unbiasedly lands near (not far past)
-    ``requested_rows``.
+    Ported from ``trainer._select_files_for_rows``. dense reads each candidate's
+    row count via ``npz_row_count(path)``; hexfield reads it straight off
+    ``ShardEntry.rows`` (already in the manifest — no re-stat). The overshoot-skip
+    logic is identical: shuffle the candidates, greedily accumulate, and a shard
+    that would overshoot is *probabilistically* skipped (``skip_prob = overshoot
+    / row_count``) and deferred; deferred shards are added back if still short.
+    Unbiasedly lands near (not far past) ``requested_rows``.
 
     Determinism: ``rng`` is the caller's pre-seeded ``np.random.default_rng(seed +
-    epoch*65537)`` (mirrors ``trainer.py:180``); every draw happens here on the
-    main thread.
+    epoch*65537)``; every draw happens here on the main thread.
     """
     candidates: list[tuple["ShardEntry", int]] = [(info, int(info.rows)) for info in entries]
     rng.shuffle(candidates)
@@ -692,24 +687,23 @@ def build_window_split(
     samples_dir: Path,
 ) -> PackedWindow:
     """Load the selected shards, per-row Bernoulli subsample, and concat into one
-    packed in-RAM window (PLAN §5.1/§5.5/§6).
+    packed in-RAM window.
 
-    The hexfield equivalent of dense's ``_build_compact_split`` (``replay.py:712-823``)
-    minus the disk re-shard (PLAN §8/M3): hexfield keeps the window PACKED in RAM,
-    so there is no ``data*.npz`` write and no fixed-batch alignment here — the
-    permute + ``effective_rows`` truncation live in the Phase-5 consumer.
+    The hexfield equivalent of dense's ``_build_compact_split`` minus the disk
+    re-shard: hexfield keeps the window PACKED in RAM, so there is no
+    ``data*.npz`` write and no fixed-batch alignment here — the permute +
+    ``effective_rows`` truncation live in the consumer.
 
-    Subsample fidelity (PLAN §3.3): the per-row keep is an independent
-    ``Bernoulli(keep_prob)`` drawn from the **single shared** ``rng`` consumed in
-    deterministic ``(generation, game_key)`` shard order (the manifest order),
-    and within a shard in stored row order — exactly ``rng.random(len(shard)) <
-    keep_prob`` per shard, matching ``replay.py:777``. ``keep_prob >= 1.0`` keeps
-    every row with no RNG draw (matching ``replay.py:774``), so the stream is
+    Subsample fidelity: the per-row keep is an independent ``Bernoulli(keep_prob)``
+    drawn from the **single shared** ``rng`` consumed in deterministic
+    ``(generation, game_key)`` shard order (the manifest order), and within a
+    shard in stored row order — exactly ``rng.random(len(shard)) < keep_prob`` per
+    shard. ``keep_prob >= 1.0`` keeps every row with no RNG draw, so the stream is
     identical whether or not a subsample is needed.
 
-    Memory (PLAN §5.5): survivors are concatenated with the streaming
-    :func:`concat_packed` (pre-size + fill + free-each-part), so the transient
-    peak stays ~1x the final window plus one shard rather than ~2x.
+    Memory: survivors are concatenated with the streaming :func:`concat_packed`
+    (pre-size + fill + free-each-part), so the transient peak stays ~1x the final
+    window plus one shard rather than ~2x.
     """
     # Consume the keep mask in deterministic (generation, game_key) order so the
     # single shared rng stream is reproducible regardless of how `selected` was
@@ -724,7 +718,7 @@ def build_window_split(
             survivors.append(shard)
             continue
         # Independent per-row Bernoulli(keep_prob). One vectorized draw per shard,
-        # in stored row order (rng.random releases the GIL internally — PLAN §4.1).
+        # in stored row order (rng.random releases the GIL internally).
         mask = rng.random(shard.n) < keep_prob
         survivors.append(_subset_packed(shard, mask))
 

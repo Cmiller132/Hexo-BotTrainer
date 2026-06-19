@@ -1,14 +1,12 @@
-"""Persisted, mtime-free shard manifest for the KataGo-style replay buffer
-(PLAN §5.3, §5.4, §6).
+"""Persisted, mtime-free shard manifest for the KataGo-style replay buffer.
 
-The v1 trainer ordered shards by ``st_mtime`` (``trainer.py:43-48``), which is
-fragile: resume/checkpoint/``touch`` perturb it. This manifest replaces that with a
-**stable ordering by ``(generation, game_key)``** persisted to
-``<samples_dir>/.buffer_manifest.json`` and updated **incrementally** so the
-per-epoch re-glob + ``stat()``-sort goes away (it does NOT replace the per-epoch
-window *decode* — that is what the Rust path is for, PLAN §M6).
+Ordering shards by ``st_mtime`` is fragile: resume/checkpoint/``touch`` perturb
+it. This manifest instead uses a **stable ordering by ``(generation,
+game_key)``** persisted to ``<samples_dir>/.buffer_manifest.json`` and updated
+**incrementally** so the per-epoch re-glob + ``stat()``-sort goes away (it does
+NOT replace the per-epoch window *decode* — that is what the Rust path is for).
 
-Two row totals are tracked (PLAN §3.5 / M2):
+Two row totals are tracked:
 
 * ``total_rows`` — the **live** sum over present entries. Used for *window*
   selection (taper / recent-window / keep_prob).
@@ -17,12 +15,12 @@ Two row totals are tracked (PLAN §3.5 / M2):
   *governor*; feeding it a non-monotone count would spuriously trip the
   ``elif total_rows < level_at_row`` reload branch and zero the reuse counter.
 
-Generation tagging never uses mtime (PLAN §5.4 / S3): the key-derived epoch
-(``game_key // 1_000_000``, structurally guaranteed by ``selfplay.py:77``) is
+Generation tagging never uses mtime: the key-derived epoch (``game_key //
+1_000_000``, structurally guaranteed by the selfplay shard writer) is
 **authoritative**; the sidecar ``epoch`` is a cross-check that WARNs on mismatch;
 the directory name is the last-resort fallback when the sidecar is absent.
 
-Robustness rules (PLAN §5.3 / S3):
+Robustness rules:
 
 * Shards lacking a JSON sidecar are SKIPPED — the live writer emits the ``.npz``
   before (or concurrently with) its ``.json`` sidecar, so a sidecar-less file may
@@ -51,17 +49,18 @@ MANIFEST_VERSION = 1
 # ``game_*.npz`` glob and visually distinct from shard data.
 MANIFEST_NAME = ".buffer_manifest.json"
 
-# Rows per epoch in a game key, mirroring ``selfplay.py:77`` (``next_key =
-# epoch * 1_000_000``). game_key = epoch * 1_000_000 + within-epoch index.
+# Rows per epoch in a game key, mirroring the selfplay shard writer
+# (``next_key = epoch * 1_000_000``). game_key = epoch * 1_000_000 + within-epoch
+# index.
 _KEYS_PER_EPOCH = 1_000_000
 
 
 @dataclass(frozen=True)
 class ShardEntry:
     """One self-play shard. ``rel_path`` is POSIX-relative to ``samples_dir``
-    (portable + the stable key the md5 train/val split hashes, PLAN §3.6).
-    ``generation`` is the producing epoch; ``game_key`` is the within-run game
-    id (``epoch * 1_000_000 + i``)."""
+    (portable + the stable key the md5 train/val split hashes). ``generation`` is
+    the producing epoch; ``game_key`` is the within-run game id
+    (``epoch * 1_000_000 + i``)."""
 
     rel_path: str
     rows: int
@@ -95,7 +94,7 @@ class BufferManifest:
     entries: list[ShardEntry] = field(default_factory=list)
     # Live sum over present entries (drives WINDOW selection).
     total_rows: int = 0
-    # MONOTONE, never decremented (drives the GOVERNOR — PLAN §3.5 / M2).
+    # MONOTONE, never decremented (drives the GOVERNOR).
     cumulative_rows_ever: int = 0
 
     # -- derived helpers -------------------------------------------------
@@ -148,7 +147,7 @@ class BufferManifest:
 
 
 def _game_key_and_generation(npz_path: Path, sidecar: Mapping[str, Any] | None) -> tuple[int, int]:
-    """Return ``(game_key, generation)`` for a shard (PLAN §5.4 / S3).
+    """Return ``(game_key, generation)`` for a shard.
 
     Key-derived epoch is authoritative; the sidecar ``epoch`` is a cross-check
     that WARNs on mismatch; never uses mtime. ``game_key`` is the integer after
@@ -162,7 +161,7 @@ def _game_key_and_generation(npz_path: Path, sidecar: Mapping[str, Any] | None) 
     except (IndexError, ValueError):
         # Non-conforming name: fall back to the sidecar/dir, key unknown -> -1
         # so it sorts before real keys but still loads. This should not happen
-        # for live shards (selfplay.py names them game_<key>.npz).
+        # for live shards (the selfplay writer names them game_<key>.npz).
         game_key = -1
 
     key_generation = game_key // _KEYS_PER_EPOCH if game_key >= 0 else None
@@ -198,11 +197,10 @@ def _game_key_and_generation(npz_path: Path, sidecar: Mapping[str, Any] | None) 
 
 
 def _rows_from_sidecar(sidecar: Mapping[str, Any]) -> int | None:
-    """Row count from a parsed sidecar. The live writer emits ``"rows"``
-    (``shards.py:183``); ``num_rows``/``effective_rows`` are tolerated for
-    cross-lineage robustness (dense uses those, ``replay.py:610``). Returns
-    ``None`` if no usable key is present so the caller can fall back to the
-    ``.npz``.
+    """Row count from a parsed sidecar. The live writer emits ``"rows"``;
+    ``num_rows``/``effective_rows`` are tolerated for cross-lineage robustness
+    (the dense lineage uses those). Returns ``None`` if no usable key is present
+    so the caller can fall back to the ``.npz``.
     """
     for key in ("rows", "num_rows", "effective_rows"):
         if key in sidecar:
@@ -231,8 +229,8 @@ def _rows_from_npz(npz_path: Path) -> int:
 
 def _build_entry(npz_path: Path, samples_dir: Path) -> ShardEntry | None:
     """Build a :class:`ShardEntry` for one ``.npz``. Returns ``None`` if the
-    shard lacks a sidecar (half-written by the live writer — PLAN §S3): such
-    shards are SKIPPED, never opened, so the scan never reads a torn ``.npz``.
+    shard lacks a sidecar (half-written by the live writer): such shards are
+    SKIPPED, never opened, so the scan never reads a torn ``.npz``.
     """
     sidecar_path = npz_path.with_suffix(".json")
     if not sidecar_path.exists():
@@ -315,21 +313,21 @@ def _atomic_write_manifest(manifest_path: Path, manifest: BufferManifest) -> Non
 
 
 def _iter_shard_npzs(samples_dir: Path) -> Iterable[Path]:
-    """All ``epoch_*/game_*.npz`` under ``samples_dir`` (the self-play layout,
-    ``selfplay.py:337,285``). Sorted for deterministic discovery order."""
+    """All ``epoch_*/game_*.npz`` under ``samples_dir`` (the self-play layout).
+    Sorted for deterministic discovery order."""
     return sorted(samples_dir.glob("epoch_*/game_*.npz"))
 
 
 def scan_or_update_manifest(samples_dir: str | os.PathLike[str]) -> BufferManifest:
     """Load, incrementally update, persist, and return the buffer manifest.
 
-    Steps (PLAN §5.3):
+    Steps:
 
     1. Load ``.buffer_manifest.json`` if present and valid; otherwise start a
        fresh manifest (full rebuild — self-healing on parse/version mismatch).
     2. Drop entries whose ``.npz`` file has vanished.
     3. Incrementally ``glob`` ``epoch_*/game_*.npz`` and add ONLY shards not
-       already present. SKIP shards lacking a sidecar (half-written — §S3).
+       already present. SKIP shards lacking a sidecar (half-written).
        Row count from the sidecar (``rows``/``num_rows``/``effective_rows``);
        fall back to the shard's ``num_rows`` array only if the sidecar carries
        no row key.
@@ -362,7 +360,7 @@ def scan_or_update_manifest(samples_dir: str | os.PathLike[str]) -> BufferManife
         npz_path = samples_dir / entry.rel_path
         if npz_path.exists():
             present[entry.rel_path] = entry
-        # else: file vanished -> drop silently (eviction is allowed, PLAN §5.2).
+        # else: file vanished -> drop silently (eviction is allowed).
 
     # (3) Incrementally add new shards (not already entries; sidecar required).
     for npz_path in _iter_shard_npzs(samples_dir):

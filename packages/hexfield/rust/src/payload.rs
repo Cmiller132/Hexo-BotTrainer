@@ -53,9 +53,9 @@ fn featurize_and_sort(states: &[&RustHexoState]) -> PyResult<Vec<Row>> {
     // Featurize rows across rayon workers: build_support (the depth-9 BFS) and
     // build_features are pure functions of &state, so per-row work is
     // independent. par_iter collect preserves request order, and the sort below
-    // is deterministic, so the wire bytes are byte-identical to the serial form
-    // (dense_cnn mcts_eval.rs:248 port). This runs GIL-free Rust on the one
-    // critical thread, so it directly cuts the host encode cost.
+    // is deterministic, so the wire bytes are byte-identical to the serial form.
+    // This runs GIL-free Rust on the one critical thread, so it directly cuts
+    // the host encode cost.
     let mut rows: Vec<Row> = states
         .par_iter()
         .enumerate()
@@ -200,8 +200,8 @@ fn parse_chunk_reply(
     // Parse per (sorted) row across rayon workers, then restore caller order.
     // Each row reads a DISJOINT prior slice (precomputed prior_offsets) plus one
     // value/moves_left, and finalize_priors is deterministic, so the output is
-    // byte-identical to the sequential parse (dense_cnn mcts_eval.rs:358 port).
-    // The per-row prior decode+sort was the dominant host parse cost.
+    // byte-identical to the sequential parse. The per-row prior decode+sort was
+    // the dominant host parse cost.
     let mut prior_offsets = Vec::with_capacity(rows.len() + 1);
     let mut running = 0usize;
     prior_offsets.push(0usize);

@@ -21,6 +21,7 @@ from hexfield.plugin import get_plugin
 from hexfield.samples import STV_HORIZONS, HexfieldSampleData, finalize_game_samples
 from hexfield.shards import write_compact_shard
 from hexfield.trainer import HexfieldTrainer
+from hexfield.window import load_packed_shard
 
 
 def test_config_production_defaults() -> None:
@@ -104,7 +105,7 @@ def test_plugin_builds_model_and_optimizer_split() -> None:
     plugin = get_plugin()
     assert plugin.name == "hexfield"
     model = plugin.build_model({}, {})
-    assert sum(p.numel() for p in model.parameters()) == 1_230_651
+    assert sum(p.numel() for p in model.parameters()) == 1_591_748
 
     overrides = plugin.training_component_overrides(
         defaults=None, config={}, shared=None, model=model
@@ -112,15 +113,20 @@ def test_plugin_builds_model_and_optimizer_split() -> None:
     assert overrides.uses_shared_sample_store is False
     assert overrides.trainer is not None
     assert overrides.checkpoint_loader is not None and overrides.checkpoint_saver is not None
-    # Decoupled weight decay on matrix weights only: the bias table, tokens, and
-    # all 1-D params (LN gains/biases, conv biases) must be in the no-decay group.
+    # Decoupled weight decay on matrix weights only: the per-block bias tables,
+    # tokens, and all 1-D params (LN gains/biases, conv biases) must be in the
+    # no-decay group.
     groups = overrides.optimizer.param_groups
     decay_ids = {id(p) for p in groups[0]["params"]}
     no_decay_ids = {id(p) for p in groups[1]["params"]}
     assert groups[0]["weight_decay"] == 1e-4
     assert groups[1]["weight_decay"] == 0.0
     named = dict(model.named_parameters())
-    assert id(named["bias_table"]) in no_decay_ids
+    # Per-block relative-position bias tables (bias_tables.0/.1/.2) all no-decay.
+    bias_table_names = [n for n in named if n.startswith("bias_tables.")]
+    assert len(bias_table_names) == len(model.bias_tables) >= 3
+    for name in bias_table_names:
+        assert id(named[name]) in no_decay_ids, name
     assert id(named["tokens"]) in no_decay_ids
     for name, p in named.items():
         if p.ndim <= 1:
@@ -165,31 +171,47 @@ def _decisive_game_shard(out_dir: Path) -> int:
 
 
 def test_trainer_runs_on_real_rows(tmp_path) -> None:
-    """The train-on-rows path end to end: real decisive-game shard -> window ->
-    micro-bucket collate -> loss -> optimizer step -> finite loss + steps>0.
-    (Self-play smokes truncate on weak models, so this is the direct gate.)"""
+    """The train-on-rows path end to end: real decisive-game shard -> packed
+    window -> serial expand -> micro-bucket collate -> loss -> optimizer step ->
+    finite loss + steps>0. (Self-play smokes truncate on weak models, so this is
+    the direct gate.)
+
+    train_passes now consumes an opaque PackedWindow (built by load_packed_shard
+    here, the production loader build_window_split uses) rather than reading a
+    samples_dir itself; with no prior select_training_samples call _effective_rows_for
+    falls back to min(window.n, train_samples_per_epoch), so the full window trains.
+    """
 
     samples_dir = tmp_path / "samples"
     rows = _decisive_game_shard(samples_dir / "epoch_000001")
     assert rows >= 6
+
+    # Pack the single decisive-game shard into the in-RAM PackedWindow the trainer
+    # consumes (the production path concatenates these via build_window_split).
+    window = load_packed_shard(samples_dir / "epoch_000001" / "game_1.npz")
+    assert window.n == rows
 
     model = HexfieldNet()
     cfg = parse_hexfield_config({"device": "cpu", "training": {"batch_rows": 8}})
     opt = torch.optim.AdamW(model.parameters(), lr=1e-3)
     trainer = HexfieldTrainer(model=model, config=cfg, optimizer=opt)
 
+    # train_passes reads ctx.config.run.seed (D6/permutation determinism) and
+    # ctx.diagnostics_dir (the per-epoch diag write); samples_dir is unused now
+    # that the packed window is passed directly.
     ctx = types.SimpleNamespace(
-        samples_dir=samples_dir,
+        config=types.SimpleNamespace(run=types.SimpleNamespace(seed=0)),
         diagnostics_dir=tmp_path / "diagnostics",
     )
     (tmp_path / "diagnostics").mkdir()
     before = {n: p.detach().clone() for n, p in model.named_parameters()}
     result = trainer.train_passes(
-        passes=2, sample_window=None, sample_symmetries=None,
+        passes=2, sample_window=window, sample_symmetries=None,
         ctx=ctx, components=None, epoch=1,
     )
     assert result["status"] == "completed"
     assert result["window_rows"] == rows
+    assert result["trained_rows"] == rows
     assert result["steps"] > 0
     assert result["grad_norm_mean"] >= 0.0
     # the optimizer actually moved the weights

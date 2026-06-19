@@ -1,11 +1,11 @@
-"""HexfieldEvaluator — the serve-side half of the §5.2 ABI.
+"""HexfieldEvaluator — the serve-side half of the wire ABI.
 
 Consumes the Rust payload (CSR over support nodes, rows pre-sorted by support
-size descending), packs rows into 256-quantized static shapes under the
-inference pair ceiling (§5.3), runs `forward_policy_value`, and returns the
-reply: `values_bytes` (f32 x B, clamped [-1, 1]), `priors_bytes` (f32 x sum
-L_g, positional over each row's legal prefix, fp32 softmax), and
-`moves_left_bytes` (f32 x B, median-of-bins decisions) when requested.
+size descending), packs rows into quantized static shapes under the inference
+pair ceiling, runs `forward_policy_value`, and returns the reply: `values_bytes`
+(f32 x B, clamped [-1, 1]), `priors_bytes` (f32 x sum L_g, positional over each
+row's legal prefix, fp32 softmax), and `moves_left_bytes` (f32 x B) when
+requested.
 """
 
 from __future__ import annotations
@@ -22,10 +22,10 @@ from .model import HexfieldNet
 
 NBR_SENTINEL = 0xFFFF
 # B * S_pad^2 <= this keeps the fp16 (B, 4, S, S) bias transient <= ~305 MB
-# (§5.3 — the INFERENCE ceiling, distinct from the training pair budget).
+# (the INFERENCE ceiling, distinct from the training pair budget).
 PAIR_CEILING = 3.8e7
-# Pad quantum: finer (64 vs the old 256) cuts padded-cell waste, the dominant
-# serve inefficiency on skewed support mixes (M8 workflow finding).
+# Pad quantum: finer values cut padded-cell waste, the dominant serve
+# inefficiency on skewed support mixes.
 QUANT_NODES = 64
 # Bound padding waste: don't pad a row up to a group anchor more than ~18%
 # larger than the row's own size (or 64 nodes), so the squared attention waste
@@ -68,31 +68,17 @@ class HexfieldEvaluator:
         self.model = model
         self.device = torch.device(device)
         self.model.to(self.device).eval()
-        # Serve forward compile (spec §5.3). It is the throughput bottleneck
-        # (~70% is the rel-pos bias machinery: many small elementwise/gather
-        # kernels); torch.compile fuses them for ~2.4x at fp16-tolerance parity.
-        # Eval/self-play only — training never goes through HexfieldEvaluator.
+        # Serve forward compile. The rel-pos bias machinery (many small
+        # elementwise/gather kernels) dominates the forward; torch.compile fuses
+        # them. Eval/self-play only — training never goes through HexfieldEvaluator.
         #
-        # ONE dynamic compile serves EVERY shape. Both varying dims — batch (dim 0)
+        # ONE dynamic compile serves EVERY shape: both varying dims — batch (dim 0)
         # and cell-count Npad (dim 1) — are marked dynamic (in _forward_group) and
         # compile() is invoked with dynamic=True, so Inductor builds a single graph
         # parameterized by symbolic (B, Npad) on the first (small) flush and reuses
-        # it for all later shapes, deep late-game included. This REPLACES the old
-        # static-per-Npad scheme and its `HEXFIELD_COMPILE_MAX_NPAD<=1024` cutoff.
-        #
-        # Why the old scheme existed, and why it was wrong: a prior note claimed
-        # dynamic Npad raises `CantSplit: 96*s+768 not divisible by s+8` (the
-        # attention out-reshape CHANNELS*(Npad+8) over seq-len Npad+8) and forces a
-        # silent eager fallback, so it pinned Npad static and compiled ~48 buckets —
-        # which then HUNG the single self-play thread the first time a deep shape
-        # compiled. MEASURED FALSE on torch 2.12 (scripts/_hexfield_compile_diag.py,
-        # 2026-06-16, epoch-34 ckpt): `compile(dynamic=True)` + mark_dynamic on the
-        # Npad dim compiles ONCE (~27 s on Npad=256) and serves Npad 512..2560 with
-        # NO recompile and NO CantSplit (4–13 ms reuse). It is also numerically the
-        # SAME path as the shipped static compile: dyn-vs-static == static-vs-eager
-        # == one fp16 ulp (the compile noise floor, not added error). Because there
-        # is now exactly ONE compile — on the first small shape — the deep-shape
-        # compile that hung can never occur; the cutoff is gone.
+        # it for all later shapes, deep late-game included. Because there is exactly
+        # one compile (on the first small shape), the deep-shape compile that could
+        # hang the single self-play thread never occurs.
         # Opt out with HEXFIELD_NO_COMPILE=1; falls back to eager on any error.
         self._raw_fpv = self.model.forward_policy_value
         self._compiled_fpv = self._raw_fpv
@@ -150,7 +136,7 @@ class HexfieldEvaluator:
 
     @torch.no_grad()
     def submit_payload(self, payload: dict) -> dict:
-        """Phase 1 of the async serve split (§5.3 overlap): parse the request and
+        """Phase 1 of the async serve split (overlap): parse the request and
         ENQUEUE every forward group on the GPU, but do NOT synchronize — the
         decoded outputs stay on-device and no .cpu() runs here. Returns an opaque
         handle. The caller (Rust) can then run the pre-backup select pass with the
@@ -178,11 +164,10 @@ class HexfieldEvaluator:
         feats16 = np.frombuffer(payload["node_feats"], dtype=np.float16)
         if feats16.shape[0] != total_nodes * NUM_FEATURES:
             raise ValueError("node_feats byte count mismatch")
-        # Keep feats f16 (dense_cnn-style): the wire is already f16 and the serve
-        # forward runs f16 under autocast, so the old astype(float32) was a wasteful
-        # host copy that doubled the feats H2D — autocast downcasts the upcast back
-        # to the identical f16 value. Pack/H2D below build f16 on cuda (half size,
-        # no astype), f32 only on the rare CPU path / the F32_FEATS A/B toggle.
+        # Keep feats f16: the wire is already f16 and the serve forward runs f16
+        # under autocast, so an astype(float32) would be a wasteful host copy that
+        # doubles the feats H2D. Pack/H2D below build f16 on cuda (half size, no
+        # astype), f32 only on the rare CPU path / the F32_FEATS A/B toggle.
         feats = (
             feats16.reshape(total_nodes, NUM_FEATURES)
             if self._f16_feats
@@ -192,7 +177,7 @@ class HexfieldEvaluator:
         nbr = np.frombuffer(payload["nbr"], dtype=np.uint16).reshape(total_nodes, 6)
 
         sizes = (offsets[1:] - offsets[:-1]).astype(np.int64)
-        # Single-D2H discipline (§5.3): every group appends GPU tensors to these
+        # Single-D2H discipline: every group appends GPU tensors to these
         # buffers; the ONE .cpu() sync happens later, in result(). gpu_priors holds
         # ONE flat tensor PER GROUP (the group's rows' legal-prefix priors already
         # concatenated row-major); plan_groups emits groups in ascending row order,
@@ -265,7 +250,7 @@ class HexfieldEvaluator:
             gn = grp["g"]
             p = grp["pad_to"]
             # frombuffer views the zero-copy Rust buffer; .to(dev) copies it
-            # straight to the GPU (pageable -> synchronous H2D; matches dense_cnn).
+            # straight to the GPU (pageable -> synchronous H2D).
             d_feats = (
                 torch.frombuffer(grp["feats"], dtype=torch.float16)
                 .reshape(gn, p, NUM_FEATURES)
@@ -339,13 +324,11 @@ class HexfieldEvaluator:
         values_out = handle["values_gpu"].cpu().numpy().astype(np.float32, copy=False)
         # priors_gpu is already torch.cat over the per-row legal-prefix priors in
         # row order, so flat_priors IS the sum(legal_counts) positional layout the
-        # Rust parser walks — the old per-row slice + np.concatenate rebuilt the
-        # identical array. Emit it directly (one contiguous f32 buffer). legal_counts
-        # is unused here now but kept in the handle for the parser's row split.
+        # Rust parser walks. Emit it directly (one contiguous f32 buffer); the row
+        # split happens Rust-side from legal_counts on the wire.
         flat_priors = np.ascontiguousarray(
             handle["priors_gpu"].cpu().numpy(), dtype=np.float32
         )
-        _ = legal_counts  # row split happens Rust-side from legal_counts on the wire
 
         reply = {
             "values_bytes": values_out.tobytes(),
@@ -424,20 +407,14 @@ class HexfieldEvaluator:
         device = self.device
         use_fp16 = device.type == "cuda"
         # One dynamic graph for every shape (see __init__): mark BOTH varying dims
-        # dynamic — batch (dim 0) and cell-count Npad (dim 1) — so the single
-        # compiled graph absorbs all (B, Npad) without recompiling.
+        # dynamic — batch (dim 0) and cell-count Npad (dim 1).
         #
-        # A CONCRETE batch of 1 is the one shape dynamo refuses to keep symbolic
-        # (it always specializes a size-1 dim away). That leaves Npad the sole free
-        # symbol, and Inductor then trips on the attention head-merge transpose-copy
-        # — domain CHANNELS*(Npad+NUM_TOKENS), which it tiles as (S, CHANNELS) and
-        # cannot split by the compound seq-len S = Npad+NUM_TOKENS:
-        # `CantSplit: 96*s+768 not divisible by s+8` (REPRODUCED on torch 2.12,
-        # scripts/_hexfield_compile_diag.py). With batch >= 2 the batch dim stays a
-        # free symbol and the very same graph compiles cleanly for every Npad. So
-        # duplicate a size-1 compiled group to batch 2 (the model is pad-/batch-
-        # inert per row, §6.3, so row 0's outputs are unchanged by a twin) and slice
-        # the twin off after. Cost is one extra row on the rare singleton group.
+        # A concrete batch of 1 is the one shape dynamo specializes away, leaving
+        # Npad the sole free symbol — which then trips Inductor's CantSplit on the
+        # attention head-merge reshape. With batch >= 2 the graph compiles cleanly
+        # for every Npad, so duplicate a size-1 group to batch 2 (the model is
+        # batch-inert per row, so row 0's outputs are unchanged) and slice the twin
+        # off after.
         use_compiled = self._use_compile and self._compiled_fpv is not self._raw_fpv
         fpv = self._compiled_fpv if use_compiled else self._raw_fpv
         pad_batch = use_compiled and g == 1

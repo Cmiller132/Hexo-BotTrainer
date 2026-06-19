@@ -1,5 +1,5 @@
-"""Continuous self-play epoch driver (spec §5.1b: run_continuous owns the
-epoch; this module owns the Python side of the on_move protocol).
+"""Continuous self-play epoch driver: run_continuous owns the epoch; this module
+owns the Python side of the on_move protocol.
 
 Per game the driver tracks the placement history incrementally (the same
 tested derivations the BC writer uses: ordinal phase/player, window_scan hot/
@@ -83,9 +83,9 @@ class ContinuousDriver:
         self.policy_entropies: list[float] = []
         self.root_values: list[float] = []
         self.next_key = epoch * 1_000_000
-        # Background shard writer (dense_cnn_restnet selfplay.py:1229 port): the
-        # heavy per-game finalize + .hxr record + zlib npz write runs off the Rust
-        # on_move callback thread so game completions never stall the search loop.
+        # Background shard writer: the heavy per-game finalize + .hxr record + zlib
+        # npz write runs off the Rust on_move callback thread so game completions
+        # never stall the search loop.
         self._write_queue: queue.Queue = queue.Queue()
         self._writer_errors: list[BaseException] = []
         self._writer_failed = threading.Event()
@@ -96,8 +96,8 @@ class ContinuousDriver:
     def _write_live(self, status: str) -> None:
         """Emit hexfield.selfplay.live.json for the dashboard (progress bar +
         pos/s). Throttled to LIVE_INTERVAL_S while running; forced on
-        start/completed. Mirrors the dense_cnn.selfplay.live.json field contract
-        the dashboard's live-status panel + sub-phase derivation read."""
+        start/completed. Emits the field contract the dashboard's live-status panel
+        + sub-phase derivation read."""
 
         if self.diag_dir is None:
             return
@@ -158,7 +158,7 @@ class ContinuousDriver:
             ids = np.frombuffer(bytes(payload["visit_policy_action_ids_bytes"]), dtype=np.uint32)
             weights = np.frombuffer(bytes(payload["visit_policy_weights_bytes"]), dtype=np.float32)
             # Per-cell Q (one Q per recorded action, SAME set+order as the visit
-            # policy — Rust contract §3) feeds the train-only cell_q head.
+            # policy — Rust contract) feeds the train-only cell_q head.
             qs = np.frombuffer(bytes(payload["visit_policy_q_bytes"]), dtype=np.float32)
             # Policy-surprise = KL(visit ‖ root prior); reweights the self CE.
             prior_ids = np.frombuffer(
@@ -199,7 +199,7 @@ class ContinuousDriver:
         elif not full and not init:
             # Fast rows are never written, but the pending list keeps every
             # decision so opp-policy lookup + moves_left counts stay exact
-            # (restnet semantics: mask_opp_from_fast at finalize).
+            # (mask_opp_from_fast at finalize).
             sample = HexfieldSampleData(
                 game_id=str(game_key), turn_index=tape.ply, current_player=current,
                 phase=record_phase(tape.ply), records=tuple(tape.records),
@@ -281,8 +281,8 @@ class ContinuousDriver:
         self._write_queue.put((tape, winner, truncated))
 
     def _writer_loop(self) -> None:
-        """Background shard writer (dense_cnn_restnet selfplay.py:1229 port).
-        Drains finished games and does the heavy I/O — .hxr record, finalize,
+        """Background shard writer. Drains finished games and does the heavy I/O —
+        .hxr record, finalize,
         and the zlib `write_compact_shard` — off the search-callback thread.
         Bytes are byte-identical to the inline path; only the writing thread
         moves. A write failure is captured and surfaced, never swallowed."""

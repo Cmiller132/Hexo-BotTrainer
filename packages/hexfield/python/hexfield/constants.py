@@ -2,7 +2,6 @@
 
 Single source for every magic number shared by the Python featurizer, the
 model, the wire ABI, and (via parity fixtures) the Rust serve-time featurizer.
-Spec: docs/specs/hexfield_model_spec.md §1 (representation), §2.3 (bias table).
 """
 
 from __future__ import annotations
@@ -35,10 +34,8 @@ COORD_OFFSET = 1 << 15
 NBR_SENTINEL_U16 = 0xFFFF
 
 # --- node features (F = 15) ---------------------------------------------------
-# Indices 0-12 are the trusted dense_cnn plane semantics (constants.py:29-41 of
-# dense_cnn_restnet; encoding.rs), with index 11 redefined crop-center-distance
-# -> distance-to-nearest-stone. Indices 13-14 are the engine-exact standing-win
-# planes (spec §1.2 / §12.7).
+# Indices 0-12 are the plane semantics, with index 11 = distance-to-nearest-stone.
+# Indices 13-14 are the engine-exact standing-win planes.
 F_OWN_STONE = 0
 F_OPP_STONE = 1
 F_EMPTY = 2
@@ -81,7 +78,7 @@ ATTENTION_HEADS = 4
 HEAD_DIM = CHANNELS // ATTENTION_HEADS  # 24
 MLP_RATIO = 2
 
-# --- relative-position bias table (one shared learned table, spec §2.3) ---------
+# --- relative-position bias table (per-block learned tables) --------------------
 # rows 0-216:  exact axial offsets with hex-dist <= 8 (the 217-offset disk LUT)
 # rows 217-224: on-win-axis ring buckets, hex-dist 9-16
 # rows 225-232: off-axis ring buckets, hex-dist 9-16

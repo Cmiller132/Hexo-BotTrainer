@@ -34,7 +34,6 @@ from torch.nn import functional as F
 from .constants import (
     ATTENTION_HEADS,
     BIAS_CELL_TOKEN_ROW,
-    BIAS_DISK_RADIUS,
     BIAS_FAR_ROW,
     BIAS_OFF_AXIS_BASE,
     BIAS_ON_AXIS_BASE,
@@ -50,7 +49,7 @@ from .constants import (
     NUM_TOKENS,
     VALUE_BINS,
 )
-from .geometry import disk_offsets, rel_bias_index
+from .geometry import rel_bias_index
 
 # Finite in fp16 — closes restnet's documented -1e9 -> -inf saturation hazard.
 PAD_KEY_MASK_VALUE = -3.0e4
@@ -162,33 +161,6 @@ class _FlexBias:
         return score_mod
 
 
-class _BiasGather(torch.autograd.Function):
-    """table[pair] with a histogram backward.
-
-    The generic indexing backward scatter-adds ~19M gradient elements into the
-    237-row table with raw atomics — profiled at 86% of total step time. With
-    only BIAS_ROWS destination classes, the gradient is a per-head bincount:
-    milliseconds instead of ~640 ms."""
-
-    @staticmethod
-    def forward(ctx, table: torch.Tensor, pair: torch.Tensor) -> torch.Tensor:
-        ctx.save_for_backward(pair)
-        ctx.rows = table.shape[0]
-        return table[pair]
-
-    @staticmethod
-    def backward(ctx, grad: torch.Tensor):
-        (pair,) = ctx.saved_tensors
-        flat = pair.reshape(-1)
-        g = grad.reshape(-1, grad.shape[-1])
-        acc = torch.float64 if grad.dtype == torch.float64 else torch.float32
-        cols = [
-            torch.bincount(flat, weights=g[:, h].to(acc), minlength=ctx.rows)
-            for h in range(g.shape[1])
-        ]
-        return torch.stack(cols, dim=1).to(grad.dtype), None
-
-
 class HexNodeConv(nn.Module):
     """Direction-typed 7-tap hex convolution: gather (B,N,7,Cin) -> one GEMM.
 
@@ -246,8 +218,7 @@ class ConvBlock(nn.Module):
 
 class RelPosAttention(nn.Module):
     """4-head MHSA over the joint [tokens ; cells] sequence with the shared
-    bias table gathered as an additive mask. Two numerically identical
-    implementations: 'sdpa' (production) and 'materialized' (test oracle)."""
+    bias table gathered as an additive mask (sdpa)."""
 
     def __init__(self, channels: int) -> None:
         super().__init__()
@@ -258,7 +229,6 @@ class RelPosAttention(nn.Module):
         self.k_proj = nn.Linear(channels, channels)
         self.v_proj = nn.Linear(channels, channels)
         self.out_proj = nn.Linear(channels, channels)
-        self.impl = "sdpa"
 
     def forward(self, seq: torch.Tensor, attn_bias) -> torch.Tensor:
         b, s, c = seq.shape
@@ -280,13 +250,7 @@ class RelPosAttention(nn.Module):
         # Match the bias dtype to q under autocast: a dtype mismatch silently
         # drops sdpa to the slow math fallback. -3.0e4 stays finite in fp16.
         attn_bias = attn_bias.to(q.dtype)
-        if self.impl == "sdpa":
-            out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_bias)
-        elif self.impl == "materialized":
-            scores = (q @ k.transpose(-2, -1)) * self.scale + attn_bias
-            out = torch.softmax(scores, dim=-1) @ v
-        else:  # pragma: no cover - config validation
-            raise ValueError(f"unknown attention impl: {self.impl}")
+        out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_bias)
         out = out.transpose(1, 2).reshape(b, s, c)
         return self.out_proj(out)
 
@@ -339,13 +303,6 @@ class HexfieldNet(nn.Module):
         )
         self.moves_left_head = nn.Linear(c, VALUE_BINS)
 
-        # Exact-offset LUT for the on-GPU pair-index build: (17*17,) long,
-        # row = lut[(dq+8)*17 + (dr+8)] valid wherever hex-dist <= 8.
-        lut = torch.zeros((2 * BIAS_DISK_RADIUS + 1) ** 2, dtype=torch.long)
-        for dq, dr in disk_offsets(BIAS_DISK_RADIUS):
-            lut[(dq + BIAS_DISK_RADIUS) * 17 + (dr + BIAS_DISK_RADIUS)] = rel_bias_index(dq, dr)
-        self.register_buffer("_exact_lut", lut, persistent=False)
-
         # FULL cell-bias LUT over the entire (dq, dr) offset domain — the single
         # gather that replaces the per-forward abs/maximum/clamp/where/where bias
         # machinery (profiled ~70% of the serve forward, all memory-bound O(B*S^2)
@@ -396,10 +353,6 @@ class HexfieldNet(nn.Module):
             nn.init.zeros_(block.attn.out_proj.weight)
             nn.init.zeros_(block.fc2.weight)
 
-    def set_attention_impl(self, impl: str) -> None:
-        for block in self.attn_blocks:
-            block.attn.impl = impl
-
     # --- pair index + bias (built once per batch, shared by all 3 A blocks) ---
 
     def build_attn_bias(
@@ -439,18 +392,6 @@ class HexfieldNet(nn.Module):
         key_pad = torch.cat(
             [mask.new_ones(b, NUM_TOKENS), mask], dim=1
         )  # (B, S) True = live key
-
-        if torch.is_grad_enabled():
-            # TRAINING: gather in FP32 via _BiasGather. Casting the table to fp16
-            # before _BiasGather made its backward accumulate fp16 gradients; the
-            # hot far/ring rows receive ~19M scatter-adds and overflow to inf under
-            # AMP+GradScaler (HIGH audit fix). The fp32 master-table bincount
-            # backward keeps the gradient finite. Add the mask in head-LAST layout
-            # (key = dim 2), then ONE permute+contiguous to (B, heads, Sq, Sk).
-            bias = _BiasGather.apply(self.bias_table, pair)  # (B, Sq, Sk, heads) fp32
-            fill = torch.where(key_pad, 0.0, PAD_KEY_MASK_VALUE).to(bias.dtype)
-            bias = bias + fill[:, None, :, None]  # broadcast over key axis (dim 2)
-            return bias.permute(0, 3, 1, 2).contiguous()  # (B, heads, Sq, Sk)
 
         # INFERENCE (no grad — self-play/eval, the throughput path): no backward
         # exists, so build the ENTIRE (B,heads,S,S) bias in fp16 directly in the
@@ -534,32 +475,6 @@ class HexfieldNet(nn.Module):
 
         counts = mask.sum(dim=1, keepdim=True).clamp(min=1).to(cells.dtype)
         return (cells * mask.unsqueeze(-1)).sum(dim=1) / counts
-
-    def forward(
-        self,
-        feats: torch.Tensor,
-        nbr: torch.Tensor,
-        mask: torch.Tensor,
-        coords: torch.Tensor,
-    ) -> dict[str, torch.Tensor]:
-        cells, tokens, gather_idx = self.trunk(feats, nbr, mask, coords)
-        pooled = self._pooled(cells, mask)
-        out = {
-            "policy": self._policy_logits(
-                self.policy_conv, self.policy_head, cells, gather_idx, mask
-            ),
-            "opp_policy": self._policy_logits(
-                self.opp_policy_conv, self.opp_policy_head, cells, gather_idx, mask
-            ),
-            "value": self.value_head(
-                F.relu(self.value_reduction(self._value_input(tokens, 0, 1, pooled)))
-            ),
-        }
-        aux = F.relu(self.aux_reduction(self._value_input(tokens, 2, 3, pooled)))
-        for horizon, head in self.stv_heads.items():
-            out[f"stvalue_{horizon}"] = head(aux)
-        out["moves_left"] = self.moves_left_head(aux)
-        return out
 
     def forward_policy_value(
         self,

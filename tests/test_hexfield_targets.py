@@ -465,9 +465,14 @@ def test_pair_budget_bucket_rule() -> None:
 
 
 def test_decode_moves_left_median() -> None:
+    # decode_moves_left is a softmax-EXPECTATION decode (NOT median) mapping the
+    # 65-bin scalar support [-1, 1] onto decisions [0, MOVES_LEFT_CAP]:
+    #   decisions = (scalar + 1) / 2 * MOVES_LEFT_CAP   (losses.decode_moves_left).
+    # Near-one-hot logits collapse the expectation onto the peak bin's scalar.
+    cap = float(C.MOVES_LEFT_CAP)
     logits = torch.full((3, C.VALUE_BINS), -40.0)
     logits[0, 0] = 40.0   # bin 0  -> scalar -1 -> 0 decisions
-    logits[1, 32] = 40.0  # bin 32 -> scalar  0 -> 256 decisions
-    logits[2, 64] = 40.0  # bin 64 -> scalar +1 -> 512 decisions
+    logits[1, 32] = 40.0  # bin 32 -> scalar  0 -> cap/2 decisions
+    logits[2, 64] = 40.0  # bin 64 -> scalar +1 -> cap decisions
     decoded = decode_moves_left(logits)
-    assert torch.allclose(decoded, torch.tensor([0.0, 256.0, 512.0]))
+    assert torch.allclose(decoded, torch.tensor([0.0, 0.5 * cap, cap]))

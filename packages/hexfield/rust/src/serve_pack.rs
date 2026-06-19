@@ -86,7 +86,7 @@ pub fn plan_groups(sizes: &[usize]) -> Vec<(usize, usize, usize)> {
     groups
 }
 
-// --- Zero-copy buffers (exact PlaneBuffer ABI per dense_cnn mcts_eval.rs) -----
+// --- Zero-copy buffers (exact PlaneBuffer ABI) --------------------------------
 
 macro_rules! plane_buffer {
     ($name:ident, $ty:ty) => {
@@ -228,7 +228,7 @@ fn assemble_groups(
         .collect()
 }
 
-/// HOT-PATH ENTRY (gated behind HEXFIELD_RUST_PACK in inference.py). Parse the
+/// Flag-gated alternate arm (HEXFIELD_RUST_PACK, off by default). Parse the
 /// CSR-flat request, plan the IDENTICAL groups, assemble the padded per-group
 /// buffers in parallel (GIL released), then build the Python group dict list.
 ///

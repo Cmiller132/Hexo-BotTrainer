@@ -1,13 +1,13 @@
-"""Moves-left head health audit (§5.4.4 L0 gate).
+"""Moves-left head health audit (L0 gate).
 
 Decodes the model's moves-left prediction on stored self-play shards (each
 ``game_*.npz`` is one game, rows in ply order) and scores it against the true
 remaining-decisions target the shard already carries. This is the calibration
 the MLH search lever depends on: a flood-damaged head (chance-level within-game
-ordering / wrong-sign decrements, the documented restnet failure) would steer
-search BACKWARD, so both the standalone audit and the per-epoch monitor gate the
-lever on these metrics. Reuses the trainer's exact expand/collate path; no Rust
-featurization and (beyond one forward) no GPU contention.
+ordering / wrong-sign decrements) would steer search BACKWARD, so both the
+standalone audit and the per-epoch monitor gate the lever on these metrics.
+Reuses the trainer's expand/collate path; no Rust featurization and (beyond one
+forward) no GPU contention.
 """
 
 from __future__ import annotations
@@ -23,9 +23,9 @@ from .losses import decode_moves_left
 from .samples import expand_sample
 from .shards import read_compact_shard
 
-# PASS thresholds. The headline calibration signal (per the Stage-3 feasibility
-# audit) is within-game conversion-zone Spearman: healthy heads ~0.58-0.62, a
-# flood-damaged head sits at chance (~0.17). Spearman is rank-based, so it is
+# PASS thresholds. The headline calibration signal is within-game conversion-zone
+# Spearman: healthy heads ~0.58-0.62, a flood-damaged head sits at chance
+# (~0.17). Spearman is rank-based, so it is
 # robust to the decode's quantization AND captures sign-correctness (a wrong-sign
 # head would score near 0 / negative). Near-end MAE pins decisive-zone accuracy.
 # Monotonicity RATE is deliberately NOT a pass gate: the median-of-bins decode is

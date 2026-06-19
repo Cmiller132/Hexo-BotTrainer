@@ -13,7 +13,6 @@ import torch
 from hexo_engine import api
 from hexo_engine.types import AxialCoord, PlacementAction
 
-from . import _rust
 from .config import ML_AUTO_DISABLED_FLAG, build_divergence_overrides, parse_hexfield_config
 from .geometry import unpack_action_id
 from .inference import HexfieldEvaluator

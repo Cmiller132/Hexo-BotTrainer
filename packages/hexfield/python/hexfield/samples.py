@@ -1,11 +1,11 @@
-"""Sample facts, game finalization, and train-time row expansion — spec §3/§6.
+"""Sample facts, game finalization, and train-time row expansion.
 
 `finalize_game_samples`, the STV even-offset EMA, the future-opponent-policy
-rule, and the moves-left target are exact semantic ports of the verified
-restnet constructions (restnet samples.py is the test oracle). Expansion maps
-targets from packed action ids onto the row's legal-prefix slots; policy mass
-off the legal set is a hard error for the self policy and a tracked
-projection drop (`opp_coverage`) for the opponent policy.
+rule, and the moves-left target are exact semantic ports of the restnet
+constructions (restnet samples.py is the test oracle). Expansion maps targets
+from packed action ids onto the row's legal-prefix slots; policy mass off the
+legal set is a hard error for the self policy and a tracked projection drop
+(`opp_coverage`) for the opponent policy.
 """
 
 from __future__ import annotations
@@ -147,17 +147,17 @@ def finalize_game_samples(
 ) -> list[HexfieldSampleData]:
     """Assign outcome targets to a finished game's pre-decision samples.
 
-    Hard z is the v1 value target (soft_z_lambda stays 0 in production; the
+    Hard z is the value target (soft_z_lambda stays 0 in production; the
     parameter is ported for parity with the restnet oracle).
 
-    Truncated games (``truncated=True``, ``winner=None``) ARE now written (with
-    their outcome-dependent heads masked downstream): ``metadata['truncated']``
-    is set, ``moves_left`` is the -1 sentinel (→ moves_left_mask=0 at expand),
-    and the same flag zeroes the value/stvalue/cell_q masks in ``expand_sample``.
-    The outcome-INDEPENDENT heads (policy, opp_policy) train normally on
-    truncated rows. The hard-z value target stays 0.0 for truncated rows but is
-    NEVER used because value_mask gates it to zero loss. Completed games are
-    untouched (truncated=False path is byte-identical to before).
+    Truncated games (``truncated=True``, ``winner=None``) ARE written (with their
+    outcome-dependent heads masked downstream): ``metadata['truncated']`` is set,
+    ``moves_left`` is the -1 sentinel (→ moves_left_mask=0 at expand), and the
+    same flag zeroes the value/stvalue/cell_q masks in ``expand_sample``. The
+    outcome-INDEPENDENT heads (policy, opp_policy) train normally on truncated
+    rows. The hard-z value target stays 0.0 for truncated rows but is NEVER used
+    because value_mask gates it to zero loss. Completed games (truncated=False)
+    are untouched.
     """
 
     decisions = list(pending)
@@ -221,7 +221,7 @@ def expand_sample(
     The drawn symmetry is applied to all stored coordinate facts (including
     policy / opp-policy action ids); support, node order, features, and
     target slots are rebuilt from the transformed facts. Augmentation is
-    exact for 100% of rows — no spill, no drops (spec §4).
+    exact for 100% of rows — no spill, no drops.
     """
 
     facts = transform_facts(sample.facts(), symmetry)
@@ -296,7 +296,7 @@ def expand_sample(
     # leaving policy / opp_policy (visit-count distributions, outcome-INDEPENDENT)
     # to train normally. moves_left is ALREADY masked via its -1 sentinel above.
     # Completed rows (truncated absent/False) keep value_mask=1.0 and the
-    # presence masks exactly as built → byte-identical to before.
+    # presence masks exactly as built.
     truncated = bool(sample.metadata.get("truncated", False))
     if truncated:
         value_mask = 0.0

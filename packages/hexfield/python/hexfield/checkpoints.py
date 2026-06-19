@@ -1,5 +1,5 @@
-"""Strict checkpoint IO for the hexo_train pipeline (spec: no silent partial
-loads — bidirectional key equality, mismatch raises)."""
+"""Strict checkpoint IO for the hexo_train pipeline: no silent partial loads —
+bidirectional key equality, mismatch raises."""
 
 from __future__ import annotations
 
@@ -37,13 +37,8 @@ def load_into(model: HexfieldNet, payload: dict, *, optimizer=None) -> dict:
     model.load_state_dict(state, strict=True)
     if optimizer is not None and payload.get("optimizer"):
         optimizer.load_state_dict(payload["optimizer"])
-        # Checkpoints are loaded with map_location="cpu", so the optimizer's
-        # per-parameter state (exp_avg/exp_avg_sq/...) lands on CPU while the
-        # model params are on the run device (cuda). AdamW.step() then mixes
-        # devices -> "Expected all tensors to be on the same device, cuda:0 and
-        # cpu" and the FIRST post-resume training epoch crashes (self-play is
-        # inference so it survives; only the optimizer step fails). Move every
-        # optimizer state tensor onto the model's device after the load.
+        # Invariant: optimizer state is loaded on CPU (map_location) but must move
+        # to the model's device, or AdamW.step() mixes devices and crashes.
         dev = next(model.parameters()).device
         for st in optimizer.state.values():
             for key, val in st.items():
@@ -174,8 +169,8 @@ class HexfieldCheckpointSaver:
         if match:
             epoch = int(match.group(1))
         # Persist the KataGo-style train-bucket governor state inside the
-        # checkpoint meta (PLAN §6/M1). Guard with getattr so a trainer without
-        # a train_state (e.g. tests) does not crash the save.
+        # checkpoint meta. Guard with getattr so a trainer without a train_state
+        # (e.g. tests) does not crash the save.
         trainer = getattr(components.model, "trainer", None)
         extra = {
             "run": ctx.config.run.name,
