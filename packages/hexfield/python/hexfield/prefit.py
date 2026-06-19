@@ -13,6 +13,31 @@ epoch, entropy, value ECE vs frozen realized outcomes, D6-consistency KL).
 
 from __future__ import annotations
 
+import os
+
+# Production training fast path (spec §6.4 perf): route grad-enabled attention
+# through the in-kernel FlexAttention score_mod instead of materializing the
+# (B, heads, S, S) relative-position bias (a memory-bound transient that is
+# ~68% of the eager forward). This is EXACTLY how the deployed trainer reaches
+# production speed (scripts/systemd/hexfield-supervisor-3.service sets
+# HEXFIELD_TRAIN_FLEX=1); there is no whole-model torch.compile — the only
+# compile is the inner flex op, compiled in its own graph inside model.py.
+#
+# model.py reads HEXFIELD_TRAIN_FLEX ONCE at import (its _TRAIN_FLEX), so this
+# MUST run before the `from .model import HexfieldNet` below or it is a silent
+# no-op. setdefault (not hard-set) leaves the door open for a user to force the
+# plain eager materialized path for parity/debug via HEXFIELD_TRAIN_FLEX=0.
+#
+# Safety/fallback: the train-flex path is backward-capable (gradients flow into
+# all per-block FP32-master bias_tables and downstream weights) and numerically
+# equivalent to the eager bias within fp16-autocast tolerance, so the loss is
+# unchanged. If the installed torch lacks flex_attention, model.py's import
+# guard sets _flex_attention=None and self._train_flex resolves to False, i.e.
+# this flag transparently degrades to the eager materialized forward (no crash).
+# The grad path requires no fixed Npad; the existing PAD_QUANTUM padding (below)
+# already gives flex a small, stable, repeating shape set.
+os.environ.setdefault("HEXFIELD_TRAIN_FLEX", "1")
+
 import argparse
 import json
 import math

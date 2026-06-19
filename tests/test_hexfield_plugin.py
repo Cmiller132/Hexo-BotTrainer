@@ -105,7 +105,9 @@ def test_plugin_builds_model_and_optimizer_split() -> None:
     plugin = get_plugin()
     assert plugin.name == "hexfield"
     model = plugin.build_model({}, {})
-    assert sum(p.numel() for p in model.parameters()) == 1_591_748
+    # 1_591_748 base + 64_705 for the main_4 KataGo auxiliary soft_policy head
+    # (soft_policy_conv + soft_policy_head). The non-soft params are unchanged.
+    assert sum(p.numel() for p in model.parameters()) == 1_656_453
 
     overrides = plugin.training_component_overrides(
         defaults=None, config={}, shared=None, model=model
