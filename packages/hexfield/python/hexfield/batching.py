@@ -136,6 +136,29 @@ def collate_training(
         opp[g, :n] = torch.from_numpy(row.opp_policy)
         cell_q[g, :n] = torch.from_numpy(row.cell_q)  # n == row.cell_q.shape[0]
         cell_q_mask[g, :n] = torch.from_numpy(row.cell_q_mask)
+    # KataGo auxiliary SOFT policy target (main_4): a softened (T=4) version of
+    # the MCTS visit policy, predicted by the train-only soft_policy head. KataGo
+    # (metrics_pytorch.py) VERBATIM:
+    #   target_soft = (target_policy + 1e-7) * policymask
+    #   target_soft = target_soft ** (1/T)        # T=4 -> exponent 0.25
+    #   target_soft /= target_soft.sum(dim=1)     # renormalize (also done in CE)
+    # We apply the 1e-7 floor on the NORMALIZED visit distribution p (per the
+    # plan) so the floor is scale-invariant, and confine the transform to each
+    # row's legal prefix [0, n) — the off-prefix slots stay exactly 0 (so no mass
+    # lands off the legal prefix, which segment_policy_ce treats as a hard error).
+    # Pure function of `policy` (the packed visit policy) -> backend-agnostic: the
+    # serial/pool/rust expand backends all produce the same `policy`, hence the
+    # same soft target; no shard-schema or replay_expand.rs change is needed.
+    soft_policy = torch.zeros(b, npad, dtype=torch.float32)
+    legal_counts = batch["legal_counts"]
+    prefix = (
+        torch.arange(npad).unsqueeze(0) < legal_counts.unsqueeze(1)
+    )  # (b, npad) bool, legal_counts == per-row n
+    row_sum = policy.sum(dim=1, keepdim=True).clamp_min(1e-12)
+    p = policy / row_sum
+    soft_prefix = (p + 1e-7).pow(0.25)
+    soft_policy[prefix] = soft_prefix[prefix]
+
     if row_weights is None:
         weights = [1.0] * b
     else:
@@ -144,6 +167,7 @@ def collate_training(
     batch.update(
         {
             "policy": policy,
+            "soft_policy": soft_policy,
             "opp_policy": opp,
             "cell_q": cell_q,
             "cell_q_mask": cell_q_mask,

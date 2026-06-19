@@ -52,6 +52,52 @@ def load_into(model: HexfieldNet, payload: dict, *, optimizer=None) -> dict:
     return payload.get("meta", {})
 
 
+def warm_start_into(model: HexfieldNet, state: dict) -> dict:
+    """Tolerant weights-only warm start (initialize_from / BC-prefit ONLY).
+
+    Loads every checkpoint key that matches the model's state dict and EXACTLY
+    matches its shape; leaves any model param that is MISSING from the checkpoint
+    at its freshly-constructed value (``_init_weights``). This is the warm-start
+    path for main_4: the soft_policy_conv/_head params (and any future new head)
+    do not exist in the v3 BC prefit, so a strict load would raise. The new head
+    therefore trains FRESH from its trunc_normal(0.02)/zeros init — exactly the
+    owner-mandated zero/fresh-init choice, documented here.
+
+    Precedent: the per-block ``bias_tables.*`` migration in model.py likewise
+    tolerates an older single-table checkpoint. This relaxation is applied ONLY
+    on the warm-start (initialize_from) path; the strict ``resume`` path
+    (``load_into``) is intentionally left untouched so a true training resume
+    still enforces bidirectional key equality.
+
+    Returns a summary dict {loaded, missing, unexpected, shape_mismatch} for the
+    caller to log. Shape-mismatched and unexpected (checkpoint-only) keys are
+    DROPPED, not loaded — a deliberate, reported decision rather than a silent
+    strict-load failure.
+    """
+
+    model_sd = model.state_dict()
+    to_load: dict[str, torch.Tensor] = {}
+    shape_mismatch: list[str] = []
+    for key, val in state.items():
+        if key not in model_sd:
+            continue  # unexpected / checkpoint-only key -> dropped
+        if model_sd[key].shape != val.shape:
+            shape_mismatch.append(key)
+            continue
+        to_load[key] = val
+    missing = sorted(set(model_sd) - set(to_load))
+    unexpected = sorted(set(state) - set(model_sd))
+    # strict=False: missing keys keep their _init_weights value; the matched
+    # subset is copied in. assign=False so dtype/device follow the live params.
+    model.load_state_dict(to_load, strict=False)
+    return {
+        "loaded": len(to_load),
+        "missing": missing,
+        "unexpected": unexpected,
+        "shape_mismatch": shape_mismatch,
+    }
+
+
 class HexfieldCheckpointLoader:
     """hexo_train contract: load(ref, ctx, components) -> state dict.
 
@@ -83,25 +129,40 @@ class HexfieldCheckpointLoader:
                 if (resume and optimizer is not None)
                 else None
             )
-            meta = load_into(model, payload, optimizer=optimizer if resume else None)
-            if resume:
-                if config_lr is not None:
-                    for group, lr in zip(optimizer.param_groups, config_lr):
-                        group["lr"] = lr
-                # Restore the KataGo-style train-bucket governor ONLY on a true
-                # resume (PLAN §6/M1). A missing key -> from_dict(None) -> fresh
-                # state, so old-format checkpoints resume cleanly. Never restore
-                # on the initialize_from warm-start branch below: a BC-prefit
-                # warm start must begin with a fresh governor, not inherit a
-                # stale bucket from an unrelated run.
-                trainer = getattr(components.model, "trainer", None)
-                if trainer is not None:
-                    trainer.train_state = HexfieldTrainState.from_dict(meta.get("train_state"))
-                return {"status": "loaded", "epoch": int(meta.get("epoch", 0)), "path": str(path)}
-            return {"status": "initialized_from", "path": str(path)}
-        # prefit shape
-        model.load_state_dict(payload["model"], strict=True)
-        return {"status": "initialized_from", "path": str(path), "source": "bc_prefit"}
+            if not resume:
+                # initialize_from warm start (meta-shape checkpoint): tolerant
+                # load so a v3-lineage checkpoint without the new soft_policy head
+                # warm-starts cleanly (the head trains fresh). Optimizer state is
+                # intentionally NOT restored on warm start.
+                summary = warm_start_into(model, payload["model"])
+                return {
+                    "status": "initialized_from",
+                    "path": str(path),
+                    "warm_start": summary,
+                }
+            # resume == True here (the not-resume warm start returned above).
+            meta = load_into(model, payload, optimizer=optimizer)
+            if config_lr is not None:
+                for group, lr in zip(optimizer.param_groups, config_lr):
+                    group["lr"] = lr
+            # Restore the KataGo-style train-bucket governor ONLY on a true
+            # resume (PLAN §6/M1). A missing key -> from_dict(None) -> fresh
+            # state, so old-format checkpoints resume cleanly. The warm-start
+            # branch above never reaches here, so a BC-prefit warm start always
+            # begins with a fresh governor, not a stale bucket from another run.
+            trainer = getattr(components.model, "trainer", None)
+            if trainer is not None:
+                trainer.train_state = HexfieldTrainState.from_dict(meta.get("train_state"))
+            return {"status": "loaded", "epoch": int(meta.get("epoch", 0)), "path": str(path)}
+        # prefit shape (raw BC-prefit dict): tolerant warm start so a v3 prefit
+        # without the new soft_policy head warm-starts cleanly (head trains fresh).
+        summary = warm_start_into(model, payload["model"])
+        return {
+            "status": "initialized_from",
+            "path": str(path),
+            "source": "bc_prefit",
+            "warm_start": summary,
+        }
 
 
 class HexfieldCheckpointSaver:

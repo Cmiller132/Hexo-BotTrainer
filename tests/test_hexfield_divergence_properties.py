@@ -162,6 +162,16 @@ def test_early_stop_without_lcb_is_exact() -> None:
         "early_stop": True,
         "visit_scaled_c_puct": False,
         "moves_left_utility": False,
+        # main_4 KataGo-faithful divergences default ON in production() (the base
+        # this overrides dict sits on top of); neutralize them to the parity()
+        # legacy value so this gate isolates early_stop vs the search_parity_mode
+        # session below.
+        "nucleus_f64": False,
+        "new_child_fpu": False,
+        "lazy_widening": False,
+        "clean_root_prior_cache": False,
+        "dirichlet_shaped": False,
+        "pruned_dynamic_cpuct": False,
     }
     stops = 0
     for index, state in enumerate(states):

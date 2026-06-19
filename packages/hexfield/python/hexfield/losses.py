@@ -26,6 +26,12 @@ from .constants import MOVES_LEFT_CAP, VALUE_BINS
 POLICY_WEIGHT = 1.0
 VALUE_WEIGHT = 1.0
 OPP_POLICY_WEIGHT = 0.25
+# KataGo auxiliary SOFT policy target loss weight (main_4). KataGo's
+# -soft-policy-weight-scale default is 8.0 (8x the main policy loss); the 8x
+# compensates for the much smaller gradients the softened (T=4) target produces
+# once the main policy is near-optimized. Mirror in config.TrainingSection
+# (soft_policy_weight) — keep the two in sync.
+SOFT_POLICY_WEIGHT = 8.0
 SHORT_TERM_VALUE_WEIGHT = 0.1
 MOVES_LEFT_WEIGHT = 0.1
 Q_HEAD_WEIGHT = 0.1
@@ -203,6 +209,7 @@ def hexfield_loss(
     policy_weight: float = POLICY_WEIGHT,
     value_weight: float = VALUE_WEIGHT,
     opp_policy_weight: float = OPP_POLICY_WEIGHT,
+    soft_policy_weight: float = SOFT_POLICY_WEIGHT,
     short_term_value_weight: float = SHORT_TERM_VALUE_WEIGHT,
     moves_left_weight: float = MOVES_LEFT_WEIGHT,
     q_head_weight: float = Q_HEAD_WEIGHT,
@@ -258,6 +265,22 @@ def hexfield_loss(
             denominator=rows,
         )
         total = total + opp_policy_weight * components["opp_policy"]
+
+    if "soft_policy" in outputs and "soft_policy" in batch:
+        # KataGo auxiliary SOFT policy: CE of the soft-policy head logits against
+        # the (visit_policy+1e-7)^(1/4)-renormalized target (computed in
+        # collate_training). FLAT rows denominator — KataGo's aux soft loss is not
+        # surprise-reweighted (it carries no policy_ce_weight). The soft target is
+        # derived from the main visit policy which always carries positive mass
+        # (expand hard-errors on zero policy mass), so allow_zero_rows is not
+        # needed.
+        components["soft_policy"] = segment_policy_ce(
+            outputs["soft_policy"],
+            batch["legal_counts"],
+            batch["soft_policy"],
+            denominator=rows,
+        )
+        total = total + soft_policy_weight * components["soft_policy"]
 
     for key, output in outputs.items():
         if key.startswith("stvalue_") and key in batch:

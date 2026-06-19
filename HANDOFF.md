@@ -6,6 +6,28 @@ then two placements per turn). Python orchestration + Rust/PyO3 (maturin) for th
 (`/root/.venvs/hexgt-build`); run dirs live under `/mnt/e/Hexo-BotTrainer/runs/` (note: a
 different mount root than this repo).
 
+## 2026-06-19 — hexfield main_4 / KataGo-faithful prep (branch `claude/hexfield-main4`, PREPARE-ONLY)
+
+KataGo-faithful hexfield build prepared on this worktree (`/mnt/e/Hexo-BotTrainer-main4`); main_3
+keeps running untouched and main_4 is NOT launched. Rust (`tree.rs`/`search.rs`) gains six
+behavioral fixes — shaped Dirichlet from a NEW clean post-temp/pre-noise root-prior cache (which
+also fixes the reuse-compounding bug), new-child FPU baseline (`fpu+U`), lazy/live `can_widen`
+(subsumes the frozen-cap + nucleus-f32 bugs, FPU as sole gate), nucleus f64 + `mass>=1.0` sentinel,
+dynamic `c_for(N)` in the pruned recorded target, and a first-class `root_fpu_reduction=0.0` (spec
+correction: modern KataGo has no zero-FPU-under-noise branch; self-play uses `rootFpuReductionMax=0`)
+— plus first-class wiring of `c_scale`/`c_base`/`visit_scaled_c_puct`/`lcb_z` from config (the known
+gap). EVERY new behavior is gated behind a `Divergences` flag set to legacy in `parity()` and
+faithful in `production()`, so the M5/M6 golden vectors stay byte-identical. Python adds the KataGo
+auxiliary SOFT policy target — `(visit_policy+1e-7)^(1/4)` renorm (T=4), CE weighted 8.0, derived in
+`collate_training` (backend-agnostic, no shard/`replay_expand.rs` change), a new train-only
+`soft_policy` own-conv head (not in serve), and a tolerant `warm_start_into` so the v3 BC prefit
+loads with the fresh head zero-init. Config: `configs/hexfield_main_4.toml` (main_3 + the new
+selfplay knobs + `soft_policy_weight=8.0`, `expand_backend="rust"` kept). VERIFIED: `cargo test -p
+hexfield --lib --features python` = 22/22 (15 new), all changed Python files py_compile. DEFERRED:
+torch CPU tests (`tests/test_hexfield_soft_policy.py` — hexfield-dev venv has no torch; isolated-venv
+install not quick), the maturin `.so` rebuild, and launch. Full detail + launch steps:
+`docs/analysis/HEXFIELD_MAIN4_CHANGES.md`.
+
 ## 2026-06-10 — main_2 prep (branch `claude/wizardly-johnson-x90akh`, owner directives)
 
 KataGo self-play data levers for a FRESH run, motivated by the main1 opening-diversity /

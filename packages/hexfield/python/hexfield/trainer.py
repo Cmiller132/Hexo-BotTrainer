@@ -184,9 +184,9 @@ class HexfieldTrainer:
 
         Used for per-group pre-clip grad-norm logging. ``stem*`` / ``conv_blocks*``
         (incl. the +2 conv blocks and their LayerScale ``ls.gamma``) -> trunk_conv;
-        ``attn_blocks*`` + the trunk ``tokens`` / relative-position ``bias_table``
-        -> trunk_attn; everything else (reductions + heads, incl. ml_reduction /
-        cell_q_*) -> heads.
+        ``attn_blocks*`` + the trunk ``tokens`` / per-block relative-position
+        ``bias_tables.*`` -> trunk_attn; everything else (reductions + heads, incl.
+        ml_reduction / cell_q_* / soft_policy_*) -> heads.
         """
         groups: dict[str, list[torch.nn.Parameter]] = {
             "trunk_conv": [],
@@ -196,7 +196,11 @@ class HexfieldTrainer:
         for name, p in self.model.named_parameters():
             if name.startswith("stem") or name.startswith("conv_blocks"):
                 groups["trunk_conv"].append(p)
-            elif name.startswith("attn_blocks") or name in ("tokens", "bias_table"):
+            elif (
+                name.startswith("attn_blocks")
+                or name == "tokens"
+                or name.startswith("bias_tables")
+            ):
                 groups["trunk_attn"].append(p)
             else:
                 groups["heads"].append(p)
@@ -586,6 +590,7 @@ class HexfieldTrainer:
                     policy_weight=tcfg.policy_weight,
                     value_weight=tcfg.value_weight,
                     opp_policy_weight=tcfg.opp_policy_weight,
+                    soft_policy_weight=tcfg.soft_policy_weight,
                     short_term_value_weight=tcfg.short_term_value_weight,
                     moves_left_weight=tcfg.moves_left_weight,
                     q_head_weight=tcfg.q_head_weight,

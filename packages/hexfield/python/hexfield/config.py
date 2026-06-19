@@ -23,10 +23,40 @@ class SelfplayConfig:
     active_root_limit: int = 256
     root_dirichlet_total_alpha: float = 10.83
     root_dirichlet_noise_fraction: float = 0.25
+    # --- KataGo-faithful dynamic c_puct + LCB (ledger items [7]/[8]) ----------
+    # First-class, config-auditable versions of knobs that resolve_divergences
+    # already reads but Python never emitted (the established wiring gap). The
+    # defaults equal the prior baked-in Divergences::production() values, so the
+    # production self-play behavior is UNCHANGED — they are now just driven by
+    # config instead of being implicit. c_for(N) = c_puct + c_scale*ln((N+c_base)
+    # /c_base); visit_scaled_c_puct gates the log term; lcb_z is the LCB z-score.
+    c_scale: float = 0.45
+    c_base: float = 500.0
+    visit_scaled_c_puct: bool = True
+    lcb_z: float = 1.6
+    # --- main_4 KataGo-faithful search divergences (ledger items [1]-[7]) -----
+    # These flip the six behavioral fixes ON for production self-play (they are
+    # already ON in Divergences::production(); emitting them from config makes
+    # them auditable + individually controllable). The M5/M6 golden-vector tests
+    # run Divergences::parity() (search_parity_mode=True, NOT this path) so they
+    # stay byte-identical regardless of these values.
+    nucleus_f64: bool = True
+    new_child_fpu: bool = True
+    lazy_widening: bool = True
+    clean_root_prior_cache: bool = True
+    dirichlet_shaped: bool = True
+    pruned_dynamic_cpuct: bool = True
     # QUARANTINED (spec §5.1): defaults off.
     root_policy_temperature: float = 1.0
     root_policy_temperature_early: float = 0.0
     root_policy_temperature_halflife: float = 0.0
+    # SPEC CORRECTION (ledger item [6]): modern KataGo has NO "zero FPU under
+    # noise" branch; self-play uses rootFpuReductionMax=0.0. root_fpu_reduction
+    # is the first-class root FPU; the legacy noise-conditioned knob below is
+    # KEPT only for the parity path (golden vectors). Default 0.0 = KataGo
+    # self-play. root_fpu_zero_under_noise stays False so the legacy branch is
+    # inert in production.
+    root_fpu_reduction: float = 0.0
     root_fpu_zero_under_noise: bool = False
     fpu_reduction: float = 0.2
     virtual_loss: float = 1.0
@@ -80,6 +110,13 @@ class TrainingSection:
     short_term_value_weight: float = 0.1
     moves_left_weight: float = 0.1
     q_head_weight: float = 0.1
+    # KataGo auxiliary SOFT policy target (main_4). Loss weight for the new
+    # train-only soft_policy head (CE against the (visit_policy+1e-7)^(1/4)
+    # renormalized soft target). MUST stay in sync with
+    # losses.SOFT_POLICY_WEIGHT (8.0 = KataGo soft-policy-weight-scale default);
+    # kept as a hardcoded default here to match the existing "defaults =
+    # losses.py constants" pattern (config.py does not import losses).
+    soft_policy_weight: float = 8.0
     # --- Policy-surprise self-CE reweight (v3 #5) ----------------------------
     policy_surprise_uniform_fraction: float = 0.5
     policy_surprise_max_weight: float = 8.0
@@ -371,16 +408,36 @@ ML_AUTO_DISABLED_FLAG = "ml_auto_disabled.flag"
 
 
 def build_divergence_overrides(sp: SelfplayConfig, *, disabled: bool = False) -> dict:
-    """The §5.4.4 moves-left divergence knobs as a Rust ``divergence_overrides``
-    dict, so the lever is driven by config (controllable + auditable) rather than
-    baked into ``Divergences::production()``. When ``disabled`` — either the
-    ``ml_auto_disabled`` config field or the run-dir heal-gate flag — the whole
-    lever (descent bonus, two-sided branch, final pick) is forced off so a
-    miscalibrated head stops steering search; the constants are still passed so a
-    later re-enable uses the validated values. All values are concrete bool/float
-    (never None) because ``resolve_divergences`` calls ``.extract()``."""
+    """The Rust ``divergence_overrides`` dict, so every controllable lever is
+    driven by config (auditable) rather than baked into
+    ``Divergences::production()``.
+
+    Three groups:
+      - §5.4.4 moves-left knobs: gated by ``off`` (the ``ml_auto_disabled``
+        config field or the run-dir heal-gate flag) so a miscalibrated MLH head
+        stops steering search; the constants are still passed so a later
+        re-enable uses the validated values.
+      - the dynamic c_puct / LCB knobs (c_scale, c_base, visit_scaled_c_puct,
+        lcb_z) that ``resolve_divergences`` already reads but Python never
+        emitted (the established wiring gap) — now first-class + auditable.
+      - the six main_4 KataGo-faithful search divergences (nucleus_f64,
+        new_child_fpu, lazy_widening, clean_root_prior_cache, dirichlet_shaped,
+        pruned_dynamic_cpuct). These default to the faithful (ON) production
+        values; emitting them makes them config-auditable + individually
+        flippable for the M6/M10 differential harness.
+
+    NOTE: this dict is applied ON TOP of the base selected by
+    ``search_parity_mode`` inside ``resolve_divergences`` (production() when
+    False). Production self-play runs with ``search_parity_mode=False``, so
+    these values simply reaffirm production(). The M5/M6 golden-vector tests
+    construct parity() sessions directly (not through this path), so they stay
+    byte-identical regardless of what this emits.
+
+    All values are concrete bool/float (never None) because
+    ``resolve_divergences`` calls ``.extract()``."""
     off = bool(disabled or sp.ml_auto_disabled)
     return {
+        # §5.4.4 moves-left utility (gated by the heal-gate / ml_auto_disabled).
         "moves_left_utility": bool(sp.moves_left_utility) and not off,
         "ml_weight": float(sp.ml_weight),
         "ml_scale": float(sp.ml_scale),
@@ -388,6 +445,18 @@ def build_divergence_overrides(sp: SelfplayConfig, *, disabled: bool = False) ->
         "ml_two_sided": bool(sp.ml_two_sided) and not off,
         "ml_final_pick": bool(sp.ml_final_pick) and not off,
         "ml_final_pick_band": float(sp.ml_final_pick_band),
+        # Dynamic c_puct + LCB (previously baked-in defaults; now config-driven).
+        "c_scale": float(sp.c_scale),
+        "c_base": float(sp.c_base),
+        "visit_scaled_c_puct": bool(sp.visit_scaled_c_puct),
+        "lcb_z": float(sp.lcb_z),
+        # main_4 KataGo-faithful search divergences (ledger [1]-[7]).
+        "nucleus_f64": bool(sp.nucleus_f64),
+        "new_child_fpu": bool(sp.new_child_fpu),
+        "lazy_widening": bool(sp.lazy_widening),
+        "clean_root_prior_cache": bool(sp.clean_root_prior_cache),
+        "dirichlet_shaped": bool(sp.dirichlet_shaped),
+        "pruned_dynamic_cpuct": bool(sp.pruned_dynamic_cpuct),
     }
 
 

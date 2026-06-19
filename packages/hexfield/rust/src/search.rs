@@ -71,6 +71,11 @@ struct ContinuousMovePolicy {
     noise: Option<RootNoiseConfig>,
     tss_enabled: bool,
     root_fpu_zero_under_noise: bool,
+    /// [6] first-class root FPU reduction (KataGo rootFpuReductionMax). When
+    /// Some it takes precedence over the legacy noise-conditioned mechanism;
+    /// self-play sets 0.0. When None, the legacy `root_fpu_zero_under_noise`
+    /// path applies (parity).
+    root_fpu_reduction: Option<f32>,
     divergences: Divergences,
 }
 
@@ -139,6 +144,14 @@ impl ContinuousMovePolicy {
     }
 
     fn root_fpu_for(&self, class: MoveClass) -> f32 {
+        // [6] first-class root FPU reduction takes precedence (KataGo
+        // rootFpuReductionMax; self-play 0.0). Applies to every move class — the
+        // root descent always uses the root-specific reduction, not a
+        // noise-conditioned special case.
+        if let Some(value) = self.root_fpu_reduction {
+            return value;
+        }
+        // Legacy (parity): zero FPU only at noised Full roots.
         if matches!(class, MoveClass::Full)
             && self.noise.is_some()
             && self.root_fpu_zero_under_noise
@@ -511,7 +524,7 @@ impl HexfieldMctsSession {
 
     /// Lockstep batched search (eval ladder / arena / differential harness).
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (game_keys, states, visits, c_puct, temperature, seed, evaluator, virtual_batch_size=None, active_root_limit=None, root_dirichlet_total_alpha=None, root_dirichlet_noise_fraction=None, root_policy_temperature=None, fpu_reduction=None, virtual_loss=None, widening_policy_mass=None, widening_max_children=None, widening_min_children=None, forced_playout_k=None, move_temperatures=None, root_policy_temperatures=None, tss_enabled=None, root_fpu_zero_under_noise=None, search_parity_mode=None, divergence_overrides=None, debug_no_advance=None))]
+    #[pyo3(signature = (game_keys, states, visits, c_puct, temperature, seed, evaluator, virtual_batch_size=None, active_root_limit=None, root_dirichlet_total_alpha=None, root_dirichlet_noise_fraction=None, root_policy_temperature=None, fpu_reduction=None, virtual_loss=None, widening_policy_mass=None, widening_max_children=None, widening_min_children=None, forced_playout_k=None, move_temperatures=None, root_policy_temperatures=None, tss_enabled=None, root_fpu_zero_under_noise=None, root_fpu_reduction=None, search_parity_mode=None, divergence_overrides=None, debug_no_advance=None))]
     fn search(
         &mut self,
         py: Python<'_>,
@@ -540,6 +553,11 @@ impl HexfieldMctsSession {
         // FPU zeroing at noised roots). The differential harness passes true
         // to reproduce dense's as-built behavior.
         root_fpu_zero_under_noise: Option<bool>,
+        // [6] SPEC CORRECTION: modern KataGo has NO "zero FPU under noise"
+        // branch; it uses a separate rootFpuReductionMax that self-play sets to
+        // 0.0. When provided this is the first-class root FPU reduction and
+        // takes precedence over the legacy noise-conditioned mechanism.
+        root_fpu_reduction: Option<f32>,
         search_parity_mode: Option<bool>,
         divergence_overrides: Option<&Bound<'_, PyDict>>,
         debug_no_advance: Option<bool>,
@@ -628,13 +646,21 @@ impl HexfieldMctsSession {
         let root_noise_config =
             root_noise_config(root_dirichlet_total_alpha, root_dirichlet_noise_fraction)?;
         let tss_enabled = tss_enabled.unwrap_or(true);
-        // QUARANTINE: default FALSE (dense's as-built default is true).
-        let root_fpu_reduction =
-            if root_noise_config.is_some() && root_fpu_zero_under_noise.unwrap_or(false) {
-                0.0
-            } else {
-                fpu_reduction
-            };
+        // [6] root FPU reduction. If `root_fpu_reduction` is given explicitly it
+        // is the first-class KataGo rootFpuReductionMax (self-play sets 0.0) and
+        // takes precedence. Otherwise fall back to the legacy noise-conditioned
+        // mechanism (parity): zero FPU only at noised roots when the quarantined
+        // `root_fpu_zero_under_noise` knob is set.
+        let root_fpu_reduction = match root_fpu_reduction {
+            Some(value) => validate_nonnegative_f32("root_fpu_reduction", value)?,
+            None => {
+                if root_noise_config.is_some() && root_fpu_zero_under_noise.unwrap_or(false) {
+                    0.0
+                } else {
+                    fpu_reduction
+                }
+            }
+        };
         let widening = build_widening(
             widening_policy_mass,
             widening_min_children,
@@ -655,7 +681,9 @@ impl HexfieldMctsSession {
                     search.set_tss_enabled(tss_enabled);
                     search.set_divergences(divergences);
                     search.apply_root_policy_temperature(root_policy_temps[index]);
-                    if let Some(noise) = root_noise(root_noise_config, seed, index) {
+                    if let Some(noise) =
+                        root_noise(root_noise_config, seed, index, divergences.dirichlet_shaped)
+                    {
                         search.apply_root_dirichlet_noise(noise);
                     }
                     searches.push(Some(search));
@@ -696,7 +724,7 @@ impl HexfieldMctsSession {
                     fpu_reduction,
                     root_fpu_reduction,
                     root_policy_temps[index],
-                    root_noise(root_noise_config, seed, index),
+                    root_noise(root_noise_config, seed, index, divergences.dirichlet_shaped),
                     widening,
                     forced_playout_k,
                     tss_enabled,
@@ -787,7 +815,7 @@ impl HexfieldMctsSession {
 
     /// Continuous per-slot scheduler (the production self-play driver).
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (game_keys, states, evaluator, on_move, visits, c_puct, base_seed, virtual_batch_size, flush_target, active_root_limit, temperature_by_ply, root_dirichlet_total_alpha=None, root_dirichlet_noise_fraction=None, root_policy_temperature=None, fpu_reduction=None, virtual_loss=None, widening_policy_mass=None, widening_max_children=None, widening_min_children=None, forced_playout_k=None, root_policy_temperature_early=None, root_policy_temperature_halflife=None, pcr_full_proportion=None, pcr_fast_visits=None, policy_init_fraction=None, policy_init_avg_plies=None, policy_init_max_plies=None, policy_init_temperature=None, tss_enabled=None, root_fpu_zero_under_noise=None, search_parity_mode=None, divergence_overrides=None))]
+    #[pyo3(signature = (game_keys, states, evaluator, on_move, visits, c_puct, base_seed, virtual_batch_size, flush_target, active_root_limit, temperature_by_ply, root_dirichlet_total_alpha=None, root_dirichlet_noise_fraction=None, root_policy_temperature=None, fpu_reduction=None, virtual_loss=None, widening_policy_mass=None, widening_max_children=None, widening_min_children=None, forced_playout_k=None, root_policy_temperature_early=None, root_policy_temperature_halflife=None, pcr_full_proportion=None, pcr_fast_visits=None, policy_init_fraction=None, policy_init_avg_plies=None, policy_init_max_plies=None, policy_init_temperature=None, tss_enabled=None, root_fpu_zero_under_noise=None, root_fpu_reduction=None, search_parity_mode=None, divergence_overrides=None))]
     fn run_continuous(
         &mut self,
         py: Python<'_>,
@@ -821,6 +849,9 @@ impl HexfieldMctsSession {
         policy_init_temperature: Option<f32>,
         tss_enabled: Option<bool>,
         root_fpu_zero_under_noise: Option<bool>,
+        // [6] first-class KataGo rootFpuReductionMax (self-play 0.0); precedence
+        // over the legacy noise-conditioned knob when provided.
+        root_fpu_reduction: Option<f32>,
         search_parity_mode: Option<bool>,
         divergence_overrides: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
@@ -924,6 +955,11 @@ impl HexfieldMctsSession {
             tss_enabled: tss_enabled.unwrap_or(true),
             // QUARANTINE default false (dense as-built default is true).
             root_fpu_zero_under_noise: root_fpu_zero_under_noise.unwrap_or(false),
+            // [6] first-class root FPU reduction (validated >= 0 when provided).
+            root_fpu_reduction: match root_fpu_reduction {
+                Some(value) => Some(validate_nonnegative_f32("root_fpu_reduction", value)?),
+                None => None,
+            },
             divergences,
         };
         let widening = build_widening(
@@ -973,6 +1009,7 @@ impl HexfieldMctsSession {
                     if let Some(noise) = root_noise_exact(
                         move_policy.noise_for(move_class),
                         mix_seed(base_seed, game_key, 0, SEED_STREAM_ROOT_NOISE),
+                        divergences.dirichlet_shaped,
                     ) {
                         search.apply_root_dirichlet_noise(noise);
                     }
@@ -1525,6 +1562,7 @@ fn backup_continuous_items(
                     root_noise_exact(
                         move_policy.noise_for(move_class),
                         mix_seed(base_seed, slot.game_key, slot.ply, SEED_STREAM_ROOT_NOISE),
+                        divergences.dirichlet_shaped,
                     ),
                     widening,
                     move_policy.forced_k_for(move_class),
@@ -1718,6 +1756,7 @@ fn complete_continuous_slots(
                         if let Some(noise) = root_noise_exact(
                             move_policy.noise_for(next_class),
                             mix_seed(base_seed, game_key, next_ply, SEED_STREAM_ROOT_NOISE),
+                            move_policy.divergences.dirichlet_shaped,
                         ) {
                             search.apply_root_dirichlet_noise(noise);
                         }
@@ -1851,6 +1890,26 @@ fn resolve_divergences(
         if let Some(v) = overrides.get_item("c_base")? {
             dv.c_base = v.extract()?;
         }
+        // main_4 KataGo-faithful search divergences (ledger items [1]-[7]) —
+        // individually flippable for the M6 property gates / M10 lesions.
+        if let Some(v) = overrides.get_item("nucleus_f64")? {
+            dv.nucleus_f64 = v.extract()?;
+        }
+        if let Some(v) = overrides.get_item("new_child_fpu")? {
+            dv.new_child_fpu = v.extract()?;
+        }
+        if let Some(v) = overrides.get_item("lazy_widening")? {
+            dv.lazy_widening = v.extract()?;
+        }
+        if let Some(v) = overrides.get_item("clean_root_prior_cache")? {
+            dv.clean_root_prior_cache = v.extract()?;
+        }
+        if let Some(v) = overrides.get_item("dirichlet_shaped")? {
+            dv.dirichlet_shaped = v.extract()?;
+        }
+        if let Some(v) = overrides.get_item("pruned_dynamic_cpuct")? {
+            dv.pruned_dynamic_cpuct = v.extract()?;
+        }
     }
     Ok(dv)
 }
@@ -1899,7 +1958,10 @@ fn build_search_result_payloads(
         let (policy_action_ids, policy_weights, _policy_q, policy_total) =
             visit_policy(root, baseline);
         let (export_action_ids, export_weights, export_q) = if forced_playout_k > 0.0 {
-            pruned_visit_policy(root, baseline, forced_playout_k, c_puct)
+            // [7] align the recorded-target pruning with selection's c_for(N)
+            // when pruned_dynamic_cpuct is on; otherwise static c_puct (parity).
+            let effective_c = search.effective_pruning_c_puct(c_puct, root.visits);
+            pruned_visit_policy(root, baseline, forced_playout_k, effective_c)
         } else {
             let (ids, w, q, _t) = visit_policy(root, baseline);
             (ids, w, q)
@@ -2105,21 +2167,28 @@ fn root_noise(
     config: Option<RootNoiseConfig>,
     seed: u64,
     index: usize,
+    shaped: bool,
 ) -> Option<RootDirichletNoise> {
     let config = config?;
     Some(RootDirichletNoise {
         total_alpha: config.total_alpha,
         fraction: config.fraction,
         seed: seed.wrapping_add((index as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)),
+        shaped,
     })
 }
 
-fn root_noise_exact(config: Option<RootNoiseConfig>, seed: u64) -> Option<RootDirichletNoise> {
+fn root_noise_exact(
+    config: Option<RootNoiseConfig>,
+    seed: u64,
+    shaped: bool,
+) -> Option<RootDirichletNoise> {
     let config = config?;
     Some(RootDirichletNoise {
         total_alpha: config.total_alpha,
         fraction: config.fraction,
         seed,
+        shaped,
     })
 }
 

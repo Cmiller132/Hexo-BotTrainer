@@ -185,6 +185,15 @@ def test_divergences_off_equals_parity_mode() -> None:
             "early_stop": False,
             "visit_scaled_c_puct": False,
             "moves_left_utility": False,
+            # main_4 KataGo-faithful divergences default ON in production(); this
+            # test asserts (all divergences off) == search_parity_mode, so the new
+            # flags must be neutralized to their parity() legacy value too.
+            "nucleus_f64": False,
+            "new_child_fpu": False,
+            "lazy_widening": False,
+            "clean_root_prior_cache": False,
+            "dirichlet_shaped": False,
+            "pruned_dynamic_cpuct": False,
         },
         **kwargs,
     )

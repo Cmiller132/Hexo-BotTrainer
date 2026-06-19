@@ -1,0 +1,236 @@
+# hexfield production run 4 (KATAGO-FAITHFUL build). FRESH run, copied from
+# hexfield_main_3.toml. PREPARE-ONLY: this config exists so main_4 can be
+# launched later; the live hexfield_main_3 run is NOT touched.
+#
+# ==========================================================================
+# WHAT CHANGED vs hexfield_main_3 (and why) — every delta is enumerated here:
+# ==========================================================================
+#
+# [run] / [checkpoint] — identity + warm-start:
+#   - name -> "hexfield_main_4", output_dir -> .../runs/hexfield_main_4.
+#   - This is a FRESH run, NOT a resume. The new KataGo soft-policy head (and
+#     the per-block bias migration already in the arch) means the checkpoint
+#     SHAPE differs from any prior net. initialize_from still points at the v3
+#     BC prefit (same as main_3); the soft_policy head has NO weights there, so
+#     the checkpoint loader's initialize_from/BC path fresh/zero-inits the new
+#     head (tolerant non-strict load — the `resume` path stays strict).
+#     warmup_steps=0 (fresh-governor warm start).
+#
+# [model.config.selfplay] — KataGo-faithful search (NEW, all behind divergence
+#   flags that resolve to Divergences::production() in production self-play;
+#   the M5/M6 golden-vector parity tests run Divergences::parity() and stay
+#   byte-identical):
+#   - visit_scaled_c_puct=true, c_scale=0.45, c_base=500.0, lcb_z=1.6: the
+#     dynamic-c_puct + LCB knobs are now FIRST-CLASS / config-auditable. These
+#     VALUES EQUAL the prior baked-in production() defaults, so search behavior
+#     is UNCHANGED — this only closes the wiring gap (Python never emitted them
+#     before, though Rust resolve_divergences already read them).
+#   - root_fpu_reduction=0.0 (SPEC CORRECTION, ledger [6]): modern KataGo has
+#     NO "zero FPU under noise" branch; self-play uses rootFpuReductionMax=0.0.
+#     This first-class root FPU replaces the noise-conditioned mechanism.
+#     root_fpu_zero_under_noise=false keeps the legacy branch inert (it is kept
+#     only for the parity path / golden vectors).
+#   - fpu_reduction=0.2 (interior FPU) UNCHANGED.
+#   - Six KataGo-faithful search divergences flipped ON (they are already ON in
+#     production(); set here for audit + individual control):
+#       nucleus_f64=true            (f64 cumulative + mass>=1.0 sentinel)
+#       new_child_fpu=true          (new-child = fpu + U, not U-only)
+#       lazy_widening=true          (live can_widen check; no frozen cap)
+#       clean_root_prior_cache=true (no Dirichlet/temp re-mix compounding)
+#       dirichlet_shaped=true       (KataGo computeDirichletAlphaDistribution)
+#       pruned_dynamic_cpuct=true   (exported target uses c_for(N), not static)
+#     new_child_fpu and lazy_widening are COUPLED (the lifted cap makes FPU the
+#     sole gate); both ON here.
+#
+# [model.config.training] — KataGo auxiliary SOFT policy target (NEW):
+#   - soft_policy_weight=8.0 (KataGo soft-policy-weight-scale default). Trains
+#     the new train-only soft_policy head (CE against the
+#     (visit_policy+1e-7)^(1/4) renormalized soft target, derived in
+#     collate_training from the existing visit policy — NO shard-schema or
+#     replay_expand.rs change). All other training knobs UNCHANGED from main_3.
+#
+# KEPT verbatim from main_3 (NOT changed): search_visits=512, c_puct=1.5,
+#   root_dirichlet_total_alpha=10.83, root_dirichlet_noise_fraction=0.25,
+#   forced_playout_k=2.0, widening_policy_mass=0.95, widening_max_children=96
+#   (still passed but with lazy_widening ON the live can_widen check is the
+#   real gate — kept for the parity path / for flipping lazy_widening off),
+#   widening_min_children=2, temperature=1.0/floor=0.15/halflife=60.0,
+#   root_policy_temperature=1.07 (flat, early=0/halflife=0), max_game_plies=256,
+#   ml_two_sided=false, ml_final_pick_band=0.08, the full replay-buffer block,
+#   learning_rate=3e-4, train_samples_per_epoch=48000.
+#   expand_backend="rust" KEPT: the soft target is derived in collate (not in
+#   expand), so the Rust train-read kernel needs NO change and stays valid.
+#
+# Owner decisions baked in (per ledger open_decisions): own-conv soft head
+#   (Hexfield per-head-conv adaptation), player-only soft policy (no opp-soft),
+#   lazy_widening + new_child_fpu both ON, c_scale kept at 0.45 (production
+#   value, now auditable), tolerant-load of the existing v3 prefit, no
+#   cpuctUtilityStdevScale per-node variance state.
+
+[model]
+name = "hexfield"
+module = "hexfield.plugin"
+
+[model.config]
+device = "cuda"
+
+[model.config.selfplay]
+search_visits = 512
+pcr_full_proportion = 0.33
+pcr_fast_visits = 128
+active_games = 96
+c_puct = 1.5
+virtual_batch_size = 4
+flush_target = 1024
+active_root_limit = 192
+root_dirichlet_total_alpha = 10.83
+root_dirichlet_noise_fraction = 0.25
+fpu_reduction = 0.2
+# KataGo-faithful root FPU (ledger [6]): first-class root FPU reduction. 0.0 =
+# KataGo self-play (rootFpuReductionMax=0). Replaces the noise-conditioned
+# mechanism; root_fpu_zero_under_noise kept false (legacy branch inert, parity
+# path only).
+root_fpu_reduction = 0.0
+root_fpu_zero_under_noise = false
+# Dynamic c_puct + LCB, now first-class / config-auditable. Values == prior
+# baked-in production() defaults (behavior unchanged; only wiring is new).
+visit_scaled_c_puct = true
+c_scale = 0.45
+c_base = 500.0
+lcb_z = 1.6
+# Six KataGo-faithful search divergences, ON (== production()). Audit + per-knob
+# control for the M6/M10 differential harness. The M5/M6 golden vectors run
+# parity() (search_parity_mode=false here; the tests select parity separately)
+# so they stay byte-identical regardless.
+nucleus_f64 = true
+new_child_fpu = true
+lazy_widening = true
+clean_root_prior_cache = true
+dirichlet_shaped = true
+pruned_dynamic_cpuct = true
+widening_policy_mass = 0.95
+widening_max_children = 96
+widening_min_children = 2
+forced_playout_k = 2.0
+policy_init_fraction = 0.25
+policy_init_avg_plies = 4.0
+policy_init_max_plies = 8
+policy_init_temperature = 1.4
+temperature = 1.0
+# Temperature reform (inherited from main_3): slower decay + higher floor so the
+# mid/endgame isn't played near-greedy at 170+ ply games. halflife 60, floor 0.15.
+temperature_floor = 0.15
+temperature_halflife_plies = 60.0
+# Root-policy temperature: FLAT 1.07, no ramp (early=0/halflife=0).
+root_policy_temperature = 1.07
+root_policy_temperature_early = 0.0
+root_policy_temperature_halflife = 0.0
+# Moves-left (decisiveness) utility (inherited from main_3 Stage-1 retune):
+# ml_two_sided=false (favor fast wins, do not reward dragging out losses);
+# ml_final_pick_band 0.08 (broader decisive root tie-break). ml_weight/ml_scale/
+# ml_q_gate/moves_left_utility stay at production defaults.
+ml_two_sided = false
+ml_final_pick_band = 0.08
+max_game_plies = 256
+tss_enabled = true
+cache_max_states = 262144
+
+# KataGo / dense_cnn_restnet replay-buffer port (inherited verbatim from main_3,
+# PLAN §6/§7). Defaults are hexfield-tuned (NOT dense's literals): the
+# dimensionless KataGo constants (exponent=0.65, expand=0.4) are unchanged, but
+# min_rows/scale/keep_target are scaled to hexfield's ~7k Full rows/epoch stream.
+[model.config.training]
+batch_rows = 32
+learning_rate = 3e-4
+weight_decay = 1e-4
+grad_clip = 5.0
+# Adaptive grad clip (#1): after clip_warmup_steps, clip at clip_c*EMA(pre-clip norm).
+adaptive_clip = true
+clip_c = 1.75
+clip_ema_decay = 0.99
+clip_warmup_steps = 50
+# Config-driven loss weights (#2); defaults mirror losses.py constants.
+policy_weight = 1.0
+value_weight = 1.0
+opp_policy_weight = 0.25
+short_term_value_weight = 0.1
+moves_left_weight = 0.1
+q_head_weight = 0.1
+# KataGo auxiliary SOFT policy target (NEW for main_4). Loss weight for the new
+# train-only soft_policy head (CE against the (visit_policy+1e-7)^(1/4)
+# renormalized soft target, derived in collate_training from the visit policy —
+# no shard-schema or replay_expand.rs change). 8.0 = KataGo soft-policy-weight-
+# scale; must match losses.SOFT_POLICY_WEIGHT. main_4 trains this head fresh
+# (zero-init via the tolerant initialize_from path).
+soft_policy_weight = 8.0
+# Policy-surprise self-CE reweight (#5).
+policy_surprise_uniform_fraction = 0.5
+policy_surprise_max_weight = 8.0
+warmup_steps = 0
+shuffle_min_rows = 20000
+shuffle_keep_target_rows = 300000
+shuffle_taper_window_exponent = 0.65
+shuffle_expand_window_per_row = 0.4
+shuffle_taper_window_scale = 20000.0
+validation_fraction = 0.0
+train_samples_per_epoch = 48000
+max_train_bucket_per_new_data = 8.0
+max_train_bucket_size = 500000.0
+no_repeat_files = false
+# expand_backend="rust" KEPT (main_3 default). The soft target is derived in
+# collate_training (a pure function of the visit policy AFTER expand), so the
+# Rust train-read kernel (replay_expand.rs) needs NO change and stays element-
+# identical across serial/pool/rust backends. To roll back, flip to "serial".
+expand_backend = "rust"
+expand_workers = 0
+
+[model.config.evaluation]
+games_per_epoch = 16
+eval_visits = 128
+eval_every = 5
+
+# In-run COMPARABLE strength eval (eval-v2), inherited verbatim from main_3.
+[model.config.multi_stage_eval]
+enabled = true
+games_budget = 128
+every_n_epochs = 5
+full_search_visits = 512
+eval_virtual_batch_size = 32
+sealbot_share = 0.5
+verdict_reference_lag = 5
+pool_path = "diagnostics/eval_pool.json"
+
+[model.config.multi_stage_eval.sprt]
+enabled = false
+
+[model.config.multi_stage_eval.opponents]
+sealbot_enabled = true
+bracket_size = 1
+permanent_anchors = [["main2_ep45", "/mnt/e/Hexo-BotTrainer/runs/hexfield_main_2/checkpoints/epoch_000045.pt"], ["ep5", "epoch_000005.pt"]]
+radius8_opponents = []
+
+[run]
+name = "hexfield_main_4"
+output_dir = "/mnt/e/Hexo-BotTrainer/runs/hexfield_main_4"
+seed = 1
+
+[loop]
+epochs = 200
+
+[selfplay]
+games_per_epoch = 256
+update_checkpoint_pointer = false
+
+[train]
+passes_per_epoch = 1
+
+[checkpoint]
+# FRESH-init warm start (NOT a resume): the initialize_from branch loads
+# matching weights only and starts a fresh train bucket / governor. main_4 adds
+# the new soft_policy head, which has NO weights in the v3 BC prefit, so the
+# loader must fresh/zero-init the missing soft_policy_* keys (tolerant non-strict
+# initialize_from path — the `resume` path stays strict). Same v3 prefit as
+# main_3. Does NOT point at any live run, so launching main_4 cannot disturb
+# hexfield_main_3.
+initialize_from = "/mnt/e/Hexo-BotTrainer-hexgt/runs/hexfield_bc_v3/checkpoint_epoch0.pt"
+save_name = "latest"

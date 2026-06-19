@@ -368,6 +368,16 @@ class HexfieldNet(nn.Module):
         self.policy_head = nn.Linear(c, 1)
         self.opp_policy_conv = HexNodeConv(c, c)
         self.opp_policy_head = nn.Linear(c, 1)
+        # KataGo auxiliary SOFT policy head (main_4, train-only). KataGo emits the
+        # soft policy as an extra OUTPUT CHANNEL of its single multi-channel policy
+        # head (channel 2 = player soft). Hexfield uses a separate conv+Linear(c,1)
+        # per target (policy / opp_policy / cell_q), so the faithful-in-spirit
+        # adaptation gives the soft head its OWN conv+Linear, mirroring opp_policy.
+        # Documented divergence: this is NOT byte-faithful to KataGo's shared-conv
+        # channel-slice layout, but matches Hexfield's per-head-conv architecture.
+        # Fresh/zero-init via _init_weights (trunc_normal(0.02) weight, zeros bias).
+        self.soft_policy_conv = HexNodeConv(c, c)
+        self.soft_policy_head = nn.Linear(c, 1)
         # Train-only per-cell Q head (#4): emitted in forward() only, never serve.
         self.cell_q_conv = HexNodeConv(c, c)
         self.cell_q_head = nn.Linear(c, VALUE_BINS)
@@ -660,6 +670,11 @@ class HexfieldNet(nn.Module):
             ),
             "opp_policy": self._policy_logits(
                 self.opp_policy_conv, self.opp_policy_head, cells, gather_idx, mask
+            ),
+            # KataGo aux soft policy (train-only): NOT added to forward_policy_value
+            # (serve), exactly like cell_q / opp_policy.
+            "soft_policy": self._policy_logits(
+                self.soft_policy_conv, self.soft_policy_head, cells, gather_idx, mask
             ),
             "value": self.value_head(
                 F.relu(self.value_reduction(self._value_input(tokens, 0, 1, pooled)))

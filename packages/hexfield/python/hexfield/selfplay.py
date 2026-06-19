@@ -469,6 +469,11 @@ def generate_selfplay_epoch(*, ctx, components, epoch: int, games_per_epoch: int
             policy_init_max_plies=sp.policy_init_max_plies,
             policy_init_temperature=sp.policy_init_temperature,
             tss_enabled=sp.tss_enabled,
+            # SPEC CORRECTION (ledger [6]): first-class root FPU reduction
+            # (KataGo rootFpuReductionMax; self-play default 0.0). When set, Rust
+            # uses it directly and ignores the legacy noise-conditioned branch;
+            # root_fpu_zero_under_noise is kept only for the parity path.
+            root_fpu_reduction=sp.root_fpu_reduction,
             root_fpu_zero_under_noise=sp.root_fpu_zero_under_noise,
             search_parity_mode=sp.search_parity_mode,
             divergence_overrides=build_divergence_overrides(
