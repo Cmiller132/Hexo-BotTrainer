@@ -79,13 +79,13 @@
 #   lazy_widening off), widening_min_children=2, temperature=1.0/floor=0.15,
 #   max_game_plies=256, ml_two_sided=false, ml_final_pick_band=0.08, the full
 #   replay-buffer block, train_samples_per_epoch=48000.
-#   expand_backend="rust" KEPT (owner: do not fix now). NOTE — KNOWN BUG: replay_expand.rs
-#   emits no value_mask, so expand_backends.py falls back to np.ones and truncated-game
-#   value/stvalue/cell_q rows are NOT masked (outcome_valid ignored on the rust path).
-#   The SOFT target is unaffected (derived in collate), but the truncated-game VALUE
-#   masking from b8a9f43 is INACTIVE under rust. Fix later = make replay_expand.rs read
-#   outcome_valid + emit value_mask, OR set expand_backend="serial"/"pool". (Same bug is
-#   live in main_3.)
+#   expand_backend="rust" — and now CORRECT. The merge of claude/hexfield-cleanup
+#   (merge commit on this branch) fixed the rust-expand value_mask bug:
+#   replay_expand.rs now READS outcome_valid and EMITS value_mask (0.0 for truncated
+#   rows, zeroing stvalue_mask/cell_q_mask; 1.0 for completed), and expand_backends.py
+#   consumes result["value_mask"] (no more np.ones fallback). So truncated-game value
+#   masking from b8a9f43 is ACTIVE under rust — no need to switch to serial/pool.
+#   (NOTE: the live main_3 run still has this bug — it runs the pre-fix rust kernel.)
 #
 # Owner decisions baked in (per ledger open_decisions): own-conv soft head
 #   (Hexfield per-head-conv adaptation), player-only soft policy (no opp-soft),
