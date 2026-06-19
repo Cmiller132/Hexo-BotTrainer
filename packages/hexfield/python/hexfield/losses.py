@@ -27,11 +27,13 @@ POLICY_WEIGHT = 1.0
 VALUE_WEIGHT = 1.0
 OPP_POLICY_WEIGHT = 0.25
 # KataGo auxiliary SOFT policy target loss weight (main_4). KataGo's
-# -soft-policy-weight-scale default is 8.0 (8x the main policy loss); the 8x
-# compensates for the much smaller gradients the softened (T=4) target produces
-# once the main policy is near-optimized. Mirror in config.TrainingSection
+# -soft-policy-weight-scale default is 8.0 (8x the main policy loss) paired with a
+# T=4 (^0.25) full-legal target. We use a HEXO-ADAPTED gentler target (T=2 ^0.5,
+# support-only — see batching.py), so we halve the weight to 4.0: with a sharper
+# (less-flattened) soft target the per-row gradient is larger, so the 8x KataGo
+# multiplier would over-pull the trunk. Mirror in config.TrainingSection
 # (soft_policy_weight) — keep the two in sync.
-SOFT_POLICY_WEIGHT = 8.0
+SOFT_POLICY_WEIGHT = 4.0
 SHORT_TERM_VALUE_WEIGHT = 0.1
 MOVES_LEFT_WEIGHT = 0.1
 Q_HEAD_WEIGHT = 0.1

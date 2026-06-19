@@ -48,24 +48,44 @@
 #     new_child_fpu and lazy_widening are COUPLED (the lifted cap makes FPU the
 #     sole gate); both ON here.
 #
-# [model.config.training] — KataGo auxiliary SOFT policy target (NEW):
-#   - soft_policy_weight=8.0 (KataGo soft-policy-weight-scale default). Trains
-#     the new train-only soft_policy head (CE against the
-#     (visit_policy+1e-7)^(1/4) renormalized soft target, derived in
-#     collate_training from the existing visit policy — NO shard-schema or
-#     replay_expand.rs change). All other training knobs UNCHANGED from main_3.
+# CONFIG-REVIEW changes (55-agent per-knob CPU critique, Hexo-vs-Go, owner-adjusted)
+# — these tune for Hexo's measured conversion-failure/defensive-lock + sudden-death,
+#   and several DELIBERATELY DIVERGE from KataGo self-play (Go-isms that hurt Hexo):
+#   - root_dirichlet_noise_fraction 0.25 -> 0.20 (exploration not the bottleneck).
+#   - forced_playout_k 2.0 -> 1.0 (k=2 over-sprays Hexo's flat prior; gentle floor
+#     kept; do NOT set 0 — it also kills target pruning + the discovery channel).
+#   - temperature_halflife_plies 60 -> 45 (more committal mid/endgame for conversion).
+#   - root_policy_temperature_early 1.25 -> 1.15 (gentler opening flatten; steady
+#     stays 1.1; KataGo's 1.25 over-flattens an opening Dirichlet already saturates).
+#   - pcr_fast_visits 128 -> 192 (cut fast-move conversion blunders; throughput-gated).
+#   - moves_left_weight 0.1 -> 0.2 (feed the ml-utility decisiveness lever).
+#   - learning_rate 3e-4 -> 5e-4 (owner; hotter early lr for a fresh run).
+#   - c_puct KEPT 1.5 (config-review: low-stakes; forced playouts dominate discovery,
+#     not c; KataGo's 1.1 assumes a wide score-Q Hexo lacks).
+#
+# [model.config.training] — KataGo auxiliary SOFT policy target (NEW), HEXO-ADAPTED:
+#   - soft_policy_weight=4.0 (HALVED from KataGo's 8.0). Train-only soft_policy head;
+#     soft target derived in collate_training from the visit policy (NO shard /
+#     replay_expand.rs change). HEXO ADAPTATION (config-review): KataGo's ^0.25 (T=4)
+#     over the FULL legal set leaks ~40-72% of soft-target mass onto Hexo's huge
+#     unvisited-legal tail (savage in sudden-death), so the target is p^0.5 (T=2),
+#     SUPPORT-ONLY (no full-legal 1e-7 floor); weight halved to 4.0 to match the
+#     sharper target's larger gradient. (batching.collate_training + losses.py.)
 #
 # KEPT verbatim from main_3 (NOT changed): search_visits=512, c_puct=1.5,
-#   root_dirichlet_total_alpha=10.83, root_dirichlet_noise_fraction=0.25,
-#   forced_playout_k=2.0, widening_policy_mass=0.95, widening_max_children=96
-#   (still passed but with lazy_widening ON the live can_widen check is the
-#   real gate — kept for the parity path / for flipping lazy_widening off),
-#   widening_min_children=2, temperature=1.0/floor=0.15/halflife=60.0,
-#   max_game_plies=256,
-#   ml_two_sided=false, ml_final_pick_band=0.08, the full replay-buffer block,
-#   learning_rate=3e-4, train_samples_per_epoch=48000.
-#   expand_backend="rust" KEPT: the soft target is derived in collate (not in
-#   expand), so the Rust train-read kernel needs NO change and stays valid.
+#   root_dirichlet_total_alpha=10.83, widening_policy_mass=0.95,
+#   widening_max_children=96 (still passed but with lazy_widening ON the live
+#   can_widen check is the real gate — kept for the parity path / for flipping
+#   lazy_widening off), widening_min_children=2, temperature=1.0/floor=0.15,
+#   max_game_plies=256, ml_two_sided=false, ml_final_pick_band=0.08, the full
+#   replay-buffer block, train_samples_per_epoch=48000.
+#   expand_backend="rust" KEPT (owner: do not fix now). NOTE — KNOWN BUG: replay_expand.rs
+#   emits no value_mask, so expand_backends.py falls back to np.ones and truncated-game
+#   value/stvalue/cell_q rows are NOT masked (outcome_valid ignored on the rust path).
+#   The SOFT target is unaffected (derived in collate), but the truncated-game VALUE
+#   masking from b8a9f43 is INACTIVE under rust. Fix later = make replay_expand.rs read
+#   outcome_valid + emit value_mask, OR set expand_backend="serial"/"pool". (Same bug is
+#   live in main_3.)
 #
 # Owner decisions baked in (per ledger open_decisions): own-conv soft head
 #   (Hexfield per-head-conv adaptation), player-only soft policy (no opp-soft),
@@ -84,14 +104,23 @@ device = "cuda"
 [model.config.selfplay]
 search_visits = 512
 pcr_full_proportion = 0.33
-pcr_fast_visits = 128
+# pcr_fast_visits 128 -> 192 (config-review): 67% of moves are fast/greedy and
+# shape the data; late-game 128-visit fast moves blunder ~10.8% (sudden-death) vs
+# ~0.3% at 512, so 192 buys deeper 2-3-ply conversion resolution. THROUGHPUT-GATED:
+# revert to 128 at launch if pos/s regresses materially (can't measure pre-launch).
+pcr_fast_visits = 192
 active_games = 96
 c_puct = 1.5
 virtual_batch_size = 4
 flush_target = 1024
 active_root_limit = 192
 root_dirichlet_total_alpha = 10.83
-root_dirichlet_noise_fraction = 0.25
+# root_dirichlet_noise_fraction 0.25 -> 0.20 (config-review, owner: 0.20 not 0.15):
+# exploration is not the bottleneck (conversion is). At total_alpha=10.83 over
+# Nlegal 337-777 the per-move alpha is spiky (~0.014-0.032), so eps=0.25 hands
+# ~28% of the 512-visit budget to ~18 random cells; 0.20 trims that toward
+# conversion depth while keeping ample opening diversity (KataGo self-play = 0.25).
+root_dirichlet_noise_fraction = 0.20
 fpu_reduction = 0.2
 # KataGo-faithful root FPU (ledger [6]): first-class root FPU reduction. 0.0 =
 # KataGo self-play (rootFpuReductionMax=0). Replaces the noise-conditioned
@@ -129,27 +158,45 @@ pruned_dynamic_cpuct = true
 widening_policy_mass = 0.95
 widening_max_children = 96
 widening_min_children = 2
-forced_playout_k = 2.0
+# forced_playout_k 2.0 -> 1.0 (config-review). KataGo k=2 is tuned for ~361 + a
+# sharp score-Q; on Hexo's FLAT opening prior over 337-777 legal the forced floors
+# (n_forced=sqrt(k*P*N)) sum to ~41% of the 512 budget and spray visits across the
+# widened children down to prior ~0.001, halving PV depth where the compressed
+# value head needs depth to convert. k=1.0 keeps a GENTLE discovery floor (and the
+# forced-playout target-pruning, which only fires when k>0) without the spray.
+# NOTE (owner Q): do NOT set k=0 — that disables forced playouts AND the
+# policy-target pruning, removing the channel that discovers underrated converting
+# moves (sims show this floor, not c_puct, drives tactical discovery). 1.0 (or 1.5)
+# is the floor; 0 is not. Late-game high branching (~1000 legal) is handled by
+# lazy_widening + FPU lazily opening only the ~dozens of competitive moves, NOT by
+# forcing all 1000 (n_forced<1 for any move with prior < ~1/(k*N) ~ 0.002, so the
+# ~960 near-zero-prior cells get ZERO forced visits — it is self-limiting).
+forced_playout_k = 1.0
 policy_init_fraction = 0.25
 policy_init_avg_plies = 4.0
 policy_init_max_plies = 8
 policy_init_temperature = 1.4
 temperature = 1.0
-# Temperature reform (inherited from main_3): slower decay + higher floor so the
-# mid/endgame isn't played near-greedy at 170+ ply games. halflife 60, floor 0.15.
+# Temperature reform: higher floor 0.15 kept. halflife 60 -> 45 (config-review):
+# main_3 raised halflife to 60 to avoid near-greedy 170+ ply games, but at hl60 the
+# conversion-critical ply~40 still samples at T~0.63 (only ~0.43 chance of the top
+# converting move), keeping mid/endgame too random where DECISIVENESS is needed and
+# manufacturing the non-converting marathons. 45 is a compromise toward KataGo's
+# faster decay (halflife 19) WITHOUT reverting all the way to 30 (which would undo
+# main_3's anti-greedy intent on a fresh net). floor 0.15 unchanged.
 temperature_floor = 0.15
-temperature_halflife_plies = 60.0
-# Root-policy temperature (KataGo self-play faithfulness, selfplay8b20.cfg):
-# rootPolicyTemperature=1.1, rootPolicyTemperatureEarly=1.25, with the early->
-# steady decay over chosenMoveTemperatureHalflife=19 moves. Hexfield interp is
-# temp(ply)=steady+(early-steady)*0.5^(ply/halflife) (== KataGo interpolateEarly),
-# so early=1.25 at ply 0 flattens the opening prior more, decaying to 1.1. The
-# halflife is in plies (Hexo ply ~= KataGo move; KataGo's 19 is board-scaled and
-# Hexo has no fixed board, so 19 is the literal transfer — tunable; note Hexo's
-# move-selection halflife is 60, so 19 is on the shorter/earlier side).
-# REPLACES main_3's flat 1.07.
+temperature_halflife_plies = 45.0
+# Root-policy temperature. KataGo self-play: 1.1 steady + 1.25 early over halflife
+# 19. Owner choice (config-review): keep steady=1.1 (KataGo), but SOFTEN the early
+# ramp 1.25 -> 1.15. Rationale: temp flattens the root prior BEFORE Dirichlet, and
+# Dirichlet already saturates Hexo opening diversity; a 1.25 early-flatten raised
+# risky-tail (rank>=30) opening picks ~16.8%->24.2% in sim, and in sudden-death one
+# unsound flattened opening stone seeding a completable threat is costly. early=1.15
+# is a gentle opening flatten decaying to 1.1. interp is
+# temp(ply)=steady+(early-steady)*0.5^(ply/halflife) (== KataGo interpolateEarly);
+# halflife 19 plies (Hexo ply ~= KataGo move). REPLACES main_3's flat 1.07.
 root_policy_temperature = 1.1
-root_policy_temperature_early = 1.25
+root_policy_temperature_early = 1.15
 root_policy_temperature_halflife = 19.0
 # Moves-left (decisiveness) utility (inherited from main_3 Stage-1 retune):
 # ml_two_sided=false (favor fast wins, do not reward dragging out losses);
@@ -167,7 +214,11 @@ cache_max_states = 262144
 # min_rows/scale/keep_target are scaled to hexfield's ~7k Full rows/epoch stream.
 [model.config.training]
 batch_rows = 32
-learning_rate = 3e-4
+# learning_rate 3e-4 -> 5e-4 (owner). main_3's held-out sweep found lower-is-better
+# across [5e-4,1e-3] (1e-3 worst) and adopted 3e-4; 5e-4 is a deliberate step UP for
+# a FRESH run (fresh-governor warm start + the new soft head benefit from a slightly
+# hotter early lr). Watch early-epoch grad/clip stability; drop to 3e-4 if unstable.
+learning_rate = 5e-4
 weight_decay = 1e-4
 grad_clip = 5.0
 # Adaptive grad clip (#1): after clip_warmup_steps, clip at clip_c*EMA(pre-clip norm).
@@ -180,15 +231,23 @@ policy_weight = 1.0
 value_weight = 1.0
 opp_policy_weight = 0.25
 short_term_value_weight = 0.1
-moves_left_weight = 0.1
+# moves_left_weight 0.1 -> 0.2 (config-review): the moves-left head feeds the
+# in-search moves_left_utility — the lever explicitly built to attack the
+# conversion-failure/defensive-lock pathology — and a heal-gate disables that
+# utility when the head is unhealthy. Up-weighting sharpens the head so ml-utility
+# stays on and drives decisiveness. (Escalate to 0.3 only if the head fails its
+# heal-gate audit; not beyond.)
+moves_left_weight = 0.2
 q_head_weight = 0.1
-# KataGo auxiliary SOFT policy target (NEW for main_4). Loss weight for the new
-# train-only soft_policy head (CE against the (visit_policy+1e-7)^(1/4)
-# renormalized soft target, derived in collate_training from the visit policy —
-# no shard-schema or replay_expand.rs change). 8.0 = KataGo soft-policy-weight-
-# scale; must match losses.SOFT_POLICY_WEIGHT. main_4 trains this head fresh
-# (zero-init via the tolerant initialize_from path).
-soft_policy_weight = 8.0
+# KataGo auxiliary SOFT policy target (NEW for main_4), HEXO-ADAPTED. Train-only
+# soft_policy head, CE against the soft target derived in collate_training from the
+# visit policy (no shard/replay_expand change). KataGo uses ^0.25 (T=4) over the
+# FULL legal set at weight 8.0; on Hexo's 70-700-cell legal sets that leaks ~40-72%
+# of mass onto the unvisited tail (savage in sudden-death), so we use a gentler
+# HEXO target: p^0.5 (T=2), SUPPORT-ONLY (no full-legal 1e-7 floor), and HALVE the
+# weight to 4.0 (sharper target => larger per-row gradient). Must match
+# losses.SOFT_POLICY_WEIGHT and the transform in batching.collate_training.
+soft_policy_weight = 4.0
 # Policy-surprise self-CE reweight (#5).
 policy_surprise_uniform_fraction = 0.5
 policy_surprise_max_weight = 8.0

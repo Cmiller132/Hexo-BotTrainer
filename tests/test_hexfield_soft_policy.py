@@ -3,13 +3,15 @@
 Covers the three pieces of the soft-policy implementation that do NOT need the
 native MCTS module or the GPU:
 
-1. The soft-target TRANSFORM as produced by ``batching.collate_training``:
-   target_soft = (p + 1e-7)^(1/4) over each row's legal prefix, where p is the
-   row-normalized visit policy; off-prefix slots stay exactly 0; the renorm is
-   deferred to ``segment_policy_ce`` (KataGo: metrics_pytorch.py T=4).
+1. The soft-target TRANSFORM as produced by ``batching.collate_training``
+   (HEXO-ADAPTED from KataGo): target_soft = p^(1/2) on the VISITED SUPPORT
+   (policy > 0) within each row's legal prefix; unvisited-legal and off-prefix
+   slots stay exactly 0 (no full-legal 1e-7 leak); the renorm is deferred to
+   ``segment_policy_ce``. (KataGo metrics_pytorch.py uses T=4 ^0.25 over full
+   legal with a 1e-7 floor; we use T=2 support-only — see batching.py.)
 2. The ``segment_policy_ce`` CE on the soft target (renorm inside, prefix-only).
 3. The ``hexfield_loss`` wiring: the ``soft_policy`` component is present iff both
-   ``outputs['soft_policy']`` and ``batch['soft_policy']`` exist, weighted 8x.
+   ``outputs['soft_policy']`` and ``batch['soft_policy']`` exist, weighted 4x.
 
 Rows are built from synthetic closed-form supports + numpy targets (no engine,
 no native module), so the whole file runs under a plain CPU torch.
@@ -36,8 +38,9 @@ def _row(policy: np.ndarray) -> ExpandedRow:
     policy) matter; the rest are filled with valid placeholders. A single stone
     at the origin yields a large legal prefix (all empty cells within radius), so
     ``policy`` (its visit weights, leading slots) fits with the remaining legal
-    slots left at zero visits — exercising the +1e-7 floor on zero-visit legal
-    cells exactly as KataGo does. ``legal_count`` == support.legal_count drives
+    slots left at zero visits — exercising the SUPPORT-ONLY rule (those
+    zero-visit legal cells must stay 0, no full-legal 1e-7 leak). ``legal_count``
+    == support.legal_count drives
     the collate transform; ``policy`` must carry positive total mass (expand
     contract), which the leading nonzero entries provide.
     """
@@ -67,17 +70,19 @@ def _row(policy: np.ndarray) -> ExpandedRow:
 
 
 def _katago_soft_reference(policy_row: np.ndarray, legal_count: int) -> np.ndarray:
-    """KataGo soft target VERBATIM on one row (pre-renorm, as collate emits it).
+    """Hexo-adapted soft target on one row (pre-renorm, as collate emits it).
 
-    target_soft = ((p + 1e-7) over the legal prefix)^0.25, off-prefix = 0, where
-    p = visit_policy / sum(visit_policy). Renorm is NOT applied here (it happens
-    inside segment_policy_ce), matching what collate stores.
+    target_soft = p^0.5 on the VISITED SUPPORT (policy > 0) within the legal
+    prefix; unvisited-legal cells and off-prefix slots stay EXACTLY 0 (no
+    full-legal 1e-7 leak). p = visit_policy / sum(visit_policy). Renorm is NOT
+    applied here (it happens inside segment_policy_ce), matching what collate stores.
     """
 
     out = np.zeros_like(policy_row)
     prefix = policy_row[:legal_count]
     p = prefix / max(prefix.sum(), 1e-12)
-    out[:legal_count] = np.power(p + 1e-7, 0.25)
+    support = p > 0
+    out[:legal_count][support] = np.power(p[support], 0.5)
     return out
 
 
@@ -102,14 +107,17 @@ def test_collate_soft_target_matches_katago_transform() -> None:
         # Off the legal prefix the soft target is EXACTLY zero (so it cannot put
         # mass off-prefix, which segment_policy_ce treats as a hard error).
         assert float(soft[g, lc:].abs().sum().item()) == 0.0, g
-        # Every legal slot is strictly positive (the +1e-7 floor), even the
-        # zero-visit slots of the near-deterministic row.
-        assert bool((soft[g, :lc] > 0).all().item()), g
+        # SUPPORT-ONLY: positive exactly on the visited support (policy > 0);
+        # unvisited-legal cells stay 0 (no full-legal 1e-7 leak). The
+        # near-deterministic row has unvisited legal slots that must be 0.
+        support = policy[g, :lc] > 0
+        assert bool((soft[g, :lc][support] > 0).all().item()), g
+        assert float(soft[g, :lc][~support].abs().sum().item()) == 0.0, g
 
 
 def test_soft_target_softens_relative_to_visit_policy() -> None:
-    # T=4 softening flattens the distribution: the renormalized soft target has
-    # LOWER max prob and HIGHER entropy than the original visit policy.
+    # T=2 (^0.5) softening flattens the distribution: the renormalized soft target
+    # has LOWER max prob and HIGHER entropy than the original visit policy.
     rows = [_row(np.array([0.7, 0.2, 0.1], dtype=np.float32))]
     batch = collate_training(rows)
     lc = int(batch["legal_counts"][0].item())
@@ -165,13 +173,13 @@ def test_hexfield_loss_includes_weighted_soft_component() -> None:
     batch_value["value"] = torch.zeros(b, dtype=torch.float32)
     total, comps = hexfield_loss(outputs, batch_value)
     assert "soft_policy" in comps
-    # The soft component enters total at weight SOFT_POLICY_WEIGHT (8.0): removing
+    # The soft component enters total at weight SOFT_POLICY_WEIGHT (4.0): removing
     # it (weight 0) drops total by exactly soft_policy_weight * component.
     total0, _ = hexfield_loss(outputs, batch_value, soft_policy_weight=0.0)
     delta = float((total - total0).item())
     expect = SOFT_POLICY_WEIGHT * float(comps["soft_policy"].item())
     assert abs(delta - expect) < 1e-5
-    assert abs(SOFT_POLICY_WEIGHT - 8.0) < 1e-12
+    assert abs(SOFT_POLICY_WEIGHT - 4.0) < 1e-12
 
 
 def test_hexfield_loss_omits_soft_when_head_absent() -> None:

@@ -136,16 +136,20 @@ def collate_training(
         opp[g, :n] = torch.from_numpy(row.opp_policy)
         cell_q[g, :n] = torch.from_numpy(row.cell_q)  # n == row.cell_q.shape[0]
         cell_q_mask[g, :n] = torch.from_numpy(row.cell_q_mask)
-    # KataGo auxiliary SOFT policy target (main_4): a softened (T=4) version of
-    # the MCTS visit policy, predicted by the train-only soft_policy head. KataGo
-    # (metrics_pytorch.py) VERBATIM:
-    #   target_soft = (target_policy + 1e-7) * policymask
-    #   target_soft = target_soft ** (1/T)        # T=4 -> exponent 0.25
-    #   target_soft /= target_soft.sum(dim=1)     # renormalize (also done in CE)
-    # We apply the 1e-7 floor on the NORMALIZED visit distribution p (per the
-    # plan) so the floor is scale-invariant, and confine the transform to each
-    # row's legal prefix [0, n) — the off-prefix slots stay exactly 0 (so no mass
-    # lands off the legal prefix, which segment_policy_ce treats as a hard error).
+    # KataGo auxiliary SOFT policy target (main_4), HEXO-ADAPTED (config review).
+    # KataGo (metrics_pytorch.py) is target_soft = ((p + 1e-7)*policymask)^(1/T),
+    # T=4 (exponent 0.25), over the FULL legal set. On Hexo that is harmful: the
+    # legal prefix is 70-700+ cells, so the +1e-7 floor on every legal (incl.
+    # UNVISITED) cell, amplified by ^0.25 ((1e-7)^0.25 ~= 0.018), leaks ~40-72% of
+    # the soft-target mass onto the unvisited-legal tail — in sudden-death Hexo
+    # that teaches a near-forced defensive block far too flat. Two adaptations:
+    #   (1) SUPPORT-ONLY: transform ONLY the visited support (policy > 0); leave
+    #       unvisited-legal cells at exactly 0 (no full-legal 1e-7 leak). Off-prefix
+    #       slots also stay 0 (segment_policy_ce treats off-prefix mass as a hard
+    #       error). The target is still a valid distribution over the support.
+    #   (2) T=2 (exponent 0.5, gentler than KataGo's T=4) -> softens the visit
+    #       distribution without the savage board-size-coupled flattening.
+    # soft_policy_weight is correspondingly reduced 8.0 -> 4.0 in losses.py.
     # Pure function of `policy` (the packed visit policy) -> backend-agnostic: the
     # serial/pool/rust expand backends all produce the same `policy`, hence the
     # same soft target; no shard-schema or replay_expand.rs change is needed.
@@ -156,8 +160,9 @@ def collate_training(
     )  # (b, npad) bool, legal_counts == per-row n
     row_sum = policy.sum(dim=1, keepdim=True).clamp_min(1e-12)
     p = policy / row_sum
-    soft_prefix = (p + 1e-7).pow(0.25)
-    soft_policy[prefix] = soft_prefix[prefix]
+    support = prefix & (policy > 0)  # visited support only (no full-legal 1e-7 leak)
+    soft_prefix = p.pow(0.5)  # T=2 softening (gentler than KataGo's ^0.25)
+    soft_policy[support] = soft_prefix[support]
 
     if row_weights is None:
         weights = [1.0] * b
