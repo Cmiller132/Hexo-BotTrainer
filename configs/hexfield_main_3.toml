@@ -170,16 +170,17 @@ eval_every = 5
 # pairs per checkpoint opponent; the stats review verified 4 pairs beats 3).
 [model.config.multi_stage_eval]
 enabled = true
-# 32 SealBot + 32 checkpoint = 64 games/epoch. eval-vbs 32 (was 16) halves the
-# rounds/ply at the fixed 512 visits (uniform across epochs+opponents, so
-# comparability-safe). 512 visits KEPT so every point stays comparable with the
-# ep10-30 pool (the learning curve would break at mixed visits). The pool
-# compounds, so the 5-epoch cadence still grows a clean curve.
-games_budget = 64
+# 64 SealBot + 64 checkpoint = 128 games/epoch (doubled from 64 on 2026-06-19 to
+# tighten the Elo CI by ~1/sqrt(2) ~29%: per-checkpoint-opponent 8->16 games,
+# SealBot 32->64). Visits UNCHANGED (512) so this stays pool-comparable — it only
+# adds precision. NOTE: SE still ~85-123 Elo; resolves gross regressions, NOT the
+# sub-100-Elo plateau gains (that needs ~200+ games/edge or a dense prior-checkpoint
+# head-to-head). eval-vbs 32 halves rounds/ply at the fixed 512 visits.
+games_budget = 128
 every_n_epochs = 5
 full_search_visits = 512
 eval_virtual_batch_size = 32
-# 1:1 SealBot-vs-checkpoint split (0.5 of the 64-game budget -> 32 SealBot).
+# 1:1 SealBot-vs-checkpoint split (0.5 of the 128-game budget -> 64 SealBot).
 sealbot_share = 0.5
 verdict_reference_lag = 5
 pool_path = "diagnostics/eval_pool.json"
@@ -194,7 +195,7 @@ enabled = false
 # _hexfield_supervise_main1.sh), so the down-weighted cross-lineage zero-point is
 # played and the BT pool pins on SealBot at 0 Elo. bracket_size=1 -> 4 checkpoint
 # opponents (bc_prefit, ep5, the single bracket rung, the L-lag champion); at
-# budget 64 with sealbot_share=0.5 that is 32//4 = 8 games (4 CRN pairs) each.
+# budget 128 with sealbot_share=0.5 that is 64//4 = 16 games (8 CRN pairs) each.
 sealbot_enabled = true
 bracket_size = 1
 # v3 anchor: main_2 epoch_000045 (radius-4-NATIVE, strongest prior-lineage net) is
