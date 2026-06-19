@@ -310,12 +310,14 @@ update_checkpoint_pointer = false
 passes_per_epoch = 1
 
 [checkpoint]
-# FRESH-init warm start (NOT a resume): the initialize_from branch loads
-# matching weights only and starts a fresh train bucket / governor. main_4 adds
-# the new soft_policy head, which has NO weights in the v3 BC prefit, so the
-# loader must fresh/zero-init the missing soft_policy_* keys (tolerant non-strict
-# initialize_from path — the `resume` path stays strict). Same v3 prefit as
-# main_3. Does NOT point at any live run, so launching main_4 cannot disturb
-# hexfield_main_3.
-initialize_from = "/mnt/e/Hexo-BotTrainer-hexgt/runs/hexfield_bc_v3/checkpoint_epoch0.pt"
+# FRESH-init warm start (NOT a resume): the initialize_from branch loads matching
+# weights only and starts a fresh train bucket / governor (tolerant non-strict
+# load; the `resume` path stays strict).
+# CHECKPOINT 0 = a main_4-arch BC prefit trained on hexfield_main_3 epochs 40-45
+# self-play samples (all ~1270 shards, 6 epochs, torch.compile path). UNLIKE the
+# old v3 prefit, this checkpoint ALREADY carries trained soft_policy_* weights
+# (the prefit builds the full main_4 HexfieldNet), so the new head warm-starts
+# pretrained rather than zero-init. Same {model,optimizer,scaler,...} format as the
+# v3 prefit, so the loader path is unchanged. Does NOT point at any live run.
+initialize_from = "/mnt/e/Hexo-BotTrainer/runs/hexfield_main_4_prefit/checkpoint_epoch5.pt"
 save_name = "latest"

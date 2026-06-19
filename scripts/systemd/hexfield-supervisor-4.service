@@ -1,0 +1,44 @@
+# /etc/systemd/system/hexfield-supervisor-4.service
+[Unit]
+Description=hexfield_main_4 self-play training supervisor (KataGo-faithful: shaped Dirichlet, no-widening, root_fpu=0, dynamic-c_puct pruning, soft-policy head; radius-4; main2_ep45 anchor)
+After=network.target
+StartLimitIntervalSec=200
+StartLimitBurst=5
+
+[Service]
+Type=simple
+KillMode=control-group
+# Self-contained, version-tracked unit for main_4 (copy of -3 with the main_4
+# config/rundir). The tree at ROOT is `main` (== branch claude/hexfield-main4
+# merged), with the hexfield native rebuilt (scripts/_rebuild_hexfield.sh) so the
+# compiled search matches the KataGo-faithful code. The shared supervisor sets
+# PYTHONPATH=$ROOT/packages/hexfield/python:... so hexfield resolves from this
+# tree while hexo_train loads from the venv.
+#
+# CHECKPOINT 0 = the BC prefit on hexfield_main_3 ep40-45 samples (radius-4,
+# torch.compile path) at runs/hexfield_main_4_prefit/checkpoint_epoch5.pt; the
+# main_4 toml [checkpoint].initialize_from points there. First launch warm-starts
+# from it (fresh governor); subsequent launches resume from the latest main_4 ckpt.
+#
+# HEXFIELD_SUPPORT_RADIUS=4 -> model-side legal radius (main_2/main_3 regime). MUST
+#   match the prefit's radius (the prefit was run with HEXFIELD_SUPPORT_RADIUS=4).
+# HEXFIELD_TRAIN_FLEX=1 -> in-kernel FlexAttention on the TRAIN path (self-play
+#   training has stable shapes, so this is the correct speed lever here; the prefit
+#   used torch.compile instead because its micro-bucket shapes vary).
+Environment=ROOT=/mnt/e/Hexo-BotTrainer-hexgt
+Environment=RUNDIR=/mnt/e/Hexo-BotTrainer/runs/hexfield_main_4
+Environment=CONFIG=/mnt/e/Hexo-BotTrainer-hexgt/configs/hexfield_main_4.toml
+Environment=HEXFIELD_SUPPORT_RADIUS=4
+Environment=HEXFIELD_TRAIN_FLEX=1
+Environment=HEXFIELD_ANCHOR_ROOTS=/mnt/e/Hexo-BotTrainer-hexgt
+ExecStartPre=/usr/bin/test -f /mnt/e/Hexo-BotTrainer-hexgt/scripts/_hexfield_supervise_main1.sh
+ExecStartPre=-/usr/bin/rm -f /mnt/e/Hexo-BotTrainer/runs/hexfield_main_4/supervisor.lock
+ExecStart=/usr/bin/bash /mnt/e/Hexo-BotTrainer-hexgt/scripts/_hexfield_supervise_main1.sh
+Restart=on-failure
+RestartSec=15
+TimeoutStopSec=45
+# A clean circuit-breaker halt exits 1; do not let systemd retry it.
+RestartPreventExitStatus=1
+
+[Install]
+WantedBy=multi-user.target
