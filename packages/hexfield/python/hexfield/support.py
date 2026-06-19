@@ -1,17 +1,17 @@
-"""Support-set construction — the one geometric law (spec §1.1).
+"""Support-set construction — the one geometric law.
 
 Ground truth is the engine, never re-derived geometry:
 
-1. ``stones`` = occupied cells; ``legal`` = empty ∧ hex-dist <= 8 of any stone
-   (ply 0 / Opening => forced {(0, 0)}).
+1. ``stones`` = occupied cells; ``legal`` = empty ∧ hex-dist <= LEGAL_RADIUS of
+   any stone (ply 0 / Opening => forced {(0, 0)}).
 2. ``core = stones ∪ legal``; ``halo`` = cells hex-adjacent to core, not in
    core (carries features, never logits).
 3. ``support = core ∪ halo``.
 
-One multi-source BFS of depth 9 from the stones yields the support, the halo,
-and the dist_to_stone feature in one pass. Geometric identities — core is the
-union of radius-8 disks (always connected), halo is exactly the distance-9
-shell — are property tests, not construction steps.
+One multi-source BFS of depth LEGAL_RADIUS+1 from the stones yields the support,
+the halo, and the dist_to_stone feature in one pass. Geometric identities — core
+is the union of radius-LEGAL_RADIUS disks (always connected), halo is exactly the
+distance-(LEGAL_RADIUS+1) shell — are property tests, not construction steps.
 
 Node order (layout contract): segments ``[ legal | stones | halo ]``, each
 ascending by packed action id (== ascending signed (q, r)). Legal-prefix
@@ -31,12 +31,13 @@ from .constants import DIRECTIONS, HALO_DIST, LEGAL_RADIUS
 
 # Model-side legal-move radius (NOT the game engine's). HEXFIELD_SUPPORT_RADIUS
 # restricts the support to legal cells within hex-dist <= R of a stone (default
-# 8 == the engine's legality, i.e. unchanged). Setting R=4 makes the model + MCTS
-# consider only the radius-4 candidate moves (a smaller support -> a cheaper
-# O(support^2) forward) while the engine still allows radius-8. The bias table
-# (BIAS_DISK_RADIUS) and DIST_SCALE stay at 8, so the network architecture and the
-# feature scaling are UNCHANGED (the checkpoint loads); only the support shrinks.
-# Serve (Rust featurizer) reads the same env var, so train/serve stay consistent.
+# LEGAL_RADIUS == the engine's legality, i.e. unchanged). A smaller R makes the
+# model + MCTS consider fewer candidate moves (smaller support -> cheaper
+# O(support^2) forward) while the engine still allows LEGAL_RADIUS. The bias table
+# (BIAS_DISK_RADIUS) and DIST_SCALE stay at LEGAL_RADIUS, so the network
+# architecture and feature scaling are UNCHANGED (the checkpoint loads); only the
+# support shrinks. Serve (Rust featurizer) reads the same env var, so train/serve
+# stay consistent.
 _SUPPORT_RADIUS = int(os.environ.get("HEXFIELD_SUPPORT_RADIUS", LEGAL_RADIUS))
 _SUPPORT_HALO = _SUPPORT_RADIUS + 1
 
@@ -45,12 +46,11 @@ class SupportContractError(ValueError):
     """Raised when :func:`build_support` is fed a non-decision (e.g. terminal)
     state — i.e. the closed-form legal set disagrees with the engine's.
 
-    The closed-form legality ``empty ∧ dist <= 8`` only equals the engine's
-    legal set on *decision* states. On a terminal state the engine returns an
-    empty legal set (spec §1.1: "terminal states are never evaluated ... the
-    payload path tolerates a zero-legal row"), yet the closed form still yields
-    a non-empty legal prefix — a silent latent-parity divergence. This error is
-    the opt-in tripwire for that contract violation.
+    The closed-form legality ``empty ∧ dist <= LEGAL_RADIUS`` only equals the
+    engine's legal set on *decision* states. On a terminal state the engine
+    returns an empty legal set (terminal states are never evaluated), yet the
+    closed form still yields a non-empty legal prefix — a silent latent-parity
+    divergence. This error is the opt-in tripwire for that contract violation.
     """
 
 
@@ -95,12 +95,12 @@ def build_support(
     """Build the support set from the stone list (empty list == ply 0).
 
     CONTRACT — decision states only. ``build_support`` re-derives legality in
-    closed form (``empty ∧ dist <= 8``), which equals the engine's legal set
-    *only on decision states*. Terminal states are never evaluated (the tree
-    backs up engine outcomes), so callers on the train/serve paths must pass
+    closed form (``empty ∧ dist <= LEGAL_RADIUS``), which equals the engine's
+    legal set *only on decision states*. Terminal states are never evaluated (the
+    tree backs up engine outcomes), so callers on the train/serve paths must pass
     decision states; on a terminal state the engine returns an empty legal set
-    (spec §1.1) while the closed form still produces a non-empty legal prefix —
-    a silent latent-parity divergence.
+    while the closed form still produces a non-empty legal prefix — a silent
+    latent-parity divergence.
 
     This is a contract, not a happy-path change: by default (``expected_legal``
     is ``None``) numerics are byte-for-byte unchanged. Callers that have the
@@ -151,14 +151,14 @@ def _validate_legal(
             f"in_closed_form_not_engine={extra[:8]} — "
             "build_support is decision-states-only; a non-empty closed-form "
             "legal set against an empty engine set indicates a TERMINAL state, "
-            "which is never evaluated (spec §1.1)."
+            "which is never evaluated."
         )
 
 
 def _build_support(stones: list[tuple[int, int]]) -> Support:
     if not stones:
         # Ply 0: support = origin + its 6 halo neighbours (7 nodes, 1 legal);
-        # dist_to_stone := 0 everywhere on this one state (spec §1.1).
+        # dist_to_stone := 0 everywhere on this one state.
         ordered = [(0, 0)] + sorted(
             (dq, dr) for dq, dr in DIRECTIONS
         )

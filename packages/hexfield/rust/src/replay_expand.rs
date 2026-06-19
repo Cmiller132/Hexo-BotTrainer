@@ -23,8 +23,8 @@
 //!
 //! OFF-LEGAL (PLAN §4.5 step 1): an off-legal SELF policy target flags the row
 //! INVALID in the returned `valid` mask (NOT dropped in-worker) when
-//! `tolerate_off_legal`; otherwise it is a hard error (mirrors
-//! `samples.py:204-207`). The caller filters survivors / permutes / truncates on
+//! `tolerate_off_legal`; otherwise it is a hard error (mirrors the serial
+//! `samples.py` raise). The caller filters survivors / permutes / truncates on
 //! the main thread, so the survivor SET is a pure function of `(row, d6, radius)`
 //! and identical across the serial / pool / rust backends.
 //!
@@ -50,14 +50,13 @@ use crate::constants::{
     F_OWN_STONE, F_OWN_WIN_NOW, F_PHASE_SECOND, F_PLAYER_COLOUR, NUM_FEATURES,
 };
 
-// hexfield_compact_v1: phase enum (shards.py:35) — index 2 == "SecondStone".
+// hexfield_compact_v1: phase enum — index 2 == "SecondStone".
 const PHASE_SECOND_STONE: u8 = 2;
-// MOVES_LEFT_CAP (constants.py:75): moves_left normalized to [-1, 1] over
-// [0, CAP]. v3 bumped this to 209 (p99.5 of main_2 recorded moves_left); this
-// Rust twin MUST track the Python constant or the moves_left target diverges
-// from the serial oracle (parity gate).
+// MOVES_LEFT_CAP: moves_left normalized to [-1, 1] over [0, CAP]. This Rust
+// twin MUST track the Python constant or the moves_left target diverges from
+// the serial oracle (parity gate).
 const MOVES_LEFT_CAP: f32 = 209.0;
-// COORD_OFFSET (constants.py:31): packed action id = ((q+2^15)<<16) | (r+2^15).
+// COORD_OFFSET: packed action id = ((q+2^15)<<16) | (r+2^15).
 const COORD_OFFSET: i32 = 1 << 15;
 
 // =============================================================================
@@ -129,6 +128,9 @@ struct RowFacts {
     stvalue: Vec<f32>,
     stvalue_mask: Vec<f32>,
     moves_left: f32,
+    // 1 == completed game (grounded outcome), 0 == truncated (no engine winner):
+    // gates the value/stvalue/cell_q heads to zero loss.
+    outcome_valid: u8,
 }
 
 /// One expanded row's flat arrays (the `ExpandedRow` twin). Invalid rows carry
@@ -150,15 +152,16 @@ struct RowOut {
     cell_q_mask: Vec<f32>,
     policy_surprise: f32,
     // f64: the serial oracle's opp_coverage is a PYTHON float (f64 ratio of f64-
-    // accumulated sums, samples.py:225). Emitting it as f64 makes it bit-identical
-    // to the oracle (a strict ``abs(serial - rust) <= 1e-12`` parity check then
-    // holds, not just an f32-cast equivalence). All other scalars stay f32: value
-    // widens losslessly; moves_left = 2*min(1,ml/CAP)-1 is emitted as f32 — equal to
-    // the serial f64 form AFTER the f32 cast that batching.py applies to the training
-    // tensor (with the v3 CAP=209, non-power-of-2, the f64 and f32 forms differ only
-    // in the last bit, so the parity check compares moves_left at f32 precision).
+    // accumulated sums). Emitting it as f64 makes it bit-identical to the oracle
+    // (a strict ``abs(serial - rust) <= 1e-12`` parity check then holds, not just
+    // an f32-cast equivalence). All other scalars stay f32: value widens
+    // losslessly; moves_left = 2*min(1,ml/CAP)-1 is emitted as f32 — equal to the
+    // serial f64 form AFTER the f32 cast that batching applies to the training
+    // tensor (with CAP=209, non-power-of-2, the f64 and f32 forms differ only in
+    // the last bit, so the parity check compares moves_left at f32 precision).
     opp_coverage: f64,
     value: f32,
+    value_mask: f32,
     stvalue: Vec<f32>,
     stvalue_mask: Vec<f32>,
     moves_left: f32,
@@ -361,10 +364,10 @@ fn opp_last_turn_cells(records: &[(i32, i32, u8, u32)], current_player: i32) -> 
 /// D6-transformed coords; `first_stone`/hot/win cells are likewise transformed.
 ///
 /// A cell that is absent from the support raises in Python (`KeyError` at
-/// `sup.index[cell]`, features.py:197-232) — a HARD error that crashes the epoch.
-/// On valid decision states every fact cell is in the support, so this never
-/// fires; we surface it as `ExpandErr::Hard` (a clean error return) rather than
-/// a `.expect()` panic crossing the rayon/FFI boundary.
+/// `sup.index[cell]`) — a HARD error that crashes the epoch. On valid decision
+/// states every fact cell is in the support, so this never fires; we surface it
+/// as `ExpandErr::Hard` (a clean error return) rather than a `.expect()` panic
+/// crossing the rayon/FFI boundary.
 fn build_features(
     sup: &Support,
     records: &[(i32, i32, u8, u32)],
@@ -387,8 +390,8 @@ fn build_features(
             .ok_or_else(|| ExpandErr::Hard(format!("{what} cell {cell:?} missing from support")))
     };
 
-    // Stones + recency (features.py:196-207). age = placements_made -
-    // placement_index; weight = 1/(1+age); max-accumulate.
+    // Stones + recency. age = placements_made - placement_index;
+    // weight = 1/(1+age); max-accumulate.
     for &(q, r, owner, placement_index) in records {
         let row = lookup(sup, (q, r), "stone")?;
         let recency_plane = if owner as i32 == current_player {
@@ -400,9 +403,9 @@ fn build_features(
         };
         let age = placements_made - placement_index as i64;
         // Match Python's double-rounding EXACTLY: `1.0 / (1.0 + float(age))` is
-        // computed in f64 (features.py:205-206) then cast to f32 on assignment
-        // into the float32 array. Computing in f32 directly could differ in the
-        // last ULP for non-dyadic ratios (e.g. 1/3), so go through f64.
+        // computed in f64 then cast to f32 on assignment into the float32 array.
+        // Computing in f32 directly could differ in the last ULP for non-dyadic
+        // ratios (e.g. 1/3), so go through f64.
         let weight = (1.0f64 / (1.0 + age as f64)) as f32;
         let off = row * NUM_FEATURES + recency_plane;
         if weight > feats[off] {
@@ -410,7 +413,7 @@ fn build_features(
         }
     }
 
-    // EMPTY = 1 - own - opp; LEGAL on the legal prefix (features.py:209-210).
+    // EMPTY = 1 - own - opp; LEGAL on the legal prefix.
     for row in 0..n {
         let own = feats[row * NUM_FEATURES + F_OWN_STONE];
         let opp = feats[row * NUM_FEATURES + F_OPP_STONE];
@@ -420,7 +423,7 @@ fn build_features(
         feats[row * NUM_FEATURES + F_LEGAL] = 1.0;
     }
 
-    // Phase-second + first-stone (features.py:212-215).
+    // Phase-second + first-stone.
     if phase == PHASE_SECOND_STONE {
         for row in 0..n {
             feats[row * NUM_FEATURES + F_PHASE_SECOND] = 1.0;
@@ -431,14 +434,14 @@ fn build_features(
         }
     }
 
-    // Player colour (features.py:217-218).
+    // Player colour.
     if current_player == 0 {
         for row in 0..n {
             feats[row * NUM_FEATURES + F_PLAYER_COLOUR] = 1.0;
         }
     }
 
-    // Hot / standing-win cells (features.py:220-227) — stored cells, transformed.
+    // Hot / standing-win cells — stored cells, transformed.
     for &cell in opp_hot {
         let row = lookup(sup, cell, "opp_hot")?;
         feats[row * NUM_FEATURES + F_OPP_HOT] = 1.0;
@@ -456,12 +459,12 @@ fn build_features(
         feats[row * NUM_FEATURES + F_OWN_WIN_NOW] = 1.0;
     }
 
-    // dist_to_stone (features.py:229): dist / DIST_SCALE.
+    // dist_to_stone: dist / DIST_SCALE.
     for row in 0..n {
         feats[row * NUM_FEATURES + F_DIST_TO_STONE] = sup.dist[row] as f32 / DIST_SCALE;
     }
 
-    // Opponent last full turn (features.py:231-232).
+    // Opponent last full turn.
     for cell in opp_last_turn_cells(records, current_player) {
         let row = lookup(sup, cell, "opp_last_turn")?;
         feats[row * NUM_FEATURES + F_OPP_LAST_TURN] = 1.0;
@@ -531,8 +534,8 @@ fn expand_one(
         &opp_win,
     )?;
 
-    // (4) Self policy projection — off-legal is a hard error (samples.py:204-207),
-    // tolerated as an invalid-row flag during a radius transition (PLAN §4.5).
+    // (4) Self policy projection — off-legal is a hard error, tolerated as an
+    // invalid-row flag during a radius transition (PLAN §4.5).
     let mut policy = vec![0f32; legal_count];
     let mut total = 0.0f32;
     for &(action_id, w) in &facts.policy {
@@ -562,15 +565,15 @@ fn expand_one(
         ));
     }
 
-    // (5) Opp policy projection (samples.py:213-225) — drop off-legal, track
-    // coverage; NEVER raises (projection, not a hard error).
+    // (5) Opp policy projection — drop off-legal, track coverage; NEVER raises
+    // (projection, not a hard error).
     //
     // `opp` is a float32 array, so `opp[slot] += w` accumulates in f32 (matching
     // numpy's in-place float32 add). But Python's coverage scalars `opp_total` /
     // `opp_kept` are PYTHON floats: each `w = float(weight)` promotes the stored
-    // f32 weight to f64 and the `+=` runs in f64 (samples.py:216-224). So accumulate
-    // the COVERAGE in f64 to match `opp_kept / opp_total` to the last ULP, while the
-    // projected `opp` array stays f32.
+    // f32 weight to f64 and the `+=` runs in f64. So accumulate the COVERAGE in
+    // f64 to match `opp_kept / opp_total` to the last ULP, while the projected
+    // `opp` array stays f32.
     let mut opp = vec![0f32; legal_count];
     let mut opp_total = 0.0f64;
     let mut opp_kept = 0.0f64;
@@ -588,8 +591,8 @@ fn expand_one(
     }
     let opp_coverage: f64 = if opp_total > 0.0 { opp_kept / opp_total } else { 1.0 };
 
-    // (5b) Per-cell Q projection (samples.py:254-266): scalar assign + presence
-    // mask; off-legal dropped (never raises on off-legal); q finite & in [-1,1].
+    // (5b) Per-cell Q projection: scalar assign + presence mask; off-legal
+    // dropped (never raises on off-legal); q finite & in [-1,1].
     let mut cell_q = vec![0f32; legal_count];
     let mut cell_q_mask = vec![0f32; legal_count];
     for &(action_id, q) in &facts.q_policy {
@@ -604,28 +607,51 @@ fn expand_one(
         }
     }
 
-    // (6) STV + moves_left (samples.py:227-242) — D6-invariant. The serial oracle
-    // rebuilds stvalue from `short_term_value()` (window.py:186-193), which keeps
-    // ONLY masked columns; unmasked columns stay 0.0. The writer already stores
-    // 0.0 in unmasked stvalue slots (shards.py:109-113), so this is a no-op on real
-    // data, but we re-zero unmasked columns to match the oracle bit-for-bit even if
-    // a stored stvalue were nonzero under a zero mask.
+    // (6) STV + moves_left — D6-invariant. The serial oracle rebuilds stvalue
+    // from `short_term_value()`, which keeps ONLY masked columns; unmasked
+    // columns stay 0.0. The writer already stores 0.0 in unmasked stvalue slots,
+    // so this is a no-op on real data, but we re-zero unmasked columns to match
+    // the oracle bit-for-bit even if a stored stvalue were nonzero under a zero
+    // mask.
     let mut stvalue = facts.stvalue[..horizons_len].to_vec();
-    let stvalue_mask = facts.stvalue_mask[..horizons_len].to_vec();
+    let mut stvalue_mask = facts.stvalue_mask[..horizons_len].to_vec();
     for c in 0..horizons_len {
         if !(stvalue_mask[c] > 0.0) {
             stvalue[c] = 0.0;
         }
     }
     // Compute in f64 then cast to f32, matching Python's `2.0 * min(1.0,
-    // float(moves_left)/512) - 1.0` (samples.py:237-242, all f64) which is then
-    // placed into a float32 training tensor (batching.py:117). f32-direct would
-    // double-round; f64-then-cast is bit-identical to np.float32(py_value).
+    // float(moves_left)/MOVES_LEFT_CAP) - 1.0` (all f64) which is then placed
+    // into a float32 training tensor. f32-direct would double-round; f64-then-cast
+    // is bit-identical to np.float32(py_value).
     let (moves_left, moves_left_mask) = if facts.moves_left >= 0.0 {
         let m = 2.0f64 * (facts.moves_left as f64 / MOVES_LEFT_CAP as f64).min(1.0) - 1.0;
         (m as f32, 1.0f32)
     } else {
         (0.0f32, 0.0f32)
+    };
+
+    // (7) Truncated-game outcome masking — EXACT twin. A truncated row
+    // (outcome_valid==0, no engine winner) has no grounded terminal
+    // outcome, so the value head's hard-z target, the bootstrapped STV targets,
+    // and the value/Q-derived cell_q target are all undefined: zero value_mask,
+    // stvalue_mask, and cell_q_mask (gating those heads to zero loss) while the
+    // outcome-INDEPENDENT policy/opp_policy heads (and moves_left, already masked
+    // via its -1 sentinel above) train normally. The stvalue/cell_q TARGET arrays
+    // are left as built (only the masks are zeroed), mirroring the oracle which
+    // does `np.zeros_like(mask)` and leaves the value/stvalue/cell_q arrays alone.
+    // Completed rows (outcome_valid==1) keep value_mask=1.0 and the presence masks
+    // exactly as built → byte-identical to before.
+    let value_mask = if facts.outcome_valid == 0 {
+        for c in 0..horizons_len {
+            stvalue_mask[c] = 0.0;
+        }
+        for m in cell_q_mask.iter_mut() {
+            *m = 0.0;
+        }
+        0.0f32
+    } else {
+        1.0f32
     };
 
     let nbr = neighbor_table(&sup.coords, &sup.index);
@@ -651,6 +677,7 @@ fn expand_one(
         policy_surprise: facts.policy_surprise,
         opp_coverage,
         value: facts.value,
+        value_mask,
         stvalue,
         stvalue_mask,
         moves_left,
@@ -776,7 +803,7 @@ fn col_typed<'a, T: Copy>(
 }
 
 // =============================================================================
-// HOT-PATH ENTRY — expand a window's rows under their pre-drawn D6 (PLAN §4.2).
+// Entry point — expand a window's rows under their pre-drawn D6 (PLAN §4.2).
 // =============================================================================
 
 /// Expand the rows named by `row_index` (into the packed window columns) under
@@ -786,6 +813,7 @@ fn col_typed<'a, T: Copy>(
 /// `bytes` object (LE/native) EXCEPT the offset arrays which arrive as the typed
 /// keys below. Required keys (all `bytes` unless noted):
 ///   scalars[n]:  current_player(u8), phase(u8), value(f32), moves_left(f32),
+///                policy_surprise(f32), outcome_valid(u8),
 ///                first_q(i16), first_r(i16), first_present(u8)
 ///   blocks[n*H]: stvalue(f32), stvalue_mask(f32)
 ///   hist CSR:    hist_qr(i16, 2*L), hist_owner(u8, L), hist_pidx(u16, L),
@@ -803,7 +831,7 @@ fn col_typed<'a, T: Copy>(
 ///   coords(RxI32Buf, 2*ΣN), dist(RxI32Buf, ΣN), nbr(RxI32Buf, 6*ΣN),
 ///   feats(RxF32Buf, NUM_FEATURES*ΣN),
 ///   policy(RxF32Buf, ΣL), opp_policy(RxF32Buf, ΣL),
-///   opp_coverage/value/moves_left/moves_left_mask(RxF32Buf[r]),
+///   opp_coverage/value/value_mask/moves_left/moves_left_mask(RxF32Buf[r]),
 ///   stvalue(RxF32Buf, r*H), stvalue_mask(RxF32Buf, r*H).
 #[pyfunction]
 #[pyo3(signature = (columns, n, row_index, d6, horizons_len, support_radius, tolerate_off_legal))]
@@ -835,6 +863,9 @@ pub fn expand_shard_train<'py>(
     let first_q = col_typed::<i16>(columns, "first_q", n)?;
     let first_r = col_typed::<i16>(columns, "first_r", n)?;
     let first_present = col_typed::<u8>(columns, "first_present", n)?;
+    // outcome_valid[i] (u8): 1 completed / 0 truncated. Gates the value/stvalue/
+    // cell_q heads to zero loss for truncated rows.
+    let outcome_valid = col_typed::<u8>(columns, "outcome_valid", n)?;
     let stvalue = col_typed::<f32>(columns, "stvalue", n * horizons_len)?;
     let stvalue_mask = col_typed::<f32>(columns, "stvalue_mask", n * horizons_len)?;
 
@@ -923,6 +954,7 @@ pub fn expand_shard_train<'py>(
             stvalue: stv,
             stvalue_mask: stv_mask,
             moves_left: moves_left[i],
+            outcome_valid: outcome_valid[i],
         });
     }
 
@@ -960,6 +992,7 @@ pub fn expand_shard_train<'py>(
                 policy_surprise: 0.0,
                 opp_coverage: 1.0,
                 value: 0.0,
+                value_mask: 0.0,
                 stvalue: vec![0.0; horizons_len],
                 stvalue_mask: vec![0.0; horizons_len],
                 moves_left: 0.0,
@@ -990,6 +1023,7 @@ pub fn expand_shard_train<'py>(
     let mut policy_surprise_out = Vec::with_capacity(r);
     let mut opp_coverage: Vec<f64> = Vec::with_capacity(r);
     let mut value_out = Vec::with_capacity(r);
+    let mut value_mask_out = Vec::with_capacity(r);
     let mut moves_left_out = Vec::with_capacity(r);
     let mut moves_left_mask = Vec::with_capacity(r);
     let mut stvalue_out = Vec::with_capacity(r * horizons_len);
@@ -1013,6 +1047,7 @@ pub fn expand_shard_train<'py>(
         policy_surprise_out.push(row.policy_surprise);
         opp_coverage.push(row.opp_coverage);
         value_out.push(row.value);
+        value_mask_out.push(row.value_mask);
         moves_left_out.push(row.moves_left);
         moves_left_mask.push(row.moves_left_mask);
         stvalue_out.extend_from_slice(&row.stvalue);
@@ -1036,6 +1071,7 @@ pub fn expand_shard_train<'py>(
     out.set_item("opp_policy", Py::new(py, RxF32Buf { data: opp_policy })?)?;
     out.set_item("opp_coverage", Py::new(py, RxF64Buf { data: opp_coverage })?)?;
     out.set_item("value", Py::new(py, RxF32Buf { data: value_out })?)?;
+    out.set_item("value_mask", Py::new(py, RxF32Buf { data: value_mask_out })?)?;
     out.set_item("moves_left", Py::new(py, RxF32Buf { data: moves_left_out })?)?;
     out.set_item("moves_left_mask", Py::new(py, RxF32Buf { data: moves_left_mask })?)?;
     out.set_item("stvalue", Py::new(py, RxF32Buf { data: stvalue_out })?)?;

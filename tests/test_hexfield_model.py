@@ -1,6 +1,7 @@
 """M1 gates: the hexfield network (spec §2, §9).
 
-- exact parameter count (== §9: 1,230,651)
+- exact parameter count (current architecture: 8 conv + 3 attn blocks, per-block
+  bias tables, cell_q head -> 1,591,748; supersedes the §9 1,230,651 figure)
 - sdpa ≡ materialized attention (fp32, <= 1e-4)
 - HexNodeConv ≡ dense_cnn HexConv2d on embedded supports (fp64 oracle)
 - padded-batch vs single-row forward identity (pad-inertness)
@@ -25,7 +26,9 @@ from hexfield.features import build_position
 from hexfield.geometry import rel_bias_index
 from hexfield.model import HexfieldNet, _BiasGather
 
-EXPECTED_PARAMS = 1_230_651
+# Current architecture (8 conv blocks + 3 attn blocks, 3 per-block bias tables,
+# cell_q head). Computed by summing p.numel() over a fresh HexfieldNet().
+EXPECTED_PARAMS = 1_591_748
 
 
 def _rows(count: int = 3):
@@ -49,7 +52,8 @@ def _derandomize(model: HexfieldNet, seed: int = 5) -> None:
         for block in model.attn_blocks:
             for p in (block.attn.out_proj.weight, block.fc2.weight):
                 p.copy_(torch.randn(p.shape, generator=gen) * 0.05)
-        model.bias_table.copy_(torch.randn(model.bias_table.shape, generator=gen) * 0.1)
+        for table in model.bias_tables:
+            table.copy_(torch.randn(table.shape, generator=gen) * 0.1)
 
 
 def test_param_count_matches_spec_section_9() -> None:
@@ -135,10 +139,14 @@ def test_padded_batch_equals_single_row() -> None:
         out_batch = model(batch["feats"], batch["nbr"], batch["mask"], batch["coords"])
         out_alone = model(alone["feats"], alone["nbr"], alone["mask"], alone["coords"])
     n = small[0].num_nodes
+    # Per-node heads (B, Npad[, BINS]): policy/opp_policy logits and the per-cell
+    # cell_q head are masked to exactly zero on pad rows; slice to the row's real
+    # nodes for the identity check and assert the pad tail is zero.
+    per_node_heads = ("policy", "opp_policy", "cell_q")
     for key in out_alone:
         a = out_alone[key][0]
         b = out_batch[key][0]
-        if key in ("policy", "opp_policy"):
+        if key in per_node_heads:
             a, b = a[:n], b[:n]
             # pad logits are exactly zero (masked) beyond the row's nodes
             assert out_batch[key][0][n:].abs().max().item() == 0.0
@@ -218,11 +226,17 @@ def test_grads_reach_every_param() -> None:
 def test_pair_index_matches_geometry() -> None:
     model = HexfieldNet()
     with torch.no_grad():
-        model.bias_table.zero_()
-        model.bias_table[:, 0] = torch.arange(C.BIAS_ROWS, dtype=torch.float32)
+        # Per-block bias tables: seed every block's head-0 column with its row id so
+        # the gathered bias value reads back the bias-table ROW class for any block.
+        for table in model.bias_tables:
+            table.zero_()
+            table[:, 0] = torch.arange(C.BIAS_ROWS, dtype=torch.float32)
     batch = collate_rows(_rows(1))
     coords, mask = batch["coords"], batch["mask"]
-    bias = model.build_attn_bias(coords, mask)  # (1, heads, S, S)
+    # _build_pair computes the block-INDEPENDENT (pair, key_pad); build_attn_bias
+    # then materializes the (1, heads, S, S) bias for a specific attention block.
+    pair, key_pad = model._build_pair(coords, mask)
+    bias = model.build_attn_bias(pair, key_pad, 0)  # (1, heads, S, S)
     t = C.NUM_TOKENS
     cells = coords[0][mask[0]].tolist()
     # token/token and token/cell classes
@@ -266,18 +280,22 @@ def test_bias_gather_backward_equals_generic_indexing() -> None:
 
 def test_fresh_model_zero_init_residual_identity() -> None:
     """FIX 3: a FRESH HexfieldNet (NOT _derandomized) is the identity on every
-    residual branch at step 0 -- each ConvBlock.ln2.weight, each AttnBlock
-    out_proj.weight and fc2.weight, and the bias table are all exactly zero --
-    and its forward is finite (the zero-init invariant the training relies on)."""
+    residual branch at step 0 -- residual-branch identity now comes from
+    LayerScale(init=1e-4) on every branch (each ConvBlock.ls, each AttnBlock
+    ls_attn/ls_mlp gamma == 1e-4), NOT from zero-init of ln2/out_proj/fc2; the
+    per-block relative-position bias tables are all exactly zero -- and its
+    forward is finite (the zero-init invariant the training relies on)."""
 
     torch.manual_seed(7)
     model = HexfieldNet()
+    expected_gamma = torch.full_like(model.conv_blocks[0].ls.gamma, 1e-4)
     for i, block in enumerate(model.conv_blocks):
-        assert torch.count_nonzero(block.ln2.weight).item() == 0, f"conv_blocks[{i}].ln2.weight"
+        assert torch.equal(block.ls.gamma, expected_gamma), f"conv_blocks[{i}].ls.gamma"
     for i, block in enumerate(model.attn_blocks):
-        assert torch.count_nonzero(block.attn.out_proj.weight).item() == 0, f"attn_blocks[{i}].out_proj.weight"
-        assert torch.count_nonzero(block.fc2.weight).item() == 0, f"attn_blocks[{i}].fc2.weight"
-    assert torch.count_nonzero(model.bias_table).item() == 0, "bias_table"
+        assert torch.equal(block.ls_attn.gamma, expected_gamma), f"attn_blocks[{i}].ls_attn.gamma"
+        assert torch.equal(block.ls_mlp.gamma, expected_gamma), f"attn_blocks[{i}].ls_mlp.gamma"
+    for i, table in enumerate(model.bias_tables):
+        assert torch.count_nonzero(table).item() == 0, f"bias_tables[{i}]"
 
     b, n = 2, 11
     feats = torch.randn(b, n, C.NUM_FEATURES)
@@ -301,7 +319,9 @@ def test_sdpa_equals_materialized_fp16_cuda() -> None:
     device = torch.device("cuda")
     torch.manual_seed(0)
     model = HexfieldNet().eval().to(device)
-    # Light derandomize so attention branches fire (fresh model is identity).
+    # Light derandomize so attention branches fire (fresh model is identity: the
+    # LayerScale gammas init to 1e-4, so the residual branches are nearly closed
+    # -- open them too, not just out_proj/fc2, and seed each per-block bias table).
     gen = torch.Generator(device=device).manual_seed(11)
     with torch.no_grad():
         for block in model.attn_blocks:
@@ -311,9 +331,10 @@ def test_sdpa_equals_materialized_fp16_cuda() -> None:
             block.fc2.weight.copy_(
                 torch.randn(block.fc2.weight.shape, generator=gen, device=device) * 0.05
             )
-        model.bias_table.copy_(
-            torch.randn(model.bias_table.shape, generator=gen, device=device) * 0.1
-        )
+            block.ls_attn.gamma.fill_(1.0)
+            block.ls_mlp.gamma.fill_(1.0)
+        for table in model.bias_tables:
+            table.copy_(torch.randn(table.shape, generator=gen, device=device) * 0.1)
 
     b, n = 3, 40
     feats = torch.randn(b, n, C.NUM_FEATURES, device=device)

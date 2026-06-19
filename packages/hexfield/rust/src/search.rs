@@ -1,6 +1,6 @@
 //! hexfield search drivers — lockstep + continuous scheduler, ported from the
-//! as-built dense_cnn mcts.rs (the semantic reference for the M5/M6
-//! differential harness) with:
+//! as-built dense_cnn mcts (the semantic reference for the differential
+//! harness) with:
 //!
 //! - the §5.1 exploration-knob QUARANTINE: `root_fpu_zero_under_noise`
 //!   defaults FALSE and the root-policy-temperature schedule defaults OFF
@@ -219,18 +219,6 @@ struct ContinuousSchedulerStats {
     lcb_overrides: u64,
 }
 
-pub fn continuous_flush_decision_pub(
-    queue_len: usize,
-    flush_target: usize,
-    made_progress: bool,
-) -> u8 {
-    match continuous_flush_decision(queue_len, flush_target, made_progress) {
-        ContinuousFlushDecision::Hold => 0,
-        ContinuousFlushDecision::Flush { .. } => 1,
-        ContinuousFlushDecision::Stop => 2,
-    }
-}
-
 fn continuous_flush_decision(
     queue_len: usize,
     flush_target: usize,
@@ -261,7 +249,7 @@ fn continuous_completion_ready(completed_visits: u32, target_visits: u32, in_fli
 /// §5.4.2 early-stop. Greedy unrecorded searches (Fast / eval-arena): stop
 /// when the remaining budget cannot overtake the visit leader AND, when LCB
 /// selection is active, the LCB winner currently equals the visit winner
-/// (conservative-heuristic w.r.t. LCB — the M6 gate for the LCB arm is
+/// (conservative-heuristic w.r.t. LCB — the gate for the LCB arm is
 /// statistical). Recorded Full roots: a conservative 75% visit floor first.
 fn early_stop_ready(
     search: &RustSearch,
@@ -345,7 +333,7 @@ fn lcb_stats(
 /// LCB pick among eligible root edges: Q - z * sigma / sqrt(n), eligibility
 /// delta >= max(lcb_min_visits, lcb_visit_fraction * max_child_delta). None
 /// when no child qualifies (caller falls back to max-visits). Delegates to
-/// the same core the M6 closed-form table tests exercise.
+/// the same core the closed-form table tests exercise.
 fn lcb_pick(
     root: &RustNode,
     baseline: Option<&HashMap<PackedCoord, u32>>,
@@ -458,51 +446,8 @@ impl HexfieldMctsSession {
         })
     }
 
-    fn clear(&mut self) {
-        self.searches.clear();
-        self.evaluation_cache
-            .lock()
-            .expect("evaluation cache mutex poisoned")
-            .clear();
-    }
-
     fn discard(&mut self, game_key: u64) {
         self.searches.remove(&game_key);
-    }
-
-    /// Debug-only: dump the stored tree for a game key (parity forensics).
-    fn debug_dump(&self, py: Python<'_>, game_key: u64) -> PyResult<Py<PyAny>> {
-        let Some(search) = self.searches.get(&game_key) else {
-            return Ok(py.None());
-        };
-        let nodes = PyList::empty(py);
-        for node in &search.nodes {
-            let edges = PyList::empty(py);
-            for edge in &node.edges {
-                edges.append((
-                    edge.action_id,
-                    edge.visits,
-                    edge.value_sum,
-                    edge.prior,
-                    edge.child,
-                    edge.forced,
-                ))?;
-            }
-            let entry = PyDict::new(py);
-            entry.set_item("visits", node.visits)?;
-            entry.set_item("value_sum", node.value_sum)?;
-            entry.set_item("eval_value", node.eval_value)?;
-            entry.set_item("remaining", node.remaining_prior_count())?;
-            entry.set_item("max_children", node.max_eligible_children)?;
-            entry.set_item("next_candidate", node.remaining_priors().first().copied())?;
-            entry.set_item("edges", edges)?;
-            nodes.append(entry)?;
-        }
-        let out = PyDict::new(py);
-        out.set_item("completed", search.completed_visits)?;
-        out.set_item("target", search.target_visits)?;
-        out.set_item("nodes", nodes)?;
-        Ok(out.into_any().unbind())
     }
 
     fn len(&self) -> usize {
@@ -511,7 +456,7 @@ impl HexfieldMctsSession {
 
     /// Lockstep batched search (eval ladder / arena / differential harness).
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (game_keys, states, visits, c_puct, temperature, seed, evaluator, virtual_batch_size=None, active_root_limit=None, root_dirichlet_total_alpha=None, root_dirichlet_noise_fraction=None, root_policy_temperature=None, fpu_reduction=None, virtual_loss=None, widening_policy_mass=None, widening_max_children=None, widening_min_children=None, forced_playout_k=None, move_temperatures=None, root_policy_temperatures=None, tss_enabled=None, root_fpu_zero_under_noise=None, search_parity_mode=None, divergence_overrides=None, debug_no_advance=None))]
+    #[pyo3(signature = (game_keys, states, visits, c_puct, temperature, seed, evaluator, virtual_batch_size=None, active_root_limit=None, root_dirichlet_total_alpha=None, root_dirichlet_noise_fraction=None, root_policy_temperature=None, fpu_reduction=None, virtual_loss=None, widening_policy_mass=None, widening_max_children=None, widening_min_children=None, forced_playout_k=None, move_temperatures=None, root_policy_temperatures=None, tss_enabled=None, root_fpu_zero_under_noise=None, search_parity_mode=None, divergence_overrides=None))]
     fn search(
         &mut self,
         py: Python<'_>,
@@ -542,7 +487,6 @@ impl HexfieldMctsSession {
         root_fpu_zero_under_noise: Option<bool>,
         search_parity_mode: Option<bool>,
         divergence_overrides: Option<&Bound<'_, PyDict>>,
-        debug_no_advance: Option<bool>,
     ) -> PyResult<Py<PyAny>> {
         validate_search_inputs(visits, c_puct, temperature)?;
         let divergences = resolve_divergences(search_parity_mode, divergence_overrides)?;
@@ -764,17 +708,11 @@ impl HexfieldMctsSession {
             forced_playout_k,
         )?;
 
-        let no_advance = debug_no_advance.unwrap_or(false);
         for ((game_key, mut search), selected) in game_keys
             .into_iter()
             .zip(searches.into_iter())
             .zip(selected_actions.into_iter())
         {
-            if no_advance {
-                // Forensics only: store the searched tree as-is for debug_dump.
-                self.searches.insert(game_key, search);
-                continue;
-            }
             if let Some(action_id) = selected {
                 if search.advance_root(action_id)? {
                     self.searches.insert(game_key, search);
@@ -1214,11 +1152,11 @@ fn run_searches_to_targets(
     // the eval). That ordering is SEMANTIC — it extends the virtual-loss
     // window by one batch — so the serial form here replicates it exactly:
     // select(N+1) runs after evaluate(N) and before backup(N). (Running the
-    // select on a worker thread to reclaim the wall-clock is an M8 perf item
-    // with identical semantics.)
-    // §5.4.2 early-stop. in_flight is passed as 0 here BY DESIGN (audit
-    // 2026-06-13 reviewed): the visit-overtake test inside early_stop_ready is
-    // already in-flight-safe — apply_virtual_visit increments BOTH
+    // select on a worker thread to reclaim the wall-clock would have identical
+    // semantics.)
+    // §5.4.2 early-stop. in_flight is passed as 0 here BY DESIGN: the
+    // visit-overtake test inside early_stop_ready is already in-flight-safe —
+    // apply_virtual_visit increments BOTH
     // completed_visits and the selected edge's visit count at selection time,
     // so best/second (per-edge delta visits) include pending leaves while
     // remaining = target - completed excludes them. Thus best-second > remaining
@@ -1436,8 +1374,7 @@ fn select_continuous_pass(
     // Per-slot selection is independent (each closure owns one slot's tree via
     // &mut; the RNG is seeded by slot_index, not execution order), so fan it
     // across cores with rayon. Results fold in slot order, so the leaf sweep is
-    // byte-identical to the serial form (dense_cnn mcts.rs:1458 port — the layer
-    // the hexfield port had dropped).
+    // byte-identical to the serial form.
     let per_slot: PyResult<Vec<(Vec<RustLeaf>, bool)>> = slots
         .par_iter_mut()
         .enumerate()
@@ -1811,7 +1748,7 @@ fn resolve_divergences(
         Divergences::production()
     };
     if let Some(overrides) = overrides {
-        // Test-only per-divergence toggles (M6 property gates / M10 lesions).
+        // Test-only per-divergence toggles (property gates / lesions).
         if let Some(v) = overrides.get_item("lcb_move_selection")? {
             dv.lcb_move_selection = v.extract()?;
         }
@@ -2123,9 +2060,9 @@ fn root_noise_exact(config: Option<RootNoiseConfig>, seed: u64) -> Option<RootDi
     })
 }
 
-/// Test-only surfaces for the M6 property gates (§5.4 LCB closed-form table
-/// tests + moves-left utility sign/gate properties). Pure functions over the
-/// same formulas the search uses.
+/// Test-only surfaces for the property gates (§5.4 LCB closed-form table tests
+/// + moves-left utility sign/gate properties). Pure functions over the same
+/// formulas the search uses.
 pub fn debug_lcb_from_stats(
     stats: &[(u64, u32, u32, f32, f32)], // (action_id, delta, visits, value_sum, value_sq_sum)
     z: f32,

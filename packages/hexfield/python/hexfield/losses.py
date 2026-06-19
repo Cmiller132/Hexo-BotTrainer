@@ -1,17 +1,15 @@
-"""Losses and 65-bin helpers — spec §3.
+"""Losses and 65-bin helpers.
 
-Target semantics are exact ports of the verified restnet constructions
-(restnet losses.py is imported in tests as the oracle), re-keyed from crop
-flats to support nodes. Two structural differences from the crop lineage:
+Two structural points:
 
 - Policy CE is a segment soft cross-entropy over each row's legal prefix
   (scatter-logsumexp, fp32). No -1e9 fill exists in the loss path at all —
   legality masking is structural because the logit support IS the legal set.
   Target mass off the legal prefix is a hard error.
-- Loss reduction is always mean over ROWS, never over nodes (the variable-N
-  bug rule). Every reduction takes an optional explicit denominator so the
-  pair-budget micro-bucket trainer (§6.3) can pass step-global denominators,
-  making gradient accumulation exactly equal to a monolithic batch.
+- Loss reduction is always mean over ROWS, never over nodes. Every reduction
+  takes an optional explicit denominator so the pair-budget micro-bucket trainer
+  can pass step-global denominators, making gradient accumulation exactly equal
+  to a monolithic batch.
 """
 
 from __future__ import annotations
@@ -34,8 +32,8 @@ Q_HEAD_WEIGHT = 0.1
 def _at_least_fp32(x: torch.Tensor) -> torch.Tensor:
     """fp32 floor for the loss math: upcast half/bfloat16, keep fp32/fp64.
 
-    "fp32" in the spec means AMP-safe, not a downcast — the §6.3 exactness
-    tests run the whole loss path in fp64."""
+    AMP-safe, not a downcast — the exactness tests run the whole loss path in
+    fp64."""
 
     if x.dtype in (torch.float16, torch.bfloat16):
         return x.float()
@@ -67,7 +65,7 @@ def decode_moves_left(logits: torch.Tensor) -> torch.Tensor:
 
 
 def scalar_to_binned_target(values: torch.Tensor | float) -> torch.Tensor:
-    """Scalars in [-1, 1] -> adjacent-bin soft targets (restnet semantics)."""
+    """Scalars in [-1, 1] -> adjacent-bin soft targets."""
 
     target = torch.as_tensor(values)
     if not bool(torch.isfinite(target).all().item()):
@@ -103,8 +101,7 @@ def segment_policy_ce(
     logits/target: (B, Npad); per row g only slots [0, L_g) participate.
     Target mass outside the prefix is a hard error (for opp-policy targets the
     projection/drop happens at expansion, never here). Zero-mass rows
-    contribute exactly 0 but stay in the denominator (restnet
-    ``allow_zero_rows`` semantics).
+    contribute exactly 0 but stay in the denominator (``allow_zero_rows``).
     """
 
     if logits.shape != target.shape:
@@ -161,8 +158,8 @@ def binned_value_loss(
     mask: torch.Tensor | None = None,
     denominator: float | None = None,
 ) -> torch.Tensor:
-    """CE against scalar or distributional 65-bin targets (restnet semantics);
-    masked rows contribute exactly 0; denominator defaults to the masked row
+    """CE against scalar or distributional 65-bin targets; masked rows
+    contribute exactly 0; denominator defaults to the masked row
     count (or B when unmasked), overridable for step-global accumulation."""
 
     target_tensor = torch.as_tensor(target, device=logits.device, dtype=logits.dtype)
@@ -249,7 +246,7 @@ def hexfield_loss(
     if "opp_policy" in outputs and "opp_policy" in batch:
         # Zero-target rows (no future opponent decision / masked-from-fast /
         # zero projected mass) contribute exactly 0 but stay in the
-        # denominator — restnet allow_zero_rows semantics.
+        # denominator (allow_zero_rows).
         components["opp_policy"] = segment_policy_ce(
             outputs["opp_policy"],
             batch["legal_counts"],

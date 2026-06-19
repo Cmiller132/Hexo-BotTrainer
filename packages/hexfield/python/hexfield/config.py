@@ -1,8 +1,9 @@
 """hexfield run configuration (the [model.config] sections of a run toml).
 
-Defaults are the PRODUCTION values: §5.4 divergences ON, the §5.1 quarantined
-knobs OFF (no FPU noise-zeroing, root policy temperature 1.0 / no ramp), other
-search knobs mirroring production main_4.
+Defaults track a known-good configuration (close to production main_3) but a
+live run's toml overrides them — read the run toml for the authoritative values.
+Notable defaults: the moves-left divergences ON, the quarantined knobs OFF (no
+FPU noise-zeroing, root policy temperature 1.0 / no ramp).
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ class SelfplayConfig:
     active_root_limit: int = 256
     root_dirichlet_total_alpha: float = 10.83
     root_dirichlet_noise_fraction: float = 0.25
-    # QUARANTINED (spec §5.1): defaults off.
+    # Quarantined exploration knobs: defaults off.
     root_policy_temperature: float = 1.0
     root_policy_temperature_early: float = 0.0
     root_policy_temperature_halflife: float = 0.0
@@ -44,13 +45,13 @@ class SelfplayConfig:
     max_game_plies: int = 512
     tss_enabled: bool = True
     search_parity_mode: bool = False
-    # §5.4.4 moves-left utility (MLH decisiveness). PRODUCTION = ON, two-sided,
-    # with the final-move tie-break. The Rust Divergences mirror these; passing
-    # them as divergence_overrides makes the lever controllable + auditable from
-    # config instead of being baked into Divergences::production(). Set
-    # moves_left_utility=False (or search_parity_mode=True) for the byte-identical
-    # no-MLH baseline. ml_auto_disabled / the run-dir ml_auto_disabled.flag force
-    # the lever off mid-run when the per-epoch head-health monitor trips.
+    # Moves-left utility (MLH decisiveness): default ON, two-sided, with the
+    # final-move tie-break. The Rust Divergences mirror these; passing them as
+    # divergence_overrides makes the lever controllable + auditable from config
+    # instead of being baked into Divergences::production(). Set
+    # moves_left_utility=False (or search_parity_mode=True) for the no-MLH
+    # baseline. ml_auto_disabled / the run-dir ml_auto_disabled.flag force the
+    # lever off mid-run when the per-epoch head-health monitor trips.
     moves_left_utility: bool = True
     ml_weight: float = 0.03
     ml_scale: float = 32.0
@@ -68,28 +69,27 @@ class TrainingSection:
     learning_rate: float = 1e-3
     weight_decay: float = 1e-4
     grad_clip: float = 1.0
-    # --- Adaptive grad-clip (v3 #1) ------------------------------------------
+    # --- Adaptive grad-clip --------------------------------------------------
     adaptive_clip: bool = True
     clip_c: float = 1.75
     clip_ema_decay: float = 0.99
     clip_warmup_steps: int = 50
-    # --- Config-driven loss weights (v3 #2); defaults = losses.py constants ---
+    # --- Config-driven loss weights; defaults match the losses.py constants --
     policy_weight: float = 1.0
     value_weight: float = 1.0
     opp_policy_weight: float = 0.25
     short_term_value_weight: float = 0.1
     moves_left_weight: float = 0.1
     q_head_weight: float = 0.1
-    # --- Policy-surprise self-CE reweight (v3 #5) ----------------------------
+    # --- Policy-surprise self-CE reweight ------------------------------------
     policy_surprise_uniform_fraction: float = 0.5
     policy_surprise_max_weight: float = 8.0
     warmup_steps: int = 0  # fresh-init runs warm-start from the BC prefit
     shuffle_keep_target_rows: int = 300_000
-    # KataGo / dense_cnn_restnet replay-buffer port (PLAN §6/§7). Defaults are
-    # hexfield-tuned (NOT dense's literals): the dimensionless KataGo knobs
-    # (exponent=0.65, expand=0.4) are unchanged, but min_rows/scale/targets are
-    # scaled to hexfield's ~7k Full-rows/epoch stream (PLAN §3.1/§8/S1). _merge
-    # is a strict flat merge that already tolerates new scalar fields.
+    # KataGo / dense_cnn_restnet replay-buffer knobs. Defaults are hexfield-tuned
+    # (NOT dense's literals): the dimensionless KataGo knobs (exponent=0.65,
+    # expand=0.4) are unchanged, but min_rows/scale/targets are scaled to
+    # hexfield's ~7k Full-rows/epoch stream.
     shuffle_min_rows: int = 20_000
     shuffle_taper_window_exponent: float = 0.65
     shuffle_expand_window_per_row: float = 0.4
@@ -107,8 +107,7 @@ class TrainingSection:
 class EvaluationSection:
     games_per_epoch: int = 16
     eval_visits: int = 128
-    # Run the H2H arena every Nth epoch (the lockstep arena is single-game and
-    # slow; over a long run, evaluating every epoch dominates wall-clock).
+    # Run the H2H arena every Nth epoch.
     eval_every: int = 1
 
 
@@ -284,9 +283,7 @@ class MultiStageEvalSection:
     # Fraction of ``games_budget`` allocated to the SealBot zero-point pairing
     # (the rest is split evenly across the checkpoint opponents). Threaded into
     # ``allocate_budget`` by the orchestrator so the in-run split is config-driven.
-    # Default 0.25 matches the historical allocate_budget default (the existing
-    # 0.25-split tests stay green); the production config raises this to 0.5 for a
-    # 1:1 SealBot-vs-checkpoint split (32 SealBot + 32 checkpoint at budget 64).
+    # A run toml may raise this to 0.5 for a 1:1 SealBot-vs-checkpoint split.
     sealbot_share: float = 0.25
     # Bradley-Terry convergence guard: ASSERT max|grad| < this before computing
     # covariance. The legacy fixed-step GD does NOT meet this (max|grad| ~0.30);
@@ -371,7 +368,7 @@ ML_AUTO_DISABLED_FLAG = "ml_auto_disabled.flag"
 
 
 def build_divergence_overrides(sp: SelfplayConfig, *, disabled: bool = False) -> dict:
-    """The §5.4.4 moves-left divergence knobs as a Rust ``divergence_overrides``
+    """The moves-left divergence knobs as a Rust ``divergence_overrides``
     dict, so the lever is driven by config (controllable + auditable) rather than
     baked into ``Divergences::production()``. When ``disabled`` — either the
     ``ml_auto_disabled`` config field or the run-dir heal-gate flag — the whole

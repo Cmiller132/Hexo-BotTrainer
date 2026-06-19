@@ -1,6 +1,6 @@
 //! Node features (F = 15) from the authoritative engine state — serve-time
-//! truth (spec §1.2). Indices 0-12 port dense_cnn's encoding.rs semantics
-//! exactly (index 11 redefined to distance-to-nearest-stone); 13-14 are the
+//! truth (spec §1.2). Indices 0-12 port dense_cnn's encoding semantics exactly
+//! (index 11 redefined to distance-to-nearest-stone); 13-14 are the
 //! engine-exact standing-win planes. The Rust↔Python parity fixtures pin this
 //! against python/hexfield/features.py.
 
@@ -27,8 +27,8 @@ pub fn build_features(state: &RustHexoState, sup: &Support) -> Vec<f32> {
     let current = state.current_player();
     let placements_made = state.placements_made();
 
-    // Stones + recency (encoding.rs:182-196 verbatim: age = placements_made -
-    // placement_index; weight = 1/(1+age); max-accumulate; stones == history).
+    // Stones + recency: age = placements_made - placement_index; weight =
+    // 1/(1+age); max-accumulate; stones == history.
     for record in state.placement_history().iter() {
         let row = sup.row(record.coord).expect("stone missing from support");
         let (stone_plane, recency_plane) = if record.player == current {
@@ -76,9 +76,8 @@ pub fn build_features(state: &RustHexoState, sup: &Support) -> Vec<f32> {
     feats
 }
 
-/// Hot (count >= 4, gated placements >= 7 — encoding.rs:226-266 exactly) and
-/// standing-win (count == 5, ungated) planes over single-colour windows'
-/// EMPTY cells.
+/// Hot (count >= 4, gated placements >= 7) and standing-win (count == 5,
+/// ungated) planes over single-colour windows' EMPTY cells.
 fn fill_hot_and_win(
     state: &RustHexoState,
     current: Player,
@@ -122,7 +121,7 @@ fn fill_hot_and_win(
     }
 }
 
-/// Cells of the opponent's most recent full turn (encoding.rs:268-298).
+/// Cells of the opponent's most recent full turn.
 fn fill_opponent_last_turn(
     state: &RustHexoState,
     current: Player,

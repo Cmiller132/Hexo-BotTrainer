@@ -1,5 +1,5 @@
 //! hexfield PUCT tree — from-scratch port of the as-built dense_cnn tree
-//! semantics (mcts_tree.rs is the semantic reference; the M5/M6 stub-evaluator
+//! semantics (mcts_tree is the semantic reference; the stub-evaluator
 //! differential harness pins this implementation against it bit-for-bit in
 //! `search_parity_mode`), plus the §5.4 divergence machinery:
 //!
@@ -377,7 +377,8 @@ impl RustSearch {
 
     /// Root-policy softmax temperature on a REUSED root (raw eval priors),
     /// applied before noise, at most once per root lifetime — dense semantics
-    /// verbatim (the quarantined production default passes 1.0 == no-op).
+    /// verbatim (a temperature of exactly 1.0 is a no-op; production currently
+    /// passes 1.07).
     pub fn apply_root_policy_temperature(&mut self, temperature: f32) {
         if !temperature.is_finite() || temperature <= 0.0 || (temperature - 1.0).abs() < 1.0e-6 {
             return;
@@ -545,7 +546,7 @@ impl RustSearch {
     /// Q_e > ml_q_gate (winning -> prefer faster wins); s = -1 when two-sided
     /// and Q_e < -ml_q_gate (losing -> prefer slower losses); s = 0 in the
     /// |Q_e| <= gate dead-zone (no sign discontinuity). Delegates to the same
-    /// core the M6 property tests exercise.
+    /// core the property tests exercise.
     fn ml_bonus(&self, node: &RustNode, edge: &RustEdge) -> f32 {
         if !self.divergences.moves_left_utility {
             return 0.0;
@@ -862,19 +863,18 @@ impl RustSearch {
         nodes[0].state_hash = root_hash;
         if edge.visits > nodes[0].visits {
             nodes[0].visits = edge.visits;
-            // INHERITED-FROM-DENSE (audit 2026-06-13, intentional): the edge
-            // value_sum is the child value from the PARENT's perspective, so the
-            // strictly-correct promoted-root value would negate ONLY when the
-            // child's side-to-move differs from the parent's — which is NOT the
-            // case for a FirstStone->SecondStone promotion (same player). dense
-            // mcts_tree.rs negates unconditionally; hexfield reproduces it
-            // verbatim so the M5/M6 differential-parity gate holds bit-for-bit.
-            // The effect is bounded: this only seeds the promoted root's FPU
-            // baseline / first reported value and is overwritten by fresh
-            // backups within the next search. Owner decision to "fix" (negate
-            // conditionally on player flip, diverging from dense) is deferred;
-            // it is not a hexfield-introduced regression and matches the
-            // workspace's most successful lineage.
+            // INHERITED-FROM-DENSE (intentional): the edge value_sum is the
+            // child value from the PARENT's perspective, so the strictly-correct
+            // promoted-root value would negate ONLY when the child's side-to-move
+            // differs from the parent's — which is NOT the case for a
+            // FirstStone->SecondStone promotion (same player). dense mcts_tree
+            // negates unconditionally; hexfield reproduces it verbatim so the
+            // differential-parity gate holds bit-for-bit. The effect is bounded:
+            // this only seeds the promoted root's FPU baseline / first reported
+            // value and is overwritten by fresh backups within the next search.
+            // "Fixing" it (negate conditionally on player flip, diverging from
+            // dense) is deferred; it is not a hexfield-introduced regression and
+            // matches the workspace's most successful lineage.
             nodes[0].value_sum = -edge.value_sum;
         }
         let mut node_table = HashMap::with_capacity(nodes.len());

@@ -54,11 +54,6 @@ pub struct RustEvaluationCache {
 }
 
 impl RustEvaluationCache {
-    pub fn clear(&mut self) {
-        self.entries.clear();
-        self.insertion_order.clear();
-    }
-
     pub fn len(&self) -> usize {
         self.entries.len()
     }

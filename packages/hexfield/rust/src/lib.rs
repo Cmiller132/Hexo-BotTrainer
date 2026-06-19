@@ -6,17 +6,17 @@
 //! through hexo_engine's stable C-ABI state capsule (state.rs), exactly like
 //! the other lineages.
 //!
-//! M4 surface: serve-time support/feature construction (the Rust half of the
-//! Rust↔Python featurizer parity contract). M5/M6 add payload assembly, the
-//! PUCT tree, and the continuous scheduler.
+//! Surfaces: serve-time support/feature construction (the Rust half of the
+//! Rust↔Python featurizer parity contract), payload assembly, the PUCT tree,
+//! and the continuous scheduler.
 //!
 //! Build: scripts/_rebuild_hexfield.sh (hexfield-dev venv, --release). Never
 //! build into the live hexgt-build venv.
 
 // rustc 1.95.0 ICEs inside the dead-code lint's diagnostic emitter on this
 // crate (annotate_snippet panic in check_mod_deathness). Several search-stat
-// fields are intentionally write-only until the M6 telemetry consumers land,
-// so silence the lint rather than fight the ICE.
+// fields are intentionally write-only (telemetry consumers), so silence the
+// lint rather than fight the ICE.
 #![allow(dead_code)]
 
 mod constants;
@@ -69,7 +69,7 @@ fn capabilities(py: Python<'_>) -> PyResult<Py<PyAny>> {
 }
 
 /// Serve-time featurization of live engine states (parity-test surface and
-/// the building block of the M5 evaluator payload). One dict per state:
+/// the building block of the evaluator payload). One dict per state:
 /// coords (i16 q,r pairs), legal/stone/halo counts, dist (i32), nbr
 /// (i32 row-local, -1 missing, node-major x 6), feats (f32 node-major x 15).
 #[cfg(feature = "python")]
@@ -105,14 +105,14 @@ fn featurize_states(py: Python<'_>, states: &Bound<'_, PyAny>) -> PyResult<Py<Py
     Ok(out.into_any().unbind())
 }
 
-/// Golden-vector surface for the seed-discipline contract (M6 tests).
+/// Golden-vector surface for the seed-discipline contract.
 #[cfg(feature = "python")]
 #[pyfunction]
 fn mix_seed(base_seed: u64, game_key: u64, ply: u32, stream: u64) -> u64 {
     search::mix_seed(base_seed, game_key, ply, stream)
 }
 
-/// M6 property-gate surfaces: the LCB core (closed-form table tests) and the
+/// Property-gate surfaces: the LCB core (closed-form table tests) and the
 /// moves-left utility bonus (sign / monotonicity / gate-zero properties).
 #[cfg(feature = "python")]
 #[pyfunction]
@@ -155,7 +155,7 @@ pub fn _rust(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<serve_pack::F16Buf>()?;
     module.add_class::<serve_pack::I32Buf>()?;
     module.add_class::<serve_pack::U8Buf>()?;
-    // Rust rayon GIL-free train-read expand kernel (expand_backend="rust", P7).
+    // Rust rayon GIL-free train-read expand kernel (expand_backend="rust").
     module.add_function(wrap_pyfunction!(replay_expand::expand_shard_train, module)?)?;
     module.add_class::<replay_expand::RxF32Buf>()?;
     module.add_class::<replay_expand::RxF64Buf>()?;

@@ -1,46 +1,44 @@
-"""Train-read row expansion backends (PLAN §4.3 fallback ladder).
+"""Train-read row expansion backends (the fallback ladder).
 
 The dominant per-epoch train-read cost is the pure-Python ``expand_sample`` loop
-(D6 transform + depth-9 support BFS + feature build + legal-slot policy
-projection — ``samples.py``). This module factors that loop out of
-``trainer.train_passes`` and dispatches it across a configurable backend so the
-GPU is fed instead of starved.
+(D6 transform + support BFS + feature build + legal-slot policy projection —
+``samples.py``). This module factors that loop out of ``trainer.train_passes``
+and dispatches it across a configurable backend so the GPU is fed instead of
+starved.
 
 Backends (``backend=`` argument / ``config.training.expand_backend`` /
-``HEXFIELD_EXPAND`` env), the PLAN §4.3 ladder:
+``HEXFIELD_EXPAND`` env):
 
-* ``"serial"`` — the Phase-5 path, refactored verbatim here: one
-  ``expand_sample`` call per window row on the main thread. The PARITY ORACLE and
-  the safe default.
-* ``"pool"`` — dense's exact pattern (``dense_cnn_restnet/trainer.py:320-355``):
-  a persistent ``ProcessPoolExecutor(mp_context="spawn")``; the unit of work is
-  one contiguous CHUNK of rows shipped to the TOP-LEVEL picklable
+* ``"serial"`` — one ``expand_sample`` call per window row on the main thread.
+  The PARITY ORACLE and the safe default.
+* ``"pool"`` — dense's exact pattern: a persistent
+  ``ProcessPoolExecutor(mp_context="spawn")``; the unit of work is one contiguous
+  CHUNK of rows shipped to the TOP-LEVEL picklable
   :func:`expand_chunk_to_arrays`; ``workers+2`` inflight; ``wait(FIRST_COMPLETED)``;
-  serial below :data:`_PARALLEL_MIN_ROWS`. Strictly inferior to the eventual Rust
-  kernel on this host (spawn is mandatory on WSL/Windows) but proven and low-risk.
-* ``"rust"`` — the Phase-7 production path: the GIL-free rayon kernel
+  serial below :data:`_PARALLEL_MIN_ROWS`. Strictly inferior to the Rust kernel on
+  this host (spawn is mandatory on WSL/Windows) but proven and low-risk.
+* ``"rust"`` — the production path: the GIL-free rayon kernel
   (``replay_expand.rs::expand_shard_train``). One parallel call expands the whole
   window under the pre-drawn D6, returning zero-copy buffers reassembled here into
   the SAME ``(rows, valid)`` shape as serial/pool (Rust↔serial element-wise parity
-  is gated by ``tests/katago_buffer/test_p7_rust_parity.py``). ``workers``/``pool``
-  are ignored (rayon owns its thread pool).
+  is gated by ``test_p7_rust_parity.py``). ``workers``/``pool`` are ignored (rayon
+  owns its thread pool).
 
-DETERMINISM (the load-bearing contract, PLAN §4.4/§4.5): **all randomness is
-pre-drawn on the main thread** (the per-row ``d6`` vector) and passed positionally
-into the workers. Workers are PURE functions — they import only numpy / the
-torch-free hexfield expansion chain (``samples`` → ``features`` / ``geometry`` /
+DETERMINISM (the load-bearing contract): **all randomness is pre-drawn on the
+main thread** (the per-row ``d6`` vector) and passed positionally into the
+workers. Workers are PURE functions — they import only numpy / the torch-free
+hexfield expansion chain (``samples`` → ``features`` / ``geometry`` /
 ``support``), NEVER torch, and make NO ``rng`` call. Results are reassembled in
 the ORIGINAL row order (chunks are written back at their start offset), so the
 output is element-for-element identical to the serial path regardless of worker
 count or future-completion order. ``expand_rows`` therefore satisfies, by
 construction: ``pool == serial`` and ``workers=1 == workers=N``.
 
-OFF-LEGAL (PLAN §4.5 step 1): an off-legal row (``expand_sample`` raises
-"... off the legal set ...") is flagged INVALID in the returned ``valid`` mask —
-NOT dropped in-worker. The caller (``train_passes``) does the survivor filter →
-permute → truncate on the main thread (steps 2-5), so the survivor SET is
-identical across backends. A non-off-legal ``ValueError`` (e.g. zero policy mass)
-propagates exactly as in the serial v1 path.
+OFF-LEGAL: an off-legal row (``expand_sample`` raises "... off the legal set
+...") is flagged INVALID in the returned ``valid`` mask — NOT dropped in-worker.
+The caller (``train_passes``) does the survivor filter → permute → truncate on
+the main thread, so the survivor SET is identical across backends. A
+non-off-legal ``ValueError`` (e.g. zero policy mass) propagates unchanged.
 
 This module is intentionally torch-free so a spawn worker re-importing it stays
 lean (no per-worker torch RSS for the expansion itself).
@@ -60,15 +58,16 @@ from .shards import _PHASES
 from .support import Support
 from .window import PackedRowView, PackedWindow
 
-# Columns the Rust kernel reads off the PackedWindow (PLAN §4.2). The scalar /
-# block / CSR-data / CSR-offset arrays of hexfield_compact_v1 — passed as raw
-# bytes (LE/native; build+train share the host) plus the explicit row count.
+# Columns the Rust kernel reads off the PackedWindow. The scalar / block /
+# CSR-data / CSR-offset arrays of hexfield_compact_v1 — passed as raw bytes
+# (LE/native; build+train share the host) plus the explicit row count.
 _RUST_SCALAR_COLS = (
     "current_player",
     "phase",
     "value",
     "moves_left",
     "policy_surprise",
+    "outcome_valid",
     "first_q",
     "first_r",
     "first_present",
@@ -98,13 +97,12 @@ _RUST_OFF_COLS = (
     "opp_win_off",
 )
 
-# Off-legal sentinel substring raised by ``expand_sample`` (``samples.py:206``).
-# Mirrors the predicate the Phase-5 ``train_passes`` loop used to gate the skip.
+# Off-legal sentinel substring raised by ``expand_sample``. Mirrors the predicate
+# the ``train_passes`` loop uses to gate the skip.
 _OFF_LEGAL_MARKER = "off the legal set"
 
 # Expand serially below this many rows (tests / tiny epochs) to skip the
-# spawn-pool startup + pickling overhead. Mirrors dense's ``_PARALLEL_MIN_ROWS``
-# (``dense_cnn_restnet/trainer.py:584``).
+# spawn-pool startup + pickling overhead. Mirrors dense's ``_PARALLEL_MIN_ROWS``.
 _PARALLEL_MIN_ROWS = 2048
 
 # Rows per chunk shipped to a pool worker. Picked so a 32-CPU box at the default
@@ -121,8 +119,7 @@ _CHUNK_ROWS = 256
 # ---------------------------------------------------------------------------
 def _row_view_to_sample(view: PackedRowView) -> HexfieldSampleData:
     """Adapt a zero-copy :class:`~hexfield.window.PackedRowView` into the
-    :class:`~hexfield.samples.HexfieldSampleData` that ``expand_sample`` consumes
-    (the serial-phase shim, PLAN §6/Phase-5).
+    :class:`~hexfield.samples.HexfieldSampleData` that ``expand_sample`` consumes.
 
     The ``PackedRowView`` already exposes every field as an accessor whose return
     shape matches the dataclass (``records()`` → ``(q,r,owner,idx)`` tuples,
@@ -132,9 +129,9 @@ def _row_view_to_sample(view: PackedRowView) -> HexfieldSampleData:
     representation gap is ``phase``: the packed column stores the u8 enum index
     while ``HexfieldSampleData.phase`` (and ``build_features``) want the STRING
     name — so it is mapped through ``shards._PHASES`` here exactly as
-    ``read_compact_shard`` does (``shards.py:238``). ``game_id`` is unused by
-    expansion and left empty; ``metadata`` defaults empty (the opp-policy source
-    was already resolved at write time)."""
+    ``read_compact_shard`` does. ``game_id`` is unused by expansion and left
+    empty; ``metadata`` defaults empty (the opp-policy source was already resolved
+    at write time)."""
     return HexfieldSampleData(
         game_id="",
         turn_index=view.turn_index,
@@ -155,8 +152,7 @@ def _row_view_to_sample(view: PackedRowView) -> HexfieldSampleData:
         policy_surprise=view.policy_surprise,
         # Truncated-game flag (outcome_valid==0) carried as metadata so the
         # serial expand path masks the value/stvalue/cell_q heads. Only set when
-        # truncated so completed-game rows keep an empty metadata dict (matching
-        # the pre-truncated-support shim exactly → byte-identical expansion).
+        # truncated so completed-game rows keep an empty metadata dict.
         metadata=({"truncated": True} if int(view.outcome_valid) == 0 else {}),
     )
 
@@ -170,11 +166,11 @@ def _expand_one(
     """Expand ONE row under its pre-drawn symmetry, returning ``(row, valid)``.
 
     The single point where the off-legal skip is realized identically for both
-    backends (PLAN §4.5): an off-legal target raises ``ValueError`` and — when
+    backends: an off-legal target raises ``ValueError`` and — when
     ``tolerate_off_legal`` (a radius-transition is in effect) — the row is flagged
     invalid (``(None, False)``) rather than dropped, so the survivor SET stays a
     pure function of ``(row, sym, radius)``. Any OTHER ``ValueError`` (e.g. zero
-    policy mass) propagates exactly as in the serial v1 path.
+    policy mass) propagates unchanged.
     """
     try:
         return expand_sample(sample, symmetry=int(sym), horizons=horizons), True
@@ -185,7 +181,7 @@ def _expand_one(
 
 
 # ---------------------------------------------------------------------------
-# Top-level picklable worker unit (PLAN §4.3 rung 2): one contiguous chunk.
+# Top-level picklable worker unit: one contiguous chunk.
 # ---------------------------------------------------------------------------
 def expand_chunk_to_arrays(
     samples: list[HexfieldSampleData],
@@ -200,8 +196,8 @@ def expand_chunk_to_arrays(
     NO rng (every symmetry arrives pre-drawn in ``d6``). Returns the per-row
     expanded rows (``None`` for an off-legal-skipped row) plus the aligned
     ``valid`` mask. Returning a list of (ragged-support) ``ExpandedRow`` rather
-    than stacked planes is the hexfield divergence the PLAN calls out (§4.2): the
-    per-row support graph is ragged and cannot be stacked into fixed arrays.
+    than stacked planes is a hexfield divergence from dense: the per-row support
+    graph is ragged and cannot be stacked into fixed arrays.
 
     ``samples`` and ``d6`` are positionally aligned and 1:1; the caller ships
     contiguous chunks and stitches the results back at their start offset, so the
@@ -219,17 +215,16 @@ def expand_chunk_to_arrays(
 
 
 # ---------------------------------------------------------------------------
-# Worker-count resolution (PLAN §4.3): min(8, max(1, cpu//4)), overridable.
+# Worker-count resolution: min(8, max(1, cpu//4)), overridable.
 # ---------------------------------------------------------------------------
 def resolve_expand_workers(configured: int | None = None) -> int:
-    """Resolve the pool worker count (PLAN §4.3 / §7).
+    """Resolve the pool worker count.
 
     Precedence: ``HEXFIELD_EXPAND_WORKERS`` env (an explicit operator override)
     > the ``configured`` value (``config.training.expand_workers``, ``0`` ⇒ auto)
     > the auto default ``min(8, max(1, cpu_count // 4))``. The ``//4`` + cap-8
     leaves headroom for the main process feeding the GPU and bounds idle-pool RAM,
-    mirroring dense's ``_resolve_expand_workers`` (``trainer.py:562-579``).
-    Always ``>= 1``.
+    mirroring dense's ``_resolve_expand_workers``. Always ``>= 1``.
     """
     env = os.environ.get("HEXFIELD_EXPAND_WORKERS")
     if env is not None:
@@ -249,7 +244,7 @@ def _chunk_bounds(n: int, chunk_rows: int) -> list[tuple[int, int]]:
 
 
 # ---------------------------------------------------------------------------
-# Rust backend (PLAN §4.2/§4.5): the GIL-free rayon kernel + zero-copy reassembly.
+# Rust backend: the GIL-free rayon kernel + zero-copy reassembly.
 # ---------------------------------------------------------------------------
 def _resolve_support_radius() -> int:
     """The model support radius (``HEXFIELD_SUPPORT_RADIUS``), passed explicitly
@@ -273,7 +268,7 @@ def _resolve_support_radius() -> int:
 
 def _window_columns_as_bytes(window: PackedWindow) -> dict[str, bytes]:
     """Pack the PackedWindow columns the Rust kernel needs into a ``{name: bytes}``
-    dict (PLAN §4.2). Each array is forced C-contiguous + its writer dtype, then
+    dict. Each array is forced C-contiguous + its writer dtype, then
     ``.tobytes()`` (a single bulk copy per column — the BFS/feature cost the kernel
     parallelizes dwarfs it). Offsets stay ``int64``; the kernel reinterprets bytes.
     """
@@ -289,7 +284,7 @@ def _reassemble_rust_rows(
     result: dict, horizons_len: int
 ) -> tuple[list[ExpandedRow | None], np.ndarray]:
     """Turn the kernel's zero-copy buffers back into the ``(rows, valid)`` shape the
-    serial/pool backends return (PLAN §4.2/§4.5).
+    serial/pool backends return.
 
     Each per-row segment is sliced out of the flat ``coords``/``dist``/``nbr``/
     ``feats``/``policy``/``opp_policy`` buffers via the returned CSR offsets
@@ -332,11 +327,11 @@ def _reassemble_rust_rows(
     moves_left_mask = np.frombuffer(bytes(result["moves_left_mask"]), dtype=np.float32, count=r)
     # value_mask gates the value/stvalue/cell_q heads for truncated-game rows
     # (outcome_valid==0). The serial oracle (samples.expand_sample) derives it
-    # from metadata['truncated']; the Rust kernel does NOT yet project it (TODO:
-    # replay_expand.rs must read the outcome_valid column and emit value_mask +
-    # zero the stvalue_mask/cell_q_mask for truncated rows BEFORE expand_backend
-    # is flipped to "rust" on a buffer that contains truncated rows). Until then
-    # the kernel omits the buffer and every Rust row is treated as completed.
+    # from metadata['truncated']; the Rust kernel reads the outcome_valid column
+    # and emits value_mask (and zeroes stvalue_mask/cell_q_mask for truncated
+    # rows) matching the oracle. The legacy fallback (kernel omits the buffer ⇒
+    # all rows treated as completed) is retained for forward-compat with an older
+    # .so but never taken once the rebuilt kernel is loaded.
     if "value_mask" in result:
         value_mask = np.frombuffer(bytes(result["value_mask"]), dtype=np.float32, count=r)
     else:
@@ -396,9 +391,9 @@ def _expand_rows_rust(
 ) -> tuple[list[ExpandedRow | None], np.ndarray]:
     """Dispatch ``index`` of ``window`` to the Rust rayon kernel and reassemble.
 
-    The per-row D6 vector is pre-drawn (passed positionally — no rng in the kernel,
-    PLAN §4.4). ``horizons`` is the CONFIG horizon set (S4); the kernel copies the
-    stored ``stvalue`` columns and only uses ``len(horizons)`` to slice the block.
+    The per-row D6 vector is pre-drawn (passed positionally — no rng in the
+    kernel). ``horizons`` is the CONFIG horizon set; the kernel copies the stored
+    ``stvalue`` columns and only uses ``len(horizons)`` to slice the block.
     """
     from . import _rust  # local import: the package imports fine without the .so
 
@@ -443,7 +438,7 @@ def expand_rows(
     workers: int = 0,
     pool: Any | None = None,
 ) -> tuple[list[ExpandedRow | None], np.ndarray]:
-    """Expand a window's rows under their pre-drawn D6 symmetries (PLAN §4.3/§4.5).
+    """Expand a window's rows under their pre-drawn D6 symmetries.
 
     Parameters
     ----------
@@ -451,12 +446,12 @@ def expand_rows(
         The packed in-RAM replay window.
     survivor_index
         The rows to expand, in expansion order. ``None`` ⇒ all rows
-        ``range(window.n)`` (the Phase-5 default: expand ALL, filter later). When
+        ``range(window.n)`` (the default: expand ALL, filter later). When
         given, ``d6`` is indexed by the SAME positions (``d6[k]`` is the symmetry
         for ``survivor_index[k]``), so the result is positionally aligned to
         ``survivor_index``.
     d6
-        Pre-drawn per-row symmetry vector (main-thread draw, PLAN §4.4). Length
+        Pre-drawn per-row symmetry vector (main-thread draw). Length
         must cover the expanded rows (``window.n`` when ``survivor_index`` is
         ``None``; otherwise ``len(survivor_index)``).
     horizons
@@ -469,9 +464,9 @@ def expand_rows(
         which takes it explicitly; accepted to pin the contract but not re-read.
     tolerate_off_legal
         When True, an off-legal row is flagged invalid (mask ``False``) instead of
-        raising — the radius-transition behavior (PLAN §4.5).
+        raising — the radius-transition behavior.
     backend
-        ``"serial"`` | ``"pool"`` | ``"rust"`` (the implemented Phase-7 rayon kernel).
+        ``"serial"`` | ``"pool"`` | ``"rust"`` (the rayon kernel).
     workers
         Pool worker count (``0`` ⇒ auto via :func:`resolve_expand_workers`); only
         consulted for ``backend="pool"`` when no ``pool`` is supplied.
@@ -486,8 +481,7 @@ def expand_rows(
         ``rows`` is the list of ``ExpandedRow`` (``None`` for an off-legal-skipped
         row), aligned 1:1 to the expansion order; ``valid`` is the ``bool``
         numpy mask of the same length. The caller applies the survivor filter,
-        survivor permutation, and ``effective_rows`` truncation (PLAN §4.5
-        steps 2-5).
+        survivor permutation, and ``effective_rows`` truncation.
     """
     _ = support_radius  # see docstring: env-sourced at support import, not re-read
     horizons = tuple(int(h) for h in horizons)
@@ -508,17 +502,17 @@ def expand_rows(
         return [], np.zeros(0, dtype=bool)
 
     if backend == "rust":
-        # The production GIL-free rayon kernel (PLAN §4.2): one parallel
-        # expand_shard_train call, zero-copy buffers reassembled into the same
-        # (rows, valid) shape the serial/pool paths return. Off-legal rows are
-        # flagged invalid in the mask (NOT dropped in-worker, PLAN §4.5 step 1);
-        # the caller does the survivor filter / permute / truncate. `workers` /
+        # The production GIL-free rayon kernel: one parallel expand_shard_train
+        # call, zero-copy buffers reassembled into the same (rows, valid) shape
+        # the serial/pool paths return. Off-legal rows are flagged invalid in the
+        # mask (NOT dropped in-worker); the caller does the survivor filter /
+        # permute / truncate. `workers` /
         # `pool` are ignored (rayon manages its own thread pool internally).
         return _expand_rows_rust(window, index, d6, horizons, tolerate_off_legal)
     if backend not in ("serial", "pool"):
         raise ValueError(f"unknown expand_backend {backend!r} (serial|pool|rust)")
 
-    # --- serial: the Phase-5 path, refactored verbatim ----------------------
+    # --- serial path --------------------------------------------------------
     # Also the small-workload fast path for the pool backend (avoid the spawn +
     # pickle cost below _PARALLEL_MIN_ROWS), exactly like dense.
     if backend == "serial" or n < _PARALLEL_MIN_ROWS:
