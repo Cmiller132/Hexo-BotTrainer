@@ -39,6 +39,98 @@ def _ceil_quant(n: int) -> int:
     return max(QUANT_NODES, -(-int(n) // QUANT_NODES) * QUANT_NODES)
 
 
+class PerfTrace:
+    """main_6 Increment-0 GPU-busy instrument (bench-only, HEXFIELD_PERF_TRACE=1).
+
+    The verification critic flagged that the depth-2 / complete-overlap perf
+    claim ("convert GPU idle to busy") was asserted against `nvidia-smi`, which
+    is too coarse (1-2 s sampling) to confirm a sub-flush idle change. This class
+    is the missing PRIMARY metric the plans call for: a `cuda.Event`-based
+    GPU-busy fraction, NOT a sampler.
+
+    Mechanism: a pair of `cuda.Event`s brackets the forward enqueues of each
+    flush (recorded in submit, on the same stream the forwards run on). When the
+    flush is drained (`result()` forces the D2H sync, so both events are
+    complete), `start.elapsed_time(end)` gives the wall-clock GPU time that
+    flush's forwards actually occupied the device. Summing those over a measured
+    wall window yields busy_fraction = sum(device_ms) / wall_ms — the fraction of
+    real time the GPU spent computing forwards. Idle fraction = 1 - busy.
+
+    Zero behavioral effect: only `cuda.Event.record()` calls are added to the
+    forward path (no extra sync, no D2H, no math change); the events are read in
+    `result()` which already syncs. Entirely inert unless the flag is set
+    (the evaluator holds `_perf = None`), so the production path is untouched.
+    """
+
+    def __init__(self) -> None:
+        self.device_ms = 0.0      # sum of per-flush forward device time
+        self.flushes = 0          # flushes whose events were measured
+        self.states = 0           # total states (rows) evaluated
+        self.per_flush_ms: list[float] = []
+        self.per_flush_states: list[int] = []
+        self._t0: float | None = None   # wall-clock anchor (first submit)
+        self._t_last: float = 0.0        # wall-clock of the last drained flush
+
+    def make_events(self):
+        """Allocate a (start, end) cuda.Event pair for one flush, or None if
+        CUDA is unavailable (CPU path — tracing is a no-op there)."""
+        if not torch.cuda.is_available():
+            return None
+        return (
+            torch.cuda.Event(enable_timing=True),
+            torch.cuda.Event(enable_timing=True),
+        )
+
+    def on_submit(self) -> None:
+        import time as _time
+        if self._t0 is None:
+            self._t0 = _time.perf_counter()
+
+    def on_result(self, events, n_states: int) -> None:
+        """Called from result() AFTER the D2H sync (events guaranteed complete).
+        Accumulate this flush's device-busy ms and the wall anchor."""
+        import time as _time
+        self._t_last = _time.perf_counter()
+        if events is None:
+            return
+        start_ev, end_ev = events
+        ms = start_ev.elapsed_time(end_ev)
+        self.device_ms += ms
+        self.flushes += 1
+        self.states += n_states
+        self.per_flush_ms.append(ms)
+        self.per_flush_states.append(n_states)
+
+    def report(self) -> dict:
+        import statistics
+        wall_ms = (
+            (self._t_last - self._t0) * 1000.0
+            if self._t0 is not None and self._t_last > self._t0
+            else 0.0
+        )
+        busy = (self.device_ms / wall_ms) if wall_ms > 0 else 0.0
+        ms = self.per_flush_ms
+        st = self.per_flush_states
+        out = {
+            "gpu_busy_fraction": round(busy, 4),
+            "gpu_idle_fraction": round(1.0 - busy, 4) if wall_ms > 0 else None,
+            "device_busy_ms": round(self.device_ms, 2),
+            "wall_window_ms": round(wall_ms, 2),
+            "measured_flushes": self.flushes,
+            "measured_states": self.states,
+            "mean_batch": round(self.states / self.flushes, 1) if self.flushes else 0.0,
+            "mean_forward_ms": round(statistics.mean(ms), 3) if ms else 0.0,
+            "mean_ms_per_state": (
+                round(self.device_ms / self.states, 4) if self.states else 0.0
+            ),
+        }
+        if len(ms) >= 2:
+            out["median_forward_ms"] = round(statistics.median(ms), 3)
+        if len(st) >= 2:
+            out["median_batch"] = round(statistics.median(st), 1)
+        return out
+
+
 def plan_groups(sizes) -> list[tuple[int, int, int]]:
     """Padding-aware grouping over rows sorted DESCENDING by size. Returns
     (start, end, pad_to) groups. pad_to is the 64-quantized anchor (largest
@@ -109,6 +201,12 @@ class HexfieldEvaluator:
             and self._f16_feats
             and os.environ.get("HEXFIELD_RUST_PACK") == "1"
         )
+        # main_6 Increment-0: cuda.Event GPU-busy instrument (bench-only). Inert
+        # (None) unless HEXFIELD_PERF_TRACE=1, so the production/parity path adds
+        # nothing. See PerfTrace for why nvidia-smi is insufficient.
+        self._perf = (
+            PerfTrace() if os.environ.get("HEXFIELD_PERF_TRACE") == "1" else None
+        )
         if self._use_compile:
             # Keep the eager fallback (suppress_errors) as an unattended-run
             # safety net: if some never-before-seen shape ever fails to compile,
@@ -134,6 +232,11 @@ class HexfieldEvaluator:
         """Synchronous serve (eval arena + the non-overlapped self-play path):
         enqueue the forward and immediately read it back."""
         return self.result(self.submit_payload(payload))
+
+    def perf_trace_report(self) -> dict | None:
+        """Increment-0 GPU-busy report, or None if HEXFIELD_PERF_TRACE is unset.
+        Called by the self-play driver after run_continuous returns."""
+        return self._perf.report() if self._perf is not None else None
 
     @torch.no_grad()
     def submit_payload(self, payload: dict) -> dict:
@@ -197,6 +300,13 @@ class HexfieldEvaluator:
         # _forward_group) so submit only enqueues forwards and select can overlap.
         deferred: list | None = [] if self._defer_decode else None
 
+        # Increment-0 trace: bracket the forward enqueues with cuda.Events on the
+        # forward stream (no extra sync). Read in result() after the D2H sync.
+        perf_events = self._perf.make_events() if self._perf is not None else None
+        if perf_events is not None:
+            self._perf.on_submit()
+            perf_events[0].record()
+
         # Padding-aware grouping (rows arrive size-descending): 64-quantized
         # Npad, batch under the pair ceiling, split to bound padding waste.
         for start, end, pad_to in plan_groups(sizes):
@@ -206,6 +316,9 @@ class HexfieldEvaluator:
                 gpu_logits, deferred,
             )
 
+        if perf_events is not None:
+            perf_events[1].record()
+
         if self._defer_decode:
             # Raw forwards enqueued; the syncing decode happens in result().
             return {
@@ -214,6 +327,7 @@ class HexfieldEvaluator:
                 "request_logits": request_logits,
                 "legal_counts": legal_counts,
                 "deferred": deferred,
+                "perf_events": perf_events,
             }
         # Concatenate on-GPU (still no D2H); the syncs happen in result().
         return {
@@ -225,6 +339,7 @@ class HexfieldEvaluator:
             "ml_gpu": torch.cat(gpu_ml) if request_ml else None,
             "priors_gpu": torch.cat(gpu_priors),
             "logits_gpu": torch.cat(gpu_logits) if request_logits else None,
+            "perf_events": perf_events,
         }
 
     @torch.no_grad()
@@ -258,6 +373,12 @@ class HexfieldEvaluator:
         gpu_ml: list[torch.Tensor] = []
         gpu_logits: list[torch.Tensor] = []
         deferred: list | None = [] if self._defer_decode else None
+
+        # Increment-0 trace: bracket the forward enqueues (see submit_payload).
+        perf_events = self._perf.make_events() if self._perf is not None else None
+        if perf_events is not None:
+            self._perf.on_submit()
+            perf_events[0].record()
 
         for grp in groups:
             start = grp["start"]
@@ -295,6 +416,9 @@ class HexfieldEvaluator:
                 gpu_logits, deferred,
             )
 
+        if perf_events is not None:
+            perf_events[1].record()
+
         if self._defer_decode:
             return {
                 "b": b,
@@ -302,6 +426,7 @@ class HexfieldEvaluator:
                 "request_logits": request_logits,
                 "legal_counts": legal_counts,
                 "deferred": deferred,
+                "perf_events": perf_events,
             }
         return {
             "b": b,
@@ -312,6 +437,7 @@ class HexfieldEvaluator:
             "ml_gpu": torch.cat(gpu_ml) if request_ml else None,
             "priors_gpu": torch.cat(gpu_priors),
             "logits_gpu": torch.cat(gpu_logits) if request_logits else None,
+            "perf_events": perf_events,
         }
 
     @torch.no_grad()
@@ -368,6 +494,10 @@ class HexfieldEvaluator:
                 handle["logits_gpu"].cpu().numpy(), dtype=np.float32
             )
             reply["priors_logits_bytes"] = flat_logits.tobytes()
+        # Increment-0 trace: the .cpu() syncs above guarantee this flush's forward
+        # events are complete; read their elapsed device time now. Bench-only.
+        if self._perf is not None:
+            self._perf.on_result(handle.get("perf_events"), int(b))
         return reply
 
     def _forward_group(

@@ -524,6 +524,13 @@ def generate_selfplay_epoch(*, ctx, components, epoch: int, games_per_epoch: int
         "scheduler": {k: v for k, v in scheduler_stats.items() if not isinstance(v, dict)},
         **driver.stats(),
     }
+    # main_6 Increment-0: attach the cuda.Event GPU-busy report (bench-only;
+    # None unless HEXFIELD_PERF_TRACE=1). Lets a bench compare depth-2 /
+    # complete-overlap ON vs OFF on the PRIMARY metric (busy fraction), not
+    # nvidia-smi. getattr guards evaluators that predate the method.
+    perf_report = getattr(evaluator, "perf_trace_report", lambda: None)()
+    if perf_report is not None:
+        result["perf_trace"] = perf_report
     diag_path = ctx.diagnostics_dir / f"hexfield.selfplay.epoch_{epoch:06d}.json"
     diag_path.write_text(json.dumps(result, indent=2, default=str), encoding="utf-8")
     return result

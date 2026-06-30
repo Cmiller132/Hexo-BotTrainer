@@ -205,7 +205,7 @@ def test_main6_config_loads_with_gumbel_on() -> None:
     assert sp.gumbel_nonroot_select is True
     assert sp.gumbel_c_visit == 50.0
     assert sp.gumbel_c_scale == 1.0
-    assert sp.gumbel_m == 16
+    assert sp.gumbel_m == 32
     assert sp.gumbel_target_min_visits == 1
     assert cfg.training.policy_target == "gumbel"
 
