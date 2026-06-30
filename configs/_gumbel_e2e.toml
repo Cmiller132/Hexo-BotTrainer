@@ -313,7 +313,7 @@ gumbel_c_scale = 1.0
 #   default and suits Hexo's wide branching (337->~1000): large enough to cover
 #   the realistic move set, small enough that each survivor gets a deep ~256+
 #   visit allocation under SH.
-gumbel_m = 16
+gumbel_m = 32
 # gumbel_target_min_visits = 1 — support floor for the #3 target: root actions
 #   with N(a) < this are EXCLUDED from the pi' softmax support (then renormalize),
 #   denying the value head a target write on un-searched cells. 1 keeps any

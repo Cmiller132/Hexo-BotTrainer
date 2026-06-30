@@ -308,12 +308,16 @@ gumbel_target_enabled = true
 #   the validated values, not a hexo-tuned crutch.
 gumbel_c_visit = 50.0
 gumbel_c_scale = 1.0
-# gumbel_m = 16 candidates (clamped to n_legal; opening's forced (0,0) -> m=1).
-#   With budget 1024 this is R=ceil(log2(16))=4 SH rounds. m=16 is the Danihelka
-#   default and suits Hexo's wide branching (337->~1000): large enough to cover
-#   the realistic move set, small enough that each survivor gets a deep ~256+
-#   visit allocation under SH.
-gumbel_m = 16
+# gumbel_m = 32 candidates (clamped to n_legal; opening's forced (0,0) -> m=1).
+#   RAISED 16->32 (2026-06-30): m=16 was the borrowed Danihelka default, not fit
+#   to Hexo's ~300-wide branching — 16/300 ~ 5% coverage starved the completedQ
+#   target (only the top-16-by-(logit+g) moves ever entered the target). With the
+#   generous budget 1024, m=32 -> R=ceil(log2(32))=5 SH rounds, round-1 ~7 visits/
+#   candidate (still healthy for SH) while ~doubling coverage. Bias/variance knob:
+#   larger m = more coverage but fewer visits/candidate = noisier per-move Q in the
+#   target; 32 balances the two for this branching+budget. Plus the TSS tactical
+#   cells are now force-included on top of the m budget (init_gumbel_root).
+gumbel_m = 32
 # gumbel_target_min_visits = 1 — support floor for the #3 target: root actions
 #   with N(a) < this are EXCLUDED from the pi' softmax support (then renormalize),
 #   denying the value head a target write on un-searched cells. 1 keeps any

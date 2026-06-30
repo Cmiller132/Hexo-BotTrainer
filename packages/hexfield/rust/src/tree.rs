@@ -786,8 +786,35 @@ impl RustSearch {
                 .unwrap_or(Ordering::Equal)
                 .then_with(|| a.cmp(&b))
         });
-        action_ids.truncate(m);
-        let survivors = action_ids;
+        // TSS faithfulness: force-include every legal TSS tactical cell in the
+        // candidate set even if its (logit+g) Gumbel score ranks below the top-m.
+        // TSS injects tactical edges so PUCT always searches immediate threats /
+        // refutations; without this, Gumbel's top-m truncation would silently drop
+        // a tactical cell the net underrates, so the line is never searched and
+        // never enters the completedQ target. Tactical cells are ADDED to the m
+        // budget (|tactical| is small), not counted against it.
+        let tactical: HashSet<PackedCoord> = if self.tss_enabled {
+            threats::tactical_cells(&self.root_state)
+                .into_iter()
+                .map(pack_coord)
+                .collect()
+        } else {
+            HashSet::new()
+        };
+        let mut survivors: Vec<PackedCoord> = Vec::with_capacity(m + tactical.len());
+        let mut chosen: HashSet<PackedCoord> = HashSet::with_capacity(m + tactical.len());
+        // 1. top-m by Gumbel score (action_ids already sorted descending).
+        for &a in action_ids.iter().take(m) {
+            if chosen.insert(a) {
+                survivors.push(a);
+            }
+        }
+        // 2. force-include any legal tactical cell not already in the top-m.
+        for &a in &action_ids {
+            if tactical.contains(&a) && chosen.insert(a) {
+                survivors.push(a);
+            }
+        }
         // Restrict the kept g/logits maps to the survivor set.
         let mut g_kept: HashMap<PackedCoord, f32> = HashMap::with_capacity(survivors.len());
         let mut l_kept: HashMap<PackedCoord, f32> = HashMap::with_capacity(survivors.len());
