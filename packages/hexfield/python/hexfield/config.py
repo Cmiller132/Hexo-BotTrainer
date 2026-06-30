@@ -91,6 +91,27 @@ class SelfplayConfig:
     ml_final_pick_band: float = 0.05
     ml_auto_disabled: bool = False
     cache_max_states: int = 262_144
+    # --- main_6 FULL Gumbel AlphaZero (Danihelka et al. 2022) -----------------
+    # All default-OFF: Gumbel is opt-in ONLY via main_6. With every enable flag
+    # False, build_divergence_overrides emits the OFF bools and the Rust paths
+    # are dormant -> production self-play + golden vectors are byte-identical.
+    #   #1 root  : gumbel_root_enabled (Gumbel-Top-k sampling of m candidates)
+    #              + gumbel_sequential_halving (root-only SH visit allocation).
+    #   #2 select: gumbel_nonroot_select (deterministic argmax[logits+σ(Q)]).
+    #   #3 target: gumbel_target_enabled (π'=softmax(logits+σ(completedQ))).
+    # σ(q)=(c_visit+max_b N(b))·c_scale·q ; m = candidate count (clamped to
+    # n_legal at the root); gumbel_target_min_visits = target support floor.
+    # export_root_prior_logits asks the evaluator for the raw pre-softmax policy
+    # logits Rust needs for the σ/Gumbel/target math (off => parity-minimal).
+    gumbel_target_enabled: bool = False
+    gumbel_root_enabled: bool = False
+    gumbel_sequential_halving: bool = False
+    gumbel_nonroot_select: bool = False
+    gumbel_c_visit: float = 50.0
+    gumbel_c_scale: float = 1.0
+    gumbel_m: int = 16
+    gumbel_target_min_visits: int = 1
+    export_root_prior_logits: bool = False
 
 
 @dataclass(frozen=True)
@@ -118,6 +139,12 @@ class TrainingSection:
     # kept as a hardcoded default here to match the existing "defaults =
     # losses.py constants" pattern (config.py does not import losses).
     soft_policy_weight: float = 8.0
+    # main_6 Gumbel S5: which target drives the MAIN policy CE. "visit" (default)
+    # = the visit-count distribution (unchanged); "gumbel" = the improved-policy
+    # target π'=softmax(logits+σ(completedQ)) per-row where present (rows lacking a
+    # gumbel target — fast / old shards — always fall back to visit). Lives on the
+    # TrainingSection (training-side selector), NOT SelfplayConfig.
+    policy_target: str = "visit"
     # --- Policy-surprise self-CE reweight (v3 #5) ----------------------------
     policy_surprise_uniform_fraction: float = 0.5
     policy_surprise_max_weight: float = 8.0
@@ -138,6 +165,11 @@ class TrainingSection:
     no_repeat_files: bool = False
     expand_backend: str = "serial"
     expand_workers: int = 0
+    # main_6 training-side policy-target selector: "visit" (visit-count target,
+    # legacy/default) or "gumbel" (the improved π'=softmax(logits+σ(completedQ))
+    # target, #3). losses.py sources this from TrainingSection (NOT
+    # SelfplayConfig); a row falls back to "visit" when no gumbel target present.
+    policy_target: str = "visit"
 
 
 @dataclass(frozen=True)
@@ -454,6 +486,16 @@ def build_divergence_overrides(sp: SelfplayConfig, *, disabled: bool = False) ->
         "clean_root_prior_cache": bool(sp.clean_root_prior_cache),
         "dirichlet_shaped": bool(sp.dirichlet_shaped),
         "pruned_dynamic_cpuct": bool(sp.pruned_dynamic_cpuct),
+        # main_6 FULL Gumbel AlphaZero (default-OFF; main_6 config opts in). All
+        # concrete bool/float/int — resolve_divergences calls .extract().
+        "gumbel_target": bool(sp.gumbel_target_enabled),
+        "gumbel_root": bool(sp.gumbel_root_enabled),
+        "gumbel_sequential_halving": bool(sp.gumbel_sequential_halving),
+        "gumbel_nonroot_select": bool(sp.gumbel_nonroot_select),
+        "gumbel_c_visit": float(sp.gumbel_c_visit),
+        "gumbel_c_scale": float(sp.gumbel_c_scale),
+        "gumbel_m": int(sp.gumbel_m),
+        "gumbel_target_min_visits": int(sp.gumbel_target_min_visits),
     }
 
 

@@ -40,6 +40,11 @@ class HexfieldSampleData:
     policy: tuple[tuple[int, float], ...]
     opp_policy: tuple[tuple[int, float], ...] = ()
     q_policy: tuple[tuple[int, float], ...] = ()  # (action_id, child Q); parallel to policy
+    # main_6 #3 (Gumbel S5): improved-policy target π'=softmax(logits+σ(completedQ))
+    # as (action_id, weight) over the searched support, and the parallel raw root
+    # logits column (action_id, logit). Empty ⇒ row falls back to the visit target.
+    gumbel_policy: tuple[tuple[int, float], ...] = ()
+    prior_logit: tuple[tuple[int, float], ...] = ()
     value: float = 0.0
     short_term_value: tuple[tuple[int, float], ...] = ()
     moves_left: float = -1.0
@@ -209,6 +214,18 @@ class ExpandedRow:
     cell_q: np.ndarray  # (L,) f32 per-cell Q target over the legal prefix; 0 where absent
     cell_q_mask: np.ndarray  # (L,) f32 presence mask (Q=0.0 is a valid target)
     policy_surprise: float  # KL(visit ‖ prior); collate turns it into the self-CE weight
+    # main_6 #3 (Gumbel S5): dense (L,) improved-policy target (renormalized over
+    # the kept support; sums to 1 when present, all-zero when absent ⇒ visit
+    # fallback) + a presence flag, plus the dense (L,) raw root logits (audit).
+    # Defaulted (empty/0) so pre-Gumbel constructors stay valid (transition-safe);
+    # an empty array ⇒ collate's getattr fallback packs an all-zero target.
+    gumbel_policy: np.ndarray = field(
+        default_factory=lambda: np.zeros(0, dtype=np.float32)
+    )  # (L,) f32; sums to 1 over kept support, else all-zero
+    gumbel_policy_valid: float = 0.0  # 1.0 when a gumbel target was projected
+    prior_logit: np.ndarray = field(
+        default_factory=lambda: np.zeros(0, dtype=np.float32)
+    )  # (L,) f32 raw root logits over the legal prefix (0 where absent)
 
 
 def expand_sample(
@@ -274,6 +291,39 @@ def expand_sample(
             cell_q[slot] = qv  # SCALAR assign (one action -> one distinct cell)
             cell_q_mask[slot] = 1.0
 
+    # main_6 #3 (Gumbel S5): project the improved-policy target π' and the raw
+    # root logits onto THIS row's legal set. gumbel_policy is renormalized over
+    # the KEPT (on-legal) support so it sums to 1 when present; absent ⇒ all-zero
+    # and gumbel_policy_valid=0.0 ⇒ the loss falls back to the visit target.
+    gumbel_policy = np.zeros(legal_count, dtype=np.float32)
+    g_total = 0.0
+    for action_id, weight in sample.gumbel_policy:
+        w = float(weight)
+        if not np.isfinite(w) or w < 0.0:
+            raise ValueError("gumbel policy weights must be finite and nonnegative")
+        slot = _legal_slot(sup, symmetry, int(action_id))
+        if slot is not None:
+            gumbel_policy[slot] += w  # projection onto THIS row's legal set
+            g_total += w
+    gumbel_policy_valid = 0.0
+    if sample.gumbel_policy and g_total > 0.0:
+        gumbel_policy /= g_total  # renormalize over the kept support
+        gumbel_policy_valid = 1.0
+    elif sample.gumbel_policy:
+        # A gumbel target existed but no mass landed on-legal (should not happen
+        # since the support is built from this position's legal edges): fall back
+        # to the visit target rather than emit a degenerate zero distribution.
+        gumbel_policy = np.zeros(legal_count, dtype=np.float32)
+
+    prior_logit = np.zeros(legal_count, dtype=np.float32)
+    for action_id, logit in sample.prior_logit:
+        lv = float(logit)
+        if not np.isfinite(lv):
+            raise ValueError("prior_logit values must be finite")
+        slot = _legal_slot(sup, symmetry, int(action_id))
+        if slot is not None:
+            prior_logit[slot] = lv  # SCALAR assign (one action -> one cell)
+
     horizons = tuple(int(h) for h in horizons)
     stvalue = np.zeros(len(horizons), dtype=np.float32)
     stvalue_mask = np.zeros(len(horizons), dtype=np.float32)
@@ -330,6 +380,9 @@ def expand_sample(
         cell_q=cell_q,
         cell_q_mask=cell_q_mask,
         policy_surprise=float(sample.policy_surprise),
+        gumbel_policy=gumbel_policy,
+        gumbel_policy_valid=gumbel_policy_valid,
+        prior_logit=prior_logit,
     )
 
 

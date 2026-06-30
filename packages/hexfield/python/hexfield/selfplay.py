@@ -168,6 +168,28 @@ class ContinuousDriver:
                 bytes(payload["root_prior_policy_weights_bytes"]), dtype=np.float32
             )
             surprise = _policy_surprise_kl(ids, weights, prior_ids, prior_weights)
+            # main_6 #3 (Gumbel S5): the improved-policy target π' + raw root logits
+            # are present ONLY when gumbel_target is on (Rust omits the keys in
+            # parity/production). Absent ⇒ empty tuples ⇒ visit-target fallback.
+            gumbel_pairs: tuple[tuple[int, float], ...] = ()
+            prior_logit_pairs: tuple[tuple[int, float], ...] = ()
+            if "gumbel_policy_action_ids_bytes" in payload:
+                g_ids = np.frombuffer(
+                    bytes(payload["gumbel_policy_action_ids_bytes"]), dtype=np.uint32
+                )
+                g_weights = np.frombuffer(
+                    bytes(payload["gumbel_policy_weights_bytes"]), dtype=np.float32
+                )
+                gumbel_pairs = tuple(
+                    zip((int(a) for a in g_ids), (float(w) for w in g_weights))
+                )
+                if "root_prior_logits_bytes" in payload:
+                    g_logits = np.frombuffer(
+                        bytes(payload["root_prior_logits_bytes"]), dtype=np.float32
+                    )
+                    prior_logit_pairs = tuple(
+                        zip((int(a) for a in g_ids), (float(l) for l in g_logits))
+                    )
             phase = record_phase(tape.ply)
             first_stone = (
                 (tape.records[-1][0], tape.records[-1][1]) if phase == "SecondStone" else None
@@ -188,6 +210,8 @@ class ContinuousDriver:
                 opp_win=opp_win,
                 policy=tuple(zip((int(a) for a in ids), (float(w) for w in weights))),
                 q_policy=tuple(zip((int(a) for a in ids), (float(q) for q in qs))),
+                gumbel_policy=gumbel_pairs,
+                prior_logit=prior_logit_pairs,
                 policy_surprise=float(surprise),
                 metadata={"pcr_full": True},
             )

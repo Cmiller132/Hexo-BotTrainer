@@ -4,8 +4,9 @@ Consumes the Rust payload (CSR over support nodes, rows pre-sorted by support
 size descending), packs rows into quantized static shapes under the inference
 pair ceiling, runs `forward_policy_value`, and returns the reply: `values_bytes`
 (f32 x B, clamped [-1, 1]), `priors_bytes` (f32 x sum L_g, positional over each
-row's legal prefix, fp32 softmax), and `moves_left_bytes` (f32 x B) when
-requested.
+row's legal prefix, fp32 softmax), `moves_left_bytes` (f32 x B) when requested,
+and `priors_logits_bytes` (f32 x sum L_g, RAW pre-softmax policy logits, same
+positional layout as `priors_bytes`) when `request_logits` is set (Gumbel S2).
 """
 
 from __future__ import annotations
@@ -153,13 +154,19 @@ class HexfieldEvaluator:
         if legal_counts.shape[0] != b:
             raise ValueError("legal_counts byte count mismatch")
         request_ml = bool(payload.get("request_moves_left", False))
+        # Gumbel S2: emit raw pre-softmax policy logits (priors_logits_bytes)
+        # parallel to priors_bytes when asked. Off by default ⇒ no extra column,
+        # reply byte-identical to today.
+        request_logits = bool(payload.get("request_logits", False))
 
         if self._rust_pack:
             # Rust parallel serve-pack: grouping + per-group padding + f16/int
             # buffer assembly happen GIL-free in parallel Rust; consume the
             # zero-copy buffers via torch.frombuffer + .to(device). NO Python
             # plan_groups, NO np_* pad loop, NO astype.
-            return self._submit_rust_pack(payload, b, offsets, legal_counts, request_ml)
+            return self._submit_rust_pack(
+                payload, b, offsets, legal_counts, request_ml, request_logits
+            )
 
         feats16 = np.frombuffer(payload["node_feats"], dtype=np.float16)
         if feats16.shape[0] != total_nodes * NUM_FEATURES:
@@ -185,6 +192,7 @@ class HexfieldEvaluator:
         gpu_priors: list[torch.Tensor] = []
         gpu_values: list[torch.Tensor] = []
         gpu_ml: list[torch.Tensor] = []
+        gpu_logits: list[torch.Tensor] = []
         # DEFER mode: collect raw per-group outputs; decode in result() (see
         # _forward_group) so submit only enqueues forwards and select can overlap.
         deferred: list | None = [] if self._defer_decode else None
@@ -194,7 +202,8 @@ class HexfieldEvaluator:
         for start, end, pad_to in plan_groups(sizes):
             self._forward_group(
                 feats, qr, nbr, offsets, sizes, legal_counts, start, end, pad_to,
-                request_ml, gpu_values, gpu_ml, gpu_priors, deferred,
+                request_ml, request_logits, gpu_values, gpu_ml, gpu_priors,
+                gpu_logits, deferred,
             )
 
         if self._defer_decode:
@@ -202,6 +211,7 @@ class HexfieldEvaluator:
             return {
                 "b": b,
                 "request_ml": request_ml,
+                "request_logits": request_logits,
                 "legal_counts": legal_counts,
                 "deferred": deferred,
             }
@@ -209,14 +219,18 @@ class HexfieldEvaluator:
         return {
             "b": b,
             "request_ml": request_ml,
+            "request_logits": request_logits,
             "legal_counts": legal_counts,
             "values_gpu": torch.cat(gpu_values),
             "ml_gpu": torch.cat(gpu_ml) if request_ml else None,
             "priors_gpu": torch.cat(gpu_priors),
+            "logits_gpu": torch.cat(gpu_logits) if request_logits else None,
         }
 
     @torch.no_grad()
-    def _submit_rust_pack(self, payload, b, offsets, legal_counts, request_ml) -> dict:
+    def _submit_rust_pack(
+        self, payload, b, offsets, legal_counts, request_ml, request_logits
+    ) -> dict:
         """Rust parallel serve-pack consumption (HEXFIELD_RUST_PACK).
 
         Hands the CSR-flat wire bytes (f16 feats, i16 coords, u16 nbr) + the i64
@@ -242,6 +256,7 @@ class HexfieldEvaluator:
         gpu_priors: list[torch.Tensor] = []
         gpu_values: list[torch.Tensor] = []
         gpu_ml: list[torch.Tensor] = []
+        gpu_logits: list[torch.Tensor] = []
         deferred: list | None = [] if self._defer_decode else None
 
         for grp in groups:
@@ -275,24 +290,28 @@ class HexfieldEvaluator:
                 .to(torch.int64)
             )
             self._run_forward(
-                d_feats, d_nbr, d_mask, d_coords, gn, request_ml, legal_counts,
-                start, end, gpu_values, gpu_ml, gpu_priors, deferred,
+                d_feats, d_nbr, d_mask, d_coords, gn, request_ml, request_logits,
+                legal_counts, start, end, gpu_values, gpu_ml, gpu_priors,
+                gpu_logits, deferred,
             )
 
         if self._defer_decode:
             return {
                 "b": b,
                 "request_ml": request_ml,
+                "request_logits": request_logits,
                 "legal_counts": legal_counts,
                 "deferred": deferred,
             }
         return {
             "b": b,
             "request_ml": request_ml,
+            "request_logits": request_logits,
             "legal_counts": legal_counts,
             "values_gpu": torch.cat(gpu_values),
             "ml_gpu": torch.cat(gpu_ml) if request_ml else None,
             "priors_gpu": torch.cat(gpu_priors),
+            "logits_gpu": torch.cat(gpu_logits) if request_logits else None,
         }
 
     @torch.no_grad()
@@ -302,24 +321,28 @@ class HexfieldEvaluator:
         synchronous path."""
         b = handle["b"]
         request_ml = handle["request_ml"]
+        request_logits = handle.get("request_logits", False)
         legal_counts = handle["legal_counts"]
 
         # DEFER mode: the per-group decode/softmax/gather was held out of submit so
         # the forwards could overlap the select pass. Do it now (still BEFORE the one
         # D2H below), then fall through to the identical concat+.cpu() path.
         if "deferred" in handle:
-            gpu_values, gpu_ml, gpu_priors = [], [], []
+            gpu_values, gpu_ml, gpu_priors, gpu_logits = [], [], [], []
             for out, start, end in handle["deferred"]:
-                value, ml, priors_flat = self._decode_group(
-                    out, legal_counts, start, end, request_ml
+                value, ml, priors_flat, logits_flat = self._decode_group(
+                    out, legal_counts, start, end, request_ml, request_logits
                 )
                 gpu_values.append(value)
                 if request_ml:
                     gpu_ml.append(ml)
                 gpu_priors.append(priors_flat)
+                if request_logits:
+                    gpu_logits.append(logits_flat)
             handle["values_gpu"] = torch.cat(gpu_values)
             handle["priors_gpu"] = torch.cat(gpu_priors)
             handle["ml_gpu"] = torch.cat(gpu_ml) if request_ml else None
+            handle["logits_gpu"] = torch.cat(gpu_logits) if request_logits else None
 
         values_out = handle["values_gpu"].cpu().numpy().astype(np.float32, copy=False)
         # priors_gpu is already torch.cat over the per-row legal-prefix priors in
@@ -338,11 +361,19 @@ class HexfieldEvaluator:
             reply["moves_left_bytes"] = (
                 handle["ml_gpu"].cpu().numpy().astype(np.float32, copy=False).tobytes()
             )
+        if request_logits:
+            # Raw pre-softmax logits, SAME positional layout as priors_bytes
+            # (per-row legal prefix, row order). Gumbel S2.
+            flat_logits = np.ascontiguousarray(
+                handle["logits_gpu"].cpu().numpy(), dtype=np.float32
+            )
+            reply["priors_logits_bytes"] = flat_logits.tobytes()
         return reply
 
     def _forward_group(
         self, feats, qr, nbr, offsets, sizes, legal_counts, start, end, pad_to,
-        request_ml, gpu_values, gpu_ml, gpu_priors, deferred=None,
+        request_ml, request_logits, gpu_values, gpu_ml, gpu_priors, gpu_logits,
+        deferred=None,
     ) -> None:
         g = end - start
         # Vectorized host pack: build the padded (g, pad_to, *) numpy buffers in
@@ -388,13 +419,15 @@ class HexfieldEvaluator:
         d_mask = _h2d(batch_mask)
         d_coords = _h2d(batch_coords)
         self._run_forward(
-            d_feats, d_nbr, d_mask, d_coords, g, request_ml, legal_counts,
-            start, end, gpu_values, gpu_ml, gpu_priors, deferred,
+            d_feats, d_nbr, d_mask, d_coords, g, request_ml, request_logits,
+            legal_counts, start, end, gpu_values, gpu_ml, gpu_priors, gpu_logits,
+            deferred,
         )
 
     def _run_forward(
-        self, d_feats, d_nbr, d_mask, d_coords, g, request_ml, legal_counts,
-        start, end, gpu_values, gpu_ml, gpu_priors, deferred,
+        self, d_feats, d_nbr, d_mask, d_coords, g, request_ml, request_logits,
+        legal_counts, start, end, gpu_values, gpu_ml, gpu_priors, gpu_logits,
+        deferred,
     ) -> None:
         """Shared forward tail for BOTH the CSR (_forward_group) and Rust-pack
         (_submit_rust_pack) packers. Takes the four DEVICE tensors already in
@@ -448,13 +481,17 @@ class HexfieldEvaluator:
         if deferred is not None:
             deferred.append((out, start, end))
             return
-        value, ml, priors_flat = self._decode_group(out, legal_counts, start, end, request_ml)
+        value, ml, priors_flat, logits_flat = self._decode_group(
+            out, legal_counts, start, end, request_ml, request_logits
+        )
         gpu_values.append(value)
         if request_ml:
             gpu_ml.append(ml)
         gpu_priors.append(priors_flat)
+        if request_logits:
+            gpu_logits.append(logits_flat)
 
-    def _decode_group(self, out, legal_counts, start, end, request_ml):
+    def _decode_group(self, out, legal_counts, start, end, request_ml, request_logits=False):
         """Per-group serve decode: binned value, moves-left, and the flattened
         legal-prefix prior gather. Holds the two device syncs (group_counts H2D +
         the priors[legal] nonzero); invoked from submit (immediate) or result
@@ -475,4 +512,9 @@ class HexfieldEvaluator:
         legal = col_idx.unsqueeze(0) < group_counts.unsqueeze(1)  # (g, Npad)
         masked = logits.masked_fill(~legal, float("-inf"))
         priors = torch.softmax(masked, dim=1)  # fp32, GPU; rows with l==0 -> NaN
-        return value, ml, priors[legal]
+        # Gumbel S2: gather the RAW (pre-softmax, un-masked) logits over the SAME
+        # legal mask / row-major order as priors[legal], so the flat layout is
+        # positionally identical to priors_bytes. Only when requested (else the
+        # extra gather/D2H is skipped and the reply is byte-identical to today).
+        logits_flat = logits[legal] if request_logits else None
+        return value, ml, priors[legal], logits_flat

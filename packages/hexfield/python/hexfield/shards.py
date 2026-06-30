@@ -26,7 +26,14 @@ from .features import window_scan
 from .samples import STV_HORIZONS, HexfieldSampleData
 
 SCHEMA = "hexfield_compact_v1"
-SCHEMA_VERSION = 1
+# v2 (main_6 Gumbel S5): adds the per-action `gumbel_pol_w` (improved-policy
+# target π' weight, aligned to `pol_act`) and `prior_logit` (raw root logit,
+# aligned to `pol_act`) columns, plus a per-row `gumbel_present` flag. Old (v1)
+# shards lack these columns; the reader is legacy-absent-guarded (q_pol_q
+# discipline) so a mixed v1+v2 corpus loads and v1 rows fall back to the visit
+# target. The accept guard takes BOTH versions.
+SCHEMA_VERSION = 2
+_ACCEPTED_SCHEMA_VERSIONS = (1, 2)
 # The restnet compact-v1 layout the Phase-B adapter reads
 # (dense_cnn_restnet.compact_io.COMPACT_SCHEMA_VERSION). Older restnet shards
 # predate the column entirely, so the adapter is lenient when it is absent but
@@ -105,6 +112,12 @@ def write_compact_shard(
     pol_act: list[np.ndarray] = []
     pol_w: list[np.ndarray] = []
     pol_q: list[np.ndarray] = []  # child Q parallel to pol_act (cell_q head target)
+    # main_6 Gumbel S5: improved-policy target weight + raw root logit, both
+    # aligned to pol_act (0 where the action is outside the gumbel support / has
+    # no logit). gumbel_present marks rows that actually carry a gumbel target.
+    pol_gumbel: list[np.ndarray] = []
+    pol_logit: list[np.ndarray] = []
+    gumbel_present = np.zeros(n, dtype=np.uint8)
     pol_len: list[int] = []
     opp_act: list[np.ndarray] = []
     opp_w: list[np.ndarray] = []
@@ -151,9 +164,20 @@ def write_compact_shard(
         # (q_policy is parallel to policy; the dict guards length == pol_act).
         qmap = {int(a): float(q) for a, q in sample.q_policy}
         pq = np.fromiter((qmap.get(int(a), 0.0) for a in pa.tolist()), dtype=np.float32, count=pa.shape[0])
+        # main_6 Gumbel S5: align π' weight + raw logit to pol_act order (0 where
+        # absent). gumbel_present[i] flags rows that actually carry a target so
+        # the dense reconstruct can distinguish "all-zero target" from "absent".
+        gmap = {int(a): float(w) for a, w in sample.gumbel_policy}
+        lmap = {int(a): float(l) for a, l in sample.prior_logit}
+        pg = np.fromiter((gmap.get(int(a), 0.0) for a in pa.tolist()), dtype=np.float32, count=pa.shape[0])
+        pl = np.fromiter((lmap.get(int(a), 0.0) for a in pa.tolist()), dtype=np.float32, count=pa.shape[0])
+        if sample.gumbel_policy:
+            gumbel_present[i] = 1
         pol_act.append(pa)
         pol_w.append(pw)
         pol_q.append(pq)
+        pol_gumbel.append(pg)
+        pol_logit.append(pl)
         pol_len.append(int(pa.shape[0]))
         oa = np.fromiter((int(a) for a, _ in sample.opp_policy), dtype=np.uint32, count=len(sample.opp_policy))
         ow = np.fromiter((float(w) for _, w in sample.opp_policy), dtype=np.float32, count=len(sample.opp_policy))
@@ -189,6 +213,9 @@ def write_compact_shard(
         "pol_act": _cat(pol_act, np.uint32),
         "pol_w": _cat(pol_w, np.float32),
         "q_pol_q": _cat(pol_q, np.float32),
+        "gumbel_pol_w": _cat(pol_gumbel, np.float32),
+        "prior_logit": _cat(pol_logit, np.float32),
+        "gumbel_present": gumbel_present,
         "pol_off": _concat_offsets(pol_len),
         "policy_surprise": policy_surprise,
         "opp_act": _cat(opp_act, np.uint32),
@@ -220,7 +247,7 @@ def read_compact_shard(path: Path) -> list[HexfieldSampleData]:
 
     with np.load(path) as data:
         arrays = {key: data[key] for key in data.files}
-    if int(arrays["schema_version"]) != SCHEMA_VERSION:
+    if int(arrays["schema_version"]) not in _ACCEPTED_SCHEMA_VERSIONS:
         raise ValueError(f"unsupported hexfield shard schema {int(arrays['schema_version'])}")
 
     n = int(arrays["num_rows"])
@@ -270,6 +297,31 @@ def read_compact_shard(path: Path) -> list[HexfieldSampleData]:
             if "q_pol_q" in arrays
             else ()
         )
+        # main_6 Gumbel S5: reconstruct the per-action π' target + raw logit
+        # (both aligned to pol_act). gumbel_present marks rows that carried a
+        # target; v1 (legacy) shards lack all three columns ⇒ empty tuples ⇒ the
+        # expand/loss falls back to the visit target.
+        gumbel_here = (
+            "gumbel_pol_w" in arrays
+            and "gumbel_present" in arrays
+            and int(arrays["gumbel_present"][i]) == 1
+        )
+        gumbel_policy = (
+            tuple(
+                (int(arrays["pol_act"][k]), float(arrays["gumbel_pol_w"][k]))
+                for k in range(p0, p1)
+            )
+            if gumbel_here
+            else ()
+        )
+        prior_logit = (
+            tuple(
+                (int(arrays["pol_act"][k]), float(arrays["prior_logit"][k]))
+                for k in range(p0, p1)
+            )
+            if gumbel_here and "prior_logit" in arrays
+            else ()
+        )
         out.append(
             HexfieldSampleData(
                 game_id="",
@@ -284,6 +336,8 @@ def read_compact_shard(path: Path) -> list[HexfieldSampleData]:
                 opp_win=_unpack_qr(arrays["opp_win_qr"], arrays["opp_win_off"], i),
                 policy=policy,
                 q_policy=q_policy,
+                gumbel_policy=gumbel_policy,
+                prior_logit=prior_logit,
                 opp_policy=opp_policy,
                 value=float(arrays["value"][i]),
                 short_term_value=stval,

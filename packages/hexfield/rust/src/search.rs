@@ -34,8 +34,8 @@ use crate::payload::{evaluate_state_refs_cached, finish_eval_cached, submit_eval
 use crate::state::states_from_py_states;
 use crate::threats_shared as threats;
 use crate::tree::{
-    random_unit, terminal_value, Divergences, RootDirichletNoise, RustEdge, RustLeaf, RustNode,
-    RustSearch, Widening,
+    gumbel_completed_q, gumbel_sigma, gumbel_softmax, random_unit, terminal_value, Divergences,
+    RootDirichletNoise, RustEdge, RustLeaf, RustNode, RustSearch, Widening,
 };
 
 pub const ACTIVE_ROOT_LIMIT: usize = 512;
@@ -46,6 +46,9 @@ pub const SEED_STREAM_PCR: u64 = 2;
 pub const SEED_STREAM_POLICY_INIT_SELECT: u64 = 3;
 pub const SEED_STREAM_POLICY_INIT_COUNT: u64 = 4;
 pub const SEED_STREAM_POLICY_INIT_SAMPLE: u64 = 5;
+/// main_6 Gumbel-Top-k root draws (§0.8). Dedicated stream so Gumbel noise is
+/// independent of the Dirichlet root-noise stream (id 0) and reproducible.
+pub const SEED_STREAM_GUMBEL: u64 = 6;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MoveClass {
@@ -178,6 +181,17 @@ impl ContinuousMovePolicy {
 
     fn request_moves_left(&self) -> bool {
         self.divergences.moves_left_utility
+    }
+
+    /// Whether the evaluator must emit raw pre-softmax policy logits
+    /// (`priors_logits_bytes`). Any Gumbel mechanism that reads `logits(a)` —
+    /// the improved target (#3), the Gumbel-Top-k root sampler (#1), or the
+    /// deterministic non-root selection (#2) — needs them on the tree. OFF in
+    /// production/parity ⇒ no logits requested, reply byte-identical to today.
+    fn request_logits(&self) -> bool {
+        self.divergences.gumbel_target
+            || self.divergences.gumbel_root
+            || self.divergences.gumbel_nonroot_select
     }
 }
 
@@ -612,6 +626,10 @@ impl HexfieldMctsSession {
             widening_max_children,
         )?;
         let request_ml = divergences.moves_left_utility;
+        // Gumbel S2: request raw logits whenever any Gumbel mechanism reads them.
+        let request_logits = divergences.gumbel_target
+            || divergences.gumbel_root
+            || divergences.gumbel_nonroot_select;
 
         let mut searches: Vec<Option<RustSearch>> = Vec::with_capacity(roots.len());
         let mut missing_indices = Vec::new();
@@ -656,6 +674,7 @@ impl HexfieldMctsSession {
                 Some(&evaluation_stats),
                 self.cache_max_states,
                 request_ml,
+                request_logits,
             )?;
             for ((index, root), evaluation) in missing_indices
                 .into_iter()
@@ -701,6 +720,7 @@ impl HexfieldMctsSession {
             self.cache_max_states,
             virtual_loss,
             request_ml,
+            request_logits,
             &move_temps,
             &baselines,
         )?;
@@ -958,6 +978,16 @@ impl HexfieldMctsSession {
                     ) {
                         search.apply_root_dirichlet_noise(noise);
                     }
+                    // main_6 #1: (re)build the Gumbel-Top-k candidate set + SH
+                    // schedule on a reused root. init_gumbel_root clears any
+                    // stale state from the previous ply first; for a non-Full
+                    // reuse it is cleared so the normal PUCT root runs.
+                    if divergences.gumbel_root && matches!(move_class, MoveClass::Full) {
+                        let gumbel_seed = mix_seed(base_seed, game_key, 0, SEED_STREAM_GUMBEL);
+                        search.init_gumbel_root(gumbel_seed, move_policy.visits_for(move_class));
+                    } else {
+                        search.clear_gumbel_root();
+                    }
                     slot.baseline = search.root_edge_visits().into_iter().collect();
                     slot.search = Some(search);
                     slot.phase = ContinuousPhase::Active;
@@ -1035,6 +1065,7 @@ impl HexfieldMctsSession {
                         &self.evaluation_cache,
                         Some(&evaluation_stats),
                         move_policy.request_moves_left(),
+                        move_policy.request_logits(),
                     )?;
                     let prefetch_result = if no_prefetch {
                         (Vec::new(), false)
@@ -1066,6 +1097,7 @@ impl HexfieldMctsSession {
                         Some(&evaluation_stats),
                         self.cache_max_states,
                         move_policy.request_moves_left(),
+                        move_policy.request_logits(),
                     )?;
                     let prefetch_result = if no_prefetch {
                         (Vec::new(), false)
@@ -1188,6 +1220,7 @@ fn run_searches_to_targets(
     cache_max_states: usize,
     virtual_loss: f32,
     request_moves_left: bool,
+    request_logits: bool,
     move_temps: &[f32],
     baselines: &[HashMap<PackedCoord, u32>],
 ) -> PyResult<()> {
@@ -1260,6 +1293,7 @@ fn run_searches_to_targets(
             Some(evaluation_stats),
             cache_max_states,
             request_moves_left,
+            request_logits,
         )?;
         // Prefetch select with the current batch still pending (pre-backup
         // tree state) — dense's overlap semantics, serial form.
@@ -1436,6 +1470,16 @@ fn select_continuous_pass(
             if !search.needs_visits() {
                 return Ok((Vec::new(), false));
             }
+            // main_6 #1 intra-slot barrier (§0.9): when ALL surviving Gumbel
+            // candidates in THIS slot have reached the current round's per-
+            // candidate cap, halve the survivor set and advance the SH round.
+            // No-op unless a SH Gumbel root is active. Fired per-slot (no cross-
+            // slot barrier) so the global flush/par_iter_mut hot path is intact.
+            // Loop because once cap-equal, advancing may immediately satisfy the
+            // next round's barrier (e.g. tiny budgets) and we must not deadlock.
+            if search.has_gumbel_root() {
+                while search.maybe_advance_gumbel_round() {}
+            }
             let (leaves, progressed, added_in_flight) =
                 select_continuous_leaves(search, slot_index, c_puct, cap, virtual_loss)?;
             slot.in_flight = slot.in_flight.saturating_add(added_in_flight);
@@ -1496,7 +1540,7 @@ fn backup_continuous_items(
                     slot.policy_init_remaining,
                 );
                 slot.move_class = move_class;
-                let search = RustSearch::new(
+                let mut search = RustSearch::new(
                     state,
                     &**evaluation,
                     move_policy.visits_for(move_class),
@@ -1517,6 +1561,14 @@ fn backup_continuous_items(
                     return Err(PyValueError::new_err(
                         "hexfield continuous MCTS root has no legal actions",
                     ));
+                }
+                // main_6 #1: build the Gumbel-Top-k candidate set + SH schedule
+                // for Full moves when gumbel_root is on. No-op otherwise (the
+                // search keeps the normal PUCT root). budget = the move's visits.
+                if divergences.gumbel_root && matches!(move_class, MoveClass::Full) {
+                    let gumbel_seed =
+                        mix_seed(base_seed, slot.game_key, slot.ply, SEED_STREAM_GUMBEL);
+                    search.init_gumbel_root(gumbel_seed, move_policy.visits_for(move_class));
                 }
                 slot.baseline = search.root_edge_visits().into_iter().collect();
                 slot.search = Some(search);
@@ -1854,6 +1906,31 @@ fn resolve_divergences(
         if let Some(v) = overrides.get_item("pruned_dynamic_cpuct")? {
             dv.pruned_dynamic_cpuct = v.extract()?;
         }
+        // main_6 FULL Gumbel AlphaZero flags (default-OFF; main_6 config opts in).
+        if let Some(v) = overrides.get_item("gumbel_target")? {
+            dv.gumbel_target = v.extract()?;
+        }
+        if let Some(v) = overrides.get_item("gumbel_root")? {
+            dv.gumbel_root = v.extract()?;
+        }
+        if let Some(v) = overrides.get_item("gumbel_sequential_halving")? {
+            dv.gumbel_sequential_halving = v.extract()?;
+        }
+        if let Some(v) = overrides.get_item("gumbel_nonroot_select")? {
+            dv.gumbel_nonroot_select = v.extract()?;
+        }
+        if let Some(v) = overrides.get_item("gumbel_c_visit")? {
+            dv.gumbel_c_visit = v.extract()?;
+        }
+        if let Some(v) = overrides.get_item("gumbel_c_scale")? {
+            dv.gumbel_c_scale = v.extract()?;
+        }
+        if let Some(v) = overrides.get_item("gumbel_m")? {
+            dv.gumbel_m = v.extract()?;
+        }
+        if let Some(v) = overrides.get_item("gumbel_target_min_visits")? {
+            dv.gumbel_target_min_visits = v.extract()?;
+        }
     }
     Ok(dv)
 }
@@ -1958,6 +2035,24 @@ fn build_search_result_payloads(
             to_bytes_f32(&root_prior_weights),
         )?;
         result.set_item("root_prior_policy_count", root_prior_action_ids.len())?;
+        // main_6 #3 (S5): improved-policy target π'=softmax(logits+σ(completedQ)).
+        // Exported ONLY when gumbel_target is on so parity payloads stay byte-
+        // identical (no new keys). The raw root logits column ships alongside for
+        // offline audit / Route-A rebuild. Flag off ⇒ none of these keys appear.
+        let div = &search.divergences;
+        if div.gumbel_target {
+            let (gumbel_ids, gumbel_weights, gumbel_logits) = gumbel_target_policy(
+                root,
+                div.gumbel_c_visit,
+                div.gumbel_c_scale,
+                div.gumbel_target_min_visits,
+            );
+            result.set_item("gumbel_policy_action_ids_bytes", to_bytes(&gumbel_ids))?;
+            result.set_item("gumbel_policy_weights_bytes", to_bytes_f32(&gumbel_weights))?;
+            result.set_item("gumbel_policy_count", gumbel_ids.len())?;
+            // Raw pre-softmax logits aligned to gumbel_policy_action_ids order.
+            result.set_item("root_prior_logits_bytes", to_bytes_f32(&gumbel_logits))?;
+        }
         result.set_item("root_value", root.value())?;
         result.set_item("visits", policy_total)?;
         let diag = PyDict::new(py);
@@ -2021,6 +2116,56 @@ fn root_prior_policy(root: &RustNode) -> (Vec<PackedCoord>, Vec<f32>) {
         }
     }
     (action_ids, weights)
+}
+
+/// main_6 #3 (S5): the improved-policy TARGET π'(a)=softmax(logits+σ(completedQ))
+/// over the root candidate support (§0.3). Returns (action_ids, weights,
+/// raw_logits) — the raw-logits column is exported alongside so the target can
+/// be audited / rebuilt offline (Route A fallback). Only the ROOT's own edges
+/// form the support (the searched candidate set); v_mix (§0.2) fills completedQ
+/// for an in-support edge that happens to be unvisited.
+///
+/// **Support floor (§S5):** edges with `N(a) < min_visits` are EXCLUDED from the
+/// softmax support before the softmax (then it renormalizes over the survivors),
+/// denying the value head a target write on un-searched cells. Falls back to the
+/// full edge set if the floor would empty the support (degenerate guard).
+fn gumbel_target_policy(
+    root: &RustNode,
+    c_visit: f32,
+    c_scale: f32,
+    min_visits: u32,
+) -> (Vec<PackedCoord>, Vec<f32>, Vec<f32>) {
+    let logit_map = root.root_logits.clone().unwrap_or_default();
+    // completedQ map + the v_mix visited-weighted fallback (shared with #1/#2).
+    let (completed, v_mix) = gumbel_completed_q(root, &logit_map);
+    let max_n = root.edges.iter().map(|e| e.visits).max().unwrap_or(0);
+
+    // Candidate support = root edges meeting the visit floor (§S5 support floor).
+    let mut in_support: Vec<&RustEdge> = root
+        .edges
+        .iter()
+        .filter(|edge| edge.visits >= min_visits)
+        .collect();
+    // Degenerate guard: if the floor empties the support, fall back to all edges.
+    if in_support.is_empty() {
+        in_support = root.edges.iter().collect();
+    }
+
+    // Deterministic action_id order (mirrors root_prior_policy's stable order).
+    in_support.sort_unstable_by_key(|edge| edge.action_id);
+
+    let mut action_ids = Vec::with_capacity(in_support.len());
+    let mut logits = Vec::with_capacity(in_support.len());
+    let mut scores = Vec::with_capacity(in_support.len());
+    for edge in &in_support {
+        let l = logit_map.get(&edge.action_id).copied().unwrap_or(0.0);
+        let q = completed.get(&edge.action_id).copied().unwrap_or(v_mix);
+        action_ids.push(edge.action_id);
+        logits.push(l);
+        scores.push(l + gumbel_sigma(q, max_n, c_visit, c_scale));
+    }
+    let weights = gumbel_softmax(&scores);
+    (action_ids, weights, logits)
 }
 
 fn validate_search_inputs(visits: u32, c_puct: f32, temperature: f32) -> PyResult<()> {

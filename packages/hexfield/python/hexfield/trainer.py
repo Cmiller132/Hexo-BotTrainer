@@ -572,6 +572,7 @@ class HexfieldTrainer:
                     short_term_value_weight=tcfg.short_term_value_weight,
                     moves_left_weight=tcfg.moves_left_weight,
                     q_head_weight=tcfg.q_head_weight,
+                    policy_target=tcfg.policy_target,
                     denominators=denoms,
                 )
                 if not torch.isfinite(loss):

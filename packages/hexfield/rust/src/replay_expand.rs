@@ -121,6 +121,12 @@ struct RowFacts {
     // (action_id, weight)
     policy: Vec<(u32, f32)>,
     q_policy: Vec<(u32, f32)>,
+    // main_6 Gumbel S5: improved-policy target π' + raw root logits, both as
+    // (action_id, value) aligned to `policy`. `gumbel_present` == 0 ⇒ no target
+    // (the projection emits an all-zero gumbel_policy + gumbel_policy_valid 0).
+    gumbel_policy: Vec<(u32, f32)>,
+    prior_logit: Vec<(u32, f32)>,
+    gumbel_present: u8,
     opp_policy: Vec<(u32, f32)>,
     policy_surprise: f32,
     value: f32,
@@ -152,6 +158,12 @@ struct RowOut {
     opp_policy: Vec<f32>,
     cell_q: Vec<f32>,
     cell_q_mask: Vec<f32>,
+    // main_6 Gumbel S5: dense (legal_count) improved-policy target (renormalized
+    // over kept support, all-zero when absent) + a presence flag + the dense
+    // (legal_count) raw root logits. Element-identical twin of expand_sample.
+    gumbel_policy: Vec<f32>,
+    gumbel_policy_valid: f32,
+    prior_logit: Vec<f32>,
     policy_surprise: f32,
     // f64: the serial oracle's opp_coverage is a PYTHON float (f64 ratio of f64-
     // accumulated sums). Emitting it as f64 makes it bit-identical to the oracle
@@ -610,6 +622,50 @@ fn expand_one(
         }
     }
 
+    // (5c) main_6 Gumbel S5: improved-policy target π' projection + raw root
+    // logits. EXACT twin of samples.expand_sample: project the per-action π'
+    // weights onto this row's legal set, renormalize over the KEPT (on-legal)
+    // support so the dense target sums to 1 when present; absent (gumbel_present
+    // == 0 ⇒ empty facts.gumbel_policy) ⇒ all-zero + gumbel_policy_valid 0.0 ⇒
+    // the loss falls back to the visit target. prior_logit is a scalar assign.
+    let mut gumbel_policy = vec![0f32; legal_count];
+    let mut g_total = 0.0f32;
+    for &(action_id, w) in &facts.gumbel_policy {
+        if !w.is_finite() || w < 0.0 {
+            return Err(ExpandErr::Hard(
+                "gumbel policy weights must be finite and nonnegative".to_string(),
+            ));
+        }
+        if let Some(slot) = legal_slot(&sup, sym, action_id) {
+            gumbel_policy[slot] += w;
+            g_total += w;
+        }
+    }
+    let gumbel_policy_valid = if !facts.gumbel_policy.is_empty() && g_total > 0.0 {
+        for w in gumbel_policy.iter_mut() {
+            *w /= g_total; // renormalize over the kept support
+        }
+        1.0f32
+    } else {
+        // A target existed but no mass landed on-legal, or no target at all:
+        // emit an all-zero distribution + valid 0.0 (visit fallback).
+        for w in gumbel_policy.iter_mut() {
+            *w = 0.0;
+        }
+        0.0f32
+    };
+    let mut prior_logit = vec![0f32; legal_count];
+    for &(action_id, l) in &facts.prior_logit {
+        if !l.is_finite() {
+            return Err(ExpandErr::Hard(
+                "prior_logit values must be finite".to_string(),
+            ));
+        }
+        if let Some(slot) = legal_slot(&sup, sym, action_id) {
+            prior_logit[slot] = l; // SCALAR assign (one action -> one cell)
+        }
+    }
+
     // (6) STV + moves_left — D6-invariant. The serial oracle rebuilds stvalue
     // from `short_term_value()`, which keeps ONLY masked columns; unmasked
     // columns stay 0.0. The writer already stores 0.0 in unmasked stvalue slots,
@@ -689,6 +745,9 @@ fn expand_one(
         opp_policy: opp,
         cell_q,
         cell_q_mask,
+        gumbel_policy,
+        gumbel_policy_valid,
+        prior_logit,
         policy_surprise: facts.policy_surprise,
         opp_coverage,
         value: facts.value,
@@ -818,6 +877,27 @@ fn col_typed<'a, T: Copy>(
     Ok(unsafe { std::mem::transmute::<&[T], &'a [T]>(typed) })
 }
 
+/// Optional variant of [`col_typed`]: returns `None` when the column is absent
+/// (forward-compat with an older packed window that predates the Gumbel S5
+/// columns — `gumbel_present` / `gumbel_pol_w` / `prior_logit`). Present-but-
+/// wrong-length still errors via `as_typed`.
+fn col_typed_opt<'a, T: Copy>(
+    columns: &'a Bound<'_, PyDict>,
+    key: &str,
+    count: usize,
+) -> PyResult<Option<&'a [T]>> {
+    match columns.get_item(key)? {
+        Some(item) => {
+            let bytes = item.downcast::<PyBytes>()?.as_bytes();
+            let typed = as_typed::<T>(bytes, count, key)?;
+            Ok(Some(unsafe {
+                std::mem::transmute::<&[T], &'a [T]>(typed)
+            }))
+        }
+        None => Ok(None),
+    }
+}
+
 // =============================================================================
 // Entry point — expand a window's rows under their pre-drawn D6 (PLAN §4.2).
 // =============================================================================
@@ -884,6 +964,10 @@ pub fn expand_shard_train<'py>(
     let outcome_valid = col_typed::<u8>(columns, "outcome_valid", n)?;
     // policy_valid[i] (u8): 1 full / 0 fast. Gates policy/opp/soft/cell_q.
     let policy_valid = col_typed::<u8>(columns, "policy_valid", n)?;
+    // main_6 Gumbel S5: gumbel_present[i] (u8): 1 ⇒ this row carries a π' target.
+    // Optional ⇒ None for an older packed window ⇒ every row treated as absent
+    // (visit fallback). Default 0 keeps parity byte-identical.
+    let gumbel_present = col_typed_opt::<u8>(columns, "gumbel_present", n)?;
     let stvalue = col_typed::<f32>(columns, "stvalue", n * horizons_len)?;
     let stvalue_mask = col_typed::<f32>(columns, "stvalue_mask", n * horizons_len)?;
 
@@ -906,6 +990,10 @@ pub fn expand_shard_train<'py>(
     let pol_act = col_typed::<u32>(columns, "pol_act", pol_total)?;
     let pol_w = col_typed::<f32>(columns, "pol_w", pol_total)?;
     let q_pol_q = col_typed::<f32>(columns, "q_pol_q", pol_total)?;
+    // main_6 Gumbel S5: π' weight + raw logit, aligned to pol_act (optional ⇒
+    // None for an older window ⇒ no gumbel target read).
+    let gumbel_pol_w = col_typed_opt::<f32>(columns, "gumbel_pol_w", pol_total)?;
+    let prior_logit_col = col_typed_opt::<f32>(columns, "prior_logit", pol_total)?;
     let opp_act = col_typed::<u32>(columns, "opp_act", opp_total)?;
     let opp_w = col_typed::<f32>(columns, "opp_w", opp_total)?;
     let own_hot_qr = col_typed::<i16>(columns, "own_hot_qr", 2 * *own_hot_off.last().unwrap() as usize)?;
@@ -945,6 +1033,21 @@ pub fn expand_shard_train<'py>(
         let p1 = pol_off[i + 1] as usize;
         let policy: Vec<(u32, f32)> = (p0..p1).map(|k| (pol_act[k], pol_w[k])).collect();
         let q_policy: Vec<(u32, f32)> = (p0..p1).map(|k| (pol_act[k], q_pol_q[k])).collect();
+        // main_6 Gumbel S5: only carry the π' target / logits when this row is
+        // flagged present (and the columns exist); else empty ⇒ visit fallback.
+        let row_gumbel_present = gumbel_present.map(|g| g[i]).unwrap_or(0);
+        let (gumbel_policy, prior_logit_facts): (Vec<(u32, f32)>, Vec<(u32, f32)>) =
+            if row_gumbel_present != 0 {
+                let gp = gumbel_pol_w
+                    .map(|g| (p0..p1).map(|k| (pol_act[k], g[k])).collect())
+                    .unwrap_or_default();
+                let pl = prior_logit_col
+                    .map(|l| (p0..p1).map(|k| (pol_act[k], l[k])).collect())
+                    .unwrap_or_default();
+                (gp, pl)
+            } else {
+                (Vec::new(), Vec::new())
+            };
         let o0 = opp_off[i] as usize;
         let o1 = opp_off[i + 1] as usize;
         let opp_policy: Vec<(u32, f32)> = (o0..o1).map(|k| (opp_act[k], opp_w[k])).collect();
@@ -966,6 +1069,9 @@ pub fn expand_shard_train<'py>(
             opp_win: qr_pairs(opp_win_qr, opp_win_off[i] as usize, opp_win_off[i + 1] as usize),
             policy,
             q_policy,
+            gumbel_policy,
+            prior_logit: prior_logit_facts,
+            gumbel_present: row_gumbel_present,
             opp_policy,
             policy_surprise: policy_surprise[i],
             value: value[i],
@@ -1008,6 +1114,9 @@ pub fn expand_shard_train<'py>(
                 opp_policy: Vec::new(),
                 cell_q: Vec::new(),
                 cell_q_mask: Vec::new(),
+                gumbel_policy: Vec::new(),
+                gumbel_policy_valid: 0.0,
+                prior_logit: Vec::new(),
                 policy_surprise: 0.0,
                 opp_coverage: 1.0,
                 value: 0.0,
@@ -1040,6 +1149,11 @@ pub fn expand_shard_train<'py>(
     let mut opp_policy = Vec::with_capacity(total_legal);
     let mut cell_q = Vec::with_capacity(total_legal);
     let mut cell_q_mask = Vec::with_capacity(total_legal);
+    // main_6 Gumbel S5 outputs: dense π' + raw logits follow pol_off; the
+    // present flag is per-row.
+    let mut gumbel_policy = Vec::with_capacity(total_legal);
+    let mut prior_logit_out = Vec::with_capacity(total_legal);
+    let mut gumbel_policy_valid_out = Vec::with_capacity(r);
     let mut policy_surprise_out = Vec::with_capacity(r);
     let mut opp_coverage: Vec<f64> = Vec::with_capacity(r);
     let mut value_out = Vec::with_capacity(r);
@@ -1065,6 +1179,9 @@ pub fn expand_shard_train<'py>(
         opp_policy.extend_from_slice(&row.opp_policy);
         cell_q.extend_from_slice(&row.cell_q);
         cell_q_mask.extend_from_slice(&row.cell_q_mask);
+        gumbel_policy.extend_from_slice(&row.gumbel_policy);
+        prior_logit_out.extend_from_slice(&row.prior_logit);
+        gumbel_policy_valid_out.push(row.gumbel_policy_valid);
         policy_surprise_out.push(row.policy_surprise);
         opp_coverage.push(row.opp_coverage);
         value_out.push(row.value);
@@ -1101,6 +1218,14 @@ pub fn expand_shard_train<'py>(
     out.set_item("stvalue_mask", Py::new(py, RxF32Buf { data: stvalue_mask_out })?)?;
     out.set_item("cell_q", Py::new(py, RxF32Buf { data: cell_q })?)?;
     out.set_item("cell_q_mask", Py::new(py, RxF32Buf { data: cell_q_mask })?)?;
+    // main_6 Gumbel S5: dense π' target (follows pol_off), per-row present flag,
+    // dense raw logits. Element-identical twin of samples.expand_sample.
+    out.set_item("gumbel_policy", Py::new(py, RxF32Buf { data: gumbel_policy })?)?;
+    out.set_item(
+        "gumbel_policy_valid",
+        Py::new(py, RxF32Buf { data: gumbel_policy_valid_out })?,
+    )?;
+    out.set_item("prior_logit", Py::new(py, RxF32Buf { data: prior_logit_out })?)?;
     out.set_item("policy_surprise", Py::new(py, RxF32Buf { data: policy_surprise_out })?)?;
     out.set_item("num_rows", r)?;
     out.set_item("num_features", NUM_FEATURES)?;

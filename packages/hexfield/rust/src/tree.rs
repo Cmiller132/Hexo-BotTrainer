@@ -117,6 +117,31 @@ pub struct Divergences {
     /// [7] recorded-target forced-playout pruning uses the dynamic c_for(N)
     /// (matching selection), vs static c_puct. parity()=false (legacy static).
     pub pruned_dynamic_cpuct: bool,
+    // === main_6 FULL Gumbel AlphaZero divergences (Danihelka et al. 2022). ===
+    // All default OFF in BOTH parity() and production() — Gumbel is opt-in ONLY
+    // via the main_6 config, so production() stays KataGo-PUCT and the M5/M6
+    // golden vectors stay byte-identical. `gumbel()` flips the four bools ON.
+    /// #3 improved-policy target export: train the policy head against
+    /// π'(a)=softmax(logits+σ(completedQ)). OFF => visit-count target.
+    pub gumbel_target: bool,
+    /// #1 Gumbel-Top-k root candidate sampling (replaces Dirichlet+temperature
+    /// root diversity). OFF => PUCT+Dirichlet root.
+    pub gumbel_root: bool,
+    /// #1 Sequential-Halving root budget allocation over the Gumbel-Top-m
+    /// candidates (ROOT-ONLY). Requires `gumbel_root`. OFF => normal PUCT visits.
+    pub gumbel_sequential_halving: bool,
+    /// #2 deterministic non-root selection: canonical visit-regularized rule
+    /// argmax[π'(a) − N(a)/(1+ΣN)], π'=softmax(logits+σ(completedQ)) (no
+    /// PUCT/c_puct/FPU/widening at interior nodes). OFF => PUCT interior.
+    pub gumbel_nonroot_select: bool,
+    /// σ transform constants (§0.1): σ(q)=(c_visit+max_b N(b))·c_scale·q.
+    pub gumbel_c_visit: f32,
+    pub gumbel_c_scale: f32,
+    /// #1 candidate count m for Gumbel-Top-k (clamped to n_legal at the root).
+    pub gumbel_m: u32,
+    /// #3 support floor: actions with N(a) < this are excluded from the target
+    /// softmax support (then renormalized over survivors).
+    pub gumbel_target_min_visits: u32,
 }
 
 impl Divergences {
@@ -146,6 +171,15 @@ impl Divergences {
             clean_root_prior_cache: false,
             dirichlet_shaped: false,
             pruned_dynamic_cpuct: false,
+            // main_6 Gumbel: OFF in parity (golden vectors byte-identical).
+            gumbel_target: false,
+            gumbel_root: false,
+            gumbel_sequential_halving: false,
+            gumbel_nonroot_select: false,
+            gumbel_c_visit: 50.0,
+            gumbel_c_scale: 1.0,
+            gumbel_m: 16,
+            gumbel_target_min_visits: 1,
         }
     }
 
@@ -165,6 +199,20 @@ impl Divergences {
             dirichlet_shaped: true,
             pruned_dynamic_cpuct: true,
             ..Self::parity()
+        }
+    }
+
+    /// main_6 FULL Gumbel AlphaZero profile (Danihelka et al. 2022): starts from
+    /// `production()` (KataGo-PUCT base + all main_4 fixes) and flips the four
+    /// Gumbel mechanism bools ON, with the σ/m scalars at their canonical
+    /// defaults. Used by tests; `main_6` opts in via the gumbel config knobs.
+    pub fn gumbel() -> Self {
+        Self {
+            gumbel_target: true,
+            gumbel_root: true,
+            gumbel_sequential_halving: true,
+            gumbel_nonroot_select: true,
+            ..Self::production()
         }
     }
 }
@@ -267,6 +315,13 @@ pub struct RustNode {
     pub edges: Vec<RustEdge>,
     pub priors: NodePriors,
     pub max_eligible_children: usize,
+    /// Raw pre-softmax policy logits for this node's legal actions, keyed by
+    /// action_id (Gumbel S2). `None` unless the evaluator emitted
+    /// `priors_logits_bytes` for this node (i.e. a Gumbel mechanism requested
+    /// them). Stored RAW: never temperature-shaped, normalized, or Dirichlet-
+    /// noised — so σ/Gumbel/completedQ read true logits. Carried onto BOTH the
+    /// root and interior nodes so #1/#2/#3 can look up `logits(a)`.
+    pub root_logits: Option<HashMap<PackedCoord, f32>>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -373,6 +428,10 @@ pub struct RustSearch {
     clean_root_priors: Option<HashMap<PackedCoord, f32>>,
     active_edge_count: usize,
     max_active_edges_per_node: usize,
+    /// main_6 #1: per-root Gumbel-Top-k candidate set + Sequential-Halving state
+    /// (§0.6/§0.9). `Some` only when `gumbel_root` is on for a Full move; `None`
+    /// otherwise ⇒ the normal PUCT root path runs unchanged (parity/production).
+    gumbel_root: Option<GumbelRootState>,
 }
 
 pub struct RustSelectedLeaf {
@@ -439,6 +498,7 @@ impl RustSearch {
             clean_root_priors,
             active_edge_count: 0,
             max_active_edges_per_node: 0,
+            gumbel_root: None,
         })
     }
 
@@ -670,6 +730,193 @@ impl RustSearch {
             .collect()
     }
 
+    /// True when a Gumbel-Top-k root candidate set is active on this search.
+    pub fn has_gumbel_root(&self) -> bool {
+        self.gumbel_root.is_some()
+    }
+
+    /// Tear down any Gumbel root state (e.g. when a slot transitions to a
+    /// non-Full move on reuse). Idempotent.
+    pub fn clear_gumbel_root(&mut self) {
+        self.gumbel_root = None;
+    }
+
+    /// main_6 #1: build the Gumbel-Top-k root candidate set (§0.5) and seed the
+    /// Sequential-Halving schedule (§0.6). Draws g(a)~Gumbel(0,1) per legal root
+    /// action from `seed` (the SEED_STREAM_GUMBEL-mixed per-root seed), takes the
+    /// top `min(m, n_legal)` by `logits(a)+g(a)`, and lays out the SH rounds over
+    /// `budget` visits. No-op (clears state) unless `gumbel_root` is on AND the
+    /// root carries raw logits (S2). `sequential_halving` selects SH vs the
+    /// intermediate "top-m + PUCT" mode.
+    pub fn init_gumbel_root(&mut self, seed: u64, budget: u32) {
+        self.gumbel_root = None;
+        if !self.divergences.gumbel_root {
+            return;
+        }
+        // RAW per-action logits must be present (S2). Without them we cannot do
+        // the Gumbel-max draw faithfully, so fall back to PUCT (state stays None).
+        let Some(logit_map) = self.nodes[0].root_logits.clone() else {
+            return;
+        };
+        // Legal root action ids: edges (nucleus) + any unexpanded candidates, so
+        // the Gumbel draw covers the FULL legal set (not just the nucleus head).
+        let mut action_ids: Vec<PackedCoord> =
+            self.nodes[0].edges.iter().map(|e| e.action_id).collect();
+        for (action_id, _) in self.nodes[0].remaining_priors() {
+            action_ids.push(action_id);
+        }
+        if action_ids.is_empty() {
+            return;
+        }
+        // g(a) per action from a dedicated per-action sub-stream of `seed`.
+        let mut gumbel: HashMap<PackedCoord, f32> = HashMap::with_capacity(action_ids.len());
+        for &action_id in &action_ids {
+            let g = gumbel_draw(seed.wrapping_add(action_id as u64));
+            gumbel.insert(action_id, g);
+        }
+        // Top-m by logits(a)+g(a) (Gumbel-max sampling-without-replacement).
+        let m = (self.divergences.gumbel_m as usize)
+            .min(action_ids.len())
+            .max(1);
+        action_ids.sort_by(|&a, &b| {
+            let sa = logit_map.get(&a).copied().unwrap_or(0.0) + gumbel[&a];
+            let sb = logit_map.get(&b).copied().unwrap_or(0.0) + gumbel[&b];
+            // Descending by score; ties broken by action_id for determinism.
+            sb.partial_cmp(&sa)
+                .unwrap_or(Ordering::Equal)
+                .then_with(|| a.cmp(&b))
+        });
+        action_ids.truncate(m);
+        let survivors = action_ids;
+        // Restrict the kept g/logits maps to the survivor set.
+        let mut g_kept: HashMap<PackedCoord, f32> = HashMap::with_capacity(survivors.len());
+        let mut l_kept: HashMap<PackedCoord, f32> = HashMap::with_capacity(survivors.len());
+        for &a in &survivors {
+            g_kept.insert(a, gumbel[&a]);
+            l_kept.insert(a, logit_map.get(&a).copied().unwrap_or(0.0));
+        }
+        let sequential_halving = self.divergences.gumbel_sequential_halving;
+        let num_rounds = if sequential_halving {
+            GumbelRootState::rounds_for(survivors.len())
+        } else {
+            0
+        };
+        let mut state = GumbelRootState {
+            survivors,
+            gumbel: g_kept,
+            logits: l_kept,
+            budget,
+            num_rounds,
+            round: 0,
+            round_cap: HashMap::new(),
+            sequential_halving,
+        };
+        if sequential_halving {
+            self.seed_gumbel_round_caps(&mut state);
+        }
+        self.gumbel_root = Some(state);
+    }
+
+    /// Compute the per-survivor cumulative visit caps for the CURRENT round
+    /// (§0.6): each survivor must reach `entry_visits + floor(n/(R·|A_r|))`
+    /// (min 1). Reads each survivor's current root-edge visit count as its
+    /// round-entry baseline. The last round absorbs any budget remainder so the
+    /// total played visits don't undershoot the move budget.
+    fn seed_gumbel_round_caps(&self, state: &mut GumbelRootState) {
+        let entry: HashMap<PackedCoord, u32> = self
+            .nodes[0]
+            .edges
+            .iter()
+            .map(|e| (e.action_id, e.visits))
+            .collect();
+        state.round_cap.clear();
+        // The single final survivor absorbs ALL remaining budget: its cap is
+        // effectively unbounded so the slot keeps visiting it until the move's
+        // target_visits is reached (the scheduler's needs_visits() gate ends it).
+        if state.survivors.len() <= 1 {
+            for &a in &state.survivors {
+                state.round_cap.insert(a, u32::MAX);
+            }
+            return;
+        }
+        let a_r = state.survivors.len() as u32;
+        let r = state.num_rounds.max(1);
+        // Equal per-survivor quota for this round (§0.6: floor(n/(R·|A_r|))).
+        let per = (state.budget / (r * a_r)).max(1);
+        for &a in &state.survivors {
+            let base = entry.get(&a).copied().unwrap_or(0);
+            state.round_cap.insert(a, base.saturating_add(per));
+        }
+    }
+
+    /// main_6 #1 intra-slot barrier (§0.9): if every surviving candidate has met
+    /// its current-round cap, rank survivors by `g(a)+logits(a)+σ(completedQ(a))`,
+    /// keep the top `ceil(|A_r|/2)`, advance the round, and re-seed caps. No-op
+    /// unless a SH Gumbel root is active and the barrier condition holds. Returns
+    /// true when a halving fired (telemetry).
+    pub fn maybe_advance_gumbel_round(&mut self) -> bool {
+        let Some(state) = self.gumbel_root.as_ref() else {
+            return false;
+        };
+        if !state.sequential_halving || state.survivors.len() <= 1 || state.round >= state.num_rounds
+        {
+            return false;
+        }
+        // Intra-slot barrier: ALL survivors must have reached their round cap.
+        let visits: HashMap<PackedCoord, u32> = self
+            .nodes[0]
+            .edges
+            .iter()
+            .map(|e| (e.action_id, e.visits))
+            .collect();
+        let all_met = state.survivors.iter().all(|a| {
+            let v = visits.get(a).copied().unwrap_or(0);
+            let cap = state.round_cap.get(a).copied().unwrap_or(0);
+            v >= cap
+        });
+        if !all_met {
+            return false;
+        }
+        // Rank survivors by the canonical SH score g(a)+logits(a)+σ(completedQ(a)).
+        let root = &self.nodes[0];
+        let logit_map = root.root_logits.clone().unwrap_or_default();
+        let (completed, _v_mix) = gumbel_completed_q(root, &logit_map);
+        let max_n = root.edges.iter().map(|e| e.visits).max().unwrap_or(0);
+        let c_visit = self.divergences.gumbel_c_visit;
+        let c_scale = self.divergences.gumbel_c_scale;
+        let state = self.gumbel_root.as_ref().expect("checked above");
+        let mut ranked: Vec<(PackedCoord, f32)> = state
+            .survivors
+            .iter()
+            .map(|&a| {
+                let g = state.gumbel.get(&a).copied().unwrap_or(0.0);
+                let l = state.logits.get(&a).copied().unwrap_or(0.0);
+                // Unsearched survivors fall back to v_mix via `completed`; if a
+                // survivor never materialized an edge it uses v_mix too.
+                let q = completed.get(&a).copied().unwrap_or(_v_mix);
+                let score = g + l + gumbel_sigma(q, max_n, c_visit, c_scale);
+                (a, score)
+            })
+            .collect();
+        // Descending by score; deterministic action_id tie-break.
+        ranked.sort_by(|&(a, sa), &(b, sb)| {
+            sb.partial_cmp(&sa)
+                .unwrap_or(Ordering::Equal)
+                .then_with(|| a.cmp(&b))
+        });
+        let keep = ((ranked.len() + 1) / 2).max(1);
+        ranked.truncate(keep);
+        let survivors: Vec<PackedCoord> = ranked.into_iter().map(|(a, _)| a).collect();
+        let state = self.gumbel_root.as_mut().expect("checked above");
+        state.survivors = survivors;
+        state.round = state.round.saturating_add(1);
+        // Re-seed caps for the new round (against the new, smaller survivor set).
+        let mut new_state = state.clone();
+        self.seed_gumbel_round_caps(&mut new_state);
+        *self.gumbel_root.as_mut().expect("checked above") = new_state;
+        true
+    }
+
     pub fn add_node_from_eval(
         &mut self,
         state: &RustHexoState,
@@ -829,11 +1076,28 @@ impl RustSearch {
     }
 
     fn select_or_materialize_edge(&mut self, node_id: usize, c_puct: f32) -> Option<usize> {
+        // main_6 #1: at a Gumbel-Top-k root, selection is constrained to the
+        // surviving candidate set and (under SH) the current round's visit caps —
+        // this REPLACES the PUCT/Dirichlet/forced-playout root path. Interior
+        // nodes (node_id != 0) are untouched here (that is #2 / S4).
+        if node_id == 0 && self.gumbel_root.is_some() {
+            return self.select_gumbel_root_edge(c_puct);
+        }
         // TSS forced edges get a guaranteed first visit before normal PUCT.
         for (index, edge) in self.nodes[node_id].edges.iter().enumerate() {
             if edge.forced && edge.visits == 0 && !(edge.pending > 0 && edge.child.is_none()) {
                 return Some(index);
             }
+        }
+
+        // main_6 #2 (S4): deterministic non-root selection. At interior nodes
+        // (node_id != 0), when `gumbel_nonroot_select` is on, child selection is
+        // the canonical visit-regularized rule argmax_a [ π'(a) − N(a)/(1+ΣN) ]
+        // with π'=softmax(logits+σ(completedQ)) — no PUCT/c_puct/FPU/widening
+        // scoring. Root (node_id == 0) NEVER reaches here (it is handled by the
+        // Gumbel-Top-k branch above or the PUCT path). Flag off ⇒ PUCT verbatim.
+        if self.divergences.gumbel_nonroot_select && node_id != 0 {
+            return self.select_gumbel_nonroot_edge(node_id);
         }
 
         let node = &self.nodes[node_id];
@@ -934,6 +1198,267 @@ impl RustSearch {
             }
         }
         best.map(|(index, _)| index)
+    }
+
+    /// main_6 #2 (S4): deterministic non-root child selection (§0.4), CANONICAL
+    /// Gumbel form (Danihelka et al. 2022). Interior nodes pick the
+    /// visit-regularized action
+    ///
+    /// ```text
+    ///   argmax_a [ π'(a) − N(a) / (1 + Σ_b N(b)) ]
+    /// ```
+    ///
+    /// where `π'(a) = softmax_a( logits(a) + σ(completedQ(a)) )` is the node-level
+    /// improved policy over the node's candidate set (all materialized edges PLUS
+    /// the next-materializable prior), `N(a)` is the action's visit count, and
+    /// `Σ_b N(b)` is the total visit count over that candidate set. This drives
+    /// the empirical visit distribution toward π' (proportional allocation), the
+    /// behaviour the paper prescribes — NOT the bare argmax of `logits+σ(Q)`,
+    /// which is near-greedy at interior nodes. No PUCT, no c_puct, no FPU, no
+    /// widening-score gate. completedQ(a) = Q(a) for visited edges, else the
+    /// canonical visit-weighted node-value fallback `v_mix` (§0.2). The σ
+    /// transform uses this node's own `max_b N(b)`.
+    ///
+    /// A still-unmaterialized candidate (the next prior in the owned/shared tail)
+    /// participates in the π' softmax at its completedQ == v_mix (it is unvisited)
+    /// and at N==0, so its visit-regularized score is just π'(candidate). It is
+    /// materialized only when it wins the argmax — mirroring the PUCT path's
+    /// peek/expand machinery but with the Gumbel rule replacing the PUCT score.
+    ///
+    /// Reuses `compare_edge_score` `(index, score, visits, action_id)` so ties
+    /// break deterministically (fewer visits, then smaller action_id), matching
+    /// the PUCT path's determinism discipline.
+    fn select_gumbel_nonroot_edge(&mut self, node_id: usize) -> Option<usize> {
+        let c_visit = self.divergences.gumbel_c_visit;
+        let c_scale = self.divergences.gumbel_c_scale;
+        // logits(a) for this node's legal actions (raw, S2). Absent ⇒ logit 0.
+        let logit_map = self.nodes[node_id].root_logits.clone().unwrap_or_default();
+        let node = &self.nodes[node_id];
+        // completedQ map + v_mix fallback (canonical visit-weighted node value);
+        // shared with #1/#3.
+        let (completed, v_mix) = gumbel_completed_q(node, &logit_map);
+        // σ scaling uses this node's own max child visit count.
+        let max_n = node.edges.iter().map(|e| e.visits).max().unwrap_or(0);
+
+        // Build the node-level improved policy π'(a) = softmax(logits + σ(Q*))
+        // over the candidate set: every materialized edge in order, then the
+        // next-materializable candidate (if any) as a virtual trailing slot. The
+        // softmax MUST span the full candidate support so π' is a proper policy.
+        let next_candidate = node.peek_next_candidate();
+        let n_edges = node.edges.len();
+        let mut scores: Vec<f32> = Vec::with_capacity(n_edges + 1);
+        for edge in &node.edges {
+            let l = logit_map.get(&edge.action_id).copied().unwrap_or(0.0);
+            let q = completed.get(&edge.action_id).copied().unwrap_or(v_mix);
+            scores.push(l + gumbel_sigma(q, max_n, c_visit, c_scale));
+        }
+        if let Some((action_id, _prior)) = next_candidate {
+            let l = logit_map.get(&action_id).copied().unwrap_or(0.0);
+            // The candidate is unvisited ⇒ completedQ == v_mix.
+            scores.push(l + gumbel_sigma(v_mix, max_n, c_visit, c_scale));
+        }
+        let improved_pi = gumbel_softmax(&scores);
+
+        // Σ_b N(b) over the candidate set (the next candidate contributes 0).
+        let total_visits: u64 = node.edges.iter().map(|e| e.visits as u64).sum();
+        let reg_denom = 1.0 + total_visits as f32;
+
+        // Visit-regularized score for each materialized edge:
+        //   π'(a) − N(a)/(1+ΣN). Skip edges with an in-flight expansion exactly
+        // as the PUCT path does.
+        let mut best: Option<(usize, f32, u32, PackedCoord)> = None;
+        for (index, edge) in node.edges.iter().enumerate() {
+            if edge.pending > 0 && edge.child.is_none() {
+                continue;
+            }
+            let score = improved_pi[index] - (edge.visits as f32) / reg_denom;
+            let candidate = (index, score, edge.visits, edge.action_id);
+            let replace = match best {
+                Some(current) => compare_edge_score(candidate, current) == Ordering::Greater,
+                None => true,
+            };
+            if replace {
+                best = Some(candidate);
+            }
+        }
+
+        // Widening: the next-materializable candidate competes at its π' score
+        // (its N==0 ⇒ visit-regularized score is just π'(candidate)). This
+        // REPLACES the lazy-widening FPU/PUCT gate; the candidate set is the
+        // node's expanded + materializable edges as usual, but its selection
+        // priority is the canonical visit-regularized Gumbel rule. Materialization
+        // still uses the existing peek/expand machinery.
+        if let Some((action_id, _prior)) = next_candidate {
+            let score = improved_pi[n_edges]; // trailing softmax slot; N==0.
+            let candidate_key = (usize::MAX, score, 0, action_id);
+            let replace = match best {
+                Some(current) => compare_edge_score(candidate_key, current) == Ordering::Greater,
+                None => true,
+            };
+            if replace {
+                let edge_index = self.nodes[node_id].edges.len();
+                let edge = self.nodes[node_id].materialize_next_candidate();
+                self.nodes[node_id].edges.push(edge);
+                self.record_materialized_edge(node_id);
+                return Some(edge_index);
+            }
+        }
+
+        best.map(|item| item.0)
+    }
+
+    /// main_6 #1: root edge selection under an active Gumbel-Top-k candidate set.
+    /// Selection is constrained to the surviving candidates; no PUCT exploration
+    /// term, no Dirichlet, no nucleus widening, no forced-playout (the m-candidate
+    /// set IS the diversity/discovery mechanism, §S3.1).
+    ///
+    /// SH mode: allocate visits equally per round by selecting the survivor with
+    /// the largest deficit below its current round cap (ties → fewest visits →
+    /// action_id). When every survivor has met its cap, return None: the slot
+    /// makes no further root progress until the scheduler's intra-slot barrier
+    /// (`maybe_advance_gumbel_round`) halves and re-seeds the next round.
+    ///
+    /// Intermediate mode (gumbel_root on, SH off): visits allocate among the
+    /// survivors via the normal PUCT score (the top-m set is the only change).
+    fn select_gumbel_root_edge(&mut self, c_puct: f32) -> Option<usize> {
+        let state = self.gumbel_root.as_ref()?;
+        let survivor_set: HashSet<PackedCoord> = state.survivors.iter().copied().collect();
+        let sequential_halving = state.sequential_halving;
+        let round_cap = state.round_cap.clone();
+
+        // Materialize any survivor that is still an unexpanded prior so it can be
+        // visited. (The Gumbel draw covers the full legal set, so a survivor may
+        // sit in the owned-candidate tail rather than the nucleus edges.)
+        // We materialize on demand: only when a survivor is the chosen action and
+        // has no edge yet. First, build the current edge index per survivor.
+        if sequential_halving {
+            // Equal-allocation: choose the survivor with the largest (cap - visits)
+            // deficit that is not currently pending-without-child. Prefer existing
+            // edges; materialize a survivor with no edge only when it is the pick.
+            let mut best_action: Option<(PackedCoord, u32)> = None; // (action, deficit)
+            for &action in &survivor_set {
+                let cap = round_cap.get(&action).copied().unwrap_or(0);
+                // Current edge state for this survivor (if materialized).
+                let edge = self.nodes[0]
+                    .edges
+                    .iter()
+                    .find(|e| e.action_id == action);
+                if let Some(edge) = edge {
+                    if edge.pending > 0 && edge.child.is_none() {
+                        continue; // already in flight; respect equal allocation
+                    }
+                    if edge.visits >= cap {
+                        continue; // met its round cap
+                    }
+                    let deficit = cap.saturating_sub(edge.visits);
+                    let replace = match best_action {
+                        Some((ba, bd)) => deficit > bd || (deficit == bd && action < ba),
+                        None => true,
+                    };
+                    if replace {
+                        best_action = Some((action, deficit));
+                    }
+                } else {
+                    // Unexpanded survivor: visits == 0, deficit == cap (>=1).
+                    let deficit = cap.max(1);
+                    let replace = match best_action {
+                        Some((ba, bd)) => deficit > bd || (deficit == bd && action < ba),
+                        None => true,
+                    };
+                    if replace {
+                        best_action = Some((action, deficit));
+                    }
+                }
+            }
+            let (action, _) = best_action?;
+            return self.gumbel_root_edge_index(action);
+        }
+
+        // Intermediate mode: PUCT among survivors only.
+        let node = &self.nodes[0];
+        let exploration_scale =
+            self.c_for(c_puct, node.visits) * (node.visits.max(1) as f32).sqrt();
+        let parent_value = node.value();
+        let fpu_reduction = self.root_fpu_reduction;
+        let mut best: Option<(usize, f32, u32, PackedCoord)> = None;
+        for (index, edge) in node.edges.iter().enumerate() {
+            if !survivor_set.contains(&edge.action_id) {
+                continue;
+            }
+            if edge.pending > 0 && edge.child.is_none() {
+                continue;
+            }
+            let score = edge.value_or_fpu(parent_value, fpu_reduction)
+                + edge.prior * exploration_scale / (1.0 + edge.visits as f32)
+                + self.ml_bonus(node, edge);
+            let candidate = (index, score, edge.visits, edge.action_id);
+            let replace = match best {
+                Some(current) => compare_edge_score(candidate, current) == Ordering::Greater,
+                None => true,
+            };
+            if replace {
+                best = Some(candidate);
+            }
+        }
+        // Materialize an unexpanded survivor if PUCT prefers a new child. The
+        // new-child score mirrors the standard widening score but is gated to the
+        // survivor set; this lets a high-logit survivor that sits in the owned
+        // tail get its first visit.
+        let mut best_new: Option<(PackedCoord, f32)> = None;
+        for (action_id, prior) in node.remaining_priors() {
+            if !survivor_set.contains(&action_id) {
+                continue;
+            }
+            let score = new_child_score(
+                parent_value,
+                fpu_reduction,
+                prior,
+                exploration_scale,
+                self.divergences.new_child_fpu,
+            );
+            let replace = match best_new {
+                Some((ba, bs)) => score > bs || (score == bs && action_id < ba),
+                None => true,
+            };
+            if replace {
+                best_new = Some((action_id, score));
+            }
+        }
+        if let Some((new_action, new_score)) = best_new {
+            let take_new = match best {
+                Some((_, best_score, _, _)) => new_score > best_score,
+                None => true,
+            };
+            if take_new {
+                return self.gumbel_root_edge_index(new_action);
+            }
+        }
+        best.map(|item| item.0)
+    }
+
+    /// Return the edge index for `action`, materializing it from the owned root
+    /// candidate tail if it has not been expanded yet. Returns None only if the
+    /// action is neither an edge nor an owned candidate (should not happen for a
+    /// survivor drawn from the legal set).
+    fn gumbel_root_edge_index(&mut self, action: PackedCoord) -> Option<usize> {
+        if let Some(index) = self.nodes[0]
+            .edges
+            .iter()
+            .position(|e| e.action_id == action)
+        {
+            return Some(index);
+        }
+        // Materialize the specific owned candidate (root is always Owned).
+        if let NodePriors::Owned(unexpanded) = &mut self.nodes[0].priors {
+            if let Some(pos) = unexpanded.iter().position(|c| c.action_id == action) {
+                let candidate = unexpanded.remove(pos);
+                let edge_index = self.nodes[0].edges.len();
+                self.nodes[0].edges.push(candidate.into_edge());
+                self.record_materialized_edge(0);
+                return Some(edge_index);
+            }
+        }
+        None
     }
 
     pub fn apply_virtual_visit(&mut self, path: &[(usize, usize)], virtual_loss: f32) {
@@ -1188,6 +1713,18 @@ fn split_tactical(
     (forced, rest, cap)
 }
 
+/// Build the raw-logit lookup carried onto a `RustNode` from an evaluation's
+/// optional logits (Gumbel S2). `None` (production/parity) ⇒ no map, so no
+/// Gumbel/σ path can read logits and behavior is byte-identical to today.
+fn node_logits_from_evaluation(
+    evaluation: &RustEvaluation,
+) -> Option<HashMap<PackedCoord, f32>> {
+    evaluation
+        .logits
+        .as_ref()
+        .map(|pairs| pairs.iter().copied().collect())
+}
+
 fn owned_with_injection_from_eval(
     state_hash_value: StateHash,
     state: &RustHexoState,
@@ -1216,6 +1753,7 @@ fn owned_with_injection_from_eval(
         edges,
         priors: NodePriors::Owned(rest),
         max_eligible_children,
+        root_logits: node_logits_from_evaluation(evaluation),
     }
 }
 
@@ -1227,6 +1765,8 @@ fn shared_from_cache(
     nucleus_f64: bool,
 ) -> RustNode {
     let max_eligible_children = nucleus_count_pairs(&evaluation.priors, widening, nucleus_f64);
+    // Build the logit map BEFORE moving the Arc into NodePriors::Shared.
+    let root_logits = node_logits_from_evaluation(&evaluation);
     RustNode {
         state_hash: state_hash_value,
         player: state.current_player(),
@@ -1239,6 +1779,7 @@ fn shared_from_cache(
         edges: Vec::new(),
         priors: NodePriors::Shared(evaluation),
         max_eligible_children,
+        root_logits,
     }
 }
 
@@ -1311,6 +1852,8 @@ fn owned_root_from_evaluation(
             edges,
             priors: NodePriors::Owned(candidates),
             max_eligible_children,
+            // RAW logits keyed by action_id (pre-temperature, pre-Dirichlet).
+            root_logits: node_logits_from_evaluation(evaluation),
         },
         clean_cache,
     ))
@@ -1644,6 +2187,178 @@ pub fn random_unit(seed: u64) -> f64 {
     ((value >> 11) as f64) * (1.0 / ((1u64 << 53) as f64))
 }
 
+// === main_6 Gumbel AlphaZero shared math (Danihelka et al. 2022) ===
+// These helpers are referenced by #1 (Gumbel-Top-k root + Sequential Halving,
+// S3), #2 (deterministic non-root selection, S4) and #3 (improved target, S5).
+// They are pure functions of the tree state and take no effect unless a Gumbel
+// flag routes through them.
+
+/// The canonical σ transform (§0.1): σ(q)=(c_visit + max_b N(b))·c_scale·q.
+/// `max_n` is the maximum child visit count at the node σ is applied at. Q is
+/// already on [-1,1] here, so σ is a clean monotone-in-q scaling (σ(0)=0).
+pub fn gumbel_sigma(q: f32, max_n: u32, c_visit: f32, c_scale: f32) -> f32 {
+    (c_visit + max_n as f32) * c_scale * q
+}
+
+/// A single Gumbel(0,1) draw from a deterministic per-action seed (§0.8). The
+/// inverse-CDF transform g = -ln(-ln(u)) on a uniform u in the open interval
+/// (0,1). The uniform is clamped strictly inside (0,1) so the double log never
+/// hits ±inf (random_unit can return exactly 0.0).
+pub fn gumbel_draw(seed: u64) -> f32 {
+    let mut u = random_unit(seed);
+    // Clamp to the open interval; the ulp-scale floor/ceil keep g finite.
+    const EPS: f64 = 1.0e-12;
+    if u < EPS {
+        u = EPS;
+    } else if u > 1.0 - EPS {
+        u = 1.0 - EPS;
+    }
+    (-(-u.ln()).ln()) as f32
+}
+
+/// completedQ + the v_mix unvisited fallback (§0.2), computed once per node.
+///
+/// For each candidate action_id we return `Q(a)` if it has visits, else the
+/// shared `v_mix` fallback for unvisited actions. `v_mix` is the CANONICAL
+/// Gumbel/MuZero (Danihelka et al. 2022, Eq. for completed_Q) visit-count
+/// weighted interpolation between the node's own value estimate `v̂` and the
+/// prior-weighted average Q over visited children:
+///
+/// ```text
+///   v_mix = ( v̂ + (Σ_b N(b)) · (Σ_b π(b)·Q(b)) / (Σ_b π(b)) ) / ( 1 + Σ_b N(b) )
+/// ```
+///
+/// over VISITED b only, where `π(b)=softmax(logits)(b)` is the network prior and
+/// `v̂ = node.value()` (the node's backed-up value, or its eval_value when the
+/// node itself is unvisited). At low visit counts the `v̂` term dominates (the
+/// paper's intended behaviour — the fallback starts at the node's own estimate
+/// and migrates toward the visited-child average as visits accrue); as ΣN→∞ it
+/// approaches the visited-child average. When no child is visited (ΣN==0 or the
+/// visited-π mass is 0) v_mix is exactly `v̂`.
+///
+/// `logits` maps action_id -> raw policy logit (carried via S2 `root_logits`);
+/// absent actions get logit 0. Returns the per-(action_id) completedQ map plus
+/// the `v_mix` scalar (so callers can extend it to candidates not in `edges`).
+pub fn gumbel_completed_q(
+    node: &RustNode,
+    logits: &HashMap<PackedCoord, f32>,
+) -> (HashMap<PackedCoord, f32>, f32) {
+    // Prior-weighted average Q over the VISITED children: softmax(logits) over
+    // the visited support, weighting their Q. Numerically-stable shifted form;
+    // denominator is the visited-π mass (NOT the full action set). `sum_n` is the
+    // total child visit count Σ_b N(b) over the same visited support.
+    let mut max_logit = f32::NEG_INFINITY;
+    for edge in &node.edges {
+        if edge.visits > 0 {
+            let l = logits.get(&edge.action_id).copied().unwrap_or(0.0);
+            if l > max_logit {
+                max_logit = l;
+            }
+        }
+    }
+    let mut weighted_q = 0.0f32;
+    let mut weight_sum = 0.0f32;
+    let mut sum_n = 0u64;
+    if max_logit.is_finite() {
+        for edge in &node.edges {
+            if edge.visits == 0 {
+                continue;
+            }
+            let l = logits.get(&edge.action_id).copied().unwrap_or(0.0);
+            let w = (l - max_logit).exp();
+            weighted_q += w * edge.value();
+            weight_sum += w;
+            sum_n += edge.visits as u64;
+        }
+    }
+    // Canonical v_mix: visit-count-weighted blend of v̂ (= node.value()) and the
+    // prior-weighted visited-child average. When no child is visited this reduces
+    // to v̂ (the natural two-player-zero-sum default).
+    let v_node = node.value();
+    let v_mix = if weight_sum > 0.0 && sum_n > 0 {
+        let visited_avg = weighted_q / weight_sum;
+        let n = sum_n as f32;
+        (v_node + n * visited_avg) / (1.0 + n)
+    } else {
+        v_node
+    };
+    let mut completed = HashMap::with_capacity(node.edges.len());
+    for edge in &node.edges {
+        let q = if edge.visits > 0 { edge.value() } else { v_mix };
+        completed.insert(edge.action_id, q);
+    }
+    (completed, v_mix)
+}
+
+/// Numerically-stable softmax of a slice into a fresh Vec that sums to 1. Used
+/// by the SH ranking and the #3 target build. Empty input => empty output.
+pub fn gumbel_softmax(scores: &[f32]) -> Vec<f32> {
+    if scores.is_empty() {
+        return Vec::new();
+    }
+    let max = scores
+        .iter()
+        .copied()
+        .fold(f32::NEG_INFINITY, f32::max);
+    if !max.is_finite() {
+        // All -inf (no support): degenerate uniform to avoid NaNs.
+        let u = 1.0 / scores.len() as f32;
+        return vec![u; scores.len()];
+    }
+    let mut exps: Vec<f32> = scores.iter().map(|&s| (s - max).exp()).collect();
+    let sum: f32 = exps.iter().sum();
+    if sum > 0.0 {
+        for e in exps.iter_mut() {
+            *e /= sum;
+        }
+    }
+    exps
+}
+
+/// Per-slot Gumbel-Top-k + Sequential-Halving state for ONE root (§0.6/§0.9).
+/// Lives on `RustSearch` (the per-slot search). `survivors` shrinks as halving
+/// rounds advance; `gumbel` holds the per-candidate g(a) draw for SH ranking;
+/// `target_at_round[a]` is the cumulative visit cap candidate `a` must reach in
+/// the current round before the intra-slot barrier permits a halving. The state
+/// is only constructed when `gumbel_root` is on AND the move is a Full move.
+#[derive(Clone, Debug)]
+pub struct GumbelRootState {
+    /// Surviving candidate action_ids for the current SH round (shrinks by ~half
+    /// each round; in the no-SH intermediate mode this stays the full top-m set).
+    pub survivors: Vec<PackedCoord>,
+    /// g(a) ~ Gumbel(0,1) per ORIGINAL top-m candidate (kept across rounds for
+    /// the SH rank `g(a)+logits(a)+σ(completedQ(a))`).
+    pub gumbel: HashMap<PackedCoord, f32>,
+    /// Raw logits per candidate (snapshot of the root's RAW logits, §0.5 score).
+    pub logits: HashMap<PackedCoord, f32>,
+    /// Total per-move visit budget `n` to allocate via SH.
+    pub budget: u32,
+    /// Number of SH rounds R = ceil(log2(m)).
+    pub num_rounds: u32,
+    /// 0-based current round index.
+    pub round: u32,
+    /// Cumulative visit cap each surviving candidate must reach by the END of
+    /// the current round (its visits at round entry + this round's per-survivor
+    /// quota). Keyed by action_id; only survivors appear.
+    pub round_cap: HashMap<PackedCoord, u32>,
+    /// Whether SH halving is active. When false (gumbel_root on, SH off — the
+    /// A/B intermediate mode) the candidate set is fixed to the top-m and visits
+    /// allocate by normal PUCT among them (no rounds, no caps).
+    pub sequential_halving: bool,
+}
+
+impl GumbelRootState {
+    /// Ceil(log2(m)) rounds, with m>=1 => 0 rounds is impossible (1 candidate is
+    /// already the winner). m==1 => num_rounds 0 (nothing to halve).
+    fn rounds_for(m: usize) -> u32 {
+        if m <= 1 {
+            0
+        } else {
+            (usize::BITS - (m - 1).leading_zeros()).max(1)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1810,6 +2525,7 @@ mod tests {
             legal_action_count: priors.len(),
             priors,
             moves_left: None,
+            logits: None,
         }
     }
 
@@ -1971,5 +2687,632 @@ mod tests {
                 "flat dirichlet must be byte-identical: action {id} expected {e} got {g}"
             );
         }
+    }
+
+    // === Gumbel S2: raw-logit plumbing onto the tree ===
+
+    /// An evaluation carrying the optional raw-logit column (Gumbel S2 path).
+    fn eval_with_priors_and_logits(
+        priors: Vec<(PackedCoord, f32)>,
+        logits: Vec<(PackedCoord, f32)>,
+        value: f32,
+    ) -> RustEvaluation {
+        RustEvaluation {
+            value,
+            legal_action_count: priors.len(),
+            priors,
+            moves_left: None,
+            logits: Some(logits),
+        }
+    }
+
+    fn build_search_from_eval(eval: &RustEvaluation, divergences: Divergences) -> RustSearch {
+        RustSearch::new(
+            RustHexoState::new(),
+            eval,
+            64,
+            0.2,
+            0.2,
+            1.0,
+            None,
+            widening(0.95, 2, 8),
+            0.0,
+            false,
+            divergences,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn root_logits_absent_when_eval_carries_none() {
+        // Production/parity: no logits requested ⇒ eval.logits is None ⇒ the
+        // root node carries no logit map and no Gumbel/σ path can read one.
+        let eval = eval_with_priors(vec![(0, 0.5), (1, 0.3), (2, 0.2)], 0.1);
+        assert!(eval.logits.is_none());
+        let search = build_search_from_eval(&eval, Divergences::production());
+        assert!(
+            search.root().root_logits.is_none(),
+            "root_logits must be None when the evaluation omits raw logits"
+        );
+    }
+
+    #[test]
+    fn root_logits_present_and_aligned_by_action_id() {
+        // Gumbel path: eval carries raw logits aligned to the legal set. The
+        // root must carry them keyed by action_id, RAW (no temperature/noise),
+        // regardless of the descending-prior reordering applied to priors.
+        let priors = vec![(0, 0.5), (1, 0.3), (2, 0.2)];
+        // Logits in a DIFFERENT order than the prior-sorted set, with a negative
+        // value (logits are unconstrained in sign, unlike priors).
+        let logits = vec![(2, -1.25), (0, 3.5), (1, 0.0)];
+        let eval = eval_with_priors_and_logits(priors, logits, 0.1);
+        let search = build_search_from_eval(&eval, Divergences::production());
+        let map = search
+            .root()
+            .root_logits
+            .as_ref()
+            .expect("root_logits must be Some when the evaluation carries logits");
+        assert_eq!(map.len(), 3);
+        assert_eq!(map.get(&0).copied(), Some(3.5));
+        assert_eq!(map.get(&1).copied(), Some(0.0));
+        assert_eq!(map.get(&2).copied(), Some(-1.25));
+    }
+
+    // === Gumbel S3: Gumbel-Top-k root + Sequential Halving ===
+
+    /// gumbel() profile: a Full-move Gumbel root carries logits.
+    fn gumbel_eval(n: usize) -> RustEvaluation {
+        // Distinct priors (descending) and distinct logits per action id.
+        let priors: Vec<(PackedCoord, f32)> = (0..n)
+            .map(|i| (i as PackedCoord, (n - i) as f32))
+            .collect();
+        let total: f32 = priors.iter().map(|(_, p)| *p).sum();
+        let priors: Vec<(PackedCoord, f32)> =
+            priors.into_iter().map(|(a, p)| (a, p / total)).collect();
+        let logits: Vec<(PackedCoord, f32)> = (0..n)
+            .map(|i| (i as PackedCoord, (n - i) as f32 * 0.5 - 1.0))
+            .collect();
+        RustEvaluation {
+            value: 0.0,
+            legal_action_count: n,
+            priors,
+            moves_left: None,
+            logits: Some(logits),
+        }
+    }
+
+    #[test]
+    fn sigma_transform_canonical_and_monotone() {
+        // σ(q)=(c_visit+max_n)·c_scale·q ; σ(0)=0 ; monotone increasing in q.
+        assert_eq!(gumbel_sigma(0.0, 7, 50.0, 1.0), 0.0);
+        assert_eq!(gumbel_sigma(1.0, 0, 50.0, 1.0), 50.0);
+        assert_eq!(gumbel_sigma(1.0, 10, 50.0, 1.0), 60.0);
+        // boundaries q = ±1
+        assert_eq!(gumbel_sigma(-1.0, 50, 50.0, 1.0), -100.0);
+        // monotone: σ(q1) < σ(q2) for q1 < q2 at fixed (max_n, consts).
+        let lo = gumbel_sigma(-0.3, 5, 50.0, 1.0);
+        let hi = gumbel_sigma(0.6, 5, 50.0, 1.0);
+        assert!(lo < hi);
+    }
+
+    #[test]
+    fn gumbel_draw_is_finite_across_seeds() {
+        for s in 0u64..10_000 {
+            let g = gumbel_draw(s);
+            assert!(g.is_finite(), "gumbel draw must be finite for seed {s}");
+        }
+    }
+
+    #[test]
+    fn rounds_for_is_ceil_log2() {
+        assert_eq!(GumbelRootState::rounds_for(1), 0);
+        assert_eq!(GumbelRootState::rounds_for(2), 1);
+        assert_eq!(GumbelRootState::rounds_for(3), 2);
+        assert_eq!(GumbelRootState::rounds_for(4), 2);
+        assert_eq!(GumbelRootState::rounds_for(8), 3);
+        assert_eq!(GumbelRootState::rounds_for(16), 4);
+        assert_eq!(GumbelRootState::rounds_for(17), 5);
+    }
+
+    #[test]
+    fn init_gumbel_root_noop_without_flag_or_logits() {
+        // Flag off ⇒ no Gumbel state even with logits present.
+        let eval = gumbel_eval(8);
+        let mut s = build_search_from_eval(&eval, Divergences::production());
+        s.init_gumbel_root(123, 64);
+        assert!(!s.has_gumbel_root(), "no gumbel state when gumbel_root off");
+
+        // Flag on but logits absent ⇒ falls back to PUCT (no state).
+        let eval_nologit = eval_with_priors(vec![(0, 0.5), (1, 0.3), (2, 0.2)], 0.0);
+        let mut s2 = build_search_from_eval(&eval_nologit, Divergences::gumbel());
+        s2.init_gumbel_root(123, 64);
+        assert!(
+            !s2.has_gumbel_root(),
+            "no gumbel state when raw logits are absent"
+        );
+    }
+
+    #[test]
+    fn gumbel_topk_selects_top_m_by_logits_plus_g() {
+        // m candidates = top-m of logits(a)+g(a). Build the same draw the search
+        // uses and assert the survivor set matches.
+        let n = 12;
+        let eval = gumbel_eval(n);
+        let mut dv = Divergences::gumbel();
+        dv.gumbel_m = 5;
+        let mut s = build_search_from_eval(&eval, dv);
+        let seed = 0xABCD_1234u64;
+        s.init_gumbel_root(seed, 256);
+        assert!(s.has_gumbel_root());
+        let state = s.gumbel_root.as_ref().unwrap();
+        assert_eq!(state.survivors.len(), 5, "m clamped to gumbel_m");
+
+        // Reference: logits+g over the full legal set, take top-5.
+        let logit_map: std::collections::HashMap<PackedCoord, f32> =
+            eval.logits.clone().unwrap().into_iter().collect();
+        let mut scored: Vec<(PackedCoord, f32)> = (0..n as PackedCoord)
+            .map(|a| {
+                let g = gumbel_draw(seed.wrapping_add(a as u64));
+                (a, logit_map[&a] + g)
+            })
+            .collect();
+        scored.sort_by(|&(a, sa), &(b, sb)| {
+            sb.partial_cmp(&sa).unwrap().then_with(|| a.cmp(&b))
+        });
+        let expected: std::collections::HashSet<PackedCoord> =
+            scored.into_iter().take(5).map(|(a, _)| a).collect();
+        let got: std::collections::HashSet<PackedCoord> =
+            state.survivors.iter().copied().collect();
+        assert_eq!(got, expected, "survivor set must be top-m by logits+g");
+    }
+
+    #[test]
+    fn sh_round_caps_are_equal_allocation() {
+        // m=8, budget=256, R=3 ⇒ per-survivor round-0 quota = 256/(3*8)=10.
+        let eval = gumbel_eval(8);
+        let mut dv = Divergences::gumbel();
+        dv.gumbel_m = 8;
+        let mut s = build_search_from_eval(&eval, dv);
+        s.init_gumbel_root(42, 256);
+        let state = s.gumbel_root.as_ref().unwrap();
+        assert_eq!(state.num_rounds, 3);
+        assert_eq!(state.survivors.len(), 8);
+        let per = 256 / (3 * 8); // floor = 10
+        // At round entry all survivor visits are 0, so cap == per.
+        for &a in &state.survivors {
+            assert_eq!(state.round_cap.get(&a).copied(), Some(per));
+        }
+    }
+
+    #[test]
+    fn sh_halving_keeps_ceil_half_and_advances() {
+        // Drive a Gumbel root to its cap and assert one halving keeps ceil(m/2).
+        let eval = gumbel_eval(8);
+        let mut dv = Divergences::gumbel();
+        dv.gumbel_m = 8;
+        let mut s = build_search_from_eval(&eval, dv);
+        s.init_gumbel_root(7, 256);
+        let m0 = s.gumbel_root.as_ref().unwrap().survivors.len();
+        assert_eq!(m0, 8);
+
+        // No halving before any survivor meets its cap.
+        assert!(!s.maybe_advance_gumbel_round());
+
+        // Force every survivor's root-edge visits up to its cap (materialize +
+        // bump visits directly — this is the intra-slot barrier condition).
+        let caps: Vec<(PackedCoord, u32)> = s
+            .gumbel_root
+            .as_ref()
+            .unwrap()
+            .round_cap
+            .iter()
+            .map(|(&a, &c)| (a, c))
+            .collect();
+        for (a, cap) in caps {
+            let idx = s.gumbel_root_edge_index(a).expect("survivor materializes");
+            s.nodes[0].edges[idx].visits = cap;
+        }
+        // Barrier now satisfied ⇒ exactly one halving to ceil(8/2)=4.
+        assert!(s.maybe_advance_gumbel_round());
+        let state = s.gumbel_root.as_ref().unwrap();
+        assert_eq!(state.round, 1);
+        assert_eq!(state.survivors.len(), 4, "halving keeps ceil(m/2)");
+        // New caps were re-seeded against the survivors' current visits.
+        for &a in &state.survivors {
+            let v = s.nodes[0].edges.iter().find(|e| e.action_id == a).unwrap().visits;
+            let cap = state.round_cap.get(&a).copied().unwrap();
+            assert!(cap > v, "new round cap must be above current visits");
+        }
+    }
+
+    #[test]
+    fn completed_q_visited_is_edge_value_unvisited_is_v_mix() {
+        // Hand-built: two visited edges (with Q via value_sum/visits) and one
+        // unvisited. completedQ(visited)=value(); completedQ(unvisited)=v_mix.
+        let eval = gumbel_eval(3);
+        let mut s = build_search_from_eval(&eval, Divergences::gumbel());
+        // Materialize all three as root edges and set visit stats.
+        for a in 0u32..3 {
+            let _ = s.gumbel_root_edge_index(a); // ensure edge exists
+        }
+        // edge 0: 4 visits, value_sum 2.0 ⇒ Q=0.5 ; edge 1: 1 visit, sum -0.5 ⇒ -0.5
+        // edge 2: 0 visits ⇒ unvisited.
+        {
+            let e0 = s.nodes[0].edges.iter_mut().find(|e| e.action_id == 0).unwrap();
+            e0.visits = 4;
+            e0.value_sum = 2.0;
+        }
+        {
+            let e1 = s.nodes[0].edges.iter_mut().find(|e| e.action_id == 1).unwrap();
+            e1.visits = 1;
+            e1.value_sum = -0.5;
+        }
+        let logit_map = s.nodes[0].root_logits.clone().unwrap();
+        let (completed, v_mix) = gumbel_completed_q(&s.nodes[0], &logit_map);
+        assert!((completed[&0] - 0.5).abs() < 1e-6);
+        assert!((completed[&1] - (-0.5)).abs() < 1e-6);
+        // unvisited action 2 == v_mix (prior-softmax weighted over visited 0,1).
+        assert!((completed[&2] - v_mix).abs() < 1e-6);
+        // v_mix must lie within [min,max] of the visited Qs (-0.5..0.5).
+        assert!(v_mix >= -0.5 - 1e-6 && v_mix <= 0.5 + 1e-6);
+    }
+
+    // === Gumbel S6 [6]: Divergences profile gating ===
+
+    #[test]
+    fn gumbel_profile_flips_four_bools_on_with_default_scalars() {
+        // §1: gumbel() = production() with the four Gumbel bools ON and the σ /
+        // candidate scalars at their canonical Danihelka defaults.
+        let g = Divergences::gumbel();
+        assert!(g.gumbel_target);
+        assert!(g.gumbel_root);
+        assert!(g.gumbel_sequential_halving);
+        assert!(g.gumbel_nonroot_select);
+        assert_eq!(g.gumbel_c_visit, 50.0);
+        assert_eq!(g.gumbel_c_scale, 1.0);
+        assert_eq!(g.gumbel_m, 16);
+        assert_eq!(g.gumbel_target_min_visits, 1);
+        // gumbel() inherits the production() main_4 divergence set unchanged.
+        assert!(g.nucleus_f64);
+        assert!(g.dirichlet_shaped);
+    }
+
+    #[test]
+    fn parity_and_production_disable_all_gumbel_bools() {
+        // Contract (§1): with all four Gumbel bools false, every Gumbel path is
+        // bypassed and output is byte-identical to today. Both parity() and
+        // production() MUST hold the four bools OFF; scalars at the defaults.
+        for d in [Divergences::parity(), Divergences::production()] {
+            assert!(!d.gumbel_target);
+            assert!(!d.gumbel_root);
+            assert!(!d.gumbel_sequential_halving);
+            assert!(!d.gumbel_nonroot_select);
+            assert_eq!(d.gumbel_c_visit, 50.0);
+            assert_eq!(d.gumbel_c_scale, 1.0);
+            assert_eq!(d.gumbel_m, 16);
+            assert_eq!(d.gumbel_target_min_visits, 1);
+        }
+    }
+
+    // === Gumbel S6 [2]: completedQ support floor excludes un-searched actions ===
+
+    #[test]
+    fn completed_q_floor_excludes_unsearched_from_target_support() {
+        // The #3 target softmax support is the set of edges with visits >=
+        // gumbel_target_min_visits. completedQ itself still defines a value for
+        // every edge (visited=Q, unvisited=v_mix), but a floored-out action must
+        // not enter the softmax support — verified here by composing the same
+        // logits+σ(completedQ) score the exporter uses and excluding floored ids.
+        let eval = gumbel_eval(4);
+        let mut s = build_search_from_eval(&eval, Divergences::gumbel());
+        for a in 0u32..4 {
+            let _ = s.gumbel_root_edge_index(a);
+        }
+        // visited: 0 (3 visits) and 2 (5 visits); unsearched: 1 and 3 (0 visits).
+        for (a, v, sum) in [(0u32, 3u32, 1.5f32), (2, 5, -2.0)] {
+            let e = s.nodes[0].edges.iter_mut().find(|e| e.action_id == a).unwrap();
+            e.visits = v;
+            e.value_sum = sum;
+        }
+        let min_visits = 1u32;
+        let support: Vec<PackedCoord> = s.nodes[0]
+            .edges
+            .iter()
+            .filter(|e| e.visits >= min_visits)
+            .map(|e| e.action_id)
+            .collect();
+        assert_eq!(support, vec![0, 2], "floor keeps only searched actions");
+        // The floored-out actions 1 and 3 carry a completedQ (== v_mix) but are
+        // NOT members of the softmax support.
+        let logit_map = s.nodes[0].root_logits.clone().unwrap();
+        let (completed, v_mix) = gumbel_completed_q(&s.nodes[0], &logit_map);
+        assert!((completed[&1] - v_mix).abs() < 1e-6);
+        assert!((completed[&3] - v_mix).abs() < 1e-6);
+        assert!(!support.contains(&1) && !support.contains(&3));
+    }
+
+    // === Gumbel S6 [5]: target softmax == softmax(logits + σ(completedQ)) ===
+
+    #[test]
+    fn target_softmax_matches_logits_plus_sigma_completed_q() {
+        // Build a hand tree, compose the #3 target exactly as gumbel_target_policy
+        // does (logits + σ(completedQ) over the floored support, then softmax),
+        // and assert it sums to 1 and equals an independent reference computation.
+        let eval = gumbel_eval(3);
+        let mut s = build_search_from_eval(&eval, Divergences::gumbel());
+        for a in 0u32..3 {
+            let _ = s.gumbel_root_edge_index(a);
+        }
+        // edge 0: 8 visits, sum 4.0 ⇒ Q=0.5 ; edge 1: 2 visits, sum -0.6 ⇒ -0.3
+        // edge 2: 4 visits, sum 0.0 ⇒ 0.0. All meet the floor (>=1).
+        for (a, v, sum) in [(0u32, 8u32, 4.0f32), (1, 2, -0.6), (2, 4, 0.0)] {
+            let e = s.nodes[0].edges.iter_mut().find(|e| e.action_id == a).unwrap();
+            e.visits = v;
+            e.value_sum = sum;
+        }
+        let c_visit = 50.0f32;
+        let c_scale = 1.0f32;
+        let logit_map = s.nodes[0].root_logits.clone().unwrap();
+        let (completed, _v_mix) = gumbel_completed_q(&s.nodes[0], &logit_map);
+        let max_n = s.nodes[0].edges.iter().map(|e| e.visits).max().unwrap();
+        assert_eq!(max_n, 8);
+
+        // Support in ascending action_id order (mirrors the exporter).
+        let mut support: Vec<PackedCoord> = s.nodes[0]
+            .edges
+            .iter()
+            .filter(|e| e.visits >= 1)
+            .map(|e| e.action_id)
+            .collect();
+        support.sort_unstable();
+        let scores: Vec<f32> = support
+            .iter()
+            .map(|a| {
+                let l = logit_map[a];
+                l + gumbel_sigma(completed[a], max_n, c_visit, c_scale)
+            })
+            .collect();
+        let weights = gumbel_softmax(&scores);
+
+        // Sums to 1 over support.
+        let total: f32 = weights.iter().sum();
+        assert!((total - 1.0).abs() < 1e-5, "target must sum to 1, got {total}");
+
+        // Independent reference: explicit stable softmax of the same scores.
+        let m = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let exps: Vec<f32> = scores.iter().map(|&x| (x - m).exp()).collect();
+        let z: f32 = exps.iter().sum();
+        for (w, e) in weights.iter().zip(exps.iter()) {
+            assert!((w - e / z).abs() < 1e-6);
+        }
+        // Highest score (action 0: largest logit AND largest Q) gets the largest
+        // weight — monotone sanity on the composed target.
+        let argmax = weights
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .unwrap()
+            .0;
+        assert_eq!(support[argmax], 0);
+    }
+
+    // === Gumbel S6 [3]: Gumbel-Top-k == sampling-without-replacement ===
+
+    /// Chi-squared goodness-of-fit upper-tail survival probability P(X^2 >= stat)
+    /// for `df` degrees of freedom, via the regularized upper incomplete gamma
+    /// Q(df/2, stat/2). Pure (no deps) so the test stays self-contained.
+    fn chi2_sf(stat: f64, df: f64) -> f64 {
+        if stat <= 0.0 {
+            return 1.0;
+        }
+        let a = df / 2.0;
+        let x = stat / 2.0;
+        // Lanczos ln-gamma (z >= 0.5 always holds here: a = df/2 >= 0.5 for the
+        // chi-square dfs we use, so the reflection branch is unnecessary).
+        fn ln_gamma(z: f64) -> f64 {
+            const C: [f64; 8] = [
+                676.520_368_121_885_1,
+                -1_259.139_216_722_402_8,
+                771.323_428_777_653_1,
+                -176.615_029_162_140_6,
+                12.507_343_278_686_905,
+                -0.138_571_095_265_720_12,
+                9.984_369_578_019_572e-6,
+                1.505_632_735_149_311_6e-7,
+            ];
+            let g = 7.0;
+            let z = z - 1.0;
+            let mut x = 0.999_999_999_999_809_93;
+            for (i, &c) in C.iter().enumerate() {
+                x += c / (z + (i as f64) + 1.0);
+            }
+            let t = z + g + 0.5;
+            0.5 * (2.0 * std::f64::consts::PI).ln() + (z + 0.5) * t.ln() - t + x.ln()
+        }
+        // Regularized lower incomplete gamma P(a,x); SF = 1 - P for the upper tail
+        // of the gamma == chi-square upper tail.
+        // Series expansion (good for x < a+1), else continued fraction.
+        let gln = ln_gamma(a);
+        if x < a + 1.0 {
+            let mut ap = a;
+            let mut sum = 1.0 / a;
+            let mut del = sum;
+            for _ in 0..500 {
+                ap += 1.0;
+                del *= x / ap;
+                sum += del;
+                if del.abs() < sum.abs() * 1e-15 {
+                    break;
+                }
+            }
+            let p = sum * (-x + a * x.ln() - gln).exp();
+            1.0 - p
+        } else {
+            // Lentz continued fraction for Q(a,x).
+            let tiny = 1e-300;
+            let mut b = x + 1.0 - a;
+            let mut c = 1.0 / tiny;
+            let mut d = 1.0 / b;
+            let mut h = d;
+            for i in 1..500 {
+                let an = -(i as f64) * (i as f64 - a);
+                b += 2.0;
+                d = an * d + b;
+                if d.abs() < tiny {
+                    d = tiny;
+                }
+                c = b + an / c;
+                if c.abs() < tiny {
+                    c = tiny;
+                }
+                d = 1.0 / d;
+                let del = d * c;
+                h *= del;
+                if (del - 1.0).abs() < 1e-15 {
+                    break;
+                }
+            }
+            (-x + a * x.ln() - gln).exp() * h
+        }
+    }
+
+    fn softmax_f64(logits: &[f32]) -> Vec<f64> {
+        let m = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max) as f64;
+        let exps: Vec<f64> = logits.iter().map(|&l| ((l as f64) - m).exp()).collect();
+        let z: f64 = exps.iter().sum();
+        exps.into_iter().map(|e| e / z).collect()
+    }
+
+    /// One Gumbel draw per action with the SAME per-action seed discipline the
+    /// search uses (§0.8): g(a) = gumbel_draw(seed.wrapping_add(action_id)).
+    fn gumbel_argsort(logits: &[f32], seed: u64) -> Vec<usize> {
+        let mut scored: Vec<(usize, f32)> = logits
+            .iter()
+            .enumerate()
+            .map(|(a, &l)| (a, l + gumbel_draw(seed.wrapping_add(a as u64))))
+            .collect();
+        scored.sort_by(|x, y| {
+            y.1.partial_cmp(&x.1)
+                .unwrap()
+                .then_with(|| x.0.cmp(&y.0))
+        });
+        scored.into_iter().map(|(a, _)| a).collect()
+    }
+
+    #[test]
+    fn gumbel_topk_is_sampling_without_replacement_chi2_gate() {
+        // §0.5 / S6[3]: top-m of (logits + Gumbel(0,1)) is sampling WITHOUT
+        // replacement from softmax(logits). Gate: over >=100 random logit
+        // vectors (varied length/entropy), draw for >=10_000 seeds each, compare
+        // empirical FIRST-pick freqs to softmax(logits) via chi-squared GoF at
+        // alpha=0.01; allow <=5% of vectors to fail. Then the SECOND pick,
+        // conditioned on the first, must match softmax renormalized over the
+        // remaining support (same gate). This is the Gumbel-max theorem.
+        const N_VECTORS: usize = 120;
+        const N_SEEDS: u64 = 12_000;
+        const ALPHA: f64 = 0.01;
+
+        // Deterministic LCG to generate the logit vectors (no rand dep needed).
+        let mut rng: u64 = 0x1234_5678_9ABC_DEF0;
+        let mut next = || {
+            rng = rng
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (rng >> 11) as f64 / (1u64 << 53) as f64
+        };
+
+        let mut first_fail = 0usize;
+        let mut second_fail = 0usize;
+        for v in 0..N_VECTORS {
+            // Length 2..=8 and a scale that varies entropy (small scale ⇒ near
+            // uniform, large scale ⇒ peaked).
+            let n = 2 + (v % 7); // 2..=8
+            let scale = 0.5 + (v as f64 % 5.0) * 1.2;
+            let logits: Vec<f32> = (0..n)
+                .map(|_| ((next() - 0.5) * 2.0 * scale) as f32)
+                .collect();
+            let probs = softmax_f64(&logits);
+
+            // Space the seeds far apart so seed.wrapping_add(action_id) ranges of
+            // adjacent trials never overlap (clean independence per §0.8 hashing).
+            let stride: u64 = 1 << 20;
+            // First-pick counts, plus second-pick counts conditioned on first==j*.
+            let mut first_counts = vec![0u64; n];
+            // For the most-probable first pick, accumulate second-pick freqs.
+            let star = probs
+                .iter()
+                .enumerate()
+                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+                .unwrap()
+                .0;
+            let mut second_counts = vec![0u64; n];
+            let mut second_total = 0u64;
+            for t in 0..N_SEEDS {
+                let seed = (v as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ (t * stride);
+                let order = gumbel_argsort(&logits, seed);
+                first_counts[order[0]] += 1;
+                if order[0] == star {
+                    second_counts[order[1]] += 1;
+                    second_total += 1;
+                }
+            }
+
+            // First-pick chi-squared GoF vs softmax(logits).
+            let total = N_SEEDS as f64;
+            let mut stat = 0.0;
+            for j in 0..n {
+                let exp = probs[j] * total;
+                if exp > 0.0 {
+                    let obs = first_counts[j] as f64;
+                    stat += (obs - exp) * (obs - exp) / exp;
+                }
+            }
+            let p = chi2_sf(stat, (n - 1) as f64);
+            if p <= ALPHA {
+                first_fail += 1;
+            }
+
+            // Second-pick: conditioned on first==star, the remaining support is
+            // softmax(logits) renormalized after removing `star`.
+            let denom: f64 = 1.0 - probs[star];
+            if denom > 1e-9 && second_total > 50 {
+                let mut stat2 = 0.0;
+                let st = second_total as f64;
+                for j in 0..n {
+                    if j == star {
+                        // star can't be picked second; expect ~0.
+                        continue;
+                    }
+                    let exp = (probs[j] / denom) * st;
+                    if exp > 0.0 {
+                        let obs = second_counts[j] as f64;
+                        stat2 += (obs - exp) * (obs - exp) / exp;
+                    }
+                }
+                // df = (support size after removal) - 1 = (n-1) - 1.
+                let df = (n - 2).max(1) as f64;
+                let p2 = chi2_sf(stat2, df);
+                if p2 <= ALPHA {
+                    second_fail += 1;
+                }
+                // star must essentially never be drawn second.
+                assert!(
+                    second_counts[star] as f64 <= 0.01 * st + 5.0,
+                    "star {star} drawn second too often: {} / {st}",
+                    second_counts[star]
+                );
+            }
+        }
+
+        let first_rate = first_fail as f64 / N_VECTORS as f64;
+        let second_rate = second_fail as f64 / N_VECTORS as f64;
+        assert!(
+            first_rate <= 0.05,
+            "first-pick GoF fail rate {first_rate:.3} exceeds 5% ({first_fail}/{N_VECTORS})"
+        );
+        assert!(
+            second_rate <= 0.05,
+            "second-pick GoF fail rate {second_rate:.3} exceeds 5% ({second_fail}/{N_VECTORS})"
+        );
     }
 }

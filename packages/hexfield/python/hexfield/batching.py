@@ -130,12 +130,20 @@ def collate_training(
     opp = torch.zeros(b, npad, dtype=torch.float32)
     cell_q = torch.zeros(b, npad, dtype=torch.float32)
     cell_q_mask = torch.zeros(b, npad, dtype=torch.float32)
+    # main_6 Gumbel S5: dense improved-policy target π' (B, L). All-zero for rows
+    # without a target; gumbel_policy_valid flags which rows carry one so the loss
+    # selects π' vs the visit target per row. Older ExpandedRow (no gumbel field)
+    # ⇒ getattr fallback to all-zero / 0.0 (visit fallback) for transition safety.
+    gumbel_policy = torch.zeros(b, npad, dtype=torch.float32)
     for g, row in enumerate(rows):
         n = row.policy.shape[0]
         policy[g, :n] = torch.from_numpy(row.policy)
         opp[g, :n] = torch.from_numpy(row.opp_policy)
         cell_q[g, :n] = torch.from_numpy(row.cell_q)  # n == row.cell_q.shape[0]
         cell_q_mask[g, :n] = torch.from_numpy(row.cell_q_mask)
+        gp = getattr(row, "gumbel_policy", None)
+        if gp is not None and gp.shape[0] == n:
+            gumbel_policy[g, :n] = torch.from_numpy(gp)
     # KataGo auxiliary SOFT policy target (main_4), HEXO-ADAPTED (config review).
     # KataGo (metrics_pytorch.py) is target_soft = ((p + 1e-7)*policymask)^(1/T),
     # T=4 (exponent 0.25), over the FULL legal set. On Hexo that is harmful: the
@@ -176,6 +184,15 @@ def collate_training(
             "opp_policy": opp,
             "cell_q": cell_q,
             "cell_q_mask": cell_q_mask,
+            # main_6 Gumbel S5: dense π' target + per-row presence mask. losses.py
+            # drives the main-policy CE from gumbel_policy where valid (and
+            # policy_target=="gumbel"); else the visit `policy`. All-zero / valid-0
+            # on visit-only batches ⇒ byte-identical to pre-Gumbel.
+            "gumbel_policy": gumbel_policy,
+            "gumbel_policy_valid": torch.tensor(
+                [float(getattr(row, "gumbel_policy_valid", 0.0)) for row in rows],
+                dtype=torch.float32,
+            ),
             "policy_ce_weight": torch.tensor(weights, dtype=torch.float32),
             "opp_coverage": torch.tensor([row.opp_coverage for row in rows]),
             "value": torch.tensor([row.value for row in rows], dtype=torch.float32),

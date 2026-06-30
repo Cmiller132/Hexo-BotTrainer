@@ -6,7 +6,9 @@
 //! reply. Reply: dense_cnn's two-key contract byte-identical
 //! (values_bytes f32 x B, priors_bytes f32 x sum(L_g) positional over each
 //! row's legal prefix) plus the optional moves_left_bytes (f32 x B, decoded
-//! decisions [0, 512]) when `request_moves_left` is set.
+//! decisions [0, 512]) when `request_moves_left` is set, and the optional
+//! priors_logits_bytes (f32 x sum(L_g), raw pre-softmax policy logits, same
+//! positional layout as priors_bytes) when `request_logits` is set (Gumbel S2).
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -111,6 +113,7 @@ fn build_chunk_payload<'py>(
     py: Python<'py>,
     rows: &[Row],
     request_moves_left: bool,
+    request_logits: bool,
     encoding_started: Instant,
     stats: Option<&SharedEvaluationStats>,
 ) -> PyResult<Bound<'py, PyDict>> {
@@ -145,6 +148,10 @@ fn build_chunk_payload<'py>(
     payload.set_item("nbr", bytes_of(py, &nbr))?;
     payload.set_item("legal_counts", bytes_of(py, &legal_counts))?;
     payload.set_item("request_moves_left", request_moves_left)?;
+    // Gumbel logit plumbing: only ASK for raw logits when a Gumbel path needs
+    // them (S2). Off (production/parity) ⇒ the evaluator emits no
+    // `priors_logits_bytes` and the reply is byte-identical to today.
+    payload.set_item("request_logits", request_logits)?;
     if let Some(stats) = stats {
         let mut stats = lock_stats(stats);
         stats.evaluator_chunks += 1;
@@ -164,6 +171,7 @@ fn parse_chunk_reply(
     rows: &[Row],
     states_len: usize,
     request_moves_left: bool,
+    request_logits: bool,
     stats: Option<&SharedEvaluationStats>,
 ) -> PyResult<Vec<RustEvaluation>> {
     let parse_started = Instant::now();
@@ -188,6 +196,23 @@ fn parse_chunk_reply(
         let bytes = obj.downcast::<PyBytes>()?.as_bytes().to_vec();
         require_exact_bytes("moves_left_bytes", bytes.len(), b, 4)?;
         Some(bytes)
+    } else {
+        None
+    };
+    // Optional raw-logit column (Gumbel S2). Same positional layout as
+    // `priors_bytes` (sum of legal prefixes, fp32). Absent ⇒ None so parity
+    // replies and older evaluators that omit it still load. When `request_logits`
+    // is set the evaluator is contracted to emit it (mirrors moves_left), but we
+    // also tolerate absence (→ None) for forward/backward compatibility.
+    let logits_bytes: Option<Vec<u8>> = if request_logits {
+        match output.get_item("priors_logits_bytes") {
+            Ok(obj) => {
+                let bytes = obj.downcast::<PyBytes>()?.as_bytes().to_vec();
+                require_exact_bytes("priors_logits_bytes", bytes.len(), expected_priors, 4)?;
+                Some(bytes)
+            }
+            Err(_) => None,
+        }
     } else {
         None
     };
@@ -221,6 +246,21 @@ fn parse_chunk_reply(
                 priors.push((action_id, prior));
             }
             finalize_priors(&mut priors, row.legal_ids.len(), sorted_index)?;
+            // Build raw logits aligned to the row's legal-id ordering (NOT the
+            // descending-sorted/normalized `priors` order). The downstream tree
+            // builds a HashMap keyed by action_id, so order is irrelevant beyond
+            // pairing each id with its own logit.
+            let logits = match &logits_bytes {
+                Some(bytes) => {
+                    let mut row_logits = Vec::with_capacity(row.legal_ids.len());
+                    for (k, &action_id) in row.legal_ids.iter().enumerate() {
+                        let logit = read_logit(bytes, base + k, sorted_index)?;
+                        row_logits.push((action_id, logit));
+                    }
+                    Some(row_logits)
+                }
+                None => None,
+            };
             let moves_left = match &moves_left_bytes {
                 Some(bytes) => {
                     let ml = read_f32_required("moves_left_bytes", bytes, sorted_index)?;
@@ -240,6 +280,7 @@ fn parse_chunk_reply(
                     legal_action_count: row.legal_ids.len(),
                     priors,
                     moves_left,
+                    logits,
                 },
             ))
         })
@@ -262,18 +303,33 @@ fn evaluate_states_chunk(
     evaluator: &Bound<'_, PyAny>,
     states: &[&RustHexoState],
     request_moves_left: bool,
+    request_logits: bool,
     stats: Option<&SharedEvaluationStats>,
 ) -> PyResult<Vec<RustEvaluation>> {
     let encoding_started = Instant::now();
     let rows = featurize_and_sort(states)?;
-    let payload = build_chunk_payload(py, &rows, request_moves_left, encoding_started, stats)?;
+    let payload = build_chunk_payload(
+        py,
+        &rows,
+        request_moves_left,
+        request_logits,
+        encoding_started,
+        stats,
+    )?;
 
     let evaluator_started = Instant::now();
     let output = evaluator.call1((payload,))?;
     if let Some(stats) = stats {
         lock_stats(stats).evaluator_seconds += evaluator_started.elapsed().as_secs_f64();
     }
-    parse_chunk_reply(&output, &rows, states.len(), request_moves_left, stats)
+    parse_chunk_reply(
+        &output,
+        &rows,
+        states.len(),
+        request_moves_left,
+        request_logits,
+        stats,
+    )
 }
 
 /// Async phase 1: featurize + ENQUEUE the forward via `evaluator.submit_payload`
@@ -285,11 +341,19 @@ fn submit_states_chunk(
     evaluator: &Bound<'_, PyAny>,
     states: &[&RustHexoState],
     request_moves_left: bool,
+    request_logits: bool,
     stats: Option<&SharedEvaluationStats>,
 ) -> PyResult<(Py<PyAny>, Vec<Row>, usize)> {
     let encoding_started = Instant::now();
     let rows = featurize_and_sort(states)?;
-    let payload = build_chunk_payload(py, &rows, request_moves_left, encoding_started, stats)?;
+    let payload = build_chunk_payload(
+        py,
+        &rows,
+        request_moves_left,
+        request_logits,
+        encoding_started,
+        stats,
+    )?;
     let handle = evaluator.call_method1("submit_payload", (payload,))?;
     Ok((handle.unbind(), rows, states.len()))
 }
@@ -303,6 +367,7 @@ fn finish_states_chunk(
     rows: &[Row],
     states_len: usize,
     request_moves_left: bool,
+    request_logits: bool,
     stats: Option<&SharedEvaluationStats>,
 ) -> PyResult<Vec<RustEvaluation>> {
     let evaluator_started = Instant::now();
@@ -310,7 +375,14 @@ fn finish_states_chunk(
     if let Some(stats) = stats {
         lock_stats(stats).evaluator_seconds += evaluator_started.elapsed().as_secs_f64();
     }
-    parse_chunk_reply(&output, rows, states_len, request_moves_left, stats)
+    parse_chunk_reply(
+        &output,
+        rows,
+        states_len,
+        request_moves_left,
+        request_logits,
+        stats,
+    )
 }
 
 fn evaluate_state_refs(
@@ -318,6 +390,7 @@ fn evaluate_state_refs(
     evaluator: &Bound<'_, PyAny>,
     states: &[&RustHexoState],
     request_moves_left: bool,
+    request_logits: bool,
     stats: Option<&SharedEvaluationStats>,
 ) -> PyResult<Vec<RustEvaluation>> {
     if states.len() > EVAL_CHUNK_STATES {
@@ -328,12 +401,13 @@ fn evaluate_state_refs(
                 evaluator,
                 chunk,
                 request_moves_left,
+                request_logits,
                 stats,
             )?);
         }
         return Ok(evaluations);
     }
-    evaluate_states_chunk(py, evaluator, states, request_moves_left, stats)
+    evaluate_states_chunk(py, evaluator, states, request_moves_left, request_logits, stats)
 }
 
 /// Cache-checked, duplicate-coalescing batch evaluation preserving caller
@@ -346,6 +420,7 @@ pub fn evaluate_state_refs_cached(
     stats: Option<&SharedEvaluationStats>,
     cache_max_states: usize,
     request_moves_left: bool,
+    request_logits: bool,
 ) -> PyResult<Vec<Arc<RustEvaluation>>> {
     let mut result_slots: Vec<Option<Arc<RustEvaluation>>> = vec![None; requests.len()];
     let mut unique_states: Vec<&RustHexoState> = Vec::new();
@@ -365,9 +440,12 @@ pub fn evaluate_state_refs_cached(
         for (index, request) in requests.iter().enumerate() {
             let key = request.state_hash;
             if let Some(cached_eval) = cached.get(&key) {
-                // A cached eval without moves_left cannot serve a request that
-                // needs it; treat as a miss so the reply carries the field.
-                if !request_moves_left || cached_eval.moves_left.is_some() {
+                // A cached eval missing a requested optional field cannot serve
+                // a request that needs it; treat as a miss so the reply carries
+                // the field. (moves_left and, for Gumbel, the raw logits.)
+                if (!request_moves_left || cached_eval.moves_left.is_some())
+                    && (!request_logits || cached_eval.logits.is_some())
+                {
                     result_slots[index] = Some(cached_eval);
                     if let Some(stats) = stats {
                         lock_stats(stats).cache_hits += 1;
@@ -393,8 +471,14 @@ pub fn evaluate_state_refs_cached(
         if let Some(stats) = stats {
             lock_stats(stats).unique_states += unique_states.len();
         }
-        let unique_evals =
-            evaluate_state_refs(py, evaluator, &unique_states, request_moves_left, stats)?;
+        let unique_evals = evaluate_state_refs(
+            py,
+            evaluator,
+            &unique_states,
+            request_moves_left,
+            request_logits,
+            stats,
+        )?;
         let unique_evals: Vec<Arc<RustEvaluation>> = unique_evals
             .into_iter()
             .map(|mut eval| {
@@ -497,6 +581,7 @@ pub struct PendingEval {
     slot_to_unique: Vec<Option<usize>>,
     unique_keys: Vec<StateHash>,
     request_moves_left: bool,
+    request_logits: bool,
     pending: PendingKind,
 }
 
@@ -511,6 +596,7 @@ pub fn submit_eval_cached(
     cache: &SharedEvaluationCache,
     stats: Option<&SharedEvaluationStats>,
     request_moves_left: bool,
+    request_logits: bool,
 ) -> PyResult<PendingEval> {
     let mut result_slots: Vec<Option<Arc<RustEvaluation>>> = vec![None; requests.len()];
     let mut unique_states: Vec<&RustHexoState> = Vec::new();
@@ -530,7 +616,9 @@ pub fn submit_eval_cached(
         for (index, request) in requests.iter().enumerate() {
             let key = request.state_hash;
             if let Some(cached_eval) = cached.get(&key) {
-                if !request_moves_left || cached_eval.moves_left.is_some() {
+                if (!request_moves_left || cached_eval.moves_left.is_some())
+                    && (!request_logits || cached_eval.logits.is_some())
+                {
                     result_slots[index] = Some(cached_eval);
                     if let Some(stats) = stats {
                         lock_stats(stats).cache_hits += 1;
@@ -566,11 +654,18 @@ pub fn submit_eval_cached(
                 evaluator,
                 &unique_states,
                 request_moves_left,
+                request_logits,
                 stats,
             )?)
         } else {
-            let (handle, rows, states_len) =
-                submit_states_chunk(py, evaluator, &unique_states, request_moves_left, stats)?;
+            let (handle, rows, states_len) = submit_states_chunk(
+                py,
+                evaluator,
+                &unique_states,
+                request_moves_left,
+                request_logits,
+                stats,
+            )?;
             PendingKind::Async {
                 handle,
                 rows,
@@ -584,6 +679,7 @@ pub fn submit_eval_cached(
         slot_to_unique,
         unique_keys,
         request_moves_left,
+        request_logits,
         pending,
     })
 }
@@ -604,6 +700,7 @@ pub fn finish_eval_cached(
         slot_to_unique,
         unique_keys,
         request_moves_left,
+        request_logits,
         pending,
     } = pending;
 
@@ -621,6 +718,7 @@ pub fn finish_eval_cached(
             &rows,
             states_len,
             request_moves_left,
+            request_logits,
             stats,
         )?),
     };
@@ -743,6 +841,18 @@ fn read_prior(bytes: &[u8], index: usize, row_index: usize) -> PyResult<f32> {
     if !value.is_finite() || value < 0.0 {
         return Err(PyValueError::new_err(format!(
             "priors_bytes row {row_index} entry {index} must be finite and >= 0, got {value}"
+        )));
+    }
+    Ok(value)
+}
+
+/// Raw pre-softmax policy logit. Unlike priors these are unconstrained in sign
+/// (any real value); only require finiteness so NaN/Inf can't poison σ/Gumbel.
+fn read_logit(bytes: &[u8], index: usize, row_index: usize) -> PyResult<f32> {
+    let value = read_f32_required("priors_logits_bytes", bytes, index)?;
+    if !value.is_finite() {
+        return Err(PyValueError::new_err(format!(
+            "priors_logits_bytes row {row_index} entry {index} must be finite, got {value}"
         )));
     }
     Ok(value)

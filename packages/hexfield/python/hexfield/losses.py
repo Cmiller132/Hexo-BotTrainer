@@ -216,6 +216,7 @@ def hexfield_loss(
     short_term_value_weight: float = SHORT_TERM_VALUE_WEIGHT,
     moves_left_weight: float = MOVES_LEFT_WEIGHT,
     q_head_weight: float = Q_HEAD_WEIGHT,
+    policy_target: str = "visit",
     denominators: Mapping[str, float] | None = None,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """Total = 1.0*policy + 1.0*value + 0.25*opp + 0.1*sum(stv) + 0.1*ml.
@@ -243,10 +244,27 @@ def hexfield_loss(
     _pv = batch.get("policy_valid")
     if _pol_weight is not None and _pv is not None:
         _pol_weight = _pol_weight * _pv
+    # main_6 Gumbel S5: select the MAIN-policy CE target. With policy_target ==
+    # "gumbel" AND a per-row gumbel target present (gumbel_policy_valid==1), drive
+    # the CE from the improved-policy target π'; every other row (fast / absent /
+    # old shard) keeps the visit target. Built as a per-row blend so a mixed batch
+    # is correct and a visit-only batch (no gumbel cols, or policy_target=="visit")
+    # is byte-identical to the pre-Gumbel path.
+    _policy_target = batch["policy"]
+    if (
+        policy_target == "gumbel"
+        and "gumbel_policy" in batch
+        and "gumbel_policy_valid" in batch
+    ):
+        _use_gumbel = (batch["gumbel_policy_valid"] > 0.0).to(_policy_target.dtype)
+        _use_gumbel = _use_gumbel.unsqueeze(1)  # (B,1) broadcast over the legal prefix
+        _policy_target = (
+            _use_gumbel * batch["gumbel_policy"] + (1.0 - _use_gumbel) * batch["policy"]
+        )
     components["policy"] = segment_policy_ce(
         outputs["policy"],
         batch["legal_counts"],
-        batch["policy"],
+        _policy_target,
         allow_zero_rows=True,
         row_weight=_pol_weight,
         weight_denominator=denoms.get("policy_ce_weight_sum"),
