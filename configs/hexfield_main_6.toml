@@ -152,9 +152,9 @@ pcr_full_proportion = 0.33
 # ~0.3% at 512, so 192 buys deeper 2-3-ply conversion resolution. THROUGHPUT-GATED:
 # revert to 128 at launch if pos/s regresses materially (can't measure pre-launch).
 pcr_fast_visits = 192
-active_games = 96
+active_games = 192
 c_puct = 1.5
-virtual_batch_size = 4
+virtual_batch_size = 16
 flush_target = 1024
 active_root_limit = 192
 root_dirichlet_total_alpha = 10.83
