@@ -416,7 +416,7 @@ validation_fraction = 0.0
 # Self-play (the epoch bottleneck) is UNCHANGED (fast moves are already played);
 # training compute ~3x (~15% slower epochs, owner-sanctioned). After the smoke,
 # re-set to round(48000 * measured_rows_after / 9022) if the multiplier is off.
-train_samples_per_epoch = 96000
+train_samples_per_epoch = 3000
 max_train_bucket_per_new_data = 8.0
 max_train_bucket_size = 500000.0
 no_repeat_files = false
@@ -462,15 +462,15 @@ permanent_anchors = [["main4_ep60", "/mnt/e/Hexo-BotTrainer/runs/hexfield_main_4
 radius8_opponents = []
 
 [run]
-name = "hexfield_main_6"
-output_dir = "/mnt/e/Hexo-BotTrainer/runs/hexfield_main_6"
+name = "hexfield_gumbel_e2e"
+output_dir = "/mnt/e/Hexo-BotTrainer/runs/_gumbel_e2e_test"
 seed = 1
 
 [loop]
-epochs = 200
+epochs = 1
 
 [selfplay]
-games_per_epoch = 256
+games_per_epoch = 16
 update_checkpoint_pointer = false
 
 [train]

@@ -1138,7 +1138,7 @@ impl HexfieldMctsSession {
                 };
             }
 
-            let moves_decided = complete_continuous_slots(
+            let mut moves_decided = complete_continuous_slots(
                 py,
                 on_move,
                 &mut slots,
@@ -1148,17 +1148,38 @@ impl HexfieldMctsSession {
                 base_seed,
                 &mut queue,
                 &mut stats,
+                false,
             )?;
 
             if matches!(decision, ContinuousFlushDecision::Stop) && moves_decided == 0 {
-                let stuck = slots
-                    .iter()
-                    .filter(|slot| !matches!(slot.phase, ContinuousPhase::Empty))
-                    .count();
-                return Err(PyRuntimeError::new_err(format!(
-                    "hexfield continuous MCTS scheduler stalled with {stuck} unfinished slots \
-                     (queue empty, no selectable leaves, no completable roots)"
-                )));
+                // Rescue pass before declaring a stall: a Gumbel Sequential-Halving
+                // root can saturate its reachable tree below target_visits / its
+                // round caps (terminal subtrees), which the normal completion path
+                // cannot finalize. Force-complete any such stuck Gumbel slot from
+                // its accrued visits; only a genuine non-Gumbel deadlock remains a
+                // hard error.
+                moves_decided = complete_continuous_slots(
+                    py,
+                    on_move,
+                    &mut slots,
+                    c_puct,
+                    &move_policy,
+                    &temperature_by_ply,
+                    base_seed,
+                    &mut queue,
+                    &mut stats,
+                    true,
+                )?;
+                if moves_decided == 0 {
+                    let stuck = slots
+                        .iter()
+                        .filter(|slot| !matches!(slot.phase, ContinuousPhase::Empty))
+                        .count();
+                    return Err(PyRuntimeError::new_err(format!(
+                        "hexfield continuous MCTS scheduler stalled with {stuck} unfinished slots \
+                         (queue empty, no selectable leaves, no completable roots)"
+                    )));
+                }
             }
         }
 
@@ -1591,6 +1612,7 @@ fn complete_continuous_slots(
     base_seed: u64,
     queue: &mut Vec<ContinuousEvalItem>,
     stats: &mut ContinuousSchedulerStats,
+    force_stuck_gumbel: bool,
 ) -> PyResult<u64> {
     let mut moves_decided = 0u64;
     for slot_index in 0..slots.len() {
@@ -1610,6 +1632,20 @@ fn complete_continuous_slots(
                 );
                 if normal {
                     return (true, false);
+                }
+                // main_6 #1 (SH saturation safety net): a Gumbel root can exhaust
+                // its REACHABLE tree (terminal/solved subtrees, common in the
+                // endgame) below target_visits and below its SH round caps. When
+                // that happens the slot has no in-flight evals and the scheduler
+                // made no global progress this pass (force_stuck_gumbel), so it can
+                // never reach completion or advance the SH barrier -> it would
+                // stall. Finalize the move from the visits accrued so far instead.
+                if force_stuck_gumbel
+                    && search.has_gumbel_root()
+                    && in_flight == 0
+                    && search.needs_visits()
+                {
+                    return (true, true);
                 }
                 // §5.4.2: Fast moves stop unrestricted; recorded Full roots
                 // keep the conservative visit floor.
@@ -1978,7 +2014,7 @@ fn build_search_result_payloads(
         let baseline = baselines.and_then(|items| items.get(index));
         let (policy_action_ids, policy_weights, _policy_q, policy_total) =
             visit_policy(root, baseline);
-        let (export_action_ids, export_weights, export_q) = if forced_playout_k > 0.0 {
+        let (mut export_action_ids, mut export_weights, mut export_q) = if forced_playout_k > 0.0 {
             // [7] align the recorded-target pruning with selection's c_for(N)
             // when pruned_dynamic_cpuct is on; otherwise static c_puct (parity).
             let effective_c = search.effective_pruning_c_puct(c_puct, root.visits);
@@ -1987,6 +2023,39 @@ fn build_search_result_payloads(
             let (ids, w, q, _t) = visit_policy(root, baseline);
             (ids, w, q)
         };
+        // RECORDED-target fallback for the degenerate force-completed Gumbel SH
+        // root (main_6 #1 saturation safety-net): such a move can finalize with
+        // ZERO net delta visits over its reuse baseline, so the delta-visit export
+        // above is EMPTY. A Full (pcr_full) row with an empty/zero-mass policy
+        // target is a HARD error in shard expansion ("policy target must carry
+        // positive mass"), so substitute the CUMULATIVE visit distribution
+        // (baseline-free), then the root prior — both real, on-legal, positive-mass
+        // targets that match the played-move fallback. Inert for normal completion
+        // (export is non-empty there), so parity payloads are unaffected.
+        if export_action_ids.is_empty() {
+            let (cum_ids, cum_w, cum_q, cum_total) = visit_policy(root, None);
+            if !cum_ids.is_empty() && cum_total > 0 {
+                export_action_ids = cum_ids;
+                export_weights = cum_w;
+                export_q = cum_q;
+            } else {
+                // No edge carries a cumulative visit: fall back to the root prior.
+                let (prior_ids, prior_w) = root_prior_policy(root);
+                let prior_q: Vec<f32> = prior_ids
+                    .iter()
+                    .map(|id| {
+                        root.edges
+                            .iter()
+                            .find(|e| e.action_id == *id)
+                            .map(|e| e.value())
+                            .unwrap_or(0.0)
+                    })
+                    .collect();
+                export_action_ids = prior_ids;
+                export_weights = prior_w;
+                export_q = prior_q;
+            }
+        }
         let (root_prior_action_ids, root_prior_weights) = root_prior_policy(root);
         let guarded_weights = if search.tss_enabled {
             tactical_guard_weights(&search.root_state, &policy_action_ids, &policy_weights)
@@ -2001,7 +2070,33 @@ fn build_search_result_payloads(
             temperatures[index],
             seed.wrapping_add(index as u64),
         )?;
-        result.set_item("action_id", selected.unwrap_or(0))?;
+        // Robust played-move resolution. `selected` can come back None when the
+        // DELTA-visit policy is empty: a force-completed Gumbel SH root (main_6
+        // #1 saturation safety-net) can finalize a move with ZERO net visits over
+        // its reuse baseline, so every edge's delta is 0 and `visit_policy` drops
+        // them all. Falling through `selected.unwrap_or(0)` would emit PackedCoord
+        // 0, which unpacks to the illegal sentinel HexCoord{q:-32768,r:-32768} and
+        // crashes apply_action downstream. Instead, fall back to the CUMULATIVE
+        // visit distribution (baseline-free), then to the root prior — both are
+        // real, legal root action_ids. This path is inert for normal full-visit
+        // completion (where `selected` is always Some), so parity is unaffected.
+        let selected = match selected {
+            Some(action_id) => action_id,
+            None => fallback_root_action(root).ok_or_else(|| {
+                PyValueError::new_err(
+                    "continuous move selection found no legal root action (empty edges and priors)",
+                )
+            })?,
+        };
+        debug_assert!(
+            root.edges.iter().any(|e| e.action_id == selected)
+                || root
+                    .remaining_priors()
+                    .iter()
+                    .any(|(a, _)| *a == selected),
+            "selected played action_id must be a real root action, never the sentinel"
+        );
+        result.set_item("action_id", selected)?;
         result.set_item(
             "action_selection",
             if baseline.is_some() {
@@ -2089,6 +2184,50 @@ fn eval_stats_dict<'py>(py: Python<'py>, stats: &EvaluationStats) -> PyResult<Bo
     dict.set_item("cache_inserts", stats.cache_inserts)?;
     dict.set_item("cache_size_peak", stats.cache_size_peak)?;
     Ok(dict)
+}
+
+/// Deterministic last-resort played-move pick when the normal (delta-visit)
+/// selection yields nothing — used only for force-completed Gumbel SH roots that
+/// accrued no net visits over their reuse baseline. Prefers the most-visited
+/// CUMULATIVE root edge (baseline-free), then the highest-prior root action.
+/// Returns a real, legal root action_id (never the PackedCoord-0 sentinel), or
+/// None only if the root genuinely has no edges and no priors (a real bug). Ties
+/// broken by smallest action_id for reproducibility.
+fn fallback_root_action(root: &RustNode) -> Option<PackedCoord> {
+    // 1) Most-visited cumulative edge.
+    let by_visits = root
+        .edges
+        .iter()
+        .max_by(|a, b| {
+            a.visits
+                .cmp(&b.visits)
+                .then_with(|| b.action_id.cmp(&a.action_id))
+        })
+        .map(|edge| (edge.action_id, edge.visits));
+    if let Some((action_id, visits)) = by_visits {
+        if visits > 0 {
+            return Some(action_id);
+        }
+    }
+    // 2) No edge carries a visit (degenerate): take the highest-prior root
+    // action across edges + unexpanded candidates.
+    let (prior_ids, prior_weights) = root_prior_policy(root);
+    let best_prior = prior_ids
+        .iter()
+        .copied()
+        .zip(prior_weights.iter().copied())
+        .max_by(|a, b| {
+            a.1.partial_cmp(&b.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| b.0.cmp(&a.0))
+        })
+        .map(|(action_id, _)| action_id);
+    if best_prior.is_some() {
+        return best_prior;
+    }
+    // 3) Priors all non-positive but an edge exists: any edge action_id beats a
+    // sentinel. Fall back to the visit-argmax (already legal) if present.
+    by_visits.map(|(action_id, _)| action_id)
 }
 
 fn root_prior_policy(root: &RustNode) -> (Vec<PackedCoord>, Vec<f32>) {
@@ -2677,4 +2816,123 @@ fn select_action_from_policy(
         }
     }
     Ok(action_ids.last().copied())
+}
+
+#[cfg(test)]
+mod fallback_tests {
+    use super::*;
+    use crate::tree::{NodePriors, RustPriorCandidate};
+    use hexo_engine::Player;
+    use hexo_utils::StateHash;
+
+    fn edge(action_id: PackedCoord, prior: f32, visits: u32, value_sum: f32) -> RustEdge {
+        RustEdge {
+            action_id,
+            action: unpack_coord(action_id),
+            prior,
+            visits,
+            value_sum,
+            value_sq_sum: 0.0,
+            ml_sum: 0.0,
+            ml_weight: 0.0,
+            pending: 0,
+            child: None,
+            forced: false,
+        }
+    }
+
+    fn node(edges: Vec<RustEdge>, candidates: Vec<RustPriorCandidate>) -> RustNode {
+        RustNode {
+            state_hash: StateHash::default(),
+            player: Player::Player0,
+            eval_value: 0.0,
+            eval_ml: None,
+            visits: edges.iter().map(|e| e.visits).sum(),
+            value_sum: 0.0,
+            ml_sum: 0.0,
+            ml_weight: 0.0,
+            edges,
+            priors: NodePriors::Owned(candidates),
+            max_eligible_children: 8,
+            root_logits: None,
+        }
+    }
+
+    // Non-sentinel action ids: PackedCoord 0 unpacks to the illegal sentinel
+    // HexCoord{q:-32768,r:-32768}; any non-zero id we use here is a "real" action
+    // for the purposes of the played-move invariant.
+    const A1: PackedCoord = 0x8001_8000; // q=1, r=0
+    const A2: PackedCoord = 0x8000_8001; // q=0, r=1
+    const A3: PackedCoord = 0x8001_8001; // q=1, r=1
+
+    #[test]
+    fn delta_visit_policy_is_empty_when_all_edges_match_baseline() {
+        // Reproduces the force-completed Gumbel SH stall: a root whose edges all
+        // sit at their reuse baseline (zero net delta) yields an EMPTY delta-visit
+        // policy, so the normal selection returns None.
+        let root = node(
+            vec![edge(A1, 0.6, 3, 1.5), edge(A2, 0.4, 2, 0.5)],
+            Vec::new(),
+        );
+        let baseline: HashMap<PackedCoord, u32> =
+            [(A1, 3u32), (A2, 2u32)].into_iter().collect();
+        let (ids, weights, _q, total) = visit_policy(&root, Some(&baseline));
+        assert!(ids.is_empty(), "all-baseline delta policy must be empty");
+        assert!(weights.is_empty());
+        assert_eq!(total, 0);
+        // The normal sampler returns None on an empty policy.
+        let picked = select_action_from_policy(&ids, &weights, 1.0, 7).unwrap();
+        assert!(picked.is_none());
+    }
+
+    #[test]
+    fn fallback_never_returns_sentinel_and_prefers_most_visited() {
+        // The fallback used when `selected` is None must yield a REAL root action
+        // (never PackedCoord 0 / the sentinel). With visits present it picks the
+        // most-visited cumulative edge.
+        let root = node(
+            vec![edge(A1, 0.2, 5, 2.0), edge(A2, 0.7, 1, 0.1)],
+            vec![RustPriorCandidate { action_id: A3, prior: 0.9 }],
+        );
+        let picked = fallback_root_action(&root).expect("fallback yields an action");
+        assert_ne!(picked, 0, "fallback must never return the sentinel id 0");
+        assert_eq!(picked, A1, "most-visited cumulative edge wins");
+    }
+
+    #[test]
+    fn cumulative_visit_policy_recovers_target_when_delta_is_empty() {
+        // The RECORDED-target fallback in build_search_result_payloads substitutes
+        // the baseline-free cumulative visit policy when the delta-visit export is
+        // empty. Pin the property it relies on: with edges carrying cumulative
+        // visits, visit_policy(root, None) yields a NON-EMPTY, positive-mass target
+        // even though the delta policy (vs an all-matching baseline) is empty.
+        let root = node(
+            vec![edge(A1, 0.6, 3, 1.5), edge(A2, 0.4, 2, 0.5)],
+            Vec::new(),
+        );
+        let baseline: HashMap<PackedCoord, u32> =
+            [(A1, 3u32), (A2, 2u32)].into_iter().collect();
+        let (d_ids, _d_w, _d_q, d_total) = visit_policy(&root, Some(&baseline));
+        assert!(d_ids.is_empty() && d_total == 0, "delta policy is empty");
+        let (c_ids, c_w, _c_q, c_total) = visit_policy(&root, None);
+        assert_eq!(c_ids.len(), 2, "cumulative policy keeps both edges");
+        assert_eq!(c_total, 5, "cumulative total = sum of edge visits");
+        let mass: f32 = c_w.iter().sum();
+        assert!((mass - 1.0).abs() < 1e-6, "cumulative target carries unit mass");
+        assert!(c_ids.iter().all(|&id| id != 0), "no sentinel in the target");
+    }
+
+    #[test]
+    fn fallback_uses_highest_prior_when_no_visits() {
+        // Degenerate root: edges exist but carry zero visits (force-completed with
+        // nothing searched). Fallback then takes the highest-prior action across
+        // edges + unexpanded candidates — still a real, legal action id.
+        let root = node(
+            vec![edge(A1, 0.2, 0, 0.0), edge(A2, 0.3, 0, 0.0)],
+            vec![RustPriorCandidate { action_id: A3, prior: 0.5 }],
+        );
+        let picked = fallback_root_action(&root).expect("fallback yields an action");
+        assert_ne!(picked, 0);
+        assert_eq!(picked, A3, "highest-prior action wins when no edge is visited");
+    }
 }
