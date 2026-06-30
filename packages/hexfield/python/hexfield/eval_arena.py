@@ -221,8 +221,15 @@ def _load_hexfield_net(checkpoint: str | Path) -> HexfieldNet:
     payload = torch.load(path, map_location="cpu", weights_only=False)
     if not isinstance(payload, dict) or "model" not in payload:
         raise RuntimeError(f"hexfield checkpoint payload has no 'model' state: {path}")
-    model = HexfieldNet()
     sd = payload["model"]
+    # Build the opponent net at ITS OWN width, not the process-global CHANNELS, so a
+    # narrower (or wider) anchor — e.g. a c=96 main_4/main_2 checkpoint evaluated by a
+    # c=128 run — loads instead of shape-mismatching. The width is the trunk channel
+    # dim, read off the learned `tokens` parameter (NUM_TOKENS, c); fall back to the
+    # stem bias (c). None => default-width construction (==CHANNELS), so single-width
+    # runs are byte-identical to before.
+    ckpt_channels = _infer_checkpoint_channels(sd)
+    model = HexfieldNet() if ckpt_channels is None else HexfieldNet(channels=ckpt_channels)
     try:
         model.load_state_dict(sd, strict=True)
     except RuntimeError:
@@ -253,10 +260,24 @@ def _load_hexfield_net(checkpoint: str | Path) -> HexfieldNet:
         # Still strict — a genuine corruption must surface, not keep random heads.
         from .legacy_model_v2 import HexfieldNet as HexfieldNetV2
 
-        model = HexfieldNetV2()
+        model = HexfieldNetV2() if ckpt_channels is None else HexfieldNetV2(channels=ckpt_channels)
         model.load_state_dict(payload["model"], strict=True)
     model.eval()
     return model
+
+
+def _infer_checkpoint_channels(sd: dict) -> int | None:
+    """Trunk channel width of a hexfield checkpoint, or None if undeterminable.
+
+    The width is the second dim of the learned ``tokens`` parameter (NUM_TOKENS, c);
+    the stem conv bias (c,) is the fallback. Returning None means "use the default
+    (process-global CHANNELS)", so a same-width run is constructed exactly as before.
+    """
+    for key in ("tokens", "stem.bias"):
+        t = sd.get(key)
+        if t is not None and hasattr(t, "shape") and len(t.shape) >= 1:
+            return int(t.shape[-1])
+    return None
 
 
 def _resolve_eval_overrides(

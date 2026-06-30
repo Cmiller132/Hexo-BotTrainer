@@ -223,8 +223,11 @@ class RelPosAttention(nn.Module):
     def __init__(self, channels: int) -> None:
         super().__init__()
         self.heads = ATTENTION_HEADS
-        self.head_dim = HEAD_DIM
-        self.scale = 1.0 / math.sqrt(HEAD_DIM)
+        # Per-instance head_dim (channels // heads) so a non-default-width legacy
+        # anchor (e.g. a c=96 main_2 checkpoint) loads inside a c=128 process. At the
+        # default width this equals the global HEAD_DIM (byte-identical).
+        self.head_dim = channels // ATTENTION_HEADS
+        self.scale = 1.0 / math.sqrt(self.head_dim)
         self.q_proj = nn.Linear(channels, channels)
         self.k_proj = nn.Linear(channels, channels)
         self.v_proj = nn.Linear(channels, channels)
@@ -278,9 +281,11 @@ class AttnBlock(nn.Module):
 class HexfieldNet(nn.Module):
     """The full network: stem, C C C A C C A C A, LN_final, heads."""
 
-    def __init__(self) -> None:
+    def __init__(self, channels: int = CHANNELS) -> None:
         super().__init__()
-        c = CHANNELS
+        # channels defaults to the process-global CHANNELS; an explicit value lets
+        # the eval arena load a legacy anchor at its own checkpoint width.
+        c = channels
         self.stem = HexNodeConv(NUM_FEATURES, c)
         self.stem_ln = nn.LayerNorm(c)
         self.conv_blocks = nn.ModuleList([ConvBlock(c) for _ in range(6)])

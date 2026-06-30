@@ -156,6 +156,10 @@ def segment_policy_ce(
         denom = float(b) if weight_denominator is None else float(weight_denominator)
     else:
         denom = float(b) if denominator is None else float(denominator)
+    if denom <= 0.0:
+        # All-masked nominal batch (e.g. policy_rows==0): contribute exactly 0
+        # without a divide-by-zero, mirroring binned_value_loss.
+        return logits.sum() * 0.0
     return per_row.sum() / denom
 
 
@@ -228,11 +232,23 @@ def hexfield_loss(
     rows = denoms.get("rows")
     components: dict[str, torch.Tensor] = {}
 
+    # PCR value-rows: FAST rows carry all-zero policy + policy_valid==0. Fold the
+    # policy_valid mask into the per-row CE weight so fast rows contribute exactly
+    # 0 AND set allow_zero_rows so the zero-mass fast policy targets do not raise.
+    # weight_denominator stays the FULL-row surprise-weight sum (G2), preserving
+    # mean-over-full-rows. On full-only batches policy_valid is all-1 ⇒ the weight,
+    # the denominator, and allow_zero_rows (no zero-mass rows present) all reduce
+    # to the pre-fix path byte-identically.
+    _pol_weight = batch.get("policy_ce_weight")
+    _pv = batch.get("policy_valid")
+    if _pol_weight is not None and _pv is not None:
+        _pol_weight = _pol_weight * _pv
     components["policy"] = segment_policy_ce(
         outputs["policy"],
         batch["legal_counts"],
         batch["policy"],
-        row_weight=batch.get("policy_ce_weight"),
+        allow_zero_rows=True,
+        row_weight=_pol_weight,
         weight_denominator=denoms.get("policy_ce_weight_sum"),
         denominator=rows,
     )
@@ -253,15 +269,23 @@ def hexfield_loss(
     total = policy_weight * components["policy"] + value_weight * components["value"]
 
     if "opp_policy" in outputs and "opp_policy" in batch:
-        # Zero-target rows (no future opponent decision / masked-from-fast /
-        # zero projected mass) contribute exactly 0 but stay in the
-        # denominator (allow_zero_rows).
+        # Zero-target rows (no future opponent decision / masked-from-fast / zero
+        # projected mass) contribute exactly 0 but stay in the denominator
+        # (allow_zero_rows). PCR value-rows BUGFIX (2026-06-22): FAST rows are NOT
+        # guaranteed zero-target — a fast row whose NEXT move was a FULL move carries
+        # a real future-opponent target. Without gating, those leaked gradient into
+        # the opp head AND inflated the loss (numerator over all rows, denominator
+        # policy_rows). row_weight=policy_valid zeroes fast rows in the numerator;
+        # weight_denominator=policy_rows keeps the mean over FULL rows. On full-only
+        # batches policy_valid is all-1 ⇒ byte-identical to pre-fix.
         components["opp_policy"] = segment_policy_ce(
             outputs["opp_policy"],
             batch["legal_counts"],
             batch["opp_policy"],
             allow_zero_rows=True,
-            denominator=rows,
+            row_weight=batch.get("policy_valid"),
+            weight_denominator=denoms.get("policy_rows", rows),
+            denominator=denoms.get("policy_rows", rows),
         )
         total = total + opp_policy_weight * components["opp_policy"]
 
@@ -273,11 +297,18 @@ def hexfield_loss(
         # derived from the main visit policy which always carries positive mass
         # (expand hard-errors on zero policy mass), so allow_zero_rows is not
         # needed.
+        # FAST rows have all-zero soft_policy (derived from the all-zero visit
+        # policy) → zero-mass rows. allow_zero_rows lets them contribute 0 without
+        # raising; the denominator is gated to FULL rows so the mean is not
+        # diluted. On full-only batches every soft row has positive mass and
+        # policy_rows == rows ⇒ byte-identical to pre-fix (allow_zero_rows is a
+        # no-op when no zero-mass row exists).
         components["soft_policy"] = segment_policy_ce(
             outputs["soft_policy"],
             batch["legal_counts"],
             batch["soft_policy"],
-            denominator=rows,
+            allow_zero_rows=True,
+            denominator=denoms.get("policy_rows", rows),
         )
         total = total + soft_policy_weight * components["soft_policy"]
 

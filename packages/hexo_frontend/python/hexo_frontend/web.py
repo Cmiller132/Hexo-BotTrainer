@@ -1545,6 +1545,12 @@ def _training_runs() -> dict[str, object]:
         ):
             if not path.is_dir():
                 continue
+            # Explicit opt-out: a run dir containing a `.dashboard_hidden` marker
+            # file is skipped from the run list. Used to hide a stopped/erroneous
+            # run that is kept on disk for its checkpoints/anchors but should not
+            # appear in the UI (reversible: delete the marker to unhide).
+            if (path / ".dashboard_hidden").exists():
+                continue
             diagnostics = path / "diagnostics"
             selfplay = path / "selfplay"
             if not diagnostics.exists() and not selfplay.exists():

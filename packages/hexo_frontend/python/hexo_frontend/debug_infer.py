@@ -887,14 +887,32 @@ def _hexfield() -> SimpleNamespace:
     )
 
 
+def _infer_hexfield_channels(state_dict: dict[str, Any]) -> int | None:
+    """Read the trunk width (channels) off a hexfield state dict.
+
+    ``stem.bias`` is a length-``channels`` vector and ``tokens`` is
+    ``(NUM_TOKENS, channels)``; either pins the width without consulting the
+    process-global CHANNELS, so a c=96 worker can still load a c=128 run.
+    Returns None when neither key is present (caller falls back to the default).
+    """
+
+    for key, axis in (("stem.bias", 0), ("stem_ln.weight", 0), ("tokens", 1)):
+        tensor = state_dict.get(key)
+        shape = getattr(tensor, "shape", None)
+        if shape is not None and len(shape) > axis:
+            return int(shape[axis])
+    return None
+
+
 def _load_hexfield_checkpoint(ckpt_path: Path, payload: dict[str, Any]) -> LoadedModel:
     """Load a hexfield checkpoint onto CPU.
 
-    The payload is ``{meta, model (state dict), optimizer}``; the architecture
-    is fixed (no per-checkpoint structural drift like the dense/hexgt lineages),
-    so the network is built bare and the weights load strict. The state dict is
-    the authoritative head set, so a strict mismatch is surfaced as a warning
-    rather than 500-ing (same defensive contract as the other loaders)."""
+    The payload is ``{meta, model (state dict), optimizer}``. The block layout
+    and head set are fixed, but the trunk width (channels) is env-driven per run
+    (main_5 is c=128 vs the c=96 default), so it is read off the weights and the
+    net built at that width before a strict load. The state dict is the
+    authoritative head set, so a strict mismatch is surfaced as a warning rather
+    than 500-ing (same defensive contract as the other loaders)."""
 
     hf = _hexfield()
     meta = dict(payload.get("meta", {}))
@@ -902,7 +920,13 @@ def _load_hexfield_checkpoint(ckpt_path: Path, payload: dict[str, Any]) -> Loade
     if not isinstance(state_dict, dict):
         raise ValueError(f"{ckpt_path.name}: hexfield checkpoint 'model' is not a state dict")
 
-    model = hf.HexfieldNet()
+    # The hexfield width (channels) is env-driven at training time, so a worker
+    # built with the production-default CHANNELS (e.g. 96) cannot load a wider
+    # run (main_5 is c=128). HexfieldNet is fully channels-parameterized, so read
+    # the width straight off the weights — stem.bias is [c] (fall back to the
+    # token table [NUM_TOKENS, c]) — and build the net at the checkpoint's width.
+    channels = _infer_hexfield_channels(state_dict)
+    model = hf.HexfieldNet(channels=channels) if channels is not None else hf.HexfieldNet()
     warnings: list[str] = []
     try:
         model.load_state_dict(state_dict, strict=True)

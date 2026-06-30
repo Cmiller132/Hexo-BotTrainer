@@ -82,6 +82,12 @@ def write_compact_shard(
     # read_compact_shard), so the addition is backward-compatible and needs NO
     # schema bump. Derived from metadata['truncated'] (set by finalize).
     outcome_valid = np.ones(n, dtype=np.uint8)
+    # policy_valid[i] == 0 marks a FAST (value-only) row: policy/opp_policy/
+    # soft_policy/cell_q masked at expand+loss; value/stvalue/moves_left train.
+    # Defaults to 1 (full). Legacy shards lacking it read back all-1 (see
+    # read_compact_shard) ⇒ backward-compatible, NO schema bump. Derived from
+    # metadata['pcr_full'] (False for fast rows written on completed games).
+    policy_valid = np.ones(n, dtype=np.uint8)
     policy_surprise = np.zeros(n, dtype=np.float32)
     first_q = np.zeros(n, dtype=np.int16)
     first_r = np.zeros(n, dtype=np.int16)
@@ -111,6 +117,7 @@ def write_compact_shard(
         value[i] = float(sample.value)
         moves_left[i] = float(sample.moves_left)
         outcome_valid[i] = 0 if bool(sample.metadata.get("truncated", False)) else 1
+        policy_valid[i] = 1 if bool(sample.metadata.get("pcr_full", True)) else 0
         policy_surprise[i] = float(sample.policy_surprise)
         if sample.first_stone is not None:
             first_q[i] = int(sample.first_stone[0])
@@ -169,6 +176,7 @@ def write_compact_shard(
         "value": value,
         "moves_left": moves_left,
         "outcome_valid": outcome_valid,
+        "policy_valid": policy_valid,
         "first_q": first_q,
         "first_r": first_r,
         "first_present": first_present,
@@ -219,6 +227,8 @@ def read_compact_shard(path: Path) -> list[HexfieldSampleData]:
     horizons = [int(h) for h in arrays["horizons"]]
     # Backward-compatible: legacy shards predate outcome_valid → all-completed.
     outcome_valid = arrays.get("outcome_valid")
+    # Backward-compatible: legacy shards predate policy_valid → all full rows.
+    policy_valid = arrays.get("policy_valid")
     out: list[HexfieldSampleData] = []
     for i in range(n):
         h0, h1 = int(arrays["hist_off"][i]), int(arrays["hist_off"][i + 1])
@@ -250,6 +260,16 @@ def read_compact_shard(path: Path) -> list[HexfieldSampleData]:
             if int(arrays["first_present"][i]) == 1
             else None
         )
+        # FIX 2026-06-22: read q_pol_q back into q_policy (parallel to pol_act). The
+        # writer emits q_pol_q but this reader dropped it -> q_policy=() -> cell_q_mask
+        # all-zero for samples decoded here. OFFLINE-ONLY (training uses the packed
+        # window + rust expand, which is unaffected); the gap fooled an analysis probe
+        # into reporting cell_q "dead". Guarded for legacy shards without q_pol_q.
+        q_policy = (
+            tuple((int(arrays["pol_act"][k]), float(arrays["q_pol_q"][k])) for k in range(p0, p1))
+            if "q_pol_q" in arrays
+            else ()
+        )
         out.append(
             HexfieldSampleData(
                 game_id="",
@@ -263,15 +283,19 @@ def read_compact_shard(path: Path) -> list[HexfieldSampleData]:
                 own_win=_unpack_qr(arrays["own_win_qr"], arrays["own_win_off"], i),
                 opp_win=_unpack_qr(arrays["opp_win_qr"], arrays["opp_win_off"], i),
                 policy=policy,
+                q_policy=q_policy,
                 opp_policy=opp_policy,
                 value=float(arrays["value"][i]),
                 short_term_value=stval,
                 moves_left=float(arrays["moves_left"][i]),
-                metadata=(
-                    {"truncated": True}
-                    if outcome_valid is not None and int(outcome_valid[i]) == 0
-                    else {}
-                ),
+                metadata={
+                    **(
+                        {"truncated": True}
+                        if outcome_valid is not None and int(outcome_valid[i]) == 0
+                        else {}
+                    ),
+                    "pcr_full": bool(policy_valid is None or int(policy_valid[i]) != 0),
+                },
             )
         )
     return out

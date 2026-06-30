@@ -308,7 +308,11 @@ class ContinuousDriver:
                     tape.pending, winner, self.horizons,
                     truncated=truncated, mask_opp_from_fast=True,
                 )
-                rows = [s for s in finalized if s.metadata.get("pcr_full", False)]
+                rows = [
+                    s for s in finalized
+                    if s.metadata.get("pcr_full", False)                      # all full rows (completed + truncated) — unchanged
+                    or (not truncated and not s.metadata.get("policy_init", False))  # NEW: fast+completed value rows; excludes init
+                ]
                 if rows:
                     path = self.out_dir / f"game_{tape.key}.npz"
                     self.rows_written += write_compact_shard(

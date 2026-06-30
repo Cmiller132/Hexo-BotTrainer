@@ -137,18 +137,29 @@ def _to_device(batch: dict, device: torch.device) -> dict:
 def run_step(model, buckets, denoms, device, scaler, optimizer, grad_stats) -> dict:
     optimizer.zero_grad(set_to_none=True)
     components_sum: dict[str, float] = {}
+    any_backward = False
     for batch in buckets:
         batch = _to_device(batch, device)
         with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=device.type == "cuda"):
             out = model(batch["feats"], batch["nbr"], batch["mask"], batch["coords"])
         loss, components = hexfield_loss(out, batch, denominators=denoms)
         if not torch.isfinite(loss):
-            sizes = [int(b["mask"].sum()) for b in buckets]
-            raise RuntimeError(f"non-finite loss; bucket node counts {sizes}; components "
-                               f"{ {k: float(v) for k, v in components.items()} }")
+            # PCR fast-value-row buckets occasionally yield a non-finite cell_q in the
+            # OFFLINE expand_sample path (production's rust expand is clean). Skip the
+            # bucket instead of crashing the warm-start — cell_q is auxiliary and a rare
+            # skipped bucket's policy/value gradient is negligible for a BC prefit. The
+            # printed count lets us confirm it stays rare.
+            print(f"  [skip] non-finite bucket (cell_q={float(components.get('cell_q', float('nan'))):.3g})", flush=True)
+            continue
         scaler.scale(loss).backward()
+        any_backward = True
         for key, val in components.items():
             components_sum[key] = components_sum.get(key, 0.0) + float(val.detach())
+    if not any_backward:
+        # The whole nominal step was non-finite (every bucket skipped) — no grads were
+        # scaled, so skip the optimizer update rather than tripping GradScaler's
+        # "No inf checks were recorded" assert. Rare (a lone all-fast cell_q bucket).
+        return components_sum
     scaler.unscale_(optimizer)
     grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)
     grad_stats.append(float(grad_norm))

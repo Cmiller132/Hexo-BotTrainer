@@ -6,6 +6,8 @@ model, the wire ABI, and (via parity fixtures) the Rust serve-time featurizer.
 
 from __future__ import annotations
 
+import os
+
 # --- engine-contract geometry -------------------------------------------------
 # Legality: empty ∧ hex-dist <= LEGAL_RADIUS of any stone (engine legal.rs
 # LEGAL_RADIUS == 8); Opening => forced {(0, 0)}. The halo is exactly the
@@ -72,10 +74,15 @@ VALUE_BINS = 65
 MOVES_LEFT_CAP = 209  # v3: measured p99.5 of main_2 recorded moves_left (max 254)
 
 # --- trunk ----------------------------------------------------------------------
-CHANNELS = 96
+# Env-driven width (2026-06-24): main_4 and ALL prior runs default to 96; main_5
+# sets HEXFIELD_CHANNELS=128 (head_dim 32 with 4 heads, divisible). Read once at
+# import. The Rust .so / featurizer are width-agnostic (the model is pure PyTorch),
+# so c=128 needs NO native rebuild. A checkpoint can only load into a net built at
+# the SAME width, so main_4's 96-d .pt won't load into a 128-d net (expected).
+CHANNELS = int(os.environ.get("HEXFIELD_CHANNELS", "96"))
 NUM_TOKENS = 8
 ATTENTION_HEADS = 4
-HEAD_DIM = CHANNELS // ATTENTION_HEADS  # 24
+HEAD_DIM = CHANNELS // ATTENTION_HEADS  # 24 at c=96, 32 at c=128
 MLP_RATIO = 2
 
 # --- relative-position bias table (per-block learned tables) --------------------

@@ -185,6 +185,13 @@ def collate_training(
             "value_mask": torch.tensor(
                 [row.value_mask for row in rows], dtype=torch.float32
             ),
+            # Per-row policy-family mask: 0.0 for FAST (value-only) rows, 1.0 for
+            # FULL rows. Gates self-policy CE, soft_policy CE, and opp_policy CE.
+            # (cell_q is masked at expand via cell_q_mask.) All-1 on full-only
+            # batches ⇒ byte-identical to pre-fix.
+            "policy_valid": torch.tensor(
+                [row.policy_valid for row in rows], dtype=torch.float32
+            ),
             "stvalue": torch.stack(
                 [torch.from_numpy(row.stvalue) for row in rows]
             ).reshape(b, h),
@@ -236,10 +243,17 @@ def step_global_denominators(
     denoms["moves_left"] = float(sum(row.moves_left_mask for row in rows))
     # cell_q: total masked-cell count (mean-over-contributing-cells, spec §10.3).
     denoms["cell_q"] = float(sum(float(row.cell_q_mask.sum()) for row in rows))
-    # Self-policy CE weight sum over the whole nominal batch (mean-over-ROWS
-    # denominator for the surprise-weighted CE, spec §10.3/§12.2).
+    # Flat full-row count: denominator for the opp/soft policy CE so the
+    # mean-over-rows is not diluted ~3x by FAST (value-only) rows. On full-only
+    # batches policy_rows == rows ⇒ byte-identical.
+    denoms["policy_rows"] = float(sum(row.policy_valid for row in rows))
+    # Self-policy CE weight sum over FULL rows only (fast rows are policy-masked;
+    # including their surprise weight would inflate the mean-over-full-rows denom).
+    # A FAST row has policy_surprise=0.0 → weight=uniform_fraction (not 0), so it
+    # would WRONGLY inflate the denominator if counted; restrict to the full subset.
+    full_surprises = [row.policy_surprise for row in rows if row.policy_valid != 0.0]
     _w, wsum = policy_surprise_weights(
-        [row.policy_surprise for row in rows],
+        full_surprises,
         policy_surprise_uniform_fraction,
         policy_surprise_max_weight,
     )

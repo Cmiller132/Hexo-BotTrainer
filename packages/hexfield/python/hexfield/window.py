@@ -55,6 +55,7 @@ SCALAR_COLS: tuple[str, ...] = (
     "value",
     "moves_left",
     "outcome_valid",
+    "policy_valid",
     "policy_surprise",
     "first_q",
     "first_r",
@@ -125,6 +126,7 @@ class PackedRowView:
     value: float
     moves_left: float
     outcome_valid: int  # 1 completed / 0 truncated (gates value/stvalue/cell_q)
+    policy_valid: int  # 1 full / 0 fast (gates policy/opp/soft/cell_q)
     policy_surprise: float
     first_q: int
     first_r: int
@@ -265,6 +267,7 @@ class PackedWindow:
             value=float(c["value"][i]),
             moves_left=float(c["moves_left"][i]),
             outcome_valid=int(c["outcome_valid"][i]),
+            policy_valid=int(c["policy_valid"][i]),
             policy_surprise=float(c["policy_surprise"][i]),
             first_q=int(c["first_q"][i]),
             first_r=int(c["first_r"][i]),
@@ -298,6 +301,7 @@ _SCALAR_DTYPES: dict[str, np.dtype] = {
     "value": np.dtype(np.float32),
     "moves_left": np.dtype(np.float32),
     "outcome_valid": np.dtype(np.uint8),
+    "policy_valid": np.dtype(np.uint8),
     "policy_surprise": np.dtype(np.float32),
     "first_q": np.dtype(np.int16),
     "first_r": np.dtype(np.int16),
@@ -395,9 +399,10 @@ def load_packed_shard(path: Path) -> PackedWindow:
         # Materialize each needed column out of the npz mmap into a real array
         # (np.load arrays are lazy/closed-on-exit; force the read while open).
         for name in SCALAR_COLS:
-            if name == "outcome_valid" and name not in files:
-                # Backward-compatible: shards written before truncated-game
-                # support lack this column → every row is a completed game.
+            if name in ("outcome_valid", "policy_valid") and name not in files:
+                # Backward-compatible: shards predating the truncated-game
+                # (outcome_valid) / PCR value-row (policy_valid) features lack
+                # this column → default all-1 (every row completed / full).
                 cols[name] = np.ones(n, dtype=_SCALAR_DTYPES[name])
                 continue
             cols[name] = np.ascontiguousarray(data[name])

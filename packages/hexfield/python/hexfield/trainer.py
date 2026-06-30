@@ -525,12 +525,23 @@ class HexfieldTrainer:
                 policy_surprise_uniform_fraction=tcfg.policy_surprise_uniform_fraction,
                 policy_surprise_max_weight=tcfg.policy_surprise_max_weight,
             )
-            surprise_weights, _ = policy_surprise_weights(
-                [row.policy_surprise for row in expanded],
+            # PCR value-rows BUGFIX (2026-06-22): compute the self-policy surprise
+            # weights over the FULL subset ONLY (policy_valid != 0), matching the
+            # FULL-row weight-sum denominator (step_global_denominators computes
+            # policy_ce_weight_sum over full rows too). Computing over ALL rows
+            # normalizes by n=B with the all-rows surprise total while the
+            # denominator uses n=full_count -> inflated the self-policy CE
+            # ~B/full_count (~2x at the 33/67 PCR mix). FAST rows get weight 0 (they
+            # are policy-masked; losses also x policy_valid). On full-only batches the
+            # full subset == expanded => byte-identical to pre-fix.
+            full_rows = [r for r in expanded if getattr(r, "policy_valid", 1.0) != 0.0]
+            full_weights, _ = policy_surprise_weights(
+                [row.policy_surprise for row in full_rows],
                 tcfg.policy_surprise_uniform_fraction,
                 tcfg.policy_surprise_max_weight,
             )
-            weight_by_row = {id(r): w for r, w in zip(expanded, surprise_weights)}
+            weight_by_row = {id(r): 0.0 for r in expanded}
+            weight_by_row.update({id(r): w for r, w in zip(full_rows, full_weights)})
             self.optimizer.zero_grad(set_to_none=True)
             for bucket in pair_budget_microbuckets(expanded, quantize=PAD_QUANTUM):
                 # Same quantum the budget split assumed (PAD_QUANTUM), so the

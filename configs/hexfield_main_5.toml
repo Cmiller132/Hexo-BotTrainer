@@ -102,7 +102,10 @@ module = "hexfield.plugin"
 device = "cuda"
 
 [model.config.selfplay]
-search_visits = 512
+# 2026-06-29 (owner): 512 -> 1024 to raise self-play target QUALITY at the firm
+# ep60-100 plateau (train loss + fixed-anchor Elo both flat ~40 epochs). NOTE:
+# ~halves self-play pos/s; full PCR moves now get 1024 visits (fast stay at 192).
+search_visits = 1024
 pcr_full_proportion = 0.33
 # pcr_fast_visits 128 -> 192 (config-review): 67% of moves are fast/greedy and
 # shape the data; late-game 128-visit fast moves blunder ~10.8% (sudden-death) vs
@@ -120,7 +123,9 @@ root_dirichlet_total_alpha = 10.83
 # Nlegal 337-777 the per-move alpha is spiky (~0.014-0.032), so eps=0.25 hands
 # ~28% of the 512-visit budget to ~18 random cells; 0.20 trims that toward
 # conversion depth while keeping ample opening diversity (KataGo self-play = 0.25).
-root_dirichlet_noise_fraction = 0.20
+# 2026-06-29 (owner): 0.20 -> 0.25 (KataGo self-play value) to widen opening/data
+# diversity against the entropy/length narrowing (1.41->1.23, len 103->88) at the plateau.
+root_dirichlet_noise_fraction = 0.25
 fpu_reduction = 0.2
 # KataGo-faithful root FPU (ledger [6]): first-class root FPU reduction. 0.0 =
 # KataGo self-play (rootFpuReductionMax=0). Replaces the noise-conditioned
@@ -249,7 +254,7 @@ batch_rows = 256  # 2026-06-22: 128->256. KataGo's training batch (~256) AND ~ha
 # FIX 2026-06-20 (divergence root-cause): 5e-4 -> 3e-4 (revert to main_3 known-good).
 # main_3's held-out sweep found lower-is-better; 5e-4 only AMPLIFIED the fit to the
 # saturating value targets on a fresh-from-prefit net. Back to the proven 3e-4.
-learning_rate = 5e-4  # 2026-06-22: 3e-4->5e-4 to scale with batch 128->256 (between the sqrt2 and linear Adam rules for a 2x batch; f2 probe confirmed <=5e-4 has no overshoot, and the cleaner b256 gradient supports it). Revert to 3e-4 if early-epoch grad/clip/amp destabilize.
+learning_rate = 4e-4  # 2026-06-29 (owner): 5e-4 -> 4e-4, slight late-run decay at the ep60-100 plateau. (Prior: 2026-06-22 3e-4->5e-4 to scale with batch 128->256; f2 probe confirmed <=5e-4 has no overshoot.)
 weight_decay = 1e-4
 grad_clip = 5.0
 # Adaptive grad clip (#1): after clip_warmup_steps, clip at clip_c*EMA(pre-clip norm).
@@ -315,7 +320,7 @@ validation_fraction = 0.0
 # Self-play (the epoch bottleneck) is UNCHANGED (fast moves are already played);
 # training compute ~3x (~15% slower epochs, owner-sanctioned). After the smoke,
 # re-set to round(48000 * measured_rows_after / 9022) if the multiplier is off.
-train_samples_per_epoch = 142000
+train_samples_per_epoch = 96000
 max_train_bucket_per_new_data = 8.0
 max_train_bucket_size = 500000.0
 no_repeat_files = false
@@ -348,12 +353,12 @@ enabled = false
 [model.config.multi_stage_eval.opponents]
 sealbot_enabled = true
 bracket_size = 1
-permanent_anchors = [["main2_ep45", "/mnt/e/Hexo-BotTrainer/runs/hexfield_main_2/checkpoints/epoch_000045.pt"], ["ep5", "epoch_000005.pt"]]
+permanent_anchors = [["main4_ep60", "/mnt/e/Hexo-BotTrainer/runs/hexfield_main_4/checkpoints/epoch_000060.pt"], ["ep5", "epoch_000005.pt"]]
 radius8_opponents = []
 
 [run]
-name = "hexfield_main_4"
-output_dir = "/mnt/e/Hexo-BotTrainer/runs/hexfield_main_4"
+name = "hexfield_main_5"
+output_dir = "/mnt/e/Hexo-BotTrainer/runs/hexfield_main_5"
 seed = 1
 
 [loop]
@@ -376,5 +381,5 @@ passes_per_epoch = 1
 # (the prefit builds the full main_4 HexfieldNet), so the new head warm-starts
 # pretrained rather than zero-init. Same {model,optimizer,scaler,...} format as the
 # v3 prefit, so the loader path is unchanged. Does NOT point at any live run.
-initialize_from = "/mnt/e/Hexo-BotTrainer/runs/hexfield_main_4_prefit/checkpoint_epoch5.pt"
+initialize_from = "/mnt/e/Hexo-BotTrainer/runs/hexfield_main_5_prefit/checkpoint_epoch3.pt"  # c=128 BC prefit on main_4 ep67-77 (finalize epoch at launch)
 save_name = "latest"

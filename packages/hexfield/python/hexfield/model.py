@@ -77,7 +77,27 @@ try:
     # outer graph trips the flex subgraph tracer on the score_mod's captured graph
     # tensors. So _flex_call is torch.compiler.disable'd: the outer graph breaks at
     # the attention and the flex op compiles in its OWN inner graph.
+    #
+    # MUST stay dynamic=False: the score_mod does data-dependent indexing
+    # (coords[b, kc], table[row, h]) which inductor cannot lower under dynamic
+    # shapes (LoweringException: unbacked_bindings). So flex specializes per
+    # distinct (batch, Npad) serve shape instead.
     _flex_compiled = torch.compile(_flex_attention, dynamic=False)
+
+    # Because each serve shape gets its own specialization, a long continuous
+    # self-play generation visits more than dynamo's default 64-recompile cap,
+    # after which the frame falls back PERMANENTLY to the unfused eager flex path
+    # (materializes the full scores matrix -> ~100x slower serve, ~3 pos/s). The
+    # set of serve shapes is bounded (batch <= active_limit, Npad bucketed), so a
+    # generous cap keeps every shape on its fused kernel and never drops to eager.
+    try:
+        import torch._dynamo as _dynamo
+
+        _dynamo.config.recompile_limit = max(
+            getattr(_dynamo.config, "recompile_limit", 8), 512
+        )
+    except Exception:  # pragma: no cover - older torch
+        pass
 
     @torch.compiler.disable(recursive=False)
     def _flex_call(q, k, v, score_mod):
@@ -256,8 +276,12 @@ class RelPosAttention(nn.Module):
     def __init__(self, channels: int) -> None:
         super().__init__()
         self.heads = ATTENTION_HEADS
-        self.head_dim = HEAD_DIM
-        self.scale = 1.0 / math.sqrt(HEAD_DIM)
+        # head_dim derives from THIS net's width (channels // heads), not the global
+        # HEAD_DIM, so a net built at a non-default width — e.g. a c=96 eval anchor
+        # loaded inside a c=128 process — gets the correct per-head dim. At the
+        # default width channels == CHANNELS, so head_dim == HEAD_DIM (byte-identical).
+        self.head_dim = channels // ATTENTION_HEADS
+        self.scale = 1.0 / math.sqrt(self.head_dim)
         self.q_proj = nn.Linear(channels, channels)
         self.k_proj = nn.Linear(channels, channels)
         self.v_proj = nn.Linear(channels, channels)
@@ -318,9 +342,13 @@ class AttnBlock(nn.Module):
 class HexfieldNet(nn.Module):
     """The full network: stem, C C C A C C C A C C A, LN_final, heads."""
 
-    def __init__(self) -> None:
+    def __init__(self, channels: int = CHANNELS) -> None:
         super().__init__()
-        c = CHANNELS
+        # channels defaults to the process-global CHANNELS (production / training);
+        # an explicit value lets the eval arena build an opponent net at ITS OWN
+        # checkpoint width (e.g. a c=96 anchor inside a c=128 run). All submodules
+        # are already channels-parameterized, so this threads cleanly.
+        c = channels
         self.stem = HexNodeConv(NUM_FEATURES, c)
         self.stem_ln = nn.LayerNorm(c)
         self.conv_blocks = nn.ModuleList([ConvBlock(c) for _ in range(8)])
