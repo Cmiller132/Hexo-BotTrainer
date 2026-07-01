@@ -1294,6 +1294,38 @@ def _play_sealbot_opponent(
     return edge, sealbot_ci, None
 
 
+def _foreign_opponent_overrides(
+    full_cfg: HexfieldConfig,
+    roster: Roster,
+    candidate_ckpt: Path,
+    diagnostics_dir: Path,
+) -> dict[str, dict]:
+    """Per-opponent search-profile overrides, keyed by opponent label.
+
+    Opponents whose checkpoint lives OUTSIDE this run's checkpoints dir
+    (foreign anchors, e.g. main4/main5 lineages trained under plain PUCT
+    search) are evaluated with the pre-Gumbel PUCT profile they were tuned
+    for; this-run lineage checkpoints are absent from the map and keep the
+    candidate's (self-play) profile. A no-op map when the run's self-play
+    profile has the Gumbel flags off already."""
+    from . import eval_arena as _arena
+
+    cand_dir = Path(candidate_ckpt).resolve().parent
+    out: dict[str, dict] = {}
+    puct: dict | None = None
+    for opp in roster.opponents:
+        if opp.ckpt is None:
+            continue
+        if Path(opp.ckpt).resolve().parent == cand_dir:
+            continue  # this-run lineage: same profile as the candidate
+        if puct is None:
+            puct = _arena.puct_eval_overrides(
+                full_cfg.selfplay, diagnostics_dir=diagnostics_dir
+            )
+        out[opp.label] = puct
+    return out
+
+
 def _play_checkpoint_opponent(
     cfg: MultiStageEvalSection,
     roster: Roster,
@@ -1305,6 +1337,7 @@ def _play_checkpoint_opponent(
     play_checkpoint_match: Callable[..., dict[str, Any]],
     diagnostics_dir: Path,
     reuse_champion_match: dict[str, Any] | None = None,
+    divergence_overrides_b: dict | None = None,
 ) -> dict[str, Any] | None:
     """Play ONE checkpoint pairing (paired/CRN) and build its descriptive edge.
 
@@ -1338,6 +1371,9 @@ def _play_checkpoint_opponent(
             virtual_batch_size=_eval_virtual_batch_size(cfg, full_cfg),
             opening_plies=cfg.opening_plies,
             opening_temperature=cfg.opening_temperature,
+            # Foreign anchors search with their original PUCT profile; None for
+            # this-run lineage (symmetric with the candidate).
+            divergence_overrides_b=divergence_overrides_b,
             diagnostics_dir=str(diagnostics_dir),
             # Decorrelate the topup's CRN seeds from the SPRT batch so the
             # added pairs are fresh openings, not repeats.
@@ -1418,6 +1454,9 @@ def _stage_c_deep(
 
     # ----- Checkpoint pairings (paired, CRN). -----
     per = alloc.get("per_checkpoint", 0)
+    foreign_ov = _foreign_opponent_overrides(
+        full_cfg, roster, candidate_ckpt, diagnostics_dir
+    )
     for opp in roster.opponents:
         if opp.ckpt is None:
             continue
@@ -1426,6 +1465,7 @@ def _stage_c_deep(
             play_checkpoint_match=play_checkpoint_match,
             diagnostics_dir=diagnostics_dir,
             reuse_champion_match=reuse_champion_match if opp.role == "champion" else None,
+            divergence_overrides_b=foreign_ov.get(opp.label),
         )
         if edge is None:
             continue
@@ -1912,6 +1952,9 @@ def run_eval_part(
             play_checkpoint_match=play_checkpoint_match,
             diagnostics_dir=diag_dir,
             reuse_champion_match=reuse_champion_match if opp.role == "champion" else None,
+            divergence_overrides_b=_foreign_opponent_overrides(
+                full_cfg, roster, candidate_ckpt, diag_dir
+            ).get(opp.label),
         )
 
     if edge is None:
@@ -2386,6 +2429,7 @@ def run_multistage_eval_concurrent(
     # ----- ALL checkpoint opponents in ONE concurrent multi-opponent pass. -----
     per = alloc.get("per_checkpoint", 0)
     ckpt_opps = [o for o in roster.opponents if o.ckpt is not None]
+    foreign_ov = _foreign_opponent_overrides(full_cfg, roster, candidate_ckpt, diag_dir)
     if per > 0 and ckpt_opps:
         try:
             matches = play_multi_checkpoint_match(
@@ -2398,6 +2442,9 @@ def run_multistage_eval_concurrent(
                 virtual_batch_size=_eval_virtual_batch_size(cfg, full_cfg),
                 opening_plies=cfg.opening_plies,
                 opening_temperature=cfg.opening_temperature,
+                # Foreign anchors search with their original PUCT profile;
+                # this-run lineage keeps the candidate's (self-play) profile.
+                divergence_overrides_by_opponent=foreign_ov or None,
                 diagnostics_dir=str(diag_dir),
             )
         except Exception as exc:  # noqa: BLE001 — fail-soft at the batch boundary.
@@ -2417,6 +2464,13 @@ def run_multistage_eval_concurrent(
         "n_edges": len(edges),
         "opponents_played": played,
         "concurrent_one_pass": True,
+        # Audit: which searcher each checkpoint opponent used. Foreign anchors
+        # (checkpoints outside this run) search with their original PUCT
+        # profile; lineage opponents mirror the candidate's self-play profile.
+        "opponent_search_profiles": {
+            o.label: ("puct" if o.label in foreign_ov else "selfplay")
+            for o in ckpt_opps
+        },
     }
     if sealbot_unavailable is not None:
         stage_c_detail["sealbot_unavailable"] = sealbot_unavailable

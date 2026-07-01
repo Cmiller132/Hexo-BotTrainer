@@ -151,6 +151,71 @@ def test_gumbel_profile_smoke_runs_and_exports_normalized_target() -> None:
 
 
 @needs_rust
+def test_gumbel_lockstep_search_engages_sh_on_fresh_and_reused_roots() -> None:
+    """The lockstep ``session.search`` path (the eval-arena driver) builds the
+    Gumbel-Top-k + SH root for fresh AND reused (advanced) roots when
+    ``gumbel_root`` is on.
+
+    Under SH every one of the m candidates must reach its round-0 quota before
+    any halving, so the delta-visit distribution spreads over at least m
+    actions. The PUCT root path with this stub's peaked prior concentrates on
+    far fewer. Guards the lockstep init (fresh + reuse blocks) — before it was
+    added, session.search never engaged the SH root at all."""
+    from hexo_engine.types import AxialCoord, PlacementAction
+
+    from hexfield.geometry import unpack_action_id
+
+    m = 8
+    overrides = _gumbel_overrides()
+    overrides["gumbel_m"] = m
+    session = hexfield_rust.HexfieldMctsSession(max_states=65536)
+    stub = GumbelStub()
+    key = 70_000
+    # Mid-game decision state: the empty board has a single forced legal move
+    # (support 1 is CORRECT there), so SH engagement is only observable from a
+    # position with a real branching factor.
+    state = sample_decision_states(range(40), (6, 7, 8))[0]
+
+    def one_move(state, seed):
+        results = session.search(
+            [key],
+            (state,),
+            evaluator=stub,
+            visits=64,
+            c_puct=1.5,
+            temperature=1.0,  # >0 disables the lockstep early stop
+            seed=seed,
+            virtual_batch_size=8,
+            fpu_reduction=0.2,
+            virtual_loss=1.0,
+            widening_policy_mass=0.95,
+            widening_max_children=96,
+            widening_min_children=2,
+            forced_playout_k=0.0,
+            root_policy_temperature=1.0,
+            tss_enabled=False,
+            divergence_overrides=overrides,
+        )
+        return results[0]
+
+    # Fresh root: SH spreads the delta-visit support over all m candidates.
+    r1 = one_move(state, seed=31337)
+    assert r1["visit_policy_count"] >= m, (
+        f"fresh lockstep root did not engage SH: support {r1['visit_policy_count']} < {m}"
+    )
+
+    # Advance the engine state by the played move; the session stored the
+    # advanced tree under `key`, so this second call takes the REUSE block.
+    q, r = unpack_action_id(r1["action_id"])
+    api.apply_action(state, PlacementAction(AxialCoord(q=q, r=r)))
+    r2 = one_move(state, seed=31337)  # same per-call seed: root-hash mix decorrelates
+    assert r2["visit_policy_count"] >= m, (
+        f"reused lockstep root did not rebuild SH: support {r2['visit_policy_count']} < {m}"
+    )
+    session.discard(key)
+
+
+@needs_rust
 def test_gumbel_continuous_reuse_rebuilds_sh_state_per_move() -> None:
     """Regression: run_continuous with the Gumbel flags on must re-run a full
     Gumbel-Top-k + SH search on every Full move, including reused (promoted)

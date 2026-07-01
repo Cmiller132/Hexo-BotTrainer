@@ -301,6 +301,29 @@ def _resolve_eval_overrides(
     return build_divergence_overrides(sp, disabled=disabled)
 
 
+def puct_eval_overrides(sp: Any, *, diagnostics_dir: str | Path | None = None) -> dict:
+    """The pre-Gumbel production search profile: the default (self-play) eval
+    overrides with the four Gumbel mechanisms forced off.
+
+    Used for foreign anchors that were trained under plain PUCT search — they
+    are evaluated with the searcher they were tuned for, while this run's
+    lineage keeps the self-play (Gumbel) profile. A no-op difference when the
+    run's self-play profile has the Gumbel flags off already."""
+    ov = dict(
+        _resolve_eval_overrides(
+            sp, diagnostics_dir=diagnostics_dir, divergence_overrides=None
+        )
+    )
+    for key in (
+        "gumbel_target",
+        "gumbel_root",
+        "gumbel_sequential_halving",
+        "gumbel_nonroot_select",
+    ):
+        ov[key] = False
+    return ov
+
+
 def _write_eval_hxr(
     games,
     diagnostics_dir,
@@ -1001,6 +1024,7 @@ def play_multi_checkpoint_match(
     opening_temperature: float = DEFAULT_OPENING_TEMPERATURE,
     divergence_overrides_candidate: dict | None = None,
     divergence_overrides_opponent: dict | None = None,
+    divergence_overrides_by_opponent: dict[str, dict] | None = None,
     diagnostics_dir: str | Path | None = None,
     max_states: int = 65_536,
     game_seed_base: int = 0,
@@ -1104,6 +1128,24 @@ def play_multi_checkpoint_match(
             sp, diagnostics_dir=diagnostics_dir, divergence_overrides=divergence_overrides_opponent
         )
     )
+    # Per-opponent override map (keyed by opponent label): an entry takes
+    # precedence over the shared ``divergence_overrides_opponent``; absent
+    # labels fall back to ``ov_opp``. Lets one concurrent pass mix search
+    # profiles (e.g. this-run lineage on the self-play profile while foreign
+    # anchors keep their original PUCT profile).
+    _by_label = divergence_overrides_by_opponent or {}
+    ov_by_label = {
+        label: (
+            _resolve_eval_overrides(
+                sp,
+                diagnostics_dir=diagnostics_dir,
+                divergence_overrides=_by_label[label],
+            )
+            if label in _by_label
+            else ov_opp
+        )
+        for label, _ckpt in opponents
+    }
 
     common = dict(
         visits=eval_visits,
@@ -1353,7 +1395,7 @@ def play_multi_checkpoint_match(
                 seed=seed,
                 evaluator=grp.evaluator,
                 move_temperatures=temps,
-                divergence_overrides=ov_opp,
+                divergence_overrides=ov_by_label[grp.label],
                 **common,
             )
             mcts_search_elapsed += time.perf_counter() - t0
@@ -1377,7 +1419,9 @@ def play_multi_checkpoint_match(
             session, evaluator, key, ov = cand_session, cand_eval, g.cand_key, ov_cand
         else:
             grp = groups[g.opp_index]
-            session, evaluator, key, ov = grp.session, grp.evaluator, g.local_index, ov_opp
+            session, evaluator, key, ov = (
+                grp.session, grp.evaluator, g.local_index, ov_by_label[grp.label],
+            )
         t0 = time.perf_counter()
         searches = session.search(
             [key],
@@ -1536,7 +1580,7 @@ def play_multi_checkpoint_match(
                 "opening_temperature": opening_temperature,
                 "game_seed_base": game_seed_base,
                 "divergence_overrides_a": ov_cand,
-                "divergence_overrides_b": ov_opp,
+                "divergence_overrides_b": ov_by_label[grp.label],
                 "budget_hit": budget_hit,
                 # Concurrency telemetry (additive — downstream consumers ignore).
                 "concurrent": True,

@@ -651,6 +651,19 @@ impl HexfieldMctsSession {
                     {
                         search.apply_root_dirichlet_noise(noise);
                     }
+                    // (Re)build the Gumbel-Top-k candidate set + SH schedule on
+                    // the reused root, mirroring the continuous reuse paths;
+                    // cleared when the Gumbel root is off so the PUCT root runs.
+                    // The root hash folds into the seed stream so successive
+                    // moves of one game draw fresh Gumbel noise even when the
+                    // caller repeats its per-call seed.
+                    if divergences.gumbel_root {
+                        let gumbel_seed =
+                            mix_seed(seed, *game_key ^ root_hash, 0, SEED_STREAM_GUMBEL);
+                        search.init_gumbel_root(gumbel_seed, target_visits);
+                    } else {
+                        search.clear_gumbel_root();
+                    }
                     searches.push(Some(search));
                     continue;
                 }
@@ -683,7 +696,8 @@ impl HexfieldMctsSession {
                 .zip(missing_roots.into_iter())
                 .zip(root_evals.iter())
             {
-                searches[index] = Some(RustSearch::new(
+                let root_hash = state_hash(&root);
+                let mut search = RustSearch::new(
                     root,
                     &**evaluation,
                     target_visits,
@@ -695,7 +709,16 @@ impl HexfieldMctsSession {
                     forced_playout_k,
                     tss_enabled,
                     divergences,
-                )?);
+                )?;
+                // Build the Gumbel-Top-k candidate set + SH schedule for a
+                // fresh root when the Gumbel root is on (mirrors the continuous
+                // RootInit path). No-op without raw root logits.
+                if divergences.gumbel_root {
+                    let gumbel_seed =
+                        mix_seed(seed, game_keys[index] ^ root_hash, 0, SEED_STREAM_GUMBEL);
+                    search.init_gumbel_root(gumbel_seed, target_visits);
+                }
+                searches[index] = Some(search);
             }
         }
 
@@ -1694,6 +1717,14 @@ fn select_leaf_batch(
     for (root_index, search) in searches.iter_mut().enumerate() {
         if !search.needs_visits() {
             continue;
+        }
+        // Intra-search Sequential-Halving barrier (mirrors the continuous
+        // scheduler): when every surviving Gumbel candidate has met its round
+        // cap, halve the survivor set and re-seed before selecting. Looped
+        // because advancing may immediately satisfy the next round's barrier.
+        // No-op without an active Gumbel root.
+        if search.has_gumbel_root() {
+            while search.maybe_advance_gumbel_round() {}
         }
         let budget = leaf_batch_per_root.min(search.remaining_visits());
         for _ in 0..budget {
