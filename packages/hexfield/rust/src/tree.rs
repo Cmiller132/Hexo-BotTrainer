@@ -32,7 +32,7 @@ use crate::threats_shared as threats;
 /// are added on this same scale. `Q_UTILITY_WIDTH` is the width of that interval
 /// (2.0) and is not read in the selection math; it documents the c_puct scale.
 pub const Q_UTILITY_WIDTH: f32 = 2.0;
-/// Reference utility width (1.4). Not read in the selection math.
+/// Alternate reference utility width (1.4). Not read in the selection math.
 pub const KATAGO_UTILITY_WIDTH: f32 = 1.4;
 
 #[derive(Clone, Copy, Debug)]
@@ -95,30 +95,30 @@ pub struct Divergences {
     /// When true, recorded-target forced-playout pruning uses the dynamic
     /// c_for(root_visits) (matching selection); when false, static c_puct.
     pub pruned_dynamic_cpuct: bool,
-    // === main_6 FULL Gumbel AlphaZero divergences (Danihelka et al. 2022). ===
-    // All default OFF in BOTH parity() and production() — Gumbel is opt-in ONLY
-    // via the main_6 config, so production() stays KataGo-PUCT and the M5/M6
-    // golden vectors stay byte-identical. `gumbel()` flips the four bools ON.
-    /// #3 improved-policy target export: train the policy head against
-    /// π'(a)=softmax(logits+σ(completedQ)). OFF => visit-count target.
+    // === Gumbel AlphaZero divergences (Danihelka et al. 2022). ===
+    // All default off in both parity() and production(); `gumbel()` turns the
+    // four mechanism bools on.
+    /// Improved-policy target export: train the policy head against
+    /// π'(a)=softmax(logits+σ(completedQ)). Off => visit-count target.
     pub gumbel_target: bool,
-    /// #1 Gumbel-Top-k root candidate sampling (replaces Dirichlet+temperature
-    /// root diversity). OFF => PUCT+Dirichlet root.
+    /// Gumbel-Top-k root candidate sampling. On => the top-m candidate set
+    /// replaces the Dirichlet+temperature root diversity. Off => PUCT+Dirichlet
+    /// root.
     pub gumbel_root: bool,
-    /// #1 Sequential-Halving root budget allocation over the Gumbel-Top-m
-    /// candidates (ROOT-ONLY). Requires `gumbel_root`. OFF => normal PUCT visits.
+    /// Sequential-Halving root budget allocation over the Gumbel-Top-m
+    /// candidates (root only). Requires `gumbel_root`. Off => normal PUCT visits.
     pub gumbel_sequential_halving: bool,
-    /// #2 deterministic non-root selection: canonical visit-regularized rule
-    /// argmax[π'(a) − N(a)/(1+ΣN)], π'=softmax(logits+σ(completedQ)) (no
-    /// PUCT/c_puct/FPU/widening at interior nodes). OFF => PUCT interior.
+    /// Deterministic non-root selection: visit-regularized rule
+    /// argmax[π'(a) − N(a)/(1+ΣN)], π'=softmax(logits+σ(completedQ)), with no
+    /// PUCT/c_puct/FPU/widening at interior nodes. Off => PUCT interior.
     pub gumbel_nonroot_select: bool,
-    /// σ transform constants (§0.1): σ(q)=(c_visit+max_b N(b))·c_scale·q.
+    /// σ transform constants: σ(q)=(c_visit+max_b N(b))·c_scale·q.
     pub gumbel_c_visit: f32,
     pub gumbel_c_scale: f32,
-    /// #1 candidate count m for Gumbel-Top-k (clamped to n_legal at the root).
+    /// Candidate count m for Gumbel-Top-k (clamped to n_legal at the root).
     pub gumbel_m: u32,
-    /// #3 support floor: actions with N(a) < this are excluded from the target
-    /// softmax support (then renormalized over survivors).
+    /// Target support floor: actions with N(a) < this are excluded from the
+    /// target softmax support (then renormalized over survivors).
     pub gumbel_target_min_visits: u32,
 }
 
@@ -147,7 +147,7 @@ impl Divergences {
             clean_root_prior_cache: false,
             dirichlet_shaped: false,
             pruned_dynamic_cpuct: false,
-            // main_6 Gumbel: OFF in parity (golden vectors byte-identical).
+            // Gumbel mechanisms off in parity.
             gumbel_target: false,
             gumbel_root: false,
             gumbel_sequential_halving: false,
@@ -177,10 +177,9 @@ impl Divergences {
         }
     }
 
-    /// main_6 FULL Gumbel AlphaZero profile (Danihelka et al. 2022): starts from
-    /// `production()` (KataGo-PUCT base + all main_4 fixes) and flips the four
-    /// Gumbel mechanism bools ON, with the σ/m scalars at their canonical
-    /// defaults. Used by tests; `main_6` opts in via the gumbel config knobs.
+    /// Gumbel AlphaZero profile (Danihelka et al. 2022): starts from
+    /// `production()` and turns the four Gumbel mechanism bools on, with the
+    /// σ/m scalars at their defaults.
     pub fn gumbel() -> Self {
         Self {
             gumbel_target: true,
@@ -290,11 +289,10 @@ pub struct RustNode {
     pub priors: NodePriors,
     pub max_eligible_children: usize,
     /// Raw pre-softmax policy logits for this node's legal actions, keyed by
-    /// action_id (Gumbel S2). `None` unless the evaluator emitted
-    /// `priors_logits_bytes` for this node (i.e. a Gumbel mechanism requested
-    /// them). Stored RAW: never temperature-shaped, normalized, or Dirichlet-
-    /// noised — so σ/Gumbel/completedQ read true logits. Carried onto BOTH the
-    /// root and interior nodes so #1/#2/#3 can look up `logits(a)`.
+    /// action_id. `None` unless the evaluation carried logits for this node.
+    /// Stored raw: never temperature-shaped, normalized, or Dirichlet-noised, so
+    /// the σ/Gumbel/completedQ paths read true logits. Carried onto both root and
+    /// interior nodes so the Gumbel mechanisms can look up `logits(a)`.
     pub root_logits: Option<HashMap<PackedCoord, f32>>,
 }
 
@@ -401,9 +399,9 @@ pub struct RustSearch {
     clean_root_priors: Option<HashMap<PackedCoord, f32>>,
     active_edge_count: usize,
     max_active_edges_per_node: usize,
-    /// main_6 #1: per-root Gumbel-Top-k candidate set + Sequential-Halving state
-    /// (§0.6/§0.9). `Some` only when `gumbel_root` is on for a Full move; `None`
-    /// otherwise ⇒ the normal PUCT root path runs unchanged (parity/production).
+    /// Per-root Gumbel-Top-k candidate set + Sequential-Halving state. `Some`
+    /// only when `gumbel_root` is on for a Full move; `None` otherwise, in which
+    /// case the PUCT root path runs.
     gumbel_root: Option<GumbelRootState>,
 }
 
@@ -711,25 +709,24 @@ impl RustSearch {
         self.gumbel_root = None;
     }
 
-    /// main_6 #1: build the Gumbel-Top-k root candidate set (§0.5) and seed the
-    /// Sequential-Halving schedule (§0.6). Draws g(a)~Gumbel(0,1) per legal root
-    /// action from `seed` (the SEED_STREAM_GUMBEL-mixed per-root seed), takes the
-    /// top `min(m, n_legal)` by `logits(a)+g(a)`, and lays out the SH rounds over
-    /// `budget` visits. No-op (clears state) unless `gumbel_root` is on AND the
-    /// root carries raw logits (S2). `sequential_halving` selects SH vs the
-    /// intermediate "top-m + PUCT" mode.
+    /// Build the Gumbel-Top-k root candidate set and seed the Sequential-Halving
+    /// schedule. Draws g(a)~Gumbel(0,1) per legal root action from `seed`, takes
+    /// the top `min(m, n_legal)` by `logits(a)+g(a)`, and lays out the SH rounds
+    /// over `budget` visits. Clears state and returns without building unless
+    /// `gumbel_root` is on and the root carries raw logits. `sequential_halving`
+    /// selects SH vs the intermediate "top-m + PUCT" mode.
     pub fn init_gumbel_root(&mut self, seed: u64, budget: u32) {
         self.gumbel_root = None;
         if !self.divergences.gumbel_root {
             return;
         }
-        // RAW per-action logits must be present (S2). Without them we cannot do
-        // the Gumbel-max draw faithfully, so fall back to PUCT (state stays None).
+        // Raw per-action logits are required for the Gumbel-max draw; without
+        // them the state stays None and the PUCT root path runs.
         let Some(logit_map) = self.nodes[0].root_logits.clone() else {
             return;
         };
         // Legal root action ids: edges (nucleus) + any unexpanded candidates, so
-        // the Gumbel draw covers the FULL legal set (not just the nucleus head).
+        // the Gumbel draw covers the full legal set.
         let mut action_ids: Vec<PackedCoord> =
             self.nodes[0].edges.iter().map(|e| e.action_id).collect();
         for (action_id, _) in self.nodes[0].remaining_priors() {
@@ -756,13 +753,9 @@ impl RustSearch {
                 .unwrap_or(Ordering::Equal)
                 .then_with(|| a.cmp(&b))
         });
-        // TSS faithfulness: force-include every legal TSS tactical cell in the
-        // candidate set even if its (logit+g) Gumbel score ranks below the top-m.
-        // TSS injects tactical edges so PUCT always searches immediate threats /
-        // refutations; without this, Gumbel's top-m truncation would silently drop
-        // a tactical cell the net underrates, so the line is never searched and
-        // never enters the completedQ target. Tactical cells are ADDED to the m
-        // budget (|tactical| is small), not counted against it.
+        // Force-include every legal TSS tactical cell in the candidate set even
+        // if its (logit+g) Gumbel score ranks below the top-m. Tactical cells are
+        // added to the m budget, not counted against it.
         let tactical: HashSet<PackedCoord> = if self.tss_enabled {
             threats::tactical_cells(&self.root_state)
                 .into_iter()
@@ -814,11 +807,10 @@ impl RustSearch {
         self.gumbel_root = Some(state);
     }
 
-    /// Compute the per-survivor cumulative visit caps for the CURRENT round
-    /// (§0.6): each survivor must reach `entry_visits + floor(n/(R·|A_r|))`
-    /// (min 1). Reads each survivor's current root-edge visit count as its
-    /// round-entry baseline. The last round absorbs any budget remainder so the
-    /// total played visits don't undershoot the move budget.
+    /// Compute the per-survivor cumulative visit caps for the current round:
+    /// each survivor must reach `entry_visits + floor(n/(R·|A_r|))` (min 1).
+    /// Reads each survivor's current root-edge visit count as its round-entry
+    /// baseline.
     fn seed_gumbel_round_caps(&self, state: &mut GumbelRootState) {
         let entry: HashMap<PackedCoord, u32> = self
             .nodes[0]
@@ -827,9 +819,8 @@ impl RustSearch {
             .map(|e| (e.action_id, e.visits))
             .collect();
         state.round_cap.clear();
-        // The single final survivor absorbs ALL remaining budget: its cap is
-        // effectively unbounded so the slot keeps visiting it until the move's
-        // target_visits is reached (the scheduler's needs_visits() gate ends it).
+        // A single final survivor gets an unbounded cap (u32::MAX), so the slot
+        // keeps visiting it until the move's target_visits is reached.
         if state.survivors.len() <= 1 {
             for &a in &state.survivors {
                 state.round_cap.insert(a, u32::MAX);
@@ -838,7 +829,7 @@ impl RustSearch {
         }
         let a_r = state.survivors.len() as u32;
         let r = state.num_rounds.max(1);
-        // Equal per-survivor quota for this round (§0.6: floor(n/(R·|A_r|))).
+        // Equal per-survivor quota for this round: floor(n/(R·|A_r|)).
         let per = (state.budget / (r * a_r)).max(1);
         for &a in &state.survivors {
             let base = entry.get(&a).copied().unwrap_or(0);
@@ -846,11 +837,11 @@ impl RustSearch {
         }
     }
 
-    /// main_6 #1 intra-slot barrier (§0.9): if every surviving candidate has met
-    /// its current-round cap, rank survivors by `g(a)+logits(a)+σ(completedQ(a))`,
-    /// keep the top `ceil(|A_r|/2)`, advance the round, and re-seed caps. No-op
-    /// unless a SH Gumbel root is active and the barrier condition holds. Returns
-    /// true when a halving fired (telemetry).
+    /// Intra-slot barrier: if every surviving candidate has met its current-round
+    /// cap, rank survivors by `g(a)+logits(a)+σ(completedQ(a))`, keep the top
+    /// `ceil(|A_r|/2)`, advance the round, and re-seed caps. Returns without
+    /// change unless a SH Gumbel root is active and the barrier condition holds.
+    /// Returns true when a halving fired.
     pub fn maybe_advance_gumbel_round(&mut self) -> bool {
         let Some(state) = self.gumbel_root.as_ref() else {
             return false;
@@ -874,7 +865,7 @@ impl RustSearch {
         if !all_met {
             return false;
         }
-        // Rank survivors by the canonical SH score g(a)+logits(a)+σ(completedQ(a)).
+        // Rank survivors by the SH score g(a)+logits(a)+σ(completedQ(a)).
         let root = &self.nodes[0];
         let logit_map = root.root_logits.clone().unwrap_or_default();
         let (completed, _v_mix) = gumbel_completed_q(root, &logit_map);
@@ -925,8 +916,7 @@ impl RustSearch {
         }
         let id = self.nodes.len();
         // TSS expansion injection. Every tactical cell is engine-legal and the
-        // candidate set is the full legal set, so all tactical cells are
-        // injected (no candidate crop).
+        // candidate set is the full legal set, so all tactical cells are injected.
         let tactical = if self.tss_enabled {
             threats::tactical_cells(state)
         } else {
@@ -1072,10 +1062,10 @@ impl RustSearch {
     }
 
     fn select_or_materialize_edge(&mut self, node_id: usize, c_puct: f32) -> Option<usize> {
-        // main_6 #1: at a Gumbel-Top-k root, selection is constrained to the
-        // surviving candidate set and (under SH) the current round's visit caps —
-        // this REPLACES the PUCT/Dirichlet/forced-playout root path. Interior
-        // nodes (node_id != 0) are untouched here (that is #2 / S4).
+        // At a Gumbel-Top-k root, selection is constrained to the surviving
+        // candidate set and (under SH) the current round's visit caps, replacing
+        // the PUCT/Dirichlet/forced-playout root path. Interior nodes
+        // (node_id != 0) are not handled here.
         if node_id == 0 && self.gumbel_root.is_some() {
             return self.select_gumbel_root_edge(c_puct);
         }
@@ -1086,12 +1076,12 @@ impl RustSearch {
             }
         }
 
-        // main_6 #2 (S4): deterministic non-root selection. At interior nodes
-        // (node_id != 0), when `gumbel_nonroot_select` is on, child selection is
-        // the canonical visit-regularized rule argmax_a [ π'(a) − N(a)/(1+ΣN) ]
-        // with π'=softmax(logits+σ(completedQ)) — no PUCT/c_puct/FPU/widening
-        // scoring. Root (node_id == 0) NEVER reaches here (it is handled by the
-        // Gumbel-Top-k branch above or the PUCT path). Flag off ⇒ PUCT verbatim.
+        // Deterministic non-root selection. At interior nodes (node_id != 0),
+        // when `gumbel_nonroot_select` is on, child selection is the
+        // visit-regularized rule argmax_a [ π'(a) − N(a)/(1+ΣN) ] with
+        // π'=softmax(logits+σ(completedQ)), with no PUCT/c_puct/FPU/widening
+        // scoring. The root (node_id == 0) does not reach here; it is handled by
+        // the Gumbel-Top-k branch above or the PUCT path. Flag off => PUCT.
         if self.divergences.gumbel_nonroot_select && node_id != 0 {
             return self.select_gumbel_nonroot_edge(node_id);
         }
@@ -1193,42 +1183,36 @@ impl RustSearch {
         best.map(|(index, _)| index)
     }
 
-    /// main_6 #2 (S4): deterministic non-root child selection (§0.4), CANONICAL
-    /// Gumbel form (Danihelka et al. 2022). Interior nodes pick the
-    /// visit-regularized action
+    /// Deterministic non-root child selection (Danihelka et al. 2022). Interior
+    /// nodes pick the visit-regularized action
     ///
     /// ```text
     ///   argmax_a [ π'(a) − N(a) / (1 + Σ_b N(b)) ]
     /// ```
     ///
     /// where `π'(a) = softmax_a( logits(a) + σ(completedQ(a)) )` is the node-level
-    /// improved policy over the node's candidate set (all materialized edges PLUS
+    /// improved policy over the node's candidate set (all materialized edges plus
     /// the next-materializable prior), `N(a)` is the action's visit count, and
     /// `Σ_b N(b)` is the total visit count over that candidate set. This drives
-    /// the empirical visit distribution toward π' (proportional allocation), the
-    /// behaviour the paper prescribes — NOT the bare argmax of `logits+σ(Q)`,
-    /// which is near-greedy at interior nodes. No PUCT, no c_puct, no FPU, no
-    /// widening-score gate. completedQ(a) = Q(a) for visited edges, else the
-    /// canonical visit-weighted node-value fallback `v_mix` (§0.2). The σ
+    /// the empirical visit distribution toward π' (proportional allocation). No
+    /// PUCT, no c_puct, no FPU, no widening-score gate. completedQ(a) = Q(a) for
+    /// visited edges, else the visit-weighted node-value fallback `v_mix`. The σ
     /// transform uses this node's own `max_b N(b)`.
     ///
     /// A still-unmaterialized candidate (the next prior in the owned/shared tail)
     /// participates in the π' softmax at its completedQ == v_mix (it is unvisited)
     /// and at N==0, so its visit-regularized score is just π'(candidate). It is
-    /// materialized only when it wins the argmax — mirroring the PUCT path's
-    /// peek/expand machinery but with the Gumbel rule replacing the PUCT score.
+    /// materialized only when it wins the argmax, using the peek/expand machinery.
     ///
-    /// Reuses `compare_edge_score` `(index, score, visits, action_id)` so ties
-    /// break deterministically (fewer visits, then smaller action_id), matching
-    /// the PUCT path's determinism discipline.
+    /// Uses `compare_edge_score` `(index, score, visits, action_id)` so ties
+    /// break deterministically (fewer visits, then smaller action_id).
     fn select_gumbel_nonroot_edge(&mut self, node_id: usize) -> Option<usize> {
         let c_visit = self.divergences.gumbel_c_visit;
         let c_scale = self.divergences.gumbel_c_scale;
-        // logits(a) for this node's legal actions (raw, S2). Absent ⇒ logit 0.
+        // logits(a) for this node's legal actions (raw). Absent => logit 0.
         let logit_map = self.nodes[node_id].root_logits.clone().unwrap_or_default();
         let node = &self.nodes[node_id];
-        // completedQ map + v_mix fallback (canonical visit-weighted node value);
-        // shared with #1/#3.
+        // completedQ map + v_mix fallback (visit-weighted node value).
         let (completed, v_mix) = gumbel_completed_q(node, &logit_map);
         // σ scaling uses this node's own max child visit count.
         let max_n = node.edges.iter().map(|e| e.visits).max().unwrap_or(0);
@@ -1236,7 +1220,7 @@ impl RustSearch {
         // Build the node-level improved policy π'(a) = softmax(logits + σ(Q*))
         // over the candidate set: every materialized edge in order, then the
         // next-materializable candidate (if any) as a virtual trailing slot. The
-        // softmax MUST span the full candidate support so π' is a proper policy.
+        // softmax spans the full candidate support so π' is a proper policy.
         let next_candidate = node.peek_next_candidate();
         let n_edges = node.edges.len();
         let mut scores: Vec<f32> = Vec::with_capacity(n_edges + 1);
@@ -1276,11 +1260,9 @@ impl RustSearch {
         }
 
         // Widening: the next-materializable candidate competes at its π' score
-        // (its N==0 ⇒ visit-regularized score is just π'(candidate)). This
-        // REPLACES the lazy-widening FPU/PUCT gate; the candidate set is the
-        // node's expanded + materializable edges as usual, but its selection
-        // priority is the canonical visit-regularized Gumbel rule. Materialization
-        // still uses the existing peek/expand machinery.
+        // (its N==0 => visit-regularized score is just π'(candidate)), in place of
+        // the lazy-widening FPU/PUCT gate. Materialization uses the peek/expand
+        // machinery.
         if let Some((action_id, _prior)) = next_candidate {
             let score = improved_pi[n_edges]; // trailing softmax slot; N==0.
             let candidate_key = (usize::MAX, score, 0, action_id);
@@ -1300,19 +1282,18 @@ impl RustSearch {
         best.map(|item| item.0)
     }
 
-    /// main_6 #1: root edge selection under an active Gumbel-Top-k candidate set.
-    /// Selection is constrained to the surviving candidates; no PUCT exploration
-    /// term, no Dirichlet, no nucleus widening, no forced-playout (the m-candidate
-    /// set IS the diversity/discovery mechanism, §S3.1).
+    /// Root edge selection under an active Gumbel-Top-k candidate set. Selection
+    /// is constrained to the surviving candidates; no PUCT exploration term, no
+    /// Dirichlet, no nucleus widening, no forced-playout.
     ///
     /// SH mode: allocate visits equally per round by selecting the survivor with
-    /// the largest deficit below its current round cap (ties → fewest visits →
-    /// action_id). When every survivor has met its cap, return None: the slot
-    /// makes no further root progress until the scheduler's intra-slot barrier
+    /// the largest deficit below its current round cap (ties -> fewest visits ->
+    /// action_id). When every survivor has met its cap, return None; the slot
+    /// makes no further root progress until the intra-slot barrier
     /// (`maybe_advance_gumbel_round`) halves and re-seeds the next round.
     ///
     /// Intermediate mode (gumbel_root on, SH off): visits allocate among the
-    /// survivors via the normal PUCT score (the top-m set is the only change).
+    /// survivors via the PUCT score, over the top-m set only.
     fn select_gumbel_root_edge(&mut self, c_puct: f32) -> Option<usize> {
         let state = self.gumbel_root.as_ref()?;
         let survivor_set: HashSet<PackedCoord> = state.survivors.iter().copied().collect();
@@ -1394,9 +1375,8 @@ impl RustSearch {
             }
         }
         // Materialize an unexpanded survivor if PUCT prefers a new child. The
-        // new-child score mirrors the standard widening score but is gated to the
-        // survivor set; this lets a high-logit survivor that sits in the owned
-        // tail get its first visit.
+        // new-child score is the standard widening score, gated to the survivor
+        // set, so a survivor sitting in the owned tail can get its first visit.
         let mut best_new: Option<(PackedCoord, f32)> = None;
         for (action_id, prior) in node.remaining_priors() {
             if !survivor_set.contains(&action_id) {
@@ -1590,10 +1570,9 @@ impl RustSearch {
         if edge.visits > nodes[0].visits {
             nodes[0].visits = edge.visits;
             // The edge value_sum is the child value from the parent's
-            // perspective; it is negated unconditionally here regardless of
-            // whether the child's side-to-move differs from the parent's. This
-            // seeds the promoted root's FPU baseline and first reported value
-            // and is overwritten by fresh backups during the next search.
+            // perspective; it is negated unconditionally here. This seeds the
+            // promoted root's FPU baseline and first reported value and is
+            // overwritten by fresh backups during the next search.
             nodes[0].value_sum = -edge.value_sum;
         }
         let mut node_table = HashMap::with_capacity(nodes.len());
@@ -1701,8 +1680,8 @@ fn split_tactical(
 }
 
 /// Build the raw-logit lookup carried onto a `RustNode` from an evaluation's
-/// optional logits (Gumbel S2). `None` (production/parity) ⇒ no map, so no
-/// Gumbel/σ path can read logits and behavior is byte-identical to today.
+/// optional logits. When the evaluation has no logits this returns `None`, so no
+/// Gumbel/σ path can read logits.
 fn node_logits_from_evaluation(
     evaluation: &RustEvaluation,
 ) -> Option<HashMap<PackedCoord, f32>> {
@@ -1838,7 +1817,7 @@ fn owned_root_from_evaluation(
             edges,
             priors: NodePriors::Owned(candidates),
             max_eligible_children,
-            // RAW logits keyed by action_id (pre-temperature, pre-Dirichlet).
+            // Raw logits keyed by action_id (pre-temperature, pre-Dirichlet).
             root_logits: node_logits_from_evaluation(evaluation),
         },
         clean_cache,
@@ -2164,20 +2143,20 @@ pub fn random_unit(seed: u64) -> f64 {
     ((value >> 11) as f64) * (1.0 / ((1u64 << 53) as f64))
 }
 
-// === main_6 Gumbel AlphaZero shared math (Danihelka et al. 2022) ===
-// These helpers are referenced by #1 (Gumbel-Top-k root + Sequential Halving,
-// S3), #2 (deterministic non-root selection, S4) and #3 (improved target, S5).
-// They are pure functions of the tree state and take no effect unless a Gumbel
-// flag routes through them.
+// === Gumbel AlphaZero shared math (Danihelka et al. 2022) ===
+// These helpers are used by the Gumbel-Top-k root + Sequential Halving, the
+// deterministic non-root selection, and the improved target. They are pure
+// functions of the tree state and have no effect unless a Gumbel flag routes
+// through them.
 
-/// The canonical σ transform (§0.1): σ(q)=(c_visit + max_b N(b))·c_scale·q.
-/// `max_n` is the maximum child visit count at the node σ is applied at. Q is
-/// already on [-1,1] here, so σ is a clean monotone-in-q scaling (σ(0)=0).
+/// The σ transform: σ(q)=(c_visit + max_b N(b))·c_scale·q. `max_n` is the
+/// maximum child visit count at the node σ is applied at. Q is already on
+/// [-1,1] here, so σ is a monotone-in-q scaling (σ(0)=0).
 pub fn gumbel_sigma(q: f32, max_n: u32, c_visit: f32, c_scale: f32) -> f32 {
     (c_visit + max_n as f32) * c_scale * q
 }
 
-/// A single Gumbel(0,1) draw from a deterministic per-action seed (§0.8). The
+/// A single Gumbel(0,1) draw from a deterministic per-action seed. The
 /// inverse-CDF transform g = -ln(-ln(u)) on a uniform u in the open interval
 /// (0,1). The uniform is clamped strictly inside (0,1) so the double log never
 /// hits ±inf (random_unit can return exactly 0.0).
@@ -2193,36 +2172,34 @@ pub fn gumbel_draw(seed: u64) -> f32 {
     (-(-u.ln()).ln()) as f32
 }
 
-/// completedQ + the v_mix unvisited fallback (§0.2), computed once per node.
+/// completedQ + the v_mix unvisited fallback, computed once per node.
 ///
-/// For each candidate action_id we return `Q(a)` if it has visits, else the
-/// shared `v_mix` fallback for unvisited actions. `v_mix` is the CANONICAL
-/// Gumbel/MuZero (Danihelka et al. 2022, Eq. for completed_Q) visit-count
+/// For each candidate action_id this returns `Q(a)` if it has visits, else the
+/// shared `v_mix` fallback for unvisited actions. `v_mix` is the visit-count
 /// weighted interpolation between the node's own value estimate `v̂` and the
-/// prior-weighted average Q over visited children:
+/// prior-weighted average Q over visited children (Danihelka et al. 2022,
+/// completed_Q):
 ///
 /// ```text
 ///   v_mix = ( v̂ + (Σ_b N(b)) · (Σ_b π(b)·Q(b)) / (Σ_b π(b)) ) / ( 1 + Σ_b N(b) )
 /// ```
 ///
-/// over VISITED b only, where `π(b)=softmax(logits)(b)` is the network prior and
+/// over visited b only, where `π(b)=softmax(logits)(b)` is the network prior and
 /// `v̂ = node.value()` (the node's backed-up value, or its eval_value when the
-/// node itself is unvisited). At low visit counts the `v̂` term dominates (the
-/// paper's intended behaviour — the fallback starts at the node's own estimate
-/// and migrates toward the visited-child average as visits accrue); as ΣN→∞ it
-/// approaches the visited-child average. When no child is visited (ΣN==0 or the
-/// visited-π mass is 0) v_mix is exactly `v̂`.
+/// node itself is unvisited). At low visit counts the `v̂` term dominates; as
+/// ΣN→∞ it approaches the visited-child average. When no child is visited
+/// (ΣN==0 or the visited-π mass is 0) v_mix is exactly `v̂`.
 ///
-/// `logits` maps action_id -> raw policy logit (carried via S2 `root_logits`);
-/// absent actions get logit 0. Returns the per-(action_id) completedQ map plus
-/// the `v_mix` scalar (so callers can extend it to candidates not in `edges`).
+/// `logits` maps action_id -> raw policy logit; absent actions get logit 0.
+/// Returns the per-(action_id) completedQ map plus the `v_mix` scalar (so
+/// callers can extend it to candidates not in `edges`).
 pub fn gumbel_completed_q(
     node: &RustNode,
     logits: &HashMap<PackedCoord, f32>,
 ) -> (HashMap<PackedCoord, f32>, f32) {
-    // Prior-weighted average Q over the VISITED children: softmax(logits) over
+    // Prior-weighted average Q over the visited children: softmax(logits) over
     // the visited support, weighting their Q. Numerically-stable shifted form;
-    // denominator is the visited-π mass (NOT the full action set). `sum_n` is the
+    // denominator is the visited-π mass (not the full action set). `sum_n` is the
     // total child visit count Σ_b N(b) over the same visited support.
     let mut max_logit = f32::NEG_INFINITY;
     for edge in &node.edges {
@@ -2248,9 +2225,9 @@ pub fn gumbel_completed_q(
             sum_n += edge.visits as u64;
         }
     }
-    // Canonical v_mix: visit-count-weighted blend of v̂ (= node.value()) and the
+    // v_mix: visit-count-weighted blend of v̂ (= node.value()) and the
     // prior-weighted visited-child average. When no child is visited this reduces
-    // to v̂ (the natural two-player-zero-sum default).
+    // to v̂.
     let v_node = node.value();
     let v_mix = if weight_sum > 0.0 && sum_n > 0 {
         let visited_avg = weighted_q / weight_sum;
@@ -2268,7 +2245,7 @@ pub fn gumbel_completed_q(
 }
 
 /// Numerically-stable softmax of a slice into a fresh Vec that sums to 1. Used
-/// by the SH ranking and the #3 target build. Empty input => empty output.
+/// by the SH ranking and the target build. Empty input => empty output.
 pub fn gumbel_softmax(scores: &[f32]) -> Vec<f32> {
     if scores.is_empty() {
         return Vec::new();
@@ -2292,21 +2269,21 @@ pub fn gumbel_softmax(scores: &[f32]) -> Vec<f32> {
     exps
 }
 
-/// Per-slot Gumbel-Top-k + Sequential-Halving state for ONE root (§0.6/§0.9).
-/// Lives on `RustSearch` (the per-slot search). `survivors` shrinks as halving
-/// rounds advance; `gumbel` holds the per-candidate g(a) draw for SH ranking;
-/// `target_at_round[a]` is the cumulative visit cap candidate `a` must reach in
-/// the current round before the intra-slot barrier permits a halving. The state
-/// is only constructed when `gumbel_root` is on AND the move is a Full move.
+/// Per-slot Gumbel-Top-k + Sequential-Halving state for one root. Lives on
+/// `RustSearch`. `survivors` shrinks as halving rounds advance; `gumbel` holds
+/// the per-candidate g(a) draw for SH ranking; `round_cap[a]` is the cumulative
+/// visit cap candidate `a` must reach in the current round before the intra-slot
+/// barrier permits a halving. Constructed only when `gumbel_root` is on and the
+/// move is a Full move.
 #[derive(Clone, Debug)]
 pub struct GumbelRootState {
     /// Surviving candidate action_ids for the current SH round (shrinks by ~half
     /// each round; in the no-SH intermediate mode this stays the full top-m set).
     pub survivors: Vec<PackedCoord>,
-    /// g(a) ~ Gumbel(0,1) per ORIGINAL top-m candidate (kept across rounds for
+    /// g(a) ~ Gumbel(0,1) per original top-m candidate (kept across rounds for
     /// the SH rank `g(a)+logits(a)+σ(completedQ(a))`).
     pub gumbel: HashMap<PackedCoord, f32>,
-    /// Raw logits per candidate (snapshot of the root's RAW logits, §0.5 score).
+    /// Raw logits per candidate (snapshot of the root's raw logits).
     pub logits: HashMap<PackedCoord, f32>,
     /// Total per-move visit budget `n` to allocate via SH.
     pub budget: u32,
@@ -2318,15 +2295,14 @@ pub struct GumbelRootState {
     /// the current round (its visits at round entry + this round's per-survivor
     /// quota). Keyed by action_id; only survivors appear.
     pub round_cap: HashMap<PackedCoord, u32>,
-    /// Whether SH halving is active. When false (gumbel_root on, SH off — the
-    /// A/B intermediate mode) the candidate set is fixed to the top-m and visits
-    /// allocate by normal PUCT among them (no rounds, no caps).
+    /// Whether SH halving is active. When false (gumbel_root on, SH off) the
+    /// candidate set is fixed to the top-m and visits allocate by PUCT among
+    /// them (no rounds, no caps).
     pub sequential_halving: bool,
 }
 
 impl GumbelRootState {
-    /// Ceil(log2(m)) rounds, with m>=1 => 0 rounds is impossible (1 candidate is
-    /// already the winner). m==1 => num_rounds 0 (nothing to halve).
+    /// Ceil(log2(m)) rounds. m<=1 => 0 rounds (nothing to halve).
     fn rounds_for(m: usize) -> u32 {
         if m <= 1 {
             0
@@ -2360,7 +2336,7 @@ mod tests {
     }
 
     #[test]
-    fn nucleus_f64_truncation_vs_legacy_f32() {
+    fn nucleus_f64_truncation_vs_f32() {
         // 1000 equal priors of 1/1000 each. The f64 path with the mass==1.0
         // short-circuit returns the full cap (hi == 1000).
         let priors = vec![1.0f32 / 1000.0; 1000];
@@ -2370,7 +2346,7 @@ mod tests {
     }
 
     #[test]
-    fn nucleus_f32_matches_legacy_for_normal_mass() {
+    fn nucleus_f32_matches_f64_for_normal_mass() {
         // Sharply-peaked policy with mass 0.95: f32 and f64 modes agree.
         let priors = vec![0.5f32, 0.3, 0.15, 0.04, 0.01];
         let w = widening(0.95, 2, 5);
@@ -2570,7 +2546,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_no_cache_does_compound() {
+    fn no_cache_does_compound() {
         // With clean_root_prior_cache off, the second application mixes on the
         // already-noised priors, so the priors differ between the first and
         // second application.
@@ -2601,7 +2577,7 @@ mod tests {
     // === parity() / production() divergence defaults ===
 
     #[test]
-    fn parity_disables_all_main4_divergences() {
+    fn parity_disables_all_divergences() {
         let p = Divergences::parity();
         assert!(!p.nucleus_f64);
         assert!(!p.new_child_fpu);
@@ -2612,7 +2588,7 @@ mod tests {
     }
 
     #[test]
-    fn production_enables_all_main4_divergences() {
+    fn production_enables_all_divergences() {
         let p = Divergences::production();
         assert!(p.nucleus_f64);
         assert!(p.new_child_fpu);
@@ -2623,7 +2599,7 @@ mod tests {
     }
 
     #[test]
-    fn parity_dirichlet_is_flat_and_byte_identical() {
+    fn parity_dirichlet_is_flat() {
         // With shaped off, the fresh-root construction path produces the flat
         // Dirichlet priors: compare a search built under parity() against a
         // manual flat mix.
@@ -2659,9 +2635,9 @@ mod tests {
         }
     }
 
-    // === Gumbel S2: raw-logit plumbing onto the tree ===
+    // === Gumbel: raw-logit plumbing onto the tree ===
 
-    /// An evaluation carrying the optional raw-logit column (Gumbel S2 path).
+    /// An evaluation carrying the optional raw-logit column.
     fn eval_with_priors_and_logits(
         priors: Vec<(PackedCoord, f32)>,
         logits: Vec<(PackedCoord, f32)>,
@@ -2728,7 +2704,7 @@ mod tests {
         assert_eq!(map.get(&2).copied(), Some(-1.25));
     }
 
-    // === Gumbel S3: Gumbel-Top-k root + Sequential Halving ===
+    // === Gumbel: Gumbel-Top-k root + Sequential Halving ===
 
     /// gumbel() profile: a Full-move Gumbel root carries logits.
     fn gumbel_eval(n: usize) -> RustEvaluation {
@@ -2752,7 +2728,7 @@ mod tests {
     }
 
     #[test]
-    fn sigma_transform_canonical_and_monotone() {
+    fn sigma_transform_is_monotone() {
         // σ(q)=(c_visit+max_n)·c_scale·q ; σ(0)=0 ; monotone increasing in q.
         assert_eq!(gumbel_sigma(0.0, 7, 50.0, 1.0), 0.0);
         assert_eq!(gumbel_sigma(1.0, 0, 50.0, 1.0), 50.0);
@@ -2927,12 +2903,12 @@ mod tests {
         assert!(v_mix >= -0.5 - 1e-6 && v_mix <= 0.5 + 1e-6);
     }
 
-    // === Gumbel S6 [6]: Divergences profile gating ===
+    // === Gumbel: Divergences profile gating ===
 
     #[test]
     fn gumbel_profile_flips_four_bools_on_with_default_scalars() {
-        // §1: gumbel() = production() with the four Gumbel bools ON and the σ /
-        // candidate scalars at their canonical Danihelka defaults.
+        // gumbel() = production() with the four Gumbel bools on and the σ /
+        // candidate scalars at their defaults.
         let g = Divergences::gumbel();
         assert!(g.gumbel_target);
         assert!(g.gumbel_root);
@@ -2942,16 +2918,16 @@ mod tests {
         assert_eq!(g.gumbel_c_scale, 1.0);
         assert_eq!(g.gumbel_m, 16);
         assert_eq!(g.gumbel_target_min_visits, 1);
-        // gumbel() inherits the production() main_4 divergence set unchanged.
+        // gumbel() inherits the production() divergence set unchanged.
         assert!(g.nucleus_f64);
         assert!(g.dirichlet_shaped);
     }
 
     #[test]
     fn parity_and_production_disable_all_gumbel_bools() {
-        // Contract (§1): with all four Gumbel bools false, every Gumbel path is
-        // bypassed and output is byte-identical to today. Both parity() and
-        // production() MUST hold the four bools OFF; scalars at the defaults.
+        // With all four Gumbel bools false, every Gumbel path is bypassed. Both
+        // parity() and production() hold the four bools off; scalars at the
+        // defaults.
         for d in [Divergences::parity(), Divergences::production()] {
             assert!(!d.gumbel_target);
             assert!(!d.gumbel_root);
@@ -2964,11 +2940,11 @@ mod tests {
         }
     }
 
-    // === Gumbel S6 [2]: completedQ support floor excludes un-searched actions ===
+    // === Gumbel: completedQ support floor excludes un-searched actions ===
 
     #[test]
     fn completed_q_floor_excludes_unsearched_from_target_support() {
-        // The #3 target softmax support is the set of edges with visits >=
+        // The target softmax support is the set of edges with visits >=
         // gumbel_target_min_visits. completedQ itself still defines a value for
         // every edge (visited=Q, unvisited=v_mix), but a floored-out action must
         // not enter the softmax support — verified here by composing the same
@@ -3001,13 +2977,13 @@ mod tests {
         assert!(!support.contains(&1) && !support.contains(&3));
     }
 
-    // === Gumbel S6 [5]: target softmax == softmax(logits + σ(completedQ)) ===
+    // === Gumbel: target softmax == softmax(logits + σ(completedQ)) ===
 
     #[test]
     fn target_softmax_matches_logits_plus_sigma_completed_q() {
-        // Build a hand tree, compose the #3 target exactly as gumbel_target_policy
-        // does (logits + σ(completedQ) over the floored support, then softmax),
-        // and assert it sums to 1 and equals an independent reference computation.
+        // Build a hand tree, compose the target as gumbel_target_policy does
+        // (logits + σ(completedQ) over the floored support, then softmax), and
+        // assert it sums to 1 and equals an independent reference computation.
         let eval = gumbel_eval(3);
         let mut s = build_search_from_eval(&eval, Divergences::gumbel());
         for a in 0u32..3 {
@@ -3066,7 +3042,7 @@ mod tests {
         assert_eq!(support[argmax], 0);
     }
 
-    // === Gumbel S6 [3]: Gumbel-Top-k == sampling-without-replacement ===
+    // === Gumbel: Gumbel-Top-k == sampling-without-replacement ===
 
     /// Chi-squared goodness-of-fit upper-tail survival probability P(X^2 >= stat)
     /// for `df` degrees of freedom, via the regularized upper incomplete gamma
@@ -3153,8 +3129,8 @@ mod tests {
         exps.into_iter().map(|e| e / z).collect()
     }
 
-    /// One Gumbel draw per action with the SAME per-action seed discipline the
-    /// search uses (§0.8): g(a) = gumbel_draw(seed.wrapping_add(action_id)).
+    /// One Gumbel draw per action with the same per-action seed discipline the
+    /// search uses: g(a) = gumbel_draw(seed.wrapping_add(action_id)).
     fn gumbel_argsort(logits: &[f32], seed: u64) -> Vec<usize> {
         let mut scored: Vec<(usize, f32)> = logits
             .iter()
@@ -3171,13 +3147,13 @@ mod tests {
 
     #[test]
     fn gumbel_topk_is_sampling_without_replacement_chi2_gate() {
-        // §0.5 / S6[3]: top-m of (logits + Gumbel(0,1)) is sampling WITHOUT
-        // replacement from softmax(logits). Gate: over >=100 random logit
-        // vectors (varied length/entropy), draw for >=10_000 seeds each, compare
-        // empirical FIRST-pick freqs to softmax(logits) via chi-squared GoF at
-        // alpha=0.01; allow <=5% of vectors to fail. Then the SECOND pick,
-        // conditioned on the first, must match softmax renormalized over the
-        // remaining support (same gate). This is the Gumbel-max theorem.
+        // Top-m of (logits + Gumbel(0,1)) is sampling without replacement from
+        // softmax(logits). Gate: over >=100 random logit vectors (varied
+        // length/entropy), draw for >=10_000 seeds each, compare empirical
+        // first-pick freqs to softmax(logits) via chi-squared GoF at alpha=0.01;
+        // allow <=5% of vectors to fail. Then the second pick, conditioned on the
+        // first, must match softmax renormalized over the remaining support (same
+        // gate).
         const N_VECTORS: usize = 120;
         const N_SEEDS: u64 = 12_000;
         const ALPHA: f64 = 0.01;
@@ -3204,7 +3180,7 @@ mod tests {
             let probs = softmax_f64(&logits);
 
             // Space the seeds far apart so seed.wrapping_add(action_id) ranges of
-            // adjacent trials never overlap (clean independence per §0.8 hashing).
+            // adjacent trials never overlap (clean per-action seed independence).
             let stride: u64 = 1 << 20;
             // First-pick counts, plus second-pick counts conditioned on first==j*.
             let mut first_counts = vec![0u64; n];

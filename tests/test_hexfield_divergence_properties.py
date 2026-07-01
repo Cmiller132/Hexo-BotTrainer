@@ -137,9 +137,9 @@ def test_build_divergence_overrides() -> None:
     assert off["ml_two_sided"] is False
     assert off["ml_final_pick"] is False
     assert off["ml_weight"] == pytest.approx(0.03)
-    # Concrete bool/float/int, never None — resolve_divergences calls
-    # v.extract() into bool/f32/u32 (the gumbel_m / gumbel_target_min_visits
-    # knobs are u32, emitted as concrete int per the S1 overrides contract).
+    # Every override value is a concrete bool/float/int, never None.
+    # resolve_divergences extracts each into bool/f32/u32; u32 knobs such as
+    # gumbel_m and gumbel_target_min_visits are emitted as concrete int.
     for key, value in on.items():
         assert value is not None, key
         assert isinstance(value, (bool, float, int)), (key, type(value))

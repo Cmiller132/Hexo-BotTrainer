@@ -301,9 +301,9 @@ def _reassemble_rust_rows(
     # Per-cell Q target + presence mask follow the SAME pol_off slices as policy.
     cell_q = np.frombuffer(bytes(result["cell_q"]), dtype=np.float32, count=total_legal)
     cell_q_mask = np.frombuffer(bytes(result["cell_q_mask"]), dtype=np.float32, count=total_legal)
-    # main_6 Gumbel S5: dense π' target + dense raw logits follow the SAME pol_off
-    # slices as policy; gumbel_policy_valid is per-row. Forward-compat: an older
-    # .so omits these keys ⇒ all-zero / valid 0.0 ⇒ the loss falls back to visit.
+    # Dense Gumbel policy target + dense raw logits follow the same pol_off slices
+    # as policy; gumbel_policy_valid is per-row. When the kernel omits these keys,
+    # gumbel_policy/prior_logit are all-zero and gumbel_policy_valid is 0.0.
     if "gumbel_policy" in result:
         gumbel_policy = np.frombuffer(bytes(result["gumbel_policy"]), dtype=np.float32, count=total_legal)
         prior_logit = np.frombuffer(bytes(result["prior_logit"]), dtype=np.float32, count=total_legal)

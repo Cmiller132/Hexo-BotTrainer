@@ -1,21 +1,20 @@
-"""M6 #4 gate: the depth-2 double-buffered scheduler (HEXFIELD_PIPELINE_DEPTH2)
-is FLAG-GATED, default OFF, and NOT byte-identical to the lockstep path (it
-deepens the async eval window by one flush, so the leaf stream legitimately
-differs). This test guards the two properties that MUST hold for the opt-in path:
+"""Tests for the depth-2 double-buffered scheduler (HEXFIELD_PIPELINE_DEPTH2).
 
-  1. Determinism — two depth-2 runs with the same seed produce the identical
-     on_move stream (the interleave is fixed by the loop structure, not by
-     wall-clock), so enabling it is reproducible.
-  2. No lost / double-applied backups — every started game still decides exactly
-     the same NUMBER of moves as the lockstep run (each game runs to MAX_PLIES),
-     i.e. the pipeline drains its final flush and never drops or replays an eval.
+The depth-2 path is flag-gated and default off. It deepens the async eval
+window by one flush, so its leaf/on_move stream differs from the lockstep path.
+These tests cover:
 
-It also asserts the default-OFF path is reachable and that depth-2 falls back to
-lockstep (with no crash) when HEXFIELD_ASYNC_EVAL is absent.
+  1. Determinism — two depth-2 runs with the same seed produce an identical
+     on_move stream.
+  2. Move accounting — every game decides the same NUMBER of moves as the
+     lockstep run (each game runs to MAX_PLIES): no backup is lost or applied
+     twice.
+  3. Fallback — with HEXFIELD_PIPELINE_DEPTH2 set but HEXFIELD_ASYNC_EVAL
+     absent, the run falls back to the lockstep loop.
 
-The byte-IDENTICAL-to-dense parity corpus is covered separately by
-tests/test_hexfield_continuous_parity.py with the flag UNSET; depth-2 must NOT be
-compared against that corpus.
+Byte-identical parity against the dense corpus is covered in
+tests/test_hexfield_continuous_parity.py with the flag unset; the depth-2
+stream is not compared against that corpus.
 """
 
 from __future__ import annotations
@@ -33,11 +32,11 @@ from test_hexfield_search_parity import HexfieldStub
 
 
 class AsyncStub:
-    """Wraps the synchronous HexfieldStub in the async submit/result protocol the
-    depth-2 (HEXFIELD_ASYNC_EVAL) path drives: `submit_payload` enqueues (here:
-    eagerly computes — the test isn't timing the GPU) and returns a handle;
-    `result(handle)` returns the precomputed reply. Still callable so the sync /
-    fallback path (which calls the evaluator directly) works unchanged."""
+    """Wraps HexfieldStub in the async submit/result protocol the depth-2
+    (HEXFIELD_ASYNC_EVAL) path drives: `submit_payload` computes the reply
+    eagerly and returns an integer handle; `result(handle)` pops and returns the
+    precomputed reply. Also callable directly, so the sync/fallback path (which
+    invokes the evaluator directly) works."""
 
     def __init__(self):
         self._inner = HexfieldStub()
@@ -66,15 +65,16 @@ needs_native = pytest.mark.skipif(
     reason="native module not built",
 )
 
-# Same shallow corpus discipline as the parity test (keeps decision states in a
-# legal region the stub evaluates consistently); every game runs to MAX_PLIES so
-# the move COUNT is search-path-independent.
+# Each game runs to MAX_PLIES plies, so the move count is independent of the
+# search path.
 MAX_PLIES = 6
 
 
 class Recorder:
-    """on_move driver: applies actions to its own engine states and records the
-    full decision stream (the same 8-tuple the parity test compares)."""
+    """on_move driver: applies each action to its own engine state and records
+    the decision stream as 8-tuples (game_key, action_id, pcr_full,
+    policy_init, visits, visit_policy_action_ids_bytes,
+    visit_policy_weights_bytes, root_value rounded to 6 places)."""
 
     def __init__(self):
         self.states = {}
@@ -107,8 +107,7 @@ class Recorder:
 
 
 def _continuous_kwargs():
-    # Mirrors the parity-test config (full per-move machinery exercised), with a
-    # small enough corpus to stay in-stub.
+    # Continuous-search config exercising the full per-move machinery.
     return dict(
         visits=48,
         c_puct=1.5,
@@ -176,7 +175,7 @@ def _run(keys, **env):
 
 @needs_native
 def test_depth2_is_deterministic() -> None:
-    """Same seed + depth-2 flag => bit-identical on_move stream across two runs."""
+    """Two depth-2 runs with the same seed produce an identical on_move stream."""
     keys = list(range(700, 706))
     env = {"HEXFIELD_ASYNC_EVAL": "1", "HEXFIELD_PIPELINE_DEPTH2": "1"}
     records_a, stats_a = _run(keys, **env)
@@ -187,9 +186,8 @@ def test_depth2_is_deterministic() -> None:
 
 @needs_native
 def test_depth2_no_lost_or_double_moves() -> None:
-    """Every game decides exactly MAX_PLIES moves under depth-2 (no eval lost at
-    shutdown, no flush backed up twice). The COUNT matches the lockstep run even
-    though the stream legitimately differs."""
+    """Every game decides exactly MAX_PLIES moves under depth-2, and the move
+    count matches the lockstep run even though the stream differs."""
     keys = list(range(700, 706))
 
     lockstep_records, lockstep_stats = _run(
@@ -199,28 +197,27 @@ def test_depth2_no_lost_or_double_moves() -> None:
         keys, HEXFIELD_ASYNC_EVAL="1", HEXFIELD_PIPELINE_DEPTH2="1"
     )
 
-    # Every game ran to the MAX_PLIES cap on both paths -> identical move counts.
+    # Both paths run every game to the MAX_PLIES cap.
     assert len(depth2_records) == len(keys) * MAX_PLIES
     assert len(depth2_records) == len(lockstep_records)
     assert depth2_stats["moves_decided"] == lockstep_stats["moves_decided"]
 
-    # Per-game move counts match (no game starved by a lost backup).
+    # Per-game move counts match between the two paths.
     for key in keys:
         d2 = sum(1 for rec in depth2_records if rec[0] == key)
         ls = sum(1 for rec in lockstep_records if rec[0] == key)
         assert d2 == ls == MAX_PLIES, f"game {key}: depth2={d2} lockstep={ls}"
 
-    # The flushed/queued accounting is internally consistent (every queued state
-    # was eventually flushed -> no flush left undrained at exit).
+    # Flushed/queued accounting: at least one flush occurred and no more states
+    # were flushed than were queued.
     assert depth2_stats["flush_count"] >= 1
     assert depth2_stats["flushed_states"] <= depth2_stats["queued_states"]
 
 
 @needs_native
 def test_depth2_falls_back_without_async() -> None:
-    """Depth-2 without HEXFIELD_ASYNC_EVAL must fall back to the lockstep loop
-    (warn + run), not crash. The fallback stream therefore equals a plain
-    lockstep run."""
+    """With HEXFIELD_PIPELINE_DEPTH2 set but HEXFIELD_ASYNC_EVAL absent, the run
+    falls back to the lockstep loop, so its stream equals a plain lockstep run."""
     keys = list(range(700, 703))
     lockstep_records, _ = _run(
         keys, HEXFIELD_PIPELINE_DEPTH2=None, HEXFIELD_ASYNC_EVAL=None

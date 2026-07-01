@@ -154,9 +154,9 @@ class ContinuousDriver:
             ids = np.frombuffer(bytes(payload["visit_policy_action_ids_bytes"]), dtype=np.uint32)
             weights = np.frombuffer(bytes(payload["visit_policy_weights_bytes"]), dtype=np.float32)
             # Per-cell Q: one Q per recorded action, same set and order as the
-            # visit policy. Feeds the train-only cell_q head.
+            # visit policy. Feeds the cell_q head.
             qs = np.frombuffer(bytes(payload["visit_policy_q_bytes"]), dtype=np.float32)
-            # Policy-surprise = KL(visit || root prior); reweights the self CE.
+            # Policy-surprise = KL(visit || root prior).
             prior_ids = np.frombuffer(
                 bytes(payload["root_prior_policy_action_ids_bytes"]), dtype=np.uint32
             )
@@ -164,9 +164,9 @@ class ContinuousDriver:
                 bytes(payload["root_prior_policy_weights_bytes"]), dtype=np.float32
             )
             surprise = _policy_surprise_kl(ids, weights, prior_ids, prior_weights)
-            # main_6 #3 (Gumbel S5): the improved-policy target π' + raw root logits
-            # are present ONLY when gumbel_target is on (Rust omits the keys in
-            # parity/production). Absent ⇒ empty tuples ⇒ visit-target fallback.
+            # Improved-policy target π' and raw root logits are present only when
+            # gumbel_target is enabled; otherwise the keys are absent from the
+            # payload and these stay empty (visit policy is used as the target).
             gumbel_pairs: tuple[tuple[int, float], ...] = ()
             prior_logit_pairs: tuple[tuple[int, float], ...] = ()
             if "gumbel_policy_action_ids_bytes" in payload:
@@ -218,7 +218,7 @@ class ContinuousDriver:
             self.root_values.append(float(payload["root_value"]))
         elif not full and not init:
             # Fast rows are not written, but the pending list keeps every
-            # decision so opp-policy lookup and moves_left counts stay exact
+            # decision so opp-policy lookup and moves_left counts remain complete
             # (mask_opp_from_fast at finalize).
             sample = HexfieldSampleData(
                 game_id=str(game_key), turn_index=tape.ply, current_player=current,
@@ -286,8 +286,7 @@ class ContinuousDriver:
         if truncated:
             self.games_truncated += 1
         else:
-            # A non-truncated game must have a concrete engine winner; None is
-            # only valid on the truncated path.
+            # winner is None only on the truncated path.
             assert winner is not None, "non-truncated finish requires an engine winner"
         # Surface a prior writer-thread failure before queueing more work.
         if self._writer_failed.is_set():
@@ -479,9 +478,8 @@ def generate_selfplay_epoch(*, ctx, components, epoch: int, games_per_epoch: int
             policy_init_max_plies=sp.policy_init_max_plies,
             policy_init_temperature=sp.policy_init_temperature,
             tss_enabled=sp.tss_enabled,
-            # Root FPU reduction. When set, Rust applies it directly and ignores
-            # the noise-conditioned branch; root_fpu_zero_under_noise applies only
-            # on the parity path.
+            # Root FPU reduction. root_fpu_zero_under_noise and search_parity_mode
+            # gate how this interacts with root Dirichlet noise (handled in Rust).
             root_fpu_reduction=sp.root_fpu_reduction,
             root_fpu_zero_under_noise=sp.root_fpu_zero_under_noise,
             search_parity_mode=sp.search_parity_mode,
@@ -505,10 +503,8 @@ def generate_selfplay_epoch(*, ctx, components, epoch: int, games_per_epoch: int
         "scheduler": {k: v for k, v in scheduler_stats.items() if not isinstance(v, dict)},
         **driver.stats(),
     }
-    # main_6 Increment-0: attach the cuda.Event GPU-busy report (bench-only;
-    # None unless HEXFIELD_PERF_TRACE=1). Lets a bench compare depth-2 /
-    # complete-overlap ON vs OFF on the PRIMARY metric (busy fraction), not
-    # nvidia-smi. getattr guards evaluators that predate the method.
+    # Attach the cuda.Event GPU-busy report (None unless HEXFIELD_PERF_TRACE=1).
+    # getattr defaults to None for evaluators without perf_trace_report.
     perf_report = getattr(evaluator, "perf_trace_report", lambda: None)()
     if perf_report is not None:
         result["perf_trace"] = perf_report

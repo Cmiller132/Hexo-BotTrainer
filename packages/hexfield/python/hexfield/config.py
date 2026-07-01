@@ -1,9 +1,9 @@
 """hexfield run configuration (the [model.config] sections of a run toml).
 
-Defaults track a known-good configuration (close to production main_3) but a
-live run's toml overrides them — read the run toml for the authoritative values.
-Notable defaults: the moves-left divergences ON, the quarantined knobs OFF (no
-FPU noise-zeroing, root policy temperature 1.0 / no ramp).
+Dataclass defaults are overridden by a run's toml; read the run toml for the
+authoritative values. Defaults have moves-left utility ON and the root-policy
+temperature knobs off (root_policy_temperature 1.0, no ramp; no FPU
+noise-zeroing).
 """
 
 from __future__ import annotations
@@ -24,39 +24,31 @@ class SelfplayConfig:
     active_root_limit: int = 256
     root_dirichlet_total_alpha: float = 10.83
     root_dirichlet_noise_fraction: float = 0.25
-    # --- KataGo-faithful dynamic c_puct + LCB (ledger items [7]/[8]) ----------
-    # First-class, config-auditable versions of knobs that resolve_divergences
-    # already reads but Python never emitted (the established wiring gap). The
-    # defaults equal the prior baked-in Divergences::production() values, so the
-    # production self-play behavior is UNCHANGED — they are now just driven by
-    # config instead of being implicit. c_for(N) = c_puct + c_scale*ln((N+c_base)
+    # --- Dynamic c_puct + LCB -------------------------------------------------
+    # Read by resolve_divergences. c_for(N) = c_puct + c_scale*ln((N+c_base)
     # /c_base); visit_scaled_c_puct gates the log term; lcb_z is the LCB z-score.
     c_scale: float = 0.45
     c_base: float = 500.0
     visit_scaled_c_puct: bool = True
     lcb_z: float = 1.6
-    # --- main_4 KataGo-faithful search divergences (ledger items [1]-[7]) -----
-    # These flip the six behavioral fixes ON for production self-play (they are
-    # already ON in Divergences::production(); emitting them from config makes
-    # them auditable + individually controllable). The M5/M6 golden-vector tests
-    # run Divergences::parity() (search_parity_mode=True, NOT this path) so they
-    # stay byte-identical regardless of these values.
+    # --- Search divergences ---------------------------------------------------
+    # Six boolean search behaviors emitted from config and applied on top of the
+    # base divergences selected by search_parity_mode (see
+    # build_divergence_overrides). Each is individually controllable.
     nucleus_f64: bool = True
     new_child_fpu: bool = True
     lazy_widening: bool = True
     clean_root_prior_cache: bool = True
     dirichlet_shaped: bool = True
     pruned_dynamic_cpuct: bool = True
-    # QUARANTINED (spec §5.1): defaults off.
+    # Root-policy temperature knobs. Defaults leave temperature at 1.0 with no
+    # ramp (early value 0.0, halflife 0.0).
     root_policy_temperature: float = 1.0
     root_policy_temperature_early: float = 0.0
     root_policy_temperature_halflife: float = 0.0
-    # SPEC CORRECTION (ledger item [6]): modern KataGo has NO "zero FPU under
-    # noise" branch; self-play uses rootFpuReductionMax=0.0. root_fpu_reduction
-    # is the first-class root FPU; the legacy noise-conditioned knob below is
-    # KEPT only for the parity path (golden vectors). Default 0.0 = KataGo
-    # self-play. root_fpu_zero_under_noise stays False so the legacy branch is
-    # inert in production.
+    # root_fpu_reduction is the root FPU reduction (default 0.0).
+    # root_fpu_zero_under_noise gates a noise-conditioned FPU-zeroing branch used
+    # only by the parity path; default False leaves it inactive.
     root_fpu_reduction: float = 0.0
     root_fpu_zero_under_noise: bool = False
     fpu_reduction: float = 0.2
@@ -75,13 +67,11 @@ class SelfplayConfig:
     max_game_plies: int = 512
     tss_enabled: bool = True
     search_parity_mode: bool = False
-    # Moves-left utility (MLH decisiveness): default ON, two-sided, with the
-    # final-move tie-break. The Rust Divergences mirror these; passing them as
-    # divergence_overrides makes the lever controllable + auditable from config
-    # instead of being baked into Divergences::production(). Set
-    # moves_left_utility=False (or search_parity_mode=True) for the no-MLH
-    # baseline. ml_auto_disabled / the run-dir ml_auto_disabled.flag force the
-    # lever off mid-run when the per-epoch head-health monitor trips.
+    # Moves-left utility. Defaults: enabled, two-sided, with the final-move
+    # tie-break. Passed to Rust as divergence_overrides. moves_left_utility=False
+    # (or search_parity_mode=True) selects the no-MLH baseline. ml_auto_disabled
+    # (config field) and the run-dir ml_auto_disabled.flag both force the lever
+    # off; see build_divergence_overrides for the gating.
     moves_left_utility: bool = True
     ml_weight: float = 0.03
     ml_scale: float = 32.0
@@ -91,18 +81,17 @@ class SelfplayConfig:
     ml_final_pick_band: float = 0.05
     ml_auto_disabled: bool = False
     cache_max_states: int = 262_144
-    # --- main_6 FULL Gumbel AlphaZero (Danihelka et al. 2022) -----------------
-    # All default-OFF: Gumbel is opt-in ONLY via main_6. With every enable flag
-    # False, build_divergence_overrides emits the OFF bools and the Rust paths
-    # are dormant -> production self-play + golden vectors are byte-identical.
-    #   #1 root  : gumbel_root_enabled (Gumbel-Top-k sampling of m candidates)
-    #              + gumbel_sequential_halving (root-only SH visit allocation).
-    #   #2 select: gumbel_nonroot_select (deterministic argmax[logits+σ(Q)]).
-    #   #3 target: gumbel_target_enabled (π'=softmax(logits+σ(completedQ))).
-    # σ(q)=(c_visit+max_b N(b))·c_scale·q ; m = candidate count (clamped to
+    # --- Gumbel AlphaZero (Danihelka et al. 2022) -----------------------------
+    # All flags default OFF; when off the corresponding Rust paths are inactive.
+    # Three mechanisms, each gated by its own enable flag:
+    #   root  : gumbel_root_enabled (Gumbel-Top-k sampling of m candidates)
+    #           + gumbel_sequential_halving (root-only SH visit allocation).
+    #   select: gumbel_nonroot_select (deterministic argmax[logits+σ(Q)]).
+    #   target: gumbel_target_enabled (π'=softmax(logits+σ(completedQ))).
+    # σ(q)=(c_visit+max_b N(b))·c_scale·q ; gumbel_m = candidate count (clamped to
     # n_legal at the root); gumbel_target_min_visits = target support floor.
-    # export_root_prior_logits asks the evaluator for the raw pre-softmax policy
-    # logits Rust needs for the σ/Gumbel/target math (off => parity-minimal).
+    # export_root_prior_logits requests the raw pre-softmax policy logits from the
+    # evaluator, which the σ/Gumbel/target math consumes.
     gumbel_target_enabled: bool = False
     gumbel_root_enabled: bool = False
     gumbel_sequential_halving: bool = False
@@ -125,35 +114,23 @@ class TrainingSection:
     clip_c: float = 1.75
     clip_ema_decay: float = 0.99
     clip_warmup_steps: int = 50
-    # --- Config-driven loss weights; defaults match the losses.py constants --
+    # --- Loss weights; defaults match the losses.py constants ----------------
     policy_weight: float = 1.0
     value_weight: float = 1.0
     opp_policy_weight: float = 0.25
     short_term_value_weight: float = 0.1
     moves_left_weight: float = 0.1
     q_head_weight: float = 0.1
-    # KataGo auxiliary SOFT policy target (main_4). Loss weight for the new
-    # train-only soft_policy head (CE against the (visit_policy+1e-7)^(1/4)
-    # renormalized soft target). MUST stay in sync with
-    # losses.SOFT_POLICY_WEIGHT (8.0 = KataGo soft-policy-weight-scale default);
-    # kept as a hardcoded default here to match the existing "defaults =
-    # losses.py constants" pattern (config.py does not import losses).
+    # Loss weight for the train-only soft_policy head (CE against the
+    # (visit_policy+1e-7)^(1/4) renormalized soft target). Default mirrors
+    # losses.SOFT_POLICY_WEIGHT (config.py does not import losses).
     soft_policy_weight: float = 8.0
-    # main_6 Gumbel S5: which target drives the MAIN policy CE. "visit" (default)
-    # = the visit-count distribution (unchanged); "gumbel" = the improved-policy
-    # target π'=softmax(logits+σ(completedQ)) per-row where present (rows lacking a
-    # gumbel target — fast / old shards — always fall back to visit). Lives on the
-    # TrainingSection (training-side selector), NOT SelfplayConfig.
-    policy_target: str = "visit"
-    # --- Policy-surprise self-CE reweight (v3 #5) ----------------------------
+    # --- Policy-surprise self-CE reweight ------------------------------------
     policy_surprise_uniform_fraction: float = 0.5
     policy_surprise_max_weight: float = 8.0
-    warmup_steps: int = 0  # fresh-init runs warm-start from the BC prefit
+    warmup_steps: int = 0
     shuffle_keep_target_rows: int = 300_000
-    # KataGo / dense_cnn_restnet replay-buffer knobs. Defaults are hexfield-tuned
-    # (NOT dense's literals): the dimensionless KataGo knobs (exponent=0.65,
-    # expand=0.4) are unchanged, but min_rows/scale/targets are scaled to
-    # hexfield's ~7k Full-rows/epoch stream.
+    # Replay-buffer shuffle-window knobs.
     shuffle_min_rows: int = 20_000
     shuffle_taper_window_exponent: float = 0.65
     shuffle_expand_window_per_row: float = 0.4
@@ -165,10 +142,9 @@ class TrainingSection:
     no_repeat_files: bool = False
     expand_backend: str = "serial"
     expand_workers: int = 0
-    # main_6 training-side policy-target selector: "visit" (visit-count target,
-    # legacy/default) or "gumbel" (the improved π'=softmax(logits+σ(completedQ))
-    # target, #3). losses.py sources this from TrainingSection (NOT
-    # SelfplayConfig); a row falls back to "visit" when no gumbel target present.
+    # Training-side policy-target selector, read by losses.py: "visit" (default;
+    # visit-count target) or "gumbel" (the π'=softmax(logits+σ(completedQ))
+    # target). A row falls back to "visit" when no gumbel target is present.
     policy_target: str = "visit"
 
 
@@ -180,116 +156,101 @@ class EvaluationSection:
     eval_every: int = 1
 
 
-# --- Multi-stage standalone evaluation (purely measurement) ------------------
+# --- Multi-stage standalone evaluation ---------------------------------------
 #
-# This is a SEPARATE, opt-in evaluator from the per-epoch ``EvaluationSection``
-# lockstep arena above. It is run by a STANDALONE script (scripts/), NOT inside
-# the training pipeline, so it never interrupts the live run. Its only product
-# is a verdict LABEL (PROMOTE / REGRESS / INCONCLUSIVE) plus rolling ratings;
-# it MUST NOT gate, promote, halt, or otherwise alter the run. The two
-# ``*_gating_*`` / ``*_promotion_*`` knobs below default OFF and are wired to
-# nothing that changes training — they exist only so a future, explicitly
-# opted-in consumer could read them.
+# A separate, opt-in evaluator from the per-epoch ``EvaluationSection`` lockstep
+# arena above. Run by a standalone script (scripts/), not inside the training
+# pipeline. Its product is a verdict label (PROMOTE / REGRESS / INCONCLUSIVE)
+# plus rolling ratings; it does not gate, promote, or halt the run. The
+# ``*_gating_*`` / ``*_promotion_*`` knobs below default OFF and are not wired
+# to anything that changes training.
 #
-# Statistical design notes (the corrected, adversary-reviewed design):
-#  - SealBot is the cross-lineage zero-point ONLY (pinned at 0 Elo); its depth
-#    varies under GPU load, so it must NOT enter difference inference at full
-#    weight (see ``sealbot_overdispersion``).
+# Statistical design:
+#  - SealBot is the cross-lineage zero-point (pinned at 0 Elo). Its edge is
+#    down-weighted in difference inference via ``sealbot_overdispersion``.
 #  - Permanent anchors (BC prefit + ep5) never slide; the sliding bracket is the
-#    nearest two fixed log-grid rungs BELOW the current epoch (NOT "vs prior").
-#  - The 128 games/epoch are PAIRED (shared openings / common random numbers)
+#    nearest two fixed log-grid rungs below the current epoch.
+#  - The 128 games/epoch are paired (shared openings / common random numbers)
 #    and scored pentanomially; pair-level SE + paired/effective counts feed the
-#    Bradley-Terry likelihood. The BT fit must CONVERGE (max|grad| < tol) before
+#    Bradley-Terry likelihood. The BT fit must converge (max|grad| < tol) before
 #    any covariance is computed.
-#  - HONEST RESOLUTION: a single 128-game epoch resolves only ~100-120 Elo
-#    (single-epoch SE(r_L - r_B) ~= 40-55 Elo). The ~15-20 Elo resolution is a
-#    MULTI-EPOCH ROLLING ASYMPTOTE of the persisted pool, never a per-epoch
-#    property. Stage B (SPRT) is a GROSS-regression triage, not a calibrated
-#    5%/5% test.
+#  - Resolution: a single 128-game epoch resolves roughly 100-120 Elo
+#    (single-epoch SE(r_L - r_B) ~= 40-55 Elo); tighter resolution is a
+#    multi-epoch rolling asymptote of the persisted pool. Stage B (SPRT) is a
+#    gross-regression triage, not a calibrated 5%/5% test.
 
 
 @dataclass(frozen=True)
 class MultiStageEvalOpponents:
     """Opponent roster for the deep (Stage C) eval and the rolling pool.
 
-    Three roles, per the corrected design:
+    Three roles:
       * SealBot  -- cross-lineage zero-point / calibrator, pinned at 0 Elo.
       * permanent anchors -- never slide (BC prefit + ep5 by default).
       * sliding bracket -- the nearest ``bracket_size`` rungs of ``log_grid``
-        strictly BELOW the current epoch (NOT the immediately-prior checkpoint).
+        strictly below the current epoch.
     """
 
     # SealBot zero-point. ``sealbot_path`` falls back to $SEALBOT_PATH when None
-    # (matches hexo_runner SealBotConfig.resolved_path). Disable when SealBot is
-    # unavailable; the pool then floats relative to the permanent anchors.
+    # (matches hexo_runner SealBotConfig.resolved_path). When disabled, the pool
+    # floats relative to the permanent anchors.
     sealbot_enabled: bool = True
     sealbot_path: str | None = None
     sealbot_variant: str = "current"
     sealbot_time_limit: float = 0.05
-    # PERMANENT anchors, as (label, checkpoint-path) pairs relative to the run
-    # tree. These never slide. Paths use forward slashes (resolved by the runner
-    # against the repo/run root). Defaults: the BC prefit and ep5.
-    # E2: a path may also be ABSOLUTE (``_resolve_anchor_path`` short-circuits an
-    # absolute path), and the env var ``HEXFIELD_ANCHOR_ROOTS`` (os.pathsep-
-    # separated dirs) prepends extra search roots — either lets the live importing
-    # tree reach a checkpoint that is only in the canonical tree WITHOUT a code
-    # change, and a still-unresolved anchor is now LOUD + recorded (not a silent
-    # drop) in roster.dropped_anchors.
+    # Permanent anchors, as (label, checkpoint-path) pairs. These never slide.
+    # Relative paths use forward slashes and are resolved by the runner against
+    # the repo/run root; ``_resolve_anchor_path`` short-circuits an absolute
+    # path. The env var ``HEXFIELD_ANCHOR_ROOTS`` (os.pathsep-separated dirs)
+    # prepends extra search roots. An unresolved anchor is recorded in
+    # roster.dropped_anchors. Defaults: the BC prefit and ep5.
     permanent_anchors: tuple[tuple[str, str], ...] = (
         ("bc_prefit", "runs/hexfield_bc_1/checkpoint_epoch2.pt"),
         ("ep5", "epoch_000005.pt"),
     )
-    # Fixed log-grid of epochs the SLIDING bracket is drawn from. The bracket is
+    # Fixed log-grid of epochs the sliding bracket is drawn from. The bracket is
     # the nearest ``bracket_size`` rungs strictly below the current epoch.
     log_grid: tuple[int, ...] = (5, 10, 20, 40, 80, 160)
     bracket_size: int = 2
-    # E4 radius-confound annotation: labels of opponents TRAINED at the radius-8
-    # legality era (the BC prefit, and any pre-shrink anchor). The support radius
-    # is a process-global OnceLock/module-global read once per process, so EVERY
-    # opponent is featurized at the LIVE HEXFIELD_SUPPORT_RADIUS. A radius-8-era
-    # net forced to radius-4 plays OOD -> weaker -> inflates the candidate's Elo
-    # against it. We cannot vary the radius per net (and the frozen checkpoints
-    # carry no training radius), so we ANNOTATE such edges ``featurized_ood`` and
-    # EXCLUDE them from the pinned BT zero-point — never read the cross-lineage
-    # curve as a clean strength signal. Edges still participate descriptively.
+    # Labels of opponents trained under the radius-8 legality regime. The support
+    # radius is a process-global read once per process, so every opponent is
+    # featurized at the live HEXFIELD_SUPPORT_RADIUS; a radius-8-trained net
+    # forced to a different radius is out-of-distribution. Edges to these
+    # opponents are annotated ``featurized_ood`` and excluded from the pinned BT
+    # zero-point, but still participate descriptively.
     radius8_opponents: tuple[str, ...] = ("bc_prefit",)
 
 
 @dataclass(frozen=True)
 class MultiStageEvalSprt:
-    """Stage B SPRT screen parameters -- a coherent GROSS-REGRESSION TRIAGE.
+    """Stage B SPRT screen parameters -- a one-sided gross-regression triage.
 
-    This is NOT a calibrated two-sided test of a small edge; it is a one-sided
-    cheap filter that asks only "did the candidate grossly regress?". The two
-    simple hypotheses are framed so the test and its label mapping agree:
+    A one-sided sequential filter that tests only whether the candidate grossly
+    regressed. Two simple hypotheses:
 
-      * H0 (``elo0 = 0``): the candidate is FINE -- Elo gap ~0 vs the screen
-        opponent. This is the null we hope to keep.
-      * H1 (``elo1 = -50``): the candidate GROSSLY REGRESSED -- a large negative
-        Elo gap. ``winrate_from_elo`` makes ``p1 < 0.5 < p0``, so a record
-        dominated by LOSSES drives the LLR up to ``upper`` and accepts H1.
+      * H0 (``elo0 = 0``): Elo gap ~0 vs the screen opponent.
+      * H1 (``elo1 = -50``): a large negative Elo gap. ``winrate_from_elo`` makes
+        ``p1 < 0.5 < p0``, so a loss-dominated record drives the LLR up to
+        ``upper`` and accepts H1.
 
-    Label mapping (lives in multistage_eval._stage_b_sprt; stated here so the two
-    files reconcile):
+    Label mapping (implemented in multistage_eval._stage_b_sprt):
 
-      * ``accept_h1`` -> ``"regress_suspected"`` (record favours the gross-
-        regression hypothesis; flag for the deep eval to confirm).
-      * ``accept_h0`` -> ``"ok"`` / escalate-to-deep (candidate looks fine; the
-        calibrated verdict is still Stage C/D, never this screen).
-      * ``continue`` -> ``"escalate"`` (undecided under the cap -> deep eval).
+      * ``accept_h1`` -> ``"regress_suspected"``.
+      * ``accept_h0`` -> ``"ok"`` / escalate-to-deep.
+      * ``continue``  -> ``"escalate"`` (undecided under the cap -> deep eval).
 
-    PURE EVAL: the screen NEVER short-circuits Stage C and NEVER gates/promotes;
-    Stage C/D (paired games + BT pool) is always the authoritative measurement.
-    With a small ``max_games`` cap the honest expected-N near the indifference
-    region (order ~285 decided games) means most non-gross candidates simply
-    ``escalate`` rather than resolve here -- by design. ``elo0``/``elo1`` are the
-    H0/H1 Elo bounds; ``alpha``/``beta`` the nominal error rates (advisory, given
-    the cap); ``max_games`` caps the screen.
+    The screen does not short-circuit Stage C and does not gate/promote; Stage
+    C/D (paired games + BT pool) is the authoritative measurement. With a small
+    ``max_games`` cap and an expected-N near the indifference region of order
+    ~285 decided games, most non-gross candidates ``escalate`` rather than
+    resolve here. ``elo0``/``elo1`` are the H0/H1 Elo bounds; ``alpha``/``beta``
+    the nominal error rates (advisory, given the cap); ``max_games`` caps the
+    screen.
     """
 
     enabled: bool = True
-    # H0: candidate is fine (Elo gap ~0). H1: candidate grossly regressed
-    # (~-50 Elo). See class docstring for the accept_h0/accept_h1 -> label map.
+    # H0: Elo gap ~0. H1: ~-50 Elo. See class docstring for the
+    # accept_h0/accept_h1 -> label map.
     elo0: float = 0.0
     elo1: float = -50.0
     alpha: float = 0.05
@@ -299,92 +260,71 @@ class MultiStageEvalSprt:
 
 @dataclass(frozen=True)
 class MultiStageEvalSection:
-    """Standalone, opt-in multi-stage strength eval -- PURELY MEASUREMENT.
+    """Standalone, opt-in multi-stage strength eval.
 
-    Emits a verdict LABEL and updates a persisted, SealBot-pinned Bradley-Terry
-    pool; never gates/promotes/halts the run. Disabled by default
-    (``enabled=False``) and only ever invoked by a standalone script.
+    Emits a verdict label and updates a persisted, SealBot-pinned Bradley-Terry
+    pool; does not gate/promote/halt the run. Disabled by default
+    (``enabled=False``) and invoked only by a standalone script.
     """
 
-    # Master switch. Off by default: the multi-stage eval is opt-in + standalone.
+    # Master switch. Off by default.
     enabled: bool = False
-    # Stage C budget: paired games per epoch evaluated (shared openings). These
-    # COMPOUND into the rolling pool across epochs.
+    # Stage C budget: paired games per epoch (shared openings). These accumulate
+    # into the rolling pool across epochs.
     games_budget: int = 128
     # Run the standalone eval against every Nth produced checkpoint/epoch.
     every_n_epochs: int = 5
-    # Search budget for eval games. Historically the reduced 128-visit eval
-    # budget; kept for back-compat / a deliberately cheap screen. NOTE the
-    # concurrent arena (eval_arena.play_checkpoint_match / play_sealbot_match)
-    # batches games across the GPU, so FULL sims are now affordable — the
-    # orchestrator runs eval at ``full_search_visits`` (below) by default, not
-    # this value. Leave this for an explicit reduced-budget override.
+    # Reduced eval search budget. The orchestrator runs eval at
+    # ``full_search_visits`` (below) by default; this value is used only as an
+    # explicit reduced-budget override.
     eval_visits: int = 128
     # Eval search budget. ``None`` -> use the production ``selfplay.search_visits``
-    # (512); an int pins a specific budget. LOCKED to the production 512 for the
-    # in-run comparable eval: default ``None`` so an omitted value can NEVER
-    # silently under-shoot to a reduced budget — every eval, every epoch, every
-    # opponent plays at 512. The deep eval (and the SPRT screen, when enabled) play
-    # at this budget (threaded into Stage B + Stage C by the orchestrator's
-    # _eval_visits). Pin an int only for a deliberate reduced-budget experiment.
+    # (512); an int pins a specific budget. The deep eval (and the SPRT screen,
+    # when enabled) play at this budget, threaded into Stage B + Stage C by the
+    # orchestrator's _eval_visits.
     full_search_visits: int | None = None
-    # EVAL-ONLY MCTS leaf-parallelism / virtual-loss batch. LOCKED 16 and UNIFORM
-    # across all epochs + opponents so every measurement is comparable. Threaded
-    # into the eval search calls ONLY (via the orchestrator's
-    # _eval_virtual_batch_size); it does NOT touch SelfplayConfig.virtual_batch_size
-    # (=4) — self-play strength is unchanged. Negligible, symmetric strength effect
-    # at fixed visits; locked once purely for cross-epoch comparability.
+    # Eval-only MCTS leaf-parallelism / virtual-loss batch. Threaded into the
+    # eval search calls via the orchestrator's _eval_virtual_batch_size; does not
+    # affect SelfplayConfig.virtual_batch_size (=4).
     eval_virtual_batch_size: int = 16
-    # Opening plies temperature-sampled to diversify PAIRED lines (shared opening
+    # Opening plies temperature-sampled to diversify paired lines (shared opening
     # seed per pair => common random numbers across the two seat-swapped games).
     opening_plies: int = 8
     opening_temperature: float = 1.0
-    # PRIMARY hypothesis: candidate L vs prior champion B, via the BT
-    # difference-CI (includes the Cov_LB term). All OTHER opponent edges are
-    # DESCRIPTIVE only (Wilson/Elo CIs, no significance verdict). When more than
-    # one edge must carry a verdict, apply Bonferroni: per-edge alpha = 0.05/k.
+    # Primary hypothesis: candidate L vs reference B, via the BT difference-CI
+    # (includes the Cov_LB term). Other opponent edges are descriptive only
+    # (Wilson/Elo CIs, no significance verdict). With ``bonferroni_correction``,
+    # per-edge alpha = 0.05/k when more than one edge carries a verdict.
     primary_alpha: float = 0.05
     bonferroni_correction: bool = True
-    # SealBot's non-deterministic depth must not enter difference inference at
-    # full weight: scale its edge's effective count by this over-dispersion
-    # factor (< 1 down-weights). It stays the pinned zero-point regardless.
+    # Scale SealBot's edge effective count by this over-dispersion factor
+    # (< 1 down-weights) in difference inference. It stays the pinned zero-point.
     sealbot_overdispersion: float = 0.5
     # Fraction of ``games_budget`` allocated to the SealBot zero-point pairing
     # (the rest is split evenly across the checkpoint opponents). Threaded into
-    # ``allocate_budget`` by the orchestrator so the in-run split is config-driven.
-    # A run toml may raise this to 0.5 for a 1:1 SealBot-vs-checkpoint split.
+    # ``allocate_budget`` by the orchestrator.
     sealbot_share: float = 0.25
-    # Bradley-Terry convergence guard: ASSERT max|grad| < this before computing
-    # covariance. The legacy fixed-step GD does NOT meet this (max|grad| ~0.30);
-    # the corrected fit (Newton / scipy.optimize.minimize) must.
+    # Bradley-Terry convergence guard: assert max|grad| < this before computing
+    # covariance.
     bt_grad_tol: float = 1e-6
     bt_max_iters: int = 200
-    # Persisted rolling pool so per-epoch edges COMPOUND. Relative to the run
-    # diagnostics dir.
+    # Persisted rolling pool, relative to the run diagnostics dir. Per-epoch
+    # edges accumulate here.
     pool_path: str = "diagnostics/eval_pool.json"
     # Verdict thresholds (Elo, on the BT difference r_L - r_B). The CI must clear
-    # these to label PROMOTE / REGRESS; otherwise INCONCLUSIVE. NB: a single
-    # epoch only resolves ~100-120 Elo -- tight thresholds resolve only as the
-    # rolling pool accumulates.
+    # these to label PROMOTE / REGRESS; otherwise INCONCLUSIVE.
     promote_elo_threshold: float = 0.0
     regress_elo_threshold: float = 0.0
-    # L-2: the PRIMARY verdict compares the candidate to a STABLE reference, NOT
-    # the immediately-prior (highly-correlated) checkpoint. The reference is the
-    # highest checkpoint at least ``verdict_reference_lag`` epochs below the
-    # candidate; 0 keeps the legacy immediately-prior behavior. A lag of 5 matches
-    # ``every_n_epochs`` (the natural eval cadence) and the log-grid spacing, so a
-    # contiguous ladder (candidate ep16) targets ~ep10/ep11 instead of ep15 -- a
-    # genuinely de-correlated target. The immediately-prior checkpoint still
-    # appears as a DESCRIPTIVE bracket edge, so its information is still pooled
-    # into the BT fit; only the reported verdict target rests on the stable
-    # reference. PURE EVAL -- this ONLY chooses the reported verdict target; it is
-    # NOT a promotion/registry pointer and gates nothing.
+    # The primary verdict compares the candidate to the highest checkpoint at
+    # least ``verdict_reference_lag`` epochs below it; 0 uses the
+    # immediately-prior checkpoint. The immediately-prior checkpoint still
+    # appears as a descriptive bracket edge and is pooled into the BT fit; this
+    # setting only chooses the reported verdict target and gates nothing.
     verdict_reference_lag: int = 5
     opponents: MultiStageEvalOpponents = field(default_factory=MultiStageEvalOpponents)
     sprt: MultiStageEvalSprt = field(default_factory=MultiStageEvalSprt)
-    # --- Gating / promotion hooks: PURELY EVAL -> HARD OFF by default. --------
-    # These exist so a future opted-in consumer COULD wire them, but in this
-    # feature they are wired to NOTHING that alters the run. Leave False.
+    # --- Gating / promotion hooks: off by default ----------------------------
+    # Not wired to anything that alters the run in this feature.
     eval_gating_enabled: bool = False
     eval_promotion_enabled: bool = False
 
@@ -437,36 +377,26 @@ ML_AUTO_DISABLED_FLAG = "ml_auto_disabled.flag"
 
 
 def build_divergence_overrides(sp: SelfplayConfig, *, disabled: bool = False) -> dict:
-    """The Rust ``divergence_overrides`` dict, so every controllable lever is
-    driven by config (auditable) rather than baked into
-    ``Divergences::production()``.
+    """Build the Rust ``divergence_overrides`` dict from a SelfplayConfig.
 
-    Three groups:
-      - §5.4.4 moves-left knobs: gated by ``off`` (the ``ml_auto_disabled``
-        config field or the run-dir heal-gate flag) so a miscalibrated MLH head
-        stops steering search; the constants are still passed so a later
-        re-enable uses the validated values.
-      - the dynamic c_puct / LCB knobs (c_scale, c_base, visit_scaled_c_puct,
-        lcb_z) that ``resolve_divergences`` already reads but Python never
-        emitted (the established wiring gap) — now first-class + auditable.
-      - the six main_4 KataGo-faithful search divergences (nucleus_f64,
-        new_child_fpu, lazy_widening, clean_root_prior_cache, dirichlet_shaped,
-        pruned_dynamic_cpuct). These default to the faithful (ON) production
-        values; emitting them makes them config-auditable + individually
-        flippable for the M6/M10 differential harness.
+    Groups of levers:
+      - moves-left knobs: the boolean levers are gated by ``off`` (the
+        ``ml_auto_disabled`` config field or the ``disabled`` argument); the
+        numeric constants are always passed.
+      - dynamic c_puct / LCB knobs (c_scale, c_base, visit_scaled_c_puct,
+        lcb_z), read by ``resolve_divergences``.
+      - the six search divergences (nucleus_f64, new_child_fpu, lazy_widening,
+        clean_root_prior_cache, dirichlet_shaped, pruned_dynamic_cpuct).
+      - the Gumbel levers (default OFF).
 
-    NOTE: this dict is applied ON TOP of the base selected by
-    ``search_parity_mode`` inside ``resolve_divergences`` (production() when
-    False). Production self-play runs with ``search_parity_mode=False``, so
-    these values simply reaffirm production(). The M5/M6 golden-vector tests
-    construct parity() sessions directly (not through this path), so they stay
-    byte-identical regardless of what this emits.
+    ``resolve_divergences`` applies this dict on top of the base selected by
+    ``search_parity_mode`` (production() when False).
 
-    All values are concrete bool/float (never None) because
+    All values are concrete bool/float/int (never None) because
     ``resolve_divergences`` calls ``.extract()``."""
     off = bool(disabled or sp.ml_auto_disabled)
     return {
-        # §5.4.4 moves-left utility (gated by the heal-gate / ml_auto_disabled).
+        # Moves-left utility (boolean levers gated by ml_auto_disabled/disabled).
         "moves_left_utility": bool(sp.moves_left_utility) and not off,
         "ml_weight": float(sp.ml_weight),
         "ml_scale": float(sp.ml_scale),
@@ -474,20 +404,19 @@ def build_divergence_overrides(sp: SelfplayConfig, *, disabled: bool = False) ->
         "ml_two_sided": bool(sp.ml_two_sided) and not off,
         "ml_final_pick": bool(sp.ml_final_pick) and not off,
         "ml_final_pick_band": float(sp.ml_final_pick_band),
-        # Dynamic c_puct + LCB (previously baked-in defaults; now config-driven).
+        # Dynamic c_puct + LCB.
         "c_scale": float(sp.c_scale),
         "c_base": float(sp.c_base),
         "visit_scaled_c_puct": bool(sp.visit_scaled_c_puct),
         "lcb_z": float(sp.lcb_z),
-        # main_4 KataGo-faithful search divergences (ledger [1]-[7]).
+        # Search divergences.
         "nucleus_f64": bool(sp.nucleus_f64),
         "new_child_fpu": bool(sp.new_child_fpu),
         "lazy_widening": bool(sp.lazy_widening),
         "clean_root_prior_cache": bool(sp.clean_root_prior_cache),
         "dirichlet_shaped": bool(sp.dirichlet_shaped),
         "pruned_dynamic_cpuct": bool(sp.pruned_dynamic_cpuct),
-        # main_6 FULL Gumbel AlphaZero (default-OFF; main_6 config opts in). All
-        # concrete bool/float/int — resolve_divergences calls .extract().
+        # Gumbel AlphaZero levers (default OFF).
         "gumbel_target": bool(sp.gumbel_target_enabled),
         "gumbel_root": bool(sp.gumbel_root_enabled),
         "gumbel_sequential_halving": bool(sp.gumbel_sequential_halving),

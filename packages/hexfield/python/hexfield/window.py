@@ -47,7 +47,7 @@ SCALAR_COLS: tuple[str, ...] = (
     "moves_left",
     "outcome_valid",
     "policy_valid",
-    "gumbel_present",  # main_6 Gumbel S5: 1 ⇒ row carries a π' target; 0/absent ⇒ visit fallback
+    "gumbel_present",  # 1 => row carries a π' target; 0/absent => visit fallback
     "policy_surprise",
     "first_q",
     "first_r",
@@ -66,9 +66,8 @@ BLOCK_COLS: tuple[str, ...] = ("stvalue", "stvalue_mask")
 #     (pol/opp/hist_owner/hist_pidx) the slice is ``data[off[i] : off[i+1]]``.
 #
 # The ``hist`` group: ``hist_qr`` is qr-doubled while ``hist_owner`` and
-# ``hist_pidx`` share the same ``hist_off`` but are not doubled. It is split into
-# two pseudo-groups sharing one offsets array so the per-column copy + rebase
-# logic is uniform.
+# ``hist_pidx`` share the same ``hist_off`` but are not doubled. It appears as
+# two pseudo-groups sharing one offsets array.
 CSR_GROUPS: tuple[tuple[str, tuple[str, ...], bool], ...] = (
     ("hist_off", ("hist_qr",), True),
     ("hist_off", ("hist_owner", "hist_pidx"), False),
@@ -119,7 +118,7 @@ class PackedRowView:
     moves_left: float
     outcome_valid: int  # 1 completed / 0 truncated (gates value/stvalue/cell_q)
     policy_valid: int  # 1 full / 0 fast (gates policy/opp/soft/cell_q)
-    gumbel_present: int  # main_6 Gumbel S5: 1 ⇒ π' target present; 0 ⇒ visit fallback
+    gumbel_present: int  # 1 => π' target present; 0 => visit fallback
     policy_surprise: float
     first_q: int
     first_r: int
@@ -135,8 +134,8 @@ class PackedRowView:
     pol_act: np.ndarray  # (P,) u32 view
     pol_w: np.ndarray  # (P,) f32 view
     q_pol_q: np.ndarray  # (P,) f32 view; one child Q per recorded action (== pol_act)
-    gumbel_pol_w: np.ndarray  # (P,) f32 view; π' weight aligned to pol_act (Gumbel S5)
-    prior_logit_arr: np.ndarray  # (P,) f32 view; raw root logit aligned to pol_act (Gumbel S5)
+    gumbel_pol_w: np.ndarray  # (P,) f32 view; π' weight aligned to pol_act
+    prior_logit_arr: np.ndarray  # (P,) f32 view; raw root logit aligned to pol_act
     opp_act: np.ndarray  # (O,) u32 view
     opp_w: np.ndarray  # (O,) f32 view
     # standing-cell qr CSR (flat pair-packed i16 views)
@@ -183,11 +182,10 @@ class PackedRowView:
         return tuple((int(self.pol_act[k]), float(self.q_pol_q[k])) for k in range(self.pol_act.shape[0]))
 
     def gumbel_policy(self) -> tuple[tuple[int, float], ...]:
-        """main_6 Gumbel S5: the improved-policy target π' aligned to ``pol_act``.
+        """Improved-policy target π' aligned to ``pol_act``.
 
-        Empty when the row carries no target (``gumbel_present == 0``) so the
-        downstream expand falls back to the visit target. When present, the
-        weights are the per-action π' mass (renormalized over support at expand)."""
+        Empty when the row carries no target (``gumbel_present == 0``). When
+        present, the weights are the per-action π' mass."""
         if int(self.gumbel_present) == 0:
             return ()
         return tuple(
@@ -196,7 +194,7 @@ class PackedRowView:
         )
 
     def prior_logit(self) -> tuple[tuple[int, float], ...]:
-        """main_6 Gumbel S5: the raw root logits aligned to ``pol_act`` (audit)."""
+        """Raw root logits aligned to ``pol_act``. Empty when ``gumbel_present == 0``."""
         if int(self.gumbel_present) == 0:
             return ()
         return tuple(
@@ -232,7 +230,7 @@ class PackedWindow:
 
     The window exposes neither ``window_size`` nor an ``index`` with
     ``sample_count``, so ``D6SymmetrySelector`` treats it as opaque
-    (``_sample_count`` -> 0) and does not hash every row each epoch.
+    (``_sample_count`` -> 0).
     """
 
     n: int
@@ -430,8 +428,8 @@ def load_packed_shard(path: Path) -> PackedWindow:
                 cols[name] = np.ones(n, dtype=_SCALAR_DTYPES[name])
                 continue
             if name == "gumbel_present" and name not in files:
-                # main_6 Gumbel S5: v1 shards predate the improved-policy target →
-                # default all-0 (no π' target ⇒ the loss falls back to visit).
+                # Shards lacking the gumbel_present column default to all-0
+                # (no π' target; the loss falls back to the visit target).
                 cols[name] = np.zeros(n, dtype=_SCALAR_DTYPES[name])
                 continue
             cols[name] = np.ascontiguousarray(data[name])
@@ -442,9 +440,9 @@ def load_packed_shard(path: Path) -> PackedWindow:
         for _off, datas, _doubled in CSR_GROUPS:
             for d in datas:
                 if d in ("gumbel_pol_w", "prior_logit") and d not in files:
-                    # main_6 Gumbel S5: v1 shards lack these per-action columns →
-                    # zero-fill aligned to pol_act (the pol_off group's length) so
-                    # downstream slicing stays valid; gumbel_present=0 ignores them.
+                    # Shards lacking these per-action columns zero-fill aligned to
+                    # pol_act (the pol_off group's length) to keep downstream
+                    # slicing valid; a gumbel_present=0 row ignores them.
                     pol_total = int(data["pol_act"].shape[0])
                     cols[d] = np.zeros(pol_total, dtype=_CSR_DTYPES[d])
                     continue

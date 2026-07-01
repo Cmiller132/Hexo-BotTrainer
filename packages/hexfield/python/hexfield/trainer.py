@@ -52,7 +52,7 @@ from .batching import (
 from .buffer_manifest import scan_or_update_manifest
 from .config import HexfieldConfig
 from .expand_backends import (
-    _row_view_to_sample,  # re-exported for back-compat (tests import it here)
+    _row_view_to_sample,  # re-exported here; imported from this module by tests
     expand_rows,
     resolve_expand_workers,
 )
@@ -341,8 +341,8 @@ class HexfieldTrainer:
                          keep_prob=kp, effective_rows=int(effective_rows), window_rows=0,
                          reuse_ratio=effective_rows / max(1, new_rows_this_epoch),
                          requested=requested_rows, selected_rows=selected_rows)
-        # Debit at selection time; a later short pass does not refund.
-        # steps_since_last_reload increments to track reuse.
+        # Debit effective_rows from the bucket at selection time; a later short
+        # pass does not refund. steps_since_last_reload increments each selection.
         self.train_state.train_bucket_level = max(
             0.0, self.train_state.train_bucket_level - effective_rows
         )

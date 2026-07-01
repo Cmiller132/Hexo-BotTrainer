@@ -226,21 +226,20 @@ def hexfield_loss(
     rows = denoms.get("rows")
     components: dict[str, torch.Tensor] = {}
 
-    # policy_valid==0 rows carry all-zero policy targets. Multiply policy_valid
-    # into the per-row CE weight so those rows contribute 0, and set
-    # allow_zero_rows so their zero-mass targets do not raise. weight_denominator
-    # is the full-row weight sum (policy_ce_weight_sum), giving a mean over rows
-    # with policy_valid==1.
+    # policy_valid==0 rows carry all-zero policy targets. policy_valid is
+    # multiplied into the per-row CE weight so those rows contribute 0;
+    # allow_zero_rows lets their zero-mass targets pass. weight_denominator is the
+    # full-row weight sum (policy_ce_weight_sum), so the reduction is a mean over
+    # policy_valid==1 rows.
     _pol_weight = batch.get("policy_ce_weight")
     _pv = batch.get("policy_valid")
     if _pol_weight is not None and _pv is not None:
         _pol_weight = _pol_weight * _pv
-    # main_6 Gumbel S5: select the MAIN-policy CE target. With policy_target ==
-    # "gumbel" AND a per-row gumbel target present (gumbel_policy_valid==1), drive
-    # the CE from the improved-policy target π'; every other row (fast / absent /
-    # old shard) keeps the visit target. Built as a per-row blend so a mixed batch
-    # is correct and a visit-only batch (no gumbel cols, or policy_target=="visit")
-    # is byte-identical to the pre-Gumbel path.
+    # Select the main-policy CE target per row. When policy_target == "gumbel"
+    # and both "gumbel_policy" and "gumbel_policy_valid" are present, rows with
+    # gumbel_policy_valid > 0 use the gumbel_policy target; all other rows use the
+    # "policy" (visit) target. Computed as a per-row blend, so mixed batches and
+    # visit-only batches are both handled.
     _policy_target = batch["policy"]
     if (
         policy_target == "gumbel"
@@ -273,10 +272,10 @@ def hexfield_loss(
     total = policy_weight * components["policy"] + value_weight * components["value"]
 
     if "opp_policy" in outputs and "opp_policy" in batch:
-        # Zero-target rows contribute 0 but stay in the denominator
-        # (allow_zero_rows). row_weight=policy_valid zeroes policy_valid==0 rows in
-        # the numerator; weight_denominator=policy_rows keeps the mean over rows
-        # with policy_valid==1.
+        # allow_zero_rows keeps zero-target rows in the denominator while they
+        # contribute 0. row_weight=policy_valid zeroes policy_valid==0 rows in the
+        # numerator; weight_denominator=policy_rows makes the reduction a mean over
+        # policy_valid==1 rows.
         components["opp_policy"] = segment_policy_ce(
             outputs["opp_policy"],
             batch["legal_counts"],
@@ -289,11 +288,10 @@ def hexfield_loss(
         total = total + opp_policy_weight * components["opp_policy"]
 
     if "soft_policy" in outputs and "soft_policy" in batch:
-        # Auxiliary soft policy: CE of the soft-policy head logits against the
-        # soft target built in collate_training. Not surprise-reweighted (no
-        # row_weight), so the denominator is a flat row count. policy_valid==0
-        # rows carry all-zero soft_policy; allow_zero_rows lets them contribute 0,
-        # and the denominator is policy_rows.
+        # CE of the soft-policy head logits against the "soft_policy" target
+        # (built in collate_training). No row_weight, so the denominator is a flat
+        # row count. policy_valid==0 rows carry all-zero soft_policy;
+        # allow_zero_rows lets them contribute 0. Denominator is policy_rows.
         components["soft_policy"] = segment_policy_ce(
             outputs["soft_policy"],
             batch["legal_counts"],

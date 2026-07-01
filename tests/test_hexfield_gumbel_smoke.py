@@ -1,16 +1,16 @@
-"""main_6 Gumbel S6[10]: gated end-to-end smoke + transition gates.
+"""End-to-end smoke and config gates for the Gumbel search flags.
 
-A torch-free smoke that drives the real Rust search (`HexfieldMctsSession.search`)
-with the four Gumbel divergence flags ON (the `Divergences::gumbel()` profile,
-expressed via `divergence_overrides`) over a handful of real decision states,
-using a stub evaluator that emits the raw `priors_logits_bytes` column (Gumbel
-S2) when the search requests it.
+Drives the Rust search (`HexfieldMctsSession.search`) with the four Gumbel
+divergence flags enabled (expressed via `divergence_overrides`) over a handful
+of decision states, using a stub evaluator that emits the raw
+`priors_logits_bytes` column when the search requests it. Requires no torch.
 
-Asserts: no panic; Gumbel-Top-k root + Sequential-Halving + #2 non-root select +
-#3 target export run end-to-end; and the exported improved-policy target
-(`gumbel_policy_weights_bytes`) is a normalized distribution over its support.
+Asserts: the search runs without panicking with Gumbel-Top-k root, Sequential
+Halving, non-root select, and target export enabled; and the exported
+improved-policy target (`gumbel_policy_weights_bytes`) is a normalized
+distribution over its support.
 
-Also pins the config-load + strict-key guard (S6[9]).
+Also covers config load and the strict-key guard.
 """
 
 from __future__ import annotations
@@ -34,13 +34,12 @@ needs_rust = pytest.mark.skipif(
 
 
 class GumbelStub:
-    """Minimal dense-equivalent stub evaluator.
+    """Stub evaluator.
 
-    Emits a normalized prior per legal action (deterministic, mildly peaked so
-    the Gumbel-Top-k draw and σ have non-trivial structure) plus, when the
-    search sets ``request_logits`` (Gumbel S2), the RAW pre-softmax logits in
-    the SAME positional layout as ``priors_bytes`` (``log(prior)`` recovers a
-    consistent logit set since softmax(log p) == p)."""
+    Emits a deterministic, descending (peaked) normalized prior per legal
+    action, plus, when the search sets ``request_logits``, raw pre-softmax
+    logits in the same positional layout as ``priors_bytes``. The logits are
+    ``log(prior)``, so softmax over them reproduces the priors."""
 
     def __call__(self, payload: dict) -> dict:
         b, _total = payload["shape"]
@@ -50,14 +49,13 @@ class GumbelStub:
         logits: list[float] = []
         for g in range(b):
             l = int(legal_counts[g])
-            # Deterministic, descending, peaked prior over this row's legal set.
+            # Deterministic, descending prior over this row's legal set.
             raw = np.array([1.0 / (1 + i) for i in range(l)], dtype=np.float64)
             p = raw / raw.sum()
             priors.extend(float(x) for x in p)
-            # Raw logits == log(prior) (any affine shift is softmax-invariant; the
-            # search stores them RAW and only the relative structure matters).
+            # Raw logits == log(prior); softmax over them reproduces the priors.
             logits.extend(float(math.log(x)) for x in p)
-            # A small non-zero value so completedQ / σ are exercised.
+            # Small non-zero values, alternating sign across rows.
             values.append(0.15 if (g % 2 == 0) else -0.1)
         reply = {
             "values_bytes": struct.pack(f"<{b}f", *values),
@@ -71,9 +69,8 @@ class GumbelStub:
 
 
 def _gumbel_overrides() -> dict:
-    """The Divergences::gumbel() bool set, plus the canonical σ/candidate
-    scalars, as a divergence_overrides dict (mirrors build_divergence_overrides
-    with the gumbel knobs enabled)."""
+    """divergence_overrides dict with the four Gumbel bools enabled plus the
+    σ/candidate scalars."""
     return {
         "gumbel_target": True,
         "gumbel_root": True,
@@ -124,7 +121,7 @@ def test_gumbel_profile_smoke_runs_and_exports_normalized_target() -> None:
         assert isinstance(r["action_id"], int)
         assert r["visits"] > 0
 
-        # The #3 improved-policy target column must be present (gumbel_target on).
+        # With gumbel_target on, the improved-policy target columns are present.
         assert "gumbel_policy_weights_bytes" in r, "gumbel target column missing"
         assert "gumbel_policy_action_ids_bytes" in r
         assert "root_prior_logits_bytes" in r
@@ -137,23 +134,23 @@ def test_gumbel_profile_smoke_runs_and_exports_normalized_target() -> None:
         assert r["gumbel_policy_count"] == len(ids) == len(weights)
         if len(weights) > 0:
             produced_target += 1
-            # Normalized improved-policy target over its support.
+            # Weights form a normalized distribution over the support.
             assert np.all(np.isfinite(weights)), "target weights must be finite"
             assert np.all(weights >= -1e-6), "target weights must be non-negative"
             assert abs(float(weights.sum()) - 1.0) < 1e-4, (
                 f"gumbel target must sum to 1, got {float(weights.sum())}"
             )
-            # Support floor (min_visits=1): every exported action was searched.
+            # Action ids in the support are unique.
             assert len(set(ids.tolist())) == len(ids), "duplicate target action ids"
         session.discard(key)
 
-    assert produced_target >= 1, "no Full root produced a Gumbel target across the smoke"
+    assert produced_target >= 1, "no state produced a non-empty Gumbel target"
 
 
 @needs_rust
 def test_gumbel_flags_off_omits_target_column() -> None:
-    """Contract (§1): with the Gumbel bools OFF (parity/production), the export
-    omits the new keys entirely — byte-identical payload schema to today."""
+    """With the Gumbel bools off (the default), the search result omits the
+    Gumbel target keys."""
     states = sample_decision_states(range(40), (3, 4, 5, 6, 7, 8))[:3]
     session = hexfield_rust.HexfieldMctsSession(max_states=65536)
     stub = GumbelStub()
@@ -176,7 +173,7 @@ def test_gumbel_flags_off_omits_target_column() -> None:
             forced_playout_k=0.0,
             root_policy_temperature=1.0,
             tss_enabled=False,
-            # No divergence_overrides ⇒ production defaults ⇒ all gumbel bools off.
+            # No divergence_overrides: defaults leave all gumbel bools off.
         )
         r = results[0]
         assert "gumbel_policy_weights_bytes" not in r
@@ -186,9 +183,8 @@ def test_gumbel_flags_off_omits_target_column() -> None:
 
 
 def test_main6_config_loads_with_gumbel_on() -> None:
-    """S6[9]: hexfield_main_6.toml parses; main_6 OPTS IN to all four Gumbel
-    mechanisms (the mandate: main_6 is the full-Gumbel run, opts in via config);
-    σ / candidate scalars at canonical defaults; policy_target='gumbel'."""
+    """hexfield_main_6.toml parses and enables all four Gumbel mechanisms, with
+    the σ/candidate scalars set and training.policy_target == 'gumbel'."""
     import tomllib
     from pathlib import Path
 
@@ -211,8 +207,8 @@ def test_main6_config_loads_with_gumbel_on() -> None:
 
 
 def test_misplaced_policy_target_raises() -> None:
-    """S6[9] guard: policy_target belongs under [model.config.training]; placing
-    it under [model.config.selfplay] must raise ValueError at load."""
+    """policy_target belongs under [model.config.training]; placing it under
+    [model.config.selfplay] raises ValueError at load."""
     from hexfield.config import parse_hexfield_config
 
     with pytest.raises(ValueError):
@@ -220,8 +216,8 @@ def test_misplaced_policy_target_raises() -> None:
 
 
 def test_build_divergence_overrides_emits_gumbel_knobs() -> None:
-    """S1 contract: the overrides dict carries the four gumbel bools + the σ /
-    candidate scalars as concrete bool/float/int (never None)."""
+    """build_divergence_overrides emits the four gumbel bools plus the σ/
+    candidate scalars as concrete bool/float/int values (never None)."""
     from hexfield.config import SelfplayConfig, build_divergence_overrides
 
     sp = SelfplayConfig(
