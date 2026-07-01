@@ -27,15 +27,17 @@ from hexfield.samples import STV_HORIZONS, ExpandedRow
 from hexfield.support import build_support
 
 
-def _row(policy: np.ndarray) -> ExpandedRow:
+def _row(policy: np.ndarray, gumbel_policy: np.ndarray | None = None) -> ExpandedRow:
     """An ExpandedRow over a one-stone support whose legal prefix carries ``policy``.
 
-    Only the fields collate_training reads for the soft target (support and
-    policy) are meaningful; the rest are valid placeholders. A single stone at
-    the origin yields a legal prefix covering all empty cells within radius, so
-    ``policy`` occupies the leading slots and the remaining legal slots stay at
-    zero visits. ``legal_count`` equals support.legal_count. ``policy`` must
-    carry positive total mass, provided by its leading nonzero entries.
+    Only the fields collate_training reads for the soft target (support, policy,
+    and the optional gumbel target) are meaningful; the rest are valid
+    placeholders. A single stone at the origin yields a legal prefix covering all
+    empty cells within radius, so ``policy`` occupies the leading slots and the
+    remaining legal slots stay at zero visits. ``legal_count`` equals
+    support.legal_count. ``policy`` must carry positive total mass, provided by
+    its leading nonzero entries. ``gumbel_policy`` (when given) is placed on the
+    leading slots likewise and flags the row gumbel_policy_valid.
     """
 
     sup = build_support([(0, 0)])
@@ -43,6 +45,13 @@ def _row(policy: np.ndarray) -> ExpandedRow:
     assert policy.shape[0] <= legal_count
     pol = np.zeros(legal_count, dtype=np.float32)
     pol[: policy.shape[0]] = policy
+    gp = np.zeros(0, dtype=np.float32)
+    gp_valid = 0.0
+    if gumbel_policy is not None:
+        assert gumbel_policy.shape[0] <= legal_count
+        gp = np.zeros(legal_count, dtype=np.float32)
+        gp[: gumbel_policy.shape[0]] = gumbel_policy
+        gp_valid = 1.0
     h = len(STV_HORIZONS)
     return ExpandedRow(
         support=sup,
@@ -52,6 +61,7 @@ def _row(policy: np.ndarray) -> ExpandedRow:
         opp_coverage=1.0,
         value=0.0,
         value_mask=1.0,
+        policy_valid=1.0,
         stvalue=np.zeros(h, dtype=np.float32),
         stvalue_mask=np.zeros(h, dtype=np.float32),
         moves_left=0.0,
@@ -59,6 +69,8 @@ def _row(policy: np.ndarray) -> ExpandedRow:
         cell_q=np.zeros(legal_count, dtype=np.float32),
         cell_q_mask=np.zeros(legal_count, dtype=np.float32),
         policy_surprise=0.0,
+        gumbel_policy=gp,
+        gumbel_policy_valid=gp_valid,
     )
 
 
@@ -128,6 +140,29 @@ def test_soft_target_is_pure_function_of_visit_policy() -> None:
     a = collate_training([_row(pol)])["soft_policy"]
     b = collate_training([_row(pol.copy())])["soft_policy"]
     assert torch.equal(a, b)
+
+
+def test_soft_target_derives_from_gumbel_policy_when_valid() -> None:
+    # A row carrying a gumbel improved-policy target π' derives its soft target
+    # from π' (T=2 softened over π''s support), NOT from the visit policy: under
+    # Sequential Halving the visit histogram is a schedule artifact. A row
+    # without a gumbel target falls back to the visit softening, so mixed
+    # batches select per row.
+    visits = np.array([0.5, 0.3, 0.2, 0.0], dtype=np.float32)
+    gumbel = np.array([0.1, 0.1, 0.1, 0.7], dtype=np.float32)  # disjoint shape
+    batch = collate_training([_row(visits, gumbel), _row(visits)])
+    lc = int(batch["legal_counts"][0].item())
+
+    # Row 0: soft == π'^0.5 on π''s support (slot 3 positive, visit-only shape
+    # ignored).
+    expect0 = _katago_soft_reference(batch["gumbel_policy"][0].numpy(), lc)
+    assert np.allclose(batch["soft_policy"][0].numpy(), expect0, atol=1e-6)
+    assert float(batch["soft_policy"][0, 3].item()) > 0.0  # π' support wins
+
+    # Row 1 (no gumbel target): unchanged visit-based softening.
+    expect1 = _katago_soft_reference(batch["policy"][1].numpy(), lc)
+    assert np.allclose(batch["soft_policy"][1].numpy(), expect1, atol=1e-6)
+    assert float(batch["soft_policy"][1, 3].item()) == 0.0  # unvisited stays 0
 
 
 def test_segment_ce_on_soft_target_renorms_and_is_finite() -> None:

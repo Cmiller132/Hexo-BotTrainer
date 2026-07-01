@@ -136,19 +136,31 @@ def collate_training(
         gp = getattr(row, "gumbel_policy", None)
         if gp is not None and gp.shape[0] == n:
             gumbel_policy[g, :n] = torch.from_numpy(gp)
-    # Auxiliary soft policy target: the row-normalized visit policy raised to the
-    # power 0.5 (temperature T=2), over the visited support only. Cells with
-    # policy == 0 (unvisited-legal and off-prefix slots) stay at exactly 0, so the
-    # target is a valid distribution over the support. Pure function of `policy`
-    # (the packed visit policy). The paired loss weight lives in losses.py.
+    # Auxiliary soft policy target: the row-normalized base distribution raised
+    # to the power 0.5 (temperature T=2), over its support only. The base is the
+    # row's best policy-improvement distribution: the gumbel improved policy π'
+    # where the row carries one (gumbel_policy_valid), else the visit policy.
+    # Under Gumbel Sequential Halving the visit histogram is a schedule artifact
+    # (equal per-round quotas + winner hammering), so π' is the meaningful base;
+    # visit-only rows (PUCT search / legacy shards) keep the KataGo-style visit
+    # softening. Cells with base == 0 (unvisited-legal and off-prefix slots) stay
+    # at exactly 0, so the target is a valid distribution over the support.
+    # The paired loss weight lives in losses.py.
+    gumbel_policy_valid = torch.tensor(
+        [float(getattr(row, "gumbel_policy_valid", 0.0)) for row in rows],
+        dtype=torch.float32,
+    )
+    soft_base = torch.where(
+        (gumbel_policy_valid > 0).unsqueeze(1), gumbel_policy, policy
+    )
     soft_policy = torch.zeros(b, npad, dtype=torch.float32)
     legal_counts = batch["legal_counts"]
     prefix = (
         torch.arange(npad).unsqueeze(0) < legal_counts.unsqueeze(1)
     )  # (b, npad) bool; legal_counts is the per-row legal-prefix length
-    row_sum = policy.sum(dim=1, keepdim=True).clamp_min(1e-12)
-    p = policy / row_sum
-    support = prefix & (policy > 0)  # visited support only
+    row_sum = soft_base.sum(dim=1, keepdim=True).clamp_min(1e-12)
+    p = soft_base / row_sum
+    support = prefix & (soft_base > 0)  # base-distribution support only
     soft_prefix = p.pow(0.5)  # T=2 softening
     soft_policy[support] = soft_prefix[support]
 
@@ -168,10 +180,7 @@ def collate_training(
             # main-policy CE from gumbel_policy where valid (and
             # policy_target=="gumbel"); otherwise from the visit `policy`.
             "gumbel_policy": gumbel_policy,
-            "gumbel_policy_valid": torch.tensor(
-                [float(getattr(row, "gumbel_policy_valid", 0.0)) for row in rows],
-                dtype=torch.float32,
-            ),
+            "gumbel_policy_valid": gumbel_policy_valid,
             "policy_ce_weight": torch.tensor(weights, dtype=torch.float32),
             "opp_coverage": torch.tensor([row.opp_coverage for row in rows]),
             "value": torch.tensor([row.value for row in rows], dtype=torch.float32),

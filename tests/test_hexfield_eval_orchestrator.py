@@ -1298,3 +1298,64 @@ def test_parts_orchestrator_resumes_after_partial_completion(tmp_path: Path) -> 
     )
     assert {label for label, _ in arena_resume.ckpt_calls} == {last}, arena_resume.ckpt_calls
     assert _pooled_edge_keys(_pool_doc_for(run, cfg)) == ref_keys
+
+
+# --------------------------------------------------------------------------- #
+# 8. Per-lineage search profiles: foreign anchors search PUCT, lineage gumbel.
+# --------------------------------------------------------------------------- #
+def test_foreign_opponent_overrides_split_by_checkpoint_home(tmp_path) -> None:
+    """``_foreign_opponent_overrides``: opponents whose checkpoint lives outside
+    this run's checkpoints dir get the PUCT profile (four gumbel bools off);
+    this-run lineage checkpoints are absent from the map (they mirror the
+    candidate's self-play profile). SealBot (ckpt None) is ignored."""
+
+    run_ckpts = tmp_path / "run" / "checkpoints"
+    run_ckpts.mkdir(parents=True)
+    foreign_ckpts = tmp_path / "other_run" / "checkpoints"
+    foreign_ckpts.mkdir(parents=True)
+    cand = run_ckpts / "epoch_000030.pt"
+    lineage = run_ckpts / "epoch_000005.pt"
+    foreign = foreign_ckpts / "epoch_000060.pt"
+    for p in (cand, lineage, foreign):
+        p.write_bytes(b"")
+
+    cfg = parse_hexfield_config(
+        {
+            "selfplay": {
+                "gumbel_target_enabled": True,
+                "gumbel_root_enabled": True,
+                "gumbel_sequential_halving": True,
+                "gumbel_nonroot_select": True,
+            }
+        }
+    )
+    roster = mse.Roster(
+        candidate_label="cand_ep30",
+        candidate_epoch=30,
+        sealbot=mse.Opponent(label="sealbot", role="sealbot", ckpt=None),
+        champion=None,
+        opponents=(
+            mse.Opponent(label="ep5", role="anchor", ckpt=lineage, epoch=5),
+            mse.Opponent(label="main4_ep60", role="anchor", ckpt=foreign, epoch=60),
+            mse.Opponent(label="sealbot", role="sealbot", ckpt=None),
+        ),
+    )
+    out = mse._foreign_opponent_overrides(cfg, roster, cand, tmp_path)
+
+    # Only the foreign anchor appears; lineage + SealBot are absent.
+    assert set(out.keys()) == {"main4_ep60"}
+    puct = out["main4_ep60"]
+    for key in (
+        "gumbel_target",
+        "gumbel_root",
+        "gumbel_sequential_halving",
+        "gumbel_nonroot_select",
+    ):
+        assert puct[key] is False, key
+
+    # The candidate's own (self-play) profile keeps the gumbel flags on, so the
+    # split is real: lineage searches gumbel, the foreign anchor searches PUCT.
+    from hexfield.config import build_divergence_overrides
+
+    self_ov = build_divergence_overrides(cfg.selfplay)
+    assert self_ov["gumbel_root"] is True
