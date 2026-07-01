@@ -1,30 +1,37 @@
-//! Train-read row expansion kernel (Rust + rayon, GIL-free).
+//! Train-read row expansion — the Rust + rayon GIL-free kernel (PLAN §4.2/§4.5).
 //!
-//! Per row: a D6 transform of every stored coordinate fact, a depth-(radius+1)
-//! multi-source BFS support build, the feature build, and the legal-slot policy
-//! projection. Runs across `facts.par_iter()` under `py.detach` (GIL released),
+//! The dominant per-epoch train-read cost is the pure-Python `expand_sample`
+//! loop (`samples.py`): per row a D6 transform of every stored coordinate fact,
+//! a depth-(radius+1) multi-source BFS support build, the 15-plane feature
+//! build, and the legal-slot policy projection. This kernel ports that loop into
+//! Rust and runs it across `rows.par_iter()` under `py.detach` (GIL released),
 //! order-preserving via `collect`, exposing the stacked result as zero-copy
-//! buffers consumed Python-side.
+//! buffers consumed Python-side (no pickling, no per-worker torch RSS).
 //!
-//! This mirrors the Python expansion chain (`support.py::_build_support`,
-//! `features.py::build_features`, `samples.py::expand_sample`/`_legal_slot`,
-//! `geometry.py::apply_d6`), not the serve-time `support.rs`/`features.rs`. The
-//! train path has only the stored `hexfield_compact_v1` facts: the unified
-//! placement history, the phase, the first stone, and the pre-computed hot /
-//! standing-win cell lists. Legality is derived in closed form
-//! (`empty ∧ dist <= radius`); the hot/win cells are read from the shard and
-//! D6-transformed (`transform_facts`), not recomputed from windows. The
-//! element-wise parity test across all 12 D6 values and off-legal radius-4 rows
-//! is `tests/katago_buffer/test_p7_rust_parity.py`.
+//! PARITY ORACLE: this is a TWIN of the PYTHON expansion chain
+//! (`support.py::_build_support` + `features.py::build_features` +
+//! `samples.py::expand_sample`/`_legal_slot` + `geometry.py::apply_d6`), NOT of
+//! the serve-time `support.rs`/`features.rs` (which read a live engine state via
+//! `write_legal_moves`/`board().windows()`). The train path has only the stored
+//! `hexfield_compact_v1` facts: the unified placement history, the phase, the
+//! first stone, and the pre-computed hot / standing-win cell lists. So legality
+//! is re-derived in CLOSED FORM (`empty ∧ dist <= radius`) and the hot/win cells
+//! are read from the shard and D6-transformed (the `transform_facts` twin), NEVER
+//! recomputed from windows. The Rust↔Python element-wise parity test across all
+//! 12 D6 values + off-legal radius-4 rows (`tests/katago_buffer/test_p7_rust_parity.py`)
+//! is the contract.
 //!
-//! Off-legal handling: an off-legal SELF policy target flags the row invalid in
-//! the returned `valid` mask (not dropped in-worker) when `tolerate_off_legal`;
-//! otherwise it is a hard error. The caller filters survivors / permutes /
-//! truncates on the main thread.
+//! OFF-LEGAL (PLAN §4.5 step 1): an off-legal SELF policy target flags the row
+//! INVALID in the returned `valid` mask (NOT dropped in-worker) when
+//! `tolerate_off_legal`; otherwise it is a hard error (mirrors the serial
+//! `samples.py` raise). The caller filters survivors / permutes / truncates on
+//! the main thread, so the survivor SET is a pure function of `(row, d6, radius)`
+//! and identical across the serial / pool / rust backends.
 //!
-//! Determinism: the per-row `d6: i32[n]` vector is pre-drawn on the main thread
-//! and passed positionally; the kernel makes no rng call. `par_iter().collect()`
-//! preserves input order, so the output does not depend on worker count.
+//! DETERMINISM: the per-row `d6: i32[n]` vector is pre-drawn on the main thread
+//! and passed positionally; the kernel makes NO rng call. `par_iter().collect()`
+//! preserves input order, so the output is byte-identical regardless of worker
+//! count (`workers=1 == workers=N`, PLAN §4.4).
 
 use std::collections::HashMap;
 use std::ffi::c_void;
@@ -43,16 +50,17 @@ use crate::constants::{
     F_OWN_STONE, F_OWN_WIN_NOW, F_PHASE_SECOND, F_PLAYER_COLOUR, NUM_FEATURES,
 };
 
-// hexfield_compact_v1 phase enum: index 2 == "SecondStone".
+// hexfield_compact_v1: phase enum — index 2 == "SecondStone".
 const PHASE_SECOND_STONE: u8 = 2;
-// moves_left is normalized to [-1, 1] over [0, MOVES_LEFT_CAP]. Must match the
-// Python constant.
+// MOVES_LEFT_CAP: moves_left normalized to [-1, 1] over [0, CAP]. This Rust
+// twin MUST track the Python constant or the moves_left target diverges from
+// the serial oracle (parity gate).
 const MOVES_LEFT_CAP: f32 = 209.0;
-// Packed action id = ((q+2^15)<<16) | (r+2^15).
+// COORD_OFFSET: packed action id = ((q+2^15)<<16) | (r+2^15).
 const COORD_OFFSET: i32 = 1 << 15;
 
 // =============================================================================
-// Geometry (mirrors geometry.py) — integer math, no floats.
+// Geometry (geometry.py twin) — exact integer math, no floats.
 // =============================================================================
 
 /// `geometry.rot60`: (-r, q+r).
@@ -68,7 +76,7 @@ fn reflect(q: i32, r: i32) -> (i32, i32) {
 }
 
 /// `geometry.apply_d6`: index 0-5 == rot60^i; 6-11 == rot60^(i-6) ∘ reflect.
-/// Reflect first when index>=6, then rotate.
+/// Byte-identical to the Python loop (reflect first when index>=6, then rotate).
 #[inline]
 fn apply_d6(index: i32, q: i32, r: i32) -> (i32, i32) {
     let (mut q, mut r) = (q, r);
@@ -96,8 +104,8 @@ fn unpack_action_id(action_id: u32) -> (i32, i32) {
 }
 
 // =============================================================================
-// Per-row stored facts, copied out of the byte buffers on the main thread so
-// workers own their data (no borrow of the source buffers inside par_iter).
+// Per-row stored facts (one PackedRowView's worth, copied out of the byte
+// buffers on the main thread so workers own their data — no borrow of the npz).
 // =============================================================================
 
 struct RowFacts {
@@ -113,6 +121,12 @@ struct RowFacts {
     // (action_id, weight)
     policy: Vec<(u32, f32)>,
     q_policy: Vec<(u32, f32)>,
+    // main_6 Gumbel S5: improved-policy target π' + raw root logits, both as
+    // (action_id, value) aligned to `policy`. `gumbel_present` == 0 ⇒ no target
+    // (the projection emits an all-zero gumbel_policy + gumbel_policy_valid 0).
+    gumbel_policy: Vec<(u32, f32)>,
+    prior_logit: Vec<(u32, f32)>,
+    gumbel_present: u8,
     opp_policy: Vec<(u32, f32)>,
     policy_surprise: f32,
     value: f32,
@@ -120,15 +134,15 @@ struct RowFacts {
     stvalue: Vec<f32>,
     stvalue_mask: Vec<f32>,
     moves_left: f32,
-    // 1 == completed game (grounded outcome), 0 == truncated (no engine winner).
-    // Gates the value/stvalue/cell_q heads to zero loss.
+    // 1 == completed game (grounded outcome), 0 == truncated (no engine winner):
+    // gates the value/stvalue/cell_q heads to zero loss.
     outcome_valid: u8,
-    // 1 == full row (policy/opp/soft/cell_q), 0 == fast (value-only).
+    // 1 == full row (train policy/opp/soft/cell_q); 0 == fast (value-only).
     policy_valid: u8,
 }
 
-/// One expanded row's flat arrays. Invalid rows carry zero-length node/policy
-/// vecs and `valid=false`.
+/// One expanded row's flat arrays (the `ExpandedRow` twin). Invalid rows carry
+/// zero-length node/policy vecs and `valid=false`.
 struct RowOut {
     valid: bool,
     legal_count: i32,
@@ -144,9 +158,21 @@ struct RowOut {
     opp_policy: Vec<f32>,
     cell_q: Vec<f32>,
     cell_q_mask: Vec<f32>,
+    // main_6 Gumbel S5: dense (legal_count) improved-policy target (renormalized
+    // over kept support, all-zero when absent) + a presence flag + the dense
+    // (legal_count) raw root logits. Element-identical twin of expand_sample.
+    gumbel_policy: Vec<f32>,
+    gumbel_policy_valid: f32,
+    prior_logit: Vec<f32>,
     policy_surprise: f32,
-    // opp_coverage is emitted as f64: it is an f64 ratio of f64-accumulated sums,
-    // matching the Python float computation. Other scalars stay f32.
+    // f64: the serial oracle's opp_coverage is a PYTHON float (f64 ratio of f64-
+    // accumulated sums). Emitting it as f64 makes it bit-identical to the oracle
+    // (a strict ``abs(serial - rust) <= 1e-12`` parity check then holds, not just
+    // an f32-cast equivalence). All other scalars stay f32: value widens
+    // losslessly; moves_left = 2*min(1,ml/CAP)-1 is emitted as f32 — equal to the
+    // serial f64 form AFTER the f32 cast that batching applies to the training
+    // tensor (with CAP=209, non-power-of-2, the f64 and f32 forms differ only in
+    // the last bit, so the parity check compares moves_left at f32 precision).
     opp_coverage: f64,
     value: f32,
     value_mask: f32,
@@ -158,7 +184,7 @@ struct RowOut {
 }
 
 // =============================================================================
-// Support build (mirrors support.py::_build_support) — closed-form legality.
+// Support build (support.py::_build_support twin) — closed-form legality.
 // =============================================================================
 
 struct Support {
@@ -178,13 +204,13 @@ impl Support {
     }
 }
 
-/// Mirrors `support.py::_build_support(stones)`. `stones` is the D6-transformed
-/// stone coordinate list (order irrelevant — deduped into a set). `radius`/`halo`
-/// correspond to `_SUPPORT_RADIUS`/`_SUPPORT_HALO`.
+/// `support.py::_build_support(stones)` exact twin. `stones` is the D6-transformed
+/// stone coordinate list (order irrelevant — deduped into a set like Python).
+/// `radius`/`halo` mirror `_SUPPORT_RADIUS`/`_SUPPORT_HALO`.
 fn build_support(stones: &[(i32, i32)], radius: i32, halo: i32) -> Support {
     if stones.is_empty() {
-        // Ply 0: origin + its 6 halo neighbours (7 nodes, 1 legal), all dist 0.
-        // coords = [(0,0)] + sorted(DIRECTIONS).
+        // Ply 0: origin + its 6 halo neighbours (7 nodes, 1 legal); dist 0 (spec
+        // §1.1). Python: ordered = [(0,0)] + sorted(DIRECTIONS).
         let mut dirs: Vec<(i32, i32)> = DIRECTIONS.iter().map(|&(dq, dr)| (dq as i32, dr as i32)).collect();
         dirs.sort();
         let mut coords = Vec::with_capacity(7);
@@ -202,8 +228,8 @@ fn build_support(stones: &[(i32, i32)], radius: i32, halo: i32) -> Support {
         };
     }
 
-    // Multi-source BFS depth `halo` (== radius+1) from the stones. dist is
-    // seeded from the deduped stone set, so duplicates do not double-seed.
+    // Multi-source BFS depth `halo` (== radius+1) from the stones. Python seeds
+    // dist from a SET of the stones (dedup), so duplicates do not double-seed.
     let mut dist_map: HashMap<(i32, i32), i32> = HashMap::with_capacity(stones.len() * 16);
     let mut frontier: std::collections::VecDeque<(i32, i32)> =
         std::collections::VecDeque::with_capacity(stones.len() * 8);
@@ -273,7 +299,7 @@ fn build_index(coords: &[(i32, i32)]) -> HashMap<(i32, i32), usize> {
     index
 }
 
-/// Mirrors `support._neighbor_table`: (N,6) row-local neighbour index per
+/// `support._neighbor_table` twin: (N,6) row-local neighbour index per
 /// DIRECTIONS, -1 when absent. Returned node-major flat (row*6 + k).
 fn neighbor_table(coords: &[(i32, i32)], index: &HashMap<(i32, i32), usize>) -> Vec<i32> {
     let n = coords.len();
@@ -289,8 +315,7 @@ fn neighbor_table(coords: &[(i32, i32)], index: &HashMap<(i32, i32), usize>) -> 
 }
 
 // =============================================================================
-// Phase / player ordinal derivation (mirrors features.py::record_phase/
-// record_player).
+// Phase / player ordinal derivation (features.py::record_phase/record_player).
 // =============================================================================
 
 const REC_PHASE_OPENING: u8 = 0;
@@ -321,8 +346,8 @@ fn record_player(ordinal: usize) -> i32 {
     }
 }
 
-/// Mirrors `features._opp_last_turn_cells`: reversed-history scan over the
-/// records (records carry the D6-transformed coords already).
+/// `features._opp_last_turn_cells` twin: reversed-history scan over the
+/// D6-transformed records (records carry the transformed coords already).
 fn opp_last_turn_cells(records: &[(i32, i32, u8, u32)], current_player: i32) -> Vec<(i32, i32)> {
     let opponent = 1 - current_player;
     let n = records.len();
@@ -333,8 +358,8 @@ fn opp_last_turn_cells(records: &[(i32, i32, u8, u32)], current_player: i32) -> 
         let phase = record_phase(ordinal);
         let (q, r, _o, _i) = records[ordinal];
         if phase == REC_PHASE_SECOND {
-            // ordinal-1 is the opponent's first-stone companion (ordinal >= 1
-            // here since phase is SecondStone).
+            // ordinal-1 is the opponent's first-stone companion (Python indexes
+            // records[ordinal - 1]; ordinal >= 1 here since phase is SecondStone).
             let (fq, fr, _o2, _i2) = records[ordinal - 1];
             return vec![(fq, fr), (q, r)];
         }
@@ -347,14 +372,17 @@ fn opp_last_turn_cells(records: &[(i32, i32, u8, u32)], current_player: i32) -> 
 }
 
 // =============================================================================
-// Feature build (mirrors features.py::build_features) from D6-transformed facts.
+// Feature build (features.py::build_features twin) from D6-transformed facts.
 // =============================================================================
 
 /// Build the (N*NUM_FEATURES) node-major feature matrix. `records` carries the
 /// D6-transformed coords; `first_stone`/hot/win cells are likewise transformed.
 ///
-/// A cell absent from the support is surfaced as `ExpandErr::Hard` (a clean
-/// error return) rather than a panic crossing the rayon/FFI boundary.
+/// A cell that is absent from the support raises in Python (`KeyError` at
+/// `sup.index[cell]`) — a HARD error that crashes the epoch. On valid decision
+/// states every fact cell is in the support, so this never fires; we surface it
+/// as `ExpandErr::Hard` (a clean error return) rather than a `.expect()` panic
+/// crossing the rayon/FFI boundary.
 fn build_features(
     sup: &Support,
     records: &[(i32, i32, u8, u32)],
@@ -389,9 +417,10 @@ fn build_features(
             F_OPP_RECENCY
         };
         let age = placements_made - placement_index as i64;
-        // Computed in f64 then cast to f32 (matches `1.0 / (1.0 + float(age))`
-        // in Python). f64-then-cast avoids the last-ULP difference an f32-direct
-        // computation would have for non-dyadic ratios.
+        // Match Python's double-rounding EXACTLY: `1.0 / (1.0 + float(age))` is
+        // computed in f64 then cast to f32 on assignment into the float32 array.
+        // Computing in f32 directly could differ in the last ULP for non-dyadic
+        // ratios (e.g. 1/3), so go through f64.
         let weight = (1.0f64 / (1.0 + age as f64)) as f32;
         let off = row * NUM_FEATURES + recency_plane;
         if weight > feats[off] {
@@ -460,11 +489,11 @@ fn build_features(
 }
 
 // =============================================================================
-// Policy projection (mirrors samples.py::_legal_slot + expand_sample).
+// Policy projection (samples.py::_legal_slot + expand_sample twin).
 // =============================================================================
 
-/// Mirrors `samples._legal_slot`: unpack the action id, apply D6, look up the
-/// support slot; None when off-support or not in the legal prefix.
+/// `samples._legal_slot`: unpack the action id, apply D6, look up the support
+/// slot; None when off-support or NOT in the legal prefix.
 #[inline]
 fn legal_slot(sup: &Support, sym: i32, action_id: u32) -> Option<usize> {
     let (q, r) = unpack_action_id(action_id);
@@ -475,10 +504,10 @@ fn legal_slot(sup: &Support, sym: i32, action_id: u32) -> Option<usize> {
     }
 }
 
-/// Expand one row under symmetry `sym` (mirrors samples.py::expand_sample).
-/// Returns `Err(ExpandErr::OffLegal)` for a tolerated off-legal SELF policy
-/// target (flag invalid), `Err(ExpandErr::Hard)` for a hard error to raise.
-/// Numeric errors (non-finite / negative / zero-mass policy) always hard-error.
+/// Expand ONE row under symmetry `sym` (samples.py::expand_sample twin).
+/// Returns `Err(true)` for a tolerated off-legal SELF policy target (flag
+/// invalid), `Err(false)` for a hard error to raise. Numeric errors (non-finite
+/// / negative / zero-mass policy) always hard-error.
 fn expand_one(
     facts: &RowFacts,
     sym: i32,
@@ -487,7 +516,7 @@ fn expand_one(
     horizons_len: usize,
     tolerate_off_legal: bool,
 ) -> Result<RowOut, ExpandErr> {
-    // (1) Transform every stored coordinate fact (transform_facts).
+    // (1) Transform every stored coordinate fact (transform_facts twin).
     let records: Vec<(i32, i32, u8, u32)> = facts
         .records
         .iter()
@@ -502,12 +531,12 @@ fn expand_one(
     let own_win = transform_cells(&facts.own_win, sym);
     let opp_win = transform_cells(&facts.opp_win, sym);
 
-    // (2) Support from transformed stones.
+    // (2) Support from transformed stones (build_position twin).
     let stones: Vec<(i32, i32)> = records.iter().map(|&(q, r, _, _)| (q, r)).collect();
     let sup = build_support(&stones, radius, halo);
     let legal_count = sup.legal_count;
 
-    // (3) Features.
+    // (3) Features (build_features twin).
     let feats = build_features(
         &sup,
         &records,
@@ -520,8 +549,8 @@ fn expand_one(
         &opp_win,
     )?;
 
-    // (4) Self policy projection. Off-legal is a hard error unless
-    // `tolerate_off_legal`, in which case it flags the row invalid.
+    // (4) Self policy projection — off-legal is a hard error, tolerated as an
+    // invalid-row flag during a radius transition (PLAN §4.5).
     let mut policy = vec![0f32; legal_count];
     let mut total = 0.0f32;
     for &(action_id, w) in &facts.policy {
@@ -551,13 +580,15 @@ fn expand_one(
         ));
     }
 
-    // (5) Opp policy projection: drop off-legal, track coverage. Off-legal does
-    // not raise here.
+    // (5) Opp policy projection — drop off-legal, track coverage; NEVER raises
+    // (projection, not a hard error).
     //
-    // `opp[slot] += w` accumulates in f32 (matching numpy's in-place float32
-    // add). The coverage scalars `opp_total`/`opp_kept` accumulate in f64
-    // (matching Python floats, where `w = float(weight)` promotes the f32 weight
-    // to f64), so `opp_kept / opp_total` is computed in f64.
+    // `opp` is a float32 array, so `opp[slot] += w` accumulates in f32 (matching
+    // numpy's in-place float32 add). But Python's coverage scalars `opp_total` /
+    // `opp_kept` are PYTHON floats: each `w = float(weight)` promotes the stored
+    // f32 weight to f64 and the `+=` runs in f64. So accumulate the COVERAGE in
+    // f64 to match `opp_kept / opp_total` to the last ULP, while the projected
+    // `opp` array stays f32.
     let mut opp = vec![0f32; legal_count];
     let mut opp_total = 0.0f64;
     let mut opp_kept = 0.0f64;
@@ -575,8 +606,8 @@ fn expand_one(
     }
     let opp_coverage: f64 = if opp_total > 0.0 { opp_kept / opp_total } else { 1.0 };
 
-    // (5b) Per-cell Q projection: scalar assign + presence mask. Off-legal is
-    // dropped (does not raise); q must be finite and in [-1, 1].
+    // (5b) Per-cell Q projection: scalar assign + presence mask; off-legal
+    // dropped (never raises on off-legal); q finite & in [-1,1].
     let mut cell_q = vec![0f32; legal_count];
     let mut cell_q_mask = vec![0f32; legal_count];
     for &(action_id, q) in &facts.q_policy {
@@ -586,13 +617,61 @@ fn expand_one(
             ));
         }
         if let Some(slot) = legal_slot(&sup, sym, action_id) {
-            cell_q[slot] = q;        // scalar assign (one action -> one distinct cell)
+            cell_q[slot] = q;        // SCALAR assign (one action -> one distinct cell)
             cell_q_mask[slot] = 1.0;
         }
     }
 
-    // (6) STV + moves_left — D6-invariant. Unmasked stvalue columns
-    // (mask <= 0.0) are re-zeroed; masked columns are kept as stored.
+    // (5c) main_6 Gumbel S5: improved-policy target π' projection + raw root
+    // logits. EXACT twin of samples.expand_sample: project the per-action π'
+    // weights onto this row's legal set, renormalize over the KEPT (on-legal)
+    // support so the dense target sums to 1 when present; absent (gumbel_present
+    // == 0 ⇒ empty facts.gumbel_policy) ⇒ all-zero + gumbel_policy_valid 0.0 ⇒
+    // the loss falls back to the visit target. prior_logit is a scalar assign.
+    let mut gumbel_policy = vec![0f32; legal_count];
+    let mut g_total = 0.0f32;
+    for &(action_id, w) in &facts.gumbel_policy {
+        if !w.is_finite() || w < 0.0 {
+            return Err(ExpandErr::Hard(
+                "gumbel policy weights must be finite and nonnegative".to_string(),
+            ));
+        }
+        if let Some(slot) = legal_slot(&sup, sym, action_id) {
+            gumbel_policy[slot] += w;
+            g_total += w;
+        }
+    }
+    let gumbel_policy_valid = if !facts.gumbel_policy.is_empty() && g_total > 0.0 {
+        for w in gumbel_policy.iter_mut() {
+            *w /= g_total; // renormalize over the kept support
+        }
+        1.0f32
+    } else {
+        // A target existed but no mass landed on-legal, or no target at all:
+        // emit an all-zero distribution + valid 0.0 (visit fallback).
+        for w in gumbel_policy.iter_mut() {
+            *w = 0.0;
+        }
+        0.0f32
+    };
+    let mut prior_logit = vec![0f32; legal_count];
+    for &(action_id, l) in &facts.prior_logit {
+        if !l.is_finite() {
+            return Err(ExpandErr::Hard(
+                "prior_logit values must be finite".to_string(),
+            ));
+        }
+        if let Some(slot) = legal_slot(&sup, sym, action_id) {
+            prior_logit[slot] = l; // SCALAR assign (one action -> one cell)
+        }
+    }
+
+    // (6) STV + moves_left — D6-invariant. The serial oracle rebuilds stvalue
+    // from `short_term_value()`, which keeps ONLY masked columns; unmasked
+    // columns stay 0.0. The writer already stores 0.0 in unmasked stvalue slots,
+    // so this is a no-op on real data, but we re-zero unmasked columns to match
+    // the oracle bit-for-bit even if a stored stvalue were nonzero under a zero
+    // mask.
     let mut stvalue = facts.stvalue[..horizons_len].to_vec();
     let mut stvalue_mask = facts.stvalue_mask[..horizons_len].to_vec();
     for c in 0..horizons_len {
@@ -600,9 +679,10 @@ fn expand_one(
             stvalue[c] = 0.0;
         }
     }
-    // Computed in f64 then cast to f32 (matches `2.0 * min(1.0,
-    // float(moves_left)/MOVES_LEFT_CAP) - 1.0` in Python), avoiding the
-    // double-rounding an f32-direct computation would introduce.
+    // Compute in f64 then cast to f32, matching Python's `2.0 * min(1.0,
+    // float(moves_left)/MOVES_LEFT_CAP) - 1.0` (all f64) which is then placed
+    // into a float32 training tensor. f32-direct would double-round; f64-then-cast
+    // is bit-identical to np.float32(py_value).
     let (moves_left, moves_left_mask) = if facts.moves_left >= 0.0 {
         let m = 2.0f64 * (facts.moves_left as f64 / MOVES_LEFT_CAP as f64).min(1.0) - 1.0;
         (m as f32, 1.0f32)
@@ -610,13 +690,17 @@ fn expand_one(
         (0.0f32, 0.0f32)
     };
 
-    // (7) Truncated-game outcome masking. A truncated row (outcome_valid==0) has
-    // no grounded terminal outcome, so value_mask, stvalue_mask, and cell_q_mask
-    // are zeroed (gating the value/stvalue/cell_q heads to zero loss). The
-    // policy/opp_policy heads and moves_left (masked via its -1 sentinel above)
-    // are unaffected. The stvalue/cell_q target arrays are left as built; only
-    // the masks are zeroed. Completed rows (outcome_valid==1) keep
-    // value_mask=1.0 and the presence masks as built.
+    // (7) Truncated-game outcome masking — EXACT twin. A truncated row
+    // (outcome_valid==0, no engine winner) has no grounded terminal
+    // outcome, so the value head's hard-z target, the bootstrapped STV targets,
+    // and the value/Q-derived cell_q target are all undefined: zero value_mask,
+    // stvalue_mask, and cell_q_mask (gating those heads to zero loss) while the
+    // outcome-INDEPENDENT policy/opp_policy heads (and moves_left, already masked
+    // via its -1 sentinel above) train normally. The stvalue/cell_q TARGET arrays
+    // are left as built (only the masks are zeroed), mirroring the oracle which
+    // does `np.zeros_like(mask)` and leaves the value/stvalue/cell_q arrays alone.
+    // Completed rows (outcome_valid==1) keep value_mask=1.0 and the presence masks
+    // exactly as built → byte-identical to before.
     let value_mask = if facts.outcome_valid == 0 {
         for c in 0..horizons_len {
             stvalue_mask[c] = 0.0;
@@ -631,6 +715,7 @@ fn expand_one(
     // Fast (value-only) rows: mask cell_q (search-distribution head). policy/
     // opp_policy/soft_policy are gated by policy_valid at the loss; cell_q is
     // gated by its presence mask, so zeroing it here is the operative gate.
+    // Element-identical twin of samples.expand_sample.
     let policy_valid = if facts.policy_valid == 0 {
         for m in cell_q_mask.iter_mut() {
             *m = 0.0;
@@ -660,6 +745,9 @@ fn expand_one(
         opp_policy: opp,
         cell_q,
         cell_q_mask,
+        gumbel_policy,
+        gumbel_policy_valid,
+        prior_logit,
         policy_surprise: facts.policy_surprise,
         opp_coverage,
         value: facts.value,
@@ -675,19 +763,21 @@ fn expand_one(
 enum ExpandErr {
     /// Off-legal SELF policy target under tolerate_off_legal: flag row invalid.
     OffLegal,
-    /// A hard error to surface to Python.
+    /// A hard error to surface to Python (parity with the v1 serial raise).
     Hard(String),
 }
 
 #[inline]
 fn transform_cells(cells: &[(i32, i32)], sym: i32) -> Vec<(i32, i32)> {
-    // The transformed cells are not sorted: each cell sets feats[row]=1
-    // independently, so ordering does not affect the produced feature values.
+    // Python sorts the transformed cells (transform_facts), but the sort is
+    // irrelevant to feature VALUES (each cell sets feats[row]=1 independently),
+    // so we skip it — the produced features are identical. (Verified by the
+    // element-wise parity test.)
     cells.iter().map(|&(q, r)| apply_d6(sym, q, r)).collect()
 }
 
 // =============================================================================
-// Zero-copy output buffers (PlaneBuffer ABI; see serve_pack.rs).
+// Zero-copy output buffers (exact PlaneBuffer ABI; serve_pack.rs pattern).
 // =============================================================================
 
 macro_rules! out_buffer {
@@ -748,8 +838,9 @@ out_buffer!(RxU8Buf, u8);
 // Column extraction (reinterpret the PackedWindow byte buffers + CSR offsets).
 // =============================================================================
 
-/// Reinterpret a `&[u8]` as a typed slice (native endianness). Length-checked
-/// against `count`.
+/// Reinterpret a `&[u8]` as a typed slice (LE/native on the build+train host;
+/// same machine, same endianness — a bytewise reinterpret is exact, exactly as
+/// serve_pack.rs does for the wire buffers). Length-checked against `count`.
 fn as_typed<'a, T: Copy>(bytes: &'a [u8], count: usize, name: &str) -> PyResult<&'a [T]> {
     let want = count
         .checked_mul(std::mem::size_of::<T>())
@@ -786,15 +877,37 @@ fn col_typed<'a, T: Copy>(
     Ok(unsafe { std::mem::transmute::<&[T], &'a [T]>(typed) })
 }
 
+/// Optional variant of [`col_typed`]: returns `None` when the column is absent
+/// (forward-compat with an older packed window that predates the Gumbel S5
+/// columns — `gumbel_present` / `gumbel_pol_w` / `prior_logit`). Present-but-
+/// wrong-length still errors via `as_typed`.
+fn col_typed_opt<'a, T: Copy>(
+    columns: &'a Bound<'_, PyDict>,
+    key: &str,
+    count: usize,
+) -> PyResult<Option<&'a [T]>> {
+    match columns.get_item(key)? {
+        Some(item) => {
+            let bytes = item.downcast::<PyBytes>()?.as_bytes();
+            let typed = as_typed::<T>(bytes, count, key)?;
+            Ok(Some(unsafe {
+                std::mem::transmute::<&[T], &'a [T]>(typed)
+            }))
+        }
+        None => Ok(None),
+    }
+}
+
 // =============================================================================
-// Entry point — expand a window's rows under their pre-drawn D6.
+// Entry point — expand a window's rows under their pre-drawn D6 (PLAN §4.2).
 // =============================================================================
 
 /// Expand the rows named by `row_index` (into the packed window columns) under
 /// their pre-drawn `d6` symmetries, in parallel and GIL-free.
 ///
 /// `columns` is a dict of the `hexfield_compact_v1` window columns, each value a
-/// `bytes` object (native endianness). Required keys (all `bytes` unless noted):
+/// `bytes` object (LE/native) EXCEPT the offset arrays which arrive as the typed
+/// keys below. Required keys (all `bytes` unless noted):
 ///   scalars[n]:  current_player(u8), phase(u8), value(f32), moves_left(f32),
 ///                policy_surprise(f32), outcome_valid(u8),
 ///                first_q(i16), first_r(i16), first_present(u8)
@@ -849,8 +962,12 @@ pub fn expand_shard_train<'py>(
     // outcome_valid[i] (u8): 1 completed / 0 truncated. Gates the value/stvalue/
     // cell_q heads to zero loss for truncated rows.
     let outcome_valid = col_typed::<u8>(columns, "outcome_valid", n)?;
-    // policy_valid[i] (u8): 1 full / 0 fast. Gates policy/opp/soft/cell_q heads.
+    // policy_valid[i] (u8): 1 full / 0 fast. Gates policy/opp/soft/cell_q.
     let policy_valid = col_typed::<u8>(columns, "policy_valid", n)?;
+    // main_6 Gumbel S5: gumbel_present[i] (u8): 1 ⇒ this row carries a π' target.
+    // Optional ⇒ None for an older packed window ⇒ every row treated as absent
+    // (visit fallback). Default 0 keeps parity byte-identical.
+    let gumbel_present = col_typed_opt::<u8>(columns, "gumbel_present", n)?;
     let stvalue = col_typed::<f32>(columns, "stvalue", n * horizons_len)?;
     let stvalue_mask = col_typed::<f32>(columns, "stvalue_mask", n * horizons_len)?;
 
@@ -873,6 +990,10 @@ pub fn expand_shard_train<'py>(
     let pol_act = col_typed::<u32>(columns, "pol_act", pol_total)?;
     let pol_w = col_typed::<f32>(columns, "pol_w", pol_total)?;
     let q_pol_q = col_typed::<f32>(columns, "q_pol_q", pol_total)?;
+    // main_6 Gumbel S5: π' weight + raw logit, aligned to pol_act (optional ⇒
+    // None for an older window ⇒ no gumbel target read).
+    let gumbel_pol_w = col_typed_opt::<f32>(columns, "gumbel_pol_w", pol_total)?;
+    let prior_logit_col = col_typed_opt::<f32>(columns, "prior_logit", pol_total)?;
     let opp_act = col_typed::<u32>(columns, "opp_act", opp_total)?;
     let opp_w = col_typed::<f32>(columns, "opp_w", opp_total)?;
     let own_hot_qr = col_typed::<i16>(columns, "own_hot_qr", 2 * *own_hot_off.last().unwrap() as usize)?;
@@ -880,8 +1001,8 @@ pub fn expand_shard_train<'py>(
     let own_win_qr = col_typed::<i16>(columns, "own_win_qr", 2 * *own_win_off.last().unwrap() as usize)?;
     let opp_win_qr = col_typed::<i16>(columns, "opp_win_qr", 2 * *opp_win_off.last().unwrap() as usize)?;
 
-    // --- materialize per-row facts on the main thread so workers own their
-    // data (no borrow of the PyBytes inside par_iter) -------------------------
+    // --- materialize per-row facts on the MAIN thread (workers own their data,
+    // no borrow of the PyBytes inside par_iter so the kernel is GIL-free) ------
     let qr_pairs = |flat: &[i16], a: usize, b: usize| -> Vec<(i32, i32)> {
         (a..b)
             .map(|k| (flat[2 * k] as i32, flat[2 * k + 1] as i32))
@@ -912,6 +1033,21 @@ pub fn expand_shard_train<'py>(
         let p1 = pol_off[i + 1] as usize;
         let policy: Vec<(u32, f32)> = (p0..p1).map(|k| (pol_act[k], pol_w[k])).collect();
         let q_policy: Vec<(u32, f32)> = (p0..p1).map(|k| (pol_act[k], q_pol_q[k])).collect();
+        // main_6 Gumbel S5: only carry the π' target / logits when this row is
+        // flagged present (and the columns exist); else empty ⇒ visit fallback.
+        let row_gumbel_present = gumbel_present.map(|g| g[i]).unwrap_or(0);
+        let (gumbel_policy, prior_logit_facts): (Vec<(u32, f32)>, Vec<(u32, f32)>) =
+            if row_gumbel_present != 0 {
+                let gp = gumbel_pol_w
+                    .map(|g| (p0..p1).map(|k| (pol_act[k], g[k])).collect())
+                    .unwrap_or_default();
+                let pl = prior_logit_col
+                    .map(|l| (p0..p1).map(|k| (pol_act[k], l[k])).collect())
+                    .unwrap_or_default();
+                (gp, pl)
+            } else {
+                (Vec::new(), Vec::new())
+            };
         let o0 = opp_off[i] as usize;
         let o1 = opp_off[i + 1] as usize;
         let opp_policy: Vec<(u32, f32)> = (o0..o1).map(|k| (opp_act[k], opp_w[k])).collect();
@@ -933,6 +1069,9 @@ pub fn expand_shard_train<'py>(
             opp_win: qr_pairs(opp_win_qr, opp_win_off[i] as usize, opp_win_off[i + 1] as usize),
             policy,
             q_policy,
+            gumbel_policy,
+            prior_logit: prior_logit_facts,
+            gumbel_present: row_gumbel_present,
             opp_policy,
             policy_surprise: policy_surprise[i],
             value: value[i],
@@ -944,10 +1083,10 @@ pub fn expand_shard_train<'py>(
         });
     }
 
-    // --- expand in parallel under py.detach (GIL released) -------------------
-    // par_iter().collect() preserves input order, so the output does not depend
-    // on worker count. A Hard error in any row aborts the whole call (surfaced
-    // by first index in the loop below).
+    // --- expand in parallel under py.detach (GIL released, PLAN §4.2) --------
+    // par_iter().collect() preserves input order, so the output is byte-identical
+    // regardless of worker count (workers=1 == workers=N, PLAN §4.4). A Hard error
+    // in any row aborts the whole call (first by index via the reduce below).
     let results: Vec<Result<RowOut, ExpandErr>> = py.detach(|| {
         facts
             .par_iter()
@@ -956,7 +1095,8 @@ pub fn expand_shard_train<'py>(
             .collect()
     });
 
-    // Surface the first hard error in row order.
+    // Surface the FIRST hard error in row order (deterministic message, matching
+    // the serial path which raises at the first offending row).
     let mut rows: Vec<RowOut> = Vec::with_capacity(r);
     for res in results {
         match res {
@@ -974,6 +1114,9 @@ pub fn expand_shard_train<'py>(
                 opp_policy: Vec::new(),
                 cell_q: Vec::new(),
                 cell_q_mask: Vec::new(),
+                gumbel_policy: Vec::new(),
+                gumbel_policy_valid: 0.0,
+                prior_logit: Vec::new(),
                 policy_surprise: 0.0,
                 opp_coverage: 1.0,
                 value: 0.0,
@@ -1006,6 +1149,11 @@ pub fn expand_shard_train<'py>(
     let mut opp_policy = Vec::with_capacity(total_legal);
     let mut cell_q = Vec::with_capacity(total_legal);
     let mut cell_q_mask = Vec::with_capacity(total_legal);
+    // main_6 Gumbel S5 outputs: dense π' + raw logits follow pol_off; the
+    // present flag is per-row.
+    let mut gumbel_policy = Vec::with_capacity(total_legal);
+    let mut prior_logit_out = Vec::with_capacity(total_legal);
+    let mut gumbel_policy_valid_out = Vec::with_capacity(r);
     let mut policy_surprise_out = Vec::with_capacity(r);
     let mut opp_coverage: Vec<f64> = Vec::with_capacity(r);
     let mut value_out = Vec::with_capacity(r);
@@ -1031,6 +1179,9 @@ pub fn expand_shard_train<'py>(
         opp_policy.extend_from_slice(&row.opp_policy);
         cell_q.extend_from_slice(&row.cell_q);
         cell_q_mask.extend_from_slice(&row.cell_q_mask);
+        gumbel_policy.extend_from_slice(&row.gumbel_policy);
+        prior_logit_out.extend_from_slice(&row.prior_logit);
+        gumbel_policy_valid_out.push(row.gumbel_policy_valid);
         policy_surprise_out.push(row.policy_surprise);
         opp_coverage.push(row.opp_coverage);
         value_out.push(row.value);
@@ -1067,6 +1218,14 @@ pub fn expand_shard_train<'py>(
     out.set_item("stvalue_mask", Py::new(py, RxF32Buf { data: stvalue_mask_out })?)?;
     out.set_item("cell_q", Py::new(py, RxF32Buf { data: cell_q })?)?;
     out.set_item("cell_q_mask", Py::new(py, RxF32Buf { data: cell_q_mask })?)?;
+    // main_6 Gumbel S5: dense π' target (follows pol_off), per-row present flag,
+    // dense raw logits. Element-identical twin of samples.expand_sample.
+    out.set_item("gumbel_policy", Py::new(py, RxF32Buf { data: gumbel_policy })?)?;
+    out.set_item(
+        "gumbel_policy_valid",
+        Py::new(py, RxF32Buf { data: gumbel_policy_valid_out })?,
+    )?;
+    out.set_item("prior_logit", Py::new(py, RxF32Buf { data: prior_logit_out })?)?;
     out.set_item("policy_surprise", Py::new(py, RxF32Buf { data: policy_surprise_out })?)?;
     out.set_item("num_rows", r)?;
     out.set_item("num_features", NUM_FEATURES)?;

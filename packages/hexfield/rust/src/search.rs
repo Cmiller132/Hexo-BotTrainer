@@ -1,13 +1,17 @@
-//! hexfield search drivers: lockstep batched search and continuous per-slot
-//! scheduler.
+//! hexfield search drivers — lockstep + continuous scheduler, ported from the
+//! as-built dense_cnn mcts (the semantic reference for the differential
+//! harness) with:
 //!
-//! - `root_fpu_zero_under_noise` defaults FALSE; the root-policy-temperature
-//!   schedule defaults off (1.0, no ramp).
-//! - The `Divergences` features (LCB greedy selection, early-stop by move
-//!   class, visit-scaled c_puct, moves-left utility) default on and are forced
-//!   off by `search_parity_mode`.
+//! - the §5.1 exploration-knob QUARANTINE: `root_fpu_zero_under_noise`
+//!   defaults FALSE and the root-policy-temperature schedule defaults OFF
+//!   (1.0 / no ramp). The differential harness passes dense's as-built values
+//!   explicitly to both sides; production simply never enables them.
+//! - the §5.4 divergences (LCB greedy selection, early-stop by move class,
+//!   visit-scaled c_puct, moves-left utility), default ON in production,
+//!   forced off by `search_parity_mode`.
 //!
-//! `mix_seed` and stream ids 0-5 are covered by golden vectors in tests.
+//! Seed discipline: the exact dense `mix_seed` hash and stream ids 0-5 are a
+//! written contract (golden vectors in tests).
 
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -26,12 +30,14 @@ use crate::cache::{
     RustEvaluation, RustEvaluationRequest, SharedEvaluationCache, SharedEvaluationStats,
     EVAL_CACHE_MAX_STATES,
 };
-use crate::payload::{evaluate_state_refs_cached, finish_eval_cached, submit_eval_cached};
+use crate::payload::{
+    evaluate_state_refs_cached, finish_eval_cached, submit_eval_cached, PendingEval,
+};
 use crate::state::states_from_py_states;
 use crate::threats_shared as threats;
 use crate::tree::{
-    random_unit, terminal_value, Divergences, RootDirichletNoise, RustEdge, RustLeaf, RustNode,
-    RustSearch, Widening,
+    gumbel_completed_q, gumbel_sigma, gumbel_softmax, random_unit, terminal_value, Divergences,
+    RootDirichletNoise, RustEdge, RustLeaf, RustNode, RustSearch, Widening,
 };
 
 pub const ACTIVE_ROOT_LIMIT: usize = 512;
@@ -42,6 +48,9 @@ pub const SEED_STREAM_PCR: u64 = 2;
 pub const SEED_STREAM_POLICY_INIT_SELECT: u64 = 3;
 pub const SEED_STREAM_POLICY_INIT_COUNT: u64 = 4;
 pub const SEED_STREAM_POLICY_INIT_SAMPLE: u64 = 5;
+/// main_6 Gumbel-Top-k root draws (§0.8). Dedicated stream so Gumbel noise is
+/// independent of the Dirichlet root-noise stream (id 0) and reproducible.
+pub const SEED_STREAM_GUMBEL: u64 = 6;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MoveClass {
@@ -67,9 +76,10 @@ struct ContinuousMovePolicy {
     noise: Option<RootNoiseConfig>,
     tss_enabled: bool,
     root_fpu_zero_under_noise: bool,
-    /// Root FPU reduction. When `Some`, it takes precedence over the
-    /// noise-conditioned mechanism. When `None`, the `root_fpu_zero_under_noise`
-    /// path applies.
+    /// [6] first-class root FPU reduction (KataGo rootFpuReductionMax). When
+    /// Some it takes precedence over the legacy noise-conditioned mechanism;
+    /// self-play sets 0.0. When None, the legacy `root_fpu_zero_under_noise`
+    /// path applies (parity).
     root_fpu_reduction: Option<f32>,
     divergences: Divergences,
 }
@@ -139,12 +149,14 @@ impl ContinuousMovePolicy {
     }
 
     fn root_fpu_for(&self, class: MoveClass) -> f32 {
-        // When set, `root_fpu_reduction` applies to every move class and takes
-        // precedence.
+        // [6] first-class root FPU reduction takes precedence (KataGo
+        // rootFpuReductionMax; self-play 0.0). Applies to every move class — the
+        // root descent always uses the root-specific reduction, not a
+        // noise-conditioned special case.
         if let Some(value) = self.root_fpu_reduction {
             return value;
         }
-        // Otherwise, zero FPU only at noised Full roots when enabled.
+        // Legacy (parity): zero FPU only at noised Full roots.
         if matches!(class, MoveClass::Full)
             && self.noise.is_some()
             && self.root_fpu_zero_under_noise
@@ -171,6 +183,17 @@ impl ContinuousMovePolicy {
 
     fn request_moves_left(&self) -> bool {
         self.divergences.moves_left_utility
+    }
+
+    /// Whether the evaluator must emit raw pre-softmax policy logits
+    /// (`priors_logits_bytes`). Any Gumbel mechanism that reads `logits(a)` —
+    /// the improved target (#3), the Gumbel-Top-k root sampler (#1), or the
+    /// deterministic non-root selection (#2) — needs them on the tree. OFF in
+    /// production/parity ⇒ no logits requested, reply byte-identical to today.
+    fn request_logits(&self) -> bool {
+        self.divergences.gumbel_target
+            || self.divergences.gumbel_root
+            || self.divergences.gumbel_nonroot_select
     }
 }
 
@@ -252,11 +275,11 @@ fn continuous_completion_ready(completed_visits: u32, target_visits: u32, in_fli
     completed_visits >= target_visits && in_flight == 0
 }
 
-/// Early-stop test. Greedy unrecorded searches (Fast / eval-arena) stop when
-/// the remaining budget cannot overtake the visit leader and, when LCB
-/// selection is active, the LCB winner currently equals the visit winner.
-/// Recorded Full roots additionally require `full_visit_floor` of the target
-/// visits to have completed first.
+/// §5.4.2 early-stop. Greedy unrecorded searches (Fast / eval-arena): stop
+/// when the remaining budget cannot overtake the visit leader AND, when LCB
+/// selection is active, the LCB winner currently equals the visit winner
+/// (conservative-heuristic w.r.t. LCB — the gate for the LCB arm is
+/// statistical). Recorded Full roots: a conservative 75% visit floor first.
 fn early_stop_ready(
     search: &RustSearch,
     baseline: Option<&HashMap<PackedCoord, u32>>,
@@ -278,9 +301,11 @@ fn early_stop_ready(
         }
     }
     let root = search.root();
-    // Build the per-edge stats vec once and derive best/second/best_id from it.
-    // The `delta > best` (strictly-greater) tie-break keeps the first edge at
-    // the max delta as best_id.
+    // Build the per-edge stats vec ONCE (delta + LCB inputs) and derive
+    // best/second/best_id from it, instead of scanning root.edges here and
+    // then re-scanning it inside lcb_pick. The derivation below preserves the
+    // original `delta > best` (strictly-greater) tie-break — the first edge at
+    // the max delta stays best_id — so this is bit-identical to the prior code.
     let stats = lcb_stats(root, baseline);
     let mut best = 0u32;
     let mut second = 0u32;
@@ -335,8 +360,9 @@ fn lcb_stats(
 }
 
 /// LCB pick among eligible root edges: Q - z * sigma / sqrt(n), eligibility
-/// delta >= max(lcb_min_visits, lcb_visit_fraction * max_child_delta). Returns
-/// None when no child qualifies (caller falls back to max-visits).
+/// delta >= max(lcb_min_visits, lcb_visit_fraction * max_child_delta). None
+/// when no child qualifies (caller falls back to max-visits). Delegates to
+/// the same core the closed-form table tests exercise.
 fn lcb_pick(
     root: &RustNode,
     baseline: Option<&HashMap<PackedCoord, u32>>,
@@ -347,12 +373,14 @@ fn lcb_pick(
         .map(|id| id as PackedCoord)
 }
 
-/// Final-move decisiveness tie-break. Among root moves whose LCB is within
-/// `ml_final_pick_band` of the LCB leader and are guard-positive, prefers the
-/// most decisive one: fewest moves-left when the root value > ml_q_gate, most
-/// moves-left when root value < -ml_q_gate. Returns None in the
-/// |value| <= gate dead-zone or when no candidate carries a moves-left mean;
-/// the caller then keeps the plain LCB pick.
+/// §5.4.4 final-move decisiveness tie-break. Among root moves whose LCB is
+/// within `ml_final_pick_band` of the LCB leader AND are guard-positive, prefer
+/// the most decisive one: fewest moves-left when the root is clearly winning
+/// (root value > ml_q_gate), most moves-left when clearly losing (< -ml_q_gate).
+/// Returns None in the |value| <= gate dead-zone or when no candidate carries a
+/// moves-left mean (head inert) — the caller then keeps the plain LCB pick. By
+/// construction it only ever re-picks among value-equivalent moves, so a
+/// miscalibrated head costs at most `ml_final_pick_band` of value.
 fn ml_final_pick(
     root: &RustNode,
     baseline: Option<&HashMap<PackedCoord, u32>>,
@@ -482,10 +510,14 @@ impl HexfieldMctsSession {
         move_temperatures: Option<Vec<f32>>,
         root_policy_temperatures: Option<Vec<f32>>,
         tss_enabled: Option<bool>,
-        // Defaults FALSE. When true, zeroes FPU at noised roots.
+        // QUARANTINED (spec §5.1): hexfield production default is FALSE (no
+        // FPU zeroing at noised roots). The differential harness passes true
+        // to reproduce dense's as-built behavior.
         root_fpu_zero_under_noise: Option<bool>,
-        // When provided, this is the root FPU reduction and takes precedence
-        // over the noise-conditioned mechanism.
+        // [6] SPEC CORRECTION: modern KataGo has NO "zero FPU under noise"
+        // branch; it uses a separate rootFpuReductionMax that self-play sets to
+        // 0.0. When provided this is the first-class root FPU reduction and
+        // takes precedence over the legacy noise-conditioned mechanism.
         root_fpu_reduction: Option<f32>,
         search_parity_mode: Option<bool>,
         divergence_overrides: Option<&Bound<'_, PyDict>>,
@@ -542,7 +574,7 @@ impl HexfieldMctsSession {
             virtual_batch_size.unwrap_or(target_visits),
         )?;
         let evaluation_stats = new_shared_evaluation_stats();
-        // Root policy temperature defaults to 1.0 (schedule off).
+        // QUARANTINE: root policy temperature defaults to 1.0 (schedule off).
         let root_policy_temperature = validate_positive_f32(
             "root_policy_temperature",
             root_policy_temperature.unwrap_or(1.0),
@@ -575,9 +607,11 @@ impl HexfieldMctsSession {
         let root_noise_config =
             root_noise_config(root_dirichlet_total_alpha, root_dirichlet_noise_fraction)?;
         let tss_enabled = tss_enabled.unwrap_or(true);
-        // If `root_fpu_reduction` is given explicitly it takes precedence.
-        // Otherwise zero FPU only at noised roots when `root_fpu_zero_under_noise`
-        // is set, else use `fpu_reduction`.
+        // [6] root FPU reduction. If `root_fpu_reduction` is given explicitly it
+        // is the first-class KataGo rootFpuReductionMax (self-play sets 0.0) and
+        // takes precedence. Otherwise fall back to the legacy noise-conditioned
+        // mechanism (parity): zero FPU only at noised roots when the quarantined
+        // `root_fpu_zero_under_noise` knob is set.
         let root_fpu_reduction = match root_fpu_reduction {
             Some(value) => validate_nonnegative_f32("root_fpu_reduction", value)?,
             None => {
@@ -594,6 +628,10 @@ impl HexfieldMctsSession {
             widening_max_children,
         )?;
         let request_ml = divergences.moves_left_utility;
+        // Gumbel S2: request raw logits whenever any Gumbel mechanism reads them.
+        let request_logits = divergences.gumbel_target
+            || divergences.gumbel_root
+            || divergences.gumbel_nonroot_select;
 
         let mut searches: Vec<Option<RustSearch>> = Vec::with_capacity(roots.len());
         let mut missing_indices = Vec::new();
@@ -638,6 +676,7 @@ impl HexfieldMctsSession {
                 Some(&evaluation_stats),
                 self.cache_max_states,
                 request_ml,
+                request_logits,
             )?;
             for ((index, root), evaluation) in missing_indices
                 .into_iter()
@@ -683,6 +722,7 @@ impl HexfieldMctsSession {
             self.cache_max_states,
             virtual_loss,
             request_ml,
+            request_logits,
             &move_temps,
             &baselines,
         )?;
@@ -776,7 +816,8 @@ impl HexfieldMctsSession {
         policy_init_temperature: Option<f32>,
         tss_enabled: Option<bool>,
         root_fpu_zero_under_noise: Option<bool>,
-        // When provided, takes precedence over the noise-conditioned knob.
+        // [6] first-class KataGo rootFpuReductionMax (self-play 0.0); precedence
+        // over the legacy noise-conditioned knob when provided.
         root_fpu_reduction: Option<f32>,
         search_parity_mode: Option<bool>,
         divergence_overrides: Option<&Bound<'_, PyDict>>,
@@ -879,9 +920,9 @@ impl HexfieldMctsSession {
             forced_playout_k,
             noise: root_noise_config,
             tss_enabled: tss_enabled.unwrap_or(true),
-            // Defaults false.
+            // QUARANTINE default false (dense as-built default is true).
             root_fpu_zero_under_noise: root_fpu_zero_under_noise.unwrap_or(false),
-            // Validated >= 0 when provided.
+            // [6] first-class root FPU reduction (validated >= 0 when provided).
             root_fpu_reduction: match root_fpu_reduction {
                 Some(value) => Some(validate_nonnegative_f32("root_fpu_reduction", value)?),
                 None => None,
@@ -939,6 +980,16 @@ impl HexfieldMctsSession {
                     ) {
                         search.apply_root_dirichlet_noise(noise);
                     }
+                    // main_6 #1: (re)build the Gumbel-Top-k candidate set + SH
+                    // schedule on a reused root. init_gumbel_root clears any
+                    // stale state from the previous ply first; for a non-Full
+                    // reuse it is cleared so the normal PUCT root runs.
+                    if divergences.gumbel_root && matches!(move_class, MoveClass::Full) {
+                        let gumbel_seed = mix_seed(base_seed, game_key, 0, SEED_STREAM_GUMBEL);
+                        search.init_gumbel_root(gumbel_seed, move_policy.visits_for(move_class));
+                    } else {
+                        search.clear_gumbel_root();
+                    }
                     slot.baseline = search.root_edge_visits().into_iter().collect();
                     slot.search = Some(search);
                     slot.phase = ContinuousPhase::Active;
@@ -955,17 +1006,59 @@ impl HexfieldMctsSession {
         }
 
         let mut stats = ContinuousSchedulerStats::default();
-        // The next select pass runs with the flush's virtual losses still
-        // pending (pre-backup tree state). A no-progress prefetch is discarded
-        // so the next iteration re-selects after the backup frees the paths.
+        // dense's select↔eval overlap, serial form: the NEXT select pass runs
+        // with the flush's virtual losses still pending (pre-backup tree
+        // state); a no-progress prefetch is stale advice and is discarded so
+        // the next iteration re-selects after the backup freed the paths.
         let mut prefetched: Option<(Vec<RustLeaf>, bool)> = None;
-        // HEXFIELD_ASYNC_EVAL: the forward is enqueued (submit, no device sync),
-        // the pre-backup select runs with the GIL released while those kernels
-        // execute, then the forward is drained (finish). Off => synchronous
-        // eval-then-select. Results are identical either way; only the sync
-        // point moves. HEXFIELD_NO_PREFETCH disables the prefetch select.
+        // HEXFIELD_ASYNC_EVAL: real GPU/host overlap. The forward is ENQUEUED
+        // (submit, no device sync), the pre-backup select runs with the GIL
+        // released while those kernels execute, then the forward is drained
+        // (finish). Off => the original synchronous eval-then-select. Results
+        // are identical either way (only the sync point moves); the flag exists
+        // so the path can be parity-gated before it owns the live run.
+        // HEXFIELD_NO_PREFETCH is a parity-debugging lever only.
         let async_eval = std::env::var("HEXFIELD_ASYNC_EVAL").is_ok();
         let no_prefetch = std::env::var("HEXFIELD_NO_PREFETCH").is_ok();
+        // main_6 #4: depth-2 double-buffered eval (FLAG-GATED, default OFF, NOT
+        // byte-identical). Keeps one eval in flight on the GPU while the host
+        // selects the next batch and backs up the PREVIOUS flush. It deepens the
+        // existing async (submit/finish) window by one flush, so the leaf stream
+        // diverges from strict lockstep (still virtual-loss-faithful) — hence it
+        // must NEVER touch the production parity path. Requires HEXFIELD_ASYNC_EVAL
+        // (depth-2 IS the async pipeline, one step deeper); without it we cannot
+        // submit-without-sync, so we fall back to the lockstep loop with a warning.
+        let pipeline_depth2 = std::env::var("HEXFIELD_PIPELINE_DEPTH2").is_ok();
+        let pipeline_depth2 = if pipeline_depth2 && !async_eval {
+            eprintln!(
+                "hexfield: HEXFIELD_PIPELINE_DEPTH2 ignored (requires HEXFIELD_ASYNC_EVAL=1); \
+                 falling back to the lockstep scheduler"
+            );
+            false
+        } else {
+            pipeline_depth2
+        };
+        if pipeline_depth2 {
+            self.run_continuous_pipeline_depth2(
+                py,
+                &mut slots,
+                &mut queue,
+                evaluator,
+                on_move,
+                c_puct,
+                base_seed,
+                leaf_batch_per_root,
+                flush_target,
+                virtual_loss,
+                &move_policy,
+                widening,
+                divergences,
+                &temperature_by_ply,
+                &evaluation_stats,
+                &mut stats,
+            )?;
+            return self.finish_continuous_stats(py, stats, &evaluation_stats);
+        }
         while continuous_has_work(&slots) || !queue.is_empty() {
             let (new_leaves, made_progress) = match prefetched.take() {
                 Some(result) => result,
@@ -1002,8 +1095,8 @@ impl HexfieldMctsSession {
                         },
                     })
                     .collect();
-                // Eval the flush and run the pre-backup select on pre-backup
-                // tree state. Async: submit -> select (overlaps GPU) -> finish.
+                // Eval the flush and run the pre-backup select (on pre-backup
+                // tree state). Async: submit -> select (overlaps GPU) -> finish.
                 // Sync: eval -> select. Both yield (prefetch_result, evaluations).
                 let (prefetch_result, evaluations) = if async_eval {
                     let pending = submit_eval_cached(
@@ -1013,6 +1106,7 @@ impl HexfieldMctsSession {
                         &self.evaluation_cache,
                         Some(&evaluation_stats),
                         move_policy.request_moves_left(),
+                        move_policy.request_logits(),
                     )?;
                     let prefetch_result = if no_prefetch {
                         (Vec::new(), false)
@@ -1044,6 +1138,7 @@ impl HexfieldMctsSession {
                         Some(&evaluation_stats),
                         self.cache_max_states,
                         move_policy.request_moves_left(),
+                        move_policy.request_logits(),
                     )?;
                     let prefetch_result = if no_prefetch {
                         (Vec::new(), false)
@@ -1068,6 +1163,7 @@ impl HexfieldMctsSession {
                     .entry(unique_flushed.max(1).next_power_of_two())
                     .or_insert(0) += 1;
                 backup_continuous_items(
+                    py,
                     &mut slots,
                     items,
                     &evaluations,
@@ -1084,7 +1180,7 @@ impl HexfieldMctsSession {
                 };
             }
 
-            let moves_decided = complete_continuous_slots(
+            let mut moves_decided = complete_continuous_slots(
                 py,
                 on_move,
                 &mut slots,
@@ -1094,20 +1190,57 @@ impl HexfieldMctsSession {
                 base_seed,
                 &mut queue,
                 &mut stats,
+                false,
             )?;
 
             if matches!(decision, ContinuousFlushDecision::Stop) && moves_decided == 0 {
-                let stuck = slots
-                    .iter()
-                    .filter(|slot| !matches!(slot.phase, ContinuousPhase::Empty))
-                    .count();
-                return Err(PyRuntimeError::new_err(format!(
-                    "hexfield continuous MCTS scheduler stalled with {stuck} unfinished slots \
-                     (queue empty, no selectable leaves, no completable roots)"
-                )));
+                // Rescue pass before declaring a stall: a Gumbel Sequential-Halving
+                // root can saturate its reachable tree below target_visits / its
+                // round caps (terminal subtrees), which the normal completion path
+                // cannot finalize. Force-complete any such stuck Gumbel slot from
+                // its accrued visits; only a genuine non-Gumbel deadlock remains a
+                // hard error.
+                moves_decided = complete_continuous_slots(
+                    py,
+                    on_move,
+                    &mut slots,
+                    c_puct,
+                    &move_policy,
+                    &temperature_by_ply,
+                    base_seed,
+                    &mut queue,
+                    &mut stats,
+                    true,
+                )?;
+                if moves_decided == 0 {
+                    let stuck = slots
+                        .iter()
+                        .filter(|slot| !matches!(slot.phase, ContinuousPhase::Empty))
+                        .count();
+                    return Err(PyRuntimeError::new_err(format!(
+                        "hexfield continuous MCTS scheduler stalled with {stuck} unfinished slots \
+                         (queue empty, no selectable leaves, no completable roots)"
+                    )));
+                }
             }
         }
 
+        self.finish_continuous_stats(py, stats, &evaluation_stats)
+    }
+}
+
+// Internal (non-`#[pymethods]`) scheduler helpers. These take native Rust types
+// (`Widening`, `Divergences`, `&mut [ContinuousSlot]`) that pyo3 cannot expose,
+// so they MUST live outside the `#[pymethods]` block above.
+impl HexfieldMctsSession {
+    /// Build the `run_continuous` stats dict (shared by the lockstep loop and the
+    /// depth-2 pipeline). Pure GIL-held conversion of the accumulated counters.
+    fn finish_continuous_stats(
+        &self,
+        py: Python<'_>,
+        stats: ContinuousSchedulerStats,
+        evaluation_stats: &SharedEvaluationStats,
+    ) -> PyResult<Py<PyAny>> {
         let dict = PyDict::new(py);
         dict.set_item("flush_count", stats.flush_count)?;
         dict.set_item("queued_states", stats.queued_states)?;
@@ -1150,6 +1283,302 @@ impl HexfieldMctsSession {
         dict.set_item("cache_len", cache_len)?;
         Ok(dict.into_any().unbind())
     }
+
+    /// main_6 #4: depth-2 double-buffered eval loop (FLAG-GATED, OFF by default
+    /// via `HEXFIELD_PIPELINE_DEPTH2`; the lockstep loop above is the untouched,
+    /// byte-identical production path).
+    ///
+    /// Invariant (one eval in flight, one staged): at the top of each iteration
+    /// at most ONE flush's eval (`inflight`) is enqueued on the GPU but not yet
+    /// backed up. Per iteration the host: selects N (next leaves), submits N to
+    /// the GPU (no sync), then DRAINS the PREVIOUS flush (`inflight` = P) —
+    /// finish + parallel backup — and stashes N as the new `inflight`. So the GPU
+    /// computes N while the host backs up P-1 and selects N+1; the staleness
+    /// window is exactly one flush wider than the lockstep async path. Virtual
+    /// loss (applied at selection, restored at backup) keeps the extra-stale
+    /// selects search-faithful: a leaf with an in-flight eval carries a pending
+    /// virtual penalty so the next select does not re-pick it.
+    ///
+    /// Exactly-once backup: each flush's `items` ride in the `inflight` tuple
+    /// next to their `PendingEval`; `take` on submit (from the queue) and `take`
+    /// on drain (from the Option) make every flush submitted once and finished
+    /// once. The loop runs while `inflight.is_some()` so the final flush is always
+    /// drained before exit; the Gumbel stuck-root rescue runs only after the
+    /// pipeline is empty.
+    #[allow(clippy::too_many_arguments)]
+    fn run_continuous_pipeline_depth2(
+        &mut self,
+        py: Python<'_>,
+        slots: &mut [ContinuousSlot],
+        queue: &mut Vec<ContinuousEvalItem>,
+        evaluator: &Bound<'_, PyAny>,
+        on_move: &Bound<'_, PyAny>,
+        c_puct: f32,
+        base_seed: u64,
+        leaf_batch_per_root: u32,
+        flush_target: usize,
+        virtual_loss: f32,
+        move_policy: &ContinuousMovePolicy,
+        widening: Widening,
+        divergences: Divergences,
+        temperature_by_ply: &[f32],
+        evaluation_stats: &SharedEvaluationStats,
+        stats: &mut ContinuousSchedulerStats,
+    ) -> PyResult<()> {
+        // The in-flight (submitted, not-yet-backed-up) flush: its eval handle, the
+        // items it will resolve, and the unique-state count snapshot taken at its
+        // submit (for the per-flush histogram, computed when it drains).
+        let mut inflight: Option<(PendingEval, Vec<ContinuousEvalItem>, usize)> = None;
+
+        // main_6 INCREMENT 1 (FLAG-GATED, default OFF, NOT byte-identical — only
+        // valid INSIDE the already-non-byte-identical depth-2 pipeline):
+        // `HEXFIELD_PIPELINE_COMPLETE_OVERLAP` moves the per-iteration `complete`
+        // phase (Phase-A parallel build under py.detach + Phase-B GIL-held
+        // `on_move`) to run AFTER submit(N) but BEFORE the drain of the previous
+        // flush P. Today complete runs after the drain, with the GPU idle (the
+        // drain's `finish` is a D2H sync). Running complete while N's forward is
+        // computing on the GPU fills that idle window. Correctness is preserved by
+        // the existing invariant: `complete_continuous_slots` only finalizes slots
+        // with `in_flight == 0`, and a slot whose eval is still buffered in the
+        // previous-flush `inflight` (not yet backed up) still has `in_flight > 0`,
+        // so it is correctly NOT completed in the overlapped pass — it completes on
+        // the next iteration after P is drained. Off => the original ordering
+        // (complete after drain), byte-identical to the prior depth-2 behavior.
+        let complete_overlap = std::env::var("HEXFIELD_PIPELINE_COMPLETE_OVERLAP").is_ok();
+
+        // Drain the in-flight flush P (finish its forward, then parallel backup).
+        // Closed over nothing mutable except via args so it can be called from the
+        // steady-state path and the shutdown tail without duplicating the body.
+        // (Inlined as a macro-free helper would need &mut self/slots; we keep it a
+        // local sequence below to avoid borrow-checker fights with `slots`.)
+
+        // The loop continues as long as there is host work OR an eval is still in
+        // flight (so the last flush is always drained + completed).
+        while continuous_has_work(slots) || !queue.is_empty() || inflight.is_some() {
+            // (1) select N on the CURRENT (post-previous-backup) tree state.
+            let (new_leaves, made_progress) = py.detach(|| {
+                select_continuous_pass(slots, c_puct, leaf_batch_per_root, virtual_loss)
+            })?;
+            queue.extend(new_leaves.into_iter().map(ContinuousEvalItem::Leaf));
+
+            let decision = continuous_flush_decision(queue.len(), flush_target, made_progress);
+
+            // Track whether THIS pass drained the buffered eval. A drain backs up
+            // a flush and mutates the trees (slots can become Active / completable
+            // next pass), so it counts as pipeline progress: we must NOT declare a
+            // stall in the same iteration that drained — loop again and let select /
+            // complete act on the freshly backed-up state first.
+            let mut drained_this_pass = false;
+
+            // INCREMENT 1 (complete-overlap): when the overlapped complete runs
+            // inside the flush branch (before the drain), it records its decided
+            // count here and suppresses the post-drain complete for this pass.
+            let mut completed_this_pass = false;
+            let mut overlapped_moves = 0u64;
+
+            // (2) On a flush: submit N (enqueue, no sync), THEN drain the previous
+            // flush P (finish + backup). Submitting first keeps the GPU busy with N
+            // while the host backs up P.
+            if let ContinuousFlushDecision::Flush { no_progress } = decision {
+                if no_progress {
+                    stats.no_progress_flushes += 1;
+                }
+                let items_n = std::mem::take(queue);
+                stats.flush_count += 1;
+                stats.queued_states += items_n.len() as u64;
+                let unique_before_n = lock_unique_states(evaluation_stats);
+                let requests_n: Vec<RustEvaluationRequest> = items_n
+                    .iter()
+                    .map(continuous_item_request)
+                    .collect();
+                let pending_n = submit_eval_cached(
+                    py,
+                    evaluator,
+                    &requests_n,
+                    &self.evaluation_cache,
+                    Some(evaluation_stats),
+                    move_policy.request_moves_left(),
+                    move_policy.request_logits(),
+                )?;
+                drop(requests_n);
+                // INCREMENT 1: with the complete-overlap flag set, finalize ready
+                // slots HERE — after N is enqueued (its forward computing on the
+                // GPU) but BEFORE the drain of P. The completes (parallel Phase-A
+                // build + GIL-held Phase-B on_move) now overlap N's GPU forward
+                // instead of running with the GPU idle after the drain. Slots whose
+                // eval is still buffered in the un-drained `inflight` (P) keep
+                // in_flight > 0 and are NOT finalized here (existing invariant), so
+                // they complete on the next pass after P is drained.
+                if complete_overlap {
+                    overlapped_moves = complete_continuous_slots(
+                        py,
+                        on_move,
+                        slots,
+                        c_puct,
+                        move_policy,
+                        temperature_by_ply,
+                        base_seed,
+                        queue,
+                        stats,
+                        false,
+                    )?;
+                    completed_this_pass = true;
+                }
+                // Drain the PREVIOUS flush now that N is enqueued on the GPU.
+                if let Some((pending_p, items_p, unique_before_p)) = inflight.take() {
+                    self.drain_pipeline_flush(
+                        py,
+                        slots,
+                        evaluator,
+                        pending_p,
+                        items_p,
+                        unique_before_p,
+                        move_policy,
+                        widening,
+                        base_seed,
+                        virtual_loss,
+                        divergences,
+                        evaluation_stats,
+                        stats,
+                    )?;
+                    drained_this_pass = true;
+                }
+                inflight = Some((pending_n, items_n, unique_before_n));
+            } else if !made_progress && inflight.is_some() {
+                // No new flush this pass and select stalled: drain the buffered
+                // eval so its backup frees paths / completes slots. Without this
+                // the loop would spin (select keeps stalling) until a flush; this
+                // both unblocks progress and bounds the staleness to one flush.
+                let (pending_p, items_p, unique_before_p) = inflight.take().expect("inflight set");
+                self.drain_pipeline_flush(
+                    py,
+                    slots,
+                    evaluator,
+                    pending_p,
+                    items_p,
+                    unique_before_p,
+                    move_policy,
+                    widening,
+                    base_seed,
+                    virtual_loss,
+                    divergences,
+                    evaluation_stats,
+                    stats,
+                )?;
+                drained_this_pass = true;
+            }
+
+            // (3) Complete any slots whose evals have all landed (in_flight == 0).
+            // A slot with an eval still in `inflight` has in_flight > 0 and is
+            // correctly NOT completed here. When the complete-overlap path already
+            // ran the complete this pass (after submit, before drain), reuse its
+            // decided count instead of completing a second time.
+            let mut moves_decided = if completed_this_pass {
+                overlapped_moves
+            } else {
+                complete_continuous_slots(
+                    py,
+                    on_move,
+                    slots,
+                    c_puct,
+                    move_policy,
+                    temperature_by_ply,
+                    base_seed,
+                    queue,
+                    stats,
+                    false,
+                )?
+            };
+
+            // (4) Stall handling: only a GENUINE deadlock — Stop decision, no move
+            // completed, the pipeline fully drained (inflight None), AND no drain
+            // happened this pass (a drain just mutated the trees, so loop again and
+            // let the next select/complete act before judging the run stuck).
+            if matches!(decision, ContinuousFlushDecision::Stop)
+                && moves_decided == 0
+                && inflight.is_none()
+                && !drained_this_pass
+            {
+                moves_decided = complete_continuous_slots(
+                    py,
+                    on_move,
+                    slots,
+                    c_puct,
+                    move_policy,
+                    temperature_by_ply,
+                    base_seed,
+                    queue,
+                    stats,
+                    true,
+                )?;
+                if moves_decided == 0 {
+                    let stuck = slots
+                        .iter()
+                        .filter(|slot| !matches!(slot.phase, ContinuousPhase::Empty))
+                        .count();
+                    return Err(PyRuntimeError::new_err(format!(
+                        "hexfield continuous MCTS scheduler (depth-2) stalled with {stuck} \
+                         unfinished slots (queue empty, no selectable leaves, no in-flight eval, \
+                         no completable roots)"
+                    )));
+                }
+            }
+        }
+        debug_assert!(
+            inflight.is_none(),
+            "depth-2 pipeline exited with an undrained in-flight eval"
+        );
+        Ok(())
+    }
+
+    /// Finish + back up one in-flight flush P (the parallel backup of change #2),
+    /// folding its unique-state count into the flush histogram. Exactly-once:
+    /// called only on an `inflight` value moved out by `take`.
+    #[allow(clippy::too_many_arguments)]
+    fn drain_pipeline_flush(
+        &mut self,
+        py: Python<'_>,
+        slots: &mut [ContinuousSlot],
+        evaluator: &Bound<'_, PyAny>,
+        pending: PendingEval,
+        items: Vec<ContinuousEvalItem>,
+        unique_before: usize,
+        move_policy: &ContinuousMovePolicy,
+        widening: Widening,
+        base_seed: u64,
+        virtual_loss: f32,
+        divergences: Divergences,
+        evaluation_stats: &SharedEvaluationStats,
+        stats: &mut ContinuousSchedulerStats,
+    ) -> PyResult<()> {
+        let evaluations = finish_eval_cached(
+            py,
+            evaluator,
+            pending,
+            &self.evaluation_cache,
+            Some(evaluation_stats),
+            self.cache_max_states,
+        )?;
+        let unique_after = lock_unique_states(evaluation_stats);
+        let unique_flushed = unique_after.saturating_sub(unique_before);
+        stats.flushed_states += unique_flushed as u64;
+        *stats
+            .flush_size_histogram
+            .entry(unique_flushed.max(1).next_power_of_two())
+            .or_insert(0) += 1;
+        backup_continuous_items(
+            py,
+            slots,
+            items,
+            &evaluations,
+            move_policy,
+            widening,
+            base_seed,
+            virtual_loss,
+            divergences,
+        )?;
+        Ok(())
+    }
 }
 
 // === Lockstep internals ===
@@ -1166,22 +1595,29 @@ fn run_searches_to_targets(
     cache_max_states: usize,
     virtual_loss: f32,
     request_moves_left: bool,
+    request_logits: bool,
     move_temps: &[f32],
     baselines: &[HashMap<PackedCoord, u32>],
 ) -> PyResult<()> {
-    // Two-stage pipeline: the next batch is selected before the current batch
-    // is backed up. This ordering extends the virtual-loss window by one batch:
-    // select(N+1) runs after evaluate(N) and before backup(N).
-    //
-    // Early-stop: in_flight is passed as 0 here. The visit-overtake test inside
-    // early_stop_ready is in-flight-safe because apply_virtual_visit increments
-    // both completed_visits and the selected edge's visit count at selection
-    // time, so best/second (per-edge delta visits) include pending leaves while
-    // remaining = target - completed excludes them. best-second > remaining thus
-    // proves the visit leader is unbeatable by all un-selected visits regardless
-    // of how many are pending; the pending batch is still evaluated and backed
-    // up by the loop below before exit. The continuous path's in_flight==0 guard
-    // is a separate concern (slot-advance / node-id invalidation).
+    // dense's lockstep is a two-stage pipeline: the NEXT batch is selected
+    // BEFORE the current batch is backed up (the select worker runs during
+    // the eval). That ordering is SEMANTIC — it extends the virtual-loss
+    // window by one batch — so the serial form here replicates it exactly:
+    // select(N+1) runs after evaluate(N) and before backup(N). (Running the
+    // select on a worker thread to reclaim the wall-clock would have identical
+    // semantics.)
+    // §5.4.2 early-stop. in_flight is passed as 0 here BY DESIGN: the
+    // visit-overtake test inside early_stop_ready is already in-flight-safe —
+    // apply_virtual_visit increments BOTH
+    // completed_visits and the selected edge's visit count at selection time,
+    // so best/second (per-edge delta visits) include pending leaves while
+    // remaining = target - completed excludes them. Thus best-second > remaining
+    // correctly proves the visit leader is unbeatable by ALL un-selected visits
+    // regardless of how many are currently pending; the pending batch is still
+    // evaluated+backed-up by the loop below before exit (no leaked virtual
+    // loss). The continuous path's in_flight==0 guard is about slot-advance
+    // safety (node-id invalidation), a different concern. test_early_stop_
+    // without_lcb_is_exact pins chosen-move equality AND non-vacuity.
     let early_stop_pass = |searches: &mut [RustSearch]| {
         for (index, search) in searches.iter_mut().enumerate() {
             if search.needs_visits()
@@ -1199,7 +1635,7 @@ fn run_searches_to_targets(
         select_leaf_batch(searches, c_puct, leaf_batch_per_root, virtual_loss)?;
 
     loop {
-        // Checked between every batch (no-op in parity mode); see the
+        // §5.4.2: check between every batch (a parity-mode no-op); see the
         // in-flight-safety note on early_stop_pass above.
         early_stop_pass(searches);
         if pending_leaves.is_empty() {
@@ -1232,9 +1668,10 @@ fn run_searches_to_targets(
             Some(evaluation_stats),
             cache_max_states,
             request_moves_left,
+            request_logits,
         )?;
         // Prefetch select with the current batch still pending (pre-backup
-        // tree state).
+        // tree state) — dense's overlap semantics, serial form.
         let next_leaves = if searches.iter().any(RustSearch::needs_visits) {
             select_leaf_batch(searches, c_puct, leaf_batch_per_root, virtual_loss)?.0
         } else {
@@ -1388,8 +1825,9 @@ fn select_continuous_pass(
     virtual_loss: f32,
 ) -> PyResult<(Vec<RustLeaf>, bool)> {
     // Per-slot selection is independent (each closure owns one slot's tree via
-    // &mut; the RNG is seeded by slot_index, not execution order), so it fans
-    // across cores with rayon. Results fold in slot order.
+    // &mut; the RNG is seeded by slot_index, not execution order), so fan it
+    // across cores with rayon. Results fold in slot order, so the leaf sweep is
+    // byte-identical to the serial form.
     let per_slot: PyResult<Vec<(Vec<RustLeaf>, bool)>> = slots
         .par_iter_mut()
         .enumerate()
@@ -1407,6 +1845,16 @@ fn select_continuous_pass(
             if !search.needs_visits() {
                 return Ok((Vec::new(), false));
             }
+            // main_6 #1 intra-slot barrier (§0.9): when ALL surviving Gumbel
+            // candidates in THIS slot have reached the current round's per-
+            // candidate cap, halve the survivor set and advance the SH round.
+            // No-op unless a SH Gumbel root is active. Fired per-slot (no cross-
+            // slot barrier) so the global flush/par_iter_mut hot path is intact.
+            // Loop because once cap-equal, advancing may immediately satisfy the
+            // next round's barrier (e.g. tiny budgets) and we must not deadlock.
+            if search.has_gumbel_root() {
+                while search.maybe_advance_gumbel_round() {}
+            }
             let (leaves, progressed, added_in_flight) =
                 select_continuous_leaves(search, slot_index, c_puct, cap, virtual_loss)?;
             slot.in_flight = slot.in_flight.saturating_add(added_in_flight);
@@ -1422,8 +1870,92 @@ fn select_continuous_pass(
     Ok((leaves, made_progress))
 }
 
+/// Apply one backup item (Leaf or RootInit) to its owning slot. Lifted verbatim
+/// from the original serial loop body so the parallel and serial dispatchers run
+/// byte-identical per-item operations. `slot` is the item's owning slot
+/// (`leaf.root_index` for Leaf / `slot_index` for RootInit) — never indexed by
+/// any other slot, so callers may hand it a disjoint `&mut` from `par_iter_mut`.
+#[allow(clippy::too_many_arguments)]
+fn apply_backup_item(
+    slot: &mut ContinuousSlot,
+    item: ContinuousEvalItem,
+    evaluation: &Arc<RustEvaluation>,
+    move_policy: &ContinuousMovePolicy,
+    widening: Widening,
+    base_seed: u64,
+    virtual_loss: f32,
+    divergences: Divergences,
+) -> PyResult<()> {
+    match item {
+        ContinuousEvalItem::Leaf(leaf) => {
+            let Some(search) = slot.search.as_mut() else {
+                return Err(PyValueError::new_err(
+                    "continuous MCTS leaf resolved for empty slot",
+                ));
+            };
+            let child_id =
+                search.add_node_from_eval(&leaf.state, leaf.state_hash, Arc::clone(evaluation))?;
+            search.nodes[leaf.parent_node].edges[leaf.edge_index].child = Some(child_id);
+            search.mark_pending(leaf.parent_node, leaf.edge_index, -1);
+            slot.in_flight = slot.in_flight.saturating_sub(1);
+            let child_player = search.nodes[child_id].player;
+            let child_value = search.nodes[child_id].value();
+            let leaf_ml = if search.divergences.moves_left_utility {
+                search.nodes[child_id].ml_mean()
+            } else {
+                None
+            };
+            search.backup_virtual(&leaf.path, child_player, child_value, virtual_loss, leaf_ml);
+        }
+        ContinuousEvalItem::RootInit { state, .. } => {
+            let move_class = move_policy.classify(
+                base_seed,
+                slot.game_key,
+                slot.ply,
+                slot.policy_init_remaining,
+            );
+            slot.move_class = move_class;
+            let mut search = RustSearch::new(
+                state,
+                &**evaluation,
+                move_policy.visits_for(move_class),
+                move_policy.fpu_reduction,
+                move_policy.root_fpu_for(move_class),
+                move_policy.root_temp_for(move_class, slot.ply),
+                root_noise_exact(
+                    move_policy.noise_for(move_class),
+                    mix_seed(base_seed, slot.game_key, slot.ply, SEED_STREAM_ROOT_NOISE),
+                    divergences.dirichlet_shaped,
+                ),
+                widening,
+                move_policy.forced_k_for(move_class),
+                move_policy.tss_enabled,
+                divergences,
+            )?;
+            if search.root_edges_empty() {
+                return Err(PyValueError::new_err(
+                    "hexfield continuous MCTS root has no legal actions",
+                ));
+            }
+            // main_6 #1: build the Gumbel-Top-k candidate set + SH schedule
+            // for Full moves when gumbel_root is on. No-op otherwise (the
+            // search keeps the normal PUCT root). budget = the move's visits.
+            if divergences.gumbel_root && matches!(move_class, MoveClass::Full) {
+                let gumbel_seed = mix_seed(base_seed, slot.game_key, slot.ply, SEED_STREAM_GUMBEL);
+                search.init_gumbel_root(gumbel_seed, move_policy.visits_for(move_class));
+            }
+            slot.baseline = search.root_edge_visits().into_iter().collect();
+            slot.search = Some(search);
+            slot.phase = ContinuousPhase::Active;
+            slot.in_flight = 0;
+        }
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn backup_continuous_items(
+    py: Python<'_>,
     slots: &mut [ContinuousSlot],
     items: Vec<ContinuousEvalItem>,
     evaluations: &[Arc<RustEvaluation>],
@@ -1433,73 +1965,96 @@ fn backup_continuous_items(
     virtual_loss: f32,
     divergences: Divergences,
 ) -> PyResult<()> {
-    for (item, evaluation) in items.into_iter().zip(evaluations.iter()) {
-        match item {
-            ContinuousEvalItem::Leaf(leaf) => {
-                let slot = &mut slots[leaf.root_index];
-                let Some(search) = slot.search.as_mut() else {
-                    return Err(PyValueError::new_err(
-                        "continuous MCTS leaf resolved for empty slot",
-                    ));
+    // Each item targets exactly one slot. Bucketing by slot (order-preserving)
+    // and processing slots with `par_iter_mut` is byte-identical to the serial
+    // loop: within a slot items run in the same in-flush order, and across slots
+    // there is no shared mutable state (each closure owns one slot's `&mut`
+    // tree — the same disjoint-borrow guarantee `select_continuous_pass` uses).
+    // `HEXFIELD_SERIAL_BACKUP=1` keeps the old serial path as a parity oracle.
+    if std::env::var("HEXFIELD_SERIAL_BACKUP").is_ok() {
+        return py.detach(|| {
+            for (item, evaluation) in items.into_iter().zip(evaluations.iter()) {
+                let slot_index = match &item {
+                    ContinuousEvalItem::Leaf(leaf) => leaf.root_index,
+                    ContinuousEvalItem::RootInit { slot_index, .. } => *slot_index,
                 };
-                let child_id =
-                    search.add_node_from_eval(&leaf.state, leaf.state_hash, Arc::clone(evaluation))?;
-                search.nodes[leaf.parent_node].edges[leaf.edge_index].child = Some(child_id);
-                search.mark_pending(leaf.parent_node, leaf.edge_index, -1);
-                slot.in_flight = slot.in_flight.saturating_sub(1);
-                let child_player = search.nodes[child_id].player;
-                let child_value = search.nodes[child_id].value();
-                let leaf_ml = if search.divergences.moves_left_utility {
-                    search.nodes[child_id].ml_mean()
-                } else {
-                    None
-                };
-                search.backup_virtual(&leaf.path, child_player, child_value, virtual_loss, leaf_ml);
-            }
-            ContinuousEvalItem::RootInit {
-                slot_index, state, ..
-            } => {
-                let slot = &mut slots[slot_index];
-                let move_class = move_policy.classify(
-                    base_seed,
-                    slot.game_key,
-                    slot.ply,
-                    slot.policy_init_remaining,
-                );
-                slot.move_class = move_class;
-                let search = RustSearch::new(
-                    state,
-                    &**evaluation,
-                    move_policy.visits_for(move_class),
-                    move_policy.fpu_reduction,
-                    move_policy.root_fpu_for(move_class),
-                    move_policy.root_temp_for(move_class, slot.ply),
-                    root_noise_exact(
-                        move_policy.noise_for(move_class),
-                        mix_seed(base_seed, slot.game_key, slot.ply, SEED_STREAM_ROOT_NOISE),
-                        divergences.dirichlet_shaped,
-                    ),
+                apply_backup_item(
+                    &mut slots[slot_index],
+                    item,
+                    evaluation,
+                    move_policy,
                     widening,
-                    move_policy.forced_k_for(move_class),
-                    move_policy.tss_enabled,
+                    base_seed,
+                    virtual_loss,
                     divergences,
                 )?;
-                if search.root_edges_empty() {
-                    return Err(PyValueError::new_err(
-                        "hexfield continuous MCTS root has no legal actions",
-                    ));
-                }
-                slot.baseline = search.root_edge_visits().into_iter().collect();
-                slot.search = Some(search);
-                slot.phase = ContinuousPhase::Active;
-                slot.in_flight = 0;
             }
-        }
+            Ok(())
+        });
     }
-    Ok(())
+
+    py.detach(|| {
+        // Stage 1: bucket items by owning slot, preserving in-flush order
+        // (serial, cheap — no tree work).
+        let mut per_slot: Vec<Vec<(ContinuousEvalItem, Arc<RustEvaluation>)>> =
+            (0..slots.len()).map(|_| Vec::new()).collect();
+        for (item, evaluation) in items.into_iter().zip(evaluations.iter()) {
+            let slot_index = match &item {
+                ContinuousEvalItem::Leaf(leaf) => leaf.root_index,
+                ContinuousEvalItem::RootInit { slot_index, .. } => *slot_index,
+            };
+            per_slot[slot_index].push((item, Arc::clone(evaluation)));
+        }
+
+        // Stage 2: process slots in parallel (disjoint `&mut`), serial within a
+        // slot in the preserved in-flush order.
+        slots
+            .par_iter_mut()
+            .zip(per_slot.into_par_iter())
+            .try_for_each(|(slot, bucket)| -> PyResult<()> {
+                for (item, evaluation) in bucket {
+                    apply_backup_item(
+                        slot,
+                        item,
+                        &evaluation,
+                        move_policy,
+                        widening,
+                        base_seed,
+                        virtual_loss,
+                        divergences,
+                    )?;
+                }
+                Ok(())
+            })
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Everything the SERIAL Phase-B dispatch needs to call `on_move` and apply its
+/// response for one completed slot, computed in the off-GIL parallel Phase A.
+/// Holds the pure-Rust `PayloadNative` (converted to a `PyDict` under the GIL in
+/// Phase B) plus the per-slot scalars Phase B applies (early-stop bookkeeping,
+/// the resolved `action_id`, move-class flags). No Python objects live here, so
+/// it is `Send` and safe to collect from a rayon `par_iter`.
+struct PreparedMove {
+    move_class: MoveClass,
+    game_key: u64,
+    ply: u32,
+    /// True when this completion is an early stop (drives the early-stop search
+    /// mutation + stats in Phase B, mirroring the serial order).
+    early: bool,
+    /// `search.remaining_visits()` captured BEFORE the early-stop mutation, so
+    /// the `early_stop_visits_saved` stat matches the serial value.
+    early_remaining_visits: u32,
+    payload: PayloadNative,
+    /// Final played action_id (= the Init prior sample when `move_class==Init`,
+    /// else the payload's selected action). Drives `advance_root` in Phase B.
+    action_id: PackedCoord,
+    /// For Init moves, the sampled action_id + selection label that overwrite
+    /// the payload dict (matching the serial path).
+    init_override: Option<PackedCoord>,
+}
+
 fn complete_continuous_slots(
     py: Python<'_>,
     on_move: &Bound<'_, PyAny>,
@@ -1510,43 +2065,167 @@ fn complete_continuous_slots(
     base_seed: u64,
     queue: &mut Vec<ContinuousEvalItem>,
     stats: &mut ContinuousSchedulerStats,
+    force_stuck_gumbel: bool,
 ) -> PyResult<u64> {
+    // ── Phase A (PARALLEL, GIL released): build the payload + decision for every
+    // ready slot. Pure Rust, read-only over the slot trees (`par_iter`), so it is
+    // rayon-safe and adds no contention. Each closure writes only its own
+    // `Option<PreparedMove>` (disjoint by slot index) — no shared mutable sink,
+    // no cross-slot state — so the result is a deterministic function of the
+    // per-slot search snapshot. `HEXFIELD_SERIAL_COMPLETE=1` keeps the build
+    // serial as a parity oracle for one release.
+    let serial_build = std::env::var("HEXFIELD_SERIAL_COMPLETE").is_ok();
+    let prepared: Vec<Option<PreparedMove>> = py.detach(|| {
+        let prepare = |_slot_index: usize, slot: &ContinuousSlot| -> PyResult<Option<PreparedMove>> {
+            if !matches!(slot.phase, ContinuousPhase::Active) {
+                return Ok(None);
+            }
+            let move_class = slot.move_class;
+            let in_flight = slot.in_flight;
+            let (complete, early) = slot
+                .search
+                .as_ref()
+                .map(|search| {
+                    let normal = continuous_completion_ready(
+                        search.completed_visits,
+                        search.target_visits,
+                        in_flight,
+                    );
+                    if normal {
+                        return (true, false);
+                    }
+                    // main_6 #1 (SH saturation safety net): a Gumbel root can
+                    // exhaust its REACHABLE tree (terminal/solved subtrees, common
+                    // in the endgame) below target_visits and below its SH round
+                    // caps. When that happens the slot has no in-flight evals and
+                    // the scheduler made no global progress this pass
+                    // (force_stuck_gumbel), so it can never reach completion or
+                    // advance the SH barrier -> it would stall. Finalize the move
+                    // from the visits accrued so far instead.
+                    if force_stuck_gumbel
+                        && search.has_gumbel_root()
+                        && in_flight == 0
+                        && search.needs_visits()
+                    {
+                        return (true, true);
+                    }
+                    // §5.4.2: Fast moves stop unrestricted; recorded Full roots
+                    // keep the conservative visit floor.
+                    let early = early_stop_ready(
+                        search,
+                        Some(&slot.baseline),
+                        matches!(move_class, MoveClass::Full),
+                        in_flight,
+                    );
+                    (early, early)
+                })
+                .unwrap_or((false, false));
+            if !complete {
+                return Ok(None);
+            }
+
+            let search = slot
+                .search
+                .as_ref()
+                .expect("active continuous slot has search");
+            // Capture remaining_visits() BEFORE Phase B applies the early-stop
+            // mutation (target_visits = completed_visits), matching the serial
+            // value used for the early_stop_visits_saved stat.
+            let early_remaining_visits = if early {
+                search.remaining_visits()
+            } else {
+                0
+            };
+
+            let game_key = slot.game_key;
+            let ply = slot.ply;
+            let move_seed = mix_seed(base_seed, game_key, ply, SEED_STREAM_MOVE_SELECT);
+            let temperature = match move_class {
+                MoveClass::Full => temperature_for_ply(temperature_by_ply, ply),
+                MoveClass::Fast => 0.0,
+                MoveClass::Init => 0.0,
+            };
+            let mut payload = build_search_result_payload_native(
+                search,
+                Some(&slot.baseline),
+                temperature,
+                move_seed,
+                c_puct,
+                move_policy.forced_k_for(move_class),
+            )?;
+            // Serial parity: the early-stop block sets `search.early_stopped =
+            // true` BEFORE building the payload, so the dict's `early_stopped`
+            // reads true. We build read-only here, so reflect `early` onto the
+            // native field instead (identical resulting value).
+            if early {
+                payload.early_stopped = true;
+            }
+
+            // Init class: sample the played move from the root PRIOR (overrides
+            // the payload's selected action). Pure Rust + deterministic seed.
+            let init_override = if matches!(move_class, MoveClass::Init) {
+                let (prior_ids, prior_weights) = root_prior_policy(search.root());
+                let sampled = select_action_from_policy(
+                    &prior_ids,
+                    &prior_weights,
+                    move_policy.policy_init_temperature,
+                    mix_seed(base_seed, game_key, ply, SEED_STREAM_POLICY_INIT_SAMPLE),
+                )?
+                .ok_or_else(|| {
+                    PyValueError::new_err("policy-init sampling found no positive prior mass")
+                })?;
+                Some(sampled)
+            } else {
+                None
+            };
+            let action_id = init_override.unwrap_or(payload.action_id);
+
+            Ok(Some(PreparedMove {
+                move_class,
+                game_key,
+                ply,
+                early,
+                early_remaining_visits,
+                payload,
+                action_id,
+                init_override,
+            }))
+        };
+
+        if serial_build {
+            let mut out = Vec::with_capacity(slots.len());
+            for (slot_index, slot) in slots.iter().enumerate() {
+                out.push(prepare(slot_index, slot)?);
+            }
+            Ok(out)
+        } else {
+            slots
+                .par_iter()
+                .enumerate()
+                .map(|(slot_index, slot)| prepare(slot_index, slot))
+                .collect::<PyResult<Vec<_>>>()
+        }
+    })?;
+
+    // ── Phase B (SERIAL, GIL held): convert each native payload to a PyDict and
+    // dispatch `on_move` in slot-index order — byte-identical to the old serial
+    // loop's order — then apply the (possibly tree-mutating) response. All slot
+    // mutation that depends on Python output stays here, single-owner.
     let mut moves_decided = 0u64;
     for slot_index in 0..slots.len() {
-        if !matches!(slots[slot_index].phase, ContinuousPhase::Active) {
+        let Some(prepared) = prepared[slot_index].as_ref() else {
             continue;
-        }
-        let move_class = slots[slot_index].move_class;
-        let in_flight = slots[slot_index].in_flight;
-        let (complete, early) = slots[slot_index]
-            .search
-            .as_ref()
-            .map(|search| {
-                let normal = continuous_completion_ready(
-                    search.completed_visits,
-                    search.target_visits,
-                    in_flight,
-                );
-                if normal {
-                    return (true, false);
-                }
-                // Fast moves stop unrestricted; recorded Full roots keep the
-                // visit floor.
-                let early = early_stop_ready(
-                    search,
-                    Some(&slots[slot_index].baseline),
-                    matches!(move_class, MoveClass::Full),
-                    in_flight,
-                );
-                (early, early)
-            })
-            .unwrap_or((false, false));
-        if !complete {
-            continue;
-        }
-        if early {
+        };
+        let move_class = prepared.move_class;
+        let game_key = prepared.game_key;
+        let ply = prepared.ply;
+        let action_id = prepared.action_id;
+
+        // Early-stop bookkeeping (mutates the slot's search + stats) — applied
+        // here in slot order, exactly as the serial loop did before building.
+        if prepared.early {
             let search = slots[slot_index].search.as_mut().expect("active slot");
-            stats.early_stop_visits_saved += search.remaining_visits() as u64;
+            stats.early_stop_visits_saved += prepared.early_remaining_visits as u64;
             match move_class {
                 MoveClass::Full => stats.early_stops_full += 1,
                 _ => stats.early_stops_fast += 1,
@@ -1555,66 +2234,16 @@ fn complete_continuous_slots(
             search.target_visits = search.completed_visits;
         }
 
-        let game_key = slots[slot_index].game_key;
-        let ply = slots[slot_index].ply;
-        let move_seed = mix_seed(base_seed, game_key, ply, SEED_STREAM_MOVE_SELECT);
-        let temperature = match move_class {
-            MoveClass::Full => temperature_for_ply(temperature_by_ply, ply),
-            MoveClass::Fast => 0.0,
-            MoveClass::Init => 0.0,
-        };
-        let baseline = slots[slot_index].baseline.clone();
-        let payloads = {
-            let search = slots[slot_index]
-                .search
-                .as_ref()
-                .expect("active continuous slot has search");
-            let baselines = vec![baseline];
-            build_search_result_payloads(
-                py,
-                std::slice::from_ref(search),
-                None,
-                None,
-                &[temperature],
-                move_seed,
-                Some(&baselines),
-                c_puct,
-                move_policy.forced_k_for(move_class),
-            )?
-        };
-        let payloads = payloads.bind(py).downcast::<PyList>()?;
-        let payload = payloads.get_item(0)?;
-        let payload_dict = payload.downcast::<PyDict>()?;
+        let payload_dict = prepared.payload.to_pydict(py, None, None)?;
         payload_dict.set_item("pcr_full", matches!(move_class, MoveClass::Full))?;
         payload_dict.set_item("policy_init", matches!(move_class, MoveClass::Init))?;
-        if let Some(true) = payload_dict
-            .get_item("lcb_override")?
-            .map(|v| v.extract::<bool>().unwrap_or(false))
-        {
+        if prepared.payload.lcb_override {
             stats.lcb_overrides += 1;
         }
-        if matches!(move_class, MoveClass::Init) {
-            let search = slots[slot_index]
-                .search
-                .as_ref()
-                .expect("active continuous slot has search");
-            let (prior_ids, prior_weights) = root_prior_policy(search.root());
-            let sampled = select_action_from_policy(
-                &prior_ids,
-                &prior_weights,
-                move_policy.policy_init_temperature,
-                mix_seed(base_seed, game_key, ply, SEED_STREAM_POLICY_INIT_SAMPLE),
-            )?
-            .ok_or_else(|| {
-                PyValueError::new_err("policy-init sampling found no positive prior mass")
-            })?;
+        if let Some(sampled) = prepared.init_override {
             payload_dict.set_item("action_id", sampled)?;
             payload_dict.set_item("action_selection", "policy_init_prior")?;
         }
-        let action_id: PackedCoord = payload_dict
-            .get_item("action_id")?
-            .ok_or_else(|| PyValueError::new_err("continuous payload missing action_id"))?
-            .extract()?;
 
         moves_decided += 1;
         stats.moves_decided += 1;
@@ -1624,7 +2253,7 @@ fn complete_continuous_slots(
             MoveClass::Init => stats.init_moves += 1,
         }
         let started = std::time::Instant::now();
-        let response = on_move.call1((game_key, payload_dict))?;
+        let response = on_move.call1((game_key, &payload_dict))?;
         stats.on_move_seconds += started.elapsed().as_secs_f64();
         if response.is_none() {
             slots[slot_index].search = None;
@@ -1739,6 +2368,31 @@ fn continuous_has_work(slots: &[ContinuousSlot]) -> bool {
         .any(|slot| !matches!(slot.phase, ContinuousPhase::Empty))
 }
 
+/// Snapshot the cumulative unique-states counter (depth-2 per-flush histogram).
+fn lock_unique_states(stats: &SharedEvaluationStats) -> usize {
+    stats
+        .lock()
+        .expect("evaluation stats mutex poisoned")
+        .unique_states
+}
+
+/// Map a queued eval item to its forward-pass request (state + hash). Identical
+/// to the inline match in the lockstep loop; shared by the depth-2 path.
+fn continuous_item_request(item: &ContinuousEvalItem) -> RustEvaluationRequest<'_> {
+    match item {
+        ContinuousEvalItem::Leaf(leaf) => RustEvaluationRequest {
+            state: &leaf.state,
+            state_hash: leaf.state_hash,
+        },
+        ContinuousEvalItem::RootInit {
+            state, state_hash, ..
+        } => RustEvaluationRequest {
+            state,
+            state_hash: *state_hash,
+        },
+    }
+}
+
 fn temperature_for_ply(values: &[f32], ply: u32) -> f32 {
     let index = (ply as usize).min(values.len().saturating_sub(1));
     values[index]
@@ -1805,6 +2459,8 @@ fn resolve_divergences(
         if let Some(v) = overrides.get_item("c_base")? {
             dv.c_base = v.extract()?;
         }
+        // main_4 KataGo-faithful search divergences (ledger items [1]-[7]) —
+        // individually flippable for the M6 property gates / M10 lesions.
         if let Some(v) = overrides.get_item("nucleus_f64")? {
             dv.nucleus_f64 = v.extract()?;
         }
@@ -1822,6 +2478,31 @@ fn resolve_divergences(
         }
         if let Some(v) = overrides.get_item("pruned_dynamic_cpuct")? {
             dv.pruned_dynamic_cpuct = v.extract()?;
+        }
+        // main_6 FULL Gumbel AlphaZero flags (default-OFF; main_6 config opts in).
+        if let Some(v) = overrides.get_item("gumbel_target")? {
+            dv.gumbel_target = v.extract()?;
+        }
+        if let Some(v) = overrides.get_item("gumbel_root")? {
+            dv.gumbel_root = v.extract()?;
+        }
+        if let Some(v) = overrides.get_item("gumbel_sequential_halving")? {
+            dv.gumbel_sequential_halving = v.extract()?;
+        }
+        if let Some(v) = overrides.get_item("gumbel_nonroot_select")? {
+            dv.gumbel_nonroot_select = v.extract()?;
+        }
+        if let Some(v) = overrides.get_item("gumbel_c_visit")? {
+            dv.gumbel_c_visit = v.extract()?;
+        }
+        if let Some(v) = overrides.get_item("gumbel_c_scale")? {
+            dv.gumbel_c_scale = v.extract()?;
+        }
+        if let Some(v) = overrides.get_item("gumbel_m")? {
+            dv.gumbel_m = v.extract()?;
+        }
+        if let Some(v) = overrides.get_item("gumbel_target_min_visits")? {
+            dv.gumbel_target_min_visits = v.extract()?;
         }
     }
     Ok(dv)
@@ -1851,6 +2532,256 @@ fn build_widening(
     Ok(widening)
 }
 
+/// Pure-Rust core of a single search-result payload — every value the PyDict
+/// in `build_search_result_payloads` carries, but as plain Rust scalars/bytes
+/// so it can be computed WITHOUT the GIL (main_6 #3 / S3: build payloads in a
+/// `par_iter` off the GIL, then convert to a `PyDict` serially under the GIL
+/// right before `on_move`). `to_pydict` is the GIL-held conversion; it sets the
+/// EXACT same keys in the EXACT same order as the original so the payload is
+/// byte-identical.
+struct PayloadNative {
+    action_id: PackedCoord,
+    action_selection: &'static str,
+    lcb_override: bool,
+    early_stopped: bool,
+    export_action_ids: Vec<PackedCoord>,
+    export_weights: Vec<f32>,
+    export_q: Vec<f32>,
+    root_prior_action_ids: Vec<PackedCoord>,
+    root_prior_weights: Vec<f32>,
+    // Present only when `gumbel_target` is on (otherwise None → keys omitted, so
+    // parity payloads stay byte-identical).
+    gumbel: Option<GumbelTargetNative>,
+    root_value: f32,
+    visits: u32,
+    node_count: usize,
+    active_edge_count: usize,
+    root_active_edges: usize,
+    root_hidden_priors: usize,
+}
+
+struct GumbelTargetNative {
+    action_ids: Vec<PackedCoord>,
+    weights: Vec<f32>,
+    logits: Vec<f32>,
+}
+
+impl PayloadNative {
+    /// Convert the pure-Rust payload into the `PyDict` the on_move callback
+    /// expects. Mirrors the original `build_search_result_payloads` body
+    /// key-for-key / order-for-order so the recorded stream is byte-identical.
+    /// `eval_stats` / `cache_len` are the per-batch diagnostics only the
+    /// lockstep multi-search path supplies (the continuous path passes None).
+    fn to_pydict<'py>(
+        &self,
+        py: Python<'py>,
+        eval_stats: Option<&EvaluationStats>,
+        cache_len: Option<usize>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let result = PyDict::new(py);
+        result.set_item("action_id", self.action_id)?;
+        result.set_item("action_selection", self.action_selection)?;
+        result.set_item("lcb_override", self.lcb_override)?;
+        result.set_item("early_stopped", self.early_stopped)?;
+        let to_bytes = |data: &[u32]| -> Bound<'py, PyBytes> {
+            let len = std::mem::size_of_val(data);
+            let raw = unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, len) };
+            PyBytes::new(py, raw)
+        };
+        let to_bytes_f32 = |data: &[f32]| -> Bound<'py, PyBytes> {
+            let len = std::mem::size_of_val(data);
+            let raw = unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, len) };
+            PyBytes::new(py, raw)
+        };
+        result.set_item(
+            "visit_policy_action_ids_bytes",
+            to_bytes(&self.export_action_ids),
+        )?;
+        result.set_item("visit_policy_weights_bytes", to_bytes_f32(&self.export_weights))?;
+        result.set_item("visit_policy_q_bytes", to_bytes_f32(&self.export_q))?;
+        result.set_item("visit_policy_count", self.export_action_ids.len())?;
+        result.set_item(
+            "root_prior_policy_action_ids_bytes",
+            to_bytes(&self.root_prior_action_ids),
+        )?;
+        result.set_item(
+            "root_prior_policy_weights_bytes",
+            to_bytes_f32(&self.root_prior_weights),
+        )?;
+        result.set_item("root_prior_policy_count", self.root_prior_action_ids.len())?;
+        if let Some(gumbel) = &self.gumbel {
+            result.set_item("gumbel_policy_action_ids_bytes", to_bytes(&gumbel.action_ids))?;
+            result.set_item("gumbel_policy_weights_bytes", to_bytes_f32(&gumbel.weights))?;
+            result.set_item("gumbel_policy_count", gumbel.action_ids.len())?;
+            result.set_item("root_prior_logits_bytes", to_bytes_f32(&gumbel.logits))?;
+        }
+        result.set_item("root_value", self.root_value)?;
+        result.set_item("visits", self.visits)?;
+        let diag = PyDict::new(py);
+        diag.set_item("node_count", self.node_count)?;
+        diag.set_item("active_edge_count", self.active_edge_count)?;
+        diag.set_item("root_active_edges", self.root_active_edges)?;
+        diag.set_item("root_hidden_priors", self.root_hidden_priors)?;
+        if let Some(stats) = eval_stats {
+            diag.set_item("evaluation", eval_stats_dict(py, stats)?)?;
+        }
+        if let Some(cache_len) = cache_len {
+            diag.set_item("cache_len", cache_len)?;
+        }
+        result.set_item("diagnostics", diag)?;
+        Ok(result)
+    }
+}
+
+/// Pure-Rust core that builds the native payload for ONE search. Carries no
+/// Python state and makes no Python calls, so it is safe to run inside a rayon
+/// `par_iter` with the GIL released. The logic is lifted verbatim from the
+/// original `build_search_result_payloads` per-search body; only the final
+/// `PyDict` construction is deferred (see `PayloadNative::to_pydict`).
+#[allow(clippy::too_many_arguments)]
+fn build_search_result_payload_native(
+    search: &RustSearch,
+    baseline: Option<&HashMap<PackedCoord, u32>>,
+    temperature: f32,
+    seed: u64,
+    c_puct: f32,
+    forced_playout_k: f32,
+) -> PyResult<PayloadNative> {
+    let root = search.root();
+    let (policy_action_ids, policy_weights, _policy_q, policy_total) = visit_policy(root, baseline);
+    let (mut export_action_ids, mut export_weights, mut export_q) = if forced_playout_k > 0.0 {
+        // [7] align the recorded-target pruning with selection's c_for(N)
+        // when pruned_dynamic_cpuct is on; otherwise static c_puct (parity).
+        let effective_c = search.effective_pruning_c_puct(c_puct, root.visits);
+        pruned_visit_policy(root, baseline, forced_playout_k, effective_c)
+    } else {
+        let (ids, w, q, _t) = visit_policy(root, baseline);
+        (ids, w, q)
+    };
+    // RECORDED-target fallback for the degenerate force-completed Gumbel SH
+    // root (main_6 #1 saturation safety-net): such a move can finalize with
+    // ZERO net delta visits over its reuse baseline, so the delta-visit export
+    // above is EMPTY. A Full (pcr_full) row with an empty/zero-mass policy
+    // target is a HARD error in shard expansion ("policy target must carry
+    // positive mass"), so substitute the CUMULATIVE visit distribution
+    // (baseline-free), then the root prior — both real, on-legal, positive-mass
+    // targets that match the played-move fallback. Inert for normal completion
+    // (export is non-empty there), so parity payloads are unaffected.
+    if export_action_ids.is_empty() {
+        let (cum_ids, cum_w, cum_q, cum_total) = visit_policy(root, None);
+        if !cum_ids.is_empty() && cum_total > 0 {
+            export_action_ids = cum_ids;
+            export_weights = cum_w;
+            export_q = cum_q;
+        } else {
+            // No edge carries a cumulative visit: fall back to the root prior.
+            let (prior_ids, prior_w) = root_prior_policy(root);
+            let prior_q: Vec<f32> = prior_ids
+                .iter()
+                .map(|id| {
+                    root.edges
+                        .iter()
+                        .find(|e| e.action_id == *id)
+                        .map(|e| e.value())
+                        .unwrap_or(0.0)
+                })
+                .collect();
+            export_action_ids = prior_ids;
+            export_weights = prior_w;
+            export_q = prior_q;
+        }
+    }
+    let (root_prior_action_ids, root_prior_weights) = root_prior_policy(root);
+    let guarded_weights = if search.tss_enabled {
+        tactical_guard_weights(&search.root_state, &policy_action_ids, &policy_weights)
+    } else {
+        policy_weights.clone()
+    };
+    let (selected, lcb_override) = select_action_with_lcb(
+        search,
+        baseline,
+        &policy_action_ids,
+        &guarded_weights,
+        temperature,
+        seed,
+    )?;
+    // Robust played-move resolution. `selected` can come back None when the
+    // DELTA-visit policy is empty: a force-completed Gumbel SH root (main_6
+    // #1 saturation safety-net) can finalize a move with ZERO net visits over
+    // its reuse baseline, so every edge's delta is 0 and `visit_policy` drops
+    // them all. Falling through `selected.unwrap_or(0)` would emit PackedCoord
+    // 0, which unpacks to the illegal sentinel HexCoord{q:-32768,r:-32768} and
+    // crashes apply_action downstream. Instead, fall back to the CUMULATIVE
+    // visit distribution (baseline-free), then to the root prior — both are
+    // real, legal root action_ids. This path is inert for normal full-visit
+    // completion (where `selected` is always Some), so parity is unaffected.
+    let selected = match selected {
+        Some(action_id) => action_id,
+        None => fallback_root_action(root).ok_or_else(|| {
+            PyValueError::new_err(
+                "continuous move selection found no legal root action (empty edges and priors)",
+            )
+        })?,
+    };
+    debug_assert!(
+        root.edges.iter().any(|e| e.action_id == selected)
+            || root
+                .remaining_priors()
+                .iter()
+                .any(|(a, _)| *a == selected),
+        "selected played action_id must be a real root action, never the sentinel"
+    );
+    let action_selection = if baseline.is_some() {
+        "delta_visit_policy"
+    } else {
+        "cumulative_visit_policy"
+    };
+    // main_6 #3 (S5): improved-policy target π'=softmax(logits+σ(completedQ)).
+    // Exported ONLY when gumbel_target is on so parity payloads stay byte-
+    // identical (no new keys). The raw root logits column ships alongside for
+    // offline audit / Route-A rebuild. Flag off ⇒ none of these keys appear.
+    let div = &search.divergences;
+    let gumbel = if div.gumbel_target {
+        let (gumbel_ids, gumbel_weights, gumbel_logits) = gumbel_target_policy(
+            root,
+            div.gumbel_c_visit,
+            div.gumbel_c_scale,
+            div.gumbel_target_min_visits,
+        );
+        Some(GumbelTargetNative {
+            action_ids: gumbel_ids,
+            weights: gumbel_weights,
+            logits: gumbel_logits,
+        })
+    } else {
+        None
+    };
+    let tree = search.diagnostics();
+    Ok(PayloadNative {
+        action_id: selected,
+        action_selection,
+        lcb_override,
+        early_stopped: search.early_stopped,
+        export_action_ids,
+        export_weights,
+        export_q,
+        root_prior_action_ids,
+        root_prior_weights,
+        gumbel,
+        root_value: root.value(),
+        visits: policy_total,
+        node_count: tree.node_count,
+        active_edge_count: tree.active_edge_count,
+        root_active_edges: tree.root_active_edges,
+        root_hidden_priors: tree.root_hidden_priors,
+    })
+}
+
+/// Thin wrapper retained for the lockstep multi-search batch caller
+/// (`search` / eval_arena): builds the native payload per search and converts
+/// to the same `PyList[PyDict]` as before. The continuous scheduler bypasses
+/// this and calls `build_search_result_payload_native` directly in its
+/// off-GIL parallel build phase (main_6 #3 / S3).
 #[allow(clippy::too_many_arguments)]
 fn build_search_result_payloads(
     py: Python<'_>,
@@ -1865,83 +2796,16 @@ fn build_search_result_payloads(
 ) -> PyResult<Py<PyAny>> {
     let results = PyList::empty(py);
     for (index, search) in searches.iter().enumerate() {
-        let result = PyDict::new(py);
-        let root = search.root();
         let baseline = baselines.and_then(|items| items.get(index));
-        let (policy_action_ids, policy_weights, _policy_q, policy_total) =
-            visit_policy(root, baseline);
-        let (export_action_ids, export_weights, export_q) = if forced_playout_k > 0.0 {
-            // When pruned_dynamic_cpuct is on, align the recorded-target
-            // pruning with selection's c_for(N); otherwise use static c_puct.
-            let effective_c = search.effective_pruning_c_puct(c_puct, root.visits);
-            pruned_visit_policy(root, baseline, forced_playout_k, effective_c)
-        } else {
-            let (ids, w, q, _t) = visit_policy(root, baseline);
-            (ids, w, q)
-        };
-        let (root_prior_action_ids, root_prior_weights) = root_prior_policy(root);
-        let guarded_weights = if search.tss_enabled {
-            tactical_guard_weights(&search.root_state, &policy_action_ids, &policy_weights)
-        } else {
-            policy_weights.clone()
-        };
-        let (selected, lcb_override) = select_action_with_lcb(
+        let native = build_search_result_payload_native(
             search,
             baseline,
-            &policy_action_ids,
-            &guarded_weights,
             temperatures[index],
             seed.wrapping_add(index as u64),
+            c_puct,
+            forced_playout_k,
         )?;
-        result.set_item("action_id", selected.unwrap_or(0))?;
-        result.set_item(
-            "action_selection",
-            if baseline.is_some() {
-                "delta_visit_policy"
-            } else {
-                "cumulative_visit_policy"
-            },
-        )?;
-        result.set_item("lcb_override", lcb_override)?;
-        result.set_item("early_stopped", search.early_stopped)?;
-        let to_bytes = |data: &[u32]| -> Bound<'_, PyBytes> {
-            let len = std::mem::size_of_val(data);
-            let raw = unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, len) };
-            PyBytes::new(py, raw)
-        };
-        let to_bytes_f32 = |data: &[f32]| -> Bound<'_, PyBytes> {
-            let len = std::mem::size_of_val(data);
-            let raw = unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, len) };
-            PyBytes::new(py, raw)
-        };
-        result.set_item("visit_policy_action_ids_bytes", to_bytes(&export_action_ids))?;
-        result.set_item("visit_policy_weights_bytes", to_bytes_f32(&export_weights))?;
-        result.set_item("visit_policy_q_bytes", to_bytes_f32(&export_q))?;
-        result.set_item("visit_policy_count", export_action_ids.len())?;
-        result.set_item(
-            "root_prior_policy_action_ids_bytes",
-            to_bytes(&root_prior_action_ids),
-        )?;
-        result.set_item(
-            "root_prior_policy_weights_bytes",
-            to_bytes_f32(&root_prior_weights),
-        )?;
-        result.set_item("root_prior_policy_count", root_prior_action_ids.len())?;
-        result.set_item("root_value", root.value())?;
-        result.set_item("visits", policy_total)?;
-        let diag = PyDict::new(py);
-        let tree = search.diagnostics();
-        diag.set_item("node_count", tree.node_count)?;
-        diag.set_item("active_edge_count", tree.active_edge_count)?;
-        diag.set_item("root_active_edges", tree.root_active_edges)?;
-        diag.set_item("root_hidden_priors", tree.root_hidden_priors)?;
-        if let Some(stats) = eval_stats {
-            diag.set_item("evaluation", eval_stats_dict(py, stats)?)?;
-        }
-        if let Some(cache_len) = cache_len {
-            diag.set_item("cache_len", cache_len)?;
-        }
-        result.set_item("diagnostics", diag)?;
+        let result = native.to_pydict(py, eval_stats, cache_len)?;
         results.append(result)?;
     }
 
@@ -1963,6 +2827,50 @@ fn eval_stats_dict<'py>(py: Python<'py>, stats: &EvaluationStats) -> PyResult<Bo
     dict.set_item("cache_inserts", stats.cache_inserts)?;
     dict.set_item("cache_size_peak", stats.cache_size_peak)?;
     Ok(dict)
+}
+
+/// Deterministic last-resort played-move pick when the normal (delta-visit)
+/// selection yields nothing — used only for force-completed Gumbel SH roots that
+/// accrued no net visits over their reuse baseline. Prefers the most-visited
+/// CUMULATIVE root edge (baseline-free), then the highest-prior root action.
+/// Returns a real, legal root action_id (never the PackedCoord-0 sentinel), or
+/// None only if the root genuinely has no edges and no priors (a real bug). Ties
+/// broken by smallest action_id for reproducibility.
+fn fallback_root_action(root: &RustNode) -> Option<PackedCoord> {
+    // 1) Most-visited cumulative edge.
+    let by_visits = root
+        .edges
+        .iter()
+        .max_by(|a, b| {
+            a.visits
+                .cmp(&b.visits)
+                .then_with(|| b.action_id.cmp(&a.action_id))
+        })
+        .map(|edge| (edge.action_id, edge.visits));
+    if let Some((action_id, visits)) = by_visits {
+        if visits > 0 {
+            return Some(action_id);
+        }
+    }
+    // 2) No edge carries a visit (degenerate): take the highest-prior root
+    // action across edges + unexpanded candidates.
+    let (prior_ids, prior_weights) = root_prior_policy(root);
+    let best_prior = prior_ids
+        .iter()
+        .copied()
+        .zip(prior_weights.iter().copied())
+        .max_by(|a, b| {
+            a.1.partial_cmp(&b.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| b.0.cmp(&a.0))
+        })
+        .map(|(action_id, _)| action_id);
+    if best_prior.is_some() {
+        return best_prior;
+    }
+    // 3) Priors all non-positive but an edge exists: any edge action_id beats a
+    // sentinel. Fall back to the visit-argmax (already legal) if present.
+    by_visits.map(|(action_id, _)| action_id)
 }
 
 fn root_prior_policy(root: &RustNode) -> (Vec<PackedCoord>, Vec<f32>) {
@@ -1990,6 +2898,56 @@ fn root_prior_policy(root: &RustNode) -> (Vec<PackedCoord>, Vec<f32>) {
         }
     }
     (action_ids, weights)
+}
+
+/// main_6 #3 (S5): the improved-policy TARGET π'(a)=softmax(logits+σ(completedQ))
+/// over the root candidate support (§0.3). Returns (action_ids, weights,
+/// raw_logits) — the raw-logits column is exported alongside so the target can
+/// be audited / rebuilt offline (Route A fallback). Only the ROOT's own edges
+/// form the support (the searched candidate set); v_mix (§0.2) fills completedQ
+/// for an in-support edge that happens to be unvisited.
+///
+/// **Support floor (§S5):** edges with `N(a) < min_visits` are EXCLUDED from the
+/// softmax support before the softmax (then it renormalizes over the survivors),
+/// denying the value head a target write on un-searched cells. Falls back to the
+/// full edge set if the floor would empty the support (degenerate guard).
+fn gumbel_target_policy(
+    root: &RustNode,
+    c_visit: f32,
+    c_scale: f32,
+    min_visits: u32,
+) -> (Vec<PackedCoord>, Vec<f32>, Vec<f32>) {
+    let logit_map = root.root_logits.clone().unwrap_or_default();
+    // completedQ map + the v_mix visited-weighted fallback (shared with #1/#2).
+    let (completed, v_mix) = gumbel_completed_q(root, &logit_map);
+    let max_n = root.edges.iter().map(|e| e.visits).max().unwrap_or(0);
+
+    // Candidate support = root edges meeting the visit floor (§S5 support floor).
+    let mut in_support: Vec<&RustEdge> = root
+        .edges
+        .iter()
+        .filter(|edge| edge.visits >= min_visits)
+        .collect();
+    // Degenerate guard: if the floor empties the support, fall back to all edges.
+    if in_support.is_empty() {
+        in_support = root.edges.iter().collect();
+    }
+
+    // Deterministic action_id order (mirrors root_prior_policy's stable order).
+    in_support.sort_unstable_by_key(|edge| edge.action_id);
+
+    let mut action_ids = Vec::with_capacity(in_support.len());
+    let mut logits = Vec::with_capacity(in_support.len());
+    let mut scores = Vec::with_capacity(in_support.len());
+    for edge in &in_support {
+        let l = logit_map.get(&edge.action_id).copied().unwrap_or(0.0);
+        let q = completed.get(&edge.action_id).copied().unwrap_or(v_mix);
+        action_ids.push(edge.action_id);
+        logits.push(l);
+        scores.push(l + gumbel_sigma(q, max_n, c_visit, c_scale));
+    }
+    let weights = gumbel_softmax(&scores);
+    (action_ids, weights, logits)
 }
 
 fn validate_search_inputs(visits: u32, c_puct: f32, temperature: f32) -> PyResult<()> {
@@ -2105,7 +3063,9 @@ fn root_noise_exact(
     })
 }
 
-/// Test-facing pure function over the same LCB formula the search uses.
+/// Test-only surfaces for the property gates (§5.4 LCB closed-form table tests
+/// + moves-left utility sign/gate properties). Pure functions over the same
+/// formulas the search uses.
 pub fn debug_lcb_from_stats(
     stats: &[(u64, u32, u32, f32, f32)], // (action_id, delta, visits, value_sum, value_sq_sum)
     z: f32,
@@ -2146,11 +3106,11 @@ pub fn debug_ml_bonus(
     gate: f32,
     two_sided: bool,
 ) -> f32 {
-    // s gates by the chooser's perspective Q: +1 when Q > gate (prefer fewer
-    // moves left), -1 when two-sided and Q < -gate (prefer more moves left),
-    // 0 in the |Q| <= gate dead-zone. Both signs add a positive bonus to the
-    // preferred child since tanh flips with (m_edge - m_node). Bounded by
-    // `weight`.
+    // s gates by the CHOOSER's perspective Q: +1 clearly winning (prefer fewer
+    // moves left = faster win), -1 clearly losing when two-sided (prefer more
+    // moves left = slower loss), 0 in the |Q| <= gate dead-zone (no sign
+    // discontinuity at Q=0). Both signs add a POSITIVE bonus to the desired
+    // child because tanh flips with (m_edge - m_node). Bounded by `weight`.
     let s = if q > gate {
         1.0
     } else if two_sided && q < -gate {
@@ -2248,10 +3208,11 @@ fn select_search_action(
     Ok(selected)
 }
 
-/// Action selection: temperature sampling on non-greedy paths and, on greedy
-/// (T == 0) paths with `lcb_move_selection` on, LCB-of-Q selection among
-/// eligible children (fallback max-visits). The TSS guard has already zeroed
-/// proven-losing weights; LCB only picks among guard-positive actions.
+/// Action selection: temperature sampling on Full paths (dense semantics
+/// verbatim) and, on greedy (T == 0) paths with the §5.4.1 divergence on,
+/// LCB-of-Q selection among eligible children (fallback max-visits). The TSS
+/// guard has already zeroed proven-losing weights; LCB only ever picks among
+/// guard-positive actions.
 fn select_action_with_lcb(
     search: &RustSearch,
     baseline: Option<&HashMap<PackedCoord, u32>>,
@@ -2271,10 +3232,10 @@ fn select_action_with_lcb(
                 .zip(guarded_weights.iter())
                 .any(|(&id, &w)| id == lcb_id && w > 0.0);
             if allowed {
-                // Decisiveness tie-break on the played move: among moves
-                // value-tied with the LCB leader, prefer the decisive one.
-                // Gated on moves_left_utility; returns lcb_id in the dead-zone
-                // or with no ml stats.
+                // §5.4.4 decisiveness tie-break on the PLAYED move: among moves
+                // value-tied with the LCB leader, prefer the decisive one. Needs
+                // the moves-left head (gated on moves_left_utility); inert + safe
+                // (returns lcb_id) in the dead-zone or with no ml stats.
                 let final_id = if dv.ml_final_pick && dv.moves_left_utility {
                     ml_final_pick(root, baseline, &dv, action_ids, guarded_weights)
                         .unwrap_or(lcb_id)
@@ -2297,9 +3258,10 @@ fn visit_policy(
     root: &RustNode,
     baseline: Option<&HashMap<PackedCoord, u32>>,
 ) -> (Vec<PackedCoord>, Vec<f32>, Vec<f32>, u32) {
-    // Compute each edge's delta visits once (edge_delta_visits is a HashMap
-    // lookup when baseline is Some) and reuse the deltas for both the total and
-    // the per-edge weights.
+    // Compute each edge's delta visits ONCE (edge_delta_visits is a HashMap
+    // lookup when baseline is Some) and reuse the cached deltas for both the
+    // total and the per-edge weights. Value-identical to the prior two-pass
+    // form: same sum, same per-edge weight numerators.
     let deltas: Vec<u32> = root
         .edges
         .iter()
@@ -2497,4 +3459,123 @@ fn select_action_from_policy(
         }
     }
     Ok(action_ids.last().copied())
+}
+
+#[cfg(test)]
+mod fallback_tests {
+    use super::*;
+    use crate::tree::{NodePriors, RustPriorCandidate};
+    use hexo_engine::Player;
+    use hexo_utils::StateHash;
+
+    fn edge(action_id: PackedCoord, prior: f32, visits: u32, value_sum: f32) -> RustEdge {
+        RustEdge {
+            action_id,
+            action: unpack_coord(action_id),
+            prior,
+            visits,
+            value_sum,
+            value_sq_sum: 0.0,
+            ml_sum: 0.0,
+            ml_weight: 0.0,
+            pending: 0,
+            child: None,
+            forced: false,
+        }
+    }
+
+    fn node(edges: Vec<RustEdge>, candidates: Vec<RustPriorCandidate>) -> RustNode {
+        RustNode {
+            state_hash: StateHash::default(),
+            player: Player::Player0,
+            eval_value: 0.0,
+            eval_ml: None,
+            visits: edges.iter().map(|e| e.visits).sum(),
+            value_sum: 0.0,
+            ml_sum: 0.0,
+            ml_weight: 0.0,
+            edges,
+            priors: NodePriors::Owned(candidates),
+            max_eligible_children: 8,
+            root_logits: None,
+        }
+    }
+
+    // Non-sentinel action ids: PackedCoord 0 unpacks to the illegal sentinel
+    // HexCoord{q:-32768,r:-32768}; any non-zero id we use here is a "real" action
+    // for the purposes of the played-move invariant.
+    const A1: PackedCoord = 0x8001_8000; // q=1, r=0
+    const A2: PackedCoord = 0x8000_8001; // q=0, r=1
+    const A3: PackedCoord = 0x8001_8001; // q=1, r=1
+
+    #[test]
+    fn delta_visit_policy_is_empty_when_all_edges_match_baseline() {
+        // Reproduces the force-completed Gumbel SH stall: a root whose edges all
+        // sit at their reuse baseline (zero net delta) yields an EMPTY delta-visit
+        // policy, so the normal selection returns None.
+        let root = node(
+            vec![edge(A1, 0.6, 3, 1.5), edge(A2, 0.4, 2, 0.5)],
+            Vec::new(),
+        );
+        let baseline: HashMap<PackedCoord, u32> =
+            [(A1, 3u32), (A2, 2u32)].into_iter().collect();
+        let (ids, weights, _q, total) = visit_policy(&root, Some(&baseline));
+        assert!(ids.is_empty(), "all-baseline delta policy must be empty");
+        assert!(weights.is_empty());
+        assert_eq!(total, 0);
+        // The normal sampler returns None on an empty policy.
+        let picked = select_action_from_policy(&ids, &weights, 1.0, 7).unwrap();
+        assert!(picked.is_none());
+    }
+
+    #[test]
+    fn fallback_never_returns_sentinel_and_prefers_most_visited() {
+        // The fallback used when `selected` is None must yield a REAL root action
+        // (never PackedCoord 0 / the sentinel). With visits present it picks the
+        // most-visited cumulative edge.
+        let root = node(
+            vec![edge(A1, 0.2, 5, 2.0), edge(A2, 0.7, 1, 0.1)],
+            vec![RustPriorCandidate { action_id: A3, prior: 0.9 }],
+        );
+        let picked = fallback_root_action(&root).expect("fallback yields an action");
+        assert_ne!(picked, 0, "fallback must never return the sentinel id 0");
+        assert_eq!(picked, A1, "most-visited cumulative edge wins");
+    }
+
+    #[test]
+    fn cumulative_visit_policy_recovers_target_when_delta_is_empty() {
+        // The RECORDED-target fallback in build_search_result_payloads substitutes
+        // the baseline-free cumulative visit policy when the delta-visit export is
+        // empty. Pin the property it relies on: with edges carrying cumulative
+        // visits, visit_policy(root, None) yields a NON-EMPTY, positive-mass target
+        // even though the delta policy (vs an all-matching baseline) is empty.
+        let root = node(
+            vec![edge(A1, 0.6, 3, 1.5), edge(A2, 0.4, 2, 0.5)],
+            Vec::new(),
+        );
+        let baseline: HashMap<PackedCoord, u32> =
+            [(A1, 3u32), (A2, 2u32)].into_iter().collect();
+        let (d_ids, _d_w, _d_q, d_total) = visit_policy(&root, Some(&baseline));
+        assert!(d_ids.is_empty() && d_total == 0, "delta policy is empty");
+        let (c_ids, c_w, _c_q, c_total) = visit_policy(&root, None);
+        assert_eq!(c_ids.len(), 2, "cumulative policy keeps both edges");
+        assert_eq!(c_total, 5, "cumulative total = sum of edge visits");
+        let mass: f32 = c_w.iter().sum();
+        assert!((mass - 1.0).abs() < 1e-6, "cumulative target carries unit mass");
+        assert!(c_ids.iter().all(|&id| id != 0), "no sentinel in the target");
+    }
+
+    #[test]
+    fn fallback_uses_highest_prior_when_no_visits() {
+        // Degenerate root: edges exist but carry zero visits (force-completed with
+        // nothing searched). Fallback then takes the highest-prior action across
+        // edges + unexpanded candidates — still a real, legal action id.
+        let root = node(
+            vec![edge(A1, 0.2, 0, 0.0), edge(A2, 0.3, 0, 0.0)],
+            vec![RustPriorCandidate { action_id: A3, prior: 0.5 }],
+        );
+        let picked = fallback_root_action(&root).expect("fallback yields an action");
+        assert_ne!(picked, 0);
+        assert_eq!(picked, A3, "highest-prior action wins when no edge is visited");
+    }
 }

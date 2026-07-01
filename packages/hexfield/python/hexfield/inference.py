@@ -1,11 +1,12 @@
-"""HexfieldEvaluator: serve-side consumer of the wire ABI.
+"""HexfieldEvaluator — the serve-side half of the wire ABI.
 
 Consumes the Rust payload (CSR over support nodes, rows pre-sorted by support
 size descending), packs rows into quantized static shapes under the inference
 pair ceiling, runs `forward_policy_value`, and returns the reply: `values_bytes`
 (f32 x B, clamped [-1, 1]), `priors_bytes` (f32 x sum L_g, positional over each
-row's legal prefix, fp32 softmax), and `moves_left_bytes` (f32 x B) when
-requested.
+row's legal prefix, fp32 softmax), `moves_left_bytes` (f32 x B) when requested,
+and `priors_logits_bytes` (f32 x sum L_g, RAW pre-softmax policy logits, same
+positional layout as `priors_bytes`) when `request_logits` is set (Gumbel S2).
 """
 
 from __future__ import annotations
@@ -21,15 +22,16 @@ from .losses import decode_binned_value, decode_moves_left
 from .model import HexfieldNet
 
 NBR_SENTINEL = 0xFFFF
-# Upper bound on B * (S_pad + NUM_TOKENS)^2 per group, bounding the fp16
-# (B, 4, S, S) bias transient. Inference ceiling, separate from any training
-# pair budget.
+# B * S_pad^2 <= this keeps the fp16 (B, 4, S, S) bias transient <= ~305 MB
+# (the INFERENCE ceiling, distinct from the training pair budget).
 PAIR_CEILING = 3.8e7
-# Padding quantum in nodes: row sizes are rounded up to a multiple of this.
+# Pad quantum: finer values cut padded-cell waste, the dominant serve
+# inefficiency on skewed support mixes.
 QUANT_NODES = 64
-# A group stops extending when the next row is more than this fraction (or
-# QUANT_NODES nodes) smaller than the group's padded anchor, bounding per-row
-# padding waste.
+# Bound padding waste: don't pad a row up to a group anchor more than ~18%
+# larger than the row's own size (or 64 nodes), so the squared attention waste
+# (sum B*S_pad^2) stays small where S is large. Coalescing for batch size is
+# still allowed where padding is cheap (small S).
 WASTE_FRACTION = 0.18
 
 
@@ -37,12 +39,105 @@ def _ceil_quant(n: int) -> int:
     return max(QUANT_NODES, -(-int(n) // QUANT_NODES) * QUANT_NODES)
 
 
+class PerfTrace:
+    """main_6 Increment-0 GPU-busy instrument (bench-only, HEXFIELD_PERF_TRACE=1).
+
+    The verification critic flagged that the depth-2 / complete-overlap perf
+    claim ("convert GPU idle to busy") was asserted against `nvidia-smi`, which
+    is too coarse (1-2 s sampling) to confirm a sub-flush idle change. This class
+    is the missing PRIMARY metric the plans call for: a `cuda.Event`-based
+    GPU-busy fraction, NOT a sampler.
+
+    Mechanism: a pair of `cuda.Event`s brackets the forward enqueues of each
+    flush (recorded in submit, on the same stream the forwards run on). When the
+    flush is drained (`result()` forces the D2H sync, so both events are
+    complete), `start.elapsed_time(end)` gives the wall-clock GPU time that
+    flush's forwards actually occupied the device. Summing those over a measured
+    wall window yields busy_fraction = sum(device_ms) / wall_ms — the fraction of
+    real time the GPU spent computing forwards. Idle fraction = 1 - busy.
+
+    Zero behavioral effect: only `cuda.Event.record()` calls are added to the
+    forward path (no extra sync, no D2H, no math change); the events are read in
+    `result()` which already syncs. Entirely inert unless the flag is set
+    (the evaluator holds `_perf = None`), so the production path is untouched.
+    """
+
+    def __init__(self) -> None:
+        self.device_ms = 0.0      # sum of per-flush forward device time
+        self.flushes = 0          # flushes whose events were measured
+        self.states = 0           # total states (rows) evaluated
+        self.per_flush_ms: list[float] = []
+        self.per_flush_states: list[int] = []
+        self._t0: float | None = None   # wall-clock anchor (first submit)
+        self._t_last: float = 0.0        # wall-clock of the last drained flush
+
+    def make_events(self):
+        """Allocate a (start, end) cuda.Event pair for one flush, or None if
+        CUDA is unavailable (CPU path — tracing is a no-op there)."""
+        if not torch.cuda.is_available():
+            return None
+        return (
+            torch.cuda.Event(enable_timing=True),
+            torch.cuda.Event(enable_timing=True),
+        )
+
+    def on_submit(self) -> None:
+        import time as _time
+        if self._t0 is None:
+            self._t0 = _time.perf_counter()
+
+    def on_result(self, events, n_states: int) -> None:
+        """Called from result() AFTER the D2H sync (events guaranteed complete).
+        Accumulate this flush's device-busy ms and the wall anchor."""
+        import time as _time
+        self._t_last = _time.perf_counter()
+        if events is None:
+            return
+        start_ev, end_ev = events
+        ms = start_ev.elapsed_time(end_ev)
+        self.device_ms += ms
+        self.flushes += 1
+        self.states += n_states
+        self.per_flush_ms.append(ms)
+        self.per_flush_states.append(n_states)
+
+    def report(self) -> dict:
+        import statistics
+        wall_ms = (
+            (self._t_last - self._t0) * 1000.0
+            if self._t0 is not None and self._t_last > self._t0
+            else 0.0
+        )
+        busy = (self.device_ms / wall_ms) if wall_ms > 0 else 0.0
+        ms = self.per_flush_ms
+        st = self.per_flush_states
+        out = {
+            "gpu_busy_fraction": round(busy, 4),
+            "gpu_idle_fraction": round(1.0 - busy, 4) if wall_ms > 0 else None,
+            "device_busy_ms": round(self.device_ms, 2),
+            "wall_window_ms": round(wall_ms, 2),
+            "measured_flushes": self.flushes,
+            "measured_states": self.states,
+            "mean_batch": round(self.states / self.flushes, 1) if self.flushes else 0.0,
+            "mean_forward_ms": round(statistics.mean(ms), 3) if ms else 0.0,
+            "mean_ms_per_state": (
+                round(self.device_ms / self.states, 4) if self.states else 0.0
+            ),
+        }
+        if len(ms) >= 2:
+            out["median_forward_ms"] = round(statistics.median(ms), 3)
+        if len(st) >= 2:
+            out["median_batch"] = round(statistics.median(st), 1)
+        return out
+
+
 def plan_groups(sizes) -> list[tuple[int, int, int]]:
-    """Group rows sorted DESCENDING by size. Returns (start, end, pad_to)
-    tuples. pad_to is QUANT_NODES-quantized from the first (largest) row of the
-    group, so pad_to >= every row in the group. A group stops extending when
-    (a) adding the next row would exceed PAIR_CEILING, or (b) the next row is
-    smaller than pad_to by more than the WASTE_FRACTION bound."""
+    """Padding-aware grouping over rows sorted DESCENDING by size. Returns
+    (start, end, pad_to) groups. pad_to is the 64-quantized anchor (largest
+    row in the group) so pad_to >= every row (pad-inertness preserved). A
+    group stops extending when (a) the pair ceiling would be exceeded or
+    (b) the next row is smaller than the anchor pad by more than the waste
+    bound — keeping squared padding waste low at large S."""
     n = len(sizes)
     groups: list[tuple[int, int, int]] = []
     start = 0
@@ -53,7 +148,7 @@ def plan_groups(sizes) -> list[tuple[int, int, int]]:
         while end < n:
             if (end - start + 1) * (pad_to + NUM_TOKENS) ** 2 > PAIR_CEILING:
                 break
-            if int(sizes[end]) < floor:  # exceeds padding-waste bound -> split
+            if int(sizes[end]) < floor:  # too much padding waste -> split
                 break
             end += 1
         groups.append((start, end, pad_to))
@@ -66,42 +161,59 @@ class HexfieldEvaluator:
         self.model = model
         self.device = torch.device(device)
         self.model.to(self.device).eval()
-        # Compile the serve forward with dynamic=True: both varying dims, batch
-        # (dim 0) and cell-count Npad (dim 1), are marked dynamic (in
-        # _run_forward), so a single graph parameterized by symbolic (B, Npad) is
-        # built on the first flush and reused for all later shapes.
-        # Enabled on cuda; opt out with HEXFIELD_NO_COMPILE=1. Falls back to eager
-        # on any compile error.
+        # Serve forward compile. The rel-pos bias machinery (many small
+        # elementwise/gather kernels) dominates the forward; torch.compile fuses
+        # them. Eval/self-play only — training never goes through HexfieldEvaluator.
+        #
+        # ONE dynamic compile serves EVERY shape: both varying dims — batch (dim 0)
+        # and cell-count Npad (dim 1) — are marked dynamic (in _forward_group) and
+        # compile() is invoked with dynamic=True, so Inductor builds a single graph
+        # parameterized by symbolic (B, Npad) on the first (small) flush and reuses
+        # it for all later shapes, deep late-game included. Because there is exactly
+        # one compile (on the first small shape), the deep-shape compile that could
+        # hang the single self-play thread never occurs.
+        # Opt out with HEXFIELD_NO_COMPILE=1; falls back to eager on any error.
         self._raw_fpv = self.model.forward_policy_value
         self._compiled_fpv = self._raw_fpv
         self._use_compile = (
             self.device.type == "cuda"
             and os.environ.get("HEXFIELD_NO_COMPILE") != "1"
         )
-        # When set, the per-group decode/softmax/gather (the two device syncs)
-        # runs in result() instead of submit_payload(), so submit only enqueues
-        # forwards. Enabled by HEXFIELD_DEFER_DECODE=1; default off.
+        # Defer the per-group decode/softmax/gather (the two device syncs) from
+        # submit_payload to result(), so submit only enqueues forwards and the
+        # pre-backup select pass overlaps them. Opt-in A/B knob; default OFF.
         self._defer_decode = os.environ.get("HEXFIELD_DEFER_DECODE") == "1"
-        # Keep feats f16 through pack + H2D on cuda. HEXFIELD_F32_FEATS=1 forces
-        # the f32 path.
+        # Keep feats f16 through pack+H2D (cuda) — half the feats H2D + no astype
+        # copy. HEXFIELD_F32_FEATS=1 forces the old f32 path (A/B only).
         self._f16_feats = (
             self.device.type == "cuda"
             and os.environ.get("HEXFIELD_F32_FEATS") != "1"
         )
-        # When set, grouping, per-group padding, and f16/int buffer assembly run
-        # in Rust, exposed as zero-copy buffers consumed via torch.frombuffer +
-        # .to(device). Enabled by HEXFIELD_RUST_PACK=1. Gated on _f16_feats: the
-        # Rust pack emits f16 feats only, so the f32 path falls back to the
-        # CSR/Python pack.
+        # Rust parallel serve-pack with zero-copy buffers (HEXFIELD_RUST_PACK):
+        # do the grouping + per-group padding + f16/int buffer assembly in
+        # PARALLEL Rust, expose ZERO-COPY buffers, and consume them via
+        # torch.frombuffer + .to(device) — NO Python pack loop, NO astype.
+        # Gated on _f16_feats: the Rust pack emits f16 feats ONLY, so if the
+        # F32 toggle is on we MUST fall back to the CSR/Python pack (cannot honor
+        # the f32 request from the f16-only pack path).
         self._rust_pack = (
             self.device.type == "cuda"
             and self._f16_feats
             and os.environ.get("HEXFIELD_RUST_PACK") == "1"
         )
+        # main_6 Increment-0: cuda.Event GPU-busy instrument (bench-only). Inert
+        # (None) unless HEXFIELD_PERF_TRACE=1, so the production/parity path adds
+        # nothing. See PerfTrace for why nvidia-smi is insufficient.
+        self._perf = (
+            PerfTrace() if os.environ.get("HEXFIELD_PERF_TRACE") == "1" else None
+        )
         if self._use_compile:
-            # suppress_errors drops to eager for any shape that fails to compile.
-            # cache_size_limit covers the specializations in use (request_moves_left
-            # True/False and the batch-size-1 guard).
+            # Keep the eager fallback (suppress_errors) as an unattended-run
+            # safety net: if some never-before-seen shape ever fails to compile,
+            # the run drops to eager for it instead of dying. automatic_dynamic
+            # stays ON (it cannot hurt once dynamic=True already generalizes Npad).
+            # cache_size_limit covers the handful of real specializations
+            # (request_moves_left True/False, and a batch-size-1 guard).
             torch._dynamo.config.suppress_errors = True
             torch._dynamo.config.automatic_dynamic_shapes = True
             torch._dynamo.config.cache_size_limit = max(
@@ -117,15 +229,24 @@ class HexfieldEvaluator:
 
     @torch.no_grad()
     def evaluate_payload(self, payload: dict) -> dict:
-        """Synchronous serve: submit the payload and immediately drain it."""
+        """Synchronous serve (eval arena + the non-overlapped self-play path):
+        enqueue the forward and immediately read it back."""
         return self.result(self.submit_payload(payload))
+
+    def perf_trace_report(self) -> dict | None:
+        """Increment-0 GPU-busy report, or None if HEXFIELD_PERF_TRACE is unset.
+        Called by the self-play driver after run_continuous returns."""
+        return self._perf.report() if self._perf is not None else None
 
     @torch.no_grad()
     def submit_payload(self, payload: dict) -> dict:
-        """Parse the request and enqueue every forward group on the GPU without
-        synchronizing: decoded outputs stay on-device and no .cpu() runs here.
-        Returns an opaque handle; call result(handle) to drain it. Paired with
-        result() so the caller can overlap other work between the two."""
+        """Phase 1 of the async serve split (overlap): parse the request and
+        ENQUEUE every forward group on the GPU, but do NOT synchronize — the
+        decoded outputs stay on-device and no .cpu() runs here. Returns an opaque
+        handle. The caller (Rust) can then run the pre-backup select pass with the
+        GIL released while these kernels execute, and only afterwards call
+        result(handle) to drain them. The math is identical to evaluate_payload;
+        only the host/GPU sync point moves."""
         if int(payload["abi"]) != 1:
             raise ValueError(f"unsupported hexfield ABI {payload['abi']}")
         b, total_nodes = (int(x) for x in payload["shape"])
@@ -136,15 +257,27 @@ class HexfieldEvaluator:
         if legal_counts.shape[0] != b:
             raise ValueError("legal_counts byte count mismatch")
         request_ml = bool(payload.get("request_moves_left", False))
+        # Gumbel S2: emit raw pre-softmax policy logits (priors_logits_bytes)
+        # parallel to priors_bytes when asked. Off by default ⇒ no extra column,
+        # reply byte-identical to today.
+        request_logits = bool(payload.get("request_logits", False))
 
         if self._rust_pack:
-            return self._submit_rust_pack(payload, b, offsets, legal_counts, request_ml)
+            # Rust parallel serve-pack: grouping + per-group padding + f16/int
+            # buffer assembly happen GIL-free in parallel Rust; consume the
+            # zero-copy buffers via torch.frombuffer + .to(device). NO Python
+            # plan_groups, NO np_* pad loop, NO astype.
+            return self._submit_rust_pack(
+                payload, b, offsets, legal_counts, request_ml, request_logits
+            )
 
         feats16 = np.frombuffer(payload["node_feats"], dtype=np.float16)
         if feats16.shape[0] != total_nodes * NUM_FEATURES:
             raise ValueError("node_feats byte count mismatch")
-        # Wire feats are f16. Keep them f16 when _f16_feats is set (cuda); the
-        # CPU path and the F32_FEATS toggle upcast to f32.
+        # Keep feats f16: the wire is already f16 and the serve forward runs f16
+        # under autocast, so an astype(float32) would be a wasteful host copy that
+        # doubles the feats H2D. Pack/H2D below build f16 on cuda (half size, no
+        # astype), f32 only on the rare CPU path / the F32_FEATS A/B toggle.
         feats = (
             feats16.reshape(total_nodes, NUM_FEATURES)
             if self._f16_feats
@@ -154,53 +287,78 @@ class HexfieldEvaluator:
         nbr = np.frombuffer(payload["nbr"], dtype=np.uint16).reshape(total_nodes, 6)
 
         sizes = (offsets[1:] - offsets[:-1]).astype(np.int64)
-        # Each group appends GPU tensors to these buffers; the single .cpu() sync
-        # happens in result(). gpu_priors holds one flat tensor per group (the
-        # group's rows' legal-prefix priors, row-major). plan_groups emits groups
-        # in ascending row order, so concatenating them yields the full row-order
-        # flat-priors layout.
+        # Single-D2H discipline: every group appends GPU tensors to these
+        # buffers; the ONE .cpu() sync happens later, in result(). gpu_priors holds
+        # ONE flat tensor PER GROUP (the group's rows' legal-prefix priors already
+        # concatenated row-major); plan_groups emits groups in ascending row order,
+        # so concatenating them is the full row-order flat-priors layout.
         gpu_priors: list[torch.Tensor] = []
         gpu_values: list[torch.Tensor] = []
         gpu_ml: list[torch.Tensor] = []
-        # Defer mode: collect raw per-group outputs and decode in result().
+        gpu_logits: list[torch.Tensor] = []
+        # DEFER mode: collect raw per-group outputs; decode in result() (see
+        # _forward_group) so submit only enqueues forwards and select can overlap.
         deferred: list | None = [] if self._defer_decode else None
 
+        # Increment-0 trace: bracket the forward enqueues with cuda.Events on the
+        # forward stream (no extra sync). Read in result() after the D2H sync.
+        perf_events = self._perf.make_events() if self._perf is not None else None
+        if perf_events is not None:
+            self._perf.on_submit()
+            perf_events[0].record()
+
+        # Padding-aware grouping (rows arrive size-descending): 64-quantized
+        # Npad, batch under the pair ceiling, split to bound padding waste.
         for start, end, pad_to in plan_groups(sizes):
             self._forward_group(
                 feats, qr, nbr, offsets, sizes, legal_counts, start, end, pad_to,
-                request_ml, gpu_values, gpu_ml, gpu_priors, deferred,
+                request_ml, request_logits, gpu_values, gpu_ml, gpu_priors,
+                gpu_logits, deferred,
             )
 
+        if perf_events is not None:
+            perf_events[1].record()
+
         if self._defer_decode:
+            # Raw forwards enqueued; the syncing decode happens in result().
             return {
                 "b": b,
                 "request_ml": request_ml,
+                "request_logits": request_logits,
                 "legal_counts": legal_counts,
                 "deferred": deferred,
+                "perf_events": perf_events,
             }
-        # Concatenate on-GPU; the D2H syncs happen in result().
+        # Concatenate on-GPU (still no D2H); the syncs happen in result().
         return {
             "b": b,
             "request_ml": request_ml,
+            "request_logits": request_logits,
             "legal_counts": legal_counts,
             "values_gpu": torch.cat(gpu_values),
             "ml_gpu": torch.cat(gpu_ml) if request_ml else None,
             "priors_gpu": torch.cat(gpu_priors),
+            "logits_gpu": torch.cat(gpu_logits) if request_logits else None,
+            "perf_events": perf_events,
         }
 
     @torch.no_grad()
-    def _submit_rust_pack(self, payload, b, offsets, legal_counts, request_ml) -> dict:
-        """Consume the Rust serve-pack (HEXFIELD_RUST_PACK).
+    def _submit_rust_pack(
+        self, payload, b, offsets, legal_counts, request_ml, request_logits
+    ) -> dict:
+        """Rust parallel serve-pack consumption (HEXFIELD_RUST_PACK).
 
         Hands the CSR-flat wire bytes (f16 feats, i16 coords, u16 nbr) + the i64
-        row offsets to `_rust.build_serve_groups`, which runs the same grouping as
-        plan_groups and assembles each group's padded buffers: feats (f16, pad=0),
-        nbr (i32, fill=pad_to, sentinel->pad_to), mask (u8, 1 at real nodes),
-        coords (i32, pad=0). Each group's four buffers come back as read-only
-        zero-copy buffers; torch.frombuffer views them and .to(device) copies them
-        to the GPU. The int32 nbr/coords are cast to int64 on-device (the model's
-        gather needs int64). The forward tail is the shared _run_forward."""
-        from hexfield import _rust  # only the rust-pack path needs it
+        row offsets to `_rust.build_serve_groups`, which runs the IDENTICAL
+        plan_groups planner and assembles every group's padded buffers in
+        PARALLEL (GIL-free): feats (f16, pad=0), nbr (i32, fill=pad_to,
+        sentinel->pad_to), mask (u8, 1 at real nodes), coords (i32, pad=0). Each
+        group's four buffers come back as read-only zero-copy #[pyclass] buffers;
+        torch.frombuffer views them in place and .to(device) copies straight to
+        the GPU — NO Python pad loop, NO astype. The int32 nbr/coords are cast to
+        int64 ON-DEVICE (value-preserving; the model's gather needs int64). The
+        forward tail is the SHARED _run_forward, byte-identical to the CSR path."""
+        from hexfield import _rust  # local import: only the rust-pack path needs it
 
         dev = self.device
         groups = _rust.build_serve_groups(
@@ -213,15 +371,22 @@ class HexfieldEvaluator:
         gpu_priors: list[torch.Tensor] = []
         gpu_values: list[torch.Tensor] = []
         gpu_ml: list[torch.Tensor] = []
+        gpu_logits: list[torch.Tensor] = []
         deferred: list | None = [] if self._defer_decode else None
+
+        # Increment-0 trace: bracket the forward enqueues (see submit_payload).
+        perf_events = self._perf.make_events() if self._perf is not None else None
+        if perf_events is not None:
+            self._perf.on_submit()
+            perf_events[0].record()
 
         for grp in groups:
             start = grp["start"]
             end = grp["end"]
             gn = grp["g"]
             p = grp["pad_to"]
-            # frombuffer views the zero-copy Rust buffer; .to(dev) copies it to
-            # the GPU.
+            # frombuffer views the zero-copy Rust buffer; .to(dev) copies it
+            # straight to the GPU (pageable -> synchronous H2D).
             d_feats = (
                 torch.frombuffer(grp["feats"], dtype=torch.float16)
                 .reshape(gn, p, NUM_FEATURES)
@@ -246,56 +411,70 @@ class HexfieldEvaluator:
                 .to(torch.int64)
             )
             self._run_forward(
-                d_feats, d_nbr, d_mask, d_coords, gn, request_ml, legal_counts,
-                start, end, gpu_values, gpu_ml, gpu_priors, deferred,
+                d_feats, d_nbr, d_mask, d_coords, gn, request_ml, request_logits,
+                legal_counts, start, end, gpu_values, gpu_ml, gpu_priors,
+                gpu_logits, deferred,
             )
+
+        if perf_events is not None:
+            perf_events[1].record()
 
         if self._defer_decode:
             return {
                 "b": b,
                 "request_ml": request_ml,
+                "request_logits": request_logits,
                 "legal_counts": legal_counts,
                 "deferred": deferred,
+                "perf_events": perf_events,
             }
         return {
             "b": b,
             "request_ml": request_ml,
+            "request_logits": request_logits,
             "legal_counts": legal_counts,
             "values_gpu": torch.cat(gpu_values),
             "ml_gpu": torch.cat(gpu_ml) if request_ml else None,
             "priors_gpu": torch.cat(gpu_priors),
+            "logits_gpu": torch.cat(gpu_logits) if request_logits else None,
+            "perf_events": perf_events,
         }
 
     @torch.no_grad()
     def result(self, handle: dict) -> dict:
-        """Drain a submit_payload() handle. The .cpu() calls here are the single
-        device->host sync for the whole flush."""
+        """Phase 2: drain a submit_payload() handle. The .cpu() calls here are the
+        single device->host sync for the whole flush; bytes are identical to the
+        synchronous path."""
         b = handle["b"]
         request_ml = handle["request_ml"]
+        request_logits = handle.get("request_logits", False)
         legal_counts = handle["legal_counts"]
 
-        # Defer mode: the per-group decode/softmax/gather was held out of submit.
-        # Run it now (before the D2H below), then fall through to the concat+.cpu()
-        # path.
+        # DEFER mode: the per-group decode/softmax/gather was held out of submit so
+        # the forwards could overlap the select pass. Do it now (still BEFORE the one
+        # D2H below), then fall through to the identical concat+.cpu() path.
         if "deferred" in handle:
-            gpu_values, gpu_ml, gpu_priors = [], [], []
+            gpu_values, gpu_ml, gpu_priors, gpu_logits = [], [], [], []
             for out, start, end in handle["deferred"]:
-                value, ml, priors_flat = self._decode_group(
-                    out, legal_counts, start, end, request_ml
+                value, ml, priors_flat, logits_flat = self._decode_group(
+                    out, legal_counts, start, end, request_ml, request_logits
                 )
                 gpu_values.append(value)
                 if request_ml:
                     gpu_ml.append(ml)
                 gpu_priors.append(priors_flat)
+                if request_logits:
+                    gpu_logits.append(logits_flat)
             handle["values_gpu"] = torch.cat(gpu_values)
             handle["priors_gpu"] = torch.cat(gpu_priors)
             handle["ml_gpu"] = torch.cat(gpu_ml) if request_ml else None
+            handle["logits_gpu"] = torch.cat(gpu_logits) if request_logits else None
 
         values_out = handle["values_gpu"].cpu().numpy().astype(np.float32, copy=False)
-        # priors_gpu is torch.cat over the per-row legal-prefix priors in row
-        # order, so flat_priors is the sum(legal_counts) positional layout the Rust
-        # parser walks. Emitted as one contiguous f32 buffer; the row split happens
-        # Rust-side from legal_counts.
+        # priors_gpu is already torch.cat over the per-row legal-prefix priors in
+        # row order, so flat_priors IS the sum(legal_counts) positional layout the
+        # Rust parser walks. Emit it directly (one contiguous f32 buffer); the row
+        # split happens Rust-side from legal_counts on the wire.
         flat_priors = np.ascontiguousarray(
             handle["priors_gpu"].cpu().numpy(), dtype=np.float32
         )
@@ -308,17 +487,32 @@ class HexfieldEvaluator:
             reply["moves_left_bytes"] = (
                 handle["ml_gpu"].cpu().numpy().astype(np.float32, copy=False).tobytes()
             )
+        if request_logits:
+            # Raw pre-softmax logits, SAME positional layout as priors_bytes
+            # (per-row legal prefix, row order). Gumbel S2.
+            flat_logits = np.ascontiguousarray(
+                handle["logits_gpu"].cpu().numpy(), dtype=np.float32
+            )
+            reply["priors_logits_bytes"] = flat_logits.tobytes()
+        # Increment-0 trace: the .cpu() syncs above guarantee this flush's forward
+        # events are complete; read their elapsed device time now. Bench-only.
+        if self._perf is not None:
+            self._perf.on_result(handle.get("perf_events"), int(b))
         return reply
 
     def _forward_group(
         self, feats, qr, nbr, offsets, sizes, legal_counts, start, end, pad_to,
-        request_ml, gpu_values, gpu_ml, gpu_priors, deferred=None,
+        request_ml, request_logits, gpu_values, gpu_ml, gpu_priors, gpu_logits,
+        deferred=None,
     ) -> None:
         g = end - start
-        # Build the padded (g, pad_to, *) numpy buffers per field, then one
-        # from_numpy + .to(device) per field. Fields: feats (f16 on cuda, f32
-        # otherwise; pad 0), nbr (int64, sentinel->pad_to, pad pad_to), mask (bool,
-        # True at real nodes), coords (int64, pad 0).
+        # Vectorized host pack: build the padded (g, pad_to, *) numpy buffers in
+        # one pass per field, then a single from_numpy + .to(device) per field.
+        # Byte-for-byte identical to the prior per-row from_numpy/torch.where
+        # loop (same fp32 feats, same sentinel->pad_to neighbor remap, same
+        # int64 coords, same bool mask), only without g separate host copies.
+        # f16 feats on cuda -> half the H2D bytes + no astype copy (CPU path stays
+        # f32; numpy upcasts the f16 source on assignment there).
         feat_dtype = np.float16 if self._f16_feats else np.float32
         np_feats = np.zeros((g, pad_to, NUM_FEATURES), dtype=feat_dtype)
         np_nbr = np.full((g, pad_to, 6), pad_to, dtype=np.int64)
@@ -340,9 +534,12 @@ class HexfieldEvaluator:
 
         device = self.device
         use_fp16 = device.type == "cuda"
-        # On cuda, pin each host buffer and copy with non_blocking=True so the H2D
-        # can overlap queued GPU work; the consuming forward runs on the same
-        # stream. CPU device uses a plain blocking copy.
+        # Pinned + non_blocking H2D (CUDA): page-lock each freshly-allocated host
+        # buffer so the driver can DMA it asynchronously and overlap the copies
+        # with queued GPU work, instead of a synchronous pageable bounce copy.
+        # Bit-identical — pinning changes only the host allocator and non_blocking
+        # only the copy timing; the consuming forward runs on the same stream so
+        # ordering holds. CPU device keeps the plain blocking copy.
 
         def _h2d(t):
             return t.pin_memory().to(device, non_blocking=True) if use_fp16 else t.to(device)
@@ -352,27 +549,35 @@ class HexfieldEvaluator:
         d_mask = _h2d(batch_mask)
         d_coords = _h2d(batch_coords)
         self._run_forward(
-            d_feats, d_nbr, d_mask, d_coords, g, request_ml, legal_counts,
-            start, end, gpu_values, gpu_ml, gpu_priors, deferred,
+            d_feats, d_nbr, d_mask, d_coords, g, request_ml, request_logits,
+            legal_counts, start, end, gpu_values, gpu_ml, gpu_priors, gpu_logits,
+            deferred,
         )
 
     def _run_forward(
-        self, d_feats, d_nbr, d_mask, d_coords, g, request_ml, legal_counts,
-        start, end, gpu_values, gpu_ml, gpu_priors, deferred,
+        self, d_feats, d_nbr, d_mask, d_coords, g, request_ml, request_logits,
+        legal_counts, start, end, gpu_values, gpu_ml, gpu_priors, gpu_logits,
+        deferred,
     ) -> None:
-        """Shared forward tail for the CSR (_forward_group) and Rust-pack
-        (_submit_rust_pack) packers. Takes the four device tensors in their final
-        dtypes (feats f16/f32, nbr int64, mask bool, coords int64) and runs the
-        compiled/eager forward: the batch-1 duplicate-to-2 guard, mark_dynamic,
-        autocast, and the defer-or-decode path."""
+        """Shared forward tail for BOTH the CSR (_forward_group) and Rust-pack
+        (_submit_rust_pack) packers. Takes the four DEVICE tensors already in
+        their final dtypes (feats f16/f32, nbr int64, mask bool, coords int64)
+        and runs the IDENTICAL compiled/eager forward + the singleton-batch-2
+        dup + mark_dynamic + autocast + FlexAttention + defer-or-decode path.
+        The ONLY difference between the two packers is how these four device
+        tensors are produced; folding the tail here guarantees byte-identical
+        downstream behaviour (the parity-confidence linchpin)."""
         device = self.device
         use_fp16 = device.type == "cuda"
-        # Mark both varying dims dynamic: batch (dim 0) and cell-count Npad (dim 1).
-        # A concrete batch of 1 is specialized away by dynamo, leaving Npad the
-        # sole free symbol, which trips Inductor's CantSplit on the attention
-        # head-merge reshape. A size-1 group is duplicated to batch 2 (the model is
-        # per-row batch-inert, so row 0's outputs are unchanged) and the twin is
-        # sliced off after.
+        # One dynamic graph for every shape (see __init__): mark BOTH varying dims
+        # dynamic — batch (dim 0) and cell-count Npad (dim 1).
+        #
+        # A concrete batch of 1 is the one shape dynamo specializes away, leaving
+        # Npad the sole free symbol — which then trips Inductor's CantSplit on the
+        # attention head-merge reshape. With batch >= 2 the graph compiles cleanly
+        # for every Npad, so duplicate a size-1 group to batch 2 (the model is
+        # batch-inert per row, so row 0's outputs are unchanged) and slice the twin
+        # off after.
         use_compiled = self._use_compile and self._compiled_fpv is not self._raw_fpv
         fpv = self._compiled_fpv if use_compiled else self._raw_fpv
         pad_batch = use_compiled and g == 1
@@ -383,8 +588,8 @@ class HexfieldEvaluator:
             d_coords = d_coords.repeat(2, 1, 1)
         if use_compiled:
             for t in (d_feats, d_nbr, d_mask, d_coords):
-                torch._dynamo.mark_dynamic(t, 0)  # batch
-                torch._dynamo.mark_dynamic(t, 1)  # Npad
+                torch._dynamo.mark_dynamic(t, 0)  # batch (>= 2 here) dynamic
+                torch._dynamo.mark_dynamic(t, 1)  # Npad dynamic
         with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=use_fp16):
             out = fpv(
                 d_feats,
@@ -393,35 +598,43 @@ class HexfieldEvaluator:
                 d_coords,
                 request_moves_left=request_ml,
             )
-        if pad_batch:  # drop the duplicated twin row -> back to g == 1
+        if pad_batch:  # drop the duplicated twin row -> back to the true g == 1
             out = {k: v[:g] for k, v in out.items()}
-        # Defer mode: stash the raw forward outputs and run the per-group
-        # decode/softmax/gather in result(). That decode has two device syncs (the
-        # group_counts H2D and the priors[legal] gather), so running it here would
-        # make submit_payload block on each group's forward.
+        # DEFER mode (HEXFIELD_DEFER_DECODE): stash the RAW forward outputs and do
+        # the per-group decode/softmax/gather later, in result(). The decode has two
+        # device syncs — the group_counts H2D and the priors[legal] boolean gather's
+        # nonzero — so doing it HERE makes submit_payload block on each group's
+        # forward, defeating the submit->select overlap (submit can't return until
+        # the GPU is done). Deferring to result() lets submit only ENQUEUE the
+        # forwards (truly async); the pre-backup select pass then overlaps them.
+        # Math is identical (same ops/order) -> bit-identical outputs.
         if deferred is not None:
             deferred.append((out, start, end))
             return
-        value, ml, priors_flat = self._decode_group(out, legal_counts, start, end, request_ml)
+        value, ml, priors_flat, logits_flat = self._decode_group(
+            out, legal_counts, start, end, request_ml, request_logits
+        )
         gpu_values.append(value)
         if request_ml:
             gpu_ml.append(ml)
         gpu_priors.append(priors_flat)
+        if request_logits:
+            gpu_logits.append(logits_flat)
 
-    def _decode_group(self, out, legal_counts, start, end, request_ml):
+    def _decode_group(self, out, legal_counts, start, end, request_ml, request_logits=False):
         """Per-group serve decode: binned value, moves-left, and the flattened
-        legal-prefix prior gather. Contains the two device syncs (group_counts H2D
-        and the priors[legal] gather); invoked from submit (immediate) or result
-        (deferred). Decoded value/ml are (g,) GPU tensors; priors[legal] flattens
-        each row's first legal_counts[row] entries in row order (`legal` is
-        row-major and l==0 rows select nothing)."""
+        legal-prefix prior gather. Holds the two device syncs (group_counts H2D +
+        the priors[legal] nonzero); invoked from submit (immediate) or result
+        (deferred). Decoded values/ml are (g,) GPU tensors; priors[legal] flattens
+        each row's first legal_counts[row] entries in row order (== the old per-row
+        slice loop, since `legal` is row-major and l==0 rows select nothing)."""
         value = decode_binned_value(out["value"].float())
         ml = decode_moves_left(out["moves_left"].float()) if request_ml else None
         logits = out["policy"].float()
         # Set columns at index >= the row's legal count to -inf before one batched
-        # softmax. Model logits are mask-zeroed (not -inf), so a bare slice softmax
-        # would let the zeros enter the denominator. The -inf columns contribute
-        # exp(-inf)=0, so each [:l] slice equals torch.softmax(logits[k, :l]).
+        # softmax (logits are mask-ZEROED, not -inf, in the model, so a bare slice
+        # softmax would let the zeros pollute the denominator). The -inf columns add
+        # exp(-inf)=0 to num+denom, so each [:l] slice equals torch.softmax(logits[k, :l]).
         group_counts = torch.from_numpy(
             np.ascontiguousarray(legal_counts[start:end])
         ).to(logits.device, dtype=torch.long)
@@ -429,4 +642,9 @@ class HexfieldEvaluator:
         legal = col_idx.unsqueeze(0) < group_counts.unsqueeze(1)  # (g, Npad)
         masked = logits.masked_fill(~legal, float("-inf"))
         priors = torch.softmax(masked, dim=1)  # fp32, GPU; rows with l==0 -> NaN
-        return value, ml, priors[legal]
+        # Gumbel S2: gather the RAW (pre-softmax, un-masked) logits over the SAME
+        # legal mask / row-major order as priors[legal], so the flat layout is
+        # positionally identical to priors_bytes. Only when requested (else the
+        # extra gather/D2H is skipped and the reply is byte-identical to today).
+        logits_flat = logits[legal] if request_logits else None
+        return value, ml, priors[legal], logits_flat

@@ -22,6 +22,11 @@ pub struct RustEvaluation {
     pub priors: Vec<(PackedCoord, f32)>,
     /// Moves-left estimate in decisions [0, 512], or None when the reply omitted it.
     pub moves_left: Option<f32>,
+    /// Raw pre-softmax policy logits per legal move, aligned to the same legal
+    /// action set as `priors` (NOT sorted/normalized). `None` when the reply
+    /// omitted `priors_logits_bytes` (production / parity, where Gumbel is off).
+    /// Consumed by the Gumbel target / root sampler / non-root selection.
+    pub logits: Option<Vec<(PackedCoord, f32)>>,
 }
 
 #[derive(Clone, Debug, Default)]

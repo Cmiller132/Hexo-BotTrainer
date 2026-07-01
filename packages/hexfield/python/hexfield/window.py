@@ -31,7 +31,7 @@ from typing import TYPE_CHECKING, Sequence
 
 import numpy as np
 
-from .shards import SCHEMA_VERSION
+from .shards import _ACCEPTED_SCHEMA_VERSIONS, SCHEMA_VERSION
 
 if TYPE_CHECKING:
     from .buffer_manifest import ShardEntry
@@ -47,6 +47,7 @@ SCALAR_COLS: tuple[str, ...] = (
     "moves_left",
     "outcome_valid",
     "policy_valid",
+    "gumbel_present",  # main_6 Gumbel S5: 1 ⇒ row carries a π' target; 0/absent ⇒ visit fallback
     "policy_surprise",
     "first_q",
     "first_r",
@@ -71,7 +72,7 @@ BLOCK_COLS: tuple[str, ...] = ("stvalue", "stvalue_mask")
 CSR_GROUPS: tuple[tuple[str, tuple[str, ...], bool], ...] = (
     ("hist_off", ("hist_qr",), True),
     ("hist_off", ("hist_owner", "hist_pidx"), False),
-    ("pol_off", ("pol_act", "pol_w", "q_pol_q"), False),
+    ("pol_off", ("pol_act", "pol_w", "q_pol_q", "gumbel_pol_w", "prior_logit"), False),
     ("opp_off", ("opp_act", "opp_w"), False),
     ("own_hot_off", ("own_hot_qr",), True),
     ("opp_hot_off", ("opp_hot_qr",), True),
@@ -118,6 +119,7 @@ class PackedRowView:
     moves_left: float
     outcome_valid: int  # 1 completed / 0 truncated (gates value/stvalue/cell_q)
     policy_valid: int  # 1 full / 0 fast (gates policy/opp/soft/cell_q)
+    gumbel_present: int  # main_6 Gumbel S5: 1 ⇒ π' target present; 0 ⇒ visit fallback
     policy_surprise: float
     first_q: int
     first_r: int
@@ -133,6 +135,8 @@ class PackedRowView:
     pol_act: np.ndarray  # (P,) u32 view
     pol_w: np.ndarray  # (P,) f32 view
     q_pol_q: np.ndarray  # (P,) f32 view; one child Q per recorded action (== pol_act)
+    gumbel_pol_w: np.ndarray  # (P,) f32 view; π' weight aligned to pol_act (Gumbel S5)
+    prior_logit_arr: np.ndarray  # (P,) f32 view; raw root logit aligned to pol_act (Gumbel S5)
     opp_act: np.ndarray  # (O,) u32 view
     opp_w: np.ndarray  # (O,) f32 view
     # standing-cell qr CSR (flat pair-packed i16 views)
@@ -177,6 +181,28 @@ class PackedRowView:
 
     def q_policy(self) -> tuple[tuple[int, float], ...]:
         return tuple((int(self.pol_act[k]), float(self.q_pol_q[k])) for k in range(self.pol_act.shape[0]))
+
+    def gumbel_policy(self) -> tuple[tuple[int, float], ...]:
+        """main_6 Gumbel S5: the improved-policy target π' aligned to ``pol_act``.
+
+        Empty when the row carries no target (``gumbel_present == 0``) so the
+        downstream expand falls back to the visit target. When present, the
+        weights are the per-action π' mass (renormalized over support at expand)."""
+        if int(self.gumbel_present) == 0:
+            return ()
+        return tuple(
+            (int(self.pol_act[k]), float(self.gumbel_pol_w[k]))
+            for k in range(self.pol_act.shape[0])
+        )
+
+    def prior_logit(self) -> tuple[tuple[int, float], ...]:
+        """main_6 Gumbel S5: the raw root logits aligned to ``pol_act`` (audit)."""
+        if int(self.gumbel_present) == 0:
+            return ()
+        return tuple(
+            (int(self.pol_act[k]), float(self.prior_logit_arr[k]))
+            for k in range(self.pol_act.shape[0])
+        )
 
     def opp_policy(self) -> tuple[tuple[int, float], ...]:
         return tuple((int(self.opp_act[k]), float(self.opp_w[k])) for k in range(self.opp_act.shape[0]))
@@ -258,6 +284,7 @@ class PackedWindow:
             moves_left=float(c["moves_left"][i]),
             outcome_valid=int(c["outcome_valid"][i]),
             policy_valid=int(c["policy_valid"][i]),
+            gumbel_present=int(c["gumbel_present"][i]),
             policy_surprise=float(c["policy_surprise"][i]),
             first_q=int(c["first_q"][i]),
             first_r=int(c["first_r"][i]),
@@ -270,6 +297,8 @@ class PackedWindow:
             pol_act=c["pol_act"][p0:p1],
             pol_w=c["pol_w"][p0:p1],
             q_pol_q=c["q_pol_q"][p0:p1],
+            gumbel_pol_w=c["gumbel_pol_w"][p0:p1],
+            prior_logit_arr=c["prior_logit"][p0:p1],
             opp_act=c["opp_act"][o0:o1],
             opp_w=c["opp_w"][o0:o1],
             own_hot_qr=qr_slice("own_hot"),
@@ -292,6 +321,7 @@ _SCALAR_DTYPES: dict[str, np.dtype] = {
     "moves_left": np.dtype(np.float32),
     "outcome_valid": np.dtype(np.uint8),
     "policy_valid": np.dtype(np.uint8),
+    "gumbel_present": np.dtype(np.uint8),
     "policy_surprise": np.dtype(np.float32),
     "first_q": np.dtype(np.int16),
     "first_r": np.dtype(np.int16),
@@ -304,6 +334,8 @@ _CSR_DTYPES: dict[str, np.dtype] = {
     "pol_act": np.dtype(np.uint32),
     "pol_w": np.dtype(np.float32),
     "q_pol_q": np.dtype(np.float32),
+    "gumbel_pol_w": np.dtype(np.float32),
+    "prior_logit": np.dtype(np.float32),
     "opp_act": np.dtype(np.uint32),
     "opp_w": np.dtype(np.float32),
     "own_hot_qr": np.dtype(np.int16),
@@ -380,9 +412,10 @@ def load_packed_shard(path: Path) -> PackedWindow:
         if "schema_version" not in files:
             raise ValueError(f"{path.name}: not a hexfield_compact_v1 shard (no schema_version)")
         version = int(data["schema_version"])
-        if version != SCHEMA_VERSION:
+        if version not in _ACCEPTED_SCHEMA_VERSIONS:
             raise ValueError(
-                f"unsupported hexfield shard schema {version} (loader expects {SCHEMA_VERSION})"
+                f"unsupported hexfield shard schema {version} "
+                f"(loader accepts {_ACCEPTED_SCHEMA_VERSIONS})"
             )
         n = int(data["num_rows"])
         horizons = tuple(int(h) for h in data["horizons"])
@@ -396,6 +429,11 @@ def load_packed_shard(path: Path) -> PackedWindow:
                 # to all-1 (every row treated as completed / full).
                 cols[name] = np.ones(n, dtype=_SCALAR_DTYPES[name])
                 continue
+            if name == "gumbel_present" and name not in files:
+                # main_6 Gumbel S5: v1 shards predate the improved-policy target →
+                # default all-0 (no π' target ⇒ the loss falls back to visit).
+                cols[name] = np.zeros(n, dtype=_SCALAR_DTYPES[name])
+                continue
             cols[name] = np.ascontiguousarray(data[name])
         for name in BLOCK_COLS:
             cols[name] = np.ascontiguousarray(data[name])
@@ -403,6 +441,13 @@ def load_packed_shard(path: Path) -> PackedWindow:
             cols[off] = np.ascontiguousarray(data[off]).astype(np.int64, copy=False)
         for _off, datas, _doubled in CSR_GROUPS:
             for d in datas:
+                if d in ("gumbel_pol_w", "prior_logit") and d not in files:
+                    # main_6 Gumbel S5: v1 shards lack these per-action columns →
+                    # zero-fill aligned to pol_act (the pol_off group's length) so
+                    # downstream slicing stays valid; gumbel_present=0 ignores them.
+                    pol_total = int(data["pol_act"].shape[0])
+                    cols[d] = np.zeros(pol_total, dtype=_CSR_DTYPES[d])
+                    continue
                 cols[d] = np.ascontiguousarray(data[d])
 
     generation = np.full(n, _shard_generation(path, n), dtype=np.int32)

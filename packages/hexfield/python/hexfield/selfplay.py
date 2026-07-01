@@ -164,6 +164,28 @@ class ContinuousDriver:
                 bytes(payload["root_prior_policy_weights_bytes"]), dtype=np.float32
             )
             surprise = _policy_surprise_kl(ids, weights, prior_ids, prior_weights)
+            # main_6 #3 (Gumbel S5): the improved-policy target π' + raw root logits
+            # are present ONLY when gumbel_target is on (Rust omits the keys in
+            # parity/production). Absent ⇒ empty tuples ⇒ visit-target fallback.
+            gumbel_pairs: tuple[tuple[int, float], ...] = ()
+            prior_logit_pairs: tuple[tuple[int, float], ...] = ()
+            if "gumbel_policy_action_ids_bytes" in payload:
+                g_ids = np.frombuffer(
+                    bytes(payload["gumbel_policy_action_ids_bytes"]), dtype=np.uint32
+                )
+                g_weights = np.frombuffer(
+                    bytes(payload["gumbel_policy_weights_bytes"]), dtype=np.float32
+                )
+                gumbel_pairs = tuple(
+                    zip((int(a) for a in g_ids), (float(w) for w in g_weights))
+                )
+                if "root_prior_logits_bytes" in payload:
+                    g_logits = np.frombuffer(
+                        bytes(payload["root_prior_logits_bytes"]), dtype=np.float32
+                    )
+                    prior_logit_pairs = tuple(
+                        zip((int(a) for a in g_ids), (float(l) for l in g_logits))
+                    )
             phase = record_phase(tape.ply)
             first_stone = (
                 (tape.records[-1][0], tape.records[-1][1]) if phase == "SecondStone" else None
@@ -184,6 +206,8 @@ class ContinuousDriver:
                 opp_win=opp_win,
                 policy=tuple(zip((int(a) for a in ids), (float(w) for w in weights))),
                 q_policy=tuple(zip((int(a) for a in ids), (float(q) for q in qs))),
+                gumbel_policy=gumbel_pairs,
+                prior_logit=prior_logit_pairs,
                 policy_surprise=float(surprise),
                 metadata={"pcr_full": True},
             )
@@ -481,6 +505,13 @@ def generate_selfplay_epoch(*, ctx, components, epoch: int, games_per_epoch: int
         "scheduler": {k: v for k, v in scheduler_stats.items() if not isinstance(v, dict)},
         **driver.stats(),
     }
+    # main_6 Increment-0: attach the cuda.Event GPU-busy report (bench-only;
+    # None unless HEXFIELD_PERF_TRACE=1). Lets a bench compare depth-2 /
+    # complete-overlap ON vs OFF on the PRIMARY metric (busy fraction), not
+    # nvidia-smi. getattr guards evaluators that predate the method.
+    perf_report = getattr(evaluator, "perf_trace_report", lambda: None)()
+    if perf_report is not None:
+        result["perf_trace"] = perf_report
     diag_path = ctx.diagnostics_dir / f"hexfield.selfplay.epoch_{epoch:06d}.json"
     diag_path.write_text(json.dumps(result, indent=2, default=str), encoding="utf-8")
     return result

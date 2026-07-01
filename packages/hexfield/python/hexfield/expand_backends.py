@@ -60,6 +60,7 @@ _RUST_SCALAR_COLS = (
     "policy_surprise",
     "outcome_valid",
     "policy_valid",
+    "gumbel_present",
     "first_q",
     "first_r",
     "first_present",
@@ -72,6 +73,8 @@ _RUST_CSR_DATA = (
     "pol_act",
     "pol_w",
     "q_pol_q",
+    "gumbel_pol_w",
+    "prior_logit",
     "opp_act",
     "opp_w",
     "own_hot_qr",
@@ -133,6 +136,8 @@ def _row_view_to_sample(view: PackedRowView) -> HexfieldSampleData:
         policy=view.policy(),
         opp_policy=view.opp_policy(),
         q_policy=view.q_policy(),
+        gumbel_policy=view.gumbel_policy(),
+        prior_logit=view.prior_logit(),
         value=view.value,
         short_term_value=view.short_term_value(),
         moves_left=view.moves_left,
@@ -296,6 +301,17 @@ def _reassemble_rust_rows(
     # Per-cell Q target + presence mask follow the SAME pol_off slices as policy.
     cell_q = np.frombuffer(bytes(result["cell_q"]), dtype=np.float32, count=total_legal)
     cell_q_mask = np.frombuffer(bytes(result["cell_q_mask"]), dtype=np.float32, count=total_legal)
+    # main_6 Gumbel S5: dense π' target + dense raw logits follow the SAME pol_off
+    # slices as policy; gumbel_policy_valid is per-row. Forward-compat: an older
+    # .so omits these keys ⇒ all-zero / valid 0.0 ⇒ the loss falls back to visit.
+    if "gumbel_policy" in result:
+        gumbel_policy = np.frombuffer(bytes(result["gumbel_policy"]), dtype=np.float32, count=total_legal)
+        prior_logit = np.frombuffer(bytes(result["prior_logit"]), dtype=np.float32, count=total_legal)
+        gumbel_policy_valid = np.frombuffer(bytes(result["gumbel_policy_valid"]), dtype=np.float32, count=r)
+    else:
+        gumbel_policy = np.zeros(total_legal, dtype=np.float32)
+        prior_logit = np.zeros(total_legal, dtype=np.float32)
+        gumbel_policy_valid = np.zeros(r, dtype=np.float32)
     policy_surprise = np.frombuffer(bytes(result["policy_surprise"]), dtype=np.float32, count=r)
     # opp_coverage is f64 (see replay_expand.rs RowOut::opp_coverage).
     opp_coverage = np.frombuffer(bytes(result["opp_coverage"]), dtype=np.float64, count=r)
@@ -361,6 +377,9 @@ def _reassemble_rust_rows(
                 cell_q=cell_q[pa:pb].copy(),
                 cell_q_mask=cell_q_mask[pa:pb].copy(),
                 policy_surprise=float(policy_surprise[k]),
+                gumbel_policy=gumbel_policy[pa:pb].copy(),
+                gumbel_policy_valid=float(gumbel_policy_valid[k]),
+                prior_logit=prior_logit[pa:pb].copy(),
             )
         )
     return rows, valid
