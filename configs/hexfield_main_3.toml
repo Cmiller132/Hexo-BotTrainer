@@ -1,14 +1,3 @@
-# hexfield production run 3 (KataGo replay-buffer port, PLAN §7/§10): a FRESH
-# run that ships the dense_cnn_restnet-style replay buffer (power-law taper
-# window + recent-window cut + keep_prob Bernoulli + train-bucket reuse governor
-# + md5 split + persisted train_state + packed columnar in-RAM window +
-# multithreaded Rust expand). Copied from hexfield_main_1.toml; only run.name,
-# output_dir, the [model.config.training] block (the new KataGo knobs), and
-# expand_backend differ. The live hexfield_main_2 run is NOT touched — it finishes
-# undisturbed (PLAN §1 non-goal, §10 rollout). Owner directive 2026-06-12 search
-# knobs preserved verbatim: 512 visits, PCR fast=128 at 33% full. Warm-start: the
-# BC prefit (same as main_1, spec §7) — a fresh-governor warm start, NOT a resume.
-
 [model]
 name = "hexfield"
 module = "hexfield.plugin"
@@ -21,27 +10,8 @@ search_visits = 512
 pcr_full_proportion = 0.33
 pcr_fast_visits = 128
 active_games = 96
-# c_puct sweep candidates to try: {1.0, 1.5, 2.0, 2.5} (knob only, no code change).
 c_puct = 1.5
 virtual_batch_size = 4
-# flush_target must be ABOVE max in-flight (active_games*virtual_batch_size) so
-# the flush is select-exhaustion-driven, not a stall waiting for an unreachable
-# full batch (flush_target==in-flight HANGS; <in-flight caps the batch small).
-#
-# 2026-06-15 (forward-rewrite session): active_games REVERTED 192->64.
-# The prior 64->192 bump set active_games == games_per_epoch (192), which kills
-# the continuous REFILL: with no fresh games replacing finished ones, all games
-# drain into the slow large-support late game TOGETHER (a "cohort"), and live
-# full-epoch throughput fell to ~2.2 pos/s (the 60s early-game sweep that
-# motivated 192 measured ply-~7 positions, not the late game that dominates an
-# epoch). Keeping active_games (64) < games_per_epoch (192) restores the refill
-# MIX (192-64 refills => early/mid/late games co-resident, so the cheap early
-# positions keep throughput up). 64 is the historically PROVEN value: epochs
-# 11-30 averaged ~3.7 pos/s at ac64 (vs 2.2 at ac192). With the bias-build
-# forward rewrite (~2.2x late-game forward, ~1.5x end-to-end) on top, the epoch
-# average should land materially above 3.7. (NOTE: the lategame_bench refill
-# numbers were early-game-biased and over-stated; 64 is chosen on the proven
-# full-epoch data, not that bench.) In-flight 64*4=256 < 1024.
 flush_target = 1024
 active_root_limit = 192
 root_dirichlet_total_alpha = 10.83
@@ -56,62 +26,32 @@ policy_init_avg_plies = 4.0
 policy_init_max_plies = 8
 policy_init_temperature = 1.4
 temperature = 1.0
-# Temperature reform (exploration-study workflow, 2026-06-18): slower decay + higher
-# floor so the mid/endgame isn't played near-greedy. The halflife (30) was tuned for
-# ~40-ply games but games run 170+ ply now, so the floor was reached at ~ply 90 and
-# the decisive mid/endgame collapsed to one greedy line. halflife 30->60, floor
-# 0.1->0.15 push the floor-reach point out to ~ply 165 (t=max(floor,1.0*0.5^(ply/60))).
-# Paired with truncated-game training so the longer games this produces are NOT wasted.
 temperature_floor = 0.15
 temperature_halflife_plies = 60.0
-# Root-policy temperature: FLAT 1.07, no ramp (early=0/halflife=0 => scheduler holds 1.07 every ply).
 root_policy_temperature = 1.07
 root_policy_temperature_early = 0.0
 root_policy_temperature_halflife = 0.0
-# Moves-left (decisiveness) utility — Stage 1 retune (aggression-design workflow,
-# 2026-06-18). Both knobs override SelfplayConfig defaults (config.py:58,60) via
-# build_divergence_overrides -> Rust; no rebuild, effective on next restart.
-# ml_two_sided=false: the in-tree ml_bonus (tree.rs:662) + final-pick (search.rs:367)
-#   now favor FAST WINS only and NO LONGER reward dragging out LOSSES (prod default
-#   was true). Pure upside for "end games sooner"; shifts losing-side data to shorter
-#   losses. ml_weight=0.03 / ml_scale=32 / ml_q_gate=0.6 / moves_left_utility stay at
-#   production (deepen those only if this stage is clean but insufficient).
-# ml_final_pick_band 0.05 -> 0.08: broader decisive root tie-break among LCB-tied
-#   moves (worst case costs only this band of value among already-equal moves).
-# Validate >=8-10 epochs: eval ladder within noise + won-game p90/p95 length drops +
-#   moves_left_head_audit still PASS (heal-gate auto-disables ml if it trips).
 ml_two_sided = false
 ml_final_pick_band = 0.08
 max_game_plies = 256
 tss_enabled = true
 cache_max_states = 262144
 
-# KataGo / dense_cnn_restnet replay-buffer port (PLAN §6/§7). The old v1 window
-# used a single hard `shuffle_keep_target_rows` cutoff (32000 live); this block
-# adds the full dense mechanism. Defaults are hexfield-tuned (NOT dense's
-# literals): the dimensionless KataGo constants (exponent=0.65, expand=0.4) are
-# unchanged, but min_rows/scale/keep_target are scaled to hexfield's ~7k Full
-# rows/epoch stream (PLAN §3.1/§8/S1; dense's 100k min_rows would stall ~14
-# epochs at that rate). All 12 new knobs match the TrainingSection defaults; they
-# are written explicitly here so the fresh run is self-documenting.
 [model.config.training]
 batch_rows = 32
 learning_rate = 3e-4
 weight_decay = 1e-4
 grad_clip = 5.0
-# Adaptive grad clip (#1): after clip_warmup_steps, clip at clip_c*EMA(pre-clip norm).
 adaptive_clip = true
 clip_c = 1.75
 clip_ema_decay = 0.99
 clip_warmup_steps = 50
-# Config-driven loss weights (#2); defaults mirror losses.py constants.
 policy_weight = 1.0
 value_weight = 1.0
 opp_policy_weight = 0.25
 short_term_value_weight = 0.1
 moves_left_weight = 0.1
 q_head_weight = 0.1
-# Policy-surprise self-CE reweight (#5).
 policy_surprise_uniform_fraction = 0.5
 policy_surprise_max_weight = 8.0
 warmup_steps = 0
@@ -125,84 +65,30 @@ train_samples_per_epoch = 48000
 max_train_bucket_per_new_data = 8.0
 max_train_bucket_size = 500000.0
 no_repeat_files = false
-# expand_backend = "rust": Phase 7 parity PASSED — the Rust+rayon GIL-free
-# train-read kernel (replay_expand.rs::expand_shard_train) is element-identical to
-# the serial-Python `expand_sample` oracle across all 12 D6 symmetries, the
-# off-legal validity mask is backend-invariant, and the result is deterministic
-# (workers=1 == workers=N under order-preserving collect). It is ~7x faster than
-# serial on this 32-core host (~4.3-4.7k rows/s vs ~0.57k). The "serial" and
-# "pool" backends remain available via this knob (and the HEXFIELD_EXPAND env) as
-# the parity oracle / spawn-ProcessPool fallback (PLAN §4.3/§10 step 8).
-# v3: the Rust expand kernel (replay_expand.rs::expand_shard_train) now projects
-# the per-cell Q target (cell_q/cell_q_mask) and passes through policy_surprise,
-# mirroring the serial oracle (samples.expand_sample) element-for-element — parity
-# verified across all 12 D6 symmetries (test_p7_rust_parity.py, 4/4) at ~10x. So
-# "rust" is READY and restores the ~7x expand (~11s/epoch vs ~84s serial).
-#
-# DEPLOYED to "rust" 2026-06-18: the .so was rebuilt (scripts/_rebuild_hexfield.sh)
-# with the cell_q/cell_q_mask + policy_surprise projection, so the resume train-read
-# uses the ~10x rayon kernel. To roll back, flip to "serial" (the new .so runs the
-# serial Python oracle path unchanged) and restart — no rebuild needed.
 expand_backend = "rust"
 expand_workers = 0
 
 [model.config.evaluation]
 games_per_epoch = 16
 eval_visits = 128
-# The lockstep arena is single-game/slow; over a long run evaluate periodically
-# (the eval ladder is for tracking strength, not a per-epoch gate).
 eval_every = 5
 
-# In-run COMPARABLE strength eval (eval-v2), wired into evaluate_epoch. Replaces
-# the 16-game vs-prior arena with paired games vs a FIXED roster (permanent
-# anchors bc_prefit + ep5, sliding bracket, L-lag champion), pooled into a
-# persisted Bradley-Terry ladder so epochs compound into an apples-to-apples
-# learning curve. LOCKED + UNIFORM for comparability: 512 sims, eval-vbs 32.
-# PURE EVAL (reports a label; never gates/halts/promotes).
-#
-# CONCURRENT ONE-PASS (eval-v2 fast redesign): every 5 epochs the eval plays the
-# WHOLE roster in ONE batched pass (SealBot via play_sealbot_match + ALL checkpoint
-# opponents via play_multi_checkpoint_match, one shared candidate forward across
-# opponents), so wall-clock is MAX over matches, not SUM — a few minutes, not the
-# serial per-opponent sum. With sealbot_share=0.5 + bracket_size=1 the roster is
-# 4 checkpoint opponents (bc_prefit, ep5, the bracket rung, the L-lag champion);
-# at games_budget=64 -> 32 SealBot + 32 checkpoint = 64 games (8 games = 4 CRN
-# pairs per checkpoint opponent; the stats review verified 4 pairs beats 3).
 [model.config.multi_stage_eval]
 enabled = true
-# 64 SealBot + 64 checkpoint = 128 games/epoch (doubled from 64 on 2026-06-19 to
-# tighten the Elo CI by ~1/sqrt(2) ~29%: per-checkpoint-opponent 8->16 games,
-# SealBot 32->64). Visits UNCHANGED (512) so this stays pool-comparable — it only
-# adds precision. NOTE: SE still ~85-123 Elo; resolves gross regressions, NOT the
-# sub-100-Elo plateau gains (that needs ~200+ games/edge or a dense prior-checkpoint
-# head-to-head). eval-vbs 32 halves rounds/ply at the fixed 512 visits.
 games_budget = 128
 every_n_epochs = 5
 full_search_visits = 512
 eval_virtual_batch_size = 32
-# 1:1 SealBot-vs-checkpoint split (0.5 of the 128-game budget -> 64 SealBot).
 sealbot_share = 0.5
 verdict_reference_lag = 5
 pool_path = "diagnostics/eval_pool.json"
 
 [model.config.multi_stage_eval.sprt]
-# SPRT OFF: the concurrent path skips Stage B anyway; off keeps the champion edge at
-# the uniform per-opponent game count (no SPRT-dependent variation) for comparable graphs.
 enabled = false
 
 [model.config.multi_stage_eval.opponents]
-# SealBot is reachable in the WSL trainer (SEALBOT_PATH=/mnt/e/SealBot exported by
-# _hexfield_supervise_main1.sh), so the down-weighted cross-lineage zero-point is
-# played and the BT pool pins on SealBot at 0 Elo. bracket_size=1 -> 4 checkpoint
-# opponents (bc_prefit, ep5, the single bracket rung, the L-lag champion); at
-# budget 128 with sealbot_share=0.5 that is 64//4 = 16 games (8 CRN pairs) each.
 sealbot_enabled = true
 bracket_size = 1
-# v3 anchor: main_2 epoch_000045 (radius-4-NATIVE, strongest prior-lineage net) is
-# the fixed external anchor, replacing the radius-8 bc_prefit. It is an OLD-arch
-# checkpoint; eval_arena._load_hexfield_net falls back to the frozen legacy_model_v2
-# snapshot to load it (strict). NOT in radius8_opponents (it is radius-4-native, so
-# its edges are in-distribution and DO count toward the BT zero-point alongside SealBot).
 permanent_anchors = [["main2_ep45", "/mnt/e/Hexo-BotTrainer/runs/hexfield_main_2/checkpoints/epoch_000045.pt"], ["ep5", "epoch_000005.pt"]]
 radius8_opponents = []
 
@@ -222,15 +108,5 @@ update_checkpoint_pointer = false
 passes_per_epoch = 1
 
 [checkpoint]
-# Warm-start from the BC prefit, the SAME checkpoint main_1 used (PLAN §7,
-# non-goals). This is a fresh-init warm start, NOT a resume: the checkpoint
-# loader's `initialize_from` branch loads weights only and starts a FRESH train
-# bucket / governor (it never inherits a stale train_state — only the `resume`
-# branch restores train_state, PLAN §6 checkpoints.py / M1). It does NOT point at
-# any live run, so launching main_3 cannot disturb hexfield_main_2.
-# v3 warm-start: a fresh BC prefit trained against the v3 architecture (the old
-# bc_1 prefit is pre-v3 arch and will NOT strict-load). Regenerated via
-# scripts/_hexfield_prefit.py --out runs/hexfield_bc_v3 (5k-sample minimal warm
-# start; rerun with more steps for a stronger prefit before a serious run).
 initialize_from = "/mnt/e/Hexo-BotTrainer-hexgt/runs/hexfield_bc_v3/checkpoint_epoch0.pt"
 save_name = "latest"
