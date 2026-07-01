@@ -2257,6 +2257,27 @@ fn complete_continuous_slots(
                         ) {
                             search.apply_root_dirichlet_noise(noise);
                         }
+                        // (Re)build the Gumbel-Top-k candidate set + SH schedule
+                        // for the promoted root, mirroring the epoch-entry reuse
+                        // path. Without this the previous move's finished SH
+                        // state (survivors/round caps keyed to the old root's
+                        // actions) persists onto the new root, and the slot
+                        // either hammers a stale survivor or stalls until the
+                        // force-stuck safety net finalizes the move with zero
+                        // new visits. Non-Full moves clear the state so the
+                        // normal PUCT root runs.
+                        if move_policy.divergences.gumbel_root
+                            && matches!(next_class, MoveClass::Full)
+                        {
+                            let gumbel_seed =
+                                mix_seed(base_seed, game_key, next_ply, SEED_STREAM_GUMBEL);
+                            search.init_gumbel_root(
+                                gumbel_seed,
+                                move_policy.visits_for(next_class),
+                            );
+                        } else {
+                            search.clear_gumbel_root();
+                        }
                         slots[slot_index].baseline =
                             search.root_edge_visits().into_iter().collect();
                         keep_promoted = true;
