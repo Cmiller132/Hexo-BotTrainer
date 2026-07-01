@@ -1,9 +1,3 @@
-# hexfield M9 soak (spec §10 M9): 3 unattended epochs of the real RL loop
-# (continuous self-play at production search settings + training), warm-started
-# from the BC prefit. Fewer games than production for a faster stability/band
-# check; run dir on the dashboard mount. Exploration bands judged vs the
-# dense main_4 reference (scripts/_hexfield_band_check.py).
-
 [model]
 name = "hexfield"
 module = "hexfield.plugin"

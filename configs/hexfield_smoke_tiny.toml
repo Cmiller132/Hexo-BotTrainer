@@ -1,8 +1,3 @@
-# Fast plumbing check for the M7 pipeline fix (not the spec gate — that's
-# hexfield_smoke.toml at 4 games / 64 visits). Tiny so the full epoch
-# (selfplay -> finalize -> select -> train -> checkpoint -> eval-skip) runs
-# in a couple of minutes on CPU.
-
 [model]
 name = "hexfield"
 module = "hexfield.plugin"

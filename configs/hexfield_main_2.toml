@@ -1,8 +1,3 @@
-# hexfield production run 1 (owner directive 2026-06-12): 512 visits,
-# PCR fast=128 at 33% full. Quarantined knobs OFF (spec §5.1), §5.4
-# divergences ON (defaults). Run dir on the dashboard mount so the :8080
-# History screen renders it natively. Warm-start: the BC prefit (spec §7).
-
 [model]
 name = "hexfield"
 module = "hexfield.plugin"
@@ -17,24 +12,6 @@ pcr_fast_visits = 128
 active_games = 128
 c_puct = 1.5
 virtual_batch_size = 4
-# flush_target must be ABOVE max in-flight (active_games*virtual_batch_size) so
-# the flush is select-exhaustion-driven, not a stall waiting for an unreachable
-# full batch (flush_target==in-flight HANGS; <in-flight caps the batch small).
-#
-# 2026-06-15 (forward-rewrite session): active_games REVERTED 192->64.
-# The prior 64->192 bump set active_games == games_per_epoch (192), which kills
-# the continuous REFILL: with no fresh games replacing finished ones, all games
-# drain into the slow large-support late game TOGETHER (a "cohort"), and live
-# full-epoch throughput fell to ~2.2 pos/s (the 60s early-game sweep that
-# motivated 192 measured ply-~7 positions, not the late game that dominates an
-# epoch). Keeping active_games (64) < games_per_epoch (192) restores the refill
-# MIX (192-64 refills => early/mid/late games co-resident, so the cheap early
-# positions keep throughput up). 64 is the historically PROVEN value: epochs
-# 11-30 averaged ~3.7 pos/s at ac64 (vs 2.2 at ac192). With the bias-build
-# forward rewrite (~2.2x late-game forward, ~1.5x end-to-end) on top, the epoch
-# average should land materially above 3.7. (NOTE: the lategame_bench refill
-# numbers were early-game-biased and over-stated; 64 is chosen on the proven
-# full-epoch data, not that bench.) In-flight 64*4=256 < 1024.
 flush_target = 1024
 active_root_limit = 192
 root_dirichlet_total_alpha = 10.83
@@ -64,52 +41,22 @@ shuffle_keep_target_rows = 32000
 [model.config.evaluation]
 games_per_epoch = 16
 eval_visits = 128
-# The lockstep arena is single-game/slow; over a long run evaluate periodically
-# (the eval ladder is for tracking strength, not a per-epoch gate).
 eval_every = 5
 
-# In-run COMPARABLE strength eval (eval-v2), wired into evaluate_epoch. Replaces
-# the 16-game vs-prior arena with paired games vs a FIXED roster (permanent
-# anchors bc_prefit + ep5, sliding bracket, L-lag champion), pooled into a
-# persisted Bradley-Terry ladder so epochs compound into an apples-to-apples
-# learning curve. LOCKED + UNIFORM for comparability: 512 sims, eval-vbs 32.
-# PURE EVAL (reports a label; never gates/halts/promotes).
-#
-# CONCURRENT ONE-PASS (eval-v2 fast redesign): every 5 epochs the eval plays the
-# WHOLE roster in ONE batched pass (SealBot via play_sealbot_match + ALL checkpoint
-# opponents via play_multi_checkpoint_match, one shared candidate forward across
-# opponents), so wall-clock is MAX over matches, not SUM — a few minutes, not the
-# serial per-opponent sum. With sealbot_share=0.5 + bracket_size=1 the roster is
-# 4 checkpoint opponents (bc_prefit, ep5, the bracket rung, the L-lag champion);
-# at games_budget=64 -> 32 SealBot + 32 checkpoint = 64 games (8 games = 4 CRN
-# pairs per checkpoint opponent; the stats review verified 4 pairs beats 3).
 [model.config.multi_stage_eval]
 enabled = true
-# 32 SealBot + 32 checkpoint = 64 games/epoch. eval-vbs 32 (was 16) halves the
-# rounds/ply at the fixed 512 visits (uniform across epochs+opponents, so
-# comparability-safe). 512 visits KEPT so every point stays comparable with the
-# ep10-30 pool (the learning curve would break at mixed visits). The pool
-# compounds, so the 5-epoch cadence still grows a clean curve.
 games_budget = 64
 every_n_epochs = 5
 full_search_visits = 512
 eval_virtual_batch_size = 32
-# 1:1 SealBot-vs-checkpoint split (0.5 of the 64-game budget -> 32 SealBot).
 sealbot_share = 0.5
 verdict_reference_lag = 5
 pool_path = "diagnostics/eval_pool.json"
 
 [model.config.multi_stage_eval.sprt]
-# SPRT OFF: the concurrent path skips Stage B anyway; off keeps the champion edge at
-# the uniform per-opponent game count (no SPRT-dependent variation) for comparable graphs.
 enabled = false
 
 [model.config.multi_stage_eval.opponents]
-# SealBot is reachable in the WSL trainer (SEALBOT_PATH=/mnt/e/SealBot exported by
-# _hexfield_supervise_main1.sh), so the down-weighted cross-lineage zero-point is
-# played and the BT pool pins on SealBot at 0 Elo. bracket_size=1 -> 4 checkpoint
-# opponents (bc_prefit, ep5, the single bracket rung, the L-lag champion); at
-# budget 64 with sealbot_share=0.5 that is 32//4 = 8 games (4 CRN pairs) each.
 sealbot_enabled = true
 bracket_size = 1
 
