@@ -1,15 +1,14 @@
-"""Continuous self-play epoch driver: run_continuous owns the epoch; this module
-owns the Python side of the on_move protocol.
+"""Continuous self-play epoch driver: the Python side of the on_move protocol.
 
-Per game the driver tracks the placement history incrementally (the same
-tested derivations the BC writer uses: ordinal phase/player, window_scan hot/
-standing-win cells), records FULL-search decisions as pending samples, applies
-the chosen action through hexo_engine, and at game end finalizes targets
-(hard z, opp policy with fast-masking, STV, moves_left) and writes one
-hexfield_compact_v1 shard. Truncated games (max_game_plies reached, no engine
-winner) ARE written too: their outcome-INDEPENDENT heads (policy, opp_policy)
-train normally while the value/stvalue/cell_q/moves_left heads are masked via
-the truncated flag (outcome_valid=0 column → value_mask=0 at expand).
+Per game the driver tracks placement history incrementally (ordinal
+phase/player and window_scan hot/standing-win cells), records FULL-search
+decisions as pending samples, applies the chosen action through hexo_engine,
+and at game end finalizes targets (hard z, opp policy with fast-masking, STV,
+moves_left) and writes one hexfield_compact_v1 shard. Truncated games
+(max_game_plies reached, no engine winner) are also written: their
+outcome-independent heads (policy, opp_policy) train normally while the
+value/stvalue/cell_q/moves_left heads are masked via the truncated flag
+(outcome_valid=0 column -> value_mask=0 at expand).
 """
 
 from __future__ import annotations
@@ -61,13 +60,12 @@ class ContinuousDriver:
         self.max_plies = max_plies
         self.out_dir = out_dir
         self.horizons = horizons
-        # Open .hxr game-record file for the epoch (dashboard-viewable replays);
-        # None disables recording. Set by generate_selfplay_epoch.
+        # .hxr game-record file for the epoch; None disables recording.
+        # Set by generate_selfplay_epoch.
         self.record_file = record_file
-        # Live within-epoch progress for the :8080 dashboard (progress bar +
-        # positions/second). Written to <diag_dir>/hexfield.selfplay.live.json
-        # every LIVE_INTERVAL_S during the epoch; the dashboard reads it
-        # lineage-aware. None disables the live file.
+        # Directory for the live progress file
+        # <diag_dir>/hexfield.selfplay.live.json, written every LIVE_INTERVAL_S
+        # while running. None disables the live file.
         self.diag_dir = diag_dir
         self.active_limit = int(active_limit)
         self._t0 = time.time()
@@ -83,9 +81,8 @@ class ContinuousDriver:
         self.policy_entropies: list[float] = []
         self.root_values: list[float] = []
         self.next_key = epoch * 1_000_000
-        # Background shard writer: the heavy per-game finalize + .hxr record + zlib
-        # npz write runs off the Rust on_move callback thread so game completions
-        # never stall the search loop.
+        # Background shard writer: the per-game finalize + .hxr record + zlib npz
+        # write runs off the on_move callback thread.
         self._write_queue: queue.Queue = queue.Queue()
         self._writer_errors: list[BaseException] = []
         self._writer_failed = threading.Event()
@@ -94,10 +91,9 @@ class ContinuousDriver:
     LIVE_INTERVAL_S = 3.0
 
     def _write_live(self, status: str) -> None:
-        """Emit hexfield.selfplay.live.json for the dashboard (progress bar +
-        pos/s). Throttled to LIVE_INTERVAL_S while running; forced on
-        start/completed. Emits the field contract the dashboard's live-status panel
-        + sub-phase derivation read."""
+        """Write hexfield.selfplay.live.json with epoch progress and
+        positions/second. Throttled to LIVE_INTERVAL_S while status=="running";
+        other statuses always write. No-op when diag_dir is None."""
 
         if self.diag_dir is None:
             return
@@ -125,12 +121,12 @@ class ContinuousDriver:
             "full_decisions": self.full_decisions,
             "scheduler": "continuous",
         }
-        # Cosmetic dashboard file: a write failure must NEVER crash self-play.
+        # Write failures here are swallowed so they cannot interrupt self-play.
         try:
             path = self.diag_dir / "hexfield.selfplay.live.json"
             tmp = self.diag_dir / "hexfield.selfplay.live.json.tmp"
             tmp.write_text(json.dumps(payload), encoding="utf-8")
-            tmp.replace(path)  # atomic: dashboard never reads a half-written file
+            tmp.replace(path)  # atomic replace
         except Exception:
             pass
 
@@ -150,17 +146,17 @@ class ContinuousDriver:
         full = bool(payload["pcr_full"])
         init = bool(payload["policy_init"])
         self.decisions += 1
-        self._write_live("running")  # throttled live progress for the dashboard
+        self._write_live("running")
 
         current = record_player(tape.ply)
         if full and not init:
             self.full_decisions += 1
             ids = np.frombuffer(bytes(payload["visit_policy_action_ids_bytes"]), dtype=np.uint32)
             weights = np.frombuffer(bytes(payload["visit_policy_weights_bytes"]), dtype=np.float32)
-            # Per-cell Q (one Q per recorded action, SAME set+order as the visit
-            # policy — Rust contract) feeds the train-only cell_q head.
+            # Per-cell Q: one Q per recorded action, same set and order as the
+            # visit policy. Feeds the train-only cell_q head.
             qs = np.frombuffer(bytes(payload["visit_policy_q_bytes"]), dtype=np.float32)
-            # Policy-surprise = KL(visit ‖ root prior); reweights the self CE.
+            # Policy-surprise = KL(visit || root prior); reweights the self CE.
             prior_ids = np.frombuffer(
                 bytes(payload["root_prior_policy_action_ids_bytes"]), dtype=np.uint32
             )
@@ -197,8 +193,8 @@ class ContinuousDriver:
                 self.policy_entropies.append(float(-(probs * np.log(probs)).sum()))
             self.root_values.append(float(payload["root_value"]))
         elif not full and not init:
-            # Fast rows are never written, but the pending list keeps every
-            # decision so opp-policy lookup + moves_left counts stay exact
+            # Fast rows are not written, but the pending list keeps every
+            # decision so opp-policy lookup and moves_left counts stay exact
             # (mask_opp_from_fast at finalize).
             sample = HexfieldSampleData(
                 game_id=str(game_key), turn_index=tape.ply, current_player=current,
@@ -236,11 +232,11 @@ class ContinuousDriver:
         return None
 
     def _write_record(self, tape: _GameTape, *, winner, truncated: bool) -> None:
-        """Write one ``.hxr`` game record so the dashboard can replay the model's
-        play. EVERY finished game is recorded (completed AND truncated) — only the
-        TRAINING rows are completed-games-only (handled in ``_finish``). Records
-        the full placement sequence in move order, then closes the game with the
-        engine winner label (``player0``/``player1``) or an abort for truncation."""
+        """Write one ``.hxr`` game record. Every finished game is recorded
+        (completed and truncated). Records the placement sequence in move order,
+        then closes the game with the engine winner label (``player0``/``player1``)
+        for completed games or an abort record for truncated games. No-op when
+        record_file is None."""
 
         if self.record_file is None:
             return
@@ -266,26 +262,22 @@ class ContinuousDriver:
         if truncated:
             self.games_truncated += 1
         else:
-            # Contract: a written (non-truncated) game has a concrete engine
-            # winner. `_winner_value(None, ...)` silently codes a draw (z = 0),
-            # so a missing winner would poison every row's value target instead
-            # of raising — the truncated path is the ONLY legitimate `None`.
+            # A non-truncated game must have a concrete engine winner; None is
+            # only valid on the truncated path.
             assert winner is not None, "non-truncated finish requires an engine winner"
-        # A prior writer-thread failure aborts the epoch here rather than letting
-        # the run silently drop shards while the queue backs up.
+        # Surface a prior writer-thread failure before queueing more work.
         if self._writer_failed.is_set():
             raise self._writer_errors[0]
-        # Hand the finished (about-to-be-detached) tape to the background writer.
-        # The tape is immutable after the game ends, so the handoff is race-free;
-        # __call__ deletes it from self.games immediately after this returns.
+        # Hand the finished tape to the background writer. The tape is not mutated
+        # after the game ends; __call__ deletes it from self.games after this
+        # returns.
         self._write_queue.put((tape, winner, truncated))
 
     def _writer_loop(self) -> None:
-        """Background shard writer. Drains finished games and does the heavy I/O —
-        .hxr record, finalize,
-        and the zlib `write_compact_shard` — off the search-callback thread.
-        Bytes are byte-identical to the inline path; only the writing thread
-        moves. A write failure is captured and surfaced, never swallowed."""
+        """Background shard writer. Drains finished games from _write_queue and
+        does the I/O -- .hxr record, finalize, and the zlib `write_compact_shard`
+        -- off the search-callback thread. A write failure is captured in
+        _writer_errors and _writer_failed is set. Exits on a None sentinel."""
 
         while True:
             item = self._write_queue.get()
@@ -293,25 +285,22 @@ class ContinuousDriver:
                 if item is None:
                     return
                 tape, winner, truncated = item
-                # Record the game for dashboard replay (completed AND truncated),
-                # mirroring the old inline order.
+                # Record the game (completed and truncated) before finalizing.
                 self._write_record(tape, winner=winner, truncated=truncated)
-                # Truncated games (max_game_plies hit, no engine winner) are NO
-                # LONGER dropped: their rows ARE written so the outcome-INDEPENDENT
-                # heads (policy, opp_policy) train on them, while the value /
-                # stvalue / cell_q / moves_left heads are masked downstream (the
-                # truncated metadata flag → outcome_valid=0 shard column →
-                # value_mask=0 + zeroed stvalue/cell_q masks at expand). Completed
-                # games are finalized exactly as before (truncated=False), so their
-                # training stays byte-identical.
+                # Truncated games (max_game_plies hit, no engine winner) still
+                # have rows written: the outcome-independent heads (policy,
+                # opp_policy) train on them, while the value / stvalue / cell_q /
+                # moves_left heads are masked downstream (truncated metadata flag
+                # -> outcome_valid=0 shard column -> value_mask=0 + zeroed
+                # stvalue/cell_q masks at expand).
                 finalized = finalize_game_samples(
                     tape.pending, winner, self.horizons,
                     truncated=truncated, mask_opp_from_fast=True,
                 )
                 rows = [
                     s for s in finalized
-                    if s.metadata.get("pcr_full", False)                      # all full rows (completed + truncated) — unchanged
-                    or (not truncated and not s.metadata.get("policy_init", False))  # NEW: fast+completed value rows; excludes init
+                    if s.metadata.get("pcr_full", False)                      # all full rows (completed + truncated)
+                    or (not truncated and not s.metadata.get("policy_init", False))  # fast rows from completed games; excludes init
                 ]
                 if rows:
                     path = self.out_dir / f"game_{tape.key}.npz"
@@ -322,7 +311,7 @@ class ContinuousDriver:
                             "winner": winner, "truncated": bool(truncated),
                         },
                     )
-            except BaseException as exc:  # noqa: BLE001 — surface, don't swallow
+            except BaseException as exc:  # noqa: BLE001
                 self._writer_errors.append(exc)
                 self._writer_failed.set()
             finally:
@@ -335,9 +324,8 @@ class ContinuousDriver:
         self._writer_thread.start()
 
     def _stop_writer(self) -> None:
-        """Drain queued games and join the writer while the .hxr file is still
-        open, then re-raise any writer error so a write failure fails the epoch
-        instead of silently dropping shards."""
+        """Enqueue the None sentinel, join the writer thread, then re-raise any
+        writer error. No-op when no writer thread is running."""
 
         if self._writer_thread is None:
             return
@@ -372,20 +360,17 @@ def generate_selfplay_epoch(*, ctx, components, epoch: int, games_per_epoch: int
     out_dir = ctx.samples_dir / f"epoch_{epoch:06d}"
     out_dir.mkdir(parents=True, exist_ok=True)
     games_target = max(int(games_per_epoch), 1)
-    # Resume support: completed games already wrote their shards, and training
-    # reads a rolling mtime window over all epoch_*/game_*.npz, so finished games
-    # are already usable. On a mid-epoch restart, KEEP them and generate only the
-    # remainder (with keys past any the interrupted run assigned, so nothing is
-    # overwritten) instead of recomputing finished play. In-flight (unfinished)
-    # games can't be recovered — the remainder replaces them with fresh games.
+    # Resume support: completed games already wrote their shards. On a restart,
+    # keep the existing shards and generate only the remainder, using keys past
+    # any the interrupted run assigned. In-flight (unfinished) games are not
+    # recovered; the remainder replaces them with fresh games.
     existing = sorted(out_dir.glob("game_*.npz"))
     already_done = len(existing)
     remaining = max(games_target - already_done, 0)
     resuming = already_done > 0
 
     if remaining == 0:
-        # Epoch's self-play already on disk (crashed after self-play, before the
-        # checkpoint). Skip regeneration entirely.
+        # All of the epoch's self-play is already on disk; skip regeneration.
         driver = ContinuousDriver(
             epoch=epoch, games_target=0, max_plies=sp.max_game_plies, out_dir=out_dir,
             diag_dir=ctx.diagnostics_dir, active_limit=0,
@@ -414,13 +399,11 @@ def generate_selfplay_epoch(*, ctx, components, epoch: int, games_per_epoch: int
         driver.next_key = (max(existing_keys) + 1) if existing_keys else epoch * 1_000_000
     tapes = driver.start_games(slots)
 
-    # Per-epoch .hxr game records under <run>/selfplay (the layout the dashboard
-    # scans), so every self-play game is replayable on the History screen.
+    # Per-epoch .hxr game records under <run>/selfplay.
     record_dir = ctx.output_dir / "selfplay"
     record_dir.mkdir(parents=True, exist_ok=True)
-    # On resume use a separate .hxr so the interrupted run's replays aren't
-    # truncated (HexoRecordFile.create clobbers); the topup games are recorded
-    # alongside. Fresh epochs keep the canonical path the dashboard scans.
+    # On resume, write to a separate .hxr path (HexoRecordFile.create overwrites
+    # an existing file). Fresh epochs use the canonical path.
     record_path = record_dir / (
         f"epoch_{epoch:06d}_resume{already_done:03d}.hxr" if resuming
         else f"epoch_{epoch:06d}.hxr"
@@ -432,16 +415,15 @@ def generate_selfplay_epoch(*, ctx, components, epoch: int, games_per_epoch: int
 
     session = _rust.HexfieldMctsSession(max_states=sp.cache_max_states)
     started = time.time()
-    driver._t0 = started  # anchor live pos/s to actual self-play start
-    driver._write_live("running")  # initial 0% progress bar before the first move
+    driver._t0 = started  # anchor live pos/s to self-play start
+    driver._write_live("running")  # initial progress before the first move
     noise_kwargs = {}
     if sp.root_dirichlet_noise_fraction > 0:
         noise_kwargs = dict(
             root_dirichlet_total_alpha=sp.root_dirichlet_total_alpha,
             root_dirichlet_noise_fraction=sp.root_dirichlet_noise_fraction,
         )
-    # Context-managed so the .hxr is finalized (valid file with all completed
-    # games) even if run_continuous raises.
+    # Context-managed so the .hxr is finalized even if run_continuous raises.
     with HexoRecordFile.create(record_path, api.engine_metadata(), players) as record_file:
         driver.record_file = record_file
         driver._start_writer()
@@ -473,10 +455,9 @@ def generate_selfplay_epoch(*, ctx, components, epoch: int, games_per_epoch: int
             policy_init_max_plies=sp.policy_init_max_plies,
             policy_init_temperature=sp.policy_init_temperature,
             tss_enabled=sp.tss_enabled,
-            # SPEC CORRECTION (ledger [6]): first-class root FPU reduction
-            # (KataGo rootFpuReductionMax; self-play default 0.0). When set, Rust
-            # uses it directly and ignores the legacy noise-conditioned branch;
-            # root_fpu_zero_under_noise is kept only for the parity path.
+            # Root FPU reduction. When set, Rust applies it directly and ignores
+            # the noise-conditioned branch; root_fpu_zero_under_noise applies only
+            # on the parity path.
             root_fpu_reduction=sp.root_fpu_reduction,
             root_fpu_zero_under_noise=sp.root_fpu_zero_under_noise,
             search_parity_mode=sp.search_parity_mode,
@@ -485,11 +466,11 @@ def generate_selfplay_epoch(*, ctx, components, epoch: int, games_per_epoch: int
             ),
             **noise_kwargs,
         )
-        # Drain + join the writer while the .hxr file is still open (re-raises any
-        # write error), so every finished game is on disk before the epoch closes.
+        # Drain and join the writer while the .hxr file is still open; re-raises
+        # any write error so all finished games are on disk before the epoch closes.
         driver._stop_writer()
     driver.record_file = None
-    driver._write_live("completed")  # final 100% so the dashboard marks the epoch done
+    driver._write_live("completed")  # final progress marking the epoch done
 
     elapsed = time.time() - started
     result = {

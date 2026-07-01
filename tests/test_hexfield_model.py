@@ -1,14 +1,14 @@
-"""M1 gates: the hexfield network (spec §2, §9).
+"""Tests for the hexfield network.
 
-- exact parameter count (current architecture: 8 conv + 3 attn blocks, per-block
-  bias tables, cell_q head -> 1,591,748; supersedes the §9 1,230,651 figure)
-- sdpa ≡ materialized attention (fp32, <= 1e-4)
-- HexNodeConv ≡ dense_cnn HexConv2d on embedded supports (fp64 oracle)
-- padded-batch vs single-row forward identity (pad-inertness)
-- per-row gradient accumulation ≡ monolithic batch (LN exactness)
-- train-mode ≡ eval-mode bit parity
+Covers:
+- parameter count (8 conv + 3 attn blocks, per-block bias tables, cell_q head)
+- sdpa vs materialized attention equality (fp32)
+- HexNodeConv vs dense_cnn HexConv2d on embedded supports (fp64)
+- padded-batch vs single-row forward identity
+- per-row gradient accumulation vs monolithic batch
+- train-mode vs eval-mode output parity
 - gradients reach every parameter
-- on-GPU pair-index build ≡ geometry.rel_bias_index
+- pair-index build vs geometry.rel_bias_index
 """
 
 from __future__ import annotations
@@ -26,8 +26,8 @@ from hexfield.features import build_position
 from hexfield.geometry import rel_bias_index
 from hexfield.model import HexfieldNet, _BiasGather
 
-# Current architecture (8 conv blocks + 3 attn blocks, 3 per-block bias tables,
-# cell_q head). Computed by summing p.numel() over a fresh HexfieldNet().
+# Sum of p.numel() over a fresh HexfieldNet() (8 conv + 3 attn blocks,
+# 3 per-block bias tables, cell_q head).
 EXPECTED_PARAMS = 1_591_748
 
 
@@ -42,8 +42,8 @@ def _rows(count: int = 3):
 
 
 def _derandomize(model: HexfieldNet, seed: int = 5) -> None:
-    """Fill the zero-initialized residual-closing params with small randoms so
-    attention/conv branches actually fire in numerical tests."""
+    """Fill residual-branch params with small randoms so attention/conv
+    branches produce nonzero output in numerical tests."""
 
     gen = torch.Generator().manual_seed(seed)
     with torch.no_grad():
@@ -78,9 +78,8 @@ def test_sdpa_equals_materialized() -> None:
 
 
 def test_conv_oracle_against_dense_cnn_hexconv2d() -> None:
-    """The 7 direction matrices, copied tap-for-tap into dense_cnn's masked
-    HexConv2d, must produce identical values at the support cells (fp64) —
-    the trusted implementation as oracle, never as dependency."""
+    """The 7 direction matrices copied tap-for-tap into dense_cnn's masked
+    HexConv2d produce identical values at the support cells (fp64)."""
 
     from hexo_models.dense_cnn.architecture import HexConv2d
 
@@ -92,7 +91,7 @@ def test_conv_oracle_against_dense_cnn_hexconv2d() -> None:
     stones = [(0, 0), (1, 0), (0, 1), (2, -1), (1, 1), (-1, 2), (3, 0)]
     sup = build_support(stones)
     n = sup.num_nodes
-    assert int(np.abs(sup.coords).max()) + 1 < 20  # fits the 41x41 embed with margin
+    assert int(np.abs(sup.coords).max()) + 1 < 20  # fits within the 41x41 embed grid
 
     mine = HexNodeConv(cin, cout).double()
     dense = HexConv2d(cin, cout, kernel_size=3, padding=1, bias=True).double()
@@ -133,31 +132,30 @@ def test_padded_batch_equals_single_row() -> None:
     rows = _rows(2)
     rows.sort(key=lambda item: item[0].num_nodes)
     small, large = rows
-    batch = collate_rows([small, large])  # small row padded up to the large N
+    batch = collate_rows([small, large])  # small row padded up to large's N
     alone = collate_rows([small])
     with torch.no_grad():
         out_batch = model(batch["feats"], batch["nbr"], batch["mask"], batch["coords"])
         out_alone = model(alone["feats"], alone["nbr"], alone["mask"], alone["coords"])
     n = small[0].num_nodes
-    # Per-node heads (B, Npad[, BINS]): policy/opp_policy logits and the per-cell
-    # cell_q head are masked to exactly zero on pad rows; slice to the row's real
-    # nodes for the identity check and assert the pad tail is zero.
+    # Per-node heads (B, Npad[, BINS]): policy, opp_policy, and cell_q are zero
+    # on pad rows. Slice to the row's real nodes for the identity check and
+    # assert the pad tail is zero.
     per_node_heads = ("policy", "opp_policy", "cell_q")
     for key in out_alone:
         a = out_alone[key][0]
         b = out_batch[key][0]
         if key in per_node_heads:
             a, b = a[:n], b[:n]
-            # pad logits are exactly zero (masked) beyond the row's nodes
+            # pad logits beyond the row's nodes are zero
             assert out_batch[key][0][n:].abs().max().item() == 0.0
         diff = (a - b).abs().max().item()
         assert diff <= 1e-6, f"{key}: padded vs single-row diff {diff}"
 
 
 def test_per_row_grad_accumulation_equals_monolithic() -> None:
-    """Under LN there are no cross-row statistics, so summed per-row losses
-    give identical gradients whether rows share a batch or not (the §6.3
-    micro-bucket theorem at the model level; the loss-level version is M2)."""
+    """LayerNorm uses no cross-row statistics, so summed per-row losses give
+    identical gradients whether rows share a batch or not."""
 
     torch.manual_seed(3)
     rows = _rows(2)
@@ -169,12 +167,11 @@ def test_per_row_grad_accumulation_equals_monolithic() -> None:
 
     def row_loss(model: HexfieldNet, batch) -> torch.Tensor:
         out = model(batch["feats"], batch["nbr"], batch["mask"], batch["coords"])
-        # Pad logits are exactly zero (pad-inertness), so summing over every
-        # output including pads is a pure per-row sum — every head contributes.
+        # Pad logits are zero, so summing over every output including pads is a
+        # per-row sum; every head contributes.
         return sum(v.square().sum() for v in out.values())
 
-    # fp64: the claim is a theorem (LN has no cross-row statistics), so the
-    # only tolerance needed is summation noise far below any fp32 effect.
+    # fp64: tolerance covers summation ordering noise only.
     model = HexfieldNet().double()
     _derandomize(model)
     state = {k: v.detach().clone() for k, v in model.state_dict().items()}
@@ -226,15 +223,15 @@ def test_grads_reach_every_param() -> None:
 def test_pair_index_matches_geometry() -> None:
     model = HexfieldNet()
     with torch.no_grad():
-        # Per-block bias tables: seed every block's head-0 column with its row id so
-        # the gathered bias value reads back the bias-table ROW class for any block.
+        # Seed each block's head-0 column with its row id, so a gathered bias
+        # value reads back the bias-table row class.
         for table in model.bias_tables:
             table.zero_()
             table[:, 0] = torch.arange(C.BIAS_ROWS, dtype=torch.float32)
     batch = collate_rows(_rows(1))
     coords, mask = batch["coords"], batch["mask"]
-    # _build_pair computes the block-INDEPENDENT (pair, key_pad); build_attn_bias
-    # then materializes the (1, heads, S, S) bias for a specific attention block.
+    # _build_pair computes the block-independent (pair, key_pad); build_attn_bias
+    # materializes the (1, heads, S, S) bias for a given attention block.
     pair, key_pad = model._build_pair(coords, mask)
     bias = model.build_attn_bias(pair, key_pad, 0)  # (1, heads, S, S)
     t = C.NUM_TOKENS
@@ -243,7 +240,7 @@ def test_pair_index_matches_geometry() -> None:
     assert bias[0, 0, 0, 1].item() == C.BIAS_TOKEN_TOKEN_ROW
     assert bias[0, 0, 0, t].item() == C.BIAS_TOKEN_CELL_ROW
     assert bias[0, 0, t, 0].item() == C.BIAS_CELL_TOKEN_ROW
-    # cell/cell rows == the exact geometry function (key - query offsets)
+    # cell/cell rows equal the geometry function of (key - query) offsets
     idx = np.random.RandomState(0).choice(len(cells), size=min(40, len(cells)), replace=False)
     for i in idx:
         for j in idx[:10]:
@@ -254,10 +251,9 @@ def test_pair_index_matches_geometry() -> None:
 
 
 def test_bias_gather_backward_equals_generic_indexing() -> None:
-    """FIX 2: _BiasGather's bincount backward is BIT-EXACT to the generic
-    advanced-indexing backward (the op it replaces for perf), in fp64 and fp32.
-    A small table + random pair matrix + random upstream weight isolates the
-    gradient path with no model state."""
+    """_BiasGather's bincount backward equals the generic advanced-indexing
+    backward (table[pair]) in fp64 and fp32. A small table, random pair matrix,
+    and random upstream weight isolate the gradient path with no model state."""
 
     for dtype in (torch.float64, torch.float32):
         torch.manual_seed(0)
@@ -267,9 +263,9 @@ def test_bias_gather_backward_equals_generic_indexing() -> None:
         pair = torch.randint(0, rows, (n, n), dtype=torch.long)
         upstream = torch.randn(n, n, heads, dtype=dtype)
 
-        # generic indexing backward (table[pair]) -- the trusted reference op
+        # generic indexing backward (table[pair]): reference
         (table_ref[pair] * upstream).sum().backward()
-        # _BiasGather backward -- must match BIT-FOR-BIT
+        # _BiasGather backward: compared for exact equality below
         (_BiasGather.apply(table_gather, pair) * upstream).sum().backward()
 
         assert torch.equal(table_gather.grad, table_ref.grad), (
@@ -279,12 +275,10 @@ def test_bias_gather_backward_equals_generic_indexing() -> None:
 
 
 def test_fresh_model_zero_init_residual_identity() -> None:
-    """FIX 3: a FRESH HexfieldNet (NOT _derandomized) is the identity on every
-    residual branch at step 0 -- residual-branch identity now comes from
-    LayerScale(init=1e-4) on every branch (each ConvBlock.ls, each AttnBlock
-    ls_attn/ls_mlp gamma == 1e-4), NOT from zero-init of ln2/out_proj/fc2; the
-    per-block relative-position bias tables are all exactly zero -- and its
-    forward is finite (the zero-init invariant the training relies on)."""
+    """A fresh HexfieldNet (not _derandomized) has LayerScale gamma == 1e-4 on
+    every residual branch (each ConvBlock.ls, each AttnBlock ls_attn/ls_mlp),
+    all per-block relative-position bias tables exactly zero, and a finite
+    forward pass."""
 
     torch.manual_seed(7)
     model = HexfieldNet()
@@ -311,17 +305,15 @@ def test_fresh_model_zero_init_residual_identity() -> None:
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="fp16 fused SDPA needs CUDA")
 def test_sdpa_equals_materialized_fp16_cuda() -> None:
-    """FIX 4: cover the PRODUCTION path -- sdpa (fused fp16 kernel) vs the
-    materialized oracle under cuda fp16 autocast. fp32 equivalence is the M1
-    gate; this guards the fp16 fused kernel the serve/train loop actually runs.
-    Tolerance is an fp16-rounding budget (observed diff ~1.2e-4)."""
+    """sdpa (fused fp16 kernel) vs materialized attention under cuda fp16
+    autocast. Tolerance is an fp16-rounding budget."""
 
     device = torch.device("cuda")
     torch.manual_seed(0)
     model = HexfieldNet().eval().to(device)
-    # Light derandomize so attention branches fire (fresh model is identity: the
-    # LayerScale gammas init to 1e-4, so the residual branches are nearly closed
-    # -- open them too, not just out_proj/fc2, and seed each per-block bias table).
+    # Derandomize so attention branches produce nonzero output: set out_proj/fc2
+    # to small randoms, open the LayerScale gammas to 1.0, and seed each
+    # per-block bias table.
     gen = torch.Generator(device=device).manual_seed(11)
     with torch.no_grad():
         for block in model.attn_blocks:
@@ -340,7 +332,7 @@ def test_sdpa_equals_materialized_fp16_cuda() -> None:
     feats = torch.randn(b, n, C.NUM_FEATURES, device=device)
     nbr = torch.randint(0, n, (b, n, 6), dtype=torch.long, device=device)
     mask = torch.ones(b, n, dtype=torch.bool, device=device)
-    mask[2, -5:] = False  # a padded row exercises the pad-key mask
+    mask[2, -5:] = False  # padded row exercises the pad-key mask
     coords = torch.randint(-8, 9, (b, n, 2), dtype=torch.long, device=device)
     args = (feats, nbr, mask, coords)
 

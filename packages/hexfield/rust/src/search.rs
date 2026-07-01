@@ -1,17 +1,13 @@
-//! hexfield search drivers — lockstep + continuous scheduler, ported from the
-//! as-built dense_cnn mcts (the semantic reference for the differential
-//! harness) with:
+//! hexfield search drivers: lockstep batched search and continuous per-slot
+//! scheduler.
 //!
-//! - the §5.1 exploration-knob QUARANTINE: `root_fpu_zero_under_noise`
-//!   defaults FALSE and the root-policy-temperature schedule defaults OFF
-//!   (1.0 / no ramp). The differential harness passes dense's as-built values
-//!   explicitly to both sides; production simply never enables them.
-//! - the §5.4 divergences (LCB greedy selection, early-stop by move class,
-//!   visit-scaled c_puct, moves-left utility), default ON in production,
-//!   forced off by `search_parity_mode`.
+//! - `root_fpu_zero_under_noise` defaults FALSE; the root-policy-temperature
+//!   schedule defaults off (1.0, no ramp).
+//! - The `Divergences` features (LCB greedy selection, early-stop by move
+//!   class, visit-scaled c_puct, moves-left utility) default on and are forced
+//!   off by `search_parity_mode`.
 //!
-//! Seed discipline: the exact dense `mix_seed` hash and stream ids 0-5 are a
-//! written contract (golden vectors in tests).
+//! `mix_seed` and stream ids 0-5 are covered by golden vectors in tests.
 
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -71,10 +67,9 @@ struct ContinuousMovePolicy {
     noise: Option<RootNoiseConfig>,
     tss_enabled: bool,
     root_fpu_zero_under_noise: bool,
-    /// [6] first-class root FPU reduction (KataGo rootFpuReductionMax). When
-    /// Some it takes precedence over the legacy noise-conditioned mechanism;
-    /// self-play sets 0.0. When None, the legacy `root_fpu_zero_under_noise`
-    /// path applies (parity).
+    /// Root FPU reduction. When `Some`, it takes precedence over the
+    /// noise-conditioned mechanism. When `None`, the `root_fpu_zero_under_noise`
+    /// path applies.
     root_fpu_reduction: Option<f32>,
     divergences: Divergences,
 }
@@ -144,14 +139,12 @@ impl ContinuousMovePolicy {
     }
 
     fn root_fpu_for(&self, class: MoveClass) -> f32 {
-        // [6] first-class root FPU reduction takes precedence (KataGo
-        // rootFpuReductionMax; self-play 0.0). Applies to every move class — the
-        // root descent always uses the root-specific reduction, not a
-        // noise-conditioned special case.
+        // When set, `root_fpu_reduction` applies to every move class and takes
+        // precedence.
         if let Some(value) = self.root_fpu_reduction {
             return value;
         }
-        // Legacy (parity): zero FPU only at noised Full roots.
+        // Otherwise, zero FPU only at noised Full roots when enabled.
         if matches!(class, MoveClass::Full)
             && self.noise.is_some()
             && self.root_fpu_zero_under_noise
@@ -259,11 +252,11 @@ fn continuous_completion_ready(completed_visits: u32, target_visits: u32, in_fli
     completed_visits >= target_visits && in_flight == 0
 }
 
-/// §5.4.2 early-stop. Greedy unrecorded searches (Fast / eval-arena): stop
-/// when the remaining budget cannot overtake the visit leader AND, when LCB
-/// selection is active, the LCB winner currently equals the visit winner
-/// (conservative-heuristic w.r.t. LCB — the gate for the LCB arm is
-/// statistical). Recorded Full roots: a conservative 75% visit floor first.
+/// Early-stop test. Greedy unrecorded searches (Fast / eval-arena) stop when
+/// the remaining budget cannot overtake the visit leader and, when LCB
+/// selection is active, the LCB winner currently equals the visit winner.
+/// Recorded Full roots additionally require `full_visit_floor` of the target
+/// visits to have completed first.
 fn early_stop_ready(
     search: &RustSearch,
     baseline: Option<&HashMap<PackedCoord, u32>>,
@@ -285,11 +278,9 @@ fn early_stop_ready(
         }
     }
     let root = search.root();
-    // Build the per-edge stats vec ONCE (delta + LCB inputs) and derive
-    // best/second/best_id from it, instead of scanning root.edges here and
-    // then re-scanning it inside lcb_pick. The derivation below preserves the
-    // original `delta > best` (strictly-greater) tie-break — the first edge at
-    // the max delta stays best_id — so this is bit-identical to the prior code.
+    // Build the per-edge stats vec once and derive best/second/best_id from it.
+    // The `delta > best` (strictly-greater) tie-break keeps the first edge at
+    // the max delta as best_id.
     let stats = lcb_stats(root, baseline);
     let mut best = 0u32;
     let mut second = 0u32;
@@ -344,9 +335,8 @@ fn lcb_stats(
 }
 
 /// LCB pick among eligible root edges: Q - z * sigma / sqrt(n), eligibility
-/// delta >= max(lcb_min_visits, lcb_visit_fraction * max_child_delta). None
-/// when no child qualifies (caller falls back to max-visits). Delegates to
-/// the same core the closed-form table tests exercise.
+/// delta >= max(lcb_min_visits, lcb_visit_fraction * max_child_delta). Returns
+/// None when no child qualifies (caller falls back to max-visits).
 fn lcb_pick(
     root: &RustNode,
     baseline: Option<&HashMap<PackedCoord, u32>>,
@@ -357,14 +347,12 @@ fn lcb_pick(
         .map(|id| id as PackedCoord)
 }
 
-/// §5.4.4 final-move decisiveness tie-break. Among root moves whose LCB is
-/// within `ml_final_pick_band` of the LCB leader AND are guard-positive, prefer
-/// the most decisive one: fewest moves-left when the root is clearly winning
-/// (root value > ml_q_gate), most moves-left when clearly losing (< -ml_q_gate).
-/// Returns None in the |value| <= gate dead-zone or when no candidate carries a
-/// moves-left mean (head inert) — the caller then keeps the plain LCB pick. By
-/// construction it only ever re-picks among value-equivalent moves, so a
-/// miscalibrated head costs at most `ml_final_pick_band` of value.
+/// Final-move decisiveness tie-break. Among root moves whose LCB is within
+/// `ml_final_pick_band` of the LCB leader and are guard-positive, prefers the
+/// most decisive one: fewest moves-left when the root value > ml_q_gate, most
+/// moves-left when root value < -ml_q_gate. Returns None in the
+/// |value| <= gate dead-zone or when no candidate carries a moves-left mean;
+/// the caller then keeps the plain LCB pick.
 fn ml_final_pick(
     root: &RustNode,
     baseline: Option<&HashMap<PackedCoord, u32>>,
@@ -494,14 +482,10 @@ impl HexfieldMctsSession {
         move_temperatures: Option<Vec<f32>>,
         root_policy_temperatures: Option<Vec<f32>>,
         tss_enabled: Option<bool>,
-        // QUARANTINED (spec §5.1): hexfield production default is FALSE (no
-        // FPU zeroing at noised roots). The differential harness passes true
-        // to reproduce dense's as-built behavior.
+        // Defaults FALSE. When true, zeroes FPU at noised roots.
         root_fpu_zero_under_noise: Option<bool>,
-        // [6] SPEC CORRECTION: modern KataGo has NO "zero FPU under noise"
-        // branch; it uses a separate rootFpuReductionMax that self-play sets to
-        // 0.0. When provided this is the first-class root FPU reduction and
-        // takes precedence over the legacy noise-conditioned mechanism.
+        // When provided, this is the root FPU reduction and takes precedence
+        // over the noise-conditioned mechanism.
         root_fpu_reduction: Option<f32>,
         search_parity_mode: Option<bool>,
         divergence_overrides: Option<&Bound<'_, PyDict>>,
@@ -558,7 +542,7 @@ impl HexfieldMctsSession {
             virtual_batch_size.unwrap_or(target_visits),
         )?;
         let evaluation_stats = new_shared_evaluation_stats();
-        // QUARANTINE: root policy temperature defaults to 1.0 (schedule off).
+        // Root policy temperature defaults to 1.0 (schedule off).
         let root_policy_temperature = validate_positive_f32(
             "root_policy_temperature",
             root_policy_temperature.unwrap_or(1.0),
@@ -591,11 +575,9 @@ impl HexfieldMctsSession {
         let root_noise_config =
             root_noise_config(root_dirichlet_total_alpha, root_dirichlet_noise_fraction)?;
         let tss_enabled = tss_enabled.unwrap_or(true);
-        // [6] root FPU reduction. If `root_fpu_reduction` is given explicitly it
-        // is the first-class KataGo rootFpuReductionMax (self-play sets 0.0) and
-        // takes precedence. Otherwise fall back to the legacy noise-conditioned
-        // mechanism (parity): zero FPU only at noised roots when the quarantined
-        // `root_fpu_zero_under_noise` knob is set.
+        // If `root_fpu_reduction` is given explicitly it takes precedence.
+        // Otherwise zero FPU only at noised roots when `root_fpu_zero_under_noise`
+        // is set, else use `fpu_reduction`.
         let root_fpu_reduction = match root_fpu_reduction {
             Some(value) => validate_nonnegative_f32("root_fpu_reduction", value)?,
             None => {
@@ -794,8 +776,7 @@ impl HexfieldMctsSession {
         policy_init_temperature: Option<f32>,
         tss_enabled: Option<bool>,
         root_fpu_zero_under_noise: Option<bool>,
-        // [6] first-class KataGo rootFpuReductionMax (self-play 0.0); precedence
-        // over the legacy noise-conditioned knob when provided.
+        // When provided, takes precedence over the noise-conditioned knob.
         root_fpu_reduction: Option<f32>,
         search_parity_mode: Option<bool>,
         divergence_overrides: Option<&Bound<'_, PyDict>>,
@@ -898,9 +879,9 @@ impl HexfieldMctsSession {
             forced_playout_k,
             noise: root_noise_config,
             tss_enabled: tss_enabled.unwrap_or(true),
-            // QUARANTINE default false (dense as-built default is true).
+            // Defaults false.
             root_fpu_zero_under_noise: root_fpu_zero_under_noise.unwrap_or(false),
-            // [6] first-class root FPU reduction (validated >= 0 when provided).
+            // Validated >= 0 when provided.
             root_fpu_reduction: match root_fpu_reduction {
                 Some(value) => Some(validate_nonnegative_f32("root_fpu_reduction", value)?),
                 None => None,
@@ -974,18 +955,15 @@ impl HexfieldMctsSession {
         }
 
         let mut stats = ContinuousSchedulerStats::default();
-        // dense's select↔eval overlap, serial form: the NEXT select pass runs
-        // with the flush's virtual losses still pending (pre-backup tree
-        // state); a no-progress prefetch is stale advice and is discarded so
-        // the next iteration re-selects after the backup freed the paths.
+        // The next select pass runs with the flush's virtual losses still
+        // pending (pre-backup tree state). A no-progress prefetch is discarded
+        // so the next iteration re-selects after the backup frees the paths.
         let mut prefetched: Option<(Vec<RustLeaf>, bool)> = None;
-        // HEXFIELD_ASYNC_EVAL: real GPU/host overlap. The forward is ENQUEUED
-        // (submit, no device sync), the pre-backup select runs with the GIL
-        // released while those kernels execute, then the forward is drained
-        // (finish). Off => the original synchronous eval-then-select. Results
-        // are identical either way (only the sync point moves); the flag exists
-        // so the path can be parity-gated before it owns the live run.
-        // HEXFIELD_NO_PREFETCH is a parity-debugging lever only.
+        // HEXFIELD_ASYNC_EVAL: the forward is enqueued (submit, no device sync),
+        // the pre-backup select runs with the GIL released while those kernels
+        // execute, then the forward is drained (finish). Off => synchronous
+        // eval-then-select. Results are identical either way; only the sync
+        // point moves. HEXFIELD_NO_PREFETCH disables the prefetch select.
         let async_eval = std::env::var("HEXFIELD_ASYNC_EVAL").is_ok();
         let no_prefetch = std::env::var("HEXFIELD_NO_PREFETCH").is_ok();
         while continuous_has_work(&slots) || !queue.is_empty() {
@@ -1024,8 +1002,8 @@ impl HexfieldMctsSession {
                         },
                     })
                     .collect();
-                // Eval the flush and run the pre-backup select (on pre-backup
-                // tree state). Async: submit -> select (overlaps GPU) -> finish.
+                // Eval the flush and run the pre-backup select on pre-backup
+                // tree state. Async: submit -> select (overlaps GPU) -> finish.
                 // Sync: eval -> select. Both yield (prefetch_result, evaluations).
                 let (prefetch_result, evaluations) = if async_eval {
                     let pending = submit_eval_cached(
@@ -1191,25 +1169,19 @@ fn run_searches_to_targets(
     move_temps: &[f32],
     baselines: &[HashMap<PackedCoord, u32>],
 ) -> PyResult<()> {
-    // dense's lockstep is a two-stage pipeline: the NEXT batch is selected
-    // BEFORE the current batch is backed up (the select worker runs during
-    // the eval). That ordering is SEMANTIC — it extends the virtual-loss
-    // window by one batch — so the serial form here replicates it exactly:
-    // select(N+1) runs after evaluate(N) and before backup(N). (Running the
-    // select on a worker thread to reclaim the wall-clock would have identical
-    // semantics.)
-    // §5.4.2 early-stop. in_flight is passed as 0 here BY DESIGN: the
-    // visit-overtake test inside early_stop_ready is already in-flight-safe —
-    // apply_virtual_visit increments BOTH
-    // completed_visits and the selected edge's visit count at selection time,
-    // so best/second (per-edge delta visits) include pending leaves while
-    // remaining = target - completed excludes them. Thus best-second > remaining
-    // correctly proves the visit leader is unbeatable by ALL un-selected visits
-    // regardless of how many are currently pending; the pending batch is still
-    // evaluated+backed-up by the loop below before exit (no leaked virtual
-    // loss). The continuous path's in_flight==0 guard is about slot-advance
-    // safety (node-id invalidation), a different concern. test_early_stop_
-    // without_lcb_is_exact pins chosen-move equality AND non-vacuity.
+    // Two-stage pipeline: the next batch is selected before the current batch
+    // is backed up. This ordering extends the virtual-loss window by one batch:
+    // select(N+1) runs after evaluate(N) and before backup(N).
+    //
+    // Early-stop: in_flight is passed as 0 here. The visit-overtake test inside
+    // early_stop_ready is in-flight-safe because apply_virtual_visit increments
+    // both completed_visits and the selected edge's visit count at selection
+    // time, so best/second (per-edge delta visits) include pending leaves while
+    // remaining = target - completed excludes them. best-second > remaining thus
+    // proves the visit leader is unbeatable by all un-selected visits regardless
+    // of how many are pending; the pending batch is still evaluated and backed
+    // up by the loop below before exit. The continuous path's in_flight==0 guard
+    // is a separate concern (slot-advance / node-id invalidation).
     let early_stop_pass = |searches: &mut [RustSearch]| {
         for (index, search) in searches.iter_mut().enumerate() {
             if search.needs_visits()
@@ -1227,7 +1199,7 @@ fn run_searches_to_targets(
         select_leaf_batch(searches, c_puct, leaf_batch_per_root, virtual_loss)?;
 
     loop {
-        // §5.4.2: check between every batch (a parity-mode no-op); see the
+        // Checked between every batch (no-op in parity mode); see the
         // in-flight-safety note on early_stop_pass above.
         early_stop_pass(searches);
         if pending_leaves.is_empty() {
@@ -1262,7 +1234,7 @@ fn run_searches_to_targets(
             request_moves_left,
         )?;
         // Prefetch select with the current batch still pending (pre-backup
-        // tree state) — dense's overlap semantics, serial form.
+        // tree state).
         let next_leaves = if searches.iter().any(RustSearch::needs_visits) {
             select_leaf_batch(searches, c_puct, leaf_batch_per_root, virtual_loss)?.0
         } else {
@@ -1416,9 +1388,8 @@ fn select_continuous_pass(
     virtual_loss: f32,
 ) -> PyResult<(Vec<RustLeaf>, bool)> {
     // Per-slot selection is independent (each closure owns one slot's tree via
-    // &mut; the RNG is seeded by slot_index, not execution order), so fan it
-    // across cores with rayon. Results fold in slot order, so the leaf sweep is
-    // byte-identical to the serial form.
+    // &mut; the RNG is seeded by slot_index, not execution order), so it fans
+    // across cores with rayon. Results fold in slot order.
     let per_slot: PyResult<Vec<(Vec<RustLeaf>, bool)>> = slots
         .par_iter_mut()
         .enumerate()
@@ -1559,8 +1530,8 @@ fn complete_continuous_slots(
                 if normal {
                     return (true, false);
                 }
-                // §5.4.2: Fast moves stop unrestricted; recorded Full roots
-                // keep the conservative visit floor.
+                // Fast moves stop unrestricted; recorded Full roots keep the
+                // visit floor.
                 let early = early_stop_ready(
                     search,
                     Some(&slots[slot_index].baseline),
@@ -1834,8 +1805,6 @@ fn resolve_divergences(
         if let Some(v) = overrides.get_item("c_base")? {
             dv.c_base = v.extract()?;
         }
-        // main_4 KataGo-faithful search divergences (ledger items [1]-[7]) —
-        // individually flippable for the M6 property gates / M10 lesions.
         if let Some(v) = overrides.get_item("nucleus_f64")? {
             dv.nucleus_f64 = v.extract()?;
         }
@@ -1902,8 +1871,8 @@ fn build_search_result_payloads(
         let (policy_action_ids, policy_weights, _policy_q, policy_total) =
             visit_policy(root, baseline);
         let (export_action_ids, export_weights, export_q) = if forced_playout_k > 0.0 {
-            // [7] align the recorded-target pruning with selection's c_for(N)
-            // when pruned_dynamic_cpuct is on; otherwise static c_puct (parity).
+            // When pruned_dynamic_cpuct is on, align the recorded-target
+            // pruning with selection's c_for(N); otherwise use static c_puct.
             let effective_c = search.effective_pruning_c_puct(c_puct, root.visits);
             pruned_visit_policy(root, baseline, forced_playout_k, effective_c)
         } else {
@@ -2136,9 +2105,7 @@ fn root_noise_exact(
     })
 }
 
-/// Test-only surfaces for the property gates (§5.4 LCB closed-form table tests
-/// + moves-left utility sign/gate properties). Pure functions over the same
-/// formulas the search uses.
+/// Test-facing pure function over the same LCB formula the search uses.
 pub fn debug_lcb_from_stats(
     stats: &[(u64, u32, u32, f32, f32)], // (action_id, delta, visits, value_sum, value_sq_sum)
     z: f32,
@@ -2179,11 +2146,11 @@ pub fn debug_ml_bonus(
     gate: f32,
     two_sided: bool,
 ) -> f32 {
-    // s gates by the CHOOSER's perspective Q: +1 clearly winning (prefer fewer
-    // moves left = faster win), -1 clearly losing when two-sided (prefer more
-    // moves left = slower loss), 0 in the |Q| <= gate dead-zone (no sign
-    // discontinuity at Q=0). Both signs add a POSITIVE bonus to the desired
-    // child because tanh flips with (m_edge - m_node). Bounded by `weight`.
+    // s gates by the chooser's perspective Q: +1 when Q > gate (prefer fewer
+    // moves left), -1 when two-sided and Q < -gate (prefer more moves left),
+    // 0 in the |Q| <= gate dead-zone. Both signs add a positive bonus to the
+    // preferred child since tanh flips with (m_edge - m_node). Bounded by
+    // `weight`.
     let s = if q > gate {
         1.0
     } else if two_sided && q < -gate {
@@ -2281,11 +2248,10 @@ fn select_search_action(
     Ok(selected)
 }
 
-/// Action selection: temperature sampling on Full paths (dense semantics
-/// verbatim) and, on greedy (T == 0) paths with the §5.4.1 divergence on,
-/// LCB-of-Q selection among eligible children (fallback max-visits). The TSS
-/// guard has already zeroed proven-losing weights; LCB only ever picks among
-/// guard-positive actions.
+/// Action selection: temperature sampling on non-greedy paths and, on greedy
+/// (T == 0) paths with `lcb_move_selection` on, LCB-of-Q selection among
+/// eligible children (fallback max-visits). The TSS guard has already zeroed
+/// proven-losing weights; LCB only picks among guard-positive actions.
 fn select_action_with_lcb(
     search: &RustSearch,
     baseline: Option<&HashMap<PackedCoord, u32>>,
@@ -2305,10 +2271,10 @@ fn select_action_with_lcb(
                 .zip(guarded_weights.iter())
                 .any(|(&id, &w)| id == lcb_id && w > 0.0);
             if allowed {
-                // §5.4.4 decisiveness tie-break on the PLAYED move: among moves
-                // value-tied with the LCB leader, prefer the decisive one. Needs
-                // the moves-left head (gated on moves_left_utility); inert + safe
-                // (returns lcb_id) in the dead-zone or with no ml stats.
+                // Decisiveness tie-break on the played move: among moves
+                // value-tied with the LCB leader, prefer the decisive one.
+                // Gated on moves_left_utility; returns lcb_id in the dead-zone
+                // or with no ml stats.
                 let final_id = if dv.ml_final_pick && dv.moves_left_utility {
                     ml_final_pick(root, baseline, &dv, action_ids, guarded_weights)
                         .unwrap_or(lcb_id)
@@ -2331,10 +2297,9 @@ fn visit_policy(
     root: &RustNode,
     baseline: Option<&HashMap<PackedCoord, u32>>,
 ) -> (Vec<PackedCoord>, Vec<f32>, Vec<f32>, u32) {
-    // Compute each edge's delta visits ONCE (edge_delta_visits is a HashMap
-    // lookup when baseline is Some) and reuse the cached deltas for both the
-    // total and the per-edge weights. Value-identical to the prior two-pass
-    // form: same sum, same per-edge weight numerators.
+    // Compute each edge's delta visits once (edge_delta_visits is a HashMap
+    // lookup when baseline is Some) and reuse the deltas for both the total and
+    // the per-edge weights.
     let deltas: Vec<u32> = root
         .edges
         .iter()

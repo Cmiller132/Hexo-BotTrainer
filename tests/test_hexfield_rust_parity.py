@@ -1,9 +1,9 @@
-"""M4 gate: Rust↔Python featurizer parity (spec §6.2).
+"""Rust/Python featurizer parity checks.
 
-The Rust serve-time featurizer (hexfield._rust.featurize_states) must equal
-the Python train-time featurizer on random engine states: exact node order,
-counts, BFS distances, neighbour tables, and features (floats compared in f32
-BEFORE any f16 wire cast, <= 1e-6; everything else exact).
+Compares hexfield._rust.featurize_states against the Python featurizer on
+sampled engine states: node order, counts, BFS distances, neighbour tables,
+and features. Feature floats are compared in f32 with a <= 1e-6 tolerance;
+all other outputs are compared exactly.
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ def test_capabilities() -> None:
 @needs_rust
 def test_rust_python_featurizer_parity() -> None:
     states = sample_decision_states(range(10), (0, 1, 3, 7, 12, 19, 28, 41))
-    assert len(states) >= 50  # the spec's ~50-state fixture floor
+    assert len(states) >= 50
     payloads = _rust.featurize_states(states)
     assert len(payloads) == len(states)
 
@@ -52,7 +52,7 @@ def test_rust_python_featurizer_parity() -> None:
         assert payload["halo_count"] == sup.halo_count
 
         coords = np.frombuffer(payload["coords"], dtype=np.int16).reshape(n, 2)
-        assert np.array_equal(coords.astype(np.int32), sup.coords)  # exact node order
+        assert np.array_equal(coords.astype(np.int32), sup.coords)
 
         dist = np.frombuffer(payload["dist"], dtype=np.int32)
         assert np.array_equal(dist, sup.dist)
@@ -63,8 +63,8 @@ def test_rust_python_featurizer_parity() -> None:
         rust_feats = np.frombuffer(payload["feats"], dtype=np.float32).reshape(
             n, C.NUM_FEATURES
         )
-        # Binary planes + dist must be exact; recency may differ by f32
-        # rounding order (1e-6 envelope per the spec).
+        # All features within 1e-6; recency planes may differ within this
+        # tolerance, the remaining planes are checked for exact equality below.
         diff = np.abs(rust_feats - feats)
         assert diff.max() <= 1e-6, (
             f"feature mismatch: max diff {diff.max()} at "

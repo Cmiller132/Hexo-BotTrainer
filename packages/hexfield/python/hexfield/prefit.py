@@ -1,32 +1,26 @@
-"""Phase-A BC prefit trainer + probe harness (spec §7 Phase A, §6.4 probes).
+"""BC prefit trainer and probe harness.
 
-Optimizer per §6.3: AdamW lr 1e-3, wd 1e-4 on matrix weights only (no decay:
-biases, LN params, token inits, bias table), AMP + GradScaler, grad-clip 1.0,
-500-step linear LR warmup on fresh initializations, no EMA. One optimizer
-step per nominal 32-row batch via pair-budget micro-buckets with step-global
-denominators (exactly equal to monolithic batches under LN — tested theorem).
+Optimizer: AdamW lr 1e-3, wd 1e-4 on matrix weights only (no decay on biases,
+LayerNorm params, token inits, bias table), AMP + GradScaler, grad-clip 1.0,
+500-step linear LR warmup on fresh initializations, no EMA. One optimizer step
+per nominal 32-row batch via pair-budget micro-buckets with step-global
+denominators.
 
-Per-epoch artifacts in the run dir: checkpoint, diagnostics.jsonl line, and a
-probe npz over ~1024 frozen validation rows (policy churn KL vs the previous
-epoch, entropy, value ECE vs frozen realized outcomes, D6-consistency KL).
+Per-epoch artifacts written to the run dir: checkpoint, one diagnostics.jsonl
+line, and a probe npz over up to PROBE_ROWS frozen validation rows (policy KL
+vs the previous epoch, entropy, value ECE vs realized outcomes, D6-consistency
+KL).
 """
 
 from __future__ import annotations
 
 import os
 
-# PERF NOTE — HEXFIELD_TRAIN_FLEX is deliberately NOT defaulted on for the prefit.
-# Production self-play/training (systemd HEXFIELD_TRAIN_FLEX=1) gets a big win from
-# the in-kernel FlexAttention score_mod because its forward runs on a SMALL, STABLE
-# set of shapes. The prefit is different: its pair-budget micro-buckets pack a
-# VARIABLE number of rows per step (the batch/seq dim swings, e.g. 11 vs 3), which
-# the inner flex compile (torch.compile(dynamic=False) in model.py) cannot cache —
-# it recompiles per shape and then falls back to the UNFUSED flex path that
-# materializes the full scores matrix. MEASURED: enabling train-flex here made the
-# prefit ~1.85 s/step vs ~0.33 s/step eager (5.6x SLOWER). So the prefit stays on
-# the eager materialized-bias path. (A user can still force flex for experiments via
-# HEXFIELD_TRAIN_FLEX=1 in the env; matching production flex speed would instead
-# require stabilizing the prefit's batch shapes — a separate, larger change.)
+# HEXFIELD_TRAIN_FLEX is not defaulted on for the prefit. The pair-budget
+# micro-buckets pack a variable number of rows per step (batch/seq dim varies),
+# which the inner FlexAttention compile (torch.compile(dynamic=False) in
+# model.py) recompiles per shape. The prefit uses the eager materialized-bias
+# path. Setting HEXFIELD_TRAIN_FLEX=1 in the env forces the flex path.
 
 import argparse
 import json
@@ -115,12 +109,9 @@ class BootstrapShards(IterableDataset):
             denoms = step_global_denominators(expanded, STV_HORIZONS)
             buckets = []
             for bucket in pair_budget_microbuckets(expanded, quantize=PAD_QUANTUM):
-                # Quantize Npad to PAD_QUANTUM-multiples: a small, repeating set
-                # of tensor shapes keeps the CUDA caching allocator from
-                # fragmenting toward the VRAM ceiling (the §5.3 static-shape
-                # discipline, applied to training). The split above assumed this
-                # same quantum, so the live (B,4,S,S) transient honours the
-                # PAIR_BUDGET (§6.3).
+                # Round the padded node count up to a multiple of PAD_QUANTUM.
+                # pair_budget_microbuckets above used the same quantum for its
+                # budget.
                 pad_to = -(-max(r.support.num_nodes for r in bucket) // PAD_QUANTUM) * PAD_QUANTUM
                 batch = collate_training(bucket, pad_to=pad_to)
                 buckets.append(split_stvalue_columns(batch, STV_HORIZONS))
@@ -144,11 +135,8 @@ def run_step(model, buckets, denoms, device, scaler, optimizer, grad_stats) -> d
             out = model(batch["feats"], batch["nbr"], batch["mask"], batch["coords"])
         loss, components = hexfield_loss(out, batch, denominators=denoms)
         if not torch.isfinite(loss):
-            # PCR fast-value-row buckets occasionally yield a non-finite cell_q in the
-            # OFFLINE expand_sample path (production's rust expand is clean). Skip the
-            # bucket instead of crashing the warm-start — cell_q is auxiliary and a rare
-            # skipped bucket's policy/value gradient is negligible for a BC prefit. The
-            # printed count lets us confirm it stays rare.
+            # Skip buckets whose loss is non-finite (e.g. a non-finite cell_q)
+            # rather than backpropagating them, and log the cell_q value.
             print(f"  [skip] non-finite bucket (cell_q={float(components.get('cell_q', float('nan'))):.3g})", flush=True)
             continue
         scaler.scale(loss).backward()
@@ -156,9 +144,8 @@ def run_step(model, buckets, denoms, device, scaler, optimizer, grad_stats) -> d
         for key, val in components.items():
             components_sum[key] = components_sum.get(key, 0.0) + float(val.detach())
     if not any_backward:
-        # The whole nominal step was non-finite (every bucket skipped) — no grads were
-        # scaled, so skip the optimizer update rather than tripping GradScaler's
-        # "No inf checks were recorded" assert. Rare (a lone all-fast cell_q bucket).
+        # Every bucket was skipped, so no grads were scaled; skip the optimizer
+        # update to avoid GradScaler's "No inf checks were recorded" assert.
         return components_sum
     scaler.unscale_(optimizer)
     grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)
@@ -186,9 +173,8 @@ def evaluate(model, shard_paths, device, max_rows: int = 50_000) -> dict:
             chunk_policy = 0.0
             chunk_value = 0.0
             chunk_rows = len(expanded)
-            # eval collate pads to raw max N (pad_to=None), so the split must
-            # use the raw quantum (no 256-rounding) for its budget to match the
-            # actual transient here — keeps prior eval bucketing unchanged.
+            # eval collate pads to the raw max N (pad_to=None), so the bucketing
+            # uses quantize=1 to match.
             for bucket in pair_budget_microbuckets(expanded, quantize=1):
                 batch = _to_device(
                     split_stvalue_columns(collate_training(bucket), STV_HORIZONS), device
@@ -196,7 +182,7 @@ def evaluate(model, shard_paths, device, max_rows: int = 50_000) -> dict:
                 out = model(batch["feats"], batch["nbr"], batch["mask"], batch["coords"])
                 _, comps = hexfield_loss(out, batch, denominators=denoms)
                 # components use the chunk-global denominator, so summing the
-                # buckets reconstructs the chunk-mean CE exactly
+                # buckets gives the chunk-mean CE
                 chunk_policy += float(comps["policy"])
                 chunk_value += float(comps["value"])
                 b = batch["value"].shape[0]
@@ -239,7 +225,7 @@ def evaluate(model, shard_paths, device, max_rows: int = 50_000) -> dict:
 
 @torch.no_grad()
 def run_probe(model, probe_samples, device, prev_probs: list[np.ndarray] | None):
-    """Frozen-probe forward: policy churn KL, entropy, E[v], D6-consistency KL."""
+    """Frozen-probe forward: policy KL vs prev_probs, entropy, E[v], D6-consistency KL."""
 
     model.eval()
     probs_out: list[np.ndarray] = []
@@ -337,14 +323,11 @@ def main(argv=None) -> None:
         start_epoch = int(payload["epoch"]) + 1
         print(f"resumed from {args.resume} at epoch {start_epoch}", flush=True)
 
-    # torch.compile the FORWARD (dynamic=True). Measured ~1.45x on this prefit
-    # (0.278 -> 0.192 s/step steady) after a ~12s one-time warmup. dynamic=True is
-    # essential: the pair-budget micro-buckets vary the batch/seq dim, so a static
-    # compile would recompile per shape (that is exactly why HEXFIELD_TRAIN_FLEX,
-    # whose inner flex op is dynamic=False, was ~5.6x SLOWER here). Keep `model`
-    # (the eager module) for make_optimizer and save_checkpoint — the compiled
-    # wrapper prefixes state_dict keys with "_orig_mod." which would break the
-    # checkpoint loader. Set HEXFIELD_PREFIT_COMPILE=0 to force plain eager.
+    # torch.compile the forward with dynamic=True, since the pair-budget
+    # micro-buckets vary the batch/seq dim. The eager `model` is retained for
+    # make_optimizer and save_checkpoint: the compiled wrapper prefixes
+    # state_dict keys with "_orig_mod.", which the checkpoint loader does not
+    # expect. Set HEXFIELD_PREFIT_COMPILE=0 to use plain eager.
     fwd = model
     if os.environ.get("HEXFIELD_PREFIT_COMPILE", "1") == "1":
         try:
@@ -374,7 +357,7 @@ def main(argv=None) -> None:
         grad_stats: list[float] = []
         steps = 0
         for buckets, denoms in loader:
-            # linear warmup on fresh inits only (resumes skip via global_step)
+            # linear LR warmup while global_step < WARMUP_STEPS
             if global_step < WARMUP_STEPS:
                 lr = LR * (global_step + 1) / WARMUP_STEPS
                 for group in optimizer.param_groups:

@@ -1,15 +1,12 @@
-"""M6 property gates for the §5.4 divergences.
+"""Property tests for the search divergences.
 
-- LCB vs closed-form on synthetic visit/Q/sigma tables, incl. eligibility
-  fallback (None when no child qualifies).
-- Moves-left utility: identically zero at/below the |Q| gate (no sign
-  discontinuity), correct sign (shorter-when-winning preferred), monotone in
-  (M_e - M_node), bounded by w.
-- Early-stop with LCB lesioned off ≡ early-stop off: EXACT chosen-move
-  equality over many greedy searches (pure visit-overtake is provably sound),
-  and the stop actually fires (non-vacuous).
-- Reused-root policy temperature is applied exactly once per root lifetime
-  (the main1 reuse-bug regression, hexfield-side).
+- LCB pick vs closed-form on synthetic visit/Q/sigma tables, including the
+  eligibility fallback (None when no child qualifies).
+- Moves-left utility: zero at/below the |Q| gate, correct sign
+  (shorter-when-winning preferred), monotone in (M_e - M_node), bounded by w.
+- Early-stop with LCB selection off compared against early-stop off: chosen-move
+  equality over greedy searches, and a check that the stop fires at least once.
+- Reused-root policy temperature is applied once per root lifetime.
 """
 
 from __future__ import annotations
@@ -72,7 +69,7 @@ def test_lcb_matches_closed_form_tables() -> None:
 
 @needs_native
 def test_lcb_eligibility_fallback() -> None:
-    # All children below the visit threshold -> None (caller falls back).
+    # All children below the visit threshold -> None.
     stats = [(1, 3, 3, 1.5, 1.0), (2, 2, 2, -0.5, 0.5)]
     assert hexfield_rust.debug_lcb_pick(stats, 1.6, 8, 0.1) is None
 
@@ -81,13 +78,13 @@ def test_lcb_eligibility_fallback() -> None:
 def test_ml_bonus_properties() -> None:
     w, scale, gate = 0.03, 32.0, 0.6
     bonus = lambda q, me, mn: hexfield_rust.debug_ml_bonus(q, me, mn, w, scale, gate)
-    # Identically zero at and below the gate — no sign discontinuity exists.
+    # Zero in the dead zone (|q| <= gate) and, one-sided, for q < -gate.
     for q in (-1.0, -0.7, 0.0, 0.3, 0.6):
         assert bonus(q, 10.0, 50.0) == 0.0
         assert bonus(q, 50.0, 10.0) == 0.0
-    # Winning + child predicts FEWER moves left -> positive bonus (prefer it).
+    # Winning + child predicts fewer moves left -> positive bonus.
     assert bonus(0.9, 20.0, 40.0) > 0.0
-    # Winning + child predicts MORE moves left -> negative bonus.
+    # Winning + child predicts more moves left -> negative bonus.
     assert bonus(0.9, 60.0, 40.0) < 0.0
     # Monotone decreasing in (M_e - M_node); bounded by w.
     last = None
@@ -97,7 +94,7 @@ def test_ml_bonus_properties() -> None:
         if last is not None:
             assert b < last
         last = b
-    # Delta form: invariant to a shared absolute bias.
+    # Invariant to a shared additive offset on both moves-left values.
     assert bonus(0.9, 20.0, 40.0) == pytest.approx(bonus(0.9, 120.0, 140.0), abs=1e-7)
 
 
@@ -106,27 +103,27 @@ def test_ml_bonus_two_sided() -> None:
     w, scale, gate = 0.03, 32.0, 0.6
     one = lambda q, me, mn: hexfield_rust.debug_ml_bonus(q, me, mn, w, scale, gate, False)
     two = lambda q, me, mn: hexfield_rust.debug_ml_bonus(q, me, mn, w, scale, gate, True)
-    # Dead-zone is identical either way: zero for |q| <= gate (no discontinuity).
+    # Zero for |q| <= gate under both modes.
     for q in (-0.6, -0.3, 0.0, 0.3, 0.6):
         assert one(q, 10.0, 50.0) == 0.0
         assert two(q, 10.0, 50.0) == 0.0
-    # One-sided: the losing side never fires.
+    # One-sided: the losing side (q < -gate) yields zero.
     assert one(-0.9, 60.0, 40.0) == 0.0
     assert one(-0.9, 20.0, 40.0) == 0.0
-    # Two-sided losing side prefers the SLOWER loss: more moves left -> positive
-    # bonus (drag it out), fewer moves left -> negative (avoid the quick loss).
+    # Two-sided losing side: more moves left -> positive bonus,
+    # fewer moves left -> negative bonus.
     assert two(-0.9, 60.0, 40.0) > 0.0
     assert two(-0.9, 20.0, 40.0) < 0.0
     # Symmetric with the winning side at equal |q| and mirrored delta.
     assert two(-0.9, 60.0, 40.0) == pytest.approx(two(0.9, 20.0, 40.0), abs=1e-7)
-    # Still bounded by w on the losing side.
+    # Bounded by w on the losing side.
     assert abs(two(-0.95, 500.0, 0.0)) <= w + 1e-9
 
 
 def test_build_divergence_overrides() -> None:
     from hexfield.config import SelfplayConfig, build_divergence_overrides
 
-    sp = SelfplayConfig()  # production defaults: MLH on, two-sided, final-pick
+    sp = SelfplayConfig()  # default config: moves-left on, two-sided, final-pick
     on = build_divergence_overrides(sp)
     assert on["moves_left_utility"] is True
     assert on["ml_two_sided"] is True
@@ -134,8 +131,7 @@ def test_build_divergence_overrides() -> None:
     assert on["ml_weight"] == pytest.approx(0.03)
     assert on["ml_scale"] == pytest.approx(32.0)
     assert on["ml_q_gate"] == pytest.approx(0.6)
-    # The heal-gate / manual disable forces the lever off but keeps the constants
-    # (so a later re-enable uses the validated values).
+    # disabled=True sets the enable flags off while leaving the constants unchanged.
     off = build_divergence_overrides(sp, disabled=True)
     assert off["moves_left_utility"] is False
     assert off["ml_two_sided"] is False
@@ -148,11 +144,9 @@ def test_build_divergence_overrides() -> None:
 
 @needs_native
 def test_early_stop_without_lcb_is_exact() -> None:
-    """Pure visit-overtake early-stop is provably selection-invariant for the
-    raw greedy argmax, so this gate runs TSS-OFF: the tactical guard is an
-    independent overlay that re-ranks among guard-positive moves, where the
-    (unvisited tail of the) distribution legitimately depends on when the
-    search stopped. The guard's own correctness has its own parity coverage."""
+    """Visit-overtake early-stop compared against early-stop off, with the raw
+    greedy argmax and tss_enabled=False. Asserts the chosen move matches and the
+    early stop fires at least once across the corpus."""
 
     states = _corpus(60)
     on = hexfield_rust.HexfieldMctsSession(max_states=65536)
@@ -162,10 +156,8 @@ def test_early_stop_without_lcb_is_exact() -> None:
         "early_stop": True,
         "visit_scaled_c_puct": False,
         "moves_left_utility": False,
-        # main_4 KataGo-faithful divergences default ON in production() (the base
-        # this overrides dict sits on top of); neutralize them to the parity()
-        # legacy value so this gate isolates early_stop vs the search_parity_mode
-        # session below.
+        # Set the remaining divergences to the search_parity_mode values so this
+        # test isolates early_stop against the parity session below.
         "nucleus_f64": False,
         "new_child_fpu": False,
         "lazy_widening": False,
@@ -187,14 +179,13 @@ def test_early_stop_without_lcb_is_exact() -> None:
         stops += int(a["early_stopped"])
         on.discard(index)
         off.discard(index)
-    assert stops > 0, "early-stop never fired — gate is vacuous"
+    assert stops > 0, "early-stop never fired"
 
 
 @needs_native
 def test_reused_root_temperature_applied_once() -> None:
-    """Regression (main1 reuse bug, hexfield side): a promoted root gets the
-    root-policy temperature exactly once — its exported prior equals
-    normalize(raw_eval_prior ** (1/T)), not raw and not double-softened."""
+    """A promoted (reused) root applies the root-policy temperature once: its
+    exported prior equals normalize(normalize(raw_eval_prior) ** (1/T))."""
 
     state = api.new_game()
     for q, r in [(0, 0), (1, 1), (-1, 0)]:
@@ -217,11 +208,11 @@ def test_reused_root_temperature_applied_once() -> None:
     ids = np.frombuffer(bytes(r1["root_prior_policy_action_ids_bytes"]), dtype=np.uint32)
     weights = np.frombuffer(bytes(r1["root_prior_policy_weights_bytes"]), dtype=np.float32)
 
-    # Expected: the stub's raw priors for THIS state, normalized, then ^(1/T),
-    # renormalized — computed independently through the Rust featurizer path.
+    # Expected: the stub's raw priors for this state, normalized, then ^(1/T),
+    # renormalized — computed via the Rust featurizer path.
     payload_rows = hexfield_rust.featurize_states([state])
     row = payload_rows[0]
-    # Rebuild the stub's view via the actual evaluator payload contract:
+    # Build the evaluator payload from the featurizer output.
     feats_f16 = (
         np.frombuffer(row["feats"], dtype=np.float32).astype(np.float16).tobytes()
     )  # featurize_states emits f32; the evaluator wire carries f16
@@ -246,7 +237,7 @@ def test_reused_root_temperature_applied_once() -> None:
 
     expected = dict(zip(legal_ids.astype(np.uint32).tolist(), softened.tolist()))
     got = dict(zip(ids.tolist(), weights.astype(np.float64).tolist()))
-    # zero-prior (out-of-disk) cells are dropped from the export on both sides
+    # zero-prior cells are dropped from the export on both sides
     expected = {k: v for k, v in expected.items() if v > 0}
     assert set(got) == set(expected)
     for aid, w in got.items():

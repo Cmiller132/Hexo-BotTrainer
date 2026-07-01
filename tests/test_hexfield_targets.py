@@ -1,14 +1,16 @@
-"""M2 gates: losses / targets / shards / batching vs the restnet oracles.
+"""Tests for hexfield losses, targets, shards, and batching.
 
-- 65-bin helpers ≡ dense_cnn_restnet.losses
-- segment legal-prefix CE ≡ restnet's masked dense CE on embedded rows
-- masked binned losses ≡ restnet semantics incl. zero-denominator exact-0
-- STV even-offset EMA + future-opponent-policy rule ≡ restnet samples helpers
+Several tests compare hexfield outputs against the dense_cnn_restnet
+implementation as an oracle:
+- 65-bin binned-value helpers vs dense_cnn_restnet.losses
+- segment legal-prefix CE vs masked dense CE on embedded rows
+- masked binned losses including zero-denominator rows
+- short-term-value targets and future-opponent-policy vs restnet samples helpers
 - finalize invariants (hard z, moves-left countdown, truncated, fast-mask)
-- expansion: policy slot mapping, D6 commutation, off-legal hard error
-- hexfield_compact_v1 writer round-trip + sidecar
-- legacy restnet shard cross-read with derived legality + derived win-now
-- micro-bucket accumulation ≡ monolithic loss/grads (fp64 theorem)
+- expansion: policy slot mapping, D6 symmetry, off-legal error
+- hexfield_compact_v1 writer round-trip plus sidecar
+- legacy restnet shard cross-read with derived legality and win-now
+- micro-bucket accumulation vs monolithic loss/grads in fp64
 - pair-budget bucket rule
 """
 
@@ -123,7 +125,7 @@ def test_segment_ce_matches_restnet_dense_ce() -> None:
         t = torch.rand(l)
         target[g, :l] = t / t.sum()
 
-    dense_logits = torch.randn(b, area)  # junk everywhere off the embedding
+    dense_logits = torch.randn(b, area)  # arbitrary values off the embedded cells
     dense_target = torch.zeros(b, area)
     dense_mask = torch.zeros(b, area, dtype=torch.bool)
     for g in range(b):
@@ -154,14 +156,14 @@ def test_binned_value_loss_matches_restnet() -> None:
         atol=1e-6,
     )
     zero = binned_value_loss(logits, target, mask=torch.zeros(8))
-    assert float(zero) == 0.0  # zero-denominator rows contribute exactly nothing
+    assert float(zero) == 0.0  # all-zero mask yields exactly 0.0
 
 
 def test_stv_and_opp_helpers_match_restnet() -> None:
     from dense_cnn_restnet import samples as oracle
 
     rng = random.Random(7)
-    # Synthetic decision sequence with the real 1-then-2 player structure.
+    # Synthetic decision sequence: player 0 first, then alternating in pairs.
     players_int = [0] + [1 if ((k - 1) // 2) % 2 == 0 else 0 for k in range(1, 23)]
     decisions_mine = []
     decisions_oracle = []
@@ -226,7 +228,7 @@ def test_expand_policy_mapping_and_d6() -> None:
     for sym in range(12):
         rot = expand_sample(sample, symmetry=sym)
         assert rot.policy.shape == base.policy.shape
-        # Each stored action's mass lands on the slot of its transformed cell.
+        # Each stored action's mass maps to the slot of its transformed cell.
         for action_id, weight in sample.policy:
             q, r = unpack_action_id(action_id)
             cell = apply_d6(sym, q, r)
@@ -240,11 +242,11 @@ def test_expand_policy_mapping_and_d6() -> None:
         game_id="", turn_index=0, current_player=sample.current_player, phase=sample.phase,
         records=sample.records, first_stone=sample.first_stone, own_hot=sample.own_hot,
         opp_hot=sample.opp_hot, own_win=sample.own_win, opp_win=sample.opp_win,
-        policy=((pack_action_id(2000, 2000), 1.0),),  # nowhere near the support
+        policy=((pack_action_id(2000, 2000), 1.0),),  # cell outside the support
     )
     try:
         expand_sample(bad)
-        raise AssertionError("off-legal policy target must be a hard error")
+        raise AssertionError("off-legal policy target must raise")
     except ValueError:
         pass
 
@@ -296,9 +298,9 @@ def test_legacy_crossread(tmp_path) -> None:
         turn_index=5,
         current_player=str(mirror.current_player),
         phase=str(mirror.phase.value),
-        center=(1, -1),  # crop center: ignored by the adapter
+        center=(1, -1),  # ignored by the adapter
         stones=[(c.q, c.r, str(p)) for c, p in mirror.board.stones],
-        legal_action_ids=legal,  # crop-restricted at source: ignored
+        legal_action_ids=legal,  # ignored by the adapter
         placement_history=[
             (rec.coord.q, rec.coord.r, str(rec.player), None, rec.placement_index, None, None)
             for rec in mirror.placement_history
@@ -308,7 +310,7 @@ def test_legacy_crossread(tmp_path) -> None:
         ),
         own_hot=facts.own_hot,
         opponent_hot=facts.opp_hot,
-        opponent_last_turn=((0, 0),),  # ignored: derived from history instead
+        opponent_last_turn=((0, 0),),  # ignored: derived from history
         policy=policy,
         root_prior_policy=(),
         opp_policy=((legal[1], 1.0),),
@@ -327,12 +329,12 @@ def test_legacy_crossread(tmp_path) -> None:
     assert row.current_player == facts.current_player
     assert row.phase == facts.phase
     assert row.own_hot == facts.own_hot and row.opp_hot == facts.opp_hot
-    # Standing-win cells derive from stones and equal the engine's view.
+    # Win-now cells are derived from stones and match the engine facts.
     assert row.own_win == facts.own_win and row.opp_win == facts.opp_win
     assert row.moves_left == 42.0
     assert dict(row.short_term_value) == {2: np.float32(0.25), 16: np.float32(-0.5)}
 
-    # Derived legality == the engine's full legal set (not the stored column).
+    # Derived legality equals the engine's full legal set, not the stored column.
     expanded = expand_sample(row)
     sup_ids = [pack_action_id(q, r) for q, r in expanded.support.legal_coords().tolist()]
     assert sup_ids == legal
@@ -340,9 +342,8 @@ def test_legacy_crossread(tmp_path) -> None:
 
 def _write_minimal_legacy_shard(path, *, schema_version) -> None:
     """Write a one-row restnet compact-v1 shard via the oracle writer, then
-    re-save it with the ``schema_version`` column forced to ``schema_version``
-    (or dropped entirely when ``None``) so the adapter's drift guard can be
-    exercised without hand-rolling the legacy column layout."""
+    re-save it with the ``schema_version`` column set to ``schema_version``
+    (or dropped when ``None``)."""
 
     from dense_cnn_restnet import compact_io as oracle_io
     from dense_cnn_restnet.samples import Model1SampleData
@@ -391,8 +392,7 @@ def _write_minimal_legacy_shard(path, *, schema_version) -> None:
 
 
 def test_legacy_shard_schema_version_guard(tmp_path) -> None:
-    # A wrong stored legacy schema_version is a hard error (drift guard,
-    # mirroring read_compact_shard).
+    # A wrong stored legacy schema_version raises.
     bad = tmp_path / "bad.npz"
     _write_minimal_legacy_shard(bad, schema_version=99)
     try:
@@ -407,7 +407,7 @@ def test_legacy_shard_schema_version_guard(tmp_path) -> None:
     rows = read_legacy_restnet_shard(ok)
     assert len(rows) == 1 and rows[0].metadata["source"] == "legacy_shard"
 
-    # Lenient on absence: pre-versioning restnet shards still read.
+    # A missing schema_version column reads without error.
     absent = tmp_path / "absent.npz"
     _write_minimal_legacy_shard(absent, schema_version=None)
     rows = read_legacy_restnet_shard(absent)
@@ -439,7 +439,7 @@ def test_microbucket_loss_equals_monolithic_fp64() -> None:
 
     model2 = HexfieldNet().double()
     model2.load_state_dict({k: v for k, v in model.state_dict().items()})
-    buckets = pair_budget_microbuckets(rows, budget=2.0e5)  # tiny: force splits
+    buckets = pair_budget_microbuckets(rows, budget=2.0e5)  # small budget forces multiple buckets
     assert len(buckets) >= 2
     assert sorted(id(r) for b in buckets for r in b) == sorted(id(r) for r in rows)
     total = 0.0
@@ -465,9 +465,9 @@ def test_pair_budget_bucket_rule() -> None:
 
 
 def test_decode_moves_left_median() -> None:
-    # decode_moves_left is a softmax-EXPECTATION decode (NOT median) mapping the
-    # 65-bin scalar support [-1, 1] onto decisions [0, MOVES_LEFT_CAP]:
-    #   decisions = (scalar + 1) / 2 * MOVES_LEFT_CAP   (losses.decode_moves_left).
+    # decode_moves_left takes the softmax expectation over the 65-bin scalar
+    # support [-1, 1] and maps it onto decisions [0, MOVES_LEFT_CAP]:
+    #   decisions = (scalar + 1) / 2 * MOVES_LEFT_CAP.
     # Near-one-hot logits collapse the expectation onto the peak bin's scalar.
     cap = float(C.MOVES_LEFT_CAP)
     logits = torch.full((3, C.VALUE_BINS), -40.0)

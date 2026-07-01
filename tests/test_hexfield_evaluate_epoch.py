@@ -1,19 +1,18 @@
-"""Integration tests for hexfield.evaluation.evaluate_epoch — the in-run hook the
-training loop calls. The deep multistage eval is faked (monkeypatched) so these
-run without GPU games; they pin the LOAD-BEARING contracts:
+"""Integration tests for hexfield.evaluation.evaluate_epoch.
 
-  * FAIL-SOFT: a multistage-eval exception is CAUGHT and recorded, never
-    propagated (loop.run_epochs re-raises evaluate_epoch errors, which would kill
-    the training run).
-  * GATING: disabled / epoch<2 / every_n_epochs / missing candidate checkpoint
-    all short-circuit the deep eval cleanly.
-  * CANDIDATE-BY-PATH: the runner is handed the on-disk epoch checkpoint PATH and
-    ctx.output_dir as run_dir, never the in-memory model.
-  * HEAD AUDIT PRESERVED: the MLH head-health audit + heal-gate still runs
-    regardless of whether the deep eval ran, errored, or was skipped.
+The multistage eval is monkeypatched so these run without GPU games. Covered
+behaviors:
 
-Imports hexfield.evaluation (which imports torch + the native engine at module
-top for _play_pair), so this runs in the torch venv, not the pure-CPU suite.
+  * A multistage-eval exception is caught and recorded in the result, not
+    propagated.
+  * The deep eval short-circuits when disabled, when epoch does not match
+    every_n_epochs, or when the candidate checkpoint file is missing.
+  * The runner receives the on-disk epoch checkpoint path and ctx.output_dir
+    as run_dir.
+  * The moves-left head audit runs whether or not the deep eval ran.
+
+Imports hexfield.evaluation, which imports torch and the native engine at module
+import time, so this runs in the torch venv rather than the pure-CPU suite.
 """
 
 from __future__ import annotations
@@ -70,7 +69,7 @@ def _make_ctx(tmp_path: Path, *, enabled=True, every=1):
 
 @pytest.fixture(autouse=True)
 def _stub_head_audit(monkeypatch):
-    # Keep the head audit torch-free + deterministic; the test only asserts it RAN.
+    # Replace the head audit with a torch-free stub returning a fixed result.
     monkeypatch.setattr(
         "hexfield.head_audit.audit_moves_left_head",
         lambda *a, **k: {"passed": True, "stub": True},
@@ -90,7 +89,7 @@ def test_fail_soft_does_not_propagate_and_head_audit_still_runs(tmp_path, monkey
     result = evaluation.evaluate_epoch(ctx=ctx, components=components, epoch=5)
     assert result["multistage"]["status"] == "error"
     assert "eval blew up" in result["multistage"]["error"]
-    # FAIL-SOFT: head audit still ran.
+    # Head audit ran despite the multistage-eval error.
     assert "moves_left_head_audit" in result
     assert result["moves_left_head_audit"].get("stub") is True
 

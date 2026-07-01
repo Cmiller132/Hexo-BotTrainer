@@ -1,27 +1,21 @@
 """Unit tests for the hexfield eval statistics layer (pure numpy/CPU).
 
-These exercise the CORRECTED-design statistics in
-``packages/hexfield/python/hexfield/eval_stats.py`` — the load-bearing fixes an
-adversarial statistician demanded:
+Covers the functions in ``packages/hexfield/python/hexfield/eval_stats.py``:
 
   - Wilson CI coverage (Monte-Carlo) and edge cases.
-  - LOS sanity / monotonicity.
-  - Pentanomial / paired SE: pairing TIGHTENS or LOOSENS the CI correctly vs the
-    naive per-game binomial, and the effective-count deflation matches the design
-    effect (fix #2 — pairing is real correlation, not 2N independent Bernoulli).
-  - Bradley-Terry: CONVERGES (max|grad| < 1e-6, the legacy GD bug), recovers
-    known Elos on synthetic data, and the SealBot anchor is pinned at 0 (fix #1).
-  - var_diff: the difference variance SHRINKS when two players share a positive-
-    covariance anchor, vs adding marginal SEs in quadrature (fix #3).
-  - Over-dispersion down-weight for the noisy SealBot edge (fix #5).
-  - SPRT boundary monotonicity / verdicts as a gross-regression triage.
-  - Elo<->win-rate round-trips and the honest single-epoch resolution numbers
-    (fix #4).
+  - LOS values and monotonicity.
+  - Pentanomial / paired SE: pair-level SE vs the naive per-game binomial, and
+    the effective-count deflation under within-pair correlation.
+  - Bradley-Terry: convergence (max|grad| < 1e-6), Elo recovery on synthetic
+    data, and anchor pinned at 0.
+  - var_diff: difference variance under shared free-anchor covariance.
+  - Over-dispersion down-weight.
+  - SPRT boundary monotonicity and verdicts.
+  - Elo<->win-rate round-trips and single-epoch resolution numbers.
 
-hexfield is deliberately never installed in a shared venv; we add its source to
-``sys.path`` directly. eval_stats has NO engine/torch/CUDA dependency (pure
-numpy + optional scipy), so this collects and runs on a CPU-only interpreter
-without touching the live GPU run.
+hexfield is not installed in a shared venv; its source is added to ``sys.path``
+directly. eval_stats has no engine/torch/CUDA dependency (pure numpy + optional
+scipy) and runs on a CPU-only interpreter.
 """
 
 from __future__ import annotations
@@ -67,9 +61,9 @@ from hexfield.eval_stats import (  # noqa: E402
 def test_wilson_empty_and_extremes() -> None:
     assert wilson_ci(0, 0) == (0.0, 1.0)
     lo, hi = wilson_ci(0, 20)
-    assert lo == 0.0 and 0.0 < hi < 0.25  # all losses: lower rail at 0
+    assert lo == 0.0 and 0.0 < hi < 0.25  # all losses: lower bound at 0
     lo, hi = wilson_ci(20, 20)
-    assert hi == 1.0 and 0.75 < lo < 1.0  # all wins: upper rail at 1
+    assert hi == 1.0 and 0.75 < lo < 1.0  # all wins: upper bound at 1
     lo, hi = wilson_ci(10, 20)
     assert lo < 0.5 < hi
     assert math.isclose((lo + hi) / 2.0, 0.5, abs_tol=1e-9)  # symmetric at p=.5
@@ -83,11 +77,9 @@ def test_wilson_contains_point_and_orders() -> None:
 
 
 def test_wilson_coverage_montecarlo() -> None:
-    """A nominal-95% Wilson interval should cover the true p ~>=90% of the time.
+    """A nominal-95% Wilson interval covers the true p >= 90% of the time.
 
-    Wilson is known to be slightly conservative/anti-conservative depending on
-    p*n; we only assert it lands in a sane band for several p, n — a guard
-    against a broken formula (e.g. Wald), not an exact-coverage proof.
+    Asserts empirical coverage lands in [0.90, 0.995] across several p, n.
     """
 
     rng = random.Random(20240613)
@@ -127,7 +119,7 @@ def test_elo_winrate_roundtrip() -> None:
     for p in (0.05, 0.3, 0.5, 0.7, 0.95):
         assert math.isclose(winrate_from_elo(elo_from_winrate(p)), p, rel_tol=1e-9, abs_tol=1e-9)
     assert math.isclose(elo_from_winrate(0.5), 0.0, abs_tol=1e-12)
-    # 0.75 win rate is the canonical ~191 Elo gap.
+    # 0.75 win rate maps to ~190.84 Elo.
     assert math.isclose(elo_from_winrate(0.75), 190.84, abs_tol=0.05)
     assert elo_from_winrate(1.0) == float("inf")
     assert elo_from_winrate(0.0) == float("-inf")
@@ -148,7 +140,7 @@ def test_elo_ci_brackets_point() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Pentanomial / paired SE (fix #2).
+# Pentanomial / paired SE.
 # --------------------------------------------------------------------------- #
 def test_pentanomial_winrate_value() -> None:
     # 10 pairs: 4 WW (2 pts), 3 even (1 pt), 3 LL (0 pts) -> mean pts = 1.1/2.
@@ -167,19 +159,17 @@ def test_pentanomial_rejects_bad_shape() -> None:
 
 
 def test_pairing_correlation_changes_se_vs_naive_binomial() -> None:
-    """Pairing must use pair-level SE, not 2N independent Bernoulli (fix #2).
+    """Pair-level SE depends on within-pair correlation.
 
-    Construct two pentanomials with the SAME win rate (0.5) and SAME number of
-    games (2*N), differing only in within-pair correlation:
+    Two pentanomials with the same win rate (0.5) and same game count (2*N),
+    differing only in within-pair correlation:
 
-      - HIGH correlation: every pair is WW or LL (mass on the rails). Pairs
-        behave like a single coin per pair -> LARGE pair-level variance.
-      - LOW correlation: every pair splits 1-1 (all 'even'). Pairs are nearly
-        deterministic at 0.5 -> TINY pair-level variance.
+      - HIGH correlation: every pair is WW or LL -> large pair-level variance.
+      - LOW correlation: every pair splits 1-1 (all 'even') -> small pair-level
+        variance.
 
-    The naive per-game binomial SE (sqrt(.25/2N)) is identical for both, which is
-    exactly the anti-conservative error. Our pair-level SE must DIFFER: high-corr
-    SE >> low-corr SE.
+    The naive per-game binomial SE (sqrt(.25/2N)) is identical for both. The
+    pair-level SE differs: high-corr SE >> low-corr SE.
     """
 
     n = 50
@@ -188,12 +178,12 @@ def test_pairing_correlation_changes_se_vs_naive_binomial() -> None:
     assert math.isclose(high.win_rate, 0.5, abs_tol=1e-12)
     assert math.isclose(low.win_rate, 0.5, abs_tol=1e-12)
 
-    naive_se_p = math.sqrt(0.25 / (2 * n))  # what the broken per-game CI would use
-    # Low correlation: pairs nearly constant => SE much SMALLER than naive.
+    naive_se_p = math.sqrt(0.25 / (2 * n))  # per-game binomial SE
+    # Low correlation: pairs nearly constant => SE much smaller than naive.
     assert low.se < naive_se_p * 0.25
-    # High correlation: pair is one effective coin => SE LARGER than naive.
+    # High correlation: pair is one effective coin => SE larger than naive.
     assert high.se > naive_se_p * 1.2
-    # And the two pairing regimes are very different from each other.
+    # The two pairing regimes differ from each other.
     assert high.se > low.se * 5
 
 
@@ -219,10 +209,10 @@ def test_effective_counts_deflates_with_positive_correlation() -> None:
     high = pentanomial_summary([n // 2, 0, 0, 0, n // 2])
     w, l, n_eff = effective_counts(high)
     assert math.isclose(w, l, abs_tol=1e-9)             # symmetric at p=0.5
-    assert math.isclose(n_eff, n, rel_tol=0.05)         # ~N_pairs, NOT 2N
+    assert math.isclose(n_eff, n, rel_tol=0.05)         # ~N_pairs, not 2N
     assert n_eff < 2 * n - 1e-6                          # strictly deflated
 
-    # Anti-/low correlation (all splits): n_eff capped at the physical 2N games.
+    # Low correlation (all splits): n_eff capped at the physical 2N games.
     low = pentanomial_summary([0, 0, n, 0, 0])
     _, _, n_eff_low = effective_counts(low)
     assert n_eff_low <= 2 * n + 1e-6
@@ -238,12 +228,12 @@ def test_effective_counts_degenerate_sweep() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Over-dispersion down-weight (fix #5).
+# Over-dispersion down-weight.
 # --------------------------------------------------------------------------- #
 def test_overdispersion_weight() -> None:
-    # Over-dispersed (noisy SealBot edge): deff=2 -> weight 0.5.
+    # Over-dispersed: deff=2 -> weight 0.5.
     assert math.isclose(overdispersion_weight(0.5, 0.25), 0.5, rel_tol=1e-9)
-    # Not over-dispersed (deff<=1): clamp to 1.0 (never inflate information).
+    # Not over-dispersed (deff<=1): clamp to 1.0.
     assert overdispersion_weight(0.1, 0.25) == 1.0
     assert overdispersion_weight(0.25, 0.25) == 1.0
     # Degenerate inputs -> neutral weight.
@@ -252,7 +242,7 @@ def test_overdispersion_weight() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Bradley-Terry: convergence + Elo recovery + anchor pin (fix #1).
+# Bradley-Terry: convergence + Elo recovery + anchor pin.
 # --------------------------------------------------------------------------- #
 def _simulate_edges(true_elo: dict[str, float], n_games: int, seed: int) -> list[BTEdge]:
     """Synthetic head-to-head games from known true Elos (round-robin)."""
@@ -274,7 +264,7 @@ def test_bradley_terry_converges_and_recovers_elos() -> None:
     edges = _simulate_edges(true_elo, n_games=4000, seed=7)
     res = bradley_terry(edges, anchor="sealbot")
 
-    # FIX #1: the fit actually converged (legacy GD stalled at max|grad|~0.30).
+    # Fit converged.
     assert res.converged
     assert res.max_grad < 1e-6
 
@@ -283,7 +273,7 @@ def test_bradley_terry_converges_and_recovers_elos() -> None:
     assert res.cov[res.players["sealbot"], :].sum() == 0.0
     assert res.cov[:, res.players["sealbot"]].sum() == 0.0
 
-    # Recovers the true Elos within a few SE (lots of games -> tight).
+    # Recovers the true Elos within 25 Elo.
     for label, elo in true_elo.items():
         assert abs(res.rating(label) - elo) < 25.0, f"{label}: {res.rating(label):.1f} vs {elo}"
     # Ordering preserved.
@@ -292,27 +282,25 @@ def test_bradley_terry_converges_and_recovers_elos() -> None:
 
 
 def test_bradley_terry_converges_on_ill_conditioned_ladder() -> None:
-    """Convergence on the REAL eval topology, where the legacy GD fails (fix #1).
+    """Convergence on a chain topology and comparison to fixed-step GD.
 
-    The eval ladder is a CHAIN: sealbot - e5 - e10 - e20 - e40 - e80 - e160, each
-    rung a lopsided high-count edge, only nearest-neighbour edges (the sliding
-    bracket). A chain Hessian is ill-conditioned, so the legacy fixed-step GD
-    (step 0.002, 500 iters) stalls FAR from the optimum (here max|grad| ~ 0.017,
-    >> 1e-6) and its Fisher-from-final-iterate covariance is meaningless. Newton
-    reaches the stationary point in a handful of iterations. We assert both: our
-    fit converges, AND the legacy recipe on the same data does not.
+    The ladder is a chain: sealbot - e5 - e10 - e20 - e40 - e80 - e160, with
+    only nearest-neighbour edges, each a lopsided high-count edge. The chain
+    Hessian is ill-conditioned. bradley_terry converges (max|grad| < 1e-6) in
+    fewer than 50 iterations. A fixed-step GD (step 0.002, 500 iters) on the
+    same data does not reach a stationary point (max|grad| > 1e-3).
     """
 
     chain = ["sealbot", "e5", "e10", "e20", "e40", "e80", "e160"]
     edges = [BTEdge(a, b, 420.0, 180.0) for a, b in zip(chain[1:], chain[:-1])]
     res = bradley_terry(edges, anchor="sealbot")
     assert res.max_grad < 1e-6
-    assert res.iterations < 50  # Newton is fast even when ill-conditioned
+    assert res.iterations < 50
     ratings = [res.rating(p) for p in chain]
     assert ratings == sorted(ratings)  # monotone up the ladder
     assert res.rating("sealbot") == 0.0
 
-    # Legacy fixed-step GD on the SAME data does NOT reach a stationary point.
+    # Fixed-step GD on the same data does not reach a stationary point.
     labels = sorted({lbl for e in edges for lbl in (e.a, e.b)})
     idx = {p: i for i, p in enumerate(labels)}
     n = len(labels)
@@ -336,12 +324,11 @@ def test_bradley_terry_converges_on_ill_conditioned_ladder() -> None:
         g_final[ia] -= s
         g_final[ib] += s
     g_final[idx["sealbot"]] = 0.0
-    legacy_max_grad = float(np.max(np.abs(g_final)))
-    assert legacy_max_grad > 1e-3, (
-        f"expected the legacy GD to stall on the ladder, got {legacy_max_grad:.2e}"
+    gd_max_grad = float(np.max(np.abs(g_final)))
+    assert gd_max_grad > 1e-3, (
+        f"expected fixed-step GD to stall on the ladder, got {gd_max_grad:.2e}"
     )
-    # Our converged fit is strictly better-conditioned than the legacy stall.
-    assert res.max_grad < legacy_max_grad
+    assert res.max_grad < gd_max_grad
 
 
 def test_bradley_terry_tuple_edges_and_iterations() -> None:
@@ -353,7 +340,7 @@ def test_bradley_terry_tuple_edges_and_iterations() -> None:
 
 
 def test_bradley_terry_handles_undefeated_via_prior() -> None:
-    # cand never loses -> MLE is +inf; the ridge prior must keep it finite & converged.
+    # cand never loses -> unregularized MLE is +inf; the ridge prior keeps it finite.
     edges = [BTEdge("cand", "sealbot", 50.0, 0.0), BTEdge("ep5", "sealbot", 30.0, 20.0)]
     res = bradley_terry(edges, anchor="sealbot", prior_sd_elo=800.0)
     assert res.max_grad < 1e-6
@@ -367,7 +354,7 @@ def test_bradley_terry_anchor_must_exist() -> None:
 
 
 def test_bradley_terry_newton_matches_scipy() -> None:
-    """The pure-numpy Newton fallback agrees with the scipy path (both converge)."""
+    """The pure-numpy Newton path and the scipy path agree (both converge)."""
 
     true_elo = {"sealbot": 0.0, "bc": 100.0, "cand": 220.0}
     edges = _simulate_edges(true_elo, n_games=2000, seed=3)
@@ -381,7 +368,7 @@ def test_bradley_terry_newton_matches_scipy() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# var_diff & the shared-anchor shrinkage (fix #3).
+# var_diff & shared-anchor covariance.
 # --------------------------------------------------------------------------- #
 def test_var_diff_formula() -> None:
     cov = np.array([[4.0, 1.5], [1.5, 9.0]])
@@ -389,19 +376,16 @@ def test_var_diff_formula() -> None:
 
 
 def test_var_diff_shrinks_with_shared_anchor_covariance() -> None:
-    """Two players measured against a SHARED FREE anchor get positive Cov_ij, so
-    the difference variance is SMALLER than adding marginal variances (fix #3).
+    """Two players measured against a shared free anchor get positive Cov_ij, so
+    the difference variance is smaller than the sum of marginal variances.
 
-    Topology mirrors the real eval design: 'cand' and 'champ' both play a shared
-    PERMANENT anchor 'bc' (the BC-prefit, a free player) in addition to the
-    pinned 'sealbot'. The shared free anchor couples their estimates ->
+    'cand' and 'champ' both play a shared free anchor 'bc' in addition to the
+    pinned 'sealbot'. The shared free anchor couples their estimates:
     Cov(cand, champ) > 0 -> Var(cand - champ) < Var(cand) + Var(champ).
 
-    (Note the contrast: if the two players shared ONLY the *pinned* sealbot and
-    had no other common opponent, the Hessian would be block-diagonal and
-    Cov_ij would be exactly 0 — a pinned anchor carries no covariance. The
-    shrinkage is a property of the shared FREE anchors, which is why the design
-    keeps BC/ep5 as permanent free anchors.)
+    Contrast: if the two players shared only the pinned sealbot and no other
+    common opponent, the Hessian is block-diagonal and Cov_ij is exactly 0 (a
+    pinned anchor carries no covariance). See the test below.
     """
 
     edges = [
@@ -418,20 +402,18 @@ def test_var_diff_shrinks_with_shared_anchor_covariance() -> None:
 
     vd = res.var_diff("cand", "champ")
     sum_marginals = res.cov[i, i] + res.cov[j, j]
-    assert vd < sum_marginals  # the -2*Cov_ij term tightens the difference
-    # The difference SE must be smaller than the quadrature-of-marginals SE.
+    assert vd < sum_marginals  # -2*Cov_ij term reduces the difference variance
+    # The difference SE is smaller than the quadrature-of-marginals SE.
     se_diff = res.se_diff("cand", "champ")
     se_quad = math.sqrt(res.se("cand") ** 2 + res.se("champ") ** 2)
     assert se_diff < se_quad
 
 
 def test_var_diff_zero_covariance_with_only_pinned_anchor() -> None:
-    """Sharing only the PINNED anchor gives Cov_ij == 0 (block-diagonal Hessian).
+    """Sharing only the pinned anchor gives Cov_ij == 0 (block-diagonal Hessian).
 
-    Documents the contrast in the test above: a pinned zero-point induces no
-    covariance between two players who otherwise never meet, so their difference
-    variance is exactly the sum of marginals (no shrinkage). This is correct
-    statistics, not a bug — it is why permanent FREE anchors matter.
+    A pinned zero-point induces no covariance between two players who otherwise
+    never meet, so their difference variance equals the sum of marginals.
     """
 
     edges = [
@@ -456,7 +438,7 @@ def test_diff_ci_brackets_point_estimate() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# SPRT — gross-regression triage.
+# SPRT.
 # --------------------------------------------------------------------------- #
 def test_sprt_bounds_symmetry_and_monotonicity() -> None:
     lo, hi = sprt_bounds(0.05, 0.05)
@@ -471,7 +453,7 @@ def test_sprt_bounds_symmetry_and_monotonicity() -> None:
 
 
 def test_sprt_llr_monotone_in_wins() -> None:
-    # H0: -10 Elo (gross regression null), H1: 0 Elo.
+    # H0: -10 Elo, H1: 0 Elo.
     prev = -1e9
     for w in range(0, 51):
         cur = sprt_llr(w, 50 - w, elo0=-10.0, elo1=0.0)
@@ -480,55 +462,50 @@ def test_sprt_llr_monotone_in_wins() -> None:
 
 
 def test_sprt_verdicts() -> None:
-    # Dominant win record -> accept H1 (improvement / not a gross regression).
+    # Dominant win record -> accept H1.
     r = sprt(wins=120, losses=20, elo0=-15.0, elo1=0.0)
     assert r.verdict == "accept_h1"
     assert r.llr >= r.upper
-    # Dominant loss record -> accept H0 (the gross regression null).
+    # Dominant loss record -> accept H0.
     r = sprt(wins=20, losses=120, elo0=-15.0, elo1=0.0)
     assert r.verdict == "accept_h0"
     assert r.llr <= r.lower
-    # Near-indifference, small sample -> continue (escalate to deep eval). This
-    # is the honest behaviour the design calls out: the triage mostly escalates.
+    # Near-indifference, small sample -> continue.
     r = sprt(wins=16, losses=14, elo0=-15.0, elo1=0.0)
     assert r.verdict == "continue"
     assert r.lower < r.llr < r.upper
 
 
 # --------------------------------------------------------------------------- #
-# Honest-resolution helpers (fix #4) and Bonferroni (#3).
+# Resolution helpers and Bonferroni.
 # --------------------------------------------------------------------------- #
 def test_single_epoch_resolution_is_honest() -> None:
-    """128 games resolve ~30 Elo (single rate); the paired r_L-r_B SE is ~40-55,
-    and the ~15-20 Elo number is the MULTI-EPOCH rolling asymptote (fix #4).
+    """Single-rate and paired-difference Elo SE at 128 games.
 
-    - expected_se_elo(128) is the SE of ONE win-rate's Elo from 128 *independent*
-      decided games: ~30.7 Elo. (NOT ~15-20.)
-    - The PRIMARY hypothesis is a *difference* r_L - r_B of two ratings, and the
-      games are PAIRED (effective N < 128). Both effects enlarge the SE into the
-      spec's honest ~40-55 Elo band — reconstructed here from the same helper.
+    - expected_se_elo(128) is the SE of one win-rate's Elo from 128 independent
+      decided games: ~30.7 Elo.
+    - The paired difference SE r_L - r_B enlarges this via a sqrt(2) factor and
+      an effective-N reduction (N_eff = 128/deff for design effect deff),
+      landing in the ~40-55 Elo band across a deff sweep.
     """
 
     se_128 = expected_se_elo(128, p=0.5)
     assert 28.0 < se_128 < 33.0, se_128  # single-rate, independent games
 
     # Paired difference SE = single-rate SE(N_eff) * sqrt(2), with N_eff = 128/deff
-    # for design effect deff. The spec's honest ~40-55 Elo band for SE(r_L - r_B)
-    # at a single epoch is CONTAINED in the range spanned by a plausible deff
-    # sweep (mild deff~1 -> ~43; stronger deff~2 -> ~61). We assert the band is
-    # bracketed rather than cherry-picking a deff, and that every case strictly
-    # exceeds the single-rate ~30 (the difference is always wider than one rate).
+    # for design effect deff. Assert the 40-55 Elo band is bracketed by the sweep
+    # and every case exceeds the single-rate SE.
     diff_se = {
         deff: expected_se_elo(128 / deff, p=0.5) * math.sqrt(2.0)
         for deff in (1.0, 1.3, 1.6, 2.0)
     }
     assert diff_se[1.0] < 45.0 < 50.0 < diff_se[2.0]      # band 40-55 is bracketed
     assert min(diff_se.values()) > se_128                  # difference always > single rate
-    assert all(v > 40.0 for v in diff_se.values())         # never as small as the asymptote
+    assert all(v > 40.0 for v in diff_se.values())
 
-    # Reaching ~15 Elo SE (on a single rate) needs FAR more than one epoch.
+    # Reaching ~15 Elo SE on a single rate needs more than 4x128 games.
     need = games_for_se(15.0, p=0.5)
-    assert need > 128 * 4  # several epochs compounding in the rolling pool
+    assert need > 128 * 4
     # games_for_se inverts expected_se_elo.
     assert math.isclose(expected_se_elo(need, 0.5), 15.0, rel_tol=0.02)
 
@@ -546,7 +523,7 @@ def test_bonferroni_alpha() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Verdict label (pure-eval; never gates).
+# Verdict label.
 # --------------------------------------------------------------------------- #
 def test_primary_verdict_labels() -> None:
     assert primary_verdict((5.0, 40.0)) == "PROMOTE"        # CI entirely > 0

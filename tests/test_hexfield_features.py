@@ -1,11 +1,12 @@
-"""M0 gates: features vs the engine (spec §1.2, §4).
+"""Tests comparing hexfield features against the engine.
 
-- window_scan (shard-less hot/standing-win derivation from raw stones) ≡ the
-  engine WindowStore on random states
-- own_win_now cells are engine-verified win-in-1: applying the placement wins
-- opp_last_turn ≡ the engine's last_turn record
-- record phase/player derivable from ordinal position ≡ engine records
-- D6 commutation 12/12: build(transform(facts)) == permuted build(facts)
+Covers:
+- window_scan output vs the engine WindowStore on sampled states
+- own_win_now cells applied to the engine terminate as wins for the side to move
+- opp_last_turn plane vs the engine placement records
+- record phase/player derived from ordinal position vs engine records
+- D6 commutation across all 12 symmetries: build(transform(facts)) equals the
+  permuted build(facts)
 - ply-0 features
 """
 
@@ -36,7 +37,7 @@ def _states():
 def test_window_scan_matches_engine_window_store() -> None:
     for state in _states():
         mirror = api.to_python_state(state)
-        facts = facts_from_engine(mirror)  # hot/win from engine WindowStore
+        facts = facts_from_engine(mirror)
         derived = window_scan(facts.records, facts.current_player, facts.placements_made)
         assert derived == (facts.own_hot, facts.opp_hot, facts.own_win, facts.opp_win)
 
@@ -46,17 +47,16 @@ def _apply(state, q: int, r: int):
 
 
 def test_own_win_now_cells_win_immediately() -> None:
-    # Construct a position with a live standing win through the engine:
-    # P0 builds five in a row on the Q axis while P1 scatters non-collinear
-    # stones and never blocks.
+    # P0 places five in a row on the Q axis; P1 places non-collinear stones
+    # and does not block.
     state = api.new_game()
     for q, r in [
         (0, 0),  # P0 opening
         (0, 4), (4, -4),  # P1
         (1, 0), (2, 0),  # P0
         (-4, 0), (0, -4),  # P1
-        (3, 0), (4, 0),  # P0 -> five in a row, not yet six
-        (8, -8), (-8, 4),  # P1 declines to block
+        (3, 0), (4, 0),  # P0 -> five in a row
+        (8, -8), (-8, 4),  # P1
     ]:
         result = _apply(state, q, r)
         assert not result.terminal
@@ -75,8 +75,8 @@ def test_own_win_now_cells_win_immediately() -> None:
         assert terminal is not None
         assert player_int(terminal.winner) == 0
 
-    # The same chain seen from P1's side (one turn earlier) is opp_win.
-    # Replay without P1's final non-blocking turn:
+    # The same chain seen from P1's side (one turn earlier), replayed without
+    # P1's final turn, appears in opp_win.
     state2 = api.new_game()
     for q, r in [
         (0, 0),
@@ -91,7 +91,8 @@ def test_own_win_now_cells_win_immediately() -> None:
     assert set(facts2.opp_win) == {(-1, 0), (5, 0)}
     assert facts2.own_win == ()
 
-    # Random-play sweep: every own_win cell found in the wild must also win.
+    # Over sampled states, each own_win cell terminates as a win for the
+    # current player when applied.
     for state in _states():
         facts = facts_from_engine(api.to_python_state(state))
         for cell in facts.own_win[:3]:
@@ -107,9 +108,8 @@ def test_record_phase_player_derivation_matches_engine() -> None:
     for state in _states():
         mirror = api.to_python_state(state)
         for ordinal, rec in enumerate(mirror.placement_history):
-            # Engine placement_index is 1-based: the most recent record has
-            # placement_index == placements_made (so its recency age is 0 and
-            # its weight exactly 1.0 under the encoding.rs formula).
+            # Engine placement_index is 1-based; the most recent record has
+            # placement_index == placements_made.
             assert rec.placement_index == ordinal + 1
             assert rec.phase.value == record_phase(ordinal)
             assert player_int(rec.player) == record_player(ordinal)
@@ -163,10 +163,10 @@ def test_features_against_engine_state() -> None:
         expected = 1.0 / (1.0 + (facts.placements_made - last_idx))
         assert np.isclose(recency[sup.index[(last_q, last_r)]], expected)
 
-        # opp_last_turn: oracle scan over the ENGINE's record objects (their
-        # native phase / first_stone fields, not our ordinal derivation),
-        # mirroring encoding.rs:268-298. (mirror.last_turn is NOT usable here:
-        # it tracks the in-progress turn when the current player is mid-turn.)
+        # opp_last_turn: expected set built by scanning the engine's placement
+        # records using their phase / first_stone fields. mirror.last_turn is
+        # not used here because it tracks the in-progress turn while the current
+        # player is mid-turn.
         marked = {
             tuple(sup.coords[i].tolist())
             for i in np.flatnonzero(feats[:, C.F_OPP_LAST_TURN])

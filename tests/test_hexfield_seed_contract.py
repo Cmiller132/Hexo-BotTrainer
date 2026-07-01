@@ -1,5 +1,4 @@
-"""M6 gate: the mix_seed hash + stream ids are a written contract — golden
-vectors copied from dense mcts.rs's own unit tests."""
+"""Golden-vector tests for the native mix_seed hash and its stream ids."""
 
 import pytest
 
@@ -17,4 +16,4 @@ def test_mix_seed_golden_vectors() -> None:
     assert hexfield_rust.mix_seed(1, 2, 3, 4) == 0xA6A9_B091_CFF9_D67A
     a = hexfield_rust.mix_seed(123_456_789, 987_654_321, 42, 0)
     b = hexfield_rust.mix_seed(123_456_789, 987_654_321, 42, 1)
-    assert a != b  # streams are independent
+    assert a != b  # different stream index yields a different value

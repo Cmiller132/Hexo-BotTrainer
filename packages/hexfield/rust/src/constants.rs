@@ -1,5 +1,4 @@
-//! hexfield constants — must mirror python/hexfield/constants.py exactly
-//! (the Rust↔Python featurizer parity fixtures are the contract).
+//! hexfield constants. Corresponding Python values are in python/hexfield/constants.py.
 
 pub const LEGAL_RADIUS: i32 = 8;
 pub const HALO_DIST: i32 = 9;

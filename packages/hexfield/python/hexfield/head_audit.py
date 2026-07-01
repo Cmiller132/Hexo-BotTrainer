@@ -1,13 +1,9 @@
-"""Moves-left head health audit (L0 gate).
+"""Moves-left head audit.
 
 Decodes the model's moves-left prediction on stored self-play shards (each
-``game_*.npz`` is one game, rows in ply order) and scores it against the true
-remaining-decisions target the shard already carries. This is the calibration
-the MLH search lever depends on: a flood-damaged head (chance-level within-game
-ordering / wrong-sign decrements) would steer search BACKWARD, so both the
-standalone audit and the per-epoch monitor gate the lever on these metrics.
-Reuses the trainer's expand/collate path; no Rust featurization and (beyond one
-forward) no GPU contention.
+``game_*.npz`` is one game, rows in ply order) and scores it against the
+remaining-decisions target carried by the shard. Reuses the expand/collate
+path from ``samples.py`` and ``batching.py``; runs one forward pass per chunk.
 """
 
 from __future__ import annotations
@@ -23,18 +19,13 @@ from .losses import decode_moves_left
 from .samples import expand_sample
 from .shards import read_compact_shard
 
-# PASS thresholds. The headline calibration signal is within-game conversion-zone
-# Spearman: healthy heads ~0.58-0.62, a flood-damaged head sits at chance
-# (~0.17). Spearman is rank-based, so it is
-# robust to the decode's quantization AND captures sign-correctness (a wrong-sign
-# head would score near 0 / negative). Near-end MAE pins decisive-zone accuracy.
-# Monotonicity RATE is deliberately NOT a pass gate: the median-of-bins decode is
-# quantized to ~8-decision bins, so within the conversion zone (true remaining
-# changes by <1 bin over several plies) many adjacent diffs are legitimately flat
-# (0, not <0). It is reported for diagnostics only.
+# Pass thresholds. conv_spearman is the within-game conversion-zone (true
+# remaining < 60) rank correlation; full_spearman is over all kept rows; near-end
+# MAE is over the [0,5) true-remaining bucket. Monotonicity rate is reported for
+# diagnostics only and is not gated.
 CONV_SPEARMAN_GATE = 0.50
 FULL_SPEARMAN_GATE = 0.40
-NEAR_END_MAE_GATE = 25.0  # [0,5) true-remaining median-decode MAE (decisions)
+NEAR_END_MAE_GATE = 25.0  # [0,5) true-remaining decode MAE (decisions)
 
 _BUCKETS = [(0, 5), (5, 20), (20, 60), (60, 120), (120, 10**9)]
 _BUCKET_NAMES = ["[0,5)", "[5,20)", "[20,60)", "[60,120)", "[120+)"]
@@ -51,13 +42,14 @@ def _spearman(a: np.ndarray, b: np.ndarray) -> float:
 
 @torch.no_grad()
 def _predict_game(model, expanded, device, row_budget_nodes: int = 40_000):
-    """Decoded moves-left (decisions) for one game's expanded rows, chunked so
-    the (rows, S, S) attention transient stays bounded on large support."""
+    """Decoded moves-left (decisions) for one game's expanded rows. Rows are
+    processed in chunks sized so ``rows * pad_to^2`` stays within
+    ``row_budget_nodes * PAD_QUANTUM``. Returns a 1-D array."""
     preds: list[np.ndarray] = []
     i = 0
     n = len(expanded)
     while i < n:
-        # Greedily grow a chunk until rows*pad_to^2 would exceed the budget.
+        # Grow the chunk until rows*pad_to^2 would exceed the budget.
         j = i
         max_nodes = 0
         while j < n:
@@ -83,7 +75,7 @@ def _predict_game(model, expanded, device, row_budget_nodes: int = 40_000):
 
 def audit_moves_left_head(model, shard_paths, *, device, max_games: int = 60) -> dict:
     """Audit the moves-left head over up to ``max_games`` shard-games. Returns
-    a dict with the aggregate metrics and a ``passed`` verdict (the L0 gate)."""
+    a dict with the aggregate metrics and a ``passed`` verdict."""
     device = torch.device(device)
     model.eval().to(device)
 
@@ -104,7 +96,7 @@ def audit_moves_left_head(model, shard_paths, *, device, max_games: int = 60) ->
         pred = _predict_game(model, keep, device).astype(np.float64)
         if pred.shape[0] != true.shape[0]:
             continue
-        # Recover ply order (true decreases with ply): sort by true descending.
+        # Order rows by true remaining descending (true decreases with ply).
         order = np.argsort(-true)
         true, pred = true[order], pred[order]
         n_games += 1
@@ -151,7 +143,7 @@ def audit_moves_left_head(model, shard_paths, *, device, max_games: int = 60) ->
         "full_spearman_mean": round(full_spearman, 3),
         "overall_mae": round(float(np.abs(err_cat).mean()), 2),
         "near_end_mae_0_5": near_end_mae,
-        "conv_mono_rate_diagnostic": round(conv_mono_rate, 3),  # quantization-confounded; not gated
+        "conv_mono_rate_diagnostic": round(conv_mono_rate, 3),  # not gated
         "mono_adj_rate_diagnostic": round(float(np.mean(mono_adj)), 3) if mono_adj else None,
         "buckets": buckets,
         "gates": {

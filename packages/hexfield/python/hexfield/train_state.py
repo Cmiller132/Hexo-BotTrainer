@@ -1,14 +1,12 @@
-"""Persisted trainer state for the KataGo-style replay buffer (the train-bucket
-reuse governor + window bookkeeping).
+"""Persisted trainer state for the replay-buffer train-bucket reuse governor and
+window bookkeeping.
 
-hexfield shuffles the window IN RAM and never materializes on-disk shuffle dirs,
-so this carries no shuffle-output bookkeeping. It is serialized into the
-checkpoint ``meta`` by the saver and restored by the loader on the RESUME branch
-only — never on an ``initialize_from`` warm start, which must begin with a fresh
-governor.
+Serialized into the checkpoint ``meta`` and restored on resume; an
+``initialize_from`` warm start begins with fresh state. Carries no shuffle-output
+bookkeeping (the window is shuffled in RAM).
 
-Versioned with a missing-key/version-mismatch -> fresh-state fallback so old
-checkpoints (which carry no ``train_state``) resume cleanly instead of raising.
+A missing-key or version mismatch loads a fresh state, so checkpoints without a
+``train_state`` entry resume without raising.
 """
 
 from __future__ import annotations
@@ -22,36 +20,33 @@ TRAIN_STATE_VERSION = 1
 
 @dataclass
 class HexfieldTrainState:
-    # Monotone count of self-play rows ever seen by the governor. NEVER
-    # decremented: window selection uses the live manifest total, but the bucket
-    # accrual is driven by this cumulative counter so a pruned / regenerated
-    # window can't spuriously trip the reload branch.
+    # Cumulative count of self-play rows seen by the governor; monotonically
+    # non-decreasing. Drives bucket accrual (window selection uses the live
+    # manifest total instead).
     total_num_data_rows: int = 0
-    # Cumulative gradient samples consumed (diagnostics / reuse accounting).
+    # Cumulative gradient samples consumed.
     global_step_samples: int = 0
     # First global row index still inside the current window.
     window_start_data_row_idx: int = 0
     # Train-bucket reuse governor. ``level`` is credited by each new self-play row
-    # * max_train_bucket_per_new_data and debited by effective_rows at selection
-    # time; ``level_at_row`` is the cumulative-row watermark the last accrual was
-    # computed against.
+    # times max_train_bucket_per_new_data and debited by effective_rows at
+    # selection time; ``level_at_row`` is the cumulative-row watermark the last
+    # accrual was computed against.
     train_bucket_level: float = 0.0
     train_bucket_level_at_row: int = 0
     train_steps_since_last_reload: int = 0
-    # Optional no-repeat-files set (defaults OFF for hexfield's single-game shards,
-    # so this normally stays empty; kept so a run that opts in survives resume).
+    # Optional no-repeat-files set; empty unless the no-repeat-files option is
+    # enabled.
     data_files_used: set[str] = field(default_factory=set)
     version: int = TRAIN_STATE_VERSION
 
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any] | None) -> "HexfieldTrainState":
-        """Tolerant load. ``None``/non-mapping/old-format/version-mismatch all
-        return a FRESH state (old checkpoints carry no ``train_state``)."""
+        """Build from a persisted mapping. ``None``, a non-mapping, or a version
+        mismatch returns a fresh state."""
         if not isinstance(raw, Mapping):
             return cls()
         if int(raw.get("version", 0)) != TRAIN_STATE_VERSION:
-            # Incompatible persisted schema -> start the governor fresh rather
-            # than misinterpreting fields. Safe: the bucket simply re-accrues.
             return cls()
         return cls(
             total_num_data_rows=int(raw.get("total_num_data_rows", 0)),

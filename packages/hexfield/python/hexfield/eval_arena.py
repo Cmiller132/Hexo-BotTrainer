@@ -1,92 +1,67 @@
 """Game-running layer for the hexfield multi-stage strength evaluation.
 
-PURELY EVAL. Nothing in this module gates, promotes, halts, or mutates a
-training run; it only plays games and returns structured result dicts. The
-statistical verdict layer (SPRT screen, pentanomial/Wilson CIs, the rolling
-Bradley-Terry pool) lives in sibling modules and consumes these results.
+This module only plays games and returns structured result dicts; it does not
+gate, promote, halt, or mutate a training run. The statistical verdict layer
+(SPRT screen, pentanomial/Wilson CIs, the rolling Bradley-Terry pool) lives in
+sibling modules and consumes these results.
 
-Two runners, both returning the same result-dict shape as the standalone arena
+Runners return the result-dict shape of the standalone arena
 (scripts/_wf_h2h2_arena.py): ``meta`` / ``score`` (with ``by_seat``) /
-``game_lengths`` / ``opening_dedup`` / per-game rows, augmented with the
-pair-level ``pentanomial`` block the corrected design needs.
+``game_lengths`` / ``opening_dedup`` / per-game rows, plus a pair-level
+``pentanomial`` block for paired matches.
 
 play_checkpoint_match(model_a_ckpt, model_b_ckpt, ...)
-    Hexfield-vs-hexfield, CONCURRENT and PAIRED. Both players are hexfield nets,
-    so each ROUND batches whichever side is to move through THAT net's
-    ``HexfieldMctsSession.search`` multi-root call (cross-game leaf batching) —
-    two batched forwards per round (one per net), the natural generalization of
-    ``play_sealbot_match`` with the serial SealBot drain replaced by a second
-    batched hexfield search. Games are still coupled into MATCHED PAIRS via
-    common random numbers (CRN): the same sampled opening is played from BOTH
-    seats, so a pair is a paired comparison of the two nets on one shared line.
-    Concurrency is orthogonal to the pairing (the CRN contract is a per-game
-    property of seat + seed, untouched by batching) — see the CRN note below.
+    Hexfield-vs-hexfield, concurrent and paired. Both players are hexfield nets.
+    Each round batches whichever side is to move through that net's
+    ``HexfieldMctsSession.search`` multi-root call (cross-game leaf batching):
+    two batched forwards per round, one per net. Games are coupled into matched
+    pairs via common random numbers (CRN): a shared opening line is played from
+    both seats, so a pair is a paired comparison of the two nets on one line.
+    See the CRN notes below.
+
+play_multi_checkpoint_match(candidate_ckpt, opponents, ...)
+    One candidate (net A) vs many checkpoint opponents in one batched concurrent
+    pass. Each round gathers the greedy candidate-to-move games across all
+    opponents into one candidate-session multi-root call; each opponent searches
+    its own games in its own session.
 
 play_sealbot_match(model_ckpt, ...)
-    Hexfield-vs-SealBot. A near-mechanical port of the dense concurrent SealBot
-    loop (dense_cnn_restnet/evaluation.py:327-391): every game where hexfield is
-    to move is searched together in ONE ``HexfieldMctsSession.search`` multi-root
-    call (cross-game leaf batching), and SealBot's moves are drained serially per
-    game through the hexo_runner SealBot adapter. No CRN pairing here — SealBot's
-    minimax depth varies under load, so its games are not a matched comparison
-    (the corrected design uses SealBot only as the pinned zero-point downstream).
+    Hexfield-vs-SealBot. Every game where hexfield is to move is searched
+    together in one ``HexfieldMctsSession.search`` multi-root call (cross-game
+    leaf batching); SealBot's moves are drained serially per game through the
+    hexo_runner SealBot adapter. No CRN pairing: SealBot's minimax depth varies
+    under load, so its games are not a matched comparison.
 
-Concurrency vs pairing — the two are orthogonal:
-  * ``play_sealbot_match`` is CONCURRENT (many games in flight, batched forwards)
-    but UNPAIRED.
-  * ``play_checkpoint_match`` is BOTH CONCURRENT and PAIRED: many seat-swapped
-    CRN games are in flight at once, batched per round through each net's
-    session.
+CRN / shared-opening note: ``hexo_engine.api.new_game(seed=...)`` does not
+randomize the opening — the engine is deterministic and the first move is the
+forced centre stone (api.py docstring). Opening diversity comes from the MCTS
+temperature sampling at the root: the first ``opening_plies`` plies sample the
+move from the visit distribution using the per-search ``seed``.
 
-CRN / shared-opening note (load-bearing): ``hexo_engine.api.new_game(seed=...)``
-does NOT randomize the opening — the engine is deterministic and the first move
-is the forced centre stone (api.py docstring). ALL opening diversity comes from
-the MCTS temperature sampling at the root (the first ``opening_plies`` plies
-sample the move from the visit distribution using the per-search ``seed``).
-Therefore a "shared opening" between the two seats of a pair is produced by
-giving both seat-orderings the SAME per-ply search RNG ``pair_seed * 5003 + ply``
-(matching the serial ``_play_pair``). With symmetric search configs the two
-games then explore the same opening line from opposite seats — a genuine
-common-random-number pairing — and any score difference inside the pair is
-attributable to the seat swap / net strength, not to opening luck.
-
-CRN UNDER BATCHING (why the concurrent runner can batch EVERY ply — opening and
-greedy alike — while still giving each pair a shared opening LINE): the lockstep
-``search`` builds a tree by DETERMINISTIC PUCT (no RNG in leaf selection) and
-its only randomness is (a) optional root Dirichlet noise — never used in eval —
-and (b) the final move selection. At ``temperature == 0`` (the greedy tail)
-move selection is a pure deterministic argmax / LCB-of-Q (search.rs
+CRN under batching: the lockstep ``search`` builds a tree by deterministic PUCT
+(no RNG in leaf selection). Its randomness is (a) optional root Dirichlet noise,
+not used in eval, and (b) the final move selection. At ``temperature == 0`` (the
+greedy tail) move selection is a deterministic argmax / LCB-of-Q (search.rs
 select_action_from_policy / select_action_with_lcb), so a batched multi-root
-greedy search yields the bit-identical move per game regardless of the shared
-batch seed — greedy plies batch freely. At ``temperature > 0`` (the
-``opening_plies`` sampled prefix) the per-root selection RNG is
-``seed.wrapping_add(root_index)`` (search.rs:748-749), i.e. each root in a
-batched call samples from a DISTINCT stream keyed by its batch position.
+greedy search yields the same move per game regardless of the shared batch seed.
+At ``temperature > 0`` (the ``opening_plies`` sampled prefix) the per-root
+selection RNG is ``seed.wrapping_add(root_index)``, i.e. each root in a batched
+call samples from a distinct stream keyed by its batch position.
 
-The shared opening LINE within a pair is NOT obtained by giving the two seats one
-RNG stream (the seat swap means a different net moves at ply 0, so a shared seed
-alone would not share the line). It is obtained by FORCED-OPENING REPLAY (L-1):
-each pair has a LEADER (game 0) and a seat-swapped FOLLOWER (game 1); only the
-LEADER searches its opening, and the FOLLOWER REPLAYS the leader's recorded
-opening actions ply-for-ply (no search). Because the pairing depends ONLY on
-``follower.opening == leader.opening`` — never on the leader's line being any
-particular RNG draw — and LEADERS ARE INDEPENDENT GAMES (distinct ``pair_seed``,
-no cross-leader CRN), the leaders' opening searches are batched cross-game into
-one multi-root ``search`` per round per net exactly like the greedy tail. Each
-leader root in that batch is seeded ``open_seed.wrapping_add(root_index)``, which
-gives every leader its own decorrelated sampling stream (the per-root offset that
-USED to be a problem for shared-seed pairs is exactly what we now WANT, since it
-keeps independent leaders from collapsing onto one opening). Followers replay
-their leader's recorded line; the rare leader-ended-mid-opening case falls back
-to a single-root follower search. So the opening — which used to run one
-serial single-root search PER LEADER PER PLY and starved the GPU — now runs as a
-handful of fat multi-root forwards, while the long greedy tail stays batched as
-before, all reusing the existing ``search`` ABI with NO Rust change. The
-load-bearing invariant is the PAIRING (follower replays leader), NOT
-byte-equivalence to the old single-root opening line (a batched leader samples a
-different specific line, which is fine). (A pair whose two games agree on the
-winner-by-color is an "even" pentanomial pair; a split pair is the informative
-one.)
+The shared opening line within a pair is produced by forced-opening replay: each
+pair has a LEADER (game 0) and a seat-swapped FOLLOWER (game 1). Only the leader
+searches its opening; the follower replays the leader's recorded opening actions
+ply-for-ply (no search). Because a seat swap means a different net moves at
+ply 0, a shared seed alone would not share the line, so the pairing depends on
+``follower.opening == leader.opening``. Leaders are independent games (distinct
+``pair_seed``, no cross-leader CRN), so their opening searches are batched
+cross-game into one multi-root ``search`` per round per net, with each leader
+root seeded ``open_seed.wrapping_add(root_index)`` for a decorrelated sampling
+stream. The greedy tail is batched as well. The rare leader-ended-mid-opening
+case falls back to a single-root follower search.
+
+A pair whose two games agree on the winner-by-color is an "even" pentanomial
+pair; a split pair is the informative one.
 """
 
 from __future__ import annotations
@@ -106,46 +81,39 @@ from .config import (
 )
 from .geometry import pack_action_id, unpack_action_id
 
-# Surfaces 0-record eval .hxr writes loudly so a future regression that empties
-# ``_Game.actions`` is machine-visible (see E1) instead of being silently
-# swallowed by the best-effort writer.
+# Logger for the eval .hxr writer; a 0-record write is logged as a warning.
 _EVAL_LOG = logging.getLogger("hexfield.eval")
 
-# torch / HexfieldEvaluator / HexfieldNet are imported LAZILY inside the
-# checkpoint-loading paths so this module is IMPORTABLE on a CPU-only host
-# WITHOUT torch (the concurrent loop can then be unit-tested through the
-# ``build_evaluators`` / ``make_session`` seams with a numpy stub evaluator —
-# no torch, no GPU). Only ``_load_hexfield_net`` and the non-stub evaluator
-# branches touch them.
+# torch / HexfieldEvaluator / HexfieldNet are imported lazily inside the
+# checkpoint-loading paths so this module is importable on a CPU-only host
+# without torch (the concurrent loop can be unit-tested through the
+# ``build_evaluators`` / ``make_session`` seams with a numpy stub evaluator).
+# Only ``_load_hexfield_net`` and the non-stub evaluator branches touch them.
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .model import HexfieldNet
 
 # The native MCTS session lives in the maturin-built extension. Import lazily so
-# this module is IMPORTABLE on hosts without the .so (e.g. CPU-only test runners
+# this module is importable on hosts without the .so (e.g. CPU-only test runners
 # that inject a fake session via ``make_session``/``build_opponent``); a real
-# session construction without the extension still raises a clear error.
+# session construction without the extension raises a clear error.
 try:
     from . import _rust
 except ImportError:  # pragma: no cover - exercised only on hosts without the .so
     _rust = None
 
-# Per-side MCTS search-seed offsets, mirroring evaluation.py's reference ladder
-# and the standalone arena: the two seats draw from decorrelated RNG streams so
-# (where CRN is NOT requested) their opening samples never mirror each other.
-# In CRN/paired mode these are deliberately bypassed (both seat orderings share
-# one seed) — see play_checkpoint_match.
+# Per-side MCTS search-seed offsets used in unpaired mode: the two seats draw
+# from decorrelated RNG streams so their opening samples do not mirror each
+# other. In paired (CRN) mode these are bypassed (both seat orderings share one
+# seed) — see play_checkpoint_match.
 _SIDE_SEED_OFFSET = {"a": 0, "b": 500_009_999}
 
-# Default search/opening knobs for the deep eval, matching the production eval
-# protocol (evaluation.evaluate_epoch + the standalone arena): greedy after a
-# temperature-sampled opening, no Dirichlet noise (eval games are not training
-# games). ``opening_plies`` is in PLIES (single stones), like _play_pair.
+# Default search/opening knobs: greedy after a temperature-sampled opening, no
+# Dirichlet noise. ``opening_plies`` is in plies (single stones).
 DEFAULT_OPENING_PLIES = 8
 DEFAULT_OPENING_TEMPERATURE = 1.0
 
-# Hexfield has NO draws (the engine always resolves a winner before max_plies in
-# practice; a max_plies truncation is the only non-decisive outcome and is
-# reported separately as a "truncated" game, never as a draw).
+# Hexfield has no draws. A max_plies truncation is the only non-decisive outcome
+# and is reported separately as a "truncated" game, never as a draw.
 
 
 # --------------------------------------------------------------------------- #
@@ -207,9 +175,8 @@ def _new_rust_session(max_states: int) -> Any:
 def _load_hexfield_net(checkpoint: str | Path) -> HexfieldNet:
     """Strict-load a hexfield checkpoint into a fresh HexfieldNet.
 
-    Mirrors evaluation.evaluate_epoch's loader (``payload["model"]``, strict).
-    Strict by design: a value-/moves-left-head mismatch must surface here, not
-    silently keep a random head.
+    Loads ``payload["model"]`` with ``strict=True`` so a value-/moves-left-head
+    mismatch raises rather than keeping a random head.
     """
     import torch  # lazy: keep the module importable on CPU hosts without torch
 
@@ -222,25 +189,18 @@ def _load_hexfield_net(checkpoint: str | Path) -> HexfieldNet:
     if not isinstance(payload, dict) or "model" not in payload:
         raise RuntimeError(f"hexfield checkpoint payload has no 'model' state: {path}")
     sd = payload["model"]
-    # Build the opponent net at ITS OWN width, not the process-global CHANNELS, so a
-    # narrower (or wider) anchor — e.g. a c=96 main_4/main_2 checkpoint evaluated by a
-    # c=128 run — loads instead of shape-mismatching. The width is the trunk channel
-    # dim, read off the learned `tokens` parameter (NUM_TOKENS, c); fall back to the
-    # stem bias (c). None => default-width construction (==CHANNELS), so single-width
-    # runs are byte-identical to before.
+    # Build the net at the checkpoint's own trunk width, not the process-global
+    # CHANNELS, so a narrower or wider checkpoint (e.g. c=96 evaluated by a c=128
+    # run) loads instead of shape-mismatching. The width is inferred from the
+    # checkpoint; None means default-width construction (== CHANNELS).
     ckpt_channels = _infer_checkpoint_channels(sd)
     model = HexfieldNet() if ckpt_channels is None else HexfieldNet(channels=ckpt_channels)
     try:
         model.load_state_dict(sd, strict=True)
     except RuntimeError:
-        # (a) Older v3 checkpoint with the SHARED relative-position ``bias_table``,
-        # saved BEFORE the per-block-bias deploy (main_3 ep31). The current model
-        # expects one ``bias_tables.{i}`` per attention block; expand the shared
-        # table into per-block copies (bit-identical — exactly the per-block
-        # migration) so ep5..ep30-era opponents stay loadable in the eval. Without
-        # this, these v3-but-shared-bias checkpoints fall through to the legacy v2
-        # branch below and FAIL (they carry cell_q/conv6-7/LayerScale keys v2 lacks),
-        # which silently drops the entire multi-checkpoint match to SealBot-only.
+        # (a) Checkpoint with a single shared relative-position ``bias_table``
+        # while the current model expects one ``bias_tables.{i}`` per attention
+        # block. Expand the shared table into per-block copies and retry.
         remapped = None
         if "bias_table" in sd and any(k.startswith("bias_tables.") for k in model.state_dict()):
             remapped = {k: v for k, v in sd.items() if k != "bias_table"}
@@ -253,11 +213,9 @@ def _load_hexfield_net(checkpoint: str | Path) -> HexfieldNet:
                 return model
             except RuntimeError:
                 pass
-        # (b) Legacy (pre-v3) checkpoint: a different architecture (6 conv blocks,
-        # shared aux reduction, no cell_q / ml_reduction / LayerScale). Load it
-        # into the FROZEN eval-only v2 snapshot so radius-4-native anchors trained
-        # before the v3 arch change (e.g. main_2 epoch_000045.pt) stay playable.
-        # Still strict — a genuine corruption must surface, not keep random heads.
+        # (b) Legacy architecture (6 conv blocks, shared aux reduction, no
+        # cell_q / ml_reduction / LayerScale). Load into the frozen eval-only v2
+        # snapshot. Still strict, so genuine corruption raises.
         from .legacy_model_v2 import HexfieldNet as HexfieldNetV2
 
         model = HexfieldNetV2() if ckpt_channels is None else HexfieldNetV2(channels=ckpt_channels)
@@ -269,9 +227,9 @@ def _load_hexfield_net(checkpoint: str | Path) -> HexfieldNet:
 def _infer_checkpoint_channels(sd: dict) -> int | None:
     """Trunk channel width of a hexfield checkpoint, or None if undeterminable.
 
-    The width is the second dim of the learned ``tokens`` parameter (NUM_TOKENS, c);
-    the stem conv bias (c,) is the fallback. Returning None means "use the default
-    (process-global CHANNELS)", so a same-width run is constructed exactly as before.
+    The width is the last dim of the learned ``tokens`` parameter (NUM_TOKENS, c);
+    the stem conv bias (c,) is the fallback. None means the default (process-global
+    CHANNELS) should be used.
     """
     for key in ("tokens", "stem.bias"):
         t = sd.get(key)
@@ -286,12 +244,11 @@ def _resolve_eval_overrides(
     diagnostics_dir: str | Path | None,
     divergence_overrides: dict | None,
 ) -> dict:
-    """The §5.4 divergence overrides the arena searches with.
+    """The divergence overrides the arena searches with.
 
-    Default: mirror self-play exactly, including the heal-gate auto-disable flag
-    (``ml_auto_disabled.flag`` in the run's diagnostics dir) so the arena
-    measures the same engine the run actually plays. An explicit
-    ``divergence_overrides`` (e.g. a parity-mode A/B) wins outright.
+    Default: mirror self-play, including the heal-gate auto-disable flag
+    (``ml_auto_disabled.flag`` in the run's diagnostics dir). An explicit
+    ``divergence_overrides`` takes precedence.
     """
     if divergence_overrides is not None:
         return divergence_overrides
@@ -313,18 +270,17 @@ def _write_eval_hxr(
     """Write the eval games as a ``.hxr`` record so the dashboard can REPLAY them
     (the History screen's "evaluation" source scans ``<run>/evaluation/*.hxr``).
 
-    Best-effort + FAIL-SOFT: any error is swallowed so recording can never break
+    Best-effort and fail-soft: any error is swallowed so recording cannot break
     the eval. One file per match at ``<run>/evaluation/epoch_NNNNNN/<a>_vs_<b>.hxr``
     (``<run>`` is the parent of ``diagnostics_dir``). Players are seat-labelled
-    (player0/player1); each game id encodes the matchup + which seat the candidate
-    held (seats swap per CRN pair), so the viewer shows the real board + winner.
-    Returns the written path (str) or None.
+    (player0/player1); each game id encodes the matchup and which seat the
+    candidate held (seats swap per CRN pair). Returns the written path (str) or
+    None.
 
-    E1 hardening: a 0-record write (every game had falsy ``.actions``) is no
-    longer silent — it emits a LOUD WARNING and the write exception (if any) is
-    logged instead of being blanket-swallowed. If ``stats`` is passed, it is
-    populated with ``games_written`` / ``games_skipped`` so the caller can thread
-    the count into match meta (machine-visible 0-record detection).
+    A 0-record write (every game had falsy ``.actions``) emits a warning and the
+    write exception (if any) is logged. If ``stats`` is passed, it is populated
+    with ``games_written`` / ``games_skipped`` so the caller can thread the count
+    into match meta.
     """
 
     if stats is not None:
@@ -357,12 +313,9 @@ def _write_eval_hxr(
                     skipped += 1
                     continue
                 cand_seat = "candP0" if g.a_is_p0 else "candP1"
-                # serial play_checkpoint_match's _Game exposes ``.index``; the
-                # concurrent play_multi_checkpoint_match's _Game exposes
-                # ``.local_index`` (no ``.index``). The shared writer must accept
-                # BOTH — referencing ``g.index`` directly raised AttributeError on
-                # every concurrent eval game, aborting the write after the header
-                # and leaving a 0-record .hxr (the empty-replay bug).
+                # play_checkpoint_match's _Game exposes ``.index``;
+                # play_multi_checkpoint_match's _Game exposes ``.local_index``
+                # (no ``.index``). Accept either.
                 g_index = getattr(g, "index", None)
                 if g_index is None:
                     g_index = getattr(g, "local_index", 0)
@@ -389,9 +342,7 @@ def _write_eval_hxr(
             stats["games_skipped"] = skipped
         total = len(games) if hasattr(games, "__len__") else (n + skipped)
         if n == 0 and total > 0:
-            # A 0-record file is produced when EVERY game had falsy .actions
-            # (the regression that emptied live eval .hxr). Make it LOUD so it is
-            # never silently swallowed again.
+            # A 0-record file is produced when every game had falsy .actions.
             _EVAL_LOG.warning(
                 "eval .hxr wrote 0 of %d games (all .actions empty) -> %s",
                 total,
@@ -432,80 +383,66 @@ def play_checkpoint_match(
     build_evaluators: Callable[..., tuple[Any, Any]] | None = None,
     make_session: Callable[..., Any] | None = None,
 ) -> dict[str, Any]:
-    """Play model A vs model B CONCURRENTLY and return a structured pentanomial
-    result (drop-in: identical public signature and result-dict shape as before).
+    """Play model A vs model B concurrently and return a structured pentanomial
+    result.
 
-    Both players are hexfield nets. The runner keeps TWO persistent sessions /
+    Both players are hexfield nets. The runner keeps two persistent sessions and
     evaluators (one per net, keyed by game index) and plays all games in lockstep
-    ROUNDS. Each round advances every active game by one ply: the games where net
+    rounds. Each round advances every active game by one ply: the games where net
     A is to move are batched through net A's session in one (or, above
     ``active_root_limit``, a few chunked) multi-root ``search`` call, and the
     games where net B is to move likewise through net B's session. The net's move
-    is read from the search result and applied to that game's engine state. This
-    is the same cross-game leaf batching self-play uses, at FULL search visits —
-    parallelism, not fewer sims, is the speedup.
+    is read from the search result and applied to that game's engine state. Search
+    runs at full visits; parallelism, not fewer sims, is the throughput lever.
 
-    PAIRING (``paired_openings=True``, the corrected design's default): games are
-    grouped into ``n_pairs = ceil(n_games / 2)`` matched pairs. Both games of a
-    pair use the SAME CRN ``pair_seed`` (so the opening-temperature sampling is
-    shared — see the module CRN note) but SWAP seats: game 0 plays A-as-player0,
-    game 1 plays B-as-player0. Concurrency does not change this: every in-flight
-    game carries its own ``pair_index`` / ``pair_seed`` / ``a_is_p0`` / running
-    ply count, so the per-game CRN contract survives batching. The shared opening
-    LINE within a pair comes from FORCED-OPENING REPLAY: only each pair's LEADER
+    Pairing (``paired_openings=True``, the default): games are grouped into
+    ``n_pairs = ceil(n_games / 2)`` matched pairs. Both games of a pair use the
+    same CRN ``pair_seed`` (shared opening-temperature sampling — see the module
+    CRN note) but swap seats: game 0 plays A-as-player0, game 1 plays
+    B-as-player0. Every in-flight game carries its own ``pair_index`` /
+    ``pair_seed`` / ``a_is_p0`` / running ply count. The shared opening line
+    within a pair comes from forced-opening replay: only each pair's LEADER
     searches its opening and the seat-swapped FOLLOWER replays the leader's
-    recorded actions (no search). Because leaders are independent games, ALL
-    leaders' opening-ply searches are BATCHED cross-game into one multi-root call
-    per round per net (each leader root seeded ``open_seed + root_index`` so the
-    independent leaders decorrelate), and the greedy tail batches freely (it is
-    RNG-free at temperature 0) — see the module "CRN under batching" note.
-    Each pair yields one pentanomial outcome: how many of its two games net A won
-    (0, 1, or 2), plus the seat pattern, so the downstream pair-level SE (N_pairs
-    units) and the pentanomial→BT mapping have what they need.
+    recorded actions (no search). Leaders are independent games, so all leaders'
+    opening-ply searches are batched cross-game into one multi-root call per round
+    per net (each leader root seeded ``open_seed + root_index`` to decorrelate),
+    and the greedy tail batches (it is RNG-free at temperature 0) — see the module
+    "CRN under batching" note. Each pair yields one pentanomial outcome: how many
+    of its two games net A won (0, 1, or 2), plus the seat pattern, feeding the
+    downstream pair-level SE (N_pairs units) and the pentanomial->BT mapping.
 
-    UNPAIRED (``paired_openings=False``): every game gets an independent seed and
-    seats simply alternate by game index (the legacy independent-Bernoulli
-    layout). Returned for completeness / debugging; the statistical layer should
-    prefer the paired result.
+    Unpaired (``paired_openings=False``): every game gets an independent seed and
+    seats alternate by game index (independent-Bernoulli layout).
 
-    FULL SIMS: ``visits=None`` defaults to ``cfg.selfplay.search_visits`` (the
-    full production budget, 512), NOT the reduced ``cfg.evaluation.eval_visits``;
-    an explicit ``visits`` overrides. Parallelism makes full sims affordable.
+    Sims: ``visits=None`` defaults to ``cfg.selfplay.search_visits``, not
+    ``cfg.evaluation.eval_visits``; an explicit ``visits`` overrides.
 
     ``active_root_limit`` caps a single multi-root batch (defaults to
     ``cfg.selfplay.active_root_limit``); larger to-move groups are chunked.
-    ``batch_openings`` (default False): the leaders' opening plies are ALWAYS
-    batched cross-game now (the serial single-root opening was the throughput
-    bottleneck); the only thing this flag changes is the FOLLOWER opening. Left
-    False (the default for any paired-pentanomial measurement) followers REPLAY
-    their leader's recorded opening so the pair shares the real opening line.
-    Set True it drops the leader/follower split entirely and batches every game's
-    opening with one decorrelated per-root seed (no replay) — an ad-hoc throughput
-    knob that forgoes the within-pair shared opening, so leave it False unless you
-    do not need the paired pentanomial.
+    ``batch_openings`` (default False): leaders' opening plies are always batched
+    cross-game; this flag changes only the FOLLOWER opening. When False, followers
+    replay their leader's recorded opening so the pair shares the opening line.
+    When True, the leader/follower split is dropped and every game's opening is
+    batched with one decorrelated per-root seed (no replay), which forgoes the
+    within-pair shared opening and the paired pentanomial.
     ``build_evaluators`` / ``make_session`` are CPU-test injection seams: given
     them, the runner skips checkpoint loading / GPU and uses the supplied
-    (eval_a, eval_b) and session factory so the loop is unit-testable with a stub
-    evaluator and no torch/CUDA. ``build_evaluators`` is called with no args and
-    returns ``(eval_a, eval_b)``; ``make_session`` is called with no args and
-    returns a fresh session.
+    (eval_a, eval_b) and session factory. ``build_evaluators`` is called with no
+    args and returns ``(eval_a, eval_b)``; ``make_session`` is called with no
+    args and returns a fresh session.
 
     Returns a dict with ``meta`` / ``score`` / ``pentanomial`` / ``game_lengths``
     / ``opening_dedup`` / ``games`` (see module docstring). Win counts in
     ``score`` are net-A-centric ("a_wins"). ``pentanomial.pairs`` is the list the
     pair-level statistics consume; for unpaired runs ``pentanomial`` is ``None``.
-
-    Does NOT execute on the GPU here under the live constraint; callers run it.
     """
 
     cfg = config if config is not None else parse_hexfield_config({})
     sp = cfg.selfplay
-    # FULL sims by default: fall back to the production search budget (512), not
-    # the reduced eval_visits (128). Parallelism makes the full budget affordable.
+    # visits=None defaults to the self-play search budget, not eval_visits.
     eval_visits = int(visits) if visits is not None else int(sp.search_visits)
-    # EVAL-ONLY vbs override (LOCKED 16 by the multistage eval). Threaded here so
-    # the eval can use a different MCTS leaf-parallelism than self-play WITHOUT
-    # touching SelfplayConfig.virtual_batch_size (=4). None -> self-play value.
+    # Eval-only virtual-batch-size override, independent of
+    # SelfplayConfig.virtual_batch_size. None -> self-play value.
     vbs = int(virtual_batch_size) if virtual_batch_size is not None else int(sp.virtual_batch_size)
     root_limit = int(active_root_limit) if active_root_limit is not None else int(sp.active_root_limit)
     new_session = make_session if make_session is not None else (
@@ -524,14 +461,11 @@ def play_checkpoint_match(
         eval_a = HexfieldEvaluator(model_a, device=cfg.device)
         eval_b = HexfieldEvaluator(model_b, device=cfg.device)
 
-    # Symmetric divergence overrides by default (so the win rate is unbiased); an
-    # explicit per-net override drives a search-change A/B. The override follows
-    # the SEARCHING net: ``ov_a`` whenever net A is to move, ``ov_b`` whenever net
-    # B is to move — independent of which engine seat each net holds in a given
-    # game. This is exactly equivalent to the serial ``_play_pair``, which passed
-    # ``ov_a`` as the seat-player0 override and swapped it with ``ov_b`` between a
-    # pair's two seat orderings — i.e. net A always searched with ``ov_a``. Each
-    # round's two batched searches are single-net, so each carries one net's ov.
+    # Symmetric divergence overrides by default; an explicit per-net override
+    # drives a search-change A/B. The override follows the searching net:
+    # ``ov_a`` whenever net A is to move, ``ov_b`` whenever net B is to move,
+    # independent of which engine seat each net holds. Each round's two batched
+    # searches are single-net, so each carries one net's ov.
     ov_a = _resolve_eval_overrides(
         sp, diagnostics_dir=diagnostics_dir, divergence_overrides=divergence_overrides_a
     )
@@ -543,8 +477,7 @@ def play_checkpoint_match(
         )
     )
 
-    # ----- Build the in-flight game set (seats + CRN seeds), same layout as the
-    # serial version, so pairing/CRN is preserved; only the execution is batched.
+    # ----- Build the in-flight game set (seats + CRN seeds).
     class _Game:
         __slots__ = (
             "index", "pair_index", "a_is_p0", "seed", "state",
@@ -556,7 +489,7 @@ def play_checkpoint_match(
             self.index = index
             self.pair_index = pair_index
             self.a_is_p0 = a_is_p0
-            self.seed = seed  # the CRN seed (== _play_pair's per-game seed)
+            self.seed = seed  # the CRN seed
             self.state = api.new_game()
             self.plies = 0
             self.done = False
@@ -567,13 +500,12 @@ def play_checkpoint_match(
             # game is replayable as a .hxr record on the dashboard. Distinct from
             # ``opening`` (only the first ``opening_plies`` actions).
             self.actions: list[int] = []
-            # FORCED-OPENING CRN (L-1): each pair has a LEADER (game 0, the first
-            # seat ordering created) and a FOLLOWER (game 1, the seat-swapped
-            # sibling). The leader searches its opening normally; the follower
-            # REPLAYS the leader's recorded opening actions ply-for-ply (no
-            # search) so the pair shares the real opening LINE, not merely the RNG
-            # stream. ``leader`` points the follower at its leader so it can read
-            # ``leader.opening[ply]``; the leader's ``leader`` is itself (unused).
+            # Forced-opening CRN: each pair has a LEADER (game 0, the first seat
+            # ordering created) and a FOLLOWER (game 1, the seat-swapped sibling).
+            # The leader searches its opening; the follower replays the leader's
+            # recorded opening actions ply-for-ply (no search), so the pair shares
+            # the opening line. ``leader`` points the follower at its leader so it
+            # can read ``leader.opening[ply]``; a leader's ``leader`` is itself.
             self.is_leader = True
             self.leader: _Game = self
 
@@ -601,7 +533,7 @@ def play_checkpoint_match(
             pair_members.setdefault(pair_index, []).append(g0)
             if idx0 + 1 < n_games:  # odd n_games -> last pair is a singleton
                 g1 = _Game(idx0 + 1, pair_index, a_is_p0=False, seed=pair_seed)
-                # FORCED-OPENING CRN: g1 follows g0 — it replays g0's opening line.
+                # g1 follows g0: it replays g0's opening line.
                 g1.is_leader = False
                 g1.leader = g0
                 games.append(g1)
@@ -613,11 +545,9 @@ def play_checkpoint_match(
             )
             games.append(_Game(game_index, -1, a_is_p0=(game_index % 2 == 0), seed=seed))
 
-    # ----- Two persistent sessions, one per NET, keyed by game index. The serial
-    # version built a fresh session per game per seat; with a persistent session
-    # the Rust per-game-key tree store keeps trees from crossing games (and we
-    # discard each game's tree at end), so cross-game tree reuse never happens —
-    # the concurrent equivalent of the serial fresh-session-per-game guarantee.
+    # ----- Two persistent sessions, one per net, keyed by game index. The Rust
+    # per-game-key tree store keeps trees from crossing games, and each game's
+    # tree is discarded at end, so trees are never reused across games.
     s_net_a = new_session()
     s_net_b = new_session()
     budget_hit = False
@@ -648,9 +578,9 @@ def play_checkpoint_match(
         if api.terminal(g.state) is not None or g.plies >= sp.max_game_plies:
             _finalize(g)
 
-    # Common search knobs shared by every batched/single-root call (mirrors the
-    # eval protocol: greedy after a sampled opening, no Dirichlet noise, the §5.4
-    # divergences as self-play runs them; per-net override + session below).
+    # Common search knobs shared by every batched/single-root call: greedy after
+    # a sampled opening, no Dirichlet noise. Per-net override and session are
+    # supplied at each call site.
     common = dict(
         visits=eval_visits,
         c_puct=sp.c_puct,
@@ -670,8 +600,7 @@ def play_checkpoint_match(
         return "A" if g.a_to_move() else "B"
 
     def _temp(g: _Game) -> float:
-        """Opening temperature off the GLOBAL ply count (== _play_pair, which
-        keys temperature on ``ply < opening_plies``), then greedy."""
+        """Opening temperature while ``plies < opening_plies``, then greedy (0)."""
         return opening_temperature if (g.plies < opening_plies and opening_temperature > 0.0) else 0.0
 
     def _apply_search(g: _Game, search: dict[str, Any]) -> None:
@@ -684,11 +613,9 @@ def play_checkpoint_match(
         _settle(g)
 
     def _replay_action(g: _Game, action_id: int) -> None:
-        """Apply a PRE-DECIDED opening action to a follower game without any
-        search (forced-opening CRN). Identical bookkeeping to ``_apply_search``
-        so the follower's plies/opening/settle path matches a searched ply — only
-        the move SOURCE differs (the leader's recorded action, not a fresh
-        search)."""
+        """Apply a pre-decided opening action to a follower game without search.
+        Same plies/opening/settle bookkeeping as ``_apply_search``; only the move
+        source differs (the leader's recorded action, not a fresh search)."""
         q, r = unpack_action_id(int(action_id))
         api.apply_action(g.state, PlacementAction(AxialCoord(q=q, r=r)))
         g.plies += 1
@@ -699,12 +626,11 @@ def play_checkpoint_match(
 
     def _follower_opening_action(g: _Game) -> int | None:
         """The leader's recorded action for the follower ``g``'s current opening
-        ply, or ``None`` if the leader has no action for that ply yet (it should
-        always have one — the round order guarantees the leader is strictly ahead
-        of the follower at every follower move — but if the leader's game ended
-        DURING its own opening it may have fewer than ``opening_plies`` recorded
-        actions, in which case the follower falls back to a normal single-root
-        CRN search for the remaining opening plies)."""
+        ply, or ``None`` if the leader has no action for that ply. The round order
+        keeps the leader strictly ahead of the follower, so a recorded action
+        normally exists; if the leader's game ended during its own opening it may
+        have fewer than ``opening_plies`` actions, in which case the follower
+        falls back to a single-root search for the remaining opening plies."""
         line = g.leader.opening
         return line[g.plies] if g.plies < len(line) else None
 
@@ -714,12 +640,8 @@ def play_checkpoint_match(
         nonlocal mcts_search_elapsed, forward_batches
         session = s_net_a if net == "A" else s_net_b
         evaluator = eval_a if net == "A" else eval_b
-        # ov is applied to the mover by SEAT in _play_pair; here every game in the
-        # batch has the SAME net to move, but that net sits at different seats
-        # across games. ov_a/ov_b are symmetric by default, so the seat the net
-        # occupies determines its override: net A uses ov_a (its self-play
-        # override), net B uses ov_b. (For the default symmetric case ov_a is
-        # ov_b, so this is moot; it matters only for an explicit A/B lever-off.)
+        # Every game in the batch has the same net to move: net A uses ov_a, net B
+        # uses ov_b. For the default symmetric case ov_a == ov_b.
         overrides = ov_a if net == "A" else ov_b
         applied = 0
         for start in range(0, len(batch), root_limit):
@@ -748,22 +670,18 @@ def play_checkpoint_match(
         return applied
 
     def _run_opening_batch(net: str, batch: list[_Game], seed: int) -> int:
-        """One multi-root ``search`` for the OPENING-ply LEADERS to-move for
-        ``net`` (chunked at ``root_limit``), replacing the old per-leader serial
-        single-root loop. Every root carries ``opening_temperature`` so each
-        leader SAMPLES its opening move, and the native per-root selection seed
-        ``seed.wrapping_add(root_index)`` (search.rs:748-749) gives each
-        independent leader its own decorrelated stream — there is NO cross-leader
-        CRN to preserve (CRN is strictly within a pair, leader<->follower, and the
-        follower does not search but replays). Returns the number of plies applied.
+        """One multi-root ``search`` for the opening-ply LEADERS to-move for
+        ``net`` (chunked at ``root_limit``). Every root carries
+        ``opening_temperature`` so each leader samples its opening move, and the
+        native per-root selection seed ``seed.wrapping_add(root_index)`` gives each
+        leader its own decorrelated stream (leaders carry no cross-leader CRN).
+        Returns the number of plies applied.
 
-        Identical in structure to ``_run_batch`` except the temperatures are pinned
-        to ``opening_temperature`` (documenting intent — these games are all at
-        ``plies < opening_plies`` so ``_temp`` would return the same value) and the
-        base seed is the per-(net, round) opening stream rather than the greedy
-        ``batch_seed``. Each leader's sampled action is recorded into ``g.opening``
-        by ``_apply_search`` exactly as before, so followers still find a line to
-        replay."""
+        Same structure as ``_run_batch`` except the temperatures are pinned to
+        ``opening_temperature`` (these games are all at ``plies < opening_plies``)
+        and the base seed is the per-(net, round) opening stream. Each leader's
+        sampled action is recorded into ``g.opening`` by ``_apply_search`` so
+        followers have a line to replay."""
         nonlocal mcts_search_elapsed, forward_batches
         session = s_net_a if net == "A" else s_net_b
         evaluator = eval_a if net == "A" else eval_b
@@ -794,14 +712,11 @@ def play_checkpoint_match(
         return applied
 
     def _run_single(g: _Game, net: str) -> None:
-        """Single-root ``search`` for one game with the serial RNG
-        (``seed = g.seed * 5003 + g.ply``, per-root index 0). Now used ONLY as the
-        FOLLOWER fallback when its leader ended its own game before recording an
-        action for this opening ply (nothing to replay), so the follower still
-        moves. The leaders' opening plies are batched cross-game via
-        ``_run_opening_batch`` and the greedy tail via ``_run_batch``. The follower
-        shares its leader's seed, so this fallback's RNG is ``pair_seed*5003+ply``
-        — consistent with the rest of the pair's stream."""
+        """Single-root ``search`` for one game with seed ``g.seed * 5003 +
+        g.plies`` (per-root index 0). Used only as the follower fallback when its
+        leader ended before recording an action for this opening ply. The follower
+        shares its leader's seed, so this fallback's RNG is
+        ``pair_seed * 5003 + ply``."""
         nonlocal mcts_search_elapsed, forward_batches
         session = s_net_a if net == "A" else s_net_b
         evaluator = eval_a if net == "A" else eval_b
@@ -823,25 +738,21 @@ def play_checkpoint_match(
     # ----- Round loop: each round advances every active game by at least one ply
     # (a game whose seat-to-move flips after net A's batch is also played in net
     # B's recomputed to-move set the same round, so it can advance up to 2 plies).
-    # Per round and per net we batch BOTH the OPENING LEADERS (one multi-root
-    # forward) and the GREEDY to-move games (another multi-root forward); followers
-    # replay their leader's recorded opening (no search). ``batch_openings``
-    # collapses the leader/follower distinction (everything in ``greedy``). A round
-    # that makes no progress is a bug -> raise rather than hang.
+    # Per round and per net, the opening leaders are batched in one multi-root
+    # forward and the greedy to-move games in another; followers replay their
+    # leader's recorded opening (no search). ``batch_openings`` collapses the
+    # leader/follower distinction (everything goes through ``greedy``). A round
+    # that makes no progress raises rather than hangs.
     #
-    # FORCED-OPENING CRN (L-1): within the opening, a pair's LEADER searches; its
-    # seat-swapped FOLLOWER does NOT search — it REPLAYS the leader's recorded
-    # action for that ply, so both games traverse the IDENTICAL opening LINE (not
-    # merely the same RNG stream — the seat swap means a different net would move at
-    # ply 0, so a shared seed alone does NOT share the line). The leaders are
-    # INDEPENDENT games (no cross-leader CRN), so all leaders to-move for a net are
-    # searched together in ONE multi-root ``_run_opening_batch`` call (each leader
-    # root decorrelated by the native per-root ``seed+index`` offset) instead of the
-    # old serial single-root-per-leader loop that starved the GPU. The round order
-    # (net A pass then net B pass) guarantees the leader is strictly ahead of the
-    # follower at every follower move, so the action to replay is always already
-    # recorded; the rare leader-ended-mid-opening case falls back to a follower
-    # single-root search.
+    # Within the opening, a pair's LEADER searches; its seat-swapped FOLLOWER
+    # replays the leader's recorded action for that ply, so both games traverse
+    # the same opening line. Leaders are independent games (no cross-leader CRN),
+    # so all leaders to-move for a net are searched in one multi-root
+    # ``_run_opening_batch`` call (each leader root decorrelated by the native
+    # per-root ``seed+index`` offset). The round order (net A pass then net B pass)
+    # keeps the leader strictly ahead of the follower at every follower move, so
+    # the action to replay is already recorded; the rare leader-ended-mid-opening
+    # case falls back to a follower single-root search.
     while True:
         active = [g for g in games if not g.done]
         if not active:
@@ -857,10 +768,9 @@ def play_checkpoint_match(
             to_move = [g for g in active if not g.done and _net_for(g) == net]
             if not to_move:
                 continue
-            # Opening plies: in PAIRED mode (and unless batch_openings) each game
-            # is handled per the forced-opening CRN — leaders search (batched
-            # cross-game), followers replay the leader's recorded line; everything
-            # past the opening batches too.
+            # Opening plies: in paired mode (and unless batch_openings) leaders
+            # search (batched cross-game) and followers replay the leader's
+            # recorded line; games past the opening are batched as greedy.
             if paired_openings and not batch_openings:
                 openers = [g for g in to_move if g.plies < opening_plies and g.is_leader]
                 followers = [g for g in to_move if g.plies < opening_plies and not g.is_leader]
@@ -870,14 +780,12 @@ def play_checkpoint_match(
                 followers = []
                 greedy = to_move
             if openers:
-                # All these leaders are independent games (no cross-leader CRN), so
-                # batch their opening-ply searches into ONE multi-root call. The
-                # per-(net, round) base seed plus the native per-root ``seed+index``
-                # offset gives each leader its own decorrelated sampling stream. The
-                # opening base offsets (13M/19M) are distinct from the greedy
-                # offsets (0/7M below) for BOTH nets, so an opening batch and a
-                # greedy batch in the same round never share a base seed (a round
-                # in the opening->greedy transition can run both).
+                # These leaders are independent games, batched into one multi-root
+                # call. The per-(net, round) base seed plus the native per-root
+                # ``seed+index`` offset gives each leader its own decorrelated
+                # stream. The opening base offsets (13M/19M) are distinct from the
+                # greedy offsets (0/7M below) for both nets, so an opening batch and
+                # a greedy batch in the same round never share a base seed.
                 open_seed = (
                     game_seed_base + (13_000_003 if net == "A" else 19_000_003) + rounds * 1_000_003
                 )
@@ -893,9 +801,8 @@ def play_checkpoint_match(
                     _run_single(g, net)
                 plies_this_round += 1
             if greedy:
-                # Per-round, per-net batch seed (greedy plies are temperature 0, so
-                # this RNG only tie-breaks; the value is decorrelated per net/round
-                # like the SealBot loop's ``search_seed + rounds * 1_000_003``).
+                # Per-round, per-net batch seed. Greedy plies are temperature 0, so
+                # this RNG only tie-breaks; the value is decorrelated per net/round.
                 batch_seed = (
                     game_seed_base + (0 if net == "A" else 7_000_003) + rounds * 1_000_003
                 )
@@ -905,9 +812,7 @@ def play_checkpoint_match(
                 "hexfield checkpoint eval made no progress in a round; aborting to avoid a hang"
             )
 
-    # ----- Re-key the in-flight games to the result rows + per-pair rows (the
-    # exact shapes the serial version emitted, so _build_match_result and every
-    # downstream consumer are unchanged).
+    # ----- Re-key the in-flight games to the result rows and per-pair rows.
     game_rows = [
         {
             "index": g.index,
@@ -982,9 +887,9 @@ def play_checkpoint_match(
 
 
 # --------------------------------------------------------------------------- #
-# (1b) CONCURRENT MULTI-OPPONENT checkpoint match — ONE candidate forward across
-#      EVERY opponent's candidate-to-move games per round (the shared-candidate
-#      batch is the speed win), each opponent searched in its OWN session.
+# (1b) Concurrent multi-opponent checkpoint match — one candidate forward across
+#      every opponent's candidate-to-move games per round; each opponent searched
+#      in its own session.
 # --------------------------------------------------------------------------- #
 
 
@@ -1010,66 +915,55 @@ def play_multi_checkpoint_match(
     build_opponent_evaluator: Callable[..., Any] | None = None,
     make_session: Callable[..., Any] | None = None,
 ) -> dict[str, Any]:
-    """Play the candidate (always net A) vs MANY checkpoint opponents in ONE
+    """Play the candidate (always net A) vs many checkpoint opponents in one
     batched concurrent pass and return ``{opponent_label: match_result_dict}``.
 
-    Each opponent's ``match_result_dict`` is BYTE-FOR-BYTE the shape
+    Each opponent's ``match_result_dict`` has the shape
     :func:`play_checkpoint_match` returns (``meta`` / ``score`` /
-    ``pentanomial`` / ``game_lengths`` / ``opening_dedup`` / ``games``), so the
-    existing downstream (``multistage_eval._checkpoint_edge_counts`` ->
-    ``eval_stats.effective_counts`` -> ``BTEdge``) consumes it UNCHANGED.
+    ``pentanomial`` / ``game_lengths`` / ``opening_dedup`` / ``games``), consumed
+    downstream by ``multistage_eval._checkpoint_edge_counts`` ->
+    ``eval_stats.effective_counts`` -> ``BTEdge``.
 
-    THE SPEED WIN — SHARED CANDIDATE FORWARD. The candidate is net A in EVERY
-    game across EVERY opponent. The candidate keeps ONE persistent session and
-    ONE evaluator; each round, the GREEDY candidate-to-move games across ALL
-    opponents are gathered and searched in ONE multi-root candidate-session call
-    (the candidate net runs a single fat forward instead of one-per-opponent).
-    Each opponent keeps its OWN session+evaluator and searches only its own
-    games. Wall-clock is then MAX over opponents, not SUM.
+    Shared candidate forward: the candidate is net A in every game across every
+    opponent. It keeps one persistent session and evaluator; each round, the
+    greedy candidate-to-move games across all opponents are searched in one
+    multi-root candidate-session call. Each opponent keeps its own
+    session+evaluator and searches only its own games. Wall-clock is then max over
+    opponents, not sum.
 
-    EXACT EQUIVALENCE TO N SERIAL ``play_checkpoint_match`` CALLS (the safety
-    net the equivalence test pins). Each opponent group is constructed IDENTICALLY
-    to a standalone ``play_checkpoint_match(candidate, opponent_b, n_games,
-    paired_openings=True, game_seed_base=game_seed_base, ...)`` — same CRN pairs,
-    same per-pair ``pair_seed = game_seed_base + pair_index``, same
-    ``a_is_p0`` seat pattern, same leader/follower forced-opening replay. The
-    ONLY thing that changes is WHEN the candidate's searches fire:
+    Each opponent group is constructed identically to a standalone
+    ``play_checkpoint_match(candidate, opponent_b, n_games, paired_openings=True,
+    game_seed_base=game_seed_base, ...)`` — same CRN pairs, same per-pair
+    ``pair_seed = game_seed_base + pair_index``, same ``a_is_p0`` seat pattern,
+    same leader/follower forced-opening replay. What differs is when the
+    candidate's searches fire:
 
-      * GREEDY plies (temperature 0): the native per-root selection seed is
-        ``seed.wrapping_add(root_index)`` but at temperature 0 move selection is a
-        pure deterministic argmax / LCB-of-Q (search.rs select_search_action), so
-        the chosen move is SEED- AND BATCH-POSITION-INDEPENDENT. Therefore
-        merging every opponent's greedy candidate games into one multi-root call
-        yields the bit-identical per-game move a serial run would — greedy plies
-        batch FREELY across opponents. This is the bulk of plies (the long tail).
+      * Greedy plies (temperature 0): move selection is a deterministic argmax /
+        LCB-of-Q (search.rs select_search_action), seed- and
+        batch-position-independent, so every opponent's greedy candidate games are
+        merged into one multi-root call. This is the bulk of plies.
 
-      * OPENING-LEADER plies (temperature > 0): the per-root seed
-        ``open_seed.wrapping_add(root_index)`` DOES matter, so to stay
-        bit-identical to the serial run each opponent's candidate opening leaders
-        are searched in their OWN per-opponent multi-root call with that
-        opponent's own ``open_seed`` (= ``game_seed_base + 13_000_003 +
-        rounds*1_000_003``, the SAME stream the serial run uses) and per-GROUP
-        root_index. (Followers replay their leader's recorded line — no search.)
-        The opening is a handful of plies; the per-opponent split here costs
-        almost nothing while keeping the equivalence exact.
+      * Opening-leader plies (temperature > 0): the per-root seed
+        ``open_seed.wrapping_add(root_index)`` matters, so each opponent's
+        candidate opening leaders are searched in their own per-opponent multi-root
+        call with that opponent's ``open_seed`` (= ``game_seed_base + 13_000_003 +
+        rounds*1_000_003``) and per-group root_index. Followers replay their
+        leader's recorded line (no search).
 
-    GAME-KEY NAMESPACING. ``HexfieldMctsSession.search`` keys trees by game_key in
-    a HashMap. The candidate session holds trees for games from ALL opponents at
-    once, so each game's candidate-side key is a GLOBAL ``opp_index * KEY_STRIDE +
-    local_index`` (KEY_STRIDE >> any plausible per-opponent game count), and is
-    ``discard``-ed at game end so candidate trees never collide or leak across
-    opponent groups. Each opponent session uses the local per-group index (its own
-    games only), discarded at game end exactly like ``play_checkpoint_match``.
+    Game-key namespacing: ``HexfieldMctsSession.search`` keys trees by game_key in
+    a HashMap. The candidate session holds trees for games from all opponents at
+    once, so each game's candidate-side key is a global ``opp_index * KEY_STRIDE +
+    local_index`` (KEY_STRIDE >> any plausible per-opponent game count),
+    discarded at game end so candidate trees never collide across opponent groups.
+    Each opponent session uses the local per-group index, discarded at game end.
 
     Also writes one ``.hxr`` eval-game record per opponent under
-    ``<run>/evaluation/epoch_N/`` via the existing ``_write_eval_hxr`` helper.
+    ``<run>/evaluation/epoch_N/`` via ``_write_eval_hxr``.
 
     ``build_candidate_evaluator`` / ``build_opponent_evaluator`` / ``make_session``
     are CPU-test injection seams (no torch/CUDA). ``build_candidate_evaluator()``
     -> candidate evaluator; ``build_opponent_evaluator(label, ckpt_path)`` ->
     that opponent's evaluator; ``make_session()`` -> a fresh session.
-
-    Does NOT execute on the GPU here under the live constraint; callers run it.
     """
 
     cfg = config if config is not None else parse_hexfield_config({})
@@ -1091,9 +985,8 @@ def play_multi_checkpoint_match(
 
         cand_eval = HexfieldEvaluator(_load_hexfield_net(candidate_ckpt), device=cfg.device)
 
-    # ov follows the SEARCHING net, exactly as in play_checkpoint_match: the
-    # candidate (net A) always searches with ``ov_cand`` (its self-play override);
-    # an opponent searches with ``ov_opp``. Symmetric by default (unbiased winrate).
+    # ov follows the searching net: the candidate (net A) searches with
+    # ``ov_cand``, an opponent with ``ov_opp``. Symmetric by default.
     ov_cand = _resolve_eval_overrides(
         sp, diagnostics_dir=diagnostics_dir, divergence_overrides=divergence_overrides_candidate
     )
@@ -1119,8 +1012,8 @@ def play_multi_checkpoint_match(
         search_parity_mode=sp.search_parity_mode,
     )
 
-    # Per-game state. Mirrors play_checkpoint_match._Game but tracks the OPPONENT
-    # group + a GLOBAL candidate-session key so candidate trees never collide.
+    # Per-game state. Like play_checkpoint_match._Game but tracks the opponent
+    # group and a global candidate-session key so candidate trees never collide.
     class _Game:
         __slots__ = (
             "opp_index", "local_index", "cand_key", "pair_index", "a_is_p0",
@@ -1131,8 +1024,8 @@ def play_multi_checkpoint_match(
         def __init__(self, opp_index: int, local_index: int, cand_key: int,
                      pair_index: int, a_is_p0: bool, seed: int) -> None:
             self.opp_index = opp_index
-            self.local_index = local_index  # key in THIS opponent's session
-            self.cand_key = cand_key        # GLOBAL key in the candidate session
+            self.local_index = local_index  # key in this opponent's session
+            self.cand_key = cand_key        # global key in the candidate session
             self.pair_index = pair_index
             self.a_is_p0 = a_is_p0
             self.seed = seed
@@ -1158,12 +1051,12 @@ def play_multi_checkpoint_match(
             return api.current_player(self.state) == self.a_role
 
     # KEY_STRIDE namespaces candidate-session game keys per opponent so two
-    # opponents' games never share a candidate tree (n_games_per_opponent is tiny
-    # vs this stride).
+    # opponents' games never share a candidate tree (n_games_per_opponent << this
+    # stride).
     KEY_STRIDE = 1_000_000
 
-    # One opponent group per (label, ckpt). Each group is the EXACT game layout a
-    # standalone play_checkpoint_match would build for that opponent.
+    # One opponent group per (label, ckpt). Each group builds the same game layout
+    # a standalone play_checkpoint_match would for that opponent.
     class _Group:
         __slots__ = ("opp_index", "label", "ckpt", "session", "evaluator",
                      "games", "pair_members")
@@ -1268,10 +1161,9 @@ def play_multi_checkpoint_match(
         return g.cand_key
 
     def _run_candidate_greedy(batch: list[_Game], seed: int) -> int:
-        """ONE shared candidate-session multi-root search over the GREEDY
-        candidate-to-move games across ALL opponents (chunked at root_limit). At
-        temperature 0 the move is a deterministic seed-independent argmax, so this
-        cross-opponent merge is bit-identical to per-opponent serial searches."""
+        """One shared candidate-session multi-root search over the greedy
+        candidate-to-move games across all opponents (chunked at root_limit). At
+        temperature 0 the move is a deterministic seed-independent argmax."""
         nonlocal mcts_search_elapsed, forward_batches, cand_forward_batches
         applied = 0
         for start in range(0, len(batch), root_limit):
@@ -1300,10 +1192,10 @@ def play_multi_checkpoint_match(
         return applied
 
     def _run_candidate_opening(grp: "_Group", openers: list[_Game], seed: int) -> int:
-        """Per-OPPONENT candidate opening-leader batch. Uses the candidate session
-        + candidate evaluator but THIS opponent's own ``open_seed`` and per-group
-        root_index, so the native ``seed+root_index`` per-root sampling stream is
-        bit-identical to a serial play_checkpoint_match for this opponent."""
+        """Per-opponent candidate opening-leader batch. Uses the candidate session
+        and evaluator but this opponent's own ``open_seed`` and per-group
+        root_index, so each leader's native ``seed+root_index`` sampling stream is
+        keyed per opponent."""
         nonlocal mcts_search_elapsed, forward_batches, cand_forward_batches
         applied = 0
         for start in range(0, len(openers), root_limit):
@@ -1333,10 +1225,9 @@ def play_multi_checkpoint_match(
 
     def _run_opponent_batch(grp: "_Group", batch: list[_Game], seed: int,
                             *, temperature: float | None) -> int:
-        """One multi-root search for the opponent (net B) to-move games in THIS
+        """One multi-root search for the opponent (net B) to-move games in this
         opponent's session (chunked at root_limit). ``temperature`` None -> per-game
-        greedy/opening temperature via ``_temp``; a float pins it (opening leaders).
-        Bit-identical to play_checkpoint_match's per-net batch for this opponent."""
+        temperature via ``_temp``; a float pins it (opening leaders)."""
         nonlocal mcts_search_elapsed, forward_batches
         applied = 0
         for start in range(0, len(batch), root_limit):
@@ -1369,9 +1260,8 @@ def play_multi_checkpoint_match(
         return applied
 
     def _run_single(g: _Game, net: str) -> None:
-        """Single-root follower fallback (leader ended mid-opening). Uses the
-        serial RNG ``g.seed * 5003 + g.plies`` and the right session per net —
-        exactly play_checkpoint_match's _run_single."""
+        """Single-root follower fallback (leader ended mid-opening). Uses seed
+        ``g.seed * 5003 + g.plies`` and the session/evaluator for ``net``."""
         nonlocal mcts_search_elapsed, forward_batches, cand_forward_batches
         if net == "A":
             session, evaluator, key, ov = cand_session, cand_eval, g.cand_key, ov_cand
@@ -1394,14 +1284,13 @@ def play_multi_checkpoint_match(
             cand_forward_batches += 1
         _apply_search(g, searches[0])
 
-    # ----- Round loop. Per round: (1) CANDIDATE pass — gather every opponent's
-    # candidate-to-move games; search the OPENING leaders per-opponent (own
-    # open_seed) and the GREEDY games in ONE shared cross-opponent call; followers
-    # replay. (2) OPPONENT pass — each opponent searches its own to-move games in
-    # its own session (openers per-opponent open_seed; greedy in one batch). This
-    # ordering (candidate first, then each opponent) matches play_checkpoint_match's
-    # net-A-then-net-B ordering per opponent group, so the leader is always strictly
-    # ahead of its follower when the follower replays.
+    # ----- Round loop. Per round: (1) candidate pass — gather every opponent's
+    # candidate-to-move games; search the opening leaders per-opponent (own
+    # open_seed) and the greedy games in one shared cross-opponent call; followers
+    # replay. (2) opponent pass — each opponent searches its own to-move games in
+    # its own session (openers per-opponent open_seed; greedy in one batch). The
+    # candidate-first ordering keeps each leader strictly ahead of its follower
+    # when the follower replays.
     while True:
         active = [g for g in all_games if not g.done]
         if not active:
@@ -1414,7 +1303,7 @@ def play_multi_checkpoint_match(
         rounds += 1
         plies_this_round = 0
 
-        # ---- (1) CANDIDATE pass (net A), shared forward for the greedy tail. ----
+        # ---- (1) Candidate pass (net A), shared forward for the greedy tail. ----
         cand_to_move = [g for g in active if not g.done and g.a_to_move()]
         cand_openers_by_opp: dict[int, list[_Game]] = {}
         cand_followers: list[_Game] = []
@@ -1427,8 +1316,7 @@ def play_multi_checkpoint_match(
             else:
                 cand_greedy.append(g)
         # Opening leaders: per-opponent with that opponent's own open_seed (net A
-        # offset 13_000_003, == play_checkpoint_match), so each leader's per-root
-        # seed (open_seed+root_index) is bit-identical to the serial run.
+        # offset 13_000_003).
         for opp_index, openers in cand_openers_by_opp.items():
             open_seed = game_seed_base + 13_000_003 + rounds * 1_000_003
             plies_this_round += _run_candidate_opening(groups[opp_index], openers, open_seed)
@@ -1440,13 +1328,13 @@ def play_multi_checkpoint_match(
             else:
                 _run_single(g, "A")
             plies_this_round += 1
-        # Greedy: ONE shared candidate forward across ALL opponents (temp 0 ->
-        # seed-independent argmax, so the cross-opponent merge is exact).
+        # Greedy: one shared candidate forward across all opponents (temp 0 ->
+        # seed-independent argmax).
         if cand_greedy:
             cand_seed = game_seed_base + rounds * 1_000_003
             plies_this_round += _run_candidate_greedy(cand_greedy, cand_seed)
 
-        # ---- (2) OPPONENT pass (net B), each in its own session. ----
+        # ---- (2) Opponent pass (net B), each in its own session. ----
         active2 = [g for g in all_games if not g.done]
         for grp in groups:
             to_move = [g for g in active2 if g.opp_index == grp.opp_index and not g.done and not g.a_to_move()]
@@ -1456,7 +1344,7 @@ def play_multi_checkpoint_match(
             followers = [g for g in to_move if g.plies < opening_plies and not g.is_leader]
             greedy = [g for g in to_move if g.plies >= opening_plies]
             if openers:
-                # Net B opening offset 19_000_003 == play_checkpoint_match.
+                # Net B opening offset 19_000_003.
                 open_seed = game_seed_base + 19_000_003 + rounds * 1_000_003
                 plies_this_round += _run_opponent_batch(
                     grp, openers, open_seed, temperature=opening_temperature
@@ -1469,7 +1357,7 @@ def play_multi_checkpoint_match(
                     _run_single(g, "B")
                 plies_this_round += 1
             if greedy:
-                # Net B greedy offset 7_000_003 == play_checkpoint_match.
+                # Net B greedy offset 7_000_003.
                 batch_seed = game_seed_base + 7_000_003 + rounds * 1_000_003
                 plies_this_round += _run_opponent_batch(grp, greedy, batch_seed, temperature=None)
 
@@ -1479,7 +1367,7 @@ def play_multi_checkpoint_match(
                 "aborting to avoid a hang"
             )
 
-    # ----- Build ONE result dict PER opponent, in play_checkpoint_match's shape. -
+    # ----- Build one result dict per opponent, in play_checkpoint_match's shape. -
     elapsed = round(time.perf_counter() - started, 2)
     results: dict[str, Any] = {}
     for grp in groups:
@@ -1580,30 +1468,22 @@ def play_sealbot_match(
 ) -> dict[str, Any]:
     """Play hexfield vs SealBot concurrently and return a structured result.
 
-    Mechanical port of the dense concurrent SealBot loop
-    (dense_cnn_restnet/evaluation.py:327-391), adapted to the hexfield search
-    ABI:
       * One persistent ``HexfieldMctsSession``; every game where hexfield is to
-        move is searched together in ONE ``session.search([keys], (states,),
+        move is searched together in one ``session.search([keys], (states,),
         ..., evaluator=...)`` multi-root call so the net batches leaves across
-        all in-flight games. Search knobs mirror the eval protocol (greedy after
-        a sampled opening; no Dirichlet noise; the §5.4 divergences as self-play
-        runs them).
+        all in-flight games. Search knobs: greedy after a sampled opening, no
+        Dirichlet noise.
       * SealBot's turn is drained serially per game through the hexo_runner
-        ``SealBotPlayer`` adapter (each game keeps its own isolated worker, like
-        the dense loop), because the two SealBot variants cannot coexist in one
-        process and its think time is a fixed wall, not the bottleneck.
+        ``SealBotPlayer`` adapter (each game keeps its own worker). The two
+        SealBot variants cannot coexist in one process.
 
-    NO CRN pairing: SealBot's minimax depth varies under GPU/CPU load, so two
-    SealBot games are not a matched comparison. The corrected design uses SealBot
-    only as the pinned zero-point downstream; this runner just produces the
+    No CRN pairing: SealBot's minimax depth varies under load, so two SealBot
+    games are not a matched comparison. This runner produces the
     hexfield-vs-SealBot edge (Wilson CI on the binomial win rate).
 
     Seats alternate by game index (even -> hexfield is player0). ``build_opponent``
     is an injection seam (tests fake the bot); default builds a real
     ``SealBotPlayer`` per game.
-
-    Does NOT execute here under the live-GPU constraint; callers run it.
     """
 
     # Imported lazily so importing this module never requires the SealBot
@@ -1612,16 +1492,12 @@ def play_sealbot_match(
 
     cfg = config if config is not None else parse_hexfield_config({})
     sp = cfg.selfplay
-    # FULL sims by default, matching play_checkpoint_match (sp.search_visits, the
-    # production budget) — NOT the reduced cfg.evaluation.eval_visits. The
-    # orchestrator already threads the full value explicitly, but the default must
-    # agree with the checkpoint runner so an ad-hoc caller that omits ``visits``
-    # measures SealBot at the SAME strength as the checkpoint edges (a latent
-    # foot-gun otherwise: the two runners would silently default to different
-    # budgets). An explicit ``visits`` (e.g. cfg.eval_visits) still overrides.
+    # visits=None defaults to the self-play search budget (sp.search_visits), the
+    # same default as play_checkpoint_match, not cfg.evaluation.eval_visits. An
+    # explicit ``visits`` overrides.
     eval_visits = int(visits) if visits is not None else int(sp.search_visits)
-    # EVAL-ONLY vbs override (LOCKED 16), same contract as play_checkpoint_match;
-    # None -> self-play value. Does NOT touch SelfplayConfig.virtual_batch_size.
+    # Eval-only virtual-batch-size override, independent of
+    # SelfplayConfig.virtual_batch_size. None -> self-play value.
     vbs = int(virtual_batch_size) if virtual_batch_size is not None else int(sp.virtual_batch_size)
     root_limit = int(active_root_limit) if active_root_limit is not None else sp.active_root_limit
 
@@ -1648,7 +1524,7 @@ def play_sealbot_match(
     evaluator = HexfieldEvaluator(model, device=cfg.device)
     session = _new_rust_session(max_states)
 
-    # One in-flight game. Mirrors dense_cnn_restnet/evaluation._EvalGame.
+    # One in-flight game.
     class _Game:
         __slots__ = (
             "index", "seed", "hex_is_p0", "state", "opponent",
@@ -1730,11 +1606,9 @@ def play_sealbot_match(
             # --- Batched hexfield ply across every game where hex is to move. ---
             hex_games = [g for g in active if g.hex_to_move()]
             if hex_games:
-                # Cap the multi-root batch at the session's strict active-root
-                # limit; if more games than the limit are simultaneously
-                # hex-to-move, search them in chunks (the dense loop never hits
-                # this because games_per_epoch < limit, but n_games here can be
-                # large). Each chunk is one multi-root forward.
+                # Cap the multi-root batch at the active-root limit; if more games
+                # than the limit are simultaneously hex-to-move, search them in
+                # chunks. Each chunk is one multi-root forward.
                 for chunk_start in range(0, len(hex_games), root_limit):
                     chunk = hex_games[chunk_start : chunk_start + root_limit]
                     move_temperatures = [
@@ -1810,10 +1684,9 @@ def play_sealbot_match(
                 pass
 
     # Persist the SealBot games as a replayable .hxr (dashboard "evaluation"
-    # source), mirroring the checkpoint runners. Best-effort / fail-soft. The
-    # writer is net-A-centric (expects .a_is_p0 and .winner in {"A","B",None});
-    # adapt the SealBot _Game (hexfield IS the candidate = net A, winner is
-    # "hex"/"sealbot") onto that shape without disturbing the result mapping below.
+    # source). Best-effort / fail-soft. The writer is net-A-centric (expects
+    # .a_is_p0 and .winner in {"A","B",None}), so the SealBot _Game (hexfield is
+    # net A, winner "hex"/"sealbot") is adapted onto that shape here.
     from types import SimpleNamespace
 
     _hxr_stats: dict[str, int] = {}
@@ -1832,9 +1705,8 @@ def play_sealbot_match(
         _hxr_games, diagnostics_dir, label, f"SealBot {sealbot_variant}", stats=_hxr_stats
     )
 
-    # Re-key game rows to the hexfield-vs-X result shape (winner relative to the
-    # FIRST label = hexfield). _build_match_result is net-A-centric, so map
-    # hexfield -> "A", sealbot -> "B".
+    # Re-key game rows to the hexfield-vs-X result shape. _build_match_result is
+    # net-A-centric, so map hexfield -> "A", sealbot -> "B".
     game_rows = [
         {
             "index": g.index,
@@ -1928,10 +1800,9 @@ def _build_match_result(
         "b_wins": b_wins,
         "decided": decided,
         "a_winrate_decided": round(a_wins / decided, 4) if decided else None,
-        # 95% Wilson on the binomial win rate. PER-GAME (unit = game). For PAIRED
-        # matches this UNDERSTATES the SE because paired games are correlated;
-        # the pair-level SE in the ``pentanomial`` block is the correct one — see
-        # the corrected-design note. This CI is descriptive only.
+        # 95% Wilson on the binomial win rate, per-game (unit = game). For paired
+        # matches, use the pair-level SE in the ``pentanomial`` block instead;
+        # this per-game CI does not account for within-pair correlation.
         "a_winrate_ci95": [round(lo, 4), round(hi, 4)] if decided else None,
         "by_seat": {"A_as_P0": _seat_block(p0_games), "A_as_P1": _seat_block(p1_games)},
     }
@@ -1954,23 +1825,19 @@ def _build_match_result(
 
 
 def _pentanomial_block(pairs: list[dict[str, Any]]) -> dict[str, Any]:
-    """Pair-level pentanomial summary + the pair-unit win-rate SE.
+    """Pair-level pentanomial summary and the pair-unit win-rate SE.
 
-    The pentanomial counts (over 2-game pairs, by net-A score in {0, 1, 2}) and
-    the pair-level standard error are the load-bearing corrected-design outputs:
-    the BT/Wilson inference downstream MUST use N_pairs units, not N_games, or
-    the CIs are anti-conservative (paired games are correlated, not independent
-    Bernoulli). We surface the raw per-pair scores so the verdict layer can
-    apply its own over-dispersion / sandwich correction.
+    Reports the pentanomial counts (over 2-game pairs, by net-A score in
+    {0, 1, 2}) and the pair-level standard error (N_pairs units). The raw
+    per-pair scores are surfaced in ``pairs`` for downstream inference.
 
     For a complete 2-game pair the per-pair net-A score ``s in {0, 1, 2}`` is
-    the number of games net A won; the natural pair-level statistic is
-    ``s / 2 in {0, 0.5, 1}`` (an "even" pair = 1 each = 0.5). We compute the
-    mean and the standard error of that pair statistic across pairs (treating
-    each pair as one i.i.d. draw — the correct unit). Singleton/partial pairs
-    (only at an odd ``n_games`` tail) are reported but, having ``n_games < 2``,
-    are excluded from the pentanomial 0/1/2 histogram (they cannot be classed),
-    and their lone game is folded into the pair statistic at ``s/ n_decided``.
+    the number of games net A won; the pair-level statistic is ``s / 2 in
+    {0, 0.5, 1}`` (an "even" pair = 1 each = 0.5). The mean and standard error of
+    that statistic are computed across pairs (each pair one draw). Singleton /
+    partial pairs (only at an odd ``n_games`` tail) are reported but, having
+    ``n_games < 2``, are excluded from the 0/1/2 histogram; their lone game is
+    folded into the pair statistic at ``s / n_decided``.
     """
 
     full_pairs = [p for p in pairs if p["n_games"] == 2 and p["n_decided"] == 2]
@@ -2002,8 +1869,8 @@ def _pentanomial_block(pairs: list[dict[str, Any]]) -> dict[str, Any]:
         # Histogram over full (2-decided-game) pairs, keyed by net-A wins.
         "histogram_a_wins": {"0": pent[0], "1": pent[1], "2": pent[2]},
         "pair_winrate_mean": round(mean, 4) if mean is not None else None,
-        # Pair-LEVEL SE (N_pairs units). This is the SE the corrected design
-        # feeds the inference — NOT the per-game Wilson half-width in ``score``.
+        # Pair-level SE (N_pairs units), distinct from the per-game Wilson
+        # half-width in ``score``.
         "pair_winrate_se": round(se, 4) if se is not None else None,
         "pair_winrate_sample_variance": round(var, 6) if var is not None else None,
         "pairs": pairs,
@@ -2011,11 +1878,11 @@ def _pentanomial_block(pairs: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def _wilson_ci(wins: int, n: int, z: float = 1.959964) -> tuple[float, float]:
-    """Wilson score interval (verbatim from scripts/_wf_h2h2_arena.py).
+    """Wilson score interval.
 
-    PER-UNIT: pass independent counts. For paired matches the unit is the PAIR,
-    not the game — callers wanting a paired CI use the pair-level SE in the
-    pentanomial block, not this function on per-game counts.
+    Pass independent counts. For paired matches the unit is the pair, not the
+    game — a paired CI uses the pair-level SE in the pentanomial block, not this
+    function on per-game counts.
     """
     if n == 0:
         return (0.0, 1.0)

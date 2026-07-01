@@ -1,11 +1,8 @@
-"""Unit tests for the hexfield multi-stage eval ORCHESTRATOR (pure CPU, no GPU).
+"""Unit tests for the hexfield multi-stage eval orchestrator (CPU-only, no GPU).
 
-This consolidates the former ``test_hexfield_multistage_eval`` +
-``test_hexfield_eval_harden`` + ``test_hexfield_eval_parts`` suites, asserting
-each orchestration behavior ONCE. It exercises
-``packages/hexfield/python/hexfield/multistage_eval.py`` — the layer that wires
-the game-running arena to the statistics core and emits a verdict LABEL (the
-statistics themselves are covered in ``test_hexfield_eval_stats.py``).
+Exercises ``packages/hexfield/python/hexfield/multistage_eval.py``, the layer
+that wires the game-running arena to the statistics core and emits a verdict
+label. The statistics themselves are covered in ``test_hexfield_eval_stats.py``.
 
 Sections:
   1. Opponent-ladder selection (``select_opponents``): roles/anchors/bracket/
@@ -17,18 +14,18 @@ Sections:
      cross-epoch compounding.
   3. Verdict logic from synthetic edges: PROMOTE / REGRESS / INCONCLUSIVE, the
      primary-only invariant, descriptive-edge CI shape, custom thresholds.
-  4. Stage flow + SPRT triage (M-1 label mapping; advisory, never a gate) + the
+  4. Stage flow + SPRT triage (label mapping; advisory, never a gate) + the
      full-sims wiring (Stage B/C at the production budget).
   5. Orchestrator robustness: SealBot fail-open (incl. import-error path) +
      always-pin-an-anchor.
-  6. Pure-eval invariant: gating/promotion OFF, verdict mutates no run state.
+  6. Pure-eval invariant: gating/promotion off, verdict mutates no run state.
   7. Run-in-parts: per-opponent parts, resume, durability, parts == monolithic.
 
-The arena (which needs the GPU + the SealBot checkout) is MOCKED throughout via
+The arena (which needs the GPU + the SealBot checkout) is mocked throughout via
 the ``play_checkpoint_match`` / ``play_sealbot_match`` injection seams (the shared
 ``_FakeArena`` / ``_StubArena`` from ``hexfield_eval_kit``), so this collects and
-runs on a CPU-only interpreter without touching the live training run.
-``multistage_eval`` imports torch only lazily, so importing it here is torch-free.
+runs on a CPU-only interpreter. ``multistage_eval`` imports torch lazily, so
+importing it here does not require torch.
 """
 
 from __future__ import annotations
@@ -63,8 +60,7 @@ from hexfield_eval_kit import (  # noqa: E402
 # Local helpers.
 # --------------------------------------------------------------------------- #
 def _no_sprt_config(**overrides):
-    """Production-default config with Stage B SPRT disabled (it needs a champion
-    match; the deep eval is what the verdict tests exercise)."""
+    """Production-default config with Stage B SPRT disabled."""
 
     return parse_hexfield_config({"multi_stage_eval": {"sprt": {"enabled": False}, **overrides}})
 
@@ -91,9 +87,9 @@ def _candidate(run: Path, epoch: int) -> Path:
 # 1. Opponent-ladder selection.
 # =========================================================================== #
 def test_roster_roles_anchors_bracket_champion(tmp_path: Path) -> None:
-    """At a mid-ladder epoch the roster has every role, with the corrected
-    semantics: PERMANENT anchors (BC + ep5), a SLIDING bracket of the nearest
-    log-grid rungs strictly below, and the single highest-prior-epoch champion."""
+    """At a mid-ladder epoch the roster has every role: permanent anchors
+    (BC + ep5), a sliding bracket of the nearest log-grid rungs strictly below,
+    and the single highest-prior-epoch champion."""
 
     run = _make_run(tmp_path, epochs=(5, 10, 20, 40))
     cfg = MultiStageEvalSection()
@@ -105,14 +101,14 @@ def test_roster_roles_anchors_bracket_champion(tmp_path: Path) -> None:
     assert roster.sealbot.ckpt is None  # SealBot is an external engine, not a ckpt
 
     by_label = {o.label: o for o in roster.opponents}
-    # Permanent anchors (never slide): BC prefit + ep5.
+    # Permanent anchors: BC prefit + ep5.
     assert by_label["bc_prefit"].role == "anchor"
     assert by_label["ep5"].role == "anchor"
     # Sliding bracket: nearest log-grid rungs strictly below 40 -> {10, 20}. 20
     # is also the champion (highest prior epoch) so it is de-duped to "champion".
     assert by_label["ep10"].role == "bracket"
     # Champion: highest existing epoch strictly below the candidate (ep20, since
-    # no ep30 exists on disk — NOT "the immediately-prior checkpoint").
+    # no ep30 exists on disk).
     assert roster.champion is not None
     assert roster.champion.label == "ep20"
     assert roster.champion.epoch == 20
@@ -120,9 +116,8 @@ def test_roster_roles_anchors_bracket_champion(tmp_path: Path) -> None:
 
 
 def test_roster_dedupes_anchor_that_is_also_champion(tmp_path: Path) -> None:
-    """When the prior champion IS a permanent anchor (ep5 at candidate ep10), it
-    appears ONCE in the roster, flagged champion (so it is not double-counted as
-    both an anchor edge and a champion edge)."""
+    """When the prior champion is a permanent anchor (ep5 at candidate ep10), it
+    appears once in the roster, flagged champion."""
 
     run = _make_run(tmp_path, epochs=(5, 10))
     roster = mse.select_opponents(
@@ -138,8 +133,8 @@ def test_roster_dedupes_anchor_that_is_also_champion(tmp_path: Path) -> None:
 
 
 def test_roster_first_eligible_epoch_has_no_champion(tmp_path: Path) -> None:
-    """The lowest epoch (no prior checkpoint below it) yields champion=None -> no
-    primary hypothesis exists (verdict will be INCONCLUSIVE downstream)."""
+    """The lowest epoch (no prior checkpoint below it) yields champion=None: no
+    primary hypothesis exists, and the downstream verdict is INCONCLUSIVE."""
 
     run = _make_run(tmp_path, epochs=(5, 10, 20))
     roster = mse.select_opponents(
@@ -151,9 +146,9 @@ def test_roster_first_eligible_epoch_has_no_champion(tmp_path: Path) -> None:
 
 
 def test_bracket_is_bounded_and_slides_as_epochs_grow(tmp_path: Path) -> None:
-    """The SLIDING bracket window is the nearest ``bracket_size`` log-grid rungs
-    strictly below the candidate, it tracks the candidate epoch upward, and its
-    top rung is de-duped into the champion role."""
+    """The bracket window is the nearest ``bracket_size`` log-grid rungs strictly
+    below the candidate; it tracks the candidate epoch upward, and its top rung is
+    de-duped into the champion role."""
 
     run = _make_run(tmp_path, epochs=(5, 10, 20, 40, 80, 160))
     cfg = MultiStageEvalSection()  # bracket_size=2, log_grid=(5,10,20,40,80,160)
@@ -175,7 +170,7 @@ def test_bracket_is_bounded_and_slides_as_epochs_grow(tmp_path: Path) -> None:
         # Bounded: the bracket window never exceeds bracket_size.
         assert len({*bracket, roster.champion.label}) <= cfg.opponents.bracket_size
 
-    # The window slides UP as the candidate climbs (nearest-below, not cumulative).
+    # The window slides up as the candidate climbs (nearest-below, not cumulative).
     assert roster_for(40).champion.label == "ep20"
     assert roster_for(80).champion.label == "ep40"
     assert roster_for(160).champion.label == "ep80"
@@ -193,11 +188,11 @@ def test_bracket_size_zero_yields_no_bracket(tmp_path: Path) -> None:
 
 
 def test_missing_anchor_checkpoints_are_skipped(tmp_path: Path) -> None:
-    """A permanent anchor whose file is absent (e.g. an early epoch predating
-    ep5, or a missing BC prefit) is silently skipped, not an error.
+    """A permanent anchor whose file is absent is silently skipped, not an error.
 
-    The default ``bc_prefit`` anchor path now resolves against the REPO tree too,
-    so the SKIP test uses anchor paths that resolve to NOTHING under any root.
+    The default ``bc_prefit`` anchor path resolves against the repo tree as well
+    as the run-data tree, so this test uses anchor paths that resolve to nothing
+    under any root.
     """
 
     run = _make_run(tmp_path, epochs=(10, 20), bc=False)  # no BC file, no ep5 file
@@ -233,9 +228,9 @@ def test_sealbot_disabled_drops_zero_point(tmp_path: Path) -> None:
 
 
 def test_verdict_reference_lag_decorrelates_target_on_contiguous_ladder(tmp_path: Path) -> None:
-    """L-2 STABLE verdict target: on a CONTIGUOUS ladder the verdict target is a
-    STABLE, de-correlated reference (>= lag epochs below the candidate), NOT the
-    immediately-prior checkpoint; lag=0 restores the legacy immediately-prior."""
+    """On a contiguous ladder the verdict target is the highest checkpoint at or
+    below (candidate - lag), not the immediately-prior checkpoint; lag=0 selects
+    the immediately-prior checkpoint."""
 
     run = _make_run(tmp_path, epochs=(10, 11, 12, 13, 14, 15))
     cfg = MultiStageEvalSection(verdict_reference_lag=5)
@@ -254,8 +249,8 @@ def test_verdict_reference_lag_decorrelates_target_on_contiguous_ladder(tmp_path
 
 
 def test_verdict_reference_lag_falls_back_when_no_old_enough_prior(tmp_path: Path) -> None:
-    """L-2 fallback: when nothing is >= lag epochs below the candidate (first few
-    epochs), the target falls back to the nearest prior so a hypothesis exists."""
+    """When nothing is >= lag epochs below the candidate, the target falls back to
+    the nearest prior checkpoint so a hypothesis exists."""
 
     run = _make_run(tmp_path, epochs=(1, 2, 3))
     cfg = MultiStageEvalSection(verdict_reference_lag=5)  # nothing 5 below ep3
@@ -266,9 +261,9 @@ def test_verdict_reference_lag_falls_back_when_no_old_enough_prior(tmp_path: Pat
 
 
 def test_immediately_prior_still_pooled_as_descriptive_edge(tmp_path: Path) -> None:
-    """The immediately-prior checkpoint is NOT discarded — it still appears as a
-    descriptive (bracket) opponent so its information is pooled into the BT fit;
-    only the reported VERDICT target rests on the stable reference."""
+    """The immediately-prior checkpoint still appears as a descriptive (bracket)
+    opponent and is pooled into the BT fit; only the reported verdict target rests
+    on the lagged reference."""
 
     run = _make_run(tmp_path, epochs=(10, 11, 12, 13, 14, 15))
     cfg = _no_sprt_config(
@@ -278,10 +273,10 @@ def test_immediately_prior_still_pooled_as_descriptive_edge(tmp_path: Path) -> N
     arena = _StubArena(per_score=2)
     rep = _run(run, 15, arena, config=cfg)
 
-    # Verdict target is the STABLE reference (highest epoch <= 15-5=10) -> ep10.
+    # Verdict target is the highest epoch <= 15-5=10 -> ep10.
     assert rep["verdict"]["primary"] is not None
     assert rep["verdict"]["primary"]["champion"] == "ep10"
-    # The near-candidate bracket rungs (ep12, ep14) are STILL played + pooled as
+    # The near-candidate bracket rungs (ep12, ep14) are played and pooled as
     # descriptive edges even though they are not the verdict target.
     played = {label for label, _ in arena.ckpt_calls}
     assert {"ep12", "ep14"} <= played
@@ -299,10 +294,9 @@ def test_verdict_reference_lag_in_config_summary(tmp_path: Path) -> None:
 
 
 def test_bc_prefit_resolves_from_repo_tree(tmp_path: Path, monkeypatch) -> None:
-    """bc_prefit PATH resolution: the RUN-DATA tree has a ``hexfield_bc_1/`` dir
-    but NO ``checkpoint_epoch2.pt`` (that file ships only in the REPO tree). The
-    resolver must try the repo-tree root (derived from the module's own location)
-    and return the file that ACTUALLY exists there."""
+    """bc_prefit path resolution: the run-data tree has a ``hexfield_bc_1/`` dir
+    but no ``checkpoint_epoch2.pt``. The resolver tries the repo-tree root (derived
+    from the module's own location) and returns the file that exists there."""
 
     # Run-data tree with a hexfield_bc_1 DIR but no BC FILE.
     data_tree = tmp_path / "Hexo-BotTrainer"
@@ -312,8 +306,8 @@ def test_bc_prefit_resolves_from_repo_tree(tmp_path: Path, monkeypatch) -> None:
     for epoch in (5, 10, 20, 40):
         (run / "checkpoints" / f"epoch_{epoch:06d}.pt").write_text("stub", encoding="utf-8")
 
-    # Fake REPO tree that DOES hold the BC file; make the resolver treat it as the
-    # repo root by monkeypatching the module file location.
+    # Repo tree that holds the BC file; make the resolver treat it as the repo
+    # root by monkeypatching the module file location.
     repo_tree = tmp_path / "Hexo-BotTrainer-hexgt"
     bc_file = repo_tree / "runs" / "hexfield_bc_1" / "checkpoint_epoch2.pt"
     bc_file.parent.mkdir(parents=True)
@@ -328,7 +322,7 @@ def test_bc_prefit_resolves_from_repo_tree(tmp_path: Path, monkeypatch) -> None:
     resolved = mse._resolve_anchor_path(
         run, run / "checkpoints", "runs/hexfield_bc_1/checkpoint_epoch2.pt"
     )
-    # Resolved to the REPO-tree file (which exists), not the run-data path.
+    # Resolved to the repo-tree file (which exists), not the run-data path.
     assert resolved == bc_file
     assert resolved.is_file()
     # And select_opponents therefore pins bc_prefit as an anchor opponent.
@@ -341,9 +335,9 @@ def test_bc_prefit_resolves_from_repo_tree(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_bc_prefit_prefers_run_data_tree_when_present(tmp_path: Path) -> None:
-    """Back-compat: when the BC file DOES exist under the run-data tree, that root
-    is preferred, so the repo-tree fallback only fires when the run-data tree
-    lacks the file. Also exercised end-to-end via select_opponents pinning."""
+    """When the BC file exists under the run-data tree, that root is preferred, so
+    the repo-tree fallback only fires when the run-data tree lacks the file. Also
+    exercised end-to-end via select_opponents pinning."""
 
     run = _make_run(tmp_path, epochs=(5, 10, 20, 40), bc=True)  # builds the BC file
     resolved = mse._resolve_anchor_path(
@@ -359,8 +353,8 @@ def test_bc_prefit_prefers_run_data_tree_when_present(tmp_path: Path) -> None:
 
 
 def test_allocate_budget_even_split_and_sealbot_share() -> None:
-    """Budget allocation: SealBot gets a fixed share, the rest is split EVENLY
-    across checkpoint opponents and rounded to an EVEN per-pairing count."""
+    """Budget allocation: SealBot gets a fixed share, the rest is split evenly
+    across checkpoint opponents and rounded to an even per-pairing count."""
 
     alloc = mse.allocate_budget(128, n_checkpoint_opponents=4, has_sealbot=True)
     assert alloc[mse.SEALBOT_LABEL] == 32  # 25% default share
@@ -379,17 +373,17 @@ def test_allocate_budget_even_split_and_sealbot_share() -> None:
 
 
 def test_allocate_budget_floors_each_opponent_to_one_pair() -> None:
-    """allocate_budget MINIMUM: at a small positive budget every selected opponent
-    still gets >=1 CRN pair (2 games) instead of 0, so the champion edge (the
-    primary hypothesis) is always played; a zero budget stays all-zeros."""
+    """At a small positive budget every selected opponent gets >=1 CRN pair
+    (2 games), so the champion edge is always played; a zero budget stays
+    all-zeros."""
 
-    # budget 4, 3 checkpoint opponents, SealBot on (the reported failure case).
+    # budget 4, 3 checkpoint opponents, SealBot on.
     alloc = mse.allocate_budget(4, n_checkpoint_opponents=3, has_sealbot=True)
     assert alloc["per_checkpoint"] == 2
     assert alloc["per_checkpoint"] % 2 == 0  # stays an even pair count
     assert alloc[mse.SEALBOT_LABEL] >= 2
 
-    # budget 4 with MANY opponents (the {sealbot:0, per:0} variant).
+    # budget 4 with many opponents.
     alloc2 = mse.allocate_budget(4, n_checkpoint_opponents=10, has_sealbot=True)
     assert alloc2["per_checkpoint"] == 2
     assert alloc2[mse.SEALBOT_LABEL] >= 2
@@ -397,20 +391,20 @@ def test_allocate_budget_floors_each_opponent_to_one_pair() -> None:
     # No SealBot: per_checkpoint still floored.
     assert mse.allocate_budget(4, n_checkpoint_opponents=3, has_sealbot=False)["per_checkpoint"] == 2
 
-    # Zero budget -> all-zeros (the early-return is preserved).
+    # Zero budget -> all-zeros.
     assert mse.allocate_budget(0, n_checkpoint_opponents=4, has_sealbot=True) == {
         mse.SEALBOT_LABEL: 0, "per_checkpoint": 0,
     }
 
-    # Production budgets are UNCHANGED by the floor.
+    # Production budgets are unchanged by the floor.
     assert mse.allocate_budget(128, n_checkpoint_opponents=4, has_sealbot=True)["per_checkpoint"] == 24
     assert mse.allocate_budget(120, n_checkpoint_opponents=3, has_sealbot=False)["per_checkpoint"] == 40
 
 
 def test_small_budget_run_pins_anchor_and_produces_primary(tmp_path: Path) -> None:
-    """End-to-end of the budget floor + anchor pin together: a tiny games_budget no
-    longer degrades to no-anchor — the champion is played, the pool anchors, and a
-    primary hypothesis block is produced with the champion actually played."""
+    """End-to-end of the budget floor + anchor pin together: with a tiny
+    games_budget the champion is played, the pool anchors, and a primary
+    hypothesis block is produced."""
 
     run = _make_run(tmp_path, epochs=(5, 10, 20, 40))
     arena = _StubArena(per_score=2, sealbot_winrate=0.6)
@@ -419,7 +413,7 @@ def test_small_budget_run_pins_anchor_and_produces_primary(tmp_path: Path) -> No
     assert rep["ratings"]["fit"]["converged"] is True
     assert rep["verdict"]["primary"] is not None
     assert rep["verdict"]["primary"]["champion"] == "ep20"  # lag-5 reference of ep40
-    # Every checkpoint opponent got at least one pair (>=2 decided games).
+    # Every checkpoint opponent got at least one pair (>=2 games).
     champ_calls = [n for lb, n in arena.ckpt_calls if lb == "ep20"]
     assert champ_calls and all(n >= 2 for n in champ_calls)
 
@@ -455,8 +449,8 @@ def test_pool_roundtrip_is_stable(tmp_path: Path) -> None:
 
 
 def test_pool_load_degrades_gracefully(tmp_path: Path) -> None:
-    """Missing / corrupt / foreign-format pools yield a FRESH empty pool rather
-    than raising — a broken pool must never wedge an eval-only run."""
+    """Missing / corrupt / foreign-format pools yield a fresh empty pool rather
+    than raising."""
 
     missing = tmp_path / "nope.json"
     fresh = mse._load_pool(missing)
@@ -474,16 +468,16 @@ def test_pool_load_degrades_gracefully(tmp_path: Path) -> None:
 
 def test_bt_edges_aggregate_across_epochs_and_keep_weights_separate() -> None:
     """The append-only edge log projects to one BT edge per (unordered pair,
-    weight): repeated epochs of a pairing POOL their counts, reversed directions
-    canonicalise together, and the down-weighted SealBot edge never merges with a
-    full-weight edge."""
+    weight): repeated epochs of a pairing pool their counts, reversed directions
+    canonicalise together, and the down-weighted SealBot edge does not merge with
+    a full-weight edge."""
 
     doc = {
         "edges": [
             {"a": "cand", "b": "ep5", "wins_a": 40, "wins_b": 20, "weight": 1.0},
             {"a": "cand", "b": "ep5", "wins_a": 30, "wins_b": 10, "weight": 1.0},   # same pair -> pooled
             {"a": "ep5", "b": "cand", "wins_a": 5, "wins_b": 5, "weight": 1.0},      # reversed -> canonicalised
-            {"a": "cand", "b": "sealbot", "wins_a": 30, "wins_b": 10, "weight": 0.5},  # down-weighted, separate
+            {"a": "cand", "b": "sealbot", "wins_a": 30, "wins_b": 10, "weight": 0.5},  # down-weighted, distinct edge
         ]
     }
     edges = {(e.a, e.b, e.weight): (e.wins_a, e.wins_b) for e in mse._bt_edges_from_pool(doc)}
@@ -495,8 +489,7 @@ def test_bt_edges_aggregate_across_epochs_and_keep_weights_separate() -> None:
 
 def test_pool_persists_and_compounds_across_runs(tmp_path: Path) -> None:
     """End-to-end: two eval runs of the same epoch append to the persisted pool
-    (append-only audit trail) and the PRIMARY difference SE SHRINKS as the games
-    compound — the only way the tight multi-epoch resolution is ever reached."""
+    and the primary difference SE shrinks as the games compound."""
 
     run = _make_run(tmp_path, epochs=(5, 10, 20, 40))
     arena = _FakeArena(ckpt_scorer=lambda lb, n: _scores_for_winrate(0.75, n), sealbot_winrate=0.7)
@@ -522,7 +515,7 @@ def test_pool_persists_and_compounds_across_runs(tmp_path: Path) -> None:
     assert len(doc2["edges"]) == 2 * edges_after_1
     assert doc2["format"] == mse.POOL_FORMAT and doc2["anchor"] == mse.SEALBOT_LABEL
 
-    # Compounding: more pooled games -> a strictly tighter primary difference SE.
+    # More pooled games -> a strictly tighter primary difference SE.
     se1 = rep1["verdict"]["primary"]["se_elo"]
     se2 = rep2["verdict"]["primary"]["se_elo"]
     assert se2 < se1
@@ -563,10 +556,10 @@ def test_verdict_inconclusive_when_even(tmp_path: Path) -> None:
 
 
 def test_only_primary_hypothesis_drives_the_verdict(tmp_path: Path) -> None:
-    """LOAD-BEARING: the verdict rests on ONE pre-registered primary edge
-    (candidate vs prior champion). Crushing every NON-champion (descriptive) edge
-    while staying even with the champion must NOT move the label off INCONCLUSIVE,
-    and the descriptive edges must carry NO significance verdict."""
+    """The verdict rests on one primary edge (candidate vs prior champion).
+    Crushing every non-champion (descriptive) edge while staying even with the
+    champion leaves the label at INCONCLUSIVE, and the descriptive edges carry no
+    significance verdict."""
 
     run = _make_run(tmp_path, epochs=(5, 10, 20, 40))
 
@@ -574,7 +567,7 @@ def test_only_primary_hypothesis_drives_the_verdict(tmp_path: Path) -> None:
         target = 0.5 if label_b == "ep20" else 0.75
         return _scores_for_winrate(target, n_pairs)
 
-    arena = _FakeArena(ckpt_scorer=scorer, sealbot_winrate=0.95)  # also crush SealBot
+    arena = _FakeArena(ckpt_scorer=scorer, sealbot_winrate=0.95)
     rep = _run(run, 40, arena)
 
     assert rep["verdict"]["label"] == "INCONCLUSIVE"
@@ -589,8 +582,8 @@ def test_only_primary_hypothesis_drives_the_verdict(tmp_path: Path) -> None:
 
 
 def test_no_champion_yields_inconclusive_with_no_primary(tmp_path: Path) -> None:
-    """First eligible epoch (no prior champion) -> verdict INCONCLUSIVE and the
-    primary block is absent: there is no hypothesis to test."""
+    """First eligible epoch (no prior champion): verdict INCONCLUSIVE and the
+    primary block is absent."""
 
     run = _make_run(tmp_path, epochs=(5, 10, 20))
     arena = _FakeArena(ckpt_scorer=lambda lb, n: _scores_for_winrate(0.75, n), sealbot_winrate=0.7)
@@ -602,7 +595,7 @@ def test_no_champion_yields_inconclusive_with_no_primary(tmp_path: Path) -> None
 
 def test_custom_thresholds_shift_the_verdict(tmp_path: Path) -> None:
     """Verdict thresholds are configurable: a demanding promote threshold turns a
-    real-but-small edge INCONCLUSIVE. PURE EVAL — the thresholds only relabel."""
+    small edge INCONCLUSIVE. The thresholds only relabel."""
 
     run = _make_run(tmp_path, epochs=(5, 10, 20, 40))
     arena = _FakeArena(ckpt_scorer=lambda lb, n: _scores_for_winrate(0.75, n), sealbot_winrate=0.7)
@@ -631,7 +624,7 @@ def test_descriptive_edges_have_pairlevel_cis_not_pergame(tmp_path: Path) -> Non
     # The SealBot edge is unpaired and reports its Wilson win-rate CI + down-weight.
     sb_edge = next(e for e in rep["edges"] if e["kind"] == "sealbot")
     assert sb_edge["paired"] is False
-    assert sb_edge["down_weight"] == pytest.approx(0.5)  # over-dispersion
+    assert sb_edge["down_weight"] == pytest.approx(0.5)
     assert rep["sealbot_winrate_ci95"] is not None
 
 
@@ -639,8 +632,8 @@ def test_descriptive_edges_have_pairlevel_cis_not_pergame(tmp_path: Path) -> Non
 # 4. Stage flow + SPRT triage + full-sims wiring.
 # =========================================================================== #
 def test_stage_flow_runs_all_four_stages(tmp_path: Path) -> None:
-    """Sanity: the orchestrator returns the staged A-D structure with the deep
-    eval and pool completing (Stage B skipped here since SPRT is disabled)."""
+    """The orchestrator returns the staged A-D structure with the deep eval and
+    pool completing (Stage B skipped here since SPRT is disabled)."""
 
     run = _make_run(tmp_path, epochs=(5, 10, 20, 40))
     arena = _FakeArena(ckpt_scorer=lambda lb, n: _scores_for_winrate(0.75, n), sealbot_winrate=0.7)
@@ -652,7 +645,7 @@ def test_stage_flow_runs_all_four_stages(tmp_path: Path) -> None:
     assert stages["D_pool"] == "completed"
     opponents_played = {label for label, _ in arena.ckpt_calls}
     assert {"ep20", "ep10", "ep5", "bc_prefit"} <= opponents_played
-    assert arena.sealbot_calls  # SealBot zero-point edge was played
+    assert arena.sealbot_calls  # SealBot zero-point edge played
 
 
 def test_sprt_config_defaults_are_gross_regression_framed() -> None:
@@ -661,16 +654,16 @@ def test_sprt_config_defaults_are_gross_regression_framed() -> None:
 
     sprt = MultiStageEvalSection().sprt
     assert sprt.elo0 == 0.0
-    assert sprt.elo1 < 0.0  # gross-regression alternative (default -50)
+    assert sprt.elo1 < 0.0  # gross-regression alternative
 
 
 def test_sprt_triage_maps_accept_h1_to_regress_and_h0_to_ok(tmp_path: Path, monkeypatch) -> None:
-    """M-1 label MAPPING: accept_h1 -> 'regress_suspected'; accept_h0 -> 'ok';
-    continue -> 'escalate'. We stub eval_stats.sprt's mechanical verdict so the
-    test is independent of the SPRT arithmetic."""
+    """Label mapping: accept_h1 -> 'regress_suspected'; accept_h0 -> 'ok';
+    continue -> 'escalate'. Stubs eval_stats.sprt's verdict so the test is
+    independent of the SPRT arithmetic."""
 
     run = _make_run(tmp_path, epochs=(5, 10, 20, 40))
-    arena = _StubArena(per_score=1)  # champion match content is irrelevant here
+    arena = _StubArena(per_score=1)  # champion match content unused here
     cfg = parse_hexfield_config({"multi_stage_eval": {"sprt": {"enabled": True, "max_games": 8}}})
 
     from hexfield import eval_stats
@@ -692,10 +685,9 @@ def test_sprt_triage_maps_accept_h1_to_regress_and_h0_to_ok(tmp_path: Path, monk
 
 
 def test_sprt_stage_b_is_advisory_and_never_short_circuits(tmp_path: Path, monkeypatch) -> None:
-    """PURE-EVAL framing of M-1: Stage B runs as TRIAGE (its own verdict is
-    reported and screened against the prior champion) but never short-circuits the
-    deep eval — even a strong accept_h1 still runs Stage C/D, which produce the
-    authoritative verdict."""
+    """Stage B runs as triage (its own verdict is reported and screened against the
+    prior champion) but does not short-circuit the deep eval: even a strong
+    accept_h1 still runs Stage C/D, which produce the authoritative verdict."""
 
     run = _make_run(tmp_path, epochs=(5, 10, 20, 40))
     cfg = parse_hexfield_config({"multi_stage_eval": {"sprt": {"enabled": True, "max_games": 8}}})
@@ -717,16 +709,15 @@ def test_sprt_stage_b_is_advisory_and_never_short_circuits(tmp_path: Path, monke
 
 
 def test_full_sims_threaded_into_stage_b_and_c_by_default(tmp_path: Path) -> None:
-    """By default the orchestrator threads the FULL production search budget
-    (selfplay.search_visits=512) into BOTH the SPRT screen (Stage B) and the deep
-    eval (Stage C checkpoint + SealBot), NOT the historical reduced eval_visits
-    (128)."""
+    """By default the orchestrator threads selfplay.search_visits (512) into both
+    the SPRT screen (Stage B) and the deep eval (Stage C checkpoint + SealBot),
+    not eval_visits (128)."""
 
     run = _make_run(tmp_path, epochs=(5, 10, 20, 40))
     arena = _FakeArena(ckpt_scorer=lambda lb, n: _scores_for_winrate(0.75, n), sealbot_winrate=0.7)
     cfg = parse_hexfield_config({"multi_stage_eval": {"sprt": {"enabled": True, "max_games": 16}}})
     assert cfg.selfplay.search_visits == 512
-    assert cfg.multi_stage_eval.eval_visits == 128  # the OLD reduced default
+    assert cfg.multi_stage_eval.eval_visits == 128
 
     rep = _run(run, 40, arena, config=cfg)
 
@@ -738,8 +729,8 @@ def test_full_sims_threaded_into_stage_b_and_c_by_default(tmp_path: Path) -> Non
 
 
 def test_full_search_visits_knob_overrides_default(tmp_path: Path) -> None:
-    """``full_search_visits`` pins the eval budget (configurable); when set it is
-    threaded everywhere instead of selfplay.search_visits."""
+    """``full_search_visits``, when set, is threaded everywhere instead of
+    selfplay.search_visits."""
 
     run = _make_run(tmp_path, epochs=(5, 10, 20, 40))
     arena = _FakeArena(ckpt_scorer=lambda lb, n: _scores_for_winrate(0.75, n), sealbot_winrate=0.7)
@@ -749,16 +740,16 @@ def test_full_search_visits_knob_overrides_default(tmp_path: Path) -> None:
     _run(run, 40, arena, config=cfg)
     assert all(v == 256 for v in arena.ckpt_visits), arena.ckpt_visits
     assert all(v == 256 for v in arena.sealbot_visits)
-    assert cfg.multi_stage_eval.eval_visits == 128  # untouched, unused for budget
+    assert cfg.multi_stage_eval.eval_visits == 128  # not used for the eval budget
 
 
 # =========================================================================== #
 # 5. Orchestrator robustness: SealBot fail-open + always-pin-an-anchor.
 # =========================================================================== #
 def test_sealbot_unavailable_drops_edge_and_completes_with_ratings(tmp_path: Path) -> None:
-    """FAIL-OPEN: SealBot's compiled extension is missing, so ``play_sealbot_match``
-    raises. The orchestrator must DROP that one edge, record WHY, and still complete
-    with ratings from the checkpoint opponents — the exception must NEVER propagate.
+    """When SealBot's compiled extension is missing, ``play_sealbot_match`` raises.
+    The orchestrator drops that one edge, records the reason, and still completes
+    with ratings from the checkpoint opponents; the exception does not propagate.
     """
 
     run = _make_run(tmp_path, epochs=(5, 10, 20, 40))
@@ -769,7 +760,7 @@ def test_sealbot_unavailable_drops_edge_and_completes_with_ratings(tmp_path: Pat
         )
 
     arena = _StubArena(per_score=2, sealbot_raises=boom)
-    # Drive the run directly so a propagating exception fails the test loudly.
+    # Drive the run directly so a propagating exception fails the test.
     rep = mse.run_multistage_eval(
         run, run / "checkpoints" / "epoch_000040.pt", _no_sprt_config(),
         candidate_epoch=40, write_diagnostics=False,
@@ -784,15 +775,15 @@ def test_sealbot_unavailable_drops_edge_and_completes_with_ratings(tmp_path: Pat
     assert "minimax_cpp" in stage_c["sealbot_unavailable"]
     assert mse.SEALBOT_LABEL not in {e["opponent"] for e in rep["edges"]}
     assert rep["sealbot_winrate_ci95"] is None
-    # The pool anchored on a CHECKPOINT, not on the missing SealBot.
+    # The pool anchored on a checkpoint, not on the missing SealBot.
     assert rep["ratings"]["fit"]["anchor"] != mse.SEALBOT_LABEL
     assert rep["ratings"]["fit"]["anchor_is_sealbot"] is False
 
 
 def test_sealbot_import_error_is_also_failed_open(tmp_path: Path) -> None:
     """The adapter imports ``hexo_engine`` at module top, so a CPU-only box can
-    raise ImportError/ModuleNotFoundError BEFORE the availability check. The
-    fail-open is broad enough to catch that too (not just SealBotUnavailableError).
+    raise ImportError/ModuleNotFoundError before the availability check. The
+    fail-open catches that too, not just SealBotUnavailableError.
     """
 
     run = _make_run(tmp_path, epochs=(5, 10, 20, 40))
@@ -809,9 +800,7 @@ def test_sealbot_import_error_is_also_failed_open(tmp_path: Path) -> None:
 
 
 def test_anchor_pins_bc_prefit_when_sealbot_disabled(tmp_path: Path) -> None:
-    """ALWAYS-PIN-A-USABLE-ANCHOR: with SealBot disabled, the BT fit anchors on
-    bc_prefit (the canonical lineage base) rather than degrading to 'no anchor in
-    pool'; ratings exist."""
+    """With SealBot disabled, the BT fit anchors on bc_prefit; ratings exist."""
 
     run = _make_run(tmp_path, epochs=(5, 10, 20, 40))
     cfg = _no_sprt_config(opponents={"sealbot_enabled": False})
@@ -825,9 +814,9 @@ def test_anchor_pins_bc_prefit_when_sealbot_disabled(tmp_path: Path) -> None:
 
 
 def test_anchor_falls_back_to_lowest_checkpoint_when_no_anchors(tmp_path: Path) -> None:
-    """Deepest fallback: SealBot off AND no resolvable bc_prefit/ep5 -> the LOWEST
-    available checkpoint opponent (by epoch) anchors the pool. The pool never
-    free-floats when ANY checkpoint edge exists."""
+    """SealBot off and no resolvable bc_prefit/ep5: the lowest available checkpoint
+    opponent (by epoch) anchors the pool. The pool has an anchor whenever any
+    checkpoint edge exists."""
 
     run = _make_run(tmp_path, epochs=(10, 20, 40), bc=False)  # no BC, no ep5 file
     cfg = _no_sprt_config(
@@ -848,9 +837,9 @@ def test_anchor_falls_back_to_lowest_checkpoint_when_no_anchors(tmp_path: Path) 
 
 
 def test_choose_anchor_preference_order() -> None:
-    """Unit-level: SealBot > bc_prefit > lowest-epoch checkpoint > any, and only
-    ever a label that appears in an edge (so the BT anchor-in-edge guard cannot
-    trip). None only when there is literally no non-candidate edge."""
+    """Preference order SealBot > bc_prefit > lowest-epoch checkpoint > any, and
+    only ever a label that appears in an edge. Returns None only when there is no
+    non-candidate edge."""
 
     cand = "cand_ep40"
     roster = mse.Roster(
@@ -891,13 +880,13 @@ def test_gating_and_promotion_default_off() -> None:
     cfg = MultiStageEvalSection()
     assert cfg.eval_gating_enabled is False
     assert cfg.eval_promotion_enabled is False
-    # The tripwire passes for the default (PURE EVAL) config.
+    # The tripwire passes for the default config.
     mse._assert_no_run_mutation(cfg)
 
 
 def test_assert_no_run_mutation_fires_when_a_knob_is_flipped() -> None:
-    """The tripwire (a future-proofing guard) MUST fire the instant a
-    gating/promotion knob is turned on, BEFORE any game runs."""
+    """The tripwire fires when a gating/promotion knob is turned on, before any
+    game runs."""
 
     base = MultiStageEvalSection()
     with pytest.raises(AssertionError, match="eval_gating_enabled must be False"):
@@ -919,21 +908,21 @@ def test_report_advertises_pure_eval_and_off_knobs(tmp_path: Path) -> None:
 
 
 def test_write_diagnostics_false_writes_nothing(tmp_path: Path) -> None:
-    """With ``write_diagnostics=False`` the run is fully PURE: no pool, no
-    diagnostics JSON, no directory created anywhere under the run tree."""
+    """With ``write_diagnostics=False`` the run writes no pool, no diagnostics
+    JSON, and no directory anywhere under the run tree."""
 
     run = _make_run(tmp_path, epochs=(5, 10, 20, 40))
     arena = _FakeArena(ckpt_scorer=lambda lb, n: _scores_for_winrate(0.75, n), sealbot_winrate=0.7)
     rep = _run(run, 40, arena)  # _run passes write_diagnostics=False
-    assert rep["verdict"]["label"] == "PROMOTE"  # it still computes a verdict
-    assert not (run / "diagnostics").exists()     # ...but writes NOTHING
+    assert rep["verdict"]["label"] == "PROMOTE"  # verdict is still computed
+    assert not (run / "diagnostics").exists()     # ...but nothing is written
     assert "diagnostics_path" not in rep["meta"]
 
 
 def test_changing_the_verdict_touches_no_run_state(tmp_path: Path) -> None:
-    """Flipping the verdict from PROMOTE to REGRESS must leave the run tree
-    byte-identical apart from the eval-only pool/diagnostics — no checkpoint write,
-    no flag, no run-state edit keyed on the verdict."""
+    """Flipping the verdict from PROMOTE to REGRESS leaves the run tree unchanged
+    apart from the eval-only pool/diagnostics: no checkpoint write, no flag, no
+    run-state edit keyed on the verdict."""
 
     def run_with(strength: float, winrate: float, subdir: str) -> tuple[str, set[Path]]:
         run = _make_run(tmp_path / subdir, epochs=(5, 10, 20, 40))
@@ -1068,7 +1057,7 @@ def test_run_eval_part_sealbot_appends_sealbot_edge(tmp_path: Path) -> None:
     assert (40, roster.candidate_label, mse.SEALBOT_LABEL) in _pooled_edge_keys(pool)
     sb_rows = [r for r in pool["edges"] if r["b"] == mse.SEALBOT_LABEL]
     assert len(sb_rows) == 1
-    assert sb_rows[0]["weight"] < 1.0  # down-weighted, out of difference inference
+    assert sb_rows[0]["weight"] < 1.0  # down-weighted
 
 
 def test_part_skipped_when_edge_already_in_pool(tmp_path: Path) -> None:

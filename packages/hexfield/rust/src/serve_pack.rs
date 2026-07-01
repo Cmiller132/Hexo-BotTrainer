@@ -1,27 +1,19 @@
-//! Rust parallel serve-pack with zero-copy buffers (the dense_cnn PlaneBuffer
-//! move applied to the hexfield serve path).
+//! Rust parallel serve-pack with zero-copy buffers.
 //!
-//! Eliminates the Python per-group PADDING loop on the serve GIL thread (the
-//! remaining inter-forward host gap; GPU was 33-46% idle post-FlexAttention).
-//! `build_serve_groups` takes the CSR-flat request (already on the wire as f16
-//! feats / i16 coords / u16 nbr) plus the per-row offsets, runs the IDENTICAL
-//! `plan_groups` boundary planner, and assembles the padded per-group buffers
-//! in PARALLEL (rayon), exposing them as read-only zero-copy `#[pyclass]`
-//! buffers consumed Python-side via `torch.frombuffer(buf, ...).to(device)` —
-//! NO Python pack loop, NO astype.
+//! `build_serve_groups` takes the CSR-flat request (f16 feats / i16 coords /
+//! u16 nbr) plus the per-row offsets, runs the `plan_groups` boundary planner,
+//! and assembles the padded per-group buffers in parallel (rayon), exposing
+//! them as read-only zero-copy `#[pyclass]` buffers consumed Python-side via
+//! `torch.frombuffer(buf, ...).to(device)`.
 //!
-//! BIT-EXACT to the Python `_forward_group` pad: this is PURE DATA MOVEMENT
-//! (same f16 feats, same int values, same padding) so the forward inputs are
-//! byte-identical to the Python pack and the serve outputs are bit-identical.
-//! The exact pad rules reproduced:
+//! Pad rules:
 //!   - feats pad rows  = 0  (`f16::ZERO`)
 //!   - nbr fill        = `pad_to`; `NBR_SENTINEL (0xFFFF)` -> `pad_to`
-//!   - mask            = `1` only at real nodes, else `0`
-//!   - coords          = 0 at pad rows (`np.zeros` in Python; never read but
-//!                       zero-filled to meet the byte-identical bar)
-//! The model gathers need int64 nbr/coords on-device; Rust emits int32 (sound:
-//! payload.rs hard-asserts `num_nodes <= NBR_SENTINEL`, so every index fits i32
-//! with vast headroom) and Python casts to int64 on the GPU, value-preserving.
+//!   - mask            = `1` at real nodes, else `0`
+//!   - coords          = 0 at pad rows
+//! Indices are emitted as int32; `payload.rs` asserts
+//! `num_nodes <= NBR_SENTINEL`, so every index fits i32. Python casts to int64
+//! on the GPU.
 
 use pyo3::exceptions::{PyBufferError, PyValueError};
 use pyo3::ffi;
@@ -36,35 +28,30 @@ use half::f16;
 use crate::constants::NUM_FEATURES;
 
 const NBR_SENTINEL: u16 = 0xFFFF;
-// Must mirror inference.py EXACTLY (the §D boundary-equivalence test gates this).
+// Node-count quantization for pad_to; mirrors inference.py.
 const QUANT_NODES: usize = 64;
-// NUM_TOKENS in the (pad_to + NUM_TOKENS)^2 pair-ceiling test (model has 8 tokens).
+// Token count added in the (pad_to + NUM_TOKENS)^2 pair-ceiling test.
 const NUM_TOKENS: usize = 8;
 const PAIR_CEILING: f64 = 3.8e7;
-// f64 literal — must be the literal 0.18_f64 so int(0.18*pad_to) truncates
-// identically to CPython's int(WASTE_FRACTION * pad_to).
 const WASTE_FRACTION: f64 = 0.18;
 
-/// `inference.py::_ceil_quant`: `max(64, -(-n//64)*64)`. For n>=1 this is the
-/// 64-quantized ceiling; for n==0 it is 64 (matches CPython's `-(-0//64)*64=0`
-/// then `max(64,0)=64`).
+/// 64-quantized ceiling of `n`: `max(64, div_ceil(n, 64) * 64)`. Returns 64
+/// for `n == 0`.
 fn ceil_quant(n: usize) -> usize {
     let q = n.div_ceil(QUANT_NODES) * QUANT_NODES;
     QUANT_NODES.max(q)
 }
 
-/// Port of `inference.py::plan_groups`. Rows arrive size-DESCENDING. Returns
-/// (start, end, pad_to) groups in ascending row order. BYTE-FOR-BYTE boundary
-/// parity with the Python planner is a HARD GATE (debug_plan_groups test).
+/// Group boundary planner. Rows arrive size-descending. Returns
+/// (start, end, pad_to) groups in ascending row order.
 pub fn plan_groups(sizes: &[usize]) -> Vec<(usize, usize, usize)> {
     let n = sizes.len();
     let mut groups: Vec<(usize, usize, usize)> = Vec::new();
     let mut start = 0usize;
     while start < n {
         let pad_to = ceil_quant(sizes[start]);
-        // floor = pad_to - max(QUANT_NODES, int(WASTE_FRACTION * pad_to))
-        // int(...) truncates toward zero; pad_to >= 0 so `as usize` truncates
-        // the (non-negative) f64 product identically to CPython int().
+        // floor = pad_to - max(QUANT_NODES, trunc(WASTE_FRACTION * pad_to)).
+        // The f64 product is non-negative, so `as usize` truncates toward zero.
         let waste = (WASTE_FRACTION * pad_to as f64) as usize;
         let floor = pad_to - QUANT_NODES.max(waste);
         let mut end = start + 1;
@@ -86,7 +73,7 @@ pub fn plan_groups(sizes: &[usize]) -> Vec<(usize, usize, usize)> {
     groups
 }
 
-// --- Zero-copy buffers (exact PlaneBuffer ABI) --------------------------------
+// --- Zero-copy buffers --------------------------------------------------------
 
 macro_rules! plane_buffer {
     ($name:ident, $ty:ty) => {
@@ -157,14 +144,14 @@ struct GroupBufs {
     coords: Vec<i32>,
 }
 
-/// Assemble all groups' padded buffers in PARALLEL (one worker per group, good
-/// locality), reproducing the Python `_forward_group` pad EXACTLY. GIL-free.
+/// Assemble all groups' padded buffers in parallel (one worker per group),
+/// applying the pad rules documented in the module header.
 ///
 /// `feats` is the CSR-flat f16 node features (total_nodes * NUM_FEATURES),
 /// `qr` the i16 coords (total_nodes * 2), `nbr` the u16 row-local neighbours
 /// (total_nodes * 6, sentinel 0xFFFF), `offsets` the per-row node offsets
-/// (len b+1), `sizes` the per-row node counts (len b). All in sorted (DESC)
-/// row order, matching the wire.
+/// (len b+1), `sizes` the per-row node counts (len b). All in size-descending
+/// row order.
 fn assemble_groups(
     groups: &[(usize, usize, usize)],
     feats: &[f16],
@@ -228,8 +215,7 @@ fn assemble_groups(
         .collect()
 }
 
-/// Flag-gated alternate arm (HEXFIELD_RUST_PACK, off by default). Parse the
-/// CSR-flat request, plan the IDENTICAL groups, assemble the padded per-group
+/// Parse the CSR-flat request, plan the groups, assemble the padded per-group
 /// buffers in parallel (GIL released), then build the Python group dict list.
 ///
 /// `feats_bytes`: f16 LE, total_nodes*NUM_FEATURES. `qr_bytes`: i16 LE,
@@ -250,8 +236,7 @@ pub fn build_serve_groups<'py>(
     let b = offsets.len() - 1;
     let total_nodes = *offsets.last().unwrap() as usize;
 
-    // Reinterpret the wire bytes as typed slices. These are LE/native on the
-    // build+serve host (same machine) so a bytewise reinterpret is exact.
+    // Reinterpret the wire bytes as typed slices; assumes native (LE) byte order.
     if feats_bytes.len() != total_nodes * NUM_FEATURES * std::mem::size_of::<f16>() {
         return Err(PyValueError::new_err("feats byte count mismatch"));
     }
@@ -261,10 +246,9 @@ pub fn build_serve_groups<'py>(
     if nbr_bytes.len() != total_nodes * 6 * std::mem::size_of::<u16>() {
         return Err(PyValueError::new_err("nbr byte count mismatch"));
     }
-    // SAFETY: lengths checked above; f16/i16/u16 are plain POD with no invalid
-    // bit patterns; the source byte buffers (PyBytes/numpy) are alive for the
-    // call and properly aligned (PyBytes is malloc-aligned; element align <= 2
-    // and these are contiguous arrays). Build owned Vecs (cheap parse copies).
+    // SAFETY: lengths checked above; f16/i16/u16 are POD with no invalid bit
+    // patterns; the source byte buffers are alive for the call and aligned
+    // (element align <= 2, contiguous arrays). Copied into owned Vecs.
     let feats: Vec<f16> = unsafe {
         std::slice::from_raw_parts(feats_bytes.as_ptr() as *const f16, total_nodes * NUM_FEATURES)
     }
@@ -283,7 +267,7 @@ pub fn build_serve_groups<'py>(
 
     let groups = plan_groups(&sizes);
 
-    // Parallel pad with the GIL released (the host-side win).
+    // Parallel pad with the GIL released.
     let assembled =
         py.detach(|| assemble_groups(&groups, &feats, &qr, &nbr, &offsets_us, &sizes));
 
@@ -303,9 +287,7 @@ pub fn build_serve_groups<'py>(
     Ok(out)
 }
 
-/// §D HARD-GATE surface: expose the SAME `plan_groups` used by the hot path so
-/// the parity test can assert `debug_plan_groups(sizes) == inference.plan_groups`
-/// element-for-element (start, end, pad_to).
+/// Exposes `plan_groups` to Python. Returns the (start, end, pad_to) tuples.
 #[pyfunction]
 pub fn debug_plan_groups(sizes: Vec<usize>) -> Vec<(usize, usize, usize)> {
     plan_groups(&sizes)

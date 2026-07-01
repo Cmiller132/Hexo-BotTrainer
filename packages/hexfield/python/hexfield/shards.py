@@ -1,17 +1,14 @@
-"""hexfield_compact_v1 shard (de)serialization + the legacy restnet adapter.
+"""hexfield_compact_v1 shard (de)serialization and the restnet adapter.
 
-Spec §6.1. One columnar ``.npz`` + JSON sidecar per game; raw
-representation-agnostic facts; encoders expand at train read. Hygiene changes
-vs the legacy layout: NO legal-id column (legality is closed-form from
-stones, CI-pinned to the engine); stones and history UNIFIED into one column
-``(q i16, r i16, owner u8, placement_index u16)``; ``phase`` stored u8 enum;
-standing-win cell columns added.
+One columnar ``.npz`` plus a JSON sidecar per game. No legal-id column;
+legality is derived from stones. Stones and history are one unified column
+``(q i16, r i16, owner u8, placement_index u16)``. ``phase`` is stored as a
+u8 enum. Standing-win cells are stored as coordinate columns.
 
-The legacy adapter reads existing restnet compact-v1 shards by re-implementing
-their column layout here (dense_cnn_restnet is never imported at runtime —
-its writer is the test oracle only), IGNORING the stored crop-restricted
-legal_ids and deriving legality from stones; win-now cells are derived from
-the stored stones via the same window scan.
+The restnet adapter reads restnet compact-v1 shards by re-implementing their
+column layout here. Stored legal_ids and crop center are ignored; legality is
+derived from stones. Win-now cells are derived from the stored stones via the
+shared window scan.
 """
 
 from __future__ import annotations
@@ -27,10 +24,8 @@ from .samples import STV_HORIZONS, HexfieldSampleData
 
 SCHEMA = "hexfield_compact_v1"
 SCHEMA_VERSION = 1
-# The restnet compact-v1 layout the Phase-B adapter reads
-# (dense_cnn_restnet.compact_io.COMPACT_SCHEMA_VERSION). Older restnet shards
-# predate the column entirely, so the adapter is lenient when it is absent but
-# loud on a present-but-wrong version (mirrors read_compact_shard's guard).
+# Expected schema_version of restnet compact-v1 shards read by the adapter.
+# When the column is absent the adapter proceeds; when present it must match.
 LEGACY_RESTNET_SCHEMA_VERSION = 1
 _PHASES = ("Opening", "FirstStone", "SecondStone")
 _PHASE_INDEX = {name: i for i, name in enumerate(_PHASES)}
@@ -76,17 +71,13 @@ def write_compact_shard(
     phase = np.empty(n, dtype=np.uint8)
     value = np.empty(n, dtype=np.float32)
     moves_left = np.full(n, -1.0, dtype=np.float32)
-    # outcome_valid[i] == 0 marks a TRUNCATED-game row (no engine winner): the
-    # value/stvalue/cell_q heads are masked to zero loss at expand time. Defaults
-    # to 1 (completed). Legacy shards lacking this column read back as all-1 (see
-    # read_compact_shard), so the addition is backward-compatible and needs NO
-    # schema bump. Derived from metadata['truncated'] (set by finalize).
+    # outcome_valid[i] == 0 marks a truncated-game row (no engine winner); the
+    # value/stvalue/cell_q heads are masked to zero loss at expand time.
+    # Defaults to 1 (completed). Derived from metadata['truncated'].
     outcome_valid = np.ones(n, dtype=np.uint8)
-    # policy_valid[i] == 0 marks a FAST (value-only) row: policy/opp_policy/
-    # soft_policy/cell_q masked at expand+loss; value/stvalue/moves_left train.
-    # Defaults to 1 (full). Legacy shards lacking it read back all-1 (see
-    # read_compact_shard) ⇒ backward-compatible, NO schema bump. Derived from
-    # metadata['pcr_full'] (False for fast rows written on completed games).
+    # policy_valid[i] == 0 marks a value-only (fast) row; policy/opp_policy/
+    # soft_policy/cell_q are masked at expand and loss, while value/stvalue/
+    # moves_left train. Defaults to 1 (full). Derived from metadata['pcr_full'].
     policy_valid = np.ones(n, dtype=np.uint8)
     policy_surprise = np.zeros(n, dtype=np.float32)
     first_q = np.zeros(n, dtype=np.int16)
@@ -147,8 +138,8 @@ def write_compact_shard(
 
         pa = np.fromiter((int(a) for a, _ in sample.policy), dtype=np.uint32, count=len(sample.policy))
         pw = np.fromiter((float(w) for _, w in sample.policy), dtype=np.float32, count=len(sample.policy))
-        # Child Q for the cell_q head, aligned to the recorded policy action order
-        # (q_policy is parallel to policy; the dict guards length == pol_act).
+        # Child Q for the cell_q head, aligned to pol_act order; actions absent
+        # from sample.q_policy map to 0.0.
         qmap = {int(a): float(q) for a, q in sample.q_policy}
         pq = np.fromiter((qmap.get(int(a), 0.0) for a in pa.tolist()), dtype=np.float32, count=pa.shape[0])
         pol_act.append(pa)
@@ -225,9 +216,9 @@ def read_compact_shard(path: Path) -> list[HexfieldSampleData]:
 
     n = int(arrays["num_rows"])
     horizons = [int(h) for h in arrays["horizons"]]
-    # Backward-compatible: legacy shards predate outcome_valid → all-completed.
+    # Absent when the shard lacks the column; then all rows read as completed.
     outcome_valid = arrays.get("outcome_valid")
-    # Backward-compatible: legacy shards predate policy_valid → all full rows.
+    # Absent when the shard lacks the column; then all rows read as full.
     policy_valid = arrays.get("policy_valid")
     out: list[HexfieldSampleData] = []
     for i in range(n):
@@ -260,11 +251,8 @@ def read_compact_shard(path: Path) -> list[HexfieldSampleData]:
             if int(arrays["first_present"][i]) == 1
             else None
         )
-        # FIX 2026-06-22: read q_pol_q back into q_policy (parallel to pol_act). The
-        # writer emits q_pol_q but this reader dropped it -> q_policy=() -> cell_q_mask
-        # all-zero for samples decoded here. OFFLINE-ONLY (training uses the packed
-        # window + rust expand, which is unaffected); the gap fooled an analysis probe
-        # into reporting cell_q "dead". Guarded for legacy shards without q_pol_q.
+        # q_pol_q decoded into q_policy, parallel to pol_act. Empty when the
+        # shard lacks the q_pol_q column.
         q_policy = (
             tuple((int(arrays["pol_act"][k]), float(arrays["q_pol_q"][k])) for k in range(p0, p1))
             if "q_pol_q" in arrays
@@ -302,23 +290,19 @@ def read_compact_shard(path: Path) -> list[HexfieldSampleData]:
 
 
 def read_legacy_restnet_shard(path: Path) -> list[HexfieldSampleData]:
-    """Read a restnet compact-v1 shard as hexfield rows (Phase-B adapter).
+    """Read a restnet compact-v1 shard as hexfield rows.
 
-    Stored legal_ids (crop-restricted at the source) and the crop center are
-    IGNORED — legality re-derives from stones at expansion, so crop-clipped
-    marathon rows re-expand with full supports. Stored hot lists are raw
-    engine coords and read as-is; standing-win cells are derived from the
-    stored stones via the shared window scan. The stored visit policies
-    remain crop-limited at the source and are disclosed as such
-    (`source=legacy_shard`).
+    Stored legal_ids and the crop center are ignored; legality is derived from
+    stones at expansion. Stored hot lists are read as raw engine coordinates.
+    Standing-win cells are derived from the stored stones via the shared window
+    scan. Returned rows carry metadata ``source=legacy_shard``.
     """
 
     with np.load(path, allow_pickle=True) as data:
         arrays = {key: data[key] for key in data.files}
 
-    # Lenient on absence (pre-versioning restnet shards), loud on drift: mirrors
-    # read_compact_shard's guard so a layout change in the legacy writer cannot
-    # be misread as the current restnet column order.
+    # Proceed when schema_version is absent; when present it must match
+    # LEGACY_RESTNET_SCHEMA_VERSION.
     legacy_version = arrays.get("schema_version")
     if legacy_version is not None and int(legacy_version) != LEGACY_RESTNET_SCHEMA_VERSION:
         raise ValueError(

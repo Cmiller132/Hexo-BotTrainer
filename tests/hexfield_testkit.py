@@ -1,8 +1,7 @@
 """Shared helpers for the hexfield test suite (not collected by pytest).
 
-Adds packages/hexfield/python to sys.path — hexfield is deliberately never
-installed into a shared venv (spec §5.1 build blast-radius discipline), so
-tests import it via this shim.
+Adds packages/hexfield/python to sys.path so tests can import hexfield without
+it being installed into a venv.
 """
 
 from __future__ import annotations
@@ -13,8 +12,8 @@ from pathlib import Path
 
 _PACKAGES = Path(__file__).resolve().parent.parent / "packages"
 sys.path.insert(0, str(_PACKAGES / "hexfield" / "python"))
-# Test-only oracle package (not installed in the build venv): restnet's
-# losses/samples/compact_io are imported by the M2 parity tests.
+# Adds dense_cnn_restnet/python to sys.path; its losses/samples/compact_io
+# modules are imported by the parity tests.
 sys.path.insert(0, str(_PACKAGES / "dense_cnn_restnet" / "python"))
 
 from hexo_engine import api

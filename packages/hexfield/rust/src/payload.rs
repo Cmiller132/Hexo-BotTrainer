@@ -1,12 +1,11 @@
-//! Evaluator payload ABI (spec §5.2) + cached batch evaluation.
+//! Evaluator payload ABI and cached batch evaluation.
 //!
-//! Request: one dict per flush; CSR flat-concat over support nodes; rows
-//! pre-sorted by support size DESCENDING (stable by request index) so Python
-//! grouping is contiguous slicing; the dedup slot-map restores caller order on
-//! reply. Reply: dense_cnn's two-key contract byte-identical
-//! (values_bytes f32 x B, priors_bytes f32 x sum(L_g) positional over each
-//! row's legal prefix) plus the optional moves_left_bytes (f32 x B, decoded
-//! decisions [0, 512]) when `request_moves_left` is set.
+//! Request: one dict per flush; CSR flat-concat over support nodes; rows sorted
+//! by support size descending, stable by request index. A dedup slot-map
+//! restores caller order on reply. Reply keys: values_bytes (f32 x B),
+//! priors_bytes (f32 x sum(L_g), positional over each row's legal prefix), and,
+//! when `request_moves_left` is set, moves_left_bytes (f32 x B, values in
+//! [0, 512]).
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -31,12 +30,11 @@ use crate::support::build_support;
 
 pub const ABI_VERSION: u32 = 1;
 pub const NBR_SENTINEL: u16 = 0xFFFF;
-/// Keep evaluator batches bounded (same intent as dense's chunking).
+/// Maximum states per evaluator batch chunk.
 pub const EVAL_CHUNK_STATES: usize = 1024;
 
 /// One featurized request row. Owns all its data (no borrow of the source
-/// state), so a built row set can outlive `states` — required for the async
-/// submit/finish split, where parsing happens after the borrowing scope ends.
+/// state), so a built row set can outlive `states`.
 struct Row {
     request_index: usize,
     legal_ids: Vec<PackedCoord>,
@@ -46,16 +44,13 @@ struct Row {
     num_nodes: usize,
 }
 
-/// Featurize each row, then order rows by support size DESCENDING (stable by
-/// request index). Rust keeps the per-row sorted legal action ids; they never
-/// cross the boundary — priors return positionally over the prefix.
+/// Featurize each row, then order rows by support size descending, stable by
+/// request index. Per-row legal action ids are kept locally; priors are
+/// returned positionally over the legal prefix.
 fn featurize_and_sort(states: &[&RustHexoState]) -> PyResult<Vec<Row>> {
-    // Featurize rows across rayon workers: build_support (the depth-9 BFS) and
-    // build_features are pure functions of &state, so per-row work is
-    // independent. par_iter collect preserves request order, and the sort below
-    // is deterministic, so the wire bytes are byte-identical to the serial form.
-    // This runs GIL-free Rust on the one critical thread, so it directly cuts
-    // the host encode cost.
+    // Featurize rows across rayon workers. build_support and build_features are
+    // pure functions of &state, so per-row work is independent. par_iter collect
+    // preserves request order; the sort below is deterministic.
     let mut rows: Vec<Row> = states
         .par_iter()
         .enumerate()
@@ -63,8 +58,7 @@ fn featurize_and_sort(states: &[&RustHexoState]) -> PyResult<Vec<Row>> {
             let sup = build_support(state);
             let feats32 = build_features(state, &sup);
             let mut feats = vec![f16::ZERO; feats32.len()];
-            // SIMD f32->f16 (round-to-nearest, element-wise identical to the
-            // scalar f16::from_f32 loop it replaces).
+            // f32->f16 conversion, round-to-nearest, element-wise.
             feats.convert_from_f32_slice(&feats32);
             let mut coords_qr = Vec::with_capacity(sup.num_nodes() * 2);
             for c in &sup.coords {
@@ -105,8 +99,7 @@ fn featurize_and_sort(states: &[&RustHexoState]) -> PyResult<Vec<Row>> {
     Ok(rows)
 }
 
-/// Pack featurized rows into the §5.2 wire payload dict (also folds the encode
-/// stats). Identical bytes for the sync and async paths.
+/// Pack featurized rows into the wire payload dict and fold in the encode stats.
 fn build_chunk_payload<'py>(
     py: Python<'py>,
     rows: &[Row],
@@ -198,10 +191,8 @@ fn parse_chunk_reply(
     }
 
     // Parse per (sorted) row across rayon workers, then restore caller order.
-    // Each row reads a DISJOINT prior slice (precomputed prior_offsets) plus one
-    // value/moves_left, and finalize_priors is deterministic, so the output is
-    // byte-identical to the sequential parse. The per-row prior decode+sort was
-    // the dominant host parse cost.
+    // Each row reads a disjoint prior slice (precomputed prior_offsets) plus one
+    // value/moves_left; finalize_priors is deterministic.
     let mut prior_offsets = Vec::with_capacity(rows.len() + 1);
     let mut running = 0usize;
     prior_offsets.push(0usize);
@@ -276,10 +267,9 @@ fn evaluate_states_chunk(
     parse_chunk_reply(&output, &rows, states.len(), request_moves_left, stats)
 }
 
-/// Async phase 1: featurize + ENQUEUE the forward via `evaluator.submit_payload`
-/// (no device sync). Returns the GIL-independent handle plus the row metadata
-/// needed to parse the reply later. The GPU work runs while the caller does the
-/// pre-backup select pass; `finish_states_chunk` drains it.
+/// Async phase 1: featurize and enqueue the forward via
+/// `evaluator.submit_payload` (no device sync). Returns the handle plus the row
+/// metadata needed to parse the reply. `finish_states_chunk` drains it.
 fn submit_states_chunk(
     py: Python<'_>,
     evaluator: &Bound<'_, PyAny>,
@@ -295,7 +285,7 @@ fn submit_states_chunk(
 }
 
 /// Async phase 2: drain a `submit_states_chunk` handle via `evaluator.result`
-/// (the single device->host sync) and parse it. Byte-identical to the sync path.
+/// (the device->host sync) and parse it.
 fn finish_states_chunk(
     _py: Python<'_>,
     evaluator: &Bound<'_, PyAny>,
@@ -336,8 +326,7 @@ fn evaluate_state_refs(
     evaluate_states_chunk(py, evaluator, states, request_moves_left, stats)
 }
 
-/// Cache-checked, duplicate-coalescing batch evaluation preserving caller
-/// order (port of dense's evaluate_model1_state_refs_cached).
+/// Cache-checked, duplicate-coalescing batch evaluation preserving caller order.
 pub fn evaluate_state_refs_cached(
     py: Python<'_>,
     evaluator: &Bound<'_, PyAny>,
@@ -365,8 +354,8 @@ pub fn evaluate_state_refs_cached(
         for (index, request) in requests.iter().enumerate() {
             let key = request.state_hash;
             if let Some(cached_eval) = cached.get(&key) {
-                // A cached eval without moves_left cannot serve a request that
-                // needs it; treat as a miss so the reply carries the field.
+                // A cached eval without moves_left does not satisfy a request
+                // that sets request_moves_left; treat it as a miss.
                 if !request_moves_left || cached_eval.moves_left.is_some() {
                     result_slots[index] = Some(cached_eval);
                     if let Some(stats) = stats {
@@ -432,8 +421,7 @@ pub fn evaluate_state_refs_cached(
 }
 
 /// Insert freshly-evaluated unique evals into the cache and fan them out to the
-/// still-empty result slots. Shared by the sync and async cached paths so both
-/// produce identical cache state and ordering.
+/// still-empty result slots. Shared by the sync and async cached paths.
 fn integrate_unique_evals(
     unique_evals: Vec<RustEvaluation>,
     unique_keys: &[StateHash],
@@ -483,15 +471,14 @@ enum PendingKind {
         rows: Vec<Row>,
         states_len: usize,
     },
-    /// Rare multi-chunk flush (> EVAL_CHUNK_STATES uniques): evaluated
-    /// synchronously at submit time (no overlap), already parsed.
+    /// Multi-chunk flush (> EVAL_CHUNK_STATES uniques): evaluated synchronously
+    /// at submit time, already parsed.
     Ready(Vec<RustEvaluation>),
 }
 
-/// Cache-checked evaluation split across the pre-backup select pass. Holds the
-/// fully-resolved cache hits plus the in-flight GPU work; `finish_eval_cached`
-/// drains it. All fields are owned (no borrow of the requests/slots), so the
-/// caller may run the select pass between submit and finish.
+/// Cache-checked evaluation split across two phases. Holds the resolved cache
+/// hits plus the in-flight GPU work; `finish_eval_cached` drains it. All fields
+/// are owned (no borrow of the requests/slots).
 pub struct PendingEval {
     result_slots: Vec<Option<Arc<RustEvaluation>>>,
     slot_to_unique: Vec<Option<usize>>,
@@ -501,9 +488,8 @@ pub struct PendingEval {
 }
 
 /// Async phase 1 of `evaluate_state_refs_cached`: resolve cache/duplicate hits
-/// and ENQUEUE the unique forward (no device sync), returning a `PendingEval`.
-/// The GPU runs while the caller does the pre-backup select; then call
-/// `finish_eval_cached` with the SAME cache/stats to drain and integrate.
+/// and enqueue the unique forward (no device sync), returning a `PendingEval`.
+/// Call `finish_eval_cached` with the same cache/stats to drain and integrate.
 pub fn submit_eval_cached(
     py: Python<'_>,
     evaluator: &Bound<'_, PyAny>,
@@ -559,8 +545,8 @@ pub fn submit_eval_cached(
             lock_stats(stats).unique_states += unique_states.len();
         }
         if unique_states.len() > EVAL_CHUNK_STATES {
-            // Multi-chunk flushes are rare (flush ~144 << 1024); evaluate them
-            // synchronously here rather than juggle multiple in-flight handles.
+            // Multi-chunk flushes are evaluated synchronously here rather than
+            // tracking multiple in-flight handles.
             PendingKind::Ready(evaluate_state_refs(
                 py,
                 evaluator,
@@ -588,9 +574,8 @@ pub fn submit_eval_cached(
     })
 }
 
-/// Async phase 2: drain the in-flight forward (the single device->host sync),
-/// insert into the cache, and fan out to the result slots. Byte-identical
-/// result to `evaluate_state_refs_cached`.
+/// Async phase 2: drain the in-flight forward (the device->host sync), insert
+/// into the cache, and fan out to the result slots.
 pub fn finish_eval_cached(
     py: Python<'_>,
     evaluator: &Bound<'_, PyAny>,
@@ -643,9 +628,9 @@ pub fn finish_eval_cached(
         .collect())
 }
 
-/// Validate + descending-sort + normalize (dense finalize_model_priors port;
-/// `legal_action_count == priors.len()` always holds here — the vocabulary IS
-/// the legal set).
+/// Validate priors, sort descending by prior (ties broken by action id), and
+/// normalize to sum 1. `legal_action_count` equals `priors.len()`; the
+/// vocabulary is the legal set.
 fn finalize_priors(
     priors: &mut Vec<(PackedCoord, f32)>,
     legal_action_count: usize,

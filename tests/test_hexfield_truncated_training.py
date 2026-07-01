@@ -1,19 +1,18 @@
-"""Smoke test for truncated-game training with per-head masking (Task A).
+"""End-to-end test for truncated-game training with per-head masking.
 
-End-to-end: build a small COMPLETED game + a small TRUNCATED game, run them
-through finalize_game_samples -> write_compact_shard -> read/expand ->
-collate_training -> hexfield_loss, and assert:
+Builds a completed game and a truncated game, runs them through
+finalize_game_samples -> write_compact_shard -> read/expand ->
+collate_training -> hexfield_loss, and asserts:
 
-  (a) truncated rows ARE written / present (not dropped),
-  (b) the value / stvalue / cell_q / moves_left loss contributions are ZERO for
+  (a) truncated rows are written and present (not dropped),
+  (b) value / stvalue / cell_q / moves_left loss contributions are 0 for
       truncated rows (their per-row masks are 0),
-  (c) the policy loss IS nonzero for truncated rows (trained normally),
-  (d) completed-game targets / per-head losses are UNCHANGED (byte-identical)
-      whether finalized/expanded alone or mixed with truncated rows,
-  (e) no exception anywhere.
+  (c) policy loss is nonzero for truncated rows,
+  (d) completed-game targets and per-head losses are identical whether
+      finalized/expanded alone or mixed with truncated rows,
+  (e) no exception is raised.
 
-Deliberately oracle-free (no dense_cnn_restnet import) so it runs on the
-Windows smoke interpreter as well as the WSL build venv.
+Does not import dense_cnn_restnet, so it runs without the oracle backend.
 """
 
 from __future__ import annotations
@@ -55,7 +54,7 @@ def _sample_from_state(state, rng: random.Random, turn_index: int) -> HexfieldSa
     weights = [rng.random() + 0.1 for _ in chosen]
     total = sum(weights)
     policy = tuple((aid, w / total) for aid, w in zip(chosen, weights))
-    # Child Q parallel to policy (cell_q head target); finite in [-1, 1].
+    # Child Q parallel to policy (cell_q head target), values in [-0.9, 0.9].
     q_policy = tuple((aid, rng.uniform(-0.9, 0.9)) for aid in chosen)
     return HexfieldSampleData(
         game_id="test",
@@ -99,20 +98,18 @@ def _full_rows(finalized):
 
 
 def _expand_all(samples):
-    # Symmetry 0 keeps the expansion deterministic and comparable row-for-row.
+    # Symmetry 0: identity expansion, row-for-row comparable.
     return [expand_sample(s, symmetry=0) for s in samples]
 
 
 def test_truncated_rows_masked_completed_unchanged(tmp_path) -> None:
-    # Random Hexo playouts essentially never terminate within a sane ply budget,
-    # so we model a "completed" game the way the production finalize path does:
-    # a concrete engine winner (0/1) with truncated=False. A "truncated" game is
-    # the SAME shape finalized with winner=None + truncated=True. This isolates
-    # exactly the masking contract (the winner label only feeds the hard-z value
-    # target, which is masked off for truncated rows anyway).
+    # A completed game is finalized with a concrete winner (0/1) and
+    # truncated=False. A truncated game is the same shape finalized with
+    # winner=None and truncated=True. The winner label feeds only the hard-z
+    # value target, which is masked off for truncated rows.
     comp_pending, _ = _make_game(101, max_plies=24)
     trunc_pending, _ = _make_game(202, max_plies=18)
-    comp_winner = 0  # concrete winner => a "completed" game (truncated=False)
+    comp_winner = 0  # concrete winner => completed game (truncated=False)
 
     comp_final = finalize_game_samples(comp_pending, comp_winner, mask_opp_from_fast=True)
     trunc_final = finalize_game_samples(
@@ -128,7 +125,7 @@ def test_truncated_rows_masked_completed_unchanged(tmp_path) -> None:
     trunc_rows_src = _full_rows(trunc_final)
     assert comp_rows_src and trunc_rows_src
 
-    # --- shard round-trip: truncated rows ARE written and the flag survives ---
+    # --- shard round-trip: truncated rows are written and the flag survives ---
     comp_path = tmp_path / "completed.npz"
     trunc_path = tmp_path / "truncated.npz"
     n_comp = write_compact_shard(comp_path, comp_rows_src)
@@ -136,17 +133,17 @@ def test_truncated_rows_masked_completed_unchanged(tmp_path) -> None:
     assert n_comp == len(comp_rows_src)
     assert n_trunc == len(trunc_rows_src)  # (a) truncated rows present on disk
 
-    # read_compact_shard is the columnar parity oracle: confirm the truncated
-    # flag round-trips through the outcome_valid column (a). (This reader does not
-    # reconstruct q_policy, so cell_q is checked via the packed train path below.)
+    # read_compact_shard reads the columnar shard: the truncated flag round-trips
+    # through the outcome_valid column (a). This reader does not reconstruct
+    # q_policy, so cell_q is checked via the packed train path below.
     comp_read = read_compact_shard(comp_path)
     trunc_read = read_compact_shard(trunc_path)
     assert all(r.metadata.get("truncated", False) for r in trunc_read)
     assert all(not r.metadata.get("truncated", False) for r in comp_read)
 
-    # --- expand via the REAL train path (PackedWindow + serial expand_rows) -----
-    # This is the production serial path: it restores q_policy from the q_pol_q
-    # column and threads outcome_valid -> metadata['truncated'] -> masks.
+    # --- expand via the train path (PackedWindow + serial expand_rows) ----------
+    # The serial path restores q_policy from the q_pol_q column and threads
+    # outcome_valid -> metadata['truncated'] -> masks.
     def expand_via_window(path, n):
         win = load_packed_shard(path)
         rows, valid = expand_rows(win, None, np.zeros(win.n, dtype=np.int32), backend="serial")
@@ -159,7 +156,7 @@ def test_truncated_rows_masked_completed_unchanged(tmp_path) -> None:
     for row in comp_exp:
         assert row.value_mask == 1.0
         assert float(row.moves_left_mask) == 1.0
-    # completed games carry grounded cell_q presence on at least one row.
+    # completed games have nonzero cell_q mask on at least one row.
     assert any(float(row.cell_q_mask.sum()) > 0.0 for row in comp_exp)
     for row in trunc_exp:
         assert row.value_mask == 0.0
@@ -169,10 +166,9 @@ def test_truncated_rows_masked_completed_unchanged(tmp_path) -> None:
         # policy / opp_policy are NOT masked: positive policy mass is preserved.
         assert float(row.policy.sum()) > 0.0
 
-    # --- (d) byte-identical completed-game expansion: in-memory vs packed path --
-    # The in-memory finalized rows expand identically to the packed-window rows
-    # (proves the added outcome_valid column / value_mask plumbing did not alter
-    # a completed row's targets or masks).
+    # --- (d) completed-game expansion: in-memory vs packed path -----------------
+    # In-memory finalized rows expand to identical targets and masks as the
+    # packed-window rows.
     comp_exp_direct = _expand_all(comp_rows_src)
     for a, b in zip(comp_exp_direct, comp_exp):
         assert a.value == b.value and a.value_mask == b.value_mask == 1.0
@@ -199,8 +195,8 @@ def test_truncated_rows_masked_completed_unchanged(tmp_path) -> None:
             total, comps = hexfield_loss(out, batch, denominators=denoms)
         return total, comps, denoms
 
-    # (b)/(c): a truncated-ONLY batch. The value/stvalue/cell_q/moves_left masks
-    # are all zero, so those components are exactly 0; policy is nonzero.
+    # (b)/(c): a truncated-only batch. The value/stvalue/cell_q/moves_left masks
+    # are all zero, so those components are 0; policy is nonzero.
     t_total, t_comps, t_denoms = run_loss(trunc_exp)
     assert t_denoms["value"] == 0.0
     assert t_denoms["moves_left"] == 0.0
@@ -214,15 +210,13 @@ def test_truncated_rows_masked_completed_unchanged(tmp_path) -> None:
         assert float(t_comps[f"stvalue_{h}"]) == 0.0
     # (c) policy trains on truncated rows -> strictly positive CE.
     assert float(t_comps["policy"]) > 0.0
-    # opp_policy is allowed to be zero (no future opponent on a tail row) but must
-    # be finite and contribute no NaN.
+    # opp_policy may be zero (no future opponent on a tail row) but must be finite.
     assert np.isfinite(float(t_comps["opp_policy"]))
 
-    # (d) the COMPLETED component losses must be IDENTICAL whether the batch is
+    # (d) the completed component losses are identical whether the batch is
     # completed-only or mixed with truncated rows. Truncated rows contribute zero
-    # to every masked head's numerator AND denominator, and the value/stvalue/
-    # cell_q/moves_left step-global denominators count only completed rows, so the
-    # masked-head means over completed rows are unchanged.
+    # to every masked head's numerator and denominator, and the value/stvalue/
+    # cell_q/moves_left step-global denominators count only completed rows.
     c_total, c_comps, c_denoms = run_loss(comp_exp)
     mixed_total, mixed_comps, mixed_denoms = run_loss(comp_exp + trunc_exp)
 
@@ -233,14 +227,14 @@ def test_truncated_rows_masked_completed_unchanged(tmp_path) -> None:
     for h in horizons:
         assert mixed_denoms[f"stvalue_{h}"] == c_denoms[f"stvalue_{h}"]
 
-    # Masked heads: byte-identical between completed-only and mixed.
+    # Masked heads: identical between completed-only and mixed.
     for key in ["value", "moves_left", "cell_q"] + [f"stvalue_{h}" for h in horizons]:
         assert float(mixed_comps[key]) == float(c_comps[key]), key
 
 
 def test_finalize_truncated_does_not_mutate_completed() -> None:
-    # The completed-game finalize call path is byte-identical to before: changing
-    # only the truncated parameter must not alter any completed-game target.
+    # Finalizing a completed game (winner set, truncated defaulted) produces
+    # value = +/-1, moves_left counting down to 0, and no truncated flag.
     pending, _ = _make_game(303, max_plies=40)
     winner = 1  # concrete winner => completed game
     finalized = finalize_game_samples(pending, winner, mask_opp_from_fast=True)

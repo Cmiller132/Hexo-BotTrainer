@@ -1,15 +1,14 @@
-"""M5 gate: stub-evaluator differential parity — hexfield lockstep search vs
-the live dense_cnn implementation (spec §5.1).
+"""Stub-evaluator differential parity between the hexfield and dense_cnn MCTS
+sessions.
 
-Corpus constrained (and asserted) to positions whose FULL legal set lies
-inside dense's radius-20 crop, so both vocabularies are identical. The stub
-evaluator keys priors/values by (rank in the ascending-id legal order, legal
-count) — both payloads expose exactly that (engine emits legal ids ascending;
-hexfield's prefix is ascending by construction; asserted below). hexfield runs
-in `search_parity_mode` with dense's AS-BUILT quarantined knob values passed
-explicitly to both sides. Identical PUCT constants + identical seed streams +
-identical priors => identical visit counts, chosen moves, root values, and
-exported visit-policy targets.
+The corpus is constrained (and asserted) to positions whose full legal set
+lies inside dense's radius-20 crop, so both engines share an identical move
+vocabulary. The stub evaluator keys priors/values by the legal cells' crop
+flats; both payloads expose the legal set in ascending-id order (asserted in
+`_fully_in_crop`). hexfield runs with `search_parity_mode=True`; the same knob
+values are passed to both sides. Identical PUCT constants, seed streams, and
+priors are expected to yield identical visit counts, chosen moves, root values,
+and exported visit-policy targets.
 """
 
 from __future__ import annotations
@@ -55,8 +54,13 @@ def _row_hash(flats: list[int]) -> int:
 
 
 def _stub_reply(rows: list[list[int]], request_ml: bool = False) -> dict:
-    """Shared stub: each row is its DENSE-crop legal flats (state-pure AND
-    state-discriminating — both ABIs can derive them)."""
+    """Build values/priors reply from per-row dense-crop legal flats.
+
+    `rows` is a list of per-row flat-index lists. Returns a dict with
+    little-endian float32 `values_bytes` (one per row) and `priors_bytes`
+    (one per legal flat, row-concatenated); `moves_left_bytes` is added when
+    `request_ml` is set.
+    """
 
     values = []
     priors: list[float] = []
@@ -75,7 +79,8 @@ def _stub_reply(rows: list[list[int]], request_ml: bool = False) -> dict:
 
 
 def _python_round(numerator: int, denominator: int) -> int:
-    """Exact integer ties-to-even (dense encoding.rs python_round port)."""
+    """Integer division rounding half to even. Matches the round-half-to-even
+    behavior used by dense's encoding."""
 
     quotient, remainder = divmod(numerator, denominator)
     doubled = remainder * 2
@@ -91,12 +96,13 @@ def _hexd(dq: int, dr: int) -> int:
 
 
 class HexfieldStub:
-    """Reconstructs dense's evaluator view from the CSR payload: stones ->
-    exact rounded centroid -> per-legal crop flat. Legal cells OUTSIDE the
-    radius-20 hex disk (which dense's evaluator structurally drops) get prior
-    0.0 — sorted last, never materialized under the nucleus cap, excluded
-    from exports — making the stub an exact dense-equivalent evaluator over
-    hexfield's full legal vocabulary."""
+    """Evaluator over hexfield's CSR payload.
+
+    Derives the crop center from the stones' rounded centroid, then maps each
+    legal cell to its radius-20 crop flat. Legal cells outside the radius-20
+    hex disk are assigned prior 0.0. Values are keyed by the row hash of the
+    in-disk flats. Returns the same reply layout as `_stub_reply`.
+    """
 
     def __call__(self, payload: dict) -> dict:
         b, total = payload["shape"]
@@ -142,7 +148,8 @@ class HexfieldStub:
 
 
 class DenseStub:
-    """dense already speaks crop flats: legal_flat_indices per row."""
+    """Evaluator over dense's payload, which supplies crop flats directly via
+    `legal_flat_indices` per row."""
 
     def __call__(self, payload: dict) -> dict:
         offsets = payload["legal_row_offsets"]
@@ -165,10 +172,13 @@ def _crop_center(stones: list[tuple[int, int]]) -> tuple[int, int]:
 
 
 def _fully_in_crop(state, margin: int) -> bool:
-    """The crop constraint must hold for every state the SEARCH visits, not
-    just the root: leaves sit several placements deeper and dense recomputes
-    its centroid crop per state. `margin` keeps the root deep-interior so no
-    reachable leaf's legal set can stray out of its own crop."""
+    """Return True when every legal cell and every stone lies within
+    `20 - margin` of the crop center. dense recomputes its centroid crop per
+    state, so `margin` bounds how far leaf states reached during search can
+    shift the crop while keeping their legal sets in-crop.
+
+    Also asserts the engine's legal action ids are ascending.
+    """
 
     mirror = api.to_python_state(state)
     stones = [(c.q, c.r) for c, _p in mirror.board.stones]
@@ -259,8 +269,8 @@ def test_lockstep_parity_greedy_no_noise() -> None:
 
 @needs_native
 def test_lockstep_parity_full_exploration_machinery() -> None:
-    # Noise + sampling temperature + forced playouts + KataGo target pruning +
-    # the as-built quarantined knobs (dense defaults: zeroing on, root temp).
+    # Exercises noise, sampling temperature, forced playouts, target pruning,
+    # and the fpu-zero-under-noise / root-temp knobs together.
     states = _corpus(60)
     _run_pair(
         states, visits=48, seed=23, temperature=1.0, noise=(10.83, 0.25),

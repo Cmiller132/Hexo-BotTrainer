@@ -1,8 +1,8 @@
-"""M0 gates: hexfield geometry — packing, distance, D6 algebra, bias rows.
+"""hexfield geometry tests: packing, distance, D6 algebra, bias rows.
 
-Pure-Python (no engine .so needed except the packing cross-check, which uses
-the pure-Python hexo_engine.types mirror). hexfield is deliberately NOT
-installed in any shared venv; tests import it via a path shim.
+Pure-Python. The packing cross-check uses the pure-Python hexo_engine.types
+implementation. hexfield is imported by inserting
+packages/hexfield/python onto sys.path (see below).
 """
 
 from __future__ import annotations
@@ -57,11 +57,11 @@ def test_d6_group_properties() -> None:
         inv = geometry.d6_inverse(sym)
         for q, r in cells:
             tq, tr = geometry.apply_d6(sym, q, r)
-            # sigma^-1 ∘ sigma == id
+            # inverse composed with the transform gives the identity
             assert geometry.apply_d6(inv, tq, tr) == (q, r)
-            # isometry: distance to origin and pairwise structure preserved
+            # transform preserves distance to the origin
             assert geometry.hex_dist(tq, tr) == geometry.hex_dist(q, r)
-            # the win-axis predicate is exactly D6-invariant
+            # transform preserves the on_win_axis predicate
             assert geometry.on_win_axis(tq, tr) == geometry.on_win_axis(q, r)
     # identity is index 0
     assert geometry.apply_d6(0, 5, -3) == (5, -3)
@@ -87,8 +87,8 @@ def test_bias_ring_and_far_rows() -> None:
 
 
 def test_bias_rows_respect_d6_classes() -> None:
-    """Under any D6 transform an offset keeps its distance and axis class, so
-    ring/far rows are invariant and exact rows permute within the disk."""
+    """A D6 transform preserves an offset's distance and axis class: ring and
+    far rows map to themselves, exact rows map to other exact rows."""
 
     rng = random.Random(23)
     for _ in range(500):
@@ -99,6 +99,6 @@ def test_bias_rows_respect_d6_classes() -> None:
             tq, tr = geometry.apply_d6(sym, dq, dr)
             trow = geometry.rel_bias_index(tq, tr)
             if row >= constants.BIAS_ON_AXIS_BASE:
-                assert trow == row  # ring + far rows are exactly D6-invariant
+                assert trow == row  # ring and far rows map to the same row
             else:
-                assert trow < constants.BIAS_ON_AXIS_BASE  # disk stays disk
+                assert trow < constants.BIAS_ON_AXIS_BASE  # exact rows stay exact rows

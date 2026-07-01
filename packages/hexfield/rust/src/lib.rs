@@ -1,31 +1,22 @@
-//! hexfield Rust accelerator — own crate, own cdylib (`hexfield._rust`).
+//! hexfield Rust accelerator crate, built as the cdylib `hexfield._rust`.
 //!
-//! Spec: docs/specs/hexfield_model_spec.md §5/§8. Deliberately NOT part of
-//! `hexo_models._rust`: building this crate can never change the live
-//! lineages' search semantics or replace their .so. Engine state intake goes
-//! through hexo_engine's stable C-ABI state capsule (state.rs), exactly like
-//! the other lineages.
+//! Engine state intake goes through hexo_engine's C-ABI state capsule
+//! (state.rs).
 //!
-//! Surfaces: serve-time support/feature construction (the Rust half of the
-//! Rust↔Python featurizer parity contract), payload assembly, the PUCT tree,
-//! and the continuous scheduler.
+//! Surfaces: serve-time support/feature construction, payload assembly, the
+//! PUCT tree, and the continuous scheduler.
 //!
-//! Build: scripts/_rebuild_hexfield.sh (hexfield-dev venv, --release). Never
-//! build into the live hexgt-build venv.
+//! Build: scripts/_rebuild_hexfield.sh (hexfield-dev venv, --release).
 
-// rustc 1.95.0 ICEs inside the dead-code lint's diagnostic emitter on this
-// crate (annotate_snippet panic in check_mod_deathness). Several search-stat
-// fields are intentionally write-only (telemetry consumers), so silence the
-// lint rather than fight the ICE.
+// Several search-stat fields are write-only (telemetry).
 #![allow(dead_code)]
 
 mod constants;
 mod features;
 mod support;
 
-// Threat-Space Search core: the spec-mandated #[path] file-include of the
-// shared module (hexgnn-precedent pattern; a cross-crate drift parity test
-// pins it; rlib promotion is a later owner-scheduled option).
+// Threat-Space Search core: #[path] file-include of the shared module from
+// hexo_models/rust/src/threats_shared.rs.
 #[path = "../../../hexo_models/rust/src/threats_shared.rs"]
 mod threats_shared;
 
@@ -68,8 +59,7 @@ fn capabilities(py: Python<'_>) -> PyResult<Py<PyAny>> {
     Ok(dict.into_any().unbind())
 }
 
-/// Serve-time featurization of live engine states (parity-test surface and
-/// the building block of the evaluator payload). One dict per state:
+/// Serve-time featurization of engine states. Returns one dict per state:
 /// coords (i16 q,r pairs), legal/stone/halo counts, dist (i32), nbr
 /// (i32 row-local, -1 missing, node-major x 6), feats (f32 node-major x 15).
 #[cfg(feature = "python")]
@@ -105,15 +95,15 @@ fn featurize_states(py: Python<'_>, states: &Bound<'_, PyAny>) -> PyResult<Py<Py
     Ok(out.into_any().unbind())
 }
 
-/// Golden-vector surface for the seed-discipline contract.
+/// Deterministic seed mixing from (base_seed, game_key, ply, stream).
 #[cfg(feature = "python")]
 #[pyfunction]
 fn mix_seed(base_seed: u64, game_key: u64, ply: u32, stream: u64) -> u64 {
     search::mix_seed(base_seed, game_key, ply, stream)
 }
 
-/// Property-gate surfaces: the LCB core (closed-form table tests) and the
-/// moves-left utility bonus (sign / monotonicity / gate-zero properties).
+/// LCB pick over (stats, z, min_visits, visit_fraction); see search::debug_lcb_from_stats.
+/// The moves-left utility bonus is exposed below via debug_ml_bonus.
 #[cfg(feature = "python")]
 #[pyfunction]
 fn debug_lcb_pick(
@@ -149,13 +139,13 @@ pub fn _rust(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(debug_lcb_pick, module)?)?;
     module.add_function(wrap_pyfunction!(debug_ml_bonus, module)?)?;
     module.add_class::<search::HexfieldMctsSession>()?;
-    // Rust parallel serve-pack with zero-copy buffers (HEXFIELD_RUST_PACK path).
+    // Parallel serve-pack with zero-copy buffers (HEXFIELD_RUST_PACK path).
     module.add_function(wrap_pyfunction!(serve_pack::build_serve_groups, module)?)?;
     module.add_function(wrap_pyfunction!(serve_pack::debug_plan_groups, module)?)?;
     module.add_class::<serve_pack::F16Buf>()?;
     module.add_class::<serve_pack::I32Buf>()?;
     module.add_class::<serve_pack::U8Buf>()?;
-    // Rust rayon GIL-free train-read expand kernel (expand_backend="rust").
+    // rayon GIL-free train-read expand kernel (expand_backend="rust").
     module.add_function(wrap_pyfunction!(replay_expand::expand_shard_train, module)?)?;
     module.add_class::<replay_expand::RxF32Buf>()?;
     module.add_class::<replay_expand::RxF64Buf>()?;

@@ -1,24 +1,22 @@
-"""Shared test fixtures for the hexfield eval suites (pure CPU, no GPU/torch/.so).
+"""Shared test fixtures for the hexfield eval suites (CPU-only, no GPU/torch/.so).
 
-This kit consolidates the fakes that used to be copy-pasted / cross-imported
-across the eval tests so each is defined ONCE:
+Contents:
 
-  * ENGINE/SESSION FAKES (consumed by the arena suite, ``test_hexfield_eval_arena``):
+  * Engine/session fakes (used by ``test_hexfield_eval_arena``):
     ``_Terminal``, ``_FakeState``, ``_FakeApi``, ``_FakeEvaluator``,
-    ``_FakeSession``, ``_make_session_factory`` — a tiny deterministic Connect6
+    ``_FakeSession``, ``_make_session_factory`` — a deterministic Connect6
     engine monkeypatched onto ``eval_arena.api`` plus a fake multi-root session /
     evaluator injected through the ``make_session`` / ``build_evaluators`` seams.
-    The native MCTS extension and the real engine .so are never imported.
+    The native MCTS extension and the engine .so are not imported.
 
-  * ORCHESTRATOR STUBS (consumed by ``test_hexfield_eval_orchestrator`` and
+  * Orchestrator stubs (used by ``test_hexfield_eval_orchestrator`` and
     the parts tests): ``_make_run`` (fake run tree), ``_paired_match`` /
-    ``_sealbot_match`` (synthetic match-result builders with a real pentanomial
-    block), ``_StubArena`` (records calls + returns synthetic matches), and the
-    richer ``_FakeArena`` (per-opponent scorer + visits capture).
+    ``_sealbot_match`` (synthetic match-result builders with a pentanomial
+    block), ``_StubArena`` (records calls + returns synthetic matches), and
+    ``_FakeArena`` (per-opponent scorer + visits capture).
 
-Importing this module is torch-free (it only touches ``hexfield.config`` /
-``hexfield.geometry`` / ``hexo_engine.types``), so every consumer collects + runs
-on a CPU-only interpreter and never touches the live training run.
+Importing this module touches only ``hexfield.geometry`` and
+``hexo_engine.types``; it does not import torch.
 """
 
 from __future__ import annotations
@@ -41,41 +39,38 @@ from hexo_engine.types import Player  # noqa: E402
 # =========================================================================== #
 class _Terminal:
     def __init__(self, winner_label: str | None) -> None:
-        # str(self.winner) must yield "player0"/"player1" like the real engine.
-        self.winner = winner_label  # already the string label, or None
+        # String label "player0"/"player1", or None. str(self) returns it.
+        self.winner = winner_label
 
-    def __str__(self) -> str:  # pragma: no cover - not used directly
+    def __str__(self) -> str:  # pragma: no cover
         return str(self.winner)
 
 
 class _FakeState:
     """Connect6 mover schedule (0, 1,1, 0,0, 1,1, ...) over a fixed game length.
 
-    The engine is SEEDLESS (like the real one): every game starts identical, all
-    diversity comes from which action the search picks. ``winner_seat`` is set by
-    the harness when the game ends so the test can pin the net-A-centric winner
-    mapping deterministically.
+    Seedless: every game starts identical. ``winner_seat`` is set when the game
+    reaches ``game_len``.
     """
 
     def __init__(self, *, game_len: int) -> None:
         self.game_len = game_len
         self.ply = 0
         self.actions: list[int] = []
-        self.winner_seat: int | None = None  # 0/1 engine seat that "won"
+        self.winner_seat: int | None = None  # 0/1 engine seat, or None until terminal
 
     def mover_seat(self) -> int:
-        # Identical schedule to evaluation._play_pair's formula.
         return 0 if self.ply == 0 else (1 if ((self.ply - 1) // 2) % 2 == 0 else 0)
 
 
 class _FakeApi:
-    """Stand-in for hexo_engine.api with just what the arena calls."""
+    """Stand-in for hexo_engine.api exposing the methods the arena calls."""
 
     Player = Player
 
     def __init__(self, *, game_len: int, decide_winner) -> None:
         self._game_len = game_len
-        # decide_winner(state) -> engine seat int (0/1) that wins this game.
+        # decide_winner(state) -> engine seat int (0/1) that wins the game.
         self._decide_winner = decide_winner
 
     def new_game(self, *, seed=None, scenario=None):
@@ -106,17 +101,14 @@ class _FakeEvaluator:
 class _FakeSession:
     """Records ``search`` calls and returns one deterministic move per root.
 
-    Faithful to the CRN property that matters: the chosen move is a pure function
-    of (search RNG seed, position) — NOT of the game index or the evaluator — so
-    two games searched at the same position with the same seed pick the SAME
-    move (exactly what real symmetric MCTS does, and what the opening-CRN
-    guarantee relies on). At temperature 0 (the greedy tail) the move is a pure
-    function of position (deterministic argmax) so it is seed-independent. We do
-    NOT model real MCTS internals — only this call/return contract.
+    The chosen move is a pure function of (search RNG seed, position), and does
+    not depend on the game index or the evaluator. At temperature 0 the move
+    depends on position only (seed-independent); at temperature > 0 it also
+    depends on the seed. Only this call/return contract is modeled, not MCTS
+    internals.
     """
 
-    # Class-level shared log so the test can inspect every call across the two
-    # per-net sessions in one place.
+    # Class-level shared log spanning all sessions, for test inspection.
     calls: list[dict] = []
 
     def __init__(self) -> None:
@@ -124,8 +116,8 @@ class _FakeSession:
 
     @staticmethod
     def _move_for(seed: int, temperature: float, ply: int) -> int:
-        # Greedy (temp 0): position-only argmax. Sampled (temp > 0): also depends
-        # on the seed. Coords stay tiny so pack_action_id never overflows.
+        # temp 0: position-only. temp > 0: also depends on seed. Coords stay
+        # small so pack_action_id does not overflow.
         if temperature > 0.0:
             mix = (seed * 2654435761 + ply * 40503) % 7
         else:
@@ -174,10 +166,10 @@ def _make_session_factory():
 def _make_run(tmp_path: Path, epochs=(5, 10, 20, 40), *, bc: bool = True) -> Path:
     """A fake run tree ``<tmp>/runs/r/checkpoints/epoch_*.pt`` (+ BC sibling).
 
-    Mirrors the real layout ``select_opponents`` resolves: in-run checkpoints
-    under ``<run>/checkpoints`` and the BC prefit in a sibling ``hexfield_bc_1``
-    referenced by the default permanent-anchor path. Files are empty stubs —
-    selection is pure path resolution and never loads a checkpoint.
+    Layout resolved by ``select_opponents``: in-run checkpoints under
+    ``<run>/checkpoints`` and the BC prefit in a sibling ``hexfield_bc_1``.
+    Files contain the placeholder text "stub"; selection resolves paths and does
+    not load checkpoints.
     """
 
     run = tmp_path / "runs" / "r"
@@ -193,14 +185,14 @@ def _make_run(tmp_path: Path, epochs=(5, 10, 20, 40), *, bc: bool = True) -> Pat
 
 
 def _paired_match_from_scores(label_a: str, label_b: str, pair_scores: list[int]) -> dict:
-    """A fake ``play_checkpoint_match`` result with a real pentanomial block.
+    """A fake ``play_checkpoint_match`` result with a pentanomial block.
 
-    ``pair_scores`` is one net-A score per COMPLETE 2-game pair, in {0, 1, 2}
-    (net-A wins among the pair's two decided games). The shape exactly matches
-    ``eval_arena._build_match_result`` + ``_pentanomial_block`` (``score`` with
-    ``a_wins`` net-A-centric, ``pentanomial.pairs`` rows + the ``histogram_a_wins``
-    fallback), so the orchestrator's ``_checkpoint_edge_counts`` /
-    ``_pentanomial_to_paired_result`` consume it unchanged.
+    ``pair_scores`` is one net-A score per complete 2-game pair, in {0, 1, 2}
+    (net-A wins among the pair's two decided games). The shape matches
+    ``eval_arena._build_match_result`` + ``_pentanomial_block``: a ``score`` block
+    with net-A-centric ``a_wins``, ``pentanomial.pairs`` rows, and a
+    ``histogram_a_wins`` map. Consumed by the orchestrator's
+    ``_checkpoint_edge_counts`` / ``_pentanomial_to_paired_result``.
     """
 
     pairs = []
@@ -247,10 +239,9 @@ def _paired_match_from_scores(label_a: str, label_b: str, pair_scores: list[int]
 def _paired_match(label_a: str, label_b: str, n_pairs: int, a_score: int) -> dict:
     """Fake ``play_checkpoint_match`` result for a fixed per-pair net-A score.
 
-    ``a_score`` is the per-pair net-A score in {0, 1, 2}; we mix it with a split
-    pair so the pair-level SE is non-degenerate (all-identical pairs give SE 0,
-    which is not representative). Built on top of ``_paired_match_from_scores`` so
-    the result shape is identical to the explicit-scores form.
+    ``a_score`` is the per-pair net-A score in {0, 1, 2}. It is mixed with a
+    split (1) pair on odd indices so the pair-level SE is non-zero. Built on
+    ``_paired_match_from_scores``, so the result shape matches that form.
     """
 
     pair_scores = [a_score if i % 2 == 0 else 1 for i in range(max(n_pairs, 1))]
@@ -271,9 +262,9 @@ class _StubArena:
     """Records calls and returns synthetic matches at a configured strength.
 
     ``per_score`` is the per-pair net-A score (0/1/2) the candidate scores vs
-    every checkpoint opponent; ``sealbot_winrate`` sets the binomial SealBot edge.
-    ``sealbot_raises`` (a callable or None) lets a test make the SealBot runner
-    blow up to exercise the fail-open path.
+    every checkpoint opponent; ``sealbot_winrate`` sets the binomial SealBot
+    winrate. ``sealbot_raises`` (a callable or None) is invoked at the start of
+    ``play_sealbot_match`` when set, allowing a test to raise there.
     """
 
     def __init__(self, *, per_score: int = 2, sealbot_winrate: float = 0.6,
@@ -298,10 +289,10 @@ class _StubArena:
 class _FakeArena:
     """Records calls and returns synthetic matches at a configured strength.
 
-    ``ckpt_scorer(label_b, n_pairs) -> per-pair-score pattern`` lets a test set
-    the candidate's strength PER opponent (so the primary edge can differ from the
-    descriptive ones); ``sealbot_winrate`` sets the binomial SealBot edge. The
-    visits each match is threaded are captured for the full-sims wiring checks.
+    ``ckpt_scorer(label_b, n_pairs) -> per-pair-score pattern`` sets the
+    candidate's per-pair scores per opponent; ``sealbot_winrate`` sets the
+    binomial SealBot winrate. The ``visits`` kwarg passed to each match is
+    captured and echoed into the returned match's ``meta``.
     """
 
     def __init__(self, *, ckpt_scorer, sealbot_winrate: float = 0.55) -> None:
@@ -318,7 +309,7 @@ class _FakeArena:
         self.ckpt_visits.append(kw.get("visits"))
         n_pairs = max(1, n // 2)
         match = _paired_match_from_scores(kw["label_a"], label_b, self._ckpt_scorer(label_b, n_pairs))
-        match["meta"]["visits"] = kw.get("visits")  # echo so provenance is testable
+        match["meta"]["visits"] = kw.get("visits")  # echo visits into meta
         return match
 
     def play_sealbot_match(self, ckpt, n, **kw) -> dict:
@@ -332,14 +323,12 @@ class _FakeArena:
 def _scores_for_winrate(target: float, n_pairs: int) -> list[int]:
     """A per-pair {0,1,2} pattern whose mean/2 approximates ``target`` win rate.
 
-    Uses a mix of decisive (2 / 0) and split (1) pairs so the pentanomial has
-    non-degenerate variance (degenerate all-WW pairs make the pair-level SE
-    zero, which is not representative). The exact rate is not load-bearing —
-    tests assert verdict DIRECTION, not a specific Elo.
+    Mixes decisive (2 / 0) and split (1) pairs so the pentanomial has non-zero
+    pair-level variance. The rate is approximate.
     """
 
     if target >= 0.7:
-        return [2 if i % 2 == 0 else 1 for i in range(n_pairs)]      # ~0.75
+        return [2 if i % 2 == 0 else 1 for i in range(n_pairs)]      # mean/2 ~0.75
     if target <= 0.3:
-        return [0 if i % 2 == 0 else 1 for i in range(n_pairs)]      # ~0.25
-    return [2 if i % 3 == 0 else (0 if i % 3 == 1 else 1) for i in range(n_pairs)]  # ~0.5
+        return [0 if i % 2 == 0 else 1 for i in range(n_pairs)]      # mean/2 ~0.25
+    return [2 if i % 3 == 0 else (0 if i % 3 == 1 else 1) for i in range(n_pairs)]  # mean/2 ~0.5

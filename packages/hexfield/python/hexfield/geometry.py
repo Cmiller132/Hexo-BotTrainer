@@ -1,8 +1,7 @@
 """Hex-lattice geometry: distance, packing, D6 transforms, bias-row indexing.
 
 Pure functions over axial coordinates (q, r); third cube axis s = -q - r.
-Everything here is exact integer math — no floats, no torch — so the Rust
-serve-time featurizer can mirror it tap-for-tap (M4 parity fixtures).
+All operations use exact integer arithmetic (no floats, no torch).
 """
 
 from __future__ import annotations
@@ -29,9 +28,10 @@ def hex_dist(dq: int, dr: int) -> int:
 
 
 def pack_action_id(q: int, r: int) -> int:
-    """Pack a coordinate exactly like engine legal.rs / hexo_engine.types.
+    """Pack an axial coordinate into a single integer action id.
 
-    ((q + 2^15) << 16) | (r + 2^15); integer order == ascending signed (q, r).
+    Returns ((q + 2^15) << 16) | (r + 2^15); integer order matches ascending
+    signed (q, r). Raises ValueError if q or r is outside i16 range.
     """
 
     if not (_COORD_MIN <= q <= _COORD_MAX and _COORD_MIN <= r <= _COORD_MAX):
@@ -46,9 +46,8 @@ def unpack_action_id(action_id: int) -> tuple[int, int]:
 
 
 # --- D6 about the origin --------------------------------------------------------
-# The forced opening pins translation, so D6 about the origin is the full
-# symmetry group of reachable positions. Indices 0-5 = rot60^i; 6-11 =
-# reflect-then-rotate: sigma_i = rot60^(i-6) ∘ reflect (spec §4).
+# Indices 0-5 = rot60^i; indices 6-11 = reflect-then-rotate:
+# sigma_i = rot60^(i-6) ∘ reflect.
 
 
 def rot60(q: int, r: int) -> tuple[int, int]:
@@ -84,21 +83,20 @@ def d6_inverse(index: int) -> int:
 
 
 def on_win_axis(dq: int, dr: int) -> bool:
-    """Whether an offset is collinear with one of the three engine win axes
-    Q=(1,0), R=(0,1), QR=(1,-1): dq == 0 ∨ dr == 0 ∨ dq + dr == 0.
+    """Whether an offset is collinear with one of the three win axes
+    Q=(1,0), R=(0,1), QR=(1,-1): dq == 0 or dr == 0 or dq + dr == 0.
 
-    Exactly D6-invariant: rotations 3-cycle the axes, reflections transpose
-    them (spec §2.3)."""
+    Invariant under D6 (rotations 3-cycle the axes, reflections transpose them)."""
 
     return dq == 0 or dr == 0 or dq + dr == 0
 
 
-# --- relative-position bias row index (spec §2.3) --------------------------------
+# --- relative-position bias row index --------------------------------------------
 
 
 def disk_offsets(radius: int) -> list[tuple[int, int]]:
-    """All axial offsets with hex_dist <= radius, ascending (dq, dr) order
-    (== ascending packed-id order; the canonical exact-row enumeration)."""
+    """All axial offsets with hex_dist <= radius, in ascending (dq, dr) order
+    (which matches ascending packed-id order)."""
 
     offsets = [
         (dq, dr)
@@ -117,11 +115,12 @@ assert len(_EXACT_LUT) == BIAS_EXACT_ROWS
 
 
 def rel_bias_index(dq: int, dr: int) -> int:
-    """Bias-table row for a cell-cell query/key offset (token rows are
-    assigned by sequence-slot class, not by this function).
+    """Bias-table row for a cell-cell query/key offset.
 
-    Exact LUT for d <= 8; `base + (d - 9)` ring buckets split on-win-axis vs
-    off-axis for 9 <= d <= 16; one far row beyond."""
+    For d = hex_dist(dq, dr) <= BIAS_DISK_RADIUS, returns the exact LUT row.
+    For BIAS_RING_MIN <= d <= BIAS_RING_MAX, returns base + (d - BIAS_RING_MIN),
+    where base is BIAS_ON_AXIS_BASE if on_win_axis else BIAS_OFF_AXIS_BASE.
+    Beyond that, returns BIAS_FAR_ROW."""
 
     d = hex_dist(dq, dr)
     if d <= BIAS_DISK_RADIUS:

@@ -1,56 +1,40 @@
-"""hexfield eval — the statistics layer (corrected, adversarially reviewed).
+"""hexfield eval statistics layer.
 
-This module is the load-bearing inference core for the multi-stage hexfield
-evaluation (docs/specs/hexfield_v2_synthesis.md eval track). It is *purely*
-arithmetic: it turns game tallies into win-rate CIs, Elos, a converged
-Bradley-Terry rating pool, and SPRT triage verdicts. It knows nothing about
-games, GPUs, or the run; callers feed it counts and it returns labels and
-intervals. It NEVER gates, promotes, or halts anything — the verdict is a
-reported string.
+Pure arithmetic: turns game tallies into win-rate CIs, Elos, a Bradley-Terry
+rating pool, and SPRT verdicts. Callers feed it counts; it returns labels and
+intervals. It performs no gating, promotion, or halting — the verdict is a
+returned string.
 
-Pure ``numpy`` (+ optional ``scipy`` for the BT optimiser, with a self-
-contained Newton fallback). No engine, no torch, no CUDA. Safe to unit-test on
-a CPU-only interpreter.
+Depends on ``numpy`` (and optional ``scipy`` for the BT optimiser, with a
+built-in Newton fallback). No engine, torch, or CUDA; runs on a CPU-only
+interpreter.
 
-THE FIVE CORRECTED-DESIGN FIXES (these are the whole point; the naive versions
-are wrong and were rejected in review):
+Design notes:
 
-1. BT MUST CONVERGE. The legacy ``scripts/_wf_r4_bt_rating.py`` does 500 steps
-   of fixed-step gradient descent (step 0.002) and stops with ``max|grad|~0.30``
-   — nowhere near a stationary point, so its Fisher-from-the-final-iterate
-   covariance is meaningless. Here we run Newton (or ``scipy.optimize.minimize``)
-   to a gradient tolerance and ``assert max|grad| < grad_tol`` BEFORE inverting
-   the Hessian. See :func:`bradley_terry`.
+1. The Bradley-Terry fit iterates to a gradient tolerance and asserts
+   ``max|grad| < grad_tol`` before inverting the Hessian for the covariance.
+   See :func:`bradley_terry`.
 
-2. PAIRING IS REAL CORRELATION. Paired games (same opening, swapped seats) are
-   NOT independent Bernoulli trials. The unit of replication is the PAIR. Win
-   rates get pair-level SEs (``N_pairs`` units, :func:`paired_winrate`), and the
-   BT likelihood is fed EFFECTIVE counts (pairing deflates the effective sample
-   size relative to ``2*N_pairs`` independent games), so the resulting CIs are
-   not anti-conservative. See :func:`pentanomial_summary` and
-   :func:`effective_counts`.
+2. Paired games (same opening, swapped seats) are treated with the PAIR as the
+   unit of replication. Win rates use pair-level SEs (``N_pairs`` units,
+   :func:`paired_winrate`), and the BT likelihood is fed effective counts that
+   deflate the sample size relative to ``2*N_pairs`` independent games. See
+   :func:`pentanomial_summary` and :func:`effective_counts`.
 
-3. MULTIPLE COMPARISONS. There is exactly ONE pre-registered primary hypothesis
-   per verdict: candidate ``L`` vs prior champion ``B``, tested via the
-   BT difference CI ``r_L - r_B`` using the full covariance (the ``-2*Cov_LB``
-   term — :func:`var_diff`). Every other opponent edge is DESCRIPTIVE: report
-   its Wilson/Elo CI, attach NO significance verdict. If several edges must gate
-   (they do not, by default), Bonferroni each at ``alpha/k``
-   (:func:`bonferroni_alpha`).
+3. The primary hypothesis per verdict is candidate ``L`` vs champion ``B``,
+   tested via the BT difference CI ``r_L - r_B`` using the full covariance
+   (the ``-2*Cov_LB`` term — :func:`var_diff`). Other opponent edges are
+   descriptive (Wilson/Elo CI, no significance verdict).
+   :func:`bonferroni_alpha` splits alpha across ``k`` edges if several must gate.
 
-4. HONEST SIGNIFICANCE. 128 games/epoch resolve ~100-120 Elo
-   (single-epoch ``SE(r_L - r_B) ~= 40-55 Elo``). The ~15-20 Elo resolution is
-   the MULTI-EPOCH ROLLING ASYMPTOTE of the persisted pool, not a per-epoch
-   property. :func:`expected_se_elo` and :func:`games_for_se` make this explicit;
-   do not overclaim a single epoch.
+4. :func:`expected_se_elo` and :func:`games_for_se` report the single-block Elo
+   SE and the game budget for a target SE.
 
-5. THE NOISY SEALBOT EDGE. SealBot's search depth varies under GPU load, so its
-   edge is over-dispersed and must NOT enter difference inference at full weight.
-   SealBot is used ONLY as the pinned zero-point of the rating scale; its edges
-   are down-weighted by an over-dispersion factor (:func:`overdispersion_weight`,
-   wired through ``bradley_terry(weights=...)``). Hexo has NO draws (binomial
-   base); the pentanomial "trinomial-per-game" device is only a conservative
-   bookkeeping for split pairs, never an invented draw outcome.
+5. An edge may be down-weighted by an over-dispersion factor
+   (:func:`overdispersion_weight`, passed as ``BTEdge.weight``). The ``anchor``
+   player is the pinned zero-point of the rating scale. Hexo has no draws
+   (binomial base); the pentanomial buckets carry split-pair outcomes, not
+   per-game draws.
 """
 
 from __future__ import annotations
@@ -60,13 +44,12 @@ from dataclasses import dataclass
 
 import numpy as np
 
-# logit (natural-log strength) -> Elo. Elo is defined so that a 10x odds ratio
-# (one e-fold in log-strength is *not* 400 Elo; 400 Elo is one base-10 fold).
-# r is in natural log units, so Elo = r * 400 / ln(10).
+# Conversion between natural-log strength (logit) and Elo: 400 Elo per base-10
+# fold of odds, so Elo = r * 400 / ln(10) for r in natural-log units.
 ELO_PER_LOGIT = 400.0 / math.log(10.0)
 LOGIT_PER_ELO = math.log(10.0) / 400.0
 
-# Default two-sided 95% normal quantile (z_{0.975}); matches the arena script.
+# Two-sided 95% normal quantile (z_{0.975}).
 Z95 = 1.959963984540054
 
 
@@ -76,13 +59,11 @@ Z95 = 1.959963984540054
 def wilson_ci(wins: int, n: int, z: float = Z95) -> tuple[float, float]:
     """Wilson score interval for a binomial proportion (no continuity corr.).
 
-    The Wilson interval is the inversion of the score test and stays inside
-    ``[0, 1]`` with good small-sample coverage, unlike the Wald interval. On an
-    empty sample it returns the trivial ``(0, 1)``.
+    Inversion of the score test; the interval stays inside ``[0, 1]``. Returns
+    ``(0, 1)`` on an empty sample.
 
-    NOTE on pairing: this treats the ``n`` games as independent Bernoulli
-    trials. For PAIRED games (shared openings, swapped seats) the independent
-    ``n`` is anti-conservative — use :func:`paired_winrate` /
+    Treats the ``n`` games as independent Bernoulli trials. For paired games
+    (shared openings, swapped seats) use :func:`paired_winrate` /
     :func:`pentanomial_summary`, whose SE is computed on ``N_pairs`` units.
     """
 
@@ -98,10 +79,10 @@ def wilson_ci(wins: int, n: int, z: float = Z95) -> tuple[float, float]:
 def los(wins: int, losses: int) -> float:
     """Likelihood-of-superiority: ``Phi((w - l) / sqrt(w + l))``.
 
-    The standard chess-engine LOS — the probability that the candidate is truly
-    stronger than the opponent given ``w`` wins and ``l`` losses, under the
-    normal approximation to the binomial (Hexo has no draws, so ``w + l`` is the
-    decided count). Returns 0.5 when no games are decided.
+    Probability that the candidate is stronger than the opponent given ``w``
+    wins and ``l`` losses, under the normal approximation to the binomial. Hexo
+    has no draws, so ``w + l`` is the decided count. Returns 0.5 when no games
+    are decided.
     """
 
     decided = wins + losses
@@ -111,7 +92,7 @@ def los(wins: int, losses: int) -> float:
 
 
 # --------------------------------------------------------------------------- #
-# 2. Paired / pentanomial scoring (fix #2: pairing is correlation).
+# 2. Paired / pentanomial scoring.
 # --------------------------------------------------------------------------- #
 @dataclass(frozen=True)
 class PairedResult:
@@ -119,22 +100,20 @@ class PairedResult:
 
     A "pair" is two games on one opening with the candidate playing each seat
     once. Each pair scores in {0, 0.5, 1, 1.5, 2} candidate-points out of 2; the
-    five-bucket count vector is the *pentanomial*. The mean per-pair score / 2 is
-    the candidate win rate, but its SE is taken over PAIRS (the true unit of
-    replication), which captures within-pair correlation that a per-game
-    binomial SE ignores.
+    five-bucket count vector is the pentanomial. The candidate win rate is the
+    mean per-pair score / 2; its SE is taken over PAIRS (the unit of
+    replication), which captures within-pair correlation.
 
     n_pairs:    number of complete pairs.
-    penta:      length-5 counts [LL, LD, DD(=split), DW, WW] in candidate terms,
-                i.e. points {0, 0.5, 1, 1.5, 2}. (Hexo has no draws, so a single
-                game is never 0.5; the 0.5/1.5 buckets only arise from a pair
-                whose two games split, and the middle 1.0 bucket is a 1-1 split.
-                We still carry the full five-bucket vector so the variance is
-                computed from the realised point distribution, not assumed.)
+    penta:      length-5 counts for candidate points {0, 0.5, 1, 1.5, 2}.
+                Hexo has no draws, so a single game is never 0.5; the 0.5/1.5
+                buckets arise from a pair whose two games split, and the 1.0
+                bucket is a 1-1 split. The full five-bucket vector is carried so
+                variance is computed from the realised point distribution.
     win_rate:   candidate win rate = mean pair score / 2, in [0, 1].
     se:         standard error of ``win_rate`` on N_pairs units.
-    var_drift:  per-pair variance of the (points/2) score (the over-dispersion
-                signal: 0 => every pair identical, 0.25 => max Bernoulli-like).
+    var_drift:  per-pair variance of the (points/2) score (0 => every pair
+                identical, 0.25 => max Bernoulli-like).
     """
 
     n_pairs: int
@@ -157,16 +136,13 @@ def pentanomial_summary(penta: "tuple[int, ...] | np.ndarray") -> PairedResult:
     """Summarise a pentanomial count vector into a pair-level win rate + SE.
 
     ``penta`` is the length-5 vector of pair counts for candidate points
-    ``{0, 0.5, 1, 1.5, 2}`` (i.e. ``[LL, split-low, even, split-high, WW]``).
-    The per-pair score (in [0, 1]) takes values ``{0, .25, .5, .75, 1}``; the
-    win rate is their mean and the SE is ``sqrt(sample_var / n_pairs)`` — the
-    pair is the unit, so within-pair correlation is already absorbed.
+    ``{0, 0.5, 1, 1.5, 2}``. The per-pair score (in [0, 1]) takes values
+    ``{0, .25, .5, .75, 1}``; the win rate is their mean and the SE is
+    ``sqrt(sample_var / n_pairs)`` with the pair as the unit, so within-pair
+    correlation is absorbed.
 
-    This is the variance-correct alternative to treating ``2 * n_pairs`` games
-    as independent: when the two games of a pair are positively correlated
-    (the usual case with shared openings) the pentanomial concentrates mass in
-    the 0 and 1 buckets, inflating ``var_drift`` and the SE relative to the
-    naive binomial — exactly the anti-conservatism fix.
+    Positive within-pair correlation concentrates pentanomial mass in the 0 and
+    1 buckets, raising ``var_drift`` and the SE relative to a per-game binomial.
     """
 
     counts = np.asarray(penta, dtype=np.float64)
@@ -183,9 +159,8 @@ def pentanomial_summary(penta: "tuple[int, ...] | np.ndarray") -> PairedResult:
     # Population variance of the per-pair score over the realised distribution.
     var = float((weight * (scores - mean) ** 2).sum())
     if n_pairs > 1:
-        # Sample-variance correction (Bessel) so the SE is unbiased for the
-        # mean; with one pair the SE is undefined (reported as the population
-        # sqrt(var/1), which is 0 for a single bucket — caller should widen).
+        # Bessel correction. With one pair this reduces to the population
+        # variance (0 for a single bucket).
         sample_var = var * n_pairs / (n_pairs - 1)
     else:
         sample_var = var
@@ -197,20 +172,18 @@ def paired_winrate(pair_scores: "list[float] | np.ndarray") -> PairedResult:
     """Pair-level win rate + SE directly from per-pair scores in ``[0, 1]``.
 
     ``pair_scores`` is one value per complete pair = (candidate points in the
-    pair) / 2, i.e. each entry is in ``{0, 0.25, 0.5, 0.75, 1}`` for Hexo (no
-    draws) but any value in ``[0, 1]`` is accepted. Bins into the pentanomial
-    and defers to :func:`pentanomial_summary`, so the SE is on ``N_pairs``
-    units. This is the convenient entry point when the runner emits raw pair
-    scores rather than a binned vector.
+    pair) / 2. Each entry is in ``{0, 0.25, 0.5, 0.75, 1}`` for Hexo (no draws)
+    but any value in ``[0, 1]`` is accepted. Bins into the pentanomial; the SE
+    is on ``N_pairs`` units. Entry point for callers that emit raw pair scores
+    rather than a binned vector.
     """
 
     arr = np.asarray(pair_scores, dtype=np.float64)
     if arr.size and (np.any(arr < 0.0) or np.any(arr > 1.0)):
         raise ValueError("pair scores must lie in [0, 1]")
     penta = np.zeros(5, dtype=np.float64)
-    # Nearest of the five canonical buckets (robust to fp dust); off-grid values
-    # (shouldn't occur for Hexo) snap to the closest bucket for the count, but
-    # the SE below is recomputed from the exact scores to stay faithful.
+    # Bin each score into the nearest of the five canonical buckets for the
+    # count vector. The SE below is recomputed from the exact scores.
     canonical = np.array([0.0, 0.25, 0.5, 0.75, 1.0])
     for v in arr:
         penta[int(np.argmin(np.abs(canonical - v)))] += 1.0
@@ -227,18 +200,15 @@ def paired_winrate(pair_scores: "list[float] | np.ndarray") -> PairedResult:
 def effective_counts(result: PairedResult) -> tuple[float, float, float]:
     """Effective ``(wins, losses, n_eff)`` for feeding paired data to the BT fit.
 
-    The BT likelihood (:func:`bradley_terry`) wants per-edge ``(wins, losses)``
-    in *independent-Bernoulli* units. Paired games are over- (or under-)
-    dispersed relative to that, so plugging in the raw ``2 * n_pairs`` games
-    yields anti-conservative covariance. We deflate to an EFFECTIVE game count
-    via the design effect ``deff = Var_paired / Var_binomial`` (the ratio of the
-    realised pair-mean variance to the binomial variance of independent games),
-    then split ``n_eff`` by the observed win rate.
+    The BT likelihood (:func:`bradley_terry`) takes per-edge ``(wins, losses)``
+    in independent-Bernoulli units. Paired games are deflated to an effective
+    game count via the design effect ``deff = Var_paired / Var_binomial`` (the
+    ratio of the realised pair-mean variance to the binomial variance of
+    independent games), then ``n_eff`` is split by the observed win rate.
 
-    deff > 1 (positive within-pair correlation, the common case) shrinks
-    ``n_eff`` below ``2 * n_pairs`` — fewer effective trials, wider CIs. deff < 1
-    (anti-correlated pairs) is allowed but never inflates ``n_eff`` past the
-    physical game count.
+    deff > 1 (positive within-pair correlation) shrinks ``n_eff`` below
+    ``2 * n_pairs``. deff < 1 (anti-correlated pairs) is allowed but ``n_eff``
+    is capped at the physical game count.
     """
 
     if result.n_pairs <= 0 or not math.isfinite(result.win_rate):
@@ -247,18 +217,18 @@ def effective_counts(result: PairedResult) -> tuple[float, float, float]:
     p = result.win_rate
     var_binom = p * (1.0 - p)  # per-game (independent) variance of a 0/1 score
     if var_binom <= 0.0:
-        # Degenerate (all wins or all losses): no information about dispersion;
-        # fall back to the physical game count (the BT prior keeps it finite).
+        # All wins or all losses: no dispersion information; use the physical
+        # game count.
         n_eff = n_games
     else:
         # var_drift is the per-pair variance of (points/2). For independent
-        # games the per-pair mean variance would be var_binom / 2, so the design
-        # effect on the pair mean is var_drift / (var_binom / 2). The effective
-        # number of independent games is the physical count / deff.
+        # games the per-pair mean variance is var_binom / 2, so the design
+        # effect on the pair mean is var_drift / (var_binom / 2), and the
+        # effective independent game count is the physical count / deff.
         deff = (result.var_drift / (var_binom / 2.0)) if result.var_drift > 0 else 1.0
         deff = max(deff, 1e-6)
         n_eff = n_games / deff
-        n_eff = min(n_eff, n_games)  # never claim more info than games played
+        n_eff = min(n_eff, n_games)  # cap at games played
     wins = p * n_eff
     losses = (1.0 - p) * n_eff
     return (wins, losses, n_eff)
@@ -270,9 +240,8 @@ def effective_counts(result: PairedResult) -> tuple[float, float, float]:
 def elo_from_winrate(p: float) -> float:
     """Elo difference implied by a win rate ``p`` (logistic / Bradley-Terry).
 
-    ``elo = (400 / ln 10) * ln(p / (1 - p))``. Saturates at +-inf as ``p`` hits
-    0 or 1 (an undefeated result is unbounded in Elo — callers should report the
-    CI, not the point estimate, near the rails).
+    ``elo = (400 / ln 10) * ln(p / (1 - p))``. Returns +-inf as ``p`` reaches
+    0 or 1.
     """
 
     if p <= 0.0:
@@ -292,9 +261,9 @@ def elo_winrate_se(p: float, se_p: float) -> float:
     """Delta-method SE of the Elo estimate given win rate ``p`` and its SE.
 
     ``d/dp elo = (400 / ln 10) / (p (1 - p))``, so
-    ``SE(elo) ~= (400 / ln 10) * SE(p) / (p (1 - p))``. Pass ``se_p`` from the
-    PAIR-level SE (:func:`pentanomial_summary`) so the Elo CI inherits the
-    pairing correction. Returns +inf at the rails (derivative blows up).
+    ``SE(elo) ~= (400 / ln 10) * SE(p) / (p (1 - p))``. Passing ``se_p`` from the
+    pair-level SE (:func:`pentanomial_summary`) carries the pairing correction
+    into the Elo CI. Returns +inf at ``p`` = 0 or 1.
     """
 
     if not (0.0 < p < 1.0) or not math.isfinite(se_p):
@@ -305,10 +274,8 @@ def elo_winrate_se(p: float, se_p: float) -> float:
 def elo_ci_from_winrate(p: float, se_p: float, z: float = Z95) -> tuple[float, float]:
     """Two-sided Elo CI from a win rate and its (pair-level) SE.
 
-    Built on the win-rate scale then mapped through :func:`elo_from_winrate`
-    (monotone), which keeps the interval sane near the rails where the
-    delta-method Elo SE diverges. The point estimate uses ``p``; the endpoints
-    use ``p +- z*se_p`` clipped to ``(0, 1)``.
+    Endpoints ``p +- z*se_p`` are clipped to ``[0, 1]`` and mapped through the
+    monotone :func:`elo_from_winrate`. The point estimate uses ``p``.
     """
 
     lo_p = min(max(p - z * se_p, 0.0), 1.0)
@@ -317,18 +284,15 @@ def elo_ci_from_winrate(p: float, se_p: float, z: float = Z95) -> tuple[float, f
 
 
 # --------------------------------------------------------------------------- #
-# 4. Over-dispersion / SealBot down-weight hook (fix #5).
+# 4. Over-dispersion down-weight hook.
 # --------------------------------------------------------------------------- #
 def overdispersion_weight(observed_var: float, binomial_var: float) -> float:
     """Likelihood down-weight ``1 / deff`` for an over-dispersed edge.
 
     ``deff = observed_var / binomial_var`` is the design effect (>1 when the
-    edge is noisier than an independent binomial — e.g. the SealBot edge, whose
-    opponent depth drifts under GPU load). The BT likelihood contribution of
-    such an edge is scaled by ``1 / max(deff, 1)`` so an over-dispersed edge
-    cannot pretend to carry full Fisher information. An under-dispersed edge
-    (deff < 1) is clamped to weight 1.0 — we never let an edge claim MORE
-    information than its nominal game count.
+    edge is noisier than an independent binomial). An over-dispersed edge's BT
+    likelihood contribution is scaled by ``1 / max(deff, 1)``. An under-dispersed
+    edge (deff < 1) is clamped to weight 1.0.
     """
 
     if binomial_var <= 0.0 or observed_var <= 0.0:
@@ -338,7 +302,7 @@ def overdispersion_weight(observed_var: float, binomial_var: float) -> float:
 
 
 # --------------------------------------------------------------------------- #
-# 5. Bradley-Terry rating pool — CONVERGED (fix #1), with full covariance.
+# 5. Bradley-Terry rating pool with full covariance.
 # --------------------------------------------------------------------------- #
 @dataclass(frozen=True)
 class BTEdge:
@@ -348,11 +312,10 @@ class BTEdge:
     wins_a:  decided games won by ``a`` against ``b``.
     wins_b:  decided games won by ``b`` against ``a``.
     weight:  per-edge likelihood weight (default 1.0). Set < 1 to down-weight an
-             over-dispersed edge (e.g. ``overdispersion_weight(...)`` for the
-             SealBot edge), or use :func:`effective_counts` to pre-deflate paired
-             games and leave ``weight`` at 1.0. Weighting scales BOTH the
-             gradient and the Fisher information of the edge, so the covariance
-             stays consistent with the down-weighted likelihood.
+             over-dispersed edge (e.g. via :func:`overdispersion_weight`), or use
+             :func:`effective_counts` to pre-deflate paired games and leave
+             ``weight`` at 1.0. Weighting scales both the gradient and the Fisher
+             information of the edge.
     """
 
     a: str
@@ -364,19 +327,18 @@ class BTEdge:
 
 @dataclass(frozen=True)
 class BTResult:
-    """Converged Bradley-Terry fit, SealBot pinned at 0 Elo.
+    """Bradley-Terry fit with the anchor player pinned at 0 Elo.
 
     players:    label -> index into the rating/covariance arrays.
-    elo:        Elo rating per player (anchor pinned exactly at 0.0).
-    cov:        full covariance matrix of the FREE (non-anchor) ratings, in
-                Elo^2, embedded into the full ``(n, n)`` layout with the anchor
-                row/col zeroed. Use :func:`var_diff` for ``Var(r_i - r_j)``.
+    elo:        Elo rating per player (anchor pinned at 0.0).
+    cov:        covariance matrix of the free (non-anchor) ratings, in Elo^2,
+                embedded into the full ``(n, n)`` layout with the anchor row/col
+                zeroed. Use :func:`var_diff` for ``Var(r_i - r_j)``.
     anchor:     the pinned label (zero-point of the scale).
     max_grad:   max|gradient| of the free params at the solution (asserted
-                ``< grad_tol`` during the fit; reported for the manifest).
+                ``< grad_tol`` during the fit).
     iterations: optimiser iterations used.
-    converged:  always True on return (the fit raises otherwise); kept for the
-                record / serialisation.
+    converged:  True on return; the fit raises otherwise.
     """
 
     players: dict[str, int]
@@ -410,12 +372,10 @@ class BTResult:
         return var_diff(self.cov, self.players[i], self.players[j])
 
     def diff_ci(self, i: str, j: str, z: float = Z95) -> tuple[float, float]:
-        """CI for ``r_i - r_j`` — the PRIMARY hypothesis test (fix #3).
+        """CI for ``r_i - r_j`` (candidate ``i`` vs champion ``j``).
 
-        This is the only edge that carries a significance verdict: candidate
-        ``i`` vs prior champion ``j``. The variance includes the shared-anchor
-        positive covariance, which TIGHTENS the difference CI relative to adding
-        the two marginal SEs in quadrature.
+        The variance includes the shared-anchor covariance term, which tightens
+        the difference CI relative to adding the two marginal SEs in quadrature.
         """
 
         d = self.diff(i, j)
@@ -429,11 +389,9 @@ class BTResult:
 def var_diff(cov: np.ndarray, i: int, j: int) -> float:
     """``Var(r_i - r_j) = Cov_ii + Cov_jj - 2 Cov_ij`` from a covariance matrix.
 
-    The cross term is the whole reason a *pooled* rating beats per-edge Elos:
-    when ``i`` and ``j`` are measured against shared anchors, ``Cov_ij > 0`` and
-    the difference variance shrinks below ``Cov_ii + Cov_jj``. Never compute a
-    difference CI by adding marginal SEs in quadrature — that drops the
-    ``-2 Cov_ij`` term and is anti-conservative for a comparison.
+    When ``i`` and ``j`` are measured against shared anchors, ``Cov_ij > 0`` and
+    the difference variance is below ``Cov_ii + Cov_jj``. The ``-2 Cov_ij`` term
+    is dropped if a difference CI is built by adding marginal SEs in quadrature.
     """
 
     return float(cov[i, i] + cov[j, j] - 2.0 * cov[i, j])
@@ -448,36 +406,31 @@ def bradley_terry(
     max_iter: int = 200,
     use_scipy: bool = True,
 ) -> BTResult:
-    """Fit a Bradley-Terry rating pool, SealBot (``anchor``) pinned at 0 Elo.
+    """Fit a Bradley-Terry rating pool with ``anchor`` pinned at 0 Elo.
 
-    The model: ``P(a beats b) = sigma(r_a - r_b)`` with ``r`` in natural-log
-    strength. We maximise the (weighted) binomial log-likelihood over the FREE
-    ratings (every player except ``anchor``, which is fixed at 0) plus a weak
-    Gaussian ridge prior ``r ~ N(0, prior_sd^2)`` that (a) keeps the fit
-    identifiable / finite even with separated edges (an undefeated player has an
-    unbounded MLE) and (b) makes the Hessian positive-definite so the covariance
-    exists. The prior SD defaults to 1000 Elo — broad enough to be negligible
-    against any real data, tight enough to regularise rails.
+    Model: ``P(a beats b) = sigma(r_a - r_b)`` with ``r`` in natural-log
+    strength. Maximises the weighted binomial log-likelihood over the free
+    ratings (every player except ``anchor``, fixed at 0) plus a Gaussian ridge
+    prior ``r ~ N(0, prior_sd^2)`` that keeps the fit finite under separated
+    edges (an undefeated player has an unbounded MLE) and makes the Hessian
+    positive-definite. ``prior_sd_elo`` defaults to 1000 Elo.
 
-    CONVERGENCE (fix #1): we use Newton's method with a backtracking line search
-    (or ``scipy.optimize.minimize(method="trust-ncg"/"Newton-CG")`` when
-    available and ``use_scipy``), iterating until ``max|grad| < grad_tol``, then
-    ``assert`` it. The covariance is the inverse of the Hessian of the negative
-    log-posterior at that converged point — which is only meaningful BECAUSE we
-    actually reached a stationary point (the legacy fixed-step GD did not).
+    Uses Newton's method with a backtracking line search (or
+    ``scipy.optimize.minimize(method="trust-ncg")`` when available and
+    ``use_scipy``), iterating until ``max|grad| < grad_tol``, then asserting it.
+    The covariance is the inverse Hessian of the negative log-posterior at that
+    point.
 
-    Returns ratings + covariance in Elo units (the internal logit-scale Hessian
-    inverse is scaled by ``ELO_PER_LOGIT**2``). The anchor's row/col in ``cov``
-    is zero (it is fixed, not estimated). Raises ``RuntimeError`` if the
-    gradient tolerance is not met (never returns an unconverged fit).
+    Returns ratings + covariance in Elo units (the logit-scale Hessian inverse
+    is scaled by ``ELO_PER_LOGIT**2``). The anchor's row/col in ``cov`` is zero.
+    Asserts if the gradient tolerance is not met.
     """
 
     norm_edges = _normalise_edges(edges)
     edge_labels = {lbl for e in norm_edges for lbl in (e.a, e.b)}
     if anchor not in edge_labels:
-        # A pinned zero-point with no games is not a usable anchor: it would sit
-        # at 0 Elo by fiat with no edge tying the scale to it, leaving the rest
-        # of the pool free-floating. Require at least one anchor edge.
+        # The anchor must appear in at least one edge; otherwise nothing ties
+        # the rest of the pool to the pinned zero-point.
         raise ValueError(
             f"anchor {anchor!r} appears in no edge; the pinned zero-point must "
             f"play at least one game. Players with edges: {sorted(edge_labels)}"
@@ -507,7 +460,7 @@ def bradley_terry(
     def neg_log_post(theta: np.ndarray) -> float:
         r = full_r(theta)
         d = r[ia] - r[ib]
-        # -loglik via the numerically stable log-sigmoid; +ridge prior.
+        # log-likelihood via the stable log-sigmoid; plus ridge prior.
         ll = np.sum(we * (wa * _log_sigmoid(d) + wb * _log_sigmoid(-d)))
         prior = 0.5 * prior_prec * float(theta @ theta)
         return -ll + prior
@@ -560,18 +513,18 @@ def bradley_terry(
     if not used_scipy:
         theta, iterations = _newton_solve(neg_log_post, grad_free, hess_free, theta, grad_tol, max_iter)
 
-    # If scipy ran but missed tolerance, polish with Newton (belt and braces).
+    # If scipy ran but missed tolerance, polish with Newton.
     if np.max(np.abs(grad_free(theta))) >= grad_tol:
         theta, extra = _newton_solve(neg_log_post, grad_free, hess_free, theta, grad_tol, max_iter)
         iterations += extra
 
     max_grad = float(np.max(np.abs(grad_free(theta)))) if m > 0 else 0.0
-    # FIX #1 — the assert that the legacy script could not satisfy.
+    # Require a stationary point before inverting the Hessian for the covariance.
     assert max_grad < grad_tol, (
         f"Bradley-Terry did not converge: max|grad|={max_grad:.3e} "
         f">= grad_tol={grad_tol:.3e}. A non-stationary fit makes the "
-        f"Hessian-inverse covariance meaningless (this is exactly the legacy "
-        f"_wf_r4_bt_rating.py bug). Increase max_iter or check for degenerate edges."
+        f"Hessian-inverse covariance invalid. Increase max_iter or check for "
+        f"degenerate edges."
     )
 
     # Covariance = inverse Hessian of the neg-log-posterior at the optimum,
@@ -598,7 +551,7 @@ def bradley_terry(
 
 
 # --------------------------------------------------------------------------- #
-# 6. SPRT — gross-regression triage (fix: honest about expected-N).
+# 6. SPRT triage.
 # --------------------------------------------------------------------------- #
 @dataclass(frozen=True)
 class SPRTResult:
@@ -621,11 +574,8 @@ def sprt_llr(wins: int, losses: int, elo0: float, elo1: float) -> float:
 
     Per decided game the LLR increment is ``ln(p1/p0)`` for a win and
     ``ln((1-p1)/(1-p0))`` for a loss, where ``p_i = winrate_from_elo(elo_i)``.
-    H0 is the null Elo gap ``elo0`` (typically a small negative = "gross
-    regression"), H1 the alternative ``elo1`` (typically ~0 or slightly
-    positive). This is the binomial SPRT; Hexo has no draws so there is no
-    trinomial pentanomial-SPRT here (that device is only for paired CI variance,
-    not for this triage).
+    H0 is the null Elo gap ``elo0``, H1 the alternative ``elo1``. Binomial SPRT;
+    Hexo has no draws.
     """
 
     p0 = winrate_from_elo(elo0)
@@ -660,17 +610,12 @@ def sprt(
     alpha: float = 0.05,
     beta: float = 0.05,
 ) -> SPRTResult:
-    """SPRT verdict for a no-draw record — a GROSS-REGRESSION TRIAGE only.
+    """SPRT verdict for a no-draw record.
 
-    HONESTY NOTE (do not advertise this as a calibrated 5%/5% test of a small
-    edge): the SPRT's nominal ``alpha``/``beta`` hold only at the two simple
-    hypotheses ``elo0`` and ``elo1``. For an effect sitting BETWEEN them (the
-    indifference region — exactly where a borderline candidate lives) the
-    expected sample size is large (order ~285 decided games for a [-X, +X]-Elo
-    bracket), so any small per-stage game cap will MOSTLY return "continue"
-    (escalate to the deep eval). Stage B uses this purely to catch a *gross*
-    regression cheaply and to early-accept an obvious improvement; the calibrated
-    measurement is Stage C/D (paired games + BT pool), never this.
+    The nominal ``alpha``/``beta`` hold at the two simple hypotheses ``elo0`` and
+    ``elo1``. For an effect between them (the indifference region) the expected
+    sample size is large, so a small per-stage game cap mostly returns
+    "continue". Returns "accept_h1", "accept_h0", or "continue".
     """
 
     lower, upper = sprt_bounds(alpha, beta)
@@ -685,20 +630,15 @@ def sprt(
 
 
 # --------------------------------------------------------------------------- #
-# 7. Honest-resolution helpers (fix #4) and multiple-comparison helper (#3).
+# 7. Resolution helpers and multiple-comparison helper.
 # --------------------------------------------------------------------------- #
 def expected_se_elo(n_games: int, p: float = 0.5) -> float:
-    """Approx single-block SE of a measured Elo difference from ``n_games``.
+    """Single-block Elo SE for ``n_games`` independent games at win rate ``p``.
 
     Uses the binomial win-rate SE ``sqrt(p(1-p)/n)`` mapped through the
     delta-method Elo slope at ``p``. At ``p = 0.5`` and ``n = 128`` this is
-    ~30.7 Elo for ONE win-rate of INDEPENDENT games. The honest single-epoch SE
-    of the PRIMARY *difference* ``r_L - r_B`` is larger (~40-55 Elo): the games
-    are PAIRED so the effective N is below 128 (design effect ~2 => ~64), and a
-    difference of two ratings adds the ~``sqrt(2)`` of two SEs. Either way it is
-    NOT the ~15-20 Elo that the *rolling, multi-epoch* pool asymptotes to. This
-    function exists so callers/docs quote the honest single-epoch number rather
-    than the multi-epoch asymptote.
+    ~30.7 Elo for one win rate of independent games. The SE of a difference
+    ``r_L - r_B`` of two paired ratings is larger.
     """
 
     if n_games <= 0:
@@ -708,12 +648,10 @@ def expected_se_elo(n_games: int, p: float = 0.5) -> float:
 
 
 def games_for_se(target_se_elo: float, p: float = 0.5) -> int:
-    """Independent games needed for a target Elo SE (the multi-epoch budget).
+    """Independent games needed for a target Elo SE.
 
-    Inverts :func:`expected_se_elo`. E.g. reaching ~15 Elo SE near ``p = 0.5``
-    needs on the order of 1000+ decided games — i.e. roughly ``ceil(1000/128)``
-    epochs of the 128-game eval COMPOUNDING in the persisted pool, which is the
-    only way the tight resolution is achieved. Makes fix #4 quantitative.
+    Inverts :func:`expected_se_elo`. Reaching ~15 Elo SE near ``p = 0.5`` needs
+    on the order of 1000+ decided games.
     """
 
     if target_se_elo <= 0.0:
@@ -728,10 +666,8 @@ def games_for_se(target_se_elo: float, p: float = 0.5) -> int:
 def bonferroni_alpha(alpha: float, k: int) -> float:
     """Per-edge alpha for ``k`` simultaneous gating comparisons (``alpha / k``).
 
-    Only relevant if multiple edges must each gate (they do NOT by default — the
-    primary verdict is a single BT difference test, fix #3). When a caller opts
-    several edges into gating, split the family-wise ``alpha`` evenly so the
-    overall false-positive rate stays bounded.
+    Splits the family-wise ``alpha`` evenly across ``k`` edges to bound the
+    overall false-positive rate.
     """
 
     if k <= 0:
@@ -740,7 +676,7 @@ def bonferroni_alpha(alpha: float, k: int) -> float:
 
 
 # --------------------------------------------------------------------------- #
-# Verdict label (PURE EVAL — never gates; just a reported string).
+# Verdict label (returns a string; performs no gating).
 # --------------------------------------------------------------------------- #
 def primary_verdict(
     diff_ci: tuple[float, float],
@@ -749,15 +685,10 @@ def primary_verdict(
 ) -> str:
     """Map a BT difference CI ``(lo, hi)`` for ``r_candidate - r_champion`` to a label.
 
-    PURELY a reported label (the feature never gates):
-      - "PROMOTE"      if the whole CI is above 0 (candidate provably stronger),
-      - "REGRESS"      if the whole CI is below ``regress_elo`` (provably weaker),
-      - "INCONCLUSIVE" otherwise (CI straddles the threshold — the common
-        single-epoch outcome given fix #4's ~40-55 Elo SE).
-
-    Promotion/gating consumers of this label MUST default OFF
-    (``eval_gating_enabled = False``, ``eval_promotion_enabled = False``) and be
-    wired to nothing that alters the training run.
+    Returns:
+      - "PROMOTE"      if the whole CI is above 0,
+      - "REGRESS"      if the whole CI is below ``regress_elo``,
+      - "INCONCLUSIVE" otherwise (CI straddles the threshold).
     """
 
     lo, hi = diff_ci
@@ -810,10 +741,8 @@ def _newton_solve(
     """Newton's method with backtracking line search to a gradient tolerance.
 
     Returns ``(theta, iterations)``. The Hessian is SPD here (Fisher info + ridge
-    prior), so the Newton step is a descent direction; the Armijo backtrack
-    guarantees monotone decrease of the neg-log-posterior and convergence to the
-    unique minimiser. This is the convergence guarantee the legacy fixed-step GD
-    lacked.
+    prior), so the Newton step is a descent direction and the Armijo backtrack
+    gives monotone decrease of the neg-log-posterior toward the unique minimiser.
     """
 
     theta = np.array(theta0, dtype=np.float64)

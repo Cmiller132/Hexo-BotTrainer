@@ -1,34 +1,34 @@
-"""hexo_train trainer: per-epoch KataGo-style replay window.
+"""hexo_train trainer: per-epoch replay-window selection and single-pass training.
 
-``select_training_samples`` builds the window: a mtime-free
-``(generation, game_key)`` manifest → power-law taper → recent-window cut → md5
-split → keep_prob subsample → overshoot-skip file selection → train-bucket reuse
-governor → an in-RAM packed columnar :class:`~hexfield.window.PackedWindow`.
+``select_training_samples`` builds the window from an mtime-free
+``(generation, game_key)`` manifest: power-law taper, recent-window cut, md5
+train/val split, keep_prob subsample, overshoot-skip file selection, and a
+train-bucket reuse governor, producing an in-RAM packed columnar
+:class:`~hexfield.window.PackedWindow`.
 
-``train_passes`` drains that PackedWindow in a SINGLE pass, no within-epoch repeat:
+``train_passes`` drains that PackedWindow in a single pass (no within-epoch
+repeat):
 
-1. Pre-draw (main thread, before expansion) a per-row D6 vector from
+1. Pre-draw, on the main thread before expansion, a per-row D6 vector from
    ``_aug_seed(run_seed, epoch)`` and a survivor permutation from
-   ``_perm_seed(run_seed, epoch)`` — all randomness drawn up front, never per-row
-   inside the loop, so results are reproducible and backend-independent.
+   ``_perm_seed(run_seed, epoch)``. No per-row rng call occurs inside the loop.
 2. Expand all rows through ``expand_backends.expand_rows`` under the configured
-   backend (``serial`` | ``pool`` spawn ProcessPool | ``rust`` rayon kernel). All
-   return a per-row validity mask (off-legal rows flagged invalid, not dropped
-   in-worker). Backends are element-wise equal because randomness is pre-drawn
-   and results reassembled in original row order.
+   backend (``serial`` | ``pool`` spawn ProcessPool | ``rust`` rayon kernel).
+   Each returns a per-row validity mask; off-legal rows are flagged invalid, not
+   dropped in-worker. Results are reassembled in original row order.
 3. Filter survivors (validity mask), permute, truncate to ``effective_rows``.
 4. Micro-bucket (``pair_budget_microbuckets``).
 5. loss / optimizer / AMP / grad-clip.
 
 Backend: ``config.training.expand_backend`` (env ``HEXFIELD_EXPAND`` overrides);
 pool worker count: ``config.training.expand_workers`` (env
-``HEXFIELD_EXPAND_WORKERS`` overrides; ``0`` ⇒ auto ``min(8, cpu//4)``). The
+``HEXFIELD_EXPAND_WORKERS`` overrides; ``0`` selects ``min(8, cpu//4)``). The
 persistent spawn pool is owned by the trainer (``_get_expand_pool``) and torn
-down by ``close()`` at run end.
+down by ``close()``.
 
 ``effective_rows`` is threaded from ``select_training_samples`` via
-``self._last_select``; a direct ``train_passes`` call without a prior selection
-recomputes it from the window + config.
+``self._last_select``; a ``train_passes`` call without a prior selection
+recomputes it from the window and config.
 """
 
 from __future__ import annotations
@@ -76,19 +76,17 @@ D6_SIZE = 12
 def _aug_seed(run_seed: int, epoch: int) -> int:
     """Deterministic per-(run, epoch) seed for the D6 augmentation draw.
 
-    A stable fold of ``(run_seed, epoch)`` so each row's orientation
-    re-randomizes every epoch while staying reproducible. ALL D6 randomness is
-    drawn from this seed on the main thread BEFORE expansion — no per-row ``rng``
-    call ever happens inside the loop.
+    A fold of ``(run_seed, epoch)``. All D6 randomness is drawn from this seed
+    on the main thread before expansion.
     """
     return (int(run_seed) * 1_000_003 + int(epoch) * 9_176 + 1) & 0x7FFFFFFF
 
 
 def _perm_seed(run_seed: int, epoch: int) -> int:
-    """Deterministic per-(run, epoch) seed for the SURVIVOR permutation. A
-    distinct fold from :func:`_aug_seed` so the permutation stream is independent
-    of the D6 stream; both are pure functions of ``(run_seed, epoch)`` so the
-    same seed yields an identical survivor index and D6 vector."""
+    """Deterministic per-(run, epoch) seed for the survivor permutation. A
+    distinct fold from :func:`_aug_seed`, so the permutation stream is
+    independent of the D6 stream. Both are pure functions of ``(run_seed,
+    epoch)``."""
     return (int(run_seed) * 2_654_435_761 + int(epoch) * 40_503 + 7) & 0x7FFFFFFF
 
 
@@ -100,35 +98,32 @@ class HexfieldTrainer:
         self.device = torch.device(config.device)
         self.scaler = torch.amp.GradScaler(enabled=self.device.type == "cuda")
         self.global_step = 0
-        # Adaptive grad-clip EMA of the pre-clip grad-norm (v3 #1). Cross-epoch,
-        # NOT checkpointed — seeded from the first observed norm and updated every
-        # step (including warmup) so the post-warmup threshold has a value to use.
+        # EMA of the pre-clip grad-norm for adaptive grad-clip. Cross-epoch, not
+        # checkpointed; seeded from the first observed norm and updated every step
+        # (including warmup).
         self._grad_norm_ema: float | None = None
-        # Static param-group partition for per-group grad-norm logging (v3 #1).
+        # Param-group partition for per-group grad-norm logging.
         self._grad_norm_groups = self._build_grad_norm_groups()
-        # Persisted KataGo-style train-bucket governor + window bookkeeping.
-        # Serialized into the checkpoint meta by the saver and restored by the
-        # loader on the RESUME branch only. Starts fresh here.
+        # Train-bucket governor + window bookkeeping. Serialized into the
+        # checkpoint meta by the saver and restored by the loader on resume;
+        # starts fresh here.
         self.train_state = HexfieldTrainState()
         # Per-epoch selection bookkeeping stashed by select_training_samples and
-        # read back by train_passes (the same trainer instance backs both dispatch
-        # calls). Threads effective_rows / window_start / reuse_ratio /
-        # train_bucket_level into the consumer.
+        # read back by train_passes on the same trainer instance. Carries
+        # effective_rows / window_start / reuse_ratio / train_bucket_level.
         self._last_select: dict[int, dict[str, Any]] = {}
-        # Persistent spawn process-pool for the parallel ("pool") expand backend.
-        # Created lazily on first pool-eligible epoch, reused across epochs, and
-        # torn down by close(). None until needed; stays None for serial.
+        # Persistent spawn process-pool for the "pool" expand backend. Created
+        # lazily on first pool-eligible epoch, reused across epochs, torn down by
+        # close(). None until needed; stays None for serial.
         self._expand_pool: Any | None = None
 
     def _get_expand_pool(self):
         """Lazily build the persistent spawn pool for ``expand_backend="pool"``.
 
         One ``ProcessPoolExecutor(mp_context="spawn")`` reused across epochs.
-        Returns ``None`` when only one worker is resolved (no benefit to a pool —
-        the backend then runs the serial in-process path). ``spawn`` is mandatory
-        on WSL/Windows (no fork); the pool inherits the parent environment, so
-        each worker re-reads the same ``HEXFIELD_SUPPORT_RADIUS`` at ``support``
-        import time and stays consistent with the main thread.
+        Returns ``None`` when the resolved worker count is <= 1. The pool inherits
+        the parent environment, so each worker re-reads ``HEXFIELD_SUPPORT_RADIUS``
+        at ``support`` import time.
         """
         n_workers = resolve_expand_workers(self.config.training.expand_workers)
         if n_workers <= 1:
@@ -145,32 +140,26 @@ class HexfieldTrainer:
     def close(self) -> None:
         """Shut down the expansion pool, if any.
 
-        Called by the generic pipeline's run-end teardown (best-effort
-        ``getattr(trainer, "close")``) so the spawn workers are reclaimed when the
-        run finishes instead of lingering until interpreter exit. Safe to call
-        when no pool was ever created (serial backend).
+        Called by the pipeline's run-end teardown. Safe to call when no pool was
+        ever created (serial backend).
         """
         if self._expand_pool is not None:
             self._expand_pool.shutdown(wait=False, cancel_futures=True)
             self._expand_pool = None
 
     def __del__(self) -> None:
-        # Best-effort backstop if the trainer is GC'd without an explicit close().
-        # The reliable teardown is the pipeline finally; a finalizer cannot rely
-        # on ProcessPoolExecutor.shutdown at interpreter exit.
+        # Backstop if the trainer is GC'd without an explicit close().
         try:
             self.close()
         except Exception:  # noqa: BLE001 - finalizer must never raise
             pass
 
     def _build_grad_norm_groups(self) -> dict[str, list[torch.nn.Parameter]]:
-        """Partition model params into trunk-conv / trunk-attn / heads.
+        """Partition model params into trunk_conv / trunk_attn / heads.
 
         Used for per-group pre-clip grad-norm logging. ``stem*`` / ``conv_blocks*``
-        (incl. the +2 conv blocks and their LayerScale ``ls.gamma``) -> trunk_conv;
-        ``attn_blocks*`` + the trunk ``tokens`` / per-block relative-position
-        ``bias_tables.*`` -> trunk_attn; everything else (reductions + heads, incl.
-        ml_reduction / cell_q_* / soft_policy_*) -> heads.
+        -> trunk_conv; ``attn_blocks*``, ``tokens``, and ``bias_tables*`` ->
+        trunk_attn; everything else -> heads.
         """
         groups: dict[str, list[torch.nn.Parameter]] = {
             "trunk_conv": [],
@@ -191,12 +180,10 @@ class HexfieldTrainer:
         return groups
 
     def _group_grad_norms(self) -> dict[str, float]:
-        """This step's per-group L2 grad-norm (PRE-clip).
+        """This step's per-group L2 grad-norm (pre-clip).
 
-        Computed after ``unscale_`` and BEFORE ``clip_grad_norm_``. The caller
-        merges the result into the running totals ONLY on finite steps (matching
-        ``grad_norm_mean``'s isfinite filter), so an AMP-overflow step never
-        poisons the reported group averages with inf/nan.
+        Computed after ``unscale_`` and before ``clip_grad_norm_``. The caller
+        merges the result into the running totals only on finite steps.
         """
         out: dict[str, float] = {}
         for gname, params in self._grad_norm_groups.items():
@@ -210,15 +197,14 @@ class HexfieldTrainer:
     def _update_train_bucket(self, total_rows: int, window_start: int) -> None:
         """Accrue / clamp the train-bucket reuse governor.
 
-        ``total_rows`` is the **monotone** ``cumulative_rows_ever`` from the
-        manifest (NEVER the live total, which can shrink when shards are pruned and
-        would spuriously trip the ``elif`` reload branch).
+        ``total_rows`` is the monotone ``cumulative_rows_ever`` from the manifest,
+        not the live total.
 
         * ``cap = max(max_train_bucket_size, train_samples_per_epoch)``.
-        * each fresh row credits the bucket by ``max_train_bucket_per_new_data``,
-          clamped at ``cap``, advancing ``level_at_row`` to ``total_rows``;
-        * a *decrease* in ``total_rows`` (window regenerated/shrank) re-bases the
-          watermark, zeroes ``steps_since_last_reload``, and re-clamps the level.
+        * Each new row credits the bucket by ``max_train_bucket_per_new_data``,
+          clamped at ``cap``, advancing ``level_at_row`` to ``total_rows``.
+        * A decrease in ``total_rows`` re-bases the watermark, zeroes
+          ``steps_since_last_reload``, and re-clamps the level.
         """
         cap = max(
             float(self.config.training.max_train_bucket_size),
@@ -240,29 +226,28 @@ class HexfieldTrainer:
         self.train_state.window_start_data_row_idx = int(window_start)
 
     def select_training_samples(self, *, ctx, components, epoch: int) -> dict[str, Any]:
-        """KataGo-style window selection (in-RAM ``PackedWindow``, no disk re-shard).
+        """Window selection into an in-RAM ``PackedWindow`` (no disk re-shard).
 
         1. ``scan_or_update_manifest`` -> the mtime-free ``(generation,game_key)``
-           ordered shard manifest (live ``total_rows`` for window selection; the
-           monotone ``cumulative_rows_ever`` for the governor).
-        2. ``compute_katago_window_rows`` power-law taper, clamped ``max(_,
-           min_rows)``; ``select_recent_window`` newest->oldest whole-shard cut.
-        3. ``_update_train_bucket(cumulative_rows_ever, window_start)`` — accrual is
-           driven by the monotone counter; ``window_start = max(0, total_rows -
-           used)`` is the live-window bookkeeping (computed first so the recorded
-           ``window_start`` is the final one).
+           ordered shard manifest. Live ``total_rows`` drives window selection;
+           the monotone ``cumulative_rows_ever`` drives the governor.
+        2. ``compute_katago_window_rows`` power-law taper, clamped to
+           ``max(_, min_rows)``; ``select_recent_window`` newest->oldest
+           whole-shard cut.
+        3. ``_update_train_bucket(cumulative_rows_ever, window_start)`` accrues on
+           the monotone counter; ``window_start = max(0, total_rows - used)``.
         4. ``_split_by_md5`` per-file train/val partition.
         5. ``_select_files_for_rows`` overshoot-skip selection capped at
-           ``train_samples_per_epoch`` (``no_repeat_files`` honored first — default
-           OFF for hexfield).
-        6. ``effective_rows = min(requested, selected)``; the bucket throttle
-           (``train_bucket_limited``) or debit-by-``effective_rows``.
-        7. ``build_window_split`` keep_prob-subsamples + concats the survivors into
-           one ``PackedWindow`` -> ``components.shared.sample_window``.
+           ``train_samples_per_epoch`` (``no_repeat_files`` applied first; default
+           off).
+        6. ``effective_rows = min(requested, selected)``; then either the bucket
+           throttle (``train_bucket_limited``) or a debit by ``effective_rows``.
+        7. ``build_window_split`` keep_prob-subsamples and concats the survivors
+           into one ``PackedWindow`` -> ``components.shared.sample_window``.
 
-        Determinism: a single ``np.random.default_rng((seed)+epoch)``
-        drives keep_prob; a separate ``np.random.default_rng((seed)+epoch*65537)``
-        drives the file selection. ``seed = (ctx.config.run.seed or 0)``.
+        Determinism: ``np.random.default_rng(seed + epoch)`` drives keep_prob; a
+        separate ``np.random.default_rng(seed + epoch*65537)`` drives file
+        selection. ``seed = (ctx.config.run.seed or 0)``.
         """
         cfg = self.config.training
         seed = int(ctx.config.run.seed or 0)
@@ -274,7 +259,7 @@ class HexfieldTrainer:
         total_rows = int(manifest.total_rows)
         cumulative_rows_ever = int(manifest.cumulative_rows_ever)
         # New rows credited to the governor since the last accrual (for the
-        # diagnostic reuse_ratio); captured BEFORE _update_train_bucket mutates it.
+        # diagnostic reuse_ratio); captured before _update_train_bucket mutates it.
         prev_level_at_row = int(self.train_state.train_bucket_level_at_row)
         new_rows_this_epoch = max(0, cumulative_rows_ever - prev_level_at_row)
 
@@ -290,7 +275,7 @@ class HexfieldTrainer:
         selected_window, used = select_recent_window(entries, desired)
         window_start = max(0, total_rows - used)
 
-        # (3) governor accrual on the monotone counter (record the live window_start).
+        # (3) governor accrual on the monotone counter.
         self._update_train_bucket(cumulative_rows_ever, window_start)
 
         def _skip(status: str, reason: str, **extra) -> dict[str, Any]:
@@ -307,8 +292,8 @@ class HexfieldTrainer:
                 "train_bucket_level": float(self.train_state.train_bucket_level),
             }
             base.update(extra)
-            # Stash for the consumer: an empty/limited selection trains nothing,
-            # so effective_rows is 0 and the reuse_ratio is carried through.
+            # Stash for the consumer. An empty/limited selection trains nothing,
+            # so effective_rows is 0 and reuse_ratio is carried through.
             self._last_select[epoch] = {
                 "effective_rows": int(base.get("effective_rows", 0) or 0),
                 "window_start": int(window_start),
@@ -333,7 +318,7 @@ class HexfieldTrainer:
                          keep_prob=kp, effective_rows=0, window_rows=0, reuse_ratio=0.0)
 
         # (5) overshoot-skip selection, capped at train_samples_per_epoch.
-        # no_repeat_files (default OFF for hexfield single-game shards) filters first.
+        # no_repeat_files (default off) filters first.
         candidate_entries = train_entries
         if cfg.no_repeat_files:
             candidate_entries = [
@@ -349,23 +334,22 @@ class HexfieldTrainer:
                          keep_prob=kp, effective_rows=0, window_rows=0, reuse_ratio=0.0,
                          requested=requested_rows, selected_rows=selected_rows)
 
-        # (6) effective_rows = min(requested, selected); the bucket throttle / debit.
+        # (6) effective_rows = min(requested, selected); then bucket throttle / debit.
         effective_rows = min(requested_rows, selected_rows)
         if self.train_state.train_bucket_level + 1.0e-9 < effective_rows:
             return _skip("train_bucket_limited", "train_bucket_limited",
                          keep_prob=kp, effective_rows=int(effective_rows), window_rows=0,
                          reuse_ratio=effective_rows / max(1, new_rows_this_epoch),
                          requested=requested_rows, selected_rows=selected_rows)
-        # Debit at SELECTION time (dense semantics — a later short pass does not
-        # refund, trainer.py:217). steps_since_last_reload++ tracks reuse.
+        # Debit at selection time; a later short pass does not refund.
+        # steps_since_last_reload increments to track reuse.
         self.train_state.train_bucket_level = max(
             0.0, self.train_state.train_bucket_level - effective_rows
         )
         self.train_state.train_steps_since_last_reload += 1
 
         # (7) build the packed in-RAM window: per-row keep_prob subsample + concat,
-        # consumed via the SINGLE shared per-epoch rng in (generation, game_key)
-        # order.
+        # consumed via a single per-epoch rng in (generation, game_key) order.
         keep_rng = np.random.default_rng(seed + epoch)
         window = build_window_split(
             selected_files, keep_prob=kp, rng=keep_rng, samples_dir=ctx.samples_dir
@@ -389,8 +373,8 @@ class HexfieldTrainer:
             "selected_rows": int(selected_rows),
         }
         # Stash effective_rows / window_start / reuse_ratio / train_bucket_level
-        # for train_passes (threaded via the trainer instance — the slotted
-        # SharedComponents only carries the opaque PackedWindow).
+        # for train_passes, threaded via the trainer instance (SharedComponents
+        # only carries the PackedWindow).
         self._last_select[epoch] = {
             "effective_rows": int(effective_rows),
             "window_start": int(window_start),
@@ -415,11 +399,10 @@ class HexfieldTrainer:
     def _effective_rows_for(self, window: PackedWindow, epoch: int) -> int:
         """Row cap for this epoch's single pass.
 
-        Prefers the ``effective_rows`` ``select_training_samples`` stashed for
-        ``epoch`` (the bucket-debited count the governor honored). When
-        ``train_passes`` is called WITHOUT a prior selection (a direct test call),
-        recompute the faithful equivalent ``min(window.n,
-        train_samples_per_epoch)`` so the truncation contract still holds.
+        Returns the ``effective_rows`` value ``select_training_samples`` stashed
+        for ``epoch`` (the bucket-debited count). When ``train_passes`` is called
+        without a prior selection, returns ``min(window.n,
+        train_samples_per_epoch)``.
         """
         stashed = self._last_select.get(epoch)
         if stashed is not None:
@@ -427,26 +410,24 @@ class HexfieldTrainer:
         return min(int(window.n), int(self.config.training.train_samples_per_epoch))
 
     def train_passes(self, *, passes, sample_window, sample_symmetries, ctx, components, epoch) -> dict[str, Any]:
-        # The opaque PackedWindow is self-drawn for D6; the framework's
-        # sample_symmetries selection is intentionally ignored.
+        # D6 augmentation is drawn from the window itself; the framework's
+        # sample_symmetries argument is ignored.
         _ = sample_symmetries
         window = sample_window if isinstance(sample_window, PackedWindow) else None
         if window is None or window.n <= 0:
             return {"status": "skipped", "epoch": epoch, "reason": "empty sample window"}
 
         seed = int(ctx.config.run.seed or 0)
-        # --- PRE-DRAW all randomness on the main thread -----------------------
-        # (a) a per-row D6 vector in WINDOW row order, and (b) the survivor
-        # permutation; both pure functions of (seed, epoch). Drawn here (no per-row
-        # rng call inside the loop), consumed positionally.
+        # Pre-draw all randomness on the main thread: (a) a per-row D6 vector in
+        # window row order, and (b) the survivor permutation (drawn below). Both
+        # are pure functions of (seed, epoch), consumed positionally.
         d6 = np.random.default_rng(_aug_seed(seed, epoch)).integers(
             0, D6_SIZE, size=int(window.n), dtype=np.int64
         )
 
         self.model.train().to(self.device)
-        # Invariant: optimizer state loaded on CPU must move to the model's device
-        # before the first step(), or AdamW mixes devices and crashes (no-op after
-        # epoch 1).
+        # Move any optimizer state tensors to the model's device before the first
+        # step(). No-op once state already lives on the device.
         for _st in self.optimizer.state.values():
             for _k, _v in _st.items():
                 if isinstance(_v, torch.Tensor) and _v.device != self.device:
@@ -459,29 +440,27 @@ class HexfieldTrainer:
         group_norm_steps = 0
         steps = 0
         started = time.time()
-        # Radius transition: tolerate (skip) replay-buffer samples whose policy
-        # targets are off the now-smaller legal set (the off-legal validity mask
-        # below). The hard-error wire stays armed at the default radius.
+        # When HEXFIELD_SUPPORT_RADIUS < 8, tolerate (flag invalid, skip) replay
+        # samples whose policy targets fall off the smaller legal set. At the
+        # default radius, off-legal rows hard-error instead.
         tolerate_off_legal = int(os.environ.get("HEXFIELD_SUPPORT_RADIUS", "8")) < 8
 
-        # (1) EXPAND ALL window rows under their pre-drawn D6 via the configured
+        # (1) Expand all window rows under their pre-drawn D6 via the configured
         # backend (serial | pool | rust). The backend returns a per-row
-        # ExpandedRow list aligned to range(window.n) plus a `valid` mask; an
-        # off-legal row is flagged invalid (NOT dropped in-worker). The expansion
-        # math is frozen (samples.py), so pool == serial element-wise.
+        # ExpandedRow list aligned to range(window.n) plus a `valid` mask;
+        # off-legal rows are flagged invalid, not dropped in-worker.
         backend = str(os.environ.get("HEXFIELD_EXPAND", self.config.training.expand_backend))
         expand_pool = None
         if backend == "pool":
             # Reuse the trainer's persistent spawn pool. When the resolved worker
-            # count is <= 1 (degenerate / 1-2 CPU host, or HEXFIELD_EXPAND_WORKERS=1)
-            # _get_expand_pool returns None and there is no benefit to a pool, so we
-            # fall back to the in-process serial path.
+            # count is <= 1, _get_expand_pool returns None and the in-process
+            # serial path is used instead.
             expand_pool = self._get_expand_pool()
             if expand_pool is None:
                 backend = "serial"
         expanded_rows, valid = expand_rows(
             window,
-            None,  # expand ALL rows; the survivor filter + truncation happen below
+            None,  # expand all rows; survivor filter + truncation happen below
             d6,
             STV_HORIZONS,
             tolerate_off_legal=tolerate_off_legal,
@@ -490,50 +469,42 @@ class HexfieldTrainer:
             pool=expand_pool,
         )
 
-        # (2) FILTER survivors on the main thread using the validity mask. This
-        # compacted list is independent of which backend produced it (same
-        # expansion, same off-legal drops, same order).
+        # (2) Filter survivors on the main thread using the validity mask.
         survivors: list = [row for row, ok in zip(expanded_rows, valid) if ok]
         rows_skipped_off_legal = int((~np.asarray(valid, dtype=bool)).sum())
 
-        # (3) PERMUTE the SURVIVOR index (drawn over the POST-skip set), then (4)
-        # TRUNCATE to effective_rows — the load-bearing fidelity point: single
-        # pass, no within-epoch repeat, capped at exactly the bucket-debited
-        # effective_rows.
+        # (3) Permute the survivor index (drawn over the post-skip set), then
+        # (4) truncate to effective_rows: a single pass, no within-epoch repeat,
+        # capped at the bucket-debited effective_rows.
         n_surv = len(survivors)
         perm = np.random.default_rng(_perm_seed(seed, epoch)).permutation(n_surv)
         effective_rows = self._effective_rows_for(window, epoch)
         keep = perm[: max(0, int(effective_rows))]
         ordered_rows = [survivors[int(j)] for j in keep]
 
-        # (5) MICRO-BUCKET (pair_budget_microbuckets). One optimizer step per
-        # nominal batch of ``batch_rows`` survivors; the VRAM split + (6)
-        # loss/optimizer/AMP/grad-clip block follow below.
+        # (5) Micro-bucket via pair_budget_microbuckets. One optimizer step per
+        # nominal batch of ``batch_rows`` survivors; the (6) loss / optimizer /
+        # AMP / grad-clip block follows below.
         for start in range(0, len(ordered_rows), batch_rows):
             expanded = ordered_rows[start : start + batch_rows]
             if not expanded:
                 continue
             tcfg = self.config.training
             # Step-global denominators (mean-over-rows / -cells over the nominal
-            # batch, incl. cell_q + the policy-surprise self-CE weight sum, v3
-            # #4/#5). The matching per-row self-CE weights are computed ONCE here
-            # over the SAME nominal batch and keyed by id(row), so collate packs
-            # the correct value even though pair_budget_microbuckets may reorder
-            # the rows within the batch (mean-over-rows preserved at step scope).
+            # batch, including cell_q and the policy-surprise self-CE weight sum).
+            # The matching per-row self-CE weights are computed once here over the
+            # same nominal batch and keyed by id(row), so collate packs the correct
+            # value even when pair_budget_microbuckets reorders rows within the
+            # batch.
             denoms = step_global_denominators(
                 expanded, STV_HORIZONS,
                 policy_surprise_uniform_fraction=tcfg.policy_surprise_uniform_fraction,
                 policy_surprise_max_weight=tcfg.policy_surprise_max_weight,
             )
-            # PCR value-rows BUGFIX (2026-06-22): compute the self-policy surprise
-            # weights over the FULL subset ONLY (policy_valid != 0), matching the
-            # FULL-row weight-sum denominator (step_global_denominators computes
-            # policy_ce_weight_sum over full rows too). Computing over ALL rows
-            # normalizes by n=B with the all-rows surprise total while the
-            # denominator uses n=full_count -> inflated the self-policy CE
-            # ~B/full_count (~2x at the 33/67 PCR mix). FAST rows get weight 0 (they
-            # are policy-masked; losses also x policy_valid). On full-only batches the
-            # full subset == expanded => byte-identical to pre-fix.
+            # Compute the self-policy surprise weights over the full subset only
+            # (policy_valid != 0), matching the full-row weight-sum denominator in
+            # step_global_denominators. Rows with policy_valid == 0 get weight 0
+            # (they are policy-masked, and losses also multiply by policy_valid).
             full_rows = [r for r in expanded if getattr(r, "policy_valid", 1.0) != 0.0]
             full_weights, _ = policy_surprise_weights(
                 [row.policy_surprise for row in full_rows],
@@ -544,8 +515,7 @@ class HexfieldTrainer:
             weight_by_row.update({id(r): w for r, w in zip(full_rows, full_weights)})
             self.optimizer.zero_grad(set_to_none=True)
             for bucket in pair_budget_microbuckets(expanded, quantize=PAD_QUANTUM):
-                # Same quantum the budget split assumed (PAD_QUANTUM), so the
-                # live (B,4,S,S) transient honours PAIR_BUDGET.
+                # Pad to the same PAD_QUANTUM the budget split assumed.
                 pad_to = -(-max(r.support.num_nodes for r in bucket) // PAD_QUANTUM) * PAD_QUANTUM
                 batch = split_stvalue_columns(
                     collate_training(
@@ -583,10 +553,10 @@ class HexfieldTrainer:
                 for key, val in comps.items():
                     comp_totals[key] = comp_totals.get(key, 0.0) + float(val.detach())
             self.scaler.unscale_(self.optimizer)
-            # Adaptive grad-clip (v3 #1): during warmup (or adaptive_clip off, or
-            # before any EMA exists) use the static grad_clip; after warmup clip at
-            # clip_c * EMA(pre-clip grad-norm). The per-group norms are accumulated
-            # BEFORE clipping so they reflect the true pre-clip magnitudes.
+            # Adaptive grad-clip: during warmup, when adaptive_clip is off, or
+            # before any EMA exists, clip at the static grad_clip; otherwise clip
+            # at clip_c * EMA(pre-clip grad-norm). Per-group norms are accumulated
+            # before clipping to reflect pre-clip magnitudes.
             tcfg = self.config.training
             if (
                 not tcfg.adaptive_clip
@@ -604,8 +574,7 @@ class HexfieldTrainer:
                 group_norm_steps += 1
                 for _g, _v in step_group_norms.items():
                     group_norm_totals[_g] = group_norm_totals.get(_g, 0.0) + _v
-                # Update the pre-clip-norm EMA every step (warmup included) so the
-                # post-warmup adaptive threshold is seeded.
+                # Update the pre-clip-norm EMA every step, warmup included.
                 d = float(tcfg.clip_ema_decay)
                 self._grad_norm_ema = (
                     float(norm)
@@ -631,16 +600,16 @@ class HexfieldTrainer:
 
         stashed = self._last_select.get(epoch, {})
         grads = np.asarray(grad_norms or [0.0])
-        # clip_fraction vs the EFFECTIVE per-step clip threshold (static during
-        # warmup, adaptive after); aligned positionally to the recorded norms.
+        # clip_fraction compared against the effective per-step clip threshold,
+        # aligned positionally to the recorded norms.
         clips = np.asarray(clip_values or [self.config.training.grad_clip])
         n_clip = min(len(grads), len(clips))
         clip_fraction = float((grads[:n_clip] > clips[:n_clip]).mean()) if n_clip else 0.0
         result = {
             "status": "completed",
             "epoch": epoch,
-            # Single pass, no within-epoch repeat (KataGo semantics); the generic
-            # ``passes`` request is reported but not multiplied.
+            # Single pass, no within-epoch repeat; the generic ``passes`` request
+            # is reported but not multiplied.
             "passes": 1,
             "generic_passes_requested": passes,
             "window_rows": int(window.n),

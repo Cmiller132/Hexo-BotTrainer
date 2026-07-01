@@ -1,10 +1,8 @@
-//! Bounded evaluation cache + request dedup (spec §5.1).
+//! Bounded evaluation cache and request dedup.
 //!
-//! Port of dense_cnn's mcts_eval cache semantics: FIFO insertion-order
-//! eviction bounded at the production 262,144 default, Arc-shared evaluations
-//! so tree nodes share prior vectors by reference, duplicate-miss coalescing
-//! preserving caller order. hexfield's evaluation carries one extra optional
-//! field (`moves_left`, decoded decisions) consumed by the §5.4.4 utility.
+//! FIFO insertion-order eviction bounded by a max-states limit. Evaluations are
+//! Arc-shared so tree nodes reference the same prior vectors. Evaluations carry
+//! an optional `moves_left` field.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -18,12 +16,11 @@ pub const EVAL_CACHE_MAX_STATES: usize = 262_144;
 pub struct RustEvaluation {
     /// Scalar value from the evaluated state's side-to-move perspective.
     pub value: f32,
-    /// Full engine legal count == priors.len() (no crop exists).
+    /// Legal move count; equals `priors.len()`.
     pub legal_action_count: usize,
-    /// One prior per legal move, descending by prior (then ascending id).
+    /// One prior per legal move, ordered descending by prior then ascending id.
     pub priors: Vec<(PackedCoord, f32)>,
-    /// Median-of-bins moves-left decode in decisions [0, 512]; None when the
-    /// reply omitted it (parity mode / ML auto-disable).
+    /// Moves-left estimate in decisions [0, 512], or None when the reply omitted it.
     pub moves_left: Option<f32>,
 }
 

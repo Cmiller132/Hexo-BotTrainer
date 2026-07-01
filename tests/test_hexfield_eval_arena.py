@@ -1,32 +1,28 @@
-"""Tests for the CONCURRENT checkpoint-vs-checkpoint arena runner
+"""Tests for the concurrent checkpoint-vs-checkpoint arena runner
 (``eval_arena.play_checkpoint_match`` / ``play_multi_checkpoint_match``).
 
-This consolidates three formerly-separate suites into one, each layer asserting a
-distinct oracle:
+Three layers, each asserting a distinct oracle:
 
-  1. FAKE-ENGINE ORACLE (pure CPU, always runs). A tiny deterministic engine +
-     fake multi-root session injected through the ``make_session`` /
-     ``build_evaluators`` seams pin the loop's BOOKKEEPING: the drop-in result
-     shape, concurrency mechanics (cross-game leaf batching, seats/CRN pairing,
-     full-sims budget), the opening-leader batching + per-root decorrelation, and
-     truncation / edge cases. The native MCTS extension and the real engine .so
-     are never imported.
+  1. Fake-engine oracle (pure CPU, always runs). A deterministic engine + fake
+     multi-root session injected through the ``make_session`` / ``build_evaluators``
+     seams cover the result shape, concurrency mechanics (cross-game leaf batching,
+     seats/CRN pairing, full-sims budget), opening-leader batching + per-root
+     decorrelation, and truncation / edge cases. The native MCTS extension and the
+     engine .so are not imported.
 
-  2. REAL-ABI NATIVE ORACLE (canonical; skips cleanly without the .so). The loop
-     is driven through the ACTUAL multi-root ``search`` ABI + real engine with a
-     numpy STUB evaluator, pinning what only the real search can prove:
-     native-equivalence-of-PAIRING + batched-opening determinism, and the
+  2. Real-ABI native oracle (skips when the .so is absent). The loop is driven
+     through the multi-root ``search`` ABI + real engine with a numpy stub
+     evaluator, covering pairing structure, batched-opening determinism, and the
      forced-opening CRN (the follower replays the leader's recorded line) under
-     both symmetric and ASYMMETRIC nets.
+     both symmetric and asymmetric nets.
 
-  3. LIVE play_multi == N-serial EQUIVALENCE (pure CPU). The multi-opponent
-     runner ``play_multi_checkpoint_match`` over K opponents produces, FOR EACH
-     opponent, the SAME per-opponent result as calling ``play_checkpoint_match``
-     once per opponent on the same seeds/config — the whole safety net for the
-     shared-candidate-forward rewrite — plus the shared-forward mechanics.
+  3. play_multi vs N-serial equivalence (pure CPU). ``play_multi_checkpoint_match``
+     over K opponents produces, for each opponent, the same per-opponent result as
+     calling ``play_checkpoint_match`` once per opponent on the same seeds/config,
+     plus the shared-forward mechanics.
 
-Forced-opening-replay is asserted ONCE, in layer 2 (the canonical real-ABI form);
-the fake-engine layer asserts the weaker batched-opening pairing it can see.
+Forced-opening replay is asserted in layer 2; the fake-engine layer asserts the
+batched-opening pairing it can observe.
 """
 
 from __future__ import annotations
@@ -69,12 +65,11 @@ except ImportError:  # pragma: no cover
 
 
 def _engine_bridge_available() -> bool:
-    """The real-ABI native tests drive ``eval_arena`` against the REAL engine +
-    the native ``HexfieldMctsSession``, so they require BOTH native extensions to
-    be importable AND the hexo_engine Rust bridge to be live (a CPU-only build
-    that lacks the engine .so raises ``EngineUnavailableError`` on the first
-    ``api.new_game()``). We probe it once so the suite skips cleanly rather than
-    erroring when either .so is missing."""
+    """Return True when the real-ABI native tests can run.
+
+    Requires the hexfield Rust extension to be importable and the hexo_engine
+    bridge to be live. A build lacking the engine .so raises on the first
+    ``api.new_game()``; probing once lets the suite skip rather than error."""
 
     if hexfield_rust is None:
         return False
@@ -92,27 +87,24 @@ needs_native = pytest.mark.skipif(
 
 
 # =========================================================================== #
-# LAYER 1: FAKE-ENGINE ORACLE.
+# LAYER 1: fake-engine oracle.
 # =========================================================================== #
-# The fake engine is SEEDLESS and only sees opaque states, so to decide each
-# game's winner net-relatively we track which net-A seat the arena assigned to
-# each freshly-created state (the arena creates paired games in
-# (a_is_p0=True, a_is_p0=False) order per pair). The winner is then the stronger
-# net's engine seat — exactly the (engine-seat-returning, net-relative) outcome
-# the real engine produces, so the arena's net-A-centric winner mapping is
-# exercised faithfully.
+# The fake engine is seedless and only sees opaque states. Each game's winner is
+# decided net-relatively by tracking which net-A seat the arena assigned to each
+# freshly-created state. The arena creates paired games in
+# (a_is_p0=True, a_is_p0=False) order per pair; the winner is the stronger net's
+# engine seat.
 # --------------------------------------------------------------------------- #
 def _run_match(monkeypatch, *, n_games, a_strength, b_strength, game_len=6,
                config=None, **kw):
-    """Drive play_checkpoint_match with a fully deterministic fake engine that
-    tracks each game's net-A seat so winners are exact and net-relative."""
+    """Drive play_checkpoint_match with a deterministic fake engine that tracks
+    each game's net-A seat so winners are net-relative."""
 
     _FakeSession.calls = []
     factory, sessions = _make_session_factory()
 
-    # Per-state net-A seat, filled as games are created in arena order. The arena
-    # creates paired games in (a_is_p0=True, a_is_p0=False) order per pair, so we
-    # replay that ordering deterministically.
+    # Per-state net-A seat, filled as games are created in arena order. Paired
+    # games are created in (a_is_p0=True, a_is_p0=False) order per pair.
     seat_iter = []
     if kw.get("paired_openings", True):
         n_pairs = (n_games + 1) // 2
@@ -132,7 +124,7 @@ def _run_match(monkeypatch, *, n_games, a_strength, b_strength, game_len=6,
         a_seat = 0 if a_is_p0 else 1
         b_seat = 1 - a_seat
         if a_strength == b_strength:
-            return 0  # deterministic, keeps it decided
+            return 0  # equal strengths resolve to seat 0
         return a_seat if a_strength > b_strength else b_seat
 
     base_api = _FakeApi(game_len=game_len, decide_winner=decide)
@@ -143,7 +135,7 @@ def _run_match(monkeypatch, *, n_games, a_strength, b_strength, game_len=6,
         def new_game(self, *, seed=None, scenario=None):
             st = _FakeState(game_len=game_len)
             created.append(st)
-            # Assign the next seat in arena creation order.
+            # Assign the next seat in creation order.
             seat_of_state[id(st)] = seat_iter[len(created) - 1]
             return st
 
@@ -172,7 +164,7 @@ def _run_match(monkeypatch, *, n_games, a_strength, b_strength, game_len=6,
     return result, sessions
 
 
-# --- 1a. Result-dict shape / drop-in contract. ----------------------------- #
+# --- 1a. Result-dict shape / contract. ------------------------------------- #
 def test_result_shape_is_drop_in(monkeypatch):
     result, _ = _run_match(monkeypatch, n_games=8, a_strength=2, b_strength=1, game_len=6)
 
@@ -182,14 +174,14 @@ def test_result_shape_is_drop_in(monkeypatch):
     score = result["score"]
     for key in ("completed", "truncated", "aborted_budget", "a_wins", "b_wins", "decided", "by_seat"):
         assert key in score, key
-    # Candidate (net A) is the stronger net -> wins every decided game.
+    # Candidate (net A) is the stronger net and wins every decided game.
     assert score["completed"] == 8
     assert score["decided"] == 8
     assert score["a_wins"] == 8
     assert score["b_wins"] == 0
     assert score["truncated"] == 0
 
-    # Per-game rows carry the exact load-bearing keys.
+    # Per-game rows carry these keys.
     assert len(result["games"]) == 8
     for g in result["games"]:
         assert set(g) >= {"index", "seed", "a_seat", "status", "winner", "plies", "opening"}
@@ -197,7 +189,7 @@ def test_result_shape_is_drop_in(monkeypatch):
         assert g["status"] in ("completed", "truncated", "aborted_budget")
         assert g["winner"] in ("A", "B", None)
 
-    # Pentanomial block + per-pair rows the orchestrator consumes.
+    # Pentanomial block + per-pair rows.
     penta = result["pentanomial"]
     assert penta is not None
     assert set(penta) >= {"n_pairs", "histogram_a_wins", "pairs"}
@@ -209,11 +201,11 @@ def test_result_shape_is_drop_in(monkeypatch):
         }
         assert p["n_games"] == 2
         assert p["n_decided"] == 2
-        assert p["a_wins"] == 2  # candidate swept both seats of every pair
+        assert p["a_wins"] == 2  # candidate won both seats of every pair
     # histogram keyed by net-A wins among the pair's 2 decided games.
     assert penta["histogram_a_wins"] == {"0": 0, "1": 0, "2": 4}
 
-    # meta carries the keys the orchestrator reads (games_requested) + telemetry.
+    # meta keys: games_requested + telemetry.
     meta = result["meta"]
     assert meta["games_requested"] == 8
     assert meta["label_a"] == "cand" and meta["label_b"] == "opp"
@@ -222,8 +214,7 @@ def test_result_shape_is_drop_in(monkeypatch):
 
 
 def test_result_consumed_by_orchestrator_helpers(monkeypatch):
-    """The concurrent result feeds the SAME downstream helpers the orchestrator
-    uses (the real drop-in proof)."""
+    """The concurrent result feeds the downstream orchestrator helpers."""
 
     from hexfield import multistage_eval as mse
 
@@ -232,7 +223,7 @@ def test_result_consumed_by_orchestrator_helpers(monkeypatch):
     # Stage-C edge counts (pentanomial -> effective BT counts).
     wa, wb, n_eff, prov = mse._checkpoint_edge_counts(result)
     assert wa > 0.0
-    assert wb == 0.0  # candidate swept; no opponent wins
+    assert wb == 0.0  # candidate won all decided games; no opponent wins
     assert n_eff > 0.0
 
     # Stage-B SPRT consumes score.a_wins / score.b_wins directly.
@@ -241,15 +232,15 @@ def test_result_consumed_by_orchestrator_helpers(monkeypatch):
     sprt = es.sprt(result["score"]["a_wins"], result["score"]["b_wins"], elo0=0.0, elo1=35.0)
     assert sprt.verdict in {"accept_h0", "accept_h1", "continue"}
 
-    # Pentanomial -> PairedResult path the orchestrator prefers.
+    # Pentanomial -> PairedResult path.
     paired = mse._pentanomial_to_paired_result(result["pentanomial"])
     assert paired is not None and paired.n_pairs == 4
 
 
 # --- 1b. Concurrency mechanics + seat / pairing preservation. -------------- #
 def test_games_run_concurrently_in_multiroot_batches(monkeypatch):
-    """Many games in flight -> the greedy tail is searched in MULTI-ROOT batches
-    (n_roots > 1), not one game at a time."""
+    """With many games in flight, the greedy tail is searched in multi-root
+    batches (n_roots > 1) rather than one game at a time."""
 
     # game_len=6 with opening_plies=2 leaves a multi-ply greedy tail to batch.
     result, sessions = _run_match(
@@ -257,13 +248,13 @@ def test_games_run_concurrently_in_multiroot_batches(monkeypatch):
     )
     batched = [c for c in _FakeSession.calls if c["n_roots"] > 1]
     assert batched, "expected at least one multi-root (concurrent) search batch"
-    # The biggest batch should pull in many games at once (cross-game batching).
+    # The biggest batch pulls in many games at once (cross-game batching).
     assert max(c["n_roots"] for c in _FakeSession.calls) >= 4
 
-    # Exactly two persistent sessions were created (one per net), NOT one per game.
+    # Two persistent sessions (one per net), not one per game.
     assert len(sessions) == 2
 
-    # Every game's tree is discarded on BOTH sessions at game end (no leak).
+    # Every game's tree is discarded on both sessions at game end.
     for s in sessions:
         assert sorted(s.discarded) == list(range(16))
 
@@ -281,26 +272,26 @@ def test_seats_swapped_within_pairs_and_crn_seed_shared(monkeypatch):
 
 
 def test_winner_mapping_is_net_a_centric_and_seat_symmetric(monkeypatch):
-    """Net B stronger -> candidate (A) loses every decided game regardless of the
-    seat it sits in (the winner mapping is net-relative, not seat-relative)."""
+    """With net B stronger, candidate (A) loses every decided game regardless of
+    its seat: the winner mapping is net-relative, not seat-relative."""
 
     result, _ = _run_match(monkeypatch, n_games=8, a_strength=1, b_strength=3, game_len=4)
     score = result["score"]
     assert score["a_wins"] == 0
     assert score["b_wins"] == 8
-    # And B wins from BOTH seats (so the result is not just a seat-0 artifact).
+    # B wins from both seats.
     by_seat = score["by_seat"]
     assert by_seat["A_as_P0"]["b_wins"] == by_seat["A_as_P0"]["n"]
     assert by_seat["A_as_P1"]["b_wins"] == by_seat["A_as_P1"]["n"]
 
 
 def test_full_sims_threaded_by_default(monkeypatch):
-    """visits=None -> the full production search budget (selfplay.search_visits=512)
-    is threaded into every search call, NOT the reduced eval_visits (128)."""
+    """With visits=None, selfplay.search_visits (512) is threaded into every
+    search call, not evaluation.eval_visits (128)."""
 
     cfg = parse_hexfield_config({})
     assert cfg.selfplay.search_visits == 512
-    assert cfg.evaluation.eval_visits == 128  # the OLD default we must NOT use
+    assert cfg.evaluation.eval_visits == 128
 
     result, _ = _run_match(monkeypatch, n_games=4, a_strength=1, b_strength=1, game_len=4)
     assert result["meta"]["visits"] == 512
@@ -315,13 +306,12 @@ def test_explicit_visits_overrides_full_default(monkeypatch):
 
 # --- 1c. CRN under batching: opening leaders batch cross-game; siblings share. #
 def test_opening_plies_are_batched_and_pairing_preserved(monkeypatch):
-    """Opening plies (temperature-sampled) for the pair LEADERS are now searched
-    BATCHED cross-game in multi-root calls (the old single-root-per-leader loop was
-    the throughput bottleneck and is gone), with every root carrying
+    """Opening plies (temperature-sampled) for the pair leaders are searched
+    batched cross-game in multi-root calls, with every root carrying
     ``opening_temperature`` and the per-(net, round) opening base seed
-    ``game_seed_base + (0|13_000_003) + rounds*1_000_003``. The CRN payoff — paired
-    seat-swapped siblings share the IDENTICAL opening — is PRESERVED because the
-    follower REPLAYS the leader's recorded line (no search of its own)."""
+    ``game_seed_base + (0|13_000_003) + rounds*1_000_003``. Paired seat-swapped
+    siblings share the identical opening because the follower replays the leader's
+    recorded line rather than searching its own."""
 
     n_games = 8
     opening_plies = 2
@@ -331,7 +321,7 @@ def test_opening_plies_are_batched_and_pairing_preserved(monkeypatch):
         opening_plies=opening_plies, game_seed_base=game_seed_base,
     )
 
-    # No single-root opening searches remain: the opening leaders batch.
+    # Opening leaders batch cross-game: no single-root opening search.
     single_root_opening = [
         c for c in _FakeSession.calls if c["n_roots"] == 1 and c["move_temperatures"][0] > 0.0
     ]
@@ -340,9 +330,9 @@ def test_opening_plies_are_batched_and_pairing_preserved(monkeypatch):
         f"(saw {single_root_opening})"
     )
 
-    # The opening LEADER batches: multi-root (with 8 games several share each
-    # side-to-move every round), every root at opening_temperature (>0), and the
-    # seed is the per-(net, round) opening stream, NOT the greedy 7_000_003 stream.
+    # Opening leader batches: multi-root (with 8 games several share each
+    # side-to-move every round), every root at opening_temperature (>0), on the
+    # per-(net, round) opening seed stream, not the greedy 7_000_003 stream.
     opening_batches = [
         c for c in _FakeSession.calls
         if c["n_roots"] >= 1 and any(t > 0.0 for t in c["move_temperatures"])
@@ -357,15 +347,15 @@ def test_opening_plies_are_batched_and_pairing_preserved(monkeypatch):
         for off in (13_000_003, 19_000_003):
             valid_open_seeds.add(game_seed_base + off + rounds * 1_000_003)
     for c in opening_batches:
-        # All roots in an opening batch are at opening_temperature (the leaders are,
-        # by construction, all at plies < opening_plies).
+        # All roots in an opening batch are at opening_temperature (leaders are at
+        # plies < opening_plies).
         assert all(t > 0.0 for t in c["move_temperatures"]), c["move_temperatures"]
         assert c["seed"] in valid_open_seeds, (
             c["seed"], "not a per-(net,round) opening base seed"
         )
 
-    # The greedy tail uses multi-root batches at temperature 0, on a DISTINCT seed
-    # stream (offset 7_000_003) so opening and greedy batches never collide.
+    # The greedy tail uses multi-root batches at temperature 0, on a distinct seed
+    # stream (offset 7_000_003) so opening and greedy batches do not collide.
     greedy_batches = [
         c for c in _FakeSession.calls
         if c["n_roots"] > 1 and all(t == 0.0 for t in c["move_temperatures"])
@@ -382,8 +372,8 @@ def test_opening_plies_are_batched_and_pairing_preserved(monkeypatch):
             "greedy and opening seed streams must not collide"
         )
 
-    # CRN payoff (LOAD-BEARING, preserved): paired siblings produced the IDENTICAL
-    # opening prefix — the follower replayed the leader's recorded line.
+    # Paired siblings produced the identical opening prefix: the follower replayed
+    # the leader's recorded line.
     games = {g["index"]: g for g in result["games"]}
     for p in result["pentanomial"]["pairs"]:
         i0, i1 = p["game_indices"]
@@ -393,13 +383,12 @@ def test_opening_plies_are_batched_and_pairing_preserved(monkeypatch):
 
 
 def test_batched_openers_decorrelate_across_leaders(monkeypatch):
-    """Two DIFFERENT leaders sharing one opening batch must get DISTINCT per-root
-    sampling seeds so they are free to sample DIFFERENT openings (independent
-    leaders must not collapse onto one line). With the native ABI the per-root seed
-    is ``open_seed.wrapping_add(root_index)`` (search.rs:748-749); the fake session
-    records the call's base ``open_seed`` and ``n_roots``, so we assert a real
-    multi-root opening batch exists and that its roots therefore span distinct
-    per-root seeds (``open_seed+0 .. open_seed+n_roots-1`` are all different)."""
+    """Two different leaders sharing one opening batch get distinct per-root
+    sampling seeds so they can sample different openings. In the native ABI the
+    per-root seed is ``open_seed.wrapping_add(root_index)``; the fake session
+    records the call's base ``open_seed`` and ``n_roots``. Asserts a multi-root
+    opening batch exists and its roots span distinct per-root seeds
+    (``open_seed+0 .. open_seed+n_roots-1`` are all different)."""
 
     n_games = 8
     opening_plies = 3
@@ -425,9 +414,9 @@ def test_batched_openers_decorrelate_across_leaders(monkeypatch):
 
 
 def test_batch_openings_true_batches_everything(monkeypatch):
-    """``batch_openings=True`` collapses the opening single-root special case so
-    EVERY ply (incl. the opening) batches — a throughput knob. The pairing /
-    result shape is unaffected."""
+    """``batch_openings=True`` removes the opening single-root special case so
+    every ply (including the opening) batches. The pairing and result shape are
+    unaffected."""
 
     result, _ = _run_match(
         monkeypatch, n_games=8, a_strength=2, b_strength=1, game_len=6,
@@ -448,15 +437,14 @@ def test_batch_openings_true_batches_everything(monkeypatch):
 # --- 1d. Terminal vs max_plies truncation + edge cases. -------------------- #
 def test_max_plies_truncation_marks_games_undecided(monkeypatch):
     """A game that never reaches a terminal before ``selfplay.max_game_plies`` is
-    finalized as ``status='truncated'`` with ``winner=None`` (hexo has no draws,
-    so truncation is the only non-decisive outcome), is EXCLUDED from
-    ``decided``/``a_wins``/``b_wins`` but COUNTED in ``score.truncated``, and the
-    round loop still terminates (no hang). The fake engine only declares a winner
-    at ``ply >= game_len``, so a ``max_game_plies`` BELOW ``game_len`` forces the
-    ply-cap truncation path for every game."""
+    finalized as ``status='truncated'`` with ``winner=None`` (hexo has no draws),
+    excluded from ``decided``/``a_wins``/``b_wins`` but counted in
+    ``score.truncated``, and the round loop terminates. The fake engine declares a
+    winner only at ``ply >= game_len``, so a ``max_game_plies`` below ``game_len``
+    forces the ply-cap truncation path for every game."""
 
     cfg = parse_hexfield_config({"selfplay": {"max_game_plies": 3}})
-    # game_len (10) > max_game_plies (3) -> the engine never sets a winner, so the
+    # game_len (10) > max_game_plies (3): the engine never sets a winner, so the
     # ply cap fires first and every game truncates.
     result, sessions = _run_match(
         monkeypatch, n_games=6, a_strength=2, b_strength=1, game_len=10,
@@ -468,19 +456,18 @@ def test_max_plies_truncation_marks_games_undecided(monkeypatch):
     assert score["completed"] == 0
     assert score["decided"] == 0
     assert score["a_wins"] == 0 and score["b_wins"] == 0
-    # Undecided -> no descriptive win rate / CI.
+    # Undecided: no descriptive win rate / CI.
     assert score["a_winrate_decided"] is None
     assert score["a_winrate_ci95"] is None
 
-    # Every per-game row is truncated/undecided, capped at max_game_plies, and the
-    # loop did not hang (all games done).
+    # Every per-game row is truncated/undecided, capped at max_game_plies.
     assert len(result["games"]) == 6
     for g in result["games"]:
         assert g["status"] == "truncated"
         assert g["winner"] is None
-        assert g["plies"] == 3  # finalized exactly at the ply cap
+        assert g["plies"] == 3  # finalized at the ply cap
 
-    # Pentanomial: full pairs need 2 DECIDED games, so there are none; the
+    # Pentanomial: full pairs need 2 decided games, so there are none; the
     # histogram is empty and no pair is informative.
     penta = result["pentanomial"]
     assert penta["n_pairs"] == 3
@@ -490,8 +477,7 @@ def test_max_plies_truncation_marks_games_undecided(monkeypatch):
     for p in penta["pairs"]:
         assert p["n_decided"] == 0 and p["a_wins"] == 0
 
-    # Trees still discarded on BOTH sessions for every game (no leak on the
-    # truncation path either).
+    # Trees discarded on both sessions for every game on the truncation path.
     assert len(sessions) == 2
     for s in sessions:
         assert sorted(s.discarded) == list(range(6))
@@ -499,18 +485,16 @@ def test_max_plies_truncation_marks_games_undecided(monkeypatch):
 
 def test_terminal_and_truncation_coexist_in_one_match(monkeypatch):
     """Terminal-decided and ply-truncated games are scored independently in the
-    same match: decided games drive the win counts, truncated games only bump
+    same match: decided games drive the win counts, truncated games bump
     ``score.truncated`` and are dropped from the pentanomial's informative set.
 
-    Half the games (those whose net-A seat is player0) are decided early; the rest
-    truncate. We drive that purely through the fake engine's per-game winner hook
-    so the arena's status/winner mapping is exercised on a mixed match."""
+    Games whose index is even are decided early; the rest truncate, driven through
+    the fake engine's per-game winner hook."""
 
     cfg = parse_hexfield_config({"selfplay": {"max_game_plies": 4}})
 
-    # A custom engine: a game is decided (centre-seat wins) iff its index is even,
-    # else it runs past the ply cap and truncates. This is independent of the
-    # arena's seat assignment, so we get a deterministic decided/truncated mix.
+    # A game is decided (centre-seat wins) iff its index is even, else it runs past
+    # the ply cap and truncates. This is independent of the arena's seat assignment.
     decided_indices = {0, 2}
 
     class _MixedState(_FakeState):
@@ -536,7 +520,7 @@ def test_terminal_and_truncation_coexist_in_one_match(monkeypatch):
             coord = action.coord
             state.actions.append(pack_action_id(coord.q, coord.r))
             state.ply += 1
-            # Decided games resolve at ply 2 (well before the cap); others never.
+            # Decided games resolve at ply 2 (before the cap); others never.
             if state.index in decided_indices and state.ply >= 2:
                 state.winner_seat = 0
 
@@ -562,7 +546,7 @@ def test_terminal_and_truncation_coexist_in_one_match(monkeypatch):
     assert score["decided"] == 2
     # Status per game row matches the engine's decided/truncated split.
     by_index = {g["index"]: g for g in result["games"]}
-    for i in (0, 2):
+    for i in (0, 2):  # even indices decided
         assert by_index[i]["status"] == "completed"
         assert by_index[i]["winner"] in ("A", "B")
     for i in (1, 3):
@@ -615,12 +599,12 @@ def test_eval_vbs_defaults_to_selfplay_value(monkeypatch):
 
 
 # =========================================================================== #
-# LAYER 2: REAL-ABI NATIVE ORACLE (skips cleanly without the .so).
+# LAYER 2: real-ABI native oracle (skips when the .so is absent).
 # =========================================================================== #
-# Deterministic, seat-symmetric numpy stub evaluator (speaks the §5.2 ABI). Pure
-# function of the position (legal-coordinate prefix), so two paired siblings at
-# the same position get the IDENTICAL value/priors regardless of seat — what the
-# CRN guarantee needs. ``salt`` lets two stubs differ (asymmetric strengths).
+# Deterministic, seat-symmetric numpy stub evaluator. A pure function of the
+# position (legal-coordinate prefix), so two paired siblings at the same position
+# get identical value/priors regardless of seat. ``salt`` lets two stubs differ
+# (asymmetric strengths).
 # --------------------------------------------------------------------------- #
 def _hash_coords(coords) -> int:
     h = 1469598103934665603
@@ -651,7 +635,7 @@ class _StubEvaluator:
             ln = int(legal_counts[g])
             legal = [(int(qr[o + i, 0]), int(qr[o + i, 1])) for i in range(ln)]
             rh = _hash_coords(legal) ^ (self.salt * 0x9E3779B97F4A7C15)
-            values.append(((rh % 2001) - 1000) / 1000.0)  # [-1, 1], position-pure
+            values.append(((rh % 2001) - 1000) / 1000.0)  # in [-1, 1]
             for i, (q, r) in enumerate(legal):
                 priors.append(float((q * 2654435761 + r * 40503 + rh + i) % 997 + 1))
         reply = {
@@ -673,7 +657,7 @@ def _cfg(*, visits: int, max_plies: int, vbs: int = 4):
                 "max_game_plies": max_plies,
                 "active_root_limit": 64,
             },
-            # Deliberately huge so a regression that uses eval_visits is caught.
+            # Set far above search_visits so a call that reads eval_visits is caught.
             "evaluation": {"eval_visits": visits + 1000},
         }
     )
@@ -684,26 +668,24 @@ def _serial_reference(cfg, eval_a, eval_b, *, n_games, opening_plies,
     """Serial reference: replay each game one ply at a time, single-root, no
     greedy batching, recording per-game winner/status/plies/opening line + seat.
 
-    SCOPE NOTE: since the runner now BATCHES the opening leaders (each leader root
-    sampled with the native per-root ``open_seed+index`` rather than a single-root
-    ``seed``), this single-root serial replay no longer reproduces the runner's
-    leader opening LINE byte-for-byte — and therefore not the winner/status/plies
-    that depend on it. The caller uses this reference ONLY for the seed-INDEPENDENT
-    pairing structure (game count + per-game seat assignment); the opening-line /
-    winner equivalence is checked instead via within-pair pairing (follower==leader)
-    and concurrent self-determinism. The leader's opening RNG here is kept as
-    ``pair_seed*5003+ply`` (the historical single-root stream) purely so the
-    forced-opening REPLAY mechanics below are exercised faithfully.
+    Scope: the runner batches the opening leaders (each leader root sampled with
+    the native per-root ``open_seed+index`` rather than a single-root ``seed``), so
+    this single-root replay does not reproduce the runner's leader opening line,
+    nor the winner/status/plies that depend on it. Callers use this reference for
+    the seed-independent pairing structure (game count + per-game seat assignment)
+    only; opening-line / winner equivalence is checked via within-pair pairing
+    (follower == leader) and concurrent self-determinism. The leader's opening RNG
+    here is ``pair_seed*5003+ply`` (the single-root stream) so the forced-opening
+    replay mechanics below are exercised.
 
-    FORCED-OPENING CRN (L-1): within a pair the LEADER (``a_is_p0=True``, game 0)
-    searches its opening and its opening line is recorded; the FOLLOWER
-    (``a_is_p0=False``, game 1) does NOT search the opening — it REPLAYS the
-    leader's recorded action for each opening ply, so the pair shares the real
-    opening LINE (the seat swap means a shared seed alone would NOT, because a
-    different net moves at ply 0). If the leader ended its game before
-    ``opening_plies`` (fewer recorded actions), the follower falls back to a
-    single-root search for the remaining opening plies — the same fallback
-    ``eval_arena`` uses (the follower shares the leader's seed)."""
+    Forced-opening CRN: within a pair the leader (``a_is_p0=True``, game 0) searches
+    its opening and its opening line is recorded; the follower (``a_is_p0=False``,
+    game 1) does not search the opening but replays the leader's recorded action for
+    each opening ply, so the pair shares the opening line despite the seat swap (a
+    different net moves at ply 0, so a shared seed alone would not). If the leader
+    ended its game before ``opening_plies`` (fewer recorded actions), the follower
+    falls back to a single-root search for the remaining opening plies, matching the
+    fallback ``eval_arena`` uses (the follower shares the leader's seed)."""
 
     sp = cfg.selfplay
     ov = build_divergence_overrides(sp)
@@ -711,7 +693,7 @@ def _serial_reference(cfg, eval_a, eval_b, *, n_games, opening_plies,
     n_pairs = (n_games + 1) // 2
     for pair_index in range(n_pairs):
         pair_seed = game_seed_base + pair_index
-        leader_line: list[int] = []  # the leader's recorded opening, replayed below
+        leader_line: list[int] = []  # leader's recorded opening, replayed below
         for a_is_p0 in (True, False):
             game_index = pair_index * 2 + (0 if a_is_p0 else 1)
             if game_index >= n_games:
@@ -726,7 +708,7 @@ def _serial_reference(cfg, eval_a, eval_b, *, n_games, opening_plies,
             status = "truncated"
             while ply < sp.max_game_plies:
                 in_opening = ply < opening_plies
-                # FOLLOWER opening: replay the leader's recorded action (no search)
+                # Follower opening: replay the leader's recorded action (no search)
                 # when one exists for this ply; otherwise fall back to a search.
                 if (not is_leader) and in_opening and ply < len(leader_line):
                     aid = int(leader_line[ply])
@@ -769,25 +751,22 @@ def _serial_reference(cfg, eval_a, eval_b, *, n_games, opening_plies,
 
 @needs_native
 def test_concurrent_pairing_matches_serial_and_is_deterministic() -> None:
-    """Native-equivalence-of-PAIRING + batched-opening determinism.
+    """Pairing structure + batched-opening determinism.
 
-    The opening LEADERS now batch cross-game, so each leader root samples with the
-    native per-root seed ``open_seed+index`` instead of a single-root ``seed`` —
-    the leader's specific opening LINE therefore differs from a single-root serial
-    replay, which is FINE (the load-bearing invariant is the PAIRING, not byte
-    equivalence to the old single-root line). So this test pins what IS invariant:
+    The opening leaders batch cross-game, so each leader root samples with the
+    native per-root seed ``open_seed+index`` rather than a single-root ``seed``; the
+    leader's opening line therefore differs from a single-root serial replay. This
+    test asserts:
 
-      1. PAIRING STRUCTURE matches a serial reference: same game count, same seat
+      1. Pairing structure matches a serial reference: same game count, same seat
          assignment per game (seed-independent), same pair membership.
-      2. WITHIN-PAIR PAIRING: the follower replays the leader, so the two siblings
-         of every pair share the IDENTICAL opening line and (under these stubs) a
-         consistent pair outcome.
-      3. DETERMINISM: two concurrent runs with identical inputs produce
-         BYTE-IDENTICAL per-game rows — batching changes the evaluator-call ORDER,
-         never the game (the meaningful "concurrent == itself" equivalence now that
-         the single-root serial baseline plays a different opening line).
+      2. Within-pair pairing: the follower replays the leader, so the two siblings
+         of every pair share the identical opening line and a consistent pair
+         outcome under these stubs.
+      3. Determinism: two concurrent runs with identical inputs produce
+         byte-identical per-game rows.
 
-    Two different stubs make the strengths asymmetric (a stronger discriminator)."""
+    Two different stubs make the strengths asymmetric."""
 
     vbs = 8
     visits = 16
@@ -795,9 +774,9 @@ def test_concurrent_pairing_matches_serial_and_is_deterministic() -> None:
     n_games = 6
     opening_plies, opening_temperature, seed_base = 4, 1.0, 4242
 
-    # Serial reference: used here ONLY for the seed-independent pairing structure
-    # (game count + per-game seat assignment), NOT for the opening line / winner,
-    # which legitimately diverge now that leaders batch.
+    # Serial reference: used for the seed-independent pairing structure (game count
+    # + per-game seat assignment), not for the opening line / winner, which diverge
+    # because leaders batch.
     serial_rows = _serial_reference(
         cfg, _StubEvaluator(salt=1), _StubEvaluator(salt=2),
         n_games=n_games, opening_plies=opening_plies,
@@ -841,22 +820,22 @@ def test_concurrent_pairing_matches_serial_and_is_deterministic() -> None:
         for key in ("winner", "status", "plies", "opening", "a_seat", "seed"):
             assert cg[key] == cg2[key], (idx, key, cg[key], cg2[key])
 
-    # Anti-vacuity: the opening lines must be real (the sampled prefix has more
-    # than just the forced centre stone), the opening LEADERS actually BATCHED
-    # (a multi-root opening forward), and the greedy tail batched too.
+    # Anti-vacuity: the sampled opening prefix has more than the forced centre
+    # stone, the opening leaders batched (a multi-root opening forward), and the
+    # greedy tail batched.
     assert any(len(g["opening"]) >= opening_plies for g in res["games"])
     assert res["meta"]["rounds"] >= opening_plies
-    # forward_batches counts every search call; with batched openings AND a batched
-    # greedy tail it is far below "one per ply per game" (n_games * plies).
+    # forward_batches counts every search call; with batched openings and a batched
+    # greedy tail it is below n_games * plies.
     total_plies = sum(g["plies"] for g in res["games"])
     assert res["meta"]["forward_batches"] < total_plies
 
 
 @needs_native
 def test_crn_paired_siblings_share_line_and_split() -> None:
-    """Two IDENTICAL stubs -> the seat-swapped games of every pair play the same
-    real-MCTS line, so paired opening prefixes match and every DECIDED full pair
-    splits (pentanomial_a_score == 1)."""
+    """With two identical stubs, the seat-swapped games of every pair play the same
+    MCTS line, so paired opening prefixes match and every decided full pair splits
+    (pentanomial_a_score == 1)."""
 
     cfg = _cfg(visits=16, max_plies=24)
     n_games = 8
@@ -881,11 +860,10 @@ def test_crn_paired_siblings_share_line_and_split() -> None:
 
 
 def _opening_led_by(cfg, p0_eval, p1_eval, *, seed_base, opening_plies):
-    """Search a full opening LINE with ``p0_eval`` as the net at engine seat P0
-    and ``p1_eval`` at P1, using the serial CRN RNG (``seed_base*5003+ply``).
-    Returns the opening action-id line. This reconstructs, for the FOLLOWER, the
-    line it WOULD have searched without forced-opening replay (its net sits at P0
-    swapped vs the leader), so the test can prove replay actually changed it."""
+    """Search a full opening line with ``p0_eval`` as the net at engine seat P0 and
+    ``p1_eval`` at P1, using the serial CRN RNG (``seed_base*5003+ply``). Returns the
+    opening action-id line. Reconstructs, for the follower, the line it would search
+    without forced-opening replay (its net at P0, swapped vs the leader)."""
 
     sp = cfg.selfplay
     ov = build_divergence_overrides(sp)
@@ -917,28 +895,26 @@ def _opening_led_by(cfg, p0_eval, p1_eval, *, seed_base, opening_plies):
 
 @needs_native
 def test_forced_opening_replay_shares_line_under_asymmetric_nets() -> None:
-    """FORCED-OPENING CRN (L-1): with ASYMMETRIC nets the paired siblings STILL
-    share the identical opening LINE — proving the share comes from REPLAYING the
-    leader's recorded actions, not from net symmetry.
+    """Forced-opening CRN: with asymmetric nets the paired siblings share the
+    identical opening line, showing the share comes from replaying the leader's
+    recorded actions rather than net symmetry.
 
-    The seat swap means a different net moves at the first real decision ply in
-    each sibling (the leader has net A at P0, the follower has net B at P0), so if
-    the pair only shared the RNG STREAM (the pre-L-1 behavior) the asymmetric nets
-    would sample a DIFFERENT opening and the lines would diverge after the forced
-    centre stone. We first prove that divergence directly (the line the follower
-    WOULD have searched, net B leading from P0, differs from the leader's within
-    the opening), then assert the runner's actual siblings agree ply-for-ply.
-
-    This is the CANONICAL forced-opening-replay assertion for the arena suite."""
+    The seat swap means a different net moves at the first real decision ply in each
+    sibling (the leader has net A at P0, the follower has net B at P0), so sharing
+    only the RNG stream would let the asymmetric nets sample different openings and
+    the lines would diverge after the forced centre stone. This first shows that
+    divergence directly (the line the follower would search, net B leading from P0,
+    differs from the leader's within the opening), then asserts the runner's actual
+    siblings agree ply-for-ply."""
 
     cfg = _cfg(visits=16, max_plies=24)
     opening_plies, seed_base = 4, 9999
     sa, sb = 11, 29  # asymmetric salts
 
-    # Anti-vacuity: the leader line (net A at P0) and the line the FOLLOWER would
-    # have searched WITHOUT replay (net B at P0 — its swapped seat) genuinely
-    # diverge somewhere within the opening. (Ply 0 is the forced centre stone, so
-    # the divergence appears from ply 1 on; we only require SOME divergence.)
+    # Anti-vacuity: the leader line (net A at P0) and the line the follower would
+    # have searched without replay (net B at P0, its swapped seat) diverge somewhere
+    # within the opening. Ply 0 is the forced centre stone, so divergence appears
+    # from ply 1 on; only some divergence is required.
     leader_line = _opening_led_by(
         cfg, _StubEvaluator(salt=sa), _StubEvaluator(salt=sb),
         seed_base=seed_base, opening_plies=opening_plies,
@@ -963,9 +939,9 @@ def test_forced_opening_replay_shares_line_under_asymmetric_nets() -> None:
     games = {g["index"]: g for g in res["games"]}
     for p in res["pentanomial"]["pairs"]:
         i0, i1 = p["game_indices"]
-        # The follower (the seat-swapped P1 sibling) replayed the LEADER's (P0)
-        # opening, so its prefix equals the leader's exactly — even though, left to
-        # search on its own (``follower_would_be``), it would have diverged.
+        # The follower (seat-swapped P1 sibling) replayed the leader's (P0) opening,
+        # so its prefix equals the leader's, even though searching on its own
+        # (``follower_would_be``) it would have diverged.
         leader = games[i0] if games[i0]["a_seat"] == "P0" else games[i1]
         follower = games[i1] if leader is games[i0] else games[i0]
         assert follower["opening"][:opening_plies] == leader["opening"][:opening_plies], (
@@ -973,17 +949,14 @@ def test_forced_opening_replay_shares_line_under_asymmetric_nets() -> None:
             f"replay: {follower['opening']} vs {leader['opening']}"
         )
 
-    # Pair 0's leader is seat P0, follower seat P1, and the leader drove a REAL
-    # sampled line (more than the forced centre stone) which the follower replayed.
-    # We deliberately do NOT compare ``leader0["opening"]`` to ``leader_line`` (the
-    # single-root ``_opening_led_by`` reconstruction): the leader now samples via
-    # the native per-root ``open_seed+index`` in a cross-game batch, so its specific
-    # line legitimately differs from the single-root stream — the load-bearing
-    # invariant is the PAIRING (follower replays leader, asserted above), not byte
-    # equivalence to the old single-root opening line. The anti-vacuity check
-    # (``leader_line != follower_would_be``) above already proves the asymmetric
-    # stubs produce seat-divergent openings, so the follower-replays-leader match is
-    # non-vacuous regardless of which specific line the leader sampled.
+    # Pair 0's leader is seat P0, follower seat P1, and the leader drove a sampled
+    # line (more than the forced centre stone) which the follower replayed.
+    # ``leader0["opening"]`` is not compared to ``leader_line`` (the single-root
+    # ``_opening_led_by`` reconstruction): the leader samples via the native per-root
+    # ``open_seed+index`` in a cross-game batch, so its line differs from the
+    # single-root stream. The anti-vacuity check (``leader_line != follower_would_be``)
+    # above establishes the asymmetric stubs produce seat-divergent openings, so the
+    # follower-replays-leader match is non-vacuous.
     pair0 = res["pentanomial"]["pairs"][0]
     leader0 = games[pair0["game_indices"][0]]
     follower0 = games[pair0["game_indices"][1]]
@@ -1003,7 +976,7 @@ def test_full_sims_default_through_real_search() -> None:
         opening_plies=2, opening_temperature=1.0,
         build_evaluators=lambda: (_StubEvaluator(), _StubEvaluator()),
     )
-    assert res["meta"]["visits"] == 24  # == search_visits, not eval_visits (1024)
+    assert res["meta"]["visits"] == 24  # == search_visits, not eval_visits
 
     res2 = eval_arena.play_checkpoint_match(
         "a", "b", 2, config=cfg, visits=9, paired_openings=True,
@@ -1014,17 +987,17 @@ def test_full_sims_default_through_real_search() -> None:
 
 
 # =========================================================================== #
-# LAYER 3: LIVE play_multi == N-serial EQUIVALENCE (fake-engine, pure CPU).
+# LAYER 3: play_multi == N-serial equivalence (fake-engine, pure CPU).
 # =========================================================================== #
 # A tracking fake engine that decides each game's winner net-relatively, keyed by
-# the OPPONENT each freshly-created game belongs to. Both the serial driver (one
+# the opponent each freshly-created game belongs to. Both the serial driver (one
 # play_checkpoint_match per opponent) and the concurrent driver (one
 # play_multi_checkpoint_match) create paired games in (a_is_p0=True, a_is_p0=False)
-# order; we replay that ordering so each state's (opponent, net-A seat) is known
+# order; that ordering is replayed so each state's (opponent, net-A seat) is known
 # and the winner is the stronger net's engine seat.
 # --------------------------------------------------------------------------- #
 def _seat_iter(n_games: int) -> list[bool]:
-    """The arena's per-game net-A seat in creation order (paired: True, False,...)."""
+    """Per-game net-A seat in creation order (paired: True, False, ...)."""
     out: list[bool] = []
     n_pairs = (n_games + 1) // 2
     for p in range(n_pairs):
@@ -1038,13 +1011,13 @@ def _winner_seat_for(a_strength: int, b_strength: int, a_is_p0: bool) -> int:
     a_seat = 0 if a_is_p0 else 1
     b_seat = 1 - a_seat
     if a_strength == b_strength:
-        return 0  # deterministic, keeps it decided
+        return 0  # equal strengths resolve to seat 0
     return a_seat if a_strength > b_strength else b_seat
 
 
 class _MultiTrackingApi:
     """Stand-in for hexo_engine.api. Each new game is tagged with the (opponent,
-    a_is_p0) the caller is about to assign, via a creation-order plan."""
+    a_is_p0) it belongs to, via a creation-order plan."""
 
     Player = Player
 
@@ -1086,8 +1059,8 @@ def _strength_by_opp(opponents, candidate_strength):
 
 def _run_serial(monkeypatch, *, opponents, n_games, candidate_strength,
                 game_len, cfg, **kw):
-    """Reference: call play_checkpoint_match ONCE per opponent, each on a fresh
-    fake engine whose creation plan is just that opponent's games."""
+    """Reference: call play_checkpoint_match once per opponent, each on a fresh
+    fake engine whose creation plan is that opponent's games."""
     out: dict[str, dict] = {}
     strength = _strength_by_opp(opponents, candidate_strength)
     for label, opp_strength in opponents:
@@ -1118,11 +1091,11 @@ def _run_serial(monkeypatch, *, opponents, n_games, candidate_strength,
 
 def _run_concurrent(monkeypatch, *, opponents, n_games, candidate_strength,
                     game_len, cfg, **kw):
-    """The runner under test: ONE play_multi_checkpoint_match over all opponents.
+    """The runner under test: one play_multi_checkpoint_match over all opponents.
 
-    The concurrent runner creates ALL opponent groups up front (opponent 0's
-    pairs, then opponent 1's pairs, ...), so the creation plan is the concatenation
-    of each opponent's seat sequence in roster order."""
+    The concurrent runner creates all opponent groups up front (opponent 0's pairs,
+    then opponent 1's pairs, ...), so the creation plan is the concatenation of each
+    opponent's seat sequence in roster order."""
     _FakeSession.calls = []
     strength = _strength_by_opp(opponents, candidate_strength)
     plan: list[tuple[str, bool]] = []
@@ -1202,8 +1175,8 @@ def _assert_match_equivalent(label, serial_match, conc_match):
 # --- 3a. The core equivalence: concurrent == serial per opponent. ---------- #
 def test_multi_equals_serial_per_opponent(monkeypatch):
     """K=3 opponents at distinct strengths (candidate beats one, loses to one,
-    ties one): each opponent's concurrent result == its serial play_checkpoint_match
-    result on the same seeds/config."""
+    ties one): each opponent's concurrent result equals its serial
+    play_checkpoint_match result on the same seeds/config."""
 
     cfg = parse_hexfield_config({})
     opponents = [("opp_weak", 1), ("opp_strong", 5), ("opp_even", 3)]
@@ -1275,10 +1248,9 @@ def test_multi_equals_serial_with_truncation(monkeypatch):
 
 # --- 3b. Concurrency mechanics: the candidate forward is SHARED. ----------- #
 def test_candidate_greedy_forward_is_shared_across_opponents(monkeypatch):
-    """The candidate's GREEDY plies across ALL opponents are merged into ONE
-    multi-root call whose roots span more than one opponent's games (the
-    cross-opponent batch is the speed win), and the candidate session is a SINGLE
-    persistent session, NOT one-per-opponent."""
+    """The candidate's greedy plies across all opponents are merged into one
+    multi-root call whose roots span more than one opponent's games, and the
+    candidate session is a single persistent session, not one per opponent."""
 
     cfg = parse_hexfield_config({})
     opponents = [("o1", 2), ("o2", 4), ("o3", 1)]
@@ -1302,14 +1274,13 @@ def test_candidate_greedy_forward_is_shared_across_opponents(monkeypatch):
         "(the shared candidate forward)"
     )
 
-    # Sessions: 1 candidate + 3 opponents = 4 (NOT one-per-game).
+    # Sessions: 1 candidate + 3 opponents = 4.
     assert len(sessions) == 1 + len(opponents)
 
 
 def test_candidate_trees_discarded_no_leak(monkeypatch):
     """Every game's candidate tree is discarded on the candidate session (global
-    keys) and every opponent tree on that opponent's session (local keys), so no
-    tree leaks across opponent groups."""
+    keys) and every opponent tree on that opponent's session (local keys)."""
 
     cfg = parse_hexfield_config({})
     opponents = [("o1", 2), ("o2", 4)]
@@ -1342,8 +1313,8 @@ def test_candidate_trees_discarded_no_leak(monkeypatch):
 
 
 def test_result_dicts_are_play_checkpoint_match_shape(monkeypatch):
-    """Each per-opponent result is the exact drop-in shape the orchestrator's
-    downstream (_checkpoint_edge_counts) consumes, AND it consumes it."""
+    """Each per-opponent result has the shape the orchestrator downstream
+    (_checkpoint_edge_counts) consumes, and it is consumed here."""
 
     from hexfield import multistage_eval as mse
 

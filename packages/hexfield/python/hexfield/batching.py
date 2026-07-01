@@ -1,23 +1,19 @@
 """Batch assembly for variable-N rows: the model collate, the training
-collate, and the pair-budget micro-bucket split (spec §6.3).
+collate, and the pair-budget micro-bucket split.
 
-Conventions consumed by `model.HexfieldNet` (see its docstring): pad rows are
-all-zero features with nbr pointing at the appended zero row (index Npad) and
-mask False; coords of pad rows are zero (never read — pad keys are additively
-masked, pad query rows re-zeroed).
+Conventions consumed by `model.HexfieldNet`: pad rows are all-zero features
+with nbr pointing at the appended zero row (index Npad) and mask False; coords
+of pad rows are zero.
 
-The pair budget `B_g * S_pad^2 <= PAIR_BUDGET` bounds the dominant
-(B, heads, S, S) attention-bias transient (≈160 MB in fp16 under autocast).
-S_pad here is the SAME quantity the model actually allocates: the trainer and
-prefit pad every micro-bucket up to `ceil(maxN / PAD_QUANTUM) * PAD_QUANTUM`
-nodes before appending NUM_TOKENS, so the split MUST quantize identically —
-otherwise the live transient can exceed the budget by up to ~3.85x (the
-worst case at N just above a 256 boundary). `pair_budget_microbuckets`
-therefore takes the same quantum the padders use (default PAD_QUANTUM).
+The pair budget bounds the (B, heads, S_pad, S_pad) attention-bias transient
+via `B_g * S_pad^2 <= PAIR_BUDGET`. S_pad matches the sequence length the
+trainer and prefit allocate: each micro-bucket is padded up to
+`ceil(maxN / PAD_QUANTUM) * PAD_QUANTUM` nodes before appending NUM_TOKENS.
+`pair_budget_microbuckets` uses the same quantum (default PAD_QUANTUM).
+
 One optimizer step per nominal batch via gradient accumulation with
-STEP-GLOBAL denominators (per-head unmasked-row counts computed here over the
-whole nominal batch), which under LN is mathematically identical to a
-monolithic batch — enforced by tests, not assumed.
+step-global denominators (per-head unmasked-row counts computed here over the
+whole nominal batch).
 """
 
 from __future__ import annotations
@@ -30,18 +26,15 @@ from .samples import ExpandedRow
 from .support import Support
 
 PAIR_BUDGET = 2.0e7
-# Npad is quantized to multiples of this before NUM_TOKENS are appended (the
-# §5.3 static-shape discipline: a small, repeating set of tensor shapes keeps
-# the CUDA caching allocator from fragmenting toward the VRAM ceiling). The
-# trainer and prefit pad to this same quantum; the budget split must too.
+# Npad is quantized to multiples of this before NUM_TOKENS are appended. The
+# trainer, prefit, and budget split all use this quantum.
 PAD_QUANTUM = 256
 
 
 def quantized_npad(max_nodes: int, quantize: int = PAD_QUANTUM) -> int:
     """Round `max_nodes` up to a multiple of `quantize` (the padded Npad).
 
-    `quantize <= 1` means no rounding (raw N) — used only by callers that
-    deliberately collate without 256-quantization.
+    `quantize <= 1` returns `max_nodes` unrounded (raw N).
     """
 
     if quantize <= 1:
@@ -90,12 +83,12 @@ def collate_rows(
 def policy_surprise_weights(
     surprises: list[float], uniform_fraction: float, max_weight: float
 ) -> tuple[list[float], float]:
-    """Per-row self-policy CE weights from KataGo policy-surprise (spec §5/§10.1).
+    """Per-row self-policy CE weights from policy-surprise.
 
     ``weight_g = uniform_fraction + (1 - uniform_fraction) * n * surprise_g / Σsurprise``
-    clamped to ``max_weight``. Mean-1 by construction when no clamp fires (the
-    normalization preserves mean-over-ROWS). All-zero surprise ⇒ every weight 1.0.
-    Returns ``(weights, Σweights)``; the sum is the step-global self-CE denominator.
+    clamped to ``max_weight``, where n is the row count. Mean over rows is 1
+    when no clamp fires. All-zero surprise gives every weight 1.0. Negative
+    surprises are clamped to 0. Returns ``(weights, Σweights)``.
     """
     n = float(len(surprises))
     s = [max(0.0, float(x)) for x in surprises]
@@ -116,11 +109,10 @@ def collate_training(
 ) -> dict[str, torch.Tensor]:
     """Model batch + legal-prefix targets for one (micro-)batch of rows.
 
-    ``row_weights`` (when given) is the precomputed per-row self-policy CE weight
-    for THIS bucket's rows, sliced from the whole-nominal-batch weight vector by
-    the caller (the weight is a function of the whole batch's surprise total, so
-    it cannot be recomputed from the bucket alone — spec §10.4). ``None`` packs
-    all-ones (legacy/standalone callers stay byte-identical).
+    ``row_weights`` (when given) is the per-row self-policy CE weight for this
+    bucket's rows, sliced by the caller from the whole-nominal-batch weight
+    vector (each weight depends on the whole batch's surprise total, so it
+    cannot be recomputed from the bucket alone). ``None`` packs all-ones.
     """
 
     batch = collate_rows([(row.support, row.feats) for row in rows], pad_to=pad_to)
@@ -136,32 +128,19 @@ def collate_training(
         opp[g, :n] = torch.from_numpy(row.opp_policy)
         cell_q[g, :n] = torch.from_numpy(row.cell_q)  # n == row.cell_q.shape[0]
         cell_q_mask[g, :n] = torch.from_numpy(row.cell_q_mask)
-    # KataGo auxiliary SOFT policy target (main_4), HEXO-ADAPTED (config review).
-    # KataGo (metrics_pytorch.py) is target_soft = ((p + 1e-7)*policymask)^(1/T),
-    # T=4 (exponent 0.25), over the FULL legal set. On Hexo that is harmful: the
-    # legal prefix is 70-700+ cells, so the +1e-7 floor on every legal (incl.
-    # UNVISITED) cell, amplified by ^0.25 ((1e-7)^0.25 ~= 0.018), leaks ~40-72% of
-    # the soft-target mass onto the unvisited-legal tail — in sudden-death Hexo
-    # that teaches a near-forced defensive block far too flat. Two adaptations:
-    #   (1) SUPPORT-ONLY: transform ONLY the visited support (policy > 0); leave
-    #       unvisited-legal cells at exactly 0 (no full-legal 1e-7 leak). Off-prefix
-    #       slots also stay 0 (segment_policy_ce treats off-prefix mass as a hard
-    #       error). The target is still a valid distribution over the support.
-    #   (2) T=2 (exponent 0.5, gentler than KataGo's T=4) -> softens the visit
-    #       distribution without the savage board-size-coupled flattening.
-    # soft_policy_weight is correspondingly reduced 8.0 -> 4.0 in losses.py.
-    # Pure function of `policy` (the packed visit policy) -> backend-agnostic: the
-    # serial/pool/rust expand backends all produce the same `policy`, hence the
-    # same soft target; no shard-schema or replay_expand.rs change is needed.
+    # Auxiliary soft policy target. Built from the row-normalized visit policy
+    # over the visited support only (policy > 0): unvisited-legal cells and
+    # off-prefix slots stay exactly 0. Softening uses exponent 0.5 (T=2). The
+    # result is a function of `policy` alone.
     soft_policy = torch.zeros(b, npad, dtype=torch.float32)
     legal_counts = batch["legal_counts"]
     prefix = (
         torch.arange(npad).unsqueeze(0) < legal_counts.unsqueeze(1)
-    )  # (b, npad) bool, legal_counts == per-row n
+    )  # (b, npad) bool; legal_counts is the per-row prefix length n
     row_sum = policy.sum(dim=1, keepdim=True).clamp_min(1e-12)
     p = policy / row_sum
-    support = prefix & (policy > 0)  # visited support only (no full-legal 1e-7 leak)
-    soft_prefix = p.pow(0.5)  # T=2 softening (gentler than KataGo's ^0.25)
+    support = prefix & (policy > 0)  # visited support only
+    soft_prefix = p.pow(0.5)  # exponent 0.5 (T=2)
     soft_policy[support] = soft_prefix[support]
 
     if row_weights is None:
@@ -187,8 +166,7 @@ def collate_training(
             ),
             # Per-row policy-family mask: 0.0 for FAST (value-only) rows, 1.0 for
             # FULL rows. Gates self-policy CE, soft_policy CE, and opp_policy CE.
-            # (cell_q is masked at expand via cell_q_mask.) All-1 on full-only
-            # batches ⇒ byte-identical to pre-fix.
+            # (cell_q is masked at expand via cell_q_mask.)
             "policy_valid": torch.tensor(
                 [row.policy_valid for row in rows], dtype=torch.float32
             ),
@@ -228,29 +206,25 @@ def step_global_denominators(
     policy_surprise_uniform_fraction: float = 0.5,
     policy_surprise_max_weight: float = 8.0,
 ) -> dict[str, float]:
-    """Per-head denominators over the WHOLE nominal batch (spec §6.3)."""
+    """Per-head denominators over the whole nominal batch."""
 
     denoms: dict[str, float] = {"rows": float(len(rows))}
     for col, horizon in enumerate(horizons):
         denoms[f"stvalue_{horizon}"] = float(
             sum(1.0 for row in rows if row.stvalue_mask[col] > 0)
         )
-    # Value head: count only completed-game (unmasked) rows so truncated rows
-    # neither contribute to the numerator nor inflate the denominator. With no
-    # truncated rows this equals len(rows) (== the old `rows` denominator), so
-    # completed-only batches are byte-identical.
+    # Value head: count only completed-game (unmasked) rows. With no truncated
+    # rows this equals len(rows).
     denoms["value"] = float(sum(row.value_mask for row in rows))
     denoms["moves_left"] = float(sum(row.moves_left_mask for row in rows))
-    # cell_q: total masked-cell count (mean-over-contributing-cells, spec §10.3).
+    # cell_q: total masked-cell count (denominator for mean over contributing cells).
     denoms["cell_q"] = float(sum(float(row.cell_q_mask.sum()) for row in rows))
-    # Flat full-row count: denominator for the opp/soft policy CE so the
-    # mean-over-rows is not diluted ~3x by FAST (value-only) rows. On full-only
-    # batches policy_rows == rows ⇒ byte-identical.
+    # Full-row count: denominator for the opp/soft policy CE (excludes FAST
+    # value-only rows). On full-only batches equals `rows`.
     denoms["policy_rows"] = float(sum(row.policy_valid for row in rows))
-    # Self-policy CE weight sum over FULL rows only (fast rows are policy-masked;
-    # including their surprise weight would inflate the mean-over-full-rows denom).
-    # A FAST row has policy_surprise=0.0 → weight=uniform_fraction (not 0), so it
-    # would WRONGLY inflate the denominator if counted; restrict to the full subset.
+    # Self-policy CE weight sum over FULL rows only. A FAST row has
+    # policy_surprise=0.0, giving weight=uniform_fraction (not 0), so it is
+    # excluded from this denominator.
     full_surprises = [row.policy_surprise for row in rows if row.policy_valid != 0.0]
     _w, wsum = policy_surprise_weights(
         full_surprises,
@@ -269,11 +243,10 @@ def pair_budget_microbuckets(
 ) -> list[list[ExpandedRow]]:
     """Sort a nominal batch by N and split under `B_g * S_pad^2 <= budget`.
 
-    S_pad = ceil(largest N in the bucket / `quantize`) * `quantize` + NUM_TOKENS
-    — the SAME padded sequence length the trainer/prefit actually allocate, so
-    the live (B, heads, S_pad, S_pad) bias transient honours `budget`. (With
-    `quantize <= 1` S_pad falls back to raw N + NUM_TOKENS.) A single
-    over-budget row still forms its own bucket (it cannot be split further).
+    S_pad = ceil(largest N in the bucket / `quantize`) * `quantize` + NUM_TOKENS,
+    matching the padded sequence length the trainer/prefit allocate. With
+    `quantize <= 1`, S_pad is raw N + NUM_TOKENS. A single over-budget row forms
+    its own bucket.
     """
 
     ordered = sorted(rows, key=lambda row: row.support.num_nodes)

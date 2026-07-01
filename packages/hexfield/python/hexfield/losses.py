@@ -1,15 +1,11 @@
 """Losses and 65-bin helpers.
 
-Two structural points:
-
 - Policy CE is a segment soft cross-entropy over each row's legal prefix
-  (scatter-logsumexp, fp32). No -1e9 fill exists in the loss path at all —
-  legality masking is structural because the logit support IS the legal set.
-  Target mass off the legal prefix is a hard error.
-- Loss reduction is always mean over ROWS, never over nodes. Every reduction
-  takes an optional explicit denominator so the pair-budget micro-bucket trainer
-  can pass step-global denominators, making gradient accumulation exactly equal
-  to a monolithic batch.
+  (scatter-logsumexp, fp32). Legality masking is structural: the logit support
+  is the legal set. Target mass off the legal prefix raises.
+- Loss reduction is mean over rows. Every reduction accepts an optional explicit
+  denominator, so gradient accumulation over micro-buckets with step-global
+  denominators matches a monolithic batch.
 """
 
 from __future__ import annotations
@@ -24,13 +20,8 @@ from .constants import MOVES_LEFT_CAP, VALUE_BINS
 POLICY_WEIGHT = 1.0
 VALUE_WEIGHT = 1.0
 OPP_POLICY_WEIGHT = 0.25
-# KataGo auxiliary SOFT policy target loss weight (main_4). KataGo's
-# -soft-policy-weight-scale default is 8.0 (8x the main policy loss) paired with a
-# T=4 (^0.25) full-legal target. We use a HEXO-ADAPTED gentler target (T=2 ^0.5,
-# support-only — see batching.py), so we halve the weight to 4.0: with a sharper
-# (less-flattened) soft target the per-row gradient is larger, so the 8x KataGo
-# multiplier would over-pull the trunk. Mirror in config.TrainingSection
-# (soft_policy_weight) — keep the two in sync.
+# Auxiliary soft-policy target loss weight. The soft target is built in
+# batching.py. Mirrored by config.TrainingSection.soft_policy_weight.
 SOFT_POLICY_WEIGHT = 4.0
 SHORT_TERM_VALUE_WEIGHT = 0.1
 MOVES_LEFT_WEIGHT = 0.1
@@ -38,10 +29,8 @@ Q_HEAD_WEIGHT = 0.1
 
 
 def _at_least_fp32(x: torch.Tensor) -> torch.Tensor:
-    """fp32 floor for the loss math: upcast half/bfloat16, keep fp32/fp64.
-
-    AMP-safe, not a downcast — the exactness tests run the whole loss path in
-    fp64."""
+    """fp32 floor for the loss math: upcast float16/bfloat16, pass fp32/fp64
+    through unchanged."""
 
     if x.dtype in (torch.float16, torch.bfloat16):
         return x.float()
@@ -49,23 +38,22 @@ def _at_least_fp32(x: torch.Tensor) -> torch.Tensor:
 
 
 def value_bins(*, device: torch.device | None = None, dtype: torch.dtype | None = None) -> torch.Tensor:
-    """The fixed 65 scalar support points for every binned head."""
+    """The VALUE_BINS scalar support points, linspace(-1, 1), shared by every
+    binned head."""
 
     return torch.linspace(-1.0, 1.0, VALUE_BINS, device=device, dtype=dtype)
 
 
 def decode_binned_value(logits: torch.Tensor) -> torch.Tensor:
-    """Softmax expectation, clamped to [-1, 1] (the serve-side decode)."""
+    """Softmax expectation over the bins, clamped to [-1, 1]."""
 
     bins = value_bins(device=logits.device, dtype=logits.dtype)
     return ((torch.softmax(logits, dim=-1) * bins).sum(dim=-1)).clamp(-1.0, 1.0)
 
 
 def decode_moves_left(logits: torch.Tensor) -> torch.Tensor:
-    """Softmax-EXPECTATION decode mapped to decisions [0, MOVES_LEFT_CAP] (v3).
-
-    Replaces the median-of-bins decode, whose ~8-decision quantization drove the
-    full-horizon Spearman drift; expectation mirrors ``decode_binned_value``."""
+    """Softmax expectation over the bins, clamped to [-1, 1], then affine-mapped
+    to decisions in [0, MOVES_LEFT_CAP]."""
 
     bins = value_bins(device=logits.device, dtype=logits.dtype)
     scalar = (torch.softmax(logits, dim=-1) * bins).sum(dim=-1).clamp(-1.0, 1.0)
@@ -106,10 +94,10 @@ def segment_policy_ce(
 ) -> torch.Tensor:
     """Soft CE over each row's legal prefix; mean over rows.
 
-    logits/target: (B, Npad); per row g only slots [0, L_g) participate.
-    Target mass outside the prefix is a hard error (for opp-policy targets the
-    projection/drop happens at expansion, never here). Zero-mass rows
-    contribute exactly 0 but stay in the denominator (``allow_zero_rows``).
+    logits/target: (B, Npad); per row g only slots [0, L_g) participate, where
+    L_g = legal_counts[g]. Target mass outside the prefix raises. With
+    ``allow_zero_rows``, zero-mass rows contribute 0 but stay in the denominator;
+    otherwise a zero-mass row raises.
     """
 
     if logits.shape != target.shape:
@@ -137,7 +125,7 @@ def segment_policy_ce(
     flat_target = _at_least_fp32(target[prefix])
     row_ids = prefix.nonzero(as_tuple=True)[0]
 
-    # Scatter-logsumexp per row (fp32): max, then sum of shifted exps.
+    # Per-row logsumexp: row max, then sum of exp(logit - max) over the prefix.
     row_max = torch.full((b,), float("-inf"), device=logits.device, dtype=flat_logits.dtype)
     row_max = row_max.scatter_reduce(0, row_ids, flat_logits, reduce="amax")
     shifted = (flat_logits - row_max[row_ids]).exp()
@@ -157,8 +145,7 @@ def segment_policy_ce(
     else:
         denom = float(b) if denominator is None else float(denominator)
     if denom <= 0.0:
-        # All-masked nominal batch (e.g. policy_rows==0): contribute exactly 0
-        # without a divide-by-zero, mirroring binned_value_loss.
+        # Denominator of 0: return 0 without dividing.
         return logits.sum() * 0.0
     return per_row.sum() / denom
 
@@ -170,9 +157,11 @@ def binned_value_loss(
     mask: torch.Tensor | None = None,
     denominator: float | None = None,
 ) -> torch.Tensor:
-    """CE against scalar or distributional 65-bin targets; masked rows
-    contribute exactly 0; denominator defaults to the masked row
-    count (or B when unmasked), overridable for step-global accumulation."""
+    """CE against scalar or distributional 65-bin targets.
+
+    Scalar targets (shape != logits) are converted via scalar_to_binned_target.
+    Masked rows contribute 0. The denominator defaults to the masked row count
+    (or the item count when unmasked) and is overridable."""
 
     target_tensor = torch.as_tensor(target, device=logits.device, dtype=logits.dtype)
     if target_tensor.shape != logits.shape:
@@ -218,27 +207,29 @@ def hexfield_loss(
     q_head_weight: float = Q_HEAD_WEIGHT,
     denominators: Mapping[str, float] | None = None,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-    """Total = 1.0*policy + 1.0*value + 0.25*opp + 0.1*sum(stv) + 0.1*ml.
+    """Weighted sum of the per-head losses; returns (total, components) where
+    components maps each head name (plus "total") to its scalar loss.
 
-    ``denominators`` (step-global, computed at collate over the whole nominal
-    batch) keys: ``rows`` plus per-masked-head row counts (``value``,
-    ``stvalue_<h>``, ``moves_left``, ``cell_q``). When absent, this micro-bucket's
-    own counts are used — correct for monolithic batches only. The ``value``
-    count excludes truncated-game rows (value_mask==0) so they contribute zero to
-    both numerator and denominator; with no truncated rows it equals ``rows``.
+    Head weights default to the module constants: policy, value,
+    opp_policy, soft_policy, short_term_value (each stvalue_<h>), moves_left,
+    q_head (cell_q).
+
+    ``denominators`` supplies step-global row counts. Recognized keys: ``rows``,
+    ``policy_ce_weight_sum``, ``policy_rows``, and per-masked-head counts
+    (``value``, ``stvalue_<h>``, ``moves_left``, ``cell_q``). When absent, each
+    reduction uses this batch's own counts. The ``value`` count excludes
+    value_mask==0 rows from both numerator and denominator.
     """
 
     denoms = dict(denominators or {})
     rows = denoms.get("rows")
     components: dict[str, torch.Tensor] = {}
 
-    # PCR value-rows: FAST rows carry all-zero policy + policy_valid==0. Fold the
-    # policy_valid mask into the per-row CE weight so fast rows contribute exactly
-    # 0 AND set allow_zero_rows so the zero-mass fast policy targets do not raise.
-    # weight_denominator stays the FULL-row surprise-weight sum (G2), preserving
-    # mean-over-full-rows. On full-only batches policy_valid is all-1 ⇒ the weight,
-    # the denominator, and allow_zero_rows (no zero-mass rows present) all reduce
-    # to the pre-fix path byte-identically.
+    # policy_valid==0 rows carry all-zero policy targets. Multiply policy_valid
+    # into the per-row CE weight so those rows contribute 0, and set
+    # allow_zero_rows so their zero-mass targets do not raise. weight_denominator
+    # is the full-row weight sum (policy_ce_weight_sum), giving a mean over rows
+    # with policy_valid==1.
     _pol_weight = batch.get("policy_ce_weight")
     _pv = batch.get("policy_valid")
     if _pol_weight is not None and _pv is not None:
@@ -252,14 +243,9 @@ def hexfield_loss(
         weight_denominator=denoms.get("policy_ce_weight_sum"),
         denominator=rows,
     )
-    # Value head masks truncated-game rows (value_mask==0): they carry no real
-    # winner, so the hard-z target is undefined and must not pollute the head.
-    # When no truncated rows are present, value_mask is all-1 and denoms['value']
-    # == rows, so (per_item * 1).sum() / rows reproduces the unmasked path exactly
-    # — completed-only batches are byte-identical. The denominator prefers the
-    # step-global value count; absent that it falls back to `rows` (then to B
-    # inside binned_value_loss), exactly as before. Callers that omit value_mask
-    # entirely (mask=None) keep the original unmasked behavior byte-for-byte.
+    # value_mask==0 rows are excluded from the value head. The denominator uses
+    # denoms['value'] if present, else `rows`, else the masked row count inside
+    # binned_value_loss.
     components["value"] = binned_value_loss(
         outputs["value"],
         batch["value"],
@@ -269,15 +255,10 @@ def hexfield_loss(
     total = policy_weight * components["policy"] + value_weight * components["value"]
 
     if "opp_policy" in outputs and "opp_policy" in batch:
-        # Zero-target rows (no future opponent decision / masked-from-fast / zero
-        # projected mass) contribute exactly 0 but stay in the denominator
-        # (allow_zero_rows). PCR value-rows BUGFIX (2026-06-22): FAST rows are NOT
-        # guaranteed zero-target — a fast row whose NEXT move was a FULL move carries
-        # a real future-opponent target. Without gating, those leaked gradient into
-        # the opp head AND inflated the loss (numerator over all rows, denominator
-        # policy_rows). row_weight=policy_valid zeroes fast rows in the numerator;
-        # weight_denominator=policy_rows keeps the mean over FULL rows. On full-only
-        # batches policy_valid is all-1 ⇒ byte-identical to pre-fix.
+        # Zero-target rows contribute 0 but stay in the denominator
+        # (allow_zero_rows). row_weight=policy_valid zeroes policy_valid==0 rows in
+        # the numerator; weight_denominator=policy_rows keeps the mean over rows
+        # with policy_valid==1.
         components["opp_policy"] = segment_policy_ce(
             outputs["opp_policy"],
             batch["legal_counts"],
@@ -290,19 +271,11 @@ def hexfield_loss(
         total = total + opp_policy_weight * components["opp_policy"]
 
     if "soft_policy" in outputs and "soft_policy" in batch:
-        # KataGo auxiliary SOFT policy: CE of the soft-policy head logits against
-        # the (visit_policy+1e-7)^(1/4)-renormalized target (computed in
-        # collate_training). FLAT rows denominator — KataGo's aux soft loss is not
-        # surprise-reweighted (it carries no policy_ce_weight). The soft target is
-        # derived from the main visit policy which always carries positive mass
-        # (expand hard-errors on zero policy mass), so allow_zero_rows is not
-        # needed.
-        # FAST rows have all-zero soft_policy (derived from the all-zero visit
-        # policy) → zero-mass rows. allow_zero_rows lets them contribute 0 without
-        # raising; the denominator is gated to FULL rows so the mean is not
-        # diluted. On full-only batches every soft row has positive mass and
-        # policy_rows == rows ⇒ byte-identical to pre-fix (allow_zero_rows is a
-        # no-op when no zero-mass row exists).
+        # Auxiliary soft policy: CE of the soft-policy head logits against the
+        # soft target built in collate_training. Not surprise-reweighted (no
+        # row_weight), so the denominator is a flat row count. policy_valid==0
+        # rows carry all-zero soft_policy; allow_zero_rows lets them contribute 0,
+        # and the denominator is policy_rows.
         components["soft_policy"] = segment_policy_ce(
             outputs["soft_policy"],
             batch["legal_counts"],

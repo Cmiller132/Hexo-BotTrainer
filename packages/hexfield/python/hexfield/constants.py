@@ -1,7 +1,7 @@
-"""hexfield constants — feature indices, geometry radii, bias-table layout.
+"""hexfield constants: feature indices, geometry radii, bias-table layout.
 
-Single source for every magic number shared by the Python featurizer, the
-model, the wire ABI, and (via parity fixtures) the Rust serve-time featurizer.
+Shared by the Python featurizer, the model, the wire ABI, and (via parity
+fixtures) the Rust serve-time featurizer.
 """
 
 from __future__ import annotations
@@ -9,14 +9,14 @@ from __future__ import annotations
 import os
 
 # --- engine-contract geometry -------------------------------------------------
-# Legality: empty ∧ hex-dist <= LEGAL_RADIUS of any stone (engine legal.rs
-# LEGAL_RADIUS == 8); Opening => forced {(0, 0)}. The halo is exactly the
-# distance-(LEGAL_RADIUS + 1) shell (a property test, not a construction step).
+# Legality: empty and hex-dist <= LEGAL_RADIUS of any stone; opening move is
+# forced to {(0, 0)}. LEGAL_RADIUS matches engine legal.rs. The halo is the
+# distance-(LEGAL_RADIUS + 1) shell.
 LEGAL_RADIUS = 8
 HALO_DIST = LEGAL_RADIUS + 1
 
 # Fixed direction order D: the rotate60 orbit of (1, 0).
-# rot60(D[i]) == D[(i + 1) % 6]; reflect(D[i]) == D[5 - i] (tests only).
+# rot60(D[i]) == D[(i + 1) % 6]; reflect(D[i]) == D[5 - i].
 DIRECTIONS: tuple[tuple[int, int], ...] = (
     (1, 0),
     (0, 1),
@@ -26,18 +26,18 @@ DIRECTIONS: tuple[tuple[int, int], ...] = (
     (1, -1),
 )
 
-# Packed action id: ((q + 2^15) << 16) | (r + 2^15) — byte-identical to engine
-# legal.rs pack_coord and hexo_engine.types.pack_coord_id (cross-checked in
-# tests). Integer order of ids == ascending signed (q, r) order.
+# Packed action id: ((q + 2^15) << 16) | (r + 2^15). Matches engine legal.rs
+# pack_coord and hexo_engine.types.pack_coord_id. Integer order of ids equals
+# ascending signed (q, r) order.
 COORD_OFFSET = 1 << 15
 
 # Missing-neighbour sentinel on the u16 wire (`nbr` ABI buffer). The Python
-# featurizer uses -1; the wire/batching layer maps -1 -> the padded zero row.
+# featurizer uses -1; the wire/batching layer maps -1 to the padded zero row.
 NBR_SENTINEL_U16 = 0xFFFF
 
 # --- node features (F = 15) ---------------------------------------------------
-# Indices 0-12 are the plane semantics, with index 11 = distance-to-nearest-stone.
-# Indices 13-14 are the engine-exact standing-win planes.
+# Indices 0-12 are plane semantics; index 11 is distance-to-nearest-stone.
+# Indices 13-14 are the standing-win planes.
 F_OWN_STONE = 0
 F_OPP_STONE = 1
 F_EMPTY = 2
@@ -55,30 +55,29 @@ F_OPP_WIN_NOW = 13
 F_OWN_WIN_NOW = 14
 NUM_FEATURES = 15
 
-# Window thresholds: hot == the TSS threat definition (count >= 4, one concept
-# repo-wide, threats_shared.rs); standing win == count == 5 (its single empty
-# is a win-in-1 cell). The hot gate is exact, not a heuristic: the first
-# possible count-4 single-colour window appears after placement 7.
+# Window thresholds over length-WINDOW_LEN single-colour windows.
+# hot: count >= HOT_MIN_COUNT (matches the TSS threat definition in
+# threats_shared.rs). standing win: count == WIN_NOW_COUNT (single empty cell
+# is a win-in-1). HOT_MIN_PLACEMENTS is the earliest placement at which a
+# count-4 single-colour window can occur.
 HOT_MIN_COUNT = 4
 WIN_NOW_COUNT = 5
 HOT_MIN_PLACEMENTS = 7
 WINDOW_LEN = 6
 
 # dist_to_stone feature scaling: stones -> 0, legal in (0, 1], halo -> 1.125
-# exactly (9/8, exactly representable in f16). Ply 0 => 0 everywhere.
+# (9/8, exactly representable in f16). Ply 0 => 0 everywhere.
 DIST_SCALE = float(LEGAL_RADIUS)
 HALO_DIST_FEATURE = HALO_DIST / DIST_SCALE  # 1.125
 
 # --- heads / targets ------------------------------------------------------------
 VALUE_BINS = 65
-MOVES_LEFT_CAP = 209  # v3: measured p99.5 of main_2 recorded moves_left (max 254)
+MOVES_LEFT_CAP = 209
 
 # --- trunk ----------------------------------------------------------------------
-# Env-driven width (2026-06-24): main_4 and ALL prior runs default to 96; main_5
-# sets HEXFIELD_CHANNELS=128 (head_dim 32 with 4 heads, divisible). Read once at
-# import. The Rust .so / featurizer are width-agnostic (the model is pure PyTorch),
-# so c=128 needs NO native rebuild. A checkpoint can only load into a net built at
-# the SAME width, so main_4's 96-d .pt won't load into a 128-d net (expected).
+# Trunk width from env HEXFIELD_CHANNELS (default 96), read once at import.
+# Must be divisible by ATTENTION_HEADS. A checkpoint loads only into a net built
+# at the same width.
 CHANNELS = int(os.environ.get("HEXFIELD_CHANNELS", "96"))
 NUM_TOKENS = 8
 ATTENTION_HEADS = 4

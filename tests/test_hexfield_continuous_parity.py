@@ -1,11 +1,11 @@
-"""M6 gates: continuous-scheduler differential parity vs dense_cnn, plus the
-end-to-end ABI round-trip through the real model.
+"""Continuous-scheduler differential parity between hexfield and dense_cnn,
+plus an end-to-end ABI round-trip through the real model.
 
-Both sides drive `run_continuous` over the same fresh games with the same
-base_seed and the full per-move machinery (PCR full/fast coin, policy-init
-openings, Dirichlet noise, temperature schedules, TSS, forced playouts,
-as-built quarantined knobs). The on_move streams must match exactly: move
-classes, chosen actions, visit counts, exported (pruned) visit-policy bytes.
+Both sides drive `run_continuous` over the same games with the same base_seed
+and the full per-move machinery (PCR full/fast coin, policy-init openings,
+Dirichlet noise, temperature schedules, TSS, forced playouts, quarantined
+knobs). The on_move streams are compared for equality: move classes, chosen
+actions, visit counts, and exported (pruned) visit-policy bytes.
 """
 
 from __future__ import annotations
@@ -33,11 +33,10 @@ needs_native = pytest.mark.skipif(
     reason="native modules not built",
 )
 
-# Keeps every searched state (incl. noised ROOTS, where an out-of-disk legal
-# would change the Dirichlet candidate count: hexfield's noise spans its full
-# legal vocabulary, dense's only the in-crop set) deep inside dense's crop —
-# the structural boundary of the comparison, not a search-semantics limit.
-# The Recorder ASSERTS the §5.1 corpus constraint at every decision state.
+# Ply cap that keeps every searched state (including noised roots) inside
+# dense's crop. At noised roots the Dirichlet candidate count must match:
+# hexfield's noise spans its full legal vocabulary, dense's only the in-crop
+# set. The Recorder asserts the in-crop constraint at every decision state.
 MAX_PLIES = 6
 
 
@@ -56,12 +55,12 @@ class Recorder:
         from test_hexfield_search_parity import _fully_in_crop
 
         state = self.states[game_key]
-        # Deep-leaf out-of-disk legals are handled exactly by the stub
-        # (zero prior, dense-equivalent); only noised ROOTS require full
-        # in-disk legality (the Dirichlet candidate count must match).
+        # Deep-leaf out-of-disk legals get a zero prior from the stub, matching
+        # dense; noised roots require full in-disk legality so the Dirichlet
+        # candidate count matches between the two sides.
         assert _fully_in_crop(state, margin=0), (
             "decision-state legal set left dense's crop — lower MAX_PLIES "
-            "(spec §5.1: the differential corpus must stay in-crop)"
+            "to keep the corpus in-crop"
         )
         action_id = payload["action_id"]
         self.records.append(
@@ -111,7 +110,7 @@ def _continuous_kwargs():
         policy_init_max_plies=8,
         policy_init_temperature=1.4,
         tss_enabled=True,
-        # dense AS-BUILT quarantined knob value, passed to both sides.
+        # Quarantined knob value passed to both sides.
         root_fpu_zero_under_noise=True,
     )
 
@@ -161,7 +160,8 @@ def test_continuous_parity_full_machinery() -> None:
 
 @needs_native
 def test_divergences_off_equals_parity_mode() -> None:
-    """(all divergences off via overrides) ≡ search_parity_mode bit-for-bit."""
+    """All divergences off via overrides produces the same records as
+    search_parity_mode."""
 
     keys = [900, 901, 902]
     rec_a = Recorder()
@@ -185,9 +185,9 @@ def test_divergences_off_equals_parity_mode() -> None:
             "early_stop": False,
             "visit_scaled_c_puct": False,
             "moves_left_utility": False,
-            # main_4 KataGo-faithful divergences default ON in production(); this
-            # test asserts (all divergences off) == search_parity_mode, so the new
-            # flags must be neutralized to their parity() legacy value too.
+            # These divergences default ON in production(); this test compares
+            # all-divergences-off against search_parity_mode, so they are set to
+            # their parity() value here.
             "nucleus_f64": False,
             "new_child_fpu": False,
             "lazy_widening": False,
@@ -202,9 +202,9 @@ def test_divergences_off_equals_parity_mode() -> None:
 
 @needs_native
 def test_e2e_abi_roundtrip_with_real_model() -> None:
-    """Payload -> packer -> HexfieldNet -> reply -> tree, divergences ON
-    (exercises moves_left_bytes end to end). Sanity: search completes, visits
-    land, the chosen move is legal."""
+    """Payload -> packer -> HexfieldNet -> reply -> tree with divergences ON,
+    exercising moves_left_bytes end to end. Checks that search completes, visits
+    land, and the chosen move is legal."""
 
     import torch
 
@@ -237,8 +237,7 @@ def test_e2e_abi_roundtrip_with_real_model() -> None:
     assert result["visits"] == 24
     assert result["action_id"] in legal
     assert result["visit_policy_count"] >= 1
-    # Production defaults: divergences ON => the evaluator was asked for
-    # moves_left and the reply carried it (no exception got here), and the
-    # LCB/early-stop fields exist in the payload.
+    # With divergences ON (production defaults), the result payload carries the
+    # LCB and early-stop fields.
     assert "lcb_override" in result
     assert "early_stopped" in result

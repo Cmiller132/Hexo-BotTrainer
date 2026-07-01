@@ -1,23 +1,21 @@
-"""hexfield network — trunk, attention/bias, heads.
+"""hexfield network: trunk, attention/bias, heads.
 
-Trunk interleave C C C A C C C A C C A over variable-N node sets: post-activation
-conv residual blocks with LayerNorm everywhere, and 3 pre-norm transformer blocks
-over the joint sequence [8 summary tokens ; cells], each with its OWN learned
-237-row relative-position bias table. HexNodeConv is a gather + one GEMM (no cuDNN
-convs anywhere).
+Trunk block order C C C A C C C A C C A over variable-N node sets: post-activation
+conv residual blocks with LayerNorm, and 3 pre-norm transformer blocks over the
+joint sequence [8 summary tokens ; cells], each with its own learned
+BIAS_ROWS-row relative-position bias table. HexNodeConv is a gather + one GEMM.
 
 Batch conventions (built by `batching.py`):
 - feats  (B, Npad, F) f32; pad rows all-zero
 - nbr    (B, Npad, 6) long, row-local; missing/pad -> Npad (the appended
-  zero row — conv zero-padding semantics)
+  zero row, giving conv zero-padding semantics)
 - mask   (B, Npad) bool, True at real nodes
-- coords (B, Npad, 2) long axial (q, r); pad coords arbitrary (never read
-  through the bias because pad KEY columns are additively masked and pad
-  QUERY rows are re-zeroed after every block)
+- coords (B, Npad, 2) long axial (q, r); pad coords arbitrary (not read
+  through the bias: pad KEY columns are additively masked and pad QUERY rows
+  are re-zeroed after every block)
 
-Pad-inertness is an invariant: convs and attention re-apply the node mask after
-every parameter-carrying op, so a row's outputs are bit-identical regardless of
-how much padding shares its batch.
+Convs and attention re-apply the node mask after every parameter-carrying op,
+so a row's outputs do not depend on how much padding shares its batch.
 """
 
 from __future__ import annotations
@@ -50,46 +48,37 @@ from .constants import (
 )
 from .geometry import rel_bias_index
 
-# Finite in fp16 (avoids the -1e9 -> -inf saturation hazard).
+# Additive pad-key mask value; finite in fp16.
 PAD_KEY_MASK_VALUE = -3.0e4
 
 STV_HORIZONS = (2, 6, 16)
 
-# FlexAttention serve path (opt-in, default OFF). When HEXFIELD_SERVE_FLEX=1 the
-# NO-GRAD serve forward computes the rel-pos bias INSIDE the attention kernel via
+# FlexAttention serve path, enabled when HEXFIELD_SERVE_FLEX=1 (default off). The
+# no-grad serve forward computes the rel-pos bias inside the attention kernel via
 # a score_mod (coords + _cell_bias_lut + bias_table gather + pad-key fill) instead
-# of materializing the (B, heads, S, S) bias. The training (grad) path is
-# untouched. Read once at import; the import is guarded so a torch without flex
-# still loads.
+# of materializing the (B, heads, S, S) bias. Read once at import; the import is
+# guarded so a torch without flex still loads.
 _SERVE_FLEX = os.environ.get("HEXFIELD_SERVE_FLEX") == "1"
-# FlexAttention TRAINING path (opt-in, default OFF). When HEXFIELD_TRAIN_FLEX=1
-# the grad-enabled forward uses the SAME per-block score_mod, except the carrier
-# passes the FP32 master bias_tables[i] (not the fp16 serve cast) so the table's
-# gradient accumulates in fp32 — same rationale as the _BiasGather fp32-master
-# backward (the fp16 path overflows the hot far/ring rows under AMP+GradScaler).
-# Default OFF == materialized behavior bit-for-bit.
+# FlexAttention training path, enabled when HEXFIELD_TRAIN_FLEX=1 (default off).
+# The grad-enabled forward uses the same per-block score_mod, but the carrier
+# passes the fp32 master bias_tables[i] (not the fp16 serve cast) so the table's
+# gradient accumulates in fp32. With both flags off the materialized path runs.
 _TRAIN_FLEX = os.environ.get("HEXFIELD_TRAIN_FLEX") == "1"
 try:
     from torch.nn.attention.flex_attention import flex_attention as _flex_attention
 
-    # Inner-compiled flex_attention (one flex kernel serves every Npad). The serve
-    # forward is itself torch.compile(dynamic=True); tracing the flex HOP into that
-    # outer graph trips the flex subgraph tracer on the score_mod's captured graph
-    # tensors. So _flex_call is torch.compiler.disable'd: the outer graph breaks at
-    # the attention and the flex op compiles in its OWN inner graph.
+    # Inner-compiled flex_attention. _flex_call (below) is torch.compiler.disable'd
+    # so the outer torch.compile(dynamic=True) serve graph breaks at the attention
+    # and the flex op compiles in its own inner graph.
     #
-    # MUST stay dynamic=False: the score_mod does data-dependent indexing
-    # (coords[b, kc], table[row, h]) which inductor cannot lower under dynamic
-    # shapes (LoweringException: unbacked_bindings). So flex specializes per
-    # distinct (batch, Npad) serve shape instead.
+    # dynamic=False: the score_mod does data-dependent indexing (coords[b, kc],
+    # table[row, h]) which inductor cannot lower under dynamic shapes, so flex
+    # specializes per distinct (batch, Npad) serve shape.
     _flex_compiled = torch.compile(_flex_attention, dynamic=False)
 
-    # Because each serve shape gets its own specialization, a long continuous
-    # self-play generation visits more than dynamo's default 64-recompile cap,
-    # after which the frame falls back PERMANENTLY to the unfused eager flex path
-    # (materializes the full scores matrix -> ~100x slower serve, ~3 pos/s). The
-    # set of serve shapes is bounded (batch <= active_limit, Npad bucketed), so a
-    # generous cap keeps every shape on its fused kernel and never drops to eager.
+    # Each serve shape gets its own specialization. dynamo's recompile limit is
+    # raised so the bounded set of serve shapes (batch <= active_limit, Npad
+    # bucketed) each keeps its fused kernel rather than falling back to eager flex.
     try:
         import torch._dynamo as _dynamo
 
@@ -114,10 +103,10 @@ class _FlexBias:
     attn_bias tensor; RelPosAttention.forward detects it and routes to
     flex_attention.
 
-    It holds the RAW inputs the score_mod needs (coords, mask, bias table, cell
-    LUT) — NOT a pre-built closure. The closure is constructed locally in
-    RelPosAttention.forward (same frame as the flex call) and invoked through the
-    disable'd _flex_call. No (B, heads, S, S) tensor is ever materialized."""
+    Holds the raw inputs the score_mod needs (coords, mask, bias table, cell LUT),
+    not a pre-built closure. The closure is constructed in RelPosAttention.forward
+    (same frame as the flex call) and invoked through the disable'd _flex_call. No
+    (B, heads, S, S) tensor is materialized."""
 
     __slots__ = ("coords", "mask", "table", "lut", "m", "w")
 
@@ -131,10 +120,9 @@ class _FlexBias:
 
     def make_score_mod(self):
         """Build the flex score_mod closure (called inside RelPosAttention.forward,
-        the same frame as the flex_attention call). Computes the SAME additive bias
-        build_attn_bias adds — coords + _cell_bias_lut + bias_table gather — plus
-        the pad-KEY additive fill (PAD_KEY_MASK_VALUE) folded in via the bool
-        mask."""
+        the same frame as the flex_attention call). Computes the additive bias
+        build_attn_bias adds (coords + _cell_bias_lut + bias_table gather) plus the
+        pad-KEY additive fill (PAD_KEY_MASK_VALUE) folded in via the bool mask."""
 
         nt = NUM_TOKENS
         coords = self.coords
@@ -179,9 +167,8 @@ class _FlexBias:
 class _BiasGather(torch.autograd.Function):
     """table[pair] with a histogram backward.
 
-    The generic indexing backward scatter-adds the gradient into the 237-row table
-    with raw atomics (the dominant step cost). With only BIAS_ROWS destination
-    classes, the gradient is a per-head bincount instead."""
+    Forward is a plain gather. Backward computes the table gradient as a per-head
+    bincount over the BIAS_ROWS destination classes rather than a scatter-add."""
 
     @staticmethod
     def forward(ctx, table: torch.Tensor, pair: torch.Tensor) -> torch.Tensor:
@@ -215,7 +202,7 @@ class HexNodeConv(nn.Module):
         self.out_channels = out_channels
         self.weight = nn.Parameter(torch.empty(7, in_channels, out_channels))
         self.bias = nn.Parameter(torch.empty(out_channels))
-        # PyTorch conv default init with fan_in = 7 * C_in.
+        # Uniform init with fan_in = 7 * C_in.
         fan_in = 7 * in_channels
         bound = 1.0 / math.sqrt(fan_in)
         nn.init.uniform_(self.weight, -bound, bound)
@@ -226,7 +213,7 @@ class HexNodeConv(nn.Module):
     ) -> torch.Tensor:
         """x (B, Npad, Cin); gather_idx (B, Npad, 7) with tap 0 = self and
         missing -> Npad; mask (B, Npad) bool. Returns (B, Npad, Cout) with
-        pad rows exactly zero (the conv bias would otherwise leak into them).
+        pad rows zeroed by the mask.
         """
 
         b, n, c = x.shape
@@ -269,17 +256,16 @@ class ConvBlock(nn.Module):
 
 
 class RelPosAttention(nn.Module):
-    """4-head MHSA over the joint [tokens ; cells] sequence with this block's
-    bias table gathered as an additive mask. Two numerically identical
-    implementations: 'sdpa' (production) and 'materialized' (test oracle)."""
+    """Multi-head self-attention over the joint [tokens ; cells] sequence with
+    this block's bias table gathered as an additive mask. Two implementations
+    selectable via self.impl: 'sdpa' and 'materialized'."""
 
     def __init__(self, channels: int) -> None:
         super().__init__()
         self.heads = ATTENTION_HEADS
-        # head_dim derives from THIS net's width (channels // heads), not the global
-        # HEAD_DIM, so a net built at a non-default width — e.g. a c=96 eval anchor
-        # loaded inside a c=128 process — gets the correct per-head dim. At the
-        # default width channels == CHANNELS, so head_dim == HEAD_DIM (byte-identical).
+        # head_dim derives from this net's width (channels // heads), so a net built
+        # at a non-default width gets the correct per-head dim. At the default width
+        # channels == CHANNELS, so head_dim == HEAD_DIM.
         self.head_dim = channels // ATTENTION_HEADS
         self.scale = 1.0 / math.sqrt(self.head_dim)
         self.q_proj = nn.Linear(channels, channels)
@@ -294,17 +280,16 @@ class RelPosAttention(nn.Module):
         q = self.q_proj(seq).reshape(b, s, h, d).transpose(1, 2)
         k = self.k_proj(seq).reshape(b, s, h, d).transpose(1, 2)
         v = self.v_proj(seq).reshape(b, s, h, d).transpose(1, 2)
-        # Flex path: the rel-pos bias + pad mask live INSIDE the kernel via a
-        # score_mod (no materialized (B,heads,S,S) tensor). block_mask is
-        # deliberately None so no per-shape BlockMask object enters the dynamic-Npad
-        # compile. The score_mod is built HERE, in the same frame as the flex call.
+        # Flex path: the rel-pos bias + pad mask are computed inside the kernel via
+        # a score_mod (no materialized (B,heads,S,S) tensor). block_mask is None.
+        # The score_mod is built here, in the same frame as the flex call.
         if isinstance(attn_bias, _FlexBias):
             score_mod = attn_bias.make_score_mod()
             out = _flex_call(q, k, v, score_mod)
             out = out.transpose(1, 2).reshape(b, s, c)
             return self.out_proj(out)
-        # Match the bias dtype to q under autocast: a dtype mismatch silently
-        # drops sdpa to the slow math fallback. -3.0e4 stays finite in fp16.
+        # Match the bias dtype to q under autocast; a dtype mismatch drops sdpa to
+        # the math fallback.
         attn_bias = attn_bias.to(q.dtype)
         if self.impl == "sdpa":
             out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_bias)
@@ -318,7 +303,7 @@ class RelPosAttention(nn.Module):
 
 
 class AttnBlock(nn.Module):
-    """Pre-norm transformer block (GELU, MLP ratio 2)."""
+    """Pre-norm transformer block (GELU, MLP hidden width MLP_RATIO * channels)."""
 
     def __init__(self, channels: int) -> None:
         super().__init__()
@@ -344,20 +329,16 @@ class HexfieldNet(nn.Module):
 
     def __init__(self, channels: int = CHANNELS) -> None:
         super().__init__()
-        # channels defaults to the process-global CHANNELS (production / training);
-        # an explicit value lets the eval arena build an opponent net at ITS OWN
-        # checkpoint width (e.g. a c=96 anchor inside a c=128 run). All submodules
-        # are already channels-parameterized, so this threads cleanly.
+        # channels defaults to the module-global CHANNELS; an explicit value builds
+        # the net at a different width. All submodules are channels-parameterized.
         c = channels
         self.stem = HexNodeConv(NUM_FEATURES, c)
         self.stem_ln = nn.LayerNorm(c)
         self.conv_blocks = nn.ModuleList([ConvBlock(c) for _ in range(8)])
         self.attn_blocks = nn.ModuleList([AttnBlock(c) for _ in range(3)])
         self.tokens = nn.Parameter(torch.empty(NUM_TOKENS, c))
-        # Per-block relative-position bias tables: each of the 3 attention blocks
-        # gets its OWN (BIAS_ROWS, heads) table instead of one shared table. Each
-        # is zero-init (a fresh run is bit-identical to the old single-zero-table
-        # net); a migrated checkpoint copies the old shared table into all 3.
+        # Per-block relative-position bias tables: each attention block gets its own
+        # zero-init (BIAS_ROWS, heads) table.
         self.bias_tables = nn.ParameterList(
             [
                 nn.Parameter(torch.zeros(BIAS_ROWS, ATTENTION_HEADS))
@@ -372,17 +353,11 @@ class HexfieldNet(nn.Module):
         self.policy_head = nn.Linear(c, 1)
         self.opp_policy_conv = HexNodeConv(c, c)
         self.opp_policy_head = nn.Linear(c, 1)
-        # KataGo auxiliary SOFT policy head (main_4, train-only). KataGo emits the
-        # soft policy as an extra OUTPUT CHANNEL of its single multi-channel policy
-        # head (channel 2 = player soft). Hexfield uses a separate conv+Linear(c,1)
-        # per target (policy / opp_policy / cell_q), so the faithful-in-spirit
-        # adaptation gives the soft head its OWN conv+Linear, mirroring opp_policy.
-        # Documented divergence: this is NOT byte-faithful to KataGo's shared-conv
-        # channel-slice layout, but matches Hexfield's per-head-conv architecture.
-        # Fresh/zero-init via _init_weights (trunc_normal(0.02) weight, zeros bias).
+        # Auxiliary soft policy head (train-only): its own conv + Linear(c, 1),
+        # mirroring opp_policy. Initialized by _init_weights.
         self.soft_policy_conv = HexNodeConv(c, c)
         self.soft_policy_head = nn.Linear(c, 1)
-        # Train-only per-cell Q head (#4): emitted in forward() only, never serve.
+        # Per-cell Q head (train-only): emitted in forward() only, not in serve.
         self.cell_q_conv = HexNodeConv(c, c)
         self.cell_q_head = nn.Linear(c, VALUE_BINS)
         self.value_reduction = nn.Linear(3 * c, c)
@@ -391,17 +366,13 @@ class HexfieldNet(nn.Module):
         self.stv_heads = nn.ModuleDict(
             {str(h): nn.Linear(c, VALUE_BINS) for h in STV_HORIZONS}
         )
-        self.ml_reduction = nn.Linear(3 * c, c)  # moves_left's own reduction (tokens 4,5)
+        self.ml_reduction = nn.Linear(3 * c, c)  # moves_left reduction (tokens 4, 5)
         self.moves_left_head = nn.Linear(c, VALUE_BINS)
 
-        # FULL cell-bias LUT over the entire (dq, dr) offset domain — one gather
-        # replaces the per-forward abs/maximum/clamp/where bias machinery (O(B*S^2)
-        # over the cell-cell pair grid). row = _cell_bias_lut[
-        # (clamp(dq,-M,M)+M)*W + (clamp(dr,-M,M)+M)], M = BIAS_RING_MAX+1 = 17,
-        # W = 2M+1 = 35. Bit-identical to the old machinery: for |dq|,|dr| <= M the
-        # table IS rel_bias_index(dq,dr); the clamp only ever fires on offsets that
-        # were already far (hex-dist > BIAS_RING_MAX), which the table also maps to
-        # the far row.
+        # Cell-bias LUT over the (dq, dr) offset domain. Gathered per pair as
+        # row = _cell_bias_lut[(clamp(dq,-M,M)+M)*W + (clamp(dr,-M,M)+M)], with
+        # M = BIAS_RING_MAX + 1 and W = 2M + 1. For |dq|,|dr| <= M the entry equals
+        # rel_bias_index(dq, dr); offsets beyond M map to the far row.
         self._cell_bias_M = BIAS_RING_MAX + 1
         cw = 2 * self._cell_bias_M + 1
         cell_lut = torch.empty(cw * cw, dtype=torch.long)
@@ -412,24 +383,20 @@ class HexfieldNet(nn.Module):
                 )
         self.register_buffer("_cell_bias_lut", cell_lut, persistent=False)
 
-        # Flex flags, read ONCE (compile-time constants for the dynamo graph).
-        # serve_flex applies on the no-grad serve path; train_flex on the grad path
-        # (fp32-table carrier). With both OFF, attention uses the materialized
-        # build_attn_bias + _BiasGather.
+        # Flex flags, read once. serve_flex applies on the no-grad serve path;
+        # train_flex on the grad path (fp32-table carrier). With both off,
+        # attention uses the materialized build_attn_bias + _BiasGather.
         self._serve_flex = _SERVE_FLEX and _flex_attention is not None
         self._train_flex = _TRAIN_FLEX and _flex_attention is not None
 
         self._init_weights()
 
     def _init_weights(self) -> None:
-        """trunc_normal(0.02) Linears; LN (1, 0); convs PyTorch default
-        (done in HexNodeConv); per-block bias tables zero (already, from the
-        ParameterList constructor — must NOT be touched here); tokens
-        trunc_normal(0.02). Residual-branch identity at step 0 now comes from
-        LayerScale(init=1e-4) on every branch (ConvBlock.ls; AttnBlock
-        ls_attn/ls_mlp), so the explicit residual-closing zero-inits are gone.
-        LayerScale.gamma is neither Linear nor LayerNorm, so the generic loops
-        leave its 1e-4 fill untouched."""
+        """Linears trunc_normal(std=0.02) weight, zero bias; LayerNorm weight 1,
+        bias 0; convs keep HexNodeConv's own init; tokens trunc_normal(std=0.02).
+        Bias tables are left at their zero init from the ParameterList constructor.
+        LayerScale.gamma is neither Linear nor LayerNorm, so the loops below leave
+        its init fill untouched."""
 
         for module in self.modules():
             if isinstance(module, nn.Linear):
@@ -449,13 +416,13 @@ class HexfieldNet(nn.Module):
     def _build_pair(
         self, coords: torch.Tensor, mask: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Block-INDEPENDENT pieces of the bias build, computed ONCE per forward
-        and reused by all 3 attention blocks (was inlined in build_attn_bias).
+        """Block-independent pieces of the bias build, computed once per forward
+        and reused by all 3 attention blocks.
 
         Returns (pair, key_pad):
-        - pair (B, S, S) long: the per-pair bias-table ROW index. S = NUM_TOKENS +
-          Npad. Tokens sit at slots 0-7 with no board position; token keys are
-          never masked, so a fully-masked softmax row is structurally impossible.
+        - pair (B, S, S) long: the per-pair bias-table row index. S = NUM_TOKENS +
+          Npad. Tokens occupy slots 0..NUM_TOKENS-1 with no board position; token
+          keys are never masked.
         - key_pad (B, S) bool: True at live keys (the pad-KEY additive fill mask).
 
         coords (B, Npad, 2) long; mask (B, Npad) bool."""
@@ -463,9 +430,8 @@ class HexfieldNet(nn.Module):
         b, n, _ = coords.shape
         dq = coords[:, None, :, 0] - coords[:, :, None, 0]  # (B, N, N) key - query
         dr = coords[:, None, :, 1] - coords[:, :, None, 1]
-        # Single precomputed-LUT gather over the whole offset domain (see the
-        # _cell_bias_lut construction note in __init__): one clamp + one mul-add +
-        # one gather instead of a chain of (B, N, N) elementwise/select kernels.
+        # LUT gather over the offset domain (see _cell_bias_lut in __init__):
+        # clamp + mul-add + gather to the (B, N, N) row indices.
         m = self._cell_bias_M
         w = 2 * m + 1
         qi = dq.clamp(-m, m) + m
@@ -478,12 +444,11 @@ class HexfieldNet(nn.Module):
         pair[:, NUM_TOKENS:, :NUM_TOKENS] = BIAS_CELL_TOKEN_ROW
         pair[:, NUM_TOKENS:, NUM_TOKENS:] = cell_idx
 
-        # Pad-cell KEY columns: additive, finite in fp16. Token keys untouched.
-        # The mask MUST be added before the returned attn_mask is materialized so
-        # it has stride(-1) == 1 on the key axis: a non-stride-1 attn_mask silently
-        # forces F.scaled_dot_product_attention onto the FP32 MATH backend (the
-        # profiled ampere_sgemm + fp32 softmax) instead of the fused fp16
-        # mem-efficient kernel.
+        # Pad-cell KEY columns: additive, finite in fp16; token keys untouched.
+        # The mask is added before the attn_mask is materialized so it has
+        # stride(-1) == 1 on the key axis; a non-stride-1 attn_mask forces
+        # F.scaled_dot_product_attention onto the fp32 math backend instead of the
+        # fused fp16 mem-efficient kernel.
         key_pad = torch.cat(
             [mask.new_ones(b, NUM_TOKENS), mask], dim=1
         )  # (B, S) True = live key
@@ -493,29 +458,25 @@ class HexfieldNet(nn.Module):
         self, pair: torch.Tensor, key_pad: torch.Tensor, block: int
     ) -> torch.Tensor:
         """(B, heads, S, S) additive bias for attention block `block`, using that
-        block's OWN table self.bias_tables[block] + the pad-key mask.
+        block's own table self.bias_tables[block] plus the pad-key mask.
 
         `pair` (B, S, S) row indices and `key_pad` (B, S) live-key mask come from
         _build_pair (built once per forward, shared across the 3 blocks)."""
 
         table = self.bias_tables[block]
         if torch.is_grad_enabled():
-            # TRAINING: gather in FP32 via _BiasGather. The fp32 master-table
-            # bincount backward keeps the bias-table gradient finite; a fp16 table
-            # would let the hot far/ring rows overflow to inf under AMP+GradScaler.
-            # Add the mask in head-LAST layout (key = dim 2), then ONE
-            # permute+contiguous to (B, heads, Sq, Sk).
+            # Grad path: gather in fp32 via _BiasGather (fp32 table gradient). Add
+            # the mask in head-last layout (key = dim 2), then one permute+contiguous
+            # to (B, heads, Sq, Sk).
             bias = _BiasGather.apply(table, pair)  # (B, Sq, Sk, heads) fp32
             fill = torch.where(key_pad, 0.0, PAD_KEY_MASK_VALUE).to(bias.dtype)
             bias = bias + fill[:, None, :, None]  # broadcast over key axis (dim 2)
             return bias.permute(0, 3, 1, 2).contiguous()  # (B, heads, Sq, Sk)
 
-        # INFERENCE (no grad — self-play/eval): no backward exists, so build the
-        # whole (B,heads,S,S) bias in fp16 in head-FIRST layout. Indexing the
-        # transposed table (heads, ROWS) yields a contiguous (heads, B, Sq, Sk);
-        # permute(1,0,2,3) is a stride(-1)==1 view, and the pad-mask add is the
-        # single full-tensor materialization (one fewer (B,heads,S,S) write than the
-        # head-last path). Arithmetic is bit-identical to the head-last fp16 path.
+        # No-grad path: build the (B, heads, S, S) bias in fp16, head-first layout.
+        # Indexing the transposed table (heads, ROWS) yields a contiguous
+        # (heads, B, Sq, Sk); permute(1,0,2,3) is a stride(-1)==1 view, and the
+        # pad-mask add is the single full-tensor materialization.
         bias_t = table.to(torch.float16).t().contiguous()  # (heads, ROWS)
         bias = bias_t[:, pair]                       # (heads, B, Sq, Sk) contiguous
         bias = bias.permute(1, 0, 2, 3)              # (B, heads, Sq, Sk) view, stride(-1)=1
@@ -526,15 +487,15 @@ class HexfieldNet(nn.Module):
         self, coords: torch.Tensor, mask: torch.Tensor, block: int
     ) -> "_FlexBias":
         """Serve-flex (no-grad) equivalent of build_attn_bias for attention block
-        `block`. Packages the RAW tensors the score_mod needs (coords, mask, fp16
-        bias table for THIS block, cell LUT) into a _FlexBias carrier; the closure
-        is built downstream in RelPosAttention.forward. No (B, heads, S, S) tensor
-        is materialized; block_mask is None (the pad mask is folded into the score).
+        `block`. Packages the raw tensors the score_mod needs (coords, mask, fp16
+        bias table for this block, cell LUT) into a _FlexBias carrier; the closure
+        is built in RelPosAttention.forward. No (B, heads, S, S) tensor is
+        materialized; block_mask is None (the pad mask is folded into the score).
 
-        The pad-key boundary is read DIRECTLY from the bool mask, NOT mask.sum(): a
-        reduction inside the score_mod produces a data-dependent (unbacked) symint
-        the dynamic-Npad Inductor lowering cannot bind. (ROWS, heads) fp16 table,
-        no transpose — the score_mod indexes table[row, h]."""
+        The pad-key boundary is read directly from the bool mask, not mask.sum(),
+        since a reduction inside the score_mod produces an unbacked symint the
+        dynamic-Npad Inductor lowering cannot bind. Table is (ROWS, heads) fp16,
+        no transpose; the score_mod indexes table[row, h]."""
 
         table = self.bias_tables[block].to(torch.float16)
         return _FlexBias(coords, mask, table, self._cell_bias_lut, self._cell_bias_M)
@@ -542,16 +503,14 @@ class HexfieldNet(nn.Module):
     def _build_train_flex_bias(
         self, coords: torch.Tensor, mask: torch.Tensor, block: int
     ) -> "_FlexBias":
-        """Train-flex (GRAD-enabled) equivalent of build_attn_bias for attention
-        block `block`. Identical to _build_flex_bias EXCEPT it passes the FP32
-        MASTER table self.bias_tables[block] directly (NO .to(fp16) cast): the
-        score_mod's `table[row, h].to(score.dtype)` read is differentiable, so the
-        table gradient flows back through the flex backward and accumulates in fp32
-        — same fp32-master rationale as build_attn_bias's _BiasGather training
-        branch. The score_mod is reused UNCHANGED. No (B, heads, S, S) tensor is
-        materialized; block_mask stays None (pad mask folded into the score)."""
+        """Train-flex (grad-enabled) equivalent of build_attn_bias for attention
+        block `block`. Same as _build_flex_bias except it passes the fp32 table
+        self.bias_tables[block] directly (no .to(fp16) cast), so the score_mod's
+        `table[row, h].to(score.dtype)` read is differentiable and the table
+        gradient accumulates in fp32. No (B, heads, S, S) tensor is materialized;
+        block_mask stays None (pad mask folded into the score)."""
 
-        table = self.bias_tables[block]  # fp32 master — NOT cast to fp16 (see above)
+        table = self.bias_tables[block]  # fp32, not cast to fp16 (see above)
         return _FlexBias(coords, mask, table, self._cell_bias_lut, self._cell_bias_M)
 
     # --- forward ---------------------------------------------------------------
@@ -571,13 +530,12 @@ class HexfieldNet(nn.Module):
         gather_idx = torch.cat([self_idx, nbr], dim=2)  # (B, Npad, 7), tap 0 = self
 
         x = F.relu(self.stem_ln(self.stem(feats, gather_idx, mask))) * mask.unsqueeze(-1)
-        # FlexAttention bias path is chosen per execution mode: serve_flex (no-grad
-        # serve, fp16 carrier) or train_flex (grad, fp32 master carrier). Either
-        # uses the in-kernel score_mod (no (B,heads,S,S) materialization); with both
-        # flags OFF, the materialized build_attn_bias (+ _BiasGather) branch runs.
-        # Each attention block uses its OWN bias_tables[i]; the pair/key_pad index
-        # machinery is block-INDEPENDENT and built ONCE here. block_bias(i) returns
-        # the right object per block.
+        # Bias path is chosen per execution mode: serve_flex (no-grad, fp16 carrier)
+        # or train_flex (grad, fp32 carrier) use the in-kernel score_mod with no
+        # (B, heads, S, S) materialization; with both flags off the materialized
+        # build_attn_bias (+ _BiasGather) branch runs. The pair/key_pad index is
+        # block-independent and built once here; block_bias(i) returns the per-block
+        # object using bias_tables[i].
         grad_on = torch.is_grad_enabled()
         serve_flex = self._serve_flex and not grad_on
         train_flex = self._train_flex and grad_on
@@ -634,8 +592,8 @@ class HexfieldNet(nn.Module):
             "opp_policy": self._policy_logits(
                 self.opp_policy_conv, self.opp_policy_head, cells, gather_idx, mask
             ),
-            # KataGo aux soft policy (train-only): NOT added to forward_policy_value
-            # (serve), exactly like cell_q / opp_policy.
+            # Auxiliary soft policy (train-only): not in forward_policy_value
+            # (serve), like cell_q and opp_policy.
             "soft_policy": self._policy_logits(
                 self.soft_policy_conv, self.soft_policy_head, cells, gather_idx, mask
             ),
@@ -695,7 +653,7 @@ class HexfieldNet(nn.Module):
         mask: torch.Tensor,
     ) -> torch.Tensor:
         y = F.relu(conv(cells, gather_idx, mask))
-        return head(y).squeeze(-1) * mask  # (B, Npad); legality is structural
+        return head(y).squeeze(-1) * mask  # (B, Npad); pad rows zeroed
 
     @staticmethod
     def _cell_q_logits(

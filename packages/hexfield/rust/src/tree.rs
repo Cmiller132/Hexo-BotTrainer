@@ -1,15 +1,15 @@
-//! hexfield PUCT tree — from-scratch port of the as-built dense_cnn tree
-//! semantics (mcts_tree is the semantic reference; the stub-evaluator
-//! differential harness pins this implementation against it bit-for-bit in
-//! `search_parity_mode`), plus the §5.4 divergence machinery:
+//! hexfield PUCT tree.
 //!
-//! - per-edge sum-of-squares accumulator (LCB selection; inert in parity)
-//! - per-node/per-edge (ml_sum, ml_weight) moves-left stats (§5.4.4; inert
-//!   when the utility is off)
-//! - visit-scaled c_puct schedule (§5.4.3; off => the caller's static c)
+//! Divergence machinery gated by the `Divergences` toggles:
 //!
-//! No crop exists: every engine-legal move is a candidate by construction, so
-//! TSS injection is total (the dense call-site crop filter is deleted).
+//! - per-edge sum-of-squares accumulator (LCB selection; inactive when
+//!   `lcb_move_selection` is off)
+//! - per-node/per-edge (ml_sum, ml_weight) moves-left stats (inactive when
+//!   `moves_left_utility` is off)
+//! - visit-scaled c_puct schedule (off => the caller's static c)
+//!
+//! Every engine-legal move is a candidate; there is no candidate crop, so TSS
+//! injection covers the full legal set.
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -27,28 +27,12 @@ use crate::cache::{state_hash, RustEvaluation};
 use crate::state::move_error;
 use crate::threats_shared as threats;
 
-/// Q SCALE + c_puct RADIUS RATIONALE (KataGo-faithful, made explicit per the
-/// main_4 ledger — this documents the math, it does NOT change it).
-///
-/// Edge Q here is `value_sum / visits` on the SYMMETRIC interval [-1, 1] (a
-/// win/loss utility with NO KataGo-style per-node normalization). Hexo has no
-/// territory/score term, so the faithful KataGo utility radius collapses to
-/// `winLossUtilityFactor = 1.0`, giving a Q WIDTH of 2.0 (vs KataGo's ~1.4 once
-/// its score-utility terms are included).
-///
-/// Because exploration (the U term) and value (Q) are ADDED on the same scale,
-/// the exploration constant must be expressed on the SAME radius. The
-/// c_puct we ship (~1.5) is the radius-rescaled KataGo cpuctExploration (1.0):
-///   c_puct ≈ 1.0 * Q_UTILITY_WIDTH / KATAGO_UTILITY_WIDTH = 1.0 * 2.0 / 1.4
-///          ≈ 1.43  (we ship 1.5).
-/// Equivalently, c/radius is near-identical: KataGo 1.0/1.4 = 0.714 vs hexfield
-/// 1.5/2.0 = 0.75. We deliberately do NOT remap Q to [0,1]; doing so would force
-/// re-deriving fpu_reduction (0.2), the moves-left weight/gate, lcb_z, the
-/// forced-playout U comparison, and the recorded target — all of which are
-/// calibrated against the [-1,1] radius.
+/// Edge Q is `value_sum / visits` on the symmetric interval [-1, 1] (win/loss
+/// utility, no per-node normalization). The exploration (U) and value (Q) terms
+/// are added on this same scale. `Q_UTILITY_WIDTH` is the width of that interval
+/// (2.0) and is not read in the selection math; it documents the c_puct scale.
 pub const Q_UTILITY_WIDTH: f32 = 2.0;
-/// KataGo's effective utility width with its score terms (winLoss + score);
-/// used only to document the c_puct radius rescale above. Not used in the math.
+/// Reference utility width (1.4). Not read in the selection math.
 pub const KATAGO_UTILITY_WIDTH: f32 = 1.4;
 
 #[derive(Clone, Copy, Debug)]
@@ -56,15 +40,14 @@ pub struct RootDirichletNoise {
     pub total_alpha: f32,
     pub fraction: f32,
     pub seed: u64,
-    /// [5] when true, per-move concentration is the KataGo SHAPED alpha
-    /// distribution (computeDirichletAlphaDistribution) times total_alpha,
-    /// instead of the flat `total_alpha / count`. Set from the `dirichlet_shaped`
-    /// divergence flag at the call site.
+    /// When true, per-move concentration is the shaped alpha distribution
+    /// (see `shaped_alpha`) times total_alpha; when false, the flat
+    /// `total_alpha / count`. Set from the `dirichlet_shaped` divergence flag.
     pub shaped: bool,
 }
 
-/// §5.4 divergence toggles + constants. `parity()` (== `search_parity_mode`)
-/// forces all four off; production defaults ship all four ON (spec §5.4).
+/// Divergence toggles and constants. `parity()` forces the divergences off;
+/// `production()` turns them on.
 #[derive(Clone, Copy, Debug)]
 pub struct Divergences {
     pub lcb_move_selection: bool,
@@ -80,42 +63,37 @@ pub struct Divergences {
     pub ml_weight: f32,
     pub ml_scale: f32,
     pub ml_q_gate: f32,
-    /// Two-sided (§5.4.4): when on, the bonus also fires on the losing side
-    /// (Q < -gate), preferring SLOWER losses; when off, win-side only.
+    /// When on, the moves-left bonus also fires on the losing side
+    /// (Q < -gate); when off, it fires only on the winning side (Q > gate).
     pub ml_two_sided: bool,
     /// Final root-move decisiveness tie-break among near-LCB-tied moves.
     pub ml_final_pick: bool,
     /// LCB band (in value units) defining "near-tied" for the final pick.
     pub ml_final_pick_band: f32,
-    // === main_4 KataGo-faithful search divergences (ledger items [1]-[7]). ===
-    // Each defaults to the CURRENT/legacy value in `parity()` (so the M5/M6
-    // golden vectors and the differential harness stay byte-identical) and to
-    // the KataGo-faithful value in `production()`.
-    /// [1] nucleus widening cumulative-mass accounting in f64 + an explicit
-    /// `mass >= 1.0 => take all` sentinel. parity()=false (legacy f32 loop that
-    /// truncates the low-prior tail and never short-circuits at mass==1.0).
+    /// When true, nucleus widening accumulates cumulative mass in f64 and
+    /// short-circuits to "take all" when `widening.mass >= 1.0`. When false,
+    /// accumulate in f32 with no `mass == 1.0` short-circuit. See
+    /// `nucleus_count_values`.
     pub nucleus_f64: bool,
-    /// [2] new (visits==0) child selection score includes the FPU baseline
-    /// `value_or_fpu(parent_value, fpu_reduction)` (KataGo getNewExploreSelection
-    /// Value == fpu + U). parity()=false (legacy U-only `prior*scale`).
-    /// MUST ship together with `lazy_widening` so the lifted cap never runs with
-    /// U-only scoring (the sign-of-parent-value bias flips selection otherwise).
+    /// When true, the new (visits==0) child selection score includes the FPU
+    /// baseline `value_or_fpu(parent_value, fpu_reduction)` (fpu + U). When
+    /// false, the score is U-only (`prior * exploration_scale`). See
+    /// `new_child_score`. Intended to be enabled together with `lazy_widening`.
     pub new_child_fpu: bool,
-    /// [3] widening eligibility is a LIVE `peek_next_candidate().is_some()` check
-    /// (an unexpanded candidate exists), subsuming the frozen-cap bug and the
-    /// nucleus truncation as the eligibility gate. parity()=false (legacy frozen
-    /// `edges.len() < max_eligible_children`). Coupled with `new_child_fpu`.
+    /// When true, widening eligibility is a live `peek_next_candidate().is_some()`
+    /// check (an unexpanded candidate exists). When false, the frozen comparison
+    /// `edges.len() < max_eligible_children`.
     pub lazy_widening: bool,
-    /// [4] cache the CLEAN post-temp pre-noise root priors and reset from them
-    /// before re-applying temperature/noise on reused/promoted roots, so noise
-    /// never compounds across plies. parity()=false (legacy in-place re-mix).
+    /// When true, cache the clean post-temp pre-noise root priors and reset from
+    /// them before re-applying temperature/noise on reused/promoted roots. When
+    /// false, re-apply in place.
     pub clean_root_prior_cache: bool,
-    /// [5] SHAPED Dirichlet (KataGo computeDirichletAlphaDistribution) fed from
-    /// the clean post-temp pre-noise policy, vs the flat Dir(total_alpha/count).
-    /// parity()=false (legacy flat alpha).
+    /// When true, root Dirichlet noise uses the shaped alpha distribution (see
+    /// `shaped_alpha`) computed from the clean post-temp pre-noise policy. When
+    /// false, flat Dir(total_alpha / count).
     pub dirichlet_shaped: bool,
-    /// [7] recorded-target forced-playout pruning uses the dynamic c_for(N)
-    /// (matching selection), vs static c_puct. parity()=false (legacy static).
+    /// When true, recorded-target forced-playout pruning uses the dynamic
+    /// c_for(root_visits) (matching selection); when false, static c_puct.
     pub pruned_dynamic_cpuct: bool,
 }
 
@@ -138,8 +116,6 @@ impl Divergences {
             ml_two_sided: false,
             ml_final_pick: false,
             ml_final_pick_band: 0.05,
-            // main_4 divergences: legacy/current values for byte-identical
-            // golden vectors.
             nucleus_f64: false,
             new_child_fpu: false,
             lazy_widening: false,
@@ -157,7 +133,6 @@ impl Divergences {
             moves_left_utility: true,
             ml_two_sided: true,
             ml_final_pick: true,
-            // main_4 KataGo-faithful search defaults (ledger items [1]-[7]).
             nucleus_f64: true,
             new_child_fpu: true,
             lazy_widening: true,
@@ -176,10 +151,9 @@ pub struct RustEdge {
     pub prior: f32,
     pub visits: u32,
     pub value_sum: f32,
-    /// Sum of squared REAL backup values (LCB sigma; virtual losses excluded —
-    /// a schema addition that is inert in parity mode).
+    /// Sum of squared real backup values (LCB sigma; virtual losses excluded).
     pub value_sq_sum: f32,
-    /// Moves-left stats accumulated on real backups (§5.4.4; inert when off).
+    /// Moves-left stats accumulated on real backups.
     pub ml_sum: f32,
     pub ml_weight: f32,
     pub pending: u32,
@@ -246,10 +220,10 @@ pub struct Widening {
 
 #[derive(Clone, Debug)]
 pub enum NodePriors {
-    /// Interior nodes share the cache's DESCENDING normalized prior vector;
+    /// Interior nodes share the cache's descending normalized prior vector;
     /// the next unexpanded candidate is `priors[edges.len()]`.
     Shared(Arc<RustEvaluation>),
-    /// Root nodes: owned ASCENDING candidate list (highest popped from back).
+    /// Owned ascending candidate list (highest prior popped from the back).
     Owned(Vec<RustPriorCandidate>),
 }
 
@@ -258,7 +232,7 @@ pub struct RustNode {
     pub state_hash: StateHash,
     pub player: Player,
     pub eval_value: f32,
-    /// Evaluator moves-left decode for this node's state (decisions).
+    /// Evaluator moves-left decode for this node's state, in decisions.
     pub eval_ml: Option<f32>,
     pub visits: u32,
     pub value_sum: f32,
@@ -364,12 +338,11 @@ pub struct RustSearch {
     pub divergences: Divergences,
     /// Set when an early-stop fired for this search (telemetry).
     pub early_stopped: bool,
-    /// [4] clean post-temp, PRE-noise root priors (the NN policy after the
-    /// at-most-once root-policy-temperature step). When `clean_root_prior_cache`
-    /// is on, a reused/promoted root resets its edge/candidate priors from this
-    /// cache BEFORE re-applying temperature/noise, so Dirichlet noise never
-    /// compounds across plies and the shaped-alpha input is always the clean
-    /// policy. Keyed by action_id. Lazily populated on first root setup.
+    /// Clean post-temp, pre-noise root priors (policy after the at-most-once
+    /// root-policy-temperature step), keyed by action_id. When
+    /// `clean_root_prior_cache` is on, a reused/promoted root resets its
+    /// edge/candidate priors from this cache before re-applying temperature or
+    /// noise. Lazily populated on first root setup; None until then.
     clean_root_priors: Option<HashMap<PackedCoord, f32>>,
     active_edge_count: usize,
     max_active_edges_per_node: usize,
@@ -458,27 +431,26 @@ impl RustSearch {
         self.divergences = divergences;
     }
 
-    /// Root-policy softmax temperature on a REUSED root (raw eval priors),
-    /// applied before noise, at most once per root lifetime — dense semantics
-    /// verbatim (the quarantined production default passes 1.0 == no-op).
+    /// Apply root-policy softmax temperature to the root priors, before noise,
+    /// at most once per root lifetime.
     ///
-    /// [4] with `clean_root_prior_cache` on: the cache holds the post-temp,
-    /// pre-noise priors. If it is already populated for this root, reset the
-    /// edge/candidate priors from it and DO NOT re-power (temperature is already
-    /// baked in — re-powering is the reuse-compounding bug). If it is empty
-    /// (a freshly promoted root), apply temperature once and capture the result.
+    /// With `clean_root_prior_cache` on: if the cache is already populated for
+    /// this root, reset the edge/candidate priors from it and return without
+    /// re-powering (temperature is already baked into the cached priors). If the
+    /// cache is empty (a freshly promoted root), apply temperature once and
+    /// capture the result into the cache.
     pub fn apply_root_policy_temperature(&mut self, temperature: f32) {
         if self.divergences.clean_root_prior_cache {
             if self.clean_root_priors.is_some() {
                 self.reset_root_priors_from_clean_cache();
                 return;
             }
-            // Promoted root with no cache yet: fall through to apply temperature
-            // once, then capture below.
+            // Promoted root with no cache yet: fall through, apply temperature
+            // once, and capture below.
         }
         if !temperature.is_finite() || temperature <= 0.0 || (temperature - 1.0).abs() < 1.0e-6 {
-            // Even a no-op temperature must seed the clean cache on a promoted
-            // root so the subsequent noise mix resets from a stable baseline.
+            // A no-op temperature still seeds the clean cache on a promoted root
+            // so the subsequent noise mix resets from this baseline.
             if self.divergences.clean_root_prior_cache && self.clean_root_priors.is_none() {
                 self.capture_clean_root_priors();
             }
@@ -515,14 +487,14 @@ impl RustSearch {
                 }
             }
         }
-        // [4] capture the post-temp, pre-noise priors for a promoted root that
-        // had no cache yet (the fall-through case above).
+        // Capture the post-temp, pre-noise priors for a promoted root that had
+        // no cache yet (the fall-through case above).
         if self.divergences.clean_root_prior_cache && self.clean_root_priors.is_none() {
             self.capture_clean_root_priors();
         }
     }
 
-    /// [4] snapshot the current root edge/candidate priors into the clean cache.
+    /// Snapshot the current root edge/candidate priors into the clean cache.
     fn capture_clean_root_priors(&mut self) {
         let root = &self.nodes[0];
         let mut cache: HashMap<PackedCoord, f32> =
@@ -538,9 +510,8 @@ impl RustSearch {
         self.clean_root_priors = Some(cache);
     }
 
-    /// [4] reset the root edge/candidate priors back to the clean (post-temp,
-    /// pre-noise) values cached for this root, so a re-applied Dirichlet mix
-    /// never compounds on already-noised priors across plies / repeated searches.
+    /// Reset the root edge/candidate priors back to the clean (post-temp,
+    /// pre-noise) values cached for this root.
     fn reset_root_priors_from_clean_cache(&mut self) {
         let Some(cache) = self.clean_root_priors.clone() else {
             return;
@@ -580,10 +551,9 @@ impl RustSearch {
     }
 
     pub fn apply_root_dirichlet_noise(&mut self, noise: RootDirichletNoise) {
-        // [4] reset to clean (post-temp, pre-noise) priors BEFORE mixing so the
-        // noise never compounds on a reused/promoted root. When the cache is
-        // active the priors then sum to 1, so the visible_total scaling below
-        // is ~1.0 and the mix matches KataGo's sum-to-1 contract.
+        // Reset to clean (post-temp, pre-noise) priors before mixing. When the
+        // cache is active the priors then sum to 1, so the visible_total scaling
+        // below is ~1.0.
         if self.divergences.clean_root_prior_cache {
             if self.clean_root_priors.is_none() {
                 self.capture_clean_root_priors();
@@ -591,8 +561,8 @@ impl RustSearch {
             self.reset_root_priors_from_clean_cache();
         }
         self.ensure_root_owned();
-        // Collect the clean policy (post-reset) for the shaped-alpha input in
-        // canonical (edges-then-unexpanded) order before we borrow mutably.
+        // Collect the policy (post-reset) for the shaped-alpha input in
+        // edges-then-unexpanded order before borrowing mutably.
         let shaped = noise.shaped;
         let root = &self.nodes[0];
         let NodePriors::Owned(unexpanded_ro) = &root.priors else {
@@ -680,10 +650,9 @@ impl RustSearch {
             return Ok(existing);
         }
         let id = self.nodes.len();
-        // TSS expansion injection. Injection is TOTAL by construction here:
-        // every tactical cell is engine-legal (hex-dist <= 5 of a stone) and
-        // the candidate vocabulary is the full legal set — the dense crop
-        // filter does not exist.
+        // TSS expansion injection. Every tactical cell is engine-legal and the
+        // candidate set is the full legal set, so all tactical cells are
+        // injected (no candidate crop).
         let tactical = if self.tss_enabled {
             threats::tactical_cells(state)
         } else {
@@ -710,10 +679,9 @@ impl RustSearch {
         Ok(id)
     }
 
-    /// [7] public view of the dynamic c_puct schedule for the RECORDED-target
-    /// forced-playout pruning. When `pruned_dynamic_cpuct` is on, the export uses
-    /// c_for(root.visits) (matching selection); otherwise the static c_puct.
-    /// Honors visit_scaled_c_puct via c_for.
+    /// c_puct used by recorded-target forced-playout pruning. When
+    /// `pruned_dynamic_cpuct` is on, returns c_for(root_visits) (matching
+    /// selection); otherwise the static c_puct.
     pub fn effective_pruning_c_puct(&self, c_puct: f32, root_visits: u32) -> f32 {
         if self.divergences.pruned_dynamic_cpuct {
             self.c_for(c_puct, root_visits)
@@ -722,8 +690,9 @@ impl RustSearch {
         }
     }
 
-    /// §5.4.3: exploration constant for a node with `visits` — static c in
-    /// parity, else c_init + c_scale * ln((n + c_base) / c_base).
+    /// Exploration constant for a node with `visits`: `c_puct` when
+    /// `visit_scaled_c_puct` is off, else
+    /// `c_puct + c_scale * ln((visits + c_base) / c_base)`.
     fn c_for(&self, c_puct: f32, visits: u32) -> f32 {
         if !self.divergences.visit_scaled_c_puct {
             return c_puct;
@@ -733,12 +702,12 @@ impl RustSearch {
                 * ((visits as f32 + self.divergences.c_base) / self.divergences.c_base).ln()
     }
 
-    /// §5.4.4 moves-left selection bonus for one edge (0 when off / ungated /
-    /// no stats): -w * s(Q_e) * tanh((M_e - M_node) / m_scale). s = +1 when
-    /// Q_e > ml_q_gate (winning -> prefer faster wins); s = -1 when two-sided
-    /// and Q_e < -ml_q_gate (losing -> prefer slower losses); s = 0 in the
-    /// |Q_e| <= gate dead-zone (no sign discontinuity). Delegates to the same
-    /// core the property tests exercise.
+    /// Moves-left selection bonus for one edge. Returns 0 when
+    /// `moves_left_utility` is off, when the edge has no visits, or when either
+    /// moves-left mean is absent. Otherwise
+    /// `-w * s(Q_e) * tanh((M_e - M_node) / m_scale)`, where s = +1 for
+    /// Q_e > ml_q_gate, s = -1 when two-sided and Q_e < -ml_q_gate, and s = 0
+    /// for |Q_e| <= ml_q_gate. Delegates to `crate::search::debug_ml_bonus`.
     fn ml_bonus(&self, node: &RustNode, edge: &RustEdge) -> f32 {
         if !self.divergences.moves_left_utility {
             return 0.0;
@@ -863,13 +832,10 @@ impl RustSearch {
             }
         }
 
-        // [3] widening eligibility. lazy_widening (production): a LIVE check —
-        // an unexpanded candidate exists. This subsumes the frozen-cap bug
-        // (max_eligible_children was set at node creation and never re-derived)
-        // and removes the nucleus truncation as the eligibility gate, making FPU
-        // the sole gate (KataGo-faithful no-progressive-widening). parity()
-        // keeps the legacy frozen-cap comparison so golden vectors are
-        // byte-identical.
+        // Widening eligibility. With lazy_widening: a live check that an
+        // unexpanded candidate exists. Otherwise: the frozen comparison
+        // `edges.len() < max_eligible_children` (max_eligible_children is set at
+        // node creation and not re-derived).
         let can_widen = if self.divergences.lazy_widening {
             self.nodes[node_id].peek_next_candidate().is_some()
         } else {
@@ -877,7 +843,7 @@ impl RustSearch {
         };
         if can_widen {
             if let Some((action_id, prior)) = self.nodes[node_id].peek_next_candidate() {
-                // [2] new-child selection score (see `new_child_score`).
+                // New-child selection score (see `new_child_score`).
                 let score = new_child_score(
                     parent_value,
                     fpu_reduction,
@@ -947,9 +913,8 @@ impl RustSearch {
     }
 
     /// Real backup (adds back the virtual loss). `leaf_ml` is the moves-left
-    /// estimate at the leaf in DECISIONS (terminals contribute exact path
-    /// distance — 0 at the terminal itself; the off-by-one is handled by the
-    /// per-step increment below). ML stats are side-agnostic.
+    /// estimate at the leaf in decisions (0 at a terminal). Per-step distance is
+    /// added below. ML stats are side-agnostic.
     pub fn backup_virtual(
         &mut self,
         path: &[(usize, usize)],
@@ -974,7 +939,7 @@ impl RustSearch {
                 let edge = &mut node.edges[edge_index];
                 edge.value_sum += value + virtual_loss;
                 edge.value_sq_sum += value * value;
-                edge.ml_sum += ml_here - 1.0; // the edge's child sits one decision deeper
+                edge.ml_sum += ml_here - 1.0; // edge's child is one decision deeper
                 edge.ml_weight += 1.0;
             } else {
                 let edge = &mut node.edges[edge_index];
@@ -1072,18 +1037,11 @@ impl RustSearch {
         nodes[0].state_hash = root_hash;
         if edge.visits > nodes[0].visits {
             nodes[0].visits = edge.visits;
-            // INHERITED-FROM-DENSE (intentional): the edge value_sum is the
-            // child value from the PARENT's perspective, so the strictly-correct
-            // promoted-root value would negate ONLY when the child's side-to-move
-            // differs from the parent's — which is NOT the case for a
-            // FirstStone->SecondStone promotion (same player). dense mcts_tree
-            // negates unconditionally; hexfield reproduces it verbatim so the
-            // differential-parity gate holds bit-for-bit. The effect is bounded:
-            // this only seeds the promoted root's FPU baseline / first reported
-            // value and is overwritten by fresh backups within the next search.
-            // "Fixing" it (negate conditionally on player flip, diverging from
-            // dense) is deferred; it is not a hexfield-introduced regression and
-            // matches the workspace's most successful lineage.
+            // The edge value_sum is the child value from the parent's
+            // perspective; it is negated unconditionally here regardless of
+            // whether the child's side-to-move differs from the parent's. This
+            // seeds the promoted root's FPU baseline and first reported value
+            // and is overwritten by fresh backups during the next search.
             nodes[0].value_sum = -edge.value_sum;
         }
         let mut node_table = HashMap::with_capacity(nodes.len());
@@ -1100,7 +1058,7 @@ impl RustSearch {
             .edges
             .iter()
             .fold(self.nodes[0].visits, |total, edge| total.max(edge.visits));
-        // [4] the promoted root is a NEW root: discard the previous root's clean
+        // The promoted root is a new root: discard the previous root's clean
         // prior cache so the next temperature/noise application re-captures the
         // promoted root's own clean (post-temp, pre-noise) priors.
         self.clean_root_priors = None;
@@ -1146,8 +1104,10 @@ fn clone_subtree_nodes(
     new_id
 }
 
-/// TSS injection split (dense semantics, additive cap) — but with NO crop
-/// filter: every tactical cell is in the candidate set by construction.
+/// Split candidates into forced (tactical) edges and the remaining candidate
+/// list, and return the widening cap. All tactical cells are treated as
+/// candidates (no crop). The cap is the nucleus plus the number of tactical
+/// cells that fall outside the nucleus.
 fn split_tactical(
     candidates: Vec<RustPriorCandidate>,
     tactical: &[HexCoord],
@@ -1242,9 +1202,9 @@ fn shared_from_cache(
     }
 }
 
-/// Build the owned root node. Returns the node plus the CLEAN post-temp,
-/// PRE-noise prior cache (keyed by action_id) when `clean_root_prior_cache` is
-/// on — the reuse path resets from it before re-mixing noise (item [4]).
+/// Build the owned root node. Returns the node plus the clean post-temp,
+/// pre-noise prior cache (keyed by action_id) when `clean_root_prior_cache` is
+/// on, else None.
 fn owned_root_from_evaluation(
     state_hash_value: StateHash,
     state: &RustHexoState,
@@ -1270,7 +1230,7 @@ fn owned_root_from_evaluation(
         apply_root_policy_temperature_to(&mut candidates, temperature);
     }
     normalize_candidate_priors(&mut candidates)?;
-    // [4] cache the clean post-temp, pre-noise priors before mixing noise.
+    // Cache the clean post-temp, pre-noise priors before mixing noise.
     let clean_cache = if divergences.clean_root_prior_cache {
         Some(
             candidates
@@ -1282,9 +1242,8 @@ fn owned_root_from_evaluation(
         None
     };
     if let Some(noise) = root_noise {
-        // [5] shaped vs flat is selected by `noise.shaped` (wired from the
-        // dirichlet_shaped flag). The clean (post-temp, normalized, pre-noise)
-        // priors are the shaped-alpha input.
+        // Shaped vs flat is selected by `noise.shaped`. The clean (post-temp,
+        // normalized, pre-noise) priors are the shaped-alpha input.
         apply_dirichlet_noise(&mut candidates, noise);
     }
     candidates.sort_by(compare_prior_candidate);
@@ -1339,12 +1298,9 @@ fn nucleus_count_pairs(
 /// Count the nucleus (the top-prior children whose cumulative mass first reaches
 /// `widening.mass`), clamped to [min_children, max_children].
 ///
-/// [1] `f64_mode` (the `nucleus_f64` divergence): when true, accumulate the
-/// cumulative mass in f64 AND short-circuit to "take all" (`hi`) when
-/// `mass >= 1.0`. The legacy f32 loop (f64_mode=false) accumulates in f32 — its
-/// rounding can reach >= mass early and truncate the low-prior tail, and it does
-/// NOT treat mass==1.0 as "no cap" (the comment claiming so was false). parity()
-/// keeps the legacy behavior so golden vectors are byte-identical.
+/// When `f64_mode` is true, accumulate cumulative mass in f64 and short-circuit
+/// to `hi` (take all eligible) when `widening.mass >= 1.0`. When false,
+/// accumulate in f32 with no `mass == 1.0` short-circuit.
 fn nucleus_count_values(mut priors: Vec<f32>, widening: Widening, f64_mode: bool) -> usize {
     let total = priors.len();
     if total == 0 {
@@ -1356,8 +1312,8 @@ fn nucleus_count_values(mut priors: Vec<f32>, widening: Widening, f64_mode: bool
         return hi;
     }
     if f64_mode && widening.mass >= 1.0 {
-        // No cap: the cumulative mass can never exceed 1.0 for a normalized
-        // policy, so the explicit sentinel takes every eligible child.
+        // Take every eligible child: for a normalized policy the cumulative mass
+        // cannot exceed 1.0.
         return hi;
     }
     priors.sort_by(|a, b| b.partial_cmp(a).unwrap_or(Ordering::Equal));
@@ -1401,10 +1357,10 @@ fn apply_dirichlet_noise(candidates: &mut [RustPriorCandidate], noise: RootDiric
         return;
     }
     let fraction = noise.fraction;
-    // The candidate priors here are the CLEAN post-temp, normalized policy (this
-    // is the fresh-root path; priors sum to 1). For shaped noise the per-move
-    // concentration is the KataGo shaped alpha distribution computed from these
-    // clean priors; for flat noise it is total_alpha / count.
+    // Candidate priors are the clean post-temp, normalized policy (priors sum to
+    // 1). For shaped noise the per-move concentration is the shaped alpha
+    // distribution computed from these priors; for flat noise it is
+    // total_alpha / count.
     let samples = if noise.shaped {
         let clean: Vec<f32> = candidates.iter().map(|c| c.prior).collect();
         shaped_dirichlet_samples(&clean, noise)
@@ -1438,11 +1394,10 @@ fn dirichlet_samples(count: usize, noise: RootDirichletNoise) -> Vec<f32> {
         .collect()
 }
 
-/// [5] KataGo `computeDirichletAlphaDistribution` (searchhelpers.cpp), VERBATIM.
-/// Input `clean_policy` is the CLEAN post-temp, normalized, pre-noise policy
-/// over the legal moves (every entry treated as legal; the engine has no
-/// padding here). Returns a per-move alpha SHAPE that sums to 1 over the legal
-/// moves; multiply by `total_concentration` to get nextGamma's per-move alpha.
+/// Shaped Dirichlet alpha distribution. Input `clean_policy` is the clean
+/// post-temp, normalized, pre-noise policy over the legal moves. Returns a
+/// per-move alpha shape that sums to 1 over the moves; multiply by a total
+/// concentration to get a per-move alpha.
 ///   a[i]  = log(min(0.01, p[i]) + 1e-20)
 ///   mean  = sum(a) / n
 ///   a[i]  = max(0, a[i] - mean)
@@ -1473,12 +1428,10 @@ fn shaped_alpha(clean_policy: &[f32]) -> Vec<f64> {
     a
 }
 
-/// [5] Draw a Dirichlet sample whose per-move concentration is the KataGo SHAPED
-/// alpha (shaped_alpha(clean) * total_concentration). Returns samples that sum
-/// to 1 (a Dirichlet draw), matching `dirichlet_samples`' contract so the
-/// caller mixes identically (the flat path scales nothing; both produce a
-/// normalized vector). The same gamma sampler / seed stream is used so only the
-/// SHAPE of the concentration changes.
+/// Draw a Dirichlet sample whose per-move concentration is the shaped alpha
+/// (`shaped_alpha(clean) * noise.total_alpha`). Returns samples that sum to 1,
+/// matching `dirichlet_samples`' contract. Uses the same gamma sampler and seed
+/// stream as `dirichlet_samples`.
 fn shaped_dirichlet_samples(clean_policy: &[f32], noise: RootDirichletNoise) -> Vec<f32> {
     let count = clean_policy.len();
     if count == 0 {
@@ -1591,17 +1544,14 @@ fn normalize_candidate_priors(candidates: &mut [RustPriorCandidate]) -> PyResult
     Ok(())
 }
 
-/// [2] PUCT selection value for a NEW (visits==0) candidate child.
+/// PUCT selection value for a new (visits==0) candidate child.
 ///
-/// - `new_child_fpu` ON (production): `value_or_fpu(parent_value) + U`, matching
-///   KataGo getNewExploreSelectionValue (fpu + U). A new child has visits==0 so
-///   the U denominator is (1 + 0) = 1, hence `U = prior * exploration_scale`.
-///   The FPU baseline for a visits==0 edge is `parent_value - fpu_reduction`
-///   (the same value `RustEdge::value_or_fpu` returns for an existing 0-visit
-///   edge), so a materialized candidate scores identically to an already-
-///   present-but-unvisited edge — the bias that flips with sign(parent_value)
-///   under U-only scoring is removed.
-/// - `new_child_fpu` OFF (parity): legacy U-only `prior * exploration_scale`.
+/// - `new_child_fpu` on: `(parent_value - fpu_reduction) + U`. A new child has
+///   visits==0, so the U denominator is (1 + 0) = 1 and
+///   `U = prior * exploration_scale`. This matches the score
+///   `RustEdge::value_or_fpu` yields for an existing 0-visit edge with the same
+///   prior.
+/// - `new_child_fpu` off: U-only `prior * exploration_scale`.
 fn new_child_score(
     parent_value: f32,
     fpu_reduction: f32,
@@ -1657,34 +1607,29 @@ mod tests {
         }
     }
 
-    // === [1] nucleus sentinel + f64/f32 parity ===
+    // === nucleus f64 short-circuit + f64/f32 agreement ===
 
     #[test]
     fn nucleus_f64_sentinel_returns_total_at_mass_one() {
-        // Many tiny priors that, summed in f32 left-to-right, round to >= 1.0
-        // BEFORE the last few are counted — the legacy f32 loop truncates the
-        // tail; the f64 sentinel takes them all (hi == total here).
         let priors = vec![1.0f32 / 50.0; 50];
         let w = widening(1.0, 2, 50);
-        // f64 sentinel: mass>=1.0 short-circuits to hi == total (50).
+        // mass >= 1.0 short-circuits to hi == total (50).
         assert_eq!(nucleus_count_values(priors.clone(), w, true), 50);
     }
 
     #[test]
     fn nucleus_f64_truncation_vs_legacy_f32() {
-        // 1000 equal priors of 1/1000 each. Legacy f32 accumulation reaches
-        // 0.95 early and rounds, possibly truncating; the f64 path with the
-        // sentinel at mass==1.0 returns the full cap. Here cap (hi) is 1000.
+        // 1000 equal priors of 1/1000 each. The f64 path with the mass==1.0
+        // short-circuit returns the full cap (hi == 1000).
         let priors = vec![1.0f32 / 1000.0; 1000];
         let w = widening(1.0, 2, 1000);
         let n_f64 = nucleus_count_values(priors.clone(), w, true);
-        assert_eq!(n_f64, 1000, "f64 sentinel must take all at mass==1.0");
+        assert_eq!(n_f64, 1000, "f64 short-circuit takes all at mass==1.0");
     }
 
     #[test]
     fn nucleus_f32_matches_legacy_for_normal_mass() {
-        // For a sharply-peaked policy and mass 0.95 well below 1.0, f32 and f64
-        // must agree (the tail truncation only bites near mass==1.0 / rounding).
+        // Sharply-peaked policy with mass 0.95: f32 and f64 modes agree.
         let priors = vec![0.5f32, 0.3, 0.15, 0.04, 0.01];
         let w = widening(0.95, 2, 5);
         let n_f32 = nucleus_count_values(priors.clone(), w, false);
@@ -1705,7 +1650,7 @@ mod tests {
         assert_eq!(n2, 1);
     }
 
-    // === [5] shaped alpha matches hand-computed KataGo formula ===
+    // === shaped alpha matches hand-computed formula ===
 
     #[test]
     fn shaped_alpha_sums_to_one_over_legal() {
@@ -1756,7 +1701,7 @@ mod tests {
         }
     }
 
-    // === [2] new-child FPU candidate scoring ===
+    // === new-child FPU candidate scoring ===
 
     #[test]
     fn new_child_score_fpu_vs_u_only() {
@@ -1765,10 +1710,10 @@ mod tests {
         let prior = 0.3f32;
         let scale = 2.0f32;
         let u = prior * scale; // 0.6
-        // OFF (parity): U-only.
+        // fpu off: U-only.
         let off = new_child_score(parent_value, fpu_reduction, prior, scale, false);
         assert!((off - u).abs() < 1e-9);
-        // ON: fpu baseline (parent_value - fpu_reduction) + U.
+        // fpu on: (parent_value - fpu_reduction) + U.
         let on = new_child_score(parent_value, fpu_reduction, prior, scale, true);
         assert!((on - ((parent_value - fpu_reduction) + u)).abs() < 1e-9);
         // The FPU baseline shifts the score by exactly (parent_value - fpu_red).
@@ -1802,7 +1747,7 @@ mod tests {
         assert!((existing - candidate).abs() < 1e-6, "{existing} vs {candidate}");
     }
 
-    // === [4] clean-cache reuse-reset stops Dirichlet compounding ===
+    // === clean-cache reuse-reset behavior ===
 
     fn eval_with_priors(priors: Vec<(PackedCoord, f32)>, value: f32) -> RustEvaluation {
         RustEvaluation {
@@ -1857,7 +1802,7 @@ mod tests {
         // root must produce the SAME priors each time (reset-from-clean), not a
         // compounding drift.
         let mut dv = Divergences::production();
-        dv.dirichlet_shaped = false; // isolate the reset behavior from shape
+        dv.dirichlet_shaped = false; // isolate reset behavior from shaped alpha
         let noise = RootDirichletNoise {
             total_alpha: 10.83,
             fraction: 0.25,
@@ -1883,10 +1828,9 @@ mod tests {
 
     #[test]
     fn legacy_no_cache_does_compound() {
-        // Sanity / contrast: with clean_root_prior_cache OFF (parity), the
-        // second application mixes on the already-noised priors, so the priors
-        // DIFFER between the first and second application (compounding). This
-        // pins that the parity path is unchanged (still compounds as before).
+        // With clean_root_prior_cache off, the second application mixes on the
+        // already-noised priors, so the priors differ between the first and
+        // second application.
         let mut dv = Divergences::parity();
         dv.dirichlet_shaped = false;
         assert!(!dv.clean_root_prior_cache);
@@ -1908,10 +1852,10 @@ mod tests {
                 any_diff = true;
             }
         }
-        assert!(any_diff, "parity path is expected to compound on reuse");
+        assert!(any_diff, "no-cache path compounds on reuse");
     }
 
-    // === [flag-off byte-identical] parity() leaves the new knobs at legacy ===
+    // === parity() / production() divergence defaults ===
 
     #[test]
     fn parity_disables_all_main4_divergences() {
@@ -1937,10 +1881,9 @@ mod tests {
 
     #[test]
     fn parity_dirichlet_is_flat_and_byte_identical() {
-        // Flag-off shaped: the fresh-root construction path with shaped=false
-        // must produce EXACTLY the flat-dirichlet priors (the legacy behavior).
-        // We compare a search built under parity() (shaped off) with a manual
-        // flat mix to confirm no shaped math leaks in.
+        // With shaped off, the fresh-root construction path produces the flat
+        // Dirichlet priors: compare a search built under parity() against a
+        // manual flat mix.
         let dv = Divergences::parity();
         let noise = RootDirichletNoise {
             total_alpha: 10.83,
@@ -1968,7 +1911,7 @@ mod tests {
             let g = got.get(&id).copied().unwrap();
             assert!(
                 (e - g).abs() < 1e-5,
-                "flat dirichlet must be byte-identical: action {id} expected {e} got {g}"
+                "flat dirichlet mismatch: action {id} expected {e} got {g}"
             );
         }
     }

@@ -1,9 +1,8 @@
-"""Engine-state -> PositionFacts bridge (hexo_engine is shared infra, spec §8).
+"""Convert engine state into PositionFacts.
 
-Used by the BC bootstrap writer (M3), test oracles, and fixture generation.
-The hot / standing-win lists here come straight from the engine WindowStore
-mirror — the executable ground truth that `features.window_scan` (the
-shard-less derivation) is property-tested against.
+Hot and standing-win lists are derived from the engine WindowStore mirror
+(`mirror.board.windows`). The same lists can be derived without shard data
+by `features.window_scan`.
 """
 
 from __future__ import annotations
@@ -71,6 +70,6 @@ def facts_from_engine(mirror: PythonHexoState) -> PositionFacts:
 
 
 def facts_from_state(state: "api.HexoState") -> PositionFacts:
-    """Convenience: mirror + convert in one call (dashboard-volume cost)."""
+    """Convert a HexoState by building its Python mirror, then converting."""
 
     return facts_from_engine(api.to_python_state(state))

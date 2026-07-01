@@ -1,4 +1,4 @@
-"""hexfield training plugin — the hexo_train composition boundary (spec §8)."""
+"""hexfield training plugin: hexo_train component composition boundary."""
 
 from __future__ import annotations
 
@@ -32,8 +32,9 @@ class HexfieldPlugin:
         for name, param in model.named_parameters():
             if not param.requires_grad:
                 continue
-            # spec §6.3: wd on matrix weights only — no decay for biases, LN
-            # params, the token inits, or the relative-position bias table.
+            # Weight decay applies to weights with ndim >= 2. Excluded (no
+            # decay): biases and other 1-D params, the "tokens" param, and
+            # params whose name contains "bias_table".
             if param.ndim >= 2 and "bias_table" not in name and name != "tokens":
                 decay.append(param)
             else:

@@ -1,15 +1,14 @@
-"""Node features (F = 15) from stored position facts — spec §1.2.
+"""Node features (F = 15) from stored position facts.
 
-The train-time featurizer expands rows from raw representation-agnostic facts
-(the hexfield_compact_v1 columns): the unified placement history
-(q, r, owner, placement_index), phase, first stone, and the side-relative
-hot / standing-win cell lists. Indices 0-12 port the trusted dense_cnn plane
-semantics exactly (encoding.rs is the semantic reference; index 11 redefined
-to distance-to-nearest-stone); 13-14 are the engine-exact standing-win planes.
+Expands feature rows from raw facts (the hexfield_compact_v1 columns): the
+placement history (q, r, owner, placement_index), phase, first stone, and the
+side-relative hot / standing-win cell lists. Indices 0-10 and 12 follow the
+dense_cnn plane semantics; index 11 is distance-to-nearest-stone; 13-14 are
+the standing-win planes.
 
-Turn structure is deterministic (1-then-2-2-2…), so each history record's
-phase and player are derivable from its ordinal position — the shard schema
-stores neither (spec §6.1), and tests pin the derivation to the engine.
+Turn structure is deterministic (1-then-2-2-2...), so each history record's
+phase and player are derived from its ordinal position; the shard schema
+stores neither.
 """
 
 from __future__ import annotations
@@ -48,7 +47,7 @@ PHASE_OPENING = "Opening"
 PHASE_FIRST = "FirstStone"
 PHASE_SECOND = "SecondStone"
 
-# Engine win axes (tactics.rs): Q=(1,0), R=(0,1), QR=(1,-1).
+# Win axes: Q=(1,0), R=(0,1), QR=(1,-1).
 AXIS_DELTAS: dict[str, tuple[int, int]] = {"Q": (1, 0), "R": (0, 1), "QR": (1, -1)}
 
 
@@ -57,8 +56,8 @@ class PositionFacts:
     """Raw facts for one decision state, side-relative where applicable.
 
     records: chronological placement history (q, r, owner, placement_index);
-    owner is 0/1 (player0/player1). placements_made == len(records) (no
-    captures exist). Hot / win lists are relative to ``current_player``.
+    owner is 0/1 (player0/player1). placements_made == len(records). Hot / win
+    lists are relative to ``current_player``.
     """
 
     records: tuple[tuple[int, int, int, int], ...]
@@ -94,7 +93,7 @@ def record_player(ordinal: int) -> int:
     return 1 if ((ordinal - 1) // 2) % 2 == 0 else 0
 
 
-# --- window scan (single-sourced threat/standing-win logic) ---------------------
+# --- window scan (threat/standing-win logic) ------------------------------------
 
 
 def window_scan(
@@ -109,12 +108,12 @@ def window_scan(
 ]:
     """(own_hot, opp_hot, own_win, opp_win) cell lists from raw stones.
 
-    Ports encoding.rs fill_hot_cells exactly: single-colour windows only, hot
-    at count >= HOT_MIN_COUNT gated on placements_made >= 7, marking EMPTY
-    window cells. Standing win = count == 5 (exactly one empty), ungated
-    (count-5 windows cannot exist before placement 9). Used by the BC writer
-    and the legacy-shard adapter; selfplay shards carry the Rust featurizer's
-    output of the same scan. Tests pin this against the engine WindowStore.
+    Scans single-colour windows only. A window is hot when its stone count is
+    >= HOT_MIN_COUNT and placements_made >= HOT_MIN_PLACEMENTS; its empty cells
+    are marked hot. A window is a standing win when its stone count ==
+    WIN_NOW_COUNT (exactly one empty cell); its empty cell is marked win.
+    Hot/win cells are assigned to own_* or opp_* by comparing the window
+    owner against ``current_player``.
     """
 
     owner_at: dict[tuple[int, int], int] = {(q, r): owner for q, r, owner, _ in records}
@@ -144,7 +143,7 @@ def window_scan(
                     else:
                         counts[owner] += 1
                 if counts[0] > 0 and counts[1] > 0:
-                    continue  # two-coloured: dead for winning purposes
+                    continue  # two-coloured window: skipped
                 count = counts[0] + counts[1]
                 owner = 0 if counts[0] > 0 else 1
                 if count == WIN_NOW_COUNT:
@@ -178,7 +177,7 @@ def build_features(facts: PositionFacts, sup: Support) -> np.ndarray:
         else:
             feats[row, F_OPP_STONE] = 1.0
             recency_plane = F_OPP_RECENCY
-        # encoding.rs:182-196 verbatim: age = placements_made - placement_index.
+        # age = placements_made - placement_index; recency weight = 1/(1+age).
         age = placements_made - placement_index
         weight = 1.0 / (1.0 + float(age))
         feats[row, recency_plane] = max(feats[row, recency_plane], weight)
@@ -212,12 +211,12 @@ def build_features(facts: PositionFacts, sup: Support) -> np.ndarray:
 
 
 def _opp_last_turn_cells(facts: PositionFacts) -> list[tuple[int, int]]:
-    """Cells of the opponent's most recent full turn (encoding.rs:268-298).
+    """Cells of the opponent's most recent full turn.
 
-    Reversed-history scan; the first opponent SecondStone record marks both
-    its own cell and its first-stone companion (the previous record); an
-    opponent Opening record marks its single cell; opponent FirstStone
-    records are skipped (mid-turn — the full turn lies further back)."""
+    Scans history in reverse. The first opponent SecondStone record returns
+    both its own cell and the previous record's cell (its first-stone
+    companion); an opponent Opening record returns its single cell; opponent
+    FirstStone records are skipped."""
 
     opponent = 1 - facts.current_player
     records = facts.records
@@ -241,14 +240,15 @@ def build_position(facts: PositionFacts) -> tuple[Support, np.ndarray]:
     return sup, build_features(facts, sup)
 
 
-# --- D6 augmentation (spec §4) ------------------------------------------------------
+# --- D6 augmentation ----------------------------------------------------------------
 
 
 def transform_facts(facts: PositionFacts, sym: int) -> PositionFacts:
     """Apply D6 transform ``sym`` to every stored coordinate fact.
 
-    The support set, node order, neighbour table, features, and bias indices
-    are then rebuilt from the transformed facts — nothing else transforms."""
+    Transforms the coordinates in records, first_stone, and the hot/win cell
+    lists; all other fields are copied unchanged. Support, node order,
+    neighbour table, and features are rebuilt from the transformed facts."""
 
     def t(cell: tuple[int, int]) -> tuple[int, int]:
         return apply_d6(sym, cell[0], cell[1])

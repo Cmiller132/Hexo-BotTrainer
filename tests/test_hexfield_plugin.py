@@ -1,4 +1,4 @@
-"""M7 unit gates: config parse, checkpoint strict round-trip + mismatch raise,
+"""Unit tests: config parse, checkpoint strict round-trip + mismatch raise,
 plugin wiring (build_model param count, optimizer decay split)."""
 
 from __future__ import annotations
@@ -30,12 +30,11 @@ def test_config_production_defaults() -> None:
     assert sp.search_visits == 512
     assert sp.pcr_fast_visits == 128
     assert sp.pcr_full_proportion == pytest.approx(0.33)
-    # §5.1 quarantine: OFF by default.
     assert sp.root_fpu_zero_under_noise is False
     assert sp.root_policy_temperature == 1.0
     assert sp.root_policy_temperature_early == 0.0
     assert sp.search_parity_mode is False
-    # temperature schedule decays from 1.0 to the floor.
+    # Temperature schedule decays from 1.0 to the floor.
     temps = cfg.temperature_by_ply()
     assert temps[0] == pytest.approx(1.0)
     assert temps[-1] == pytest.approx(sp.temperature_floor)
@@ -48,11 +47,10 @@ def test_config_rejects_unknown_keys() -> None:
 
 
 def test_config_rejects_unknown_top_level_keys() -> None:
-    # A typo'd top-level section (e.g. [model.config.slfplay]) must fail loudly
-    # rather than be silently ignored, which would leave defaults in force.
+    # An unknown top-level section key raises rather than being ignored.
     with pytest.raises(ValueError, match="unknown HexfieldConfig keys"):
         parse_hexfield_config({"slfplay": {"search_visits": 256}})
-    # Sanity: a valid full config (every top-level section) still parses.
+    # A config with every top-level section parses.
     cfg = parse_hexfield_config(
         {
             "device": "cpu",
@@ -105,8 +103,8 @@ def test_plugin_builds_model_and_optimizer_split() -> None:
     plugin = get_plugin()
     assert plugin.name == "hexfield"
     model = plugin.build_model({}, {})
-    # 1_591_748 base + 64_705 for the main_4 KataGo auxiliary soft_policy head
-    # (soft_policy_conv + soft_policy_head). The non-soft params are unchanged.
+    # 1_591_748 params plus 64_705 for the soft_policy head
+    # (soft_policy_conv + soft_policy_head).
     assert sum(p.numel() for p in model.parameters()) == 1_656_453
 
     overrides = plugin.training_component_overrides(
@@ -115,8 +113,8 @@ def test_plugin_builds_model_and_optimizer_split() -> None:
     assert overrides.uses_shared_sample_store is False
     assert overrides.trainer is not None
     assert overrides.checkpoint_loader is not None and overrides.checkpoint_saver is not None
-    # Decoupled weight decay on matrix weights only: the per-block bias tables,
-    # tokens, and all 1-D params (LN gains/biases, conv biases) must be in the
+    # Weight decay applies to matrix weights only; the per-block bias tables,
+    # tokens, and all 1-D params (LN gains/biases, conv biases) are in the
     # no-decay group.
     groups = overrides.optimizer.param_groups
     decay_ids = {id(p) for p in groups[0]["params"]}
@@ -124,7 +122,7 @@ def test_plugin_builds_model_and_optimizer_split() -> None:
     assert groups[0]["weight_decay"] == 1e-4
     assert groups[1]["weight_decay"] == 0.0
     named = dict(model.named_parameters())
-    # Per-block relative-position bias tables (bias_tables.0/.1/.2) all no-decay.
+    # Per-block relative-position bias tables (bias_tables.*) are all no-decay.
     bias_table_names = [n for n in named if n.startswith("bias_tables.")]
     assert len(bias_table_names) == len(model.bias_tables) >= 3
     for name in bias_table_names:
@@ -136,8 +134,8 @@ def test_plugin_builds_model_and_optimizer_split() -> None:
 
 
 def _decisive_game_shard(out_dir: Path) -> int:
-    """Write one hexfield_compact_v1 shard from a real finished game (P0 builds
-    six on the Q axis), so the trainer has Full rows to consume."""
+    """Write one hexfield_compact_v1 shard from a finished game (P0 builds six on
+    the Q axis) and return its Full-row count."""
 
     state = api.new_game()
     moves = [
@@ -173,23 +171,22 @@ def _decisive_game_shard(out_dir: Path) -> int:
 
 
 def test_trainer_runs_on_real_rows(tmp_path) -> None:
-    """The train-on-rows path end to end: real decisive-game shard -> packed
-    window -> serial expand -> micro-bucket collate -> loss -> optimizer step ->
-    finite loss + steps>0. (Self-play smokes truncate on weak models, so this is
-    the direct gate.)
+    """Train-on-rows path end to end: decisive-game shard -> packed window ->
+    serial expand -> micro-bucket collate -> loss -> optimizer step, asserting
+    finite loss and steps > 0.
 
-    train_passes now consumes an opaque PackedWindow (built by load_packed_shard
-    here, the production loader build_window_split uses) rather than reading a
-    samples_dir itself; with no prior select_training_samples call _effective_rows_for
-    falls back to min(window.n, train_samples_per_epoch), so the full window trains.
+    train_passes consumes a PackedWindow (built here by load_packed_shard, the
+    same loader used by build_window_split) rather than reading a samples_dir.
+    With no prior select_training_samples call, _effective_rows_for falls back to
+    min(window.n, train_samples_per_epoch), so the full window trains.
     """
 
     samples_dir = tmp_path / "samples"
     rows = _decisive_game_shard(samples_dir / "epoch_000001")
     assert rows >= 6
 
-    # Pack the single decisive-game shard into the in-RAM PackedWindow the trainer
-    # consumes (the production path concatenates these via build_window_split).
+    # Pack the single shard into the in-RAM PackedWindow the trainer consumes;
+    # build_window_split concatenates multiple such shards.
     window = load_packed_shard(samples_dir / "epoch_000001" / "game_1.npz")
     assert window.n == rows
 
@@ -198,9 +195,8 @@ def test_trainer_runs_on_real_rows(tmp_path) -> None:
     opt = torch.optim.AdamW(model.parameters(), lr=1e-3)
     trainer = HexfieldTrainer(model=model, config=cfg, optimizer=opt)
 
-    # train_passes reads ctx.config.run.seed (D6/permutation determinism) and
-    # ctx.diagnostics_dir (the per-epoch diag write); samples_dir is unused now
-    # that the packed window is passed directly.
+    # train_passes reads ctx.config.run.seed (permutation determinism) and
+    # ctx.diagnostics_dir (per-epoch diagnostics write).
     ctx = types.SimpleNamespace(
         config=types.SimpleNamespace(run=types.SimpleNamespace(seed=0)),
         diagnostics_dir=tmp_path / "diagnostics",
@@ -216,7 +212,7 @@ def test_trainer_runs_on_real_rows(tmp_path) -> None:
     assert result["trained_rows"] == rows
     assert result["steps"] > 0
     assert result["grad_norm_mean"] >= 0.0
-    # the optimizer actually moved the weights
+    # The optimizer moved at least one weight.
     moved = any(
         not torch.equal(p, before[n]) for n, p in model.named_parameters()
     )

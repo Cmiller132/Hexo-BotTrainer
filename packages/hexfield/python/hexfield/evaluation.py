@@ -1,6 +1,6 @@
-"""Per-epoch strength evaluation: head-to-head arena vs the previous epoch's
-checkpoint (greedy lockstep searches; the §5.4 divergences run as in
-production). Reports win rate + game lengths; written to diagnostics."""
+"""Per-epoch strength evaluation. Runs a multistage strength eval against a
+fixed roster of checkpoints and a head-health audit of the moves-left head.
+Results are written to diagnostics."""
 
 from __future__ import annotations
 
@@ -22,20 +22,17 @@ from .model import HexfieldNet
 def _play_pair(session_a, eval_a, session_b, eval_b, *, visits, c_puct, seed, sp,
                max_plies, opening_plies=8, opening_temperature=1.0,
                divergence_overrides=None, divergence_overrides_b=None):
-    """One game: A is player0. Returns (winner_int|None, plies).
+    """Play one game. A is player0. Returns (winner_int|None, plies).
 
-    The first `opening_plies` moves are TEMPERATURE-SAMPLED (per-game seed) so
-    the 16 eval games are independent lines rather than the same deterministic
-    game repeated; after the opening, both sides play greedy (temperature 0) so
-    the result measures pure strength. Sampling is symmetric (both models use it),
-    so it does not bias the win rate."""
+    The first `opening_plies` moves use temperature sampling (seeded per game);
+    after the opening, both sides play greedy (temperature 0). Sampling is
+    applied symmetrically to both sides."""
 
     state = api.new_game()
     sessions = (session_a, session_b)
     evaluators = (eval_a, eval_b)
-    # MLH steered identically for both seats (symmetric -> unbiased win rate) by
-    # default; an A/B can pass divergence_overrides_b to give seat B a different
-    # search config (e.g. lever-off) for a head-to-head of the search change.
+    # Both seats use the same divergence overrides by default. Passing
+    # divergence_overrides_b gives seat B a different search config.
     ov_a = divergence_overrides if divergence_overrides is not None else build_divergence_overrides(sp)
     ov_b = divergence_overrides_b if divergence_overrides_b is not None else ov_a
     overrides_by_mover = (ov_a, ov_b)
@@ -73,18 +70,13 @@ def evaluate_epoch(*, ctx, components, epoch: int) -> dict[str, Any]:
     started = time.time()
     result: dict[str, Any] = {"status": "completed", "epoch": epoch}
 
-    # ===== Deep multistage strength eval (the COMPARABLE in-run eval) ==========
-    # Replaces the old 16-game vs-immediately-prior arena (near-uninformative:
-    # adjacent checkpoints are nearly identical). Plays games_budget (72) paired
-    # games vs the FIXED roster (permanent anchors bc_prefit + ep5, the sliding
-    # bracket, and the L-lag champion) at the LOCKED full_search_visits (512) and
-    # eval_virtual_batch_size (16), pooling every edge into the persisted, append-
-    # only Bradley-Terry pool so per-epoch games COMPOUND into an apples-to-apples
-    # progress curve. PURE EVAL — it reports a PROMOTE/REGRESS/INCONCLUSIVE label
-    # and writes ONLY its own diagnostics + the pool; it NEVER gates/halts/promotes
-    # (eval_gating_enabled/eval_promotion_enabled stay False; the runner asserts it).
-    # FAIL-SOFT: any error is recorded and NEVER breaks the training epoch (the
-    # loop re-raises evaluate_epoch exceptions, which would kill the run).
+    # Multistage strength eval. Plays games_budget paired games against a fixed
+    # roster of checkpoints (permanent anchors, a sliding bracket, and a lagged
+    # champion) at full_search_visits and eval_virtual_batch_size, pooling every
+    # edge into a persisted append-only Bradley-Terry pool. Reports a
+    # PROMOTE/REGRESS/INCONCLUSIVE label and writes its own diagnostics plus the
+    # pool; it does not gate, halt, or promote. Errors are recorded in the result
+    # and do not propagate.
     every = max(int(mse_cfg.every_n_epochs), 1)
     cand_path = ctx.checkpoint_dir / f"epoch_{epoch:06d}.pt"
     if not mse_cfg.enabled:
@@ -97,12 +89,10 @@ def evaluate_epoch(*, ctx, components, epoch: int) -> dict[str, Any]:
         result["multistage"] = {"status": "skipped", "reason": "candidate checkpoint missing"}
     else:
         try:
-            from . import multistage_eval as mse  # lazy: pulls torch/GPU only here
+            from . import multistage_eval as mse  # lazy import
 
-            # CONCURRENT ONE-PASS eval: play SealBot + ALL checkpoint opponents in
-            # ONE batched pass (one shared candidate forward across opponents), so
-            # wall-clock is MAX over matches, not SUM (the old --parts path ran
-            # opponents serially). Stage D statistics are UNCHANGED. PURE EVAL.
+            # Plays SealBot and all checkpoint opponents in one batched pass with
+            # a single shared candidate forward across opponents.
             report = mse.run_multistage_eval_concurrent(
                 ctx.output_dir,
                 cand_path,
@@ -121,18 +111,17 @@ def evaluate_epoch(*, ctx, components, epoch: int) -> dict[str, Any]:
                 "elapsed_seconds": meta.get("elapsed_seconds"),
                 "diagnostics_path": meta.get("diagnostics_path"),
             }
-        except Exception as exc:  # FAIL-SOFT: the training epoch must survive.
+        except Exception as exc:  # record error; do not propagate
             result["multistage"] = {"status": "error", "error": repr(exc)}
         finally:
-            # The eval loaded opponent models in eval(); the live training model
-            # (``current``) is untouched by the runner (candidate is reloaded from
-            # disk), but restore train() defensively before the head audit.
+            # Restore the live training model to train() before the head audit;
+            # the eval runs opponent models in eval().
             current.train()
     result["elapsed_seconds"] = round(time.time() - started, 1)
-    # §5.4.4 head-health monitor + heal-gate: the MLH lever is only as safe as
-    # the moves-left head. Audit the head on recent shards; if it would steer
-    # search backward, drop the run-dir flag that forces the lever off next epoch
-    # (build_divergence_overrides reads it); clear the flag once it heals.
+    # Moves-left head audit. Audits the head on recent shards. If the audit
+    # fails and moves_left_utility is enabled, write the run-dir flag that forces
+    # the lever off next epoch (read by build_divergence_overrides); if the audit
+    # passes, clear the flag.
     try:
         from .head_audit import audit_moves_left_head
 
@@ -149,8 +138,8 @@ def evaluate_epoch(*, ctx, components, epoch: int) -> dict[str, Any]:
             flag.write_text(json.dumps({"epoch": epoch, "audit": head}), encoding="utf-8")
         result["moves_left_head_audit"] = head
         result["ml_auto_disabled"] = bool(not head.get("passed") and sp.moves_left_utility)
-        current.train()  # audit left the model in eval(); restore for next epoch
-    except Exception as exc:  # a monitor failure must never break the eval epoch
+        current.train()  # restore to train(); the audit runs the model in eval()
+    except Exception as exc:  # record error; do not propagate
         result["moves_left_head_audit"] = {"error": repr(exc)}
     diag_path = ctx.diagnostics_dir / f"hexfield.evaluation.epoch_{epoch:06d}.json"
     diag_path.write_text(json.dumps(result, indent=2), encoding="utf-8")

@@ -1,11 +1,12 @@
-"""M0 gates: support construction vs the engine (spec §1.1).
+"""Tests for support construction against the engine.
 
-- closed-form legality (empty ∧ dist <= 8; Opening => {(0,0)}) ≡ engine legal
-  set on random non-terminal states
-- halo is exactly the distance-9 shell; core = stones ∪ legal
-- BFS distances ≡ brute-force min hex distance
-- ply 0 support = 7 nodes, 1 legal
-- node order: [legal | stones | halo], each ascending by packed action id
+Covered properties:
+- Closed-form legality (empty ∧ dist <= LEGAL_RADIUS; opening => {(0,0)})
+  equals the engine legal set on random non-terminal states.
+- Halo is exactly the HALO_DIST shell; core = stones ∪ legal.
+- BFS distances equal brute-force min hex distance.
+- Ply 0 support has 7 nodes, 1 legal.
+- Node order: [legal | stones | halo], each ascending by packed action id.
 """
 
 from __future__ import annotations
@@ -38,12 +39,12 @@ def _brute_dist(cell: tuple[int, int], stones: list[tuple[int, int]]) -> int:
 
 def test_support_matches_engine_on_random_states() -> None:
     states = sample_decision_states(range(8), (1, 2, 5, 9, 14, 23, 36, 51))
-    assert len(states) >= 30  # random play must yield a healthy sample
+    assert len(states) >= 30
     for state in states:
         stones = _stones(state)
         sup = build_support(stones)
 
-        # Closed-form legality == the engine's legal set, in packed-id order.
+        # Closed-form legality equals the engine legal set, in packed-id order.
         engine_ids = sorted(api.legal_action_ids(state))
         sup_ids = [pack_action_id(q, r) for q, r in sup.legal_coords().tolist()]
         assert sup_ids == engine_ids
@@ -56,7 +57,7 @@ def test_support_matches_engine_on_random_states() -> None:
             ]
             assert seg_ids == sorted(seg_ids)
 
-        # Distances: BFS == brute force; halo is exactly the dist-9 shell.
+        # Distances: BFS equals brute force; halo is exactly the HALO_DIST shell.
         coords = [tuple(c) for c in sup.coords.tolist()]
         for row, cell in enumerate(coords):
             d = _brute_dist(cell, stones)
@@ -92,15 +93,15 @@ def test_ply0_support() -> None:
     assert sup.stone_count == 0
     assert sup.halo_count == 6
     assert tuple(sup.coords[0].tolist()) == (0, 0)
-    assert sup.dist.tolist() == [0] * 7  # dist_to_stone := 0 on this one state
+    assert sup.dist.tolist() == [0] * 7
 
-    # Engine agreement: the opening legal set is exactly the origin.
+    # The opening legal set is exactly the origin.
     state = api.new_game()
     assert sorted(api.legal_action_ids(state)) == [pack_action_id(0, 0)]
 
 
 def test_scale_anchor_one_stone() -> None:
-    # 1 stone -> 217-cell core (1 stone + 216 legal) + 54 halo = 271 nodes.
+    # 1 stone: 217-cell core (1 stone + 216 legal) + 54 halo = 271 nodes.
     sup = build_support([(0, 0)])
     assert sup.num_nodes == 271
     assert sup.legal_count == 216
@@ -109,12 +110,12 @@ def test_scale_anchor_one_stone() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# FIX E1: build_support decision-state contract (opt-in validation hook)
+# build_support decision-state contract (opt-in validation hook)
 # --------------------------------------------------------------------------- #
 
 
 def _engine_legal_coords(state) -> set[tuple[int, int]]:
-    """The engine's legal set as a coord set (ground truth)."""
+    """The engine's legal set as a coord set."""
 
     return {unpack_action_id(int(a)) for a in api.legal_action_ids(state)}
 
@@ -150,8 +151,8 @@ def _first_terminal_state():
     return None
 
 
-def test_default_build_support_is_byte_for_byte_unchanged() -> None:
-    """``expected_legal is None`` (the default) must equal the legacy result."""
+def test_default_build_support_matches_no_expected_legal() -> None:
+    """``expected_legal=None`` (the default) equals passing it explicitly."""
 
     stones = [(0, 0), (1, 0), (0, 1), (2, -1), (1, 1), (-1, 2), (3, 0)]
     a = build_support(stones)
@@ -212,10 +213,9 @@ def test_decision_state_validation_passes_against_engine() -> None:
 
 
 def test_terminal_state_diverges_and_is_flagged() -> None:
-    """Engine-backed: on a terminal state the engine legal set is empty but the
-    closed form is not — the divergence FIX E1 guards. The opt-in hook flags it;
-    the unguarded happy path silently does not (documenting why the guard
-    matters)."""
+    """On a terminal state the engine legal set is empty while the closed form
+    is not. Passing expected_legal raises SupportContractError; the default
+    call (no expected_legal) does not."""
 
     state = _first_terminal_state()
     if state is None:
@@ -225,11 +225,10 @@ def test_terminal_state_diverges_and_is_flagged() -> None:
     assert engine_legal == set(), "terminal engine legal set must be empty"
 
     stones = _state_stones(state)
-    # The silent divergence: closed-form legality still yields a legal prefix.
+    # Without expected_legal, closed-form legality still yields a legal prefix.
     unguarded = build_support(stones)
-    assert unguarded.legal_count > 0, "closed-form legal set is non-empty (the divergence)"
+    assert unguarded.legal_count > 0, "closed-form legal set is non-empty"
 
-    # The opt-in guard catches exactly this.
     with pytest.raises(SupportContractError):
         build_support(stones, expected_legal=engine_legal)
     with pytest.raises(SupportContractError):
@@ -237,9 +236,9 @@ def test_terminal_state_diverges_and_is_flagged() -> None:
 
 
 def test_synthetic_terminal_like_empty_legal_is_flagged() -> None:
-    """Engine-free analogue: any non-empty closed-form set against an empty
-    engine set (the terminal signature) must raise, with both divergence
-    directions surfaced in the message."""
+    """A non-empty closed-form set against an empty expected_legal raises, and
+    the message reports coords in the closed form but not the engine set and
+    marks the case TERMINAL."""
 
     stones = [(0, 0), (1, 0), (0, 1)]
     with pytest.raises(SupportContractError) as exc:
@@ -250,8 +249,8 @@ def test_synthetic_terminal_like_empty_legal_is_flagged() -> None:
 
 
 def test_partial_mismatch_is_flagged_both_directions() -> None:
-    """A non-terminal mismatch (drift, not emptiness) also raises and reports
-    coords missing from / extra to the engine set."""
+    """A non-empty mismatch against a non-empty expected_legal raises and
+    reports coords missing from and extra to the engine set."""
 
     stones = [(0, 0), (1, 0), (0, 1)]
     derived = {tuple(c) for c in build_support(stones).legal_coords().tolist()}
