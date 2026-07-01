@@ -462,7 +462,7 @@ enabled = false
 [model.config.multi_stage_eval.opponents]
 sealbot_enabled = true
 bracket_size = 1
-permanent_anchors = [["main4_ep60", "/mnt/e/Hexo-BotTrainer/runs/hexfield_main_4/checkpoints/epoch_000060.pt"], ["ep5", "epoch_000005.pt"]]
+permanent_anchors = [["main4_ep60", "/mnt/e/Hexo-BotTrainer/runs/hexfield_main_4/checkpoints/epoch_000060.pt"], ["main5_ep105", "/mnt/e/Hexo-BotTrainer/runs/hexfield_main_5/checkpoints/epoch_000105.pt"], ["ep5", "epoch_000005.pt"]]
 radius8_opponents = []
 
 [run]
