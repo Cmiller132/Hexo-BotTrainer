@@ -151,6 +151,102 @@ def test_gumbel_profile_smoke_runs_and_exports_normalized_target() -> None:
 
 
 @needs_rust
+def test_gumbel_continuous_reuse_rebuilds_sh_state_per_move() -> None:
+    """Regression: run_continuous with the Gumbel flags on must re-run a full
+    Gumbel-Top-k + SH search on every Full move, including reused (promoted)
+    roots after an ('advance', state) response.
+
+    The bug this guards against: the advance/keep_promoted path did not rebuild
+    the Gumbel root state, so the previous move's finished SH schedule (stale
+    survivors + met round caps) persisted onto the new root. The slot then made
+    no root progress and the force-stuck safety net finalized the move with
+    ZERO net visits over the reuse baseline (payload['visits'] == 0)."""
+    from hexo_engine import api as engine_api
+    from hexo_engine.types import AxialCoord, PlacementAction
+
+    from hexfield.geometry import unpack_action_id
+
+    budget = 96
+    max_plies = 10
+
+    class _Driver:
+        def __init__(self) -> None:
+            self.states: dict = {}
+            self.plies: dict = {}
+            self.rows: list = []
+
+        def start(self, key: int):
+            self.states[key] = engine_api.new_game()
+            self.plies[key] = 0
+            return self.states[key]
+
+        def __call__(self, game_key: int, payload: dict):
+            ply = self.plies[game_key]
+            self.rows.append(
+                (ply, bool(payload.get("pcr_full")), int(payload["visits"]))
+            )
+            q, r = unpack_action_id(payload["action_id"])
+            state = self.states[game_key]
+            result = engine_api.apply_action(
+                state, PlacementAction(AxialCoord(q=q, r=r))
+            )
+            self.plies[game_key] = ply + 1
+            if result.terminal or self.plies[game_key] >= max_plies:
+                del self.states[game_key]
+                return None
+            return ("advance", state)
+
+    session = hexfield_rust.HexfieldMctsSession(max_states=65536)
+    driver = _Driver()
+    keys = [91_000, 91_001]
+    states = tuple(driver.start(k) for k in keys)
+    session.run_continuous(
+        keys,
+        states,
+        evaluator=GumbelStub(),
+        on_move=driver,
+        visits=budget,
+        c_puct=1.5,
+        base_seed=424242,
+        virtual_batch_size=8,
+        flush_target=64,
+        active_root_limit=len(keys),
+        temperature_by_ply=[1.0] * 64,
+        root_policy_temperature=1.0,
+        fpu_reduction=0.2,
+        virtual_loss=1.0,
+        widening_policy_mass=0.95,
+        widening_max_children=96,
+        widening_min_children=2,
+        forced_playout_k=0.0,
+        pcr_full_proportion=1.0,  # every move Full: each must search
+        pcr_fast_visits=32,
+        policy_init_fraction=0.0,
+        policy_init_avg_plies=0.0,
+        policy_init_max_plies=0,
+        policy_init_temperature=1.0,
+        tss_enabled=False,
+        root_fpu_reduction=0.2,
+        root_fpu_zero_under_noise=False,
+        search_parity_mode=False,
+        divergence_overrides=_gumbel_overrides(),
+    )
+
+    full_rows = [(ply, visits) for ply, full, visits in driver.rows if full]
+    assert len(full_rows) >= 2 * (max_plies - 1), "expected full games of Full moves"
+    reused = [(ply, visits) for ply, visits in full_rows if ply >= 1]
+    assert reused, "no reused-root moves decided"
+    zero_visit = [row for row in reused if row[1] == 0]
+    assert not zero_visit, (
+        f"reused-root Full moves finalized with zero net visits: {zero_visit}"
+    )
+    mean_visits = sum(v for _, v in reused) / len(reused)
+    assert mean_visits >= budget * 0.5, (
+        f"reused-root Full moves under-searched: mean {mean_visits:.1f} of {budget}"
+    )
+
+
+@needs_rust
 def test_gumbel_flags_off_omits_target_column() -> None:
     """Contract (§1): with the Gumbel bools OFF (parity/production), the export
     omits the new keys entirely — byte-identical payload schema to today."""

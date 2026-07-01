@@ -758,6 +758,10 @@ impl RustSearch {
         let Some(logit_map) = self.nodes[0].root_logits.clone() else {
             return;
         };
+        // Survivors materialize on demand from the owned candidate tail
+        // (gumbel_root_edge_index); a promoted root can still be Shared, so
+        // convert it up front.
+        self.ensure_root_owned();
         // Legal root action ids: edges (nucleus) + any unexpanded candidates, so
         // the Gumbel draw covers the FULL legal set (not just the nucleus head).
         let mut action_ids: Vec<PackedCoord> =

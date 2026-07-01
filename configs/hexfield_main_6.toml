@@ -15,7 +15,7 @@ virtual_batch_size = 16
 flush_target = 1024
 active_root_limit = 192
 root_dirichlet_total_alpha = 10.83
-root_dirichlet_noise_fraction = 0.25
+root_dirichlet_noise_fraction = 0.0
 fpu_reduction = 0.2
 root_fpu_reduction = 0.2
 root_fpu_zero_under_noise = false
@@ -74,7 +74,7 @@ opp_policy_weight = 0.25
 short_term_value_weight = 0.1
 moves_left_weight = 0.2
 q_head_weight = 0.1
-soft_policy_weight = 1.0
+soft_policy_weight = 0.25
 policy_surprise_uniform_fraction = 0.5
 policy_surprise_max_weight = 8.0
 warmup_steps = 0
@@ -103,7 +103,7 @@ games_budget = 128
 every_n_epochs = 5
 full_search_visits = 512
 eval_virtual_batch_size = 32
-sealbot_share = 0.5
+sealbot_share = 0.25
 verdict_reference_lag = 5
 pool_path = "diagnostics/eval_pool.json"
 
@@ -113,7 +113,7 @@ enabled = false
 [model.config.multi_stage_eval.opponents]
 sealbot_enabled = true
 bracket_size = 1
-permanent_anchors = [["main4_ep60", "/mnt/e/Hexo-BotTrainer/runs/hexfield_main_4/checkpoints/epoch_000060.pt"], ["main5_ep105", "/mnt/e/Hexo-BotTrainer/runs/hexfield_main_5/checkpoints/epoch_000105.pt"], ["ep5", "epoch_000005.pt"]]
+permanent_anchors = [["main4_ep60", "/mnt/e/Hexo-BotTrainer/runs/hexfield_main_4/checkpoints/epoch_000060.pt"], ["main5_ep105", "/mnt/e/Hexo-BotTrainer/runs/hexfield_main_5/checkpoints/epoch_000105.pt"], ["ep5", "epoch_000005.pt"], ["ep30", "epoch_000030.pt"]]
 radius8_opponents = []
 
 [run]
