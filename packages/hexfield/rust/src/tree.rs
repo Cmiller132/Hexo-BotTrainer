@@ -767,9 +767,18 @@ impl RustSearch {
             gumbel.insert(action_id, g);
         }
         // Top-m by logits(a)+g(a) (Gumbel-max sampling-without-replacement).
-        let m = (self.divergences.gumbel_m as usize)
+        // Under SH, m is budget-calibrated: the configured gumbel_m is sized
+        // for the selfplay full budget, and reusing it at smaller budgets
+        // (eval matches, quick-gate evals) starves the round-0 quota below
+        // GUMBEL_MIN_ROUND0_VISITS per candidate.
+        let mut m = (self.divergences.gumbel_m as usize)
             .min(action_ids.len())
             .max(1);
+        if self.divergences.gumbel_sequential_halving {
+            m = GumbelRootState::budget_calibrated_m(m, budget)
+                .min(action_ids.len())
+                .max(1);
+        }
         action_ids.sort_by(|&a, &b| {
             let sa = logit_map.get(&a).copied().unwrap_or(0.0) + gumbel[&a];
             let sb = logit_map.get(&b).copied().unwrap_or(0.0) + gumbel[&b];
@@ -2326,6 +2335,13 @@ pub struct GumbelRootState {
     pub sequential_halving: bool,
 }
 
+/// Minimum SH round-0 visits each candidate must afford before the tournament
+/// is considered calibrated for the move's visit budget. A candidate scored
+/// from fewer look-aheads than this carries too little Q signal to rank
+/// tactical replies, so `init_gumbel_root` shrinks the candidate count instead
+/// of starving the quota.
+const GUMBEL_MIN_ROUND0_VISITS: u32 = 4;
+
 impl GumbelRootState {
     /// Ceil(log2(m)) rounds. m<=1 => 0 rounds (nothing to halve).
     fn rounds_for(m: usize) -> u32 {
@@ -2334,6 +2350,27 @@ impl GumbelRootState {
         } else {
             (usize::BITS - (m - 1).leading_zeros()).max(1)
         }
+    }
+
+    /// Largest candidate count `m' <= m` (walking the halving ladder
+    /// m -> ceil(m/2) -> ...) whose SH round-0 quota
+    /// `floor(budget/(R(m')*m'))` reaches GUMBEL_MIN_ROUND0_VISITS. A single
+    /// configured `gumbel_m` is sized for the selfplay full budget; smaller
+    /// budgets (eval matches, quick-gate evals) reuse the same config, and
+    /// without this clamp their round-0 quota collapses (32 candidates at 512
+    /// visits = 3 look-aheads each). Never returns below 2 — a two-candidate
+    /// tournament is the minimum meaningful SH; the legal-action clamp is the
+    /// caller's.
+    fn budget_calibrated_m(m: usize, budget: u32) -> usize {
+        let mut mm = m;
+        while mm > 2 {
+            let r = Self::rounds_for(mm).max(1);
+            if budget / (r * mm as u32) >= GUMBEL_MIN_ROUND0_VISITS {
+                break;
+            }
+            mm = (mm + 1) / 2;
+        }
+        mm
     }
 }
 
@@ -2835,6 +2872,38 @@ mod tests {
         let got: std::collections::HashSet<PackedCoord> =
             state.survivors.iter().copied().collect();
         assert_eq!(got, expected, "survivor set must be top-m by logits+g");
+    }
+
+    #[test]
+    fn gumbel_m_budget_calibration_walks_halving_ladder() {
+        // Selfplay full budget: 1024/(5*32)=6 >= 4, m untouched.
+        assert_eq!(GumbelRootState::budget_calibrated_m(32, 1024), 32);
+        // Eval budget: 512/(5*32)=3 < 4 -> halve once: 512/(4*16)=8.
+        assert_eq!(GumbelRootState::budget_calibrated_m(32, 512), 16);
+        // Quick-gate budget: 128 -> 8 (128/(3*8)=5).
+        assert_eq!(GumbelRootState::budget_calibrated_m(32, 128), 8);
+        // Floor: never below a two-candidate tournament.
+        assert_eq!(GumbelRootState::budget_calibrated_m(32, 1), 2);
+        // Already-affordable m is a no-op at any of these budgets.
+        assert_eq!(GumbelRootState::budget_calibrated_m(8, 96), 8);
+    }
+
+    #[test]
+    fn init_gumbel_root_calibrates_m_to_budget() {
+        // 40 legal actions, configured m=32. At the selfplay budget the full
+        // 32 survive; at the eval budget the candidate set halves to 16 so
+        // round-0 still affords >= GUMBEL_MIN_ROUND0_VISITS per candidate.
+        let eval = gumbel_eval(40);
+        let mut dv = Divergences::gumbel();
+        dv.gumbel_m = 32;
+        let mut s = build_search_from_eval(&eval, dv);
+        s.init_gumbel_root(99, 1024);
+        assert_eq!(s.gumbel_root.as_ref().unwrap().survivors.len(), 32);
+        s.init_gumbel_root(99, 512);
+        let state = s.gumbel_root.as_ref().unwrap();
+        assert_eq!(state.survivors.len(), 16, "eval budget must shrink m");
+        let per = 512 / (state.num_rounds * 16);
+        assert!(per >= 4, "round-0 quota under the calibration floor: {per}");
     }
 
     #[test]

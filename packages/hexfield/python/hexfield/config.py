@@ -90,6 +90,11 @@ class SelfplayConfig:
     #   target: gumbel_target_enabled (π'=softmax(logits+σ(completedQ))).
     # σ(q)=(c_visit+max_b N(b))·c_scale·q ; gumbel_m = candidate count (clamped to
     # n_legal at the root); gumbel_target_min_visits = target support floor.
+    # Size gumbel_m for the FULL selfplay visit budget: under SH the tree
+    # budget-calibrates it per move, walking m down the halving ladder
+    # (m -> ceil(m/2) -> ...) until round 0 affords >= 4 visits per candidate,
+    # so smaller budgets (eval matches, quick-gate evals) shrink the candidate
+    # set instead of starving the round quota.
     # export_root_prior_logits requests the raw pre-softmax policy logits from the
     # evaluator, which the σ/Gumbel/target math consumes.
     gumbel_target_enabled: bool = False
