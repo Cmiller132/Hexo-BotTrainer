@@ -82,6 +82,10 @@ class ContinuousDriver:
         self.game_lengths: list[int] = []
         self.policy_entropies: list[float] = []
         self.root_values: list[float] = []
+        # Opening-diversity tripwire: distinct first-10-ply lines across the
+        # epoch's finished games. Should stay near games_finished; a collapse
+        # means the play sampler has become too exploitative.
+        self.opening_lines: set[tuple] = set()
         self.next_key = epoch * 1_000_000
         # Background shard writer: the heavy per-game finalize + .hxr record + zlib
         # npz write runs off the Rust on_move callback thread so game completions
@@ -287,6 +291,7 @@ class ContinuousDriver:
     def _finish(self, tape: _GameTape, *, winner, truncated: bool) -> None:
         self.games_finished += 1
         self.game_lengths.append(tape.ply)
+        self.opening_lines.add(tuple((q, r) for q, r, _o, _p in tape.records[:10]))
         if truncated:
             self.games_truncated += 1
         else:
@@ -384,6 +389,7 @@ class ContinuousDriver:
             "p90_game_length": float(np.percentile(lengths, 90)),
             "root_policy_entropy_mean": float(np.mean(self.policy_entropies)) if self.policy_entropies else None,
             "root_value_mean": float(np.mean(self.root_values)) if self.root_values else None,
+            "unique_openings_10ply": len(self.opening_lines),
         }
 
 

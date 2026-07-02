@@ -240,9 +240,13 @@ struct ContinuousSchedulerStats {
     lcb_overrides: u64,
     // Play-policy telemetry: moves selected via the quota-pruned Gumbel play
     // distribution, and how many of those played the raw delta leader (the SH
-    // winner). winner/moves ≈ exploitation rate of the play sampler.
+    // winner). winner/moves ≈ exploitation rate of the play sampler. The
+    // `_early` pair covers ply < 20 (the high-temperature exploration window);
+    // late-game rates should approach 1 as the ply temperature decays.
     gumbel_play_moves: u64,
     gumbel_play_winner_moves: u64,
+    gumbel_play_moves_early: u64,
+    gumbel_play_winner_early: u64,
 }
 
 fn continuous_flush_decision(
@@ -1271,6 +1275,8 @@ impl HexfieldMctsSession {
         dict.set_item("lcb_overrides", stats.lcb_overrides)?;
         dict.set_item("gumbel_play_moves", stats.gumbel_play_moves)?;
         dict.set_item("gumbel_play_winner_moves", stats.gumbel_play_winner_moves)?;
+        dict.set_item("gumbel_play_moves_early", stats.gumbel_play_moves_early)?;
+        dict.set_item("gumbel_play_winner_early", stats.gumbel_play_winner_early)?;
         let hist = PyDict::new(py);
         let mut hist_items: Vec<_> = stats.flush_size_histogram.into_iter().collect();
         hist_items.sort_unstable_by_key(|(size, _)| *size);
@@ -2235,6 +2241,12 @@ fn complete_continuous_slots(
             stats.gumbel_play_moves += 1;
             if prepared.payload.play_winner {
                 stats.gumbel_play_winner_moves += 1;
+            }
+            if ply < 20 {
+                stats.gumbel_play_moves_early += 1;
+                if prepared.payload.play_winner {
+                    stats.gumbel_play_winner_early += 1;
+                }
             }
         }
         if let Some(sampled) = prepared.init_override {
