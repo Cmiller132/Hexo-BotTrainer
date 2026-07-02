@@ -1359,3 +1359,53 @@ def test_foreign_opponent_overrides_split_by_checkpoint_home(tmp_path) -> None:
 
     self_ov = build_divergence_overrides(cfg.selfplay)
     assert self_ov["gumbel_root"] is True
+
+
+def test_sealbot_edge_candidate_searches_puct_profile(tmp_path) -> None:
+    """The SealBot zero-point edge pins the rating scale across epochs and
+    lineages, so the CANDIDATE side searches it with the PUCT profile even on
+    a gumbel run — a searcher-vs-tactics confound must never move the anchor
+    (the ep45-ep60 SealBot collapse). Lineage checkpoint edges keep the
+    symmetric self-play profile (covered elsewhere)."""
+    from hexfield_eval_kit import _sealbot_match
+
+    cfg = parse_hexfield_config(
+        {
+            "selfplay": {
+                "gumbel_target_enabled": True,
+                "gumbel_root_enabled": True,
+                "gumbel_sequential_halving": True,
+                "gumbel_nonroot_select": True,
+            }
+        }
+    )
+    captured: dict = {}
+
+    def fake_sealbot(ckpt, n, **kw):
+        captured.update(kw)
+        return _sealbot_match("cand", n, 0.9)
+
+    roster = mse.Roster(
+        candidate_label="cand_ep50",
+        candidate_epoch=50,
+        sealbot=mse.Opponent(label="sealbot", role="sealbot", ckpt=None),
+        champion=None,
+        opponents=(),
+    )
+    ck = tmp_path / "run" / "checkpoints" / "epoch_000050.pt"
+    ck.parent.mkdir(parents=True)
+    ck.write_bytes(b"")
+    edge, _ci, unavail = mse._play_sealbot_opponent(
+        cfg.multi_stage_eval, roster, ck, cfg, 8,
+        play_sealbot_match=fake_sealbot, diagnostics_dir=tmp_path,
+    )
+    assert unavail is None and edge is not None
+    ov = captured.get("divergence_overrides")
+    assert isinstance(ov, dict), "sealbot match must receive an explicit profile"
+    for key in (
+        "gumbel_target",
+        "gumbel_root",
+        "gumbel_sequential_halving",
+        "gumbel_nonroot_select",
+    ):
+        assert ov[key] is False, key

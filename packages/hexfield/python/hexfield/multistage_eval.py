@@ -1192,6 +1192,8 @@ def _play_sealbot_opponent(
 
     sb_match: dict[str, Any] | None = None
     try:
+        from . import eval_arena as _arena
+
         sb_match = play_sealbot_match(
             str(candidate_ckpt),
             sb_games,
@@ -1204,6 +1206,19 @@ def _play_sealbot_opponent(
             virtual_batch_size=_eval_virtual_batch_size(cfg, full_cfg),
             opening_plies=cfg.opening_plies,
             opening_temperature=cfg.opening_temperature,
+            # ZERO-POINT CONTINUITY: the SealBot edge exists to pin the rating
+            # scale across epochs AND lineages, so the candidate searches it
+            # with the same PUCT profile every prior epoch/lineage used. The
+            # gumbel eval profile is stronger head-to-head (net-vs-net A/B) but
+            # markedly weaker against SealBot's tactical style (SH round-0
+            # allocates ~visits/(R*m) per candidate — too shallow to score deep
+            # tactical defenses), and letting that searcher confound move the
+            # ZERO-POINT re-bases every rating in the pool (the ep45-ep60
+            # SealBot collapse 95% -> ~55%). Lineage-vs-lineage edges keep the
+            # symmetric gumbel profile — relative readings stay "as trained".
+            divergence_overrides=_arena.puct_eval_overrides(
+                full_cfg.selfplay, diagnostics_dir=diagnostics_dir
+            ),
             diagnostics_dir=str(diagnostics_dir),
         )
     except Exception as exc:  # noqa: BLE001 — fail-open at the opponent boundary.
