@@ -3657,18 +3657,51 @@ def _multistage_eval_history(run_dir: Path) -> list[dict[str, object]]:
         verdict = payload.get("verdict") if isinstance(payload.get("verdict"), dict) else {}
         edges = payload.get("edges") if isinstance(payload.get("edges"), list) else []
         roster = payload.get("roster") if isinstance(payload.get("roster"), dict) else {}
-        headline_edges = [
-            {
+        # ALL edges, enriched for the history screen's eval-detail card. The
+        # legacy headline consumers keep working (same keys, `headline` flags
+        # the old subset); the new fields add the per-opponent W-L record, the
+        # Elo point, the opponent's search profile (puct vs selfplay/gumbel),
+        # and the game/visit provenance.
+        def _edge_row(edge: dict[str, object]) -> dict[str, object]:
+            prov = edge.get("provenance") if isinstance(edge.get("provenance"), dict) else {}
+            wins_a = prov.get("physical_wins_a", prov.get("physical_wins_cand"))
+            wins_b = prov.get("physical_wins_b", prov.get("physical_wins_sealbot"))
+            return {
                 "opponent": edge.get("opponent"),
                 "role": edge.get("role"),
+                "kind": edge.get("kind"),
                 "primary": bool(edge.get("primary")),
+                "headline": _multistage_headline_edge(edge),
                 "decided": edge.get("decided"),
                 "winrate": edge.get("winrate"),
                 "winrate_ci95": edge.get("winrate_ci95"),
+                "elo_point": edge.get("elo_point"),
+                "wins_a": wins_a,
+                "wins_b": wins_b,
+                "eval_visits": prov.get("eval_visits"),
+                "n_pairs": prov.get("n_pairs"),
+                "opponent_search_profile": prov.get("opponent_search_profile"),
             }
-            for edge in edges
-            if isinstance(edge, dict) and _multistage_headline_edge(edge)
+
+        headline_edges = [
+            _edge_row(edge) for edge in edges if isinstance(edge, dict)
         ]
+        # Stage-C health: surfaces a PARTIAL eval (e.g. the concurrent
+        # checkpoint pass dying on a CUDA error while SealBot already played)
+        # instead of silently rendering the surviving edges as a full report.
+        stages = payload.get("stages") if isinstance(payload.get("stages"), list) else []
+        stage_c = next(
+            (s for s in stages if isinstance(s, dict) and s.get("stage") == "C_deep"),
+            {},
+        )
+        stage_health = {
+            "status": stage_c.get("status"),
+            "opponents_played": stage_c.get("opponents_played"),
+            "allocation": stage_c.get("allocation"),
+            "multi_checkpoint_error": stage_c.get("multi_checkpoint_error"),
+            "sealbot_unavailable": stage_c.get("sealbot_unavailable"),
+            "opponent_search_profiles": stage_c.get("opponent_search_profiles"),
+        }
         players = ratings.get("players") if isinstance(ratings.get("players"), list) else []
         # Compact roster: the opponent labels/roles actually evaluated this epoch
         # plus the configured permanent anchors, so the frontend can surface a
@@ -3710,6 +3743,10 @@ def _multistage_eval_history(run_dir: Path) -> list[dict[str, object]]:
                     "fit": ratings.get("fit") if isinstance(ratings.get("fit"), dict) else {},
                 },
                 "edges": headline_edges,
+                "stage_health": stage_health,
+                "pure_eval": meta.get("pure_eval"),
+                "elapsed_seconds": meta.get("elapsed_seconds"),
+                "full_search_visits": config.get("full_search_visits"),
                 "sealbot_winrate_ci95": payload.get("sealbot_winrate_ci95"),
                 "path": f"diagnostics/{path.name}",
                 "modified": stat.st_mtime if stat is not None else 0,

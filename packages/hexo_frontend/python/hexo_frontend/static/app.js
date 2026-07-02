@@ -3950,6 +3950,16 @@ function renderHistStrength(runs) {
   const pureEval = latest.pure_eval !== undefined ? latest.pure_eval : meta.pure_eval;
   if (pureEval === true) flags.push(`<span class="hist-rating-tag">pure eval</span>`);
   else if (pureEval === false) flags.push(`<span class="hist-rating-tag hist-rating-tag-muted">gating on</span>`);
+  // PARTIAL EVAL tripwire: the concurrent checkpoint pass failed (e.g. a CUDA
+  // error) after some edges already played — this epoch's ratings come from a
+  // fraction of the budget and must not read as a full report.
+  const stageHealth = latest && typeof latest.stage_health === "object" && latest.stage_health ? latest.stage_health : {};
+  if (stageHealth.multi_checkpoint_error) {
+    const played = Array.isArray(stageHealth.opponents_played) && stageHealth.opponents_played.length
+      ? `only ${stageHealth.opponents_played.join(", ")} played` : "no opponents played";
+    flags.push(`<span class="hist-rating-verdict hist-health-intervene" `
+      + `title="${escapeAttr(`checkpoint pass failed — ${played}. ${String(stageHealth.multi_checkpoint_error).split("\n")[0]}`)}">PARTIAL EVAL</span>`);
+  }
   msDroppedAnchors(latest).forEach(name => {
     flags.push(`<span class="hist-rating-tag hist-rating-tag-muted" title="permanent anchor missing from this epoch's roster">${escapeText(name)} dropped</span>`);
   });
@@ -4024,14 +4034,85 @@ function renderHistStrength(runs) {
 
   // ---- Opponent cards: top BT rungs + per-opponent W-L (each its own card) -
   const opponentCards = msStrengthOpponentPanel(run, latest);
+  // ---- Latest eval detail: every edge of the newest report ----------------
+  const evalDetailCard = msEvalDetailCard(latest);
 
   const caption = (runs || []).length > 1
     ? `<div class="hist-trends-caption">Strength &amp; eval: ${escapeText((run && run.name) || "latest run")}</div>`
     : `<div class="hist-trends-caption">Strength &amp; eval</div>`;
   // Single responsive grid: full-width hero banner + four equal-weight cards
   // (Elo curve | SealBot curve | BT ladder | latest W-L) that auto-fit columns.
-  histStrength.innerHTML = `${caption}<div class="hist-strength-grid">${heroBlock}${curveCards}${opponentCards}</div>`;
+  histStrength.innerHTML = `${caption}<div class="hist-strength-grid">${heroBlock}${curveCards}${evalDetailCard}${opponentCards}</div>`;
   histStrength.hidden = false;
+}
+
+// Latest-report eval detail card: one row per EDGE of the newest multistage
+// report — opponent (+role/searcher-profile tags), the physical W–L record,
+// win% with its 95% CI, and the per-edge Elo point. A PARTIAL banner leads
+// when the checkpoint pass failed (stage_health.multi_checkpoint_error) so a
+// fraction-of-budget report can never read as a full one. Returns "" when the
+// row carries no edges (pre-multistage epochs).
+function msEvalDetailCard(latest) {
+  const edges = Array.isArray(latest && latest.edges)
+    ? latest.edges.filter(e => e && typeof e === "object")
+    : [];
+  const health = latest && typeof latest.stage_health === "object" && latest.stage_health ? latest.stage_health : {};
+  if (!edges.length && !health.multi_checkpoint_error) return "";
+
+  const banners = [];
+  if (health.multi_checkpoint_error) {
+    const firstLine = String(health.multi_checkpoint_error).split("\n")[0];
+    const played = Array.isArray(health.opponents_played) && health.opponents_played.length
+      ? health.opponents_played.join(", ") : "none";
+    banners.push(`<div class="hist-hero-note" title="${escapeAttr(String(health.multi_checkpoint_error))}">`
+      + `<span class="hist-rating-verdict hist-health-intervene">PARTIAL</span> `
+      + `checkpoint pass failed (${escapeText(firstLine)}); played: ${escapeText(played)}</div>`);
+  }
+  if (health.sealbot_unavailable) {
+    banners.push(`<div class="hist-hero-note">SealBot unavailable: ${escapeText(String(health.sealbot_unavailable))}</div>`);
+  }
+
+  const rows = edges.map(e => {
+    const wa = asFinite(e.wins_a);
+    const wb = asFinite(e.wins_b);
+    const rec = wa !== null && wb !== null ? `${Math.round(wa)}–${Math.round(wb)}` : "—";
+    const lead = wa !== null && wb !== null
+      ? (wa > wb ? "hist-eval-win" : wa < wb ? "hist-eval-loss" : "hist-eval-draw")
+      : "hist-eval-draw";
+    const wr = asFinite(e.winrate);
+    const ci = Array.isArray(e.winrate_ci95) ? e.winrate_ci95 : null;
+    const ciTxt = ci && asFinite(ci[0]) !== null && asFinite(ci[1]) !== null
+      ? ` [${formatPercent(asFinite(ci[0]))}–${formatPercent(asFinite(ci[1]))}]` : "";
+    const wrTxt = wr !== null ? `${formatPercent(wr)}${ciTxt}` : "";
+    const eloPt = asFinite(e.elo_point);
+    const eloTxt = eloPt !== null ? `${eloPt > 0 ? "+" : ""}${Math.round(eloPt)}` : "";
+    const tags = [];
+    if (e.primary) tags.push(`<span class="hist-rating-tag">primary</span>`);
+    else if (e.role && e.role !== "checkpoint") tags.push(`<span class="hist-rating-tag hist-rating-tag-muted">${escapeText(String(e.role))}</span>`);
+    if (e.opponent_search_profile) {
+      tags.push(`<span class="hist-rating-tag hist-rating-tag-muted" `
+        + `title="searcher the OPPONENT side used (lineage mirrors the candidate's self-play profile; foreign anchors keep the PUCT profile they trained under)">`
+        + `${escapeText(String(e.opponent_search_profile))}</span>`);
+    }
+    const games = asFinite(e.decided);
+    const gamesTxt = games !== null ? `<span class="hist-hero-sub">${Math.round(games)}g</span>` : "";
+    return `<div class="hist-loss-row hist-eval-pair">`
+      + `<span class="hist-loss-label" title="${escapeAttr(String(e.opponent || ""))}">${escapeText(String(e.opponent || "?"))}${tags.join("")}</span>`
+      + `<span class="hist-eval-record ${lead}" title="physical wins (candidate–opponent)">${rec}</span>`
+      + `<span class="hist-hero-sub" title="win rate [95% CI]">${wrTxt}</span>`
+      + `<span class="hist-hero-sub" title="per-edge Elo point estimate">${eloTxt}</span>`
+      + `${gamesTxt}</div>`;
+  }).join("");
+
+  const bits = [];
+  const visits = asFinite(latest.full_search_visits);
+  if (visits !== null) bits.push(`${Math.round(visits)} visits`);
+  const elapsed = asFinite(latest.elapsed_seconds);
+  if (elapsed !== null) bits.push(`${Math.round(elapsed)}s`);
+  const sub = bits.length ? ` · ${bits.join(" · ")}` : "";
+  return `<div class="hist-strength-card"><div class="hist-insp-group">`
+    + `<span class="hist-insp-group-title">Eval detail · e${escapeText(latest.epoch)}${escapeText(sub)}</span>`
+    + `${banners.join("")}${rows}</div></div>`;
 }
 
 // The compact opponent panel for #histStrength: the TOP rungs of the unified BT
