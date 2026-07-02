@@ -71,7 +71,11 @@ BLOCK_COLS: tuple[str, ...] = ("stvalue", "stvalue_mask")
 CSR_GROUPS: tuple[tuple[str, tuple[str, ...], bool], ...] = (
     ("hist_off", ("hist_qr",), True),
     ("hist_off", ("hist_owner", "hist_pidx"), False),
-    ("pol_off", ("pol_act", "pol_w", "q_pol_q", "gumbel_pol_w", "prior_logit"), False),
+    ("pol_off", ("pol_act", "pol_w", "q_pol_q", "prior_logit"), False),
+    # π' target on its OWN support (shard schema v3): a superset of pol_act on
+    # reused roots. v2 shards stored it aligned to pol_act; the loader converts
+    # to CSR at load so downstream sees one shape.
+    ("gumbel_off", ("gumbel_act", "gumbel_w"), False),
     ("opp_off", ("opp_act", "opp_w"), False),
     ("own_hot_off", ("own_hot_qr",), True),
     ("opp_hot_off", ("opp_hot_qr",), True),
@@ -84,6 +88,7 @@ CSR_GROUPS: tuple[tuple[str, tuple[str, ...], bool], ...] = (
 OFF_COLS: tuple[str, ...] = (
     "hist_off",
     "pol_off",
+    "gumbel_off",
     "opp_off",
     "own_hot_off",
     "opp_hot_off",
@@ -134,7 +139,8 @@ class PackedRowView:
     pol_act: np.ndarray  # (P,) u32 view
     pol_w: np.ndarray  # (P,) f32 view
     q_pol_q: np.ndarray  # (P,) f32 view; one child Q per recorded action (== pol_act)
-    gumbel_pol_w: np.ndarray  # (P,) f32 view; π' weight aligned to pol_act
+    gumbel_act: np.ndarray  # (G,) u32 view; π' target support (own CSR group)
+    gumbel_w: np.ndarray  # (G,) f32 view; π' weight per gumbel_act entry
     prior_logit_arr: np.ndarray  # (P,) f32 view; raw root logit aligned to pol_act
     opp_act: np.ndarray  # (O,) u32 view
     opp_w: np.ndarray  # (O,) f32 view
@@ -182,15 +188,16 @@ class PackedRowView:
         return tuple((int(self.pol_act[k]), float(self.q_pol_q[k])) for k in range(self.pol_act.shape[0]))
 
     def gumbel_policy(self) -> tuple[tuple[int, float], ...]:
-        """Improved-policy target π' aligned to ``pol_act``.
+        """Improved-policy target π' on its OWN support (``gumbel_act``).
 
         Empty when the row carries no target (``gumbel_present == 0``). When
-        present, the weights are the per-action π' mass."""
+        present, the weights are the per-action π' mass; the support can exceed
+        ``pol_act`` (inherited edges on reused roots)."""
         if int(self.gumbel_present) == 0:
             return ()
         return tuple(
-            (int(self.pol_act[k]), float(self.gumbel_pol_w[k]))
-            for k in range(self.pol_act.shape[0])
+            (int(self.gumbel_act[k]), float(self.gumbel_w[k]))
+            for k in range(self.gumbel_act.shape[0])
         )
 
     def prior_logit(self) -> tuple[tuple[int, float], ...]:
@@ -267,6 +274,7 @@ class PackedWindow:
         c = self.cols
         h0, h1 = int(c["hist_off"][i]), int(c["hist_off"][i + 1])
         p0, p1 = int(c["pol_off"][i]), int(c["pol_off"][i + 1])
+        g0, g1 = int(c["gumbel_off"][i]), int(c["gumbel_off"][i + 1])
         o0, o1 = int(c["opp_off"][i]), int(c["opp_off"][i + 1])
 
         def qr_slice(key: str) -> np.ndarray:
@@ -295,7 +303,8 @@ class PackedWindow:
             pol_act=c["pol_act"][p0:p1],
             pol_w=c["pol_w"][p0:p1],
             q_pol_q=c["q_pol_q"][p0:p1],
-            gumbel_pol_w=c["gumbel_pol_w"][p0:p1],
+            gumbel_act=c["gumbel_act"][g0:g1],
+            gumbel_w=c["gumbel_w"][g0:g1],
             prior_logit_arr=c["prior_logit"][p0:p1],
             opp_act=c["opp_act"][o0:o1],
             opp_w=c["opp_w"][o0:o1],
@@ -332,7 +341,8 @@ _CSR_DTYPES: dict[str, np.dtype] = {
     "pol_act": np.dtype(np.uint32),
     "pol_w": np.dtype(np.float32),
     "q_pol_q": np.dtype(np.float32),
-    "gumbel_pol_w": np.dtype(np.float32),
+    "gumbel_act": np.dtype(np.uint32),
+    "gumbel_w": np.dtype(np.float32),
     "prior_logit": np.dtype(np.float32),
     "opp_act": np.dtype(np.uint32),
     "opp_w": np.dtype(np.float32),
@@ -436,17 +446,53 @@ def load_packed_shard(path: Path) -> PackedWindow:
         for name in BLOCK_COLS:
             cols[name] = np.ascontiguousarray(data[name])
         for off in OFF_COLS:
+            if off == "gumbel_off" and off not in files:
+                # v1/v2 shard: the π' CSR group is synthesized below.
+                continue
             cols[off] = np.ascontiguousarray(data[off]).astype(np.int64, copy=False)
         for _off, datas, _doubled in CSR_GROUPS:
             for d in datas:
-                if d in ("gumbel_pol_w", "prior_logit") and d not in files:
-                    # Shards lacking these per-action columns zero-fill aligned to
-                    # pol_act (the pol_off group's length) to keep downstream
-                    # slicing valid; a gumbel_present=0 row ignores them.
+                if d in ("gumbel_act", "gumbel_w") and d not in files:
+                    # Synthesized below for v1/v2 shards.
+                    continue
+                if d == "prior_logit" and d not in files:
+                    # Shards lacking the per-action logit column zero-fill
+                    # aligned to pol_act (the pol_off group's length) to keep
+                    # downstream slicing valid; a gumbel_present=0 row ignores it.
                     pol_total = int(data["pol_act"].shape[0])
                     cols[d] = np.zeros(pol_total, dtype=_CSR_DTYPES[d])
                     continue
                 cols[d] = np.ascontiguousarray(data[d])
+        if "gumbel_off" not in cols:
+            # Legacy π' storage (v2: gumbel_pol_w aligned to pol_act; v1: none).
+            # Convert to the v3 CSR shape at load so downstream sees one format.
+            # v2's alignment already truncated π' to the visit support, so this
+            # conversion preserves exactly what the shard stored (nonzero mass).
+            if "gumbel_pol_w" in files and int(data["pol_act"].shape[0]) > 0:
+                aligned = np.ascontiguousarray(data["gumbel_pol_w"]).astype(
+                    np.float32, copy=False
+                )
+                pol_act_arr = cols["pol_act"]
+                pol_off_arr = cols["pol_off"]
+                present = cols["gumbel_present"]
+                keep = np.zeros(aligned.shape[0], dtype=bool)
+                lens = np.zeros(n, dtype=np.int64)
+                for i in range(n):
+                    if int(present[i]) == 0:
+                        continue
+                    a, b = int(pol_off_arr[i]), int(pol_off_arr[i + 1])
+                    seg = aligned[a:b] > 0.0
+                    keep[a:b] = seg
+                    lens[i] = int(seg.sum())
+                cols["gumbel_act"] = np.ascontiguousarray(pol_act_arr[keep])
+                cols["gumbel_w"] = np.ascontiguousarray(aligned[keep])
+                offsets = np.zeros(n + 1, dtype=np.int64)
+                np.cumsum(lens, out=offsets[1:])
+                cols["gumbel_off"] = offsets
+            else:
+                cols["gumbel_act"] = np.empty(0, dtype=_CSR_DTYPES["gumbel_act"])
+                cols["gumbel_w"] = np.empty(0, dtype=_CSR_DTYPES["gumbel_w"])
+                cols["gumbel_off"] = np.zeros(n + 1, dtype=np.int64)
 
     generation = np.full(n, _shard_generation(path, n), dtype=np.int32)
     row_shard_id = np.zeros(n, dtype=np.int32)

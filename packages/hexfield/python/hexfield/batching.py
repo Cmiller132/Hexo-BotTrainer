@@ -127,6 +127,7 @@ def collate_training(
     # π' vs the visit target per row. Rows whose ExpandedRow lacks a
     # gumbel_policy field fall back to all-zero via getattr.
     gumbel_policy = torch.zeros(b, npad, dtype=torch.float32)
+    gumbel_packed = [False] * b
     for g, row in enumerate(rows):
         n = row.policy.shape[0]
         policy[g, :n] = torch.from_numpy(row.policy)
@@ -136,6 +137,7 @@ def collate_training(
         gp = getattr(row, "gumbel_policy", None)
         if gp is not None and gp.shape[0] == n:
             gumbel_policy[g, :n] = torch.from_numpy(gp)
+            gumbel_packed[g] = bool(gp.sum() > 0.0)
     # Auxiliary soft policy target: the row-normalized base distribution raised
     # to the power 0.5 (temperature T=2), over its support only. The base is the
     # row's best policy-improvement distribution: the gumbel improved policy π'
@@ -146,8 +148,15 @@ def collate_training(
     # softening. Cells with base == 0 (unvisited-legal and off-prefix slots) stay
     # at exactly 0, so the target is a valid distribution over the support.
     # The paired loss weight lives in losses.py.
+    # Validity requires BOTH the row's flag and an actually-packed positive-mass
+    # target: a flagged row with a misaligned/zero-mass gumbel array would
+    # otherwise select an all-zero CE target for the main policy and the soft
+    # head (silently diluted by allow_zero_rows).
     gumbel_policy_valid = torch.tensor(
-        [float(getattr(row, "gumbel_policy_valid", 0.0)) for row in rows],
+        [
+            float(bool(getattr(row, "gumbel_policy_valid", 0.0)) and gumbel_packed[g])
+            for g, row in enumerate(rows)
+        ],
         dtype=torch.float32,
     )
     soft_base = torch.where(

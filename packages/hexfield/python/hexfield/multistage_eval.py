@@ -821,6 +821,12 @@ def run_multistage_eval(
         cfg, roster, candidate_ckpt, full_cfg,
         play_checkpoint_match=play_checkpoint_match,
         diagnostics_dir=diag_dir,
+        divergence_overrides_b=(
+            _foreign_opponent_overrides(full_cfg, roster, candidate_ckpt, diag_dir)
+            .get(roster.champion.label)
+            if roster.champion is not None
+            else None
+        ),
     )
     stages.append(stage_b)
 
@@ -935,6 +941,7 @@ def _stage_b_sprt(
     *,
     play_checkpoint_match: Callable[..., dict[str, Any]],
     diagnostics_dir: Path,
+    divergence_overrides_b: dict | None = None,
 ) -> tuple[StageResult, dict[str, Any] | None]:
     """Play up to ``sprt.max_games`` paired games vs the reference and screen.
 
@@ -984,6 +991,10 @@ def _stage_b_sprt(
         virtual_batch_size=_eval_virtual_batch_size(cfg, full_cfg),
         opening_plies=cfg.opening_plies,
         opening_temperature=cfg.opening_temperature,
+        # The champion's search profile must match Stage C's for this pairing:
+        # Stage C merges/tops-up this match, and a profile mismatch would pool
+        # games played under two different searchers into one edge.
+        divergence_overrides_b=divergence_overrides_b,
         diagnostics_dir=str(diagnostics_dir),
     )
     score = match.get("score") or {}
@@ -1090,6 +1101,7 @@ def _build_checkpoint_edge_from_match(
     *,
     reused: int = 0,
     cfg: MultiStageEvalSection | None = None,
+    opponent_search_profile: str | None = None,
 ) -> dict[str, Any]:
     """Build one checkpoint opponent's descriptive + BT edge dict from an
     already-played paired match (candidate is net A).
@@ -1110,6 +1122,11 @@ def _build_checkpoint_edge_from_match(
     # pool row (_edge_pool_row copies descriptive["provenance"] into raw).
     if isinstance(prov, dict):
         prov = {**prov, "featurized_ood": featurized_ood, "featurize_radius": live_radius}
+        # Which searcher the OPPONENT side used ("puct" for foreign anchors,
+        # "selfplay" for lineage). Persisted into the pool row so the one-time
+        # PUCT->Gumbel eval-regime switch can be split post-hoc.
+        if opponent_search_profile is not None:
+            prov = {**prov, "opponent_search_profile": opponent_search_profile}
     score = match.get("score") or {}
     decided = int(score.get("decided", 0) or 0)
     wins = int(score.get("a_wins", 0) or 0)
@@ -1289,7 +1306,12 @@ def _play_checkpoint_opponent(
         match = _merge_matches(match, fresh) if match is not None else fresh
     if match is None:
         return None
-    return _build_checkpoint_edge_from_match(roster, opp, match, reused=reused, cfg=cfg)
+    return _build_checkpoint_edge_from_match(
+        roster, opp, match, reused=reused, cfg=cfg,
+        opponent_search_profile=(
+            "puct" if divergence_overrides_b is not None else "selfplay"
+        ),
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -2325,7 +2347,14 @@ def run_multistage_eval_concurrent(
             match = matches.get(opp.label)
             if match is None:
                 continue
-            edges.append(_build_checkpoint_edge_from_match(roster, opp, match, cfg=cfg))
+            edges.append(
+                _build_checkpoint_edge_from_match(
+                    roster, opp, match, cfg=cfg,
+                    opponent_search_profile=(
+                        "puct" if opp.label in foreign_ov else "selfplay"
+                    ),
+                )
+            )
             played.append(opp.label)
 
     stage_c_status = "completed" if edges else "empty"

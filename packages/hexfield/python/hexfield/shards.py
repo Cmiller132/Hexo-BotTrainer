@@ -24,13 +24,18 @@ from .features import window_scan
 from .samples import STV_HORIZONS, HexfieldSampleData
 
 SCHEMA = "hexfield_compact_v1"
-# v2 adds the per-action `gumbel_pol_w` (improved-policy target weight, aligned
+# v2 added the per-action `gumbel_pol_w` (improved-policy target weight, ALIGNED
 # to `pol_act`) and `prior_logit` (raw root logit, aligned to `pol_act`)
-# columns, plus a per-row `gumbel_present` flag. v1 shards lack these columns;
-# the reader guards for their absence so rows without them fall back to the
-# visit target. Both versions are accepted.
-SCHEMA_VERSION = 2
-_ACCEPTED_SCHEMA_VERSIONS = (1, 2)
+# columns, plus a per-row `gumbel_present` flag. v3 replaces the aligned gumbel
+# weight with its own CSR columns (`gumbel_act`/`gumbel_w`/`gumbel_off`): the π'
+# target support (cumulative root visits >= min_visits) is a SUPERSET of the
+# recorded delta-visit support, and the v2 alignment silently dropped π' mass on
+# actions outside `pol_act` (e.g. inherited edges on reused roots) — exactly the
+# rows where π' disagrees with the visit policy and carries teaching signal.
+# The reader accepts all versions; rows without gumbel columns fall back to the
+# visit target.
+SCHEMA_VERSION = 3
+_ACCEPTED_SCHEMA_VERSIONS = (1, 2, 3)
 # The restnet compact-v1 schema_version the adapter reads
 # (dense_cnn_restnet.compact_io.COMPACT_SCHEMA_VERSION). The adapter accepts a
 # shard with no schema_version but raises on a present-but-different version.
@@ -106,10 +111,14 @@ def write_compact_shard(
     pol_act: list[np.ndarray] = []
     pol_w: list[np.ndarray] = []
     pol_q: list[np.ndarray] = []  # child Q parallel to pol_act (cell_q head target)
-    # Improved-policy target weight and raw root logit, both aligned to pol_act
-    # (0 where the action has no gumbel weight / no logit). gumbel_present marks
-    # rows that carry a gumbel target.
-    pol_gumbel: list[np.ndarray] = []
+    # Improved-policy target (π') CSR columns: OWN action/weight/offset arrays,
+    # NOT aligned to pol_act — π''s support is a superset of the delta-visit
+    # support, and aligning would drop off-support π' mass (v2's silent-
+    # truncation defect). Raw root logit stays aligned to pol_act.
+    # gumbel_present marks rows that carry a gumbel target.
+    g_act: list[np.ndarray] = []
+    g_w: list[np.ndarray] = []
+    g_len: list[int] = []
     pol_logit: list[np.ndarray] = []
     gumbel_present = np.zeros(n, dtype=np.uint8)
     pol_len: list[int] = []
@@ -158,19 +167,29 @@ def write_compact_shard(
         # order (0 for actions absent from q_policy).
         qmap = {int(a): float(q) for a, q in sample.q_policy}
         pq = np.fromiter((qmap.get(int(a), 0.0) for a in pa.tolist()), dtype=np.float32, count=pa.shape[0])
-        # Align improved-policy weight and raw logit to pol_act order (0 where
-        # absent). gumbel_present[i] flags rows that carry a target, so the dense
-        # reconstruct can distinguish an all-zero target from an absent one.
-        gmap = {int(a): float(w) for a, w in sample.gumbel_policy}
+        # π' target on its OWN support (CSR). gumbel_present[i] flags rows that
+        # carry a target, so the dense reconstruct can distinguish an all-zero
+        # target from an absent one. Raw logit stays aligned to pol_act.
+        ga = np.fromiter(
+            (int(a) for a, _ in sample.gumbel_policy),
+            dtype=np.uint32,
+            count=len(sample.gumbel_policy),
+        )
+        gw = np.fromiter(
+            (float(w) for _, w in sample.gumbel_policy),
+            dtype=np.float32,
+            count=len(sample.gumbel_policy),
+        )
         lmap = {int(a): float(l) for a, l in sample.prior_logit}
-        pg = np.fromiter((gmap.get(int(a), 0.0) for a in pa.tolist()), dtype=np.float32, count=pa.shape[0])
         pl = np.fromiter((lmap.get(int(a), 0.0) for a in pa.tolist()), dtype=np.float32, count=pa.shape[0])
         if sample.gumbel_policy:
             gumbel_present[i] = 1
         pol_act.append(pa)
         pol_w.append(pw)
         pol_q.append(pq)
-        pol_gumbel.append(pg)
+        g_act.append(ga)
+        g_w.append(gw)
+        g_len.append(int(ga.shape[0]))
         pol_logit.append(pl)
         pol_len.append(int(pa.shape[0]))
         oa = np.fromiter((int(a) for a, _ in sample.opp_policy), dtype=np.uint32, count=len(sample.opp_policy))
@@ -207,7 +226,9 @@ def write_compact_shard(
         "pol_act": _cat(pol_act, np.uint32),
         "pol_w": _cat(pol_w, np.float32),
         "q_pol_q": _cat(pol_q, np.float32),
-        "gumbel_pol_w": _cat(pol_gumbel, np.float32),
+        "gumbel_act": _cat(g_act, np.uint32),
+        "gumbel_w": _cat(g_w, np.float32),
+        "gumbel_off": _concat_offsets(g_len),
         "prior_logit": _cat(pol_logit, np.float32),
         "gumbel_present": gumbel_present,
         "pol_off": _concat_offsets(pol_len),
@@ -288,29 +309,32 @@ def read_compact_shard(path: Path) -> list[HexfieldSampleData]:
             if "q_pol_q" in arrays
             else ()
         )
-        # Reconstruct the per-action improved-policy target and raw logit (both
-        # aligned to pol_act). gumbel_present marks rows that carried a target;
-        # shards lacking these columns decode to empty tuples, and the expand and
-        # loss fall back to the visit target.
-        gumbel_here = (
-            "gumbel_pol_w" in arrays
-            and "gumbel_present" in arrays
-            and int(arrays["gumbel_present"][i]) == 1
-        )
-        gumbel_policy = (
-            tuple(
+        # Reconstruct the per-action improved-policy target. v3 shards carry π'
+        # on its OWN CSR columns (gumbel_act/gumbel_w/gumbel_off — support can
+        # exceed pol_act); v2 shards carried it aligned to pol_act (silently
+        # truncated to the visit support — read as stored). gumbel_present marks
+        # rows that carried a target; shards lacking these columns decode to
+        # empty tuples, and the expand and loss fall back to the visit target.
+        present = "gumbel_present" in arrays and int(arrays["gumbel_present"][i]) == 1
+        if present and "gumbel_act" in arrays:
+            g0, g1 = int(arrays["gumbel_off"][i]), int(arrays["gumbel_off"][i + 1])
+            gumbel_policy = tuple(
+                (int(arrays["gumbel_act"][k]), float(arrays["gumbel_w"][k]))
+                for k in range(g0, g1)
+            )
+        elif present and "gumbel_pol_w" in arrays:
+            gumbel_policy = tuple(
                 (int(arrays["pol_act"][k]), float(arrays["gumbel_pol_w"][k]))
                 for k in range(p0, p1)
             )
-            if gumbel_here
-            else ()
-        )
+        else:
+            gumbel_policy = ()
         prior_logit = (
             tuple(
                 (int(arrays["pol_act"][k]), float(arrays["prior_logit"][k]))
                 for k in range(p0, p1)
             )
-            if gumbel_here and "prior_logit" in arrays
+            if present and "prior_logit" in arrays
             else ()
         )
         out.append(

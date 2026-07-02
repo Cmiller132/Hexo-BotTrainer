@@ -959,8 +959,15 @@ pub fn expand_shard_train<'py>(
     let pol_act = col_typed::<u32>(columns, "pol_act", pol_total)?;
     let pol_w = col_typed::<f32>(columns, "pol_w", pol_total)?;
     let q_pol_q = col_typed::<f32>(columns, "q_pol_q", pol_total)?;
-    // π' weight and raw logit, aligned to pol_act. Optional: None when the column
-    // is absent, in which case no gumbel target is read.
+    // π' target on its OWN CSR group (schema v3; support can exceed pol_act).
+    // Optional: absent for legacy windows, which instead may carry the v2
+    // aligned column below. The raw logit stays aligned to pol_act.
+    let gumbel_off = col_typed_opt::<i64>(columns, "gumbel_off", n + 1)?;
+    let gumbel_total = gumbel_off.map(|o| *o.last().unwrap() as usize).unwrap_or(0);
+    let gumbel_act = col_typed_opt::<u32>(columns, "gumbel_act", gumbel_total)?;
+    let gumbel_w = col_typed_opt::<f32>(columns, "gumbel_w", gumbel_total)?;
+    // Legacy v2 storage: π' weight aligned to pol_act. Read only when the CSR
+    // group is absent.
     let gumbel_pol_w = col_typed_opt::<f32>(columns, "gumbel_pol_w", pol_total)?;
     let prior_logit_col = col_typed_opt::<f32>(columns, "prior_logit", pol_total)?;
     let opp_act = col_typed::<u32>(columns, "opp_act", opp_total)?;
@@ -1007,9 +1014,18 @@ pub fn expand_shard_train<'py>(
         let row_gumbel_present = gumbel_present.map(|g| g[i]).unwrap_or(0);
         let (gumbel_policy, prior_logit_facts): (Vec<(u32, f32)>, Vec<(u32, f32)>) =
             if row_gumbel_present != 0 {
-                let gp = gumbel_pol_w
-                    .map(|g| (p0..p1).map(|k| (pol_act[k], g[k])).collect())
-                    .unwrap_or_default();
+                // Prefer the v3 CSR group (π' on its own support); fall back to
+                // the v2 pol_act-aligned column for legacy windows.
+                let gp: Vec<(u32, f32)> = match (gumbel_off, gumbel_act, gumbel_w) {
+                    (Some(goff), Some(gact), Some(gwv)) => {
+                        let g0 = goff[i] as usize;
+                        let g1 = goff[i + 1] as usize;
+                        (g0..g1).map(|k| (gact[k], gwv[k])).collect()
+                    }
+                    _ => gumbel_pol_w
+                        .map(|g| (p0..p1).map(|k| (pol_act[k], g[k])).collect())
+                        .unwrap_or_default(),
+                };
                 let pl = prior_logit_col
                     .map(|l| (p0..p1).map(|k| (pol_act[k], l[k])).collect())
                     .unwrap_or_default();

@@ -238,6 +238,11 @@ struct ContinuousSchedulerStats {
     early_stops_full: u64,
     early_stop_visits_saved: u64,
     lcb_overrides: u64,
+    // Play-policy telemetry: moves selected via the quota-pruned Gumbel play
+    // distribution, and how many of those played the raw delta leader (the SH
+    // winner). winner/moves ≈ exploitation rate of the play sampler.
+    gumbel_play_moves: u64,
+    gumbel_play_winner_moves: u64,
 }
 
 fn continuous_flush_decision(
@@ -1264,6 +1269,8 @@ impl HexfieldMctsSession {
         dict.set_item("early_stops_full", stats.early_stops_full)?;
         dict.set_item("early_stop_visits_saved", stats.early_stop_visits_saved)?;
         dict.set_item("lcb_overrides", stats.lcb_overrides)?;
+        dict.set_item("gumbel_play_moves", stats.gumbel_play_moves)?;
+        dict.set_item("gumbel_play_winner_moves", stats.gumbel_play_winner_moves)?;
         let hist = PyDict::new(py);
         let mut hist_items: Vec<_> = stats.flush_size_histogram.into_iter().collect();
         hist_items.sort_unstable_by_key(|(size, _)| *size);
@@ -2224,6 +2231,12 @@ fn complete_continuous_slots(
         if prepared.payload.lcb_override {
             stats.lcb_overrides += 1;
         }
+        if prepared.payload.play_pruned {
+            stats.gumbel_play_moves += 1;
+            if prepared.payload.play_winner {
+                stats.gumbel_play_winner_moves += 1;
+            }
+        }
         if let Some(sampled) = prepared.init_override {
             payload_dict.set_item("action_id", sampled)?;
             payload_dict.set_item("action_selection", "policy_init_prior")?;
@@ -2414,10 +2427,55 @@ fn single_state_from_py(py: Python<'_>, state: &Bound<'_, PyAny>) -> PyResult<Ru
         .ok_or_else(|| PyValueError::new_err("expected one state"))
 }
 
+/// Every key `resolve_divergences` understands. Unknown keys are a hard error:
+/// a silently-dropped key (version skew, typo) reverts part of the search
+/// profile to defaults with zero symptoms — the same silent-PUCT failure class
+/// the lockstep Gumbel-init fix closed.
+const KNOWN_DIVERGENCE_KEYS: &[&str] = &[
+    "lcb_move_selection",
+    "early_stop",
+    "visit_scaled_c_puct",
+    "moves_left_utility",
+    "ml_weight",
+    "ml_scale",
+    "ml_q_gate",
+    "ml_two_sided",
+    "ml_final_pick",
+    "ml_final_pick_band",
+    "lcb_z",
+    "c_scale",
+    "c_base",
+    "nucleus_f64",
+    "new_child_fpu",
+    "lazy_widening",
+    "clean_root_prior_cache",
+    "dirichlet_shaped",
+    "pruned_dynamic_cpuct",
+    "gumbel_target",
+    "gumbel_root",
+    "gumbel_sequential_halving",
+    "gumbel_nonroot_select",
+    "gumbel_c_visit",
+    "gumbel_c_scale",
+    "gumbel_m",
+    "gumbel_target_min_visits",
+    "gumbel_play_prune",
+];
+
 fn resolve_divergences(
     search_parity_mode: Option<bool>,
     overrides: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Divergences> {
+    if let Some(overrides) = overrides {
+        for key in overrides.keys() {
+            let key: String = key.extract()?;
+            if !KNOWN_DIVERGENCE_KEYS.contains(&key.as_str()) {
+                return Err(PyValueError::new_err(format!(
+                    "unknown divergence override key {key:?}; known keys: {KNOWN_DIVERGENCE_KEYS:?}"
+                )));
+            }
+        }
+    }
     let mut dv = if search_parity_mode.unwrap_or(false) {
         Divergences::parity()
     } else {
@@ -2508,6 +2566,9 @@ fn resolve_divergences(
         if let Some(v) = overrides.get_item("gumbel_target_min_visits")? {
             dv.gumbel_target_min_visits = v.extract()?;
         }
+        if let Some(v) = overrides.get_item("gumbel_play_prune")? {
+            dv.gumbel_play_prune = v.extract()?;
+        }
     }
     Ok(dv)
 }
@@ -2546,6 +2607,10 @@ struct PayloadNative {
     action_selection: &'static str,
     lcb_override: bool,
     early_stopped: bool,
+    // Play-policy telemetry: whether the quota-pruned Gumbel play distribution
+    // drove selection, and whether the played move is the raw delta leader.
+    play_pruned: bool,
+    play_winner: bool,
     export_action_ids: Vec<PackedCoord>,
     export_weights: Vec<f32>,
     export_q: Vec<f32>,
@@ -2583,6 +2648,8 @@ impl PayloadNative {
         result.set_item("action_selection", self.action_selection)?;
         result.set_item("lcb_override", self.lcb_override)?;
         result.set_item("early_stopped", self.early_stopped)?;
+        result.set_item("play_pruned", self.play_pruned)?;
+        result.set_item("play_winner", self.play_winner)?;
         let to_bytes = |data: &[u32]| -> Bound<'py, PyBytes> {
             let len = std::mem::size_of_val(data);
             let raw = unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, len) };
@@ -2648,15 +2715,21 @@ fn build_search_result_payload_native(
 ) -> PyResult<PayloadNative> {
     let root = search.root();
     let (policy_action_ids, policy_weights, _policy_q, policy_total) = visit_policy(root, baseline);
-    let (mut export_action_ids, mut export_weights, mut export_q) = if forced_playout_k > 0.0 {
-        // When pruned_dynamic_cpuct is on the recorded-target pruning uses
-        // selection's c_for(N); otherwise static c_puct.
-        let effective_c = search.effective_pruning_c_puct(c_puct, root.visits);
-        pruned_visit_policy(root, baseline, forced_playout_k, effective_c)
-    } else {
-        let (ids, w, q, _t) = visit_policy(root, baseline);
-        (ids, w, q)
-    };
+    // Forced-playout pruning is PUCT bookkeeping: at a Gumbel SH root the
+    // selection path never takes the forced branches, so there are no forced
+    // playouts to prune and the PUCT pruning math (n_forced = sqrt(k*P*N))
+    // would strip legitimate SH round-quota visits from the recorded target.
+    // Gate it off whenever the SH root is active.
+    let (mut export_action_ids, mut export_weights, mut export_q) =
+        if forced_playout_k > 0.0 && !search.has_gumbel_root() {
+            // When pruned_dynamic_cpuct is on the recorded-target pruning uses
+            // selection's c_for(N); otherwise static c_puct.
+            let effective_c = search.effective_pruning_c_puct(c_puct, root.visits);
+            pruned_visit_policy(root, baseline, forced_playout_k, effective_c)
+        } else {
+            let (ids, w, q, _t) = visit_policy(root, baseline);
+            (ids, w, q)
+        };
     // Recorded-target fallback for a force-completed Gumbel SH root: such a move
     // can finalize with zero net delta visits over its reuse baseline, so the
     // delta-visit export above is empty. A Full (pcr_full) row with an
@@ -2689,15 +2762,61 @@ fn build_search_result_payload_native(
         }
     }
     let (root_prior_action_ids, root_prior_weights) = root_prior_policy(root);
-    let guarded_weights = if search.tss_enabled {
-        tactical_guard_weights(&search.root_state, &policy_action_ids, &policy_weights)
+    // Play distribution for Gumbel SH roots at exploration temperatures
+    // (gumbel_play_prune): the delta-visit histogram is a SCHEDULE artifact —
+    // every round-0 loser carries its equal entry quota (~budget/(R*m)), so
+    // temperature-sampling it plays measured-bad moves at the quota rate.
+    // Zero every action whose delta never exceeded the round-0 quota (it was
+    // eliminated without surviving a halving) and renormalize; the surviving
+    // mass is ordered by rounds survived — SH's own quality ranking at visit
+    // counts it already paid for. The RECORDED targets above are untouched.
+    // Gated to T>0 (the T=0 greedy/LCB path keeps the raw histogram, so eval
+    // arena behavior is unchanged) and inert when pruning would empty the
+    // support (degenerate/force-finalized roots keep the fallback chain).
+    let play_pair: Option<(Vec<PackedCoord>, Vec<f32>)> = if temperature > 0.0
+        && search.divergences.gumbel_play_prune
+        && policy_total > 0
+    {
+        search.gumbel_play_quota().and_then(|quota| {
+            let total = policy_total as f32;
+            let cut = quota as f32 + 0.5;
+            let mut ids = Vec::with_capacity(policy_action_ids.len());
+            let mut ws = Vec::with_capacity(policy_action_ids.len());
+            for (id, w) in policy_action_ids.iter().zip(policy_weights.iter()) {
+                if *w * total > cut {
+                    ids.push(*id);
+                    ws.push(*w);
+                }
+            }
+            if ids.is_empty() {
+                None
+            } else {
+                let sum: f32 = ws.iter().sum();
+                if sum > 0.0 {
+                    for w in ws.iter_mut() {
+                        *w /= sum;
+                    }
+                }
+                Some((ids, ws))
+            }
+        })
     } else {
-        policy_weights.clone()
+        None
+    };
+    let play_pruned = play_pair.is_some();
+    let (sel_ids, sel_weights): (&Vec<PackedCoord>, &Vec<f32>) = match &play_pair {
+        Some((ids, ws)) => (ids, ws),
+        None => (&policy_action_ids, &policy_weights),
+    };
+    let guarded_weights = if search.tss_enabled {
+        tactical_guard_weights(&search.root_state, sel_ids, sel_weights)
+    } else {
+        sel_weights.clone()
     };
     let (selected, lcb_override) = select_action_with_lcb(
         search,
         baseline,
-        &policy_action_ids,
+        sel_ids,
         &guarded_weights,
         temperature,
         seed,
@@ -2726,11 +2845,22 @@ fn build_search_result_payload_native(
                 .any(|(a, _)| *a == selected),
         "selected played action_id must be a real root action, never the sentinel"
     );
-    let action_selection = if baseline.is_some() {
+    let action_selection = if play_pruned {
+        "gumbel_play_policy"
+    } else if baseline.is_some() {
         "delta_visit_policy"
     } else {
         "cumulative_visit_policy"
     };
+    // Telemetry: whether the played action is the raw delta-visit leader (the
+    // SH winner on a completed SH root). Read alongside play_pruned to judge
+    // how exploratory the play distribution actually is.
+    let play_winner = policy_action_ids
+        .iter()
+        .zip(policy_weights.iter())
+        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(id, _)| *id == selected)
+        .unwrap_or(false);
     // Improved-policy target π'=softmax(logits+σ(completedQ)). Exported only when
     // gumbel_target is on; the raw root logits column ships alongside. When the
     // flag is off, none of these keys appear.
@@ -2756,6 +2886,8 @@ fn build_search_result_payload_native(
         action_selection,
         lcb_override,
         early_stopped: search.early_stopped,
+        play_pruned,
+        play_winner,
         export_action_ids,
         export_weights,
         export_q,

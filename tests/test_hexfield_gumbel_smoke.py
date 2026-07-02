@@ -245,7 +245,12 @@ def test_gumbel_continuous_reuse_rebuilds_sh_state_per_move() -> None:
         def __call__(self, game_key: int, payload: dict):
             ply = self.plies[game_key]
             self.rows.append(
-                (ply, bool(payload.get("pcr_full")), int(payload["visits"]))
+                (
+                    ply,
+                    bool(payload.get("pcr_full")),
+                    int(payload["visits"]),
+                    int(payload.get("gumbel_policy_count", 0)),
+                )
             )
             q, r = unpack_action_id(payload["action_id"])
             state = self.states[game_key]
@@ -294,17 +299,25 @@ def test_gumbel_continuous_reuse_rebuilds_sh_state_per_move() -> None:
         divergence_overrides=_gumbel_overrides(),
     )
 
-    full_rows = [(ply, visits) for ply, full, visits in driver.rows if full]
+    full_rows = [(ply, visits, gc) for ply, full, visits, gc in driver.rows if full]
     assert len(full_rows) >= 2 * (max_plies - 1), "expected full games of Full moves"
-    reused = [(ply, visits) for ply, visits in full_rows if ply >= 1]
+    reused = [(ply, visits, gc) for ply, visits, gc in full_rows if ply >= 1]
     assert reused, "no reused-root moves decided"
     zero_visit = [row for row in reused if row[1] == 0]
     assert not zero_visit, (
         f"reused-root Full moves finalized with zero net visits: {zero_visit}"
     )
-    mean_visits = sum(v for _, v in reused) / len(reused)
+    mean_visits = sum(v for _, v, _ in reused) / len(reused)
     assert mean_visits >= budget * 0.5, (
         f"reused-root Full moves under-searched: mean {mean_visits:.1f} of {budget}"
+    )
+    # Gumbel-specific observable: every reused-root Full move exports a π'
+    # target over more than one action. A plain-PUCT .so (version skew) or a
+    # gumbel profile that silently reverted to PUCT passes the visit assertions
+    # above but has no gumbel_policy_count key — this catches that class.
+    thin_targets = [row for row in reused if row[2] < 2]
+    assert not thin_targets, (
+        f"reused-root Full moves exported degenerate π' targets: {thin_targets}"
     )
 
 
@@ -396,6 +409,176 @@ def test_build_divergence_overrides_emits_gumbel_knobs() -> None:
     assert ov["gumbel_c_scale"] == pytest.approx(1.0)
     assert isinstance(ov["gumbel_m"], int) and ov["gumbel_m"] == 16
     assert isinstance(ov["gumbel_target_min_visits"], int)
+    assert ov["gumbel_play_prune"] is False  # default off; main_6 enables it
     for k, v in ov.items():
         assert v is not None, k
         assert isinstance(v, (bool, float, int)), (k, type(v))
+
+
+@needs_rust
+def test_gumbel_play_prune_zeroes_quota_losers_without_touching_targets() -> None:
+    """gumbel_play_prune: the PLAYED move samples the quota-pruned histogram
+    (action_selection == 'gumbel_play_policy', play stats counted), while the
+    RECORDED visit-policy target keeps the full SH support (round-0 losers
+    included). Off by default: the same run without the flag keeps the legacy
+    'delta_visit_policy' selection."""
+    from hexo_engine import api as engine_api
+    from hexo_engine.types import AxialCoord, PlacementAction
+
+    from hexfield.geometry import unpack_action_id
+
+    budget = 96
+    m = 8
+    max_plies = 8
+
+    class _Driver:
+        def __init__(self) -> None:
+            self.states: dict = {}
+            self.plies: dict = {}
+            self.rows: list = []
+
+        def start(self, key: int):
+            self.states[key] = engine_api.new_game()
+            self.plies[key] = 0
+            return self.states[key]
+
+        def __call__(self, game_key: int, payload: dict):
+            ply = self.plies[game_key]
+            self.rows.append(
+                (
+                    ply,
+                    bool(payload.get("pcr_full")),
+                    str(payload.get("action_selection")),
+                    bool(payload.get("play_pruned")),
+                    int(payload.get("visit_policy_count", 0)),
+                )
+            )
+            q, r = unpack_action_id(payload["action_id"])
+            state = self.states[game_key]
+            result = engine_api.apply_action(
+                state, PlacementAction(AxialCoord(q=q, r=r))
+            )
+            self.plies[game_key] = ply + 1
+            if result.terminal or self.plies[game_key] >= max_plies:
+                del self.states[game_key]
+                return None
+            return ("advance", state)
+
+    def run(play_prune: bool):
+        overrides = _gumbel_overrides()
+        overrides["gumbel_m"] = m
+        overrides["gumbel_play_prune"] = play_prune
+        session = hexfield_rust.HexfieldMctsSession(max_states=65536)
+        driver = _Driver()
+        keys = [93_000]
+        states = tuple(driver.start(k) for k in keys)
+        stats = session.run_continuous(
+            keys,
+            states,
+            evaluator=GumbelStub(),
+            on_move=driver,
+            visits=budget,
+            c_puct=1.5,
+            base_seed=777_777,
+            virtual_batch_size=8,
+            flush_target=64,
+            active_root_limit=1,
+            temperature_by_ply=[1.0] * 64,
+            root_policy_temperature=1.0,
+            fpu_reduction=0.2,
+            virtual_loss=1.0,
+            widening_policy_mass=0.95,
+            widening_max_children=96,
+            widening_min_children=2,
+            forced_playout_k=0.0,
+            pcr_full_proportion=1.0,
+            pcr_fast_visits=32,
+            policy_init_fraction=0.0,
+            policy_init_avg_plies=0.0,
+            policy_init_max_plies=0,
+            policy_init_temperature=1.0,
+            tss_enabled=False,
+            root_fpu_reduction=0.2,
+            root_fpu_zero_under_noise=False,
+            search_parity_mode=False,
+            divergence_overrides=overrides,
+        )
+        return driver.rows, stats
+
+    rows_on, stats_on = run(play_prune=True)
+    # Reused-root Full moves (ply >= 1; ply 0 is the forced single opening
+    # move) select via the pruned play distribution...
+    pruned = [r for r in rows_on if r[0] >= 1 and r[1]]
+    assert pruned, "no reused-root Full moves decided"
+    assert all(r[2] == "gumbel_play_policy" and r[3] for r in pruned), pruned
+    # ...but the RECORDED visit-policy target keeps the full SH candidate
+    # support (round-0 losers included): support >= m for a full-budget move.
+    assert all(r[4] >= m for r in pruned), (
+        f"recorded target support shrank under play prune: {pruned}"
+    )
+    # Scheduler telemetry counts the pruned selections and the winner rate.
+    assert int(stats_on["gumbel_play_moves"]) >= len(pruned)
+    assert (
+        0
+        <= int(stats_on["gumbel_play_winner_moves"])
+        <= int(stats_on["gumbel_play_moves"])
+    )
+
+    rows_off, stats_off = run(play_prune=False)
+    legacy = [r for r in rows_off if r[0] >= 1 and r[1]]
+    assert legacy and all(r[2] == "delta_visit_policy" and not r[3] for r in legacy)
+    assert int(stats_off["gumbel_play_moves"]) == 0
+
+
+def test_shard_v3_gumbel_csr_roundtrip_preserves_off_support_mass(tmp_path) -> None:
+    """Schema v3: the π' target survives write -> read -> packed-window load
+    with its FULL support, including actions outside the recorded visit-policy
+    support (inherited edges on reused roots). Guards the v2 defect where the
+    aligned column silently truncated π' to pol_act and renormalized the
+    dropped mass away."""
+    from hexfield.samples import HexfieldSampleData
+    from hexfield.shards import read_compact_shard, write_compact_shard
+    from hexfield.window import load_packed_shard
+
+    # Visit support {10, 11}; π' support {10, 11, 12} with the argmax OFF the
+    # visit support (action 12 = the underrated inherited edge).
+    sample = HexfieldSampleData(
+        game_id="g",
+        turn_index=3,
+        current_player=0,
+        phase="Opening",
+        records=((0, 0, 0, 1), (1, 0, 1, 2), (0, 1, 0, 3)),
+        first_stone=None,
+        own_hot=(),
+        opp_hot=(),
+        own_win=(),
+        opp_win=(),
+        policy=((10, 0.75), (11, 0.25)),
+        q_policy=((10, 0.1), (11, -0.2)),
+        gumbel_policy=((10, 0.2), (11, 0.1), (12, 0.7)),
+        prior_logit=((10, -1.0), (11, -2.0)),
+        opp_policy=(),
+        value=1.0,
+        short_term_value=(),
+        moves_left=0.5,
+        policy_surprise=0.0,
+        metadata={"pcr_full": True},
+    )
+    path = tmp_path / "game_1.npz"
+    write_compact_shard(path, [sample])
+
+    # Reader round-trip: full π' support survives, off-support action included.
+    (row,) = read_compact_shard(path)
+    got_read = dict(row.gumbel_policy)
+    assert set(got_read.keys()) == {10, 11, 12}
+    assert abs(got_read[12] - 0.7) < 1e-6
+    assert abs(sum(got_read.values()) - 1.0) < 1e-6
+
+    # Packed-window round-trip (the production rust-expand input path).
+    win = load_packed_shard(path)
+    view = win.row_view(0)
+    got = dict(view.gumbel_policy())
+    assert set(got.keys()) == {10, 11, 12}
+    assert abs(got[12] - 0.7) < 1e-6, "off-support π' mass must survive packing"
+    # The visit policy itself is untouched.
+    assert dict(view.policy()) == {10: 0.75, 11: 0.25}
