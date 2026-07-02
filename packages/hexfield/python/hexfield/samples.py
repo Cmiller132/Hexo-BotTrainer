@@ -94,18 +94,27 @@ def _future_opponent_policy(
     *,
     mask_from_fast: bool = False,
 ) -> tuple[tuple[tuple[int, float], ...], str]:
-    """Return the next opponent decision's visit policy and a source tag.
+    """Return the next opponent decision's policy target and a source tag.
+
+    Prefers the opponent decision's improved policy π' when it carries one
+    (``future_opponent_gumbel``): under Gumbel Sequential Halving the visit
+    histogram is a schedule artifact (equal per-round quotas), so π' is the
+    meaningful prediction target for the opp head — mirroring the main-policy
+    and soft-policy target selection. Falls back to the visit policy
+    (``future_opponent_mcts``) for decisions without one (PUCT search /
+    legacy rows).
 
     Returns an empty policy tagged ``fast_unrecorded_masked`` when
     ``mask_from_fast`` is set and that decision's ``metadata['pcr_full']`` is
-    False; ``future_opponent_mcts`` when an opponent decision is found;
-    ``none`` when no later opponent decision exists.
+    False; ``none`` when no later opponent decision exists.
     """
 
     for future_player, future_sample, _root_value in decisions[index + 1 :]:
         if future_player != player:
             if mask_from_fast and not future_sample.metadata.get("pcr_full", True):
                 return (), "fast_unrecorded_masked"
+            if future_sample.gumbel_policy:
+                return tuple(future_sample.gumbel_policy), "future_opponent_gumbel"
             return tuple(future_sample.policy), "future_opponent_mcts"
     return (), "none"
 

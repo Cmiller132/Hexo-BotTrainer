@@ -963,9 +963,12 @@ def play_multi_checkpoint_match(
     candidate's searches fire:
 
       * Greedy plies (temperature 0): move selection is a deterministic argmax /
-        LCB-of-Q (search.rs select_search_action), seed- and
-        batch-position-independent, so every opponent's greedy candidate games are
-        merged into one multi-root call. This is the bulk of plies.
+        LCB-of-Q (search.rs select_search_action), so every opponent's greedy
+        candidate games are merged into one multi-root call. This is the bulk
+        of plies. NOTE: under a gumbel profile the search itself is seeded (the
+        root Gumbel-Top-k draw mixes the per-call seed, game key, and root
+        hash), so greedy moves are deterministic per (seed, key, position) but
+        no longer seed-independent as they are for plain PUCT.
 
       * Opening-leader plies (temperature > 0): the per-root seed
         ``open_seed.wrapping_add(root_index)`` matters, so each opponent's

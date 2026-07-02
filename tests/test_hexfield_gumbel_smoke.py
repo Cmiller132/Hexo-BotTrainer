@@ -530,6 +530,53 @@ def test_gumbel_play_prune_zeroes_quota_losers_without_touching_targets() -> Non
     assert int(stats_off["gumbel_play_moves"]) == 0
 
 
+def test_future_opponent_policy_prefers_gumbel_target() -> None:
+    """The opp-policy target uses the opponent decision's improved policy π'
+    when it carries one (``future_opponent_gumbel``), falling back to the visit
+    policy otherwise — same schedule-artifact reasoning as the main/soft
+    policy target selection. Fast-masking still wins over both."""
+    from hexfield.samples import HexfieldSampleData, _future_opponent_policy
+
+    def _decision(player: int, *, policy=(), gumbel=(), full=True):
+        return (
+            player,
+            HexfieldSampleData(
+                game_id="g",
+                turn_index=0,
+                current_player=player,
+                phase="Opening",
+                records=(),
+                first_stone=None,
+                own_hot=(),
+                opp_hot=(),
+                own_win=(),
+                opp_win=(),
+                policy=tuple(policy),
+                gumbel_policy=tuple(gumbel),
+                metadata={"pcr_full": full},
+            ),
+            0.0,
+        )
+
+    visit = ((5, 0.6), (6, 0.4))
+    pi = ((5, 0.1), (7, 0.9))  # π' disagrees with visits and adds action 7
+
+    # Opponent decision carries π' -> π' wins.
+    decisions = [_decision(0), _decision(1, policy=visit, gumbel=pi)]
+    target, source = _future_opponent_policy(decisions, 0, 0, mask_from_fast=True)
+    assert source == "future_opponent_gumbel" and target == pi
+
+    # No π' on the opponent decision -> visit fallback.
+    decisions = [_decision(0), _decision(1, policy=visit)]
+    target, source = _future_opponent_policy(decisions, 0, 0, mask_from_fast=True)
+    assert source == "future_opponent_mcts" and target == visit
+
+    # Fast (unrecorded) opponent decision still masks, π' or not.
+    decisions = [_decision(0), _decision(1, policy=(), gumbel=(), full=False)]
+    target, source = _future_opponent_policy(decisions, 0, 0, mask_from_fast=True)
+    assert source == "fast_unrecorded_masked" and target == ()
+
+
 def test_shard_v3_gumbel_csr_roundtrip_preserves_off_support_mass(tmp_path) -> None:
     """Schema v3: the π' target survives write -> read -> packed-window load
     with its FULL support, including actions outside the recorded visit-policy
