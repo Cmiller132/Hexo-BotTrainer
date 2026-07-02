@@ -1372,12 +1372,12 @@ def test_foreign_opponent_overrides_split_by_checkpoint_home(tmp_path) -> None:
     assert self_ov["gumbel_root"] is True
 
 
-def test_sealbot_edge_candidate_searches_puct_profile(tmp_path) -> None:
-    """The SealBot zero-point edge pins the rating scale across epochs and
-    lineages, so the CANDIDATE side searches it with the PUCT profile even on
-    a gumbel run — a searcher-vs-tactics confound must never move the anchor
-    (the ep45-ep60 SealBot collapse). Lineage checkpoint edges keep the
-    symmetric self-play profile (covered elsewhere)."""
+def test_sealbot_edge_candidate_searches_as_trained_profile(tmp_path) -> None:
+    """The SealBot edge measures the candidate under its own as-trained
+    searcher — no PUCT override even on a gumbel run. Budget calibration of
+    the candidate count happens in-tree (init_gumbel_root walks gumbel_m down
+    the halving ladder for the eval budget), not via a per-match profile, so
+    the searcher regime is recorded on the edge's provenance instead."""
     from hexfield_eval_kit import _sealbot_match
 
     cfg = parse_hexfield_config(
@@ -1411,12 +1411,8 @@ def test_sealbot_edge_candidate_searches_puct_profile(tmp_path) -> None:
         play_sealbot_match=fake_sealbot, diagnostics_dir=tmp_path,
     )
     assert unavail is None and edge is not None
-    ov = captured.get("divergence_overrides")
-    assert isinstance(ov, dict), "sealbot match must receive an explicit profile"
-    for key in (
-        "gumbel_target",
-        "gumbel_root",
-        "gumbel_sequential_halving",
-        "gumbel_nonroot_select",
-    ):
-        assert ov[key] is False, key
+    assert "divergence_overrides" not in captured, (
+        "candidate must search SealBot with its as-trained profile"
+    )
+    prov = edge["descriptive"]["provenance"]
+    assert prov.get("candidate_search_profile") == "selfplay"

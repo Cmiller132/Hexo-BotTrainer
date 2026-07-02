@@ -177,11 +177,13 @@ def test_gumbel_lockstep_search_engages_sh_on_fresh_and_reused_roots() -> None:
     state = sample_decision_states(range(40), (6, 7, 8))[0]
 
     def one_move(state, seed):
+        # 96 visits: m=8 needs floor(96/(3*8)) >= 4 round-0 visits per
+        # candidate to survive the in-tree budget calibration of gumbel_m.
         results = session.search(
             [key],
             (state,),
             evaluator=stub,
-            visits=64,
+            visits=96,
             c_puct=1.5,
             temperature=1.0,  # >0 disables the lockstep early stop
             seed=seed,

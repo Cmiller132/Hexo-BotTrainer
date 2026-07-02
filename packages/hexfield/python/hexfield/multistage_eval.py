@@ -1060,6 +1060,13 @@ def _build_sealbot_edge_from_match(
     """
 
     wa, wb, n_eff, prov = _sealbot_edge(sb_match, cfg.sealbot_overdispersion)
+    if isinstance(prov, dict):
+        # Which searcher the CANDIDATE side used against SealBot ("selfplay"
+        # = the run's own as-trained profile, mirroring the checkpoint-edge
+        # vocabulary). Persisted into the pool row so zero-point regimes
+        # (puct era <= ep40, budget-starved gumbel ep45-ep60,
+        # budget-calibrated gumbel after) can be split post-hoc.
+        prov = {**prov, "candidate_search_profile": "selfplay"}
     decided = int((sb_match.get("score") or {}).get("decided", 0) or 0)
     wins = int((sb_match.get("score") or {}).get("a_wins", 0) or 0)
     lo, hi = eval_stats.wilson_ci(wins, decided) if decided else (0.0, 1.0)
@@ -1192,8 +1199,6 @@ def _play_sealbot_opponent(
 
     sb_match: dict[str, Any] | None = None
     try:
-        from . import eval_arena as _arena
-
         sb_match = play_sealbot_match(
             str(candidate_ckpt),
             sb_games,
@@ -1206,19 +1211,17 @@ def _play_sealbot_opponent(
             virtual_batch_size=_eval_virtual_batch_size(cfg, full_cfg),
             opening_plies=cfg.opening_plies,
             opening_temperature=cfg.opening_temperature,
-            # ZERO-POINT CONTINUITY: the SealBot edge exists to pin the rating
-            # scale across epochs AND lineages, so the candidate searches it
-            # with the same PUCT profile every prior epoch/lineage used. The
-            # gumbel eval profile is stronger head-to-head (net-vs-net A/B) but
-            # markedly weaker against SealBot's tactical style (SH round-0
-            # allocates ~visits/(R*m) per candidate — too shallow to score deep
-            # tactical defenses), and letting that searcher confound move the
-            # ZERO-POINT re-bases every rating in the pool (the ep45-ep60
-            # SealBot collapse 95% -> ~55%). Lineage-vs-lineage edges keep the
-            # symmetric gumbel profile — relative readings stay "as trained".
-            divergence_overrides=_arena.puct_eval_overrides(
-                full_cfg.selfplay, diagnostics_dir=diagnostics_dir
-            ),
+            # AS-TRAINED SEARCHER: the candidate plays SealBot with its own
+            # gumbel eval profile — the same searcher as the lineage edges.
+            # The candidate count is budget-calibrated in-tree
+            # (init_gumbel_root shrinks gumbel_m down the halving ladder until
+            # SH round-0 affords >= GUMBEL_MIN_ROUND0_VISITS look-aheads per
+            # candidate), which repairs the ep45-ep60 tactical shallowness
+            # (32 candidates at 512 visits = 3 look-aheads each) that
+            # collapsed the SealBot zero-point 95% -> ~55%. This re-bases the
+            # pooled scale once relative to PUCT-era edges; the
+            # candidate_search_profile provenance below records which regime
+            # measured each pooled SealBot edge.
             diagnostics_dir=str(diagnostics_dir),
         )
     except Exception as exc:  # noqa: BLE001 — fail-open at the opponent boundary.
