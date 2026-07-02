@@ -82,7 +82,8 @@ _RUST_CSR_DATA = (
     "pol_act",
     "pol_w",
     "q_pol_q",
-    "gumbel_pol_w",
+    "gumbel_act",
+    "gumbel_w",
     "prior_logit",
     "opp_act",
     "opp_w",
@@ -94,6 +95,7 @@ _RUST_CSR_DATA = (
 _RUST_OFF_COLS = (
     "hist_off",
     "pol_off",
+    "gumbel_off",
     "opp_off",
     "own_hot_off",
     "opp_hot_off",

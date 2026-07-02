@@ -32,7 +32,7 @@ pruned_dynamic_cpuct = true
 widening_policy_mass = 0.95
 widening_max_children = 96
 widening_min_children = 2
-forced_playout_k = 1.0
+forced_playout_k = 0.0
 policy_init_fraction = 0.25
 policy_init_avg_plies = 4.0
 policy_init_max_plies = 8
@@ -57,6 +57,7 @@ gumbel_c_visit = 50.0
 gumbel_c_scale = 1.0
 gumbel_m = 32
 gumbel_target_min_visits = 1
+gumbel_play_prune = true
 export_root_prior_logits = true
 
 [model.config.training]

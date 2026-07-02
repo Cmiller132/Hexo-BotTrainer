@@ -111,6 +111,11 @@ class SelfplayConfig:
     gumbel_c_scale: float = 1.0
     gumbel_m: int = 16
     gumbel_target_min_visits: int = 1
+    # Play-policy quota prune: sample the PLAYED move (Full moves, T>0) from the
+    # delta-visit histogram with round-0 quota losers zeroed — removes the SH
+    # schedule mass (~budget/(R·m) per eliminated candidate) from move sampling
+    # while leaving every recorded training target untouched.
+    gumbel_play_prune: bool = False
     export_root_prior_logits: bool = False
 
 
@@ -496,6 +501,7 @@ def build_divergence_overrides(sp: SelfplayConfig, *, disabled: bool = False) ->
         "gumbel_c_scale": float(sp.gumbel_c_scale),
         "gumbel_m": int(sp.gumbel_m),
         "gumbel_target_min_visits": int(sp.gumbel_target_min_visits),
+        "gumbel_play_prune": bool(sp.gumbel_play_prune),
     }
 
 

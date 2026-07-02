@@ -142,6 +142,11 @@ pub struct Divergences {
     /// #3 support floor: actions with N(a) < this are excluded from the target
     /// softmax support (then renormalized over survivors).
     pub gumbel_target_min_visits: u32,
+    /// Play-policy quota prune: at an active SH root with temperature > 0 the
+    /// PLAYED move samples the delta-visit histogram with round-0 quota losers
+    /// zeroed (they carry schedule mass, not quality mass). Recorded targets
+    /// are untouched. Off => sample the raw histogram (legacy behavior).
+    pub gumbel_play_prune: bool,
 }
 
 impl Divergences {
@@ -180,6 +185,7 @@ impl Divergences {
             gumbel_c_scale: 1.0,
             gumbel_m: 16,
             gumbel_target_min_visits: 1,
+            gumbel_play_prune: false,
         }
     }
 
@@ -733,6 +739,21 @@ impl RustSearch {
     /// True when a Gumbel-Top-k root candidate set is active on this search.
     pub fn has_gumbel_root(&self) -> bool {
         self.gumbel_root.is_some()
+    }
+
+    /// Round-0 per-candidate visit quota of the active Gumbel SH root
+    /// (`floor(budget / (R * m_initial))`, min 1), or None without an active
+    /// sequential-halving state. The play-policy quota prune uses it as its
+    /// cut line: a candidate whose delta visits never exceeded this quota was
+    /// eliminated without surviving a halving.
+    pub fn gumbel_play_quota(&self) -> Option<u32> {
+        let state = self.gumbel_root.as_ref()?;
+        if !state.sequential_halving {
+            return None;
+        }
+        let m = state.gumbel.len().max(1) as u32;
+        let r = state.num_rounds.max(1);
+        Some((state.budget / (r * m)).max(1))
     }
 
     /// Tear down any Gumbel root state (e.g. when a slot transitions to a
