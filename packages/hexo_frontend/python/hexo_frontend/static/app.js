@@ -5327,6 +5327,14 @@ function gameHistoryListRow(runName, item, maxLen) {
   const srcText = source === "selfplay" ? "SP" : source === "evaluation" ? "EV" : "H";
   const p0 = historyPlayerLabel(item.players && item.players.player0);
   const p1 = historyPlayerLabel(item.players && item.players.player1);
+  const candSeat = historyCandidateSeat(item);
+  // Explicit seats ("P0 x · P1 y"); mark the candidate seat with a leading dot
+  // so the current model is visible at a glance. Selfplay/no-candidate rows just
+  // show plain P0/P1 labels.
+  const candMark = `<span class="hist-cand-mark" title="Current model">●</span>`;
+  const p0Seat = `<span class="hist-seat${candSeat === "player0" ? " hist-seat-cand" : ""}">${candSeat === "player0" ? candMark : ""}P0 ${escapeText(p0)}</span>`;
+  const p1Seat = `<span class="hist-seat${candSeat === "player1" ? " hist-seat-cand" : ""}">${candSeat === "player1" ? candMark : ""}P1 ${escapeText(p1)}</span>`;
+  const outcomeBadge = historyOutcomeBadge(item);
   const winnerDot = item.winner
     ? `<span class="hist-win-dot" style="background:${playerColor(item.winner)}" title="${escapeAttr(item.winner_label || winnerLabel(item.winner))}"></span>`
     : `<span class="hist-win-dot hist-win-none" title="No winner"></span>`;
@@ -5334,10 +5342,11 @@ function gameHistoryListRow(runName, item, maxLen) {
   return `<div class="hist-game-row${selected ? " selected" : ""}" data-history-key="${escapeAttr(key)}">
     <button class="hist-game-main" type="button" data-history-key="${escapeAttr(key)}" title="${escapeAttr(rowTitle)}">
       ${winnerDot}
+      ${outcomeBadge}
       <span class="hist-game-label">g${escapeText(Number(item.record_index || 0))} e${epochNum !== null ? escapeText(epochNum) : "--"}</span>
       <span class="hist-src-badge ${srcClass}" title="${escapeAttr(source)}">${srcText}</span>
       <span class="hist-game-len"><b>${escapeText(len)}</b><span class="hist-len-bar"><span style="width:${barPct}%"></span></span></span>
-      <span class="hist-game-players">${escapeText(p0)} v ${escapeText(p1)}</span>
+      <span class="hist-game-players">${p0Seat} · ${p1Seat}</span>
       <span class="hist-game-date">${escapeText(formatHistoryDate(item.modified))}</span>
     </button>
     <button class="hist-game-replay" type="button" data-history-load data-history-run="${escapeAttr(runName || "")}" data-history-path="${escapeAttr(item.path)}" data-record-index="${escapeAttr(item.record_index || 0)}" title="Load replay on the Match board">Replay</button>
@@ -5374,6 +5383,15 @@ function gameHistoryDetailHtml(runName, item) {
     ? [abort.stage, abort.exception_type, abort.message].filter(Boolean).map(String).join(": ") || "aborted"
     : (item.abort ? String(item.abort) : "");
   const epochNum = asFinite(item.epoch);
+  const candSeat = historyCandidateSeat(item);
+  const outcomeBadge = historyOutcomeBadge(item);
+  // Explicit P0/P1 identities on the outcome line (also kept in the collapsed
+  // Players section below); the candidate seat is marked when identifiable.
+  const p0Name = historyPlayerLabel(p0);
+  const p1Name = historyPlayerLabel(p1);
+  const candMark = `<span class="hist-cand-mark" title="Current model">●</span>`;
+  const p0Bit = `<span class="hist-outcome-bit hist-seat${candSeat === "player0" ? " hist-seat-cand" : ""}">${candSeat === "player0" ? candMark : ""}P0 ${escapeText(p0Name)}</span>`;
+  const p1Bit = `<span class="hist-outcome-bit hist-seat${candSeat === "player1" ? " hist-seat-cand" : ""}">${candSeat === "player1" ? candMark : ""}P1 ${escapeText(p1Name)}</span>`;
   const winnerDot = item.winner
     ? `<span class="hist-win-dot" style="background:${playerColor(item.winner)}"></span>`
     : `<span class="hist-win-dot hist-win-none"></span>`;
@@ -5385,11 +5403,14 @@ function gameHistoryDetailHtml(runName, item) {
     </div>
     <div class="hist-outcome-line">
       ${winnerDot}
+      ${outcomeBadge}
       <strong class="${winnerClass(item.winner)}">${escapeText(winner)}</strong>
       <span class="hist-outcome-bit">${escapeText(item.length || item.actions || 0)} moves</span>
       <span class="hist-outcome-bit">${escapeText(item.source || "history")}</span>
       <span class="hist-outcome-bit">e${epochNum !== null ? escapeText(epochNum) : "--"}</span>
       <span class="hist-outcome-bit">${escapeText(item.status || "unknown")}</span>
+      ${p0Bit}
+      ${p1Bit}
     </div>
     ${thumb}
     <div class="history-detail-actions">
@@ -5530,6 +5551,37 @@ function diagnosticDetailsHtml(diagnostics) {
 function historyPlayerLabel(player) {
   if (!player) return "Unknown";
   return player.label || PLAYER_KIND_LABELS[player.kind] || player.kind || "Unknown";
+}
+
+// Which seat ("player0"/"player1") the run's own candidate net held in an eval
+// game, or null. Set server-side (web.py _candidate_seat_from_game_id) from the
+// record game_id's "-candPN" suffix; only evaluation games carry it. Anything
+// other than a known seat string degrades to null (no wrong badge).
+function historyCandidateSeat(item) {
+  const seat = item && item.candidate_seat;
+  return seat === "player0" || seat === "player1" ? seat : null;
+}
+
+// "win"/"loss" for the candidate net in an eval game, or null when it cannot be
+// decided (not an eval game, no identifiable candidate seat, or no winner).
+function historyCandidateOutcome(item) {
+  if (!item || String(item.source || "") !== "evaluation") return null;
+  const seat = historyCandidateSeat(item);
+  if (!seat || !item.winner) return null;
+  return item.winner === seat ? "win" : "loss";
+}
+
+// Compact color-coded W/L badge for the candidate net (eval games only).
+// Returns "" when the outcome is undecidable so callers render nothing extra.
+function historyOutcomeBadge(item) {
+  const outcome = historyCandidateOutcome(item);
+  if (!outcome) return "";
+  const seat = historyCandidateSeat(item);
+  const oppSeat = seat === "player0" ? "player1" : "player0";
+  const oppLabel = historyPlayerLabel(item.players && item.players[oppSeat]);
+  const won = outcome === "win";
+  const title = `Current model (${seat === "player0" ? "P0" : "P1"}) ${won ? "won" : "lost"} vs ${oppLabel}`;
+  return `<span class="hist-cand-badge hist-cand-${won ? "win" : "loss"}" title="${escapeAttr(title)}">${won ? "W" : "L"}</span>`;
 }
 
 function winnerLabel(winner) {

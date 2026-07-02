@@ -1863,6 +1863,46 @@ body.bot-thinking .legal {
   color: #9fe8cd;
 }
 
+/* Candidate net W/L badge (eval games only): green "W" / red "L". Rendered
+   only when the current model's outcome is decidable (historyOutcomeBadge). */
+.hist-cand-badge {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 1;
+  color: #07131b;
+}
+
+.hist-cand-win {
+  background: var(--green);
+}
+
+.hist-cand-loss {
+  background: var(--red);
+}
+
+/* Explicit P0/P1 seat labels; the candidate seat is marked in accent color and
+   a leading dot span (see hist-cand-mark) so the current model is visible at a
+   glance. Marker is a real span, not ::before, so it does not collide with the
+   .hist-outcome-bit::before separator in the detail panel. */
+.hist-seat-cand {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.hist-cand-mark {
+  font-size: 8px;
+  vertical-align: middle;
+  margin-right: 3px;
+  color: var(--accent);
+}
+
 .hist-game-len {
   flex: none;
   width: 76px;

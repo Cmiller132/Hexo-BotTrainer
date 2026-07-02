@@ -3255,10 +3255,30 @@ def _history_rows_for_file(
     return rows
 
 
+def _candidate_seat_from_game_id(game_id: object) -> str | None:
+    """Return which seat ("player0"/"player1") the run's own candidate net held
+    in an evaluation game, or None when it cannot be determined.
+
+    Evaluation .hxr games (written by hexfield.eval_arena._write_eval_hxr) carry
+    seat-symmetric player labels ("cand_epN/opp · seat 0/1"), so the label alone
+    does not identify the candidate. The candidate seat SWAPS per game (CRN
+    pairing) and is instead encoded as a "-candP0"/"-candP1" suffix on the
+    record's game_id (e.g. "ep65-cand_ep65-vs-ep60-g3-candP1"). Selfplay
+    game_ids ("epoch-000066-game-...") carry no such suffix, so this returns None
+    for them, which is the correct "no current-model-vs-opponent" answer."""
+
+    text = str(game_id or "")
+    if text.endswith("-candP0"):
+        return "player0"
+    if text.endswith("-candP1"):
+        return "player1"
+    return None
+
+
 def _hxr_base_rows(path: Path, run_dir: Path) -> list[dict[str, object]]:
     """Decode one .hxr file into per-game summary rows (game_id, winner,
-    length, players, abort, ...), memoized by (mtime_ns, size) in
-    _hxr_history_cache. Returns row COPIES so callers can annotate freely.
+    length, players, abort, candidate_seat, ...), memoized by (mtime_ns, size)
+    in _hxr_history_cache. Returns row COPIES so callers can annotate freely.
     This cache is what makes history paging and the .hxr stat backfills
     (_selfplay_game_stats_from_records) cheap on re-poll."""
 
@@ -3299,6 +3319,7 @@ def _hxr_base_rows(path: Path, run_dir: Path) -> list[dict[str, object]]:
                 "source": source,
                 "seed": record.seed,
                 "players": players_by_role,
+                "candidate_seat": _candidate_seat_from_game_id(record.game_id),
                 "modified": stat.st_mtime,
                 "modified_ns": stat.st_mtime_ns,
                 "bytes": stat.st_size,
