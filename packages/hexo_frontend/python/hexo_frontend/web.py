@@ -138,6 +138,13 @@ TRAINING_CACHE_TTL_SECONDS = 3.0
 # multiply them; a ~1s micro-cache bounds the disk work to once per second per
 # run while staying far fresher than the 3s full-payload cache.
 TRAINING_LIVE_CACHE_TTL_SECONDS = 1.0
+# /api/training/epochs scans the run's diagnostics dir (a few hundred small
+# json files) once per request and merges the selfplay/select/training/eval
+# telemetry into one row per epoch. The game-history epoch strip re-polls with
+# the 15s screen refresh; cache the built payload by the diagnostics dir's
+# newest mtime so an unchanged run costs one dict lookup and a churning run
+# (a fresh epoch file just landed) rebuilds immediately.
+TRAINING_EPOCHS_CACHE_TTL_SECONDS = 3.0
 
 _static_lock = Lock()
 # name -> (mtime, (raw_bytes, gzipped_bytes, etag, last_modified, content_type))
@@ -147,6 +154,10 @@ _training_run_cache: dict[str, tuple[float, dict[str, object]]] = {}
 _training_runs_cache: list[tuple[float, dict[str, object]]] = []
 # run name -> (monotonic, payload) for /api/training/live (micro-cache, ~1s TTL)
 _training_live_cache: dict[str, tuple[float, dict[str, object]]] = {}
+# run name -> (diagnostics-dir mtime, payload) for /api/training/epochs. Keyed on
+# the directory mtime (not a clock TTL) so it invalidates the instant a new
+# per-epoch file lands and is otherwise a free rescan-skip.
+_training_epochs_cache: dict[str, tuple[float, dict[str, object]]] = {}
 _hxr_history_cache: dict[str, tuple[int, int, list[dict[str, object]]]] = {}
 _hxr_count_cache: dict[str, tuple[int, int, int]] = {}
 
@@ -244,6 +255,30 @@ def _training_live_cached(name: str) -> dict[str, object]:
     }
     with _training_cache_lock:
         _training_live_cache[name] = (monotonic(), payload)
+    return payload
+
+
+def _training_epochs_cached(name: str) -> dict[str, object]:
+    """Per-epoch telemetry payload for ``GET /api/training/epochs?run=`` (the
+    game-history epoch strip / inspector detail).
+
+    Cached by the diagnostics dir's newest mtime rather than a clock TTL: an
+    unchanged run replays the built payload without touching disk, and a run
+    that just wrote a new epoch file rebuilds on the very next request. Unknown
+    runs raise ValueError (-> 400 ``{"error": ...}``) and are never cached."""
+
+    run_dir = _resolve_run_dir(name)
+    if run_dir is None:
+        raise ValueError("Unknown training run")
+    stat = _safe_stat(run_dir / "diagnostics")
+    mtime = stat.st_mtime if stat is not None else 0.0
+    with _training_cache_lock:
+        hit = _training_epochs_cache.get(run_dir.name)
+        if hit is not None and hit[0] == mtime:
+            return hit[1]
+    payload = _training_epochs(run_dir)  # heavy scan, kept outside the lock
+    with _training_cache_lock:
+        _training_epochs_cache[run_dir.name] = (mtime, payload)
     return payload
 
 
@@ -1152,6 +1187,7 @@ class HexoPlayHandler(BaseHTTPRequestHandler):
           /api/training/run?name=           full run overview (trends/health/pages, 3s cache)
           /api/training/live?run=           fast status tier (~1s micro-cache)
           /api/training/epoch?run=&epoch=   epoch-inspector detail (uncached by design)
+          /api/training/epochs?run=         per-epoch telemetry strip (selfplay/select/train/eval merge, mtime-cached)
           /api/training/history-page?run=&limit=&cursor=&source=&winner=&sort=&query=&include_total=
                                             paged .hxr game rows (opaque JSON cursor)
           /api/training/history-count?...   filtered game count
@@ -1196,6 +1232,9 @@ class HexoPlayHandler(BaseHTTPRequestHandler):
                         _query_int(query.get("epoch", [None])[0]),
                     )
                 )
+            elif path == "/api/training/epochs":
+                query = parse_qs(parsed.query)
+                self._send_json(_training_epochs_cached(str(query.get("run", [""])[0])))
             elif path == "/api/training/history-page":
                 query = parse_qs(parsed.query)
                 self._send_json(
@@ -1719,6 +1758,277 @@ def _training_epoch(name: str, epoch: int | None) -> dict[str, object]:
         "manifest": _manifest_model_summary(run_dir),
         "checkpoint": _epoch_checkpoint_stat(run_dir, history_row, epoch),
     }
+
+
+# ---------------------------------------------------------------------------
+# Per-epoch telemetry strip (/api/training/epochs). One request scans the run's
+# diagnostics dir once and merges the four hexfield per-epoch artifacts
+# (selfplay / select / training / multistage_eval) into one flat record per
+# epoch. Every field is guarded: a missing file, a missing key, or a legacy
+# (pre-2026-07-03) schema simply yields None on that field — the record is
+# never partial-crash, and the client renders "—". Both the legacy and the
+# upgraded self-play key names are read, newest-schema winning.
+# ---------------------------------------------------------------------------
+
+
+def _tget(payload: object, key: str) -> object:
+    """payload[key] when payload is a dict, else None (never KeyError)."""
+
+    return payload.get(key) if isinstance(payload, dict) else None
+
+
+def _tfirst(payload: object, *keys: str) -> object:
+    """First non-None value among ``keys`` in a dict payload (schema fallback)."""
+
+    if not isinstance(payload, dict):
+        return None
+    for key in keys:
+        value = payload.get(key)
+        if value is not None:
+            return value
+    return None
+
+
+def _fraction_of(numerator: object, denominator: object) -> float | None:
+    """numerator/denominator as a float in [0, .], or None when either is
+    missing / non-numeric / the denominator is zero. Used to synthesise the
+    per-move rate fields (fast/full/init, gumbel/lcb) from the raw scheduler
+    counters on legacy epochs that predate the emitted ``*_rate`` keys."""
+
+    num = _optional_float(numerator)
+    den = _optional_float(denominator)
+    if num is None or den is None or den <= 0.0:
+        return None
+    return num / den
+
+
+def _epoch_selfplay_record(payload: object) -> dict[str, object]:
+    """Flatten one ``hexfield.selfplay.epoch_*.json`` into the strip record's
+    self-play block, reading both the upgraded and the legacy key names and
+    deriving the per-move rates from the ``scheduler`` counters when the
+    producer did not emit the ``*_rate`` fields directly. All-None for a run/
+    epoch without a self-play file (``payload`` is None)."""
+
+    sched = payload.get("scheduler") if isinstance(_tget(payload, "scheduler"), dict) else {}
+    full = _tget(sched, "full_moves")
+    fast = _tget(sched, "fast_moves")
+    init = _tget(sched, "init_moves")
+    moves_decided = _tfirst(payload, "total_decisions") or _tget(sched, "moves_decided")
+    gumbel_moves = _tget(sched, "gumbel_play_moves")
+    gumbel_winner = _tget(sched, "gumbel_play_winner_moves")
+    gumbel_early = _tget(sched, "gumbel_play_moves_early")
+    gumbel_winner_early = _tget(sched, "gumbel_play_winner_early")
+    lcb_overrides = _tget(sched, "lcb_overrides")
+
+    wins_by_player = payload.get("wins_by_player") if isinstance(_tget(payload, "wins_by_player"), dict) else None
+    p0_share: float | None = None
+    if isinstance(wins_by_player, dict):
+        w0 = _optional_float(wins_by_player.get("0"))
+        w1 = _optional_float(wins_by_player.get("1"))
+        if w0 is not None and w1 is not None and (w0 + w1) > 0.0:
+            p0_share = w0 / (w0 + w1)
+
+    return {
+        "status": _tget(payload, "status"),
+        "games_finished": _tfirst(payload, "games_finished", "games_started"),
+        "games_started": _tget(payload, "games_started"),
+        "truncated_games": _tget(payload, "truncated_games"),
+        "rows_written": _tget(payload, "rows_written"),
+        "elapsed_seconds": _tget(payload, "elapsed_seconds"),
+        "search_visits": _tget(payload, "search_visits"),
+        "mean_game_length": _tfirst(payload, "mean_game_length"),
+        "game_length_p10": _tget(payload, "game_length_p10"),
+        "game_length_p50": _tfirst(payload, "game_length_p50", "mean_game_length"),
+        "game_length_p90": _tfirst(payload, "game_length_p90", "p90_game_length"),
+        "game_length_max": _tget(payload, "game_length_max"),
+        "root_policy_entropy_mean": _tget(payload, "root_policy_entropy_mean"),
+        "root_policy_entropy_by_phase": payload.get("root_policy_entropy_by_phase")
+        if isinstance(_tget(payload, "root_policy_entropy_by_phase"), dict)
+        else None,
+        "root_value_mean": _tget(payload, "root_value_mean"),
+        "root_value_abs_mean": _tget(payload, "root_value_abs_mean"),
+        "root_value_std": _tget(payload, "root_value_std"),
+        "root_value_by_phase": payload.get("root_value_by_phase")
+        if isinstance(_tget(payload, "root_value_by_phase"), dict)
+        else None,
+        "decided_fraction": _tget(payload, "decided_fraction"),
+        "wins_by_player": wins_by_player,
+        "p0_win_share": p0_share,
+        # unique_openings is the upgraded {"10","16","20"} object; unique_openings_10ply
+        # is the legacy scalar — surface it under the "10" slot so the 10-ply figure
+        # is never lost on older epochs.
+        "unique_openings": (
+            payload.get("unique_openings")
+            if isinstance(_tget(payload, "unique_openings"), dict)
+            else ({"10": payload.get("unique_openings_10ply")} if _tget(payload, "unique_openings_10ply") is not None else None)
+        ),
+        "policy_surprise_mean": _tget(payload, "policy_surprise_mean"),
+        "policy_surprise_p90": _tget(payload, "policy_surprise_p90"),
+        "policy_surprise_max": _tget(payload, "policy_surprise_max"),
+        # Per-move rates: prefer the emitted *_rate/​*_fraction fields, else derive
+        # from the raw scheduler counters (older epochs carry only the counters).
+        "fast_fraction": _tfirst(payload, "fast_fraction") if _tget(payload, "fast_fraction") is not None
+        else _fraction_of(fast, moves_decided),
+        "full_fraction": _tget(payload, "full_fraction") if _tget(payload, "full_fraction") is not None
+        else _fraction_of(full, moves_decided),
+        "init_fraction": _tget(payload, "init_fraction") if _tget(payload, "init_fraction") is not None
+        else _fraction_of(init, moves_decided),
+        "lcb_override_rate": _tget(payload, "lcb_override_rate") if _tget(payload, "lcb_override_rate") is not None
+        else _fraction_of(lcb_overrides, moves_decided),
+        "gumbel_play_winner_rate": _tget(payload, "gumbel_play_winner_rate") if _tget(payload, "gumbel_play_winner_rate") is not None
+        else _fraction_of(gumbel_winner, gumbel_moves),
+        "gumbel_play_winner_early_rate": _tget(payload, "gumbel_play_winner_early_rate") if _tget(payload, "gumbel_play_winner_early_rate") is not None
+        else _fraction_of(gumbel_winner_early, gumbel_early),
+        "scheduler": {
+            "full_moves": full,
+            "fast_moves": fast,
+            "init_moves": init,
+            "moves_decided": moves_decided,
+            "gumbel_play_moves": gumbel_moves,
+            "lcb_overrides": lcb_overrides,
+        },
+        # Resume/merge provenance: `resumed_skip`/`segments`/`merged_approx` drive
+        # the "resumed" / "merged≈" badges. `resumed_existing_games` is the legacy
+        # annotation on the zeroed resumed-epoch sample (epoch 13) — surface it so
+        # that state reads as resumed too.
+        "resumed_skip": _tget(payload, "resumed_skip"),
+        "resumed_skip_count": _tget(payload, "resumed_skip_count"),
+        "resumed_existing_games": _tget(payload, "resumed_existing_games"),
+        "segments": payload.get("segments") if isinstance(_tget(payload, "segments"), list) else None,
+        "merged_approx": _tget(payload, "merged_approx"),
+    }
+
+
+def _epoch_select_record(payload: object) -> dict[str, object]:
+    """Flatten one ``hexfield.select.epoch_*.json`` into the strip record's
+    window-selection block. ``skipped_paths`` is capped to keep the payload
+    small; the count comes from ``shards_skipped``. All-None when absent."""
+
+    skipped_paths = payload.get("skipped_paths") if isinstance(_tget(payload, "skipped_paths"), list) else None
+    window_span = payload.get("window_epoch_span") if isinstance(_tget(payload, "window_epoch_span"), dict) else None
+    return {
+        "keep_prob": _tget(payload, "keep_prob"),
+        "select_request": _tfirst(payload, "select_request", "desired_rows"),
+        "selected_rows": _tfirst(payload, "selected_rows", "window_rows"),
+        "window_rows": _tget(payload, "window_rows"),
+        "reuse_ratio": _tget(payload, "reuse_ratio"),
+        # shards_skipped is the upgraded count; fall back to the length of an
+        # emitted skipped_paths list so the warning badge fires on older files too.
+        "shards_skipped": _tget(payload, "shards_skipped")
+        if _tget(payload, "shards_skipped") is not None
+        else (len(skipped_paths) if isinstance(skipped_paths, list) else None),
+        "skipped_paths": [str(p) for p in skipped_paths[:20]] if isinstance(skipped_paths, list) else None,
+        "window_epoch_span": {
+            "min": _tget(window_span, "min"),
+            "max": _tget(window_span, "max"),
+            "epochs": _tget(window_span, "epochs"),
+        } if window_span is not None else None,
+        "select_seconds": _tget(payload, "select_seconds"),
+    }
+
+
+def _epoch_training_record(payload: object) -> dict[str, object]:
+    """Flatten one ``hexfield.training.epoch_*.json`` into the strip record's
+    training block (the loss subset + step/timing keys). ``select_seconds``
+    isn't in the training file today, so it stays None unless a future producer
+    adds it. All-None when the file is absent."""
+
+    return {
+        "loss_policy": _tget(payload, "loss_policy"),
+        "loss_soft_policy": _tget(payload, "loss_soft_policy"),
+        "loss_value": _tget(payload, "loss_value"),
+        "loss_total": _tget(payload, "loss_total"),
+        "steps": _tget(payload, "steps"),
+        "trained_rows": _tget(payload, "trained_rows"),
+        "surprise_weight_mean": _tget(payload, "surprise_weight_mean"),
+        "surprise_weight_max": _tget(payload, "surprise_weight_max"),
+        "select_seconds": _tget(payload, "select_seconds"),
+        # The training file emits `seconds`; the newer schema splits it into
+        # select/train. Surface whichever is present as the train elapsed.
+        "train_seconds": _tfirst(payload, "train_seconds", "seconds"),
+    }
+
+
+def _epoch_eval_record(row: object) -> dict[str, object] | None:
+    """Compact headline-Elo block for the strip from one
+    ``_multistage_eval_history`` row (present only at eval epochs). Carries the
+    candidate's Elo point + the headline edges (opponent / winrate / Elo). None
+    when there is no eval row for the epoch."""
+
+    if not isinstance(row, dict):
+        return None
+    players = row.get("ratings", {}).get("players") if isinstance(_tget(row, "ratings"), dict) else None
+    elo_point: float | None = None
+    if isinstance(players, list):
+        # The rating table is SealBot-anchored: the candidate is the (single)
+        # non-anchor player. Its Elo lives under `elo` (not `rating`).
+        candidate = next(
+            (p for p in players if isinstance(p, dict) and not p.get("is_anchor")),
+            None,
+        )
+        if candidate is not None:
+            elo_point = _optional_float(candidate.get("elo"))
+    edges = row.get("edges") if isinstance(_tget(row, "edges"), list) else []
+    headline = [
+        {
+            "opponent": _tget(edge, "opponent"),
+            "winrate": _tget(edge, "winrate"),
+            "elo_point": _tget(edge, "elo_point"),
+            "decided": _tget(edge, "decided"),
+        }
+        for edge in edges
+        if isinstance(edge, dict) and edge.get("headline")
+    ]
+    return {
+        "verdict_label": row.get("verdict_label") or _tget(row.get("verdict"), "label"),
+        "elo_point": elo_point,
+        "edges": headline,
+    }
+
+
+def _training_epochs(run_dir: Path) -> dict[str, object]:
+    """Assemble the per-epoch telemetry strip for ``run_dir``.
+
+    Scans ``diagnostics/`` once for the hexfield self-play / select / training
+    per-epoch files, groups them by epoch, and emits one merged record per
+    epoch (ascending) carrying the curated self-play / select / training key
+    subsets plus a headline-Elo block at the epochs that have a multi-stage
+    eval report. Every field degrades to None on a missing file or key, so the
+    strip renders for legacy runs (pre-schema-upgrade) and mid-run epochs
+    without crashing. Non-hexfield lineages (no ``hexfield.*`` files) yield an
+    empty ``epochs`` list."""
+
+    prefix = _diag_prefix(run_dir)
+    diagnostics_dir = run_dir / "diagnostics"
+    selfplay: dict[int, object] = {}
+    select: dict[int, object] = {}
+    training: dict[int, object] = {}
+    if diagnostics_dir.is_dir():
+        for kind, sink in (("selfplay", selfplay), ("select", select), ("training", training)):
+            for path in sorted(diagnostics_dir.glob(f"{prefix}.{kind}.epoch_*.json")):
+                payload = _read_json_file(path)
+                epoch = _coerce_epoch(_tget(payload, "epoch"), path.name)
+                if epoch is not None:
+                    sink[epoch] = payload
+    eval_by_epoch = {
+        row.get("epoch"): row
+        for row in _multistage_eval_history(run_dir)
+        if isinstance(row.get("epoch"), int)
+    }
+
+    epochs = sorted(set(selfplay) | set(select) | set(training))
+    records: list[dict[str, object]] = []
+    for epoch in epochs:
+        records.append(
+            {
+                "epoch": epoch,
+                "selfplay": _epoch_selfplay_record(selfplay.get(epoch)),
+                "select": _epoch_select_record(select.get(epoch)),
+                "training": _epoch_training_record(training.get(epoch)),
+                "eval": _epoch_eval_record(eval_by_epoch.get(epoch)),
+            }
+        )
+    return {"run": run_dir.name, "epochs": records}
 
 
 def _selfplay_epoch_extras(run_dir: Path, epoch: int) -> dict[str, object] | None:

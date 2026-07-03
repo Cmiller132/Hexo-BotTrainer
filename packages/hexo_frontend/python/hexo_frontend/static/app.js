@@ -149,6 +149,13 @@ let histTrendTipEl = null;           // the shared #histTrendTip div (appended t
 let histInspectEpoch = null;         // {run, epoch} | null — the open inspector
 let histEpochInfoCache = new Map();  // "<run>::<epoch>" -> {status, payload} from /api/training/epoch, FIFO-capped
 let histCkptInfoCache = new Map();   // "<run>::<ckptName>" -> {status, payload} from /api/debug/ckpt_info, FIFO-capped
+// Per-epoch telemetry strip (schema-upgrade 2026-07-03): one /api/training/epochs
+// fetch per run, cached by run name. {status, epochs:[record]} — records merge the
+// selfplay/select/training/eval subsets, every field degrading to null. Feeds the
+// inspector's Telemetry group + the strip sparklines; missing/legacy fields render
+// as "—" and never crash. FIFO-capped like the other lazy caches.
+let histEpochsCache = new Map();     // "<run>" -> {status, epochs} from /api/training/epochs
+const HIST_EPOCHS_CACHE_MAX = 6;
 // Selected-game navigation (P2). The displayed-list key order, rebuilt every
 // render — nav buttons and the keydown handler always re-read it.
 let histDisplayedKeys = [];          // historyItemKey order of the filtered+sorted+epoch-chip list
@@ -927,6 +934,10 @@ function histLiveTriggerFullRefresh() {
   const now = Date.now();
   if (now - histLiveRefreshAt < 2000) return; // debounce burst transitions
   histLiveRefreshAt = now;
+  // A boundary means new per-epoch diagnostics files exist; drop the telemetry
+  // strip cache so the inspector re-fetches /api/training/epochs (backend is
+  // itself mtime-cached, so this is a cheap rescan at most).
+  histEpochsCache.clear();
   // The existing 15s path; its historyRefreshInFlight/pendingRequest guards
   // make this a no-op when a refresh is already running.
   refreshHistoryIfVisible();
@@ -4776,6 +4787,100 @@ function epochProgressDetail(buf) {
 const HIST_EPOCH_INFO_CACHE_MAX = 20;
 const HIST_CKPT_INFO_CACHE_MAX = 12;
 
+// ---- Per-epoch telemetry strip (/api/training/epochs) -----------------------
+// One fetch per run, cached by run name (FIFO). The strip records feed the
+// inspector's Telemetry group and the sparkline mini-trends. Every field may be
+// null (legacy epochs / mid-run) — formatters below render "—" and never throw.
+
+function loadHistEpochs(runName) {
+  const cached = histEpochsCache.get(runName);
+  if (cached && (cached.status === "loading" || cached.status === "ready")) return;
+  histEpochsCache.set(runName, { status: "loading", epochs: [] });
+  while (histEpochsCache.size > HIST_EPOCHS_CACHE_MAX) {
+    histEpochsCache.delete(histEpochsCache.keys().next().value);
+  }
+  fetch(`/api/training/epochs?${new URLSearchParams({ run: runName }).toString()}`)
+    .then(res => safeJson(res).then(data => ({ res, data })))
+    .then(({ res, data }) => {
+      if (!res.ok) throw new Error((data && data.error) || "epochs telemetry unavailable");
+      const epochs = data && Array.isArray(data.epochs) ? data.epochs : [];
+      histEpochsCache.set(runName, { status: "ready", epochs });
+      // Repaint the inspector in place if it is still showing this run — the
+      // Telemetry group + sparklines fill once the fetch lands (no full render,
+      // same rationale as histInspPatchLazy).
+      if (histInspectEpoch && histInspectEpoch.run === runName) renderHistEpochInspector(null);
+    })
+    .catch(error => {
+      console.warn("loadHistEpochs failed", error);
+      histEpochsCache.set(runName, { status: "error", epochs: [] });
+    });
+}
+
+// The strip record for one (run, epoch), or null while loading / on miss. Kicks
+// the per-run fetch on first miss (deduped by the "loading" cache state).
+function histEpochTelemetry(runName, epoch) {
+  const entry = histEpochsCache.get(runName);
+  if (!entry) { loadHistEpochs(runName); return null; }
+  if (entry.status !== "ready") return null;
+  return entry.epochs.find(rec => rec && asFinite(rec.epoch) === Number(epoch)) || null;
+}
+
+// Compact human count: 21845 -> "21.8k", 950 -> "950", 2_100_000 -> "2.1M".
+function formatCount(value) {
+  const n = asFinite(value);
+  if (n === null) return "--";
+  const abs = Math.abs(n);
+  if (abs >= 1e6) return `${(n / 1e6).toFixed(1)}M`;
+  if (abs >= 1e4) return `${(n / 1e3).toFixed(1)}k`;
+  if (abs >= 1000) return `${(n / 1e3).toFixed(2)}k`;
+  return String(Math.round(n));
+}
+
+// Seconds -> "427s" / "32.6m" (compact wall-time).
+function formatSeconds(value) {
+  const n = asFinite(value);
+  if (n === null) return "--";
+  if (n >= 600) return `${(n / 60).toFixed(1)}m`;
+  return `${Math.round(n)}s`;
+}
+
+// Self-contained inline-SVG polyline sparkline (no external deps — the dashboard
+// runs offline). `values` may contain nulls (missing epochs); those break the
+// line into segments so gaps read as gaps, not zeros. `markIdx` highlights the
+// currently-inspected epoch's dot. Returns "" when fewer than 2 finite points.
+function histSparkline(values, opts = {}) {
+  const w = opts.width || 132;
+  const h = opts.height || 26;
+  const pad = 3;
+  const nums = (values || []).map(asFinite);
+  const finite = nums.filter(v => v !== null);
+  if (finite.length < 2) return "";
+  const min = Math.min(...finite);
+  const max = Math.max(...finite);
+  const span = max - min || 1;
+  const n = nums.length;
+  const x = i => pad + (n <= 1 ? 0 : (i / (n - 1)) * (w - 2 * pad));
+  const y = v => pad + (1 - (v - min) / span) * (h - 2 * pad);
+  // Split into contiguous finite runs so nulls leave a gap.
+  const segments = [];
+  let cur = [];
+  nums.forEach((v, i) => {
+    if (v === null) { if (cur.length) { segments.push(cur); cur = []; } }
+    else cur.push(`${x(i).toFixed(1)},${y(v).toFixed(1)}`);
+  });
+  if (cur.length) segments.push(cur);
+  const lines = segments
+    .map(pts => `<polyline class="hist-spark-line" fill="none" points="${pts.join(" ")}"></polyline>`)
+    .join("");
+  let mark = "";
+  const mi = asFinite(opts.markIdx);
+  if (mi !== null && mi >= 0 && mi < n && nums[mi] !== null) {
+    mark = `<circle class="hist-spark-mark" cx="${x(mi).toFixed(1)}" cy="${y(nums[mi]).toFixed(1)}" r="2.4"></circle>`;
+  }
+  const title = opts.title ? ` title="${escapeAttr(opts.title)}"` : "";
+  return `<svg class="hist-spark" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" preserveAspectRatio="none" aria-hidden="true"${title}>${lines}${mark}</svg>`;
+}
+
 function histInspRunPayload(runName, runs) {
   const list = runs || historyRunsForPage();
   return (list || []).find(run => run && run.name === runName) || trainingRunDetails[runName] || null;
@@ -5146,6 +5251,188 @@ function histInspCkptLineInner(row, infoEntry) {
   return "";
 }
 
+// ---- Telemetry group (schema-upgrade strip) ---------------------------------
+// Renders the per-epoch telemetry from /api/training/epochs into the inspector's
+// detail: state badges, a compact headline chip row, a per-phase entropy+value
+// table, and expandable detail chips (unique openings, decided fraction,
+// surprise, fast/full/init, lcb/gumbel rates, window span, shards+paths, eval
+// Elo edges), plus sparkline mini-trends across epochs. Every value degrades to
+// "—"; the whole group returns "" (→ :empty hides it) when the record is null.
+
+function histTelemBadges(sp, sel) {
+  const badges = [];
+  const resumed = sp.resumed_skip === true || asFinite(sp.resumed_skip_count) > 0 || asFinite(sp.resumed_existing_games) > 0;
+  if (resumed) {
+    const cnt = asFinite(sp.resumed_skip_count);
+    badges.push(`<span class="hist-telem-badge hist-telem-badge-info" title="This epoch resumed existing self-play games (segment merge)">resumed${cnt ? ` ×${cnt}` : ""}</span>`);
+  }
+  if (sp.merged_approx) {
+    badges.push(`<span class="hist-telem-badge hist-telem-badge-info" title="Segment stats merged approximately across a resume boundary">merged≈</span>`);
+  }
+  const shards = asFinite(sel.shards_skipped);
+  if (shards !== null && shards > 0) {
+    badges.push(`<span class="hist-telem-badge hist-telem-badge-warn" title="Shards skipped during window selection">skipped shards ${shards}</span>`);
+  }
+  const trunc = asFinite(sp.truncated_games);
+  if (trunc !== null && trunc > 0) {
+    badges.push(`<span class="hist-telem-badge hist-telem-badge-warn" title="Games hitting the length cap (truncated, not naturally decided)">truncated ${trunc}</span>`);
+  }
+  return badges.length ? `<div class="hist-telem-badges">${badges.join("")}</div>` : "";
+}
+
+// Per-phase entropy + value table (opening / mid / late). Rows appear only for
+// phases the producer emitted; "" when neither by-phase object exists.
+function histTelemPhaseTable(sp) {
+  const ent = sp.root_policy_entropy_by_phase && typeof sp.root_policy_entropy_by_phase === "object" ? sp.root_policy_entropy_by_phase : {};
+  const val = sp.root_value_by_phase && typeof sp.root_value_by_phase === "object" ? sp.root_value_by_phase : {};
+  const phases = ["opening", "mid", "late"];
+  const present = phases.filter(p => (ent[p] && typeof ent[p] === "object") || (val[p] && typeof val[p] === "object"));
+  if (!present.length) return "";
+  const cell = obj => {
+    if (!obj || typeof obj !== "object") return "<td>—</td>";
+    const m = formatDecimal(obj.mean, 2);
+    const n = asFinite(obj.n);
+    return `<td>${escapeText(m)}${n !== null ? `<span class="hist-telem-n"> n${formatCount(n)}</span>` : ""}</td>`;
+  };
+  const rows = present.map(p =>
+    `<tr><th>${escapeText(p)}</th>${cell(ent[p])}${cell(val[p])}</tr>`).join("");
+  return `<table class="hist-telem-phase"><thead><tr><th></th><th>entropy</th><th>value</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+// Detail chips: unique openings, decided fraction, surprise, move-mix fractions,
+// gumbel/lcb rates, window span, shards + skipped paths.
+function histTelemDetailChips(sp, sel, tr) {
+  const chips = [];
+  const uo = sp.unique_openings && typeof sp.unique_openings === "object" ? sp.unique_openings : null;
+  if (uo) {
+    const parts = ["10", "16", "20"].map(k => asFinite(uo[k]) !== null ? `${k}:${uo[k]}` : null).filter(Boolean);
+    if (parts.length) chips.push(epochChip("openings", parts.join(" ")));
+  }
+  if (asFinite(sp.decided_fraction) !== null) chips.push(epochChip("decided", formatPercent(sp.decided_fraction)));
+  if (asFinite(sp.root_value_abs_mean) !== null) chips.push(epochChip("|value|", formatDecimal(sp.root_value_abs_mean, 3)));
+  if (asFinite(sp.root_value_std) !== null) chips.push(epochChip("value σ", formatDecimal(sp.root_value_std, 3)));
+  if (asFinite(sp.policy_surprise_mean) !== null) {
+    const p90 = asFinite(sp.policy_surprise_p90);
+    const mx = asFinite(sp.policy_surprise_max);
+    const extra = [p90 !== null ? `p90 ${p90.toFixed(2)}` : null, mx !== null ? `max ${mx.toFixed(2)}` : null].filter(Boolean).join(" · ");
+    chips.push(epochChip("surprise", `${formatDecimal(sp.policy_surprise_mean, 2)}${extra ? ` (${extra})` : ""}`));
+  }
+  const mix = ["fast_fraction", "full_fraction", "init_fraction"]
+    .map(k => asFinite(sp[k]) !== null ? `${k[0]}${formatPercent(sp[k])}` : null).filter(Boolean);
+  if (mix.length) chips.push(epochChip("f/f/i mix", mix.join(" ")));
+  if (asFinite(sp.gumbel_play_winner_rate) !== null) chips.push(epochChip("gumbel win", formatPercent(sp.gumbel_play_winner_rate)));
+  if (asFinite(sp.gumbel_play_winner_early_rate) !== null) chips.push(epochChip("gumbel early", formatPercent(sp.gumbel_play_winner_early_rate)));
+  if (asFinite(sp.lcb_override_rate) !== null) chips.push(epochChip("lcb ovr", formatPercent(sp.lcb_override_rate)));
+  const span = sel.window_epoch_span && typeof sel.window_epoch_span === "object" ? sel.window_epoch_span : null;
+  if (span && (asFinite(span.min) !== null || asFinite(span.max) !== null)) {
+    chips.push(epochChip("window", `e${asFinite(span.min) ?? "?"}–e${asFinite(span.max) ?? "?"}${asFinite(span.epochs) !== null ? ` (${span.epochs}ep)` : ""}`));
+  }
+  if (asFinite(sel.keep_prob) !== null) chips.push(epochChip("keep p", formatDecimal(sel.keep_prob, 2)));
+  if (asFinite(sel.reuse_ratio) !== null) chips.push(epochChip("reuse", `${formatDecimal(sel.reuse_ratio, 2)}×`));
+  if (asFinite(tr.surprise_weight_mean) !== null) {
+    chips.push(epochChip("surprise wt", `${formatDecimal(tr.surprise_weight_mean, 2)}${asFinite(tr.surprise_weight_max) !== null ? `/${formatDecimal(tr.surprise_weight_max, 2)}` : ""}`));
+  }
+  let paths = "";
+  const skipped = Array.isArray(sel.skipped_paths) ? sel.skipped_paths.filter(Boolean) : [];
+  if (skipped.length) {
+    paths = `<details class="hist-telem-paths"><summary>${skipped.length} skipped shard${skipped.length === 1 ? "" : "s"}</summary><ul>${skipped.map(p => `<li>${escapeText(String(p))}</li>`).join("")}</ul></details>`;
+  }
+  if (!chips.length && !paths) return "";
+  return `${chips.length ? `<div class="hist-insp-chips">${chips.join("")}</div>` : ""}${paths}`;
+}
+
+// Eval Elo edges block (present only at eval epochs).
+function histTelemEvalEdges(ev) {
+  if (!ev || typeof ev !== "object") return "";
+  const chips = [];
+  if (ev.verdict_label) chips.push(`<span class="hist-rating-verdict ${msVerdictClass(ev.verdict_label)}">${escapeText(String(ev.verdict_label).toUpperCase())}</span>`);
+  if (asFinite(ev.elo_point) !== null) chips.push(epochChip("Elo", Math.round(Number(ev.elo_point))));
+  (Array.isArray(ev.edges) ? ev.edges : []).forEach(edge => {
+    if (!edge || typeof edge !== "object") return;
+    const wr = asFinite(edge.winrate);
+    const elo = asFinite(edge.elo_point);
+    const val = [wr !== null ? formatPercent(wr) : null, elo !== null ? `${elo > 0 ? "+" : ""}${Math.round(elo)} Elo` : null].filter(Boolean).join(" · ");
+    if (val) chips.push(epochChip(`vs ${edge.opponent || "?"}`, val));
+  });
+  return chips.length ? `<div class="hist-insp-chips">${chips.join("")}</div>` : "";
+}
+
+// Sparkline mini-trends across the run's epochs (entropy, length p50, gumbel-win
+// rate, loss_policy), with the inspected epoch marked. "" when the strip has <2
+// usable points on any trend.
+function histTelemSparklines(records, epoch) {
+  if (!Array.isArray(records) || records.length < 2) return "";
+  const ordered = records.slice().sort((a, b) => Number(a.epoch) - Number(b.epoch));
+  const markIdx = ordered.findIndex(r => Number(r.epoch) === Number(epoch));
+  const trends = [
+    { label: "entropy", pick: r => asFinite((r.selfplay || {}).root_policy_entropy_mean) },
+    { label: "len p50", pick: r => asFinite((r.selfplay || {}).game_length_p50) },
+    { label: "gumbel win", pick: r => asFinite((r.selfplay || {}).gumbel_play_winner_rate) },
+    { label: "loss pol", pick: r => asFinite((r.training || {}).loss_policy) },
+  ];
+  const cells = trends.map(t => {
+    const values = ordered.map(t.pick);
+    const spark = histSparkline(values, { markIdx, title: `${t.label} across epochs ${ordered[0].epoch}–${ordered[ordered.length - 1].epoch}` });
+    if (!spark) return "";
+    const here = markIdx >= 0 ? values[markIdx] : null;
+    return `<div class="hist-telem-spark-cell"><span class="hist-telem-spark-label">${escapeText(t.label)}${here !== null ? ` <b>${here.toFixed(here < 10 ? 2 : 0)}</b>` : ""}</span>${spark}</div>`;
+  }).filter(Boolean);
+  return cells.length ? `<div class="hist-telem-sparks">${cells.join("")}</div>` : "";
+}
+
+function histInspTelemetryGroup(runName, epoch) {
+  const entry = histEpochsCache.get(runName);
+  if (!entry) { loadHistEpochs(runName); }
+  const rec = histEpochTelemetry(runName, epoch);
+  const status = entry ? entry.status : "loading";
+  if (!rec) {
+    if (status === "loading" || !entry) {
+      return `<div class="hist-insp-group hist-insp-telem"><span class="hist-insp-group-title">Telemetry</span><div class="hist-insp-note">Loading per-epoch telemetry</div></div>`;
+    }
+    return "";  // ready-but-no-record (non-hexfield / no diagnostics) → hidden
+  }
+  const sp = rec.selfplay || {};
+  const sel = rec.select || {};
+  const tr = rec.training || {};
+  // Headline chip row: the compact "at a glance" numbers.
+  const head = [];
+  const games = asFinite(sp.games_finished);
+  const trunc = asFinite(sp.truncated_games);
+  if (games !== null) head.push(epochChip("games", `${games}${trunc ? ` (−${trunc})` : ""}`));
+  if (asFinite(sp.rows_written) !== null) head.push(epochChip("rows", formatCount(sp.rows_written)));
+  if (asFinite(sp.game_length_p50) !== null || asFinite(sp.game_length_p90) !== null) {
+    head.push(epochChip("len p50/p90", `${formatDecimal(sp.game_length_p50, 0)}/${formatDecimal(sp.game_length_p90, 0)}`));
+  }
+  if (asFinite(sp.root_policy_entropy_mean) !== null) head.push(epochChip("entropy", formatDecimal(sp.root_policy_entropy_mean, 2)));
+  if (asFinite(sp.gumbel_play_winner_rate) !== null) head.push(epochChip("winner rate", formatPercent(sp.gumbel_play_winner_rate)));
+  if (asFinite(sp.p0_win_share) !== null) head.push(epochChip("P0 share", formatPercent(sp.p0_win_share)));
+  if (asFinite(tr.loss_policy) !== null || asFinite(tr.loss_value) !== null) {
+    head.push(epochChip("loss pol/val", `${formatDecimal(tr.loss_policy, 2)}/${formatDecimal(tr.loss_value, 2)}`));
+  }
+  if (asFinite(sel.reuse_ratio) !== null) head.push(epochChip("reuse", `${formatDecimal(sel.reuse_ratio, 2)}×`));
+  if (asFinite(sp.elapsed_seconds) !== null) head.push(epochChip("sp wall", formatSeconds(sp.elapsed_seconds)));
+  if (asFinite(tr.train_seconds) !== null) head.push(epochChip("train wall", formatSeconds(tr.train_seconds)));
+
+  const badges = histTelemBadges(sp, sel);
+  const phaseTable = histTelemPhaseTable(sp);
+  const detailChips = histTelemDetailChips(sp, sel, tr);
+  const evalEdges = histTelemEvalEdges(rec.eval);
+  const sparks = histTelemSparklines(entry.epochs, epoch);
+
+  const detailSection = phaseTable || detailChips || evalEdges
+    ? `<details class="hist-telem-detail" open><summary>Detail</summary>${phaseTable}${detailChips}${evalEdges ? `<div class="hist-telem-eval-label">Eval edges</div>${evalEdges}` : ""}</details>`
+    : "";
+
+  if (!head.length && !badges && !detailSection && !sparks) return "";
+  return `<div class="hist-insp-group hist-insp-telem">
+    <span class="hist-insp-group-title">Telemetry</span>
+    ${badges}
+    ${head.length ? `<div class="hist-insp-chips">${head.join("")}</div>` : ""}
+    ${sparks}
+    ${detailSection}
+  </div>`;
+}
+
 function renderHistEpochInspector(runs) {
   if (!histEpochInspector) return;
   if (!histInspectEpoch) {
@@ -5215,6 +5502,7 @@ function renderHistEpochInspector(runs) {
   const groups = [
     histInspLossGroup(buf, prevBuf),
     histInspGameStatsGroup(sp),
+    histInspTelemetryGroup(runName, epoch),
     histInspBufferGroup(buf, row.samples),
     histInspCalibrationGroup(buf, prevBuf),
     histInspEvalGroup(row, run, epoch),

@@ -1706,6 +1706,154 @@ body.bot-thinking .legal {
   font-size: 10px;
 }
 
+/* --- Per-epoch telemetry group (schema-upgrade strip) --------------------- */
+/* The Telemetry group can carry a phase table + sparklines, so let it span the
+   full inspector width instead of one 240px grid cell. */
+.hist-insp-telem {
+  grid-column: 1 / -1;
+}
+
+.hist-telem-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.hist-telem-badge {
+  padding: 2px 7px;
+  border-radius: 10px;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  border: 1px solid var(--line);
+  color: var(--muted);
+}
+
+.hist-telem-badge-info {
+  border-color: rgba(201, 134, 255, 0.45);
+  color: #d3adff;
+  background: rgba(201, 134, 255, 0.08);
+}
+
+.hist-telem-badge-warn {
+  border-color: rgba(255, 206, 86, 0.5);
+  color: #ffce56;
+  background: rgba(255, 206, 86, 0.09);
+}
+
+/* Sparkline mini-trends row. */
+.hist-telem-sparks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.hist-telem-spark-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.hist-telem-spark-label {
+  font-size: 9px;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.hist-telem-spark-label b {
+  color: var(--text);
+  font-weight: 800;
+}
+
+.hist-spark {
+  display: block;
+  width: 132px;
+  height: 26px;
+}
+
+.hist-spark-line {
+  stroke: var(--accent);
+  stroke-width: 1.4;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.hist-spark-mark {
+  fill: #c986ff;
+}
+
+/* Per-phase entropy/value table. */
+.hist-telem-phase {
+  border-collapse: collapse;
+  font-size: 11px;
+  color: var(--text);
+}
+
+.hist-telem-phase th,
+.hist-telem-phase td {
+  padding: 2px 10px 2px 0;
+  text-align: left;
+  font-weight: 600;
+}
+
+.hist-telem-phase thead th,
+.hist-telem-phase tbody th {
+  color: var(--muted);
+  font-weight: 700;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+.hist-telem-n {
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.hist-telem-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.hist-telem-detail > summary {
+  cursor: pointer;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: var(--muted);
+  list-style: revert;
+}
+
+.hist-telem-eval-label {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.hist-telem-paths {
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.hist-telem-paths > summary {
+  cursor: pointer;
+}
+
+.hist-telem-paths ul {
+  margin: 4px 0 0;
+  padding-left: 16px;
+  max-height: 140px;
+  overflow: auto;
+  word-break: break-all;
+}
+
 /* Inspected-row accent: same shape as .hist-epoch-live, distinct color, and
    declared after it so a row that is both live and inspected reads inspected. */
 [data-hist-epoch-inspect] {
