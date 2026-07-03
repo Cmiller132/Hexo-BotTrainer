@@ -25,6 +25,10 @@ device = "cuda"
 search_visits = 1024
 pcr_full_proportion = 0.33
 pcr_fast_visits = 192
+# Gentle exploration on the value-only Fast plies (67% of moves): T=0.1 samples
+# the guard-filtered delta-visit histogram at exponent 1/T=10 (near-argmax). At
+# T>0 Fast no longer takes the greedy LCB pick / ml_final_pick (those need T==0).
+pcr_fast_temperature = 0.1
 active_games = 192
 c_puct = 1.5
 # Carried from main_6 round-2 (2026-07-03, +6% pos/s at c=128). At c=192 the
@@ -33,24 +37,27 @@ c_puct = 1.5
 virtual_batch_size = 48
 flush_target = 1024
 active_root_limit = 192
-root_dirichlet_total_alpha = 10.83
+# Root Dirichlet noise fully off; gumbel top-m is the root exploration. This
+# fraction is the load-bearing off-switch (config default is 0.25) — it also
+# makes root_dirichlet_total_alpha / dirichlet_shaped / root_fpu_zero_under_noise
+# inert, so those are left at their (behavior-identical) defaults.
 root_dirichlet_noise_fraction = 0.0
 fpu_reduction = 0.2
 root_fpu_reduction = 0.2
-root_fpu_zero_under_noise = false
-visit_scaled_c_puct = true
+# c_scale = 0.0 zeroes the visit-scaled log term (config default 0.45), so c_for
+# collapses to the static c_puct; visit_scaled_c_puct / c_base then don't matter
+# and are left at their (behavior-identical) defaults.
 c_scale = 0.0
-c_base = 500.0
 lcb_z = 1.6
 nucleus_f64 = true
 new_child_fpu = true
 lazy_widening = false
 clean_root_prior_cache = true
-dirichlet_shaped = true
-pruned_dynamic_cpuct = true
 widening_policy_mass = 0.95
 widening_max_children = 96
 widening_min_children = 2
+# Forced playouts off (config default is 2.0 — KEEP explicit). Also gates
+# pruned_dynamic_cpuct, so that lever is left at its default and inert here.
 forced_playout_k = 0.0
 policy_init_fraction = 0.25
 policy_init_avg_plies = 4.0
@@ -59,9 +66,14 @@ policy_init_temperature = 1.4
 temperature = 1.0
 temperature_floor = 0.15
 temperature_halflife_plies = 10.0
+# Under the gumbel root these only shape the EXPORTED prior / surprise baseline
+# (root move selection is gumbel top-m, not the root-policy-temperature softmax).
 root_policy_temperature = 1.1
 root_policy_temperature_early = 1.15
 root_policy_temperature_halflife = 19.0
+# ml_* selection levers apply only on the T==0 paths (fast/eval greedy pick). With
+# pcr_fast_temperature = 0.1 above, Fast moves no longer hit T==0, so ml_final_pick
+# now scopes to the eval/lockstep arenas only.
 ml_two_sided = false
 ml_final_pick_band = 0.08
 max_game_plies = 256

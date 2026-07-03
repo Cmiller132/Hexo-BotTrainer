@@ -969,6 +969,7 @@ def generate_selfplay_epoch(*, ctx, components, epoch: int, games_per_epoch: int
             forced_playout_k=sp.forced_playout_k,
             pcr_full_proportion=sp.pcr_full_proportion,
             pcr_fast_visits=sp.pcr_fast_visits,
+            pcr_fast_temperature=sp.pcr_fast_temperature,
             policy_init_fraction=sp.policy_init_fraction,
             policy_init_avg_plies=sp.policy_init_avg_plies,
             policy_init_max_plies=sp.policy_init_max_plies,

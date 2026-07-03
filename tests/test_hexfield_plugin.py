@@ -29,6 +29,8 @@ def test_config_production_defaults() -> None:
     sp = cfg.selfplay
     assert sp.search_visits == 512
     assert sp.pcr_fast_visits == 128
+    # Fast-class play temperature defaults OFF (0.0 => current greedy behavior).
+    assert sp.pcr_fast_temperature == 0.0
     assert sp.pcr_full_proportion == pytest.approx(0.33)
     assert sp.root_fpu_zero_under_noise is False
     assert sp.root_policy_temperature == 1.0
@@ -69,6 +71,14 @@ def test_config_override() -> None:
     cfg = parse_hexfield_config({"selfplay": {"search_visits": 256, "search_parity_mode": True}})
     assert cfg.selfplay.search_visits == 256
     assert cfg.selfplay.search_parity_mode is True
+
+
+def test_pcr_fast_temperature_round_trips_and_defaults_off() -> None:
+    # Absent -> default 0.0 (exactly the current greedy Fast behavior).
+    assert parse_hexfield_config({}).selfplay.pcr_fast_temperature == 0.0
+    # Explicit value round-trips through the [selfplay] parser.
+    cfg = parse_hexfield_config({"selfplay": {"pcr_fast_temperature": 0.1}})
+    assert cfg.selfplay.pcr_fast_temperature == pytest.approx(0.1)
 
 
 def test_checkpoint_strict_roundtrip(tmp_path) -> None:

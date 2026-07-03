@@ -17,6 +17,14 @@ class SelfplayConfig:
     search_visits: int = 512
     pcr_full_proportion: float = 0.33
     pcr_fast_visits: int = 128
+    # Play temperature for the Fast (value-only) PCR class in the continuous
+    # selfplay driver ONLY. Default 0.0 = exactly current behavior (Fast moves
+    # take the greedy LCB pick, T==0). At T>0 the played move is a temperature
+    # sample (exponent 1/T) of the guard-filtered delta-visit histogram, and the
+    # LCB pick + ml_final_pick no longer fire for Fast moves (they require T==0).
+    # Init stays 0.0/prior-sampled; Full is unaffected. Eval/lockstep/parity
+    # paths do not read this lever.
+    pcr_fast_temperature: float = 0.0
     active_games: int = 128
     c_puct: float = 1.5
     virtual_batch_size: int = 4

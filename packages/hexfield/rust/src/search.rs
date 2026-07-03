@@ -60,6 +60,8 @@ enum MoveClass {
 struct ContinuousMovePolicy {
     full_visits: u32,
     fast_visits: u32,
+    /// Play temperature for the Fast class. 0.0 (default) => greedy LCB pick.
+    fast_temperature: f32,
     pcr_full_proportion: f32,
     policy_init_fraction: f32,
     policy_init_avg_plies: f32,
@@ -173,6 +175,28 @@ impl ContinuousMovePolicy {
         self.root_policy_temperature
             + (self.root_policy_temperature_early - self.root_policy_temperature)
                 * 0.5f32.powf(ply as f32 / self.root_policy_temperature_halflife)
+    }
+
+    /// Per-class PLAY temperature for the continuous driver.
+    ///   Full => the ply schedule (floor applied by config).
+    ///   Fast => `fast_temperature` (default 0.0 = greedy LCB pick, bit-for-bit
+    ///           unchanged; at T=0.1 the sampler exponent is 1/T=10 over the
+    ///           guard-filtered delta-visit histogram — gentle exploration, near
+    ///           argmax unless the top candidates are close. At T>0 the LCB pick +
+    ///           ml_final_pick no longer fire for Fast moves — they require T==0).
+    ///   Init => 0.0 (the played move is then prior-sampled by the caller at
+    ///           policy_init_temperature).
+    fn temperature_for_class(
+        &self,
+        class: MoveClass,
+        temperature_by_ply: &[f32],
+        ply: u32,
+    ) -> f32 {
+        match class {
+            MoveClass::Full => temperature_for_ply(temperature_by_ply, ply),
+            MoveClass::Fast => self.fast_temperature,
+            MoveClass::Init => 0.0,
+        }
     }
 
     fn request_moves_left(&self) -> bool {
@@ -809,7 +833,7 @@ impl HexfieldMctsSession {
 
     /// Continuous per-slot scheduler (the production self-play driver).
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (game_keys, states, evaluator, on_move, visits, c_puct, base_seed, virtual_batch_size, flush_target, active_root_limit, temperature_by_ply, root_dirichlet_total_alpha=None, root_dirichlet_noise_fraction=None, root_policy_temperature=None, fpu_reduction=None, virtual_loss=None, widening_policy_mass=None, widening_max_children=None, widening_min_children=None, forced_playout_k=None, root_policy_temperature_early=None, root_policy_temperature_halflife=None, pcr_full_proportion=None, pcr_fast_visits=None, policy_init_fraction=None, policy_init_avg_plies=None, policy_init_max_plies=None, policy_init_temperature=None, tss_enabled=None, root_fpu_zero_under_noise=None, root_fpu_reduction=None, search_parity_mode=None, divergence_overrides=None))]
+    #[pyo3(signature = (game_keys, states, evaluator, on_move, visits, c_puct, base_seed, virtual_batch_size, flush_target, active_root_limit, temperature_by_ply, root_dirichlet_total_alpha=None, root_dirichlet_noise_fraction=None, root_policy_temperature=None, fpu_reduction=None, virtual_loss=None, widening_policy_mass=None, widening_max_children=None, widening_min_children=None, forced_playout_k=None, root_policy_temperature_early=None, root_policy_temperature_halflife=None, pcr_full_proportion=None, pcr_fast_visits=None, pcr_fast_temperature=None, policy_init_fraction=None, policy_init_avg_plies=None, policy_init_max_plies=None, policy_init_temperature=None, tss_enabled=None, root_fpu_zero_under_noise=None, root_fpu_reduction=None, search_parity_mode=None, divergence_overrides=None))]
     fn run_continuous(
         &mut self,
         py: Python<'_>,
@@ -837,6 +861,7 @@ impl HexfieldMctsSession {
         root_policy_temperature_halflife: Option<f32>,
         pcr_full_proportion: Option<f32>,
         pcr_fast_visits: Option<u32>,
+        pcr_fast_temperature: Option<f32>,
         policy_init_fraction: Option<f32>,
         policy_init_avg_plies: Option<f32>,
         policy_init_max_plies: Option<u32>,
@@ -908,6 +933,10 @@ impl HexfieldMctsSession {
                 "pcr_fast_visits must be >= 1 when PCR is enabled",
             ));
         }
+        // Fast-class play temperature. Default 0.0 reproduces the greedy LCB pick
+        // (see temperature_for_class) bit-for-bit.
+        let pcr_fast_temperature =
+            validate_nonnegative_f32("pcr_fast_temperature", pcr_fast_temperature.unwrap_or(0.0))?;
         let policy_init_fraction = policy_init_fraction.unwrap_or(0.0);
         if !policy_init_fraction.is_finite() || !(0.0..=1.0).contains(&policy_init_fraction) {
             return Err(PyValueError::new_err(
@@ -935,6 +964,7 @@ impl HexfieldMctsSession {
         let move_policy = ContinuousMovePolicy {
             full_visits: visits,
             fast_visits: pcr_fast_visits,
+            fast_temperature: pcr_fast_temperature,
             pcr_full_proportion,
             policy_init_fraction,
             policy_init_avg_plies,
@@ -2230,11 +2260,7 @@ fn complete_continuous_slots(
             let game_key = slot.game_key;
             let ply = slot.ply;
             let move_seed = mix_seed(base_seed, game_key, ply, SEED_STREAM_MOVE_SELECT);
-            let temperature = match move_class {
-                MoveClass::Full => temperature_for_ply(temperature_by_ply, ply),
-                MoveClass::Fast => 0.0,
-                MoveClass::Init => 0.0,
-            };
+            let temperature = move_policy.temperature_for_class(move_class, temperature_by_ply, ply);
             let mut payload = build_search_result_payload_native(
                 search,
                 Some(&slot.baseline),
@@ -3686,14 +3712,24 @@ fn select_action_from_policy(
             "temperature-adjusted visit policy must contain positive finite mass",
         ));
     }
+    // Walk the CDF, skipping zero-weight (e.g. tactical-guard-zeroed) entries so
+    // they can never be selected: random_unit == 0.0 puts threshold at 0.0 up
+    // front, which would otherwise return the FIRST action even if its adjusted
+    // weight is 0; and f64 residue at the tail must not fall through onto a
+    // zero-weight last action. The fallback is the LAST positive-weight action.
     let mut threshold = random_unit(seed) * total;
+    let mut last_positive: Option<PackedCoord> = None;
     for (action_id, weight) in action_ids.iter().copied().zip(adjusted) {
+        if weight <= 0.0 {
+            continue;
+        }
+        last_positive = Some(action_id);
         threshold -= weight;
         if threshold <= 0.0 {
             return Ok(Some(action_id));
         }
     }
-    Ok(action_ids.last().copied())
+    Ok(last_positive)
 }
 
 #[cfg(test)]
@@ -3812,5 +3848,108 @@ mod fallback_tests {
         let picked = fallback_root_action(&root).expect("fallback yields an action");
         assert_ne!(picked, 0);
         assert_eq!(picked, A3, "highest-prior action wins when no edge is visited");
+    }
+
+    // --- Fast-class play temperature + sampler zero-weight edge ---------------
+
+    // Non-sentinel ids for the sampler tests.
+    const S1: PackedCoord = A1;
+    const S2: PackedCoord = A2;
+    const S3: PackedCoord = A3;
+
+    fn move_policy(fast_temperature: f32) -> ContinuousMovePolicy {
+        ContinuousMovePolicy {
+            full_visits: 512,
+            fast_visits: 128,
+            fast_temperature,
+            pcr_full_proportion: 0.33,
+            policy_init_fraction: 0.0,
+            policy_init_avg_plies: 0.0,
+            policy_init_max_plies: 0,
+            policy_init_temperature: 1.0,
+            root_policy_temperature: 1.0,
+            root_policy_temperature_early: 0.0,
+            root_policy_temperature_halflife: 0.0,
+            fpu_reduction: 0.2,
+            forced_playout_k: 0.0,
+            noise: None,
+            tss_enabled: true,
+            root_fpu_zero_under_noise: false,
+            root_fpu_reduction: None,
+            divergences: Divergences::production(),
+        }
+    }
+
+    #[test]
+    fn fast_class_default_temperature_is_zero() {
+        // Default 0.0 => Fast plays greedily (the T==0 LCB pick branch),
+        // reproducing current behavior. Full uses the ply schedule; Init is 0.0.
+        let policy = move_policy(0.0);
+        let by_ply = vec![0.9, 0.5, 0.15];
+        assert_eq!(policy.temperature_for_class(MoveClass::Fast, &by_ply, 1), 0.0);
+        assert_eq!(policy.temperature_for_class(MoveClass::Init, &by_ply, 1), 0.0);
+        assert_eq!(
+            policy.temperature_for_class(MoveClass::Full, &by_ply, 1),
+            0.5,
+            "Full follows the ply schedule"
+        );
+    }
+
+    #[test]
+    fn fast_class_uses_the_lever_when_set() {
+        // The lever flows to the Fast class only; Full/Init are unchanged.
+        let policy = move_policy(0.1);
+        let by_ply = vec![0.9, 0.5, 0.15];
+        assert_eq!(policy.temperature_for_class(MoveClass::Fast, &by_ply, 0), 0.1);
+        assert_eq!(policy.temperature_for_class(MoveClass::Init, &by_ply, 0), 0.0);
+        assert_eq!(
+            policy.temperature_for_class(MoveClass::Full, &by_ply, 0),
+            0.9,
+            "Full still follows the ply schedule"
+        );
+    }
+
+    #[test]
+    fn sampler_never_selects_zero_weight_first_entry() {
+        // random_unit(seed) can be exactly 0.0 for some seeds, putting the CDF
+        // threshold at 0.0 before the walk. A zero-weight (tactical-guard-zeroed)
+        // FIRST entry must still never be selected. Sweep many seeds at T=0.1.
+        let ids = vec![S1, S2, S3];
+        let weights = vec![0.0f32, 0.7, 0.3];
+        for seed in 0u64..2000 {
+            let picked = select_action_from_policy(&ids, &weights, 0.1, seed)
+                .unwrap()
+                .expect("positive mass yields a pick");
+            assert_ne!(picked, S1, "zero-weight first entry must never be selected");
+        }
+    }
+
+    #[test]
+    fn sampler_never_selects_zero_weight_last_entry() {
+        // f64 residue at the tail must not fall through onto a zero-weight LAST
+        // action; the fallback is the last POSITIVE-weight action.
+        let ids = vec![S1, S2, S3];
+        let weights = vec![0.6f32, 0.4, 0.0];
+        for seed in 0u64..2000 {
+            let picked = select_action_from_policy(&ids, &weights, 0.1, seed)
+                .unwrap()
+                .expect("positive mass yields a pick");
+            assert_ne!(picked, S3, "zero-weight last entry must never be selected");
+        }
+    }
+
+    #[test]
+    fn sampler_leading_zero_weights_never_selected_high_temperature() {
+        // Two leading zero-weight entries (guard-zeroed) with only the tail
+        // carrying mass; at a large T the exponent flattens weights but the zero
+        // entries stay zero and must never be picked, across seeds.
+        let ids = vec![S1, S2, S3];
+        let weights = vec![0.0f32, 0.0, 1.0];
+        for seed in 0u64..500 {
+            let picked = select_action_from_policy(&ids, &weights, 2.0, seed)
+                .unwrap()
+                .expect("positive mass yields a pick");
+            assert_eq!(picked, S3, "only the positive-weight action is selectable");
+        }
     }
 }
