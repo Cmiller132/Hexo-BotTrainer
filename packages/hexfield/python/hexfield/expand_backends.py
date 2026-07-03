@@ -403,13 +403,17 @@ def _expand_rows_rust(
     from . import _rust  # local import: the package imports without the .so
 
     horizons_len = len(horizons)
-    if window.cols["stvalue"].shape[1] != horizons_len:
-        # The stored block width must equal the requested horizon count (the
-        # kernel slices [:horizons_len] from each row's block). A mismatch would
-        # misalign the STV target.
+    # The kernel copies the stored stvalue block POSITIONALLY (facts.stvalue[..len]),
+    # unlike the serial python path which remaps by horizon VALUE (samples.py
+    # horizon_index). A width-only check would pass a re-tuned horizon set of the
+    # same length (e.g. reordered, or different values) against old shards and
+    # silently train the STV heads on the wrong horizon's target. Require exact
+    # tuple equality so the positional copy is provably aligned.
+    if tuple(window.horizons) != tuple(horizons):
         raise ValueError(
-            f"rust backend: stvalue block width {window.cols['stvalue'].shape[1]} "
-            f"!= len(horizons) {horizons_len}"
+            f"rust backend: window horizons {tuple(window.horizons)} "
+            f"!= requested horizons {tuple(horizons)}; the kernel copies stvalue "
+            f"positionally and cannot remap by horizon value"
         )
     columns = _window_columns_as_bytes(window)
     row_index = np.asarray(index, dtype=np.int64)

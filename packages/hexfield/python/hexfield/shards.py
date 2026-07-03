@@ -15,6 +15,7 @@ derived from the stored stones via the window scan.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Sequence
 
@@ -243,7 +244,29 @@ def write_compact_shard(
 
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(path, **arrays)
+    # Atomic write of BOTH files (the host takes real power cuts). Commit order is
+    # npz-first-then-sidecar: the sidecar is the commit marker — a shard is only
+    # counted downstream once its sidecar exists (buffer_manifest._build_entry
+    # skips a sidecar-less npz). Writing the sidecar last means a cut between the
+    # two leaves an orphan npz (harmless, skipped) rather than a sidecar pointing
+    # at a torn/missing npz.
+    #
+    # np.savez_compressed APPENDS `.npz` to a str/Path lacking that suffix, which
+    # would defeat the tmp name — so open the tmp file object ourselves and pass
+    # THE HANDLE (savez writes to it verbatim, no suffix). The `.npz.tmp` name
+    # also stays off the buffer-manifest glob `epoch_*/game_*.npz` (must end
+    # `.npz`).
+    npz_tmp = path.with_name(path.name + ".tmp")
+    try:
+        npz_tmp.unlink()  # clean any stale tmp from a previous crash (guarded)
+    except OSError:
+        pass
+    with open(npz_tmp, "wb") as f:
+        np.savez_compressed(f, **arrays)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(npz_tmp, path)
+
     meta = {
         "lineage": "hexfield",
         "schema": SCHEMA,
@@ -253,7 +276,27 @@ def write_compact_shard(
         **(sidecar or {}),
     }
     sidecar_path = path.with_suffix(".json") if path.suffix == ".npz" else Path(str(path) + ".json")
-    sidecar_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    side_tmp = sidecar_path.with_name(sidecar_path.name + ".tmp")
+    try:
+        side_tmp.unlink()  # clean any stale tmp from a previous crash (guarded)
+    except OSError:
+        pass
+    with open(side_tmp, "w", encoding="utf-8") as f:
+        json.dump(meta, f, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(side_tmp, sidecar_path)  # commit marker: publishes the shard
+
+    # Best-effort directory fsync so both renames are durable. Guarded: fsync on
+    # a directory fd is not portable to Windows test runs.
+    try:
+        dir_fd = os.open(str(path.parent), os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    except OSError:
+        pass
     return n
 
 

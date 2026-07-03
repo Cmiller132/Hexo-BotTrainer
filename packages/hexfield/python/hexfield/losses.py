@@ -163,11 +163,15 @@ def binned_value_loss(
     Masked rows contribute 0. The denominator defaults to the masked row count
     (or the item count when unmasked) and is overridable."""
 
-    target_tensor = torch.as_tensor(target, device=logits.device, dtype=logits.dtype)
+    # Targets stay fp32 end-to-end: under train autocast ``logits.dtype`` is fp16,
+    # which would quantize continuous scalar targets on entry AND compute the
+    # two-hot position (in [0, 64], fp16 ulp ~1/32 near the top) in fp16,
+    # mis-splitting adjacent-bin weights by up to ~3% of a bin (short-term
+    # values, cell_q, moves_left). The CE below already lifts logits to >= fp32
+    # via ``_at_least_fp32``, so an fp32 target costs nothing.
+    target_tensor = torch.as_tensor(target, device=logits.device, dtype=torch.float32)
     if target_tensor.shape != logits.shape:
-        target_tensor = scalar_to_binned_target(target_tensor).to(
-            device=logits.device, dtype=logits.dtype
-        )
+        target_tensor = scalar_to_binned_target(target_tensor).to(device=logits.device)
     if logits.shape != target_tensor.shape:
         raise ValueError(
             f"value target shape {tuple(target_tensor.shape)} != logits {tuple(logits.shape)}"

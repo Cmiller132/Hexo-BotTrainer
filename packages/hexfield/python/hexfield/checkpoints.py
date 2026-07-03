@@ -5,6 +5,7 @@ and a tolerant weights-only warm-start path."""
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -22,7 +23,33 @@ def save_checkpoint(path: Path, *, model: HexfieldNet, optimizer, epoch: int, ex
         "optimizer": optimizer.state_dict() if optimizer is not None else None,
     }
     path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(payload, path)
+    # Atomic save: the host takes real power cuts, and the supervisor always
+    # resumes from the highest-numbered epoch_*.pt with no fallback — a torn
+    # newest checkpoint crash-loops the run. Write to a temp file IN THE SAME
+    # directory, fsync, then os.replace onto the target so the target is only
+    # ever the fully-flushed file or the previous one. The tmp suffix keeps the
+    # name off the supervisor's `epoch_*.pt` glob (it must end at `.pt`).
+    tmp = path.with_name(path.name + ".tmp")
+    # Clean up any stale tmp left by a previous crash (guarded for portability).
+    try:
+        tmp.unlink()
+    except OSError:
+        pass
+    with open(tmp, "wb") as f:
+        torch.save(payload, f)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+    # Best-effort directory fsync so the rename itself is durable. Guarded:
+    # os.open(dir) / fsync on a directory is not portable to Windows test runs.
+    try:
+        dir_fd = os.open(str(path.parent), os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    except OSError:
+        pass
     return path
 
 

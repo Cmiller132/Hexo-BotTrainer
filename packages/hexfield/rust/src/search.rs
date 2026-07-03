@@ -1678,8 +1678,10 @@ fn run_searches_to_targets(
     };
 
     early_stop_pass(searches);
+    // No leaves in flight on the priming select, so the SH barrier is unblocked
+    // for every search (empty in-flight set).
     let (mut pending_leaves, _primed_progress) =
-        select_leaf_batch(searches, c_puct, leaf_batch_per_root, virtual_loss)?;
+        select_leaf_batch(searches, c_puct, leaf_batch_per_root, virtual_loss, &[])?;
 
     loop {
         // Check between every batch (a no-op in parity mode); see the
@@ -1689,8 +1691,10 @@ fn run_searches_to_targets(
             if !searches.iter().any(RustSearch::needs_visits) {
                 break;
             }
+            // pending_leaves is empty here: nothing is un-backed, so the SH
+            // barrier is unblocked for every search.
             let (leaves, made_progress) =
-                select_leaf_batch(searches, c_puct, leaf_batch_per_root, virtual_loss)?;
+                select_leaf_batch(searches, c_puct, leaf_batch_per_root, virtual_loss, &[])?;
             if leaves.is_empty() {
                 if !made_progress {
                     break;
@@ -1718,9 +1722,18 @@ fn run_searches_to_targets(
             request_logits,
         )?;
         // Prefetch select with the current batch still pending (pre-backup
-        // tree state).
+        // tree state). `pending_leaves` carries −virtual_loss on the trees of
+        // the searches it touches, so the SH barrier is blocked for exactly
+        // those searches (their round ranking would read contaminated stats).
         let next_leaves = if searches.iter().any(RustSearch::needs_visits) {
-            select_leaf_batch(searches, c_puct, leaf_batch_per_root, virtual_loss)?.0
+            select_leaf_batch(
+                searches,
+                c_puct,
+                leaf_batch_per_root,
+                virtual_loss,
+                &pending_leaves,
+            )?
+            .0
         } else {
             Vec::new()
         };
@@ -1735,6 +1748,11 @@ fn select_leaf_batch(
     c_puct: f32,
     leaf_batch_per_root: u32,
     virtual_loss: f32,
+    // Leaves selected in a prior batch that have not yet been backed up. Each
+    // still carries −virtual_loss on its owning search's tree, so the SH barrier
+    // must not advance a round for any search that owns one (its ranking would
+    // read vl-contaminated per-edge visits/completedQ).
+    in_flight: &[RustLeaf],
 ) -> PyResult<(Vec<RustLeaf>, bool)> {
     let mut leaves = Vec::new();
     let mut made_progress = false;
@@ -1747,7 +1765,14 @@ fn select_leaf_batch(
         // cap, halve the survivor set and re-seed before selecting. Looped
         // because advancing may immediately satisfy the next round's barrier.
         // No-op without an active Gumbel root.
-        if search.has_gumbel_root() {
+        //
+        // Gated on a drained search: skip the barrier while this search has any
+        // un-backed leaf in flight, since those leaves' virtual losses would
+        // contaminate the round ranking. The pending leaves are guaranteed to
+        // back up (apply_eval_backups runs every loop iteration), so the barrier
+        // fires on a later drained pass — no deadlock.
+        let drained = !in_flight.iter().any(|leaf| leaf.root_index == root_index);
+        if drained && search.has_gumbel_root() {
             while search.maybe_advance_gumbel_round() {}
         }
         let budget = leaf_batch_per_root.min(search.remaining_visits());
@@ -1905,7 +1930,20 @@ fn select_continuous_pass(
             // round. No-op unless a Gumbel root is active. Looped because
             // advancing may immediately satisfy the next round's barrier (e.g.
             // tiny budgets).
-            if search.has_gumbel_root() {
+            //
+            // Gated on a DRAINED slot (in_flight == 0): the barrier ranks on
+            // per-edge visits and completedQ, both of which carry −virtual_loss
+            // for every in-flight sim (apply_virtual_visit bumps visits and
+            // subtracts vl at selection; the real backup adds it back). Advancing
+            // a round on vl-contaminated stats mis-ranks survivors. A re-descent
+            // into an existing subtree carries −vl on the root edge WITHOUT a
+            // pending flag, so the root-edge `pending` count alone is not a
+            // sufficient drain test — the slot's in_flight counter is. When
+            // in_flight > 0 the barrier simply waits: those evals are guaranteed
+            // to back up and drive in_flight to 0, at which point either the
+            // barrier fires or the force-stuck rescue (in_flight == 0 in
+            // complete_ready_slots) finalizes the move, so this cannot deadlock.
+            if slot.in_flight == 0 && search.has_gumbel_root() {
                 while search.maybe_advance_gumbel_round() {}
             }
             let (leaves, progressed, added_in_flight) =
@@ -2931,6 +2969,7 @@ fn build_search_result_payload_native(
     let gumbel = if div.gumbel_target {
         let (gumbel_ids, gumbel_weights, gumbel_logits) = gumbel_target_policy(
             root,
+            baseline,
             div.gumbel_c_visit,
             div.gumbel_c_scale,
             div.gumbel_target_min_visits,
@@ -3097,6 +3136,7 @@ fn root_prior_policy(root: &RustNode) -> (Vec<PackedCoord>, Vec<f32>) {
 /// edge set if the floor would empty the support.
 fn gumbel_target_policy(
     root: &RustNode,
+    baseline: Option<&HashMap<PackedCoord, u32>>,
     c_visit: f32,
     c_scale: f32,
     min_visits: u32,
@@ -3104,7 +3144,18 @@ fn gumbel_target_policy(
     let logit_map = root.root_logits.clone().unwrap_or_default();
     // completedQ map + the v_mix visited-weighted fallback.
     let (completed, v_mix) = gumbel_completed_q(root, &logit_map);
-    let max_n = root.edges.iter().map(|e| e.visits).max().unwrap_or(0);
+    // σ scale = THIS MOVE's max delta visits over the move-entry baseline, so the
+    // exported target's σ multiplier matches the SH ranking's (tree.rs
+    // maybe_advance_gumbel_round) and a reused root's inherited visits do not
+    // inflate it. On a fresh (baseline None / all-zero) root this equals the
+    // cumulative max, so the recorded target is unchanged for lockstep/fresh
+    // roots.
+    let max_n = root
+        .edges
+        .iter()
+        .map(|e| edge_delta_visits(e, baseline))
+        .max()
+        .unwrap_or(0);
 
     // Candidate support = root edges meeting the visit floor.
     let mut in_support: Vec<&RustEdge> = root

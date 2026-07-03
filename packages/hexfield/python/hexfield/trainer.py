@@ -34,6 +34,7 @@ recomputes it from the window and config.
 from __future__ import annotations
 
 import json
+import math
 import os
 import time
 from typing import Any
@@ -357,22 +358,32 @@ class HexfieldTrainer:
                 e for e in train_entries if str(e.rel_path) not in self.train_state.data_files_used
             ]
         requested_rows = int(cfg.train_samples_per_epoch)
+        # build_window_split then per-row Bernoulli(kp)-thins the SELECTED files, so
+        # the epoch trains ~selected_rows*kp rows. Inflate the file-selection request
+        # by 1/kp so post-thinning survivors land near requested_rows; kp==1.0 leaves
+        # the request (and the whole path) bit-identical.
+        select_request = requested_rows if kp >= 1.0 else int(math.ceil(requested_rows / kp))
         sel_rng = np.random.default_rng(seed + epoch * 65_537)
         selected_files, selected_rows = _select_files_for_rows(
-            candidate_entries, requested_rows, sel_rng
+            candidate_entries, select_request, sel_rng
         )
         if selected_rows <= 0:
             return _skip("skipped", "no new training files",
                          keep_prob=kp, effective_rows=0, window_rows=0, reuse_ratio=0.0,
-                         requested=requested_rows, selected_rows=selected_rows)
+                         requested=requested_rows, select_request=select_request,
+                         selected_rows=selected_rows)
 
-        # (6) effective_rows = min(requested, selected); then bucket throttle / debit.
-        effective_rows = min(requested_rows, selected_rows)
+        # (6) effective_rows = the rows that will actually be trained in expectation:
+        # min(requested, selected*kp). Debit/accounting match the post-thin window,
+        # not the inflated pre-thin selection. kp==1.0 -> min(requested, selected)
+        # (bit-identical to the pre-fix accounting).
+        effective_rows = min(requested_rows, int(round(selected_rows * kp)))
         if self.train_state.train_bucket_level + 1.0e-9 < effective_rows:
             return _skip("train_bucket_limited", "train_bucket_limited",
                          keep_prob=kp, effective_rows=int(effective_rows), window_rows=0,
                          reuse_ratio=effective_rows / max(1, new_rows_this_epoch),
-                         requested=requested_rows, selected_rows=selected_rows)
+                         requested=requested_rows, select_request=select_request,
+                         selected_rows=selected_rows)
         # Debit effective_rows from the bucket at selection time; a later short
         # pass does not refund. steps_since_last_reload increments each selection.
         self.train_state.train_bucket_level = max(
@@ -402,6 +413,7 @@ class HexfieldTrainer:
             "train_bucket_level": float(self.train_state.train_bucket_level),
             "reuse_ratio": effective_rows / max(1, new_rows_this_epoch),
             "selected_files": len(selected_files),
+            "select_request": int(select_request),
             "selected_rows": int(selected_rows),
         }
         # Stash effective_rows / window_start / reuse_ratio / train_bucket_level

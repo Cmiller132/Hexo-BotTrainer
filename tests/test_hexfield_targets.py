@@ -20,6 +20,7 @@ import random
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 import torch
 
 from hexfield_testkit import api, random_playout
@@ -157,6 +158,55 @@ def test_binned_value_loss_matches_restnet() -> None:
     )
     zero = binned_value_loss(logits, target, mask=torch.zeros(8))
     assert float(zero) == 0.0  # all-zero mask yields exactly 0.0
+
+
+def test_binned_value_loss_bins_scalar_targets_in_fp32() -> None:
+    """Under train autocast ``logits`` are fp16, so binned_value_loss casts the
+    scalar target to fp16 (logits.dtype) at entry. The two-hot interpolation
+    ``position = (v+1)*(VALUE_BINS-1)/2`` must then be computed in fp32, not fp16:
+    near position ~32 (v~0) the fp16 ulp is ~1/64, mis-splitting the two-hot by that
+    fraction of a bin. The fix casts the (already-fp16) scalar to fp32 before
+    binning so the interpolation is fp32-exact.
+
+    Adversarial value: for this fp16 input the fp16-arithmetic position rounds to
+    32.125 while the exact (fp32/fp64) position is 32.140625 — a half-fp16-ulp
+    mis-split of the two-hot mass across bins 32/33."""
+
+    # The exact fp16 value the production cast (target -> logits.dtype) lands on.
+    v_fp16 = torch.tensor(0.004395599999999944, dtype=torch.float16)
+    v_exact = float(v_fp16)  # 0.00439453125, promoted to double
+    # Single-row fp16 logits so a scalar target bins to the matching (VALUE_BINS,).
+    fp16_logits = torch.randn(C.VALUE_BINS, dtype=torch.float16)
+
+    # fp64 reference two-hot computed from the exact fp16 input value.
+    pos = (v_exact + 1.0) * ((C.VALUE_BINS - 1) / 2.0)
+    lo = int(np.floor(pos))
+    hi = int(np.ceil(pos))
+    ref = torch.zeros(C.VALUE_BINS, dtype=torch.float64)
+    up_w = pos - lo
+    ref[lo] += 1.0 - up_w
+    ref[hi] += up_w
+
+    # NEW path (fixed): cast the fp16 scalar to fp32, then bin -> fp32 arithmetic.
+    fp32_binned = scalar_to_binned_target(v_fp16.to(torch.float32))
+    assert fp32_binned.dtype == torch.float32
+    assert torch.allclose(fp32_binned.double(), ref, atol=1e-7), (
+        f"fp32-binned two-hot {fp32_binned.tolist()} != fp64 ref {ref.tolist()}"
+    )
+
+    # OLD path (buggy): bin the fp16 scalar directly -> fp16 arithmetic; coarser.
+    fp16_binned = scalar_to_binned_target(v_fp16)
+    fp16_err = (fp16_binned.double() - ref).abs().max().item()
+    fp32_err = (fp32_binned.double() - ref).abs().max().item()
+    assert fp16_err > 1e-3, f"fp16 binning unexpectedly exact (err={fp16_err})"
+    assert fp32_err < 1e-6 < fp16_err, (
+        f"fix not load-bearing: fp32 err {fp32_err} vs fp16 err {fp16_err}"
+    )
+
+    # End-to-end: binned_value_loss with fp16 logits + a scalar target is finite and
+    # builds an fp32 distribution internally (the CE lifts logits via _at_least_fp32).
+    loss = binned_value_loss(fp16_logits, v_exact)
+    assert torch.isfinite(loss).all()
 
 
 def test_stv_and_opp_helpers_match_restnet() -> None:
@@ -464,6 +514,170 @@ def test_pair_budget_bucket_rule() -> None:
             assert len(bucket) * s_pad**2 <= budget
 
 
+def _fast_game_with_engine_facts(seed: int, max_plies: int = 24):
+    """Play one random game recording, per decision, (a) an EMPTY-fact fast row
+    exactly as selfplay's fast branch stores it and (b) the serve-time
+    PositionFacts for the same decision state. Returns (pending, ref_facts,
+    winner) where pending is the (player, empty-fast-sample, root_value) list."""
+
+    rng = random.Random(seed)
+    state = api.new_game()
+    pending = []
+    ref_facts = []
+    winner = None
+    for ply in range(max_plies):
+        ids = api.legal_action_ids(state)
+        if not ids:
+            break
+        facts = facts_from_engine(api.to_python_state(state))
+        ref_facts.append(facts)
+        # Mirror selfplay's fast branch: empty first_stone / hot / win facts,
+        # pcr_full False, records/current_player/phase captured pre-decision.
+        sample = HexfieldSampleData(
+            game_id="test",
+            turn_index=ply,
+            current_player=facts.current_player,
+            phase=facts.phase,
+            records=facts.records,
+            first_stone=None,
+            own_hot=(),
+            opp_hot=(),
+            own_win=(),
+            opp_win=(),
+            policy=(),
+            metadata={"pcr_full": False},
+        )
+        pending.append((facts.current_player, sample, rng.uniform(-0.8, 0.8)))
+        q, r = unpack_action_id(rng.choice(ids))
+        result = api.apply_action(state, PlacementAction(AxialCoord(q=q, r=r)))
+        if result.terminal:
+            winner = player_int(api.terminal(state).winner)
+            break
+    return pending, ref_facts, winner
+
+
+def test_fast_row_facts_recomputed_at_write() -> None:
+    """A written fast (value-only) row's first-stone / hot / win facts must equal
+    a reference window_scan recompute from its own records -- and the serve-time
+    engine facts -- closing the train/serve feature skew. Fast rows store empty
+    facts on the search hot path; _populate_fast_facts fills them at write time."""
+
+    from hexfield.features import window_scan
+    from hexfield.selfplay import _populate_fast_facts
+
+    pending, ref_facts, winner = _fast_game_with_engine_facts(41)
+    finalized = finalize_game_samples(pending, winner, mask_opp_from_fast=True)
+    # Every row is a fast row here; before populate their facts are empty.
+    assert all(not s.metadata.get("pcr_full", False) for s in finalized)
+    assert all(s.own_hot == () and s.first_stone is None for s in finalized)
+
+    populated = [_populate_fast_facts(s) for s in finalized]
+    saw_second_stone_first = False
+    for row, facts in zip(populated, ref_facts):
+        # (1) Matches a direct window_scan recompute from the row's records.
+        wh_own, wh_opp, ww_own, ww_opp = window_scan(
+            row.records, row.current_player, len(row.records)
+        )
+        assert row.own_hot == wh_own
+        assert row.opp_hot == wh_opp
+        assert row.own_win == ww_own
+        assert row.opp_win == ww_opp
+        # (2) Matches the serve-time engine facts (train/serve parity).
+        assert row.own_hot == facts.own_hot
+        assert row.opp_hot == facts.opp_hot
+        assert row.own_win == facts.own_win
+        assert row.opp_win == facts.opp_win
+        assert row.first_stone == facts.first_stone
+        # (3) first_stone is set for SecondStone-phase fast rows.
+        if row.phase == "SecondStone":
+            assert row.first_stone == (row.records[-1][0], row.records[-1][1])
+            assert row.first_stone is not None
+            saw_second_stone_first = True
+        else:
+            assert row.first_stone is None
+    assert saw_second_stone_first, "game had no SecondStone decision to exercise first_stone"
+
+
+def _hot_fast_sample(current_player: int) -> HexfieldSampleData:
+    """An EMPTY-fact fast row (as selfplay stores it) over a hand-built position
+    with four collinear player-0 stones on the Q axis -- a length-6 window of
+    count 4 -> a hot window (HOT_MIN_COUNT=4) with >= HOT_MIN_PLACEMENTS=7
+    placements. window_scan yields non-empty hot cells whose own/opp assignment
+    depends on ``current_player``, so this exercises the non-empty recompute the
+    random games never hit."""
+
+    records = (
+        (0, 0, 0, 1), (5, 5, 1, 2), (1, 0, 0, 3), (6, 5, 1, 4),
+        (2, 0, 0, 5), (7, 5, 1, 6), (3, 0, 0, 7),
+    )
+    return HexfieldSampleData(
+        game_id="test", turn_index=len(records), current_player=current_player,
+        phase="FirstStone", records=records,
+        first_stone=None, own_hot=(), opp_hot=(), own_win=(), opp_win=(),
+        policy=(), metadata={"pcr_full": False},
+    )
+
+
+def test_fast_row_facts_nonempty_and_side_relative() -> None:
+    """On a constructed hot position the recompute yields non-empty hot cells,
+    and the own/opp split flips with current_player -- proving the fix is
+    load-bearing (planes were force-zeroed before) and side-relative."""
+
+    from hexfield.features import window_scan
+    from hexfield.selfplay import _populate_fast_facts
+
+    p0 = _populate_fast_facts(_hot_fast_sample(current_player=0))
+    p1 = _populate_fast_facts(_hot_fast_sample(current_player=1))
+    ref0 = window_scan(p0.records, 0, len(p0.records))
+    assert (p0.own_hot, p0.opp_hot, p0.own_win, p0.opp_win) == ref0
+    assert p0.own_hot and not p0.opp_hot          # player-0's window -> own for cp=0
+    assert p1.opp_hot and not p1.own_hot          # same window -> opp for cp=1
+    assert p0.own_hot == p1.opp_hot               # cells identical, side flipped
+
+
+def test_fast_row_facts_survive_shard_roundtrip(tmp_path) -> None:
+    """The recomputed fast-row facts persist through the compact-shard writer
+    (the same path _writer_loop takes), so the stored planes are non-empty and
+    match the reference -- not force-zeroed as before the fix."""
+
+    from hexfield.selfplay import _populate_fast_facts
+
+    populated = [_populate_fast_facts(_hot_fast_sample(current_player=1))]
+    assert any(s.own_hot or s.opp_hot or s.own_win or s.opp_win for s in populated)
+
+    path = tmp_path / "game.npz"
+    write_compact_shard(path, populated)
+    restored = read_compact_shard(path)
+    for a, b in zip(populated, restored):
+        assert b.own_hot == a.own_hot and b.opp_hot == a.opp_hot
+        assert b.own_win == a.own_win and b.opp_win == a.opp_win
+        assert b.first_stone == a.first_stone
+        assert b.metadata["pcr_full"] is False  # still a value-only row
+
+
+def test_resume_counts_only_committed_shards(tmp_path) -> None:
+    """Resume accounting counts a game done only when its npz AND .json sidecar
+    both exist. A sidecar-less (power-cut) npz is excluded from the done count
+    but still feeds the next-key max so keys are never reused."""
+
+    epoch_dir = tmp_path / "epoch_000000"
+    epoch_dir.mkdir()
+    # Two committed games (npz + sidecar) and one uncommitted (npz only).
+    for key in (5, 6):
+        (epoch_dir / f"game_{key}.npz").write_bytes(b"x")
+        (epoch_dir / f"game_{key}.json").write_text("{}", encoding="utf-8")
+    (epoch_dir / "game_9.npz").write_bytes(b"x")  # sidecar-less: not committed
+
+    existing = sorted(epoch_dir.glob("game_*.npz"))
+    already_done = sum(1 for p in existing if p.with_suffix(".json").exists())
+    assert already_done == 2  # the sidecar-less npz does not count
+
+    # Next key considers ALL npz (including the sidecar-less one) so 9 is never
+    # reused: next_key == max(5, 6, 9) + 1.
+    existing_keys = [int(p.stem.split("_", 1)[1]) for p in existing]
+    assert max(existing_keys) + 1 == 10
+
+
 def test_decode_moves_left_median() -> None:
     # decode_moves_left takes the softmax expectation over the 65-bin scalar
     # support [-1, 1] and maps it onto decisions [0, MOVES_LEFT_CAP]:
@@ -476,3 +690,26 @@ def test_decode_moves_left_median() -> None:
     logits[2, 64] = 40.0  # bin 64 -> scalar +1 -> cap decisions
     decoded = decode_moves_left(logits)
     assert torch.allclose(decoded, torch.tensor([0.0, 0.5 * cap, cap]))
+
+
+def test_rust_expand_rejects_horizon_mismatch() -> None:
+    """The rust kernel copies the stvalue block POSITIONALLY, so a window whose
+    stored horizons differ from the requested set (even at the same length) must be
+    rejected — otherwise the STV heads train on the wrong horizon's target. The
+    serial python path remaps by horizon VALUE and is unaffected."""
+    import dataclasses
+
+    pytest.importorskip(
+        "hexfield._rust", reason="rust backend .so required for _expand_rows_rust"
+    )
+    from hexfield.expand_backends import _expand_rows_rust
+    from hexfield.window import PackedWindow
+
+    # A same-length but re-tuned horizon set: (2, 6, 16) stored vs (2, 6, 99) asked.
+    win = dataclasses.replace(PackedWindow.empty(), horizons=(2, 6, 16))
+    with pytest.raises(ValueError, match="horizons"):
+        _expand_rows_rust(win, [], np.empty(0, dtype=np.int64), (2, 6, 99), False)
+
+    # Reordered same values must also be rejected (positional copy is order-sensitive).
+    with pytest.raises(ValueError, match="horizons"):
+        _expand_rows_rust(win, [], np.empty(0, dtype=np.int64), (6, 2, 16), False)

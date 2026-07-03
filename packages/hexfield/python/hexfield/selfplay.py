@@ -18,6 +18,7 @@ import math
 import queue
 import threading
 import time
+from dataclasses import replace
 from typing import Any
 
 import numpy as np
@@ -221,9 +222,12 @@ class ContinuousDriver:
                 self.policy_entropies.append(float(-(probs * np.log(probs)).sum()))
             self.root_values.append(float(payload["root_value"]))
         elif not full and not init:
-            # Fast rows are not written, but the pending list keeps every
-            # decision so opp-policy lookup and moves_left counts remain complete
-            # (mask_opp_from_fast at finalize).
+            # Fast rows ARE written for completed games (as value-only rows,
+            # policy_valid=0 -- see the writer filter); the pending list also
+            # keeps every decision so opp-policy lookup and moves_left counts
+            # remain complete (mask_opp_from_fast at finalize). The first-stone /
+            # hot / win facts are left empty here (off the search hot path) and
+            # recomputed in _writer_loop before the row is written.
             sample = HexfieldSampleData(
                 game_id=str(game_key), turn_index=tape.ply, current_player=current,
                 phase=record_phase(tape.ply), records=tuple(tape.records),
@@ -325,6 +329,20 @@ class ContinuousDriver:
                     tape.pending, winner, self.horizons,
                     truncated=truncated, mask_opp_from_fast=True,
                 )
+                # Populate the first-stone / hot / win facts for fast rows off the
+                # search hot path. Fast rows stored empty facts at decision time
+                # (pcr_full False); recompute exactly what the full branch would
+                # have produced from the row's own pre-decision records/player/
+                # phase (s.records is the pre-decision placement tuple). Only the
+                # written value-only rows carry these planes downstream, so the
+                # recompute must match the full branch bit-for-bit.
+                finalized = [
+                    _populate_fast_facts(s)
+                    if not s.metadata.get("pcr_full", False)
+                    and not s.metadata.get("policy_init", False)  # init rows are never written
+                    else s
+                    for s in finalized
+                ]
                 rows = [
                     s for s in finalized
                     if s.metadata.get("pcr_full", False)                      # all full rows (completed + truncated)
@@ -380,6 +398,35 @@ class ContinuousDriver:
         }
 
 
+def _populate_fast_facts(sample: HexfieldSampleData) -> HexfieldSampleData:
+    """Recompute the first-stone / hot / win facts a fast row stored empty.
+
+    Fast (playout-cap-randomized) decisions skip the window scan on the search
+    hot path and store empty facts; completed games nonetheless write them as
+    value-only rows, so the feature planes must be rebuilt off-thread. The
+    inputs are the row's own pre-decision facts (``records`` is the pre-decision
+    placement tuple, ``current_player`` / ``phase`` the decision's player /
+    phase), so this reproduces exactly what the full branch computes at the same
+    decision point."""
+
+    own_hot, opp_hot, own_win, opp_win = window_scan(
+        sample.records, sample.current_player, len(sample.records)
+    )
+    first_stone = (
+        (sample.records[-1][0], sample.records[-1][1])
+        if sample.phase == "SecondStone"
+        else None
+    )
+    return replace(
+        sample,
+        first_stone=first_stone,
+        own_hot=own_hot,
+        opp_hot=opp_hot,
+        own_win=own_win,
+        opp_win=opp_win,
+    )
+
+
 def generate_selfplay_epoch(*, ctx, components, epoch: int, games_per_epoch: int) -> dict[str, Any]:
     cfg = parse_hexfield_config(ctx.config.model.config)
     sp = cfg.selfplay
@@ -394,7 +441,13 @@ def generate_selfplay_epoch(*, ctx, components, epoch: int, games_per_epoch: int
     # any the interrupted run assigned. In-flight (unfinished) games are not
     # recovered; the remainder replaces them with fresh games.
     existing = sorted(out_dir.glob("game_*.npz"))
-    already_done = len(existing)
+    # A game counts as done only when both its npz AND its .json sidecar exist:
+    # the sidecar is the commit marker (the buffer manifest skips sidecar-less
+    # shards forever), so a power-cut npz with no sidecar is not a completed
+    # game and must not shrink the epoch's remaining count. Sidecar-less npz
+    # files are left on disk and still feed the next-key logic below so keys are
+    # never reused.
+    already_done = sum(1 for p in existing if p.with_suffix(".json").exists())
     remaining = max(games_target - already_done, 0)
     resuming = already_done > 0
 
@@ -418,7 +471,10 @@ def generate_selfplay_epoch(*, ctx, components, epoch: int, games_per_epoch: int
         epoch=epoch, games_target=remaining, max_plies=sp.max_game_plies, out_dir=out_dir,
         diag_dir=ctx.diagnostics_dir, active_limit=slots,
     )
-    if resuming:
+    # Advance next_key past every npz already on disk -- including sidecar-less
+    # (uncommitted) ones, which do not count as done but whose keys must not be
+    # reused -- so a restart never overwrites a prior key.
+    if existing:
         existing_keys = []
         for p in existing:
             try:

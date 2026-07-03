@@ -25,6 +25,8 @@ Notes:
 from __future__ import annotations
 
 import hashlib
+import warnings
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Sequence
@@ -772,8 +774,26 @@ def build_window_split(
     ordered = sorted(selected, key=lambda e: (int(e.generation), int(e.game_key)))
 
     survivors: list[PackedWindow] = []
+    skipped: list[str] = []
     for entry in ordered:
-        shard = load_packed_shard(samples_dir / entry.rel_path)
+        shard_path = samples_dir / entry.rel_path
+        # A power cut can leave a shard's npz torn while its commit-marker sidecar
+        # survives (or a v-mismatch/short read), so load_packed_shard raises. Such
+        # a shard stays in the recent window for dozens of epochs, so an unguarded
+        # load crash-loops training EVERY epoch. Skip the bad shard loudly instead
+        # (the operator quarantines the file manually; we do not delete/move it).
+        try:
+            shard = load_packed_shard(shard_path)
+        except (zipfile.BadZipFile, ValueError, KeyError, OSError, EOFError) as exc:
+            skipped.append(str(shard_path))
+            warnings.warn(
+                f"build_window_split: skipping unreadable shard {shard_path} "
+                f"({type(exc).__name__}: {exc}); window will have fewer rows "
+                "(operator: quarantine this file)",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            continue
         if keep_prob >= 1.0:
             survivors.append(shard)
             continue
@@ -781,6 +801,19 @@ def build_window_split(
         # in stored row order.
         mask = rng.random(shard.n) < keep_prob
         survivors.append(_subset_packed(shard, mask))
+
+    if skipped:
+        # Surface the aggregate skip count in diagnostics (the return type is a
+        # bare PackedWindow, so a summary warning is the visible signal). A skip
+        # means the built window has fewer rows than the caller's accounting
+        # expects; the trainer permutes over actual window.n rows, so this is
+        # tolerated (fewer rows, no out-of-range indexing).
+        warnings.warn(
+            f"build_window_split: {len(skipped)}/{len(ordered)} shards skipped "
+            f"as unreadable (torn npz?); {sorted(skipped)}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
 
     return concat_packed(survivors)
 

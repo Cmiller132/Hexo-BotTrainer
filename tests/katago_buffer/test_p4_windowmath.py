@@ -42,6 +42,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 import dense_cnn_restnet.replay as dense_replay
 from hexfield import shards as hex_shards
@@ -284,6 +285,86 @@ def test_split_and_selection() -> None:
 
 
 # ----------------------------------------------------------------------
+# 3b. keep_prob double-subsample accounting (bug fix)
+# ----------------------------------------------------------------------
+
+
+def test_keep_prob_selection_accounting() -> None:
+    """When keep_prob<1.0, select_training_samples inflates the file-selection
+    request by 1/kp so build_window_split's per-row Bernoulli(kp) thinning leaves
+    ~requested_rows survivors, and debits/accounts effective_rows = the post-thin
+    expectation (min(requested, round(selected*kp))). This mirrors the exact
+    arithmetic of the fixed select_training_samples without touching a GPU/model."""
+    import math
+
+    # Big window of 100-row shards so the inflated (1/kp) request has headroom.
+    entries = [_FakeEntry(100, g, g * 1_000_000 + i, f"epoch_{g:06d}/game_{g*1_000_000+i}.npz")
+               for g in range(1, 40) for i in range(40)]  # 1560 shards * 100 = 156_000 rows
+    total = sum(e.rows for e in entries)
+    requested = 6_000
+
+    # --- kp == 1.0: request and accounting are BIT-IDENTICAL to the old path. ----
+    kp1 = keep_prob(used_rows=requested, keep_target_rows=10_000_000)  # >= target -> 1.0
+    assert kp1 == 1.0
+    select_request1 = requested if kp1 >= 1.0 else int(math.ceil(requested / kp1))
+    assert select_request1 == requested  # no inflation
+    _sel1, selected1 = _select_files_for_rows(entries, select_request1, np.random.default_rng(1))
+    eff1_new = min(requested, int(round(selected1 * kp1)))
+    eff1_old = min(requested, selected1)  # pre-fix formula
+    assert eff1_new == eff1_old, "kp=1.0 accounting must be bit-identical to the old path"
+
+    # --- kp < 1.0: inflate the request, account the post-thin survivors. --------
+    used = 60_000  # window larger than the keep target -> kp = target/used < 1
+    kp = keep_prob(used_rows=used, keep_target_rows=30_000)
+    assert kp == pytest.approx(0.5)
+    select_request = requested if kp >= 1.0 else int(math.ceil(requested / kp))
+    assert select_request == int(math.ceil(requested / kp)) == 12_000  # inflated by 1/kp
+
+    sel, selected = _select_files_for_rows(entries, select_request, np.random.default_rng(2025))
+    assert selected >= select_request, "inflated selection must cover the 1/kp-scaled request"
+
+    effective_rows = min(requested, int(round(selected * kp)))
+    # The expected trained rows (post-thin) should be ~requested, NOT requested*kp.
+    assert effective_rows == requested, (
+        f"effective_rows {effective_rows} != requested {requested}; the 1/kp inflation "
+        f"should make post-thin survivors reach the target"
+    )
+
+    # Simulate build_window_split's per-shard Bernoulli(kp) thinning and confirm the
+    # actually-trained survivor count lands near effective_rows (the debited value) —
+    # i.e. accounting matches what will be trained in expectation, closing the bug.
+    thin_rng = np.random.default_rng(2025)
+    ordered = sorted(sel, key=lambda e: (int(e.generation), int(e.game_key)))
+    survivors = int(sum((thin_rng.random(int(e.rows)) < kp).sum() for e in ordered))
+    # perm[:effective_rows] truncation in train_passes caps the trained rows at
+    # effective_rows; survivors >= effective_rows means the epoch trains exactly
+    # effective_rows rows. Assert survivors is close to (and at least ~) the target.
+    assert survivors == pytest.approx(requested, rel=0.1), (
+        f"post-thin survivors {survivors} not within 10% of requested {requested}"
+    )
+    assert survivors >= effective_rows * 0.9, (
+        f"survivors {survivors} far below debited effective_rows {effective_rows}"
+    )
+
+    # --- window smaller than requested: exact behavior (train what exists). -----
+    small = [_FakeEntry(100, 1, i, f"epoch_000001/game_{i}.npz") for i in range(20)]  # 2000 rows
+    kp_s = keep_prob(used_rows=2_000, keep_target_rows=1_000)  # 0.5
+    assert kp_s == pytest.approx(0.5)
+    req_s = 5_000  # more than the (thinned) window can supply
+    select_request_s = int(math.ceil(req_s / kp_s))  # 10_000 > 2_000 available
+    sel_s, selected_s = _select_files_for_rows(small, select_request_s, np.random.default_rng(9))
+    assert selected_s == 2_000, "short window returns all rows"
+    effective_s = min(req_s, int(round(selected_s * kp_s)))
+    assert effective_s == 1_000, (
+        f"short-window effective_rows {effective_s} != round(2000*0.5)=1000"
+    )
+    assert effective_s < req_s, "when the window is smaller than requested, train what exists"
+    print("  keep_prob accounting: kp=1.0 bit-identical; kp=0.5 inflates request 2x, "
+          f"effective_rows={requested} post-thin survivors~{survivors}; "
+          "short window trains round(selected*kp)")
+
+
+# ----------------------------------------------------------------------
 # 4. train-bucket governor
 # ----------------------------------------------------------------------
 
@@ -505,6 +586,7 @@ def main() -> int:
     test_window_math_parity()
     test_select_recent_window()
     test_split_and_selection()
+    test_keep_prob_selection_accounting()
     test_update_train_bucket()
 
     # --- gates needing real shards (copied out, mutate only copies) ----------

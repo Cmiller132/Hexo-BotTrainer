@@ -821,6 +821,11 @@ impl RustSearch {
             return Ok(false);
         }
 
+        // The old root's player, captured before the subtree clone replaces
+        // self.nodes. edge.value_sum is in the OLD root's player perspective;
+        // whether the promoted root shares that perspective decides the sign.
+        let old_player = self.nodes[0].player;
+
         let mut old_to_new = HashMap::new();
         let mut nodes = Vec::new();
         clone_subtree_nodes(child_id, &self.nodes, &mut old_to_new, &mut nodes);
@@ -832,7 +837,15 @@ impl RustSearch {
         nodes[0].state_hash = root_hash;
         if edge.visits > nodes[0].visits {
             nodes[0].visits = edge.visits;
-            nodes[0].value_sum = -edge.value_sum;
+            // edge.value_sum flips perspective only when the promoted root is
+            // the other player; a same-player promotion (FirstStone ->
+            // SecondStone keeps current_player) already matches, and negating
+            // would flip the sign.
+            nodes[0].value_sum = if nodes[0].player == old_player {
+                edge.value_sum
+            } else {
+                -edge.value_sum
+            };
         }
         let mut node_table = HashMap::with_capacity(nodes.len());
         for (index, node) in nodes.iter().enumerate() {

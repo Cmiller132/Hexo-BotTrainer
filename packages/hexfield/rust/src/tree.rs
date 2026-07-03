@@ -825,6 +825,15 @@ impl RustSearch {
         } else {
             0
         };
+        // Move-entry snapshot of every root-edge visit count. Read here (before
+        // any of this move's visits land) so this move's σ-scale can be built
+        // from delta visits regardless of what the reused subtree carried in.
+        let entry_visits: HashMap<PackedCoord, u32> = self
+            .nodes[0]
+            .edges
+            .iter()
+            .map(|e| (e.action_id, e.visits))
+            .collect();
         let mut state = GumbelRootState {
             survivors,
             gumbel: g_kept,
@@ -833,6 +842,7 @@ impl RustSearch {
             num_rounds,
             round: 0,
             round_cap: HashMap::new(),
+            entry_visits,
             sequential_halving,
         };
         if sequential_halving {
@@ -903,10 +913,21 @@ impl RustSearch {
         let root = &self.nodes[0];
         let logit_map = root.root_logits.clone().unwrap_or_default();
         let (completed, _v_mix) = gumbel_completed_q(root, &logit_map);
-        let max_n = root.edges.iter().map(|e| e.visits).max().unwrap_or(0);
         let c_visit = self.divergences.gumbel_c_visit;
         let c_scale = self.divergences.gumbel_c_scale;
         let state = self.gumbel_root.as_ref().expect("checked above");
+        // σ scale = THIS MOVE's max delta visits (current − move-entry baseline),
+        // NOT the cumulative count: on a reused root the inherited visits would
+        // otherwise apply a late-round σ multiplier to survivors whose Q rests on
+        // a handful of fresh look-aheads. On a fresh root every entry baseline is
+        // 0, so this is numerically identical to the cumulative max.
+        let entry = &state.entry_visits;
+        let max_n = root
+            .edges
+            .iter()
+            .map(|e| e.visits.saturating_sub(entry.get(&e.action_id).copied().unwrap_or(0)))
+            .max()
+            .unwrap_or(0);
         let mut ranked: Vec<(PackedCoord, f32)> = state
             .survivors
             .iter()
@@ -1592,6 +1613,11 @@ impl RustSearch {
             return Ok(false);
         }
 
+        // The old root's player, captured BEFORE the subtree clone replaces
+        // self.nodes. edge.value_sum is in the OLD root's player perspective;
+        // whether the promoted root shares that perspective decides the sign.
+        let old_player = self.nodes[0].player;
+
         let mut old_to_new = HashMap::new();
         let mut nodes = Vec::new();
         clone_subtree_nodes(child_id, &self.nodes, &mut old_to_new, &mut nodes);
@@ -1603,11 +1629,18 @@ impl RustSearch {
         nodes[0].state_hash = root_hash;
         if edge.visits > nodes[0].visits {
             nodes[0].visits = edge.visits;
-            // The edge value_sum is the child value from the parent's
-            // perspective; it is negated unconditionally here. This seeds the
-            // promoted root's FPU baseline and first reported value and is
-            // overwritten by fresh backups during the next search.
-            nodes[0].value_sum = -edge.value_sum;
+            // edge.value_sum carries the child value in the OLD root's player
+            // perspective. When the promoted root is the OTHER player (normal
+            // turn pass) the perspective flips, so negate; on a same-player
+            // promotion (FirstStone -> SecondStone keeps current_player) the
+            // perspective already matches and negating would flip the sign.
+            // This seeds the promoted root's FPU baseline and first reported
+            // value; it is diluted (not overwritten) by fresh backups.
+            nodes[0].value_sum = if nodes[0].player == old_player {
+                edge.value_sum
+            } else {
+                -edge.value_sum
+            };
         }
         let mut node_table = HashMap::with_capacity(nodes.len());
         for (index, node) in nodes.iter().enumerate() {
@@ -2329,6 +2362,13 @@ pub struct GumbelRootState {
     /// the current round (its visits at round entry + this round's per-survivor
     /// quota). Keyed by action_id; only survivors appear.
     pub round_cap: HashMap<PackedCoord, u32>,
+    /// Per-root-edge visit counts snapshotted at THIS MOVE's Gumbel-root init
+    /// (move entry). On a reused root these are the inherited counts from the
+    /// previous move's subtree; on a fresh root they are all 0. The SH ranking
+    /// and the exported gumbel target derive their σ-scale `max_n` from this
+    /// move's DELTA visits (current − entry) so a reuse-inflated cumulative
+    /// count cannot apply a late-round σ multiplier to early-round survivors.
+    pub entry_visits: HashMap<PackedCoord, u32>,
     /// Whether SH halving is active. When false (gumbel_root on, SH off) the
     /// candidate set is fixed to the top-m and visits allocate by PUCT among
     /// them (no rounds, no caps).
@@ -3354,5 +3394,169 @@ mod tests {
             second_rate <= 0.05,
             "second-pick GoF fail rate {second_rate:.3} exceeds 5% ({second_fail}/{N_VECTORS})"
         );
+    }
+
+    // === advance_root promoted-root value seeding (same/different player) ===
+
+    /// Build a search on `root_state` with a single materialized root edge for
+    /// `action`, wired to a child node whose player is `child_player`. The edge
+    /// carries `edge_value_sum` over `edge_visits` (parent-perspective Q). This
+    /// is the minimal shape advance_root needs to exercise its value seeding.
+    fn search_with_child_edge(
+        root_state: RustHexoState,
+        action: PackedCoord,
+        child_player: Player,
+        edge_value_sum: f32,
+        edge_visits: u32,
+    ) -> RustSearch {
+        // eval prior on `action` so RustSearch::new materializes it as a root
+        // edge; a second distinct legal action keeps the root non-degenerate.
+        let eval = eval_with_priors(vec![(action, 0.7), (action + 1, 0.3)], 0.0);
+        let mut s = RustSearch::new(
+            root_state,
+            &eval,
+            64,
+            0.2,
+            0.2,
+            1.0,
+            None,
+            widening(0.95, 2, 8),
+            0.0,
+            false,
+            Divergences::production(),
+        )
+        .expect("search builds");
+        // Materialize `action` as a root edge (root edges are lazily expanded
+        // from the owned candidate tail).
+        let edge_index = s
+            .gumbel_root_edge_index(action)
+            .expect("action materializes as a root edge");
+        // Append a child node for `action`; give it its own edges so the
+        // promoted root is a normal (non-empty) node after clone.
+        let child_id = s.nodes.len();
+        let mut child = s.nodes[0].clone();
+        child.player = child_player;
+        child.visits = edge_visits.saturating_sub(1);
+        child.value_sum = 0.0;
+        s.nodes.push(child);
+        let edge = &mut s.nodes[0].edges[edge_index];
+        edge.child = Some(child_id);
+        edge.visits = edge_visits;
+        edge.value_sum = edge_value_sum;
+        s
+    }
+
+    #[test]
+    fn advance_root_same_player_promotion_keeps_edge_value_sign() {
+        // Root at FirstStone (reached by the Opening ZERO move): current_player
+        // is Player1 and stays Player1 through FirstStone -> SecondStone, so the
+        // promoted child is the SAME player. edge.value_sum is already in that
+        // player's perspective, so the seed must NOT be negated.
+        let mut root_state = RustHexoState::new();
+        apply_placement(&mut root_state, Placement { coord: HexCoord::ZERO })
+            .expect("opening move");
+        assert_eq!(root_state.current_player(), Player::Player1);
+        let action = pack_coord(HexCoord::new(1, 0));
+        // Positive edge Q (parent/Player1 perspective) must stay positive.
+        let mut s = search_with_child_edge(root_state, action, Player::Player1, 6.0, 8);
+        assert!(s.advance_root(action).expect("advance ok"));
+        assert_eq!(s.nodes[0].player, Player::Player1);
+        assert!(
+            s.nodes[0].value() > 0.0,
+            "same-player promotion must keep the edge value sign, got {}",
+            s.nodes[0].value()
+        );
+        // Exact: value_sum seeded to +edge.value_sum, visits to edge.visits.
+        assert!((s.nodes[0].value() - 6.0 / 8.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn advance_root_different_player_promotion_negates_edge_value() {
+        // Root at Opening: current_player is Player0; advancing ZERO yields a
+        // FirstStone child whose player is Player1 (DIFFERENT). edge.value_sum
+        // is in Player0's perspective, so the seed MUST be negated into the
+        // child's perspective.
+        let root_state = RustHexoState::new();
+        assert_eq!(root_state.current_player(), Player::Player0);
+        let action = pack_coord(HexCoord::ZERO);
+        // Positive edge Q (parent/Player0 perspective) must flip to negative.
+        let mut s = search_with_child_edge(root_state, action, Player::Player1, 6.0, 8);
+        assert!(s.advance_root(action).expect("advance ok"));
+        assert_eq!(s.nodes[0].player, Player::Player1);
+        assert!(
+            s.nodes[0].value() < 0.0,
+            "different-player promotion must negate the edge value, got {}",
+            s.nodes[0].value()
+        );
+        assert!((s.nodes[0].value() - (-6.0 / 8.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn gumbel_sh_ranking_max_n_uses_this_moves_delta_visits() {
+        // BUG 3: on a reused root the σ scale must be THIS move's delta visits,
+        // not the cumulative (reuse-inflated) max. Snapshot a large entry
+        // baseline, then verify the ranking's max_n reflects only fresh deltas.
+        let eval = gumbel_eval(8);
+        let mut dv = Divergences::gumbel();
+        dv.gumbel_m = 8;
+        let mut s = build_search_from_eval(&eval, dv);
+        s.init_gumbel_root(11, 256);
+        // Materialize every survivor as a root edge (edges are lazily expanded).
+        let survivors: Vec<PackedCoord> =
+            s.gumbel_root.as_ref().unwrap().survivors.clone();
+        for &a in &survivors {
+            let _ = s.gumbel_root_edge_index(a).expect("survivor materializes");
+        }
+        // Simulate a fully-reused root: inflate every materialized edge's
+        // cumulative visits by 500 over the move-entry baseline, and set the
+        // entry snapshot to those same current counts (every action inherited
+        // its whole subtree from the previous move, so this move's delta is 0).
+        for e in s.nodes[0].edges.iter_mut() {
+            e.visits += 500;
+        }
+        {
+            let entry: HashMap<PackedCoord, u32> = s.nodes[0]
+                .edges
+                .iter()
+                .map(|e| (e.action_id, e.visits))
+                .collect();
+            s.gumbel_root.as_mut().unwrap().entry_visits = entry;
+        }
+        // With entry == current, this move's delta max_n is 0; assert the
+        // ranking computes σ off delta (max_n 0), not the inflated cumulative.
+        let state = s.gumbel_root.as_ref().unwrap();
+        let entry = &state.entry_visits;
+        let delta_max = s.nodes[0]
+            .edges
+            .iter()
+            .map(|e| e.visits.saturating_sub(entry.get(&e.action_id).copied().unwrap_or(0)))
+            .max()
+            .unwrap_or(0);
+        let cumulative_max = s.nodes[0].edges.iter().map(|e| e.visits).max().unwrap_or(0);
+        assert_eq!(delta_max, 0, "delta max_n must subtract the entry baseline");
+        assert!(cumulative_max >= 500, "cumulative would be reuse-inflated");
+    }
+
+    #[test]
+    fn gumbel_entry_visits_zero_on_fresh_root_delta_equals_cumulative() {
+        // Invariant: on a fresh (non-reused) root the entry snapshot is all 0,
+        // so delta visits == cumulative visits and BUG-3's fix is a no-op there.
+        let eval = gumbel_eval(8);
+        let mut dv = Divergences::gumbel();
+        dv.gumbel_m = 8;
+        let mut s = build_search_from_eval(&eval, dv);
+        s.init_gumbel_root(3, 256);
+        for (&_a, &v) in s.gumbel_root.as_ref().unwrap().entry_visits.iter() {
+            assert_eq!(v, 0, "fresh-root entry baseline must be 0");
+        }
+        // Bump some edges; delta must equal cumulative when the baseline is 0.
+        for (i, e) in s.nodes[0].edges.iter_mut().enumerate() {
+            e.visits = i as u32 + 1;
+        }
+        let entry = &s.gumbel_root.as_ref().unwrap().entry_visits;
+        for e in s.nodes[0].edges.iter() {
+            let delta = e.visits.saturating_sub(entry.get(&e.action_id).copied().unwrap_or(0));
+            assert_eq!(delta, e.visits, "delta must equal cumulative on a fresh root");
+        }
     }
 }
