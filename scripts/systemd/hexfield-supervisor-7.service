@@ -1,0 +1,54 @@
+[Unit]
+Description=hexfield_main_7 self-play training supervisor (c=192, heads 3x64, trunk CCAx5; GUMBEL; full triton serve stack; BC-prefit warm start from main_6 samples)
+After=network.target
+StartLimitIntervalSec=200
+StartLimitBurst=5
+
+[Service]
+Type=simple
+KillMode=control-group
+# main_7 runs from the DEV repo (it carries the gumbel rust .so, the 2026-07
+# triton kernels, and the env-driven architecture). The architecture env below
+# is LOAD-BEARING: a checkpoint only loads into a net built with the same
+# CHANNELS / ATTENTION_HEADS / TRUNK.
+Environment=ROOT=/mnt/e/Hexo-BotTrainer-hexgt
+Environment=RUNDIR=/mnt/e/Hexo-BotTrainer/runs/hexfield_main_7
+Environment=CONFIG=/mnt/e/Hexo-BotTrainer-hexgt/configs/hexfield_main_7.toml
+Environment=HEXFIELD_SUPPORT_RADIUS=4
+Environment=HEXFIELD_CHANNELS=192
+Environment=HEXFIELD_ATTENTION_HEADS=3
+Environment=HEXFIELD_TRUNK=CCACCACCACCACCA
+Environment=HEXFIELD_TRAIN_FLEX=1
+Environment=HEXFIELD_ANCHOR_ROOTS=/mnt/e/Hexo-BotTrainer-hexgt
+# Serve stack (2026-07-02/03 rounds 1+2, all parity-gated; see
+# docs/analysis/MAIN6_SERVE_SPEEDUP_2026-07-02.md and PLAN_MAIN7_PERF_ROADMAP.md):
+Environment=HEXFIELD_TRITON_CONV=1
+Environment=HEXFIELD_FLEX_PAIR=1
+Environment=HEXFIELD_SERVE_HALF=1
+Environment=HEXFIELD_RUST_PACK=1
+Environment=HEXFIELD_COPY_STREAM=1
+# main_7 kernel additions (2026-07-03, parity 1.4e-3/2.3e-3 under the full
+# fp16 stack at main_6 shapes; re-gate at c=192 before first launch):
+Environment=HEXFIELD_TRITON_ATTN=1
+Environment=HEXFIELD_TRITON_CONV_LN=1
+# fp8 convs measured 4.5e-2 value deviation (2026-07-03) — OFF pending an
+# arena-eval verdict at bring-up. Enable only with a measured strength pass:
+# Environment=HEXFIELD_CONV_FP8=1
+Environment=HEXFIELD_TRAIN_COMPILE=1
+# Training flex backward memory grows ~1.5x at c=192 — if training OOMs or
+# thrashes, set an explicit pair budget below the c=128 default (the 8e7
+# experiment mapped the cliff; tune at bring-up smoke):
+# Environment=HEXFIELD_TRAIN_PAIR_BUDGET=3e7
+Environment=MALLOC_TRIM_THRESHOLD_=536870912
+Environment=MALLOC_MMAP_THRESHOLD_=536870912
+Environment=MALLOC_TOP_PAD_=134217728
+ExecStartPre=/usr/bin/test -f /mnt/e/Hexo-BotTrainer-hexgt/scripts/_hexfield_supervise_main1.sh
+ExecStartPre=-/usr/bin/rm -f /mnt/e/Hexo-BotTrainer/runs/hexfield_main_7/supervisor.lock
+ExecStart=/usr/bin/bash /mnt/e/Hexo-BotTrainer-hexgt/scripts/_hexfield_supervise_main1.sh
+Restart=on-failure
+RestartSec=15
+TimeoutStopSec=45
+RestartPreventExitStatus=1
+
+[Install]
+WantedBy=multi-user.target

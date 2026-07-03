@@ -1,0 +1,159 @@
+# hexfield_main_7 — c=192, heads 3x64, trunk CC A CC A CC A CC A CC A (~8.1M params).
+#
+# The architecture comes from ENV, not this file (constants are read at import):
+#   HEXFIELD_CHANNELS=192 HEXFIELD_ATTENTION_HEADS=3 HEXFIELD_TRUNK=CCACCACCACCACCA
+# (set in scripts/systemd/hexfield-supervisor-7.service — a checkpoint loads only
+# into a net built with the same env). Head_dim 64 is deliberate: every fast
+# attention kernel wants d=64; see docs/PLAN_MAIN7_PERF_ROADMAP.md.
+#
+# Warm start: BC prefit on recent main_6 samples (scripts/_main7_prefit_data.sh
+# + _main7_prefit_launch.sh), initialize_from below points at its output.
+#
+# Search budget: carried from main_6 (1024 visits, gumbel_m 32) for launch.
+# A stronger net needs fewer visits for equal move quality — run the
+# established visit/gumbel_m budget calibration against main_6 anchors after
+# the run stabilizes (~epoch 20-30) before spending kernel-won throughput here.
+
+[model]
+name = "hexfield"
+module = "hexfield.plugin"
+
+[model.config]
+device = "cuda"
+
+[model.config.selfplay]
+search_visits = 1024
+pcr_full_proportion = 0.33
+pcr_fast_visits = 192
+active_games = 192
+c_puct = 1.5
+# Carried from main_6 round-2 (2026-07-03, +6% pos/s at c=128). At c=192 the
+# GPU is the wall again, so deeper in-flight pipelining matters less — revisit
+# only if serve profiling shows starvation.
+virtual_batch_size = 48
+flush_target = 1024
+active_root_limit = 192
+root_dirichlet_total_alpha = 10.83
+root_dirichlet_noise_fraction = 0.0
+fpu_reduction = 0.2
+root_fpu_reduction = 0.2
+root_fpu_zero_under_noise = false
+visit_scaled_c_puct = true
+c_scale = 0.0
+c_base = 500.0
+lcb_z = 1.6
+nucleus_f64 = true
+new_child_fpu = true
+lazy_widening = false
+clean_root_prior_cache = true
+dirichlet_shaped = true
+pruned_dynamic_cpuct = true
+widening_policy_mass = 0.95
+widening_max_children = 96
+widening_min_children = 2
+forced_playout_k = 0.0
+policy_init_fraction = 0.25
+policy_init_avg_plies = 4.0
+policy_init_max_plies = 8
+policy_init_temperature = 1.4
+temperature = 1.0
+temperature_floor = 0.15
+temperature_halflife_plies = 10.0
+root_policy_temperature = 1.1
+root_policy_temperature_early = 1.15
+root_policy_temperature_halflife = 19.0
+ml_two_sided = false
+ml_final_pick_band = 0.08
+max_game_plies = 256
+tss_enabled = true
+cache_max_states = 262144
+
+gumbel_root_enabled = true
+gumbel_sequential_halving = true
+gumbel_nonroot_select = true
+gumbel_target_enabled = true
+gumbel_c_visit = 50.0
+gumbel_c_scale = 1.0
+gumbel_m = 32
+gumbel_target_min_visits = 1
+gumbel_play_prune = true
+export_root_prior_logits = true
+
+[model.config.training]
+batch_rows = 256
+learning_rate = 4e-4
+weight_decay = 1e-4
+grad_clip = 5.0
+adaptive_clip = true
+clip_c = 1.75
+clip_ema_decay = 0.99
+clip_warmup_steps = 50
+policy_weight = 1.0
+value_weight = 1.0
+opp_policy_weight = 0.25
+short_term_value_weight = 0.1
+moves_left_weight = 0.2
+q_head_weight = 0.1
+soft_policy_weight = 1.0
+policy_surprise_uniform_fraction = 0.5
+policy_surprise_max_weight = 8.0
+warmup_steps = 0
+shuffle_min_rows = 20000
+shuffle_keep_target_rows = 600000
+shuffle_taper_window_exponent = 0.65
+shuffle_expand_window_per_row = 0.8
+shuffle_taper_window_scale = 20000.0
+validation_fraction = 0.0
+train_samples_per_epoch = 96000
+max_train_bucket_per_new_data = 8.0
+max_train_bucket_size = 500000.0
+no_repeat_files = false
+expand_backend = "rust"
+expand_workers = 0
+policy_target = "gumbel"
+
+[model.config.evaluation]
+games_per_epoch = 16
+eval_visits = 128
+eval_every = 5
+
+[model.config.multi_stage_eval]
+enabled = true
+games_budget = 128
+every_n_epochs = 5
+full_search_visits = 512
+eval_virtual_batch_size = 32
+sealbot_share = 0.25
+verdict_reference_lag = 5
+pool_path = "diagnostics/eval_pool.json"
+
+[model.config.multi_stage_eval.sprt]
+enabled = false
+
+[model.config.multi_stage_eval.opponents]
+sealbot_enabled = true
+bracket_size = 1
+# main6 anchor: bump to the best main_6 checkpoint at actual launch time.
+permanent_anchors = [["main5_ep105", "/mnt/e/Hexo-BotTrainer/runs/hexfield_main_5/checkpoints/epoch_000105.pt"], ["main6_ep73", "/mnt/e/Hexo-BotTrainer/runs/hexfield_main_6/checkpoints/epoch_000073.pt"], ["ep5", "epoch_000005.pt"], ["ep30", "epoch_000030.pt"]]
+radius8_opponents = []
+
+[run]
+name = "hexfield_main_7"
+output_dir = "/mnt/e/Hexo-BotTrainer/runs/hexfield_main_7"
+seed = 1
+
+[loop]
+epochs = 200
+
+[selfplay]
+games_per_epoch = 256
+update_checkpoint_pointer = false
+
+[train]
+passes_per_epoch = 1
+
+[checkpoint]
+# BC prefit output (scripts/_main7_prefit_launch.sh). Update the epoch suffix
+# to the final prefit checkpoint before launch.
+initialize_from = "/mnt/e/Hexo-BotTrainer/runs/hexfield_main_7_prefit/checkpoint_epoch3.pt"
+save_name = "latest"

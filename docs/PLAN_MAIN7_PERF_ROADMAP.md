@@ -5,6 +5,61 @@ after the 2026-07-02/03 speedup rounds (`docs/analysis/MAIN6_SERVE_SPEEDUP_2026-
 Everything here is grounded in tonight's profiles, not guesses; projections
 are labeled as projections.
 
+## BUILD STATUS (2026-07-03, same night)
+
+The Tier-3 package below is now IMPLEMENTED in the dev repo (flag-gated,
+default off, main_6 untouched):
+
+| item | status | gate result (main_6 shapes, epoch-73 ckpt, frozen states) |
+|---|---|---|
+| env-driven arch (`HEXFIELD_ATTENTION_HEADS`, `HEXFIELD_TRUNK`) | done | main_6 defaults bit-identical in eager; strict ckpt load OK; compiled-mode 6e-4 = inductor re-fusion of the textually-new trunk (same class as accepted compile variance) |
+| bespoke fused attention (`HEXFIELD_TRITON_ATTN`, `_triton_attn.py`) | done | kernel vs fp32 ref <= 2e-4 (d=32/64, all edge shapes); serve parity 6.7e-4 vs flex, 1.4e-3 under SERVE_HALF (3e-3 gate PASS). Pad-key tiles are SKIPPED via per-row seq_lens — flex paid full S^2 for pad |
+| conv+LN(+ReLU)+mask epilogue (`HEXFIELD_TRITON_CONV_LN`) | done | 9.5e-4 alone; full stack (attn+LN+half) 1.4e-3/2.3e-3 PASS; c=192 BN=256 tile verified vs fp32 ref (1.7e-3) |
+| fp8 e4m3 trunk convs (`HEXFIELD_CONV_FP8`) | built, OFF | 4.5e-2 value / 6.2e-2 prior deviation (trunk-only; head convs excluded — adding them: 4.6e-2). 10x the accepted serve_half drift -> arena eval must decide at bring-up; enable only on a measured strength pass |
+| bring-up artifacts | done | `configs/hexfield_main_7.toml`, `scripts/systemd/hexfield-supervisor-7.service`, `scripts/_main7_prefit_data.sh` + `_main7_prefit_launch.sh` (BC prefit from recent main_6 samples at the main_7 arch) |
+| c=192 bench matrix | DONE | see below |
+
+Parity/unit harnesses: `scripts/_main7_parity_attn*.sh`, `_main7_parity_convln.sh`,
+`_main7_parity_fp8.sh`, `_main7_attn_unit.py`, `_main7_convln_unit.py`,
+`_main7_arch_smoke.py`.
+
+### Measured c=192 forward matrix (2026-07-03, quiet GPU, eager, random weights)
+
+`_main7_bench_matrix.sh`, N=384 (Npad=384, B=247), us/state — RELATIVE numbers
+(eager overstates pointwise; compiled serve fuses it):
+
+| config | us/state | note |
+|---|---|---|
+| flex-d64 (arch-only: stock flex, triton conv, fp16) | 281.8 | attention only 11% of forward at c=192 — convs dominate (37%+) |
+| + TRITON_ATTN | 274.3 | kernel itself -40% vs flex (7.64 -> 4.6 ms/fwd) |
+| + TRITON_CONV_LN (first-cut tiles) | 270.2 | LN fused but GEMM regressed — tile problem |
+| + tuned CONV_LN tiles (BM=64/w4/s2) | **234.9** | **launch stack. -16.6% vs flex-d64; conv_ln kernel 26.8 -> 18.2 ms/fwd, 30-37% faster than unfused conv+LN** |
+| + CONV_FP8 (numerics-gated, OFF) | ~200 est. | measured 230.6 on the bad tiles; retest on good tiles when arena-gating it |
+| heads6-d32 counterfactual (stock flex) | 273.3 | d=32 vs d=64 flex is a WASH at c=192 (attention isn't the wall here — the d=64 win shows up in the bespoke kernel, not in flex) |
+| main6-ref (c=128 live stack) | 129.8 | main_7 launch stack = **1.81x** main_6 device cost (3x params) |
+
+Tile sweeps: conv_ln winner BM=64/warps=4/stages=2 (defaults updated in
+`_triton_conv.py`; first-cut BM=32/w8 was the sweep's WORST point). attn_pair
+winner = the original BM=64/BN=64/w4/s3 defaults (BM=128 variants slower or
+out of shared memory).
+
+Projection at live batching: ~23.5 pos/s main_6 at ~80% GPU busy ->
+main_7 GPU-bound at 1.81x device cost with dispatch hidden: **~15 pos/s**
+(faster than pre-speedup main_6's 13.75), + fp8 and/or visit recalibration
+on top if gated in later.
+
+### Revised lessons vs the original projections
+
+1. At c=192 the convs are the wall (37-51% of forward), not attention. The
+   bespoke attention kernel still pays (-40% on its component) but the "d=64
+   flex is 2.5x faster than d=32 flex" projection did NOT materialize — flex
+   is equally mediocre at both at these shapes. The heads 3x64 choice is still
+   right (it's what makes the bespoke kernel's tensor-core tiles work).
+2. The conv+LN fusion is the second-biggest single win (30-37% off every
+   trunk conv) — but only with the swept tiles.
+3. fp8 numerics (4.5e-2 value deviation) are 10x the accepted serve_half
+   drift; it stays OFF until an arena eval proves it doesn't cost strength.
+
 ## 0. Where the system is (baseline for all numbers)
 
 - Live main_6 (c=128, 16 convs + 3 attn, heads 4x32): serve device cost
