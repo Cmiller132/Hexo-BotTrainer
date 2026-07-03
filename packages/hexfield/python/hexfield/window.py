@@ -755,6 +755,7 @@ def build_window_split(
     keep_prob: float,
     rng: np.random.Generator,
     samples_dir: Path,
+    diag: dict | None = None,
 ) -> PackedWindow:
     """Load the selected shards, per-row Bernoulli subsample, and concat into one
     packed in-RAM window.
@@ -768,6 +769,15 @@ def build_window_split(
     ``keep_prob >= 1.0`` keeps every row with no RNG draw.
 
     Survivors are concatenated with :func:`concat_packed`.
+
+    Telemetry: when ``diag`` is a dict it is filled in place with load/skip
+    accounting (does not alter what is loaded or concatenated):
+
+    * ``shards_selected``   — survivor shard count (``len(ordered)`` minus skips);
+    * ``shards_skipped``    — count of shards skipped as unreadable (torn npz);
+    * ``skipped_paths``     — the skipped shard paths, capped at 20;
+    * ``rows_loaded``       — total rows across survivors BEFORE keep_prob thinning;
+    * ``rows_post_thin``    — the concatenated window's ``n`` (post-thin rows).
     """
     # Consume the keep mask in (generation, game_key) order so the shared rng
     # stream is reproducible regardless of the input ordering.
@@ -775,6 +785,7 @@ def build_window_split(
 
     survivors: list[PackedWindow] = []
     skipped: list[str] = []
+    rows_loaded = 0  # survivor rows before keep_prob thinning (telemetry only)
     for entry in ordered:
         shard_path = samples_dir / entry.rel_path
         # A power cut can leave a shard's npz torn while its commit-marker sidecar
@@ -794,6 +805,7 @@ def build_window_split(
                 stacklevel=2,
             )
             continue
+        rows_loaded += int(shard.n)
         if keep_prob >= 1.0:
             survivors.append(shard)
             continue
@@ -815,7 +827,19 @@ def build_window_split(
             stacklevel=2,
         )
 
-    return concat_packed(survivors)
+    window = concat_packed(survivors)
+
+    if diag is not None:
+        # Telemetry out-param: load/skip accounting for the select diagnostic.
+        # skipped_paths capped at 20 to bound the diag json size on a bad-disk
+        # epoch; shards_skipped carries the true (uncapped) count.
+        diag["shards_selected"] = len(ordered) - len(skipped)
+        diag["shards_skipped"] = len(skipped)
+        diag["skipped_paths"] = sorted(skipped)[:20]
+        diag["rows_loaded"] = int(rows_loaded)
+        diag["rows_post_thin"] = int(window.n)
+
+    return window
 
 
 def _subset_packed(window: PackedWindow, mask: np.ndarray) -> PackedWindow:

@@ -370,8 +370,16 @@ def test_keep_prob_selection_accounting() -> None:
 
 
 def _make_trainer(**training_overrides) -> HexfieldTrainer:
-    """A trainer with a CPU config and no real model/optimizer (we only call the
-    pure window/governor methods, never train_passes)."""
+    """A trainer with a CPU config and a tiny real model/optimizer (we only call
+    the pure window/governor/selection methods, never train_passes).
+
+    HexfieldTrainer.__init__ partitions params via ``model.named_parameters()``
+    for per-group grad-norm logging, so the model must be a real ``nn.Module``
+    (a bare SimpleNamespace has no ``named_parameters``); the linear layer is never
+    forwarded/stepped by the paths these tests exercise.
+    """
+    import torch
+
     base = dict(
         max_train_bucket_size=500_000.0,
         train_samples_per_epoch=100_000,
@@ -379,9 +387,8 @@ def _make_trainer(**training_overrides) -> HexfieldTrainer:
     )
     base.update(training_overrides)
     cfg = HexfieldConfig(device="cpu", training=TrainingSection(**base))
-    # model/optimizer are never touched by the governor / selection path.
-    model = SimpleNamespace()
-    opt = SimpleNamespace(state={})
+    model = torch.nn.Linear(4, 3)
+    opt = torch.optim.SGD(model.parameters(), lr=0.1)
     return HexfieldTrainer(model=model, config=cfg, optimizer=opt)
 
 

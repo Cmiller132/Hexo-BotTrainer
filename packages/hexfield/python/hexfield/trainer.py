@@ -93,6 +93,20 @@ def _perm_seed(run_seed: int, epoch: int) -> int:
     return (int(run_seed) * 2_654_435_761 + int(epoch) * 40_503 + 7) & 0x7FFFFFFF
 
 
+def _atomic_write_json(path, payload: dict[str, Any]) -> None:
+    """Serialize ``payload`` to ``path`` via tmp + ``os.replace``.
+
+    The host takes real power cuts (see tests/test_hexfield_durability.py); an
+    interrupted plain ``write_text`` can leave a torn diagnostics json. Writing to
+    ``<path>.tmp`` then atomically renaming guarantees a reader sees either the old
+    file or the complete new one, never a partial. Same-directory tmp so the
+    rename stays on one filesystem.
+    """
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+    os.replace(tmp, path)
+
+
 class HexfieldTrainer:
     def __init__(self, *, model, config: HexfieldConfig, optimizer):
         self.model = model
@@ -284,6 +298,10 @@ class HexfieldTrainer:
         """
         cfg = self.config.training
         seed = int(ctx.config.run.seed or 0)
+        # Wall-clock for the whole selection phase (manifest scan + window build).
+        # time.monotonic is immune to wall-clock steps; recorded in the diag and
+        # stashed so train_passes can print it in the epoch summary line.
+        select_t0 = time.monotonic()
 
         # (1) manifest: live total drives window selection; the monotone counter
         # drives the governor.
@@ -393,11 +411,27 @@ class HexfieldTrainer:
 
         # (7) build the packed in-RAM window: per-row keep_prob subsample + concat,
         # consumed via a single per-epoch rng in (generation, game_key) order.
+        # ``window_diag`` collects load/skip telemetry (shards_skipped etc.) that
+        # build_window_split only surfaced via a RuntimeWarning before.
         keep_rng = np.random.default_rng(seed + epoch)
+        window_diag: dict[str, Any] = {}
         window = build_window_split(
-            selected_files, keep_prob=kp, rng=keep_rng, samples_dir=ctx.samples_dir
+            selected_files, keep_prob=kp, rng=keep_rng, samples_dir=ctx.samples_dir,
+            diag=window_diag,
         )
         components.shared.sample_window = window
+
+        # Window depth telemetry: how many distinct producing epochs the selected
+        # files span, and what fraction come from the newest epoch. The selected
+        # entries carry ``generation``; both are O(len(selected_files)) and run at
+        # the phase boundary (negligible cost).
+        sel_gens = [int(e.generation) for e in selected_files]
+        window_epoch_span: dict[str, int] = {}
+        shards_from_latest_epoch = 0.0
+        if sel_gens:
+            gmin, gmax = min(sel_gens), max(sel_gens)
+            window_epoch_span = {"min": gmin, "max": gmax, "epochs": gmax - gmin + 1}
+            shards_from_latest_epoch = sum(1 for g in sel_gens if g == gmax) / len(sel_gens)
 
         result = {
             "status": "completed",
@@ -415,15 +449,30 @@ class HexfieldTrainer:
             "selected_files": len(selected_files),
             "select_request": int(select_request),
             "selected_rows": int(selected_rows),
+            # Load/skip telemetry from build_window_split (torn-shard visibility).
+            "shards_skipped": int(window_diag.get("shards_skipped", 0)),
+            "skipped_paths": window_diag.get("skipped_paths", []),
+            "rows_loaded": int(window_diag.get("rows_loaded", 0)),
+            "rows_post_thin": int(window_diag.get("rows_post_thin", int(window.n))),
+            # Window-depth telemetry (how many epochs deep the window reaches).
+            "window_epoch_span": window_epoch_span,
+            "shards_from_latest_epoch": float(shards_from_latest_epoch),
+            # Selection-phase wall-clock (seconds).
+            "select_seconds": round(time.monotonic() - select_t0, 1),
         }
         # Stash effective_rows / window_start / reuse_ratio / train_bucket_level
         # for train_passes, threaded via the trainer instance (SharedComponents
-        # only carries the PackedWindow).
+        # only carries the PackedWindow). select_seconds / shards_skipped /
+        # window_epoch_span are carried for the train-phase summary line.
         self._last_select[epoch] = {
             "effective_rows": int(effective_rows),
             "window_start": int(window_start),
             "reuse_ratio": float(result["reuse_ratio"]),
             "train_bucket_level": float(self.train_state.train_bucket_level),
+            "select_seconds": float(result["select_seconds"]),
+            "shards_skipped": int(result["shards_skipped"]),
+            "window_epoch_span": window_epoch_span,
+            "keep_prob": float(kp),
         }
         self._write_select_diag(ctx, epoch, result)
         return result
@@ -436,7 +485,7 @@ class HexfieldTrainer:
             if diag_dir is None:
                 return
             path = diag_dir / f"hexfield.select.epoch_{epoch:06d}.json"
-            path.write_text(json.dumps(result, indent=2, default=str), encoding="utf-8")
+            _atomic_write_json(path, result)
         except OSError:
             pass
 
@@ -483,7 +532,17 @@ class HexfieldTrainer:
         group_norm_totals: dict[str, float] = {}
         group_norm_steps = 0
         steps = 0
+        # Per-row surprise-weight telemetry, aggregated at the phase boundary from
+        # the per-batch weight vectors already computed below (no hot-path cost).
+        surprise_weight_sum = 0.0
+        surprise_weight_count = 0
+        surprise_weight_max = 0.0
+        surprise_weight_clamped_count = 0
+        surprise_clamp_thresh = float(self.config.training.policy_surprise_max_weight)
         started = time.time()
+        # Monotonic wall-clock for the train phase (train_seconds); ``started``
+        # above stays for the existing ``seconds`` field (unchanged).
+        train_t0 = time.monotonic()
         # When HEXFIELD_SUPPORT_RADIUS < 8, tolerate (flag invalid, skip) replay
         # samples whose policy targets fall off the smaller legal set. At the
         # default radius, off-legal rows hard-error instead.
@@ -557,6 +616,17 @@ class HexfieldTrainer:
             )
             weight_by_row = {id(r): 0.0 for r in expanded}
             weight_by_row.update({id(r): w for r, w in zip(full_rows, full_weights)})
+            # Telemetry: aggregate the per-row surprise weights over the policy-valid
+            # rows (the ones that carry a nontrivial weight). Cheap running reduce;
+            # matches the weights actually applied by collate_training. clamped ==
+            # weights that hit policy_surprise_max_weight.
+            if full_weights:
+                surprise_weight_sum += float(sum(full_weights))
+                surprise_weight_count += len(full_weights)
+                surprise_weight_max = max(surprise_weight_max, max(full_weights))
+                surprise_weight_clamped_count += sum(
+                    1 for w in full_weights if w >= surprise_clamp_thresh - 1e-9
+                )
             self.optimizer.zero_grad(set_to_none=True)
             for bucket in pair_budget_microbuckets(
                 expanded, budget=self._pair_budget, quantize=PAD_QUANTUM
@@ -691,7 +761,39 @@ class HexfieldTrainer:
             ),
             "train_steps_since_last_reload": int(self.train_state.train_steps_since_last_reload),
             "rows_skipped_off_legal": int(rows_skipped_off_legal),
+            # Per-row surprise-weight telemetry (mean over policy-valid rows == ~1
+            # when no clamp fires; max and clamped-count expose weight skew).
+            "surprise_weight_mean": (
+                surprise_weight_sum / surprise_weight_count if surprise_weight_count else 0.0
+            ),
+            "surprise_weight_max": float(surprise_weight_max),
+            "surprise_weight_clamped_count": int(surprise_weight_clamped_count),
+            # Per-epoch wall-clock split (select phase timed in
+            # select_training_samples and stashed; train phase timed here).
+            "select_seconds": float(stashed.get("select_seconds", 0.0)),
+            "train_seconds": round(time.monotonic() - train_t0, 1),
         }
         diag_path = ctx.diagnostics_dir / f"hexfield.training.epoch_{epoch:06d}.json"
-        diag_path.write_text(json.dumps(result, indent=2, default=str), encoding="utf-8")
+        _atomic_write_json(diag_path, result)
+
+        # Human-readable one-line summary to stdout (lands in the supervisor's
+        # train.out). Every field is guarded for absence so a partial epoch still
+        # prints something useful.
+        span = stashed.get("window_epoch_span") or {}
+        print(
+            f"train epoch {epoch}: "
+            f"{result['trained_rows']}/{result['window_rows']} rows "
+            f"(reuse {result['reuse_ratio']:.1f}, "
+            f"kp {float(stashed.get('keep_prob', 1.0)):.2f}) | "
+            f"pol {result.get('loss_policy', 0.0):.2f} "
+            f"soft {result.get('loss_soft_policy', 0.0):.2f} "
+            f"val {result.get('loss_value', 0.0):.2f} | "
+            f"surprise mean {result['surprise_weight_mean']:.1f} "
+            f"max {result['surprise_weight_max']:.1f} | "
+            f"select {result['select_seconds']:.0f}s "
+            f"train {result['train_seconds']:.0f}s | "
+            f"window {int(span.get('epochs', 0))} epochs, "
+            f"{int(stashed.get('shards_skipped', 0))} skipped",
+            flush=True,
+        )
         return result

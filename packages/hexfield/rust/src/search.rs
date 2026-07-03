@@ -241,8 +241,11 @@ struct ContinuousSchedulerStats {
     // Play-policy telemetry: moves selected via the quota-pruned Gumbel play
     // distribution, and how many of those played the raw delta leader (the SH
     // winner). winner/moves ≈ exploitation rate of the play sampler. The
-    // `_early` pair covers ply < 20 (the high-temperature exploration window);
-    // late-game rates should approach 1 as the ply temperature decays.
+    // `_early` pair covers ply < 20 (the high-temperature exploration window).
+    // Late-game rates do NOT approach 1: SH forces the two finalists to a
+    // ~228:196 visit split (1024 visits, m=32), so at the 0.15 temperature
+    // floor the runner-up keeps (196/228)^(1/0.15) ≈ 0.37 relative weight and
+    // the winner-rate ceiling is ≈ 0.73.
     gumbel_play_moves: u64,
     gumbel_play_winner_moves: u64,
     gumbel_play_moves_early: u64,
