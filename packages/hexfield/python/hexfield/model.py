@@ -44,6 +44,7 @@ from .constants import (
     MLP_RATIO,
     NUM_FEATURES,
     NUM_TOKENS,
+    TRUNK_LAYOUT,
     VALUE_BINS,
 )
 from .geometry import rel_bias_index
@@ -92,6 +93,44 @@ if _TRITON_CONV:
         _hex_conv_fused = None
 else:
     _hex_conv_fused = None
+# Bespoke fused attention, HEXFIELD_TRITON_ATTN=1 (default off; requires the
+# flex-pair serve path for the uint8 pair index + appended-pad-row table).
+# FA2-style online-softmax kernel with the pair bias gathered in the score
+# loop and fully-padded key tiles skipped via per-row seq_lens. Serve
+# (no-grad, CUDA, fp16 q/k/v) only; see _triton_attn.py.
+_TRITON_ATTN = os.environ.get("HEXFIELD_TRITON_ATTN") == "1"
+if _TRITON_ATTN:
+    try:
+        from ._triton_attn import attn_pair as _attn_pair_fused
+    except Exception:  # pragma: no cover - no triton
+        _attn_pair_fused = None
+else:
+    _attn_pair_fused = None
+# Conv + LayerNorm(+ReLU) + mask epilogue fusion, HEXFIELD_TRITON_CONV_LN=1
+# (default off). ConvBlock's post-conv LayerNorm epilogue runs inside the
+# fused conv kernel on the fp32 accumulator, saving one full read+write of
+# the (B, Npad, C) activation per conv. Serve (no-grad, CUDA) only.
+_TRITON_CONV_LN = os.environ.get("HEXFIELD_TRITON_CONV_LN") == "1"
+if _TRITON_CONV_LN:
+    try:
+        from ._triton_conv import hex_conv_ln as _hex_conv_ln_fused
+    except Exception:  # pragma: no cover - no triton
+        _hex_conv_ln_fused = None
+else:
+    _hex_conv_ln_fused = None
+# fp8 (e4m3) conv GEMMs, HEXFIELD_CONV_FP8=1 (default off). Swaps the fused
+# conv kernels' tensor-core dots to e4m3 (2x fp16 rate on Ada) with
+# per-out-channel weight scales. MEDIUM numerics risk: gated by its own
+# parity tolerance + the arena eval, NOT the 3e-3 gate. Applies wherever the
+# triton conv path applies (trunk + serve-side head convs).
+_CONV_FP8 = os.environ.get("HEXFIELD_CONV_FP8") == "1"
+if _CONV_FP8:
+    try:
+        from ._triton_conv import hex_conv_ln_fp8 as _hex_conv_ln_fp8_fused
+    except Exception:  # pragma: no cover - no triton
+        _hex_conv_ln_fp8_fused = None
+else:
+    _hex_conv_ln_fp8_fused = None
 try:
     from torch.nn.attention.flex_attention import flex_attention as _flex_attention
 
@@ -216,13 +255,19 @@ class _FlexPairBias:
     forward (block-independent) with pad-KEY columns set to the extra pad row;
     `table2` (BIAS_ROWS + 1, heads) fp16 is this block's bias table with the
     PAD_KEY_MASK_VALUE row appended. The score_mod is one gather + one tiny
-    table read; no mask/coords/LUT work in-kernel."""
+    table read; no mask/coords/LUT work in-kernel.
 
-    __slots__ = ("pair", "table2")
+    `seq_lens` (B,) int32 = NUM_TOKENS + last-live-cell-index + 1, set only on
+    the serve path when the bespoke Triton attention kernel is active — it
+    bounds that kernel's key loop so fully-padded key tiles are skipped. None
+    on the flex/train paths (the score_mod never reads it)."""
 
-    def __init__(self, pair, table2) -> None:
+    __slots__ = ("pair", "table2", "seq_lens")
+
+    def __init__(self, pair, table2, seq_lens=None) -> None:
         self.pair = pair
         self.table2 = table2
+        self.seq_lens = seq_lens
 
     def make_score_mod(self):
         pair = self.pair
@@ -298,6 +343,12 @@ class HexNodeConv(nn.Module):
             and c % 16 == 0
             and self.out_channels % 16 == 0
         ):
+            # fp8 deliberately NOT routed here: standalone HexNodeConvs are the
+            # stem and the policy/value head convs, whose outputs feed logits
+            # with no LayerNorm to renormalize quantization noise. (Measured
+            # 2026-07-03: trunk-only fp8 = 4.5e-2 value deviation, adding head
+            # convs 4.6e-2 — the trunk dominates either way, but the head convs
+            # buy nothing.) Trunk ConvBlocks opt in via their fused conv+LN path.
             return _hex_conv_fused(x, gather_idx, mask, self.weight, self.bias)
         x_ext = torch.cat([x, x.new_zeros(b, 1, c)], dim=1)  # zero row at index Npad
         flat = gather_idx.reshape(b, n * 7, 1).expand(-1, -1, c)
@@ -331,6 +382,32 @@ class ConvBlock(nn.Module):
     def forward(
         self, x: torch.Tensor, gather_idx: torch.Tensor, mask: torch.Tensor
     ) -> torch.Tensor:
+        # Serve fast path (HEXFIELD_TRITON_CONV_LN): conv + LN (+ReLU) + mask
+        # in one kernel per conv — the LN round-trip over the activation never
+        # happens. Residual + LayerScale + final ReLU stay outside (cheap
+        # pointwise; inductor fuses them into one kernel).
+        if (
+            _hex_conv_ln_fused is not None
+            and x.is_cuda
+            and not torch.is_grad_enabled()
+            and x.shape[-1] % 16 == 0
+        ):
+            fused = (
+                _hex_conv_ln_fp8_fused
+                if _hex_conv_ln_fp8_fused is not None
+                else _hex_conv_ln_fused
+            )
+            y = fused(
+                x, gather_idx, mask,
+                self.conv1.weight, self.conv1.bias,
+                self.ln1.weight, self.ln1.bias, self.ln1.eps, True,
+            )
+            y = fused(
+                y, gather_idx, mask,
+                self.conv2.weight, self.conv2.bias,
+                self.ln2.weight, self.ln2.bias, self.ln2.eps, False,
+            )
+            return F.relu(x + self.ls(y))
         m = mask.unsqueeze(-1)
         y = F.relu(self.ln1(self.conv1(x, gather_idx, mask))) * m
         y = self.ln2(self.conv2(y, gather_idx, mask)) * m
@@ -362,6 +439,25 @@ class RelPosAttention(nn.Module):
         q = self.q_proj(seq).reshape(b, s, h, d).transpose(1, 2)
         k = self.k_proj(seq).reshape(b, s, h, d).transpose(1, 2)
         v = self.v_proj(seq).reshape(b, s, h, d).transpose(1, 2)
+        # Bespoke fused kernel (HEXFIELD_TRITON_ATTN): flex-pair serve batches
+        # route to the FA2-style Triton kernel — pair bias gathered inside the
+        # score loop, fully-padded key tiles skipped via seq_lens. No backward;
+        # anything it can't take (grad, non-fp16, odd head_dim) falls through
+        # to flex below.
+        if (
+            _attn_pair_fused is not None
+            and isinstance(attn_bias, _FlexPairBias)
+            and attn_bias.seq_lens is not None
+            and not torch.is_grad_enabled()
+            and q.is_cuda
+            and q.dtype == torch.float16
+            and d in (16, 32, 64, 128)
+        ):
+            out = _attn_pair_fused(
+                q, k, v, attn_bias.pair, attn_bias.table2, attn_bias.seq_lens
+            )
+            out = out.transpose(1, 2).reshape(b, s, c)
+            return self.out_proj(out)
         # Flex path: the rel-pos bias + pad mask are computed inside the kernel via
         # a score_mod (no materialized (B,heads,S,S) tensor). block_mask is None.
         # The score_mod is built here, in the same frame as the flex call.
@@ -407,17 +503,25 @@ class AttnBlock(nn.Module):
 
 
 class HexfieldNet(nn.Module):
-    """The full network: stem, C C C A C C C A C C A, LN_final, heads."""
+    """The full network: stem, TRUNK_LAYOUT (default C C C A C C C A C C A),
+    LN_final, heads."""
 
     def __init__(self, channels: int = CHANNELS) -> None:
         super().__init__()
         # channels defaults to the module-global CHANNELS; an explicit value builds
         # the net at a different width. All submodules are channels-parameterized.
+        # Block order comes from TRUNK_LAYOUT (env HEXFIELD_TRUNK); conv_blocks[i]
+        # is the i-th 'C' and attn_blocks[i] the i-th 'A' in layout order.
         c = channels
+        self._trunk_layout = TRUNK_LAYOUT
         self.stem = HexNodeConv(NUM_FEATURES, c)
         self.stem_ln = nn.LayerNorm(c)
-        self.conv_blocks = nn.ModuleList([ConvBlock(c) for _ in range(8)])
-        self.attn_blocks = nn.ModuleList([AttnBlock(c) for _ in range(3)])
+        self.conv_blocks = nn.ModuleList(
+            [ConvBlock(c) for _ in range(TRUNK_LAYOUT.count("C"))]
+        )
+        self.attn_blocks = nn.ModuleList(
+            [AttnBlock(c) for _ in range(TRUNK_LAYOUT.count("A"))]
+        )
         self.tokens = nn.Parameter(torch.empty(NUM_TOKENS, c))
         # Per-block relative-position bias tables: each attention block gets its own
         # zero-init (BIAS_ROWS, heads) table.
@@ -606,16 +710,17 @@ class HexfieldNet(nn.Module):
         return pair.masked_fill(key_dead[:, None, :], BIAS_ROWS)
 
     def _build_flex_pair_bias(
-        self, pair: torch.Tensor, block: int
+        self, pair: torch.Tensor, block: int, seq_lens: torch.Tensor | None = None
     ) -> "_FlexPairBias":
         """Flex-pair carrier for attention block `block`: the shared uint8 pair
         index plus this block's fp16 table with the PAD_KEY_MASK_VALUE row
         appended (row BIAS_ROWS), so the pad-KEY additive fill is a plain table
-        row instead of an in-kernel mask read."""
+        row instead of an in-kernel mask read. `seq_lens` rides along for the
+        bespoke Triton attention kernel (None on the flex path)."""
 
         table = self.bias_tables[block].to(torch.float16)
         pad_row = table.new_full((1, table.shape[1]), PAD_KEY_MASK_VALUE)
-        return _FlexPairBias(pair, torch.cat([table, pad_row], dim=0))
+        return _FlexPairBias(pair, torch.cat([table, pad_row], dim=0), seq_lens)
 
     def _build_train_flex_pair_bias(
         self, pair: torch.Tensor, block: int
@@ -691,8 +796,18 @@ class HexfieldNet(nn.Module):
         if not flex:
             pair, key_pad = self._build_pair(coords, mask)
         elif flex_pair or train_flex_pair:
-            # Block-independent, built once and shared by all 3 blocks.
+            # Block-independent, built once and shared by all attention blocks.
             pair_u8 = self._build_pair_u8(coords, mask)
+        attn_seq_lens = None
+        if flex_pair and _attn_pair_fused is not None:
+            # Per-row key count for the bespoke attention kernel: tokens + the
+            # LAST live cell + 1 (conservative if padding were ever
+            # non-contiguous; pad keys inside the bound still hit the pair
+            # tensor's pad row, so this only affects tile-skipping, not math).
+            cell_idx = torch.arange(
+                1, mask.shape[1] + 1, device=mask.device, dtype=torch.int32
+            )
+            attn_seq_lens = NUM_TOKENS + (cell_idx * mask).amax(dim=1)
 
         def block_bias(i: int):
             if train_flex_pair:
@@ -700,7 +815,7 @@ class HexfieldNet(nn.Module):
             if train_flex:
                 return self._build_train_flex_bias(coords, mask, i)
             if flex_pair:
-                return self._build_flex_pair_bias(pair_u8, i)
+                return self._build_flex_pair_bias(pair_u8, i, attn_seq_lens)
             if serve_flex:
                 return self._build_flex_bias(coords, mask, i)
             return self.build_attn_bias(pair, key_pad, i)
@@ -708,19 +823,25 @@ class HexfieldNet(nn.Module):
         seq_mask = torch.cat([mask.new_ones(b, NUM_TOKENS), mask], dim=1)
 
         tokens = self.tokens.unsqueeze(0).expand(b, -1, -1)
-        x = self.conv_blocks[0](x, gather_idx, mask)
-        x = self.conv_blocks[1](x, gather_idx, mask)
-        x = self.conv_blocks[2](x, gather_idx, mask)
-        seq = self.attn_blocks[0](torch.cat([tokens, x], dim=1), block_bias(0), seq_mask)
-        tokens, x = seq[:, :NUM_TOKENS], seq[:, NUM_TOKENS:]
-        x = self.conv_blocks[3](x, gather_idx, mask)
-        x = self.conv_blocks[4](x, gather_idx, mask)
-        x = self.conv_blocks[5](x, gather_idx, mask)
-        seq = self.attn_blocks[1](torch.cat([tokens, x], dim=1), block_bias(1), seq_mask)
-        tokens, x = seq[:, :NUM_TOKENS], seq[:, NUM_TOKENS:]
-        x = self.conv_blocks[6](x, gather_idx, mask)
-        x = self.conv_blocks[7](x, gather_idx, mask)
-        seq = self.attn_blocks[2](torch.cat([tokens, x], dim=1), block_bias(2), seq_mask)
+        # Walk the layout string; the op sequence for the default layout is
+        # identical to the historical hand-unrolled CCC A CCC A CC A body. After
+        # every attention block except the last the joint sequence is split back
+        # into (tokens, cells); the last block's output goes to ln_final whole.
+        layout = self._trunk_layout
+        ci = 0
+        ai = 0
+        seq = None
+        for pos, kind in enumerate(layout):
+            if kind == "C":
+                x = self.conv_blocks[ci](x, gather_idx, mask)
+                ci += 1
+            else:
+                seq = self.attn_blocks[ai](
+                    torch.cat([tokens, x], dim=1), block_bias(ai), seq_mask
+                )
+                ai += 1
+                if pos != len(layout) - 1:
+                    tokens, x = seq[:, :NUM_TOKENS], seq[:, NUM_TOKENS:]
         seq = self.ln_final(seq)
         tokens, x = seq[:, :NUM_TOKENS], seq[:, NUM_TOKENS:]
         return x * mask.unsqueeze(-1), tokens, gather_idx

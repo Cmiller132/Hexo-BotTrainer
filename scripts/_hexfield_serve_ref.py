@@ -16,7 +16,14 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO / "packages" / "hexfield" / "python"))
+# HEXFIELD_REF_PKGROOT swaps which tree's hexfield package is under test
+# (e.g. the live gumbel worktree as an old-code baseline); default = this repo.
+sys.path.insert(
+    0,
+    os.environ.get(
+        "HEXFIELD_REF_PKGROOT", str(REPO / "packages" / "hexfield" / "python")
+    ),
+)
 
 import numpy as np
 import torch

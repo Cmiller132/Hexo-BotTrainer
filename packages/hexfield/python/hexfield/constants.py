@@ -80,9 +80,32 @@ MOVES_LEFT_CAP = 209
 # at the same width.
 CHANNELS = int(os.environ.get("HEXFIELD_CHANNELS", "96"))
 NUM_TOKENS = 8
-ATTENTION_HEADS = 4
-HEAD_DIM = CHANNELS // ATTENTION_HEADS  # 24 at c=96, 32 at c=128
+# Head count from env HEXFIELD_ATTENTION_HEADS (default 4 — every net up to
+# main_6). main_7 uses 3 so head_dim lands on 64 (c=192), where attention
+# kernels are actually fast; d=32 flex runs at ~1/3 the throughput.
+ATTENTION_HEADS = int(os.environ.get("HEXFIELD_ATTENTION_HEADS", "4"))
+if CHANNELS % ATTENTION_HEADS != 0:
+    raise ValueError(
+        f"HEXFIELD_CHANNELS={CHANNELS} not divisible by "
+        f"HEXFIELD_ATTENTION_HEADS={ATTENTION_HEADS}"
+    )
+HEAD_DIM = CHANNELS // ATTENTION_HEADS  # 24 at c=96, 32 at c=128, 64 at c=192/h=3
 MLP_RATIO = 2
+# Trunk block order from env HEXFIELD_TRUNK (default = the main_1..main_6
+# layout). 'C' = ConvBlock (two hex convs), 'A' = attention block; the layout
+# must end with 'A' (ln_final consumes the joint [tokens; cells] sequence the
+# last attention block produced). main_7 uses "CCACCACCACCACCA" (CC A x5).
+# A checkpoint loads only into a net built with the same layout.
+TRUNK_LAYOUT = os.environ.get("HEXFIELD_TRUNK", "CCCACCCACCA")
+if (
+    not TRUNK_LAYOUT
+    or set(TRUNK_LAYOUT) - {"C", "A"}
+    or not TRUNK_LAYOUT.endswith("A")
+):
+    raise ValueError(
+        f"HEXFIELD_TRUNK={TRUNK_LAYOUT!r} must be a non-empty string of "
+        "'C'/'A' ending with 'A'"
+    )
 
 # --- relative-position bias table (per-block learned tables) --------------------
 # rows 0-216:  exact axial offsets with hex-dist <= 8 (the 217-offset disk LUT)

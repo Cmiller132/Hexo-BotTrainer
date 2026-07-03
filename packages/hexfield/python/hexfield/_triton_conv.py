@@ -20,6 +20,8 @@ round like the reference's fp16 GEMM output). Output is fp16.
 
 from __future__ import annotations
 
+import os
+
 import torch
 
 try:  # pragma: no cover - triton ships with cuda torch builds
@@ -30,14 +32,22 @@ try:  # pragma: no cover - triton ships with cuda torch builds
 except Exception:  # pragma: no cover
     HAVE_TRITON = False
 
+# conv+LN kernel tile knobs (bench sweeps; defaults = measured winners at
+# c=192, RTX 4070 Ti, 2026-07-03: BM=64/warps=4/stages=2 runs the fused kernel
+# 30-37% FASTER than plain conv + eager LN; the first-cut BM=32/warps=8 was
+# the worst point in the sweep, ~neutral vs unfused).
+_LN_BM = int(os.environ.get("HEXFIELD_CONVLN_BM", "64"))
+_LN_WARPS = int(os.environ.get("HEXFIELD_CONVLN_WARPS", "4"))
+_LN_STAGES = int(os.environ.get("HEXFIELD_CONVLN_STAGES", "2"))
+
 
 if HAVE_TRITON:
 
     @triton.jit
     def _hex_conv_kernel(
-        x_ptr, idx_ptr, mask_ptr, w_ptr, bias_ptr, out_ptr,
+        x_ptr, idx_ptr, mask_ptr, w_ptr, bias_ptr, sc_ptr, out_ptr,
         B, Npad, C, Cout,
-        IS_FP16_IN: tl.constexpr,
+        IS_FP16_IN: tl.constexpr, FP8: tl.constexpr,
         BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr,
     ):
         pid_m = tl.program_id(0)
@@ -68,8 +78,17 @@ if HAVE_TRITON:
                     mask=k_ok[:, None] & n_valid[None, :],
                     other=0.0,
                 )
-                acc += tl.dot(a16, w)
+                if FP8:
+                    # e4m3 x e4m3 tensor-core dot (2x fp16 rate on Ada); the
+                    # weight tensor is already fp8 with per-out-channel scales
+                    # dequantized in the epilogue.
+                    acc += tl.dot(a16.to(tl.float8e4nv), w)
+                else:
+                    acc += tl.dot(a16, w)
 
+        if FP8:
+            sc = tl.load(sc_ptr + n_offs, mask=n_valid, other=1.0)
+            acc *= sc[None, :].to(tl.float32)
         bias = tl.load(bias_ptr + n_offs, mask=n_valid, other=0.0)
         acc += bias[None, :].to(tl.float32)
         rmask = tl.load(mask_ptr + m_offs, mask=m_valid, other=0)
@@ -103,9 +122,9 @@ if HAVE_TRITON:
         BN, BK = min(128, cout), 64
         grid = (triton.cdiv(rows, BM), triton.cdiv(cout, BN))
         _hex_conv_kernel[grid](
-            x, gidx, m8, w16, b32, out,
+            x, gidx, m8, w16, b32, b32, out,  # sc_ptr unused when FP8=False
             b, npad, c, cout,
-            IS_FP16_IN=(x.dtype == torch.float16),
+            IS_FP16_IN=(x.dtype == torch.float16), FP8=False,
             BM=BM, BN=BN, BK=BK,
             num_warps=4 if BM == 32 else 8, num_stages=3,
         )
@@ -117,5 +136,228 @@ if HAVE_TRITON:
             (x.shape[0], x.shape[1], weight.shape[-1]), dtype=torch.float16
         )
 
+    # --- conv + LayerNorm(+ReLU) + row-mask epilogue -----------------------------
+    # Same fused gather+GEMM as _hex_conv_kernel, but the program owns the FULL
+    # Cout row (BN >= Cout, one N-tile per program), so the ConvBlock's
+    # LayerNorm -> (ReLU) -> mask epilogue runs on the fp32 accumulator before
+    # the single fp16 store. Kills one full read+write of the (B, Npad, C)
+    # activation per conv (the LN kernel's round-trip). LN statistics are fp32
+    # over the true Cout columns; numerically the same class as the reference
+    # (which LayerNorms the fp16-rounded conv output in fp32).
+
+    @triton.jit
+    def _hex_conv_ln_kernel(
+        x_ptr, idx_ptr, mask_ptr, w_ptr, bias_ptr, sc_ptr, lnw_ptr, lnb_ptr,
+        out_ptr,
+        B, Npad, C, Cout, eps,
+        IS_FP16_IN: tl.constexpr, RELU: tl.constexpr, FP8: tl.constexpr,
+        BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr,
+    ):
+        pid_m = tl.program_id(0)
+        m_offs = pid_m * BM + tl.arange(0, BM)  # rows over B*Npad
+        m_valid = m_offs < B * Npad
+        b_ids = m_offs // Npad
+        n_offs = tl.arange(0, BN)  # the whole Cout row
+        n_valid = n_offs < Cout
+
+        acc = tl.zeros((BM, BN), dtype=tl.float32)
+        for t in tl.static_range(7):
+            idx = tl.load(idx_ptr + m_offs * 7 + t, mask=m_valid, other=Npad)
+            row_ok = m_valid & (idx < Npad)
+            x_row = (b_ids * Npad + idx) * C
+            for k0 in tl.range(0, tl.cdiv(C, BK)):
+                k_offs = k0 * BK + tl.arange(0, BK)
+                k_ok = k_offs < C
+                a = tl.load(
+                    x_ptr + x_row[:, None] + k_offs[None, :],
+                    mask=row_ok[:, None] & k_ok[None, :],
+                    other=0.0,
+                )
+                a16 = a if IS_FP16_IN else a.to(tl.float16)
+                w = tl.load(
+                    w_ptr + (t * C + k_offs)[:, None] * Cout + n_offs[None, :],
+                    mask=k_ok[:, None] & n_valid[None, :],
+                    other=0.0,
+                )
+                if FP8:
+                    acc += tl.dot(a16.to(tl.float8e4nv), w)
+                else:
+                    acc += tl.dot(a16, w)
+
+        if FP8:
+            sc = tl.load(sc_ptr + n_offs, mask=n_valid, other=1.0)
+            acc *= sc[None, :].to(tl.float32)
+        bias = tl.load(bias_ptr + n_offs, mask=n_valid, other=0.0)
+        acc += bias[None, :].to(tl.float32)
+        # LayerNorm over the true Cout columns (fp32 stats on the accumulator).
+        accm = tl.where(n_valid[None, :], acc, 0.0)
+        mean = tl.sum(accm, 1) / Cout
+        cent = tl.where(n_valid[None, :], acc - mean[:, None], 0.0)
+        var = tl.sum(cent * cent, 1) / Cout
+        rstd = tl.math.rsqrt(var + eps)
+        lnw = tl.load(lnw_ptr + n_offs, mask=n_valid, other=0.0)
+        lnb = tl.load(lnb_ptr + n_offs, mask=n_valid, other=0.0)
+        y = cent * rstd[:, None] * lnw[None, :].to(tl.float32) + lnb[None, :].to(
+            tl.float32
+        )
+        if RELU:
+            y = tl.maximum(y, 0.0)
+        rmask = tl.load(mask_ptr + m_offs, mask=m_valid, other=0)
+        y = tl.where(rmask[:, None] > 0, y, 0.0)
+        tl.store(
+            out_ptr + m_offs[:, None] * Cout + n_offs[None, :],
+            y.to(tl.float16),
+            mask=m_valid[:, None] & n_valid[None, :],
+        )
+
+    @torch.library.custom_op("hexfield::hex_conv_ln", mutates_args=())
+    def hex_conv_ln(
+        x: torch.Tensor,
+        gather_idx: torch.Tensor,
+        mask: torch.Tensor,
+        weight: torch.Tensor,
+        bias: torch.Tensor,
+        ln_weight: torch.Tensor,
+        ln_bias: torch.Tensor,
+        eps: float,
+        relu: bool,
+    ) -> torch.Tensor:
+        b, npad, c = x.shape
+        cout = weight.shape[-1]
+        x = x.contiguous()
+        gidx = gather_idx.contiguous()
+        m8 = mask.to(torch.uint8).contiguous()
+        w16 = weight.reshape(7 * c, cout).to(torch.float16).contiguous()
+        b32 = bias.to(torch.float32).contiguous()
+        lnw = ln_weight.to(torch.float32).contiguous()
+        lnb = ln_bias.to(torch.float32).contiguous()
+        out = torch.empty((b, npad, cout), dtype=torch.float16, device=x.device)
+        rows = b * npad
+        BN = triton.next_power_of_2(cout)  # whole row per program (LN needs it)
+        BM, BK = _LN_BM, 64
+        grid = (triton.cdiv(rows, BM),)
+        _hex_conv_ln_kernel[grid](
+            x, gidx, m8, w16, b32, b32, lnw, lnb, out,  # sc_ptr unused (FP8=False)
+            b, npad, c, cout, eps,
+            IS_FP16_IN=(x.dtype == torch.float16), RELU=relu, FP8=False,
+            BM=BM, BN=BN, BK=BK,
+            num_warps=_LN_WARPS, num_stages=_LN_STAGES,
+        )
+        return out
+
+    @hex_conv_ln.register_fake
+    def _hex_conv_ln_fake(
+        x, gather_idx, mask, weight, bias, ln_weight, ln_bias, eps, relu
+    ):
+        return x.new_empty(
+            (x.shape[0], x.shape[1], weight.shape[-1]), dtype=torch.float16
+        )
+
+    # --- fp8 (e4m3) variants ------------------------------------------------------
+    # Ada tensor cores run e4m3 x e4m3 at 2x the fp16 rate. Weights are
+    # quantized per call (trivial: 7*C*Cout elements) with per-out-channel
+    # scales dequantized in the fp32 epilogue; activations are cast to fp8 in
+    # registers (LayerNorm-bounded, so the e4m3 range is never clipped — only
+    # mantissa precision is spent). MEDIUM numerics risk by design: gate with
+    # a fresh serve-parity tolerance and the arena eval, not the 3e-3 gate.
+
+    # Serve weights are frozen, so quantize once per weight tensor and cache.
+    # The entry keeps a strong ref to the weight (id() can't alias a collected
+    # tensor) and re-quantizes if the weight is ever mutated in place.
+    _W8_CACHE: dict = {}
+
+    def _w8_scales(weight: torch.Tensor, c: int, cout: int):
+        key = id(weight)
+        ent = _W8_CACHE.get(key)
+        if ent is not None and ent[0] is weight and ent[1] == weight._version:
+            return ent[2], ent[3]
+        w = weight.reshape(7 * c, cout).to(torch.float32)
+        sc = (w.abs().amax(dim=0) / 448.0).clamp(min=1e-12)
+        w8 = (w / sc).to(torch.float8_e4m3fn).contiguous()
+        sc = sc.contiguous()
+        _W8_CACHE[key] = (weight, weight._version, w8, sc)
+        return w8, sc
+
+    @torch.library.custom_op("hexfield::hex_conv_fp8", mutates_args=())
+    def hex_conv_fp8(
+        x: torch.Tensor,
+        gather_idx: torch.Tensor,
+        mask: torch.Tensor,
+        weight: torch.Tensor,
+        bias: torch.Tensor,
+    ) -> torch.Tensor:
+        b, npad, c = x.shape
+        cout = weight.shape[-1]
+        x = x.contiguous()
+        gidx = gather_idx.contiguous()
+        m8 = mask.to(torch.uint8).contiguous()
+        w8, sc = _w8_scales(weight, c, cout)
+        b32 = bias.to(torch.float32).contiguous()
+        out = torch.empty((b, npad, cout), dtype=torch.float16, device=x.device)
+        rows = b * npad
+        BM = 32 if rows < 32768 else 64
+        BN, BK = min(128, cout), 64
+        grid = (triton.cdiv(rows, BM), triton.cdiv(cout, BN))
+        _hex_conv_kernel[grid](
+            x, gidx, m8, w8, b32, sc, out,
+            b, npad, c, cout,
+            IS_FP16_IN=(x.dtype == torch.float16), FP8=True,
+            BM=BM, BN=BN, BK=BK,
+            num_warps=4 if BM == 32 else 8, num_stages=3,
+        )
+        return out
+
+    @hex_conv_fp8.register_fake
+    def _hex_conv_fp8_fake(x, gather_idx, mask, weight, bias):
+        return x.new_empty(
+            (x.shape[0], x.shape[1], weight.shape[-1]), dtype=torch.float16
+        )
+
+    @torch.library.custom_op("hexfield::hex_conv_ln_fp8", mutates_args=())
+    def hex_conv_ln_fp8(
+        x: torch.Tensor,
+        gather_idx: torch.Tensor,
+        mask: torch.Tensor,
+        weight: torch.Tensor,
+        bias: torch.Tensor,
+        ln_weight: torch.Tensor,
+        ln_bias: torch.Tensor,
+        eps: float,
+        relu: bool,
+    ) -> torch.Tensor:
+        b, npad, c = x.shape
+        cout = weight.shape[-1]
+        x = x.contiguous()
+        gidx = gather_idx.contiguous()
+        m8 = mask.to(torch.uint8).contiguous()
+        w8, sc = _w8_scales(weight, c, cout)
+        b32 = bias.to(torch.float32).contiguous()
+        lnw = ln_weight.to(torch.float32).contiguous()
+        lnb = ln_bias.to(torch.float32).contiguous()
+        out = torch.empty((b, npad, cout), dtype=torch.float16, device=x.device)
+        rows = b * npad
+        BN = triton.next_power_of_2(cout)
+        BM, BK = _LN_BM, 64
+        grid = (triton.cdiv(rows, BM),)
+        _hex_conv_ln_kernel[grid](
+            x, gidx, m8, w8, b32, sc, lnw, lnb, out,
+            b, npad, c, cout, eps,
+            IS_FP16_IN=(x.dtype == torch.float16), RELU=relu, FP8=True,
+            BM=BM, BN=BN, BK=BK,
+            num_warps=_LN_WARPS, num_stages=_LN_STAGES,
+        )
+        return out
+
+    @hex_conv_ln_fp8.register_fake
+    def _hex_conv_ln_fp8_fake(
+        x, gather_idx, mask, weight, bias, ln_weight, ln_bias, eps, relu
+    ):
+        return x.new_empty(
+            (x.shape[0], x.shape[1], weight.shape[-1]), dtype=torch.float16
+        )
+
 else:  # pragma: no cover
     hex_conv = None
+    hex_conv_ln = None
+    hex_conv_fp8 = None
+    hex_conv_ln_fp8 = None
