@@ -81,7 +81,17 @@ export_root_prior_logits = true
 
 [model.config.training]
 batch_rows = 256
-learning_rate = 4e-4
+# 4e-4 -> 5e-4 (2026-07-03, epoch-3 restart): the inherited 4e-4 was main_6's
+# LATE-RUN decay value (5e-4 -> 4e-4 at its ep60-100 plateau); the house
+# fresh-run precedent at batch 256 is 5e-4 (main_4 + main_6 launch, overshoot
+# probe cleared <=5e-4 at c=128). main_7 epochs 1-2 ran COOLER than main_6
+# ever did at 5e-4 (grad_mean 2.3-2.5 vs 3.7-3.9, clip_fraction 0.0 vs
+# 0.01-0.08), so there is measured headroom. Not going above 5e-4: that is
+# the only overshoot-cleared ceiling, and width scaling argues against
+# extrapolating up at c=192. Decay to 4e-4 at the mid-run plateau per the
+# main_6 playbook; revisit 6e-4 only if clip_fraction stays ~0 for ~5 epochs
+# AND the loss slope looks LR-limited.
+learning_rate = 5e-4
 weight_decay = 1e-4
 grad_clip = 5.0
 adaptive_clip = true
