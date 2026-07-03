@@ -40,9 +40,11 @@ from typing import Any
 
 import numpy as np
 import torch
+import torch._dynamo  # noqa: F401  (train-compile config + mark_* helpers)
 
 from .batching import (
     PAD_QUANTUM,
+    PAIR_BUDGET,
     collate_training,
     pair_budget_microbuckets,
     policy_surprise_weights,
@@ -116,6 +118,36 @@ class HexfieldTrainer:
         # lazily on first pool-eligible epoch, reused across epochs, torn down by
         # close(). None until needed; stays None for serial.
         self._expand_pool: Any | None = None
+        # Training pair budget (HEXFIELD_TRAIN_PAIR_BUDGET, default batching's
+        # PAIR_BUDGET=2e7). PAIR_BUDGET was sized for the materialized fp16
+        # (B, 4, S, S) bias transient; with HEXFIELD_TRAIN_FLEX the attention
+        # never builds an S^2 tensor, so a larger budget packs more rows per
+        # microbucket (fewer, fatter fwd+bwd launches per optimizer step) with
+        # gradient-identical math (step-global denominators make the step
+        # gradient independent of the bucket split, modulo fp reassociation).
+        self._pair_budget = float(
+            os.environ.get("HEXFIELD_TRAIN_PAIR_BUDGET", 0) or PAIR_BUDGET
+        )
+        # Compiled training forward (HEXFIELD_TRAIN_COMPILE=1, CUDA only).
+        # The batch dim is marked dynamic and Npad is marked STATIC per call:
+        # microbucket row counts vary freely (one symbolic graph covers them)
+        # while Npad only takes the few PAD_QUANTUM multiples, each getting its
+        # own specialization. Marking BOTH dims dynamic trips Inductor's
+        # CantSplit on the attention head-merge reshape (B*(Npad+8) with two
+        # free symbols) — the same failure the serve path dodges by other means.
+        self._train_compile = (
+            self.device.type == "cuda"
+            and os.environ.get("HEXFIELD_TRAIN_COMPILE") == "1"
+        )
+        self._compiled_train_fwd = None
+        if self._train_compile:
+            try:
+                torch._dynamo.config.cache_size_limit = max(
+                    64, torch._dynamo.config.cache_size_limit
+                )
+                self._compiled_train_fwd = torch.compile(self.model.forward)
+            except Exception:
+                self._compiled_train_fwd = None
 
     def _get_expand_pool(self):
         """Lazily build the persistent spawn pool for ``expand_backend="pool"``.
@@ -514,7 +546,9 @@ class HexfieldTrainer:
             weight_by_row = {id(r): 0.0 for r in expanded}
             weight_by_row.update({id(r): w for r, w in zip(full_rows, full_weights)})
             self.optimizer.zero_grad(set_to_none=True)
-            for bucket in pair_budget_microbuckets(expanded, quantize=PAD_QUANTUM):
+            for bucket in pair_budget_microbuckets(
+                expanded, budget=self._pair_budget, quantize=PAD_QUANTUM
+            ):
                 # Pad to the same PAD_QUANTUM the budget split assumed.
                 pad_to = -(-max(r.support.num_nodes for r in bucket) // PAD_QUANTUM) * PAD_QUANTUM
                 batch = split_stvalue_columns(
@@ -528,11 +562,21 @@ class HexfieldTrainer:
                     k: v.to(self.device, non_blocking=True) if isinstance(v, torch.Tensor) else v
                     for k, v in batch.items()
                 }
+                fwd = self.model
+                if self._compiled_train_fwd is not None:
+                    # B symbolic (hint, not constraint: the flex graph break
+                    # specializes B in a sub-graph, which a hard mark_dynamic
+                    # turns into a ConstraintViolation), Npad pinned static:
+                    # one graph per PAD_QUANTUM multiple.
+                    for t in (batch["feats"], batch["nbr"], batch["mask"], batch["coords"]):
+                        torch._dynamo.maybe_mark_dynamic(t, 0)
+                        torch._dynamo.mark_static(t, 1)
+                    fwd = self._compiled_train_fwd
                 with torch.autocast(
                     device_type=self.device.type, dtype=torch.float16,
                     enabled=self.device.type == "cuda",
                 ):
-                    out = self.model(batch["feats"], batch["nbr"], batch["mask"], batch["coords"])
+                    out = fwd(batch["feats"], batch["nbr"], batch["mask"], batch["coords"])
                 loss, comps = hexfield_loss(
                     out, batch,
                     policy_weight=tcfg.policy_weight,

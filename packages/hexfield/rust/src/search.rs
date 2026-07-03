@@ -247,6 +247,16 @@ struct ContinuousSchedulerStats {
     gumbel_play_winner_moves: u64,
     gumbel_play_moves_early: u64,
     gumbel_play_winner_early: u64,
+    // Per-phase wall time (seconds) accumulated over the run: where the
+    // scheduler loop actually spends its time. `Instant::now()` bracketing is
+    // ~ns-scale against ms-scale phases, so this is always on.
+    select_seconds: f64,
+    submit_seconds: f64,
+    finish_seconds: f64,
+    backup_seconds: f64,
+    complete_seconds: f64,
+    loop_iterations: u64,
+    completes_skipped: u64,
 }
 
 fn continuous_flush_decision(
@@ -1070,13 +1080,25 @@ impl HexfieldMctsSession {
             )?;
             return self.finish_continuous_stats(py, stats, &evaluation_stats);
         }
+        // HEXFIELD_GATE_COMPLETE: skip the per-iteration complete scan (a
+        // par_iter readiness sweep over every slot) on iterations where nothing
+        // could have become ready — no backup ran this iteration, the previous
+        // complete decided no moves, and the loop is not at a Stop decision.
+        // Completion readiness only changes when a backup lands new visits or a
+        // completed move advances a root, so the gated scan is decision-
+        // identical; the flag exists for the A/B.
+        let gate_complete = std::env::var("HEXFIELD_GATE_COMPLETE").is_ok();
+        let mut last_moves_decided: u64 = 1; // force the first scan
         while continuous_has_work(&slots) || !queue.is_empty() {
+            stats.loop_iterations += 1;
+            let phase_t0 = std::time::Instant::now();
             let (new_leaves, made_progress) = match prefetched.take() {
                 Some(result) => result,
                 None => py.detach(|| {
                     select_continuous_pass(&mut slots, c_puct, leaf_batch_per_root, virtual_loss)
                 })?,
             };
+            stats.select_seconds += phase_t0.elapsed().as_secs_f64();
             queue.extend(new_leaves.into_iter().map(ContinuousEvalItem::Leaf));
 
             let decision = continuous_flush_decision(queue.len(), flush_target, made_progress);
@@ -1110,6 +1132,7 @@ impl HexfieldMctsSession {
                 // tree state). Async: submit -> select -> finish. Sync: eval ->
                 // select. Both yield (prefetch_result, evaluations).
                 let (prefetch_result, evaluations) = if async_eval {
+                    let t_submit = std::time::Instant::now();
                     let pending = submit_eval_cached(
                         py,
                         evaluator,
@@ -1119,6 +1142,8 @@ impl HexfieldMctsSession {
                         move_policy.request_moves_left(),
                         move_policy.request_logits(),
                     )?;
+                    stats.submit_seconds += t_submit.elapsed().as_secs_f64();
+                    let t_prefetch = std::time::Instant::now();
                     let prefetch_result = if no_prefetch {
                         (Vec::new(), false)
                     } else {
@@ -1131,6 +1156,8 @@ impl HexfieldMctsSession {
                             )
                         })?
                     };
+                    stats.select_seconds += t_prefetch.elapsed().as_secs_f64();
+                    let t_finish = std::time::Instant::now();
                     let evaluations = finish_eval_cached(
                         py,
                         evaluator,
@@ -1139,6 +1166,7 @@ impl HexfieldMctsSession {
                         Some(&evaluation_stats),
                         self.cache_max_states,
                     )?;
+                    stats.finish_seconds += t_finish.elapsed().as_secs_f64();
                     (prefetch_result, evaluations)
                 } else {
                     let evaluations = evaluate_state_refs_cached(
@@ -1173,6 +1201,7 @@ impl HexfieldMctsSession {
                     .flush_size_histogram
                     .entry(unique_flushed.max(1).next_power_of_two())
                     .or_insert(0) += 1;
+                let t_backup = std::time::Instant::now();
                 backup_continuous_items(
                     py,
                     &mut slots,
@@ -1184,6 +1213,7 @@ impl HexfieldMctsSession {
                     virtual_loss,
                     divergences,
                 )?;
+                stats.backup_seconds += t_backup.elapsed().as_secs_f64();
                 prefetched = if prefetch_result.1 {
                     Some(prefetch_result)
                 } else {
@@ -1191,18 +1221,30 @@ impl HexfieldMctsSession {
                 };
             }
 
-            let mut moves_decided = complete_continuous_slots(
-                py,
-                on_move,
-                &mut slots,
-                c_puct,
-                &move_policy,
-                &temperature_by_ply,
-                base_seed,
-                &mut queue,
-                &mut stats,
-                false,
-            )?;
+            let flushed_this_iter = matches!(decision, ContinuousFlushDecision::Flush { .. });
+            let must_complete = !gate_complete
+                || flushed_this_iter
+                || last_moves_decided > 0
+                || matches!(decision, ContinuousFlushDecision::Stop);
+            let t_complete = std::time::Instant::now();
+            let mut moves_decided = if must_complete {
+                complete_continuous_slots(
+                    py,
+                    on_move,
+                    &mut slots,
+                    c_puct,
+                    &move_policy,
+                    &temperature_by_ply,
+                    base_seed,
+                    &mut queue,
+                    &mut stats,
+                    false,
+                )?
+            } else {
+                stats.completes_skipped += 1;
+                0
+            };
+            stats.complete_seconds += t_complete.elapsed().as_secs_f64();
 
             if matches!(decision, ContinuousFlushDecision::Stop) && moves_decided == 0 {
                 // Rescue pass before declaring a stall: a Gumbel
@@ -1234,6 +1276,8 @@ impl HexfieldMctsSession {
                     )));
                 }
             }
+            // After the rescue so a rescue-decided move re-arms the next scan.
+            last_moves_decided = moves_decided;
         }
 
         self.finish_continuous_stats(py, stats, &evaluation_stats)
@@ -1285,6 +1329,13 @@ impl HexfieldMctsSession {
         }
         dict.set_item("flush_size_histogram", hist)?;
         dict.set_item("on_move_seconds", stats.on_move_seconds)?;
+        dict.set_item("select_seconds", stats.select_seconds)?;
+        dict.set_item("submit_seconds", stats.submit_seconds)?;
+        dict.set_item("finish_seconds", stats.finish_seconds)?;
+        dict.set_item("backup_seconds", stats.backup_seconds)?;
+        dict.set_item("complete_seconds", stats.complete_seconds)?;
+        dict.set_item("loop_iterations", stats.loop_iterations)?;
+        dict.set_item("completes_skipped", stats.completes_skipped)?;
         let eval_snapshot = evaluation_stats
             .lock()
             .expect("evaluation stats mutex poisoned")

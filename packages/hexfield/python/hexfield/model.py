@@ -64,6 +64,34 @@ _SERVE_FLEX = os.environ.get("HEXFIELD_SERVE_FLEX") == "1"
 # passes the fp32 master bias_tables[i] (not the fp16 serve cast) so the table's
 # gradient accumulates in fp32. With both flags off the materialized path runs.
 _TRAIN_FLEX = os.environ.get("HEXFIELD_TRAIN_FLEX") == "1"
+# Precomputed-pair flex serve variant, HEXFIELD_FLEX_PAIR=1 (default off; only
+# applies on the serve-flex no-grad path). The per-pair bias-table ROW INDEX is
+# materialized once per forward as a (B, S, S) uint8 tensor shared by all 3
+# attention blocks, with the pad-KEY fill folded in as an extra table row
+# (row BIAS_ROWS = PAD_KEY_MASK_VALUE). The score_mod then does ONE 1-byte
+# gather + a tiny (BIAS_ROWS+1, heads) fp16 table read per score, instead of
+# two int64 coord gathers + an int64 LUT gather + branchy region selects. The
+# uint8 pair tensor is bounded by the serve pair ceiling (B*S^2 bytes ~ 38 MB),
+# 8x smaller than the old materialized fp16 (B, heads, S, S) bias.
+_FLEX_PAIR = os.environ.get("HEXFIELD_FLEX_PAIR") == "1"
+# Train-side flex-pair, HEXFIELD_TRAIN_FLEX_PAIR=1 (default off; requires
+# train-flex). Same precomputed uint8 pair as the serve variant, but the
+# appended-pad-row table2 is built from the FP32 master bias_tables[i] (no
+# fp16 cast), so the table gradient flows through the table2 gather and
+# accumulates in fp32 exactly like the plain train-flex carrier. Gated
+# separately from the serve flag so the two paths roll out independently.
+_TRAIN_FLEX_PAIR = os.environ.get("HEXFIELD_TRAIN_FLEX_PAIR") == "1"
+# Fused gather+GEMM Triton conv, HEXFIELD_TRITON_CONV=1 (default off). Serve
+# (no-grad, CUDA) only; the (B, Npad, 7C) gathered tensor is never built. See
+# _triton_conv.py. The import is guarded so a torch without triton still loads.
+_TRITON_CONV = os.environ.get("HEXFIELD_TRITON_CONV") == "1"
+if _TRITON_CONV:
+    try:
+        from ._triton_conv import hex_conv as _hex_conv_fused
+    except Exception:  # pragma: no cover - no triton
+        _hex_conv_fused = None
+else:
+    _hex_conv_fused = None
 try:
     from torch.nn.attention.flex_attention import flex_attention as _flex_attention
 
@@ -75,6 +103,15 @@ try:
     # table[row, h]) which inductor cannot lower under dynamic shapes, so flex
     # specializes per distinct (batch, Npad) serve shape.
     _flex_compiled = torch.compile(_flex_attention, dynamic=False)
+    # SHAPE-KEYED compile instances (2026-07-03): a single compiled callable
+    # holds every (B, S) specialization in ONE dynamo cache, and dynamo resolves
+    # hits by linearly scanning guard-sets — with hundreds of live serve shapes
+    # that scan runs on every flex call (3 per group, ~20 groups per flush) and
+    # dominates the serve submit phase. Keying a separate torch.compile
+    # instance per exact q-shape makes the lookup a dict hit with a 1-entry
+    # guard chain; the inductor artifact is shared via the code cache, so the
+    # per-shape compile cost is unchanged.
+    _flex_by_shape: dict = {}
 
     # Each serve shape gets its own specialization. dynamo's recompile limit is
     # raised so the bounded set of serve shapes (batch <= active_limit, Npad
@@ -90,7 +127,15 @@ try:
 
     @torch.compiler.disable(recursive=False)
     def _flex_call(q, k, v, score_mod):
-        return _flex_compiled(q, k, v, score_mod=score_mod)
+        key = (
+            q.shape[0], q.shape[1], q.shape[2], q.shape[3],
+            q.dtype, q.requires_grad,
+        )
+        fn = _flex_by_shape.get(key)
+        if fn is None:
+            fn = torch.compile(_flex_attention, dynamic=False)
+            _flex_by_shape[key] = fn
+        return fn(q, k, v, score_mod=score_mod)
 
 except Exception:  # pragma: no cover - older torch without flex
     _flex_attention = None
@@ -164,6 +209,32 @@ class _FlexBias:
         return score_mod
 
 
+class _FlexPairBias:
+    """Carrier for the precomputed-pair flex serve path (HEXFIELD_FLEX_PAIR=1).
+
+    `pair` (B, S, S) uint8 is the per-pair bias-table row index, built ONCE per
+    forward (block-independent) with pad-KEY columns set to the extra pad row;
+    `table2` (BIAS_ROWS + 1, heads) fp16 is this block's bias table with the
+    PAD_KEY_MASK_VALUE row appended. The score_mod is one gather + one tiny
+    table read; no mask/coords/LUT work in-kernel."""
+
+    __slots__ = ("pair", "table2")
+
+    def __init__(self, pair, table2) -> None:
+        self.pair = pair
+        self.table2 = table2
+
+    def make_score_mod(self):
+        pair = self.pair
+        table2 = self.table2
+
+        def score_mod(score, b, h, q_idx, kv_idx):
+            row = pair[b, q_idx, kv_idx].to(torch.int32)
+            return score + table2[row, h].to(score.dtype)
+
+        return score_mod
+
+
 class _BiasGather(torch.autograd.Function):
     """table[pair] with a histogram backward.
 
@@ -217,6 +288,17 @@ class HexNodeConv(nn.Module):
         """
 
         b, n, c = x.shape
+        # Serve fast path (HEXFIELD_TRITON_CONV): fused gather+GEMM custom op —
+        # the (B, Npad, 7C) tensor is never materialized. No-grad CUDA only (no
+        # backward); 16-aligned channels only (the stem's C_in=15 falls through).
+        if (
+            _hex_conv_fused is not None
+            and x.is_cuda
+            and not torch.is_grad_enabled()
+            and c % 16 == 0
+            and self.out_channels % 16 == 0
+        ):
+            return _hex_conv_fused(x, gather_idx, mask, self.weight, self.bias)
         x_ext = torch.cat([x, x.new_zeros(b, 1, c)], dim=1)  # zero row at index Npad
         flat = gather_idx.reshape(b, n * 7, 1).expand(-1, -1, c)
         gathered = x_ext.gather(1, flat).reshape(b, n, 7 * c)
@@ -283,7 +365,7 @@ class RelPosAttention(nn.Module):
         # Flex path: the rel-pos bias + pad mask are computed inside the kernel via
         # a score_mod (no materialized (B,heads,S,S) tensor). block_mask is None.
         # The score_mod is built here, in the same frame as the flex call.
-        if isinstance(attn_bias, _FlexBias):
+        if isinstance(attn_bias, (_FlexBias, _FlexPairBias)):
             score_mod = attn_bias.make_score_mod()
             out = _flex_call(q, k, v, score_mod)
             out = out.transpose(1, 2).reshape(b, s, c)
@@ -382,12 +464,20 @@ class HexfieldNet(nn.Module):
                     rel_bias_index(dq, dr)
                 )
         self.register_buffer("_cell_bias_lut", cell_lut, persistent=False)
+        # uint8 twin of the LUT for the precomputed-pair path (values <= 233).
+        self.register_buffer(
+            "_cell_bias_lut_u8", cell_lut.to(torch.uint8), persistent=False
+        )
 
         # Flex flags, read once. serve_flex applies on the no-grad serve path;
         # train_flex on the grad path (fp32-table carrier). With both off,
         # attention uses the materialized build_attn_bias + _BiasGather.
+        # flex_pair upgrades the serve-flex score_mod to the precomputed-pair
+        # variant (see _FLEX_PAIR above); it is inert without serve_flex.
         self._serve_flex = _SERVE_FLEX and _flex_attention is not None
         self._train_flex = _TRAIN_FLEX and _flex_attention is not None
+        self._flex_pair = _FLEX_PAIR
+        self._train_flex_pair = _TRAIN_FLEX_PAIR
 
         self._init_weights()
 
@@ -483,6 +573,62 @@ class HexfieldNet(nn.Module):
         fill = torch.where(key_pad, 0.0, PAD_KEY_MASK_VALUE).to(bias.dtype)
         return bias + fill[:, None, None, :]         # broadcast over key axis (dim 3)
 
+    def _build_pair_u8(
+        self, coords: torch.Tensor, mask: torch.Tensor
+    ) -> torch.Tensor:
+        """(B, S, S) uint8 per-pair bias-table row index for the flex-pair serve
+        path: the same rows _build_pair produces, built once per forward and
+        shared by all 3 attention blocks, with pad-KEY columns set to the extra
+        pad row (BIAS_ROWS). Built through int16/int32 intermediates so no
+        (B, S, S) int64 tensor is materialized. Pad QUERY rows carry garbage
+        rows exactly like every other bias path (their outputs are re-zeroed
+        after each block)."""
+
+        b, n, _ = coords.shape
+        c16 = coords.to(torch.int16)
+        dq = c16[:, None, :, 0] - c16[:, :, None, 0]  # (B, N, N) key - query
+        dr = c16[:, None, :, 1] - c16[:, :, None, 1]
+        m = self._cell_bias_M
+        w = 2 * m + 1
+        qi = (dq.clamp(-m, m) + m).to(torch.int32)
+        ri = (dr.clamp(-m, m) + m).to(torch.int32)
+        cell = self._cell_bias_lut_u8[(qi * w + ri).reshape(-1)].reshape(b, n, n)
+
+        s = NUM_TOKENS + n
+        pair = torch.full(
+            (b, s, s), BIAS_TOKEN_TOKEN_ROW, dtype=torch.uint8, device=coords.device
+        )
+        pair[:, :NUM_TOKENS, NUM_TOKENS:] = BIAS_TOKEN_CELL_ROW
+        pair[:, NUM_TOKENS:, :NUM_TOKENS] = BIAS_CELL_TOKEN_ROW
+        pair[:, NUM_TOKENS:, NUM_TOKENS:] = cell
+        # Pad-cell KEY columns -> the appended pad row; token keys never masked.
+        key_dead = torch.cat([mask.new_zeros(b, NUM_TOKENS), ~mask], dim=1)
+        return pair.masked_fill(key_dead[:, None, :], BIAS_ROWS)
+
+    def _build_flex_pair_bias(
+        self, pair: torch.Tensor, block: int
+    ) -> "_FlexPairBias":
+        """Flex-pair carrier for attention block `block`: the shared uint8 pair
+        index plus this block's fp16 table with the PAD_KEY_MASK_VALUE row
+        appended (row BIAS_ROWS), so the pad-KEY additive fill is a plain table
+        row instead of an in-kernel mask read."""
+
+        table = self.bias_tables[block].to(torch.float16)
+        pad_row = table.new_full((1, table.shape[1]), PAD_KEY_MASK_VALUE)
+        return _FlexPairBias(pair, torch.cat([table, pad_row], dim=0))
+
+    def _build_train_flex_pair_bias(
+        self, pair: torch.Tensor, block: int
+    ) -> "_FlexPairBias":
+        """Grad-enabled flex-pair carrier: table2 keeps the FP32 master table
+        (no fp16 cast) so the score_mod's table2[row, h] read is differentiable
+        and the table gradient accumulates in fp32; the appended pad row is a
+        constant (no grad). Same fp32-master rationale as _build_train_flex_bias."""
+
+        table = self.bias_tables[block]  # fp32 master — NOT cast (see above)
+        pad_row = table.detach().new_full((1, table.shape[1]), PAD_KEY_MASK_VALUE)
+        return _FlexPairBias(pair, torch.cat([table, pad_row], dim=0))
+
     def _build_flex_bias(
         self, coords: torch.Tensor, mask: torch.Tensor, block: int
     ) -> "_FlexBias":
@@ -539,13 +685,22 @@ class HexfieldNet(nn.Module):
         grad_on = torch.is_grad_enabled()
         serve_flex = self._serve_flex and not grad_on
         train_flex = self._train_flex and grad_on
+        flex_pair = serve_flex and self._flex_pair
+        train_flex_pair = train_flex and self._train_flex_pair
         flex = serve_flex or train_flex
         if not flex:
             pair, key_pad = self._build_pair(coords, mask)
+        elif flex_pair or train_flex_pair:
+            # Block-independent, built once and shared by all 3 blocks.
+            pair_u8 = self._build_pair_u8(coords, mask)
 
         def block_bias(i: int):
+            if train_flex_pair:
+                return self._build_train_flex_pair_bias(pair_u8, i)
             if train_flex:
                 return self._build_train_flex_bias(coords, mask, i)
+            if flex_pair:
+                return self._build_flex_pair_bias(pair_u8, i)
             if serve_flex:
                 return self._build_flex_bias(coords, mask, i)
             return self.build_attn_bias(pair, key_pad, i)
@@ -625,16 +780,22 @@ class HexfieldNet(nn.Module):
 
         cells, tokens, gather_idx = self.trunk(feats, nbr, mask, coords)
         pooled = self._pooled(cells, mask)
+        # Head inputs follow the head weights' dtype. A no-op on the uniform
+        # paths (train fp32, autocast serve); on the fp16-serve path
+        # (HEXFIELD_SERVE_HALF) the evaluator keeps the value/ml tops fp32, so
+        # the cast upgrades their inputs and the scalar heads run fp32.
+        vin = self._value_input(tokens, 0, 1, pooled)
+        vin = vin.to(self.value_reduction.weight.dtype)
         out = {
             "policy": self._policy_logits(
                 self.policy_conv, self.policy_head, cells, gather_idx, mask
             ),
-            "value": self.value_head(
-                F.relu(self.value_reduction(self._value_input(tokens, 0, 1, pooled)))
-            ),
+            "value": self.value_head(F.relu(self.value_reduction(vin))),
         }
         if request_moves_left:
-            ml = F.relu(self.ml_reduction(self._value_input(tokens, 4, 5, pooled)))
+            mlin = self._value_input(tokens, 4, 5, pooled)
+            mlin = mlin.to(self.ml_reduction.weight.dtype)
+            ml = F.relu(self.ml_reduction(mlin))
             out["moves_left"] = self.moves_left_head(ml)
         return out
 
