@@ -164,6 +164,22 @@ try:
     except Exception:  # pragma: no cover - older torch
         pass
 
+    # Grad-path flex block sizes (2026-07-03, main_7 bring-up): at d=64 EVERY
+    # default flex train config wants 147456B shared memory vs Ada's 101376B
+    # limit -> "No valid triton configs" -> dynamo falls back to eager PER
+    # MICROBUCKET SHAPE and training runs ~9-10 s/step (measured live,
+    # main_7 epochs 1-2). These explicit blocks fit on Ada at every probed
+    # shape (B<=48, S<=648) and beat the H100-tuned defaults where those do
+    # compile. Serve-path flex is untouched (no-grad calls pass None).
+    # HEXFIELD_TRAIN_FLEX_SMALL_BLOCKS=0 reverts.
+    if os.environ.get("HEXFIELD_TRAIN_FLEX_SMALL_BLOCKS", "1") == "1":
+        _TRAIN_FLEX_KOPTS = {
+            "BLOCK_M": 64, "BLOCK_N": 32,
+            "BLOCK_M1": 32, "BLOCK_N1": 32, "BLOCK_M2": 32, "BLOCK_N2": 32,
+        }
+    else:
+        _TRAIN_FLEX_KOPTS = None
+
     @torch.compiler.disable(recursive=False)
     def _flex_call(q, k, v, score_mod):
         key = (
@@ -174,7 +190,8 @@ try:
         if fn is None:
             fn = torch.compile(_flex_attention, dynamic=False)
             _flex_by_shape[key] = fn
-        return fn(q, k, v, score_mod=score_mod)
+        kopts = _TRAIN_FLEX_KOPTS if q.requires_grad else None
+        return fn(q, k, v, score_mod=score_mod, kernel_options=kopts)
 
 except Exception:  # pragma: no cover - older torch without flex
     _flex_attention = None
