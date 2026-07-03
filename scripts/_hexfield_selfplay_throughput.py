@@ -29,6 +29,7 @@ GAMES = int(sys.argv[3]) if len(sys.argv) > 3 else 16
 PLY_CAP = int(sys.argv[4]) if len(sys.argv) > 4 else 20
 FLUSH_TARGET = int(sys.argv[5]) if len(sys.argv) > 5 else 256
 ARL = int(sys.argv[6]) if len(sys.argv) > 6 else GAMES
+VBS = int(sys.argv[7]) if len(sys.argv) > 7 else 4
 
 device = torch.device("cuda")
 model = HexfieldNet()
@@ -60,7 +61,7 @@ torch.cuda.synchronize()
 t0 = time.time()
 stats = session.run_continuous(
     list(range(GAMES)), tuple(states.values()), evaluator=evaluator, on_move=on_move,
-    visits=VISITS, c_puct=1.5, base_seed=7, virtual_batch_size=4, flush_target=FLUSH_TARGET,
+    visits=VISITS, c_puct=1.5, base_seed=7, virtual_batch_size=VBS, flush_target=FLUSH_TARGET,
     active_root_limit=ARL, temperature_by_ply=[1.0] * 8 + [0.3] * 200,
     forced_playout_k=2.0, widening_policy_mass=0.95, widening_max_children=96,
     widening_min_children=2, root_dirichlet_total_alpha=10.83,
@@ -82,4 +83,17 @@ print(f"full/fast/init moves: {stats['full_moves']}/{stats['fast_moves']}/{stats
 print(f"early_stops fast/full: {stats['early_stops_fast']}/{stats['early_stops_full']}  "
       f"saved={stats['early_stop_visits_saved']}")
 print(f"peak VRAM: {peak:.2f} GiB")
+phase_keys = [
+    "select_seconds", "submit_seconds", "finish_seconds", "backup_seconds",
+    "complete_seconds", "loop_iterations", "completes_skipped",
+    "no_progress_flushes",
+]
+if "select_seconds" in stats:
+    print("phases: " + "  ".join(f"{k.replace('_seconds','')}={stats[k]:.1f}" if isinstance(stats.get(k), float) else f"{k}={stats.get(k)}" for k in phase_keys))
+ev = stats.get("evaluation")
+if isinstance(ev, dict):
+    print("eval_stats: " + "  ".join(f"{k}={v:.2f}" if isinstance(v, float) else f"{k}={v}" for k, v in sorted(ev.items())))
+rep = evaluator.perf_trace_report()
+if rep:
+    print(f"perf_trace: {rep}")
 print(f"DENSE FLOOR: restnet ~9.7 pos/s @ 256v; 0.8x = 7.8 pos/s (note: hexfield 512v vs 256v)")

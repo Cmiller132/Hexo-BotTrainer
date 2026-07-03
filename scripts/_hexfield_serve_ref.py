@@ -30,7 +30,7 @@ from hexfield.geometry import unpack_action_id
 from hexfield.inference import HexfieldEvaluator
 from hexfield.model import HexfieldNet
 
-RUN = "/mnt/e/Hexo-BotTrainer/runs/hexfield_main_1"
+RUN = os.environ.get("HEXFIELD_REF_RUN", "/mnt/e/Hexo-BotTrainer/runs/hexfield_main_1")
 CKPT = os.environ.get("HEXFIELD_REF_CKPT", f"{RUN}/checkpoints/epoch_000034.pt")
 NBR_SENTINEL = 0xFFFF
 
