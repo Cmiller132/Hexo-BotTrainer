@@ -95,6 +95,10 @@ class LoadedModel:
     # output presence is not a valid lineage-level detector. Only the hexfield
     # loader ever sets this True; every other lineage keeps the default False.
     has_cell_q: bool = False
+    # Run root (the checkpoint's grandparent dir) — the hexfield search reads
+    # the run's manifest.json from here to search with the AS-TRAINED profile
+    # (gumbel flags, calibrated gumbel_m, divergences). None for other lineages.
+    run_dir: str | None = None
 
 
 def _detect_lineage(payload: Any) -> str:
@@ -225,13 +229,22 @@ def search_position(
     c_puct: float = 1.5,
     n: int | None = None,
     seed: int = 0,
+    temperature: float = 0.0,
 ) -> dict[str, Any]:
-    """Run a fresh, reproducible CPU MCTS on the position (no root noise)."""
+    """Run a fresh, reproducible CPU MCTS on the position (no root noise).
+
+    ``temperature`` is hexfield-only: in-search move-selection temperature for
+    the as-trained (eval-protocol) profile — 0 keeps the greedy debug read;
+    match bots pass 1.0 for opening plies. Other lineages ignore it (their
+    selection stays the client-side visit argmax)."""
 
     if loaded.lineage in (DENSE_RESTNET, DENSE_PLAIN):
         return _search_dense(loaded, action_ids, visits=visits, c_puct=c_puct, seed=seed)
     if loaded.lineage == HEXFIELD:
-        return _search_hexfield(loaded, action_ids, visits=visits, c_puct=c_puct, seed=seed)
+        return _search_hexfield(
+            loaded, action_ids, visits=visits, c_puct=c_puct, seed=seed,
+            temperature=temperature,
+        )
     return _search_hexgt(loaded, action_ids, visits=visits, c_puct=c_puct, n=n, seed=seed)
 
 
@@ -904,6 +917,48 @@ def _infer_hexfield_channels(state_dict: dict[str, Any]) -> int | None:
     return None
 
 
+# Trunk layout by (conv_blocks, attn_blocks) count. The counts alone do not pin
+# the C/A interleaving, so known lineage layouts are mapped explicitly:
+# main_1..main_6 are CCC A CCC A CC A; main_7 is CC A x5. A new layout must be
+# added here before its checkpoints can be debugged (the loader raises a clear
+# error instead of mis-building the net).
+_HEXFIELD_TRUNK_LAYOUTS: dict[tuple[int, int], str] = {
+    (8, 3): "CCCACCCACCA",
+    (10, 5): "CCACCACCACCACCA",
+}
+
+
+def _infer_hexfield_arch(state_dict: dict[str, Any]) -> dict[str, Any]:
+    """Infer (channels, attention_heads, trunk_layout) off a hexfield state dict.
+
+    All three are env-driven at training time (HEXFIELD_CHANNELS /
+    HEXFIELD_ATTENTION_HEADS / HEXFIELD_TRUNK), so the worker — whose process
+    env is NOT the run's env — must reconstruct them from the weights:
+    channels from stem.bias, heads from the bias-table column count
+    (``bias_tables.0`` is (BIAS_ROWS, heads)), block counts from the parameter
+    key indices, and the C/A interleaving from the known-lineage layout map."""
+
+    channels = _infer_hexfield_channels(state_dict)
+    heads = None
+    bt = state_dict.get("bias_tables.0")
+    if bt is not None and len(getattr(bt, "shape", ())) == 2:
+        heads = int(bt.shape[1])
+    conv_ids = {
+        int(k.split(".")[1]) for k in state_dict if k.startswith("conv_blocks.")
+    }
+    attn_ids = {
+        int(k.split(".")[1]) for k in state_dict if k.startswith("attn_blocks.")
+    }
+    layout = None
+    if conv_ids and attn_ids:
+        counts = (max(conv_ids) + 1, max(attn_ids) + 1)
+        layout = _HEXFIELD_TRUNK_LAYOUTS.get(counts)
+        # Unknown counts (e.g. legacy v2's 6C/3A): leave layout None so the
+        # net builds at the env default and the non-strict load surfaces the
+        # drift as load_warnings — same soft contract as before, never a 500.
+    return {"channels": channels, "attention_heads": heads, "trunk_layout": layout}
+
+
 def _load_hexfield_checkpoint(ckpt_path: Path, payload: dict[str, Any]) -> LoadedModel:
     """Load a hexfield checkpoint onto CPU.
 
@@ -920,13 +975,20 @@ def _load_hexfield_checkpoint(ckpt_path: Path, payload: dict[str, Any]) -> Loade
     if not isinstance(state_dict, dict):
         raise ValueError(f"{ckpt_path.name}: hexfield checkpoint 'model' is not a state dict")
 
-    # The hexfield width (channels) is env-driven at training time, so a worker
-    # built with the production-default CHANNELS (e.g. 96) cannot load a wider
-    # run (main_5 is c=128). HexfieldNet is fully channels-parameterized, so read
-    # the width straight off the weights — stem.bias is [c] (fall back to the
-    # token table [NUM_TOKENS, c]) — and build the net at the checkpoint's width.
-    channels = _infer_hexfield_channels(state_dict)
-    model = hf.HexfieldNet(channels=channels) if channels is not None else hf.HexfieldNet()
+    # The hexfield width (channels), head count, AND trunk layout are env-driven
+    # at training time (main_5/6 are c=128/4-head/CCCACCCACCA; main_7 is
+    # c=192/3-head/CCACCACCACCACCA), so a worker running with the process-default
+    # env cannot load foreign runs unless it reconstructs the arch off the
+    # weights. HexfieldNet is fully parameterized for exactly this.
+    inferred = _infer_hexfield_arch(state_dict)
+    kwargs: dict[str, Any] = {}
+    if inferred["channels"] is not None:
+        kwargs["channels"] = inferred["channels"]
+    if inferred["attention_heads"] is not None:
+        kwargs["attention_heads"] = inferred["attention_heads"]
+    if inferred["trunk_layout"] is not None:
+        kwargs["trunk_layout"] = inferred["trunk_layout"]
+    model = hf.HexfieldNet(**kwargs)
     warnings: list[str] = []
     try:
         model.load_state_dict(state_dict, strict=True)
@@ -942,9 +1004,12 @@ def _load_hexfield_checkpoint(ckpt_path: Path, payload: dict[str, Any]) -> Loade
     model.eval()
     # arch carries the run/lineage meta for the provenance panel (only jsonable
     # scalars survive the worker's _model_meta filter, which is exactly meta's
-    # shape). The structural fields are constants, so nothing is inferred.
+    # shape) plus the weight-inferred structural fields.
     arch: dict[str, Any] = {str(k): v for k, v in meta.items()}
     arch["moves_left_head"] = True
+    arch["channels"] = inferred["channels"]
+    arch["attention_heads"] = inferred["attention_heads"]
+    arch["trunk_layout"] = inferred["trunk_layout"]
     return LoadedModel(
         lineage=HEXFIELD,
         model=model,
@@ -962,6 +1027,9 @@ def _load_hexfield_checkpoint(ckpt_path: Path, payload: dict[str, Any]) -> Loade
         # The per-cell Q head is train-only (v3+). Older hexfield lineages lack
         # it; gate the debug Q heatmap / regret UI on this from the state dict.
         has_cell_q=("cell_q_head.weight" in state_dict),
+        # Run root — lets the search read the run's manifest for the as-trained
+        # (gumbel) search profile. <run>/checkpoints/<file>.pt -> <run>.
+        run_dir=str(ckpt_path.resolve().parent.parent),
     )
 
 
@@ -1147,6 +1215,27 @@ def _decode_id_weight_pairs(ids_bytes: Any, weights_bytes: Any) -> list[tuple[in
     return [(int(a), float(w)) for a, w in zip(ids.tolist(), weights.tolist())]
 
 
+@lru_cache(maxsize=16)
+def _hexfield_run_config(run_dir: str | None):
+    """The run's parsed HexfieldConfig (from ``<run>/manifest.json``), or None.
+
+    This is how the search runs AS-TRAINED: the manifest carries the exact
+    ``model.config`` the run trains/evals with — the gumbel levers, the
+    budget-calibrated ``gumbel_m``, the divergence set, vbs. A missing/foreign
+    manifest falls back to None (caller uses SelfplayConfig defaults)."""
+
+    if not run_dir:
+        return None
+    try:
+        from hexfield.config import parse_hexfield_config
+
+        manifest = Path(run_dir) / "manifest.json"
+        data = json.loads(manifest.read_text(encoding="utf-8-sig"))
+        return parse_hexfield_config(data.get("model", {}).get("config", {}))
+    except Exception:
+        return None
+
+
 @torch.no_grad()
 def _search_hexfield(
     loaded: LoadedModel,
@@ -1155,27 +1244,47 @@ def _search_hexfield(
     visits: int,
     c_puct: float,
     seed: int,
+    temperature: float = 0.0,
 ) -> dict[str, Any]:
     """Real CPU MCTS via the Rust HexfieldMctsSession (single-position search).
 
-    Mirrors evaluation.py / selfplay.py: the session takes the engine state and
-    drives featurization through a CPU ``HexfieldEvaluator``. Clean-search debug
-    contract (same as _search_dense/_search_hexgt): no Dirichlet root noise,
-    move-selection temperature 0 (reported best == visit argmax), neutral root
-    policy temperature, fixed seed. Production search divergences (widening, FPU,
-    forced playouts, TSS) are left at the SelfplayConfig production defaults so
-    the tree matches how the model actually plays; ``search_parity_mode`` stays
-    off (the production path, not the dense-lockstep parity path)."""
+    Searches with the run's AS-TRAINED profile, exactly like the eval arena
+    (eval_arena.play_checkpoint_match): the divergence overrides — including
+    the Gumbel levers (root gumbel + sequential halving + non-root select) and
+    the budget-calibrated ``gumbel_m`` — come from the run's own manifest via
+    ``build_divergence_overrides``, and move selection happens IN-SEARCH via
+    ``move_temperatures`` (the eval protocol: sampled opening plies at
+    temperature 1, argmax after). ``temperature=0`` (the debug default) keeps
+    the clean reproducible read: no Dirichlet noise, returned best == the
+    profile's greedy selection. A run without gumbel in its config gets the
+    same plain-PUCT profile as before (the overrides mirror whatever the
+    config says)."""
 
-    from hexfield.config import SelfplayConfig
+    from hexfield.config import SelfplayConfig, build_divergence_overrides
     from hexfield.inference import HexfieldEvaluator
 
     hf = _hexfield()
-    sp = SelfplayConfig()  # production search knobs (defaults)
+    cfg = _hexfield_run_config(loaded.run_dir)
+    sp = cfg.selfplay if cfg is not None else SelfplayConfig()
+    # Eval-arena vbs: the multistage eval's eval_virtual_batch_size, not the
+    # self-play in-flight depth (48) — single-root CPU search wants the former.
+    eval_vbs = 32
+    if cfg is not None:
+        eval_vbs = int(
+            getattr(cfg.multi_stage_eval, "eval_virtual_batch_size", 32) or 32
+        )
+    disabled = False
+    if loaded.run_dir:
+        disabled = (Path(loaded.run_dir) / "diagnostics" / "ml_auto_disabled.flag").exists()
+    overrides = build_divergence_overrides(sp, disabled=disabled)
+
     state = state_from_actions(action_ids)
     evaluator = HexfieldEvaluator(loaded.model, device="cpu")
     session = hf._rust.HexfieldMctsSession(max_states=65536)
 
+    # Mirrors eval_arena's `common` search kwargs (visits/c_puct come from the
+    # request; the rest from the run's selfplay profile) + per-root
+    # move_temperatures for in-search selection.
     result = session.search(
         [int(seed)],
         (state,),
@@ -1183,17 +1292,15 @@ def _search_hexfield(
         visits=int(visits),
         c_puct=float(c_puct),
         temperature=0.0,
+        move_temperatures=[float(temperature)],
+        divergence_overrides=overrides,
         seed=int(seed),
-        virtual_batch_size=sp.virtual_batch_size,
-        fpu_reduction=sp.fpu_reduction,
-        virtual_loss=sp.virtual_loss,
+        virtual_batch_size=eval_vbs,
         widening_policy_mass=sp.widening_policy_mass,
         widening_max_children=sp.widening_max_children,
         widening_min_children=sp.widening_min_children,
-        forced_playout_k=sp.forced_playout_k,
-        root_policy_temperature=sp.root_policy_temperature,
+        fpu_reduction=sp.fpu_reduction,
         tss_enabled=sp.tss_enabled,
-        root_fpu_zero_under_noise=sp.root_fpu_zero_under_noise,
         search_parity_mode=sp.search_parity_mode,
     )[0]
 
@@ -1214,6 +1321,19 @@ def _search_hexfield(
         "best": _coord_of(best_action_id),
         "visit_policy": _policy_pairs_to_rows(visit_pairs, normalize=True),
         "root_prior": _policy_pairs_to_rows(root_prior_pairs, normalize=False),
+        # Selection happened INSIDE the search (move_temperatures), under the
+        # run's as-trained profile — callers (match bots) should play
+        # best_action_id directly instead of re-sampling visit rows.
+        "selection_in_search": True,
+        "search_profile": {
+            "source": "manifest" if cfg is not None else "defaults",
+            "temperature": float(temperature),
+            "gumbel_root": bool(overrides.get("gumbel_root")),
+            "gumbel_sequential_halving": bool(
+                overrides.get("gumbel_sequential_halving")
+            ),
+            "gumbel_m": int(overrides.get("gumbel_m", 0)),
+        },
     }
 
 
@@ -1221,7 +1341,10 @@ def _search_hexfield(
 # hexfield attention map (Model Debug interactive attention view)
 # ---------------------------------------------------------------------------
 
-# Constants the response echoes so the UI never hardcodes them (model constants).
+# Skeleton/echo constants. NUM_TOKENS is a true model constant; BLOCKS/HEADS
+# are only the non-hexfield n/a-skeleton clamps — for a loaded hexfield model
+# the real counts are read off the model (arch-dependent: main_6 3x4-head,
+# main_7 5x3-head) in attention_position.
 _ATTN_NUM_TOKENS = 8
 _ATTN_NUM_BLOCKS = 3
 _ATTN_NUM_HEADS = 4
@@ -1272,11 +1395,18 @@ def attention_position(
     is unused here. Non-hexfield lineages return the n/a skeleton (found False).
     """
 
-    block = max(0, min(int(block), _ATTN_NUM_BLOCKS - 1))
-    head = None if head is None else ("max" if head == "max" else max(0, min(int(head), _ATTN_NUM_HEADS - 1)))
-
     if loaded.lineage != HEXFIELD:
+        block = max(0, min(int(block), _ATTN_NUM_BLOCKS - 1))
+        head = None if head is None else ("max" if head == "max" else max(0, min(int(head), _ATTN_NUM_HEADS - 1)))
         return _attention_na_skeleton(loaded, block, head, action_ids)
+
+    # Structural constants come from the LOADED model, not module constants —
+    # the attn block count and head count are arch-dependent (main_6 is 3
+    # blocks x 4 heads; main_7 is 5 blocks x 3 heads).
+    num_blocks = len(loaded.model.attn_blocks)
+    num_heads = int(loaded.model.attn_blocks[0].attn.heads)
+    block = max(0, min(int(block), num_blocks - 1))
+    head = None if head is None else ("max" if head == "max" else max(0, min(int(head), num_heads - 1)))
 
     hf = _hexfield()
     state = state_from_actions(action_ids)
@@ -1381,8 +1511,8 @@ def attention_position(
             out["reason"] = "bad_query"
             # still echo the real lineage/structural constants for a hexfield miss
             out["lineage"] = loaded.lineage
-            out["num_blocks"] = _ATTN_NUM_BLOCKS
-            out["num_heads"] = _ATTN_NUM_HEADS
+            out["num_blocks"] = num_blocks
+            out["num_heads"] = num_heads
             out["num_cells"] = n_cells
             out["cells"] = cells
             out["token_queries"] = token_queries
@@ -1408,8 +1538,8 @@ def attention_position(
         "lineage": loaded.lineage,
         "block": int(block),
         "head": (None if head is None else (head if head == "max" else int(head))),
-        "num_blocks": _ATTN_NUM_BLOCKS,
-        "num_heads": _ATTN_NUM_HEADS,
+        "num_blocks": num_blocks,
+        "num_heads": num_heads,
         "num_tokens": nt,
         "num_cells": n_cells,
         "cells": cells,

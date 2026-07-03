@@ -44,6 +44,7 @@ import random
 import re
 import statistics
 import tempfile
+import zlib
 from collections.abc import Callable
 from email.utils import formatdate
 from http import HTTPStatus
@@ -111,6 +112,12 @@ CHECKPOINT_C_PUCT_DEFAULT = 1.5
 # so repeated games diverge; afterwards play is the strict visit argmax.
 CHECKPOINT_OPENING_MOVES = 8
 CHECKPOINT_OPENING_TEMPERATURE = 0.6
+# In-search opening temperature for lineages whose selection happens inside
+# the search (hexfield, as-trained gumbel profile). 1.0 = the multistage-eval
+# arena's opening_temperature, so match-screen games sample openings exactly
+# like eval games. The 0.6 above remains the client-side visit-sampling knob
+# for legacy lineages (dense/hexgt).
+CHECKPOINT_OPENING_TEMPERATURE_IN_SEARCH = 1.0
 
 # --- Transfer efficiency (gzip + caching) -----------------------------------
 # The dashboard is often viewed over LAN/VPN, where uncompressed payloads and
@@ -914,8 +921,26 @@ class _CheckpointBotPlayer:
                 "top_p": policy[0].get("p"),
             }
         else:
+            # Eval protocol, mirrored end to end: sampled opening plies at
+            # temperature 1 then greedy, with the selection made IN-SEARCH by
+            # the run's as-trained profile (gumbel for gumbel-trained runs —
+            # the worker reads the run manifest). The seed decorrelates per
+            # (game, ply) exactly like the eval path's per-(game, move) seeds;
+            # it feeds both the search's stochastic levers and the tempered
+            # opening selection, and rides the cache signature so distinct
+            # games never share a cached opening move.
+            ply = len(acts)
+            temperature = (
+                CHECKPOINT_OPENING_TEMPERATURE_IN_SEARCH
+                if ply < CHECKPOINT_OPENING_MOVES
+                else 0.0
+            )
+            seed = zlib.crc32(f"{self._game_token}|{ply}".encode()) & 0x7FFFFFFF
             signature = _debug_signature(
-                f"match-search:{self._visits}:{self._c_puct}", self._ckpt_path, acts, None
+                f"match-search:{self._visits}:{self._c_puct}:{temperature}:{seed}",
+                self._ckpt_path,
+                acts,
+                None,
             )
             result = _debug_worker().cached(
                 signature,
@@ -925,21 +950,33 @@ class _CheckpointBotPlayer:
                 action_ids=acts,
                 visits=self._visits,
                 c_puct=self._c_puct,
-                seed=0,
+                seed=seed,
+                temperature=temperature,
             )
-            # Eval-protocol selection (visit argmax after a sampled opening).
-            # `best_action_id` (also the visit argmax since the debug search
-            # moved to temperature 0) stays as the degenerate-rows fallback.
-            ply = len(acts)
-            selected = _select_visit_action(result.get("visit_policy") or [], ply, self._game_token)
-            action_id = int(result["best_action_id"]) if selected is None else selected
+            if result.get("selection_in_search"):
+                # hexfield: the returned action IS the profile's selection
+                # (tempered opening / greedy after) — play it directly.
+                action_id = int(result["best_action_id"])
+                selection = (
+                    "in-search-opening" if temperature > 0.0 else "in-search-argmax"
+                )
+            else:
+                # Other lineages: eval-protocol selection client-side (visit
+                # sampling in the opening, argmax after). `best_action_id`
+                # stays as the degenerate-rows fallback.
+                selected = _select_visit_action(
+                    result.get("visit_policy") or [], ply, self._game_token
+                )
+                action_id = int(result["best_action_id"]) if selected is None else selected
+                selection = "opening-sample" if ply < CHECKPOINT_OPENING_MOVES else "argmax"
             diagnostics = {
                 "root_value": result.get("root_value"),
                 "visits": result.get("visits"),
                 "mode": self._mode,
                 "run": self._run,
                 "checkpoint": self._checkpoint,
-                "selection": "opening-sample" if ply < CHECKPOINT_OPENING_MOVES else "argmax",
+                "selection": selection,
+                "search_profile": result.get("search_profile"),
             }
         return DecisionResult(
             action=engine.PlacementAction(unpack_coord_id(action_id)),

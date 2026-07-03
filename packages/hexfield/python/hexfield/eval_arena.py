@@ -189,12 +189,16 @@ def _load_hexfield_net(checkpoint: str | Path) -> HexfieldNet:
     if not isinstance(payload, dict) or "model" not in payload:
         raise RuntimeError(f"hexfield checkpoint payload has no 'model' state: {path}")
     sd = payload["model"]
-    # Build the net at the checkpoint's own trunk width, not the process-global
-    # CHANNELS, so a narrower or wider checkpoint (e.g. c=96 evaluated by a c=128
-    # run) loads instead of shape-mismatching. The width is inferred from the
-    # checkpoint; None means default-width construction (== CHANNELS).
-    ckpt_channels = _infer_checkpoint_channels(sd)
-    model = HexfieldNet() if ckpt_channels is None else HexfieldNet(channels=ckpt_channels)
+    # Build the net at the checkpoint's OWN arch (width, head count, trunk
+    # layout), not the process-global env constants, so a foreign-arch anchor
+    # loads instead of shape-mismatching — main_7 (c=192, 3 heads, CCAx5)
+    # evaluates main_6/main_5 anchors (c=128, 4 heads, CCCACCCACCA) and vice
+    # versa. Undeterminable fields fall back to the env defaults.
+    from .model import infer_net_kwargs_from_state_dict
+
+    net_kwargs = infer_net_kwargs_from_state_dict(sd)
+    ckpt_channels = net_kwargs.get("channels")
+    model = HexfieldNet(**net_kwargs)
     try:
         model.load_state_dict(sd, strict=True)
     except RuntimeError:

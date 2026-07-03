@@ -161,6 +161,7 @@ def _handle(req: dict[str, Any]) -> dict[str, Any]:
             c_puct=float(req.get("c_puct", 1.5)),
             n=req.get("n"),
             seed=int(req.get("seed", 0)),
+            temperature=float(req.get("temperature", 0.0)),
         )
         result["ply"] = len(action_ids)
         return result

@@ -5707,7 +5707,9 @@ const dbg = {
   treeBusy: false,
   attn: null,          // /api/debug/attention payload for the current attn cache slot
   attnQuery: null,     // {type:"cell"|"token", id:int} | null — active attention query
-  attnBlock: 0,        // attn block 0..2 (mirrors nav.attnblk)
+  attnBlock: 0,        // attn block index (mirrors nav.attnblk)
+  attnNumBlocks: 3,    // arch-dependent (main_6 3x4-head, main_7 5x3-head);
+  attnNumHeads: 4,     // refreshed from every attention payload's num_blocks/num_heads
   attnHead: null,      // attn head 0..3 or null=mean (mirrors nav.attnhead)
   attnPending: false,  // an attention fetch is in flight for the current slot
   treeOpen: new Map(), // tree-node path -> explicit expand/collapse (default: PV open)
@@ -5882,8 +5884,10 @@ function dbgHashToNav(hash) {
   // Attention query/block/head — validated lightly (worker clamps authoritatively).
   const aq = params.get("attnq") || "";
   nav.attnq = /^(cell|token):-?\d+$/.test(aq) ? aq : "";
+  // Loose URL clamp only (arch block count is unknown until a payload lands);
+  // the worker clamps authoritatively to the loaded model's block count.
   const ablk = parseInt(params.get("attnblk"), 10);
-  nav.attnblk = Number.isFinite(ablk) ? Math.max(0, Math.min(ablk, 2)) : 0;
+  nav.attnblk = Number.isFinite(ablk) ? Math.max(0, Math.min(ablk, 31)) : 0;
   const ah = params.get("attnhead");
   if (ah == null || ah === "" || ah === "mean") nav.attnhead = "";
   else if (ah === "max") nav.attnhead = "max";
@@ -7980,9 +7984,53 @@ function dbgAttnActiveRow(attn) {
   return attn.cell_query || null;  // null until the cell-query payload lands
 }
 
+// Rebuild the block/head <select> options to the loaded model's arch (payload
+// num_blocks/num_heads): main_6 is 3 blocks x 4 heads, main_7 5 blocks x 3
+// heads. Idempotent — only touches the DOM when the counts change.
+function dbgSyncAttnArch(attn) {
+  if (!attn) return;
+  const nb = Number(attn.num_blocks) || 0;
+  const nh = Number(attn.num_heads) || 0;
+  if (nb > 0 && nb !== dbg.attnNumBlocks) {
+    dbg.attnNumBlocks = nb;
+    const sel = dbgEl("dbgAttnBlockSel");
+    if (sel) {
+      sel.innerHTML = "";
+      for (let i = 0; i < nb; i++) {
+        const opt = document.createElement("option");
+        opt.value = String(i);
+        opt.textContent = String(i);
+        sel.appendChild(opt);
+      }
+    }
+  }
+  if (nh > 0 && nh !== dbg.attnNumHeads) {
+    dbg.attnNumHeads = nh;
+    const sel = dbgEl("dbgAttnHeadSel");
+    if (sel) {
+      sel.innerHTML = "";
+      const mean = document.createElement("option");
+      mean.value = "";
+      mean.textContent = "mean";
+      sel.appendChild(mean);
+      const mx = document.createElement("option");
+      mx.value = "max";
+      mx.textContent = "max";
+      sel.appendChild(mx);
+      for (let i = 0; i < nh; i++) {
+        const opt = document.createElement("option");
+        opt.value = String(i);
+        opt.textContent = String(i);
+        sel.appendChild(opt);
+      }
+    }
+  }
+}
+
 function dbgRenderAttn() {
   const body = dbgEl("dbgAttnBody");
   if (!body) return;
+  dbgSyncAttnArch(dbgFreshData("attn"));
   const blockSel = dbgEl("dbgAttnBlockSel");
   const headSel = dbgEl("dbgAttnHeadSel");
   if (blockSel) blockSel.value = String(dbg.attnBlock);
@@ -10134,12 +10182,14 @@ function debugBindEvents() {
   // Attention block/head selectors — a new block/head changes the cache signature
   // and refetches (the worker recomputes that block's/head's row).
   on("dbgAttnBlockSel", "change", e => {
-    const blk = Math.max(0, Math.min(Number(e.target.value) || 0, 2));
+    const maxBlk = Math.max(0, (dbg.attnNumBlocks || 3) - 1);
+    const blk = Math.max(0, Math.min(Number(e.target.value) || 0, maxBlk));
     dbgNavigate({ attnblk: blk }, { replace: true });
   });
   on("dbgAttnHeadSel", "change", e => {
     const v = e.target.value;
-    const next = v === "" ? "" : (v === "max" ? "max" : Math.max(0, Math.min(Number(v) || 0, 3)));
+    const maxHead = Math.max(0, (dbg.attnNumHeads || 4) - 1);
+    const next = v === "" ? "" : (v === "max" ? "max" : Math.max(0, Math.min(Number(v) || 0, maxHead)));
     dbgNavigate({ attnhead: next }, { replace: true });
   });
   on("dbgCmpSplit", "change", e => dbgToggleSplit(e.target.checked));

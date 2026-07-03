@@ -436,13 +436,17 @@ class RelPosAttention(nn.Module):
     this block's bias table gathered as an additive mask. Two implementations
     selectable via self.impl: 'sdpa' and 'materialized'."""
 
-    def __init__(self, channels: int) -> None:
+    def __init__(self, channels: int, heads: int | None = None) -> None:
         super().__init__()
-        self.heads = ATTENTION_HEADS
+        # heads defaults to the module-global ATTENTION_HEADS; an explicit value
+        # builds the block at a different head count (the dashboard debug worker
+        # reconstructs foreign-arch checkpoints this way — its process env is not
+        # the run's env).
+        self.heads = ATTENTION_HEADS if heads is None else int(heads)
         # head_dim derives from this net's width (channels // heads), so a net built
         # at a non-default width gets the correct per-head dim. At the default width
         # channels == CHANNELS, so head_dim == HEAD_DIM.
-        self.head_dim = channels // ATTENTION_HEADS
+        self.head_dim = channels // self.heads
         self.scale = 1.0 / math.sqrt(self.head_dim)
         self.q_proj = nn.Linear(channels, channels)
         self.k_proj = nn.Linear(channels, channels)
@@ -500,10 +504,10 @@ class RelPosAttention(nn.Module):
 class AttnBlock(nn.Module):
     """Pre-norm transformer block (GELU, MLP hidden width MLP_RATIO * channels)."""
 
-    def __init__(self, channels: int) -> None:
+    def __init__(self, channels: int, heads: int | None = None) -> None:
         super().__init__()
         self.ln1 = nn.LayerNorm(channels)
-        self.attn = RelPosAttention(channels)
+        self.attn = RelPosAttention(channels, heads)
         self.ln2 = nn.LayerNorm(channels)
         self.fc1 = nn.Linear(channels, MLP_RATIO * channels)
         self.fc2 = nn.Linear(MLP_RATIO * channels, channels)
@@ -519,32 +523,87 @@ class AttnBlock(nn.Module):
         return seq
 
 
+# Trunk layout by (conv_blocks, attn_blocks) count, for loaders that rebuild a
+# FOREIGN-arch net off its checkpoint (eval anchors, the dashboard debug
+# worker): the counts alone don't pin the C/A interleaving, so known lineage
+# layouts are mapped explicitly. main_1..main_6 = CCC A CCC A CC A; main_7 =
+# CC A x5. (Legacy v2's 6C/3A is deliberately absent — it is a different
+# class, handled by eval_arena's legacy fallback.)
+KNOWN_TRUNK_LAYOUTS: dict[tuple[int, int], str] = {
+    (8, 3): "CCCACCCACCA",
+    (10, 5): "CCACCACCACCACCA",
+}
+
+
+def infer_net_kwargs_from_state_dict(sd: dict) -> dict:
+    """HexfieldNet constructor kwargs inferred off a checkpoint state dict.
+
+    channels from stem.bias/tokens, attention_heads from the bias-table column
+    count, trunk_layout from the block-count map above. Every field is
+    best-effort: anything undeterminable is simply omitted (the constructor
+    falls back to the env-driven module globals, and a genuine arch mismatch
+    then fails the caller's strict load with a clear size error instead of
+    failing here)."""
+
+    kwargs: dict = {}
+    for key, axis in (("stem.bias", 0), ("stem_ln.weight", 0), ("tokens", 1)):
+        t = sd.get(key)
+        shape = getattr(t, "shape", None)
+        if shape is not None and len(shape) > axis:
+            kwargs["channels"] = int(shape[axis])
+            break
+    bt = sd.get("bias_tables.0")
+    if bt is not None and len(getattr(bt, "shape", ())) == 2:
+        kwargs["attention_heads"] = int(bt.shape[1])
+    conv_ids = {int(k.split(".")[1]) for k in sd if k.startswith("conv_blocks.")}
+    attn_ids = {int(k.split(".")[1]) for k in sd if k.startswith("attn_blocks.")}
+    if conv_ids and attn_ids:
+        layout = KNOWN_TRUNK_LAYOUTS.get((max(conv_ids) + 1, max(attn_ids) + 1))
+        if layout is not None:
+            kwargs["trunk_layout"] = layout
+    return kwargs
+
+
 class HexfieldNet(nn.Module):
     """The full network: stem, TRUNK_LAYOUT (default C C C A C C C A C C A),
     LN_final, heads."""
 
-    def __init__(self, channels: int = CHANNELS) -> None:
+    def __init__(
+        self,
+        channels: int = CHANNELS,
+        attention_heads: int | None = None,
+        trunk_layout: str | None = None,
+    ) -> None:
         super().__init__()
-        # channels defaults to the module-global CHANNELS; an explicit value builds
-        # the net at a different width. All submodules are channels-parameterized.
-        # Block order comes from TRUNK_LAYOUT (env HEXFIELD_TRUNK); conv_blocks[i]
-        # is the i-th 'C' and attn_blocks[i] the i-th 'A' in layout order.
+        # channels/attention_heads/trunk_layout default to the module globals
+        # (env-driven, read once at import); explicit values build the net at a
+        # different shape. The env path is how every RUN constructs its net; the
+        # explicit path exists for cross-arch loaders (the dashboard debug
+        # worker infers all three off a checkpoint's state dict and passes them
+        # here, so one process can serve main_6 c=128/4-head and main_7
+        # c=192/3-head/CCAx5 checkpoints side by side).
+        # conv_blocks[i] is the i-th 'C' and attn_blocks[i] the i-th 'A' in
+        # layout order.
         c = channels
-        self._trunk_layout = TRUNK_LAYOUT
+        heads = ATTENTION_HEADS if attention_heads is None else int(attention_heads)
+        layout = TRUNK_LAYOUT if trunk_layout is None else str(trunk_layout)
+        if not layout or set(layout) - {"C", "A"} or not layout.endswith("A"):
+            raise ValueError(f"invalid trunk layout {layout!r}")
+        self._trunk_layout = layout
         self.stem = HexNodeConv(NUM_FEATURES, c)
         self.stem_ln = nn.LayerNorm(c)
         self.conv_blocks = nn.ModuleList(
-            [ConvBlock(c) for _ in range(TRUNK_LAYOUT.count("C"))]
+            [ConvBlock(c) for _ in range(layout.count("C"))]
         )
         self.attn_blocks = nn.ModuleList(
-            [AttnBlock(c) for _ in range(TRUNK_LAYOUT.count("A"))]
+            [AttnBlock(c, heads) for _ in range(layout.count("A"))]
         )
         self.tokens = nn.Parameter(torch.empty(NUM_TOKENS, c))
         # Per-block relative-position bias tables: each attention block gets its own
         # zero-init (BIAS_ROWS, heads) table.
         self.bias_tables = nn.ParameterList(
             [
-                nn.Parameter(torch.zeros(BIAS_ROWS, ATTENTION_HEADS))
+                nn.Parameter(torch.zeros(BIAS_ROWS, heads))
                 for _ in range(len(self.attn_blocks))
             ]
         )
