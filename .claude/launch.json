@@ -28,7 +28,7 @@
         "-e",
         "bash",
         "-lc",
-        "cd /mnt/e/Hexo-BotTrainer && /root/.venvs/hexgt-build/bin/python -m hexo_frontend.web --host 0.0.0.0 --port 8095"
+        "ROOT=/mnt/e/Hexo-BotTrainer-hexgt; export PYTHONPATH=\"$ROOT/packages/hexo_engine/python:$ROOT/packages/hexo_utils/python:$ROOT/packages/hexo_runner/python:$ROOT/packages/hexo_train/python:$ROOT/packages/hexo_models/python:$ROOT/packages/hexo_frontend/python:$ROOT/packages/dense_cnn_restnet/python\"; export HEXO_DEBUG_RUN_ROOT=/mnt/e/Hexo-BotTrainer; cd /mnt/e/Hexo-BotTrainer && exec /root/.venvs/hexgt-build/bin/python -u -m hexo_frontend.web --host 0.0.0.0 --port 8095 --sealbot-path /mnt/e/SealBot"
       ],
       "port": 8095
     }
