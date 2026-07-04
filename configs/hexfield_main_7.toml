@@ -25,10 +25,10 @@ device = "cuda"
 search_visits = 1024
 pcr_full_proportion = 0.33
 pcr_fast_visits = 192
-# Gentle exploration on the value-only Fast plies (67% of moves): T=0.1 samples
-# the guard-filtered delta-visit histogram at exponent 1/T=10 (near-argmax). At
-# T>0 Fast no longer takes the greedy LCB pick / ml_final_pick (those need T==0).
-pcr_fast_temperature = 0.1
+# Reverted to 0.0 on 2026-07-04: a paired probe showed T=0.1 on the value-only
+# Fast plies induced a P0 outcome-skew (+7pp) that poisoned the value labels.
+# 0.0 = Fast moves take the greedy LCB pick (T==0), ml_final_pick re-engaged.
+pcr_fast_temperature = 0.0
 active_games = 192
 c_puct = 1.5
 # Carried from main_6 round-2 (2026-07-03, +6% pos/s at c=128). At c=192 the
@@ -86,7 +86,14 @@ gumbel_nonroot_select = true
 gumbel_target_enabled = true
 gumbel_c_visit = 50.0
 gumbel_c_scale = 1.0
+# Softens ONLY the exported π' target: σ-gain drops from ~278x to ~97x (published
+# Gumbel-AZ practice is ~80x). Search behavior (SH ranking, interior select) is
+# unchanged — it keeps gumbel_c_scale = 1.0.
+gumbel_target_c_scale = 0.35
 gumbel_m = 32
+# Staged for a later A/B; 1.0 = today's logit+g draw (explicit off). DO NOT enable
+# without the paired probe — >1 widens the sampled top-m candidate set.
+gumbel_draw_temperature = 1.0
 gumbel_target_min_visits = 1
 gumbel_play_prune = true
 export_root_prior_logits = true
