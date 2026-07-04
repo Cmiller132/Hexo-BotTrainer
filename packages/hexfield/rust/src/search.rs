@@ -2587,7 +2587,9 @@ const KNOWN_DIVERGENCE_KEYS: &[&str] = &[
     "gumbel_nonroot_select",
     "gumbel_c_visit",
     "gumbel_c_scale",
+    "gumbel_target_c_scale",
     "gumbel_m",
+    "gumbel_draw_temperature",
     "gumbel_target_min_visits",
     "gumbel_play_prune",
 ];
@@ -4046,5 +4048,28 @@ mod fallback_tests {
             top1_soft < top1_full,
             "softened top-1 mass {top1_soft} must be below the c_scale=1.0 top-1 {top1_full}"
         );
+    }
+
+    /// The strict KNOWN_DIVERGENCE_KEYS gate must accept every key the python
+    /// side emits — the 2026-07-04 deploy crashed because the new lever keys
+    /// were parsed but missing from the whitelist. Exercises the real pyo3
+    /// resolve path with both new keys present.
+    #[test]
+    fn resolve_divergences_accepts_the_new_lever_keys() {
+        Python::initialize();
+        Python::attach(|py| {
+            let overrides = PyDict::new(py);
+            overrides.set_item("gumbel_target_c_scale", 0.35f32).unwrap();
+            overrides.set_item("gumbel_draw_temperature", 1.0f32).unwrap();
+            let dv = resolve_divergences(None, Some(&overrides))
+                .expect("new lever keys must pass the known-keys gate");
+            assert_eq!(dv.gumbel_target_c_scale, Some(0.35));
+            assert_eq!(dv.gumbel_draw_temperature, 1.0);
+
+            // The gate itself still rejects a genuinely unknown key.
+            let bogus = PyDict::new(py);
+            bogus.set_item("gumbel_bogus_lever", 1.0f32).unwrap();
+            assert!(resolve_divergences(None, Some(&bogus)).is_err());
+        });
     }
 }
