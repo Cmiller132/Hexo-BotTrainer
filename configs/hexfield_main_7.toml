@@ -91,9 +91,11 @@ gumbel_c_scale = 1.0
 # unchanged — it keeps gumbel_c_scale = 1.0.
 gumbel_target_c_scale = 0.35
 gumbel_m = 32
-# Staged for a later A/B; 1.0 = today's logit+g draw (explicit off). DO NOT enable
-# without the paired probe — >1 widens the sampled top-m candidate set.
-gumbel_draw_temperature = 1.0
+# Enabled 1.5 on 2026-07-04 after the ep40 gate passed (+52.5 +/- 48 Elo vs ep30
+# over 200 paired games with target softening alone). Flattens the top-m DRAW
+# only: candidates sample from softmax(logits/1.5); SH ranking, played move, and
+# the exported target still use raw logits. Gate: ~ep50 paired match vs ep40.
+gumbel_draw_temperature = 1.5
 gumbel_target_min_visits = 1
 gumbel_play_prune = true
 export_root_prior_logits = true
