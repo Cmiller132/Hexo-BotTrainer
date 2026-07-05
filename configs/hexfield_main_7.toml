@@ -29,6 +29,16 @@ pcr_fast_visits = 192
 # Fast plies induced a P0 outcome-skew (+7pp) that poisoned the value labels.
 # 0.0 = Fast moves take the greedy LCB pick (T==0), ml_final_pick re-engaged.
 pcr_fast_temperature = 0.0
+# Blunder-seeded self-play, enabled 2026-07-05 (~ep69): 10% of games start from
+# a recent high-policy_surprise mid-game position (mined from the last 5 epochs'
+# shards, seed depth <= ply 40) for KataGo-style off-policy state coverage.
+# Seeded games are flagged in rows/sidecars/telemetry and excluded from the
+# unique-openings tripwire. Gate: the armed ep77-vs-ep67 paired match (seeded
+# from ~ep69) + seeded-game telemetry. 0.0 = feature fully off (bit-identical).
+blunder_seed_fraction = 0.10
+blunder_seed_recent_epochs = 5
+blunder_seed_max_ply = 40
+blunder_seed_surprise_quantile = 0.9
 active_games = 192
 c_puct = 1.5
 # Carried from main_6 round-2 (2026-07-03, +6% pos/s at c=128). At c=192 the
