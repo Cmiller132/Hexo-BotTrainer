@@ -2046,9 +2046,16 @@ function renderMtFacts() {
     ["Game", String(state.game_id || "game")],
     ["Seed", seed],
   ];
-  facts.innerHTML = chips.map(([label, value]) =>
+  let html = chips.map(([label, value]) =>
     `<span class="mt-chip"><span class="mt-chip-label">${escapeText(label)}</span>${escapeText(value)}</span>`
   ).join("");
+  // Blunder-seeded replay badge: the loaded history game started from a stored
+  // mid-game position; its first seed_ply moves are a replayed prefix.
+  const seedPly = historySeedPly();
+  if (seedPly > 0) {
+    html += `<span class="mt-chip mt-chip-seeded" title="${escapeAttr(`Blunder-seeded game — the first ${seedPly} plies were replayed from a stored position, not chosen by search`)}">SEEDED @ PLY ${seedPly}</span>`;
+  }
+  facts.innerHTML = html;
 }
 
 // The move list is a bounded, wrapping, vertically-scrolling box. Chips flow and
@@ -2074,19 +2081,29 @@ function renderMoveHistory() {
   }
 
   history.classList.add("has-moves");
+  // Seeded-history games: the first seedPly placements are a REPLAYED stored
+  // prefix (blunder seeding), not moves the net searched — dim them and draw a
+  // labelled divider at the seed boundary so the prefix can't be misread as
+  // the net's play. seedPly is 0 for everything else (no markup change).
+  const seedPly = historySeedPly();
   // game_id is part of the rebuild signature (§8): a series can advance to a
   // new game whose placement count momentarily matches the previous game's.
-  const structSig = `${(state && state.game_id) || ""}:${placements.length}:${placements[placements.length - 1].index}`;
+  const structSig = `${(state && state.game_id) || ""}:${placements.length}:${placements[placements.length - 1].index}:${seedPly}`;
   if (structSig !== moveHistoryStructSig) {
     moveHistoryStructSig = structSig;
-    history.innerHTML = placements.map(p => {
-      const cls = p.player === "player0" ? "p0" : "p1";
-      return `<button class="history-chip ${cls}" data-move-index="${p.index}">
+    const chips = placements.map((p, i) => {
+      const cls = `${p.player === "player0" ? "p0" : "p1"}${i < seedPly ? " seed-prefix" : ""}`;
+      const title = i < seedPly ? ` title="Seed prefix — replayed from a stored position, not searched"` : "";
+      return `<button class="history-chip ${cls}" data-move-index="${p.index}"${title}>
       <span class="chip-index">${p.index}</span>
       <span class="chip-dot"></span>
       <span class="chip-text">${playerShort(p.player)} (${p.q}, ${p.r})</span>
     </button>`;
-    }).join("");
+    });
+    if (seedPly > 0 && seedPly <= chips.length) {
+      chips.splice(seedPly, 0, `<div class="seed-divider" title="Moves above this line were replayed from the stored seed position">seed prefix — replayed, not searched</div>`);
+    }
+    history.innerHTML = chips.join("");
   }
 
   // Update the selection without a full rebuild, then scroll it into view.
@@ -2119,6 +2136,17 @@ function renderReplay() {
   const slider = document.getElementById("replaySlider");
   slider.max = String(total);
   slider.value = String(viewed);
+  // Seed-boundary tint on the scrubber track: the replayed-prefix span of a
+  // blunder-seeded history game is shaded up to seed_ply. No-op (class off,
+  // var cleared) for live matches and unseeded games.
+  const seedPly = historySeedPly();
+  if (seedPly > 0 && total > 0) {
+    slider.classList.add("seeded");
+    slider.style.setProperty("--seed-stop", `${((seedPly / total) * 100).toFixed(1)}%`);
+  } else {
+    slider.classList.remove("seeded");
+    slider.style.removeProperty("--seed-stop");
+  }
   document.getElementById("replayLabel").textContent = `${viewed} / ${total}`;
   document.getElementById("replaySub").textContent = replaySubtitle(viewed);
   document.getElementById("replayMidTick").textContent = String(Math.floor(total / 2));
@@ -2667,6 +2695,17 @@ function isLiveView() {
   return replayIndex === null || viewedPlacementCount() === totalPlacements();
 }
 
+// Seed-prefix length of the loaded history game: the first N placements of a
+// blunder-seeded game are a REPLAYED stored prefix (no search behind them).
+// 0 for live matches, unseeded games, and payloads without the joined
+// history.seeded/seed_ply fields (pre-seeding epochs, foreign runs).
+function historySeedPly() {
+  const history = state && state.mode === "history" ? state.history : null;
+  if (!history || !history.seeded) return 0;
+  const ply = Number(history.seed_ply);
+  return Number.isFinite(ply) && ply > 0 ? Math.min(ply, totalPlacements()) : 0;
+}
+
 function setReplayIndex(index) {
   stopReplay();
   const total = totalPlacements();
@@ -2713,7 +2752,9 @@ function replaySubtitle(viewed) {
   if (!viewed) return "Opening";
   const placement = (state.placements || [])[viewed - 1];
   if (!placement) return "Live";
-  return `${phaseLabel(placement.phase)} - ${playerShort(placement.player)} (${placement.q}, ${placement.r})`;
+  // Flag scrub positions inside a seeded game's replayed prefix.
+  const seedNote = viewed <= historySeedPly() ? " · seed prefix (replayed)" : "";
+  return `${phaseLabel(placement.phase)} - ${playerShort(placement.player)} (${placement.q}, ${placement.r})${seedNote}`;
 }
 
 function cellInfo(key) {
@@ -4745,6 +4786,14 @@ function renderHistEpochTable(runs) {
       const l = inProg.selfplay_live;
       spText = `self-play ${Number(l.games_finished || 0)}/${Number(l.requested_games || 0)} games · ${formatRate(l.search_pos_s, "pos/s")} · ${formatAge(l.elapsed_seconds)}`;
     }
+    // Blunder-seeded games chip (hexfield, epoch ~70+): only when the epoch's
+    // diagnostics carry a positive games_seeded; older epochs and dense_cnn
+    // runs lack the keys and render nothing.
+    const seededN = asFinite(sp.games_seeded);
+    const seededPly = asFinite(sp.seed_ply_mean);
+    const seededChip = seededN !== null && seededN > 0
+      ? `<span class="hist-epoch-seeded" title="${escapeAttr(`${seededN} blunder-seeded games${seededPly !== null ? ` · mean seed depth ~ply ${Math.round(seededPly)}` : ""} — each replayed a stored mid-game prefix before search`)}">${seededN} seeded${seededPly !== null ? ` · ply ~${Math.round(seededPly)}` : ""}</span>`
+      : "";
     // Inline diverging win-balance bar: P0 left, draws middle, P1 right.
     const p0 = asFinite(sp.win_p0_fraction);
     const p1 = asFinite(sp.win_p1_fraction);
@@ -4794,6 +4843,7 @@ function renderHistEpochTable(runs) {
       <button class="hist-epoch-num" type="button" data-hist-epoch="${epoch}" title="Filter the games list to epoch ${epoch}">e${epoch}</button>
       ${runTag}
       <span class="hist-epoch-cell hist-epoch-sp" title="${escapeAttr(spText)}">${escapeText(spText)}</span>
+      ${seededChip}
       ${balance}
       <span class="hist-epoch-cell hist-epoch-train" title="${escapeAttr(trainTitle)}">${escapeText(trainText)}</span>
       <span class="hist-epoch-cell hist-epoch-eval" title="${escapeAttr(evalText)}">${escapeText(evalText)}</span>
@@ -5112,6 +5162,13 @@ function histInspGameStatsGroup(sp) {
   if (asFinite(sp.game_length_max) !== null) chips.push(epochChip("max", formatDecimal(sp.game_length_max, 0)));
   if (asFinite(sp.game_length_stdev) !== null) chips.push(epochChip("σ", formatDecimal(sp.game_length_stdev, 1)));
   if (asFinite(sp.games) !== null) chips.push(epochChip("games", asFinite(sp.games)));
+  // Blunder-seeded telemetry (hexfield, epoch ~70+); keys absent on older
+  // epochs and dense_cnn runs, so nothing renders there.
+  if (asFinite(sp.games_seeded) !== null && asFinite(sp.games_seeded) > 0) {
+    chips.push(epochChip("seeded", asFinite(sp.games_seeded), "epoch-chip-seeded"));
+    if (asFinite(sp.seed_ply_mean) !== null) chips.push(epochChip("seed ply μ", formatDecimal(sp.seed_ply_mean, 1), "epoch-chip-seeded"));
+    if (asFinite(sp.unique_openings_seeded) !== null) chips.push(epochChip("seed openings", asFinite(sp.unique_openings_seeded), "epoch-chip-seeded"));
+  }
   if (asFinite(sp.samples_added) !== null) chips.push(epochChip("smp", asFinite(sp.samples_added)));
   if (asFinite(sp.search_positions_per_second) !== null) chips.push(epochChip("speed", formatRate(sp.search_positions_per_second, "pos/s")));
   if (asFinite(sp.mcts_sims_per_searched_position) !== null) chips.push(epochChip("sims/pos", formatDecimal(sp.mcts_sims_per_searched_position, 1)));
@@ -5716,6 +5773,7 @@ function gameHistoryListRow(runName, item, maxLen) {
       ${outcomeBadge}
       <span class="hist-game-label">g${escapeText(Number(item.record_index || 0))} e${epochNum !== null ? escapeText(epochNum) : "--"}</span>
       <span class="hist-src-badge ${srcClass}" title="${escapeAttr(source)}">${srcText}</span>
+      ${historySeedBadge(item)}
       <span class="hist-game-len"><b>${escapeText(len)}</b><span class="hist-len-bar"><span style="width:${barPct}%"></span></span></span>
       <span class="hist-game-players">${p0Seat} · ${p1Seat}</span>
       <span class="hist-game-date">${escapeText(formatHistoryDate(item.modified))}</span>
@@ -5780,6 +5838,7 @@ function gameHistoryDetailHtml(runName, item) {
       <span class="hist-outcome-bit">${escapeText(item.source || "history")}</span>
       <span class="hist-outcome-bit">e${epochNum !== null ? escapeText(epochNum) : "--"}</span>
       <span class="hist-outcome-bit">${escapeText(item.status || "unknown")}</span>
+      ${item.seeded ? `<span class="hist-outcome-bit hist-outcome-seeded" title="Blunder-seeded game — the first ${escapeAttr(String(asFinite(item.seed_ply) ?? "?"))} plies were replayed from a stored position, not searched">seeded @ ply ${escapeText(asFinite(item.seed_ply) ?? "?")}</span>` : ""}
       ${p0Bit}
       ${p1Bit}
     </div>
@@ -5959,6 +6018,17 @@ function winnerLabel(winner) {
   if (winner === "player0") return "P0";
   if (winner === "player1") return "P1";
   return "None";
+}
+
+// Compact badge for a blunder-seeded selfplay game ("S@31"). item.seeded /
+// item.seed_ply are joined server-side from the game's npz sidecar (web.py
+// _seed_provenance_for_game); only seeded games carry the keys, so unseeded
+// games, eval games, and foreign runs render "".
+function historySeedBadge(item) {
+  if (!item || !item.seeded) return "";
+  const ply = asFinite(item.seed_ply);
+  const title = `Blunder-seeded game — first ${ply !== null ? ply : "?"} plies replayed from a stored position, not searched`;
+  return `<span class="hist-seed-badge" title="${escapeAttr(title)}">S${ply !== null ? `@${ply}` : ""}</span>`;
 }
 
 function historyDiagnosticsText(diagnostics) {

@@ -161,6 +161,9 @@ _training_live_cache: dict[str, tuple[float, dict[str, object]]] = {}
 _training_epochs_cache: dict[str, tuple[float, dict[str, object]]] = {}
 _hxr_history_cache: dict[str, tuple[int, int, list[dict[str, object]]]] = {}
 _hxr_count_cache: dict[str, tuple[int, int, int]] = {}
+# samples/epoch_NNNNNN dir -> (dir mtime_ns, {game_key: {"seeded": True, "seed_ply": N}})
+# for the blunder-seeded-game sidecar join (see _seed_provenance_by_game_key).
+_seed_sidecar_cache: dict[str, tuple[int, dict[str, dict[str, object]]]] = {}
 
 
 def _strong_etag(data: bytes) -> str:
@@ -2225,6 +2228,13 @@ def _training_history(run_name: str, artifact_path: str, record_index: int = 0) 
         engine.apply_action(state, engine.PlacementAction(unpack_coord_id(action_id)))
         applied_actions.append(action_id)
 
+    # Blunder-seed provenance for the replay view, joined from the game's npz
+    # sidecar (samples/epoch_NNNNNN/game_<key>.json) via the key embedded in
+    # the selfplay game_id. {} for unseeded games, eval games, foreign runs,
+    # and games whose sidecar is gone — the payload then omits the keys.
+    run_dir = _resolve_run_dir(run_name)
+    seed_info = _seed_provenance_for_game(run_dir, record.game_id) if run_dir else {}
+
     payload = dashboard_state(engine.to_python_state(state))
     payload.update(
         {
@@ -2252,6 +2262,9 @@ def _training_history(run_name: str, artifact_path: str, record_index: int = 0) 
                 "placements": record.placements,
                 "action_ids": applied_actions,
                 "abort": _abort_payload(record.abort),
+                # "seeded": True + "seed_ply": N for blunder-seeded games only
+                # (moves before seed_ply are the replayed prefix, not searched).
+                **seed_info,
             },
             "record_games": [
                 {
@@ -2260,6 +2273,7 @@ def _training_history(run_name: str, artifact_path: str, record_index: int = 0) 
                     "status": item.status,
                     "actions": len(item.action_ids),
                     "winner": item.winner,
+                    **(_seed_provenance_for_game(run_dir, item.game_id) if run_dir else {}),
                 }
                 for index, item in enumerate(records)
             ],
@@ -3651,6 +3665,72 @@ def _candidate_seat_from_game_id(game_id: object) -> str | None:
     return None
 
 
+# Blunder-seeded self-play provenance (hexfield, live from epoch ~70): ~10% of
+# games start from a stored mid-game position whose first ``seed_ply`` moves are
+# replayed (not searched) before the net plays. The .hxr record does NOT flag
+# seeding — provenance lives only in the per-game npz sidecar
+# ``samples/epoch_NNNNNN/game_<key>.json`` ("seeded": true, "seed_ply": N;
+# ordinary games omit both keys). The join key is the game key embedded in the
+# selfplay record's game_id ("epoch-NNNNNN-game-<key>", written by
+# hexfield.selfplay._write_record; the sidecar filename carries the same key).
+# Evaluation game_ids and dense_cnn-style ids never match the pattern, so
+# foreign runs and eval .hxr rows are untouched by the join.
+_SELFPLAY_GAME_ID_RE = re.compile(r"^epoch-(\d+)-game-(\d+)$")
+
+
+def _seed_provenance_by_game_key(samples_dir: Path) -> dict[str, dict[str, object]]:
+    """Map game key -> ``{"seeded": True, "seed_ply": N}`` for one epoch's
+    samples directory, reading every ``game_*.json`` sidecar once and keeping
+    only the seeded entries. Memoized by the directory's mtime_ns so the 15s
+    history re-polls cost one stat; a missing directory (pre-seeding epochs,
+    pruned samples, dense_cnn runs) returns {} without caching (its later
+    appearance must not be masked)."""
+
+    stat = _safe_stat(samples_dir)
+    if stat is None:
+        return {}
+    cache_key = str(samples_dir)
+    with _training_cache_lock:
+        hit = _seed_sidecar_cache.get(cache_key)
+        if hit is not None and hit[0] == stat.st_mtime_ns:
+            return hit[1]
+    mapping: dict[str, dict[str, object]] = {}
+    try:
+        entries = list(os.scandir(samples_dir))
+    except OSError:
+        return {}
+    for entry in entries:
+        name = entry.name
+        if not (name.startswith("game_") and name.endswith(".json")):
+            continue
+        try:
+            data = json.loads(Path(entry.path).read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(data, dict) and data.get("seeded"):
+            seed_ply = data.get("seed_ply")
+            mapping[name[len("game_"):-len(".json")]] = {
+                "seeded": True,
+                "seed_ply": int(seed_ply) if isinstance(seed_ply, (int, float)) else None,
+            }
+    with _training_cache_lock:
+        _seed_sidecar_cache[cache_key] = (stat.st_mtime_ns, mapping)
+    return mapping
+
+
+def _seed_provenance_for_game(run_dir: Path, game_id: object) -> dict[str, object]:
+    """Seed provenance for one recorded game (``{"seeded": True, "seed_ply": N}``
+    when its sidecar marks it blunder-seeded, else {}). The epoch is parsed from
+    the game_id itself (not the .hxr filename) so resume files
+    (epoch_NNNNNN_resumeMMM.hxr) join against the right samples directory."""
+
+    match = _SELFPLAY_GAME_ID_RE.match(str(game_id or ""))
+    if not match:
+        return {}
+    samples_dir = run_dir / "samples" / f"epoch_{int(match.group(1)):06d}"
+    return _seed_provenance_by_game_key(samples_dir).get(match.group(2), {})
+
+
 def _hxr_base_rows(path: Path, run_dir: Path) -> list[dict[str, object]]:
     """Decode one .hxr file into per-game summary rows (game_id, winner,
     length, players, abort, candidate_seat, ...), memoized by (mtime_ns, size)
@@ -3681,11 +3761,20 @@ def _hxr_base_rows(path: Path, run_dir: Path) -> list[dict[str, object]]:
     players_by_role = _players_by_role(players)
     for index, record in enumerate(records):
         length = int(record.placements or len(record.action_ids))
+        # Blunder-seed provenance join (selfplay rows only): adds
+        # "seeded"/"seed_ply" keys ONLY for games whose npz sidecar marks them
+        # seeded, so unseeded rows keep their pre-feature shape exactly.
+        seed_info = (
+            _seed_provenance_for_game(run_dir, record.game_id)
+            if source == "selfplay"
+            else {}
+        )
         rows.append(
             {
                 "path": rel,
                 "record_index": index,
                 "game_id": record.game_id,
+                **seed_info,
                 "status": record.status,
                 "winner": record.winner,
                 "winner_label": _winner_label(record.winner),
@@ -4783,7 +4872,7 @@ def _selfplay_epoch_summary(payload: dict[str, object]) -> dict[str, object]:
     if sims is not None and searched is not None and searched > 0.0:
         mcts_sims_per_searched_position = sims / searched
 
-    return {
+    summary: dict[str, object] = {
         "status": payload.get("status"),
         "games": games,
         "completed_games": completed_games,
@@ -4828,6 +4917,15 @@ def _selfplay_epoch_summary(payload: dict[str, object]) -> dict[str, object]:
         # Losses group never reaches epochProgressDetail in app.js.
         "buffer": payload.get("buffer"),
     }
+    # Blunder-seeded self-play telemetry (hexfield emits these from the seeding
+    # deploy onward — main_7 epoch ~70; earlier epochs and dense_cnn producers
+    # omit the keys entirely). Added only when present so pre-seeding rows keep
+    # their exact shape and app.js gates the chip on key presence.
+    if "games_seeded" in payload:
+        summary["games_seeded"] = payload.get("games_seeded")
+        summary["seed_ply_mean"] = payload.get("seed_ply_mean")
+        summary["unique_openings_seeded"] = payload.get("unique_openings_seeded")
+    return summary
 
 
 def _selfplay_game_stats_from_records(run_dir: Path, epoch: int) -> dict[str, object]:

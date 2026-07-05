@@ -531,6 +531,40 @@ body.pending button:disabled {
 
 .history-chip.p1 .chip-dot { background: var(--p1); }
 
+/* Blunder-seeded replay: the first seed_ply chips are the REPLAYED stored
+   prefix (no search behind them) — dimmed + dashed so they can't be misread
+   as the net's play. Selection/hover restores most contrast for scrubbing. */
+.history-chip.seed-prefix {
+  opacity: 0.5;
+  border-style: dashed;
+}
+
+.history-chip.seed-prefix:hover,
+.history-chip.seed-prefix.selected {
+  opacity: 0.85;
+}
+
+/* Full-width labelled rule at the seed boundary inside the wrapping move list. */
+.seed-divider {
+  flex: 1 0 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #ffe2a1;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.seed-divider::before,
+.seed-divider::after {
+  content: "";
+  flex: 1 1 auto;
+  border-top: 1px dashed rgba(255, 206, 86, 0.5);
+}
+
 .bottom-dock {
   height: auto;
   min-height: 0;
@@ -669,6 +703,19 @@ body.pending button:disabled {
 #replaySlider {
   width: 100%;
   accent-color: var(--accent);
+}
+
+/* Seed-boundary tint under the scrubber for blunder-seeded history games:
+   the replayed-prefix span (0 → --seed-stop, set inline by renderReplay) is
+   shaded amber so the boundary is visible while dragging. */
+#replaySlider.seeded {
+  --seed-stop: 0%;
+  border-radius: 999px;
+  background: linear-gradient(
+    to right,
+    rgba(255, 206, 86, 0.22) 0 var(--seed-stop),
+    transparent var(--seed-stop) 100%
+  );
 }
 
 .slider-ticks {
@@ -1484,6 +1531,19 @@ body.bot-thinking .legal {
   color: var(--text);
 }
 
+/* Blunder-seeded-games chip in the epoch table ("26 seeded · ply ~31");
+   rendered only when the epoch's diagnostics carry games_seeded > 0. */
+.hist-epoch-seeded {
+  flex: none;
+  padding: 2px 7px;
+  border: 1px solid rgba(255, 206, 86, 0.45);
+  border-radius: 10px;
+  font-size: 10px;
+  font-weight: 700;
+  color: #ffe2a1;
+  white-space: nowrap;
+}
+
 .hist-epoch-chevron {
   flex: none;
   min-width: 44px;
@@ -2057,6 +2117,25 @@ body.bot-thinking .legal {
   background: var(--red);
 }
 
+/* Blunder-seeded game badge ("S@31") on game rows; the outcome-line variant in
+   the Selected Game panel reuses the amber tint on a plain text bit. */
+.hist-seed-badge {
+  flex: none;
+  padding: 1px 5px;
+  border: 1px solid rgba(255, 206, 86, 0.5);
+  border-radius: 4px;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.4px;
+  color: #ffe2a1;
+  white-space: nowrap;
+}
+
+.hist-outcome-bit.hist-outcome-seeded {
+  color: #ffe2a1;
+  font-weight: 700;
+}
+
 /* Explicit P0/P1 seat labels; the candidate seat is marked in accent color and
    a leading dot span (see hist-cand-mark) so the current model is visible at a
    glance. Marker is a real span, not ::before, so it does not collide with the
@@ -2553,6 +2632,12 @@ body.bot-thinking .legal {
 .epoch-chip-total,
 .epoch-chip-total i {
   color: var(--text);
+}
+
+/* Blunder-seeded telemetry chips in the epoch inspector's Game stats group. */
+.epoch-chip-seeded {
+  border-color: rgba(255, 206, 86, 0.40);
+  background: rgba(255, 206, 86, 0.08);
 }
 
 @media (max-width: 1100px) {
@@ -3537,6 +3622,16 @@ body.bot-thinking .legal {
   font-weight: 800;
   letter-spacing: 0.8px;
   text-transform: uppercase;
+}
+
+/* Replay-header badge for a blunder-seeded history game ("SEEDED @ PLY 31"). */
+.mt-chip-seeded {
+  border-color: rgba(255, 206, 86, 0.55);
+  background: rgba(255, 206, 86, 0.10);
+  color: #ffe2a1;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.6px;
 }
 
 #mtPlayers {
