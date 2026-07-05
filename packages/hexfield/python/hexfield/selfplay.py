@@ -19,6 +19,7 @@ import os
 import queue
 import threading
 import time
+import warnings
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,7 @@ from hexo_engine.types import AxialCoord, PlacementAction
 from hexo_runner.records import AbortRecord, HexoRecordFile, HexoRecordPlayer
 
 from . import _rust
+from .blunder_seeds import mine_blunder_seeds
 from .config import ML_AUTO_DISABLED_FLAG, build_divergence_overrides, parse_hexfield_config
 from .engine_facts import player_int
 from .features import record_phase, record_player, window_scan
@@ -45,7 +47,7 @@ from .shards import write_compact_shard
 
 
 class _GameTape:
-    __slots__ = ("key", "state", "records", "pending", "ply")
+    __slots__ = ("key", "state", "records", "pending", "ply", "seed_ply")
 
     def __init__(self, key: int):
         self.key = key
@@ -53,16 +55,61 @@ class _GameTape:
         self.records: list[tuple[int, int, int, int]] = []
         self.pending: list[tuple[int, HexfieldSampleData, float]] = []
         self.ply = 0
+        # 0 for an ordinary empty-board game; > 0 for a blunder-seeded game
+        # whose first seed_ply placements were replayed from a stored position
+        # before search began. seed_ply>0 flags the game as seeded (rows carry
+        # metadata["seeded"], and its shared opening is excluded from the
+        # unique-openings tripwire).
+        self.seed_ply = 0
+
+
+def seed_game_tape(tape: _GameTape, move_prefix) -> None:
+    """Replay ``move_prefix`` into ``tape`` so it reaches a stored mid-game
+    position via the EXACT path a live game uses.
+
+    For each ``(q, r)`` this mirrors the per-move bookkeeping in
+    ``ContinuousDriver.__call__`` (the block at the tail of that method): apply
+    the placement through the engine, append ``(q, r, record_player(ply),
+    ply+1)`` to ``tape.records`` with ``record_player`` computed from the SAME
+    ply counter, and increment ``tape.ply``. No pending sample is created for a
+    seed move — the seeded prefix is training-invisible except as history, and
+    the .hxr writer records the prefix as leading placements so the game replays
+    cleanly.
+
+    Because ``record_player`` / ``record_phase`` / ``window_scan`` are pure
+    functions of the ply counter and the records list (NOT the engine state),
+    the resulting tape is indistinguishable from one that reached the same
+    position by live play: the next row emitted carries identical
+    current_player / phase / first_stone / hot / win labels. ``tape.seed_ply``
+    is set to the prefix length so the game is flagged as seeded and
+    ``tape.ply`` starts there (so max_game_plies applies to TOTAL ply)."""
+
+    for q, r in move_prefix:
+        current = record_player(tape.ply)
+        api.apply_action(tape.state, PlacementAction(AxialCoord(q=int(q), r=int(r))))
+        tape.records.append((int(q), int(r), current, tape.ply + 1))
+        tape.ply += 1
+    tape.seed_ply = tape.ply
 
 
 class ContinuousDriver:
     def __init__(self, *, epoch: int, games_target: int, max_plies: int, out_dir,
-                 horizons=STV_HORIZONS, record_file=None, diag_dir=None, active_limit=0):
+                 horizons=STV_HORIZONS, record_file=None, diag_dir=None, active_limit=0,
+                 blunder_seeds=None, blunder_seed_fraction=0.0, blunder_base_seed=0):
         self.epoch = epoch
         self.games_target = games_target
         self.max_plies = max_plies
         self.out_dir = out_dir
         self.horizons = horizons
+        # Blunder-seed pool + seeding controls. An empty pool or fraction<=0
+        # disables seeding entirely: start_games then takes a path bit-identical
+        # to current behavior (no RNG is drawn — the seeding decision short-
+        # circuits before the mix_seed call), so fraction=0.0 is a no-op.
+        self.blunder_seeds = list(blunder_seeds or [])
+        self.blunder_seed_fraction = float(blunder_seed_fraction)
+        self.blunder_base_seed = int(blunder_base_seed)
+        self.games_seeded = 0
+        self.seed_plies: list[int] = []
         # .hxr game-record file for the epoch; None disables recording.
         # Set by generate_selfplay_epoch.
         self.record_file = record_file
@@ -101,6 +148,9 @@ class ContinuousDriver:
         self.opening_lines: set[tuple] = set()
         self.opening_lines_16: set[tuple] = set()
         self.opening_lines_20: set[tuple] = set()
+        # Seeded games share stored openings; counted separately so they do not
+        # dilute the diversity tripwire above (unique_openings_seeded in stats).
+        self.opening_lines_seeded: set[tuple] = set()
         self.next_key = epoch * 1_000_000
         # Background shard writer: the per-game finalize + .hxr record + zlib npz
         # write runs off the on_move callback thread.
@@ -151,11 +201,43 @@ class ContinuousDriver:
         except Exception:
             pass
 
+    # mix_seed stream index reserved for the blunder-seed decision. Chosen well
+    # outside the range of stream ids the Rust search uses for its own per-game
+    # streams, so this draw cannot collide with / perturb any existing stream.
+    _BLUNDER_STREAM = 0x0B1D_0000
+
+    def _maybe_seed(self, tape: _GameTape) -> None:
+        """With probability ``blunder_seed_fraction`` (a deterministic per-game
+        Bernoulli drawn from a fresh mix_seed stream), replay a mined seed
+        prefix into ``tape`` before search sees it.
+
+        The decision and the seed pick are derived from ``mix_seed(base_seed,
+        game_key, 0, _BLUNDER_STREAM)`` — a NEW stream keyed by the game key, so
+        the choice is reproducible for a given epoch/game and independent of the
+        Rust search streams. No RNG is drawn when seeding is disabled (empty
+        pool or fraction<=0), so the fraction=0.0 path is bit-identical to the
+        pre-feature driver."""
+
+        if not self.blunder_seeds or self.blunder_seed_fraction <= 0.0:
+            return
+        h = int(_rust.mix_seed(self.blunder_base_seed, int(tape.key), 0, self._BLUNDER_STREAM))
+        # Two independent uniforms from one 64-bit hash: the high 32 bits gate
+        # the Bernoulli draw, the low 32 bits pick the seed index.
+        u_gate = (h >> 32) / float(1 << 32)
+        if u_gate >= self.blunder_seed_fraction:
+            return
+        idx = (h & 0xFFFF_FFFF) % len(self.blunder_seeds)
+        seed = self.blunder_seeds[idx]
+        seed_game_tape(tape, seed.move_prefix)
+        self.games_seeded += 1
+        self.seed_plies.append(int(tape.seed_ply))
+
     def start_games(self, count: int) -> list[_GameTape]:
         tapes = []
         for _ in range(count):
             tape = _GameTape(self.next_key)
             self.next_key += 1
+            self._maybe_seed(tape)
             self.games_started += 1
             self.games[tape.key] = tape
             tapes.append(tape)
@@ -170,6 +252,12 @@ class ContinuousDriver:
         self._write_live("running")
 
         current = record_player(tape.ply)
+        # Seed provenance stamped on every row of a blunder-seeded game. Empty
+        # for ordinary games, so their metadata is unchanged (fraction=0.0 keeps
+        # rows bit-identical to the pre-feature writer).
+        seed_meta = (
+            {"seeded": True, "seed_ply": int(tape.seed_ply)} if tape.seed_ply else {}
+        )
         if full and not init:
             self.full_decisions += 1
             ids = np.frombuffer(bytes(payload["visit_policy_action_ids_bytes"]), dtype=np.uint32)
@@ -230,7 +318,7 @@ class ContinuousDriver:
                 gumbel_policy=gumbel_pairs,
                 prior_logit=prior_logit_pairs,
                 policy_surprise=float(surprise),
-                metadata={"pcr_full": True},
+                metadata={"pcr_full": True, **seed_meta},
             )
             tape.pending.append((current, sample, float(payload["root_value"])))
             probs = weights[weights > 0]
@@ -253,7 +341,7 @@ class ContinuousDriver:
                 game_id=str(game_key), turn_index=tape.ply, current_player=current,
                 phase=record_phase(tape.ply), records=tuple(tape.records),
                 first_stone=None, own_hot=(), opp_hot=(), own_win=(), opp_win=(),
-                policy=(), metadata={"pcr_full": False},
+                policy=(), metadata={"pcr_full": False, **seed_meta},
             )
             tape.pending.append((current, sample, float(payload["root_value"])))
         else:
@@ -261,7 +349,7 @@ class ContinuousDriver:
                 game_id=str(game_key), turn_index=tape.ply, current_player=current,
                 phase=record_phase(tape.ply), records=tuple(tape.records),
                 first_stone=None, own_hot=(), opp_hot=(), own_win=(), opp_win=(),
-                policy=(), metadata={"pcr_full": False, "policy_init": True},
+                policy=(), metadata={"pcr_full": False, "policy_init": True, **seed_meta},
             )
             tape.pending.append((current, sample, float(payload["root_value"])))
 
@@ -313,9 +401,19 @@ class ContinuousDriver:
         self.games_finished += 1
         self.game_lengths.append(tape.ply)
         line = tuple((q, r) for q, r, _o, _p in tape.records)
-        self.opening_lines.add(line[:10])
-        self.opening_lines_16.add(line[:16])
-        self.opening_lines_20.add(line[:20])
+        # Opening-diversity tripwire: seeded games share their STORED opening
+        # (many games replay the same mined prefix), which would falsely collapse
+        # the unique-openings counts and blunt the diversity tripwire. Stratify:
+        # only self-generated (empty-board) openings feed the main counters; the
+        # seeded games' openings are tallied separately as unique_openings_seeded.
+        # getattr keeps _finish tolerant of tape-likes lacking the attribute
+        # (unseeded default), matching the defensive metadata handling elsewhere.
+        if getattr(tape, "seed_ply", 0):
+            self.opening_lines_seeded.add(line[:10])
+        else:
+            self.opening_lines.add(line[:10])
+            self.opening_lines_16.add(line[:16])
+            self.opening_lines_20.add(line[:20])
         if truncated:
             self.games_truncated += 1
         else:
@@ -376,11 +474,22 @@ class ContinuousDriver:
                 ]
                 if rows:
                     path = self.out_dir / f"game_{tape.key}.npz"
+                    # Seeded games carry their provenance in the sidecar so a
+                    # blunder-seeded shard is identifiable on disk. Ordinary
+                    # games omit these keys, keeping the sidecar byte-identical
+                    # to the pre-feature writer (seed_ply == 0).
+                    _seed_ply = getattr(tape, "seed_ply", 0)
+                    seed_sidecar = (
+                        {"seeded": True, "seed_ply": int(_seed_ply)}
+                        if _seed_ply
+                        else {}
+                    )
                     self.rows_written += write_compact_shard(
                         path, rows, short_term_value_horizons=self.horizons,
                         sidecar={
                             "epoch": self.epoch, "game_key": tape.key,
                             "winner": winner, "truncated": bool(truncated),
+                            **seed_sidecar,
                         },
                     )
             except BaseException as exc:  # noqa: BLE001
@@ -459,6 +568,16 @@ class ContinuousDriver:
                 "16": len(self.opening_lines_16),
                 "20": len(self.opening_lines_20),
             },
+            # Blunder-seeded self-play telemetry. games_seeded counts games that
+            # started from a mined mid-game position; seed_ply_mean is the mean
+            # seed depth (None when none seeded). unique_openings_seeded is the
+            # distinct 10-ply seeded-opening count, tracked apart from the
+            # diversity tripwire above (seeded games share stored openings).
+            "games_seeded": int(self.games_seeded),
+            "seed_ply_mean": (
+                float(np.mean(self.seed_plies)) if self.seed_plies else None
+            ),
+            "unique_openings_seeded": len(self.opening_lines_seeded),
         }
 
 
@@ -569,6 +688,7 @@ def _diag_is_nontrivial(diag: dict[str, Any] | None) -> bool:
 _ADDITIVE_KEYS = (
     "games_started", "games_finished", "truncated_games", "rows_written",
     "total_decisions", "full_decisions", "searched_positions", "elapsed_seconds",
+    "games_seeded",
 )
 
 
@@ -749,6 +869,15 @@ def _merge_epoch_diag(segments: list[dict[str, Any]]) -> dict[str, Any]:
                     uo[k] += int(d.get(k, 0) or 0)
         merged["unique_openings"] = uo
         approx = True
+    # Seeded-opening count sums like the other unique-opening counts (approx).
+    if any("unique_openings_seeded" in seg for seg in segments):
+        merged["unique_openings_seeded"] = sum(
+            int(seg.get("unique_openings_seeded", 0) or 0) for seg in segments
+        )
+        approx = True
+    # Mean seed depth is games_seeded-weighted across segments.
+    if any("seed_ply_mean" in seg for seg in segments):
+        merged["seed_ply_mean"] = _weighted_mean(_w("seed_ply_mean", "games_seeded"))
 
     # Store raw segment payloads (prior first, resumed last), capped.
     raw = [_segment_payload(seg) for seg in segments]
@@ -835,6 +964,14 @@ def _format_epoch_summary(result: dict[str, Any]) -> str:
     w0 = int(wins.get("0", 0) or 0)
     w1 = int(wins.get("1", 0) or 0)
     p0_share = (w0 / (w0 + w1)) if (w0 + w1) > 0 else None
+    seeded = int(result.get("games_seeded", 0) or 0)
+    # Seed segment appears only when the epoch actually seeded games, so the
+    # default (fraction=0) summary line is unchanged.
+    seed_frag = (
+        f"| seeded {seeded} (ply {_fmt(result.get('seed_ply_mean'), '.0f')}) "
+        if seeded
+        else ""
+    )
     return (
         f"selfplay epoch {epoch}: {finished} games ({trunc} trunc) {rows} rows "
         f"| len p50 {_fmt(result.get('game_length_p50'), '.0f')} "
@@ -842,6 +979,7 @@ def _format_epoch_summary(result: dict[str, Any]) -> str:
         f"| ent {_fmt(result.get('root_policy_entropy_mean'))} "
         f"(open {_ph('opening')}/mid {_ph('mid')}/late {_ph('late')}) "
         f"| uniq10/16/20 {uo.get('10', '?')}/{uo.get('16', '?')}/{uo.get('20', '?')} "
+        f"{seed_frag}"
         f"| winner-rate {_fmt(result.get('gumbel_play_winner_rate'))} "
         f"| P0 wins {_fmt(p0_share)}"
     )
@@ -900,10 +1038,43 @@ def generate_selfplay_epoch(*, ctx, components, epoch: int, games_per_epoch: int
     # reflects the WHOLE epoch, not just the resumed portion (the epoch-7 case).
     prior_diag = _load_prior_diag(diag_path) if resuming else None
 
+    # Blunder-seed mining. Off by default (fraction<=0 -> empty pool -> the
+    # driver's start_games path is bit-identical to current behavior). When on,
+    # mine seed prefixes ONCE per epoch from the run's own recent shards; the
+    # mine is deterministic given the on-disk data + config, and cheap (a single
+    # pass over the recent epochs' npz metadata). Mining is guarded so a failure
+    # (or missing data) degrades gracefully to no seeding rather than crashing
+    # the epoch.
+    blunder_seeds: list = []
+    if sp.blunder_seed_fraction > 0.0:
+        try:
+            blunder_seeds = mine_blunder_seeds(
+                ctx.samples_dir,
+                current_epoch=epoch,
+                recent_epochs=sp.blunder_seed_recent_epochs,
+                max_ply=sp.blunder_seed_max_ply,
+                surprise_quantile=sp.blunder_seed_surprise_quantile,
+            )
+        except Exception as exc:  # noqa: BLE001
+            warnings.warn(
+                f"blunder_seeds: mining failed for epoch {epoch} ({exc!r}); "
+                "falling back to no seeding",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            blunder_seeds = []
+    # Base seed for the per-game blunder decision stream. Same run-seed/epoch
+    # mixing as the Rust search base_seed below, on a distinct mix_seed stream,
+    # so the seeding decisions are reproducible and stream-isolated.
+    blunder_base_seed = (ctx.config.run.seed or 1) * 1_000_003 + epoch
+
     slots = min(sp.active_games, remaining)
     driver = ContinuousDriver(
         epoch=epoch, games_target=remaining, max_plies=sp.max_game_plies, out_dir=out_dir,
         diag_dir=ctx.diagnostics_dir, active_limit=slots,
+        blunder_seeds=blunder_seeds,
+        blunder_seed_fraction=sp.blunder_seed_fraction,
+        blunder_base_seed=blunder_base_seed,
     )
     # Advance next_key past every npz already on disk -- including sidecar-less
     # (uncommitted) ones, which do not count as done but whose keys must not be

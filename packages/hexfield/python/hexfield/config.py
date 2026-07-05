@@ -129,6 +129,25 @@ class SelfplayConfig:
     # while leaving every recorded training target untouched.
     gumbel_play_prune: bool = False
     export_root_prior_logits: bool = False
+    # --- Blunder-seeded self-play (KataGo-style off-policy state coverage) -----
+    # A fraction of games per epoch start from a stored mid-game position where
+    # the net was recently "surprised" (high policy_surprise), instead of an
+    # empty board. All flags default to a no-op: blunder_seed_fraction=0.0 means
+    # zero games are seeded and the driver takes a path bit-identical to current
+    # behavior (the seeding RNG is drawn from a NEW mix_seed stream only when
+    # fraction>0, so existing streams are never perturbed). Seeds are mined from
+    # the run's own recent npz shards (route (b): the ordered move prefix is
+    # recovered from each row's hist_* placement history + policy_surprise +
+    # turn_index — no .hxr cross-reference).
+    blunder_seed_fraction: float = 0.0
+    # Mine seeds from the last N epochs' sample shards.
+    blunder_seed_recent_epochs: int = 5
+    # Never seed deeper than this ply (late-game seeds make degenerate short
+    # games).
+    blunder_seed_max_ply: int = 40
+    # Rows above this quantile of policy_surprise (over the mined full rows)
+    # qualify as seed candidates.
+    blunder_seed_surprise_quantile: float = 0.9
 
 
 @dataclass(frozen=True)
