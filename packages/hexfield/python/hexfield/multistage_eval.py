@@ -99,12 +99,19 @@ import logging
 import math
 import os
 import time
+import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
 from . import eval_stats
-from .config import HexfieldConfig, MultiStageEvalSection, parse_hexfield_config
+from .config import (
+    HexfieldConfig,
+    MultiStageEvalSection,
+    SelfplayConfig,
+    build_divergence_overrides,
+    parse_hexfield_config,
+)
 
 # Logger for roster/anchor/SealBot degradation warnings.
 _EVAL_LOG = logging.getLogger("hexfield.eval")
@@ -1237,6 +1244,33 @@ def _play_sealbot_opponent(
     return edge, sealbot_ci, None
 
 
+def _anchor_native_overrides(opp_ckpt: Path | str) -> dict | None:
+    """The anchor's OWN trained search profile, recovered from the
+    ``_resume_config.toml`` snapshot co-located with its run
+    (``<run>/checkpoints/x.pt`` -> ``<run>/_resume_config.toml``).
+
+    This is the searcher the checkpoint was actually tuned for: a Gumbel-lineage
+    anchor (main_6 / main_7) resolves to its Gumbel profile, a PUCT-lineage
+    anchor (main_4 / main_5) to its PUCT profile. Returns ``None`` when the
+    snapshot is absent or unparseable (an external checkpoint, or a path that is
+    not a ``<run>/checkpoints/`` layout) so the caller falls back to the
+    candidate PUCT profile. Never raises — eval robustness beats profile
+    precision, and a bad snapshot must not break the whole multistage eval."""
+    try:
+        run_dir = Path(opp_ckpt).resolve().parent.parent
+        cfg_path = run_dir / "_resume_config.toml"
+        if not cfg_path.is_file():
+            return None
+        with open(cfg_path, "rb") as fh:
+            raw = tomllib.load(fh)
+        sp_dict = ((raw.get("model") or {}).get("config") or {}).get("selfplay") or {}
+        known = set(SelfplayConfig.__dataclass_fields__)
+        sp = SelfplayConfig(**{k: v for k, v in sp_dict.items() if k in known})
+        return build_divergence_overrides(sp)
+    except Exception:  # noqa: BLE001 - a bad snapshot must not crash the eval
+        return None
+
+
 def _foreign_opponent_overrides(
     full_cfg: HexfieldConfig,
     roster: Roster,
@@ -1245,22 +1279,35 @@ def _foreign_opponent_overrides(
 ) -> dict[str, dict]:
     """Per-opponent search-profile overrides, keyed by opponent label.
 
-    Opponents whose checkpoint lives OUTSIDE this run's checkpoints dir
-    (foreign anchors, e.g. main4/main5 lineages trained under plain PUCT
-    search) are evaluated with the pre-Gumbel PUCT profile they were tuned
-    for; this-run lineage checkpoints are absent from the map and keep the
-    candidate's (self-play) profile. A no-op map when the run's self-play
-    profile has the Gumbel flags off already."""
+    Each opponent whose checkpoint lives OUTSIDE this run's checkpoints dir (a
+    foreign anchor) is evaluated with the searcher IT was trained under,
+    recovered from its own run's ``_resume_config.toml``. So a Gumbel-lineage
+    anchor (main_6 / main_7) plays Gumbel and a PUCT-lineage anchor
+    (main_4 / main_5) plays PUCT — rather than all foreign anchors being forced
+    onto the candidate's PUCT profile (which handicapped Gumbel-trained anchors
+    and mildly flattered the candidate against them). This-run lineage
+    checkpoints (ep5 / ep30) are absent from the map and keep the candidate's
+    (self-play) profile. When an anchor's native profile cannot be resolved (no
+    snapshot / external ckpt) it falls back to the candidate PUCT profile. A
+    no-op map when every anchor already resolves to the candidate's profile."""
     from . import eval_arena as _arena
 
     cand_dir = Path(candidate_ckpt).resolve().parent
     out: dict[str, dict] = {}
     puct: dict | None = None
+    native_by_run: dict[Path, dict | None] = {}
     for opp in roster.opponents:
         if opp.ckpt is None:
             continue
         if Path(opp.ckpt).resolve().parent == cand_dir:
             continue  # this-run lineage: same profile as the candidate
+        run_dir = Path(opp.ckpt).resolve().parent.parent
+        if run_dir not in native_by_run:
+            native_by_run[run_dir] = _anchor_native_overrides(opp.ckpt)
+        native = native_by_run[run_dir]
+        if native is not None:
+            out[opp.label] = native
+            continue
         if puct is None:
             puct = _arena.puct_eval_overrides(
                 full_cfg.selfplay, diagnostics_dir=diagnostics_dir
