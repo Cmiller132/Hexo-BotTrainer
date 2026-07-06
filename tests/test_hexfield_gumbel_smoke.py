@@ -532,6 +532,193 @@ def test_gumbel_play_prune_zeroes_quota_losers_without_touching_targets() -> Non
     assert int(stats_off["gumbel_play_moves"]) == 0
 
 
+def test_build_fast_divergence_overrides_golden_and_folded() -> None:
+    """main_8 per-class maps: with no fast_* levers the fast map equals the base
+    map (golden invariant); with fast_* levers set, only the fast map's Gumbel
+    fields change (base map untouched)."""
+    from hexfield.config import (
+        SelfplayConfig,
+        build_divergence_overrides,
+        build_fast_divergence_overrides,
+    )
+
+    # Golden: absent fast_* => fast map == base map, byte-for-byte.
+    sp0 = SelfplayConfig(gumbel_root_enabled=False)
+    base0 = build_divergence_overrides(sp0)
+    fast0 = build_fast_divergence_overrides(sp0)
+    assert fast0 == base0, "fast map must equal base map when no fast_* levers set"
+
+    # Folded: Full stays PUCT (base gumbel_root False); Fast turns Gumbel on with
+    # its own c_scale/m. The base map keeps the Full values.
+    sp = SelfplayConfig(
+        gumbel_root_enabled=False,
+        gumbel_sequential_halving=False,
+        gumbel_c_scale=1.0,
+        gumbel_m=16,
+        fast_gumbel_root_enabled=True,
+        fast_gumbel_sequential_halving=True,
+        fast_gumbel_nonroot_select=True,
+        fast_gumbel_c_scale=0.5,
+        fast_gumbel_m=8,
+        fast_gumbel_play_prune=True,
+    )
+    base = build_divergence_overrides(sp)
+    fast = build_fast_divergence_overrides(sp)
+    # Base (Full) view keeps PUCT + the base scalars.
+    assert base["gumbel_root"] is False
+    assert base["gumbel_sequential_halving"] is False
+    assert base["gumbel_c_scale"] == pytest.approx(1.0)
+    assert base["gumbel_m"] == 16
+    # Fast view folds the fast_* values onto the gumbel fields.
+    assert fast["gumbel_root"] is True
+    assert fast["gumbel_sequential_halving"] is True
+    assert fast["gumbel_nonroot_select"] is True
+    assert fast["gumbel_c_scale"] == pytest.approx(0.5)
+    assert fast["gumbel_m"] == 8
+    assert fast["gumbel_play_prune"] is True
+    # Non-gumbel levers are shared between the two maps.
+    for k in ("moves_left_utility", "lcb_z", "c_base", "nucleus_f64"):
+        assert base[k] == fast[k], k
+    # Unset fast numeric lever falls back to the base value.
+    sp_partial = SelfplayConfig(fast_gumbel_root_enabled=True)  # c_visit/m unset
+    fp = build_fast_divergence_overrides(sp_partial)
+    bp = build_divergence_overrides(sp_partial)
+    assert fp["gumbel_c_visit"] == bp["gumbel_c_visit"]
+    assert fp["gumbel_m"] == bp["gumbel_m"]
+
+
+@needs_rust
+def test_continuous_cross_class_full_puct_fast_gumbel_reuse() -> None:
+    """main_8 per-class divergences end-to-end: run_continuous with a base
+    (Full/PUCT) override map and a SECOND fast (Gumbel+SH) override map. Turns
+    alternate Full/Fast by the per-turn PCR hash; the driver must not panic and
+    every decided move — Full or Fast — must produce a sane, budget-respecting
+    visit distribution. Fast moves (Gumbel) additionally export a π' target."""
+    from hexo_engine import api as engine_api
+    from hexo_engine.types import AxialCoord, PlacementAction
+
+    from hexfield.geometry import unpack_action_id
+
+    budget = 96
+    fast_budget = 48
+    max_plies = 12
+
+    class _Driver:
+        def __init__(self) -> None:
+            self.states: dict = {}
+            self.plies: dict = {}
+            self.rows: list = []
+
+        def start(self, key: int):
+            self.states[key] = engine_api.new_game()
+            self.plies[key] = 0
+            return self.states[key]
+
+        def __call__(self, game_key: int, payload: dict):
+            ply = self.plies[game_key]
+            self.rows.append(
+                (
+                    ply,
+                    bool(payload.get("pcr_full")),
+                    int(payload["visits"]),
+                    int(payload.get("gumbel_policy_count", 0)),
+                )
+            )
+            q, r = unpack_action_id(payload["action_id"])
+            state = self.states[game_key]
+            result = engine_api.apply_action(
+                state, PlacementAction(AxialCoord(q=q, r=r))
+            )
+            self.plies[game_key] = ply + 1
+            if result.terminal or self.plies[game_key] >= max_plies:
+                del self.states[game_key]
+                return None
+            return ("advance", state)
+
+    # Base map: Full/Init = PUCT (base gumbel_root off). Fast map: base map with
+    # the Fast Gumbel view (root + SH + non-root select) folded in.
+    from hexfield.config import (
+        SelfplayConfig,
+        build_divergence_overrides as _bdo,
+        build_fast_divergence_overrides,
+    )
+
+    sp = SelfplayConfig(
+        gumbel_root_enabled=False,  # Full stays PUCT
+        gumbel_target_enabled=True,  # export π' so Fast rows carry a target
+        gumbel_sequential_halving=False,
+        gumbel_nonroot_select=False,
+        gumbel_m=8,
+        fast_gumbel_root_enabled=True,
+        fast_gumbel_sequential_halving=True,
+        fast_gumbel_nonroot_select=True,
+        fast_gumbel_m=8,
+    )
+    base_overrides = _bdo(sp)
+    fast_overrides = build_fast_divergence_overrides(sp)
+    # Sanity: the two maps really differ (Full PUCT vs Fast Gumbel root).
+    assert base_overrides["gumbel_root"] is False
+    assert fast_overrides["gumbel_root"] is True
+
+    session = hexfield_rust.HexfieldMctsSession(max_states=65536)
+    driver = _Driver()
+    keys = [95_000 + i for i in range(6)]
+    states = tuple(driver.start(k) for k in keys)
+    session.run_continuous(
+        keys,
+        states,
+        evaluator=GumbelStub(),
+        on_move=driver,
+        visits=budget,
+        c_puct=1.5,
+        base_seed=20260706,
+        virtual_batch_size=8,
+        flush_target=64,
+        active_root_limit=len(keys),
+        temperature_by_ply=[1.0] * 64,
+        root_policy_temperature=1.0,
+        fpu_reduction=0.2,
+        virtual_loss=1.0,
+        widening_policy_mass=0.95,
+        widening_max_children=96,
+        widening_min_children=2,
+        forced_playout_k=0.0,
+        pcr_full_proportion=0.5,  # turns alternate Full/Fast by the PCR hash
+        pcr_fast_visits=fast_budget,
+        policy_init_fraction=0.0,
+        policy_init_avg_plies=0.0,
+        policy_init_max_plies=0,
+        policy_init_temperature=1.0,
+        tss_enabled=False,
+        root_fpu_reduction=0.2,
+        root_fpu_zero_under_noise=False,
+        search_parity_mode=False,
+        divergence_overrides=base_overrides,
+        fast_divergence_overrides=fast_overrides,
+    )
+
+    full_rows = [(p, v, gc) for p, full, v, gc in driver.rows if full]
+    fast_rows = [(p, v, gc) for p, full, v, gc in driver.rows if not full]
+    # Both classes must actually occur (per-turn hash at 0.5 over 6 games x many
+    # plies is overwhelmingly likely to yield both).
+    assert full_rows, "no Full-class moves decided"
+    assert fast_rows, "no Fast-class moves decided"
+    # No move finalized with zero net visits; each respects its class budget.
+    for p, v, _gc in full_rows:
+        assert 0 < v <= budget, f"Full move ply {p} visits {v} out of (0, {budget}]"
+    for p, v, _gc in fast_rows:
+        assert 0 < v <= fast_budget, (
+            f"Fast move ply {p} visits {v} out of (0, {fast_budget}]"
+        )
+    # Fast moves run under Gumbel+SH: reused-root Fast moves export a π' target
+    # over more than one action (the observable that the Fast regime engaged).
+    fast_reused = [(p, v, gc) for p, v, gc in fast_rows if p >= 1]
+    assert fast_reused, "no reused-root Fast moves decided"
+    assert any(gc >= 2 for _p, _v, gc in fast_reused), (
+        f"Fast (Gumbel) moves never exported a multi-action target: {fast_reused}"
+    )
+
+
 def test_future_opponent_policy_prefers_gumbel_target() -> None:
     """The opp-policy target uses the opponent decision's improved policy π'
     when it carries one (``future_opponent_gumbel``), falling back to the visit

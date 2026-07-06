@@ -241,7 +241,14 @@ class HexfieldTrainer:
             out[gname] = sq ** 0.5
         return out
 
-    def _update_train_bucket(self, total_rows: int, window_start: int) -> None:
+    def _update_train_bucket(
+        self,
+        total_rows: int,
+        window_start: int,
+        *,
+        epoch: int | None = None,
+        live_total_rows: int | None = None,
+    ) -> None:
         """Accrue / clamp the train-bucket reuse governor.
 
         ``total_rows`` is the monotone ``cumulative_rows_ever`` from the manifest,
@@ -252,11 +259,52 @@ class HexfieldTrainer:
           clamped at ``cap``, advancing ``level_at_row`` to ``total_rows``.
         * A decrease in ``total_rows`` re-bases the watermark, zeroes
           ``steps_since_last_reload``, and re-clamps the level.
+
+        Rollback awareness (``epoch`` / ``live_total_rows`` supplied by
+        ``select_training_samples``): ``cumulative_rows_ever`` is monotone, so a
+        rollback (resume from an earlier checkpoint, or epoch quarantine that drops
+        present rows) leaves the watermark stranded at a high value while no forward
+        credit can accrue — the governor freezes and never trains. When the current
+        epoch index or the live present-row count has REGRESSED below the persisted
+        ``last_seen_epoch`` / ``last_seen_live_rows`` watermarks, the monotone
+        ``train_bucket_level_at_row`` is rebased down to the current live present
+        rows so subsequent growth of ``cumulative_rows_ever`` re-credits the bucket.
+        With no regression (or when these args are omitted) the decision path below
+        is byte-identical to the pre-fix behaviour.
         """
         cap = max(
             float(self.config.training.max_train_bucket_size),
             float(self.config.training.train_samples_per_epoch),
         )
+        # Rollback detection: only ever runs when the caller supplies the run-state
+        # signals AND a regression is present. It mutates the watermark before the
+        # forward accrual below; the forward path is otherwise untouched.
+        regressed = False
+        if epoch is not None and self.train_state.last_seen_epoch >= 0:
+            regressed = regressed or int(epoch) < int(self.train_state.last_seen_epoch)
+        if live_total_rows is not None:
+            regressed = regressed or int(live_total_rows) < int(
+                self.train_state.last_seen_live_rows
+            )
+        if regressed:
+            # Rebase the monotone watermark down to the actual present rows so the
+            # next real growth in cumulative_rows_ever credits again. Prefer the
+            # live present count when known; else fall back to the monotone value.
+            rebase_to = int(live_total_rows) if live_total_rows is not None else int(total_rows)
+            self.train_state.train_bucket_level_at_row = rebase_to
+            self.train_state.train_steps_since_last_reload = 0
+            self.train_state.train_bucket_level = min(
+                self.train_state.train_bucket_level, cap
+            )
+        # Advance the run-state watermarks to the current (possibly rolled-back)
+        # state. Both follow the actual current values (not a running max) so a
+        # rollback is detected exactly once: after rebasing at the rollback epoch,
+        # the following epochs read as forward progress. A later quarantine that
+        # drops present rows is still caught by the live-rows watermark.
+        if epoch is not None:
+            self.train_state.last_seen_epoch = int(epoch)
+        if live_total_rows is not None:
+            self.train_state.last_seen_live_rows = int(live_total_rows)
         if total_rows > self.train_state.train_bucket_level_at_row:
             new_rows = total_rows - self.train_state.train_bucket_level_at_row
             self.train_state.train_bucket_level = min(
@@ -326,8 +374,16 @@ class HexfieldTrainer:
         selected_window, used = select_recent_window(entries, desired)
         window_start = max(0, total_rows - used)
 
-        # (3) governor accrual on the monotone counter.
-        self._update_train_bucket(cumulative_rows_ever, window_start)
+        # (3) governor accrual on the monotone counter. The live present-row count
+        # and epoch index are passed so the governor can detect a rollback (resume
+        # from an earlier checkpoint or epoch quarantine) and rebase the monotone
+        # watermark down instead of freezing.
+        self._update_train_bucket(
+            cumulative_rows_ever,
+            window_start,
+            epoch=epoch,
+            live_total_rows=total_rows,
+        )
 
         def _skip(status: str, reason: str, **extra) -> dict[str, Any]:
             components.shared.sample_window = PackedWindow.empty()

@@ -146,7 +146,12 @@ impl ContinuousMovePolicy {
         if self.pcr_full_proportion >= 1.0 {
             return MoveClass::Full;
         }
-        let unit = random_unit(mix_seed(base_seed, game_key, ply, SEED_STREAM_PCR));
+        // Per-turn PCR (twin of hexfield search.rs classify): both plies 2k and
+        // 2k+1 map to turn index k, so a full turn's reused tree stays on one
+        // regime. Kept identical to hexfield to preserve continuous differential
+        // parity (tests/test_hexfield_continuous_parity.py).
+        let turn = ply / 2;
+        let unit = random_unit(mix_seed(base_seed, game_key, turn, SEED_STREAM_PCR));
         if unit < self.pcr_full_proportion as f64 {
             MoveClass::Full
         } else {

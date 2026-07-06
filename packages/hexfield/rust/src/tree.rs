@@ -48,7 +48,7 @@ pub struct RootDirichletNoise {
 
 /// Divergence toggles and constants. `parity()` forces the divergences off;
 /// `production()` turns them on.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Divergences {
     pub lcb_move_selection: bool,
     pub lcb_z: f32,

@@ -35,6 +35,15 @@ class HexfieldTrainState:
     train_bucket_level: float = 0.0
     train_bucket_level_at_row: int = 0
     train_steps_since_last_reload: int = 0
+    # Rollback-detection watermarks for the governor. ``last_seen_epoch`` is the
+    # highest epoch index a governor accrual has run against; ``last_seen_live_rows``
+    # is the live (present, non-monotone) manifest row count at that accrual. When
+    # the run regresses below either watermark (resume from an earlier checkpoint,
+    # or epoch quarantine drops present rows), ``_update_train_bucket`` rebases the
+    # monotone ``train_bucket_level_at_row`` down so crediting resumes instead of
+    # freezing. ``-1`` means "never accrued", which never triggers a regression.
+    last_seen_epoch: int = -1
+    last_seen_live_rows: int = 0
     # Optional no-repeat-files set; empty unless the no-repeat-files option is
     # enabled.
     data_files_used: set[str] = field(default_factory=set)
@@ -55,6 +64,8 @@ class HexfieldTrainState:
             train_bucket_level=float(raw.get("train_bucket_level", 0.0)),
             train_bucket_level_at_row=int(raw.get("train_bucket_level_at_row", 0)),
             train_steps_since_last_reload=int(raw.get("train_steps_since_last_reload", 0)),
+            last_seen_epoch=int(raw.get("last_seen_epoch", -1)),
+            last_seen_live_rows=int(raw.get("last_seen_live_rows", 0)),
             data_files_used=set(str(item) for item in raw.get("data_files_used", ()) or ()),
         )
 
@@ -67,5 +78,7 @@ class HexfieldTrainState:
             "train_bucket_level": float(self.train_bucket_level),
             "train_bucket_level_at_row": int(self.train_bucket_level_at_row),
             "train_steps_since_last_reload": int(self.train_steps_since_last_reload),
+            "last_seen_epoch": int(self.last_seen_epoch),
+            "last_seen_live_rows": int(self.last_seen_live_rows),
             "data_files_used": sorted(self.data_files_used),
         }

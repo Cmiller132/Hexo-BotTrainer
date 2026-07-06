@@ -79,10 +79,23 @@ struct ContinuousMovePolicy {
     /// noise-conditioned `root_fpu_zero_under_noise` mechanism and applies to
     /// every move class. When None, the `root_fpu_zero_under_noise` path applies.
     root_fpu_reduction: Option<f32>,
-    divergences: Divergences,
+    /// Divergences view for Full/Init move classes (the base search profile).
+    divergences_full: Divergences,
+    /// Divergences view for the Fast move class. Equals `divergences_full` when
+    /// no `fast_*` overrides are set (golden invariant), so absent fast levers
+    /// reproduce today's single-profile behavior byte-for-byte.
+    divergences_fast: Divergences,
 }
 
 impl ContinuousMovePolicy {
+    /// The per-class Divergences view: Fast moves get `divergences_fast`,
+    /// Full/Init get `divergences_full`.
+    fn divergences_for(&self, class: MoveClass) -> Divergences {
+        match class {
+            MoveClass::Fast => self.divergences_fast,
+            MoveClass::Full | MoveClass::Init => self.divergences_full,
+        }
+    }
     fn policy_init_plies(&self, base_seed: u64, game_key: u64) -> u32 {
         if self.policy_init_fraction <= 0.0
             || self.policy_init_avg_plies <= 0.0
@@ -103,6 +116,26 @@ impl ContinuousMovePolicy {
         (count.max(0.0) as u32).min(self.policy_init_max_plies)
     }
 
+    /// Classify a ply into a Full/Fast/Init move class.
+    ///
+    /// PCR classification is per-TURN, not per-ply: the mix counter is
+    /// `ply / 2`, so the two plies of one turn (2k and 2k+1) hash to the SAME
+    /// stream input and therefore share one Full/Fast class. Two reasons:
+    ///
+    ///  1. Clean tree reuse. A Full turn builds a deep PUCT subtree that its
+    ///     paired ply promotes and reuses under the SAME regime. If the two
+    ///     plies could land in different classes, the per-class
+    ///     `set_divergences` refactor below would swap the Gumbel-root vs PUCT
+    ///     regime mid-turn onto a reused root, corrupting the promoted SH state.
+    ///     Sharing the class keeps the whole turn's reused tree on one regime.
+    ///  2. Balanced player coverage. Each Full turn exports one P0 and one P1
+    ///     policy target, so Full turns contribute training rows for both
+    ///     players symmetrically instead of skewing to whichever seat happened
+    ///     to draw Full.
+    ///
+    /// The `policy_init_remaining > 0 => Init` short-circuit and the
+    /// `pcr_full_proportion >= 1.0 => Full` short-circuit are unchanged. Call
+    /// sites still pass the real `ply`; the `/2` happens only here.
     fn classify(
         &self,
         base_seed: u64,
@@ -116,7 +149,9 @@ impl ContinuousMovePolicy {
         if self.pcr_full_proportion >= 1.0 {
             return MoveClass::Full;
         }
-        let unit = random_unit(mix_seed(base_seed, game_key, ply, SEED_STREAM_PCR));
+        // Per-turn: both plies 2k and 2k+1 map to turn index k.
+        let turn = ply / 2;
+        let unit = random_unit(mix_seed(base_seed, game_key, turn, SEED_STREAM_PCR));
         if unit < self.pcr_full_proportion as f64 {
             MoveClass::Full
         } else {
@@ -199,17 +234,21 @@ impl ContinuousMovePolicy {
         }
     }
 
+    /// Whether the evaluator must emit moves-left output. True when EITHER
+    /// class view enables the moves-left utility (a shared evaluation feeds both
+    /// Full and Fast roots, so it must satisfy whichever class needs ML).
     fn request_moves_left(&self) -> bool {
-        self.divergences.moves_left_utility
+        self.divergences_full.moves_left_utility || self.divergences_fast.moves_left_utility
     }
 
     /// Whether the evaluator must emit raw pre-softmax policy logits. True when
-    /// any Gumbel mechanism that reads `logits(a)` is enabled: the improved
-    /// target, the Gumbel-Top-k root sampler, or the non-root selection.
+    /// EITHER class view enables a Gumbel mechanism that reads `logits(a)` (the
+    /// improved target, the Gumbel-Top-k root sampler, or the non-root
+    /// selection). Fast will need logits when it runs under Gumbel while Full
+    /// stays PUCT, so both views are OR-ed.
     fn request_logits(&self) -> bool {
-        self.divergences.gumbel_target
-            || self.divergences.gumbel_root
-            || self.divergences.gumbel_nonroot_select
+        let needs = |d: &Divergences| d.gumbel_target || d.gumbel_root || d.gumbel_nonroot_select;
+        needs(&self.divergences_full) || needs(&self.divergences_fast)
     }
 }
 
@@ -833,7 +872,7 @@ impl HexfieldMctsSession {
 
     /// Continuous per-slot scheduler (the production self-play driver).
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (game_keys, states, evaluator, on_move, visits, c_puct, base_seed, virtual_batch_size, flush_target, active_root_limit, temperature_by_ply, root_dirichlet_total_alpha=None, root_dirichlet_noise_fraction=None, root_policy_temperature=None, fpu_reduction=None, virtual_loss=None, widening_policy_mass=None, widening_max_children=None, widening_min_children=None, forced_playout_k=None, root_policy_temperature_early=None, root_policy_temperature_halflife=None, pcr_full_proportion=None, pcr_fast_visits=None, pcr_fast_temperature=None, policy_init_fraction=None, policy_init_avg_plies=None, policy_init_max_plies=None, policy_init_temperature=None, tss_enabled=None, root_fpu_zero_under_noise=None, root_fpu_reduction=None, search_parity_mode=None, divergence_overrides=None))]
+    #[pyo3(signature = (game_keys, states, evaluator, on_move, visits, c_puct, base_seed, virtual_batch_size, flush_target, active_root_limit, temperature_by_ply, root_dirichlet_total_alpha=None, root_dirichlet_noise_fraction=None, root_policy_temperature=None, fpu_reduction=None, virtual_loss=None, widening_policy_mass=None, widening_max_children=None, widening_min_children=None, forced_playout_k=None, root_policy_temperature_early=None, root_policy_temperature_halflife=None, pcr_full_proportion=None, pcr_fast_visits=None, pcr_fast_temperature=None, policy_init_fraction=None, policy_init_avg_plies=None, policy_init_max_plies=None, policy_init_temperature=None, tss_enabled=None, root_fpu_zero_under_noise=None, root_fpu_reduction=None, search_parity_mode=None, divergence_overrides=None, fast_divergence_overrides=None))]
     fn run_continuous(
         &mut self,
         py: Python<'_>,
@@ -873,9 +912,19 @@ impl HexfieldMctsSession {
         root_fpu_reduction: Option<f32>,
         search_parity_mode: Option<bool>,
         divergence_overrides: Option<&Bound<'_, PyDict>>,
+        // Fast-class divergence view. When None, the Fast class reuses the base
+        // (Full) divergences, so absent fast levers = today's single profile.
+        fast_divergence_overrides: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
         validate_search_inputs(visits, c_puct, 0.0)?;
         let divergences = resolve_divergences(search_parity_mode, divergence_overrides)?;
+        // Fast-class view: parse the fast override map when provided, else fall
+        // back to the base view (golden invariant: divergences_fast ==
+        // divergences_full when no fast_* keys are set).
+        let divergences_fast = match fast_divergence_overrides {
+            Some(fast) => resolve_divergences(search_parity_mode, Some(fast))?,
+            None => divergences,
+        };
         let roots = states_from_py_states(py, states)?;
         if roots.len() != game_keys.len() {
             return Err(PyValueError::new_err(format!(
@@ -984,7 +1033,8 @@ impl HexfieldMctsSession {
                 Some(value) => Some(validate_nonnegative_f32("root_fpu_reduction", value)?),
                 None => None,
             },
-            divergences,
+            divergences_full: divergences,
+            divergences_fast,
         };
         let widening = build_widening(
             widening_policy_mass,
@@ -1024,24 +1074,26 @@ impl HexfieldMctsSession {
             };
             if let Some(mut search) = self.searches.remove(&game_key) {
                 if search.root_hash == root_hash {
+                    // Per-class divergence view: Fast=fast, Full/Init=base.
+                    let class_div = move_policy.divergences_for(move_class);
                     search.set_additional_visits(move_policy.visits_for(move_class));
                     search.set_forced_playout_k(move_policy.forced_k_for(move_class));
                     search.set_root_fpu_reduction(move_policy.root_fpu_for(move_class));
                     search.set_tss_enabled(move_policy.tss_enabled);
-                    search.set_divergences(divergences);
+                    search.set_divergences(class_div);
                     search.apply_root_policy_temperature(move_policy.root_temp_for(move_class, 0));
                     if let Some(noise) = root_noise_exact(
                         move_policy.noise_for(move_class),
                         mix_seed(base_seed, game_key, 0, SEED_STREAM_ROOT_NOISE),
-                        divergences.dirichlet_shaped,
+                        class_div.dirichlet_shaped,
                     ) {
                         search.apply_root_dirichlet_noise(noise);
                     }
                     // (Re)build the Gumbel-Top-k candidate set + SH schedule on
                     // a reused root. init_gumbel_root clears any prior state
-                    // first; for a non-Full reuse it is cleared so the normal
-                    // PUCT root runs.
-                    if divergences.gumbel_root && matches!(move_class, MoveClass::Full) {
+                    // first; when this class's view has gumbel_root off it is
+                    // cleared so the normal PUCT root runs.
+                    if class_div.gumbel_root {
                         let gumbel_seed = mix_seed(base_seed, game_key, 0, SEED_STREAM_GUMBEL);
                         search.init_gumbel_root(gumbel_seed, move_policy.visits_for(move_class));
                     } else {
@@ -2007,7 +2059,12 @@ fn apply_backup_item(
     widening: Widening,
     base_seed: u64,
     virtual_loss: f32,
-    divergences: Divergences,
+    // The RootInit branch now derives its per-class divergence view from
+    // `move_policy` (divergences_for), and the Leaf branch reads the search's
+    // own stored view; the threaded base divergences are no longer consulted
+    // here. Kept in the signature so the shared serial/parallel backup callers
+    // pass one uniform argument.
+    _divergences: Divergences,
 ) -> PyResult<()> {
     match item {
         ContinuousEvalItem::Leaf(leaf) => {
@@ -2038,6 +2095,9 @@ fn apply_backup_item(
                 slot.policy_init_remaining,
             );
             slot.move_class = move_class;
+            // Per-class divergence view for this fresh root (Fast=fast,
+            // Full/Init=base). Replaces the single threaded `divergences`.
+            let class_div = move_policy.divergences_for(move_class);
             let mut search = RustSearch::new(
                 state,
                 &**evaluation,
@@ -2048,22 +2108,22 @@ fn apply_backup_item(
                 root_noise_exact(
                     move_policy.noise_for(move_class),
                     mix_seed(base_seed, slot.game_key, slot.ply, SEED_STREAM_ROOT_NOISE),
-                    divergences.dirichlet_shaped,
+                    class_div.dirichlet_shaped,
                 ),
                 widening,
                 move_policy.forced_k_for(move_class),
                 move_policy.tss_enabled,
-                divergences,
+                class_div,
             )?;
             if search.root_edges_empty() {
                 return Err(PyValueError::new_err(
                     "hexfield continuous MCTS root has no legal actions",
                 ));
             }
-            // Build the Gumbel-Top-k candidate set + SH schedule for Full moves
-            // when gumbel_root is on. No-op otherwise (the search keeps the
-            // normal PUCT root). budget = the move's visits.
-            if divergences.gumbel_root && matches!(move_class, MoveClass::Full) {
+            // Build the Gumbel-Top-k candidate set + SH schedule when this
+            // class's view has gumbel_root on. No-op otherwise (the search keeps
+            // the normal PUCT root). budget = the move's visits.
+            if class_div.gumbel_root {
                 let gumbel_seed = mix_seed(base_seed, slot.game_key, slot.ply, SEED_STREAM_GUMBEL);
                 search.init_gumbel_root(gumbel_seed, move_policy.visits_for(move_class));
             }
@@ -2418,16 +2478,22 @@ fn complete_continuous_slots(
                 let mut keep_promoted = false;
                 if let Some(search) = slots[slot_index].search.as_mut() {
                     if search.advance_root(action_id)? && search.root_hash == next_hash {
+                        // Per-class divergence view for the promoted root. The
+                        // paired ply of a turn shares the turn's class (see
+                        // classify), so a Full-turn PUCT subtree is reused under
+                        // the Full regime and a Fast turn under the Fast regime.
+                        let class_div = move_policy.divergences_for(next_class);
                         search.set_additional_visits(move_policy.visits_for(next_class));
                         search.set_forced_playout_k(move_policy.forced_k_for(next_class));
                         search.set_root_fpu_reduction(move_policy.root_fpu_for(next_class));
                         search.set_tss_enabled(move_policy.tss_enabled);
+                        search.set_divergences(class_div);
                         search
                             .apply_root_policy_temperature(move_policy.root_temp_for(next_class, next_ply));
                         if let Some(noise) = root_noise_exact(
                             move_policy.noise_for(next_class),
                             mix_seed(base_seed, game_key, next_ply, SEED_STREAM_ROOT_NOISE),
-                            move_policy.divergences.dirichlet_shaped,
+                            class_div.dirichlet_shaped,
                         ) {
                             search.apply_root_dirichlet_noise(noise);
                         }
@@ -2438,11 +2504,9 @@ fn complete_continuous_slots(
                         // actions) persists onto the new root, and the slot
                         // either hammers a stale survivor or stalls until the
                         // force-stuck safety net finalizes the move with zero
-                        // new visits. Non-Full moves clear the state so the
-                        // normal PUCT root runs.
-                        if move_policy.divergences.gumbel_root
-                            && matches!(next_class, MoveClass::Full)
-                        {
+                        // new visits. When this class's view has gumbel_root off
+                        // the state is cleared so the normal PUCT root runs.
+                        if class_div.gumbel_root {
                             let gumbel_seed =
                                 mix_seed(base_seed, game_key, next_ply, SEED_STREAM_GUMBEL);
                             search.init_gumbel_root(
@@ -2592,6 +2656,19 @@ const KNOWN_DIVERGENCE_KEYS: &[&str] = &[
     "gumbel_draw_temperature",
     "gumbel_target_min_visits",
     "gumbel_play_prune",
+    // Fast-class Gumbel levers (main_8: PUCT Full / Gumbel Fast). These name the
+    // Fast view's values; the driver's Python side folds them into the SECOND
+    // (fast) override map whose base keys resolve_divergences reads. They are
+    // whitelisted here so the strict known-keys gate never rejects them when
+    // they ride in an override dict — a parser/whitelist mismatch on new keys
+    // tripped the supervisor circuit breaker on 2026-07-04 (supervisor_halted.flag).
+    "fast_gumbel_root_enabled",
+    "fast_gumbel_sequential_halving",
+    "fast_gumbel_nonroot_select",
+    "fast_gumbel_c_visit",
+    "fast_gumbel_c_scale",
+    "fast_gumbel_m",
+    "fast_gumbel_play_prune",
 ];
 
 fn resolve_divergences(
@@ -2706,6 +2783,33 @@ fn resolve_divergences(
             dv.gumbel_target_min_visits = v.extract()?;
         }
         if let Some(v) = overrides.get_item("gumbel_play_prune")? {
+            dv.gumbel_play_prune = v.extract()?;
+        }
+        // Fast-class Gumbel levers (main_8). When present these override the
+        // gumbel fields with the Fast view's values; they are applied LAST so a
+        // fast-override map carrying fast_* keys wins over any base-keyed gumbel
+        // entry it also holds. Absent => the base gumbel fields stand, so a plain
+        // (non-fast) override map is unchanged and the fast view falls back to
+        // the base view (golden invariant).
+        if let Some(v) = overrides.get_item("fast_gumbel_root_enabled")? {
+            dv.gumbel_root = v.extract()?;
+        }
+        if let Some(v) = overrides.get_item("fast_gumbel_sequential_halving")? {
+            dv.gumbel_sequential_halving = v.extract()?;
+        }
+        if let Some(v) = overrides.get_item("fast_gumbel_nonroot_select")? {
+            dv.gumbel_nonroot_select = v.extract()?;
+        }
+        if let Some(v) = overrides.get_item("fast_gumbel_c_visit")? {
+            dv.gumbel_c_visit = v.extract()?;
+        }
+        if let Some(v) = overrides.get_item("fast_gumbel_c_scale")? {
+            dv.gumbel_c_scale = v.extract()?;
+        }
+        if let Some(v) = overrides.get_item("fast_gumbel_m")? {
+            dv.gumbel_m = v.extract()?;
+        }
+        if let Some(v) = overrides.get_item("fast_gumbel_play_prune")? {
             dv.gumbel_play_prune = v.extract()?;
         }
     }
@@ -3889,7 +3993,8 @@ mod fallback_tests {
             tss_enabled: true,
             root_fpu_zero_under_noise: false,
             root_fpu_reduction: None,
-            divergences: Divergences::production(),
+            divergences_full: Divergences::production(),
+            divergences_fast: Divergences::production(),
         }
     }
 
@@ -4053,7 +4158,7 @@ mod fallback_tests {
     /// The strict KNOWN_DIVERGENCE_KEYS gate must accept every key the python
     /// side emits — the 2026-07-04 deploy crashed because the new lever keys
     /// were parsed but missing from the whitelist. Exercises the real pyo3
-    /// resolve path with both new keys present.
+    /// resolve path with both new keys present, plus every main_8 fast_* key.
     #[test]
     fn resolve_divergences_accepts_the_new_lever_keys() {
         Python::initialize();
@@ -4066,10 +4171,169 @@ mod fallback_tests {
             assert_eq!(dv.gumbel_target_c_scale, Some(0.35));
             assert_eq!(dv.gumbel_draw_temperature, 1.0);
 
+            // Every main_8 fast_* key must pass the gate AND fold onto its
+            // gumbel field. A whitelist/parser mismatch here is exactly the
+            // failure class that tripped the supervisor circuit breaker.
+            let fast = PyDict::new(py);
+            fast.set_item("fast_gumbel_root_enabled", true).unwrap();
+            fast.set_item("fast_gumbel_sequential_halving", true).unwrap();
+            fast.set_item("fast_gumbel_nonroot_select", true).unwrap();
+            fast.set_item("fast_gumbel_c_visit", 12.0f32).unwrap();
+            fast.set_item("fast_gumbel_c_scale", 0.5f32).unwrap();
+            fast.set_item("fast_gumbel_m", 8u32).unwrap();
+            fast.set_item("fast_gumbel_play_prune", true).unwrap();
+            let fv = resolve_divergences(None, Some(&fast))
+                .expect("fast_* keys must pass the known-keys gate");
+            assert!(fv.gumbel_root);
+            assert!(fv.gumbel_sequential_halving);
+            assert!(fv.gumbel_nonroot_select);
+            assert_eq!(fv.gumbel_c_visit, 12.0);
+            assert_eq!(fv.gumbel_c_scale, 0.5);
+            assert_eq!(fv.gumbel_m, 8);
+            assert!(fv.gumbel_play_prune);
+
             // The gate itself still rejects a genuinely unknown key.
             let bogus = PyDict::new(py);
             bogus.set_item("gumbel_bogus_lever", 1.0f32).unwrap();
             assert!(resolve_divergences(None, Some(&bogus)).is_err());
         });
+    }
+
+    // === main_8: turn-based classification + per-class divergences ===========
+
+    /// Full ContinuousMovePolicy tuned for classify() sampling tests: a real
+    /// pcr_full_proportion and no policy-init so classify exercises the PCR
+    /// hash rather than the Init/Full short-circuits.
+    fn classify_policy(pcr_full_proportion: f32) -> ContinuousMovePolicy {
+        let mut p = move_policy(0.0);
+        p.pcr_full_proportion = pcr_full_proportion;
+        p.policy_init_fraction = 0.0;
+        p.policy_init_avg_plies = 0.0;
+        p.policy_init_max_plies = 0;
+        p
+    }
+
+    #[test]
+    fn classify_is_per_turn_paired_plies_share_a_class() {
+        // Both plies of a turn (2k, 2k+1) must map to the same class, for many
+        // turns and many seeds. This is the invariant the per-class
+        // set_divergences reuse relies on.
+        let policy = classify_policy(0.5);
+        for base_seed in 0u64..64 {
+            for game_key in [0u64, 1, 7, 4242, u64::MAX] {
+                for k in 0u32..64 {
+                    let a = policy.classify(base_seed, game_key, 2 * k, 0);
+                    let b = policy.classify(base_seed, game_key, 2 * k + 1, 0);
+                    assert_eq!(
+                        a, b,
+                        "plies {} and {} of turn {k} must share a class (seed {base_seed}, key {game_key})",
+                        2 * k,
+                        2 * k + 1
+                    );
+                    // And it is never Init here (no policy-init remaining).
+                    assert!(matches!(a, MoveClass::Full | MoveClass::Fast));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn classify_full_fraction_matches_proportion_over_turns() {
+        // Over a large sample of turns, roughly pcr_full_proportion of TURNS are
+        // Full. Sample one ply per turn (the pair is identical by the test
+        // above) across many game_keys to average out the per-key hash.
+        let prop = 0.33f32;
+        let policy = classify_policy(prop);
+        let base_seed = 12345u64;
+        let mut full = 0u64;
+        let mut total = 0u64;
+        for game_key in 0u64..2000 {
+            for k in 0u32..16 {
+                if matches!(policy.classify(base_seed, game_key, 2 * k, 0), MoveClass::Full) {
+                    full += 1;
+                }
+                total += 1;
+            }
+        }
+        let frac = full as f64 / total as f64;
+        assert!(
+            (frac - prop as f64).abs() < 0.02,
+            "Full turn fraction {frac} should be ~{prop} over {total} turns"
+        );
+    }
+
+    #[test]
+    fn classify_short_circuits_are_unchanged() {
+        // policy_init_remaining > 0 => Init regardless of ply/turn.
+        let policy = classify_policy(0.33);
+        assert!(matches!(policy.classify(1, 2, 0, 3), MoveClass::Init));
+        assert!(matches!(policy.classify(1, 2, 5, 1), MoveClass::Init));
+        // pcr_full_proportion >= 1.0 => always Full.
+        let all_full = classify_policy(1.0);
+        for ply in 0u32..16 {
+            assert!(matches!(all_full.classify(9, 9, ply, 0), MoveClass::Full));
+        }
+    }
+
+    #[test]
+    fn divergences_for_selects_the_class_view() {
+        let mut policy = move_policy(0.0);
+        let mut fast = Divergences::production();
+        fast.gumbel_root = true; // make the fast view distinguishable
+        policy.divergences_fast = fast;
+        assert!(!policy.divergences_for(MoveClass::Full).gumbel_root);
+        assert!(!policy.divergences_for(MoveClass::Init).gumbel_root);
+        assert!(policy.divergences_for(MoveClass::Fast).gumbel_root);
+    }
+
+    #[test]
+    fn golden_invariant_fast_equals_full_without_fast_overrides() {
+        // When no fast_* keys are set, the driver falls back to the base view
+        // for the fast map (fast_divergence_overrides=None => divergences_fast =
+        // divergences). Mirror that here: fast resolved from None equals base.
+        Python::initialize();
+        Python::attach(|py| {
+            let base_overrides = PyDict::new(py);
+            base_overrides.set_item("gumbel_root", true).unwrap();
+            base_overrides.set_item("gumbel_c_scale", 0.7f32).unwrap();
+            let base = resolve_divergences(None, Some(&base_overrides)).unwrap();
+            // No fast overrides => fast view IS the base view (Rust fallback).
+            let fast_fallback = base;
+            assert_eq!(
+                fast_fallback, base,
+                "divergences_fast must equal divergences_full when no fast_* keys set"
+            );
+
+            // And request_logits/request_moves_left with identical views match
+            // the single-view result.
+            let mut policy = move_policy(0.0);
+            policy.divergences_full = base;
+            policy.divergences_fast = base;
+            assert_eq!(policy.request_logits(), base.gumbel_root);
+        });
+    }
+
+    #[test]
+    fn request_logits_true_if_either_view_needs_them() {
+        let mut policy = move_policy(0.0);
+        // Neither view needs logits.
+        let mut plain = Divergences::production();
+        plain.gumbel_target = false;
+        plain.gumbel_root = false;
+        plain.gumbel_nonroot_select = false;
+        policy.divergences_full = plain;
+        policy.divergences_fast = plain;
+        assert!(!policy.request_logits());
+        // Fast view alone needs them => request_logits true.
+        let mut fast = plain;
+        fast.gumbel_root = true;
+        policy.divergences_fast = fast;
+        assert!(policy.request_logits());
+        // Reset fast, set only full.
+        policy.divergences_fast = plain;
+        let mut full = plain;
+        full.gumbel_nonroot_select = true;
+        policy.divergences_full = full;
+        assert!(policy.request_logits());
     }
 }

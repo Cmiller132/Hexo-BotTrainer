@@ -129,6 +129,28 @@ class SelfplayConfig:
     # while leaving every recorded training target untouched.
     gumbel_play_prune: bool = False
     export_root_prior_logits: bool = False
+    # --- Per-class Gumbel for the Fast PCR class (main_8) ----------------------
+    # main_8 runs PUCT for Full turns and Gumbel+SH for Fast turns. These OPTIONAL
+    # fast_* levers describe the Fast class's Gumbel view; the base
+    # gumbel_*_enabled levers keep describing the Full/Init view. All default
+    # None/False so ABSENT = today's single-profile behavior (the fast override
+    # map equals the base map, and Rust's divergences_fast == divergences_full).
+    # build_divergence_overrides folds a set fast_* value onto its base gumbel
+    # counterpart in the SECOND (fast) override map only:
+    #   fast_gumbel_root_enabled       -> gumbel_root
+    #   fast_gumbel_sequential_halving -> gumbel_sequential_halving
+    #   fast_gumbel_nonroot_select     -> gumbel_nonroot_select
+    #   fast_gumbel_c_visit            -> gumbel_c_visit   (when not None)
+    #   fast_gumbel_c_scale            -> gumbel_c_scale   (when not None)
+    #   fast_gumbel_m                  -> gumbel_m         (when not None)
+    #   fast_gumbel_play_prune         -> gumbel_play_prune
+    fast_gumbel_root_enabled: bool = False
+    fast_gumbel_sequential_halving: bool = False
+    fast_gumbel_nonroot_select: bool = False
+    fast_gumbel_c_visit: float | None = None
+    fast_gumbel_c_scale: float | None = None
+    fast_gumbel_m: int | None = None
+    fast_gumbel_play_prune: bool = False
     # --- Blunder-seeded self-play (KataGo-style off-policy state coverage) -----
     # A fraction of games per epoch start from a stored mid-game position where
     # the net was recently "surprised" (high policy_surprise), instead of an
@@ -423,8 +445,16 @@ def _merge_multi_stage_eval(section: Mapping[str, Any]) -> "MultiStageEvalSectio
 ML_AUTO_DISABLED_FLAG = "ml_auto_disabled.flag"
 
 
-def build_divergence_overrides(sp: SelfplayConfig, *, disabled: bool = False) -> dict:
+def build_divergence_overrides(
+    sp: SelfplayConfig, *, disabled: bool = False, fast: bool = False
+) -> dict:
     """Build the Rust ``divergence_overrides`` dict from a SelfplayConfig.
+
+    With ``fast=True`` this returns the SECOND (Fast-class) override map for the
+    main_8 per-class refactor: the base map with its Gumbel fields replaced by
+    the ``fast_*`` values (see ``build_fast_divergence_overrides``). With
+    ``fast=False`` (default) it returns the base map exactly as before, so every
+    existing caller and eval path is unchanged.
 
     Groups of levers:
       - moves-left knobs: the boolean levers are gated by ``off`` (the
@@ -442,7 +472,7 @@ def build_divergence_overrides(sp: SelfplayConfig, *, disabled: bool = False) ->
     All values are concrete bool/float/int (never None) because
     ``resolve_divergences`` calls ``.extract()``."""
     off = bool(disabled or sp.ml_auto_disabled)
-    return {
+    base = {
         # Moves-left utility (boolean levers gated by ml_auto_disabled/disabled).
         "moves_left_utility": bool(sp.moves_left_utility) and not off,
         "ml_weight": float(sp.ml_weight),
@@ -484,6 +514,32 @@ def build_divergence_overrides(sp: SelfplayConfig, *, disabled: bool = False) ->
             else {}
         ),
     }
+    if not fast:
+        return base
+    # Fast-class map: start from the base map and replace its Gumbel fields with
+    # the Fast view's values. Booleans always apply; the optional numeric levers
+    # (c_visit/c_scale/m) only override when set (None => keep the base value).
+    fast_map = dict(base)
+    fast_map["gumbel_root"] = bool(sp.fast_gumbel_root_enabled)
+    fast_map["gumbel_sequential_halving"] = bool(sp.fast_gumbel_sequential_halving)
+    fast_map["gumbel_nonroot_select"] = bool(sp.fast_gumbel_nonroot_select)
+    fast_map["gumbel_play_prune"] = bool(sp.fast_gumbel_play_prune)
+    if sp.fast_gumbel_c_visit is not None:
+        fast_map["gumbel_c_visit"] = float(sp.fast_gumbel_c_visit)
+    if sp.fast_gumbel_c_scale is not None:
+        fast_map["gumbel_c_scale"] = float(sp.fast_gumbel_c_scale)
+    if sp.fast_gumbel_m is not None:
+        fast_map["gumbel_m"] = int(sp.fast_gumbel_m)
+    return fast_map
+
+
+def build_fast_divergence_overrides(
+    sp: SelfplayConfig, *, disabled: bool = False
+) -> dict:
+    """The Fast-class (SECOND) override map for the continuous driver: the base
+    map with its Gumbel fields folded to the ``fast_*`` values. Thin alias for
+    ``build_divergence_overrides(sp, disabled=disabled, fast=True)``."""
+    return build_divergence_overrides(sp, disabled=disabled, fast=True)
 
 
 def parse_hexfield_config(config: Mapping[str, Any]) -> HexfieldConfig:

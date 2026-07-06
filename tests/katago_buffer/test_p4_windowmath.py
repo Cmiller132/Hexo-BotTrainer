@@ -430,6 +430,100 @@ def test_update_train_bucket() -> None:
     print("  _update_train_bucket: accrual / cap / no-op / monotone-reload branches match dense")
 
 
+def test_update_train_bucket_rollback_reawards() -> None:
+    """Governor must resume crediting after a rollback instead of freezing.
+
+    Regression guard for the KataGo reuse-governor freeze (main_7 epochs 36/37
+    trained 0 rows). The governor accrues on the MONOTONE ``cumulative_rows_ever``.
+    On a rollback (resume from an earlier checkpoint, or an epoch quarantine that
+    drops present rows) ``cumulative_rows_ever`` stays high, so the pre-fix forward
+    path saw ``total_rows == train_bucket_level_at_row`` and never re-credited —
+    training froze. The fix passes the epoch index + live present-row count so the
+    governor detects the regression and rebases the monotone watermark down to the
+    present rows, letting subsequent real growth re-credit.
+
+    Part A: a PURE-FORWARD stream (with the new epoch/live args supplied every
+    call) must be byte-identical to the arg-less golden stream — no rebase, no
+    behaviour change on the happy path.
+
+    Part B: after several forward epochs the bucket is fully spent; a rollback to a
+    lower epoch / fewer present rows must REBASE the watermark and let the next
+    epoch's new self-play data credit again (bucket climbs off zero) rather than
+    freeze.
+    """
+    # --- Part A: forward path with the new args == arg-less golden path. --------
+    tr_args = _make_trainer()
+    tr_noargs = _make_trainer()
+    # A monotone cumulative stream over increasing epochs, live == cumulative
+    # (no rollback anywhere): both trainers must end in the same governor state.
+    stream = [(0, 1000, 1000), (1, 1500, 1500), (2, 1500, 1500), (3, 3000, 3000)]
+    for ep, cum, live in stream:
+        tr_args._update_train_bucket(cum, window_start=ep, epoch=ep, live_total_rows=live)
+        tr_noargs._update_train_bucket(cum, window_start=ep)
+    assert tr_args.train_state.train_bucket_level == tr_noargs.train_state.train_bucket_level
+    assert (
+        tr_args.train_state.train_bucket_level_at_row
+        == tr_noargs.train_state.train_bucket_level_at_row
+    )
+    assert (
+        tr_args.train_state.train_steps_since_last_reload
+        == tr_noargs.train_state.train_steps_since_last_reload
+    )
+    # And the watermarks reflect the last forward step (no regression fired).
+    assert tr_args.train_state.last_seen_epoch == 3
+    assert tr_args.train_state.last_seen_live_rows == 3000
+
+    # --- Part B: forward, spend the bucket, then roll back. ---------------------
+    tr = _make_trainer()
+    per_new = 8.0  # max_train_bucket_per_new_data from _make_trainer defaults
+    # Epoch 0: 100k rows present -> credited, watermark 100k.
+    tr._update_train_bucket(100_000, window_start=0, epoch=0, live_total_rows=100_000)
+    # Epoch 1..3: cumulative grows to 130k; live tracks it (normal forward).
+    tr._update_train_bucket(110_000, window_start=1, epoch=1, live_total_rows=110_000)
+    tr._update_train_bucket(120_000, window_start=2, epoch=2, live_total_rows=120_000)
+    tr._update_train_bucket(130_000, window_start=3, epoch=3, live_total_rows=130_000)
+    assert tr.train_state.train_bucket_level_at_row == 130_000
+    assert tr.train_state.last_seen_epoch == 3
+    # Fully spend the bucket (simulate the debits select_training_samples applies).
+    tr.train_state.train_bucket_level = 0.0
+    frozen_watermark = tr.train_state.train_bucket_level_at_row  # 130k, monotone
+
+    # ROLLBACK: resume from the epoch-1 checkpoint. cumulative_rows_ever is monotone
+    # so the manifest still reports 130k, but the run is now at epoch 1 with only
+    # ~110k present rows (later epochs quarantined). PRE-FIX: total_rows (130k) ==
+    # watermark (130k) -> no credit -> FROZEN at level 0. POST-FIX: epoch 1 <
+    # last_seen 3 (and live 110k < last_seen 130k) -> the watermark is rebased down
+    # to the present 110k, then the forward accrual in the SAME call credits the
+    # 20k-row gap back up to the monotone 130k. Net: training RESUMES immediately.
+    level_before = tr.train_state.train_bucket_level  # 0.0 (spent, clamped)
+    tr._update_train_bucket(130_000, window_start=1, epoch=1, live_total_rows=110_000)
+    # Reload counter zeroed by the rebase branch, watermark re-advanced to the
+    # monotone total after crediting the rebased gap.
+    assert tr.train_state.train_steps_since_last_reload == 0
+    assert tr.train_state.last_seen_epoch == 1
+    assert tr.train_state.last_seen_live_rows == 110_000
+    assert tr.train_state.train_bucket_level_at_row == 130_000  # credited gap, re-advanced
+    expected_credit = (130_000 - 110_000) * per_new  # 20k rows * 8 = 160k
+    assert tr.train_state.train_bucket_level == pytest.approx(level_before + expected_credit), (
+        "governor must resume crediting after a rollback instead of freezing at "
+        f"level {level_before}; got {tr.train_state.train_bucket_level}"
+    )
+    assert tr.train_state.train_bucket_level > 0.0, "bucket froze at zero after rollback"
+
+    # Sanity: WITHOUT the rollback signals, a monotone stream at a spent bucket
+    # stays frozen (proves the credit above came from the rollback rebase, not from
+    # some unrelated path).
+    tr_frozen = _make_trainer()
+    tr_frozen._update_train_bucket(130_000, window_start=0)  # arg-less: watermark -> 130k
+    tr_frozen.train_state.train_bucket_level = 0.0
+    tr_frozen._update_train_bucket(130_000, window_start=0)  # same monotone total, no args
+    assert tr_frozen.train_state.train_bucket_level == 0.0, (
+        "control: monotone total with no rollback signal must stay frozen"
+    )
+    print("  rollback re-award: forward path byte-identical; rollback rebases "
+          "watermark and resumes crediting (main_7 ep36/37 freeze guard)")
+
+
 # ----------------------------------------------------------------------
 # 5. build_window_split keep_prob behaviour
 # ----------------------------------------------------------------------
@@ -595,6 +689,7 @@ def main() -> int:
     test_split_and_selection()
     test_keep_prob_selection_accounting()
     test_update_train_bucket()
+    test_update_train_bucket_rollback_reawards()
 
     # --- gates needing real shards (copied out, mutate only copies) ----------
     root = _fresh("p4_select")

@@ -32,7 +32,12 @@ from hexo_runner.records import AbortRecord, HexoRecordFile, HexoRecordPlayer
 
 from . import _rust
 from .blunder_seeds import mine_blunder_seeds
-from .config import ML_AUTO_DISABLED_FLAG, build_divergence_overrides, parse_hexfield_config
+from .config import (
+    ML_AUTO_DISABLED_FLAG,
+    build_divergence_overrides,
+    build_fast_divergence_overrides,
+    parse_hexfield_config,
+)
 from .engine_facts import player_int
 from .features import record_phase, record_player, window_scan
 from .geometry import pack_action_id, unpack_action_id
@@ -1152,6 +1157,12 @@ def generate_selfplay_epoch(*, ctx, components, epoch: int, games_per_epoch: int
             root_fpu_zero_under_noise=sp.root_fpu_zero_under_noise,
             search_parity_mode=sp.search_parity_mode,
             divergence_overrides=build_divergence_overrides(
+                sp, disabled=(ctx.diagnostics_dir / ML_AUTO_DISABLED_FLAG).exists()
+            ),
+            # Fast-class (main_8: Gumbel Fast) override map. Equals the base map
+            # when no fast_* levers are set, so absent = today's single profile
+            # and Rust's divergences_fast == divergences_full (golden invariant).
+            fast_divergence_overrides=build_fast_divergence_overrides(
                 sp, disabled=(ctx.diagnostics_dir / ML_AUTO_DISABLED_FLAG).exists()
             ),
             **noise_kwargs,
