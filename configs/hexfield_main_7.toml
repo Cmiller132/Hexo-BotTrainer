@@ -35,7 +35,10 @@ pcr_fast_temperature = 0.0
 # Seeded games are flagged in rows/sidecars/telemetry and excluded from the
 # unique-openings tripwire. Gate: the armed ep77-vs-ep67 paired match (seeded
 # from ~ep69) + seeded-game telemetry. 0.0 = feature fully off (bit-identical).
-blunder_seed_fraction = 0.10
+# REVERTED to 0.0 on 2026-07-06: ep77-vs-ep67 gate = 80-120 (-70.4 +/- 48 Elo),
+# a genuine regression over the 8 seeded epochs (expected +24 from the baseline
+# grind). Mechanism under investigation; 0.0 = feature fully off.
+blunder_seed_fraction = 0.0
 blunder_seed_recent_epochs = 5
 blunder_seed_max_ply = 40
 blunder_seed_surprise_quantile = 0.9
