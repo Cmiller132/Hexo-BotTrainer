@@ -1,6 +1,6 @@
 # /etc/systemd/system/hexfield-supervisor-8.service
 [Unit]
-Description=hexfield_main_8 self-play training supervisor (c=192, heads 3x64, trunk CCAx5; HYBRID SEARCH: PUCT full / Gumbel fast, turn-based PCR; warm-started direct from main_7 ep91)
+Description=hexfield_main_8 self-play training supervisor (c=192, heads 3x64, trunk CCAx5; HYBRID SEARCH: PUCT full / Gumbel fast, turn-based PCR; warm-started direct from main_7 ep67)
 After=network.target
 StartLimitIntervalSec=200
 StartLimitBurst=5
