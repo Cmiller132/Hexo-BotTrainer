@@ -3889,6 +3889,59 @@ mod fallback_tests {
         }
     }
 
+    // ---- Forced-playout target pruning (KataGo policy-target pruning). ----
+    // These lock the main_8 Full-move export path: for a PUCT (non-Gumbel) root
+    // with forced_playout_k > 0, build_search_result_payload_native records the
+    // policy target from pruned_visit_policy -> prune_forced_delta_counts, which
+    // strips the sqrt(k*P*N) forced-exploration visits back out while leaving the
+    // raw visit_policy (used only for play selection) untouched. Counts are exact
+    // u32, so these assert exact expected histograms. explore = c_puct*sqrt(N).
+
+    #[test]
+    fn prune_forced_strips_forced_visits_from_a_low_value_child() {
+        // N=100, c=1.5 -> explore=15. Best = idx0 (60 delta).
+        // u_best = 0.5 + 0.7*15/61 = 0.6721.
+        // idx1: n_forced = floor(sqrt(2*0.05*100)) = 3; each removal keeps
+        // U_1 (~ -0.22) far below u_best, so all 3 forced visits are stripped.
+        let pruned = prune_forced_delta_counts(
+            &[60, 10], &[0.7, 0.05], &[60, 10], &[0.5, -0.3], 100, 2.0, 1.5,
+        );
+        assert_eq!(pruned, vec![60, 7]);
+    }
+
+    #[test]
+    fn prune_forced_keeps_genuine_visits_of_a_high_value_child() {
+        // Same best/u_best. idx1 has n_forced=floor(sqrt(60))=7, but value 0.8
+        // makes U_1 = 0.8 + 0.3*15/10 = 1.25 > u_best on the first candidate
+        // removal, so the loop breaks immediately: genuine visits, not forced.
+        let pruned = prune_forced_delta_counts(
+            &[60, 10], &[0.7, 0.3], &[60, 10], &[0.5, 0.8], 100, 2.0, 1.5,
+        );
+        assert_eq!(pruned, vec![60, 10]);
+    }
+
+    #[test]
+    fn prune_forced_zero_k_is_identity() {
+        // forced_playout_k = 0 (Gumbel-era / off): the recorded target is the
+        // raw delta-visit histogram, unchanged.
+        let deltas = [60u32, 10, 5];
+        let pruned = prune_forced_delta_counts(
+            &deltas, &[0.5, 0.3, 0.2], &[60, 10, 5], &[0.4, 0.1, -0.2], 75, 0.0, 1.5,
+        );
+        assert_eq!(pruned, deltas.to_vec());
+    }
+
+    #[test]
+    fn prune_forced_never_prunes_best_and_caps_at_n_forced() {
+        // Three children; best = idx0 (50) is never touched. u_best = 0.5471.
+        // idx1: n_forced=floor(sqrt(80))=8, U stays below u_best across all 8 ->
+        // loses exactly 8 (30->22). idx2: n_forced=floor(sqrt(4))=2 -> 8->6.
+        let pruned = prune_forced_delta_counts(
+            &[50, 30, 8], &[0.5, 0.4, 0.02], &[50, 30, 8], &[0.4, 0.2, -0.5], 100, 2.0, 1.5,
+        );
+        assert_eq!(pruned, vec![50, 22, 6]);
+    }
+
     // Non-sentinel action ids: PackedCoord 0 unpacks to the illegal sentinel
     // HexCoord{q:-32768,r:-32768}; any non-zero id we use here is a "real" action
     // for the purposes of the played-move invariant.
