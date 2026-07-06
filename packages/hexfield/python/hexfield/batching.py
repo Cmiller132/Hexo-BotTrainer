@@ -199,12 +199,6 @@ def collate_training(
             "value_mask": torch.tensor(
                 [row.value_mask for row in rows], dtype=torch.float32
             ),
-            # Per-row policy-family mask: 0.0 for FAST (value-only) rows, 1.0 for
-            # FULL rows. Gates self-policy CE, soft_policy CE, and opp_policy CE.
-            # (cell_q is masked at expand via cell_q_mask.)
-            "policy_valid": torch.tensor(
-                [row.policy_valid for row in rows], dtype=torch.float32
-            ),
             "stvalue": torch.stack(
                 [torch.from_numpy(row.stvalue) for row in rows]
             ).reshape(b, h),
@@ -254,15 +248,11 @@ def step_global_denominators(
     denoms["moves_left"] = float(sum(row.moves_left_mask for row in rows))
     # cell_q: total masked-cell count (mean over contributing cells).
     denoms["cell_q"] = float(sum(float(row.cell_q_mask.sum()) for row in rows))
-    # Denominator for the opp/soft policy CE: count of FULL rows. Equals rows
-    # when every row is full.
-    denoms["policy_rows"] = float(sum(row.policy_valid for row in rows))
-    # Self-policy CE weight sum over FULL rows only. A FAST row has
-    # policy_surprise=0.0, which maps to weight=uniform_fraction (not 0), so it is
-    # excluded here to keep it out of the mean-over-full-rows denominator.
-    full_surprises = [row.policy_surprise for row in rows if row.policy_valid != 0.0]
+    # Self-policy CE weight sum over all rows. Every recorded row is a full
+    # (policy-bearing) row in main_9 (fast rows are dropped at the self-play
+    # writer), so this is the mean-over-rows denominator.
     _w, wsum = policy_surprise_weights(
-        full_surprises,
+        [row.policy_surprise for row in rows],
         policy_surprise_uniform_fraction,
         policy_surprise_max_weight,
     )

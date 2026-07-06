@@ -527,11 +527,24 @@ class AttnBlock(nn.Module):
 # FOREIGN-arch net off its checkpoint (eval anchors, the dashboard debug
 # worker): the counts alone don't pin the C/A interleaving, so known lineage
 # layouts are mapped explicitly. main_1..main_6 = CCC A CCC A CC A; main_7 =
-# CC A x5. (Legacy v2's 6C/3A is deliberately absent — it is a different
-# class, handled by eval_arena's legacy fallback.)
+# CC A x5; main_9 = CC A CC A CC A (6C/3A, the HEXFIELD_TRUNK=CCACCACCA arch).
+#
+# (6, 3) is SHARED by two DIFFERENT classes: main_9's current-arch net AND the
+# frozen legacy-v2 snapshot (also 6C/3A, also CCACCACCA interleaving). This is
+# safe because the two are NOT disambiguated by this map — they are told apart
+# by their parameter-key SETS at strict-load time in eval_arena._load_checkpoint:
+# legacy-v2 carries a single shared `bias_table` + `aux_reduction` and lacks
+# `bias_tables.{i}` / cell_q / LayerScale (ls_attn/ls_mlp), so a legacy-v2 state
+# dict fails the current HexfieldNet's strict load (and the shared-table remap
+# retry) and falls through to eval_arena's HexfieldNetV2 fallback regardless of
+# the trunk_layout inferred here. A main_9 state dict has the current-arch keys
+# and loads cleanly. Mapping (6, 3) is thus NEEDED so a main_9 anchor rebuilt in
+# a foreign-arch process (e.g. a main_7 CCAx5 dashboard worker) gets the right
+# CCACCACCA interleaving instead of the process-global HEXFIELD_TRUNK default.
 KNOWN_TRUNK_LAYOUTS: dict[tuple[int, int], str] = {
     (8, 3): "CCCACCCACCA",
     (10, 5): "CCACCACCACCACCA",
+    (6, 3): "CCACCACCA",  # main_9 (current arch); legacy-v2 same shape, see above
 }
 
 

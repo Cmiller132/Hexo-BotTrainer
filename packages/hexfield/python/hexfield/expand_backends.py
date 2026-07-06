@@ -59,7 +59,6 @@ _RUST_SCALAR_COLS = (
     "moves_left",
     "policy_surprise",
     "outcome_valid",
-    "policy_valid",
     "gumbel_present",
     "first_q",
     "first_r",
@@ -147,10 +146,9 @@ def _row_view_to_sample(view: PackedRowView) -> HexfieldSampleData:
         # Truncated-game flag (outcome_valid==0) carried as metadata; the serial
         # expand path uses it to mask the value/stvalue/cell_q heads. Only set
         # when truncated, so completed-game rows keep an empty metadata dict.
-        metadata={
-            **({"truncated": True} if int(view.outcome_valid) == 0 else {}),
-            "pcr_full": bool(int(view.policy_valid) != 0),
-        },
+        metadata=(
+            {"truncated": True} if int(view.outcome_valid) == 0 else {}
+        ),
     )
 
 
@@ -329,14 +327,6 @@ def _reassemble_rust_rows(
         value_mask = np.frombuffer(bytes(result["value_mask"]), dtype=np.float32, count=r)
     else:
         value_mask = np.ones(r, dtype=np.float32)
-    # policy_valid gates the policy/opp/soft/cell_q heads for fast (value-only)
-    # rows. The serial path derives it from metadata['pcr_full']; the Rust kernel
-    # reads the policy_valid column and emits it (and zeroes cell_q_mask for fast
-    # rows). If the kernel omits the buffer, all rows are treated as full.
-    if "policy_valid" in result:
-        policy_valid = np.frombuffer(bytes(result["policy_valid"]), dtype=np.float32, count=r)
-    else:
-        policy_valid = np.ones(r, dtype=np.float32)
     stvalue = np.frombuffer(bytes(result["stvalue"]), dtype=np.float32, count=r * horizons_len).reshape(r, horizons_len)
     stvalue_mask = np.frombuffer(bytes(result["stvalue_mask"]), dtype=np.float32, count=r * horizons_len).reshape(r, horizons_len)
 
@@ -371,7 +361,6 @@ def _reassemble_rust_rows(
                 opp_coverage=float(opp_coverage[k]),
                 value=float(value[k]),
                 value_mask=float(value_mask[k]),
-                policy_valid=float(policy_valid[k]),
                 stvalue=stvalue[k].copy(),
                 stvalue_mask=stvalue_mask[k].copy(),
                 moves_left=float(moves_left[k]),

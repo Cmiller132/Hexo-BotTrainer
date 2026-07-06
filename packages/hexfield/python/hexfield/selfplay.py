@@ -20,7 +20,6 @@ import queue
 import threading
 import time
 import warnings
-from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -130,6 +129,12 @@ class ContinuousDriver:
         self.games_finished = 0
         self.games_truncated = 0
         self.rows_written = 0
+        # main_9: Fast (PCR value-only) + Init decisions still search and stay in
+        # tape.pending (targets iterate the full decision list), but are never
+        # written -- only FULL rows reach disk. This counts the rows the writer
+        # filter dropped across the epoch (parity with dense_cnn_restnet's
+        # pcr.fast_rows_excluded telemetry).
+        self.fast_rows_excluded = 0
         self.decisions = 0
         self.full_decisions = 0
         self.game_lengths: list[int] = []
@@ -336,12 +341,12 @@ class ContinuousDriver:
             self.policy_surprises.append(float(surprise))
             self.root_values.append((tape.ply, float(payload["root_value"])))
         elif not full and not init:
-            # Fast rows ARE written for completed games (as value-only rows,
-            # policy_valid=0 -- see the writer filter); the pending list also
-            # keeps every decision so opp-policy lookup and moves_left counts
-            # remain complete (mask_opp_from_fast at finalize). The first-stone /
-            # hot / win facts are left empty here (off the search hot path) and
-            # recomputed in _writer_loop before the row is written.
+            # Fast (PCR value-only) decisions are NEVER written to training shards
+            # (main_9 records only full-search turns, matching KataGo). They are
+            # still appended to tape.pending so full rows' opp-policy lookup,
+            # moves_left counts, and short-term-value targets keep iterating the
+            # complete decision list; the writer filter drops them before any row
+            # is written. Feature planes are left empty (fast rows never persist).
             sample = HexfieldSampleData(
                 game_id=str(game_key), turn_index=tape.ply, current_player=current,
                 phase=record_phase(tape.ply), records=tuple(tape.records),
@@ -458,25 +463,15 @@ class ContinuousDriver:
                     tape.pending, winner, self.horizons,
                     truncated=truncated, mask_opp_from_fast=True,
                 )
-                # Populate the first-stone / hot / win facts for fast rows off the
-                # search hot path. Fast rows stored empty facts at decision time
-                # (pcr_full False); recompute exactly what the full branch would
-                # have produced from the row's own pre-decision records/player/
-                # phase (s.records is the pre-decision placement tuple). Only the
-                # written value-only rows carry these planes downstream, so the
-                # recompute must match the full branch bit-for-bit.
-                finalized = [
-                    _populate_fast_facts(s)
-                    if not s.metadata.get("pcr_full", False)
-                    and not s.metadata.get("policy_init", False)  # init rows are never written
-                    else s
-                    for s in finalized
-                ]
-                rows = [
-                    s for s in finalized
-                    if s.metadata.get("pcr_full", False)                      # all full rows (completed + truncated)
-                    or (not truncated and not s.metadata.get("policy_init", False))  # fast rows from completed games; excludes init
-                ]
+                # main_9: match KataGo -- record/train ONLY on FULL-search rows.
+                # Fast (PCR value-only) and Init decisions still play their search
+                # and stay in tape.pending (so full rows' STV / opp-policy /
+                # moves_left targets iterate the COMPLETE decision list), but they
+                # are never WRITTEN. pcr_full defaults False so a row lacking the
+                # tag is treated as non-full and excluded.
+                rows = [s for s in finalized if s.metadata.get("pcr_full", False)]
+                # Fast + Init rows dropped from the written shard this game.
+                self.fast_rows_excluded += len(finalized) - len(rows)
                 if rows:
                     path = self.out_dir / f"game_{tape.key}.npz"
                     # Seeded games carry their provenance in the sidecar so a
@@ -535,6 +530,7 @@ class ContinuousDriver:
             "games_finished": self.games_finished,
             "truncated_games": self.games_truncated,
             "rows_written": self.rows_written,
+            "fast_rows_excluded": self.fast_rows_excluded,
             "total_decisions": self.decisions,
             "full_decisions": self.full_decisions,
             "mean_game_length": float(lengths.mean()),
@@ -584,35 +580,6 @@ class ContinuousDriver:
             ),
             "unique_openings_seeded": len(self.opening_lines_seeded),
         }
-
-
-def _populate_fast_facts(sample: HexfieldSampleData) -> HexfieldSampleData:
-    """Recompute the first-stone / hot / win facts a fast row stored empty.
-
-    Fast (playout-cap-randomized) decisions skip the window scan on the search
-    hot path and store empty facts; completed games nonetheless write them as
-    value-only rows, so the feature planes must be rebuilt off-thread. The
-    inputs are the row's own pre-decision facts (``records`` is the pre-decision
-    placement tuple, ``current_player`` / ``phase`` the decision's player /
-    phase), so this reproduces exactly what the full branch computes at the same
-    decision point."""
-
-    own_hot, opp_hot, own_win, opp_win = window_scan(
-        sample.records, sample.current_player, len(sample.records)
-    )
-    first_stone = (
-        (sample.records[-1][0], sample.records[-1][1])
-        if sample.phase == "SecondStone"
-        else None
-    )
-    return replace(
-        sample,
-        first_stone=first_stone,
-        own_hot=own_hot,
-        opp_hot=opp_hot,
-        own_win=own_win,
-        opp_win=opp_win,
-    )
 
 
 # --- Telemetry helpers ------------------------------------------------------
@@ -692,6 +659,7 @@ def _diag_is_nontrivial(diag: dict[str, Any] | None) -> bool:
 # in the scheduler sub-dict is summed key-wise as well (handled separately).
 _ADDITIVE_KEYS = (
     "games_started", "games_finished", "truncated_games", "rows_written",
+    "fast_rows_excluded",
     "total_decisions", "full_decisions", "searched_positions", "elapsed_seconds",
     "games_seeded",
 )

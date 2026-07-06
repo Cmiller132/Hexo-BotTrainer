@@ -81,9 +81,9 @@ def _mine_shard(
 ) -> tuple[list[BlunderSeed], list[float]]:
     """Extract candidate seeds and the full-row surprise values from one shard.
 
-    Returns ``(candidates, surprises)`` where ``candidates`` are rows that are
-    FULL (policy_valid != 0 — only full rows carry a meaningful policy_surprise;
-    fast/value-only rows store 0.0) with ``1 <= turn_index <= max_ply``, and
+    Returns ``(candidates, surprises)`` where ``candidates`` are rows with
+    ``1 <= turn_index <= max_ply`` (every recorded row is a full-search turn;
+    fast rows are never written to shards), and
     ``surprises`` is the list of surprise values over those same full,
     in-ply-range rows (used by the caller to compute the epoch-wide quantile
     BEFORE thresholding). A malformed / unreadable shard is skipped with a
@@ -120,9 +120,6 @@ def _mine_shard(
             hist_qr = np.asarray(data["hist_qr"])
             hist_pidx = np.asarray(data["hist_pidx"])
             hist_off = np.asarray(data["hist_off"])
-            # policy_valid is absent on legacy shards; then all rows read as full.
-            policy_valid = data["policy_valid"] if "policy_valid" in data.files else None
-            policy_valid = np.asarray(policy_valid) if policy_valid is not None else None
     except (OSError, ValueError, EOFError, KeyError) as exc:
         warnings.warn(
             f"blunder_seeds: cannot read shard {npz_path.name} ({exc!r}); skipping",
@@ -134,9 +131,7 @@ def _mine_shard(
     candidates: list[BlunderSeed] = []
     surprises: list[float] = []
     for i in range(n):
-        # Only full rows carry a real surprise; fast rows store 0.0.
-        if policy_valid is not None and int(policy_valid[i]) == 0:
-            continue
+        # All recorded rows are full-search (fast rows are never written).
         ply = int(turn_index[i])
         if ply < 1 or ply > int(max_ply):
             continue

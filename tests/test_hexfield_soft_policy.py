@@ -61,7 +61,6 @@ def _row(policy: np.ndarray, gumbel_policy: np.ndarray | None = None) -> Expande
         opp_coverage=1.0,
         value=0.0,
         value_mask=1.0,
-        policy_valid=1.0,
         stvalue=np.zeros(h, dtype=np.float32),
         stvalue_mask=np.zeros(h, dtype=np.float32),
         moves_left=0.0,

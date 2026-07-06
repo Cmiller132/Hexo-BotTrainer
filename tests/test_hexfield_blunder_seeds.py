@@ -24,6 +24,11 @@ import pytest
 from hexo_engine import api
 from hexo_engine.types import AxialCoord, PlacementAction
 
+# Imported for its side effect: prepends the working-tree packages/hexfield/python
+# to sys.path so `hexfield` resolves to the source under test, not a stale
+# site-packages install (which may predate modules like blunder_seeds).
+import hexfield_testkit  # noqa: F401
+
 from hexfield import blunder_seeds as bs
 from hexfield.config import SelfplayConfig
 from hexfield.features import record_phase, record_player
@@ -261,8 +266,10 @@ def test_seed_player_phase_matches_engine(tmp_path, prefix_len):
 # ---------------------------------------------------------------------------
 
 def _write_fake_shard(path, rows):
-    """Write a shard from (turn_index, surprise, prefix, policy_valid) rows using
-    real records so the miner's history reconstruction is exercised."""
+    """Write a shard from (turn_index, surprise, prefix, is_full) rows using real
+    records so the miner's history reconstruction is exercised. ``is_full`` sets
+    the row's pcr_full metadata and whether it carries a policy (fast rows carry
+    none); the main_9 shard schema has no policy_valid column."""
     samples = []
     for (ti, surprise, prefix, pv) in rows:
         records = tuple(
@@ -328,25 +335,27 @@ def test_miner_deterministic_and_thresholds(tmp_path):
     assert all(s.seed_ply <= 40 for s in out1)
 
 
-def test_miner_excludes_fast_rows_and_respects_recent_window(tmp_path):
+def test_miner_respects_recent_window(tmp_path):
+    # main_9: fast (PCR value-only) rows are excluded at the SELF-PLAY WRITER, so
+    # a real shard on disk contains only FULL rows -- the miner never sees a fast
+    # row (the policy_valid gate was removed with the column). This shard mirrors
+    # that: every written row is full. The out-of-window epoch is still ignored.
     samples_dir = tmp_path / "samples"
     # Epoch too old (outside recent window) -> ignored.
     old = samples_dir / "epoch_000001"
     old.mkdir(parents=True)
     _write_fake_shard(old / "game_1000000.npz", [(3, 9.0, _real_prefix(3), True)])
-    # Recent epoch: one full high-surprise row + one FAST row (must be ignored;
-    # fast rows store 0 surprise and no policy).
+    # Recent epoch: full rows only (as the main_9 writer produces).
     rec = samples_dir / "epoch_000008"
     rec.mkdir(parents=True)
     _write_fake_shard(rec / "game_8000000.npz", [
         (4, 8.0, _real_prefix(4), True),
-        (6, 0.0, _real_prefix(6), False),  # fast -> excluded
     ])
     seeds = bs.mine_blunder_seeds(
         samples_dir, current_epoch=9, recent_epochs=3, max_ply=40,
         surprise_quantile=0.0,  # accept all qualifying full rows
     )
-    # Only the recent full row survives (old epoch out of window; fast excluded).
+    # Only the recent full row survives (the old epoch is out of the window).
     assert len(seeds) == 1
     assert seeds[0].source_epoch == 8
     assert seeds[0].seed_ply == 4

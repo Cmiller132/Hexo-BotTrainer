@@ -660,28 +660,25 @@ class HexfieldTrainer:
                 policy_surprise_uniform_fraction=tcfg.policy_surprise_uniform_fraction,
                 policy_surprise_max_weight=tcfg.policy_surprise_max_weight,
             )
-            # Compute the self-policy surprise weights over the full subset only
-            # (policy_valid != 0), matching the full-row weight-sum denominator in
-            # step_global_denominators. Rows with policy_valid == 0 get weight 0
-            # (they are policy-masked, and losses also multiply by policy_valid).
-            full_rows = [r for r in expanded if getattr(r, "policy_valid", 1.0) != 0.0]
-            full_weights, _ = policy_surprise_weights(
-                [row.policy_surprise for row in full_rows],
+            # Compute the self-policy surprise weights over all expanded rows,
+            # matching the row weight-sum denominator in step_global_denominators.
+            # Every recorded row is a full (policy-bearing) row in main_9 (fast rows
+            # are dropped at the self-play writer), so there is no subset to exclude.
+            row_weights, _ = policy_surprise_weights(
+                [row.policy_surprise for row in expanded],
                 tcfg.policy_surprise_uniform_fraction,
                 tcfg.policy_surprise_max_weight,
             )
-            weight_by_row = {id(r): 0.0 for r in expanded}
-            weight_by_row.update({id(r): w for r, w in zip(full_rows, full_weights)})
-            # Telemetry: aggregate the per-row surprise weights over the policy-valid
-            # rows (the ones that carry a nontrivial weight). Cheap running reduce;
-            # matches the weights actually applied by collate_training. clamped ==
-            # weights that hit policy_surprise_max_weight.
-            if full_weights:
-                surprise_weight_sum += float(sum(full_weights))
-                surprise_weight_count += len(full_weights)
-                surprise_weight_max = max(surprise_weight_max, max(full_weights))
+            weight_by_row = {id(r): w for r, w in zip(expanded, row_weights)}
+            # Telemetry: aggregate the per-row surprise weights. Cheap running
+            # reduce; matches the weights actually applied by collate_training.
+            # clamped == weights that hit policy_surprise_max_weight.
+            if row_weights:
+                surprise_weight_sum += float(sum(row_weights))
+                surprise_weight_count += len(row_weights)
+                surprise_weight_max = max(surprise_weight_max, max(row_weights))
                 surprise_weight_clamped_count += sum(
-                    1 for w in full_weights if w >= surprise_clamp_thresh - 1e-9
+                    1 for w in row_weights if w >= surprise_clamp_thresh - 1e-9
                 )
             self.optimizer.zero_grad(set_to_none=True)
             for bucket in pair_budget_microbuckets(

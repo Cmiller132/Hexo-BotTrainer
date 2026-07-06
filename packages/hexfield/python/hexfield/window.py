@@ -48,7 +48,6 @@ SCALAR_COLS: tuple[str, ...] = (
     "value",
     "moves_left",
     "outcome_valid",
-    "policy_valid",
     "gumbel_present",  # 1 => row carries a π' target; 0/absent => visit fallback
     "policy_surprise",
     "first_q",
@@ -124,7 +123,6 @@ class PackedRowView:
     value: float
     moves_left: float
     outcome_valid: int  # 1 completed / 0 truncated (gates value/stvalue/cell_q)
-    policy_valid: int  # 1 full / 0 fast (gates policy/opp/soft/cell_q)
     gumbel_present: int  # 1 => π' target present; 0 => visit fallback
     policy_surprise: float
     first_q: int
@@ -291,7 +289,6 @@ class PackedWindow:
             value=float(c["value"][i]),
             moves_left=float(c["moves_left"][i]),
             outcome_valid=int(c["outcome_valid"][i]),
-            policy_valid=int(c["policy_valid"][i]),
             gumbel_present=int(c["gumbel_present"][i]),
             policy_surprise=float(c["policy_surprise"][i]),
             first_q=int(c["first_q"][i]),
@@ -329,7 +326,6 @@ _SCALAR_DTYPES: dict[str, np.dtype] = {
     "value": np.dtype(np.float32),
     "moves_left": np.dtype(np.float32),
     "outcome_valid": np.dtype(np.uint8),
-    "policy_valid": np.dtype(np.uint8),
     "gumbel_present": np.dtype(np.uint8),
     "policy_surprise": np.dtype(np.float32),
     "first_q": np.dtype(np.int16),
@@ -434,9 +430,9 @@ def load_packed_shard(path: Path) -> PackedWindow:
         # Materialize each column into a real array while the npz is open
         # (np.load arrays are lazy and close on exit).
         for name in SCALAR_COLS:
-            if name in ("outcome_valid", "policy_valid") and name not in files:
-                # Shards lacking the outcome_valid / policy_valid columns default
-                # to all-1 (every row treated as completed / full).
+            if name == "outcome_valid" and name not in files:
+                # Shards lacking the outcome_valid column default to all-1 (every
+                # row treated as completed).
                 cols[name] = np.ones(n, dtype=_SCALAR_DTYPES[name])
                 continue
             if name == "gumbel_present" and name not in files:

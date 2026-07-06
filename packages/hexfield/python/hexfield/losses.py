@@ -220,7 +220,7 @@ def hexfield_loss(
     q_head (cell_q).
 
     ``denominators`` supplies step-global row counts. Recognized keys: ``rows``,
-    ``policy_ce_weight_sum``, ``policy_rows``, and per-masked-head counts
+    ``policy_ce_weight_sum``, and per-masked-head counts
     (``value``, ``stvalue_<h>``, ``moves_left``, ``cell_q``). When absent, each
     reduction uses this batch's own counts. The ``value`` count excludes
     value_mask==0 rows from both numerator and denominator.
@@ -230,15 +230,11 @@ def hexfield_loss(
     rows = denoms.get("rows")
     components: dict[str, torch.Tensor] = {}
 
-    # policy_valid==0 rows carry all-zero policy targets. policy_valid is
-    # multiplied into the per-row CE weight so those rows contribute 0;
-    # allow_zero_rows lets their zero-mass targets pass. weight_denominator is the
-    # full-row weight sum (policy_ce_weight_sum), so the reduction is a mean over
-    # policy_valid==1 rows.
+    # Every recorded row is a full (policy-bearing) row in main_9 (fast rows are
+    # dropped at the self-play writer), so the CE weight is the per-row surprise
+    # weight directly. weight_denominator is the row weight sum
+    # (policy_ce_weight_sum), so the reduction is a mean over all rows.
     _pol_weight = batch.get("policy_ce_weight")
-    _pv = batch.get("policy_valid")
-    if _pol_weight is not None and _pv is not None:
-        _pol_weight = _pol_weight * _pv
     # Select the main-policy CE target per row. When policy_target == "gumbel"
     # and both "gumbel_policy" and "gumbel_policy_valid" are present, rows with
     # gumbel_policy_valid > 0 use the gumbel_policy target; all other rows use the
@@ -276,32 +272,28 @@ def hexfield_loss(
     total = policy_weight * components["policy"] + value_weight * components["value"]
 
     if "opp_policy" in outputs and "opp_policy" in batch:
-        # allow_zero_rows keeps zero-target rows in the denominator while they
-        # contribute 0. row_weight=policy_valid zeroes policy_valid==0 rows in the
-        # numerator; weight_denominator=policy_rows makes the reduction a mean over
-        # policy_valid==1 rows.
+        # allow_zero_rows keeps rows whose opp target is absent/uncovered (a zero
+        # target) in the denominator while they contribute 0. Every recorded row
+        # is a full row in main_9, so the reduction is a flat mean over rows.
         components["opp_policy"] = segment_policy_ce(
             outputs["opp_policy"],
             batch["legal_counts"],
             batch["opp_policy"],
             allow_zero_rows=True,
-            row_weight=batch.get("policy_valid"),
-            weight_denominator=denoms.get("policy_rows", rows),
-            denominator=denoms.get("policy_rows", rows),
+            denominator=rows,
         )
         total = total + opp_policy_weight * components["opp_policy"]
 
     if "soft_policy" in outputs and "soft_policy" in batch:
         # CE of the soft-policy head logits against the "soft_policy" target
         # (built in collate_training). No row_weight, so the denominator is a flat
-        # row count. policy_valid==0 rows carry all-zero soft_policy;
-        # allow_zero_rows lets them contribute 0. Denominator is policy_rows.
+        # row count over all rows.
         components["soft_policy"] = segment_policy_ce(
             outputs["soft_policy"],
             batch["legal_counts"],
             batch["soft_policy"],
             allow_zero_rows=True,
-            denominator=denoms.get("policy_rows", rows),
+            denominator=rows,
         )
         total = total + soft_policy_weight * components["soft_policy"]
 

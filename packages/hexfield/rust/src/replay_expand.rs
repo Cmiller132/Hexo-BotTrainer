@@ -129,8 +129,6 @@ struct RowFacts {
     // 1 == completed game (grounded outcome); 0 == truncated (no engine winner).
     // When 0, the value/stvalue/cell_q heads are masked to zero loss.
     outcome_valid: u8,
-    // 1 == full row (policy/opp/soft/cell_q trained); 0 == fast (value-only).
-    policy_valid: u8,
 }
 
 /// One expanded row's flat arrays (mirrors `ExpandedRow`). Invalid rows carry
@@ -163,7 +161,6 @@ struct RowOut {
     opp_coverage: f64,
     value: f32,
     value_mask: f32,
-    policy_valid: f32,
     stvalue: Vec<f32>,
     stvalue_mask: Vec<f32>,
     moves_left: f32,
@@ -559,7 +556,10 @@ fn expand_one(
             }
         }
     }
-    if facts.policy_valid != 0 && total <= 0.0 {
+    // Every recorded row is a full (policy-bearing) row in main_9: fast rows are
+    // dropped at the self-play writer and never reach expand, so the policy
+    // target must always carry positive mass.
+    if total <= 0.0 {
         return Err(ExpandErr::Hard(
             "policy target must carry positive mass".to_string(),
         ));
@@ -684,18 +684,6 @@ fn expand_one(
     } else {
         1.0f32
     };
-    // Fast (value-only) rows: zero cell_q_mask (the search-distribution head).
-    // policy/opp_policy/soft_policy are gated by policy_valid at the loss; cell_q
-    // is gated by its presence mask, zeroed here.
-    let policy_valid = if facts.policy_valid == 0 {
-        for m in cell_q_mask.iter_mut() {
-            *m = 0.0;
-        }
-        0.0f32
-    } else {
-        1.0f32
-    };
-
     let nbr = neighbor_table(&sup.coords, &sup.index);
     let mut coords_flat = Vec::with_capacity(sup.num_nodes() * 2);
     for &(q, r) in &sup.coords {
@@ -723,7 +711,6 @@ fn expand_one(
         opp_coverage,
         value: facts.value,
         value_mask,
-        policy_valid,
         stvalue,
         stvalue_mask,
         moves_left,
@@ -931,8 +918,6 @@ pub fn expand_shard_train<'py>(
     // outcome_valid[i] (u8): 1 completed / 0 truncated. When 0, the value/stvalue/
     // cell_q heads are masked to zero loss.
     let outcome_valid = col_typed::<u8>(columns, "outcome_valid", n)?;
-    // policy_valid[i] (u8): 1 full / 0 fast. Gates policy/opp/soft/cell_q.
-    let policy_valid = col_typed::<u8>(columns, "policy_valid", n)?;
     // gumbel_present[i] (u8): 1 means this row carries a π' target. Optional: None
     // for a packed window without the column, in which case every row is treated
     // as absent (visit fallback).
@@ -1064,7 +1049,6 @@ pub fn expand_shard_train<'py>(
             stvalue_mask: stv_mask,
             moves_left: moves_left[i],
             outcome_valid: outcome_valid[i],
-            policy_valid: policy_valid[i],
         });
     }
 
@@ -1105,7 +1089,6 @@ pub fn expand_shard_train<'py>(
                 opp_coverage: 1.0,
                 value: 0.0,
                 value_mask: 0.0,
-                policy_valid: 0.0,
                 stvalue: vec![0.0; horizons_len],
                 stvalue_mask: vec![0.0; horizons_len],
                 moves_left: 0.0,
@@ -1141,7 +1124,6 @@ pub fn expand_shard_train<'py>(
     let mut opp_coverage: Vec<f64> = Vec::with_capacity(r);
     let mut value_out = Vec::with_capacity(r);
     let mut value_mask_out = Vec::with_capacity(r);
-    let mut policy_valid_out = Vec::with_capacity(r);
     let mut moves_left_out = Vec::with_capacity(r);
     let mut moves_left_mask = Vec::with_capacity(r);
     let mut stvalue_out = Vec::with_capacity(r * horizons_len);
@@ -1169,7 +1151,6 @@ pub fn expand_shard_train<'py>(
         opp_coverage.push(row.opp_coverage);
         value_out.push(row.value);
         value_mask_out.push(row.value_mask);
-        policy_valid_out.push(row.policy_valid);
         moves_left_out.push(row.moves_left);
         moves_left_mask.push(row.moves_left_mask);
         stvalue_out.extend_from_slice(&row.stvalue);
@@ -1194,7 +1175,6 @@ pub fn expand_shard_train<'py>(
     out.set_item("opp_coverage", Py::new(py, RxF64Buf { data: opp_coverage })?)?;
     out.set_item("value", Py::new(py, RxF32Buf { data: value_out })?)?;
     out.set_item("value_mask", Py::new(py, RxF32Buf { data: value_mask_out })?)?;
-    out.set_item("policy_valid", Py::new(py, RxF32Buf { data: policy_valid_out })?)?;
     out.set_item("moves_left", Py::new(py, RxF32Buf { data: moves_left_out })?)?;
     out.set_item("moves_left_mask", Py::new(py, RxF32Buf { data: moves_left_mask })?)?;
     out.set_item("stvalue", Py::new(py, RxF32Buf { data: stvalue_out })?)?;

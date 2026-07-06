@@ -1,0 +1,204 @@
+# hexfield_main_9 — FAST-ROW STRIP (KataGo-clean data). Smaller net than main_8
+# (c=128, heads 2x64, trunk CCACCACCA -> 6 conv + 3 attn, ~fewer params) run on
+# the SAME hybrid search regime as main_8, but the DATA pipeline now matches
+# KataGo: Fast (PCR value-only) turns are NEVER recorded or trained on.
+#   Full moves (33% of turns, 1024 visits, the only rows that export a policy
+#     target)  -> classic PUCT with the full KataGo kit (Dirichlet noise, forced
+#     playouts + target pruning, visit-scaled c_puct, progressive/lazy widening,
+#     LCB play). Policy target = pruned VISIT COUNTS. THESE ARE THE ONLY ROWS
+#     WRITTEN TO THE TRAINING BUFFER.
+#   Fast moves (67% of turns, 192 visits, value-only) -> still PLAY a Gumbel
+#     root + sequential halving search for game progression, but their rows are
+#     DROPPED at the self-play writer filter (no policy_valid gate anymore — the
+#     fast-row machinery is fully removed; fast rows simply are not written).
+#
+# PCR is TURN-BASED (both plies of a turn share a class); search.rs classify()
+# is UNCHANGED. Fast plies still populate tape.pending so full rows' short-term-
+# value / opp-policy / moves-left targets iterate the COMPLETE decision list.
+#
+# Architecture env is in scripts/systemd/hexfield-supervisor-9.service:
+# HEXFIELD_CHANNELS=128 ATTENTION_HEADS=2 TRUNK=CCACCACCA (head_dim 64).
+#
+# Warm start: BC prefit from the TRIMMED main_8 ep7 data (fast rows stripped),
+# built at the main_9 arch by scripts/_main9_prefit_launch.sh -> the epoch3
+# prefit checkpoint below (128c net -> clean tensor load).
+
+[model]
+name = "hexfield"
+module = "hexfield.plugin"
+
+[model.config]
+device = "cuda"
+
+[model.config.selfplay]
+search_visits = 1024
+pcr_full_proportion = 0.33
+pcr_fast_visits = 192
+# Locked 0.0 (P0 outcome-skew conviction 2026-07-04). Fast-move exploration now
+# comes from the Gumbel candidate draw, not outcome-flipping play temperature.
+pcr_fast_temperature = 0.0
+active_games = 192
+virtual_batch_size = 48
+flush_target = 1024
+active_root_limit = 192
+max_game_plies = 256
+tss_enabled = true
+cache_max_states = 262144
+nucleus_f64 = true
+lcb_z = 1.6
+clean_root_prior_cache = true
+
+# ---- Full-move PUCT (exports policy targets) ----
+c_puct = 1.5
+# Visit-scaled c_puct is LIVE for the first time. main_5's "PUCT era" shipped
+# c_scale = 0.0 (this log term disabled) -> it ran static c_puct the whole run.
+visit_scaled_c_puct = true
+c_scale = 0.45
+c_base = 500.0
+root_dirichlet_noise_fraction = 0.25
+root_dirichlet_total_alpha = 10.83
+dirichlet_shaped = true
+root_fpu_zero_under_noise = false
+fpu_reduction = 0.2
+root_fpu_reduction = 0.2
+# KataGo value 2.0 (main_5 ran 1.0). Forces sqrt(k*P(a)*N) visits on noised
+# children so root noise actually reaches the tree; the exported target is
+# de-noised by the dynamic-cpuct pruning below.
+forced_playout_k = 2.0
+pruned_dynamic_cpuct = true
+# Progressive widening: children materialize one at a time when the new-child
+# (FPU + U) score beats every expanded edge — evidence-driven, not a frozen
+# nucleus count. main_5 shipped this off (lazy_widening = false).
+lazy_widening = true
+new_child_fpu = true
+widening_policy_mass = 0.95
+widening_max_children = 96
+widening_min_children = 2
+# Play schedule (Full moves): T=1.0 decaying, floor 0.15, halflife 10 plies.
+# No SH play-selection ceiling anymore — post-floor play is a real LCB argmax.
+temperature = 1.0
+temperature_floor = 0.15
+temperature_halflife_plies = 10.0
+# Live again under a PUCT root (in main_7 these only fed the surprise baseline).
+root_policy_temperature = 1.1
+root_policy_temperature_early = 1.15
+root_policy_temperature_halflife = 19.0
+# Opening diversity channel, up from main_7's 0.25 (explore/exploit rec).
+policy_init_fraction = 0.35
+policy_init_avg_plies = 4.0
+policy_init_max_plies = 8
+policy_init_temperature = 1.4
+ml_two_sided = false
+ml_final_pick_band = 0.08
+# Full moves still export raw root logits (surprise baseline + dashboard).
+export_root_prior_logits = true
+
+# Gumbel is OFF for the Full class (Full = PUCT). It is enabled only for the
+# Fast class via the fast_gumbel_* overrides below.
+gumbel_root_enabled = false
+gumbel_sequential_halving = false
+gumbel_nonroot_select = false
+gumbel_target_enabled = false
+
+# ---- Fast-move Gumbel (value-only rows; per-class override of the above) ----
+# These apply ONLY to Fast-class moves. m auto-calibrates down to the 192-visit
+# budget inside init_gumbel_root (effective m ~8-16); 32 is the cap. Fast turns
+# still run this search for progression; their rows are just never WRITTEN.
+fast_gumbel_root_enabled = true
+fast_gumbel_sequential_halving = true
+fast_gumbel_nonroot_select = true
+fast_gumbel_c_visit = 50.0
+fast_gumbel_c_scale = 1.0
+fast_gumbel_m = 32
+fast_gumbel_play_prune = true
+
+[model.config.training]
+batch_rows = 256
+# House fresh-run precedent at batch 256. Decay to 4e-4 at the mid-run plateau
+# per the main_6 playbook.
+learning_rate = 5e-4
+weight_decay = 1e-4
+grad_clip = 5.0
+adaptive_clip = true
+clip_c = 1.75
+clip_ema_decay = 0.99
+clip_warmup_steps = 50
+policy_weight = 1.0
+value_weight = 1.0
+opp_policy_weight = 0.25
+short_term_value_weight = 0.1
+moves_left_weight = 0.2
+q_head_weight = 0.1
+soft_policy_weight = 1.0
+policy_surprise_uniform_fraction = 0.5
+policy_surprise_max_weight = 8.0
+warmup_steps = 0
+# Shuffle window retuned for the smaller KataGo-clean row rate (~33% of turns
+# written vs 100%): min_rows 20000->7000, keep_target 600000->210000,
+# taper_window_scale 20000->7000. expand_window_per_row held at 0.8.
+shuffle_min_rows = 7000
+shuffle_keep_target_rows = 210000
+shuffle_taper_window_exponent = 0.65
+shuffle_expand_window_per_row = 0.8
+shuffle_taper_window_scale = 7000.0
+validation_fraction = 0.0
+# Fewer rows per epoch to match the trimmed (full-only) write rate.
+train_samples_per_epoch = 32000
+max_train_bucket_per_new_data = 8.0
+max_train_bucket_size = 500000.0
+no_repeat_files = false
+expand_backend = "rust"
+expand_workers = 0
+# Pruned visit counts (the PUCT Full-move target). The gumbel improved-policy
+# target is retired for main_8. Surprise-reweight KL is now computed on the same
+# histogram that is trained.
+policy_target = "visit"
+
+[model.config.evaluation]
+games_per_epoch = 16
+eval_visits = 128
+eval_every = 5
+
+[model.config.multi_stage_eval]
+enabled = true
+games_budget = 128
+every_n_epochs = 5
+full_search_visits = 512
+eval_virtual_batch_size = 32
+sealbot_share = 0.25
+verdict_reference_lag = 5
+pool_path = "diagnostics/eval_pool.json"
+
+[model.config.multi_stage_eval.sprt]
+enabled = false
+
+[model.config.multi_stage_eval.opponents]
+sealbot_enabled = true
+bracket_size = 1
+# main7_ep67 = the pre-seeding peak; main_8 anchors carried forward as the bars
+# main_9 must clear despite the smaller net.
+permanent_anchors = [["main5_ep105", "/mnt/e/Hexo-BotTrainer/runs/hexfield_main_5/checkpoints/epoch_000105.pt"], ["main6_ep73", "/mnt/e/Hexo-BotTrainer/runs/hexfield_main_6/checkpoints/epoch_000073.pt"], ["main7_ep67", "/mnt/e/Hexo-BotTrainer/runs/hexfield_main_7/checkpoints/epoch_000067.pt"], ["ep5", "epoch_000005.pt"], ["ep30", "epoch_000030.pt"]]
+radius8_opponents = []
+
+[run]
+name = "hexfield_main_9"
+output_dir = "/mnt/e/Hexo-BotTrainer/runs/hexfield_main_9"
+seed = 1
+
+[loop]
+epochs = 200
+
+[selfplay]
+games_per_epoch = 256
+update_checkpoint_pointer = false
+
+[train]
+passes_per_epoch = 1
+
+[checkpoint]
+# BC prefit from the TRIMMED main_8 ep7 data (fast rows stripped), rebuilt at the
+# main_9 arch (c=128 / heads 2 / trunk CCACCACCA) by scripts/_main9_prefit_launch.sh.
+# 4 prefit epochs (0..3) -> checkpoint_epoch3.pt is the warm start. Tolerant
+# non-strict load; fresh governor / epoch 0.
+initialize_from = "/mnt/e/Hexo-BotTrainer/runs/hexfield_main_9_prefit/checkpoints/checkpoint_epoch3.pt"
+save_name = "latest"

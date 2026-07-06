@@ -90,11 +90,6 @@ def write_compact_shard(
     # to 1 (completed). Shards lacking this column read back as all-1 (see
     # read_compact_shard). Derived from metadata['truncated'].
     outcome_valid = np.ones(n, dtype=np.uint8)
-    # policy_valid[i] == 0 marks a value-only (fast) row: policy/opp_policy/
-    # soft_policy/cell_q are masked at expand and loss; value/stvalue/moves_left
-    # still train. Defaults to 1 (full). Shards lacking it read back as all-1
-    # (see read_compact_shard). Derived from metadata['pcr_full'].
-    policy_valid = np.ones(n, dtype=np.uint8)
     policy_surprise = np.zeros(n, dtype=np.float32)
     first_q = np.zeros(n, dtype=np.int16)
     first_r = np.zeros(n, dtype=np.int16)
@@ -134,7 +129,6 @@ def write_compact_shard(
         value[i] = float(sample.value)
         moves_left[i] = float(sample.moves_left)
         outcome_valid[i] = 0 if bool(sample.metadata.get("truncated", False)) else 1
-        policy_valid[i] = 1 if bool(sample.metadata.get("pcr_full", True)) else 0
         policy_surprise[i] = float(sample.policy_surprise)
         if sample.first_stone is not None:
             first_q[i] = int(sample.first_stone[0])
@@ -214,7 +208,6 @@ def write_compact_shard(
         "value": value,
         "moves_left": moves_left,
         "outcome_valid": outcome_valid,
-        "policy_valid": policy_valid,
         "first_q": first_q,
         "first_r": first_r,
         "first_present": first_present,
@@ -312,8 +305,6 @@ def read_compact_shard(path: Path) -> list[HexfieldSampleData]:
     horizons = [int(h) for h in arrays["horizons"]]
     # Absent for shards without this column; then all rows read as completed.
     outcome_valid = arrays.get("outcome_valid")
-    # Absent for shards without this column; then all rows read as full.
-    policy_valid = arrays.get("policy_valid")
     out: list[HexfieldSampleData] = []
     for i in range(n):
         h0, h1 = int(arrays["hist_off"][i]), int(arrays["hist_off"][i + 1])
@@ -400,14 +391,11 @@ def read_compact_shard(path: Path) -> list[HexfieldSampleData]:
                 value=float(arrays["value"][i]),
                 short_term_value=stval,
                 moves_left=float(arrays["moves_left"][i]),
-                metadata={
-                    **(
-                        {"truncated": True}
-                        if outcome_valid is not None and int(outcome_valid[i]) == 0
-                        else {}
-                    ),
-                    "pcr_full": bool(policy_valid is None or int(policy_valid[i]) != 0),
-                },
+                metadata=(
+                    {"truncated": True}
+                    if outcome_valid is not None and int(outcome_valid[i]) == 0
+                    else {}
+                ),
             )
         )
     return out

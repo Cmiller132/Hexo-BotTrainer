@@ -8,7 +8,8 @@ implementation as an oracle:
 - short-term-value targets and future-opponent-policy vs restnet samples helpers
 - finalize invariants (hard z, moves-left countdown, truncated, fast-mask)
 - expansion: policy slot mapping, D6 symmetry, off-legal error
-- hexfield_compact_v1 writer round-trip plus sidecar
+- writer filter: only FULL rows recorded, fast_rows_excluded accounting (main_9)
+- hexfield_compact_v1 writer round-trip plus sidecar (no policy_valid column)
 - legacy restnet shard cross-read with derived legality and win-now
 - micro-bucket accumulation vs monolithic loss/grads in fp64
 - pair-budget bucket rule
@@ -311,6 +312,15 @@ def test_writer_roundtrip(tmp_path) -> None:
     assert '"lineage": "hexfield"' in sidecar
     assert '"hexfield_compact_v1"' in sidecar
 
+    # main_9 shard schema: the fast-row gating column (policy_valid) was removed
+    # entirely -- every recorded row is a full row, so no per-row policy-validity
+    # flag is stored. (gumbel_present is the retained gumbel-target gate, which is
+    # orthogonal and MUST still be present.)
+    with np.load(path) as data:
+        columns = set(data.files)
+    assert "policy_valid" not in columns
+    assert "gumbel_present" in columns
+
     restored = read_compact_shard(path)
     assert len(restored) == len(finalized)
     for a, b in zip(finalized, restored):
@@ -514,145 +524,110 @@ def test_pair_budget_bucket_rule() -> None:
             assert len(bucket) * s_pad**2 <= budget
 
 
-def _fast_game_with_engine_facts(seed: int, max_plies: int = 24):
-    """Play one random game recording, per decision, (a) an EMPTY-fact fast row
-    exactly as selfplay's fast branch stores it and (b) the serve-time
-    PositionFacts for the same decision state. Returns (pending, ref_facts,
-    winner) where pending is the (player, empty-fast-sample, root_value) list."""
+def _mixed_pcr_game(seed: int, max_plies: int = 24):
+    """Play one random game whose decisions alternate FULL / FAST exactly as
+    selfplay's on_move branches record them. Returns (pending, winner, n_full,
+    n_fast). FULL decisions carry a real (policy-bearing) sample; FAST decisions
+    carry the EMPTY-fact value-only sample selfplay's fast branch stores. Every
+    decision stays in ``pending`` (targets iterate the complete list); only the
+    FULL rows survive the writer filter."""
 
     rng = random.Random(seed)
     state = api.new_game()
-    pending = []
-    ref_facts = []
+    pending: list = []
     winner = None
+    n_full = n_fast = 0
     for ply in range(max_plies):
         ids = api.legal_action_ids(state)
         if not ids:
             break
-        facts = facts_from_engine(api.to_python_state(state))
-        ref_facts.append(facts)
-        # Mirror selfplay's fast branch: empty first_stone / hot / win facts,
-        # pcr_full False, records/current_player/phase captured pre-decision.
-        sample = HexfieldSampleData(
-            game_id="test",
-            turn_index=ply,
-            current_player=facts.current_player,
-            phase=facts.phase,
-            records=facts.records,
-            first_stone=None,
-            own_hot=(),
-            opp_hot=(),
-            own_win=(),
-            opp_win=(),
-            policy=(),
-            metadata={"pcr_full": False},
-        )
-        pending.append((facts.current_player, sample, rng.uniform(-0.8, 0.8)))
+        is_full = ply % 2 == 0  # deterministic alternation gives both classes
+        if is_full:
+            sample = _sample_from_state(state, rng, ply)  # pcr_full True
+            n_full += 1
+        else:
+            facts = facts_from_engine(api.to_python_state(state))
+            # Mirror selfplay's fast branch: empty facts, empty policy, pcr_full
+            # False. It stays in pending but is dropped at the writer filter.
+            sample = HexfieldSampleData(
+                game_id="test", turn_index=ply, current_player=facts.current_player,
+                phase=facts.phase, records=facts.records, first_stone=None,
+                own_hot=(), opp_hot=(), own_win=(), opp_win=(),
+                policy=(), metadata={"pcr_full": False},
+            )
+            n_fast += 1
+        pending.append((sample.current_player, sample, rng.uniform(-0.8, 0.8)))
         q, r = unpack_action_id(rng.choice(ids))
         result = api.apply_action(state, PlacementAction(AxialCoord(q=q, r=r)))
         if result.terminal:
             winner = player_int(api.terminal(state).winner)
             break
-    return pending, ref_facts, winner
+    return pending, winner, n_full, n_fast
 
 
-def test_fast_row_facts_recomputed_at_write() -> None:
-    """A written fast (value-only) row's first-stone / hot / win facts must equal
-    a reference window_scan recompute from its own records -- and the serve-time
-    engine facts -- closing the train/serve feature skew. Fast rows store empty
-    facts on the search hot path; _populate_fast_facts fills them at write time."""
+def _run_writer_once(driver, tape, winner, truncated):
+    """Enqueue one finished tape, run _writer_loop to completion (None sentinel),
+    and re-raise any writer error -- the exact I/O path the background thread
+    takes, run inline so the test is deterministic."""
 
-    from hexfield.features import window_scan
-    from hexfield.selfplay import _populate_fast_facts
-
-    pending, ref_facts, winner = _fast_game_with_engine_facts(41)
-    finalized = finalize_game_samples(pending, winner, mask_opp_from_fast=True)
-    # Every row is a fast row here; before populate their facts are empty.
-    assert all(not s.metadata.get("pcr_full", False) for s in finalized)
-    assert all(s.own_hot == () and s.first_stone is None for s in finalized)
-
-    populated = [_populate_fast_facts(s) for s in finalized]
-    saw_second_stone_first = False
-    for row, facts in zip(populated, ref_facts):
-        # (1) Matches a direct window_scan recompute from the row's records.
-        wh_own, wh_opp, ww_own, ww_opp = window_scan(
-            row.records, row.current_player, len(row.records)
-        )
-        assert row.own_hot == wh_own
-        assert row.opp_hot == wh_opp
-        assert row.own_win == ww_own
-        assert row.opp_win == ww_opp
-        # (2) Matches the serve-time engine facts (train/serve parity).
-        assert row.own_hot == facts.own_hot
-        assert row.opp_hot == facts.opp_hot
-        assert row.own_win == facts.own_win
-        assert row.opp_win == facts.opp_win
-        assert row.first_stone == facts.first_stone
-        # (3) first_stone is set for SecondStone-phase fast rows.
-        if row.phase == "SecondStone":
-            assert row.first_stone == (row.records[-1][0], row.records[-1][1])
-            assert row.first_stone is not None
-            saw_second_stone_first = True
-        else:
-            assert row.first_stone is None
-    assert saw_second_stone_first, "game had no SecondStone decision to exercise first_stone"
+    driver._write_queue.put((tape, winner, truncated))
+    driver._write_queue.put(None)
+    driver._writer_loop()
+    if driver._writer_errors:
+        raise driver._writer_errors[0]
 
 
-def _hot_fast_sample(current_player: int) -> HexfieldSampleData:
-    """An EMPTY-fact fast row (as selfplay stores it) over a hand-built position
-    with four collinear player-0 stones on the Q axis -- a length-6 window of
-    count 4 -> a hot window (HOT_MIN_COUNT=4) with >= HOT_MIN_PLACEMENTS=7
-    placements. window_scan yields non-empty hot cells whose own/opp assignment
-    depends on ``current_player``, so this exercises the non-empty recompute the
-    random games never hit."""
+def test_writer_persists_only_full_rows_and_counts_excluded(tmp_path) -> None:
+    """main_9: the self-play writer records ONLY FULL-search rows. FAST (PCR
+    value-only) decisions still occupy tape.pending -- so the FULL rows' STV /
+    opp-policy / moves_left targets iterate the complete decision list -- but the
+    writer filter drops them, and ``fast_rows_excluded`` counts exactly the Fast
+    decisions. Mirrors dense_cnn_restnet's pcr.fast_rows_excluded telemetry
+    (test_dense_cnn_restnet_pcr_policy_init::test_fast_rows_are_excluded_by_pcr_full_filter)."""
 
-    records = (
-        (0, 0, 0, 1), (5, 5, 1, 2), (1, 0, 0, 3), (6, 5, 1, 4),
-        (2, 0, 0, 5), (7, 5, 1, 6), (3, 0, 0, 7),
+    from hexfield.selfplay import ContinuousDriver, _GameTape
+
+    pending, winner, n_full, n_fast = _mixed_pcr_game(41)
+    assert n_full > 0 and n_fast > 0, "fixture must exercise both classes"
+
+    driver = ContinuousDriver(
+        epoch=0, games_target=1, max_plies=64, out_dir=tmp_path,
     )
-    return HexfieldSampleData(
-        game_id="test", turn_index=len(records), current_player=current_player,
-        phase="FirstStone", records=records,
-        first_stone=None, own_hot=(), opp_hot=(), own_win=(), opp_win=(),
-        policy=(), metadata={"pcr_full": False},
+    tape = _GameTape(key=7)
+    tape.pending = pending
+    tape.ply = len(pending)
+    _run_writer_once(driver, tape, winner, truncated=False)
+
+    # Exactly the FULL rows reached disk; the Fast rows were excluded.
+    assert driver.rows_written == n_full
+    assert driver.fast_rows_excluded == n_fast
+
+    written = read_compact_shard(tmp_path / "game_7.npz")
+    assert len(written) == n_full
+    # Every written row is a full (policy-bearing) row -- no empty-policy Fast row
+    # leaked through the filter.
+    assert all(row.policy for row in written)
+
+
+def test_writer_accounting_identity_recorded_equals_full(tmp_path) -> None:
+    """Accounting identity across the writer path: rows_written (recorded) equals
+    the number of FULL decisions, and rows_written + fast_rows_excluded equals the
+    total decision count. Mirrors test_hexgt_pcr::test_pcr_records_only_full_positions
+    (recorded_positions == full_search_count)."""
+
+    from hexfield.selfplay import ContinuousDriver, _GameTape
+
+    pending, winner, n_full, n_fast = _mixed_pcr_game(53)
+    driver = ContinuousDriver(
+        epoch=0, games_target=1, max_plies=64, out_dir=tmp_path,
     )
+    tape = _GameTape(key=11)
+    tape.pending = pending
+    tape.ply = len(pending)
+    _run_writer_once(driver, tape, winner, truncated=False)
 
-
-def test_fast_row_facts_nonempty_and_side_relative() -> None:
-    """On a constructed hot position the recompute yields non-empty hot cells,
-    and the own/opp split flips with current_player -- proving the fix is
-    load-bearing (planes were force-zeroed before) and side-relative."""
-
-    from hexfield.features import window_scan
-    from hexfield.selfplay import _populate_fast_facts
-
-    p0 = _populate_fast_facts(_hot_fast_sample(current_player=0))
-    p1 = _populate_fast_facts(_hot_fast_sample(current_player=1))
-    ref0 = window_scan(p0.records, 0, len(p0.records))
-    assert (p0.own_hot, p0.opp_hot, p0.own_win, p0.opp_win) == ref0
-    assert p0.own_hot and not p0.opp_hot          # player-0's window -> own for cp=0
-    assert p1.opp_hot and not p1.own_hot          # same window -> opp for cp=1
-    assert p0.own_hot == p1.opp_hot               # cells identical, side flipped
-
-
-def test_fast_row_facts_survive_shard_roundtrip(tmp_path) -> None:
-    """The recomputed fast-row facts persist through the compact-shard writer
-    (the same path _writer_loop takes), so the stored planes are non-empty and
-    match the reference -- not force-zeroed as before the fix."""
-
-    from hexfield.selfplay import _populate_fast_facts
-
-    populated = [_populate_fast_facts(_hot_fast_sample(current_player=1))]
-    assert any(s.own_hot or s.opp_hot or s.own_win or s.opp_win for s in populated)
-
-    path = tmp_path / "game.npz"
-    write_compact_shard(path, populated)
-    restored = read_compact_shard(path)
-    for a, b in zip(populated, restored):
-        assert b.own_hot == a.own_hot and b.opp_hot == a.opp_hot
-        assert b.own_win == a.own_win and b.opp_win == a.opp_win
-        assert b.first_stone == a.first_stone
-        assert b.metadata["pcr_full"] is False  # still a value-only row
+    assert driver.rows_written == n_full  # recorded == full_search_count
+    assert driver.rows_written + driver.fast_rows_excluded == len(pending)
 
 
 def test_resume_counts_only_committed_shards(tmp_path) -> None:

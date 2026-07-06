@@ -186,6 +186,7 @@ def test_training_epoch_returns_curated_full_payload(
         "selfplay_extras",
         "manifest",
         "checkpoint",
+        "multistage_eval",
     }
     assert payload["run"] == "dense_cnn_epoch_full"
     assert payload["epoch"] == 2
@@ -203,6 +204,9 @@ def test_training_epoch_returns_curated_full_payload(
     assert extras["mcts_search_elapsed_seconds"] == 250.0
     assert extras["temperature_control"]["expected_game_length"] == 150.0
     assert extras["pcr"]["full_search_count"] == 600
+    # main_9: hexfield emits pcr.fast_rows_excluded (rows the writer dropped); the
+    # curation whitelist passes it through so the frontend can render it.
+    assert extras["pcr"]["fast_rows_excluded"] == 100
     assert extras["policy_init"]["moves"] == 512
     assert extras["root_policy_temperature_control"]["base"] == 1.1
     # Curation is the size cap: the bulk/memory-internal keys must never pass through.
@@ -239,7 +243,7 @@ def test_training_epoch_missing_epoch_returns_all_null_data_fields(
 
     assert payload["run"] == "dense_cnn_epoch_bare"
     assert payload["epoch"] == 99
-    for key in ("history", "prev_epoch", "evaluation", "diagnostics", "selfplay_extras", "manifest", "checkpoint"):
+    for key in ("history", "prev_epoch", "evaluation", "diagnostics", "selfplay_extras", "manifest", "checkpoint", "multistage_eval"):
         assert payload[key] is None
 
 

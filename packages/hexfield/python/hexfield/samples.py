@@ -221,7 +221,6 @@ class ExpandedRow:
     opp_coverage: float  # kept mass / total mass (1.0 when no target existed)
     value: float
     value_mask: float  # 1.0 for completed games; 0.0 for truncated (no winner)
-    policy_valid: float  # 1.0=full (train policy/opp/soft/cell_q); 0.0=fast (value-only)
     stvalue: np.ndarray  # (H,) f32
     stvalue_mask: np.ndarray  # (H,) f32
     moves_left: float  # normalized to [-1, 1]; 0 when masked
@@ -271,8 +270,10 @@ def expand_sample(
             )
         policy[slot] += w
         total += w
-    policy_valid = 0.0 if sample.metadata.get("pcr_full", True) is False else 1.0
-    if policy_valid != 0.0 and total <= 0.0:
+    # Every recorded row is a full (policy-bearing) row in main_9: fast rows are
+    # dropped at the self-play writer and never reach expand. The policy target
+    # must therefore always carry positive mass.
+    if total <= 0.0:
         raise ValueError("policy target must carry positive mass")
 
     opp = np.zeros(legal_count, dtype=np.float32)
@@ -360,10 +361,6 @@ def expand_sample(
         cell_q_mask = np.zeros_like(cell_q_mask)
     else:
         value_mask = 1.0
-    # Fast (value-only) rows: zero the cell_q mask. policy/opp_policy/soft_policy
-    # are gated by policy_valid at the loss; cell_q is gated by its presence mask.
-    if policy_valid == 0.0:
-        cell_q_mask = np.zeros_like(cell_q_mask)
 
     return ExpandedRow(
         support=sup,
@@ -373,7 +370,6 @@ def expand_sample(
         opp_coverage=opp_coverage,
         value=float(sample.value),
         value_mask=value_mask,
-        policy_valid=policy_valid,
         stvalue=stvalue,
         stvalue_mask=stvalue_mask,
         moves_left=moves_left,
