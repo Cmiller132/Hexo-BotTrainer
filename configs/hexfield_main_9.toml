@@ -200,5 +200,5 @@ passes_per_epoch = 1
 # main_9 arch (c=128 / heads 2 / trunk CCACCACCA) by scripts/_main9_prefit_launch.sh.
 # 4 prefit epochs (0..3) -> checkpoint_epoch3.pt is the warm start. Tolerant
 # non-strict load; fresh governor / epoch 0.
-initialize_from = "/mnt/e/Hexo-BotTrainer/runs/hexfield_main_9_prefit/checkpoints/checkpoint_epoch3.pt"
+initialize_from = "/mnt/e/Hexo-BotTrainer/runs/hexfield_main_9_prefit/checkpoint_epoch3.pt"
 save_name = "latest"
