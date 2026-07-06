@@ -14,8 +14,11 @@
 # Architecture env is in scripts/systemd/hexfield-supervisor-8.service (identical
 # to main_7: HEXFIELD_CHANNELS=192 ATTENTION_HEADS=3 TRUNK=CCACCACCACCACCA).
 #
-# Warm start: DIRECT from main_7 epoch 91 (same architecture -> clean tensor
-# load, no BC prefit needed). ep79-91 are post-seeding-recovery clean epochs.
+# Warm start: DIRECT from main_7 epoch 67 (same architecture -> clean tensor
+# load, no BC prefit needed). ep67 is the pre-seeding peak: a 2026-07-06 powered
+# 200-game match measured ep91 vs ep67 = -49 +/- 48 Elo, i.e. the post-seeding
+# grind did NOT recover past ep67 (seeded ep69-78 rows are still inside ep91's
+# 22-epoch window), so ep67 is the strongest CLEAN checkpoint available.
 # Design + rationale: docs/PLAN_MAIN8_HYBRID_SEARCH.md.
 
 [model]
@@ -165,8 +168,8 @@ enabled = false
 [model.config.multi_stage_eval.opponents]
 sealbot_enabled = true
 bracket_size = 1
-# main7_ep91 = the post-seeding-recovery clean anchor (also the warm-start).
-permanent_anchors = [["main5_ep105", "/mnt/e/Hexo-BotTrainer/runs/hexfield_main_5/checkpoints/epoch_000105.pt"], ["main6_ep73", "/mnt/e/Hexo-BotTrainer/runs/hexfield_main_6/checkpoints/epoch_000073.pt"], ["main7_ep91", "/mnt/e/Hexo-BotTrainer/runs/hexfield_main_7/checkpoints/epoch_000091.pt"], ["ep5", "epoch_000005.pt"], ["ep30", "epoch_000030.pt"]]
+# main7_ep67 = the pre-seeding peak / warm-start = the bar main_8 must beat.
+permanent_anchors = [["main5_ep105", "/mnt/e/Hexo-BotTrainer/runs/hexfield_main_5/checkpoints/epoch_000105.pt"], ["main6_ep73", "/mnt/e/Hexo-BotTrainer/runs/hexfield_main_6/checkpoints/epoch_000073.pt"], ["main7_ep67", "/mnt/e/Hexo-BotTrainer/runs/hexfield_main_7/checkpoints/epoch_000067.pt"], ["ep5", "epoch_000005.pt"], ["ep30", "epoch_000030.pt"]]
 radius8_opponents = []
 
 [run]
@@ -185,8 +188,10 @@ update_checkpoint_pointer = false
 passes_per_epoch = 1
 
 [checkpoint]
-# Direct warm start from main_7 ep91 (identical architecture -> full tensor
-# load; tolerant non-strict; fresh governor / epoch 0). The policy head adapts
-# from the gumbel pi' target to visit-count targets over the first epochs.
-initialize_from = "/mnt/e/Hexo-BotTrainer/runs/hexfield_main_7/checkpoints/epoch_000091.pt"
+# Direct warm start from main_7 ep67 = the pre-seeding peak (identical
+# architecture -> full tensor load; tolerant non-strict; fresh governor /
+# epoch 0). Chosen over ep91 after the 2026-07-06 ep91-vs-ep67 match (-49 Elo).
+# The policy head adapts from the gumbel pi' target to visit-count targets over
+# the first epochs.
+initialize_from = "/mnt/e/Hexo-BotTrainer/runs/hexfield_main_7/checkpoints/epoch_000067.pt"
 save_name = "latest"
