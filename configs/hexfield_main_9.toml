@@ -31,7 +31,7 @@ module = "hexfield.plugin"
 device = "cuda"
 
 [model.config.selfplay]
-search_visits = 1024
+search_visits = 768
 pcr_full_proportion = 0.33
 pcr_fast_visits = 192
 # Locked 0.0 (P0 outcome-skew conviction 2026-07-04). Fast-move exploration now
@@ -80,9 +80,8 @@ temperature = 1.0
 temperature_floor = 0.15
 temperature_halflife_plies = 10.0
 # Live again under a PUCT root (in main_7 these only fed the surprise baseline).
-root_policy_temperature = 1.1
-root_policy_temperature_early = 1.15
-root_policy_temperature_halflife = 19.0
+# Early boost removed: flat root policy temperature, no ply-decayed ramp.
+root_policy_temperature = 1.05
 # Opening diversity channel, up from main_7's 0.25 (explore/exploit rec).
 policy_init_fraction = 0.35
 policy_init_avg_plies = 4.0
@@ -129,7 +128,7 @@ opp_policy_weight = 0.25
 short_term_value_weight = 0.1
 moves_left_weight = 0.2
 q_head_weight = 0.1
-soft_policy_weight = 1.0
+soft_policy_weight = 0.5
 policy_surprise_uniform_fraction = 0.5
 policy_surprise_max_weight = 8.0
 warmup_steps = 0
