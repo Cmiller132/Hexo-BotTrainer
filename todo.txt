@@ -1,0 +1,41 @@
+TODO — remove pre-KataGo FPU dead code (deferred; kept only for the parity()
+regression harness)
+==============================================================================
+Context: 2026-07-07, KataGo-faithful FPU landed as the `scaled_fpu` divergence
+(ON in production()/gumbel(), OFF in parity()) plus root_fpu_reduction default
+0.0. The old flat-FPU path and the noise-conditioned root-FPU mechanism are now
+DEAD in production self-play, but are retained so Divergences::parity() still
+reproduces the byte-identical pre-port reference (golden vectors). Remove all of
+the below in one pass WHEN the parity() harness is retired or its golden vectors
+are regenerated to the KataGo behavior.
+
+RUST — packages/hexfield/rust/src/tree.rs
+  - Divergences.scaled_fpu flag: once parity is gone, make √-scaling
+    unconditional and delete the flag (struct field + parity()/production()
+    entries + the KNOWN_DIVERGENCE_KEYS/override plumbing in search.rs).
+  - The `if self.divergences.scaled_fpu { ... } else { base_fpu_reduction }`
+    branches at BOTH selection sites (select_or_materialize_edge and the Gumbel
+    intermediate-PUCT path): drop the `else` (flat) branch, always √-scale.
+  - RustEdge::value_or_fpu stays (still the FPU baseline), but its callers no
+    longer need the flat fallback.
+
+RUST — packages/hexfield/rust/src/search.rs
+  - root_fpu_zero_under_noise: the whole noise-conditioned mechanism is
+    superseded by first-class root_fpu_reduction=0.0. Remove:
+      * the `root_fpu_zero_under_noise` param on `search()` and `run_continuous()`
+      * the `SearchMovePolicy.root_fpu_zero_under_noise` field
+      * the noise-conditioned branch in `root_fpu_for()` (keep only the
+        root_fpu_reduction path)
+      * the None-fallback in the `root_fpu_reduction` resolution that defers to
+        it (make root FPU simply default 0.0 when unset)
+
+PYTHON — packages/hexfield/python/hexfield/config.py
+  - SelfplayConfig.root_fpu_zero_under_noise field (default False) — remove once
+    the Rust param is gone; drop it from the run_continuous/search call sites in
+    selfplay.py / evaluation.py / eval_arena.py.
+
+CONFIGS
+  - Drop any `root_fpu_zero_under_noise = ...` lines from live configs
+    (hexfield_main_9.toml still carries it; main_10 no longer does).
+
+Search anchors: `root_fpu_zero_under_noise`, `scaled_fpu`, `value_or_fpu`.

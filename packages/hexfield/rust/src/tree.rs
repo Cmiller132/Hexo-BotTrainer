@@ -95,6 +95,14 @@ pub struct Divergences {
     /// When true, recorded-target forced-playout pruning uses the dynamic
     /// c_for(root_visits) (matching selection); when false, static c_puct.
     pub pruned_dynamic_cpuct: bool,
+    /// When true, the FPU reduction applied to unvisited children is scaled by
+    /// `sqrt(Σ prior of already-visited children)` (KataGo
+    /// `fpuReductionMax · √policyProbMassVisited`): ~0 at a fresh node (unvisited
+    /// children look as good as the parent → early breadth), growing toward the
+    /// full reduction as the node fills. When false, the reduction is the flat
+    /// `fpu_reduction` (the pre-KataGo behavior, retained for `parity()`). See
+    /// `RustNode::visited_policy_mass` and the selection sites.
+    pub scaled_fpu: bool,
     // === Gumbel AlphaZero divergences (Danihelka et al. 2022). ===
     // All default off in both parity() and production(); `gumbel()` turns the
     // four mechanism bools on.
@@ -164,6 +172,7 @@ impl Divergences {
             clean_root_prior_cache: false,
             dirichlet_shaped: false,
             pruned_dynamic_cpuct: false,
+            scaled_fpu: false,
             // Gumbel mechanisms off in parity.
             gumbel_target: false,
             gumbel_root: false,
@@ -193,6 +202,7 @@ impl Divergences {
             clean_root_prior_cache: true,
             dirichlet_shaped: true,
             pruned_dynamic_cpuct: true,
+            scaled_fpu: true,
             ..Self::parity()
         }
     }
@@ -350,6 +360,17 @@ impl RustNode {
 
     fn has_actions(&self) -> bool {
         !self.edges.is_empty() || self.remaining_prior_count() > 0
+    }
+
+    /// Σ of the (normalized) prior over children that have received at least one
+    /// visit — KataGo's `policyProbMassVisited`. Used to scale the FPU reduction
+    /// (`fpu_reduction · √mass`) under the `scaled_fpu` divergence.
+    fn visited_policy_mass(&self) -> f32 {
+        self.edges
+            .iter()
+            .filter(|edge| edge.visits > 0)
+            .map(|edge| edge.prior)
+            .sum()
     }
 
     pub fn remaining_prior_count(&self) -> usize {
@@ -1167,10 +1188,18 @@ impl RustSearch {
         let exploration_scale =
             self.c_for(c_puct, node.visits) * (node.visits.max(1) as f32).sqrt();
         let parent_value = node.value();
-        let fpu_reduction = if node_id == 0 {
+        let base_fpu_reduction = if node_id == 0 {
             self.root_fpu_reduction
         } else {
             self.fpu_reduction
+        };
+        // KataGo scales the FPU reduction by √(policyProbMassVisited): ~0 at a
+        // fresh node (unvisited children look as good as the parent), growing
+        // toward the full reduction as children get searched. Flat under parity().
+        let fpu_reduction = if self.divergences.scaled_fpu {
+            base_fpu_reduction * node.visited_policy_mass().sqrt()
+        } else {
+            base_fpu_reduction
         };
         let mut best: Option<(usize, f32, u32, PackedCoord)> = None;
         for (index, edge) in node.edges.iter().enumerate() {
@@ -1430,7 +1459,12 @@ impl RustSearch {
         let exploration_scale =
             self.c_for(c_puct, node.visits) * (node.visits.max(1) as f32).sqrt();
         let parent_value = node.value();
-        let fpu_reduction = self.root_fpu_reduction;
+        // Root FPU, √(policyProbMassVisited)-scaled under scaled_fpu (flat in parity).
+        let fpu_reduction = if self.divergences.scaled_fpu {
+            self.root_fpu_reduction * node.visited_policy_mass().sqrt()
+        } else {
+            self.root_fpu_reduction
+        };
         let mut best: Option<(usize, f32, u32, PackedCoord)> = None;
         for (index, edge) in node.edges.iter().enumerate() {
             if !survivor_set.contains(&edge.action_id) {
@@ -2709,6 +2743,7 @@ mod tests {
         assert!(!p.clean_root_prior_cache);
         assert!(!p.dirichlet_shaped);
         assert!(!p.pruned_dynamic_cpuct);
+        assert!(!p.scaled_fpu);
     }
 
     #[test]
@@ -2720,6 +2755,38 @@ mod tests {
         assert!(p.clean_root_prior_cache);
         assert!(p.dirichlet_shaped);
         assert!(p.pruned_dynamic_cpuct);
+        assert!(p.scaled_fpu);
+    }
+
+    #[test]
+    fn visited_policy_mass_sums_visited_child_priors() {
+        // Only children with visits > 0 contribute; the sqrt of this mass scales
+        // the FPU reduction under scaled_fpu.
+        let mut node = RustNode {
+            state_hash: 0,
+            player: Player::Player0,
+            eval_value: 0.0,
+            eval_ml: None,
+            visits: 3,
+            value_sum: 0.0,
+            ml_sum: 0.0,
+            ml_weight: 0.0,
+            edges: vec![
+                RustEdge { action_id: 0, action: unpack_coord(0), prior: 0.5, visits: 2, value_sum: 0.0, value_sq_sum: 0.0, ml_sum: 0.0, ml_weight: 0.0, pending: 0, child: None, forced: false },
+                RustEdge { action_id: 1, action: unpack_coord(1), prior: 0.3, visits: 0, value_sum: 0.0, value_sq_sum: 0.0, ml_sum: 0.0, ml_weight: 0.0, pending: 0, child: None, forced: false },
+                RustEdge { action_id: 2, action: unpack_coord(2), prior: 0.2, visits: 1, value_sum: 0.0, value_sq_sum: 0.0, ml_sum: 0.0, ml_weight: 0.0, pending: 0, child: None, forced: false },
+            ],
+            priors: NodePriors::Owned(vec![]),
+            max_eligible_children: 3,
+            root_logits: None,
+        };
+        // Visited children: action 0 (prior 0.5) + action 2 (prior 0.2) = 0.7.
+        assert!((node.visited_policy_mass() - 0.7).abs() < 1e-6);
+        // A fresh node (no visited children) has zero mass => zero reduction.
+        for edge in &mut node.edges {
+            edge.visits = 0;
+        }
+        assert!(node.visited_policy_mass().abs() < 1e-6);
     }
 
     #[test]

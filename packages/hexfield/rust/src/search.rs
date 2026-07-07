@@ -2645,6 +2645,7 @@ const KNOWN_DIVERGENCE_KEYS: &[&str] = &[
     "clean_root_prior_cache",
     "dirichlet_shaped",
     "pruned_dynamic_cpuct",
+    "scaled_fpu",
     "gumbel_target",
     "gumbel_root",
     "gumbel_sequential_halving",
@@ -2749,6 +2750,9 @@ fn resolve_divergences(
         }
         if let Some(v) = overrides.get_item("pruned_dynamic_cpuct")? {
             dv.pruned_dynamic_cpuct = v.extract()?;
+        }
+        if let Some(v) = overrides.get_item("scaled_fpu")? {
+            dv.scaled_fpu = v.extract()?;
         }
         // Gumbel AlphaZero flags (default-OFF).
         if let Some(v) = overrides.get_item("gumbel_target")? {
