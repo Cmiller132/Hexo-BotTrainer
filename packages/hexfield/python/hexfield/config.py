@@ -198,6 +198,21 @@ class TrainingSection:
     policy_surprise_uniform_fraction: float = 0.5
     policy_surprise_max_weight: float = 8.0
     warmup_steps: int = 0
+    # --- Optimizer LR schedule (config-gated; default OFF) --------------------
+    # Wired into the trainer's per-step optimizer update (see trainer.scheduled_lr).
+    # ``lr_schedule="none"`` (the default) is a NO-OP: the trainer never touches
+    # the optimizer LR, so a run that omits these keys behaves byte-identically to
+    # before this feature (constant ``learning_rate``). When set to "cosine" or
+    # "linear", the LR does a linear warmup over ``lr_warmup_steps`` OPTIMIZER
+    # STEPS (0 -> learning_rate), then decays from ``learning_rate`` to ``lr_final``
+    # over ``lr_decay_epochs`` EPOCHS, holding ``lr_final`` afterward. The step
+    # counter that drives warmup is derived from the persisted
+    # ``train_state.global_step_samples`` so warmup survives supervisor restarts
+    # (and is fresh on an ``initialize_from`` warm start).
+    lr_schedule: str = "none"
+    lr_warmup_steps: int = 0
+    lr_final: float = 0.0
+    lr_decay_epochs: int = 0
     shuffle_keep_target_rows: int = 300_000
     # Replay-buffer shuffle-window knobs.
     shuffle_min_rows: int = 20_000

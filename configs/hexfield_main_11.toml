@@ -1,0 +1,249 @@
+# hexfield_main_11 — GUMBEL completedQ SHARP-TARGET regime change. Same net as
+# main_9/main_10 (c=128, heads 2x64, trunk CCACCACCA), WARM-STARTED from the
+# main_10 epoch-20 checkpoint and continued.
+#
+# WHY: main_10 (PUCT hybrid, 1024 visits, 33% PCR, policy_target="visit") stalled
+# / regressed. A verified review traced the root cause to the diffuse PUCT
+# visit-count policy target. The fix is main_6's regime — a Gumbel completedQ
+# *value-informed sharp* improved-policy target — which took main_6 (SAME c=128
+# arch) to -72 vs Strix.
+#
+# SEARCH REGIME (main_6-style, single class):
+#   EVERY move is a full, written move (100% PCR — there are NO fast/dropped
+#   moves). Search = Gumbel-Top-m root draw + Sequential Halving + deterministic
+#   Gumbel interior selection, 256 visits. The EXPORTED training target is the
+#   Gumbel completedQ improved policy pi' = softmax(logits + sigma(completedQ))
+#   (gumbel_target_enabled + [training] policy_target="gumbel"), NOT raw visit
+#   counts. Every written row carries that sharp value-informed target.
+#
+# WHAT main_11 CHANGES vs main_10:
+#   * SEARCH -> Gumbel SH for the (now sole) full class; export the Gumbel
+#     completedQ target (policy_target visit -> gumbel).
+#   * search_visits 1024 -> 256; pcr_full_proportion 0.33 -> 1.0 (100% PCR).
+#   * De-contaminate the target search: root Dirichlet 0.25 -> 0.0,
+#     forced_playout_k 2.0 -> 0.0, c_scale 0.45 -> 0.0 (constant c_puct).
+#   * Throughput: 512 games/epoch, 384 active games, 72000 rows/epoch.
+#   * LR schedule (never implemented before): linear warmup 400 steps to 5e-4,
+#     cosine decay to 4e-4 by ~epoch 100, hold. Config-gated (see [training]).
+#   * WARM START from main_10 ep20 (below) instead of main_9 ep30.
+#
+# The fast_gumbel_* / pcr_fast_* levers below are DEAD at 100% PCR (there is no
+# fast class); left in place, unread.
+#
+# Architecture env is in scripts/systemd/hexfield-supervisor-11.service and is
+# IDENTICAL to main_9/main_10: HEXFIELD_CHANNELS=128 ATTENTION_HEADS=2
+# TRUNK=CCACCACCA.
+
+[model]
+name = "hexfield"
+module = "hexfield.plugin"
+
+[model.config]
+device = "cuda"
+
+[model.config.selfplay]
+search_visits = 256
+# 100% PCR: every turn is a full move with a written Gumbel-target row. No fast
+# (dropped) moves at all.
+pcr_full_proportion = 1.0
+pcr_fast_visits = 192
+# DEAD at 100% PCR (no fast class). Retained inert.
+pcr_fast_temperature = 0.0
+active_games = 384
+virtual_batch_size = 48
+flush_target = 1024
+active_root_limit = 384
+max_game_plies = 256
+tss_enabled = true
+cache_max_states = 262144
+nucleus_f64 = true
+lcb_z = 1.6
+clean_root_prior_cache = true
+
+# ---- Search c_puct (constant; visit-scaling neutralized) ----
+c_puct = 1.5
+# c_scale 0.0 => the visit-scaled log term contributes nothing, so c_puct is
+# CONSTANT regardless of visit_scaled_c_puct (review de-contamination #2).
+visit_scaled_c_puct = true
+c_scale = 0.0
+c_base = 500.0
+# De-contaminate the target search: ZERO root Dirichlet noise.
+root_dirichlet_noise_fraction = 0.0
+root_dirichlet_total_alpha = 10.83
+dirichlet_shaped = true
+# KataGo-faithful FPU. root_fpu_reduction is INACTIVE under Gumbel root
+# selection (Gumbel uses logits+sigma(completedQ), not FPU-based root
+# exploration); left at 0.0.
+fpu_reduction = 0.2
+root_fpu_reduction = 0.0
+# De-contaminate: ZERO forced playouts (no forced-visit target skew).
+forced_playout_k = 0.0
+pruned_dynamic_cpuct = true
+# Progressive widening (unchanged from main_10).
+lazy_widening = true
+new_child_fpu = true
+widening_policy_mass = 0.95
+widening_max_children = 96
+widening_min_children = 2
+# Play schedule: T=1.0 decaying, floor 0.15, halflife 20 plies.
+temperature = 1.0
+temperature_floor = 0.15
+temperature_halflife_plies = 20.0
+# Flat root policy temperature, no ply-decayed early ramp.
+root_policy_temperature = 1.05
+# Opening diversity channel.
+policy_init_fraction = 0.35
+policy_init_avg_plies = 4.0
+policy_init_max_plies = 8
+policy_init_temperature = 1.4
+ml_two_sided = false
+ml_final_pick_band = 0.08
+# Export raw root logits — the sigma/Gumbel/target math consumes them.
+export_root_prior_logits = true
+
+# ---- Gumbel AlphaZero for the (sole) full class — main_6 target regime ----
+# Root Gumbel-Top-m draw + Sequential Halving, deterministic interior select,
+# and the Gumbel completedQ improved-policy TARGET export. Consumed as the
+# training target by [training] policy_target = "gumbel".
+gumbel_root_enabled = true
+gumbel_sequential_halving = true
+gumbel_nonroot_select = true
+gumbel_target_enabled = true
+gumbel_c_visit = 50.0
+gumbel_c_scale = 1.0
+# m=16 fits the 256-visit SH budget EXACTLY: 4 halving rounds (16->8->4->2),
+# 64 visits/round => round-0 4 visits/candidate (the engine's >=4 floor), then
+# 8/16/32 per candidate. Total 16*4+8*8+4*16+2*32 = 256. (main_6 used m=32 at
+# 1024 visits; at 256 the SH auto-calibrator walks m down to 16, so 16 is the
+# effective schedule made explicit.)
+gumbel_m = 16
+gumbel_target_min_visits = 1
+# Play-policy quota prune (main_6): the PLAYED move (T>0) is sampled from the
+# delta-visit histogram with round-0 SH losers zeroed; the WRITTEN target is
+# untouched.
+gumbel_play_prune = true
+
+# ---- Fast-move Gumbel — DEAD at 100% PCR (no fast class). Retained inert. ----
+fast_gumbel_root_enabled = true
+fast_gumbel_sequential_halving = true
+fast_gumbel_nonroot_select = true
+fast_gumbel_c_visit = 50.0
+fast_gumbel_c_scale = 1.0
+fast_gumbel_m = 32
+fast_gumbel_play_prune = true
+
+[model.config.training]
+batch_rows = 256
+# LR base. Linear-warmup target then cosine-decayed to lr_final by lr_decay_epochs
+# (see the lr_* schedule knobs below).
+learning_rate = 5e-4
+weight_decay = 1e-4
+grad_clip = 5.0
+adaptive_clip = true
+clip_c = 1.75
+clip_ema_decay = 0.99
+clip_warmup_steps = 50
+policy_weight = 1.0
+value_weight = 1.0
+opp_policy_weight = 0.25
+short_term_value_weight = 0.1
+moves_left_weight = 0.2
+q_head_weight = 0.1
+soft_policy_weight = 0.5
+policy_surprise_uniform_fraction = 0.5
+policy_surprise_max_weight = 8.0
+warmup_steps = 0
+# --- LR schedule (config-gated; implemented in trainer.scheduled_lr) ---
+# Linear warmup over 400 optimizer steps (0 -> learning_rate), then cosine decay
+# from learning_rate (5e-4) to lr_final (4e-4) over lr_decay_epochs (60) EPOCHS,
+# holding 4e-4 afterward. Warmup step index is persisted via global_step_samples,
+# so a supervisor restart does not restart warmup. At ~144000 rows / 256 batch_rows
+# ~= 562 steps/epoch, 400 warmup steps ~= 0.7 epochs.
+lr_schedule = "cosine"
+lr_warmup_steps = 400
+lr_final = 4e-4
+lr_decay_epochs = 60
+# Shuffle window: same as main_10. At the ~3x higher row rate (100% PCR, 512
+# games) the taper still saturates against shuffle_keep_target_rows before
+# reaching stale data, so keep_target is NOT raised (the review found a raised
+# keep_target inert/staler).
+shuffle_min_rows = 7000
+shuffle_keep_target_rows = 210000
+shuffle_taper_window_exponent = 0.65
+shuffle_expand_window_per_row = 0.8
+shuffle_taper_window_scale = 7000.0
+validation_fraction = 0.0
+# 100% PCR => ~50-56k fresh rows/epoch; 144000 samples => reuse ~2.6-2.9 (more
+# reuse, deliberate), well under the max_train_bucket_per_new_data=8 governor. The
+# 210k window fills in ~4 epochs at this row rate, so max staleness stays ~4 epochs
+# (vs main_10's ~11) — high reuse on fresh data, not the stale-window trap.
+train_samples_per_epoch = 144000
+max_train_bucket_per_new_data = 8.0
+max_train_bucket_size = 500000.0
+no_repeat_files = false
+expand_backend = "rust"
+expand_workers = 0
+# The Gumbel completedQ improved-policy target (pi'=softmax(logits+sigma(Q))).
+# Rows fall back to the visit target only if no gumbel target is present; at 100%
+# PCR with gumbel_target_enabled every written row carries the gumbel target.
+policy_target = "gumbel"
+
+[model.config.evaluation]
+games_per_epoch = 16
+eval_visits = 128
+eval_every = 5
+
+[model.config.multi_stage_eval]
+enabled = true
+# Preserved from main_10 (Strix anchor budget). Unchanged.
+games_budget = 192
+every_n_epochs = 5
+full_search_visits = 512
+eval_virtual_batch_size = 32
+sealbot_share = 0.1667
+strix_share = 0.3333
+strix_weight = 1.0
+verdict_reference_lag = 5
+pool_path = "diagnostics/eval_pool.json"
+
+[model.config.multi_stage_eval.sprt]
+enabled = false
+
+[model.config.multi_stage_eval.opponents]
+sealbot_enabled = true
+strix_enabled = true
+strix_ckpt = "/mnt/c/Users/epicm/Downloads/checkpoint_00237000.pt"
+# 512 to MATCH the candidate's eval budget (multi_stage_eval.full_search_visits =
+# 512). Was 256; raised so the Strix anchor searches at the same visit count as
+# the hexfield candidate it is scored against. m stays 16 (same SH ladder as the
+# candidate at 512: 16->8->4->2 over 128-visit rounds).
+strix_sims = 512
+strix_m = 16
+strix_device = "cuda"
+strix_label = "strix"
+bracket_size = 1
+permanent_anchors = [["main6_ep73", "/mnt/e/Hexo-BotTrainer/runs/hexfield_main_6/checkpoints/epoch_000073.pt"], ["main5_ep105", "/mnt/e/Hexo-BotTrainer/runs/hexfield_main_5/checkpoints/epoch_000105.pt"]]
+radius8_opponents = []
+
+[run]
+name = "hexfield_main_11"
+output_dir = "/mnt/e/Hexo-BotTrainer/runs/hexfield_main_11"
+seed = 1
+
+[loop]
+epochs = 200
+
+[selfplay]
+games_per_epoch = 512
+update_checkpoint_pointer = false
+
+[train]
+passes_per_epoch = 1
+
+[checkpoint]
+# WARM START (fresh governor / epoch 0, tolerant non-strict load): the main_10
+# epoch-20 checkpoint. Same arch (c=128 / heads 2 / CCACCACCA). On the
+# supervisor's FIRST LAUNCH this initialize_from is used; subsequent epochs
+# resume from main_11's own latest checkpoint.
+initialize_from = "/mnt/e/Hexo-BotTrainer/runs/hexfield_main_10/checkpoints/epoch_000020.pt"
+save_name = "latest"

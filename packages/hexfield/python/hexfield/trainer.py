@@ -76,6 +76,48 @@ from .window import (
 D6_SIZE = 12
 
 
+def scheduled_lr(
+    *,
+    schedule: str,
+    base_lr: float,
+    final_lr: float,
+    warmup_steps: int,
+    decay_epochs: int,
+    global_step: int,
+    epoch: int,
+) -> float:
+    """Optimizer learning rate for a given (persistent) optimizer step + epoch.
+
+    A pure function (no state) so it is trivially unit-testable. Two phases:
+
+    * Linear warmup measured in OPTIMIZER STEPS: for ``global_step <
+      warmup_steps`` the LR ramps linearly ``0 -> base_lr`` (value at step k is
+      ``base_lr * (k + 1) / warmup_steps``, reaching ``base_lr`` at the last
+      warmup step).
+    * Decay measured in EPOCHS: after warmup, the LR decays from ``base_lr`` to
+      ``final_lr`` as ``epoch`` runs ``0 -> decay_epochs`` and holds ``final_lr``
+      for ``epoch > decay_epochs``. ``"cosine"`` uses a half-cosine
+      (``0.5*(1+cos(pi*p))``); ``"linear"`` interpolates linearly in ``p``.
+
+    ``schedule == "none"`` (or any unrecognized name) returns ``base_lr``
+    unchanged, so the caller leaves the optimizer LR untouched. ``warmup_steps
+    <= 0`` skips the warmup phase; ``decay_epochs <= 0`` skips the decay phase
+    (constant ``base_lr`` after warmup).
+    """
+    if schedule not in ("cosine", "linear"):
+        return base_lr
+    if warmup_steps > 0 and global_step < warmup_steps:
+        return base_lr * float(global_step + 1) / float(warmup_steps)
+    if decay_epochs <= 0:
+        return base_lr
+    p = min(1.0, max(0.0, float(epoch) / float(decay_epochs)))
+    if schedule == "linear":
+        return base_lr + (final_lr - base_lr) * p
+    # cosine: 1.0 at p=0 (base_lr) -> 0.0 at p=1 (final_lr).
+    cos = 0.5 * (1.0 + math.cos(math.pi * p))
+    return final_lr + (base_lr - final_lr) * cos
+
+
 def _aug_seed(run_seed: int, epoch: int) -> int:
     """Deterministic per-(run, epoch) seed for the D6 augmentation draw.
 
@@ -582,6 +624,12 @@ class HexfieldTrainer:
                 if isinstance(_v, torch.Tensor) and _v.device != self.device:
                     _st[_k] = _v.to(self.device)
         batch_rows = self.config.training.batch_rows
+        # Persistent base optimizer-step index for the LR schedule. Derived from
+        # the checkpoint-persisted ``global_step_samples`` (restored on resume,
+        # fresh on an initialize_from warm start) so the linear warmup measured in
+        # optimizer steps is not restarted by a supervisor relaunch. Inert when
+        # lr_schedule == "none" (the schedule branch below never runs).
+        sched_base_step = int(round(self.train_state.global_step_samples / max(1, batch_rows)))
         comp_totals: dict[str, float] = {}
         grad_norms: list[float] = []
         clip_values: list[float] = []
@@ -761,6 +809,23 @@ class HexfieldTrainer:
                     if self._grad_norm_ema is None
                     else d * self._grad_norm_ema + (1.0 - d) * float(norm)
                 )
+            # Config-gated LR schedule: set the optimizer LR for this step. When
+            # lr_schedule == "none" (default) this branch is skipped entirely and
+            # the optimizer keeps its config/checkpoint LR (byte-identical to the
+            # pre-schedule behavior). ``sched_base_step + steps`` is the persistent
+            # global optimizer-step index for this step.
+            if tcfg.lr_schedule != "none":
+                lr = scheduled_lr(
+                    schedule=tcfg.lr_schedule,
+                    base_lr=float(tcfg.learning_rate),
+                    final_lr=float(tcfg.lr_final),
+                    warmup_steps=int(tcfg.lr_warmup_steps),
+                    decay_epochs=int(tcfg.lr_decay_epochs),
+                    global_step=sched_base_step + steps,
+                    epoch=int(epoch),
+                )
+                for group in self.optimizer.param_groups:
+                    group["lr"] = lr
             self.scaler.step(self.optimizer)
             self.scaler.update()
             steps += 1
