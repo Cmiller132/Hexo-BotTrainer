@@ -3466,6 +3466,199 @@ body.bot-thinking .legal {
   font-style: italic;
 }
 
+/* ===== #histStrength — Strix-anchored eval redesign (added panels) ===== */
+
+/* Cards / disclosure children that must span the whole responsive grid. */
+.hist-strength-wide {
+  grid-column: 1 / -1;
+}
+
+/* Supporting-cards disclosure: keeps provenance/detail/pool behind a summary so
+   the hero + ladder + pentanomial + curves carry the 3-second glance. */
+.hist-strength-more-wrap {
+  grid-column: 1 / -1;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(7, 13, 19, 0.3);
+  padding: 4px 8px 8px;
+}
+.hist-strength-more-wrap > summary {
+  cursor: pointer;
+  font-size: 9px;
+  font-weight: 900;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--muted);
+  padding: 6px 2px;
+  list-style: none;
+}
+.hist-strength-more-wrap > summary::-webkit-details-marker { display: none; }
+.hist-strength-more-wrap > summary::before { content: "▸ "; color: var(--accent); }
+.hist-strength-more-wrap[open] > summary::before { content: "▾ "; }
+.hist-strength-more-wrap > .hist-strength-grid { margin-top: 6px; }
+
+/* Hero three-zone banner (LEFT verdict/tripwire · CENTER kpis · RIGHT trust). */
+.hist-hero-banner {
+  display: grid;
+  grid-template-columns: minmax(160px, auto) 1fr minmax(150px, auto);
+  gap: 14px;
+  align-items: stretch;
+}
+@media (max-width: 720px) {
+  .hist-hero-banner { grid-template-columns: 1fr; }
+}
+.hist-hero-left {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  min-width: 0;
+}
+.hist-hero-tripwire {
+  font-size: 10px;
+  line-height: 1.35;
+  color: var(--yellow);
+  background: rgba(245, 197, 66, 0.1);
+  border: 1px solid rgba(245, 197, 66, 0.45);
+  border-radius: 7px;
+  padding: 7px 9px;
+}
+.hist-hero-tripwire b { color: var(--yellow); }
+.hist-hero-matchup { font-size: 11px; color: var(--muted); }
+.hist-hero-matchup b { color: var(--text); }
+
+.hist-hero-kpis {
+  display: grid;
+  grid-template-columns: 1.15fr 1fr 0.85fr;
+  gap: 10px;
+  min-width: 0;
+}
+@media (max-width: 560px) {
+  .hist-hero-kpis { grid-template-columns: 1fr; }
+}
+.hist-hero-lead {
+  border-color: var(--accent) !important;
+  box-shadow: 0 0 0 1px rgba(39, 215, 230, 0.25);
+}
+.hist-hero-demoted { opacity: 0.92; }
+.hist-hero-demoted .hist-hero-v { font-size: 15px; }
+.hist-hero-tag {
+  float: right;
+  font-size: 7.5px;
+  font-weight: 800;
+  letter-spacing: 0.5px;
+  color: var(--accent);
+}
+.hist-hero-tag.amber { color: var(--yellow); }
+.hist-hero-tag.grey { color: var(--muted); }
+.hist-hero-faint { color: #5f6b78 !important; }
+
+.hist-hero-right {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-left: 1px solid var(--line);
+  padding-left: 12px;
+  min-width: 0;
+}
+.hist-hero-trust-h {
+  font-size: 8.5px;
+  font-weight: 800;
+  letter-spacing: 0.7px;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.hist-chiprow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  align-items: center;
+}
+.hist-chip {
+  font-size: 10px;
+  padding: 3px 7px;
+  border-radius: 6px;
+  background: rgba(7, 13, 19, 0.44);
+  border: 1px solid var(--line);
+  color: var(--muted);
+  white-space: nowrap;
+}
+.hist-chip b { color: var(--text); font-weight: 700; }
+.hist-chip.good b { color: var(--green); }
+.hist-chip.warn { border-color: rgba(245, 197, 66, 0.45); }
+.hist-chip.warn b { color: var(--yellow); }
+
+/* CI-bar color variants (win / amber) + promote-threshold tick. */
+.hist-ci-range.hist-ci-win { background: rgba(54, 211, 153, 0.28); border-color: rgba(54, 211, 153, 0.6); }
+.hist-ci-point.hist-ci-win { background: #36d399; }
+.hist-ci-range.hist-ci-amber { background: rgba(245, 197, 66, 0.24); border-color: rgba(245, 197, 66, 0.6); }
+.hist-ci-point.hist-ci-amber { background: #f5c542; }
+.hist-ci-thr { position: absolute; top: 0; width: 1px; height: 14px; background: var(--green); }
+
+/* Forest-ladder SVG primitives. */
+.hist-ladder-grid { stroke: var(--line); stroke-width: 1; }
+.hist-ladder-axis { fill: #5f6b78; font-size: 9px; }
+.hist-ladder-anchorln { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 3 4; opacity: 0.5; }
+.hist-ladder-zerorail { stroke: var(--accent); stroke-width: 1.6; }
+.hist-ladder-candband { fill: rgba(39, 215, 230, 0.07); stroke: var(--accent); stroke-width: 1; }
+.hist-ladder-replay { fill: var(--accent); cursor: pointer; }
+.hist-ladder-replay:hover { text-decoration: underline; }
+.hist-ladder-legend {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-size: 10px;
+  color: var(--muted);
+  margin-top: 8px;
+  align-items: center;
+}
+.hist-ladder-lg { display: inline-flex; align-items: center; gap: 5px; }
+.hist-ladder-sw { width: 11px; height: 11px; border-radius: 2px; display: inline-block; }
+
+/* Provenance allocation micro-bar. */
+.hist-alloc-wrap { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
+.hist-alloc {
+  display: flex;
+  height: 16px;
+  border-radius: 5px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  flex: 1;
+  min-width: 200px;
+}
+.hist-alloc-seg {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 8.5px;
+  color: #04121a;
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+/* Per-edge detail table. */
+.hist-eval-scroll { overflow-x: auto; margin-top: 4px; }
+.hist-eval-table { width: 100%; border-collapse: collapse; font-size: 11px; }
+.hist-eval-table th,
+.hist-eval-table td {
+  text-align: right;
+  padding: 4px 7px;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+.hist-eval-table th {
+  color: var(--muted);
+  font-size: 8.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-weight: 700;
+}
+.hist-eval-td-l { text-align: left !important; }
+.hist-eval-td-mono { font-variant-numeric: tabular-nums; color: var(--muted); }
+.hist-eval-trow td.hist-eval-win { color: #36d399; font-weight: 800; }
+.hist-eval-trow td.hist-eval-loss { color: #ff7a7a; font-weight: 800; }
+.hist-eval-trow td.hist-eval-draw { color: var(--muted); font-weight: 800; }
+
 .mt-opts label.mt-check {
   display: inline-flex;
   align-items: center;

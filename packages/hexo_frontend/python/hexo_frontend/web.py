@@ -1964,12 +1964,32 @@ def _epoch_eval_record(row: object) -> dict[str, object] | None:
     players = row.get("ratings", {}).get("players") if isinstance(_tget(row, "ratings"), dict) else None
     elo_point: float | None = None
     if isinstance(players, list):
-        # The rating table is SealBot-anchored: the candidate is the (single)
-        # non-anchor player. Its Elo lives under `elo` (not `rating`).
-        candidate = next(
-            (p for p in players if isinstance(p, dict) and not p.get("is_anchor")),
-            None,
+        # The candidate is the player named by the report -- NOT simply the first
+        # non-anchor. Under a Strix (or other foreign) anchor the roster carries
+        # several non-anchor checkpoints (e.g. main5_ep105), so first-non-anchor
+        # would pick the wrong rung. Key on the report's candidate label
+        # (meta.candidate_label / roster.candidate.label / verdict.primary.candidate),
+        # matching the app.js msCandidatePlayer precedence, before falling back.
+        verdict = row.get("verdict") if isinstance(_tget(row, "verdict"), dict) else {}
+        primary = verdict.get("primary") if isinstance(verdict.get("primary"), dict) else {}
+        roster = row.get("roster") if isinstance(_tget(row, "roster"), dict) else {}
+        roster_cand = roster.get("candidate") if isinstance(roster.get("candidate"), dict) else {}
+        want_label = (
+            row.get("candidate_label")
+            or roster_cand.get("label")
+            or primary.get("candidate")
         )
+        candidate = None
+        if want_label:
+            candidate = next(
+                (p for p in players if isinstance(p, dict) and p.get("label") == want_label),
+                None,
+            )
+        if candidate is None:
+            candidate = next(
+                (p for p in players if isinstance(p, dict) and not p.get("is_anchor")),
+                None,
+            )
         if candidate is not None:
             elo_point = _optional_float(candidate.get("elo"))
     edges = row.get("edges") if isinstance(_tget(row, "edges"), list) else []
@@ -4098,9 +4118,11 @@ def _evaluation_history(run_dir: Path) -> list[dict[str, object]]:
 
 
 # Headline edge selector: which descriptive edges to surface as chips. The
-# verdict's PRIMARY edge (vs prior champion) plus the two fixed anchors the
-# standalone eval always reports against -- SealBot and the BC-prefit base.
-_MULTISTAGE_HEADLINE_OPPONENTS = ("sealbot", "bc_prefit", "ep5")
+# verdict's PRIMARY edge (vs prior champion) plus the fixed anchors the
+# standalone eval always reports against -- the pinned Strix zero-point, the
+# legacy SealBot zero-point, and the BC-prefit base. `strix` is included so the
+# pinned-anchor edge reaches the headline strip on Strix-anchored reports.
+_MULTISTAGE_HEADLINE_OPPONENTS = ("strix", "sealbot", "bc_prefit", "ep5")
 
 
 def _multistage_headline_edge(edge: dict[str, object]) -> bool:
@@ -4151,13 +4173,23 @@ def _multistage_eval_history(run_dir: Path) -> list[dict[str, object]]:
         def _edge_row(edge: dict[str, object]) -> dict[str, object]:
             prov = edge.get("provenance") if isinstance(edge.get("provenance"), dict) else {}
             wins_a = prov.get("physical_wins_a", prov.get("physical_wins_cand"))
-            wins_b = prov.get("physical_wins_b", prov.get("physical_wins_sealbot"))
+            # The opponent-side physical score: prefer the generic
+            # physical_wins_b, then the pinned-Strix count, then the legacy
+            # SealBot count -- so the Strix edge's opponent score resolves
+            # instead of reading null on Strix-anchored reports.
+            wins_b = prov.get(
+                "physical_wins_b",
+                prov.get("physical_wins_strix", prov.get("physical_wins_sealbot")),
+            )
             return {
                 "opponent": edge.get("opponent"),
                 "role": edge.get("role"),
                 "kind": edge.get("kind"),
                 "primary": bool(edge.get("primary")),
                 "headline": _multistage_headline_edge(edge),
+                "paired": bool(edge.get("paired")),
+                "weight": edge.get("weight"),
+                "note": edge.get("note"),
                 "decided": edge.get("decided"),
                 "winrate": edge.get("winrate"),
                 "winrate_ci95": edge.get("winrate_ci95"),
@@ -4166,6 +4198,11 @@ def _multistage_eval_history(run_dir: Path) -> list[dict[str, object]]:
                 "wins_b": wins_b,
                 "eval_visits": prov.get("eval_visits"),
                 "n_pairs": prov.get("n_pairs"),
+                "n_eff": prov.get("n_eff"),
+                "pair_se": prov.get("pair_se"),
+                "pentanomial": prov.get("pentanomial"),
+                "physical_wins_cand": prov.get("physical_wins_cand"),
+                "physical_wins_strix": prov.get("physical_wins_strix"),
                 "opponent_search_profile": prov.get("opponent_search_profile"),
             }
 
@@ -4180,13 +4217,25 @@ def _multistage_eval_history(run_dir: Path) -> list[dict[str, object]]:
             (s for s in stages if isinstance(s, dict) and s.get("stage") == "C_deep"),
             {},
         )
+        # The pooled BT-fit stage: its convergence flag lets the provenance panel
+        # show "D_pool converged". Forwarded alongside C_deep, not instead of it.
+        stage_d = next(
+            (s for s in stages if isinstance(s, dict) and s.get("stage") == "D_pool"),
+            {},
+        )
         stage_health = {
             "status": stage_c.get("status"),
             "opponents_played": stage_c.get("opponents_played"),
             "allocation": stage_c.get("allocation"),
+            "budget": stage_c.get("budget"),
             "multi_checkpoint_error": stage_c.get("multi_checkpoint_error"),
             "sealbot_unavailable": stage_c.get("sealbot_unavailable"),
             "opponent_search_profiles": stage_c.get("opponent_search_profiles"),
+            "d_pool": {
+                "status": stage_d.get("status"),
+                "anchor": stage_d.get("anchor"),
+                "converged": stage_d.get("converged"),
+            },
         }
         players = ratings.get("players") if isinstance(ratings.get("players"), list) else []
         # Compact roster: the opponent labels/roles actually evaluated this epoch
@@ -4208,6 +4257,39 @@ def _multistage_eval_history(run_dir: Path) -> list[dict[str, object]]:
             for entry in perm
             if isinstance(entry, (list, tuple)) and entry
         ]
+        # Enrich each rating player with the role + is_candidate the frontend
+        # needs. The report's players carry only label/elo/elo_ci95/se_elo/
+        # is_anchor, but the forest ladder + Elo-curve guide-lines key off role
+        # (anchor/champion) and is_candidate. Join to the roster by label so the
+        # player objects are self-describing: the pinned anchor stays is_anchor,
+        # permanent anchors + the champion inherit their roster role, and the
+        # candidate is flagged. Legacy reports without a roster degrade to the
+        # unenriched players (panels then fall back to label matching).
+        cand_label = meta.get("candidate_label") or (
+            roster.get("candidate", {}).get("label") if isinstance(roster.get("candidate"), dict) else None
+        )
+        role_by_label = {
+            o.get("label"): o.get("role")
+            for o in roster_opponents
+            if o.get("label") and o.get("role")
+        }
+        champ_label = (
+            roster.get("champion", {}).get("label") if isinstance(roster.get("champion"), dict) else None
+        )
+        players_enriched: list[dict[str, object]] = []
+        for p in players:
+            if not isinstance(p, dict):
+                continue
+            q = dict(p)
+            lbl = q.get("label")
+            if lbl is not None and lbl == cand_label:
+                q["is_candidate"] = True
+            role = role_by_label.get(lbl)
+            if role is None and lbl is not None and lbl == champ_label:
+                role = "champion"
+            if role and not q.get("role"):
+                q["role"] = role
+            players_enriched.append(q)
         stat = _safe_stat(path)
         rows.append(
             {
@@ -4220,12 +4302,14 @@ def _multistage_eval_history(run_dir: Path) -> list[dict[str, object]]:
                     "candidate": roster.get("candidate") if isinstance(roster.get("candidate"), dict) else {},
                     "champion": roster.get("champion") if isinstance(roster.get("champion"), dict) else {},
                     "sealbot": roster.get("sealbot"),
+                    "strix": roster.get("strix"),
+                    "dropped_anchors": roster.get("dropped_anchors"),
                     "opponents": roster_opponents,
                     "permanent_anchors": permanent_anchors,
                 },
                 "ratings": {
                     "anchor": ratings.get("anchor"),
-                    "players": [p for p in players if isinstance(p, dict)],
+                    "players": players_enriched,
                     "fit": ratings.get("fit") if isinstance(ratings.get("fit"), dict) else {},
                 },
                 "edges": headline_edges,
@@ -4234,6 +4318,18 @@ def _multistage_eval_history(run_dir: Path) -> list[dict[str, object]]:
                 "elapsed_seconds": meta.get("elapsed_seconds"),
                 "full_search_visits": config.get("full_search_visits"),
                 "sealbot_winrate_ci95": payload.get("sealbot_winrate_ci95"),
+                "strix_winrate_ci95": payload.get("strix_winrate_ci95"),
+                # Minimal config passthrough for the provenance/budget panel
+                # (the heavy `config` block stays out of the row payload).
+                "eval_config": {
+                    "games_budget": config.get("games_budget"),
+                    "full_search_visits": config.get("full_search_visits"),
+                    "strix_sims": opp_cfg.get("strix_sims"),
+                    "opening_plies": config.get("opening_plies"),
+                    "eval_every": config.get("eval_every"),
+                    "verdict_reference_lag": config.get("verdict_reference_lag"),
+                    "permanent_anchors": permanent_anchors,
+                },
                 "path": f"diagnostics/{path.name}",
                 "modified": stat.st_mtime if stat is not None else 0,
             }
@@ -4273,7 +4369,8 @@ def _eval_pool_summary(run_dir: Path) -> dict[str, object] | None:
         raw = edge.get("raw") if isinstance(edge.get("raw"), dict) else {}
         slim_raw: dict[str, object] = {}
         for key in ("physical_wins_a", "physical_wins_b",
-                    "physical_wins_cand", "physical_wins_sealbot"):
+                    "physical_wins_cand", "physical_wins_sealbot",
+                    "physical_wins_strix"):
             if key in raw:
                 slim_raw[key] = raw.get(key)
         compact: dict[str, object] = {

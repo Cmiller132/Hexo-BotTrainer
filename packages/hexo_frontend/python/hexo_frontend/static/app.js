@@ -38,7 +38,7 @@
 // the version were invisible. This single top bar always shows the running
 // version, a live "last tap" echo (so a tap that registers is visible even if its
 // effect isn't), and any JS error (uncaught OR surfaced from the Debug code).
-const APP_VERSION = "20260617-dbgattn";
+const APP_VERSION = "20260708-evalredesign";
 function __diagBar() {
   let el = document.getElementById("__diag");
   if (!el) {
@@ -3703,16 +3703,50 @@ function msEdgeLabel(edge) {
   return `vs ${opp}`;
 }
 
-// Descriptive SealBot zero-point winrate for one report row: the sealbot edge's
-// winrate, else the midpoint of sealbot_winrate_ci95. null when SealBot absent.
-function msSealbotWinrate(row) {
+// The report's pinned zero-point anchor label (Strix on main_10, SealBot on the
+// legacy main_6 reports). Data-driven: prefer the is_anchor player, then the
+// row-level anchor field. Never hard-codes "strix"/"sealbot".
+function msAnchorLabel(row) {
+  const anchor = msAnchorPlayer(row);
+  if (anchor && anchor.label) return String(anchor.label);
+  if (row && row.anchor) return String(row.anchor);
+  return "anchor";
+}
+
+// The edge whose opponent IS the pinned zero-point anchor (matched by label /
+// kind / role), or null. This is the drift-immune reference edge.
+function msAnchorEdge(row) {
+  const label = String(msAnchorLabel(row) || "").toLowerCase();
   const edges = row && Array.isArray(row.edges) ? row.edges : [];
-  const edge = edges.find(e => e && String(e.opponent || e.role || "").toLowerCase() === "sealbot");
+  return edges.find(e => e
+    && String(e.opponent || e.kind || e.role || "").toLowerCase() === label) || null;
+}
+
+// The pinned-anchor winrate CI for a row: prefer the anchor-keyed headline
+// (<anchor>_winrate_ci95, e.g. strix_winrate_ci95 / sealbot_winrate_ci95), then
+// the anchor edge's own winrate_ci95. null when absent.
+function msAnchorWinrateCi(row) {
+  if (!row) return null;
+  const label = String(msAnchorLabel(row) || "").toLowerCase();
+  const keyed = row[label + "_winrate_ci95"];
+  if (Array.isArray(keyed)) return keyed;
+  if (Array.isArray(row.strix_winrate_ci95)) return row.strix_winrate_ci95;
+  if (Array.isArray(row.sealbot_winrate_ci95)) return row.sealbot_winrate_ci95;
+  const edge = msAnchorEdge(row);
+  if (edge && Array.isArray(edge.winrate_ci95)) return edge.winrate_ci95;
+  return null;
+}
+
+// Descriptive drift-immune ANCHOR zero-point winrate for one report row: the
+// pinned-anchor edge's winrate, else the midpoint of the anchor winrate CI.
+// null when no anchor edge/CI is present. Anchor-data-driven (Strix or SealBot).
+function msAnchorWinrate(row) {
+  const edge = msAnchorEdge(row);
   if (edge) {
     const wr = asFinite(edge.winrate);
     if (wr !== null) return wr;
   }
-  const ci = Array.isArray(row && row.sealbot_winrate_ci95) ? row.sealbot_winrate_ci95 : null;
+  const ci = msAnchorWinrateCi(row);
   if (ci) {
     const lo = asFinite(ci[0]);
     const hi = asFinite(ci[1]);
@@ -3720,6 +3754,27 @@ function msSealbotWinrate(row) {
   }
   return null;
 }
+
+// Thin backward-compat alias (the panel was SealBot-only before the Strix
+// re-pin). Both now resolve the data-driven pinned anchor.
+function msSealbotWinrate(row) {
+  return msAnchorWinrate(row);
+}
+
+// Normalized 5-cell pentanomial [LL, LD, split, WD, WW] for a paired edge, or
+// null when the edge carries no pentanomial (unpaired / legacy reports).
+function msPentanomial(edge) {
+  const pent = edge && Array.isArray(edge.pentanomial) ? edge.pentanomial : null;
+  if (!pent || pent.length !== 5) return null;
+  const cells = pent.map(v => asFinite(v));
+  if (cells.some(v => v === null)) return null;
+  return cells;
+}
+
+// Pentanomial cell colors [LL, LD, split, WD, WW] and human labels. The middle
+// cell is a NEUTRAL even split (1W-1L, score=1), NOT a draw.
+const MS_PENT_COLORS = ["#c94040", "#ff7a7a", "var(--muted)", "#7fe3b8", "#36d399"];
+const MS_PENT_LABELS = ["LL double-loss", "LD loss+draw", "split (score=1)", "WD win+draw", "WW double-win"];
 
 // Configured permanent anchors that are NOT in this report's roster (SEV-2: the
 // bc_prefit drop). Returns the dropped anchor labels, [] when none/absent.
@@ -3980,6 +4035,169 @@ function renderHistTrends(runs) {
 // history + eval_pool + learning_health); only the presentation is rebuilt.
 // Hidden whenever the run carries no multistage_eval_history.
 // ---------------------------------------------------------------------------
+// A compact horizontal CI error bar (reused across the hero KPI tiles). `left`,
+// `width`, `point` are already-percent values on the tile's local domain;
+// `zero`/`thr` are optional reference-tick percents; `variant` picks a color
+// class ("" default cyan, "win", "amber").
+function msCiBar(left, width, point, opts) {
+  const o = opts || {};
+  const v = o.variant ? ` hist-ci-${o.variant}` : "";
+  const zero = o.zero !== undefined && o.zero !== null
+    ? `<span class="hist-ci-zero" style="left:${Number(o.zero).toFixed(1)}%"></span>` : "";
+  const thr = o.thr !== undefined && o.thr !== null
+    ? `<span class="hist-ci-thr" style="left:${Number(o.thr).toFixed(1)}%" title="${escapeAttr(o.thrTitle || "promote threshold 0")}"></span>` : "";
+  return `<span class="hist-ci-bar"><span class="hist-ci-track"></span>${zero}`
+    + `<span class="hist-ci-range${v}" style="left:${Number(left).toFixed(1)}%;width:${Math.max(0, Number(width)).toFixed(1)}%"></span>`
+    + `<span class="hist-ci-point${v}" style="left:${Number(point).toFixed(1)}%"></span>${thr}</span>`;
+}
+
+// The re-pinned dual-verdict hero banner. Three KPI tiles that stop conflating
+// signals: the drift-immune ANCHOR paired win% LEAD, the CALIBRATED Elo-vs-anchor,
+// and a deliberately-DEMOTED Δ-vs-champion with a promote_threshold_elo tick.
+// verdict.primary.note is surfaced verbatim as a PURE-EVAL tripwire. All
+// anchor-data-driven (Strix on main_10, SealBot on legacy main_6).
+function msStrengthHero(latest, candPlayer, anchorLabel, verdict, verdictLabel, msRows) {
+  const primary = verdict && typeof verdict.primary === "object" && verdict.primary ? verdict.primary : {};
+  const anchorEdge = msAnchorEdge(latest);
+  const pent = anchorEdge ? msPentanomial(anchorEdge) : null;
+
+  // Left zone: verdict pill + PURE-EVAL tripwire + matchup line.
+  const leftItems = [];
+  if (verdictLabel) {
+    leftItems.push(`<div class="hist-hero-verdict ${msVerdictClass(verdictLabel)}">`
+      + `<span class="hist-hero-k">verdict</span>`
+      + `<span class="hist-hero-v">${escapeText(String(verdictLabel).toUpperCase())}</span></div>`);
+  }
+  const note = primary.note || (verdict && verdict.note);
+  if (note) {
+    leftItems.push(`<div class="hist-hero-tripwire" title="reported-only gross-regression tripwire, not a fine-edge test">`
+      + `<b>PURE-EVAL tripwire.</b> ${escapeText(String(note))}</div>`);
+  }
+  if (primary.candidate && primary.champion) {
+    leftItems.push(`<div class="hist-hero-matchup">gate: <b>${escapeText(String(primary.candidate))}</b> `
+      + `vs champion <b>${escapeText(String(primary.champion))}</b> · pooled BT diff</div>`);
+  }
+  const leftZone = `<div class="hist-hero-left">${leftItems.join("")}</div>`;
+
+  // Center zone: three KPI tiles.
+  const tiles = [];
+  // (a) LEAD — drift-immune anchor paired win%, win-tinted, 50% parity tick.
+  const wr = msAnchorWinrate(latest);
+  const wrCi = msAnchorWinrateCi(latest);
+  if (wr !== null) {
+    const lo = wrCi ? asFinite(wrCi[0]) : null;
+    const hi = wrCi ? asFinite(wrCi[1]) : null;
+    const ciTxt = lo !== null && hi !== null ? ` · 95% [${formatPercent(lo)}, ${formatPercent(hi)}]` : "";
+    const bar = lo !== null && hi !== null
+      ? msCiBar(lo * 100, (hi - lo) * 100, wr * 100, { variant: "win", zero: 50 })
+      : "";
+    tiles.push(`<div class="hist-hero-kpi hist-hero-lead">`
+      + `<span class="hist-hero-k">${escapeText(anchorLabel)} win% <span class="hist-hero-tag">drift-immune</span></span>`
+      + `<span class="hist-hero-v hist-hero-big">${formatPercent(wr)}</span>`
+      + `<span class="hist-hero-sub">vs pinned anchor · full-weight${escapeText(ciTxt)}</span>${bar}`
+      + `<span class="hist-hero-sub hist-hero-faint">0 — 50% parity — 100%</span></div>`);
+  }
+  // (b) CALIBRATED — Elo vs anchor (candidate elo / se / ci), amber whisker.
+  const candElo = candPlayer ? asFinite(candPlayer.elo) : null;
+  if (candElo !== null) {
+    const ci = Array.isArray(candPlayer.elo_ci95) ? candPlayer.elo_ci95 : null;
+    const lo = ci ? asFinite(ci[0]) : null;
+    const hi = ci ? asFinite(ci[1]) : null;
+    const se = asFinite(candPlayer.se_elo);
+    const sub = [];
+    if (se !== null) sub.push(`± se ${Math.round(se)}`);
+    if (lo !== null && hi !== null) sub.push(`95% [${Math.round(lo)}, ${Math.round(hi)}]`);
+    sub.push("distance to anchor");
+    let bar = "";
+    if (lo !== null && hi !== null) {
+      // Local domain [min(lo,elo,0), max(hi,0)] with pad, anchor 0 marked.
+      let dLo = Math.min(lo, candElo, 0);
+      let dHi = Math.max(hi, 0);
+      const pad = (dHi - dLo) * 0.08 || 20;
+      dLo -= pad; dHi += pad;
+      const at = v => ((v - dLo) / (dHi - dLo)) * 100;
+      bar = msCiBar(at(lo), at(hi) - at(lo), at(candElo), { variant: "amber", zero: at(0) });
+    }
+    const sign = candElo > 0 ? "+" : "";
+    tiles.push(`<div class="hist-hero-kpi">`
+      + `<span class="hist-hero-k">Elo vs ${escapeText(anchorLabel)} <span class="hist-hero-tag amber">calibrated</span></span>`
+      + `<span class="hist-hero-v hist-hero-big">${sign}${Math.round(candElo)}</span>`
+      + `<span class="hist-hero-sub">${escapeText(sub.join(" · "))}</span>${bar}</div>`);
+  }
+  // (c) DEMOTED — Δ vs champion (smaller) with a promote_threshold_elo tick.
+  const eloDiff = asFinite(primary.elo_diff);
+  const ci = Array.isArray(primary.elo_diff_ci95) ? primary.elo_diff_ci95 : null;
+  const ciLo = ci ? asFinite(ci[0]) : null;
+  const ciHi = ci ? asFinite(ci[1]) : null;
+  if (ciLo !== null && ciHi !== null) {
+    const thr = asFinite(primary.promote_threshold_elo);
+    const reach = Math.max(Math.abs(ciLo), Math.abs(ciHi), eloDiff !== null ? Math.abs(eloDiff) : 0, thr !== null ? Math.abs(thr) : 0, 1);
+    const toPct = v => 50 + (Math.max(Math.min(v, reach), -reach) / reach) * 50;
+    const se = asFinite(primary.se_elo);
+    const diffTxt = eloDiff !== null ? `${eloDiff > 0 ? "+" : ""}${Math.round(eloDiff)}` : "0";
+    const seTxt = se !== null ? `se ${Math.round(se)} · ` : "";
+    const bar = msCiBar(toPct(ciLo), toPct(ciHi) - toPct(ciLo), eloDiff !== null ? toPct(eloDiff) : 50,
+      { zero: 50, thr: thr !== null ? toPct(thr) : null, thrTitle: `promote threshold ${Math.round(thr || 0)}` });
+    tiles.push(`<div class="hist-hero-kpi hist-hero-demoted" title="beats last champion — NOT 'reached anchor'">`
+      + `<span class="hist-hero-k">Δ vs champion <span class="hist-hero-tag grey">demoted</span></span>`
+      + `<span class="hist-hero-v">${escapeText(diffTxt)}</span>`
+      + `<span class="hist-hero-sub">${escapeText(seTxt)}95% [${Math.round(ciLo)}, ${Math.round(ciHi)}] · width ${Math.round(ciHi - ciLo)}</span>${bar}`
+      + `<span class="hist-hero-sub hist-hero-faint">beats last champion — not "reached anchor"</span></div>`);
+  }
+  const centerZone = `<div class="hist-hero-kpis">${tiles.join("")}</div>`;
+
+  // Right rail: eval & trust chips (n_eff as a variance-reduced N, not "CRN
+  // saved X%"; the anchor sweep-loss rate; pairing).
+  const chips = [];
+  chips.push(`<div class="hist-chip">epoch <b>e${escapeText(latest.epoch)}</b></div>`);
+  const elapsed = asFinite(latest.elapsed_seconds);
+  if (elapsed !== null) chips.push(`<div class="hist-chip">wall <b>${Math.round(elapsed)}s</b></div>`);
+  if (anchorEdge) {
+    const nEff = asFinite(anchorEdge.n_eff);
+    const decided = asFinite(anchorEdge.decided);
+    if (nEff !== null && decided !== null) chips.push(`<div class="hist-chip good">n_eff <b>${formatDecimal(nEff, 1)}/${Math.round(decided)}</b></div>`);
+    const pairSe = asFinite(anchorEdge.pair_se);
+    if (pairSe !== null) chips.push(`<div class="hist-chip">pair_se <b>.${(pairSe * 1000).toFixed(0)}</b></div>`);
+    if (pent) {
+      const nPairs = pent.reduce((a, b) => a + b, 0) || 1;
+      const lossSweep = pent[0] / nPairs;
+      chips.push(`<div class="hist-chip warn" title="LL double-loss sweeps / paired games vs the pinned anchor">LL-sweep vs ${escapeAttr(anchorLabel)} <b>${formatPercent(lossSweep)}</b></div>`);
+    }
+    if (anchorEdge.paired) chips.push(`<div class="hist-chip">paired CRN</div>`);
+  }
+  const rightZone = `<div class="hist-hero-right"><div class="hist-hero-trust-h">Eval &amp; trust</div><div class="hist-chiprow">${chips.join("")}</div></div>`;
+
+  // Flags (DEGRADED / OOD / pure-eval / PARTIAL / dropped anchors).
+  const flags = [];
+  if (verdict.anchor_substituted === true || verdict.degraded === true) {
+    const to = verdict.substituted_to ? ` → ${escapeText(String(verdict.substituted_to))}` : "";
+    const fnote = verdict.degraded_note || verdict.sealbot_unavailable_reason || "anchor substituted; absolute Elo not calibrated";
+    flags.push(`<span class="hist-rating-verdict hist-health-intervene" title="${escapeAttr(String(fnote))}">DEGRADED${to}</span>`);
+  }
+  const oodOpps = Array.isArray(verdict.ood_opponents) ? verdict.ood_opponents.filter(Boolean) : [];
+  if (oodOpps.length) {
+    const onote = verdict.ood_note || `Opponents ${oodOpps.join(", ")} featurized out-of-distribution (radius mismatch); excluded from the pinned anchor.`;
+    flags.push(`<span class="hist-rating-tag hist-rating-tag-muted" title="${escapeAttr(String(onote))}">OOD: ${escapeText(oodOpps.join(", "))}</span>`);
+  }
+  const meta = latest && typeof latest.meta === "object" && latest.meta ? latest.meta : {};
+  const pureEval = latest.pure_eval !== undefined ? latest.pure_eval : meta.pure_eval;
+  if (pureEval === true) flags.push(`<span class="hist-rating-tag">pure eval</span>`);
+  else if (pureEval === false) flags.push(`<span class="hist-rating-tag hist-rating-tag-muted">gating on</span>`);
+  const stageHealth = latest && typeof latest.stage_health === "object" && latest.stage_health ? latest.stage_health : {};
+  if (stageHealth.multi_checkpoint_error) {
+    const played = Array.isArray(stageHealth.opponents_played) && stageHealth.opponents_played.length
+      ? `only ${stageHealth.opponents_played.join(", ")} played` : "no opponents played";
+    flags.push(`<span class="hist-rating-verdict hist-health-intervene" `
+      + `title="${escapeAttr(`checkpoint pass failed — ${played}. ${String(stageHealth.multi_checkpoint_error).split("\n")[0]}`)}">PARTIAL EVAL</span>`);
+  }
+  msDroppedAnchors(latest).forEach(name => {
+    flags.push(`<span class="hist-rating-tag hist-rating-tag-muted" title="permanent anchor missing from this epoch's roster">${escapeText(name)} dropped</span>`);
+  });
+  const flagRow = flags.length ? `<div class="hist-hero-flags">${flags.join("")}</div>` : "";
+
+  return `<div class="hist-strength-hero"><div class="hist-hero-banner">${leftZone}${centerZone}${rightZone}</div>${flagRow}</div>`;
+}
+
 function renderHistStrength(runs) {
   if (!histStrength) return;
   const run = histTrendRun(runs);
@@ -3991,97 +4209,24 @@ function renderHistStrength(runs) {
   }
   const latest = msRows[msRows.length - 1];
   const candPlayer = msCandidatePlayer(latest);
+  const candLabel = candPlayer && candPlayer.label;
   const anchorPlayer = msAnchorPlayer(latest);
   const anchorLabel = (anchorPlayer && anchorPlayer.label) || latest.anchor || "anchor";
   const verdict = latest && typeof latest.verdict === "object" && latest.verdict ? latest.verdict : {};
   const verdictLabel = latest.verdict_label || verdict.label || null;
+  const players = msPlayers(latest);
+  const edges = Array.isArray(latest.edges) ? latest.edges.filter(e => e && typeof e === "object") : [];
 
-  // ---- Row 1: current-strength hero --------------------------------------
-  const heroItems = [];
-  // Verdict pill leads (PROMOTE / REGRESS / INCONCLUSIVE), status-tinted.
-  if (verdictLabel) {
-    heroItems.push(`<div class="hist-hero-verdict ${msVerdictClass(verdictLabel)}">`
-      + `<span class="hist-hero-k">verdict</span>`
-      + `<span class="hist-hero-v">${escapeText(String(verdictLabel).toUpperCase())}</span></div>`);
-  }
-  // Candidate Elo vs the (named) zero-point anchor — the headline strength number.
-  const candElo = candPlayer ? asFinite(candPlayer.elo) : null;
-  if (candElo !== null) {
-    const sign = candElo > 0 ? "+" : "";
-    heroItems.push(`<div class="hist-hero-kpi">`
-      + `<span class="hist-hero-k">Elo vs ${escapeText(anchorLabel)}</span>`
-      + `<span class="hist-hero-v hist-hero-big">${sign}${Math.round(candElo)}</span>`
-      + `<span class="hist-hero-sub">${escapeText(msEloText(candPlayer))}</span></div>`);
-  }
-  // SealBot zero-point winrate — the descriptive cross-lineage progress signal.
-  const sbWr = msSealbotWinrate(latest);
-  if (sbWr !== null) {
-    heroItems.push(`<div class="hist-hero-kpi">`
-      + `<span class="hist-hero-k">SealBot win%</span>`
-      + `<span class="hist-hero-v hist-hero-big">${formatPercent(sbWr)}</span>`
-      + `<span class="hist-hero-sub">zero-point</span></div>`);
-  }
-  // Latest eval epoch + cadence.
-  heroItems.push(`<div class="hist-hero-kpi">`
-    + `<span class="hist-hero-k">eval epoch</span>`
-    + `<span class="hist-hero-v hist-hero-big">e${escapeText(latest.epoch)}</span>`
-    + `<span class="hist-hero-sub">${escapeText(msEvalCadenceSubtitle(msRows) || `${msRows.length} reports`)}</span></div>`);
-  // Δ-Elo 95% CI tripwire (compact horizontal error bar) — keeps a wide
-  // INCONCLUSIVE reading as "low resolution", not a regression.
-  const primary = verdict && typeof verdict.primary === "object" && verdict.primary ? verdict.primary : null;
-  const eloDiff = primary ? asFinite(primary.elo_diff) : null;
-  const ci = primary && Array.isArray(primary.elo_diff_ci95) ? primary.elo_diff_ci95 : null;
-  const ciLo = ci ? asFinite(ci[0]) : null;
-  const ciHi = ci ? asFinite(ci[1]) : null;
-  if (ciLo !== null && ciHi !== null) {
-    const reach = Math.max(Math.abs(ciLo), Math.abs(ciHi), eloDiff !== null ? Math.abs(eloDiff) : 0, 1);
-    const toPct = v => 50 + (Math.max(Math.min(v, reach), -reach) / reach) * 50;
-    const left = toPct(ciLo);
-    const right = toPct(ciHi);
-    const pointPct = eloDiff !== null ? toPct(eloDiff) : 50;
-    const diffTxt = eloDiff !== null ? `${eloDiff > 0 ? "+" : ""}${Math.round(eloDiff)}` : "0";
-    heroItems.push(`<div class="hist-hero-ci" title="Δ Elo 95% CI [${Math.round(ciLo)}, ${Math.round(ciHi)}] — gross-regression tripwire, not a fine-edge test">`
-      + `<span class="hist-hero-k">Δ Elo ${escapeText(diffTxt)} <small>[${Math.round(ciLo)}, ${Math.round(ciHi)}]</small></span>`
-      + `<span class="hist-ci-bar"><span class="hist-ci-track"></span>`
-      + `<span class="hist-ci-zero" style="left:50%"></span>`
-      + `<span class="hist-ci-range" style="left:${left.toFixed(1)}%;width:${Math.max(0, right - left).toFixed(1)}%"></span>`
-      + `<span class="hist-ci-point" style="left:${pointPct.toFixed(1)}%"></span></span></div>`);
-  }
-  // Flags: DEGRADED anchor substitution + OOD opponents + pure-eval / gating.
-  const flags = [];
-  if (verdict.anchor_substituted === true || verdict.degraded === true) {
-    const to = verdict.substituted_to ? ` → ${escapeText(String(verdict.substituted_to))}` : "";
-    const note = verdict.degraded_note || verdict.sealbot_unavailable_reason || "anchor substituted; absolute Elo not calibrated";
-    flags.push(`<span class="hist-rating-verdict hist-health-intervene" title="${escapeAttr(String(note))}">DEGRADED${to}</span>`);
-  }
-  const oodOpps = Array.isArray(verdict.ood_opponents) ? verdict.ood_opponents.filter(Boolean) : [];
-  if (oodOpps.length) {
-    const note = verdict.ood_note || `Opponents ${oodOpps.join(", ")} featurized out-of-distribution (radius mismatch); excluded from the pinned anchor.`;
-    flags.push(`<span class="hist-rating-tag hist-rating-tag-muted" title="${escapeAttr(String(note))}">OOD: ${escapeText(oodOpps.join(", "))}</span>`);
-  }
-  const meta = latest && typeof latest.meta === "object" && latest.meta ? latest.meta : {};
-  const pureEval = latest.pure_eval !== undefined ? latest.pure_eval : meta.pure_eval;
-  if (pureEval === true) flags.push(`<span class="hist-rating-tag">pure eval</span>`);
-  else if (pureEval === false) flags.push(`<span class="hist-rating-tag hist-rating-tag-muted">gating on</span>`);
-  // PARTIAL EVAL tripwire: the concurrent checkpoint pass failed (e.g. a CUDA
-  // error) after some edges already played — this epoch's ratings come from a
-  // fraction of the budget and must not read as a full report.
-  const stageHealth = latest && typeof latest.stage_health === "object" && latest.stage_health ? latest.stage_health : {};
-  if (stageHealth.multi_checkpoint_error) {
-    const played = Array.isArray(stageHealth.opponents_played) && stageHealth.opponents_played.length
-      ? `only ${stageHealth.opponents_played.join(", ")} played` : "no opponents played";
-    flags.push(`<span class="hist-rating-verdict hist-health-intervene" `
-      + `title="${escapeAttr(`checkpoint pass failed — ${played}. ${String(stageHealth.multi_checkpoint_error).split("\n")[0]}`)}">PARTIAL EVAL</span>`);
-  }
-  msDroppedAnchors(latest).forEach(name => {
-    flags.push(`<span class="hist-rating-tag hist-rating-tag-muted" title="permanent anchor missing from this epoch's roster">${escapeText(name)} dropped</span>`);
-  });
-  if (flags.length) heroItems.push(`<div class="hist-hero-flags">${flags.join("")}</div>`);
-  const verdictNote = verdict && verdict.note ? `<div class="hist-hero-note">${escapeText(String(verdict.note))}</div>` : "";
-  // Hero is a full-width banner spanning the whole grid (grid-column:1/-1).
-  const heroBlock = `<div class="hist-strength-hero"><div class="hist-hero">${heroItems.join("")}</div>${verdictNote}</div>`;
+  // ---- Hero (full-width banner) ------------------------------------------
+  const heroBlock = msStrengthHero(latest, candPlayer, anchorLabel, verdict, verdictLabel, msRows);
 
-  // ---- Row 2: ONE learning curve (candidate Elo vs epoch + CI band) -------
+  // ---- Centerpiece: Strix-pinned forest ladder ---------------------------
+  const ladderCard = renderStrixForestLadder(players, edges, anchorLabel, msRows.length, candLabel, asFinite(latest.epoch));
+
+  // ---- Pentanomial & paired-variance -------------------------------------
+  const pentCard = renderPentanomialPanel(edges, anchorLabel);
+
+  // ---- Learning curves (Elo vs anchor + anchor paired win%) --------------
   const msEpochs = msRows.map(row => Number(row.epoch));
   const msElo = msRows.map(row => asFinite((msCandidatePlayer(row) || {}).elo));
   const charts = [];
@@ -4092,12 +4237,28 @@ function renderHistStrength(runs) {
     });
     const bandLo = ciRows.map(c => (c ? asFinite(c[0]) : null));
     const bandHi = ciRows.map(c => (c ? asFinite(c[1]) : null));
+    const candSeries = [{ label: "candidate", color: "var(--accent)", values: msElo, width: 1.8, points: true }];
+    // Anchor guide-lines REDRAWN per eval (main5/main6/champion Elos wobble),
+    // plus the pinned anchor=0 rail. Data-driven off role, capped to avoid clutter.
+    const guideLabels = players
+      .filter(p => (p.role === "anchor" && !p.is_anchor) || p.role === "champion")
+      .map(p => p.label);
+    guideLabels.forEach(lab => {
+      const isChamp = players.some(p => p.label === lab && p.role === "champion");
+      candSeries.push({
+        label: lab,
+        color: isChamp ? "#f5c542" : "var(--muted)",
+        width: 1,
+        values: msRows.map(r => asFinite((msPlayers(r).find(p => p.label === lab) || {}).elo)),
+      });
+    });
+    candSeries.push({ label: `${anchorLabel}=0`, color: "var(--accent)", width: 1, values: msEpochs.map(() => 0) });
     const t = histChartSvg({
       id: "strengthElo",
       title: `Eval Elo (${anchorLabel}=0)`,
       subtitle: msEvalCadenceSubtitle(msRows),
       epochs: msEpochs,
-      series: [{ label: "candidate", color: "var(--accent)", values: msElo, width: 1.8, points: true }],
+      series: candSeries,
       band: histSeriesCount(bandLo) >= 2 ? { lo: bandLo, hi: bandHi, color: "rgba(39,215,230,0.12)" } : null,
       tip: [
         { label: "Elo", values: msElo, fmt: value => formatDecimal(value, 0) },
@@ -4107,60 +4268,352 @@ function renderHistStrength(runs) {
       format: value => formatDecimal(value, 0),
       latest: `${formatDecimal(histLatestNonNull(msElo), 0)} Elo`,
     });
-    if (t) charts.push(t);
+    if (t) charts.push(`<div class="hist-strength-card">${t}</div>`);
   }
-  // SealBot zero-point winrate companion — the drift-immune progress signal.
-  const sbWrSeries = msRows.map(row => msSealbotWinrate(row));
-  if (histSeriesCount(sbWrSeries) >= 2) {
-    const sbCi = msRows.map(row => {
-      const e = (Array.isArray(row.edges) ? row.edges : []).find(
-        x => x && String(x.opponent || x.role || "").toLowerCase() === "sealbot");
-      if (e && Array.isArray(e.winrate_ci95)) return e.winrate_ci95;
-      return Array.isArray(row.sealbot_winrate_ci95) ? row.sealbot_winrate_ci95 : null;
-    });
-    const sbLo = sbCi.map(c => (c ? asFinite(c[0]) : null));
-    const sbHi = sbCi.map(c => (c ? asFinite(c[1]) : null));
-    const sbHalf = msEpochs.map(() => 0.5);
+  // Anchor paired win% companion — data-driven title/band; 50% parity ref line.
+  const wrSeries = msRows.map(row => msAnchorWinrate(row));
+  const wrTitle = `${anchorLabel} paired win%`;
+  if (histSeriesCount(wrSeries) >= 2) {
+    const wrCi = msRows.map(row => msAnchorWinrateCi(row));
+    const wrLo = wrCi.map(c => (c ? asFinite(c[0]) : null));
+    const wrHi = wrCi.map(c => (c ? asFinite(c[1]) : null));
+    const half = msEpochs.map(() => 0.5);
     const t = histChartSvg({
-      id: "strengthSealbot",
-      title: "SealBot win%",
+      id: "strengthAnchorWr",
+      title: wrTitle,
       subtitle: msEvalCadenceSubtitle(msRows),
       epochs: msEpochs,
       domain: [0, 1],
       series: [
-        { label: "win rate", color: "#36d399", values: sbWrSeries, width: 1.8, points: true },
-        { label: "50%", color: "var(--muted)", values: sbHalf, width: 1 },
+        { label: "win rate", color: "#36d399", values: wrSeries, width: 1.8, points: true },
+        { label: "50% parity", color: "var(--muted)", values: half, width: 1 },
       ],
-      band: histSeriesCount(sbLo) >= 2 ? { lo: sbLo, hi: sbHi, color: "rgba(54,211,153,0.12)" } : null,
+      band: histSeriesCount(wrLo) >= 2 ? { lo: wrLo, hi: wrHi, color: "rgba(54,211,153,0.12)" } : null,
       tip: [
-        { label: "win%", values: sbWrSeries, fmt: value => formatPercent(value) },
-        { label: "lo", values: sbLo, fmt: value => formatPercent(value) },
-        { label: "hi", values: sbHi, fmt: value => formatPercent(value) },
+        { label: "win%", values: wrSeries, fmt: value => formatPercent(value) },
+        { label: "lo", values: wrLo, fmt: value => formatPercent(value) },
+        { label: "hi", values: wrHi, fmt: value => formatPercent(value) },
       ],
       format: value => formatPercent(value),
-      latest: formatPercent(histLatestNonNull(sbWrSeries)),
+      latest: formatPercent(histLatestNonNull(wrSeries)),
     });
-    if (t) charts.push(t);
+    if (t) charts.push(`<div class="hist-strength-card">${t}</div>`);
+  } else {
+    // histChartSvg returns '' for <2 points — degrade to a "collecting" note so
+    // the single-eval epoch (e5) reads as "activates at ≥2 evals", not missing.
+    charts.push(`<div class="hist-strength-card"><div class="hist-insp-group">`
+      + `<span class="hist-insp-group-title">${escapeText(wrTitle)}</span>`
+      + `<div class="hist-hero-note">Trajectory activates at ≥2 evals — collecting (${msRows.length} report${msRows.length === 1 ? "" : "s"} so far).</div>`
+      + `</div></div>`);
   }
-  // Each curve becomes a peer card in the grid (not a stacked two-row block).
-  const curveCards = charts.map(c => `<div class="hist-strength-card">${c}</div>`).join("");
+  const curveCards = charts.join("");
 
-  // ---- Opponent cards: top BT rungs + per-opponent W-L (each its own card) -
-  const opponentCards = msStrengthOpponentPanel(run, latest);
-  // ---- Latest eval detail: every edge of the newest report ----------------
+  // ---- Supporting cards (behind the disclosure) --------------------------
+  const provCard = renderEvalProvenance(latest);
   const evalDetailCard = msEvalDetailCard(latest);
+  const opponentCards = msStrengthOpponentPanel(run, latest);
+  const moreInner = [provCard, evalDetailCard, opponentCards].filter(Boolean).join("");
+  const moreBlock = moreInner
+    ? `<details class="hist-strength-more-wrap"><summary>Provenance, per-edge detail &amp; pool ladder</summary>`
+      + `<div class="hist-strength-grid">${moreInner}</div></details>`
+    : "";
 
   const caption = (runs || []).length > 1
     ? `<div class="hist-trends-caption">Strength &amp; eval: ${escapeText((run && run.name) || "latest run")}</div>`
     : `<div class="hist-trends-caption">Strength &amp; eval</div>`;
-  // Single responsive grid: full-width hero banner + four equal-weight cards
-  // (Elo curve | SealBot curve | BT ladder | latest W-L) that auto-fit columns.
-  histStrength.innerHTML = `${caption}<div class="hist-strength-grid">${heroBlock}${curveCards}${evalDetailCard}${opponentCards}</div>`;
+  // Primary glance grid: hero + forest ladder + pentanomial + curves; the
+  // supporting cards sit behind the disclosure so the 3-second read stays clean.
+  histStrength.innerHTML = `${caption}<div class="hist-strength-grid">${heroBlock}${ladderCard}${pentCard}${curveCards}${moreBlock}</div>`;
   histStrength.hidden = false;
 }
 
+// CENTERPIECE — the anchor-pinned competitive forest ladder. A single custom
+// shared-scale SVG: ONE absolute Elo axis with a bold anchor=0 zero-rail through
+// every lane; each of ALL players is a point-dot + 95% CI whisker (statistical
+// overlap is the pre-attentive headline), carrying an inline 5-cell pentanomial
+// strip (NEUTRAL middle cell = "split (score=1)", NOT draw), role/weight/paired/
+// profile badges, and two SEPARATE candidate delta chips (+Δ vs champion and
+// −Δ to anchors). Anchor-data-driven off is_anchor / is_candidate / role /
+// edge.paired / edge.weight / opponent_search_profile — never hard-codes an
+// opponent name. Returns "" when no player carries a finite Elo. Do NOT route
+// through histChartSvg (epoch-x-axis, returns '' for n<2).
+function renderStrixForestLadder(players, edges, anchor, historyLen, candLabel, evalEpoch) {
+  const rows = (players || [])
+    .filter(p => p && typeof p === "object" && asFinite(p.elo) !== null)
+    .slice()
+    .sort((a, b) => asFinite(b.elo) - asFinite(a.elo));
+  if (!rows.length) return "";
+  const anchorLc = String(anchor || "").toLowerCase();
+  const edgeOf = label => (edges || []).find(e => e
+    && String(e.opponent || e.kind || e.role || "").toLowerCase() === String(label || "").toLowerCase()) || null;
+  const isCand = p => p.is_candidate === true || (candLabel && p.label === candLabel);
+
+  // Shared absolute Elo domain (include the anchor 0), padded.
+  const vals = [];
+  rows.forEach(p => {
+    vals.push(asFinite(p.elo));
+    const ci = Array.isArray(p.elo_ci95) ? p.elo_ci95 : null;
+    if (ci) { const lo = asFinite(ci[0]); const hi = asFinite(ci[1]); if (lo !== null) vals.push(lo); if (hi !== null) vals.push(hi); }
+  });
+  vals.push(0);
+  let dmin = Math.min(...vals);
+  let dmax = Math.max(...vals);
+  const pad = (dmax - dmin) * 0.06 || 20;
+  dmin -= pad; dmax += pad;
+
+  const W = 1000, rowH = 46, top = 50;
+  const H = top + rows.length * rowH + 20;
+  const X0 = 252, X1 = 712, pentX0 = 744, pentX1 = 884, readoutX = 890;
+  const ax = e => X0 + ((e - dmin) / (dmax - dmin)) * (X1 - X0);
+  const rowY = i => top + i * rowH + rowH / 2;
+  const yTop = top - 8, yBot = rowY(rows.length - 1) + 14;
+
+  let s = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${escapeAttr(anchor)}-pinned Elo forest ladder">`;
+  // Gridlines + axis labels (5 ticks).
+  for (let k = 0; k <= 4; k++) {
+    const t = dmin + (k / 4) * (dmax - dmin);
+    const x = ax(t);
+    s += `<line class="hist-ladder-grid" x1="${x.toFixed(1)}" y1="${yTop}" x2="${x.toFixed(1)}" y2="${yBot}"></line>`;
+    s += `<text class="hist-ladder-axis" x="${x.toFixed(1)}" y="${(top - 12).toFixed(0)}" text-anchor="middle">${Math.round(t)}</text>`;
+  }
+  // Permanent-anchor dashed reference lines (role==anchor, not the pinned 0).
+  rows.filter(p => p.role === "anchor" && !p.is_anchor).forEach(p => {
+    const x = ax(asFinite(p.elo));
+    s += `<line class="hist-ladder-anchorln" x1="${x.toFixed(1)}" y1="${yTop}" x2="${x.toFixed(1)}" y2="${yBot}"></line>`;
+  });
+  // Bold anchor=0 zero-rail through every lane.
+  if (dmin <= 0 && dmax >= 0) {
+    const zx = ax(0);
+    s += `<line class="hist-ladder-zerorail" x1="${zx.toFixed(1)}" y1="${yTop}" x2="${zx.toFixed(1)}" y2="${yBot}"></line>`;
+    s += `<text class="hist-ladder-axis" x="${zx.toFixed(1)}" y="${(H - 5).toFixed(0)}" text-anchor="middle" fill="var(--accent)">⚓ ${escapeText(anchor)} = 0</text>`;
+  }
+  s += `<text class="hist-ladder-axis" x="8" y="${(top - 12).toFixed(0)}">PLAYER</text>`;
+  s += `<text class="hist-ladder-axis" x="${pentX0}" y="${(top - 12).toFixed(0)}">PENTANOMIAL</text>`;
+
+  const champElo = (() => { const c = rows.find(p => p.role === "champion"); return c ? asFinite(c.elo) : null; })();
+
+  rows.forEach((p, i) => {
+    const y = rowY(i);
+    const cand = isCand(p);
+    const elo = asFinite(p.elo);
+    const ed = p.is_anchor || p.role === "anchor" || p.role === "champion" || (!cand) ? edgeOf(p.label) : null;
+    if (cand) s += `<rect class="hist-ladder-candband" x="6" y="${(y - 18).toFixed(1)}" width="${W - 12}" height="36" rx="6"></rect>`;
+    // Identity: glyph + label + badges.
+    const glyph = p.is_anchor ? "⚓" : cand ? "★" : p.role === "champion" ? "♛" : "·";
+    const gcol = p.is_anchor ? "var(--accent)" : cand ? "#36d399" : p.role === "champion" ? "#f5c542" : "var(--muted)";
+    s += `<text x="12" y="${(y + 4).toFixed(1)}" font-size="13" fill="${gcol}">${glyph}</text>`;
+    s += `<text x="30" y="${(y - 2).toFixed(1)}" font-size="12" font-weight="${cand ? 800 : 600}" fill="var(--text)">${escapeText(p.label)}</text>`;
+    const badges = [];
+    if (p.is_anchor) badges.push([`ANCHOR·0`, "var(--accent)"]);
+    else if (p.role === "anchor") badges.push(["perm-anchor", "var(--muted)"]);
+    else if (p.role === "champion") badges.push(["champion", "#f5c542"]);
+    else if (cand) badges.push(["candidate", "#36d399"]);
+    if (ed) {
+      badges.push([ed.paired ? "paired" : "UNPAIRED", ed.paired ? "var(--muted)" : "#5f6b78"]);
+      const w = asFinite(ed.weight);
+      if (w !== null) badges.push([`x${formatDecimal(w, w < 1 ? 1 : 0)}`, w < 1 ? "#5f6b78" : "var(--muted)"]);
+      if (ed.opponent_search_profile) badges.push([String(ed.opponent_search_profile), "var(--muted)"]);
+    }
+    let bx = 30;
+    badges.forEach(b => { s += `<text x="${bx.toFixed(1)}" y="${(y + 11).toFixed(1)}" font-size="8" fill="${b[1]}">${escapeText(b[0])}</text>`; bx += String(b[0]).length * 4.7 + 8; });
+    // Elo lane: dot + 95% whisker on the shared axis.
+    const laneCol = cand ? "var(--accent)" : p.is_anchor ? "var(--accent)" : p.role === "champion" ? "#f5c542" : "var(--p0)";
+    const ci = Array.isArray(p.elo_ci95) ? p.elo_ci95 : null;
+    const lo = ci ? asFinite(ci[0]) : null;
+    const hi = ci ? asFinite(ci[1]) : null;
+    const dotx = ax(elo);
+    if (lo !== null && hi !== null && hi > lo) {
+      const xlo = ax(lo), xhi = ax(hi);
+      const dash = p.is_anchor === false && !ed && !cand ? "" : "";
+      s += `<line x1="${xlo.toFixed(1)}" y1="${y}" x2="${xhi.toFixed(1)}" y2="${y}" stroke="${laneCol}" stroke-width="1.4" opacity="0.85"${dash}></line>`;
+      s += `<line x1="${xlo.toFixed(1)}" y1="${(y - 5).toFixed(1)}" x2="${xlo.toFixed(1)}" y2="${(y + 5).toFixed(1)}" stroke="${laneCol}" stroke-width="1.2"></line>`;
+      s += `<line x1="${xhi.toFixed(1)}" y1="${(y - 5).toFixed(1)}" x2="${xhi.toFixed(1)}" y2="${(y + 5).toFixed(1)}" stroke="${laneCol}" stroke-width="1.2"></line>`;
+    }
+    s += `<circle cx="${dotx.toFixed(1)}" cy="${y}" r="${cand ? 5 : 4}" fill="${laneCol}" stroke="var(--bg)" stroke-width="1.5"></circle>`;
+    s += `<text x="${dotx.toFixed(1)}" y="${(y - 9).toFixed(1)}" text-anchor="middle" font-size="9.5" font-weight="700" fill="${laneCol}">${elo === 0 ? "0" : (elo > 0 ? "+" : "") + Math.round(elo)}</text>`;
+    // Candidate: two physically-separate delta chips + ghost/projection gate.
+    if (cand) {
+      const anchorDeltas = rows
+        .filter(q => (q.is_anchor || q.role === "anchor") && q.label !== p.label)
+        .map(q => ({ label: q.label, d: elo - asFinite(q.elo) }))
+        .sort((a, b) => Math.abs(a.d) - Math.abs(b.d))
+        .slice(0, 2)
+        .map(a => `${a.d > 0 ? "+" : ""}${Math.round(a.d)} to ${a.label}`);
+      if (anchorDeltas.length) s += `<text x="${dotx.toFixed(1)}" y="${(y + 15).toFixed(1)}" text-anchor="middle" font-size="8.5" fill="#f5c542">▲ ${escapeText(anchorDeltas.join(" · "))}</text>`;
+      if (champElo !== null) {
+        const dch = elo - champElo;
+        s += `<text x="${(ax(champElo) + 8).toFixed(1)}" y="${(y + 15).toFixed(1)}" font-size="8.5" fill="#36d399">${dch > 0 ? "+" : ""}${Math.round(dch)} vs champion →</text>`;
+      }
+      if (historyLen >= 2) {
+        s += `<circle cx="${(dotx - 26).toFixed(1)}" cy="${y}" r="3.2" fill="none" stroke="#5f6b78" stroke-width="1" stroke-dasharray="2 2"></circle>`;
+      }
+    }
+    // Inline pentanomial strip + readout.
+    const pent = ed ? msPentanomial(ed) : null;
+    if (pent) {
+      const tot = pent.reduce((a, b) => a + b, 0) || 1;
+      const sw = pentX1 - pentX0;
+      let px = pentX0;
+      pent.forEach((c, k) => {
+        const w = (c / tot) * sw;
+        if (w > 0) {
+          s += `<rect x="${(px + 0.6).toFixed(1)}" y="${(y - 6).toFixed(1)}" width="${Math.max(0, w - 1.2).toFixed(1)}" height="12" fill="${MS_PENT_COLORS[k]}" rx="1"><title>${escapeAttr(MS_PENT_LABELS[k] + ": " + c)}</title></rect>`;
+          if (w > 13) s += `<text x="${(px + w / 2).toFixed(1)}" y="${(y + 3.5).toFixed(1)}" text-anchor="middle" font-size="8" fill="#04121a" font-weight="700">${c}</text>`;
+        }
+        px += w;
+      });
+      const nEff = asFinite(ed.n_eff);
+      const decided = asFinite(ed.decided);
+      if (nEff !== null && decided !== null) s += `<text x="${readoutX}" y="${(y - 1).toFixed(1)}" font-size="9" fill="var(--muted)">${formatDecimal(nEff, 1)}/${Math.round(decided)}</text>`;
+      const wc = asFinite(ed.physical_wins_cand);
+      const wo = asFinite(ed.physical_wins_strix);
+      const wa = asFinite(ed.wins_a);
+      const wb = asFinite(ed.wins_b);
+      if (wc !== null && wo !== null) s += `<text x="${readoutX}" y="${(y + 10).toFixed(1)}" font-size="9" fill="var(--muted)">score ${Math.round(wc)}–${Math.round(wo)}</text>`;
+      else if (wa !== null && wb !== null) s += `<text x="${readoutX}" y="${(y + 10).toFixed(1)}" font-size="9" fill="var(--muted)">score ${Math.round(wa)}–${Math.round(wb)}</text>`;
+    } else if (ed) {
+      const wr = asFinite(ed.winrate);
+      const wrTxt = wr !== null ? `wr ${formatPercent(wr)}` : "";
+      s += `<text x="${pentX0}" y="${(y + 2).toFixed(1)}" font-size="9" fill="#5f6b78" font-style="italic">unpaired · no pentanomial ${escapeText(wrTxt)}</text>`;
+    }
+    // Per-rung replay deep-link (SVG text carrying the delegated data attribute).
+    const rungEp = (() => { const m = /ep(\d+)$/.exec(String(p.label || "")); return m ? Number(m[1]) : (evalEpoch !== null && evalEpoch !== undefined ? evalEpoch : null); })();
+    if (rungEp !== null) {
+      s += `<text class="hist-ladder-replay" x="${W - 10}" y="${(y + 3).toFixed(1)}" text-anchor="end" font-size="8.5" data-hist-eval-epoch="${escapeAttr(rungEp)}" title="Show evaluation replays for epoch ${escapeAttr(rungEp)}">↺ e${escapeText(rungEp)}</text>`;
+    }
+  });
+  s += `</svg>`;
+
+  const legend = `<div class="hist-ladder-legend">`
+    + MS_PENT_COLORS.map((c, k) => `<span class="hist-ladder-lg"><span class="hist-ladder-sw" style="background:${c}"></span>${escapeText(MS_PENT_LABELS[k])}</span>`).join("")
+    + `</div>`;
+  const note = `<div class="hist-hero-note"><b>Overlap is the headline.</b> Point + 95% CI whisker on one shared absolute Elo axis — heavily overlapping whiskers are statistically tied, do not rank them. The middle pentanomial cell is an <b>even split (1W–1L, score=1)</b>, not a draw; pooled "score" is game points (draws split). The dotted candidate ghost is a movement/projection layer that activates only at ≥2 evals.</div>`;
+  return `<div class="hist-strength-card hist-strength-wide"><div class="hist-insp-group-title">`
+    + `Competitive BT ladder — ${escapeText(anchor)}-pinned forest plot · shared absolute Elo axis</div>`
+    + `${s}${legend}${note}</div>`;
+}
+
+// Pentanomial & paired-variance panel: one diverging 5-segment bar per PAIRED
+// edge, centered on the split midline (losses left, wins right). Surfaces
+// outcome SHAPE + sweep%/split%/n_eff/pair_se readouts, plus an unpaired-anchor
+// contrast note. Returns "" when no paired edge carries a pentanomial.
+function renderPentanomialPanel(edges, anchor) {
+  const paired = (edges || []).filter(e => e && msPentanomial(e));
+  if (!paired.length) return "";
+  // Order: put the pinned anchor first when present, then the rest.
+  const anchorLc = String(anchor || "").toLowerCase();
+  paired.sort((a, b) => {
+    const aa = String(a.opponent || a.kind || "").toLowerCase() === anchorLc ? 0 : 1;
+    const bb = String(b.opponent || b.kind || "").toLowerCase() === anchorLc ? 0 : 1;
+    return aa - bb;
+  });
+  const W = 470, rowHt = 56, H = paired.length * rowHt + 14;
+  const cx = W * 0.5, half = W * 0.34;
+  let s = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Pentanomial pair-outcome distributions">`;
+  paired.forEach((ed, i) => {
+    const pent = msPentanomial(ed);
+    const y = 18 + i * rowHt;
+    const tot = pent.reduce((a, b) => a + b, 0) || 1;
+    const label = String(ed.opponent || ed.kind || ed.role || "?");
+    s += `<text x="6" y="${(y - 4).toFixed(1)}" font-size="10.5" font-weight="700" fill="var(--text)">${escapeText(label)}</text>`;
+    const sweep = ((pent[0] + pent[4]) / tot * 100).toFixed(0);
+    const split = (pent[2] / tot * 100).toFixed(0);
+    const nEff = asFinite(ed.n_eff);
+    const decided = asFinite(ed.decided);
+    const pairSe = asFinite(ed.pair_se);
+    const meta = [];
+    if (nEff !== null && decided !== null) meta.push(`n_eff ${formatDecimal(nEff, 1)}/${Math.round(decided)}`);
+    if (pairSe !== null) meta.push(`se .${(pairSe * 1000).toFixed(0)}`);
+    meta.push(`${tot}pr`);
+    s += `<text x="${W - 6}" y="${(y - 4).toFixed(1)}" font-size="9" text-anchor="end" fill="var(--muted)">${escapeText(meta.join(" · "))}</text>`;
+    const denom = Math.max(pent[0] + pent[1], pent[3] + pent[4], 1) + pent[2] / 2 + 0.5;
+    const unit = half / denom;
+    const barY = y + 6, bh = 13;
+    // Center split cell.
+    s += `<rect x="${(cx - pent[2] / 2 * unit).toFixed(1)}" y="${barY}" width="${(pent[2] * unit).toFixed(1)}" height="${bh}" fill="${MS_PENT_COLORS[2]}"></rect>`;
+    // Losses grow left.
+    let lx = cx - pent[2] / 2 * unit;
+    [1, 0].forEach(k => { const w = pent[k] * unit; lx -= w; if (w > 0) s += `<rect x="${(lx + 0.5).toFixed(1)}" y="${barY}" width="${Math.max(0, w - 1).toFixed(1)}" height="${bh}" fill="${MS_PENT_COLORS[k]}"></rect>`; });
+    // Wins grow right.
+    let rx = cx + pent[2] / 2 * unit;
+    [3, 4].forEach(k => { const w = pent[k] * unit; if (w > 0) s += `<rect x="${(rx + 0.5).toFixed(1)}" y="${barY}" width="${Math.max(0, w - 1).toFixed(1)}" height="${bh}" fill="${MS_PENT_COLORS[k]}"></rect>`; rx += w; });
+    s += `<line x1="${cx}" y1="${(barY - 3).toFixed(1)}" x2="${cx}" y2="${(barY + bh + 3).toFixed(1)}" stroke="#5f6b78" stroke-width="1"></line>`;
+    s += `<text x="${(cx - half - 2).toFixed(1)}" y="${(barY + bh - 2).toFixed(1)}" text-anchor="end" font-size="8" fill="#ff7a7a">◀ ${pent[0] + pent[1]} loss</text>`;
+    s += `<text x="${(cx + half + 2).toFixed(1)}" y="${(barY + bh - 2).toFixed(1)}" font-size="8" fill="#36d399">${pent[3] + pent[4]} win ▶</text>`;
+    s += `<text x="${cx}" y="${(barY + bh + 13).toFixed(1)}" text-anchor="middle" font-size="8" fill="var(--muted)">sweep ${sweep}% · split ${split}% · [${pent.join(",")}]</text>`;
+  });
+  s += `</svg>`;
+  // Unpaired-anchor / SealBot contrast note (only when an unpaired edge exists).
+  const unpaired = (edges || []).find(e => e && !e.paired && asFinite(e.winrate) !== null && !msPentanomial(e));
+  let contrast = `<div class="hist-hero-note">"sweep" = (LL+WW)/pairs (both games same result); "split" = 1W–1L pairs (score=1) — decisive games, not draws. CRN efficiency (n_eff/decided) is near-uniform across paired edges, so pair_se spread tracks <b>n_pairs</b>, not pairing.`;
+  if (unpaired) {
+    const wr = asFinite(unpaired.winrate);
+    const ci = Array.isArray(unpaired.winrate_ci95) ? unpaired.winrate_ci95 : null;
+    const ciTxt = ci && asFinite(ci[0]) !== null && asFinite(ci[1]) !== null ? ` [${formatPercent(asFinite(ci[0]))}, ${formatPercent(asFinite(ci[1]))}]` : "";
+    const wTxt = asFinite(unpaired.weight) !== null ? ` ×${formatDecimal(asFinite(unpaired.weight), 1)}` : "";
+    contrast += ` <b>${escapeText(String(unpaired.opponent || unpaired.kind || "unpaired"))}</b> is unpaired${escapeText(wTxt)} — no pentanomial, only a wide winrate CI ${formatPercent(wr)}${escapeText(ciTxt)}.`;
+  }
+  contrast += `</div>`;
+  return `<div class="hist-strength-card"><div class="hist-insp-group-title">Pentanomial &amp; paired-variance · outcome shape</div>${s}${contrast}</div>`;
+}
+
+// Eval provenance & budget: config chip strip + D_pool convergence + wall-time,
+// a stacked C_deep allocation micro-bar (from stage_health.allocation), and
+// puct-vs-selfplay search-regime chips (from opponent_search_profiles). Returns
+// "" when neither the config nor the stage allocation is present.
+function renderEvalProvenance(latest) {
+  const cfg = latest && typeof latest.eval_config === "object" && latest.eval_config ? latest.eval_config : {};
+  const health = latest && typeof latest.stage_health === "object" && latest.stage_health ? latest.stage_health : {};
+  const alloc = health && typeof health.allocation === "object" && health.allocation ? health.allocation : null;
+  const profiles = health && typeof health.opponent_search_profiles === "object" && health.opponent_search_profiles ? health.opponent_search_profiles : null;
+  const dPool = health && typeof health.d_pool === "object" && health.d_pool ? health.d_pool : {};
+
+  const chips = [];
+  const chip = (label, value, cls) => {
+    if (value === null || value === undefined || value === "") return;
+    chips.push(`<div class="hist-chip${cls ? " " + cls : ""}">${escapeText(label)} <b>${escapeText(String(value))}</b></div>`);
+  };
+  chip("games", asFinite(cfg.games_budget));
+  chip("full_visits", asFinite(cfg.full_search_visits) !== null ? asFinite(cfg.full_search_visits) : asFinite(latest.full_search_visits));
+  chip("strix_sims", asFinite(cfg.strix_sims));
+  chip("opening_plies", asFinite(cfg.opening_plies));
+  chip("eval_every", asFinite(cfg.eval_every));
+  const perms = Array.isArray(cfg.permanent_anchors) ? cfg.permanent_anchors : [];
+  if (perms.length) chip("perm-anchors", perms.join(", "));
+  if (dPool.converged === true) chips.push(`<div class="hist-chip good">D_pool <b>converged ✓</b></div>`);
+  else if (dPool.status) chip("D_pool", dPool.status);
+  const elapsed = asFinite(latest.elapsed_seconds);
+  if (elapsed !== null) chip("wall", `${Math.round(elapsed)}s`);
+  if (!chips.length && !alloc && !profiles) return "";
+
+  let allocBar = "";
+  if (alloc) {
+    const entries = Object.keys(alloc)
+      .map(k => ({ k, v: asFinite(alloc[k]) }))
+      .filter(e => e.v !== null && e.v > 0);
+    const tot = entries.reduce((a, e) => a + e.v, 0) || 1;
+    const cols = ["var(--accent)", "var(--p0)", "#7fe3b8", "#f5c542", "var(--muted)"];
+    const segs = entries.map((e, i) => `<span class="hist-alloc-seg" style="width:${(e.v / tot * 100).toFixed(1)}%;background:${cols[i % cols.length]}" title="${escapeAttr(e.k + ": " + e.v)}">${escapeText(e.k)}:${e.v}</span>`).join("");
+    allocBar = `<div class="hist-alloc-wrap"><span class="hist-hero-sub">C_deep alloc</span><div class="hist-alloc">${segs}</div></div>`;
+  }
+
+  let regimeChips = "";
+  if (profiles) {
+    const rc = Object.keys(profiles).map(k => {
+      const prof = String(profiles[k] || "");
+      const cls = prof.toLowerCase().includes("selfplay") ? " warn" : "";
+      return `<div class="hist-chip${cls}">${escapeText(k)} <b>${escapeText(prof)}</b></div>`;
+    }).join("");
+    if (rc) regimeChips = `<div class="hist-chiprow" style="margin-top:6px">${rc}`
+      + `<span class="hist-hero-sub" style="align-self:center"> ← puct(anchors) vs selfplay(cand,champion) search-regime asymmetry biases raw winrates.</span></div>`;
+  }
+
+  return `<div class="hist-strength-card hist-strength-wide"><div class="hist-insp-group-title">Eval provenance &amp; budget · config · stage-C allocation · search regimes</div>`
+    + `<div class="hist-chiprow">${chips.join("")}</div>${allocBar}${regimeChips}</div>`;
+}
+
 // Latest-report eval detail card: one row per EDGE of the newest multistage
-// report — opponent (+role/searcher-profile tags), the physical W–L record,
+// report — opponent (+role/searcher-profile tags), the pooled SCORE record,
 // win% with its 95% CI, and the per-edge Elo point. A PARTIAL banner leads
 // when the checkpoint pass failed (stage_health.multi_checkpoint_error) so a
 // fraction-of-budget report can never read as a full one. Returns "" when the
@@ -4181,11 +4634,14 @@ function msEvalDetailCard(latest) {
       + `<span class="hist-rating-verdict hist-health-intervene">PARTIAL</span> `
       + `checkpoint pass failed (${escapeText(firstLine)}); played: ${escapeText(played)}</div>`);
   }
-  if (health.sealbot_unavailable) {
-    banners.push(`<div class="hist-hero-note">SealBot unavailable: ${escapeText(String(health.sealbot_unavailable))}</div>`);
+  // Generic anchor-unavailable note (was SealBot-specific).
+  const anchorUnavailable = health.anchor_unavailable || health.sealbot_unavailable;
+  if (anchorUnavailable) {
+    banners.push(`<div class="hist-hero-note">Anchor unavailable: ${escapeText(String(anchorUnavailable))}</div>`);
   }
 
-  const rows = edges.map(e => {
+  const bodyRows = edges.map(e => {
+    // Pooled SCORE (relabeled from "physical wins"): game points, draws split.
     const wa = asFinite(e.wins_a);
     const wb = asFinite(e.wins_b);
     const rec = wa !== null && wb !== null ? `${Math.round(wa)}–${Math.round(wb)}` : "—";
@@ -4194,28 +4650,56 @@ function msEvalDetailCard(latest) {
       : "hist-eval-draw";
     const wr = asFinite(e.winrate);
     const ci = Array.isArray(e.winrate_ci95) ? e.winrate_ci95 : null;
-    const ciTxt = ci && asFinite(ci[0]) !== null && asFinite(ci[1]) !== null
-      ? ` [${formatPercent(asFinite(ci[0]))}–${formatPercent(asFinite(ci[1]))}]` : "";
-    const wrTxt = wr !== null ? `${formatPercent(wr)}${ciTxt}` : "";
+    const wrTxt = wr !== null
+      ? `${formatPercent(wr)}${ci && asFinite(ci[0]) !== null && asFinite(ci[1]) !== null ? ` [${formatPercent(asFinite(ci[0]))}–${formatPercent(asFinite(ci[1]))}]` : ""}`
+      : "—";
     const eloPt = asFinite(e.elo_point);
-    const eloTxt = eloPt !== null ? `${eloPt > 0 ? "+" : ""}${Math.round(eloPt)}` : "";
+    const eloTxt = eloPt !== null ? `${eloPt > 0 ? "+" : ""}${Math.round(eloPt)}` : "—";
+    const pent = msPentanomial(e);
+    const pentTxt = pent ? `[${pent.join(",")}]` : "—";
+    const nEff = asFinite(e.n_eff);
+    const decided = asFinite(e.decided);
+    const nEffTxt = nEff !== null ? formatDecimal(nEff, 1) : (decided !== null ? "" : "—");
+    const pairSe = asFinite(e.pair_se);
+    const pairSeTxt = pairSe !== null ? `.${(pairSe * 1000).toFixed(0)}` : "—";
+    const gamesTxt = decided !== null ? `${Math.round(decided)}` : "—";
+    // Role / pairing / weight / regime badges (opponent-agnostic).
     const tags = [];
     if (e.primary) tags.push(`<span class="hist-rating-tag">primary</span>`);
     else if (e.role && e.role !== "checkpoint") tags.push(`<span class="hist-rating-tag hist-rating-tag-muted">${escapeText(String(e.role))}</span>`);
+    tags.push(e.paired
+      ? `<span class="hist-rating-tag hist-rating-tag-muted">paired</span>`
+      : `<span class="hist-rating-tag hist-rating-tag-muted">unpaired</span>`);
+    const w = asFinite(e.weight);
+    if (w !== null) tags.push(`<span class="hist-rating-tag hist-rating-tag-muted">×${formatDecimal(w, w < 1 ? 1 : 0)}</span>`);
     if (e.opponent_search_profile) {
       tags.push(`<span class="hist-rating-tag hist-rating-tag-muted" `
         + `title="searcher the OPPONENT side used (lineage mirrors the candidate's self-play profile; foreign anchors keep the PUCT profile they trained under)">`
         + `${escapeText(String(e.opponent_search_profile))}</span>`);
     }
-    const games = asFinite(e.decided);
-    const gamesTxt = games !== null ? `<span class="hist-hero-sub">${Math.round(games)}g</span>` : "";
-    return `<div class="hist-loss-row hist-eval-pair">`
-      + `<span class="hist-loss-label" title="${escapeAttr(String(e.opponent || ""))}">${escapeText(String(e.opponent || "?"))}${tags.join("")}</span>`
-      + `<span class="hist-eval-record ${lead}" title="physical wins (candidate–opponent)">${rec}</span>`
-      + `<span class="hist-hero-sub" title="win rate [95% CI]">${wrTxt}</span>`
-      + `<span class="hist-hero-sub" title="per-edge Elo point estimate">${eloTxt}</span>`
-      + `${gamesTxt}</div>`;
+    const replay = histEvalReplayLink(latest.epoch, "↺");
+    return `<tr class="hist-eval-trow">`
+      + `<td class="hist-eval-td-l"><b>${escapeText(String(e.opponent || "?"))}</b> ${tags.join(" ")}</td>`
+      + `<td>${escapeText(wrTxt)}</td>`
+      + `<td>${escapeText(eloTxt)}</td>`
+      + `<td class="hist-eval-td-mono">${escapeText(pentTxt)}</td>`
+      + `<td>${escapeText(nEffTxt)}</td>`
+      + `<td>${escapeText(pairSeTxt)}</td>`
+      + `<td class="${lead}" title="pooled game SCORE (draws split), not a decisive W-L sweep">${rec}</td>`
+      + `<td>${escapeText(gamesTxt)}</td>`
+      + `<td>${replay}</td></tr>`;
   }).join("");
+
+  const table = edges.length
+    ? `<div class="hist-eval-scroll"><table class="hist-eval-table"><thead><tr>`
+      + `<th class="hist-eval-td-l">opponent · role / pairing / weight / regime</th>`
+      + `<th>win% [95% CI]</th><th>Elo</th><th>pentanomial</th><th>n_eff</th><th>pair_se</th>`
+      + `<th title="pooled game score (draws split)">score</th><th>games</th><th>replay</th>`
+      + `</tr></thead><tbody>${bodyRows}</tbody></table></div>`
+    : "";
+  const foot = edges.length
+    ? `<div class="hist-hero-note">"score" is the pooled game score (draws split), reconciled against the pentanomial [LL,LD,split,WD,WW]: each LL is 2 opponent points, each WW is 2 candidate points, and split/LD/WD share the pair 1–1. n_eff is a variance-reduced effective N (CRN efficiency ≈0.97–0.99, near-uniform).</div>`
+    : "";
 
   const bits = [];
   const visits = asFinite(latest.full_search_visits);
@@ -4223,9 +4707,9 @@ function msEvalDetailCard(latest) {
   const elapsed = asFinite(latest.elapsed_seconds);
   if (elapsed !== null) bits.push(`${Math.round(elapsed)}s`);
   const sub = bits.length ? ` · ${bits.join(" · ")}` : "";
-  return `<div class="hist-strength-card"><div class="hist-insp-group">`
+  return `<div class="hist-strength-card hist-strength-wide"><div class="hist-insp-group">`
     + `<span class="hist-insp-group-title">Eval detail · e${escapeText(latest.epoch)}${escapeText(sub)}</span>`
-    + `${banners.join("")}${rows}</div></div>`;
+    + `${banners.join("")}${table}${foot}</div></div>`;
 }
 
 // The compact opponent panel for #histStrength: the TOP rungs of the unified BT
@@ -4236,7 +4720,9 @@ function msStrengthOpponentPanel(run, latest) {
   const pool = run && typeof run.eval_pool === "object" && run.eval_pool ? run.eval_pool : null;
   const edges = pool && Array.isArray(pool.edges) ? pool.edges.filter(e => e && typeof e === "object") : [];
   const players = msPlayers(latest);
-  const anchorName = String((pool && pool.anchor) || latest.anchor || "sealbot");
+  // Anchor label is data-driven: pool anchor, then the report anchor, then the
+  // is_anchor player — never a hard-coded "sealbot".
+  const anchorName = String((pool && pool.anchor) || latest.anchor || msAnchorLabel(latest) || "anchor");
 
   // --- Unified BT ladder (top rungs) -------------------------------------
   const eloOf = label => { const p = players.find(x => x && x.label === label); return p ? asFinite(p.elo) : null; };
@@ -4302,9 +4788,13 @@ function msStrengthOpponentPanel(run, latest) {
       const wa = asFinite(raw.physical_wins_a);
       const wb = asFinite(raw.physical_wins_b);
       const wcand = asFinite(raw.physical_wins_cand);
+      // Opponent-side physical count: prefer the pinned-anchor (Strix) count,
+      // then the legacy SealBot count — role/anchor-driven, not SealBot-only.
+      const wopp = asFinite(raw.physical_wins_strix);
       const wsb = asFinite(raw.physical_wins_sealbot);
+      const woppScore = wopp !== null ? wopp : wsb;
       if (wa !== null && wb !== null) { rec.wa += wa; rec.wb += wb; }
-      else if (wcand !== null && wsb !== null) { rec.wa += wcand; rec.wb += wsb; }
+      else if (wcand !== null && woppScore !== null) { rec.wa += wcand; rec.wb += woppScore; }
       else { rec.wa += asFinite(e.wins_a) || 0; rec.wb += asFinite(e.wins_b) || 0; }
       const ep = asFinite(e.epoch);
       if (ep !== null) rec.epochs.push(ep);
@@ -4317,7 +4807,12 @@ function msStrengthOpponentPanel(run, latest) {
       .map(rec => {
         const wa = Math.round(rec.wa); const wb = Math.round(rec.wb);
         const lead = wa > wb ? "hist-eval-win" : wa < wb ? "hist-eval-loss" : "hist-eval-draw";
-        const kindBadge = rec.kind === "sealbot" ? `<span class="hist-rating-tag hist-rating-tag-muted">SealBot ×${formatDecimal(rec.weight, 1)}</span>` : "";
+        // Role/kind/weight-driven badge (was hard-coded to kind==="sealbot").
+        const kb = [];
+        if (rec.kind && rec.kind !== "checkpoint") kb.push(escapeText(String(rec.kind)));
+        const kw = asFinite(rec.weight);
+        if (kw !== null && kw !== 1) kb.push(`×${formatDecimal(kw, 1)}`);
+        const kindBadge = kb.length ? `<span class="hist-rating-tag hist-rating-tag-muted">${kb.join(" ")}</span>` : "";
         const epLast = rec.epochs.length ? Math.max(...rec.epochs) : null;
         const replay = epLast !== null ? histEvalReplayLink(epLast, "↪") : "";
         return `<div class="hist-loss-row hist-eval-pair">`
