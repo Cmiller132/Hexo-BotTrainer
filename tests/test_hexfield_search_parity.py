@@ -146,6 +146,15 @@ class HexfieldStub:
             reply["moves_left_bytes"] = struct.pack(f"<{b}f", *([100.0] * b))
         return reply
 
+    def submit_payload(self, payload: dict) -> dict:
+        # HEXFIELD_ASYNC_EVAL protocol: compute eagerly so the drained result is
+        # byte-identical to the sync __call__ path (the async branch only moves
+        # the device sync; the stub has none).
+        return self.__call__(payload)
+
+    def result(self, handle: dict) -> dict:
+        return handle
+
 
 class DenseStub:
     """Evaluator over dense's payload, which supplies crop flats directly via
@@ -161,6 +170,13 @@ class DenseStub:
         for row in range(b):
             rows.append([int(f) for f in flats_all[int(offsets[row]) : int(offsets[row + 1])]])
         return _stub_reply(rows)
+
+    def submit_payload(self, payload: dict) -> dict:
+        # HEXFIELD_ASYNC_EVAL protocol (see HexfieldStub.submit_payload).
+        return self.__call__(payload)
+
+    def result(self, handle: dict) -> dict:
+        return handle
 
 
 def _crop_center(stones: list[tuple[int, int]]) -> tuple[int, int]:

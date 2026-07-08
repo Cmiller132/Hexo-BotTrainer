@@ -11,6 +11,7 @@ positional layout as `priors_bytes`) when `request_logits` is set.
 
 from __future__ import annotations
 
+import logging
 import os
 
 import numpy as np
@@ -20,6 +21,8 @@ import torch._dynamo  # noqa: F401  (mark_dynamic / config used in the serve pat
 from .constants import NUM_FEATURES, NUM_TOKENS
 from .losses import decode_binned_value, decode_moves_left
 from .model import HexfieldNet
+
+logger = logging.getLogger(__name__)
 
 NBR_SENTINEL = 0xFFFF
 # Upper bound on B * S_pad^2 per group. The 3.8e7 default keeps the fp16
@@ -979,3 +982,70 @@ class HexfieldEvaluator:
         # is positionally identical to priors_bytes. Skipped otherwise.
         logits_flat = logits[legal] if request_logits else None
         return value, ml, priors[legal], logits_flat
+
+
+# Fire the import-time-mismatch warning at most once per process (it is a
+# static property of how hexfield.model was imported, not per-construction).
+_SERVE_ENV_WARNED = False
+
+
+def _warn_if_import_flags_mismatch(role: str) -> None:
+    """Warn once if hexfield.model was imported with any serve kernel gate OFF.
+
+    The import-time flex/triton flags (serve_env.IMPORT_TIME_FLAGS) are read
+    once at ``import hexfield.model`` and cannot be flipped afterward. If the
+    module's already-imported globals disagree with the self-play serve profile
+    (all ON), the evaluator cannot match self-play kernels — surface that so the
+    caller knows to run ``prime_serve_env()`` before importing hexfield.model.
+    """
+    global _SERVE_ENV_WARNED
+    if _SERVE_ENV_WARNED:
+        return
+    from . import model as _model
+
+    # env flag -> model.py module global set at import time.
+    gate_globals = {
+        "HEXFIELD_SERVE_FLEX": "_SERVE_FLEX",
+        "HEXFIELD_FLEX_PAIR": "_FLEX_PAIR",
+        "HEXFIELD_TRITON_CONV": "_TRITON_CONV",
+        "HEXFIELD_TRITON_ATTN": "_TRITON_ATTN",
+        "HEXFIELD_TRITON_CONV_LN": "_TRITON_CONV_LN",
+    }
+    disagree = [
+        env for env, attr in gate_globals.items() if not getattr(_model, attr, False)
+    ]
+    if disagree:
+        _SERVE_ENV_WARNED = True
+        logger.warning(
+            "build_serve_evaluator(role=%s): hexfield.model was imported with "
+            "serve kernel gates OFF (%s); these import-time flags cannot be "
+            "flipped now. Call hexfield.serve_env.prime_serve_env() BEFORE the "
+            "first 'import hexfield.model' to match the self-play serve profile.",
+            role,
+            ", ".join(disagree),
+        )
+
+
+def build_serve_evaluator(model, cfg, *, role="eval", auto_match_serve_env=True):
+    """Single construction point for the serve-side ``HexfieldEvaluator``.
+
+    Wraps ``HexfieldEvaluator(model, device=cfg.device)`` so eval and self-play
+    build the evaluator identically. When ``auto_match_serve_env`` (the default
+    for standalone eval), forces the evaluator-time serve flags to the self-play
+    profile via ``apply_serve_env_profile()`` BEFORE construction (they are
+    re-read per HexfieldEvaluator), and warns once if hexfield.model's
+    already-imported import-time kernel gates disagree with that profile (those
+    cannot be flipped post-import; call ``prime_serve_env()`` before
+    ``import hexfield.model``).
+
+    ``role`` ("eval" | "selfplay") is advisory, for log context only; both roles
+    build the same evaluator class. Self-play passes
+    ``auto_match_serve_env=False`` since it already runs under the full serve env
+    from the supervisor, keeping its evaluator construction byte-identical.
+    """
+    from .serve_env import apply_serve_env_profile
+
+    if auto_match_serve_env:
+        apply_serve_env_profile()
+        _warn_if_import_flags_mismatch(role)
+    return HexfieldEvaluator(model, device=cfg.device)

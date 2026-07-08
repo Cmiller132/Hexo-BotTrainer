@@ -1,0 +1,43 @@
+diff --git a/hexo-rs/hexo-mcts/src/inference_subprocess.rs b/hexo-rs/hexo-mcts/src/inference_subprocess.rs
+index d2abf60..aff9cb1 100644
+--- a/hexo-rs/hexo-mcts/src/inference_subprocess.rs
++++ b/hexo-rs/hexo-mcts/src/inference_subprocess.rs
+@@ -3,6 +3,7 @@
+ 
+ use rustc_hash::FxHashMap as HashMap;
+ use std::io::{BufRead, BufReader, BufWriter, Write as _};
++#[cfg(unix)]
+ use std::os::fd::AsRawFd;
+ use std::path::Path;
+ use std::process::{Child, Command, Stdio};
+@@ -13,8 +14,10 @@ use std::time::{Duration, SystemTime};
+ /// 60k-node batch ≈ 5 MB). Linux's default pipe buffer is 64 KB, forcing
+ /// ~80 read/write cycles per request. Bumping to 1 MB cuts this to ~5
+ /// cycles and removes the bulk of pipe-blocking overhead.
++#[cfg(unix)]
+ const TARGET_PIPE_SIZE: libc::c_int = 1 << 20; // 1 MB
+ 
++#[cfg(unix)]
+ fn try_resize_pipe(raw_fd: libc::c_int, label: &str) {
+     // SAFETY: raw_fd is the kernel-side pipe FD owned by the child handle;
+     // F_SETPIPE_SZ is the documented resize op. Kernel caps at
+@@ -136,11 +139,14 @@ impl SubprocessModel {
+         // Bump both pipes to 1 MB before any traffic — per-request payloads
+         // are multi-MB (features+edges for ~60k-node batches), so the 64 KB
+         // default forces dozens of write/read syscalls per request.
+-        if let Some(stdin) = child.stdin.as_ref() {
+-            try_resize_pipe(stdin.as_raw_fd(), "rust→python (stdin)");
+-        }
+-        if let Some(stdout) = child.stdout.as_ref() {
+-            try_resize_pipe(stdout.as_raw_fd(), "python→rust (stdout)");
++        #[cfg(unix)]
++        {
++            if let Some(stdin) = child.stdin.as_ref() {
++                try_resize_pipe(stdin.as_raw_fd(), "rust→python (stdin)");
++            }
++            if let Some(stdout) = child.stdout.as_ref() {
++                try_resize_pipe(stdout.as_raw_fd(), "python→rust (stdout)");
++            }
+         }
+ 
+         let stderr = child.stderr.take().expect("stderr was piped");

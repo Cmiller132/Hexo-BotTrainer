@@ -21,8 +21,10 @@ round like the reference's fp16 GEMM output). Output is fp16.
 from __future__ import annotations
 
 import os
+import warnings
 
 import torch
+import torch.nn.functional as F
 
 try:  # pragma: no cover - triton ships with cuda torch builds
     import triton
@@ -31,6 +33,17 @@ try:  # pragma: no cover - triton ships with cuda torch builds
     HAVE_TRITON = True
 except Exception:  # pragma: no cover
     HAVE_TRITON = False
+
+# Triton's CompilationError location moves between versions; import defensively.
+# An empty tuple makes isinstance() always False (we still fall back on ANY
+# exception — this only tunes the log message).
+try:  # pragma: no cover - triton internals vary by version
+    from triton.compiler.errors import CompilationError as _TritonCompileError
+except Exception:  # pragma: no cover
+    try:
+        from triton.compiler import CompilationError as _TritonCompileError
+    except Exception:
+        _TritonCompileError = ()
 
 # conv+LN kernel tile knobs (bench sweeps; defaults = measured winners at
 # c=192, RTX 4070 Ti, 2026-07-03: BM=64/warps=4/stages=2 runs the fused kernel
@@ -42,6 +55,70 @@ _LN_STAGES = int(os.environ.get("HEXFIELD_CONVLN_STAGES", "2"))
 
 
 if HAVE_TRITON:
+
+    # --- compile-failure fallback (cross-width eval hardening) --------------------
+    # Some channel widths trip a per-arch Triton codegen edge case (observed:
+    # c=96 fails to compile _hex_conv_kernel under triton 3.7.0 / torch 2.12,
+    # while c=128 compiles fine). The reference gather+GEMM path is numerically
+    # equivalent, so on ANY kernel-launch failure we memoize the specializing
+    # shape and serve that shape from the reference path forever after — no retry
+    # of the (failing, slow) compile on every forward. This lives INSIDE the
+    # custom op: under the serve torch.compile(dynamic=True) graph the op is
+    # opaque and its Triton compile happens when the op EXECUTES for a new shape,
+    # not during dynamo tracing, so this is the only layer that catches it under
+    # both eager and compiled serve. Keyed by (C, Cout) — the dims that drive the
+    # kernel's tiling/codegen; a shape that compiles (c=128) never enters a set,
+    # so its fast path is byte-for-byte unchanged.
+    _TRITON_VER = getattr(triton, "__version__", "?")
+    _CONV_FAILED: set = set()
+    _CONV_LN_FAILED: set = set()
+    _CONV_FP8_FAILED: set = set()
+    _CONV_LN_FP8_FAILED: set = set()
+
+    def _mark_failed(failed: set, kernel: str, key, err: Exception) -> None:
+        """Record a failing shape and warn ONCE (called only when key is new)."""
+        failed.add(key)
+        kind = (
+            "compile error"
+            if isinstance(err, _TritonCompileError)
+            else f"{type(err).__name__}"
+        )
+        c, cout = key
+        warnings.warn(
+            f"hexfield: triton {kernel} failed to compile for C={c},Cout={cout} "
+            f"({kind}) under triton {_TRITON_VER}; using the reference path for "
+            f"this shape.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
+    def _conv_ref(x, gather_idx, mask, weight, bias):
+        """Reference HexNodeConv (the no-flag path in model.py), fp16 out to match
+        the custom op's fake kernel."""
+        b, n, c = x.shape
+        cout = weight.shape[-1]
+        x_ext = torch.cat([x, x.new_zeros(b, 1, c)], dim=1)
+        flat = gather_idx.to(torch.int64).reshape(b, n * 7, 1).expand(-1, -1, c)
+        gathered = x_ext.gather(1, flat).reshape(b, n, 7 * c)
+        out = gathered @ weight.reshape(7 * c, cout) + bias
+        out = out * mask.unsqueeze(-1)
+        return out.to(torch.float16)
+
+    def _conv_ln_ref(x, gather_idx, mask, weight, bias, ln_w, ln_b, eps, relu):
+        """Reference conv + LayerNorm(+ReLU) + row-mask (the ConvBlock no-flag
+        path). LN stats in fp32 on the conv accumulator, matching the fused
+        kernel; masked rows are zeroed last (pad rows only, so valid rows match)."""
+        b, n, c = x.shape
+        cout = weight.shape[-1]
+        x_ext = torch.cat([x, x.new_zeros(b, 1, c)], dim=1)
+        flat = gather_idx.to(torch.int64).reshape(b, n * 7, 1).expand(-1, -1, c)
+        gathered = x_ext.gather(1, flat).reshape(b, n, 7 * c)
+        conv = gathered @ weight.reshape(7 * c, cout) + bias
+        y = F.layer_norm(conv.float(), (cout,), ln_w.float(), ln_b.float(), eps)
+        if relu:
+            y = F.relu(y)
+        y = y * mask.unsqueeze(-1)
+        return y.to(torch.float16)
 
     @triton.jit
     def _hex_conv_kernel(
@@ -109,26 +186,34 @@ if HAVE_TRITON:
     ) -> torch.Tensor:
         b, npad, c = x.shape
         cout = weight.shape[-1]
-        x = x.contiguous()
-        gidx = gather_idx.contiguous()
-        m8 = mask.to(torch.uint8).contiguous()
-        w16 = weight.reshape(7 * c, cout).to(torch.float16).contiguous()
-        b32 = bias.to(torch.float32).contiguous()
-        out = torch.empty((b, npad, cout), dtype=torch.float16, device=x.device)
-        rows = b * npad
-        # Small flushes (late-game / singleton groups) need more, smaller
-        # programs to keep the SMs fed; big flushes prefer the fatter tile.
-        BM = 32 if rows < 32768 else 64
-        BN, BK = min(128, cout), 64
-        grid = (triton.cdiv(rows, BM), triton.cdiv(cout, BN))
-        _hex_conv_kernel[grid](
-            x, gidx, m8, w16, b32, b32, out,  # sc_ptr unused when FP8=False
-            b, npad, c, cout,
-            IS_FP16_IN=(x.dtype == torch.float16), FP8=False,
-            BM=BM, BN=BN, BK=BK,
-            num_warps=4 if BM == 32 else 8, num_stages=3,
-        )
-        return out
+        key = (c, cout)
+        if key not in _CONV_FAILED:
+            try:
+                x = x.contiguous()
+                gidx = gather_idx.contiguous()
+                m8 = mask.to(torch.uint8).contiguous()
+                w16 = weight.reshape(7 * c, cout).to(torch.float16).contiguous()
+                b32 = bias.to(torch.float32).contiguous()
+                out = torch.empty(
+                    (b, npad, cout), dtype=torch.float16, device=x.device
+                )
+                rows = b * npad
+                # Small flushes (late-game / singleton groups) need more, smaller
+                # programs to keep the SMs fed; big flushes prefer the fatter tile.
+                BM = 32 if rows < 32768 else 64
+                BN, BK = min(128, cout), 64
+                grid = (triton.cdiv(rows, BM), triton.cdiv(cout, BN))
+                _hex_conv_kernel[grid](
+                    x, gidx, m8, w16, b32, b32, out,  # sc_ptr unused when FP8=False
+                    b, npad, c, cout,
+                    IS_FP16_IN=(x.dtype == torch.float16), FP8=False,
+                    BM=BM, BN=BN, BK=BK,
+                    num_warps=4 if BM == 32 else 8, num_stages=3,
+                )
+                return out
+            except Exception as err:  # per-arch triton codegen edge case
+                _mark_failed(_CONV_FAILED, "hex_conv", key, err)
+        return _conv_ref(x, gather_idx, mask, weight, bias)
 
     @hex_conv.register_fake
     def _hex_conv_fake(x, gather_idx, mask, weight, bias):
@@ -224,26 +309,36 @@ if HAVE_TRITON:
     ) -> torch.Tensor:
         b, npad, c = x.shape
         cout = weight.shape[-1]
-        x = x.contiguous()
-        gidx = gather_idx.contiguous()
-        m8 = mask.to(torch.uint8).contiguous()
-        w16 = weight.reshape(7 * c, cout).to(torch.float16).contiguous()
-        b32 = bias.to(torch.float32).contiguous()
-        lnw = ln_weight.to(torch.float32).contiguous()
-        lnb = ln_bias.to(torch.float32).contiguous()
-        out = torch.empty((b, npad, cout), dtype=torch.float16, device=x.device)
-        rows = b * npad
-        BN = triton.next_power_of_2(cout)  # whole row per program (LN needs it)
-        BM, BK = _LN_BM, 64
-        grid = (triton.cdiv(rows, BM),)
-        _hex_conv_ln_kernel[grid](
-            x, gidx, m8, w16, b32, b32, lnw, lnb, out,  # sc_ptr unused (FP8=False)
-            b, npad, c, cout, eps,
-            IS_FP16_IN=(x.dtype == torch.float16), RELU=relu, FP8=False,
-            BM=BM, BN=BN, BK=BK,
-            num_warps=_LN_WARPS, num_stages=_LN_STAGES,
+        key = (c, cout)
+        if key not in _CONV_LN_FAILED:
+            try:
+                x = x.contiguous()
+                gidx = gather_idx.contiguous()
+                m8 = mask.to(torch.uint8).contiguous()
+                w16 = weight.reshape(7 * c, cout).to(torch.float16).contiguous()
+                b32 = bias.to(torch.float32).contiguous()
+                lnw = ln_weight.to(torch.float32).contiguous()
+                lnb = ln_bias.to(torch.float32).contiguous()
+                out = torch.empty(
+                    (b, npad, cout), dtype=torch.float16, device=x.device
+                )
+                rows = b * npad
+                BN = triton.next_power_of_2(cout)  # whole row per program (LN needs it)
+                BM, BK = _LN_BM, 64
+                grid = (triton.cdiv(rows, BM),)
+                _hex_conv_ln_kernel[grid](
+                    x, gidx, m8, w16, b32, b32, lnw, lnb, out,  # sc_ptr unused (FP8=False)
+                    b, npad, c, cout, eps,
+                    IS_FP16_IN=(x.dtype == torch.float16), RELU=relu, FP8=False,
+                    BM=BM, BN=BN, BK=BK,
+                    num_warps=_LN_WARPS, num_stages=_LN_STAGES,
+                )
+                return out
+            except Exception as err:  # per-arch triton codegen edge case
+                _mark_failed(_CONV_LN_FAILED, "hex_conv_ln", key, err)
+        return _conv_ln_ref(
+            x, gather_idx, mask, weight, bias, ln_weight, ln_bias, eps, relu
         )
-        return out
 
     @hex_conv_ln.register_fake
     def _hex_conv_ln_fake(
@@ -288,24 +383,33 @@ if HAVE_TRITON:
     ) -> torch.Tensor:
         b, npad, c = x.shape
         cout = weight.shape[-1]
-        x = x.contiguous()
-        gidx = gather_idx.contiguous()
-        m8 = mask.to(torch.uint8).contiguous()
-        w8, sc = _w8_scales(weight, c, cout)
-        b32 = bias.to(torch.float32).contiguous()
-        out = torch.empty((b, npad, cout), dtype=torch.float16, device=x.device)
-        rows = b * npad
-        BM = 32 if rows < 32768 else 64
-        BN, BK = min(128, cout), 64
-        grid = (triton.cdiv(rows, BM), triton.cdiv(cout, BN))
-        _hex_conv_kernel[grid](
-            x, gidx, m8, w8, b32, sc, out,
-            b, npad, c, cout,
-            IS_FP16_IN=(x.dtype == torch.float16), FP8=True,
-            BM=BM, BN=BN, BK=BK,
-            num_warps=4 if BM == 32 else 8, num_stages=3,
-        )
-        return out
+        key = (c, cout)
+        if key not in _CONV_FP8_FAILED:
+            try:
+                x = x.contiguous()
+                gidx = gather_idx.contiguous()
+                m8 = mask.to(torch.uint8).contiguous()
+                w8, sc = _w8_scales(weight, c, cout)
+                b32 = bias.to(torch.float32).contiguous()
+                out = torch.empty(
+                    (b, npad, cout), dtype=torch.float16, device=x.device
+                )
+                rows = b * npad
+                BM = 32 if rows < 32768 else 64
+                BN, BK = min(128, cout), 64
+                grid = (triton.cdiv(rows, BM), triton.cdiv(cout, BN))
+                _hex_conv_kernel[grid](
+                    x, gidx, m8, w8, b32, sc, out,
+                    b, npad, c, cout,
+                    IS_FP16_IN=(x.dtype == torch.float16), FP8=True,
+                    BM=BM, BN=BN, BK=BK,
+                    num_warps=4 if BM == 32 else 8, num_stages=3,
+                )
+                return out
+            except Exception as err:  # per-arch triton codegen edge case
+                _mark_failed(_CONV_FP8_FAILED, "hex_conv_fp8", key, err)
+        # fp16 reference: dropping fp8 on failure only improves numerics.
+        return _conv_ref(x, gather_idx, mask, weight, bias)
 
     @hex_conv_fp8.register_fake
     def _hex_conv_fp8_fake(x, gather_idx, mask, weight, bias):
@@ -327,26 +431,37 @@ if HAVE_TRITON:
     ) -> torch.Tensor:
         b, npad, c = x.shape
         cout = weight.shape[-1]
-        x = x.contiguous()
-        gidx = gather_idx.contiguous()
-        m8 = mask.to(torch.uint8).contiguous()
-        w8, sc = _w8_scales(weight, c, cout)
-        b32 = bias.to(torch.float32).contiguous()
-        lnw = ln_weight.to(torch.float32).contiguous()
-        lnb = ln_bias.to(torch.float32).contiguous()
-        out = torch.empty((b, npad, cout), dtype=torch.float16, device=x.device)
-        rows = b * npad
-        BN = triton.next_power_of_2(cout)
-        BM, BK = _LN_BM, 64
-        grid = (triton.cdiv(rows, BM),)
-        _hex_conv_ln_kernel[grid](
-            x, gidx, m8, w8, b32, sc, lnw, lnb, out,
-            b, npad, c, cout, eps,
-            IS_FP16_IN=(x.dtype == torch.float16), RELU=relu, FP8=True,
-            BM=BM, BN=BN, BK=BK,
-            num_warps=_LN_WARPS, num_stages=_LN_STAGES,
+        key = (c, cout)
+        if key not in _CONV_LN_FP8_FAILED:
+            try:
+                x = x.contiguous()
+                gidx = gather_idx.contiguous()
+                m8 = mask.to(torch.uint8).contiguous()
+                w8, sc = _w8_scales(weight, c, cout)
+                b32 = bias.to(torch.float32).contiguous()
+                lnw = ln_weight.to(torch.float32).contiguous()
+                lnb = ln_bias.to(torch.float32).contiguous()
+                out = torch.empty(
+                    (b, npad, cout), dtype=torch.float16, device=x.device
+                )
+                rows = b * npad
+                BN = triton.next_power_of_2(cout)
+                BM, BK = _LN_BM, 64
+                grid = (triton.cdiv(rows, BM),)
+                _hex_conv_ln_kernel[grid](
+                    x, gidx, m8, w8, b32, sc, lnw, lnb, out,
+                    b, npad, c, cout, eps,
+                    IS_FP16_IN=(x.dtype == torch.float16), RELU=relu, FP8=True,
+                    BM=BM, BN=BN, BK=BK,
+                    num_warps=_LN_WARPS, num_stages=_LN_STAGES,
+                )
+                return out
+            except Exception as err:  # per-arch triton codegen edge case
+                _mark_failed(_CONV_LN_FP8_FAILED, "hex_conv_ln_fp8", key, err)
+        # fp16 reference: dropping fp8 on failure only improves numerics.
+        return _conv_ln_ref(
+            x, gather_idx, mask, weight, bias, ln_weight, ln_bias, eps, relu
         )
-        return out
 
     @hex_conv_ln_fp8.register_fake
     def _hex_conv_ln_fp8_fake(

@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hexo-strix"
+version = "0.1.0"
+description = "Dependency-light port of the SootyOwl/hexo-strix GNN bot (HeXONet + axis graph builder) as an eval opponent on this repo's engine/runner. Pure PyTorch: no torch_geometric, no hexo-strix Rust extension."
+requires-python = ">=3.11"
+dependencies = [
+  "torch>=2.2",
+  "hexo-engine==0.1.0",
+  "hexo-runner==0.1.0",
+]
+
+[tool.setuptools]
+package-dir = {"" = "python"}
+
+[tool.setuptools.packages.find]
+where = ["python"]

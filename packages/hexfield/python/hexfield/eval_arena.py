@@ -77,7 +77,22 @@ from hexo_engine.types import AxialCoord, PlacementAction
 from .config import (
     ML_AUTO_DISABLED_FLAG,
     build_divergence_overrides,
+    build_eval_search_kwargs,
     parse_hexfield_config,
+)
+from .eval_driver import (
+    EvalGame,
+    HexfieldCheckpointAdapter,
+    SealBotAdapter,
+    StrixAdapter,
+    _CountingSession,
+    _HexTelemetry,
+    finalize,
+    follower_opening_action,
+    play_eval_match,
+    record_move,
+    run_hexfield_ply,
+    settle,
 )
 from .geometry import pack_action_id, unpack_action_id
 
@@ -119,6 +134,26 @@ DEFAULT_OPENING_TEMPERATURE = 1.0
 # --------------------------------------------------------------------------- #
 # Shared helpers (result-dict construction; numpy-free, importable on CPU)
 # --------------------------------------------------------------------------- #
+
+
+def _resolve_eval_budget(
+    sp: Any,
+    *,
+    visits: int | None,
+    virtual_batch_size: int | None,
+    active_root_limit: int | None,
+) -> tuple[int, int, int]:
+    """Resolve the (visits, virtual_batch_size, active_root_limit) eval budget.
+
+    The single fallback point for the four arenas' identical budget resolution:
+    ``visits=None`` defaults to the self-play search budget (``sp.search_visits``),
+    NOT ``cfg.evaluation.eval_visits``; ``virtual_batch_size=None`` and
+    ``active_root_limit=None`` default to the corresponding ``sp.*`` fields. An
+    explicit value overrides. Preserves the standalone-arena behavior."""
+    eval_visits = int(visits) if visits is not None else int(sp.search_visits)
+    vbs = int(virtual_batch_size) if virtual_batch_size is not None else int(sp.virtual_batch_size)
+    root_limit = int(active_root_limit) if active_root_limit is not None else int(sp.active_root_limit)
+    return eval_visits, vbs, root_limit
 
 
 def _percentile(xs: list[int], q: float) -> int | None:
@@ -466,33 +501,13 @@ def play_checkpoint_match(
 
     cfg = config if config is not None else parse_hexfield_config({})
     sp = cfg.selfplay
-    # visits=None defaults to the self-play search budget, not eval_visits.
-    eval_visits = int(visits) if visits is not None else int(sp.search_visits)
-    # Eval-only virtual-batch-size override, independent of
-    # SelfplayConfig.virtual_batch_size. None -> self-play value.
-    vbs = int(virtual_batch_size) if virtual_batch_size is not None else int(sp.virtual_batch_size)
-    root_limit = int(active_root_limit) if active_root_limit is not None else int(sp.active_root_limit)
-    new_session = make_session if make_session is not None else (
-        lambda: _new_rust_session(max_states)
-    )
-
-    started = time.perf_counter()
-    if build_evaluators is not None:
-        # CPU-test seam: skip checkpoint loading + GPU; use the supplied pair.
-        eval_a, eval_b = build_evaluators()
-    else:
-        from .inference import HexfieldEvaluator  # lazy: torch only on the GPU path
-
-        model_a = _load_hexfield_net(model_a_ckpt)
-        model_b = _load_hexfield_net(model_b_ckpt)
-        eval_a = HexfieldEvaluator(model_a, device=cfg.device)
-        eval_b = HexfieldEvaluator(model_b, device=cfg.device)
 
     # Symmetric divergence overrides by default; an explicit per-net override
-    # drives a search-change A/B. The override follows the searching net:
-    # ``ov_a`` whenever net A is to move, ``ov_b`` whenever net B is to move,
-    # independent of which engine seat each net holds. Each round's two batched
-    # searches are single-net, so each carries one net's ov.
+    # drives a search-change A/B. The override follows the searching net: ``ov_a``
+    # whenever net A is to move, ``ov_b`` whenever net B is to move, independent of
+    # which engine seat each net holds. When ``divergence_overrides_b`` is None,
+    # net B shares net A's resolved dict (identity), matching the pre-refactor
+    # runner.
     ov_a = _resolve_eval_overrides(
         sp, diagnostics_dir=diagnostics_dir, divergence_overrides=divergence_overrides_a
     )
@@ -504,395 +519,49 @@ def play_checkpoint_match(
         )
     )
 
-    # ----- Build the in-flight game set (seats + CRN seeds).
-    class _Game:
-        __slots__ = (
-            "index", "pair_index", "a_is_p0", "seed", "state",
-            "plies", "done", "status", "winner", "opening", "actions",
-            "is_leader", "leader",
-        )
-
-        def __init__(self, index: int, pair_index: int, a_is_p0: bool, seed: int) -> None:
-            self.index = index
-            self.pair_index = pair_index
-            self.a_is_p0 = a_is_p0
-            self.seed = seed  # the CRN seed
-            self.state = api.new_game()
-            self.plies = 0
-            self.done = False
-            self.status = "truncated"
-            self.winner: str | None = None  # "A" | "B" | None (net-A-centric)
-            self.opening: list[int] = []
-            # FULL ordered move sequence (action_ids, engine move order) so the
-            # game is replayable as a .hxr record on the dashboard. Distinct from
-            # ``opening`` (only the first ``opening_plies`` actions).
-            self.actions: list[int] = []
-            # Forced-opening CRN: each pair has a LEADER (game 0, the first seat
-            # ordering created) and a FOLLOWER (game 1, the seat-swapped sibling).
-            # The leader searches its opening; the follower replays the leader's
-            # recorded opening actions ply-for-ply (no search), so the pair shares
-            # the opening line. ``leader`` points the follower at its leader so it
-            # can read ``leader.opening[ply]``; a leader's ``leader`` is itself.
-            self.is_leader = True
-            self.leader: _Game = self
-
-        # Engine seat (player0/player1) net A occupies in this game.
-        @property
-        def a_role(self) -> Any:
-            return api.Player.PLAYER_0 if self.a_is_p0 else api.Player.PLAYER_1
-
-        @property
-        def a_role_label(self) -> str:
-            return "player0" if self.a_is_p0 else "player1"
-
-        def a_to_move(self) -> bool:
-            return api.current_player(self.state) == self.a_role
-
-    games: list[_Game] = []
-    pair_members: dict[int, list[_Game]] = {}
-    if paired_openings:
-        n_pairs = (n_games + 1) // 2
-        for pair_index in range(n_pairs):
-            pair_seed = game_seed_base + pair_index  # shared CRN seed (both seats)
-            idx0 = pair_index * 2
-            g0 = _Game(idx0, pair_index, a_is_p0=True, seed=pair_seed)
-            games.append(g0)
-            pair_members.setdefault(pair_index, []).append(g0)
-            if idx0 + 1 < n_games:  # odd n_games -> last pair is a singleton
-                g1 = _Game(idx0 + 1, pair_index, a_is_p0=False, seed=pair_seed)
-                # g1 follows g0: it replays g0's opening line.
-                g1.is_leader = False
-                g1.leader = g0
-                games.append(g1)
-                pair_members[pair_index].append(g1)
+    # Split the single ``build_evaluators() -> (eval_a, eval_b)`` seam into the
+    # driver's candidate builder + the adapter's opponent builder, called once
+    # (preserves the CPU-test contract). Absent the seam both sides load from the
+    # checkpoints on the GPU path.
+    if build_evaluators is not None:
+        _eval_a, _eval_b = build_evaluators()
+        build_candidate_evaluator = lambda: _eval_a  # noqa: E731
+        opponent_build_evaluator = lambda: _eval_b  # noqa: E731
     else:
-        for game_index in range(n_games):
-            seed = game_seed_base + game_index + (
-                _SIDE_SEED_OFFSET["b"] if game_index % 2 else _SIDE_SEED_OFFSET["a"]
-            )
-            games.append(_Game(game_index, -1, a_is_p0=(game_index % 2 == 0), seed=seed))
+        build_candidate_evaluator = None
+        opponent_build_evaluator = None
 
-    # ----- Two persistent sessions, one per net, keyed by game index. The Rust
-    # per-game-key tree store keeps trees from crossing games, and each game's
-    # tree is discarded at end, so trees are never reused across games.
-    s_net_a = new_session()
-    s_net_b = new_session()
-    budget_hit = False
-    rounds = 0
-    forward_batches = 0
-    mcts_search_elapsed = 0.0
-
-    def _finalize(g: _Game) -> None:
-        terminal = api.terminal(g.state)
-        if terminal is not None:
-            g.status = "completed"
-            if terminal.winner is None:
-                g.winner = None  # hexo has no draws; defensive
-            else:
-                won_label = str(terminal.winner)  # "player0" / "player1"
-                g.winner = "A" if won_label == g.a_role_label else "B"
-        elif budget_hit:
-            g.status = "aborted_budget"
-            g.winner = None
-        else:
-            g.status = "truncated"
-            g.winner = None
-        g.done = True
-        s_net_a.discard(g.index)
-        s_net_b.discard(g.index)
-
-    def _settle(g: _Game) -> None:
-        if api.terminal(g.state) is not None or g.plies >= sp.max_game_plies:
-            _finalize(g)
-
-    # Common search knobs shared by every batched/single-root call: greedy after
-    # a sampled opening, no Dirichlet noise. Per-net override and session are
-    # supplied at each call site.
-    common = dict(
-        visits=eval_visits,
-        c_puct=sp.c_puct,
-        temperature=0.0,
-        virtual_batch_size=vbs,
-        active_root_limit=root_limit,
-        widening_policy_mass=sp.widening_policy_mass,
-        widening_max_children=sp.widening_max_children,
-        widening_min_children=sp.widening_min_children,
-        fpu_reduction=sp.fpu_reduction,
-        tss_enabled=sp.tss_enabled,
-        search_parity_mode=sp.search_parity_mode,
+    # Net B is a second hexfield session with its own opening/greedy seed streams.
+    opponent = HexfieldCheckpointAdapter(
+        model_b_ckpt,
+        config=cfg,
+        label=label_b,
+        overrides_b=ov_b,
+        make_session=make_session,
+        max_states=max_states,
+        visits=visits,
+        virtual_batch_size=virtual_batch_size,
+        active_root_limit=active_root_limit,
+        paired_openings=paired_openings,
+        batch_openings=batch_openings,
+        build_evaluator=opponent_build_evaluator,
     )
 
-    def _net_for(g: _Game) -> str:
-        """Which NET is to move in ``g`` ('A' or 'B')."""
-        return "A" if g.a_to_move() else "B"
-
-    def _temp(g: _Game) -> float:
-        """Opening temperature while ``plies < opening_plies``, then greedy (0)."""
-        return opening_temperature if (g.plies < opening_plies and opening_temperature > 0.0) else 0.0
-
-    def _apply_search(g: _Game, search: dict[str, Any]) -> None:
-        q, r = unpack_action_id(int(search["action_id"]))
-        api.apply_action(g.state, PlacementAction(AxialCoord(q=q, r=r)))
-        g.plies += 1
-        g.actions.append(int(search["action_id"]))
-        if len(g.opening) < opening_plies:
-            g.opening.append(int(search["action_id"]))
-        _settle(g)
-
-    def _replay_action(g: _Game, action_id: int) -> None:
-        """Apply a pre-decided opening action to a follower game without search.
-        Same plies/opening/settle bookkeeping as ``_apply_search``; only the move
-        source differs (the leader's recorded action, not a fresh search)."""
-        q, r = unpack_action_id(int(action_id))
-        api.apply_action(g.state, PlacementAction(AxialCoord(q=q, r=r)))
-        g.plies += 1
-        g.actions.append(int(action_id))
-        if len(g.opening) < opening_plies:
-            g.opening.append(int(action_id))
-        _settle(g)
-
-    def _follower_opening_action(g: _Game) -> int | None:
-        """The leader's recorded action for the follower ``g``'s current opening
-        ply, or ``None`` if the leader has no action for that ply. The round order
-        keeps the leader strictly ahead of the follower, so a recorded action
-        normally exists; if the leader's game ended during its own opening it may
-        have fewer than ``opening_plies`` actions, in which case the follower
-        falls back to a single-root search for the remaining opening plies."""
-        line = g.leader.opening
-        return line[g.plies] if g.plies < len(line) else None
-
-    def _run_batch(net: str, batch: list[_Game], seed: int) -> int:
-        """One multi-root ``search`` for ``batch`` (all to-move for ``net``),
-        chunked at ``root_limit``. Returns the number of plies applied."""
-        nonlocal mcts_search_elapsed, forward_batches
-        session = s_net_a if net == "A" else s_net_b
-        evaluator = eval_a if net == "A" else eval_b
-        # Every game in the batch has the same net to move: net A uses ov_a, net B
-        # uses ov_b. For the default symmetric case ov_a == ov_b.
-        overrides = ov_a if net == "A" else ov_b
-        applied = 0
-        for start in range(0, len(batch), root_limit):
-            chunk = batch[start : start + root_limit]
-            move_temperatures = [_temp(g) for g in chunk]
-            t0 = time.perf_counter()
-            searches = session.search(
-                [g.index for g in chunk],
-                tuple(g.state for g in chunk),
-                seed=seed,
-                evaluator=evaluator,
-                move_temperatures=move_temperatures,
-                divergence_overrides=overrides,
-                **common,
-            )
-            mcts_search_elapsed += time.perf_counter() - t0
-            forward_batches += 1
-            if len(searches) != len(chunk):
-                raise RuntimeError(
-                    f"hexfield checkpoint eval search returned {len(searches)} "
-                    f"results for {len(chunk)} games"
-                )
-            for g, search in zip(chunk, searches):
-                _apply_search(g, search)
-                applied += 1
-        return applied
-
-    def _run_opening_batch(net: str, batch: list[_Game], seed: int) -> int:
-        """One multi-root ``search`` for the opening-ply LEADERS to-move for
-        ``net`` (chunked at ``root_limit``). Every root carries
-        ``opening_temperature`` so each leader samples its opening move, and the
-        native per-root selection seed ``seed.wrapping_add(root_index)`` gives each
-        leader its own decorrelated stream (leaders carry no cross-leader CRN).
-        Returns the number of plies applied.
-
-        Same structure as ``_run_batch`` except the temperatures are pinned to
-        ``opening_temperature`` (these games are all at ``plies < opening_plies``)
-        and the base seed is the per-(net, round) opening stream. Each leader's
-        sampled action is recorded into ``g.opening`` by ``_apply_search`` so
-        followers have a line to replay."""
-        nonlocal mcts_search_elapsed, forward_batches
-        session = s_net_a if net == "A" else s_net_b
-        evaluator = eval_a if net == "A" else eval_b
-        overrides = ov_a if net == "A" else ov_b
-        applied = 0
-        for start in range(0, len(batch), root_limit):
-            chunk = batch[start : start + root_limit]
-            t0 = time.perf_counter()
-            searches = session.search(
-                [g.index for g in chunk],
-                tuple(g.state for g in chunk),
-                seed=seed,
-                evaluator=evaluator,
-                move_temperatures=[opening_temperature] * len(chunk),
-                divergence_overrides=overrides,
-                **common,
-            )
-            mcts_search_elapsed += time.perf_counter() - t0
-            forward_batches += 1
-            if len(searches) != len(chunk):
-                raise RuntimeError(
-                    f"hexfield checkpoint eval opening search returned {len(searches)} "
-                    f"results for {len(chunk)} games"
-                )
-            for g, search in zip(chunk, searches):
-                _apply_search(g, search)
-                applied += 1
-        return applied
-
-    def _run_single(g: _Game, net: str) -> None:
-        """Single-root ``search`` for one game with seed ``g.seed * 5003 +
-        g.plies`` (per-root index 0). Used only as the follower fallback when its
-        leader ended before recording an action for this opening ply. The follower
-        shares its leader's seed, so this fallback's RNG is
-        ``pair_seed * 5003 + ply``."""
-        nonlocal mcts_search_elapsed, forward_batches
-        session = s_net_a if net == "A" else s_net_b
-        evaluator = eval_a if net == "A" else eval_b
-        overrides = ov_a if net == "A" else ov_b
-        t0 = time.perf_counter()
-        searches = session.search(
-            [g.index],
-            (g.state,),
-            seed=g.seed * 5003 + g.plies,
-            evaluator=evaluator,
-            move_temperatures=[_temp(g)],
-            divergence_overrides=overrides,
-            **common,
-        )
-        mcts_search_elapsed += time.perf_counter() - t0
-        forward_batches += 1
-        _apply_search(g, searches[0])
-
-    # ----- Round loop: each round advances every active game by at least one ply
-    # (a game whose seat-to-move flips after net A's batch is also played in net
-    # B's recomputed to-move set the same round, so it can advance up to 2 plies).
-    # Per round and per net, the opening leaders are batched in one multi-root
-    # forward and the greedy to-move games in another; followers replay their
-    # leader's recorded opening (no search). ``batch_openings`` collapses the
-    # leader/follower distinction (everything goes through ``greedy``). A round
-    # that makes no progress raises rather than hangs.
-    #
-    # Within the opening, a pair's LEADER searches; its seat-swapped FOLLOWER
-    # replays the leader's recorded action for that ply, so both games traverse
-    # the same opening line. Leaders are independent games (no cross-leader CRN),
-    # so all leaders to-move for a net are searched in one multi-root
-    # ``_run_opening_batch`` call (each leader root decorrelated by the native
-    # per-root ``seed+index`` offset). The round order (net A pass then net B pass)
-    # keeps the leader strictly ahead of the follower at every follower move, so
-    # the action to replay is already recorded; the rare leader-ended-mid-opening
-    # case falls back to a follower single-root search.
-    while True:
-        active = [g for g in games if not g.done]
-        if not active:
-            break
-        if max_wall_seconds and (time.perf_counter() - started) > max_wall_seconds:
-            budget_hit = True
-            for g in active:
-                _finalize(g)
-            break
-        rounds += 1
-        plies_this_round = 0
-        for net in ("A", "B"):
-            to_move = [g for g in active if not g.done and _net_for(g) == net]
-            if not to_move:
-                continue
-            # Opening plies: in paired mode (and unless batch_openings) leaders
-            # search (batched cross-game) and followers replay the leader's
-            # recorded line; games past the opening are batched as greedy.
-            if paired_openings and not batch_openings:
-                openers = [g for g in to_move if g.plies < opening_plies and g.is_leader]
-                followers = [g for g in to_move if g.plies < opening_plies and not g.is_leader]
-                greedy = [g for g in to_move if g.plies >= opening_plies]
-            else:
-                openers = []
-                followers = []
-                greedy = to_move
-            if openers:
-                # These leaders are independent games, batched into one multi-root
-                # call. The per-(net, round) base seed plus the native per-root
-                # ``seed+index`` offset gives each leader its own decorrelated
-                # stream. The opening base offsets (13M/19M) are distinct from the
-                # greedy offsets (0/7M below) for both nets, so an opening batch and
-                # a greedy batch in the same round never share a base seed.
-                open_seed = (
-                    game_seed_base + (13_000_003 if net == "A" else 19_000_003) + rounds * 1_000_003
-                )
-                plies_this_round += _run_opening_batch(net, openers, open_seed)
-            for g in followers:
-                # Replay the leader's recorded opening action; if the leader ended
-                # its game before reaching this ply (no recorded action), fall back
-                # to a normal single-root CRN search so the follower still moves.
-                replay = _follower_opening_action(g)
-                if replay is not None:
-                    _replay_action(g, replay)
-                else:
-                    _run_single(g, net)
-                plies_this_round += 1
-            if greedy:
-                # Per-round, per-net batch seed. Greedy plies are temperature 0, so
-                # this RNG only tie-breaks; the value is decorrelated per net/round.
-                batch_seed = (
-                    game_seed_base + (0 if net == "A" else 7_000_003) + rounds * 1_000_003
-                )
-                plies_this_round += _run_batch(net, greedy, batch_seed)
-        if plies_this_round == 0:
-            raise RuntimeError(
-                "hexfield checkpoint eval made no progress in a round; aborting to avoid a hang"
-            )
-
-    # ----- Re-key the in-flight games to the result rows and per-pair rows.
-    game_rows = [
-        {
-            "index": g.index,
-            "seed": g.seed,
-            "a_seat": "P0" if g.a_is_p0 else "P1",
-            "status": g.status,
-            "winner": g.winner,
-            "plies": g.plies,
-            "opening": list(g.opening),
-        }
-        for g in games
-    ]
-    pairs: list[dict[str, Any]] = []
-    if paired_openings:
-        for pair_index in sorted(pair_members):
-            members = pair_members[pair_index]
-            decided = [g for g in members if g.status == "completed"]
-            a_wins_in_pair = sum(1 for g in decided if g.winner == "A")
-            pairs.append(
-                {
-                    "pair_index": pair_index,
-                    "seed": game_seed_base + pair_index,
-                    "game_indices": [g.index for g in members],
-                    "n_games": len(members),
-                    "n_decided": len(decided),
-                    "a_wins": a_wins_in_pair,
-                    "b_wins": len(decided) - a_wins_in_pair,
-                    # Pentanomial class for a 2-game pair: 2/1/0 net-A wins among
-                    # the 2 decided games. Singleton/partial pairs report their
-                    # decided count so the consumer can weight them correctly.
-                    "pentanomial_a_score": a_wins_in_pair,
-                }
-            )
-
-    # Persist the games as a replayable .hxr (dashboard "evaluation" source).
-    # Best-effort: _write_eval_hxr is fully fail-soft.
-    _hxr_stats: dict[str, int] = {}
-    hxr_path = _write_eval_hxr(games, diagnostics_dir, label_a, label_b, stats=_hxr_stats)
-
-    result = _build_match_result(
-        games=game_rows,
-        pairs=pairs if paired_openings else None,
-        label_a=label_a,
-        label_b=label_b,
-        meta_extra={
+    def _meta_extra(games, tel) -> dict[str, Any]:
+        # Persist the games as a replayable .hxr (dashboard "evaluation" source);
+        # _write_eval_hxr is fully fail-soft. ``games`` are net-A-centric EvalGame
+        # records (.a_is_p0 / .winner in {"A","B",None}), the writer's shape.
+        _hxr_stats: dict[str, int] = {}
+        hxr_path = _write_eval_hxr(games, diagnostics_dir, label_a, label_b, stats=_hxr_stats)
+        return {
             "kind": "hexfield_vs_hexfield",
             "hxr_record": hxr_path,
             "hxr_games_written": _hxr_stats.get("games_written", 0),
             "ckpt_a": {"label": label_a, "path": str(model_a_ckpt)},
             "ckpt_b": {"label": label_b, "path": str(model_b_ckpt)},
             "games_requested": n_games,
-            "visits": eval_visits,
-            "virtual_batch_size": vbs,
+            "visits": tel.eval_visits,
+            "virtual_batch_size": tel.virtual_batch_size,
             "device": cfg.device,
             "paired_openings": paired_openings,
             "opening_plies": opening_plies,
@@ -900,17 +569,57 @@ def play_checkpoint_match(
             "game_seed_base": game_seed_base,
             "divergence_overrides_a": ov_a,
             "divergence_overrides_b": ov_b,
-            "budget_hit": budget_hit,
+            "budget_hit": tel.budget_hit,
             # Concurrency telemetry (additive — downstream consumers ignore these).
             "concurrent": True,
             "batch_openings": bool(batch_openings),
-            "rounds": rounds,
-            "forward_batches": forward_batches,
-            "elapsed_seconds": round(time.perf_counter() - started, 2),
-            "mcts_search_elapsed_seconds": round(mcts_search_elapsed, 2),
-        },
-    )
-    return result
+            "rounds": tel.rounds,
+            # forward_batches / mcts time cover BOTH nets' hexfield searches (net A
+            # via the driver, net B via the adapter), matching the old single
+            # combined counter.
+            "forward_batches": tel.forward_batches + opponent.telemetry.forward_batches,
+            "elapsed_seconds": round(tel.elapsed_seconds, 2),
+            "mcts_search_elapsed_seconds": round(
+                tel.mcts_search_elapsed + opponent.telemetry.mcts_search_elapsed, 2
+            ),
+        }
+
+    # The driver (eval_driver) references the engine only through ITS module-level
+    # ``api`` name; sync it to this module's ``api`` (which tests / the golden
+    # harness monkeypatch) for the duration of the call, then restore. This lets
+    # the shared driver use the same (possibly faked) engine without a second
+    # patch site, with no cross-test leakage.
+    from . import eval_driver as _eval_driver
+
+    _saved_api = _eval_driver.api
+    _eval_driver.api = api
+    try:
+        return play_eval_match(
+            model_a_ckpt,
+            opponent,
+            n_games,
+            config=cfg,
+            label_a=label_a,
+            label_b=label_b,
+            meta_extra_fn=_meta_extra,
+            paired_openings=paired_openings,
+            visits=visits,
+            virtual_batch_size=virtual_batch_size,
+            active_root_limit=active_root_limit,
+            opening_plies=opening_plies,
+            opening_temperature=opening_temperature,
+            batch_openings=batch_openings,
+            divergence_overrides=ov_a,
+            diagnostics_dir=diagnostics_dir,
+            game_seed_base=game_seed_base,
+            max_wall_seconds=max_wall_seconds,
+            max_states=max_states,
+            side_seed_offset=_SIDE_SEED_OFFSET,
+            build_candidate_evaluator=build_candidate_evaluator,
+            make_session=make_session,
+        )
+    finally:
+        _eval_driver.api = _saved_api
 
 
 # --------------------------------------------------------------------------- #
@@ -999,9 +708,9 @@ def play_multi_checkpoint_match(
 
     cfg = config if config is not None else parse_hexfield_config({})
     sp = cfg.selfplay
-    eval_visits = int(visits) if visits is not None else int(sp.search_visits)
-    vbs = int(virtual_batch_size) if virtual_batch_size is not None else int(sp.virtual_batch_size)
-    root_limit = int(active_root_limit) if active_root_limit is not None else int(sp.active_root_limit)
+    eval_visits, vbs, root_limit = _resolve_eval_budget(
+        sp, visits=visits, virtual_batch_size=virtual_batch_size, active_root_limit=active_root_limit
+    )
     new_session = make_session if make_session is not None else (
         lambda: _new_rust_session(max_states)
     )
@@ -1012,9 +721,9 @@ def play_multi_checkpoint_match(
     if build_candidate_evaluator is not None:
         cand_eval = build_candidate_evaluator()
     else:
-        from .inference import HexfieldEvaluator  # lazy: torch only on the GPU path
+        from .inference import build_serve_evaluator  # lazy: torch only on the GPU path
 
-        cand_eval = HexfieldEvaluator(_load_hexfield_net(candidate_ckpt), device=cfg.device)
+        cand_eval = build_serve_evaluator(_load_hexfield_net(candidate_ckpt), cfg, role="eval")
 
     # ov follows the searching net: the candidate (net A) searches with
     # ``ov_cand``, an opponent with ``ov_opp``. Symmetric by default.
@@ -1047,57 +756,9 @@ def play_multi_checkpoint_match(
         for label, _ckpt in opponents
     }
 
-    common = dict(
-        visits=eval_visits,
-        c_puct=sp.c_puct,
-        temperature=0.0,
-        virtual_batch_size=vbs,
-        active_root_limit=root_limit,
-        widening_policy_mass=sp.widening_policy_mass,
-        widening_max_children=sp.widening_max_children,
-        widening_min_children=sp.widening_min_children,
-        fpu_reduction=sp.fpu_reduction,
-        tss_enabled=sp.tss_enabled,
-        search_parity_mode=sp.search_parity_mode,
+    common = build_eval_search_kwargs(
+        sp, visits=eval_visits, virtual_batch_size=vbs, active_root_limit=root_limit
     )
-
-    # Per-game state. Like play_checkpoint_match._Game but tracks the opponent
-    # group and a global candidate-session key so candidate trees never collide.
-    class _Game:
-        __slots__ = (
-            "opp_index", "local_index", "cand_key", "pair_index", "a_is_p0",
-            "seed", "state", "plies", "done", "status", "winner", "opening",
-            "actions", "is_leader", "leader",
-        )
-
-        def __init__(self, opp_index: int, local_index: int, cand_key: int,
-                     pair_index: int, a_is_p0: bool, seed: int) -> None:
-            self.opp_index = opp_index
-            self.local_index = local_index  # key in this opponent's session
-            self.cand_key = cand_key        # global key in the candidate session
-            self.pair_index = pair_index
-            self.a_is_p0 = a_is_p0
-            self.seed = seed
-            self.state = api.new_game()
-            self.plies = 0
-            self.done = False
-            self.status = "truncated"
-            self.winner: str | None = None  # "A" | "B" | None (candidate-centric)
-            self.opening: list[int] = []
-            self.actions: list[int] = []
-            self.is_leader = True
-            self.leader: _Game = self
-
-        @property
-        def a_role(self) -> Any:
-            return api.Player.PLAYER_0 if self.a_is_p0 else api.Player.PLAYER_1
-
-        @property
-        def a_role_label(self) -> str:
-            return "player0" if self.a_is_p0 else "player1"
-
-        def a_to_move(self) -> bool:
-            return api.current_player(self.state) == self.a_role
 
     # KEY_STRIDE namespaces candidate-session game keys per opponent so two
     # opponents' games never share a candidate tree (n_games_per_opponent << this
@@ -1105,7 +766,10 @@ def play_multi_checkpoint_match(
     KEY_STRIDE = 1_000_000
 
     # One opponent group per (label, ckpt). Each group builds the same game layout
-    # a standalone play_checkpoint_match would for that opponent.
+    # a standalone play_checkpoint_match would for that opponent. Games are the
+    # shared ``eval_driver.EvalGame`` record: ``index`` is this opponent's session
+    # key (the old per-group ``local_index``); ``opp_index`` / ``cand_key`` namespace
+    # the candidate session so its trees never collide across opponents.
     class _Group:
         __slots__ = ("opp_index", "label", "ckpt", "session", "evaluator",
                      "games", "pair_members")
@@ -1116,8 +780,8 @@ def play_multi_checkpoint_match(
             self.ckpt = ckpt
             self.session = session
             self.evaluator = evaluator
-            self.games: list[_Game] = []
-            self.pair_members: dict[int, list[_Game]] = {}
+            self.games: list[EvalGame] = []
+            self.pair_members: dict[int, list[EvalGame]] = {}
 
     groups: list[_Group] = []
     cand_session = new_session()
@@ -1125,9 +789,9 @@ def play_multi_checkpoint_match(
         if build_opponent_evaluator is not None:
             opp_eval = build_opponent_evaluator(label, ckpt)
         else:
-            from .inference import HexfieldEvaluator  # lazy: torch only on GPU path
+            from .inference import build_serve_evaluator  # lazy: torch only on GPU path
 
-            opp_eval = HexfieldEvaluator(_load_hexfield_net(ckpt), device=cfg.device)
+            opp_eval = build_serve_evaluator(_load_hexfield_net(ckpt), cfg, role="eval")
         grp = _Group(opp_index, label, ckpt, new_session(), opp_eval)
         # Build CRN pairs identically to play_checkpoint_match (paired_openings).
         n_pairs = (n_games_per_opponent + 1) // 2
@@ -1135,360 +799,329 @@ def play_multi_checkpoint_match(
         for pair_index in range(n_pairs):
             pair_seed = game_seed_base + pair_index  # shared CRN seed (both seats)
             idx0 = pair_index * 2
-            g0 = _Game(opp_index, idx0, base + idx0, pair_index, a_is_p0=True, seed=pair_seed)
+            g0 = EvalGame(
+                index=idx0, pair_index=pair_index, a_is_p0=True, seed=pair_seed,
+                state=api.new_game(), opp_index=opp_index, cand_key=base + idx0,
+            )
             grp.games.append(g0)
             grp.pair_members.setdefault(pair_index, []).append(g0)
             if idx0 + 1 < n_games_per_opponent:
-                g1 = _Game(opp_index, idx0 + 1, base + idx0 + 1, pair_index,
-                           a_is_p0=False, seed=pair_seed)
+                g1 = EvalGame(
+                    index=idx0 + 1, pair_index=pair_index, a_is_p0=False, seed=pair_seed,
+                    state=api.new_game(), opp_index=opp_index, cand_key=base + idx0 + 1,
+                )
                 g1.is_leader = False
                 g1.leader = g0
                 grp.games.append(g1)
                 grp.pair_members[pair_index].append(g1)
         groups.append(grp)
 
-    all_games: list[_Game] = [g for grp in groups for g in grp.games]
+    all_games: list[EvalGame] = [g for grp in groups for g in grp.games]
+
+    # Telemetry: candidate-session searches are counted separately from opponent-
+    # session searches so ``candidate_forward_batches`` and the combined
+    # ``forward_batches`` both reproduce the pre-refactor per-call counters. Every
+    # session is wrapped in a ``_CountingSession`` so ``run_hexfield_ply`` (which
+    # does not itself count) records exactly one forward per multi-root chunk, as
+    # the old inline search loops did. All opponents share one ``opp_tel`` (their
+    # forwards sum into the single combined opponent counter).
+    cand_tel = _HexTelemetry()
+    opp_tel = _HexTelemetry()
+    cand_counting = _CountingSession(cand_session, cand_tel)
+    opp_counting = {grp.opp_index: _CountingSession(grp.session, opp_tel) for grp in groups}
 
     budget_hit = False
     rounds = 0
-    forward_batches = 0
-    cand_forward_batches = 0
-    mcts_search_elapsed = 0.0
 
-    def _opp_session(g: _Game) -> Any:
-        return groups[g.opp_index].session
-
-    def _finalize(g: _Game) -> None:
-        terminal = api.terminal(g.state)
-        if terminal is not None:
-            g.status = "completed"
-            if terminal.winner is None:
-                g.winner = None
-            else:
-                won_label = str(terminal.winner)  # "player0" / "player1"
-                g.winner = "A" if won_label == g.a_role_label else "B"
-        elif budget_hit:
-            g.status = "aborted_budget"
-            g.winner = None
-        else:
-            g.status = "truncated"
-            g.winner = None
-        g.done = True
+    def _on_discard(g: EvalGame) -> None:
+        # Candidate tree keyed by the global cand_key; opponent tree by the local
+        # per-group index (== EvalGame.index). Both discarded at game end so trees
+        # never leak across opponent groups.
         cand_session.discard(g.cand_key)
-        _opp_session(g).discard(g.local_index)
+        groups[g.opp_index].session.discard(g.index)
 
-    def _settle(g: _Game) -> None:
-        if api.terminal(g.state) is not None or g.plies >= sp.max_game_plies:
-            _finalize(g)
+    def _finalize(g: EvalGame) -> None:
+        finalize(g, budget_hit=budget_hit, on_discard=_on_discard)
 
-    def _temp(g: _Game) -> float:
+    def _settle(g: EvalGame) -> None:
+        settle(g, sp.max_game_plies, budget_hit=budget_hit, on_discard=_on_discard)
+
+    def _temp(g: EvalGame) -> float:
         return opening_temperature if (g.plies < opening_plies and opening_temperature > 0.0) else 0.0
 
-    def _apply_search(g: _Game, search: dict[str, Any]) -> None:
-        q, r = unpack_action_id(int(search["action_id"]))
-        api.apply_action(g.state, PlacementAction(AxialCoord(q=q, r=r)))
-        g.plies += 1
-        g.actions.append(int(search["action_id"]))
-        if len(g.opening) < opening_plies:
-            g.opening.append(int(search["action_id"]))
-        _settle(g)
+    def _record(g: EvalGame, action_id: int, *, is_a: bool) -> None:
+        record_move(g, action_id, is_a=is_a, opening_plies=opening_plies, settle_fn=_settle)
 
-    def _replay_action(g: _Game, action_id: int) -> None:
-        q, r = unpack_action_id(int(action_id))
-        api.apply_action(g.state, PlacementAction(AxialCoord(q=q, r=r)))
-        g.plies += 1
-        g.actions.append(int(action_id))
-        if len(g.opening) < opening_plies:
-            g.opening.append(int(action_id))
-        _settle(g)
+    def _replay_action(g: EvalGame, action_id: int) -> None:
+        # Follower opening replay (the leader's recorded action). ``is_a`` follows
+        # whose turn it is (candidate pass -> net A, opponent pass -> net B); it only
+        # bumps the unused a_decisions counter, so it never affects the result.
+        _record(g, action_id, is_a=g.a_to_move())
 
-    def _follower_opening_action(g: _Game) -> int | None:
-        line = g.leader.opening
-        return line[g.plies] if g.plies < len(line) else None
+    def _follower_opening_action(g: EvalGame) -> int | None:
+        return follower_opening_action(g)
 
-    def _candidate_key(g: _Game) -> int:
-        return g.cand_key
-
-    def _run_candidate_greedy(batch: list[_Game], seed: int) -> int:
+    def _run_candidate_greedy(batch: list[EvalGame], seed: int) -> int:
         """One shared candidate-session multi-root search over the greedy
         candidate-to-move games across all opponents (chunked at root_limit). At
         temperature 0 the move is a deterministic seed-independent argmax."""
-        nonlocal mcts_search_elapsed, forward_batches, cand_forward_batches
-        applied = 0
-        for start in range(0, len(batch), root_limit):
-            chunk = batch[start : start + root_limit]
-            t0 = time.perf_counter()
-            searches = cand_session.search(
-                [_candidate_key(g) for g in chunk],
-                tuple(g.state for g in chunk),
-                seed=seed,
-                evaluator=cand_eval,
-                move_temperatures=[0.0] * len(chunk),
-                divergence_overrides=ov_cand,
-                **common,
-            )
-            mcts_search_elapsed += time.perf_counter() - t0
-            forward_batches += 1
-            cand_forward_batches += 1
-            if len(searches) != len(chunk):
-                raise RuntimeError(
-                    f"hexfield multi-checkpoint candidate greedy search returned "
-                    f"{len(searches)} results for {len(chunk)} games"
-                )
-            for g, search in zip(chunk, searches):
-                _apply_search(g, search)
-                applied += 1
-        return applied
+        return run_hexfield_ply(
+            cand_counting,
+            cand_eval,
+            batch,
+            search_kwargs=common,
+            root_limit=root_limit,
+            overrides=ov_cand,
+            seed=seed,
+            move_temperature_fn=lambda g: 0.0,
+            record_fn=_record,
+            is_a=True,
+            key_fn=lambda g: g.cand_key,
+        )
 
-    def _run_candidate_opening(grp: "_Group", openers: list[_Game], seed: int) -> int:
+    def _run_candidate_opening(grp: "_Group", openers: list[EvalGame], seed: int) -> int:
         """Per-opponent candidate opening-leader batch. Uses the candidate session
         and evaluator but this opponent's own ``open_seed`` and per-group
         root_index, so each leader's native ``seed+root_index`` sampling stream is
         keyed per opponent."""
-        nonlocal mcts_search_elapsed, forward_batches, cand_forward_batches
-        applied = 0
-        for start in range(0, len(openers), root_limit):
-            chunk = openers[start : start + root_limit]
-            t0 = time.perf_counter()
-            searches = cand_session.search(
-                [_candidate_key(g) for g in chunk],
-                tuple(g.state for g in chunk),
-                seed=seed,
-                evaluator=cand_eval,
-                move_temperatures=[opening_temperature] * len(chunk),
-                divergence_overrides=ov_cand,
-                **common,
-            )
-            mcts_search_elapsed += time.perf_counter() - t0
-            forward_batches += 1
-            cand_forward_batches += 1
-            if len(searches) != len(chunk):
-                raise RuntimeError(
-                    f"hexfield multi-checkpoint candidate opening search returned "
-                    f"{len(searches)} results for {len(chunk)} games"
-                )
-            for g, search in zip(chunk, searches):
-                _apply_search(g, search)
-                applied += 1
-        return applied
+        return run_hexfield_ply(
+            cand_counting,
+            cand_eval,
+            openers,
+            search_kwargs=common,
+            root_limit=root_limit,
+            overrides=ov_cand,
+            seed=seed,
+            move_temperature_fn=lambda g: opening_temperature,
+            record_fn=_record,
+            is_a=True,
+            key_fn=lambda g: g.cand_key,
+        )
 
-    def _run_opponent_batch(grp: "_Group", batch: list[_Game], seed: int,
+    def _run_opponent_batch(grp: "_Group", batch: list[EvalGame], seed: int,
                             *, temperature: float | None) -> int:
         """One multi-root search for the opponent (net B) to-move games in this
         opponent's session (chunked at root_limit). ``temperature`` None -> per-game
         temperature via ``_temp``; a float pins it (opening leaders)."""
-        nonlocal mcts_search_elapsed, forward_batches
-        applied = 0
-        for start in range(0, len(batch), root_limit):
-            chunk = batch[start : start + root_limit]
-            temps = (
-                [temperature] * len(chunk)
-                if temperature is not None
-                else [_temp(g) for g in chunk]
-            )
-            t0 = time.perf_counter()
-            searches = grp.session.search(
-                [g.local_index for g in chunk],
-                tuple(g.state for g in chunk),
-                seed=seed,
-                evaluator=grp.evaluator,
-                move_temperatures=temps,
-                divergence_overrides=ov_by_label[grp.label],
-                **common,
-            )
-            mcts_search_elapsed += time.perf_counter() - t0
-            forward_batches += 1
-            if len(searches) != len(chunk):
-                raise RuntimeError(
-                    f"hexfield multi-checkpoint opponent search returned "
-                    f"{len(searches)} results for {len(chunk)} games"
-                )
-            for g, search in zip(chunk, searches):
-                _apply_search(g, search)
-                applied += 1
-        return applied
+        temp_fn = (lambda g: temperature) if temperature is not None else _temp
+        return run_hexfield_ply(
+            opp_counting[grp.opp_index],
+            grp.evaluator,
+            batch,
+            search_kwargs=common,
+            root_limit=root_limit,
+            overrides=ov_by_label[grp.label],
+            seed=seed,
+            move_temperature_fn=temp_fn,
+            record_fn=_record,
+            is_a=False,
+            key_fn=lambda g: g.index,
+        )
 
-    def _run_single(g: _Game, net: str) -> None:
+    def _run_single(g: EvalGame, net: str) -> int:
         """Single-root follower fallback (leader ended mid-opening). Uses seed
         ``g.seed * 5003 + g.plies`` and the session/evaluator for ``net``."""
-        nonlocal mcts_search_elapsed, forward_batches, cand_forward_batches
         if net == "A":
-            session, evaluator, key, ov = cand_session, cand_eval, g.cand_key, ov_cand
-        else:
-            grp = groups[g.opp_index]
-            session, evaluator, key, ov = (
-                grp.session, grp.evaluator, g.local_index, ov_by_label[grp.label],
+            return run_hexfield_ply(
+                cand_counting,
+                cand_eval,
+                [g],
+                search_kwargs=common,
+                root_limit=root_limit,
+                overrides=ov_cand,
+                seed=g.seed * 5003 + g.plies,
+                move_temperature_fn=_temp,
+                record_fn=_record,
+                is_a=True,
+                key_fn=lambda gg: gg.cand_key,
             )
-        t0 = time.perf_counter()
-        searches = session.search(
-            [key],
-            (g.state,),
+        grp = groups[g.opp_index]
+        return run_hexfield_ply(
+            opp_counting[g.opp_index],
+            grp.evaluator,
+            [g],
+            search_kwargs=common,
+            root_limit=root_limit,
+            overrides=ov_by_label[grp.label],
             seed=g.seed * 5003 + g.plies,
-            evaluator=evaluator,
-            move_temperatures=[_temp(g)],
-            divergence_overrides=ov,
-            **common,
+            move_temperature_fn=_temp,
+            record_fn=_record,
+            is_a=False,
+            key_fn=lambda gg: gg.index,
         )
-        mcts_search_elapsed += time.perf_counter() - t0
-        forward_batches += 1
-        if net == "A":
-            cand_forward_batches += 1
-        _apply_search(g, searches[0])
 
-    # ----- Round loop. Per round: (1) candidate pass — gather every opponent's
-    # candidate-to-move games; search the opening leaders per-opponent (own
-    # open_seed) and the greedy games in one shared cross-opponent call; followers
-    # replay. (2) opponent pass — each opponent searches its own to-move games in
-    # its own session (openers per-opponent open_seed; greedy in one batch). The
-    # candidate-first ordering keeps each leader strictly ahead of its follower
-    # when the follower replays.
-    while True:
-        active = [g for g in all_games if not g.done]
-        if not active:
-            break
-        if max_wall_seconds and (time.perf_counter() - started) > max_wall_seconds:
-            budget_hit = True
-            for g in active:
-                _finalize(g)
-            break
-        rounds += 1
-        plies_this_round = 0
+    # The shared eval_driver primitives (EvalGame.a_to_move / finalize / settle /
+    # record_move) reference the engine only through eval_driver's module-level
+    # ``api``; sync it to this module's ``api`` (tests / the golden harness
+    # monkeypatch it) for the duration of the loop, then restore. This lets the
+    # cross-opponent loop reuse the shared primitives without a second patch site.
+    from . import eval_driver as _eval_driver
 
-        # ---- (1) Candidate pass (net A), shared forward for the greedy tail. ----
-        cand_to_move = [g for g in active if not g.done and g.a_to_move()]
-        cand_openers_by_opp: dict[int, list[_Game]] = {}
-        cand_followers: list[_Game] = []
-        cand_greedy: list[_Game] = []
-        for g in cand_to_move:
-            if g.plies < opening_plies and g.is_leader:
-                cand_openers_by_opp.setdefault(g.opp_index, []).append(g)
-            elif g.plies < opening_plies and not g.is_leader:
-                cand_followers.append(g)
-            else:
-                cand_greedy.append(g)
-        # Opening leaders: per-opponent with that opponent's own open_seed (net A
-        # offset 13_000_003).
-        for opp_index, openers in cand_openers_by_opp.items():
-            open_seed = game_seed_base + 13_000_003 + rounds * 1_000_003
-            plies_this_round += _run_candidate_opening(groups[opp_index], openers, open_seed)
-        # Followers replay their leader's recorded opening line (no search).
-        for g in cand_followers:
-            replay = _follower_opening_action(g)
-            if replay is not None:
-                _replay_action(g, replay)
-            else:
-                _run_single(g, "A")
-            plies_this_round += 1
-        # Greedy: one shared candidate forward across all opponents (temp 0 ->
-        # seed-independent argmax).
-        if cand_greedy:
-            cand_seed = game_seed_base + rounds * 1_000_003
-            plies_this_round += _run_candidate_greedy(cand_greedy, cand_seed)
+    _saved_api = _eval_driver.api
+    _eval_driver.api = api
+    try:
+        # ----- Round loop. Per round: (1) candidate pass — gather every opponent's
+        # candidate-to-move games; search the opening leaders per-opponent (own
+        # open_seed) and the greedy games in one shared cross-opponent call; followers
+        # replay. (2) opponent pass — each opponent searches its own to-move games in
+        # its own session (openers per-opponent open_seed; greedy in one batch). The
+        # candidate-first ordering keeps each leader strictly ahead of its follower
+        # when the follower replays.
+        while True:
+            active = [g for g in all_games if not g.done]
+            if not active:
+                break
+            if max_wall_seconds and (time.perf_counter() - started) > max_wall_seconds:
+                budget_hit = True
+                for g in active:
+                    _finalize(g)
+                break
+            rounds += 1
+            plies_this_round = 0
 
-        # ---- (2) Opponent pass (net B), each in its own session. ----
-        active2 = [g for g in all_games if not g.done]
-        for grp in groups:
-            to_move = [g for g in active2 if g.opp_index == grp.opp_index and not g.done and not g.a_to_move()]
-            if not to_move:
-                continue
-            openers = [g for g in to_move if g.plies < opening_plies and g.is_leader]
-            followers = [g for g in to_move if g.plies < opening_plies and not g.is_leader]
-            greedy = [g for g in to_move if g.plies >= opening_plies]
-            if openers:
-                # Net B opening offset 19_000_003.
-                open_seed = game_seed_base + 19_000_003 + rounds * 1_000_003
-                plies_this_round += _run_opponent_batch(
-                    grp, openers, open_seed, temperature=opening_temperature
-                )
-            for g in followers:
+            # ---- (1) Candidate pass (net A), shared forward for the greedy tail. ----
+            cand_to_move = [g for g in active if not g.done and g.a_to_move()]
+            cand_openers_by_opp: dict[int, list[EvalGame]] = {}
+            cand_followers: list[EvalGame] = []
+            cand_greedy: list[EvalGame] = []
+            for g in cand_to_move:
+                if g.plies < opening_plies and g.is_leader:
+                    cand_openers_by_opp.setdefault(g.opp_index, []).append(g)
+                elif g.plies < opening_plies and not g.is_leader:
+                    cand_followers.append(g)
+                else:
+                    cand_greedy.append(g)
+            # Opening leaders: per-opponent with that opponent's own open_seed (net A
+            # offset 13_000_003).
+            for opp_index, openers in cand_openers_by_opp.items():
+                open_seed = game_seed_base + 13_000_003 + rounds * 1_000_003
+                plies_this_round += _run_candidate_opening(groups[opp_index], openers, open_seed)
+            # Followers replay their leader's recorded opening line (no search).
+            for g in cand_followers:
                 replay = _follower_opening_action(g)
                 if replay is not None:
                     _replay_action(g, replay)
                 else:
-                    _run_single(g, "B")
+                    _run_single(g, "A")
                 plies_this_round += 1
-            if greedy:
-                # Net B greedy offset 7_000_003.
-                batch_seed = game_seed_base + 7_000_003 + rounds * 1_000_003
-                plies_this_round += _run_opponent_batch(grp, greedy, batch_seed, temperature=None)
+            # Greedy: one shared candidate forward across all opponents (temp 0 ->
+            # seed-independent argmax).
+            if cand_greedy:
+                cand_seed = game_seed_base + rounds * 1_000_003
+                plies_this_round += _run_candidate_greedy(cand_greedy, cand_seed)
 
-        if plies_this_round == 0:
-            raise RuntimeError(
-                "hexfield multi-checkpoint eval made no progress in a round; "
-                "aborting to avoid a hang"
-            )
+            # ---- (2) Opponent pass (net B), each in its own session. ----
+            active2 = [g for g in all_games if not g.done]
+            for grp in groups:
+                to_move = [g for g in active2 if g.opp_index == grp.opp_index and not g.done and not g.a_to_move()]
+                if not to_move:
+                    continue
+                openers = [g for g in to_move if g.plies < opening_plies and g.is_leader]
+                followers = [g for g in to_move if g.plies < opening_plies and not g.is_leader]
+                greedy = [g for g in to_move if g.plies >= opening_plies]
+                if openers:
+                    # Net B opening offset 19_000_003.
+                    open_seed = game_seed_base + 19_000_003 + rounds * 1_000_003
+                    plies_this_round += _run_opponent_batch(
+                        grp, openers, open_seed, temperature=opening_temperature
+                    )
+                for g in followers:
+                    replay = _follower_opening_action(g)
+                    if replay is not None:
+                        _replay_action(g, replay)
+                    else:
+                        _run_single(g, "B")
+                    plies_this_round += 1
+                if greedy:
+                    # Net B greedy offset 7_000_003.
+                    batch_seed = game_seed_base + 7_000_003 + rounds * 1_000_003
+                    plies_this_round += _run_opponent_batch(grp, greedy, batch_seed, temperature=None)
 
-    # ----- Build one result dict per opponent, in play_checkpoint_match's shape. -
-    elapsed = round(time.perf_counter() - started, 2)
-    results: dict[str, Any] = {}
-    for grp in groups:
-        game_rows = [
-            {
-                "index": g.local_index,
-                "seed": g.seed,
-                "a_seat": "P0" if g.a_is_p0 else "P1",
-                "status": g.status,
-                "winner": g.winner,
-                "plies": g.plies,
-                "opening": list(g.opening),
-            }
-            for g in grp.games
-        ]
-        pairs: list[dict[str, Any]] = []
-        for pair_index in sorted(grp.pair_members):
-            members = grp.pair_members[pair_index]
-            decided = [g for g in members if g.status == "completed"]
-            a_wins_in_pair = sum(1 for g in decided if g.winner == "A")
-            pairs.append(
+            if plies_this_round == 0:
+                raise RuntimeError(
+                    "hexfield multi-checkpoint eval made no progress in a round; "
+                    "aborting to avoid a hang"
+                )
+
+        # ----- Build one result dict per opponent, in play_checkpoint_match's shape. -
+        # forward_batches / candidate_forward_batches / mcts wall time come from the
+        # _CountingSession telemetry (candidate own + all opponents), reproducing the
+        # pre-refactor combined counters exactly.
+        elapsed = round(time.perf_counter() - started, 2)
+        forward_batches = cand_tel.forward_batches + opp_tel.forward_batches
+        cand_forward_batches = cand_tel.forward_batches
+        mcts_search_elapsed = cand_tel.mcts_search_elapsed + opp_tel.mcts_search_elapsed
+        results: dict[str, Any] = {}
+        for grp in groups:
+            game_rows = [
                 {
-                    "pair_index": pair_index,
-                    "seed": game_seed_base + pair_index,
-                    "game_indices": [g.local_index for g in members],
-                    "n_games": len(members),
-                    "n_decided": len(decided),
-                    "a_wins": a_wins_in_pair,
-                    "b_wins": len(decided) - a_wins_in_pair,
-                    "pentanomial_a_score": a_wins_in_pair,
+                    "index": g.index,
+                    "seed": g.seed,
+                    "a_seat": "P0" if g.a_is_p0 else "P1",
+                    "status": g.status,
+                    "winner": g.winner,
+                    "plies": g.plies,
+                    "opening": list(g.opening),
                 }
+                for g in grp.games
+            ]
+            pairs: list[dict[str, Any]] = []
+            for pair_index in sorted(grp.pair_members):
+                members = grp.pair_members[pair_index]
+                decided = [g for g in members if g.status == "completed"]
+                a_wins_in_pair = sum(1 for g in decided if g.winner == "A")
+                pairs.append(
+                    {
+                        "pair_index": pair_index,
+                        "seed": game_seed_base + pair_index,
+                        "game_indices": [g.index for g in members],
+                        "n_games": len(members),
+                        "n_decided": len(decided),
+                        "a_wins": a_wins_in_pair,
+                        "b_wins": len(decided) - a_wins_in_pair,
+                        "pentanomial_a_score": a_wins_in_pair,
+                    }
+                )
+            _hxr_stats: dict[str, int] = {}
+            hxr_path = _write_eval_hxr(
+                grp.games, diagnostics_dir, candidate_label, grp.label, stats=_hxr_stats
             )
-        _hxr_stats: dict[str, int] = {}
-        hxr_path = _write_eval_hxr(
-            grp.games, diagnostics_dir, candidate_label, grp.label, stats=_hxr_stats
-        )
-        results[grp.label] = _build_match_result(
-            games=game_rows,
-            pairs=pairs,
-            label_a=candidate_label,
-            label_b=grp.label,
-            meta_extra={
-                "kind": "hexfield_vs_hexfield",
-                "hxr_record": hxr_path,
-                "hxr_games_written": _hxr_stats.get("games_written", 0),
-                "ckpt_a": {"label": candidate_label, "path": str(candidate_ckpt)},
-                "ckpt_b": {"label": grp.label, "path": str(grp.ckpt)},
-                "games_requested": n_games_per_opponent,
-                "visits": eval_visits,
-                "virtual_batch_size": vbs,
-                "device": cfg.device,
-                "paired_openings": True,
-                "opening_plies": opening_plies,
-                "opening_temperature": opening_temperature,
-                "game_seed_base": game_seed_base,
-                "divergence_overrides_a": ov_cand,
-                "divergence_overrides_b": ov_by_label[grp.label],
-                "budget_hit": budget_hit,
-                # Concurrency telemetry (additive — downstream consumers ignore).
-                "concurrent": True,
-                "multi_opponent": True,
-                "n_opponents": len(groups),
-                "rounds": rounds,
-                "forward_batches": forward_batches,
-                "candidate_forward_batches": cand_forward_batches,
-                "elapsed_seconds": elapsed,
-                "mcts_search_elapsed_seconds": round(mcts_search_elapsed, 2),
-            },
-        )
-    return results
+            results[grp.label] = _build_match_result(
+                games=game_rows,
+                pairs=pairs,
+                label_a=candidate_label,
+                label_b=grp.label,
+                meta_extra={
+                    "kind": "hexfield_vs_hexfield",
+                    "hxr_record": hxr_path,
+                    "hxr_games_written": _hxr_stats.get("games_written", 0),
+                    "ckpt_a": {"label": candidate_label, "path": str(candidate_ckpt)},
+                    "ckpt_b": {"label": grp.label, "path": str(grp.ckpt)},
+                    "games_requested": n_games_per_opponent,
+                    "visits": eval_visits,
+                    "virtual_batch_size": vbs,
+                    "device": cfg.device,
+                    "paired_openings": True,
+                    "opening_plies": opening_plies,
+                    "opening_temperature": opening_temperature,
+                    "game_seed_base": game_seed_base,
+                    "divergence_overrides_a": ov_cand,
+                    "divergence_overrides_b": ov_by_label[grp.label],
+                    "budget_hit": budget_hit,
+                    # Concurrency telemetry (additive — downstream consumers ignore).
+                    "concurrent": True,
+                    "multi_opponent": True,
+                    "n_opponents": len(groups),
+                    "rounds": rounds,
+                    "forward_batches": forward_batches,
+                    "candidate_forward_batches": cand_forward_batches,
+                    "elapsed_seconds": elapsed,
+                    "mcts_search_elapsed_seconds": round(mcts_search_elapsed, 2),
+                },
+            )
+        return results
+    finally:
+        _eval_driver.api = _saved_api
 
 
 # --------------------------------------------------------------------------- #
@@ -1535,6 +1168,14 @@ def play_sealbot_match(
     Seats alternate by game index (even -> hexfield is player0). ``build_opponent``
     is an injection seam (tests fake the bot); default builds a real
     ``SealBotPlayer`` per game.
+
+    Thin wrapper over the central ``eval_driver.play_eval_match`` engine in UNPAIRED
+    mode (``paired_openings=False``, ``pentanomial=None``): net A is the hexfield
+    candidate (driven by the shared multi-root ``session.search`` pass), net B is
+    the :class:`SealBotAdapter`. The net-A pass keeps SealBot's 7M greedy seed
+    offset and gates the opening temperature on the hexfield move count
+    (``a_decisions``, not total plies), so the result dict is byte-identical to the
+    pre-refactor runner.
     """
 
     # Imported lazily so importing this module never requires the SealBot
@@ -1543,15 +1184,10 @@ def play_sealbot_match(
 
     cfg = config if config is not None else parse_hexfield_config({})
     sp = cfg.selfplay
-    # visits=None defaults to the self-play search budget (sp.search_visits), the
-    # same default as play_checkpoint_match, not cfg.evaluation.eval_visits. An
-    # explicit ``visits`` overrides.
-    eval_visits = int(visits) if visits is not None else int(sp.search_visits)
-    # Eval-only virtual-batch-size override, independent of
-    # SelfplayConfig.virtual_batch_size. None -> self-play value.
-    vbs = int(virtual_batch_size) if virtual_batch_size is not None else int(sp.virtual_batch_size)
-    root_limit = int(active_root_limit) if active_root_limit is not None else sp.active_root_limit
 
+    # Net A's (and, echoed into meta, the match's) divergence overrides. An
+    # explicit dict is returned as-is by _resolve_eval_overrides, so passing this
+    # resolved dict on to the driver is idempotent.
     overrides = _resolve_eval_overrides(
         sp, diagnostics_dir=diagnostics_dir, divergence_overrides=divergence_overrides
     )
@@ -1568,238 +1204,303 @@ def play_sealbot_match(
             return build_opponent(sealbot_config)
         return SealBotPlayer(sealbot_config, player_id=f"sealbot-{sealbot_variant}")
 
-    from .inference import HexfieldEvaluator  # lazy: torch only on the GPU path
-
-    started = time.perf_counter()
-    model = _load_hexfield_net(model_ckpt)
-    evaluator = HexfieldEvaluator(model, device=cfg.device)
-    session = _new_rust_session(max_states)
-
-    # One in-flight game.
-    class _Game:
-        __slots__ = (
-            "index", "seed", "hex_is_p0", "state", "opponent",
-            "plies", "hex_decisions", "done", "status", "winner", "opening",
-            "actions",
-        )
-
-        def __init__(self, index: int) -> None:
-            self.index = index
-            self.seed = game_seed_base + index
-            self.hex_is_p0 = index % 2 == 0
-            self.state = api.new_game(seed=self.seed)
-            self.opponent = _make_opponent()
-            self.plies = 0
-            self.hex_decisions = 0
-            self.done = False
-            self.status = "truncated"
-            self.winner: str | None = None  # "hex" | "sealbot" | None
-            self.opening: list[int] = []
-            # Full move stream (BOTH players) for the replayable .hxr record.
-            self.actions: list[int] = []
-
-        @property
-        def hex_role(self) -> Any:
-            return api.Player.PLAYER_0 if self.hex_is_p0 else api.Player.PLAYER_1
-
-        @property
-        def hex_role_label(self) -> str:
-            return "player0" if self.hex_is_p0 else "player1"
-
-        def hex_to_move(self) -> bool:
-            return api.current_player(self.state) == self.hex_role
-
-    games = [_Game(i) for i in range(n_games)]
-    search_seed = game_seed_base + 7_000_003
-    mcts_search_elapsed = 0.0
-    opponent_elapsed = 0.0
-    rounds = 0
-    forward_batches = 0
-    budget_hit = False
-
-    def _finalize(game: _Game) -> None:
-        terminal = api.terminal(game.state)
-        if terminal is not None:
-            game.status = "completed"
-            if terminal.winner is None:
-                game.winner = None
-            else:
-                won_label = str(terminal.winner)  # "player0" / "player1"
-                game.winner = "hex" if won_label == game.hex_role_label else "sealbot"
-        elif budget_hit:
-            game.status = "aborted_budget"
-            game.winner = None
-        else:
-            game.status = "truncated"
-            game.winner = None
-        game.done = True
-        session.discard(game.index)
-
-    def _settle(game: _Game) -> bool:
-        if api.terminal(game.state) is not None or game.plies >= sp.max_game_plies:
-            _finalize(game)
-            return True
-        return False
-
-    try:
-        while True:
-            active = [g for g in games if not g.done]
-            if not active:
-                break
-            if max_wall_seconds and (time.perf_counter() - started) > max_wall_seconds:
-                budget_hit = True
-                for g in active:
-                    _finalize(g)
-                break
-            rounds += 1
-            plies_this_round = 0
-
-            # --- Batched hexfield ply across every game where hex is to move. ---
-            hex_games = [g for g in active if g.hex_to_move()]
-            if hex_games:
-                # Cap the multi-root batch at the active-root limit; if more games
-                # than the limit are simultaneously hex-to-move, search them in
-                # chunks. Each chunk is one multi-root forward.
-                for chunk_start in range(0, len(hex_games), root_limit):
-                    chunk = hex_games[chunk_start : chunk_start + root_limit]
-                    move_temperatures = [
-                        opening_temperature
-                        if (g.hex_decisions < opening_plies and opening_temperature > 0.0)
-                        else 0.0
-                        for g in chunk
-                    ]
-                    t0 = time.perf_counter()
-                    searches = session.search(
-                        [g.index for g in chunk],
-                        tuple(g.state for g in chunk),
-                        visits=eval_visits,
-                        c_puct=sp.c_puct,
-                        temperature=0.0,
-                        seed=search_seed + rounds * 1_000_003,
-                        evaluator=evaluator,
-                        virtual_batch_size=vbs,
-                        active_root_limit=root_limit,
-                        widening_policy_mass=sp.widening_policy_mass,
-                        widening_max_children=sp.widening_max_children,
-                        widening_min_children=sp.widening_min_children,
-                        fpu_reduction=sp.fpu_reduction,
-                        tss_enabled=sp.tss_enabled,
-                        search_parity_mode=sp.search_parity_mode,
-                        move_temperatures=move_temperatures,
-                        divergence_overrides=overrides,
-                    )
-                    mcts_search_elapsed += time.perf_counter() - t0
-                    forward_batches += 1
-                    if len(searches) != len(chunk):
-                        raise RuntimeError(
-                            f"hexfield SealBot eval search returned {len(searches)} "
-                            f"results for {len(chunk)} games"
-                        )
-                    for g, search in zip(chunk, searches):
-                        q, r = unpack_action_id(int(search["action_id"]))
-                        api.apply_action(g.state, PlacementAction(AxialCoord(q=q, r=r)))
-                        g.plies += 1
-                        g.hex_decisions += 1
-                        g.actions.append(int(search["action_id"]))
-                        if len(g.opening) < opening_plies:
-                            g.opening.append(int(search["action_id"]))
-                        plies_this_round += 1
-                        _settle(g)
-
-            # --- SealBot turns, serially per game, fully drained per turn. ---
-            for g in active:
-                if g.done:
-                    continue
-                while not g.done and not g.hex_to_move():
-                    t0 = time.perf_counter()
-                    decision = g.opponent.decide(g.state)
-                    opponent_elapsed += time.perf_counter() - t0
-                    api.apply_action(g.state, decision.action)
-                    g.plies += 1
-                    coord = decision.action.coord
-                    g.actions.append(pack_action_id(coord.q, coord.r))
-                    if len(g.opening) < opening_plies:
-                        g.opening.append(pack_action_id(coord.q, coord.r))
-                    plies_this_round += 1
-                    _settle(g)
-
-            if plies_this_round == 0:
-                raise RuntimeError(
-                    "hexfield SealBot eval made no progress in a round; aborting to avoid a hang"
-                )
-    finally:
-        for g in games:
-            try:
-                g.opponent.close()
-            except Exception:
-                pass
-
-    # Persist the SealBot games as a replayable .hxr (dashboard "evaluation"
-    # source). Best-effort / fail-soft. The writer is net-A-centric (expects
-    # .a_is_p0 and .winner in {"A","B",None}), so the SealBot _Game (hexfield is
-    # net A, winner "hex"/"sealbot") is adapted onto that shape here.
-    from types import SimpleNamespace
-
-    _hxr_stats: dict[str, int] = {}
-    _hxr_games = [
-        SimpleNamespace(
-            actions=g.actions,
-            a_is_p0=g.hex_is_p0,
-            seed=g.seed,
-            index=g.index,
-            plies=g.plies,
-            winner=("A" if g.winner == "hex" else ("B" if g.winner == "sealbot" else None)),
-        )
-        for g in games
-    ]
-    hxr_path = _write_eval_hxr(
-        _hxr_games, diagnostics_dir, label, f"SealBot {sealbot_variant}", stats=_hxr_stats
+    # Net B is SealBot: one persistent minimax worker per game, drained serially.
+    opponent = SealBotAdapter(
+        label=f"SealBot {sealbot_variant}", make_opponent=_make_opponent
     )
 
-    # Re-key game rows to the hexfield-vs-X result shape. _build_match_result is
-    # net-A-centric, so map hexfield -> "A", sealbot -> "B".
-    game_rows = [
-        {
-            "index": g.index,
-            "seed": g.seed,
-            "a_seat": "P0" if g.hex_is_p0 else "P1",
-            "status": g.status,
-            "winner": (
-                "A" if g.winner == "hex" else ("B" if g.winner == "sealbot" else None)
-            ),
-            "plies": g.plies,
-            "opening": list(g.opening),
-        }
-        for g in games
-    ]
-    result = _build_match_result(
-        games=game_rows,
-        pairs=None,  # SealBot games are unpaired
-        label_a=label,
-        label_b=f"SealBot {sealbot_variant}",
-        meta_extra={
+    def _meta_extra(games: list[Any], tel: Any) -> dict[str, Any]:
+        # Persist the games as a replayable .hxr (dashboard "evaluation" source);
+        # _write_eval_hxr is fully fail-soft. ``games`` are net-A-centric EvalGame
+        # records (.a_is_p0 / .winner in {"A","B",None}), the writer's shape.
+        _hxr_stats: dict[str, int] = {}
+        hxr_path = _write_eval_hxr(
+            games, diagnostics_dir, label, f"SealBot {sealbot_variant}", stats=_hxr_stats
+        )
+        return {
             "kind": "hexfield_vs_sealbot",
             "ckpt": {"label": label, "path": str(model_ckpt)},
             "sealbot": {"variant": sealbot_variant, "time_limit": sealbot_time_limit},
             "games_requested": n_games,
-            "visits": eval_visits,
-            "virtual_batch_size": vbs,
+            "visits": tel.eval_visits,
+            "virtual_batch_size": tel.virtual_batch_size,
             "device": cfg.device,
             "opening_plies": opening_plies,
             "opening_temperature": opening_temperature,
             "game_seed_base": game_seed_base,
             "divergence_overrides": overrides,
-            "budget_hit": budget_hit,
-            "rounds": rounds,
-            "forward_batches": forward_batches,
-            "elapsed_seconds": round(time.perf_counter() - started, 2),
-            "mcts_search_elapsed_seconds": round(mcts_search_elapsed, 2),
-            "opponent_elapsed_seconds": round(opponent_elapsed, 2),
+            "budget_hit": tel.budget_hit,
+            "rounds": tel.rounds,
+            # forward_batches / mcts time cover ONLY net A's hexfield searches
+            # (SealBot decisions go through the minimax worker, not session.search).
+            "forward_batches": tel.forward_batches,
+            "elapsed_seconds": round(tel.elapsed_seconds, 2),
+            "mcts_search_elapsed_seconds": round(tel.mcts_search_elapsed, 2),
+            "opponent_elapsed_seconds": round(opponent.opponent_elapsed, 2),
             "hxr_record": hxr_path,
             "hxr_games_written": _hxr_stats.get("games_written", 0),
-        },
+        }
+
+    # The driver (eval_driver) references the engine only through ITS module-level
+    # ``api`` name; sync it to this module's ``api`` (which tests / the golden
+    # harness monkeypatch) for the duration of the call, then restore. This lets
+    # the shared driver + the SealBotAdapter (new_state / a_to_move) use the same
+    # (possibly faked) engine without a second patch site, with no cross-test leak.
+    from . import eval_driver as _eval_driver
+
+    _saved_api = _eval_driver.api
+    _eval_driver.api = api
+    try:
+        return play_eval_match(
+            model_ckpt,
+            opponent,
+            n_games,
+            config=cfg,
+            label_a=label,
+            label_b=f"SealBot {sealbot_variant}",
+            meta_extra_fn=_meta_extra,
+            paired_openings=False,  # SealBot is load-nondeterministic -> unpaired
+            visits=visits,
+            virtual_batch_size=virtual_batch_size,
+            active_root_limit=active_root_limit,
+            opening_plies=opening_plies,
+            opening_temperature=opening_temperature,
+            divergence_overrides=overrides,
+            diagnostics_dir=diagnostics_dir,
+            game_seed_base=game_seed_base,
+            max_wall_seconds=max_wall_seconds,
+            max_states=max_states,
+            # SealBot's pre-refactor net-A pass used the 7M greedy seed offset and
+            # gated the opening on the hexfield move count (a_decisions).
+            net_a_greedy_offset=7_000_003,
+            opening_gate_attr="a_decisions",
+        )
+    finally:
+        _eval_driver.api = _saved_api
+
+
+def play_strix_match(
+    hexfield_ckpt: str | Path,
+    strix_ckpt: str | Path,
+    n_games: int,
+    *,
+    config: Any = None,
+    label: str = "hexfield",  # label_a
+    strix_label: str = "hexo-strix",  # label_b
+    # --- hexfield search knobs (net A) ---
+    visits: int | None = None,  # None -> sp.search_visits
+    virtual_batch_size: int | None = None,
+    opening_plies: int = DEFAULT_OPENING_PLIES,
+    opening_temperature: float = DEFAULT_OPENING_TEMPERATURE,
+    divergence_overrides: dict | None = None,
+    active_root_limit: int | None = None,
+    # --- strix search knobs (net B) ---
+    strix_sims: int = 256,
+    strix_m_actions: int = 16,
+    strix_c_visit: int = 50,
+    strix_c_scale: float = 1.0,
+    strix_disable_gumbel_noise: bool = True,
+    # Opening-confined "light noise" for strix (StrixMctsPlayer.noise_opening_plies):
+    # None -> opening_plies (strix samples its opening among the top-m candidates,
+    # then plays a deterministic greedy tail); 0 -> fully deterministic strix.
+    # Confining the noise to the opening keeps the post-opening play reproducible,
+    # so strix stays a STABLE anchor, while still diversifying games. The opening
+    # noise is seeded from each game's CRN seed, so a fixed game_seed_base replays
+    # identically across epochs.
+    strix_noise_opening_plies: int | None = None,
+    strix_device: str = "cuda",
+    strix_linger_s: float = 0.0008,
+    strix_max_batch: int = 512,
+    strix_pool_threads: int | None = None,  # None -> n_games (see risk R4)
+    # --- pairing / bookkeeping ---
+    paired_openings: bool = True,
+    diagnostics_dir: str | Path | None = None,
+    max_states: int = 65_536,
+    game_seed_base: int = 0,
+    max_wall_seconds: float = 0.0,
+    # --- CPU-test injection seams (mirror play_sealbot_match) ---
+    build_hexfield_evaluator: Callable[..., Any] | None = None,
+    make_session: Callable[..., Any] | None = None,
+    build_strix_player: Callable[[int, bool], Any] | None = None,
+    make_batch_server: Callable[..., Any] | None = None,
+) -> dict[str, Any]:
+    """Play hexfield vs hexo-strix concurrently, GPU-batched on BOTH sides.
+
+    A lock-step multi-game arena that supersedes the thread-per-game
+    ``hexo_strix.match_runner.run_threaded_matches`` glue (used by
+    ``scripts/_strix_vs_hexfield_eval.py``). It removes that path's two taxes:
+
+      * **hexfield side** is no longer lock-serialised. One driver thread owns a
+        single persistent ``HexfieldMctsSession`` and collapses ALL
+        hexfield-to-move games into one multi-root ``session.search`` per round
+        (one big GPU forward, no lock — only the driver touches the
+        non-thread-safe evaluator), chunked at the active-root limit. This is the
+        ``play_sealbot_match`` hexfield pass verbatim.
+      * **strix side** is fired as a concurrent burst: every strix-to-move game's
+        (read-only) ``StrixMctsPlayer.decide`` is submitted to a thread pool at
+        once, so their leaves block simultaneously in the shared
+        :class:`hexo_strix.batch_server.StrixBatchServer` and coalesce into large
+        cross-game GPU forwards. The driver applies each returned action
+        single-threaded after the join (``decide`` never mutates the state), so
+        there are no write races.
+
+    Both engines share ONE ``hexo_engine`` state per game (``session.search`` and
+    ``StrixMctsPlayer.decide`` both take a ``HexoState``), handed to whichever
+    side is to move — no per-side state duplication. Net A = hexfield, net B =
+    strix throughout, so the returned dict is net-A-centric like
+    ``play_sealbot_match``.
+
+    Pairing (``paired_openings=True``, the default): games are grouped into
+    ``n_pairs = ceil(n_games / 2)`` CRN pairs sharing a ``pair_seed`` but swapping
+    seats — the LEADER (game 0) plays hexfield-as-player0, the seat-swapped
+    FOLLOWER (game 1) plays hexfield-as-player1. Only the leader searches its
+    opening (hexfield samples via ``opening_temperature``; strix samples via its
+    opening-confined Gumbel noise, ``strix_noise_opening_plies``); the follower
+    REPLAYS the leader's recorded opening line ply-for-ply (no search on either
+    engine), so both games traverse the identical opening board with swapped
+    colors. After the opening both engines play a deterministic greedy tail, so a
+    pair's only difference is the seat swap — a clean pentanomial CRN pair (net-A
+    wins in {0, 1, 2}) that the downstream ``effective_counts`` deflation consumes.
+    This works with a (mostly) deterministic strix because the opening variance
+    comes from the leader's temperature/noise sampling, which the follower shares.
+
+    The leader/follower forced-opening replay mirrors ``play_checkpoint_match``
+    exactly (net A = hexfield pass first, then net B = strix pass; within each
+    pass the leader batch runs before the follower replays), so the leader stays
+    strictly ahead and the follower's recorded opening action always exists; the
+    rare leader-ended-mid-opening case falls back to a single search / decide.
+
+    Unpaired (``paired_openings=False``): every game gets an independent seed and
+    seats alternate by game index (even -> hexfield is player0), the
+    independent-Bernoulli layout ``play_sealbot_match`` uses for a foreign
+    opponent (``pentanomial=None``).
+
+    Injection seams (``build_hexfield_evaluator`` / ``make_session`` /
+    ``build_strix_player`` / ``make_batch_server``) let a CPU test drive the loop
+    with fakes and no GPU / no ``hexo_rs`` wheel, exactly as ``build_opponent``
+    does for ``play_sealbot_match``. ``build_strix_player(game_seed, is_leader)``
+    returns a player exposing ``.decide(state) -> DecisionResult``.
+    """
+
+    cfg = config if config is not None else parse_hexfield_config({})
+    sp = cfg.selfplay
+    # Opening-confined light noise window for strix: default to the shared
+    # opening_plies so strix samples over the same opening horizon hexfield does.
+    strix_noise_plies = (
+        int(opening_plies) if strix_noise_opening_plies is None else int(strix_noise_opening_plies)
     )
-    return result
+
+    # Net A's (and, echoed into meta, the match's) divergence overrides. An
+    # explicit dict is returned as-is by _resolve_eval_overrides, so passing this
+    # resolved dict on to the driver is idempotent.
+    overrides = _resolve_eval_overrides(
+        sp, diagnostics_dir=diagnostics_dir, divergence_overrides=divergence_overrides
+    )
+
+    # Net B is hexo-strix: a shared GPU batch server + per-game MCTS player pool.
+    opponent = StrixAdapter(
+        strix_ckpt,
+        label=strix_label,
+        strix_label=strix_label,
+        n_games=n_games,
+        paired_openings=paired_openings,
+        strix_noise_plies=strix_noise_plies,
+        strix_sims=strix_sims,
+        strix_m_actions=strix_m_actions,
+        strix_c_visit=strix_c_visit,
+        strix_c_scale=strix_c_scale,
+        strix_disable_gumbel_noise=strix_disable_gumbel_noise,
+        strix_device=strix_device,
+        strix_linger_s=strix_linger_s,
+        strix_max_batch=strix_max_batch,
+        strix_pool_threads=strix_pool_threads,
+        build_strix_player=build_strix_player,
+        make_batch_server=make_batch_server,
+    )
+
+    def _meta_extra(games: list[Any], tel: Any) -> dict[str, Any]:
+        # Persist the games as a replayable .hxr (dashboard "evaluation" source);
+        # _write_eval_hxr is fully fail-soft. ``games`` are net-A-centric EvalGame
+        # records (.a_is_p0 / .winner in {"A","B",None}), the writer's shape.
+        _hxr_stats: dict[str, int] = {}
+        hxr_path = _write_eval_hxr(games, diagnostics_dir, label, strix_label, stats=_hxr_stats)
+        return {
+            "kind": "hexfield_vs_strix",
+            "ckpt": {"label": label, "path": str(hexfield_ckpt)},
+            "strix": {
+                "label": strix_label,
+                "path": str(strix_ckpt),
+                "sims": strix_sims,
+                "m_actions": strix_m_actions,
+                "c_visit": strix_c_visit,
+                "c_scale": strix_c_scale,
+                "disable_gumbel_noise": strix_disable_gumbel_noise,
+                "noise_opening_plies": strix_noise_plies,
+                "device": strix_device,
+                "linger_s": strix_linger_s,
+                "max_batch": strix_max_batch,
+            },
+            "games_requested": n_games,
+            "visits": tel.eval_visits,
+            "virtual_batch_size": tel.virtual_batch_size,
+            "device": cfg.device,
+            "paired_openings": paired_openings,
+            "opening_plies": opening_plies,
+            "opening_temperature": opening_temperature,
+            "game_seed_base": game_seed_base,
+            "divergence_overrides": overrides,
+            "budget_hit": tel.budget_hit,
+            "rounds": tel.rounds,
+            # forward_batches / mcts time cover ONLY net A's hexfield searches
+            # (strix decisions go through the pool, not session.search).
+            "forward_batches": tel.forward_batches,
+            "elapsed_seconds": round(tel.elapsed_seconds, 2),
+            "mcts_search_elapsed_seconds": round(tel.mcts_search_elapsed, 2),
+            "strix_elapsed_seconds": round(opponent.strix_elapsed, 2),
+            # Strix batch-server coalescing telemetry (read after close()).
+            "strix_forward_batches": opponent.strix_forward_batches,
+            "strix_leaves": opponent.strix_leaves,
+            "strix_max_batch": opponent.strix_max_seen_batch,
+            "hxr_record": hxr_path,
+            "hxr_games_written": _hxr_stats.get("games_written", 0),
+        }
+
+    # The driver (eval_driver) references the engine only through ITS module-level
+    # ``api`` name; sync it to this module's ``api`` (which tests / the golden
+    # harness monkeypatch) for the duration of the call, then restore. This lets
+    # the shared driver + the StrixAdapter (new_state / a_to_move) use the same
+    # (possibly faked) engine without a second patch site, with no cross-test leak.
+    from . import eval_driver as _eval_driver
+
+    _saved_api = _eval_driver.api
+    _eval_driver.api = api
+    try:
+        return play_eval_match(
+            hexfield_ckpt,
+            opponent,
+            n_games,
+            config=cfg,
+            label_a=label,
+            label_b=strix_label,
+            meta_extra_fn=_meta_extra,
+            paired_openings=paired_openings,
+            visits=visits,
+            virtual_batch_size=virtual_batch_size,
+            active_root_limit=active_root_limit,
+            opening_plies=opening_plies,
+            opening_temperature=opening_temperature,
+            divergence_overrides=overrides,
+            diagnostics_dir=diagnostics_dir,
+            game_seed_base=game_seed_base,
+            max_wall_seconds=max_wall_seconds,
+            max_states=max_states,
+            build_candidate_evaluator=(
+                build_hexfield_evaluator if build_hexfield_evaluator is not None else None
+            ),
+            make_session=make_session,
+        )
+    finally:
+        _eval_driver.api = _saved_api
 
 
 # --------------------------------------------------------------------------- #

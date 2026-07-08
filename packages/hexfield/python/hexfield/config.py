@@ -267,6 +267,17 @@ class MultiStageEvalOpponents:
     sealbot_path: str | None = None
     sealbot_variant: str = "current"
     sealbot_time_limit: float = 0.05
+    # Strix zero-point (SootyOwl/hexo-strix GNN at fixed sims). Deterministic /
+    # GPU-batched => STABLE strength, so it is the PREFERRED pinned 0-Elo anchor
+    # (above SealBot) and enters difference inference at FULL weight. When disabled
+    # the anchor falls back to SealBot, then the permanent anchors. ``strix_ckpt``
+    # is a hexo-strix HeXONet ``checkpoint_*.pt``; None => disabled in practice.
+    strix_enabled: bool = False
+    strix_ckpt: str | None = None
+    strix_sims: int = 256                   # hexo-strix EvalConfig default (DEFAULT_SIMS)
+    strix_m: int = 16                       # m_actions (DEFAULT_M_ACTIONS)
+    strix_device: str = "cuda"
+    strix_label: str = "strix"              # stable pool/rating label (edges compound)
     # Permanent anchors, as (label, checkpoint-path) pairs. These never slide.
     # Relative paths use forward slashes and are resolved by the runner against
     # the repo/run root; ``_resolve_anchor_path`` short-circuits an absolute
@@ -373,6 +384,12 @@ class MultiStageEvalSection:
     # (the rest is split evenly across the checkpoint opponents). Threaded into
     # ``allocate_budget`` by the orchestrator.
     sealbot_share: float = 0.25
+    # Strix edge likelihood weight in the BT fit (full weight; contrast SealBot's
+    # 0.5 over-dispersion down-weight). Strix at fixed sims is stable, so its edge
+    # enters difference inference undeflated.
+    strix_weight: float = 1.0
+    # Fraction of ``games_budget`` for the Strix zero-point pairing.
+    strix_share: float = 0.25
     # Bradley-Terry convergence guard: assert max|grad| < this before computing
     # covariance.
     bt_grad_tol: float = 1e-6
@@ -540,6 +557,45 @@ def build_fast_divergence_overrides(
     map with its Gumbel fields folded to the ``fast_*`` values. Thin alias for
     ``build_divergence_overrides(sp, disabled=disabled, fast=True)``."""
     return build_divergence_overrides(sp, disabled=disabled, fast=True)
+
+
+def build_eval_search_kwargs(
+    sp: SelfplayConfig,
+    *,
+    visits: int,
+    virtual_batch_size: int,
+    active_root_limit: int,
+    temperature: float = 0.0,
+) -> dict:
+    """Build the canonical eval ``session.search`` keyword bundle.
+
+    The single source of truth for the search-knob dict every eval arena passes
+    to ``HexfieldMctsSession.search``: the greedy-after-opening, no-Dirichlet
+    profile shared by ``play_checkpoint_match`` / ``play_multi_checkpoint_match``
+    / ``play_sealbot_match`` / ``play_strix_match``. ``visits`` /
+    ``virtual_batch_size`` / ``active_root_limit`` are the already-resolved eval
+    budget (see ``_resolve_eval_budget``); the remaining knobs read from ``sp``.
+
+    Returns the 11 canonical fields (visits, c_puct, temperature,
+    virtual_batch_size, active_root_limit, widening_policy_mass,
+    widening_max_children, widening_min_children, fpu_reduction, tss_enabled,
+    search_parity_mode). The PER-CALL args (seed, move_temperatures,
+    divergence_overrides, evaluator, and the positional roots/states) stay at the
+    call site — they are not part of this dict. A new self-play search knob is
+    added here once and every arena inherits it."""
+    return dict(
+        visits=int(visits),
+        c_puct=sp.c_puct,
+        temperature=temperature,
+        virtual_batch_size=int(virtual_batch_size),
+        active_root_limit=int(active_root_limit),
+        widening_policy_mass=sp.widening_policy_mass,
+        widening_max_children=sp.widening_max_children,
+        widening_min_children=sp.widening_min_children,
+        fpu_reduction=sp.fpu_reduction,
+        tss_enabled=sp.tss_enabled,
+        search_parity_mode=sp.search_parity_mode,
+    )
 
 
 def parse_hexfield_config(config: Mapping[str, Any]) -> HexfieldConfig:

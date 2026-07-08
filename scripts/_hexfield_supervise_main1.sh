@@ -33,7 +33,10 @@ export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
 # /mnt/e/SealBot/{current,best} (variant 'current').
 export SEALBOT_PATH="${SEALBOT_PATH:-/mnt/e/SealBot}"
 # Minimal PYTHONPATH proven by the original launch (hexo_* resolve from the venv).
-export PYTHONPATH="$ROOT/packages/hexfield/python:$ROOT/packages/dense_cnn_restnet/python"
+# hexo_strix is the Strix eval-anchor package (pure-python; hexo_rs installed in
+# the venv). It is NOT pip-installed, so add its source dir here — else the in-run
+# Strix opponent import fails and the BT anchor silently falls back to SealBot.
+export PYTHONPATH="$ROOT/packages/hexfield/python:$ROOT/packages/dense_cnn_restnet/python:$ROOT/packages/hexo_strix/python"
 # GPU/host overlap in the self-play serve loop (2026-06-15): the forward is
 # submitted (no device sync), the pre-backup prefetch select runs GIL-released
 # while those kernels execute, then the forward is drained. Bit-identical to the

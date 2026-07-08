@@ -1762,6 +1762,21 @@ fn run_searches_to_targets(
         }
     };
 
+    // HEXFIELD_ASYNC_EVAL: the forward is enqueued (submit, no device sync), the
+    // pre-backup select runs with the GIL released while those kernels execute,
+    // then the forward is drained (finish). Off => synchronous eval-then-select.
+    // Only the sync point moves; the leaf stream is bit-identical. Depth-2 is
+    // NOT read here — it stays self-play-only (it would change the leaf stream).
+    //
+    // Unlike run_continuous (self-play, always a real HexfieldEvaluator), the eval
+    // `search` entry receives diverse evaluators (arena stubs, custom eval
+    // opponents). The async split needs the two-phase submit_payload/result
+    // protocol; when the evaluator only implements the synchronous __call__
+    // contract, fall back to the sync path rather than raising. Real evaluators
+    // have submit_payload, so production async is unaffected.
+    let async_eval = std::env::var("HEXFIELD_ASYNC_EVAL").is_ok()
+        && evaluator.hasattr("submit_payload").unwrap_or(false);
+
     early_stop_pass(searches);
     // No leaves in flight on the priming select, so the SH barrier is unblocked
     // for every search (empty in-flight set).
@@ -1796,31 +1811,71 @@ fn run_searches_to_targets(
                 state_hash: leaf.state_hash,
             })
             .collect();
-        let evaluations = evaluate_state_refs_cached(
-            py,
-            evaluator,
-            &leaf_requests,
-            evaluation_cache,
-            Some(evaluation_stats),
-            cache_max_states,
-            request_moves_left,
-            request_logits,
-        )?;
         // Prefetch select with the current batch still pending (pre-backup
         // tree state). `pending_leaves` carries −virtual_loss on the trees of
         // the searches it touches, so the SH barrier is blocked for exactly
         // those searches (their round ranking would read contaminated stats).
-        let next_leaves = if searches.iter().any(RustSearch::needs_visits) {
-            select_leaf_batch(
-                searches,
-                c_puct,
-                leaf_batch_per_root,
-                virtual_loss,
-                &pending_leaves,
-            )?
-            .0
+        // Async: submit -> select (GIL released) -> finish. Sync: eval ->
+        // select. Both yield (next_leaves, evaluations); the leaf stream is
+        // identical because the select reads the same pre-backup tree state
+        // with the same batch in flight either way.
+        let (next_leaves, evaluations) = if async_eval {
+            let pending = submit_eval_cached(
+                py,
+                evaluator,
+                &leaf_requests,
+                evaluation_cache,
+                Some(evaluation_stats),
+                request_moves_left,
+                request_logits,
+            )?;
+            let next_leaves = if searches.iter().any(RustSearch::needs_visits) {
+                py.detach(|| {
+                    select_leaf_batch(
+                        searches,
+                        c_puct,
+                        leaf_batch_per_root,
+                        virtual_loss,
+                        &pending_leaves,
+                    )
+                })?
+                .0
+            } else {
+                Vec::new()
+            };
+            let evaluations = finish_eval_cached(
+                py,
+                evaluator,
+                pending,
+                evaluation_cache,
+                Some(evaluation_stats),
+                cache_max_states,
+            )?;
+            (next_leaves, evaluations)
         } else {
-            Vec::new()
+            let evaluations = evaluate_state_refs_cached(
+                py,
+                evaluator,
+                &leaf_requests,
+                evaluation_cache,
+                Some(evaluation_stats),
+                cache_max_states,
+                request_moves_left,
+                request_logits,
+            )?;
+            let next_leaves = if searches.iter().any(RustSearch::needs_visits) {
+                select_leaf_batch(
+                    searches,
+                    c_puct,
+                    leaf_batch_per_root,
+                    virtual_loss,
+                    &pending_leaves,
+                )?
+                .0
+            } else {
+                Vec::new()
+            };
+            (next_leaves, evaluations)
         };
         apply_eval_backups(searches, pending_leaves, &evaluations, virtual_loss)?;
         pending_leaves = next_leaves;

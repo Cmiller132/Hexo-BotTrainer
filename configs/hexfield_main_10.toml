@@ -152,13 +152,21 @@ eval_every = 5
 
 [model.config.multi_stage_eval]
 enabled = true
-games_budget = 128
+# 192-game budget so the Strix zero-point can take a well-powered 64-game pairing
+# (0.3333 * 192 = 64) every 5 epochs WITHOUT starving the checkpoint ladder:
+# Strix 64 + SealBot 32 (0.1667 * 192) leaves 96 split across main6_ep73 +
+# main5_ep105 + the sliding bracket (~32 each, paired).
+games_budget = 192
 every_n_epochs = 5
 full_search_visits = 512
 eval_virtual_batch_size = 32
-# 48 of the 128-game budget to the SealBot pairing (0.375 * 128 = 48); the rest
-# split across main6_ep73 + main5_ep105 + the sliding bracket.
-sealbot_share = 0.375
+# Strix is the PREFERRED (deterministic, GPU-batched) 0-Elo anchor, so SealBot is
+# demoted to the fallback zero-point and its share drops (0.1667 * 192 = 32); its
+# edge is still played + pooled, just no longer the pin. Strix takes the larger
+# zero-point pairing (0.3333 * 192 = 64) at full likelihood weight.
+sealbot_share = 0.1667
+strix_share = 0.3333
+strix_weight = 1.0
 verdict_reference_lag = 5
 pool_path = "diagnostics/eval_pool.json"
 
@@ -167,6 +175,17 @@ enabled = false
 
 [model.config.multi_stage_eval.opponents]
 sealbot_enabled = true
+# Strix zero-point (SootyOwl/hexo-strix HeXONet). PREFERRED pinned 0-Elo anchor:
+# deterministic greedy tail with opening-confined light Gumbel noise, played as a
+# paired CRN pentanomial vs the candidate. strix_sims/m mirror hexo-strix's
+# EvalConfig. NOTE: relocate this checkpoint out of Downloads to a stable path
+# before a long run.
+strix_enabled = true
+strix_ckpt = "/mnt/c/Users/epicm/Downloads/checkpoint_00237000.pt"
+strix_sims = 256
+strix_m = 16
+strix_device = "cuda"
+strix_label = "strix"
 # Sliding bracket kept as-is (nearest rung(s) of log_grid below the current epoch).
 bracket_size = 1
 # Ladder restricted to SealBot + these two permanent anchors (+ the sliding bracket).

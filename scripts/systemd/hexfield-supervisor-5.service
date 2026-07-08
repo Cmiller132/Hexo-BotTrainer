@@ -1,0 +1,34 @@
+# /etc/systemd/system/hexfield-supervisor-5.service
+[Unit]
+Description=hexfield_main_5 self-play training supervisor (c=128 wider trunk; warm-started from main_4 ep67-77 BC prefit; tspe=96k lower-reuse; radius-4; main2_ep45 anchor)
+After=network.target
+StartLimitIntervalSec=200
+StartLimitBurst=5
+
+[Service]
+Type=simple
+KillMode=control-group
+# main_5: the c=128 (HEXFIELD_CHANNELS=128) successor to the plateaued, capacity-bound
+# main_4. Warm-starts from a c=128 BC prefit on main_4 ep67-77 samples at
+# runs/hexfield_main_5_prefit; the main_5 toml [checkpoint].initialize_from points there
+# (tolerant non-strict load; fresh governor / epoch 0). Lower reuse via tspe=96000.
+# HEXFIELD_CHANNELS=128 -> the env-driven width in constants.py; the Rust .so is
+# width-agnostic so NO native rebuild is needed (model is pure PyTorch).
+Environment=ROOT=/mnt/e/Hexo-BotTrainer-hexgt
+Environment=RUNDIR=/mnt/e/Hexo-BotTrainer/runs/hexfield_main_5
+Environment=CONFIG=/mnt/e/Hexo-BotTrainer-hexgt/configs/hexfield_main_5.toml
+Environment=HEXFIELD_SUPPORT_RADIUS=4
+Environment=HEXFIELD_TRAIN_FLEX=1
+Environment=HEXFIELD_CHANNELS=128
+Environment=HEXFIELD_ANCHOR_ROOTS=/mnt/e/Hexo-BotTrainer-hexgt
+ExecStartPre=/usr/bin/test -f /mnt/e/Hexo-BotTrainer-hexgt/scripts/_hexfield_supervise_main1.sh
+ExecStartPre=-/usr/bin/rm -f /mnt/e/Hexo-BotTrainer/runs/hexfield_main_5/supervisor.lock
+ExecStart=/usr/bin/bash /mnt/e/Hexo-BotTrainer-hexgt/scripts/_hexfield_supervise_main1.sh
+Restart=on-failure
+RestartSec=15
+TimeoutStopSec=45
+# A clean circuit-breaker halt exits 1; do not let systemd retry it.
+RestartPreventExitStatus=1
+
+[Install]
+WantedBy=multi-user.target

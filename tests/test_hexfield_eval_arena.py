@@ -45,6 +45,7 @@ from hexo_engine.types import AxialCoord, PlacementAction, Player  # noqa: E402
 from hexfield import eval_arena  # noqa: E402  (torch-free import)
 from hexfield.config import (  # noqa: E402
     build_divergence_overrides,
+    build_eval_search_kwargs,
     parse_hexfield_config,
 )
 from hexfield.geometry import pack_action_id, unpack_action_id  # noqa: E402
@@ -1310,6 +1311,54 @@ def test_candidate_trees_discarded_no_leak(monkeypatch):
     opp_sessions = [s for s in sessions if s is not cand_session]
     for s in opp_sessions:
         assert sorted(s.discarded) == list(range(n_games))
+
+
+def test_build_eval_search_kwargs_golden_dict():
+    """The shared search-kwarg builder reproduces the exact 11-field ``common``
+    dict every arena used to assemble inline, byte-for-byte (keys, order, values).
+
+    The golden below is the pre-refactor inline literal (eval_arena.py common /
+    inline bundles) evaluated at a resolved budget; all four arenas now route
+    through ``build_eval_search_kwargs`` so one golden covers every arena."""
+    cfg = parse_hexfield_config({})
+    sp = cfg.selfplay
+    eval_visits, vbs, root_limit = eval_arena._resolve_eval_budget(
+        sp, visits=None, virtual_batch_size=None, active_root_limit=None
+    )
+    golden = dict(
+        visits=eval_visits,
+        c_puct=sp.c_puct,
+        temperature=0.0,
+        virtual_batch_size=vbs,
+        active_root_limit=root_limit,
+        widening_policy_mass=sp.widening_policy_mass,
+        widening_max_children=sp.widening_max_children,
+        widening_min_children=sp.widening_min_children,
+        fpu_reduction=sp.fpu_reduction,
+        tss_enabled=sp.tss_enabled,
+        search_parity_mode=sp.search_parity_mode,
+    )
+    built = build_eval_search_kwargs(
+        sp, visits=eval_visits, virtual_batch_size=vbs, active_root_limit=root_limit
+    )
+    # Same keys, same insertion order, same values (byte-equal dict).
+    assert built == golden
+    assert list(built.items()) == list(golden.items())
+
+
+def test_resolve_eval_budget_fallbacks_and_overrides():
+    """None -> sp.* defaults; explicit args override; ints preserved."""
+    cfg = parse_hexfield_config({})
+    sp = cfg.selfplay
+    # None everywhere -> the self-play budget (visits from search_visits, NOT
+    # evaluation.eval_visits).
+    assert eval_arena._resolve_eval_budget(
+        sp, visits=None, virtual_batch_size=None, active_root_limit=None
+    ) == (sp.search_visits, sp.virtual_batch_size, sp.active_root_limit)
+    # Explicit overrides win.
+    assert eval_arena._resolve_eval_budget(
+        sp, visits=999, virtual_batch_size=7, active_root_limit=33
+    ) == (999, 7, 33)
 
 
 def test_result_dicts_are_play_checkpoint_match_shape(monkeypatch):

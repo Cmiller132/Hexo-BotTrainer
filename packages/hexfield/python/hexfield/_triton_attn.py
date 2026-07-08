@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import math
 import os
+import warnings
 
 import torch
 
@@ -48,6 +49,15 @@ try:  # pragma: no cover - triton ships with cuda torch builds
 except Exception:  # pragma: no cover
     HAVE_TRITON = False
 
+# Triton's CompilationError location moves between versions; import defensively.
+try:  # pragma: no cover - triton internals vary by version
+    from triton.compiler.errors import CompilationError as _TritonCompileError
+except Exception:  # pragma: no cover
+    try:
+        from triton.compiler import CompilationError as _TritonCompileError
+    except Exception:
+        _TritonCompileError = ()
+
 _BM = int(os.environ.get("HEXFIELD_ATTN_BM", "64"))
 _BN = int(os.environ.get("HEXFIELD_ATTN_BN", "64"))
 _WARPS = int(os.environ.get("HEXFIELD_ATTN_WARPS", "4"))
@@ -55,6 +65,52 @@ _STAGES = int(os.environ.get("HEXFIELD_ATTN_STAGES", "3"))
 
 
 if HAVE_TRITON:
+
+    # --- compile-failure fallback (cross-width eval hardening) --------------------
+    # A per-arch Triton codegen edge case (see _triton_conv.py) can equally trip
+    # this kernel for some head_dim under bleeding-edge triton. On ANY kernel
+    # launch failure we memoize the specializing head_dim and serve it from a
+    # materialized reference that reproduces the flex-pair score_mod exactly
+    # (score = q·kᵀ·scale + table2[pair]; pad-key columns already carry the
+    # appended pad-row's large-negative bias, so their softmax weight underflows
+    # to ~0 just as the kernel's seq_lens tile-skip intends). This sits INSIDE
+    # the opaque custom op so it catches the compile under both eager and the
+    # serve torch.compile(dynamic=True) graph (the compile fires when the op
+    # executes for a new shape, not during dynamo tracing). Keyed by head_dim D —
+    # the constexpr tile dim that drives codegen; a head_dim that compiles is
+    # never memoized, so its fast path is unchanged.
+    _TRITON_VER = getattr(triton, "__version__", "?")
+    _ATTN_FAILED: set = set()
+
+    def _mark_attn_failed(d: int, err: Exception) -> None:
+        """Record a failing head_dim and warn ONCE (called only when d is new)."""
+        _ATTN_FAILED.add(d)
+        kind = (
+            "compile error"
+            if isinstance(err, _TritonCompileError)
+            else f"{type(err).__name__}"
+        )
+        warnings.warn(
+            f"hexfield: triton attn_pair failed to compile for head_dim={d} "
+            f"({kind}) under triton {_TRITON_VER}; using the reference path for "
+            f"this shape.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
+    def _attn_ref(q, k, v, pair, table2, seq_lens):
+        """Materialized rel-pos-bias attention (flex-pair score_mod), fp16 out to
+        match the custom op's fake kernel. seq_lens is unused: pad-key bias in
+        `pair`/`table2` already zeros those keys in the softmax."""
+        d = q.shape[-1]
+        scale = 1.0 / math.sqrt(d)
+        scores = torch.matmul(q.float(), k.float().transpose(-2, -1)) * scale
+        # table2[pair] -> (B, S, S, H); move heads to (B, H, S, S).
+        bias = table2.to(torch.float32)[pair.to(torch.int64)].permute(0, 3, 1, 2)
+        scores = scores + bias
+        attn = torch.softmax(scores, dim=-1)
+        out = torch.matmul(attn, v.float())
+        return out.to(torch.float16)
 
     @triton.jit
     def _attn_pair_kernel(
@@ -139,32 +195,39 @@ if HAVE_TRITON:
         seq_lens: torch.Tensor,
     ) -> torch.Tensor:
         b, h, s, d = q.shape
-        # (B,S,H,D).transpose(1,2) views satisfy stride(-1)==1 already; the
-        # kernel takes the remaining strides as-is, so no copies here.
-        if q.stride(-1) != 1:
-            q = q.contiguous()
-        if k.stride(-1) != 1:
-            k = k.contiguous()
-        if v.stride(-1) != 1:
-            v = v.contiguous()
-        pair = pair.contiguous()
-        tab = table2.to(torch.float16).contiguous()
-        seq = seq_lens.to(torch.int32).contiguous()
-        out = torch.empty((b, h, s, d), dtype=torch.float16, device=q.device)
-        grid = (triton.cdiv(s, _BM), b * h)
-        _attn_pair_kernel[grid](
-            q, k, v, pair, tab, seq, out,
-            q.stride(0), q.stride(1), q.stride(2),
-            k.stride(0), k.stride(1), k.stride(2),
-            v.stride(0), v.stride(1), v.stride(2),
-            out.stride(0), out.stride(1), out.stride(2),
-            pair.stride(0), pair.stride(1),
-            h, s, 1.0 / math.sqrt(d),
-            PAD_ROW=tab.shape[0] - 1,
-            D=d, BM=_BM, BN=_BN,
-            num_warps=_WARPS, num_stages=_STAGES,
-        )
-        return out
+        if d not in _ATTN_FAILED:
+            try:
+                # (B,S,H,D).transpose(1,2) views satisfy stride(-1)==1 already; the
+                # kernel takes the remaining strides as-is, so no copies here.
+                if q.stride(-1) != 1:
+                    q = q.contiguous()
+                if k.stride(-1) != 1:
+                    k = k.contiguous()
+                if v.stride(-1) != 1:
+                    v = v.contiguous()
+                pairc = pair.contiguous()
+                tab = table2.to(torch.float16).contiguous()
+                seq = seq_lens.to(torch.int32).contiguous()
+                out = torch.empty(
+                    (b, h, s, d), dtype=torch.float16, device=q.device
+                )
+                grid = (triton.cdiv(s, _BM), b * h)
+                _attn_pair_kernel[grid](
+                    q, k, v, pairc, tab, seq, out,
+                    q.stride(0), q.stride(1), q.stride(2),
+                    k.stride(0), k.stride(1), k.stride(2),
+                    v.stride(0), v.stride(1), v.stride(2),
+                    out.stride(0), out.stride(1), out.stride(2),
+                    pairc.stride(0), pairc.stride(1),
+                    h, s, 1.0 / math.sqrt(d),
+                    PAD_ROW=tab.shape[0] - 1,
+                    D=d, BM=_BM, BN=_BN,
+                    num_warps=_WARPS, num_stages=_STAGES,
+                )
+                return out
+            except Exception as err:  # per-arch triton codegen edge case
+                _mark_attn_failed(d, err)
+        return _attn_ref(q, k, v, pair, table2, seq_lens)
 
     @attn_pair.register_fake
     def _attn_pair_fake(q, k, v, pair, table2, seq_lens):

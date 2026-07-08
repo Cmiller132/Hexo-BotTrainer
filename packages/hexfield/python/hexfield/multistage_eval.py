@@ -120,6 +120,13 @@ _EVAL_LOG = logging.getLogger("hexfield.eval")
 # pinned at exactly 0 Elo (eval_stats.bradley_terry(anchor=...)).
 SEALBOT_LABEL = "sealbot"
 
+# Label of the Strix zero-point in the pool / BT fit. Strix is the PREFERRED
+# pinned 0-Elo anchor (see _choose_anchor); SealBot stays as a fallback anchor.
+# The actual roster label is config-overridable (cfg.opponents.strix_label) and
+# anchor-tier checks key on roster.strix.label, not this constant; this is only
+# the default.
+STRIX_LABEL = "strix"
+
 POOL_FORMAT = "hexfield.multistage_eval.pool"
 POOL_VERSION = 1
 
@@ -198,11 +205,15 @@ class Opponent:
     """One resolved opponent in the roster.
 
     label:   pool/rating label (stable across epochs so edges compound).
-    role:    "sealbot" | "anchor" | "bracket" | "champion". The primary verdict
-             compares the candidate to the single ``champion`` opponent; every
-             other role is descriptive. SealBot is additionally the pinned
-             zero-point and is kept out of difference inference (down-weighted).
-    ckpt:    checkpoint path (None for SealBot, which is an external engine).
+    role:    "strix" | "sealbot" | "anchor" | "bracket" | "champion". The primary
+             verdict compares the candidate to the single ``champion`` opponent;
+             every other role is descriptive. Strix (preferred) and SealBot
+             (fallback) are additionally pinned-zero-point candidates: SealBot is
+             kept out of difference inference (down-weighted); Strix enters at
+             full weight.
+    ckpt:    checkpoint path (None for SealBot, which is an external engine; the
+             Strix HeXONet ckpt for the strix role, though it is run via the
+             external batch-server arena, not the checkpoint pairing path).
     epoch:   the opponent's epoch where meaningful (anchors/bracket/champion),
              else None.
     """
@@ -231,6 +242,12 @@ class Roster:
     sealbot: Opponent | None
     champion: Opponent | None
     opponents: tuple[Opponent, ...]
+    # Strix zero-point (or None when disabled/unavailable). Like ``sealbot`` it is
+    # a separate roster field (NOT in ``opponents``) run via the external
+    # batch-server arena, but it is the PREFERRED pinned anchor. Defaulted so
+    # existing keyword Roster constructions stay valid; placed after the
+    # no-default fields for frozen-dataclass field ordering.
+    strix: Opponent | None = None
     # Permanent anchors that failed to resolve on disk and were dropped from the
     # roster. Each entry: {"label", "raw", "resolved"}. Empty for a fully-resolved
     # roster. Surfaced in _roster_summary (per-epoch JSON) and logged.
@@ -240,6 +257,8 @@ class Roster:
         labels = [self.candidate_label]
         if self.sealbot is not None:
             labels.append(self.sealbot.label)
+        if self.strix is not None:
+            labels.append(self.strix.label)
         labels.extend(o.label for o in self.opponents)
         return labels
 
@@ -376,6 +395,18 @@ def select_opponents(
         else None
     )
 
+    # Strix zero-point (preferred anchor). Enabled only when a checkpoint is
+    # configured; the ckpt is carried for provenance but Strix is played via the
+    # external batch-server arena, not the checkpoint pairing path.
+    strix = (
+        Opponent(
+            label=opp_cfg.strix_label, role="strix",
+            ckpt=Path(opp_cfg.strix_ckpt), epoch=None,
+        )
+        if opp_cfg.strix_enabled and opp_cfg.strix_ckpt
+        else None
+    )
+
     # Collect checkpoint opponents into a label-keyed dict so duplicates merge
     # (champion may equal a bracket rung). Insertion order is preserved for a
     # stable, readable roster: anchors, then bracket, then champion.
@@ -438,6 +469,7 @@ def select_opponents(
         candidate_label=cand_label,
         candidate_epoch=cand_epoch,
         sealbot=sealbot,
+        strix=strix,
         champion=champion,
         opponents=tuple(collected.values()),
         dropped_anchors=tuple(dropped_anchors),
@@ -472,42 +504,62 @@ def allocate_budget(
     n_checkpoint_opponents: int,
     has_sealbot: bool,
     sealbot_share: float = 0.25,
+    has_strix: bool = False,
+    strix_share: float = 0.0,
 ) -> dict[str, int]:
     """Split ``total_games`` across the deep-eval pairings.
 
-    SealBot gets ``sealbot_share`` of the budget (floored to 2 when enabled and
-    the budget is positive); the remainder is split evenly across the N
-    checkpoint opponents and rounded down to an even per-pairing count (paired
-    games come two-per-pair, floored to 2). Returns a dict with keys
-    :data:`SEALBOT_LABEL` -> SealBot games and ``"per_checkpoint"`` -> games per
-    checkpoint opponent; the caller distributes the latter across its opponents.
+    SealBot gets ``sealbot_share`` and (when ``has_strix``) Strix gets
+    ``strix_share`` of the budget (each floored to 2 when enabled and the budget
+    is positive); the remainder is split evenly across the N checkpoint opponents
+    and rounded down to an even per-pairing count (paired games come two-per-pair,
+    floored to 2). Returns a dict with keys :data:`SEALBOT_LABEL` -> SealBot
+    games, :data:`STRIX_LABEL` -> Strix games (present ONLY when ``has_strix``, so
+    existing SealBot-only callers keep their exact dict shape), and
+    ``"per_checkpoint"`` -> games per checkpoint opponent; the caller distributes
+    the latter across its opponents.
 
     Allocation is arithmetic and deterministic; no games are played.
 
     The per-opponent floor of one CRN pair (2 games) means the budget is
     advisory, not a hard cap, at small N: the physical-game sum may exceed
-    ``total_games`` (e.g. budget 4 with 4 opponents -> 2 each = 8 games). A zero
-    budget returns all-zeros.
+    ``total_games`` (e.g. budget 4 with 4 opponents -> 2 each = 8 games). With
+    both zero-points floored the sum is amplified further. A zero budget returns
+    all-zeros.
     """
 
     total = max(int(total_games), 0)
+
+    def _finish(d: dict[str, int], strix_games: int) -> dict[str, int]:
+        # The STRIX_LABEL key is emitted only when Strix is enabled, so existing
+        # SealBot-only callers (and their exact-dict-equality tests) are unchanged.
+        if has_strix:
+            d[STRIX_LABEL] = strix_games
+        return d
+
     if total == 0:
-        return {SEALBOT_LABEL: 0, "per_checkpoint": 0}
+        return _finish({SEALBOT_LABEL: 0, "per_checkpoint": 0}, 0)
     sealbot_games = 0
     if has_sealbot:
         sealbot_games = int(round(total * max(0.0, min(sealbot_share, 1.0))))
         # Floor SealBot to one pairing's worth so the zero-point edge is played.
         sealbot_games = max(sealbot_games, 2)
-    checkpoint_total = max(total - sealbot_games, 0)
+    strix_games = 0
+    if has_strix:
+        strix_games = int(round(total * max(0.0, min(strix_share, 1.0))))
+        strix_games = max(strix_games, 2)
+    checkpoint_total = max(total - sealbot_games - strix_games, 0)
     if n_checkpoint_opponents <= 0:
-        # No checkpoint opponents (first epoch): everything to SealBot if present.
-        return {SEALBOT_LABEL: total if has_sealbot else 0, "per_checkpoint": 0}
+        # No checkpoint opponents (first epoch): fund the zero-points. Strix
+        # (preferred) takes its share; SealBot takes the remainder.
+        sb = (total - strix_games) if has_sealbot else 0
+        return _finish({SEALBOT_LABEL: max(sb, 0), "per_checkpoint": 0}, strix_games)
     per = checkpoint_total // n_checkpoint_opponents
     if per % 2 == 1:  # keep pairings even (two games per CRN pair)
         per -= 1
     # Floor at one CRN pair so every selected opponent is played.
     per = max(per, 2)
-    return {SEALBOT_LABEL: sealbot_games, "per_checkpoint": per}
+    return _finish({SEALBOT_LABEL: sealbot_games, "per_checkpoint": per}, strix_games)
 
 
 # --------------------------------------------------------------------------- #
@@ -626,6 +678,63 @@ def _sealbot_edge(match: dict[str, Any], overdispersion: float) -> tuple[float, 
         "virtual_batch_size": (match.get("meta") or {}).get("virtual_batch_size"),
         "overdispersion_weight": w,
         "note": "unpaired; zero-point edge, down-weighted out of difference inference",
+    }
+    return raw_a, raw_b, raw_a + raw_b, prov
+
+
+def _strix_edge(match: dict[str, Any], weight: float) -> tuple[float, float, float, dict[str, Any]]:
+    """Strix edge counts + full-weight factor.
+
+    Strix games are PAIRED (CRN pentanomial: each pair shares an opening line and
+    swaps seats, exactly like ``play_checkpoint_match``), so — like a checkpoint
+    edge — the decided counts are deflated to EFFECTIVE counts via the pentanomial
+    design effect (:func:`eval_stats.effective_counts`), the correct treatment for
+    correlated paired games. Strix at fixed sims with only opening-confined light
+    noise is stable/GPU-batched, so — unlike SealBot's load-variable minimax depth
+    — there is no over-dispersion penalty: the edge carries a likelihood
+    ``weight = strix_weight`` (full weight, 1.0 by default). Strix is the
+    PREFERRED BT anchor.
+
+    The raw ``physical_wins_cand`` / ``physical_wins_strix`` decided counts are
+    ALSO kept in provenance so the pool-reconstruction paths
+    (``_strix_ci_from_pool`` / ``_epoch_descriptive_edges``) still work. Without a
+    pentanomial block (unpaired fallback) the raw decided counts are used.
+    """
+
+    score = match.get("score") or {}
+    raw_a = float(score.get("a_wins", 0))
+    raw_b = float(score.get("b_wins", 0))
+    w = max(0.0, min(float(weight), 1.0))
+    eval_visits = (match.get("meta") or {}).get("visits")
+    eval_vbs = (match.get("meta") or {}).get("virtual_batch_size")
+    paired = _pentanomial_to_paired_result(match.get("pentanomial") or {})
+    if paired is not None and paired.n_pairs > 0 and math.isfinite(paired.win_rate):
+        w_eff, l_eff, n_eff = eval_stats.effective_counts(paired)
+        prov = {
+            "physical_wins_cand": raw_a,
+            "physical_wins_strix": raw_b,
+            "eval_visits": eval_visits,
+            "virtual_batch_size": eval_vbs,
+            "n_pairs": paired.n_pairs,
+            "pentanomial": list(paired.penta),
+            "pair_winrate": round(paired.win_rate, 6),
+            "pair_se": round(paired.se, 6) if math.isfinite(paired.se) else None,
+            "n_eff": round(n_eff, 4),
+            "wins_a_eff": round(w_eff, 4),
+            "wins_b_eff": round(l_eff, 4),
+            "strix_weight": w,
+            "note": "paired CRN pentanomial; FULL-weight zero-point edge (stable fixed-sims Strix).",
+        }
+        return w_eff, l_eff, n_eff, prov
+    # Unpaired / degenerate fallback: raw decided counts.
+    prov = {
+        "physical_wins_cand": raw_a,
+        "physical_wins_strix": raw_b,
+        "eval_visits": eval_visits,
+        "virtual_batch_size": eval_vbs,
+        "n_pairs": None,
+        "strix_weight": w,
+        "note": "no pentanomial; FULL-weight zero-point edge on raw decided counts.",
     }
     return raw_a, raw_b, raw_a + raw_b, prov
 
@@ -758,6 +867,7 @@ def run_multistage_eval(
     write_diagnostics: bool = True,
     play_checkpoint_match: Callable[..., dict[str, Any]] | None = None,
     play_sealbot_match: Callable[..., dict[str, Any]] | None = None,
+    play_strix_match: Callable[..., dict[str, Any]] | None = None,
     now: Callable[[], float] = time.time,
 ) -> dict[str, Any]:
     """Run the staged hexfield strength eval and return a verdict-bearing report.
@@ -805,6 +915,8 @@ def run_multistage_eval(
             play_checkpoint_match = _arena.play_checkpoint_match
         if play_sealbot_match is None:
             play_sealbot_match = _arena.play_sealbot_match
+        if play_strix_match is None:
+            play_strix_match = getattr(_arena, "play_strix_match", None)
 
     # ----- Roster (used by Stage A onward). -----
     roster = select_opponents(
@@ -842,19 +954,24 @@ def run_multistage_eval(
         cfg, roster, candidate_ckpt, full_cfg,
         play_checkpoint_match=play_checkpoint_match,
         play_sealbot_match=play_sealbot_match,
+        play_strix_match=play_strix_match,
         diagnostics_dir=diag_dir,
         reuse_champion_match=sprt_match,
     )
     stages.append(stage_c)
 
     # ===== Stage D — rolling Bradley-Terry pool ===============================
-    # Thread the SealBot-unavailable flag (only when SealBot is config-enabled).
+    # Thread the SealBot/Strix-unavailable flags (only when config-enabled).
     sealbot_expected_but_unavailable = (
         stage_c.detail.get("sealbot_unavailable") if roster.sealbot is not None else None
+    )
+    strix_expected_but_unavailable = (
+        stage_c.detail.get("strix_unavailable") if roster.strix is not None else None
     )
     stage_d, ratings, verdict_block, pool_doc = _stage_d_pool(
         cfg, roster, edges, run_dir,
         sealbot_expected_but_unavailable=sealbot_expected_but_unavailable,
+        strix_expected_but_unavailable=strix_expected_but_unavailable,
     )
     stages.append(stage_d)
 
@@ -865,7 +982,8 @@ def run_multistage_eval(
             "candidate_ckpt": str(candidate_ckpt),
             "candidate_label": cand_label,
             "candidate_epoch": roster.candidate_epoch,
-            "anchor": SEALBOT_LABEL,
+            # The actually-pinned anchor (Strix > SealBot > anchor > checkpoint).
+            "anchor": ratings.get("anchor", SEALBOT_LABEL),
             "config": _config_summary(cfg),
             "elapsed_seconds": round(now() - started, 2),
             # Single-epoch resolution note, derived from the champion games played
@@ -880,6 +998,7 @@ def run_multistage_eval(
         "ratings": ratings,
         "edges": [e["descriptive"] for e in edges],
         "sealbot_winrate_ci95": sealbot_winrate_ci,
+        "strix_winrate_ci95": stage_c.detail.get("strix_winrate_ci95"),
         "verdict": verdict_block,
     }
 
@@ -1244,6 +1363,135 @@ def _play_sealbot_opponent(
     return edge, sealbot_ci, None
 
 
+def _build_strix_edge_from_match(
+    cfg: MultiStageEvalSection,
+    roster: Roster,
+    sx_match: dict[str, Any],
+    sx_games: int,
+) -> tuple[dict[str, Any], list[float]]:
+    """Build the Strix (full-weight) edge dict + win-rate Wilson CI from an
+    already-played Strix match.
+
+    Mirrors :func:`_build_sealbot_edge_from_match` but the edge is FULL weight
+    (``cfg.strix_weight``, clamped to [0, 1]) and pins the rating scale as the
+    preferred zero-point. Shared by :func:`_play_strix_opponent` and the
+    concurrent path. Returns ``(edge, strix_winrate_ci)``.
+    """
+
+    wa, wb, n_eff, prov = _strix_edge(sx_match, cfg.strix_weight)
+    if isinstance(prov, dict):
+        # Which searcher the CANDIDATE side used against Strix ("selfplay" = the
+        # run's own as-trained profile, mirroring the SealBot/checkpoint edges).
+        prov = {**prov, "candidate_search_profile": "selfplay"}
+    decided = int((sx_match.get("score") or {}).get("decided", 0) or 0)
+    wins = int((sx_match.get("score") or {}).get("a_wins", 0) or 0)
+    # Paired CRN pentanomial -> pair-level CI/win-rate when available (mirrors the
+    # checkpoint edge); else fall back to the Wilson CI on raw decided counts.
+    paired = _pentanomial_to_paired_result(sx_match.get("pentanomial") or {})
+    is_paired = paired is not None and paired.n_pairs > 0 and math.isfinite(paired.se)
+    if is_paired:
+        lo, hi = paired.ci()
+        winrate = round(paired.win_rate, 4)
+    else:
+        lo, hi = eval_stats.wilson_ci(wins, decided) if decided else (0.0, 1.0)
+        winrate = round(wins / decided, 4) if decided else None
+    strix_ci = [round(lo, 4), round(hi, 4)]
+    w = max(0.0, min(cfg.strix_weight, 1.0))
+    edge = {
+        "role": "strix",
+        "opponent": roster.strix.label,
+        "bt": eval_stats.BTEdge(
+            a=roster.candidate_label, b=roster.strix.label,
+            wins_a=wa, wins_b=wb, weight=w,
+        ),
+        "descriptive": {
+            "opponent": roster.strix.label,
+            "role": "strix",
+            "kind": "strix",
+            "primary": False,
+            "paired": bool(is_paired),
+            "games_requested": sx_games,
+            "decided": decided,
+            "winrate": winrate,
+            "winrate_ci95": strix_ci,
+            "elo_point": _safe_elo(winrate) if winrate is not None else None,
+            "weight": round(w, 4),
+            "note": (
+                "PREFERRED zero-point. Strix at fixed sims (opening-confined light "
+                "noise) is stable and GPU-batched, played as a paired CRN "
+                "pentanomial, so this edge is FULL weight and pins the rating "
+                "scale at 0 Elo."
+            ),
+            "provenance": prov,
+        },
+    }
+    return edge, strix_ci
+
+
+def _play_strix_opponent(
+    cfg: MultiStageEvalSection,
+    roster: Roster,
+    candidate_ckpt: Path,
+    full_cfg: HexfieldConfig,
+    sx_games: int,
+    *,
+    play_strix_match: Callable[..., dict[str, Any]],
+    diagnostics_dir: Path,
+) -> tuple[dict[str, Any] | None, list[float] | None, str | None]:
+    """Play the Strix zero-point pairing and build its (full-weight) edge.
+
+    Returns ``(edge_dict | None, strix_winrate_ci | None, unavailable | None)``.
+    Fail-open: a Strix runner exception (unbuilt ``hexo_rs`` wheel, missing
+    ``hexo_engine``, checkpoint load failure, a mid-match batch-server error) is
+    caught here and surfaced as the third tuple element so the caller can drop
+    just this edge and continue.
+
+    An all-truncated match (``decided == 0``) is ALSO surfaced as unavailable
+    rather than an edge: a 0-0 edge is filtered out of ``_bt_edges_from_pool``
+    (counts sum to 0), which would silently de-anchor the pool from the preferred
+    Strix zero-point. Reporting it as unavailable instead makes the anchor fall
+    back cleanly (to SealBot) and fires the degraded/substituted path.
+    """
+
+    sx_match: dict[str, Any] | None = None
+    try:
+        sx_match = play_strix_match(
+            str(candidate_ckpt),
+            str(cfg.opponents.strix_ckpt),
+            sx_games,
+            config=full_cfg,
+            label=roster.candidate_label,
+            strix_label=roster.strix.label,
+            visits=_eval_visits(cfg, full_cfg),
+            virtual_batch_size=_eval_virtual_batch_size(cfg, full_cfg),
+            opening_plies=cfg.opening_plies,
+            opening_temperature=cfg.opening_temperature,
+            # Strix (net B) search knobs from the opponent config. Deterministic
+            # anchor => Gumbel root noise stays disabled (the arena default).
+            strix_sims=cfg.opponents.strix_sims,
+            strix_m_actions=cfg.opponents.strix_m,
+            strix_device=cfg.opponents.strix_device,
+            diagnostics_dir=str(diagnostics_dir),
+        )
+    except Exception as exc:  # noqa: BLE001 — fail-open at the opponent boundary.
+        # Broad by intent: an unbuilt hexo_rs wheel / missing hexo_engine raises
+        # ImportError/ModuleNotFoundError, a bad checkpoint or mid-match batch
+        # server error raises its own type. All are specific to the Strix
+        # opponent and do not touch the candidate/checkpoint path.
+        return None, None, f"{type(exc).__name__}: {exc}"
+    if sx_match is None:
+        return None, None, None
+
+    decided = int((sx_match.get("score") or {}).get("decided", 0) or 0)
+    if decided <= 0:
+        # A 0-0 edge would drop from the BT fit and silently de-anchor the pool;
+        # treat it as unavailable so the substitution/degraded path fires.
+        return None, None, "strix match produced no decided games (all truncated)"
+
+    edge, strix_ci = _build_strix_edge_from_match(cfg, roster, sx_match, sx_games)
+    return edge, strix_ci, None
+
+
 def _anchor_native_overrides(opp_ckpt: Path | str) -> dict | None:
     """The anchor's OWN trained search profile, recovered from the
     ``_resume_config.toml`` snapshot co-located with its run
@@ -1390,6 +1638,7 @@ def _stage_c_deep(
     *,
     play_checkpoint_match: Callable[..., dict[str, Any]],
     play_sealbot_match: Callable[..., dict[str, Any]],
+    play_strix_match: Callable[..., dict[str, Any]] | None = None,
     diagnostics_dir: Path,
     reuse_champion_match: dict[str, Any] | None,
 ) -> tuple[StageResult, list[dict[str, Any]], list[float] | None]:
@@ -1410,18 +1659,37 @@ def _stage_c_deep(
 
     n_ckpt = len(roster.opponents)
     has_sealbot = roster.sealbot is not None
+    has_strix = roster.strix is not None
     alloc = allocate_budget(
         cfg.games_budget, n_checkpoint_opponents=n_ckpt, has_sealbot=has_sealbot,
         sealbot_share=cfg.sealbot_share,
+        has_strix=has_strix, strix_share=cfg.strix_share,
     )
 
     edges: list[dict[str, Any]] = []
     played: dict[str, Any] = {}
     sealbot_ci: list[float] | None = None
+    strix_ci: list[float] | None = None
     # Fail-open per opponent: if the SealBot edge cannot be played, drop just that
     # edge, record why here, and continue. The pool then anchors on a checkpoint
     # (see _choose_anchor).
     sealbot_unavailable: str | None = None
+    strix_unavailable: str | None = None
+
+    # ----- Strix zero-point edge (preferred anchor; concurrent, unpaired). -----
+    if has_strix and play_strix_match is not None and alloc.get(STRIX_LABEL, 0) > 0:
+        sx_games = alloc[STRIX_LABEL]
+        sx_edge, sx_ci, sx_unavail = _play_strix_opponent(
+            cfg, roster, candidate_ckpt, full_cfg, sx_games,
+            play_strix_match=play_strix_match,
+            diagnostics_dir=diagnostics_dir,
+        )
+        if sx_unavail is not None:
+            strix_unavailable = sx_unavail
+        if sx_edge is not None:
+            strix_ci = sx_ci
+            edges.append(sx_edge)
+            played[roster.strix.label] = {"played": True}
 
     # ----- SealBot zero-point edge (concurrent, unpaired). -----
     if has_sealbot and alloc.get(SEALBOT_LABEL, 0) > 0:
@@ -1471,6 +1739,12 @@ def _stage_c_deep(
     }
     if sealbot_unavailable is not None:
         detail["sealbot_unavailable"] = sealbot_unavailable
+    if strix_unavailable is not None:
+        detail["strix_unavailable"] = strix_unavailable
+    # Strix win-rate CI is carried in the stage detail (the return tuple stays a
+    # 3-tuple, sealbot_ci); the monolithic report reads it from here.
+    if strix_ci is not None:
+        detail["strix_winrate_ci95"] = strix_ci
     return (
         StageResult(
             stage="C_deep",
@@ -1514,6 +1788,7 @@ def _stage_d_pool(
     pool_doc: dict[str, Any] | None = None,
     append: bool = True,
     sealbot_expected_but_unavailable: str | None = None,
+    strix_expected_but_unavailable: str | None = None,
 ) -> tuple[StageResult, dict[str, Any], dict[str, Any], dict[str, Any]]:
     """Append this epoch's edges to the pool, refit BT, derive the verdict.
 
@@ -1565,6 +1840,9 @@ def _stage_d_pool(
         if o.label in edge_labels and _opponent_featurized_ood(o.label, cfg, live_radius)
     }
     anchor_label = _choose_anchor(bt_edges, roster, ood_labels=ood_labels)
+    # Report the actually-pinned anchor (may be Strix, SealBot, an anchor, or a
+    # checkpoint) rather than a hardcoded label.
+    ratings["anchor"] = anchor_label if anchor_label is not None else SEALBOT_LABEL
 
     # When SealBot was expected (config-enabled) but unavailable, the anchor
     # re-pins to bc_prefit / the lowest checkpoint, shifting every absolute Elo.
@@ -1574,6 +1852,17 @@ def _stage_d_pool(
         sealbot_expected_but_unavailable is not None
         and anchor_label is not None
         and anchor_label != SEALBOT_LABEL
+    )
+    # Parallel Strix substitution: Strix is the PREFERRED anchor, so when it was
+    # expected but unavailable the anchor re-pins below it. That is GRACEFUL when
+    # it lands on SealBot (still a calibrated zero-point, only a re-basing) and
+    # SEVERE when it lands on a checkpoint (absolute Elo uncalibrated). Keyed on
+    # the configurable roster.strix.label, not the STRIX_LABEL default.
+    strix_substituted = bool(
+        strix_expected_but_unavailable is not None
+        and anchor_label is not None
+        and roster.strix is not None
+        and anchor_label != roster.strix.label
     )
 
     fit = None
@@ -1601,9 +1890,11 @@ def _stage_d_pool(
                     "is_anchor": label == anchor_label,
                 }
             )
+        anchor_is_strix = roster.strix is not None and anchor_label == roster.strix.label
         ratings["fit"] = {
             "anchor": anchor_label,
             "anchor_is_sealbot": anchor_label == SEALBOT_LABEL,
+            "anchor_is_strix": anchor_is_strix,
             "max_grad": fit.max_grad,
             "iterations": fit.iterations,
             "converged": fit.converged,
@@ -1615,10 +1906,15 @@ def _stage_d_pool(
             "ood_opponents": sorted(ood_labels),
             "featurize_radius": live_radius,
             "note": (
-                "SealBot pinned at 0 Elo (zero-point); its edges are down-weighted "
-                "out of difference inference."
-                if anchor_label == SEALBOT_LABEL
-                else f"SealBot unavailable; pool anchored on {anchor_label} (floats vs that anchor)."
+                "Strix pinned at 0 Elo (preferred zero-point; deterministic "
+                "fixed-sims); its edge enters difference inference at full weight."
+                if anchor_is_strix
+                else (
+                    "SealBot pinned at 0 Elo (zero-point); its edges are down-weighted "
+                    "out of difference inference."
+                    if anchor_label == SEALBOT_LABEL
+                    else f"Strix/SealBot unavailable; pool anchored on {anchor_label} (floats vs that anchor)."
+                )
             ),
         }
 
@@ -1717,8 +2013,41 @@ def _stage_d_pool(
             anchor_label,
         )
 
+    # Surface a Strix substitution the same way. Placed AFTER the SealBot block so
+    # its (preferred-anchor) fields win when both zero-points are unavailable.
+    if strix_substituted:
+        graceful = anchor_label == SEALBOT_LABEL
+        verdict_block["anchor_substituted"] = True
+        verdict_block["substituted_from"] = roster.strix.label
+        verdict_block["substituted_to"] = anchor_label
+        verdict_block["strix_unavailable_reason"] = strix_expected_but_unavailable
+        verdict_block["degraded"] = True
+        verdict_block["degraded_note"] = (
+            (
+                "Strix (preferred zero-point) was expected but unavailable (%s); the "
+                "BT zero-point re-pinned to SealBot (%r). SealBot is still a "
+                "calibrated cross-lineage zero-point, so this is a GRACEFUL re-basing "
+                "— absolute Elo shifts but stays calibrated."
+                % (strix_expected_but_unavailable, anchor_label)
+            )
+            if graceful
+            else (
+                "Strix (preferred zero-point) was expected but unavailable (%s); the "
+                "BT zero-point re-pinned to %r (a checkpoint), shifting every ABSOLUTE "
+                "Elo. Difference verdicts between same-lineage nets are unaffected, "
+                "but absolute placements are NOT calibrated."
+                % (strix_expected_but_unavailable, anchor_label)
+            )
+        )
+        _EVAL_LOG.warning(
+            "Strix expected but unavailable (%s); anchor substituted to %r — "
+            "Stage-D marked degraded",
+            strix_expected_but_unavailable,
+            anchor_label,
+        )
+
     if fit is not None:
-        status = "degraded" if sealbot_substituted else "completed"
+        status = "degraded" if (sealbot_substituted or strix_substituted) else "completed"
     else:
         status = "degraded"
     return (
@@ -1733,6 +2062,8 @@ def _stage_d_pool(
                 "converged": bool(fit is not None),
                 "sealbot_substituted": sealbot_substituted,
                 "sealbot_unavailable_reason": sealbot_expected_but_unavailable,
+                "strix_substituted": strix_substituted,
+                "strix_unavailable_reason": strix_expected_but_unavailable,
             },
         ),
         ratings,
@@ -1778,15 +2109,19 @@ def _epoch_edge_exists(
 
 
 def _part_opponents(roster: Roster) -> list[Opponent]:
-    """Ordered list of parts for a candidate: SealBot first (if enabled), then
-    every checkpoint opponent (anchors + bracket + champion), one part each.
+    """Ordered list of parts for a candidate: Strix then SealBot zero-points (if
+    enabled), then every checkpoint opponent (anchors + bracket + champion), one
+    part each.
 
-    The SealBot part is the roster's ``sealbot`` pseudo-opponent (ckpt None);
-    checkpoint parts are the resolved ``roster.opponents`` with a real ckpt. Same
-    opponent set as Stage C, run one at a time with persistence between them.
+    The Strix / SealBot parts are the roster's ``strix`` / ``sealbot``
+    pseudo-opponents (external engines); checkpoint parts are the resolved
+    ``roster.opponents`` with a real ckpt. Same opponent set as Stage C, run one
+    at a time with persistence between them.
     """
 
     parts: list[Opponent] = []
+    if roster.strix is not None:
+        parts.append(roster.strix)
     if roster.sealbot is not None:
         parts.append(roster.sealbot)
     parts.extend(o for o in roster.opponents if o.ckpt is not None)
@@ -1818,6 +2153,7 @@ def run_eval_part(
     reuse_champion_match: dict[str, Any] | None = None,
     play_checkpoint_match: Callable[..., dict[str, Any]] | None = None,
     play_sealbot_match: Callable[..., dict[str, Any]] | None = None,
+    play_strix_match: Callable[..., dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Play one part (one opponent's games) and append its edge to the pool.
 
@@ -1857,6 +2193,8 @@ def run_eval_part(
             play_checkpoint_match = _arena.play_checkpoint_match
         if play_sealbot_match is None:
             play_sealbot_match = _arena.play_sealbot_match
+        if play_strix_match is None:
+            play_strix_match = getattr(_arena, "play_strix_match", None)
 
     roster = select_opponents(
         run_dir, candidate_ckpt, cfg,
@@ -1897,10 +2235,25 @@ def run_eval_part(
         n_checkpoint_opponents=len(roster.opponents),
         has_sealbot=roster.sealbot is not None,
         sealbot_share=cfg.sealbot_share,
+        has_strix=roster.strix is not None,
+        strix_share=cfg.strix_share,
     )
 
     # ----- Play the one opponent (the same helpers Stage C uses). -----
-    if opp.role == "sealbot":
+    if opp.role == "strix":
+        sx_games = alloc.get(STRIX_LABEL, 0)
+        if sx_games <= 0 or play_strix_match is None:
+            return {"part": opp.label, "status": "empty", "epoch": epoch_tag,
+                    "reason": "zero Strix budget or no runner", "pool_doc": pool_doc}
+        edge, _sx_ci, unavail = _play_strix_opponent(
+            cfg, roster, candidate_ckpt, full_cfg, sx_games,
+            play_strix_match=play_strix_match,
+            diagnostics_dir=diag_dir,
+        )
+        if unavail is not None:
+            return {"part": opp.label, "status": "unavailable", "epoch": epoch_tag,
+                    "reason": unavail, "pool_doc": pool_doc}
+    elif opp.role == "sealbot":
         sb_games = alloc.get(SEALBOT_LABEL, 0)
         if sb_games <= 0:
             return {"part": opp.label, "status": "empty", "epoch": epoch_tag,
@@ -2004,14 +2357,24 @@ def aggregate_pool(
         sealbot_expected_but_unavailable = (
             "SealBot edge absent from pool for this epoch (part did not complete)"
         )
+    strix_expected_but_unavailable = None
+    if roster.strix is not None and not _epoch_has_strix_edge(
+        pool_doc, epoch_tag, cand_label
+    ):
+        strix_expected_but_unavailable = (
+            "Strix edge absent from pool for this epoch (part did not complete)"
+        )
     stage_d, ratings, verdict_block, pool_doc = _stage_d_pool(
         cfg, roster, [], run_dir, pool_doc=pool_doc, append=False,
         sealbot_expected_but_unavailable=sealbot_expected_but_unavailable,
+        strix_expected_but_unavailable=strix_expected_but_unavailable,
     )
 
-    # The SealBot win-rate read, recovered from the pooled SealBot edge (if any)
-    # for THIS epoch, so the aggregate report carries the same descriptive field.
+    # The SealBot / Strix win-rate reads, recovered from the pooled zero-point
+    # edges (if any) for THIS epoch, so the aggregate report carries the same
+    # descriptive fields.
     sealbot_ci = _sealbot_ci_from_pool(pool_doc, epoch_tag, cand_label)
+    strix_ci = _strix_ci_from_pool(pool_doc, epoch_tag, cand_label)
     # This-epoch descriptive edges, recovered from the pool's provenance rows.
     epoch_edges = _epoch_descriptive_edges(pool_doc, epoch_tag, cand_label, roster)
 
@@ -2023,7 +2386,7 @@ def aggregate_pool(
             "candidate_ckpt": str(candidate_ckpt),
             "candidate_label": cand_label,
             "candidate_epoch": roster.candidate_epoch,
-            "anchor": SEALBOT_LABEL,
+            "anchor": ratings.get("anchor", SEALBOT_LABEL),
             "config": _config_summary(cfg),
             "elapsed_seconds": round(now() - started, 2),
             "single_epoch_se_elo_note": _resolution_note(cfg, epoch_edges, roster),
@@ -2036,6 +2399,7 @@ def aggregate_pool(
         "ratings": ratings,
         "edges": [e["descriptive"] for e in epoch_edges],
         "sealbot_winrate_ci95": sealbot_ci,
+        "strix_winrate_ci95": strix_ci,
         "verdict": verdict_block,
     }
 
@@ -2099,6 +2463,63 @@ def _sealbot_ci_from_pool(
     return None
 
 
+def _epoch_has_strix_edge(
+    pool_doc: dict[str, Any], epoch_tag: int, cand_label: str
+) -> bool:
+    """True if a Strix edge for this candidate epoch is present in the pool.
+
+    Label-agnostic (keys on ``kind == "strix"``, not the configurable label).
+    Used by the aggregate path to infer Strix unavailability: a config-enabled
+    Strix with no edge appended this epoch means its part did not complete.
+    """
+
+    for row in pool_doc.get("edges", []):
+        try:
+            if int(row.get("epoch")) != int(epoch_tag):
+                continue
+        except (TypeError, ValueError):
+            continue
+        if row.get("kind") != "strix":
+            continue
+        if str(row.get("a")) == cand_label or str(row.get("b")) == cand_label:
+            return True
+    return False
+
+
+def _strix_ci_from_pool(
+    pool_doc: dict[str, Any], epoch_tag: int, cand_label: str
+) -> list[float] | None:
+    """Recover this epoch's Strix win-rate Wilson CI from the pooled edge's
+    provenance. Label-agnostic (keys on ``kind == "strix"``). None when no Strix
+    edge was pooled this epoch."""
+
+    for row in pool_doc.get("edges", []):
+        try:
+            if int(row.get("epoch")) != int(epoch_tag):
+                continue
+        except (TypeError, ValueError):
+            continue
+        if row.get("kind") != "strix":
+            continue
+        if str(row.get("a")) != cand_label and str(row.get("b")) != cand_label:
+            continue
+        raw = row.get("raw") or {}
+        wins = int(raw.get("physical_wins_cand", 0) or 0)
+        losses = int(raw.get("physical_wins_strix", 0) or 0)
+        decided = wins + losses
+        if decided <= 0:
+            return None
+        # Prefer the paired pair-level CI when the provenance carries it.
+        pr_wr = raw.get("pair_winrate")
+        pr_se = raw.get("pair_se")
+        if pr_wr is not None and pr_se is not None and math.isfinite(float(pr_se)):
+            wr, se = float(pr_wr), float(pr_se)
+            return [round(max(0.0, wr - 1.96 * se), 4), round(min(1.0, wr + 1.96 * se), 4)]
+        lo, hi = eval_stats.wilson_ci(wins, decided)
+        return [round(lo, 4), round(hi, 4)]
+    return None
+
+
 def _epoch_descriptive_edges(
     pool_doc: dict[str, Any], epoch_tag: int, cand_label: str, roster: Roster
 ) -> list[dict[str, Any]]:
@@ -2115,6 +2536,8 @@ def _epoch_descriptive_edges(
     role_by_label = {o.label: o.role for o in roster.opponents}
     if roster.sealbot is not None:
         role_by_label.setdefault(roster.sealbot.label, "sealbot")
+    if roster.strix is not None:
+        role_by_label.setdefault(roster.strix.label, "strix")
 
     out: list[dict[str, Any]] = []
     for row in pool_doc.get("edges", []):
@@ -2135,7 +2558,38 @@ def _epoch_descriptive_edges(
         raw = row.get("raw") or {}
         role = role_by_label.get(opp_label, "champion" if opp_label == champ_label else "bracket")
         is_champ = opp_label == champ_label
-        if kind == "sealbot":
+        if kind == "strix":
+            wins = int(raw.get("physical_wins_cand", 0) or 0)
+            losses = int(raw.get("physical_wins_strix", 0) or 0)
+            decided = wins + losses
+            # Paired CRN pentanomial when the provenance carries pair stats; else
+            # fall back to the Wilson CI on raw decided counts.
+            pr_wr = raw.get("pair_winrate")
+            pr_se = raw.get("pair_se")
+            if pr_wr is not None and pr_se is not None and math.isfinite(float(pr_se)):
+                wr, se = float(pr_wr), float(pr_se)
+                lo, hi = max(0.0, wr - 1.96 * se), min(1.0, wr + 1.96 * se)
+                winrate = round(wr, 4)
+                is_paired = True
+            else:
+                lo, hi = eval_stats.wilson_ci(wins, decided) if decided else (0.0, 1.0)
+                winrate = round(wins / decided, 4) if decided else None
+                is_paired = False
+            desc = {
+                "opponent": opp_label,
+                "role": "strix",
+                "kind": "strix",
+                "primary": False,
+                "paired": is_paired,
+                "decided": decided,
+                "winrate": winrate,
+                "winrate_ci95": [round(lo, 4), round(hi, 4)],
+                "elo_point": _safe_elo(winrate) if winrate is not None else None,
+                "weight": round(float(row.get("weight", 1.0)), 4),
+                "provenance": raw,
+                "note": "PREFERRED zero-point (reconstructed from the pooled edge).",
+            }
+        elif kind == "sealbot":
             wins = int(raw.get("physical_wins_cand", 0) or 0)
             losses = int(raw.get("physical_wins_sealbot", 0) or 0)
             decided = wins + losses
@@ -2206,6 +2660,7 @@ def run_multistage_eval_in_parts(
     resume: bool = True,
     play_checkpoint_match: Callable[..., dict[str, Any]] | None = None,
     play_sealbot_match: Callable[..., dict[str, Any]] | None = None,
+    play_strix_match: Callable[..., dict[str, Any]] | None = None,
     now: Callable[[], float] = time.time,
 ) -> dict[str, Any]:
     """Run the staged eval as a sequence of resumable per-opponent parts.
@@ -2242,6 +2697,8 @@ def run_multistage_eval_in_parts(
             play_checkpoint_match = _arena.play_checkpoint_match
         if play_sealbot_match is None:
             play_sealbot_match = _arena.play_sealbot_match
+        if play_strix_match is None:
+            play_strix_match = getattr(_arena, "play_strix_match", None)
 
     roster = select_opponents(
         run_dir, candidate_ckpt, cfg,
@@ -2266,6 +2723,7 @@ def run_multistage_eval_in_parts(
             write_pool=write_diagnostics, resume=resume, pool_doc=mem_pool,
             play_checkpoint_match=play_checkpoint_match,
             play_sealbot_match=play_sealbot_match,
+            play_strix_match=play_strix_match,
         )
         # Carry the (possibly newly-built) in-memory pool forward to the next part.
         if mem_pool is not None:
@@ -2307,6 +2765,7 @@ def run_multistage_eval_concurrent(
     write_diagnostics: bool = True,
     play_multi_checkpoint_match: Callable[..., dict[str, Any]] | None = None,
     play_sealbot_match: Callable[..., dict[str, Any]] | None = None,
+    play_strix_match: Callable[..., dict[str, Any]] | None = None,
     now: Callable[[], float] = time.time,
 ) -> dict[str, Any]:
     """Run the deep eval (Stage C) as one concurrent pass, then Stage D.
@@ -2347,6 +2806,8 @@ def run_multistage_eval_concurrent(
             play_multi_checkpoint_match = _arena.play_multi_checkpoint_match
         if play_sealbot_match is None:
             play_sealbot_match = _arena.play_sealbot_match
+        if play_strix_match is None:
+            play_strix_match = getattr(_arena, "play_strix_match", None)
 
     roster = select_opponents(
         run_dir, candidate_ckpt, cfg,
@@ -2361,13 +2822,36 @@ def run_multistage_eval_concurrent(
         n_checkpoint_opponents=len(roster.opponents),
         has_sealbot=roster.sealbot is not None,
         sealbot_share=cfg.sealbot_share,
+        has_strix=roster.strix is not None,
+        strix_share=cfg.strix_share,
     )
 
     edges: list[dict[str, Any]] = []
     played: list[str] = []
     sealbot_ci: list[float] | None = None
+    strix_ci: list[float] | None = None
     sealbot_unavailable: str | None = None
+    strix_unavailable: str | None = None
     multi_error: str | None = None
+
+    # ----- Strix zero-point (preferred anchor; separate concurrent runner). -----
+    if (
+        roster.strix is not None
+        and play_strix_match is not None
+        and alloc.get(STRIX_LABEL, 0) > 0
+    ):
+        sx_games = alloc[STRIX_LABEL]
+        sx_edge, sx_ci, sx_unavail = _play_strix_opponent(
+            cfg, roster, candidate_ckpt, full_cfg, sx_games,
+            play_strix_match=play_strix_match,
+            diagnostics_dir=diag_dir,
+        )
+        if sx_unavail is not None:
+            strix_unavailable = sx_unavail
+        if sx_edge is not None:
+            strix_ci = sx_ci
+            edges.append(sx_edge)
+            played.append(roster.strix.label)
 
     # ----- SealBot zero-point (separate concurrent runner; fail-open). -----
     if roster.sealbot is not None and alloc.get(SEALBOT_LABEL, 0) > 0:
@@ -2439,20 +2923,26 @@ def run_multistage_eval_concurrent(
     }
     if sealbot_unavailable is not None:
         stage_c_detail["sealbot_unavailable"] = sealbot_unavailable
+    if strix_unavailable is not None:
+        stage_c_detail["strix_unavailable"] = strix_unavailable
     if multi_error is not None:
         stage_c_detail["multi_checkpoint_error"] = multi_error
     stage_c = StageResult(stage="C_deep", status=stage_c_status, detail=stage_c_detail)
 
     # ----- Stage D — the same pool append / BT fit / verdict. -----
-    # Flag an expected-but-unavailable SealBot so the substituted anchor degrades
-    # the verdict. Gated on roster.sealbot so a config-disabled SealBot is not a
-    # degradation.
+    # Flag an expected-but-unavailable SealBot / Strix so the substituted anchor
+    # degrades the verdict. Gated on the roster field so a config-disabled
+    # zero-point is not a degradation.
     sealbot_expected_but_unavailable = (
         stage_c_detail.get("sealbot_unavailable") if roster.sealbot is not None else None
+    )
+    strix_expected_but_unavailable = (
+        stage_c_detail.get("strix_unavailable") if roster.strix is not None else None
     )
     stage_d, ratings, verdict_block, pool_doc = _stage_d_pool(
         cfg, roster, edges, run_dir,
         sealbot_expected_but_unavailable=sealbot_expected_but_unavailable,
+        strix_expected_but_unavailable=strix_expected_but_unavailable,
     )
 
     report: dict[str, Any] = {
@@ -2463,7 +2953,9 @@ def run_multistage_eval_concurrent(
             "candidate_ckpt": str(candidate_ckpt),
             "candidate_label": cand_label,
             "candidate_epoch": roster.candidate_epoch,
-            "anchor": SEALBOT_LABEL,
+            # The actually-pinned anchor (Strix > SealBot > anchor > checkpoint);
+            # evaluation.py surfaces this into the run log.
+            "anchor": ratings.get("anchor", SEALBOT_LABEL),
             "config": _config_summary(cfg),
             "elapsed_seconds": round(now() - started, 2),
             "single_epoch_se_elo_note": _resolution_note(cfg, edges, roster),
@@ -2479,6 +2971,7 @@ def run_multistage_eval_concurrent(
         "ratings": ratings,
         "edges": [e["descriptive"] for e in edges],
         "sealbot_winrate_ci95": sealbot_ci,
+        "strix_winrate_ci95": strix_ci,
         "verdict": verdict_block,
     }
 
@@ -2518,22 +3011,29 @@ def _choose_anchor(
     edge. When any checkpoint edge exists the fit is never left free-floating.
 
     Preference order:
-      1. SealBot, when it has an edge (the cross-lineage zero-point).
-      2. ``bc_prefit``, then any other permanent anchor with an edge, in
+      1. Strix, when it has an edge (the preferred deterministic zero-point;
+         keyed on the configurable ``roster.strix.label``).
+      2. SealBot, when it has an edge (the fallback cross-lineage zero-point).
+      3. ``bc_prefit``, then any other permanent anchor with an edge, in
          configured order.
-      3. The lowest available checkpoint opponent by epoch (e.g. ep5) with an
+      4. The lowest available checkpoint opponent by epoch (e.g. ep5) with an
          edge.
-      4. Any non-candidate player with an edge.
+      5. Any non-candidate player with an edge.
 
     ``ood_labels`` are featurized-OOD opponents; they are not eligible as the
-    pinned zero-point (tiers 2/3 skip them) but still participate as descriptive
-    edges. Tier 4 falls back to one only when there is no non-OOD non-candidate
+    pinned zero-point (tiers 3/4 skip them) but still participate as descriptive
+    edges. Tier 5 falls back to one only when there is no non-OOD non-candidate
     edge.
     """
 
     ood = ood_labels or set()
     labels = {lbl for e in bt_edges for lbl in (e.a, e.b)}
-    # 1. SealBot zero-point (when it produced an edge).
+    # 0. Strix zero-point (preferred; deterministic fixed-sims => stable). Above
+    #    SealBot. Only when it produced an edge this pool; keyed on the
+    #    configurable label so a renamed Strix still pins.
+    if roster.strix is not None and roster.strix.label in labels:
+        return roster.strix.label
+    # 1. SealBot zero-point (fallback zero-point; when it produced an edge).
     if SEALBOT_LABEL in labels:
         return SEALBOT_LABEL
     # 2. bc_prefit first, then any other anchor-role opponent, in configured
@@ -2682,6 +3182,9 @@ def _config_summary(cfg: MultiStageEvalSection) -> dict[str, Any]:
         "primary_alpha": cfg.primary_alpha,
         "bonferroni_correction": cfg.bonferroni_correction,
         "sealbot_overdispersion": cfg.sealbot_overdispersion,
+        "sealbot_share": cfg.sealbot_share,
+        "strix_weight": cfg.strix_weight,
+        "strix_share": cfg.strix_share,
         "bt_grad_tol": cfg.bt_grad_tol,
         "bt_max_iters": cfg.bt_max_iters,
         "promote_elo_threshold": cfg.promote_elo_threshold,
@@ -2696,6 +3199,11 @@ def _config_summary(cfg: MultiStageEvalSection) -> dict[str, Any]:
         "opponents": {
             "sealbot_enabled": cfg.opponents.sealbot_enabled,
             "sealbot_variant": cfg.opponents.sealbot_variant,
+            "strix_enabled": cfg.opponents.strix_enabled,
+            "strix_ckpt": cfg.opponents.strix_ckpt,
+            "strix_sims": cfg.opponents.strix_sims,
+            "strix_m": cfg.opponents.strix_m,
+            "strix_label": cfg.opponents.strix_label,
             "permanent_anchors": [list(a) for a in cfg.opponents.permanent_anchors],
             "log_grid": list(cfg.opponents.log_grid),
             "bracket_size": cfg.opponents.bracket_size,
@@ -2707,6 +3215,7 @@ def _roster_summary(roster: Roster) -> dict[str, Any]:
     return {
         "candidate": {"label": roster.candidate_label, "epoch": roster.candidate_epoch},
         "sealbot": roster.sealbot.label if roster.sealbot else None,
+        "strix": roster.strix.label if roster.strix else None,
         "champion": (
             {"label": roster.champion.label, "epoch": roster.champion.epoch}
             if roster.champion else None

@@ -40,7 +40,7 @@ from .config import (
 from .engine_facts import player_int
 from .features import record_phase, record_player, window_scan
 from .geometry import pack_action_id, unpack_action_id
-from .inference import HexfieldEvaluator
+from .inference import build_serve_evaluator
 from .samples import (
     STV_HORIZONS,
     HexfieldSampleData,
@@ -962,7 +962,12 @@ def generate_selfplay_epoch(*, ctx, components, epoch: int, games_per_epoch: int
     cfg = parse_hexfield_config(ctx.config.model.config)
     sp = cfg.selfplay
     model = components.model.model
-    evaluator = HexfieldEvaluator(model, device=cfg.device)
+    # Self-play already runs under the full serve env from the supervisor;
+    # auto_match_serve_env=False keeps this construction byte-identical (no env
+    # mutation, no import-gate warning), so epoch diagnostics are unchanged.
+    evaluator = build_serve_evaluator(
+        model, cfg, role="selfplay", auto_match_serve_env=False
+    )
 
     out_dir = ctx.samples_dir / f"epoch_{epoch:06d}"
     out_dir.mkdir(parents=True, exist_ok=True)
