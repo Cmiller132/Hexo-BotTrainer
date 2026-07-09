@@ -54,7 +54,7 @@ fn capabilities(py: Python<'_>) -> PyResult<Py<PyAny>> {
     dict.set_item("status", "ready")?;
     dict.set_item("model_family", "hexfield_eq")?;
     dict.set_item("state_source", "direct_engine_state")?;
-    dict.set_item("num_features", constants::NUM_FEATURES)?;
+    dict.set_item("num_features", constants::num_features())?;
     dict.set_item("support_node_order", "legal|stones|halo asc packed id")?;
     Ok(dict.into_any().unbind())
 }
@@ -62,7 +62,8 @@ fn capabilities(py: Python<'_>) -> PyResult<Py<PyAny>> {
 /// Serve-time featurization of engine states. Returns one dict per state:
 /// coords (i16 q,r pairs), legal/stone/halo counts, dist (i32), nbr
 /// (i32 row-local, -1 missing, node-major x 6), feats (f32 node-major x
-/// NUM_FEATURES == 25), raylen (u8 node-major x RAYLEN_SLOTS == 12).
+/// num_features(): 25 / 46 by HEXFIELD_EQ_FEATURE_VERSION), raylen (u8
+/// node-major x RAYLEN_SLOTS == 12).
 #[cfg(feature = "python")]
 #[pyfunction(signature = (states))]
 fn featurize_states(py: Python<'_>, states: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {

@@ -40,9 +40,10 @@ use rayon::prelude::*;
 use hexo_engine::{HexCoord, Player, WindowStore};
 
 use crate::constants::{
-    DIRECTIONS, DIST_SCALE, F_DIST_TO_STONE, F_EMPTY, F_FIRST_STONE, F_LEGAL, F_OPP_FORK,
-    F_OPP_LAST_TURN, F_OPP_RECENCY, F_OPP_STONE, F_OWN_FORK, F_OWN_LINE_Q, F_OWN_RECENCY,
-    F_OWN_STONE, F_PHASE_SECOND, F_PLAYER_COLOUR, NUM_FEATURES, RAYLEN_SLOTS,
+    f_opp_fork, f_own_fork, feature_version, num_axis_planes, num_features, DIRECTIONS,
+    DIST_SCALE, F_DIST_TO_STONE, F_EMPTY, F_FIRST_STONE, F_LEGAL, F_OPP_LAST_TURN,
+    F_OPP_RECENCY, F_OPP_STONE, F_OWN_LINE_Q, F_OWN_RECENCY, F_OWN_STONE, F_PHASE_SECOND,
+    F_PLAYER_COLOUR, RAYLEN_SLOTS,
 };
 
 // hexfield_compact_v1 phase enum: index 2 == "SecondStone".
@@ -375,7 +376,8 @@ fn build_features(
     first_stone: Option<(i32, i32)>,
 ) -> Result<Vec<f32>, ExpandErr> {
     let n = sup.num_nodes();
-    let mut feats = vec![0f32; n * NUM_FEATURES];
+    let nf = num_features();
+    let mut feats = vec![0f32; n * nf];
     let placements_made = records.len() as i64;
 
     let lookup = |sup: &Support, cell: (i32, i32), what: &str| -> Result<usize, ExpandErr> {
@@ -390,10 +392,10 @@ fn build_features(
     for &(q, r, owner, placement_index) in records {
         let row = lookup(sup, (q, r), "stone")?;
         let recency_plane = if owner as i32 == current_player {
-            feats[row * NUM_FEATURES + F_OWN_STONE] = 1.0;
+            feats[row * nf + F_OWN_STONE] = 1.0;
             F_OWN_RECENCY
         } else {
-            feats[row * NUM_FEATURES + F_OPP_STONE] = 1.0;
+            feats[row * nf + F_OPP_STONE] = 1.0;
             F_OPP_RECENCY
         };
         let age = placements_made - placement_index as i64;
@@ -402,7 +404,7 @@ fn build_features(
         // Computing in f32 directly can differ in the last ULP for non-dyadic
         // ratios (e.g. 1/3).
         let weight = (1.0f64 / (1.0 + age as f64)) as f32;
-        let off = row * NUM_FEATURES + recency_plane;
+        let off = row * nf + recency_plane;
         if weight > feats[off] {
             feats[off] = weight;
         }
@@ -410,36 +412,37 @@ fn build_features(
 
     // EMPTY = 1 - own - opp; LEGAL on the legal prefix.
     for row in 0..n {
-        let own = feats[row * NUM_FEATURES + F_OWN_STONE];
-        let opp = feats[row * NUM_FEATURES + F_OPP_STONE];
-        feats[row * NUM_FEATURES + F_EMPTY] = 1.0 - own - opp;
+        let own = feats[row * nf + F_OWN_STONE];
+        let opp = feats[row * nf + F_OPP_STONE];
+        feats[row * nf + F_EMPTY] = 1.0 - own - opp;
     }
     for row in 0..sup.legal_count {
-        feats[row * NUM_FEATURES + F_LEGAL] = 1.0;
+        feats[row * nf + F_LEGAL] = 1.0;
     }
 
     // Phase-second + first-stone.
     if phase == PHASE_SECOND_STONE {
         for row in 0..n {
-            feats[row * NUM_FEATURES + F_PHASE_SECOND] = 1.0;
+            feats[row * nf + F_PHASE_SECOND] = 1.0;
         }
         if let Some(fs) = first_stone {
             let row = lookup(sup, fs, "first_stone")?;
-            feats[row * NUM_FEATURES + F_FIRST_STONE] = 1.0;
+            feats[row * nf + F_FIRST_STONE] = 1.0;
         }
     }
 
     // Player colour.
     if current_player == 0 {
         for row in 0..n {
-            feats[row * NUM_FEATURES + F_PLAYER_COLOUR] = 1.0;
+            feats[row * nf + F_PLAYER_COLOUR] = 1.0;
         }
     }
 
-    // Graded per-axis window planes (11-24): recompute from the transformed
-    // placements. Build the same incremental window store the engine maintains
-    // during play, then read the graded features per support cell. `me`/`other`
-    // are the current player's own/opp perspective.
+    // Graded per-axis window planes (11-24 under version 1, 11-42 under
+    // version 2): recompute from the transformed placements. Build the same
+    // incremental window store the engine maintains during play, then read the
+    // graded features per support cell. `me`/`other` are the current player's
+    // own/opp perspective.
     {
         let placements: Vec<(HexCoord, Player)> = records
             .iter()
@@ -453,31 +456,40 @@ fn build_features(
         let windows = WindowStore::from_placements(&placements);
         let me = if current_player == 0 { Player::Player0 } else { Player::Player1 };
         let other = me.other();
+        let n_axis = num_axis_planes();
+        let (own_fork, opp_fork) = (f_own_fork(), f_opp_fork());
         for row in 0..n {
             let (q, r) = sup.coords[row];
             let x = HexCoord { q: q as i16, r: r as i16 };
             // Empty iff neither stone plane was set for this row above.
-            let is_empty = feats[row * NUM_FEATURES + F_OWN_STONE] == 0.0
-                && feats[row * NUM_FEATURES + F_OPP_STONE] == 0.0;
+            let is_empty = feats[row * nf + F_OWN_STONE] == 0.0
+                && feats[row * nf + F_OPP_STONE] == 0.0;
             let vals = crate::features::window_feature_row(&windows, x, is_empty, me, other);
-            let base = row * NUM_FEATURES;
-            for k in 0..12 {
+            let base = row * nf;
+            for k in 0..n_axis {
                 feats[base + F_OWN_LINE_Q + k] = vals[k];
             }
-            feats[base + F_OWN_FORK] = vals[12];
-            feats[base + F_OPP_FORK] = vals[13];
+            feats[base + own_fork] = vals[30];
+            feats[base + opp_fork] = vals[31];
         }
     }
 
     // dist_to_stone: dist / DIST_SCALE.
     for row in 0..n {
-        feats[row * NUM_FEATURES + F_DIST_TO_STONE] = sup.dist[row] as f32 / DIST_SCALE;
+        feats[row * nf + F_DIST_TO_STONE] = sup.dist[row] as f32 / DIST_SCALE;
     }
 
     // Opponent last full turn.
     for cell in opp_last_turn_cells(records, current_player) {
         let row = lookup(sup, cell, "opp_last_turn")?;
-        feats[row * NUM_FEATURES + F_OPP_LAST_TURN] = 1.0;
+        feats[row * nf + F_OPP_LAST_TURN] = 1.0;
+    }
+
+    // Version-2 global scalar planes (spec §1.4), from the transformed records
+    // (chronological — the centroid sum order matches the Python oracle).
+    if feature_version() == 2 {
+        let stones: Vec<(i32, i32)> = records.iter().map(|&(q, r, _, _)| (q, r)).collect();
+        crate::features::fill_global_scalars(&mut feats, nf, n, &stones, |row| sup.coords[row]);
     }
 
     Ok(feats)
@@ -1118,7 +1130,7 @@ pub fn expand_shard_train<'py>(
     let mut coords = Vec::with_capacity(total_nodes * 2);
     let mut dist = Vec::with_capacity(total_nodes);
     let mut nbr = Vec::with_capacity(total_nodes * 6);
-    let mut feats = Vec::with_capacity(total_nodes * NUM_FEATURES);
+    let mut feats = Vec::with_capacity(total_nodes * num_features());
     let mut raylen = Vec::with_capacity(total_nodes * RAYLEN_SLOTS);
     let mut policy = Vec::with_capacity(total_legal);
     let mut opp_policy = Vec::with_capacity(total_legal);
@@ -1202,6 +1214,8 @@ pub fn expand_shard_train<'py>(
     out.set_item("prior_logit", Py::new(py, RxF32Buf { data: prior_logit_out })?)?;
     out.set_item("policy_surprise", Py::new(py, RxF32Buf { data: policy_surprise_out })?)?;
     out.set_item("num_rows", r)?;
-    out.set_item("num_features", NUM_FEATURES)?;
+    // The active plane-map width; the Python consumer asserts it against its
+    // own NUM_FEATURES so a stale .so / feature-version desync fails loudly.
+    out.set_item("num_features", num_features())?;
     Ok(out)
 }
