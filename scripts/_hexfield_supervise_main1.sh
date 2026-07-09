@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Unattended supervisor for hexfield_main_1 — mirrors _dc_restnet_supervise_main1.sh
-# (auto-relaunch + circuit breaker + single-instance lock + halt flag), drives the
+# Unattended supervisor for hexfield runs (CONFIG/RUNDIR env-overridable; the
+# systemd units set both). Auto-relaunch + circuit breaker + single-instance
+# lock + halt flag; drives the
 # config-driven CLI (hexo_train.cli.train_model), and RESUMES from the latest
 # epoch checkpoint (resume_from injected into [checkpoint]; hexo_train prefers
 # resume_from over initialize_from, and HexfieldCheckpointLoader loads
@@ -13,7 +14,7 @@ set -uo pipefail
 ROOT="${ROOT:-/mnt/e/Hexo-BotTrainer-hexgt}"
 VENV="${VENV:-/root/.venvs/hexgt-build}"
 CONFIG="${CONFIG:-$ROOT/configs/hexfield_main_9.toml}"
-RUNDIR="${RUNDIR:-/mnt/e/Hexo-BotTrainer/runs/hexfield_main_1}"
+RUNDIR="${RUNDIR:-/mnt/e/Hexo-BotTrainer/runs/hexfield_main_9}"
 
 CKPTS="$RUNDIR/checkpoints"
 SUPLOG="$RUNDIR/supervisor.log"; LOCK="$RUNDIR/supervisor.lock"
