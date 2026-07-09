@@ -153,3 +153,45 @@ def test_fifty_random_signatures_norm_scale_pool_and_pointwise() -> None:
             # PyTorch's vectorized CPU GELU can differ by one fp64 ulp after a
             # channel permutation even though the operation is pointwise.
             _assert_close(F.gelu(x_g), transform_channels(F.gelu(x), signature, g))
+
+
+def test_gelu_commutes_with_every_quotient_permutation() -> None:
+    """G5 positive control: every required single-type action is legal."""
+
+    torch.manual_seed(0)
+    for type_name in TYPE_ORDER:
+        signature = ((type_name, 1),)
+        x = torch.randn(5, len(signature_action(signature, 0)), dtype=torch.float64)
+        for g in range(GROUP_ORDER):
+            _assert_close(
+                F.gelu(transform_channels(x, signature, g)),
+                transform_channels(F.gelu(x), signature, g),
+            )
+
+
+def test_sign_rep_is_a_representation_but_gelu_breaks_it() -> None:
+    """G5 negative control: reflection signs do not commute with GELU."""
+
+    def orientation(g: int) -> int:
+        aq, ar = apply_d6(g, 1, 0)
+        bq, br = apply_d6(g, 0, 1)
+        return aq * br - ar * bq
+
+    sign = [orientation(g) for g in range(GROUP_ORDER)]
+    mult = build_group()["mult"]
+    for g in range(GROUP_ORDER):
+        for h in range(GROUP_ORDER):
+            assert sign[g] * sign[h] == sign[mult[g][h]]
+
+    x = torch.tensor([-2.0, -0.75, 0.25, 1.5], dtype=torch.float64)
+    reflection_violations = []
+    for g in range(GROUP_ORDER):
+        lhs = F.gelu(sign[g] * x)
+        rhs = sign[g] * F.gelu(x)
+        violation = float((lhs - rhs).abs().max())
+        if sign[g] == 1:
+            assert violation == 0.0
+        else:
+            reflection_violations.append(violation)
+    assert len(reflection_violations) == 6
+    assert min(reflection_violations) > 1.0

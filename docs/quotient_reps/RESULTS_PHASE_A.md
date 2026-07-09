@@ -110,5 +110,18 @@ ReLU is bit-exact. PyTorch's vectorized CPU GELU produced a one-ulp
 commutation check uses the fp64 averaging-grade tolerance; WSL also passes.
 `tests/test_hexfield_eq_reps_typed_layers.py`: **3 passed** on each platform.
 
+### G5 — nonlinearity legality: PASS
+
+The positive control applies GELU under every element of every required
+single-type permutation representation. The negative control independently
+constructs the determinant/sign representation, verifies its homomorphism law
+for all 144 products, and measures the reflection-equivariance violation of
+GELU on a fixed fp64 vector.
+
+Every quotient action commuted within fp64 tolerance. Every reflection in the
+valid sign representation violated GELU commutation by more than 1.0, while
+rotations (sign `+1`) remained exact. The combined G4/G5 file now reports
+**5 passed** on Windows and **5 passed** in WSL.
+
 Later gate results, audit evidence, cost rankings, and the final recommendation
 will be filled as each ordered gate turns green.
