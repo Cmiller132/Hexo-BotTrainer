@@ -20,8 +20,8 @@ strix `hexo_rs` wheel all import (e.g. /root/.venvs/hexgt-build).
 Usage (from WSL):
   python scripts/_strix_vs_hexfield_eval.py \
       --strix-ckpt /mnt/c/Users/epicm/Downloads/checkpoint_00237000.pt \
-      --hexfield-ckpt /mnt/e/Hexo-BotTrainer/runs/hexfield_main_6/checkpoints/epoch_000075.pt \
-      --hexfield-config /mnt/e/Hexo-BotTrainer-hexgt/configs/hexfield_main_6.toml \
+      --hexfield-ckpt /path/to/hexfield/checkpoints/epoch_000075.pt \
+      --hexfield-config /mnt/e/Hexo-BotTrainer-hexgt/configs/hexfield_main_9.toml \
       --games 40 --sims 256 --m 16
 """
 

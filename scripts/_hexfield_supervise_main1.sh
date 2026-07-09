@@ -12,7 +12,7 @@ set -uo pipefail
 
 ROOT="${ROOT:-/mnt/e/Hexo-BotTrainer-hexgt}"
 VENV="${VENV:-/root/.venvs/hexgt-build}"
-CONFIG="${CONFIG:-$ROOT/configs/hexfield_main_1.toml}"
+CONFIG="${CONFIG:-$ROOT/configs/hexfield_main_9.toml}"
 RUNDIR="${RUNDIR:-/mnt/e/Hexo-BotTrainer/runs/hexfield_main_1}"
 
 CKPTS="$RUNDIR/checkpoints"

@@ -1,9 +1,0 @@
-.............................                                            [100%]
-=============================== warnings summary ===============================
-tests/test_dense_cnn_pipeline.py::test_training_pipeline_run_records_dense_cnn_epoch_diagnostics
-  /mnt/e/Hexo-BotTrainer-hexgt/packages/hexo_models/dense_cnn/python/hexo_models/dense_cnn/inference.py:283: UserWarning: The given buffer is not writable, and PyTorch does not support non-writable tensors. This means you can write to the underlying (supposedly non-writable) buffer using the tensor. You may want to copy the buffer to protect its data or make it writable before converting it to a tensor. This type of warning will be suppressed for the rest of this program. (Triggered internally at /pytorch/torch/csrc/utils/tensor_new.cpp:1576.)
-    inputs = torch.frombuffer(payload["inputs"], dtype=torch.float16).reshape(shape)
-
--- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
-29 passed, 1 warning in 5.35s
-exit=0

@@ -1,9 +1,0 @@
-........                                                                 [100%]
-=============================== warnings summary ===============================
-tests/test_restnet_reference_eval.py::test_reference_phase_cpu_smoke
-  /mnt/e/Hexo-BotTrainer-hexgt/packages/dense_cnn_restnet/python/dense_cnn_restnet/inference.py:351: UserWarning: The given buffer is not writable, and PyTorch does not support non-writable tensors. This means you can write to the underlying (supposedly non-writable) buffer using the tensor. You may want to copy the buffer to protect its data or make it writable before converting it to a tensor. This type of warning will be suppressed for the rest of this program. (Triggered internally at /pytorch/torch/csrc/utils/tensor_new.cpp:1576.)
-    inputs = torch.frombuffer(payload["inputs"], dtype=torch.float16).reshape(shape)
-
--- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
-8 passed, 1 warning in 2.95s
-exit=0

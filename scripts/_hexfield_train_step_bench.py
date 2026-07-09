@@ -28,13 +28,83 @@ import numpy as np
 import torch
 import torch._dynamo
 
+from hexfield.constants import DIRECTIONS, NUM_FEATURES
 from hexfield.model import HexfieldNet
-
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _hexfield_main6_profile import make_batch  # noqa: E402
 
 PAIR_BUDGET = 2.0e7
 PAD_QUANTUM = 256
+
+# Batch synthesis (inlined from the former _hexfield_main6_profile.py): random
+# adjacent-stone blobs, support = union of radius-4 disks, padded to a
+# 64-multiple Npad — matches the production serve/train row shapes.
+QUANT = 64
+DISK_R = 4  # HEXFIELD_SUPPORT_RADIUS in the live run
+
+
+def hexdist(dq: int, dr: int) -> int:
+    return max(abs(dq), abs(dr), abs(dq + dr))
+
+
+DISK = [
+    (dq, dr)
+    for dq in range(-DISK_R, DISK_R + 1)
+    for dr in range(-DISK_R, DISK_R + 1)
+    if hexdist(dq, dr) <= DISK_R
+]
+
+
+def make_blob(n_target: int, rng: np.random.Generator):
+    """Random adjacent stone walk; support = union of radius-4 disks. Returns
+    (coords (N,2) int64, nbr (N,6) row-local with missing -> N)."""
+
+    stones = [(0, 0)]
+    support: set[tuple[int, int]] = set(DISK)
+    while len(support) < n_target:
+        base = stones[rng.integers(len(stones))]
+        d = DIRECTIONS[rng.integers(6)]
+        s = (base[0] + d[0], base[1] + d[1])
+        if s in [tuple(x) for x in stones]:
+            continue
+        stones.append(s)
+        for dq, dr in DISK:
+            support.add((s[0] + dq, s[1] + dr))
+    cells = sorted(support)[: n_target]  # trim to exact N for shape control
+    cellset = {c: i for i, c in enumerate(cells)}
+    n = len(cells)
+    coords = np.array(cells, dtype=np.int64)
+    nbr = np.full((n, 6), n, dtype=np.int64)
+    for i, (q, r) in enumerate(cells):
+        for t, (dq, dr) in enumerate(DIRECTIONS):
+            j = cellset.get((q + dq, r + dr))
+            if j is not None:
+                nbr[i, t] = j
+    return coords, nbr
+
+
+def make_batch(b: int, n: int, device, rng):
+    npad = ((n + QUANT - 1) // QUANT) * QUANT
+    feats = torch.zeros(b, npad, NUM_FEATURES, dtype=torch.float16)
+    nbrs = torch.full((b, npad, 6), npad, dtype=torch.long)
+    mask = torch.zeros(b, npad, dtype=torch.bool)
+    coords = torch.zeros(b, npad, 2, dtype=torch.long)
+    for k in range(4):  # 4 distinct blobs cycled over the batch
+        c, nb = make_blob(n, rng)
+        rows = range(k, b, 4)
+        for i in rows:
+            feats[i, :n] = torch.from_numpy(
+                rng.standard_normal((n, NUM_FEATURES)).astype(np.float16)
+            )
+            nbrs[i, :n] = torch.from_numpy(nb)
+            # pad-row nbr already npad; blob 'missing -> n' must become npad
+            nbrs[i, :n][nbrs[i, :n] == n] = npad
+            mask[i, :n] = True
+            coords[i, :n] = torch.from_numpy(c)
+    return (
+        feats.to(device),
+        nbrs.to(device),
+        mask.to(device),
+        coords.to(device),
+    )
 
 
 def bucket_b(npad: int) -> int:

@@ -1,8 +1,0 @@
-#!/usr/bin/env bash
-set -eu
-PY=/root/.venvs/hexgt-build/bin/python
-S=/mnt/e/Hexo-BotTrainer-hexgt/scripts/_main7_attn_sweep.py
-HEXFIELD_ATTN_BM=64 HEXFIELD_ATTN_BN=64 HEXFIELD_ATTN_WARPS=4 HEXFIELD_ATTN_STAGES=3 "$PY" "$S" 2>/dev/null
-HEXFIELD_ATTN_BM=64 HEXFIELD_ATTN_BN=64 HEXFIELD_ATTN_WARPS=4 HEXFIELD_ATTN_STAGES=2 "$PY" "$S" 2>/dev/null
-HEXFIELD_ATTN_BM=128 HEXFIELD_ATTN_BN=32 HEXFIELD_ATTN_WARPS=8 HEXFIELD_ATTN_STAGES=3 "$PY" "$S" 2>/dev/null
-echo DONE2
