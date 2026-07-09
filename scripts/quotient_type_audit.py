@@ -48,6 +48,7 @@ CHANNELS = GROUP_ORDER * ORBIT_CHANNELS
 NUM_TOKENS = 6
 DEFAULT_POSITIONS = 512
 DEFAULT_BATCH_SIZE = 8
+VALUE_BINS = 65
 
 ARCH_ENV_RELATIVE = Path("scripts/prefit_env/hexfield_eq_arm4_raylayout.env")
 ARM4_ENV_EXPECTED = {
@@ -856,6 +857,308 @@ def _projection_cosets(runtime: RuntimeAPI) -> tuple[
     return cosets, sigma, rot180
 
 
+class RightSigmaProjector:
+    """Fp32 right-``<sigma>`` averaging with independently checked semantics."""
+
+    def __init__(
+        self,
+        runtime: RuntimeAPI,
+        sigma: int,
+        mirror_cosets: tuple[tuple[int, ...], ...],
+    ) -> None:
+        mult = runtime.reps.build_group()["mult"]
+        gather = tuple(int(mult[g][sigma]) for g in range(GROUP_ORDER))
+        if any(gather[gather[g]] != g for g in range(GROUP_ORDER)):
+            raise AssertionError("right-sigma gather is not an involution")
+        blocks = tuple(
+            sorted(
+                {tuple(sorted((g, gather[g]))) for g in range(GROUP_ORDER)},
+                key=lambda block: (min(block), block),
+            )
+        )
+        if blocks != mirror_cosets:
+            raise AssertionError(
+                f"right-sigma pairs disagree with mirror quotient cosets: {blocks}"
+            )
+        self.gather = torch.tensor(gather, dtype=torch.long)
+        self.mirror_cosets = mirror_cosets
+        self.runtime_idempotence_checked = False
+
+        # This reference is deliberately block-based rather than expressed with
+        # the gather formula used by _project.  It catches a left/right or slot-
+        # ordering mistake before any checkpoint inference is attempted.
+        probe = torch.arange(
+            2 * GROUP_ORDER * ORBIT_CHANNELS, dtype=torch.float64
+        ).reshape(2, GROUP_ORDER * ORBIT_CHANNELS)
+        projected = self._project(probe)
+        reference_fibers = probe.reshape(2, GROUP_ORDER, ORBIT_CHANNELS).clone()
+        for block in mirror_cosets:
+            mean = reference_fibers[:, list(block), :].mean(dim=1, keepdim=True)
+            reference_fibers[:, list(block), :] = mean
+        reference = reference_fibers.reshape_as(probe)
+        torch.testing.assert_close(projected, reference, rtol=0.0, atol=0.0)
+        torch.testing.assert_close(
+            self._project(projected), projected, rtol=0.0, atol=0.0
+        )
+
+    def _project(self, activation: torch.Tensor) -> torch.Tensor:
+        if activation.shape[-1] != CHANNELS:
+            raise ValueError(
+                f"right-sigma projection requires width {CHANNELS}, "
+                f"got {activation.shape[-1]}"
+            )
+        gather = self.gather.to(activation.device)
+        fibers = activation.reshape(*activation.shape[:-1], GROUP_ORDER, ORBIT_CHANNELS)
+        projected = (fibers + fibers.index_select(-2, gather)) * 0.5
+        return projected.reshape_as(activation)
+
+    def __call__(self, activation: torch.Tensor) -> torch.Tensor:
+        if activation.device.type != "cpu":
+            raise RuntimeError("causal mirror projection received a non-CPU activation")
+        if activation.dtype != torch.float32:
+            raise RuntimeError(
+                f"causal mirror projection requires fp32 inference, got {activation.dtype}"
+            )
+        if not bool(torch.isfinite(activation).all()):
+            raise ValueError("causal mirror projection received non-finite activations")
+        projected = self._project(activation)
+        if not self.runtime_idempotence_checked:
+            torch.testing.assert_close(
+                self._project(projected), projected, rtol=0.0, atol=0.0
+            )
+            self.runtime_idempotence_checked = True
+        return projected
+
+
+def _causal_depth_modules(model: Any, layout: str) -> list[tuple[str, str, Any]]:
+    """Map every layout depth to the module whose output carries that stream."""
+
+    result: list[tuple[str, str, Any]] = []
+    conv_index = ray_index = attn_index = 0
+    for depth, kind in enumerate(layout):
+        if kind == "C":
+            module = model.conv_blocks[conv_index]
+            conv_index += 1
+        elif kind == "L":
+            module = model.ray_blocks[ray_index]
+            ray_index += 1
+        elif kind == "A":
+            module = model.attn_blocks[attn_index]
+            attn_index += 1
+        else:
+            raise ValueError(f"unsupported trunk kind {kind!r}")
+        result.append((f"depth_{depth:02d}_{kind}", kind, module))
+    if len(result) != 11:
+        raise AssertionError(
+            f"arm-4 causal audit requires all 11 trunk depths, got {len(result)}"
+        )
+    return result
+
+
+def _distribution_drift(
+    baseline_logits: torch.Tensor,
+    projected_logits: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return baseline/projected fp64 probabilities plus KL(base||new) and TV."""
+
+    baseline_logp = torch.log_softmax(baseline_logits.to(torch.float64), dim=-1)
+    projected_logp = torch.log_softmax(projected_logits.to(torch.float64), dim=-1)
+    baseline_p = baseline_logp.exp()
+    projected_p = projected_logp.exp()
+    kl = (baseline_p * (baseline_logp - projected_logp)).sum()
+    if float(kl.item()) < -1e-12:
+        raise AssertionError(f"negative KL beyond fp64 tolerance: {float(kl.item())}")
+    kl = kl.clamp_min(0.0)
+    tv = 0.5 * (baseline_p - projected_p).abs().sum()
+    return baseline_p, projected_p, kl, tv
+
+
+class CausalMetricAccumulator:
+    """Per-position causal drifts, computed and retained as fp64 scalars."""
+
+    METRICS = (
+        "policy_kl",
+        "policy_tv",
+        "top1_flip",
+        "value_kl",
+        "value_tv",
+        "expected_value_abs_drift",
+    )
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.values: dict[str, list[float]] = {key: [] for key in self.METRICS}
+
+    def update(
+        self,
+        baseline: dict[str, torch.Tensor],
+        projected: dict[str, torch.Tensor],
+        legal_counts: torch.Tensor,
+    ) -> None:
+        for output_name in ("policy", "value"):
+            for label, output in (("baseline", baseline), ("projected", projected)):
+                tensor = output[output_name]
+                if tensor.device.type != "cpu" or tensor.dtype != torch.float32:
+                    raise RuntimeError(
+                        f"{self.name}: {label} {output_name} must be CPU fp32, "
+                        f"got {tensor.device}/{tensor.dtype}"
+                    )
+                if not bool(torch.isfinite(tensor).all()):
+                    raise ValueError(f"{self.name}: non-finite {label} {output_name}")
+        if baseline["policy"].shape != projected["policy"].shape:
+            raise ValueError(f"{self.name}: policy output shape changed")
+        if baseline["value"].shape != projected["value"].shape:
+            raise ValueError(f"{self.name}: value output shape changed")
+        if baseline["value"].ndim != 2 or baseline["value"].shape[1] != VALUE_BINS:
+            raise ValueError(f"{self.name}: expected {VALUE_BINS} value bins")
+        if baseline["policy"].shape[0] != legal_counts.numel():
+            raise ValueError(f"{self.name}: legal-count batch mismatch")
+
+        value_support = torch.linspace(-1.0, 1.0, VALUE_BINS, dtype=torch.float64)
+        for row in range(int(legal_counts.numel())):
+            legal_count = int(legal_counts[row].item())
+            if not 0 < legal_count <= baseline["policy"].shape[1]:
+                raise ValueError(f"{self.name}: invalid legal_count={legal_count}")
+            base_policy_logits = baseline["policy"][row, :legal_count]
+            new_policy_logits = projected["policy"][row, :legal_count]
+            _, _, policy_kl, policy_tv = _distribution_drift(
+                base_policy_logits, new_policy_logits
+            )
+            top1_flip = float(
+                int(torch.argmax(base_policy_logits).item())
+                != int(torch.argmax(new_policy_logits).item())
+            )
+
+            base_value, new_value, value_kl, value_tv = _distribution_drift(
+                baseline["value"][row], projected["value"][row]
+            )
+            base_expected = torch.dot(base_value, value_support)
+            new_expected = torch.dot(new_value, value_support)
+            expected_drift = (base_expected - new_expected).abs()
+
+            scalars = {
+                "policy_kl": policy_kl,
+                "policy_tv": policy_tv,
+                "top1_flip": torch.tensor(top1_flip, dtype=torch.float64),
+                "value_kl": value_kl,
+                "value_tv": value_tv,
+                "expected_value_abs_drift": expected_drift,
+            }
+            for key, value in scalars.items():
+                if value.dtype != torch.float64 or not bool(torch.isfinite(value)):
+                    raise AssertionError(f"{self.name}: invalid fp64 metric {key}={value}")
+                self.values[key].append(float(value.item()))
+
+    def finalize(self) -> dict[str, Any]:
+        counts = {len(values) for values in self.values.values()}
+        if len(counts) != 1 or not counts or next(iter(counts)) <= 0:
+            raise AssertionError(f"{self.name}: incomplete causal metric accumulation")
+        count = next(iter(counts))
+        result: dict[str, Any] = {"name": self.name, "positions": count}
+        for key, values in self.values.items():
+            result[key] = {
+                "mean": math.fsum(values) / count,
+                "median": _quantile(values, 0.50),
+                "p95": _quantile(values, 0.95),
+                "max": max(values),
+            }
+        result["top1_flip_rate"] = result["top1_flip"]["mean"]
+        return result
+
+
+def _run_causal_mirror_audit(
+    *,
+    model: Any,
+    runtime: RuntimeAPI,
+    layout: str,
+    positions: Sequence[AuditPosition],
+    count: int,
+    batch_size: int,
+    sigma: int,
+    mirror_cosets: tuple[tuple[int, ...], ...],
+    verbose: bool,
+) -> tuple[list[dict[str, Any]], float]:
+    """Run paired serve forwards with one right-mirror intervention at a time."""
+
+    if count <= 0:
+        raise ValueError("--causal-mirror-positions must be positive when enabled")
+    if count > len(positions):
+        raise ValueError(
+            f"--causal-mirror-positions={count} exceeds the {len(positions)} "
+            "loaded real positions; increase --positions"
+        )
+    if batch_size <= 0:
+        raise ValueError("--batch-size must be positive")
+
+    # Select before bucketing: these are precisely the first N positions in the
+    # deterministic manifest-uniform real-row sample used by the required audit.
+    selected = list(positions[:count])
+    ordered = sorted(
+        selected,
+        key=lambda item: (
+            item.support.num_nodes,
+            item.turn_index,
+            item.source,
+            item.source_row,
+        ),
+    )
+    depths = _causal_depth_modules(model, layout)
+    projector = RightSigmaProjector(runtime, sigma, mirror_cosets)
+    accumulators = {name: CausalMetricAccumulator(name) for name, _, _ in depths}
+    started = time.perf_counter()
+
+    def intervention_hook(_module, _args, output):
+        if not torch.is_tensor(output):
+            raise TypeError("causal trunk hook expected one tensor output")
+        return projector(output)
+
+    with torch.inference_mode():
+        for start in range(0, len(ordered), batch_size):
+            subset = ordered[start : start + batch_size]
+            batch = runtime.collate_rows(
+                [(item.support, item.feats) for item in subset],
+                raylen=[item.raylen for item in subset],
+            )
+            if any(tensor.device.type != "cpu" for tensor in batch.values()):
+                raise RuntimeError("causal collate_rows produced a non-CPU tensor")
+            expected_legal = [int(item.support.legal_count) for item in subset]
+            actual_legal = [int(value) for value in batch["legal_counts"].tolist()]
+            if actual_legal != expected_legal:
+                raise AssertionError(
+                    f"causal legal-count ordering mismatch: {actual_legal} != {expected_legal}"
+                )
+            inputs = (
+                batch["feats"],
+                batch["nbr"],
+                batch["mask"],
+                batch["coords"],
+                batch["raylen"],
+            )
+            baseline = model.forward_policy_value(*inputs)
+            for name, _kind, module in depths:
+                handle = module.register_forward_hook(intervention_hook)
+                try:
+                    projected = model.forward_policy_value(*inputs)
+                finally:
+                    handle.remove()
+                accumulators[name].update(
+                    baseline, projected, batch["legal_counts"]
+                )
+            if verbose:
+                print(
+                    f"causal mirror audited "
+                    f"{min(start + batch_size, len(ordered))}/{len(ordered)} positions",
+                    file=sys.stderr,
+                )
+
+    if not projector.runtime_idempotence_checked:
+        raise AssertionError("causal projection hook never fired")
+    summaries = [accumulators[name].finalize() for name, _, _ in depths]
+    if any(summary["positions"] != count for summary in summaries):
+        raise AssertionError("causal depths observed inconsistent position counts")
+    return summaries, time.perf_counter() - started
+
+
 def _run_weight_audit(
     model: Any,
     cosets: dict[str, tuple[tuple[int, ...], ...]],
@@ -1009,6 +1312,75 @@ def _weight_table(summaries: Sequence[dict[str, Any]]) -> list[str]:
         )
     lines.append("")
     return lines
+
+
+def _causal_stat_cell(statistics: dict[str, float]) -> str:
+    return " / ".join(
+        f"{statistics[key]:.3e}" for key in ("mean", "median", "p95", "max")
+    )
+
+
+def _causal_mirror_report(
+    summaries: Sequence[dict[str, Any]],
+    runtime_seconds: float,
+) -> str:
+    if len(summaries) != 11:
+        raise AssertionError(f"expected 11 causal-depth summaries, got {len(summaries)}")
+    policy_peak = max(summaries, key=lambda item: item["policy_tv"]["mean"])
+    value_peak = max(summaries, key=lambda item: item["value_tv"]["mean"])
+    flip_peak = max(summaries, key=lambda item: item["top1_flip_rate"])
+    lines = [
+        "## Causal right-mirror projection extension",
+        "",
+        "At each depth independently, one block output is replaced by "
+        "`P_<sigma> = (I + R_sigma) / 2` and the complete "
+        "`forward_policy_value` serve path finishes downstream. C/L hooks replace "
+        "the cell output before register refresh; A hooks replace the whole joint "
+        "token+cell output.",
+        "",
+        f"- Positions: {summaries[0]['positions']} (first rows of the fixed-seed "
+        "deterministic real-shard sample, then node-count bucketed)",
+        "- Intervention inference: CPU fp32; probability and metric arithmetic: fp64",
+        "- Policy comparison domain: exactly `[0, support.legal_count)` for each row",
+        "- KL direction: baseline distribution || mirror-projected distribution",
+        "- Value support: 65 equally spaced bins on `[-1, 1]`",
+        "- Right-action semantics, mirror-coset agreement, and projector "
+        "idempotence: PASS",
+        f"- Causal paired-forward runtime: {runtime_seconds:.3f} seconds",
+        f"- Largest mean legal-policy TV: `{policy_peak['name']}` "
+        f"({_format_float(policy_peak['policy_tv']['mean'])})",
+        f"- Largest mean value-distribution TV: `{value_peak['name']}` "
+        f"({_format_float(value_peak['value_tv']['mean'])})",
+        f"- Largest policy top-1 flip rate: `{flip_peak['name']}` "
+        f"({100.0 * flip_peak['top1_flip_rate']:.2f}%)",
+        "",
+        "Metric cells are `mean / median / p95 / max` over positions.",
+        "",
+        "| Depth | N | Legal-policy KL | Legal-policy TV | Top-1 flip | "
+        "Value KL | Value TV | Expected-value absolute drift |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    for summary in summaries:
+        lines.append(
+            f"| `{summary['name']}` | {summary['positions']} | "
+            f"`{_causal_stat_cell(summary['policy_kl'])}` | "
+            f"`{_causal_stat_cell(summary['policy_tv'])}` | "
+            f"{100.0 * summary['top1_flip_rate']:.2f}% | "
+            f"`{_causal_stat_cell(summary['value_kl'])}` | "
+            f"`{_causal_stat_cell(summary['value_tv'])}` | "
+            f"`{_causal_stat_cell(summary['expected_value_abs_drift'])}` |"
+        )
+    lines.extend(
+        [
+            "",
+            "This intervention removes only the right-`<sigma>`-odd component at "
+            "one trained regular-representation boundary. It is a causal "
+            "sensitivity measurement, not an end-to-end quotient-net accuracy "
+            "estimate.",
+            "",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def _markdown_report(
@@ -1220,6 +1592,17 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="also project every EquivLinear.wb coefficient function on D6",
     )
+    parser.add_argument(
+        "--causal-mirror-positions",
+        type=int,
+        default=0,
+        metavar="N",
+        help=(
+            "on the first N deterministic real-shard positions, replace each "
+            "trunk depth in turn by its right-<sigma> projection and measure "
+            "policy/value drift (default: 0/off)"
+        ),
+    )
     parser.add_argument("--threads", type=int, help="set torch CPU worker threads")
     parser.add_argument("--verbose", action="store_true", help="batch progress to stderr")
     return parser
@@ -1227,6 +1610,13 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    if args.causal_mirror_positions < 0:
+        raise ValueError("--causal-mirror-positions must be non-negative")
+    if args.causal_mirror_positions and args.shards is None:
+        raise ValueError(
+            "--causal-mirror-positions requires --shards; random prefixes are "
+            "not real-position evidence"
+        )
     started = time.perf_counter()
     random.seed(SEED)
     np.random.seed(SEED)
@@ -1276,6 +1666,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     cells, tokens = audit.finalize()
     weight_summaries = _run_weight_audit(model, cosets) if args.weight_audit else None
+    causal_summaries: list[dict[str, Any]] | None = None
+    causal_runtime: float | None = None
+    if args.causal_mirror_positions:
+        causal_summaries, causal_runtime = _run_causal_mirror_audit(
+            model=model,
+            runtime=runtime,
+            layout=str(model_meta["trunk_layout"]),
+            positions=positions,
+            count=int(args.causal_mirror_positions),
+            batch_size=args.batch_size,
+            sigma=sigma,
+            mirror_cosets=cosets["mirror"],
+            verbose=bool(args.verbose),
+        )
     loaded = _triton_module_names()
     if loaded:
         raise RuntimeError(f"CPU contract violated during audit: Triton modules loaded: {loaded[:5]}")
@@ -1299,6 +1703,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         cosets=cosets,
         weight_summaries=weight_summaries,
     )
+    if causal_summaries is not None and causal_runtime is not None:
+        report += "\n" + _causal_mirror_report(causal_summaries, causal_runtime)
     print(report)
     if args.output is not None:
         _write_output(args.output, report, checkpoint)
