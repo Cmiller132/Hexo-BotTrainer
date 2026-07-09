@@ -16,7 +16,7 @@ row-subset metrics), and a probe npz over up to PROBE_ROWS frozen validation
 rows (policy KL vs the previous epoch, entropy, value ECE vs realized
 outcomes). The D6-consistency probe KL is not emitted: the equivariant trunk
 (HEXFIELD_EQ_GROUP_ORDER > 1) is D6-invariant by construction, so it is
-identically zero (BUGS FOUND.MD; plan §4).
+identically zero (BUGS_FOUND.md; plan §4).
 """
 
 from __future__ import annotations
@@ -138,7 +138,7 @@ class BootstrapShards(IterableDataset):
     def _emit(self, rows, rng):
         # Equivariant build (GROUP_ORDER > 1): the trunk is D6-equivariant by
         # construction, so BC-prefit augmentation is redundant — expand every row
-        # under the identity symmetry (BUGS FOUND.MD: zero the caller-side draw;
+        # under the identity symmetry (BUGS_FOUND.md: zero the caller-side draw;
         # the Rust sym kernel / Python transform path stay intact for the Phase-1
         # parity tests). The GROUP_ORDER == 1 passthrough ablation keeps the
         # random per-row draw.
@@ -403,7 +403,7 @@ def run_probe(model, probe_samples, device, prev_probs: list[np.ndarray] | None)
     The D6-consistency KL (``probe_d6_kl``) is intentionally omitted: the
     equivariant trunk (HEXFIELD_EQ_GROUP_ORDER > 1) is D6-invariant by
     construction, so that metric is identically zero and its per-row rotated
-    second forward is pure overhead (BUGS FOUND.MD; plan §4). The GROUP_ORDER == 1
+    second forward is pure overhead (BUGS_FOUND.md; plan §4). The GROUP_ORDER == 1
     passthrough ablation is non-equivariant, but the probe is a prefit
     diagnostic, not a gate, so it is dropped uniformly."""
 

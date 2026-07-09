@@ -94,7 +94,7 @@ oracle) implement it the same way, so they stay in exact parity. The featurizer
 does *not* distinguish an off-board cell from an interior empty cell. The
 alternative — masking off-board windows out of the openness count — is a possible
 future feature-quality tweak, **not** a correctness fix; the project owns the
-current behavior explicitly (BUGS FOUND.MD closes this as design, not defect).
+current behavior explicitly (BUGS_FOUND.md closes this as design, not defect).
 
 ### 1.2 D6 typing of the input (needed for Tier 2)
 
@@ -422,7 +422,7 @@ The line refs below are the hexfield sources whose logic is dropped/replaced.
 
 ## 7. References
 - Survey anchors throughout are current-tree (`main_9-fastrow-strip`).
-- Related: `docs/specs/hexfield_model_spec.md` (v1 model spec),
-  `docs/PLAN_MAIN12_GLOBAL_POOLING.md` (the *other*, arch-additive proposal — a
+- Related: `docs/specs/hexfield_model_spec.md` (v1 model spec), the (abandoned)
+  main_12 global-pooling plan (the *other*, arch-additive proposal — a
   precise map of the same cross-arch/persistence seams), and the next-bot design
   doc §2.3/§2.4/§3/§4.1 this plan implements.

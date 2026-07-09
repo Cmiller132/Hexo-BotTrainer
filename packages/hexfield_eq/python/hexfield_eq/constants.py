@@ -110,7 +110,7 @@ MOVES_LEFT_CAP = 209
 # ENV NAMESPACE: this package deliberately reads HEXFIELD_EQ_* arch env names,
 # NOT the live hexfield lineage's HEXFIELD_* names, so a process importing both
 # trunks (a mixed eval / dashboard debug worker) cannot cross-configure them
-# with one value ("BUGS FOUND" env-collision item). The checkpoint meta is the
+# with one value ("BUGS_FOUND" env-collision item). The checkpoint meta is the
 # authoritative arch self-description (see model.arch_meta); these envs only pick
 # the default build.
 CHANNELS = int(os.environ.get("HEXFIELD_EQ_CHANNELS", "96"))

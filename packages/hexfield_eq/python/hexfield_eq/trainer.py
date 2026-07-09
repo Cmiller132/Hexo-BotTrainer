@@ -650,7 +650,7 @@ class HexfieldTrainer:
         #
         # Equivariant build (GROUP_ORDER > 1): the trunk is D6-equivariant by
         # construction, so caller-side augmentation is redundant — draw the
-        # identity symmetry for every row (BUGS FOUND.MD: zero ONLY the
+        # identity symmetry for every row (BUGS_FOUND.md: zero ONLY the
         # caller-side draw; the Rust sym kernel + Python transform_facts path stay
         # intact, since the Phase-1 parity tests still exercise them). The
         # GROUP_ORDER == 1 passthrough ablation keeps the real random D6 draw.

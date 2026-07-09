@@ -13,7 +13,7 @@ orbit-tied affine, coset heads (`ATTENTION_HEADS=3` enforced,
 group elements. This plan builds directly on that trunk.
 
 **Explicitly rejected direction:** KataGo-style global pooling
-(`docs/PLAN_MAIN12_GLOBAL_POOLING.md`) is NOT a consideration for this lineage
+(the abandoned main_12 global-pooling plan) is NOT a consideration for this lineage
 (owner decision, 2026-07-08). Every global mechanism below is attention-native.
 
 ---
@@ -404,7 +404,7 @@ local-attention kernel (≤ 61 keys/query) is worth writing.
 - `docs/PLAN_D6_EQUIVARIANT_REWRITE.md` — the base rewrite (Phases 0–3b landed).
 - `docs/DERIVATION_D6_EQUIVARIANT_ATTENTION.md` — §4 (coset heads), §5 (joint
   bias tie; the `S_o = D6` head-constancy used by R2/L5), §6 (token rows).
-- `docs/PLAN_MAIN12_GLOBAL_POOLING.md` — the rejected pooling alternative
+- The abandoned main_12 global-pooling plan — the rejected pooling alternative
   (legacy lineage only; kept for the record).
 - Code anchors: trunk walk `model.py:1160-1243`; ConvBlock `model.py:548-598`;
   RelPosAttention `model.py:601-694`; coset machinery + LUTs `equivariant.py`;

@@ -206,7 +206,7 @@ def test_reference_vs_triton_conv_parity() -> None:
 def test_serve_path_equivariance(monkeypatch) -> None:
     """The SERVE fast path stays exactly D6-equivariant (to fp16 serve tolerance).
 
-    Closes the two serve-path gaps from docs/'BUGS FOUND.MD':
+    Closes the two serve-path gaps from docs/BUGS_FOUND.md:
 
     * fp8 conv REMOVED — the id(weight)-keyed fp8 weight cache was a miss-every-
       forward leak under the tied trunk's per-forward weight regeneration, so the

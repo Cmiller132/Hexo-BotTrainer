@@ -167,7 +167,7 @@ if _TRITON_CONV_LN:
 else:
     _hex_conv_ln_fused = None
 # fp8 (e4m3) conv GEMMs were REMOVED for the equivariant v1 (docs/DERIVATION
-# §2.3, "BUGS FOUND"): the fused-conv fp8 weight cache was keyed on id(weight),
+# §2.3, "BUGS_FOUND"): the fused-conv fp8 weight cache was keyed on id(weight),
 # but the tied trunk regenerates a fresh dense weight object every forward
 # (HexNodeConv._materialize), so the cache would miss every forward and leak a
 # strong ref to each regenerated weight. The custom ops and their cache are gone

@@ -1,6 +1,6 @@
 """Load-bearing checkpoint meta + env-prefix isolation for hexfield_eq.
 
-Closes the "BUGS FOUND" gaps that the config / env-prefix / checkpoint-meta task
+Closes the "BUGS_FOUND" gaps that the config / env-prefix / checkpoint-meta task
 targets:
 
   * checkpoints.py WRITES the arch self-description (group_order, c_orbit,

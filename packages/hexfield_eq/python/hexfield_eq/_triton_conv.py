@@ -332,7 +332,7 @@ if HAVE_TRITON:
         )
 
     # NOTE: the fp8 (e4m3) conv variants were REMOVED for the equivariant v1
-    # (docs/DERIVATION §2.3, "BUGS FOUND"). Their weight cache was keyed on
+    # (docs/DERIVATION §2.3, "BUGS_FOUND"). Their weight cache was keyed on
     # id(weight), but the tied trunk regenerates a fresh dense weight object
     # every forward (HexNodeConv._materialize), so the cache would miss every
     # forward AND retain a strong ref to each regenerated weight — an unbounded

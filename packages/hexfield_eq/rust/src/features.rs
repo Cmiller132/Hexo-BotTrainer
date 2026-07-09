@@ -170,7 +170,7 @@ pub fn build_features(state: &RustHexoState, sup: &Support) -> Vec<f32> {
     // cast to f32 to match the train expand path (replay_expand.rs) and the Python
     // oracle (features.build_features), both of which compute in f64 and store
     // into a float32 array; a direct f32 divide can differ by a ULP for non-dyadic
-    // ratios (e.g. 1/3) (BUGS FOUND.MD serve-recency-dtype item).
+    // ratios (e.g. 1/3) (BUGS_FOUND.md serve-recency-dtype item).
     for record in state.placement_history().iter() {
         let row = sup.row(record.coord).expect("stone missing from support");
         let (stone_plane, recency_plane) = if record.player == current {

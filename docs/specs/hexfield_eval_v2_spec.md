@@ -441,7 +441,7 @@ Rust changes, no `.so` rebuild). Ownership is disjoint so parallel implementatio
 > **RECONCILE-BEFORE-WRITE (load-bearing).** Two of the modules below **already exist in-tree**
 > (`packages/hexfield/python/hexfield/eval_stats.py` and `eval_arena.py`) and already implement this
 > corrected design (all five statistics fixes, the purely-eval contract, the same reuse and the same
-> dense-loop blueprint citations) — they were written against the `hexfield_v2_synthesis.md` "eval
+> dense-loop blueprint citations) — they were written against the (superseded) hexfield v2 synthesis "eval
 > track" before this dedicated spec existed. **Implementing agents must READ these first and extend
 > them, never overwrite/clobber them** (the documented hexfield lesson: static-agent "new files"
 > have clobbered untracked existing files before). The intended *package home* for the eval-v2

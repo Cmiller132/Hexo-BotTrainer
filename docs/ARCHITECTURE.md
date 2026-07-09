@@ -264,7 +264,7 @@ The Match screen plays real games through the production runner:
   must never diverge.
 - **Radius-20 crop limitation**: `encoding.rs` intentionally excludes out-of-crop
   legal moves from policy/MCTS; this froze out-of-rim wins and was the root cause of
-  the main_3 collapse (see `docs/analysis/MAIN4_RECOMMENDATION.md`); main_4's
+  the main_3 collapse; main_4's
   `win_tracker.py` frozen-win override is the mitigation.
 - **Rebuilds**: Rust edits are inert until
   `scripts/_rebuild_hexo_models_hexgt.sh` (maturin, WSL `hexgt-build` venv) is run;
@@ -272,5 +272,5 @@ The Match screen plays real games through the production runner:
 - **Tests**: flat `tests/` tree; authoritative only in the WSL `hexgt-build` venv.
   GPU/torch tests self-skip elsewhere.
 - `HANDOFF.md` lags reality (newest section is main_2 prep); the config headers in
-  `configs/dense_cnn_restnet_main_*.toml` and `docs/analysis/` are the current
+  `configs/dense_cnn_restnet_main_*.toml` are the current
   run journals.

@@ -436,4 +436,4 @@ Let's trace a single move through everything above. It's the middle of a self-pl
 
 ---
 
-*This blueprint is a conceptual companion to the technical specifications in `docs/specs/hexfield_model_spec.md` (model & lineage), `docs/specs/hexfield_v2_synthesis.md` (design rationale), and `docs/specs/hexfield_eval_v2_spec.md` (evaluation). All constants above were verified against the source on 2026-06-13.*
+*This blueprint is a conceptual companion to the technical specifications in `docs/specs/hexfield_model_spec.md` (model & lineage) and `docs/specs/hexfield_eval_v2_spec.md` (evaluation). All constants above were verified against the source on 2026-06-13.*

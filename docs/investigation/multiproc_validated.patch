@@ -1,6 +1,0 @@
-
-# NOTE: This option (multi-proc GPU time-slicing) requires ZERO changes to packages/ or configs/.
-# The prototype is purely a runtime invocation of the existing scripts/_hexfield_lategame_bench.py
-# (two concurrent processes at active_games=32 vs one at 64). The only added file is the
-# orchestration helper scripts/_mp_treatment.sh, captured above. Math is unchanged by construction.
-# RESULT: combo 5.38 pos/s vs baseline 5.24 pos/s = 1.027x. GPU IS THE WALL. verdict=revert.

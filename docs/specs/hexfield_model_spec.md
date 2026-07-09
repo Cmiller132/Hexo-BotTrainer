@@ -497,7 +497,7 @@ differential harness. None of these are production configuration surface.
    Tree mechanics: per-node `(ml_sum, ml_weight)` accumulated on real backups; terminals
    contribute exact path distance (off-by-one fix); head decode = median-of-bins mapped to
    decisions [0, 512]. PCR fast searches are steered identically. Source:
-   `docs/analysis/STAGE3_MOVES_LEFT_FEASIBILITY.md` — the mechanism was validated there; the only
+   the (removed) stage-3 moves-left feasibility analysis — the mechanism was validated there; the only
    blocker was the flood-damaged legacy head, and hexfield's head trains on clean targets from BC
    prefit onward. Health: the stage-3 L0 metrics (conversion-zone within-game Spearman ≥ 0.6,
    [0,5) median-decode MAE ≤ 15, end-vs-mid pairwise ≥ 0.85, correct-sign sibling decrements) run
@@ -672,7 +672,7 @@ packages/hexfield/
     tree.rs search.rs             # PUCT tree; lockstep + continuous, PCR, policy-init, seeds, TSS
     cache.rs                      # bounded state_hash-keyed eval cache + dedup (trait seam)
     threats_shared.rs             # #[path] include of hexo_models/rust/src/threats_shared.rs
-configs/hexfield_main_1.toml      # [model] module = "hexfield.plugin"
+configs/hexfield_main_9.toml      # [model] module = "hexfield.plugin"
 scripts/_rebuild_hexfield.sh      # maturin develop --release (dev venv by default)
 scripts/bootstrap_hexfield_hf.py
 tests/test_hexfield_*.py
