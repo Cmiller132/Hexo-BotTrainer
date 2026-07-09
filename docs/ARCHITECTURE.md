@@ -1,20 +1,34 @@
 # Hexo-BotTrainer Architecture: Cross-Package Data Flow
 
-Status date: 2026-06-12. The live training run (`dense_cnn_restnet` main_4) executes
-from this working tree under WSL (`/mnt/e/Hexo-BotTrainer-hexgt`); run artifacts live
-on a *different* mount root (`/mnt/e/Hexo-BotTrainer/runs/...`, i.e. `E:\Hexo-BotTrainer\runs`).
+Status date: 2026-07-09. The live training now runs the **hexfield** lineages
+from this working tree under WSL (`/mnt/e/Hexo-BotTrainer-hexgt`): the `hexfield`
+`main_9` self-play run and the `hexfield_eq` D6-equivariant rewrite (configs
+`hexfield_main_9.toml` / `hexfield_eq_main_1.toml`, supervised by
+`scripts/systemd/hexfield-*.service`). Run artifacts live on a *different* mount
+root (`/mnt/e/Hexo-BotTrainer/runs/...`, i.e. `E:\Hexo-BotTrainer\runs`).
+
+**Scope of this document.** Sections 2-7 trace the end-to-end data flow of the
+`dense_cnn_restnet` lineage in detail. That lineage is now **parked** (no live
+run), but its source remains in-tree — it still backs the dashboard's legacy-
+checkpoint debug worker — and it shares the same `hexo_train` / `hexo_engine` /
+`hexo_runner` / `hexo_utils` orchestration and cross-package contracts the
+hexfield lineages train on, so the flow here is the reference model for how any
+lineage trains. The hexfield lineages differ mainly in the model package
+(`packages/hexfield*`, each with its own Rust cdylib `hexfield*._rust`) and their
+supervisor scripts (`scripts/_hexfield_supervise_main1.sh` /
+`_hexfield_eq_supervise_main1.sh`).
 
 ## 1. Package status
 
 | Package | Path | Status |
 |---|---|---|
-| `dense_cnn_restnet` | `packages/dense_cnn_restnet` | **ACTIVE** model lineage (main_4 live run). Pure Python/PyTorch; ships no Rust of its own. |
-| `hexo_train` | `packages/hexo_train` | **ACTIVE** orchestration harness (the CLI that drives main_4). Its shared sample-store / placeholder-checkpoint paths are early scaffolding that every real plugin bypasses. |
+| `dense_cnn_restnet` | `packages/dense_cnn_restnet` | **PARKED** model lineage (the one this document traces; no live run). Pure Python/PyTorch; ships no Rust of its own. Still loaded by the dashboard debug worker and as the legacy-shard oracle adapter. |
+| `hexo_train` | `packages/hexo_train` | **ACTIVE** orchestration harness (the CLI that drives every lineage — dense_cnn_restnet and the hexfield lineages). Its shared sample-store / placeholder-checkpoint paths are early scaffolding that every real plugin bypasses. |
 | `hexo_engine` | `packages/hexo_engine` | **ACTIVE** authoritative rules engine (Rust + PyO3 `hexo_engine._rust`). Used by everything. |
 | `hexo_runner` | `packages/hexo_runner` | **ACTIVE** core (player contracts, match loop, `.hxr` record facade, SealBot adapter). Its `batch`/`evaluation` modes are bypassed in practice. |
 | `hexo_utils` | `packages/hexo_utils` | **ACTIVE** for the `.hxr` codec and Rust `state_hash`; the JSON sample store (`samples/`) is unused scaffolding. |
 | `hexo_frontend` | `packages/hexo_frontend` | **ACTIVE** dashboard (:8080 in WSL). Match/History/Debug screens; carries large uncommitted v2 changes. |
-| `hexo_models/dense_cnn` | `packages/hexo_models/dense_cnn` | Split: Python half **LEGACY** ("Model 1", superseded by restnet) but still loadable for old checkpoints/dashboard; **Rust half ACTIVE** — restnet drives `hexo_models._rust.dense_cnn` (encoding, MCTS, `run_continuous`) for the live run. |
+| `hexo_models/dense_cnn` | `packages/hexo_models/dense_cnn` | Split: Python half **LEGACY** ("Model 1", superseded by restnet) but still loadable for old checkpoints/dashboard; **Rust half** — dense_cnn_restnet drives `hexo_models._rust.dense_cnn` (encoding, MCTS, `run_continuous`); parked alongside that lineage. |
 | `hexo_models/hexgt` | `packages/hexo_models/hexgt` | **LEGACY/HALTED** ("Model 2/3" GNN+transformer; run halted at epoch 40, 2026-06-05). Still load-bearing for the dashboard debug worker and as the hexgnn fork's ancestor. |
 | `hexgnn` | `packages/hexgnn` | **PARKED/LEGACY** GNN experiment. Its Rust crate is still compiled into every `hexo_models` native build. |
 
@@ -25,10 +39,11 @@ hexgnn Rust) and exposed as the single PyO3 module `hexo_models._rust`.
 
 ## 2. Training loop, end to end (active path)
 
-Entry: `python -m hexo_train.cli.train_model configs/dense_cnn_restnet_main_4.toml`,
-launched detached in WSL by `scripts/_wf_r4_launch_main4.sh` ->
-`scripts/_dc_restnet_supervise_main1.sh` (the generic restnet supervisor despite its
-name; it rebuilds `_resume_config.toml` on each relaunch).
+Entry: `python -m hexo_train.cli.train_model <dense_cnn_restnet config>.toml`,
+launched detached in WSL by a per-lineage supervisor script that resumes from the
+latest checkpoint and rebuilds `_resume_config.toml` on each relaunch — the same
+pattern the live hexfield supervisors (`scripts/_hexfield_supervise_main1.sh` /
+`_hexfield_eq_supervise_main1.sh`) use today.
 
 ### 2.1 Config parse
 - `hexo_train/python/hexo_train/config.py` loads the TOML and normalizes the
@@ -141,7 +156,7 @@ name; it rebuilds `_resume_config.toml` on each relaunch).
 ## 3. ASCII diagram
 
 ```
-configs/dense_cnn_restnet_main_4.toml
+configs/<dense_cnn_restnet run>.toml
         |
         v
 hexo_train.cli.train_model -> TrainingPipeline (hexo_train/pipeline.py)
@@ -186,13 +201,13 @@ hexo_train.cli.train_model -> TrainingPipeline (hexo_train/pipeline.py)
 ## 4. Run directory layout
 
 Run dirs are created by `hexo_train/context.py` + the packages; example:
-`E:\Hexo-BotTrainer\runs\dense_cnn_restnet_main_4\`.
+`E:\Hexo-BotTrainer\runs\<run_name>\` (a `dense_cnn_restnet` or `hexfield` run).
 
 | Artifact | Path in run dir | Writer | Reader |
 |---|---|---|---|
 | Run manifest (lineage, arch, config subset) | `manifest.json` | `hexo_train/artifacts.py` | dashboard `web.py`, `debug_infer.py` |
 | Event log (step start/finish) | `diagnostics/events.jsonl` | `hexo_train/diagnostics.py` | dashboard live status |
-| Self-play epoch summary | `diagnostics/dense_cnn.selfplay.epoch_NNNNNN.json` | `selfplay.py` | dashboard, `scripts/_wf_r4_health.py`, gate scripts |
+| Self-play epoch summary | `diagnostics/dense_cnn.selfplay.epoch_NNNNNN.json` | `selfplay.py` | dashboard, health/gate scripts |
 | Self-play live progress (2s) | `diagnostics/dense_cnn.selfplay.live.json` | `selfplay.py` | dashboard `/api/training/live` |
 | Eval epoch diagnostics | `diagnostics/dense_cnn.evaluation.epoch_NNNNNN.json` | `evaluation.py` | dashboard, health scripts |
 | Per-stage step JSON | `diagnostics/<step>.json` | `hexo_train/diagnostics.py` | dashboard |
@@ -271,6 +286,6 @@ The Match screen plays real games through the production runner:
   rebuilding for restnet also changes legacy dense_cnn search semantics (shared crate).
 - **Tests**: flat `tests/` tree; authoritative only in the WSL `hexgt-build` venv.
   GPU/torch tests self-skip elsewhere.
-- `HANDOFF.md` lags reality (newest section is main_2 prep); the config headers in
-  `configs/dense_cnn_restnet_main_*.toml` are the current
-  run journals.
+- Each run's authoritative journal is the header of its config TOML in `configs/`
+  (e.g. `configs/hexfield_main_9.toml`, `configs/hexfield_eq_main_1.toml`) — the
+  config header doubles as the run's evidence dossier.
