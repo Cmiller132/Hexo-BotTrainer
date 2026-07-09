@@ -3,7 +3,7 @@ Tries esprima/pyjsparser; falls back to a string/template/comment-aware
 bracket-balance scan so an unbalanced edit is caught."""
 from pathlib import Path
 
-APP = Path("/mnt/e/hexgt-evaldash/packages/hexo_frontend/python/hexo_frontend/static/app.js")
+APP = Path(__file__).resolve().parents[2] / "packages/hexo_frontend/python/hexo_frontend/static/app.js"
 src = APP.read_text(encoding="utf-8")
 
 parsed = False
