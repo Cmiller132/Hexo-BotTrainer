@@ -244,12 +244,16 @@ def _canonical_orbit_labels(
     parent = list(range(size))
 
     def find(x: int) -> int:
+        """Return the path-compressed disjoint-set representative of ``x``."""
+
         while parent[x] != x:
             parent[x] = parent[parent[x]]
             x = parent[x]
         return x
 
     def union(a: int, b: int) -> None:
+        """Merge the disjoint sets containing ``a`` and ``b`` deterministically."""
+
         ra, rb = find(a), find(b)
         if ra != rb:
             parent[max(ra, rb)] = min(ra, rb)
@@ -760,6 +764,8 @@ def head_perm_inv(orbit_width: int) -> torch.Tensor:
 
 
 def _parameter_key(out_type: str, in_type: str) -> str:
+    """Encode a type pair as a key accepted by ``nn.ParameterDict``."""
+
     return f"{out_type}__from__{in_type}"
 
 
@@ -777,6 +783,8 @@ class TypedLinear(nn.Module):
         bias: bool = True,
         dtype: torch.dtype | None = None,
     ) -> None:
+        """Initialize one free coefficient tensor per nonempty type pair."""
+
         super().__init__()
         self.in_signature = canonical_signature(in_signature)
         self.out_signature = canonical_signature(out_signature)
@@ -813,6 +821,8 @@ class TypedLinear(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply the materialized equivariant affine map."""
+
         bias = (
             expand_per_instance(self.bias_base, self.out_signature)
             if self.bias_base is not None
@@ -835,6 +845,8 @@ class TypedConv(nn.Module):
         bias: bool = True,
         dtype: torch.dtype | None = None,
     ) -> None:
+        """Initialize one seven-tap orbit-coefficient tensor per type pair."""
+
         super().__init__()
         self.in_signature = canonical_signature(in_signature)
         self.out_signature = canonical_signature(out_signature)
@@ -904,6 +916,8 @@ class TypedStem(nn.Module):
         bias: bool = True,
         dtype: torch.dtype | None = None,
     ) -> None:
+        """Initialize an unconstrained source that is Reynolds-projected on use."""
+
         super().__init__()
         self.out_signature = canonical_signature(out_signature)
         cout = signature_width(self.out_signature)
@@ -922,6 +936,8 @@ class TypedStem(nn.Module):
         return typed_stem_weight(self.w0, self.out_signature)
 
     def forward(self, x: torch.Tensor, nbr: torch.Tensor) -> torch.Tensor:
+        """Apply the projected seven-tap stem to 25-plane node features."""
+
         if x.ndim != 3 or nbr.ndim != 3 or nbr.shape[:2] != x.shape[:2] or nbr.shape[2] != 6:
             raise ValueError("expected x(B,N,25) and nbr(B,N,6)")
         batch, nodes, features = x.shape
@@ -953,6 +969,8 @@ class TypedGroupAffineNorm(nn.Module):
         eps: float = 1e-5,
         dtype: torch.dtype | None = None,
     ) -> None:
+        """Initialize per-instance affine parameters for full-fiber LayerNorm."""
+
         super().__init__()
         self.signature = canonical_signature(signature)
         self.eps = eps
@@ -962,13 +980,19 @@ class TypedGroupAffineNorm(nn.Module):
 
     @property
     def weight(self) -> torch.Tensor:
+        """Return per-instance scales expanded over quotient slots."""
+
         return expand_per_instance(self.gamma, self.signature)
 
     @property
     def bias(self) -> torch.Tensor:
+        """Return per-instance offsets expanded over quotient slots."""
+
         return expand_per_instance(self.beta, self.signature)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Normalize the complete typed fiber and apply tied affine terms."""
+
         return F.layer_norm(
             x,
             (signature_width(self.signature),),
@@ -990,6 +1014,8 @@ class TypedLayerScale(nn.Module):
         init: float = 1e-4,
         dtype: torch.dtype | None = None,
     ) -> None:
+        """Initialize one residual scale per quotient instance."""
+
         super().__init__()
         self.signature = canonical_signature(signature)
         self.gamma = nn.Parameter(
@@ -997,4 +1023,6 @@ class TypedLayerScale(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Scale typed channels with equivariantly tied instance factors."""
+
         return x * expand_per_instance(self.gamma, self.signature)

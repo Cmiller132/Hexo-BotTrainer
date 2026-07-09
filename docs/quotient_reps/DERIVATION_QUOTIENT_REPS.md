@@ -720,10 +720,11 @@ key set, parameter names, and shapes, including `wb (12,o,i)` and
 Phase A establishes the algebraic prerequisite: G3 gives exact dense linear and
 conv parity and `1e-12` stem parity. G6 adds a smaller pure-regular structural
 comparison at `C=96`: matched parameters in the typed stem, two production-form
-C blocks, and one A block agree with `model.py` primitives to their fp64
-tolerances (`test_pure_regular_block_structure_matches_production_primitives`).
-Neither result substitutes for the Phase-B state-dict and live-logit gate; both
-make that gate well founded.
+C blocks, a register refresh, one A block, final norm, and policy/value reads
+agree with `model.py` primitives to their fp64 tolerances
+(`test_pure_regular_toy_path_matches_production_primitives`). Neither result
+substitutes for the Phase-B state-dict and live-logit gate; both make that gate
+well founded.
 
 ---
 

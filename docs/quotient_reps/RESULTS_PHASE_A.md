@@ -1,6 +1,7 @@
 # Phase A results: quotient representations
 
-Status: in progress. Measurements in this document are CPU-only.
+Status: **COMPLETE — QUALIFIED GO**. Measurements in this document are
+CPU-only. Phase B has not been started.
 
 ## Contract discrepancies found during execution
 
@@ -24,7 +25,7 @@ cannot both use the section-2 order and equal production weights elementwise
 as G3 requires. G3 and Phase-B D8 make the correction unambiguous: inside each
 type block Phase A uses the production-compatible order
 `channel = type_offset + slot * multiplicity + instance`. This is frozen by
-tests and will be reflected in the derivation.
+tests and is reflected in the derivation.
 
 ### D3: the literal "ANY environment" import requirement exceeds its imports
 
@@ -135,7 +136,8 @@ and GELU use `1e-12`. ReLU is bit-exact. PyTorch's vectorized CPU GELU produced 
 commutation check uses the fp64 averaging-grade tolerance. The independent
 adversarial review specifically confirmed that nonzero biases now participate
 in the 50-signature sweeps.
-`tests/test_hexfield_eq_reps_typed_layers.py`: **3 passed** on each platform.
+These are the first **3 G4 tests** in
+`tests/test_hexfield_eq_reps_typed_layers.py`; all 3 passed on each platform.
 
 ### G5 — nonlinearity legality: PASS
 
@@ -147,8 +149,9 @@ GELU on a fixed fp64 vector.
 
 Every quotient action commuted within fp64 tolerance. Every reflection in the
 valid sign representation violated GELU commutation by more than 1.0, while
-rotations (sign `+1`) remained exact. The combined G4/G5 file now reports
-**5 passed** on Windows and **5 passed** in WSL.
+rotations (sign `+1`) remained exact. These are the final **2 G5 tests** in the
+shared file; the combined G4/G5 file reports **5 passed** on Windows and
+**5 passed** in WSL.
 
 ### G6 — typed toy network: PASS
 
@@ -204,6 +207,12 @@ implied by the task; the prefit arms use `checkpoint_epoch0.pt` and
 `hexfield_eq_arm4_raylayout.env` still says ray-layout support is blocked,
 but that comment is stale: its architecture values match the current code and
 the strict-loaded live checkpoint exactly.
+
+Epoch 15 was the then-current checkpoint when both G7 runs were captured and
+exactly matched the 399,995-row train-state sample snapshot. The live writer
+created `epoch_000016.pt` later, after this audit and the G8 commit. The report
+therefore names its immutable epoch-15 checkpoint and hash rather than making a
+moving "latest checkpoint" claim.
 
 #### Provenance and contract
 
@@ -710,9 +719,189 @@ G7 mirror energy averaged **0.9673** and all 11 audited depths exceeded 0.954. S
 - The contract's `alpha=0.67` ranking is retained. The same report exposes the
   cost-consistent `alpha=4/7≈0.571` caveat and a wider alpha grid so the
   calibration assumption remains visible.
-- G8 is a cost model, not causal strength evidence. Signature nominations and
-  the final GO/NO-GO decision remain deferred until the pending causal evidence
-  is evaluated.
+- G8 is a cost model, not causal strength evidence. The final recommendation
+  below combines it with the causal G7 extension instead of treating projected
+  speed as evidence of retained policy strength.
 
-Later gate results, audit evidence, cost rankings, and the final recommendation
-will be filled as each ordered gate turns green.
+### G9 — bounded CPU micro-prefit A/B: PASS; selection evidence NULL/AMBIGUOUS
+
+The optional stretch was completed with
+`scripts/quotient_cpu_prefit_ab.py` (SHA-256
+`f2582326592fe2319f4a6d095c37e96935dd0b32fbfecc019588af071cf26f95`).
+It reads real compact-v4 rows without writing to the run directory, pins the
+25-plane/support-radius-4 environment before package import, and trains three
+fp32 CPU policy-only `CCA` nets:
+
+- pure regular: `reg:8`;
+- mixed: `reg:4,mirror:4,axis:4,triv:12`;
+- mirror extreme: `mirror:16`.
+
+Every arm has `C=96`, two true two-convolution C blocks, a regular `reg:8`
+q/k/v/out attention interior with 3 heads of width 32 over six joint tokens and
+the cells, a typed 2x MLP, and a common 192-wide typed policy expansion. The
+dense work is **431,568 MAC/cell plus identical joint qk/av work**. Parameters
+are deliberately reported rather than falsely described as matched. The
+experiment uses the same selected rows, batch order, and same-shaped raw
+stem/final-read initialization in all arms; type-specific orbit coefficients
+cannot have a common parameter-space initialization.
+
+The maximum bounded command was:
+
+```powershell
+$env:PYTHONPATH='packages/hexfield_eq/python;packages/hexo_engine/python;packages/hexo_utils/python'
+python scripts/quotient_cpu_prefit_ab.py --data E:\Hexo-BotTrainer\runs\hexfield_eq_main_1\samples --train-rows 1024 --val-rows 256 --steps 100 --batch-size 4 --node-cap 384 --candidate-factor 4 --threads 4
+```
+
+It exited 0 in **116.8 s**, of which 92.054 s was read/expand time. The live
+manifest snapshot contained 4,608 shards. Selection was deterministic and
+row-disjoint: 4,096 train candidates (930 over-cap observations before the
+quota filled) and 1,024 validation candidates (238 over-cap observations),
+yielding 1,024/256 rows. Train node counts were min/median/max/mean
+`7/285/384/276`; validation was `7/276/384/268`. The common batch-plan digest
+was `b41d1c802f34ff39`, and the within-run same-shaped initialization digest was
+`40e868b150ef4d7e`. All tensors remained on CPU and the post-training import
+audit found no Triton module.
+
+| Arm | Stored / effective params | Initial -> final val CE | Initial -> final top-1 | Train s |
+|---|---:|---:|---:|---:|
+| `reg:8` | 51,753 / 36,353 | 5.454164 -> 3.449561 | 0.78% -> 18.75% | 4.261 |
+| `reg:4,mirror:4,axis:4,triv:12` | 57,177 / 42,253 | 5.012975 -> 3.442540 | 4.69% -> 17.58% | 6.112 |
+| `mirror:16` | 57,401 / 42,409 | 5.238911 -> 3.315119 | 4.30% -> 20.31% | 4.364 |
+
+The plumbing also passed independently rerun Windows and WSL smokes over
+16 train/8 validation rows and two steps per arm. Both reported the same
+shared batch plan, within-run common initialization, matched shape/work,
+disjoint split, CPU-only tensors, and no Triton import; fp32 metrics agreed to
+roundoff across the two Torch builds.
+
+This is a **null/ambiguous architecture result**, despite the mirror row having
+the best final point estimates. Only 400 row presentations were consumed per
+arm (less than one pass over the 1,024 selected train rows), there was one seed,
+and top-1 counts were only 48/256 regular, 45/256 mixed, and 52/256 mirror. The
+split is row-disjoint rather than game-disjoint. Initial functions differ,
+regular achieved the largest CE reduction (2.005 versus 1.570 mixed and 1.924
+mirror), and the quotient arms have about 17% more effective parameters at
+matched dense work. The toy also omits the production joint bias, register
+refresh, final norm, value loss, and full trunk. G9 proves that real-data typed
+training works under the CPU contract; it does **not** select mirror-only and
+does not override the stronger G7 causal caution.
+
+## Decision and Phase-B nominations
+
+**QUALIFIED GO for owner-approved Phase-B implementation and controlled
+training; NO-GO for a mirror-only or ultra-narrow trunk.** This is not a
+deployment GO, and Phase B remains blocked until this Phase-A evidence is
+accepted.
+
+The decision rests on four independent facts:
+
+1. G1-G6 prove the generated group, Hom spaces, production specialization,
+   typed layers, nonlinearities, and complete boundary rehearsal on CPU.
+2. The real checkpoint has very high mirror-invariant capacity: mean trunk
+   `E_mirror=0.967314`, with every audited depth above 0.954.
+3. Removing the small mirror-odd component is nevertheless causally large for
+   policy: depth-0 mean TV is 0.426 with 60.94% top-1 flips, and even the final
+   A depth gives TV 0.098 with 14.06% flips. A regular reserve is mandatory.
+4. G8 projects useful speed at aligned widths. G9 demonstrates the training
+   plumbing but is too small and confounded to alter the selection.
+
+Two distinct residual signatures are nominated in three controlled
+configurations:
+
+| Role | Residual signature | C | K_attn | Effective / stored params | Projected speedup |
+|---|---|---:|---:|---:|---:|
+| conservative residual, fast attention | `reg:8,mirror:8,axis:4,triv:4` | 160 | 8 | 0.561M / 0.587M | **1.546-1.620x** |
+| diversified residual, full attention | `reg:4,mirror:6,point:2,axis:8,triv:8` | 128 | 16 | 0.575M / 0.595M | **1.541-1.612x** |
+| diversified residual, fast attention | `reg:4,mirror:6,point:2,axis:8,triv:8` | 128 | 8 | 0.518M / 0.538M | **2.065-2.133x** |
+
+The ranges are the G8 nominal-alpha ideal/logical ray-traffic endpoints, sorted
+low to high; they are model projections, not measured serve latency. At the
+cost-consistent `alpha=4/7` logical point the corresponding estimates are
+1.615x, 1.466x, and 2.068x. The matched C128 K16/K8 pair isolates attention
+width risk, which the residual-stream causal audit cannot answer. The C160/K8
+arm tests whether doubling the regular residual reserve from four to eight
+instances protects the chiral policy signal. `point:2` is a deliberate hedge:
+`E_point` was as high as or higher than `E_mirror` through much of the live
+trunk, while its fixed-C serve cost is effectively identical.
+
+The C96 mirror-only speed extreme is rejected despite its G9 point estimate;
+the causal audit is stronger evidence and G9 is parameter- and initialization-
+confounded. The C156 candidates are rejected for deployment misalignment. A
+C176/K8 safety arm was not nominated because its 1.355-1.427x band straddles
+Phase B's 1.4x promotion floor while C160 retains the same eight-instance
+regular reserve. Phase B must still pass its pure-regular compatibility gate,
+matched training protocol, strength criteria, and measured serve benchmark;
+none of those gates is assumed by this recommendation.
+
+## Final acceptance record
+
+### Consolidated CPU test matrix
+
+Exact Windows command and result:
+
+```powershell
+$env:PYTHONDONTWRITEBYTECODE='1'
+$env:PYTHONPATH='packages/hexfield_eq/python;packages/hexo_engine/python;packages/hexo_utils/python'
+python -B -m pytest -p no:cacheprovider tests/test_hexfield_eq_reps_group.py tests/test_hexfield_eq_reps_homdims.py tests/test_hexfield_eq_reps_parity.py tests/test_hexfield_eq_reps_typed_layers.py tests/test_hexfield_eq_reps_toynet.py -q
+# 19 passed in 12.03s
+```
+
+Exact WSL command and result (plain `pytest` from the required venv):
+
+```bash
+wsl -e bash -lc 'cd /mnt/e/Hexo-BotTrainer-hexgt && source /root/.venvs/hexgt-build/bin/activate && export PYTHONDONTWRITEBYTECODE=1 && export PYTHONPATH=packages/hexfield_eq/python:packages/hexo_engine/python:packages/hexo_utils/python && pytest -p no:cacheprovider tests/test_hexfield_eq_reps_group.py tests/test_hexfield_eq_reps_homdims.py tests/test_hexfield_eq_reps_parity.py tests/test_hexfield_eq_reps_typed_layers.py tests/test_hexfield_eq_reps_toynet.py -q'
+# 19 passed in 14.65s
+```
+
+Collected inventory: 4 G1 group tests, 4 G2 Hom-dimension tests, 4 G3 parity
+tests, 3 G4 typed-layer property tests, 2 G5 nonlinearity tests, and 2 G6 toy
+network tests, for **19 tests total**. The exact node IDs are:
+
+```text
+test_generated_group_tables_exactly_match_production
+test_distinguished_subgroups_are_derived_from_geometry
+test_canonical_coset_order
+test_all_quotient_actions_are_permutation_homomorphisms
+test_linear_dimensions_agree_three_independent_ways
+test_linear_dimension_anchors
+test_conv_dimensions_agree_between_orbits_and_reynolds_rank
+test_basis_labels_are_dense_and_deterministic
+test_regular_signature_layout_is_production_slot_major
+test_typed_linear_exactly_reproduces_production
+test_typed_conv_exactly_reproduces_production
+test_input_rep_and_typed_stem_reproduce_production
+test_fifty_random_signatures_typed_linear_equivariance
+test_fifty_random_signatures_typed_conv_algebra_and_support
+test_fifty_random_signatures_norm_scale_pool_and_pointwise
+test_gelu_commutes_with_every_quotient_permutation
+test_sign_rep_is_a_representation_but_gelu_breaks_it
+test_two_typed_toynets_are_equivariant_on_real_oracle_features
+test_pure_regular_toy_path_matches_production_primitives
+```
+
+### Scope and checklist
+
+The Phase-A branch is `codex/quotient-reps-phase-a`, based at
+`4b5ffc8a43d879daba80ec284648c636db5c9126`. Its Phase-A delta contains exactly
+the eleven allowlisted files (all additions): the package module, three
+scripts including optional G9, five tests, and two documents. No existing file
+is part of that delta. The shared worktree is not globally clean because
+unrelated changes were already present or appeared concurrently in
+`.claude/launch.json`, `.claude/settings.local.json`, the feature-v2 Python/Rust
+files, and `SPEC_RAYTAP_CONV.md`; those changes were preserved and excluded
+from every Phase-A commit.
+
+- [x] G1 production tables and all five quotient homomorphisms.
+- [x] G2 three-way agreement for all 25 linear pairs and conv anchor 84.
+- [x] G3 exact linear/conv and `1e-12` stem reproduction.
+- [x] G4 50 signatures x all 12 elements for every typed layer family.
+- [x] G5 permutation GELU positive control and sign-rep negative control.
+- [x] G6 two real-position signatures and hardened pure-regular comparison.
+- [x] G7 real checkpoint, complete stream/channel tables, and nesting checks.
+- [x] G8 18-candidate calibrated ranking plus constrained Pareto search.
+- [x] G9 optional real-data CPU A/B executed and interpreted as ambiguous.
+- [x] All 19 new tests pass together on Windows and WSL CPU.
+- [x] Phase-A branch delta adds only the allowed deliverables; no existing file
+      was modified by Phase A.
+- [x] Derivation and results complete with decision, configurations, and
+      expected speedups.
