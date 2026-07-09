@@ -14,6 +14,8 @@ from collections.abc import Mapping, Sequence
 from typing import Final
 
 import torch
+from torch import nn
+from torch.nn import functional as F
 
 from .constants import DIRECTIONS
 from .geometry import apply_d6
@@ -672,3 +674,253 @@ def typed_stem_weight(w0: torch.Tensor, out_signature: SignatureLike) -> torch.T
             "oc,tcn,mn->tom", out_matrix, transformed_taps, in_matrix
         )
     return (result / GROUP_ORDER).transpose(1, 2).contiguous()
+
+
+def instance_of_channel(signature: SignatureLike) -> torch.Tensor:
+    """Map each channel to its canonical type-instance index."""
+
+    result: list[int] = []
+    instance_offset = 0
+    for type_name, multiplicity in canonical_signature(signature):
+        for _slot in range(slots(type_name)):
+            result.extend(instance_offset + instance for instance in range(multiplicity))
+        instance_offset += multiplicity
+    return torch.tensor(result, dtype=torch.long)
+
+
+def expand_per_instance(values: torch.Tensor, signature: SignatureLike) -> torch.Tensor:
+    """Expand a final ``n_instances`` axis to the dense typed channel axis."""
+
+    expected = signature_instances(signature)
+    if values.shape[-1] != expected:
+        raise ValueError(
+            f"per-instance axis has width {values.shape[-1]}, expected {expected}"
+        )
+    index = instance_of_channel(signature).to(values.device)
+    return values.index_select(-1, index)
+
+
+def transform_channels(x: torch.Tensor, signature: SignatureLike, g: int) -> torch.Tensor:
+    """Apply ``rho_signature(g)`` to the final channel axis by gather."""
+
+    if x.shape[-1] != signature_width(signature):
+        raise ValueError("tensor width does not match signature")
+    gather = torch.tensor(signature_gather(signature, g), dtype=torch.long, device=x.device)
+    return x.index_select(-1, gather)
+
+
+def typed_group_pool(x: torch.Tensor, signature: SignatureLike) -> torch.Tensor:
+    """Mean each quotient instance over its slots, producing invariants."""
+
+    if x.shape[-1] != signature_width(signature):
+        raise ValueError("tensor width does not match signature")
+    pooled: list[torch.Tensor] = []
+    for type_name, multiplicity, start, stop in _signature_blocks(signature):
+        block = x[..., start:stop].reshape(
+            *x.shape[:-1], slots(type_name), multiplicity
+        )
+        pooled.append(block.mean(dim=-2))
+    return torch.cat(pooled, dim=-1)
+
+
+def scale_signature(signature: SignatureLike, factor: int) -> Signature:
+    """Multiply every type multiplicity by a positive integer factor."""
+
+    if factor < 1:
+        raise ValueError("signature scale factor must be positive")
+    return tuple(
+        (type_name, multiplicity * factor)
+        for type_name, multiplicity in canonical_signature(signature)
+    )
+
+
+def _parameter_key(out_type: str, in_type: str) -> str:
+    return f"{out_type}__from__{in_type}"
+
+
+class TypedLinear(nn.Module):
+    """Dense linear layer tied by quotient-pair orbit bases."""
+
+    in_signature: Signature
+    out_signature: Signature
+
+    def __init__(
+        self,
+        in_signature: SignatureLike,
+        out_signature: SignatureLike,
+        *,
+        bias: bool = True,
+        dtype: torch.dtype | None = None,
+    ) -> None:
+        super().__init__()
+        self.in_signature = canonical_signature(in_signature)
+        self.out_signature = canonical_signature(out_signature)
+        factory_kwargs = {"dtype": dtype}
+        parameters: dict[str, nn.Parameter] = {}
+        for out_type, mout in self.out_signature:
+            for in_type, min_ in self.in_signature:
+                shape = (orbit_dimension(in_type, out_type), mout, min_)
+                parameter = nn.Parameter(torch.empty(shape, **factory_kwargs))
+                nn.init.normal_(parameter, mean=0.0, std=shape[-1] ** -0.5)
+                parameters[_parameter_key(out_type, in_type)] = parameter
+        self.coefficients = nn.ParameterDict(parameters)
+        if bias:
+            self.bias_base = nn.Parameter(
+                torch.zeros(signature_instances(self.out_signature), **factory_kwargs)
+            )
+        else:
+            self.register_parameter("bias_base", None)
+
+    def coefficient_mapping(self) -> dict[tuple[str, str], torch.Tensor]:
+        """View the ParameterDict with the tuple keys used by the generator."""
+
+        return {
+            (out_type, in_type): self.coefficients[_parameter_key(out_type, in_type)]
+            for out_type, _ in self.out_signature
+            for in_type, _ in self.in_signature
+        }
+
+    def materialize_weight(self) -> torch.Tensor:
+        """Generate the dense ``nn.Linear`` weight."""
+
+        return typed_linear_weight(
+            self.coefficient_mapping(), self.in_signature, self.out_signature
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        bias = (
+            expand_per_instance(self.bias_base, self.out_signature)
+            if self.bias_base is not None
+            else None
+        )
+        return F.linear(x, self.materialize_weight(), bias)
+
+
+class TypedConv(nn.Module):
+    """Seven-tap hex convolution tied by quotient triple-orbit bases."""
+
+    in_signature: Signature
+    out_signature: Signature
+
+    def __init__(
+        self,
+        in_signature: SignatureLike,
+        out_signature: SignatureLike,
+        *,
+        bias: bool = True,
+        dtype: torch.dtype | None = None,
+    ) -> None:
+        super().__init__()
+        self.in_signature = canonical_signature(in_signature)
+        self.out_signature = canonical_signature(out_signature)
+        factory_kwargs = {"dtype": dtype}
+        parameters: dict[str, nn.Parameter] = {}
+        for out_type, mout in self.out_signature:
+            for in_type, min_ in self.in_signature:
+                shape = (orbit_dimension(in_type, out_type, conv=True), mout, min_)
+                parameter = nn.Parameter(torch.empty(shape, **factory_kwargs))
+                nn.init.normal_(parameter, mean=0.0, std=(7 * shape[-1]) ** -0.5)
+                parameters[_parameter_key(out_type, in_type)] = parameter
+        self.coefficients = nn.ParameterDict(parameters)
+        if bias:
+            self.bias_base = nn.Parameter(
+                torch.zeros(signature_instances(self.out_signature), **factory_kwargs)
+            )
+        else:
+            self.register_parameter("bias_base", None)
+
+    def coefficient_mapping(self) -> dict[tuple[str, str], torch.Tensor]:
+        """View the ParameterDict with the tuple keys used by the generator."""
+
+        return {
+            (out_type, in_type): self.coefficients[_parameter_key(out_type, in_type)]
+            for out_type, _ in self.out_signature
+            for in_type, _ in self.in_signature
+        }
+
+    def materialize_weight(self) -> torch.Tensor:
+        """Generate the dense ``(7, C_in, C_out)`` weight."""
+
+        return typed_conv_weight(
+            self.coefficient_mapping(), self.in_signature, self.out_signature
+        )
+
+    def forward(self, x: torch.Tensor, nbr: torch.Tensor) -> torch.Tensor:
+        """Apply the convolution to ``x(B,N,C)`` and row-local neighbours."""
+
+        if x.ndim != 3 or nbr.ndim != 3 or nbr.shape[:2] != x.shape[:2] or nbr.shape[2] != 6:
+            raise ValueError("expected x(B,N,C) and nbr(B,N,6)")
+        batch, nodes, cin = x.shape
+        if cin != signature_width(self.in_signature):
+            raise ValueError("input width does not match TypedConv signature")
+        padded = torch.cat((x, x.new_zeros((batch, 1, cin))), dim=1)
+        safe_nbr = torch.where(nbr >= 0, nbr, torch.full_like(nbr, nodes)).long()
+        batch_index = torch.arange(batch, device=x.device).view(batch, 1, 1)
+        neighbors = padded[batch_index, safe_nbr]
+        gathered = torch.cat((x.unsqueeze(2), neighbors), dim=2)
+        weight = self.materialize_weight()
+        result = gathered.reshape(batch, nodes, 7 * cin) @ weight.reshape(
+            7 * cin, signature_width(self.out_signature)
+        )
+        if self.bias_base is not None:
+            result = result + expand_per_instance(self.bias_base, self.out_signature)
+        return result
+
+
+class TypedGroupAffineNorm(nn.Module):
+    """Full-fiber LayerNorm with affine parameters tied per type instance."""
+
+    signature: Signature
+
+    def __init__(
+        self,
+        signature: SignatureLike,
+        *,
+        eps: float = 1e-5,
+        dtype: torch.dtype | None = None,
+    ) -> None:
+        super().__init__()
+        self.signature = canonical_signature(signature)
+        self.eps = eps
+        instances = signature_instances(self.signature)
+        self.gamma = nn.Parameter(torch.ones(instances, dtype=dtype))
+        self.beta = nn.Parameter(torch.zeros(instances, dtype=dtype))
+
+    @property
+    def weight(self) -> torch.Tensor:
+        return expand_per_instance(self.gamma, self.signature)
+
+    @property
+    def bias(self) -> torch.Tensor:
+        return expand_per_instance(self.beta, self.signature)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return F.layer_norm(
+            x,
+            (signature_width(self.signature),),
+            self.weight,
+            self.bias,
+            self.eps,
+        )
+
+
+class TypedLayerScale(nn.Module):
+    """Per-instance LayerScale expanded equivariantly across quotient slots."""
+
+    signature: Signature
+
+    def __init__(
+        self,
+        signature: SignatureLike,
+        *,
+        init: float = 1e-4,
+        dtype: torch.dtype | None = None,
+    ) -> None:
+        super().__init__()
+        self.signature = canonical_signature(signature)
+        self.gamma = nn.Parameter(
+            torch.full((signature_instances(self.signature),), init, dtype=dtype)
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x * expand_per_instance(self.gamma, self.signature)

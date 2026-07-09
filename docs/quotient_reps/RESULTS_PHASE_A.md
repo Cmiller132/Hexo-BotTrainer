@@ -93,5 +93,22 @@ conv weights at `atol=0, rtol=0`, and the averaging stem lift at
 exactly. `tests/test_hexfield_eq_reps_parity.py`: **4 passed** on Windows and
 **4 passed** in WSL.
 
+### G4 — typed layer property tests: PASS
+
+The seeded property suite samples 50 input/output signature pairs with each
+type multiplicity drawn from 0 through 4. For every pair and every D6 element
+it checks TypedLinear and TypedConv, including exact dense-weight orbit ties and
+fp64 forwards. Conv forwards rebuild the support/neighbour table after
+transforming the stone coordinates. A second 50-signature sweep checks the
+full-fiber typed norm, per-instance LayerScale, typed group pool, ReLU, and
+GELU.
+
+All 50 seeded signature pairs passed all 12 group elements. Dense orbit ties
+are asserted at `atol=0`; fp64 forward covariance is asserted at `1e-10`.
+ReLU is bit-exact. PyTorch's vectorized CPU GELU produced a one-ulp
+(`5.55e-17`) channel-order difference in one Windows case, so the mathematical
+commutation check uses the fp64 averaging-grade tolerance; WSL also passes.
+`tests/test_hexfield_eq_reps_typed_layers.py`: **3 passed** on each platform.
+
 Later gate results, audit evidence, cost rankings, and the final recommendation
 will be filled as each ordered gate turns green.
