@@ -181,9 +181,9 @@ def main() -> None:
     from hexo_strix.mcts_player import StrixMctsPlayer
 
     ap = argparse.ArgumentParser()
-    ap.add_argument("--strix-ckpt", default="/mnt/c/Users/epicm/Downloads/checkpoint_00237000.pt")
-    ap.add_argument("--hexfield-ckpt", default="/mnt/e/Hexo-BotTrainer/runs/hexfield_main_6/checkpoints/epoch_000073.pt")
-    ap.add_argument("--hexfield-config", default=str(_REPO / "configs" / "hexfield_main_6.toml"))
+    ap.add_argument("--strix-ckpt", default="/mnt/e/Hexo-BotTrainer/anchors/strix/checkpoint_00237000.pt")
+    ap.add_argument("--hexfield-ckpt", default="/mnt/e/Hexo-BotTrainer/runs/hexfield_main_9/checkpoints/epoch_000030.pt")
+    ap.add_argument("--hexfield-config", default=str(_REPO / "configs" / "hexfield_main_9.toml"))
     ap.add_argument("--games", type=int, default=40)
     ap.add_argument("--sims", type=int, default=256)
     ap.add_argument("--m", type=int, default=16, help="gumbel m_actions for BOTH sides")

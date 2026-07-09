@@ -70,8 +70,8 @@ roles**, and only one of them backs the primary verdict.
 SealBot (the external C++ minimax baseline, `packages/hexo_runner/python/hexo_runner/adapters/sealbot.py`)
 is pinned at **0 Elo**. It is the only opponent shared with the dense/restnet lineages, so it is
 the **cross-lineage anchor** that makes hexfield Elo comparable to the other lineages' historical
-SealBot-anchored numbers (e.g. the main_3/main_4 SealBot evals at the heart of
-`scripts/_wf_r4_bt_rating.py`).
+SealBot-anchored numbers (e.g. the main_3/main_4 SealBot evals at the heart of the legacy
+`scripts/_wf_r4_bt_rating.py`, since removed from the tree).
 
 **Critical caveat (anchor drift).** SealBot is a fixed-wall minimax (50 ms / decision,
 `DEFAULT_SEALBOT_TIME_LIMIT = 0.05`, sealbot.py:42). Its effective search **depth varies under
@@ -463,11 +463,12 @@ Reuse (read-only imports, no edits to these):
   opening-sampling discipline.
 - `packages/dense_cnn_restnet/python/dense_cnn_restnet/evaluation.py:327-391` — the concurrent
   SealBot loop blueprint.
-- `scripts/_wf_h2h2_arena.py:93-100` — `wilson_ci`.
+- `scripts/_wf_h2h2_arena.py:93-100` — `wilson_ci`. (Legacy `_wf_*` scripts removed from the tree;
+  recover from git history if needed.)
 - `packages/hexo_runner/python/hexo_runner/adapters/sealbot.py` (+ `_sealbot_worker.py`, hexo_runner
   match mode, `tests/test_hexo_runner_match_mode.py`) — the SealBot adapter.
-- `scripts/_wf_r4_bt_rating.py` — the BT model **as a starting point only; its non-convergent GD is
-  replaced** (§4.1).
+- `scripts/_wf_r4_bt_rating.py` (removed) — the BT model **as a starting point only; its
+  non-convergent GD is replaced** (§4.1).
 - `packages/hexfield/rust/src/search.rs:512` — the multi-root `search` API (used, not modified).
 
 ---

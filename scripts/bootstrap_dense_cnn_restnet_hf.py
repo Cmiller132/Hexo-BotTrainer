@@ -21,9 +21,10 @@ machinery; the only new code is the human-game -> samples replay):
   3. Save {model_state, optimizer_state, epoch=0} and verify a strict load into a
      fresh RestnetNetwork.
 
-Usage:
+Usage (needs a dense_cnn_restnet run config; those were removed from configs/ —
+restore one from git history if re-running):
   python scripts/bootstrap_dense_cnn_restnet_hf.py \
-    --config configs/dense_cnn_restnet_main1.toml \
+    --config <dense_cnn_restnet_config.toml> \
     --jsonl runs/dense_cnn_restnet_main1_prefit/hf_corpus/hexo_human_corpus.jsonl \
     --out  runs/dense_cnn_restnet_main1_prefit/restnet_hf_prefit.pt \
     --threads 24 --prefit-epochs 4 --prefit-batch 128

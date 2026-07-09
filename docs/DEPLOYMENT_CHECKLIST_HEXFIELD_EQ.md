@@ -133,10 +133,9 @@ first load/serve, not a prevention. Keep the env pinned in every unit/log.
   `/mnt/e/Hexo-BotTrainer/anchors/strix/checkpoint_00237000.pt` and
   `configs/hexfield_eq_main_1.toml` now points there. The original
   `/mnt/c/Users/epicm/Downloads/checkpoint_00237000.pt` still exists as a
-  backup. The LIVE lineage tomls (`hexfield_main_11.toml`,
-  `hexfield_main_10.toml`, `hexfield_main6_strix_eval.toml`) still reference
-  the Downloads path — update them ONLY at a safe moment for those runs (not
-  touched here: live-run concurrency rule).
+  backup. `hexfield_main_11.toml` was repointed to the stable path during the
+  2026-07-09 repo declutter (no run was live); the other lineage tomls that
+  referenced Downloads were removed in that same cleanup.
 - **Serve-evaluator raylen threading (spec D-S18) — LANDED (2026-07-08,
   spec D-S34)**: L-layout nets serve through `inference.py` on every path
   (CSR pack, Rust pack, copy-stream, CUDA-graph statics, compiled dynamic);

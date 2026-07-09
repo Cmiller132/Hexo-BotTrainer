@@ -358,30 +358,6 @@ def test_gumbel_flags_off_omits_target_column() -> None:
         session.discard(key)
 
 
-def test_main6_config_loads_with_gumbel_on() -> None:
-    """hexfield_main_6.toml parses and enables all four Gumbel mechanisms, with
-    the σ/candidate scalars set and training.policy_target == 'gumbel'."""
-    import tomllib
-    from pathlib import Path
-
-    from hexfield.config import parse_hexfield_config
-
-    root = Path(__file__).resolve().parents[1]
-    with open(root / "configs" / "hexfield_main_6.toml", "rb") as f:
-        raw = tomllib.load(f)
-    cfg = parse_hexfield_config(raw["model"]["config"])
-    sp = cfg.selfplay
-    assert sp.gumbel_target_enabled is True
-    assert sp.gumbel_root_enabled is True
-    assert sp.gumbel_sequential_halving is True
-    assert sp.gumbel_nonroot_select is True
-    assert sp.gumbel_c_visit == 50.0
-    assert sp.gumbel_c_scale == 1.0
-    assert sp.gumbel_m == 32
-    assert sp.gumbel_target_min_visits == 1
-    assert cfg.training.policy_target == "gumbel"
-
-
 def test_misplaced_policy_target_raises() -> None:
     """policy_target belongs under [model.config.training]; placing it under
     [model.config.selfplay] raises ValueError at load."""

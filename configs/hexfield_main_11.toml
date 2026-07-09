@@ -212,7 +212,7 @@ enabled = false
 [model.config.multi_stage_eval.opponents]
 sealbot_enabled = true
 strix_enabled = true
-strix_ckpt = "/mnt/c/Users/epicm/Downloads/checkpoint_00237000.pt"
+strix_ckpt = "/mnt/e/Hexo-BotTrainer/anchors/strix/checkpoint_00237000.pt"
 # 512 to MATCH the candidate's eval budget (multi_stage_eval.full_search_visits =
 # 512). Was 256; raised so the Strix anchor searches at the same visit count as
 # the hexfield candidate it is scored against. m stays 16 (same SH ladder as the
