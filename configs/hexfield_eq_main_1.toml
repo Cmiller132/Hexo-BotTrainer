@@ -117,10 +117,12 @@ policy_surprise_uniform_fraction = 0.5
 policy_surprise_max_weight = 8.0
 warmup_steps = 0
 # LR schedule (config-gated, trainer.scheduled_lr): warmup 400 steps, cosine to
-# lr_final by epoch 60, hold. Same shape as main_11.
+# lr_final by epoch 60, hold. lr_final 4e-4 -> 1e-4 (2026-07-09): 5x decay,
+# prefit's LR -> LR/10 shape, vs main_11's shallow 20% decay. Watch the hold:
+# if eval strength is still climbing steeply at epoch 60, raise lr_final.
 lr_schedule = "cosine"
 lr_warmup_steps = 400
-lr_final = 4e-4
+lr_final = 1e-4
 lr_decay_epochs = 60
 shuffle_min_rows = 7000
 shuffle_keep_target_rows = 210000
@@ -128,7 +130,12 @@ shuffle_taper_window_exponent = 0.65
 shuffle_expand_window_per_row = 0.8
 shuffle_taper_window_scale = 7000.0
 validation_fraction = 0.0
-train_samples_per_epoch = 144000
+# 144000 -> 56000 (2026-07-09 re-derivation): games_per_epoch 512 -> 256 halved
+# fresh rows/epoch to ~24-27k; 144k pinned lifetime reuse (= samples/fresh) at
+# ~5.8 vs the regime-verified 2.6-2.9. Eq discount below strict parity (72k):
+# augmentation-coverage reuse is gone (one tied visit = the exact 12-orientation
+# orbit-averaged gradient), so target reuse ~2.2 => 56k (~219 steps/epoch).
+train_samples_per_epoch = 56000
 max_train_bucket_per_new_data = 8.0
 max_train_bucket_size = 500000.0
 no_repeat_files = false

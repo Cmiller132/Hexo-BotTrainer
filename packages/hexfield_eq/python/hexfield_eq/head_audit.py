@@ -67,7 +67,10 @@ def _predict_game(model, expanded, device, row_budget_nodes: int = 40_000):
             k: (v.to(device) if isinstance(v, torch.Tensor) else v) for k, v in batch.items()
         }
         with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=device.type == "cuda"):
-            out = model(batch["feats"], batch["nbr"], batch["mask"], batch["coords"])
+            out = model(
+                batch["feats"], batch["nbr"], batch["mask"], batch["coords"],
+                raylen=batch.get("raylen"),
+            )
         preds.append(decode_moves_left(out["moves_left"].float()).cpu().numpy())
         i = j
     return np.concatenate(preds) if preds else np.empty(0, dtype=np.float64)
