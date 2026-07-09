@@ -529,5 +529,190 @@ Each `wb[:, out_orbit, in_orbit]` is treated as a function on D6 and projected b
 - CPU/no-Triton runtime contract: PASS
 - Deterministic seed and manifest-uniform sampling: PASS
 
+#### Causal mirror-component ablation (extension)
+
+Energy fraction alone can hide a small but highly leveraged component. To test
+causality, `--causal-mirror-positions 64` independently replaces one trunk
+block output by its right-`<sigma>` projection and then finishes the complete
+`forward_policy_value` path. C/L hooks act before register refresh; A hooks act
+on the joint token/cell output. Policy metrics use exactly the legal prefix.
+
+```powershell
+$env:PYTHONDONTWRITEBYTECODE='1'
+$env:PYTHONPATH='packages/hexfield_eq/python;packages/hexo_engine/python;packages/hexo_utils/python'
+python -B scripts/quotient_type_audit.py --checkpoint E:\Hexo-BotTrainer\runs\hexfield_eq_main_1\checkpoints\epoch_000015.pt --shards E:\Hexo-BotTrainer\runs\hexfield_eq_main_1\samples --positions 64 --causal-mirror-positions 64 --batch-size 8 --threads 16 --verbose --output $env:TEMP\hexgt_g7_causal64.md
+```
+
+The run passed on CPU in **48.67 s** total (**39.096 s** causal paired
+forwards). The 34,158-byte report SHA-256 is
+`929538ed6c1a9a303a0a1d6a8e63a2d6665f6e8dfb337ec7519713180e781358`.
+Windows and WSL 16-position smoke metrics were identical. Right-action/coset
+semantics and exact projector idempotence passed; inference was fp32 and metric
+accumulation fp64.
+
+Cells below are `mean / median / p95 / max` over 64 positions.
+
+| Depth | Policy KL | Policy TV | Top-1 flip | Value KL | Value TV | Expected-value abs drift |
+|---|---:|---:|---:|---:|---:|---:|
+| `depth_00_C` | `8.486e-01 / 5.236e-01 / 2.532e+00 / 3.261e+00` | `4.256e-01 / 3.893e-01 / 8.156e-01 / 9.407e-01` | 60.94% | `3.883e-02 / 6.583e-04 / 8.167e-02 / 9.588e-01` | `5.029e-02 / 1.631e-02 / 1.792e-01 / 6.174e-01` | `1.006e-01 / 3.262e-02 / 3.584e-01 / 1.235e+00` |
+| `depth_01_C` | `8.306e-01 / 5.048e-01 / 2.499e+00 / 3.206e+00` | `4.198e-01 / 3.866e-01 / 7.808e-01 / 9.380e-01` | 59.38% | `3.875e-02 / 6.419e-04 / 9.215e-02 / 9.655e-01` | `4.825e-02 / 1.665e-02 / 1.845e-01 / 6.289e-01` | `9.650e-02 / 3.329e-02 / 3.690e-01 / 1.258e+00` |
+| `depth_02_L` | `4.405e-01 / 2.959e-01 / 1.339e+00 / 1.954e+00` | `2.909e-01 / 2.697e-01 / 5.766e-01 / 7.055e-01` | 39.06% | `5.414e-03 / 5.007e-04 / 2.870e-02 / 7.627e-02` | `2.556e-02 / 1.429e-02 / 1.035e-01 / 1.840e-01` | `5.107e-02 / 2.858e-02 / 2.071e-01 / 3.679e-01` |
+| `depth_03_A` | `2.828e-01 / 1.785e-01 / 7.799e-01 / 1.285e+00` | `2.349e-01 / 1.923e-01 / 5.135e-01 / 5.994e-01` | 35.94% | `1.606e-03 / 1.923e-04 / 1.019e-02 / 2.037e-02` | `1.426e-02 / 9.233e-03 / 4.390e-02 / 6.683e-02` | `2.849e-02 / 1.847e-02 / 8.779e-02 / 1.336e-01` |
+| `depth_04_C` | `2.558e-01 / 1.523e-01 / 7.053e-01 / 1.167e+00` | `2.261e-01 / 1.780e-01 / 4.775e-01 / 5.860e-01` | 35.94% | `2.429e-03 / 2.115e-04 / 1.353e-02 / 4.145e-02` | `1.601e-02 / 9.291e-03 / 5.091e-02 / 8.187e-02` | `3.200e-02 / 1.858e-02 / 1.018e-01 / 1.637e-01` |
+| `depth_05_C` | `2.272e-01 / 1.340e-01 / 6.237e-01 / 1.077e+00` | `2.140e-01 / 1.714e-01 / 4.560e-01 / 5.663e-01` | 32.81% | `2.213e-03 / 2.003e-04 / 1.442e-02 / 3.583e-02` | `1.548e-02 / 8.988e-03 / 4.802e-02 / 7.430e-02` | `3.095e-02 / 1.798e-02 / 9.603e-02 / 1.486e-01` |
+| `depth_06_L` | `1.876e-01 / 1.256e-01 / 5.381e-01 / 9.092e-01` | `2.015e-01 / 1.785e-01 / 4.576e-01 / 5.433e-01` | 26.56% | `1.839e-03 / 7.811e-05 / 5.184e-03 / 4.986e-02` | `1.006e-02 / 5.584e-03 / 3.229e-02 / 7.708e-02` | `2.012e-02 / 1.117e-02 / 6.457e-02 / 1.542e-01` |
+| `depth_07_A` | `2.727e-01 / 1.614e-01 / 8.053e-01 / 1.188e+00` | `2.480e-01 / 2.390e-01 / 5.344e-01 / 6.514e-01` | 42.19% | `7.805e-05 / 2.271e-05 / 4.013e-04 / 7.352e-04` | `3.983e-03 / 3.108e-03 / 1.110e-02 / 1.586e-02` | `7.962e-03 / 6.217e-03 / 2.220e-02 / 3.173e-02` |
+| `depth_08_C` | `1.882e-01 / 1.222e-01 / 5.809e-01 / 1.000e+00` | `2.099e-01 / 1.940e-01 / 4.894e-01 / 5.375e-01` | 34.38% | `6.257e-05 / 2.787e-05 / 2.943e-04 / 6.799e-04` | `3.619e-03 / 2.680e-03 / 1.140e-02 / 1.615e-02` | `7.235e-03 / 5.275e-03 / 2.280e-02 / 3.230e-02` |
+| `depth_09_L` | `1.138e-01 / 7.320e-02 / 2.810e-01 / 1.030e+00` | `1.535e-01 / 1.434e-01 / 3.458e-01 / 5.395e-01` | 23.44% | `6.506e-05 / 2.159e-05 / 3.306e-04 / 9.881e-04` | `3.783e-03 / 3.097e-03 / 1.139e-02 / 1.842e-02` | `7.565e-03 / 6.193e-03 / 2.277e-02 / 3.685e-02` |
+| `depth_10_A` | `5.063e-02 / 3.432e-02 / 1.674e-01 / 4.288e-01` | `9.765e-02 / 8.783e-02 / 1.967e-01 / 3.416e-01` | 14.06% | `6.206e-06 / 1.070e-06 / 2.944e-05 / 6.030e-05` | `1.108e-03 / 6.609e-04 / 3.733e-03 / 5.346e-03` | `2.217e-03 / 1.322e-03 / 7.465e-03 / 1.069e-02` |
+
+This is the strongest caution in Phase A. The live policy uses its small
+mirror-odd component disproportionately: the owner energy rule is a strong GO
+signal for quotient capacity, but it is **not** evidence for a mirror-only
+trunk. A one-shot ablation is also not a trained quotient-net accuracy estimate;
+typed training can reorganize features. The actionable conclusion is to retain
+a meaningful regular reserve in every nominated arm and reject the mirror-only
+and ultra-narrow extremes.
+
+### G8 — calibrated FLOP/byte model and signature search: PASS
+
+The standard-library-only CPU model covers the exact matmul work of the stem,
+both convolutions in every C block, dense A attention, gathered 31-key L
+attention, typed MLPs, all eight register refreshes, the serve policy/value
+heads, and optional moves-left/token-read paths. It reports both effective
+equivariant degrees of freedom and estimated stored parameters, and defines its
+activation-byte proxy explicitly as logical matmul operand reads plus output
+writes. The G7-informed search is constrained by a regular reserve and
+mirror-heavy quotient balance, then Pareto-filtered over projected speed and
+effective parameter capacity rather than ranked by speed alone.
+
+Exact Windows commands and results:
+
+```powershell
+$env:PYTHONDONTWRITEBYTECODE='1'
+python -B scripts/quotient_flop_model.py --self-test
+# self-test: ok (baseline 273.675534336 GFLOP, 679626 effective / 710426 stored params)
+
+python -B scripts/quotient_flop_model.py
+# exit 0; complete default Markdown report reproduced below
+```
+
+Exact WSL commands and results:
+
+```bash
+wsl -e bash -c 'cd /mnt/e/Hexo-BotTrainer-hexgt && PYTHONDONTWRITEBYTECODE=1 /root/.venvs/hexgt-build/bin/python -B scripts/quotient_flop_model.py --self-test'
+# self-test: ok (baseline 273.675534336 GFLOP, 679626 effective / 710426 stored params)
+
+wsl -e bash -c 'cd /mnt/e/Hexo-BotTrainer-hexgt && PYTHONDONTWRITEBYTECODE=1 /root/.venvs/hexgt-build/bin/python -B scripts/quotient_flop_model.py'
+# exit 0; complete default Markdown report reproduced below
+```
+
+The normalized Windows and WSL default reports were identical (6,908
+characters each).
+
+#### Complete default report
+
+Shape: `B=96`, `Npad=250`, layout `CCLACCLACLA`, register lane `on`. Reference: `reg:16`, `K_attn=16` at the same shape.
+
+Nominal mixed-bound alpha is `0.67`. The endpoint-consistent cost interpolation is `4/7 = 0.571429`: `1/21 = alpha/18 + (1-alpha)/27`. The specified `0.67` instead comes from arithmetic throughput interpolation `21 ≈ .67*18 + .33*27`; both are reported below.
+
+FLOPs count multiply and add separately. Activation bytes count logical matmul activation reads/writes, not weights or pointwise traffic. `ideal` assumes ray K/V cache reuse equivalent to one stream-width read per query; `logical` counts all 31 gathered K/V operands. Large activations use 2 bytes/element; register aggregation and scalar tops use 4 bytes/element.
+
+##### Reference component accounting
+
+| Component | GFLOPs | Ideal GiB | Logical GiB |
+|---|---:|---:|---:|
+| stem | 1.613 | 0.0164 | 0.0164 |
+| conv_blocks | 123.863 | 0.6866 | 0.6866 |
+| attn_blocks | 57.982 | 0.4746 | 0.4746 |
+| ray_blocks | 44.182 | 0.4635 | 2.0084 |
+| register_refresh | 29.876 | 0.5115 | 0.5115 |
+| token_read | 0.000 | 0.0000 | 0.0000 |
+| policy | 15.927 | 0.0959 | 0.0959 |
+| value | 0.234 | 0.0016 | 0.0016 |
+| **total** | **273.676** | **2.2502** | **3.7951** |
+
+Reference parameters: **679,626 effective DOF**, **710,426 stored**. The difference is the current dense Reynolds-source stem (`w0`) nullspace.
+
+##### Candidate ranking
+
+Byte and speed ranges are `ideal–logical` ray traffic. `A/L` shows head dimensions; a cross marks a fast-path illegality.
+
+| Signature | K | C | I | C%16 | A/L | Params eff/stored (M) | F ratio | B ratio | Speed @ nominal | Speed @ 4/7 logical |
+|---|---:|---:|---:|:---:|:---:|---:|---:|---:|---:|---:|
+| `mirror:16` | 8 | 96 | 16 | yes | 32✓/16✓ | 0.261/0.275 | 0.267 | 0.506–0.504 | 2.889–2.897 | 2.713 |
+| `reg:4,mirror:4,axis:4,triv:12` | 8 | 96 | 24 | yes | 32✓/16✓ | 0.355/0.370 | 0.267 | 0.507–0.504 | 2.888–2.896 | 2.712 |
+| `reg:4,mirror:8,axis:4,triv:4` | 8 | 112 | 20 | yes | 32✓/16✓ | 0.342/0.359 | 0.339 | 0.560–0.536 | 2.427–2.476 | 2.362 |
+| `reg:4,mirror:6,point:2,axis:8,triv:8` | 8 | 128 | 28 | yes | 32✓/16✓ | 0.518/0.538 | 0.420 | 0.615–0.568 | 2.065–2.133 | 2.068 |
+| `reg:4,mirror:8,axis:8,triv:8` | 8 | 128 | 28 | yes | 32✓/16✓ | 0.519/0.538 | 0.420 | 0.615–0.568 | 2.065–2.133 | 2.068 |
+| `reg:4,mirror:12,axis:8,triv:12` | 8 | 156 | 36 | no | 32✓/16✓ | 0.786/0.811 | 0.584 | 0.709–0.624 | 1.599–1.674 | 1.663 |
+| `reg:8,mirror:8,axis:4,triv:4` | 8 | 160 | 24 | yes | 32✓/16✓ | 0.561/0.587 | 0.610 | 0.722–0.632 | 1.546–1.620 | 1.615 |
+| `reg:4,mirror:12,axis:8,triv:16` | 8 | 160 | 40 | yes | 32✓/16✓ | 0.899/0.924 | 0.610 | 0.723–0.632 | 1.545–1.620 | 1.614 |
+| `reg:4,mirror:6,point:2,axis:8,triv:8` | 16 | 128 | 28 | yes | 64✓/32✓ | 0.575/0.595 | 0.539 | 0.785–0.873 | 1.612–1.541 | 1.466 |
+| `reg:4,mirror:8,axis:8,triv:8` | 16 | 128 | 28 | yes | 64✓/32✓ | 0.576/0.596 | 0.539 | 0.785–0.873 | 1.612–1.541 | 1.466 |
+| `reg:8,mirror:8,axis:8,triv:8` | 8 | 176 | 32 | yes | 32✓/16✓ | 0.772/0.799 | 0.719 | 0.776–0.664 | 1.355–1.427 | 1.438 |
+| `reg:8,mirror:16` | 8 | 192 | 24 | yes | 32✓/16✓ | 0.708/0.739 | 0.837 | 0.830–0.695 | 1.198–1.265 | 1.288 |
+| `reg:4,mirror:12,axis:8,triv:12` | 16 | 156 | 36 | no | 64✓/32✓ | 0.857/0.881 | 0.722 | 0.880–0.929 | 1.291–1.265 | 1.233 |
+| `reg:8,mirror:8,axis:4,triv:4` | 16 | 160 | 24 | yes | 64✓/32✓ | 0.633/0.659 | 0.751 | 0.893–0.936 | 1.254–1.231 | 1.204 |
+| `reg:4,mirror:12,axis:8,triv:16` | 16 | 160 | 40 | yes | 64✓/32✓ | 0.971/0.996 | 0.751 | 0.893–0.937 | 1.253–1.231 | 1.204 |
+| `reg:8,mirror:8,axis:8,triv:8` | 16 | 176 | 32 | yes | 64✓/32✓ | 0.851/0.878 | 0.871 | 0.947–0.969 | 1.116–1.107 | 1.096 |
+| `reg:16` | 16 | 192 | 16 | yes | 64✓/32✓ | 0.680/0.710 | 1.000 | 1.000 | 1.000 | 1.000 |
+| `reg:8,mirror:16` | 16 | 192 | 24 | yes | 64✓/32✓ | 0.795/0.825 | 1.000 | 1.000 | 1.000 | 1.000 |
+
+At fixed `(C, K_attn)`, the dense trunk FLOPs and bytes do not depend on the type mix. Only negligible pooled-head terms depend on `I`; G7 fit and the `H`, `V`, and parameter-capacity columns must break such ties. In particular, `reg:8,mirror:16` at C=192/K=16 is not compute-cheaper than `reg:16` and has more free parameters.
+
+##### Alpha sensitivity (logical ray traffic)
+
+| Signature | K | speed @0.5 | speed @0.571 | speed @0.67 | speed @0.8 |
+|---|---:|---:|---:|---:|---:|
+| `mirror:16` | 8 | 2.594 | 2.713 | 2.897 | 3.180 |
+| `reg:4,mirror:4,axis:4,triv:12` | 8 | 2.593 | 2.712 | 2.896 | 3.179 |
+| `reg:4,mirror:8,axis:4,triv:4` | 8 | 2.286 | 2.362 | 2.476 | 2.643 |
+| `reg:4,mirror:6,point:2,axis:8,triv:8` | 8 | 2.024 | 2.068 | 2.133 | 2.224 |
+| `reg:4,mirror:8,axis:8,triv:8` | 8 | 2.024 | 2.068 | 2.133 | 2.224 |
+| `reg:4,mirror:12,axis:8,triv:12` | 8 | 1.655 | 1.663 | 1.674 | 1.688 |
+| `reg:8,mirror:8,axis:4,triv:4` | 8 | 1.611 | 1.615 | 1.620 | 1.628 |
+| `reg:4,mirror:12,axis:8,triv:16` | 8 | 1.610 | 1.614 | 1.620 | 1.627 |
+| `reg:4,mirror:6,point:2,axis:8,triv:8` | 16 | 1.417 | 1.466 | 1.541 | 1.651 |
+| `reg:4,mirror:8,axis:8,triv:8` | 16 | 1.417 | 1.466 | 1.541 | 1.651 |
+| `reg:8,mirror:8,axis:8,triv:8` | 8 | 1.446 | 1.438 | 1.427 | 1.412 |
+| `reg:8,mirror:16` | 8 | 1.305 | 1.288 | 1.265 | 1.236 |
+| `reg:4,mirror:12,axis:8,triv:12` | 16 | 1.211 | 1.233 | 1.265 | 1.309 |
+| `reg:8,mirror:8,axis:4,triv:4` | 16 | 1.185 | 1.204 | 1.231 | 1.269 |
+| `reg:4,mirror:12,axis:8,triv:16` | 16 | 1.185 | 1.204 | 1.231 | 1.269 |
+| `reg:8,mirror:8,axis:8,triv:8` | 16 | 1.087 | 1.096 | 1.107 | 1.123 |
+| `reg:16` | 16 | 1.000 | 1.000 | 1.000 | 1.000 |
+| `reg:8,mirror:16` | 16 | 1.000 | 1.000 | 1.000 | 1.000 |
+
+##### G7-informed aligned Pareto search
+
+G7 mirror energy averaged **0.9673** and all 11 audited depths exceeded 0.954. Search constraints still preserve `reg>=4`, require `mirror>=4`, `axis>=4`, `triv>=4`, enforce `mirror>=reg`, at least two quotient instances per regular instance, `mirror>=axis,point`, aligned C, balanced triv capacity, and a stored-param window [0.50, 1.50]x baseline. The frontier maximizes both nominal logical-byte speed and effective parameter capacity, so it is not a speed-only search.
+
+| Signature | K | C | I | Params eff/stored (M) | F ratio | B logical | Speed |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `reg:4,mirror:8,axis:4,triv:4` | 8 | 112 | 20 | 0.342/0.359 | 0.339 | 0.536 | 2.476 |
+| `reg:4,mirror:8,axis:8,triv:8` | 8 | 128 | 28 | 0.519/0.538 | 0.420 | 0.568 | 2.133 |
+| `reg:4,mirror:12,axis:4,triv:12` | 8 | 144 | 32 | 0.653/0.676 | 0.510 | 0.600 | 1.852 |
+| `reg:4,mirror:12,axis:12,triv:4` | 8 | 160 | 32 | 0.717/0.742 | 0.610 | 0.632 | 1.620 |
+| `reg:4,mirror:12,axis:8,triv:16` | 8 | 160 | 40 | 0.899/0.924 | 0.610 | 0.632 | 1.620 |
+| `reg:8,mirror:12,axis:4,triv:12` | 8 | 192 | 36 | 0.932/0.962 | 0.837 | 0.696 | 1.265 |
+| `reg:4,mirror:12,point:8,axis:4,triv:12` | 8 | 192 | 40 | 1.035/1.065 | 0.837 | 0.696 | 1.265 |
+
+#### G8 interpretation
+
+- At fixed residual width `C` and attention orbit width `K_attn`, changing the
+  quotient mix has no meaningful serve-compute or activation-byte effect; it
+  changes representation capacity and parameter tying instead.
+- Both required C156 rows are mathematically legal but fail the `C % 16 == 0`
+  deployment alignment gate and therefore are not Phase-B deployment arms.
+- The nominal projected bands are **1.355–1.427x** for C176/K8,
+  **1.545–1.620x** for C160/K8, and **2.065–2.133x** for C128/K8.
+- The contract's `alpha=0.67` ranking is retained. The same report exposes the
+  cost-consistent `alpha=4/7≈0.571` caveat and a wider alpha grid so the
+  calibration assumption remains visible.
+- G8 is a cost model, not causal strength evidence. Signature nominations and
+  the final GO/NO-GO decision remain deferred until the pending causal evidence
+  is evaluated.
+
 Later gate results, audit evidence, cost rankings, and the final recommendation
 will be filled as each ordered gate turns green.
