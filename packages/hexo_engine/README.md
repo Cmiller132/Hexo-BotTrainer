@@ -6,11 +6,12 @@ unbounded hexagonal grid. Owns board occupancy, the turn/phase machine
 any stone), incremental 6-cell win/threat windows, and the stable packed
 action-ID encoding.
 
-**Status: ACTIVE and load-bearing.** Every model lineage (the live
-`dense_cnn_restnet` run, legacy `hexo_models/dense_cnn`, halted
-`hexo_models/hexgt`, parked `hexgnn`), the runner, the frontend dashboard, and
-~60 test files drive it. Repo convention: Python callers come through this
-package rather than re-implementing game logic.
+**Status: ACTIVE and load-bearing.** Every model lineage (the live `hexfield`
+/ `hexfield_eq` runs, plus the parked `dense_cnn_restnet`,
+`hexo_models/dense_cnn`, `hexo_models/hexgt`, and `hexgnn` lineages), the
+runner, the frontend dashboard, and ~60 test files drive it. Repo convention:
+Python callers come through this package rather than re-implementing game
+logic.
 
 ## Shape
 

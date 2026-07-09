@@ -11,8 +11,7 @@ buffer storage and sampling mechanics live in `buffer.py`.
 Status (2026-06): LEGACY scaffolding with `buffer.py` -- no production writer
 exists (every model plugin opts out of the shared sample store and persists
 its own compact NPZ rows instead, e.g.
-`packages/dense_cnn_restnet/python/dense_cnn_restnet/samples.py`). Exercised
-by `tests/test_hexo_utils_sample_store.py`.
+`packages/hexfield/python/hexfield/samples.py`).
 """
 
 from __future__ import annotations

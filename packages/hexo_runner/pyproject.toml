@@ -5,10 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "hexo-runner"
 version = "0.1.0"
-# NOTE: description below is stale — the package is load-bearing (game loop,
-# .hxr records facade, SealBot adapter) across all model packages and the
-# frontend. Left unchanged to avoid touching metadata under a live run.
-description = "Placeholder Python runner package for the Hexo RL redesign."
+description = "Model-agnostic game execution for Hexo: match loop, .hxr record facade, and SealBot adapter; used by the hexfield_eq eval path and the frontend."
 requires-python = ">=3.11"
 dependencies = [
   "hexo-engine==0.1.0",

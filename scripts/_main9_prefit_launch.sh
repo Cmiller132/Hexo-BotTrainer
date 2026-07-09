@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # Clean-launch the main_9 BC prefit (c=128 / heads 2 / trunk CCACCACCA env is
 # LOAD-BEARING — the prefit checkpoint must be built at the main_9 arch so it
-# tensor-loads into the supervisor net). Mirrors _main7_prefit_launch.sh; only
-# kills prior PREFIT processes.
+# tensor-loads into the supervisor net). Only kills prior PREFIT processes.
 # Data is the TRIMMED main_8 ep7 samples (fast rows already stripped) staged at
 # $DATA/{train,val}. Prefit trains eagerly (TRAIN_FLEX stays off — the prefit
 # perf note from the main_4 playbook still applies) and doesn't touch the serve

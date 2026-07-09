@@ -34,9 +34,9 @@ from hexfield.model import HexfieldNet
 PAIR_BUDGET = 2.0e7
 PAD_QUANTUM = 256
 
-# Batch synthesis (inlined from the former _hexfield_main6_profile.py): random
-# adjacent-stone blobs, support = union of radius-4 disks, padded to a
-# 64-multiple Npad — matches the production serve/train row shapes.
+# Batch synthesis: random adjacent-stone blobs, support = union of radius-4
+# disks, padded to a 64-multiple Npad — matches the production serve/train row
+# shapes.
 QUANT = 64
 DISK_R = 4  # HEXFIELD_SUPPORT_RADIUS in the live run
 

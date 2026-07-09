@@ -9,12 +9,10 @@ On-disk layout (spoken only by this module and its callers):
     <store>/manifest.json          - schema + chunk table + sample_count
     <store>/chunks/chunk-NNNNNN.*  - one compressed-JSON payload per append
 
-Status (2026-06): LEGACY scaffolding. Runtime callers are
+Status (2026-06): LEGACY scaffolding. The only runtime caller is
 `packages/hexo_train/python/hexo_train/epoch/samples.py` (the shared-store
-path, skipped because every model plugin sets `uses_shared_sample_store=False`)
-and `tests/test_hexo_utils_sample_store.py` /
-`tests/test_training_pipeline_simplification.py`. Production replay storage is
-model-owned NPZ (see `packages/dense_cnn_restnet/.../replay.py`).
+path, skipped because every model plugin sets `uses_shared_sample_store=False`).
+Production replay storage is model-owned NPZ (e.g. the hexfield trainer/shards).
 """
 
 from __future__ import annotations

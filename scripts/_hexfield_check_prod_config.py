@@ -11,13 +11,13 @@ sys.path.insert(0, str(REPO / "packages" / "hexfield" / "python"))
 
 from hexfield.config import parse_hexfield_config
 
-cfg_path = REPO / "configs" / "hexfield_main_1.toml"
+cfg_path = REPO / "configs" / "hexfield_main_9.toml"
 raw = tomllib.loads(cfg_path.read_text())
 mc = raw["model"]["config"]
 cfg = parse_hexfield_config(mc)
 sp = cfg.selfplay
 
-print("=== production config (hexfield_main_1.toml) ===")
+print("=== production config (hexfield_main_9.toml) ===")
 print("run:", raw["run"]["name"], "->", raw["run"]["output_dir"])
 print("epochs:", raw["loop"]["epochs"], "| games/epoch:", raw["selfplay"]["games_per_epoch"])
 print("search_visits:", sp.search_visits, "| pcr_fast:", sp.pcr_fast_visits,

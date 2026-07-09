@@ -4,13 +4,17 @@
 # script + its parent), clear the stale lock, and report remaining strays.
 # Run as a FILE (wsl.exe -e bash <path>) to avoid nested -c quoting issues.
 set -u
-RUN=/mnt/e/Hexo-BotTrainer/runs/hexfield_main_1
+# Defaults target the main_9 supervisor unit/run; override UNIT/RUN for the
+# main_11 or eq-1 units (e.g. UNIT=hexfield-supervisor-11
+# RUN=/mnt/e/Hexo-BotTrainer/runs/hexfield_main_11).
+UNIT="${UNIT:-hexfield-supervisor-9}"
+RUN="${RUN:-/mnt/e/Hexo-BotTrainer/runs/hexfield_main_9}"
 self=$$; parent=$PPID
 
 echo "[reset] stop + disable units"
-systemctl stop hexfield-supervisor hexfield-dashboard 2>/dev/null
-systemctl disable hexfield-supervisor hexfield-dashboard 2>/dev/null
-systemctl reset-failed hexfield-supervisor hexfield-dashboard 2>/dev/null
+systemctl stop "$UNIT" hexfield-dashboard 2>/dev/null
+systemctl disable "$UNIT" hexfield-dashboard 2>/dev/null
+systemctl reset-failed "$UNIT" hexfield-dashboard 2>/dev/null
 sleep 2
 
 scan_and_kill() {
@@ -47,6 +51,6 @@ for d in /proc/[0-9]*; do
   esac
 done
 echo "[reset] remaining stray_count=$cnt"
-echo "[reset] supervisor unit: $(systemctl is-active hexfield-supervisor 2>/dev/null) / $(systemctl is-enabled hexfield-supervisor 2>/dev/null)"
+echo "[reset] supervisor unit ($UNIT): $(systemctl is-active "$UNIT" 2>/dev/null) / $(systemctl is-enabled "$UNIT" 2>/dev/null)"
 echo "[reset] GPU mem: $(nvidia-smi --query-gpu=memory.used --format=csv,noheader 2>/dev/null)"
 echo "[reset] done at $(date -u +%H:%M:%SZ)"

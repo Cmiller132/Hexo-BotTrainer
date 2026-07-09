@@ -1,8 +1,8 @@
 """Core synchronous runner loop for one game.
 
-Called by hexo_runner/modes/match.py (one game -> one .hxr file),
+Called by hexo_runner/modes/match.py (one game -> one .hxr file) and
 hexo_runner/modes/batch.py (many games sharing players + one record file per
-worker), and scripts/goal_benchmark.py. All engine access goes through
+worker). All engine access goes through
 `engine.HexoEngineAdapter`; all per-game persistence goes through the
 Rust-backed `HexoRecordFile` writer (hexo_utils, re-exported via
 hexo_runner/records). Every player/engine/record call is staged through

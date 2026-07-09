@@ -3,13 +3,13 @@
 This file is the boundary between user-authored YAML/TOML and the rest of the
 training code. Everything outside this module should read typed config objects
 instead of pulling values directly out of nested dictionaries. In practice
-every config in configs/ is TOML (e.g. configs/dense_cnn_restnet_main_4.toml,
-the live run); the YAML path is advertised by the CLI but has no caller.
+every config in configs/ is TOML (e.g. configs/hexfield_main_9.toml, the live
+run); the YAML path is advertised by the CLI but has no caller.
 
 The typed sections here cover only the orchestration skeleton. Model-owned
 settings ride through opaquely as `ModelConfig.config` ([model.config] in the
 TOML) and are parsed by the plugin's own config module (e.g.
-packages/dense_cnn_restnet/python/dense_cnn_restnet/config.py); model-neutral
+packages/hexfield/python/hexfield/config.py); model-neutral
 extras like [shared.game] stay reachable via `TrainingConfig.raw` /
 `RunContext.section()`.
 

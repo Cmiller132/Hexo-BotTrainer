@@ -9,8 +9,8 @@ see `pyproject.toml`).
 
 | Subsystem | Role |
 | --- | --- |
-| `.hxr` record codec (`rust/src/records.rs` + `pybridge.rs` + `python/hexo_utils/records.py`) | The repo's cross-package game-record format. Every self-play / evaluation / match path writes `.hxr` through it; the dashboard and health scripts read it. |
-| `state_hash` (`rust/src/state_hash.rs`) | Rust-only. Cache key for every model lineage's MCTS evaluator (dense_cnn, hexgt, hexgnn `mcts_eval.rs` / `mcts_tree.rs`). |
+| `.hxr` record codec (`rust/src/records.rs` + `pybridge.rs` + `python/hexo_utils/records.py`) | The repo's cross-package game-record format. Every self-play / evaluation / match path writes `.hxr` through it; the dashboard reads it. |
+| `state_hash` (`rust/src/state_hash.rs`) | Rust-only. Cache key for the parked `hexo_models` (dense_cnn, hexgt) and `hexgnn` MCTS evaluators (`mcts_eval.rs` / `mcts_tree.rs`); the active hexfield/hexfield_eq crates carry their own state hash. |
 | `samples/` JSON-chunk sample store + `encoding/` D6 contracts | Generic shared-store layer for the `hexo_train` pipeline. The current model plugins set `uses_shared_sample_store=False` and own their own NPZ replay storage, so this layer is exercised through `hexo_train`'s generic path and the test suite. |
 
 ## The .hxr record format
@@ -42,10 +42,9 @@ per-game writer.
 
 Inbound (who uses hexo_utils):
 
-- `hexo_runner.records.record` imports `HexoRecordFile` / `HexoRecordGameWriter` / `HexoRecord` / `HexoRecordPlayer` / `AbortRecord` / magic + schema constants from `hexo_utils.records` and re-exports them. All production `.hxr` IO flows through that path: `dense_cnn_restnet`, `hexo_models/dense_cnn`, `hexo_models/hexgt`, and `hexgnn` selfplay/evaluation write records; `hexo_frontend/web.py` reads them for the dashboard.
-- Rust: `hexo_models` (dense_cnn + hexgt subcrates) and `hexgnn` depend on the `hexo_utils` workspace crate for `use hexo_utils::{hash_state, StateHash}` in their `mcts_eval.rs` / `mcts_tree.rs` (evaluator cache keys). The active `dense_cnn_restnet` lineage reaches this indirectly through `hexo_models._rust.dense_cnn`.
+- `hexo_runner.records.record` imports `HexoRecordFile` / `HexoRecordGameWriter` / `HexoRecord` / `HexoRecordPlayer` / `AbortRecord` / magic + schema constants from `hexo_utils.records` and re-exports them. All production `.hxr` IO flows through that path — the active `hexfield` / `hexfield_eq` match and evaluation writers, plus the parked `dense_cnn_restnet` / `hexo_models` / `hexgnn` lineages; `hexo_frontend/web.py` reads them for the dashboard.
+- Rust: `hexo_models` (dense_cnn + hexgt subcrates) and `hexgnn` depend on the `hexo_utils` workspace crate for `use hexo_utils::{hash_state, StateHash}` in their `mcts_eval.rs` / `mcts_tree.rs` (evaluator cache keys); the parked `dense_cnn_restnet` lineage reaches this indirectly through `hexo_models._rust.dense_cnn`. The active hexfield/hexfield_eq crates do not depend on this crate (each carries its own state hash).
 - `hexo_train`: `defaults.py` builds the target helpers, `symmetry.py` imports `D6_SIZE` / `D6Symmetry`, `epoch/samples.py` lazily imports the sample-store API on the shared-store path.
-- Scripts/analysis: `scripts/_wf_r4_health.py` and `analysis/exploration_diversity.py` import `hexo_utils.records.HexoRecordFile` directly to audit run records.
 
 Outbound (what hexo_utils depends on):
 
@@ -60,5 +59,5 @@ on-disk layout (`manifest.json` + `chunks/*.json` compressed), spoken by `buffer
 
 - No CLI. Pure library, imported transitively by nearly every Python entry point in the repo via `hexo_runner.records`.
 - Build: the PyO3 extension is built into the source tree (`python/hexo_utils/_rust.cpython-312-*.so`, untracked) by maturin in the WSL `hexgt-build` venv (editable install); Rust changes take effect after re-running maturin. `scripts/_rebuild_hexo_models_hexgt.sh` rebuilds the hexo_models crate (which links hexo_utils as a workspace dependency); the `hexo_utils._rust` extension itself rebuilds via maturin against this package's `pyproject.toml`. On Windows Python the extension is absent; importers lazy-guard the import.
-- Tests: `tests/test_hexo_utils_sample_store.py` exercises the samples subpackage directly; many other tests gate on `pytest.importorskip("hexo_utils._rust")`; `cargo test -p hexo_utils` runs the Rust codec/hash unit suites. Per project convention, Python tests are authoritative only in the WSL venv.
-- Scripts: `scripts/_wf_r4_health.py` (run-health audit over `.hxr`); `scripts/goal_benchmark.py` and `tests/test_hexo_runner_match_mode.py` call `record.replay()`.
+- Tests: many tests gate on `pytest.importorskip("hexo_utils._rust")`; `cargo test -p hexo_utils` runs the Rust codec/hash unit suites. Per project convention, Python tests are authoritative only in the WSL venv.
+- Scripts/tests: `tests/test_hexo_runner_match_mode.py` calls `record.replay()`.

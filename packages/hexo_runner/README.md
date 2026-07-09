@@ -86,17 +86,17 @@ Imports out:
 
 Imports in (who depends on hexo_runner):
 
-- **dense_cnn_restnet** (active lineage): `selfplay.py` and `evaluation.py`
-  write `.hxr` via `hexo_runner.records` and use `SealBotPlayer` as the
-  per-epoch eval opponent, driving games with their own batched loop.
-- **hexo_models/dense_cnn**, **hexo_models/hexgt**, **hexgnn** (legacy/parked
-  lineages): same pattern; hexgt and hexgnn evaluation additionally call
-  `run_match` + `GameSpec` for SealBot gating. Each package's `player.py`
-  implements the `RunnerPlayer` protocol.
+- **hexfield / hexfield_eq** (active lineages): the eval path
+  (`eval_driver.py` / `evaluation.py` / `eval_arena.py`) writes `.hxr` via
+  `hexo_runner.records` and uses `SealBotPlayer` as an eval opponent, driving
+  games with their own batched loop.
+- **dense_cnn_restnet**, **hexo_models/dense_cnn**, **hexo_models/hexgt**,
+  **hexgnn** (parked/halted lineages): same pattern; hexgt and hexgnn
+  evaluation additionally call `run_match` + `GameSpec` for SealBot gating.
+  Each package's `player.py` implements the `RunnerPlayer` protocol.
 - **hexo_frontend**: `web.py` imports the SealBot adapter, `run_match`, the
   player contracts, `GameResult`/`HexoRecordFile`, and `GameSpec` -- Match-v2
   Arena games run through this runner; `/api` serves adapter discovery.
-- **scripts/goal_benchmark.py** imports `HexoEngineAdapter` and `run_match_loop`.
 
 Protocols / shared formats owned or relayed here:
 

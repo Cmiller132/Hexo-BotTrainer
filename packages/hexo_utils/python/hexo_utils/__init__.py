@@ -9,8 +9,7 @@ Subsystem status (see README.md for the full map):
 - `records.py` (ACTIVE): Python facade over the Rust `.hxr` codec in
   `rust/src/records.rs` + `rust/src/pybridge.rs`. Production callers reach it
   through `packages/hexo_runner/python/hexo_runner/records/record.py`, which
-  re-exports these classes; `scripts/_wf_r4_health.py` and
-  `analysis/exploration_diversity.py` import it directly.
+  re-exports these classes.
 - `samples/` + `encoding/` (LEGACY scaffolding): built for hexo_train's
   generic shared-sample-store path. Still imported by
   `packages/hexo_train/python/hexo_train/{defaults,symmetry,epoch/samples}.py`

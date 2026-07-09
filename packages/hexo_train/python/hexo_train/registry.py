@@ -10,12 +10,13 @@ Plugin lookup supports three development/deployment modes:
 2. explicit entry point name from config;
 3. model name lookup through the `hexo_train.models` entry point group.
 
-Registered plugins (entry-point group `hexo_train.models`):
-`dense_cnn_restnet` (packages/dense_cnn_restnet/pyproject.toml — the ACTIVE
-lineage), `dense_cnn` and `hexgt` (packages/hexo_models/pyproject.toml), and
-`hexgnn` (packages/hexgnn/pyproject.toml). The restnet configs use mode 1
-(`[model].module = "dense_cnn_restnet.plugin"` in
-configs/dense_cnn_restnet_main_*.toml), bypassing entry points entirely.
+Registered plugins (entry-point group `hexo_train.models`) include
+`hexfield_eq` (packages/hexfield_eq/pyproject.toml) alongside the parked
+`dense_cnn_restnet`, `dense_cnn`/`hexgt`, and `hexgnn` plugins. In practice
+the active bots select their plugin via mode 1 (explicit module path):
+`[model].module = "hexfield.plugin"` in configs/hexfield_main_9.toml and
+`"hexfield_eq.plugin"` in configs/hexfield_eq_main_1.toml, bypassing entry
+points entirely.
 
 Note: `ModelPlugin` covers only the two construction hooks. The full
 duck-typed contract a real plugin/trainer implements is wider — optional

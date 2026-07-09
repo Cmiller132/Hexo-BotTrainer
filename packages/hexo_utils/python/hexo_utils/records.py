@@ -8,9 +8,7 @@ absent (e.g. Windows Python; only the WSL venv carries the .so).
 Callers: production `.hxr` IO flows through
 `packages/hexo_runner/python/hexo_runner/records/record.py`, which wraps and
 re-exports this module for all model selfplay/evaluation writers and the
-hexo_frontend dashboard reader. `scripts/_wf_r4_health.py` and
-`analysis/exploration_diversity.py` import `HexoRecordFile` directly for run
-audits.
+hexo_frontend dashboard reader.
 
 Note: `AbortRecord` here is the PyO3 class; `hexo_runner.records.record`
 defines a same-named, same-shaped plain dataclass. The Rust side duck-types

@@ -14,10 +14,9 @@ unknown ``policy_valid`` column), while ``policy_valid`` itself is pulled from
 the raw ``.npz`` and paired to the decoded rows by index. The write side uses
 ``write_compact_shard`` unchanged, which emits the new schema.
 
-Mirrors the intent of scripts/_main7_prefit_data.sh (newest-epoch shards, ~5%
-held out to val/), but does row-level FULL selection + a deterministic 20k cap
-and re-serializes instead of symlinking (the schema changed, so symlinks to old
-shards would carry the dropped column).
+It selects newest-epoch shards and holds ~5% out to val/, and does row-level
+FULL selection + a deterministic 20k cap, re-serializing instead of symlinking
+(the schema changed, so symlinks to old shards would carry the dropped column).
 
 Run (WSL):
     PYTHONPATH=packages/hexfield/python \
@@ -52,7 +51,7 @@ DEFAULT_SEED = 1234
 # repack into fixed-size shards so the count is independent of source game
 # lengths.
 ROWS_PER_SHARD = 512
-# 1-in-VAL_EVERY output shards go to val/ (mirrors _main7_prefit_data.sh's ~5%).
+# 1-in-VAL_EVERY output shards go to val/ (~5%).
 VAL_EVERY = 20
 
 
@@ -125,8 +124,8 @@ def main(argv: list[str] | None = None) -> None:
 
     starts = list(range(0, len(selected), args.rows_per_shard))
     n_shards = len(starts)
-    # Decide the train/val split up front (mirrors _main7_prefit_data.sh's ~5%
-    # to val). With few output shards the 1-in-VAL_EVERY rule can select none, so
+    # Decide the train/val split up front (~5% to val). With few output shards
+    # the 1-in-VAL_EVERY rule can select none, so
     # force the LAST shard to val when it otherwise would have picked zero — the
     # prefit launcher raises on an empty val/.
     val_ids = {i for i in range(n_shards) if i % VAL_EVERY == VAL_EVERY - 1}

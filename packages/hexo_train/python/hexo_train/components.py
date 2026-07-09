@@ -64,11 +64,10 @@ class ComponentOverrides:
     fields fall back to shared defaults where a default exists.
 
     This dataclass is the one symbol model packages import from hexo_train
-    (see packages/dense_cnn_restnet/python/dense_cnn_restnet/plugin.py and the
-    dense_cnn/hexgt/hexgnn plugin.py twins). All four set
-    `uses_shared_sample_store=False` and supply trainer + checkpoint
-    loader/saver, so the shared-store and placeholder-checkpoint defaults are
-    bypassed on every production run.
+    (see packages/hexfield/python/hexfield/plugin.py and the other model
+    plugin.py twins). The real plugins set `uses_shared_sample_store=False`
+    and supply trainer + checkpoint loader/saver, so the shared-store and
+    placeholder-checkpoint defaults are bypassed on every production run.
     """
 
     scalar_value_target: Any | None = None

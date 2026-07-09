@@ -2,7 +2,6 @@
 
 The single point where the runner touches `hexo_engine`: `loop.py` and the
 modes call only through `HexoEngineAdapter`, never the engine module directly.
-scripts/goal_benchmark.py also constructs this adapter for benchmarking.
 """
 
 from __future__ import annotations

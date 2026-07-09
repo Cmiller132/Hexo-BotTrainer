@@ -19,13 +19,14 @@ results are recorded consistently in the diagnostics directory.
 Model packages own tensors, losses, optimizer details, sample decoding, and
 checkpoint contents. Game execution happens inside each plugin's
 `generate_selfplay` hook (the plugin drives hexo_engine/hexo_runner itself —
-e.g. packages/dense_cnn_restnet/python/dense_cnn_restnet/selfplay.py for the
-active run); this pipeline never imports the engine or runner directly.
+e.g. packages/hexfield/python/hexfield/selfplay.py for the active run); this
+pipeline never imports the engine or runner directly.
 
 Entry point: cli/train_model.py (`python -m hexo_train.cli.train_model
 <config.toml>`), which the WSL supervisor scripts
-(scripts/_dc_restnet_supervise_main1.sh and friends) loop over for the live
-runs. Tests also call `TrainingPipeline().run()` directly.
+(scripts/_hexfield_supervise_main1.sh, scripts/_hexfield_eq_supervise_main1.sh)
+loop over for the live runs. Tests also call `TrainingPipeline().run()`
+directly.
 """
 
 from __future__ import annotations
@@ -95,9 +96,9 @@ class TrainingPipeline:
         """Release model-owned resources at run end (success or failure).
 
         Generic: a model trainer that holds external resources (e.g. the
-        dense_cnn / dense_cnn_restnet trainers' persistent shard-expansion
-        process pools) may expose ``close()``; calling it in a finally keeps
-        those resources from leaking past the run. Best-effort.
+        hexfield trainer's persistent shard-expansion ProcessPool built by
+        ``_get_expand_pool``) may expose ``close()``; calling it in a finally
+        keeps those resources from leaking past the run. Best-effort.
         """
 
         trainer = getattr(getattr(components, "model", None), "trainer", None)
