@@ -22,6 +22,7 @@ from hexfield_eq.reps import (  # noqa: E402
     TypedLinear,
     build_group,
     canonical_signature,
+    expand_per_instance,
     signature_action,
     transform_channels,
     typed_group_pool,
@@ -43,8 +44,10 @@ def _fifty_signature_pairs() -> list[
     return [(_random_signature(rng), _random_signature(rng)) for _ in range(50)]
 
 
-def _assert_close(actual: torch.Tensor, expected: torch.Tensor) -> None:
-    torch.testing.assert_close(actual, expected, atol=1e-10, rtol=0)
+def _assert_close(
+    actual: torch.Tensor, expected: torch.Tensor, *, atol: float = 1e-10
+) -> None:
+    torch.testing.assert_close(actual, expected, atol=atol, rtol=0)
 
 
 def _support_pair(stones: list[tuple[int, int]], g: int):
@@ -68,6 +71,8 @@ def test_fifty_random_signatures_typed_linear_equivariance() -> None:
     torch.manual_seed(0)
     for in_signature, out_signature in _fifty_signature_pairs():
         layer = TypedLinear(in_signature, out_signature, dtype=torch.float64)
+        with torch.no_grad():
+            layer.bias_base.copy_(torch.randn_like(layer.bias_base))
         weight = layer.materialize_weight()
         x = torch.randn(3, weight.shape[1], dtype=torch.float64)
         base = layer(x)
@@ -77,6 +82,15 @@ def test_fifty_random_signatures_typed_linear_equivariance() -> None:
             torch.testing.assert_close(
                 weight.index_select(0, out_action).index_select(1, in_action),
                 weight,
+                atol=0,
+                rtol=0,
+            )
+            # The forward comparison below exercises its expansion; this
+            # explicit check freezes exact invariance of the randomized bias.
+            expanded_bias = expand_per_instance(layer.bias_base, out_signature)
+            torch.testing.assert_close(
+                expanded_bias.index_select(0, out_action),
+                expanded_bias,
                 atol=0,
                 rtol=0,
             )
@@ -96,6 +110,8 @@ def test_fifty_random_signatures_typed_conv_algebra_and_support() -> None:
     base_nbr = torch.from_numpy(base_support.nbr.astype("int64")).unsqueeze(0)
     for in_signature, out_signature in _fifty_signature_pairs():
         layer = TypedConv(in_signature, out_signature, dtype=torch.float64)
+        with torch.no_grad():
+            layer.bias_base.copy_(torch.randn_like(layer.bias_base))
         weight = layer.materialize_weight()
         x = torch.randn(1, base_support.num_nodes, weight.shape[1], dtype=torch.float64)
         base_output = layer(x, base_nbr)
@@ -108,6 +124,13 @@ def test_fifty_random_signatures_typed_conv_algebra_and_support() -> None:
                 .index_select(1, in_action)
                 .index_select(2, out_action),
                 weight,
+                atol=0,
+                rtol=0,
+            )
+            expanded_bias = expand_per_instance(layer.bias_base, out_signature)
+            torch.testing.assert_close(
+                expanded_bias.index_select(0, out_action),
+                expanded_bias,
                 atol=0,
                 rtol=0,
             )
@@ -142,17 +165,21 @@ def test_fifty_random_signatures_norm_scale_pool_and_pointwise() -> None:
         base_pool = typed_group_pool(x, signature)
         for g in range(GROUP_ORDER):
             x_g = transform_channels(x, signature, g)
-            _assert_close(norm(x_g), transform_channels(base_norm, signature, g))
+            _assert_close(
+                norm(x_g), transform_channels(base_norm, signature, g), atol=1e-12
+            )
             torch.testing.assert_close(
                 scale(x_g), transform_channels(base_scale, signature, g), atol=0, rtol=0
             )
-            _assert_close(typed_group_pool(x_g, signature), base_pool)
+            _assert_close(typed_group_pool(x_g, signature), base_pool, atol=1e-12)
             torch.testing.assert_close(
                 F.relu(x_g), transform_channels(F.relu(x), signature, g), atol=0, rtol=0
             )
             # PyTorch's vectorized CPU GELU can differ by one fp64 ulp after a
             # channel permutation even though the operation is pointwise.
-            _assert_close(F.gelu(x_g), transform_channels(F.gelu(x), signature, g))
+            _assert_close(
+                F.gelu(x_g), transform_channels(F.gelu(x), signature, g), atol=1e-12
+            )
 
 
 def test_gelu_commutes_with_every_quotient_permutation() -> None:
@@ -166,6 +193,7 @@ def test_gelu_commutes_with_every_quotient_permutation() -> None:
             _assert_close(
                 F.gelu(transform_channels(x, signature, g)),
                 transform_channels(F.gelu(x), signature, g),
+                atol=1e-12,
             )
 
 

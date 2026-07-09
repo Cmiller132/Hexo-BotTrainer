@@ -28,8 +28,15 @@ from torch.nn import functional as F  # noqa: E402
 
 # model.py imports flex_attention even when all serve/train gates are off; on
 # Windows that imports Triton.  Phase A is CPU/no-Triton, so force the existing
-# guarded import down its documented no-flex fallback before importing model.py.
-sys.modules["torch.nn.attention.flex_attention"] = None
+# guarded import down its documented no-flex fallback, then restore sys.modules
+# so this test cannot poison later collection in a larger plain-pytest run.
+_TRITON_BEFORE = {
+    name for name in sys.modules if name == "triton" or name.startswith("triton.")
+}
+_FLEX_KEY = "torch.nn.attention.flex_attention"
+_MISSING = object()
+_PREVIOUS_FLEX = sys.modules.get(_FLEX_KEY, _MISSING)
+sys.modules[_FLEX_KEY] = None
 
 from hexfield_eq import constants as C  # noqa: E402
 from hexfield_eq import equivariant as production_eq  # noqa: E402
@@ -48,12 +55,20 @@ from hexfield_eq.features import (  # noqa: E402
     transform_facts,
 )
 from hexfield_eq.geometry import apply_d6, rel_bias_index  # noqa: E402
-from hexfield_eq.model import (  # noqa: E402
-    AttnBlock as ProductionAttnBlock,
-    ConvBlock as ProductionConvBlock,
-    GroupAffineNorm as ProductionNorm,
-    HexNodeConv as ProductionConv,
-)
+try:
+    from hexfield_eq.model import (  # noqa: E402
+        AttnBlock as ProductionAttnBlock,
+        ConvBlock as ProductionConvBlock,
+        EquivLinear as ProductionLinear,
+        GroupAffineNorm as ProductionNorm,
+        HexNodeConv as ProductionConv,
+    )
+    from hexfield_eq.register import RegisterRefresh as ProductionRefresh  # noqa: E402
+finally:
+    if _PREVIOUS_FLEX is _MISSING:
+        sys.modules.pop(_FLEX_KEY, None)
+    else:
+        sys.modules[_FLEX_KEY] = _PREVIOUS_FLEX
 from hexfield_eq.reps import (  # noqa: E402
     TypedConv,
     TypedGroupAffineNorm,
@@ -71,7 +86,9 @@ from hexfield_eq.reps import (  # noqa: E402
     typed_group_pool,
 )
 
-assert not any(name == "triton" or name.startswith("triton.") for name in sys.modules)
+assert {
+    name for name in sys.modules if name == "triton" or name.startswith("triton.")
+} == _TRITON_BEFORE
 
 SIG_51 = (("reg", 2), ("mirror", 2), ("point", 1), ("axis", 2), ("triv", 3))
 SIG_96 = (("reg", 4), ("mirror", 4), ("axis", 4), ("triv", 12))
@@ -177,9 +194,10 @@ class ToyAttentionBlock(nn.Module):
 class ToyRegisterRefresh(nn.Module):
     """Sigmoid-gated, unnormalized SUM lane with regular internal heads."""
 
-    def __init__(self, signature, k_attn: int) -> None:
+    def __init__(self, signature, k_attn: int, *, fp32_sum: bool = False) -> None:
         super().__init__()
         self.signature = signature
+        self.fp32_sum = fp32_sum
         self.regular = (("reg", k_attn),)
         self.head_dim = 4 * k_attn
         self.width = 12 * k_attn
@@ -205,8 +223,14 @@ class ToyRegisterRefresh(nn.Module):
         k = k.reshape(batch, nodes, 3, self.head_dim).transpose(1, 2)
         v = v.reshape(batch, nodes, 3, self.head_dim).transpose(1, 2)
         scores = (q @ k.transpose(-2, -1)) / math.sqrt(self.head_dim)
-        gates = torch.sigmoid(scores + self.gate_bias.view(1, 1, token_count, 1))
-        update = (gates @ v) * self.sum_scale
+        scores = scores + self.gate_bias.view(1, 1, token_count, 1)
+        if self.fp32_sum:
+            # Production carries this counting primitive in fp32 even when the
+            # surrounding comparison is fp64.
+            update = (torch.sigmoid(scores.float()) @ v.float()) * self.sum_scale
+            update = update.to(cells.dtype)
+        else:
+            update = (torch.sigmoid(scores) @ v) * self.sum_scale
         update = update.transpose(1, 2).reshape(batch, token_count, self.width)
         update = update.index_select(-1, self.hp_inv)
         return tokens + self.out_proj(update)
@@ -370,8 +394,8 @@ def _copy_linear(typed: TypedLinear, production) -> None:
         typed.bias_base.copy_(production.bias_base.to(torch.float64))
 
 
-def test_pure_regular_block_structure_matches_production_primitives() -> None:
-    """Stem + two C blocks + one A block agree under matched parameters."""
+def test_pure_regular_toy_path_matches_production_primitives() -> None:
+    """Pure-reg stem/C/C/refresh/A/final/head path agrees end to end."""
 
     assert C.CHANNELS == 96 and C.C_ORBIT == 8 and C.NUM_FEATURES == 25
     signature = (("reg", C.C_ORBIT),)
@@ -387,6 +411,28 @@ def test_pure_regular_block_structure_matches_production_primitives() -> None:
     production_attn = ProductionAttnBlock(C.CHANNELS, 3).to(torch.float64)
     production_attn.attn.impl = "materialized"
     typed_attn = ToyAttentionBlock(signature, C.C_ORBIT)
+    production_refresh = ProductionRefresh(C.CHANNELS, 3).to(torch.float64)
+    typed_refresh = ToyRegisterRefresh(signature, C.C_ORBIT, fp32_sum=True)
+    production_final_norm = ProductionNorm(C.CHANNELS).to(torch.float64)
+    typed_final_norm = TypedGroupAffineNorm(signature, dtype=torch.float64)
+    production_policy_conv = ProductionConv(C.CHANNELS, C.CHANNELS).to(torch.float64)
+    typed_policy_conv = TypedConv(signature, signature, dtype=torch.float64)
+    production_policy_expand = ProductionLinear(C.CHANNELS, 2 * C.CHANNELS).to(
+        torch.float64
+    )
+    typed_policy_expand = TypedLinear(
+        signature, scale_signature(signature, 2), dtype=torch.float64
+    )
+    production_value_read = ProductionLinear(C.CHANNELS, 2 * C.CHANNELS).to(
+        torch.float64
+    )
+    typed_value_read = TypedLinear(
+        signature, scale_signature(signature, 2), dtype=torch.float64
+    )
+    production_policy_head = nn.Linear(2 * C.C_ORBIT, 1, dtype=torch.float64)
+    typed_policy_head = nn.Linear(2 * C.C_ORBIT, 1, dtype=torch.float64)
+    production_value_head = nn.Linear(4 * C.C_ORBIT, 1, dtype=torch.float64)
+    typed_value_head = nn.Linear(4 * C.C_ORBIT, 1, dtype=torch.float64)
 
     with torch.no_grad():
         typed_stem.w0.copy_(production_stem.w0)
@@ -406,8 +452,20 @@ def test_pure_regular_block_structure_matches_production_primitives() -> None:
     _copy_linear(typed_attn.fc2, production_attn.fc2)
     _copy_scale(typed_attn.ls_attn, production_attn.ls_attn)
     _copy_scale(typed_attn.ls_mlp, production_attn.ls_mlp)
+    _copy_norm(typed_refresh.ln_q, production_refresh.ln_q)
+    _copy_norm(typed_refresh.ln_kv, production_refresh.ln_kv)
+    for name in ("q_proj", "k_proj", "v_proj", "out_proj"):
+        _copy_linear(getattr(typed_refresh, name), getattr(production_refresh, name))
+    _copy_norm(typed_final_norm, production_final_norm)
+    _copy_conv(typed_policy_conv, production_policy_conv)
+    _copy_linear(typed_policy_expand, production_policy_expand)
+    _copy_linear(typed_value_read, production_value_read)
     with torch.no_grad():
         typed_attn.attn.theta.copy_(torch.randn_like(typed_attn.attn.theta) * 0.05)
+        typed_refresh.gate_bias.copy_(production_refresh.gate_bias)
+        typed_refresh.sum_scale.copy_(production_refresh.sum_scale)
+        typed_policy_head.load_state_dict(production_policy_head.state_dict())
+        typed_value_head.load_state_dict(production_value_head.state_dict())
 
     facts = _random_legal_facts(999, 7)
     support, features, nbr, coords = _inputs(facts)
@@ -427,11 +485,55 @@ def test_pure_regular_block_structure_matches_production_primitives() -> None:
 
     token_base = torch.randn(NUM_TOKENS, C.C_ORBIT, dtype=torch.float64)
     tokens = expand_per_instance(token_base, signature).unsqueeze(0)
-    typed_seq = torch.cat((tokens, typed_x), dim=1)
-    production_seq = torch.cat((tokens, production_x), dim=1)
+    typed_tokens = typed_refresh(tokens, typed_x)
+    production_tokens = production_refresh(tokens, production_x, mask)
+    torch.testing.assert_close(typed_tokens, production_tokens, atol=1e-10, rtol=0)
+    typed_seq = torch.cat((typed_tokens, typed_x), dim=1)
+    production_seq = torch.cat((production_tokens, production_x), dim=1)
     typed_output = typed_attn(typed_seq, coords)
     bias = typed_attn.attn.attention_bias(coords)
     seq_mask = torch.ones(typed_seq.shape[:2], dtype=torch.bool)
     production_output = production_attn(production_seq, bias, seq_mask)
     torch.testing.assert_close(typed_output, production_output, atol=1e-10, rtol=0)
-    assert not any(name == "triton" or name.startswith("triton.") for name in sys.modules)
+
+    typed_tokens, typed_cells = typed_output[:, :NUM_TOKENS], typed_output[:, NUM_TOKENS:]
+    production_tokens = production_output[:, :NUM_TOKENS]
+    production_cells = production_output[:, NUM_TOKENS:]
+    typed_cells = typed_final_norm(typed_cells)
+    production_cells = production_final_norm(production_cells)
+    torch.testing.assert_close(typed_cells, production_cells, atol=1e-10, rtol=0)
+
+    typed_policy_features = F.relu(typed_policy_conv(typed_cells, nbr))
+    production_policy_features = F.relu(
+        production_policy_conv(production_cells, gather, mask)
+    )
+    typed_policy_features = typed_policy_expand(typed_policy_features)
+    production_policy_features = production_policy_expand(production_policy_features)
+    typed_policy = typed_policy_head(
+        typed_group_pool(typed_policy_features, scale_signature(signature, 2))
+    )
+    production_policy = production_policy_head(
+        production_eq.group_pool(production_policy_features)
+    )
+    torch.testing.assert_close(typed_policy, production_policy, atol=1e-10, rtol=0)
+
+    typed_token_read = typed_group_pool(
+        typed_value_read(typed_tokens.mean(dim=1)), scale_signature(signature, 2)
+    )
+    typed_cell_read = typed_group_pool(
+        typed_value_read(typed_cells.mean(dim=1)), scale_signature(signature, 2)
+    )
+    production_token_read = production_eq.group_pool(
+        production_value_read(production_tokens.mean(dim=1))
+    )
+    production_cell_read = production_eq.group_pool(
+        production_value_read(production_cells.mean(dim=1))
+    )
+    typed_value = typed_value_head(torch.cat((typed_token_read, typed_cell_read), dim=-1))
+    production_value = production_value_head(
+        torch.cat((production_token_read, production_cell_read), dim=-1)
+    )
+    torch.testing.assert_close(typed_value, production_value, atol=1e-10, rtol=0)
+    assert {
+        name for name in sys.modules if name == "triton" or name.startswith("triton.")
+    } == _TRITON_BEFORE
