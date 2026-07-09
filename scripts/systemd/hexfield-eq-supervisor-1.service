@@ -1,0 +1,76 @@
+# /etc/systemd/system/hexfield-eq-supervisor-1.service
+#
+# TEMPLATE — PRE-LAUNCH SCAFFOLD for hexfield_eq_main_1 (D6-equivariant
+# rewrite lineage). Before enabling:
+#   1. Set HEXFIELD_EQ_TRUNK / HEXFIELD_EQ_REG_LANE / HEXFIELD_EQ_REG_TOK_READ
+#      to the BC-prefit ladder WINNER (they must match the initialize_from
+#      checkpoint's arch_meta exactly).
+#   2. Set [checkpoint] initialize_from in configs/hexfield_eq_main_1.toml.
+#   3. Clear the gates in docs/DEPLOYMENT_CHECKLIST_HEXFIELD_EQ.md (prefit
+#      go/no-go, serve parity, eval re-anchor smoke).
+[Unit]
+Description=hexfield_eq_main_1 self-play training supervisor (D6-equivariant x12, 25 planes, c=192 = 12 x C_ORBIT 16, coset heads 3, trunk per prefit-ladder winner; Gumbel completedQ sharp-target regime, 256 visits, 100% PCR; eval re-anchored on Strix + SealBot + self (D4))
+After=network.target
+StartLimitIntervalSec=200
+StartLimitBurst=5
+
+[Service]
+Type=simple
+KillMode=control-group
+Environment=ROOT=/mnt/e/Hexo-BotTrainer-hexgt
+Environment=RUNDIR=/mnt/e/Hexo-BotTrainer/runs/hexfield_eq_main_1
+Environment=CONFIG=/mnt/e/Hexo-BotTrainer-hexgt/configs/hexfield_eq_main_1.toml
+# --- Architecture env: LOAD-BEARING, HEXFIELD_EQ_* namespace (constants.py).
+# Must match the prefit winner's checkpoint arch_meta. C = GROUP_ORDER*C_ORBIT
+# = 192; heads structural at 3 (coset split, head_dim = 4*C_ORBIT = 64).
+Environment=HEXFIELD_EQ_SUPPORT_RADIUS=4
+Environment=HEXFIELD_EQ_CHANNELS=192
+Environment=HEXFIELD_EQ_GROUP_ORDER=12
+Environment=HEXFIELD_EQ_C_ORBIT=16
+Environment=HEXFIELD_EQ_ATTENTION_HEADS=3
+# PREFIT-LADDER WINNER (2026-07-09): arm4_raylayout — CCLACCLACLA, lane on.
+# Must match the soak_init.pt / latest checkpoint arch_meta exactly.
+Environment=HEXFIELD_EQ_TRUNK=CCLACCLACLA
+Environment=HEXFIELD_EQ_REG_LANE=1
+Environment=HEXFIELD_EQ_REG_TOK_READ=0
+Environment=HEXFIELD_ANCHOR_ROOTS=/mnt/e/Hexo-BotTrainer-hexgt
+# --- Serve/kernel stack. NOTE: these perf knobs kept the bare HEXFIELD_*
+# prefix in hexfield_eq (only the ARCH knobs are EQ-namespaced) — fine per
+# service, but never share a process with the live hexfield lineage while
+# relying on different values. ENABLED 2026-07-09: serve parity gates (3e-3)
+# re-run green under this exact flag set at the arm-4 arch; the eager
+# reference launch measured 4.2 pos/s. The supervise script defaults these
+# to 1 as well (env-overridable).
+Environment=HEXFIELD_TRAIN_FLEX=1
+Environment=HEXFIELD_TRITON_CONV=1
+Environment=HEXFIELD_FLEX_PAIR=1
+Environment=HEXFIELD_SERVE_HALF=1
+Environment=HEXFIELD_RUST_PACK=1
+Environment=HEXFIELD_COPY_STREAM=1
+Environment=HEXFIELD_TRITON_ATTN=1
+Environment=HEXFIELD_TRITON_CONV_LN=1
+Environment=HEXFIELD_TRAIN_COMPILE=1
+# Gathered L-block ray attention (spec D-S36/D-S37; parity gate
+# tests/test_hexfield_eq_triton_ray.py).
+Environment=HEXFIELD_EQ_TRITON_RAY=1
+# CUDA-graph serve capture/replay — legal with the ray kernel since 2026-07-09
+# (sync-free sort/searchsorted index build); serve gate 7/7 with this stack,
+# live mid-epoch marginal ~15 -> ~21 pos/s.
+Environment=HEXFIELD_CUDA_GRAPHS=1
+# fp8 convs: DROPPED for the equivariant v1 (per-forward tied-weight
+# generation conflicts with the id(weight)-keyed fp8 cache; plan §2.4 gotcha 1).
+# Do NOT set HEXFIELD_CONV_FP8.
+Environment=MALLOC_TRIM_THRESHOLD_=536870912
+Environment=MALLOC_MMAP_THRESHOLD_=536870912
+Environment=MALLOC_TOP_PAD_=134217728
+ExecStartPre=/usr/bin/test -f /mnt/e/Hexo-BotTrainer-hexgt/scripts/_hexfield_eq_supervise_main1.sh
+ExecStartPre=-/usr/bin/rm -f /mnt/e/Hexo-BotTrainer/runs/hexfield_eq_main_1/supervisor.lock
+ExecStart=/usr/bin/bash /mnt/e/Hexo-BotTrainer-hexgt/scripts/_hexfield_eq_supervise_main1.sh
+Restart=on-failure
+RestartSec=15
+TimeoutStopSec=45
+# A clean circuit-breaker halt exits 1; do not let systemd retry it.
+RestartPreventExitStatus=1
+
+[Install]
+WantedBy=multi-user.target

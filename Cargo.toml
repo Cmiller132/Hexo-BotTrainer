@@ -4,6 +4,7 @@ members = [
     "packages/hexo_models",
     "packages/hexo_utils",
     "packages/hexfield",
+    "packages/hexfield_eq",
 ]
 resolver = "2"
 

@@ -112,6 +112,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "hexfield_eq"
+version = "0.1.0"
+dependencies = [
+ "half",
+ "hexo_engine",
+ "hexo_utils",
+ "pyo3",
+ "rand",
+ "rayon",
+]
+
+[[package]]
 name = "hexo_engine"
 version = "0.1.0"
 dependencies = [

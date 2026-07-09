@@ -1,0 +1,31 @@
+Issues in the landed changes (ranked)
+Bug — stale eval anchors. config.py:302-316 still defaults permanent_anchors to the 15-plane hexfield BC checkpoints and keeps bc_prefit in radius8_opponents. Decision D4 says permanent_anchors = (). Any eval run will fail a strict load_state_dict on the stem shape (7,25,c) vs (7,15,c). This is the one thing that will bite before Phase 3.
+
+The landed bias is the proven negative control. The (45, heads) table with free heads in model.py:629-634 is exactly the _row_only_bias construction the derivation proves breaks equivariance (its negative-control test shows deviation 1.13). Harmless today since the trunk is non-equivariant anyway — but this means the plan's Phase 2 spec is insufficient as written: bias invariance ≠ score equivariance. Phase 3b must replace it with the derivation §5.3 joint (row, head) tie, and the plan text should be updated so nobody ships Phase 2's version into the equivariant net.
+
+D6 augmentation is still fully active (trainer.py:615-617, prefit, samples, the Rust sym path) despite the plan's "never ported." It's functionally correct (features are recomputed on the transformed board, so nothing desyncs), and here the plan itself is internally inconsistent: the Phase-1 parity tests need the Rust sym path to verify featurizer equivariance. The right fix is narrower than the plan's blanket strip — zero the caller-side draws (trainer.py:615, prefit.py:109) when the trunk goes equivariant, keep the kernel capability for tests.
+
+fp8 conv landmine. The plan says drop HEXFIELD_CONV_FP8 for v1; the path is still present and reachable (_triton_conv.py:351-478) with its id(weight)-keyed cache. Fine now, but the moment Phase 3b generates the dense weight per forward, it becomes a 100%-miss cache plus an unbounded memory leak. Cheap to remove now.
+
+Env-var collision. The eq package reads the same HEXFIELD_CHANNELS/HEXFIELD_TRUNK/etc. names as the live hexfield package. Any process importing both (dashboard debug worker, mixed eval) cross-configures the two trunks with one value. Namespace as HEXFIELD_EQ_*, or better, make checkpoint meta authoritative — which connects to:
+
+Checkpoint meta isn't load-bearing yet. checkpoints.py:19-24 writes no group_order/C_orbit/feature_width, and infer_net_kwargs_from_state_dict is still shape-only. The plan correctly calls this a must; it just hasn't landed.
+
+Off-board window liveness (plan-level design wart). An off-board window and an interior all-empty window are indistinguishable to the store (both None), so both count toward own_live/opp_live — edge cells get inflated "openness" even though an off-board window can never complete. It's symmetric between players and faithfully implements the plan's None ⇒ clean+empty rule, so it's a feature-quality question, not a bug — but the plan should own that decision explicitly rather than leave it implicit.
+
+Smaller items: stale bias_tables remap in eval_arena.py:244-247 (dead guard, latent AttributeError); probe_d6_kl not yet stripped; stale 15-plane docstrings in features.py and __init__.py; serve recency computed in f32 while train/oracle use f64.
+
+
+What I'd improve (plan and architecture)
+Amend the plan before starting 3b — the derivation resolved things the plan text doesn't yet reflect:
+
+Heads is no longer a free knob. The head split must be the 3 left cosets of K, so ATTENTION_HEADS = 3 is structural. The D5 candidate (C_orbit=16 → C=192, heads=3, d=64) satisfies this — nice coincidence — but the import-time constraint check should enforce it, and D5's search space is really just over C_orbit.
+Pin the under-specified 3b details now, on paper: which normalization (full-fiber LN vs per-slot GN — the doc says "equally valid" but they're different functions), the exact 12-slot→channel permutation so the coset heads land contiguous under the existing reshape(b,s,h,d), and the joint-tie mechanics for the real 237-row table (n_joint_classes, how joint_of composes with orbit_of_row, and the _BiasGather histogram-backward class count).
+One gap the plan misses entirely: the fused conv+LN Triton epilogue. The plan says "kernels consume a materialized weight, forward unchanged" — true for the conv itself, but the fused conv+LN kernel applies a dense per-channel affine in its epilogue. Orbit-tied group-norm either needs a small kernel change or that fusion drops off for v1. Budget for it in Phase 5's serve-perf check.
+Fix the derivation doc's §8 plane-layout formula (13 + q·3 + axis) — the shipped layout in constants.py puts axis planes at 11–22 and fork at 23–24. The abstract typing is unaffected, but an implementer typing the stem lift from §8 literally will mistype 14 planes. This is exactly the kind of trap that produces a "trains fine, isn't equivariant" net.
+Quantify the fp32 equivariance tolerance for the 3b gate (the proof is fp64 at 1e-14; the real net under AMP needs an actual number).
+From the architecture study, three things the rewrite should exploit or watch:
+
+There are 32 dense per-channel affine sites in the hexfield trunk (20 LayerNorms + 12 LayerScales), any one of which silently breaks equivariance if missed. Build one shared orbit-tied norm/scale primitive and use it at every site, and make the full-net permute-and-assert test (all 12 elements, policy covariance + value invariance, reference and Triton paths) the first thing 3b writes — currently the numpy prototype is the only equivariance evidence, and it doesn't touch model.py, the MLP, or the tokens at all.
+Capacity fairness at the Phase-4 gate: regular-rep tying cuts free channel-mixing ~12× at fixed C. If the BC-prefit comparison isn't at matched parameter budget, the equivariant net will look like a regression for reasons that have nothing to do with equivariance — the same misattribution trap as the main_10 diagnosis. D5 already says "match the c=128 budget"; treat that as non-negotiable.
+Tokens 6 and 7 are read by no head in the current architecture — pure attention scratch. The plan prunes to 6, which is fine; the alternative worth a thought is wiring them to the main_12 global-pooling idea instead, since you're rebuilding the heads anyway
