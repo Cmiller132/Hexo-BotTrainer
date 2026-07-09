@@ -117,7 +117,16 @@ def _model_meta(loaded: di.LoadedModel) -> dict[str, Any]:
     # so the candidate set / policy / cell_q / attention heatmaps are known to be
     # over the radius-restricted support. None for non-hexfield lineages
     # (dense_cnn/hexgt have no support radius) and if the import ever fails.
-    if loaded.lineage and "hexfield" in str(loaded.lineage).lower():
+    if loaded.lineage == di.HEXFIELD_EQ:
+        # EQ-namespaced radius (hexfield_eq.support reads
+        # HEXFIELD_EQ_SUPPORT_RADIUS, seeded from the checkpoint meta by
+        # debug_infer._hexfield_eq before the first import) — importing
+        # hexfield.support here would report the WRONG package's radius.
+        try:
+            meta["support_radius"] = int(di._hexfield_eq().support_radius)
+        except Exception:
+            meta["support_radius"] = None
+    elif loaded.lineage and "hexfield" in str(loaded.lineage).lower():
         try:
             from hexfield.support import _SUPPORT_RADIUS
             meta["support_radius"] = int(_SUPPORT_RADIUS)

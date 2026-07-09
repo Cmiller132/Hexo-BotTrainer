@@ -17,6 +17,13 @@ checkpoints have different payload shapes and architectures:
   CNN trunk and the position is featurized as the 13-plane 41x41 disk crop.
 * ``dense_cnn`` (plain) — payload ``ck["model"]`` == ``"hexo_models.dense_cnn"``
   plus ``ck["model_state"]``; a conv-only CNN over the same 41x41 crop.
+* ``hexfield`` / ``hexfield_eq`` — payload carries a ``meta`` block whose
+  ``lineage`` string is the marker plus ``ck["model"]`` (a state dict). The eq
+  lineage's meta is load-bearing (arch_meta: the x12-tied trunk cannot be
+  shape-inferred) and seeds the HEXFIELD_EQ_* import-time env; its 'L' ray
+  layouts additionally thread a raylen wire buffer through every forward. The
+  interactive attention view stays hexfield-only (the eq attention applies
+  coset channel perms around q/k/v that the naive hook recompute would miss).
 
 The lineage is detected from the checkpoint payload (see ``_detect_lineage``),
 the correct model is built, the correct featurizer/encoder is used, and the SAME
@@ -60,6 +67,7 @@ HEXGT = "hexgt"
 DENSE_RESTNET = "dense_cnn_restnet"
 DENSE_PLAIN = "dense_cnn"
 HEXFIELD = "hexfield"
+HEXFIELD_EQ = "hexfield_eq"
 
 
 # ---------------------------------------------------------------------------
@@ -122,6 +130,11 @@ def _detect_lineage(payload: Any) -> str:
     meta = payload.get("meta")
     if isinstance(meta, dict) and meta.get("lineage") == "hexfield" and isinstance(payload.get("model"), dict):
         return HEXFIELD
+    # hexfield_eq: same {meta, model, optimizer} payload shape as hexfield; the
+    # meta lineage string is the exact marker and the meta itself is the
+    # load-bearing arch description (x12-tied trunks cannot be shape-inferred).
+    if isinstance(meta, dict) and meta.get("lineage") == "hexfield_eq" and isinstance(payload.get("model"), dict):
+        return HEXFIELD_EQ
     tag = payload.get("model")
     if isinstance(tag, str):
         lowered = tag.lower()
@@ -153,6 +166,8 @@ def load_checkpoint(path: str | Path) -> LoadedModel:
         return _load_dense_checkpoint(ckpt_path, payload, lineage)
     if lineage == HEXFIELD:
         return _load_hexfield_checkpoint(ckpt_path, payload)
+    if lineage == HEXFIELD_EQ:
+        return _load_hexfield_eq_checkpoint(ckpt_path, payload)
     return _load_hexgt_checkpoint(ckpt_path, payload)
 
 
@@ -217,6 +232,8 @@ def analyze_position(
         return _analyze_dense(loaded, action_ids, planes=planes)
     if loaded.lineage == HEXFIELD:
         return _analyze_hexfield(loaded, action_ids)
+    if loaded.lineage == HEXFIELD_EQ:
+        return _analyze_hexfield_eq(loaded, action_ids)
     return _analyze_hexgt(loaded, action_ids, n=n)
 
 
@@ -242,6 +259,11 @@ def search_position(
         return _search_dense(loaded, action_ids, visits=visits, c_puct=c_puct, seed=seed)
     if loaded.lineage == HEXFIELD:
         return _search_hexfield(
+            loaded, action_ids, visits=visits, c_puct=c_puct, seed=seed,
+            temperature=temperature,
+        )
+    if loaded.lineage == HEXFIELD_EQ:
+        return _search_hexfield_eq(
             loaded, action_ids, visits=visits, c_puct=c_puct, seed=seed,
             temperature=temperature,
         )
@@ -1337,6 +1359,362 @@ def _search_hexfield(
     }
 
 
+# ===========================================================================
+# hexfield_eq lineage — D6-equivariant rewrite: 25-plane graded features,
+# x12 regular-rep tied trunk, raylen wire buffer for 'L' ray-attention layouts
+# ===========================================================================
+
+# Env keys hexfield_eq reads ONCE at import (constants.py / support.py). The
+# checkpoint meta (HexfieldNet.arch_meta) is the authoritative arch
+# description, and several module-level constants (C_ORBIT-derived head read
+# widths, the featurizer SUPPORT_RADIUS) are baked in at import time — the
+# HexfieldNet constructor kwargs cannot override them. So the env MUST be
+# seeded from the first eq checkpoint's meta BEFORE the first hexfield_eq
+# import. First import wins for the worker process; a later checkpoint with a
+# different arch raises a clear error (restart the worker) instead of
+# silently mis-building the tie.
+_EQ_META_ENV = (
+    ("HEXFIELD_EQ_SUPPORT_RADIUS", "support_radius"),
+    ("HEXFIELD_EQ_CHANNELS", "channels"),
+    ("HEXFIELD_EQ_GROUP_ORDER", "group_order"),
+    ("HEXFIELD_EQ_C_ORBIT", "c_orbit"),
+    ("HEXFIELD_EQ_ATTENTION_HEADS", "attention_heads"),
+    ("HEXFIELD_EQ_TRUNK", "trunk_layout"),
+)
+_EQ_META_ENV_BOOL = (
+    ("HEXFIELD_EQ_REG_LANE", "reg_lane"),
+    ("HEXFIELD_EQ_REG_TOK_READ", "reg_tok_read"),
+    ("HEXFIELD_EQ_RAY_BLOCKERS", "ray_blockers"),
+)
+
+_hexfield_eq_ns: SimpleNamespace | None = None
+
+
+def _check_eq_meta_matches_import(eq: SimpleNamespace, meta: dict) -> None:
+    """Validate the import-frozen constants against a checkpoint's meta.
+
+    The head read widths bake in the module-level C_ORBIT and the featurizer
+    bakes in SUPPORT_RADIUS at import; constructor kwargs cannot override
+    them. A mismatch means this worker already imported hexfield_eq under a
+    different arch env — the only fix is a worker restart."""
+
+    checks = (
+        ("group_order", eq.constants.GROUP_ORDER),
+        ("c_orbit", eq.constants.C_ORBIT),
+        ("support_radius", eq.support_radius),
+    )
+    for key, imported in checks:
+        want = meta.get(key)
+        if want is not None and int(want) != int(imported):
+            raise ValueError(
+                f"hexfield_eq checkpoint needs {key}={int(want)} but this "
+                f"worker imported hexfield_eq with {key}={int(imported)} "
+                "(HEXFIELD_EQ_* env is read once at import); restart the "
+                "debug worker to load this checkpoint"
+            )
+
+
+def _hexfield_eq(meta: dict | None = None) -> SimpleNamespace:
+    """Lazily import the hexfield_eq package (source-path shim, mirroring
+    ``_hexfield``: the worker's PYTHONPATH carries only hexo_frontend).
+
+    ``meta`` — the checkpoint's arch meta — seeds the HEXFIELD_EQ_* env before
+    the FIRST import so the import-time constants match the checkpoint, and is
+    validated against the imported constants on every later call."""
+
+    global _hexfield_eq_ns
+    import os
+    import sys
+
+    if _hexfield_eq_ns is None:
+        if meta:
+            for env_key, meta_key in _EQ_META_ENV:
+                if meta.get(meta_key) is not None:
+                    os.environ.setdefault(env_key, str(meta[meta_key]))
+            for env_key, meta_key in _EQ_META_ENV_BOOL:
+                if meta.get(meta_key) is not None:
+                    os.environ.setdefault(env_key, "1" if meta[meta_key] else "0")
+        _eq_src = Path(__file__).resolve().parents[3] / "hexfield_eq" / "python"
+        if _eq_src.is_dir() and str(_eq_src) not in sys.path:
+            sys.path.insert(0, str(_eq_src))
+
+        from hexfield_eq import config as eq_config
+        from hexfield_eq import constants as eq_constants
+        from hexfield_eq.batching import collate_rows
+        from hexfield_eq.engine_facts import facts_from_state
+        from hexfield_eq.features import build_features, build_ray_lengths
+        from hexfield_eq.geometry import pack_action_id
+        from hexfield_eq.inference import HexfieldEvaluator
+        from hexfield_eq.losses import decode_binned_value, value_bins
+        from hexfield_eq.model import STV_HORIZONS as EQ_STV_HORIZONS
+        from hexfield_eq.model import HexfieldNet, infer_net_kwargs_from_state_dict
+        from hexfield_eq.support import _SUPPORT_RADIUS, build_support
+
+        try:
+            from hexfield_eq import _rust as eq_rust
+        except Exception:  # .so absent: analyze still works; search raises
+            eq_rust = None
+
+        _hexfield_eq_ns = SimpleNamespace(
+            config=eq_config,
+            constants=eq_constants,
+            collate_rows=collate_rows,
+            facts_from_state=facts_from_state,
+            build_features=build_features,
+            build_ray_lengths=build_ray_lengths,
+            pack_action_id=pack_action_id,
+            HexfieldEvaluator=HexfieldEvaluator,
+            decode_binned_value=decode_binned_value,
+            value_bins=value_bins,
+            STV_HORIZONS=EQ_STV_HORIZONS,
+            HexfieldNet=HexfieldNet,
+            infer_net_kwargs_from_state_dict=infer_net_kwargs_from_state_dict,
+            support_radius=int(_SUPPORT_RADIUS),
+            build_support=build_support,
+            _rust=eq_rust,
+        )
+    if meta:
+        _check_eq_meta_matches_import(_hexfield_eq_ns, meta)
+    return _hexfield_eq_ns
+
+
+def _load_hexfield_eq_checkpoint(ckpt_path: Path, payload: dict[str, Any]) -> LoadedModel:
+    """Load a hexfield_eq checkpoint onto CPU.
+
+    The checkpoint meta (HexfieldNet.arch_meta) is load-bearing: the x12-tied
+    trunk cannot be shape-inferred from its base weights alone, so
+    ``infer_net_kwargs_from_state_dict`` reads meta FIRST and the import-time
+    HEXFIELD_EQ_* env is seeded from the same meta (see ``_hexfield_eq``).
+    Same soft strict-load contract as the other loaders: drift surfaces as
+    load_warnings, never a 500."""
+
+    meta = dict(payload.get("meta", {}))
+    state_dict = payload["model"]
+    if not isinstance(state_dict, dict):
+        raise ValueError(
+            f"{ckpt_path.name}: hexfield_eq checkpoint 'model' is not a state dict"
+        )
+    eq = _hexfield_eq(meta)
+    kwargs = eq.infer_net_kwargs_from_state_dict(state_dict, meta)
+    model = eq.HexfieldNet(**kwargs)
+    warnings: list[str] = []
+    try:
+        model.load_state_dict(state_dict, strict=True)
+    except RuntimeError as exc:
+        result = model.load_state_dict(state_dict, strict=False)
+        if result.missing_keys:
+            warnings.append(f"missing keys: {list(result.missing_keys)[:8]}")
+        if result.unexpected_keys:
+            warnings.append(f"unexpected keys: {list(result.unexpected_keys)[:8]}")
+        if not result.missing_keys and not result.unexpected_keys:
+            warnings.append(f"load mismatch: {exc}")
+    model.eval()
+    arch: dict[str, Any] = {str(k): v for k, v in meta.items()}
+    arch["moves_left_head"] = True
+    return LoadedModel(
+        lineage=HEXFIELD_EQ,
+        model=model,
+        arch=arch,
+        rl_epoch=_maybe_int(meta.get("epoch")),
+        step=_maybe_int(payload.get("step")),
+        candidate_radius=None,  # full legal set, like hexfield
+        graft=None,
+        load_warnings=warnings,
+        stv_horizons=tuple(int(h) for h in eq.STV_HORIZONS),
+        has_moves_left=True,
+        has_cell_q=("cell_q_head.weight" in state_dict),
+        run_dir=str(ckpt_path.resolve().parent.parent),
+    )
+
+
+def _hexfield_eq_inputs(eq: SimpleNamespace, model: Any, state: Any):
+    """Featurize one decision state into the eq model's (1, N, *) batch.
+
+    Mirrors ``_hexfield_inputs`` plus the Phase-L0 raylen wire buffer, built
+    only for an 'L' trunk layout (a C/A-only net's forward takes raylen=None,
+    keeping the pre-L batch key set)."""
+
+    facts = eq.facts_from_state(state)
+    sup = eq.build_support(facts.stones())
+    feats = eq.build_features(facts, sup)
+    raylen = None
+    if "L" in str(getattr(model, "_trunk_layout", "")):
+        raylen = [eq.build_ray_lengths(facts, sup)]
+    batch = eq.collate_rows([(sup, feats)], raylen=raylen)
+    legal = sup.legal_coords()  # (legal_count, 2) axial (q, r)
+    legal_action_ids = [eq.pack_action_id(int(q), int(r)) for q, r in legal.tolist()]
+    return batch, legal_action_ids
+
+
+def _hexfield_eq_forward(model: Any, batch: dict[str, Any]) -> dict[str, Any]:
+    """CPU forward on the fp32 master bias path (the same ``enable_grad()``
+    trick as ``_hexfield_forward`` — the no-grad branch is the fp16 serve
+    gather), threading the raylen buffer for 'L' layouts."""
+
+    with torch.enable_grad():
+        out = model.forward(
+            batch["feats"], batch["nbr"], batch["mask"], batch["coords"],
+            raylen=batch.get("raylen"),
+        )
+    return {k: v.detach() for k, v in out.items()}
+
+
+@torch.no_grad()
+def _analyze_hexfield_eq(loaded: LoadedModel, action_ids: Sequence[int]) -> dict[str, Any]:
+    eq = _hexfield_eq()
+    state = state_from_actions(action_ids)
+    batch, legal_action_ids = _hexfield_eq_inputs(eq, loaded.model, state)
+    out = _hexfield_eq_forward(loaded.model, batch)
+
+    policy = _hexfield_policy_rows(out["policy"][0], legal_action_ids)
+    opp = None
+    if "opp_policy" in out:
+        opp = _hexfield_policy_rows(out["opp_policy"][0], legal_action_ids)
+
+    value = _hexfield_dist(eq, out["value"][0])
+
+    stv: dict[str, Any] = {}
+    for horizon in loaded.stv_horizons:
+        key = f"stvalue_{horizon}"
+        if key in out:
+            stv[str(horizon)] = _hexfield_dist(eq, out[key][0])
+
+    # Same decode contract as hexfield: 65-bin scalar in [-1, 1]; the UI undoes
+    # the affine map with this lineage's moves_left_cap (209, not 512).
+    moves_left = _hexfield_dist(eq, out["moves_left"][0]) if "moves_left" in out else None
+
+    cell_q = (
+        _hexfield_cell_q_rows(eq, out, legal_action_ids) if loaded.has_cell_q else None
+    )
+
+    current = engine.current_player(state)
+    current_role = getattr(current, "value", str(current))
+    current_index = 1 if str(current_role).endswith("1") else 0
+
+    return {
+        "current_player": current_index,
+        "current_role": str(current_role),
+        "candidate_count": len(legal_action_ids),
+        "legal_count": int(engine.legal_action_count(state)),
+        "value": value["scalar"],
+        "cell_q": cell_q,
+        # The owner-swap optimism probe stays hexgt-only (eq encodes
+        # side-to-move ownership in its own/opp planes, like hexfield).
+        "value_swapped": None,
+        "optimism": None,
+        "value_bins": [round(float(x), 5) for x in eq.value_bins().cpu().numpy()],
+        "value_dist": value["dist"],
+        "policy": policy,
+        "opp_policy": opp,
+        "stvalue": stv,
+        "moves_left": moves_left,
+        "input_planes": None,  # support-graph featurized lineage: no dense planes
+    }
+
+
+@lru_cache(maxsize=16)
+def _hexfield_eq_run_config(run_dir: str | None):
+    """The run's parsed eq HexfieldConfig (from ``<run>/manifest.json``), or
+    None — the as-trained search profile source, mirroring
+    ``_hexfield_run_config``."""
+
+    if not run_dir:
+        return None
+    try:
+        eq = _hexfield_eq()
+        manifest = Path(run_dir) / "manifest.json"
+        data = json.loads(manifest.read_text(encoding="utf-8-sig"))
+        return eq.config.parse_hexfield_config(data.get("model", {}).get("config", {}))
+    except Exception:
+        return None
+
+
+@torch.no_grad()
+def _search_hexfield_eq(
+    loaded: LoadedModel,
+    action_ids: Sequence[int],
+    *,
+    visits: int,
+    c_puct: float,
+    seed: int,
+    temperature: float = 0.0,
+) -> dict[str, Any]:
+    """Real CPU MCTS via hexfield_eq._rust with the run's AS-TRAINED profile —
+    the exact ``_search_hexfield`` contract for the eq lineage (the eq Rust
+    session's featurizer emits the raylen wire buffer the L-layout evaluator
+    consumes)."""
+
+    eq = _hexfield_eq()
+    if eq._rust is None:
+        raise RuntimeError(
+            "hexfield_eq._rust (the MCTS extension) is unavailable in this "
+            "worker; build the .so to search hexfield_eq checkpoints"
+        )
+    cfg = _hexfield_eq_run_config(loaded.run_dir)
+    sp = cfg.selfplay if cfg is not None else eq.config.SelfplayConfig()
+    eval_vbs = 32
+    if cfg is not None:
+        eval_vbs = int(
+            getattr(cfg.multi_stage_eval, "eval_virtual_batch_size", 32) or 32
+        )
+    disabled = False
+    if loaded.run_dir:
+        disabled = (Path(loaded.run_dir) / "diagnostics" / "ml_auto_disabled.flag").exists()
+    overrides = eq.config.build_divergence_overrides(sp, disabled=disabled)
+
+    state = state_from_actions(action_ids)
+    evaluator = eq.HexfieldEvaluator(loaded.model, device="cpu")
+    session = eq._rust.HexfieldMctsSession(max_states=65536)
+
+    result = session.search(
+        [int(seed)],
+        (state,),
+        evaluator=evaluator,
+        visits=int(visits),
+        c_puct=float(c_puct),
+        temperature=0.0,
+        move_temperatures=[float(temperature)],
+        divergence_overrides=overrides,
+        seed=int(seed),
+        virtual_batch_size=eval_vbs,
+        widening_policy_mass=sp.widening_policy_mass,
+        widening_max_children=sp.widening_max_children,
+        widening_min_children=sp.widening_min_children,
+        fpu_reduction=sp.fpu_reduction,
+        tss_enabled=sp.tss_enabled,
+        search_parity_mode=sp.search_parity_mode,
+    )[0]
+
+    visit_pairs = _decode_id_weight_pairs(
+        result["visit_policy_action_ids_bytes"], result["visit_policy_weights_bytes"]
+    )
+    root_prior_pairs = _decode_id_weight_pairs(
+        result["root_prior_policy_action_ids_bytes"],
+        result["root_prior_policy_weights_bytes"],
+    )
+    best_action_id = int(result["action_id"])
+
+    return {
+        "visits_requested": int(visits),
+        "visits": int(result["visits"]),
+        "root_value": float(result["root_value"]),
+        "best_action_id": best_action_id,
+        "best": _coord_of(best_action_id),
+        "visit_policy": _policy_pairs_to_rows(visit_pairs, normalize=True),
+        "root_prior": _policy_pairs_to_rows(root_prior_pairs, normalize=False),
+        "selection_in_search": True,
+        "search_profile": {
+            "source": "manifest" if cfg is not None else "defaults",
+            "temperature": float(temperature),
+            "gumbel_root": bool(overrides.get("gumbel_root")),
+            "gumbel_sequential_halving": bool(
+                overrides.get("gumbel_sequential_halving")
+            ),
+            "gumbel_m": int(overrides.get("gumbel_m", 0)),
+        },
+    }
+
+
 # ---------------------------------------------------------------------------
 # hexfield attention map (Model Debug interactive attention view)
 # ---------------------------------------------------------------------------
@@ -1573,6 +1951,9 @@ def moves_left_cap(loaded: LoadedModel) -> int | None:
         from hexfield.constants import MOVES_LEFT_CAP
 
         return int(MOVES_LEFT_CAP)
+    if loaded.lineage == HEXFIELD_EQ:
+        # 209, not hexfield's 512 — the eq rewrite re-capped the head.
+        return int(_hexfield_eq().constants.MOVES_LEFT_CAP)
     return None
 
 
@@ -1631,6 +2012,23 @@ def _tree_evaluator(loaded: LoadedModel, n: int | None):
             out = _hexfield_forward(loaded.model, batch)
             value = float(
                 hf.decode_binned_value(out["value"][0].float().reshape(1, -1)).reshape(()).item()
+            )
+            legal_count = len(legal_action_ids)
+            if legal_count == 0:
+                return [], value
+            priors = torch.softmax(out["policy"][0][:legal_count].float(), dim=0)
+            return list(zip(legal_action_ids, priors.tolist())), value
+
+        return evaluate
+
+    if loaded.lineage == HEXFIELD_EQ:
+        eq = _hexfield_eq()
+
+        def evaluate(state: Any) -> tuple[list[tuple[int, float]], float]:
+            batch, legal_action_ids = _hexfield_eq_inputs(eq, loaded.model, state)
+            out = _hexfield_eq_forward(loaded.model, batch)
+            value = float(
+                eq.decode_binned_value(out["value"][0].float().reshape(1, -1)).reshape(()).item()
             )
             legal_count = len(legal_action_ids)
             if legal_count == 0:
@@ -2041,8 +2439,10 @@ def game_eval_positions(
     # Gated on the checkpoint actually carrying cell_q; every other lineage / an
     # older hexfield checkpoint leaves all regret keys None (additive, backward-
     # compatible). Built once; ``_regret_for_ply`` returns the 6-key dict.
-    want_regret = loaded.lineage == HEXFIELD and loaded.has_cell_q
-    hf_regret = _hexfield() if want_regret else None
+    want_regret = loaded.lineage in (HEXFIELD, HEXFIELD_EQ) and loaded.has_cell_q
+    hf_regret = None
+    if want_regret:
+        hf_regret = _hexfield() if loaded.lineage == HEXFIELD else _hexfield_eq()
     _NULL_REGRET = {
         "played_q": None,
         "best_q": None,
@@ -2056,11 +2456,18 @@ def game_eval_positions(
         # No played move at the final position (ply == total) -> no regret.
         if not want_regret or ply >= len(action_ids):
             return dict(_NULL_REGRET)
-        batch, legal_action_ids = _hexfield_inputs(hf_regret, state)
+        if loaded.lineage == HEXFIELD_EQ:
+            batch, legal_action_ids = _hexfield_eq_inputs(hf_regret, loaded.model, state)
+        else:
+            batch, legal_action_ids = _hexfield_inputs(hf_regret, state)
         legal_count = len(legal_action_ids)
         if legal_count == 0:  # terminal / no legal cell
             return dict(_NULL_REGRET)
-        out = _hexfield_forward(loaded.model, batch)
+        out = (
+            _hexfield_eq_forward(loaded.model, batch)
+            if loaded.lineage == HEXFIELD_EQ
+            else _hexfield_forward(loaded.model, batch)
+        )
         q_scalar = _hexfield_cell_q_scalars(hf_regret, out, legal_count)
         if q_scalar is None:
             return dict(_NULL_REGRET)
