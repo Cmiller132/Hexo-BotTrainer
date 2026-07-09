@@ -47,5 +47,37 @@ permutation/homomorphism laws for all five types and all 144 group-element
 pairs. Results: **4 passed** on Windows Python and **4 passed** in the specified
 WSL venv.
 
+### G2 — Hom-space dimensions: PASS
+
+Rows are input types and columns are output types. The fixed order is
+`reg, mirror, point, axis, triv`.
+
+| in \ out | reg | mirror | point | axis | triv |
+|---|---:|---:|---:|---:|---:|
+| reg | 12 | 6 | 6 | 3 | 1 |
+| mirror | 6 | 4 | 3 | 2 | 1 |
+| point | 6 | 3 | 6 | 3 | 1 |
+| axis | 3 | 2 | 3 | 2 | 1 |
+| triv | 1 | 1 | 1 | 1 | 1 |
+
+The corresponding conv-tap dimensions (reported as additional evidence) are:
+
+| in \ out | reg | mirror | point | axis | triv |
+|---|---:|---:|---:|---:|---:|
+| reg | 84 | 42 | 42 | 21 | 7 |
+| mirror | 42 | 24 | 21 | 12 | 5 |
+| point | 42 | 21 | 24 | 12 | 4 |
+| axis | 21 | 12 | 12 | 7 | 3 |
+| triv | 7 | 5 | 4 | 3 | 2 |
+
+For all 25 linear pairs, diagonal pair-orbit counts, directly enumerated
+double-coset counts, and fp64 SVD ranks of the Reynolds projectors agree. For
+all 25 conv pairs, triple-orbit counts agree with independent fp64 projector
+ranks; the required `reg -> reg` anchor is 84. Each projector is also checked
+symmetric and idempotent at `atol=1e-12`. The table was independently rebuilt
+from `apply_d6` by a second analysis and matched entry-for-entry. Results:
+`tests/test_hexfield_eq_reps_homdims.py` **4 passed** on Windows and **4 passed**
+in WSL.
+
 Later gate results, audit evidence, cost rankings, and the final recommendation
 will be filled as each ordered gate turns green.

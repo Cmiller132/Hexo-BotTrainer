@@ -13,6 +13,8 @@ import functools
 from collections.abc import Sequence
 from typing import Final
 
+import torch
+
 from .constants import DIRECTIONS
 from .geometry import apply_d6
 
@@ -221,3 +223,152 @@ def rep_gather(type_name: str, g: int) -> tuple[int, ...]:
     inv_g = build_group()["inv"][g]
     return rep_action(type_name, inv_g)
 
+
+def _canonical_orbit_labels(
+    shape: Sequence[int], transforms: Sequence[Sequence[int]]
+) -> torch.Tensor:
+    """Label finite-set orbits in first-occurrence (row-major) order."""
+
+    size = 1
+    for extent in shape:
+        size *= extent
+    parent = list(range(size))
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: int, b: int) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[max(ra, rb)] = min(ra, rb)
+
+    for transform in transforms:
+        if len(transform) != size:
+            raise ValueError("orbit transform has the wrong cardinality")
+        for source, destination in enumerate(transform):
+            union(source, destination)
+
+    label_of_root: dict[int, int] = {}
+    labels: list[int] = []
+    for flat_index in range(size):
+        root = find(flat_index)
+        if root not in label_of_root:
+            label_of_root[root] = len(label_of_root)
+        labels.append(label_of_root[root])
+    return torch.tensor(labels, dtype=torch.long).reshape(tuple(shape))
+
+
+@functools.lru_cache(maxsize=None)
+def linear_basis_index(in_type: str, out_type: str) -> torch.Tensor:
+    """Orbit-basis label for every ``(out_slot, in_slot)`` matrix entry.
+
+    Entries carrying the same integer label share one free coefficient.  Labels
+    are assigned by the first row-major entry in each diagonal-action orbit.
+    """
+
+    nout, nin = slots(out_type), slots(in_type)
+    transforms: list[list[int]] = []
+    for g in range(GROUP_ORDER):
+        out_action = rep_action(out_type, g)
+        in_action = rep_action(in_type, g)
+        transforms.append(
+            [out_action[a] * nin + in_action[b] for a in range(nout) for b in range(nin)]
+        )
+    return _canonical_orbit_labels((nout, nin), transforms)
+
+
+@functools.lru_cache(maxsize=None)
+def conv_basis_index(in_type: str, out_type: str) -> torch.Tensor:
+    """Orbit-basis labels on ``(tap, out_slot, in_slot)`` triples."""
+
+    ntaps, nout, nin = 7, slots(out_type), slots(in_type)
+    tapp = build_group()["tapp"]
+    transforms: list[list[int]] = []
+    for g in range(GROUP_ORDER):
+        out_action = rep_action(out_type, g)
+        in_action = rep_action(in_type, g)
+        transforms.append(
+            [
+                (tapp[g][tap] * nout + out_action[a]) * nin + in_action[b]
+                for tap in range(ntaps)
+                for a in range(nout)
+                for b in range(nin)
+            ]
+        )
+    return _canonical_orbit_labels((ntaps, nout, nin), transforms)
+
+
+def orbit_dimension(in_type: str, out_type: str, *, conv: bool = False) -> int:
+    """Dimension from diagonal-action orbit count (derivation sections 2–3)."""
+
+    labels = conv_basis_index(in_type, out_type) if conv else linear_basis_index(
+        in_type, out_type
+    )
+    return int(labels.max().item()) + 1
+
+
+@functools.lru_cache(maxsize=None)
+def double_cosets(in_type: str, out_type: str) -> tuple[tuple[int, ...], ...]:
+    """Enumerate ``H_out \\ G / H_in`` directly in canonical order."""
+
+    h_in, h_out = subgroup(in_type), subgroup(out_type)
+    mult = build_group()["mult"]
+    unique = {
+        tuple(
+            sorted(
+                {
+                    mult[mult[left][g]][right]
+                    for left in h_out
+                    for right in h_in
+                }
+            )
+        )
+        for g in range(GROUP_ORDER)
+    }
+    result = tuple(sorted(unique, key=lambda coset: (min(coset), coset)))
+    if sorted({element for coset in result for element in coset}) != list(
+        range(GROUP_ORDER)
+    ):
+        raise AssertionError(f"double cosets do not cover D6: {result}")
+    for a, left in enumerate(result):
+        for right in result[a + 1 :]:
+            if set(left).intersection(right):
+                raise AssertionError(f"overlapping double cosets: {left}, {right}")
+    return result
+
+
+def reynolds_projector(
+    in_type: str,
+    out_type: str,
+    *,
+    conv: bool = False,
+    dtype: torch.dtype = torch.float64,
+) -> torch.Tensor:
+    """Dense Reynolds projector on linear or conv matrix-entry space.
+
+    This construction averages explicit permutation matrices and is independent
+    of the orbit-label and double-coset algorithms used by the other G2 proofs.
+    """
+
+    ntaps = 7 if conv else 1
+    nout, nin = slots(out_type), slots(in_type)
+    dimension = ntaps * nout * nin
+    projector = torch.zeros((dimension, dimension), dtype=dtype)
+    tapp = build_group()["tapp"]
+    for g in range(GROUP_ORDER):
+        out_action = rep_action(out_type, g)
+        in_action = rep_action(in_type, g)
+        for tap in range(ntaps):
+            tap_g = tapp[g][tap] if conv else tap
+            for out_slot in range(nout):
+                for in_slot in range(nin):
+                    source = (tap * nout + out_slot) * nin + in_slot
+                    destination = (
+                        (tap_g * nout + out_action[out_slot]) * nin
+                        + in_action[in_slot]
+                    )
+                    projector[destination, source] += 1.0 / GROUP_ORDER
+    return projector
