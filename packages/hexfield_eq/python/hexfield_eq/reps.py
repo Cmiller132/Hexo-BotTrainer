@@ -10,7 +10,7 @@ Phase-A derivation: ``docs/quotient_reps/DERIVATION_QUOTIENT_REPS.md``.
 from __future__ import annotations
 
 import functools
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Final
 
 import torch
@@ -20,6 +20,13 @@ from .geometry import apply_d6
 
 GROUP_ORDER: Final = 12
 TYPE_ORDER: Final = ("reg", "mirror", "point", "axis", "triv")
+INPUT_FEATURES: Final = 25
+AXIS_PLANE_BASE: Final = 11
+N_AXIS_QUANTITIES: Final = 4
+N_AXES: Final = 3
+
+Signature = tuple[tuple[str, int], ...]
+SignatureLike = str | Mapping[str, int] | Sequence[tuple[str, int]]
 
 
 def _action_signature(g: int) -> tuple[tuple[int, int], tuple[int, int]]:
@@ -372,3 +379,296 @@ def reynolds_projector(
                     )
                     projector[destination, source] += 1.0 / GROUP_ORDER
     return projector
+
+
+def canonical_signature(signature: SignatureLike) -> Signature:
+    """Validate and canonicalize a quotient-type multiplicity signature."""
+
+    if isinstance(signature, str):
+        parsed: list[tuple[str, int]] = []
+        if signature.strip():
+            for item in signature.split(","):
+                fields = item.strip().split(":")
+                if len(fields) != 2:
+                    raise ValueError(f"invalid signature item {item!r}")
+                parsed.append((fields[0].strip(), int(fields[1])))
+        items = parsed
+    elif isinstance(signature, Mapping):
+        items = list(signature.items())
+    else:
+        items = list(signature)
+
+    counts = {name: 0 for name in TYPE_ORDER}
+    seen: set[str] = set()
+    for name, multiplicity in items:
+        if name not in counts:
+            raise ValueError(f"unknown quotient type {name!r}; expected one of {TYPE_ORDER}")
+        if name in seen:
+            raise ValueError(f"duplicate quotient type {name!r}")
+        seen.add(name)
+        value = int(multiplicity)
+        if value < 0 or value != multiplicity:
+            raise ValueError(f"multiplicity for {name} must be a non-negative integer")
+        counts[name] = value
+    result = tuple((name, counts[name]) for name in TYPE_ORDER if counts[name] > 0)
+    if not result:
+        raise ValueError("signature must contain at least one instance")
+    return result
+
+
+def signature_width(signature: SignatureLike) -> int:
+    """Dense channel width of a signature."""
+
+    return sum(slots(name) * multiplicity for name, multiplicity in canonical_signature(signature))
+
+
+def signature_instances(signature: SignatureLike) -> int:
+    """Number of quotient instances (the pooled/invariant width)."""
+
+    return sum(multiplicity for _, multiplicity in canonical_signature(signature))
+
+
+def _signature_blocks(
+    signature: SignatureLike,
+) -> tuple[tuple[str, int, int, int], ...]:
+    """Return ``(type, multiplicity, start, stop)`` channel blocks."""
+
+    result: list[tuple[str, int, int, int]] = []
+    offset = 0
+    for type_name, multiplicity in canonical_signature(signature):
+        stop = offset + slots(type_name) * multiplicity
+        result.append((type_name, multiplicity, offset, stop))
+        offset = stop
+    return tuple(result)
+
+
+@functools.lru_cache(maxsize=None)
+def _signature_action_cached(signature: Signature, g: int) -> tuple[int, ...]:
+    """Cached implementation for :func:`signature_action`."""
+
+    action: list[int] = []
+    offset = 0
+    for type_name, multiplicity in signature:
+        slot_action = rep_action(type_name, g)
+        for slot in range(slots(type_name)):
+            for instance in range(multiplicity):
+                action.append(offset + slot_action[slot] * multiplicity + instance)
+        offset += slots(type_name) * multiplicity
+    return tuple(action)
+
+
+def signature_action(signature: SignatureLike, g: int) -> tuple[int, ...]:
+    """Forward channel action in production-compatible slot-major layout.
+
+    Inside each canonical type block the frozen layout is
+    ``type_offset + slot*multiplicity + instance``.  This is the only layout
+    that permits G3's raw elementwise parity with the production regular fiber.
+    """
+
+    return _signature_action_cached(canonical_signature(signature), g)
+
+
+def signature_gather(signature: SignatureLike, g: int) -> tuple[int, ...]:
+    """Output-to-input gather permutation for a typed channel stream."""
+
+    return signature_action(signature, build_group()["inv"][g])
+
+
+def signature_matrix(
+    signature: SignatureLike,
+    g: int,
+    *,
+    dtype: torch.dtype = torch.float64,
+    device: torch.device | str | None = None,
+) -> torch.Tensor:
+    """Dense permutation matrix for a typed signature action."""
+
+    action = signature_action(signature, g)
+    matrix = torch.zeros((len(action), len(action)), dtype=dtype, device=device)
+    source = torch.arange(len(action), device=device)
+    destination = torch.tensor(action, dtype=torch.long, device=device)
+    matrix[destination, source] = 1
+    return matrix
+
+
+def _coefficient(
+    coefficients: Mapping[tuple[str, str], torch.Tensor],
+    out_type: str,
+    in_type: str,
+    expected_shape: tuple[int, int, int],
+) -> torch.Tensor:
+    """Fetch and validate one type-pair coefficient tensor."""
+
+    key = (out_type, in_type)
+    if key not in coefficients:
+        raise KeyError(f"missing coefficient tensor for out={out_type}, in={in_type}")
+    coefficient = coefficients[key]
+    if tuple(coefficient.shape) != expected_shape:
+        raise ValueError(
+            f"coefficient {key} has shape {tuple(coefficient.shape)}, "
+            f"expected {expected_shape}"
+        )
+    return coefficient
+
+
+def typed_linear_weight(
+    coefficients: Mapping[tuple[str, str], torch.Tensor],
+    in_signature: SignatureLike,
+    out_signature: SignatureLike,
+) -> torch.Tensor:
+    """Materialize an equivariant dense ``(C_out, C_in)`` linear weight.
+
+    Each mapping value is shaped ``(basis, out_instances, in_instances)`` and
+    keyed by ``(out_type, in_type)``.
+    """
+
+    in_blocks = _signature_blocks(in_signature)
+    out_blocks = _signature_blocks(out_signature)
+    exemplar = next(iter(coefficients.values()), None)
+    if exemplar is None:
+        raise ValueError("at least one coefficient tensor is required")
+    weight = exemplar.new_zeros(
+        (signature_width(out_signature), signature_width(in_signature))
+    )
+    for out_type, mout, out_start, out_stop in out_blocks:
+        for in_type, min_, in_start, in_stop in in_blocks:
+            labels = linear_basis_index(in_type, out_type).to(exemplar.device)
+            coefficient = _coefficient(
+                coefficients,
+                out_type,
+                in_type,
+                (orbit_dimension(in_type, out_type), mout, min_),
+            )
+            # (out_slot, in_slot, out_instance, in_instance) -> slot-major axes.
+            block = coefficient[labels].permute(0, 2, 1, 3).reshape(
+                out_stop - out_start, in_stop - in_start
+            )
+            weight[out_start:out_stop, in_start:in_stop] = block
+    return weight
+
+
+def typed_conv_weight(
+    coefficients: Mapping[tuple[str, str], torch.Tensor],
+    in_signature: SignatureLike,
+    out_signature: SignatureLike,
+) -> torch.Tensor:
+    """Materialize an equivariant dense conv weight ``(7, C_in, C_out)``."""
+
+    in_blocks = _signature_blocks(in_signature)
+    out_blocks = _signature_blocks(out_signature)
+    exemplar = next(iter(coefficients.values()), None)
+    if exemplar is None:
+        raise ValueError("at least one coefficient tensor is required")
+    weight = exemplar.new_zeros(
+        (7, signature_width(in_signature), signature_width(out_signature))
+    )
+    for out_type, mout, out_start, out_stop in out_blocks:
+        for in_type, min_, in_start, in_stop in in_blocks:
+            labels = conv_basis_index(in_type, out_type).to(exemplar.device)
+            coefficient = _coefficient(
+                coefficients,
+                out_type,
+                in_type,
+                (orbit_dimension(in_type, out_type, conv=True), mout, min_),
+            )
+            # (tap,out_slot,in_slot,out_inst,in_inst) -> (tap,in,out).
+            block = coefficient[labels].permute(0, 2, 4, 1, 3).reshape(
+                7, in_stop - in_start, out_stop - out_start
+            )
+            weight[:, in_start:in_stop, out_start:out_stop] = block
+    return weight
+
+
+def production_linear_coefficients(wb: torch.Tensor) -> torch.Tensor:
+    """Bijection from production ``wb`` to the generated reg→reg basis."""
+
+    if wb.ndim != 3 or wb.shape[0] != GROUP_ORDER:
+        raise ValueError("wb must have shape (12, out_instances, in_instances)")
+    labels = linear_basis_index("reg", "reg")
+    representative_labels = labels[0]
+    if sorted(representative_labels.tolist()) != list(range(GROUP_ORDER)):
+        raise AssertionError("(out=e, in=s) is not a regular linear transversal")
+    result = torch.empty_like(wb)
+    for relative_slot, label in enumerate(representative_labels.tolist()):
+        result[label] = wb[relative_slot]
+    return result
+
+
+def production_conv_coefficients(w_base: torch.Tensor) -> torch.Tensor:
+    """Bijection from production ``w_base`` to the 84 reg→reg conv basis."""
+
+    if w_base.ndim != 4 or tuple(w_base.shape[:2]) != (7, GROUP_ORDER):
+        raise ValueError("w_base must have shape (7, 12, out_instances, in_instances)")
+    labels = conv_basis_index("reg", "reg")[:, 0, :]
+    if sorted(labels.flatten().tolist()) != list(range(7 * GROUP_ORDER)):
+        raise AssertionError("(tap, out=e, in=s) is not a regular conv transversal")
+    result = w_base.new_empty((7 * GROUP_ORDER, *w_base.shape[2:]))
+    for tap in range(7):
+        for relative_slot in range(GROUP_ORDER):
+            result[labels[tap, relative_slot]] = w_base[tap, relative_slot]
+    return result
+
+
+@functools.lru_cache(maxsize=None)
+def input_rep_action(g: int) -> tuple[int, ...]:
+    """Forward action on the real 25 input planes (13 scalars + 4 axis reps)."""
+
+    if not 0 <= g < GROUP_ORDER:
+        raise ValueError(f"D6 element out of range: {g}")
+    axis_planes = set(
+        range(AXIS_PLANE_BASE, AXIS_PLANE_BASE + N_AXIS_QUANTITIES * N_AXES)
+    )
+    action = list(range(INPUT_FEATURES))
+    axis_action = rep_action("axis", g)
+    for quantity in range(N_AXIS_QUANTITIES):
+        for axis in range(N_AXES):
+            source = AXIS_PLANE_BASE + quantity * N_AXES + axis
+            action[source] = (
+                AXIS_PLANE_BASE + quantity * N_AXES + axis_action[axis]
+            )
+    if any(action[plane] != plane for plane in range(INPUT_FEATURES) if plane not in axis_planes):
+        raise AssertionError("scalar input plane moved")
+    return tuple(action)
+
+
+def input_rep_matrix(
+    g: int,
+    *,
+    dtype: torch.dtype = torch.float64,
+    device: torch.device | str | None = None,
+) -> torch.Tensor:
+    """Dense permutation matrix for the typed 25-plane input action."""
+
+    action = input_rep_action(g)
+    matrix = torch.zeros((INPUT_FEATURES, INPUT_FEATURES), dtype=dtype, device=device)
+    source = torch.arange(INPUT_FEATURES, device=device)
+    destination = torch.tensor(action, dtype=torch.long, device=device)
+    matrix[destination, source] = 1
+    return matrix
+
+
+def typed_stem_weight(w0: torch.Tensor, out_signature: SignatureLike) -> torch.Tensor:
+    """Reynolds-project a free stem into ``(7, 25, C_out)`` dense layout.
+
+    ``w0`` has shape ``(7, C_out, 25)``.  The averaging order matches the
+    production stem lift, while the output action can be any typed signature.
+    """
+
+    cout = signature_width(out_signature)
+    if tuple(w0.shape) != (7, cout, INPUT_FEATURES):
+        raise ValueError(
+            f"w0 has shape {tuple(w0.shape)}, expected {(7, cout, INPUT_FEATURES)}"
+        )
+    group = build_group()
+    result = torch.zeros_like(w0)
+    for g in range(GROUP_ORDER):
+        out_matrix = signature_matrix(
+            out_signature, g, dtype=w0.dtype, device=w0.device
+        )
+        in_matrix = input_rep_matrix(g, dtype=w0.dtype, device=w0.device)
+        inverse_taps = group["tapp"][group["inv"][g]]
+        transformed_taps = w0[inverse_taps]
+        result = result + torch.einsum(
+            "oc,tcn,mn->tom", out_matrix, transformed_taps, in_matrix
+        )
+    return (result / GROUP_ORDER).transpose(1, 2).contiguous()

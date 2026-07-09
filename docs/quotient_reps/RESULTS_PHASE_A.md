@@ -79,5 +79,19 @@ from `apply_d6` by a second analysis and matched entry-for-entry. Results:
 `tests/test_hexfield_eq_reps_homdims.py` **4 passed** on Windows and **4 passed**
 in WSL.
 
+### G3 — production machinery reproduction: PASS
+
+The pure-regular specialization uses an explicit transversal bijection:
+production `wb[s]` maps to the orbit containing `(out=e, in=s)`, and production
+`w_base[t,s]` maps to the orbit containing `(tap=t, out=e, in=s)`. This gives
+12 and 84 distinct basis coefficients respectively. The stem comparison uses
+the generated 25-plane input action and the typed-output Reynolds lift.
+
+Random fp64 production parameters were reproduced elementwise: linear and
+conv weights at `atol=0, rtol=0`, and the averaging stem lift at
+`atol=1e-12, rtol=0`. The input representation matrices also match production
+exactly. `tests/test_hexfield_eq_reps_parity.py`: **4 passed** on Windows and
+**4 passed** in WSL.
+
 Later gate results, audit evidence, cost rankings, and the final recommendation
 will be filled as each ordered gate turns green.
