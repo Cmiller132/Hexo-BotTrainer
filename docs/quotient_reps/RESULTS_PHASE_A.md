@@ -36,6 +36,18 @@ is that `reps.py` introduces no channel/group-shape dependency of its own and
 imports in every environment in which the mandated geometry/constants modules
 already import.
 
+### D4: CPU model import otherwise imports Triton indirectly
+
+Production `model.py` unconditionally attempts to import
+`torch.nn.attention.flex_attention` even when every flex and Triton environment
+gate is off. On the installed Windows Torch build that import loads the Triton
+package before falling back with a no-CUDA warning, conflicting with Phase A's
+"no Triton imports" rule. New CPU-only code therefore disables every backend
+gate and places a `None` sentinel for that optional module before importing the
+production model; the guarded import takes its existing no-flex fallback. G6
+asserts that no `triton` module entered `sys.modules`. The same guard is used by
+the G7 CPU audit.
+
 ## Gate results
 
 ### G1 — group foundation parity: PASS
@@ -122,6 +134,26 @@ Every quotient action commuted within fp64 tolerance. Every reflection in the
 valid sign representation violated GELU commutation by more than 1.0, while
 rotations (sign `+1`) remained exact. The combined G4/G5 file now reports
 **5 passed** on Windows and **5 passed** in WSL.
+
+### G6 — typed toy network: PASS
+
+The toy architecture uses both required signatures (widths 51 and 96), a typed
+25-plane Reynolds stem, two production-form typed conv residual blocks, a
+regular `reg:4` attention interior with 3 coset heads of dimension 16, joint
+pair/head bias, a regular-interior sigmoid-gated SUM register refresh, typed
+MLP, and invariant policy/value reads. The end-to-end gate covers five seeded
+legal connected prefixes expanded by the real Python oracle and all 12 D6
+transforms. A pure `reg:8` construction separately parameter-matches production
+stem, two `ConvBlock`s, and one materialized `AttnBlock` at width 96.
+
+Both signatures passed 120 end-to-end transformed forwards (2 signatures × 5
+positions × 12 elements): policy rows permuted and scalar values stayed
+invariant at `atol=1e-9`. The parameter-matched pure-regular stem/C/C/A path
+agreed with production primitives at fp64 tolerances of `1e-12` through the
+stem, `1e-11` through conv blocks, and `1e-10` through attention. The test
+asserts before and after execution that no `triton` module is loaded.
+`tests/test_hexfield_eq_reps_toynet.py`: **2 passed** on Windows and **2 passed**
+in WSL.
 
 Later gate results, audit evidence, cost rankings, and the final recommendation
 will be filled as each ordered gate turns green.

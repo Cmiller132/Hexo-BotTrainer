@@ -734,6 +734,31 @@ def scale_signature(signature: SignatureLike, factor: int) -> Signature:
     )
 
 
+@functools.lru_cache(maxsize=None)
+def head_perm(orbit_width: int) -> torch.Tensor:
+    """Coset-group a regular fiber for three axis heads at arbitrary ``K``."""
+
+    if orbit_width < 1:
+        raise ValueError("attention orbit width must be positive")
+    order = [
+        slot * orbit_width + instance
+        for coset in quotient_cosets("axis")
+        for slot in coset
+        for instance in range(orbit_width)
+    ]
+    return torch.tensor(order, dtype=torch.long)
+
+
+@functools.lru_cache(maxsize=None)
+def head_perm_inv(orbit_width: int) -> torch.Tensor:
+    """Inverse of :func:`head_perm`."""
+
+    permutation = head_perm(orbit_width)
+    inverse = torch.empty_like(permutation)
+    inverse[permutation] = torch.arange(permutation.numel())
+    return inverse
+
+
 def _parameter_key(out_type: str, in_type: str) -> str:
     return f"{out_type}__from__{in_type}"
 
@@ -861,6 +886,55 @@ class TypedConv(nn.Module):
         weight = self.materialize_weight()
         result = gathered.reshape(batch, nodes, 7 * cin) @ weight.reshape(
             7 * cin, signature_width(self.out_signature)
+        )
+        if self.bias_base is not None:
+            result = result + expand_per_instance(self.bias_base, self.out_signature)
+        return result
+
+
+class TypedStem(nn.Module):
+    """Reynolds-lifted seven-tap stem from the real 25-plane input rep."""
+
+    out_signature: Signature
+
+    def __init__(
+        self,
+        out_signature: SignatureLike,
+        *,
+        bias: bool = True,
+        dtype: torch.dtype | None = None,
+    ) -> None:
+        super().__init__()
+        self.out_signature = canonical_signature(out_signature)
+        cout = signature_width(self.out_signature)
+        self.w0 = nn.Parameter(torch.empty((7, cout, INPUT_FEATURES), dtype=dtype))
+        nn.init.normal_(self.w0, mean=0.0, std=(7 * INPUT_FEATURES) ** -0.5)
+        if bias:
+            self.bias_base = nn.Parameter(
+                torch.zeros(signature_instances(self.out_signature), dtype=dtype)
+            )
+        else:
+            self.register_parameter("bias_base", None)
+
+    def materialize_weight(self) -> torch.Tensor:
+        """Generate the dense ``(7, 25, C_out)`` projected stem weight."""
+
+        return typed_stem_weight(self.w0, self.out_signature)
+
+    def forward(self, x: torch.Tensor, nbr: torch.Tensor) -> torch.Tensor:
+        if x.ndim != 3 or nbr.ndim != 3 or nbr.shape[:2] != x.shape[:2] or nbr.shape[2] != 6:
+            raise ValueError("expected x(B,N,25) and nbr(B,N,6)")
+        batch, nodes, features = x.shape
+        if features != INPUT_FEATURES:
+            raise ValueError(f"stem requires {INPUT_FEATURES} input planes")
+        padded = torch.cat((x, x.new_zeros((batch, 1, features))), dim=1)
+        safe_nbr = torch.where(nbr >= 0, nbr, torch.full_like(nbr, nodes)).long()
+        batch_index = torch.arange(batch, device=x.device).view(batch, 1, 1)
+        neighbors = padded[batch_index, safe_nbr]
+        gathered = torch.cat((x.unsqueeze(2), neighbors), dim=2)
+        weight = self.materialize_weight()
+        result = gathered.reshape(batch, nodes, 7 * features) @ weight.reshape(
+            7 * features, signature_width(self.out_signature)
         )
         if self.bias_base is not None:
             result = result + expand_per_instance(self.bias_base, self.out_signature)
