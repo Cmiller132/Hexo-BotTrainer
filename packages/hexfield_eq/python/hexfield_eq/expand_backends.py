@@ -281,6 +281,15 @@ def _reassemble_rust_rows(
     coords = np.frombuffer(bytes(result["coords"]), dtype=np.int32, count=2 * total_nodes).reshape(-1, 2)
     dist = np.frombuffer(bytes(result["dist"]), dtype=np.int32, count=total_nodes)
     nbr = np.frombuffer(bytes(result["nbr"]), dtype=np.int32, count=6 * total_nodes).reshape(-1, 6)
+    # The kernel's feature width must match this build's plane map: a stale .so
+    # under HEXFIELD_EQ_FEATURE_VERSION=2 (or a version desync between the env
+    # the .so latched and this import) would otherwise mis-slice every plane.
+    if int(result["num_features"]) != NUM_FEATURES:
+        raise ValueError(
+            f"expand kernel emitted {int(result['num_features'])} feature planes "
+            f"but this build expects NUM_FEATURES={NUM_FEATURES} — rebuild "
+            "hexfield_eq._rust (HEXFIELD_EQ_FEATURE_VERSION desync)"
+        )
     feats = np.frombuffer(bytes(result["feats"]), dtype=np.float32, count=NUM_FEATURES * total_nodes).reshape(-1, NUM_FEATURES)
     # Side-relative ray lengths follow the SAME node_off slices as feats. When
     # the kernel omits the buffer (an older .so), rows carry all-zero raylen —

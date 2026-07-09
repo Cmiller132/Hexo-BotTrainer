@@ -26,30 +26,34 @@ import functools
 import torch
 
 from .constants import (
+    AXIS_PLANE_BASE,
     BIAS_DISK_RADIUS,
     BIAS_EXACT_ROWS,
     BIAS_ROWS,
     C_ORBIT,
     CHANNELS,
     DIRECTIONS,
+    FEATURE_VERSION,
+    N_AXES,
+    N_AXIS_QUANTITIES,
     NUM_FEATURES,
 )
 from .geometry import apply_d6, d6_inverse, disk_offsets, rel_bias_index
 
 GROUP = 12  # full D6
 
-# The 25 input planes carry a typed permutation rep (docs/DERIVATION §8):
-# 13 scalar planes (trivial rep) + 12 axis planes = 4 quantities x 3 axes, the
-# axis index carrying the same 3-set (coset) action as the heads. In the real
-# feature layout (constants.py) the 12 axis planes are contiguous starting at 11
-# (own_line/opp_line/own_live/opp_live x {Q,R,QR}); the fork scalars 23/24 sit
-# after them, so the 13 scalars are NOT contiguous.
-AXIS_PLANE_BASE = 11
-N_AXIS_QUANTITIES = 4  # own_line, opp_line, own_live, opp_live
-N_AXES = 3  # Q, R, QR
+# The input planes carry a typed permutation rep (docs/DERIVATION §8): the
+# scalar planes (trivial rep) + the axis planes = N_AXIS_QUANTITIES quantities
+# x 3 axes, the axis index carrying the same 3-set (coset) action as the heads.
+# In the real feature layout (constants.py) the axis planes are contiguous
+# starting at 11; the fork scalars sit AFTER them (23/24 under FEATURE_VERSION
+# 1, 41/42 under version 2 — spec §1.2 fork re-index), so the scalar planes are
+# NOT contiguous. The plane-map geometry (AXIS_PLANE_BASE, N_AXIS_QUANTITIES,
+# N_AXES) is version-dependent and owned by constants.py; the typing sets here
+# derive from it so every consumer regenerates against the active map.
 _AXIS_PLANES = set(range(AXIS_PLANE_BASE, AXIS_PLANE_BASE + N_AXIS_QUANTITIES * N_AXES))
 _SCALAR_PLANES = [p for p in range(NUM_FEATURES) if p not in _AXIS_PLANES]
-assert len(_SCALAR_PLANES) == 13, _SCALAR_PLANES
+assert len(_SCALAR_PLANES) == (13 if FEATURE_VERSION == 1 else 16), _SCALAR_PLANES
 
 
 @functools.lru_cache(maxsize=1)
@@ -179,8 +183,9 @@ def _reg_matrix() -> torch.Tensor:
 
 @functools.lru_cache(maxsize=1)
 def _in_rep_matrix() -> torch.Tensor:
-    """(12, NF, NF) dense rho_in(g): 13 scalar planes fixed, 12 axis planes
-    permuted by the coset action (plane 11+q*3+a -> 11+q*3+cosp[g][a])."""
+    """(12, NF, NF) dense rho_in(g): the scalar planes fixed, the axis planes
+    permuted by the coset action (plane BASE+q*3+a -> BASE+q*3+cosp[g][a],
+    q over the version's N_AXIS_QUANTITIES)."""
 
     G = build_group()
     cosp = G["cosp"]

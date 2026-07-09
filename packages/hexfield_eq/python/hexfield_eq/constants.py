@@ -35,11 +35,28 @@ COORD_OFFSET = 1 << 15
 # featurizer uses -1; the wire/batching layer maps -1 to the padded zero row.
 NBR_SENTINEL_U16 = 0xFFFF
 
-# --- node features (F = 25) ---------------------------------------------------
+# --- feature version gate (SPEC_RAYTAP_CONV.md §1.1) ----------------------------
+# HEXFIELD_EQ_FEATURE_VERSION in {1, 2}, default 1 == the pre-ray-tap 25-plane
+# map, byte-identical behavior (the live-run isolation guard, spec §9.1).
+# Version 2 selects the 46-plane map of spec §1.2: 10 axis quantities instead
+# of 4 (live3/live4/live5 per side), the fork planes re-indexed 23/24 -> 41/42,
+# and 3 new scalar planes (ply / dist-to-centroid / spread). Read once at
+# import like every other shape knob; tests needing version 2 set the env
+# before importing hexfield_eq (subprocess pattern).
+_FEATURE_VERSION_ENV = os.environ.get("HEXFIELD_EQ_FEATURE_VERSION", "1")
+if _FEATURE_VERSION_ENV not in ("1", "2"):
+    raise ValueError(
+        f"HEXFIELD_EQ_FEATURE_VERSION={_FEATURE_VERSION_ENV!r} must be '1' or '2'"
+    )
+FEATURE_VERSION = int(_FEATURE_VERSION_ENV)
+
+# --- node features (F = 25 under version 1, 46 under version 2) -----------------
 # Planes 0-10 are the 11 kept scalars (index 9 = distance-to-nearest-stone);
-# planes 11-22 are the 12 graded per-(cell, axis) window planes (4 quantities x
-# 3 axes Q/R/QR, each quantity 3 contiguous slots so a D6 axis-permutation acts
-# on 3-slot blocks); planes 23-24 are the 2 scalar fork planes. The binary
+# planes 11..(11 + 3*N_AXIS_QUANTITIES - 1) are the graded per-(cell, axis)
+# window planes (N_AXIS_QUANTITIES quantities x 3 axes Q/R/QR, each quantity 3
+# contiguous slots so a D6 axis-permutation acts on 3-slot blocks); the 2
+# scalar fork planes follow the axis block (23-24 under version 1, 41-42 under
+# version 2), and version 2 appends 3 global scalar planes (43-45). The binary
 # hot/standing-win planes of the hexfield lineage are retired (see
 # docs/PLAN_D6_EQUIVARIANT_REWRITE.md §3).
 F_OWN_STONE = 0
@@ -67,9 +84,51 @@ F_OWN_LIVE_QR = 19
 F_OPP_LIVE_Q = 20
 F_OPP_LIVE_R = 21
 F_OPP_LIVE_QR = 22
-F_OWN_FORK = 23
-F_OPP_FORK = 24
-NUM_FEATURES = 25
+# Axis-plane block geometry: plane = AXIS_PLANE_BASE + q*N_AXES + a with the
+# quantity q in [own_line, opp_line, own_live, opp_live(, own_live3, opp_live3,
+# own_live4, opp_live4, own_live5, opp_live5 under version 2)] and the axis a
+# in [Q, R, QR]. equivariant.py derives the typing sets from these.
+AXIS_PLANE_BASE = 11
+N_AXES = 3
+if FEATURE_VERSION == 2:
+    # Version-2 graded liveK planes (spec §1.3): per (cell, axis), the count of
+    # clean-for-side length-6 windows holding >= K side stones, /LIVE_NORM,
+    # K in {3, 4, 5} (same conventions as own_live/opp_live, which are K >= 0).
+    F_OWN_LIVE3_Q = 23
+    F_OWN_LIVE3_R = 24
+    F_OWN_LIVE3_QR = 25
+    F_OPP_LIVE3_Q = 26
+    F_OPP_LIVE3_R = 27
+    F_OPP_LIVE3_QR = 28
+    F_OWN_LIVE4_Q = 29
+    F_OWN_LIVE4_R = 30
+    F_OWN_LIVE4_QR = 31
+    F_OPP_LIVE4_Q = 32
+    F_OPP_LIVE4_R = 33
+    F_OPP_LIVE4_QR = 34
+    F_OWN_LIVE5_Q = 35
+    F_OWN_LIVE5_R = 36
+    F_OWN_LIVE5_QR = 37
+    F_OPP_LIVE5_Q = 38
+    F_OPP_LIVE5_R = 39
+    F_OPP_LIVE5_QR = 40
+    # The fork planes keep their definition but RE-INDEX under version 2 (the
+    # spec §1.2 trap: every consumer of the typing sets and the stem lift must
+    # regenerate against this map — T2 guards it).
+    F_OWN_FORK = 41
+    F_OPP_FORK = 42
+    # Version-2 global scalar planes (spec §1.4), all D6- and translation-
+    # invariant; exact formulas in features._fill_global_scalars.
+    F_PLY = 43
+    F_DIST_CENTROID = 44
+    F_SPREAD = 45
+    NUM_FEATURES = 46
+    N_AXIS_QUANTITIES = 10
+else:
+    F_OWN_FORK = 23
+    F_OPP_FORK = 24
+    NUM_FEATURES = 25
+    N_AXIS_QUANTITIES = 4
 
 # Length of the single-colour win/threat windows scanned for the graded planes.
 WINDOW_LEN = 6
@@ -92,6 +151,15 @@ LINE_NORM = 5.0
 LIVE_NORM = 6.0
 FORK_NORM = 3.0
 FORK_LINE_THRESHOLD = 3
+
+# Version-2 global-scalar normalizers (spec §1.4, match rust/src/constants.rs):
+#   F_PLY = min(placements_made, 96) / 96;
+#   F_SPREAD = min(spread, 16) / 16 with spread = max(1, max_s hexd(s - c)) over
+#   the stone centroid c (fractional hexd = (|dq| + |dr| + |dq + dr|) / 2);
+#   F_DIST_CENTROID = min(hexd(node - c) / (2 * spread), 1).
+# Empty board: ply 0, dist_centroid 0, spread plane 1/16.
+PLY_NORM = 96.0
+SPREAD_NORM = 16.0
 
 # dist_to_stone feature scaling: stones -> 0, legal in (0, 1], halo -> 1.125
 # (9/8, exactly representable in f16). Ply 0 => 0 everywhere.
