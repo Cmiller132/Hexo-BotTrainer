@@ -48,6 +48,18 @@ production model; the guarded import takes its existing no-flex fallback. G6
 asserts that no `triton` module entered `sys.modules`. The same guard is used by
 the G7 CPU audit.
 
+### D5: concurrent feature-v2 work appeared after Phase A started
+
+The initial ground-truth tree and live checkpoint use the specified 25-plane
+input (`13*triv + 4*axis`). During execution, unrelated unstaged edits appeared
+in `constants.py`, `equivariant.py`, `features.py`, and the Rust constants that
+add an opt-in `HEXFIELD_EQ_FEATURE_VERSION=2` 46-plane map. Phase A neither
+authored nor modified those files. Its stem proof remains intentionally scoped
+to feature version 1 because the work order, CONTEXT, and audited checkpoint all
+require 25 planes; every G3–G7 process asserts version 1. Generalizing the typed
+stem to version 2 would be a separate change to a moving, uncommitted design and
+would violate this phase's strict gate contract.
+
 ## Gate results
 
 ### G1 — group foundation parity: PASS

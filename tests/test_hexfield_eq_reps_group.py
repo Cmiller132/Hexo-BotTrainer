@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 
 os.environ["HEXFIELD_EQ_GROUP_ORDER"] = "12"
+os.environ["HEXFIELD_EQ_FEATURE_VERSION"] = "1"
+os.environ["HEXFIELD_EQ_SUPPORT_RADIUS"] = "1"
 
 from hexfield_eq import equivariant as production  # noqa: E402
 from hexfield_eq.geometry import apply_d6  # noqa: E402
@@ -74,4 +76,3 @@ def test_all_quotient_actions_are_permutation_homomorphisms() -> None:
                 action_h = rep_action(type_name, h)
                 composed = tuple(action_g[action_h[s]] for s in range(nslots))
                 assert composed == rep_action(type_name, mult[g][h]), (type_name, g, h)
-

@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 
 os.environ["HEXFIELD_EQ_GROUP_ORDER"] = "12"
+os.environ["HEXFIELD_EQ_FEATURE_VERSION"] = "1"
+os.environ["HEXFIELD_EQ_SUPPORT_RADIUS"] = "1"
 
 import torch  # noqa: E402
 
