@@ -180,8 +180,10 @@ def _cpu_child() -> None:
     np.testing.assert_allclose(
         np.frombuffer(reply["moves_left_bytes"], dtype=np.float32),
         moves,
-        atol=1.0,
-        rtol=1e-3,
+        # Both CPU paths consume the same f16-rounded wire features and decode
+        # the same fp32 logits; 1e-4 leaves headroom for float operation order.
+        atol=1.0e-4,
+        rtol=0,
     )
     print("typed-serve-cpu: ok")
 

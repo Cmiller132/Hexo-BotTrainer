@@ -200,7 +200,7 @@ def test_three_nominated_configs_and_v1_full_net_equivariance() -> None:
     assert diversified_full["max_value_error"] < 1e-4
 
     diversified_fast = _run_child(
-        "smoke",
+        "equivariance",
         signature=SIG_DIVERSIFIED,
         attn_orbit=8,
         feature_version=1,
@@ -212,6 +212,8 @@ def test_three_nominated_configs_and_v1_full_net_equivariance() -> None:
         feature_version=1,
         channels=128,
     )
+    assert diversified_fast["max_policy_error"] < 1e-4
+    assert diversified_fast["max_value_error"] < 1e-4
 
 
 def test_feature_versions_typed_stem_full_net_and_pure_reg_head_parity() -> None:
@@ -269,6 +271,41 @@ def test_mixed_signature_env_requires_explicit_attention_orbit() -> None:
         layout="A",
     )
     assert "ATTN_ORBIT is required" in error
+
+
+def test_implicit_pure_regular_attention_orbit_preserves_rollback_contract() -> None:
+    error = _run_import_failure(
+        signature=None,
+        attn_orbit=4,
+        layout="A",
+    )
+    assert "TYPE_SIG is unset" in error
+    assert "TYPE_SIG=reg:8 explicitly" in error
+
+    env = _child_env(
+        signature=None,
+        attn_orbit=8,
+        feature_version=1,
+        layout="A",
+    )
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-B",
+            "-c",
+            (
+                "import json; from hexfield_eq import constants as c; "
+                "print(json.dumps([c.TYPE_SIG,c.ATTN_ORBIT,c.CHANNELS]))"
+            ),
+        ],
+        cwd=_REPO,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert json.loads(proc.stdout.strip().splitlines()[-1]) == ["reg:8", 8, 96]
 
 
 def test_explicit_pure_signature_rejects_conflicting_legacy_c_orbit() -> None:

@@ -347,6 +347,13 @@ if GROUP_ORDER == 12:
         ATTN_ORBIT = TYPE_SIGNATURE[0][1]
     else:
         ATTN_ORBIT = int(_ATTN_ORBIT_ENV)
+        if _TYPE_SIG_ENV is None and ATTN_ORBIT != C_ORBIT:
+            raise ValueError(
+                "HEXFIELD_EQ_TYPE_SIG is unset, so HEXFIELD_EQ_ATTN_ORBIT must "
+                f"equal the default regular multiplicity {C_ORBIT}; set "
+                f"HEXFIELD_EQ_TYPE_SIG=reg:{C_ORBIT} explicitly if a "
+                "non-default attention width is intended"
+            )
     if ATTN_ORBIT < 1:
         raise ValueError("HEXFIELD_EQ_ATTN_ORBIT must be positive")
     if ATTENTION_HEADS != 3:

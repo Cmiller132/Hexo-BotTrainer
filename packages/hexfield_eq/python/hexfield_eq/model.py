@@ -1385,6 +1385,18 @@ def infer_net_kwargs_from_state_dict(sd: dict, meta: dict | None = None) -> dict
 
     kwargs: dict = {}
     meta = meta or {}
+    quotient_meta_keys = ("type_sig", "attn_orbit")
+    quotient_meta_present = tuple(key in meta for key in quotient_meta_keys)
+    if any(quotient_meta_present) and not all(quotient_meta_present):
+        missing = [
+            key
+            for key, present in zip(quotient_meta_keys, quotient_meta_present)
+            if not present
+        ]
+        raise ValueError(
+            "checkpoint quotient metadata is incomplete; missing "
+            + ", ".join(missing)
+        )
     if meta.get("channels") is not None:
         kwargs["channels"] = int(meta["channels"])
     if meta.get("attention_heads") is not None:

@@ -132,6 +132,7 @@ def test_state_dict_only_inference_is_pure_regular_only() -> None:
     assert got == {
         "foreign_stem_shape": [7, 25, 192],
         "mixed_rejected": True,
+        "partial_rejected": 2,
         "pure_attn_orbit": 16,
         "pure_type_sig": "reg:16",
     }
@@ -152,6 +153,15 @@ def test_strict_loaders_reject_exact_metadata_mismatches_and_accept_legacy() -> 
     }
 
 
+def test_warm_start_warns_on_signature_mismatch_only() -> None:
+    got = _run_child(
+        "warm-start",
+        signature=NOMINATED[2][0],
+        attn_orbit=NOMINATED[2][1],
+    )
+    assert got == {"exact_silent": True, "mismatch_warned": True}
+
+
 def _guarded_imports():
     """Import production model code without letting optional Flex load Triton."""
 
@@ -166,7 +176,7 @@ def _guarded_imports():
     sys.modules[optional_name] = None
     try:
         from hexfield_eq import constants
-        from hexfield_eq.checkpoints import load_into
+        from hexfield_eq.checkpoints import load_into, warm_start_into
         from hexfield_eq.model import HexfieldNet, infer_net_kwargs_from_state_dict
     finally:
         if previous is missing:
@@ -184,11 +194,25 @@ def _guarded_imports():
     from hexfield_eq.prefit import load_checkpoint
 
     assert not torch.cuda.is_available()
-    return constants, load_into, HexfieldNet, infer_net_kwargs_from_state_dict, load_checkpoint
+    return (
+        constants,
+        load_into,
+        warm_start_into,
+        HexfieldNet,
+        infer_net_kwargs_from_state_dict,
+        load_checkpoint,
+    )
 
 
 def _roundtrip(signature: str, attn_orbit: int, feature_version: int) -> dict:
-    constants, _load_into, net_cls, infer_kwargs, _load_checkpoint = _guarded_imports()
+    (
+        constants,
+        _load_into,
+        _warm_start,
+        net_cls,
+        infer_kwargs,
+        _load_checkpoint,
+    ) = _guarded_imports()
     model = net_cls().eval()
     meta = model.arch_meta()
     assert meta["type_sig"] == signature
@@ -219,7 +243,14 @@ def _roundtrip(signature: str, attn_orbit: int, feature_version: int) -> dict:
 def _no_meta() -> dict:
     import torch
 
-    _constants, _load_into, net_cls, infer_kwargs, _load_checkpoint = _guarded_imports()
+    (
+        _constants,
+        _load_into,
+        _warm_start,
+        net_cls,
+        infer_kwargs,
+        _load_checkpoint,
+    ) = _guarded_imports()
 
     pure = net_cls(channels=192, type_sig="reg:16", attn_orbit=16).eval()
     pure_state = pure.state_dict()
@@ -249,11 +280,27 @@ def _no_meta() -> dict:
     else:  # pragma: no cover - this is the safety property under test
         raise AssertionError("mixed no-meta inference did not fail loudly")
 
+    partial_rejected = 0
+    mixed_meta = mixed.arch_meta()
+    for present, missing in (
+        ("type_sig", "attn_orbit"),
+        ("attn_orbit", "type_sig"),
+    ):
+        try:
+            infer_kwargs(mixed.state_dict(), {present: mixed_meta[present]})
+        except ValueError as exc:
+            assert "quotient metadata is incomplete" in str(exc)
+            assert missing in str(exc)
+            partial_rejected += 1
+        else:  # pragma: no cover - safety property under test
+            raise AssertionError(f"foreign inference accepted meta missing {missing}")
+
     return {
         "foreign_stem_shape": list(pure_weight.shape),
         "pure_type_sig": pure_kwargs["type_sig"],
         "pure_attn_orbit": pure_kwargs["attn_orbit"],
         "mixed_rejected": True,
+        "partial_rejected": partial_rejected,
     }
 
 
@@ -271,7 +318,14 @@ def _loaders(signature: str, attn_orbit: int) -> dict:
 
     import torch
 
-    _constants, load_into, net_cls, _infer_kwargs, load_checkpoint = _guarded_imports()
+    (
+        _constants,
+        load_into,
+        _warm_start,
+        net_cls,
+        _infer_kwargs,
+        load_checkpoint,
+    ) = _guarded_imports()
     model = net_cls().eval()
     state = model.state_dict()
     meta = model.arch_meta()
@@ -340,6 +394,48 @@ def _loaders(signature: str, attn_orbit: int) -> dict:
     }
 
 
+def _warm_start() -> dict:
+    import warnings
+
+    (
+        _constants,
+        _load_into,
+        warm_start,
+        net_cls,
+        _infer,
+        _load_checkpoint,
+    ) = _guarded_imports()
+    target = net_cls(
+        channels=128,
+        type_sig=NOMINATED[2][0],
+        attn_orbit=8,
+        trunk_layout="CA",
+    ).eval()
+    source = net_cls(
+        channels=160,
+        type_sig=NOMINATED[0][0],
+        attn_orbit=8,
+        trunk_layout="CA",
+    ).eval()
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        warm_start(target, target.state_dict())
+    assert caught == []
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        summary = warm_start(target, source.state_dict())
+    assert len(caught) == 1
+    message = str(caught[0].message)
+    assert caught[0].category is RuntimeWarning
+    assert "missing=" in message and "unexpected=" in message
+    assert "shape_mismatch=" in message
+    assert "type signature likely differs" in message
+    assert summary["missing"] or summary["unexpected"] or summary["shape_mismatch"]
+    return {"exact_silent": True, "mismatch_warned": True}
+
+
 def _child_main(argv: list[str]) -> None:
     if len(argv) != 5 or argv[0] != "--child":
         raise SystemExit("expected --child MODE TYPE_SIG ATTN_ORBIT FEATURE_VERSION")
@@ -352,6 +448,8 @@ def _child_main(argv: list[str]) -> None:
         result = _no_meta()
     elif mode == "loaders":
         result = _loaders(signature, attn_orbit)
+    elif mode == "warm-start":
+        result = _warm_start()
     else:
         raise SystemExit(f"unknown child mode: {mode}")
     print(json.dumps(result, sort_keys=True))

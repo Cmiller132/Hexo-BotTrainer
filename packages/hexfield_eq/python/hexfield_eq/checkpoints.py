@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import re
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -140,6 +141,31 @@ def warm_start_into(model: HexfieldNet, state: dict) -> dict:
     # strict=False: missing keys keep their initialized value; the matched
     # subset is copied into the live params (dtype/device unchanged).
     model.load_state_dict(to_load, strict=False)
+    if missing or unexpected or shape_mismatch:
+        def examples(keys: list[str]) -> str:
+            return ", ".join(keys[:3]) if keys else "none"
+
+        dropped = set(missing) | set(unexpected) | set(shape_mismatch)
+        typed_weights = any(
+            ".coefficients." in key
+            or key.rsplit(".", 1)[-1] in {"wb", "w_base"}
+            for key in dropped
+        )
+        hint = (
+            " Typed/equivariant weights were dropped; the source checkpoint's "
+            "type signature likely differs from the target architecture."
+            if typed_weights
+            else ""
+        )
+        warnings.warn(
+            "hexfield warm start dropped checkpoint/model keys: "
+            f"missing={len(missing)} [{examples(missing)}], "
+            f"unexpected={len(unexpected)} [{examples(unexpected)}], "
+            f"shape_mismatch={len(shape_mismatch)} "
+            f"[{examples(shape_mismatch)}].{hint}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
     return {
         "loaded": len(to_load),
         "missing": missing,

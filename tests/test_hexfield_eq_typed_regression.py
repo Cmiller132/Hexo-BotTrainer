@@ -412,6 +412,56 @@ def test_passthrough_state_manifest_matches_phase_a() -> None:
     _assert_manifest(got["rows"], _PASSTHROUGH_MANIFEST, label="passthrough")
 
 
+_FRESH_STATE_CHILD = r"""
+import os
+import sys
+import torch
+
+sys.modules["torch.nn.attention.flex_attention"] = None
+from hexfield_eq.model import HexfieldNet
+
+torch.set_num_threads(1)
+torch.manual_seed(0)
+model = HexfieldNet().eval()
+torch.save(model.state_dict(), os.environ["D8_STATE_PATH"])
+print('{"saved":true}')
+"""
+
+
+def test_fresh_default_rng_order_matches_phase_a(tmp_path: Path) -> None:
+    import torch
+
+    reference_root = Path(
+        os.environ.get("HEXFIELD_EQ_D8_REFERENCE_ROOT", str(_DEFAULT_REFERENCE_ROOT))
+    ).expanduser()
+    if not reference_root.is_dir():
+        pytest.skip(f"D8 Phase-A reference root is absent: {reference_root}")
+    if reference_root.resolve() == _REPO.resolve():
+        pytest.fail("D8 reference root resolves to the Phase-B worktree itself")
+
+    reference_path = tmp_path / "phase_a_fresh.pt"
+    candidate_path = tmp_path / "phase_b_fresh.pt"
+    overrides = dict(_DISABLED_BACKENDS)
+    _run_child(
+        _FRESH_STATE_CHILD,
+        root=reference_root,
+        overrides=overrides,
+        extra_env={"D8_STATE_PATH": str(reference_path.resolve())},
+    )
+    _run_child(
+        _FRESH_STATE_CHILD,
+        root=_REPO,
+        overrides=overrides,
+        extra_env={"D8_STATE_PATH": str(candidate_path.resolve())},
+    )
+
+    expected = torch.load(reference_path, map_location="cpu", weights_only=True)
+    actual = torch.load(candidate_path, map_location="cpu", weights_only=True)
+    assert list(actual) == list(expected), "fresh-init state-dict key order changed"
+    for key in expected:
+        assert torch.equal(actual[key], expected[key]), f"fresh-init tensor changed: {key}"
+
+
 def test_live_checkpoint_reproduces_phase_a_logits(tmp_path: Path) -> None:
     checkpoint_env = os.environ.get("HEXFIELD_EQ_D8_CHECKPOINT")
     if not checkpoint_env:
