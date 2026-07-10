@@ -609,8 +609,13 @@ fn expand_one(
     // kept (on-legal) support so the dense target sums to 1 when present. When
     // absent (gumbel_present == 0, i.e. empty facts.gumbel_policy) the target is
     // all-zero with gumbel_policy_valid 0.0. prior_logit is a scalar assign.
+    // `gumbel_policy[slot] += w` accumulates in f32 (numpy float32 in-place add);
+    // the renormalizer `g_total` accumulates in f64 matching the Python oracle's
+    // scalar accumulation (samples.py expand_sample), then the f32 array is
+    // divided by the one-rounding `g_total as f32` — the file's f64-with-one-
+    // rounding convention, mirroring numpy's float32 /= python-float.
     let mut gumbel_policy = vec![0f32; legal_count];
-    let mut g_total = 0.0f32;
+    let mut g_total = 0.0f64;
     for &(action_id, w) in &facts.gumbel_policy {
         if !w.is_finite() || w < 0.0 {
             return Err(ExpandErr::Hard(
@@ -619,10 +624,11 @@ fn expand_one(
         }
         if let Some(slot) = legal_slot(&sup, sym, action_id) {
             gumbel_policy[slot] += w;
-            g_total += w;
+            g_total += w as f64;
         }
     }
     let gumbel_policy_valid = if !facts.gumbel_policy.is_empty() && g_total > 0.0 {
+        let g_total = g_total as f32;
         for w in gumbel_policy.iter_mut() {
             *w /= g_total; // renormalize over the kept support
         }
