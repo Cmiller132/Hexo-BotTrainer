@@ -182,8 +182,16 @@ if _TRITON_CONV_LN:
         from ._triton_conv import hex_conv_ln as _hex_conv_ln_fused
     except Exception:  # pragma: no cover - no triton
         _hex_conv_ln_fused = None
+    # K1 (SPEC_RAYTAP_CONV.md §2.4): the ray-tap variant rides the same env
+    # gate — equipped convs take it on the fused serve branch when present,
+    # else the reference path (labeled reference-path throughput).
+    try:
+        from ._triton_conv import hex_conv_ln_raytap as _hex_conv_ln_raytap_fused
+    except Exception:  # pragma: no cover - no triton
+        _hex_conv_ln_raytap_fused = None
 else:
     _hex_conv_ln_fused = None
+    _hex_conv_ln_raytap_fused = None
 # fp8 (e4m3) conv GEMMs were REMOVED for the equivariant v1 (docs/DERIVATION
 # §2.3, "BUGS_FOUND"): the fused-conv fp8 weight cache was keyed on id(weight),
 # but the tied trunk regenerates a fresh dense weight object every forward
@@ -871,6 +879,16 @@ class ConvBlock(nn.Module):
             w, b = conv._materialize()
             return _hex_conv_ln_fused(
                 x, gather_idx, mask, w, b, ln.weight, ln.bias, ln.eps, relu
+            )
+        if _hex_conv_ln_raytap_fused is not None and ray_ctx is not None:
+            # K1 fused variant: in-kernel k-loop over the ray gather index +
+            # reach + tiled alpha (spec §2.4); the op itself falls back to the
+            # reference on a memoized compile failure.
+            w, b = conv._materialize()
+            return _hex_conv_ln_raytap_fused(
+                x, gather_idx, mask, w, b, ln.weight, ln.bias,
+                ray_ctx.ray_idx, ray_ctx.reach, conv._alpha_full(),
+                ln.eps, relu, conv.alpha.shape[1],
             )
         out = conv(x, gather_idx, mask, ray_ctx=ray_ctx)
         y = F.layer_norm(

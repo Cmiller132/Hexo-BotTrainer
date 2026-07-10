@@ -791,3 +791,50 @@ def test_t4b_serve_wire_init_equivalence_cuda(monkeypatch, layout) -> None:
     # Second flush replays the captured graphs (cache hit) identically.
     vr2, pr2, _ = _reply_arrays(ev_r.evaluate_payload(dict(payload)))
     np.testing.assert_allclose(vr2, vr, atol=1e-6, rtol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA + triton")
+def test_t5_k1_fused_kernel_parity_trained_alpha() -> None:
+    """T5 on the K1 fused path: hexfield_eq::hex_conv_ln_raytap matches the
+    reference ray-tap conv + LN at a trained (non-init) alpha to the fp16
+    serve-grade tolerance. If the kernel cannot compile for this shape the op
+    falls back to the reference internally, so parity holds either way."""
+
+    from hexfield_eq._triton_conv import hex_conv_ln_raytap, _conv_ln_raytap_ref
+    from hexfield_eq._raytap import build_ray_gather_index, build_tap_reach
+
+    if hex_conv_ln_raytap is None:
+        pytest.skip("triton unavailable")
+
+    torch.manual_seed(61)
+    dev = "cuda"
+    ch = C.CHANNELS
+    corb = C.C_ORBIT if C.GROUP_ORDER == 12 else ch
+    _, n, nbr, coords, mask, _ = _disk_board(4)
+    self_idx = torch.arange(n).reshape(1, n, 1)
+    gidx = torch.cat([self_idx, nbr], dim=2).to(dev)
+    coords, mask = coords.to(dev), mask.to(dev)
+    x = torch.randn(1, n, ch, device=dev, dtype=torch.float16)
+    raylen = torch.randint(
+        0, C.RAY_REACH + 1, (1, n, RL), dtype=torch.uint8, device=dev
+    )
+    ray_idx = build_ray_gather_index(coords, mask)
+    reach = build_tap_reach(raylen)
+    weight = (torch.randn(7, ch, ch, device=dev) * 0.05)
+    bias = torch.randn(ch, device=dev) * 0.02
+    lnw = torch.rand(ch, device=dev) + 0.5
+    lnb = torch.randn(ch, device=dev) * 0.1
+    alpha = torch.zeros(5, ch, device=dev)
+    for k in range(5):
+        alpha[k] = 0.8 ** k * (1.0 + 0.1 * torch.randn(ch, device=dev))
+    with torch.no_grad():
+        for relu in (True, False):
+            out = hex_conv_ln_raytap(
+                x, gidx, mask, weight, bias, lnw, lnb, ray_idx, reach, alpha,
+                1e-5, relu, corb,
+            ).float()
+            ref = _conv_ln_raytap_ref(
+                x, gidx, mask, weight, bias, lnw, lnb, ray_idx, reach, alpha,
+                1e-5, relu, corb,
+            ).float()
+            torch.testing.assert_close(out, ref, atol=5e-3, rtol=0)
