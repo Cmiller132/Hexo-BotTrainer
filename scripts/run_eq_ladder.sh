@@ -27,7 +27,14 @@ fail() { echo "FATAL: $*" >&2; exit 1; }
 [[ -f "$RUNNER" ]] || fail "runner not found: $RUNNER"
 [[ -d "$DATA_DIR/train" && -d "$DATA_DIR/val" ]] \
   || fail "converted corpus missing train/ + val/ under $DATA_DIR (run the converter first)"
-for arm in arm1_vanilla arm2_reglane arm3_tokread arm4_raylayout arm4c_georay; do
+# Arm set: EQ_LADDER_ARMS (comma list of name[:l] tokens, e.g. the ray-tap
+# wave-1 "raytap_a0:l,...") or the default R/L ladder.
+ARM_NAMES="${EQ_LADDER_ARMS:-arm1_vanilla,arm2_reglane,arm3_tokread,arm4_raylayout,arm4c_georay}"
+IFS=',' read -ra ARM_TOKS <<< "$ARM_NAMES"
+for tok in "${ARM_TOKS[@]}"; do
+  arm="${tok%%:*}"
+  arm="$(echo "$arm" | xargs)"
+  [[ -z "$arm" ]] && continue
   [[ -f "$ROOT/scripts/prefit_env/hexfield_eq_${arm}.env" ]] \
     || fail "missing arm env file: scripts/prefit_env/hexfield_eq_${arm}.env"
 done
