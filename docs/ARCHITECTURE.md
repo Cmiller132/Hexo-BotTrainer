@@ -14,7 +14,9 @@ checkpoint debug worker — and it shares the same `hexo_train` / `hexo_engine` 
 `hexo_runner` / `hexo_utils` orchestration and cross-package contracts the
 hexfield lineages train on, so the flow here is the reference model for how any
 lineage trains. The hexfield lineages differ mainly in the model package
-(`packages/hexfield*`, each with its own Rust cdylib `hexfield*._rust`) and their
+(`packages/hexfield*`, each with its own Rust cdylib `hexfield*._rust`; their
+shared MCTS core sources live in `packages/hexfield_search_core` and are
+`#[path]`-included into both crates) and their
 supervisor scripts (`scripts/_hexfield_supervise_main1.sh` /
 `_hexfield_eq_supervise_main1.sh`).
 
@@ -29,13 +31,15 @@ supervisor scripts (`scripts/_hexfield_supervise_main1.sh` /
 | `hexo_utils` | `packages/hexo_utils` | **ACTIVE** for the `.hxr` codec and Rust `state_hash`; the JSON sample store (`samples/`) is unused scaffolding. |
 | `hexo_frontend` | `packages/hexo_frontend` | **ACTIVE** dashboard (:8080 in WSL). Match/History/Debug screens; carries large uncommitted v2 changes. |
 | `hexo_models/dense_cnn` | `packages/hexo_models/dense_cnn` | Split: Python half **LEGACY** ("Model 1", superseded by restnet) but still loadable for old checkpoints/dashboard; **Rust half** — dense_cnn_restnet drives `hexo_models._rust.dense_cnn` (encoding, MCTS, `run_continuous`); parked alongside that lineage. |
-| `hexo_models/hexgt` | `packages/hexo_models/hexgt` | **LEGACY/HALTED** ("Model 2/3" GNN+transformer; run halted at epoch 40, 2026-06-05). Still load-bearing for the dashboard debug worker and as the hexgnn fork's ancestor. |
-| `hexgnn` | `packages/hexgnn` | **PARKED/LEGACY** GNN experiment. Its Rust crate is still compiled into every `hexo_models` native build. |
+| `hexo_models/hexgt` | `packages/hexo_models/hexgt` | **LEGACY/HALTED** ("Model 2/3" GNN+transformer; run halted at epoch 40, 2026-06-05). Still load-bearing for the dashboard debug worker. |
+
+(A third graph lineage, `hexgnn` — a parked GNN fork of hexgt — was removed
+from the repo; its Rust crate is no longer compiled into `hexo_models`.)
 
 Key inversion to know: the ACTIVE lineage's MCTS/encoder hot path lives in the
 nominally-legacy `packages/hexo_models/dense_cnn/rust/src/` tree, compiled into one
-crate (`packages/hexo_models/rust/src/lib.rs` `#[path]`-includes dense_cnn, hexgt, and
-hexgnn Rust) and exposed as the single PyO3 module `hexo_models._rust`.
+crate (`packages/hexo_models/rust/src/lib.rs` `#[path]`-includes dense_cnn and hexgt
+Rust) and exposed as the single PyO3 module `hexo_models._rust`.
 
 ## 2. Training loop, end to end (active path)
 

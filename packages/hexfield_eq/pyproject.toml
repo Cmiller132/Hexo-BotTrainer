@@ -27,3 +27,7 @@ hexfield_eq = "hexfield_eq.plugin:get_plugin"
 python-source = "python"
 module-name = "hexfield_eq._rust"
 features = ["python"]
+include = [
+  # Shared MCTS core (compiled into this crate via #[path] in rust/src/lib.rs).
+  { path = "../hexfield_search_core/src/**/*", format = "sdist" },
+]

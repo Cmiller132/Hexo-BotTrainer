@@ -25,6 +25,7 @@ BC-prefit arm ladder; the currently *running* self-play training is the
 |---|---|---|
 | `packages/hexfield_eq` | **Active bot lineage.** D6-equivariant rewrite: graded per-axis window features (25 node planes), an x12 regular-rep tied trunk, orbit/joint-tied bias, register-lane / ray attention. Own Rust cdylib (`hexfield_eq._rust`: featurizer, support build, native search, evaluator ABI). Config `configs/hexfield_eq_main_1.toml` | Active (current bot) |
 | `packages/hexfield` | **Active run.** `main_9` lineage (variable-geometry hex-lattice model; c=128, CCACCACCA trunk, Gumbel/PUCT search). Own Rust cdylib (`hexfield._rust`). Config `configs/hexfield_main_9.toml`; `configs/hexfield_main_11.toml` kept as a revival candidate | Active (live `main_9`) |
+| `packages/hexfield_search_core` | Not a crate: shared MCTS core sources (`search.rs`, `tree.rs`, `cache.rs`, `state.rs`) `#[path]`-included by **both** `hexfield` and `hexfield_eq` rust crates — changes here affect both lineages (see its README) | Active (shared source) |
 | `packages/hexo_engine` | Authoritative rules engine (Rust + PyO3 `hexo_engine._rust`): board, turn phases, legality, incremental 6-cell win/threat windows, packed action IDs. Used by everything | Active |
 | `packages/hexo_utils` | Shared utilities: `.hxr` binary game-record codec (Rust `records.rs`, re-exported via `hexo_runner.records`), `state_hash` for eval caches; generic JSON sample store (bypassed in production) | Active |
 | `packages/hexo_runner` | Model-agnostic game execution: player contracts, match loop, `.hxr` records, SealBot subprocess adapter (the fixed minimax eval opponent) | Active |
@@ -33,11 +34,10 @@ BC-prefit arm ladder; the currently *running* self-play training is the
 | `packages/hexo_frontend` | Web dashboard (stdlib HTTP server, no framework): Match arena, training History, and a Debug workbench backed by a CPU-only torch worker subprocess. Runs as WSL systemd unit `hexfield-dashboard.service` on **:8080** | Active |
 | `packages/hexo_models` | Umbrella crate/wheel: builds the legacy `dense_cnn` + `hexgt` native accelerators into one PyO3 module `hexo_models._rust` plus the shared threat-space-search core. Parked, but still loaded by the dashboard debug worker for legacy checkpoints | Parked |
 | `packages/dense_cnn_restnet` | Former ResTNet lineage (pure Python/PyTorch; reuses `hexo_models._rust.dense_cnn`). Parked; kept on the dashboard PYTHONPATH as the legacy-shard oracle adapter and checkpoint loader. Its data flow is the reference model in `docs/ARCHITECTURE.md` | Parked |
-| `packages/hexgnn` | Stripped-down GNN fork of `hexgt` (own Rust crate, compiled into `hexo_models._rust`) | Parked |
 
 The Rust workspace (root `Cargo.toml`) has five members: `hexo_engine`,
-`hexo_models`, `hexo_utils`, `hexfield`, `hexfield_eq` (the `hexgnn` crate is
-compiled inside `hexo_models`; `dense_cnn_restnet` ships no Rust).
+`hexo_models`, `hexo_utils`, `hexfield`, `hexfield_eq`
+(`dense_cnn_restnet` ships no Rust).
 
 Cross-package contracts worth knowing (spot-verified against the tree):
 

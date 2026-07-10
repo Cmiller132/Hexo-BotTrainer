@@ -20,19 +20,27 @@ mod support;
 #[path = "../../../hexo_models/rust/src/threats_shared.rs"]
 mod threats_shared;
 
+// MCTS core shared with the sibling lineage: #[path] file-includes from
+// packages/hexfield_search_core/src (see its README for the inclusion
+// contract). The files compile inside this crate, so their crate:: paths
+// (payload, threats_shared, constants, ...) resolve per-lineage.
 #[cfg(feature = "python")]
+#[path = "../../../hexfield_search_core/src/cache.rs"]
 mod cache;
 #[cfg(feature = "python")]
 mod payload;
 #[cfg(feature = "python")]
 mod replay_expand;
 #[cfg(feature = "python")]
+#[path = "../../../hexfield_search_core/src/search.rs"]
 mod search;
 #[cfg(feature = "python")]
 mod serve_pack;
 #[cfg(feature = "python")]
+#[path = "../../../hexfield_search_core/src/state.rs"]
 mod state;
 #[cfg(feature = "python")]
+#[path = "../../../hexfield_search_core/src/tree.rs"]
 mod tree;
 
 #[cfg(feature = "python")]
