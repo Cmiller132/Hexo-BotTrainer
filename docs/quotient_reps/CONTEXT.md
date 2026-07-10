@@ -44,21 +44,25 @@ action id. `Support` carries `coords (N,2) int32`, `dist (N,)`,
 and `legal_count/stone_count/halo_count`. Typical mid-game N is **~150–400**.
 Batches pad to `Npad` and carry a `(B, Npad)` live-node `mask`.
 
-## 3. Input features: 25 planes with a typed D6 action
+## 3. Input features: versioned planes with a typed D6 action
 
-`NUM_FEATURES = 25` per node (`constants.py`, plan §1.1):
+`HEXFIELD_EQ_FEATURE_VERSION` is import-time versioned and defaults to 1:
 
-- **13 scalar planes** (D6-trivial): occupancy/side, `dist_to_stone`
+- **v1: 25 planes = 13 scalars + 4 axis modules.** The scalar planes are
+  D6-trivial: occupancy/side, `dist_to_stone`
   (scaled by `DIST_SCALE = 8`, halo = 1.125), the 2 fork planes
   (`own_fork`/`opp_fork` at indices 23/24), and the other kept basics. NOTE:
   the 13 scalars are **not contiguous** — the axis block sits at indices
   11..22 (`equivariant.py:41-52`).
-- **12 axis-indexed planes** (indices 11..22): 4 quantities × 3 axes —
+- Its **12 axis-indexed planes** (indices 11..22) are 4 quantities × 3 axes —
   `own_line[a]`, `opp_line[a]` (strongest own/opp count among clean length-6
   windows through the cell, /5) and `own_live[a]`, `opp_live[a]` (count of
   windows still clean for that side, /6). Under D6 these are **4 copies of the
   3-slot axis-permutation module** (a quotient rep! — the input is already
   typed; plane `11 + q*3 + a` maps to `11 + q*3 + cosp[g][a]`).
+- **v2: 46 planes = 16 scalars + 10 axis modules.** The same axis block base is
+  retained, with own/opp live3/live4/live5 adding six axis quantities. Forks
+  move to 41/42 and three global D6-trivial planes occupy 43..45.
 
 Features are computed in Rust (`hexo_engine`'s incremental `WindowStore`) with
 an exact-parity Python oracle (`features.py`). The featurizer reads the same
@@ -253,7 +257,7 @@ shrinks **both** (C drops).
   self-description and loaders rebuild from it. Any new arch knob must ride
   `arch_meta` and `infer_net_kwargs_from_state_dict`.
 - Tests run in the WSL venv:
-  `wsl -e bash -c 'cd /mnt/e/Hexo-BotTrainer-hexgt && source /root/.venvs/hexgt-build/bin/activate && export PYTHONPATH=packages/hexfield_eq/python:packages/hexo_engine/python:packages/hexo_utils/python && pytest tests/<file> -q'`
+  `wsl -e bash -c 'cd /mnt/e/Hexo-BotTrainer-hexgt && source /root/.venvs/hexgt-build/bin/activate && export PYTHONPATH=packages/hexfield_eq/python:packages/hexo_engine/python:packages/hexo_utils/python:packages/hexo_train/python:packages/hexo_runner/python && pytest tests/<file> -q'`
   CPU-only work also runs under Windows Python with the same PYTHONPATH.
 - A live training soak is running from this tree's launch scripts. **Do not
   modify anything the live run imports** (see the hard file lists in the
@@ -266,7 +270,7 @@ packages/hexfield_eq/python/hexfield_eq/
   constants.py     import-time env → all shape constants
   geometry.py      apply_d6 / d6_inverse / disk_offsets / rel_bias_index
   support.py       support-set construction (N nodes)
-  features.py      25-plane Python oracle featurizer
+  features.py      versioned 25/46-plane Python oracle featurizer
   equivariant.py   D6 tables, tie gathers, head perms, joint bias LUT, group_pool
   model.py         HexNodeConv/EquivLinear/norms/blocks/HexfieldNet/heads
   register.py      RegisterRefresh / TokenRead (lane)
@@ -283,3 +287,45 @@ tests/
   test_hexfield_eq_equivariance.py  full-net equivariance harness (reuse pattern)
   test_hexfield_eq_perm_fold.py     serve fold gate (tolerance model documented)
 ```
+
+## 11. Production typed quotient fibers (Phase B as built)
+
+The old ×12 regular fiber remains the default and rollback path. When
+`HEXFIELD_EQ_TYPE_SIG` is set, the residual stream is a canonical direct sum of
+the five supported permutation-module types:
+
+```text
+reg (12 slots), mirror (6), point (6), axis (3), triv (1).
+```
+
+Within each type block channels stay slot-major, instance-minor. The residual
+width is `C = Σ slots(type)·multiplicity`; `HEXFIELD_EQ_ATTN_ORBIT=K_attn`
+independently selects a pure-regular attention interior of width `12·K_attn`.
+Every A block, L block, and register refresh therefore crosses the same typed
+boundary:
+
+```text
+sig --TypedLinear(q/k/v)--> reg:K_attn
+    --existing attention math--> reg:K_attn
+    --TypedLinear(out)--> sig.
+```
+
+Convs use the Phase-A `(tap,out_slot,in_slot)` orbit bases. MLPs map
+`sig -> 2·sig -> sig`; tokens, norm affines, biases, and LayerScale are stored
+per type instance and expanded across quotient slots. Invariant heads pool the
+slots of each instance before any unconstrained `nn.Linear`.
+
+The materialized dense layouts and serve contracts do not change. Triton sees
+ordinary `(7,Cin,Cout)` conv weights, `(Cout,Cin)` linear weights, and expanded
+`(C,)` norm affines. Head permutation folding remains confined to the regular
+side of the attention boundary and uses the same no-grad cache gate.
+
+Pure `reg:K` modules specialize to the historical `wb`, `w_base`, and
+`bias_base` parameter names/shapes. Phase B's D8 gate loads the live pure-regular
+checkpoint and reproduces its policy/value/moves-left logits exactly. Mixed
+checkpoints record canonical `type_sig` and `attn_orbit` in `arch_meta`; missing
+mixed metadata is rejected rather than guessed.
+
+The three owner-accepted production candidates are B1 (`C=160,K=8`) and B2/B3
+(`C=128,K=16/8`). Training and deployment remain deferred; see
+`RESULTS_PHASE_B.md` for gates and the later ray-tap merge boundary.

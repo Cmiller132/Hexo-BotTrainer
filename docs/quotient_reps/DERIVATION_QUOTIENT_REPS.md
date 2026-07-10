@@ -530,29 +530,34 @@ seeded signature pairs in the same file.
 
 ---
 
-## 6. Reynolds lift of the real 25-plane stem
+## 6. Reynolds lift of the versioned real input stem
 
-The input is not a regular fiber. Its exact production plane action is
+The input is not a regular fiber. Its exact production plane action is selected
+by `HEXFIELD_EQ_FEATURE_VERSION`:
 
 ```
-V_input = 13·triv ⊕ 4·axis.                                (6.1)
+V_input(v1) = 13·triv ⊕ 4·axis,    NUM_FEATURES = 25;
+V_input(v2) = 16·triv ⊕ 10·axis,   NUM_FEATURES = 46.       (6.1)
 ```
 
-The physical layout is noncontiguous by type:
+The physical layout is noncontiguous by type in both versions:
 
-- scalar planes `0..10` and `23..24` are fixed;
-- planes `11..22` are four quantity-major axis triples;
-- `plane(q,a) = 11 + 3q + a`, with `q=0..3`, `a∈{Q,R,QR}`;
+- scalar planes `0..10`, the two post-axis fork planes, and v2's three final
+  global planes are fixed;
+- the axis block always starts at plane 11 and contains four quantity-major
+  triples in v1 or ten in v2;
+- `plane(q,a) = 11 + 3q + a`, with `q=0..N_AXIS_QUANTITIES-1`,
+  `a∈{Q,R,QR}`;
 - `ρ_input(g)` sends `plane(q,a)` to
   `plane(q,π_axis(g)a)`.
 
 The axis permutation is the same three-coset action used by the attention
 heads. In particular, the input action must not be built as a fictitious
-contiguous `13 scalars + 12 axes` block; the two fork scalars follow the axis
-planes in the shipped layout.
+contiguous scalar/axis block. The two fork scalars follow the axis planes, and
+therefore move from 23/24 in v1 to 41/42 in v2.
 
 Let `sig_out` be any mixed output signature and let an unrestricted seed have
-mathematical matrices `W⁰_t` of shape `(C_out,25)`. Its orthogonal Reynolds
+mathematical matrices `W⁰_t` of shape `(C_out,NUM_FEATURES)`. Its orthogonal Reynolds
 projection is
 
 ```
@@ -569,27 +574,26 @@ W̄_{τ_h(t)} = ρ_out(h) W̄_t ρ_input(h)⁻¹,                  (6.3)
 which is exactly the typed stem version of the conv constraint (3.1).
 Conversely, every tensor satisfying (6.3) is fixed by (6.2), so the projection
 is onto the complete equivariant stem space, not a hand-selected injection.
-The seed parameter is stored as `w0 (7,C_out,25)` and the materialized dense
-conv weight as `(7,25,C_out)`.
+The seed parameter is stored as `w0 (7,C_out,NUM_FEATURES)` and the materialized
+dense conv weight as `(7,NUM_FEATURES,C_out)`.
 
 For pure regular output, `ρ_out` and `ρ_input` exactly match production's
-generated matrices. `test_input_rep_and_typed_stem_reproduce_production` first
-checks all twelve 25-plane matrices elementwise and then compares the projected
-weights to `equivariant.gen_stem_weight` at `atol=1e-12, rtol=0`. The averaging
-projection needs a rounding tolerance; the linear and conv orbit gathers in
-§§2–3 do not.
+generated matrices. `test_input_rep_and_typed_stem_reproduce_production` checks
+the v1 action, while the Phase-B typed-model suite repeats exact input/stem
+parity under v1 and v2. The projected weights compare with
+`equivariant.gen_stem_weight` at `atol=1e-12, rtol=0`. The averaging projection
+needs a rounding tolerance; the linear and conv orbit gathers in §§2–3 do not.
 
 ---
 
-## 7. Phase-B boundary design rehearsed by the typed toy network
+## 7. Phase-B boundary design, as built
 
-This section records the locked choices D1–D8 from the Phase-B specification.
-It is a boundary contract, not authorization to start Phase B. The two genuine
-architecture choices left to the Phase-A evidence are the residual signature
-`sig` and the regular attention multiplicity `K_attn`; the remaining mechanics
-below are fixed.
+This section records the locked choices D1–D8 from the Phase-B specification
+and their production realization in `model.py`/`register.py`. The residual
+signature `sig` and regular attention multiplicity `K_attn` remain independent
+architecture inputs; every boundary below is now used by `HexfieldNet`.
 
-G6 instantiates the contract at `K_attn=4`, hence internal regular width 48 and
+The Phase-A G6 rehearsal instantiated the contract at `K_attn=4`, hence internal regular width 48 and
 A-head dimension 16, with two signatures:
 
 ```
@@ -597,12 +601,17 @@ reg:2,mirror:2,point:1,axis:2,triv:3   → C=51
 reg:4,mirror:4,axis:4,triv:12          → C=96.
 ```
 
-For each, the toy contains the real typed 25-plane stem, two two-conv residual
+For each, the toy contains the real typed v1 stem, two two-conv residual
 blocks, a sigmoid-gated register sum, one attention/MLP block, typed norms and
 LayerScale, and policy/value reads. Five legal oracle-featurized positions are
 checked under every group element: per-cell policy logits follow the transformed
 node permutation and value is invariant at `atol=1e-9`
 (`test_two_typed_toynets_are_equivariant_on_real_oracle_features`).
+
+Production Phase B instantiates the owner-accepted B1/B2/B3 signatures at
+`C∈{160,128}` and `K_attn∈{8,16}`. The full-network suite checks every D6
+element on real oracle features for B1 and B2, checks B3 construction/forward,
+and repeats the mixed full-network equivariance gate with the 46-plane v2 stem.
 
 ### 7.1 D1 — typed residual stream, regular attention internals
 
@@ -635,9 +644,9 @@ addition occurs only after returning to `sig`.
 - RegisterRefresh uses the same typed→regular q/k/v and regular→typed out
   boundaries around its sigmoid-gated **unnormalized sum**.
 
-The G6 toy directly exercises the A and register boundaries. Ray attention uses
-the same representation boundary but its six-head production integration
-remains a Phase-B test obligation.
+The production A blocks, L/ray blocks, and register refresh all use these
+boundaries. `head_perm(K_attn)` and `head_perm6(K_attn)` are generated by
+`reps.py`; the latter is covered by pure-regular parity and mixed L-block tests.
 
 ### 7.2 D2 — typed MLPs
 
@@ -678,8 +687,8 @@ kernel. Section 5 proves this and the G6 residual blocks exercise it.
 
 ### 7.5 D5 — typed convs and the typed stem
 
-Residual convs use the triple-orbit basis of §3. The stem uses the 25-plane
-Reynolds lift of §6. Materialized dense layouts remain `(7,C_in,C_out)` for
+Residual convs use the triple-orbit basis of §3. The stem uses the active
+versioned Reynolds lift of §6. Materialized dense layouts remain `(7,C_in,C_out)` for
 convs and `(C_out,C_in)` for linears, so serve caches, GEMMs, and Triton kernels
 remain blind to the parameter tie. The pure-regular specialization must retain
 the production `w_base` convention in (3.6).
@@ -707,24 +716,25 @@ q/k/v fold an output permutation and out-projection folds the corresponding
 input permutation. The fold remains a row/column reorder of the materialized
 dense boundary weight and retains the exact `not torch.is_grad_enabled()` cache
 gate contract. G3 proves the generated dense pure-regular maps have production
-ordering; the no-grad cache/fold integration itself remains a Phase-B serve
-gate.
+ordering. Production `TypedLinear.set_serve_perms` retains the same no-grad gate;
+the CPU mixed serve suite checks runtime versus folded results with the existing
+magnitude-scaled tolerance and invalidates every mixed-coefficient cache entry.
 
 ### 7.8 D8 — pure-regular bit-compatibility is the regression gate
 
-With `sig=reg:16` and `K_attn=16`, Phase B must preserve the current state-dict
-key set, parameter names, and shapes, including `wb (12,o,i)` and
-`w_base (7,12,o,i)`. It must load the live checkpoint and reproduce
-`forward_policy_value` on fp32 CPU to elementwise `atol≤1e-5`.
+With `sig=reg:16` and `K_attn=16`, Phase B preserves the current state-dict key
+set, parameter names, and shapes, including `wb (12,o,i)` and
+`w_base (7,12,o,i)`. The recorded 321-tensor arm-4 manifest matches exactly,
+and the newest live `main_1` checkpoint reproduces policy, value, and moves-left
+logits on fp32 CPU with maximum absolute error 0.0 (`atol=1e-5`, `rtol=0`).
 
 Phase A establishes the algebraic prerequisite: G3 gives exact dense linear and
 conv parity and `1e-12` stem parity. G6 adds a smaller pure-regular structural
 comparison at `C=96`: matched parameters in the typed stem, two production-form
 C blocks, a register refresh, one A block, final norm, and policy/value reads
 agree with `model.py` primitives to their fp64 tolerances
-(`test_pure_regular_toy_path_matches_production_primitives`). Neither result
-substitutes for the Phase-B state-dict and live-logit gate; both make that gate
-well founded.
+(`test_pure_regular_toy_path_matches_production_primitives`). The production
+state-dict and live-logit evidence is recorded in `RESULTS_PHASE_B.md` §3.
 
 ---
 
