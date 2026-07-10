@@ -366,3 +366,57 @@ def test_stem_typed_lift_structure():
         for g in G["E"]:
             for a in range(3):
                 assert np.abs(cols[a][G["regp"][g]] - cols[G["cosp"][g][a]]).max() < TOL
+
+
+# ------------------------------------------------- shipped plane maps (§8) ----
+# The tests above use a toy layout (13 scalars contiguous, axis planes after).
+# The SHIPPED maps interleave: the axis block starts at 11 and the fork scalars
+# sit AFTER it — 23/24 under HEXFIELD_EQ_FEATURE_VERSION=1; under version 2 the
+# fork planes RE-INDEX to 41/42 behind the liveK block and 3 global scalars
+# append (SPEC_RAYTAP_CONV.md §1.2). The §8 stem-lift structure must hold
+# against both real maps; a stale scalar set (forks left at 23/24 under the
+# 46-plane map) mistypes real planes — it trains fine but is not equivariant.
+
+REAL_PLANE_MAPS = (
+    # (nf, n_axis_quantities, scalar planes)
+    (25, 4, tuple(range(11)) + (23, 24)),
+    (46, 10, tuple(range(11)) + tuple(range(41, 46))),
+)
+
+
+def _rin_for_map(g, nf, n_axis_q, scalars):
+    M = np.zeros((nf, nf))
+    for p in scalars:
+        M[p, p] = 1.0
+    for q in range(n_axis_q):
+        for a in range(3):
+            M[11 + q * 3 + G["cosp"][g][a], 11 + q * 3 + a] = 1.0
+    return M
+
+
+def _stem_project_for_map(W0, nf, n_axis_q, scalars):
+    Ws = np.zeros_like(W0)
+    for g in G["E"]:
+        Mg = _Mreg(g)
+        Rg = np.linalg.inv(_rin_for_map(g, nf, n_axis_q, scalars))
+        for t in range(7):
+            Ws[t] += Mg @ W0[G["tapp"][G["inv"][g]][t]] @ Rg
+    return Ws / 12.0
+
+
+def test_stem_typed_lift_structure_real_plane_maps():
+    for seed, (nf, n_axis_q, scalars) in enumerate(REAL_PLANE_MAPS):
+        # the map is a partition of the planes
+        assert set(scalars) | {11 + k for k in range(3 * n_axis_q)} == set(range(nf))
+        W0 = np.random.default_rng(10 + seed).standard_normal((7, C, nf))
+        Ws = _stem_project_for_map(W0, nf, n_axis_q, scalars)
+        for p in scalars:
+            col = Ws[0, :, p].reshape(12, CORB)
+            assert np.abs(col - col.mean(0, keepdims=True)).max() < TOL, (nf, p)
+        for q in range(n_axis_q):
+            cols = [Ws[0, :, 11 + q * 3 + a].reshape(12, CORB) for a in range(3)]
+            for g in G["E"]:
+                for a in range(3):
+                    assert (
+                        np.abs(cols[a][G["regp"][g]] - cols[G["cosp"][g][a]]).max() < TOL
+                    ), (nf, q, g, a)

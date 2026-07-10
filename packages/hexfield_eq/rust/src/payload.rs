@@ -26,7 +26,7 @@ use crate::cache::{
     lock_cache, lock_stats, RustEvaluation, RustEvaluationRequest, SharedEvaluationCache,
     SharedEvaluationStats,
 };
-use crate::constants::{NUM_FEATURES, RAYLEN_SLOTS};
+use crate::constants::{num_features, RAYLEN_SLOTS};
 use crate::features::{build_features, build_ray_lengths};
 use crate::support::build_support;
 
@@ -118,7 +118,7 @@ fn build_chunk_payload<'py>(
 ) -> PyResult<Bound<'py, PyDict>> {
     let total_nodes: usize = rows.iter().map(|r| r.num_nodes).sum();
     let b = rows.len();
-    let mut node_feats: Vec<f16> = Vec::with_capacity(total_nodes * NUM_FEATURES);
+    let mut node_feats: Vec<f16> = Vec::with_capacity(total_nodes * num_features());
     let mut node_qr: Vec<i16> = Vec::with_capacity(total_nodes * 2);
     let mut nbr: Vec<u16> = Vec::with_capacity(total_nodes * 6);
     let mut raylen: Vec<u8> = Vec::with_capacity(total_nodes * RAYLEN_SLOTS);

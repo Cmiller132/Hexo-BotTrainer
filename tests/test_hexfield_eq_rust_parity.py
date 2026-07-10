@@ -52,13 +52,27 @@ needs_rust = pytest.mark.skipif(
     _rust is None, reason="hexfield_eq._rust not built (see the Phase-1 build gate)"
 )
 
-# The 12 axis-indexed planes as four (base, name) groups, each 3 contiguous slots
-# ordered by axis [Q, R, QR]. The scalar planes (everything else) are D6-invariant.
-_AXIS_GROUPS = (
-    (C.F_OWN_LINE_Q, "own_line"),
-    (C.F_OPP_LINE_Q, "opp_line"),
-    (C.F_OWN_LIVE_Q, "own_live"),
-    (C.F_OPP_LIVE_Q, "opp_live"),
+# The axis-indexed planes as (base, name) groups, each 3 contiguous slots
+# ordered by axis [Q, R, QR]: 4 quantities under HEXFIELD_EQ_FEATURE_VERSION=1,
+# 10 under version 2 (the liveK planes of SPEC_RAYTAP_CONV.md §1.3). Derived
+# from the constants so this suite pins whichever plane map the env selected —
+# tests/test_hexfield_eq_feature_v2.py re-runs it in a version-2 child. The
+# scalar planes (everything else) are D6-invariant.
+_AXIS_QUANTITY_NAMES = (
+    "own_line",
+    "opp_line",
+    "own_live",
+    "opp_live",
+    "own_live3",
+    "opp_live3",
+    "own_live4",
+    "opp_live4",
+    "own_live5",
+    "opp_live5",
+)
+_AXIS_GROUPS = tuple(
+    (C.F_OWN_LINE_Q + 3 * q, _AXIS_QUANTITY_NAMES[q])
+    for q in range(C.N_AXIS_QUANTITIES)
 )
 _AXIS_PLANES = tuple(base + a for base, _ in _AXIS_GROUPS for a in range(3))
 _SCALAR_PLANES = tuple(p for p in range(C.NUM_FEATURES) if p not in _AXIS_PLANES)
@@ -207,10 +221,12 @@ def _axis_perm(g: int) -> list[int]:
 
 
 @needs_rust
-def test_capabilities_report_25_planes() -> None:
+def test_capabilities_report_plane_count() -> None:
     caps = _rust.capabilities()
     assert caps["model_family"] == "hexfield_eq"
-    assert caps["num_features"] == C.NUM_FEATURES == 25
+    assert caps["num_features"] == C.NUM_FEATURES == (
+        25 if C.FEATURE_VERSION == 1 else 46
+    )
 
 
 @needs_rust
@@ -222,6 +238,13 @@ def test_serve_featurizer_parity() -> None:
 
     exact_planes = [p for p in range(C.NUM_FEATURES) if p not in (C.F_OWN_RECENCY, C.F_OPP_RECENCY)]
     exact_planes = [p for p in exact_planes if p not in _AXIS_PLANES]
+    if C.FEATURE_VERSION == 2:
+        # The three float-derived global scalars (spec §1.4) ride the tolerant
+        # path with the graded planes; the int-derived planes stay bit-exact.
+        exact_planes = [
+            p for p in exact_planes
+            if p not in (C.F_PLY, C.F_DIST_CENTROID, C.F_SPREAD)
+        ]
 
     saw_line = 0.0
     for state, payload in zip(states, payloads):

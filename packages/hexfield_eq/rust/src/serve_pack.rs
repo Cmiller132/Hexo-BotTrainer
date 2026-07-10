@@ -26,7 +26,7 @@ use std::ptr;
 
 use half::f16;
 
-use crate::constants::{NUM_FEATURES, RAYLEN_SLOTS};
+use crate::constants::{num_features, RAYLEN_SLOTS};
 
 const NBR_SENTINEL: u16 = 0xFFFF;
 // Node-count quantization for pad_to; mirrors inference.py.
@@ -163,13 +163,14 @@ fn assemble_groups(
     offsets: &[usize],
     sizes: &[usize],
 ) -> Vec<GroupBufs> {
+    let nf = num_features();
     groups
         .par_iter()
         .map(|&(start, end, pad_to)| {
             let g = end - start;
             let pad_i32 = pad_to as i32;
 
-            let mut f = vec![f16::ZERO; g * pad_to * NUM_FEATURES];
+            let mut f = vec![f16::ZERO; g * pad_to * nf];
             let mut nb = vec![pad_i32; g * pad_to * 6];
             let mut m = vec![0u8; g * pad_to];
             let mut c = vec![0i32; g * pad_to * 2];
@@ -181,8 +182,8 @@ fn assemble_groups(
                 let o = offsets[row];
 
                 // feats: [k, :n, :] = feats[o:o+n]; rest already f16::ZERO.
-                let src = &feats[o * NUM_FEATURES..(o + n) * NUM_FEATURES];
-                let dst = &mut f[k * pad_to * NUM_FEATURES..k * pad_to * NUM_FEATURES + n * NUM_FEATURES];
+                let src = &feats[o * nf..(o + n) * nf];
+                let dst = &mut f[k * pad_to * nf..k * pad_to * nf + n * nf];
                 dst.copy_from_slice(src);
 
                 // nbr: [k, :n, :] = where(row==SENTINEL, pad_to, row); rest = pad_to.
@@ -248,9 +249,10 @@ pub fn build_serve_groups<'py>(
     }
     let b = offsets.len() - 1;
     let total_nodes = *offsets.last().unwrap() as usize;
+    let nf = num_features();
 
     // Reinterpret the wire bytes as typed slices; assumes native (LE) byte order.
-    if feats_bytes.len() != total_nodes * NUM_FEATURES * std::mem::size_of::<f16>() {
+    if feats_bytes.len() != total_nodes * nf * std::mem::size_of::<f16>() {
         return Err(PyValueError::new_err("feats byte count mismatch"));
     }
     if qr_bytes.len() != total_nodes * 2 * std::mem::size_of::<i16>() {
@@ -266,7 +268,7 @@ pub fn build_serve_groups<'py>(
     // patterns; the source byte buffers are alive for the call and aligned
     // (element align <= 2, contiguous arrays). Copied into owned Vecs.
     let feats: Vec<f16> = unsafe {
-        std::slice::from_raw_parts(feats_bytes.as_ptr() as *const f16, total_nodes * NUM_FEATURES)
+        std::slice::from_raw_parts(feats_bytes.as_ptr() as *const f16, total_nodes * nf)
     }
     .to_vec();
     let qr: Vec<i16> = unsafe {
