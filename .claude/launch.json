@@ -22,6 +22,41 @@
       "port": 8131
     },
     {
+      "name": "learn-static",
+      "runtimeExecutable": "C:\\Python314\\python.exe",
+      "runtimeArgs": [
+        "-m",
+        "http.server",
+        "8739",
+        "-d",
+        "E:\\hexo-bot\\apps\\showcase\\web\\learn"
+      ],
+      "port": 8739
+    },
+    {
+      "name": "design-mockups",
+      "runtimeExecutable": "C:\\Python314\\python.exe",
+      "runtimeArgs": [
+        "-m",
+        "http.server",
+        "8734",
+        "-d",
+        "C:\\Users\\epicm\\AppData\\Local\\Temp\\claude\\E--Hexo-BotTrainer-hexgt\\519cb647-4c3a-4a06-8bcc-706945d316c2\\scratchpad\\design"
+      ],
+      "port": 8734
+    },
+    {
+      "name": "showcase-web",
+      "runtimeExecutable": "wsl.exe",
+      "runtimeArgs": [
+        "-e",
+        "bash",
+        "-lc",
+        "cd /mnt/e/hexo-bot && source /root/.venvs/hexo-bot-public/bin/activate && export PYTHONPATH=/mnt/e/hexo-bot/packages/hexfield/python:/mnt/e/hexo-bot/apps/showcase/server && HEXFIELD_CHANNELS=32 HEXFIELD_ATTENTION_HEADS=4 HEXFIELD_TRUNK=CCA HEXFIELD_SUPPORT_RADIUS=4 SHOWCASE_DB_PATH=/tmp/showcase-web-test.db SHOWCASE_WORKERS=1 SHOWCASE_BOTS_TOML='/mnt/c/Users/epicm/AppData/Local/Temp/claude/E--Hexo-BotTrainer-hexgt/519cb647-4c3a-4a06-8bcc-706945d316c2/scratchpad/bots-test.toml' exec uvicorn showcase.app:app --port 8123 --host 0.0.0.0"
+      ],
+      "port": 8123
+    },
+    {
       "name": "hexo-dashboard-wsl",
       "runtimeExecutable": "wsl.exe",
       "runtimeArgs": [
@@ -31,6 +66,28 @@
         "ROOT=/mnt/e/Hexo-BotTrainer-hexgt; export PYTHONPATH=\"$ROOT/packages/hexo_engine/python:$ROOT/packages/hexo_utils/python:$ROOT/packages/hexo_runner/python:$ROOT/packages/hexo_train/python:$ROOT/packages/hexo_models/python:$ROOT/packages/hexo_frontend/python:$ROOT/packages/dense_cnn_restnet/python\"; export HEXO_DEBUG_RUN_ROOT=/mnt/e/Hexo-BotTrainer; cd /mnt/e/Hexo-BotTrainer && exec /root/.venvs/hexgt-build/bin/python -u -m hexo_frontend.web --host 0.0.0.0 --port 8095 --sealbot-path /mnt/e/SealBot"
       ],
       "port": 8095
+    },
+    {
+      "name": "showcase-lab",
+      "runtimeExecutable": "wsl.exe",
+      "runtimeArgs": [
+        "-e",
+        "bash",
+        "-c",
+        "cd /mnt/e/hexo-bot && PYTHONPATH=packages/shrimp/python:apps/showcase/server SHRIMP_CHANNELS=32 SHRIMP_ATTENTION_HEADS=4 SHRIMP_TRUNK=CCA SHRIMP_SUPPORT_RADIUS=4 SHOWCASE_DB_PATH=/tmp/showcase-lab-test.db SHOWCASE_WORKERS=1 exec /root/.venvs/hexo-bot-public/bin/python -m uvicorn showcase.app:app --host 0.0.0.0 --port 8124"
+      ],
+      "port": 8124
+    },
+    {
+      "name": "showcase-verify",
+      "runtimeExecutable": "wsl.exe",
+      "runtimeArgs": [
+        "-e",
+        "bash",
+        "-c",
+        "cd /mnt/e/hexo-bot && PYTHONPATH=packages/shrimp/python:apps/showcase/server SHRIMP_CHANNELS=32 SHRIMP_ATTENTION_HEADS=4 SHRIMP_TRUNK=CCA SHRIMP_SUPPORT_RADIUS=4 SHOWCASE_DB_PATH=/tmp/showcase-verify-test.db SHOWCASE_WORKERS=1 exec /root/.venvs/hexo-bot-public/bin/python -m uvicorn showcase.app:app --host 0.0.0.0 --port 8126"
+      ],
+      "port": 8126
     }
   ]
 }
