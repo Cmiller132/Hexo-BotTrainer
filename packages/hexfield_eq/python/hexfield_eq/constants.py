@@ -170,10 +170,11 @@ HALO_DIST_FEATURE = HALO_DIST / DIST_SCALE  # 1.125
 VALUE_BINS = 65
 MOVES_LEFT_CAP = 209
 
-# --- trunk ----------------------------------------------------------------------
-# Trunk width from env HEXFIELD_EQ_CHANNELS (default 96), read once at import.
-# Must be divisible by ATTENTION_HEADS. A checkpoint loads only into a net built
-# at the same width.
+# --- trunk / quotient-representation architecture -------------------------------
+# Legacy pure-regular builds are selected by CHANNELS/C_ORBIT. An explicit
+# HEXFIELD_EQ_TYPE_SIG instead makes the residual width the sum of the nominated
+# quotient modules; HEXFIELD_EQ_ATTN_ORBIT selects the multiplicity of the pure
+# regular attention interior (Phase-B decisions D1/D8).
 #
 # ENV NAMESPACE: this package deliberately reads HEXFIELD_EQ_* arch env names,
 # NOT the live hexfield lineage's HEXFIELD_* names, so a process importing both
@@ -181,7 +182,148 @@ MOVES_LEFT_CAP = 209
 # with one value ("BUGS_FOUND" env-collision item). The checkpoint meta is the
 # authoritative arch self-description (see model.arch_meta); these envs only pick
 # the default build.
-CHANNELS = int(os.environ.get("HEXFIELD_EQ_CHANNELS", "96"))
+_TYPE_ORDER = ("reg", "mirror", "point", "axis", "triv")
+_TYPE_SLOTS = {"reg": 12, "mirror": 6, "point": 6, "axis": 3, "triv": 1}
+
+
+def _parse_type_signature(value: str) -> tuple[tuple[str, int], ...]:
+    """Parse the canonical env spelling without importing ``reps``.
+
+    ``reps`` imports this module for the feature map, so constants cannot use
+    ``reps.canonical_signature`` without creating an import cycle.
+    """
+
+    items: list[tuple[str, int]] = []
+    seen: set[str] = set()
+    last_order = -1
+    for raw in value.split(","):
+        fields = raw.strip().split(":")
+        if len(fields) != 2:
+            raise ValueError(f"invalid HEXFIELD_EQ_TYPE_SIG item {raw!r}")
+        name = fields[0].strip()
+        if name not in _TYPE_SLOTS:
+            raise ValueError(
+                f"unknown quotient type {name!r}; expected one of {_TYPE_ORDER}"
+            )
+        if name in seen:
+            raise ValueError(f"duplicate quotient type {name!r}")
+        try:
+            multiplicity = int(fields[1].strip())
+        except ValueError as exc:
+            raise ValueError(
+                f"multiplicity for {name} must be a positive integer"
+            ) from exc
+        if multiplicity < 1:
+            raise ValueError(f"multiplicity for {name} must be a positive integer")
+        order = _TYPE_ORDER.index(name)
+        if order <= last_order:
+            raise ValueError(
+                "HEXFIELD_EQ_TYPE_SIG types must follow canonical order "
+                "reg,mirror,point,axis,triv"
+            )
+        items.append((name, multiplicity))
+        seen.add(name)
+        last_order = order
+    if not items:
+        raise ValueError("HEXFIELD_EQ_TYPE_SIG must contain at least one type")
+    return tuple(items)
+
+
+def _format_type_signature(signature: tuple[tuple[str, int], ...]) -> str:
+    return ",".join(f"{name}:{multiplicity}" for name, multiplicity in signature)
+
+
+GROUP_ORDER = int(os.environ.get("HEXFIELD_EQ_GROUP_ORDER", "12"))
+if GROUP_ORDER not in (1, 6, 12):
+    raise ValueError(
+        f"HEXFIELD_EQ_GROUP_ORDER={GROUP_ORDER} unsupported; use 1 (passthrough), "
+        "6 (C6, reserved), or 12 (full D6)"
+    )
+if GROUP_ORDER == 6:
+    raise NotImplementedError(
+        "HEXFIELD_EQ_GROUP_ORDER=6 equivariant trunk not implemented; use 12 "
+        "(full D6) or 1 (passthrough)"
+    )
+
+_CHANNELS_ENV = os.environ.get("HEXFIELD_EQ_CHANNELS")
+_LEGACY_CHANNELS = int(_CHANNELS_ENV) if _CHANNELS_ENV is not None else 96
+_C_ORBIT_ENV = os.environ.get("HEXFIELD_EQ_C_ORBIT")
+_TYPE_SIG_ENV = os.environ.get("HEXFIELD_EQ_TYPE_SIG")
+
+if GROUP_ORDER == 1:
+    # Passthrough ignores representation typing, but reject a mixed spelling
+    # rather than accepting a knob that appears to do something.
+    if _TYPE_SIG_ENV is not None:
+        ignored_signature = _parse_type_signature(_TYPE_SIG_ENV)
+        if len(ignored_signature) != 1 or ignored_signature[0][0] != "reg":
+            raise ValueError(
+                "HEXFIELD_EQ_GROUP_ORDER=1 ignores HEXFIELD_EQ_TYPE_SIG; leave it "
+                "unset or specify a pure-reg signature"
+            )
+    CHANNELS = _LEGACY_CHANNELS
+    C_ORBIT = int(_C_ORBIT_ENV) if _C_ORBIT_ENV is not None else CHANNELS
+    if C_ORBIT != CHANNELS:
+        raise ValueError(
+            f"HEXFIELD_EQ_C_ORBIT={C_ORBIT} must equal "
+            f"HEXFIELD_EQ_CHANNELS={CHANNELS} when HEXFIELD_EQ_GROUP_ORDER=1 "
+            "(passthrough)"
+        )
+    TYPE_SIGNATURE = (("reg", C_ORBIT),)
+else:
+    if _TYPE_SIG_ENV is None:
+        CHANNELS = _LEGACY_CHANNELS
+        if CHANNELS % GROUP_ORDER != 0:
+            raise ValueError(
+                f"HEXFIELD_EQ_CHANNELS={CHANNELS} not divisible by "
+                f"HEXFIELD_EQ_GROUP_ORDER={GROUP_ORDER} "
+                "(unset TYPE_SIG requires a pure regular fiber)"
+            )
+        C_ORBIT = (
+            int(_C_ORBIT_ENV)
+            if _C_ORBIT_ENV is not None
+            else CHANNELS // GROUP_ORDER
+        )
+        if C_ORBIT < 1 or GROUP_ORDER * C_ORBIT != CHANNELS:
+            raise ValueError(
+                f"HEXFIELD_EQ_C_ORBIT={C_ORBIT} inconsistent: "
+                f"GROUP_ORDER*C_ORBIT={GROUP_ORDER * C_ORBIT} != "
+                f"HEXFIELD_EQ_CHANNELS={CHANNELS}"
+            )
+        TYPE_SIGNATURE = (("reg", C_ORBIT),)
+    else:
+        TYPE_SIGNATURE = _parse_type_signature(_TYPE_SIG_ENV)
+        CHANNELS = sum(
+            _TYPE_SLOTS[name] * multiplicity
+            for name, multiplicity in TYPE_SIGNATURE
+        )
+        if _CHANNELS_ENV is not None and _LEGACY_CHANNELS != CHANNELS:
+            raise ValueError(
+                f"HEXFIELD_EQ_CHANNELS={_LEGACY_CHANNELS} disagrees with "
+                f"HEXFIELD_EQ_TYPE_SIG={_TYPE_SIG_ENV!r}, whose width is {CHANNELS}"
+            )
+        # Retained only for old callers. It has no residual-fiber meaning for a
+        # mixed signature; typed production code uses TYPE_SIGNATURE/ATTN_ORBIT.
+        regular_multiplicity = dict(TYPE_SIGNATURE).get("reg", 0)
+        explicit_pure_regular = (
+            len(TYPE_SIGNATURE) == 1 and TYPE_SIGNATURE[0][0] == "reg"
+        )
+        if (
+            explicit_pure_regular
+            and _C_ORBIT_ENV is not None
+            and int(_C_ORBIT_ENV) != regular_multiplicity
+        ):
+            raise ValueError(
+                f"HEXFIELD_EQ_C_ORBIT={int(_C_ORBIT_ENV)} disagrees with "
+                f"pure HEXFIELD_EQ_TYPE_SIG={_TYPE_SIG_ENV!r}; expected "
+                f"{regular_multiplicity}"
+            )
+        C_ORBIT = (
+            int(_C_ORBIT_ENV)
+            if _C_ORBIT_ENV is not None
+            else max(1, regular_multiplicity)
+        )
+
+TYPE_SIG = _format_type_signature(TYPE_SIGNATURE)
 # Summary tokens. The equivariant rewrite prunes the two dead tokens 6 & 7 (read
 # by no head: value/aux/moves-left consume tokens 0..5), so NUM_TOKENS 8 -> 6
 # (docs/DERIVATION_D6_EQUIVARIANT_ATTENTION.md §6, plan §1.4).
@@ -191,116 +333,64 @@ NUM_TOKENS = 6
 # and at c=192 head_dim lands on 64 where attention kernels are fast). d=32 at
 # c=96 is still a valid fast-path head_dim.
 ATTENTION_HEADS = int(os.environ.get("HEXFIELD_EQ_ATTENTION_HEADS", "3"))
-if CHANNELS % ATTENTION_HEADS != 0:
-    raise ValueError(
-        f"HEXFIELD_EQ_CHANNELS={CHANNELS} not divisible by "
-        f"HEXFIELD_EQ_ATTENTION_HEADS={ATTENTION_HEADS}"
-    )
-HEAD_DIM = CHANNELS // ATTENTION_HEADS  # 24 at c=96, 32 at c=128, 64 at c=192/h=3
 MLP_RATIO = 2
 
-# --- D6-equivariant trunk knobs (hexfield_eq) -----------------------------------
-# The equivariant rewrite (docs/PLAN_D6_EQUIVARIANT_REWRITE.md) tiles the trunk
-# width C into GROUP_ORDER fibers of C_ORBIT channels each, so
-# C == GROUP_ORDER * C_ORBIT. Read once at import, matching the CHANNELS /
-# ATTENTION_HEADS / TRUNK env convention above.
-#
-#   HEXFIELD_EQ_GROUP_ORDER — regular-representation order:
-#     12 = full D6 (6 rotations x reflection; the Phase-3 target),
-#      6 = C6 rotations only (reserved),
-#      1 = non-equivariant passthrough (the Phase-6 A/B ablation AND the Phase-0
-#          scaffold DEFAULT, so the copied dense trunk still builds unchanged).
-#   HEXFIELD_EQ_C_ORBIT — per-fiber width. Unset -> derived (CHANNELS //
-#     GROUP_ORDER for GROUP_ORDER>1, else CHANNELS).
-#
-# Phase 3b: the full D6 (order-12) regular-representation tie is the DEFAULT
-# build. The tied trunk (equivariant.py + model.py) generates dense weights each
-# forward from small orbit base params. GROUP_ORDER=1 stays a non-equivariant
-# passthrough (the Phase-6 A/B ablation and the copied dense trunk).
-GROUP_ORDER = int(os.environ.get("HEXFIELD_EQ_GROUP_ORDER", "12"))
-if GROUP_ORDER not in (1, 6, 12):
-    raise ValueError(
-        f"HEXFIELD_EQ_GROUP_ORDER={GROUP_ORDER} unsupported; use 1 (passthrough), "
-        "6 (C6, reserved), or 12 (full D6)"
-    )
-
-_C_ORBIT_ENV = os.environ.get("HEXFIELD_EQ_C_ORBIT")
-if GROUP_ORDER > 1:
-    # Equivariant build: enforce the C = GROUP_ORDER * C_ORBIT divisibility, plus
-    # the kernel fast-path alignment constraints (C % 16 == 0 and
-    # head_dim in {16,32,64,128}) so a tied trunk lands on the Triton fast path.
-    if CHANNELS % GROUP_ORDER != 0:
-        raise ValueError(
-            f"HEXFIELD_EQ_CHANNELS={CHANNELS} not divisible by "
-            f"HEXFIELD_EQ_GROUP_ORDER={GROUP_ORDER} (need C = GROUP_ORDER * C_ORBIT)"
-        )
-    C_ORBIT = int(_C_ORBIT_ENV) if _C_ORBIT_ENV is not None else CHANNELS // GROUP_ORDER
-    if C_ORBIT < 1 or GROUP_ORDER * C_ORBIT != CHANNELS:
-        raise ValueError(
-            f"HEXFIELD_EQ_C_ORBIT={C_ORBIT} inconsistent: "
-            f"GROUP_ORDER*C_ORBIT={GROUP_ORDER * C_ORBIT} != "
-            f"HEXFIELD_EQ_CHANNELS={CHANNELS}"
-        )
-    if CHANNELS % 16 != 0:
-        raise ValueError(
-            f"HEXFIELD_EQ_CHANNELS={CHANNELS} must be a multiple of 16 for the "
-            f"equivariant build (HEXFIELD_EQ_GROUP_ORDER={GROUP_ORDER})"
-        )
-    if HEAD_DIM not in (16, 32, 64, 96, 128):
-        raise ValueError(
-            f"head_dim={HEAD_DIM} (CHANNELS/ATTENTION_HEADS) must be one of "
-            "{16,32,64,96,128} for the equivariant build (96 = the pre-authorized "
-            "C=288 width contingency)"
-        )
-    if HEAD_DIM == 96:
-        # Pre-authorized underfit contingency (C=288, C_ORBIT=24): permitted,
-        # but the bespoke Triton attention kernel's fast path only engages at
-        # head_dim in {16,32,64,128}; serve falls back to sdpa/flex. Loud so a
-        # run at this width knows what it opted out of.
-        import warnings
-
-        warnings.warn(
-            "HEXFIELD_EQ head_dim=96 (C=288 contingency): the bespoke Triton "
-            "attention fast path will NOT engage; sdpa/flex serve paths only "
-            "(docs/DEPLOYMENT_CHECKLIST_HEXFIELD_EQ.md).",
-            stacklevel=1,
-        )
-    # The equivariant multi-head split aligns heads to the 3 left cosets of the
-    # order-4 subgroup K = stab(Q-axis): heads == [D6:K] == 3 (the 3 win-axes),
-    # head_dim == |K|*C_ORBIT == 4*C_ORBIT (docs/DERIVATION §4). Only 12 (full D6)
-    # is implemented; 6 (C6) is reserved.
-    if GROUP_ORDER != 12:
-        raise NotImplementedError(
-            f"HEXFIELD_EQ_GROUP_ORDER={GROUP_ORDER} equivariant trunk not "
-            "implemented; use 12 (full D6) or 1 (passthrough)"
-        )
-    # heads == 3 is STRUCTURAL under full D6 (GROUP_ORDER == 12), not a free
-    # knob: the multi-head split IS the 3 left cosets of the order-4 stabilizer
-    # K = stab(Q-axis), so heads == [D6:K] == 12/4 == 3 win-axes and
-    # head_dim == |K|*C_ORBIT == 4*C_ORBIT (docs/DERIVATION §4). The derivation
-    # forbids any other head count; reject it at import with a clear message.
+_ATTN_ORBIT_ENV = os.environ.get("HEXFIELD_EQ_ATTN_ORBIT")
+if GROUP_ORDER == 12:
+    pure_regular = len(TYPE_SIGNATURE) == 1 and TYPE_SIGNATURE[0][0] == "reg"
+    if _ATTN_ORBIT_ENV is None:
+        if not pure_regular:
+            raise ValueError(
+                "HEXFIELD_EQ_ATTN_ORBIT is required for a mixed "
+                "HEXFIELD_EQ_TYPE_SIG"
+            )
+        ATTN_ORBIT = TYPE_SIGNATURE[0][1]
+    else:
+        ATTN_ORBIT = int(_ATTN_ORBIT_ENV)
+        if _TYPE_SIG_ENV is None and ATTN_ORBIT != C_ORBIT:
+            raise ValueError(
+                "HEXFIELD_EQ_TYPE_SIG is unset, so HEXFIELD_EQ_ATTN_ORBIT must "
+                f"equal the default regular multiplicity {C_ORBIT}; set "
+                f"HEXFIELD_EQ_TYPE_SIG=reg:{C_ORBIT} explicitly if a "
+                "non-default attention width is intended"
+            )
+    if ATTN_ORBIT < 1:
+        raise ValueError("HEXFIELD_EQ_ATTN_ORBIT must be positive")
     if ATTENTION_HEADS != 3:
         raise ValueError(
             f"HEXFIELD_EQ_ATTENTION_HEADS={ATTENTION_HEADS} must be 3 for the "
-            "equivariant build (GROUP_ORDER=12): heads are structural — the "
-            "3 left cosets of K=stab(Q-axis), i.e. the 3 win-axes ([D6:K]=3). "
-            "Set HEXFIELD_EQ_ATTENTION_HEADS=3 or leave it unset (default 3)."
+            "equivariant build: heads are the three axis cosets"
         )
-    if HEAD_DIM != 4 * C_ORBIT:
+    ATTN_CHANNELS = GROUP_ORDER * ATTN_ORBIT
+    HEAD_DIM = 4 * ATTN_ORBIT
+    if HEAD_DIM not in (16, 32, 64, 96, 128):
         raise ValueError(
-            f"head_dim={HEAD_DIM} must equal 4*C_ORBIT={4 * C_ORBIT} "
-            "(|K|=4 coset split) for the equivariant build"
+            f"4*HEXFIELD_EQ_ATTN_ORBIT={HEAD_DIM} must be one of "
+            "{16,32,64,96,128}"
+        )
+    import warnings
+
+    if CHANNELS % 16 != 0:
+        warnings.warn(
+            f"typed residual width C={CHANNELS} is not a multiple of 16; the "
+            "Triton conv fast path may fall off (allowed for experiments only)",
+            stacklevel=1,
+        )
+    if HEAD_DIM == 96:
+        warnings.warn(
+            "HEXFIELD_EQ attention head_dim=96: the bespoke Triton attention "
+            "fast path will not engage; sdpa/flex serve paths only",
+            stacklevel=1,
         )
 else:
-    # Passthrough (GROUP_ORDER == 1): the fiber IS the full width; no equivariant
-    # alignment constraints apply. This is the Phase-0 scaffold default.
-    C_ORBIT = int(_C_ORBIT_ENV) if _C_ORBIT_ENV is not None else CHANNELS
-    if C_ORBIT != CHANNELS:
+    if CHANNELS % ATTENTION_HEADS != 0:
         raise ValueError(
-            f"HEXFIELD_EQ_C_ORBIT={C_ORBIT} must equal "
-            f"HEXFIELD_EQ_CHANNELS={CHANNELS} when HEXFIELD_EQ_GROUP_ORDER=1 "
-            "(passthrough)"
+            f"HEXFIELD_EQ_CHANNELS={CHANNELS} not divisible by "
+            f"HEXFIELD_EQ_ATTENTION_HEADS={ATTENTION_HEADS}"
         )
+    ATTN_CHANNELS = CHANNELS
+    HEAD_DIM = CHANNELS // ATTENTION_HEADS
+    ATTN_ORBIT = C_ORBIT
 
 # Trunk block order from env HEXFIELD_EQ_TRUNK (default = the main_1..main_6
 # layout). 'C' = ConvBlock (two hex convs), 'A' = attention block, 'L' = ray
@@ -325,19 +415,19 @@ if (
 # the orbit index, NEVER the K-slots — a slot split silently breaks
 # equivariance), not an env knob; the ATTENTION_HEADS == 3 import check above
 # governs A blocks only (per-block-type head counts). head_dim_L =
-# CHANNELS / RAY_HEADS (= 2*C_ORBIT in the equivariant build).
+# ATTN_CHANNELS / RAY_HEADS (= 2*ATTN_ORBIT in the equivariant build).
 RAY_HEADS = 6
 if "L" in TRUNK_LAYOUT:
-    if CHANNELS % RAY_HEADS != 0:
+    if ATTN_CHANNELS % RAY_HEADS != 0:
         raise ValueError(
-            f"HEXFIELD_EQ_CHANNELS={CHANNELS} not divisible by RAY_HEADS="
+            f"attention width={ATTN_CHANNELS} not divisible by RAY_HEADS="
             f"{RAY_HEADS} (required for an 'L' trunk layout)"
         )
-    if GROUP_ORDER == 12 and C_ORBIT % 2 != 0:
+    if GROUP_ORDER == 12 and ATTN_ORBIT % 2 != 0:
         raise ValueError(
-            f"HEXFIELD_EQ_C_ORBIT={C_ORBIT} must be even for an 'L' layout: the "
+            f"HEXFIELD_EQ_ATTN_ORBIT={ATTN_ORBIT} must be even for an 'L' layout: the "
             "own/opp sub-head split is along the orbit index (head_dim_L = "
-            "2*C_ORBIT; plan L4)"
+            "2*ATTN_ORBIT; plan L4)"
         )
 # HEXFIELD_EQ_RAY_BLOCKERS ("0"/"1", default "1"): 1 = game-live rays (walk
 # truncated at anti-side stones, read from the raylen wire data); 0 = geometric

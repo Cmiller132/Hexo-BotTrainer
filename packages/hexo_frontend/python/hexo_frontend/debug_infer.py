@@ -1366,9 +1366,9 @@ def _search_hexfield(
 
 # Env keys hexfield_eq reads ONCE at import (constants.py / support.py). The
 # checkpoint meta (HexfieldNet.arch_meta) is the authoritative arch
-# description, and several module-level constants (C_ORBIT-derived head read
-# widths, the featurizer SUPPORT_RADIUS) are baked in at import time — the
-# HexfieldNet constructor kwargs cannot override them. So the env MUST be
+# description. TYPE_SIGNATURE, ATTN_ORBIT, NUM_FEATURES, and SUPPORT_RADIUS are
+# baked in at import time even though typed head widths now derive from the
+# constructor signature. So the env MUST be
 # seeded from the first eq checkpoint's meta BEFORE the first hexfield_eq
 # import. First import wins for the worker process; a later checkpoint with a
 # different arch raises a clear error (restart the worker) instead of
@@ -1390,28 +1390,75 @@ _EQ_META_ENV_BOOL = (
 _hexfield_eq_ns: SimpleNamespace | None = None
 
 
+def _seed_eq_meta_env(meta: dict, environ=None) -> None:
+    """Seed import-time ``HEXFIELD_EQ_*`` knobs from checkpoint metadata."""
+
+    import os
+
+    target = os.environ if environ is None else environ
+    for env_key, meta_key in _EQ_META_ENV:
+        if meta.get(meta_key) is not None:
+            target.setdefault(env_key, str(meta[meta_key]))
+    for env_key, meta_key in _EQ_META_ENV_BOOL:
+        if meta.get(meta_key) is not None:
+            target.setdefault(env_key, "1" if meta[meta_key] else "0")
+    for env_key, meta_key in (
+        ("HEXFIELD_EQ_TYPE_SIG", "type_sig"),
+        ("HEXFIELD_EQ_ATTN_ORBIT", "attn_orbit"),
+    ):
+        if meta.get(meta_key) is not None:
+            target.setdefault(env_key, str(meta[meta_key]))
+    # Phase F records the import-versioned feature map by width. Keep metadata
+    # predating that field on the historical default, while making either known
+    # width authoritative for a fresh worker.
+    feature_width = meta.get("feature_width")
+    feature_version = {25: "1", 46: "2"}.get(
+        int(feature_width) if feature_width is not None else None
+    )
+    if feature_version is not None:
+        target.setdefault("HEXFIELD_EQ_FEATURE_VERSION", feature_version)
+
+
 def _check_eq_meta_matches_import(eq: SimpleNamespace, meta: dict) -> None:
     """Validate the import-frozen constants against a checkpoint's meta.
 
-    The head read widths bake in the module-level C_ORBIT and the featurizer
-    bakes in SUPPORT_RADIUS at import; constructor kwargs cannot override
-    them. A mismatch means this worker already imported hexfield_eq under a
-    different arch env — the only fix is a worker restart."""
+    Typed constructor widths derive from the checkpoint signature, but the
+    module-level TYPE_SIGNATURE, ATTN_ORBIT, NUM_FEATURES, and SUPPORT_RADIUS
+    remain import-frozen. A mismatch means this worker already imported
+    hexfield_eq under a different arch env — the only fix is a worker restart."""
 
-    checks = (
+    def mismatch(key, want, imported) -> None:
+        raise ValueError(
+            f"hexfield_eq checkpoint needs {key}={want} but this worker "
+            f"imported hexfield_eq with {key}={imported} (HEXFIELD_EQ_* env "
+            "is read once at import); restart the debug worker to load this "
+            "checkpoint"
+        )
+
+    checks = [
         ("group_order", eq.constants.GROUP_ORDER),
-        ("c_orbit", eq.constants.C_ORBIT),
         ("support_radius", eq.support_radius),
-    )
+        ("feature_width", eq.constants.NUM_FEATURES),
+    ]
+    if meta.get("type_sig") is None:
+        checks.insert(1, ("c_orbit", eq.constants.C_ORBIT))
     for key, imported in checks:
         want = meta.get(key)
         if want is not None and int(want) != int(imported):
-            raise ValueError(
-                f"hexfield_eq checkpoint needs {key}={int(want)} but this "
-                f"worker imported hexfield_eq with {key}={int(imported)} "
-                "(HEXFIELD_EQ_* env is read once at import); restart the "
-                "debug worker to load this checkpoint"
+            mismatch(key, int(want), int(imported))
+
+    if meta.get("type_sig") is not None:
+        want_signature = eq.reps.canonical_signature(str(meta["type_sig"]))
+        if want_signature != tuple(eq.constants.TYPE_SIGNATURE):
+            mismatch(
+                "type_sig", repr(want_signature), repr(eq.constants.TYPE_SIGNATURE)
             )
+        want_attn = meta.get("attn_orbit")
+        if (
+            want_attn is not None
+            and int(want_attn) != int(eq.constants.ATTN_ORBIT)
+        ):
+            mismatch("attn_orbit", int(want_attn), int(eq.constants.ATTN_ORBIT))
 
 
 def _hexfield_eq(meta: dict | None = None) -> SimpleNamespace:
@@ -1428,18 +1475,14 @@ def _hexfield_eq(meta: dict | None = None) -> SimpleNamespace:
 
     if _hexfield_eq_ns is None:
         if meta:
-            for env_key, meta_key in _EQ_META_ENV:
-                if meta.get(meta_key) is not None:
-                    os.environ.setdefault(env_key, str(meta[meta_key]))
-            for env_key, meta_key in _EQ_META_ENV_BOOL:
-                if meta.get(meta_key) is not None:
-                    os.environ.setdefault(env_key, "1" if meta[meta_key] else "0")
+            _seed_eq_meta_env(meta)
         _eq_src = Path(__file__).resolve().parents[3] / "hexfield_eq" / "python"
         if _eq_src.is_dir() and str(_eq_src) not in sys.path:
             sys.path.insert(0, str(_eq_src))
 
         from hexfield_eq import config as eq_config
         from hexfield_eq import constants as eq_constants
+        from hexfield_eq import reps as eq_reps
         from hexfield_eq.batching import collate_rows
         from hexfield_eq.engine_facts import facts_from_state
         from hexfield_eq.features import build_features, build_ray_lengths
@@ -1458,6 +1501,7 @@ def _hexfield_eq(meta: dict | None = None) -> SimpleNamespace:
         _hexfield_eq_ns = SimpleNamespace(
             config=eq_config,
             constants=eq_constants,
+            reps=eq_reps,
             collate_rows=collate_rows,
             facts_from_state=facts_from_state,
             build_features=build_features,

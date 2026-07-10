@@ -473,6 +473,31 @@ def load_checkpoint(path: Path, model, optimizer=None, scaler=None, ema_model=No
     meta = payload.get("meta") or {}
     from .support import _SUPPORT_RADIUS
 
+    # These fields were added with quotient fibers.  Old/live checkpoints do
+    # not carry them and remain loadable; once recorded, both must match the
+    # built model's canonical architecture metadata exactly.
+    quotient_meta_keys = ("type_sig", "attn_orbit")
+    quotient_meta_present = tuple(key in meta for key in quotient_meta_keys)
+    if any(quotient_meta_present) and not all(quotient_meta_present):
+        missing = [
+            key
+            for key, present in zip(quotient_meta_keys, quotient_meta_present)
+            if not present
+        ]
+        raise ValueError(
+            "checkpoint quotient metadata is incomplete; missing "
+            + ", ".join(missing)
+        )
+    if all(quotient_meta_present):
+        model_arch = model.arch_meta()
+        for key in quotient_meta_keys:
+            if key in meta and meta[key] != model_arch.get(key):
+                raise ValueError(
+                    f"checkpoint meta {key}={meta[key]!r} != built model's "
+                    f"{key}={model_arch.get(key)!r}; refusing the resume "
+                    "(silent semantics flip)"
+                )
+
     for key, want in (
         ("trunk_layout", model._trunk_layout),
         ("reg_lane", model._reg_lane),

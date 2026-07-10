@@ -23,11 +23,11 @@ import math
 import torch
 from torch import nn
 
-from .constants import ATTENTION_HEADS, NUM_TOKENS, REG_SUM_SCALE
-from .model import EQUIVARIANT, EquivLinear, _make_norm
+from .constants import ATTN_ORBIT, ATTENTION_HEADS, GROUP_ORDER, NUM_TOKENS, REG_SUM_SCALE
+from .model import EQUIVARIANT, TypedLinear, _make_norm
 
 if EQUIVARIANT:
-    from . import equivariant as _eq
+    from . import reps as _reps
 
 
 class RegisterRefresh(nn.Module):
@@ -35,22 +35,52 @@ class RegisterRefresh(nn.Module):
     in fp32. Near-zero-init out_proj (std 3e-3, spec D-S22) => the lane is
     numerically a no-op at step 0 while every lane gradient stays live."""
 
-    def __init__(self, channels: int, heads: int | None = None) -> None:
+    def __init__(
+        self,
+        channels: int,
+        heads: int | None = None,
+        *,
+        signature=None,
+        attn_orbit: int | None = None,
+    ) -> None:
         super().__init__()
         # heads defaults to the module-global ATTENTION_HEADS; an explicit value
         # builds the refresh at a different head count (foreign-arch loaders),
         # mirroring RelPosAttention.
         self.heads = ATTENTION_HEADS if heads is None else int(heads)
-        self.head_dim = channels // self.heads
-        self.scale = 1.0 / math.sqrt(self.head_dim)
         self.equivariant = EQUIVARIANT
-        linear = EquivLinear if EQUIVARIANT else nn.Linear
-        self.ln_q = _make_norm(channels)  # pre-norm on tokens (q input)
-        self.ln_kv = _make_norm(channels)  # pre-norm on cells (k/v input)
-        self.q_proj = linear(channels, channels)
-        self.k_proj = linear(channels, channels)
-        self.v_proj = linear(channels, channels)
-        self.out_proj = linear(channels, channels)
+        if EQUIVARIANT:
+            if signature is None:
+                if channels % GROUP_ORDER != 0:
+                    raise ValueError("typed register refresh requires a signature")
+                signature = (("reg", channels // GROUP_ORDER),)
+            self.signature = _reps.canonical_signature(signature)
+            self.attn_orbit = (
+                self.signature[0][1]
+                if attn_orbit is None
+                and len(self.signature) == 1
+                and self.signature[0][0] == "reg"
+                else int(ATTN_ORBIT if attn_orbit is None else attn_orbit)
+            )
+            self.attn_signature = (("reg", self.attn_orbit),)
+            self.attn_channels = GROUP_ORDER * self.attn_orbit
+            self.head_dim = self.attn_channels // self.heads
+            self.ln_q = _make_norm(channels, signature=self.signature)
+            self.ln_kv = _make_norm(channels, signature=self.signature)
+            self.q_proj = TypedLinear(self.signature, self.attn_signature)
+            self.k_proj = TypedLinear(self.signature, self.attn_signature)
+            self.v_proj = TypedLinear(self.signature, self.attn_signature)
+            self.out_proj = TypedLinear(self.attn_signature, self.signature)
+        else:
+            self.attn_channels = channels
+            self.head_dim = channels // self.heads
+            self.ln_q = _make_norm(channels)
+            self.ln_kv = _make_norm(channels)
+            self.q_proj = nn.Linear(channels, channels)
+            self.k_proj = nn.Linear(channels, channels)
+            self.v_proj = nn.Linear(channels, channels)
+            self.out_proj = nn.Linear(channels, channels)
+        self.scale = 1.0 / math.sqrt(self.head_dim)
         # Per-token gate threshold added pre-sigmoid, broadcast over heads.
         # Head-constancy is an equivariance requirement: tokens carry no
         # position, so their score rows sit in the S_o = D6 case of the joint
@@ -63,9 +93,13 @@ class RegisterRefresh(nn.Module):
         # as board size grows. 0-dim => no-decay by ndim; trunk_reg grad group.
         self.sum_scale = nn.Parameter(torch.tensor(float(REG_SUM_SCALE)))
         if EQUIVARIANT:
-            self.register_buffer("_head_perm", _eq.head_perm(), persistent=False)
             self.register_buffer(
-                "_head_perm_inv", _eq.head_perm_inv(), persistent=False
+                "_head_perm", _reps.head_perm(self.attn_orbit).clone(), persistent=False
+            )
+            self.register_buffer(
+                "_head_perm_inv",
+                _reps.head_perm_inv(self.attn_orbit).clone(),
+                persistent=False,
             )
             # Fold the §4 coset perm into the projections' serve weight cache
             # (mirrors RelPosAttention). Static geometry, so calling before the
@@ -87,14 +121,12 @@ class RegisterRefresh(nn.Module):
 
         for proj in (self.q_proj, self.k_proj, self.v_proj):
             if self.equivariant:
-                nn.init.trunc_normal_(proj.wb, std=0.02)
-                nn.init.zeros_(proj.bias_base)
+                proj.reset_parameters(weight_std=0.02, bias=0.0)
             else:
                 nn.init.trunc_normal_(proj.weight, std=0.02)
                 nn.init.zeros_(proj.bias)
         if self.equivariant:
-            nn.init.trunc_normal_(self.out_proj.wb, std=3e-3)
-            nn.init.zeros_(self.out_proj.bias_base)
+            self.out_proj.reset_parameters(weight_std=3e-3, bias=0.0)
         else:
             nn.init.trunc_normal_(self.out_proj.weight, std=3e-3)
             nn.init.zeros_(self.out_proj.bias)
@@ -105,9 +137,10 @@ class RegisterRefresh(nn.Module):
         """tokens (B, T, C); x (B, N, C) cells; mask (B, N) bool. Returns the
         refreshed tokens (B, T, C)."""
 
-        b, t, c = tokens.shape
+        b, t, _ = tokens.shape
         n = x.shape[1]
         h, d = self.heads, self.head_dim
+        w = self.attn_channels
         # D8 (spec D-S27): the projections run in the CELLS' compute dtype (the
         # token stream may be carried fp32 on half-precision serve); only the
         # residual add below runs in the stream's dtype. No-ops on the uniform
@@ -134,7 +167,7 @@ class RegisterRefresh(nn.Module):
         # MULTIPLICATIVELY (the sum must see an exact 0, not sigmoid(-3e4)).
         gates = torch.sigmoid(scores.float()) * mask[:, None, None, :]
         upd = (gates @ v.float()) * self.sum_scale  # (B, h, T, d) — counts
-        upd = upd.transpose(1, 2).reshape(b, t, c)
+        upd = upd.transpose(1, 2).reshape(b, t, w)
         if self.equivariant and not folded:
             upd = upd[..., self._head_perm_inv]
         # Raw residual add — no norm on the update (plan R5): the count
@@ -147,15 +180,23 @@ class TokenRead(nn.Module):
     """cells <- tokens broadcast read (plan R4): per-token tied 1x1s, summed,
     zero-init, added to every live cell at C-block entry."""
 
-    def __init__(self, channels: int) -> None:
+    def __init__(self, channels: int, *, signature=None) -> None:
         super().__init__()
-        linear = EquivLinear if EQUIVARIANT else nn.Linear
-        self.reads = nn.ModuleList(
-            [linear(channels, channels) for _ in range(NUM_TOKENS)]
-        )
+        if EQUIVARIANT:
+            if signature is None:
+                signature = (("reg", channels // GROUP_ORDER),)
+            self.signature = _reps.canonical_signature(signature)
+            self.reads = nn.ModuleList(
+                [TypedLinear(self.signature, self.signature) for _ in range(NUM_TOKENS)]
+            )
+        else:
+            self.reads = nn.ModuleList(
+                [nn.Linear(channels, channels) for _ in range(NUM_TOKENS)]
+            )
         for read in self.reads:
             if EQUIVARIANT:
-                nn.init.zeros_(read.wb)
+                for parameter in read._weight_params():
+                    nn.init.zeros_(parameter)
                 nn.init.zeros_(read.bias_base)
             else:
                 nn.init.zeros_(read.weight)

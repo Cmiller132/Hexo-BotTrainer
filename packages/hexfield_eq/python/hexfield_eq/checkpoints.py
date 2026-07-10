@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import re
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -62,10 +63,11 @@ def save_checkpoint(path: Path, *, model: HexfieldNet, optimizer, epoch: int, ex
 
 def load_into(model: HexfieldNet, payload: dict, *, optimizer=None) -> dict:
     state = payload["model"]
+    meta = payload.get("meta") or {}
     # The featurizer support radius is part of the input contract (spec
     # D-S26): a checkpoint trained at a different radius would silently shift
     # the input distribution, so a recorded mismatch fails loudly.
-    meta_radius = (payload.get("meta") or {}).get("support_radius")
+    meta_radius = meta.get("support_radius")
     if meta_radius is not None and int(meta_radius) != _SUPPORT_RADIUS:
         raise ValueError(
             f"checkpoint support_radius={int(meta_radius)} != this build's "
@@ -75,12 +77,35 @@ def load_into(model: HexfieldNet, payload: dict, *, optimizer=None) -> dict:
     # (SPEC_RAYTAP_CONV.md §1.1): a checkpoint trained under the other map
     # would silently read permuted/missing planes, so a recorded mismatch
     # fails loudly (same class as the support_radius check above).
-    meta_fv = (payload.get("meta") or {}).get("feature_version")
+    meta_fv = meta.get("feature_version")
     if meta_fv is not None and int(meta_fv) != FEATURE_VERSION:
         raise ValueError(
             f"checkpoint feature_version={int(meta_fv)} != this build's "
             f"HEXFIELD_EQ_FEATURE_VERSION={FEATURE_VERSION}; refusing the load"
         )
+    # Quotient-fiber shape and attention width are load-bearing architecture
+    # semantics.  Older/live checkpoints predate these fields, so absence keeps
+    # the legacy pure-regular fallback; a recorded value must match exactly.
+    quotient_meta_keys = ("type_sig", "attn_orbit")
+    quotient_meta_present = tuple(key in meta for key in quotient_meta_keys)
+    if any(quotient_meta_present) and not all(quotient_meta_present):
+        missing = [
+            key
+            for key, present in zip(quotient_meta_keys, quotient_meta_present)
+            if not present
+        ]
+        raise ValueError(
+            "checkpoint quotient metadata is incomplete; missing "
+            + ", ".join(missing)
+        )
+    if all(quotient_meta_present):
+        model_arch = model.arch_meta()
+        for key in quotient_meta_keys:
+            if key in meta and meta[key] != model_arch.get(key):
+                raise ValueError(
+                    f"checkpoint {key}={meta[key]!r} != built model's "
+                    f"{key}={model_arch.get(key)!r}; refusing the load"
+                )
     expected = set(model.state_dict().keys())
     got = set(state.keys())
     if expected != got:
@@ -127,6 +152,31 @@ def warm_start_into(model: HexfieldNet, state: dict) -> dict:
     # strict=False: missing keys keep their initialized value; the matched
     # subset is copied into the live params (dtype/device unchanged).
     model.load_state_dict(to_load, strict=False)
+    if missing or unexpected or shape_mismatch:
+        def examples(keys: list[str]) -> str:
+            return ", ".join(keys[:3]) if keys else "none"
+
+        dropped = set(missing) | set(unexpected) | set(shape_mismatch)
+        typed_weights = any(
+            ".coefficients." in key
+            or key.rsplit(".", 1)[-1] in {"wb", "w_base"}
+            for key in dropped
+        )
+        hint = (
+            " Typed/equivariant weights were dropped; the source checkpoint's "
+            "type signature likely differs from the target architecture."
+            if typed_weights
+            else ""
+        )
+        warnings.warn(
+            "hexfield warm start dropped checkpoint/model keys: "
+            f"missing={len(missing)} [{examples(missing)}], "
+            f"unexpected={len(unexpected)} [{examples(unexpected)}], "
+            f"shape_mismatch={len(shape_mismatch)} "
+            f"[{examples(shape_mismatch)}].{hint}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
     return {
         "loaded": len(to_load),
         "missing": missing,
