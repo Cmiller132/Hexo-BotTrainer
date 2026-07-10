@@ -127,7 +127,6 @@ def _apply_overrides(cfg: HexfieldConfig, args: argparse.Namespace) -> HexfieldC
         "device": args.device or cfg.device,
         "selfplay": asdict(cfg.selfplay),
         "training": asdict(cfg.training),
-        "evaluation": asdict(cfg.evaluation),
         "multi_stage_eval": section,
     }
     return parse_hexfield_config(merged)

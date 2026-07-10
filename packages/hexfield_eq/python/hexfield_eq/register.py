@@ -86,8 +86,11 @@ class RegisterRefresh(nn.Module):
         """Concat of the (serve-folded) k/v weights as one (2C, C) projection
         for the no-grad path. Cache invalidation mirrors
         RelPosAttention._serve_qkv_wb: rebuilt when a source weight object
-        changes (EquivLinear caches regenerate on version bumps) or a Module
-        cast swapped the param data (dtype/device re-check)."""
+        changes (EquivLinear caches regenerate on version bumps), a Module
+        cast swapped the param data (dtype/device re-check), or a source
+        tensor's ``_version`` bumped — plain nn.Linear params are mutated IN
+        PLACE by ``optimizer.step()``, which changes neither identity nor
+        dtype/device."""
 
         if self.equivariant:
             wk, bk = self.k_proj._materialize()
@@ -96,17 +99,19 @@ class RegisterRefresh(nn.Module):
             wk, bk = self.k_proj.weight, self.k_proj.bias
             wv, bv = self.v_proj.weight, self.v_proj.bias
         src = self._kv_src
+        ver = (wk._version, wv._version, bk._version, bv._version)
         if (
             src is not None
             and src[0] is wk
             and src[1] is wv
-            and src[2].dtype == wk.dtype
-            and src[2].device == wk.device
+            and src[2] == ver
+            and src[3].dtype == wk.dtype
+            and src[3].device == wk.device
         ):
-            return src[2], src[3]
+            return src[3], src[4]
         w2 = torch.cat([wk, wv], dim=0)
         b2 = torch.cat([bk, bv], dim=0)
-        self._kv_src = (wk, wv, w2, b2)
+        self._kv_src = (wk, wv, ver, w2, b2)
         return w2, b2
 
     def _init_projections(self) -> None:

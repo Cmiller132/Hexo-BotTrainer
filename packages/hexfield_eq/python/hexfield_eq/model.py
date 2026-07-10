@@ -1089,16 +1089,21 @@ class RelPosAttention(nn.Module):
             self.v_proj = nn.Linear(channels, channels)
             self.out_proj = nn.Linear(channels, channels)
         self.impl = "sdpa"
-        # Fused serve QKV weight cache (_serve_qkv_wb): (source refs..., w3, b3).
+        # Fused serve QKV weight cache (_serve_qkv_wb):
+        # (source refs..., versions, w3, b3).
         self._qkv_src = None
 
     def _serve_qkv_wb(self) -> tuple[torch.Tensor, torch.Tensor]:
         """Concat of the three (serve-folded) q/k/v weights as one (3C, C)
         projection for the no-grad path: the sequence activation is read once
-        instead of three times and three GEMM launches become one. Rebuilt only
-        when any source weight object changes (the EquivLinear serve caches
+        instead of three times and three GEMM launches become one. Rebuilt when
+        any source weight object changes (the EquivLinear serve caches
         regenerate on parameter version bumps; nn.Linear params keep identity
-        but swap data under Module casts, hence the dtype/device re-check)."""
+        but swap data under Module casts, hence the dtype/device re-check) OR
+        when a source tensor's ``_version`` bumps — plain nn.Linear params are
+        mutated IN PLACE by ``optimizer.step()``, which changes neither
+        identity nor dtype/device (mirrors EquivLinear._materialize's
+        version key)."""
 
         if self.equivariant:
             wq, bq = self.q_proj._materialize()
@@ -1109,18 +1114,23 @@ class RelPosAttention(nn.Module):
             wk, bk = self.k_proj.weight, self.k_proj.bias
             wv, bv = self.v_proj.weight, self.v_proj.bias
         src = self._qkv_src
+        ver = (
+            wq._version, wk._version, wv._version,
+            bq._version, bk._version, bv._version,
+        )
         if (
             src is not None
             and src[0] is wq
             and src[1] is wk
             and src[2] is wv
-            and src[3].dtype == wq.dtype
-            and src[3].device == wq.device
+            and src[3] == ver
+            and src[4].dtype == wq.dtype
+            and src[4].device == wq.device
         ):
-            return src[3], src[4]
+            return src[4], src[5]
         w3 = torch.cat([wq, wk, wv], dim=0)
         b3 = torch.cat([bq, bk, bv], dim=0)
-        self._qkv_src = (wq, wk, wv, w3, b3)
+        self._qkv_src = (wq, wk, wv, ver, w3, b3)
         return w3, b3
 
     def forward(self, seq: torch.Tensor, attn_bias) -> torch.Tensor:
@@ -1352,18 +1362,15 @@ class RayAttnBlock(nn.Module):
 # layouts are mapped explicitly. main_1..main_6 = CCC A CCC A CC A; main_7 =
 # CC A x5; main_9 = CC A CC A CC A (6C/3A, the HEXFIELD_TRUNK=CCACCACCA arch).
 #
-# (6, 3) is SHARED by two DIFFERENT classes: main_9's current-arch net AND the
-# frozen legacy-v2 snapshot (also 6C/3A, also CCACCACCA interleaving). This is
-# safe because the two are NOT disambiguated by this map — they are told apart
-# by their parameter-key SETS at strict-load time in eval_arena._load_checkpoint:
-# legacy-v2 carries a single shared `bias_table` + `aux_reduction` and lacks
-# `bias_free_tables.{i}` / cell_q / LayerScale (ls_attn/ls_mlp), so a legacy-v2 state
-# dict fails the current HexfieldNet's strict load and falls through to
-# eval_arena's HexfieldNetV2 fallback regardless of the trunk_layout inferred
-# here. A main_9 state dict has the current-arch keys and loads cleanly. Mapping
-# (6, 3) is thus NEEDED so a main_9 anchor rebuilt in a foreign-arch process
-# (e.g. a main_7 CCAx5 dashboard worker) gets the right CCACCACCA interleaving
-# instead of the process-global HEXFIELD_EQ_TRUNK default.
+# (6, 3) was historically SHARED by main_9's current-arch net and the frozen
+# legacy-v2 snapshot (also 6C/3A). The legacy-v2 fallback class was removed
+# (eval_arena now raises on a strict-load failure instead of retrying); a
+# legacy-v2 state dict — single shared `bias_table` + `aux_reduction`, no
+# `bias_free_tables.{i}` / cell_q / LayerScale keys — fails strict load with
+# that error. Mapping (6, 3) is still NEEDED so a main_9 anchor rebuilt in a
+# foreign-arch process (e.g. a main_7 CCAx5 dashboard worker) gets the right
+# CCACCACCA interleaving instead of the process-global HEXFIELD_EQ_TRUNK
+# default.
 KNOWN_TRUNK_LAYOUTS: dict[tuple[int, int], str] = {
     (8, 3): "CCCACCCACCA",
     (10, 5): "CCACCACCACCACCA",

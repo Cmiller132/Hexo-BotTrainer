@@ -18,14 +18,13 @@ import numpy as np
 import torch
 import torch._dynamo  # noqa: F401  (mark_dynamic / config used in the serve path)
 
+from .constants import NBR_SENTINEL_U16 as NBR_SENTINEL
 from .constants import NUM_FEATURES, NUM_TOKENS, RAYLEN_SLOTS
 from .losses import decode_binned_value, decode_moves_left
 from .model import HexfieldNet
 from .support import _SUPPORT_RADIUS as _PY_SUPPORT_RADIUS
 
 logger = logging.getLogger(__name__)
-
-NBR_SENTINEL = 0xFFFF
 # Upper bound on B * S_pad^2 per group. The 3.8e7 default keeps the fp16
 # (B, 4, S, S) bias transient roughly under ~305 MB on the MATERIALIZED path.
 # On the flex serve path no (B, 4, S, S) tensor exists (the largest S^2 object
@@ -1187,14 +1186,17 @@ def _warn_if_import_flags_mismatch(role: str) -> None:
     if _SERVE_ENV_WARNED:
         return
     from . import model as _model
+    from .serve_env import IMPORT_TIME_FLAGS
 
-    # env flag -> model.py module global set at import time.
+    # env flag -> model.py module global set at import time. Derived from
+    # serve_env.IMPORT_TIME_FLAGS — the single source of the gate list — so a
+    # gate added there is checked here automatically (a hardcoded copy drifted
+    # once: ATTN2 / RAYTAP7 / EQ_TRITON_RAY were missing). The global's name is
+    # "HEXFIELD_<X>" -> "_<X>", with the irregulars mapped explicitly.
+    irregular = {"HEXFIELD_EQ_TRITON_RAY": "_TRITON_RAY"}
     gate_globals = {
-        "HEXFIELD_SERVE_FLEX": "_SERVE_FLEX",
-        "HEXFIELD_FLEX_PAIR": "_FLEX_PAIR",
-        "HEXFIELD_TRITON_CONV": "_TRITON_CONV",
-        "HEXFIELD_TRITON_ATTN": "_TRITON_ATTN",
-        "HEXFIELD_TRITON_CONV_LN": "_TRITON_CONV_LN",
+        env: irregular.get(env, "_" + env.removeprefix("HEXFIELD_"))
+        for env in IMPORT_TIME_FLAGS
     }
     disagree = [
         env for env, attr in gate_globals.items() if not getattr(_model, attr, False)

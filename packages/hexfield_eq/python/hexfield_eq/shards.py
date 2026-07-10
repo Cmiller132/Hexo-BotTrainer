@@ -250,7 +250,7 @@ def write_compact_shard(
     os.replace(npz_tmp, path)
 
     meta = {
-        "lineage": "hexfield",
+        "lineage": "hexfield_eq",
         "schema": SCHEMA,
         "schema_version": SCHEMA_VERSION,
         "rows": n,
