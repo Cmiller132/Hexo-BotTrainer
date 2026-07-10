@@ -351,17 +351,19 @@ if _RAY_BLOCKERS_ENV not in ("0", "1"):
 RAY_BLOCKERS = _RAY_BLOCKERS_ENV == "1"
 
 # --- ray-tap conv mode (SPEC_RAYTAP_CONV.md §2) ----------------------------------
-# HEXFIELD_EQ_RAYTAP in {"0", "conv2", "both"}, default "0" (= baseline 7-tap
+# HEXFIELD_EQ_RAYTAP in {"0", "conv2", "both", "dense31"}, default "0" (= baseline 7-tap
 # convs, byte-identical behavior — the live-run isolation guard, spec §9.1).
 # "conv2" equips the second conv of every C block with the ray-tap direction
 # taps (spec §2.2: visibility-masked, per-orbit-channel distance-weighted ray
 # aggregates); "both" equips both convs. The stem and the head convs are always
-# baseline. An arch knob (adds an `alpha` param per equipped conv), so it rides
-# arch_meta and infer_net_kwargs_from_state_dict like reg_lane.
+# baseline. "dense31" equips both convs with the CPU-investigation Design-A
+# 31-tap operator (no alpha). An arch knob, so it rides arch_meta and
+# infer_net_kwargs_from_state_dict like reg_lane.
 _RAYTAP_ENV = os.environ.get("HEXFIELD_EQ_RAYTAP", "0")
-if _RAYTAP_ENV not in ("0", "conv2", "both"):
+if _RAYTAP_ENV not in ("0", "conv2", "both", "dense31"):
     raise ValueError(
-        f"HEXFIELD_EQ_RAYTAP={_RAYTAP_ENV!r} must be '0', 'conv2', or 'both'"
+        f"HEXFIELD_EQ_RAYTAP={_RAYTAP_ENV!r} must be '0', 'conv2', 'both', "
+        "or 'dense31'"
     )
 RAYTAP = _RAYTAP_ENV
 if RAYTAP != "0" and C_ORBIT % 2 != 0:

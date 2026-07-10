@@ -161,6 +161,7 @@ else:
 # constructor kwarg — a foreign checkpoint can enable it under a default env),
 # so the default build's import graph is untouched (live-run isolation, §9.1).
 _raytap_mod = None
+_dense31_mod = None
 
 
 def _raytap():
@@ -170,6 +171,17 @@ def _raytap():
 
         _raytap_mod = _m
     return _raytap_mod
+
+
+def _dense31():
+    """Lazy CPU-reference import for the investigative Design-A operator."""
+
+    global _dense31_mod
+    if _dense31_mod is None:
+        from . import _dense31 as _m
+
+        _dense31_mod = _m
+    return _dense31_mod
 
 
 # Conv + LayerNorm(+ReLU) + mask epilogue fusion, HEXFIELD_TRITON_CONV_LN=1
@@ -491,7 +503,7 @@ class _RayGatherBias:
 
 
 class _RayTapCtx:
-    """Per-forward carrier for ray-tap convs (SPEC_RAYTAP_CONV.md §2.5), built
+    """Per-forward carrier for ray-tap and dense31 convs, built
     ONCE by trunk() and shared by every equipped conv:
 
     - ``idx_taps`` (B, Npad, 6, 5) int64 — row index of the cell at offset
@@ -538,7 +550,7 @@ class _BiasGather(torch.autograd.Function):
 
 
 class HexNodeConv(nn.Module):
-    """Direction-typed 7-tap hex convolution: gather (B,N,7,Cin) -> one GEMM.
+    """Direction-typed 7-tap, ray-tap, or dense31 hex convolution.
 
     Tap 0 = center; taps 1-6 = the fixed direction order D (the rotate60 orbit of
     (1,0)).
@@ -551,26 +563,38 @@ class HexNodeConv(nn.Module):
       * ``stem`` (C_in == NUM_FEATURES): typed-lift from the 25-plane input rep
         into the regular fiber (Reynolds projection, §8);
       * ``regular`` (C_in a regular fiber): the tied HexNodeConv, w_base
-        ``(7, 12, C_orbit_out, C_orbit_in)`` (§2.3).
+        ``(T, 12, C_orbit_out, C_orbit_in)`` with T=7 or T=31 (§2.3).
     A dense-weight cache keyed on the base-param ``_version`` regenerates the
     frozen-serve weight once rather than per forward.
     """
 
     def __init__(
-        self, in_channels: int, out_channels: int, raytap: bool = False
+        self,
+        in_channels: int,
+        out_channels: int,
+        raytap: bool = False,
+        dense31: bool = False,
     ) -> None:
         super().__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.equivariant = EQUIVARIANT
         self.raytap = bool(raytap)
+        self.dense31 = bool(dense31)
+        if self.raytap and self.dense31:
+            raise ValueError("HexNodeConv cannot enable raytap and dense31 together")
+        taps = 31 if self.dense31 else 7
         if not self.equivariant:
-            self.weight = nn.Parameter(torch.empty(7, in_channels, out_channels))
+            self.weight = nn.Parameter(torch.empty(taps, in_channels, out_channels))
             self.bias = nn.Parameter(torch.empty(out_channels))
-            # Uniform init with fan_in = 7 * C_in.
+            # Dense31 consumes exactly the baseline 7-tap RNG stream; farther
+            # shells are zeroed without sampling so following params align.
             fan_in = 7 * in_channels
             bound = 1.0 / math.sqrt(fan_in)
-            nn.init.uniform_(self.weight, -bound, bound)
+            nn.init.uniform_(self.weight[:7], -bound, bound)
+            if self.dense31:
+                with torch.no_grad():
+                    self.weight[7:].zero_()
             nn.init.uniform_(self.bias, -bound, bound)
             self._init_raytap()
             return
@@ -591,17 +615,28 @@ class HexNodeConv(nn.Module):
                 raise ValueError(f"in_channels={in_channels} not a regular fiber")
             self.corb_in = in_channels // GROUP_ORDER
             self.w_base = nn.Parameter(
-                torch.empty(7, GROUP_ORDER, self.corb_out, self.corb_in)
+                torch.empty(taps, GROUP_ORDER, self.corb_out, self.corb_in)
             )
-            nn.init.uniform_(self.w_base, -bound, bound)
+            nn.init.uniform_(self.w_base[:7], -bound, bound)
+            if self.dense31:
+                with torch.no_grad():
+                    self.w_base[7:].zero_()
             self.register_buffer(
-                "_conv_gather", _eq.conv_gather_index(), persistent=False
+                "_conv_gather",
+                (
+                    _eq.conv_gather_index31()
+                    if self.dense31
+                    else _eq.conv_gather_index()
+                ),
+                persistent=False,
             )
         self.bias_base = nn.Parameter(torch.empty(self.corb_out))
         nn.init.uniform_(self.bias_base, -bound, bound)
         self._cache_v = None
         self._cache_w = None
         self._cache_b = None
+        if self.dense31 and getattr(self, "kind", "") == "stem":
+            raise ValueError("the stem conv is always baseline; dense31 is trunk-only")
         self._init_raytap()
 
     def _init_raytap(self) -> None:
@@ -651,7 +686,7 @@ class HexNodeConv(nn.Module):
         return _eq.gen_conv_weight(self.w_base, self._conv_gather)
 
     def _materialize(self) -> tuple[torch.Tensor, torch.Tensor]:
-        """(weight (7, C_in, C_out), bias (C_out,)); the passthrough params or
+        """(weight (T, C_in, C_out), bias (C_out,)); the passthrough params or
         the generated dense tied weight (cached under no-grad on the base
         ``_version`` so frozen serve regenerates once)."""
 
@@ -686,6 +721,22 @@ class HexNodeConv(nn.Module):
 
         b, n, c = x.shape
         weight, bias = self._materialize()
+        if self.dense31:
+            if ray_ctx is None:
+                raise ValueError(
+                    "dense31 conv called without ray_ctx; the trunk builds it "
+                    "from coords/mask + the raylen wire"
+                )
+            corb = self.corb_in if self.equivariant else self.in_channels
+            return _dense31().dense31_conv(
+                x,
+                ray_ctx.idx_taps,
+                ray_ctx.reach,
+                weight,
+                bias,
+                mask,
+                corb,
+            )
         if self.raytap:
             # Ray-tap reference path (spec §2.4): the direction taps consume
             # the visibility-masked alpha-weighted ray aggregates; the center
@@ -872,14 +923,24 @@ class EquivLinear(nn.Module):
 class ConvBlock(nn.Module):
     """Post-activation residual block (LayerNorm). ``raytap`` (spec §2.3):
     "0" = both convs baseline (current behavior); "conv2" = the second conv
-    runs in ray-tap mode; "both" = both convs do."""
+    runs in ray-tap mode; "both" = both convs do; "dense31" = both convs use
+    the Design-A 31-tap operator."""
 
     def __init__(self, channels: int, raytap: str = "0") -> None:
         super().__init__()
-        self.conv1 = HexNodeConv(channels, channels, raytap=(raytap == "both"))
+        dense31 = raytap == "dense31"
+        self.conv1 = HexNodeConv(
+            channels,
+            channels,
+            raytap=(raytap == "both"),
+            dense31=dense31,
+        )
         self.ln1 = _make_norm(channels)
         self.conv2 = HexNodeConv(
-            channels, channels, raytap=(raytap in ("conv2", "both"))
+            channels,
+            channels,
+            raytap=(raytap in ("conv2", "both")),
+            dense31=dense31,
         )
         self.ln2 = _make_norm(channels)
         self.ls = LayerScale(channels)
@@ -892,11 +953,20 @@ class ConvBlock(nn.Module):
         the conv output, fp16 store) until the K1 fused variant lands; serve
         throughput measured on this path is labeled reference-path (§2.4)."""
 
-        if not conv.raytap:
+        if not conv.raytap and not conv.dense31:
             w, b = conv._materialize()
             return _hex_conv_ln_fused(
                 x, gather_idx, mask, w, b, ln.weight, ln.bias, ln.eps, relu
             )
+        if conv.dense31:
+            out = conv(x, gather_idx, mask, ray_ctx=ray_ctx)
+            y = F.layer_norm(
+                out.float(), (out.shape[-1],), ln.weight.float(), ln.bias.float(),
+                ln.eps,
+            )
+            if relu:
+                y = F.relu(y)
+            return (y * mask.unsqueeze(-1)).to(torch.float16)
         if _hex_ray_taps7_fused is not None and ray_ctx is not None:
             # Split path (HEXFIELD_TRITON_RAYTAP7): tapped-input kernel ->
             # one cuBLAS fp16 GEMM -> fused bias+LN(+ReLU)+mask epilogue.
@@ -1328,20 +1398,27 @@ def infer_net_kwargs_from_state_dict(sd: dict, meta: dict | None = None) -> dict
     # the toggle is a mask-build variant); absent meta keeps the env default.
     if meta.get("ray_blockers") is not None:
         kwargs["ray_blockers"] = bool(meta["ray_blockers"])
-    # Ray-tap conv mode (SPEC_RAYTAP_CONV.md §4): meta first (authoritative
-    # ternary). Fallback inference distinguishes conv2/both by the presence of
+    # Ray-tap/dense31 conv mode: meta first (authoritative). Fallback inference
+    # identifies dense31 by the 31-tap w_base shape, then distinguishes
+    # conv2/both by the presence of
     # `alpha` on FIRST-conv keys — presence of any `alpha` alone is
     # insufficient (both modes carry conv2 alphas).
     if meta.get("raytap") is not None:
         kwargs["raytap"] = str(meta["raytap"])
     else:
+        has_dense31 = any(
+            k.startswith("conv_blocks.")
+            and k.endswith(".w_base")
+            and getattr(v, "shape", (0,))[0] == 31
+            for k, v in sd.items()
+        )
         has_conv1_alpha = any(
             k.startswith("conv_blocks.") and k.endswith(".conv1.alpha") for k in sd
         )
         has_conv2_alpha = any(
             k.startswith("conv_blocks.") and k.endswith(".conv2.alpha") for k in sd
         )
-        kwargs["raytap"] = (
+        kwargs["raytap"] = "dense31" if has_dense31 else (
             "both" if has_conv1_alpha else ("conv2" if has_conv2_alpha else "0")
         )
     return kwargs
@@ -1414,9 +1491,9 @@ class HexfieldNet(nn.Module):
         # `alpha` param, so it changes the state-dict key set and rides
         # arch_meta / infer_net_kwargs_from_state_dict).
         rt_mode = RAYTAP if raytap is None else str(raytap)
-        if rt_mode not in ("0", "conv2", "both"):
+        if rt_mode not in ("0", "conv2", "both", "dense31"):
             raise ValueError(
-                f"raytap={rt_mode!r} must be '0', 'conv2', or 'both'"
+                f"raytap={rt_mode!r} must be '0', 'conv2', 'both', or 'dense31'"
             )
         self._raytap = rt_mode
         if rt_mode != "0":
@@ -1705,9 +1782,9 @@ class HexfieldNet(nn.Module):
             # The featurizer plane-map version this net was built under (spec
             # §1.1/§4): loaders hard-assert it (same class as support_radius).
             "feature_version": FEATURE_VERSION,
-            # Ray-tap conv mode (spec §2.3/§4, ternary, authoritative):
-            # load-bearing — equipped convs carry `alpha` params, and
-            # conv2-vs-both cannot be told apart by key presence alone.
+            # Ray-tap/dense31 conv mode (load-bearing and authoritative):
+            # ray-tap-equipped convs carry alpha; dense31 changes w_base's tap
+            # dimension and removes alpha.
             "raytap": self._raytap,
             "equivariant": self._equivariant,
             # Register lane toggles (Phase R0): load-bearing — they change the

@@ -119,6 +119,36 @@ def conv_gather_index() -> torch.Tensor:
 
 
 @functools.lru_cache(maxsize=1)
+def conv_gather_index31() -> torch.Tensor:
+    """(31, 12, 12) long flat index for the dense31 tied convolution.
+
+    Dense31 extends the ordinary center-plus-six-neighbour tap star with five
+    distance shells.  D6 permutes the six directions exactly as in
+    :func:`conv_gather_index` and fixes the shell number, so the 7-tap
+    derivation (docs/DERIVATION (GEN)) applies independently to every shell:
+    ``t31 = 1 + 6*(k-1) + d`` maps to the same shell with direction
+    ``tapp[g][1+d]-1``.  Closure of the tap set under this action is the only
+    additional fact needed for equivariance; the hard ray visibility mask is
+    transported covariantly by the existing raylen wire.
+    """
+
+    G = build_group()
+    inv, tapp, mult = G["inv"], G["tapp"], G["mult"]
+    idx = torch.empty((31, GROUP, GROUP), dtype=torch.long)
+    for t in range(31):
+        if t == 0:
+            shell = None
+            direction = None
+        else:
+            shell, direction = divmod(t - 1, 6)
+        for a in range(GROUP):
+            ta = 0 if t == 0 else 1 + 6 * shell + (tapp[inv[a]][1 + direction] - 1)
+            for b in range(GROUP):
+                idx[t, a, b] = ta * GROUP + mult[inv[a]][b]
+    return idx
+
+
+@functools.lru_cache(maxsize=1)
 def linear_gather_index() -> torch.Tensor:
     """(12, 12) long index into a wb of shape (12, ...): the center-tap (1x1)
     group-convolution ``W[out=a, in=b] = wb[a^-1 * b]`` (docs/DERIVATION §2.4)."""
@@ -133,19 +163,26 @@ def linear_gather_index() -> torch.Tensor:
 
 
 def gen_conv_weight(w_base: torch.Tensor, gather: torch.Tensor) -> torch.Tensor:
-    """Materialize the dense conv weight in torch layout (7, C_in, C_out).
+    """Materialize a shape-generic dense conv weight ``(T, C_in, C_out)``.
 
-    ``w_base`` is (7, 12, C_orbit_out, C_orbit_in) indexed [tap, out_slot,
-    orbit_out, orbit_in]; ``gather`` is :func:`conv_gather_index`. The reference
-    GEMM computes ``gathered(B,N,7*C_in) @ weight.reshape(7*C_in, C_out)``, so
-    weight[t] is (C_in, C_out)."""
+    ``w_base`` is (T, 12, C_orbit_out, C_orbit_in) indexed [tap, out_slot,
+    orbit_out, orbit_in]; ``gather`` is :func:`conv_gather_index` or
+    :func:`conv_gather_index31`. The reference GEMM computes
+    ``gathered(B,N,T*C_in) @ weight.reshape(T*C_in, C_out)``, so weight[t] is
+    (C_in, C_out)."""
 
+    taps = w_base.shape[0]
     corb_out, corb_in = w_base.shape[2], w_base.shape[3]
-    w_flat = w_base.reshape(7 * GROUP, corb_out, corb_in)
-    gathered = w_flat[gather]  # (7, a, b, i=orbit_out, j=orbit_in)
+    if gather.shape != (taps, GROUP, GROUP):
+        raise ValueError(
+            f"gather shape {tuple(gather.shape)} does not match "
+            f"w_base tap count {taps}"
+        )
+    w_flat = w_base.reshape(taps * GROUP, corb_out, corb_in)
+    gathered = w_flat[gather]  # (T, a, b, i=orbit_out, j=orbit_in)
     # torch weight[t, in=b*corb_in+j, out=a*corb_out+i]
     return gathered.permute(0, 2, 4, 1, 3).reshape(
-        7, GROUP * corb_in, GROUP * corb_out
+        taps, GROUP * corb_in, GROUP * corb_out
     )
 
 
