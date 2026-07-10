@@ -350,6 +350,30 @@ if _RAY_BLOCKERS_ENV not in ("0", "1"):
     )
 RAY_BLOCKERS = _RAY_BLOCKERS_ENV == "1"
 
+# --- ray-tap conv mode (SPEC_RAYTAP_CONV.md §2) ----------------------------------
+# HEXFIELD_EQ_RAYTAP in {"0", "conv2", "both"}, default "0" (= baseline 7-tap
+# convs, byte-identical behavior — the live-run isolation guard, spec §9.1).
+# "conv2" equips the second conv of every C block with the ray-tap direction
+# taps (spec §2.2: visibility-masked, per-orbit-channel distance-weighted ray
+# aggregates); "both" equips both convs. The stem and the head convs are always
+# baseline. An arch knob (adds an `alpha` param per equipped conv), so it rides
+# arch_meta and infer_net_kwargs_from_state_dict like reg_lane.
+_RAYTAP_ENV = os.environ.get("HEXFIELD_EQ_RAYTAP", "0")
+if _RAYTAP_ENV not in ("0", "conv2", "both"):
+    raise ValueError(
+        f"HEXFIELD_EQ_RAYTAP={_RAYTAP_ENV!r} must be '0', 'conv2', or 'both'"
+    )
+RAYTAP = _RAYTAP_ENV
+if RAYTAP != "0" and C_ORBIT % 2 != 0:
+    # The own/opp visibility-half split rides the orbit index (spec §2.6),
+    # exactly like the L-block sub-head split above — the same evenness
+    # requirement, now also without an 'L' in the layout (arm A5).
+    raise ValueError(
+        f"HEXFIELD_EQ_C_ORBIT={C_ORBIT} must be even when HEXFIELD_EQ_RAYTAP="
+        f"{RAYTAP!r}: the ray-tap own/opp visibility halves split the orbit "
+        "index (spec §2.6)"
+    )
+
 # --- register lane (docs/PLAN_REGISTER_LANE_RAY_ATTENTION.md Phase R) -----------
 # HEXFIELD_EQ_REG_LANE ("0"/"1", default "0"): attach a RegisterRefresh (one-way
 # sigmoid-gated SUM cross-attention, tokens <- cells) at the exit of every C

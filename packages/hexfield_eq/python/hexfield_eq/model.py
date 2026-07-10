@@ -41,6 +41,7 @@ from .constants import (
     BIAS_TOKEN_TOKEN_ROW,
     CHANNELS,
     C_ORBIT,
+    FEATURE_VERSION,
     GROUP_ORDER,
     HEAD_DIM,
     MLP_RATIO,
@@ -49,6 +50,7 @@ from .constants import (
     RAY_BLOCKERS,
     RAY_HEADS,
     RAY_REACH,
+    RAYTAP,
     REG_LANE,
     REG_TOK_READ,
     TRUNK_LAYOUT,
@@ -154,6 +156,22 @@ else:
     _ray_attn_fused = None
     _ray_gather_index_fused = None
     _ray_slot_bias_rows = None
+# Ray-tap conv support (SPEC_RAYTAP_CONV.md §2). Imported LAZILY on the first
+# construction of a ray-tap-equipped conv (env HEXFIELD_EQ_RAYTAP or the
+# constructor kwarg — a foreign checkpoint can enable it under a default env),
+# so the default build's import graph is untouched (live-run isolation, §9.1).
+_raytap_mod = None
+
+
+def _raytap():
+    global _raytap_mod
+    if _raytap_mod is None:
+        from . import _raytap as _m
+
+        _raytap_mod = _m
+    return _raytap_mod
+
+
 # Conv + LayerNorm(+ReLU) + mask epilogue fusion, HEXFIELD_TRITON_CONV_LN=1
 # (default off). ConvBlock's post-conv LayerNorm epilogue runs inside the
 # fused conv kernel on the fp32 accumulator, saving one full read+write of
@@ -447,6 +465,28 @@ class _RayGatherBias:
         self.blockers = blockers
 
 
+class _RayTapCtx:
+    """Per-forward carrier for ray-tap convs (SPEC_RAYTAP_CONV.md §2.5), built
+    ONCE by trunk() and shared by every equipped conv:
+
+    - ``idx_taps`` (B, Npad, 6, 5) int64 — row index of the cell at offset
+      ``k * DIRECTIONS[t]`` (sentinel Npad = absent -> the zero row), sliced
+      from the sync-free ray gather index by the generated tap -> slot LUT;
+    - ``reach``   (B, Npad, 2, 6) u8 — per-(side, tap) visibility reach,
+      gathered from the raylen wire buffer by the generated raylen-slot LUT;
+    - ``ray_idx`` (B, Npad, 32) int32 and ``raylen`` (B, Npad, 12) u8 — the
+      raw buffers, for the K1 fused kernel (which does the slot arithmetic
+      in-kernel instead of consuming the widened views)."""
+
+    __slots__ = ("idx_taps", "reach", "ray_idx", "raylen")
+
+    def __init__(self, idx_taps, reach, ray_idx, raylen) -> None:
+        self.idx_taps = idx_taps
+        self.reach = reach
+        self.ray_idx = ray_idx
+        self.raylen = raylen
+
+
 class _BiasGather(torch.autograd.Function):
     """table[pair] with a histogram backward.
 
@@ -491,11 +531,14 @@ class HexNodeConv(nn.Module):
     frozen-serve weight once rather than per forward.
     """
 
-    def __init__(self, in_channels: int, out_channels: int) -> None:
+    def __init__(
+        self, in_channels: int, out_channels: int, raytap: bool = False
+    ) -> None:
         super().__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.equivariant = EQUIVARIANT
+        self.raytap = bool(raytap)
         if not self.equivariant:
             self.weight = nn.Parameter(torch.empty(7, in_channels, out_channels))
             self.bias = nn.Parameter(torch.empty(out_channels))
@@ -504,6 +547,7 @@ class HexNodeConv(nn.Module):
             bound = 1.0 / math.sqrt(fan_in)
             nn.init.uniform_(self.weight, -bound, bound)
             nn.init.uniform_(self.bias, -bound, bound)
+            self._init_raytap()
             return
         # --- equivariant tied conv ---
         if out_channels % GROUP_ORDER != 0:
@@ -533,6 +577,45 @@ class HexNodeConv(nn.Module):
         self._cache_v = None
         self._cache_w = None
         self._cache_b = None
+        self._init_raytap()
+
+    def _init_raytap(self) -> None:
+        """Ray-tap free parameter (spec §2.2): ``alpha (RAY_REACH, C_ORBIT_in)``
+        — per-distance, per-orbit-channel, shared across the 6 directions and
+        tiled slot-constant over the fiber. Init ``alpha[:, c] = (1, 0, 0, 0,
+        0)`` makes the ray-tap conv functionally identical to the baseline
+        7-tap conv (init-equivalence, T4). Added ONLY when equipped, so
+        RAYTAP=0 keeps the pre-change state-dict key set. Consumes no RNG (the
+        shared-param stream stays identical to the unequipped build)."""
+
+        if not self.raytap:
+            return
+        if self.equivariant and getattr(self, "kind", "") == "stem":
+            raise ValueError(
+                "the stem conv is always baseline (spec §2.3); raytap=True is "
+                "only valid for regular-fiber convs"
+            )
+        corb_in = (
+            self.in_channels // GROUP_ORDER if self.equivariant else self.in_channels
+        )
+        # Constructor-kwarg twin of the constants.py import-time check (§2.6):
+        # the own/opp visibility halves split the orbit index.
+        if corb_in % 2 != 0:
+            raise ValueError(
+                f"ray-tap conv needs an even orbit width (got {corb_in}): the "
+                "own/opp visibility halves split the orbit index (spec §2.6)"
+            )
+        alpha = torch.zeros(RAY_REACH, corb_in)
+        alpha[0] = 1.0
+        self.alpha = nn.Parameter(alpha)
+
+    def _alpha_full(self) -> torch.Tensor:
+        """alpha tiled slot-constant to the full (RAY_REACH, C_in) fiber:
+        channel ``c = slot*C_ORBIT + a`` reads ``alpha[:, a]``."""
+
+        return (
+            self.alpha.repeat(1, GROUP_ORDER) if self.equivariant else self.alpha
+        )
 
     def _base_param(self) -> torch.Tensor:
         return self.w0 if self.kind == "stem" else self.w_base
@@ -563,15 +646,37 @@ class HexNodeConv(nn.Module):
         return weight, bias
 
     def forward(
-        self, x: torch.Tensor, gather_idx: torch.Tensor, mask: torch.Tensor
+        self,
+        x: torch.Tensor,
+        gather_idx: torch.Tensor,
+        mask: torch.Tensor,
+        ray_ctx=None,
     ) -> torch.Tensor:
         """x (B, Npad, Cin); gather_idx (B, Npad, 7) with tap 0 = self and
         missing -> Npad; mask (B, Npad) bool. Returns (B, Npad, Cout) with
-        pad rows zeroed by the mask.
+        pad rows zeroed by the mask. ``ray_ctx`` (a ``_RayTapCtx``, built once
+        per forward by trunk()) is required by (and only read by) ray-tap
+        convs.
         """
 
         b, n, c = x.shape
         weight, bias = self._materialize()
+        if self.raytap:
+            # Ray-tap reference path (spec §2.4): the direction taps consume
+            # the visibility-masked alpha-weighted ray aggregates; the center
+            # tap and the GEMM against the tied-generated weight are unchanged.
+            if ray_ctx is None:
+                raise ValueError(
+                    "ray-tap conv called without ray_ctx; the trunk builds it "
+                    "from coords/mask + the raylen wire input (spec §2.5)"
+                )
+            taps = _raytap().ray_tap_taps(
+                x, ray_ctx.idx_taps, ray_ctx.reach, self._alpha_full(),
+                self.alpha.shape[1],
+            )
+            gathered = torch.cat([x.unsqueeze(2), taps], dim=2).reshape(b, n, 7 * c)
+            out = gathered @ weight.reshape(7 * c, self.out_channels) + bias
+            return out * mask.unsqueeze(-1)
         # Serve fast path (HEXFIELD_TRITON_CONV): fused gather+GEMM custom op —
         # the (B, Npad, 7C) tensor is never materialized. No-grad CUDA only (no
         # backward); 16-aligned channels only (the stem's C_in=25 falls through).
@@ -740,18 +845,49 @@ class EquivLinear(nn.Module):
 
 
 class ConvBlock(nn.Module):
-    """Post-activation residual block (LayerNorm)."""
+    """Post-activation residual block (LayerNorm). ``raytap`` (spec §2.3):
+    "0" = both convs baseline (current behavior); "conv2" = the second conv
+    runs in ray-tap mode; "both" = both convs do."""
 
-    def __init__(self, channels: int) -> None:
+    def __init__(self, channels: int, raytap: str = "0") -> None:
         super().__init__()
-        self.conv1 = HexNodeConv(channels, channels)
+        self.conv1 = HexNodeConv(channels, channels, raytap=(raytap == "both"))
         self.ln1 = _make_norm(channels)
-        self.conv2 = HexNodeConv(channels, channels)
+        self.conv2 = HexNodeConv(
+            channels, channels, raytap=(raytap in ("conv2", "both"))
+        )
         self.ln2 = _make_norm(channels)
         self.ls = LayerScale(channels)
 
+    def _serve_conv_ln(self, conv, ln, x, gather_idx, mask, ray_ctx, relu):
+        """One conv + LN(+ReLU) + mask on the fused serve branch. Baseline
+        convs keep the fused Triton conv+LN kernel (byte-identical to the
+        pre-ray-tap path). Equipped convs run the ray-tap reference gather-sum
+        GEMM followed by the _conv_ln_ref epilogue numerics (fp32 LN stats on
+        the conv output, fp16 store) until the K1 fused variant lands; serve
+        throughput measured on this path is labeled reference-path (§2.4)."""
+
+        if not conv.raytap:
+            w, b = conv._materialize()
+            return _hex_conv_ln_fused(
+                x, gather_idx, mask, w, b, ln.weight, ln.bias, ln.eps, relu
+            )
+        out = conv(x, gather_idx, mask, ray_ctx=ray_ctx)
+        y = F.layer_norm(
+            out.float(), (out.shape[-1],), ln.weight.float(), ln.bias.float(),
+            ln.eps,
+        )
+        if relu:
+            y = F.relu(y)
+        y = y * mask.unsqueeze(-1)
+        return y.to(torch.float16)
+
     def forward(
-        self, x: torch.Tensor, gather_idx: torch.Tensor, mask: torch.Tensor
+        self,
+        x: torch.Tensor,
+        gather_idx: torch.Tensor,
+        mask: torch.Tensor,
+        ray_ctx=None,
     ) -> torch.Tensor:
         # Serve fast path (HEXFIELD_TRITON_CONV_LN): conv + LN (+ReLU) + mask
         # in one kernel per conv — the LN round-trip over the activation never
@@ -773,22 +909,16 @@ class ConvBlock(nn.Module):
             # per-channel affine makes the epilogue EXACTLY the orbit-tied group-norm,
             # so the fused serve path stays D6-equivariant (the LN mean/var are the
             # same symmetric full-fiber reduction the kernel computes over Cout).
-            w1, b1 = self.conv1._materialize()
-            w2, b2 = self.conv2._materialize()
-            y = _hex_conv_ln_fused(
-                x, gather_idx, mask,
-                w1, b1,
-                self.ln1.weight, self.ln1.bias, self.ln1.eps, True,
+            y = self._serve_conv_ln(
+                self.conv1, self.ln1, x, gather_idx, mask, ray_ctx, True
             )
-            y = _hex_conv_ln_fused(
-                y, gather_idx, mask,
-                w2, b2,
-                self.ln2.weight, self.ln2.bias, self.ln2.eps, False,
+            y = self._serve_conv_ln(
+                self.conv2, self.ln2, y, gather_idx, mask, ray_ctx, False
             )
             return F.relu(x + self.ls(y))
         m = mask.unsqueeze(-1)
-        y = F.relu(self.ln1(self.conv1(x, gather_idx, mask))) * m
-        y = self.ln2(self.conv2(y, gather_idx, mask)) * m
+        y = F.relu(self.ln1(self.conv1(x, gather_idx, mask, ray_ctx=ray_ctx))) * m
+        y = self.ln2(self.conv2(y, gather_idx, mask, ray_ctx=ray_ctx)) * m
         return F.relu(x + self.ls(y))
 
 
@@ -1147,6 +1277,22 @@ def infer_net_kwargs_from_state_dict(sd: dict, meta: dict | None = None) -> dict
     # the toggle is a mask-build variant); absent meta keeps the env default.
     if meta.get("ray_blockers") is not None:
         kwargs["ray_blockers"] = bool(meta["ray_blockers"])
+    # Ray-tap conv mode (SPEC_RAYTAP_CONV.md §4): meta first (authoritative
+    # ternary). Fallback inference distinguishes conv2/both by the presence of
+    # `alpha` on FIRST-conv keys — presence of any `alpha` alone is
+    # insufficient (both modes carry conv2 alphas).
+    if meta.get("raytap") is not None:
+        kwargs["raytap"] = str(meta["raytap"])
+    else:
+        has_conv1_alpha = any(
+            k.startswith("conv_blocks.") and k.endswith(".conv1.alpha") for k in sd
+        )
+        has_conv2_alpha = any(
+            k.startswith("conv_blocks.") and k.endswith(".conv2.alpha") for k in sd
+        )
+        kwargs["raytap"] = (
+            "both" if has_conv1_alpha else ("conv2" if has_conv2_alpha else "0")
+        )
     return kwargs
 
 
@@ -1163,6 +1309,7 @@ class HexfieldNet(nn.Module):
         reg_lane: bool | None = None,
         reg_tok_read: bool | None = None,
         ray_blockers: bool | None = None,
+        raytap: str | None = None,
     ) -> None:
         super().__init__()
         # channels/attention_heads/trunk_layout default to the module globals
@@ -1211,6 +1358,25 @@ class HexfieldNet(nn.Module):
         # state-dict change), env default with an explicit kwarg so meta-first
         # rebuilds reproduce the training-time mask semantics.
         self._ray_blockers = RAY_BLOCKERS if ray_blockers is None else bool(ray_blockers)
+        # Ray-tap conv mode (SPEC_RAYTAP_CONV.md §2.3): env default, explicit
+        # kwarg for cross-arch loaders (an arch knob — equipped convs carry an
+        # `alpha` param, so it changes the state-dict key set and rides
+        # arch_meta / infer_net_kwargs_from_state_dict).
+        rt_mode = RAYTAP if raytap is None else str(raytap)
+        if rt_mode not in ("0", "conv2", "both"):
+            raise ValueError(
+                f"raytap={rt_mode!r} must be '0', 'conv2', or 'both'"
+            )
+        self._raytap = rt_mode
+        if rt_mode != "0":
+            # Constructor-kwarg twin of the constants.py import check (§2.6).
+            rt_corb = c // GROUP_ORDER if EQUIVARIANT else c
+            if rt_corb % 2 != 0:
+                raise ValueError(
+                    f"raytap={rt_mode!r} needs an even orbit width (got "
+                    f"{rt_corb}): the own/opp visibility halves split the "
+                    "orbit index (spec §2.6)"
+                )
         n_ray = layout.count("L")
         if n_ray and c % RAY_HEADS != 0:
             raise ValueError(
@@ -1236,9 +1402,24 @@ class HexfieldNet(nn.Module):
             )
         self.stem = HexNodeConv(NUM_FEATURES, c)
         self.stem_ln = _make_norm(c)
+        # The stem and the tied head convs are always baseline (spec §2.3);
+        # ray-tap equips trunk ConvBlocks only.
         self.conv_blocks = nn.ModuleList(
-            [ConvBlock(c) for _ in range(layout.count("C"))]
+            [ConvBlock(c, raytap=rt_mode) for _ in range(layout.count("C"))]
         )
+        if rt_mode != "0":
+            # Generated tap geometry LUTs (spec §2.5, T7): non-persistent so
+            # the state-dict key set is untouched, long dtype so .half()
+            # skips them; they ride .to(device) and the serve-half deepcopy.
+            rt = _raytap()
+            self.register_buffer(
+                "_raytap_slot_lut", rt.tap_ray_slot_lut().clone(), persistent=False
+            )
+            self.register_buffer(
+                "_raytap_raylen_slots",
+                rt.tap_raylen_slots().clone(),
+                persistent=False,
+            )
         self.attn_blocks = nn.ModuleList(
             [AttnBlock(c, heads) for _ in range(layout.count("A"))]
         )
@@ -1470,6 +1651,13 @@ class HexfieldNet(nn.Module):
             # feature_width is the input feature width (== in_channels); kept as an
             # alias so older readers that only know feature_width still resolve it.
             "feature_width": NUM_FEATURES,
+            # The featurizer plane-map version this net was built under (spec
+            # §1.1/§4): loaders hard-assert it (same class as support_radius).
+            "feature_version": FEATURE_VERSION,
+            # Ray-tap conv mode (spec §2.3/§4, ternary, authoritative):
+            # load-bearing — equipped convs carry `alpha` params, and
+            # conv2-vs-both cannot be told apart by key presence alone.
+            "raytap": self._raytap,
             "equivariant": self._equivariant,
             # Register lane toggles (Phase R0): load-bearing — they change the
             # state-dict key set, and KNOWN_TRUNK_LAYOUTS cannot express them.
@@ -1826,6 +2014,25 @@ class HexfieldNet(nn.Module):
                 "input; pass batch['raylen'] (B, Npad, RAYLEN_SLOTS) or build "
                 "the net with ray_blockers=False (HEXFIELD_EQ_RAY_BLOCKERS=0)"
             )
+        # Ray-tap conv context (spec §2.5): built once per forward, shared by
+        # every equipped conv. The sync-free ray gather index is enabled
+        # whenever ray-tap is on, including L-free layouts (arm A5); ray-tap
+        # always consumes the raylen wire (there is no blockers toggle for it).
+        ray_ctx = None
+        if self._raytap != "0":
+            if raylen is None:
+                raise ValueError(
+                    "ray-tap convs enabled (raytap="
+                    f"{self._raytap!r}) but no raylen input; pass "
+                    "batch['raylen'] (B, Npad, RAYLEN_SLOTS) u8 (spec §2.5)"
+                )
+            ray_idx = _raytap().build_ray_gather_index(coords, mask)
+            ray_ctx = _RayTapCtx(
+                ray_idx[:, :, self._raytap_slot_lut].to(torch.int64),
+                raylen[:, :, self._raytap_raylen_slots],
+                ray_idx,
+                raylen,
+            )
 
         # Gathered ray-attention serve path (HEXFIELD_EQ_TRITON_RAY=1; spec
         # D-S36/D-S37): no-grad CUDA fp16 at a kernel-supported head_dim only.
@@ -1907,7 +2114,7 @@ class HexfieldNet(nn.Module):
             if kind == "C":
                 if self._reg_tok_read:
                     x = x + self.tok_reads[ci](tokens.to(x.dtype)) * mask.unsqueeze(-1)
-                x = self.conv_blocks[ci](x, gather_idx, mask)
+                x = self.conv_blocks[ci](x, gather_idx, mask, ray_ctx=ray_ctx)
                 if self._reg_lane:
                     tokens = self.registers[ci](tokens, x, mask)
                 ci += 1
