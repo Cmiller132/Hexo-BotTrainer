@@ -88,16 +88,21 @@ def _check_raylen_once(model, batch: dict) -> None:
     if _RAYLEN_SANITY_DONE:
         return
     _RAYLEN_SANITY_DONE = True
-    if "L" not in getattr(model, "_trunk_layout", "") or not getattr(
-        model, "_ray_blockers", False
-    ):
+    # raylen is read by L blocks with blockers on, and by ray-tap convs
+    # (SPEC_RAYTAP_CONV.md §2.5 — no blockers toggle there; includes L-free
+    # layouts like arm A5).
+    reads_raylen = (
+        "L" in getattr(model, "_trunk_layout", "")
+        and getattr(model, "_ray_blockers", False)
+    ) or str(getattr(model, "_raytap", "0") or "0") != "0"
+    if not reads_raylen:
         return
     rl = batch.get("raylen")
     if rl is None or not bool(rl[batch["mask"]].any()):
         raise ValueError(
-            "L trunk layout with ray blockers on but the first batch's raylen "
-            "is missing/all-zero over live cells — stale shards or an old "
-            "hexfield_eq._rust .so"
+            "the net reads raylen (L blocks with blockers on, or ray-tap "
+            "convs) but the first batch's raylen is missing/all-zero over "
+            "live cells — stale shards or an old hexfield_eq._rust .so"
         )
 
 

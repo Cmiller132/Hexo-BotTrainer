@@ -372,14 +372,21 @@ class HexfieldEvaluator:
         # tensor and call the forward with the pre-L argument list (byte-
         # identical serve). The layout is read from the model (arch_meta's
         # source of truth), not the env, so foreign-arch checkpoints serve
-        # correctly.
+        # correctly. Ray-tap convs (SPEC_RAYTAP_CONV.md §2.5) consume the same
+        # wire buffer, so raylen staging is keyed on ('L' in layout) OR raytap
+        # — including L-free layouts (arm A5).
         _layout = str(getattr(model, "_trunk_layout", "") or "")
-        self._needs_raylen = "L" in _layout
+        self._raytap = str(getattr(model, "_raytap", "0") or "0")
+        self._needs_raylen = ("L" in _layout) or (self._raytap != "0")
         self._ray_blockers = bool(getattr(model, "_ray_blockers", False))
         # One-time all-zero-raylen latch (the serve twin of
-        # trainer._check_raylen_once, spec D-S31/D-S34): with blockers on, an
-        # all-zero first buffer means a stale featurizer .so and would silently
-        # kill every ray.
+        # trainer._check_raylen_once, spec D-S31/D-S34): an all-zero first
+        # buffer means a stale featurizer .so and would silently kill every
+        # ray. Applies when the values are actually read: L blocks with
+        # blockers on, or any ray-tap conv (ray-tap has no blockers toggle).
+        self._raylen_latch_applies = (
+            ("L" in _layout) and self._ray_blockers
+        ) or (self._raytap != "0")
         self._raylen_latch_done = False
         # Serve forward compile (CUDA only; eval/self-play path, not training).
         # torch.compile fuses the many small elementwise/gather kernels of the
@@ -521,8 +528,9 @@ class HexfieldEvaluator:
         buf = payload.get("raylen")
         if buf is None:
             raise ValueError(
-                "L trunk layout but the serve payload carries no 'raylen' key; "
-                "the featurizer .so predates Phase L0 — rebuild hexfield_eq._rust"
+                "the net consumes raylen (L trunk layout or ray-tap convs) but "
+                "the serve payload carries no 'raylen' key; the featurizer .so "
+                "predates Phase L0 — rebuild hexfield_eq._rust"
             )
         raylen = np.frombuffer(buf, dtype=np.uint8)
         if raylen.shape[0] != total_nodes * RAYLEN_SLOTS:
@@ -532,11 +540,12 @@ class HexfieldEvaluator:
             )
         if not self._raylen_latch_done:
             self._raylen_latch_done = True
-            if self._ray_blockers and total_nodes > 0 and not raylen.any():
+            if self._raylen_latch_applies and total_nodes > 0 and not raylen.any():
                 raise ValueError(
-                    "L trunk layout with ray blockers on but the first serve "
-                    "payload's raylen is all-zero — stale featurizer or a "
-                    "corrupt wire buffer would silently kill every ray"
+                    "the net reads raylen (L blocks with blockers on, or "
+                    "ray-tap convs) but the first serve payload's raylen is "
+                    "all-zero — stale featurizer or a corrupt wire buffer "
+                    "would silently kill every ray"
                 )
         return raylen.reshape(total_nodes, RAYLEN_SLOTS)
 

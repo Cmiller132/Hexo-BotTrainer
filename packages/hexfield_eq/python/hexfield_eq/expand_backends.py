@@ -43,7 +43,7 @@ from typing import Any, Sequence
 
 import numpy as np
 
-from .constants import LEGAL_RADIUS, NUM_FEATURES, RAYLEN_SLOTS, TRUNK_LAYOUT
+from .constants import LEGAL_RADIUS, NUM_FEATURES, RAYLEN_SLOTS, RAYTAP, TRUNK_LAYOUT
 from .samples import STV_HORIZONS, ExpandedRow, HexfieldSampleData, expand_sample
 from .shards import _PHASES
 from .support import Support
@@ -301,11 +301,12 @@ def _reassemble_rust_rows(
             bytes(result["raylen"]), dtype=np.uint8, count=RAYLEN_SLOTS * total_nodes
         ).reshape(-1, RAYLEN_SLOTS)
     else:
-        if "L" in TRUNK_LAYOUT:
+        if "L" in TRUNK_LAYOUT or RAYTAP != "0":
             raise ValueError(
-                "expand kernel emitted no raylen buffer but the trunk layout "
-                f"{TRUNK_LAYOUT!r} contains 'L' — rebuild hexfield_eq._rust "
-                "(a fabricated all-zero raylen would kill every ray)"
+                "expand kernel emitted no raylen buffer but the net consumes "
+                f"it (trunk layout {TRUNK_LAYOUT!r} / HEXFIELD_EQ_RAYTAP="
+                f"{RAYTAP!r}) — rebuild hexfield_eq._rust (a fabricated "
+                "all-zero raylen would kill every ray)"
             )
         raylen = np.zeros((total_nodes, RAYLEN_SLOTS), dtype=np.uint8)
     policy = np.frombuffer(bytes(result["policy"]), dtype=np.float32, count=total_legal)

@@ -12,20 +12,21 @@ from typing import Any, Mapping, Sequence
 
 import numpy as np
 
-from .constants import MOVES_LEFT_CAP, RAYLEN_SLOTS, TRUNK_LAYOUT
+from .constants import MOVES_LEFT_CAP, RAYLEN_SLOTS, RAYTAP, TRUNK_LAYOUT
 from .features import PositionFacts, build_position, build_ray_lengths, transform_facts
 from .geometry import apply_d6, unpack_action_id
 from .support import Support
 
 STV_HORIZONS = (2, 6, 16)
 
-# Ray lengths are consumed only by 'L' trunk layouts; the per-row Python walk
-# (12 rays x <=5 steps per cell, all dict lookups) is pure overhead in every
-# prefit/expand worker for C/A arms, so the serial expand path skips the oracle
-# there (spec D-S29). The Rust expand kernel keeps emitting raylen regardless
-# (the model ignores it). Read once at import; the parity tests monkeypatch
-# this to force the oracle on under a C/A layout.
-_EXPAND_RAYLEN = "L" in TRUNK_LAYOUT
+# Ray lengths are consumed by 'L' trunk layouts and by ray-tap convs
+# (SPEC_RAYTAP_CONV.md §2.5 — including L-free layouts, arm A5); the per-row
+# Python walk (12 rays x <=5 steps per cell, all dict lookups) is pure overhead
+# in every prefit/expand worker for arms that consume neither, so the serial
+# expand path skips the oracle there (spec D-S29). The Rust expand kernel keeps
+# emitting raylen regardless (the model ignores it). Read once at import; the
+# parity tests monkeypatch this to force the oracle on under a C/A layout.
+_EXPAND_RAYLEN = ("L" in TRUNK_LAYOUT) or (RAYTAP != "0")
 
 
 @dataclass(frozen=True)
