@@ -37,7 +37,7 @@ from .constants import (
     PLANE_SECOND_PLACEMENT,
 )
 from .d6 import Axial, D6Symmetry, transform_action_id, transform_coord, unpack_coord_id, unpack_coord_pair
-from .geometry import coord_to_flat, coord_to_row_col, disk_mask, hex_distance, in_disk
+from .geometry import coord_to_flat, coord_to_row_col, disk_mask, in_disk
 
 
 def _flat_in_disk(flat: int) -> bool:

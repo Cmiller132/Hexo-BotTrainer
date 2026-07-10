@@ -1452,7 +1452,6 @@ def _hexfield_eq(meta: dict | None = None) -> SimpleNamespace:
     validated against the imported constants on every later call."""
 
     global _hexfield_eq_ns
-    import os
     import sys
 
     if _hexfield_eq_ns is None:

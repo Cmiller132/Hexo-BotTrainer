@@ -94,7 +94,7 @@ from .eval_driver import (
     run_hexfield_ply,
     settle,
 )
-from .geometry import pack_action_id, unpack_action_id
+from .geometry import unpack_action_id
 
 # Logger for the eval .hxr writer; a 0-record write is logged as a warning.
 _EVAL_LOG = logging.getLogger("hexfield.eval")
@@ -261,20 +261,6 @@ def _load_hexfield_net(checkpoint: str | Path) -> HexfieldNet:
         model.load_state_dict(payload["model"], strict=True)
     model.eval()
     return model
-
-
-def _infer_checkpoint_channels(sd: dict) -> int | None:
-    """Trunk channel width of a hexfield checkpoint, or None if undeterminable.
-
-    The width is the last dim of the learned ``tokens`` parameter (NUM_TOKENS, c);
-    the stem conv bias (c,) is the fallback. None means the default (process-global
-    CHANNELS) should be used.
-    """
-    for key in ("tokens", "stem.bias"):
-        t = sd.get(key)
-        if t is not None and hasattr(t, "shape") and len(t.shape) >= 1:
-            return int(t.shape[-1])
-    return None
 
 
 def _resolve_eval_overrides(

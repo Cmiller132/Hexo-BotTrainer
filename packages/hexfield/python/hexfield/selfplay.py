@@ -14,7 +14,6 @@ value/stvalue/cell_q/moves_left heads are masked via the truncated flag
 from __future__ import annotations
 
 import json
-import math
 import os
 import queue
 import threading
@@ -39,7 +38,7 @@ from .config import (
 )
 from .engine_facts import player_int
 from .features import record_phase, record_player, window_scan
-from .geometry import pack_action_id, unpack_action_id
+from .geometry import unpack_action_id
 from .inference import build_serve_evaluator
 from .samples import (
     STV_HORIZONS,

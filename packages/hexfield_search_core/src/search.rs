@@ -861,7 +861,9 @@ impl HexfieldMctsSession {
             .zip(selected_actions.into_iter())
         {
             if no_advance {
-                // Forensics only: store the searched tree as-is for debug_dump.
+                // Forensics only: store the searched tree as-is (root not
+                // advanced) so the next search call on this game_key can
+                // inspect/reuse it unchanged.
                 self.searches.insert(game_key, search);
                 continue;
             }
@@ -3142,7 +3144,7 @@ fn build_search_result_payload_native(
     forced_playout_k: f32,
 ) -> PyResult<PayloadNative> {
     let root = search.root();
-    let (policy_action_ids, policy_weights, _policy_q, policy_total) = visit_policy(root, baseline);
+    let (policy_action_ids, policy_weights, policy_q, policy_total) = visit_policy(root, baseline);
     // Forced-playout pruning is PUCT bookkeeping: at a Gumbel SH root the
     // selection path never takes the forced branches, so there are no forced
     // playouts to prune and the PUCT pruning math (n_forced = sqrt(k*P*N))
@@ -3155,8 +3157,9 @@ fn build_search_result_payload_native(
             let effective_c = search.effective_pruning_c_puct(c_puct, root.visits);
             pruned_visit_policy(root, baseline, forced_playout_k, effective_c)
         } else {
-            let (ids, w, q, _t) = visit_policy(root, baseline);
-            (ids, w, q)
+            // Common branch: the recorded target IS the play policy computed
+            // above, so reuse it instead of a second full visit_policy scan.
+            (policy_action_ids.clone(), policy_weights.clone(), policy_q)
         };
     // Recorded-target fallback for a force-completed Gumbel SH root: such a move
     // can finalize with zero net delta visits over its reuse baseline, so the

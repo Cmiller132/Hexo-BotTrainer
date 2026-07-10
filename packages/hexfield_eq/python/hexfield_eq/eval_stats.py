@@ -448,7 +448,6 @@ def bradley_terry(
     n = len(labels)
     a_idx = index[anchor]
     free = [k for k in range(n) if k != a_idx]  # estimated coordinates
-    fpos = {k: p for p, k in enumerate(free)}   # full-index -> free-index
     m = len(free)
 
     # Precompute edge index arrays for a vectorised gradient/Hessian.
@@ -684,30 +683,6 @@ def bonferroni_alpha(alpha: float, k: int) -> float:
     if k <= 0:
         raise ValueError("k must be >= 1")
     return alpha / k
-
-
-# --------------------------------------------------------------------------- #
-# Verdict label (returns a string; performs no gating).
-# --------------------------------------------------------------------------- #
-def primary_verdict(
-    diff_ci: tuple[float, float],
-    *,
-    regress_elo: float = 0.0,
-) -> str:
-    """Map a BT difference CI ``(lo, hi)`` for ``r_candidate - r_champion`` to a label.
-
-    Returns:
-      - "PROMOTE"      if the whole CI is above 0,
-      - "REGRESS"      if the whole CI is below ``regress_elo``,
-      - "INCONCLUSIVE" otherwise (CI straddles the threshold).
-    """
-
-    lo, hi = diff_ci
-    if lo > 0.0:
-        return "PROMOTE"
-    if hi < regress_elo:
-        return "REGRESS"
-    return "INCONCLUSIVE"
 
 
 # --------------------------------------------------------------------------- #

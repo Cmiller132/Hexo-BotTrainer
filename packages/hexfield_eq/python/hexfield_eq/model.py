@@ -30,12 +30,7 @@ from torch.nn import functional as F
 from .constants import (
     ATTENTION_HEADS,
     BIAS_CELL_TOKEN_ROW,
-    BIAS_DISK_RADIUS,
-    BIAS_FAR_ROW,
-    BIAS_OFF_AXIS_BASE,
-    BIAS_ON_AXIS_BASE,
     BIAS_RING_MAX,
-    BIAS_RING_MIN,
     BIAS_ROWS,
     BIAS_TOKEN_CELL_ROW,
     BIAS_TOKEN_TOKEN_ROW,
@@ -43,7 +38,6 @@ from .constants import (
     C_ORBIT,
     FEATURE_VERSION,
     GROUP_ORDER,
-    HEAD_DIM,
     MLP_RATIO,
     NUM_FEATURES,
     NUM_TOKENS,
@@ -235,14 +229,15 @@ else:
 try:
     from torch.nn.attention.flex_attention import flex_attention as _flex_attention
 
-    # Inner-compiled flex_attention. _flex_call (below) is torch.compiler.disable'd
-    # so the outer torch.compile(dynamic=True) serve graph breaks at the attention
-    # and the flex op compiles in its own inner graph.
+    # _flex_call (below) is torch.compiler.disable'd so the outer
+    # torch.compile(dynamic=True) serve graph breaks at the attention and the
+    # flex op compiles in its own inner graph.
     #
-    # dynamic=False: the score_mod does data-dependent indexing (coords[b, kc],
-    # table[row, h]) which inductor cannot lower under dynamic shapes, so flex
-    # specializes per distinct (batch, Npad) serve shape.
-    _flex_compiled = torch.compile(_flex_attention, dynamic=False)
+    # dynamic=False on the per-shape instances: the score_mod does
+    # data-dependent indexing (coords[b, kc], table[row, h]) which inductor
+    # cannot lower under dynamic shapes, so flex specializes per distinct
+    # (batch, Npad) serve shape.
+    #
     # SHAPE-KEYED compile instances (2026-07-03): a single compiled callable
     # holds every (B, S) specialization in ONE dynamo cache, and dynamo resolves
     # hits by linearly scanning guard-sets — with hundreds of live serve shapes
@@ -1375,6 +1370,7 @@ KNOWN_TRUNK_LAYOUTS: dict[tuple[int, int], str] = {
     (8, 3): "CCCACCCACCA",
     (10, 5): "CCACCACCACCACCA",
     (6, 3): "CCACCACCA",  # main_9 (current arch); legacy-v2 same shape, see above
+    (5, 3): "CCACCACA",  # a5 production arch (scripts/prefit_env/hexfield_eq_raytap_a5.env)
 }
 
 

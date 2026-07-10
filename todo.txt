@@ -9,7 +9,8 @@ reproduces the byte-identical pre-port reference (golden vectors). Remove all of
 the below in one pass WHEN the parity() harness is retired or its golden vectors
 are regenerated to the KataGo behavior.
 
-RUST — packages/hexfield/rust/src/tree.rs
+RUST — packages/hexfield_search_core/src/tree.rs (shared MCTS core, #[path]-
+included by BOTH the hexfield and hexfield_eq crates — one edit covers both)
   - Divergences.scaled_fpu flag: once parity is gone, make √-scaling
     unconditional and delete the flag (struct field + parity()/production()
     entries + the KNOWN_DIVERGENCE_KEYS/override plumbing in search.rs).
@@ -19,7 +20,7 @@ RUST — packages/hexfield/rust/src/tree.rs
   - RustEdge::value_or_fpu stays (still the FPU baseline), but its callers no
     longer need the flat fallback.
 
-RUST — packages/hexfield/rust/src/search.rs
+RUST — packages/hexfield_search_core/src/search.rs (shared core, ditto)
   - root_fpu_zero_under_noise: the whole noise-conditioned mechanism is
     superseded by first-class root_fpu_reduction=0.0. Remove:
       * the `root_fpu_zero_under_noise` param on `search()` and `run_continuous()`
@@ -29,10 +30,10 @@ RUST — packages/hexfield/rust/src/search.rs
       * the None-fallback in the `root_fpu_reduction` resolution that defers to
         it (make root FPU simply default 0.0 when unset)
 
-PYTHON — packages/hexfield/python/hexfield/config.py
+PYTHON — packages/hexfield/python/hexfield/config.py AND the hexfield_eq twin
   - SelfplayConfig.root_fpu_zero_under_noise field (default False) — remove once
     the Rust param is gone; drop it from the run_continuous/search call sites in
-    selfplay.py / evaluation.py / eval_arena.py.
+    selfplay.py / evaluation.py / eval_arena.py (both lineages).
 
 CONFIGS
   - Drop any `root_fpu_zero_under_noise = ...` lines from live configs

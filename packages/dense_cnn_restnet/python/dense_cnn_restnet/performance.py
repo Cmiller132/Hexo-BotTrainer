@@ -217,7 +217,6 @@ def _benchmark_training(
     probe_batches: int,
 ) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
-    owns_optimizer = optimizer is None
     if optimizer is None:
         optimizer = torch.optim.AdamW(model.parameters(), lr=1.0e-4)
     was_training = model.training

@@ -45,14 +45,13 @@ from hexo_runner.records import AbortRecord, HexoRecordFile, HexoRecordPlayer
 from hexo_models.dense_cnn.compact_io import write_compact_shard
 from hexo_models.dense_cnn.replay import materialize_policy_surprise_rows
 from hexo_models.dense_cnn.samples import (
-    Model1SampleData,
     finalize_game_samples,
     sample_from_state,
 )
 
 from .config import HexgtConfig
 from .inference import HexgtInference
-from .mcts import HexgtMctsSession, new_mcts_session
+from .mcts import new_mcts_session
 
 
 def _move_temperature(

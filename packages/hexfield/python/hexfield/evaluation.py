@@ -8,15 +8,12 @@ import json
 import time
 from typing import Any
 
-import torch
 
 from hexo_engine import api
 from hexo_engine.types import AxialCoord, PlacementAction
 
 from .config import ML_AUTO_DISABLED_FLAG, build_divergence_overrides, parse_hexfield_config
 from .geometry import unpack_action_id
-from .inference import HexfieldEvaluator
-from .model import HexfieldNet
 
 
 def _play_pair(session_a, eval_a, session_b, eval_b, *, visits, c_puct, seed, sp,

@@ -34,7 +34,6 @@ from .types import (
     PythonHexoState,
     PythonMoveRecord,
     PythonPlacementRecord,
-    PythonTerminal,
     PythonWindowEntry,
     PythonWindowKey,
     PythonWindowStore,

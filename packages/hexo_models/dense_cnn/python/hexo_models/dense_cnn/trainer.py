@@ -21,7 +21,7 @@ from concurrent.futures import FIRST_COMPLETED, wait
 from pathlib import Path
 from time import perf_counter
 from types import SimpleNamespace
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 import numpy as np
 import torch

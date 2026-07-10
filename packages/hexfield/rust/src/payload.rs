@@ -269,7 +269,6 @@ fn parse_chunk_reply(
                 row.request_index,
                 RustEvaluation {
                     value,
-                    legal_action_count: row.legal_ids.len(),
                     priors,
                     moves_left,
                     logits,

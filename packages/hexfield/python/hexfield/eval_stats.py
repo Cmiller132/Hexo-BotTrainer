@@ -440,7 +440,6 @@ def bradley_terry(
     n = len(labels)
     a_idx = index[anchor]
     free = [k for k in range(n) if k != a_idx]  # estimated coordinates
-    fpos = {k: p for p, k in enumerate(free)}   # full-index -> free-index
     m = len(free)
 
     # Precompute edge index arrays for a vectorised gradient/Hessian.

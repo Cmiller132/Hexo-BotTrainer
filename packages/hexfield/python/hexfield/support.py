@@ -26,7 +26,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .constants import DIRECTIONS, HALO_DIST, LEGAL_RADIUS
+from .constants import DIRECTIONS, LEGAL_RADIUS
 
 # Model-side support radius. HEXFIELD_SUPPORT_RADIUS restricts the support to
 # legal cells within hex-dist <= R of a stone (default LEGAL_RADIUS). Smaller R

@@ -23,7 +23,7 @@ from hexo_engine.types import unpack_coord_id
 from hexo_runner.records import AbortRecord, HexoRecordFile, HexoRecordPlayer
 
 from .inference import DenseCNNInference
-from .mcts import SearchResult, new_mcts_session
+from .mcts import new_mcts_session
 from .performance import _extend_mcts_diagnostic_batches, _summarize_mcts_diagnostic_batches
 from .replay import materialize_policy_surprise_rows, write_selfplay_npz
 from .samples import Model1SampleData, finalize_game_samples, sample_from_state

@@ -32,7 +32,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import torch
 
 import hexo_engine as engine
 
@@ -46,7 +45,6 @@ from hexo_runner.player import (
 )
 
 from .batched_infer import (
-    batched_eval,
     batched_eval_round,
     build_axis_graph_tensors,
     build_axis_round,

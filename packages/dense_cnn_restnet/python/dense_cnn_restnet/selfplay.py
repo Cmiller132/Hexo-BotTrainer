@@ -29,7 +29,7 @@ from hexo_runner.records import AbortRecord, HexoRecordFile, HexoRecordPlayer
 from .constants import BOARD_SIZE
 from .geometry import hex_distance
 from .inference import DenseCNNInference
-from .mcts import SearchResult, _result_from_payload, new_mcts_session
+from .mcts import _result_from_payload, new_mcts_session
 from .performance import _extend_mcts_diagnostic_batches, _summarize_mcts_diagnostic_batches
 from .replay import materialize_policy_surprise_rows, write_selfplay_npz
 from .samples import SPILL_CATEGORIES, Model1SampleData, count_spill, finalize_game_samples, sample_from_state

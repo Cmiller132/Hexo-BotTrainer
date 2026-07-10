@@ -114,11 +114,11 @@ struct RowFacts {
     policy: Vec<(u32, f32)>,
     q_policy: Vec<(u32, f32)>,
     // Improved-policy target π' and raw root logits, both as (action_id, value)
-    // aligned to `policy`. `gumbel_present == 0` means no target: the projection
-    // emits an all-zero gumbel_policy with gumbel_policy_valid 0.
+    // aligned to `policy`. Empty `gumbel_policy` means no target (shard
+    // `gumbel_present == 0`): the projection emits an all-zero gumbel_policy
+    // with gumbel_policy_valid 0.
     gumbel_policy: Vec<(u32, f32)>,
     prior_logit: Vec<(u32, f32)>,
-    gumbel_present: u8,
     opp_policy: Vec<(u32, f32)>,
     policy_surprise: f32,
     value: f32,
@@ -1047,7 +1047,6 @@ pub fn expand_shard_train<'py>(
             q_policy,
             gumbel_policy,
             prior_logit: prior_logit_facts,
-            gumbel_present: row_gumbel_present,
             opp_policy,
             policy_surprise: policy_surprise[i],
             value: value[i],
