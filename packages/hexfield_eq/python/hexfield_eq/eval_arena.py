@@ -925,9 +925,10 @@ def play_multi_checkpoint_match(
 
     def _run_candidate_opening(grp: "_Group", openers: list[EvalGame], seed: int) -> int:
         """Per-opponent candidate opening-leader batch. Uses the candidate session
-        and evaluator but this opponent's own ``open_seed`` and per-group
-        root_index, so each leader's native ``seed+root_index`` sampling stream is
-        keyed per opponent."""
+        and evaluator but this opponent's own ``open_seed`` (the caller folds
+        ``grp.opp_index`` into the seed), so each opponent group samples a
+        distinct opening stream rather than every group replaying identical
+        candidate openings."""
         return run_hexfield_ply(
             cand_counting,
             cand_eval,
@@ -1036,9 +1037,14 @@ def play_multi_checkpoint_match(
                 else:
                     cand_greedy.append(g)
             # Opening leaders: per-opponent with that opponent's own open_seed (net A
-            # offset 13_000_003).
+            # offset 13_000_003, plus a per-opponent 23_000_009 stride so candidate
+            # openings are not correlated across opponent groups).
             for opp_index, openers in cand_openers_by_opp.items():
-                open_seed = game_seed_base + 13_000_003 + rounds * 1_000_003
+                open_seed = (
+                    game_seed_base + 13_000_003
+                    + opp_index * 23_000_009
+                    + rounds * 1_000_003
+                )
                 plies_this_round += _run_candidate_opening(groups[opp_index], openers, open_seed)
             # Followers replay their leader's recorded opening line (no search).
             for g in cand_followers:
