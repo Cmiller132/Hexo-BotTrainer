@@ -234,9 +234,14 @@ them anyway with that caveat stated in the read-out.
 
 - **Interpreter**: Windows `C:\Python314\python.exe` (torch 2.10.0+cu126,
   pytest 9.0.3 — verified working on the existing raytap suite, 2026-07-10).
-- **`CUDA_VISIBLE_DEVICES=` (empty) on every python invocation.** The GPU
-  belongs to the live `hexfield_eq_main_2` training run. No CUDA allocation
-  of any kind, including "just to check".
+- **`CUDA_VISIBLE_DEVICES=-1` on every python invocation.** The GPU belongs
+  to the live `hexfield_eq_main_2` training run. No CUDA allocation of any
+  kind, including "just to check". Use the literal `-1`, NOT an empty
+  string: PowerShell deletes empty-string env vars, and with the var unset
+  Windows torch DOES see the live GPU (`torch.cuda.is_available()` True,
+  verified 2026-07-10) — which would also un-skip the CUDA-marked tests.
+  With `-1` it is False (verified). Assert it is False at the top of probe
+  and bench scripts.
 - `PYTHONPATH=packages/hexfield_eq/python` (repo root as cwd) for tests and
   scripts.
 - **No WSL commands.** Everything runs on the Windows side.
@@ -251,7 +256,7 @@ them anyway with that caveat stated in the read-out.
 
 ## 9. Definition of done
 
-    CUDA_VISIBLE_DEVICES= PYTHONPATH=packages/hexfield_eq/python \
+    CUDA_VISIBLE_DEVICES=-1 PYTHONPATH=packages/hexfield_eq/python \
       C:/Python314/python.exe -m pytest \
       tests/test_hexfield_eq_dense31.py tests/test_hexfield_eq_raytap.py -q
 
