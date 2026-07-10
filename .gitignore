@@ -1,5 +1,6 @@
 target/
 __pycache__/
+.DS_Store
 *.py[cod]
 *.so
 .pytest_cache/

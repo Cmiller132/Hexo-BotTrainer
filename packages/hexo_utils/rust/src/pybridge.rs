@@ -438,7 +438,7 @@ impl PyHexoRecordGameWriter {
 /// Return a tiny capabilities object for smoke tests and packaging checks.
 // UNUSED(2026-06-12): no references found in packages/tests/scripts -- every
 // caller of a `capabilities()` resolves to a model package's own rust_bridge
-// (dense_cnn/hexgt/hexgnn/dense_cnn_restnet); nothing imports
+// (dense_cnn/hexgt/dense_cnn_restnet); nothing imports
 // hexo_utils._rust.capabilities despite the docstring's smoke-test claim.
 #[pyfunction]
 pub fn capabilities(py: Python<'_>) -> PyResult<Py<PyAny>> {

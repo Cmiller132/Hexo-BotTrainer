@@ -123,9 +123,9 @@ pub struct PositionGraph {
     pub node_wcount: Vec<u8>, // window count (3/4/5), else 0
     // UNUSED(2026-06-12): no reader found in packages/tests/scripts — neither
     // featurizer (features.py / features.rs) consumes node_waxis (axis labels are
-    // deliberately excluded for D6 invariance), and the hexgnn fork dropped the
-    // column entirely. Built + serialized into every graph_facts payload for
-    // nothing; kept to avoid changing the payload shape on the halted lineage.
+    // deliberately excluded for D6 invariance). Built + serialized into every
+    // graph_facts payload for nothing; kept to avoid changing the payload shape
+    // on the halted lineage.
     pub node_waxis: Vec<i8>, // window axis index, else -1
     pub node_wempty: Vec<u8>, // window empty-cell count, else 0
     // Candidate node indices, in deterministic (q, r) order == CSR/legal order.

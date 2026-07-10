@@ -14,9 +14,8 @@ pipeline (drop-in PIPELINE compatibility, not tensor-shape matching). See
 STATUS (2026-06-12): the hexgt training lineage is HALTED — run `hexgt_rl_main3`
 was permanently stopped by the owner at epoch 40 (2026-06-05, see HANDOFF.md);
 the active lineage is `packages/dense_cnn_restnet`. The code remains live
-infrastructure, NOT dead: the parked `packages/hexgnn` package is a fork that
-compiles into the same `hexo_models._rust` native module, the dashboard debug
-worker (`packages/hexo_frontend/python/hexo_frontend/debug_infer.py`) loads
+infrastructure, NOT dead: the dashboard debug worker
+(`packages/hexo_frontend/python/hexo_frontend/debug_infer.py`) loads
 hexgt checkpoints through this package, `dense_cnn_restnet` copied its PCR
 design, and ~30 `tests/test_hexgt_*.py` files gate the Rust/Python contracts.
 

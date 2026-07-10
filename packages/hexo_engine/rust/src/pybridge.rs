@@ -5,8 +5,8 @@
 //! consumers:
 //! - Python callers go through the pyfunctions below; rule violations map to
 //!   `ValueError`, which api.py re-raises as `IllegalActionError`.
-//! - Model accelerator crates (hexo_models/dense_cnn, hexo_models/hexgt,
-//!   hexgnn — each rust/src/state.rs) fetch `state_api_capsule()` at batch-MCTS
+//! - Model accelerator crates (hexo_models/dense_cnn and hexo_models/hexgt
+//!   — each rust/src/state.rs) fetch `state_api_capsule()` at batch-MCTS
 //!   time to clone live `PyHexoState` objects into owned Rust states via the
 //!   C-ABI fn pointers; they must check `version == STATE_API_VERSION` (2) and
 //!   fail loudly on mismatch.

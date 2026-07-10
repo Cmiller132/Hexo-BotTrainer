@@ -90,9 +90,9 @@ Imports in (who depends on hexo_runner):
   (`eval_driver.py` / `evaluation.py` / `eval_arena.py`) writes `.hxr` via
   `hexo_runner.records` and uses `SealBotPlayer` as an eval opponent, driving
   games with their own batched loop.
-- **dense_cnn_restnet**, **hexo_models/dense_cnn**, **hexo_models/hexgt**,
-  **hexgnn** (parked/halted lineages): same pattern; hexgt and hexgnn
-  evaluation additionally call `run_match` + `GameSpec` for SealBot gating.
+- **dense_cnn_restnet**, **hexo_models/dense_cnn**, **hexo_models/hexgt**
+  (parked/halted lineages): same pattern; hexgt
+  evaluation additionally calls `run_match` + `GameSpec` for SealBot gating.
   Each package's `player.py` implements the `RunnerPlayer` protocol.
 - **hexo_frontend**: `web.py` imports the SealBot adapter, `run_match`, the
   player contracts, `GameResult`/`HexoRecordFile`, and `GameSpec` -- Match-v2

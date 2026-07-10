@@ -5,8 +5,8 @@
 //! training, runner, and model packages.
 //!
 //! Consumers:
-//! - rlib: the `hexo_models` crate (dense_cnn + hexgt subcrates) and the
-//!   `hexgnn` crate import `hash_state`/`StateHash` in their
+//! - rlib: the `hexo_models` crate (dense_cnn + hexgt subcrates) imports
+//!   `hash_state`/`StateHash` in its
 //!   `mcts_eval.rs`/`mcts_tree.rs` as the neural-eval cache key. The active
 //!   dense_cnn_restnet lineage reaches it through `hexo_models._rust.dense_cnn`.
 //! - cdylib: maturin builds `pybridge.rs` into the `hexo_utils._rust` Python

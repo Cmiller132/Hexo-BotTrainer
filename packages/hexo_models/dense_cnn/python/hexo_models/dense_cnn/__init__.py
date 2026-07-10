@@ -14,7 +14,7 @@ Lineage status: the ACTIVE training line is `packages/dense_cnn_restnet`, a
 full Python fork of this package that reuses this package's Rust accelerator
 (`hexo_models._rust.dense_cnn`, source in `../../rust/src`) read-only. The
 Python half here remains live for old `dense_cnn`-tagged checkpoints, the
-hexo_frontend debug worker, hexgnn's `compact_io` dependency, scripts, and
+hexo_frontend debug worker, scripts, and
 tests -- fixes that matter to both lineages must land in both copies.
 """
 

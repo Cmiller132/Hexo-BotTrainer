@@ -11,7 +11,7 @@ The package has a split active/legacy status:
 
 | Half | Status | Detail |
 |---|---|---|
-| Python (`python/hexo_models/dense_cnn/`) | Legacy | Superseded by `packages/dense_cnn_restnet`, a full Python fork (ResTNet trunk). Kept loadable for old checkpoints, the dashboard debug worker, ~14 test files, and `hexgnn`'s `compact_io` dependency. |
+| Python (`python/hexo_models/dense_cnn/`) | Legacy | Superseded by `packages/dense_cnn_restnet`, a full Python fork (ResTNet trunk). Kept loadable for old checkpoints, the dashboard debug worker, and ~14 test files. |
 | Rust (`rust/src/`) | Active production | `dense_cnn_restnet` ships no Rust of its own. The live `main_4` run (and `main_1`..`main_3` before it) drives this crate's encoder, MCTS sessions (including the restnet-only `run_continuous` scheduler), and sample-fact builder through `hexo_models._rust.dense_cnn`. |
 
 Runs that used this lineage directly (all retired): `configs/dense_cnn_model1*.toml`
@@ -81,9 +81,8 @@ time so D6 symmetry can be re-randomized per epoch.
 | Compact shard | `compact_io.py` (`COMPACT_SCHEMA_VERSION = 1`) | One columnar `.npz` per game: fixed per-row scalar arrays plus, for each variable-length field, a concatenated data array + `int64` offsets array of length N+1. Root prior, `policy_surprise`, `frequency_weight` are dropped at write (surprise weighting is pre-baked as row duplication by `replay.materialize_policy_surprise_rows`). |
 | Expanded training rows | `replay.py` `NPZ_KEYS` | `inputNCHW`, `policyTargetsNCHW`, `oppPolicyTargetsNCHW`, `rootPolicyNCHW`, `legalMaskNCHW`, `valueTargetsN`, `shortTermValueTargetsNC`, `shortTermValueMasksNC`, `metadataInputNC` -- produced by the KataGo-style shuffle (`build_katago_shuffle`). |
 
-The compact shard format is a cross-lineage contract: `packages/hexgnn`
-imports `compact_io` directly, and the restnet fork's copy stays
-byte-compatible with it.
+The compact shard format is a cross-lineage contract: the restnet fork's copy
+stays byte-compatible with it.
 
 ## Training approach
 
@@ -136,7 +135,6 @@ the hexgt lineage).
 | Consumer | What it uses |
 |---|---|
 | `packages/dense_cnn_restnet` (ACTIVE) | The Rust module read-only via its forked `rust_bridge.py`; near-identical Python fork of most modules here |
-| `packages/hexgnn` (parked) | `compact_io.write/read_compact_shard`, `samples`, `replay.materialize_policy_surprise_rows` |
 | `packages/hexo_frontend` | `debug_infer.py` loads `hexo_models.dense_cnn`-tagged checkpoints for the dashboard debug screen and Arena bots |
 | `packages/hexo_engine` | Game truth (Python API) + Rust rlib + state capsule |
 | `packages/hexo_runner` | Player protocol, `.hxr` records, SealBot eval opponent |

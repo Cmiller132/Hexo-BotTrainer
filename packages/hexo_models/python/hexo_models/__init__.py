@@ -9,7 +9,7 @@ re-exports nothing; model implementations stay in their family subpackages.
 
 The maturin-built native extension `hexo_models._rust` (crate root:
 packages/hexo_models/rust/src/lib.rs) sits beside this file as a platform
-`.so`/`.pyd`; it hosts the dense_cnn / hexgt / hexgnn Rust accelerators as
+`.so`/`.pyd`; it hosts the dense_cnn / hexgt Rust accelerators as
 submodules. On interpreters where the artifact is absent (e.g. Windows-side
 Python when only the WSL Linux build exists) `import hexo_models` still
 succeeds -- the missing `_rust` is surfaced lazily by each lineage's
@@ -18,9 +18,8 @@ succeeds -- the missing `_rust` is surfaced lazily by each lineage's
 Importers that rely on this stitching:
   - hexo_models.dense_cnn / hexo_models.hexgt themselves (tests, configs,
     hexo_train entry points `dense_cnn` and `hexgt`),
-  - packages/dense_cnn_restnet/python/dense_cnn_restnet/rust_bridge.py and
-    packages/hexgnn/python/hexgnn/rust_bridge.py (`from hexo_models import
-    _rust`, the ACTIVE lineage's only native path),
+  - packages/dense_cnn_restnet/python/dense_cnn_restnet/rust_bridge.py
+    (`from hexo_models import _rust`, the ACTIVE lineage's only native path),
   - packages/hexo_frontend/python/hexo_frontend/debug_infer.py (dashboard
     debug worker loading dense_cnn/hexgt checkpoints).
 """

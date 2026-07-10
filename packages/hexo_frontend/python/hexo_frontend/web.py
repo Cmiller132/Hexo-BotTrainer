@@ -2088,7 +2088,7 @@ def _selfplay_epoch_extras(run_dir: Path, epoch: int) -> dict[str, object] | Non
     epoch inspector. Curation IS the size cap: the raw file is ~120KB and carries
     memory-internals (``mcts_diagnostics``, ``scheduler_diagnostics``, the
     384-entry ``npz_writes`` list, ``spill``, ``selfplay_npz_files``) that must
-    never pass through. hexgt/hexgnn runs do not produce this file -> None."""
+    never pass through. hexgt runs do not produce this file -> None."""
 
     prefix = _diag_prefix(run_dir)
     payload = _read_json_file(run_dir / "diagnostics" / f"{prefix}.selfplay.epoch_{epoch:06d}.json")
@@ -2140,7 +2140,7 @@ def _selfplay_epoch_extras(run_dir: Path, epoch: int) -> dict[str, object] | Non
 
 def _manifest_model_summary(run_dir: Path) -> dict[str, object] | None:
     """Curated ``model.config`` subset from the run's ``manifest.json`` (arch +
-    the exploration knobs under active study). hexgt/hexgnn/dense manifests
+    the exploration knobs under active study). hexgt/dense manifests
     differ in shape, so every level is dict-guarded and missing keys are simply
     omitted -- never KeyError."""
 
@@ -4442,7 +4442,7 @@ def _epoch_history(
             row = rows.setdefault(epoch, {"epoch": epoch})
             selfplay_summary = _selfplay_epoch_summary(payload)
             # dense_cnn self-play diagnostics omit the game-length + outcome stats
-            # hexgnn emits inline; backfill them display-side from the epoch's .hxr.
+            # hexgt emits inline; backfill them display-side from the epoch's .hxr.
             _backfill_selfplay_game_stats(run_dir, epoch, selfplay_summary)
             row["selfplay"] = selfplay_summary
 
@@ -4516,7 +4516,7 @@ def _epoch_history(
     for row in rows.values():
         if "status" not in row:
             row["status"] = "partial"
-        # Per-head/total training loss band. hexgnn/hexgt attach a `buffer` block
+        # Per-head/total training loss band. hexgt runs attach a `buffer` block
         # (parsed from rl_train.log by their dashboard bridge); dense_cnn emits the
         # same numbers in the epoch's `training` block (training.loss +
         # training.loss_components). Surface them through the SAME selfplay.buffer
@@ -4526,8 +4526,8 @@ def _epoch_history(
         training = row.get("training")
         selfplay = row.get("selfplay")
         # _selfplay_epoch_summary always carries a "buffer" key (None for dense_cnn,
-        # the bridge dict for hexgnn/hexgt), so guard on falsy — only synthesize when
-        # there is no producer buffer; hexgnn's real buffer (truthy) always wins.
+        # the bridge dict for hexgt), so guard on falsy — only synthesize when
+        # there is no producer buffer; a real producer buffer (truthy) always wins.
         if isinstance(training, dict) and isinstance(selfplay, dict) and not selfplay.get("buffer"):
             loss_buffer = _loss_buffer_from_training(training)
             if loss_buffer:
@@ -4585,7 +4585,7 @@ def _loss_buffer_from_training(training: dict[str, object]) -> dict[str, object]
     / loss_value / loss_opp / loss_stvalue_<h>) from a dense_cnn epoch `training`
     result. dense_cnn's trainer returns the weighted total (`loss`) plus the UNWEIGHTED
     per-head components (`loss_components`: policy, value, opp_policy, stvalue_<h>).
-    hexgnn/hexgt feed the identical band via their bridge `buffer`; this surfaces the
+    hexgt runs feed the identical band via their bridge `buffer`; this surfaces the
     dense_cnn lineage's losses through the SAME panel. Returns {} when there is no
     numeric total loss (e.g. a skipped/untrained epoch) so the band degrades gracefully
     rather than breaking."""
@@ -4982,7 +4982,7 @@ def _selfplay_epoch_summary(payload: dict[str, object]) -> dict[str, object]:
         "search_positions_per_second": payload.get("search_positions_per_second"),
         "mcts_sims_per_searched_position": mcts_sims_per_searched_position,
         "elapsed_seconds": payload.get("elapsed_seconds"),
-        # Game-length stats. hexgnn/hexgt emit these inline; dense_cnn does not, so
+        # Game-length stats. hexgt emits these inline; dense_cnn does not, so
         # _epoch_history backfills any None from the epoch's .hxr records (display
         # side). Producer-emitted values pass through unchanged. None values are
         # omitted client-side, so a run with neither stays unaffected.
@@ -5005,7 +5005,7 @@ def _selfplay_epoch_summary(payload: dict[str, object]) -> dict[str, object]:
         "draw_fraction": payload.get("draw_fraction"),
         "decisive_fraction": payload.get("decisive_fraction"),
         # mean_abs_value (mean |value target|) needs the NPZ value labels / self-play
-        # internals, not the .hxr — passed through when emitted (hexgnn), else None.
+        # internals, not the .hxr — passed through when the producer emits it, else None.
         "mean_abs_value": payload.get("mean_abs_value"),
         # Replay-buffer + per-head training-loss + calibration stats (nested object,
         # None for producers that don't emit it — e.g. dense_cnn runs — so the
@@ -5029,7 +5029,7 @@ def _selfplay_game_stats_from_records(run_dir: Path, epoch: int) -> dict[str, ob
     """Derive game-length + win-fraction stats for one self-play epoch from its
     ``.hxr`` game records, DISPLAY-SIDE.
 
-    hexgnn/hexgt self-play diagnostics carry these stats inline; dense_cnn's do
+    hexgt self-play diagnostics carry these stats inline; dense_cnn's do
     not. The dashboard already reads the same ``.hxr`` for the History panel via
     ``_hxr_base_rows`` (memoized by mtime/size), so this reuse is cheap and adds no
     new file I/O on a warm cache. Returns ``{}`` when the epoch record is absent or
@@ -5078,8 +5078,8 @@ def _selfplay_game_stats_from_records(run_dir: Path, epoch: int) -> dict[str, ob
 def _backfill_selfplay_game_stats(run_dir: Path, epoch: int, selfplay: dict[str, object]) -> None:
     """Fill in any game-stat field the self-play diagnostics left ``None`` with the
     ``.hxr``-derived value, in place. Producer-emitted values always win; this only
-    populates gaps (so dense_cnn rows gain the stats hexgnn emits natively, while
-    hexgnn rows are untouched). Memoized record stats are computed at most once per
+    populates gaps (so dense_cnn rows gain the stats hexgt emits natively, while
+    hexgt rows are untouched). Memoized record stats are computed at most once per
     backfilled epoch per request."""
 
     if not isinstance(selfplay, dict):
@@ -5389,7 +5389,7 @@ def _derive_sub_phase(
 
     # Only derive during an actively-running epoch. Setup stages, finished/stopped
     # runs (no active stage) and non-epoch stages fall through to None, which keeps
-    # stopped runs like hexgnn on their existing label.
+    # stopped runs like hexgt on their existing label.
     if str(events.get("status") or "") != "running":
         return None, None, None
     epoch = events.get("epoch")

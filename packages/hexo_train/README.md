@@ -12,7 +12,7 @@ checkpoint -> diagnostics.
 launched as `python -m hexo_train.cli.train_model configs/hexfield_main_9.toml`
 (and `configs/hexfield_eq_main_1.toml`) by the WSL supervisor scripts. Several
 model lineages register plugins against this package; the parked
-`dense_cnn_restnet`, `hexo_models` (`dense_cnn`/`hexgt`), and `hexgnn` packages
+`dense_cnn_restnet` and `hexo_models` (`dense_cnn`/`hexgt`) packages
 remain plugin-compatible.
 
 ## Design: defaults plus plugin overrides
@@ -70,7 +70,6 @@ Imports IN (who uses this package):
   - `hexfield_eq` (`packages/hexfield_eq/pyproject.toml`) -- ACTIVE
   - `dense_cnn_restnet` (`packages/dense_cnn_restnet/pyproject.toml`) -- parked
   - `dense_cnn`, `hexgt` (`packages/hexo_models/pyproject.toml`) -- legacy/halted
-  - `hexgnn` (`packages/hexgnn/pyproject.toml`) -- parked
 - The active bots load by module path (`[model].module = "hexfield.plugin"` in
   `configs/hexfield_main_9.toml`, `"hexfield_eq.plugin"` in
   `configs/hexfield_eq_main_1.toml`), bypassing entry points.

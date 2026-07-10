@@ -6,9 +6,8 @@
 //! fields to core state.
 //!
 //! Callers: every model lineage's MCTS evaluator cache --
-//! `packages/hexo_models/dense_cnn/rust/src/{mcts.rs,mcts_eval.rs,mcts_tree.rs}`,
-//! `packages/hexo_models/hexgt/rust/src/{mcts_eval.rs,mcts_tree.rs}`, and
-//! `packages/hexgnn/rust/src/{mcts_eval.rs,mcts_tree.rs}`. No Python surface.
+//! `packages/hexo_models/dense_cnn/rust/src/{mcts.rs,mcts_eval.rs,mcts_tree.rs}` and
+//! `packages/hexo_models/hexgt/rust/src/{mcts_eval.rs,mcts_tree.rs}`. No Python surface.
 //!
 //! Stability contract: the hash is process-internal (cache keys only) and is
 //! never persisted, so the mixing constants may change between builds without

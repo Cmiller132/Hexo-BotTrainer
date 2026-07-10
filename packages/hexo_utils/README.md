@@ -10,7 +10,7 @@ see `pyproject.toml`).
 | Subsystem | Role |
 | --- | --- |
 | `.hxr` record codec (`rust/src/records.rs` + `pybridge.rs` + `python/hexo_utils/records.py`) | The repo's cross-package game-record format. Every self-play / evaluation / match path writes `.hxr` through it; the dashboard reads it. |
-| `state_hash` (`rust/src/state_hash.rs`) | Rust-only. Cache key for the parked `hexo_models` (dense_cnn, hexgt) and `hexgnn` MCTS evaluators (`mcts_eval.rs` / `mcts_tree.rs`); the active hexfield/hexfield_eq crates carry their own state hash. |
+| `state_hash` (`rust/src/state_hash.rs`) | Rust-only. Cache key for the parked `hexo_models` (dense_cnn, hexgt) MCTS evaluators (`mcts_eval.rs` / `mcts_tree.rs`); the active hexfield/hexfield_eq crates carry their own state hash. |
 | `samples/` JSON-chunk sample store + `encoding/` D6 contracts | Generic shared-store layer for the `hexo_train` pipeline. The current model plugins set `uses_shared_sample_store=False` and own their own NPZ replay storage, so this layer is exercised through `hexo_train`'s generic path and the test suite. |
 
 ## The .hxr record format
@@ -42,8 +42,8 @@ per-game writer.
 
 Inbound (who uses hexo_utils):
 
-- `hexo_runner.records.record` imports `HexoRecordFile` / `HexoRecordGameWriter` / `HexoRecord` / `HexoRecordPlayer` / `AbortRecord` / magic + schema constants from `hexo_utils.records` and re-exports them. All production `.hxr` IO flows through that path — the active `hexfield` / `hexfield_eq` match and evaluation writers, plus the parked `dense_cnn_restnet` / `hexo_models` / `hexgnn` lineages; `hexo_frontend/web.py` reads them for the dashboard.
-- Rust: `hexo_models` (dense_cnn + hexgt subcrates) and `hexgnn` depend on the `hexo_utils` workspace crate for `use hexo_utils::{hash_state, StateHash}` in their `mcts_eval.rs` / `mcts_tree.rs` (evaluator cache keys); the parked `dense_cnn_restnet` lineage reaches this indirectly through `hexo_models._rust.dense_cnn`. The active hexfield/hexfield_eq crates do not depend on this crate (each carries its own state hash).
+- `hexo_runner.records.record` imports `HexoRecordFile` / `HexoRecordGameWriter` / `HexoRecord` / `HexoRecordPlayer` / `AbortRecord` / magic + schema constants from `hexo_utils.records` and re-exports them. All production `.hxr` IO flows through that path — the active `hexfield` / `hexfield_eq` match and evaluation writers, plus the parked `dense_cnn_restnet` / `hexo_models` lineages; `hexo_frontend/web.py` reads them for the dashboard.
+- Rust: `hexo_models` (dense_cnn + hexgt subcrates) depends on the `hexo_utils` workspace crate for `use hexo_utils::{hash_state, StateHash}` in its `mcts_eval.rs` / `mcts_tree.rs` (evaluator cache keys); the parked `dense_cnn_restnet` lineage reaches this indirectly through `hexo_models._rust.dense_cnn`. The active hexfield/hexfield_eq crates do not depend on this crate (each carries its own state hash).
 - `hexo_train`: `defaults.py` builds the target helpers, `symmetry.py` imports `D6_SIZE` / `D6Symmetry`, `epoch/samples.py` lazily imports the sample-store API on the shared-store path.
 
 Outbound (what hexo_utils depends on):

@@ -8,8 +8,8 @@ the two SealBot variants ("current"/"best") export identical pybind module
 names and cannot coexist in one Python process.
 
 Consumers: every model package's SealBot evaluation harness
-(dense_cnn_restnet/evaluation.py, hexo_models/{dense_cnn,hexgt}/evaluation.py,
-hexgnn/evaluation.py) and packages/hexo_frontend/python/hexo_frontend/web.py
+(dense_cnn_restnet/evaluation.py, hexo_models/{dense_cnn,hexgt}/evaluation.py)
+and packages/hexo_frontend/python/hexo_frontend/web.py
 (Arena opponent + the /api adapters endpoint via discover_sealbot_adapters).
 Covered by tests/test_sealbot_adapter.py.
 """

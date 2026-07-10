@@ -5,7 +5,7 @@ opponents on top of batch mode, mark sessions as evaluation runs so players
 reduce exploration/noise, and own score keeping/strength estimates. That
 shared layer was never built — each model package wrote its own SealBot eval
 harness instead (dense_cnn_restnet/evaluation.py, hexo_models/dense_cnn/
-evaluation.py, hexo_models/hexgt/evaluation.py, hexgnn/evaluation.py).
+evaluation.py, hexo_models/hexgt/evaluation.py).
 """
 
 from __future__ import annotations

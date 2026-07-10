@@ -147,7 +147,7 @@ def _detect_lineage(payload: Any) -> str:
             # ResTNet builder is the superset CNN, so default to it.
             return DENSE_RESTNET
         raise ValueError(f"unrecognized checkpoint model tag {tag!r}")
-    # Graph lineage (hexgt / hexgnn): state dict + arch metadata.
+    # Graph lineage (hexgt): state dict + arch metadata.
     if "model" in payload and "arch" in payload:
         return HEXGT
     raise ValueError(

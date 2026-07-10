@@ -2,10 +2,9 @@
 //!
 //! This small crate root is the ONE Cargo crate / ONE maturin cdylib that
 //! physically hosts every lineage's native accelerator: the dense_cnn and hexgt
-//! source trees (under this package) and the hexgnn tree (in the sibling
-//! `packages/hexgnn`) are `#[path]`-included below and registered as the Python
-//! submodules `hexo_models._rust.{dense_cnn,hexgt,hexgnn}`. Consumers reach
-//! them through each lineage's Python `rust_bridge.py` -- including
+//! source trees (under this package) are `#[path]`-included below and
+//! registered as the Python submodules `hexo_models._rust.{dense_cnn,hexgt}`.
+//! Consumers reach them through each lineage's Python `rust_bridge.py` -- including
 //! `packages/dense_cnn_restnet/python/dense_cnn_restnet/rust_bridge.py`, the
 //! ACTIVE training lineage, which ships no Rust of its own and drives
 //! `_rust.dense_cnn` read-only. Rebuilding this crate therefore changes search
@@ -20,9 +19,7 @@
 // Threat-Space Search core, shared by the dense_cnn and hexgt native MCTS.
 // Pure board geometry over the engine `WindowStore`; no graph/network coupling,
 // so both #[path]-included lineages reach it via `crate::threats_shared` and
-// share one definition of threat/win-now/forced-loss semantics. NOTE: the
-// hexgnn crate included below carries its own forked copy
-// (packages/hexgnn/rust/src/threats.rs) and does NOT use this module.
+// share one definition of threat/win-now/forced-loss semantics.
 mod threats_shared;
 
 #[cfg(feature = "python")]
@@ -32,18 +29,6 @@ mod dense_cnn;
 #[cfg(feature = "python")]
 #[path = "../../hexgt/rust/src/lib.rs"]
 mod hexgt;
-
-// hexgnn: a forked-from-hexgt crate for the sparse-graph/perf rewrite. Compiled
-// into the SAME native module as a separate submodule `hexo_models._rust.hexgnn`
-// so the hexgnn lineage could sparsify/optimize the featurizer independently of
-// the (permanently-halted) hexgt run. The lineage is now PARKED (explored and
-// set aside per HANDOFF.md; see packages/hexgnn/README.md), but it still
-// compiles into every build of this crate. CAUTION: this #[path] reaches
-// outside the package directory -- the build breaks if packages/hexgnn moves,
-// and the sdist must bundle ../hexgnn/rust (special-cased in pyproject.toml).
-#[cfg(feature = "python")]
-#[path = "../../../hexgnn/rust/src/lib.rs"]
-mod hexgnn;
 
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
@@ -70,12 +55,5 @@ pub fn _rust(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
         .getattr("modules")?
         .set_item("hexo_models._rust.hexgt", &hexgt_module)?;
     module.add_submodule(&hexgt_module)?;
-
-    let hexgnn_module = PyModule::new(py, "hexgnn")?;
-    hexgnn::register_pybridge(&hexgnn_module)?;
-    py.import("sys")?
-        .getattr("modules")?
-        .set_item("hexo_models._rust.hexgnn", &hexgnn_module)?;
-    module.add_submodule(&hexgnn_module)?;
     Ok(())
 }

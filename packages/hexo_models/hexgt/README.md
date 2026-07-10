@@ -14,7 +14,6 @@ The code remains live infrastructure:
 
 | Consumer | Use |
 |---|---|
-| `packages/hexgnn` | A stripped-down fork of this package; mirrors its Python modules and compiles into the same native module. |
 | `packages/hexo_frontend/python/hexo_frontend/debug_infer.py` | Dashboard debug worker and Match Arena load hexgt checkpoints through this package. |
 | `packages/dense_cnn_restnet` | Adopted this package's PCR (Playout Cap Randomization) design -- design lineage, no import. |
 | `tests/test_hexgt_*.py` (~30 files) | Contract gates: Rust/Python featurizer byte parity, D6 equivariance, MCTS/PCR/TSS regressions. Run in the WSL venv (the native module is Linux-only). |

@@ -8,7 +8,7 @@ action-ID encoding.
 
 **Status: ACTIVE and load-bearing.** Every model lineage (the live `hexfield`
 / `hexfield_eq` runs, plus the parked `dense_cnn_restnet`,
-`hexo_models/dense_cnn`, `hexo_models/hexgt`, and `hexgnn` lineages), the
+`hexo_models/dense_cnn`, and `hexo_models/hexgt` lineages), the
 runner, the frontend dashboard, and ~60 test files drive it. Repo convention:
 Python callers come through this package rather than re-implementing game
 logic.
@@ -77,8 +77,6 @@ under Windows Python raises `EngineUnavailableError` lazily.
   candidate generation, and tensor encoding.
 - `packages/hexo_utils` -- `state_hash.rs` (MCTS eval-cache keys) and record
   replay tests.
-- `packages/hexgnn/rust` (parked lineage, compiled into the `hexo_models`
-  cdylib via `#[path]` include) also imports it.
 
 **C-ABI capsule protocol:** model accelerator crates do
 `py.import("hexo_engine._rust").state_api_capsule()` at batch-MCTS time to
@@ -89,7 +87,7 @@ use time.
 **Python consumers:** `hexo_runner` (engine adapter + match loop),
 `hexo_frontend` (`web.py`, `debug_infer.py`, `dashboard.py` replay stored
 action-ID sequences and render boards from `to_python_state()`),
-`dense_cnn_restnet` and `hexo_models/*` and `hexgnn` (selfplay / evaluation /
+`dense_cnn_restnet` and `hexo_models/*` (selfplay / evaluation /
 player / MCTS glue), plus many `scripts/_*.py` probes.
 
 **Shared/persisted contracts:**

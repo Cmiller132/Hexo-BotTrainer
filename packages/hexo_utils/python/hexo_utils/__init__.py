@@ -17,7 +17,7 @@ Subsystem status (see README.md for the full map):
   sets `uses_shared_sample_store=False` and owns its own NPZ replay storage.
 
 The Rust crate (`rust/src`) also exports `hash_state` (state_hash.rs), the
-MCTS evaluator-cache key used by the hexo_models and hexgnn crates; it has no
+MCTS evaluator-cache key used by the hexo_models crate; it has no
 Python surface.
 """
 

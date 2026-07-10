@@ -38,6 +38,4 @@ include = [
   { path = "hexgt/python/hexo_models/hexgt/**/*", format = "sdist" },
   { path = "dense_cnn/rust/**/*", format = "sdist" },
   { path = "hexgt/rust/**/*", format = "sdist" },
-  # hexgnn forked crate (compiled into _rust.hexgnn via #[path] in rust/src/lib.rs).
-  { path = "../hexgnn/rust/**/*", format = "sdist" },
 ]

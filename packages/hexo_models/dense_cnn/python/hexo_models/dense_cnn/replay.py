@@ -16,7 +16,7 @@ This module owns the on-disk replay pipeline between self-play and training:
 Callers: `selfplay.py` writes shards, `trainer.py` builds/consumes shuffles and
 owns the train state, `plugin.py` threads `DenseNpzSampleWindow` through the
 generic `hexo_train` epoch loop. The compact shard format itself lives in
-`compact_io.py` and is also read cross-package by `packages/hexgnn` and the
+`compact_io.py` and is also read cross-package by the
 repo-root dashboard bridges; `NPZ_KEYS` names the dense-expanded schema that
 `samples.expand_sample` produces at train read time.
 

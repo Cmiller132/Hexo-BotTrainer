@@ -283,7 +283,7 @@ impl HexoState {
     /// Apply one placement and return an explicit undo delta.
     ///
     /// This is the engine's MCTS hot path: the model crates
-    /// (hexo_models/dense_cnn, hexo_models/hexgt, hexgnn) drive search via
+    /// (hexo_models/dense_cnn, hexo_models/hexgt) drive search via
     /// apply/undo on capsule-cloned states. Note `previous_last_turn` clones a
     /// heap Vec on every placement purely to support `undo`.
     pub fn apply_with_delta(

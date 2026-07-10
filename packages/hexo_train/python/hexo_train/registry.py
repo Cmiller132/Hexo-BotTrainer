@@ -12,7 +12,7 @@ Plugin lookup supports three development/deployment modes:
 
 Registered plugins (entry-point group `hexo_train.models`) include
 `hexfield_eq` (packages/hexfield_eq/pyproject.toml) alongside the parked
-`dense_cnn_restnet`, `dense_cnn`/`hexgt`, and `hexgnn` plugins. In practice
+`dense_cnn_restnet` and `dense_cnn`/`hexgt` plugins. In practice
 the active bots select their plugin via mode 1 (explicit module path):
 `[model].module = "hexfield.plugin"` in configs/hexfield_main_9.toml and
 `"hexfield_eq.plugin"` in configs/hexfield_eq_main_1.toml, bypassing entry

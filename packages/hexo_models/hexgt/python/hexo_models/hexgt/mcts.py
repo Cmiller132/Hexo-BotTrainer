@@ -76,7 +76,7 @@ class HexgtMctsSession:
         # PCR ended up shipping two separate run() calls per full/fast subset
         # (selfplay.run_selfplay_games) instead of the single coalesced call this
         # path was built for. Exercised only by tests/test_hexgt_mcts_per_root.py
-        # and tests/test_hexgt_pcr.py (and mirrored in the hexgnn fork).
+        # and tests/test_hexgt_pcr.py.
         per_root_visits: Sequence[int] | None = None,
         per_root_forced_playout_k: Sequence[float] | None = None,
         per_root_noise: Sequence[bool] | None = None,

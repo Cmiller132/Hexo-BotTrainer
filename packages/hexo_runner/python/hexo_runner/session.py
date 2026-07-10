@@ -3,7 +3,7 @@
 `GameSpec` is the per-game request consumed by `hexo_runner/loop.py` and
 `hexo_runner/modes/match.py`; external constructors include
 packages/hexo_frontend/python/hexo_frontend/web.py (Match-v2 Arena) and the
-hexgt/hexgnn evaluation harnesses. `BatchSpec` feeds
+hexgt evaluation harness. `BatchSpec` feeds
 `hexo_runner/modes/batch.py` (exercised only by
 tests/test_hexo_runner_match_mode.py in practice).
 """

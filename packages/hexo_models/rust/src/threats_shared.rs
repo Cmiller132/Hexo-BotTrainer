@@ -6,10 +6,7 @@
 //! and hexgt lineages: both are `#[path]`-included into this crate (see
 //! `packages/hexo_models/rust/src/lib.rs`) and reach it via
 //! `crate::threats_shared`, so those two share exactly one definition of
-//! "what is a threat / win-now / forced loss". EXCEPTION: the hexgnn crate --
-//! compiled into the SAME native module -- carries its own duplicated fork
-//! (`packages/hexgnn/rust/src/threats.rs`); drift there is NOT caught by the
-//! dense_cnn/hexgt parity test (tests/test_dense_cnn_tss.py). Here it is
+//! "what is a threat / win-now / forced loss". Here it is
 //! consumed by:
 //!   - the tactical-candidate INJECTION at node expansion (mcts_tree.rs),
 //!   - the phase-aware hitting-set leaf value OVERRIDE (mcts.rs),
