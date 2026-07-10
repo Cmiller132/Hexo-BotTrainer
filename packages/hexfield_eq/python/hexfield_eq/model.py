@@ -28,6 +28,8 @@ from torch import nn
 from torch.nn import functional as F
 
 from .constants import (
+    ATTN_CHANNELS,
+    ATTN_ORBIT,
     ATTENTION_HEADS,
     BIAS_CELL_TOKEN_ROW,
     BIAS_DISK_RADIUS,
@@ -52,6 +54,8 @@ from .constants import (
     REG_LANE,
     REG_TOK_READ,
     TRUNK_LAYOUT,
+    TYPE_SIGNATURE,
+    TYPE_SIG,
     VALUE_BINS,
 )
 from .geometry import BIAS_FREE_ROWS, bias_orbit_of_row, rel_bias_index
@@ -63,6 +67,8 @@ from .support import _SUPPORT_RADIUS
 # dense trunk + the Phase-6 A/B ablation). constants.py already rejects the
 # reserved GROUP_ORDER == 6.
 EQUIVARIANT = GROUP_ORDER == 12
+from . import reps as _reps
+
 if EQUIVARIANT:
     from . import equivariant as _eq
 
@@ -483,15 +489,23 @@ class HexNodeConv(nn.Module):
     index-gather from small orbit "base" params (docs/DERIVATION §2), so it
     survives the SERVE_HALF deepcopy and CUDA-graph capture and the reference
     GEMM / fp16 Triton kernels below consume it unchanged. Two kinds:
-      * ``stem`` (C_in == NUM_FEATURES): typed-lift from the 25-plane input rep
-        into the regular fiber (Reynolds projection, §8);
-      * ``regular`` (C_in a regular fiber): the tied HexNodeConv, w_base
-        ``(7, 12, C_orbit_out, C_orbit_in)`` (§2.3).
+      * ``stem`` (C_in == NUM_FEATURES): typed lift from the active versioned
+        input rep into the residual signature (Reynolds projection, §8);
+      * ``regular``: quotient-typed residual convolution, retaining the old
+        ``w_base (7, 12, C_orbit_out, C_orbit_in)`` specialization for a
+        pure-regular input/output pair (§2.3).
     A dense-weight cache keyed on the base-param ``_version`` regenerates the
     frozen-serve weight once rather than per forward.
     """
 
-    def __init__(self, in_channels: int, out_channels: int) -> None:
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        *,
+        in_signature=None,
+        out_signature=None,
+    ) -> None:
         super().__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels
@@ -505,42 +519,119 @@ class HexNodeConv(nn.Module):
             nn.init.uniform_(self.weight, -bound, bound)
             nn.init.uniform_(self.bias, -bound, bound)
             return
-        # --- equivariant tied conv ---
-        if out_channels % GROUP_ORDER != 0:
-            raise ValueError(f"out_channels={out_channels} not a regular fiber")
-        self.corb_out = out_channels // GROUP_ORDER
+        # --- equivariant typed conv ---
+        if out_signature is None:
+            if out_channels % GROUP_ORDER != 0:
+                raise ValueError(
+                    f"out_channels={out_channels} needs an explicit typed signature"
+                )
+            out_signature = (("reg", out_channels // GROUP_ORDER),)
+        self.out_signature = _reps.canonical_signature(out_signature)
+        if _reps.signature_width(self.out_signature) != out_channels:
+            raise ValueError("out_signature width does not match out_channels")
+        self._pure_regular_out = (
+            len(self.out_signature) == 1 and self.out_signature[0][0] == "reg"
+        )
+        self.corb_out = self.out_signature[0][1] if self._pure_regular_out else None
         bound = 1.0 / math.sqrt(7 * in_channels)  # fan-in on the orbit basis
-        if in_channels == NUM_FEATURES:
+        if in_channels == NUM_FEATURES and in_signature is None:
             self.kind = "stem"
+            # The historical generator closes over import-time CHANNELS/C_ORBIT.
+            # Keep it only for the exact process-global pure-regular signature
+            # (D8's bit-compat path). A foreign pure-regular checkpoint rebuilt
+            # inside a differently configured process must use the signature-
+            # parameterized Reynolds lift instead.
+            self._use_production_stem_generator = (
+                self._pure_regular_out
+                and self.out_signature == tuple(TYPE_SIGNATURE)
+                and C_ORBIT == self.corb_out
+            )
             # Free stem params in (7, C_out, NF) layout; forward Reynolds-projects
             # onto the equivariant subspace.
             self.w0 = nn.Parameter(torch.empty(7, out_channels, in_channels))
             nn.init.uniform_(self.w0, -bound, bound)
         else:
             self.kind = "regular"
-            if in_channels % GROUP_ORDER != 0:
-                raise ValueError(f"in_channels={in_channels} not a regular fiber")
-            self.corb_in = in_channels // GROUP_ORDER
-            self.w_base = nn.Parameter(
-                torch.empty(7, GROUP_ORDER, self.corb_out, self.corb_in)
+            if in_signature is None:
+                if in_channels % GROUP_ORDER != 0:
+                    raise ValueError(
+                        f"in_channels={in_channels} needs an explicit typed signature"
+                    )
+                in_signature = (("reg", in_channels // GROUP_ORDER),)
+            self.in_signature = _reps.canonical_signature(in_signature)
+            if _reps.signature_width(self.in_signature) != in_channels:
+                raise ValueError("in_signature width does not match in_channels")
+            self._pure_regular_in = (
+                len(self.in_signature) == 1 and self.in_signature[0][0] == "reg"
             )
-            nn.init.uniform_(self.w_base, -bound, bound)
-            self.register_buffer(
-                "_conv_gather", _eq.conv_gather_index(), persistent=False
-            )
-        self.bias_base = nn.Parameter(torch.empty(self.corb_out))
+            self.corb_in = self.in_signature[0][1] if self._pure_regular_in else None
+            self._pure_regular = self._pure_regular_in and self._pure_regular_out
+            if self._pure_regular:
+                # D8: retain the exact production key, shape, generator and RNG
+                # draw for pure regular fibers.
+                self.w_base = nn.Parameter(
+                    torch.empty(7, GROUP_ORDER, self.corb_out, self.corb_in)
+                )
+                nn.init.uniform_(self.w_base, -bound, bound)
+                self.register_buffer(
+                    "_conv_gather", _eq.conv_gather_index(), persistent=False
+                )
+            else:
+                parameters: dict[str, nn.Parameter] = {}
+                for out_type, mout in self.out_signature:
+                    for in_type, min_ in self.in_signature:
+                        shape = (
+                            _reps.orbit_dimension(in_type, out_type, conv=True),
+                            mout,
+                            min_,
+                        )
+                        parameter = nn.Parameter(torch.empty(shape))
+                        nn.init.uniform_(parameter, -bound, bound)
+                        parameters[f"{out_type}__from__{in_type}"] = parameter
+                self.coefficients = nn.ParameterDict(parameters)
+        self.bias_base = nn.Parameter(
+            torch.empty(_reps.signature_instances(self.out_signature))
+        )
         nn.init.uniform_(self.bias_base, -bound, bound)
         self._cache_v = None
         self._cache_w = None
         self._cache_b = None
 
+    def _weight_params(self) -> tuple[torch.Tensor, ...]:
+        if self.kind == "stem":
+            return (self.w0,)
+        if self._pure_regular:
+            return (self.w_base,)
+        return tuple(self.coefficients.values())
+
     def _base_param(self) -> torch.Tensor:
-        return self.w0 if self.kind == "stem" else self.w_base
+        """Compatibility seam used by the serve cache and later ray-tap merge."""
+
+        return self._weight_params()[0]
+
+    def _coefficient_mapping(self) -> dict[tuple[str, str], torch.Tensor]:
+        return {
+            (out_type, in_type): self.coefficients[f"{out_type}__from__{in_type}"]
+            for out_type, _ in self.out_signature
+            for in_type, _ in self.in_signature
+        }
 
     def _gen_weight(self) -> torch.Tensor:
         if self.kind == "stem":
-            return _eq.gen_stem_weight(self.w0)
-        return _eq.gen_conv_weight(self.w_base, self._conv_gather)
+            if self._use_production_stem_generator:
+                return _eq.gen_stem_weight(self.w0)
+            return _reps.typed_stem_weight(self.w0, self.out_signature)
+        if self._pure_regular:
+            return _eq.gen_conv_weight(self.w_base, self._conv_gather)
+        return _reps.typed_conv_weight(
+            self._coefficient_mapping(), self.in_signature, self.out_signature
+        )
+
+    def _version_key(self) -> tuple:
+        params = (*self._weight_params(), self.bias_base)
+        return tuple(
+            (param._version, param.device, param.dtype) for param in params
+        )
 
     def _materialize(self) -> tuple[torch.Tensor, torch.Tensor]:
         """(weight (7, C_in, C_out), bias (C_out,)); the passthrough params or
@@ -551,13 +642,17 @@ class HexNodeConv(nn.Module):
             return self.weight, self.bias
         grad_on = torch.is_grad_enabled()
         if not grad_on:
-            v = (self._base_param()._version, self.bias_base._version)
+            v = self._version_key()
             if self._cache_w is not None and self._cache_v == v:
                 return self._cache_w, self._cache_b
         weight = self._gen_weight()
-        bias = self.bias_base.repeat(GROUP_ORDER)  # slot-constant (C_out,)
+        bias = (
+            self.bias_base.repeat(GROUP_ORDER)
+            if self._pure_regular_out
+            else _reps.expand_per_instance(self.bias_base, self.out_signature)
+        )
         if not grad_on:
-            self._cache_v = (self._base_param()._version, self.bias_base._version)
+            self._cache_v = self._version_key()
             self._cache_w = weight
             self._cache_b = bias
         return weight, bias
@@ -595,64 +690,115 @@ class HexNodeConv(nn.Module):
 class LayerScale(nn.Module):
     """Per-channel learned residual-branch scale (gamma), init 1e-4.
 
-    Equivariant build: gamma is one C_ORBIT-vector broadcast (tiled) over the 12
-    fiber slots so the scale commutes with the slot permutation (docs/DERIVATION
-    §3)."""
+    Equivariant build: gamma is stored per quotient instance and expanded over
+    that instance's slots, so the scale commutes with every slot permutation
+    (docs/quotient_reps/DERIVATION_QUOTIENT_REPS.md §5)."""
 
-    def __init__(self, channels: int, init: float = 1e-4) -> None:
+    def __init__(self, channels: int, init: float = 1e-4, *, signature=None) -> None:
         super().__init__()
         self.equivariant = EQUIVARIANT
-        width = C_ORBIT if self.equivariant else channels
+        if self.equivariant:
+            if signature is None:
+                if channels % GROUP_ORDER != 0:
+                    raise ValueError("typed LayerScale requires a signature")
+                signature = (("reg", channels // GROUP_ORDER),)
+            self.signature = _reps.canonical_signature(signature)
+            if _reps.signature_width(self.signature) != channels:
+                raise ValueError("LayerScale signature width mismatch")
+            self._pure_regular = (
+                len(self.signature) == 1 and self.signature[0][0] == "reg"
+            )
+            width = _reps.signature_instances(self.signature)
+            self.register_buffer(
+                "_instance_index",
+                _reps.instance_of_channel(self.signature).clone(),
+                persistent=False,
+            )
+        else:
+            width = channels
         self.gamma = nn.Parameter(torch.full((width,), init))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.equivariant:
-            return x * self.gamma.repeat(GROUP_ORDER)
+            scale = (
+                self.gamma.repeat(GROUP_ORDER)
+                if self._pure_regular
+                else self.gamma[self._instance_index]
+            )
+            return x * scale
         return x * self.gamma
 
 
 class GroupAffineNorm(nn.Module):
-    """Equivariant norm: LayerNorm's symmetric mean/var over the full C fiber
-    (invariant under the slot permutation) then an affine tied per C_ORBIT and
-    broadcast over the 12 slots (docs/DERIVATION §3). Exposes ``weight``/``bias``
-    (C,) tiled views + ``eps`` so the fused Triton conv+LN serve kernel consumes
-    it exactly like an ``nn.LayerNorm``."""
+    """Equivariant norm over the full typed fiber.
 
-    def __init__(self, channels: int, eps: float = 1e-5) -> None:
+    LayerNorm's symmetric mean/variance is invariant under every quotient-slot
+    permutation. The affine is stored per instance and expanded to ``(C,)``
+    ``weight``/``bias`` views so the fused Triton conv+LN kernel consumes it
+    exactly like an ``nn.LayerNorm``.
+    """
+
+    def __init__(self, channels: int, eps: float = 1e-5, *, signature=None) -> None:
         super().__init__()
-        if channels % C_ORBIT != 0:
-            raise ValueError(f"norm channels={channels} not a regular fiber")
+        if signature is None:
+            if channels % GROUP_ORDER != 0:
+                raise ValueError("typed norm requires a signature")
+            signature = (("reg", channels // GROUP_ORDER),)
+        self.signature = _reps.canonical_signature(signature)
+        if _reps.signature_width(self.signature) != channels:
+            raise ValueError("GroupAffineNorm signature width mismatch")
+        self._pure_regular = (
+            len(self.signature) == 1 and self.signature[0][0] == "reg"
+        )
         self.channels = channels
-        self.groups = channels // C_ORBIT
         self.eps = eps
-        self.gamma = nn.Parameter(torch.ones(C_ORBIT))
-        self.beta = nn.Parameter(torch.zeros(C_ORBIT))
+        instances = _reps.signature_instances(self.signature)
+        self.gamma = nn.Parameter(torch.ones(instances))
+        self.beta = nn.Parameter(torch.zeros(instances))
+        self.register_buffer(
+            "_instance_index",
+            _reps.instance_of_channel(self.signature).clone(),
+            persistent=False,
+        )
 
     @property
     def weight(self) -> torch.Tensor:
-        return self.gamma.repeat(self.groups)
+        return (
+            self.gamma.repeat(GROUP_ORDER)
+            if self._pure_regular
+            else self.gamma[self._instance_index]
+        )
 
     @property
     def bias(self) -> torch.Tensor:
-        return self.beta.repeat(self.groups)
+        return (
+            self.beta.repeat(GROUP_ORDER)
+            if self._pure_regular
+            else self.beta[self._instance_index]
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         xhat = F.layer_norm(x, (self.channels,), None, None, self.eps)
-        return xhat * self.gamma.repeat(self.groups) + self.beta.repeat(self.groups)
+        return xhat * self.weight + self.bias
 
 
-def _make_norm(channels: int) -> nn.Module:
+def _make_norm(channels: int, *, signature=None) -> nn.Module:
     """LayerNorm(channels) for the passthrough build, GroupAffineNorm for the
     equivariant build."""
 
-    return GroupAffineNorm(channels) if EQUIVARIANT else nn.LayerNorm(channels)
+    return (
+        GroupAffineNorm(channels, signature=signature)
+        if EQUIVARIANT
+        else nn.LayerNorm(channels)
+    )
 
 
-class EquivLinear(nn.Module):
-    """Tied 1x1 group-convolution nn.Linear (docs/DERIVATION §2.4): 12 free
-    ``C_orbit_out x C_orbit_in`` blocks + a slot-constant bias. Materializes the
-    dense ``(C_out, C_in)`` weight each forward (dense cache under no-grad keyed
-    on the base ``_version``). Invisible to the Triton attention kernel.
+class TypedLinear(nn.Module):
+    """Production quotient-typed linear map.
+
+    Mixed signatures store one orbit-coefficient tensor per ordered type pair.
+    The pure-regular specialization deliberately retains production's root-level
+    ``wb``/``bias_base`` names and shapes for the D8 checkpoint gate.
 
     Optional SERVE-FOLD coset perms (:meth:`set_serve_perms`, set once by an
     equivariant attention/refresh owner): the fixed channel permutation the owner
@@ -668,18 +814,40 @@ class EquivLinear(nn.Module):
     its runtime perm would double-apply / cancel. Default (no perms set) is a
     no-op: most EquivLinear uses (MLP fc1/fc2, token reads, heads) carry none."""
 
-    def __init__(self, in_channels: int, out_channels: int) -> None:
+    def __init__(self, in_signature, out_signature) -> None:
         super().__init__()
-        if in_channels % GROUP_ORDER != 0 or out_channels % GROUP_ORDER != 0:
-            raise ValueError("EquivLinear channels must be regular fibers")
-        self.in_channels = in_channels
-        self.out_channels = out_channels
-        self.corb_in = in_channels // GROUP_ORDER
-        self.corb_out = out_channels // GROUP_ORDER
-        self.wb = nn.Parameter(torch.empty(GROUP_ORDER, self.corb_out, self.corb_in))
-        self.bias_base = nn.Parameter(torch.zeros(self.corb_out))
-        nn.init.trunc_normal_(self.wb, std=0.02)
-        self.register_buffer("_gather", _eq.linear_gather_index(), persistent=False)
+        self.in_signature = _reps.canonical_signature(in_signature)
+        self.out_signature = _reps.canonical_signature(out_signature)
+        self.in_channels = _reps.signature_width(self.in_signature)
+        self.out_channels = _reps.signature_width(self.out_signature)
+        self._pure_regular_in = (
+            len(self.in_signature) == 1 and self.in_signature[0][0] == "reg"
+        )
+        self._pure_regular_out = (
+            len(self.out_signature) == 1 and self.out_signature[0][0] == "reg"
+        )
+        self._pure_regular = self._pure_regular_in and self._pure_regular_out
+        self.corb_in = self.in_signature[0][1] if self._pure_regular_in else None
+        self.corb_out = self.out_signature[0][1] if self._pure_regular_out else None
+        if self._pure_regular:
+            self.wb = nn.Parameter(
+                torch.empty(GROUP_ORDER, self.corb_out, self.corb_in)
+            )
+        else:
+            parameters: dict[str, nn.Parameter] = {}
+            for out_type, mout in self.out_signature:
+                for in_type, min_ in self.in_signature:
+                    shape = (_reps.orbit_dimension(in_type, out_type), mout, min_)
+                    parameters[f"{out_type}__from__{in_type}"] = nn.Parameter(
+                        torch.empty(shape)
+                    )
+            self.coefficients = nn.ParameterDict(parameters)
+        self.bias_base = nn.Parameter(
+            torch.zeros(_reps.signature_instances(self.out_signature))
+        )
+        self.reset_parameters()
+        if self._pure_regular:
+            self.register_buffer("_gather", _eq.linear_gather_index(), persistent=False)
         # Serve-fold coset perms (set_serve_perms). NON-persistent so the
         # state_dict key set is UNCHANGED (checkpoint-compat + strict-load key
         # checks depend on it) yet they ride the serve-half deepcopy and
@@ -689,6 +857,39 @@ class EquivLinear(nn.Module):
         self._cache_v = None
         self._cache_w = None
         self._cache_b = None
+
+    def reset_parameters(self, *, weight_std: float = 0.02, bias: float = 0.0) -> None:
+        """Initialize every free weight coefficient and the invariant bias."""
+
+        for parameter in self._weight_params():
+            nn.init.trunc_normal_(parameter, std=weight_std)
+        nn.init.constant_(self.bias_base, bias)
+
+    def _weight_params(self) -> tuple[torch.Tensor, ...]:
+        if self._pure_regular:
+            return (self.wb,)
+        return tuple(self.coefficients.values())
+
+    def _coefficient_mapping(self) -> dict[tuple[str, str], torch.Tensor]:
+        return {
+            (out_type, in_type): self.coefficients[f"{out_type}__from__{in_type}"]
+            for out_type, _ in self.out_signature
+            for in_type, _ in self.in_signature
+        }
+
+    def _version_key(self) -> tuple:
+        params = (*self._weight_params(), self.bias_base)
+        return tuple(
+            (parameter._version, parameter.device, parameter.dtype)
+            for parameter in params
+        )
+
+    def _gen_weight(self) -> torch.Tensor:
+        if self._pure_regular:
+            return _eq.gen_linear_weight(self.wb, self._gather)
+        return _reps.typed_linear_weight(
+            self._coefficient_mapping(), self.in_signature, self.out_signature
+        )
 
     def set_serve_perms(self, out_perm=None, in_perm=None) -> None:
         """Fold the owner's coset perm (docs/DERIVATION §4) into the serve weight
@@ -713,11 +914,15 @@ class EquivLinear(nn.Module):
     def _materialize(self) -> tuple[torch.Tensor, torch.Tensor]:
         grad_on = torch.is_grad_enabled()
         if not grad_on:
-            v = (self.wb._version, self.bias_base._version)
+            v = self._version_key()
             if self._cache_w is not None and self._cache_v == v:
                 return self._cache_w, self._cache_b
-        weight = _eq.gen_linear_weight(self.wb, self._gather)
-        bias = self.bias_base.repeat(GROUP_ORDER)
+        weight = self._gen_weight()
+        bias = (
+            self.bias_base.repeat(GROUP_ORDER)
+            if self._pure_regular_out
+            else _reps.expand_per_instance(self.bias_base, self.out_signature)
+        )
         if not grad_on:
             # Fold the owner's coset perm into the cached weight (docs/DERIVATION
             # §4). This is the ``folded`` half of the owner forward's shared
@@ -729,7 +934,7 @@ class EquivLinear(nn.Module):
                 bias = bias[self._serve_out_perm]
             if self._serve_in_perm is not None:
                 weight = weight[:, self._serve_in_perm]
-            self._cache_v = (self.wb._version, self.bias_base._version)
+            self._cache_v = self._version_key()
             self._cache_w = weight
             self._cache_b = bias
         return weight, bias
@@ -739,16 +944,32 @@ class EquivLinear(nn.Module):
         return F.linear(x, weight, bias)
 
 
+class EquivLinear(TypedLinear):
+    """Backward-compatible pure-regular spelling used by existing callers."""
+
+    def __init__(self, in_channels: int, out_channels: int) -> None:
+        if in_channels % GROUP_ORDER != 0 or out_channels % GROUP_ORDER != 0:
+            raise ValueError("EquivLinear channels must be regular fibers")
+        super().__init__(
+            (("reg", in_channels // GROUP_ORDER),),
+            (("reg", out_channels // GROUP_ORDER),),
+        )
+
+
 class ConvBlock(nn.Module):
     """Post-activation residual block (LayerNorm)."""
 
-    def __init__(self, channels: int) -> None:
+    def __init__(self, channels: int, *, signature=None) -> None:
         super().__init__()
-        self.conv1 = HexNodeConv(channels, channels)
-        self.ln1 = _make_norm(channels)
-        self.conv2 = HexNodeConv(channels, channels)
-        self.ln2 = _make_norm(channels)
-        self.ls = LayerScale(channels)
+        self.conv1 = HexNodeConv(
+            channels, channels, in_signature=signature, out_signature=signature
+        )
+        self.ln1 = _make_norm(channels, signature=signature)
+        self.conv2 = HexNodeConv(
+            channels, channels, in_signature=signature, out_signature=signature
+        )
+        self.ln2 = _make_norm(channels, signature=signature)
+        self.ls = LayerScale(channels, signature=signature)
 
     def forward(
         self, x: torch.Tensor, gather_idx: torch.Tensor, mask: torch.Tensor
@@ -797,29 +1018,54 @@ class RelPosAttention(nn.Module):
     this block's bias table gathered as an additive mask. Two implementations
     selectable via self.impl: 'sdpa' and 'materialized'."""
 
-    def __init__(self, channels: int, heads: int | None = None) -> None:
+    def __init__(
+        self,
+        channels: int,
+        heads: int | None = None,
+        *,
+        signature=None,
+        attn_orbit: int | None = None,
+    ) -> None:
         super().__init__()
         # heads defaults to the module-global ATTENTION_HEADS; an explicit value
         # builds the block at a different head count (the dashboard debug worker
         # reconstructs foreign-arch checkpoints this way — its process env is not
         # the run's env).
         self.heads = ATTENTION_HEADS if heads is None else int(heads)
-        # head_dim derives from this net's width (channels // heads), so a net built
-        # at a non-default width gets the correct per-head dim. At the default width
-        # channels == CHANNELS, so head_dim == HEAD_DIM.
-        self.head_dim = channels // self.heads
-        self.scale = 1.0 / math.sqrt(self.head_dim)
         self.equivariant = EQUIVARIANT
         if self.equivariant:
+            if signature is None:
+                if channels % GROUP_ORDER != 0:
+                    raise ValueError("typed attention requires a residual signature")
+                signature = (("reg", channels // GROUP_ORDER),)
+            self.signature = _reps.canonical_signature(signature)
+            if _reps.signature_width(self.signature) != channels:
+                raise ValueError("attention residual signature width mismatch")
+            self.attn_orbit = (
+                self.signature[0][1]
+                if attn_orbit is None
+                and len(self.signature) == 1
+                and self.signature[0][0] == "reg"
+                else int(ATTN_ORBIT if attn_orbit is None else attn_orbit)
+            )
+            self.attn_signature = (("reg", self.attn_orbit),)
+            self.attn_channels = GROUP_ORDER * self.attn_orbit
+            self.head_dim = self.attn_channels // self.heads
             # Tied group-conv projections (§2.4) + the coset channel permutation
-            # (§4) so the (heads=3, head_dim=4*C_ORBIT) reshape lands each head on
+            # (§4) so the (heads=3, head_dim=4*K_attn) reshape lands each head on
             # one win-axis coset's channels.
-            self.q_proj = EquivLinear(channels, channels)
-            self.k_proj = EquivLinear(channels, channels)
-            self.v_proj = EquivLinear(channels, channels)
-            self.out_proj = EquivLinear(channels, channels)
-            self.register_buffer("_head_perm", _eq.head_perm(), persistent=False)
-            self.register_buffer("_head_perm_inv", _eq.head_perm_inv(), persistent=False)
+            self.q_proj = TypedLinear(self.signature, self.attn_signature)
+            self.k_proj = TypedLinear(self.signature, self.attn_signature)
+            self.v_proj = TypedLinear(self.signature, self.attn_signature)
+            self.out_proj = TypedLinear(self.attn_signature, self.signature)
+            self.register_buffer(
+                "_head_perm", _reps.head_perm(self.attn_orbit).clone(), persistent=False
+            )
+            self.register_buffer(
+                "_head_perm_inv",
+                _reps.head_perm_inv(self.attn_orbit).clone(),
+                persistent=False,
+            )
             # Fold the §4 coset perm into the projections' serve weight cache so
             # the no-grad forward skips the q/k/v/out gathers (out_proj folds the
             # INPUT perm as W[:, head_perm]); the grad path keeps the runtime perm.
@@ -828,15 +1074,19 @@ class RelPosAttention(nn.Module):
             self.v_proj.set_serve_perms(out_perm=self._head_perm)
             self.out_proj.set_serve_perms(in_perm=self._head_perm)
         else:
+            self.attn_channels = channels
+            self.head_dim = channels // self.heads
             self.q_proj = nn.Linear(channels, channels)
             self.k_proj = nn.Linear(channels, channels)
             self.v_proj = nn.Linear(channels, channels)
             self.out_proj = nn.Linear(channels, channels)
+        self.scale = 1.0 / math.sqrt(self.head_dim)
         self.impl = "sdpa"
 
     def forward(self, seq: torch.Tensor, attn_bias) -> torch.Tensor:
-        b, s, c = seq.shape
+        b, s, _ = seq.shape
         h, d = self.heads, self.head_dim
+        w = self.attn_channels
         q = self.q_proj(seq)
         k = self.k_proj(seq)
         v = self.v_proj(seq)
@@ -893,7 +1143,7 @@ class RelPosAttention(nn.Module):
                 out = torch.softmax(scores, dim=-1) @ v
             else:  # pragma: no cover - config validation
                 raise ValueError(f"unknown attention impl: {self.impl}")
-        out = out.transpose(1, 2).reshape(b, s, c)
+        out = out.transpose(1, 2).reshape(b, s, w)
         if self.equivariant and not folded:
             out = out[..., self._head_perm_inv]
         return self.out_proj(out)
@@ -902,19 +1152,33 @@ class RelPosAttention(nn.Module):
 class AttnBlock(nn.Module):
     """Pre-norm transformer block (GELU, MLP hidden width MLP_RATIO * channels)."""
 
-    def __init__(self, channels: int, heads: int | None = None) -> None:
+    def __init__(
+        self,
+        channels: int,
+        heads: int | None = None,
+        *,
+        signature=None,
+        attn_orbit: int | None = None,
+    ) -> None:
         super().__init__()
-        self.ln1 = _make_norm(channels)
-        self.attn = RelPosAttention(channels, heads)
-        self.ln2 = _make_norm(channels)
-        # The MLP hidden width is a regular-rep fiber too: MLP_RATIO*C =
-        # 12*(MLP_RATIO*C_ORBIT) (docs/DERIVATION §2.4). GELU is per-channel so it
-        # commutes with the slot permutation.
-        linear = EquivLinear if EQUIVARIANT else nn.Linear
-        self.fc1 = linear(channels, MLP_RATIO * channels)
-        self.fc2 = linear(MLP_RATIO * channels, channels)
-        self.ls_attn = LayerScale(channels)
-        self.ls_mlp = LayerScale(channels)
+        if EQUIVARIANT and signature is None:
+            signature = (("reg", channels // GROUP_ORDER),)
+        self.ln1 = _make_norm(channels, signature=signature)
+        self.attn = RelPosAttention(
+            channels, heads, signature=signature, attn_orbit=attn_orbit
+        )
+        self.ln2 = _make_norm(channels, signature=signature)
+        # Scale every type multiplicity by MLP_RATIO. GELU is coordinatewise and
+        # therefore commutes with these permutation representations.
+        if EQUIVARIANT:
+            hidden_signature = _reps.scale_signature(signature, MLP_RATIO)
+            self.fc1 = TypedLinear(signature, hidden_signature)
+            self.fc2 = TypedLinear(hidden_signature, signature)
+        else:
+            self.fc1 = nn.Linear(channels, MLP_RATIO * channels)
+            self.fc2 = nn.Linear(MLP_RATIO * channels, channels)
+        self.ls_attn = LayerScale(channels, signature=signature)
+        self.ls_mlp = LayerScale(channels, signature=signature)
 
     def forward(
         self, seq: torch.Tensor, attn_bias: torch.Tensor, seq_mask: torch.Tensor
@@ -938,21 +1202,43 @@ class RayAttention(nn.Module):
     selects 'sdpa' | 'materialized' like RelPosAttention. The A-block flex-pair
     Triton kernel never applies to L blocks."""
 
-    def __init__(self, channels: int) -> None:
+    def __init__(
+        self, channels: int, *, signature=None, attn_orbit: int | None = None
+    ) -> None:
         super().__init__()
         self.heads = RAY_HEADS
-        self.head_dim = channels // self.heads
-        self.scale = 1.0 / math.sqrt(self.head_dim)
         self.equivariant = EQUIVARIANT
-        linear = EquivLinear if EQUIVARIANT else nn.Linear
-        self.q_proj = linear(channels, channels)
-        self.k_proj = linear(channels, channels)
-        self.v_proj = linear(channels, channels)
-        self.out_proj = linear(channels, channels)
         if EQUIVARIANT:
-            self.register_buffer("_head_perm6", _eq.head_perm6(), persistent=False)
+            if signature is None:
+                if channels % GROUP_ORDER != 0:
+                    raise ValueError("typed ray attention requires a signature")
+                signature = (("reg", channels // GROUP_ORDER),)
+            self.signature = _reps.canonical_signature(signature)
+            self.attn_orbit = (
+                self.signature[0][1]
+                if attn_orbit is None
+                and len(self.signature) == 1
+                and self.signature[0][0] == "reg"
+                else int(ATTN_ORBIT if attn_orbit is None else attn_orbit)
+            )
+            if self.attn_orbit % 2:
+                raise ValueError("ray attention requires an even attention orbit")
+            self.attn_signature = (("reg", self.attn_orbit),)
+            self.attn_channels = GROUP_ORDER * self.attn_orbit
+            self.head_dim = self.attn_channels // self.heads
+            self.q_proj = TypedLinear(self.signature, self.attn_signature)
+            self.k_proj = TypedLinear(self.signature, self.attn_signature)
+            self.v_proj = TypedLinear(self.signature, self.attn_signature)
+            self.out_proj = TypedLinear(self.attn_signature, self.signature)
             self.register_buffer(
-                "_head_perm6_inv", _eq.head_perm6_inv(), persistent=False
+                "_head_perm6",
+                _reps.head_perm6(self.attn_orbit).clone(),
+                persistent=False,
+            )
+            self.register_buffer(
+                "_head_perm6_inv",
+                _reps.head_perm6_inv(self.attn_orbit).clone(),
+                persistent=False,
             )
             # Fold the §4/L4 6-head coset perm into the serve weight cache; grad
             # keeps the runtime perm (out_proj folds the input perm W[:, hp6]).
@@ -960,11 +1246,20 @@ class RayAttention(nn.Module):
             self.k_proj.set_serve_perms(out_perm=self._head_perm6)
             self.v_proj.set_serve_perms(out_perm=self._head_perm6)
             self.out_proj.set_serve_perms(in_perm=self._head_perm6)
+        else:
+            self.attn_channels = channels
+            self.head_dim = channels // self.heads
+            self.q_proj = nn.Linear(channels, channels)
+            self.k_proj = nn.Linear(channels, channels)
+            self.v_proj = nn.Linear(channels, channels)
+            self.out_proj = nn.Linear(channels, channels)
+        self.scale = 1.0 / math.sqrt(self.head_dim)
         self.impl = "sdpa"
 
     def forward(self, x: torch.Tensor, attn_bias) -> torch.Tensor:
-        b, n, c = x.shape
+        b, n, _ = x.shape
         h, d = self.heads, self.head_dim
+        w = self.attn_channels
         q = self.q_proj(x)
         k = self.k_proj(x)
         v = self.v_proj(x)
@@ -1001,7 +1296,7 @@ class RayAttention(nn.Module):
                 out = torch.softmax(scores, dim=-1) @ v
             else:  # pragma: no cover - config validation
                 raise ValueError(f"unknown attention impl: {self.impl}")
-        out = out.transpose(1, 2).reshape(b, n, c)
+        out = out.transpose(1, 2).reshape(b, n, w)
         if self.equivariant and not folded:
             out = out[..., self._head_perm6_inv]
         return self.out_proj(out)
@@ -1013,16 +1308,26 @@ class RayAttnBlock(nn.Module):
     lane and A blocks — plan L3). The masked softmax never sees an empty row:
     the diagonal is always live and every live query holds its own key."""
 
-    def __init__(self, channels: int) -> None:
+    def __init__(
+        self, channels: int, *, signature=None, attn_orbit: int | None = None
+    ) -> None:
         super().__init__()
-        self.ln1 = _make_norm(channels)
-        self.attn = RayAttention(channels)
-        self.ln2 = _make_norm(channels)
-        linear = EquivLinear if EQUIVARIANT else nn.Linear
-        self.fc1 = linear(channels, MLP_RATIO * channels)
-        self.fc2 = linear(MLP_RATIO * channels, channels)
-        self.ls_attn = LayerScale(channels)
-        self.ls_mlp = LayerScale(channels)
+        if EQUIVARIANT and signature is None:
+            signature = (("reg", channels // GROUP_ORDER),)
+        self.ln1 = _make_norm(channels, signature=signature)
+        self.attn = RayAttention(
+            channels, signature=signature, attn_orbit=attn_orbit
+        )
+        self.ln2 = _make_norm(channels, signature=signature)
+        if EQUIVARIANT:
+            hidden_signature = _reps.scale_signature(signature, MLP_RATIO)
+            self.fc1 = TypedLinear(signature, hidden_signature)
+            self.fc2 = TypedLinear(hidden_signature, signature)
+        else:
+            self.fc1 = nn.Linear(channels, MLP_RATIO * channels)
+            self.fc2 = nn.Linear(MLP_RATIO * channels, channels)
+        self.ls_attn = LayerScale(channels, signature=signature)
+        self.ls_mlp = LayerScale(channels, signature=signature)
 
     def forward(
         self, x: torch.Tensor, attn_bias, mask: torch.Tensor
@@ -1074,10 +1379,9 @@ def infer_net_kwargs_from_state_dict(sd: dict, meta: dict | None = None) -> dict
     ``in_channels`` (the input feature width, NUM_FEATURES) is now RETURNED and
     passed to the constructor, which validates it against this build's
     ``NUM_FEATURES`` (a clear error instead of a silent stem shape mismatch).
-    GROUP_ORDER / C_ORBIT remain env/import-time constants — a foreign-arch
-    EQUIVARIANT rebuild still needs the matching HEXFIELD_EQ_* env, but the
-    checkpoint meta now carries those values (arch_meta) so a loader can detect and
-    report a mismatch rather than silently mis-shape the tie."""
+    GROUP_ORDER remains import-time. Quotient checkpoints carry canonical
+    ``type_sig``/``attn_orbit`` metadata so foreign-architecture loaders can
+    reconstruct the typed tie rather than guessing it from mixed coefficients."""
 
     kwargs: dict = {}
     meta = meta or {}
@@ -1087,6 +1391,10 @@ def infer_net_kwargs_from_state_dict(sd: dict, meta: dict | None = None) -> dict
         kwargs["attention_heads"] = int(meta["attention_heads"])
     if meta.get("trunk_layout") is not None:
         kwargs["trunk_layout"] = str(meta["trunk_layout"])
+    if meta.get("type_sig") is not None:
+        kwargs["type_sig"] = str(meta["type_sig"])
+    if meta.get("attn_orbit") is not None:
+        kwargs["attn_orbit"] = int(meta["attn_orbit"])
     # Input feature width: meta first (``in_channels`` or its ``feature_width``
     # alias), then the stem shape below.
     if meta.get("in_channels") is not None:
@@ -1128,6 +1436,32 @@ def infer_net_kwargs_from_state_dict(sd: dict, meta: dict | None = None) -> dict
             layout = KNOWN_TRUNK_LAYOUTS.get((max(conv_ids) + 1, max(attn_ids) + 1))
             if layout is not None:
                 kwargs["trunk_layout"] = layout
+    # Quotient architecture: metadata is authoritative. A no-meta fallback is
+    # possible only for old/pure-regular tied checkpoints; mixed coefficient
+    # keys do not identify a unique signature and must fail loudly.
+    mixed_coefficients = any(".coefficients." in key for key in sd)
+    tied_checkpoint = "stem.w0" in sd
+    meta_group_order = meta.get("group_order")
+    if tied_checkpoint and kwargs.get("type_sig") is None:
+        if mixed_coefficients:
+            raise ValueError(
+                "mixed quotient checkpoint is missing meta.type_sig; refusing "
+                "ambiguous state-dict inference"
+            )
+        channels = kwargs.get("channels")
+        if channels is not None and int(channels) % GROUP_ORDER == 0:
+            kwargs["type_sig"] = f"reg:{int(channels) // GROUP_ORDER}"
+    if tied_checkpoint and kwargs.get("attn_orbit") is None:
+        if mixed_coefficients:
+            raise ValueError(
+                "mixed quotient checkpoint is missing meta.attn_orbit; refusing "
+                "ambiguous state-dict inference"
+            )
+        q_weight = sd.get("attn_blocks.0.attn.q_proj.wb")
+        if q_weight is not None and len(getattr(q_weight, "shape", ())) == 3:
+            kwargs["attn_orbit"] = int(q_weight.shape[1])
+        elif meta_group_order == 12 and meta.get("c_orbit") is not None:
+            kwargs["attn_orbit"] = int(meta["c_orbit"])
     # Register lane toggles (Phase R0): meta first; the state-dict key set is
     # affirmative evidence either way (present -> on, absent -> off), so the
     # rebuild is deterministic regardless of the loading process's env.
@@ -1156,13 +1490,15 @@ class HexfieldNet(nn.Module):
 
     def __init__(
         self,
-        channels: int = CHANNELS,
+        channels: int | None = None,
         attention_heads: int | None = None,
         trunk_layout: str | None = None,
         in_channels: int | None = None,
         reg_lane: bool | None = None,
         reg_tok_read: bool | None = None,
         ray_blockers: bool | None = None,
+        type_sig=None,
+        attn_orbit: int | None = None,
     ) -> None:
         super().__init__()
         # channels/attention_heads/trunk_layout default to the module globals
@@ -1177,7 +1513,7 @@ class HexfieldNet(nn.Module):
         #
         # in_channels is the input feature width (== NUM_FEATURES). It is NOT a
         # free shape: the stem lift is import-time bound to this build's
-        # NUM_FEATURES rep (25 planes), so an explicit value that disagrees is a
+        # active NUM_FEATURES rep, so an explicit value that disagrees is a
         # hard error rather than a silent stem shape mismatch at load. Loaders
         # that infer it from a checkpoint (infer_net_kwargs_from_state_dict) pass
         # it so a foreign checkpoint built at a different feature width fails
@@ -1190,7 +1526,48 @@ class HexfieldNet(nn.Module):
                 "at a different feature width; rebuild hexfield_eq at a matching "
                 "NUM_FEATURES to load it."
             )
-        c = channels
+        if EQUIVARIANT:
+            signature = _reps.canonical_signature(
+                TYPE_SIGNATURE if type_sig is None else type_sig
+            )
+            signature_channels = _reps.signature_width(signature)
+            c = signature_channels if channels is None else int(channels)
+            if c != signature_channels:
+                raise ValueError(
+                    f"channels={c} does not match type_sig width {signature_channels}"
+                )
+            pure_regular = len(signature) == 1 and signature[0][0] == "reg"
+            if attn_orbit is None:
+                if type_sig is not None and not pure_regular:
+                    raise ValueError("mixed type_sig requires explicit attn_orbit")
+                k_attn = signature[0][1] if pure_regular else ATTN_ORBIT
+            else:
+                k_attn = int(attn_orbit)
+            if k_attn < 1:
+                raise ValueError("attn_orbit must be positive")
+            if 4 * k_attn not in (16, 32, 64, 96, 128):
+                raise ValueError(
+                    f"4*attn_orbit={4 * k_attn} must be one of "
+                    "{16,32,64,96,128}"
+                )
+            self._type_signature = signature
+            self._type_sig = ",".join(
+                f"{name}:{multiplicity}" for name, multiplicity in signature
+            )
+            self._attn_orbit = k_attn
+            self._attn_signature = (("reg", k_attn),)
+            self._instances = _reps.signature_instances(signature)
+        else:
+            c = CHANNELS if channels is None else int(channels)
+            if type_sig is not None:
+                parsed = _reps.canonical_signature(type_sig)
+                if len(parsed) != 1 or parsed[0][0] != "reg":
+                    raise ValueError("passthrough ignores type_sig; use pure-reg or unset")
+            self._type_signature = None
+            self._type_sig = None
+            self._attn_orbit = None
+            self._attn_signature = None
+            self._instances = c
         heads = ATTENTION_HEADS if attention_heads is None else int(attention_heads)
         # The kwarg twin of the constants.py import check: under the tied build
         # the A-block head count is structural (heads == the 3 win-axis cosets),
@@ -1212,15 +1589,16 @@ class HexfieldNet(nn.Module):
         # rebuilds reproduce the training-time mask semantics.
         self._ray_blockers = RAY_BLOCKERS if ray_blockers is None else bool(ray_blockers)
         n_ray = layout.count("L")
-        if n_ray and c % RAY_HEADS != 0:
+        attn_channels = GROUP_ORDER * self._attn_orbit if EQUIVARIANT else c
+        if n_ray and attn_channels % RAY_HEADS != 0:
             raise ValueError(
-                f"channels={c} not divisible by RAY_HEADS={RAY_HEADS} "
+                f"attention width={attn_channels} not divisible by RAY_HEADS={RAY_HEADS} "
                 "(required for an 'L' trunk layout)"
             )
-        if n_ray and EQUIVARIANT and C_ORBIT % 2 != 0:
+        if n_ray and EQUIVARIANT and self._attn_orbit % 2 != 0:
             raise ValueError(
-                f"C_ORBIT={C_ORBIT} must be even for an 'L' layout (the own/opp "
-                "sub-head split is along the orbit index; head_dim_L = 2*C_ORBIT)"
+                f"attn_orbit={self._attn_orbit} must be even for an 'L' layout "
+                "(the own/opp split rides the regular attention instance index)"
             )
         # Register lane toggles (docs/PLAN_REGISTER_LANE_RAY_ATTENTION.md Phase
         # R0): env defaults, explicit kwargs for cross-arch loaders (the toggles
@@ -1234,24 +1612,48 @@ class HexfieldNet(nn.Module):
                 "reg_tok_read=True requires reg_lane=True (the cells <- tokens "
                 "read is an arm of the register lane)"
             )
-        self.stem = HexNodeConv(NUM_FEATURES, c)
-        self.stem_ln = _make_norm(c)
+        self.stem = HexNodeConv(
+            NUM_FEATURES,
+            c,
+            out_signature=self._type_signature if EQUIVARIANT else None,
+        )
+        self.stem_ln = _make_norm(c, signature=self._type_signature)
         self.conv_blocks = nn.ModuleList(
-            [ConvBlock(c) for _ in range(layout.count("C"))]
+            [
+                ConvBlock(c, signature=self._type_signature)
+                for _ in range(layout.count("C"))
+            ]
         )
         self.attn_blocks = nn.ModuleList(
-            [AttnBlock(c, heads) for _ in range(layout.count("A"))]
+            [
+                AttnBlock(
+                    c,
+                    heads,
+                    signature=self._type_signature,
+                    attn_orbit=self._attn_orbit,
+                )
+                for _ in range(layout.count("A"))
+            ]
         )
         # ray_blocks[i] is the i-th 'L' in layout order; built ONLY for an L
         # layout so C/A layouts keep their state-dict key set.
         if n_ray:
-            self.ray_blocks = nn.ModuleList([RayAttnBlock(c) for _ in range(n_ray)])
+            self.ray_blocks = nn.ModuleList(
+                [
+                    RayAttnBlock(
+                        c,
+                        signature=self._type_signature,
+                        attn_orbit=self._attn_orbit,
+                    )
+                    for _ in range(n_ray)
+                ]
+            )
         n_attn = len(self.attn_blocks)
-        # Summary tokens carry the trivial (invariant) subrep in the equivariant
-        # build: a learned (NUM_TOKENS, C_ORBIT) broadcast (tiled) over the 12
-        # slots (docs/DERIVATION §6). Passthrough keeps the full (NUM_TOKENS, C).
+        # Summary-token seeds carry invariant content per type instance and are
+        # expanded slot-constant into the residual signature. Passthrough keeps
+        # the full (NUM_TOKENS, C) seed.
         self.tokens = nn.Parameter(
-            torch.empty(NUM_TOKENS, C_ORBIT if EQUIVARIANT else c)
+            torch.empty(NUM_TOKENS, self._instances if EQUIVARIANT else c)
         )
         if EQUIVARIANT:
             # Jointly (row, head)-tied relative-position bias (docs/DERIVATION §5):
@@ -1325,7 +1727,7 @@ class HexfieldNet(nn.Module):
                 torch.tensor([h % 2 for h in range(RAY_HEADS)], dtype=torch.long),
                 persistent=False,
             )
-        self.ln_final = _make_norm(c)
+        self.ln_final = _make_norm(c, signature=self._type_signature)
 
         # Heads. Policy heads read cells; value/aux read tokens + the masked
         # mean-pool of cells. In the equivariant build a per-cell covariant head is
@@ -1336,31 +1738,82 @@ class HexfieldNet(nn.Module):
         # the reduction, so the reductions consume invariant vectors.
         # Widened invariant reads (spec D-S20/D-S21): a shared EquivLinear
         # C -> INV_READ_EXPAND*C expansion feeds every group-pooled scalar-head
-        # read block (so each block is INV_READ_EXPAND*C_ORBIT wide, not the
-        # bare C_ORBIT=16 bottleneck); each per-cell policy head gets its own
+        # read block (so each block is INV_READ_EXPAND*n_instances wide); each
+        # per-cell policy head gets its own
         # POLICY_READ_EXPAND*C expansion the same way. The value head reads ALL
         # NUM_TOKENS tokens + the pooled cells + the PRE-ln_final token mean
         # (the register lane's count magnitudes, which ln_final would erase);
         # aux/ml keep their token pairs + pooled + the pre-ln mean.
-        head_linear = EquivLinear if EQUIVARIANT else nn.Linear
-        read_w = INV_READ_EXPAND * (C_ORBIT if EQUIVARIANT else c)
-        pol_w = POLICY_READ_EXPAND * (C_ORBIT if EQUIVARIANT else c)
+        if EQUIVARIANT:
+            self._inv_read_signature = _reps.scale_signature(
+                self._type_signature, INV_READ_EXPAND
+            )
+            self._policy_read_signature = _reps.scale_signature(
+                self._type_signature, POLICY_READ_EXPAND
+            )
+            read_w = _reps.signature_instances(self._inv_read_signature)
+            pol_w = _reps.signature_instances(self._policy_read_signature)
+        else:
+            self._inv_read_signature = None
+            self._policy_read_signature = None
+            read_w = INV_READ_EXPAND * c
+            pol_w = POLICY_READ_EXPAND * c
         red_out = read_w
-        self.inv_read = head_linear(c, INV_READ_EXPAND * c)
-        self.policy_conv = HexNodeConv(c, c)
-        self.policy_expand = head_linear(c, POLICY_READ_EXPAND * c)
+        self.inv_read = (
+            TypedLinear(self._type_signature, self._inv_read_signature)
+            if EQUIVARIANT
+            else nn.Linear(c, INV_READ_EXPAND * c)
+        )
+        self.policy_conv = HexNodeConv(
+            c,
+            c,
+            in_signature=self._type_signature,
+            out_signature=self._type_signature,
+        )
+        self.policy_expand = (
+            TypedLinear(self._type_signature, self._policy_read_signature)
+            if EQUIVARIANT
+            else nn.Linear(c, POLICY_READ_EXPAND * c)
+        )
         self.policy_head = nn.Linear(pol_w, 1)
-        self.opp_policy_conv = HexNodeConv(c, c)
-        self.opp_policy_expand = head_linear(c, POLICY_READ_EXPAND * c)
+        self.opp_policy_conv = HexNodeConv(
+            c,
+            c,
+            in_signature=self._type_signature,
+            out_signature=self._type_signature,
+        )
+        self.opp_policy_expand = (
+            TypedLinear(self._type_signature, self._policy_read_signature)
+            if EQUIVARIANT
+            else nn.Linear(c, POLICY_READ_EXPAND * c)
+        )
         self.opp_policy_head = nn.Linear(pol_w, 1)
         # Auxiliary soft policy head (train-only): its own conv + Linear, mirroring
         # opp_policy. Initialized by _init_weights.
-        self.soft_policy_conv = HexNodeConv(c, c)
-        self.soft_policy_expand = head_linear(c, POLICY_READ_EXPAND * c)
+        self.soft_policy_conv = HexNodeConv(
+            c,
+            c,
+            in_signature=self._type_signature,
+            out_signature=self._type_signature,
+        )
+        self.soft_policy_expand = (
+            TypedLinear(self._type_signature, self._policy_read_signature)
+            if EQUIVARIANT
+            else nn.Linear(c, POLICY_READ_EXPAND * c)
+        )
         self.soft_policy_head = nn.Linear(pol_w, 1)
         # Per-cell Q head (train-only): emitted in forward() only, not in serve.
-        self.cell_q_conv = HexNodeConv(c, c)
-        self.cell_q_expand = head_linear(c, POLICY_READ_EXPAND * c)
+        self.cell_q_conv = HexNodeConv(
+            c,
+            c,
+            in_signature=self._type_signature,
+            out_signature=self._type_signature,
+        )
+        self.cell_q_expand = (
+            TypedLinear(self._type_signature, self._policy_read_signature)
+            if EQUIVARIANT
+            else nn.Linear(c, POLICY_READ_EXPAND * c)
+        )
         self.cell_q_head = nn.Linear(pol_w, VALUE_BINS)
         self.value_reduction = nn.Linear((NUM_TOKENS + 2) * read_w, red_out)
         self.value_head = nn.Linear(red_out, VALUE_BINS)
@@ -1414,21 +1867,40 @@ class HexfieldNet(nn.Module):
 
             n_conv = layout.count("C")
             self.registers = nn.ModuleList(
-                [RegisterRefresh(c, heads) for _ in range(n_conv)]
+                [
+                    RegisterRefresh(
+                        c,
+                        heads,
+                        signature=self._type_signature,
+                        attn_orbit=self._attn_orbit,
+                    )
+                    for _ in range(n_conv)
+                ]
             )
             if self._reg_tok_read:
                 self.tok_reads = nn.ModuleList(
-                    [TokenRead(c) for _ in range(n_conv)]
+                    [TokenRead(c, signature=self._type_signature) for _ in range(n_conv)]
                 )
             # L blocks are non-A blocks too (plan R6): separate ModuleLists so
             # C-block indices stay dense in registers/tok_reads.
             if n_ray:
                 self.registers_l = nn.ModuleList(
-                    [RegisterRefresh(c, heads) for _ in range(n_ray)]
+                    [
+                        RegisterRefresh(
+                            c,
+                            heads,
+                            signature=self._type_signature,
+                            attn_orbit=self._attn_orbit,
+                        )
+                        for _ in range(n_ray)
+                    ]
                 )
                 if self._reg_tok_read:
                     self.tok_reads_l = nn.ModuleList(
-                        [TokenRead(c) for _ in range(n_ray)]
+                        [
+                            TokenRead(c, signature=self._type_signature)
+                            for _ in range(n_ray)
+                        ]
                     )
 
     def _init_weights(self) -> None:
@@ -1461,7 +1933,14 @@ class HexfieldNet(nn.Module):
 
         meta = {
             "group_order": GROUP_ORDER,
-            "c_orbit": C_ORBIT,
+            # Legacy field retained for old readers. For a mixed residual fiber
+            # it denotes the regular-block multiplicity; attn_orbit is the
+            # independent regular attention-interior width.
+            "c_orbit": (
+                dict(self._type_signature).get("reg", 0)
+                if self._equivariant
+                else C_ORBIT
+            ),
             "channels": int(self.stem.out_channels),
             "in_channels": int(self.stem.in_channels),
             "attention_heads": int(self.attn_blocks[0].attn.heads),
@@ -1481,6 +1960,8 @@ class HexfieldNet(nn.Module):
             "support_radius": _SUPPORT_RADIUS,
         }
         if self._equivariant:
+            meta["type_sig"] = self._type_sig
+            meta["attn_orbit"] = self._attn_orbit
             # The bias free_rows reduction the joint (row, head) tie produces.
             meta["bias_reduction"] = "joint_row_head"
             meta["bias_joint_classes"] = self._n_joint_classes
@@ -1881,10 +2362,17 @@ class HexfieldNet(nn.Module):
 
         seq_mask = torch.cat([mask.new_ones(b, NUM_TOKENS), mask], dim=1)
 
-        # Equivariant tokens are stored as (NUM_TOKENS, C_ORBIT) and broadcast
-        # (tiled) over the 12 slots to a slot-constant (invariant) (NUM_TOKENS, C).
+        # Equivariant token seeds are stored per quotient instance and expanded
+        # slot-constant into the dense (NUM_TOKENS, C) residual representation.
         base_tokens = (
-            self.tokens.repeat(1, GROUP_ORDER) if self._equivariant else self.tokens
+            (
+                self.tokens.repeat(1, GROUP_ORDER)
+                if len(self._type_signature) == 1
+                and self._type_signature[0][0] == "reg"
+                else _reps.expand_per_instance(self.tokens, self._type_signature)
+            )
+            if self._equivariant
+            else self.tokens
         )
         tokens = base_tokens.unsqueeze(0).expand(b, -1, -1)
         # D8 (spec D-S27): with the register lane on, the loop-carried token
@@ -2033,10 +2521,19 @@ class HexfieldNet(nn.Module):
     def _inv_read(self, v: torch.Tensor) -> torch.Tensor:
         """One widened fiber-invariant read block (spec D-S20): expand the
         C-fiber to INV_READ_EXPAND*C, then group-pool to an invariant
-        INV_READ_EXPAND*C_ORBIT vector (passthrough: no pool)."""
+        INV_READ_EXPAND*n_instances vector (passthrough: no pool)."""
 
         y = self.inv_read(v)
-        return _eq.group_pool(y) if EQUIVARIANT else y
+        return (
+            (
+                _eq.group_pool(y)
+                if len(self._type_signature) == 1
+                and self._type_signature[0][0] == "reg"
+                else _reps.typed_group_pool(y, self._inv_read_signature)
+            )
+            if EQUIVARIANT
+            else y
+        )
 
     def _value_input(
         self, tokens: torch.Tensor, idx, pooled: torch.Tensor,
@@ -2064,7 +2561,12 @@ class HexfieldNet(nn.Module):
     ) -> torch.Tensor:
         y = expand(F.relu(conv(cells, gather_idx, mask)))
         if EQUIVARIANT:
-            y = _eq.group_pool(y)  # (B, Npad, POLICY_READ_EXPAND*C_ORBIT)
+            y = (
+                _eq.group_pool(y)
+                if len(self._type_signature) == 1
+                and self._type_signature[0][0] == "reg"
+                else _reps.typed_group_pool(y, self._policy_read_signature)
+            )
         return head(y).squeeze(-1) * mask  # (B, Npad); pad rows zeroed
 
     def _cell_q_logits(
@@ -2078,5 +2580,10 @@ class HexfieldNet(nn.Module):
     ) -> torch.Tensor:
         y = expand(F.relu(conv(cells, gather_idx, mask)))
         if EQUIVARIANT:
-            y = _eq.group_pool(y)  # (B, Npad, POLICY_READ_EXPAND*C_ORBIT)
+            y = (
+                _eq.group_pool(y)
+                if len(self._type_signature) == 1
+                and self._type_signature[0][0] == "reg"
+                else _reps.typed_group_pool(y, self._policy_read_signature)
+            )
         return head(y) * mask.unsqueeze(-1)  # (B, Npad, VALUE_BINS); pad rows zeroed

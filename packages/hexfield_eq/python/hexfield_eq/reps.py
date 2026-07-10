@@ -17,15 +17,20 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from .constants import DIRECTIONS
+from .constants import (
+    AXIS_PLANE_BASE,
+    DIRECTIONS,
+    N_AXES,
+    N_AXIS_QUANTITIES,
+    NUM_FEATURES,
+)
 from .geometry import apply_d6
 
 GROUP_ORDER: Final = 12
 TYPE_ORDER: Final = ("reg", "mirror", "point", "axis", "triv")
-INPUT_FEATURES: Final = 25
-AXIS_PLANE_BASE: Final = 11
-N_AXIS_QUANTITIES: Final = 4
-N_AXES: Final = 3
+# Compatibility name retained for Phase-A callers.  The actual input
+# representation is selected at import by HEXFIELD_EQ_FEATURE_VERSION.
+INPUT_FEATURES: Final = NUM_FEATURES
 
 Signature = tuple[tuple[str, int], ...]
 SignatureLike = str | Mapping[str, int] | Sequence[tuple[str, int]]
@@ -314,6 +319,28 @@ def conv_basis_index(in_type: str, out_type: str) -> torch.Tensor:
     return _canonical_orbit_labels((ntaps, nout, nin), transforms)
 
 
+@functools.lru_cache(maxsize=None)
+def _linear_basis_index_on_device(
+    in_type: str, out_type: str, device: torch.device
+) -> torch.Tensor:
+    """Return a device-resident linear-basis label table.
+
+    Basis labels are immutable geometry.  Keeping one copy per device avoids a
+    host-to-device transfer on every typed-weight materialization.
+    """
+
+    return linear_basis_index(in_type, out_type).to(device=device)
+
+
+@functools.lru_cache(maxsize=None)
+def _conv_basis_index_on_device(
+    in_type: str, out_type: str, device: torch.device
+) -> torch.Tensor:
+    """Return a device-resident conv-basis label table."""
+
+    return conv_basis_index(in_type, out_type).to(device=device)
+
+
 def orbit_dimension(in_type: str, out_type: str, *, conv: bool = False) -> int:
     """Dimension from diagonal-action orbit count (derivation sections 2–3)."""
 
@@ -538,7 +565,9 @@ def typed_linear_weight(
     )
     for out_type, mout, out_start, out_stop in out_blocks:
         for in_type, min_, in_start, in_stop in in_blocks:
-            labels = linear_basis_index(in_type, out_type).to(exemplar.device)
+            labels = _linear_basis_index_on_device(
+                in_type, out_type, exemplar.device
+            )
             coefficient = _coefficient(
                 coefficients,
                 out_type,
@@ -570,7 +599,9 @@ def typed_conv_weight(
     )
     for out_type, mout, out_start, out_stop in out_blocks:
         for in_type, min_, in_start, in_stop in in_blocks:
-            labels = conv_basis_index(in_type, out_type).to(exemplar.device)
+            labels = _conv_basis_index_on_device(
+                in_type, out_type, exemplar.device
+            )
             coefficient = _coefficient(
                 coefficients,
                 out_type,
@@ -617,7 +648,12 @@ def production_conv_coefficients(w_base: torch.Tensor) -> torch.Tensor:
 
 @functools.lru_cache(maxsize=None)
 def input_rep_action(g: int) -> tuple[int, ...]:
-    """Forward action on the real 25 input planes (13 scalars + 4 axis reps)."""
+    """Forward action on the active versioned input-plane representation.
+
+    Version 1 is ``13*triv + 4*axis`` over 25 physical planes; version 2 is
+    ``16*triv + 10*axis`` over 46.  In both maps the axis modules start at
+    :data:`AXIS_PLANE_BASE`, while every plane outside that block is scalar.
+    """
 
     if not 0 <= g < GROUP_ORDER:
         raise ValueError(f"D6 element out of range: {g}")
@@ -643,7 +679,7 @@ def input_rep_matrix(
     dtype: torch.dtype = torch.float64,
     device: torch.device | str | None = None,
 ) -> torch.Tensor:
-    """Dense permutation matrix for the typed 25-plane input action."""
+    """Dense permutation matrix for the active typed input action."""
 
     action = input_rep_action(g)
     matrix = torch.zeros((INPUT_FEATURES, INPUT_FEATURES), dtype=dtype, device=device)
@@ -654,10 +690,11 @@ def input_rep_matrix(
 
 
 def typed_stem_weight(w0: torch.Tensor, out_signature: SignatureLike) -> torch.Tensor:
-    """Reynolds-project a free stem into ``(7, 25, C_out)`` dense layout.
+    """Reynolds-project a free stem into ``(7, NUM_FEATURES, C_out)`` layout.
 
-    ``w0`` has shape ``(7, C_out, 25)``.  The averaging order matches the
-    production stem lift, while the output action can be any typed signature.
+    ``w0`` has shape ``(7, C_out, NUM_FEATURES)`` for the active feature
+    version.  The averaging order matches the production stem lift, while the
+    output action can be any typed signature.
     """
 
     cout = signature_width(out_signature)
@@ -680,27 +717,54 @@ def typed_stem_weight(w0: torch.Tensor, out_signature: SignatureLike) -> torch.T
     return (result / GROUP_ORDER).transpose(1, 2).contiguous()
 
 
-def instance_of_channel(signature: SignatureLike) -> torch.Tensor:
-    """Map each channel to its canonical type-instance index."""
+@functools.lru_cache(maxsize=None)
+def _instance_of_channel_cached(signature: Signature) -> torch.Tensor:
+    """Cached CPU implementation for :func:`instance_of_channel`."""
 
     result: list[int] = []
     instance_offset = 0
-    for type_name, multiplicity in canonical_signature(signature):
+    for type_name, multiplicity in signature:
         for _slot in range(slots(type_name)):
             result.extend(instance_offset + instance for instance in range(multiplicity))
         instance_offset += multiplicity
     return torch.tensor(result, dtype=torch.long)
 
 
+@functools.lru_cache(maxsize=None)
+def _instance_of_channel_on_device(
+    signature: Signature, device: torch.device
+) -> torch.Tensor:
+    """Return a device-resident channel-to-instance label table."""
+
+    return _instance_of_channel_cached(signature).to(device=device)
+
+
+def instance_of_channel(
+    signature: SignatureLike, *, device: torch.device | str | None = None
+) -> torch.Tensor:
+    """Map each channel to its canonical type-instance index.
+
+    The default remains the cached CPU table used by Phase A.  Passing a
+    device returns a cached resident copy, which is useful for repeated
+    per-instance expansions in production typed layers.
+    """
+
+    canonical = canonical_signature(signature)
+    if device is None:
+        return _instance_of_channel_cached(canonical)
+    return _instance_of_channel_on_device(canonical, torch.device(device))
+
+
 def expand_per_instance(values: torch.Tensor, signature: SignatureLike) -> torch.Tensor:
     """Expand a final ``n_instances`` axis to the dense typed channel axis."""
 
-    expected = signature_instances(signature)
+    canonical = canonical_signature(signature)
+    expected = sum(multiplicity for _, multiplicity in canonical)
     if values.shape[-1] != expected:
         raise ValueError(
             f"per-instance axis has width {values.shape[-1]}, expected {expected}"
         )
-    index = instance_of_channel(signature).to(values.device)
+    index = _instance_of_channel_on_device(canonical, values.device)
     return values.index_select(-1, index)
 
 
@@ -758,6 +822,40 @@ def head_perm_inv(orbit_width: int) -> torch.Tensor:
     """Inverse of :func:`head_perm`."""
 
     permutation = head_perm(orbit_width)
+    inverse = torch.empty_like(permutation)
+    inverse[permutation] = torch.arange(permutation.numel())
+    return inverse
+
+
+@functools.lru_cache(maxsize=None)
+def head_perm6(orbit_width: int) -> torch.Tensor:
+    """Coset/side-group a regular fiber for six ray heads at arbitrary ``K``.
+
+    The own/opp split rides the regular-instance index, never the four slots
+    inside an axis coset.  Thus each head contains four coset slots times half
+    of the orbit instances and ``orbit_width`` must be even.
+    """
+
+    if orbit_width < 1:
+        raise ValueError("attention orbit width must be positive")
+    if orbit_width % 2:
+        raise ValueError("six-head attention requires an even orbit width")
+    half = orbit_width // 2
+    order = [
+        slot * orbit_width + side * half + instance
+        for coset in quotient_cosets("axis")
+        for side in range(2)
+        for slot in coset
+        for instance in range(half)
+    ]
+    return torch.tensor(order, dtype=torch.long)
+
+
+@functools.lru_cache(maxsize=None)
+def head_perm6_inv(orbit_width: int) -> torch.Tensor:
+    """Inverse of :func:`head_perm6`."""
+
+    permutation = head_perm6(orbit_width)
     inverse = torch.empty_like(permutation)
     inverse[permutation] = torch.arange(permutation.numel())
     return inverse
@@ -831,6 +929,28 @@ class TypedLinear(nn.Module):
         return F.linear(x, self.materialize_weight(), bias)
 
 
+def _gather_hex_taps(x: torch.Tensor, nbr: torch.Tensor) -> torch.Tensor:
+    """Gather center plus six neighbours into ``(B, N, 7, C)``.
+
+    Negative neighbour rows select one appended all-zero sentinel row.  This is
+    the common reference gather used by the Phase-A typed conv and stem.
+    """
+
+    if (
+        x.ndim != 3
+        or nbr.ndim != 3
+        or nbr.shape[:2] != x.shape[:2]
+        or nbr.shape[2] != 6
+    ):
+        raise ValueError("expected x(B,N,C) and nbr(B,N,6)")
+    batch, nodes, channels = x.shape
+    padded = torch.cat((x, x.new_zeros((batch, 1, channels))), dim=1)
+    safe_nbr = torch.where(nbr >= 0, nbr, torch.full_like(nbr, nodes)).long()
+    batch_index = torch.arange(batch, device=x.device).view(batch, 1, 1)
+    neighbors = padded[batch_index, safe_nbr]
+    return torch.cat((x.unsqueeze(2), neighbors), dim=2)
+
+
 class TypedConv(nn.Module):
     """Seven-tap hex convolution tied by quotient triple-orbit bases."""
 
@@ -885,16 +1005,10 @@ class TypedConv(nn.Module):
     def forward(self, x: torch.Tensor, nbr: torch.Tensor) -> torch.Tensor:
         """Apply the convolution to ``x(B,N,C)`` and row-local neighbours."""
 
-        if x.ndim != 3 or nbr.ndim != 3 or nbr.shape[:2] != x.shape[:2] or nbr.shape[2] != 6:
-            raise ValueError("expected x(B,N,C) and nbr(B,N,6)")
+        gathered = _gather_hex_taps(x, nbr)
         batch, nodes, cin = x.shape
         if cin != signature_width(self.in_signature):
             raise ValueError("input width does not match TypedConv signature")
-        padded = torch.cat((x, x.new_zeros((batch, 1, cin))), dim=1)
-        safe_nbr = torch.where(nbr >= 0, nbr, torch.full_like(nbr, nodes)).long()
-        batch_index = torch.arange(batch, device=x.device).view(batch, 1, 1)
-        neighbors = padded[batch_index, safe_nbr]
-        gathered = torch.cat((x.unsqueeze(2), neighbors), dim=2)
         weight = self.materialize_weight()
         result = gathered.reshape(batch, nodes, 7 * cin) @ weight.reshape(
             7 * cin, signature_width(self.out_signature)
@@ -905,7 +1019,7 @@ class TypedConv(nn.Module):
 
 
 class TypedStem(nn.Module):
-    """Reynolds-lifted seven-tap stem from the real 25-plane input rep."""
+    """Reynolds-lifted seven-tap stem from the active input rep."""
 
     out_signature: Signature
 
@@ -931,23 +1045,17 @@ class TypedStem(nn.Module):
             self.register_parameter("bias_base", None)
 
     def materialize_weight(self) -> torch.Tensor:
-        """Generate the dense ``(7, 25, C_out)`` projected stem weight."""
+        """Generate the dense ``(7, NUM_FEATURES, C_out)`` stem weight."""
 
         return typed_stem_weight(self.w0, self.out_signature)
 
     def forward(self, x: torch.Tensor, nbr: torch.Tensor) -> torch.Tensor:
-        """Apply the projected seven-tap stem to 25-plane node features."""
+        """Apply the projected stem to active-version node features."""
 
-        if x.ndim != 3 or nbr.ndim != 3 or nbr.shape[:2] != x.shape[:2] or nbr.shape[2] != 6:
-            raise ValueError("expected x(B,N,25) and nbr(B,N,6)")
+        gathered = _gather_hex_taps(x, nbr)
         batch, nodes, features = x.shape
         if features != INPUT_FEATURES:
             raise ValueError(f"stem requires {INPUT_FEATURES} input planes")
-        padded = torch.cat((x, x.new_zeros((batch, 1, features))), dim=1)
-        safe_nbr = torch.where(nbr >= 0, nbr, torch.full_like(nbr, nodes)).long()
-        batch_index = torch.arange(batch, device=x.device).view(batch, 1, 1)
-        neighbors = padded[batch_index, safe_nbr]
-        gathered = torch.cat((x.unsqueeze(2), neighbors), dim=2)
         weight = self.materialize_weight()
         result = gathered.reshape(batch, nodes, 7 * features) @ weight.reshape(
             7 * features, signature_width(self.out_signature)

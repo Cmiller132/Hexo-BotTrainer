@@ -61,15 +61,39 @@ def save_checkpoint(path: Path, *, model: HexfieldNet, optimizer, epoch: int, ex
 
 def load_into(model: HexfieldNet, payload: dict, *, optimizer=None) -> dict:
     state = payload["model"]
+    meta = payload.get("meta") or {}
     # The featurizer support radius is part of the input contract (spec
     # D-S26): a checkpoint trained at a different radius would silently shift
     # the input distribution, so a recorded mismatch fails loudly.
-    meta_radius = (payload.get("meta") or {}).get("support_radius")
+    meta_radius = meta.get("support_radius")
     if meta_radius is not None and int(meta_radius) != _SUPPORT_RADIUS:
         raise ValueError(
             f"checkpoint support_radius={int(meta_radius)} != this build's "
             f"HEXFIELD_EQ_SUPPORT_RADIUS={_SUPPORT_RADIUS}; refusing the load"
         )
+    # Quotient-fiber shape and attention width are load-bearing architecture
+    # semantics.  Older/live checkpoints predate these fields, so absence keeps
+    # the legacy pure-regular fallback; a recorded value must match exactly.
+    quotient_meta_keys = ("type_sig", "attn_orbit")
+    quotient_meta_present = tuple(key in meta for key in quotient_meta_keys)
+    if any(quotient_meta_present) and not all(quotient_meta_present):
+        missing = [
+            key
+            for key, present in zip(quotient_meta_keys, quotient_meta_present)
+            if not present
+        ]
+        raise ValueError(
+            "checkpoint quotient metadata is incomplete; missing "
+            + ", ".join(missing)
+        )
+    if all(quotient_meta_present):
+        model_arch = model.arch_meta()
+        for key in quotient_meta_keys:
+            if key in meta and meta[key] != model_arch.get(key):
+                raise ValueError(
+                    f"checkpoint {key}={meta[key]!r} != built model's "
+                    f"{key}={model_arch.get(key)!r}; refusing the load"
+                )
     expected = set(model.state_dict().keys())
     got = set(state.keys())
     if expected != got:
