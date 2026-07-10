@@ -84,8 +84,10 @@ POOL PERSISTENCE FORMAT (``diagnostics/eval_pool.json``) — see
   }
 
 Edges are append-only so the pool is a full audit trail; the BT fit consumes the
-``(a, b, wins_a, wins_b, weight)`` columns. Re-running the same epoch appends a
-fresh batch (idempotency is the caller's concern).
+``(a, b, wins_a, wins_b, weight)`` columns. Re-running an already-pooled epoch is
+idempotent: Stage D skips any (epoch, a, b) row already present (a same-epoch
+rerun replays the same CRN seed base, so appending it would double-count
+near-duplicate games and falsely tighten every pooled CI).
 
 This module imports torch transitively (via eval_arena) and runs GPU search. The
 standalone runner (scripts/_hexfield_run_multistage_eval.py) invokes it off the
@@ -195,6 +197,23 @@ def _eval_virtual_batch_size(cfg: MultiStageEvalSection, full_cfg: HexfieldConfi
     if v is not None:
         return int(v)
     return int(full_cfg.selfplay.virtual_batch_size)
+
+
+# Per-epoch CRN seed spacing. All seed streams inside one match span well under
+# ~3e8 (opening/greedy offsets 7M/13M/19M + rounds*1_000_003 + pair indices), and
+# the checkpoint top-up adds 1_000_000 + opp.epoch, so 1e9 spacing keeps every
+# epoch's streams disjoint. Without this, every epoch replayed seed base 0:
+# hexfield openings re-diversified only because the net had changed, and Strix's
+# opening noise (seeded from the CRN pair seed) replayed IDENTICALLY across
+# epochs — so pooled anchor edges were partially correlated across epochs and
+# the compounding fixed-anchor CIs were optimistic.
+_EPOCH_SEED_SPACING = 1_000_000_000
+
+
+def _epoch_seed_base(epoch_tag: int | None) -> int:
+    """Per-epoch CRN seed base so different epochs play decorrelated games."""
+
+    return int(epoch_tag or 0) * _EPOCH_SEED_SPACING
 
 
 # --------------------------------------------------------------------------- #
@@ -1122,6 +1141,9 @@ def _stage_b_sprt(
         # games played under two different searchers into one edge.
         divergence_overrides_b=divergence_overrides_b,
         diagnostics_dir=str(diagnostics_dir),
+        # Epoch-folded CRN base so successive epochs play decorrelated games
+        # (the Stage-C top-up adds its own 1M+epoch offset on the same base).
+        game_seed_base=_epoch_seed_base(roster.candidate_epoch),
     )
     score = match.get("score") or {}
     wins = int(score.get("a_wins", 0))
@@ -1349,6 +1371,10 @@ def _play_sealbot_opponent(
             # candidate_search_profile provenance below records which regime
             # measured each pooled SealBot edge.
             diagnostics_dir=str(diagnostics_dir),
+            # Epoch-folded CRN base: seed base 0 every epoch replayed the same
+            # opening-sampling streams; distinct bases decorrelate the pooled
+            # SealBot edges across epochs.
+            game_seed_base=_epoch_seed_base(roster.candidate_epoch),
         )
     except Exception as exc:  # noqa: BLE001 — fail-open at the opponent boundary.
         # Broad by intent: a missing hexo_engine raises ModuleNotFoundError, an
@@ -1472,6 +1498,11 @@ def _play_strix_opponent(
             strix_m_actions=cfg.opponents.strix_m,
             strix_device=cfg.opponents.strix_device,
             diagnostics_dir=str(diagnostics_dir),
+            # Epoch-folded CRN base. Strix's opening noise is seeded from the
+            # per-game CRN seed, so a fixed base replayed the SAME Strix noise
+            # draws every epoch; distinct bases decorrelate the pooled Strix
+            # anchor edges across epochs.
+            game_seed_base=_epoch_seed_base(roster.candidate_epoch),
         )
     except Exception as exc:  # noqa: BLE001 — fail-open at the opponent boundary.
         # Broad by intent: an unbuilt hexo_rs wheel / missing hexo_engine raises
@@ -1612,9 +1643,12 @@ def _play_checkpoint_opponent(
             # this-run lineage (symmetric with the candidate).
             divergence_overrides_b=divergence_overrides_b,
             diagnostics_dir=str(diagnostics_dir),
-            # Offset the topup's CRN seeds from the SPRT batch so the added pairs
-            # are distinct openings.
-            game_seed_base=1_000_000 + (opp.epoch or 0),
+            # Epoch-folded CRN base, offset from the SPRT batch (played at the
+            # bare epoch base) and per-opponent so the added pairs are distinct
+            # openings within the epoch AND decorrelated across epochs.
+            game_seed_base=(
+                _epoch_seed_base(roster.candidate_epoch) + 1_000_000 + (opp.epoch or 0)
+            ),
         )
         match = _merge_matches(match, fresh) if match is not None else fresh
     if match is None:
@@ -1813,10 +1847,24 @@ def _stage_d_pool(
     if pool_doc is None:
         pool_doc = _load_pool(pool_path)
 
-    # Append THIS epoch's edges (effective counts + weight + provenance).
+    # Append THIS epoch's edges (effective counts + weight + provenance). An
+    # edge whose (epoch, a, b) is already pooled is SKIPPED, not re-appended: a
+    # rerun of an already-pooled epoch replays the same CRN seed base, so its
+    # games are near-duplicates and appending them would double-count the epoch
+    # and silently tighten every pooled CI (parts-path resume semantics).
     epoch_tag = roster.candidate_epoch if roster.candidate_epoch is not None else 0
+    duplicate_edges_skipped: list[dict[str, str]] = []
     if append:
         for e in edges:
+            bt: eval_stats.BTEdge = e["bt"]
+            if _epoch_edge_exists(pool_doc, epoch_tag, bt.a, bt.b):
+                duplicate_edges_skipped.append({"a": bt.a, "b": bt.b})
+                _EVAL_LOG.warning(
+                    "pool already holds an epoch-%s edge %s vs %s; skipping "
+                    "duplicate append (rerun of an already-pooled epoch)",
+                    epoch_tag, bt.a, bt.b,
+                )
+                continue
             pool_doc["edges"].append(_edge_pool_row(epoch_tag, e))
 
     bt_edges = _bt_edges_from_pool(pool_doc)
@@ -1925,7 +1973,6 @@ def _stage_d_pool(
             and roster.champion.label in fit.players
         ):
             d = fit.diff(roster.candidate_label, roster.champion.label)
-            lo, hi = fit.diff_ci(roster.candidate_label, roster.champion.label)
             se = fit.se_diff(roster.candidate_label, roster.champion.label)
             # One edge gates by default, so alpha is unadjusted unless
             # bonferroni_correction is set.
@@ -1934,8 +1981,14 @@ def _stage_d_pool(
                 if cfg.bonferroni_correction
                 else cfg.primary_alpha
             )
-            # Verdict from the difference CI, using the configured
-            # promote/regress thresholds (both default to 0).
+            # Verdict from the difference CI computed AT the configured alpha
+            # (z from primary_alpha / the Bonferroni split), so the alpha knob
+            # is live rather than report-only, using the configured
+            # promote/regress thresholds (both default to 0). The fixed-95%
+            # interval is reported alongside as a stable descriptive.
+            z = eval_stats.z_for_alpha(alpha)
+            lo, hi = fit.diff_ci(roster.candidate_label, roster.champion.label, z=z)
+            lo95, hi95 = fit.diff_ci(roster.candidate_label, roster.champion.label)
             label = _verdict_with_thresholds(
                 lo, hi,
                 promote_elo=cfg.promote_elo_threshold,
@@ -1947,7 +2000,12 @@ def _stage_d_pool(
                     "candidate": roster.candidate_label,
                     "champion": roster.champion.label,
                     "elo_diff": round(d, 1),
-                    "elo_diff_ci95": [round(lo, 1), round(hi, 1)],
+                    # The verdict-driving CI at the configured alpha.
+                    "elo_diff_ci": [round(lo, 1), round(hi, 1)],
+                    "ci_z": round(z, 4),
+                    # Fixed-95% descriptive interval (equals elo_diff_ci at the
+                    # default alpha=0.05); kept for dashboards/readers.
+                    "elo_diff_ci95": [round(lo95, 1), round(hi95, 1)],
                     "se_elo": round(se, 1),
                     "promote_threshold_elo": cfg.promote_elo_threshold,
                     "regress_threshold_elo": cfg.regress_elo_threshold,
@@ -2058,6 +2116,7 @@ def _stage_d_pool(
                 "pool_path": str(pool_path),
                 "pool_edges_total": len(pool_doc["edges"]),
                 "bt_edges_aggregated": len(bt_edges),
+                "duplicate_edges_skipped": duplicate_edges_skipped,
                 "anchor": anchor_label,
                 "converged": bool(fit is not None),
                 "sealbot_substituted": sealbot_substituted,
@@ -2888,6 +2947,9 @@ def run_multistage_eval_concurrent(
                 # this-run lineage keeps the candidate's (self-play) profile.
                 divergence_overrides_by_opponent=foreign_ov or None,
                 diagnostics_dir=str(diag_dir),
+                # Epoch-folded CRN base so successive epochs play decorrelated
+                # games (seed base 0 every epoch replayed the same streams).
+                game_seed_base=_epoch_seed_base(roster.candidate_epoch),
             )
         except Exception as exc:  # noqa: BLE001 — fail-soft at the batch boundary.
             multi_error = f"{type(exc).__name__}: {exc}"

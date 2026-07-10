@@ -18,8 +18,10 @@ Design notes:
 2. Paired games (same opening, swapped seats) are treated with the PAIR as the
    unit of replication. Win rates use pair-level SEs (``N_pairs`` units,
    :func:`paired_winrate`), and the BT likelihood is fed effective counts that
-   deflate the sample size relative to ``2*N_pairs`` independent games. See
-   :func:`pentanomial_summary` and :func:`effective_counts`.
+   deflate the sample size relative to ``2*N_pairs`` independent games; the
+   design effect is shrunk toward 1 for small samples (it is estimated from
+   the same few pairs it deflates). See :func:`pentanomial_summary` and
+   :func:`effective_counts`.
 
 3. The primary hypothesis per verdict is candidate ``L`` vs champion ``B``,
    tested via the BT difference CI ``r_L - r_B`` using the full covariance
@@ -41,6 +43,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from statistics import NormalDist
 
 import numpy as np
 
@@ -197,7 +200,9 @@ def paired_winrate(pair_scores: "list[float] | np.ndarray") -> PairedResult:
     return PairedResult(n_pairs, _as5(penta), mean, se, var)
 
 
-def effective_counts(result: PairedResult) -> tuple[float, float, float]:
+def effective_counts(
+    result: PairedResult, *, prior_pairs: float = 16.0
+) -> tuple[float, float, float]:
     """Effective ``(wins, losses, n_eff)`` for feeding paired data to the BT fit.
 
     The BT likelihood (:func:`bradley_terry`) takes per-edge ``(wins, losses)``
@@ -209,6 +214,19 @@ def effective_counts(result: PairedResult) -> tuple[float, float, float]:
     deff > 1 (positive within-pair correlation) shrinks ``n_eff`` below
     ``2 * n_pairs``. deff < 1 (anti-correlated pairs) is allowed but ``n_eff``
     is capped at the physical game count.
+
+    SMALL-SAMPLE SHRINKAGE: the design effect is estimated from the same few
+    pairs it then deflates, so at typical match sizes (16-48 pairs) the raw
+    estimate swings ~+-30% on luck alone (variance-of-variance). The raw
+    ``deff_hat`` is therefore blended toward the seat-swap design's null
+    (deff = 1, independent games) with a prior worth ``prior_pairs`` pairs of
+    evidence:
+
+        deff = (n_pairs * deff_hat + prior_pairs) / (n_pairs + prior_pairs)
+
+    At 16 pairs the measurement gets half weight, at 48 pairs 75%, converging
+    to the raw estimate as pairs accumulate. ``prior_pairs=0`` disables the
+    shrinkage entirely (raw ``deff_hat``).
     """
 
     if result.n_pairs <= 0 or not math.isfinite(result.win_rate):
@@ -225,7 +243,9 @@ def effective_counts(result: PairedResult) -> tuple[float, float, float]:
         # games the per-pair mean variance is var_binom / 2, so the design
         # effect on the pair mean is var_drift / (var_binom / 2), and the
         # effective independent game count is the physical count / deff.
-        deff = (result.var_drift / (var_binom / 2.0)) if result.var_drift > 0 else 1.0
+        deff_hat = result.var_drift / (var_binom / 2.0)
+        k = max(float(prior_pairs), 0.0)
+        deff = (result.n_pairs * deff_hat + k) / (result.n_pairs + k)
         deff = max(deff, 1e-6)
         n_eff = n_games / deff
         n_eff = min(n_eff, n_games)  # cap at games played
@@ -673,6 +693,20 @@ def bonferroni_alpha(alpha: float, k: int) -> float:
     if k <= 0:
         raise ValueError("k must be >= 1")
     return alpha / k
+
+
+def z_for_alpha(alpha: float) -> float:
+    """Two-sided normal quantile ``z_{1 - alpha/2}`` for a coverage-``1-alpha`` CI.
+
+    Maps the configured verdict alpha (``primary_alpha``, possibly
+    Bonferroni-split) to the z used for the BT difference CI, so the alpha knob
+    actually widens/narrows the test instead of only being echoed into the
+    report. ``alpha = 0.05`` recovers :data:`Z95`.
+    """
+
+    if not (0.0 < alpha < 1.0):
+        raise ValueError("alpha must be in (0, 1)")
+    return float(NormalDist().inv_cdf(1.0 - alpha / 2.0))
 
 
 # --------------------------------------------------------------------------- #

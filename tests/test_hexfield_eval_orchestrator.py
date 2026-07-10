@@ -487,40 +487,110 @@ def test_bt_edges_aggregate_across_epochs_and_keep_weights_separate() -> None:
     assert len(edges) == 2  # exactly two distinct (pair, weight) edges
 
 
-def test_pool_persists_and_compounds_across_runs(tmp_path: Path) -> None:
-    """End-to-end: two eval runs of the same epoch append to the persisted pool
-    and the primary difference SE shrinks as the games compound."""
+def test_pool_same_epoch_rerun_is_idempotent_and_epochs_compound(tmp_path: Path) -> None:
+    """Re-running an ALREADY-POOLED epoch appends nothing: a same-epoch rerun
+    replays the same CRN seed base, so appending its near-duplicate games would
+    double-count the epoch and falsely tighten every pooled CI. A LATER epoch
+    appends fresh rows, and the fixed-anchor ratings tighten as edges compound."""
 
     run = _make_run(tmp_path, epochs=(5, 10, 20, 40))
     arena = _FakeArena(ckpt_scorer=lambda lb, n: _scores_for_winrate(0.75, n), sealbot_winrate=0.7)
 
-    rep1 = mse.run_multistage_eval(
-        run, run / "checkpoints" / "epoch_000040.pt", _no_sprt_config(),
-        candidate_epoch=40, write_diagnostics=True,
-        play_checkpoint_match=arena.play_checkpoint_match,
-        play_sealbot_match=arena.play_sealbot_match,
-    )
+    def _run_epoch(epoch: int) -> dict:
+        return mse.run_multistage_eval(
+            run, run / "checkpoints" / f"epoch_{epoch:06d}.pt", _no_sprt_config(),
+            candidate_epoch=epoch, write_diagnostics=True,
+            play_checkpoint_match=arena.play_checkpoint_match,
+            play_sealbot_match=arena.play_sealbot_match,
+        )
+
+    rep1 = _run_epoch(20)
     pool_path = run / "diagnostics" / "eval_pool.json"
     edges_after_1 = len(json.loads(pool_path.read_text(encoding="utf-8"))["edges"])
     assert edges_after_1 > 0
 
-    rep2 = mse.run_multistage_eval(
-        run, run / "checkpoints" / "epoch_000040.pt", _no_sprt_config(),
-        candidate_epoch=40, write_diagnostics=True,
-        play_checkpoint_match=arena.play_checkpoint_match,
-        play_sealbot_match=arena.play_sealbot_match,
-    )
+    # Same-epoch rerun: every edge is skipped as a duplicate; the pool is
+    # unchanged and the verdict is still produced from the pooled edges.
+    rep_rerun = _run_epoch(20)
+    doc_rerun = json.loads(pool_path.read_text(encoding="utf-8"))
+    assert len(doc_rerun["edges"]) == edges_after_1
+    stage_d = next(s for s in rep_rerun["stages"] if s["stage"] == "D_pool")
+    skipped = {(d["a"], d["b"]) for d in stage_d["duplicate_edges_skipped"]}
+    assert skipped and all(a == "cand_ep20" for a, _ in skipped)
+    assert rep_rerun["verdict"]["primary"] is not None
+
+    # A later epoch appends fresh rows.
+    rep2 = _run_epoch(40)
     doc2 = json.loads(pool_path.read_text(encoding="utf-8"))
-    # Append-only: the second run doubles the edge rows.
-    assert len(doc2["edges"]) == 2 * edges_after_1
+    assert len(doc2["edges"]) > edges_after_1
     assert doc2["format"] == mse.POOL_FORMAT and doc2["anchor"] == mse.SEALBOT_LABEL
 
-    # More pooled games -> a strictly tighter primary difference SE.
-    se1 = rep1["verdict"]["primary"]["se_elo"]
-    se2 = rep2["verdict"]["primary"]["se_elo"]
-    assert se2 < se1
+    # The FIXED ep5 anchor carries the same label both epochs, so its pooled
+    # edges compound and its marginal SE strictly tightens.
+    def _se_of(rep: dict, label: str) -> float:
+        return next(p["se_elo"] for p in rep["ratings"]["players"] if p["label"] == label)
+
+    assert _se_of(rep2, "ep5") < _se_of(rep1, "ep5")
     assert rep1["ratings"]["fit"]["converged"] and rep2["ratings"]["fit"]["converged"]
     assert rep2["ratings"]["fit"]["anchor"] == mse.SEALBOT_LABEL
+
+
+def test_epoch_seed_bases_decorrelate_epochs(tmp_path: Path) -> None:
+    """Every match request carries an epoch-folded CRN seed base: successive
+    epochs draw from disjoint seed streams (no cross-epoch near-replays), and
+    within one epoch SealBot plays at the bare epoch base while each checkpoint
+    top-up is offset per opponent."""
+
+    run = _make_run(tmp_path, epochs=(5, 10, 20, 40))
+    arena = _FakeArena(ckpt_scorer=lambda lb, n: _scores_for_winrate(0.75, n), sealbot_winrate=0.7)
+
+    _run(run, 20, arena)
+    n_ckpt_1, n_sb_1 = len(arena.ckpt_seed_bases), len(arena.sealbot_seed_bases)
+    _run(run, 40, arena)
+
+    bases_ep20 = arena.ckpt_seed_bases[:n_ckpt_1] + arena.sealbot_seed_bases[:n_sb_1]
+    bases_ep40 = arena.ckpt_seed_bases[n_ckpt_1:] + arena.sealbot_seed_bases[n_sb_1:]
+    assert bases_ep20 and bases_ep40
+    assert all(b is not None for b in bases_ep20 + bases_ep40)
+
+    # Epoch-folded: every base lands in its own epoch's 1e9-spaced band.
+    assert all(b // mse._EPOCH_SEED_SPACING == 20 for b in bases_ep20)
+    assert all(b // mse._EPOCH_SEED_SPACING == 40 for b in bases_ep40)
+    assert not set(bases_ep20) & set(bases_ep40)
+
+    # Within an epoch: SealBot at the bare epoch base; checkpoint pairings at
+    # distinct per-opponent offsets (1M + opponent epoch).
+    assert arena.sealbot_seed_bases[:n_sb_1] == [20 * mse._EPOCH_SEED_SPACING]
+    ckpt_ep20 = arena.ckpt_seed_bases[:n_ckpt_1]
+    assert len(set(ckpt_ep20)) == len(ckpt_ep20)
+    assert all(b % mse._EPOCH_SEED_SPACING >= 1_000_000 for b in ckpt_ep20)
+
+
+def test_primary_alpha_drives_the_verdict_ci(tmp_path: Path) -> None:
+    """``primary_alpha`` is live: the verdict CI is computed at z(alpha), so a
+    tiny alpha widens the interval and flips a comfortable PROMOTE to
+    INCONCLUSIVE. ``elo_diff_ci95`` stays the fixed-95% descriptive interval."""
+
+    run = _make_run(tmp_path, epochs=(5, 10, 20, 40))
+    arena = _FakeArena(ckpt_scorer=lambda lb, n: _scores_for_winrate(0.75, n), sealbot_winrate=0.7)
+
+    rep_default = _run(run, 40, arena)
+    assert rep_default["verdict"]["label"] == "PROMOTE"
+    primary = rep_default["verdict"]["primary"]
+    # At the default alpha=0.05 the verdict CI IS the 95% interval.
+    assert primary["elo_diff_ci"] == primary["elo_diff_ci95"]
+    assert primary["ci_z"] == pytest.approx(1.96, abs=0.01)
+
+    rep_strict = _run(run, 40, arena, config=_no_sprt_config(primary_alpha=1e-15))
+    strict = rep_strict["verdict"]["primary"]
+    # z(1e-15) ~ 8: the verdict CI widens well past the fixed 95% interval...
+    assert strict["ci_z"] > 7.0
+    assert strict["elo_diff_ci"][0] < strict["elo_diff_ci95"][0]
+    assert strict["elo_diff_ci"][1] > strict["elo_diff_ci95"][1]
+    # ...and the same match data no longer clears the promote threshold.
+    assert rep_strict["verdict"]["label"] == "INCONCLUSIVE"
+    # The descriptive 95% interval is unchanged by alpha.
+    assert strict["elo_diff_ci95"] == primary["elo_diff_ci95"]
 
 
 # =========================================================================== #
