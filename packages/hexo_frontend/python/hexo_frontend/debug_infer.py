@@ -1367,12 +1367,12 @@ def _search_hexfield(
 # Env keys hexfield_eq reads ONCE at import (constants.py / support.py). The
 # checkpoint meta (HexfieldNet.arch_meta) is the authoritative arch
 # description, and several module-level constants (C_ORBIT-derived head read
-# widths, the featurizer SUPPORT_RADIUS) are baked in at import time — the
-# HexfieldNet constructor kwargs cannot override them. So the env MUST be
-# seeded from the first eq checkpoint's meta BEFORE the first hexfield_eq
-# import. First import wins for the worker process; a later checkpoint with a
-# different arch raises a clear error (restart the worker) instead of
-# silently mis-building the tie.
+# widths, the featurizer SUPPORT_RADIUS and NUM_FEATURES) are baked in at
+# import time — the HexfieldNet constructor kwargs cannot override them. So
+# the env MUST be seeded from the first eq checkpoint's meta BEFORE the first
+# hexfield_eq import. First import wins for the worker process; a later
+# checkpoint with a different arch raises a clear error (restart the worker)
+# instead of silently mis-building the tie.
 _EQ_META_ENV = (
     ("HEXFIELD_EQ_SUPPORT_RADIUS", "support_radius"),
     ("HEXFIELD_EQ_CHANNELS", "channels"),
@@ -1380,6 +1380,8 @@ _EQ_META_ENV = (
     ("HEXFIELD_EQ_C_ORBIT", "c_orbit"),
     ("HEXFIELD_EQ_ATTENTION_HEADS", "attention_heads"),
     ("HEXFIELD_EQ_TRUNK", "trunk_layout"),
+    ("HEXFIELD_EQ_FEATURE_VERSION", "feature_version"),
+    ("HEXFIELD_EQ_RAYTAP", "raytap"),
 )
 _EQ_META_ENV_BOOL = (
     ("HEXFIELD_EQ_REG_LANE", "reg_lane"),
@@ -1390,18 +1392,45 @@ _EQ_META_ENV_BOOL = (
 _hexfield_eq_ns: SimpleNamespace | None = None
 
 
+def _seed_eq_meta_env(meta: dict, environ=None) -> None:
+    """Seed import-time ``HEXFIELD_EQ_*`` knobs from checkpoint metadata."""
+
+    import os
+
+    target = os.environ if environ is None else environ
+    for env_key, meta_key in _EQ_META_ENV:
+        if meta.get(meta_key) is not None:
+            target.setdefault(env_key, str(meta[meta_key]))
+    for env_key, meta_key in _EQ_META_ENV_BOOL:
+        if meta.get(meta_key) is not None:
+            target.setdefault(env_key, "1" if meta[meta_key] else "0")
+    # Phase F meta records feature_version directly; earlier v2-era metadata
+    # may carry only the width. Map either known width so a fresh worker
+    # imports the right featurizer; metadata predating both fields stays on
+    # the historical v1 default.
+    if meta.get("feature_version") is None:
+        feature_width = meta.get("feature_width")
+        feature_version = {25: "1", 46: "2"}.get(
+            int(feature_width) if feature_width is not None else None
+        )
+        if feature_version is not None:
+            target.setdefault("HEXFIELD_EQ_FEATURE_VERSION", feature_version)
+
+
 def _check_eq_meta_matches_import(eq: SimpleNamespace, meta: dict) -> None:
     """Validate the import-frozen constants against a checkpoint's meta.
 
     The head read widths bake in the module-level C_ORBIT and the featurizer
-    bakes in SUPPORT_RADIUS at import; constructor kwargs cannot override
-    them. A mismatch means this worker already imported hexfield_eq under a
-    different arch env — the only fix is a worker restart."""
+    bakes in SUPPORT_RADIUS and NUM_FEATURES at import; constructor kwargs
+    cannot override them. A mismatch means this worker already imported
+    hexfield_eq under a different arch env — the only fix is a worker
+    restart."""
 
     checks = (
         ("group_order", eq.constants.GROUP_ORDER),
         ("c_orbit", eq.constants.C_ORBIT),
         ("support_radius", eq.support_radius),
+        ("feature_width", eq.constants.NUM_FEATURES),
     )
     for key, imported in checks:
         want = meta.get(key)
@@ -1428,12 +1457,7 @@ def _hexfield_eq(meta: dict | None = None) -> SimpleNamespace:
 
     if _hexfield_eq_ns is None:
         if meta:
-            for env_key, meta_key in _EQ_META_ENV:
-                if meta.get(meta_key) is not None:
-                    os.environ.setdefault(env_key, str(meta[meta_key]))
-            for env_key, meta_key in _EQ_META_ENV_BOOL:
-                if meta.get(meta_key) is not None:
-                    os.environ.setdefault(env_key, "1" if meta[meta_key] else "0")
+            _seed_eq_meta_env(meta)
         _eq_src = Path(__file__).resolve().parents[3] / "hexfield_eq" / "python"
         if _eq_src.is_dir() and str(_eq_src) not in sys.path:
             sys.path.insert(0, str(_eq_src))
@@ -1530,15 +1554,19 @@ def _load_hexfield_eq_checkpoint(ckpt_path: Path, payload: dict[str, Any]) -> Lo
 def _hexfield_eq_inputs(eq: SimpleNamespace, model: Any, state: Any):
     """Featurize one decision state into the eq model's (1, N, *) batch.
 
-    Mirrors ``_hexfield_inputs`` plus the Phase-L0 raylen wire buffer, built
-    only for an 'L' trunk layout (a C/A-only net's forward takes raylen=None,
-    keeping the pre-L batch key set)."""
+    Mirrors ``_hexfield_inputs`` plus the raylen wire buffer, built for an
+    'L' trunk layout (Phase L0) and for ray-tap-equipped convs (spec §2.2 —
+    both consume the same wires); a plain C/A net's forward takes
+    raylen=None, keeping the pre-L batch key set."""
 
     facts = eq.facts_from_state(state)
     sup = eq.build_support(facts.stones())
     feats = eq.build_features(facts, sup)
     raylen = None
-    if "L" in str(getattr(model, "_trunk_layout", "")):
+    needs_raylen = ("L" in str(getattr(model, "_trunk_layout", ""))) or (
+        str(getattr(model, "_raytap", "0")) != "0"
+    )
+    if needs_raylen:
         raylen = [eq.build_ray_lengths(facts, sup)]
     batch = eq.collate_rows([(sup, feats)], raylen=raylen)
     legal = sup.legal_coords()  # (legal_count, 2) axial (q, r)
