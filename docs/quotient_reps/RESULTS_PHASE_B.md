@@ -222,6 +222,10 @@ production code.
 
 ### 5.1 Tile-efficiency microbenchmark
 
+The prepared operator sequence and paste-ready benchmark commands are in
+[`GPU_WINDOW_RUNBOOK.md`](GPU_WINDOW_RUNBOOK.md). The entries below remain
+pending until that safety-gated idle window is run.
+
 Pending. This host exposes one NVIDIA GeForce RTX 4070 Ti. At the final safety
 check it reported 100% utilization and 8,918 MiB / 12,282 MiB allocated. The
 concurrent Phase-R prefit and its worker pool were active. No GEMM, fused-conv,
@@ -241,6 +245,9 @@ reason. Consequently the C=160 tile-risk decision remains open; no arm was
 re-nominated and no training spend was authorized.
 
 ### 5.2 Full-network serve benchmark versus G8
+
+Run the prepared full-stack evaluator benchmark and CUDA typed-serve gate via
+[`GPU_WINDOW_RUNBOOK.md`](GPU_WINDOW_RUNBOOK.md); record their outputs here.
 
 | Arm | C | K_attn | G8 nominal-alpha projection | G8 alpha=4/7 projection | Measured speedup | Assessment |
 |---|---:|---:|---:|---:|---:|---|
@@ -344,3 +351,59 @@ The later arms must be built on the orchestrator-selected ray-tap architecture.
 
 No §9 deployment, service operation, merge to `main_9-fastrow-strip`/`main`, or
 live-run environment change was performed.
+
+## 11. Post-review fix pass (2026-07-10)
+
+- **Dashboard metadata seeding:** `debug_infer.py` now seeds canonical quotient
+  signature, attention orbit, and feature version before the first eq import;
+  it validates the import-frozen signature/orbit/feature width while retaining
+  the exact legacy pure-regular checks. The new
+  `test_hexo_frontend_eq_meta_env.py` covers B1, feature v2, restart rejection,
+  and the legacy env-key set.
+- **Implicit pure-regular rollback:** `constants.py` rejects a stray non-default
+  `HEXFIELD_EQ_ATTN_ORBIT` unless `HEXFIELD_EQ_TYPE_SIG` is explicit. The typed
+  model suite covers rejection and the harmless default-value no-op.
+- **Fresh initialization parity:** `test_hexfield_eq_typed_regression.py` now
+  constructs the scrubbed default net under both the Phase-A reference and this
+  tree at `manual_seed(0)`, then checks state-dict key order and every tensor
+  bitwise.
+- **Uniform quotient metadata contract:**
+  `infer_net_kwargs_from_state_dict` rejects either partial metadata form before
+  foreign reconstruction; the typed checkpoint suite covers both missing-key
+  directions. `eval_arena.py` calls this function with checkpoint metadata at
+  line 241 before constructing and strict-loading the net, so its foreign-load
+  path is covered without a redundant arena assertion.
+- **Visible warm-start drops:** `checkpoints.py` emits one summary warning with
+  missing/unexpected/shape-mismatch counts and examples, plus a signature hint
+  when typed weights drop. The typed checkpoint suite proves mismatch warning
+  and exact-match silence.
+- **B3 equivariance:** the literal B3 v1 signature with K=8 now runs the same
+  all-12 full-network policy-equivariance/value-invariance gate as B1/B2 in
+  `test_hexfield_eq_typed_model.py`.
+- **Moves-left serve tolerance:** `test_hexfield_eq_typed_serve.py` uses a
+  near-exact tolerance grounded in identical f16-rounded inputs instead of the
+  former decode-scale `atol=1.0`. The tightened `atol=1e-4` was confirmed by
+  the executed CPU run below.
+- **GPU-window preparation:** `bench_quotient_tile.py` provides the dense,
+  production fused-conv, and fused-attention median CUDA-event sweep;
+  `bench_quotient_serve.py` reuses `HexfieldEvaluator` with the standing
+  half/Rust-pack/copy-stream/kernel/CUDA-graph profile for baseline and B1/B2/B3.
+  Both require explicit `--allow-gpu`, provide `--cpu-smoke`, and are sequenced
+  by [`GPU_WINDOW_RUNBOOK.md`](GPU_WINDOW_RUNBOOK.md).
+- **CPU verification (executed 2026-07-10, reviewer run):** the implementing
+  agent's sandbox could not see the user-site packages
+  (`%APPDATA%\Python\Python314\site-packages`, where torch/pytest live), so
+  its own runtime verification was limited to dependency-free syntax
+  compilation and AST smokes. The reviewer then executed the full verification
+  unsandboxed. One test-harness defect was found and fixed in review: the new
+  frontend child asserted that the worker namespace import pulls in no Triton
+  modules, but the dashboard namespace deliberately imports
+  `hexfield_eq.inference`, which loads Triton whenever it is installed — the
+  over-strict assertion was removed. Final executed evidence, all CPU
+  (`CUDA_VISIBLE_DEVICES=-1`), scrubbed env, live D8 variables set: four typed
+  suites + `test_hexo_frontend_eq_meta_env.py` = **26 passed, 1 skipped in
+  61.25s** (sole skip is the CUDA-only typed serve gate; baseline was 19/1 —
+  seven new tests, zero regressions); regression spot-check (`equivariance`,
+  `perm_fold`, `checkpoint_meta`) = **20 passed, 3 CUDA-only skips**,
+  identical to baseline; both benchmark `--cpu-smoke` runs exited 0 (the serve
+  smoke constructs baseline and B1/B2/B3 end to end in tiny CPU eager mode).
