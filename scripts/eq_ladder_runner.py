@@ -196,17 +196,53 @@ class Arm:
         return REPO / "scripts" / "prefit_env" / f"hexfield_eq_{self.name}.env"
 
 
-ARMS = (
+_DEFAULT_ARMS = (
     Arm("arm1_vanilla", False),
     Arm("arm2_reglane", False),
     Arm("arm3_tokread", False),
     Arm("arm4_raylayout", True),
     Arm("arm4c_georay", True),
 )
+
+
+def _arms_from_env() -> tuple[Arm, ...]:
+    """EQ_LADDER_ARMS: comma list of ``name[:l]`` tokens (``:l`` = L-class
+    pair budget, i.e. the layout has L blocks). Unset -> the default R/L
+    ladder. Each name resolves scripts/prefit_env/hexfield_eq_<name>.env.
+    Added for the ray-tap wave-1 arm set (SPEC_RAYTAP_CONV.md §6.3); the
+    default ladder is byte-identical with the env unset."""
+
+    spec = os.environ.get("EQ_LADDER_ARMS", "").strip()
+    if not spec:
+        return _DEFAULT_ARMS
+    arms = []
+    for tok in spec.split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        name, _, flag = tok.partition(":")
+        arms.append(Arm(name.strip(), flag.strip() == "l"))
+    return tuple(arms) or _DEFAULT_ARMS
+
+
+ARMS = _arms_from_env()
+CUSTOM_ARMS = bool(os.environ.get("EQ_LADDER_ARMS", "").strip())
 ARM_BY_NAME = {a.name: a for a in ARMS}
-# Under deadline pressure the decision-relevant arms are evaluated first.
-EVAL_PRIORITY = ("arm4_raylayout", "arm4c_georay", "arm3_tokread",
-                 "arm2_reglane", "arm1_vanilla")
+# Under deadline pressure the decision-relevant arms are evaluated first. For
+# a custom arm set the default priority (and decision preference order) is the
+# EQ_LADDER_ARMS order; EQ_LADDER_EVAL_PRIORITY overrides either way.
+_PRIO_ENV = os.environ.get("EQ_LADDER_EVAL_PRIORITY", "").strip()
+if _PRIO_ENV:
+    EVAL_PRIORITY = tuple(n.strip() for n in _PRIO_ENV.split(",") if n.strip())
+elif CUSTOM_ARMS:
+    EVAL_PRIORITY = tuple(a.name for a in ARMS)
+else:
+    EVAL_PRIORITY = ("arm4_raylayout", "arm4c_georay", "arm3_tokread",
+                     "arm2_reglane", "arm1_vanilla")
+# EQ_LADDER_NO_SOAK=1: read-only ladder — prefit + eval + decision + the
+# record-only Strix baseline, but NO soak launch (the wave-1 mode: the live
+# soak keeps running; the winner feeds the write-up, not a relaunch).
+NO_SOAK = os.environ.get("EQ_LADDER_NO_SOAK") == "1"
 
 
 def real_row_min_steps() -> int:
@@ -1010,6 +1046,16 @@ def decide(infos: dict[str, dict]) -> dict:
         return usable(n) and _is_finite(infos[n].get("score"))
 
     # ---- fullest-stack pick: arm4 vs arm4c -------------------------------
+    # Custom arm sets (EQ_LADDER_ARMS) have no 4/4c head-to-head: the
+    # preference order is EVAL_PRIORITY verbatim.
+    if CUSTOM_ARMS:
+        d["head_to_head_4_vs_4c"] = {
+            "picked": None,
+            "reason": "custom arm set (EQ_LADDER_ARMS) — no 4/4c head-to-head",
+        }
+        order = [n for n in EVAL_PRIORITY if n in infos]
+        d["preference_order"] = order
+        return _decide_walk(d, infos, order, usable, scored)
     fullest, hh = None, {}
     u4, u4c = usable("arm4_raylayout"), usable("arm4c_georay")
     if u4 and u4c and scored("arm4_raylayout") and scored("arm4c_georay"):
@@ -1045,6 +1091,12 @@ def decide(infos: dict[str, dict]) -> dict:
 
     order = [n for n in (fullest, "arm3_tokread", "arm2_reglane", "arm1_vanilla") if n]
     d["preference_order"] = order
+    return _decide_walk(d, infos, order, usable, scored)
+
+
+def _decide_walk(d: dict, infos: dict, order: list, usable, scored) -> dict:
+    """The arm-set-independent tail of decide(): best-score, per-arm verdicts,
+    the preference-order walk, and the proceed-with-best fallbacks."""
 
     # ---- best score over all usable, scored arms (controls included) ------
     scored_arms = [n for n in infos if scored(n)]
@@ -1574,14 +1626,22 @@ def run_ladder(ladder: Ladder) -> int:
         except Exception as exc:  # noqa: BLE001
             ladder.error("strix-baseline (record-only, non-blocking)", exc)
 
-    # ---- stage 4: soak launch — ALWAYS happens (owner instruction) -----------
+    # ---- stage 4: soak launch — ALWAYS happens (owner instruction), UNLESS
+    # this is a read-only ladder (EQ_LADDER_NO_SOAK=1, the ray-tap wave mode:
+    # the live soak keeps running; the winner feeds the write-up).
     ladder.set_stage("soak")
-    if decision.get("soak_ray_blockers_0"):
-        ladder.status("soak: winner is arm4c — RAY_BLOCKERS=0 rides in via its env file")
-    try:
-        launch_soak(ladder, winner, decision, knobs)
-    except Exception as exc:  # noqa: BLE001
-        ladder.error("soak", exc)
+    if NO_SOAK:
+        ladder.status("soak: SKIPPED — EQ_LADDER_NO_SOAK=1 (read-only ladder; "
+                      "winner recorded for the write-up, no supervisor launch)")
+        ladder.state["soak"] = {"status": "skipped_no_soak"}
+        ladder.save_state()
+    else:
+        if decision.get("soak_ray_blockers_0"):
+            ladder.status("soak: winner is arm4c — RAY_BLOCKERS=0 rides in via its env file")
+        try:
+            launch_soak(ladder, winner, decision, knobs)
+        except Exception as exc:  # noqa: BLE001
+            ladder.error("soak", exc)
     ladder.set_stage("done")
     ladder.status("LADDER RUNNER done.")
     return 0
