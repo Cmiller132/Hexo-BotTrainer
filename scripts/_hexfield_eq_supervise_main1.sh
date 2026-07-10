@@ -53,6 +53,12 @@ export HEXFIELD_FLEX_PAIR="${HEXFIELD_FLEX_PAIR:-1}"
 export HEXFIELD_TRITON_CONV="${HEXFIELD_TRITON_CONV:-1}"
 export HEXFIELD_TRITON_ATTN="${HEXFIELD_TRITON_ATTN:-1}"
 export HEXFIELD_TRITON_CONV_LN="${HEXFIELD_TRITON_CONV_LN:-1}"
+# Split ray-tap serve path (2026-07-10): taps kernel + cuBLAS GEMM + LN
+# kernel, replacing K1 for equipped convs. Deterministic micro-bench: faster
+# than K1 at every Npad 179..1396 (1.4x small/mid; K1 regresses past
+# reference at Npad~1396 while the split holds 2.7ms/conv); serve parity
+# suites green under this exact flag set; =0 reverts to K1.
+export HEXFIELD_TRITON_RAYTAP7="${HEXFIELD_TRITON_RAYTAP7:-1}"
 # Gathered L-block ray attention (spec D-S36/D-S37) — the eq-specific kernel;
 # A-block kernels never apply to L, so without this the L blocks fall back to
 # the materialized (B, 6, N, N) bias path that capped serve at ~4 pos/s.

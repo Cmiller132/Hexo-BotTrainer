@@ -53,6 +53,14 @@ _LN_BM = int(os.environ.get("HEXFIELD_CONVLN_BM", "64"))
 _LN_WARPS = int(os.environ.get("HEXFIELD_CONVLN_WARPS", "4"))
 _LN_STAGES = int(os.environ.get("HEXFIELD_CONVLN_STAGES", "2"))
 
+# hex_ray_taps7 (split ray-tap serve path) tile knobs. The tap kernel has no
+# Cout dimension (no GEMM, no LN row), so unlike K1 it can run narrow tiles at
+# high occupancy; BM x BK are pure bandwidth knobs.
+_RT7_BM = int(os.environ.get("HEXFIELD_RT7_BM", "32"))
+_RT7_BK = int(os.environ.get("HEXFIELD_RT7_BK", "64"))
+_RT7_WARPS = int(os.environ.get("HEXFIELD_RT7_WARPS", "4"))
+_RT7_STAGES = int(os.environ.get("HEXFIELD_RT7_STAGES", "2"))
+
 
 if HAVE_TRITON:
 
@@ -569,7 +577,243 @@ if HAVE_TRITON:
             (x.shape[0], x.shape[1], weight.shape[-1]), dtype=torch.float16
         )
 
+    # --- split ray-tap serve path: taps kernel + cuBLAS GEMM + LN kernel ---------
+    # K1 fuses taps+GEMM+LN in one kernel, but the LN epilogue forces each
+    # program to own the whole Cout row (BN = next_pow2(Cout)), so a (BM, BN)
+    # fp32 accumulator rides through the 31-row tap gather — the register
+    # pressure caps occupancy and the kernel loses to cuBLAS-backed paths as
+    # Npad grows (the §2.4 bench bistability). The split keeps the memory-bound
+    # part hand-written and narrow (hex_ray_taps7: no Cout dim at all, taps
+    # accumulate in (BM, BK) tiles) and hands the FLOPs to cuBLAS
+    # ((B*Npad, 7C) @ (7C, Cout) fp16), with the LN(+ReLU)+mask epilogue in a
+    # tiny row kernel (hex_ln_mask). Numerics class per stage matches the
+    # reference: taps accumulate fp32 and round once to fp16 (torch's fp16
+    # reduce uses fp32 accumulators), the GEMM is the same fp16 cuBLAS class,
+    # and LN stats run fp32 on the fp16-rounded conv output.
+
+    _RAY_TAPS7_FAILED: set = set()
+    _LN_MASK_FAILED: set = set()
+
+    def _ray_taps7_ref(x, ray_idx, reach, alpha, corb):
+        """Reference tapped-input builder: [center ; 6 direction taps] via the
+        _raytap masked-gather aggregation (identical numerics)."""
+        from ._raytap import ray_tap_taps_naive, tap_ray_slot_lut
+
+        lut = tap_ray_slot_lut().to(ray_idx.device)
+        idx_taps = ray_idx.to(torch.int64)[:, :, lut]
+        taps = ray_tap_taps_naive(x, idx_taps, reach, alpha.to(x.dtype), corb)
+        return torch.cat([x.unsqueeze(2), taps], dim=2).to(torch.float16)
+
+    def _ln_mask_ref(y, bias, ln_w, ln_b, mask, eps, relu):
+        """Reference epilogue: bias add in y.dtype, fp32 LN stats, fp16 store
+        (the _conv_ln_raytap_ref epilogue numerics)."""
+        c = y.shape[-1]
+        out = F.layer_norm(
+            (y + bias.to(y.dtype)).float(), (c,), ln_w.float(), ln_b.float(), eps
+        )
+        if relu:
+            out = F.relu(out)
+        out = out * mask.unsqueeze(-1)
+        return out.to(torch.float16)
+
+    @triton.jit
+    def _hex_ray_taps7_kernel(
+        x_ptr, rayidx_ptr, reach_ptr, alpha_ptr, slotbase_ptr, out_ptr,
+        B, Npad, C,
+        IS_FP16_IN: tl.constexpr, CORB: tl.constexpr,
+        BM: tl.constexpr, BK: tl.constexpr,
+    ):
+        pid_m = tl.program_id(0)
+        pid_c = tl.program_id(1)
+        m_offs = pid_m * BM + tl.arange(0, BM)  # rows over B*Npad
+        m_valid = m_offs < B * Npad
+        b_ids = m_offs // Npad
+        c_offs = pid_c * BK + tl.arange(0, BK)
+        c_ok = c_offs < C
+        HALF: tl.constexpr = CORB // 2
+        side_c = (c_offs % CORB) >= HALF  # (BK,) opp-half channels
+
+        out_row = out_ptr + m_offs[:, None] * (7 * C) + c_offs[None, :]
+
+        # Tap 0 (center) = the query row itself, stored fp16 as-is.
+        ctr = tl.load(
+            x_ptr + (m_offs * C)[:, None] + c_offs[None, :],
+            mask=m_valid[:, None] & c_ok[None, :],
+            other=0.0,
+        )
+        ctr16 = ctr if IS_FP16_IN else ctr.to(tl.float16)
+        tl.store(out_row, ctr16, mask=m_valid[:, None] & c_ok[None, :])
+
+        # Taps 1..6: 5 masked row loads + FMA per direction, fp32 accumulate,
+        # one fp16 round. Rows invisible to BOTH sides never load (real raylen
+        # truncates most rays — this sheds most of the 30-row bill).
+        for t in tl.static_range(6):
+            sb = tl.load(slotbase_ptr + t)
+            rl_own = tl.load(
+                reach_ptr + m_offs * 12 + 0 * 6 + t, mask=m_valid, other=0
+            ).to(tl.int32)
+            rl_opp = tl.load(
+                reach_ptr + m_offs * 12 + 1 * 6 + t, mask=m_valid, other=0
+            ).to(tl.int32)
+            acc = tl.zeros((BM, BK), dtype=tl.float32)
+            for k in tl.static_range(5):
+                idx = tl.load(
+                    rayidx_ptr + m_offs * 32 + sb + k, mask=m_valid, other=Npad
+                )
+                present = m_valid & (idx < Npad)
+                vo = rl_own >= (k + 1)
+                vp = rl_opp >= (k + 1)
+                a = tl.load(
+                    x_ptr + ((b_ids * Npad + idx) * C)[:, None] + c_offs[None, :],
+                    mask=(present & (vo | vp))[:, None] & c_ok[None, :],
+                    other=0.0,
+                ).to(tl.float32)
+                alpha_k = tl.load(
+                    alpha_ptr + k * C + c_offs, mask=c_ok, other=0.0
+                ).to(tl.float32)
+                vis = tl.where(
+                    side_c[None, :],
+                    vp.to(tl.float32)[:, None],
+                    vo.to(tl.float32)[:, None],
+                )
+                acc += a * (alpha_k[None, :] * vis)
+            tl.store(
+                out_row + (1 + t) * C,
+                acc.to(tl.float16),
+                mask=m_valid[:, None] & c_ok[None, :],
+            )
+
+    @torch.library.custom_op("hexfield_eq::hex_ray_taps7", mutates_args=())
+    def hex_ray_taps7(
+        x: torch.Tensor,
+        ray_idx: torch.Tensor,
+        reach: torch.Tensor,
+        alpha: torch.Tensor,
+        corb: int,
+    ) -> torch.Tensor:
+        """(B, Npad, 7, C) fp16 tapped conv input: [center ; 6 direction taps].
+        ``ray_idx`` (B, Npad, 32) int32 sync-free gather index; ``reach``
+        (B, Npad, 2, 6) u8; ``alpha`` (5, C) tiled slot-constant. Falls back to
+        the reference builder on any compile/launch failure (memoized per C)."""
+
+        b, npad, c = x.shape
+        key = (c, 0)
+        if key not in _RAY_TAPS7_FAILED:
+            try:
+                xc = x.contiguous()
+                ridx = ray_idx.contiguous()
+                rch = reach.contiguous()
+                a16 = alpha.to(torch.float16).contiguous()
+                sb = _rt_slot_base_on(x.device)
+                out = torch.empty(
+                    (b, npad, 7, c), dtype=torch.float16, device=x.device
+                )
+                rows = b * npad
+                grid = (triton.cdiv(rows, _RT7_BM), triton.cdiv(c, _RT7_BK))
+                _hex_ray_taps7_kernel[grid](
+                    xc, ridx, rch, a16, sb, out,
+                    b, npad, c,
+                    IS_FP16_IN=(x.dtype == torch.float16), CORB=corb,
+                    BM=_RT7_BM, BK=_RT7_BK,
+                    num_warps=_RT7_WARPS, num_stages=_RT7_STAGES,
+                )
+                return out
+            except Exception as err:  # per-arch triton codegen edge case
+                _mark_failed(_RAY_TAPS7_FAILED, "hex_ray_taps7", key, err)
+        return _ray_taps7_ref(x, ray_idx, reach, alpha, corb)
+
+    @hex_ray_taps7.register_fake
+    def _hex_ray_taps7_fake(x, ray_idx, reach, alpha, corb):
+        return x.new_empty(
+            (x.shape[0], x.shape[1], 7, x.shape[2]), dtype=torch.float16
+        )
+
+    @triton.jit
+    def _hex_ln_mask_kernel(
+        y_ptr, bias_ptr, lnw_ptr, lnb_ptr, mask_ptr, out_ptr,
+        Rows, C, eps,
+        RELU: tl.constexpr,
+        BM: tl.constexpr, BN: tl.constexpr,
+    ):
+        pid_m = tl.program_id(0)
+        m_offs = pid_m * BM + tl.arange(0, BM)
+        m_valid = m_offs < Rows
+        n_offs = tl.arange(0, BN)
+        n_valid = n_offs < C
+
+        y = tl.load(
+            y_ptr + m_offs[:, None] * C + n_offs[None, :],
+            mask=m_valid[:, None] & n_valid[None, :],
+            other=0.0,
+        )
+        bias = tl.load(bias_ptr + n_offs, mask=n_valid, other=0.0)
+        # Bias add in the GEMM output dtype (fp16), matching the reference's
+        # `conv + bias` before the fp32 upcast.
+        acc = (y + bias[None, :]).to(tl.float32)
+        accm = tl.where(n_valid[None, :], acc, 0.0)
+        mean = tl.sum(accm, 1) / C
+        cent = tl.where(n_valid[None, :], acc - mean[:, None], 0.0)
+        var = tl.sum(cent * cent, 1) / C
+        rstd = tl.math.rsqrt(var + eps)
+        lnw = tl.load(lnw_ptr + n_offs, mask=n_valid, other=0.0)
+        lnb = tl.load(lnb_ptr + n_offs, mask=n_valid, other=0.0)
+        o = cent * rstd[:, None] * lnw[None, :].to(tl.float32) + lnb[None, :].to(
+            tl.float32
+        )
+        if RELU:
+            o = tl.maximum(o, 0.0)
+        rmask = tl.load(mask_ptr + m_offs, mask=m_valid, other=0)
+        o = tl.where(rmask[:, None] > 0, o, 0.0)
+        tl.store(
+            out_ptr + m_offs[:, None] * C + n_offs[None, :],
+            o.to(tl.float16),
+            mask=m_valid[:, None] & n_valid[None, :],
+        )
+
+    @torch.library.custom_op("hexfield_eq::hex_ln_mask", mutates_args=())
+    def hex_ln_mask(
+        y: torch.Tensor,
+        bias: torch.Tensor,
+        ln_weight: torch.Tensor,
+        ln_bias: torch.Tensor,
+        mask: torch.Tensor,
+        eps: float,
+        relu: bool,
+    ) -> torch.Tensor:
+        """bias + LayerNorm(+ReLU) + row-mask on a (B, Npad, C) GEMM output
+        (fp32 stats, fp16 store) — the split path's epilogue."""
+
+        b, npad, c = y.shape
+        key = (c, 0)
+        if key not in _LN_MASK_FAILED:
+            try:
+                yc = y.contiguous()
+                b16 = bias.to(y.dtype).contiguous()
+                lnw = ln_weight.to(torch.float32).contiguous()
+                lnb = ln_bias.to(torch.float32).contiguous()
+                m8 = mask.to(torch.uint8).contiguous()
+                out = torch.empty_like(yc, dtype=torch.float16)
+                rows = b * npad
+                BN = triton.next_power_of_2(c)
+                grid = (triton.cdiv(rows, _LN_BM),)
+                _hex_ln_mask_kernel[grid](
+                    yc, b16, lnw, lnb, m8, out,
+                    rows, c, eps,
+                    RELU=relu, BM=_LN_BM, BN=BN,
+                    num_warps=_LN_WARPS, num_stages=_LN_STAGES,
+                )
+                return out
+            except Exception as err:  # per-arch triton codegen edge case
+                _mark_failed(_LN_MASK_FAILED, "hex_ln_mask", key, err)
+        return _ln_mask_ref(y, bias, ln_weight, ln_bias, mask, eps, relu)
+
+    @hex_ln_mask.register_fake
+    def _hex_ln_mask_fake(y, bias, ln_weight, ln_bias, mask, eps, relu):
+        return y.new_empty(y.shape, dtype=torch.float16)
+
 else:  # pragma: no cover
     hex_conv = None
     hex_conv_ln = None
     hex_conv_ln_raytap = None
+    hex_ray_taps7 = None
+    hex_ln_mask = None

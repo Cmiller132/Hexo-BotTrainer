@@ -192,6 +192,23 @@ if _TRITON_CONV_LN:
 else:
     _hex_conv_ln_fused = None
     _hex_conv_ln_raytap_fused = None
+# Split ray-tap serve path, HEXFIELD_TRITON_RAYTAP7=1 (default off): taps
+# kernel + cuBLAS GEMM + LN kernel. Takes precedence over K1 for equipped
+# convs when enabled — K1's whole-Cout-row LN accumulator caps its occupancy
+# through the 31-row tap gather and loses to cuBLAS as Npad grows (the §2.4
+# bench bistability); the split keeps only the memory-bound tap build
+# hand-written. Serve (no-grad, CUDA) only.
+_TRITON_RAYTAP7 = os.environ.get("HEXFIELD_TRITON_RAYTAP7") == "1"
+if _TRITON_RAYTAP7:
+    try:
+        from ._triton_conv import hex_ln_mask as _hex_ln_mask_fused
+        from ._triton_conv import hex_ray_taps7 as _hex_ray_taps7_fused
+    except Exception:  # pragma: no cover - no triton
+        _hex_ray_taps7_fused = None
+        _hex_ln_mask_fused = None
+else:
+    _hex_ray_taps7_fused = None
+    _hex_ln_mask_fused = None
 # fp8 (e4m3) conv GEMMs were REMOVED for the equivariant v1 (docs/DERIVATION
 # §2.3, "BUGS_FOUND"): the fused-conv fp8 weight cache was keyed on id(weight),
 # but the tied trunk regenerates a fresh dense weight object every forward
@@ -879,6 +896,22 @@ class ConvBlock(nn.Module):
             w, b = conv._materialize()
             return _hex_conv_ln_fused(
                 x, gather_idx, mask, w, b, ln.weight, ln.bias, ln.eps, relu
+            )
+        if _hex_ray_taps7_fused is not None and ray_ctx is not None:
+            # Split path (HEXFIELD_TRITON_RAYTAP7): tapped-input kernel ->
+            # one cuBLAS fp16 GEMM -> fused bias+LN(+ReLU)+mask epilogue.
+            w, b = conv._materialize()
+            bsz, npad, cin = x.shape
+            t7 = _hex_ray_taps7_fused(
+                x, ray_ctx.ray_idx, ray_ctx.reach, conv._alpha_full(),
+                conv.alpha.shape[1],
+            )
+            gemm = t7.reshape(bsz * npad, 7 * cin) @ w.reshape(
+                7 * cin, conv.out_channels
+            ).to(t7.dtype)
+            return _hex_ln_mask_fused(
+                gemm.view(bsz, npad, conv.out_channels), b, ln.weight, ln.bias,
+                mask, ln.eps, relu,
             )
         if _hex_conv_ln_raytap_fused is not None and ray_ctx is not None:
             # K1 fused variant: in-kernel k-loop over the ray gather index +
