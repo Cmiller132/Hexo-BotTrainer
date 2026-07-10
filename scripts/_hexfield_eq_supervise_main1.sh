@@ -59,6 +59,17 @@ export HEXFIELD_TRITON_CONV_LN="${HEXFIELD_TRITON_CONV_LN:-1}"
 # reference at Npad~1396 while the split holds 2.7ms/conv); serve parity
 # suites green under this exact flag set; =0 reverts to K1.
 export HEXFIELD_TRITON_RAYTAP7="${HEXFIELD_TRITON_RAYTAP7:-1}"
+# Coords-direct attention (2026-07-10): the attn_pair kernel with the bias
+# row computed IN-KERNEL from coords — the (B, S, S) uint8 pair tensor and
+# its once-per-forward build (measured 13.2 ms at B=96/S=862, more device
+# time than all three A-blocks' attention math combined; its int intermediates
+# also pinned CUDA-graph pool VRAM per captured key) are gone. Ply-60 MCTS
+# A/B at the unchanged 3.8e7 ceiling: 4.41 -> 7.12 pos/s (+61%). Kernel
+# parity identical to attn_pair's class (masked max-abs 0.002-0.004 vs the
+# materialized reference at every probed shape); =0 reverts to attn_pair +
+# the pair build. Do NOT pair this with a raised HEXFIELD_PAIR_CEILING —
+# measured regression (see inference.py PAIR_CEILING note).
+export HEXFIELD_TRITON_ATTN2="${HEXFIELD_TRITON_ATTN2:-1}"
 # Gathered L-block ray attention (spec D-S36/D-S37) — the eq-specific kernel;
 # A-block kernels never apply to L, so without this the L blocks fall back to
 # the materialized (B, 6, N, N) bias path that capped serve at ~4 pos/s.

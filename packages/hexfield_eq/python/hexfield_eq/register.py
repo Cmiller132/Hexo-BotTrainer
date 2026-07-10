@@ -62,6 +62,11 @@ class RegisterRefresh(nn.Module):
         # the REG_SUM_SCALE constant: blocks can rescale their count magnitudes
         # as board size grows. 0-dim => no-decay by ndim; trunk_reg grad group.
         self.sum_scale = nn.Parameter(torch.tensor(float(REG_SUM_SCALE)))
+        # Fused serve K/V weight cache (mirrors RelPosAttention._serve_qkv_wb):
+        # the k/v projections read the same (B, N, C) normalized cells, so the
+        # no-grad path concatenates their (perm-folded) weights into one
+        # (2C, C) GEMM — the big activation is read once instead of twice.
+        self._kv_src = None
         if EQUIVARIANT:
             self.register_buffer("_head_perm", _eq.head_perm(), persistent=False)
             self.register_buffer(
@@ -76,6 +81,33 @@ class RegisterRefresh(nn.Module):
             self.v_proj.set_serve_perms(out_perm=self._head_perm)
             self.out_proj.set_serve_perms(in_perm=self._head_perm)
         self._init_projections()
+
+    def _serve_kv_wb(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """Concat of the (serve-folded) k/v weights as one (2C, C) projection
+        for the no-grad path. Cache invalidation mirrors
+        RelPosAttention._serve_qkv_wb: rebuilt when a source weight object
+        changes (EquivLinear caches regenerate on version bumps) or a Module
+        cast swapped the param data (dtype/device re-check)."""
+
+        if self.equivariant:
+            wk, bk = self.k_proj._materialize()
+            wv, bv = self.v_proj._materialize()
+        else:
+            wk, bk = self.k_proj.weight, self.k_proj.bias
+            wv, bv = self.v_proj.weight, self.v_proj.bias
+        src = self._kv_src
+        if (
+            src is not None
+            and src[0] is wk
+            and src[1] is wv
+            and src[2].dtype == wk.dtype
+            and src[2].device == wk.device
+        ):
+            return src[2], src[3]
+        w2 = torch.cat([wk, wv], dim=0)
+        b2 = torch.cat([bk, bv], dim=0)
+        self._kv_src = (wk, wv, w2, b2)
+        return w2, b2
 
     def _init_projections(self) -> None:
         """q/k/v: the trunk Linear init (trunc_normal 0.02, zero bias); out_proj
@@ -114,8 +146,15 @@ class RegisterRefresh(nn.Module):
         # fp32 train path.
         kv = self.ln_kv(x)
         q = self.q_proj(self.ln_q(tokens.to(x.dtype)))
-        k = self.k_proj(kv)
-        v = self.v_proj(kv)
+        if not torch.is_grad_enabled():
+            # Serve: one fused (2C, C) projection over the cells (read once).
+            # Same math per output block as the two separate linears (cuBLAS
+            # accumulation order may differ — the serve parity class).
+            w2, b2 = self._serve_kv_wb()
+            k, v = torch.nn.functional.linear(kv, w2, b2).chunk(2, dim=-1)
+        else:
+            k = self.k_proj(kv)
+            v = self.v_proj(kv)
         # Serve folds the §4 coset perm into the cached q/k/v/out weights on the
         # SAME ``equivariant and not grad`` gate EquivLinear._materialize uses.
         folded = self.equivariant and not torch.is_grad_enabled()

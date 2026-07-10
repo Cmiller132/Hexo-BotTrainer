@@ -133,6 +133,21 @@ if _TRITON_ATTN:
         _attn_pair_fused = None
 else:
     _attn_pair_fused = None
+# Coords-direct bespoke attention, HEXFIELD_TRITON_ATTN2=1 (default off;
+# requires the flex-pair serve flags like v1). Same FA2-style kernel as
+# attn_pair but the bias row is computed IN-KERNEL from coords + the tiny
+# cell LUT, so the (B, S, S) uint8 pair tensor — whose once-per-forward
+# build (_build_pair_u8) costs more device time than the attention math it
+# feeds — is never materialized on the serve path. trunk() prefers this
+# over attn_pair when both are importable. See _triton_attn.py.
+_TRITON_ATTN2 = os.environ.get("HEXFIELD_TRITON_ATTN2") == "1"
+if _TRITON_ATTN2:
+    try:
+        from ._triton_attn import attn_coords as _attn_coords_fused
+    except Exception:  # pragma: no cover - no triton
+        _attn_coords_fused = None
+else:
+    _attn_coords_fused = None
 # Gathered ray attention for L blocks, HEXFIELD_EQ_TRITON_RAY=1 (default off;
 # spec D-S36/D-S37). Serve (no-grad, CUDA, fp16 q/k/v) only: each query cell
 # attends its <= 31 geometric ray cells through a (B, Npad, 32) int32 gather
@@ -378,6 +393,66 @@ class _FlexPairBias:
 
         def score_mod(score, b, h, q_idx, kv_idx):
             row = pair[b, q_idx, kv_idx].to(torch.int32)
+            return score + table2[row, h].to(score.dtype)
+
+        return score_mod
+
+
+class _CoordsPairBias:
+    """Carrier for the coords-direct bespoke attention serve path
+    (HEXFIELD_TRITON_ATTN2=1): no (B, S, S) pair tensor exists — the kernel
+    computes the bias row per tile from `coords` (B, N, 2) int32, the live-cell
+    `mask` (B, N) uint8 and the (W*W,) uint8 cell LUT. `table2` is the same
+    appended-pad-row fp16 table as _FlexPairBias; `seq_lens` bounds the key
+    loop exactly like the v1 kernel. The score_mod reproduces the same math
+    for any residual miss (foreign dtype, memoized compile failure falls back
+    inside the op itself)."""
+
+    __slots__ = ("coords", "mask", "table2", "lut", "m", "seq_lens")
+
+    def __init__(self, coords, mask, table2, lut, m, seq_lens) -> None:
+        self.coords = coords
+        self.mask = mask
+        self.table2 = table2
+        self.lut = lut
+        self.m = m
+        self.seq_lens = seq_lens
+
+    def make_score_mod(self):
+        nt = NUM_TOKENS
+        coords = self.coords
+        mask = self.mask
+        table2 = self.table2
+        lut = self.lut
+        m = self.m
+        w = 2 * m + 1
+        pad_row = table2.shape[0] - 1
+
+        def score_mod(score, b, h, q_idx, kv_idx):
+            qc = torch.clamp(q_idx - nt, min=0)
+            kc = torch.clamp(kv_idx - nt, min=0)
+            dq = coords[b, kc, 0] - coords[b, qc, 0]
+            dr = coords[b, kc, 1] - coords[b, qc, 1]
+            qi = torch.clamp(dq, -m, m) + m
+            ri = torch.clamp(dr, -m, m) + m
+            cell_idx = lut[qi * w + ri].to(torch.int32)
+            q_tok = q_idx < nt
+            k_tok = kv_idx < nt
+            row = torch.where(
+                q_tok & k_tok,
+                torch.full_like(cell_idx, BIAS_TOKEN_TOKEN_ROW),
+                torch.where(
+                    q_tok & ~k_tok,
+                    torch.full_like(cell_idx, BIAS_TOKEN_CELL_ROW),
+                    torch.where(
+                        ~q_tok & k_tok,
+                        torch.full_like(cell_idx, BIAS_CELL_TOKEN_ROW),
+                        cell_idx,
+                    ),
+                ),
+            )
+            is_pad_key = (kv_idx >= nt) & (mask[b, kc] == 0)
+            row = torch.where(is_pad_key, torch.full_like(row, pad_row), row)
             return score + table2[row, h].to(score.dtype)
 
         return score_mod
@@ -1014,13 +1089,54 @@ class RelPosAttention(nn.Module):
             self.v_proj = nn.Linear(channels, channels)
             self.out_proj = nn.Linear(channels, channels)
         self.impl = "sdpa"
+        # Fused serve QKV weight cache (_serve_qkv_wb): (source refs..., w3, b3).
+        self._qkv_src = None
+
+    def _serve_qkv_wb(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """Concat of the three (serve-folded) q/k/v weights as one (3C, C)
+        projection for the no-grad path: the sequence activation is read once
+        instead of three times and three GEMM launches become one. Rebuilt only
+        when any source weight object changes (the EquivLinear serve caches
+        regenerate on parameter version bumps; nn.Linear params keep identity
+        but swap data under Module casts, hence the dtype/device re-check)."""
+
+        if self.equivariant:
+            wq, bq = self.q_proj._materialize()
+            wk, bk = self.k_proj._materialize()
+            wv, bv = self.v_proj._materialize()
+        else:
+            wq, bq = self.q_proj.weight, self.q_proj.bias
+            wk, bk = self.k_proj.weight, self.k_proj.bias
+            wv, bv = self.v_proj.weight, self.v_proj.bias
+        src = self._qkv_src
+        if (
+            src is not None
+            and src[0] is wq
+            and src[1] is wk
+            and src[2] is wv
+            and src[3].dtype == wq.dtype
+            and src[3].device == wq.device
+        ):
+            return src[3], src[4]
+        w3 = torch.cat([wq, wk, wv], dim=0)
+        b3 = torch.cat([bq, bk, bv], dim=0)
+        self._qkv_src = (wq, wk, wv, w3, b3)
+        return w3, b3
 
     def forward(self, seq: torch.Tensor, attn_bias) -> torch.Tensor:
         b, s, c = seq.shape
         h, d = self.heads, self.head_dim
-        q = self.q_proj(seq)
-        k = self.k_proj(seq)
-        v = self.v_proj(seq)
+        if not torch.is_grad_enabled():
+            # Serve: one fused (3C, C) projection. Same math per output block
+            # as the three separate linears (cuBLAS accumulation order may
+            # differ — allclose, the serve parity class, not bit-identical).
+            w3, b3 = self._serve_qkv_wb()
+            qkv = F.linear(seq, w3, b3)
+            q, k, v = qkv.chunk(3, dim=-1)
+        else:
+            q = self.q_proj(seq)
+            k = self.k_proj(seq)
+            v = self.v_proj(seq)
         # Serve folds the §4 coset perm into the cached q/k/v/out weights
         # (EquivLinear._materialize) on the SAME ``equivariant and not grad``
         # gate; the two must agree or the perm double-applies / cancels.
@@ -1045,7 +1161,23 @@ class RelPosAttention(nn.Module):
         # score loop, fully-padded key tiles skipped via seq_lens. No backward;
         # anything it can't take (grad, non-fp16, odd head_dim) falls through
         # to flex below.
+        # v2 (coords-direct) first: trunk() only builds a _CoordsPairBias when
+        # the kernel import gate passed and the serve stream is fp16 CUDA, so
+        # this branch is the norm whenever the carrier arrives; the score_mod
+        # fallback below covers any residual miss.
         if (
+            _attn_coords_fused is not None
+            and isinstance(attn_bias, _CoordsPairBias)
+            and not torch.is_grad_enabled()
+            and q.is_cuda
+            and q.dtype == torch.float16
+            and d in (16, 32, 64, 128)
+        ):
+            out = _attn_coords_fused(
+                q, k, v, attn_bias.coords, attn_bias.mask, attn_bias.table2,
+                attn_bias.lut, attn_bias.seq_lens,
+            )
+        elif (
             _attn_pair_fused is not None
             and isinstance(attn_bias, _FlexPairBias)
             and attn_bias.seq_lens is not None
@@ -1060,7 +1192,7 @@ class RelPosAttention(nn.Module):
         # Flex path: the rel-pos bias + pad mask are computed inside the kernel via
         # a score_mod (no materialized (B,heads,S,S) tensor). block_mask is None.
         # The score_mod is built here, in the same frame as the flex call.
-        elif isinstance(attn_bias, (_FlexBias, _FlexPairBias)):
+        elif isinstance(attn_bias, (_FlexBias, _FlexPairBias, _CoordsPairBias)):
             score_mod = attn_bias.make_score_mod()
             out = _flex_call(q, k, v, score_mod)
         else:
@@ -1866,6 +1998,22 @@ class HexfieldNet(nn.Module):
         pad_row = table.new_full((1, table.shape[1]), PAD_KEY_MASK_VALUE)
         return _FlexPairBias(pair, torch.cat([table, pad_row], dim=0), seq_lens)
 
+    def _build_coords_pair_bias(
+        self, coords_i32: torch.Tensor, mask_u8: torch.Tensor, block: int,
+        seq_lens: torch.Tensor,
+    ) -> "_CoordsPairBias":
+        """Coords-direct carrier for attention block `block`
+        (HEXFIELD_TRITON_ATTN2): the same appended-pad-row fp16 table as
+        _build_flex_pair_bias, but geometry rides as (B, N, 2) i32 coords +
+        (B, N) u8 live-mask + the u8 cell LUT — no (B, S, S) pair tensor."""
+
+        table = self._block_bias_table(block).to(torch.float16)
+        pad_row = table.new_full((1, table.shape[1]), PAD_KEY_MASK_VALUE)
+        return _CoordsPairBias(
+            coords_i32, mask_u8, torch.cat([table, pad_row], dim=0),
+            self._cell_bias_lut_u8, self._cell_bias_M, seq_lens,
+        )
+
     def _build_train_flex_pair_bias(
         self, pair: torch.Tensor, block: int
     ) -> "_FlexPairBias":
@@ -2032,27 +2180,52 @@ class HexfieldNet(nn.Module):
         flex_pair = serve_flex and self._flex_pair
         train_flex_pair = train_flex and self._train_flex_pair
         flex = serve_flex or train_flex
+        # Coords-direct serve attention (HEXFIELD_TRITON_ATTN2): the flex-pair
+        # flag family, but NO (B, S, S) pair tensor is built at all — the
+        # kernel computes the bias row from coords per tile (_triton_attn.py).
+        # _build_pair_u8 measured 13.2 ms/forward at (B=96, S=862), more device
+        # time than the three A-blocks' attention math combined, so skipping it
+        # is the point. Gate mirrors what RelPosAttention.forward re-checks so
+        # the carrier and the kernel branch agree; any residual miss serves
+        # through the carrier's score_mod via flex.
+        use_attn2 = (
+            flex_pair
+            and _attn_coords_fused is not None
+            and x.is_cuda
+            and (x.dtype == torch.float16 or _cuda_autocast_fp16())
+            and len(getattr(self, "attn_blocks", ())) > 0
+            and self.attn_blocks[0].attn.head_dim in (16, 32, 64, 128)
+        )
         if not flex:
             pair, key_pad = self._build_pair(coords, mask)
-        elif flex_pair or train_flex_pair:
+        elif (flex_pair and not use_attn2) or train_flex_pair:
             # Block-independent, built once and shared by all attention blocks.
             pair_u8 = self._build_pair_u8(coords, mask)
         attn_seq_lens = None
-        if flex_pair and _attn_pair_fused is not None:
-            # Per-row key count for the bespoke attention kernel: tokens + the
+        if use_attn2 or (flex_pair and _attn_pair_fused is not None):
+            # Per-row key count for the bespoke attention kernels: tokens + the
             # LAST live cell + 1 (conservative if padding were ever
-            # non-contiguous; pad keys inside the bound still hit the pair
-            # tensor's pad row, so this only affects tile-skipping, not math).
+            # non-contiguous; pad keys inside the bound still take the pad
+            # row, so this only affects tile-skipping, not math).
             cell_idx = torch.arange(
                 1, mask.shape[1] + 1, device=mask.device, dtype=torch.int32
             )
             attn_seq_lens = NUM_TOKENS + (cell_idx * mask).amax(dim=1)
+        if use_attn2:
+            # Block-independent geometry for the coords-direct carrier, built
+            # once: i32 coords + u8 live-mask (the kernel's dtypes).
+            attn2_coords = coords.to(torch.int32).contiguous()
+            attn2_mask = mask.to(torch.uint8)
 
         def block_bias(i: int):
             if train_flex_pair:
                 return self._build_train_flex_pair_bias(pair_u8, i)
             if train_flex:
                 return self._build_train_flex_bias(coords, mask, i)
+            if use_attn2:
+                return self._build_coords_pair_bias(
+                    attn2_coords, attn2_mask, i, attn_seq_lens
+                )
             if flex_pair:
                 return self._build_flex_pair_bias(pair_u8, i, attn_seq_lens)
             if serve_flex:

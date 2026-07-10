@@ -34,9 +34,26 @@ NBR_SENTINEL = 0xFFFF
 # costs host-side dispatch (dynamo guards + kernel enqueue), which is the
 # serve bottleneck once the kernels themselves are fast. Distinct from the
 # training pair budget.
+#
+# Coords-direct attention (HEXFIELD_TRITON_ATTN2=1) removes every per-pair
+# S^2 object, so in principle the ceiling could rise to pack fatter late-game
+# groups. MEASURED 2026-07-10 (ply-60 MCTS, 16 games, 512 visits): raising it
+# to 1.6e8 REGRESSED the ATTN2 gain from +61% to +3% end-to-end — bigger
+# (B_bucket, Npad) graph keys hold proportionally bigger activation pools, and
+# the CUDA-graph pool VRAM those keys pin brings back the capture-failure
+# cascade the pair-build removal had just fixed. Keep 3.8e7; raise only via
+# HEXFIELD_PAIR_CEILING with a measured end-to-end win (a bounded key ladder —
+# coarser Npad quanta at large B — is the designed follow-up).
 PAIR_CEILING = float(os.environ.get("HEXFIELD_PAIR_CEILING", 0) or 3.8e7)
 # Padded cell-count quantum (rows pad up to a multiple of this).
 QUANT_NODES = 64
+# Hard per-group row cap, aligned with _GraphCache.MAX_B: a group above it
+# cannot be graph-captured (bucket() returns None -> the per-kernel-launch
+# compiled path). Under the default 3.8e7 ceiling this is nearly implicit
+# (3.8e7/392^2 ~ 247 rows at the early-game shape); it protects a manual
+# HEXFIELD_PAIR_CEILING raise from silently losing graph replay on >260-row
+# groups.
+MAX_GROUP_ROWS = 260
 # Padding-waste bound for grouping: a row is not padded up to a group anchor
 # more than WASTE_FRACTION larger than its own size (or QUANT_NODES, whichever
 # is larger). Bounds the squared attention padding cost (sum B*S_pad^2).
@@ -197,6 +214,8 @@ def plan_groups(sizes) -> list[tuple[int, int, int]]:
         floor = pad_to - max(QUANT_NODES, int(WASTE_FRACTION * pad_to))
         end = start + 1
         while end < n:
+            if end - start >= MAX_GROUP_ROWS:  # stay graph-capturable
+                break
             if (end - start + 1) * (pad_to + NUM_TOKENS) ** 2 > PAIR_CEILING:
                 break
             if int(sizes[end]) < floor:  # exceeds padding-waste bound -> split

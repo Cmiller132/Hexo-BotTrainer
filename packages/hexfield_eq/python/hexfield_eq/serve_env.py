@@ -21,12 +21,18 @@ from __future__ import annotations
 import os
 
 # Import-time kernel gates (model.py reads each once at import). Forced to "1".
+# Keep in step with the supervise fast profile: a gate missing here leaves
+# standalone eval permanently slower than self-play serve (RAYTAP7 was absent
+# from 2026-07-10 morning until this note — evals ran the K1 conv path).
 IMPORT_TIME_FLAGS = (
     "HEXFIELD_SERVE_FLEX",
     "HEXFIELD_FLEX_PAIR",
     "HEXFIELD_TRITON_CONV",
     "HEXFIELD_TRITON_ATTN",
+    "HEXFIELD_TRITON_ATTN2",
     "HEXFIELD_TRITON_CONV_LN",
+    "HEXFIELD_TRITON_RAYTAP7",
+    "HEXFIELD_EQ_TRITON_RAY",
 )
 
 # Evaluator-time serve flags forced ON to match the self-play serve profile.
