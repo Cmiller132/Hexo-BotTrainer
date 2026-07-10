@@ -80,14 +80,17 @@ def make_optimizer(model: HexfieldNet, lr: float = LR) -> torch.optim.AdamW:
     decay, no_decay = [], []
     for name, param in model.named_parameters():
         # Orbit-tied bias free tables ("bias_free_table*"), the joint-tied
-        # "bias_theta" params, and the register lane's "gate_bias" thresholds
-        # stay no-decay even if >= 2-D; mirrors HexfieldPlugin's predicate. The
-        # lane's q/k/v/out projections decay with the other matrix weights; its
-        # norm affines are 1-D and land in no_decay on ndim.
+        # "bias_theta" params, the register lane's "gate_bias" thresholds, and
+        # the ray-tap ".alpha" reach profiles (2-D but structural — decay
+        # would pull alpha[0] away from its identity init, SPEC_RAYTAP_CONV.md
+        # §2.2) stay no-decay even if >= 2-D; mirrors HexfieldPlugin's
+        # predicate. The lane's q/k/v/out projections decay with the other
+        # matrix weights; its norm affines are 1-D and land in no_decay on ndim.
         no_decay_named = (
             ("bias_free_table" in name)
             or ("bias_theta" in name)
             or ("gate_bias" in name)
+            or name.endswith(".alpha")
         )
         if param.ndim >= 2 and not no_decay_named and name != "tokens":
             decay.append(param)

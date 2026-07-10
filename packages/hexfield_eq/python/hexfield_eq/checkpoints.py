@@ -12,6 +12,7 @@ from typing import Any
 
 import torch
 
+from .constants import FEATURE_VERSION
 from .model import HexfieldNet
 from .support import _SUPPORT_RADIUS
 from .train_state import HexfieldTrainState
@@ -69,6 +70,16 @@ def load_into(model: HexfieldNet, payload: dict, *, optimizer=None) -> dict:
         raise ValueError(
             f"checkpoint support_radius={int(meta_radius)} != this build's "
             f"HEXFIELD_EQ_SUPPORT_RADIUS={_SUPPORT_RADIUS}; refusing the load"
+        )
+    # The featurizer plane-map version is likewise part of the input contract
+    # (SPEC_RAYTAP_CONV.md §1.1): a checkpoint trained under the other map
+    # would silently read permuted/missing planes, so a recorded mismatch
+    # fails loudly (same class as the support_radius check above).
+    meta_fv = (payload.get("meta") or {}).get("feature_version")
+    if meta_fv is not None and int(meta_fv) != FEATURE_VERSION:
+        raise ValueError(
+            f"checkpoint feature_version={int(meta_fv)} != this build's "
+            f"HEXFIELD_EQ_FEATURE_VERSION={FEATURE_VERSION}; refusing the load"
         )
     expected = set(model.state_dict().keys())
     got = set(state.keys())
