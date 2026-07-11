@@ -320,6 +320,15 @@ class _GraphCache:
             "min_hits": self._min_hits,
         }
 
+    def latch_failure(self, g: int, npad: int, request_ml: bool) -> None:
+        """Latch a post-capture failure for a shape: mark the key failed AND
+        evict its entry, so every later request falls back to the compiled
+        path instead of replaying a broken graph. Used by run_group and by the
+        fused graphs+copy-stream path's fill/replay guard."""
+        key = (self.bucket(g), npad, request_ml)
+        self._failed.add(key)
+        self._graphs.pop(key, None)
+
     def _capture(self, key, npad: int, request_ml: bool):
         bb = key[0]
         dev = self._device
@@ -458,11 +467,9 @@ class _GraphCache:
             return self.replay(entry, g)
         except Exception:
             # Latch AND evict: leaving the entry in _graphs would keep serving
-            # a broken graph (entry_for checks _failed first, but the eviction
+            # a broken graph (entry_for checks _failed first, and the eviction
             # also releases the statics).
-            key = (self.bucket(g), npad, request_ml)
-            self._failed.add(key)
-            self._graphs.pop(key, None)
+            self.latch_failure(g, npad, request_ml)
             return None
 
 
@@ -817,70 +824,87 @@ class HexfieldEvaluator:
                 # one replay. No intermediate device tensors, no D2D.
                 entry = self._graph_cache.entry_for(gn, p, request_ml)
                 if entry is not None:
-                    slot = self._pin_ring.acquire()
-                    h_feats = _PinnedRing.stage(slot, "feats", grp["feats"])
-                    h_nbr = _PinnedRing.stage(slot, "nbr", grp["nbr"])
-                    h_mask = _PinnedRing.stage(slot, "mask", grp["mask"])
-                    h_coords = _PinnedRing.stage(slot, "coords", grp["coords"])
-                    h_raylen = (
-                        _PinnedRing.stage(slot, "raylen", grp["raylen"])
-                        if self._needs_raylen
-                        else None
-                    )
-                    si = entry["in"]
-                    cur = torch.cuda.current_stream()
-                    with torch.cuda.stream(self._copy_stream):
-                        # Statics are owned by the compute stream; the copy
-                        # stream must not write them before THIS key's previous
-                        # replay (and its output clones) are done.
-                        self._copy_stream.wait_event(entry["use_evt"])
-                        si["feats"][:gn].copy_(
-                            h_feats.view(torch.float16).reshape(gn, p, NUM_FEATURES),
-                            non_blocking=True,
+                    out = None
+                    try:
+                        slot = self._pin_ring.acquire()
+                        h_feats = _PinnedRing.stage(slot, "feats", grp["feats"])
+                        h_nbr = _PinnedRing.stage(slot, "nbr", grp["nbr"])
+                        h_mask = _PinnedRing.stage(slot, "mask", grp["mask"])
+                        h_coords = _PinnedRing.stage(slot, "coords", grp["coords"])
+                        h_raylen = (
+                            _PinnedRing.stage(slot, "raylen", grp["raylen"])
+                            if self._needs_raylen
+                            else None
                         )
-                        d_nbr32 = (
-                            h_nbr.view(torch.int32)
-                            .reshape(gn, p, 6)
-                            .to(dev, non_blocking=True)
-                        )
-                        si["nbr"][:gn].copy_(d_nbr32, non_blocking=True)
-                        si["mask"][:gn].copy_(
-                            h_mask.reshape(gn, p), non_blocking=True
-                        )
-                        d_coords32 = (
-                            h_coords.view(torch.int32)
-                            .reshape(gn, p, 2)
-                            .to(dev, non_blocking=True)
-                        )
-                        si["coords"][:gn].copy_(d_coords32, non_blocking=True)
-                        if h_raylen is not None:
-                            # u8 -> u8: direct pinned H2D into the static, like
-                            # feats (no int staging/cast needed).
-                            si["raylen"][:gn].copy_(
-                                h_raylen.reshape(gn, p, RAYLEN_SLOTS),
+                        si = entry["in"]
+                        cur = torch.cuda.current_stream()
+                        with torch.cuda.stream(self._copy_stream):
+                            # Statics are owned by the compute stream; the copy
+                            # stream must not write them before THIS key's previous
+                            # replay (and its output clones) are done.
+                            self._copy_stream.wait_event(entry["use_evt"])
+                            si["feats"][:gn].copy_(
+                                h_feats.view(torch.float16).reshape(gn, p, NUM_FEATURES),
                                 non_blocking=True,
                             )
-                        evt = torch.cuda.Event()
-                        evt.record(self._copy_stream)
-                    slot["event"] = evt
-                    cur.wait_event(evt)
-                    for t in (d_nbr32, d_coords32):
-                        t.record_stream(cur)
-                    _GraphCache.reset_pad(entry, gn, p)
-                    out = _GraphCache.replay(entry, gn)
-                    if deferred is not None:
-                        deferred.append((out, start, end))
-                    else:
-                        value, ml, priors_flat, logits_flat = self._decode_group(
-                            out, legal_counts, start, end, request_ml, request_logits
-                        )
-                        gpu_values.append(value)
-                        if request_ml:
-                            gpu_ml.append(ml)
-                        gpu_priors.append(priors_flat)
-                        if request_logits:
-                            gpu_logits.append(logits_flat)
-                    continue
+                            d_nbr32 = (
+                                h_nbr.view(torch.int32)
+                                .reshape(gn, p, 6)
+                                .to(dev, non_blocking=True)
+                            )
+                            si["nbr"][:gn].copy_(d_nbr32, non_blocking=True)
+                            si["mask"][:gn].copy_(
+                                h_mask.reshape(gn, p), non_blocking=True
+                            )
+                            d_coords32 = (
+                                h_coords.view(torch.int32)
+                                .reshape(gn, p, 2)
+                                .to(dev, non_blocking=True)
+                            )
+                            si["coords"][:gn].copy_(d_coords32, non_blocking=True)
+                            if h_raylen is not None:
+                                # u8 -> u8: direct pinned H2D into the static, like
+                                # feats (no int staging/cast needed).
+                                si["raylen"][:gn].copy_(
+                                    h_raylen.reshape(gn, p, RAYLEN_SLOTS),
+                                    non_blocking=True,
+                                )
+                            evt = torch.cuda.Event()
+                            evt.record(self._copy_stream)
+                        slot["event"] = evt
+                        cur.wait_event(evt)
+                        for t in (d_nbr32, d_coords32):
+                            t.record_stream(cur)
+                        _GraphCache.reset_pad(entry, gn, p)
+                        out = _GraphCache.replay(entry, gn)
+                    except Exception:
+                        # Same latch+evict semantics as run_group — but FIRST
+                        # quiesce the device: the exception may have left H2D
+                        # copies enqueued that still read this pin-ring slot
+                        # and write the entry's statics, so slot reuse and the
+                        # eviction below are only safe after a full sync (cheap
+                        # on this ultra-rare path). A poisoned CUDA context
+                        # re-raises out of the sync — the loud pre-guard
+                        # behavior — instead of serving corrupted state. If the
+                        # graph itself already launched, the compiled fallback
+                        # below means one wasted (discarded) forward, not a
+                        # double append.
+                        torch.cuda.synchronize()
+                        self._graph_cache.latch_failure(gn, p, request_ml)
+                    if out is not None:
+                        if deferred is not None:
+                            deferred.append((out, start, end))
+                        else:
+                            value, ml, priors_flat, logits_flat = self._decode_group(
+                                out, legal_counts, start, end, request_ml, request_logits
+                            )
+                            gpu_values.append(value)
+                            if request_ml:
+                                gpu_ml.append(ml)
+                            gpu_priors.append(priors_flat)
+                            if request_logits:
+                                gpu_logits.append(logits_flat)
+                        continue
             if self._copy_stream is not None:
                 # Copy-stream path: stage through pinned buffers, issue the H2D
                 # on the copy stream, and make the compute stream wait on a

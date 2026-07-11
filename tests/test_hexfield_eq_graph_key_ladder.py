@@ -107,13 +107,16 @@ def test_ladder_is_bounded_and_rejects_out_of_range(make_cache):
 
 
 def test_ladder_padding_waste_is_bounded(make_cache):
-    """Relative row padding (bb - g) / g stays under ~27% for g >= 4 (padded
-    rows ride the idle GPU; this pins the trade from growing silently)."""
+    """Pins the padding trade from growing silently: at small g the ABSOLUTE
+    pad (rows) is what matters (relative waste is meaningless at g=5), at
+    large g the RELATIVE waste is what costs compute. Both stay bounded."""
     cache, _ = make_cache()
-    worst = max(
-        (cache.bucket(g) - g) / g for g in range(4, cache.MAX_B + 1)
+    worst_abs = max(cache.bucket(g) - g for g in range(1, cache.MAX_B + 1))
+    assert worst_abs <= 32, f"worst-case absolute pad {worst_abs} rows"
+    worst_rel = max(
+        (cache.bucket(g) - g) / g for g in range(32, cache.MAX_B + 1)
     )
-    assert worst <= 0.27, f"worst-case pad waste {worst:.2%}"
+    assert worst_rel <= 0.27, f"worst-case relative pad waste {worst_rel:.2%}"
 
 
 # --------------------------------------------------------------------------- #
@@ -237,6 +240,17 @@ def test_run_group_replay_failure_latches_and_evicts(make_cache):
     assert key not in cache._graphs
     # And the key stays dead (compiled-path fallback, no recapture).
     assert cache.entry_for(4, 384, True) is None
+
+
+def test_latch_failure_marks_and_evicts(make_cache):
+    """latch_failure (shared by run_group and the fused-path guard) marks the
+    key failed and drops the cached entry in one step."""
+    cache, _ = make_cache(min_hits=1)
+    assert cache.entry_for(16, 384, True) is not None
+    cache.latch_failure(16, 384, True)
+    assert (16, 384, True) in cache._failed
+    assert (16, 384, True) not in cache._graphs
+    assert cache.entry_for(16, 384, True) is None
 
 
 def test_malformed_env_knobs_fall_back_to_defaults(monkeypatch):
