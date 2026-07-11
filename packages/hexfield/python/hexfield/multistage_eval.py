@@ -2872,26 +2872,68 @@ def run_multistage_eval_concurrent(
     per = alloc.get("per_checkpoint", 0)
     ckpt_opps = [o for o in roster.opponents if o.ckpt is not None]
     foreign_ov = _foreign_opponent_overrides(full_cfg, roster, candidate_ckpt, diag_dir)
+    multi_attempts = 0
     if per > 0 and ckpt_opps:
+        # Fail-soft with bounded retries (2026-07-11): under run_concurrent the
+        # checkpoint pass shares the GPU with the live driver's selfplay, and a
+        # freshly restarted driver's CUDA-graph capture burst can surface
+        # transient errors here ("CUDA driver error: device not ready" cost
+        # ep20 and ep30 their entire h2h leg -> INCONCLUSIVE champion
+        # verdicts). A paused retry recovers the epoch's champion edge instead
+        # of permanently dropping it; the final failure keeps the original
+        # fail-soft envelope.
+        # Malformed knobs fall back to the defaults — a bad env var must not
+        # escalate a fail-soft stage into an eval-crashing one.
         try:
-            matches = play_multi_checkpoint_match(
-                str(candidate_ckpt),
-                [(o.label, str(o.ckpt)) for o in ckpt_opps],
-                per,
-                config=full_cfg,
-                candidate_label=cand_label,
-                visits=_eval_visits(cfg, full_cfg),
-                virtual_batch_size=_eval_virtual_batch_size(cfg, full_cfg),
-                opening_plies=cfg.opening_plies,
-                opening_temperature=cfg.opening_temperature,
-                # Foreign anchors search with their original PUCT profile;
-                # this-run lineage keeps the candidate's (self-play) profile.
-                divergence_overrides_by_opponent=foreign_ov or None,
-                diagnostics_dir=str(diag_dir),
+            attempts = 1 + max(
+                0, int(os.environ.get("HEXFIELD_EVAL_H2H_RETRIES", "") or 2)
             )
-        except Exception as exc:  # noqa: BLE001 — fail-soft at the batch boundary.
-            multi_error = f"{type(exc).__name__}: {exc}"
-            matches = {}
+        except (TypeError, ValueError):
+            attempts = 3
+        try:
+            retry_delay = float(
+                os.environ.get("HEXFIELD_EVAL_H2H_RETRY_DELAY", "") or 90.0
+            )
+        except (TypeError, ValueError):
+            retry_delay = 90.0
+        if not math.isfinite(retry_delay) or retry_delay < 0.0:
+            retry_delay = 90.0
+        matches = {}
+        for multi_attempts in range(1, attempts + 1):
+            try:
+                matches = play_multi_checkpoint_match(
+                    str(candidate_ckpt),
+                    [(o.label, str(o.ckpt)) for o in ckpt_opps],
+                    per,
+                    config=full_cfg,
+                    candidate_label=cand_label,
+                    visits=_eval_visits(cfg, full_cfg),
+                    virtual_batch_size=_eval_virtual_batch_size(cfg, full_cfg),
+                    opening_plies=cfg.opening_plies,
+                    opening_temperature=cfg.opening_temperature,
+                    # Foreign anchors search with their original PUCT profile;
+                    # this-run lineage keeps the candidate's (self-play) profile.
+                    divergence_overrides_by_opponent=foreign_ov or None,
+                    diagnostics_dir=str(diag_dir),
+                )
+                multi_error = None
+                break
+            except Exception as exc:  # noqa: BLE001 — fail-soft at the batch boundary.
+                multi_error = f"{type(exc).__name__}: {exc}"
+                matches = {}
+                _EVAL_LOG.warning(
+                    "multi-checkpoint pass failed (attempt %d/%d): %s",
+                    multi_attempts, attempts, multi_error,
+                )
+                if multi_attempts < attempts:
+                    try:
+                        import torch  # local: the stats layer stays torch-free
+
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    time.sleep(retry_delay)
         for opp in ckpt_opps:
             match = matches.get(opp.label)
             if match is None:
@@ -2927,6 +2969,8 @@ def run_multistage_eval_concurrent(
         stage_c_detail["strix_unavailable"] = strix_unavailable
     if multi_error is not None:
         stage_c_detail["multi_checkpoint_error"] = multi_error
+    if multi_attempts > 1:
+        stage_c_detail["multi_checkpoint_attempts"] = multi_attempts
     stage_c = StageResult(stage="C_deep", status=stage_c_status, detail=stage_c_detail)
 
     # ----- Stage D — the same pool append / BT fit / verdict. -----

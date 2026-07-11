@@ -11,6 +11,7 @@ positional layout as `priors_bytes`) when `request_logits` is set.
 
 from __future__ import annotations
 
+import bisect
 import logging
 import os
 
@@ -42,8 +43,9 @@ NBR_SENTINEL = 0xFFFF
 # (B_bucket, Npad) graph keys hold proportionally bigger activation pools, and
 # the CUDA-graph pool VRAM those keys pin brings back the capture-failure
 # cascade the pair-build removal had just fixed. Keep 3.8e7; raise only via
-# HEXFIELD_PAIR_CEILING with a measured end-to-end win (a bounded key ladder —
-# coarser Npad quanta at large B — is the designed follow-up).
+# HEXFIELD_PAIR_CEILING with a measured end-to-end win. The designed follow-up
+# (a bounded graph-key ladder) landed 2026-07-11 in _GraphCache — see its
+# B_LADDER / MIN_HITS / MAX_KEYS bounds.
 PAIR_CEILING = float(os.environ.get("HEXFIELD_PAIR_CEILING", 0) or 3.8e7)
 # Padded cell-count quantum (rows pad up to a multiple of this).
 QUANT_NODES = 64
@@ -66,6 +68,15 @@ WASTE_FRACTION = float(os.environ.get("HEXFIELD_WASTE_FRACTION", 0) or 0.18)
 
 def _ceil_quant(n: int) -> int:
     return max(QUANT_NODES, -(-int(n) // QUANT_NODES) * QUANT_NODES)
+
+
+def _env_int(name: str, default: int) -> int:
+    """os.environ int with the default on ANY malformed value: the serve must
+    never fail to construct over a bad tuning knob."""
+    try:
+        return int(os.environ.get(name, "") or default)
+    except (TypeError, ValueError):
+        return default
 
 
 class _PinnedRing:
@@ -239,11 +250,36 @@ class _GraphCache:
     pad-row convention (zero feats, nbr=Npad, mask False), so outputs for the
     real rows are unchanged and the pad rows are sliced off after replay.
     Every graph shares one memory pool. A key that fails capture falls back to
-    the regular compiled path permanently."""
+    the regular compiled path permanently.
 
-    # Multiples of 4: mean pad waste ~1.5 rows/group. More keys than a coarse
-    # ladder, but each capture is cheap and the set is bounded by the pair
-    # ceiling (B <= ~260).
+    The captured set is BOUNDED (2026-07-11): every captured graph permanently
+    pins host-side exec structures (cudaGraph instantiation over the whole
+    compiled forward) plus its statics and pool VRAM. Under the original
+    uniform step-4 B ladder a fully-warmed selfplay serve minted a graph for
+    nearly every (B_bucket, Npad) remainder shape — hundreds of keys, ~5-7GB
+    of host RSS growth per driver life. That standing overhead is what pushed
+    the warm selfplay->train boundary past the guest memory ceiling (earlyoom
+    kill every epoch), and the per-key capture storm on a busy device is the
+    prime suspect for the concurrent eval's intermittent "CUDA driver error:
+    device not ready" (ep20/ep30 partial evals). Three bounds:
+      - B_LADDER: coarse-at-the-top batch buckets (21 values vs 65) so
+        remainder groups share keys; padded rows cost idle-GPU FLOPs only
+        (the WASTE_FRACTION trade).
+      - HEXFIELD_GRAPH_MIN_HITS (default 2): a key must recur before it is
+        worth a capture; one-off shapes use the compiled path.
+      - HEXFIELD_GRAPH_MAX_KEYS (default 96, 0 = unlimited): hard cap on
+        captured graphs; past it, new shapes use the compiled path (existing
+        graphs keep replaying)."""
+
+    # Bounded batch-bucket ladder: fine steps while the absolute pad waste is
+    # small, coarser above (relative row waste stays <= ~25%, and padded rows
+    # ride the idle GPU). Top value 260 == MAX_GROUP_ROWS.
+    B_LADDER = (
+        4, 8, 12, 16, 20, 24, 28, 32,
+        40, 48, 56, 64,
+        80, 96, 112, 128,
+        160, 192, 224, 256, 260,
+    )
     MAX_B = 260
 
     def __init__(
@@ -259,10 +295,30 @@ class _GraphCache:
         self._pool = torch.cuda.graph_pool_handle()
         self._graphs: dict = {}
         self._failed: set = set()
+        self._min_hits = max(1, _env_int("HEXFIELD_GRAPH_MIN_HITS", 2))
+        # Negative values clamp to 0 (= unlimited); disabling graphs entirely
+        # is HEXFIELD_CUDA_GRAPHS=0, not a negative cap.
+        self._max_keys = max(0, _env_int("HEXFIELD_GRAPH_MAX_KEYS", 96))
+        # _hits grows only UNTIL the cap fills (the cap check precedes the
+        # count), and the key space is the finite ladder x observed 64-quant
+        # Npads — a few thousand tiny entries worst-case, not a leak.
+        self._hits: dict = {}
+        self._cap_warned = False
 
     def bucket(self, g: int) -> int | None:
-        b = max(4, -(-g // 4) * 4)
-        return b if b <= self.MAX_B else None
+        if g < 1 or g > self.MAX_B:
+            return None
+        return self.B_LADDER[bisect.bisect_left(self.B_LADDER, g)]
+
+    def stats(self) -> dict:
+        """Capture-set accounting (debug/verification hook)."""
+        return {
+            "captured": len(self._graphs),
+            "failed": len(self._failed),
+            "keys_seen": len(self._hits),
+            "max_keys": self._max_keys,
+            "min_hits": self._min_hits,
+        }
 
     def _capture(self, key, npad: int, request_ml: bool):
         bb = key[0]
@@ -316,21 +372,46 @@ class _GraphCache:
 
     def entry_for(self, g: int, npad: int, request_ml: bool):
         """Get-or-capture the graph entry for a (bucketed) group shape, or None
-        when the shape cannot/failed to capture (caller falls back)."""
+        when the shape cannot/failed to capture, has not recurred enough to be
+        worth a graph, or the key cap is reached (caller falls back to the
+        compiled path)."""
         bb = self.bucket(g)
         if bb is None:
             return None
         key = (bb, npad, request_ml)
+        # _failed FIRST: run_group latches a post-capture replay failure into
+        # _failed (and evicts the entry), and a failed key must never serve a
+        # cached graph again.
         if key in self._failed:
             return None
         entry = self._graphs.get(key)
-        if entry is None:
-            try:
-                entry = self._capture(key, npad, request_ml)
-            except Exception:
-                self._failed.add(key)
-                return None
-            self._graphs[key] = entry
+        if entry is not None:
+            return entry
+        if self._max_keys and len(self._graphs) >= self._max_keys:
+            if not self._cap_warned:
+                self._cap_warned = True
+                logger.warning(
+                    "serve graph-key cap reached (%d captured); further new "
+                    "shapes use the compiled path (HEXFIELD_GRAPH_MAX_KEYS "
+                    "overrides, 0 = unlimited)",
+                    len(self._graphs),
+                )
+            return None
+        hits = self._hits.get(key, 0) + 1
+        self._hits[key] = hits
+        if hits < self._min_hits:
+            return None
+        try:
+            entry = self._capture(key, npad, request_ml)
+        except Exception:
+            self._failed.add(key)
+            return None
+        self._graphs[key] = entry
+        logger.info(
+            "serve graph capture %d/%s: key=(B=%d, Npad=%d, ml=%s)",
+            len(self._graphs), self._max_keys or "unlimited", bb, npad,
+            request_ml,
+        )
         return entry
 
     @staticmethod
@@ -376,7 +457,12 @@ class _GraphCache:
             self.reset_pad(entry, g, npad)
             return self.replay(entry, g)
         except Exception:
-            self._failed.add((self.bucket(g), npad, request_ml))
+            # Latch AND evict: leaving the entry in _graphs would keep serving
+            # a broken graph (entry_for checks _failed first, but the eviction
+            # also releases the statics).
+            key = (self.bucket(g), npad, request_ml)
+            self._failed.add(key)
+            self._graphs.pop(key, None)
             return None
 
 
@@ -890,6 +976,10 @@ class HexfieldEvaluator:
                 d_feats, d_nbr, d_mask, d_coords, gn, request_ml, request_logits,
                 legal_counts, start, end, gpu_values, gpu_ml, gpu_priors,
                 gpu_logits, deferred, d_raylen=d_raylen,
+                # On the fused graphs+copy-stream config, reaching here means
+                # entry_for already declined this group (threshold/cap/failed/
+                # oversize) — do not offer it to the graph cache a second time.
+                try_graph=(self._graph_cache is None or self._copy_stream is None),
             )
 
         if perf_events is not None:
@@ -1039,7 +1129,7 @@ class HexfieldEvaluator:
     def _run_forward(
         self, d_feats, d_nbr, d_mask, d_coords, g, request_ml, request_logits,
         legal_counts, start, end, gpu_values, gpu_ml, gpu_priors, gpu_logits,
-        deferred, d_raylen=None,
+        deferred, d_raylen=None, try_graph: bool = True,
     ) -> None:
         """Shared forward tail for both the CSR (_forward_group) and Rust-pack
         (_submit_rust_pack) packers. Takes the four device tensors already in
@@ -1048,7 +1138,11 @@ class HexfieldEvaluator:
         mark_dynamic, autocast, and the defer-or-decode path. The two packers
         differ only in how these four device tensors are produced. ``d_raylen``
         ((g, Npad, RAYLEN_SLOTS) u8) is present exactly when the net has L
-        blocks (spec D-S18); the C/A call carries the pre-L argument list."""
+        blocks (spec D-S18); the C/A call carries the pre-L argument list.
+        ``try_graph=False`` marks a group the fused graphs+copy-stream path
+        already offered to the graph cache and was declined (threshold / cap /
+        failed / oversize): retrying here would double-count the key's hit
+        toward HEXFIELD_GRAPH_MIN_HITS."""
         device = self.device
         use_fp16 = device.type == "cuda"
         # One dynamic graph for every shape (see __init__): mark both varying
@@ -1061,7 +1155,7 @@ class HexfieldEvaluator:
         # row 0's outputs are unchanged) and the twin is sliced off after.
         # CUDA-graph fast path: one replay per group (see _GraphCache). Falls
         # through to the regular compiled path on capture failure / oversize.
-        if self._graph_cache is not None:
+        if try_graph and self._graph_cache is not None:
             out = self._graph_cache.run_group(
                 d_feats, d_nbr, d_mask, d_coords, g, request_ml,
                 d_raylen=d_raylen,
