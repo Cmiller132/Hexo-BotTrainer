@@ -1326,7 +1326,9 @@ def play_strix_match(
     # Confining the noise to the opening keeps the post-opening play reproducible,
     # so strix stays a STABLE anchor, while still diversifying games. The opening
     # noise is seeded from each game's CRN seed, so a fixed game_seed_base replays
-    # identically across epochs.
+    # identically; the multistage orchestrator folds the candidate epoch into the
+    # base (multistage_eval._epoch_seed_base) so successive epochs draw FRESH
+    # strix opening noise and pooled anchor edges stay decorrelated.
     strix_noise_opening_plies: int | None = None,
     strix_device: str = "cuda",
     strix_linger_s: float = 0.0008,
