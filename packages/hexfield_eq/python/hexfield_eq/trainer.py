@@ -167,6 +167,27 @@ def _perm_seed(run_seed: int, epoch: int) -> int:
     return (int(run_seed) * 2_654_435_761 + int(epoch) * 40_503 + 7) & 0x7FFFFFFF
 
 
+def _trim_host_heap() -> None:
+    """Return freed glibc heap to the OS at the selfplay->train boundary.
+
+    A selfplay epoch's churn leaves freed-but-retained arena memory; the train
+    entry then stacks its ~window-sized allocations on top of that inflated
+    baseline inside a ~1.7GB guest headroom (the 2026-07-11 warm-boundary
+    earlyoom kills). ``gc.collect`` first so cycles drop their buffers, then
+    ``malloc_trim(0)`` hands the freed top/fastbins back to the kernel.
+    Best-effort: on any platform without glibc this is just the gc pass.
+    """
+    import gc
+
+    gc.collect()
+    try:
+        import ctypes
+
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except Exception:  # noqa: BLE001 — non-glibc / sandboxed: gc alone is fine.
+        pass
+
+
 def _atomic_write_json(path, payload: dict[str, Any]) -> None:
     """Serialize ``payload`` to ``path`` via tmp + ``os.replace``.
 
@@ -434,6 +455,10 @@ class HexfieldTrainer:
         # time.monotonic is immune to wall-clock steps; recorded in the diag and
         # stashed so train_passes can print it in the epoch summary line.
         select_t0 = time.monotonic()
+        # The select+train stack lands on whatever heap the selfplay epoch left
+        # behind; trim it back to the OS first (see _trim_host_heap — the warm
+        # train-entry peak was the run's only earlyoom trigger).
+        _trim_host_heap()
 
         # (1) manifest: live total drives window selection; the monotone counter
         # drives the governor.
@@ -740,18 +765,24 @@ class HexfieldTrainer:
                 backend=backend,
                 workers=self.config.training.expand_workers,
                 pool=expand_pool,
+                # Rust: stream the window serialization — each column is freed
+                # the moment its bytes copy exists, so the serialize transient
+                # is ONE column, not a second full window. The copy-all-then-
+                # clear shape peaked at window + full copy simultaneously
+                # (~2x window ≈ 10.6GB at 56k rows), which on the warm selfplay
+                # baseline crossed the guest ceiling at every warm train entry
+                # (the 2026-07-11 boundary earlyoom kills; RSS trace in
+                # wsl-memory-budget notes). Training reads nothing further from
+                # the window's numpy columns and the next select replaces the
+                # window wholesale. Pinned by the rust leg of
+                # test_hexfield_eq_lazy_expand.py (expander works off consumed
+                # cols).
+                consume_window_cols=(backend == "rust"),
             )
             if backend == "rust":
-                # The rust expander closure works entirely off the serialized
-                # column copy it just made (_window_columns_as_bytes copies via
-                # .tobytes()); training reads nothing further from the window's
-                # numpy columns, and the next select replaces the window
-                # wholesale. Dropping the columns now means the train phase
-                # holds ONE copy of the window (the closure's bytes), not two —
-                # the double was ~7GB at 56k-row windows and pushed long-running
-                # drivers into earlyoom (2026-07-11). window.n is preserved for
-                # telemetry / effective-rows math. Pinned by the rust leg of
-                # test_hexfield_eq_lazy_expand.py (expander survives cols.clear).
+                # Columns were consumed during serialization above; drop the
+                # remaining per-row metadata too. window.n is preserved for
+                # telemetry / effective-rows math.
                 window.cols.clear()
                 window.generation = np.empty(0, dtype=np.int32)
                 window.row_shard_id = np.empty(0, dtype=np.int32)

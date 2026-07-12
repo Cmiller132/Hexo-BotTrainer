@@ -24,7 +24,11 @@ import numpy as np
 import pytest
 
 from hexfield_eq.buffer_manifest import ShardEntry
-from hexfield_eq.expand_backends import expand_rows, make_chunk_expander
+from hexfield_eq.expand_backends import (
+    _window_columns_as_bytes,
+    expand_rows,
+    make_chunk_expander,
+)
 from hexfield_eq.features import build_position
 from hexfield_eq.geometry import pack_action_id, unpack_action_id
 from hexfield_eq.samples import STV_HORIZONS, ExpandedRow, HexfieldSampleData
@@ -274,4 +278,65 @@ def test_rust_chunk_expander_matches_expand_rows(window, tmp_path) -> None:
             got_rows[i], ser_rows[i], f"rust-closure vs serial row{i}",
             ignore_suffixes=(".support.index", ".raylen"),
             float_rtol=1e-5,
+        )
+
+
+def test_consume_serialization_bytes_identical(window) -> None:
+    """consume=True must produce byte-identical serialization to consume=False
+    (it only changes WHEN each source column is freed), and must actually
+    remove the consumed columns from the window."""
+    import copy as _copy
+
+    win2 = _copy.copy(window)
+    win2.cols = dict(window.cols)
+    ref = _window_columns_as_bytes(window)  # non-destructive reference
+    got = _window_columns_as_bytes(win2, consume=True)
+    assert got.keys() == ref.keys()
+    for name in ref:
+        assert got[name] == ref[name], f"column {name} bytes differ"
+        assert name not in win2.cols, f"column {name} not consumed"
+    # The reference window is untouched.
+    assert all(name in window.cols for name in ref)
+
+
+@needs_rust
+def test_rust_consume_expander_matches_reference(window) -> None:
+    """The consume_window_cols=True closure (the trainer's production shape:
+    the serialize transient is one column, not a second window) expands
+    identically to the non-consuming closure, working off a window whose
+    columns were freed during construction."""
+    idx = np.asarray([5, 2, 11, 0, 19], dtype=np.int64)
+    idx = idx[idx < int(window.n)]
+    d6 = np.random.default_rng(9).integers(0, 12, size=idx.shape[0], dtype=np.int64)
+    import copy as _copy
+
+    win2 = _copy.copy(window)
+    win2.cols = dict(window.cols)
+    exp = make_chunk_expander(
+        win2, STV_HORIZONS, tolerate_off_legal=False, backend="rust",
+        consume_window_cols=True,
+    )
+    # Every serialized (i.e. bulk CSR/block) column is consumed; small non-rust
+    # metadata columns (e.g. turn_index, one int32/row) may remain and are
+    # dropped by the trainer's follow-up cols.clear() — mirror that here.
+    ref_names = set(_window_columns_as_bytes(window).keys())
+    left = ref_names & set(win2.cols)
+    assert not left, f"consume left serialized columns behind: {sorted(left)}"
+    win2.cols.clear()
+    got_rows, got_valid = exp(idx, d6)
+    ref_rows, ref_valid = expand_rows(
+        window, idx, d6, STV_HORIZONS, tolerate_off_legal=False, backend="rust"
+    )
+    np.testing.assert_array_equal(got_valid, ref_valid)
+    for i in range(len(idx)):
+        _assert_rows_equal(got_rows[i], ref_rows[i], f"consume vs one-shot row{i}")
+
+
+def test_consume_rejects_non_rust_backends(window) -> None:
+    """serial/pool read window.cols on every chunk — consuming under them must
+    be an explicit error, not silent corruption."""
+    with pytest.raises(ValueError, match="consume_window_cols"):
+        make_chunk_expander(
+            window, STV_HORIZONS, tolerate_off_legal=False, backend="serial",
+            consume_window_cols=True,
         )

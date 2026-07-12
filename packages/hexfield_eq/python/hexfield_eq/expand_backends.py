@@ -235,17 +235,32 @@ def _resolve_support_radius() -> int:
     return min(max(r, 1), LEGAL_RADIUS + 1)
 
 
-def _window_columns_as_bytes(window: PackedWindow) -> dict[str, bytes]:
+def _window_columns_as_bytes(
+    window: PackedWindow, *, consume: bool = False
+) -> dict[str, bytes]:
     """Pack the PackedWindow columns the Rust kernel needs into a ``{name: bytes}``
     dict. Each array is made C-contiguous in its writer dtype, then ``.tobytes()``
     (one bulk copy per column). Offsets stay ``int64``; the kernel reinterprets
     the bytes.
+
+    ``consume=True`` drops each source column from ``window.cols`` as soon as
+    its bytes are taken, so the peak transient is ONE column's copy instead of
+    a full second window: the copy-all-then-clear shape held window + full
+    serialized copy simultaneously (~2x window, ~10.6GB at the 2026-07-11
+    56k-row window), which stacked on the warm selfplay baseline crossed the
+    guest memory ceiling at every warm train entry (the boundary earlyoom
+    kills — RSS trace: flat 15.5GB selfplay, then +10.6GB in ~30s, killed
+    ~2s before the clear would have run). Only for callers that own the
+    window and will not read its columns again (the lazy train expander).
     """
     c = window.cols
     out: dict[str, bytes] = {}
     for name in _RUST_SCALAR_COLS + _RUST_BLOCK_COLS + _RUST_CSR_DATA + _RUST_OFF_COLS:
         arr = np.ascontiguousarray(c[name])
         out[name] = arr.tobytes()
+        if consume:
+            del arr
+            del c[name]
     return out
 
 
@@ -415,6 +430,7 @@ def make_chunk_expander(
     backend: str = "serial",
     workers: int = 0,
     pool: Any | None = None,
+    consume_window_cols: bool = False,
 ):
     """Per-window expansion closure for chunked (lazy) train-phase expansion.
 
@@ -425,8 +441,20 @@ def make_chunk_expander(
     per chunk would re-run ``_window_columns_as_bytes`` over the full window
     each time. The serial/pool backends have no per-window setup and simply
     delegate.
+
+    ``consume_window_cols=True`` (rust backend only) streams the serialization:
+    each window column is freed the moment its bytes copy exists, capping the
+    serialize transient at one column instead of a second full window (see
+    :func:`_window_columns_as_bytes`). The serial/pool backends read
+    ``window.cols`` on every chunk, so consuming there would break them —
+    it raises instead of silently corrupting the phase.
     """
     horizons = tuple(int(h) for h in horizons)
+    if consume_window_cols and backend != "rust":
+        raise ValueError(
+            "consume_window_cols=True requires backend='rust' (serial/pool "
+            "read window.cols on every chunk)"
+        )
     if backend == "rust":
         from . import _rust  # local import: the package imports without the .so
 
@@ -444,7 +472,7 @@ def make_chunk_expander(
                 f"!= requested horizons {tuple(horizons)}; the kernel copies stvalue "
                 f"positionally and cannot remap by horizon value"
             )
-        columns = _window_columns_as_bytes(window)
+        columns = _window_columns_as_bytes(window, consume=consume_window_cols)
         window_n = int(window.n)
         support_radius = int(_resolve_support_radius())
 
