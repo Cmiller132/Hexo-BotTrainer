@@ -399,40 +399,94 @@ def _expand_rows_rust(
 ) -> tuple[list[ExpandedRow | None], np.ndarray]:
     """Dispatch ``index`` of ``window`` to the Rust rayon kernel and reassemble.
 
-    The per-row D6 vector is pre-drawn and passed positionally (no rng in the
-    kernel). ``horizons`` is the config horizon set; the kernel copies the stored
-    ``stvalue`` columns and uses ``len(horizons)`` to slice the block.
+    One-shot wrapper over :func:`make_chunk_expander` (which owns the window
+    serialization + kernel call).
     """
-    from . import _rust  # local import: the package imports without the .so
+    return make_chunk_expander(
+        window, horizons, tolerate_off_legal=tolerate_off_legal, backend="rust"
+    )(index, d6)
 
-    horizons_len = len(horizons)
-    # The kernel copies the stored stvalue block POSITIONALLY (facts.stvalue[..len]),
-    # unlike the serial python path which remaps by horizon VALUE (samples.py
-    # horizon_index). A width-only check would pass a re-tuned horizon set of the
-    # same length (e.g. reordered, or different values) against old shards and
-    # silently train the STV heads on the wrong horizon's target. Require exact
-    # tuple equality so the positional copy is provably aligned.
-    if tuple(window.horizons) != tuple(horizons):
-        raise ValueError(
-            f"rust backend: window horizons {tuple(window.horizons)} "
-            f"!= requested horizons {tuple(horizons)}; the kernel copies stvalue "
-            f"positionally and cannot remap by horizon value"
+
+def make_chunk_expander(
+    window: PackedWindow,
+    horizons: Sequence[int] = STV_HORIZONS,
+    *,
+    tolerate_off_legal: bool = False,
+    backend: str = "serial",
+    workers: int = 0,
+    pool: Any | None = None,
+):
+    """Per-window expansion closure for chunked (lazy) train-phase expansion.
+
+    Returns ``expand(index, d6_subset) -> (rows, valid)`` with exactly the
+    :func:`expand_rows` ``survivor_index=index`` contract. The point of the
+    closure: for ``backend="rust"`` the window's column buffers are serialized
+    ONCE here and reused across every chunk call — calling :func:`expand_rows`
+    per chunk would re-run ``_window_columns_as_bytes`` over the full window
+    each time. The serial/pool backends have no per-window setup and simply
+    delegate.
+    """
+    horizons = tuple(int(h) for h in horizons)
+    if backend == "rust":
+        from . import _rust  # local import: the package imports without the .so
+
+        horizons_len = len(horizons)
+        # The kernel copies the stored stvalue block POSITIONALLY
+        # (facts.stvalue[..len]), unlike the serial python path which remaps by
+        # horizon VALUE (samples.py horizon_index). A width-only check would pass
+        # a re-tuned horizon set of the same length (e.g. reordered, or different
+        # values) against old shards and silently train the STV heads on the
+        # wrong horizon's target. Require exact tuple equality so the positional
+        # copy is provably aligned.
+        if tuple(window.horizons) != tuple(horizons):
+            raise ValueError(
+                f"rust backend: window horizons {tuple(window.horizons)} "
+                f"!= requested horizons {tuple(horizons)}; the kernel copies stvalue "
+                f"positionally and cannot remap by horizon value"
+            )
+        columns = _window_columns_as_bytes(window)
+        window_n = int(window.n)
+        support_radius = int(_resolve_support_radius())
+
+        def _expand_rust(
+            index: Sequence[int] | np.ndarray, d6: np.ndarray
+        ) -> tuple[list[ExpandedRow | None], np.ndarray]:
+            row_index = np.asarray(index, dtype=np.int64)
+            # d6 may be longer than the expanded set (contract:
+            # len(d6) >= len(index)); the kernel requires equality, so slice to
+            # the aligned head.
+            d6_i32 = np.asarray(d6, dtype=np.int32)[: row_index.shape[0]]
+            result = _rust.expand_shard_train(
+                columns,
+                window_n,
+                row_index.tolist(),
+                d6_i32.tolist(),
+                horizons_len,
+                support_radius,
+                bool(tolerate_off_legal),
+            )
+            return _reassemble_rust_rows(result, horizons_len)
+
+        return _expand_rust
+
+    if backend not in ("serial", "pool"):
+        raise ValueError(f"unknown expand_backend {backend!r} (serial|pool|rust)")
+
+    def _expand_py(
+        index: Sequence[int] | np.ndarray, d6: np.ndarray
+    ) -> tuple[list[ExpandedRow | None], np.ndarray]:
+        return expand_rows(
+            window,
+            index,
+            d6,
+            horizons,
+            tolerate_off_legal=tolerate_off_legal,
+            backend=backend,
+            workers=workers,
+            pool=pool,
         )
-    columns = _window_columns_as_bytes(window)
-    row_index = np.asarray(index, dtype=np.int64)
-    # d6 may be longer than the expanded set (contract: len(d6) >= len(index)).
-    # The kernel requires len(d6) == len(row_index), so slice to the aligned head.
-    d6_i32 = np.asarray(d6, dtype=np.int32)[: row_index.shape[0]]
-    result = _rust.expand_shard_train(
-        columns,
-        int(window.n),
-        row_index.tolist(),
-        d6_i32.tolist(),
-        horizons_len,
-        int(_resolve_support_radius()),
-        bool(tolerate_off_legal),
-    )
-    return _reassemble_rust_rows(result, horizons_len)
+
+    return _expand_py
 
 
 # ---------------------------------------------------------------------------

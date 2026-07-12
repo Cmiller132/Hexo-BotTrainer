@@ -56,8 +56,10 @@ from .buffer_manifest import scan_or_update_manifest
 from .config import HexfieldConfig
 from .constants import GROUP_ORDER
 from .expand_backends import (
+    _PARALLEL_MIN_ROWS as _EXPAND_PARALLEL_MIN_ROWS,
     _row_view_to_sample,  # re-exported here; imported from this module by tests
     expand_rows,
+    make_chunk_expander,
     resolve_expand_workers,
 )
 from .losses import hexfield_loss
@@ -702,10 +704,6 @@ class HexfieldTrainer:
         # default radius, off-legal rows hard-error instead.
         tolerate_off_legal = int(os.environ.get("HEXFIELD_EQ_SUPPORT_RADIUS", "8")) < 8
 
-        # (1) Expand all window rows under their pre-drawn D6 via the configured
-        # backend (serial | pool | rust). The backend returns a per-row
-        # ExpandedRow list aligned to range(window.n) plus a `valid` mask;
-        # off-legal rows are flagged invalid, not dropped in-worker.
         backend = str(os.environ.get("HEXFIELD_EXPAND", self.config.training.expand_backend))
         expand_pool = None
         if backend == "pool":
@@ -715,35 +713,113 @@ class HexfieldTrainer:
             expand_pool = self._get_expand_pool()
             if expand_pool is None:
                 backend = "serial"
-        expanded_rows, valid = expand_rows(
-            window,
-            None,  # expand all rows; survivor filter + truncation happen below
-            d6,
-            STV_HORIZONS,
-            tolerate_off_legal=tolerate_off_legal,
-            backend=backend,
-            workers=self.config.training.expand_workers,
-            pool=expand_pool,
-        )
 
-        # (2) Filter survivors on the main thread using the validity mask.
-        survivors: list = [row for row, ok in zip(expanded_rows, valid) if ok]
-        rows_skipped_off_legal = int((~np.asarray(valid, dtype=bool)).sum())
+        if not tolerate_off_legal:
+            # (1-lazy) Production path (default support radius). With
+            # tolerate_off_legal=False every backend HARD-ERRORS on an off-legal
+            # row, so any completed upfront expansion is all-valid and the
+            # survivor set is exactly range(window.n). The permutation domain is
+            # therefore known WITHOUT expanding, and rows can expand lazily per
+            # chunk-of-batches instead of materializing every dense ExpandedRow
+            # at once — the upfront shape held ~10GB of transient RAM at 56k-row
+            # windows (grows with game length) and OOM'd the 2026-07-11 soak at
+            # every train-phase entry. Chunks are an exact multiple of
+            # ``batch_rows``, so optimizer batch composition is IDENTICAL to the
+            # upfront shape (pinned by test_hexfield_eq_lazy_expand.py); an
+            # off-legal row still raises, merely later (mid-phase, at its chunk).
+            rows_skipped_off_legal = 0
+            n_surv = int(window.n)
+            perm = np.random.default_rng(_perm_seed(seed, epoch)).permutation(n_surv)
+            effective_rows = self._effective_rows_for(window, epoch)
+            keep = perm[: max(0, int(effective_rows))]
+            trained_rows = int(keep.shape[0])
+            expander = make_chunk_expander(
+                window,
+                STV_HORIZONS,
+                tolerate_off_legal=False,
+                backend=backend,
+                workers=self.config.training.expand_workers,
+                pool=expand_pool,
+            )
+            if backend == "rust":
+                # The rust expander closure works entirely off the serialized
+                # column copy it just made (_window_columns_as_bytes copies via
+                # .tobytes()); training reads nothing further from the window's
+                # numpy columns, and the next select replaces the window
+                # wholesale. Dropping the columns now means the train phase
+                # holds ONE copy of the window (the closure's bytes), not two —
+                # the double was ~7GB at 56k-row windows and pushed long-running
+                # drivers into earlyoom (2026-07-11). window.n is preserved for
+                # telemetry / effective-rows math. Pinned by the rust leg of
+                # test_hexfield_eq_lazy_expand.py (expander survives cols.clear).
+                window.cols.clear()
+                window.generation = np.empty(0, dtype=np.int32)
+                window.row_shard_id = np.empty(0, dtype=np.int32)
+            chunk_rows = batch_rows * max(
+                1, int(os.environ.get("HEXFIELD_EXPAND_CHUNK_BATCHES", "8"))
+            )
+            if backend == "pool":
+                # expand_rows silently runs pool requests below
+                # _PARALLEL_MIN_ROWS on the main thread; round the chunk up (to
+                # a batch multiple) so the configured parallelism stays real.
+                chunk_rows = max(
+                    chunk_rows,
+                    -(-_EXPAND_PARALLEL_MIN_ROWS // batch_rows) * batch_rows,
+                )
 
-        # (3) Permute the survivor index (drawn over the post-skip set), then
-        # (4) truncate to effective_rows: a single pass, no within-epoch repeat,
-        # capped at the bucket-debited effective_rows.
-        n_surv = len(survivors)
-        perm = np.random.default_rng(_perm_seed(seed, epoch)).permutation(n_surv)
-        effective_rows = self._effective_rows_for(window, epoch)
-        keep = perm[: max(0, int(effective_rows))]
-        ordered_rows = [survivors[int(j)] for j in keep]
+            def _iter_nominal_batches():
+                for cstart in range(0, len(keep), chunk_rows):
+                    cidx = keep[cstart : cstart + chunk_rows]
+                    crows, cvalid = expander(cidx, d6[cidx])
+                    if not bool(np.all(cvalid)):
+                        # Contract break, not data: tolerate_off_legal=False must
+                        # raise inside the backend rather than flag invalid.
+                        raise RuntimeError(
+                            "lazy expand: backend returned invalid rows with "
+                            "tolerate_off_legal=False"
+                        )
+                    for bstart in range(0, len(crows), batch_rows):
+                        yield crows[bstart : bstart + batch_rows]
+                    # crows drops here; the transient is one chunk, not the window.
+        else:
+            # (1) Legacy upfront expansion (HEXFIELD_EQ_SUPPORT_RADIUS < 8
+            # ablation): off-legal rows are flagged invalid and filtered, so the
+            # permutation domain depends on the expansion result and the whole
+            # window must expand first. The full-window RAM transient is accepted
+            # in this debug mode.
+            expanded_rows, valid = expand_rows(
+                window,
+                None,  # expand all rows; survivor filter + truncation happen below
+                d6,
+                STV_HORIZONS,
+                tolerate_off_legal=tolerate_off_legal,
+                backend=backend,
+                workers=self.config.training.expand_workers,
+                pool=expand_pool,
+            )
+
+            # (2) Filter survivors on the main thread using the validity mask.
+            survivors: list = [row for row, ok in zip(expanded_rows, valid) if ok]
+            rows_skipped_off_legal = int((~np.asarray(valid, dtype=bool)).sum())
+
+            # (3) Permute the survivor index (drawn over the post-skip set), then
+            # (4) truncate to effective_rows: a single pass, no within-epoch
+            # repeat, capped at the bucket-debited effective_rows.
+            n_surv = len(survivors)
+            perm = np.random.default_rng(_perm_seed(seed, epoch)).permutation(n_surv)
+            effective_rows = self._effective_rows_for(window, epoch)
+            keep = perm[: max(0, int(effective_rows))]
+            ordered_rows = [survivors[int(j)] for j in keep]
+            trained_rows = len(ordered_rows)
+
+            def _iter_nominal_batches():
+                for start in range(0, len(ordered_rows), batch_rows):
+                    yield ordered_rows[start : start + batch_rows]
 
         # (5) Micro-bucket via pair_budget_microbuckets. One optimizer step per
         # nominal batch of ``batch_rows`` survivors; the (6) loss / optimizer /
         # AMP / grad-clip block follows below.
-        for start in range(0, len(ordered_rows), batch_rows):
-            expanded = ordered_rows[start : start + batch_rows]
+        for expanded in _iter_nominal_batches():
             if not expanded:
                 continue
             tcfg = self.config.training
@@ -885,7 +961,6 @@ class HexfieldTrainer:
             steps += 1
             self.global_step += 1
 
-        trained_rows = len(ordered_rows)
         self.train_state.global_step_samples += trained_rows
 
         if steps <= 0:
@@ -968,4 +1043,11 @@ class HexfieldTrainer:
             f"{int(stashed.get('shards_skipped', 0))} skipped",
             flush=True,
         )
+        # Release the packed window before the next selfplay phase: nothing
+        # reads it between here and the next select (which rebuilds it from
+        # disk), and retaining ~3.5GB of columns through a ~25-minute selfplay
+        # phase kept long-running drivers pressed against the guest memory
+        # ceiling (2026-07-11). The rust lazy path already dropped the columns;
+        # this covers serial/pool and drops the retained shell for all.
+        components.shared.sample_window = PackedWindow.empty()
         return result
