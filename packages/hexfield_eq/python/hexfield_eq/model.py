@@ -1025,33 +1025,33 @@ class ConvBlock(nn.Module):
     def _serve_conv_ln(self, conv, ln, x, gather_idx, mask, ray_ctx, relu):
         """One conv + LN(+ReLU) + mask on the fused serve branch. Baseline
         convs keep the fused Triton conv+LN kernel (byte-identical to the
-        pre-ray-tap path). Equipped convs run the ray-tap reference gather-sum
-        GEMM followed by the _conv_ln_ref epilogue numerics (fp32 LN stats on
-        the conv output, fp16 store) until the K1 fused variant lands; serve
-        throughput measured on this path is labeled reference-path (§2.4)."""
+        pre-ray-tap path). Equipped convs use the split ray-tap path when
+        enabled, then K1, and finally the pure-Torch reference fallback."""
 
         if not conv.raytap:
             w, b = conv._materialize()
             return _hex_conv_ln_fused(
                 x, gather_idx, mask, w, b, ln.weight, ln.bias, ln.eps, relu
             )
-        # TODO(ray7lut2-serve): teach both Triton ray-tap kernels to consume
-        # reach-conditioned O/P.  Until that GPU-gated follow-up lands, the
-        # additive mode deliberately falls through to the correct pure-torch
-        # path below; the alpha-only serve kernels must not silently ignore it.
-        if (
-            conv.raytap_lut == "none"
-            and _hex_ray_taps7_fused is not None
-            and ray_ctx is not None
-        ):
+        if conv.raytap_lut == "additive":
+            O_full, P_full = conv._alpha_tables()
+        else:
+            O_full = P_full = None
+        if _hex_ray_taps7_fused is not None and ray_ctx is not None:
             # Split path (HEXFIELD_TRITON_RAYTAP7): tapped-input kernel ->
             # one cuBLAS fp16 GEMM -> fused bias+LN(+ReLU)+mask epilogue.
             w, b = conv._materialize()
             bsz, npad, cin = x.shape
-            t7 = _hex_ray_taps7_fused(
-                x, ray_ctx.ray_idx, ray_ctx.reach, conv._alpha_full(),
-                conv.alpha.shape[1],
-            )
+            if O_full is None:
+                t7 = _hex_ray_taps7_fused(
+                    x, ray_ctx.ray_idx, ray_ctx.reach, conv._alpha_full(),
+                    conv.alpha.shape[1],
+                )
+            else:
+                t7 = _hex_ray_taps7_fused(
+                    x, ray_ctx.ray_idx, ray_ctx.reach, conv._alpha_full(),
+                    conv.alpha.shape[1], O_full, P_full,
+                )
             gemm = t7.reshape(bsz * npad, 7 * cin) @ w.reshape(
                 7 * cin, conv.out_channels
             ).to(t7.dtype)
@@ -1059,19 +1059,21 @@ class ConvBlock(nn.Module):
                 gemm.view(bsz, npad, conv.out_channels), b, ln.weight, ln.bias,
                 mask, ln.eps, relu,
             )
-        if (
-            conv.raytap_lut == "none"
-            and _hex_conv_ln_raytap_fused is not None
-            and ray_ctx is not None
-        ):
+        if _hex_conv_ln_raytap_fused is not None and ray_ctx is not None:
             # K1 fused variant: in-kernel k-loop over the ray gather index +
             # reach + tiled alpha (spec §2.4); the op itself falls back to the
             # reference on a memoized compile failure.
             w, b = conv._materialize()
+            if O_full is None:
+                return _hex_conv_ln_raytap_fused(
+                    x, gather_idx, mask, w, b, ln.weight, ln.bias,
+                    ray_ctx.ray_idx, ray_ctx.reach, conv._alpha_full(),
+                    ln.eps, relu, conv.alpha.shape[1],
+                )
             return _hex_conv_ln_raytap_fused(
                 x, gather_idx, mask, w, b, ln.weight, ln.bias,
                 ray_ctx.ray_idx, ray_ctx.reach, conv._alpha_full(),
-                ln.eps, relu, conv.alpha.shape[1],
+                ln.eps, relu, conv.alpha.shape[1], O_full, P_full,
             )
         out = conv(x, gather_idx, mask, ray_ctx=ray_ctx)
         y = F.layer_norm(

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import os
 import warnings
+from typing import Optional
 
 import torch
 import torch.nn.functional as F
@@ -89,7 +90,7 @@ if HAVE_TRITON:
             if isinstance(err, _TritonCompileError)
             else f"{type(err).__name__}"
         )
-        c, cout = key
+        c, cout = key[:2]
         warnings.warn(
             f"hexfield: triton {kernel} failed to compile for C={c},Cout={cout} "
             f"({kind}) under triton {_TRITON_VER}; using the reference path for "
@@ -373,7 +374,7 @@ if HAVE_TRITON:
 
     def _conv_ln_raytap_ref(
         x, gather_idx, mask, weight, bias, ln_w, ln_b, ray_idx, reach, alpha,
-        eps, relu, corb,
+        eps, relu, corb, O_full=None, P_full=None,
     ):
         """Reference ray-tap conv + LN(+ReLU) + mask (the ConvBlock equipped-
         conv serve fallback): the _raytap masked-gather taps + one GEMM, LN
@@ -385,7 +386,13 @@ if HAVE_TRITON:
         cout = weight.shape[-1]
         lut = tap_ray_slot_lut().to(ray_idx.device)
         idx_taps = ray_idx.to(torch.int64)[:, :, lut]
-        taps = ray_tap_taps_naive(x, idx_taps, reach, alpha.to(x.dtype), corb)
+        if O_full is None:
+            taps = ray_tap_taps_naive(x, idx_taps, reach, alpha.to(x.dtype), corb)
+        else:
+            taps = ray_tap_taps_naive(
+                x, idx_taps, reach, alpha.to(x.dtype),
+                O_full.to(x.dtype), P_full.to(x.dtype), corb,
+            )
         gathered = torch.cat([x.unsqueeze(2), taps], dim=2).reshape(b, n, 7 * c)
         conv = gathered @ weight.reshape(7 * c, cout).to(x.dtype) + bias.to(x.dtype)
         y = F.layer_norm(conv.float(), (cout,), ln_w.float(), ln_b.float(), eps)
@@ -397,11 +404,11 @@ if HAVE_TRITON:
     @triton.jit
     def _hex_conv_ln_raytap_kernel(
         x_ptr, idx_ptr, mask_ptr, w_ptr, bias_ptr, lnw_ptr, lnb_ptr,
-        rayidx_ptr, reach_ptr, alpha_ptr, slotbase_ptr,
+        rayidx_ptr, reach_ptr, alpha_ptr, O_ptr, P_ptr, slotbase_ptr,
         out_ptr,
         B, Npad, C, Cout, eps,
         IS_FP16_IN: tl.constexpr, RELU: tl.constexpr,
-        CORB: tl.constexpr,
+        CORB: tl.constexpr, HAS_LUT: tl.constexpr,
         BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr,
     ):
         pid_m = tl.program_id(0)
@@ -473,7 +480,33 @@ if HAVE_TRITON:
                     vis = tl.where(
                         side_c[None, :], vis_opp[:, None], vis_own[:, None]
                     )
-                    acc_tap += a * (alpha_k[None, :] * vis)
+                    if HAS_LUT:
+                        effective = alpha_k[None, :] + tl.zeros(
+                            (BM, BK), dtype=tl.float32
+                        )
+                        # Reach has only six states.  Load each table row as a
+                        # coalesced (BK,) broadcast instead of issuing a
+                        # data-dependent (BM, BK) gather for every output row.
+                        for r in tl.static_range(6):
+                            o_r = tl.load(
+                                O_ptr + (r * 5 + k) * C + k_offs,
+                                mask=k_ok,
+                                other=0.0,
+                            ).to(tl.float32)
+                            effective += tl.where(
+                                rl_own[:, None] == r, o_r[None, :], 0.0
+                            )
+                            p_r = tl.load(
+                                P_ptr + (r * 5 + k) * C + k_offs,
+                                mask=k_ok,
+                                other=0.0,
+                            ).to(tl.float32)
+                            effective += tl.where(
+                                rl_opp[:, None] == r, p_r[None, :], 0.0
+                            )
+                        acc_tap += a * (effective * vis)
+                    else:
+                        acc_tap += a * (alpha_k[None, :] * vis)
                 a_tap16 = acc_tap.to(tl.float16)
                 w = tl.load(
                     w_ptr + ((1 + t) * C + k_offs)[:, None] * Cout + n_offs[None, :],
@@ -520,17 +553,25 @@ if HAVE_TRITON:
         eps: float,
         relu: bool,
         corb: int,
+        O_full: Optional[torch.Tensor] = None,
+        P_full: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Fused ray-tap conv + LN(+ReLU) + mask (K1). ``ray_idx`` (B, Npad,
         32) int32 sync-free gather index; ``reach`` (B, Npad, 2, 6) u8
         per-(side, tap) visibility reach; ``alpha`` (5, C) the slot-constant
-        tiled reach profile; ``corb`` the orbit width whose halves the own/opp
-        visibility split rides. Falls back to the reference on any
+        tiled reach profile; optional ``O_full``/``P_full`` (6, 5, C) add the
+        own/opp reach-conditioned profiles; ``corb`` is the orbit width whose
+        halves the visibility split rides. Falls back to the reference on any
         compile/launch failure (memoized per (C, Cout))."""
 
         b, npad, c = x.shape
         cout = weight.shape[-1]
-        key = (c, cout)
+        if (O_full is None) != (P_full is None):
+            raise ValueError("additive ray-tap alpha requires both O and P tables")
+        has_lut = O_full is not None
+        # Keep failures specialization-local: an additive resource miss must
+        # not poison the unchanged alpha-only kernel in the same process.
+        key = (c, cout, has_lut)
         if key not in _CONV_LN_RAYTAP_FAILED:
             try:
                 xc = x.contiguous()
@@ -543,35 +584,45 @@ if HAVE_TRITON:
                 ridx = ray_idx.contiguous()
                 rch = reach.contiguous()
                 a16 = alpha.to(torch.float16).contiguous()
+                if has_lut:
+                    o16 = O_full.to(torch.float16).contiguous()
+                    p16 = P_full.to(torch.float16).contiguous()
+                else:
+                    o16 = p16 = a16
                 sb = _rt_slot_base_on(x.device)
                 out = torch.empty(
                     (b, npad, cout), dtype=torch.float16, device=x.device
                 )
                 rows = b * npad
                 BN = triton.next_power_of_2(cout)
-                BM, BK = _LN_BM, 64
+                # The LUT specialization also carries a (BM, BK) coefficient
+                # tile through the ray gather.  A narrower row tile clears the
+                # per-program register ceiling at C=96; the alpha-only launch
+                # remains exactly the previously tuned configuration.
+                BM, BK = (32 if has_lut else _LN_BM), 64
                 grid = (triton.cdiv(rows, BM),)
                 _hex_conv_ln_raytap_kernel[grid](
                     xc, gidx, m8, w16, b32, lnw, lnb,
-                    ridx, rch, a16, sb, out,
+                    ridx, rch, a16, o16, p16, sb, out,
                     b, npad, c, cout, eps,
                     IS_FP16_IN=(x.dtype == torch.float16), RELU=relu,
-                    CORB=corb,
+                    CORB=corb, HAS_LUT=has_lut,
                     BM=BM, BN=BN, BK=BK,
-                    num_warps=_LN_WARPS, num_stages=_LN_STAGES,
+                    num_warps=_LN_WARPS,
+                    num_stages=(1 if has_lut else _LN_STAGES),
                 )
                 return out
             except Exception as err:  # per-arch triton codegen edge case
                 _mark_failed(_CONV_LN_RAYTAP_FAILED, "hex_conv_ln_raytap", key, err)
         return _conv_ln_raytap_ref(
             x, gather_idx, mask, weight, bias, ln_weight, ln_bias,
-            ray_idx, reach, alpha, eps, relu, corb,
+            ray_idx, reach, alpha, eps, relu, corb, O_full, P_full,
         )
 
     @hex_conv_ln_raytap.register_fake
     def _hex_conv_ln_raytap_fake(
         x, gather_idx, mask, weight, bias, ln_weight, ln_bias,
-        ray_idx, reach, alpha, eps, relu, corb,
+        ray_idx, reach, alpha, eps, relu, corb, O_full=None, P_full=None,
     ):
         return x.new_empty(
             (x.shape[0], x.shape[1], weight.shape[-1]), dtype=torch.float16
@@ -594,14 +645,20 @@ if HAVE_TRITON:
     _RAY_TAPS7_FAILED: set = set()
     _LN_MASK_FAILED: set = set()
 
-    def _ray_taps7_ref(x, ray_idx, reach, alpha, corb):
+    def _ray_taps7_ref(x, ray_idx, reach, alpha, corb, O_full=None, P_full=None):
         """Reference tapped-input builder: [center ; 6 direction taps] via the
         _raytap masked-gather aggregation (identical numerics)."""
         from ._raytap import ray_tap_taps_naive, tap_ray_slot_lut
 
         lut = tap_ray_slot_lut().to(ray_idx.device)
         idx_taps = ray_idx.to(torch.int64)[:, :, lut]
-        taps = ray_tap_taps_naive(x, idx_taps, reach, alpha.to(x.dtype), corb)
+        if O_full is None:
+            taps = ray_tap_taps_naive(x, idx_taps, reach, alpha.to(x.dtype), corb)
+        else:
+            taps = ray_tap_taps_naive(
+                x, idx_taps, reach, alpha.to(x.dtype),
+                O_full.to(x.dtype), P_full.to(x.dtype), corb,
+            )
         return torch.cat([x.unsqueeze(2), taps], dim=2).to(torch.float16)
 
     def _ln_mask_ref(y, bias, ln_w, ln_b, mask, eps, relu):
@@ -618,9 +675,9 @@ if HAVE_TRITON:
 
     @triton.jit
     def _hex_ray_taps7_kernel(
-        x_ptr, rayidx_ptr, reach_ptr, alpha_ptr, slotbase_ptr, out_ptr,
+        x_ptr, rayidx_ptr, reach_ptr, alpha_ptr, O_ptr, P_ptr, slotbase_ptr, out_ptr,
         B, Npad, C,
-        IS_FP16_IN: tl.constexpr, CORB: tl.constexpr,
+        IS_FP16_IN: tl.constexpr, CORB: tl.constexpr, HAS_LUT: tl.constexpr,
         BM: tl.constexpr, BK: tl.constexpr,
     ):
         pid_m = tl.program_id(0)
@@ -676,7 +733,33 @@ if HAVE_TRITON:
                     vp.to(tl.float32)[:, None],
                     vo.to(tl.float32)[:, None],
                 )
-                acc += a * (alpha_k[None, :] * vis)
+                if HAS_LUT:
+                    effective = alpha_k[None, :] + tl.zeros(
+                        (BM, BK), dtype=tl.float32
+                    )
+                    # Reach has only six states.  Load each table row as a
+                    # coalesced (BK,) broadcast instead of issuing a
+                    # data-dependent (BM, BK) gather for every output row.
+                    for r in tl.static_range(6):
+                        o_r = tl.load(
+                            O_ptr + (r * 5 + k) * C + c_offs,
+                            mask=c_ok,
+                            other=0.0,
+                        ).to(tl.float32)
+                        effective += tl.where(
+                            rl_own[:, None] == r, o_r[None, :], 0.0
+                        )
+                        p_r = tl.load(
+                            P_ptr + (r * 5 + k) * C + c_offs,
+                            mask=c_ok,
+                            other=0.0,
+                        ).to(tl.float32)
+                        effective += tl.where(
+                            rl_opp[:, None] == r, p_r[None, :], 0.0
+                        )
+                    acc += a * (effective * vis)
+                else:
+                    acc += a * (alpha_k[None, :] * vis)
             tl.store(
                 out_row + (1 + t) * C,
                 acc.to(tl.float16),
@@ -690,20 +773,34 @@ if HAVE_TRITON:
         reach: torch.Tensor,
         alpha: torch.Tensor,
         corb: int,
+        O_full: Optional[torch.Tensor] = None,
+        P_full: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """(B, Npad, 7, C) fp16 tapped conv input: [center ; 6 direction taps].
         ``ray_idx`` (B, Npad, 32) int32 sync-free gather index; ``reach``
-        (B, Npad, 2, 6) u8; ``alpha`` (5, C) tiled slot-constant. Falls back to
-        the reference builder on any compile/launch failure (memoized per C)."""
+        (B, Npad, 2, 6) u8; ``alpha`` (5, C) tiled slot-constant; optional
+        ``O_full``/``P_full`` (6, 5, C) add own/opp reach-conditioned profiles.
+        Falls back to the reference builder on any compile/launch failure
+        (memoized per C)."""
 
         b, npad, c = x.shape
-        key = (c, 0)
+        if (O_full is None) != (P_full is None):
+            raise ValueError("additive ray-tap alpha requires both O and P tables")
+        has_lut = O_full is not None
+        # Keep failures specialization-local: an additive resource miss must
+        # not poison the unchanged alpha-only kernel in the same process.
+        key = (c, 0, has_lut)
         if key not in _RAY_TAPS7_FAILED:
             try:
                 xc = x.contiguous()
                 ridx = ray_idx.contiguous()
                 rch = reach.contiguous()
                 a16 = alpha.to(torch.float16).contiguous()
+                if has_lut:
+                    o16 = O_full.to(torch.float16).contiguous()
+                    p16 = P_full.to(torch.float16).contiguous()
+                else:
+                    o16 = p16 = a16
                 sb = _rt_slot_base_on(x.device)
                 out = torch.empty(
                     (b, npad, 7, c), dtype=torch.float16, device=x.device
@@ -711,19 +808,22 @@ if HAVE_TRITON:
                 rows = b * npad
                 grid = (triton.cdiv(rows, _RT7_BM), triton.cdiv(c, _RT7_BK))
                 _hex_ray_taps7_kernel[grid](
-                    xc, ridx, rch, a16, sb, out,
+                    xc, ridx, rch, a16, o16, p16, sb, out,
                     b, npad, c,
                     IS_FP16_IN=(x.dtype == torch.float16), CORB=corb,
+                    HAS_LUT=has_lut,
                     BM=_RT7_BM, BK=_RT7_BK,
                     num_warps=_RT7_WARPS, num_stages=_RT7_STAGES,
                 )
                 return out
             except Exception as err:  # per-arch triton codegen edge case
                 _mark_failed(_RAY_TAPS7_FAILED, "hex_ray_taps7", key, err)
-        return _ray_taps7_ref(x, ray_idx, reach, alpha, corb)
+        return _ray_taps7_ref(x, ray_idx, reach, alpha, corb, O_full, P_full)
 
     @hex_ray_taps7.register_fake
-    def _hex_ray_taps7_fake(x, ray_idx, reach, alpha, corb):
+    def _hex_ray_taps7_fake(
+        x, ray_idx, reach, alpha, corb, O_full=None, P_full=None
+    ):
         return x.new_empty(
             (x.shape[0], x.shape[1], 7, x.shape[2]), dtype=torch.float16
         )

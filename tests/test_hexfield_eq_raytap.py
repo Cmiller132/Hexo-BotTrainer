@@ -1107,6 +1107,263 @@ def test_t4b_serve_wire_init_equivalence_cuda(monkeypatch, layout) -> None:
     np.testing.assert_allclose(vr2, vr, atol=1e-6, rtol=0)
 
 
+def _cuda_raytap_kernel_case(npad: int, dtype: torch.dtype, seed: int):
+    """Padded live disk plus nonzero slot-tied alpha/O/P tables on CUDA."""
+
+    from hexfield_eq._raytap import build_ray_gather_index, build_tap_reach
+
+    torch.manual_seed(seed)
+    dev = "cuda"
+    ch = C.CHANNELS
+    corb = C.C_ORBIT if C.GROUP_ORDER == 12 else ch
+    copies = ch // corb
+    _, n, nbr, coords, _, _ = _disk_board(2)
+    assert n < npad
+
+    mask = torch.zeros(1, npad, dtype=torch.bool)
+    mask[:, :n] = True
+    coords_pad = torch.zeros(1, npad, 2, dtype=coords.dtype)
+    coords_pad[:, :n] = coords
+    gidx = torch.full((1, npad, 7), npad, dtype=torch.long)
+    gidx[:, :n, 0] = torch.arange(n).reshape(1, n)
+    gidx[:, :n, 1:] = torch.where(nbr == n, npad, nbr)
+
+    mask = mask.to(dev)
+    coords_pad = coords_pad.to(dev)
+    gidx = gidx.to(dev)
+    raylen = torch.zeros(1, npad, RL, dtype=torch.uint8, device=dev)
+    raylen[:, :n] = torch.randint(
+        0, C.RAY_REACH + 1, (1, n, RL), dtype=torch.uint8, device=dev
+    )
+    ray_idx = build_ray_gather_index(coords_pad, mask)
+    reach = build_tap_reach(raylen)
+
+    # Generate fp16-exact values even for the fp32-input cases: the serve ops
+    # stage alpha/O/P (and K1 weights) to fp16 before launch.
+    x = (torch.randn(1, npad, ch, device=dev, dtype=torch.float16) * 0.25).to(
+        dtype
+    )
+    alpha = (
+        torch.randn(C.RAY_REACH, corb, device=dev, dtype=torch.float16) * 0.15
+    ).repeat(1, copies).contiguous()
+    O_full = (
+        torch.randn(
+            C.RAY_REACH + 1,
+            C.RAY_REACH,
+            corb,
+            device=dev,
+            dtype=torch.float16,
+        )
+        * 0.05
+    ).repeat(1, 1, copies).contiguous()
+    P_full = (
+        torch.randn(
+            C.RAY_REACH + 1,
+            C.RAY_REACH,
+            corb,
+            device=dev,
+            dtype=torch.float16,
+        )
+        * 0.05
+    ).repeat(1, 1, copies).contiguous()
+    assert torch.count_nonzero(O_full) > 0
+    assert torch.count_nonzero(P_full) > 0
+    return {
+        "x": x,
+        "gidx": gidx,
+        "mask": mask,
+        "ray_idx": ray_idx,
+        "reach": reach,
+        "raylen": raylen,
+        "alpha": alpha,
+        "O": O_full,
+        "P": P_full,
+        "corb": corb,
+    }
+
+
+def _raytap_taps_reference(case, O_full, P_full):
+    x = case["x"]
+    lut = RT.tap_ray_slot_lut().to(x.device)
+    idx_taps = case["ray_idx"].to(torch.int64)[:, :, lut]
+    if O_full is None:
+        taps = RT.ray_tap_taps(
+            x, idx_taps, case["reach"], case["alpha"].to(x.dtype), case["corb"]
+        )
+    else:
+        taps = RT.ray_tap_taps(
+            x,
+            idx_taps,
+            case["reach"],
+            case["alpha"].to(x.dtype),
+            O_full.to(x.dtype),
+            P_full.to(x.dtype),
+            case["corb"],
+        )
+    return torch.cat([x.unsqueeze(2), taps], dim=2).to(torch.float16)
+
+
+def _assert_masked_kernel_close(got, ref, mask) -> None:
+    torch.testing.assert_close(
+        got[mask].float(), ref[mask].float(), atol=5e-3, rtol=0
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA + triton")
+@pytest.mark.parametrize("npad", [31, 37])
+@pytest.mark.parametrize(
+    "dtype", [torch.float16, torch.float32], ids=["fp16", "fp32"]
+)
+def test_additive_split_kernel_parity_cuda(npad, dtype) -> None:
+    """Split taps kernel matches the additive training path on live rows."""
+
+    from hexfield_eq._triton_conv import hex_ray_taps7
+
+    if hex_ray_taps7 is None:
+        pytest.skip("triton unavailable")
+    case = _cuda_raytap_kernel_case(npad, dtype, 70 + npad)
+    with torch.no_grad():
+        got = hex_ray_taps7(
+            case["x"], case["ray_idx"], case["reach"], case["alpha"],
+            case["corb"], case["O"], case["P"],
+        )
+        ref = _raytap_taps_reference(case, case["O"], case["P"])
+    _assert_masked_kernel_close(got, ref, case["mask"])
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA + triton")
+@pytest.mark.parametrize("npad", [31, 37])
+@pytest.mark.parametrize(
+    "dtype", [torch.float16, torch.float32], ids=["fp16", "fp32"]
+)
+def test_additive_k1_fused_kernel_parity_cuda(npad, dtype) -> None:
+    """K1 fused conv+LN matches additive pure-Torch ray-tap semantics."""
+
+    from hexfield_eq._triton_conv import hex_conv_ln_raytap, _conv_ln_raytap_ref
+
+    if hex_conv_ln_raytap is None:
+        pytest.skip("triton unavailable")
+    case = _cuda_raytap_kernel_case(npad, dtype, 90 + npad)
+    ch = C.CHANNELS
+    weight = torch.randn(
+        7, ch, ch, device="cuda", dtype=torch.float16
+    ) * 0.05
+    bias = torch.randn(ch, device="cuda") * 0.02
+    lnw = torch.rand(ch, device="cuda") + 0.5
+    lnb = torch.randn(ch, device="cuda") * 0.1
+    with torch.no_grad():
+        for relu in (True, False):
+            got = hex_conv_ln_raytap(
+                case["x"], case["gidx"], case["mask"], weight, bias, lnw, lnb,
+                case["ray_idx"], case["reach"], case["alpha"], 1e-5, relu,
+                case["corb"], case["O"], case["P"],
+            )
+            ref = _conv_ln_raytap_ref(
+                case["x"], case["gidx"], case["mask"], weight, bias, lnw, lnb,
+                case["ray_idx"], case["reach"], case["alpha"], 1e-5, relu,
+                case["corb"], case["O"], case["P"],
+            )
+            _assert_masked_kernel_close(got, ref, case["mask"])
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA + triton")
+def test_raytap_none_kernel_regression_cuda() -> None:
+    """Explicit None tables select HAS_LUT=False in both serve kernels."""
+
+    from hexfield_eq._triton_conv import (
+        hex_conv_ln_raytap,
+        hex_ray_taps7,
+        _conv_ln_raytap_ref,
+    )
+
+    if hex_ray_taps7 is None or hex_conv_ln_raytap is None:
+        pytest.skip("triton unavailable")
+    case = _cuda_raytap_kernel_case(37, torch.float16, 121)
+    ch = C.CHANNELS
+    weight = torch.randn(
+        7, ch, ch, device="cuda", dtype=torch.float16
+    ) * 0.05
+    bias = torch.randn(ch, device="cuda") * 0.02
+    lnw = torch.rand(ch, device="cuda") + 0.5
+    lnb = torch.randn(ch, device="cuda") * 0.1
+    with torch.no_grad():
+        got_taps = hex_ray_taps7(
+            case["x"], case["ray_idx"], case["reach"], case["alpha"],
+            case["corb"], None, None,
+        )
+        ref_taps = _raytap_taps_reference(case, None, None)
+        _assert_masked_kernel_close(got_taps, ref_taps, case["mask"])
+
+        got_k1 = hex_conv_ln_raytap(
+            case["x"], case["gidx"], case["mask"], weight, bias, lnw, lnb,
+            case["ray_idx"], case["reach"], case["alpha"], 1e-5, False,
+            case["corb"], None, None,
+        )
+        ref_k1 = _conv_ln_raytap_ref(
+            case["x"], case["gidx"], case["mask"], weight, bias, lnw, lnb,
+            case["ray_idx"], case["reach"], case["alpha"], 1e-5, False,
+            case["corb"], None, None,
+        )
+        _assert_masked_kernel_close(got_k1, ref_k1, case["mask"])
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA + triton")
+def test_additive_raytap_cuda_graph_capture_replay(monkeypatch) -> None:
+    """A captured additive ConvBlock replays mutated input like eager serve."""
+
+    from hexfield_eq import model as M
+    from hexfield_eq._triton_conv import (
+        hex_conv_ln,
+        hex_ln_mask,
+        hex_ray_taps7,
+    )
+
+    if hex_conv_ln is None or hex_ln_mask is None or hex_ray_taps7 is None:
+        pytest.skip("triton unavailable")
+    monkeypatch.setattr(M, "_hex_conv_ln_fused", hex_conv_ln)
+    monkeypatch.setattr(M, "_hex_ray_taps7_fused", hex_ray_taps7)
+    monkeypatch.setattr(M, "_hex_ln_mask_fused", hex_ln_mask)
+    monkeypatch.setattr(M, "_hex_conv_ln_raytap_fused", None)
+
+    case = _cuda_raytap_kernel_case(37, torch.float16, 151)
+    block = M.ConvBlock(
+        C.CHANNELS, raytap="both", raytap_lut="additive"
+    ).to(device="cuda", dtype=torch.float16).eval()
+    with torch.no_grad():
+        for param in block.parameters():
+            param.copy_(torch.randn_like(param) * 0.05)
+    lut = RT.tap_ray_slot_lut().to(case["ray_idx"].device)
+    ray_ctx = M._RayTapCtx(
+        case["ray_idx"].to(torch.int64)[:, :, lut],
+        case["reach"],
+        case["ray_idx"],
+        case["raylen"],
+    )
+    static_x = case["x"]
+    new_x = torch.randn_like(static_x)
+
+    warmup = torch.cuda.Stream()
+    warmup.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(warmup), torch.no_grad():
+        for _ in range(3):
+            block(static_x, case["gidx"], case["mask"], ray_ctx=ray_ctx)
+    torch.cuda.current_stream().wait_stream(warmup)
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.no_grad(), torch.cuda.graph(graph):
+        captured = block(
+            static_x, case["gidx"], case["mask"], ray_ctx=ray_ctx
+        )
+    first = captured.clone()
+    static_x.copy_(new_x)
+    graph.replay()
+    replayed = captured.clone()
+    with torch.no_grad():
+        eager = block(new_x, case["gidx"], case["mask"], ray_ctx=ray_ctx)
+    assert not torch.equal(replayed[case["mask"]], first[case["mask"]])
+    _assert_masked_kernel_close(replayed, eager, case["mask"])
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA + triton")
 def test_t5_k1_fused_kernel_parity_trained_alpha() -> None:
     """T5 on the K1 fused path: hexfield_eq::hex_conv_ln_raytap matches the
