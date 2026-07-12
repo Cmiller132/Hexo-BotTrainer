@@ -291,6 +291,62 @@ def test_t4_taps_are_live_off_init() -> None:
     assert not torch.allclose(out_pert["policy"], out_init["policy"], atol=1e-6)
 
 
+def test_t4_lut2_zero_init_matches_plain_raytap() -> None:
+    """The additive tables are a function-preserving extension at zero init.
+
+    Copying a plain ray-tap state dict is intentionally used instead of seed
+    alignment: the new parameters must not make this test depend on parameter
+    construction order.
+    """
+
+    batch = _position_batch(seeds=(3, 4), n_stones=7)
+    plain = HexfieldNet(raytap="both", raytap_lut="none").eval()
+    lut2 = HexfieldNet(raytap="both", raytap_lut="additive").eval()
+    result = lut2.load_state_dict(plain.state_dict(), strict=False)
+    assert not result.unexpected_keys
+    assert result.missing_keys
+    assert all(k.endswith((".O", ".P")) for k in result.missing_keys)
+
+    args = (batch["feats"], batch["nbr"], batch["mask"], batch["coords"])
+    with torch.no_grad():
+        out_plain = plain(*args, raylen=batch["raylen"])
+        out_lut2 = lut2(*args, raylen=batch["raylen"])
+    for key in out_plain:
+        torch.testing.assert_close(
+            out_lut2[key], out_plain[key], atol=1e-6, rtol=0,
+            msg=f"zero-init additive LUT changed {key}",
+        )
+
+
+def test_t4_lut2_own_and_opp_tables_are_live() -> None:
+    """Each additive table independently reaches the policy output."""
+
+    batch = _position_batch(seeds=(5,), n_stones=9)
+    model = HexfieldNet(raytap="both", raytap_lut="additive").eval()
+    _randomize(model, 14)
+    with torch.no_grad():
+        for name, param in model.named_parameters():
+            if name.endswith((".O", ".P")):
+                param.zero_()
+
+    args = (batch["feats"], batch["nbr"], batch["mask"], batch["coords"])
+    with torch.no_grad():
+        base = model(*args, raylen=batch["raylen"])["policy"]
+        for name, param in model.named_parameters():
+            if name.endswith(".O"):
+                param.fill_(0.5)
+        own = model(*args, raylen=batch["raylen"])["policy"]
+        for name, param in model.named_parameters():
+            if name.endswith(".O"):
+                param.zero_()
+            elif name.endswith(".P"):
+                param.fill_(-0.5)
+        opp = model(*args, raylen=batch["raylen"])["policy"]
+
+    assert not torch.allclose(own, base, atol=1e-6, rtol=0), "O table is not live"
+    assert not torch.allclose(opp, base, atol=1e-6, rtol=0), "P table is not live"
+
+
 def test_raytap_requires_raylen() -> None:
     batch = _position_batch(seeds=(3,), n_stones=5)
     rt = HexfieldNet(raytap="both").eval()
@@ -304,16 +360,29 @@ def test_raytap_requires_raylen() -> None:
 
 @eq_only
 @pytest.mark.parametrize(
-    "mode,layout",
-    [("conv2", "CCACCA"), ("both", "CCACCA"), ("both", "CCACCACA")],
-    ids=["conv2", "both", "both-A5-layout"],
+    "mode,layout,lut",
+    [
+        ("conv2", "CCACCA", "none"),
+        ("both", "CCACCA", "none"),
+        ("both", "CCACCACA", "none"),
+        ("both", "CCACCA", "additive"),
+    ],
+    ids=["conv2", "both", "both-A5-layout", "both-lut2"],
 )
-def test_t3_full_net_equivariance_raytap(mode: str, layout: str) -> None:
+def test_t3_full_net_equivariance_raytap(
+    mode: str, layout: str, lut: str,
+) -> None:
     from hexfield_eq import equivariant as eq
 
     _, n, nbr, coords, mask, sig = _disk_board(3)
-    model = HexfieldNet(trunk_layout=layout, raytap=mode).eval()
+    model = HexfieldNet(trunk_layout=layout, raytap=mode, raytap_lut=lut).eval()
     _randomize(model, 2)
+    if lut == "additive":
+        lut_params = [
+            p for name, p in model.named_parameters()
+            if name.endswith((".O", ".P"))
+        ]
+        assert lut_params and all(torch.count_nonzero(p) for p in lut_params)
     torch.manual_seed(21)
     feats = torch.randn(1, n, C.NUM_FEATURES)
     raylen = torch.randint(0, C.RAY_REACH + 1, (1, n, RL), dtype=torch.uint8)
@@ -348,6 +417,13 @@ def _alpha_keys(sd: dict) -> tuple[bool, bool]:
     return c1, c2
 
 
+def _lut_keys(sd: dict) -> tuple[set[str], set[str]]:
+    return (
+        {k for k in sd if k.endswith(".O")},
+        {k for k in sd if k.endswith(".P")},
+    )
+
+
 @pytest.mark.parametrize("mode", ["0", "conv2", "both"])
 def test_t6_key_set_meta_and_rebuild(mode: str) -> None:
     model = HexfieldNet(raytap=mode)
@@ -355,17 +431,21 @@ def test_t6_key_set_meta_and_rebuild(mode: str) -> None:
     c1, c2 = _alpha_keys(sd)
     assert c1 == (mode == "both")
     assert c2 == (mode in ("conv2", "both"))
+    assert not any(k.endswith((".O", ".P")) for k in sd)
 
     meta = model.arch_meta()
     assert meta["raytap"] == mode
+    assert meta["raytap_lut"] == "none"
     assert meta["feature_version"] == C.FEATURE_VERSION
 
     # Meta-first inference and the key-set fallback both land on the mode
     # (conv2-vs-both disambiguated by FIRST-conv alpha presence, spec §4).
     kw_meta = infer_net_kwargs_from_state_dict(sd, meta)
     assert kw_meta["raytap"] == mode
+    assert kw_meta["raytap_lut"] == "none"
     kw_keys = infer_net_kwargs_from_state_dict(sd, {})
     assert kw_keys["raytap"] == mode
+    assert kw_keys["raytap_lut"] == "none"
 
     rebuilt = HexfieldNet(**kw_meta)
     rebuilt.load_state_dict(sd, strict=True)
@@ -376,6 +456,57 @@ def test_t6_key_set_meta_and_rebuild(mode: str) -> None:
         corb = C.C_ORBIT if C.GROUP_ORDER == 12 else C.CHANNELS
         assert a.shape == (C.RAY_REACH, corb)
         assert torch.equal(a[0], torch.ones(corb)) and float(a[1:].abs().sum()) == 0.0
+
+
+def test_t6_lut2_meta_round_trip_and_key_fallback() -> None:
+    model = HexfieldNet(raytap="both", raytap_lut="additive")
+    sd = model.state_dict()
+    o_keys, p_keys = _lut_keys(sd)
+    assert o_keys and p_keys and len(o_keys) == len(p_keys)
+
+    meta = model.arch_meta()
+    assert meta["raytap"] == "both"
+    assert meta["raytap_lut"] == "additive"
+
+    # Metadata is authoritative, while a metadata-free checkpoint can still
+    # recover lut2 from its additive-table key set.
+    kw_meta = infer_net_kwargs_from_state_dict(sd, meta)
+    assert kw_meta["raytap_lut"] == "additive"
+    assert infer_net_kwargs_from_state_dict(sd, {})["raytap_lut"] == "additive"
+    forced_none = infer_net_kwargs_from_state_dict(
+        sd, {**meta, "raytap_lut": "none"}
+    )
+    assert forced_none["raytap_lut"] == "none"
+
+    rebuilt = HexfieldNet(**kw_meta)
+    rebuilt.load_state_dict(sd, strict=True)
+
+    corb = C.C_ORBIT if C.GROUP_ORDER == 12 else C.CHANNELS
+    for block in model.conv_blocks:
+        for conv in (block.conv1, block.conv2):
+            if not getattr(conv, "raytap", False):
+                continue
+            assert conv.O.shape == (6, C.RAY_REACH, corb)
+            assert conv.P.shape == (6, C.RAY_REACH, corb)
+            assert torch.count_nonzero(conv.O) == 0
+            assert torch.count_nonzero(conv.P) == 0
+
+
+def test_t6_old_raytap_state_warm_starts_lut2_at_zero() -> None:
+    old = HexfieldNet(raytap="both", raytap_lut="none")
+    new = HexfieldNet(raytap="both", raytap_lut="additive")
+    result = new.load_state_dict(old.state_dict(), strict=False)
+    expected_o, expected_p = _lut_keys(new.state_dict())
+    assert set(result.missing_keys) == expected_o | expected_p
+    assert not result.unexpected_keys
+    for name, param in new.named_parameters():
+        if name.endswith((".O", ".P")):
+            assert torch.count_nonzero(param) == 0, name
+
+
+def test_t6_invalid_raytap_lut_kwarg_rejected() -> None:
+    with pytest.raises(ValueError, match="raytap_lut"):
+        HexfieldNet(raytap="both", raytap_lut="multiplicative")
 
 
 def test_t6_invalid_raytap_kwarg_rejected() -> None:
@@ -401,12 +532,18 @@ def test_t6_default_env_is_inert() -> None:
     """Under the default env RAYTAP is '0' and the state-dict key set is the
     pre-change set (no alpha anywhere) — the live-run isolation guard."""
 
-    if os.environ.get("HEXFIELD_EQ_RAYTAP", "0") != "0":
-        pytest.skip("non-default HEXFIELD_EQ_RAYTAP in this process")
+    if (
+        os.environ.get("HEXFIELD_EQ_RAYTAP", "0") != "0"
+        or os.environ.get("HEXFIELD_EQ_RAYTAP_LUT", "none") != "none"
+    ):
+        pytest.skip("non-default ray-tap env in this process")
     assert C.RAYTAP == "0"
+    assert C.RAYTAP_LUT == "none"
     model = HexfieldNet()
     assert not any(k.endswith(".alpha") for k in model.state_dict())
+    assert not any(k.endswith((".O", ".P")) for k in model.state_dict())
     assert model.arch_meta()["raytap"] == "0"
+    assert model.arch_meta()["raytap_lut"] == "none"
 
 
 def test_t6_env_threads_to_net_and_expand(tmp_path: Path) -> None:
@@ -440,6 +577,33 @@ def test_t6_env_threads_to_net_and_expand(tmp_path: Path) -> None:
     }
 
 
+def test_t6_lut2_env_threads_to_net() -> None:
+    env = {k: v for k, v in os.environ.items() if not k.startswith("HEXFIELD")}
+    env["HEXFIELD_EQ_RAYTAP"] = "both"
+    env["HEXFIELD_EQ_RAYTAP_LUT"] = "additive"
+    env["PYTHONPATH"] = os.environ.get("PYTHONPATH", "")
+    code = (
+        "import json\n"
+        "from hexfield_eq import constants as C\n"
+        "from hexfield_eq.model import HexfieldNet\n"
+        "net = HexfieldNet(trunk_layout='CCA')\n"
+        "sd = net.state_dict()\n"
+        "print(json.dumps({'lut': C.RAYTAP_LUT,\n"
+        "  'net_lut': net._raytap_lut,\n"
+        "  'has_O': any(k.endswith('.O') for k in sd),\n"
+        "  'has_P': any(k.endswith('.P') for k in sd)}))\n"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", code], env=env, capture_output=True, text=True,
+        cwd=_REPO, timeout=600,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout.strip().splitlines()[-1]) == {
+        "lut": "additive", "net_lut": "additive",
+        "has_O": True, "has_P": True,
+    }
+
+
 def test_t6_invalid_env_rejected_at_import() -> None:
     env = {k: v for k, v in os.environ.items() if not k.startswith("HEXFIELD")}
     env["HEXFIELD_EQ_RAYTAP"] = "conv1"
@@ -450,6 +614,18 @@ def test_t6_invalid_env_rejected_at_import() -> None:
     )
     assert proc.returncode != 0
     assert "HEXFIELD_EQ_RAYTAP" in proc.stderr
+
+
+def test_t6_invalid_lut_env_rejected_at_import() -> None:
+    env = {k: v for k, v in os.environ.items() if not k.startswith("HEXFIELD")}
+    env["HEXFIELD_EQ_RAYTAP_LUT"] = "multiplicative"
+    env["PYTHONPATH"] = os.environ.get("PYTHONPATH", "")
+    proc = subprocess.run(
+        [sys.executable, "-c", "import hexfield_eq.constants"],
+        env=env, capture_output=True, text=True, cwd=_REPO, timeout=300,
+    )
+    assert proc.returncode != 0
+    assert "HEXFIELD_EQ_RAYTAP_LUT" in proc.stderr
 
 
 # --- T5: serve-fold parity at trained alpha -------------------------------------------
@@ -493,20 +669,51 @@ def _random_tap_inputs(seed: int, b=2, n=37, c=None, dtype=torch.float32):
         0, C.RAY_REACH + 1, (b, n, 2, 6), generator=gen
     ).to(torch.uint8)
     alpha = torch.randn(C.RAY_REACH, corb, generator=gen, dtype=dtype)
-    return x, idx, reach, alpha, corb
+    O = torch.randn(6, C.RAY_REACH, corb, generator=gen, dtype=dtype)
+    P = torch.randn(6, C.RAY_REACH, corb, generator=gen, dtype=dtype)
+    return x, idx, reach, alpha, O, P, corb
+
+
+def test_t8_lut2_reach_state_side_and_all_channel_semantics() -> None:
+    """O uses own reach, P uses opp reach, and both affect both orbit halves."""
+
+    corb = 2
+    x = torch.ones(1, 1, corb)
+    idx = torch.zeros(1, 1, 6, C.RAY_REACH, dtype=torch.long)
+    reach = torch.empty(1, 1, 2, 6, dtype=torch.uint8)
+    reach[:, :, 0].fill_(2)  # OWN -> O[2], and own-half sees k=1..2.
+    reach[:, :, 1].fill_(4)  # OPP -> P[4], and opp-half sees k=1..4.
+    alpha = torch.zeros(C.RAY_REACH, corb)
+    O = torch.zeros(C.RAY_REACH + 1, C.RAY_REACH, corb)
+    P = torch.zeros_like(O)
+    O[2].fill_(1.0)
+    P[4].fill_(10.0)
+
+    out = RT.ray_tap_taps(x, idx, reach, alpha, O, P, corb)
+    expected = torch.tensor([22.0, 44.0]).view(1, 1, 1, 2).expand_as(out)
+    assert torch.equal(out, expected)
 
 
 def test_t8_k2_matches_naive_oracle() -> None:
-    x, idx, reach, alpha, corb = _random_tap_inputs(0)
+    x, idx, reach, alpha, O, P, corb = _random_tap_inputs(0)
     xa = x.clone().requires_grad_(True)
     aa = alpha.clone().requires_grad_(True)
+    oa = O.clone().requires_grad_(True)
+    pa = P.clone().requires_grad_(True)
     xb = x.clone().requires_grad_(True)
     ab = alpha.clone().requires_grad_(True)
+    ob = O.clone().requires_grad_(True)
+    pb = P.clone().requires_grad_(True)
 
-    af_a = aa.repeat(1, x.shape[-1] // corb)
-    af_b = ab.repeat(1, x.shape[-1] // corb)
-    out_k2 = RT.ray_tap_taps(xa, idx, reach, af_a, corb)
-    out_nv = RT.ray_tap_taps_naive(xb, idx, reach, af_b, corb)
+    copies = x.shape[-1] // corb
+    af_a = aa.repeat(1, copies)
+    of_a = oa.repeat(1, 1, copies)
+    pf_a = pa.repeat(1, 1, copies)
+    af_b = ab.repeat(1, copies)
+    of_b = ob.repeat(1, 1, copies)
+    pf_b = pb.repeat(1, 1, copies)
+    out_k2 = RT.ray_tap_taps(xa, idx, reach, af_a, of_a, pf_a, corb)
+    out_nv = RT.ray_tap_taps_naive(xb, idx, reach, af_b, of_b, pf_b, corb)
     assert torch.equal(out_k2, out_nv), "forward numerics must be identical"
 
     g = torch.randn_like(out_k2)
@@ -519,30 +726,40 @@ def test_t8_k2_matches_naive_oracle() -> None:
 
     assert rel(xa.grad, xb.grad) <= 1e-5, "grad_x oracle mismatch"
     assert rel(aa.grad, ab.grad) <= 1e-5, "grad_alpha oracle mismatch"
+    assert rel(oa.grad, ob.grad) <= 1e-5, "grad_O oracle mismatch"
+    assert rel(pa.grad, pb.grad) <= 1e-5, "grad_P oracle mismatch"
 
 
 def test_t8_k2_gradcheck_float64() -> None:
-    x, idx, reach, alpha, corb = _random_tap_inputs(
-        1, b=1, n=9, dtype=torch.float64
+    expected_corb = C.C_ORBIT if C.GROUP_ORDER == 12 else C.CHANNELS
+    x, idx, reach, alpha, O, P, corb = _random_tap_inputs(
+        1, b=1, n=9, c=expected_corb, dtype=torch.float64
     )
     x = x.requires_grad_(True)
     alpha = alpha.requires_grad_(True)
+    O = O.requires_grad_(True)
+    P = P.requires_grad_(True)
 
-    def fn(x_, alpha_):
-        af = alpha_.repeat(1, x_.shape[-1] // corb)
-        return RT.ray_tap_taps(x_, idx, reach, af, corb)
+    def fn(x_, alpha_, O_, P_):
+        copies = x_.shape[-1] // corb
+        af = alpha_.repeat(1, copies)
+        of = O_.repeat(1, 1, copies)
+        pf = P_.repeat(1, 1, copies)
+        return RT.ray_tap_taps(x_, idx, reach, af, of, pf, corb)
 
-    assert torch.autograd.gradcheck(fn, (x, alpha), fast_mode=True)
+    assert torch.autograd.gradcheck(fn, (x, alpha, O, P), fast_mode=True)
 
 
 def test_t8_k2_saves_no_gathered_intermediate() -> None:
-    """The K2 Function's saved set is exactly {x, idx_taps, reach, alpha_full}
-    — no (B, N, 30, C) gathered tensor survives to backward."""
+    """K2 saves compact inputs/tables, never a gathered ray intermediate."""
 
-    x, idx, reach, alpha, corb = _random_tap_inputs(2)
+    x, idx, reach, alpha, O, P, corb = _random_tap_inputs(2)
     x = x.requires_grad_(True)
-    af = alpha.requires_grad_(True).repeat(1, x.shape[-1] // corb)
-    out = RT.ray_tap_taps(x, idx, reach, af, corb)
+    copies = x.shape[-1] // corb
+    af = alpha.requires_grad_(True).repeat(1, copies)
+    of = O.requires_grad_(True).repeat(1, 1, copies)
+    pf = P.requires_grad_(True).repeat(1, 1, copies)
+    out = RT.ray_tap_taps(x, idx, reach, af, of, pf, corb)
     node = out.grad_fn
     while node is not None and "RayTapTaps" not in type(node).__name__:
         node = node.next_functions[0][0] if node.next_functions else None
@@ -562,13 +779,33 @@ def test_t8_k2_saves_no_gathered_intermediate() -> None:
 # --- optimizer / grad-group classification ---------------------------------------------
 
 
-def test_alpha_lands_no_decay_and_trunk_conv() -> None:
+def test_prefit_data_epochs_ignore_uncommitted_games(tmp_path: Path) -> None:
+    try:
+        from hexfield_eq.prefit import _resolve_data_epoch_games
+    except ImportError as exc:  # pragma: no cover
+        pytest.skip(f"prefit import chain unavailable: {exc}")
+
+    epoch = tmp_path / "epoch_000073"
+    epoch.mkdir()
+    committed = [epoch / "game_000001.npz", epoch / "game_000002.npz"]
+    for game in committed:
+        game.write_bytes(b"complete archive placeholder")
+        game.with_suffix(".json").write_text("{}", encoding="utf-8")
+    orphan = epoch / "game_000003.npz"
+    orphan.write_bytes(b"writer was cut before its JSON commit marker")
+
+    assert _resolve_data_epoch_games([str(epoch)], None) == committed
+
+
+def test_alpha_and_lut_tables_land_no_decay_and_trunk_conv() -> None:
     try:
         from hexfield_eq.prefit import make_optimizer
     except ImportError as exc:  # pragma: no cover
         pytest.skip(f"prefit import chain unavailable: {exc}")
 
-    model = HexfieldNet(trunk_layout="CCA", raytap="both")
+    model = HexfieldNet(
+        trunk_layout="CCA", raytap="both", raytap_lut="additive"
+    )
     opt = make_optimizer(model)
     no_decay = {
         id(p)
@@ -576,11 +813,14 @@ def test_alpha_lands_no_decay_and_trunk_conv() -> None:
         if grp["weight_decay"] == 0.0
         for p in grp["params"]
     }
-    alphas = [
-        (nm, p) for nm, p in model.named_parameters() if nm.endswith(".alpha")
+    structural = [
+        (nm, p) for nm, p in model.named_parameters()
+        if nm.endswith((".alpha", ".O", ".P"))
     ]
-    assert alphas
-    for nm, p in alphas:
+    assert any(nm.endswith(".alpha") for nm, _ in structural)
+    assert any(nm.endswith(".O") for nm, _ in structural)
+    assert any(nm.endswith(".P") for nm, _ in structural)
+    for nm, p in structural:
         assert id(p) in no_decay, f"{nm} should be no-decay"
 
     try:
@@ -591,10 +831,84 @@ def test_alpha_lands_no_decay_and_trunk_conv() -> None:
             SimpleNamespace(model=model)
         )
         conv_ids = {id(p) for p in groups["trunk_conv"]}
-        for nm, p in alphas:
+        for nm, p in structural:
             assert id(p) in conv_ids, f"{nm} should be trunk_conv"
     except ImportError:  # pragma: no cover
         pass
+
+
+def test_lut2_prefit_lr_groups_and_scheduler_preserve_scale() -> None:
+    try:
+        from hexfield_eq.prefit import make_optimizer, _set_optimizer_lr
+    except ImportError as exc:  # pragma: no cover
+        pytest.skip(f"prefit import chain unavailable: {exc}")
+
+    base_lr = 2.0e-4
+    scale = 0.1
+    model = HexfieldNet(
+        trunk_layout="CCA", raytap="both", raytap_lut="additive"
+    )
+    opt = make_optimizer(
+        model, lr=base_lr, pretrained_lr_scale=scale
+    )
+    group_for = {
+        id(param): group
+        for group in opt.param_groups
+        for param in group["params"]
+    }
+    new_tables = [
+        (name, param) for name, param in model.named_parameters()
+        if name.endswith((".O", ".P"))
+    ]
+    pretrained = [
+        (name, param) for name, param in model.named_parameters()
+        if not name.endswith((".O", ".P"))
+    ]
+    assert new_tables and pretrained
+
+    for name, param in new_tables:
+        group = group_for[id(param)]
+        assert group["weight_decay"] == 0.0, name
+        assert group["lr_scale"] == pytest.approx(1.0), name
+        assert group["lr"] == pytest.approx(base_lr), name
+    for name, param in pretrained:
+        group = group_for[id(param)]
+        assert group["lr_scale"] == pytest.approx(scale), name
+        assert group["lr"] == pytest.approx(base_lr * scale), name
+
+    scheduled = 3.7e-5
+    _set_optimizer_lr(opt, scheduled)
+    for name, param in new_tables:
+        assert group_for[id(param)]["lr"] == pytest.approx(scheduled), name
+    for name, param in pretrained:
+        assert group_for[id(param)]["lr"] == pytest.approx(scheduled * scale), name
+
+    # Without a warm start the caller uses the default scale and preserves
+    # historical all-parameters-at-one-LR behavior.
+    fresh = make_optimizer(model, lr=base_lr)
+    assert all(group["lr_scale"] == pytest.approx(1.0) for group in fresh.param_groups)
+    assert all(group["lr"] == pytest.approx(base_lr) for group in fresh.param_groups)
+
+    # A run started with --init-from may later continue via --resume (without
+    # --init-from).  The freshly built optimizer must retain a compatible group
+    # topology so the checkpoint can restore its saved scales.
+    resumed = make_optimizer(model, lr=base_lr)
+    assert len(resumed.param_groups) == len(opt.param_groups)
+    resumed.load_state_dict(opt.state_dict())
+    _set_optimizer_lr(resumed, scheduled)
+    resumed_group_for = {
+        id(param): group
+        for group in resumed.param_groups
+        for param in group["params"]
+    }
+    for name, param in new_tables:
+        group = resumed_group_for[id(param)]
+        assert group["lr_scale"] == pytest.approx(1.0), name
+        assert group["lr"] == pytest.approx(scheduled), name
+    for name, param in pretrained:
+        group = resumed_group_for[id(param)]
+        assert group["lr_scale"] == pytest.approx(scale), name
+        assert group["lr"] == pytest.approx(scheduled * scale), name
 
 
 # --- serve wire tests (W-R3 un-gating; needs the Rust featurizer) ------------------------

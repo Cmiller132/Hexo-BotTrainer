@@ -31,6 +31,7 @@ import os
 
 import argparse
 import copy
+import hashlib
 import json
 import math
 import random
@@ -76,8 +77,32 @@ THREAT_PLANE_MIN = 0.6
 PLY_BUCKETS = ((0, 10), (11, 20), (21, 40), (41, 10_000))
 
 
-def make_optimizer(model: HexfieldNet, lr: float = LR) -> torch.optim.AdamW:
-    decay, no_decay = [], []
+def make_optimizer(
+    model: HexfieldNet,
+    lr: float = LR,
+    pretrained_lr_scale: float = 1.0,
+) -> torch.optim.AdamW:
+    """Build groups orthogonal in decay policy and warm-start LR.
+
+    Ordinary prefit keeps ``pretrained_lr_scale=1``.  During a model-only warm
+    start, inherited parameters use the requested scale while the newly added
+    ray-tap ``.O``/``.P`` tables retain the full scheduled learning rate.
+    """
+
+    pretrained_lr_scale = float(pretrained_lr_scale)
+    if not math.isfinite(pretrained_lr_scale) or pretrained_lr_scale < 0.0:
+        raise ValueError(
+            "pretrained_lr_scale must be finite and non-negative, got "
+            f"{pretrained_lr_scale!r}"
+        )
+
+    # Dict insertion order leaves the no-warm-start case as the familiar two
+    # decay/no-decay groups while allowing an independent LR-scale split.
+    # Keep additive tables in their own group even when every scale is 1.0.
+    # That stable three-group topology lets a later ``--resume`` construct an
+    # optimizer compatible with a checkpoint originally started via
+    # ``--init-from`` (load_state_dict then restores the saved lr_scale values).
+    grouped: dict[tuple[float, bool], list[torch.nn.Parameter]] = {}
     for name, param in model.named_parameters():
         # Orbit-tied bias free tables ("bias_free_table*"), the joint-tied
         # "bias_theta" params, the register lane's "gate_bias" thresholds, and
@@ -91,18 +116,148 @@ def make_optimizer(model: HexfieldNet, lr: float = LR) -> torch.optim.AdamW:
             or ("bias_theta" in name)
             or ("gate_bias" in name)
             or name.endswith(".alpha")
+            or name.endswith(".O")
+            or name.endswith(".P")
         )
-        if param.ndim >= 2 and not no_decay_named and name != "tokens":
-            decay.append(param)
-        else:
-            no_decay.append(param)
-    return torch.optim.AdamW(
-        [
-            {"params": decay, "weight_decay": WEIGHT_DECAY},
-            {"params": no_decay, "weight_decay": 0.0},
-        ],
-        lr=lr,
+        weight_decay = (
+            WEIGHT_DECAY
+            if param.ndim >= 2 and not no_decay_named and name != "tokens"
+            else 0.0
+        )
+        is_new_additive_table = name.endswith(".O") or name.endswith(".P")
+        grouped.setdefault((weight_decay, is_new_additive_table), []).append(param)
+
+    param_groups = []
+    for (weight_decay, is_new_additive_table), params in grouped.items():
+        lr_scale = 1.0 if is_new_additive_table else pretrained_lr_scale
+        param_groups.append(
+            {
+                "params": params,
+                "weight_decay": weight_decay,
+                "lr_scale": lr_scale,
+                "lr": float(lr) * lr_scale,
+            }
+        )
+    return torch.optim.AdamW(param_groups, lr=lr)
+
+
+def _set_optimizer_lr(optimizer: torch.optim.Optimizer, lr: float) -> None:
+    """Set a scheduled base LR while preserving each group's scale."""
+
+    for group in optimizer.param_groups:
+        # Old --resume optimizer states predate lr_scale and used one common LR.
+        group["lr"] = float(lr) * float(group.get("lr_scale", 1.0))
+
+
+def _epoch_number(path: Path) -> int | None:
+    """Return the numeric suffix of an ``epoch_*`` directory."""
+
+    if not path.name.startswith("epoch_"):
+        return None
+    suffix = path.name.removeprefix("epoch_")
+    if not suffix.isdigit():
+        return None
+    return int(suffix)
+
+
+def _committed_epoch_games(path: Path) -> list[Path]:
+    """Complete game archives in one epoch directory.
+
+    Self-play writes the same-stem JSON sidecar last as its commit marker.  A
+    cut or crash can leave a matching ``game_*.npz`` behind without that
+    marker, so excluding sidecar-less files is what makes a live/partial newest
+    epoch safe to consume.
+    """
+
+    return sorted(
+        game
+        for game in path.glob("game_*.npz")
+        if game.with_suffix(".json").is_file()
     )
+
+
+def _resolve_data_epoch_games(
+    path_args: list[str], epoch_count: int | None,
+) -> list[Path]:
+    """Resolve explicit epoch dirs, or newest epochs below one samples dir.
+
+    Empty/in-progress epoch directories are skipped.  A game participates only
+    after its same-stem JSON commit marker exists, so a writer's temporary or
+    orphaned archives are ignored.
+    """
+
+    paths = [Path(value) for value in path_args]
+    if not paths:
+        raise SystemExit("--data-epochs requires at least one path")
+
+    direct_games = _committed_epoch_games(paths[0]) if len(paths) == 1 else []
+    child_epochs: list[Path] = []
+    if len(paths) == 1 and not direct_games:
+        child_epochs = sorted(
+            (
+                child
+                for child in paths[0].glob("epoch_*")
+                if child.is_dir() and _epoch_number(child) is not None
+            ),
+            key=lambda child: (_epoch_number(child), child.name),
+        )
+
+    if child_epochs:
+        if epoch_count is None or epoch_count <= 0:
+            raise SystemExit(
+                "a samples parent passed to --data-epochs requires a positive "
+                "--data-epoch-count"
+            )
+        epoch_dirs = child_epochs[-epoch_count:]
+    else:
+        if epoch_count is not None:
+            raise SystemExit(
+                "--data-epoch-count is only valid when --data-epochs names one "
+                "samples parent containing epoch_* directories"
+            )
+        epoch_dirs = paths
+
+    games: list[Path] = []
+    for epoch_dir in epoch_dirs:
+        found = _committed_epoch_games(epoch_dir)
+        if not found:
+            print(
+                f"[data-epochs] skipping empty/incomplete {epoch_dir}",
+                flush=True,
+            )
+            continue
+        games.extend(found)
+
+    # Preserve deterministic order while removing accidental repeated paths.
+    unique = list(dict.fromkeys(games))
+    if len(unique) < 2:
+        raise SystemExit(
+            "--data-epochs resolved fewer than two game_*.npz files; a "
+            "file-level train/val holdout is impossible"
+        )
+    return unique
+
+
+def _split_data_epoch_games(
+    games: list[Path], seed: int, val_fraction: float = 0.05,
+) -> tuple[list[Path], list[Path]]:
+    """Stable seeded file-level holdout, independent of Python hash randomization."""
+
+    def score(path: Path) -> tuple[bytes, str]:
+        # Include the epoch dir because game filenames repeat across epochs.
+        key = f"{seed}/{path.parent.name}/{path.name}".encode("utf-8")
+        digest = hashlib.blake2b(
+            key, digest_size=16, person=b"hexeq-prefit"
+        ).digest()
+        return digest, str(path)
+
+    ranked = sorted(games, key=score)
+    n_val = max(1, int(round(len(ranked) * val_fraction)))
+    n_val = min(n_val, len(ranked) - 1)
+    val_set = set(ranked[:n_val])
+    train = [path for path in games if path not in val_set]
+    val = [path for path in games if path in val_set]
+    return train, val
 
 
 class BootstrapShards(IterableDataset):
@@ -498,9 +653,109 @@ def load_checkpoint(path: Path, model, optimizer=None, scaler=None, ema_model=No
     return payload
 
 
+def load_initial_weights(path: Path, model) -> tuple[list[str], list[str]]:
+    """Tolerantly load model weights only for a function-preserving warm start.
+
+    Unlike ``--resume``, this intentionally performs no architecture-meta
+    guard and restores no optimizer, scaler, epoch, EMA, or global-step state.
+    Missing additive ray-tap tables therefore remain at their zero init.
+    """
+
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+    if isinstance(payload, dict) and "model" in payload:
+        state_dict = payload["model"]
+    elif isinstance(payload, dict):
+        # Also accept a raw state dict for convenience; normal project
+        # checkpoints and soak_init files take the branch above.
+        state_dict = payload
+    else:
+        raise ValueError(f"--init-from {path} does not contain a model state dict")
+    incompatible = model.load_state_dict(state_dict, strict=False)
+    return list(incompatible.missing_keys), list(incompatible.unexpected_keys)
+
+
+def _arch_env_mismatches(meta: dict) -> list[str]:
+    """Cross-check the built architecture against explicitly set env knobs."""
+
+    env_map = {
+        "trunk_layout": "HEXFIELD_EQ_TRUNK",
+        "reg_lane": "HEXFIELD_EQ_REG_LANE",
+        "reg_tok_read": "HEXFIELD_EQ_REG_TOK_READ",
+        "ray_blockers": "HEXFIELD_EQ_RAY_BLOCKERS",
+        "support_radius": "HEXFIELD_EQ_SUPPORT_RADIUS",
+        "feature_version": "HEXFIELD_EQ_FEATURE_VERSION",
+        "channels": "HEXFIELD_EQ_CHANNELS",
+        "group_order": "HEXFIELD_EQ_GROUP_ORDER",
+        "c_orbit": "HEXFIELD_EQ_C_ORBIT",
+        "attention_heads": "HEXFIELD_EQ_ATTENTION_HEADS",
+        "raytap": "HEXFIELD_EQ_RAYTAP",
+        "raytap_lut": "HEXFIELD_EQ_RAYTAP_LUT",
+    }
+    mismatches: list[str] = []
+    for meta_key, env_key in env_map.items():
+        env_value = os.environ.get(env_key)
+        want = meta.get(meta_key)
+        if env_value is None or want is None:
+            continue
+        if isinstance(want, bool):
+            normalized = env_value.strip().lower()
+            got: object = normalized in ("1", "true", "yes", "on")
+        elif isinstance(want, int):
+            try:
+                got = int(float(env_value))
+            except ValueError:
+                got = env_value
+        elif isinstance(want, float):
+            try:
+                got = float(env_value)
+            except ValueError:
+                got = env_value
+        else:
+            got = env_value
+        if got != want:
+            mismatches.append(
+                f"{meta_key}: arch_meta={want!r}, {env_key}={env_value!r}"
+            )
+    return mismatches
+
+
+def save_soak_init(path: Path, model, provenance: dict) -> None:
+    """Atomically emit the trainer warm-start shape ``{meta, model}``."""
+
+    meta = {"lineage": "hexfield_eq", **model.arch_meta()}
+    info = dict(provenance)
+    info.setdefault("weights", "raw")
+    info.setdefault("built_utc", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+    mismatches = _arch_env_mismatches(meta)
+    info["env_mismatches"] = mismatches
+    meta["prefit_soak_init"] = info
+    if mismatches:
+        print(
+            "[WARN] soak-init arch_meta/env mismatch: " + "; ".join(mismatches),
+            flush=True,
+        )
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    torch.save({"meta": meta, "model": model.state_dict()}, tmp)
+    os.replace(tmp, path)
+    print(f"soak-init written: {path} (raw weights)", flush=True)
+
+
 def main(argv=None) -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data", required=True, help="dir with train/ and val/ shards")
+    data_source = parser.add_mutually_exclusive_group(required=True)
+    data_source.add_argument("--data", help="dir with train/ and val/ shards")
+    data_source.add_argument(
+        "--data-epochs", nargs="+", metavar="PATH",
+        help="explicit self-play epoch dirs containing game_*.npz, or one "
+        "samples parent together with --data-epoch-count",
+    )
+    parser.add_argument(
+        "--data-epoch-count", type=int, default=None, metavar="N",
+        help="with one samples parent in --data-epochs, use its N highest "
+        "numbered epoch_* dirs",
+    )
     parser.add_argument("--out", required=True, help="run dir")
     parser.add_argument("--epochs", type=int, default=4)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -508,6 +763,21 @@ def main(argv=None) -> None:
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--limit-steps", type=int, default=0, help="smoke: stop each epoch early")
     parser.add_argument("--resume", default="")
+    parser.add_argument(
+        "--init-from", default="", metavar="PATH",
+        help="model-only warm start loaded with strict=False; does not restore "
+        "optimizer/scaler/epoch state",
+    )
+    parser.add_argument(
+        "--pretrained-lr-scale", type=float, default=0.1,
+        help="LR multiplier for inherited parameters under --init-from; new "
+        "additive O/P tables retain full LR (default 0.1)",
+    )
+    parser.add_argument(
+        "--soak-init", default="", metavar="PATH",
+        help="after prefit, atomically write raw weights as a {meta, model} "
+        "trainer warm-start artifact",
+    )
     parser.add_argument(
         "--policy-target", choices=("visit", "gumbel"), default="visit",
         help="main-policy CE target; 'gumbel' uses the per-row completedQ blend "
@@ -530,6 +800,10 @@ def main(argv=None) -> None:
     parser.add_argument("--warmup-steps", type=int, default=WARMUP_STEPS,
                         help=f"linear LR warmup steps (default {WARMUP_STEPS})")
     args = parser.parse_args(argv)
+    if args.resume and args.init_from:
+        parser.error("--resume and --init-from are mutually exclusive")
+    if args.data_epoch_count is not None and not args.data_epochs:
+        parser.error("--data-epoch-count requires --data-epochs")
 
     device = torch.device(args.device)
     # TF32 for fp32 matmuls (group-norm/eval paths); autocast fp16 covers the
@@ -538,14 +812,41 @@ def main(argv=None) -> None:
     torch.set_float32_matmul_precision("high")
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
-    train_shards = sorted(Path(args.data, "train").glob("shard_*.npz"))
-    val_shards = sorted(Path(args.data, "val").glob("shard_*.npz"))
-    if not train_shards or not val_shards:
-        raise SystemExit(f"no shards under {args.data}")
+    if args.data_epochs:
+        games = _resolve_data_epoch_games(args.data_epochs, args.data_epoch_count)
+        train_shards, val_shards = _split_data_epoch_games(games, args.seed)
+        print(
+            f"[data-epochs] {len(games)} game files -> "
+            f"{len(train_shards)} train / {len(val_shards)} val",
+            flush=True,
+        )
+    else:
+        # Legacy shard layout and glob behavior remain unchanged when the new
+        # corpus mode is not selected.
+        train_shards = sorted(Path(args.data, "train").glob("shard_*.npz"))
+        val_shards = sorted(Path(args.data, "val").glob("shard_*.npz"))
+        if not train_shards or not val_shards:
+            raise SystemExit(f"no shards under {args.data}")
 
     torch.manual_seed(args.seed)
-    model = HexfieldNet().to(device)
-    optimizer = make_optimizer(model, lr=args.lr)
+    model = HexfieldNet()
+    if args.init_from:
+        missing, unexpected = load_initial_weights(Path(args.init_from), model)
+        print(
+            f"initialized model from {args.init_from} with strict=False "
+            f"({len(missing)} missing, {len(unexpected)} unexpected keys)",
+            flush=True,
+        )
+        if missing:
+            print(f"  missing keys left at init: {missing}", flush=True)
+        if unexpected:
+            print(f"  ignored unexpected keys: {unexpected}", flush=True)
+    model = model.to(device)
+    optimizer = make_optimizer(
+        model,
+        lr=args.lr,
+        pretrained_lr_scale=(args.pretrained_lr_scale if args.init_from else 1.0),
+    )
     scaler = torch.amp.GradScaler(enabled=device.type == "cuda")
     # EMA twin (C3): updated every optimizer step, evaluated alongside the raw
     # net, saved in the checkpoint. Grad-free eager module.
@@ -605,8 +906,7 @@ def main(argv=None) -> None:
                 warmup_steps=args.warmup_steps, decay_epochs=args.epochs,
                 global_step=global_step, epoch=epoch,
             )
-            for group in optimizer.param_groups:
-                group["lr"] = lr
+            _set_optimizer_lr(optimizer, lr)
             comps = run_step(
                 fwd, buckets, denoms, device, scaler, optimizer, grad_stats,
                 policy_target=args.policy_target,
@@ -674,6 +974,31 @@ def main(argv=None) -> None:
             out_dir / f"checkpoint_epoch{epoch}.pt", model, optimizer, scaler,
             epoch, global_step, ema_model=ema_model,
         )
+
+    if args.soak_init:
+        init_path = Path(args.init_from) if args.init_from else None
+        resume_path = Path(args.resume) if args.resume else None
+        provenance = {
+            "prefit_out": str(out_dir),
+            "source_init": str(init_path) if init_path else None,
+            "source_init_mtime": (
+                int(init_path.stat().st_mtime) if init_path else None
+            ),
+            "source_init_size": init_path.stat().st_size if init_path else None,
+            "source_resume": str(resume_path) if resume_path else None,
+            "data_mode": "data_epochs" if args.data_epochs else "shards",
+            "data_source": list(args.data_epochs) if args.data_epochs else args.data,
+            "train_files": len(train_shards),
+            "val_files": len(val_shards),
+            "seed": int(args.seed),
+            "epochs_requested": int(args.epochs),
+            "final_epoch": int(args.epochs - 1),
+            "global_step": int(global_step),
+            "pretrained_lr_scale": (
+                float(args.pretrained_lr_scale) if args.init_from else 1.0
+            ),
+        }
+        save_soak_init(Path(args.soak_init), model, provenance)
 
 
 if __name__ == "__main__":

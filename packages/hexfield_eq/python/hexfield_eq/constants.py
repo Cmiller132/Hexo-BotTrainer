@@ -374,6 +374,19 @@ if RAYTAP != "0" and C_ORBIT % 2 != 0:
         "index (spec §2.6)"
     )
 
+# Reach-conditioned ray-tap alpha lookup (ray7lut2).  ``none`` is the exact
+# pre-LUT path; ``additive`` adds independent own/opp reach-state tables to the
+# orbit-tied base alpha.  This is an architecture knob (the additive mode adds
+# ``O``/``P`` parameters to every equipped conv), so it is also recorded in
+# ``HexfieldNet.arch_meta`` and inferred by checkpoint loaders.
+_RAYTAP_LUT_ENV = os.environ.get("HEXFIELD_EQ_RAYTAP_LUT", "none")
+if _RAYTAP_LUT_ENV not in ("none", "additive"):
+    raise ValueError(
+        f"HEXFIELD_EQ_RAYTAP_LUT={_RAYTAP_LUT_ENV!r} must be 'none' or "
+        "'additive'"
+    )
+RAYTAP_LUT = _RAYTAP_LUT_ENV
+
 # --- register lane (docs/PLAN_REGISTER_LANE_RAY_ATTENTION.md Phase R) -----------
 # HEXFIELD_EQ_REG_LANE ("0"/"1", default "0"): attach a RegisterRefresh (one-way
 # sigmoid-gated SUM cross-attention, tokens <- cells) at the exit of every C
