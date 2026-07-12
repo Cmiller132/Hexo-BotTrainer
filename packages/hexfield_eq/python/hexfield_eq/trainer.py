@@ -728,6 +728,19 @@ class HexfieldTrainer:
         # samples whose policy targets fall off the smaller legal set. At the
         # default radius, off-legal rows hard-error instead.
         tolerate_off_legal = int(os.environ.get("HEXFIELD_EQ_SUPPORT_RADIUS", "8")) < 8
+        # HEXFIELD_EXPAND_LAZY=1: take the lazy chunked path even at radius<8.
+        # The radius gate conflated two things — whether off-legal rows CAN
+        # occur (radius semantics) and which expansion STRATEGY to use. The
+        # main_2 soak runs radius 4 and was therefore silently routed to the
+        # legacy upfront branch, which materializes every dense ExpandedRow at
+        # once (~375KB/row x 56k rows ≈ 21GB — py-spy-confirmed as THE
+        # train-entry transient behind every warm-boundary earlyoom kill on
+        # 2026-07-11). Measured across 40+ epochs / >2.2M rows of the radius-4
+        # run: rows_skipped_off_legal == 0 ALWAYS, so the lazy path's all-valid
+        # contract holds; if an off-legal row ever does appear, the expander
+        # raises (strict mode) and the supervisor restarts from checkpoint —
+        # strictly better than the guaranteed per-epoch OOM kill it replaces.
+        force_lazy = os.environ.get("HEXFIELD_EXPAND_LAZY") == "1"
 
         backend = str(os.environ.get("HEXFIELD_EXPAND", self.config.training.expand_backend))
         expand_pool = None
@@ -739,8 +752,9 @@ class HexfieldTrainer:
             if expand_pool is None:
                 backend = "serial"
 
-        if not tolerate_off_legal:
-            # (1-lazy) Production path (default support radius). With
+        if not tolerate_off_legal or force_lazy:
+            # (1-lazy) Production path (default support radius, or any radius
+            # under HEXFIELD_EXPAND_LAZY=1). With
             # tolerate_off_legal=False every backend HARD-ERRORS on an off-legal
             # row, so any completed upfront expansion is all-valid and the
             # survivor set is exactly range(window.n). The permutation domain is

@@ -99,6 +99,14 @@ export HEXFIELD_TRAIN_COMPILE="${HEXFIELD_TRAIN_COMPILE:-1}"
 export HEXFIELD_DEFER_DECODE="${HEXFIELD_DEFER_DECODE:-1}"
 # Model-side support radius: HEXFIELD_EQ_SUPPORT_RADIUS (EQ-namespaced), set by
 # the systemd unit (=4 — must match the prefit corpus / winner checkpoint).
+# 2026-07-11: lazy chunked train expansion at radius<8. The radius-4 run was
+# silently routed to the legacy upfront branch (all 56k dense rows at once,
+# ~21GB transient — THE warm-boundary earlyoom killer, py-spy-confirmed; the
+# tolerate_off_legal radius gate had conflated legality semantics with the
+# expansion strategy). 0 off-legal rows across the entire run, so the lazy
+# path's strict contract holds; an off-legal row would raise -> supervised
+# restart (never observed).
+export HEXFIELD_EXPAND_LAZY="${HEXFIELD_EXPAND_LAZY:-1}"
 
 mkdir -p "$RUNDIR" "$CKPTS"
 log(){ echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" | tee -a "$SUPLOG" >&2; }
