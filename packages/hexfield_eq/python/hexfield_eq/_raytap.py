@@ -293,6 +293,7 @@ class _RayTapTaps(torch.autograd.Function):
         return grad_x, None, None, grad_alpha, grad_O, grad_P, None
 
 
+@torch._dynamo.disable
 def ray_tap_taps(
     x: torch.Tensor,
     idx_taps: torch.Tensor,
@@ -304,7 +305,16 @@ def ray_tap_taps(
 ) -> torch.Tensor:
     """(B, N, 6, C) direction-tap inputs — the production entry point every
     equipped conv calls: the K2 custom-autograd pre-aggregation (identical
-    numerics to :func:`ray_tap_taps_naive`, memory-bounded backward)."""
+    numerics to :func:`ray_tap_taps_naive`, memory-bounded backward).
+
+    dynamo-OPAQUE (2026-07-12): under HEXFIELD_TRAIN_COMPILE the additive
+    (ray7lut2) taps math got inlined by dynamo, and inductor materialized the
+    per-direction (B, N, RAY_REACH, C) effective-alpha gathers plus int64
+    scatter indices as persistent graph buffers — a multi-GB VRAM blowup that
+    killed main_3's first train phase ("CUDA driver error: device not ready",
+    buf59 = (59, 512, 5, 192)). The disable keeps K2's eager memory-bounded
+    forward/backward intact inside the compiled trainer, at the cost of a
+    graph break per equipped conv."""
 
     # Backward-compatible alpha-only call:
     #   ray_tap_taps(x, idx, reach, alpha_full, corb)
