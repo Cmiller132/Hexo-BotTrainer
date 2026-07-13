@@ -35,12 +35,15 @@ tss_enabled = true
 # Next rungs, one epoch apart, gated on deep_verify_failed==0 + throughput:
 # mode=2 (verified hard LOSS consumption), then mode=3 + tss_solver_root_guard.
 tss_interior_guard = true
-# ep27 rung: verified hard LOSS consumption (mode 2 — the first rung where
-# proofs enter backups, each eliding a GPU eval). ep26 full-coverage gate:
-# 1.08M solves, deep_verify_failed=0, 15.3% proven, but 3.4x epoch time at
-# 16/16 sampling (endgame-tail concentration) → half sampling here.
-tss_solver_mode = 2
-tss_solver_sample_16 = 8
+# ep28 rung (final): verified WIN consumption + deep root guard. ep27 gate:
+# 295,162 hard-LOSS backups consumed (40,154 proofs, memo-served re-backs),
+# verify_failed=0 (cumulative ~2.7M solves), epoch 3153s, 1/256 truncated.
+# Both-goal solves cost ~2x Loss-only → sampling trimmed 8→4 to hold epoch
+# time roughly flat. Depth telemetry (search_depth_mean/max) ships with this
+# build — the guard/LOSS/WIN depth deltas become directly observable.
+tss_solver_mode = 3
+tss_solver_root_guard = true
+tss_solver_sample_16 = 4
 tss_solver_node_cap = 2000
 cache_max_states = 262144
 nucleus_f64 = true
