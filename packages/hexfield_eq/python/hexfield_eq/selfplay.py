@@ -220,6 +220,11 @@ class ContinuousDriver:
         self.tss_deep_verify_failed = 0
         self.tss_deep_hard_backups = 0
         self.tss_deep_memo_hits = 0
+        # Search-depth distribution over every real backup (all leaf kinds):
+        # the direct measure of how deep the search actually reaches.
+        self.tss_depth_sum = 0
+        self.tss_depth_max = 0
+        self.tss_backups = 0
         # Finished-game winner tally (completed games only; truncated games have
         # no engine winner and are counted separately by games_truncated).
         self.wins_by_player: dict[int, int] = {0: 0, 1: 0}
@@ -368,6 +373,9 @@ class ContinuousDriver:
             self.tss_deep_verify_failed += int(tss_diag.get("deep_verify_failed", 0))
             self.tss_deep_hard_backups += int(tss_diag.get("deep_hard_backups", 0))
             self.tss_deep_memo_hits += int(tss_diag.get("deep_memo_hits", 0))
+            self.tss_depth_sum += int(tss_diag.get("depth_sum", 0))
+            self.tss_depth_max = max(self.tss_depth_max, int(tss_diag.get("depth_max", 0)))
+            self.tss_backups += int(tss_diag.get("backups", 0))
         # Seed provenance stamped on every row of a blunder-seeded game. Empty
         # for ordinary games, so their metadata is unchanged (fraction=0.0 keeps
         # rows bit-identical to the pre-feature writer).
@@ -815,6 +823,12 @@ class ContinuousDriver:
                 "deep_verify_failed": int(self.tss_deep_verify_failed),
                 "deep_hard_backups": int(self.tss_deep_hard_backups),
                 "deep_memo_hits": int(self.tss_deep_memo_hits),
+                "depth_sum": int(self.tss_depth_sum),
+                "backups": int(self.tss_backups),
+                "search_depth_mean": (
+                    float(self.tss_depth_sum / self.tss_backups) if self.tss_backups else None
+                ),
+                "search_depth_max": int(self.tss_depth_max),
             },
         }
 
@@ -1102,6 +1116,7 @@ def _merge_epoch_diag(segments: list[dict[str, Any]]) -> dict[str, Any]:
             "proof_rows", "proof_disagreements", "sharpened_rows",
             "deep_calls", "deep_win", "deep_loss", "deep_unknown", "deep_nodes",
             "deep_verify_failed", "deep_hard_backups", "deep_memo_hits",
+            "depth_sum", "backups",
         )
         for key in int_keys:
             tss[key] = sum(int(seg.get(key, 0) or 0) for seg in tss_segs)
@@ -1112,6 +1127,12 @@ def _merge_epoch_diag(segments: list[dict[str, Any]]) -> dict[str, Any]:
         )
         tss["injection_fire_rate"] = (
             float(tss["injection_fired_moves"] / moves) if moves else None
+        )
+        tss["search_depth_mean"] = (
+            float(tss["depth_sum"] / tss["backups"]) if tss.get("backups") else None
+        )
+        tss["search_depth_max"] = max(
+            int(seg.get("search_depth_max", 0) or 0) for seg in tss_segs
         )
         for mkey in (
             "win_retained_mass_mean",

@@ -469,6 +469,10 @@ def test_mini_selfplay_driver_end_to_end(tmp_path):
     assert tss["moves"] == driver.decisions > 0
     assert 0.0 <= (tss["threat_move_fraction"] or 0.0) <= 1.0
     assert tss["proof_disagreements"] <= tss["proof_rows"]
+    # Depth telemetry: every search produces backups; mean/max sane.
+    assert tss["backups"] > 0
+    assert (tss["search_depth_mean"] or 0) >= 1.0
+    assert tss["search_depth_max"] >= 1
     shards = sorted(tmp_path.glob("game_*.npz"))
     assert shards, "the production writer must have written v5 shards"
     rows = read_compact_shard(shards[0])

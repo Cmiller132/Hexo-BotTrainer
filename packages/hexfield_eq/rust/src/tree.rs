@@ -397,6 +397,13 @@ pub struct TssCounters {
     pub deep_hard_backups: u32,
     /// Per-move memo hits (a solved leaf re-selected).
     pub deep_memo_hits: u32,
+    // === Search-depth telemetry (every real backup, all leaf kinds) ===
+    /// Σ leaf depth over this move's real backups (mean = depth_sum / backups).
+    pub depth_sum: u64,
+    /// Deepest leaf reached this move.
+    pub depth_max: u32,
+    /// Real backups this move (the depth distribution's denominator).
+    pub backups: u32,
 }
 
 impl TssCounters {
@@ -416,6 +423,9 @@ impl TssCounters {
         self.deep_verify_failed += other.deep_verify_failed;
         self.deep_hard_backups += other.deep_hard_backups;
         self.deep_memo_hits += other.deep_memo_hits;
+        self.depth_sum += other.depth_sum;
+        self.depth_max = self.depth_max.max(other.depth_max);
+        self.backups += other.backups;
     }
 }
 
@@ -1849,6 +1859,11 @@ impl RustSearch {
         leaf_ml: Option<f32>,
     ) {
         let depth = path.len();
+        // Depth telemetry: one sample per REAL backup, all leaf kinds
+        // (terminal / existing-node / λ¹ / verified-deep / net-eval).
+        self.tss.depth_sum += depth as u64;
+        self.tss.depth_max = self.tss.depth_max.max(depth as u32);
+        self.tss.backups += 1;
         for (step, &(node_id, edge_index)) in path.iter().enumerate() {
             let value = if self.nodes[node_id].player == leaf_player {
                 leaf_value

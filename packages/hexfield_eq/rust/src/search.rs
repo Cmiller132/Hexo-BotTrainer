@@ -3077,6 +3077,9 @@ impl PayloadNative {
         tss.set_item("deep_verify_failed", self.tss_counters.deep_verify_failed)?;
         tss.set_item("deep_hard_backups", self.tss_counters.deep_hard_backups)?;
         tss.set_item("deep_memo_hits", self.tss_counters.deep_memo_hits)?;
+        tss.set_item("depth_sum", self.tss_counters.depth_sum)?;
+        tss.set_item("depth_max", self.tss_counters.depth_max)?;
+        tss.set_item("backups", self.tss_counters.backups)?;
         diag.set_item("tss", tss)?;
         if let Some(stats) = eval_stats {
             diag.set_item("evaluation", eval_stats_dict(py, stats)?)?;
