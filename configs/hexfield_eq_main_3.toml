@@ -28,18 +28,16 @@ tss_enabled = true
 # deep solves + certificate verification at gated leaves, consuming NOTHING —
 # play/targets bit-identical to off; collects the deep_* cost/UNKNOWN
 # histograms in the epoch JSON tss block that size the consumption rungs.
-# mode=0 since ep25 training (owner: ep25 eval at full speed; the shadow
-# logging epoch is banked in hexfield.selfplay.epoch_000025.json — 110k solves,
-# 16% proven at cap 400, deep_verify_failed=0). Shadow returns at proper
-# sampling once the optimized solver (docs/TSS_SOLVER_OPT_SPEC.md) is accepted.
-tss_solver_mode = 0
-# Shadow cost tuning (ep25 first-contact measurement: full sampling at cap
-# 2000 pegged 2 CPU cores and dropped pos/s 19 -> ~5, GPU starved at 4%; the
-# solver's per-node cost on real threat-dense positions is ~ms-scale, far
-# above the smoke bench). 1/8 leaf sampling at cap 400 keeps thousands of
-# logged solves per epoch at ~2-3% of that solve load.
-tss_solver_sample_16 = 2
-tss_solver_node_cap = 400
+# Rung ladder (docs/TSS_RUNBOOK.md; owner-ordered auto-deploy 2026-07-13).
+# ep26: interior forced-move guard ON (Lever 0 — fully-forced nodes narrow to
+# the hitting universe) + shadow at FULL sampling/cap 2000 on the OPTIMIZED
+# solver (O12-O18: all buckets ≥20k nodes/s; the ep25 drag is gone).
+# Next rungs, one epoch apart, gated on deep_verify_failed==0 + throughput:
+# mode=2 (verified hard LOSS consumption), then mode=3 + tss_solver_root_guard.
+tss_interior_guard = true
+tss_solver_mode = 1
+tss_solver_sample_16 = 16
+tss_solver_node_cap = 2000
 cache_max_states = 262144
 nucleus_f64 = true
 lcb_z = 1.6
