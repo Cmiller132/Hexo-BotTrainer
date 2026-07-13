@@ -28,7 +28,11 @@ tss_enabled = true
 # deep solves + certificate verification at gated leaves, consuming NOTHING —
 # play/targets bit-identical to off; collects the deep_* cost/UNKNOWN
 # histograms in the epoch JSON tss block that size the consumption rungs.
-tss_solver_mode = 1
+# mode=0 since ep25 training (owner: ep25 eval at full speed; the shadow
+# logging epoch is banked in hexfield.selfplay.epoch_000025.json — 110k solves,
+# 16% proven at cap 400, deep_verify_failed=0). Shadow returns at proper
+# sampling once the optimized solver (docs/TSS_SOLVER_OPT_SPEC.md) is accepted.
+tss_solver_mode = 0
 # Shadow cost tuning (ep25 first-contact measurement: full sampling at cap
 # 2000 pegged 2 CPU cores and dropped pos/s 19 -> ~5, GPU starved at 4%; the
 # solver's per-node cost on real threat-dense positions is ~ms-scale, far
