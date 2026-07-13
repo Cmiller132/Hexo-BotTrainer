@@ -20,6 +20,11 @@ mod support;
 #[path = "../../../hexo_models/rust/src/threats_shared.rs"]
 mod threats_shared;
 
+// Typed TSS results (ProofStatus/HardValue) + the deep-solver seam. The only
+// module allowed to construct a backup-capable HardValue (soundness firewall,
+// docs/PLAN_TSS_DEEPENING.md §2).
+mod tss_core;
+
 #[cfg(feature = "python")]
 mod cache;
 #[cfg(feature = "python")]
@@ -143,6 +148,9 @@ pub fn _rust(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(debug_lcb_pick, module)?)?;
     module.add_function(wrap_pyfunction!(debug_ml_bonus, module)?)?;
     module.add_class::<search::HexfieldMctsSession>()?;
+    // λ¹ threat-analysis diagnostic probe (shared analysis_pydict builder);
+    // drives the Python-side TSS regression fixtures.
+    module.add_function(wrap_pyfunction!(search::hexfield_eq_threat_analysis, module)?)?;
     // Parallel serve-pack with zero-copy buffers (HEXFIELD_RUST_PACK path).
     module.add_function(wrap_pyfunction!(serve_pack::build_serve_groups, module)?)?;
     module.add_function(wrap_pyfunction!(serve_pack::debug_plan_groups, module)?)?;

@@ -148,6 +148,29 @@ class ContinuousDriver:
         # KL(visit || root prior) per full row (mirrors the per-row surprise the
         # writer stores); aggregated at epoch end into policy_surprise_* stats.
         self.policy_surprises: list[float] = []
+        # λ¹ TSS shadow telemetry (PLAN_TSS_DEEPENING.md §9). Per-move counter
+        # sums come from payload["diagnostics"]["tss"] (all move classes);
+        # per-row class/mask previews from the recorded class map (full rows);
+        # proof-vs-outcome disagreements are counted on the writer thread at
+        # finalize (the writer joins before stats()).
+        self.tss_moves = 0
+        self.tss_threat_moves = 0
+        self.tss_forced_defense_moves = 0
+        self.tss_injection_fired_moves = 0
+        self.tss_root_injected_total = 0
+        self.tss_leaf_verdict_hits = 0
+        self.tss_prune_eligible = 0
+        self.tss_prune_dropped = 0
+        self.tss_class_rows = 0
+        self.tss_win_rows = 0
+        self.tss_loss_only_rows = 0
+        # Lever-1 mask-mass preview on rows with a proven winner: the fraction
+        # of the visit / π' target mass already sitting on class=+1 actions
+        # (1.0 means guard-consistent sharpening would be a no-op there).
+        self.tss_win_retained: list[float] = []
+        self.tss_gumbel_win_retained: list[float] = []
+        self.tss_proof_rows = 0
+        self.tss_proof_disagreements = 0
         # Finished-game winner tally (completed games only; truncated games have
         # no engine winner and are counted separately by games_truncated).
         self.wins_by_player: dict[int, int] = {0: 0, 1: 0}
@@ -263,6 +286,28 @@ class ContinuousDriver:
         self._write_live("running")
 
         current = record_player(tape.ply)
+        # λ¹ TSS shadow counters, every searched move class (diagnostics is
+        # telemetry-only — never consulted for play or targets).
+        tss_diag = (payload.get("diagnostics") or {}).get("tss")
+        if tss_diag:
+            self.tss_moves += 1
+            opp_threats = int(tss_diag.get("opp_threats", 0))
+            k = int(tss_diag.get("k", -1))
+            b = int(tss_diag.get("b", 0))
+            if opp_threats > 0 or int(tss_diag.get("root_tactical", 0)) > 0:
+                self.tss_threat_moves += 1
+            # Fully-forced defense (the Lever-0 boundary): defense consumes the
+            # whole turn budget. k == -1 (infeasible) is the override's job,
+            # not the guard's.
+            if opp_threats > 0 and k > 0 and k == b:
+                self.tss_forced_defense_moves += 1
+            injected = int(tss_diag.get("root_injected", 0))
+            if injected > 0:
+                self.tss_injection_fired_moves += 1
+            self.tss_root_injected_total += injected
+            self.tss_leaf_verdict_hits += int(tss_diag.get("leaf_verdict_hits", 0))
+            self.tss_prune_eligible += int(tss_diag.get("prune_eligible", 0))
+            self.tss_prune_dropped += int(tss_diag.get("prune_dropped", 0))
         # Seed provenance stamped on every row of a blunder-seeded game. Empty
         # for ordinary games, so their metadata is unchanged (fraction=0.0 keeps
         # rows bit-identical to the pre-feature writer).
@@ -306,6 +351,42 @@ class ContinuousDriver:
                     prior_logit_pairs = tuple(
                         zip((int(a) for a in g_ids), (float(l) for l in g_logits))
                     )
+            # λ¹ class map over the union of play/recorded/π' supports (absent
+            # keys on quiet roots → empty map). Stage-0: provenance + the
+            # Lever-1 mask-mass preview; Stage-2 masking consumes it here.
+            class_pairs: tuple[tuple[int, int], ...] = ()
+            if "tss_class_action_ids_bytes" in payload:
+                c_ids = np.frombuffer(
+                    bytes(payload["tss_class_action_ids_bytes"]), dtype=np.uint32
+                )
+                c_vals = np.frombuffer(bytes(payload["tss_class_bytes"]), dtype=np.int8)
+                class_pairs = tuple(
+                    zip((int(a) for a in c_ids), (int(v) for v in c_vals))
+                )
+            if class_pairs:
+                self.tss_class_rows += 1
+                cmap = dict(class_pairs)
+                if any(v == 1 for v in cmap.values()):
+                    self.tss_win_rows += 1
+                    total = float(weights.sum())
+                    if total > 0.0:
+                        kept = float(
+                            sum(
+                                w
+                                for a, w in zip(ids.tolist(), weights.tolist())
+                                if cmap.get(int(a), 0) == 1
+                            )
+                        )
+                        self.tss_win_retained.append(kept / total)
+                    if gumbel_pairs:
+                        g_total = float(sum(w for _a, w in gumbel_pairs))
+                        if g_total > 0.0:
+                            g_kept = float(
+                                sum(w for a, w in gumbel_pairs if cmap.get(a, 0) == 1)
+                            )
+                            self.tss_gumbel_win_retained.append(g_kept / g_total)
+                elif any(v == -1 for v in cmap.values()):
+                    self.tss_loss_only_rows += 1
             phase = record_phase(tape.ply)
             first_stone = (
                 (tape.records[-1][0], tape.records[-1][1]) if phase == "SecondStone" else None
@@ -322,6 +403,8 @@ class ContinuousDriver:
                 gumbel_policy=gumbel_pairs,
                 prior_logit=prior_logit_pairs,
                 policy_surprise=float(surprise),
+                policy_class=class_pairs,
+                tss_proof=int(payload.get("tss_proof", 0)),
                 metadata={"pcr_full": True, **seed_meta},
             )
             tape.pending.append((current, sample, float(payload["root_value"])))
@@ -466,6 +549,17 @@ class ContinuousDriver:
                 rows = [s for s in finalized if s.metadata.get("pcr_full", False)]
                 # Fast + Init rows dropped from the written shard this game.
                 self.fast_rows_excluded += len(finalized) - len(rows)
+                # Lever-2 shadow: λ¹ proof vs realized-outcome disagreements
+                # (both labels are retained in the shard; PLAN §5). Counted here
+                # because hard_z needs the winner; the writer thread joins
+                # before stats() reads these.
+                for s in rows:
+                    if s.tss_proof != 0:
+                        self.tss_proof_rows += 1
+                        if winner is not None and not truncated:
+                            hz = 1.0 if int(winner) == int(s.current_player) else -1.0
+                            if hz * float(s.tss_proof) < 0.0:
+                                self.tss_proof_disagreements += 1
                 if rows:
                     path = self.out_dir / f"game_{tape.key}.npz"
                     # Seeded games carry their provenance in the sidecar so a
@@ -573,6 +667,55 @@ class ContinuousDriver:
                 float(np.mean(self.seed_plies)) if self.seed_plies else None
             ),
             "unique_openings_seeded": len(self.opening_lines_seeded),
+            # λ¹ TSS shadow telemetry (PLAN_TSS_DEEPENING.md §9): the Stage-0
+            # measurement block that gates Lever 1 (win_retained_mass — mass
+            # already on proven winners; ≈1.0 means sharpening is a no-op) and
+            # sizes Lever 0 (forced_defense fraction, prune preview) and the
+            # closed-loop metric (injection fire rate).
+            "tss": {
+                "moves": int(self.tss_moves),
+                # Raw numerators ride alongside their rates so crash-resumed
+                # epoch segments merge exactly (_merge_epoch_diag sums the ints
+                # and recomputes the rates).
+                "threat_moves": int(self.tss_threat_moves),
+                "forced_defense_moves": int(self.tss_forced_defense_moves),
+                "injection_fired_moves": int(self.tss_injection_fired_moves),
+                "threat_move_fraction": (
+                    float(self.tss_threat_moves / self.tss_moves) if self.tss_moves else None
+                ),
+                "forced_defense_fraction": (
+                    float(self.tss_forced_defense_moves / self.tss_moves)
+                    if self.tss_moves
+                    else None
+                ),
+                "injection_fire_rate": (
+                    float(self.tss_injection_fired_moves / self.tss_moves)
+                    if self.tss_moves
+                    else None
+                ),
+                "root_injected_total": int(self.tss_root_injected_total),
+                "leaf_verdict_hits_total": int(self.tss_leaf_verdict_hits),
+                "prune_eligible_total": int(self.tss_prune_eligible),
+                "prune_dropped_total": int(self.tss_prune_dropped),
+                "class_rows": int(self.tss_class_rows),
+                "win_rows": int(self.tss_win_rows),
+                "loss_only_rows": int(self.tss_loss_only_rows),
+                "win_retained_mass_mean": (
+                    float(np.mean(self.tss_win_retained)) if self.tss_win_retained else None
+                ),
+                "win_retained_mass_p10": (
+                    float(np.percentile(self.tss_win_retained, 10))
+                    if self.tss_win_retained
+                    else None
+                ),
+                "gumbel_win_retained_mass_mean": (
+                    float(np.mean(self.tss_gumbel_win_retained))
+                    if self.tss_gumbel_win_retained
+                    else None
+                ),
+                "proof_rows": int(self.tss_proof_rows),
+                "proof_disagreements": int(self.tss_proof_disagreements),
+            },
         }
 
 
@@ -845,6 +988,41 @@ def _merge_epoch_diag(segments: list[dict[str, Any]]) -> dict[str, Any]:
     # Mean seed depth is games_seeded-weighted across segments.
     if any("seed_ply_mean" in seg for seg in segments):
         merged["seed_ply_mean"] = _weighted_mean(_w("seed_ply_mean", "games_seeded"))
+
+    # TSS shadow block: sum the integer counters, recompute the rates from the
+    # summed numerators, and recombine the retained-mass means weighted by
+    # win_rows. Absent in pre-TSS segments (they contribute zeros).
+    if any(isinstance(seg.get("tss"), dict) for seg in segments):
+        tss_segs = [seg.get("tss") for seg in segments if isinstance(seg.get("tss"), dict)]
+        tss: dict[str, Any] = dict(tss_segs[-1])
+        int_keys = (
+            "moves", "threat_moves", "forced_defense_moves", "injection_fired_moves",
+            "root_injected_total", "leaf_verdict_hits_total", "prune_eligible_total",
+            "prune_dropped_total", "class_rows", "win_rows", "loss_only_rows",
+            "proof_rows", "proof_disagreements",
+        )
+        for key in int_keys:
+            tss[key] = sum(int(seg.get(key, 0) or 0) for seg in tss_segs)
+        moves = tss["moves"]
+        tss["threat_move_fraction"] = float(tss["threat_moves"] / moves) if moves else None
+        tss["forced_defense_fraction"] = (
+            float(tss["forced_defense_moves"] / moves) if moves else None
+        )
+        tss["injection_fire_rate"] = (
+            float(tss["injection_fired_moves"] / moves) if moves else None
+        )
+        for mkey in (
+            "win_retained_mass_mean",
+            "win_retained_mass_p10",
+            "gumbel_win_retained_mass_mean",
+        ):
+            tss[mkey] = _weighted_mean(
+                [
+                    (seg.get(mkey), float(seg.get("win_rows", 0) or 0))
+                    for seg in tss_segs
+                ]
+            )
+        merged["tss"] = tss
 
     # Store raw segment payloads (prior first, resumed last), capped.
     raw = [_segment_payload(seg) for seg in segments]

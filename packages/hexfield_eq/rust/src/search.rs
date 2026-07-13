@@ -32,9 +32,10 @@ use crate::payload::{
 };
 use crate::state::states_from_py_states;
 use crate::threats_shared as threats;
+use crate::tss_core::{self, ProofStatus};
 use crate::tree::{
     gumbel_completed_q, gumbel_sigma, gumbel_softmax, random_unit, terminal_value, Divergences,
-    RootDirichletNoise, RustEdge, RustLeaf, RustNode, RustSearch, Widening,
+    RootDirichletNoise, RustEdge, RustLeaf, RustNode, RustSearch, TssCounters, Widening,
 };
 
 pub const ACTIVE_ROOT_LIMIT: usize = 512;
@@ -1936,13 +1937,16 @@ fn select_leaf_batch(
                 let value = node.value();
                 let leaf_ml = if ml_on { node.ml_mean() } else { None };
                 search.backup_virtual(&selected.path, player, value, virtual_loss, leaf_ml);
-            } else if let Some(verdict) = search
+            } else if let Some(hard) = search
                 .tss_enabled
-                .then(|| threats::analyze(&selected.state).verdict())
+                .then(|| tss_core::solve_leaf_lambda1(&selected.state))
                 .flatten()
             {
+                // λ¹ HardValue: certified producer, no node, no GPU eval
+                // (tss_core.rs is the only mint — the soundness firewall).
                 let leaf_player = selected.state.current_player();
-                search.backup_virtual(&selected.path, leaf_player, verdict, virtual_loss, None);
+                search.tss.leaf_verdict_hits += 1;
+                search.backup_virtual(&selected.path, leaf_player, hard.value(), virtual_loss, None);
             } else {
                 search.mark_pending(selected.parent_node, selected.edge_index, 1);
                 leaves.push(RustLeaf {
@@ -2015,13 +2019,16 @@ fn select_continuous_leaves(
             let value = node.value();
             let leaf_ml = if ml_on { node.ml_mean() } else { None };
             search.backup_virtual(&selected.path, player, value, virtual_loss, leaf_ml);
-        } else if let Some(verdict) = search
+        } else if let Some(hard) = search
             .tss_enabled
-            .then(|| threats::analyze(&selected.state).verdict())
+            .then(|| tss_core::solve_leaf_lambda1(&selected.state))
             .flatten()
         {
+            // λ¹ HardValue: certified producer, no node, no GPU eval
+            // (tss_core.rs is the only mint — the soundness firewall).
             let leaf_player = selected.state.current_player();
-            search.backup_virtual(&selected.path, leaf_player, verdict, virtual_loss, None);
+            search.tss.leaf_verdict_hits += 1;
+            search.backup_virtual(&selected.path, leaf_player, hard.value(), virtual_loss, None);
         } else {
             search.mark_pending(selected.parent_node, selected.edge_index, 1);
             added_in_flight += 1;
@@ -2927,6 +2934,20 @@ struct PayloadNative {
     active_edge_count: usize,
     root_active_edges: usize,
     root_hidden_priors: usize,
+    // === TSS shadow export (docs/PLAN_TSS_DEEPENING.md §9) ===
+    // λ¹ classification map over the union of the play/recorded/π' supports,
+    // sorted by action_id for deterministic bytes. Empty on quiet roots.
+    tss_class_ids: Vec<PackedCoord>,
+    tss_class_vals: Vec<i8>,
+    // λ¹ verdict at the root position, side-to-move perspective (0 = None).
+    tss_proof: i8,
+    // Root analysis scalars: turn budget B, min hitting set k (-1 = infeasible/
+    // None), live opponent-threat count. All 0/-1/0 when tss is disabled.
+    tss_b: u8,
+    tss_k: i8,
+    tss_opp_threats: u32,
+    // Per-move counters accumulated during the search (reset per move).
+    tss_counters: TssCounters,
 }
 
 struct GumbelTargetNative {
@@ -2986,11 +3007,35 @@ impl PayloadNative {
         }
         result.set_item("root_value", self.root_value)?;
         result.set_item("visits", self.visits)?;
+        // TSS shadow export: the λ¹ class map rides only when non-empty (quiet
+        // roots omit the keys, mirroring the gumbel-key convention); the root
+        // proof scalar always rides (0 = no proof).
+        if !self.tss_class_ids.is_empty() {
+            result.set_item("tss_class_action_ids_bytes", to_bytes(&self.tss_class_ids))?;
+            let vals = unsafe {
+                std::slice::from_raw_parts(
+                    self.tss_class_vals.as_ptr() as *const u8,
+                    self.tss_class_vals.len(),
+                )
+            };
+            result.set_item("tss_class_bytes", PyBytes::new(py, vals))?;
+        }
+        result.set_item("tss_proof", self.tss_proof)?;
         let diag = PyDict::new(py);
         diag.set_item("node_count", self.node_count)?;
         diag.set_item("active_edge_count", self.active_edge_count)?;
         diag.set_item("root_active_edges", self.root_active_edges)?;
         diag.set_item("root_hidden_priors", self.root_hidden_priors)?;
+        let tss = PyDict::new(py);
+        tss.set_item("b", self.tss_b)?;
+        tss.set_item("k", self.tss_k)?;
+        tss.set_item("opp_threats", self.tss_opp_threats)?;
+        tss.set_item("root_tactical", self.tss_counters.root_tactical)?;
+        tss.set_item("root_injected", self.tss_counters.root_injected)?;
+        tss.set_item("leaf_verdict_hits", self.tss_counters.leaf_verdict_hits)?;
+        tss.set_item("prune_eligible", self.tss_counters.prune_eligible)?;
+        tss.set_item("prune_dropped", self.tss_counters.prune_dropped)?;
+        diag.set_item("tss", tss)?;
         if let Some(stats) = eval_stats {
             diag.set_item("evaluation", eval_stats_dict(py, stats)?)?;
         }
@@ -3110,8 +3155,56 @@ fn build_search_result_payload_native(
         Some((ids, ws)) => (ids, ws),
         None => (&policy_action_ids, &policy_weights),
     };
-    let guarded_weights = if search.tss_enabled {
-        tactical_guard_weights(&search.root_state, sel_ids, sel_weights)
+    // Improved-policy target π'=softmax(logits+σ(completedQ)). Exported only
+    // when gumbel_target is on; the raw root logits column ships alongside.
+    // Built BEFORE the guard so the λ¹ class map below covers π''s support
+    // (pure function of the tree — the move is observationally identical).
+    let div = &search.divergences;
+    let gumbel = if div.gumbel_target {
+        // Export-only σ softening: gumbel_target_c_scale overrides c_scale in the
+        // target's σ call ONLY, so π' can be flattened without touching the SH
+        // ranking or interior selection (both keep div.gumbel_c_scale).
+        let target_c_scale = div.gumbel_target_c_scale.unwrap_or(div.gumbel_c_scale);
+        let (gumbel_ids, gumbel_weights, gumbel_logits) = gumbel_target_policy(
+            root,
+            baseline,
+            div.gumbel_c_visit,
+            target_c_scale,
+            div.gumbel_target_min_visits,
+        );
+        Some(GumbelTargetNative {
+            action_ids: gumbel_ids,
+            weights: gumbel_weights,
+            logits: gumbel_logits,
+        })
+    } else {
+        None
+    };
+    // λ¹ root analysis + per-move classification, computed ONCE per move and
+    // shared by the play-time guard, the recorded class column, and the shadow
+    // metrics (docs/PLAN_TSS_DEEPENING.md §4/§9). Quiet or tss-disabled roots
+    // skip classification entirely (empty map, guard is the identity).
+    let root_analysis = search
+        .tss_enabled
+        .then(|| threats::analyze(&search.root_state));
+    let root_has_threats = root_analysis
+        .as_ref()
+        .map(|a| a.own_win_now || a.opp_threat_count > 0)
+        .unwrap_or(false);
+    let mut tss_classes: HashMap<PackedCoord, i8> = HashMap::new();
+    if root_has_threats {
+        let union = sel_ids
+            .iter()
+            .chain(export_action_ids.iter())
+            .chain(gumbel.iter().flat_map(|g| g.action_ids.iter()));
+        for &id in union {
+            tss_classes
+                .entry(id)
+                .or_insert_with(|| classify_root_move(&search.root_state, id));
+        }
+    }
+    let guarded_weights = if root_has_threats {
+        tactical_guard_weights_from(&tss_classes, sel_ids, sel_weights)
     } else {
         sel_weights.clone()
     };
@@ -3163,29 +3256,22 @@ fn build_search_result_payload_native(
         .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
         .map(|(id, _)| *id == selected)
         .unwrap_or(false);
-    // Improved-policy target π'=softmax(logits+σ(completedQ)). Exported only when
-    // gumbel_target is on; the raw root logits column ships alongside. When the
-    // flag is off, none of these keys appear.
-    let div = &search.divergences;
-    let gumbel = if div.gumbel_target {
-        // Export-only σ softening: gumbel_target_c_scale overrides c_scale in the
-        // target's σ call ONLY, so π' can be flattened without touching the SH
-        // ranking or interior selection (both keep div.gumbel_c_scale).
-        let target_c_scale = div.gumbel_target_c_scale.unwrap_or(div.gumbel_c_scale);
-        let (gumbel_ids, gumbel_weights, gumbel_logits) = gumbel_target_policy(
-            root,
-            baseline,
-            div.gumbel_c_visit,
-            target_c_scale,
-            div.gumbel_target_min_visits,
-        );
-        Some(GumbelTargetNative {
-            action_ids: gumbel_ids,
-            weights: gumbel_weights,
-            logits: gumbel_logits,
-        })
-    } else {
-        None
+    // (π' was built above, before the guard, so the class map covers it.)
+    // Deterministic class export: sorted by action_id.
+    let mut tss_pairs: Vec<(PackedCoord, i8)> = tss_classes.into_iter().collect();
+    tss_pairs.sort_by_key(|(id, _)| *id);
+    let (tss_class_ids, tss_class_vals): (Vec<PackedCoord>, Vec<i8>) =
+        tss_pairs.into_iter().unzip();
+    let (tss_proof, tss_b, tss_k, tss_opp_threats) = match &root_analysis {
+        Some(a) => (
+            a.verdict()
+                .map(|v| if v > 0.0 { 1i8 } else { -1i8 })
+                .unwrap_or(0),
+            a.b,
+            a.min_hitting_set.map(|k| k as i8).unwrap_or(-1),
+            a.opp_threat_count as u32,
+        ),
+        None => (0, 0, -1, 0),
     };
     let tree = search.diagnostics();
     Ok(PayloadNative {
@@ -3207,6 +3293,13 @@ fn build_search_result_payload_native(
         active_edge_count: tree.active_edge_count,
         root_active_edges: tree.root_active_edges,
         root_hidden_priors: tree.root_hidden_priors,
+        tss_class_ids,
+        tss_class_vals,
+        tss_proof,
+        tss_b,
+        tss_k,
+        tss_opp_threats,
+        tss_counters: search.tss,
     })
 }
 
@@ -3570,6 +3663,10 @@ pub fn mix_seed(base_seed: u64, game_key: u64, ply: u32, stream: u64) -> u64 {
     value ^ (value >> 31)
 }
 
+/// Classify one root move for the side to move: `1` proven winning (immediate
+/// outcome, or a sound λ¹ child proof in our favor), `-1` proven losing, `0`
+/// unproven. Perspective maps back by PLAYER IDENTITY (FirstStone keeps the
+/// mover; SecondStone hands over), never by ply parity.
 fn classify_root_move(root_state: &RustHexoState, action_id: PackedCoord) -> i8 {
     let me = root_state.current_player();
     let mut child = root_state.clone();
@@ -3580,21 +3677,50 @@ fn classify_root_move(root_state: &RustHexoState, action_id: PackedCoord) -> i8 
             if let Some(outcome) = res.outcome {
                 return if outcome.winner == me { 1 } else { -1 };
             }
-            match threats::analyze(&child).verdict() {
-                Some(v) => {
-                    let ours = if child.current_player() == me { v } else { -v };
-                    if ours > 0.5 {
+            match tss_core::lambda1_status(&child) {
+                ProofStatus::Unknown => 0,
+                status => {
+                    let child_wins = status == ProofStatus::Win;
+                    let ours_win = child_wins == (child.current_player() == me);
+                    if ours_win {
                         1
-                    } else if ours < -0.5 {
-                        -1
                     } else {
-                        0
+                        -1
                     }
                 }
-                None => 0,
             }
         }
     }
+}
+
+/// Guard math over a precomputed class lookup (`classify_root_move` per id;
+/// absent ids read as 0/unproven): zero non-winning moves when a proven win
+/// exists, else zero proven-losing moves; an all-zero result falls back to the
+/// original weights (never zero the only legal move).
+fn tactical_guard_weights_from(
+    classes: &HashMap<PackedCoord, i8>,
+    action_ids: &[PackedCoord],
+    weights: &[f32],
+) -> Vec<f32> {
+    let cls = |id: &PackedCoord| classes.get(id).copied().unwrap_or(0);
+    let mut guarded = weights.to_vec();
+    if action_ids.iter().any(|a| cls(a) == 1) {
+        for (i, a) in action_ids.iter().enumerate() {
+            if cls(a) != 1 {
+                guarded[i] = 0.0;
+            }
+        }
+    } else if action_ids.iter().any(|a| cls(a) != -1) {
+        for (i, a) in action_ids.iter().enumerate() {
+            if cls(a) == -1 {
+                guarded[i] = 0.0;
+            }
+        }
+    }
+    if guarded.iter().all(|&w| w <= 0.0) {
+        return weights.to_vec();
+    }
+    guarded
 }
 
 fn tactical_guard_weights(
@@ -3606,28 +3732,26 @@ fn tactical_guard_weights(
     if !analysis.own_win_now && analysis.opp_threat_count == 0 {
         return weights.to_vec();
     }
-    let classes: Vec<i8> = action_ids
-        .iter()
-        .map(|&id| classify_root_move(root_state, id))
-        .collect();
-    let mut guarded = weights.to_vec();
-    if classes.iter().any(|&c| c == 1) {
-        for (i, &c) in classes.iter().enumerate() {
-            if c != 1 {
-                guarded[i] = 0.0;
-            }
-        }
-    } else if classes.iter().any(|&c| c != -1) {
-        for (i, &c) in classes.iter().enumerate() {
-            if c == -1 {
-                guarded[i] = 0.0;
-            }
-        }
+    let mut classes: HashMap<PackedCoord, i8> = HashMap::with_capacity(action_ids.len());
+    for &id in action_ids {
+        classes
+            .entry(id)
+            .or_insert_with(|| classify_root_move(root_state, id));
     }
-    if guarded.iter().all(|&w| w <= 0.0) {
-        return weights.to_vec();
-    }
-    guarded
+    tactical_guard_weights_from(&classes, action_ids, weights)
+}
+
+/// λ¹ threat-analysis diagnostic for a live engine state, via the shared
+/// `analysis_pydict` builder (identical diagnostic surface across lineages by
+/// construction). Drives the hexfield_eq TSS regression fixtures
+/// (tests/test_hexfield_eq_tss_*.py) and offline instrumentation.
+#[pyfunction]
+pub fn hexfield_eq_threat_analysis(
+    py: Python<'_>,
+    state: &Bound<'_, PyAny>,
+) -> PyResult<Py<PyAny>> {
+    let s = single_state_from_py(py, state)?;
+    Ok(threats::analysis_pydict(py, &s)?.into_any().unbind())
 }
 
 fn select_search_action(

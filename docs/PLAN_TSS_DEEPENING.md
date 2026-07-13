@@ -499,8 +499,10 @@ fiber question; the ablation stays on the general backlog, unrelated to TSS).
    cadence as the gate; fork A/B optional instrument only).
 2. **No `GROUP_ORDER=1` gate.** Thorough testing + judgment instead; the
    λ¹-grounded components are logically sound independent of the ablation.
-3. **Adjudication: decision pending** (owner reviewing the explanation; only
-   worth building if Stage-0 shows material saved eval-ms).
+3. **Adjudication: CUT** (owner 2026-07-13): self-play games always play out —
+   the model must learn from those positions, and forced lines make them quick
+   anyway. §7.4 is void; eval-elision (§7.1) is unaffected (it skips GPU evals
+   inside search and drops no training rows).
 4. **Serve-time deep root guard: include** (§10 rung 6) — after WIN-side
    certificates are trusted.
 5. **Stage 3 delegated to Codex** with the proof-carrying spec (§10): ambitious

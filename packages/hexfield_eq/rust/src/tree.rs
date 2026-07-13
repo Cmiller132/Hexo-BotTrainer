@@ -326,6 +326,27 @@ pub struct RustNode {
     pub root_logits: Option<HashMap<PackedCoord, f32>>,
 }
 
+/// Per-move TSS shadow telemetry (docs/PLAN_TSS_DEEPENING.md §9). Reset with
+/// the per-move visit budget (`set_additional_visits`); read into the payload
+/// diagnostics. Never consulted for any search decision.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TssCounters {
+    /// Tactical cells at the Gumbel root (0 on quiet roots / PUCT roots).
+    pub root_tactical: u32,
+    /// Tactical cells force-included beyond the Gumbel top-m (the injection
+    /// fire-rate numerator: > 0 means the hook widened the candidate set).
+    pub root_injected: u32,
+    /// λ¹ hard-value leaf backups this move (each is one elided GPU eval).
+    pub leaf_verdict_hits: u32,
+    /// Node expansions meeting the interior forced-move-guard condition
+    /// (verdict None, opponent threats live, min_hitting_set == B) — the
+    /// Lever-0 preview: how often pruning WOULD fire.
+    pub prune_eligible: u32,
+    /// Non-tactical actions those eligible nodes carried — the fan-out the
+    /// guard would remove.
+    pub prune_dropped: u64,
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RustSearchDiagnostics {
     pub node_count: usize,
@@ -432,6 +453,8 @@ pub struct RustSearch {
     pub divergences: Divergences,
     /// Set when an early-stop fired for this search (telemetry).
     pub early_stopped: bool,
+    /// Per-move TSS shadow telemetry; reset alongside `early_stopped`.
+    pub tss: TssCounters,
     /// Clean post-temp, pre-noise root priors (policy after the at-most-once
     /// root-policy-temperature step), keyed by action_id. When
     /// `clean_root_prior_cache` is on, a reused/promoted root resets its
@@ -507,6 +530,7 @@ impl RustSearch {
             tss_enabled,
             divergences,
             early_stopped: false,
+            tss: TssCounters::default(),
             clean_root_priors,
             active_edge_count: 0,
             max_active_edges_per_node: 0,
@@ -724,6 +748,9 @@ impl RustSearch {
     pub fn set_additional_visits(&mut self, visits: u32) {
         self.target_visits = self.completed_visits.saturating_add(visits);
         self.early_stopped = false;
+        // New move: reset the per-move TSS shadow telemetry with the budget
+        // (this is the universal per-move entry for lockstep and continuous).
+        self.tss = TssCounters::default();
     }
 
     pub fn root(&self) -> &RustNode {
@@ -841,6 +868,7 @@ impl RustSearch {
         } else {
             HashSet::new()
         };
+        self.tss.root_tactical = tactical.len() as u32;
         let mut survivors: Vec<PackedCoord> = Vec::with_capacity(m + tactical.len());
         let mut chosen: HashSet<PackedCoord> = HashSet::with_capacity(m + tactical.len());
         // 1. top-m by Gumbel score (action_ids already sorted descending).
@@ -853,6 +881,9 @@ impl RustSearch {
         for &a in &action_ids {
             if tactical.contains(&a) && chosen.insert(a) {
                 survivors.push(a);
+                // Injection fire-rate numerator: this cell ranked outside the
+                // Gumbel top-m and was force-included (shadow telemetry).
+                self.tss.root_injected += 1;
             }
         }
         // Restrict the kept g/logits maps to the survivor set.
@@ -1033,6 +1064,20 @@ impl RustSearch {
                 nucleus_f64,
             )
         };
+        // Interior forced-move-guard PREVIEW (shadow, Lever 0 §3): a node that
+        // reaches expansion has verdict None (a Some-verdict leaf backs up hard
+        // and never creates a node), so the guard condition reduces to
+        // min_hitting_set == B with no own win. Count how often it would fire
+        // and the non-tactical fan-out it would remove; take no action.
+        if !tactical.is_empty() {
+            let analysis = threats::analyze(state);
+            if !analysis.own_win_now && analysis.min_hitting_set == Some(analysis.b) {
+                self.tss.prune_eligible += 1;
+                let total_actions = node.edges.len() + node.remaining_prior_count();
+                self.tss.prune_dropped +=
+                    total_actions.saturating_sub(tactical.len()) as u64;
+            }
+        }
         let injected_edges = node.edges.len();
         self.nodes.push(node);
         self.node_table.insert(hash, id);
