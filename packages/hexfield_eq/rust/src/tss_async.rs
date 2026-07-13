@@ -24,7 +24,7 @@
 //! byte-capped per solve exactly like the inline path, and responses carry
 //! only scalars + the small `RootBinding`.
 
-use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, Sender, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -114,12 +114,17 @@ impl TssAsyncHandle {
     /// Non-blocking enqueue. `false` => queue full or pool gone (caller counts
     /// `async_dropped` and the leaf takes the plain net eval).
     pub fn try_enqueue(&self, request: SolveRequest) -> bool {
+        // Increment BEFORE the send (compensating on failure): the worker's
+        // post-recv decrement can then never race ahead of the producer's
+        // increment and wrap the counter below zero. The counter may briefly
+        // over-count — the safe direction for a full-check.
+        self.queue_depth.fetch_add(1, Ordering::Relaxed);
         match self.sender.try_send(request) {
-            Ok(()) => {
-                self.queue_depth.fetch_add(1, Ordering::Relaxed);
-                true
+            Ok(()) => true,
+            Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
+                self.queue_depth.fetch_sub(1, Ordering::Relaxed);
+                false
             }
-            Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => false,
         }
     }
 }
@@ -129,11 +134,14 @@ impl TssAsyncHandle {
 /// `run_continuous` calls. Dropping the pool closes the request channel and
 /// the workers exit on their next `recv`.
 pub struct TssAsyncPool {
-    request_tx: SyncSender<SolveRequest>,
+    /// `Some` for the pool's whole life; taken (dropped) in `Drop` to close
+    /// the channel so workers exit before the final alarm read.
+    request_tx: Option<SyncSender<SolveRequest>>,
     results: Receiver<SolveResponse>,
     generation: AtomicU64,
     queue_depth: Arc<AtomicUsize>,
     alarms: Arc<PoolAlarms>,
+    shutdown: Arc<AtomicBool>,
     workers: Vec<JoinHandle<()>>,
 }
 
@@ -156,24 +164,27 @@ impl TssAsyncPool {
         let request_rx = Arc::new(Mutex::new(request_rx));
         let queue_depth = Arc::new(AtomicUsize::new(0));
         let alarms = Arc::new(PoolAlarms::default());
+        let shutdown = Arc::new(AtomicBool::new(false));
         let workers = (0..threads)
             .map(|index| {
                 let rx = Arc::clone(&request_rx);
                 let tx = response_tx.clone();
                 let depth = Arc::clone(&queue_depth);
                 let alarms = Arc::clone(&alarms);
+                let stop = Arc::clone(&shutdown);
                 std::thread::Builder::new()
                     .name(format!("tss-solve-{index}"))
-                    .spawn(move || worker_loop(rx, tx, depth, alarms))
+                    .spawn(move || worker_loop(rx, tx, depth, alarms, stop))
                     .expect("spawn tss async solve worker")
             })
             .collect();
         Self {
-            request_tx,
+            request_tx: Some(request_tx),
             results,
             generation: AtomicU64::new(1),
             queue_depth,
             alarms,
+            shutdown,
             workers,
         }
     }
@@ -188,7 +199,11 @@ impl TssAsyncPool {
     /// A handle stamped for `slot` at a fresh generation.
     pub fn handle_for(&self, slot: u32) -> TssAsyncHandle {
         TssAsyncHandle {
-            sender: self.request_tx.clone(),
+            sender: self
+                .request_tx
+                .as_ref()
+                .expect("request channel lives until Drop")
+                .clone(),
             slot,
             generation: self.next_generation(),
             queue_depth: Arc::clone(&self.queue_depth),
@@ -225,7 +240,19 @@ impl TssAsyncPool {
 
 impl Drop for TssAsyncPool {
     fn drop(&mut self) {
-        // Alarms must never die silently with the pool.
+        // Quiesce BEFORE the final alarm read (a worker mid-solve could bank
+        // a failure after an early read): raise the shutdown flag (workers
+        // exit after at most their CURRENT solve instead of draining the
+        // whole buffered queue), close the request channel, then join. Only
+        // then is the alarm bank final. Handles held by searches keep their
+        // own sender clones, but by pool-drop time the owning session (and
+        // its searches) are gone — and even a straggler clone only makes a
+        // worker's send fail AFTER its alarms were banked and joined here.
+        self.shutdown.store(true, Ordering::Relaxed);
+        self.request_tx = None;
+        for worker in self.workers.drain(..) {
+            let _ = worker.join();
+        }
         let verify_failed = self.alarms.verify_failed.load(Ordering::Relaxed);
         let panics = self.alarms.worker_panics.load(Ordering::Relaxed);
         if verify_failed > 0 {
@@ -245,12 +272,16 @@ fn worker_loop(
     tx: Sender<SolveResponse>,
     queue_depth: Arc<AtomicUsize>,
     alarms: Arc<PoolAlarms>,
+    shutdown: Arc<AtomicBool>,
 ) {
     // One persistent solver per worker: its shared positive-proof-fragment TT
     // warms across solves (O16); byte caps are enforced per solve inside
     // `tss_solve_verified` exactly as on the inline path.
     let mut solver = TssSolver::default();
     loop {
+        if shutdown.load(Ordering::Relaxed) {
+            return; // pool dropping: don't drain the buffered queue
+        }
         let request = {
             let guard = match rx.lock() {
                 Ok(guard) => guard,
@@ -265,6 +296,9 @@ fn worker_loop(
             }
         };
         queue_depth.fetch_sub(1, Ordering::Relaxed);
+        if shutdown.load(Ordering::Relaxed) {
+            return; // checked again post-recv: skip the doomed solve
+        }
         // Panic shield (Codex review 7): a panicking solve loses its request
         // (the Pending entry falls out at the owner's next move) but the
         // worker survives with a FRESH solver (the old one's state is

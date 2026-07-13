@@ -1191,7 +1191,7 @@ impl RustSearch {
     /// deltas plus the memo write.
     pub fn apply_tss_async_response(&mut self, response: &SolveResponse) {
         self.tss.add(&response.counters);
-        self.tss_async_memo_write(response);
+        self.tss_async_memo_write(response, false);
     }
 
     /// Land a response whose generation no longer matches (the move advanced
@@ -1204,7 +1204,7 @@ impl RustSearch {
         self.tss.async_stale += 1;
         self.tss.deep_verify_failed += response.counters.deep_verify_failed;
         if self.divergences.tss_solver_async {
-            self.tss_async_memo_write(response);
+            self.tss_async_memo_write(response, true);
         }
     }
 
@@ -1217,8 +1217,20 @@ impl RustSearch {
     ///   warmer-cache solve may decide what an earlier one could not);
     /// - a decided `Done` is never overwritten (determinism makes duplicates
     ///   equal; anything else must not clobber a verified proof).
-    fn tss_async_memo_write(&mut self, response: &SolveResponse) {
+    /// STALE responses (round 2): only DECIDED results land (an Unknown
+    /// crossing a move boundary would defeat the warmer-cache retry), and
+    /// their fresh inserts stop at the retention bound so a flood of late
+    /// arrivals can never starve the new move's enqueue gate.
+    fn tss_async_memo_write(&mut self, response: &SolveResponse, stale: bool) {
         let decided_response = response.status != ProofStatus::Unknown;
+        if stale && !decided_response {
+            return;
+        }
+        let insert_cap = if stale {
+            Self::TSS_DEEP_MEMO_RETAIN_MAX
+        } else {
+            Self::TSS_DEEP_MEMO_MAX
+        };
         match self.tss_deep_memo.get(&response.hash) {
             Some(TssMemoEntry::Pending(seen)) if *seen == response.binding => {
                 self.tss_deep_memo.insert(
@@ -1236,7 +1248,7 @@ impl RustSearch {
             }
             Some(_) => {} // binding mismatch or already decided: never clobber
             None => {
-                if self.tss_deep_memo.len() < Self::TSS_DEEP_MEMO_MAX {
+                if self.tss_deep_memo.len() < insert_cap {
                     self.tss_deep_memo.insert(
                         response.hash,
                         TssMemoEntry::Done(response.binding.clone(), response.status, response.hard),
