@@ -24,6 +24,18 @@ flush_target = 1024
 active_root_limit = 256
 max_game_plies = 256
 tss_enabled = true
+# TSS Stage-4 SHADOW (rung 2, docs/TSS_RUNBOOK.md, enabled at ep25 2026-07-13):
+# deep solves + certificate verification at gated leaves, consuming NOTHING —
+# play/targets bit-identical to off; collects the deep_* cost/UNKNOWN
+# histograms in the epoch JSON tss block that size the consumption rungs.
+tss_solver_mode = 1
+# Shadow cost tuning (ep25 first-contact measurement: full sampling at cap
+# 2000 pegged 2 CPU cores and dropped pos/s 19 -> ~5, GPU starved at 4%; the
+# solver's per-node cost on real threat-dense positions is ~ms-scale, far
+# above the smoke bench). 1/8 leaf sampling at cap 400 keeps thousands of
+# logged solves per epoch at ~2-3% of that solve load.
+tss_solver_sample_16 = 2
+tss_solver_node_cap = 400
 cache_max_states = 262144
 nucleus_f64 = true
 lcb_z = 1.6
