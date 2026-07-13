@@ -26,7 +26,7 @@ use hexo_utils::StateHash;
 use crate::cache::{state_hash, RustEvaluation};
 use crate::state::move_error;
 use crate::threats_shared as threats;
-use crate::tss_core::{self, DeepSolve, HardValue, ProofStatus, SolveCaps};
+use crate::tss_core::{self, HardValue, ProofStatus, SolveCaps, SolveGoal};
 use crate::tss_solver::TssSolver;
 use crate::tss_verify::{RootBinding, TssVerifier};
 
@@ -419,6 +419,20 @@ impl TssCounters {
     }
 }
 
+/// A solver slot with fresh-cache-on-clone semantics: `TssSolver` is
+/// deliberately not `Clone` (a proof cache owner), but `RustSearch` derives
+/// `Clone` — and a cloned search correctly starts COLD, because cache warmth
+/// is discovery state, never truth (O16). Deref-free by design: callers go
+/// through `.0`.
+#[derive(Debug, Default)]
+pub struct TssSolverSlot(pub TssSolver);
+
+impl Clone for TssSolverSlot {
+    fn clone(&self) -> Self {
+        Self(TssSolver::default())
+    }
+}
+
 /// A completed deep solve after the mandatory verification step. `hard` and
 /// `cert` are `Some` only when the independent verifier accepted the
 /// certificate; a rejected claim reads as Unknown with the FATAL
@@ -431,12 +445,15 @@ pub struct VerifiedSolve {
 
 /// One verified deep solve (the ONLY production path from solver claims to
 /// consumable results): solver → independent certificate verifier via the
-/// sole deep mint `tss_core::hard_value_from_verified`. Deterministic: node
-/// cap only, no wall clock. Shared by the per-search leaf hook and the
-/// payload-build root guard.
+/// sole deep mint `tss_core::hard_value_from_verified`. Deterministic given
+/// (state, caps, goal, solver-cache state): node cap only, no wall clock.
+/// Shared by the per-search leaf hook (persistent solver) and the
+/// payload-build root guard (per-move solver).
 pub fn tss_solve_verified(
     state: &RustHexoState,
     node_cap: u64,
+    goal: SolveGoal,
+    solver: &mut TssSolver,
     counters: &mut TssCounters,
 ) -> VerifiedSolve {
     counters.deep_calls += 1;
@@ -444,7 +461,7 @@ pub fn tss_solve_verified(
         node_cap,
         tt_bytes_cap: RustSearch::TSS_SOLVER_TT_BYTES,
     };
-    let result = TssSolver::default().solve(state, &caps);
+    let result = solver.solve_goal(state, &caps, goal);
     counters.deep_nodes += result.stats.nodes;
     match result.status {
         ProofStatus::Unknown => {
@@ -595,6 +612,13 @@ pub struct RustSearch {
     /// implies the certificate already passed the independent verifier.
     /// Bounded; cleared with the per-move counters.
     tss_deep_memo: HashMap<StateHash, (RootBinding, ProofStatus, Option<HardValue>)>,
+    /// Persistent deep solver (O16 shared positive-proof-fragment cache):
+    /// PERSISTS ACROSS MOVES so forcing structure discovered at one leaf warms
+    /// its neighbors and successors. Retained bytes are hard-capped inside the
+    /// solver (split_tt_cap of SolveCaps.tt_bytes_cap); cache warmth affects
+    /// discovery, never verdict validity — every hard result still carries a
+    /// fresh certificate replayed by the independent verifier before minting.
+    tss_solver: TssSolverSlot,
     /// Clean post-temp, pre-noise root priors (policy after the at-most-once
     /// root-policy-temperature step), keyed by action_id. When
     /// `clean_root_prior_cache` is on, a reused/promoted root resets its
@@ -672,6 +696,7 @@ impl RustSearch {
             early_stopped: false,
             tss: TssCounters::default(),
             tss_deep_memo: HashMap::new(),
+            tss_solver: TssSolverSlot::default(),
             clean_root_priors,
             active_edge_count: 0,
             max_active_edges_per_node: 0,
@@ -923,13 +948,22 @@ impl RustSearch {
             return None;
         }
         let binding = RootBinding::from_state(state);
+        // Goal follows the consumption tier: measurement wants both sides;
+        // the LOSS tier gives the whole budget to the side it consumes.
+        let goal = match mode {
+            2 => SolveGoal::Loss,
+            _ => SolveGoal::Both,
+        };
         let (status, hard) = match self.tss_deep_memo.get(&hash) {
             Some((seen, status, hard)) if *seen == binding => {
                 self.tss.deep_memo_hits += 1;
                 (*status, *hard)
             }
             _ => {
-                let (status, hard) = self.tss_solve_verified(state);
+                let node_cap = self.divergences.tss_solver_node_cap as u64;
+                let solved =
+                    tss_solve_verified(state, node_cap, goal, &mut self.tss_solver.0, &mut self.tss);
+                let (status, hard) = (solved.status, solved.hard);
                 if self.tss_deep_memo.len() < Self::TSS_DEEP_MEMO_MAX {
                     self.tss_deep_memo.insert(hash, (binding, status, hard));
                 }
@@ -947,11 +981,6 @@ impl RustSearch {
         consume
     }
 
-    fn tss_solve_verified(&mut self, state: &RustHexoState) -> (ProofStatus, Option<HardValue>) {
-        let node_cap = self.divergences.tss_solver_node_cap as u64;
-        let solved = tss_solve_verified(state, node_cap, &mut self.tss);
-        (solved.status, solved.hard)
-    }
 
     pub fn root(&self) -> &RustNode {
         debug_assert_eq!(self.nodes[0].state_hash, self.root_hash);
