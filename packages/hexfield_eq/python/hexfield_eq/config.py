@@ -100,6 +100,21 @@ class SelfplayConfig:
     # Deep root guard (rung 6): verified root solves upgrade the class map so
     # the play-time guard forces proven wins; row proofs deep-upgrade too.
     tss_solver_root_guard: bool = False
+    # Async solve pool (async rung): leaf solves run on background worker
+    # threads; verified results are consumed on later visits through the
+    # proven position (descent-stop in selection). Off => inline solves.
+    # NOTE: flag-ON self-play is not bit-reproducible under a fixed seed
+    # (result arrival is wall-clock dependent); soundness is unchanged — the
+    # workers run the identical solver → verifier → sealed-mint path.
+    tss_solver_async: bool = False
+    # Worker threads for the async pool (Rust clamps to [1, 32]).
+    tss_solver_async_threads: int = 8
+    # Hybrid inline tier under async: gated leaves with (hash & 0xF) below
+    # this threshold solve inline (first-touch consumption, the proven
+    # pre-async path); the rest enqueue. 0 = pure async. Deploy shape:
+    # sample_16=16 + async=true + inline_16=4 keeps today's inline tier
+    # verbatim and adds pool coverage for the other 12/16.
+    tss_solver_async_inline_16: int = 0
     search_parity_mode: bool = False
     # Moves-left utility. Defaults: enabled, two-sided, with the final-move
     # tie-break. Passed to Rust as divergence_overrides. moves_left_utility=False
@@ -576,6 +591,10 @@ def build_divergence_overrides(
         "tss_solver_node_cap": int(sp.tss_solver_node_cap),
         "tss_solver_sample_16": int(sp.tss_solver_sample_16),
         "tss_solver_root_guard": bool(sp.tss_solver_root_guard),
+        # TSS async solve pool (async rung, default OFF).
+        "tss_solver_async": bool(sp.tss_solver_async),
+        "tss_solver_async_threads": int(sp.tss_solver_async_threads),
+        "tss_solver_async_inline_16": int(sp.tss_solver_async_inline_16),
         # Gumbel AlphaZero levers (default OFF).
         "gumbel_target": bool(sp.gumbel_target_enabled),
         "gumbel_root": bool(sp.gumbel_root_enabled),

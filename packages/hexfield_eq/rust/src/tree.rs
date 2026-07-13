@@ -26,6 +26,7 @@ use hexo_utils::StateHash;
 use crate::cache::{state_hash, RustEvaluation};
 use crate::state::move_error;
 use crate::threats_shared as threats;
+use crate::tss_async::{SolveRequest, SolveResponse, TssAsyncHandle};
 use crate::tss_core::{self, HardValue, ProofStatus, SolveCaps, SolveGoal};
 use crate::tss_solver::TssSolver;
 use crate::tss_verify::{RootBinding, TssVerifier};
@@ -176,6 +177,25 @@ pub struct Divergences {
     /// guard (and, under Lever 1, the recorded targets) consume deep proofs.
     /// The row proof scalar (tss_proof) is likewise deep-upgraded.
     pub tss_solver_root_guard: bool,
+    /// Async solve pool (§10 async rung): gated leaves ENQUEUE their solve to
+    /// background workers and take the normal net eval; verified results
+    /// drain back into the per-move memo and are consumed by the
+    /// descent-stop on every later visit through the proven position. Same
+    /// solver → verifier → sealed-mint path, off the GPU's critical path.
+    /// TRADE: which visit first sees a proof becomes wall-clock dependent, so
+    /// flag-ON self-play is not bit-reproducible (flag-off is unchanged).
+    /// Only effective where the driver wires a pool (the continuous
+    /// scheduler); un-wired searches fall back to the inline solve.
+    pub tss_solver_async: bool,
+    /// Worker threads for the async pool (clamped to [1, 32]).
+    pub tss_solver_async_threads: u32,
+    /// Hybrid inline tier under the async flag: gated leaves whose
+    /// `(hash & 0xF)` falls below THIS threshold solve inline on the search
+    /// thread (first-touch consumption, exactly the pre-async behavior);
+    /// gated leaves at or above it enqueue to the pool. 0 = pure async.
+    /// Deploy shape: sample_16=16 + async + inline_16=4 keeps today's proven
+    /// inline tier verbatim and adds pool coverage for the other 12/16.
+    pub tss_solver_async_inline_16: u32,
 }
 
 impl Divergences {
@@ -221,6 +241,9 @@ impl Divergences {
             tss_solver_node_cap: 2000,
             tss_solver_sample_16: 16,
             tss_solver_root_guard: false,
+            tss_solver_async: false,
+            tss_solver_async_threads: 8,
+            tss_solver_async_inline_16: 0,
         }
     }
 
@@ -397,6 +420,17 @@ pub struct TssCounters {
     pub deep_hard_backups: u32,
     /// Per-move memo hits (a solved leaf re-selected).
     pub deep_memo_hits: u32,
+    // === Async-pool telemetry (tss_solver_async) ===
+    /// Solve requests handed to the background pool this move.
+    pub async_enqueued: u32,
+    /// Requests dropped (queue full / pool gone) — those leaves took the
+    /// plain net eval. Persistent nonzero => widen the queue or the pool.
+    pub async_dropped: u32,
+    /// Responses discarded because their generation no longer matched the
+    /// slot's live search (the move/game advanced past them).
+    pub async_stale: u32,
+    /// A leaf re-selected while its solve was still in flight.
+    pub async_pending_hits: u32,
     // === Search-depth telemetry (every real backup, all leaf kinds) ===
     /// Σ leaf depth over this move's real backups (mean = depth_sum / backups).
     pub depth_sum: u64,
@@ -423,10 +457,24 @@ impl TssCounters {
         self.deep_verify_failed += other.deep_verify_failed;
         self.deep_hard_backups += other.deep_hard_backups;
         self.deep_memo_hits += other.deep_memo_hits;
+        self.async_enqueued += other.async_enqueued;
+        self.async_dropped += other.async_dropped;
+        self.async_stale += other.async_stale;
+        self.async_pending_hits += other.async_pending_hits;
         self.depth_sum += other.depth_sum;
         self.depth_max = self.depth_max.max(other.depth_max);
         self.backups += other.backups;
     }
+}
+
+/// One per-move deep-memo slot. `Pending` marks an async solve in flight
+/// (dedup: the same leaf re-selected must not re-enqueue); `Done` carries the
+/// verified result. Both hold the full `RootBinding` — a value-bearing hit
+/// requires full-position equality, never the 64-bit hash alone (§2.5).
+#[derive(Clone, Debug)]
+pub enum TssMemoEntry {
+    Pending(RootBinding),
+    Done(RootBinding, ProofStatus, Option<HardValue>),
 }
 
 /// A solver slot with fresh-cache-on-clone semantics: `TssSolver` is
@@ -621,7 +669,11 @@ pub struct RustSearch {
     /// alone is never trusted for a value-bearing result). HardValue presence
     /// implies the certificate already passed the independent verifier.
     /// Bounded; cleared with the per-move counters.
-    tss_deep_memo: HashMap<StateHash, (RootBinding, ProofStatus, Option<HardValue>)>,
+    tss_deep_memo: HashMap<StateHash, TssMemoEntry>,
+    /// Async-pool enqueue handle (sender + slot + generation), wired by the
+    /// continuous driver at search creation / reuse-rebind / move advance.
+    /// `None` (lockstep paths, flag off) => the inline solve path runs.
+    tss_async: Option<TssAsyncHandle>,
     /// Persistent deep solver (O16 shared positive-proof-fragment cache):
     /// PERSISTS ACROSS MOVES so forcing structure discovered at one leaf warms
     /// its neighbors and successors. Retained bytes are hard-capped inside the
@@ -651,6 +703,10 @@ pub struct RustSelectedLeaf {
     pub edge_index: usize,
     pub terminal: Option<GameOutcome>,
     pub existing_node: Option<usize>,
+    /// Async descent-stop result: a verified deep proof for this position
+    /// arrived from the pool, so this simulation backs the hard value here
+    /// instead of descending/evaluating. Always `None` with the pool off.
+    pub hard: Option<HardValue>,
 }
 
 pub struct RustLeaf {
@@ -706,6 +762,7 @@ impl RustSearch {
             early_stopped: false,
             tss: TssCounters::default(),
             tss_deep_memo: HashMap::new(),
+            tss_async: None,
             tss_solver: TssSolverSlot::default(),
             clean_root_priors,
             active_edge_count: 0,
@@ -927,7 +984,24 @@ impl RustSearch {
         // New move: reset the per-move TSS shadow telemetry with the budget
         // (this is the universal per-move entry for lockstep and continuous).
         self.tss = TssCounters::default();
-        self.tss_deep_memo.clear();
+        if self.divergences.tss_solver_async {
+            // Async rung: verified Done entries PERSIST across moves. A proof
+            // is a property of the position (binding-checked again at every
+            // consumption; HardValue exists only post-verification), and the
+            // history-bearing hash means the retained entries re-serve
+            // exactly the re-searched played line — the forced continuation
+            // consumes without re-solving. Pending markers drop so the new
+            // move may re-enqueue; their late responses still land as
+            // stale-counted memo writes.
+            self.tss_deep_memo
+                .retain(|_, entry| matches!(entry, TssMemoEntry::Done(..)));
+        } else {
+            self.tss_deep_memo.clear();
+        }
+        // Drop the async handle with the counters: the driver's wire pass
+        // issues a FRESH generation before the next select, so in-flight
+        // responses from the move that just ended are counted as stale.
+        self.tss_async = None;
     }
 
     /// Hard cap on per-move deep-memo entries (bounded memory; past the cap
@@ -964,8 +1038,50 @@ impl RustSearch {
             2 => SolveGoal::Loss,
             _ => SolveGoal::Both,
         };
+        // Async rung: hand the solve to the background pool and let this leaf
+        // take the plain net eval; the verified result drains into the memo
+        // and is consumed by the descent-stop on later visits. Falls through
+        // to the inline solve when no pool is wired (lockstep paths) or when
+        // the position lands in the hybrid inline tier (first-touch
+        // consumption preserved for that slice, exactly the pre-async path).
+        if self.divergences.tss_solver_async
+            && ((hash & 0xF) as u32) >= self.divergences.tss_solver_async_inline_16
+        {
+            if let Some(handle) = self.tss_async.as_ref() {
+                match self.tss_deep_memo.get(&hash) {
+                    Some(TssMemoEntry::Pending(seen)) if *seen == binding => {
+                        self.tss.async_pending_hits += 1;
+                        return None;
+                    }
+                    Some(TssMemoEntry::Done(seen, status, hard)) if *seen == binding => {
+                        self.tss.deep_memo_hits += 1;
+                        let (status, hard) = (*status, *hard);
+                        return self.tss_consume_gate(status, hard);
+                    }
+                    _ => {
+                        if self.tss_deep_memo.len() < Self::TSS_DEEP_MEMO_MAX
+                            && handle.try_enqueue(SolveRequest {
+                                slot: handle.slot,
+                                generation: handle.generation,
+                                hash,
+                                binding: binding.clone(),
+                                state: state.clone(),
+                                node_cap: self.divergences.tss_solver_node_cap as u64,
+                                goal,
+                            })
+                        {
+                            self.tss.async_enqueued += 1;
+                            self.tss_deep_memo.insert(hash, TssMemoEntry::Pending(binding));
+                        } else {
+                            self.tss.async_dropped += 1;
+                        }
+                        return None;
+                    }
+                }
+            }
+        }
         let (status, hard) = match self.tss_deep_memo.get(&hash) {
-            Some((seen, status, hard)) if *seen == binding => {
+            Some(TssMemoEntry::Done(seen, status, hard)) if *seen == binding => {
                 self.tss.deep_memo_hits += 1;
                 (*status, *hard)
             }
@@ -975,20 +1091,117 @@ impl RustSearch {
                     tss_solve_verified(state, node_cap, goal, &mut self.tss_solver.0, &mut self.tss);
                 let (status, hard) = (solved.status, solved.hard);
                 if self.tss_deep_memo.len() < Self::TSS_DEEP_MEMO_MAX {
-                    self.tss_deep_memo.insert(hash, (binding, status, hard));
+                    self.tss_deep_memo
+                        .insert(hash, TssMemoEntry::Done(binding, status, hard));
                 }
                 (status, hard)
             }
         };
+        self.tss_consume_gate(status, hard)
+    }
+
+    /// The consumption tier gate shared by the inline path, the async
+    /// memo-hit path, and the descent-stop: verified LOSS backs up at
+    /// mode >= 2, verified WIN at mode >= 3, everything else does not.
+    fn tss_consume_gate(&mut self, status: ProofStatus, hard: Option<HardValue>) -> Option<HardValue> {
         let consume = match (status, hard) {
-            (ProofStatus::Loss, Some(h)) if mode >= 2 => Some(h),
-            (ProofStatus::Win, Some(h)) if mode >= 3 => Some(h),
+            (ProofStatus::Loss, Some(h)) if self.divergences.tss_solver_mode >= 2 => Some(h),
+            (ProofStatus::Win, Some(h)) if self.divergences.tss_solver_mode >= 3 => Some(h),
             _ => None,
         };
         if consume.is_some() {
             self.tss.deep_hard_backups += 1;
         }
         consume
+    }
+
+    /// Async descent-stop probe (only path by which drained pool results are
+    /// consumed): a simulation arriving at `state` during descent checks the
+    /// per-move memo and, on a verified full-binding hit at a consuming tier,
+    /// stops here and backs the hard value — mirroring the inline semantics
+    /// where solved positions are node-less stop points. Off (or sync mode):
+    /// always `None`, zero behavior change.
+    pub fn tss_async_descent_hard(
+        &mut self,
+        hash: StateHash,
+        state: &RustHexoState,
+    ) -> Option<HardValue> {
+        if !self.divergences.tss_solver_async
+            || self.divergences.tss_solver_mode < 2
+            || !self.tss_enabled
+            || self.tss_deep_memo.is_empty()
+        {
+            return None;
+        }
+        let (status, hard) = match self.tss_deep_memo.get(&hash) {
+            Some(TssMemoEntry::Done(seen, status, hard)) if *seen == RootBinding::from_state(state) => {
+                (*status, *hard)
+            }
+            _ => return None,
+        };
+        let consumed = self.tss_consume_gate(status, hard);
+        if consumed.is_some() {
+            self.tss.deep_memo_hits += 1;
+        }
+        consumed
+    }
+
+    /// Wire (or clear) the async-pool enqueue handle. The continuous driver
+    /// calls this with a FRESH generation at every search creation,
+    /// reuse-rebind, and move advance, so stale responses can never match.
+    pub fn set_tss_async(&mut self, handle: Option<TssAsyncHandle>) {
+        self.tss_async = handle;
+    }
+
+    /// The generation this search's requests are stamped with (None when no
+    /// pool is wired).
+    pub fn tss_async_generation(&self) -> Option<u64> {
+        self.tss_async.as_ref().map(|handle| handle.generation)
+    }
+
+    /// Land one drained pool response on this search: the solve's telemetry
+    /// deltas plus the memo write.
+    pub fn apply_tss_async_response(&mut self, response: &SolveResponse) {
+        self.tss.add(&response.counters);
+        self.tss_async_memo_write(response);
+    }
+
+    /// Land a response whose generation no longer matches (the move advanced
+    /// past it). The counters are dropped as stale — EXCEPT the fatal verify
+    /// counter — but the memo entry still lands: it is self-validating (a
+    /// `HardValue` exists only post-verification, and consumption re-checks
+    /// the full binding), so the already-paid solve keeps serving the game's
+    /// persistent memo.
+    pub fn apply_tss_async_response_stale(&mut self, response: &SolveResponse) {
+        self.tss.async_stale += 1;
+        self.tss.deep_verify_failed += response.counters.deep_verify_failed;
+        if self.divergences.tss_solver_async {
+            self.tss_async_memo_write(response);
+        }
+    }
+
+    /// Memo write under the binding discipline. A `Done` entry is never
+    /// overwritten (first verified result wins — they are equal by
+    /// determinism anyway unless bindings differ, in which case the
+    /// hash-colliding late arrival must not clobber the live one).
+    fn tss_async_memo_write(&mut self, response: &SolveResponse) {
+        match self.tss_deep_memo.get(&response.hash) {
+            Some(TssMemoEntry::Done(..)) => {}
+            Some(TssMemoEntry::Pending(_)) => {
+                self.tss_deep_memo.insert(
+                    response.hash,
+                    TssMemoEntry::Done(response.binding.clone(), response.status, response.hard),
+                );
+            }
+            None => {
+                if self.tss_deep_memo.len() < Self::TSS_DEEP_MEMO_MAX {
+                    self.tss_deep_memo.insert(
+                        response.hash,
+                        TssMemoEntry::Done(response.binding.clone(), response.status, response.hard),
+                    );
+                }
+            }
+        }
     }
 
 
@@ -1405,6 +1618,7 @@ impl RustSearch {
                     edge_index,
                     terminal: None,
                     existing_node: Some(node_id),
+                    hard: None,
                 }));
             };
 
@@ -1421,6 +1635,23 @@ impl RustSearch {
             last_parent = Some(node_id);
             last_edge = Some(edge_index);
 
+            // Async descent-stop: a pool-verified proof for the position just
+            // reached ends this simulation here with a hard backup — covering
+            // expanded children, table transpositions, and raw leaves alike.
+            // No-op unless tss_solver_async is on at a consuming tier.
+            if let Some(hard) = self.tss_async_descent_hard(current_hash, &state) {
+                return Ok(Some(RustSelectedLeaf {
+                    path,
+                    state,
+                    state_hash: current_hash,
+                    parent_node: node_id,
+                    edge_index,
+                    terminal: None,
+                    existing_node: None,
+                    hard: Some(hard),
+                }));
+            }
+
             if let Some(child_id) = child {
                 node_id = child_id;
                 continue;
@@ -1436,6 +1667,7 @@ impl RustSearch {
                     edge_index,
                     terminal: None,
                     existing_node: Some(child_id),
+                    hard: None,
                 }));
             }
 
@@ -1447,6 +1679,7 @@ impl RustSearch {
                 edge_index,
                 terminal: state.terminal(),
                 existing_node: None,
+                hard: None,
             }));
         }
     }
@@ -2803,6 +3036,216 @@ mod tests {
             moves_left: None,
             logits: None,
         }
+    }
+
+    // === async solve pool: memo routing + descent-stop consumption ===========
+
+    fn replay(coords: &[(i16, i16)]) -> RustHexoState {
+        let mut state = RustHexoState::new();
+        for &(q, r) in coords {
+            apply_placement(
+                &mut state,
+                Placement {
+                    coord: HexCoord { q, r },
+                },
+            )
+            .unwrap();
+        }
+        state
+    }
+
+    /// tss_solver.rs win-now fixture (decided, verifies at a tiny cap).
+    fn win_now_fixture() -> RustHexoState {
+        replay(&[
+            (0, 0),
+            (0, 8),
+            (2, 7),
+            (1, 0),
+            (2, 0),
+            (4, 6),
+            (6, 5),
+            (3, 0),
+            (4, 0),
+            (8, 4),
+            (10, 3),
+        ])
+    }
+
+    /// tss_solver.rs forced-defense fixture: live opponent threats, so the
+    /// deep-leaf gate's has_threats check passes.
+    fn forced_defense_fixture() -> RustHexoState {
+        replay(&[
+            (0, 0),
+            (0, 8),
+            (2, 7),
+            (1, 0),
+            (2, 0),
+            (4, 6),
+            (6, 5),
+            (3, 0),
+            (4, 0),
+        ])
+    }
+
+    fn async_search(mode: u32) -> RustSearch {
+        let root = RustHexoState::new();
+        let eval = eval_with_uniform_priors(&[(0, 0)]);
+        let mut divergences = Divergences::parity();
+        divergences.tss_solver_mode = mode;
+        divergences.tss_solver_sample_16 = 16;
+        divergences.tss_solver_async = true;
+        RustSearch::new(
+            root,
+            &eval,
+            16,
+            0.2,
+            0.0,
+            1.0,
+            None,
+            widening(0.9, 1, 4),
+            0.0,
+            true,
+            divergences,
+        )
+        .unwrap()
+    }
+
+    /// A verified HardValue obtained through the real production mint (the
+    /// sealed type is not constructible any other way, including in tests —
+    /// that is the firewall working as intended).
+    fn verified_fixture_solve() -> (RustHexoState, ProofStatus, Option<HardValue>) {
+        let state = win_now_fixture();
+        let mut counters = TssCounters::default();
+        let solved = tss_solve_verified(
+            &state,
+            2000,
+            SolveGoal::Both,
+            &mut TssSolver::default(),
+            &mut counters,
+        );
+        assert_ne!(solved.status, ProofStatus::Unknown, "fixture must be decided");
+        assert!(solved.hard.is_some(), "decided fixture must verify");
+        (state, solved.status, solved.hard)
+    }
+
+    /// A drained response flips Pending -> Done and the descent-stop then
+    /// consumes the hard value (with the counters bumped), while a Done entry
+    /// is never overwritten.
+    #[test]
+    fn async_response_lands_and_descent_stop_consumes() {
+        let (state, status, hard) = verified_fixture_solve();
+        let hash = state_hash(&state);
+        let binding = RootBinding::from_state(&state);
+        let mut search = async_search(3);
+
+        // Nothing to consume before the response lands.
+        assert!(search.tss_async_descent_hard(hash, &state).is_none());
+
+        let response = SolveResponse {
+            slot: 0,
+            generation: 1,
+            hash,
+            binding: binding.clone(),
+            status,
+            hard,
+            counters: TssCounters {
+                deep_calls: 1,
+                deep_win: u32::from(status == ProofStatus::Win),
+                deep_loss: u32::from(status == ProofStatus::Loss),
+                ..TssCounters::default()
+            },
+        };
+        search.apply_tss_async_response(&response);
+        assert_eq!(search.tss.deep_calls, 1);
+
+        // Descent-stop consumes at mode 3 with full-binding equality.
+        let consumed = search.tss_async_descent_hard(hash, &state);
+        assert!(consumed.is_some(), "verified result must consume at mode 3");
+        assert_eq!(consumed.unwrap().value(), hard.unwrap().value());
+        assert_eq!(search.tss.deep_hard_backups, 1);
+        assert_eq!(search.tss.deep_memo_hits, 1);
+
+        // Same hash key, DIFFERENT position: binding equality must refuse.
+        let other = forced_defense_fixture();
+        assert!(search.tss_async_descent_hard(hash, &other).is_none());
+
+        // A Done entry is never overwritten by a late duplicate.
+        let clobber = SolveResponse {
+            counters: TssCounters::default(),
+            status: ProofStatus::Unknown,
+            hard: None,
+            binding,
+            ..response
+        };
+        search.apply_tss_async_response(&clobber);
+        assert!(
+            search.tss_async_descent_hard(hash, &state).is_some(),
+            "Done entry must survive a duplicate response"
+        );
+    }
+
+    /// Shadow tier (mode 1) with the pool on: results land but nothing is
+    /// consumed — bit-identical play, exactly like the inline shadow.
+    #[test]
+    fn async_shadow_mode_consumes_nothing() {
+        let (state, status, hard) = verified_fixture_solve();
+        let hash = state_hash(&state);
+        let mut search = async_search(1);
+        search.apply_tss_async_response(&SolveResponse {
+            slot: 0,
+            generation: 1,
+            hash,
+            binding: RootBinding::from_state(&state),
+            status,
+            hard,
+            counters: TssCounters::default(),
+        });
+        assert!(search.tss_async_descent_hard(hash, &state).is_none());
+        assert_eq!(search.tss.deep_hard_backups, 0);
+    }
+
+    /// The enqueue path: first gated call enqueues (Pending), a re-selected
+    /// pending leaf does not re-enqueue, the drained result serves memo hits,
+    /// and set_additional_visits clears the handle with the memo.
+    #[test]
+    fn async_enqueue_dedups_and_serves_after_drain() {
+        let pool = crate::tss_async::TssAsyncPool::new(1);
+        let state = forced_defense_fixture();
+        let hash = state_hash(&state);
+        let mut search = async_search(3);
+        search.set_tss_async(Some(pool.handle_for(0)));
+        let generation = search.tss_async_generation().expect("handle wired");
+
+        assert!(search.tss_deep_leaf(&state, hash).is_none(), "async never solves inline");
+        assert_eq!(search.tss.async_enqueued, 1);
+        assert!(search.tss_deep_leaf(&state, hash).is_none());
+        assert_eq!(search.tss.async_enqueued, 1, "pending leaf must not re-enqueue");
+        assert_eq!(search.tss.async_pending_hits, 1);
+
+        // Drain the worker's response and land it.
+        let response = 'drain: {
+            for _ in 0..1000 {
+                let mut drained = pool.try_drain();
+                if let Some(response) = drained.pop() {
+                    break 'drain response;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            panic!("async solve pool produced no response within 10s");
+        };
+        assert_eq!(response.generation, generation);
+        search.apply_tss_async_response(&response);
+
+        // Third selection: memo hit (consumption depends on the verdict —
+        // Unknown serves None, a verified proof serves the hard value).
+        let memo_hits_before = search.tss.deep_memo_hits;
+        let _ = search.tss_deep_leaf(&state, hash);
+        assert_eq!(search.tss.deep_memo_hits, memo_hits_before + 1);
+        assert_eq!(search.tss.async_enqueued, 1, "solved leaf must not re-enqueue");
+
+        // New move: handle drops with the memo; the wire pass re-issues it.
+        search.set_additional_visits(4);
+        assert!(search.tss_async_generation().is_none());
     }
 
     /// forced_only=true narrows the node to exactly the tactical (forced)

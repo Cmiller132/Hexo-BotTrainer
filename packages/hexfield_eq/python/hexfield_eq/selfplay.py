@@ -220,6 +220,12 @@ class ContinuousDriver:
         self.tss_deep_verify_failed = 0
         self.tss_deep_hard_backups = 0
         self.tss_deep_memo_hits = 0
+        # Async solve pool (tss_solver_async): enqueue/drop/stale/pending
+        # routing counters. dropped>0 sustained => widen the pool or queue.
+        self.tss_async_enqueued = 0
+        self.tss_async_dropped = 0
+        self.tss_async_stale = 0
+        self.tss_async_pending_hits = 0
         # Search-depth distribution over every real backup (all leaf kinds):
         # the direct measure of how deep the search actually reaches.
         self.tss_depth_sum = 0
@@ -373,6 +379,10 @@ class ContinuousDriver:
             self.tss_deep_verify_failed += int(tss_diag.get("deep_verify_failed", 0))
             self.tss_deep_hard_backups += int(tss_diag.get("deep_hard_backups", 0))
             self.tss_deep_memo_hits += int(tss_diag.get("deep_memo_hits", 0))
+            self.tss_async_enqueued += int(tss_diag.get("async_enqueued", 0))
+            self.tss_async_dropped += int(tss_diag.get("async_dropped", 0))
+            self.tss_async_stale += int(tss_diag.get("async_stale", 0))
+            self.tss_async_pending_hits += int(tss_diag.get("async_pending_hits", 0))
             self.tss_depth_sum += int(tss_diag.get("depth_sum", 0))
             self.tss_depth_max = max(self.tss_depth_max, int(tss_diag.get("depth_max", 0)))
             self.tss_backups += int(tss_diag.get("backups", 0))
@@ -823,6 +833,10 @@ class ContinuousDriver:
                 "deep_verify_failed": int(self.tss_deep_verify_failed),
                 "deep_hard_backups": int(self.tss_deep_hard_backups),
                 "deep_memo_hits": int(self.tss_deep_memo_hits),
+                "async_enqueued": int(self.tss_async_enqueued),
+                "async_dropped": int(self.tss_async_dropped),
+                "async_stale": int(self.tss_async_stale),
+                "async_pending_hits": int(self.tss_async_pending_hits),
                 "depth_sum": int(self.tss_depth_sum),
                 "backups": int(self.tss_backups),
                 "search_depth_mean": (
@@ -1116,6 +1130,7 @@ def _merge_epoch_diag(segments: list[dict[str, Any]]) -> dict[str, Any]:
             "proof_rows", "proof_disagreements", "sharpened_rows",
             "deep_calls", "deep_win", "deep_loss", "deep_unknown", "deep_nodes",
             "deep_verify_failed", "deep_hard_backups", "deep_memo_hits",
+            "async_enqueued", "async_dropped", "async_stale", "async_pending_hits",
             "depth_sum", "backups",
         )
         for key in int_keys:
