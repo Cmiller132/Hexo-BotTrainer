@@ -35,8 +35,12 @@ tss_enabled = true
 # Next rungs, one epoch apart, gated on deep_verify_failed==0 + throughput:
 # mode=2 (verified hard LOSS consumption), then mode=3 + tss_solver_root_guard.
 tss_interior_guard = true
-tss_solver_mode = 1
-tss_solver_sample_16 = 16
+# ep27 rung: verified hard LOSS consumption (mode 2 — the first rung where
+# proofs enter backups, each eliding a GPU eval). ep26 full-coverage gate:
+# 1.08M solves, deep_verify_failed=0, 15.3% proven, but 3.4x epoch time at
+# 16/16 sampling (endgame-tail concentration) → half sampling here.
+tss_solver_mode = 2
+tss_solver_sample_16 = 8
 tss_solver_node_cap = 2000
 cache_max_states = 262144
 nucleus_f64 = true
