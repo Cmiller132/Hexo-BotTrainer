@@ -102,6 +102,19 @@ pub struct SolveCaps {
     pub tt_bytes_cap: usize,
 }
 
+/// Which root-perspective hard result a caller wants the deep solver to seek.
+///
+/// This is deliberately separate from [`SolveCaps`] so existing callers using
+/// its two-field literal remain source-compatible.  `DeepSolve::solve` keeps
+/// the historical [`SolveGoal::Both`] behavior; reusable solver callers may
+/// request one side explicitly and give that attempt the whole node budget.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SolveGoal {
+    Win,
+    Loss,
+    Both,
+}
+
 /// Per-solve diagnostics (telemetry only — never consulted for soundness).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SolveStats {
