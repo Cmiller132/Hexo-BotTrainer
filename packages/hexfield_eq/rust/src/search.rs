@@ -2719,6 +2719,7 @@ const KNOWN_DIVERGENCE_KEYS: &[&str] = &[
     "gumbel_draw_temperature",
     "gumbel_target_min_visits",
     "gumbel_play_prune",
+    "tss_interior_guard",
     // Fast-class Gumbel levers (main_8: PUCT Full / Gumbel Fast). These name the
     // Fast view's values; the driver's Python side folds them into the SECOND
     // (fast) override map whose base keys resolve_divergences reads. They are
@@ -2815,6 +2816,9 @@ fn resolve_divergences(
         }
         if let Some(v) = overrides.get_item("scaled_fpu")? {
             dv.scaled_fpu = v.extract()?;
+        }
+        if let Some(v) = overrides.get_item("tss_interior_guard")? {
+            dv.tss_interior_guard = v.extract()?;
         }
         // Gumbel AlphaZero flags (default-OFF).
         if let Some(v) = overrides.get_item("gumbel_target")? {

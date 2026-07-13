@@ -359,7 +359,8 @@ _CORE_KEYS = (
 
 class DigestHarness:
     """Minimal on_move driver: digests the core payload surface, applies the
-    played action, ends each game at terminal or after max_plies."""
+    played action, ends each game at terminal or after max_plies. TSS shadow
+    counters are tracked separately and never digested."""
 
     def __init__(self, states: dict[int, object], max_plies: int = 60):
         self.states = states
@@ -367,9 +368,14 @@ class DigestHarness:
         self.plies = {key: 0 for key in states}
         self.digest = hashlib.sha256()
         self.moves = 0
+        self.prune_eligible = 0
+        self.prune_dropped = 0
 
     def __call__(self, game_key: int, payload: dict):
         self.moves += 1
+        tss = (payload.get("diagnostics") or {}).get("tss") or {}
+        self.prune_eligible += int(tss.get("prune_eligible", 0))
+        self.prune_dropped += int(tss.get("prune_dropped", 0))
         self.digest.update(b"|move|%d|" % int(game_key))
         for key in _CORE_KEYS:
             if key not in payload:
@@ -392,7 +398,7 @@ class DigestHarness:
         return ("advance", state)
 
 
-def _run_stage0_digest() -> tuple[str, int]:
+def _run_stage0_digest(divergence_overrides: dict | None = None) -> DigestHarness:
     states = {1: api.new_game(), 2: api.new_game(), 3: api.new_game()}
     harness = DigestHarness(states)
     session = _rust.HexfieldMctsSession(max_states=8192)
@@ -409,8 +415,9 @@ def _run_stage0_digest() -> tuple[str, int]:
         active_root_limit=4,
         temperature_by_ply=[1.0, 0.9, 0.8],
         tss_enabled=True,
+        divergence_overrides=divergence_overrides,
     )
-    return harness.digest.hexdigest(), harness.moves
+    return harness
 
 
 @needs_rust
@@ -465,7 +472,8 @@ def test_mini_selfplay_driver_end_to_end(tmp_path):
 
 @needs_rust
 def test_stage0_digest_matches_golden():
-    digest, moves = _run_stage0_digest()
+    harness = _run_stage0_digest()
+    digest, moves = harness.digest.hexdigest(), harness.moves
     assert moves > 30, f"self-play run too short to be meaningful: {moves} moves"
     if not GOLDEN_PATH.exists():
         GOLDEN_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -479,3 +487,85 @@ def test_stage0_digest_matches_golden():
         "Stage-0 payload surface drifted from the golden build — the refactor "
         "is no longer bit-identical (or an intentional change needs a new golden)"
     )
+
+
+def _run_fixture_games(divergence_overrides: dict | None) -> DigestHarness:
+    """run_continuous from the three threat-rich fixture positions: interior
+    fully-forced nodes are guaranteed (a hitting reply leaves a one-family
+    k == B == 1 defense at SecondStone)."""
+    states = {1: forced_defense_state(), 2: forced_loss_state(), 3: win_now_state()}
+    harness = DigestHarness(states, max_plies=30)
+    session = _rust.HexfieldMctsSession(max_states=8192)
+    session.run_continuous(
+        list(states.keys()),
+        tuple(states.values()),
+        evaluator=StubEvaluator(),
+        on_move=harness,
+        visits=48,
+        c_puct=1.5,
+        base_seed=13_371_337,
+        virtual_batch_size=8,
+        flush_target=16,
+        active_root_limit=4,
+        temperature_by_ply=[1.0, 0.9, 0.8],
+        tss_enabled=True,
+        divergence_overrides=divergence_overrides,
+    )
+    return harness
+
+
+@needs_rust
+def test_interior_guard_flag_on_narrows_and_diverges():
+    """Lever 0 end-to-end twin runs from threat-rich starts: the shadow
+    preview fires identically with the flag off; with the flag on the same
+    nodes actually narrow and the play/target stream diverges (the flag is
+    not a no-op). Flag-off bit-identity vs the pre-TSS build is separately
+    pinned by test_stage0_digest_matches_golden."""
+    off = _run_fixture_games(None)
+    on = _run_fixture_games({"tss_interior_guard": True})
+    assert off.prune_eligible > 0, "fixture games produced no fully-forced nodes"
+    assert on.prune_eligible > 0
+    assert on.prune_dropped > 0
+    assert off.moves > 10 and on.moves > 10
+    assert on.digest.hexdigest() != off.digest.hexdigest(), (
+        "guard pruned nodes yet the play/target stream is unchanged — "
+        "the flag is not reaching node construction"
+    )
+
+
+def test_interior_guard_config_plumbing():
+    """SelfplayConfig.tss_interior_guard rides the divergence-overrides dict
+    (default off), for self-play and every arena/eval path alike."""
+    from hexfield_eq.config import SelfplayConfig, build_divergence_overrides
+
+    sp = SelfplayConfig()
+    assert build_divergence_overrides(sp)["tss_interior_guard"] is False
+    sp_on = SelfplayConfig(tss_interior_guard=True)
+    assert build_divergence_overrides(sp_on)["tss_interior_guard"] is True
+    # The Fast-class map inherits the base value.
+    assert build_divergence_overrides(sp_on, fast=True)["tss_interior_guard"] is True
+
+
+@needs_rust
+def test_interior_guard_lockstep_forced_defense_still_defends():
+    """Flag-on lockstep search on the forced-defense fixture: the search must
+    still play a hitting cell (the guard narrows interior nodes only — root
+    behavior and the play-time tactical guard are unchanged)."""
+    session = _rust.HexfieldMctsSession(max_states=4096)
+    payloads = session.search(
+        [0],
+        (forced_defense_state(),),
+        48,
+        1.5,
+        1.0,
+        42,
+        StubEvaluator(),
+        divergence_overrides={"tss_interior_guard": True},
+    )
+    payload = payloads[0]
+    q, r = unpack_action_id(int(payload["action_id"]))
+    assert (q, r) in {(-2, 0), (-1, 0), (5, 0), (6, 0)}
+    tss = payload["diagnostics"]["tss"]
+    # Depth-1 hitting children are themselves fully forced (one family left,
+    # k == B == 1 at SecondStone): the guard must have fired somewhere below.
+    assert tss["prune_eligible"] > 0

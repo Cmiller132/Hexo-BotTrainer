@@ -74,6 +74,12 @@ class SelfplayConfig:
     temperature_halflife_plies: float = 30.0
     max_game_plies: int = 512
     tss_enabled: bool = True
+    # Interior forced-move guard (TSS Lever 0, PLAN_TSS_DEEPENING.md §3): at
+    # interior expansion with live opponent threats, no own win-now, and
+    # min_hitting_set == B, children narrow to the hitting-cell universe
+    # (every dropped move carries a one-ply λ¹ refutation). Default OFF; its
+    # own deployment rung. Rides the divergence-overrides dict.
+    tss_interior_guard: bool = False
     search_parity_mode: bool = False
     # Moves-left utility. Defaults: enabled, two-sided, with the final-move
     # tie-break. Passed to Rust as divergence_overrides. moves_left_utility=False
@@ -543,6 +549,8 @@ def build_divergence_overrides(
         "clean_root_prior_cache": bool(sp.clean_root_prior_cache),
         "dirichlet_shaped": bool(sp.dirichlet_shaped),
         "pruned_dynamic_cpuct": bool(sp.pruned_dynamic_cpuct),
+        # TSS interior forced-move guard (Lever 0, default OFF).
+        "tss_interior_guard": bool(sp.tss_interior_guard),
         # Gumbel AlphaZero levers (default OFF).
         "gumbel_target": bool(sp.gumbel_target_enabled),
         "gumbel_root": bool(sp.gumbel_root_enabled),

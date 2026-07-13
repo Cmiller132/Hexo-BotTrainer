@@ -237,6 +237,66 @@ mod tests {
         assert!(checked > 500, "random-state corpus too small: {checked}");
     }
 
+    /// Lemma L1 (instant dispatch — the interior forced-move guard's soundness
+    /// argument, PLAN_TSS_DEEPENING.md §0/§3): at any reachable state with
+    /// verdict None, live opponent threats, and min_hitting_set == B, every
+    /// legal move OUTSIDE tactical_cells() loses by the one-ply λ¹ argument.
+    /// Exercised over the random corpus + the guarantee that the dropped move
+    /// can never be an immediate win (verdict None excludes own count-4/5).
+    #[test]
+    fn lemma_l1_every_nontactical_move_at_k_eq_b_is_lost() {
+        let mut forced_nodes = 0usize;
+        let mut dropped_checked = 0usize;
+        for seed in 1..120u64 {
+            for state in random_states(seed.wrapping_mul(0xD134_2543_DE82_EF95), 70) {
+                let a = threats::analyze(&state);
+                if a.own_win_now || a.opp_threat_count == 0 {
+                    continue;
+                }
+                if a.min_hitting_set != Some(a.b) {
+                    continue;
+                }
+                forced_nodes += 1;
+                let mover = state.current_player();
+                let tactical: Vec<HexCoord> = threats::tactical_cells(&state);
+                // Enumerate legal moves by rejection over the covering box:
+                // random_states places within ±8, legality reaches 8 further.
+                for q in -16..=16i16 {
+                    for r in -16..=16i16 {
+                        let coord = HexCoord { q, r };
+                        if tactical.contains(&coord) {
+                            continue;
+                        }
+                        let mut child = state.clone();
+                        let Ok(res) = apply_placement(&mut child, Placement { coord }) else {
+                            continue;
+                        };
+                        // verdict None at the parent ⇒ no own count-4/5 ⇒ a
+                        // single placement can never complete our 6.
+                        assert!(
+                            res.outcome.is_none(),
+                            "a non-tactical move ended the game at a verdict-None node"
+                        );
+                        let v = threats::analyze(&child)
+                            .verdict()
+                            .expect("L1: non-tactical child must be λ¹-decided");
+                        let ours = if child.current_player() == mover { v } else { -v };
+                        assert_eq!(
+                            ours, -1.0,
+                            "L1 violated: non-tactical move ({q},{r}) at k==B is not a \
+                             proven loss (seed {seed})"
+                        );
+                        dropped_checked += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            forced_nodes > 20 && dropped_checked > 2000,
+            "corpus too thin: {forced_nodes} forced nodes / {dropped_checked} dropped moves"
+        );
+    }
+
     /// ProofStatus::value is the exact backup mapping.
     #[test]
     fn proof_status_values() {

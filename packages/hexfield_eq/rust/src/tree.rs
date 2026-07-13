@@ -145,6 +145,15 @@ pub struct Divergences {
     /// zeroed (they carry schedule mass, not quality mass). Recorded targets
     /// are untouched. Off => sample the raw histogram (legacy behavior).
     pub gumbel_play_prune: bool,
+    /// Interior forced-move guard (Lever 0, PLAN_TSS_DEEPENING.md §3): at
+    /// INTERIOR node expansion with live opponent threats, no own win-now, and
+    /// `min_hitting_set == B` (defense consumes the whole turn), the children
+    /// set narrows to the hitting-cell universe — every dropped move carries a
+    /// one-ply λ¹ refutation (it leaves the threats unanswerable). At
+    /// `k < B` (a spare stone exists: quiet/counter-threat replies are live
+    /// options) nothing is pruned. Root expansion is untouched. Off => today's
+    /// inject-widen-only behavior.
+    pub tss_interior_guard: bool,
 }
 
 impl Divergences {
@@ -185,6 +194,7 @@ impl Divergences {
             gumbel_draw_temperature: 1.0,
             gumbel_target_min_visits: 1,
             gumbel_play_prune: false,
+            tss_interior_guard: false,
         }
     }
 
@@ -1052,6 +1062,21 @@ impl RustSearch {
             Vec::new()
         };
         let nucleus_f64 = self.divergences.nucleus_f64;
+        // Interior forced-move guard (Lever 0 §3). A node that reaches
+        // expansion has verdict None (a Some-verdict leaf backs up hard and
+        // never creates a node), so the fully-forced condition reduces to
+        // min_hitting_set == B with no own win — every non-tactical move then
+        // carries a one-ply λ¹ refutation. With the divergence flag ON the
+        // children narrow to the hitting-cell universe; OFF keeps today's
+        // inject-widen behavior and the counters are a shadow preview.
+        let fully_forced = if tactical.is_empty() {
+            false
+        } else {
+            let analysis = threats::analyze(state);
+            !analysis.own_win_now && analysis.min_hitting_set == Some(analysis.b)
+        };
+        let forced_only = fully_forced && self.divergences.tss_interior_guard;
+        let legal_total = evaluation.priors.len();
         let node = if tactical.is_empty() {
             shared_from_cache(hash, state, evaluation, self.widening, nucleus_f64)
         } else {
@@ -1062,21 +1087,14 @@ impl RustSearch {
                 self.widening,
                 &tactical,
                 nucleus_f64,
+                forced_only,
             )
         };
-        // Interior forced-move-guard PREVIEW (shadow, Lever 0 §3): a node that
-        // reaches expansion has verdict None (a Some-verdict leaf backs up hard
-        // and never creates a node), so the guard condition reduces to
-        // min_hitting_set == B with no own win. Count how often it would fire
-        // and the non-tactical fan-out it would remove; take no action.
-        if !tactical.is_empty() {
-            let analysis = threats::analyze(state);
-            if !analysis.own_win_now && analysis.min_hitting_set == Some(analysis.b) {
-                self.tss.prune_eligible += 1;
-                let total_actions = node.edges.len() + node.remaining_prior_count();
-                self.tss.prune_dropped +=
-                    total_actions.saturating_sub(tactical.len()) as u64;
-            }
+        if fully_forced {
+            self.tss.prune_eligible += 1;
+            // Fan-out removed (guard on) / removable (shadow preview): the
+            // full legal set minus the forced set.
+            self.tss.prune_dropped += legal_total.saturating_sub(tactical.len()) as u64;
         }
         let injected_edges = node.edges.len();
         self.nodes.push(node);
@@ -1866,6 +1884,7 @@ fn owned_with_injection_from_eval(
     widening: Widening,
     tactical: &[HexCoord],
     nucleus_f64: bool,
+    forced_only: bool,
 ) -> RustNode {
     let nucleus = nucleus_count_pairs(&evaluation.priors, widening, nucleus_f64);
     let mut candidates: Vec<RustPriorCandidate> = evaluation
@@ -1875,6 +1894,14 @@ fn owned_with_injection_from_eval(
         .collect();
     candidates.reverse();
     let (edges, rest, max_eligible_children) = split_tactical(candidates, tactical, nucleus);
+    // Interior forced-move guard (Lever 0): at a fully-forced node the caller
+    // passes forced_only=true and the non-tactical candidates are dropped
+    // entirely — each carries a one-ply λ¹ refutation (see add_node_from_eval).
+    let (rest, max_eligible_children) = if forced_only {
+        (Vec::new(), edges.len())
+    } else {
+        (rest, max_eligible_children)
+    };
     RustNode {
         state_hash: state_hash_value,
         player: state.current_player(),
@@ -2526,6 +2553,55 @@ mod tests {
             min_children: min_c,
             max_children: max_c,
         }
+    }
+
+    // === interior forced-move guard (Lever 0): node construction ===
+
+    fn eval_with_uniform_priors(cells: &[(i16, i16)]) -> RustEvaluation {
+        let priors: Vec<(PackedCoord, f32)> = cells
+            .iter()
+            .map(|&(q, r)| (pack_coord(HexCoord { q, r }), 1.0 / cells.len() as f32))
+            .collect();
+        RustEvaluation {
+            value: 0.0,
+            legal_action_count: priors.len(),
+            priors,
+            moves_left: None,
+            logits: None,
+        }
+    }
+
+    /// forced_only=true narrows the node to exactly the tactical (forced)
+    /// edges: no leftover prior candidates, widening capped at the forced set.
+    /// forced_only=false keeps today's inject-widen shape (tactical edges +
+    /// the rest as unexpanded candidates).
+    #[test]
+    fn forced_only_node_drops_non_tactical_candidates() {
+        let state = hexo_engine::HexoState::new();
+        let hash = state_hash(&state);
+        let tactical = vec![HexCoord { q: -1, r: 0 }, HexCoord { q: 5, r: 0 }];
+        let legal: Vec<(i16, i16)> = vec![(-1, 0), (5, 0), (2, 3), (4, 4), (7, 7), (0, 1)];
+        let eval = eval_with_uniform_priors(&legal);
+        let w = widening(0.9, 2, 8);
+
+        let node_off =
+            owned_with_injection_from_eval(hash, &state, &eval, w, &tactical, true, false);
+        let off_ids: Vec<PackedCoord> = node_off.edges.iter().map(|e| e.action_id).collect();
+        assert_eq!(off_ids.len(), 2, "tactical cells materialize as forced edges");
+        assert!(node_off.edges.iter().all(|e| e.forced));
+        assert_eq!(
+            node_off.remaining_prior_count(),
+            4,
+            "flag off keeps the non-tactical candidates as unexpanded priors"
+        );
+
+        let node_on =
+            owned_with_injection_from_eval(hash, &state, &eval, w, &tactical, true, true);
+        let on_ids: Vec<PackedCoord> = node_on.edges.iter().map(|e| e.action_id).collect();
+        assert_eq!(on_ids, off_ids, "the forced set is identical either way");
+        assert!(node_on.edges.iter().all(|e| e.forced));
+        assert_eq!(node_on.remaining_prior_count(), 0, "guard drops the rest");
+        assert_eq!(node_on.max_eligible_children, 2);
     }
 
     // === nucleus f64 short-circuit + f64/f32 agreement ===
