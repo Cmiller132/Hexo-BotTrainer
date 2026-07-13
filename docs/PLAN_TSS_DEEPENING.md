@@ -494,6 +494,15 @@ fiber question; the ablation stays on the general backlog, unrelated to TSS).
 
 ## 12. Decisions log (owner, 2026-07-13)
 
+> **Build status (2026-07-13, branch `claude/tss-v2-build`):** Stages 0–4 are
+> BUILT and tested, all flags default-off — Stage-0 typed core + shadow
+> metrics (bit-identity golden-proven), Lever 0, Lever 1, the Codex-built
+> proof-carrying solver + independent verifier (docs/TSS_SOLVER_PROOF.md),
+> and the Stage-4 ladder (shadow / verified LOSS / verified WIN / deep root
+> guard with play override). The Lever-2 train-read label swap builds at its
+> rung (§10 rung 5) once `proof_disagreements` justify it — both labels are
+> already captured per row. Deployment: **docs/TSS_RUNBOOK.md**.
+
 1. **Target run: main_3.** The full stack attaches to the live main_3 run once
    built and well tested, rung-by-rung per §9/§10 (flags + shadow soaks + eval
    cadence as the gate; fork A/B optional instrument only).
