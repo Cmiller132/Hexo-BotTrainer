@@ -94,6 +94,12 @@ export HEXFIELD_COPY_STREAM="${HEXFIELD_COPY_STREAM:-1}"
 # note) + compiled train forward. Both main-lineage proven.
 export HEXFIELD_TRAIN_FLEX="${HEXFIELD_TRAIN_FLEX:-1}"
 export HEXFIELD_TRAIN_COMPILE="${HEXFIELD_TRAIN_COMPILE:-1}"
+# Fused Triton train-stream ray-tap aggregation (2026-07-13): retires the
+# eager K2 island (was ~85% of train-step device time at main_3 shapes) for a
+# fwd+bwd custom op that stays in-graph under the compiled trainer. Gated
+# inside model.py (grad-enabled CUDA only; per-shape eager fallback). =0
+# reverts to the eager K2 island with zero code change.
+export HEXFIELD_TRITON_RAYTAP_TRAIN="${HEXFIELD_TRITON_RAYTAP_TRAIN:-1}"
 # Deferred-decode (bit-identical decode scheduling). Set to 0 to keep the
 # device syncs inside submit.
 export HEXFIELD_DEFER_DECODE="${HEXFIELD_DEFER_DECODE:-1}"

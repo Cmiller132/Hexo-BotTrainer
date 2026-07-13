@@ -225,6 +225,20 @@ if _TRITON_RAYTAP7:
 else:
     _hex_ray_taps7_fused = None
     _hex_ln_mask_fused = None
+# Fused TRAIN-stream ray-tap aggregation (fwd + bwd Triton custom op with
+# registered autograd), HEXFIELD_TRITON_RAYTAP_TRAIN=1 (default ON). Replaces
+# the eager K2 island — which materialized (B, N, RAY_REACH, C) fp32
+# intermediates per direction in fwd AND bwd (~85% of the training step's
+# device time at main_3 shapes, profiled 2026-07-13) and forced a dynamo graph
+# break per equipped conv — with three fused kernels that stay IN-graph under
+# torch.compile. Grad-enabled CUDA only; the op falls back internally to the
+# eager reference per (C, has_lut) key on any Triton failure.
+try:
+    from ._triton_raytap_train import ENABLED as _RT_TRAIN_ENABLED
+    from ._triton_raytap_train import rt_taps7_train as _rt_taps7_train
+except Exception:  # pragma: no cover - no triton
+    _rt_taps7_train = None
+    _RT_TRAIN_ENABLED = False
 # fp8 (e4m3) conv GEMMs were REMOVED for the equivariant v1 (docs/DERIVATION
 # §2.3, "BUGS_FOUND"): the fused-conv fp8 weight cache was keyed on id(weight),
 # but the tied trunk regenerates a fresh dense weight object every forward
@@ -808,6 +822,31 @@ class HexNodeConv(nn.Module):
                 )
             if self.raytap_lut == "additive":
                 O_full, P_full = self._alpha_tables()
+            else:
+                O_full = P_full = None
+            # Fused train-stream aggregation: one custom op emits the
+            # (B, N, 7, C) tapped GEMM input directly (center + 6 taps, the
+            # cat included), with Triton fwd/bwd — no (B, N, 5, C)
+            # intermediates, no graph break. Grad-enabled CUDA only so every
+            # serve/CPU path keeps its existing numerics byte-for-byte.
+            if (
+                _rt_taps7_train is not None
+                and _RT_TRAIN_ENABLED
+                and x.is_cuda
+                and torch.is_grad_enabled()
+            ):
+                gathered = _rt_taps7_train(
+                    x,
+                    ray_ctx.idx_taps,
+                    ray_ctx.reach,
+                    self._alpha_full(),
+                    O_full,
+                    P_full,
+                    self.alpha.shape[1],
+                ).reshape(b, n, 7 * c)
+                out = gathered @ weight.reshape(7 * c, self.out_channels) + bias
+                return out * mask.unsqueeze(-1)
+            if O_full is not None:
                 taps = _raytap().ray_tap_taps(
                     x,
                     ray_ctx.idx_taps,
