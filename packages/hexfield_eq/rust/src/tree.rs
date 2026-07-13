@@ -26,6 +26,9 @@ use hexo_utils::StateHash;
 use crate::cache::{state_hash, RustEvaluation};
 use crate::state::move_error;
 use crate::threats_shared as threats;
+use crate::tss_core::{self, DeepSolve, HardValue, ProofStatus, SolveCaps};
+use crate::tss_solver::TssSolver;
+use crate::tss_verify::{RootBinding, TssVerifier};
 
 /// Edge Q is `value_sum / visits` on the symmetric interval [-1, 1] (win/loss
 /// utility, no per-node normalization). The exploration (U) and value (Q) terms
@@ -154,6 +157,25 @@ pub struct Divergences {
     /// options) nothing is pruned. Root expansion is untouched. Off => today's
     /// inject-widen-only behavior.
     pub tss_interior_guard: bool,
+    /// Deep-solver consumption tier (Stage 4 ladder, §10): 0 = off, 1 = SHADOW
+    /// (solve + verify + count at gated leaves, consume nothing — the play and
+    /// target stream is bit-identical to off), 2 = shadow + verified hard LOSS
+    /// backups with GPU-eval elision, 3 = 2 + verified hard WIN backups. Every
+    /// hard value is minted by tss_core::hard_value_from_verified — the
+    /// independent certificate verifier runs BEFORE every backup, and a
+    /// verification failure increments the fatal `deep_verify_failed` counter
+    /// (production must alarm on nonzero) and degrades to net-eval.
+    pub tss_solver_mode: u32,
+    /// Deterministic per-solve node cap (no wall clock anywhere on this path).
+    pub tss_solver_node_cap: u32,
+    /// Leaf subsample gate in sixteenths (16 = every gated leaf, 0 = none),
+    /// keyed off the leaf StateHash so re-selection is idempotent.
+    pub tss_solver_sample_16: u32,
+    /// Deep root guard (§10 rung 6): class-0 root moves get a verified deep
+    /// solve; proven classes upgrade the shared class map, so the play-time
+    /// guard (and, under Lever 1, the recorded targets) consume deep proofs.
+    /// The row proof scalar (tss_proof) is likewise deep-upgraded.
+    pub tss_solver_root_guard: bool,
 }
 
 impl Divergences {
@@ -195,6 +217,10 @@ impl Divergences {
             gumbel_target_min_visits: 1,
             gumbel_play_prune: false,
             tss_interior_guard: false,
+            tss_solver_mode: 0,
+            tss_solver_node_cap: 2000,
+            tss_solver_sample_16: 16,
+            tss_solver_root_guard: false,
         }
     }
 
@@ -355,6 +381,103 @@ pub struct TssCounters {
     /// Non-tactical actions those eligible nodes carried — the fan-out the
     /// guard would remove.
     pub prune_dropped: u64,
+    // === Deep-solver (Stage 4) telemetry ===
+    /// Deep solves attempted this move (leaf + root-guard).
+    pub deep_calls: u32,
+    /// Verified WIN / verified LOSS / UNKNOWN outcomes.
+    pub deep_win: u32,
+    pub deep_loss: u32,
+    pub deep_unknown: u32,
+    /// Solver nodes expanded across this move's solves.
+    pub deep_nodes: u64,
+    /// FATAL: a Win/Loss claim whose certificate the independent verifier
+    /// rejected (degraded to Unknown). Production must alarm on nonzero.
+    pub deep_verify_failed: u32,
+    /// Verified hard values actually backed up (each one elides a GPU eval).
+    pub deep_hard_backups: u32,
+    /// Per-move memo hits (a solved leaf re-selected).
+    pub deep_memo_hits: u32,
+}
+
+impl TssCounters {
+    /// Field-wise accumulate (payload builder merges its local root-guard
+    /// counters into the search's per-move view).
+    pub fn add(&mut self, other: &TssCounters) {
+        self.root_tactical += other.root_tactical;
+        self.root_injected += other.root_injected;
+        self.leaf_verdict_hits += other.leaf_verdict_hits;
+        self.prune_eligible += other.prune_eligible;
+        self.prune_dropped += other.prune_dropped;
+        self.deep_calls += other.deep_calls;
+        self.deep_win += other.deep_win;
+        self.deep_loss += other.deep_loss;
+        self.deep_unknown += other.deep_unknown;
+        self.deep_nodes += other.deep_nodes;
+        self.deep_verify_failed += other.deep_verify_failed;
+        self.deep_hard_backups += other.deep_hard_backups;
+        self.deep_memo_hits += other.deep_memo_hits;
+    }
+}
+
+/// A completed deep solve after the mandatory verification step. `hard` and
+/// `cert` are `Some` only when the independent verifier accepted the
+/// certificate; a rejected claim reads as Unknown with the FATAL
+/// `deep_verify_failed` counter bumped.
+pub struct VerifiedSolve {
+    pub status: ProofStatus,
+    pub hard: Option<HardValue>,
+    pub cert: Option<crate::tss_verify::TssCertificate>,
+}
+
+/// One verified deep solve (the ONLY production path from solver claims to
+/// consumable results): solver → independent certificate verifier via the
+/// sole deep mint `tss_core::hard_value_from_verified`. Deterministic: node
+/// cap only, no wall clock. Shared by the per-search leaf hook and the
+/// payload-build root guard.
+pub fn tss_solve_verified(
+    state: &RustHexoState,
+    node_cap: u64,
+    counters: &mut TssCounters,
+) -> VerifiedSolve {
+    counters.deep_calls += 1;
+    let caps = SolveCaps {
+        node_cap,
+        tt_bytes_cap: RustSearch::TSS_SOLVER_TT_BYTES,
+    };
+    let result = TssSolver::default().solve(state, &caps);
+    counters.deep_nodes += result.stats.nodes;
+    match result.status {
+        ProofStatus::Unknown => {
+            counters.deep_unknown += 1;
+            VerifiedSolve {
+                status: ProofStatus::Unknown,
+                hard: None,
+                cert: None,
+            }
+        }
+        status => match tss_core::hard_value_from_verified(&TssVerifier, state, &result) {
+            Some(hard) => {
+                match status {
+                    ProofStatus::Win => counters.deep_win += 1,
+                    ProofStatus::Loss => counters.deep_loss += 1,
+                    ProofStatus::Unknown => unreachable!("matched above"),
+                }
+                VerifiedSolve {
+                    status,
+                    hard: Some(hard),
+                    cert: result.cert,
+                }
+            }
+            None => {
+                counters.deep_verify_failed += 1;
+                VerifiedSolve {
+                    status: ProofStatus::Unknown,
+                    hard: None,
+                    cert: None,
+                }
+            }
+        },
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -465,6 +588,13 @@ pub struct RustSearch {
     pub early_stopped: bool,
     /// Per-move TSS shadow telemetry; reset alongside `early_stopped`.
     pub tss: TssCounters,
+    /// Per-move deep-solve memo (Stage 4): a solved leaf re-selected must
+    /// never re-run the solver. Keyed by the (history-bearing) StateHash with
+    /// FULL-POSITION binding equality verified on every hit (§2.5 — the hash
+    /// alone is never trusted for a value-bearing result). HardValue presence
+    /// implies the certificate already passed the independent verifier.
+    /// Bounded; cleared with the per-move counters.
+    tss_deep_memo: HashMap<StateHash, (RootBinding, ProofStatus, Option<HardValue>)>,
     /// Clean post-temp, pre-noise root priors (policy after the at-most-once
     /// root-policy-temperature step), keyed by action_id. When
     /// `clean_root_prior_cache` is on, a reused/promoted root resets its
@@ -541,6 +671,7 @@ impl RustSearch {
             divergences,
             early_stopped: false,
             tss: TssCounters::default(),
+            tss_deep_memo: HashMap::new(),
             clean_root_priors,
             active_edge_count: 0,
             max_active_edges_per_node: 0,
@@ -761,6 +892,65 @@ impl RustSearch {
         // New move: reset the per-move TSS shadow telemetry with the budget
         // (this is the universal per-move entry for lockstep and continuous).
         self.tss = TssCounters::default();
+        self.tss_deep_memo.clear();
+    }
+
+    /// Hard cap on per-move deep-memo entries (bounded memory; past the cap
+    /// solves simply recompute — never a correctness concern, only cost).
+    const TSS_DEEP_MEMO_MAX: usize = 8192;
+    /// Per-solve transposition-table byte cap handed to the deep solver (its
+    /// TT is per-solve; this bounds transient allocation, not retained state).
+    const TSS_SOLVER_TT_BYTES: usize = 256 << 10;
+
+    /// Deep-solver leaf hook (Stage-4 consumption ladder, PLAN §10). Gated on
+    /// tss_enabled, `tss_solver_mode > 0`, live threats, and a deterministic
+    /// StateHash subsample. Every gated leaf is solved + certificate-verified
+    /// + counted in ALL modes; a backup-capable HardValue is returned only in
+    /// the consumption tiers (mode ≥ 2 for verified LOSS, ≥ 3 for verified
+    /// WIN) — shadow mode consumes nothing, so play and targets stay
+    /// bit-identical to off. Memoized per move with full-position binding
+    /// equality so a re-selected solved edge is idempotent and never re-runs
+    /// the solver.
+    pub fn tss_deep_leaf(&mut self, state: &RustHexoState, hash: StateHash) -> Option<HardValue> {
+        let mode = self.divergences.tss_solver_mode;
+        if mode == 0 || !self.tss_enabled {
+            return None;
+        }
+        if !state.board().windows().has_threats() {
+            return None;
+        }
+        if ((hash & 0xF) as u32) >= self.divergences.tss_solver_sample_16 {
+            return None;
+        }
+        let binding = RootBinding::from_state(state);
+        let (status, hard) = match self.tss_deep_memo.get(&hash) {
+            Some((seen, status, hard)) if *seen == binding => {
+                self.tss.deep_memo_hits += 1;
+                (*status, *hard)
+            }
+            _ => {
+                let (status, hard) = self.tss_solve_verified(state);
+                if self.tss_deep_memo.len() < Self::TSS_DEEP_MEMO_MAX {
+                    self.tss_deep_memo.insert(hash, (binding, status, hard));
+                }
+                (status, hard)
+            }
+        };
+        let consume = match (status, hard) {
+            (ProofStatus::Loss, Some(h)) if mode >= 2 => Some(h),
+            (ProofStatus::Win, Some(h)) if mode >= 3 => Some(h),
+            _ => None,
+        };
+        if consume.is_some() {
+            self.tss.deep_hard_backups += 1;
+        }
+        consume
+    }
+
+    fn tss_solve_verified(&mut self, state: &RustHexoState) -> (ProofStatus, Option<HardValue>) {
+        let node_cap = self.divergences.tss_solver_node_cap as u64;
+        let solved = tss_solve_verified(state, node_cap, &mut self.tss);
+        (solved.status, solved.hard)
     }
 
     pub fn root(&self) -> &RustNode {

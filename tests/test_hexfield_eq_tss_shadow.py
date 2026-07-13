@@ -77,6 +77,21 @@ FORCED_DEFENSE_MOVES = [
 # forced_defense + a p1 turn that ignores the threat → p0 to move with a live
 # count-5 (own_win_now, verdict +1).
 WIN_NOW_MOVES = FORCED_DEFENSE_MOVES + [(8, 4), (10, 3)]
+# λ² WIN fixture: p0 to move (B=2) owns TWO disjoint 3-in-lines (r=0 and r=4,
+# q=1..3). λ¹ sees a QUIET root (no ≥4 window anywhere, verdict None), but one
+# turn (extend A to count-4, extend B to count-4) leaves p1 facing two disjoint
+# families (min hitting 4 > B=2) — a deep, certificate-provable win.
+DEEP_WIN_MOVES = [
+    (0, 0),                # p0 opening (engine-required at the origin)
+    (0, 8), (2, 7),        # p1 (non-axis (2,-1) ray throughout)
+    (1, 0), (2, 0),        # p0 → line A = q0..2, r=0 (count-3)
+    (4, 6), (6, 5),        # p1
+    (0, 4), (1, 4),        # p0 → line B starts
+    (8, 4), (10, 3),       # p1
+    (2, 4), (16, 0),       # p0 → line B = q0..2, r=4 (count-3) + far filler
+    (12, 2), (14, 1),      # p1
+]
+
 # p0 owns TWO disjoint 4-in-lines (r=0 and r=4, q=0..3): each family needs 2
 # hitting cells → 4 > B=2 → proven forced loss for p1 to move.
 FORCED_LOSS_MOVES = [
@@ -363,12 +378,18 @@ class DigestHarness:
         self.moves = 0
         self.prune_eligible = 0
         self.prune_dropped = 0
+        self.deep_calls = 0
+        self.deep_hard_backups = 0
+        self.deep_verify_failed = 0
 
     def __call__(self, game_key: int, payload: dict):
         self.moves += 1
         tss = (payload.get("diagnostics") or {}).get("tss") or {}
         self.prune_eligible += int(tss.get("prune_eligible", 0))
         self.prune_dropped += int(tss.get("prune_dropped", 0))
+        self.deep_calls += int(tss.get("deep_calls", 0))
+        self.deep_hard_backups += int(tss.get("deep_hard_backups", 0))
+        self.deep_verify_failed += int(tss.get("deep_verify_failed", 0))
         self.digest.update(b"|move|%d|" % int(game_key))
         for key in _CORE_KEYS:
             if key not in payload:
@@ -632,6 +653,62 @@ def test_interior_guard_config_plumbing():
     assert build_divergence_overrides(sp_on)["tss_interior_guard"] is True
     # The Fast-class map inherits the base value.
     assert build_divergence_overrides(sp_on, fast=True)["tss_interior_guard"] is True
+
+
+@needs_rust
+def test_deep_root_guard_proves_and_plays_the_lambda2_win():
+    """Stage-4 rung 6: at the λ²-win fixture (quiet root — λ¹ has no verdict),
+    the deep root guard's verified solve upgrades the row proof to +1 and the
+    certificate's root move to class +1, and the play-time guard forces it."""
+    session = _rust.HexfieldMctsSession(max_states=4096)
+    payloads = session.search(
+        [0],
+        (_play(api.new_game(), DEEP_WIN_MOVES),),
+        48,
+        1.5,
+        1.0,
+        42,
+        StubEvaluator(),
+        divergence_overrides={
+            "tss_solver_root_guard": True,
+            "tss_solver_node_cap": 20000,
+        },
+    )
+    payload = payloads[0]
+    tss = payload["diagnostics"]["tss"]
+    assert tss["deep_verify_failed"] == 0, "FATAL: a certificate failed verification"
+    assert tss["deep_calls"] >= 1
+    assert tss["deep_win"] >= 1, "the λ² win must be proven at this cap"
+    assert payload["tss_proof"] == 1
+    classes = _classes(payload)
+    played = int(payload["action_id"])
+    assert classes.get(played, 0) == 1, "the guard must play the proven move"
+    # λ¹ still has nothing here: the proof is genuinely deeper than one turn.
+    d = _rust.hexfield_eq_threat_analysis(_play(api.new_game(), DEEP_WIN_MOVES))
+    assert d["verdict"] is None and d["opp_threat_count"] == 0
+
+
+@needs_rust
+def test_deep_solver_shadow_is_a_no_op_and_consumption_is_not():
+    """Stage-4 ladder semantics from threat-rich starts: SHADOW (mode 1)
+    solves+verifies+counts yet leaves the play/target stream bit-identical to
+    off; the LOSS tier (mode 2) may consume — when it backs anything up the
+    stream must diverge. deep_verify_failed stays 0 throughout (the live
+    solver/verifier agreement check)."""
+    base = _run_fixture_games(None)
+    shadow = _run_fixture_games({"tss_solver_mode": 1, "tss_solver_node_cap": 4000})
+    assert shadow.deep_calls > 0, "threat-rich leaves must gate deep solves"
+    assert shadow.deep_verify_failed == 0
+    assert shadow.deep_hard_backups == 0, "shadow must consume nothing"
+    assert shadow.digest.hexdigest() == base.digest.hexdigest(), (
+        "shadow mode changed the play/target stream"
+    )
+    loss = _run_fixture_games({"tss_solver_mode": 2, "tss_solver_node_cap": 4000})
+    assert loss.deep_verify_failed == 0
+    if loss.deep_hard_backups > 0:
+        assert loss.digest.hexdigest() != base.digest.hexdigest(), (
+            "verified hard backups occurred but the stream is unchanged"
+        )
 
 
 @needs_rust

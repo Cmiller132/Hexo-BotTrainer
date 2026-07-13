@@ -19,7 +19,7 @@ use std::sync::Arc;
 use rayon::prelude::*;
 
 use hexo_engine::{
-    apply_placement, unpack_coord, HexoState as RustHexoState, PackedCoord, Placement,
+    apply_placement, pack_coord, unpack_coord, HexoState as RustHexoState, PackedCoord, Placement,
 };
 
 use crate::cache::{
@@ -34,9 +34,11 @@ use crate::state::states_from_py_states;
 use crate::threats_shared as threats;
 use crate::tss_core::{self, ProofStatus};
 use crate::tree::{
-    gumbel_completed_q, gumbel_sigma, gumbel_softmax, random_unit, terminal_value, Divergences,
-    RootDirichletNoise, RustEdge, RustLeaf, RustNode, RustSearch, TssCounters, Widening,
+    gumbel_completed_q, gumbel_sigma, gumbel_softmax, random_unit, terminal_value,
+    tss_solve_verified, Divergences, RootDirichletNoise, RustEdge, RustLeaf, RustNode,
+    RustSearch, TssCounters, Widening,
 };
+use crate::tss_verify::CertNode;
 
 pub const ACTIVE_ROOT_LIMIT: usize = 512;
 
@@ -1947,6 +1949,13 @@ fn select_leaf_batch(
                 let leaf_player = selected.state.current_player();
                 search.tss.leaf_verdict_hits += 1;
                 search.backup_virtual(&selected.path, leaf_player, hard.value(), virtual_loss, None);
+            } else if let Some(hard) =
+                search.tss_deep_leaf(&selected.state, selected.state_hash)
+            {
+                // Verified deep proof (Stage-4 ladder): certificate-checked
+                // hard backup, GPU eval elided. Shadow mode never reaches here.
+                let leaf_player = selected.state.current_player();
+                search.backup_virtual(&selected.path, leaf_player, hard.value(), virtual_loss, None);
             } else {
                 search.mark_pending(selected.parent_node, selected.edge_index, 1);
                 leaves.push(RustLeaf {
@@ -2028,6 +2037,11 @@ fn select_continuous_leaves(
             // (tss_core.rs is the only mint — the soundness firewall).
             let leaf_player = selected.state.current_player();
             search.tss.leaf_verdict_hits += 1;
+            search.backup_virtual(&selected.path, leaf_player, hard.value(), virtual_loss, None);
+        } else if let Some(hard) = search.tss_deep_leaf(&selected.state, selected.state_hash) {
+            // Verified deep proof (Stage-4 ladder): certificate-checked hard
+            // backup, GPU eval elided. Shadow mode never reaches here.
+            let leaf_player = selected.state.current_player();
             search.backup_virtual(&selected.path, leaf_player, hard.value(), virtual_loss, None);
         } else {
             search.mark_pending(selected.parent_node, selected.edge_index, 1);
@@ -2720,6 +2734,10 @@ const KNOWN_DIVERGENCE_KEYS: &[&str] = &[
     "gumbel_target_min_visits",
     "gumbel_play_prune",
     "tss_interior_guard",
+    "tss_solver_mode",
+    "tss_solver_node_cap",
+    "tss_solver_sample_16",
+    "tss_solver_root_guard",
     // Fast-class Gumbel levers (main_8: PUCT Full / Gumbel Fast). These name the
     // Fast view's values; the driver's Python side folds them into the SECOND
     // (fast) override map whose base keys resolve_divergences reads. They are
@@ -2819,6 +2837,18 @@ fn resolve_divergences(
         }
         if let Some(v) = overrides.get_item("tss_interior_guard")? {
             dv.tss_interior_guard = v.extract()?;
+        }
+        if let Some(v) = overrides.get_item("tss_solver_mode")? {
+            dv.tss_solver_mode = v.extract()?;
+        }
+        if let Some(v) = overrides.get_item("tss_solver_node_cap")? {
+            dv.tss_solver_node_cap = v.extract()?;
+        }
+        if let Some(v) = overrides.get_item("tss_solver_sample_16")? {
+            dv.tss_solver_sample_16 = v.extract()?;
+        }
+        if let Some(v) = overrides.get_item("tss_solver_root_guard")? {
+            dv.tss_solver_root_guard = v.extract()?;
         }
         // Gumbel AlphaZero flags (default-OFF).
         if let Some(v) = overrides.get_item("gumbel_target")? {
@@ -3039,6 +3069,14 @@ impl PayloadNative {
         tss.set_item("leaf_verdict_hits", self.tss_counters.leaf_verdict_hits)?;
         tss.set_item("prune_eligible", self.tss_counters.prune_eligible)?;
         tss.set_item("prune_dropped", self.tss_counters.prune_dropped)?;
+        tss.set_item("deep_calls", self.tss_counters.deep_calls)?;
+        tss.set_item("deep_win", self.tss_counters.deep_win)?;
+        tss.set_item("deep_loss", self.tss_counters.deep_loss)?;
+        tss.set_item("deep_unknown", self.tss_counters.deep_unknown)?;
+        tss.set_item("deep_nodes", self.tss_counters.deep_nodes)?;
+        tss.set_item("deep_verify_failed", self.tss_counters.deep_verify_failed)?;
+        tss.set_item("deep_hard_backups", self.tss_counters.deep_hard_backups)?;
+        tss.set_item("deep_memo_hits", self.tss_counters.deep_memo_hits)?;
         diag.set_item("tss", tss)?;
         if let Some(stats) = eval_stats {
             diag.set_item("evaluation", eval_stats_dict(py, stats)?)?;
@@ -3207,7 +3245,52 @@ fn build_search_result_payload_native(
                 .or_insert_with(|| classify_root_move(&search.root_state, id));
         }
     }
-    let guarded_weights = if root_has_threats {
+    // Deep root guard (Stage-4 rung 6, PLAN §10): at a λ¹-undecided root,
+    // one verified deep solve upgrades the row proof; a verified WIN also
+    // upgrades the certificate's root move to class +1, so the play-time
+    // guard forces a proven win the net might miss (and, under Lever 1, the
+    // recorded targets sharpen onto it). Root solves are not subsampled.
+    // CPU-only, pure (local counters merged into the payload's view).
+    let mut deep_counters = TssCounters::default();
+    let mut deep_root_proof: i8 = 0;
+    let mut deep_forced_move: Option<PackedCoord> = None;
+    if search.tss_enabled && div.tss_solver_root_guard {
+        let lambda1_undecided = root_analysis
+            .as_ref()
+            .map_or(false, |a| a.verdict().is_none());
+        if lambda1_undecided {
+            let solved = tss_solve_verified(
+                &search.root_state,
+                div.tss_solver_node_cap as u64,
+                &mut deep_counters,
+            );
+            match solved.status {
+                ProofStatus::Win => {
+                    deep_root_proof = 1;
+                    if let Some(cert) = &solved.cert {
+                        if let Some(CertNode::Choice { mv, .. }) =
+                            cert.nodes.get(cert.root_node as usize)
+                        {
+                            // The certificate's root move is a verified win
+                            // (and legal — verification replayed it). It
+                            // upgrades the class map for the recorded targets
+                            // AND directly overrides play below: a proven
+                            // win-in-N is never skipped, even when the net
+                            // left it outside the visit support.
+                            let id = pack_coord(*mv);
+                            tss_classes.insert(id, 1);
+                            deep_forced_move = Some(id);
+                        }
+                    }
+                }
+                ProofStatus::Loss => deep_root_proof = -1,
+                ProofStatus::Unknown => {}
+            }
+        }
+    }
+    // With the deep guard off, classes exist iff the root has threats, so this
+    // gate is exactly the pre-Stage-4 behavior.
+    let guarded_weights = if root_has_threats || !tss_classes.is_empty() {
         tactical_guard_weights_from(&tss_classes, sel_ids, sel_weights)
     } else {
         sel_weights.clone()
@@ -3244,7 +3327,15 @@ fn build_search_result_payload_native(
                 .any(|(a, _)| *a == selected),
         "selected played action_id must be a real root action, never the sentinel"
     );
-    let action_selection = if play_pruned {
+    // Deep root-guard override (Stage-4 rung 6): a verified WIN certificate's
+    // root move takes precedence over the sampled selection. Sound by
+    // verification (the move was replayed against the exact root) and legal
+    // even outside the visit support (root priors span the full legal set).
+    let deep_override = matches!(deep_forced_move, Some(mv) if mv != selected);
+    let selected = deep_forced_move.unwrap_or(selected);
+    let action_selection = if deep_override {
+        "tss_deep_root_win"
+    } else if play_pruned {
         "gumbel_play_policy"
     } else if baseline.is_some() {
         "delta_visit_policy"
@@ -3277,6 +3368,13 @@ fn build_search_result_payload_native(
         ),
         None => (0, 0, -1, 0),
     };
+    // Deep root proof fills in only where λ¹ had none (verified-only; feeds
+    // the Lever-2 disagreement stream and, later, proof-corrected labels).
+    let tss_proof = if tss_proof == 0 { deep_root_proof } else { tss_proof };
+    // Per-move counters = the search's accumulation + this build's root-guard
+    // solves (the builder runs read-only off-GIL; local counters merge here).
+    let mut tss_counters = search.tss;
+    tss_counters.add(&deep_counters);
     let tree = search.diagnostics();
     Ok(PayloadNative {
         action_id: selected,
@@ -3303,7 +3401,7 @@ fn build_search_result_payload_native(
         tss_b,
         tss_k,
         tss_opp_threats,
-        tss_counters: search.tss,
+        tss_counters,
     })
 }
 

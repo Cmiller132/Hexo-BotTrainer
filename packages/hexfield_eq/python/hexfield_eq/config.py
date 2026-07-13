@@ -87,6 +87,19 @@ class SelfplayConfig:
     # sharpening carry target_regime=1. Default OFF; its own deployment rung,
     # gated on the shadow mask-mass metrics (tss.win_retained_mass_*).
     tss_policy_target_sharpen: bool = False
+    # Deep-solver consumption tier (Stage-4 ladder, PLAN §10): 0=off, 1=SHADOW
+    # (solve+verify+count, consume nothing — bit-identical play), 2=+verified
+    # hard LOSS backups with GPU-eval elision, 3=+verified hard WIN. Every hard
+    # value passes the independent certificate verifier BEFORE backup; the
+    # deep_verify_failed telemetry counter must stay 0 in production.
+    tss_solver_mode: int = 0
+    # Deterministic per-solve node cap (no wall clock on the hard path).
+    tss_solver_node_cap: int = 2000
+    # Leaf subsample gate in sixteenths (16 = every gated leaf).
+    tss_solver_sample_16: int = 16
+    # Deep root guard (rung 6): verified root solves upgrade the class map so
+    # the play-time guard forces proven wins; row proofs deep-upgrade too.
+    tss_solver_root_guard: bool = False
     search_parity_mode: bool = False
     # Moves-left utility. Defaults: enabled, two-sided, with the final-move
     # tie-break. Passed to Rust as divergence_overrides. moves_left_utility=False
@@ -558,6 +571,11 @@ def build_divergence_overrides(
         "pruned_dynamic_cpuct": bool(sp.pruned_dynamic_cpuct),
         # TSS interior forced-move guard (Lever 0, default OFF).
         "tss_interior_guard": bool(sp.tss_interior_guard),
+        # TSS deep-solver ladder (Stage 4, default OFF).
+        "tss_solver_mode": int(sp.tss_solver_mode),
+        "tss_solver_node_cap": int(sp.tss_solver_node_cap),
+        "tss_solver_sample_16": int(sp.tss_solver_sample_16),
+        "tss_solver_root_guard": bool(sp.tss_solver_root_guard),
         # Gumbel AlphaZero levers (default OFF).
         "gumbel_target": bool(sp.gumbel_target_enabled),
         "gumbel_root": bool(sp.gumbel_root_enabled),

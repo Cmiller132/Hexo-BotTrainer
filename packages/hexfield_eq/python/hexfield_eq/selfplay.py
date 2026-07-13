@@ -211,6 +211,15 @@ class ContinuousDriver:
         # Rows whose recorded targets Lever-1 sharpening actually changed
         # (0 whenever tss_sharpen is off).
         self.tss_sharpened_rows = 0
+        # Stage-4 deep-solver counters (all 0 while tss_solver_mode == 0).
+        self.tss_deep_calls = 0
+        self.tss_deep_win = 0
+        self.tss_deep_loss = 0
+        self.tss_deep_unknown = 0
+        self.tss_deep_nodes = 0
+        self.tss_deep_verify_failed = 0
+        self.tss_deep_hard_backups = 0
+        self.tss_deep_memo_hits = 0
         # Finished-game winner tally (completed games only; truncated games have
         # no engine winner and are counted separately by games_truncated).
         self.wins_by_player: dict[int, int] = {0: 0, 1: 0}
@@ -348,6 +357,17 @@ class ContinuousDriver:
             self.tss_leaf_verdict_hits += int(tss_diag.get("leaf_verdict_hits", 0))
             self.tss_prune_eligible += int(tss_diag.get("prune_eligible", 0))
             self.tss_prune_dropped += int(tss_diag.get("prune_dropped", 0))
+            # Stage-4 deep-solver counters. deep_verify_failed is FATAL
+            # telemetry: any nonzero total means a solver claim failed its
+            # certificate check (degraded safely, but the solver has a bug).
+            self.tss_deep_calls += int(tss_diag.get("deep_calls", 0))
+            self.tss_deep_win += int(tss_diag.get("deep_win", 0))
+            self.tss_deep_loss += int(tss_diag.get("deep_loss", 0))
+            self.tss_deep_unknown += int(tss_diag.get("deep_unknown", 0))
+            self.tss_deep_nodes += int(tss_diag.get("deep_nodes", 0))
+            self.tss_deep_verify_failed += int(tss_diag.get("deep_verify_failed", 0))
+            self.tss_deep_hard_backups += int(tss_diag.get("deep_hard_backups", 0))
+            self.tss_deep_memo_hits += int(tss_diag.get("deep_memo_hits", 0))
         # Seed provenance stamped on every row of a blunder-seeded game. Empty
         # for ordinary games, so their metadata is unchanged (fraction=0.0 keeps
         # rows bit-identical to the pre-feature writer).
@@ -783,6 +803,18 @@ class ContinuousDriver:
                 "proof_rows": int(self.tss_proof_rows),
                 "proof_disagreements": int(self.tss_proof_disagreements),
                 "sharpened_rows": int(self.tss_sharpened_rows),
+                # Stage-4 deep solver. deep_verify_failed MUST stay 0 — any
+                # nonzero total is a solver-certificate bug (values degraded
+                # safely to net-eval, but consumption should be disabled and
+                # the run investigated).
+                "deep_calls": int(self.tss_deep_calls),
+                "deep_win": int(self.tss_deep_win),
+                "deep_loss": int(self.tss_deep_loss),
+                "deep_unknown": int(self.tss_deep_unknown),
+                "deep_nodes": int(self.tss_deep_nodes),
+                "deep_verify_failed": int(self.tss_deep_verify_failed),
+                "deep_hard_backups": int(self.tss_deep_hard_backups),
+                "deep_memo_hits": int(self.tss_deep_memo_hits),
             },
         }
 
@@ -1068,6 +1100,8 @@ def _merge_epoch_diag(segments: list[dict[str, Any]]) -> dict[str, Any]:
             "root_injected_total", "leaf_verdict_hits_total", "prune_eligible_total",
             "prune_dropped_total", "class_rows", "win_rows", "loss_only_rows",
             "proof_rows", "proof_disagreements", "sharpened_rows",
+            "deep_calls", "deep_win", "deep_loss", "deep_unknown", "deep_nodes",
+            "deep_verify_failed", "deep_hard_backups", "deep_memo_hits",
         )
         for key in int_keys:
             tss[key] = sum(int(seg.get(key, 0) or 0) for seg in tss_segs)
