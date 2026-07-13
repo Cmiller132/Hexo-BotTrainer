@@ -17,6 +17,9 @@ target-semantics rungs additionally note `target_regime` below).
 | `tss_solver_node_cap` (int, 2000) | Deterministic per-solve node cap. Size from shadow histograms. |
 | `tss_solver_sample_16` (int, 16) | Leaf solve subsample (of 16). Lower it if shadow shows CPU drag. |
 | `tss_solver_root_guard` (bool) | Rung 6: verified root solves; a certified WIN's move is always played (`action_selection="tss_deep_root_win"`); row proofs deep-upgrade. |
+| `tss_solver_async` (bool) | Async rung (2026-07-13): gated leaves ENQUEUE to a background worker pool (identical solver→verifier→mint path); results drain into the memo and are consumed by the selection descent-stop on later visits. Verified `Done` entries persist across moves (binding re-checked at every consumption). Flag-ON self-play is NOT bit-reproducible (arrival timing); flag-off unchanged. Wired for continuous self-play AND the lockstep eval/arena loop. |
+| `tss_solver_async_threads` (int, 8) | Pool worker threads (Rust clamps to 1–32). |
+| `tss_solver_async_inline_16` (int, 0) | Hybrid inline tier under async: gated leaves with `(hash & 0xF)` below this solve inline (first-touch consumption, the pre-async path); the rest enqueue. Deploy shape: `sample_16=16` + `async=true` + `inline_16=4` keeps the proven 4/16 inline tier verbatim and adds pool coverage for the other 12/16 at ~zero critical-path cost. |
 
 ## Rung order (one per relaunch; watch ≥1–2 epochs + the next eval before the next rung)
 
@@ -55,6 +58,13 @@ target-semantics rungs additionally note `target_regime` below).
 - `deep_calls/win/loss/unknown/nodes` by epoch — solver cost + the vise check
   (UNKNOWN rate at production caps in the threat-dense endgame).
 - `proof_rows` / `proof_disagreements` — the Lever-2 gate.
+- Async rung: `async_dropped` ~0 (bounded queue 4096; sustained drops ⇒ more
+  threads/wider queue — never a correctness issue, dropped leaves take the
+  plain net eval); `async_stale` informational (late results still land memo
+  entries and serve later moves); `deep_hard_backups` vs the pre-async
+  epochs — the async tier consumes less per solve than inline first-touch
+  (descent-stop needs a re-visit), which is why the deploy shape keeps the
+  inline tier. Consumption regression below inline-only ⇒ raise `inline_16`.
 - Standard health: pinned entropy metric (L0+L1 compound sharpening), pos/s,
   eval cadence h2h (pool/Strix/SealBot), earlyoom/VM memory.
 
@@ -70,5 +80,8 @@ target-semantics rungs additionally note `target_regime` below).
 - The Stage-0 golden digest (`tests/data/hexfield_eq_tss_stage0_golden.json`)
   pins flag-off bit-identity; regenerate ONLY for an intentional
   behavior-change baseline (two-build procedure in the test docstring).
-- Solver memory: per-solve TT capped at 256 KiB, per-move memo ≤8192 entries,
-  cleared every move — no retained growth (host earlyoom discipline).
+- Solver memory: per-solve TT capped at 256 KiB, per-move memo ≤8192 entries
+  (cleared every move inline; async retains verified `Done` entries for the
+  life of the game's search object, still ≤8192) — no unbounded growth (host
+  earlyoom discipline). Async adds: request queue ≤4096 state clones + one
+  persistent solver TT per worker thread (byte-capped per solve).
