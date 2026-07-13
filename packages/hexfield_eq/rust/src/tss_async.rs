@@ -290,9 +290,15 @@ fn worker_loop(
                 // solve, not the recv). Exit; enqueues degrade to net evals.
                 Err(_) => return,
             };
-            match guard.recv() {
+            // recv_timeout, NOT recv: a handle clone parked on a search can
+            // keep the channel connected past pool drop, and a worker
+            // blocked in a plain recv would never recheck `shutdown` — the
+            // Drop join would deadlock (Codex round 3). The timeout bounds
+            // every worker's reaction to the flag.
+            match guard.recv_timeout(std::time::Duration::from_millis(50)) {
                 Ok(request) => request,
-                Err(_) => return, // pool dropped
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
             }
         };
         queue_depth.fetch_sub(1, Ordering::Relaxed);
