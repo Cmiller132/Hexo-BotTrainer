@@ -3259,9 +3259,15 @@ fn build_search_result_payload_native(
             .as_ref()
             .map_or(false, |a| a.verdict().is_none());
         if lambda1_undecided {
+            // Per-move solver instance: the payload builder holds only &search
+            // (off-GIL parallel build), so the root guard can't share the
+            // per-search persistent cache; one root solve per move is cheap.
+            let mut root_solver = crate::tss_solver::TssSolver::default();
             let solved = tss_solve_verified(
                 &search.root_state,
                 div.tss_solver_node_cap as u64,
+                tss_core::SolveGoal::Both,
+                &mut root_solver,
                 &mut deep_counters,
             );
             match solved.status {
