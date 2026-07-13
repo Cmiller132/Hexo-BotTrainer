@@ -712,6 +712,18 @@ if HAVE_TRITON:
             rl_opp = tl.load(
                 reach_ptr + m_offs * 12 + 1 * 6 + t, mask=m_valid, other=0
             ).to(tl.int32)
+            if HAS_LUT:
+                # One-hot row selectors for the six reach states, built once
+                # per direction and applied per k as a (BM, 16) x (16, BK)
+                # fp16 tl.dot — tensor-core row selection replacing round 1's
+                # 12 broadcast-selects per (t, k) (its ~2x lut serve tax).
+                # Numerically EXACT selection: one-hot entries are exactly
+                # 1.0/0.0, dot accumulates fp32, and reach values >= 6 (none
+                # occur; padded selector columns 6..15 load zero rows) select
+                # nothing — bitwise the round-1 semantics.
+                r16 = tl.arange(0, 16)
+                oh_own = (rl_own[:, None] == r16[None, :]).to(tl.float16)
+                oh_opp = (rl_opp[:, None] == r16[None, :]).to(tl.float16)
             acc = tl.zeros((BM, BK), dtype=tl.float32)
             for k in tl.static_range(5):
                 idx = tl.load(
@@ -734,29 +746,20 @@ if HAVE_TRITON:
                     vo.to(tl.float32)[:, None],
                 )
                 if HAS_LUT:
-                    effective = alpha_k[None, :] + tl.zeros(
-                        (BM, BK), dtype=tl.float32
+                    r16 = tl.arange(0, 16)
+                    o_k = tl.load(
+                        O_ptr + (r16[:, None] * 5 + k) * C + c_offs[None, :],
+                        mask=(r16 < 6)[:, None] & c_ok[None, :],
+                        other=0.0,
                     )
-                    # Reach has only six states.  Load each table row as a
-                    # coalesced (BK,) broadcast instead of issuing a
-                    # data-dependent (BM, BK) gather for every output row.
-                    for r in tl.static_range(6):
-                        o_r = tl.load(
-                            O_ptr + (r * 5 + k) * C + c_offs,
-                            mask=c_ok,
-                            other=0.0,
-                        ).to(tl.float32)
-                        effective += tl.where(
-                            rl_own[:, None] == r, o_r[None, :], 0.0
-                        )
-                        p_r = tl.load(
-                            P_ptr + (r * 5 + k) * C + c_offs,
-                            mask=c_ok,
-                            other=0.0,
-                        ).to(tl.float32)
-                        effective += tl.where(
-                            rl_opp[:, None] == r, p_r[None, :], 0.0
-                        )
+                    p_k = tl.load(
+                        P_ptr + (r16[:, None] * 5 + k) * C + c_offs[None, :],
+                        mask=(r16 < 6)[:, None] & c_ok[None, :],
+                        other=0.0,
+                    )
+                    effective = (
+                        alpha_k[None, :] + tl.dot(oh_own, o_k) + tl.dot(oh_opp, p_k)
+                    )
                     acc += a * (effective * vis)
                 else:
                     acc += a * (alpha_k[None, :] * vis)
