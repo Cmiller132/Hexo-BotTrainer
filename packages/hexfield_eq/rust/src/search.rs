@@ -1776,6 +1776,16 @@ fn wire_tss_async_searches(searches: &mut [RustSearch], pool: &TssAsyncPool) {
 /// Lockstep flavor of the continuous drain pass (same staleness contract:
 /// generation mismatch drops the result but never the fatal verify counter).
 fn drain_tss_async_searches(pool: &TssAsyncPool, searches: &mut [RustSearch]) {
+    if let Some(search) = searches.first_mut() {
+        search.tss.deep_verify_failed += pool.take_verify_failures();
+    }
+    let worker_panics = pool.take_worker_panics();
+    if worker_panics > 0 {
+        eprintln!(
+            "hexfield tss_async: {worker_panics} solve worker panic(s) — requests lost, \
+             workers recycled with fresh solvers"
+        );
+    }
     for response in pool.try_drain() {
         let Some(search) = searches.get_mut(response.slot as usize) else {
             if response.counters.deep_verify_failed > 0 {
@@ -2178,6 +2188,19 @@ fn wire_tss_async(slots: &mut [ContinuousSlot], pool: &TssAsyncPool) {
 /// EXCEPT the fatal `deep_verify_failed` count, which is never dropped
 /// (production alarms on nonzero regardless of which move it belonged to).
 fn drain_tss_async(pool: &TssAsyncPool, slots: &mut [ContinuousSlot]) {
+    // Worker-side alarms first: the atomic is the sole carrier of the fatal
+    // verify signal (banked at solve time, so a dropped/stale/never-drained
+    // response cannot lose it). Fold into any live search => epoch JSON.
+    if let Some(search) = slots.iter_mut().find_map(|slot| slot.search.as_mut()) {
+        search.tss.deep_verify_failed += pool.take_verify_failures();
+    }
+    let worker_panics = pool.take_worker_panics();
+    if worker_panics > 0 {
+        eprintln!(
+            "hexfield tss_async: {worker_panics} solve worker panic(s) — requests lost, \
+             workers recycled with fresh solvers"
+        );
+    }
     for response in pool.try_drain() {
         let search = slots
             .get_mut(response.slot as usize)

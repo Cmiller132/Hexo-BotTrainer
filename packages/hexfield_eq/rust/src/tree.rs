@@ -985,16 +985,24 @@ impl RustSearch {
         // (this is the universal per-move entry for lockstep and continuous).
         self.tss = TssCounters::default();
         if self.divergences.tss_solver_async {
-            // Async rung: verified Done entries PERSIST across moves. A proof
-            // is a property of the position (binding-checked again at every
-            // consumption; HardValue exists only post-verification), and the
-            // history-bearing hash means the retained entries re-serve
-            // exactly the re-searched played line — the forced continuation
-            // consumes without re-solving. Pending markers drop so the new
-            // move may re-enqueue; their late responses still land as
-            // stale-counted memo writes.
-            self.tss_deep_memo
-                .retain(|_, entry| matches!(entry, TssMemoEntry::Done(..)));
+            // Async rung: verified DECIDED entries PERSIST across moves. A
+            // proof is a property of the position (binding-checked again at
+            // every consumption; HardValue exists only post-verification),
+            // and the history-bearing hash means the retained entries
+            // re-serve exactly the re-searched played line — the forced
+            // continuation consumes without re-solving. Pending markers AND
+            // Unknown results drop (Codex review 2/3): an Unknown is a cap
+            // artifact, not a position property — the next move may re-solve
+            // it with a warmer worker cache; and decided-only retention keeps
+            // the retained set far below the memo cap so the enqueue gate
+            // never starves. Safety valve: if retained proofs alone ever
+            // crowd the cap, start the move fresh rather than starve.
+            self.tss_deep_memo.retain(|_, entry| {
+                matches!(entry, TssMemoEntry::Done(_, status, _) if *status != ProofStatus::Unknown)
+            });
+            if self.tss_deep_memo.len() > Self::TSS_DEEP_MEMO_RETAIN_MAX {
+                self.tss_deep_memo.clear();
+            }
         } else {
             self.tss_deep_memo.clear();
         }
@@ -1007,6 +1015,10 @@ impl RustSearch {
     /// Hard cap on per-move deep-memo entries (bounded memory; past the cap
     /// solves simply recompute — never a correctness concern, only cost).
     const TSS_DEEP_MEMO_MAX: usize = 8192;
+    /// Cross-move retention bound for decided async proofs (half the memo
+    /// cap): above it the memo starts the move fresh instead of letting
+    /// retained history starve the enqueue gate.
+    const TSS_DEEP_MEMO_RETAIN_MAX: usize = 4096;
     /// Per-solve transposition-table byte cap handed to the deep solver (its
     /// TT is per-solve; this bounds transient allocation, not retained state).
     const TSS_SOLVER_TT_BYTES: usize = 256 << 10;
@@ -1059,7 +1071,10 @@ impl RustSearch {
                         return self.tss_consume_gate(status, hard);
                     }
                     _ => {
+                        // Capacity pre-check BEFORE the state clone: a full
+                        // queue costs nothing but the counter bump.
                         if self.tss_deep_memo.len() < Self::TSS_DEEP_MEMO_MAX
+                            && handle.has_capacity()
                             && handle.try_enqueue(SolveRequest {
                                 slot: handle.slot,
                                 generation: handle.generation,
@@ -1133,12 +1148,25 @@ impl RustSearch {
         {
             return None;
         }
+        // Cheap gates FIRST (Codex review 6): only a hash-hit whose status
+        // would actually consume at this tier pays the full-binding
+        // construction + comparison.
         let (status, hard) = match self.tss_deep_memo.get(&hash) {
-            Some(TssMemoEntry::Done(seen, status, hard)) if *seen == RootBinding::from_state(state) => {
-                (*status, *hard)
-            }
+            Some(TssMemoEntry::Done(_, status, hard)) => (*status, *hard),
             _ => return None,
         };
+        let consumable = match (status, hard) {
+            (ProofStatus::Loss, Some(_)) => self.divergences.tss_solver_mode >= 2,
+            (ProofStatus::Win, Some(_)) => self.divergences.tss_solver_mode >= 3,
+            _ => false,
+        };
+        if !consumable {
+            return None;
+        }
+        match self.tss_deep_memo.get(&hash) {
+            Some(TssMemoEntry::Done(seen, _, _)) if *seen == RootBinding::from_state(state) => {}
+            _ => return None,
+        }
         let consumed = self.tss_consume_gate(status, hard);
         if consumed.is_some() {
             self.tss.deep_memo_hits += 1;
@@ -1180,19 +1208,33 @@ impl RustSearch {
         }
     }
 
-    /// Memo write under the binding discipline. A `Done` entry is never
-    /// overwritten (first verified result wins — they are equal by
-    /// determinism anyway unless bindings differ, in which case the
-    /// hash-colliding late arrival must not clobber the live one).
+    /// Memo write under the binding discipline. Rules (Codex review 1):
+    /// - the response only ever writes over an entry whose binding MATCHES
+    ///   the response's own (a hash-colliding stranger never clobbers the
+    ///   live entry, in either direction);
+    /// - `Pending` with a matching binding resolves to `Done`;
+    /// - a decided response UPGRADES a matching `Done(Unknown)` (a later,
+    ///   warmer-cache solve may decide what an earlier one could not);
+    /// - a decided `Done` is never overwritten (determinism makes duplicates
+    ///   equal; anything else must not clobber a verified proof).
     fn tss_async_memo_write(&mut self, response: &SolveResponse) {
+        let decided_response = response.status != ProofStatus::Unknown;
         match self.tss_deep_memo.get(&response.hash) {
-            Some(TssMemoEntry::Done(..)) => {}
-            Some(TssMemoEntry::Pending(_)) => {
+            Some(TssMemoEntry::Pending(seen)) if *seen == response.binding => {
                 self.tss_deep_memo.insert(
                     response.hash,
                     TssMemoEntry::Done(response.binding.clone(), response.status, response.hard),
                 );
             }
+            Some(TssMemoEntry::Done(seen, ProofStatus::Unknown, _))
+                if decided_response && *seen == response.binding =>
+            {
+                self.tss_deep_memo.insert(
+                    response.hash,
+                    TssMemoEntry::Done(response.binding.clone(), response.status, response.hard),
+                );
+            }
+            Some(_) => {} // binding mismatch or already decided: never clobber
             None => {
                 if self.tss_deep_memo.len() < Self::TSS_DEEP_MEMO_MAX {
                     self.tss_deep_memo.insert(
@@ -3181,6 +3223,75 @@ mod tests {
         assert!(
             search.tss_async_descent_hard(hash, &state).is_some(),
             "Done entry must survive a duplicate response"
+        );
+    }
+
+    /// Codex-review hardening: memo-write binding rules + cross-move
+    /// retention semantics.
+    /// - decided proofs persist across set_additional_visits (a proof is a
+    ///   position property);
+    /// - Unknown results do NOT persist (cap artifacts must be re-solvable);
+    /// - a decided response UPGRADES a matching Done(Unknown);
+    /// - a decided Done is never clobbered.
+    #[test]
+    fn async_memo_rules_and_cross_move_retention() {
+        let (state, status, hard) = verified_fixture_solve();
+        let hash = state_hash(&state);
+        let binding = RootBinding::from_state(&state);
+        let mut search = async_search(3);
+
+        // Land an UNKNOWN first, then upgrade it with the decided result.
+        search.apply_tss_async_response(&SolveResponse {
+            slot: 0,
+            generation: 1,
+            hash,
+            binding: binding.clone(),
+            status: ProofStatus::Unknown,
+            hard: None,
+            counters: TssCounters::default(),
+        });
+        assert!(search.tss_async_descent_hard(hash, &state).is_none());
+        search.apply_tss_async_response(&SolveResponse {
+            slot: 0,
+            generation: 1,
+            hash,
+            binding: binding.clone(),
+            status,
+            hard,
+            counters: TssCounters::default(),
+        });
+        assert!(
+            search.tss_async_descent_hard(hash, &state).is_some(),
+            "a decided response must upgrade a matching Done(Unknown)"
+        );
+
+        // Cross-move retention: the decided proof survives the move reset...
+        search.set_additional_visits(8);
+        assert!(
+            search.tss_async_descent_hard(hash, &state).is_some(),
+            "decided proofs must persist across moves"
+        );
+
+        // ...but an Unknown result does not: after the reset the same leaf
+        // re-enqueues instead of serving the stale Unknown.
+        let other = forced_defense_fixture();
+        let other_hash = state_hash(&other);
+        search.apply_tss_async_response(&SolveResponse {
+            slot: 0,
+            generation: 2,
+            hash: other_hash,
+            binding: RootBinding::from_state(&other),
+            status: ProofStatus::Unknown,
+            hard: None,
+            counters: TssCounters::default(),
+        });
+        search.set_additional_visits(8);
+        let pool = crate::tss_async::TssAsyncPool::new(1);
+        search.set_tss_async(Some(pool.handle_for(0)));
+        assert!(search.tss_deep_leaf(&other, other_hash).is_none());
+        assert_eq!(
+            search.tss.async_enqueued, 1,
+            "a dropped Unknown must be re-solvable on the next move"
         );
     }
 

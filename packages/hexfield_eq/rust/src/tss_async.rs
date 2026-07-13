@@ -24,7 +24,7 @@
 //! byte-capped per solve exactly like the inline path, and responses carry
 //! only scalars + the small `RootBinding`.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, Sender, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -39,8 +39,21 @@ use crate::tss_verify::RootBinding;
 
 /// Bounded request-queue depth. Full queue => the leaf silently falls back to
 /// the plain net eval (counted as `async_dropped`) — backpressure must never
-/// stall selection.
-pub const TSS_ASYNC_QUEUE_CAP: usize = 4096;
+/// stall selection. Sized for main_3's worst-case burst geometry (256 slots ×
+/// 96-leaf batches in threat-dense passes); memory cost is one state clone
+/// per entry (~KBs each).
+pub const TSS_ASYNC_QUEUE_CAP: usize = 16384;
+
+/// Out-of-band alarm channel, written by WORKERS at solve time so the fatal
+/// signal exists the moment it happens — it can never be lost to a dropped,
+/// stale, or never-drained response (Codex review 4). The drain passes fold
+/// pending failures into a live search's counters (=> epoch telemetry); an
+/// untaken residue is screamed about on pool drop.
+#[derive(Default)]
+pub struct PoolAlarms {
+    pub verify_failed: AtomicU32,
+    pub worker_panics: AtomicU32,
+}
 
 /// A gated leaf's solve request. `state` is a clone taken at enqueue time;
 /// `binding` re-asserts full-position identity on the way back (the 64-bit
@@ -77,6 +90,7 @@ pub struct TssAsyncHandle {
     pub sender: SyncSender<SolveRequest>,
     pub slot: u32,
     pub generation: u64,
+    queue_depth: Arc<AtomicUsize>,
 }
 
 impl std::fmt::Debug for TssAsyncHandle {
@@ -89,11 +103,22 @@ impl std::fmt::Debug for TssAsyncHandle {
 }
 
 impl TssAsyncHandle {
+    /// Cheap saturation pre-check (approximate — the depth counter is
+    /// relaxed): callers skip the state clone + request build entirely when
+    /// the queue is full instead of paying for a doomed `try_send`
+    /// (Codex review 5).
+    pub fn has_capacity(&self) -> bool {
+        self.queue_depth.load(Ordering::Relaxed) < TSS_ASYNC_QUEUE_CAP
+    }
+
     /// Non-blocking enqueue. `false` => queue full or pool gone (caller counts
     /// `async_dropped` and the leaf takes the plain net eval).
     pub fn try_enqueue(&self, request: SolveRequest) -> bool {
         match self.sender.try_send(request) {
-            Ok(()) => true,
+            Ok(()) => {
+                self.queue_depth.fetch_add(1, Ordering::Relaxed);
+                true
+            }
             Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => false,
         }
     }
@@ -107,6 +132,8 @@ pub struct TssAsyncPool {
     request_tx: SyncSender<SolveRequest>,
     results: Receiver<SolveResponse>,
     generation: AtomicU64,
+    queue_depth: Arc<AtomicUsize>,
+    alarms: Arc<PoolAlarms>,
     workers: Vec<JoinHandle<()>>,
 }
 
@@ -127,13 +154,17 @@ impl TssAsyncPool {
         // mutex. Lock hold time is one `recv` against multi-microsecond
         // solves, so contention is negligible.
         let request_rx = Arc::new(Mutex::new(request_rx));
+        let queue_depth = Arc::new(AtomicUsize::new(0));
+        let alarms = Arc::new(PoolAlarms::default());
         let workers = (0..threads)
             .map(|index| {
                 let rx = Arc::clone(&request_rx);
                 let tx = response_tx.clone();
+                let depth = Arc::clone(&queue_depth);
+                let alarms = Arc::clone(&alarms);
                 std::thread::Builder::new()
                     .name(format!("tss-solve-{index}"))
-                    .spawn(move || worker_loop(rx, tx))
+                    .spawn(move || worker_loop(rx, tx, depth, alarms))
                     .expect("spawn tss async solve worker")
             })
             .collect();
@@ -141,6 +172,8 @@ impl TssAsyncPool {
             request_tx,
             results,
             generation: AtomicU64::new(1),
+            queue_depth,
+            alarms,
             workers,
         }
     }
@@ -158,6 +191,7 @@ impl TssAsyncPool {
             sender: self.request_tx.clone(),
             slot,
             generation: self.next_generation(),
+            queue_depth: Arc::clone(&self.queue_depth),
         }
     }
 
@@ -170,13 +204,48 @@ impl TssAsyncPool {
         drained
     }
 
+    /// Take (swap to 0) the accumulated fatal verify-failure count. Drain
+    /// passes call this with a live search in hand so the count reaches the
+    /// epoch telemetry no matter which response carried the failure.
+    pub fn take_verify_failures(&self) -> u32 {
+        self.alarms.verify_failed.swap(0, Ordering::Relaxed)
+    }
+
+    /// Take (swap to 0) the accumulated worker-panic count (ops signal; each
+    /// panic lost one request and recycled that worker's solver).
+    pub fn take_worker_panics(&self) -> u32 {
+        self.alarms.worker_panics.swap(0, Ordering::Relaxed)
+    }
+
     #[cfg(test)]
     pub fn worker_count(&self) -> usize {
         self.workers.len()
     }
 }
 
-fn worker_loop(rx: Arc<Mutex<Receiver<SolveRequest>>>, tx: Sender<SolveResponse>) {
+impl Drop for TssAsyncPool {
+    fn drop(&mut self) {
+        // Alarms must never die silently with the pool.
+        let verify_failed = self.alarms.verify_failed.load(Ordering::Relaxed);
+        let panics = self.alarms.worker_panics.load(Ordering::Relaxed);
+        if verify_failed > 0 {
+            eprintln!(
+                "hexfield tss_async: {verify_failed} UNREPORTED certificate verify \
+                 FAILURE(s) at pool shutdown — investigate immediately"
+            );
+        }
+        if panics > 0 {
+            eprintln!("hexfield tss_async: {panics} unreported worker panic(s) at pool shutdown");
+        }
+    }
+}
+
+fn worker_loop(
+    rx: Arc<Mutex<Receiver<SolveRequest>>>,
+    tx: Sender<SolveResponse>,
+    queue_depth: Arc<AtomicUsize>,
+    alarms: Arc<PoolAlarms>,
+) {
     // One persistent solver per worker: its shared positive-proof-fragment TT
     // warms across solves (O16); byte caps are enforced per solve inside
     // `tss_solve_verified` exactly as on the inline path.
@@ -185,8 +254,9 @@ fn worker_loop(rx: Arc<Mutex<Receiver<SolveRequest>>>, tx: Sender<SolveResponse>
         let request = {
             let guard = match rx.lock() {
                 Ok(guard) => guard,
-                // A poisoned lock means a sibling worker panicked mid-recv;
-                // exit quietly — enqueue failures degrade to net evals.
+                // A poisoned lock means a sibling worker panicked while
+                // HOLDING the recv lock (the panic shield below covers the
+                // solve, not the recv). Exit; enqueues degrade to net evals.
                 Err(_) => return,
             };
             match guard.recv() {
@@ -194,21 +264,47 @@ fn worker_loop(rx: Arc<Mutex<Receiver<SolveRequest>>>, tx: Sender<SolveResponse>
                 Err(_) => return, // pool dropped
             }
         };
-        let mut counters = TssCounters::default();
-        let solved = tss_solve_verified(
-            &request.state,
-            request.node_cap,
-            request.goal,
-            &mut solver,
-            &mut counters,
-        );
+        queue_depth.fetch_sub(1, Ordering::Relaxed);
+        // Panic shield (Codex review 7): a panicking solve loses its request
+        // (the Pending entry falls out at the owner's next move) but the
+        // worker survives with a FRESH solver (the old one's state is
+        // suspect), and the panic is counted instead of silently shrinking
+        // the pool.
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut counters = TssCounters::default();
+            let solved = tss_solve_verified(
+                &request.state,
+                request.node_cap,
+                request.goal,
+                &mut solver,
+                &mut counters,
+            );
+            (solved.status, solved.hard, counters)
+        }));
+        let (status, hard, mut counters) = match outcome {
+            Ok(result) => result,
+            Err(_) => {
+                alarms.worker_panics.fetch_add(1, Ordering::Relaxed);
+                solver = TssSolver::default();
+                continue;
+            }
+        };
+        // The alarm atomic is the SOLE carrier of the fatal signal (single
+        // channel — no drain-vs-response double count): strip it from the
+        // response counters after banking it.
+        if counters.deep_verify_failed > 0 {
+            alarms
+                .verify_failed
+                .fetch_add(counters.deep_verify_failed, Ordering::Relaxed);
+            counters.deep_verify_failed = 0;
+        }
         let response = SolveResponse {
             slot: request.slot,
             generation: request.generation,
             hash: request.hash,
             binding: request.binding,
-            status: solved.status,
-            hard: solved.hard,
+            status,
+            hard,
             counters,
         };
         if tx.send(response).is_err() {
