@@ -97,15 +97,52 @@ def seed_game_tape(tape: _GameTape, move_prefix) -> None:
     tape.seed_ply = tape.ply
 
 
+def _sharpen_target(
+    ids, weights, cmap: dict[int, int]
+) -> list[float] | None:
+    """Guard-consistent sharpening of one recorded target (Lever 1, §4).
+
+    Mirrors the play-time tactical guard exactly: when any proven-winning
+    (class=+1) action exists in the target's support, keep mass only on the
+    winners; otherwise zero proven-losing (class=-1) actions. The kept mass is
+    rescaled to the ORIGINAL total (targets stay distributions); actions are
+    reweighted, never removed (parallel columns like cell_q stay aligned).
+    Returns the new weight list, or None when sharpening is a no-op / would
+    zero everything (the all-zero fallback restores the original — never zero
+    the only legal support)."""
+
+    classes = [cmap.get(int(a), 0) for a in ids]
+    if any(c == 1 for c in classes):
+        kept = [w if c == 1 else 0.0 for w, c in zip(weights, classes)]
+    elif any(c == -1 for c in classes):
+        kept = [w if c != -1 else 0.0 for w, c in zip(weights, classes)]
+    else:
+        return None
+    original = float(sum(weights))
+    total = float(sum(kept))
+    if total <= 0.0 or original <= 0.0:
+        return None
+    if total == original:
+        return None  # nothing was zeroed; keep the original object
+    scale = original / total
+    return [float(w) * scale for w in kept]
+
+
 class ContinuousDriver:
     def __init__(self, *, epoch: int, games_target: int, max_plies: int, out_dir,
                  horizons=STV_HORIZONS, record_file=None, diag_dir=None, active_limit=0,
-                 blunder_seeds=None, blunder_seed_fraction=0.0, blunder_base_seed=0):
+                 blunder_seeds=None, blunder_seed_fraction=0.0, blunder_base_seed=0,
+                 tss_sharpen: bool = False):
         self.epoch = epoch
         self.games_target = games_target
         self.max_plies = max_plies
         self.out_dir = out_dir
         self.horizons = horizons
+        # Lever 1 (PLAN_TSS_DEEPENING.md §4): guard-consistent sharpening of the
+        # RECORDED policy targets (visit weights + π') using the λ¹ class map.
+        # Default off; rows written under sharpening carry target_regime=1 so
+        # the semantics change is never silent in the rolling buffer.
+        self.tss_sharpen = bool(tss_sharpen)
         # Blunder-seed pool + seeding controls. An empty pool or fraction<=0
         # disables seeding entirely: start_games then takes a path bit-identical
         # to current behavior (no RNG is drawn — the seeding decision short-
@@ -171,6 +208,9 @@ class ContinuousDriver:
         self.tss_gumbel_win_retained: list[float] = []
         self.tss_proof_rows = 0
         self.tss_proof_disagreements = 0
+        # Rows whose recorded targets Lever-1 sharpening actually changed
+        # (0 whenever tss_sharpen is off).
+        self.tss_sharpened_rows = 0
         # Finished-game winner tally (completed games only; truncated games have
         # no engine winner and are counted separately by games_truncated).
         self.wins_by_player: dict[int, int] = {0: 0, 1: 0}
@@ -387,6 +427,30 @@ class ContinuousDriver:
                             self.tss_gumbel_win_retained.append(g_kept / g_total)
                 elif any(v == -1 for v in cmap.values()):
                     self.tss_loss_only_rows += 1
+            # Lever 1: guard-consistent target sharpening (§4). Runs AFTER the
+            # surprise/retained-mass computations above, so policy_surprise
+            # stays the raw-visit KL (no silent 8× reweighting of sharpened
+            # rows) and the retained-mass preview keeps measuring the raw
+            # distribution. Weights are rescaled, never removed.
+            if self.tss_sharpen and class_pairs:
+                cmap_s = dict(class_pairs)
+                new_w = _sharpen_target(ids.tolist(), weights.tolist(), cmap_s)
+                sharpened = False
+                if new_w is not None:
+                    weights = np.asarray(new_w, dtype=np.float32)
+                    sharpened = True
+                if gumbel_pairs:
+                    g_ids = [a for a, _ in gumbel_pairs]
+                    new_g = _sharpen_target(
+                        g_ids, [w for _, w in gumbel_pairs], cmap_s
+                    )
+                    if new_g is not None:
+                        gumbel_pairs = tuple(
+                            zip(g_ids, (float(w) for w in new_g))
+                        )
+                        sharpened = True
+                if sharpened:
+                    self.tss_sharpened_rows += 1
             phase = record_phase(tape.ply)
             first_stone = (
                 (tape.records[-1][0], tape.records[-1][1]) if phase == "SecondStone" else None
@@ -579,6 +643,9 @@ class ContinuousDriver:
                             "winner": winner, "truncated": bool(truncated),
                             **seed_sidecar,
                         },
+                        # Lever-1 rows carry regime 1 so the semantics change
+                        # is never silent in the rolling buffer (§4).
+                        target_regime=1 if self.tss_sharpen else 0,
                     )
             except BaseException as exc:  # noqa: BLE001
                 self._writer_errors.append(exc)
@@ -715,6 +782,7 @@ class ContinuousDriver:
                 ),
                 "proof_rows": int(self.tss_proof_rows),
                 "proof_disagreements": int(self.tss_proof_disagreements),
+                "sharpened_rows": int(self.tss_sharpened_rows),
             },
         }
 
@@ -999,7 +1067,7 @@ def _merge_epoch_diag(segments: list[dict[str, Any]]) -> dict[str, Any]:
             "moves", "threat_moves", "forced_defense_moves", "injection_fired_moves",
             "root_injected_total", "leaf_verdict_hits_total", "prune_eligible_total",
             "prune_dropped_total", "class_rows", "win_rows", "loss_only_rows",
-            "proof_rows", "proof_disagreements",
+            "proof_rows", "proof_disagreements", "sharpened_rows",
         )
         for key in int_keys:
             tss[key] = sum(int(seg.get(key, 0) or 0) for seg in tss_segs)
@@ -1225,6 +1293,7 @@ def generate_selfplay_epoch(*, ctx, components, epoch: int, games_per_epoch: int
         blunder_seeds=blunder_seeds,
         blunder_seed_fraction=sp.blunder_seed_fraction,
         blunder_base_seed=blunder_base_seed,
+        tss_sharpen=sp.tss_policy_target_sharpen,
     )
     # Advance next_key past every npz already on disk -- including sidecar-less
     # (uncommitted) ones, which do not count as done but whose keys must not be

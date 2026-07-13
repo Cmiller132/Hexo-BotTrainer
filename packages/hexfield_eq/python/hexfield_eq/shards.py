@@ -89,6 +89,7 @@ def write_compact_shard(
     *,
     short_term_value_horizons: Sequence[int] = STV_HORIZONS,
     sidecar: dict | None = None,
+    target_regime: int = TARGET_REGIME,
 ) -> int:
     """Serialize rows into one hexfield_compact_v1 ``.npz`` + JSON sidecar."""
 
@@ -247,7 +248,7 @@ def write_compact_shard(
         # v5 TSS columns (aligned to pol_act / per-row; see version comment).
         "pol_class": _cat(pol_class, np.int8),
         "tss_proof": tss_proof,
-        "target_regime": np.asarray(TARGET_REGIME, dtype=np.int32),
+        "target_regime": np.asarray(int(target_regime), dtype=np.int32),
     }
 
     path = Path(path)

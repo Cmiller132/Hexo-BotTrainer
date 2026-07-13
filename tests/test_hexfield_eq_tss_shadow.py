@@ -62,62 +62,55 @@ def _play(state, coords):
     return state
 
 
+# Fixture move prefixes (also replayed into live game tapes by the Lever-1
+# end-to-end test via seed_game_tape).
+QUIET_MOVES = [(0, 0), (0, 8), (2, 7)]
+# p0 opening; p1 rides the non-axis (2,-1) direction (no p1 threats); p0 builds
+# a 5-in-line (q=0..4, r=0). p1 then faces min_hitting_set == B == 2.
+FORCED_DEFENSE_MOVES = [
+    (0, 0),
+    (0, 8), (2, 7),
+    (1, 0), (2, 0),
+    (4, 6), (6, 5),
+    (3, 0), (4, 0),
+]
+# forced_defense + a p1 turn that ignores the threat → p0 to move with a live
+# count-5 (own_win_now, verdict +1).
+WIN_NOW_MOVES = FORCED_DEFENSE_MOVES + [(8, 4), (10, 3)]
+# p0 owns TWO disjoint 4-in-lines (r=0 and r=4, q=0..3): each family needs 2
+# hitting cells → 4 > B=2 → proven forced loss for p1 to move.
+FORCED_LOSS_MOVES = [
+    (0, 0),
+    (0, 8), (2, 7),
+    (1, 0), (2, 0),
+    (4, 6), (6, 5),
+    (3, 0), (0, 4),
+    (8, 4), (10, 3),
+    (1, 4), (2, 4),
+    (12, 2), (14, 1),
+    (3, 4), (16, 0),
+]
+
+
 def quiet_state():
     """Opening + one quiet turn: no ≥4 window anywhere."""
-    state = api.new_game()
-    return _play(state, [(0, 0), (0, 8), (2, 7)])
+    return _play(api.new_game(), QUIET_MOVES)
 
 
 def forced_defense_state():
-    """p0 owns a 5-in-line (q=0..4, r=0); p1 to move at FirstStone B=2.
-
-    The 5-line's window family needs exactly 2 hitting cells (e.g. (-1,0) and
-    (5,0)), so min_hitting_set == B == 2: the fully-forced Lever-0 boundary.
-    p1's stones ride the (2,-1) direction — not a window axis — so p1 has no
-    threats of its own.
-    """
-    state = api.new_game()
-    return _play(
-        state,
-        [
-            (0, 0),                # p0 opening
-            (0, 8), (2, 7),        # p1
-            (1, 0), (2, 0),        # p0
-            (4, 6), (6, 5),        # p1
-            (3, 0), (4, 0),        # p0 → five in line
-        ],
-    )
+    """p0 owns a 5-in-line; p1 to move at FirstStone with min_hitting_set == B
+    == 2: the fully-forced Lever-0 boundary."""
+    return _play(api.new_game(), FORCED_DEFENSE_MOVES)
 
 
 def win_now_state():
-    """forced_defense_state + a p1 turn that ignores the threat: p0 to move
-    with a live count-5 → own_win_now, verdict +1."""
-    return _play(forced_defense_state(), [(8, 4), (10, 3)])
+    """p0 to move with a live count-5 → own_win_now, verdict +1."""
+    return _play(api.new_game(), WIN_NOW_MOVES)
 
 
 def forced_loss_state():
-    """p0 owns TWO disjoint 4-in-lines (r=0 and r=4, q=0..3 each); p1 to move.
-
-    Each 4-line's window family needs 2 hitting cells, so min_hitting_set = 4
-    > B = 2 → a proven one-turn forced loss (verdict −1) for p1. All p1 stones
-    stay on the non-axis (2,-1) line; p0's final filler stone (16,0) shares no
-    6-window with either line.
-    """
-    state = api.new_game()
-    return _play(
-        state,
-        [
-            (0, 0),                 # p0 opening
-            (0, 8), (2, 7),         # p1
-            (1, 0), (2, 0),         # p0
-            (4, 6), (6, 5),         # p1
-            (3, 0), (0, 4),         # p0 → line A complete (q=0..3, r=0); line B starts
-            (8, 4), (10, 3),        # p1
-            (1, 4), (2, 4),         # p0
-            (12, 2), (14, 1),       # p1
-            (3, 4), (16, 0),        # p0 → line B complete; harmless filler
-        ],
-    )
+    """p1 to move facing two disjoint 4-line families → verdict −1."""
+    return _play(api.new_game(), FORCED_LOSS_MOVES)
 
 
 # --- 1. λ¹ fixtures through the probe ----------------------------------------
@@ -471,6 +464,66 @@ def test_mini_selfplay_driver_end_to_end(tmp_path):
 
 
 @needs_rust
+def test_lever1_sharpening_end_to_end(tmp_path):
+    """Lever 1 through the production writer: fixture-seeded live games with
+    tss_sharpen=True must write regime-1 shards whose policy rows obey the
+    guard-consistent mask — on any row with a proven winner in support, all
+    visit-target mass sits on class-1 actions (all-loss rows keep the raw
+    fallback)."""
+    from hexfield_eq.selfplay import ContinuousDriver, seed_game_tape
+
+    driver = ContinuousDriver(
+        epoch=2, games_target=3, max_plies=60, out_dir=tmp_path, active_limit=3,
+        tss_sharpen=True,
+    )
+    tapes = driver.start_games(3)
+    for tape, prefix in zip(
+        tapes, (FORCED_DEFENSE_MOVES, FORCED_LOSS_MOVES, WIN_NOW_MOVES)
+    ):
+        seed_game_tape(tape, prefix)
+    driver._start_writer()
+    session = _rust.HexfieldMctsSession(max_states=8192)
+    session.run_continuous(
+        [t.key for t in tapes],
+        tuple(t.state for t in tapes),
+        evaluator=StubEvaluator(),
+        on_move=driver,
+        visits=48,
+        c_puct=1.5,
+        base_seed=24_242_424,
+        virtual_batch_size=8,
+        flush_target=16,
+        active_root_limit=3,
+        temperature_by_ply=[1.0, 0.9],
+        tss_enabled=True,
+    )
+    driver._stop_writer()
+    stats = driver.stats()
+    assert stats["tss"]["sharpened_rows"] > 0, "threat-rich games must sharpen rows"
+    rows_with_winner = 0
+    for shard in sorted(tmp_path.glob("game_*.npz")):
+        with np.load(shard) as data:
+            assert int(data["target_regime"]) == 1
+            pol_off = data["pol_off"]
+            pol_w = data["pol_w"]
+            pol_class = data["pol_class"]
+            for i in range(int(data["num_rows"])):
+                p0, p1 = int(pol_off[i]), int(pol_off[i + 1])
+                cls = pol_class[p0:p1]
+                w = pol_w[p0:p1]
+                if (cls == 1).any():
+                    rows_with_winner += 1
+                    assert float(w[cls != 1].sum()) == 0.0, (
+                        f"{shard.name} row {i}: mass off the proven winners"
+                    )
+                elif (cls == -1).any() and (cls != -1).any():
+                    # Mixed rows without a winner: proven losers carry no mass
+                    # (all-loss rows keep the raw fallback and are exempt).
+                    assert float(w[cls == -1].sum()) == 0.0
+    assert rows_with_winner > 0, "no recorded row carried a proven winner"
+
+
+@needs_rust
 def test_stage0_digest_matches_golden():
     harness = _run_stage0_digest()
     digest, moves = harness.digest.hexdigest(), harness.moves
@@ -531,6 +584,41 @@ def test_interior_guard_flag_on_narrows_and_diverges():
         "guard pruned nodes yet the play/target stream is unchanged — "
         "the flag is not reaching node construction"
     )
+
+
+def test_sharpen_target_unit():
+    """Lever-1 mask math (selfplay._sharpen_target): winners-only when a
+    proven win exists, loser-zeroing otherwise, all-zero fallback, mass
+    rescaled to the original total, entries never removed."""
+    from hexfield_eq.selfplay import _sharpen_target
+
+    ids = [7, 9, 11, 13]
+    w = [0.4, 0.3, 0.2, 0.1]
+    # A proven winner exists → winners keep everything (rescaled to sum 1.0).
+    out = _sharpen_target(ids, w, {7: 1, 9: -1})
+    assert out is not None and len(out) == 4
+    assert out[1] == out[2] == out[3] == 0.0
+    assert out[0] == pytest.approx(1.0)
+    # Two winners split by their original ratio.
+    out = _sharpen_target(ids, w, {7: 1, 11: 1})
+    assert out[0] == pytest.approx(0.4 / 0.6)
+    assert out[2] == pytest.approx(0.2 / 0.6)
+    assert out[1] == out[3] == 0.0
+    # No winner → proven losers zeroed, survivors rescaled.
+    out = _sharpen_target(ids, w, {9: -1})
+    assert out[1] == 0.0
+    assert sum(out) == pytest.approx(1.0)
+    assert out[0] == pytest.approx(0.4 / 0.7)
+    # All proven losing → fallback: keep the original target (None).
+    assert _sharpen_target(ids, w, {7: -1, 9: -1, 11: -1, 13: -1}) is None
+    # No classified action in support → no-op.
+    assert _sharpen_target(ids, w, {99: 1}) is None
+    # Winner outside the support with losers inside: the winner branch fires
+    # only on in-support winners; here 99 is not in ids → loss-zeroing applies.
+    out = _sharpen_target(ids, w, {99: 1, 9: -1})
+    assert out is not None and out[1] == 0.0
+    # Everything already on the winner → no-op (None: keep original object).
+    assert _sharpen_target([7], [1.0], {7: 1}) is None
 
 
 def test_interior_guard_config_plumbing():

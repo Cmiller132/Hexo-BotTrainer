@@ -80,6 +80,13 @@ class SelfplayConfig:
     # (every dropped move carries a one-ply λ¹ refutation). Default OFF; its
     # own deployment rung. Rides the divergence-overrides dict.
     tss_interior_guard: bool = False
+    # Lever 1 (§4): guard-consistent sharpening of the RECORDED policy targets
+    # (visit weights + π') in the self-play writer, using the λ¹ class map —
+    # winners-only mass when a proven win exists, else proven-losing moves
+    # zeroed, all-zero falls back to the raw target. Rows written under
+    # sharpening carry target_regime=1. Default OFF; its own deployment rung,
+    # gated on the shadow mask-mass metrics (tss.win_retained_mass_*).
+    tss_policy_target_sharpen: bool = False
     search_parity_mode: bool = False
     # Moves-left utility. Defaults: enabled, two-sided, with the final-move
     # tie-break. Passed to Rust as divergence_overrides. moves_left_utility=False
