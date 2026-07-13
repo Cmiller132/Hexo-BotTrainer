@@ -24,6 +24,12 @@ mod threats_shared;
 // module allowed to construct a backup-capable HardValue (soundness firewall,
 // docs/PLAN_TSS_DEEPENING.md §2).
 mod tss_core;
+mod tss_reference;
+mod tss_solver;
+mod tss_verify;
+
+#[cfg(test)]
+mod tss_bench;
 
 #[cfg(feature = "python")]
 mod cache;
