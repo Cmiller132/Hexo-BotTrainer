@@ -1,0 +1,238 @@
+# hexfield_eq_main_3 -- additive reach-conditioned alpha (ray7lut2) run.
+# Search and training settings are copied unchanged from main_2. Architecture
+# defaults come from scripts/prefit_env/hexfield_eq_raytap_a5_lut2.env:
+# A5 feature-v2, RAYTAP=both, CCACCACA, plus RAYTAP_LUT=additive.
+# The checkpoint meta is the authoritative architecture description and must
+# match the launch environment exactly.
+
+[model]
+name = "hexfield_eq"
+module = "hexfield_eq.plugin"
+
+[model.config]
+device = "cuda"
+
+[model.config.selfplay]
+search_visits = 256
+# 100% PCR: every turn is a full move with a written Gumbel-target row.
+pcr_full_proportion = 1.0
+pcr_fast_visits = 192
+pcr_fast_temperature = 0.0
+active_games = 256
+virtual_batch_size = 96
+flush_target = 1024
+active_root_limit = 256
+max_game_plies = 256
+tss_enabled = true
+# TSS Stage-4 SHADOW (rung 2, docs/TSS_RUNBOOK.md, enabled at ep25 2026-07-13):
+# deep solves + certificate verification at gated leaves, consuming NOTHING —
+# play/targets bit-identical to off; collects the deep_* cost/UNKNOWN
+# histograms in the epoch JSON tss block that size the consumption rungs.
+# Rung ladder (docs/TSS_RUNBOOK.md; owner-ordered auto-deploy 2026-07-13).
+# ep26: interior forced-move guard ON (Lever 0 — fully-forced nodes narrow to
+# the hitting universe) + shadow at FULL sampling/cap 2000 on the OPTIMIZED
+# solver (O12-O18: all buckets ≥20k nodes/s; the ep25 drag is gone).
+# Next rungs, one epoch apart, gated on deep_verify_failed==0 + throughput:
+# mode=2 (verified hard LOSS consumption), then mode=3 + tss_solver_root_guard.
+tss_interior_guard = true
+# ep28 rung (final): verified WIN consumption + deep root guard. ep27 gate:
+# 295,162 hard-LOSS backups consumed (40,154 proofs, memo-served re-backs),
+# verify_failed=0 (cumulative ~2.7M solves), epoch 3153s, 1/256 truncated.
+# Both-goal solves cost ~2x Loss-only → sampling trimmed 8→4 to hold epoch
+# time roughly flat. Depth telemetry (search_depth_mean/max) ships with this
+# build — the guard/LOSS/WIN depth deltas become directly observable.
+tss_solver_mode = 3
+tss_solver_root_guard = true
+# ep41 (2026-07-14): 2000 -> 500. ep39 park first contact: demand 663 solves/s
+# vs 406/s capacity => 73% of parked leaves bailed (mean pen wait 512ms). The
+# release A/B bench decided the IDENTICAL position set at caps 500/2000/8000,
+# so the extra 1500 nodes only burn CPU failing to prove Unknowns. Watch
+# deep_win+deep_loss (~40k/epoch at cap 2000): a drop means production has
+# proofs the corpus lacked — revert to 2000 + accept bails if so.
+tss_solver_node_cap = 500
+# ep31 (2026-07-13, owner-ordered): 100% leaf coverage via the async solve
+# pool (Codex-approved after 4 review rounds) + the proof-carrying ZONE
+# solver rewrite (P0-P3, zone-theorem T3; docs/PLAN_TSS_SOLVER_UPGRADES.md).
+# sample_16 4->16: the inline_16=4 tier keeps the proven ep28 inline slice
+# verbatim; the other 12/16 enqueue to 8 background workers and are consumed
+# by the selection descent-stop.
+# NOTE: self-play is no longer bit-reproducible under a fixed seed with the
+# pool on (proof-arrival timing); soundness unchanged.
+# ep35 redeploy (2026-07-14): LIFO queue (ep32/33 ran 64% async_stale under
+# FIFO backlog latency) + the 14 Codex-review fixes (see runbook). tss_zone
+# true->false: production first contact (ep32/33) showed zone_nodes=0 —
+# root-caused to the +12 horizon (defender budget 6 at the first Universal
+# => full-legal fallback); with the horizon-ladder fix the release A/B bench
+# still measured ZERO additional decided positions at caps 500/2000/8000 and
+# ~1.5x solver nodes on Unknowns. The P0-P3 solver rewrite (typed certs,
+# theorem dispatch) stays live; zoned AND generation is a TOML flip away if
+# a deeper-cap corpus ever shows value.
+tss_solver_sample_16 = 16
+tss_solver_async = true
+tss_solver_async_threads = 8
+tss_solver_async_inline_16 = 4
+tss_zone = false
+# ep39 (2026-07-14, owner-ordered "make it park leaves"): wait-at-leaf rung —
+# every gated leaf parks in the scheduler pen until its verified result lands
+# (first-touch consumption for 100% of gated leaves), released by a 100ms
+# liveness bail otherwise. inline_16 above is IGNORED while parking (the pen
+# supersedes the inline tier) but stays set: flipping park off restores the
+# known-good hybrid shape. threads_max=0 auto-scales workers 8->24 on queue
+# pressure (32-core host). Watch: park_bailed ~0, epoch time vs the ep36/37
+# 1347s baseline, deep_verify_failed 0.
+# ep41 retune (ep39 first contact): threads_max 0(auto->24) -> 12 — at 24
+# workers the 32-thread host oversubscribes (24 solve + ~10 driver threads):
+# per-worker throughput fell 28k -> 7.9k nodes/s and TOTAL fell below the
+# 8-worker ep37 rate. 12 workers x ~25k nodes/s ≈ 300k nodes/s vs ~120k
+# demand at cap 500 => 2.5x headroom, queue stays drained, bails ~0.
+# Timeout 100 -> 150ms: covers scheduler-iteration jitter once capacity
+# holds; still bounds worst-case leaf latency well under a move.
+tss_solver_park = true
+tss_solver_park_timeout_ms = 150
+tss_solver_async_threads_max = 12
+# ep52 (2026-07-14): Lever 1 — guard-consistent policy-target sharpening ON.
+# The ep25 SKIP verdict measured gumbel win-retained mass 0.988 on λ¹-only
+# win rows (sharpening ≈ no-op); since deep-WIN consumption (ep28) it has sat
+# at 0.77-0.80 — deep-solver wins the net doesn't rank entered the class map,
+# so ~21% of π' mass in proven-win rows trains onto unproven moves, and
+# root-guard cert moves outside the gumbel support export at weight 0
+# (played-but-not-learned). Sharpening masks π' to class=+1 and one-hots
+# zero-mass winner sets; rows written under it carry target_regime=1.
+# Watch: sharpened_rows ≈ win_rows (~1.2k/epoch), pinned entropy metric
+# (L0+L1 compound-sharpening hazard), fixed-anchor Strix curve. Policy CE is
+# NOT comparable across this boundary (target regime change, same as ep26).
+tss_policy_target_sharpen = true
+cache_max_states = 262144
+nucleus_f64 = true
+lcb_z = 1.6
+clean_root_prior_cache = true
+
+# Constant c_puct, with de-contaminated target search.
+c_puct = 1.5
+visit_scaled_c_puct = true
+c_scale = 0.0
+c_base = 500.0
+root_dirichlet_noise_fraction = 0.0
+root_dirichlet_total_alpha = 10.83
+dirichlet_shaped = true
+fpu_reduction = 0.2
+root_fpu_reduction = 0.0
+forced_playout_k = 0.0
+pruned_dynamic_cpuct = true
+lazy_widening = true
+new_child_fpu = true
+widening_policy_mass = 0.95
+widening_max_children = 96
+widening_min_children = 2
+temperature = 1.0
+temperature_floor = 0.15
+temperature_halflife_plies = 20.0
+root_policy_temperature = 1.05
+policy_init_fraction = 0.35
+policy_init_avg_plies = 4.0
+policy_init_max_plies = 8
+policy_init_temperature = 1.4
+ml_two_sided = false
+ml_final_pick_band = 0.08
+export_root_prior_logits = true
+
+# Gumbel AlphaZero target regime; m=16 fits 256 visits exactly.
+gumbel_root_enabled = true
+gumbel_sequential_halving = true
+gumbel_nonroot_select = true
+gumbel_target_enabled = true
+gumbel_c_visit = 50.0
+gumbel_c_scale = 1.0
+gumbel_m = 16
+gumbel_target_min_visits = 1
+gumbel_play_prune = true
+
+[model.config.training]
+batch_rows = 256
+learning_rate = 5e-4
+weight_decay = 1e-4
+grad_clip = 5.0
+adaptive_clip = true
+clip_c = 1.75
+clip_ema_decay = 0.99
+clip_warmup_steps = 50
+policy_weight = 1.0
+value_weight = 1.0
+opp_policy_weight = 0.25
+short_term_value_weight = 0.1
+moves_left_weight = 0.2
+q_head_weight = 0.1
+soft_policy_weight = 0.5
+policy_surprise_uniform_fraction = 0.5
+policy_surprise_max_weight = 8.0
+warmup_steps = 0
+lr_schedule = "cosine"
+lr_warmup_steps = 400
+lr_final = 1e-4
+lr_decay_epochs = 60
+shuffle_min_rows = 7000
+shuffle_keep_target_rows = 210000
+shuffle_taper_window_exponent = 0.65
+shuffle_expand_window_per_row = 0.8
+shuffle_taper_window_scale = 7000.0
+validation_fraction = 0.0
+train_samples_per_epoch = 56000
+max_train_bucket_per_new_data = 8.0
+max_train_bucket_size = 500000.0
+no_repeat_files = false
+expand_backend = "rust"
+expand_workers = 0
+policy_target = "gumbel"
+
+[model.config.evaluation]
+games_per_epoch = 16
+eval_visits = 128
+eval_every = 5
+
+[model.config.multi_stage_eval]
+enabled = true
+games_budget = 192
+every_n_epochs = 5
+full_search_visits = 512
+eval_virtual_batch_size = 32
+sealbot_share = 0.1667
+strix_share = 0.3333
+strix_weight = 1.0
+verdict_reference_lag = 5
+pool_path = "diagnostics/eval_pool.json"
+
+[model.config.multi_stage_eval.sprt]
+enabled = false
+
+[model.config.multi_stage_eval.opponents]
+sealbot_enabled = true
+strix_enabled = true
+strix_ckpt = "/mnt/e/Hexo-BotTrainer/anchors/strix/checkpoint_00237000.pt"
+strix_sims = 512
+strix_m = 16
+strix_device = "cuda"
+strix_label = "strix"
+bracket_size = 2
+# No cross-feature-width permanent anchors.
+permanent_anchors = []
+radius8_opponents = []
+
+[run]
+name = "hexfield_eq_main_3"
+output_dir = "/mnt/e/Hexo-BotTrainer/runs/hexfield_eq_main_3"
+seed = 1
+
+[loop]
+epochs = 200
+
+[selfplay]
+games_per_epoch = 256
+update_checkpoint_pointer = false
+
+[train]
+passes_per_epoch = 1
+
+[checkpoint]
+# Raw warm-start weights from the additive main_3 BC prefit.
+initialize_from = "/mnt/e/Hexo-BotTrainer/runs/hexfield_eq_main3_prefit/additive/soak_init.pt"
+save_name = "latest"

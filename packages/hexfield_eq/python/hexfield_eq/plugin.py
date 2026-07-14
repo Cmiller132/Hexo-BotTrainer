@@ -40,8 +40,8 @@ class HexfieldPlugin:
             # but named-matched here so a future 2-D reshaping stays no-decay).
             # The register lane's "gate_bias" thresholds (Phase R0) are named the
             # same way for the same reason, as are the ray-tap ".alpha" reach
-            # profiles (2-D but structural — decay would pull alpha[0] away
-            # from its identity init, SPEC_RAYTAP_CONV.md §2.2). The tied trunk
+            # profiles and additive ".O"/".P" reach tables (structural lookup
+            # values, not projection weights).  The tied trunk
             # base params (w_base / w0 / EquivLinear.wb) are >= 2-D weights and
             # DO decay, matching the passthrough conv weights; the lane's
             # q/k/v/out projections decay with them, its norm affines and
@@ -51,6 +51,8 @@ class HexfieldPlugin:
                 or ("bias_theta" in name)
                 or ("gate_bias" in name)
                 or name.endswith(".alpha")
+                or name.endswith(".O")
+                or name.endswith(".P")
             )
             if param.ndim >= 2 and not no_decay_named and name != "tokens":
                 decay.append(param)

@@ -302,11 +302,16 @@ class _FakeArena:
         self.sealbot_calls: list[int] = []
         self.ckpt_visits: list[int | None] = []
         self.sealbot_visits: list[int | None] = []
+        # The CRN seed base each match was requested at (None when the caller
+        # omitted it) — lets tests assert the epoch-folded decorrelation.
+        self.ckpt_seed_bases: list[int | None] = []
+        self.sealbot_seed_bases: list[int | None] = []
 
     def play_checkpoint_match(self, a, b, n, **kw) -> dict:
         label_b = kw["label_b"]
         self.ckpt_calls.append((label_b, n))
         self.ckpt_visits.append(kw.get("visits"))
+        self.ckpt_seed_bases.append(kw.get("game_seed_base"))
         n_pairs = max(1, n // 2)
         match = _paired_match_from_scores(kw["label_a"], label_b, self._ckpt_scorer(label_b, n_pairs))
         match["meta"]["visits"] = kw.get("visits")  # echo visits into meta
@@ -315,6 +320,7 @@ class _FakeArena:
     def play_sealbot_match(self, ckpt, n, **kw) -> dict:
         self.sealbot_calls.append(n)
         self.sealbot_visits.append(kw.get("visits"))
+        self.sealbot_seed_bases.append(kw.get("game_seed_base"))
         match = _sealbot_match(kw.get("label", "hexfield"), n, self._sealbot_winrate)
         match["meta"]["visits"] = kw.get("visits")
         return match

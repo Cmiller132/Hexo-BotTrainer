@@ -2,15 +2,16 @@
 //! model lineage's MCTS (Threat-Space Search). Pure board geometry over the
 //! engine's incremental `WindowStore`; no graph/feature construction, no network.
 //!
-//! This module is the single source of TSS threat semantics for the dense_cnn
-//! and hexgt lineages: both are `#[path]`-included into this crate (see
-//! `packages/hexo_models/rust/src/lib.rs`) and reach it via
-//! `crate::threats_shared`, so those two share exactly one definition of
-//! "what is a threat / win-now / forced loss". EXCEPTION: the hexgnn crate --
-//! compiled into the SAME native module -- carries its own duplicated fork
-//! (`packages/hexgnn/rust/src/threats.rs`); drift there is NOT caught by the
-//! dense_cnn/hexgt parity test (tests/test_dense_cnn_tss.py). Here it is
-//! consumed by:
+//! This module is the single source of TSS threat semantics for the dense_cnn,
+//! hexgt, and hexfield_eq lineages: all are `#[path]`-included into their
+//! crates (see each crate's lib.rs) and reach it via `crate::threats_shared`,
+//! so they share exactly one definition of "what is a threat / win-now /
+//! forced loss". EXCEPTION: the hexgnn crate -- compiled into the SAME native
+//! module as dense_cnn/hexgt -- carries its own duplicated fork
+//! (`packages/hexgnn/rust/src/threats.rs`); drift there is not covered by any
+//! parity test. The live regression fixtures for these semantics are
+//! tests/test_hexfield_eq_tss_shadow.py (driving the shared `analysis_pydict`
+//! via `hexfield_eq_threat_analysis`). Here it is consumed by:
 //!   - the tactical-candidate INJECTION at node expansion (mcts_tree.rs),
 //!   - the phase-aware hitting-set leaf value OVERRIDE (mcts.rs),
 //!   - the tactical move-selection GUARD at the root (mcts.rs).

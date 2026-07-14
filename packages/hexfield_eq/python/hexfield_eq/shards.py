@@ -40,8 +40,20 @@ SCHEMA = "hexfield_compact_v1"
 # recomputed from the placement history at expand time, so nothing is stored for
 # them. Older versions still read (their extra hot/win columns are ignored; the
 # graded planes derive from history regardless).
-SCHEMA_VERSION = 4
-_ACCEPTED_SCHEMA_VERSIONS = (1, 2, 3, 4)
+#
+# v5 (TSS Stage 0, PLAN_TSS_DEEPENING.md §8): three additive columns —
+# `pol_class` (i8 λ¹ move class aligned to pol_act: 1 proven-winning /
+# -1 proven-losing / 0 unproven), `tss_proof` (i8 per-row λ¹ verdict at the
+# row's position, row-player perspective, 0 = none; the raw outcome stays in
+# `value` — BOTH labels ride), and `target_regime` (int32 scalar: the
+# policy-target semantics version — 0 = raw visit/π' targets, bumped when
+# Lever-1 guard-consistent masking turns on, so a regime change is never
+# silent in the rolling buffer). Older shards read with empty/zero defaults.
+SCHEMA_VERSION = 5
+_ACCEPTED_SCHEMA_VERSIONS = (1, 2, 3, 4, 5)
+# Policy-target semantics regime written into new shards. 0 = raw (unmasked)
+# targets. Lever 1 bumps this alongside its config flag.
+TARGET_REGIME = 0
 # The restnet compact-v1 schema_version the adapter reads
 # (dense_cnn_restnet.compact_io.COMPACT_SCHEMA_VERSION). The adapter accepts a
 # shard with no schema_version but raises on a present-but-different version.
@@ -77,6 +89,7 @@ def write_compact_shard(
     *,
     short_term_value_horizons: Sequence[int] = STV_HORIZONS,
     sidecar: dict | None = None,
+    target_regime: int = TARGET_REGIME,
 ) -> int:
     """Serialize rows into one hexfield_compact_v1 ``.npz`` + JSON sidecar."""
 
@@ -123,6 +136,10 @@ def write_compact_shard(
     opp_act: list[np.ndarray] = []
     opp_w: list[np.ndarray] = []
     opp_len: list[int] = []
+    # v5: λ¹ class aligned to pol_act (0 for actions outside the class map or
+    # quiet roots) + the per-row λ¹ proof scalar.
+    pol_class: list[np.ndarray] = []
+    tss_proof = np.zeros(n, dtype=np.int8)
 
     for i, sample in enumerate(samples):
         turn_index[i] = int(sample.turn_index)
@@ -169,6 +186,12 @@ def write_compact_shard(
         )
         lmap = {int(a): float(l) for a, l in sample.prior_logit}
         pl = np.fromiter((lmap.get(int(a), 0.0) for a in pa.tolist()), dtype=np.float32, count=pa.shape[0])
+        # v5: λ¹ class per recorded action (0 outside the class map) + the
+        # per-row proof scalar.
+        cmap = {int(a): int(c) for a, c in sample.policy_class}
+        pc = np.fromiter((cmap.get(int(a), 0) for a in pa.tolist()), dtype=np.int8, count=pa.shape[0])
+        pol_class.append(pc)
+        tss_proof[i] = int(sample.tss_proof)
         if sample.gumbel_policy:
             gumbel_present[i] = 1
         pol_act.append(pa)
@@ -222,6 +245,10 @@ def write_compact_shard(
         "opp_act": _cat(opp_act, np.uint32),
         "opp_w": _cat(opp_w, np.float32),
         "opp_off": _concat_offsets(opp_len),
+        # v5 TSS columns (aligned to pol_act / per-row; see version comment).
+        "pol_class": _cat(pol_class, np.int8),
+        "tss_proof": tss_proof,
+        "target_regime": np.asarray(int(target_regime), dtype=np.int32),
     }
 
     path = Path(path)
@@ -360,6 +387,18 @@ def read_compact_shard(path: Path) -> list[HexfieldSampleData]:
             if present and "prior_logit" in arrays
             else ()
         )
+        # v5 TSS columns; pre-v5 shards decode to empty/zero (all-zero class
+        # rows also read back as empty — zeros carry no information).
+        policy_class = (
+            tuple(
+                (int(arrays["pol_act"][k]), int(arrays["pol_class"][k]))
+                for k in range(p0, p1)
+                if int(arrays["pol_class"][k]) != 0
+            )
+            if "pol_class" in arrays
+            else ()
+        )
+        row_proof = int(arrays["tss_proof"][i]) if "tss_proof" in arrays else 0
         out.append(
             HexfieldSampleData(
                 game_id="",
@@ -376,6 +415,8 @@ def read_compact_shard(path: Path) -> list[HexfieldSampleData]:
                 value=float(arrays["value"][i]),
                 short_term_value=stval,
                 moves_left=float(arrays["moves_left"][i]),
+                policy_class=policy_class,
+                tss_proof=row_proof,
                 metadata=(
                     {"truncated": True}
                     if outcome_valid is not None and int(outcome_valid[i]) == 0

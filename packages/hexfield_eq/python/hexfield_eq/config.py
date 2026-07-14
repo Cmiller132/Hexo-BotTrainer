@@ -74,6 +74,66 @@ class SelfplayConfig:
     temperature_halflife_plies: float = 30.0
     max_game_plies: int = 512
     tss_enabled: bool = True
+    # Interior forced-move guard (TSS Lever 0, PLAN_TSS_DEEPENING.md §3): at
+    # interior expansion with live opponent threats, no own win-now, and
+    # min_hitting_set == B, children narrow to the hitting-cell universe
+    # (every dropped move carries a one-ply λ¹ refutation). Default OFF; its
+    # own deployment rung. Rides the divergence-overrides dict.
+    tss_interior_guard: bool = False
+    # Lever 1 (§4): guard-consistent sharpening of the RECORDED policy targets
+    # (visit weights + π') in the self-play writer, using the λ¹ class map —
+    # winners-only mass when a proven win exists, else proven-losing moves
+    # zeroed, all-zero falls back to the raw target. Rows written under
+    # sharpening carry target_regime=1. Default OFF; its own deployment rung,
+    # gated on the shadow mask-mass metrics (tss.win_retained_mass_*).
+    tss_policy_target_sharpen: bool = False
+    # Deep-solver consumption tier (Stage-4 ladder, PLAN §10): 0=off, 1=SHADOW
+    # (solve+verify+count, consume nothing — bit-identical play), 2=+verified
+    # hard LOSS backups with GPU-eval elision, 3=+verified hard WIN. Every hard
+    # value passes the independent certificate verifier BEFORE backup; the
+    # deep_verify_failed telemetry counter must stay 0 in production.
+    tss_solver_mode: int = 0
+    # Deterministic per-solve node cap (no wall clock on the hard path).
+    tss_solver_node_cap: int = 2000
+    # Leaf subsample gate in sixteenths (16 = every gated leaf).
+    tss_solver_sample_16: int = 16
+    # Deep root guard (rung 6): verified root solves upgrade the class map so
+    # the play-time guard forces proven wins; row proofs deep-upgrade too.
+    tss_solver_root_guard: bool = False
+    # Async solve pool (async rung): leaf solves run on background worker
+    # threads; verified results are consumed on later visits through the
+    # proven position (descent-stop in selection). Off => inline solves.
+    # NOTE: flag-ON self-play is not bit-reproducible under a fixed seed
+    # (result arrival is wall-clock dependent); soundness is unchanged — the
+    # workers run the identical solver → verifier → sealed-mint path.
+    tss_solver_async: bool = False
+    # Base worker count for the async pool (Rust validates [1, 32]).
+    tss_solver_async_threads: int = 8
+    # Park-mode maximum after queue-pressure scale-up. 0 = auto: clamp
+    # available_parallelism - 6 between base and 24 (a base above 24 remains
+    # its own ceiling); otherwise base..=64. Ignored when parking is off: the
+    # legacy async pool remains fixed at the base count for flag-off identity.
+    tss_solver_async_threads_max: int = 0
+    # Wait-at-leaf synchronous consumption: accepted async requests park their
+    # leaves off the GPU queue until a verified result arrives or the bounded
+    # bail timeout expires. Requires tss_solver_async. The select loop itself
+    # never blocks, so unrelated leaves keep flowing while a solve is pending.
+    tss_solver_park: bool = False
+    # Per-leaf liveness backstop for parking (Rust validates 1..=5000 ms).
+    tss_solver_park_timeout_ms: int = 100
+    # Hybrid inline tier under async: gated leaves with (hash & 0xF) below
+    # this threshold solve inline (first-touch consumption, the proven
+    # pre-async path); the rest enqueue. 0 = pure async. Deploy shape:
+    # sample_16=16 + async=true + inline_16=4 keeps today's inline tier
+    # verbatim and adds pool coverage for the other 12/16. IGNORED whenever
+    # tss_solver_park is on: every accepted gated leaf parks instead.
+    tss_solver_async_inline_16: int = 0
+    # Proof-carrying zone omission and its two optional heuristic trims.
+    # All remain default-off and are independently visible in rollout config.
+    tss_zone: bool = False
+    tss_zone_stale_filter: bool = False
+    tss_zone_count2: bool = False
+    tss_pair_commutation: bool = False
     search_parity_mode: bool = False
     # Moves-left utility. Defaults: enabled, two-sided, with the final-move
     # tie-break. Passed to Rust as divergence_overrides. moves_left_utility=False
@@ -543,6 +603,24 @@ def build_divergence_overrides(
         "clean_root_prior_cache": bool(sp.clean_root_prior_cache),
         "dirichlet_shaped": bool(sp.dirichlet_shaped),
         "pruned_dynamic_cpuct": bool(sp.pruned_dynamic_cpuct),
+        # TSS interior forced-move guard (Lever 0, default OFF).
+        "tss_interior_guard": bool(sp.tss_interior_guard),
+        # TSS deep-solver ladder (Stage 4, default OFF).
+        "tss_solver_mode": int(sp.tss_solver_mode),
+        "tss_solver_node_cap": int(sp.tss_solver_node_cap),
+        "tss_solver_sample_16": int(sp.tss_solver_sample_16),
+        "tss_solver_root_guard": bool(sp.tss_solver_root_guard),
+        # TSS async solve pool (async rung, default OFF).
+        "tss_solver_async": bool(sp.tss_solver_async),
+        "tss_solver_async_threads": int(sp.tss_solver_async_threads),
+        "tss_solver_async_threads_max": int(sp.tss_solver_async_threads_max),
+        "tss_solver_park": bool(sp.tss_solver_park),
+        "tss_solver_park_timeout_ms": int(sp.tss_solver_park_timeout_ms),
+        "tss_solver_async_inline_16": int(sp.tss_solver_async_inline_16),
+        "tss_zone": bool(sp.tss_zone),
+        "tss_zone_stale_filter": bool(sp.tss_zone_stale_filter),
+        "tss_zone_count2": bool(sp.tss_zone_count2),
+        "tss_pair_commutation": bool(sp.tss_pair_commutation),
         # Gumbel AlphaZero levers (default OFF).
         "gumbel_target": bool(sp.gumbel_target_enabled),
         "gumbel_root": bool(sp.gumbel_root_enabled),

@@ -53,6 +53,12 @@ SCALAR_COLS: tuple[str, ...] = (
     "first_q",
     "first_r",
     "first_present",
+    # v5 TSS provenance (defaults 0 on pre-v5 shards): the per-row deep/λ¹
+    # proof scalar and the target-semantics regime (shard-level int32 in the
+    # npz, expanded to per-row at load so mixed raw/sharpened windows stay
+    # distinguishable).
+    "tss_proof",
+    "target_regime",
 )
 
 # Per-row ``(n, H)`` block columns: indexed ``[i, :]``.
@@ -72,7 +78,7 @@ BLOCK_COLS: tuple[str, ...] = ("stvalue", "stvalue_mask")
 CSR_GROUPS: tuple[tuple[str, tuple[str, ...], bool], ...] = (
     ("hist_off", ("hist_qr",), True),
     ("hist_off", ("hist_owner", "hist_pidx"), False),
-    ("pol_off", ("pol_act", "pol_w", "q_pol_q", "prior_logit"), False),
+    ("pol_off", ("pol_act", "pol_w", "q_pol_q", "prior_logit", "pol_class"), False),
     # π' target on its OWN support (shard schema v3): a superset of pol_act on
     # reused roots. v2 shards stored it aligned to pol_act; the loader converts
     # to CSR at load so downstream sees one shape.
@@ -140,6 +146,21 @@ class PackedRowView:
     horizons: tuple[int, ...]
     generation: int
     row_shard_id: int
+    # v5 TSS provenance (defaults for constructors predating the columns)
+    tss_proof: int = 0  # per-row proof scalar (0 = none)
+    target_regime: int = 0  # 0 raw / 1 sharpened target semantics
+    pol_class_arr: np.ndarray | None = None  # (P,) i8 view aligned to pol_act
+
+    def policy_class(self) -> tuple[tuple[int, int], ...]:
+        """λ¹/deep class per recorded action (nonzero entries only), aligned to
+        ``pol_act`` — the shape ``HexfieldSampleData.policy_class`` carries."""
+        if self.pol_class_arr is None:
+            return ()
+        return tuple(
+            (int(self.pol_act[k]), int(self.pol_class_arr[k]))
+            for k in range(self.pol_act.shape[0])
+            if int(self.pol_class_arr[k]) != 0
+        )
 
     def records(self) -> tuple[tuple[int, int, int, int], ...]:
         """``(q, r, owner, placement_index)`` tuples — the ``records`` field."""
@@ -275,6 +296,9 @@ class PackedWindow:
             horizons=self.horizons,
             generation=int(self.generation[i]),
             row_shard_id=int(self.row_shard_id[i]),
+            tss_proof=int(c["tss_proof"][i]),
+            target_regime=int(c["target_regime"][i]),
+            pol_class_arr=c["pol_class"][p0:p1],
         )
 
 
@@ -292,6 +316,8 @@ _SCALAR_DTYPES: dict[str, np.dtype] = {
     "first_q": np.dtype(np.int16),
     "first_r": np.dtype(np.int16),
     "first_present": np.dtype(np.uint8),
+    "tss_proof": np.dtype(np.int8),
+    "target_regime": np.dtype(np.int32),
 }
 _CSR_DTYPES: dict[str, np.dtype] = {
     "hist_qr": np.dtype(np.int16),
@@ -303,6 +329,7 @@ _CSR_DTYPES: dict[str, np.dtype] = {
     "gumbel_act": np.dtype(np.uint32),
     "gumbel_w": np.dtype(np.float32),
     "prior_logit": np.dtype(np.float32),
+    "pol_class": np.dtype(np.int8),
     "opp_act": np.dtype(np.uint32),
     "opp_w": np.dtype(np.float32),
 }
@@ -397,6 +424,17 @@ def load_packed_shard(path: Path) -> PackedWindow:
                 # (no π' target; the loss falls back to the visit target).
                 cols[name] = np.zeros(n, dtype=_SCALAR_DTYPES[name])
                 continue
+            if name == "tss_proof" and name not in files:
+                # Pre-v5 shard: no proof provenance (0 = no proof).
+                cols[name] = np.zeros(n, dtype=_SCALAR_DTYPES[name])
+                continue
+            if name == "target_regime":
+                # Shard-LEVEL int32 scalar in the npz (all rows of one shard
+                # share a regime); expanded per-row here so concat keeps
+                # mixed-regime windows distinguishable. Pre-v5 => 0 (raw).
+                regime = int(data[name]) if name in files else 0
+                cols[name] = np.full(n, regime, dtype=_SCALAR_DTYPES[name])
+                continue
             cols[name] = np.ascontiguousarray(data[name])
         for name in BLOCK_COLS:
             cols[name] = np.ascontiguousarray(data[name])
@@ -414,6 +452,12 @@ def load_packed_shard(path: Path) -> PackedWindow:
                     # Shards lacking the per-action logit column zero-fill
                     # aligned to pol_act (the pol_off group's length) to keep
                     # downstream slicing valid; a gumbel_present=0 row ignores it.
+                    pol_total = int(data["pol_act"].shape[0])
+                    cols[d] = np.zeros(pol_total, dtype=_CSR_DTYPES[d])
+                    continue
+                if d == "pol_class" and d not in files:
+                    # Pre-v5 shard: no λ¹ class column — class 0 (unclassified)
+                    # aligned to pol_act.
                     pol_total = int(data["pol_act"].shape[0])
                     cols[d] = np.zeros(pol_total, dtype=_CSR_DTYPES[d])
                     continue
@@ -702,6 +746,18 @@ def _select_files_for_rows(
     return selected, rows
 
 
+@dataclass
+class _ShardPlan:
+    """Pass-A sizing record for one shard of the streaming window build."""
+
+    path: Path
+    mask: np.ndarray | None  # bool[n] keep mask (None = keep every row)
+    n_kept: int  # post-thin row count
+    horizons: tuple[int, ...]
+    h_width: int  # stvalue block width
+    data_lens: dict[str, int]  # post-thin flat length per CSR data column
+
+
 def build_window_split(
     selected: Sequence["ShardEntry"],
     *,
@@ -710,18 +766,32 @@ def build_window_split(
     samples_dir: Path,
     diag: dict | None = None,
 ) -> PackedWindow:
-    """Load the selected shards, per-row Bernoulli subsample, and concat into one
+    """Load the selected shards, per-row Bernoulli subsample, and stream into one
     packed in-RAM window.
 
     The window is kept packed in RAM; there is no ``data*.npz`` write. The permute
     and ``effective_rows`` truncation are done by the consumer.
 
+    Two passes, so the transient stays ~1x the final window plus ONE shard (the
+    legacy accumulate-then-:func:`concat_packed` shape held every loaded shard
+    AND the destination simultaneously — a ~2x-window peak that OOM'd the train
+    driver on memory-tight hosts):
+
+    1. **Size**: each shard is loaded once, its post-thin row/CSR-element counts
+       are computed analytically from the keep mask (nothing thinned is built),
+       and the shard is freed before the next is touched.
+    2. **Fill**: every output array is preallocated from the pass-1 totals, then
+       each shard is loaded again, thinned, copied into place (CSR offsets
+       rebased exactly as :func:`concat_packed`), and freed.
+
     The per-row keep is an independent ``Bernoulli(keep_prob)`` drawn from a single
     shared ``rng`` consumed in ``(generation, game_key)`` shard order and within a
     shard in stored row order (``rng.random(shard.n) < keep_prob`` per shard).
-    ``keep_prob >= 1.0`` keeps every row with no RNG draw.
-
-    Survivors are concatenated with :func:`concat_packed`.
+    ``keep_prob >= 1.0`` keeps every row with no RNG draw. Draws happen in pass 1
+    for exactly the shards that load cleanly, which matches the legacy
+    implementation's stream position in every non-torn-shard case; the output is
+    bit-identical to the legacy path (pinned by
+    ``test_hexfield_eq_window_streaming.py``).
 
     Telemetry: when ``diag`` is a dict it is filled in place with load/skip
     accounting (does not alter what is loaded or concatenated):
@@ -730,15 +800,25 @@ def build_window_split(
     * ``shards_skipped``    — count of shards skipped as unreadable (torn npz);
     * ``skipped_paths``     — the skipped shard paths, capped at 20;
     * ``rows_loaded``       — total rows across survivors BEFORE keep_prob thinning;
-    * ``rows_post_thin``    — the concatenated window's ``n`` (post-thin rows).
+    * ``rows_post_thin``    — the concatenated window's ``n`` (post-thin rows);
+    * ``shards_reload_failed`` — pass-2 reload failures (shard readable seconds
+      earlier in pass 1; active corruption, counted in ``shards_skipped`` too).
     """
     # Consume the keep mask in (generation, game_key) order so the shared rng
     # stream is reproducible regardless of the input ordering.
     ordered = sorted(selected, key=lambda e: (int(e.generation), int(e.game_key)))
 
-    survivors: list[PackedWindow] = []
+    # ---- pass 1: load-measure-free. Draw the keep mask per cleanly-loaded
+    # shard (legacy rng order) and size the thinned output analytically.
+    plans: list[_ShardPlan] = []
     skipped: list[str] = []
     rows_loaded = 0  # survivor rows before keep_prob thinning (telemetry only)
+    total_n = 0
+    data_totals: dict[str, int] = {
+        d: 0 for _off, datas, _dbl in CSR_GROUPS for d in datas
+    }
+    horizons: tuple[int, ...] | None = None
+    h_width = 0
     for entry in ordered:
         shard_path = samples_dir / entry.rel_path
         # A power cut can leave a shard's npz torn while its commit-marker sidecar
@@ -759,13 +839,61 @@ def build_window_split(
             )
             continue
         rows_loaded += int(shard.n)
-        if keep_prob >= 1.0:
-            survivors.append(shard)
-            continue
-        # Independent per-row Bernoulli(keep_prob), one vectorized draw per shard
-        # in stored row order.
-        mask = rng.random(shard.n) < keep_prob
-        survivors.append(_subset_packed(shard, mask))
+
+        mask: np.ndarray | None = None
+        if keep_prob < 1.0:
+            # Independent per-row Bernoulli(keep_prob), one vectorized draw per
+            # shard in stored row order.
+            mask = rng.random(shard.n) < keep_prob
+            n_kept = int(mask.sum())
+        else:
+            n_kept = int(shard.n)
+
+        if n_kept > 0:
+            # Validate horizon/block consistency now (concat_packed's contract).
+            if horizons is None:
+                horizons = shard.horizons
+                h_width = int(shard.cols["stvalue"].shape[1])
+            elif shard.horizons != horizons:
+                raise ValueError(
+                    f"concat_packed: horizon mismatch {shard.horizons} != {horizons}; "
+                    "stvalue blocks are not concatenatable"
+                )
+            elif int(shard.cols["stvalue"].shape[1]) != h_width:
+                raise ValueError("concat_packed: stvalue block width mismatch")
+
+            total_n += n_kept
+            plan_lens: dict[str, int] = {}
+            if mask is None or n_kept == int(shard.n):
+                for _off, datas, _dbl in CSR_GROUPS:
+                    for d in datas:
+                        plan_lens[d] = int(shard.cols[d].shape[0])
+            else:
+                keep_idx = np.nonzero(mask)[0]
+                for off in OFF_COLS:
+                    src_off = shard.cols[off]
+                    units = int(
+                        (src_off[keep_idx + 1] - src_off[keep_idx]).sum()
+                    )
+                    for d, doubled in _OFF_TO_DATA[off]:
+                        plan_lens[d] = 2 * units if doubled else units
+            for d, m in plan_lens.items():
+                data_totals[d] += m
+            plans.append(
+                _ShardPlan(
+                    path=shard_path,
+                    mask=mask,
+                    n_kept=n_kept,
+                    horizons=shard.horizons,
+                    h_width=h_width,
+                    data_lens=plan_lens,
+                )
+            )
+        # Free before touching the next shard: this is the whole point.
+        shard.cols.clear()
+        shard.generation = np.empty(0, dtype=np.int32)
+        shard.row_shard_id = np.empty(0, dtype=np.int32)
+        shard.n = 0
 
     if skipped:
         # Surface the aggregate skip count in diagnostics (the return type is a
@@ -780,7 +908,139 @@ def build_window_split(
             stacklevel=2,
         )
 
-    window = concat_packed(survivors)
+    reload_failed: list[str] = []
+    if not plans or total_n == 0 or horizons is None:
+        window = PackedWindow.empty()
+    else:
+        # ---- pass 2: preallocate from the pass-1 totals, then stream each
+        # shard into place. Mirrors concat_packed's fill/rebase exactly (same
+        # output ordering, offsets rebasing, and end-state asserts) with parts
+        # sourced one at a time instead of from a materialized list.
+        out: dict[str, np.ndarray] = {}
+        for name in SCALAR_COLS:
+            out[name] = np.empty(total_n, dtype=_SCALAR_DTYPES[name])
+        for name in BLOCK_COLS:
+            out[name] = np.empty((total_n, h_width), dtype=np.float32)
+        for d, tot in data_totals.items():
+            out[d] = np.empty(tot, dtype=_CSR_DTYPES[d])
+        for off in OFF_COLS:
+            out[off] = np.empty(total_n + 1, dtype=np.int64)
+            out[off][0] = 0
+        out_gen = np.empty(total_n, dtype=np.int32)
+        out_sid = np.empty(total_n, dtype=np.int32)
+
+        row_cursor = 0
+        data_cursor: dict[str, int] = {d: 0 for d in data_totals}
+        off_base: dict[str, int] = {off: 0 for off in OFF_COLS}
+
+        shard_idx = 0
+        for plan in plans:
+            # The shard read cleanly seconds ago in pass 1; a failure here is
+            # active corruption. Warn + skip; the shortfall is compacted below.
+            try:
+                part = load_packed_shard(plan.path)
+                if plan.mask is not None:
+                    part = _subset_packed(part, plan.mask)
+            except (zipfile.BadZipFile, ValueError, KeyError, OSError, EOFError) as exc:
+                reload_failed.append(str(plan.path))
+                skipped.append(str(plan.path))
+                warnings.warn(
+                    f"build_window_split: shard {plan.path} became unreadable "
+                    f"between sizing and fill ({type(exc).__name__}: {exc}); "
+                    "dropping its rows (operator: quarantine this file)",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                continue
+            # Same-file different-content between passes (rows, horizons, block
+            # width, or any CSR length): copying would corrupt the preallocated
+            # window or crash mid-fill, so validate everything the fill relies
+            # on and treat any mismatch as torn.
+            changed = (
+                part.n != plan.n_kept
+                or part.horizons != plan.horizons
+                or int(part.cols["stvalue"].shape[1]) != plan.h_width
+                or any(
+                    int(part.cols[d].shape[0]) != m
+                    for d, m in plan.data_lens.items()
+                )
+            )
+            if changed:
+                reload_failed.append(str(plan.path))
+                skipped.append(str(plan.path))
+                warnings.warn(
+                    f"build_window_split: shard {plan.path} changed between "
+                    f"sizing and fill (rows {plan.n_kept}->{part.n}); "
+                    "dropping its rows",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                continue
+
+            pc = part.cols
+            pn = part.n
+            r0, r1 = row_cursor, row_cursor + pn
+
+            for name in SCALAR_COLS:
+                out[name][r0:r1] = pc[name]
+            for name in BLOCK_COLS:
+                out[name][r0:r1, :] = pc[name]
+            out_gen[r0:r1] = part.generation
+            # row_shard_id is this part's index within the window, counting
+            # only parts that made it in (legacy survivor enumeration).
+            out_sid[r0:r1] = np.int32(shard_idx)
+
+            for off in OFF_COLS:
+                src_off = pc[off]  # int64[pn+1], starts at 0
+                base = off_base[off]
+                out[off][r0 + 1 : r1 + 1] = src_off[1:] + base
+                off_base[off] = base + int(src_off[pn])
+                for d, _doubled in _OFF_TO_DATA[off]:
+                    src = pc[d]
+                    m = src.shape[0]
+                    dc = data_cursor[d]
+                    out[d][dc : dc + m] = src
+                    data_cursor[d] = dc + m
+
+            row_cursor = r1
+            shard_idx += 1
+            # Free the part's columns after its copy.
+            part.cols.clear()
+            part.generation = np.empty(0, dtype=np.int32)
+            part.row_shard_id = np.empty(0, dtype=np.int32)
+            part.n = 0
+
+        if row_cursor < total_n:
+            # Rare pass-2 shortfall (reload_failed above): compact by view.
+            # Views keep the oversized buffers alive, but the excess is only the
+            # dropped shards' bytes — preferable to a full re-copy.
+            for name in SCALAR_COLS:
+                out[name] = out[name][:row_cursor]
+            for name in BLOCK_COLS:
+                out[name] = out[name][:row_cursor, :]
+            for off in OFF_COLS:
+                out[off] = out[off][: row_cursor + 1]
+            for d in data_totals:
+                out[d] = out[d][: data_cursor[d]]
+            out_gen = out_gen[:row_cursor]
+            out_sid = out_sid[:row_cursor]
+        else:
+            # Sanity (full fill): every CSR data array filled exactly, and each
+            # offsets array ends at the accumulated count for its group.
+            for d, tot in data_totals.items():
+                assert data_cursor[d] == tot, (
+                    f"CSR data {d} fill mismatch {data_cursor[d]} != {tot}"
+                )
+            for off in OFF_COLS:
+                assert int(out[off][total_n]) == off_base[off]
+
+        window = PackedWindow(
+            n=row_cursor,
+            cols=out,
+            horizons=horizons,
+            generation=out_gen,
+            row_shard_id=out_sid,
+        )
 
     if diag is not None:
         # Telemetry out-param: load/skip accounting for the select diagnostic.
@@ -791,6 +1051,7 @@ def build_window_split(
         diag["skipped_paths"] = sorted(skipped)[:20]
         diag["rows_loaded"] = int(rows_loaded)
         diag["rows_post_thin"] = int(window.n)
+        diag["shards_reload_failed"] = len(reload_failed)
 
     return window
 

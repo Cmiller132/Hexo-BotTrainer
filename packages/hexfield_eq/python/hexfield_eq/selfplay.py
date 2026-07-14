@@ -97,15 +97,65 @@ def seed_game_tape(tape: _GameTape, move_prefix) -> None:
     tape.seed_ply = tape.ply
 
 
+def _sharpen_target(
+    ids, weights, cmap: dict[int, int]
+) -> list[float] | None:
+    """Guard-consistent sharpening of one recorded target (Lever 1, §4).
+
+    Mirrors the play-time tactical guard exactly: when any proven-winning
+    (class=+1) action exists in the target's support, keep mass only on the
+    winners; otherwise zero proven-losing (class=-1) actions. The kept mass is
+    rescaled to the ORIGINAL total (targets stay distributions); actions are
+    reweighted, never removed (parallel columns like cell_q stay aligned).
+    Returns the new weight list, or None when sharpening is a no-op / would
+    zero everything (the all-zero fallback restores the original — never zero
+    the only legal support)."""
+
+    classes = [cmap.get(int(a), 0) for a in ids]
+    winners = any(c == 1 for c in classes)
+    if winners:
+        kept = [w if c == 1 else 0.0 for w, c in zip(weights, classes)]
+    elif any(c == -1 for c in classes):
+        kept = [w if c != -1 else 0.0 for w, c in zip(weights, classes)]
+    else:
+        return None
+    original = float(sum(weights))
+    total = float(sum(kept))
+    if original <= 0.0:
+        return None
+    if winners and total <= 0.0:
+        # Zero-mass winner set: the deep root guard can PLAY a verified win
+        # the net left outside the visit support (it rides the support at
+        # weight 0). Sharpening must still reach it — spread the original
+        # mass equally over the proven winners instead of falling back to the
+        # raw target (which trains toward the non-winning moves the game did
+        # not play).
+        n_win = sum(1 for c in classes if c == 1)
+        share = original / float(n_win)
+        return [share if c == 1 else 0.0 for c in classes]
+    if total <= 0.0:
+        return None
+    if total == original:
+        return None  # nothing was zeroed; keep the original object
+    scale = original / total
+    return [float(w) * scale for w in kept]
+
+
 class ContinuousDriver:
     def __init__(self, *, epoch: int, games_target: int, max_plies: int, out_dir,
                  horizons=STV_HORIZONS, record_file=None, diag_dir=None, active_limit=0,
-                 blunder_seeds=None, blunder_seed_fraction=0.0, blunder_base_seed=0):
+                 blunder_seeds=None, blunder_seed_fraction=0.0, blunder_base_seed=0,
+                 tss_sharpen: bool = False):
         self.epoch = epoch
         self.games_target = games_target
         self.max_plies = max_plies
         self.out_dir = out_dir
         self.horizons = horizons
+        # Lever 1 (PLAN_TSS_DEEPENING.md §4): guard-consistent sharpening of the
+        # RECORDED policy targets (visit weights + π') using the λ¹ class map.
+        # Default off; rows written under sharpening carry target_regime=1 so
+        # the semantics change is never silent in the rolling buffer.
+        self.tss_sharpen = bool(tss_sharpen)
         # Blunder-seed pool + seeding controls. An empty pool or fraction<=0
         # disables seeding entirely: start_games then takes a path bit-identical
         # to current behavior (no RNG is drawn — the seeding decision short-
@@ -148,6 +198,70 @@ class ContinuousDriver:
         # KL(visit || root prior) per full row (mirrors the per-row surprise the
         # writer stores); aggregated at epoch end into policy_surprise_* stats.
         self.policy_surprises: list[float] = []
+        # λ¹ TSS shadow telemetry (PLAN_TSS_DEEPENING.md §9). Per-move counter
+        # sums come from payload["diagnostics"]["tss"] (all move classes);
+        # per-row class/mask previews from the recorded class map (full rows);
+        # proof-vs-outcome disagreements are counted on the writer thread at
+        # finalize (the writer joins before stats()).
+        self.tss_moves = 0
+        self.tss_threat_moves = 0
+        self.tss_forced_defense_moves = 0
+        self.tss_injection_fired_moves = 0
+        self.tss_root_injected_total = 0
+        self.tss_leaf_verdict_hits = 0
+        self.tss_prune_eligible = 0
+        self.tss_prune_dropped = 0
+        self.tss_class_rows = 0
+        self.tss_win_rows = 0
+        self.tss_loss_only_rows = 0
+        # Lever-1 mask-mass preview on rows with a proven winner: the fraction
+        # of the visit / π' target mass already sitting on class=+1 actions
+        # (1.0 means guard-consistent sharpening would be a no-op there).
+        self.tss_win_retained: list[float] = []
+        self.tss_gumbel_win_retained: list[float] = []
+        self.tss_proof_rows = 0
+        self.tss_proof_disagreements = 0
+        # Rows whose recorded targets Lever-1 sharpening actually changed
+        # (0 whenever tss_sharpen is off).
+        self.tss_sharpened_rows = 0
+        # Stage-4 deep-solver counters (all 0 while tss_solver_mode == 0).
+        self.tss_deep_calls = 0
+        self.tss_deep_win = 0
+        self.tss_deep_loss = 0
+        self.tss_deep_unknown = 0
+        self.tss_deep_nodes = 0
+        self.tss_deep_verify_failed = 0
+        self.tss_horizon_retry = 0
+        self.tss_horizon_preflight_failed = 0
+        # Unknown solves with >=1 still-live line refused by the +12 deadline
+        # (depth-bound Unknowns) -- the horizon-ladder gate metric.
+        self.tss_horizon_cut = 0
+        self.tss_zone_nodes = 0
+        self.tss_pair_omitted = 0
+        self.tss_zone_verify_failed = 0
+        self.tss_deep_hard_backups = 0
+        self.tss_deep_memo_hits = 0
+        # Async solve pool (tss_solver_async): enqueue/drop/stale/pending
+        # routing counters. dropped>0 sustained => widen the pool or queue.
+        self.tss_async_enqueued = 0
+        self.tss_async_dropped = 0
+        self.tss_async_stale = 0
+        self.tss_async_pending_hits = 0
+        # Wait-at-leaf parking + dynamic-worker telemetry. All fields are
+        # additive except park_wait_ms_max, which max-merges across moves and
+        # crash-resumed epoch segments.
+        self.tss_park_parked = 0
+        self.tss_park_hard = 0
+        self.tss_park_released = 0
+        self.tss_park_bailed = 0
+        self.tss_park_wait_ms_sum = 0
+        self.tss_park_wait_ms_max = 0
+        self.tss_async_workers_spawned = 0
+        # Search-depth distribution over every real backup (all leaf kinds):
+        # the direct measure of how deep the search actually reaches.
+        self.tss_depth_sum = 0
+        self.tss_depth_max = 0
+        self.tss_backups = 0
         # Finished-game winner tally (completed games only; truncated games have
         # no engine winner and are counted separately by games_truncated).
         self.wins_by_player: dict[int, int] = {0: 0, 1: 0}
@@ -263,6 +377,63 @@ class ContinuousDriver:
         self._write_live("running")
 
         current = record_player(tape.ply)
+        # λ¹ TSS shadow counters, every searched move class (diagnostics is
+        # telemetry-only — never consulted for play or targets).
+        tss_diag = (payload.get("diagnostics") or {}).get("tss")
+        if tss_diag:
+            self.tss_moves += 1
+            opp_threats = int(tss_diag.get("opp_threats", 0))
+            k = int(tss_diag.get("k", -1))
+            b = int(tss_diag.get("b", 0))
+            if opp_threats > 0 or int(tss_diag.get("root_tactical", 0)) > 0:
+                self.tss_threat_moves += 1
+            # Fully-forced defense (the Lever-0 boundary): defense consumes the
+            # whole turn budget. k == -1 (infeasible) is the override's job,
+            # not the guard's.
+            if opp_threats > 0 and k > 0 and k == b:
+                self.tss_forced_defense_moves += 1
+            injected = int(tss_diag.get("root_injected", 0))
+            if injected > 0:
+                self.tss_injection_fired_moves += 1
+            self.tss_root_injected_total += injected
+            self.tss_leaf_verdict_hits += int(tss_diag.get("leaf_verdict_hits", 0))
+            self.tss_prune_eligible += int(tss_diag.get("prune_eligible", 0))
+            self.tss_prune_dropped += int(tss_diag.get("prune_dropped", 0))
+            # Stage-4 deep-solver counters. deep_verify_failed is FATAL
+            # telemetry: any nonzero total means a solver claim failed its
+            # certificate check (degraded safely, but the solver has a bug).
+            self.tss_deep_calls += int(tss_diag.get("deep_calls", 0))
+            self.tss_deep_win += int(tss_diag.get("deep_win", 0))
+            self.tss_deep_loss += int(tss_diag.get("deep_loss", 0))
+            self.tss_deep_unknown += int(tss_diag.get("deep_unknown", 0))
+            self.tss_deep_nodes += int(tss_diag.get("deep_nodes", 0))
+            self.tss_deep_verify_failed += int(tss_diag.get("deep_verify_failed", 0))
+            self.tss_horizon_retry += int(tss_diag.get("horizon_retry", 0))
+            self.tss_horizon_preflight_failed += int(tss_diag.get("horizon_preflight_failed", 0))
+            self.tss_horizon_cut += int(tss_diag.get("horizon_cut", 0))
+            self.tss_zone_nodes += int(tss_diag.get("zone_nodes", 0))
+            self.tss_pair_omitted += int(tss_diag.get("pair_omitted", 0))
+            self.tss_zone_verify_failed += int(tss_diag.get("zone_verify_failed", 0))
+            self.tss_deep_hard_backups += int(tss_diag.get("deep_hard_backups", 0))
+            self.tss_deep_memo_hits += int(tss_diag.get("deep_memo_hits", 0))
+            self.tss_async_enqueued += int(tss_diag.get("async_enqueued", 0))
+            self.tss_async_dropped += int(tss_diag.get("async_dropped", 0))
+            self.tss_async_stale += int(tss_diag.get("async_stale", 0))
+            self.tss_async_pending_hits += int(tss_diag.get("async_pending_hits", 0))
+            self.tss_park_parked += int(tss_diag.get("park_parked", 0))
+            self.tss_park_hard += int(tss_diag.get("park_hard", 0))
+            self.tss_park_released += int(tss_diag.get("park_released", 0))
+            self.tss_park_bailed += int(tss_diag.get("park_bailed", 0))
+            self.tss_park_wait_ms_sum += int(tss_diag.get("park_wait_ms_sum", 0))
+            self.tss_park_wait_ms_max = max(
+                self.tss_park_wait_ms_max, int(tss_diag.get("park_wait_ms_max", 0))
+            )
+            self.tss_async_workers_spawned += int(
+                tss_diag.get("async_workers_spawned", 0)
+            )
+            self.tss_depth_sum += int(tss_diag.get("depth_sum", 0))
+            self.tss_depth_max = max(self.tss_depth_max, int(tss_diag.get("depth_max", 0)))
+            self.tss_backups += int(tss_diag.get("backups", 0))
         # Seed provenance stamped on every row of a blunder-seeded game. Empty
         # for ordinary games, so their metadata is unchanged (fraction=0.0 keeps
         # rows bit-identical to the pre-feature writer).
@@ -306,6 +477,66 @@ class ContinuousDriver:
                     prior_logit_pairs = tuple(
                         zip((int(a) for a in g_ids), (float(l) for l in g_logits))
                     )
+            # λ¹ class map over the union of play/recorded/π' supports (absent
+            # keys on quiet roots → empty map). Stage-0: provenance + the
+            # Lever-1 mask-mass preview; Stage-2 masking consumes it here.
+            class_pairs: tuple[tuple[int, int], ...] = ()
+            if "tss_class_action_ids_bytes" in payload:
+                c_ids = np.frombuffer(
+                    bytes(payload["tss_class_action_ids_bytes"]), dtype=np.uint32
+                )
+                c_vals = np.frombuffer(bytes(payload["tss_class_bytes"]), dtype=np.int8)
+                class_pairs = tuple(
+                    zip((int(a) for a in c_ids), (int(v) for v in c_vals))
+                )
+            if class_pairs:
+                self.tss_class_rows += 1
+                cmap = dict(class_pairs)
+                if any(v == 1 for v in cmap.values()):
+                    self.tss_win_rows += 1
+                    total = float(weights.sum())
+                    if total > 0.0:
+                        kept = float(
+                            sum(
+                                w
+                                for a, w in zip(ids.tolist(), weights.tolist())
+                                if cmap.get(int(a), 0) == 1
+                            )
+                        )
+                        self.tss_win_retained.append(kept / total)
+                    if gumbel_pairs:
+                        g_total = float(sum(w for _a, w in gumbel_pairs))
+                        if g_total > 0.0:
+                            g_kept = float(
+                                sum(w for a, w in gumbel_pairs if cmap.get(a, 0) == 1)
+                            )
+                            self.tss_gumbel_win_retained.append(g_kept / g_total)
+                elif any(v == -1 for v in cmap.values()):
+                    self.tss_loss_only_rows += 1
+            # Lever 1: guard-consistent target sharpening (§4). Runs AFTER the
+            # surprise/retained-mass computations above, so policy_surprise
+            # stays the raw-visit KL (no silent 8× reweighting of sharpened
+            # rows) and the retained-mass preview keeps measuring the raw
+            # distribution. Weights are rescaled, never removed.
+            if self.tss_sharpen and class_pairs:
+                cmap_s = dict(class_pairs)
+                new_w = _sharpen_target(ids.tolist(), weights.tolist(), cmap_s)
+                sharpened = False
+                if new_w is not None:
+                    weights = np.asarray(new_w, dtype=np.float32)
+                    sharpened = True
+                if gumbel_pairs:
+                    g_ids = [a for a, _ in gumbel_pairs]
+                    new_g = _sharpen_target(
+                        g_ids, [w for _, w in gumbel_pairs], cmap_s
+                    )
+                    if new_g is not None:
+                        gumbel_pairs = tuple(
+                            zip(g_ids, (float(w) for w in new_g))
+                        )
+                        sharpened = True
+                if sharpened:
+                    self.tss_sharpened_rows += 1
             phase = record_phase(tape.ply)
             first_stone = (
                 (tape.records[-1][0], tape.records[-1][1]) if phase == "SecondStone" else None
@@ -322,6 +553,8 @@ class ContinuousDriver:
                 gumbel_policy=gumbel_pairs,
                 prior_logit=prior_logit_pairs,
                 policy_surprise=float(surprise),
+                policy_class=class_pairs,
+                tss_proof=int(payload.get("tss_proof", 0)),
                 metadata={"pcr_full": True, **seed_meta},
             )
             tape.pending.append((current, sample, float(payload["root_value"])))
@@ -466,6 +699,17 @@ class ContinuousDriver:
                 rows = [s for s in finalized if s.metadata.get("pcr_full", False)]
                 # Fast + Init rows dropped from the written shard this game.
                 self.fast_rows_excluded += len(finalized) - len(rows)
+                # Lever-2 shadow: λ¹ proof vs realized-outcome disagreements
+                # (both labels are retained in the shard; PLAN §5). Counted here
+                # because hard_z needs the winner; the writer thread joins
+                # before stats() reads these.
+                for s in rows:
+                    if s.tss_proof != 0:
+                        self.tss_proof_rows += 1
+                        if winner is not None and not truncated:
+                            hz = 1.0 if int(winner) == int(s.current_player) else -1.0
+                            if hz * float(s.tss_proof) < 0.0:
+                                self.tss_proof_disagreements += 1
                 if rows:
                     path = self.out_dir / f"game_{tape.key}.npz"
                     # Seeded games carry their provenance in the sidecar so a
@@ -485,6 +729,9 @@ class ContinuousDriver:
                             "winner": winner, "truncated": bool(truncated),
                             **seed_sidecar,
                         },
+                        # Lever-1 rows carry regime 1 so the semantics change
+                        # is never silent in the rolling buffer (§4).
+                        target_regime=1 if self.tss_sharpen else 0,
                     )
             except BaseException as exc:  # noqa: BLE001
                 self._writer_errors.append(exc)
@@ -573,6 +820,91 @@ class ContinuousDriver:
                 float(np.mean(self.seed_plies)) if self.seed_plies else None
             ),
             "unique_openings_seeded": len(self.opening_lines_seeded),
+            # λ¹ TSS shadow telemetry (PLAN_TSS_DEEPENING.md §9): the Stage-0
+            # measurement block that gates Lever 1 (win_retained_mass — mass
+            # already on proven winners; ≈1.0 means sharpening is a no-op) and
+            # sizes Lever 0 (forced_defense fraction, prune preview) and the
+            # closed-loop metric (injection fire rate).
+            "tss": {
+                "moves": int(self.tss_moves),
+                # Raw numerators ride alongside their rates so crash-resumed
+                # epoch segments merge exactly (_merge_epoch_diag sums the ints
+                # and recomputes the rates).
+                "threat_moves": int(self.tss_threat_moves),
+                "forced_defense_moves": int(self.tss_forced_defense_moves),
+                "injection_fired_moves": int(self.tss_injection_fired_moves),
+                "threat_move_fraction": (
+                    float(self.tss_threat_moves / self.tss_moves) if self.tss_moves else None
+                ),
+                "forced_defense_fraction": (
+                    float(self.tss_forced_defense_moves / self.tss_moves)
+                    if self.tss_moves
+                    else None
+                ),
+                "injection_fire_rate": (
+                    float(self.tss_injection_fired_moves / self.tss_moves)
+                    if self.tss_moves
+                    else None
+                ),
+                "root_injected_total": int(self.tss_root_injected_total),
+                "leaf_verdict_hits_total": int(self.tss_leaf_verdict_hits),
+                "prune_eligible_total": int(self.tss_prune_eligible),
+                "prune_dropped_total": int(self.tss_prune_dropped),
+                "class_rows": int(self.tss_class_rows),
+                "win_rows": int(self.tss_win_rows),
+                "loss_only_rows": int(self.tss_loss_only_rows),
+                "win_retained_mass_mean": (
+                    float(np.mean(self.tss_win_retained)) if self.tss_win_retained else None
+                ),
+                "win_retained_mass_p10": (
+                    float(np.percentile(self.tss_win_retained, 10))
+                    if self.tss_win_retained
+                    else None
+                ),
+                "gumbel_win_retained_mass_mean": (
+                    float(np.mean(self.tss_gumbel_win_retained))
+                    if self.tss_gumbel_win_retained
+                    else None
+                ),
+                "proof_rows": int(self.tss_proof_rows),
+                "proof_disagreements": int(self.tss_proof_disagreements),
+                "sharpened_rows": int(self.tss_sharpened_rows),
+                # Stage-4 deep solver. deep_verify_failed MUST stay 0 — any
+                # nonzero total is a solver-certificate bug (values degraded
+                # safely to net-eval, but consumption should be disabled and
+                # the run investigated).
+                "deep_calls": int(self.tss_deep_calls),
+                "deep_win": int(self.tss_deep_win),
+                "deep_loss": int(self.tss_deep_loss),
+                "deep_unknown": int(self.tss_deep_unknown),
+                "deep_nodes": int(self.tss_deep_nodes),
+                "deep_verify_failed": int(self.tss_deep_verify_failed),
+                "horizon_retry": int(self.tss_horizon_retry),
+                "horizon_preflight_failed": int(self.tss_horizon_preflight_failed),
+                "horizon_cut": int(self.tss_horizon_cut),
+                "zone_nodes": int(self.tss_zone_nodes),
+                "pair_omitted": int(self.tss_pair_omitted),
+                "zone_verify_failed": int(self.tss_zone_verify_failed),
+                "deep_hard_backups": int(self.tss_deep_hard_backups),
+                "deep_memo_hits": int(self.tss_deep_memo_hits),
+                "async_enqueued": int(self.tss_async_enqueued),
+                "async_dropped": int(self.tss_async_dropped),
+                "async_stale": int(self.tss_async_stale),
+                "async_pending_hits": int(self.tss_async_pending_hits),
+                "park_parked": int(self.tss_park_parked),
+                "park_hard": int(self.tss_park_hard),
+                "park_released": int(self.tss_park_released),
+                "park_bailed": int(self.tss_park_bailed),
+                "park_wait_ms_sum": int(self.tss_park_wait_ms_sum),
+                "park_wait_ms_max": int(self.tss_park_wait_ms_max),
+                "async_workers_spawned": int(self.tss_async_workers_spawned),
+                "depth_sum": int(self.tss_depth_sum),
+                "backups": int(self.tss_backups),
+                "search_depth_mean": (
+                    float(self.tss_depth_sum / self.tss_backups) if self.tss_backups else None
+                ),
+                "search_depth_max": int(self.tss_depth_max),
+            },
         }
 
 
@@ -846,6 +1178,67 @@ def _merge_epoch_diag(segments: list[dict[str, Any]]) -> dict[str, Any]:
     if any("seed_ply_mean" in seg for seg in segments):
         merged["seed_ply_mean"] = _weighted_mean(_w("seed_ply_mean", "games_seeded"))
 
+    # TSS shadow block: sum the integer counters, recompute the rates from the
+    # summed numerators, and recombine the retained-mass means weighted by
+    # win_rows. Absent in pre-TSS segments (they contribute zeros).
+    if any(isinstance(seg.get("tss"), dict) for seg in segments):
+        tss_segs = [seg.get("tss") for seg in segments if isinstance(seg.get("tss"), dict)]
+        tss: dict[str, Any] = dict(tss_segs[-1])
+        int_keys = (
+            "moves", "threat_moves", "forced_defense_moves", "injection_fired_moves",
+            "root_injected_total", "leaf_verdict_hits_total", "prune_eligible_total",
+            "prune_dropped_total", "class_rows", "win_rows", "loss_only_rows",
+            "proof_rows", "proof_disagreements", "sharpened_rows",
+            "deep_calls", "deep_win", "deep_loss", "deep_unknown", "deep_nodes",
+            "deep_verify_failed", "horizon_retry", "horizon_preflight_failed",
+            "horizon_cut", "zone_nodes", "pair_omitted", "zone_verify_failed",
+            "deep_hard_backups", "deep_memo_hits",
+            "async_enqueued", "async_dropped", "async_stale", "async_pending_hits",
+            "park_parked", "park_hard", "park_released", "park_bailed",
+            "park_wait_ms_sum", "async_workers_spawned",
+            "depth_sum", "backups",
+        )
+        for key in int_keys:
+            tss[key] = sum(int(seg.get(key, 0) or 0) for seg in tss_segs)
+        moves = tss["moves"]
+        tss["threat_move_fraction"] = float(tss["threat_moves"] / moves) if moves else None
+        tss["forced_defense_fraction"] = (
+            float(tss["forced_defense_moves"] / moves) if moves else None
+        )
+        tss["injection_fire_rate"] = (
+            float(tss["injection_fired_moves"] / moves) if moves else None
+        )
+        tss["search_depth_mean"] = (
+            float(tss["depth_sum"] / tss["backups"]) if tss.get("backups") else None
+        )
+        tss["search_depth_max"] = max(
+            int(seg.get("search_depth_max", 0) or 0) for seg in tss_segs
+        )
+        tss["park_wait_ms_max"] = max(
+            int(seg.get("park_wait_ms_max", 0) or 0) for seg in tss_segs
+        )
+        for mkey in (
+            "win_retained_mass_mean",
+            "gumbel_win_retained_mass_mean",
+        ):
+            tss[mkey] = _weighted_mean(
+                [
+                    (seg.get(mkey), float(seg.get("win_rows", 0) or 0))
+                    for seg in tss_segs
+                ]
+            )
+        # A weighted mean of per-segment p10 values is NOT a combined p10
+        # (Codex review, resume gate). Report the MIN across segments instead:
+        # a conservative lower bound, so the Lever-1 rollout gate can only err
+        # cautious after a resume.
+        p10_vals = [
+            seg.get("win_retained_mass_p10")
+            for seg in tss_segs
+            if seg.get("win_retained_mass_p10") is not None
+        ]
+        tss["win_retained_mass_p10"] = min(p10_vals) if p10_vals else None
+        merged["tss"] = tss
+
     # Store raw segment payloads (prior first, resumed last), capped.
     raw = [_segment_payload(seg) for seg in segments]
     merged["segments"] = raw[-_MAX_SEGMENTS:]
@@ -1047,6 +1440,7 @@ def generate_selfplay_epoch(*, ctx, components, epoch: int, games_per_epoch: int
         blunder_seeds=blunder_seeds,
         blunder_seed_fraction=sp.blunder_seed_fraction,
         blunder_base_seed=blunder_base_seed,
+        tss_sharpen=sp.tss_policy_target_sharpen,
     )
     # Advance next_key past every npz already on disk -- including sidecar-less
     # (uncommitted) ones, which do not count as done but whose keys must not be
@@ -1149,6 +1543,15 @@ def generate_selfplay_epoch(*, ctx, components, epoch: int, games_per_epoch: int
         "scheduler": {k: v for k, v in scheduler_stats.items() if not isinstance(v, dict)},
         **driver.stats(),
     }
+    # End-of-run async-pool tail sweep (Codex review): fatal verify failures
+    # banked after the last per-move payload fold arrive via the scheduler's
+    # tail-drain counters — add them into the epoch's FATAL counter so the
+    # "nonzero => halt rollout" tripwire cannot be timing-dependent.
+    tail_verify = int(scheduler_stats.get("tss_async_verify_failed_tail", 0) or 0)
+    if tail_verify and isinstance(result.get("tss"), dict):
+        result["tss"]["deep_verify_failed"] = (
+            int(result["tss"].get("deep_verify_failed", 0) or 0) + tail_verify
+        )
     # Derived rates from the scheduler counters (guarded div-by-zero). Computed
     # on this segment's own scheduler before any merge.
     _derive_scheduler_rates(result)

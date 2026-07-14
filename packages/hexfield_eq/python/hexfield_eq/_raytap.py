@@ -11,6 +11,15 @@ channel ``c`` (own = first orbit half, opp = second — the same orbit-index
 split as the L-block sub-heads, spec §2.6), and ``alpha`` shared across the 6
 directions and tiled slot-constant over the fiber.
 
+In additive reach-conditioned mode (ray7lut2), the coefficient in that sum is
+
+    alpha[k, c] + O[reach_own(i, d), k, c]
+                + P[reach_opp(i, d), k, c]
+
+where each reach value is in 0..5. O/P are also shared across directions,
+tiled slot-constant, and apply to all channels; the side-specific channel
+visibility mask remains the separate ``s(c)`` term above.
+
 Geometry is GENERATED, never hand-coded (spec §2.5): conv taps are indexed in
 ``constants.DIRECTIONS`` order; raylen slots are ``side*6 + axis*2 + dir`` with
 axis in [Q, R, QR] (``features.AXIS_DELTAS``) and dir in {+ = 0, - = 1}; the
@@ -26,7 +35,8 @@ would down-cast): fp32 on the train stream, fp16 on half serve. At init
 the distance-1 neighbour and every other term is an exact 0.0, so the ray-tap
 conv reproduces the baseline 7-tap conv bit-for-bit (T4 init-equivalence;
 relies on the terminal-blocker raylen convention: raylen >= 1 whenever the
-distance-1 cell is on the support).
+distance-1 cell is on the support). Additive O/P tables initialize to exact
+zero, preserving that function for alpha-only checkpoint warm starts.
 """
 
 from __future__ import annotations
@@ -168,6 +178,32 @@ def _masked_gather(
     ).reshape(b, n, RAY_REACH, c)
 
 
+def _effective_alpha(
+    alpha_full: torch.Tensor,
+    O_full: torch.Tensor | None,
+    P_full: torch.Tensor | None,
+    reach: torch.Tensor,
+    d: int,
+) -> torch.Tensor:
+    """Per-cell alpha for direction ``d``.
+
+    The base is shared by every cell.  In additive (ray7lut2) mode, axis 0 of
+    O/P is indexed by that cell's own/opp reach state respectively.  Both
+    tables cover every channel; the own/opp channel-half visibility split is a
+    separate mask already applied by :func:`_masked_gather`.
+    """
+
+    c = alpha_full.shape[1]
+    base = alpha_full.view(1, 1, RAY_REACH, c)
+    if O_full is None or O_full.numel() == 0:
+        return base
+    if P_full is None or P_full.numel() == 0:  # pragma: no cover - API guard
+        raise ValueError("additive ray-tap alpha requires both O and P tables")
+    reach_own = reach[:, :, 0, d]
+    reach_opp = reach[:, :, 1, d]
+    return base + O_full[reach_own] + P_full[reach_opp]
+
+
 class _RayTapTaps(torch.autograd.Function):
     """K2 — memory-bounded pre-aggregation (spec §2.4, blocking for training
     at conv2/both).
@@ -188,62 +224,115 @@ class _RayTapTaps(torch.autograd.Function):
     oracle pins the gradients to <= 1e-5 rel."""
 
     @staticmethod
-    def forward(ctx, x, idx_taps, reach, alpha_full, corb):
+    def forward(ctx, x, idx_taps, reach, alpha_full, O_full, P_full, corb):
         b, n, c = x.shape
         reach_l = reach.to(torch.long)
         x_ext = torch.cat([x, x.new_zeros(b, 1, c)], dim=1)
         taps = torch.empty(b, n, 6, c, dtype=x.dtype, device=x.device)
-        a = alpha_full.view(1, 1, RAY_REACH, c)
         for d in range(6):
             xgv = _masked_gather(x_ext, idx_taps, reach_l, corb, d)
-            taps[:, :, d] = (xgv * a).sum(dim=2)
-        ctx.save_for_backward(x, idx_taps, reach, alpha_full)
+            a_d = _effective_alpha(alpha_full, O_full, P_full, reach_l, d)
+            taps[:, :, d] = (xgv * a_d).sum(dim=2)
+        ctx.save_for_backward(x, idx_taps, reach, alpha_full, O_full, P_full)
         ctx.corb = corb
         return taps
 
     @staticmethod
     @torch.autograd.function.once_differentiable
     def backward(ctx, grad_out):
-        x, idx_taps, reach, alpha_full = ctx.saved_tensors
+        x, idx_taps, reach, alpha_full, O_full, P_full = ctx.saved_tensors
         corb = ctx.corb
         b, n, c = x.shape
         half = corb // 2
         g = c // corb
         reach_l = reach.to(torch.long)
         x_ext = torch.cat([x, x.new_zeros(b, 1, c)], dim=1)
-        need_x, _, _, need_alpha, _ = ctx.needs_input_grad
+        need_x, _, _, need_alpha, need_O, need_P, _ = ctx.needs_input_grad
         grad_x_ext = torch.zeros_like(x_ext) if need_x else None
         grad_alpha = torch.zeros_like(alpha_full) if need_alpha else None
-        a = alpha_full.view(1, 1, RAY_REACH, c)
+        grad_O = torch.zeros_like(O_full) if need_O else None
+        grad_P = torch.zeros_like(P_full) if need_P else None
         for d in range(6):
             go_d = grad_out[:, :, d]  # (B, N, C)
-            if need_alpha:
+            if need_alpha or need_O or need_P:
                 xgv = _masked_gather(x_ext, idx_taps, reach_l, corb, d)
-                grad_alpha += (xgv * go_d.unsqueeze(2)).sum(dim=(0, 1))
+                contrib = xgv * go_d.unsqueeze(2)
+                if need_alpha:
+                    grad_alpha += contrib.sum(dim=(0, 1))
+                # Scatter-add, never overwrite: many (batch, cell) rows share
+                # each reach state.  These are full-fiber gradients; when the
+                # model supplied O/P via repeat(1, 1, GROUP_ORDER), autograd's
+                # repeat backward sums the slot copies into C_ORBIT width.
+                contrib_flat = contrib.reshape(b * n, RAY_REACH, c)
+                if need_O:
+                    own_idx = (
+                        reach_l[:, :, 0, d]
+                        .reshape(b * n, 1, 1)
+                        .expand(-1, RAY_REACH, c)
+                    )
+                    grad_O.scatter_add_(0, own_idx, contrib_flat)
+                if need_P:
+                    opp_idx = (
+                        reach_l[:, :, 1, d]
+                        .reshape(b * n, 1, 1)
+                        .expand(-1, RAY_REACH, c)
+                    )
+                    grad_P.scatter_add_(0, opp_idx, contrib_flat)
                 del xgv
             if need_x:
+                a_d = _effective_alpha(alpha_full, O_full, P_full, reach_l, d)
                 vis = _tap_vis(reach_l, d)
                 gxg = (
-                    (a * go_d.unsqueeze(2)).view(b, n, RAY_REACH, g, 2, half)
+                    (a_d * go_d.unsqueeze(2)).view(
+                        b, n, RAY_REACH, g, 2, half
+                    )
                     * vis.view(b, n, RAY_REACH, 1, 2, 1).to(x.dtype)
                 ).reshape(b, n * RAY_REACH, c)
                 grad_x_ext.scatter_add_(1, _tap_flat_index(idx_taps, d, c), gxg)
         grad_x = grad_x_ext[:, :n] if need_x else None
-        return grad_x, None, None, grad_alpha, None
+        return grad_x, None, None, grad_alpha, grad_O, grad_P, None
 
 
+@torch._dynamo.disable
 def ray_tap_taps(
     x: torch.Tensor,
     idx_taps: torch.Tensor,
     reach: torch.Tensor,
     alpha_full: torch.Tensor,
-    corb: int,
+    O_full: torch.Tensor | int | None = None,
+    P_full: torch.Tensor | None = None,
+    corb: int | None = None,
 ) -> torch.Tensor:
     """(B, N, 6, C) direction-tap inputs — the production entry point every
     equipped conv calls: the K2 custom-autograd pre-aggregation (identical
-    numerics to :func:`ray_tap_taps_naive`, memory-bounded backward)."""
+    numerics to :func:`ray_tap_taps_naive`, memory-bounded backward).
 
-    return _RayTapTaps.apply(x, idx_taps, reach, alpha_full, corb)
+    dynamo-OPAQUE (2026-07-12): under HEXFIELD_TRAIN_COMPILE the additive
+    (ray7lut2) taps math got inlined by dynamo, and inductor materialized the
+    per-direction (B, N, RAY_REACH, C) effective-alpha gathers plus int64
+    scatter indices as persistent graph buffers — a multi-GB VRAM blowup that
+    killed main_3's first train phase ("CUDA driver error: device not ready",
+    buf59 = (59, 512, 5, 192)). The disable keeps K2's eager memory-bounded
+    forward/backward intact inside the compiled trainer, at the cost of a
+    graph break per equipped conv."""
+
+    # Backward-compatible alpha-only call:
+    #   ray_tap_taps(x, idx, reach, alpha_full, corb)
+    # Additive call:
+    #   ray_tap_taps(x, idx, reach, alpha_full, O_full, P_full, corb)
+    if corb is None:
+        if P_full is not None or not isinstance(O_full, int):
+            raise TypeError("ray_tap_taps requires corb")
+        corb = O_full
+        O_full = None
+    if (O_full is None) != (P_full is None):
+        raise ValueError("additive ray-tap alpha requires both O and P tables")
+    if O_full is None:
+        O_full = alpha_full.new_empty(0)
+        P_full = alpha_full.new_empty(0)
+    return _RayTapTaps.apply(
+        x, idx_taps, reach, alpha_full, O_full, P_full, int(corb)
+    )
 
 
 def ray_tap_taps_naive(
@@ -251,19 +340,31 @@ def ray_tap_taps_naive(
     idx_taps: torch.Tensor,
     reach: torch.Tensor,
     alpha_full: torch.Tensor,
-    corb: int,
+    O_full: torch.Tensor | int | None = None,
+    P_full: torch.Tensor | None = None,
+    corb: int | None = None,
 ) -> torch.Tensor:
     """(B, N, 6, C) direction-tap inputs, plain autograd (the numerics
     reference and the T8 gradient oracle). Saves the gathered intermediates
     for backward — the memory profile K2 exists to avoid; production uses
     :func:`ray_tap_taps` (the ``_RayTapTaps`` Function) instead."""
 
+    if corb is None:
+        if P_full is not None or not isinstance(O_full, int):
+            raise TypeError("ray_tap_taps_naive requires corb")
+        corb = O_full
+        O_full = None
+    if (O_full is None) != (P_full is None):
+        raise ValueError("additive ray-tap alpha requires both O and P tables")
+
     b, n, c = x.shape
     x_ext = torch.cat([x, x.new_zeros(b, 1, c)], dim=1)
     reach_l = reach.to(torch.long)
-    a = alpha_full.view(1, 1, RAY_REACH, c)
     taps = [
-        (_masked_gather(x_ext, idx_taps, reach_l, corb, d) * a).sum(dim=2)
+        (
+            _masked_gather(x_ext, idx_taps, reach_l, int(corb), d)
+            * _effective_alpha(alpha_full, O_full, P_full, reach_l, d)
+        ).sum(dim=2)
         for d in range(6)
     ]
     return torch.stack(taps, dim=2)

@@ -51,6 +51,7 @@ from .constants import (
     RAY_HEADS,
     RAY_REACH,
     RAYTAP,
+    RAYTAP_LUT,
     REG_LANE,
     REG_TOK_READ,
     TRUNK_LAYOUT,
@@ -224,6 +225,20 @@ if _TRITON_RAYTAP7:
 else:
     _hex_ray_taps7_fused = None
     _hex_ln_mask_fused = None
+# Fused TRAIN-stream ray-tap aggregation (fwd + bwd Triton custom op with
+# registered autograd), HEXFIELD_TRITON_RAYTAP_TRAIN=1 (default ON). Replaces
+# the eager K2 island — which materialized (B, N, RAY_REACH, C) fp32
+# intermediates per direction in fwd AND bwd (~85% of the training step's
+# device time at main_3 shapes, profiled 2026-07-13) and forced a dynamo graph
+# break per equipped conv — with three fused kernels that stay IN-graph under
+# torch.compile. Grad-enabled CUDA only; the op falls back internally to the
+# eager reference per (C, has_lut) key on any Triton failure.
+try:
+    from ._triton_raytap_train import ENABLED as _RT_TRAIN_ENABLED
+    from ._triton_raytap_train import rt_taps7_train as _rt_taps7_train
+except Exception:  # pragma: no cover - no triton
+    _rt_taps7_train = None
+    _RT_TRAIN_ENABLED = False
 # fp8 (e4m3) conv GEMMs were REMOVED for the equivariant v1 (docs/DERIVATION
 # §2.3, "BUGS_FOUND"): the fused-conv fp8 weight cache was keyed on id(weight),
 # but the tied trunk regenerates a fresh dense weight object every forward
@@ -632,13 +647,22 @@ class HexNodeConv(nn.Module):
     """
 
     def __init__(
-        self, in_channels: int, out_channels: int, raytap: bool = False
+        self,
+        in_channels: int,
+        out_channels: int,
+        raytap: bool = False,
+        raytap_lut: str = "none",
     ) -> None:
         super().__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.equivariant = EQUIVARIANT
         self.raytap = bool(raytap)
+        self.raytap_lut = str(raytap_lut)
+        if self.raytap_lut not in ("none", "additive"):
+            raise ValueError(
+                f"raytap_lut={self.raytap_lut!r} must be 'none' or 'additive'"
+            )
         if not self.equivariant:
             self.weight = nn.Parameter(torch.empty(7, in_channels, out_channels))
             self.bias = nn.Parameter(torch.empty(out_channels))
@@ -708,6 +732,14 @@ class HexNodeConv(nn.Module):
         alpha = torch.zeros(RAY_REACH, corb_in)
         alpha[0] = 1.0
         self.alpha = nn.Parameter(alpha)
+        if self.raytap_lut == "additive":
+            # Six reach states (0..RAY_REACH inclusive), not six directions:
+            # O/P are shared across directions and apply to every channel.  As
+            # with alpha, zero construction consumes no RNG, and zero init makes
+            # the additive net function-preserving when warm-started from an
+            # alpha-only ray-tap checkpoint.
+            self.O = nn.Parameter(torch.zeros(RAY_REACH + 1, RAY_REACH, corb_in))
+            self.P = nn.Parameter(torch.zeros(RAY_REACH + 1, RAY_REACH, corb_in))
 
     def _alpha_full(self) -> torch.Tensor:
         """alpha tiled slot-constant to the full (RAY_REACH, C_in) fiber:
@@ -716,6 +748,24 @@ class HexNodeConv(nn.Module):
         return (
             self.alpha.repeat(1, GROUP_ORDER) if self.equivariant else self.alpha
         )
+
+    def _alpha_tables(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """Reach-conditioned O/P tables tiled slot-constant over the fiber.
+
+        Table axis 0 is the inclusive reach state 0..RAY_REACH; axis 1 is the
+        k-tap.  Keeping the repeat outside the custom autograd Function makes
+        its backward the exact transpose of the tie: full-width gradients are
+        summed back into the stored C_ORBIT-width parameters by autograd.
+        """
+
+        if self.raytap_lut != "additive":
+            raise RuntimeError("reach-conditioned alpha tables require additive LUT")
+        if self.equivariant:
+            return (
+                self.O.repeat(1, 1, GROUP_ORDER),
+                self.P.repeat(1, 1, GROUP_ORDER),
+            )
+        return self.O, self.P
 
     def _base_param(self) -> torch.Tensor:
         return self.w0 if self.kind == "stem" else self.w_base
@@ -770,10 +820,52 @@ class HexNodeConv(nn.Module):
                     "ray-tap conv called without ray_ctx; the trunk builds it "
                     "from coords/mask + the raylen wire input (spec §2.5)"
                 )
-            taps = _raytap().ray_tap_taps(
-                x, ray_ctx.idx_taps, ray_ctx.reach, self._alpha_full(),
-                self.alpha.shape[1],
-            )
+            if self.raytap_lut == "additive":
+                O_full, P_full = self._alpha_tables()
+            else:
+                O_full = P_full = None
+            # Fused train-stream aggregation: one custom op emits the
+            # (B, N, 7, C) tapped GEMM input directly (center + 6 taps, the
+            # cat included), with Triton fwd/bwd — no (B, N, 5, C)
+            # intermediates, no graph break. Grad-enabled CUDA only so every
+            # serve/CPU path keeps its existing numerics byte-for-byte.
+            if (
+                _rt_taps7_train is not None
+                and _RT_TRAIN_ENABLED
+                and x.is_cuda
+                and torch.is_grad_enabled()
+            ):
+                gathered = _rt_taps7_train(
+                    x,
+                    ray_ctx.idx_taps,
+                    ray_ctx.reach,
+                    self._alpha_full(),
+                    O_full,
+                    P_full,
+                    self.alpha.shape[1],
+                ).reshape(b, n, 7 * c)
+                out = gathered @ weight.reshape(7 * c, self.out_channels) + bias
+                return out * mask.unsqueeze(-1)
+            if O_full is not None:
+                taps = _raytap().ray_tap_taps(
+                    x,
+                    ray_ctx.idx_taps,
+                    ray_ctx.reach,
+                    self._alpha_full(),
+                    O_full,
+                    P_full,
+                    self.alpha.shape[1],
+                )
+            else:
+                # Keep the legacy call shape and arithmetic path completely
+                # inert when the new architecture knob is disabled.
+                taps = _raytap().ray_tap_taps(
+                    x,
+                    ray_ctx.idx_taps,
+                    ray_ctx.reach,
+                    self._alpha_full(),
+                    self.alpha.shape[1],
+                )
             gathered = torch.cat([x.unsqueeze(2), taps], dim=2).reshape(b, n, 7 * c)
             out = gathered @ weight.reshape(7 * c, self.out_channels) + bias
             return out * mask.unsqueeze(-1)
@@ -949,12 +1041,22 @@ class ConvBlock(nn.Module):
     "0" = both convs baseline (current behavior); "conv2" = the second conv
     runs in ray-tap mode; "both" = both convs do."""
 
-    def __init__(self, channels: int, raytap: str = "0") -> None:
+    def __init__(
+        self, channels: int, raytap: str = "0", raytap_lut: str = "none"
+    ) -> None:
         super().__init__()
-        self.conv1 = HexNodeConv(channels, channels, raytap=(raytap == "both"))
+        self.conv1 = HexNodeConv(
+            channels,
+            channels,
+            raytap=(raytap == "both"),
+            raytap_lut=raytap_lut,
+        )
         self.ln1 = _make_norm(channels)
         self.conv2 = HexNodeConv(
-            channels, channels, raytap=(raytap in ("conv2", "both"))
+            channels,
+            channels,
+            raytap=(raytap in ("conv2", "both")),
+            raytap_lut=raytap_lut,
         )
         self.ln2 = _make_norm(channels)
         self.ls = LayerScale(channels)
@@ -962,25 +1064,33 @@ class ConvBlock(nn.Module):
     def _serve_conv_ln(self, conv, ln, x, gather_idx, mask, ray_ctx, relu):
         """One conv + LN(+ReLU) + mask on the fused serve branch. Baseline
         convs keep the fused Triton conv+LN kernel (byte-identical to the
-        pre-ray-tap path). Equipped convs run the ray-tap reference gather-sum
-        GEMM followed by the _conv_ln_ref epilogue numerics (fp32 LN stats on
-        the conv output, fp16 store) until the K1 fused variant lands; serve
-        throughput measured on this path is labeled reference-path (§2.4)."""
+        pre-ray-tap path). Equipped convs use the split ray-tap path when
+        enabled, then K1, and finally the pure-Torch reference fallback."""
 
         if not conv.raytap:
             w, b = conv._materialize()
             return _hex_conv_ln_fused(
                 x, gather_idx, mask, w, b, ln.weight, ln.bias, ln.eps, relu
             )
+        if conv.raytap_lut == "additive":
+            O_full, P_full = conv._alpha_tables()
+        else:
+            O_full = P_full = None
         if _hex_ray_taps7_fused is not None and ray_ctx is not None:
             # Split path (HEXFIELD_TRITON_RAYTAP7): tapped-input kernel ->
             # one cuBLAS fp16 GEMM -> fused bias+LN(+ReLU)+mask epilogue.
             w, b = conv._materialize()
             bsz, npad, cin = x.shape
-            t7 = _hex_ray_taps7_fused(
-                x, ray_ctx.ray_idx, ray_ctx.reach, conv._alpha_full(),
-                conv.alpha.shape[1],
-            )
+            if O_full is None:
+                t7 = _hex_ray_taps7_fused(
+                    x, ray_ctx.ray_idx, ray_ctx.reach, conv._alpha_full(),
+                    conv.alpha.shape[1],
+                )
+            else:
+                t7 = _hex_ray_taps7_fused(
+                    x, ray_ctx.ray_idx, ray_ctx.reach, conv._alpha_full(),
+                    conv.alpha.shape[1], O_full, P_full,
+                )
             gemm = t7.reshape(bsz * npad, 7 * cin) @ w.reshape(
                 7 * cin, conv.out_channels
             ).to(t7.dtype)
@@ -993,10 +1103,16 @@ class ConvBlock(nn.Module):
             # reach + tiled alpha (spec §2.4); the op itself falls back to the
             # reference on a memoized compile failure.
             w, b = conv._materialize()
+            if O_full is None:
+                return _hex_conv_ln_raytap_fused(
+                    x, gather_idx, mask, w, b, ln.weight, ln.bias,
+                    ray_ctx.ray_idx, ray_ctx.reach, conv._alpha_full(),
+                    ln.eps, relu, conv.alpha.shape[1],
+                )
             return _hex_conv_ln_raytap_fused(
                 x, gather_idx, mask, w, b, ln.weight, ln.bias,
                 ray_ctx.ray_idx, ray_ctx.reach, conv._alpha_full(),
-                ln.eps, relu, conv.alpha.shape[1],
+                ln.eps, relu, conv.alpha.shape[1], O_full, P_full,
             )
         out = conv(x, gather_idx, mask, ray_ctx=ray_ctx)
         y = F.layer_norm(
@@ -1476,6 +1592,17 @@ def infer_net_kwargs_from_state_dict(sd: dict, meta: dict | None = None) -> dict
         kwargs["raytap"] = (
             "both" if has_conv1_alpha else ("conv2" if has_conv2_alpha else "0")
         )
+    # Additive reach-conditioned alpha lookup (ray7lut2): meta is
+    # authoritative.  For meta-less checkpoints, O/P parameter presence is
+    # affirmative evidence; old alpha-only checkpoints deterministically infer
+    # the inert ``none`` mode rather than inheriting the loading process's env.
+    if meta.get("raytap_lut") is not None:
+        kwargs["raytap_lut"] = str(meta["raytap_lut"])
+    else:
+        has_additive_tables = any(
+            k.startswith("conv_blocks.") and k.endswith((".O", ".P")) for k in sd
+        )
+        kwargs["raytap_lut"] = "additive" if has_additive_tables else "none"
     return kwargs
 
 
@@ -1493,6 +1620,7 @@ class HexfieldNet(nn.Module):
         reg_tok_read: bool | None = None,
         ray_blockers: bool | None = None,
         raytap: str | None = None,
+        raytap_lut: str | None = None,
     ) -> None:
         super().__init__()
         # channels/attention_heads/trunk_layout default to the module globals
@@ -1551,6 +1679,14 @@ class HexfieldNet(nn.Module):
                 f"raytap={rt_mode!r} must be '0', 'conv2', or 'both'"
             )
         self._raytap = rt_mode
+        lut_mode = RAYTAP_LUT if raytap_lut is None else str(raytap_lut)
+        if lut_mode not in ("none", "additive"):
+            raise ValueError(
+                f"raytap_lut={lut_mode!r} must be 'none' or 'additive'"
+            )
+        # Meaningful only for equipped ray-tap convs, but retained verbatim so
+        # arch_meta remains an authoritative description of the constructor.
+        self._raytap_lut = lut_mode
         if rt_mode != "0":
             # Constructor-kwarg twin of the constants.py import check (§2.6).
             rt_corb = c // GROUP_ORDER if EQUIVARIANT else c
@@ -1588,7 +1724,10 @@ class HexfieldNet(nn.Module):
         # The stem and the tied head convs are always baseline (spec §2.3);
         # ray-tap equips trunk ConvBlocks only.
         self.conv_blocks = nn.ModuleList(
-            [ConvBlock(c, raytap=rt_mode) for _ in range(layout.count("C"))]
+            [
+                ConvBlock(c, raytap=rt_mode, raytap_lut=lut_mode)
+                for _ in range(layout.count("C"))
+            ]
         )
         if rt_mode != "0":
             # Generated tap geometry LUTs (spec §2.5, T7): non-persistent so
@@ -1841,6 +1980,10 @@ class HexfieldNet(nn.Module):
             # load-bearing — equipped convs carry `alpha` params, and
             # conv2-vs-both cannot be told apart by key presence alone.
             "raytap": self._raytap,
+            # Additive reach-conditioned alpha lookup (ray7lut2).  This is
+            # authoritative even though old checkpoints lack the field; their
+            # state-dict fallback resolves to ``none``.
+            "raytap_lut": self._raytap_lut,
             "equivariant": self._equivariant,
             # Register lane toggles (Phase R0): load-bearing — they change the
             # state-dict key set, and KNOWN_TRUNK_LAYOUTS cannot express them.

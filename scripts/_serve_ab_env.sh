@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Live serve env profile for offline serve benches (mirrors the supervisor's
+# export block, minus paths/run-specific vars). Source, then run the bench.
+set -a
+source "$(dirname "${BASH_SOURCE[0]}")/prefit_env/hexfield_eq_raytap_a5_lut2.env"
+CUDA_VISIBLE_DEVICES=0
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+OMP_NUM_THREADS=8
+HEXFIELD_ASYNC_EVAL=1
+HEXFIELD_SERVE_FLEX=1
+HEXFIELD_FLEX_PAIR=1
+HEXFIELD_TRITON_CONV=1
+HEXFIELD_TRITON_ATTN=1
+HEXFIELD_TRITON_CONV_LN=1
+HEXFIELD_TRITON_RAYTAP7=1
+HEXFIELD_TRITON_ATTN2=1
+HEXFIELD_EQ_TRITON_RAY=1
+HEXFIELD_CUDA_GRAPHS=1
+HEXFIELD_GRAPH_MAX_KEYS=24
+HEXFIELD_SERVE_HALF=1
+HEXFIELD_RUST_PACK=1
+HEXFIELD_COPY_STREAM=1
+HEXFIELD_DEFER_DECODE=1
+set +a

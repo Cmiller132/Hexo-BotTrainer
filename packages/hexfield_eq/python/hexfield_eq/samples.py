@@ -50,6 +50,14 @@ class HexfieldSampleData:
     short_term_value: tuple[tuple[int, float], ...] = ()
     moves_left: float = -1.0
     policy_surprise: float = 0.0  # KL(visit ‖ root prior); self policy CE weight
+    # λ¹ TSS shadow columns (PLAN_TSS_DEEPENING.md §4/§9). policy_class maps
+    # (action_id -> class) over the union of the play/recorded/π' supports on
+    # threatful roots: 1 proven-winning, -1 proven-losing, 0 unproven. Empty on
+    # quiet roots. tss_proof is the λ¹ verdict at THIS row's position from the
+    # row player's perspective (0 = no proof). Both are provenance/measurement
+    # in Stage 0; Lever 1 masking (Stage 2) consumes policy_class in the writer.
+    policy_class: tuple[tuple[int, int], ...] = ()
+    tss_proof: int = 0
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def facts(self) -> PositionFacts:

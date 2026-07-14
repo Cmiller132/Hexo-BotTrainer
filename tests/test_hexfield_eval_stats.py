@@ -52,6 +52,7 @@ from hexfield.eval_stats import (  # noqa: E402
     var_diff,
     wilson_ci,
     winrate_from_elo,
+    z_for_alpha,
 )
 
 
@@ -205,17 +206,42 @@ def test_effective_counts_deflates_with_positive_correlation() -> None:
     """Effective game count drops below 2*N_pairs when pairs are correlated."""
 
     n = 40
-    # Perfectly correlated pairs (WW/LL only) at p=0.5: effective games == N_pairs.
+    # Perfectly correlated pairs (WW/LL only) at p=0.5: raw deff = 2, blended
+    # toward 1 with the default 16-pair prior -> deff = (2n + 16) / (n + 16).
     high = pentanomial_summary([n // 2, 0, 0, 0, n // 2])
     w, l, n_eff = effective_counts(high)
     assert math.isclose(w, l, abs_tol=1e-9)             # symmetric at p=0.5
-    assert math.isclose(n_eff, n, rel_tol=0.05)         # ~N_pairs, not 2N
+    expected_deff = (n * 2.0 + 16.0) / (n + 16.0)
+    assert math.isclose(n_eff, 2 * n / expected_deff, rel_tol=1e-9)
     assert n_eff < 2 * n - 1e-6                          # strictly deflated
+    # prior_pairs=0 recovers the raw estimate: effective games == N_pairs.
+    _, _, n_eff_raw = effective_counts(high, prior_pairs=0.0)
+    assert math.isclose(n_eff_raw, n, rel_tol=1e-9)
 
     # Low correlation (all splits): n_eff capped at the physical 2N games.
     low = pentanomial_summary([0, 0, n, 0, 0])
     _, _, n_eff_low = effective_counts(low)
     assert n_eff_low <= 2 * n + 1e-6
+
+
+def test_effective_counts_shrinks_deff_toward_independence() -> None:
+    """The design effect is blended toward 1 (independent games) with a prior
+    worth 16 pairs, so a small sample's lucky extreme pentanomial cannot swing
+    n_eff by +-30% on noise; the blend fades as pairs accumulate."""
+
+    def n_eff_for(n_pairs: int, **kw) -> float:
+        # Perfectly correlated pairs (WW/LL only) at p=0.5: raw deff = 2.
+        penta = [n_pairs // 2, 0, 0, 0, n_pairs // 2]
+        return effective_counts(pentanomial_summary(penta), **kw)[2]
+
+    # 16 pairs: measurement and prior get equal weight -> deff 1.5, not 2.
+    assert math.isclose(n_eff_for(16), 32.0 / 1.5, rel_tol=1e-9)
+    # The deflation FRACTION deepens with more pairs (blend fades toward the
+    # raw deff=2): n_eff/physical 0.667 at 16 pairs -> 0.556 at 64.
+    assert n_eff_for(16) / 32.0 > n_eff_for(64) / 128.0
+    # Anti-correlated samples stay capped at the physical count under the blend.
+    splits = pentanomial_summary([0, 0, 8, 0, 0])
+    assert effective_counts(splits)[2] <= 16.0 + 1e-9
 
 
 def test_effective_counts_degenerate_sweep() -> None:
@@ -520,6 +546,22 @@ def test_bonferroni_alpha() -> None:
     assert bonferroni_alpha(0.05, 1) == 0.05
     with pytest.raises(ValueError):
         bonferroni_alpha(0.05, 0)
+
+
+def test_z_for_alpha() -> None:
+    """The two-sided quantile that makes the alpha knob live: alpha=0.05 recovers
+    Z95, smaller alpha widens (larger z), and out-of-range alpha raises."""
+
+    from hexfield.eval_stats import Z95
+
+    assert math.isclose(z_for_alpha(0.05), Z95, rel_tol=1e-9)
+    assert z_for_alpha(0.01) > Z95 > z_for_alpha(0.5)
+    # A Bonferroni-split alpha maps to a strictly wider z.
+    assert z_for_alpha(bonferroni_alpha(0.05, 5)) > z_for_alpha(0.05)
+    with pytest.raises(ValueError):
+        z_for_alpha(0.0)
+    with pytest.raises(ValueError):
+        z_for_alpha(1.0)
 
 
 # --------------------------------------------------------------------------- #
