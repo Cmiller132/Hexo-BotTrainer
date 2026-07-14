@@ -90,6 +90,18 @@ tss_zone = false
 tss_solver_park = true
 tss_solver_park_timeout_ms = 150
 tss_solver_async_threads_max = 12
+# ep52 (2026-07-14): Lever 1 — guard-consistent policy-target sharpening ON.
+# The ep25 SKIP verdict measured gumbel win-retained mass 0.988 on λ¹-only
+# win rows (sharpening ≈ no-op); since deep-WIN consumption (ep28) it has sat
+# at 0.77-0.80 — deep-solver wins the net doesn't rank entered the class map,
+# so ~21% of π' mass in proven-win rows trains onto unproven moves, and
+# root-guard cert moves outside the gumbel support export at weight 0
+# (played-but-not-learned). Sharpening masks π' to class=+1 and one-hots
+# zero-mass winner sets; rows written under it carry target_regime=1.
+# Watch: sharpened_rows ≈ win_rows (~1.2k/epoch), pinned entropy metric
+# (L0+L1 compound-sharpening hazard), fixed-anchor Strix curve. Policy CE is
+# NOT comparable across this boundary (target regime change, same as ep26).
+tss_policy_target_sharpen = true
 cache_max_states = 262144
 nucleus_f64 = true
 lcb_z = 1.6
