@@ -432,10 +432,12 @@ fn tss_bench_report() {
     let bucket_caps = SolveCaps {
         node_cap: 100,
         tt_bytes_cap: 64 << 10,
+        semantic_horizon: u32::MAX,
     };
     let full_caps = SolveCaps {
         node_cap: 2_000,
         tt_bytes_cap: 64 << 10,
+        semantic_horizon: u32::MAX,
     };
     let buckets = build_buckets();
     let synthetic_positions = buckets

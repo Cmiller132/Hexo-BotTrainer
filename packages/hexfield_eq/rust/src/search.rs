@@ -2909,6 +2909,10 @@ const KNOWN_DIVERGENCE_KEYS: &[&str] = &[
     "tss_solver_async",
     "tss_solver_async_threads",
     "tss_solver_async_inline_16",
+    "tss_zone",
+    "tss_zone_stale_filter",
+    "tss_zone_count2",
+    "tss_pair_commutation",
     // Fast-class Gumbel levers (main_8: PUCT Full / Gumbel Fast). These name the
     // Fast view's values; the driver's Python side folds them into the SECOND
     // (fast) override map whose base keys resolve_divergences reads. They are
@@ -3029,6 +3033,18 @@ fn resolve_divergences(
         }
         if let Some(v) = overrides.get_item("tss_solver_async_inline_16")? {
             dv.tss_solver_async_inline_16 = v.extract()?;
+        }
+        if let Some(v) = overrides.get_item("tss_zone")? {
+            dv.tss_zone = v.extract()?;
+        }
+        if let Some(v) = overrides.get_item("tss_zone_stale_filter")? {
+            dv.tss_zone_stale_filter = v.extract()?;
+        }
+        if let Some(v) = overrides.get_item("tss_zone_count2")? {
+            dv.tss_zone_count2 = v.extract()?;
+        }
+        if let Some(v) = overrides.get_item("tss_pair_commutation")? {
+            dv.tss_pair_commutation = v.extract()?;
         }
         // Gumbel AlphaZero flags (default-OFF).
         if let Some(v) = overrides.get_item("gumbel_target")? {
@@ -3255,6 +3271,14 @@ impl PayloadNative {
         tss.set_item("deep_unknown", self.tss_counters.deep_unknown)?;
         tss.set_item("deep_nodes", self.tss_counters.deep_nodes)?;
         tss.set_item("deep_verify_failed", self.tss_counters.deep_verify_failed)?;
+        tss.set_item("horizon_retry", self.tss_counters.horizon_retry)?;
+        tss.set_item(
+            "horizon_preflight_failed",
+            self.tss_counters.horizon_preflight_failed,
+        )?;
+        tss.set_item("zone_nodes", self.tss_counters.zone_nodes)?;
+        tss.set_item("pair_omitted", self.tss_counters.pair_omitted)?;
+        tss.set_item("zone_verify_failed", self.tss_counters.zone_verify_failed)?;
         tss.set_item("deep_hard_backups", self.tss_counters.deep_hard_backups)?;
         tss.set_item("deep_memo_hits", self.tss_counters.deep_memo_hits)?;
         tss.set_item("async_enqueued", self.tss_counters.async_enqueued)?;
@@ -3454,6 +3478,12 @@ fn build_search_result_payload_native(
                 &search.root_state,
                 div.tss_solver_node_cap as u64,
                 tss_core::SolveGoal::Both,
+                tss_core::ZoneSearchCaps {
+                    enabled: div.tss_zone,
+                    stale_area_filter: div.tss_zone_stale_filter,
+                    count2_threshold: div.tss_zone_count2,
+                    pair_commutation: div.tss_pair_commutation,
+                },
                 &mut root_solver,
                 &mut deep_counters,
             );

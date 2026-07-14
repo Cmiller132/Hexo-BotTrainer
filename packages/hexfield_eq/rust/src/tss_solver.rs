@@ -13,15 +13,21 @@
 //! failed restricted attack is never interpreted as a proof for the opponent.
 
 use std::cmp::Reverse;
+use std::collections::HashSet;
 use std::mem::size_of;
 
-use hexo_engine::{HexCoord, HexoState as RustHexoState, Placement, Player, TurnPhase};
+use hexo_engine::{
+    apply_placement, hex_distance, Axis, HexCoord, HexoState as RustHexoState, Placement, Player,
+    TurnPhase, WindowKey,
+};
 
 use crate::threats_shared as threats;
-use crate::tss_core::{DeepResult, DeepSolve, ProofStatus, SolveCaps, SolveGoal, SolveStats};
+use crate::tss_core::{
+    DeepResult, DeepSolve, ProofStatus, SolveCaps, SolveGoal, SolveStats, ZoneSearchCaps,
+};
 use crate::tss_verify::{
-    CertEdge, CertNode, CertNodeId, RootBinding, TssCertificate, MAX_CERT_DEPTH, MAX_CERT_EDGES,
-    MAX_CERT_NODES, MAX_CERT_ROOT_STONES,
+    CertCommutation, CertEdge, CertNode, CertNodeId, RootBinding, TssCertificate, ZoneInfo,
+    MAX_CERT_DEPTH, MAX_CERT_EDGES, MAX_CERT_NODES, MAX_CERT_ROOT_STONES,
 };
 
 /// A second, fixed guard in addition to `SolveCaps::node_cap`.  It bounds stack
@@ -52,6 +58,7 @@ pub(crate) struct TssSolver {
     tt_enabled: bool,
     hash_mask: u64,
     shared_tt: SharedProofCache,
+    zone: ZoneSearchCaps,
 }
 
 impl Default for TssSolver {
@@ -60,17 +67,23 @@ impl Default for TssSolver {
             tt_enabled: true,
             hash_mask: u64::MAX,
             shared_tt: SharedProofCache::new(0, u64::MAX),
+            zone: ZoneSearchCaps::default(),
         }
     }
 }
 
 impl TssSolver {
+    pub(crate) fn set_zone_options(&mut self, zone: ZoneSearchCaps) {
+        self.zone = zone;
+    }
+
     #[cfg(test)]
     fn without_tt() -> Self {
         Self {
             tt_enabled: false,
             hash_mask: u64::MAX,
             shared_tt: SharedProofCache::new(0, u64::MAX),
+            zone: ZoneSearchCaps::default(),
         }
     }
 
@@ -82,6 +95,7 @@ impl TssSolver {
             tt_enabled: true,
             hash_mask,
             shared_tt: SharedProofCache::new(0, hash_mask),
+            zone: ZoneSearchCaps::default(),
         }
     }
 
@@ -106,7 +120,10 @@ impl TssSolver {
             peak_tt_bytes: self.shared_tt.current_bytes as u64,
             ..SolveStats::default()
         };
-        if caps.node_cap == 0 || state.board().len() > MAX_CERT_ROOT_STONES {
+        if caps.node_cap == 0
+            || caps.semantic_horizon < state.placements_made()
+            || state.board().len() > MAX_CERT_ROOT_STONES
+        {
             return unknown(initial_stats);
         }
 
@@ -119,6 +136,9 @@ impl TssSolver {
             ..initial_stats
         };
         if let Some((claimant, leaf)) = immediate_winner(state) {
+            if node_resolution(&leaf) > caps.semantic_horizon {
+                return unknown(stats);
+            }
             let status = status_for_claimant(state.current_player(), claimant);
             if goal_accepts(goal, status) {
                 let cert = TssCertificate {
@@ -126,6 +146,7 @@ impl TssSolver {
                     claimant,
                     root_node: 0,
                     nodes: vec![leaf],
+                    semantic_horizon: caps.semantic_horizon,
                 };
                 return DeepResult {
                     status,
@@ -145,7 +166,14 @@ impl TssSolver {
         let root_player = state.current_player();
 
         if primal_cap > 0 {
-            let attempt = self.prove_for(state, root_player, primal_cap, local_tt_cap);
+            let attempt = self.prove_for(
+                state,
+                root_player,
+                primal_cap,
+                local_tt_cap,
+                caps.semantic_horizon,
+                self.zone,
+            );
             merge_stats(&mut stats, attempt.stats);
             if let Some(cert) = attempt.cert {
                 return DeepResult {
@@ -157,7 +185,14 @@ impl TssSolver {
         }
 
         if dual_cap > 0 {
-            let attempt = self.prove_for(state, root_player.other(), dual_cap, local_tt_cap);
+            let attempt = self.prove_for(
+                state,
+                root_player.other(),
+                dual_cap,
+                local_tt_cap,
+                caps.semantic_horizon,
+                self.zone,
+            );
             merge_stats(&mut stats, attempt.stats);
             if let Some(cert) = attempt.cert {
                 return DeepResult {
@@ -187,12 +222,22 @@ impl TssSolver {
         claimant: Player,
         node_cap: u64,
         local_tt_cap: usize,
+        semantic_horizon: u32,
+        zone: ZoneSearchCaps,
     ) -> AttemptResult {
         let mut work = state.clone();
         let entry_key = PositionKey::from_state(&work);
-        let mut context =
-            SearchContext::with_shared(node_cap, local_tt_cap, self.hash_mask, &mut self.shared_tt);
-        let proof = context.prove(&mut work, claimant, 0);
+        let root_ply = state.placements_made();
+        let mut context = SearchContext::with_shared(
+            node_cap,
+            local_tt_cap,
+            self.hash_mask,
+            &mut self.shared_tt,
+            root_ply,
+            semantic_horizon,
+            zone,
+        );
+        let proof = context.prove(&mut work, claimant, root_ply, None);
 
         // Every recursive path uses LIFO make/unmake, including cap exits.
         debug_assert_eq!(entry_key, PositionKey::from_state(&work));
@@ -209,12 +254,15 @@ impl TssSolver {
                     context.insert_shared(entry_key.clone(), claimant, cached);
                 }
             }
-            Some(TssCertificate {
+            let mut cert = TssCertificate {
                 root: RootBinding::from_state(state),
                 claimant,
                 root_node,
                 nodes,
-            })
+                semantic_horizon,
+            };
+            rebase_zone_distances(&mut cert, state)?;
+            Some(cert)
         });
         let stats = SolveStats {
             peak_tt_bytes: context.peak_tt_bytes as u64,
@@ -222,6 +270,62 @@ impl TssSolver {
         };
         AttemptResult { cert, stats }
     }
+}
+
+/// Imported zone fragments may have been built at a larger admissible
+/// horizon. Their searched set remains sound at a smaller T, but the carried
+/// D evidence must be relabelled to the assembled certificate's exact build
+/// horizon before solver-side preflight and independent verification.
+fn rebase_zone_distances(cert: &mut TssCertificate, root: &RustHexoState) -> Option<()> {
+    let mut states = vec![None; cert.nodes.len()];
+    let mut stack = vec![(cert.root_node, root.clone())];
+    while let Some((id, state)) = stack.pop() {
+        let slot = states.get_mut(id as usize)?;
+        if let Some(seen) = slot.as_ref() {
+            if PositionKey::from_state(seen) != PositionKey::from_state(&state) {
+                return None;
+            }
+            continue;
+        }
+        *slot = Some(state.clone());
+        match cert.nodes.get(id as usize)? {
+            CertNode::Choice { mv, child } => {
+                let mut next = state;
+                let result = apply_placement(&mut next, Placement { coord: *mv }).ok()?;
+                if result.outcome.is_some() {
+                    return None;
+                }
+                stack.push((*child, next));
+            }
+            CertNode::Universal { edges, .. } => {
+                for edge in edges {
+                    let mut next = state.clone();
+                    let result = apply_placement(&mut next, Placement { coord: edge.mv }).ok()?;
+                    if result.outcome.is_some() {
+                        return None;
+                    }
+                    stack.push((edge.child, next));
+                }
+            }
+            _ => {}
+        }
+    }
+    for (index, state) in states.into_iter().enumerate() {
+        let Some(state) = state else {
+            return None;
+        };
+        if let CertNode::Universal {
+            zone: Some(zone), ..
+        } = cert.nodes.get_mut(index)?
+        {
+            zone.d = remaining_defender_placements_for_horizon(
+                &state,
+                cert.claimant,
+                cert.semantic_horizon,
+            )?;
+        }
+    }
+    Some(())
 }
 
 fn split_tt_cap(total: usize) -> (usize, usize) {
@@ -270,14 +374,78 @@ fn status_for_claimant(root_player: Player, claimant: Player) -> ProofStatus {
 /// theorem is post-opening), although reachable Opening currently has no
 /// threats and therefore cannot produce a verdict anyway.
 fn immediate_winner(state: &RustHexoState) -> Option<(Player, CertNode)> {
-    if let Some(outcome) = state.terminal() {
-        return Some((outcome.winner, CertNode::Terminal));
+    if state.is_terminal() {
+        return None;
     }
     if matches!(state.phase(), TurnPhase::Opening) {
         return None;
     }
     let analysis = threats::analyze(state);
-    winner_from_analysis(state, &analysis).map(|winner| (winner, CertNode::Lambda1))
+    let winner = winner_from_analysis(state, &analysis)?;
+    typed_lambda_leaf(state, winner, &analysis).map(|leaf| (winner, leaf))
+}
+
+fn window_key_order(key: WindowKey) -> (u8, i16, i16) {
+    (key.axis.index(), key.start.q, key.start.r)
+}
+
+fn typed_lambda_leaf(
+    state: &RustHexoState,
+    winner: Player,
+    analysis: &threats::ThreatAnalysis,
+) -> Option<CertNode> {
+    if winner == state.current_player() {
+        let mut candidates = state
+            .board()
+            .windows()
+            .entries()
+            .filter(|entry| {
+                entry.active_player() == Some(winner)
+                    && (entry.count(winner) == 5 || (analysis.b == 2 && entry.count(winner) == 4))
+            })
+            .collect::<Vec<_>>();
+        candidates.sort_by_key(|entry| {
+            (
+                std::cmp::Reverse(entry.count(winner)),
+                window_key_order(entry.key()),
+            )
+        });
+        let witness = candidates.first().copied()?;
+        let count = witness.count(winner);
+        let extra = if count == 5 { 1 } else { 2 };
+        Some(CertNode::Win {
+            witness: witness.key(),
+            count,
+            budget: analysis.b,
+            resolution_ply: state.placements_made().saturating_add(extra),
+        })
+    } else {
+        let mut witnesses = state
+            .board()
+            .windows()
+            .threats()
+            .filter_map(|(owner, entry)| (owner == winner).then_some(entry.key()))
+            .collect::<Vec<_>>();
+        witnesses.sort_by_key(|key| window_key_order(*key));
+        witnesses.dedup();
+        (!witnesses.is_empty()).then_some(CertNode::Loss {
+            witnesses,
+            resolution_ply: state
+                .placements_made()
+                .saturating_add(u32::from(analysis.b))
+                .saturating_add(2),
+        })
+    }
+}
+
+fn node_resolution(node: &CertNode) -> u32 {
+    match node {
+        CertNode::OrCompletion { completion_ply, .. } => *completion_ply,
+        CertNode::Win { resolution_ply, .. } | CertNode::Loss { resolution_ply, .. } => {
+            *resolution_ply
+        }
+        CertNode::Choice { .. } | CertNode::Universal { .. } => 0,
+    }
 }
 
 fn winner_from_analysis(
@@ -303,6 +471,18 @@ struct SearchContext<'a> {
     tt: BoundedTt,
     shared_tt: Option<&'a mut SharedProofCache>,
     peak_tt_bytes: usize,
+    /// Absolute placement index at the attempt root.  Structural depth is
+    /// derived from the separately threaded ply clock.
+    root_ply: u32,
+    semantic_horizon: u32,
+    clock_is_absolute: bool,
+    zone: ZoneSearchCaps,
+}
+
+#[derive(Clone, Debug)]
+struct PairContext {
+    first: HexCoord,
+    turn_start_legal: Vec<HexCoord>,
 }
 
 impl SearchContext<'static> {
@@ -319,6 +499,10 @@ impl SearchContext<'static> {
             tt,
             shared_tt: None,
             peak_tt_bytes,
+            root_ply: 0,
+            semantic_horizon: u32::MAX,
+            clock_is_absolute: false,
+            zone: ZoneSearchCaps::default(),
         }
     }
 }
@@ -329,6 +513,9 @@ impl<'a> SearchContext<'a> {
         tt_bytes_cap: usize,
         hash_mask: u64,
         shared_tt: &'a mut SharedProofCache,
+        root_ply: u32,
+        semantic_horizon: u32,
+        zone: ZoneSearchCaps,
     ) -> Self {
         let tt = BoundedTt::new(tt_bytes_cap, hash_mask);
         let peak_tt_bytes = tt.current_bytes.saturating_add(shared_tt.current_bytes);
@@ -343,6 +530,10 @@ impl<'a> SearchContext<'a> {
             tt,
             shared_tt,
             peak_tt_bytes,
+            root_ply,
+            semantic_horizon,
+            clock_is_absolute: true,
+            zone,
         }
     }
 
@@ -350,8 +541,18 @@ impl<'a> SearchContext<'a> {
         &mut self,
         state: &mut RustHexoState,
         claimant: Player,
-        depth: usize,
+        ply: u32,
+        pair: Option<&PairContext>,
     ) -> Option<CertNodeId> {
+        let depth = if self.clock_is_absolute {
+            debug_assert_eq!(state.placements_made(), ply);
+            usize::try_from(ply.checked_sub(self.root_ply)?).ok()?
+        } else {
+            ply as usize
+        };
+        if self.clock_is_absolute && ply > self.semantic_horizon {
+            return None;
+        }
         if depth > MAX_SEARCH_DEPTH || self.nodes >= self.node_cap {
             self.hit_limit = true;
             return None;
@@ -359,26 +560,26 @@ impl<'a> SearchContext<'a> {
         self.nodes += 1;
 
         let key = PositionKey::from_state(state);
-        if let Some(node) = self.tt.lookup(&key, claimant) {
-            if (node as usize) < self.arena.len() {
+        if pair.is_none() {
+            if let Some(node) = self.tt.lookup(&key, claimant) {
+                if (node as usize) < self.arena.len() {
+                    self.tt_hits += 1;
+                    return Some(node);
+                }
+            }
+            if let Some(node) = self.lookup_shared(&key, claimant, depth) {
+                self.tt.insert(key, claimant, node);
                 self.tt_hits += 1;
+                self.observe_tt_bytes();
                 return Some(node);
             }
         }
-        if let Some(node) = self.lookup_shared(&key, claimant, depth) {
-            self.tt.insert(key, claimant, node);
-            self.tt_hits += 1;
-            self.observe_tt_bytes();
-            return Some(node);
-        }
 
         if let Some(outcome) = state.terminal() {
-            if outcome.winner != claimant {
-                return None;
-            }
-            let node = self.alloc_node(CertNode::Terminal, 0)?;
-            self.remember_proof(key, claimant, node);
-            return Some(node);
+            let _ = outcome;
+            // A claimant completion is represented at its parent by the typed
+            // OrCompletion leaf; defender-terminal edges are not certifiable.
+            return None;
         }
 
         // Analyze each non-terminal node exactly once.  Universal dispatch
@@ -389,18 +590,24 @@ impl<'a> SearchContext<'a> {
                 if winner != claimant {
                     return None;
                 }
-                let node = self.alloc_node(CertNode::Lambda1, 0)?;
+                let leaf = typed_lambda_leaf(state, winner, &analysis)?;
+                if node_resolution(&leaf) > self.semantic_horizon {
+                    return None;
+                }
+                let node = self.alloc_node(leaf, 0)?;
                 self.remember_proof(key, claimant, node);
                 return Some(node);
             }
         }
 
         let node = if state.current_player() == claimant {
-            self.prove_choice(state, claimant, depth)?
+            self.prove_choice(state, claimant, ply)?
         } else {
-            self.prove_universal(state, claimant, depth, &analysis)?
+            self.prove_universal(state, claimant, ply, &analysis, pair)?
         };
-        self.remember_proof(key, claimant, node);
+        if pair.is_none() {
+            self.remember_proof(key, claimant, node);
+        }
         Some(node)
     }
 
@@ -408,18 +615,49 @@ impl<'a> SearchContext<'a> {
         &mut self,
         state: &mut RustHexoState,
         claimant: Player,
-        depth: usize,
+        ply: u32,
     ) -> Option<CertNodeId> {
         // Descending line count is the static proof-number initialization:
         // completions before four-builds before three-builds.  The coordinate
         // tie break makes the order independent of WindowStore hash iteration.
         for candidate in ordered_threat_creating_moves(state, claimant) {
-            let Ok((_result, delta)) = state.apply_with_delta(Placement {
+            let Ok((result, delta)) = state.apply_with_delta(Placement {
                 coord: candidate.coord,
             }) else {
                 continue;
             };
-            let child = self.prove(state, claimant, depth + 1);
+            if result
+                .outcome
+                .is_some_and(|outcome| outcome.winner == claimant)
+            {
+                let mut witnesses = state
+                    .board()
+                    .windows()
+                    .entries()
+                    .filter(|entry| {
+                        entry.key().contains(candidate.coord)
+                            && entry.count(claimant) == 6
+                            && entry.count(claimant.other()) == 0
+                    })
+                    .map(|entry| entry.key())
+                    .collect::<Vec<_>>();
+                witnesses.sort_by_key(|key| window_key_order(*key));
+                let witness = witnesses.first().copied();
+                state.undo(delta);
+                let completion_ply = ply.checked_add(1)?;
+                if completion_ply > self.semantic_horizon {
+                    return None;
+                }
+                return self.alloc_node(
+                    CertNode::OrCompletion {
+                        mv: candidate.coord,
+                        witness: witness?,
+                        completion_ply,
+                    },
+                    0,
+                );
+            }
+            let child = self.prove(state, claimant, ply.checked_add(1)?, None);
             state.undo(delta);
 
             if let Some(child) = child {
@@ -444,20 +682,34 @@ impl<'a> SearchContext<'a> {
         &mut self,
         state: &mut RustHexoState,
         claimant: Player,
-        depth: usize,
+        ply: u32,
         analysis: &threats::ThreatAnalysis,
+        pair: Option<&PairContext>,
     ) -> Option<CertNodeId> {
         let implicit_dispatch = !matches!(state.phase(), TurnPhase::Opening)
             && analysis.opp_threat_count > 0
             && !analysis.own_win_now
             && analysis.min_hitting_set == Some(analysis.b);
 
-        // At the proved L1 boundary the certificate represents every
-        // non-hitting move implicitly.  The independent verifier still
-        // enumerates, applies, and lambda-one-checks that entire complement;
-        // the producer need only materialize the hitting universe.
+        // At the proved L1 boundary U3 lets the verifier theorem-dismiss the
+        // complement without enumerating it.  At spare nodes the default-off
+        // U1 generator is consumable only because U2 re-derives the zone.
+        let zone = (!implicit_dispatch
+            && self.zone.enabled
+            && !matches!(state.phase(), TurnPhase::Opening))
+        .then(|| {
+            remaining_defender_placements_for_horizon(state, claimant, self.semantic_horizon).map(
+                |d| ZoneInfo {
+                    d,
+                    build_horizon: self.semantic_horizon,
+                },
+            )
+        })
+        .flatten();
         let mut explicit = if implicit_dispatch {
             hitting_universe(state, claimant)
+        } else if let Some(zone) = zone {
+            zone_initial_candidates(state, claimant, zone.d, self.zone)
         } else {
             let mut all_legal = Vec::new();
             state.write_legal_moves(&mut all_legal);
@@ -466,6 +718,11 @@ impl<'a> SearchContext<'a> {
             }
             all_legal
         };
+        if !implicit_dispatch && zone.is_none() {
+            if let Some(pair) = pair {
+                restrict_pair_candidates(&mut explicit, pair);
+            }
+        }
 
         if implicit_dispatch {
             let frame = canonical_frame(state);
@@ -481,24 +738,77 @@ impl<'a> SearchContext<'a> {
                 (!hits, canonical_coord_key(frame, *coord))
             });
         }
+        if explicit.is_empty() {
+            return None;
+        }
 
+        let turn_start_legal = (self.zone.pair_commutation
+            && pair.is_none()
+            && matches!(state.phase(), TurnPhase::FirstStone)
+            && threats::placements_remaining(state) == 2)
+            .then(|| {
+                let mut legal = Vec::new();
+                state.write_legal_moves(&mut legal);
+                legal.sort_by_key(|coord| raw_coord_key(*coord));
+                legal
+            });
         let mut edges = Vec::with_capacity(explicit.len());
-        for mv in explicit {
-            let Ok((_result, delta)) = state.apply_with_delta(Placement { coord: mv }) else {
+        for &mv in &explicit {
+            let Ok((result, delta)) = state.apply_with_delta(Placement { coord: mv }) else {
                 return None;
             };
-            let child = self.prove(state, claimant, depth + 1);
+            let pair_context = turn_start_legal.as_ref().and_then(|legal| {
+                (result.outcome.is_none() && matches!(state.phase(), TurnPhase::SecondStone { .. }))
+                    .then(|| PairContext {
+                        first: mv,
+                        turn_start_legal: legal.clone(),
+                    })
+            });
+            let child = self.prove(state, claimant, ply.checked_add(1)?, pair_context.as_ref());
             state.undo(delta);
             let child = child?; // Unknown poisons the universal claim.
             edges.push(CertEdge { mv, child });
         }
 
+        if let Some(zone) = zone {
+            loop {
+                let required =
+                    zone_certificate_extras(state, claimant, zone.d, &edges, &self.arena)?;
+                let mut added = required
+                    .into_iter()
+                    .filter(|mv| !explicit.contains(mv))
+                    .collect::<Vec<_>>();
+                if added.is_empty() {
+                    break;
+                }
+                let frame = canonical_frame(state);
+                added.sort_by_key(|coord| canonical_coord_key(frame, *coord));
+                for mv in added {
+                    let Ok((_result, delta)) = state.apply_with_delta(Placement { coord: mv })
+                    else {
+                        return None;
+                    };
+                    let child = self.prove(state, claimant, ply.checked_add(1)?, None);
+                    state.undo(delta);
+                    let child = child?;
+                    explicit.push(mv);
+                    edges.push(CertEdge { mv, child });
+                }
+            }
+        }
+
+        let commutations = turn_start_legal
+            .as_ref()
+            .map(|legal| pair_commutations(legal, &edges, &self.arena))
+            .unwrap_or_default();
         let explicit_edge_count = edges.len();
 
         self.alloc_node(
             CertNode::Universal {
                 edges,
                 implicit_dispatch,
+                zone,
+                commutations,
             },
             explicit_edge_count,
         )
@@ -573,7 +883,11 @@ impl<'a> SearchContext<'a> {
     /// appended.  A fragment that does not fit is merely a cache miss.
     fn import_cached_proof(&mut self, mut proof: CachedProof, depth: usize) -> Option<CertNodeId> {
         proof.validate()?;
-        if depth.checked_add(proof.height)? > MAX_SEARCH_DEPTH
+        if proof.resolution_t > self.semantic_horizon
+            || proof
+                .zone_build_t
+                .is_some_and(|build_t| self.semantic_horizon > build_t)
+            || depth.checked_add(proof.height)? > MAX_SEARCH_DEPTH
             || self.arena.len().checked_add(proof.nodes.len())? > MAX_CERT_NODES
             || self.edge_count.checked_add(proof.explicit_edges)? > MAX_CERT_EDGES
         {
@@ -602,6 +916,84 @@ impl<'a> SearchContext<'a> {
             .peak_tt_bytes
             .max(self.tt.current_bytes.saturating_add(shared));
     }
+}
+
+fn arena_subtree_contains_zone(arena: &[CertNode], root: CertNodeId) -> bool {
+    let mut stack = vec![root];
+    let mut seen = HashSet::new();
+    while let Some(id) = stack.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        match arena.get(id as usize) {
+            Some(CertNode::Choice { child, .. }) => stack.push(*child),
+            Some(CertNode::Universal { edges, zone, .. }) => {
+                if zone.is_some() {
+                    return true;
+                }
+                stack.extend(edges.iter().map(|edge| edge.child));
+            }
+            Some(_) => {}
+            None => return true,
+        }
+    }
+    false
+}
+
+fn pair_commutations(
+    turn_start_legal: &[HexCoord],
+    parent_edges: &[CertEdge],
+    arena: &[CertNode],
+) -> Vec<CertCommutation> {
+    let mut result = Vec::new();
+    for first_edge in parent_edges {
+        let Some(CertNode::Universal {
+            edges: first_replies,
+            ..
+        }) = arena.get(first_edge.child as usize)
+        else {
+            continue;
+        };
+        for &omitted_second in turn_start_legal {
+            if raw_coord_key(omitted_second) >= raw_coord_key(first_edge.mv)
+                || first_replies.iter().any(|edge| edge.mv == omitted_second)
+            {
+                continue;
+            }
+            let Some(mirror_edge) = parent_edges.iter().find(|edge| edge.mv == omitted_second)
+            else {
+                continue;
+            };
+            let Some(CertNode::Universal {
+                edges: mirror_replies,
+                ..
+            }) = arena.get(mirror_edge.child as usize)
+            else {
+                continue;
+            };
+            if mirror_replies.iter().any(|edge| edge.mv == first_edge.mv) {
+                result.push(CertCommutation {
+                    first: first_edge.mv,
+                    omitted_second,
+                    first_child: first_edge.child,
+                    mirror_child: mirror_edge.child,
+                });
+            }
+        }
+    }
+    result.sort_by_key(|item| {
+        (
+            raw_coord_key(item.first),
+            raw_coord_key(item.omitted_second),
+        )
+    });
+    result
+}
+
+fn restrict_pair_candidates(candidates: &mut Vec<HexCoord>, pair: &PairContext) {
+    candidates.retain(|mv| {
+        raw_coord_key(*mv) > raw_coord_key(pair.first) || !pair.turn_start_legal.contains(mv)
+    });
 }
 
 #[derive(Clone)]
@@ -804,6 +1196,186 @@ fn hitting_universe(state: &RustHexoState, claimant: Player) -> Vec<HexCoord> {
     cells
 }
 
+fn remaining_defender_placements_for_horizon(
+    state: &RustHexoState,
+    claimant: Player,
+    horizon: u32,
+) -> Option<u32> {
+    let mut ply = state.placements_made();
+    if horizon < ply {
+        return None;
+    }
+    let mut player = state.current_player();
+    let mut phase = state.phase();
+    let mut count = 0u32;
+    while ply < horizon {
+        if player != claimant {
+            count = count.checked_add(1)?;
+        }
+        match phase {
+            TurnPhase::Opening => {
+                player = player.other();
+                phase = TurnPhase::FirstStone;
+            }
+            TurnPhase::FirstStone => {
+                phase = TurnPhase::SecondStone {
+                    first: HexCoord::ZERO,
+                }
+            }
+            TurnPhase::SecondStone { .. } => {
+                player = player.other();
+                phase = TurnPhase::FirstStone;
+            }
+        }
+        ply = ply.checked_add(1)?;
+    }
+    Some(count)
+}
+
+fn all_incident_windows_two_coloured(state: &RustHexoState, cell: HexCoord) -> bool {
+    for axis in Axis::ALL {
+        for offset in 0..6i16 {
+            let key = WindowKey {
+                start: cell - axis.vector().scale(offset),
+                axis,
+            };
+            let Some(entry) = state
+                .board()
+                .windows()
+                .entries()
+                .find(|entry| entry.key() == key)
+            else {
+                return false;
+            };
+            if entry.count(Player::Player0) == 0 || entry.count(Player::Player1) == 0 {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn zone_initial_candidates(
+    state: &RustHexoState,
+    claimant: Player,
+    d: u32,
+    options: ZoneSearchCaps,
+) -> Vec<HexCoord> {
+    let mut legal = Vec::new();
+    state.write_legal_moves(&mut legal);
+    legal.sort_by_key(|coord| (coord.q, coord.r));
+    if d >= 6 {
+        return legal;
+    }
+    let defender = claimant.other();
+    let mut out = hitting_universe(state, claimant);
+    for entry in state.board().windows().entries() {
+        let attacker_term = entry.active_player() == Some(claimant)
+            && entry.count(claimant) >= if options.count2_threshold { 2 } else { 1 };
+        let defender_term = entry.active_player() == Some(defender)
+            && u32::from(entry.count(defender)) >= 6u32.saturating_sub(d);
+        if attacker_term || defender_term {
+            out.extend(entry.empty_cells());
+        }
+    }
+    out.sort_by_key(|coord| (coord.q, coord.r));
+    out.dedup();
+    out.retain(|cell| {
+        legal
+            .binary_search_by_key(&(cell.q, cell.r), |c| (c.q, c.r))
+            .is_ok()
+    });
+    if options.stale_area_filter {
+        out.retain(|cell| !all_incident_windows_two_coloured(state, *cell));
+    }
+    let hitting = hitting_universe(state, claimant);
+    let frame = canonical_frame(state);
+    out.sort_by_key(|coord| (!hitting.contains(coord), canonical_coord_key(frame, *coord)));
+    out
+}
+
+fn arena_core(arena: &[CertNode], root: CertNodeId, out: &mut Vec<HexCoord>) -> Option<()> {
+    match arena.get(root as usize)? {
+        CertNode::OrCompletion { mv, witness, .. } => {
+            out.push(*mv);
+            out.extend(witness.cells());
+        }
+        CertNode::Win { witness, .. } => out.extend(witness.cells()),
+        CertNode::Loss { witnesses, .. } => {
+            for witness in witnesses {
+                out.extend(witness.cells());
+            }
+        }
+        CertNode::Choice { mv, child } => {
+            out.push(*mv);
+            arena_core(arena, *child, out)?;
+        }
+        CertNode::Universal { edges, .. } => {
+            for edge in edges {
+                arena_core(arena, edge.child, out)?;
+            }
+        }
+    }
+    Some(())
+}
+
+fn zone_certificate_extras(
+    state: &RustHexoState,
+    claimant: Player,
+    d: u32,
+    edges: &[CertEdge],
+    arena: &[CertNode],
+) -> Option<Vec<HexCoord>> {
+    let mut legal = Vec::new();
+    state.write_legal_moves(&mut legal);
+    legal.sort_by_key(|coord| (coord.q, coord.r));
+    let mut protected = Vec::new();
+    for edge in edges {
+        arena_core(arena, edge.child, &mut protected)?;
+    }
+    let defender = claimant.other();
+    for entry in state.board().windows().entries() {
+        if entry.active_player() == Some(defender)
+            && u32::from(entry.count(defender)).saturating_add(d) >= 6
+        {
+            protected.extend(entry.empty_cells());
+        }
+    }
+    protected.sort_by_key(|coord| (coord.q, coord.r));
+    protected.dedup();
+    let stones = state.board().occupied_cells();
+    let pending = protected
+        .iter()
+        .copied()
+        .filter(|cell| {
+            legal
+                .binary_search_by_key(&(cell.q, cell.r), |c| (c.q, c.r))
+                .is_err()
+                && !stones.contains(cell)
+        })
+        .collect::<Vec<_>>();
+    let mut required = protected
+        .iter()
+        .copied()
+        .filter(|cell| {
+            legal
+                .binary_search_by_key(&(cell.q, cell.r), |c| (c.q, c.r))
+                .is_ok()
+        })
+        .collect::<Vec<_>>();
+    if !pending.is_empty() {
+        let radius = i32::try_from(d.saturating_mul(8)).unwrap_or(i32::MAX);
+        required.extend(legal.iter().copied().filter(|cell| {
+            pending
+                .iter()
+                .any(|target| i32::from(hex_distance(*cell, *target)) <= radius)
+        }));
+    }
+    required.sort_by_key(|coord| (coord.q, coord.r));
+    required.dedup();
+    Some(required)
+}
+
 /// Choose the lexicographically least D6 image of the full semantic position.
 /// Search ties are compared in this frame, so rotating/reflection-transforming
 /// an input cannot change which proof-cost class is expanded first merely due
@@ -846,6 +1418,10 @@ fn canonical_frame(state: &RustHexoState) -> u8 {
 
 fn canonical_coord_key(frame: u8, coord: HexCoord) -> (i32, i32) {
     d6_coord_i32(coord, frame)
+}
+
+fn raw_coord_key(coord: HexCoord) -> (i16, i16) {
+    (coord.q, coord.r)
 }
 
 fn d6_coord_i32(coord: HexCoord, symmetry: u8) -> (i32, i32) {
@@ -1074,6 +1650,10 @@ struct CachedProof {
     explicit_edges: usize,
     /// Maximum number of certificate edges below `root_node`.
     height: usize,
+    /// Maximum exact resolution label over all contained typed leaves.
+    resolution_t: u32,
+    /// Minimum zone-build deadline over all contained zoned components.
+    zone_build_t: Option<u32>,
 }
 
 impl CachedProof {
@@ -1093,9 +1673,20 @@ impl CachedProof {
         }
         let mut heights = vec![0usize; nodes.len()];
         let mut explicit_edges = 0usize;
+        let mut resolution_t = 0u32;
+        let mut zone_build_t: Option<u32> = None;
         for (index, node) in nodes.iter().enumerate() {
+            resolution_t = resolution_t.max(node_resolution(node));
+            if let CertNode::Universal {
+                zone: Some(zone), ..
+            } = node
+            {
+                zone_build_t = Some(
+                    zone_build_t.map_or(zone.build_horizon, |old| old.min(zone.build_horizon)),
+                );
+            }
             heights[index] = match node {
-                CertNode::Terminal | CertNode::Lambda1 => 0,
+                CertNode::OrCompletion { .. } | CertNode::Win { .. } | CertNode::Loss { .. } => 0,
                 CertNode::Choice { child, .. } => {
                     let child = *child as usize;
                     if child >= index {
@@ -1103,7 +1694,11 @@ impl CachedProof {
                     }
                     heights[child].checked_add(1)?
                 }
-                CertNode::Universal { edges, .. } => {
+                CertNode::Universal {
+                    edges,
+                    commutations,
+                    ..
+                } => {
                     explicit_edges = explicit_edges.checked_add(edges.len())?;
                     let mut height = 0usize;
                     for edge in edges {
@@ -1112,6 +1707,15 @@ impl CachedProof {
                             return None;
                         }
                         height = height.max(heights[child].checked_add(1)?);
+                    }
+                    for item in commutations {
+                        for child in [item.first_child, item.mirror_child] {
+                            let child = child as usize;
+                            if child >= index {
+                                return None;
+                            }
+                            height = height.max(heights[child].checked_add(1)?);
+                        }
                     }
                     height
                 }
@@ -1123,6 +1727,8 @@ impl CachedProof {
             root_node,
             explicit_edges,
             height,
+            resolution_t,
+            zone_build_t,
         };
         proof.validate()?;
         Some(proof)
@@ -1138,18 +1744,36 @@ impl CachedProof {
             return None;
         }
         let rebuilt = Self::from_compact_unchecked_metadata(&self.nodes, self.root_node)?;
-        (rebuilt == (self.explicit_edges, self.height)).then_some(())
+        (rebuilt
+            == (
+                self.explicit_edges,
+                self.height,
+                self.resolution_t,
+                self.zone_build_t,
+            ))
+            .then_some(())
     }
 
     fn from_compact_unchecked_metadata(
         nodes: &[CertNode],
         root_node: CertNodeId,
-    ) -> Option<(usize, usize)> {
+    ) -> Option<(usize, usize, u32, Option<u32>)> {
         let mut heights = vec![0usize; nodes.len()];
         let mut explicit_edges = 0usize;
+        let mut resolution_t = 0u32;
+        let mut zone_build_t: Option<u32> = None;
         for (index, node) in nodes.iter().enumerate() {
+            resolution_t = resolution_t.max(node_resolution(node));
+            if let CertNode::Universal {
+                zone: Some(zone), ..
+            } = node
+            {
+                zone_build_t = Some(
+                    zone_build_t.map_or(zone.build_horizon, |old| old.min(zone.build_horizon)),
+                );
+            }
             heights[index] = match node {
-                CertNode::Terminal | CertNode::Lambda1 => 0,
+                CertNode::OrCompletion { .. } | CertNode::Win { .. } | CertNode::Loss { .. } => 0,
                 CertNode::Choice { child, .. } => {
                     let child = *child as usize;
                     if child >= index {
@@ -1157,7 +1781,11 @@ impl CachedProof {
                     }
                     heights[child].checked_add(1)?
                 }
-                CertNode::Universal { edges, .. } => {
+                CertNode::Universal {
+                    edges,
+                    commutations,
+                    ..
+                } => {
                     explicit_edges = explicit_edges.checked_add(edges.len())?;
                     let mut height = 0usize;
                     for edge in edges {
@@ -1167,19 +1795,42 @@ impl CachedProof {
                         }
                         height = height.max(heights[child].checked_add(1)?);
                     }
+                    for item in commutations {
+                        for child in [item.first_child, item.mirror_child] {
+                            let child = child as usize;
+                            if child >= index {
+                                return None;
+                            }
+                            height = height.max(heights[child].checked_add(1)?);
+                        }
+                    }
                     height
                 }
             };
         }
-        Some((explicit_edges, heights[root_node as usize]))
+        Some((
+            explicit_edges,
+            heights[root_node as usize],
+            resolution_t,
+            zone_build_t,
+        ))
     }
 
     fn heap_bytes(&self) -> usize {
         let mut bytes = allocation_bytes(self.nodes.capacity(), size_of::<CertNode>());
         for node in &self.nodes {
-            if let CertNode::Universal { edges, .. } = node {
+            if let CertNode::Universal {
+                edges,
+                commutations,
+                ..
+            } = node
+            {
                 bytes =
                     bytes.saturating_add(allocation_bytes(edges.capacity(), size_of::<CertEdge>()));
+                bytes = bytes.saturating_add(allocation_bytes(
+                    commutations.capacity(),
+                    size_of::<CertCommutation>(),
+                ));
             }
         }
         bytes
@@ -1356,13 +2007,21 @@ fn offset_node_id(id: CertNodeId, base: usize, final_len: usize) -> Option<CertN
 
 fn remap_node_ids_with_offset(node: &mut CertNode, base: usize, final_len: usize) -> Option<()> {
     match node {
-        CertNode::Terminal | CertNode::Lambda1 => {}
+        CertNode::OrCompletion { .. } | CertNode::Win { .. } | CertNode::Loss { .. } => {}
         CertNode::Choice { child, .. } => {
             *child = offset_node_id(*child, base, final_len)?;
         }
-        CertNode::Universal { edges, .. } => {
+        CertNode::Universal {
+            edges,
+            commutations,
+            ..
+        } => {
             for edge in edges {
                 edge.child = offset_node_id(edge.child, base, final_len)?;
+            }
+            for item in commutations {
+                item.first_child = offset_node_id(item.first_child, base, final_len)?;
+                item.mirror_child = offset_node_id(item.mirror_child, base, final_len)?;
             }
         }
     }
@@ -1404,8 +2063,33 @@ fn compact_certificate_limited(
         }
         visiting[index] = true;
         let mapped_node = match &arena[index] {
-            CertNode::Terminal => CertNode::Terminal,
-            CertNode::Lambda1 => CertNode::Lambda1,
+            CertNode::OrCompletion {
+                mv,
+                witness,
+                completion_ply,
+            } => CertNode::OrCompletion {
+                mv: *mv,
+                witness: *witness,
+                completion_ply: *completion_ply,
+            },
+            CertNode::Win {
+                witness,
+                count,
+                budget,
+                resolution_ply,
+            } => CertNode::Win {
+                witness: *witness,
+                count: *count,
+                budget: *budget,
+                resolution_ply: *resolution_ply,
+            },
+            CertNode::Loss {
+                witnesses,
+                resolution_ply,
+            } => CertNode::Loss {
+                witnesses: witnesses.clone(),
+                resolution_ply: *resolution_ply,
+            },
             CertNode::Choice { mv, child } => CertNode::Choice {
                 mv: *mv,
                 child: copy(
@@ -1415,6 +2099,8 @@ fn compact_certificate_limited(
             CertNode::Universal {
                 edges,
                 implicit_dispatch,
+                zone,
+                commutations,
             } => {
                 *edge_count = edge_count.checked_add(edges.len())?;
                 if *edge_count > max_edges {
@@ -1430,9 +2116,38 @@ fn compact_certificate_limited(
                         )?,
                     });
                 }
+                let mut mapped_commutations = Vec::with_capacity(commutations.len());
+                for item in commutations {
+                    mapped_commutations.push(CertCommutation {
+                        first: item.first,
+                        omitted_second: item.omitted_second,
+                        first_child: copy(
+                            item.first_child,
+                            arena,
+                            remap,
+                            visiting,
+                            out,
+                            edge_count,
+                            max_nodes,
+                            max_edges,
+                        )?,
+                        mirror_child: copy(
+                            item.mirror_child,
+                            arena,
+                            remap,
+                            visiting,
+                            out,
+                            edge_count,
+                            max_nodes,
+                            max_edges,
+                        )?,
+                    });
+                }
                 CertNode::Universal {
                     edges: mapped_edges,
                     implicit_dispatch: *implicit_dispatch,
+                    zone: *zone,
+                    commutations: mapped_commutations,
                 }
             }
         };
@@ -1474,7 +2189,7 @@ mod tests {
     use crate::tss_verify::{
         d6_remap_certificate, d6_transform_coord, TssVerifier, D6_SYMMETRY_COUNT,
     };
-    use hexo_engine::apply_placement;
+    use hexo_engine::{apply_placement, WindowStore};
 
     fn replay(coords: &[(i16, i16)]) -> RustHexoState {
         let mut state = RustHexoState::new();
@@ -1488,6 +2203,181 @@ mod tests {
             .unwrap();
         }
         state
+    }
+
+    fn cache_test_leaf() -> CertNode {
+        CertNode::Win {
+            witness: WindowKey {
+                start: HexCoord::ZERO,
+                axis: hexo_engine::Axis::Q,
+            },
+            count: 5,
+            budget: 2,
+            resolution_ply: 1,
+        }
+    }
+
+    /// Geometry-only scaffold for the proof program's adversarial positions.
+    /// P2 materializes these ownership maps into matched-horizon solver roots;
+    /// keeping the canonical stone sets here makes mutations independent of a
+    /// particular legal replay ordering.
+    struct ZoneFixtureSpec {
+        stones: Vec<(HexCoord, Player)>,
+        focus: HexCoord,
+    }
+
+    fn g1_junction_spec() -> ZoneFixtureSpec {
+        let attacker = Player::Player0;
+        let defender = attacker.other();
+        let arms = [
+            (3, 0),
+            (4, 0),
+            (5, 0),
+            (-3, 0),
+            (-4, 0),
+            (-5, 0),
+            (0, 3),
+            (0, 4),
+            (0, 5),
+            (0, -3),
+            (0, -4),
+            (0, -5),
+        ];
+        let pin = [(8, -2), (11, -5), (12, -6), (13, -7)];
+        let caps = [(6, 0), (-6, 0), (0, 6), (0, -6)];
+        let mut stones = arms
+            .into_iter()
+            .chain(pin)
+            .map(|(q, r)| (HexCoord::new(q, r), attacker))
+            .collect::<Vec<_>>();
+        stones.extend(
+            caps.into_iter()
+                .map(|(q, r)| (HexCoord::new(q, r), defender)),
+        );
+        ZoneFixtureSpec {
+            stones,
+            focus: HexCoord::ZERO,
+        }
+    }
+
+    fn g3_counterfork_spec() -> ZoneFixtureSpec {
+        let attacker = Player::Player0;
+        let defender = attacker.other();
+        let defender_arms = [
+            (8, 0),
+            (9, 0),
+            (10, 0),
+            (5, 3),
+            (5, 4),
+            (5, 5),
+            (8, -3),
+            (9, -4),
+            (10, -5),
+            (5, 0),
+        ];
+        let attacker_scaffold = [(-9, 4), (-8, 4), (-6, 4), (-4, 4)];
+        let mut stones = defender_arms
+            .into_iter()
+            .map(|(q, r)| (HexCoord::new(q, r), defender))
+            .collect::<Vec<_>>();
+        stones.extend(
+            attacker_scaffold
+                .into_iter()
+                .map(|(q, r)| (HexCoord::new(q, r), attacker)),
+        );
+        ZoneFixtureSpec {
+            stones,
+            focus: HexCoord::new(5, 0),
+        }
+    }
+
+    #[test]
+    fn zone_adversary_geometry_scaffolds_match_python_reference() {
+        let g1 = g1_junction_spec();
+        let g1_store = WindowStore::from_placements(&g1.stones);
+        let junction_routes = g1_store
+            .entries()
+            .filter(|entry| {
+                entry.key().contains(g1.focus)
+                    && entry.count(Player::Player0) == 3
+                    && entry.count(Player::Player1) == 0
+            })
+            .count();
+        assert_eq!(junction_routes, 4, "G1 must retain all four junction arms");
+        let pins = g1_store
+            .entries()
+            .filter(|entry| {
+                entry.count(Player::Player0) == 4
+                    && entry.count(Player::Player1) == 0
+                    && entry.empty_cells().len() == 2
+            })
+            .count();
+        assert_eq!(pins, 1, "G1 pin is deliberately a single live window");
+
+        let g3 = g3_counterfork_spec();
+        let g3_store = WindowStore::from_placements(&g3.stones);
+        let fork_windows = g3_store
+            .entries()
+            .filter(|entry| {
+                entry.key().contains(g3.focus)
+                    && entry.count(Player::Player1) == 4
+                    && entry.count(Player::Player0) == 0
+            })
+            .map(|entry| entry.empty_cells())
+            .collect::<Vec<_>>();
+        assert_eq!(fork_windows.len(), 3);
+        for left in 0..fork_windows.len() {
+            for right in left + 1..fork_windows.len() {
+                assert!(
+                    fork_windows[left]
+                        .iter()
+                        .all(|cell| !fork_windows[right].contains(cell)),
+                    "G3 threat empties must be pairwise disjoint"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pair_generator_uses_frozen_parent_order_and_keeps_newly_legal_cells() {
+        let lower = HexCoord::new(-2, 0);
+        let first = HexCoord::new(0, 0);
+        let higher = HexCoord::new(2, 0);
+        let newly_legal_lower = HexCoord::new(-1, -1);
+        let pair = PairContext {
+            first,
+            turn_start_legal: vec![lower, first, higher],
+        };
+        let mut candidates = vec![lower, higher, newly_legal_lower];
+        restrict_pair_candidates(&mut candidates, &pair);
+        assert!(!candidates.contains(&lower));
+        assert!(candidates.contains(&higher));
+        assert!(candidates.contains(&newly_legal_lower));
+    }
+
+    #[test]
+    fn zone_generator_is_deterministic_and_never_count_truncates() {
+        let state = quiet_fixture();
+        let claimant = state.current_player().other();
+        let d = 1;
+        let caps = ZoneSearchCaps {
+            enabled: true,
+            stale_area_filter: false,
+            count2_threshold: false,
+            pair_commutation: false,
+        };
+        let first = zone_initial_candidates(&state, claimant, d, caps);
+        let second = zone_initial_candidates(&state, claimant, d, caps);
+        assert_eq!(first, second);
+        assert!(!first.is_empty());
+        let mut legal = Vec::new();
+        state.write_legal_moves(&mut legal);
+        assert!(first.len() <= legal.len());
+        assert!(first.iter().all(|mv| legal.contains(mv)));
+
+        let d6 = zone_initial_candidates(&state, claimant, 6, caps);
+        assert_eq!(d6.len(), legal.len(), "D>=6 must use the full legal set");
+        assert!(legal.iter().all(|mv| d6.contains(mv)));
     }
 
     fn forced_loss_fixture() -> RustHexoState {
@@ -1613,7 +2503,7 @@ mod tests {
             .unwrap();
         let mut context = SearchContext::new(500_000, 8 << 20, u64::MAX);
         let child = context
-            .prove(&mut work, Player::Player0, 1)
+            .prove(&mut work, Player::Player0, 1, None)
             .expect("validated forcing branch must prove");
         work.undo(delta);
         let root = context
@@ -1631,6 +2521,7 @@ mod tests {
             claimant: Player::Player0,
             root_node,
             nodes,
+            semantic_horizon: u32::MAX,
         }
     }
 
@@ -1690,6 +2581,7 @@ mod tests {
         let caps = SolveCaps {
             node_cap: 1,
             tt_bytes_cap: 0,
+            semantic_horizon: u32::MAX,
         };
         let result = TssSolver::default().solve(&state, &caps);
         assert_eq!(result.status, ProofStatus::Loss);
@@ -1761,6 +2653,7 @@ mod tests {
             &SolveCaps {
                 node_cap: 0,
                 tt_bytes_cap: usize::MAX,
+                semantic_horizon: u32::MAX,
             },
         );
         assert_eq!(result.status, ProofStatus::Unknown);
@@ -1769,11 +2662,39 @@ mod tests {
     }
 
     #[test]
+    fn semantic_horizon_is_an_absolute_placement_deadline() {
+        let state = deep_universal_fixture();
+        let root_ply = state.placements_made();
+        let result = TssSolver::default().solve(
+            &state,
+            &SolveCaps {
+                node_cap: 500_000,
+                tt_bytes_cap: 0,
+                semantic_horizon: root_ply,
+            },
+        );
+        assert_eq!(result.status, ProofStatus::Unknown);
+        assert!(result.cert.is_none());
+
+        let expired = TssSolver::default().solve(
+            &state,
+            &SolveCaps {
+                node_cap: 500_000,
+                tt_bytes_cap: 0,
+                semantic_horizon: root_ply - 1,
+            },
+        );
+        assert_eq!(expired.status, ProofStatus::Unknown);
+        assert_eq!(expired.stats.nodes, 0);
+    }
+
+    #[test]
     fn solver_configurations_are_deterministic_on_hard_leaf() {
         let state = forced_loss_fixture();
         let caps = SolveCaps {
             node_cap: 64,
             tt_bytes_cap: 4096,
+            semantic_horizon: u32::MAX,
         };
         let a = TssSolver::without_tt().solve(&state, &caps);
         let b = TssSolver::with_hash_mask(0).solve(&state, &caps);
@@ -1792,6 +2713,7 @@ mod tests {
             &SolveCaps {
                 node_cap: 500_000,
                 tt_bytes_cap: 8 << 20,
+                semantic_horizon: u32::MAX,
             },
         );
         assert_eq!(result.status, ProofStatus::Win);
@@ -1801,6 +2723,136 @@ mod tests {
             .iter()
             .any(|node| matches!(node, CertNode::Universal { .. })));
         assert!(TssVerifier.verify(&state, &cert, ProofStatus::Win));
+    }
+
+    #[test]
+    fn curated_deep_branch_zone_or_dispatch_is_reference_consistent() {
+        let state = deep_universal_fixture();
+        let base = deep_universal_certificate(&state);
+        let (exact_t, _) = crate::tss_verify::certificate_horizon_preflight(&base).unwrap();
+
+        fn collect_states(
+            cert: &TssCertificate,
+            id: CertNodeId,
+            state: &RustHexoState,
+            out: &mut [Option<RustHexoState>],
+        ) {
+            if out[id as usize].is_some() {
+                return;
+            }
+            out[id as usize] = Some(state.clone());
+            match &cert.nodes[id as usize] {
+                CertNode::Choice { mv, child } => {
+                    let mut next = state.clone();
+                    apply_placement(&mut next, Placement { coord: *mv }).unwrap();
+                    collect_states(cert, *child, &next, out);
+                }
+                CertNode::Universal { edges, .. } => {
+                    for edge in edges {
+                        let mut next = state.clone();
+                        apply_placement(&mut next, Placement { coord: edge.mv }).unwrap();
+                        collect_states(cert, edge.child, &next, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut states = vec![None; base.nodes.len()];
+        collect_states(&base, base.root_node, &state, &mut states);
+
+        let mut accepted = None;
+        for index in 0..base.nodes.len() {
+            let Some(node_state) = states[index].as_ref() else {
+                continue;
+            };
+            let CertNode::Universal {
+                edges,
+                implicit_dispatch: false,
+                ..
+            } = &base.nodes[index]
+            else {
+                continue;
+            };
+            let Some(d) =
+                remaining_defender_placements_for_horizon(node_state, base.claimant, exact_t)
+            else {
+                continue;
+            };
+            for drop_index in 0..edges.len() {
+                let mut nodes = base.nodes.clone();
+                let CertNode::Universal { edges, zone, .. } = &mut nodes[index] else {
+                    unreachable!()
+                };
+                *zone = Some(ZoneInfo {
+                    d,
+                    build_horizon: exact_t,
+                });
+                edges.remove(drop_index);
+                let Some((nodes, root_node)) = compact_certificate(&nodes, base.root_node) else {
+                    continue;
+                };
+                let candidate = TssCertificate {
+                    root: base.root.clone(),
+                    claimant: base.claimant,
+                    root_node,
+                    nodes,
+                    semantic_horizon: exact_t,
+                };
+                if TssVerifier.verify(&state, &candidate, ProofStatus::Win) {
+                    accepted = Some(candidate);
+                    break;
+                }
+            }
+            if accepted.is_some() {
+                break;
+            }
+        }
+        let cert = if let Some(cert) = accepted {
+            cert
+        } else {
+            // This curated forcing line's final core can cover every explicit
+            // reply. It still exercises the complete zone verifier; omission
+            // behavior is covered by the generator-set and mutation tests.
+            let mut nodes = base.nodes.clone();
+            let Some((index, d)) = states.iter().enumerate().find_map(|(index, replay)| {
+                let replay = replay.as_ref()?;
+                matches!(
+                    base.nodes[index],
+                    CertNode::Universal {
+                        implicit_dispatch: false,
+                        ..
+                    }
+                )
+                .then(|| {
+                    remaining_defender_placements_for_horizon(replay, base.claimant, exact_t)
+                        .map(|d| (index, d))
+                })
+                .flatten()
+            }) else {
+                // This line is dispatch-only; the U3 paired oracle is its
+                // applicable certificate gate.
+                return;
+            };
+            let CertNode::Universal { zone, .. } = &mut nodes[index] else {
+                unreachable!()
+            };
+            *zone = Some(ZoneInfo {
+                d,
+                build_horizon: exact_t,
+            });
+            TssCertificate {
+                root: base.root.clone(),
+                claimant: base.claimant,
+                root_node: base.root_node,
+                nodes,
+                semantic_horizon: exact_t,
+            }
+        };
+        assert!(TssVerifier.verify(&state, &cert, ProofStatus::Win));
+        assert_eq!(
+            tss_reference::solve(&state, exact_t - state.placements_made()).status,
+            ProofStatus::Win
+        );
     }
 
     #[test]
@@ -1821,6 +2873,7 @@ mod tests {
             let caps = SolveCaps {
                 node_cap,
                 tt_bytes_cap: 0,
+                semantic_horizon: u32::MAX,
             };
             let result = TssSolver::default().solve(&state, &caps);
             assert_eq!(result.status, expected);
@@ -1856,6 +2909,7 @@ mod tests {
             &SolveCaps {
                 node_cap: 1,
                 tt_bytes_cap: 0,
+                semantic_horizon: u32::MAX,
             },
         );
         assert_eq!(result.status, ProofStatus::Loss);
@@ -1914,28 +2968,125 @@ mod tests {
         let caps = SolveCaps {
             node_cap: 1,
             tt_bytes_cap: 1024,
+            semantic_horizon: u32::MAX,
         };
         let mut hard = 0usize;
-        for state in corpus {
-            let result = TssSolver::default().solve(&state, &caps);
+        for state in &corpus {
+            let result = TssSolver::default().solve(state, &caps);
             let Some(cert) = result.cert.as_ref() else {
                 assert_eq!(result.status, ProofStatus::Unknown);
                 continue;
             };
             hard += 1;
-            assert!(TssVerifier.verify(&state, cert, result.status));
-            let b = threats::placements_remaining(&state) as u32;
+            assert!(TssVerifier.verify(state, cert, result.status));
+            let b = threats::placements_remaining(state) as u32;
             let depth = if result.status == ProofStatus::Win {
                 b
             } else {
                 b + 2
             };
-            assert_eq!(tss_reference::solve(&state, depth).status, result.status);
+            assert_eq!(tss_reference::solve(state, depth).status, result.status);
         }
         assert!(
             hard >= 1,
             "dense anchor must produce at least one hard proof"
         );
+
+        // Repeat the one-sided differential with U1 enabled at a matched
+        // semantic horizon. Unknown remains an allowed restricted-search
+        // outcome; every hard claim must verify and match the exhaustive
+        // reference at the exact derived deadline.
+        let mut zoned_hard = 0usize;
+        for state in &corpus {
+            let mut solver = TssSolver::default();
+            solver.set_zone_options(ZoneSearchCaps {
+                enabled: true,
+                stale_area_filter: false,
+                count2_threshold: false,
+                pair_commutation: false,
+            });
+            let mut zone_caps = SolveCaps {
+                node_cap: 16,
+                tt_bytes_cap: 4096,
+                semantic_horizon: state.placements_made().saturating_add(4),
+            };
+            let mut result = solver.solve(&state, &zone_caps);
+            if let Some(cert) = result.cert.as_ref() {
+                if let Some((exact_t, true)) =
+                    crate::tss_verify::certificate_horizon_preflight(cert)
+                {
+                    if exact_t != zone_caps.semantic_horizon {
+                        zone_caps.semantic_horizon = exact_t;
+                        result = solver.solve(state, &zone_caps);
+                    }
+                }
+            }
+            let Some(cert) = result.cert.as_ref() else {
+                assert_eq!(result.status, ProofStatus::Unknown);
+                continue;
+            };
+            zoned_hard += 1;
+            assert!(TssVerifier.verify(state, cert, result.status));
+            let (exact_t, _) = crate::tss_verify::certificate_horizon_preflight(cert).unwrap();
+            assert_eq!(
+                tss_reference::solve(state, exact_t - state.placements_made()).status,
+                result.status,
+            );
+        }
+        assert!(zoned_hard >= 1);
+    }
+
+    #[test]
+    fn dispatch_theorem_and_per_move_staple_oracles_agree() {
+        let caps = SolveCaps {
+            node_cap: 2_000,
+            tt_bytes_cap: 0,
+            semantic_horizon: u32::MAX,
+        };
+        let mut corpus = Vec::new();
+        let mut random = 0x5a17_1e5u64;
+        for _ in 0..16 {
+            let mut state = RustHexoState::new();
+            for ply in 0..18 {
+                if ply >= 8 && ply % 3 == 0 {
+                    corpus.push(state.clone());
+                }
+                let mut legal = Vec::new();
+                state.write_legal_moves(&mut legal);
+                if legal.is_empty() {
+                    break;
+                }
+                random ^= random << 13;
+                random ^= random >> 7;
+                random ^= random << 17;
+                let coord = legal[(random as usize) % legal.len()];
+                if apply_placement(&mut state, Placement { coord })
+                    .unwrap()
+                    .outcome
+                    .is_some()
+                {
+                    break;
+                }
+            }
+        }
+        corpus.extend([
+            forced_defense_fixture(),
+            deep_universal_fixture(),
+            spare_tempo_fixture(),
+        ]);
+        let mut checked = 0usize;
+        for state in corpus {
+            let result = TssSolver::default().solve(&state, &caps);
+            let Some(cert) = result.cert.as_ref() else {
+                continue;
+            };
+            let theorem = TssVerifier.verify(&state, cert, result.status);
+            let per_move = TssVerifier.verify_with_dispatch_oracle(&state, cert, result.status);
+            assert_eq!(theorem, per_move, "paired dispatch oracle divergence");
+            assert!(theorem, "solver-produced hard certificate must verify");
+            checked += 1;
+        }
+        assert!(checked > 0, "paired corpus must contain hard certificates");
     }
 
     #[test]
@@ -1976,7 +3127,10 @@ mod tests {
             nodes: vec![CertNode::Universal {
                 edges: Vec::new(),
                 implicit_dispatch: true,
+                zone: None,
+                commutations: Vec::new(),
             }],
+            semantic_horizon: u32::MAX,
         };
         assert!(!TssVerifier.verify(&state, &bogus, ProofStatus::Loss));
     }
@@ -2031,6 +3185,7 @@ mod tests {
         let caps = SolveCaps {
             node_cap: 64,
             tt_bytes_cap: 64 << 10,
+            semantic_horizon: u32::MAX,
         };
         let base = TssSolver::default().solve(&state, &caps);
         assert_eq!(base.status, ProofStatus::Win);
@@ -2054,6 +3209,7 @@ mod tests {
         let caps_for = |bytes| SolveCaps {
             node_cap: 64,
             tt_bytes_cap: bytes,
+            semantic_horizon: u32::MAX,
         };
         let off = TssSolver::without_tt().solve(&state, &caps_for(0));
         let tiny = TssSolver::default().solve(&state, &caps_for(256));
@@ -2088,6 +3244,7 @@ mod tests {
         let caps = SolveCaps {
             node_cap: 64,
             tt_bytes_cap: 8 << 20,
+            semantic_horizon: u32::MAX,
         };
         let cold = TssSolver::default().solve(&state, &caps);
         let mut warm_solver = TssSolver::default();
@@ -2108,14 +3265,14 @@ mod tests {
         let key = PositionKey::from_state(&state);
         let mut cache = SharedProofCache::new(4096, u64::MAX);
         {
-            let arena = vec![CertNode::Lambda1];
+            let arena = vec![cache_test_leaf()];
             let proof = CachedProof::from_arena_limited(&arena, 0, 4, 4).unwrap();
             cache.insert(key.clone(), Player::Player0, proof);
         }
         let proof = cache.lookup_cloned(&key, Player::Player0).unwrap();
         let mut context = SearchContext::new(4, 0, u64::MAX);
         assert_eq!(context.import_cached_proof(proof, 0), Some(0));
-        assert!(matches!(context.arena.as_slice(), [CertNode::Lambda1]));
+        assert!(matches!(context.arena.as_slice(), [CertNode::Win { .. }]));
     }
 
     #[test]
@@ -2133,6 +3290,7 @@ mod tests {
         let generous = SolveCaps {
             node_cap: 500_000,
             tt_bytes_cap: 8 << 20,
+            semantic_horizon: u32::MAX,
         };
         let (local_cap, shared_cap) = split_tt_cap(generous.tt_bytes_cap);
         let mut solver = TssSolver::default();
@@ -2144,8 +3302,13 @@ mod tests {
                 local_cap,
                 u64::MAX,
                 &mut solver.shared_tt,
+                descendant_root.placements_made(),
+                generous.semantic_horizon,
+                ZoneSearchCaps::default(),
             );
-            let root = context.prove(&mut work, claimant, 1).unwrap();
+            let root = context
+                .prove(&mut work, claimant, descendant_root.placements_made(), None)
+                .unwrap();
             let CertNode::Universal { edges, .. } = &context.arena[root as usize] else {
                 panic!("forcing descendant root must be universal");
             };
@@ -2183,6 +3346,7 @@ mod tests {
         let tiny = SolveCaps {
             node_cap: 2,
             tt_bytes_cap: generous.tt_bytes_cap,
+            semantic_horizon: u32::MAX,
         };
         let cold = TssSolver::default().solve_goal(&descendant, &tiny, goal);
         assert_eq!(cold.status, ProofStatus::Unknown);
@@ -2199,6 +3363,7 @@ mod tests {
         let caps = SolveCaps {
             node_cap: 64,
             tt_bytes_cap: 8 << 20,
+            semantic_horizon: u32::MAX,
         };
         let mut solver = TssSolver::with_hash_mask(0);
         let first_a = solver.solve(&a, &caps);
@@ -2223,7 +3388,7 @@ mod tests {
     fn shared_tt_claimant_isolation() {
         let state = quiet_fixture();
         let key = PositionKey::from_state(&state);
-        let proof = CachedProof::from_compact(vec![CertNode::Lambda1], 0).unwrap();
+        let proof = CachedProof::from_compact(vec![cache_test_leaf()], 0).unwrap();
         let mut cache = SharedProofCache::new(4096, 0);
         cache.insert(key.clone(), Player::Player0, proof);
         assert!(cache.lookup_cloned(&key, Player::Player0).is_some());
@@ -2233,7 +3398,7 @@ mod tests {
     #[test]
     fn shared_tt_sustained_churn_respects_cap() {
         let mut cache = SharedProofCache::new(4096, u64::MAX);
-        let proof = CachedProof::from_compact(vec![CertNode::Lambda1], 0).unwrap();
+        let proof = CachedProof::from_compact(vec![cache_test_leaf()], 0).unwrap();
         let base = deep_universal_fixture();
         for round in 0..200usize {
             let state = transformed_state(&base, (round % D6_SYMMETRY_COUNT as usize) as u8);
@@ -2255,6 +3420,7 @@ mod tests {
         let large = SolveCaps {
             node_cap: 64,
             tt_bytes_cap: 8 << 20,
+            semantic_horizon: u32::MAX,
         };
         assert_eq!(solver.solve(&state, &large).status, ProofStatus::Win);
         assert!(solver.shared_tt.current_bytes > 0);
@@ -2262,6 +3428,7 @@ mod tests {
         let tiny = SolveCaps {
             node_cap: 0,
             tt_bytes_cap: 1024,
+            semantic_horizon: u32::MAX,
         };
         let tiny_result = solver.solve(&state, &tiny);
         assert_eq!(tiny_result.status, ProofStatus::Unknown);
@@ -2272,6 +3439,7 @@ mod tests {
         let zero = SolveCaps {
             node_cap: 0,
             tt_bytes_cap: 0,
+            semantic_horizon: u32::MAX,
         };
         let zero_result = solver.solve(&state, &zero);
         assert_eq!(zero_result.status, ProofStatus::Unknown);
@@ -2284,7 +3452,7 @@ mod tests {
     fn shared_tt_import_preflight_is_atomic() {
         let chain = CachedProof::from_compact(
             vec![
-                CertNode::Lambda1,
+                cache_test_leaf(),
                 CertNode::Choice {
                     mv: HexCoord::new(1, 0),
                     child: 0,
@@ -2305,20 +3473,22 @@ mod tests {
         assert!(depth_context.arena.is_empty());
 
         let mut node_context = SearchContext::new(4, 0, u64::MAX);
-        node_context.arena = vec![CertNode::Lambda1; MAX_CERT_NODES - 2];
+        node_context.arena = vec![cache_test_leaf(); MAX_CERT_NODES - 2];
         let before_nodes = node_context.arena.len();
         assert!(node_context.import_cached_proof(chain, 0).is_none());
         assert_eq!(node_context.arena.len(), before_nodes);
 
         let edge_proof = CachedProof::from_compact(
             vec![
-                CertNode::Lambda1,
+                cache_test_leaf(),
                 CertNode::Universal {
                     edges: vec![CertEdge {
                         mv: HexCoord::new(1, 0),
                         child: 0,
                     }],
                     implicit_dispatch: false,
+                    zone: None,
+                    commutations: Vec::new(),
                 },
             ],
             1,
@@ -2332,11 +3502,74 @@ mod tests {
     }
 
     #[test]
+    fn zone_cache_composition_refuses_slow_sibling_horizon() {
+        let mut quick = cache_test_leaf();
+        if let CertNode::Win { resolution_ply, .. } = &mut quick {
+            *resolution_ply = 4;
+        }
+        let mut slow = cache_test_leaf();
+        if let CertNode::Win { resolution_ply, .. } = &mut slow {
+            *resolution_ply = 8;
+        }
+        // The quick branch was zoned at T=6. Flattening it beside a slower
+        // T=8 sibling must retain min(zone-build)=6 and max(resolution)=8.
+        let composite = CachedProof::from_compact(
+            vec![
+                quick,
+                CertNode::Universal {
+                    edges: vec![CertEdge {
+                        mv: HexCoord::new(1, 0),
+                        child: 0,
+                    }],
+                    implicit_dispatch: false,
+                    zone: Some(ZoneInfo {
+                        d: 1,
+                        build_horizon: 6,
+                    }),
+                    commutations: Vec::new(),
+                },
+                slow,
+                CertNode::Universal {
+                    edges: vec![
+                        CertEdge {
+                            mv: HexCoord::new(2, 0),
+                            child: 1,
+                        },
+                        CertEdge {
+                            mv: HexCoord::new(3, 0),
+                            child: 2,
+                        },
+                    ],
+                    implicit_dispatch: false,
+                    zone: None,
+                    commutations: Vec::new(),
+                },
+            ],
+            3,
+        )
+        .unwrap();
+        assert_eq!(composite.resolution_t, 8);
+        assert_eq!(composite.zone_build_t, Some(6));
+
+        let mut rejected = SearchContext::new(32, 0, u64::MAX);
+        rejected.semantic_horizon = 8;
+        assert!(rejected.import_cached_proof(composite.clone(), 0).is_none());
+        assert!(rejected.arena.is_empty(), "import preflight must be atomic");
+
+        let mut accepted = SearchContext::new(32, 0, u64::MAX);
+        accepted.semantic_horizon = 6;
+        // Resolution 8 is independently too late, so a containing proof can
+        // never smuggle this malformed composite through at either horizon.
+        assert!(accepted.import_cached_proof(composite, 0).is_none());
+    }
+
+    #[test]
     fn shared_tt_never_caches_unknown() {
         let state = deep_universal_fixture();
         let caps = SolveCaps {
             node_cap: 1,
             tt_bytes_cap: 64 << 10,
+            semantic_horizon: u32::MAX,
         };
         let mut solver = TssSolver::default();
         let result = solver.solve(&state, &caps);
@@ -2354,6 +3587,7 @@ mod tests {
         let caps = SolveCaps {
             node_cap: 64,
             tt_bytes_cap: 64 << 10,
+            semantic_horizon: u32::MAX,
         };
         let run = |solver: &mut TssSolver| {
             let first = solver.solve(&a, &caps);
@@ -2382,6 +3616,7 @@ mod tests {
         let caps = SolveCaps {
             node_cap: 1,
             tt_bytes_cap: 4096,
+            semantic_horizon: u32::MAX,
         };
         let loss_filtered = TssSolver::default().solve_goal(&loss, &caps, SolveGoal::Win);
         assert_eq!(loss_filtered.status, ProofStatus::Unknown);
@@ -2403,6 +3638,7 @@ mod tests {
         let caps = SolveCaps {
             node_cap: 3,
             tt_bytes_cap: 4096,
+            semantic_horizon: u32::MAX,
         };
         let both = TssSolver::default().solve_goal(&state, &caps, SolveGoal::Both);
         let win = TssSolver::default().solve_goal(&state, &caps, SolveGoal::Win);
@@ -2417,6 +3653,7 @@ mod tests {
         let caps = SolveCaps {
             node_cap: 4,
             tt_bytes_cap: 0,
+            semantic_horizon: u32::MAX,
         };
         let expected = TssSolver::default()
             .solve_goal(&state, &caps, SolveGoal::Loss)
@@ -2437,7 +3674,7 @@ mod tests {
             let mut work = original.clone();
             let before = work.clone();
             let mut context = SearchContext::new(cap, 64 << 10, u64::MAX);
-            let _ = context.prove(&mut work, Player::Player0, 0);
+            let _ = context.prove(&mut work, Player::Player0, 0, None);
             assert_exact_state(&work, &before);
         }
     }
@@ -2450,6 +3687,7 @@ mod tests {
             &SolveCaps {
                 node_cap: 3,
                 tt_bytes_cap: 4096,
+                semantic_horizon: u32::MAX,
             },
         );
         let enough = TssSolver::default().solve(
@@ -2457,6 +3695,7 @@ mod tests {
             &SolveCaps {
                 node_cap: 5,
                 tt_bytes_cap: 4096,
+                semantic_horizon: u32::MAX,
             },
         );
         assert_eq!(small.status, ProofStatus::Unknown);

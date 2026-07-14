@@ -115,6 +115,12 @@ class SelfplayConfig:
     # sample_16=16 + async=true + inline_16=4 keeps today's inline tier
     # verbatim and adds pool coverage for the other 12/16.
     tss_solver_async_inline_16: int = 0
+    # Proof-carrying zone omission and its two optional heuristic trims.
+    # All remain default-off and are independently visible in rollout config.
+    tss_zone: bool = False
+    tss_zone_stale_filter: bool = False
+    tss_zone_count2: bool = False
+    tss_pair_commutation: bool = False
     search_parity_mode: bool = False
     # Moves-left utility. Defaults: enabled, two-sided, with the final-move
     # tie-break. Passed to Rust as divergence_overrides. moves_left_utility=False
@@ -595,6 +601,10 @@ def build_divergence_overrides(
         "tss_solver_async": bool(sp.tss_solver_async),
         "tss_solver_async_threads": int(sp.tss_solver_async_threads),
         "tss_solver_async_inline_16": int(sp.tss_solver_async_inline_16),
+        "tss_zone": bool(sp.tss_zone),
+        "tss_zone_stale_filter": bool(sp.tss_zone_stale_filter),
+        "tss_zone_count2": bool(sp.tss_zone_count2),
+        "tss_pair_commutation": bool(sp.tss_pair_commutation),
         # Gumbel AlphaZero levers (default OFF).
         "gumbel_target": bool(sp.gumbel_target_enabled),
         "gumbel_root": bool(sp.gumbel_root_enabled),
