@@ -533,19 +533,22 @@ def bradley_terry(
     if not used_scipy:
         theta, iterations = _newton_solve(neg_log_post, grad_free, hess_free, theta, grad_tol, max_iter)
 
-    # If scipy ran but missed tolerance, polish with Newton.
-    if np.max(np.abs(grad_free(theta))) >= grad_tol:
+    # If scipy ran but missed tolerance, polish with Newton. Guard m == 0 (an
+    # anchor-only pool): grad_free is zero-size and np.max would raise.
+    if m > 0 and np.max(np.abs(grad_free(theta))) >= grad_tol:
         theta, extra = _newton_solve(neg_log_post, grad_free, hess_free, theta, grad_tol, max_iter)
         iterations += extra
 
     max_grad = float(np.max(np.abs(grad_free(theta)))) if m > 0 else 0.0
     # Require a stationary point before inverting the Hessian for the covariance.
-    assert max_grad < grad_tol, (
-        f"Bradley-Terry did not converge: max|grad|={max_grad:.3e} "
-        f">= grad_tol={grad_tol:.3e}. A non-stationary fit makes the "
-        f"Hessian-inverse covariance invalid. Increase max_iter or check for "
-        f"degenerate edges."
-    )
+    # A real raise (not an assert) so ``python -O`` cannot strip the check.
+    if max_grad >= grad_tol:
+        raise RuntimeError(
+            f"Bradley-Terry did not converge: max|grad|={max_grad:.3e} "
+            f">= grad_tol={grad_tol:.3e}. A non-stationary fit makes the "
+            f"Hessian-inverse covariance invalid. Increase max_iter or check for "
+            f"degenerate edges."
+        )
 
     # Covariance = inverse Hessian of the neg-log-posterior at the optimum,
     # scaled logit^2 -> Elo^2. Anchor row/col stay zero (fixed parameter).
