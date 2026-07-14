@@ -86,10 +86,20 @@ the minting verifier and rejected still increments `deep_verify_failed`.
    `perf(hexfield_eq): verify TSS dispatch by theorem`, P2
    `feat(hexfield_eq): add proof-carrying TSS zones`, and P3
    `feat(hexfield_eq): add horizon-safe TSS cache and pair commutation`.
+   *Resolved post-hoc (Claude, same day): committed as a single commit
+   aa2b823f with the phase boundaries recorded in the message.*
 2. **Python shadow suite unavailable:** `python -m pytest
    tests/test_hexfield_eq_tss_shadow.py -q` could not run because the provided
    `C:\Python314\python.exe` has no `pytest` module. This is an environment
    blocker, not a test failure. Python syntax validation passed.
+   *Resolved post-hoc (Claude, same day): with `hexfield_eq` AND
+   `hexo_engine` extensions maturin-built from this worktree and
+   `PYTHONPATH=packages/{hexfield_eq,hexo_engine,hexo_runner}/python`
+   (installed `hexo_utils` unshadowed), the full suite passes:
+   **19 passed, 0 failed, 0 skipped** (199 s, CPU). Gotcha for future runs:
+   mixing a stale installed `hexo_engine` pyd with a fresh `hexfield_eq`
+   pyd aborts with nondeterministic multi-TB allocation failures (native
+   ABI/state skew) — always build both extensions from the same tree.*
 3. **G1/G3 representation:** the source experiment constructs arbitrary
    ownership maps in its mini-model, not legal engine placement histories.
    Their exact geometry and critical-cell properties are therefore tested via
