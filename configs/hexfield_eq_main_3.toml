@@ -43,7 +43,13 @@ tss_interior_guard = true
 # build — the guard/LOSS/WIN depth deltas become directly observable.
 tss_solver_mode = 3
 tss_solver_root_guard = true
-tss_solver_node_cap = 2000
+# ep41 (2026-07-14): 2000 -> 500. ep39 park first contact: demand 663 solves/s
+# vs 406/s capacity => 73% of parked leaves bailed (mean pen wait 512ms). The
+# release A/B bench decided the IDENTICAL position set at caps 500/2000/8000,
+# so the extra 1500 nodes only burn CPU failing to prove Unknowns. Watch
+# deep_win+deep_loss (~40k/epoch at cap 2000): a drop means production has
+# proofs the corpus lacked — revert to 2000 + accept bails if so.
+tss_solver_node_cap = 500
 # ep31 (2026-07-13, owner-ordered): 100% leaf coverage via the async solve
 # pool (Codex-approved after 4 review rounds) + the proof-carrying ZONE
 # solver rewrite (P0-P3, zone-theorem T3; docs/PLAN_TSS_SOLVER_UPGRADES.md).
@@ -74,9 +80,16 @@ tss_zone = false
 # known-good hybrid shape. threads_max=0 auto-scales workers 8->24 on queue
 # pressure (32-core host). Watch: park_bailed ~0, epoch time vs the ep36/37
 # 1347s baseline, deep_verify_failed 0.
+# ep41 retune (ep39 first contact): threads_max 0(auto->24) -> 12 — at 24
+# workers the 32-thread host oversubscribes (24 solve + ~10 driver threads):
+# per-worker throughput fell 28k -> 7.9k nodes/s and TOTAL fell below the
+# 8-worker ep37 rate. 12 workers x ~25k nodes/s ≈ 300k nodes/s vs ~120k
+# demand at cap 500 => 2.5x headroom, queue stays drained, bails ~0.
+# Timeout 100 -> 150ms: covers scheduler-iteration jitter once capacity
+# holds; still bounds worst-case leaf latency well under a move.
 tss_solver_park = true
-tss_solver_park_timeout_ms = 100
-tss_solver_async_threads_max = 0
+tss_solver_park_timeout_ms = 150
+tss_solver_async_threads_max = 12
 cache_max_states = 262144
 nucleus_f64 = true
 lcb_z = 1.6
