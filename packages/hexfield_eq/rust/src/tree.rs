@@ -1153,30 +1153,37 @@ impl RustSearch {
                         return self.tss_consume_gate(status, hard);
                     }
                     _ => {
-                        // Capacity pre-check BEFORE the state clone: a full
-                        // queue costs nothing but the counter bump.
-                        if self.tss_deep_memo.len() < Self::TSS_DEEP_MEMO_MAX
-                            && handle.has_capacity()
-                            && handle.try_enqueue(SolveRequest {
-                                slot: handle.slot,
-                                generation: handle.generation,
-                                hash,
-                                binding: binding.clone(),
-                                state: state.clone(),
-                                node_cap: self.divergences.tss_solver_node_cap as u64,
-                                goal,
-                                zone: crate::tss_core::ZoneSearchCaps {
-                                    enabled: self.divergences.tss_zone,
-                                    stale_area_filter: self.divergences.tss_zone_stale_filter,
-                                    count2_threshold: self.divergences.tss_zone_count2,
-                                    pair_commutation: self.divergences.tss_pair_commutation,
-                                },
+                        // LIFO enqueue: fresh work is always accepted (a full
+                        // queue evicts its OLDEST entry, counted as dropped);
+                        // None => pool shut down.
+                        let enqueued = (self.tss_deep_memo.len() < Self::TSS_DEEP_MEMO_MAX)
+                            .then(|| {
+                                handle.try_enqueue(SolveRequest {
+                                    slot: handle.slot,
+                                    generation: handle.generation,
+                                    hash,
+                                    binding: binding.clone(),
+                                    state: state.clone(),
+                                    node_cap: self.divergences.tss_solver_node_cap as u64,
+                                    goal,
+                                    zone: crate::tss_core::ZoneSearchCaps {
+                                        enabled: self.divergences.tss_zone,
+                                        stale_area_filter: self.divergences.tss_zone_stale_filter,
+                                        count2_threshold: self.divergences.tss_zone_count2,
+                                        pair_commutation: self.divergences.tss_pair_commutation,
+                                    },
+                                })
                             })
-                        {
-                            self.tss.async_enqueued += 1;
-                            self.tss_deep_memo.insert(hash, TssMemoEntry::Pending(binding));
-                        } else {
-                            self.tss.async_dropped += 1;
+                            .flatten();
+                        match enqueued {
+                            Some(evicted) => {
+                                self.tss.async_enqueued += 1;
+                                self.tss.async_dropped += evicted;
+                                self.tss_deep_memo.insert(hash, TssMemoEntry::Pending(binding));
+                            }
+                            None => {
+                                self.tss.async_dropped += 1;
+                            }
                         }
                         return None;
                     }

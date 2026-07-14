@@ -565,3 +565,63 @@ fn tss_bench_report() {
         median_ns <= 10_000_000,
     );
 }
+
+/// Zone A/B report: the whole corpus solved twice per cap (zone OFF vs zone
+/// ON, side-heuristics off — the production deploy shape) at several node
+/// caps. The rows answer two deployment questions directly: (1) does the
+/// zoned generator decide MORE positions within the same budget ("search
+/// deeper per node"), and (2) what happens to wall time per decision.
+#[test]
+#[ignore = "timing harness; run explicitly in --release mode"]
+fn tss_bench_zone_ab() {
+    let buckets = build_buckets();
+    for cap in [500u64, 2_000, 8_000] {
+        let caps = SolveCaps {
+            node_cap: cap,
+            tt_bytes_cap: 64 << 10,
+            semantic_horizon: u32::MAX,
+        };
+        for (label, zone_on) in [("off", false), ("on", true)] {
+            let mut solver = TssSolver::default();
+            solver.set_zone_options(crate::tss_core::ZoneSearchCaps {
+                enabled: zone_on,
+                stale_area_filter: false,
+                count2_threshold: false,
+                pair_commutation: false,
+            });
+            let mut totals = TimedTotals::default();
+            let mut latencies_ns = Vec::new();
+            for bucket in &buckets {
+                for position in &bucket.positions {
+                    let start = Instant::now();
+                    let result = solver.solve(&position.state, &caps);
+                    let elapsed = start.elapsed();
+                    latencies_ns.push(elapsed.as_nanos());
+                    totals.elapsed += elapsed;
+                    totals.nodes = totals.nodes.saturating_add(result.stats.nodes);
+                    totals.tt_hits = totals.tt_hits.saturating_add(result.stats.tt_hits);
+                    totals.peak_tt_bytes = totals.peak_tt_bytes.max(result.stats.peak_tt_bytes);
+                    record_status(&mut totals, result.status);
+                }
+            }
+            latencies_ns.sort_unstable();
+            let decided = totals.wins + totals.losses;
+            println!(
+                "TSS_BENCH_ZONE_AB cap={} zone={} positions={} decided={} wins={} losses={} unknown={} nodes={} nodes_per_sec={:.1} total_ms={:.3} median_ms={:.6} p95_ms={:.6}",
+                cap,
+                label,
+                latencies_ns.len(),
+                decided,
+                totals.wins,
+                totals.losses,
+                totals.unknown,
+                totals.nodes,
+                nodes_per_second(totals.nodes, totals.elapsed),
+                totals.elapsed.as_secs_f64() * 1_000.0,
+                median_ns(&latencies_ns) as f64 / 1_000_000.0,
+                latencies_ns[(latencies_ns.len() * 95).div_ceil(100).saturating_sub(1)] as f64
+                    / 1_000_000.0,
+            );
+        }
+    }
+}
