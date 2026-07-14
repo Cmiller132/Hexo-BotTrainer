@@ -218,6 +218,11 @@ class ContinuousDriver:
         self.tss_deep_unknown = 0
         self.tss_deep_nodes = 0
         self.tss_deep_verify_failed = 0
+        self.tss_horizon_retry = 0
+        self.tss_horizon_preflight_failed = 0
+        self.tss_zone_nodes = 0
+        self.tss_pair_omitted = 0
+        self.tss_zone_verify_failed = 0
         self.tss_deep_hard_backups = 0
         self.tss_deep_memo_hits = 0
         # Async solve pool (tss_solver_async): enqueue/drop/stale/pending
@@ -377,6 +382,11 @@ class ContinuousDriver:
             self.tss_deep_unknown += int(tss_diag.get("deep_unknown", 0))
             self.tss_deep_nodes += int(tss_diag.get("deep_nodes", 0))
             self.tss_deep_verify_failed += int(tss_diag.get("deep_verify_failed", 0))
+            self.tss_horizon_retry += int(tss_diag.get("horizon_retry", 0))
+            self.tss_horizon_preflight_failed += int(tss_diag.get("horizon_preflight_failed", 0))
+            self.tss_zone_nodes += int(tss_diag.get("zone_nodes", 0))
+            self.tss_pair_omitted += int(tss_diag.get("pair_omitted", 0))
+            self.tss_zone_verify_failed += int(tss_diag.get("zone_verify_failed", 0))
             self.tss_deep_hard_backups += int(tss_diag.get("deep_hard_backups", 0))
             self.tss_deep_memo_hits += int(tss_diag.get("deep_memo_hits", 0))
             self.tss_async_enqueued += int(tss_diag.get("async_enqueued", 0))
@@ -831,6 +841,11 @@ class ContinuousDriver:
                 "deep_unknown": int(self.tss_deep_unknown),
                 "deep_nodes": int(self.tss_deep_nodes),
                 "deep_verify_failed": int(self.tss_deep_verify_failed),
+                "horizon_retry": int(self.tss_horizon_retry),
+                "horizon_preflight_failed": int(self.tss_horizon_preflight_failed),
+                "zone_nodes": int(self.tss_zone_nodes),
+                "pair_omitted": int(self.tss_pair_omitted),
+                "zone_verify_failed": int(self.tss_zone_verify_failed),
                 "deep_hard_backups": int(self.tss_deep_hard_backups),
                 "deep_memo_hits": int(self.tss_deep_memo_hits),
                 "async_enqueued": int(self.tss_async_enqueued),
@@ -1129,7 +1144,9 @@ def _merge_epoch_diag(segments: list[dict[str, Any]]) -> dict[str, Any]:
             "prune_dropped_total", "class_rows", "win_rows", "loss_only_rows",
             "proof_rows", "proof_disagreements", "sharpened_rows",
             "deep_calls", "deep_win", "deep_loss", "deep_unknown", "deep_nodes",
-            "deep_verify_failed", "deep_hard_backups", "deep_memo_hits",
+            "deep_verify_failed", "horizon_retry", "horizon_preflight_failed",
+            "zone_nodes", "pair_omitted", "zone_verify_failed",
+            "deep_hard_backups", "deep_memo_hits",
             "async_enqueued", "async_dropped", "async_stale", "async_pending_hits",
             "depth_sum", "backups",
         )

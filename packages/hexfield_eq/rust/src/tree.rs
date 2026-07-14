@@ -196,6 +196,15 @@ pub struct Divergences {
     /// Deploy shape: sample_16=16 + async + inline_16=4 keeps today's proven
     /// inline tier verbatim and adds pool coverage for the other 12/16.
     pub tss_solver_async_inline_16: u32,
+    /// Enable proof-carrying zoned AND nodes. Default off until explicitly
+    /// selected by a rollout profile.
+    pub tss_zone: bool,
+    /// Optional exact stale-area trimming inside the zoned candidate builder.
+    pub tss_zone_stale_filter: bool,
+    /// Include claimant count-2 windows in the initial zone candidate set.
+    pub tss_zone_count2: bool,
+    /// Enable P3 same-turn defender-pair canonicalization.
+    pub tss_pair_commutation: bool,
 }
 
 impl Divergences {
@@ -244,6 +253,10 @@ impl Divergences {
             tss_solver_async: false,
             tss_solver_async_threads: 8,
             tss_solver_async_inline_16: 0,
+            tss_zone: false,
+            tss_zone_stale_filter: false,
+            tss_zone_count2: false,
+            tss_pair_commutation: false,
         }
     }
 
@@ -416,6 +429,17 @@ pub struct TssCounters {
     /// FATAL: a Win/Loss claim whose certificate the independent verifier
     /// rejected (degraded to Unknown). Production must alarm on nonzero.
     pub deep_verify_failed: u32,
+    /// Solver-side zone-horizon preflight retries.  These are expected,
+    /// non-fatal diagnostics and must never be folded into verify failures.
+    pub horizon_retry: u32,
+    /// A retry still produced a zone certificate at a different exact T;
+    /// it was stopped before the minting verifier (non-fatal Unknown).
+    pub horizon_preflight_failed: u32,
+    /// Zoned AND nodes and P3-commuted replies in submitted certificates.
+    pub zone_nodes: u32,
+    pub pair_omitted: u32,
+    /// Minting-verifier rejection specifically involving a zoned certificate.
+    pub zone_verify_failed: u32,
     /// Verified hard values actually backed up (each one elides a GPU eval).
     pub deep_hard_backups: u32,
     /// Per-move memo hits (a solved leaf re-selected).
@@ -455,6 +479,11 @@ impl TssCounters {
         self.deep_unknown += other.deep_unknown;
         self.deep_nodes += other.deep_nodes;
         self.deep_verify_failed += other.deep_verify_failed;
+        self.horizon_retry += other.horizon_retry;
+        self.horizon_preflight_failed += other.horizon_preflight_failed;
+        self.zone_nodes += other.zone_nodes;
+        self.pair_omitted += other.pair_omitted;
+        self.zone_verify_failed += other.zone_verify_failed;
         self.deep_hard_backups += other.deep_hard_backups;
         self.deep_memo_hits += other.deep_memo_hits;
         self.async_enqueued += other.async_enqueued;
@@ -511,16 +540,61 @@ pub fn tss_solve_verified(
     state: &RustHexoState,
     node_cap: u64,
     goal: SolveGoal,
+    zone: crate::tss_core::ZoneSearchCaps,
     solver: &mut TssSolver,
     counters: &mut TssCounters,
 ) -> VerifiedSolve {
     counters.deep_calls += 1;
-    let caps = SolveCaps {
+    let mut caps = SolveCaps {
         node_cap,
         tt_bytes_cap: RustSearch::TSS_SOLVER_TT_BYTES,
+        // Six complete turns is the initial deterministic semantic deadline.
+        // P2's preflight may diagnose this guess and P3's cache stamps bind it.
+        semantic_horizon: state.placements_made().saturating_add(12),
     };
-    let result = solver.solve_goal(state, &caps, goal);
+    solver.set_zone_options(zone);
+    let mut result = solver.solve_goal(state, &caps, goal);
     counters.deep_nodes += result.stats.nodes;
+    // A zoned proof is built against a guessed semantic deadline. Derive the
+    // certificate's actual maximum leaf resolution before verification and,
+    // only when the zone theorem was used, retry once at that exact deadline.
+    // No rejection-driven retry is permitted: verifier failures remain fatal.
+    if let Some(cert) = result.cert.as_ref() {
+        if let Some((derived_t, true)) = crate::tss_verify::certificate_horizon_preflight(cert) {
+            if derived_t != caps.semantic_horizon {
+                counters.horizon_retry += 1;
+                caps.semantic_horizon = derived_t;
+                result = solver.solve_goal(state, &caps, goal);
+                counters.deep_nodes += result.stats.nodes;
+            }
+        }
+    }
+    if let Some(cert) = result.cert.as_ref() {
+        if let Some((derived_t, true)) = crate::tss_verify::certificate_horizon_preflight(cert) {
+            if derived_t != caps.semantic_horizon {
+                counters.horizon_preflight_failed += 1;
+                counters.deep_unknown += 1;
+                return VerifiedSolve {
+                    status: ProofStatus::Unknown,
+                    hard: None,
+                    cert: None,
+                };
+            }
+        }
+        for node in &cert.nodes {
+            if let crate::tss_verify::CertNode::Universal {
+                zone,
+                commutations,
+                ..
+            } = node
+            {
+                counters.zone_nodes += u32::from(zone.is_some());
+                counters.pair_omitted = counters
+                    .pair_omitted
+                    .saturating_add(u32::try_from(commutations.len()).unwrap_or(u32::MAX));
+            }
+        }
+    }
     match result.status {
         ProofStatus::Unknown => {
             counters.deep_unknown += 1;
@@ -544,6 +618,14 @@ pub fn tss_solve_verified(
                 }
             }
             None => {
+                if result.cert.as_ref().is_some_and(|cert| {
+                    cert.nodes.iter().any(|node| matches!(
+                        node,
+                        crate::tss_verify::CertNode::Universal { zone: Some(_), .. }
+                    ))
+                }) {
+                    counters.zone_verify_failed += 1;
+                }
                 counters.deep_verify_failed += 1;
                 VerifiedSolve {
                     status: ProofStatus::Unknown,
@@ -1083,6 +1165,12 @@ impl RustSearch {
                                 state: state.clone(),
                                 node_cap: self.divergences.tss_solver_node_cap as u64,
                                 goal,
+                                zone: crate::tss_core::ZoneSearchCaps {
+                                    enabled: self.divergences.tss_zone,
+                                    stale_area_filter: self.divergences.tss_zone_stale_filter,
+                                    count2_threshold: self.divergences.tss_zone_count2,
+                                    pair_commutation: self.divergences.tss_pair_commutation,
+                                },
                             })
                         {
                             self.tss.async_enqueued += 1;
@@ -1102,8 +1190,19 @@ impl RustSearch {
             }
             _ => {
                 let node_cap = self.divergences.tss_solver_node_cap as u64;
-                let solved =
-                    tss_solve_verified(state, node_cap, goal, &mut self.tss_solver.0, &mut self.tss);
+                let solved = tss_solve_verified(
+                    state,
+                    node_cap,
+                    goal,
+                    crate::tss_core::ZoneSearchCaps {
+                        enabled: self.divergences.tss_zone,
+                        stale_area_filter: self.divergences.tss_zone_stale_filter,
+                        count2_threshold: self.divergences.tss_zone_count2,
+                        pair_commutation: self.divergences.tss_pair_commutation,
+                    },
+                    &mut self.tss_solver.0,
+                    &mut self.tss,
+                );
                 let (status, hard) = (solved.status, solved.hard);
                 if self.tss_deep_memo.len() < Self::TSS_DEEP_MEMO_MAX {
                     self.tss_deep_memo
@@ -1203,6 +1302,9 @@ impl RustSearch {
     pub fn apply_tss_async_response_stale(&mut self, response: &SolveResponse) {
         self.tss.async_stale += 1;
         self.tss.deep_verify_failed += response.counters.deep_verify_failed;
+        self.tss.horizon_retry += response.counters.horizon_retry;
+        self.tss.horizon_preflight_failed += response.counters.horizon_preflight_failed;
+        self.tss.zone_verify_failed += response.counters.zone_verify_failed;
         if self.divergences.tss_solver_async {
             self.tss_async_memo_write(response, true);
         }
@@ -3174,6 +3276,7 @@ mod tests {
             &state,
             2000,
             SolveGoal::Both,
+            crate::tss_core::ZoneSearchCaps::default(),
             &mut TssSolver::default(),
             &mut counters,
         );

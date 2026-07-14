@@ -33,7 +33,7 @@ use hexo_engine::HexoState as RustHexoState;
 use hexo_utils::StateHash;
 
 use crate::tree::{tss_solve_verified, TssCounters};
-use crate::tss_core::{HardValue, ProofStatus, SolveGoal};
+use crate::tss_core::{HardValue, ProofStatus, SolveGoal, ZoneSearchCaps};
 use crate::tss_solver::TssSolver;
 use crate::tss_verify::RootBinding;
 
@@ -66,6 +66,7 @@ pub struct SolveRequest {
     pub state: RustHexoState,
     pub node_cap: u64,
     pub goal: SolveGoal,
+    pub zone: ZoneSearchCaps,
 }
 
 /// A completed, already-verified solve. `hard` is `Some` only when the
@@ -316,6 +317,7 @@ fn worker_loop(
                 &request.state,
                 request.node_cap,
                 request.goal,
+                request.zone,
                 &mut solver,
                 &mut counters,
             );
@@ -417,10 +419,15 @@ mod tests {
             &state,
             2000,
             SolveGoal::Both,
+            ZoneSearchCaps::default(),
             &mut TssSolver::default(),
             &mut inline_counters,
         );
-        assert_ne!(inline.status, ProofStatus::Unknown, "fixture must be decided");
+        assert_ne!(
+            inline.status,
+            ProofStatus::Unknown,
+            "fixture must be decided"
+        );
         assert!(inline.hard.is_some(), "decided fixture must verify");
 
         let pool = TssAsyncPool::new(2);
@@ -434,6 +441,7 @@ mod tests {
             state: state.clone(),
             node_cap: 2000,
             goal: SolveGoal::Both,
+            zone: ZoneSearchCaps::default(),
         }));
         let response = drain_one(&pool);
         assert_eq!(response.slot, 7);
