@@ -49,17 +49,23 @@ tss_solver_node_cap = 2000
 # solver rewrite (P0-P3, zone-theorem T3; docs/PLAN_TSS_SOLVER_UPGRADES.md).
 # sample_16 4->16: the inline_16=4 tier keeps the proven ep28 inline slice
 # verbatim; the other 12/16 enqueue to 8 background workers and are consumed
-# by the selection descent-stop. tss_zone activates the U1/U2/U3 zoned AND
-# generation with typed certificates — the independent verifier still gates
-# every mint (deep_verify_failed MUST stay 0; zone_verify_failed nonfatal).
-# Zone side-heuristics (stale_filter/count2/pair_commutation) stay OFF.
+# by the selection descent-stop.
 # NOTE: self-play is no longer bit-reproducible under a fixed seed with the
 # pool on (proof-arrival timing); soundness unchanged.
+# ep35 redeploy (2026-07-14): LIFO queue (ep32/33 ran 64% async_stale under
+# FIFO backlog latency) + the 14 Codex-review fixes (see runbook). tss_zone
+# true->false: production first contact (ep32/33) showed zone_nodes=0 —
+# root-caused to the +12 horizon (defender budget 6 at the first Universal
+# => full-legal fallback); with the horizon-ladder fix the release A/B bench
+# still measured ZERO additional decided positions at caps 500/2000/8000 and
+# ~1.5x solver nodes on Unknowns. The P0-P3 solver rewrite (typed certs,
+# theorem dispatch) stays live; zoned AND generation is a TOML flip away if
+# a deeper-cap corpus ever shows value.
 tss_solver_sample_16 = 16
 tss_solver_async = true
 tss_solver_async_threads = 8
 tss_solver_async_inline_16 = 4
-tss_zone = true
+tss_zone = false
 cache_max_states = 262144
 nucleus_f64 = true
 lcb_z = 1.6
