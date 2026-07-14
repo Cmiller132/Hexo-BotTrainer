@@ -1484,6 +1484,7 @@ KNOWN_TRUNK_LAYOUTS: dict[tuple[int, int], str] = {
     (8, 3): "CCCACCCACCA",
     (10, 5): "CCACCACCACCACCA",
     (6, 3): "CCACCACCA",  # main_9 (current arch); legacy-v2 same shape, see above
+    (5, 3): "CCACCACA",  # a5 production arch (scripts/prefit_env/hexfield_eq_raytap_a5.env)
 }
 
 
