@@ -100,6 +100,19 @@ pub struct SolveCaps {
     /// Hard ceiling on transposition-table + cache bytes (the WSL host kills
     /// unbounded growth; §11). The solver must account and stay under it.
     pub tt_bytes_cap: usize,
+    /// Absolute placement index of the semantic proof deadline.  This is
+    /// deliberately distinct from `node_cap` and the structural depth guard:
+    /// zone obligations and typed leaf resolutions are statements about game
+    /// plies, not about how much search work happened to be affordable.
+    pub semantic_horizon: u32,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ZoneSearchCaps {
+    pub enabled: bool,
+    pub stale_area_filter: bool,
+    pub count2_threshold: bool,
+    pub pair_commutation: bool,
 }
 
 /// Which root-perspective hard result a caller wants the deep solver to seek.
@@ -204,7 +217,12 @@ mod tests {
                 let q = (rng.next() % 17) as i16 - 8;
                 let r = (rng.next() % 17) as i16 - 8;
                 let mut child = state.clone();
-                match apply_placement(&mut child, Placement { coord: HexCoord { q, r } }) {
+                match apply_placement(
+                    &mut child,
+                    Placement {
+                        coord: HexCoord { q, r },
+                    },
+                ) {
                     Ok(res) => {
                         if res.outcome.is_some() {
                             return out; // terminal: stop, later states don't exist
@@ -293,7 +311,11 @@ mod tests {
                         let v = threats::analyze(&child)
                             .verdict()
                             .expect("L1: non-tactical child must be λ¹-decided");
-                        let ours = if child.current_player() == mover { v } else { -v };
+                        let ours = if child.current_player() == mover {
+                            v
+                        } else {
+                            -v
+                        };
                         assert_eq!(
                             ours, -1.0,
                             "L1 violated: non-tactical move ({q},{r}) at k==B is not a \
@@ -338,10 +360,25 @@ mod tests {
             }
         }
         let state = RustHexoState::new();
-        let win = DeepResult { status: ProofStatus::Win, cert: Some(()), stats: SolveStats::default() };
-        let unknown = DeepResult::<()> { status: ProofStatus::Unknown, cert: None, stats: SolveStats::default() };
-        let certless_loss = DeepResult::<()> { status: ProofStatus::Loss, cert: None, stats: SolveStats::default() };
-        assert_eq!(hard_value_from_verified(&Accept, &state, &win).map(HardValue::value), Some(1.0));
+        let win = DeepResult {
+            status: ProofStatus::Win,
+            cert: Some(()),
+            stats: SolveStats::default(),
+        };
+        let unknown = DeepResult::<()> {
+            status: ProofStatus::Unknown,
+            cert: None,
+            stats: SolveStats::default(),
+        };
+        let certless_loss = DeepResult::<()> {
+            status: ProofStatus::Loss,
+            cert: None,
+            stats: SolveStats::default(),
+        };
+        assert_eq!(
+            hard_value_from_verified(&Accept, &state, &win).map(HardValue::value),
+            Some(1.0)
+        );
         assert!(hard_value_from_verified(&Reject, &state, &win).is_none());
         assert!(hard_value_from_verified(&Accept, &state, &unknown).is_none());
         assert!(hard_value_from_verified(&Accept, &state, &certless_loss).is_none());

@@ -381,6 +381,9 @@ class DigestHarness:
         self.deep_calls = 0
         self.deep_hard_backups = 0
         self.deep_verify_failed = 0
+        self.async_enqueued = 0
+        self.async_dropped = 0
+        self.async_stale = 0
 
     def __call__(self, game_key: int, payload: dict):
         self.moves += 1
@@ -390,6 +393,9 @@ class DigestHarness:
         self.deep_calls += int(tss.get("deep_calls", 0))
         self.deep_hard_backups += int(tss.get("deep_hard_backups", 0))
         self.deep_verify_failed += int(tss.get("deep_verify_failed", 0))
+        self.async_enqueued += int(tss.get("async_enqueued", 0))
+        self.async_dropped += int(tss.get("async_dropped", 0))
+        self.async_stale += int(tss.get("async_stale", 0))
         self.digest.update(b"|move|%d|" % int(game_key))
         for key in _CORE_KEYS:
             if key not in payload:
@@ -712,6 +718,38 @@ def test_deep_solver_shadow_is_a_no_op_and_consumption_is_not():
     if loss.deep_hard_backups > 0:
         assert loss.digest.hexdigest() != base.digest.hexdigest(), (
             "verified hard backups occurred but the stream is unchanged"
+        )
+
+
+@needs_rust
+def test_async_pool_routes_solves_end_to_end_and_stays_sound():
+    """Async rung e2e (tss_solver_async): with the pool on at mode 3, gated
+    leaves ENQUEUE (no inline solve on the search thread — deep_calls counts
+    only routed worker responses, so deep_calls > 0 proves the full
+    enqueue → solve → verify → drain → apply round trip), the bounded queue
+    never dropped, and the fatal verify counter stays 0. WHICH visit first
+    consumes a routed proof is wall-clock dependent by design (the async
+    trade), so consumption is asserted the same way as the mode-2 test: when
+    hard backups happened, the stream must genuinely diverge from base."""
+    base = _run_fixture_games(None)
+    result = _run_fixture_games(
+        {
+            "tss_solver_mode": 3,
+            "tss_solver_node_cap": 4000,
+            "tss_solver_async": True,
+            "tss_solver_async_threads": 2,
+        }
+    )
+    assert result.async_enqueued > 0, "threat-rich leaves must enqueue to the pool"
+    assert result.deep_calls > 0, (
+        "no worker response was routed back — the drain/apply path is dead"
+    )
+    assert result.async_dropped == 0, "the bounded queue must absorb fixture load"
+    assert result.deep_verify_failed == 0
+    assert result.moves > 10
+    if result.deep_hard_backups > 0:
+        assert result.digest.hexdigest() != base.digest.hexdigest(), (
+            "async hard backups occurred but the play/target stream is unchanged"
         )
 
 

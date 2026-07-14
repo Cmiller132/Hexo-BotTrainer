@@ -32,6 +32,7 @@ use crate::payload::{
 };
 use crate::state::states_from_py_states;
 use crate::threats_shared as threats;
+use crate::tss_async::TssAsyncPool;
 use crate::tss_core::{self, ProofStatus};
 use crate::tree::{
     gumbel_completed_q, gumbel_sigma, gumbel_softmax, random_unit, terminal_value,
@@ -535,6 +536,10 @@ pub struct HexfieldMctsSession {
     searches: HashMap<u64, RustSearch>,
     evaluation_cache: SharedEvaluationCache,
     cache_max_states: usize,
+    /// Background deep-solve pool (tss_solver_async). Created lazily on the
+    /// first run whose divergences enable it and kept for the session's life
+    /// so worker solver caches stay warm across run_continuous calls.
+    tss_pool: Option<TssAsyncPool>,
 }
 
 #[pymethods]
@@ -548,6 +553,7 @@ impl HexfieldMctsSession {
             searches: HashMap::new(),
             evaluation_cache: new_shared_evaluation_cache(),
             cache_max_states,
+            tss_pool: None,
         })
     }
 
@@ -597,6 +603,10 @@ impl HexfieldMctsSession {
     ) -> PyResult<Py<PyAny>> {
         validate_search_inputs(visits, c_puct, temperature)?;
         let divergences = resolve_divergences(search_parity_mode, divergence_overrides)?;
+        // Async solve pool (tss_solver_async): lazily created, session-owned.
+        if divergences.tss_solver_async && self.tss_pool.is_none() {
+            self.tss_pool = Some(TssAsyncPool::new(divergences.tss_solver_async_threads));
+        }
         let roots = states_from_py_states(py, states)?;
         if roots.is_empty() {
             return Ok(PyTuple::empty(py).into_any().unbind());
@@ -818,6 +828,7 @@ impl HexfieldMctsSession {
             request_logits,
             &move_temps,
             &baselines,
+            self.tss_pool.as_ref(),
         )?;
         let cache_len = self
             .evaluation_cache
@@ -928,6 +939,16 @@ impl HexfieldMctsSession {
             Some(fast) => resolve_divergences(search_parity_mode, Some(fast))?,
             None => divergences,
         };
+        // Async solve pool (tss_solver_async): created lazily on the first
+        // run whose class views ask for it, then kept warm on the session.
+        if (divergences.tss_solver_async || divergences_fast.tss_solver_async)
+            && self.tss_pool.is_none()
+        {
+            let threads = divergences
+                .tss_solver_async_threads
+                .max(divergences_fast.tss_solver_async_threads);
+            self.tss_pool = Some(TssAsyncPool::new(threads));
+        }
         let roots = states_from_py_states(py, states)?;
         if roots.len() != game_keys.len() {
             return Err(PyValueError::new_err(format!(
@@ -1179,6 +1200,13 @@ impl HexfieldMctsSession {
         let mut last_moves_decided: u64 = 1; // force the first scan
         while continuous_has_work(&slots) || !queue.is_empty() {
             stats.loop_iterations += 1;
+            // Async solve pool: re-wire fresh-move searches (new generation),
+            // then land completed solves in their memos — both before any
+            // select so consumption is as prompt as the pool allows.
+            if let Some(pool) = self.tss_pool.as_ref() {
+                wire_tss_async(&mut slots, pool);
+                drain_tss_async(pool, &mut slots);
+            }
             let phase_t0 = std::time::Instant::now();
             let (new_leaves, made_progress) = match prefetched.take() {
                 Some(result) => result,
@@ -1498,6 +1526,13 @@ impl HexfieldMctsSession {
         // The loop continues as long as there is host work OR an eval is still in
         // flight (so the last flush is always drained + completed).
         while continuous_has_work(slots) || !queue.is_empty() || inflight.is_some() {
+            // Async solve pool: re-wire fresh-move searches (new generation),
+            // then land completed solves — before the select, same as the
+            // lockstep scheduler.
+            if let Some(pool) = self.tss_pool.as_ref() {
+                wire_tss_async(slots, pool);
+                drain_tss_async(pool, slots);
+            }
             // (1) select N on the CURRENT (post-previous-backup) tree state.
             let (new_leaves, made_progress) = py.detach(|| {
                 select_continuous_pass(slots, c_puct, leaf_batch_per_root, virtual_loss)
@@ -1725,6 +1760,52 @@ impl HexfieldMctsSession {
 // === Lockstep internals ===
 
 #[allow(clippy::too_many_arguments)]
+/// Lockstep flavor of the continuous wire pass: searches are indexed by
+/// position in the batch. One lockstep call = one move, so every call wires
+/// fresh generations (set_additional_visits / RustSearch::new both leave the
+/// handle empty) and cross-call responses are dropped as stale.
+fn wire_tss_async_searches(searches: &mut [RustSearch], pool: &TssAsyncPool) {
+    for (index, search) in searches.iter_mut().enumerate() {
+        if !search.divergences.tss_solver_async || search.tss_async_generation().is_some() {
+            continue;
+        }
+        search.set_tss_async(Some(pool.handle_for(index as u32)));
+    }
+}
+
+/// Lockstep flavor of the continuous drain pass (same staleness contract:
+/// generation mismatch drops the result but never the fatal verify counter).
+fn drain_tss_async_searches(pool: &TssAsyncPool, searches: &mut [RustSearch]) {
+    if let Some(search) = searches.first_mut() {
+        search.tss.deep_verify_failed += pool.take_verify_failures();
+    }
+    let worker_panics = pool.take_worker_panics();
+    if worker_panics > 0 {
+        eprintln!(
+            "hexfield tss_async: {worker_panics} solve worker panic(s) — requests lost, \
+             workers recycled with fresh solvers"
+        );
+    }
+    for response in pool.try_drain() {
+        let Some(search) = searches.get_mut(response.slot as usize) else {
+            if response.counters.deep_verify_failed > 0 {
+                eprintln!(
+                    "hexfield tss_async: certificate VERIFY FAILURE in an orphaned \
+                     response (lockstep slot {}) — investigate immediately",
+                    response.slot
+                );
+            }
+            continue;
+        };
+        if search.tss_async_generation() == Some(response.generation) {
+            search.apply_tss_async_response(&response);
+        } else {
+            search.apply_tss_async_response_stale(&response);
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn run_searches_to_targets(
     py: Python<'_>,
     evaluator: &Bound<'_, PyAny>,
@@ -1739,6 +1820,7 @@ fn run_searches_to_targets(
     request_logits: bool,
     move_temps: &[f32],
     baselines: &[HashMap<PackedCoord, u32>],
+    tss_pool: Option<&TssAsyncPool>,
 ) -> PyResult<()> {
     // Two-stage pipeline: the next batch is selected before the current batch
     // is backed up. This ordering extends the virtual-loss window by one batch:
@@ -1780,6 +1862,12 @@ fn run_searches_to_targets(
     let async_eval = std::env::var("HEXFIELD_ASYNC_EVAL").is_ok()
         && evaluator.hasattr("submit_payload").unwrap_or(false);
 
+    // Async solve pool (lockstep flavor): wire fresh generations before the
+    // priming select so eval/arena searches enqueue instead of solving
+    // inline, exactly like self-play.
+    if let Some(pool) = tss_pool {
+        wire_tss_async_searches(searches, pool);
+    }
     early_stop_pass(searches);
     // No leaves in flight on the priming select, so the SH barrier is unblocked
     // for every search (empty in-flight set).
@@ -1787,6 +1875,10 @@ fn run_searches_to_targets(
         select_leaf_batch(searches, c_puct, leaf_batch_per_root, virtual_loss, &[])?;
 
     loop {
+        // Land completed pool solves before each batch's select.
+        if let Some(pool) = tss_pool {
+            drain_tss_async_searches(pool, searches);
+        }
         // Check between every batch (a no-op in parity mode); see the
         // in-flight-safety note on early_stop_pass above.
         early_stop_pass(searches);
@@ -1933,6 +2025,12 @@ fn select_leaf_batch(
                 let leaf_value = terminal_value(outcome, leaf_player);
                 let leaf_ml = ml_on.then_some(0.0);
                 search.backup_virtual(&selected.path, leaf_player, leaf_value, virtual_loss, leaf_ml);
+            } else if let Some(hard) = selected.hard {
+                // Async descent-stop: a pool-verified proof arrived for this
+                // position; the simulation stops here with a hard backup
+                // (counters bumped inside tss_async_descent_hard).
+                let leaf_player = selected.state.current_player();
+                search.backup_virtual(&selected.path, leaf_player, hard.value(), virtual_loss, None);
             } else if let Some(node_id) = selected.existing_node {
                 let node = &search.nodes[node_id];
                 let player = node.player;
@@ -2022,6 +2120,12 @@ fn select_continuous_leaves(
             let leaf_value = terminal_value(outcome, leaf_player);
             let leaf_ml = ml_on.then_some(0.0);
             search.backup_virtual(&selected.path, leaf_player, leaf_value, virtual_loss, leaf_ml);
+        } else if let Some(hard) = selected.hard {
+            // Async descent-stop: a pool-verified proof arrived for this
+            // position; the simulation stops here with a hard backup
+            // (counters bumped inside tss_async_descent_hard).
+            let leaf_player = selected.state.current_player();
+            search.backup_virtual(&selected.path, leaf_player, hard.value(), virtual_loss, None);
         } else if let Some(node_id) = selected.existing_node {
             let node = &search.nodes[node_id];
             let player = node.player;
@@ -2057,6 +2161,70 @@ fn select_continuous_leaves(
         }
     }
     Ok((leaves, made_progress, added_in_flight))
+}
+
+/// Async-pool wire pass (main thread, once per scheduler iteration, before
+/// any select): every active search whose class view enables the pool and
+/// whose handle was cleared (search creation / reuse-rebind / move advance
+/// all go through `set_additional_visits`, which drops it) gets a fresh
+/// slot-stamped handle at a NEW generation. Pairing the generation mint with
+/// the memo clear is the staleness guarantee: a response minted under an
+/// older generation can never match a live search.
+fn wire_tss_async(slots: &mut [ContinuousSlot], pool: &TssAsyncPool) {
+    for (slot_index, slot) in slots.iter_mut().enumerate() {
+        let Some(search) = slot.search.as_mut() else {
+            continue;
+        };
+        if !search.divergences.tss_solver_async || search.tss_async_generation().is_some() {
+            continue;
+        }
+        search.set_tss_async(Some(pool.handle_for(slot_index as u32)));
+    }
+}
+
+/// Async-pool drain pass (main thread, right after the wire pass): route
+/// every completed solve to its slot's live search. Generation mismatch =>
+/// the move/game advanced past the request — drop the result as stale,
+/// EXCEPT the fatal `deep_verify_failed` count, which is never dropped
+/// (production alarms on nonzero regardless of which move it belonged to).
+fn drain_tss_async(pool: &TssAsyncPool, slots: &mut [ContinuousSlot]) {
+    // Worker-side alarms first: the atomic is the sole carrier of the fatal
+    // verify signal (banked at solve time, so a dropped/stale/never-drained
+    // response cannot lose it). Fold into any live search => epoch JSON.
+    if let Some(search) = slots.iter_mut().find_map(|slot| slot.search.as_mut()) {
+        search.tss.deep_verify_failed += pool.take_verify_failures();
+    }
+    let worker_panics = pool.take_worker_panics();
+    if worker_panics > 0 {
+        eprintln!(
+            "hexfield tss_async: {worker_panics} solve worker panic(s) — requests lost, \
+             workers recycled with fresh solvers"
+        );
+    }
+    for response in pool.try_drain() {
+        let search = slots
+            .get_mut(response.slot as usize)
+            .and_then(|slot| slot.search.as_mut());
+        match search {
+            Some(search) => {
+                if search.tss_async_generation() == Some(response.generation) {
+                    search.apply_tss_async_response(&response);
+                } else {
+                    search.apply_tss_async_response_stale(&response);
+                }
+            }
+            None => {
+                if response.counters.deep_verify_failed > 0 {
+                    // Never let the fatal signal vanish with an emptied slot.
+                    eprintln!(
+                        "hexfield tss_async: certificate VERIFY FAILURE in an orphaned \
+                         response (slot {}) — investigate immediately",
+                        response.slot
+                    );
+                }
+            }
+        }
+    }
 }
 
 fn select_continuous_pass(
@@ -2738,6 +2906,13 @@ const KNOWN_DIVERGENCE_KEYS: &[&str] = &[
     "tss_solver_node_cap",
     "tss_solver_sample_16",
     "tss_solver_root_guard",
+    "tss_solver_async",
+    "tss_solver_async_threads",
+    "tss_solver_async_inline_16",
+    "tss_zone",
+    "tss_zone_stale_filter",
+    "tss_zone_count2",
+    "tss_pair_commutation",
     // Fast-class Gumbel levers (main_8: PUCT Full / Gumbel Fast). These name the
     // Fast view's values; the driver's Python side folds them into the SECOND
     // (fast) override map whose base keys resolve_divergences reads. They are
@@ -2849,6 +3024,27 @@ fn resolve_divergences(
         }
         if let Some(v) = overrides.get_item("tss_solver_root_guard")? {
             dv.tss_solver_root_guard = v.extract()?;
+        }
+        if let Some(v) = overrides.get_item("tss_solver_async")? {
+            dv.tss_solver_async = v.extract()?;
+        }
+        if let Some(v) = overrides.get_item("tss_solver_async_threads")? {
+            dv.tss_solver_async_threads = v.extract()?;
+        }
+        if let Some(v) = overrides.get_item("tss_solver_async_inline_16")? {
+            dv.tss_solver_async_inline_16 = v.extract()?;
+        }
+        if let Some(v) = overrides.get_item("tss_zone")? {
+            dv.tss_zone = v.extract()?;
+        }
+        if let Some(v) = overrides.get_item("tss_zone_stale_filter")? {
+            dv.tss_zone_stale_filter = v.extract()?;
+        }
+        if let Some(v) = overrides.get_item("tss_zone_count2")? {
+            dv.tss_zone_count2 = v.extract()?;
+        }
+        if let Some(v) = overrides.get_item("tss_pair_commutation")? {
+            dv.tss_pair_commutation = v.extract()?;
         }
         // Gumbel AlphaZero flags (default-OFF).
         if let Some(v) = overrides.get_item("gumbel_target")? {
@@ -3075,8 +3271,20 @@ impl PayloadNative {
         tss.set_item("deep_unknown", self.tss_counters.deep_unknown)?;
         tss.set_item("deep_nodes", self.tss_counters.deep_nodes)?;
         tss.set_item("deep_verify_failed", self.tss_counters.deep_verify_failed)?;
+        tss.set_item("horizon_retry", self.tss_counters.horizon_retry)?;
+        tss.set_item(
+            "horizon_preflight_failed",
+            self.tss_counters.horizon_preflight_failed,
+        )?;
+        tss.set_item("zone_nodes", self.tss_counters.zone_nodes)?;
+        tss.set_item("pair_omitted", self.tss_counters.pair_omitted)?;
+        tss.set_item("zone_verify_failed", self.tss_counters.zone_verify_failed)?;
         tss.set_item("deep_hard_backups", self.tss_counters.deep_hard_backups)?;
         tss.set_item("deep_memo_hits", self.tss_counters.deep_memo_hits)?;
+        tss.set_item("async_enqueued", self.tss_counters.async_enqueued)?;
+        tss.set_item("async_dropped", self.tss_counters.async_dropped)?;
+        tss.set_item("async_stale", self.tss_counters.async_stale)?;
+        tss.set_item("async_pending_hits", self.tss_counters.async_pending_hits)?;
         tss.set_item("depth_sum", self.tss_counters.depth_sum)?;
         tss.set_item("depth_max", self.tss_counters.depth_max)?;
         tss.set_item("backups", self.tss_counters.backups)?;
@@ -3270,6 +3478,12 @@ fn build_search_result_payload_native(
                 &search.root_state,
                 div.tss_solver_node_cap as u64,
                 tss_core::SolveGoal::Both,
+                tss_core::ZoneSearchCaps {
+                    enabled: div.tss_zone,
+                    stale_area_filter: div.tss_zone_stale_filter,
+                    count2_threshold: div.tss_zone_count2,
+                    pair_commutation: div.tss_pair_commutation,
+                },
                 &mut root_solver,
                 &mut deep_counters,
             );
@@ -4543,6 +4757,18 @@ mod fallback_tests {
             let bogus = PyDict::new(py);
             bogus.set_item("gumbel_bogus_lever", 1.0f32).unwrap();
             assert!(resolve_divergences(None, Some(&bogus)).is_err());
+
+            // Async solve-pool keys (the python side always emits both) must
+            // pass the gate and land on their fields.
+            let tss_async = PyDict::new(py);
+            tss_async.set_item("tss_solver_async", true).unwrap();
+            tss_async.set_item("tss_solver_async_threads", 12u32).unwrap();
+            tss_async.set_item("tss_solver_async_inline_16", 4u32).unwrap();
+            let av = resolve_divergences(None, Some(&tss_async))
+                .expect("tss_solver_async keys must pass the known-keys gate");
+            assert!(av.tss_solver_async);
+            assert_eq!(av.tss_solver_async_threads, 12);
+            assert_eq!(av.tss_solver_async_inline_16, 4);
         });
     }
 

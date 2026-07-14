@@ -28,6 +28,11 @@ mod tss_reference;
 mod tss_solver;
 mod tss_verify;
 
+// Background deep-solve pool (async rung): routes tree::tss_solve_verified
+// onto worker threads. Python-gated with tree (its counters/entry live there).
+#[cfg(feature = "python")]
+mod tss_async;
+
 #[cfg(test)]
 mod tss_bench;
 

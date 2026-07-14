@@ -54,3 +54,4 @@ data/checkpoints/*
 /data/hexo-bootstrap-corpus/
 /data/hexfield_main5_prefit/
 target-wsl/
+target-wsl-py/
