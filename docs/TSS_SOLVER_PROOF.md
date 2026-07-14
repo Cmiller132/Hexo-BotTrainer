@@ -107,6 +107,18 @@ component, and unreachable nodes (`tss_verify.rs:114`, `tss_verify.rs:461`,
 `tss_verify.rs:523`).  Replay then uses only engine application/legal
 enumeration plus `threats_shared::analyze` (`tss_verify.rs:272`).
 
+**Independence caveats.** The verifier's independence from the solver is at
+the level of *proof search*, not of every shared primitive.  Two common-mode
+dependencies are explicit and accepted: (1) the verifier and the solver both
+call the same `threats_shared::analyze` one-turn λ¹ analyzer for typed leaves
+and instant dispatch — a bug in λ¹ itself would not be caught by this pair
+(it is covered instead by λ¹'s own exhaustive unit/property tests); and (2)
+zone-omitted defender replies are dismissed by the *proven zone theorem*
+(`docs/PROOF_TSS_DEFENDER_ZONES.md`), whose obligations the verifier rechecks
+from scratch — they are theorem-dismissed, not individually replayed.  Claims
+of "full independence" elsewhere in this document should be read with these
+two carve-outs.
+
 ### Certificate soundness theorem
 
 **Theorem.** If `TssVerifier::verify(s, cert, status)` returns true, the player

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import random
 import warnings
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -395,3 +396,44 @@ def test_row_view_roundtrip(corpus) -> None:
             assert got_v.generation == want_v.generation
             row += 1
     assert row == window.n
+
+
+def test_window_preserves_tss_proof_metadata(tmp_path) -> None:
+    """The packed window must carry pol_class / tss_proof / target_regime
+    through load + concat + row_view (they were silently dropped pre-review):
+    proof provenance and target-semantics tags survive the replay round trip."""
+    samples_dir = tmp_path / "samples"
+    base = _rows(4242, 6, "gproof")
+    tagged = []
+    for i, s in enumerate(base):
+        support = [a for a, _ in s.policy]
+        # Class the first support action as a proven winner on even rows.
+        pol_class = ((support[0], 1),) if i % 2 == 0 else ()
+        tagged.append(
+            replace(s, policy_class=pol_class, tss_proof=(1 if i % 2 == 0 else 0))
+        )
+    entries = [_write_shard(samples_dir, 1, 0, tagged)]
+    # Also a regime-1 (sharpened) shard to prove mixed windows stay labeled.
+    from hexfield_eq.shards import write_compact_shard as _w
+
+    rel2 = "epoch_000001/game_1000001.npz"
+    _w(samples_dir / rel2, base, sidecar={"epoch": 1}, target_regime=1)
+    entries.append(
+        ShardEntry(rel_path=rel2, rows=len(base), generation=1, game_key=1000001)
+    )
+
+    window = build_window_split(
+        entries, keep_prob=1.0, rng=np.random.default_rng(5), samples_dir=samples_dir
+    )
+    assert window.n == len(tagged) + len(base)
+    for name in ("tss_proof", "target_regime", "pol_class"):
+        assert name in window.cols, name
+    for i, s in enumerate(tagged):
+        v = window.row_view(i)
+        assert v.tss_proof == (1 if i % 2 == 0 else 0)
+        assert v.target_regime == 0
+        assert v.policy_class() == tuple((int(a), int(c)) for a, c in s.policy_class)
+    for j in range(len(base)):
+        v = window.row_view(len(tagged) + j)
+        assert v.target_regime == 1
+        assert v.policy_class() == ()

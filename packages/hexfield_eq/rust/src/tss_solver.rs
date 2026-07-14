@@ -73,7 +73,16 @@ impl Default for TssSolver {
 }
 
 impl TssSolver {
+    /// Set the zone/commutation options for subsequent solves. Changing the
+    /// options DROPS the persistent positive-fragment cache: cached fragments
+    /// are verified proofs either way, but their node-cost provenance belongs
+    /// to the profile that built them — reusing them across an ON→OFF flip
+    /// contaminates A/B node counts and conditional determinism (Codex
+    /// review, profile isolation). Same-options calls keep the warm cache.
     pub(crate) fn set_zone_options(&mut self, zone: ZoneSearchCaps) {
+        if self.zone != zone {
+            self.shared_tt.clear();
+        }
         self.zone = zone;
     }
 
@@ -1201,6 +1210,11 @@ fn remaining_defender_placements_for_horizon(
     claimant: Player,
     horizon: u32,
 ) -> Option<u32> {
+    // Zone machinery only distinguishes budgets 0..=5 (>= 6 takes the full
+    // legal set) and production horizons sit ~12 plies out, so any count past
+    // this band signals a corrupted/degenerate horizon — bail (None => no
+    // zone, full legal set) instead of walking a `u32::MAX` horizon.
+    const DEFENDER_BUDGET_BAIL: u32 = 8;
     let mut ply = state.placements_made();
     if horizon < ply {
         return None;
@@ -1211,6 +1225,9 @@ fn remaining_defender_placements_for_horizon(
     while ply < horizon {
         if player != claimant {
             count = count.checked_add(1)?;
+            if count > DEFENDER_BUDGET_BAIL {
+                return None;
+            }
         }
         match phase {
             TurnPhase::Opening => {
@@ -1819,18 +1836,31 @@ impl CachedProof {
     fn heap_bytes(&self) -> usize {
         let mut bytes = allocation_bytes(self.nodes.capacity(), size_of::<CertNode>());
         for node in &self.nodes {
-            if let CertNode::Universal {
-                edges,
-                commutations,
-                ..
-            } = node
-            {
-                bytes =
-                    bytes.saturating_add(allocation_bytes(edges.capacity(), size_of::<CertEdge>()));
-                bytes = bytes.saturating_add(allocation_bytes(
-                    commutations.capacity(),
-                    size_of::<CertCommutation>(),
-                ));
+            match node {
+                CertNode::Universal {
+                    edges,
+                    commutations,
+                    ..
+                } => {
+                    bytes = bytes.saturating_add(allocation_bytes(
+                        edges.capacity(),
+                        size_of::<CertEdge>(),
+                    ));
+                    bytes = bytes.saturating_add(allocation_bytes(
+                        commutations.capacity(),
+                        size_of::<CertCommutation>(),
+                    ));
+                }
+                // Adaptive LOSS contracts own a witness vector too — omitting
+                // it made the cap admission understate real heap (Codex
+                // review, cache accounting).
+                CertNode::Loss { witnesses, .. } => {
+                    bytes = bytes.saturating_add(allocation_bytes(
+                        witnesses.capacity(),
+                        size_of::<WindowKey>(),
+                    ));
+                }
+                CertNode::OrCompletion { .. } | CertNode::Win { .. } | CertNode::Choice { .. } => {}
             }
         }
         bytes
@@ -1903,6 +1933,11 @@ impl SharedProofCache {
         }
     }
 
+    /// Drop every retained fragment (profile isolation on option changes).
+    fn clear(&mut self) {
+        *self = Self::new(self.cap, self.hash_mask);
+    }
+
     fn lookup_cloned(&self, key: &PositionKey, claimant: Player) -> Option<CachedProof> {
         if self.slots.is_empty() {
             return None;
@@ -1921,9 +1956,26 @@ impl SharedProofCache {
     fn could_admit_compact(&self, key: &PositionKey, nodes: &[CertNode]) -> bool {
         let mut proof_heap = allocation_bytes(nodes.len(), size_of::<CertNode>());
         for node in nodes {
-            if let CertNode::Universal { edges, .. } = node {
-                proof_heap =
-                    proof_heap.saturating_add(allocation_bytes(edges.len(), size_of::<CertEdge>()));
+            match node {
+                CertNode::Universal {
+                    edges,
+                    commutations,
+                    ..
+                } => {
+                    proof_heap = proof_heap
+                        .saturating_add(allocation_bytes(edges.len(), size_of::<CertEdge>()));
+                    proof_heap = proof_heap.saturating_add(allocation_bytes(
+                        commutations.len(),
+                        size_of::<CertCommutation>(),
+                    ));
+                }
+                CertNode::Loss { witnesses, .. } => {
+                    proof_heap = proof_heap.saturating_add(allocation_bytes(
+                        witnesses.len(),
+                        size_of::<WindowKey>(),
+                    ));
+                }
+                CertNode::OrCompletion { .. } | CertNode::Win { .. } | CertNode::Choice { .. } => {}
             }
         }
         self.could_admit_heap(key, proof_heap)

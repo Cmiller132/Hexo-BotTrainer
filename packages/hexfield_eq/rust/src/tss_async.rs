@@ -57,6 +57,10 @@ struct RequestQueue {
 struct QueueState {
     entries: VecDeque<SolveRequest>,
     disconnected: bool,
+    /// Requests popped by a worker whose response has not been sent yet.
+    /// Tracked under the queue lock so `is_idle` can never miss a request
+    /// that is between pop and completion (quiesce correctness).
+    in_flight: u32,
 }
 
 impl RequestQueue {
@@ -65,6 +69,7 @@ impl RequestQueue {
             queue: Mutex::new(QueueState {
                 entries: VecDeque::with_capacity(1024),
                 disconnected: false,
+                in_flight: 0,
             }),
             ready: Condvar::new(),
         }
@@ -92,7 +97,10 @@ impl RequestQueue {
     }
 
     /// Pop the NEWEST request, waiting up to 50ms. `None` => timed out or
-    /// disconnected (caller rechecks its shutdown flag either way).
+    /// disconnected (caller rechecks its shutdown flag either way). A popped
+    /// request is marked in-flight under the same lock; the worker MUST pair
+    /// it with `finish_one` once the solve is resolved (sent, dropped, or
+    /// panicked).
     fn pop_newest(&self) -> Option<SolveRequest> {
         let mut state = self.queue.lock().ok()?;
         if state.entries.is_empty() && !state.disconnected {
@@ -102,7 +110,38 @@ impl RequestQueue {
                 .ok()?;
             state = next;
         }
-        state.entries.pop_back()
+        let popped = state.entries.pop_back();
+        if popped.is_some() {
+            state.in_flight = state.in_flight.saturating_add(1);
+        }
+        popped
+    }
+
+    /// Mark one popped request resolved (response sent, dropped, or panicked).
+    fn finish_one(&self) {
+        if let Ok(mut state) = self.queue.lock() {
+            state.in_flight = state.in_flight.saturating_sub(1);
+        }
+    }
+
+    /// Discard every pending (not yet popped) request, returning the count.
+    fn clear_pending(&self) -> u32 {
+        match self.queue.lock() {
+            Ok(mut state) => {
+                let cleared = state.entries.len() as u32;
+                state.entries.clear();
+                cleared
+            }
+            Err(_) => 0,
+        }
+    }
+
+    /// True when no request is queued and none is mid-solve.
+    fn is_idle(&self) -> bool {
+        match self.queue.lock() {
+            Ok(state) => state.entries.is_empty() && state.in_flight == 0,
+            Err(_) => true,
+        }
     }
 
     fn disconnect(&self) {
@@ -271,7 +310,24 @@ impl TssAsyncPool {
         self.alarms.worker_panics.swap(0, Ordering::Relaxed)
     }
 
-    #[cfg(test)]
+    /// End-of-run quiesce (Codex review, late-alarm loss): discard every
+    /// pending request (all are stale once the scheduler loop ends — their
+    /// generations died with the finished slots) and wait, bounded, for
+    /// in-flight solves to resolve, so the alarm bank and result channel are
+    /// FINAL before the caller takes its tail drain into the epoch telemetry.
+    /// Returns the number of discarded pending requests. On timeout (a solve
+    /// still mid-flight) the residue still reaches the next drain pass or the
+    /// Drop-time stderr backstop.
+    pub fn quiesce_for_telemetry(&self, max_wait: std::time::Duration) -> u32 {
+        let cleared = self.requests.clear_pending();
+        let deadline = std::time::Instant::now() + max_wait;
+        while !self.requests.is_idle() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        cleared
+    }
+
+    /// Live worker-thread count (drives the resize-on-config-change check).
     pub fn worker_count(&self) -> usize {
         self.workers.len()
     }
@@ -325,6 +381,7 @@ fn worker_loop(
             continue; // timeout or disconnect: loop top rechecks shutdown
         };
         if shutdown.load(Ordering::Relaxed) {
+            rx.finish_one();
             return; // checked again post-pop: skip the doomed solve
         }
         // Panic shield (Codex review 7): a panicking solve loses its request
@@ -349,6 +406,7 @@ fn worker_loop(
             Err(_) => {
                 alarms.worker_panics.fetch_add(1, Ordering::Relaxed);
                 solver = TssSolver::default();
+                rx.finish_one();
                 continue;
             }
         };
@@ -370,7 +428,9 @@ fn worker_loop(
             hard,
             counters,
         };
-        if tx.send(response).is_err() {
+        let sent = tx.send(response);
+        rx.finish_one();
+        if sent.is_err() {
             return; // pool dropped
         }
     }

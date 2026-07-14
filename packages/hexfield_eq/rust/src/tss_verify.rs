@@ -256,11 +256,19 @@ fn certificate_metadata(cert: &TssCertificate) -> Option<CertificateMetadata> {
         }
     }
     let mut cores = vec![None; cert.nodes.len()];
+    // Depth-bounded like `verify_node`: metadata construction must never
+    // out-resource the replay it precedes (a valid acyclic million-node Choice
+    // chain would otherwise overflow the stack here before verification could
+    // reject it at MAX_CERT_DEPTH).
     fn build(
         cert: &TssCertificate,
         id: CertNodeId,
         memo: &mut [Option<Vec<HexCoord>>],
+        depth: usize,
     ) -> Option<Vec<HexCoord>> {
+        if depth > MAX_CERT_DEPTH {
+            return None;
+        }
         if let Some(core) = memo.get(id as usize)?.as_ref() {
             return Some(core.clone());
         }
@@ -278,11 +286,11 @@ fn certificate_metadata(cert: &TssCertificate) -> Option<CertificateMetadata> {
             }
             CertNode::Choice { mv, child } => {
                 core.push(*mv);
-                core.extend(build(cert, *child, memo)?);
+                core.extend(build(cert, *child, memo, depth + 1)?);
             }
             CertNode::Universal { edges, .. } => {
                 for edge in edges {
-                    core.extend(build(cert, edge.child, memo)?);
+                    core.extend(build(cert, edge.child, memo, depth + 1)?);
                 }
             }
         }
@@ -291,7 +299,7 @@ fn certificate_metadata(cert: &TssCertificate) -> Option<CertificateMetadata> {
         memo[id as usize] = Some(core.clone());
         Some(core)
     }
-    build(cert, cert.root_node, &mut cores)?;
+    build(cert, cert.root_node, &mut cores, 0)?;
     let cores = cores.into_iter().collect::<Option<Vec<_>>>()?;
     Some(CertificateMetadata {
         derived_t,
@@ -904,6 +912,13 @@ fn remaining_defender_placements(
     claimant: Player,
     horizon: u32,
 ) -> Option<u32> {
+    // A valid zone node exists only for defender budgets 0..=5 (the solver
+    // takes the full legal set at d >= 6), so once the count passes that band
+    // the exact value can no longer matter — bail rather than walk a
+    // corrupted/adversarial horizon (`u32::MAX` would otherwise spin billions
+    // of iterations outside every node cap). `None` rejects the node, which
+    // is always sound.
+    const DEFENDER_BUDGET_BAIL: u32 = 8;
     let mut ply = state.placements_made();
     if horizon < ply {
         return None;
@@ -914,6 +929,9 @@ fn remaining_defender_placements(
     while ply < horizon {
         if player != claimant {
             count = count.checked_add(1)?;
+            if count > DEFENDER_BUDGET_BAIL {
+                return None;
+            }
         }
         match phase {
             TurnPhase::Opening => {

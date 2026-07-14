@@ -112,7 +112,8 @@ def _sharpen_target(
     the only legal support)."""
 
     classes = [cmap.get(int(a), 0) for a in ids]
-    if any(c == 1 for c in classes):
+    winners = any(c == 1 for c in classes)
+    if winners:
         kept = [w if c == 1 else 0.0 for w, c in zip(weights, classes)]
     elif any(c == -1 for c in classes):
         kept = [w if c != -1 else 0.0 for w, c in zip(weights, classes)]
@@ -120,7 +121,19 @@ def _sharpen_target(
         return None
     original = float(sum(weights))
     total = float(sum(kept))
-    if total <= 0.0 or original <= 0.0:
+    if original <= 0.0:
+        return None
+    if winners and total <= 0.0:
+        # Zero-mass winner set: the deep root guard can PLAY a verified win
+        # the net left outside the visit support (it rides the support at
+        # weight 0). Sharpening must still reach it — spread the original
+        # mass equally over the proven winners instead of falling back to the
+        # raw target (which trains toward the non-winning moves the game did
+        # not play).
+        n_win = sum(1 for c in classes if c == 1)
+        share = original / float(n_win)
+        return [share if c == 1 else 0.0 for c in classes]
+    if total <= 0.0:
         return None
     if total == original:
         return None  # nothing was zeroed; keep the original object
@@ -1168,7 +1181,6 @@ def _merge_epoch_diag(segments: list[dict[str, Any]]) -> dict[str, Any]:
         )
         for mkey in (
             "win_retained_mass_mean",
-            "win_retained_mass_p10",
             "gumbel_win_retained_mass_mean",
         ):
             tss[mkey] = _weighted_mean(
@@ -1177,6 +1189,16 @@ def _merge_epoch_diag(segments: list[dict[str, Any]]) -> dict[str, Any]:
                     for seg in tss_segs
                 ]
             )
+        # A weighted mean of per-segment p10 values is NOT a combined p10
+        # (Codex review, resume gate). Report the MIN across segments instead:
+        # a conservative lower bound, so the Lever-1 rollout gate can only err
+        # cautious after a resume.
+        p10_vals = [
+            seg.get("win_retained_mass_p10")
+            for seg in tss_segs
+            if seg.get("win_retained_mass_p10") is not None
+        ]
+        tss["win_retained_mass_p10"] = min(p10_vals) if p10_vals else None
         merged["tss"] = tss
 
     # Store raw segment payloads (prior first, resumed last), capped.
@@ -1483,6 +1505,15 @@ def generate_selfplay_epoch(*, ctx, components, epoch: int, games_per_epoch: int
         "scheduler": {k: v for k, v in scheduler_stats.items() if not isinstance(v, dict)},
         **driver.stats(),
     }
+    # End-of-run async-pool tail sweep (Codex review): fatal verify failures
+    # banked after the last per-move payload fold arrive via the scheduler's
+    # tail-drain counters — add them into the epoch's FATAL counter so the
+    # "nonzero => halt rollout" tripwire cannot be timing-dependent.
+    tail_verify = int(scheduler_stats.get("tss_async_verify_failed_tail", 0) or 0)
+    if tail_verify and isinstance(result.get("tss"), dict):
+        result["tss"]["deep_verify_failed"] = (
+            int(result["tss"].get("deep_verify_failed", 0) or 0) + tail_verify
+        )
     # Derived rates from the scheduler counters (guarded div-by-zero). Computed
     # on this segment's own scheduler before any merge.
     _derive_scheduler_rates(result)
