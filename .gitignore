@@ -55,3 +55,4 @@ data/checkpoints/*
 /data/hexfield_main5_prefit/
 target-wsl/
 target-wsl-py/
+packages/hexfield_eq/rust/target-wsl-lifo/

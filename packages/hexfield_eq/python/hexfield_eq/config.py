@@ -107,13 +107,26 @@ class SelfplayConfig:
     # (result arrival is wall-clock dependent); soundness is unchanged — the
     # workers run the identical solver → verifier → sealed-mint path.
     tss_solver_async: bool = False
-    # Worker threads for the async pool (Rust clamps to [1, 32]).
+    # Base worker count for the async pool (Rust validates [1, 32]).
     tss_solver_async_threads: int = 8
+    # Park-mode maximum after queue-pressure scale-up. 0 = auto: clamp
+    # available_parallelism - 6 between base and 24 (a base above 24 remains
+    # its own ceiling); otherwise base..=64. Ignored when parking is off: the
+    # legacy async pool remains fixed at the base count for flag-off identity.
+    tss_solver_async_threads_max: int = 0
+    # Wait-at-leaf synchronous consumption: accepted async requests park their
+    # leaves off the GPU queue until a verified result arrives or the bounded
+    # bail timeout expires. Requires tss_solver_async. The select loop itself
+    # never blocks, so unrelated leaves keep flowing while a solve is pending.
+    tss_solver_park: bool = False
+    # Per-leaf liveness backstop for parking (Rust validates 1..=5000 ms).
+    tss_solver_park_timeout_ms: int = 100
     # Hybrid inline tier under async: gated leaves with (hash & 0xF) below
     # this threshold solve inline (first-touch consumption, the proven
     # pre-async path); the rest enqueue. 0 = pure async. Deploy shape:
     # sample_16=16 + async=true + inline_16=4 keeps today's inline tier
-    # verbatim and adds pool coverage for the other 12/16.
+    # verbatim and adds pool coverage for the other 12/16. IGNORED whenever
+    # tss_solver_park is on: every accepted gated leaf parks instead.
     tss_solver_async_inline_16: int = 0
     # Proof-carrying zone omission and its two optional heuristic trims.
     # All remain default-off and are independently visible in rollout config.
@@ -600,6 +613,9 @@ def build_divergence_overrides(
         # TSS async solve pool (async rung, default OFF).
         "tss_solver_async": bool(sp.tss_solver_async),
         "tss_solver_async_threads": int(sp.tss_solver_async_threads),
+        "tss_solver_async_threads_max": int(sp.tss_solver_async_threads_max),
+        "tss_solver_park": bool(sp.tss_solver_park),
+        "tss_solver_park_timeout_ms": int(sp.tss_solver_park_timeout_ms),
         "tss_solver_async_inline_16": int(sp.tss_solver_async_inline_16),
         "tss_zone": bool(sp.tss_zone),
         "tss_zone_stale_filter": bool(sp.tss_zone_stale_filter),
