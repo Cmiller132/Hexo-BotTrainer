@@ -650,6 +650,18 @@ def test_sharpen_target_unit():
     assert out is not None and out[1] == 0.0
     # Everything already on the winner → no-op (None: keep original object).
     assert _sharpen_target([7], [1.0], {7: 1}) is None
+    # Zero-mass winner (a deep-proof move appended to the support at weight 0
+    # because the net never visited it): the original mass moves ONTO the
+    # proven winner instead of falling back to the raw target.
+    out = _sharpen_target(ids, [0.5, 0.3, 0.2, 0.0], {13: 1})
+    assert out is not None
+    assert out[3] == pytest.approx(1.0)
+    assert out[0] == out[1] == out[2] == 0.0
+    # Two zero-mass winners split the original mass equally.
+    out = _sharpen_target(ids, [0.6, 0.4, 0.0, 0.0], {11: 1, 13: 1})
+    assert out[2] == pytest.approx(0.5)
+    assert out[3] == pytest.approx(0.5)
+    assert out[0] == out[1] == 0.0
 
 
 def test_interior_guard_config_plumbing():

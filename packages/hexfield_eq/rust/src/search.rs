@@ -327,6 +327,14 @@ struct ContinuousSchedulerStats {
     complete_seconds: f64,
     loop_iterations: u64,
     completes_skipped: u64,
+    // End-of-run async-pool tail drain (Codex review, late-alarm loss): fatal
+    // verify failures / worker panics banked AFTER the last in-loop drain are
+    // collected here at scheduler exit and folded into the epoch's fatal
+    // counters by the Python driver — the alarm can no longer time out into
+    // a stderr-only Drop message.
+    tss_async_verify_failed_tail: u64,
+    tss_async_worker_panics_tail: u64,
+    tss_async_tail_cleared: u64,
 }
 
 fn continuous_flush_decision(
@@ -604,8 +612,19 @@ impl HexfieldMctsSession {
         validate_search_inputs(visits, c_puct, temperature)?;
         let divergences = resolve_divergences(search_parity_mode, divergence_overrides)?;
         // Async solve pool (tss_solver_async): lazily created, session-owned.
-        if divergences.tss_solver_async && self.tss_pool.is_none() {
-            self.tss_pool = Some(TssAsyncPool::new(divergences.tss_solver_async_threads));
+        // A changed thread count replaces the pool (see run_continuous).
+        if divergences.tss_solver_async {
+            let threads = divergences.tss_solver_async_threads;
+            let resize = self
+                .tss_pool
+                .as_ref()
+                .is_some_and(|pool| pool.worker_count() != threads.clamp(1, 32) as usize);
+            if resize {
+                self.tss_pool = None;
+            }
+            if self.tss_pool.is_none() {
+                self.tss_pool = Some(TssAsyncPool::new(threads));
+            }
         }
         let roots = states_from_py_states(py, states)?;
         if roots.is_empty() {
@@ -839,29 +858,36 @@ impl HexfieldMctsSession {
             .lock()
             .expect("evaluation stats mutex poisoned")
             .clone();
-        let selected_actions: Vec<_> = searches
+        // Build the native payloads FIRST and advance the retained tree
+        // through the payload's OWN action (Codex review, action/tree
+        // mismatch): the payload path is the one that applies the play-prune
+        // and deep root-guard overrides, so a separately re-derived selection
+        // could advance the tree through a different move than the one
+        // returned to the caller — the next call's root-hash guard would
+        // then discard all retained tree/memo/solver work.
+        let natives: Vec<PayloadNative> = searches
             .iter()
             .enumerate()
             .map(|(index, search)| {
-                select_search_action(
+                build_search_result_payload_native(
                     search,
                     baselines.get(index),
                     move_temps[index],
                     seed.wrapping_add(index as u64),
+                    c_puct,
+                    forced_playout_k,
                 )
             })
             .collect::<PyResult<Vec<_>>>()?;
-        let results = build_search_result_payloads(
-            py,
-            &searches,
-            Some(&evaluation_stats_snapshot),
-            Some(cache_len),
-            &move_temps,
-            seed,
-            Some(&baselines),
-            c_puct,
-            forced_playout_k,
-        )?;
+        let selected_actions: Vec<PackedCoord> =
+            natives.iter().map(|native| native.action_id).collect();
+        let results = PyList::empty(py);
+        for native in &natives {
+            let result =
+                native.to_pydict(py, Some(&evaluation_stats_snapshot), Some(cache_len))?;
+            results.append(result)?;
+        }
+        let results = results.into_any().unbind();
 
         let no_advance = debug_no_advance.unwrap_or(false);
         for ((game_key, mut search), selected) in game_keys
@@ -874,10 +900,8 @@ impl HexfieldMctsSession {
                 self.searches.insert(game_key, search);
                 continue;
             }
-            if let Some(action_id) = selected {
-                if search.advance_root(action_id)? {
-                    self.searches.insert(game_key, search);
-                }
+            if search.advance_root(selected)? {
+                self.searches.insert(game_key, search);
             }
         }
 
@@ -941,13 +965,24 @@ impl HexfieldMctsSession {
         };
         // Async solve pool (tss_solver_async): created lazily on the first
         // run whose class views ask for it, then kept warm on the session.
-        if (divergences.tss_solver_async || divergences_fast.tss_solver_async)
-            && self.tss_pool.is_none()
-        {
+        // A changed thread count REPLACES the pool at this run boundary
+        // (Codex review, first-call-wins): dropping the old pool quiesces and
+        // joins its workers, so a live-config resize actually applies instead
+        // of silently keeping the original size for the session's lifetime.
+        if divergences.tss_solver_async || divergences_fast.tss_solver_async {
             let threads = divergences
                 .tss_solver_async_threads
                 .max(divergences_fast.tss_solver_async_threads);
-            self.tss_pool = Some(TssAsyncPool::new(threads));
+            let resize = self
+                .tss_pool
+                .as_ref()
+                .is_some_and(|pool| pool.worker_count() != threads.clamp(1, 32) as usize);
+            if resize {
+                self.tss_pool = None; // Drop joins the old workers first.
+            }
+            if self.tss_pool.is_none() {
+                self.tss_pool = Some(TssAsyncPool::new(threads));
+            }
         }
         let roots = states_from_py_states(py, states)?;
         if roots.len() != game_keys.len() {
@@ -1084,11 +1119,25 @@ impl HexfieldMctsSession {
             game_keys.into_iter().zip(roots.into_iter()).enumerate()
         {
             let root_hash = state_hash(&root);
-            let policy_init_remaining = move_policy.policy_init_plies(base_seed, game_key);
-            let move_class = move_policy.classify(base_seed, game_key, 0, policy_init_remaining);
+            // Effective starting ply comes from the STATE, not a constant 0
+            // (Codex review, seeded-slot ply): a blunder-seeded game arrives
+            // mid-game (Python replayed the prefix — placements == the
+            // driver's tape.ply), and treating it as ply 0 would re-run the
+            // Init/temperature opening schedule on a tactical midgame
+            // position. Unseeded games start at 0 placements, so this is
+            // exactly the old behavior for them.
+            let start_ply = root.placements_made();
+            // Init plies belong to the game OPENING: a seeded prefix consumed
+            // them, so the drawn count is discounted by the plies already
+            // played (0 for every unseeded game — no behavior change there).
+            let policy_init_remaining = move_policy
+                .policy_init_plies(base_seed, game_key)
+                .saturating_sub(start_ply);
+            let move_class =
+                move_policy.classify(base_seed, game_key, start_ply, policy_init_remaining);
             let mut slot = ContinuousSlot {
                 game_key,
-                ply: 0,
+                ply: start_ply,
                 search: None,
                 phase: ContinuousPhase::AwaitRootEval,
                 in_flight: 0,
@@ -1187,6 +1236,7 @@ impl HexfieldMctsSession {
                 &evaluation_stats,
                 &mut stats,
             )?;
+            self.tss_pool_tail_drain(&mut stats);
             return self.finish_continuous_stats(py, stats, &evaluation_stats);
         }
         // HEXFIELD_GATE_COMPLETE: skip the per-iteration complete scan (a
@@ -1395,6 +1445,7 @@ impl HexfieldMctsSession {
             // After the rescue so a rescue-decided move re-arms the next scan.
             last_moves_decided = moves_decided;
         }
+        self.tss_pool_tail_drain(&mut stats);
 
         self.finish_continuous_stats(py, stats, &evaluation_stats)
     }
@@ -1404,6 +1455,26 @@ impl HexfieldMctsSession {
 // (`Widening`, `Divergences`, `&mut [ContinuousSlot]`) that pyo3 cannot expose,
 // so they MUST live outside the `#[pymethods]` block above.
 impl HexfieldMctsSession {
+    /// End-of-run async-pool quiesce + alarm sweep (Codex review, late-alarm
+    /// loss): every scheduler exit path calls this BEFORE assembling the run
+    /// stats, so a verify failure banked after the last in-loop drain still
+    /// reaches this epoch's telemetry instead of a stderr-only Drop message.
+    /// Pending queue entries are discarded (their generations died with the
+    /// finished slots); the bounded wait covers in-flight solves.
+    fn tss_pool_tail_drain(&self, stats: &mut ContinuousSchedulerStats) {
+        let Some(pool) = self.tss_pool.as_ref() else {
+            return;
+        };
+        stats.tss_async_tail_cleared +=
+            pool.quiesce_for_telemetry(std::time::Duration::from_secs(2)) as u64;
+        // Responses landing now belong to dead generations; their ordinary
+        // counters are dropped exactly like any stale response, but the drain
+        // empties the channel so nothing leaks into the next run's first pass.
+        let _ = pool.try_drain();
+        stats.tss_async_verify_failed_tail += pool.take_verify_failures() as u64;
+        stats.tss_async_worker_panics_tail += pool.take_worker_panics() as u64;
+    }
+
     /// Build the `run_continuous` stats dict (shared by the lockstep loop and the
     /// depth-2 pipeline). Pure GIL-held conversion of the accumulated counters.
     fn finish_continuous_stats(
@@ -1444,6 +1515,9 @@ impl HexfieldMctsSession {
             hist.set_item(size, count)?;
         }
         dict.set_item("flush_size_histogram", hist)?;
+        dict.set_item("tss_async_verify_failed_tail", stats.tss_async_verify_failed_tail)?;
+        dict.set_item("tss_async_worker_panics_tail", stats.tss_async_worker_panics_tail)?;
+        dict.set_item("tss_async_tail_cleared", stats.tss_async_tail_cleared)?;
         dict.set_item("on_move_seconds", stats.on_move_seconds)?;
         dict.set_item("select_seconds", stats.select_seconds)?;
         dict.set_item("submit_seconds", stats.submit_seconds)?;
@@ -1974,6 +2048,14 @@ fn run_searches_to_targets(
         };
         apply_eval_backups(searches, pending_leaves, &evaluations, virtual_loss)?;
         pending_leaves = next_leaves;
+    }
+    // Tail quiesce (Codex review, late-alarm loss): a verify failure banked
+    // after the loop's final drain must still reach this call's telemetry.
+    // The searches are alive here (payloads are built from them after this
+    // returns), so the alarm folds into per-move counters as usual.
+    if let Some(pool) = tss_pool {
+        pool.quiesce_for_telemetry(std::time::Duration::from_secs(2));
+        drain_tss_async_searches(pool, searches);
     }
     Ok(())
 }
@@ -2581,8 +2663,11 @@ fn complete_continuous_slots(
             }
 
             // Init class: sample the played move from the root prior (overrides
-            // the payload's selected action). Deterministic seed.
-            let init_override = if matches!(move_class, MoveClass::Init) {
+            // the payload's selected action). Deterministic seed. A verified
+            // deep root WIN outranks the exploration sample (Codex review,
+            // proof-vs-Init precedence): a proven forced win is never
+            // discarded for a prior draw.
+            let init_override = if matches!(move_class, MoveClass::Init) && !payload.deep_override {
                 let (prior_ids, prior_weights) = root_prior_policy(search.root());
                 let sampled = select_action_from_policy(
                     &prior_ids,
@@ -2788,18 +2873,23 @@ fn complete_continuous_slots(
                 let new_key: u64 = tuple.get_item(1)?.extract()?;
                 let next_state = single_state_from_py(py, &tuple.get_item(2)?)?;
                 let next_hash = state_hash(&next_state);
+                // Mirror the epoch-entry slot init: a blunder-seeded
+                // replacement arrives mid-game, so its ply and Init budget
+                // derive from the state (0 placements = old behavior).
+                let start_ply = next_state.placements_made();
                 slots[slot_index].game_key = new_key;
-                slots[slot_index].ply = 0;
+                slots[slot_index].ply = start_ply;
                 slots[slot_index].search = None;
                 slots[slot_index].baseline.clear();
                 slots[slot_index].in_flight = 0;
                 slots[slot_index].phase = ContinuousPhase::AwaitRootEval;
-                slots[slot_index].policy_init_remaining =
-                    move_policy.policy_init_plies(base_seed, new_key);
+                slots[slot_index].policy_init_remaining = move_policy
+                    .policy_init_plies(base_seed, new_key)
+                    .saturating_sub(start_ply);
                 slots[slot_index].move_class = move_policy.classify(
                     base_seed,
                     new_key,
-                    0,
+                    start_ply,
                     slots[slot_index].policy_init_remaining,
                 );
                 queue.push(ContinuousEvalItem::RootInit {
@@ -3013,14 +3103,36 @@ fn resolve_divergences(
         if let Some(v) = overrides.get_item("tss_interior_guard")? {
             dv.tss_interior_guard = v.extract()?;
         }
+        // TSS numeric controls are range-validated (Codex review, silent
+        // misconfig): an out-of-band value silently changes rollout behavior
+        // (mode=30 acts like mode 3, sample_16=160 samples everything), so a
+        // typo'd config must fail loudly at resolve time instead.
         if let Some(v) = overrides.get_item("tss_solver_mode")? {
-            dv.tss_solver_mode = v.extract()?;
+            let mode: u32 = v.extract()?;
+            if mode > 3 {
+                return Err(PyValueError::new_err(format!(
+                    "tss_solver_mode must be 0..=3, got {mode}"
+                )));
+            }
+            dv.tss_solver_mode = mode;
         }
         if let Some(v) = overrides.get_item("tss_solver_node_cap")? {
-            dv.tss_solver_node_cap = v.extract()?;
+            let cap: u32 = v.extract()?;
+            if cap == 0 {
+                return Err(PyValueError::new_err(
+                    "tss_solver_node_cap must be >= 1 (every solve would be Unknown at 0)",
+                ));
+            }
+            dv.tss_solver_node_cap = cap;
         }
         if let Some(v) = overrides.get_item("tss_solver_sample_16")? {
-            dv.tss_solver_sample_16 = v.extract()?;
+            let sample: u32 = v.extract()?;
+            if sample > 16 {
+                return Err(PyValueError::new_err(format!(
+                    "tss_solver_sample_16 must be 0..=16 (sixteenths), got {sample}"
+                )));
+            }
+            dv.tss_solver_sample_16 = sample;
         }
         if let Some(v) = overrides.get_item("tss_solver_root_guard")? {
             dv.tss_solver_root_guard = v.extract()?;
@@ -3029,10 +3141,22 @@ fn resolve_divergences(
             dv.tss_solver_async = v.extract()?;
         }
         if let Some(v) = overrides.get_item("tss_solver_async_threads")? {
-            dv.tss_solver_async_threads = v.extract()?;
+            let threads: u32 = v.extract()?;
+            if !(1..=32).contains(&threads) {
+                return Err(PyValueError::new_err(format!(
+                    "tss_solver_async_threads must be 1..=32, got {threads}"
+                )));
+            }
+            dv.tss_solver_async_threads = threads;
         }
         if let Some(v) = overrides.get_item("tss_solver_async_inline_16")? {
-            dv.tss_solver_async_inline_16 = v.extract()?;
+            let inline: u32 = v.extract()?;
+            if inline > 16 {
+                return Err(PyValueError::new_err(format!(
+                    "tss_solver_async_inline_16 must be 0..=16 (sixteenths), got {inline}"
+                )));
+            }
+            dv.tss_solver_async_inline_16 = inline;
         }
         if let Some(v) = overrides.get_item("tss_zone")? {
             dv.tss_zone = v.extract()?;
@@ -3146,6 +3270,11 @@ struct PayloadNative {
     action_selection: &'static str,
     lcb_override: bool,
     early_stopped: bool,
+    // A verified deep root WIN forced the played action (tss_deep_root_win).
+    // Downstream: the Init-class prior sample must NOT replace the action
+    // (a proof outranks exploration), and the lockstep driver must advance
+    // the retained tree through this same action.
+    deep_override: bool,
     // Play-policy telemetry: whether the quota-pruned Gumbel play distribution
     // drove selection, and whether the played move is the raw delta leader.
     play_pruned: bool,
@@ -3413,7 +3542,7 @@ fn build_search_result_payload_native(
     // Built BEFORE the guard so the λ¹ class map below covers π''s support
     // (pure function of the tree — the move is observationally identical).
     let div = &search.divergences;
-    let gumbel = if div.gumbel_target {
+    let mut gumbel = if div.gumbel_target {
         // Export-only σ softening: gumbel_target_c_scale overrides c_scale in the
         // target's σ call ONLY, so π' can be flattened without touching the SH
         // ranking or interior selection (both keep div.gumbel_c_scale).
@@ -3556,6 +3685,29 @@ fn build_search_result_payload_native(
     // even outside the visit support (root priors span the full legal set).
     let deep_override = matches!(deep_forced_move, Some(mv) if mv != selected);
     let selected = deep_forced_move.unwrap_or(selected);
+    // A proof move the net left OUTSIDE the visit support must still be
+    // learnable (Codex review, played-but-not-learned): append it to the
+    // recorded target support at weight 0 (inert for the raw visit target —
+    // Lever-1 sharpening one-hots onto it via the class map, which already
+    // carries it at +1) with the proven-win Q. Shard classes align to
+    // pol_act, so this also preserves the +1 class through the round trip.
+    if let Some(mv) = deep_forced_move {
+        if !export_action_ids.contains(&mv) {
+            export_action_ids.push(mv);
+            export_weights.push(0.0);
+            export_q.push(1.0);
+        }
+        // Same for the π' target support, so Lever-1 sharpening of π' can
+        // reach the proof move too (logit 0.0 = the shard default for
+        // support entries the net never scored).
+        if let Some(g) = gumbel.as_mut() {
+            if !g.action_ids.contains(&mv) {
+                g.action_ids.push(mv);
+                g.weights.push(0.0);
+                g.logits.push(0.0);
+            }
+        }
+    }
     let action_selection = if deep_override {
         "tss_deep_root_win"
     } else if play_pruned {
@@ -3604,6 +3756,10 @@ fn build_search_result_payload_native(
         action_selection,
         lcb_override,
         early_stopped: search.early_stopped,
+        // is_some(), not `deep_override`: even when the sample happened to
+        // land on the proof move, an Init-class prior re-sample downstream
+        // would walk away from it — the flag must veto that too.
+        deep_override: deep_forced_move.is_some(),
         play_pruned,
         play_winner,
         export_action_ids,
@@ -3626,40 +3782,6 @@ fn build_search_result_payload_native(
         tss_opp_threats,
         tss_counters,
     })
-}
-
-/// Lockstep multi-search batch caller (`search` / eval_arena): builds the
-/// native payload per search and converts to a `PyList[PyDict]`. The continuous
-/// scheduler bypasses this and calls `build_search_result_payload_native`
-/// directly in its off-GIL parallel build phase.
-#[allow(clippy::too_many_arguments)]
-fn build_search_result_payloads(
-    py: Python<'_>,
-    searches: &[RustSearch],
-    eval_stats: Option<&EvaluationStats>,
-    cache_len: Option<usize>,
-    temperatures: &[f32],
-    seed: u64,
-    baselines: Option<&[HashMap<PackedCoord, u32>]>,
-    c_puct: f32,
-    forced_playout_k: f32,
-) -> PyResult<Py<PyAny>> {
-    let results = PyList::empty(py);
-    for (index, search) in searches.iter().enumerate() {
-        let baseline = baselines.and_then(|items| items.get(index));
-        let native = build_search_result_payload_native(
-            search,
-            baseline,
-            temperatures[index],
-            seed.wrapping_add(index as u64),
-            c_puct,
-            forced_playout_k,
-        )?;
-        let result = native.to_pydict(py, eval_stats, cache_len)?;
-        results.append(result)?;
-    }
-
-    Ok(results.into_any().unbind())
 }
 
 fn eval_stats_dict<'py>(py: Python<'py>, stats: &EvaluationStats) -> PyResult<Bound<'py, PyDict>> {
@@ -4077,23 +4199,6 @@ pub fn hexfield_eq_threat_analysis(
 ) -> PyResult<Py<PyAny>> {
     let s = single_state_from_py(py, state)?;
     Ok(threats::analysis_pydict(py, &s)?.into_any().unbind())
-}
-
-fn select_search_action(
-    search: &RustSearch,
-    baseline: Option<&HashMap<PackedCoord, u32>>,
-    temperature: f32,
-    seed: u64,
-) -> PyResult<Option<PackedCoord>> {
-    let (action_ids, weights, _q, _total) = visit_policy(search.root(), baseline);
-    let guarded = if search.tss_enabled {
-        tactical_guard_weights(&search.root_state, &action_ids, &weights)
-    } else {
-        weights.clone()
-    };
-    let (selected, _override) =
-        select_action_with_lcb(search, baseline, &action_ids, &guarded, temperature, seed)?;
-    Ok(selected)
 }
 
 /// Action selection: temperature sampling when temperature > 0, and on greedy

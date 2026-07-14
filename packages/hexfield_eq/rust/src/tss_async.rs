@@ -24,9 +24,10 @@
 //! byte-capped per solve exactly like the inline path, and responses carry
 //! only scalars + the small `RootBinding`.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
-use std::sync::mpsc::{sync_channel, Receiver, Sender, SyncSender, TrySendError};
-use std::sync::{Arc, Mutex};
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::mpsc::{Receiver, Sender};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 
 use hexo_engine::HexoState as RustHexoState;
@@ -37,12 +38,120 @@ use crate::tss_core::{HardValue, ProofStatus, SolveGoal, ZoneSearchCaps};
 use crate::tss_solver::TssSolver;
 use crate::tss_verify::RootBinding;
 
-/// Bounded request-queue depth. Full queue => the leaf silently falls back to
-/// the plain net eval (counted as `async_dropped`) — backpressure must never
-/// stall selection. Sized for main_3's worst-case burst geometry (256 slots ×
-/// 96-leaf batches in threat-dense passes); memory cost is one state clone
-/// per entry (~KBs each).
+/// Bounded request-queue depth. The queue is a LIFO with oldest-eviction
+/// (ep32 first-contact finding): workers always serve the NEWEST request, so
+/// result freshness is bounded by workers × solve-time (milliseconds) instead
+/// of the whole backlog (ep32 ran 47s of FIFO latency => 65% of responses
+/// arrived after their move died). A full queue evicts the OLDEST entry —
+/// the least likely to still matter — and the eviction is counted as
+/// `async_dropped`; fresh work is never rejected. Memory cost is one state
+/// clone per entry (~KBs each).
 pub const TSS_ASYNC_QUEUE_CAP: usize = 16384;
+
+/// The LIFO request stack shared by producers and workers.
+struct RequestQueue {
+    queue: Mutex<QueueState>,
+    ready: Condvar,
+}
+
+struct QueueState {
+    entries: VecDeque<SolveRequest>,
+    disconnected: bool,
+    /// Requests popped by a worker whose response has not been sent yet.
+    /// Tracked under the queue lock so `is_idle` can never miss a request
+    /// that is between pop and completion (quiesce correctness).
+    in_flight: u32,
+}
+
+impl RequestQueue {
+    fn new() -> Self {
+        Self {
+            queue: Mutex::new(QueueState {
+                entries: VecDeque::with_capacity(1024),
+                disconnected: false,
+                in_flight: 0,
+            }),
+            ready: Condvar::new(),
+        }
+    }
+
+    /// Push a fresh request (newest end). Returns the number of OLD entries
+    /// evicted to make room (0 or 1), or None if the pool is shut down.
+    fn push(&self, request: SolveRequest) -> Option<u32> {
+        let mut state = match self.queue.lock() {
+            Ok(state) => state,
+            Err(_) => return None,
+        };
+        if state.disconnected {
+            return None;
+        }
+        let mut evicted = 0u32;
+        if state.entries.len() >= TSS_ASYNC_QUEUE_CAP {
+            state.entries.pop_front(); // oldest
+            evicted = 1;
+        }
+        state.entries.push_back(request);
+        drop(state);
+        self.ready.notify_one();
+        Some(evicted)
+    }
+
+    /// Pop the NEWEST request, waiting up to 50ms. `None` => timed out or
+    /// disconnected (caller rechecks its shutdown flag either way). A popped
+    /// request is marked in-flight under the same lock; the worker MUST pair
+    /// it with `finish_one` once the solve is resolved (sent, dropped, or
+    /// panicked).
+    fn pop_newest(&self) -> Option<SolveRequest> {
+        let mut state = self.queue.lock().ok()?;
+        if state.entries.is_empty() && !state.disconnected {
+            let (next, _timeout) = self
+                .ready
+                .wait_timeout(state, std::time::Duration::from_millis(50))
+                .ok()?;
+            state = next;
+        }
+        let popped = state.entries.pop_back();
+        if popped.is_some() {
+            state.in_flight = state.in_flight.saturating_add(1);
+        }
+        popped
+    }
+
+    /// Mark one popped request resolved (response sent, dropped, or panicked).
+    fn finish_one(&self) {
+        if let Ok(mut state) = self.queue.lock() {
+            state.in_flight = state.in_flight.saturating_sub(1);
+        }
+    }
+
+    /// Discard every pending (not yet popped) request, returning the count.
+    fn clear_pending(&self) -> u32 {
+        match self.queue.lock() {
+            Ok(mut state) => {
+                let cleared = state.entries.len() as u32;
+                state.entries.clear();
+                cleared
+            }
+            Err(_) => 0,
+        }
+    }
+
+    /// True when no request is queued and none is mid-solve.
+    fn is_idle(&self) -> bool {
+        match self.queue.lock() {
+            Ok(state) => state.entries.is_empty() && state.in_flight == 0,
+            Err(_) => true,
+        }
+    }
+
+    fn disconnect(&self) {
+        if let Ok(mut state) = self.queue.lock() {
+            state.disconnected = true;
+            state.entries.clear();
+        }
+        self.ready.notify_all();
+    }
+}
 
 /// Out-of-band alarm channel, written by WORKERS at solve time so the fatal
 /// signal exists the moment it happens — it can never be lost to a dropped,
@@ -83,15 +192,14 @@ pub struct SolveResponse {
     pub counters: TssCounters,
 }
 
-/// Per-search enqueue handle: a clone of the pool's bounded sender plus the
+/// Per-search enqueue handle: a reference to the pool's LIFO plus the
 /// slot/generation identity stamped on every request. Rewired by the driver
 /// at every search creation, reuse-rebind, and move advance.
 #[derive(Clone)]
 pub struct TssAsyncHandle {
-    pub sender: SyncSender<SolveRequest>,
+    requests: Arc<RequestQueue>,
     pub slot: u32,
     pub generation: u64,
-    queue_depth: Arc<AtomicUsize>,
 }
 
 impl std::fmt::Debug for TssAsyncHandle {
@@ -104,29 +212,13 @@ impl std::fmt::Debug for TssAsyncHandle {
 }
 
 impl TssAsyncHandle {
-    /// Cheap saturation pre-check (approximate — the depth counter is
-    /// relaxed): callers skip the state clone + request build entirely when
-    /// the queue is full instead of paying for a doomed `try_send`
-    /// (Codex review 5).
-    pub fn has_capacity(&self) -> bool {
-        self.queue_depth.load(Ordering::Relaxed) < TSS_ASYNC_QUEUE_CAP
-    }
-
-    /// Non-blocking enqueue. `false` => queue full or pool gone (caller counts
-    /// `async_dropped` and the leaf takes the plain net eval).
-    pub fn try_enqueue(&self, request: SolveRequest) -> bool {
-        // Increment BEFORE the send (compensating on failure): the worker's
-        // post-recv decrement can then never race ahead of the producer's
-        // increment and wrap the counter below zero. The counter may briefly
-        // over-count — the safe direction for a full-check.
-        self.queue_depth.fetch_add(1, Ordering::Relaxed);
-        match self.sender.try_send(request) {
-            Ok(()) => true,
-            Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
-                self.queue_depth.fetch_sub(1, Ordering::Relaxed);
-                false
-            }
-        }
+    /// Enqueue at the fresh end of the LIFO. `Some(evicted)` => accepted
+    /// (with `evicted` OLD entries discarded to make room — the caller counts
+    /// them as `async_dropped`); `None` => pool shut down (the caller counts
+    /// the request itself as dropped and the leaf takes the plain net eval).
+    /// Fresh work is never rejected by a full queue.
+    pub fn try_enqueue(&self, request: SolveRequest) -> Option<u32> {
+        self.requests.push(request)
     }
 }
 
@@ -135,12 +227,9 @@ impl TssAsyncHandle {
 /// `run_continuous` calls. Dropping the pool closes the request channel and
 /// the workers exit on their next `recv`.
 pub struct TssAsyncPool {
-    /// `Some` for the pool's whole life; taken (dropped) in `Drop` to close
-    /// the channel so workers exit before the final alarm read.
-    request_tx: Option<SyncSender<SolveRequest>>,
+    requests: Arc<RequestQueue>,
     results: Receiver<SolveResponse>,
     generation: AtomicU64,
-    queue_depth: Arc<AtomicUsize>,
     alarms: Arc<PoolAlarms>,
     shutdown: Arc<AtomicBool>,
     workers: Vec<JoinHandle<()>>,
@@ -157,33 +246,26 @@ impl std::fmt::Debug for TssAsyncPool {
 impl TssAsyncPool {
     pub fn new(threads: u32) -> Self {
         let threads = threads.clamp(1, 32) as usize;
-        let (request_tx, request_rx) = sync_channel::<SolveRequest>(TSS_ASYNC_QUEUE_CAP);
+        let requests = Arc::new(RequestQueue::new());
         let (response_tx, results) = std::sync::mpsc::channel::<SolveResponse>();
-        // std mpsc receivers are single-consumer; workers share it behind a
-        // mutex. Lock hold time is one `recv` against multi-microsecond
-        // solves, so contention is negligible.
-        let request_rx = Arc::new(Mutex::new(request_rx));
-        let queue_depth = Arc::new(AtomicUsize::new(0));
         let alarms = Arc::new(PoolAlarms::default());
         let shutdown = Arc::new(AtomicBool::new(false));
         let workers = (0..threads)
             .map(|index| {
-                let rx = Arc::clone(&request_rx);
+                let rx = Arc::clone(&requests);
                 let tx = response_tx.clone();
-                let depth = Arc::clone(&queue_depth);
                 let alarms = Arc::clone(&alarms);
                 let stop = Arc::clone(&shutdown);
                 std::thread::Builder::new()
                     .name(format!("tss-solve-{index}"))
-                    .spawn(move || worker_loop(rx, tx, depth, alarms, stop))
+                    .spawn(move || worker_loop(rx, tx, alarms, stop))
                     .expect("spawn tss async solve worker")
             })
             .collect();
         Self {
-            request_tx: Some(request_tx),
+            requests,
             results,
             generation: AtomicU64::new(1),
-            queue_depth,
             alarms,
             shutdown,
             workers,
@@ -200,14 +282,9 @@ impl TssAsyncPool {
     /// A handle stamped for `slot` at a fresh generation.
     pub fn handle_for(&self, slot: u32) -> TssAsyncHandle {
         TssAsyncHandle {
-            sender: self
-                .request_tx
-                .as_ref()
-                .expect("request channel lives until Drop")
-                .clone(),
+            requests: Arc::clone(&self.requests),
             slot,
             generation: self.next_generation(),
-            queue_depth: Arc::clone(&self.queue_depth),
         }
     }
 
@@ -233,7 +310,24 @@ impl TssAsyncPool {
         self.alarms.worker_panics.swap(0, Ordering::Relaxed)
     }
 
-    #[cfg(test)]
+    /// End-of-run quiesce (Codex review, late-alarm loss): discard every
+    /// pending request (all are stale once the scheduler loop ends — their
+    /// generations died with the finished slots) and wait, bounded, for
+    /// in-flight solves to resolve, so the alarm bank and result channel are
+    /// FINAL before the caller takes its tail drain into the epoch telemetry.
+    /// Returns the number of discarded pending requests. On timeout (a solve
+    /// still mid-flight) the residue still reaches the next drain pass or the
+    /// Drop-time stderr backstop.
+    pub fn quiesce_for_telemetry(&self, max_wait: std::time::Duration) -> u32 {
+        let cleared = self.requests.clear_pending();
+        let deadline = std::time::Instant::now() + max_wait;
+        while !self.requests.is_idle() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        cleared
+    }
+
+    /// Live worker-thread count (drives the resize-on-config-change check).
     pub fn worker_count(&self) -> usize {
         self.workers.len()
     }
@@ -243,14 +337,13 @@ impl Drop for TssAsyncPool {
     fn drop(&mut self) {
         // Quiesce BEFORE the final alarm read (a worker mid-solve could bank
         // a failure after an early read): raise the shutdown flag (workers
-        // exit after at most their CURRENT solve instead of draining the
-        // whole buffered queue), close the request channel, then join. Only
-        // then is the alarm bank final. Handles held by searches keep their
-        // own sender clones, but by pool-drop time the owning session (and
-        // its searches) are gone — and even a straggler clone only makes a
-        // worker's send fail AFTER its alarms were banked and joined here.
+        // exit after at most their CURRENT solve), disconnect + clear the
+        // queue (waking every parked worker), then join. Only then is the
+        // alarm bank final. Handle clones parked on persisted searches can
+        // no longer stall this: the disconnect wakes waiters and every
+        // pop/timeout path rechecks the flag.
         self.shutdown.store(true, Ordering::Relaxed);
-        self.request_tx = None;
+        self.requests.disconnect();
         for worker in self.workers.drain(..) {
             let _ = worker.join();
         }
@@ -269,9 +362,8 @@ impl Drop for TssAsyncPool {
 }
 
 fn worker_loop(
-    rx: Arc<Mutex<Receiver<SolveRequest>>>,
+    rx: Arc<RequestQueue>,
     tx: Sender<SolveResponse>,
-    queue_depth: Arc<AtomicUsize>,
     alarms: Arc<PoolAlarms>,
     shutdown: Arc<AtomicBool>,
 ) {
@@ -281,30 +373,16 @@ fn worker_loop(
     let mut solver = TssSolver::default();
     loop {
         if shutdown.load(Ordering::Relaxed) {
-            return; // pool dropping: don't drain the buffered queue
+            return; // pool dropping
         }
-        let request = {
-            let guard = match rx.lock() {
-                Ok(guard) => guard,
-                // A poisoned lock means a sibling worker panicked while
-                // HOLDING the recv lock (the panic shield below covers the
-                // solve, not the recv). Exit; enqueues degrade to net evals.
-                Err(_) => return,
-            };
-            // recv_timeout, NOT recv: a handle clone parked on a search can
-            // keep the channel connected past pool drop, and a worker
-            // blocked in a plain recv would never recheck `shutdown` — the
-            // Drop join would deadlock (Codex round 3). The timeout bounds
-            // every worker's reaction to the flag.
-            match guard.recv_timeout(std::time::Duration::from_millis(50)) {
-                Ok(request) => request,
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
-            }
+        // LIFO pop (newest first) with a bounded wait, so the shutdown flag
+        // is rechecked at least every 50ms regardless of queue traffic.
+        let Some(request) = rx.pop_newest() else {
+            continue; // timeout or disconnect: loop top rechecks shutdown
         };
-        queue_depth.fetch_sub(1, Ordering::Relaxed);
         if shutdown.load(Ordering::Relaxed) {
-            return; // checked again post-recv: skip the doomed solve
+            rx.finish_one();
+            return; // checked again post-pop: skip the doomed solve
         }
         // Panic shield (Codex review 7): a panicking solve loses its request
         // (the Pending entry falls out at the owner's next move) but the
@@ -328,6 +406,7 @@ fn worker_loop(
             Err(_) => {
                 alarms.worker_panics.fetch_add(1, Ordering::Relaxed);
                 solver = TssSolver::default();
+                rx.finish_one();
                 continue;
             }
         };
@@ -349,7 +428,9 @@ fn worker_loop(
             hard,
             counters,
         };
-        if tx.send(response).is_err() {
+        let sent = tx.send(response);
+        rx.finish_one();
+        if sent.is_err() {
             return; // pool dropped
         }
     }
@@ -433,7 +514,7 @@ mod tests {
         let pool = TssAsyncPool::new(2);
         assert_eq!(pool.worker_count(), 2);
         let handle = pool.handle_for(7);
-        assert!(handle.try_enqueue(SolveRequest {
+        assert_eq!(Some(0), handle.try_enqueue(SolveRequest {
             slot: handle.slot,
             generation: handle.generation,
             hash,

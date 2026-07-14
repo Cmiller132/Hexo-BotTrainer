@@ -545,16 +545,47 @@ pub fn tss_solve_verified(
     counters: &mut TssCounters,
 ) -> VerifiedSolve {
     counters.deep_calls += 1;
+    let full_horizon = state.placements_made().saturating_add(12);
     let mut caps = SolveCaps {
         node_cap,
         tt_bytes_cap: RustSearch::TSS_SOLVER_TT_BYTES,
-        // Six complete turns is the initial deterministic semantic deadline.
+        // Six complete turns is the deterministic semantic deadline.
         // P2's preflight may diagnose this guess and P3's cache stamps bind it.
-        semantic_horizon: state.placements_made().saturating_add(12),
+        semantic_horizon: full_horizon,
     };
     solver.set_zone_options(zone);
-    let mut result = solver.solve_goal(state, &caps, goal);
-    counters.deep_nodes += result.stats.nodes;
+    // Zone horizon ladder (Codex review, +12 neutralization): at +12 the
+    // root-level defender holds exactly 6 remaining placements, and the zone
+    // generator must take the FULL legal set at d >= 6 — so zones never
+    // reduce the first Universal's fanout, exactly where the node budget
+    // dies (ep32: zone_nodes = 0 across 33k decided solves). With zones on,
+    // first attempt a TIGHT +8 deadline (d = 4 at the first Universal =>
+    // zones prune from the very first fanout) on half the node budget; a
+    // decided tight result is a fully verified proof in its own right (a win
+    // by ply T wins, a dual proof by T is a forced loss outright), while
+    // Unknown falls through to the unchanged full +12 solve. Zone-off
+    // behavior is bit-identical to before.
+    let mut result = if zone.enabled {
+        let tight = SolveCaps {
+            node_cap: (node_cap / 2).max(1),
+            tt_bytes_cap: caps.tt_bytes_cap,
+            semantic_horizon: state.placements_made().saturating_add(8),
+        };
+        let tight_result = solver.solve_goal(state, &tight, goal);
+        counters.deep_nodes += tight_result.stats.nodes;
+        if tight_result.status != ProofStatus::Unknown {
+            caps.semantic_horizon = tight.semantic_horizon;
+            tight_result
+        } else {
+            let full_result = solver.solve_goal(state, &caps, goal);
+            counters.deep_nodes += full_result.stats.nodes;
+            full_result
+        }
+    } else {
+        let full_result = solver.solve_goal(state, &caps, goal);
+        counters.deep_nodes += full_result.stats.nodes;
+        full_result
+    };
     // A zoned proof is built against a guessed semantic deadline. Derive the
     // certificate's actual maximum leaf resolution before verification and,
     // only when the zone theorem was used, retry once at that exact deadline.
@@ -1153,30 +1184,37 @@ impl RustSearch {
                         return self.tss_consume_gate(status, hard);
                     }
                     _ => {
-                        // Capacity pre-check BEFORE the state clone: a full
-                        // queue costs nothing but the counter bump.
-                        if self.tss_deep_memo.len() < Self::TSS_DEEP_MEMO_MAX
-                            && handle.has_capacity()
-                            && handle.try_enqueue(SolveRequest {
-                                slot: handle.slot,
-                                generation: handle.generation,
-                                hash,
-                                binding: binding.clone(),
-                                state: state.clone(),
-                                node_cap: self.divergences.tss_solver_node_cap as u64,
-                                goal,
-                                zone: crate::tss_core::ZoneSearchCaps {
-                                    enabled: self.divergences.tss_zone,
-                                    stale_area_filter: self.divergences.tss_zone_stale_filter,
-                                    count2_threshold: self.divergences.tss_zone_count2,
-                                    pair_commutation: self.divergences.tss_pair_commutation,
-                                },
+                        // LIFO enqueue: fresh work is always accepted (a full
+                        // queue evicts its OLDEST entry, counted as dropped);
+                        // None => pool shut down.
+                        let enqueued = (self.tss_deep_memo.len() < Self::TSS_DEEP_MEMO_MAX)
+                            .then(|| {
+                                handle.try_enqueue(SolveRequest {
+                                    slot: handle.slot,
+                                    generation: handle.generation,
+                                    hash,
+                                    binding: binding.clone(),
+                                    state: state.clone(),
+                                    node_cap: self.divergences.tss_solver_node_cap as u64,
+                                    goal,
+                                    zone: crate::tss_core::ZoneSearchCaps {
+                                        enabled: self.divergences.tss_zone,
+                                        stale_area_filter: self.divergences.tss_zone_stale_filter,
+                                        count2_threshold: self.divergences.tss_zone_count2,
+                                        pair_commutation: self.divergences.tss_pair_commutation,
+                                    },
+                                })
                             })
-                        {
-                            self.tss.async_enqueued += 1;
-                            self.tss_deep_memo.insert(hash, TssMemoEntry::Pending(binding));
-                        } else {
-                            self.tss.async_dropped += 1;
+                            .flatten();
+                        match enqueued {
+                            Some(evicted) => {
+                                self.tss.async_enqueued += 1;
+                                self.tss.async_dropped += evicted;
+                                self.tss_deep_memo.insert(hash, TssMemoEntry::Pending(binding));
+                            }
+                            None => {
+                                self.tss.async_dropped += 1;
+                            }
                         }
                         return None;
                     }

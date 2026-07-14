@@ -130,6 +130,10 @@ def _row_view_to_sample(view: PackedRowView) -> HexfieldSampleData:
         short_term_value=view.short_term_value(),
         moves_left=view.moves_left,
         policy_surprise=view.policy_surprise,
+        # v5 TSS provenance survives the packed round trip (Codex review):
+        # class map aligned to pol_act + the per-row proof scalar.
+        policy_class=view.policy_class(),
+        tss_proof=view.tss_proof,
         # Truncated-game flag (outcome_valid==0) carried as metadata; the serial
         # expand path uses it to mask the value/stvalue/cell_q heads. Only set
         # when truncated, so completed-game rows keep an empty metadata dict.

@@ -53,6 +53,12 @@ SCALAR_COLS: tuple[str, ...] = (
     "first_q",
     "first_r",
     "first_present",
+    # v5 TSS provenance (defaults 0 on pre-v5 shards): the per-row deep/λ¹
+    # proof scalar and the target-semantics regime (shard-level int32 in the
+    # npz, expanded to per-row at load so mixed raw/sharpened windows stay
+    # distinguishable).
+    "tss_proof",
+    "target_regime",
 )
 
 # Per-row ``(n, H)`` block columns: indexed ``[i, :]``.
@@ -72,7 +78,7 @@ BLOCK_COLS: tuple[str, ...] = ("stvalue", "stvalue_mask")
 CSR_GROUPS: tuple[tuple[str, tuple[str, ...], bool], ...] = (
     ("hist_off", ("hist_qr",), True),
     ("hist_off", ("hist_owner", "hist_pidx"), False),
-    ("pol_off", ("pol_act", "pol_w", "q_pol_q", "prior_logit"), False),
+    ("pol_off", ("pol_act", "pol_w", "q_pol_q", "prior_logit", "pol_class"), False),
     # π' target on its OWN support (shard schema v3): a superset of pol_act on
     # reused roots. v2 shards stored it aligned to pol_act; the loader converts
     # to CSR at load so downstream sees one shape.
@@ -140,6 +146,21 @@ class PackedRowView:
     horizons: tuple[int, ...]
     generation: int
     row_shard_id: int
+    # v5 TSS provenance (defaults for constructors predating the columns)
+    tss_proof: int = 0  # per-row proof scalar (0 = none)
+    target_regime: int = 0  # 0 raw / 1 sharpened target semantics
+    pol_class_arr: np.ndarray | None = None  # (P,) i8 view aligned to pol_act
+
+    def policy_class(self) -> tuple[tuple[int, int], ...]:
+        """λ¹/deep class per recorded action (nonzero entries only), aligned to
+        ``pol_act`` — the shape ``HexfieldSampleData.policy_class`` carries."""
+        if self.pol_class_arr is None:
+            return ()
+        return tuple(
+            (int(self.pol_act[k]), int(self.pol_class_arr[k]))
+            for k in range(self.pol_act.shape[0])
+            if int(self.pol_class_arr[k]) != 0
+        )
 
     def records(self) -> tuple[tuple[int, int, int, int], ...]:
         """``(q, r, owner, placement_index)`` tuples — the ``records`` field."""
@@ -275,6 +296,9 @@ class PackedWindow:
             horizons=self.horizons,
             generation=int(self.generation[i]),
             row_shard_id=int(self.row_shard_id[i]),
+            tss_proof=int(c["tss_proof"][i]),
+            target_regime=int(c["target_regime"][i]),
+            pol_class_arr=c["pol_class"][p0:p1],
         )
 
 
@@ -292,6 +316,8 @@ _SCALAR_DTYPES: dict[str, np.dtype] = {
     "first_q": np.dtype(np.int16),
     "first_r": np.dtype(np.int16),
     "first_present": np.dtype(np.uint8),
+    "tss_proof": np.dtype(np.int8),
+    "target_regime": np.dtype(np.int32),
 }
 _CSR_DTYPES: dict[str, np.dtype] = {
     "hist_qr": np.dtype(np.int16),
@@ -303,6 +329,7 @@ _CSR_DTYPES: dict[str, np.dtype] = {
     "gumbel_act": np.dtype(np.uint32),
     "gumbel_w": np.dtype(np.float32),
     "prior_logit": np.dtype(np.float32),
+    "pol_class": np.dtype(np.int8),
     "opp_act": np.dtype(np.uint32),
     "opp_w": np.dtype(np.float32),
 }
@@ -397,6 +424,17 @@ def load_packed_shard(path: Path) -> PackedWindow:
                 # (no π' target; the loss falls back to the visit target).
                 cols[name] = np.zeros(n, dtype=_SCALAR_DTYPES[name])
                 continue
+            if name == "tss_proof" and name not in files:
+                # Pre-v5 shard: no proof provenance (0 = no proof).
+                cols[name] = np.zeros(n, dtype=_SCALAR_DTYPES[name])
+                continue
+            if name == "target_regime":
+                # Shard-LEVEL int32 scalar in the npz (all rows of one shard
+                # share a regime); expanded per-row here so concat keeps
+                # mixed-regime windows distinguishable. Pre-v5 => 0 (raw).
+                regime = int(data[name]) if name in files else 0
+                cols[name] = np.full(n, regime, dtype=_SCALAR_DTYPES[name])
+                continue
             cols[name] = np.ascontiguousarray(data[name])
         for name in BLOCK_COLS:
             cols[name] = np.ascontiguousarray(data[name])
@@ -414,6 +452,12 @@ def load_packed_shard(path: Path) -> PackedWindow:
                     # Shards lacking the per-action logit column zero-fill
                     # aligned to pol_act (the pol_off group's length) to keep
                     # downstream slicing valid; a gumbel_present=0 row ignores it.
+                    pol_total = int(data["pol_act"].shape[0])
+                    cols[d] = np.zeros(pol_total, dtype=_CSR_DTYPES[d])
+                    continue
+                if d == "pol_class" and d not in files:
+                    # Pre-v5 shard: no λ¹ class column — class 0 (unclassified)
+                    # aligned to pol_act.
                     pol_total = int(data["pol_act"].shape[0])
                     cols[d] = np.zeros(pol_total, dtype=_CSR_DTYPES[d])
                     continue

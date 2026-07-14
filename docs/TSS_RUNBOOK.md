@@ -20,6 +20,9 @@ target-semantics rungs additionally note `target_regime` below).
 | `tss_solver_async` (bool) | Async rung (2026-07-13): gated leaves ENQUEUE to a background worker pool (identical solver→verifier→mint path); results drain into the memo and are consumed by the selection descent-stop on later visits. Verified `Done` entries persist across moves (binding re-checked at every consumption). Flag-ON self-play is NOT bit-reproducible (arrival timing); flag-off unchanged. Wired for continuous self-play AND the lockstep eval/arena loop. |
 | `tss_solver_async_threads` (int, 8) | Pool worker threads (Rust clamps to 1–32). |
 | `tss_solver_async_inline_16` (int, 0) | Hybrid inline tier under async: gated leaves with `(hash & 0xF)` below this solve inline (first-touch consumption, the pre-async path); the rest enqueue. Deploy shape: `sample_16=16` + `async=true` + `inline_16=4` keeps the proven 4/16 inline tier verbatim and adds pool coverage for the other 12/16 at ~zero critical-path cost. |
+| `tss_zone` (bool) | Zone-theorem AND generation (P0–P3 solver rewrite). With the flag on, every solve runs the **horizon ladder**: a tight `+8` deadline on half the node budget first (defender budget 4 at the first Universal ⇒ zones prune the initial fanout — at the flat `+12` the budget is exactly 6 and the generator must take the full legal set, which is why ep32 showed `zone_nodes=0`), then the unchanged `+12` solve only if the tight attempt is Unknown. Zone-off is bit-identical to pre-zone. |
+
+Numeric controls are range-validated at the Rust seam (2026-07-13 review): `tss_solver_mode` 0–3, `tss_solver_sample_16`/`tss_solver_async_inline_16` 0–16, `tss_solver_async_threads` 1–32, `tss_solver_node_cap` ≥1 — an out-of-band TOML value now fails the launch loudly instead of silently changing behavior. Changing `tss_solver_async_threads` on a live config now RESIZES the pool at the next run boundary (no longer first-call-wins). Flipping zone/commutation options mid-session drops the solver's persistent fragment cache (profile isolation).
 
 ## Rung order (one per relaunch; watch ≥1–2 epochs + the next eval before the next rung)
 
@@ -51,6 +54,11 @@ target-semantics rungs additionally note `target_regime` below).
 - **`deep_verify_failed` — MUST BE 0.** Nonzero = a solver claim failed its
   certificate check (values degraded safely, but the solver has a bug): set
   `tss_solver_mode=0`, keep shadow data, investigate before re-enabling.
+  Since the 2026-07-13 review fixes this counter is timing-safe: every
+  scheduler exit quiesces the async pool and folds late-banked failures into
+  the same epoch's total (scheduler keys `tss_async_verify_failed_tail` /
+  `tss_async_worker_panics_tail` carry the tail; the driver adds the verify
+  tail into `tss.deep_verify_failed` before the epoch JSON is written).
 - `injection_fire_rate` — the closed-loop metric; should fall as the net
   internalizes tactics.
 - `win_retained_mass_mean` / `sharpened_rows` — Lever-1 gate + effect.
@@ -58,9 +66,12 @@ target-semantics rungs additionally note `target_regime` below).
 - `deep_calls/win/loss/unknown/nodes` by epoch — solver cost + the vise check
   (UNKNOWN rate at production caps in the threat-dense endgame).
 - `proof_rows` / `proof_disagreements` — the Lever-2 gate.
-- Async rung: `async_dropped` ~0 (bounded queue 4096; sustained drops ⇒ more
-  threads/wider queue — never a correctness issue, dropped leaves take the
-  plain net eval); `async_stale` informational (late results still land memo
+- Async rung: the queue is a LIFO with oldest-eviction (cap 16384; ep32
+  first-contact fix — workers serve the NEWEST request so freshness is
+  workers × solve-time, not backlog latency). `async_dropped` counts evicted
+  oldest entries (speculative work that stopped mattering — never a
+  correctness issue, dropped leaves take the plain net eval); `async_stale`
+  informational (late results still land memo
   entries and serve later moves); `deep_hard_backups` vs the pre-async
   epochs — the async tier consumes less per solve than inline first-touch
   (descent-stop needs a re-visit), which is why the deploy shape keeps the

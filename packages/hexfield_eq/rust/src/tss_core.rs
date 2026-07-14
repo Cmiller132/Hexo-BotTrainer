@@ -107,7 +107,7 @@ pub struct SolveCaps {
     pub semantic_horizon: u32,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ZoneSearchCaps {
     pub enabled: bool,
     pub stale_area_filter: bool,
@@ -167,9 +167,24 @@ pub trait CertVerify {
 /// Certified producer #2 — deep proofs, minted ONLY here and only after the
 /// independent verifier accepts the certificate for this exact state. A
 /// rejected or missing certificate yields `None` (the caller must degrade to
-/// net-eval AND bump the fatal `verify_failed` telemetry counter). Unused
-/// until Stage 4 wires the consumption ladder.
-pub fn hard_value_from_verified<V, C>(
+/// net-eval AND bump the fatal `verify_failed` telemetry counter).
+///
+/// The verifier parameter is the CONCRETE `TssVerifier` — not the `CertVerify`
+/// trait — so no sibling module can mint a `HardValue` through an
+/// always-accepting stand-in (Codex review, mint sealing). The generic
+/// trait-driven variant survives as a test-only helper below.
+pub fn hard_value_from_verified(
+    verifier: &crate::tss_verify::TssVerifier,
+    state: &RustHexoState,
+    result: &DeepResult<crate::tss_verify::TssCertificate>,
+) -> Option<HardValue> {
+    hard_value_from_verify_impl(verifier, state, result)
+}
+
+/// Trait-generic mint used by `hard_value_from_verified` and (directly) by
+/// tests exercising the accept/reject contract with stub verifiers. Private:
+/// production callers cannot name it with a stub verifier.
+fn hard_value_from_verify_impl<V, C>(
     verifier: &V,
     state: &RustHexoState,
     result: &DeepResult<C>,
@@ -376,11 +391,11 @@ mod tests {
             stats: SolveStats::default(),
         };
         assert_eq!(
-            hard_value_from_verified(&Accept, &state, &win).map(HardValue::value),
+            hard_value_from_verify_impl(&Accept, &state, &win).map(HardValue::value),
             Some(1.0)
         );
-        assert!(hard_value_from_verified(&Reject, &state, &win).is_none());
-        assert!(hard_value_from_verified(&Accept, &state, &unknown).is_none());
-        assert!(hard_value_from_verified(&Accept, &state, &certless_loss).is_none());
+        assert!(hard_value_from_verify_impl(&Reject, &state, &win).is_none());
+        assert!(hard_value_from_verify_impl(&Accept, &state, &unknown).is_none());
+        assert!(hard_value_from_verify_impl(&Accept, &state, &certless_loss).is_none());
     }
 }

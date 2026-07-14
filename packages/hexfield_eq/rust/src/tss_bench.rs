@@ -565,3 +565,88 @@ fn tss_bench_report() {
         median_ns <= 10_000_000,
     );
 }
+
+/// Zone A/B report: the whole corpus solved twice per cap (zone OFF vs zone
+/// ON, side-heuristics off — the production deploy shape) at several node
+/// caps, THROUGH the production `tss_solve_verified` path. Routing through
+/// the wrapper matters twice over: it applies the production semantic
+/// horizons (+8/+12 zone ladder vs the flat +12) — a raw `u32::MAX` horizon
+/// makes the zone generator structurally inert (defender budget >= 6 at
+/// every node => full legal set) — and it includes the mandatory verify pass,
+/// so the timing is the cost production actually pays per solve. The rows
+/// answer the deployment questions directly: (1) does the zoned path decide
+/// MORE positions within the same budget ("search deeper per node"), (2)
+/// what happens to wall time per decision, and (3) does the zone generator
+/// engage at all (zone_nodes > 0).
+#[test]
+#[ignore = "timing harness; run explicitly in --release mode"]
+// `tree` (the production wrapper) is python-gated, so this harness needs the
+// feature: run with the PYO3_PYTHON + RUSTFLAGS link recipe from the runbook.
+#[cfg(feature = "python")]
+fn tss_bench_zone_ab() {
+    use crate::tree::{tss_solve_verified, TssCounters};
+
+    let buckets = build_buckets();
+    for cap in [500u64, 2_000, 8_000] {
+        for (label, zone_on) in [("off", false), ("on", true)] {
+            let mut solver = TssSolver::default();
+            let zone = crate::tss_core::ZoneSearchCaps {
+                enabled: zone_on,
+                stale_area_filter: false,
+                count2_threshold: false,
+                pair_commutation: false,
+            };
+            let mut counters = TssCounters::default();
+            let mut wins = 0u64;
+            let mut losses = 0u64;
+            let mut unknown = 0u64;
+            let mut elapsed = std::time::Duration::ZERO;
+            let mut latencies_ns = Vec::new();
+            for bucket in &buckets {
+                for position in &bucket.positions {
+                    let start = Instant::now();
+                    let solved = tss_solve_verified(
+                        &position.state,
+                        cap,
+                        crate::tss_core::SolveGoal::Both,
+                        zone,
+                        &mut solver,
+                        &mut counters,
+                    );
+                    let took = start.elapsed();
+                    latencies_ns.push(took.as_nanos());
+                    elapsed += took;
+                    match solved.status {
+                        crate::tss_core::ProofStatus::Win => wins += 1,
+                        crate::tss_core::ProofStatus::Loss => losses += 1,
+                        crate::tss_core::ProofStatus::Unknown => unknown += 1,
+                    }
+                }
+            }
+            assert_eq!(
+                counters.deep_verify_failed, 0,
+                "verify failures during the zone A/B bench"
+            );
+            latencies_ns.sort_unstable();
+            let decided = wins + losses;
+            println!(
+                "TSS_BENCH_ZONE_AB cap={} zone={} positions={} decided={} wins={} losses={} unknown={} nodes={} zone_nodes={} horizon_retry={} nodes_per_sec={:.1} total_ms={:.3} median_ms={:.6} p95_ms={:.6}",
+                cap,
+                label,
+                latencies_ns.len(),
+                decided,
+                wins,
+                losses,
+                unknown,
+                counters.deep_nodes,
+                counters.zone_nodes,
+                counters.horizon_retry,
+                nodes_per_second(counters.deep_nodes, elapsed),
+                elapsed.as_secs_f64() * 1_000.0,
+                median_ns(&latencies_ns) as f64 / 1_000_000.0,
+                latencies_ns[(latencies_ns.len() * 95).div_ceil(100).saturating_sub(1)] as f64
+                    / 1_000_000.0,
+            );
+        }
+    }
+}
