@@ -384,6 +384,13 @@ class DigestHarness:
         self.async_enqueued = 0
         self.async_dropped = 0
         self.async_stale = 0
+        self.park_parked = 0
+        self.park_hard = 0
+        self.park_released = 0
+        self.park_bailed = 0
+        self.park_wait_ms_sum = 0
+        self.park_wait_ms_max = 0
+        self.async_workers_spawned = 0
 
     def __call__(self, game_key: int, payload: dict):
         self.moves += 1
@@ -396,6 +403,15 @@ class DigestHarness:
         self.async_enqueued += int(tss.get("async_enqueued", 0))
         self.async_dropped += int(tss.get("async_dropped", 0))
         self.async_stale += int(tss.get("async_stale", 0))
+        self.park_parked += int(tss.get("park_parked", 0))
+        self.park_hard += int(tss.get("park_hard", 0))
+        self.park_released += int(tss.get("park_released", 0))
+        self.park_bailed += int(tss.get("park_bailed", 0))
+        self.park_wait_ms_sum += int(tss.get("park_wait_ms_sum", 0))
+        self.park_wait_ms_max = max(
+            self.park_wait_ms_max, int(tss.get("park_wait_ms_max", 0))
+        )
+        self.async_workers_spawned += int(tss.get("async_workers_spawned", 0))
         self.digest.update(b"|move|%d|" % int(game_key))
         for key in _CORE_KEYS:
             if key not in payload:
@@ -440,6 +456,53 @@ def _run_stage0_digest(divergence_overrides: dict | None = None) -> DigestHarnes
     return harness
 
 
+def test_park_epoch_telemetry_accumulates_and_max_merges(tmp_path):
+    """Production driver telemetry sums park counts/wait time while retaining
+    the maximum observed wait across both moves and crash-resumed segments."""
+    from hexfield_eq.geometry import pack_action_id
+    from hexfield_eq.selfplay import ContinuousDriver, _merge_epoch_diag
+
+    driver = ContinuousDriver(
+        epoch=0, games_target=1, max_plies=10, out_dir=tmp_path, active_limit=1
+    )
+    tape = driver.start_games(1)[0]
+    route = driver(
+        tape.key,
+        {
+            "action_id": pack_action_id(0, 0),
+            "pcr_full": False,
+            "policy_init": True,
+            "root_value": 0.0,
+            "diagnostics": {
+                "tss": {
+                    "park_parked": 2,
+                    "park_hard": 1,
+                    "park_released": 1,
+                    "park_bailed": 0,
+                    "park_wait_ms_sum": 19,
+                    "park_wait_ms_max": 13,
+                    "async_workers_spawned": 1,
+                }
+            },
+        },
+    )
+    assert route is not None and route[0] == "advance"
+    tss = driver.stats()["tss"]
+    assert tss["park_parked"] == 2
+    assert tss["park_hard"] == 1
+    assert tss["park_released"] == 1
+    assert tss["park_bailed"] == 0
+    assert tss["park_wait_ms_sum"] == 19
+    assert tss["park_wait_ms_max"] == 13
+    assert tss["async_workers_spawned"] == 1
+
+    merged = _merge_epoch_diag([{"tss": tss}, {"tss": tss}])["tss"]
+    assert merged["park_parked"] == 4
+    assert merged["park_wait_ms_sum"] == 38
+    assert merged["async_workers_spawned"] == 2
+    assert merged["park_wait_ms_max"] == 13
+
+
 @needs_rust
 def test_mini_selfplay_driver_end_to_end(tmp_path):
     """The REAL ContinuousDriver over the stub evaluator: covers the Stage-0
@@ -479,6 +542,8 @@ def test_mini_selfplay_driver_end_to_end(tmp_path):
     assert tss["backups"] > 0
     assert (tss["search_depth_mean"] or 0) >= 1.0
     assert tss["search_depth_max"] >= 1
+    assert tss["park_parked"] == 0
+    assert tss["park_wait_ms_max"] == 0
     shards = sorted(tmp_path.glob("game_*.npz"))
     assert shards, "the production writer must have written v5 shards"
     rows = read_compact_shard(shards[0])
@@ -492,6 +557,7 @@ def test_mini_selfplay_driver_end_to_end(tmp_path):
         assert merged["tss"]["injection_fire_rate"] == pytest.approx(
             tss["injection_fire_rate"]
         )
+    assert merged["tss"]["park_wait_ms_max"] == tss["park_wait_ms_max"]
 
 
 @needs_rust
@@ -677,6 +743,30 @@ def test_interior_guard_config_plumbing():
     assert build_divergence_overrides(sp_on, fast=True)["tss_interior_guard"] is True
 
 
+def test_park_config_plumbing():
+    """Parking defaults off and all three controls ride both divergence maps."""
+    from hexfield_eq.config import SelfplayConfig, build_divergence_overrides
+
+    defaults = build_divergence_overrides(SelfplayConfig())
+    assert defaults["tss_solver_park"] is False
+    assert defaults["tss_solver_park_timeout_ms"] == 100
+    assert defaults["tss_solver_async_threads_max"] == 0
+
+    sp = SelfplayConfig(
+        tss_solver_async=True,
+        tss_solver_park=True,
+        tss_solver_park_timeout_ms=200,
+        tss_solver_async_threads_max=24,
+    )
+    for overrides in (
+        build_divergence_overrides(sp),
+        build_divergence_overrides(sp, fast=True),
+    ):
+        assert overrides["tss_solver_park"] is True
+        assert overrides["tss_solver_park_timeout_ms"] == 200
+        assert overrides["tss_solver_async_threads_max"] == 24
+
+
 @needs_rust
 def test_deep_root_guard_proves_and_plays_the_lambda2_win():
     """Stage-4 rung 6: at the λ²-win fixture (quiet root — λ¹ has no verdict),
@@ -763,6 +853,50 @@ def test_async_pool_routes_solves_end_to_end_and_stays_sound():
         assert result.digest.hexdigest() != base.digest.hexdigest(), (
             "async hard backups occurred but the play/target stream is unchanged"
         )
+
+
+@needs_rust
+def test_park_first_touch_consumption_end_to_end():
+    """Parked gated leaves wait for their solve and resolve through exactly one
+    of the three pen exits (hard backup / release-to-eval / timeout bail),
+    without blocking unrelated selection work. The fixtures' gated leaves are
+    usually deep-Unknown (their λ¹-decided descendants are consumed by the λ¹
+    arm before the deep route), so — like the mode-2 and async e2e tests above
+    — consumption/divergence is asserted conditionally; the DETERMINISTIC
+    hard-consumption proof lives in the cargo pen tests, which feed a real
+    verified solve response through resolve_parked_continuous. Explicit
+    park-off remains bit-identical to the stored Stage-0 golden."""
+    base = _run_fixture_games(None)
+    result = _run_fixture_games(
+        {
+            "tss_solver_mode": 3,
+            "tss_solver_node_cap": 4000,
+            "tss_solver_async": True,
+            "tss_solver_async_threads": 4,
+            "tss_solver_park": True,
+            "tss_solver_park_timeout_ms": 200,
+        }
+    )
+    assert result.park_parked > 0, "threat-rich leaves must enter the park pen"
+    # Exactly-once accounting: every parked leaf left the pen through one exit.
+    assert (
+        result.park_hard + result.park_released + result.park_bailed
+        == result.park_parked
+    ), "pen exits must partition the parked leaves"
+    assert result.park_bailed / result.park_parked < 0.10, (
+        "solves complete in ms — the liveness bail must be a rare backstop"
+    )
+    assert result.deep_verify_failed == 0
+    assert result.moves > 10
+    if result.park_hard > 0:
+        assert result.digest.hexdigest() != base.digest.hexdigest(), (
+            "parked hard backups occurred but the play/target stream is unchanged"
+        )
+
+    flag_off = _run_stage0_digest({"tss_solver_park": False})
+    golden = json.loads(GOLDEN_PATH.read_text(encoding="utf-8"))
+    assert flag_off.moves == golden["moves"]
+    assert flag_off.digest.hexdigest() == golden["digest"]
 
 
 @needs_rust

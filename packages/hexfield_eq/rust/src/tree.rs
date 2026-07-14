@@ -187,14 +187,26 @@ pub struct Divergences {
     /// Only effective where the driver wires a pool (the continuous
     /// scheduler); un-wired searches fall back to the inline solve.
     pub tss_solver_async: bool,
-    /// Worker threads for the async pool (clamped to [1, 32]).
+    /// Base worker threads for the async pool (validated in [1, 32]).
     pub tss_solver_async_threads: u32,
+    /// Maximum worker threads for park-mode async-pool growth. 0 chooses an
+    /// available-parallelism-derived cap; otherwise validated in
+    /// `tss_solver_async_threads..=64`. Ignored by the legacy non-park pool,
+    /// which remains fixed at the base count for flag-off identity.
+    pub tss_solver_async_threads_max: u32,
+    /// Wait-at-leaf async consumption: accepted gated leaves remain parked in
+    /// the scheduler until their verified result arrives or the bail deadline
+    /// expires. Requires `tss_solver_async` and is default-off.
+    pub tss_solver_park: bool,
+    /// Per-leaf parking bail deadline in milliseconds.
+    pub tss_solver_park_timeout_ms: u32,
     /// Hybrid inline tier under the async flag: gated leaves whose
     /// `(hash & 0xF)` falls below THIS threshold solve inline on the search
     /// thread (first-touch consumption, exactly the pre-async behavior);
     /// gated leaves at or above it enqueue to the pool. 0 = pure async.
     /// Deploy shape: sample_16=16 + async + inline_16=4 keeps today's proven
-    /// inline tier verbatim and adds pool coverage for the other 12/16.
+    /// inline tier verbatim and adds pool coverage for the other 12/16. Ignored
+    /// when `tss_solver_park` is on: the select thread never solves then.
     pub tss_solver_async_inline_16: u32,
     /// Enable proof-carrying zoned AND nodes. Default off until explicitly
     /// selected by a rollout profile.
@@ -252,6 +264,9 @@ impl Divergences {
             tss_solver_root_guard: false,
             tss_solver_async: false,
             tss_solver_async_threads: 8,
+            tss_solver_async_threads_max: 0,
+            tss_solver_park: false,
+            tss_solver_park_timeout_ms: 100,
             tss_solver_async_inline_16: 0,
             tss_zone: false,
             tss_zone_stale_filter: false,
@@ -455,6 +470,20 @@ pub struct TssCounters {
     pub async_stale: u32,
     /// A leaf re-selected while its solve was still in flight.
     pub async_pending_hits: u32,
+    // === Wait-at-leaf parking telemetry (tss_solver_park) ===
+    /// Gated leaves held out of the evaluator while their solve was in flight.
+    pub park_parked: u32,
+    /// Parked leaves resolved to a verified, tier-consumable hard backup.
+    pub park_hard: u32,
+    /// Parked leaves released to evaluation after a non-consumable result.
+    pub park_released: u32,
+    /// Parked leaves released to evaluation at the bail deadline.
+    pub park_bailed: u32,
+    /// Sum and maximum of scheduler parking latency in milliseconds.
+    pub park_wait_ms_sum: u64,
+    pub park_wait_ms_max: u64,
+    /// Workers dynamically added above the async pool's base size.
+    pub async_workers_spawned: u32,
     // === Search-depth telemetry (every real backup, all leaf kinds) ===
     /// Σ leaf depth over this move's real backups (mean = depth_sum / backups).
     pub depth_sum: u64,
@@ -490,6 +519,13 @@ impl TssCounters {
         self.async_dropped += other.async_dropped;
         self.async_stale += other.async_stale;
         self.async_pending_hits += other.async_pending_hits;
+        self.park_parked += other.park_parked;
+        self.park_hard += other.park_hard;
+        self.park_released += other.park_released;
+        self.park_bailed += other.park_bailed;
+        self.park_wait_ms_sum += other.park_wait_ms_sum;
+        self.park_wait_ms_max = self.park_wait_ms_max.max(other.park_wait_ms_max);
+        self.async_workers_spawned += other.async_workers_spawned;
         self.depth_sum += other.depth_sum;
         self.depth_max = self.depth_max.max(other.depth_max);
         self.backups += other.backups;
@@ -831,6 +867,31 @@ pub struct RustLeaf {
     pub state_hash: StateHash,
 }
 
+/// Scheduler route for a gated deep-solver leaf. `Miss` is exactly the
+/// historical `None` route (normal evaluator); `Parked` is emitted only while
+/// wait-at-leaf parking is enabled and a background request is known to be in
+/// flight for the full-bound position.
+#[derive(Clone, Copy, Debug)]
+pub enum TssLeafRoute {
+    Hard(HardValue),
+    Parked,
+    Miss,
+}
+
+/// Result of probing a scheduler-owned parked leaf after async responses have
+/// drained into the owning search's memo.
+#[derive(Clone, Copy, Debug)]
+pub enum TssParkResolution {
+    /// No matching completed response yet. The scheduler keeps the leaf parked
+    /// until a later drain or its bounded bail deadline.
+    Pending,
+    /// A full-binding, tier-consumable verified value is ready for hard backup.
+    Hard(HardValue),
+    /// A matching response completed as Unknown or at a non-consumable tier;
+    /// the leaf resumes the ordinary evaluator path.
+    Release,
+}
+
 impl RustSearch {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -1136,6 +1197,124 @@ impl RustSearch {
     /// TT is per-solve; this bounds transient allocation, not retained state).
     const TSS_SOLVER_TT_BYTES: usize = 256 << 10;
 
+    /// Route a leaf through the deep solver while preserving the historical
+    /// `Option<HardValue>` implementation byte-for-byte when parking is off.
+    /// With parking enabled, every gated leaf uses the async pool regardless of
+    /// `tss_solver_async_inline_16`; the select thread never runs a solve.
+    pub fn tss_deep_leaf_route(
+        &mut self,
+        state: &RustHexoState,
+        hash: StateHash,
+    ) -> TssLeafRoute {
+        if !self.divergences.tss_solver_park {
+            return match self.tss_deep_leaf(state, hash) {
+                Some(hard) => TssLeafRoute::Hard(hard),
+                None => TssLeafRoute::Miss,
+            };
+        }
+
+        let mode = self.divergences.tss_solver_mode;
+        if mode == 0 || !self.tss_enabled {
+            return TssLeafRoute::Miss;
+        }
+        if !state.board().windows().has_threats() {
+            return TssLeafRoute::Miss;
+        }
+        if ((hash & 0xF) as u32) >= self.divergences.tss_solver_sample_16 {
+            return TssLeafRoute::Miss;
+        }
+
+        let binding = RootBinding::from_state(state);
+        let goal = match mode {
+            2 => SolveGoal::Loss,
+            _ => SolveGoal::Both,
+        };
+        let Some(handle) = self.tss_async.clone() else {
+            // A parked leaf must always have a live request behind it. Missing
+            // wiring therefore degrades to the ordinary evaluator path.
+            self.tss.async_dropped += 1;
+            return TssLeafRoute::Miss;
+        };
+
+        match self.tss_deep_memo.get(&hash) {
+            Some(TssMemoEntry::Pending(seen)) if *seen == binding => {
+                // A transposed/re-selected simulation may share the existing
+                // in-flight solve. Park it too: park-mode queues never evict,
+                // and the bounded scheduler bail remains the liveness guard.
+                self.tss.async_pending_hits += 1;
+                TssLeafRoute::Parked
+            }
+            Some(TssMemoEntry::Done(seen, status, hard)) if *seen == binding => {
+                self.tss.deep_memo_hits += 1;
+                let (status, hard) = (*status, *hard);
+                match self.tss_consume_gate(status, hard) {
+                    Some(hard) => TssLeafRoute::Hard(hard),
+                    None => TssLeafRoute::Miss,
+                }
+            }
+            _ => {
+                let enqueued = (self.tss_deep_memo.len() < Self::TSS_DEEP_MEMO_MAX)
+                    .then(|| {
+                        handle.try_enqueue(SolveRequest {
+                            slot: handle.slot,
+                            generation: handle.generation,
+                            hash,
+                            binding: binding.clone(),
+                            state: state.clone(),
+                            node_cap: self.divergences.tss_solver_node_cap as u64,
+                            goal,
+                            zone: crate::tss_core::ZoneSearchCaps {
+                                enabled: self.divergences.tss_zone,
+                                stale_area_filter: self.divergences.tss_zone_stale_filter,
+                                count2_threshold: self.divergences.tss_zone_count2,
+                                pair_commutation: self.divergences.tss_pair_commutation,
+                            },
+                        })
+                    })
+                    .flatten();
+                match enqueued {
+                    Some(evicted) => {
+                        // `evicted` is zero for a correctly matched park-mode
+                        // pool. Keep accounting defensive if a mismatched pool
+                        // ever reaches this seam; the orphaned leaf still bails.
+                        debug_assert_eq!(evicted, 0, "park-mode pool evicted a request");
+                        self.tss.async_enqueued += 1;
+                        self.tss.async_dropped += evicted;
+                        self.tss_deep_memo
+                            .insert(hash, TssMemoEntry::Pending(binding));
+                        TssLeafRoute::Parked
+                    }
+                    None => {
+                        self.tss.async_dropped += 1;
+                        TssLeafRoute::Miss
+                    }
+                }
+            }
+        }
+    }
+
+    /// Probe a scheduler-owned parked leaf after the pool drain. A hard result
+    /// travels through the same full-binding check and consumption gate used by
+    /// async descent-stop; this method does not mint values or inspect proofs.
+    pub fn tss_park_resolution(
+        &mut self,
+        hash: StateHash,
+        state: &RustHexoState,
+    ) -> TssParkResolution {
+        let binding = RootBinding::from_state(state);
+        let (status, hard) = match self.tss_deep_memo.get(&hash) {
+            Some(TssMemoEntry::Done(seen, status, hard)) if *seen == binding => {
+                (*status, *hard)
+            }
+            _ => return TssParkResolution::Pending,
+        };
+        self.tss.deep_memo_hits += 1;
+        match self.tss_consume_gate(status, hard) {
+            Some(hard) => TssParkResolution::Hard(hard),
+            None => TssParkResolution::Release,
+        }
+    }
+
     /// Deep-solver leaf hook (Stage-4 consumption ladder, PLAN §10). Gated on
     /// tss_enabled, `tss_solver_mode > 0`, live threats, and a deterministic
     /// StateHash subsample. Every gated leaf is solved + certificate-verified
@@ -1169,6 +1348,9 @@ impl RustSearch {
         // to the inline solve when no pool is wired (lockstep paths) or when
         // the position lands in the hybrid inline tier (first-touch
         // consumption preserved for that slice, exactly the pre-async path).
+        // `tss_deep_leaf_route` intercepts park mode before this legacy read,
+        // so `tss_solver_async_inline_16` is intentionally ignored while
+        // parking: no solve can run on the select thread in that mode.
         if self.divergences.tss_solver_async
             && ((hash & 0xF) as u32) >= self.divergences.tss_solver_async_inline_16
         {
@@ -3439,7 +3621,7 @@ mod tests {
             counters: TssCounters::default(),
         });
         search.set_additional_visits(8);
-        let pool = crate::tss_async::TssAsyncPool::new(1);
+        let pool = crate::tss_async::TssAsyncPool::new(1, 1, false);
         search.set_tss_async(Some(pool.handle_for(0)));
         assert!(search.tss_deep_leaf(&other, other_hash).is_none());
         assert_eq!(
@@ -3473,7 +3655,7 @@ mod tests {
     /// and set_additional_visits clears the handle with the memo.
     #[test]
     fn async_enqueue_dedups_and_serves_after_drain() {
-        let pool = crate::tss_async::TssAsyncPool::new(1);
+        let pool = crate::tss_async::TssAsyncPool::new(1, 1, false);
         let state = forced_defense_fixture();
         let hash = state_hash(&state);
         let mut search = async_search(3);

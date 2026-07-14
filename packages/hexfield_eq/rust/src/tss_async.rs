@@ -19,10 +19,11 @@
 //! generation no longer matches the slot's live search is dropped — except
 //! its fatal `deep_verify_failed` count, which is never dropped.
 //!
-//! Memory: the request queue is bounded (`try_send`; a full queue drops the
-//! request and counts it — search never blocks), each worker's solver TT is
-//! byte-capped per solve exactly like the inline path, and responses carry
-//! only scalars + the small `RootBinding`.
+//! Memory: the request queue is bounded. A full legacy queue evicts its oldest
+//! request; a full park queue rejects fresh work so no already-parked leaf is
+//! orphaned. Both outcomes are counted and selection never waits for capacity.
+//! Each worker's solver TT is byte-capped per solve exactly like the inline
+//! path, and responses carry only scalars + the small `RootBinding`.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -38,20 +39,37 @@ use crate::tss_core::{HardValue, ProofStatus, SolveGoal, ZoneSearchCaps};
 use crate::tss_solver::TssSolver;
 use crate::tss_verify::RootBinding;
 
-/// Bounded request-queue depth. The queue is a LIFO with oldest-eviction
+/// Bounded request-queue depth. The legacy queue is a LIFO with oldest-eviction
 /// (ep32 first-contact finding): workers always serve the NEWEST request, so
 /// result freshness is bounded by workers × solve-time (milliseconds) instead
 /// of the whole backlog (ep32 ran 47s of FIFO latency => 65% of responses
 /// arrived after their move died). A full queue evicts the OLDEST entry —
 /// the least likely to still matter — and the eviction is counted as
-/// `async_dropped`; fresh work is never rejected. Memory cost is one state
-/// clone per entry (~KBs each).
+/// `async_dropped`; fresh legacy work is never rejected. Park mode is FIFO
+/// and rejects a fresh request at capacity rather than evicting accepted
+/// work. Memory cost is one state clone per entry (~KBs each).
 pub const TSS_ASYNC_QUEUE_CAP: usize = 16384;
 
-/// The LIFO request stack shared by producers and workers.
+/// Queue discipline is frozen when the pool is constructed. Keeping this as
+/// an enum makes the flag-off legacy behavior explicit.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum QueueDiscipline {
+    LegacyLifoEvict,
+    ParkFifoNoEvict,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PushOutcome {
+    evicted: u32,
+    depth: usize,
+}
+
+/// The request deque shared by producers and workers.
 struct RequestQueue {
     queue: Mutex<QueueState>,
     ready: Condvar,
+    discipline: QueueDiscipline,
+    capacity: usize,
 }
 
 struct QueueState {
@@ -64,7 +82,13 @@ struct QueueState {
 }
 
 impl RequestQueue {
-    fn new() -> Self {
+    fn new(park: bool) -> Self {
+        Self::with_capacity(park, TSS_ASYNC_QUEUE_CAP)
+    }
+
+    /// Capacity injection is private and lets the queue semantics be tested
+    /// without cloning sixteen thousand engine states.
+    fn with_capacity(park: bool, capacity: usize) -> Self {
         Self {
             queue: Mutex::new(QueueState {
                 entries: VecDeque::with_capacity(1024),
@@ -72,12 +96,18 @@ impl RequestQueue {
                 in_flight: 0,
             }),
             ready: Condvar::new(),
+            discipline: if park {
+                QueueDiscipline::ParkFifoNoEvict
+            } else {
+                QueueDiscipline::LegacyLifoEvict
+            },
+            capacity,
         }
     }
 
-    /// Push a fresh request (newest end). Returns the number of OLD entries
-    /// evicted to make room (0 or 1), or None if the pool is shut down.
-    fn push(&self, request: SolveRequest) -> Option<u32> {
+    /// Push a fresh request (newest end). Returns the eviction count and depth,
+    /// or None if the pool is shut down / a park-mode queue is at capacity.
+    fn push(&self, request: SolveRequest) -> Option<PushOutcome> {
         let mut state = match self.queue.lock() {
             Ok(state) => state,
             Err(_) => return None,
@@ -86,22 +116,34 @@ impl RequestQueue {
             return None;
         }
         let mut evicted = 0u32;
-        if state.entries.len() >= TSS_ASYNC_QUEUE_CAP {
-            state.entries.pop_front(); // oldest
-            evicted = 1;
+        if state.entries.len() >= self.capacity {
+            match self.discipline {
+                QueueDiscipline::LegacyLifoEvict => {
+                    state.entries.pop_front(); // oldest
+                    evicted = 1;
+                }
+                QueueDiscipline::ParkFifoNoEvict => {
+                    // A parked leaf exists only after an accepted enqueue, so
+                    // reject fresh work rather than invalidating an existing
+                    // parked leaf's request. The caller routes this leaf to
+                    // ordinary eval. This preserves the hard memory bound.
+                    return None;
+                }
+            }
         }
         state.entries.push_back(request);
+        let depth = state.entries.len();
         drop(state);
         self.ready.notify_one();
-        Some(evicted)
+        Some(PushOutcome { evicted, depth })
     }
 
-    /// Pop the NEWEST request, waiting up to 50ms. `None` => timed out or
-    /// disconnected (caller rechecks its shutdown flag either way). A popped
-    /// request is marked in-flight under the same lock; the worker MUST pair
-    /// it with `finish_one` once the solve is resolved (sent, dropped, or
-    /// panicked).
-    fn pop_newest(&self) -> Option<SolveRequest> {
+    /// Pop according to the frozen discipline, waiting up to 50ms. `None` =>
+    /// timed out or disconnected (caller rechecks its shutdown flag either
+    /// way). A popped request is marked in-flight under the same lock; the
+    /// worker MUST pair it with `finish_one` once the solve is resolved (sent,
+    /// dropped, or panicked).
+    fn pop_next(&self) -> Option<SolveRequest> {
         let mut state = self.queue.lock().ok()?;
         if state.entries.is_empty() && !state.disconnected {
             let (next, _timeout) = self
@@ -110,7 +152,10 @@ impl RequestQueue {
                 .ok()?;
             state = next;
         }
-        let popped = state.entries.pop_back();
+        let popped = match self.discipline {
+            QueueDiscipline::LegacyLifoEvict => state.entries.pop_back(),
+            QueueDiscipline::ParkFifoNoEvict => state.entries.pop_front(),
+        };
         if popped.is_some() {
             state.in_flight = state.in_flight.saturating_add(1);
         }
@@ -192,12 +237,71 @@ pub struct SolveResponse {
     pub counters: TssCounters,
 }
 
-/// Per-search enqueue handle: a reference to the pool's LIFO plus the
+/// State shared by the owning pool and every enqueue handle. Dynamic workers
+/// are registered behind a mutex because enqueue happens through `&self` on a
+/// handle. Worker creation never happens while the request queue is locked.
+struct PoolShared {
+    requests: Arc<RequestQueue>,
+    response_tx: Sender<SolveResponse>,
+    alarms: Arc<PoolAlarms>,
+    shutdown: Arc<AtomicBool>,
+    workers: Mutex<Vec<JoinHandle<()>>>,
+    base_workers: usize,
+    max_workers: usize,
+    park: bool,
+    /// Successful dynamic scale-up spawns since the last telemetry take.
+    workers_spawned: AtomicU32,
+}
+
+impl PoolShared {
+    fn spawn_worker(&self, index: usize) -> std::io::Result<JoinHandle<()>> {
+        let rx = Arc::clone(&self.requests);
+        let tx = self.response_tx.clone();
+        let alarms = Arc::clone(&self.alarms);
+        let stop = Arc::clone(&self.shutdown);
+        std::thread::Builder::new()
+            .name(format!("tss-solve-{index}"))
+            .spawn(move || worker_loop(rx, tx, alarms, stop))
+    }
+
+    /// Spawn at most one worker for this push. The queue-depth snapshot was
+    /// captured under the queue lock, but this registry lock (and OS thread
+    /// creation) happens only after that lock has been released.
+    fn maybe_scale(&self, queue_depth: usize) {
+        if self.shutdown.load(Ordering::Relaxed) {
+            return;
+        }
+        let mut workers = self
+            .workers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let current = workers.len();
+        if self.shutdown.load(Ordering::Relaxed)
+            || current >= self.max_workers
+            || queue_depth <= current.saturating_mul(2)
+        {
+            return;
+        }
+        if let Ok(worker) = self.spawn_worker(current) {
+            workers.push(worker);
+            self.workers_spawned.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn worker_count(&self) -> usize {
+        self.workers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
+    }
+}
+
+/// Per-search enqueue handle: a reference to the pool's queue/scaler plus the
 /// slot/generation identity stamped on every request. Rewired by the driver
 /// at every search creation, reuse-rebind, and move advance.
 #[derive(Clone)]
 pub struct TssAsyncHandle {
-    requests: Arc<RequestQueue>,
+    shared: Arc<PoolShared>,
     pub slot: u32,
     pub generation: u64,
 }
@@ -212,13 +316,20 @@ impl std::fmt::Debug for TssAsyncHandle {
 }
 
 impl TssAsyncHandle {
-    /// Enqueue at the fresh end of the LIFO. `Some(evicted)` => accepted
+    /// Enqueue at the fresh end. `Some(evicted)` => accepted
     /// (with `evicted` OLD entries discarded to make room — the caller counts
-    /// them as `async_dropped`); `None` => pool shut down (the caller counts
-    /// the request itself as dropped and the leaf takes the plain net eval).
-    /// Fresh work is never rejected by a full queue.
+    /// them as `async_dropped`); `None` => pool shut down or park queue full
+    /// (the caller counts the request itself as dropped and the leaf takes the
+    /// plain net eval).
+    /// Legacy mode never rejects fresh work; park mode rejects at capacity.
     pub fn try_enqueue(&self, request: SolveRequest) -> Option<u32> {
-        self.requests.push(request)
+        let outcome = self.shared.requests.push(request)?;
+        // Preserve the pre-park fixed-size async path exactly. Dynamic scale
+        // is a park-mode capacity mechanism and is never consulted flag-off.
+        if self.shared.park {
+            self.shared.maybe_scale(outcome.depth);
+        }
+        Some(outcome.evicted)
     }
 }
 
@@ -227,48 +338,83 @@ impl TssAsyncHandle {
 /// `run_continuous` calls. Dropping the pool closes the request channel and
 /// the workers exit on their next `recv`.
 pub struct TssAsyncPool {
-    requests: Arc<RequestQueue>,
+    shared: Arc<PoolShared>,
     results: Receiver<SolveResponse>,
     generation: AtomicU64,
-    alarms: Arc<PoolAlarms>,
-    shutdown: Arc<AtomicBool>,
-    workers: Vec<JoinHandle<()>>,
 }
 
 impl std::fmt::Debug for TssAsyncPool {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TssAsyncPool")
-            .field("workers", &self.workers.len())
+            .field("base_workers", &self.shared.base_workers)
+            .field("max_workers", &self.shared.max_workers)
+            .field("workers", &self.worker_count())
+            .field("park", &self.shared.park)
             .finish()
     }
 }
 
 impl TssAsyncPool {
-    pub fn new(threads: u32) -> Self {
-        let threads = threads.clamp(1, 32) as usize;
-        let requests = Arc::new(RequestQueue::new());
+    /// Resolve a constructor request to its effective worker ceiling. Park-off
+    /// is deliberately fixed at the base for flag-off behavioral identity.
+    pub fn resolved_max_worker_count(threads: u32, threads_max: u32, park: bool) -> usize {
+        let base_workers = threads.clamp(1, 32) as usize;
+        if !park {
+            return base_workers;
+        }
+        if threads_max == 0 {
+            let available = std::thread::available_parallelism()
+                .map(std::num::NonZeroUsize::get)
+                .unwrap_or(base_workers);
+            available
+                .saturating_sub(6)
+                .max(base_workers)
+                .min(24usize.max(base_workers))
+        } else {
+            (threads_max as usize).clamp(base_workers, 64)
+        }
+    }
+
+    /// Construct a pool with a fixed base, a dynamic ceiling, and a frozen
+    /// queue discipline. Park-off always fixes the ceiling at base. In park
+    /// mode, `threads_max == 0` selects the auto ceiling:
+    /// clamp(available_parallelism - 6, base, 24). A base above 24 naturally
+    /// makes the auto ceiling equal to the base.
+    pub fn new(threads: u32, threads_max: u32, park: bool) -> Self {
+        let base_workers = threads.clamp(1, 32) as usize;
+        let max_workers = Self::resolved_max_worker_count(threads, threads_max, park);
+        let requests = Arc::new(RequestQueue::new(park));
         let (response_tx, results) = std::sync::mpsc::channel::<SolveResponse>();
         let alarms = Arc::new(PoolAlarms::default());
         let shutdown = Arc::new(AtomicBool::new(false));
-        let workers = (0..threads)
-            .map(|index| {
-                let rx = Arc::clone(&requests);
-                let tx = response_tx.clone();
-                let alarms = Arc::clone(&alarms);
-                let stop = Arc::clone(&shutdown);
-                std::thread::Builder::new()
-                    .name(format!("tss-solve-{index}"))
-                    .spawn(move || worker_loop(rx, tx, alarms, stop))
-                    .expect("spawn tss async solve worker")
-            })
-            .collect();
-        Self {
+        let shared = Arc::new(PoolShared {
             requests,
-            results,
-            generation: AtomicU64::new(1),
+            response_tx,
             alarms,
             shutdown,
-            workers,
+            workers: Mutex::new(Vec::with_capacity(max_workers)),
+            base_workers,
+            max_workers,
+            park,
+            workers_spawned: AtomicU32::new(0),
+        });
+        {
+            let mut workers = shared
+                .workers
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for index in 0..base_workers {
+                workers.push(
+                    shared
+                        .spawn_worker(index)
+                        .expect("spawn tss async solve worker"),
+                );
+            }
+        }
+        Self {
+            shared,
+            results,
+            generation: AtomicU64::new(1),
         }
     }
 
@@ -282,7 +428,7 @@ impl TssAsyncPool {
     /// A handle stamped for `slot` at a fresh generation.
     pub fn handle_for(&self, slot: u32) -> TssAsyncHandle {
         TssAsyncHandle {
-            requests: Arc::clone(&self.requests),
+            shared: Arc::clone(&self.shared),
             slot,
             generation: self.next_generation(),
         }
@@ -301,13 +447,25 @@ impl TssAsyncPool {
     /// passes call this with a live search in hand so the count reaches the
     /// epoch telemetry no matter which response carried the failure.
     pub fn take_verify_failures(&self) -> u32 {
-        self.alarms.verify_failed.swap(0, Ordering::Relaxed)
+        self.shared
+            .alarms
+            .verify_failed
+            .swap(0, Ordering::Relaxed)
     }
 
     /// Take (swap to 0) the accumulated worker-panic count (ops signal; each
     /// panic lost one request and recycled that worker's solver).
     pub fn take_worker_panics(&self) -> u32 {
-        self.alarms.worker_panics.swap(0, Ordering::Relaxed)
+        self.shared
+            .alarms
+            .worker_panics
+            .swap(0, Ordering::Relaxed)
+    }
+
+    /// Take (swap to zero) successful DYNAMIC worker spawns. Base workers are
+    /// configuration, not scale-up telemetry, and are therefore excluded.
+    pub fn take_workers_spawned(&self) -> u32 {
+        self.shared.workers_spawned.swap(0, Ordering::Relaxed)
     }
 
     /// End-of-run quiesce (Codex review, late-alarm loss): discard every
@@ -319,17 +477,32 @@ impl TssAsyncPool {
     /// still mid-flight) the residue still reaches the next drain pass or the
     /// Drop-time stderr backstop.
     pub fn quiesce_for_telemetry(&self, max_wait: std::time::Duration) -> u32 {
-        let cleared = self.requests.clear_pending();
+        let cleared = self.shared.requests.clear_pending();
         let deadline = std::time::Instant::now() + max_wait;
-        while !self.requests.is_idle() && std::time::Instant::now() < deadline {
+        while !self.shared.requests.is_idle() && std::time::Instant::now() < deadline {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
         cleared
     }
 
-    /// Live worker-thread count (drives the resize-on-config-change check).
+    /// Current live worker-thread count, including dynamic scale-up workers.
     pub fn worker_count(&self) -> usize {
-        self.workers.len()
+        self.shared.worker_count()
+    }
+
+    /// Construction-time base worker count (stable across dynamic scale-up).
+    pub fn base_worker_count(&self) -> usize {
+        self.shared.base_workers
+    }
+
+    /// Resolved dynamic ceiling (`threads_max=0` has already become auto).
+    pub fn max_worker_count(&self) -> usize {
+        self.shared.max_workers
+    }
+
+    /// Whether this pool uses the park-safe FIFO/no-eviction queue.
+    pub fn park_mode(&self) -> bool {
+        self.shared.park
     }
 }
 
@@ -342,13 +515,21 @@ impl Drop for TssAsyncPool {
         // alarm bank final. Handle clones parked on persisted searches can
         // no longer stall this: the disconnect wakes waiters and every
         // pop/timeout path rechecks the flag.
-        self.shutdown.store(true, Ordering::Relaxed);
-        self.requests.disconnect();
-        for worker in self.workers.drain(..) {
+        self.shared.shutdown.store(true, Ordering::Relaxed);
+        self.shared.requests.disconnect();
+        let workers = {
+            let mut workers = self
+                .shared
+                .workers
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::mem::take(&mut *workers)
+        };
+        for worker in workers {
             let _ = worker.join();
         }
-        let verify_failed = self.alarms.verify_failed.load(Ordering::Relaxed);
-        let panics = self.alarms.worker_panics.load(Ordering::Relaxed);
+        let verify_failed = self.shared.alarms.verify_failed.load(Ordering::Relaxed);
+        let panics = self.shared.alarms.worker_panics.load(Ordering::Relaxed);
         if verify_failed > 0 {
             eprintln!(
                 "hexfield tss_async: {verify_failed} UNREPORTED certificate verify \
@@ -375,9 +556,9 @@ fn worker_loop(
         if shutdown.load(Ordering::Relaxed) {
             return; // pool dropping
         }
-        // LIFO pop (newest first) with a bounded wait, so the shutdown flag
+        // Discipline-selected pop with a bounded wait, so the shutdown flag
         // is rechecked at least every 50ms regardless of queue traffic.
-        let Some(request) = rx.pop_newest() else {
+        let Some(request) = rx.pop_next() else {
             continue; // timeout or disconnect: loop top rechecks shutdown
         };
         if shutdown.load(Ordering::Relaxed) {
@@ -487,6 +668,119 @@ mod tests {
         panic!("async solve pool produced no response within 10s");
     }
 
+    fn queued_request(hash: StateHash) -> SolveRequest {
+        let state = RustHexoState::new();
+        SolveRequest {
+            slot: 0,
+            generation: 1,
+            hash,
+            binding: RootBinding::from_state(&state),
+            state,
+            node_cap: 1,
+            goal: SolveGoal::Both,
+            zone: ZoneSearchCaps::default(),
+        }
+    }
+
+    /// Park mode preserves acceptance obligations: entries are served oldest
+    /// first, and reaching the bound rejects fresh work instead of evicting a
+    /// request that already owns a parked leaf.
+    #[test]
+    fn park_queue_is_fifo_and_never_evicts_accepted_work() {
+        let queue = RequestQueue::with_capacity(true, 3);
+        for hash in 1..=3 {
+            assert_eq!(
+                queue.push(queued_request(hash)),
+                Some(PushOutcome {
+                    evicted: 0,
+                    depth: hash as usize,
+                })
+            );
+        }
+        assert_eq!(
+            queue.push(queued_request(4)),
+            None,
+            "a full park queue must reject fresh work, never evict accepted work"
+        );
+        for expected in 1..=3 {
+            let request = queue
+                .pop_next()
+                .expect("accepted request must remain queued");
+            assert_eq!(request.hash, expected, "park mode must serve FIFO");
+            queue.finish_one();
+        }
+        assert!(queue.is_idle());
+    }
+
+    /// Flag-off behavior is the frozen legacy discipline: newest-first and an
+    /// oldest eviction at capacity.
+    #[test]
+    fn legacy_queue_remains_lifo_with_oldest_eviction() {
+        let queue = RequestQueue::with_capacity(false, 3);
+        for hash in 1..=3 {
+            assert_eq!(queue.push(queued_request(hash)).unwrap().evicted, 0);
+        }
+        assert_eq!(queue.push(queued_request(4)).unwrap().evicted, 1);
+        for expected in [4, 3, 2] {
+            let request = queue
+                .pop_next()
+                .expect("legacy request must remain queued");
+            assert_eq!(request.hash, expected, "legacy mode must serve LIFO");
+            queue.finish_one();
+        }
+        assert!(queue.is_idle());
+    }
+
+    /// Scale-up is strict (`depth > 2 * workers`), adds one worker per
+    /// observation, and never crosses the configured maximum.
+    #[test]
+    fn dynamic_workers_spawn_at_strict_depth_threshold_and_respect_max() {
+        let pool = TssAsyncPool::new(1, 3, true);
+        assert_eq!(pool.base_worker_count(), 1);
+        assert_eq!(pool.max_worker_count(), 3);
+        assert!(pool.park_mode());
+        assert_eq!(pool.worker_count(), 1);
+        assert_eq!(pool.take_workers_spawned(), 0);
+
+        pool.shared.maybe_scale(2);
+        assert_eq!(
+            pool.worker_count(),
+            1,
+            "threshold is strictly greater than 2x"
+        );
+        pool.shared.maybe_scale(3);
+        assert_eq!(pool.worker_count(), 2);
+        assert_eq!(pool.take_workers_spawned(), 1);
+        assert_eq!(
+            pool.take_workers_spawned(),
+            0,
+            "spawn telemetry is a delta"
+        );
+
+        pool.shared.maybe_scale(4);
+        assert_eq!(pool.worker_count(), 2);
+        pool.shared.maybe_scale(5);
+        assert_eq!(pool.worker_count(), 3);
+        assert_eq!(pool.take_workers_spawned(), 1);
+
+        pool.shared.maybe_scale(usize::MAX);
+        assert_eq!(pool.worker_count(), 3, "configured max is a hard ceiling");
+        assert_eq!(pool.take_workers_spawned(), 0);
+    }
+
+    /// A max setting cannot activate scaling without the park flag; this is
+    /// part of the flag-off bit-identity contract.
+    #[test]
+    fn legacy_pool_stays_fixed_size_when_max_exceeds_base() {
+        let pool = TssAsyncPool::new(1, 3, false);
+        assert_eq!(pool.base_worker_count(), 1);
+        assert_eq!(pool.max_worker_count(), 1);
+        assert!(!pool.park_mode());
+        pool.shared.maybe_scale(usize::MAX);
+        assert_eq!(pool.worker_count(), 1);
+        assert_eq!(pool.take_workers_spawned(), 0);
+    }
+
     /// A pool worker must return the identical verified result the inline
     /// path computes, stamped with the request's slot/generation/identity.
     #[test]
@@ -511,7 +805,7 @@ mod tests {
         );
         assert!(inline.hard.is_some(), "decided fixture must verify");
 
-        let pool = TssAsyncPool::new(2);
+        let pool = TssAsyncPool::new(2, 2, false);
         assert_eq!(pool.worker_count(), 2);
         let handle = pool.handle_for(7);
         assert_eq!(Some(0), handle.try_enqueue(SolveRequest {
@@ -540,7 +834,7 @@ mod tests {
     /// collide with a live one).
     #[test]
     fn generations_are_unique_and_monotone() {
-        let pool = TssAsyncPool::new(1);
+        let pool = TssAsyncPool::new(1, 1, false);
         let a = pool.handle_for(0).generation;
         let b = pool.handle_for(0).generation;
         let c = pool.handle_for(3).generation;

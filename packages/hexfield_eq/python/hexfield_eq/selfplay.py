@@ -244,6 +244,16 @@ class ContinuousDriver:
         self.tss_async_dropped = 0
         self.tss_async_stale = 0
         self.tss_async_pending_hits = 0
+        # Wait-at-leaf parking + dynamic-worker telemetry. All fields are
+        # additive except park_wait_ms_max, which max-merges across moves and
+        # crash-resumed epoch segments.
+        self.tss_park_parked = 0
+        self.tss_park_hard = 0
+        self.tss_park_released = 0
+        self.tss_park_bailed = 0
+        self.tss_park_wait_ms_sum = 0
+        self.tss_park_wait_ms_max = 0
+        self.tss_async_workers_spawned = 0
         # Search-depth distribution over every real backup (all leaf kinds):
         # the direct measure of how deep the search actually reaches.
         self.tss_depth_sum = 0
@@ -406,6 +416,17 @@ class ContinuousDriver:
             self.tss_async_dropped += int(tss_diag.get("async_dropped", 0))
             self.tss_async_stale += int(tss_diag.get("async_stale", 0))
             self.tss_async_pending_hits += int(tss_diag.get("async_pending_hits", 0))
+            self.tss_park_parked += int(tss_diag.get("park_parked", 0))
+            self.tss_park_hard += int(tss_diag.get("park_hard", 0))
+            self.tss_park_released += int(tss_diag.get("park_released", 0))
+            self.tss_park_bailed += int(tss_diag.get("park_bailed", 0))
+            self.tss_park_wait_ms_sum += int(tss_diag.get("park_wait_ms_sum", 0))
+            self.tss_park_wait_ms_max = max(
+                self.tss_park_wait_ms_max, int(tss_diag.get("park_wait_ms_max", 0))
+            )
+            self.tss_async_workers_spawned += int(
+                tss_diag.get("async_workers_spawned", 0)
+            )
             self.tss_depth_sum += int(tss_diag.get("depth_sum", 0))
             self.tss_depth_max = max(self.tss_depth_max, int(tss_diag.get("depth_max", 0)))
             self.tss_backups += int(tss_diag.get("backups", 0))
@@ -865,6 +886,13 @@ class ContinuousDriver:
                 "async_dropped": int(self.tss_async_dropped),
                 "async_stale": int(self.tss_async_stale),
                 "async_pending_hits": int(self.tss_async_pending_hits),
+                "park_parked": int(self.tss_park_parked),
+                "park_hard": int(self.tss_park_hard),
+                "park_released": int(self.tss_park_released),
+                "park_bailed": int(self.tss_park_bailed),
+                "park_wait_ms_sum": int(self.tss_park_wait_ms_sum),
+                "park_wait_ms_max": int(self.tss_park_wait_ms_max),
+                "async_workers_spawned": int(self.tss_async_workers_spawned),
                 "depth_sum": int(self.tss_depth_sum),
                 "backups": int(self.tss_backups),
                 "search_depth_mean": (
@@ -1161,6 +1189,8 @@ def _merge_epoch_diag(segments: list[dict[str, Any]]) -> dict[str, Any]:
             "zone_nodes", "pair_omitted", "zone_verify_failed",
             "deep_hard_backups", "deep_memo_hits",
             "async_enqueued", "async_dropped", "async_stale", "async_pending_hits",
+            "park_parked", "park_hard", "park_released", "park_bailed",
+            "park_wait_ms_sum", "async_workers_spawned",
             "depth_sum", "backups",
         )
         for key in int_keys:
@@ -1178,6 +1208,9 @@ def _merge_epoch_diag(segments: list[dict[str, Any]]) -> dict[str, Any]:
         )
         tss["search_depth_max"] = max(
             int(seg.get("search_depth_max", 0) or 0) for seg in tss_segs
+        )
+        tss["park_wait_ms_max"] = max(
+            int(seg.get("park_wait_ms_max", 0) or 0) for seg in tss_segs
         )
         for mkey in (
             "win_retained_mass_mean",
