@@ -37,7 +37,7 @@ struct CorpusPosition {
 fn load_corpus() -> Vec<CorpusPosition> {
     let path = std::env::var("TSS_CORPUS_FILE").unwrap_or_else(|_| {
         format!(
-            "{}/corpus/forcing_corpus_moves.txt",
+            "{}/rust/corpus/forcing_corpus_moves.txt",
             env!("CARGO_MANIFEST_DIR")
         )
     });
@@ -105,6 +105,9 @@ fn tss_corpus_check() {
 
     let mut failures: Vec<String> = Vec::new();
     for pos in &corpus {
+        if std::env::var("TSS_CORPUS_ID").is_ok_and(|id| id != pos.id) {
+            continue;
+        }
         let mut final_status = ProofStatus::Unknown;
         for (i, cap) in ladder.iter().enumerate() {
             if !pos.expect_win && *cap > 1_000_000 {

@@ -49,6 +49,26 @@ const TARGET_BYTES_PER_SHARED_TT_SLOT: usize = 512;
 /// successful attempt root is offered regardless of these two tuning limits.
 const MAX_PROMOTED_FRAGMENT_NODES: usize = 128;
 const MAX_PROMOTED_FRAGMENT_EDGES: usize = 512;
+/// Solve-local TT sentinel for a fully explored restricted position with no
+/// proof in the current wide/depth-bounded attempt. Certificate IDs can never
+/// approach this value (`MAX_CERT_NODES` is 100k).
+const LOCAL_TT_FAILED: CertNodeId = CertNodeId::MAX;
+
+/// Optional attacker-universe expansions.  The default is deliberately the
+/// historical narrow generator so production callers retain byte-identical
+/// search behavior.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct WidthOptions {
+    vcf_pair_complete: bool,
+}
+
+impl WidthOptions {
+    pub(crate) fn vcf_pair_complete() -> Self {
+        Self {
+            vcf_pair_complete: true,
+        }
+    }
+}
 
 /// Reusable proof-carrying solver.  Its shared TT retains only complete,
 /// self-contained positive proof fragments; solve-local arena IDs never cross
@@ -59,6 +79,7 @@ pub(crate) struct TssSolver {
     hash_mask: u64,
     shared_tt: SharedProofCache,
     zone: ZoneSearchCaps,
+    width: WidthOptions,
 }
 
 impl Default for TssSolver {
@@ -68,6 +89,7 @@ impl Default for TssSolver {
             hash_mask: u64::MAX,
             shared_tt: SharedProofCache::new(0, u64::MAX),
             zone: ZoneSearchCaps::default(),
+            width: WidthOptions::default(),
         }
     }
 }
@@ -86,6 +108,16 @@ impl TssSolver {
         self.zone = zone;
     }
 
+    /// Set the attacker-width profile for subsequent solves.  As with zone
+    /// options, changing profiles drops cached positive fragments so their
+    /// node-cost provenance cannot leak between narrow and wide searches.
+    pub(crate) fn set_width_options(&mut self, width: WidthOptions) {
+        if self.width != width {
+            self.shared_tt.clear();
+        }
+        self.width = width;
+    }
+
     #[cfg(test)]
     fn without_tt() -> Self {
         Self {
@@ -93,6 +125,7 @@ impl TssSolver {
             hash_mask: u64::MAX,
             shared_tt: SharedProofCache::new(0, u64::MAX),
             zone: ZoneSearchCaps::default(),
+            width: WidthOptions::default(),
         }
     }
 
@@ -105,6 +138,7 @@ impl TssSolver {
             hash_mask,
             shared_tt: SharedProofCache::new(0, hash_mask),
             zone: ZoneSearchCaps::default(),
+            width: WidthOptions::default(),
         }
     }
 
@@ -182,6 +216,7 @@ impl TssSolver {
                 local_tt_cap,
                 caps.semantic_horizon,
                 self.zone,
+                self.width,
             );
             merge_stats(&mut stats, attempt.stats);
             if let Some(cert) = attempt.cert {
@@ -201,6 +236,7 @@ impl TssSolver {
                 local_tt_cap,
                 caps.semantic_horizon,
                 self.zone,
+                self.width,
             );
             merge_stats(&mut stats, attempt.stats);
             if let Some(cert) = attempt.cert {
@@ -233,6 +269,62 @@ impl TssSolver {
         local_tt_cap: usize,
         semantic_horizon: u32,
         zone: ZoneSearchCaps,
+        width: WidthOptions,
+    ) -> AttemptResult {
+        if !width.vcf_pair_complete {
+            return self.prove_for_at_depth(
+                state,
+                claimant,
+                node_cap,
+                local_tt_cap,
+                semantic_horizon,
+                zone,
+                width,
+                MAX_SEARCH_DEPTH,
+            );
+        }
+
+        const DEPTH_LADDER: [usize; 5] = [16, 32, 64, 128, MAX_SEARCH_DEPTH];
+        let mut stats = SolveStats::default();
+        for (index, depth_cap) in DEPTH_LADDER.into_iter().enumerate() {
+            let remaining = node_cap.saturating_sub(stats.nodes);
+            if remaining == 0 {
+                break;
+            }
+            let attempts_left = (DEPTH_LADDER.len() - index) as u64;
+            let attempt_cap = remaining / attempts_left;
+            let attempt = self.prove_for_at_depth(
+                state,
+                claimant,
+                attempt_cap,
+                local_tt_cap,
+                semantic_horizon,
+                zone,
+                width,
+                depth_cap,
+            );
+            merge_stats(&mut stats, attempt.stats);
+            if attempt.cert.is_some() {
+                return AttemptResult {
+                    cert: attempt.cert,
+                    stats,
+                };
+            }
+        }
+        AttemptResult { cert: None, stats }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prove_for_at_depth(
+        &mut self,
+        state: &RustHexoState,
+        claimant: Player,
+        node_cap: u64,
+        local_tt_cap: usize,
+        semantic_horizon: u32,
+        zone: ZoneSearchCaps,
+        width: WidthOptions,
+        depth_cap: usize,
     ) -> AttemptResult {
         let mut work = state.clone();
         let entry_key = PositionKey::from_state(&work);
@@ -245,6 +337,8 @@ impl TssSolver {
             root_ply,
             semantic_horizon,
             zone,
+            width,
+            depth_cap,
         );
         let proof = context.prove(&mut work, claimant, root_ply, None);
 
@@ -486,6 +580,8 @@ struct SearchContext<'a> {
     semantic_horizon: u32,
     clock_is_absolute: bool,
     zone: ZoneSearchCaps,
+    width: WidthOptions,
+    depth_cap: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -512,6 +608,8 @@ impl SearchContext<'static> {
             semantic_horizon: u32::MAX,
             clock_is_absolute: false,
             zone: ZoneSearchCaps::default(),
+            width: WidthOptions::default(),
+            depth_cap: MAX_SEARCH_DEPTH,
         }
     }
 }
@@ -525,6 +623,8 @@ impl<'a> SearchContext<'a> {
         root_ply: u32,
         semantic_horizon: u32,
         zone: ZoneSearchCaps,
+        width: WidthOptions,
+        depth_cap: usize,
     ) -> Self {
         let tt = BoundedTt::new(tt_bytes_cap, hash_mask);
         let peak_tt_bytes = tt.current_bytes.saturating_add(shared_tt.current_bytes);
@@ -543,6 +643,8 @@ impl<'a> SearchContext<'a> {
             semantic_horizon,
             clock_is_absolute: true,
             zone,
+            width,
+            depth_cap,
         }
     }
 
@@ -562,7 +664,13 @@ impl<'a> SearchContext<'a> {
         if self.clock_is_absolute && ply > self.semantic_horizon {
             return None;
         }
-        if depth > MAX_SEARCH_DEPTH || self.nodes >= self.node_cap {
+        if depth > self.depth_cap {
+            if !self.width.vcf_pair_complete {
+                self.hit_limit = true;
+            }
+            return None;
+        }
+        if self.nodes >= self.node_cap {
             self.hit_limit = true;
             return None;
         }
@@ -571,6 +679,10 @@ impl<'a> SearchContext<'a> {
         let key = PositionKey::from_state(state);
         if pair.is_none() {
             if let Some(node) = self.tt.lookup(&key, claimant) {
+                if node == LOCAL_TT_FAILED && self.width.vcf_pair_complete {
+                    self.tt_hits += 1;
+                    return None;
+                }
                 if (node as usize) < self.arena.len() {
                     self.tt_hits += 1;
                     return Some(node);
@@ -610,9 +722,16 @@ impl<'a> SearchContext<'a> {
         }
 
         let node = if state.current_player() == claimant {
-            self.prove_choice(state, claimant, ply)?
+            self.prove_choice(state, claimant, ply, pair)
         } else {
-            self.prove_universal(state, claimant, ply, &analysis, pair)?
+            self.prove_universal(state, claimant, ply, &analysis, pair)
+        };
+        let Some(node) = node else {
+            if self.width.vcf_pair_complete && !self.hit_limit && pair.is_none() {
+                self.tt.insert(key, claimant, LOCAL_TT_FAILED);
+                self.observe_tt_bytes();
+            }
+            return None;
         };
         if pair.is_none() {
             self.remember_proof(key, claimant, node);
@@ -625,11 +744,30 @@ impl<'a> SearchContext<'a> {
         state: &mut RustHexoState,
         claimant: Player,
         ply: u32,
+        pair: Option<&PairContext>,
     ) -> Option<CertNodeId> {
         // Descending line count is the static proof-number initialization:
         // completions before four-builds before three-builds.  The coordinate
         // tie break makes the order independent of WindowStore hash iteration.
-        for candidate in ordered_threat_creating_moves(state, claimant) {
+        let mut candidates = ordered_threat_creating_moves_with_width(state, claimant, self.width);
+        if self.width.vcf_pair_complete {
+            if let Some(pair) = pair {
+                candidates.retain(|candidate| pair_candidate_allowed(candidate.coord, pair));
+            }
+        }
+        let turn_start_candidates = (self.width.vcf_pair_complete
+            && pair.is_none()
+            && matches!(state.phase(), TurnPhase::FirstStone)
+            && threats::placements_remaining(state) == 2)
+            .then(|| {
+                let mut coords = candidates
+                    .iter()
+                    .map(|candidate| candidate.coord)
+                    .collect::<Vec<_>>();
+                coords.sort_by_key(|coord| raw_coord_key(*coord));
+                coords
+            });
+        for candidate in candidates {
             let Ok((result, delta)) = state.apply_with_delta(Placement {
                 coord: candidate.coord,
             }) else {
@@ -666,7 +804,13 @@ impl<'a> SearchContext<'a> {
                     0,
                 );
             }
-            let child = self.prove(state, claimant, ply.checked_add(1)?, None);
+            let pair_context = turn_start_candidates.as_ref().and_then(|turn_start_legal| {
+                (matches!(state.phase(), TurnPhase::SecondStone { .. })).then(|| PairContext {
+                    first: candidate.coord,
+                    turn_start_legal: turn_start_legal.clone(),
+                })
+            });
+            let child = self.prove(state, claimant, ply.checked_add(1)?, pair_context.as_ref());
             state.undo(delta);
 
             if let Some(child) = child {
@@ -751,7 +895,7 @@ impl<'a> SearchContext<'a> {
             return None;
         }
 
-        let turn_start_legal = (self.zone.pair_commutation
+        let turn_start_legal = ((self.zone.pair_commutation || self.width.vcf_pair_complete)
             && pair.is_none()
             && matches!(state.phase(), TurnPhase::FirstStone)
             && threats::placements_remaining(state) == 2)
@@ -1000,9 +1144,11 @@ fn pair_commutations(
 }
 
 fn restrict_pair_candidates(candidates: &mut Vec<HexCoord>, pair: &PairContext) {
-    candidates.retain(|mv| {
-        raw_coord_key(*mv) > raw_coord_key(pair.first) || !pair.turn_start_legal.contains(mv)
-    });
+    candidates.retain(|mv| pair_candidate_allowed(*mv, pair));
+}
+
+fn pair_candidate_allowed(mv: HexCoord, pair: &PairContext) -> bool {
+    raw_coord_key(mv) > raw_coord_key(pair.first) || !pair.turn_start_legal.contains(&mv)
 }
 
 #[derive(Clone)]
@@ -1013,6 +1159,18 @@ struct Candidate {
     strength: u8,
     priority_class: u8,
     child_threats: usize,
+    /// This move occupies an empty of an active defender count-four/five
+    /// window.  Wide mode must retain such tempo-preserving blocks even when
+    /// the cell is not yet in a claimant-owned window.
+    defender_block: bool,
+    /// Distinct count-two windows through this cell.  In pair-complete mode
+    /// this is the primary ordering key within the newly admitted tier.
+    pair_start_degree: usize,
+    /// Distinct local count-one windows through this cell.  This orders the r3
+    /// escalation tier after pair starts.
+    seed_degree: usize,
+    /// Nearest claimant stone, used only to break widened-tier ordering ties.
+    own_proximity: i16,
     /// Count-three claimant windows this placement turns into live threats.
     /// Their pre-placement empties let SecondStone reply forcedness be derived
     /// without rescanning or mutating the engine state.
@@ -1029,6 +1187,14 @@ struct CandidateBatch {
 /// length-six window with at least three stones into a >=4 threat (or a win).
 /// Omitting all other claimant moves can only miss a winning proof.
 fn threat_creating_moves(state: &RustHexoState, claimant: Player) -> CandidateBatch {
+    threat_creating_moves_with_threshold(state, claimant, 3)
+}
+
+fn threat_creating_moves_with_threshold(
+    state: &RustHexoState,
+    claimant: Player,
+    minimum_strength: u8,
+) -> CandidateBatch {
     let mut candidates: Vec<Candidate> = Vec::new();
     let mut claimant_threats = Vec::new();
     let mut defender_threats = Vec::new();
@@ -1047,11 +1213,20 @@ fn threat_creating_moves(state: &RustHexoState, claimant: Player) -> CandidateBa
             continue;
         }
         let strength = entry.count(claimant);
-        if strength < 3 {
+        if strength < minimum_strength {
             continue;
         }
         let empties = entry.empty_cells();
         for &coord in &empties {
+            if strength == 1
+                && !state
+                    .board()
+                    .occupied_cells()
+                    .iter()
+                    .any(|stone| hex_distance(coord, *stone) <= 3)
+            {
+                continue;
+            }
             let created = (strength == 3).then(|| {
                 empties
                     .iter()
@@ -1061,6 +1236,11 @@ fn threat_creating_moves(state: &RustHexoState, claimant: Player) -> CandidateBa
             });
             if let Some(existing) = candidates.iter_mut().find(|item| item.coord == coord) {
                 existing.strength = existing.strength.max(strength);
+                if strength == 2 {
+                    existing.pair_start_degree += 1;
+                } else if strength == 1 {
+                    existing.seed_degree += 1;
+                }
                 if let Some(created) = created {
                     existing.created_threats.push(created);
                 }
@@ -1070,7 +1250,30 @@ fn threat_creating_moves(state: &RustHexoState, claimant: Player) -> CandidateBa
                     strength,
                     priority_class: u8::MAX,
                     child_threats: 0,
+                    defender_block: false,
+                    pair_start_degree: usize::from(strength == 2),
+                    seed_degree: usize::from(strength == 1),
+                    own_proximity: i16::MAX,
                     created_threats: created.into_iter().collect(),
+                });
+            }
+        }
+    }
+    if minimum_strength < 3 {
+        for coord in defender_threats.iter().flatten().copied() {
+            if let Some(existing) = candidates.iter_mut().find(|item| item.coord == coord) {
+                existing.defender_block = true;
+            } else {
+                candidates.push(Candidate {
+                    coord,
+                    strength: 0,
+                    priority_class: u8::MAX,
+                    child_threats: 0,
+                    defender_block: true,
+                    pair_start_degree: 0,
+                    seed_degree: 0,
+                    own_proximity: i16::MAX,
+                    created_threats: Vec::new(),
                 });
             }
         }
@@ -1088,36 +1291,99 @@ fn threat_creating_moves(state: &RustHexoState, claimant: Player) -> CandidateBa
 /// lambda-one proof after a one-stone remainder; otherwise same-turn builds
 /// precede replies, and newly created threat-window count orders each class.
 fn ordered_threat_creating_moves(state: &RustHexoState, claimant: Player) -> Vec<Candidate> {
+    ordered_threat_creating_moves_with_width(state, claimant, WidthOptions::default())
+}
+
+fn ordered_threat_creating_moves_with_width(
+    state: &RustHexoState,
+    claimant: Player,
+    width: WidthOptions,
+) -> Vec<Candidate> {
     let CandidateBatch {
         mut candidates,
         claimant_threats,
         defender_threats,
-    } = threat_creating_moves(state, claimant);
+    } = if width.vcf_pair_complete {
+        threat_creating_moves_with_threshold(state, claimant, 1)
+    } else {
+        threat_creating_moves(state, claimant)
+    };
     for candidate in &mut candidates {
         candidate.child_threats = claimant_threats.len() + candidate.created_threats.len();
-        candidate.priority_class = match state.phase() {
-            TurnPhase::FirstStone if candidate.strength >= 4 => 0,
-            TurnPhase::FirstStone => 2,
-            TurnPhase::SecondStone { .. } => {
-                post_turn_reply_priority(candidate, &claimant_threats, &defender_threats)
+        if width.vcf_pair_complete && candidate.strength <= 2 {
+            candidate.own_proximity = state
+                .board()
+                .occupied_cells()
+                .iter()
+                .copied()
+                .filter(|coord| state.board().get(*coord) == Some(claimant))
+                .map(|coord| hex_distance(candidate.coord, coord))
+                .min()
+                .unwrap_or(i16::MAX);
+        }
+        candidate.priority_class = if candidate.defender_block && candidate.strength < 4 {
+            match state.phase() {
+                TurnPhase::FirstStone => 1,
+                TurnPhase::SecondStone { .. } => 2,
+                TurnPhase::Opening => 3,
             }
-            TurnPhase::Opening => 3,
+        } else {
+            match state.phase() {
+                TurnPhase::FirstStone if candidate.strength >= 4 => 0,
+                TurnPhase::FirstStone => 2,
+                TurnPhase::SecondStone { .. } => {
+                    post_turn_reply_priority(candidate, &claimant_threats, &defender_threats)
+                }
+                TurnPhase::Opening => 3,
+            }
         };
     }
     if candidates.len() <= 1 {
         return candidates;
     }
     let frame = canonical_frame(state);
-    candidates.sort_by_key(|item| {
-        let canonical = canonical_coord_key(frame, item.coord);
-        (
-            item.priority_class,
-            Reverse(item.child_threats),
-            Reverse(item.strength),
-            canonical.0,
-            canonical.1,
-        )
-    });
+    if width.vcf_pair_complete {
+        candidates.sort_by_key(|item| {
+            let width_tier = match (item.defender_block, item.strength) {
+                (true, _) | (_, 3..) => 0,
+                (_, 2) => 1,
+                _ => 2,
+            };
+            let canonical = canonical_coord_key(frame, item.coord);
+            (
+                width_tier,
+                if width_tier == 0 {
+                    item.priority_class
+                } else {
+                    0
+                },
+                Reverse(match width_tier {
+                    0 => item.child_threats,
+                    1 => item.pair_start_degree,
+                    _ => item.seed_degree,
+                }),
+                Reverse(if width_tier == 0 { item.strength } else { 0 }),
+                if width_tier == 0 {
+                    0
+                } else {
+                    item.own_proximity
+                },
+                canonical.0,
+                canonical.1,
+            )
+        });
+    } else {
+        candidates.sort_by_key(|item| {
+            let canonical = canonical_coord_key(frame, item.coord);
+            (
+                item.priority_class,
+                Reverse(item.child_threats),
+                Reverse(item.strength),
+                canonical.0,
+                canonical.1,
+            )
+        });
+    }
     candidates
 }
 
@@ -2408,6 +2674,114 @@ mod tests {
     }
 
     #[test]
+    fn pair_complete_width_adds_every_count_two_cell_at_both_turn_plies() {
+        let first = pair_width_first_stone_fixture();
+        assert_eq!(first.current_player(), Player::Player0);
+        assert_eq!(first.phase(), TurnPhase::FirstStone);
+        let mut second = first.clone();
+        apply_placement(
+            &mut second,
+            Placement {
+                coord: HexCoord::new(2, 0),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            second.phase(),
+            TurnPhase::SecondStone {
+                first: HexCoord::new(2, 0)
+            }
+        );
+
+        let width = WidthOptions::vcf_pair_complete();
+        let mut saw_narrow_candidate = false;
+        for state in [&first, &second] {
+            let narrow = ordered_threat_creating_moves(state, Player::Player0);
+            let wide = ordered_threat_creating_moves_with_width(state, Player::Player0, width);
+            saw_narrow_candidate |= !narrow.is_empty();
+
+            let narrow_coords = narrow.iter().map(|item| item.coord).collect::<Vec<_>>();
+            let wide_narrow_coords = wide
+                .iter()
+                .filter(|item| item.strength >= 3)
+                .map(|item| item.coord)
+                .collect::<Vec<_>>();
+            assert_eq!(wide_narrow_coords, narrow_coords);
+            assert!(wide.iter().any(|item| item.strength == 2));
+            assert!(wide
+                .iter()
+                .skip(narrow.len())
+                .all(|item| item.strength <= 2));
+            let first_seed = wide.iter().position(|item| item.strength == 1).unwrap();
+            assert!(wide[..first_seed].iter().all(|item| item.strength >= 2));
+            assert!(wide[first_seed..].iter().all(|item| item.strength == 1));
+            assert!(wide[first_seed..].iter().all(|item| {
+                state
+                    .board()
+                    .occupied_cells()
+                    .iter()
+                    .any(|stone| hex_distance(item.coord, *stone) <= 3)
+            }));
+
+            for entry in state.board().windows().entries().filter(|entry| {
+                entry.active_player() == Some(Player::Player0) && entry.count(Player::Player0) == 2
+            }) {
+                for coord in entry.empty_cells() {
+                    assert!(wide.iter().any(|item| item.coord == coord));
+                }
+            }
+        }
+        assert!(saw_narrow_candidate);
+    }
+
+    #[test]
+    fn pair_complete_count_two_order_prefers_forks_then_proximity() {
+        let state = pair_width_first_stone_fixture();
+        let candidates = ordered_threat_creating_moves_with_width(
+            &state,
+            Player::Player0,
+            WidthOptions::vcf_pair_complete(),
+        );
+        let frame = canonical_frame(&state);
+        let pair_starts = candidates
+            .iter()
+            .filter(|item| item.strength == 2)
+            .collect::<Vec<_>>();
+        assert!(pair_starts.len() > 1);
+        assert!(pair_starts.windows(2).all(|pair| {
+            let key = |item: &Candidate| {
+                let canonical = canonical_coord_key(frame, item.coord);
+                (
+                    Reverse(item.pair_start_degree),
+                    item.own_proximity,
+                    canonical.0,
+                    canonical.1,
+                )
+            };
+            key(pair[0]) <= key(pair[1])
+        }));
+    }
+
+    #[test]
+    fn pair_complete_width_keeps_defender_threat_blocks() {
+        let state = forced_defense_fixture();
+        let claimant = state.current_player();
+        let defender = claimant.other();
+        let blocks = hitting_universe(&state, defender);
+        assert!(!blocks.is_empty());
+        let candidates = ordered_threat_creating_moves_with_width(
+            &state,
+            claimant,
+            WidthOptions::vcf_pair_complete(),
+        );
+        for block in blocks {
+            assert!(candidates
+                .iter()
+                .any(|candidate| candidate.coord == block && candidate.defender_block));
+        }
+    }
+
+    #[test]
     fn zone_generator_is_deterministic_and_never_count_truncates() {
         let state = quiet_fixture();
         let claimant = state.current_player().other();
@@ -2456,6 +2830,10 @@ mod tests {
 
     fn quiet_fixture() -> RustHexoState {
         replay(&[(0, 0), (0, 8), (2, 7)])
+    }
+
+    fn pair_width_first_stone_fixture() -> RustHexoState {
+        replay(&[(0, 0), (0, 8), (2, 7), (1, 0), (4, 6), (6, 5), (8, 4)])
     }
 
     fn forced_defense_fixture() -> RustHexoState {
@@ -3357,6 +3735,8 @@ mod tests {
                 descendant_root.placements_made(),
                 generous.semantic_horizon,
                 ZoneSearchCaps::default(),
+                WidthOptions::default(),
+                MAX_SEARCH_DEPTH,
             );
             let root = context
                 .prove(&mut work, claimant, descendant_root.placements_made(), None)
@@ -3445,6 +3825,30 @@ mod tests {
         cache.insert(key.clone(), Player::Player0, proof);
         assert!(cache.lookup_cloned(&key, Player::Player0).is_some());
         assert!(cache.lookup_cloned(&key, Player::Player1).is_none());
+    }
+
+    #[test]
+    fn width_profile_change_drops_shared_fragments_but_same_profile_keeps_them() {
+        let state = quiet_fixture();
+        let key = PositionKey::from_state(&state);
+        let proof = CachedProof::from_compact(vec![cache_test_leaf()], 0).unwrap();
+        let mut solver = TssSolver::default();
+        solver.shared_tt.reconfigure(4096, u64::MAX);
+        solver.shared_tt.insert(key.clone(), Player::Player0, proof);
+        assert!(solver.shared_tt.current_bytes > 0);
+
+        solver.set_width_options(WidthOptions::default());
+        assert!(solver.shared_tt.current_bytes > 0);
+        solver.set_width_options(WidthOptions::vcf_pair_complete());
+        assert!(solver
+            .shared_tt
+            .lookup_cloned(&key, Player::Player0)
+            .is_none());
+        assert!(solver.shared_tt.slots.iter().all(Option::is_none));
+        assert_eq!(
+            solver.shared_tt.current_bytes,
+            solver.shared_tt.recomputed_bytes()
+        );
     }
 
     #[test]

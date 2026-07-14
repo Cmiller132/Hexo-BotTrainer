@@ -149,3 +149,67 @@ documented at the top of `rust/src/tss_corpus.rs`.
 
 - Python/TOML exposure of the option, selfplay integration, root-guard
   rungs, zone (AND-side) changes, perf tuning of narrow mode.
+
+---
+
+## ADDENDUM (2026-07-14, after first implementation round)
+
+The first round implemented width options and iterated on `xsnfyll` without
+reaching WIN — first exhausting at 28k nodes, then (after widening) burning
+full caps (1M nodes / minutes) with heavy TT traffic. Diagnosis from the
+session lead; treat these as binding design guidance:
+
+### 1. The blocker is NOT attacker width alone — it is missing FORCING discipline
+Analysis of `xsnfyll`: its winning first turn extends TWO count-3 windows
+((-1,-1) completes the (1,-1)-direction window holding (0,-2),(1,-3),(2,-4);
+(1,-5) completes the (0,-1)-direction window holding (1,-4),(1,-3),(1,-2)) —
+both already inside even the NARROW universe. Yet no proof is found at any
+cap. The explosion is on the DEFENDER side: an AND node that faces no
+immediate threat has no small hitting set and falls back to (near-)full-legal
+(~hundreds of moves) — one such node per line is enough to kill the search.
+
+**Required rule for vcf_pair_complete mode: turn-level forcing.** Any
+attacker TURN (the pair of plies) that completes without creating at least
+one new claimant count>=4 window — and without winning outright — is PRUNED
+(the OR node treats it as unavailable; do not expand the defender reply).
+Consequences, which are the point:
+- every defender node inside the search faces a live threat => replies come
+  from the small hitting universe, NEVER the full-legal fallback;
+- count-2 stepping stones and quiet tempo builds remain legal as ONE ply of
+  a turn whose OTHER ply creates the threat (threat+build), which is the
+  pattern the corpus wins need;
+- the search space returns to VCF shape (this is what the reference
+  solver's "tight" width means), where a depth-4 win costs thousands of
+  nodes, not millions.
+Implement the discipline at turn granularity (evaluate after the second
+ply / at defender entry), not by pre-filtering ply-1 candidates.
+
+### 2. Debug ladder — use the reference lines (new fixture)
+`rust/corpus/forcing_corpus_lines.txt` now contains the reference winning
+LINE for each of the 14 WIN entries (alternating turns, attacker first, two
+placements per turn except possibly the final winning stones; same coord
+format as the moves file). Backward-walk protocol for a failing id:
+apply the full line prefix of length k onto the corpus position, solve that
+state at cap 10k. At k=full the state is at/next-to win-now (should prove in
+~1 node). Decrease k turn-by-turn until the solve stops proving WIN — the
+first failing k tells you exactly which mechanism is missing (generation at
+that turn, defender reply set, leaf evaluation, or turn-forcing pruning).
+Add a small ignored helper test for this; keep it in tss_corpus.rs.
+
+### 3. Efficiency rules (binding)
+- While ANY position fails, iterate at caps <=100k. Do NOT raise caps to
+  chase a proof — when the discipline is right, xsnfyll-class positions
+  prove in <=10k nodes (the reference pdspn proved most of this corpus in
+  <2000 of its nodes). Cap-burning at depth 4 means the design is wrong,
+  not the budget.
+- Commit working checkpoints as you go (the previous round produced zero
+  commits over ~3 hours — do not repeat that; commit after each coherent
+  step even if the gate is not yet green).
+- Only after ALL other WIN entries prove should you spend big caps on
+  0l4291i_live (the monster; reference needed 264s).
+
+### 4. Soundness reminder
+The turn-forcing prune is a WIN-search restriction (it can only cause missed
+wins, never false WINs) — soundness of WIN certificates is unchanged. Keep
+the NO entries' requirement (never WIN) as-is; UNKNOWN via forcing-universe
+exhaustion is the expected NO behavior and is cheap under the discipline.
