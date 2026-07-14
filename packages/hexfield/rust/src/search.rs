@@ -3879,7 +3879,10 @@ fn select_action_from_policy(
     let mut total = 0.0f64;
     let mut adjusted = Vec::with_capacity(weights.len());
     for weight in weights {
-        let value = weight.powf(inv_temperature) as f64;
+        // powf in f64: at low temperatures (large exponents) an f32 powf
+        // underflows flat histograms to all-zero mass, aborting the batch with
+        // the positive-finite-mass error below. f64 keeps ~1e-308 of headroom.
+        let value = (*weight as f64).powf(inv_temperature as f64);
         total += value;
         adjusted.push(value);
     }
