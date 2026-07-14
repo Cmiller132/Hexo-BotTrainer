@@ -66,6 +66,17 @@ tss_solver_async = true
 tss_solver_async_threads = 8
 tss_solver_async_inline_16 = 4
 tss_zone = false
+# ep39 (2026-07-14, owner-ordered "make it park leaves"): wait-at-leaf rung —
+# every gated leaf parks in the scheduler pen until its verified result lands
+# (first-touch consumption for 100% of gated leaves), released by a 100ms
+# liveness bail otherwise. inline_16 above is IGNORED while parking (the pen
+# supersedes the inline tier) but stays set: flipping park off restores the
+# known-good hybrid shape. threads_max=0 auto-scales workers 8->24 on queue
+# pressure (32-core host). Watch: park_bailed ~0, epoch time vs the ep36/37
+# 1347s baseline, deep_verify_failed 0.
+tss_solver_park = true
+tss_solver_park_timeout_ms = 100
+tss_solver_async_threads_max = 0
 cache_max_states = 262144
 nucleus_f64 = true
 lcb_z = 1.6
