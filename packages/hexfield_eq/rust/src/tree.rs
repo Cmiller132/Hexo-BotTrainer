@@ -450,6 +450,11 @@ pub struct TssCounters {
     /// A retry still produced a zone certificate at a different exact T;
     /// it was stopped before the minting verifier (non-fatal Unknown).
     pub horizon_preflight_failed: u32,
+    /// Unknown solves whose search had at least one still-live line refused
+    /// by the +12 semantic deadline (depth-bound Unknowns). The horizon-ladder
+    /// gate: structural Unknowns provably cannot convert at a deeper deadline;
+    /// these might.
+    pub horizon_cut: u32,
     /// Zoned AND nodes and P3-commuted replies in submitted certificates.
     pub zone_nodes: u32,
     pub pair_omitted: u32,
@@ -510,6 +515,7 @@ impl TssCounters {
         self.deep_verify_failed += other.deep_verify_failed;
         self.horizon_retry += other.horizon_retry;
         self.horizon_preflight_failed += other.horizon_preflight_failed;
+        self.horizon_cut += other.horizon_cut;
         self.zone_nodes += other.zone_nodes;
         self.pair_omitted += other.pair_omitted;
         self.zone_verify_failed += other.zone_verify_failed;
@@ -665,6 +671,9 @@ pub fn tss_solve_verified(
     match result.status {
         ProofStatus::Unknown => {
             counters.deep_unknown += 1;
+            if result.stats.horizon_cuts > 0 {
+                counters.horizon_cut += 1;
+            }
             VerifiedSolve {
                 status: ProofStatus::Unknown,
                 hard: None,
@@ -1524,6 +1533,7 @@ impl RustSearch {
         self.tss.deep_verify_failed += response.counters.deep_verify_failed;
         self.tss.horizon_retry += response.counters.horizon_retry;
         self.tss.horizon_preflight_failed += response.counters.horizon_preflight_failed;
+        self.tss.horizon_cut += response.counters.horizon_cut;
         self.tss.zone_verify_failed += response.counters.zone_verify_failed;
         if self.divergences.tss_solver_async {
             self.tss_async_memo_write(response, true);

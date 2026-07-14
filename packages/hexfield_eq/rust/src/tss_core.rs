@@ -134,6 +134,11 @@ pub struct SolveStats {
     pub nodes: u64,
     pub tt_hits: u64,
     pub peak_tt_bytes: u64,
+    /// Lines the semantic-horizon deadline refused while still alive
+    /// (descent, typed-leaf resolution, or completion past the deadline).
+    /// Distinguishes depth-bound Unknowns from structural ones ahead of any
+    /// horizon-ladder decision.
+    pub horizon_cuts: u64,
 }
 
 /// A deep solve's outcome: a typed status, an optional replayable certificate

@@ -146,6 +146,7 @@ impl TssSolver {
         };
         if let Some((claimant, leaf)) = immediate_winner(state) {
             if node_resolution(&leaf) > caps.semantic_horizon {
+                stats.horizon_cuts += 1;
                 return unknown(stats);
             }
             let status = status_for_claimant(state.current_player(), claimant);
@@ -255,6 +256,7 @@ impl TssSolver {
             nodes: context.nodes,
             tt_hits: context.tt_hits,
             peak_tt_bytes: context.peak_tt_bytes as u64,
+            horizon_cuts: context.horizon_cuts,
         };
         let cert = proof.and_then(|root| {
             let (nodes, root_node) = compact_certificate(&context.arena, root)?;
@@ -368,6 +370,7 @@ fn merge_stats(total: &mut SolveStats, part: SolveStats) {
     total.nodes = total.nodes.saturating_add(part.nodes);
     total.tt_hits = total.tt_hits.saturating_add(part.tt_hits);
     total.peak_tt_bytes = total.peak_tt_bytes.max(part.peak_tt_bytes);
+    total.horizon_cuts = total.horizon_cuts.saturating_add(part.horizon_cuts);
 }
 
 fn status_for_claimant(root_player: Player, claimant: Player) -> ProofStatus {
@@ -475,6 +478,9 @@ struct SearchContext<'a> {
     nodes: u64,
     tt_hits: u64,
     hit_limit: bool,
+    /// Deadline refusals of still-live lines this attempt (see
+    /// `SolveStats::horizon_cuts`).
+    horizon_cuts: u64,
     arena: Vec<CertNode>,
     edge_count: usize,
     tt: BoundedTt,
@@ -503,6 +509,7 @@ impl SearchContext<'static> {
             nodes: 0,
             tt_hits: 0,
             hit_limit: false,
+            horizon_cuts: 0,
             arena: Vec::new(),
             edge_count: 0,
             tt,
@@ -534,6 +541,7 @@ impl<'a> SearchContext<'a> {
             nodes: 0,
             tt_hits: 0,
             hit_limit: false,
+            horizon_cuts: 0,
             arena: Vec::new(),
             edge_count: 0,
             tt,
@@ -560,6 +568,7 @@ impl<'a> SearchContext<'a> {
             ply as usize
         };
         if self.clock_is_absolute && ply > self.semantic_horizon {
+            self.horizon_cuts += 1;
             return None;
         }
         if depth > MAX_SEARCH_DEPTH || self.nodes >= self.node_cap {
@@ -601,6 +610,7 @@ impl<'a> SearchContext<'a> {
                 }
                 let leaf = typed_lambda_leaf(state, winner, &analysis)?;
                 if node_resolution(&leaf) > self.semantic_horizon {
+                    self.horizon_cuts += 1;
                     return None;
                 }
                 let node = self.alloc_node(leaf, 0)?;
@@ -655,6 +665,7 @@ impl<'a> SearchContext<'a> {
                 state.undo(delta);
                 let completion_ply = ply.checked_add(1)?;
                 if completion_ply > self.semantic_horizon {
+                    self.horizon_cuts += 1;
                     return None;
                 }
                 return self.alloc_node(

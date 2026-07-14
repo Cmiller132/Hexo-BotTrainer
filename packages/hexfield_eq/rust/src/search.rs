@@ -3873,6 +3873,7 @@ impl PayloadNative {
             "horizon_preflight_failed",
             self.tss_counters.horizon_preflight_failed,
         )?;
+        tss.set_item("horizon_cut", self.tss_counters.horizon_cut)?;
         tss.set_item("zone_nodes", self.tss_counters.zone_nodes)?;
         tss.set_item("pair_omitted", self.tss_counters.pair_omitted)?;
         tss.set_item("zone_verify_failed", self.tss_counters.zone_verify_failed)?;

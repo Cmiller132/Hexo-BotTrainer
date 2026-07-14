@@ -233,6 +233,9 @@ class ContinuousDriver:
         self.tss_deep_verify_failed = 0
         self.tss_horizon_retry = 0
         self.tss_horizon_preflight_failed = 0
+        # Unknown solves with >=1 still-live line refused by the +12 deadline
+        # (depth-bound Unknowns) -- the horizon-ladder gate metric.
+        self.tss_horizon_cut = 0
         self.tss_zone_nodes = 0
         self.tss_pair_omitted = 0
         self.tss_zone_verify_failed = 0
@@ -407,6 +410,7 @@ class ContinuousDriver:
             self.tss_deep_verify_failed += int(tss_diag.get("deep_verify_failed", 0))
             self.tss_horizon_retry += int(tss_diag.get("horizon_retry", 0))
             self.tss_horizon_preflight_failed += int(tss_diag.get("horizon_preflight_failed", 0))
+            self.tss_horizon_cut += int(tss_diag.get("horizon_cut", 0))
             self.tss_zone_nodes += int(tss_diag.get("zone_nodes", 0))
             self.tss_pair_omitted += int(tss_diag.get("pair_omitted", 0))
             self.tss_zone_verify_failed += int(tss_diag.get("zone_verify_failed", 0))
@@ -877,6 +881,7 @@ class ContinuousDriver:
                 "deep_verify_failed": int(self.tss_deep_verify_failed),
                 "horizon_retry": int(self.tss_horizon_retry),
                 "horizon_preflight_failed": int(self.tss_horizon_preflight_failed),
+                "horizon_cut": int(self.tss_horizon_cut),
                 "zone_nodes": int(self.tss_zone_nodes),
                 "pair_omitted": int(self.tss_pair_omitted),
                 "zone_verify_failed": int(self.tss_zone_verify_failed),
@@ -1186,7 +1191,7 @@ def _merge_epoch_diag(segments: list[dict[str, Any]]) -> dict[str, Any]:
             "proof_rows", "proof_disagreements", "sharpened_rows",
             "deep_calls", "deep_win", "deep_loss", "deep_unknown", "deep_nodes",
             "deep_verify_failed", "horizon_retry", "horizon_preflight_failed",
-            "zone_nodes", "pair_omitted", "zone_verify_failed",
+            "horizon_cut", "zone_nodes", "pair_omitted", "zone_verify_failed",
             "deep_hard_backups", "deep_memo_hits",
             "async_enqueued", "async_dropped", "async_stale", "async_pending_hits",
             "park_parked", "park_hard", "park_released", "park_bailed",
