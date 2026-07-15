@@ -943,28 +943,6 @@ impl WideUniversalPnProfile {
     }
 }
 
-fn wide_defender_pairs_from_test_environment() -> bool {
-    #[cfg(test)]
-    {
-        std::env::var_os("TSS_WIDE_AB_DEFENDER_PAIRS").is_some()
-    }
-    #[cfg(not(test))]
-    {
-        false
-    }
-}
-
-fn wide_persistent_tier_from_test_environment() -> bool {
-    #[cfg(test)]
-    {
-        std::env::var_os("TSS_WIDE_AB_PERSISTENT_TIER").is_some()
-    }
-    #[cfg(not(test))]
-    {
-        false
-    }
-}
-
 /// Flattens a defender turn into its unique linked proof obligations. A
 /// consecutive Universal entry is another defender placement in that same
 /// turn; a non-Universal entry is the resulting obligation. Exact linked
@@ -1352,8 +1330,6 @@ struct WidePnSearch {
     current_bytes: usize,
     peak_bytes: usize,
     universal_pn_profile: WideUniversalPnProfile,
-    defender_pairs: bool,
-    persistent_pair_tier: bool,
     entries: Vec<WidePnEntry>,
     by_position: HashMap<WidePositionKey, usize>,
 }
@@ -1379,8 +1355,6 @@ impl WidePnSearch {
             current_bytes: 0,
             peak_bytes: 0,
             universal_pn_profile: WideUniversalPnProfile::from_test_environment(),
-            defender_pairs: wide_defender_pairs_from_test_environment(),
-            persistent_pair_tier: wide_persistent_tier_from_test_environment(),
             entries: Vec::new(),
             by_position: HashMap::new(),
         }
@@ -1595,7 +1569,12 @@ impl WidePnSearch {
             let WidePnNode::Branch { kind, children } = &self.entries[id].node else {
                 return WidePnStepOutcome::Stalled;
             };
-            let selected = self.select_child_index(*kind, children, sequential_root_probe);
+            let selected = self.select_child_index_with_tier(
+                *kind,
+                children,
+                sequential_root_probe,
+                self.entries[id].depth == 0,
+            );
             let Some(child_index) = selected else {
                 return WidePnStepOutcome::Stalled;
             };
@@ -1813,8 +1792,12 @@ impl WidePnSearch {
                 && wide_choice_has_urgent_block(children);
             let sequential_root_probe = (entry.depth == 0 && (finish_partial_turn || urgent_pair))
                 || std::env::var_os("TSS_WIDE_SEQUENTIAL_CHOICE").is_some();
-            let Some(child_rank) = self.select_child_index(*kind, children, sequential_root_probe)
-            else {
+            let Some(child_rank) = self.select_child_index_with_tier(
+                *kind,
+                children,
+                sequential_root_probe,
+                entry.depth == 0,
+            ) else {
                 eprintln!(
                     "WIDTH_PN_PATH hop={hop} entry={entry_id} depth={} node={} pn={} dn={} stop=no_selectable_child",
                     entry.depth,
@@ -1859,11 +1842,22 @@ impl WidePnSearch {
         eprintln!("WIDTH_PN_PATH entry={entry_id} stop=path_limit limit={PATH_LIMIT}");
     }
 
+    #[cfg(test)]
     fn select_child_index(
         &self,
         kind: WidePnKind,
         children: &[WidePnChild],
         sequential_root_probe: bool,
+    ) -> Option<usize> {
+        self.select_child_index_with_tier(kind, children, sequential_root_probe, false)
+    }
+
+    fn select_child_index_with_tier(
+        &self,
+        kind: WidePnKind,
+        children: &[WidePnChild],
+        sequential_root_probe: bool,
+        prefer_width_tier: bool,
     ) -> Option<usize> {
         if kind == WidePnKind::Choice && sequential_root_probe {
             return children
@@ -1876,7 +1870,7 @@ impl WidePnSearch {
                 })
                 .map(|(index, _)| index);
         }
-        if kind == WidePnKind::Choice && self.persistent_pair_tier {
+        if kind == WidePnKind::Choice && prefer_width_tier {
             // A completed proof remains more-proving than every unresolved
             // width class. The tier profile only orders live obligations; it
             // must not postpone an already terminal claimant child.
@@ -1901,7 +1895,7 @@ impl WidePnSearch {
                 match kind {
                     // Iterator::min_by_key retains the first equal key, so
                     // canonical generator order is the only normal tie-break.
-                    WidePnKind::Choice if self.persistent_pair_tier => (
+                    WidePnKind::Choice if prefer_width_tier => (
                         u32::from(child.first_width_tier),
                         self.choice_order_pn(child),
                     ),
@@ -2319,10 +2313,7 @@ impl WidePnSearch {
         state: &mut RustHexoState,
         defender_budget: u8,
     ) -> Vec<WidePnChild> {
-        if self.defender_pairs
-            && defender_budget == 2
-            && matches!(state.phase(), TurnPhase::FirstStone)
-        {
+        if defender_budget == 2 && matches!(state.phase(), TurnPhase::FirstStone) {
             if let Some(children) = self.defender_pair_children(state) {
                 return children;
             }
@@ -5447,15 +5438,13 @@ mod tests {
             pair_child(3, tier_one_entry, 1),
         ];
 
-        search.persistent_pair_tier = false;
         assert_eq!(
-            search.select_child_index(WidePnKind::Choice, &children, false),
+            search.select_child_index_with_tier(WidePnKind::Choice, &children, false, false),
             Some(1),
             "profile-off selection remains strict minimum PN"
         );
-        search.persistent_pair_tier = true;
         assert_eq!(
-            search.select_child_index(WidePnKind::Choice, &children, false),
+            search.select_child_index_with_tier(WidePnKind::Choice, &children, false, true),
             Some(0)
         );
 
@@ -5466,7 +5455,7 @@ mod tests {
             .map(|entry| (entry.pn, entry.dn))
             .collect::<Vec<_>>();
         assert_eq!(
-            search.select_child_index(WidePnKind::Choice, &children, false),
+            search.select_child_index_with_tier(WidePnKind::Choice, &children, false, true),
             Some(0),
             "linked PN changes cannot erase the immutable first-placement tier"
         );
@@ -5486,7 +5475,7 @@ mod tests {
             child.first_width_tier = 0;
         }
         assert_eq!(
-            search.select_child_index(WidePnKind::Choice, &ordinary, false),
+            search.select_child_index_with_tier(WidePnKind::Choice, &ordinary, false, true),
             Some(1),
             "neutral one-placement children retain minimum-PN ordering"
         );
@@ -5495,7 +5484,7 @@ mod tests {
         terminal[1].result = WidePnChildResult::ClaimantTactical;
         terminal[1].entry = None;
         assert_eq!(
-            search.select_child_index(WidePnKind::Choice, &terminal, false),
+            search.select_child_index_with_tier(WidePnKind::Choice, &terminal, false, true),
             Some(1),
             "an already-proven child remains ahead of every unresolved tier"
         );
@@ -6536,7 +6525,6 @@ mod tests {
         }
 
         let mut search = WidePnSearch::new(claimant, state.placements_made(), 100, 0, 100, 10);
-        search.defender_pairs = true;
         let children = search
             .defender_pair_children(&state)
             .expect("the symmetric fixture must retain atomic children");
@@ -6592,7 +6580,6 @@ mod tests {
         expected.sort_by_key(|coord| raw_coord_key(*coord));
 
         let mut search = WidePnSearch::new(claimant, state.placements_made(), 100, 0, 100, 10);
-        search.defender_pairs = true;
         let children = search.defender_boundary_children(&mut state, analysis.b);
         let mut actual = children
             .iter()
@@ -6621,7 +6608,6 @@ mod tests {
             u32::MAX,
             64,
         );
-        search.defender_pairs = true;
         let root = search.insert_root(&state);
         search.run(&state, root);
         assert_eq!(search.entries[root].pn, 0);
