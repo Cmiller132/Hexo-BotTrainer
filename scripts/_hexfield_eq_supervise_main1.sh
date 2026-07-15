@@ -79,6 +79,14 @@ export HEXFIELD_EQ_TRITON_RAY="${HEXFIELD_EQ_TRITON_RAY:-1}"
 # sync-free (sort/searchsorted join). Serve gate 7/7 with this exact stack;
 # live: mid-epoch marginal ~15 -> ~21 pos/s (the serve loop was submit-bound).
 export HEXFIELD_CUDA_GRAPHS="${HEXFIELD_CUDA_GRAPHS:-1}"
+# 2026-07-11 diagnostic: warm-boundary earlyoom kills persist at ~26.8GB even
+# with the graph-key cap FIRING at its default 96 — either 96 keys x
+# ~50-70MB host cudaGraph exec each IS the ~7GB warm accumulation (cap too
+# high to bind), or graphs are exonerated. 24 discriminates: if the warm
+# selfplay->train peak drops ~4-6GB and the kills stop, tune the cap and
+# keep it; if unchanged, look at dynamo guards / rust session growth next.
+# Throughput cost expected small (the 24 hottest keys carry most groups).
+export HEXFIELD_GRAPH_MAX_KEYS="${HEXFIELD_GRAPH_MAX_KEYS:-24}"
 export HEXFIELD_SERVE_HALF="${HEXFIELD_SERVE_HALF:-1}"
 export HEXFIELD_RUST_PACK="${HEXFIELD_RUST_PACK:-1}"
 export HEXFIELD_COPY_STREAM="${HEXFIELD_COPY_STREAM:-1}"
@@ -91,6 +99,14 @@ export HEXFIELD_TRAIN_COMPILE="${HEXFIELD_TRAIN_COMPILE:-1}"
 export HEXFIELD_DEFER_DECODE="${HEXFIELD_DEFER_DECODE:-1}"
 # Model-side support radius: HEXFIELD_EQ_SUPPORT_RADIUS (EQ-namespaced), set by
 # the systemd unit (=4 — must match the prefit corpus / winner checkpoint).
+# 2026-07-11: lazy chunked train expansion at radius<8. The radius-4 run was
+# silently routed to the legacy upfront branch (all 56k dense rows at once,
+# ~21GB transient — THE warm-boundary earlyoom killer, py-spy-confirmed; the
+# tolerate_off_legal radius gate had conflated legality semantics with the
+# expansion strategy). 0 off-legal rows across the entire run, so the lazy
+# path's strict contract holds; an off-legal row would raise -> supervised
+# restart (never observed).
+export HEXFIELD_EXPAND_LAZY="${HEXFIELD_EXPAND_LAZY:-1}"
 
 mkdir -p "$RUNDIR" "$CKPTS"
 log(){ echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" | tee -a "$SUPLOG" >&2; }

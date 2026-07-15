@@ -27,6 +27,10 @@ MALLOC_TOP_PAD_=134217728
 # root-cause-OPEN, so main_2's first flight avoids larger buckets even on the
 # flex path. Costs a little step-packing efficiency; lift after the trace.
 HEXFIELD_TRAIN_PAIR_BUDGET=1.6e7
+# Cap the inductor fork-worker pool (defaults to nproc=32; each worker holds
+# hundreds of MB during compile bursts — a multi-GB guest-RAM spike on a VM
+# that OOM-crashed twice on 2026-07-10). 8 is plenty for warmup compiles.
+TORCHINDUCTOR_COMPILE_THREADS=8
 set +a
 
 mkdir -p "$RUNDIR"
