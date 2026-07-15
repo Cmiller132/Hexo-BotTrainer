@@ -126,8 +126,9 @@ pub enum CertNode {
     },
     /// A claimant move selecting one winning continuation.
     Choice { mv: HexCoord, child: CertNodeId },
-    /// All listed opponent moves are replayed.  When `implicit_dispatch` is
-    /// true, every extendable-hit kernel cell must be listed. The unlisted
+    /// All listed opponent moves are replayed. When `implicit_dispatch` is
+    /// true, every extendable-hit kernel cell must be represented explicitly
+    /// or by a parent-validated same-turn commutation. The unrepresented
     /// complement is individually checked by the debug oracle by applying the
     /// move and invoking lambda-1.
     Universal {
@@ -323,6 +324,11 @@ pub(crate) fn certificate_horizon_preflight(cert: &TssCertificate) -> Option<(u3
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct ReplayKey {
     stones: Vec<(i16, i16, u8)>,
+    /// Same-position Universal nodes can have different obligations when a
+    /// parent P3 commutation supplies an omitted reply. Bind that context into
+    /// memo identity so a permissive occurrence cannot discharge a stricter
+    /// one.
+    allowed_commuted: Vec<(i16, i16)>,
     current_player: u8,
     phase: PhaseKey,
     placements_made: u32,
@@ -337,7 +343,7 @@ enum PhaseKey {
 }
 
 impl ReplayKey {
-    fn from_state(state: &RustHexoState) -> Self {
+    fn from_state_with_allowed(state: &RustHexoState, allowed_commuted: &[HexCoord]) -> Self {
         let binding = RootBinding::from_state(state);
         let stones = binding
             .occupancy
@@ -346,6 +352,11 @@ impl ReplayKey {
             .zip(binding.owners.iter().copied())
             .map(|(c, p)| (c.q, c.r, player_key(p)))
             .collect();
+        let mut allowed_commuted = allowed_commuted
+            .iter()
+            .map(|coord| (coord.q, coord.r))
+            .collect::<Vec<_>>();
+        allowed_commuted.sort_unstable();
         let phase = match binding.phase {
             TurnPhase::Opening => PhaseKey::Opening,
             TurnPhase::FirstStone => PhaseKey::FirstStone,
@@ -353,6 +364,7 @@ impl ReplayKey {
         };
         Self {
             stones,
+            allowed_commuted,
             current_player: player_key(binding.current_player),
             phase,
             placements_made: binding.placements_made,
@@ -366,6 +378,12 @@ impl ReplayKey {
         self.stones
             .capacity()
             .saturating_mul(size_of::<(i16, i16, u8)>())
+            .saturating_add(
+                self.allowed_commuted
+                    .capacity()
+                    .saturating_mul(size_of::<(i16, i16)>()),
+            )
+            .saturating_add(usize::from(!self.allowed_commuted.is_empty()).saturating_mul(32))
             .saturating_add(32)
     }
 }
@@ -457,7 +475,9 @@ fn verify_node(
         return false;
     }
 
-    let replay_key = memo.is_shared(id).then(|| ReplayKey::from_state(state));
+    let replay_key = memo
+        .is_shared(id)
+        .then(|| ReplayKey::from_state_with_allowed(state, allowed_commuted));
     if let (Some(key), Some((seen, result))) = (replay_key.as_ref(), memo.get(id)) {
         return seen == key && *result;
     }
@@ -790,12 +810,10 @@ fn verify_universal(
 ) -> bool {
     if state.is_terminal()
         || state.current_player() == claimant
-        || edges.is_empty()
         || threats_shared::analyze(state).own_win_now
     {
         return false;
     }
-
     // Duplicate explicit moves are rejected rather than silently coalesced.
     // Legality is independently established by the replay below.
     let mut explicit_moves: Vec<HexCoord> = edges.iter().map(|edge| edge.mv).collect();
@@ -812,6 +830,14 @@ fn verify_universal(
             probe.apply_with_delta(Placement { coord: *mv }).is_err()
         })
     {
+        return false;
+    }
+    let mut represented = explicit_moves.clone();
+    represented.extend(allowed.iter().copied());
+    represented.sort_by_key(|coord| coord_key(*coord));
+    // Empty nested nodes are meaningful only when a validated parent
+    // commutation supplies their entire same-turn obligation.
+    if represented.is_empty() || (zone.is_some() && !allowed.is_empty()) {
         return false;
     }
 
@@ -834,7 +860,7 @@ fn verify_universal(
         // complete obligation; certificates may explicitly prove any superset.
         let kernel = boundary.as_ref().expect("checked above");
         if kernel.iter().any(|mv| {
-            explicit_moves
+            represented
                 .binary_search_by_key(&coord_key(*mv), |c| coord_key(*c))
                 .is_err()
         }) {
@@ -848,9 +874,7 @@ fn verify_universal(
         let mut legal = Vec::new();
         state.write_legal_moves(&mut legal);
         legal.sort_by_key(|coord| coord_key(*coord));
-        let mut expected = legal;
-        expected.retain(|mv| !allowed_commuted.contains(mv));
-        if explicit_moves != expected {
+        if represented != legal {
             return false;
         }
     }
@@ -887,7 +911,7 @@ fn verify_universal(
         state.write_legal_moves(&mut legal);
         let kernel = boundary.as_ref().expect("checked above");
         for mv in legal {
-            if explicit_moves
+            if represented
                 .binary_search_by_key(&coord_key(mv), |c| coord_key(*c))
                 .is_ok()
             {
@@ -1673,6 +1697,76 @@ mod tests {
                 HexCoord::new(3, -5),
                 HexCoord::new(4, -6),
             ])
+        );
+    }
+
+    #[test]
+    fn implicit_nested_universal_accepts_only_complete_commuted_kernel() {
+        let mut state = xsnfyll_forced_defender_fixture();
+        let claimant = Player::Player1;
+        let first = dispatch_boundary(&state, claimant).unwrap()[0];
+        apply_placement(&mut state, Placement { coord: first }).unwrap();
+        assert!(matches!(state.phase(), TurnPhase::SecondStone { .. }));
+        let kernel = dispatch_boundary(&state, claimant).expect("forced K1 after a K2 first reply");
+
+        let cert = TssCertificate {
+            root: RootBinding::from_state(&state),
+            claimant,
+            root_node: 0,
+            nodes: Vec::new(),
+            semantic_horizon: u32::MAX,
+        };
+        let meta = CertificateMetadata {
+            derived_t: 0,
+            has_zone: false,
+            zone_build_t: None,
+            cores: vec![Vec::new()],
+            root_stones: RootBinding::from_state(&state).occupancy,
+        };
+        let verify = |allowed: &[HexCoord], zone: Option<ZoneInfo>, oracle: bool| {
+            let mut replay = state.clone();
+            let mut memo = ReplayMemo::new(&cert).unwrap();
+            verify_universal(
+                &cert,
+                &mut replay,
+                claimant,
+                &[],
+                true,
+                zone,
+                &[],
+                0,
+                &mut memo,
+                oracle,
+                &meta,
+                0,
+                allowed,
+            )
+        };
+        assert!(verify(&kernel, None, false));
+        assert!(verify(&kernel, None, true));
+        assert!(!verify(&[], None, false));
+        assert!(!verify(
+            &kernel,
+            Some(ZoneInfo {
+                d: 1,
+                build_horizon: state.placements_made() + 1,
+            }),
+            false,
+        ));
+    }
+
+    #[test]
+    fn replay_memo_key_binds_commuted_context() {
+        let state = replay(&[(0, 0), (0, 8), (2, 7)]);
+        let a = HexCoord::new(1, 0);
+        let b = HexCoord::new(2, 0);
+        assert_ne!(
+            ReplayKey::from_state_with_allowed(&state, &[]),
+            ReplayKey::from_state_with_allowed(&state, &[a]),
+        );
+        assert_eq!(
+            ReplayKey::from_state_with_allowed(&state, &[a, b]),
+            ReplayKey::from_state_with_allowed(&state, &[b, a]),
         );
     }
 
