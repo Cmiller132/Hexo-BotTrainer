@@ -826,8 +826,8 @@ enum WidePnMove {
     One(HexCoord),
     Pair(HexCoord, HexCoord),
     /// One complete, forced defender turn. This is emitted only by the
-    /// test-only pair-canonicalization profile; unlike `Pair`, it materializes
-    /// as an implicit Universal turn with a checked commutation witness.
+    /// wide pair-canonicalization path; unlike `Pair`, it materializes as an
+    /// implicit Universal turn with a checked commutation witness.
     DefenderPair(HexCoord, HexCoord),
 }
 
@@ -858,8 +858,7 @@ struct WidePnChild {
     urgent_block: bool,
     /// Width class of the first placement in an atomic attacker pair.  Zero is
     /// also the neutral value for one-placement and defender children, so the
-    /// test-only persistent-tier profile cannot perturb their established
-    /// ordering.
+    /// root-only tier prior cannot perturb their established ordering.
     first_width_tier: u8,
 }
 
@@ -1330,6 +1329,8 @@ struct WidePnSearch {
     current_bytes: usize,
     peak_bytes: usize,
     universal_pn_profile: WideUniversalPnProfile,
+    #[cfg(test)]
+    root_width_tier: bool,
     entries: Vec<WidePnEntry>,
     by_position: HashMap<WidePositionKey, usize>,
 }
@@ -1355,6 +1356,8 @@ impl WidePnSearch {
             current_bytes: 0,
             peak_bytes: 0,
             universal_pn_profile: WideUniversalPnProfile::from_test_environment(),
+            #[cfg(test)]
+            root_width_tier: std::env::var_os("TSS_WIDE_AB_DISABLE_ROOT_TIER").is_none(),
             entries: Vec::new(),
             by_position: HashMap::new(),
         }
@@ -1405,6 +1408,25 @@ impl WidePnSearch {
                 pn: 1,
                 dn: dn_from_tau(analysis.min_hitting_set),
             }
+        }
+    }
+
+    /// The immutable first-placement width class is a root bootstrap only.
+    /// Persisting it below depth zero regresses otherwise closed positions by
+    /// overriding accumulated proof-number evidence.  The test-only opt-out
+    /// exists solely for whole-position A/B runs; production always enables
+    /// this root policy in wide mode.
+    fn prefer_width_tier_at_depth(&self, depth: usize) -> bool {
+        if depth != 0 {
+            return false;
+        }
+        #[cfg(test)]
+        {
+            self.root_width_tier
+        }
+        #[cfg(not(test))]
+        {
+            true
         }
     }
 
@@ -1565,6 +1587,7 @@ impl WidePnSearch {
         let sequential_root_probe = (self.entries[id].depth == 0
             && (finish_partial_turn || urgent_pair))
             || cfg!(test) && std::env::var_os("TSS_WIDE_SEQUENTIAL_CHOICE").is_some();
+        let prefer_width_tier = self.prefer_width_tier_at_depth(self.entries[id].depth);
         let (kind, child_index, child) = {
             let WidePnNode::Branch { kind, children } = &self.entries[id].node else {
                 return WidePnStepOutcome::Stalled;
@@ -1573,11 +1596,25 @@ impl WidePnSearch {
                 *kind,
                 children,
                 sequential_root_probe,
-                self.entries[id].depth == 0,
+                prefer_width_tier,
             );
             let Some(child_index) = selected else {
                 return WidePnStepOutcome::Stalled;
             };
+            #[cfg(test)]
+            if self.entries[id].depth == 0
+                && children.iter().all(|child| child.entry.is_none())
+                && Self::trace_pn_enabled()
+            {
+                let selected = &children[child_index];
+                eprintln!(
+                    "WIDTH_PN_ROOT_SELECT sequential={sequential_root_probe} prefer_tier={prefer_width_tier} rank={child_index} mv={:?} first_tier={} prior_pn={} urgent={}",
+                    selected.mv,
+                    selected.first_width_tier,
+                    selected.prior.pn,
+                    selected.urgent_block,
+                );
+            }
             (*kind, child_index, children[child_index].clone())
         };
         let _ = kind;
@@ -1740,8 +1777,12 @@ impl WidePnSearch {
             None => ("none".to_owned(), "none".to_owned(), "none", false),
         };
         format!(
-            "pn={pn} dn={dn} prior_pn={} prior_dn={} result={:?} urgent={} entry={entry_id} entry_depth={entry_depth} entry_node={entry_node} cutoff={cutoff}",
-            child.prior.pn, child.prior.dn, child.result, child.urgent_block
+            "pn={pn} dn={dn} prior_pn={} prior_dn={} result={:?} urgent={} first_tier={} entry={entry_id} entry_depth={entry_depth} entry_node={entry_node} cutoff={cutoff}",
+            child.prior.pn,
+            child.prior.dn,
+            child.result,
+            child.urgent_block,
+            child.first_width_tier,
         )
     }
 
@@ -1796,7 +1837,7 @@ impl WidePnSearch {
                 *kind,
                 children,
                 sequential_root_probe,
-                entry.depth == 0,
+                self.prefer_width_tier_at_depth(entry.depth),
             ) else {
                 eprintln!(
                     "WIDTH_PN_PATH hop={hop} entry={entry_id} depth={} node={} pn={} dn={} stop=no_selectable_child",
@@ -1866,7 +1907,17 @@ impl WidePnSearch {
                 .filter(|(_, child)| !self.child_is_genuinely_refuted(child))
                 .min_by_key(|(rank, child)| {
                     let tactical = self.child_numbers(child).0 == 0;
-                    (!tactical, !child.urgent_block, child.prior.pn, *rank)
+                    (
+                        !tactical,
+                        !child.urgent_block,
+                        if prefer_width_tier {
+                            child.first_width_tier
+                        } else {
+                            0
+                        },
+                        child.prior.pn,
+                        *rank,
+                    )
                 })
                 .map(|(index, _)| index);
         }
@@ -3601,8 +3652,8 @@ struct Candidate {
 
 /// The established wide ordering has exactly two attacker-width classes:
 /// narrow candidates (including mandatory defender blocks) and count-two-only
-/// pair builds.  Keep this derivation shared by generation and the test-only
-/// persistent-tier selector so the profile cannot invent a third classification.
+/// pair builds.  Keep this derivation shared by generation and the root-tier
+/// selector so the prior cannot invent a third classification.
 fn wide_candidate_width_tier(candidate: &Candidate) -> u8 {
     match (candidate.defender_block, candidate.strength) {
         (true, _) | (_, 3..) => 0,
@@ -5415,6 +5466,78 @@ mod tests {
     }
 
     #[test]
+    fn wide_pn_sequential_root_honors_width_tier_after_urgency() {
+        let search = WidePnSearch::new(Player::Player0, 0, 10, 0, 100, 10);
+        assert!(search.prefer_width_tier_at_depth(0));
+        assert!(!search.prefer_width_tier_at_depth(1));
+
+        let child = |q, prior_pn, first_width_tier| WidePnChild {
+            mv: WidePnMove::Pair(HexCoord::new(q, 0), HexCoord::new(q + 1, 0)),
+            result: WidePnChildResult::Pending,
+            entry: None,
+            prior: WidePnPrior {
+                pn: prior_pn,
+                dn: 1,
+            },
+            urgent_block: false,
+            first_width_tier,
+        };
+        let tier_zero = child(0, 20, 0);
+        let tier_one = child(3, 3, 1);
+        let children = [tier_zero.clone(), tier_one.clone()];
+
+        assert_eq!(
+            search.select_child_index_with_tier(WidePnKind::Choice, &children, true, false),
+            Some(1),
+            "without the root prior, the lower immutable fork PN leads"
+        );
+        assert_eq!(
+            search.select_child_index_with_tier(WidePnKind::Choice, &children, true, true),
+            Some(0),
+            "the sequential root path must prefer a tier-zero first placement"
+        );
+
+        let mut urgent_tier_one = tier_one.clone();
+        urgent_tier_one.urgent_block = true;
+        assert_eq!(
+            search.select_child_index_with_tier(
+                WidePnKind::Choice,
+                &[tier_zero.clone(), urgent_tier_one],
+                true,
+                true,
+            ),
+            Some(1),
+            "the established urgent-block bootstrap remains ahead of width tier"
+        );
+
+        let mut tactical_tier_one = tier_one.clone();
+        tactical_tier_one.result = WidePnChildResult::ClaimantTactical;
+        assert_eq!(
+            search.select_child_index_with_tier(
+                WidePnKind::Choice,
+                &[tier_zero.clone(), tactical_tier_one],
+                true,
+                true,
+            ),
+            Some(1),
+            "an already-proven child remains first on the sequential path"
+        );
+
+        let mut refuted_tier_zero = tier_zero;
+        refuted_tier_zero.result = WidePnChildResult::Refuted;
+        assert_eq!(
+            search.select_child_index_with_tier(
+                WidePnKind::Choice,
+                &[refuted_tier_zero, tier_one],
+                true,
+                true,
+            ),
+            Some(1),
+            "a refuted tier-zero child cannot retain sequential commitment"
+        );
+    }
+
+    #[test]
     fn wide_pn_persistent_pair_tier_survives_linked_pn_changes() {
         let mut search = WidePnSearch::new(Player::Player0, 0, 10, 0, 100, 10);
         let tier_zero_entry = search.entries.len();
@@ -6181,7 +6304,7 @@ mod tests {
         assert_eq!(
             search.format_trace_child(&child),
             format!(
-                "pn={PN_INFINITY} dn=0 prior_pn=7 prior_dn=2 result=Pending urgent=true entry={entry} entry_depth=7 entry_node=depth_cutoff cutoff=true"
+                "pn={PN_INFINITY} dn=0 prior_pn=7 prior_dn=2 result=Pending urgent=true first_tier=0 entry={entry} entry_depth=7 entry_node=depth_cutoff cutoff=true"
             )
         );
     }
